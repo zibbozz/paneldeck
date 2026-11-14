@@ -1,4 +1,4 @@
-<h1 align="center"><img src="docs/images/banner.png" alt="Paneldeck" width="100%"></h1>
+<h1 align="center"><img src="docs/images/de/banner.png" alt="Paneldeck" width="100%"></h1>
 
 <p align="center"><a href="README.md">English</a> · <strong>Deutsch</strong></p>
 
@@ -7,7 +7,7 @@ Für Windows 10 (1809+) / 11 (x64), **komplett offline lauffähig**: wahlweise a
 
 > Unabhängiges Open-Source-Projekt – nicht mit Anthropic verbunden und nicht von Anthropic unterstützt oder geprüft. „Claude“ und „Claude Code“ sind Marken von Anthropic, PBC. Details unter [Rechtliches](#rechtliches).
 
-<p align="center"><img src="docs/images/app.png" alt="Paneldeck mit geteilten Terminals, Freigabe-Anfrage und Seitenleiste" width="100%"><br><sub>Mehrere Sitzungen in Projekten und Ordnern, geteilte Bereiche, „Wartet auf dich“-Posteingang – alles in einem Fenster.</sub></p>
+<p align="center"><img src="docs/images/de/app.png" alt="Paneldeck mit geteilten Terminals, Freigabe-Anfrage und Seitenleiste" width="100%"><br><sub>Mehrere Sitzungen in Projekten und Ordnern, geteilte Bereiche, „Wartet auf dich“-Posteingang – alles in einem Fenster.</sub></p>
 
 ## Funktionen
 - **Terminals** mit voller Emulation (ConPTY): PowerShell 7, Windows PowerShell, CMD, Git Bash, WSL-Distributionen; Farben, Alt-Screen, Maus, Unicode, farbige Emojis, CJK, lückenlose Rahmenzeichen.
@@ -17,7 +17,7 @@ Für Windows 10 (1809+) / 11 (x64), **komplett offline lauffähig**: wahlweise a
 - **Agenten-Schnittstelle (MCP)**: KI-Agenten wie Claude Code können Sitzungen sehen, Terminals lesen, Befehle ausführen und mehrere Claude-Sitzungen koordinieren – standardmäßig aus, mit Stufen „Nur lesen“ / „Steuern“ (siehe unten).
 - **Anpassung**: Tastenkürzel, eigene Themes (JSON), Terminalschrift, Englisch/Deutsch (Standard: Englisch; umstellbar unter *Einstellungen → Allgemein → Sprache*).
 
-<p align="center"><img src="docs/images/kosten.png" alt="Kosten-Übersicht" width="85%"><br><sub>Kosten-Übersicht: heute, 7 Tage, Gesamt, Tagesbudget und teuerste Sitzungen.</sub></p>
+<p align="center"><img src="docs/images/de/kosten.png" alt="Kosten-Übersicht" width="85%"><br><sub>Kosten-Übersicht: heute, 7 Tage, Gesamt, Tagesbudget und teuerste Sitzungen.</sub></p>
 
 ## Erste Schritte
 1. **Installer** `Paneldeck-Setup-<Version>.exe` ausführen – oder das **portable ZIP** entpacken und `paneldeck.exe` starten.
@@ -39,7 +39,7 @@ Paneldeck enthält einen MCP-Server, damit KI-Agenten (Claude Code, Claude Deskt
 2. **Registrieren:** im selben Tab auf *Registrieren* klicken (oder von Hand: `claude mcp add --scope user paneldeck -- "<Pfad>\paneldeck.exe" mcp`). Für andere Agenten liefert *JSON für andere Agenten* den `mcpServers`-Eintrag. Der Agent startet dann bei Bedarf `paneldeck.exe mcp`; Paneldeck muss laufen.
 3. **Benutzen:** z. B. in Claude Code: „Liste meine Paneldeck-Sitzungen“, „Führe in Sitzung 3 `npm test` aus und fasse das Ergebnis zusammen“, „Warte, bis Sitzung 5 fertig ist“.
 
-<p align="center"><img src="docs/images/agenten.png" alt="Einstellungen, Tab Agenten" width="85%"><br><sub>Einstellungen → Agenten: Stufe wählen und mit einem Klick in Claude Code registrieren.</sub></p>
+<p align="center"><img src="docs/images/de/agenten.png" alt="Einstellungen, Tab Agenten" width="85%"><br><sub>Einstellungen → Agenten: Stufe wählen und mit einem Klick in Claude Code registrieren.</sub></p>
 
 | Werkzeug | Stufe | Zweck |
 |---|---|---|
