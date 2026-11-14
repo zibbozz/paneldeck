@@ -94,6 +94,14 @@ pub fn set_live_for_test(sessions: Vec<LiveSession>) {
     *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = sessions;
 }
 
+/// Nur für Tests: Sperre für alle Tests, die die Liste der Sitzungen setzen und danach lesen (sie ist ein gemeinsamer Zustand,
+/// die Tests laufen parallel). Die Sperre bis zum Ende des Tests halten.
+#[cfg(test)]
+pub fn live_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Zustand der Verknüpfung mit diesem Ziel (siehe Modul-Doku). Nur im UI-Thread der App sinnvoll.
 #[allow(dead_code)] // API für die Ticket-Ansicht
 pub fn terminal_link_state(target: &str) -> LinkState {
