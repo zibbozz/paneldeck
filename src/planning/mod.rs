@@ -12,6 +12,7 @@
 //! * `links`, `comments`, `time_entries`, `history` (Quelle und Verlaufstexte), `todo_bridge` (einfache Todo-Liste lesen und in
 //!   Tickets umwandeln);
 //! * `ops` (Rückgängig/Wiederholen über `undo::History`).
+//! * `search` (Abfrage-Ausführung: Schema, Abfragesprache nach SQL, Boards, Beispieldaten für die Hilfe).
 
 // Die Schicht ist vollständig, die Oberfläche und die Tickets (nächste Schritte) nutzen sie erst nach und nach.
 #![allow(dead_code)]
@@ -31,6 +32,7 @@ pub mod projects;
 pub mod quick;
 pub mod query_help;
 pub mod schema;
+pub mod search;
 pub mod statuses;
 pub mod summary;
 pub mod template;
