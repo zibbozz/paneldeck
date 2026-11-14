@@ -247,27 +247,27 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
         let _ = s.write_all(r.to_string().as_bytes());
     };
     if v.get("token").and_then(|t| t.as_str()) != Some(ipc_token) {
-        return reply(mcp_err("unauthorized", "Ungültiger Token"));
+        return reply(mcp_err("unauthorized", crate::state::t("Ungültiger Token", "Invalid token")));
     }
     let Some(tool) = v.get("tool").and_then(|t| t.as_str()) else {
-        return reply(mcp_err("bad_args", "tool fehlt"));
+        return reply(mcp_err("bad_args", crate::state::t("tool fehlt", "tool is missing")));
     };
     let level = mcp::current_level();
     if tool == "_level" {
         return reply(json!({"ok": true, "result": {"level": level.as_u8()}}));
     }
     if level == mcp::McpLevel::Off {
-        return reply(mcp_err("mcp_disabled", "Die Agenten-Schnittstelle ist in Paneldeck ausgeschaltet (Einstellungen → Agenten)."));
+        return reply(mcp_err("mcp_disabled", crate::state::t("Die Agenten-Schnittstelle ist in Paneldeck ausgeschaltet (Einstellungen → Agenten).", "The agent interface is switched off in Paneldeck (Settings → Agents).")));
     }
     let Some(required) = mcp::tool_level(tool) else {
-        return reply(mcp_err("not_found", "Unbekanntes Werkzeug"));
+        return reply(mcp_err("not_found", crate::state::t("Unbekanntes Werkzeug", "Unknown tool")));
     };
     if required > level {
-        return reply(mcp_err("forbidden", "Die Stufe „Nur lesen“ erlaubt dieses Werkzeug nicht (Einstellungen → Agenten → Steuern)."));
+        return reply(mcp_err("forbidden", crate::state::t("Die Stufe „Nur lesen“ erlaubt dieses Werkzeug nicht (Einstellungen → Agenten → Steuern).", "The “Read only” level does not allow this tool (Settings → Agents → Control).")));
     }
     if mcp::ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= mcp::MAX_ACTIVE {
         mcp::ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        return reply(mcp_err("busy", "Zu viele gleichzeitige Anfragen"));
+        return reply(mcp_err("busy", crate::state::t("Zu viele gleichzeitige Anfragen", "Too many concurrent requests")));
     }
     let args = v.get("args").cloned().unwrap_or_else(|| json!({}));
     // Wartezeit: bei Werkzeugen mit eigener Frist deren Wert (+ Reserve), sonst kurz.
@@ -276,13 +276,13 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
     let caller_pid = v.get("caller_pid").and_then(|c| c.as_u64()).and_then(|p| u32::try_from(p).ok());
     let (rtx, rrx) = std::sync::mpsc::sync_channel(1);
     let out = if mcp_tx.send(McpJob { tool: tool.to_string(), args, caller, caller_pid, reply: rtx }).is_err() {
-        mcp_err("internal", "Hub nicht bereit")
+        mcp_err("internal", crate::state::t("Hub nicht bereit", "Hub not ready"))
     } else {
         ctx.request_repaint();
         match rrx.recv_timeout(Duration::from_secs(wait)) {
             Ok(Ok(result)) => json!({"ok": true, "result": result}),
             Ok(Err((code, message))) => mcp_err(&code, &message),
-            Err(_) => mcp_err("timeout", "Der Hub hat nicht rechtzeitig geantwortet (läuft die Oberfläche noch?)"),
+            Err(_) => mcp_err("timeout", crate::state::t("Der Hub hat nicht rechtzeitig geantwortet (läuft die Oberfläche noch?)", "The hub did not answer in time (is the UI still running?)")),
         }
     };
     mcp::ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -291,7 +291,7 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
 
 /// Werkzeugaufruf an die laufende Instanz (Brücke → Hub). Fehler als `(Code, Text)`.
 pub fn call_mcp(dir: &Path, tool: &str, args: &Value, caller: Option<u64>, pid: Option<u32>) -> Result<Value, (String, String)> {
-    let down = || ("hub_not_running".to_string(), "Paneldeck läuft nicht (oder nutzt einen anderen Datenordner). Bitte Paneldeck starten.".to_string());
+    let down = || ("hub_not_running".to_string(), crate::state::t("Paneldeck läuft nicht (oder nutzt einen anderen Datenordner). Bitte Paneldeck starten.", "Paneldeck is not running (or uses a different data folder). Please start Paneldeck.").to_string());
     let s = std::fs::read_to_string(dir.join("ipc.json")).map_err(|_| down())?;
     let v: Value = serde_json::from_str(crate::state::strip_bom(&s)).map_err(|_| down())?;
     let (Some(port), Some(token)) = (v["port"].as_u64(), v["token"].as_str()) else { return Err(down()) };
@@ -302,12 +302,12 @@ pub fn call_mcp(dir: &Path, tool: &str, args: &Value, caller: Option<u64>, pid: 
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(crate::mcp::MAX_WAIT_SECS + 30)));
     let mut reply = String::new();
-    stream.read_to_string(&mut reply).map_err(|e| ("io".to_string(), format!("Verbindung zum Hub abgebrochen: {e}")))?;
-    let r: Value = serde_json::from_str(&reply).map_err(|_| ("io".to_string(), "Ungültige Antwort des Hubs".to_string()))?;
+    stream.read_to_string(&mut reply).map_err(|e| ("io".to_string(), format!("{}: {e}", crate::state::t("Verbindung zum Hub abgebrochen", "Connection to the hub was interrupted"))))?;
+    let r: Value = serde_json::from_str(&reply).map_err(|_| ("io".to_string(), crate::state::t("Ungültige Antwort des Hubs", "Invalid reply from the hub").to_string()))?;
     if r["ok"].as_bool() == Some(true) {
         Ok(r["result"].clone())
     } else {
-        Err((r["error"]["code"].as_str().unwrap_or("error").to_string(), r["error"]["message"].as_str().unwrap_or("Fehler").to_string()))
+        Err((r["error"]["code"].as_str().unwrap_or("error").to_string(), r["error"]["message"].as_str().unwrap_or("error").to_string()))
     }
 }
 
@@ -445,14 +445,14 @@ fn store_settings(path: &Path, v: &Value) -> Result<(), String> {
 pub fn install_global(path: &Path, exe: &Path) -> Result<(), String> {
     let mut v = load_settings(path)?;
     let Some(root) = v.as_object_mut() else {
-        return Err("settings.json ist kein JSON-Objekt".into());
+        return Err(crate::state::t("settings.json ist kein JSON-Objekt", "settings.json is not a JSON object").into());
     };
     let ours = hooks_value(&hook_command(exe));
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
-    let hooks = hooks.as_object_mut().ok_or("\"hooks\" ist kein Objekt")?;
+    let hooks = hooks.as_object_mut().ok_or(crate::state::t("\"hooks\" ist kein Objekt", "\"hooks\" is not an object"))?;
     for (ev, groups) in ours.as_object().into_iter().flatten() {
         let arr = hooks.entry(ev.clone()).or_insert_with(|| json!([]));
-        let arr = arr.as_array_mut().ok_or("Hook-Eintrag ist keine Liste")?;
+        let arr = arr.as_array_mut().ok_or(crate::state::t("Hook-Eintrag ist keine Liste", "Hook entry is not a list"))?;
         arr.retain(|g| !is_hub_entry(g));
         arr.extend(groups.as_array().into_iter().flatten().cloned());
     }
@@ -556,17 +556,25 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_ipc_file(&dir, srv.port, &srv.ipc_token);
         let code = |r: Result<Value, (String, String)>| r.err().map(|e| e.0).unwrap_or_default();
+        // Standardsprache ist Englisch: die lesbaren Fehlermeldungen enthalten keine deutschen Zeichen.
+        let msg = |r: Result<Value, (String, String)>| r.err().map(|e| e.1).unwrap_or_default();
+        let english = |m: String| {
+            assert!(!m.is_empty() && !m.chars().any(|c| "äöüÄÖÜß„".contains(c)), "not English: {m}");
+        };
         // Stufe „Aus“: Stufenabfrage geht (für tools/list), alles andere nicht.
         LEVEL.store(McpLevel::Off.as_u8(), Ordering::Relaxed);
         assert_eq!(call_mcp(&dir, "_level", &json!({}), None, None).unwrap()["level"], 0);
         assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "mcp_disabled");
         assert_eq!(code(call_mcp(&dir, "send_text", &json!({"session": 1, "text": "x"}), None, None)), "mcp_disabled");
+        english(msg(call_mcp(&dir, "send_text", &json!({"session": 1, "text": "x"}), None, None)));
         // „Nur lesen“: Steuer-Werkzeuge sind verboten, unbekannte gibt es nicht.
         LEVEL.store(McpLevel::Read.as_u8(), Ordering::Relaxed);
         assert_eq!(call_mcp(&dir, "_level", &json!({}), None, None).unwrap()["level"], 1);
         assert_eq!(code(call_mcp(&dir, "run_command", &json!({"session": 1, "command": "dir"}), None, None)), "forbidden");
         assert_eq!(code(call_mcp(&dir, "close_session", &json!({"session": 1}), None, None)), "forbidden");
         assert_eq!(code(call_mcp(&dir, "gibt_es_nicht", &json!({}), None, None)), "not_found");
+        english(msg(call_mcp(&dir, "gibt_es_nicht", &json!({}), None, None)));
+        english(msg(call_mcp(&dir, "run_command", &json!({"session": 1, "command": "dir"}), None, None)));
         // Ein Lese-Werkzeug erreicht die UI-Schleife (hier: ein Test, der sie spielt).
         let reply = std::thread::spawn({
             let dir = dir.clone();
@@ -580,9 +588,11 @@ mod tests {
         // Falscher Token (der Hook-Token aus den Terminal-Umgebungen) wird abgewiesen.
         write_ipc_file(&dir, srv.port, &srv.token);
         assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "unauthorized");
+        english(msg(call_mcp(&dir, "list_sessions", &json!({}), None, None)));
         // Hub nicht erreichbar → verständlicher Fehler
         write_ipc_file(&dir, 1, "x");
         assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "hub_not_running");
+        english(msg(call_mcp(&dir, "list_sessions", &json!({}), None, None)));
         LEVEL.store(McpLevel::Off.as_u8(), Ordering::Relaxed);
     }
 
