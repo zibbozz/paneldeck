@@ -81,12 +81,12 @@ impl App {
                     let resp = ui.interact(r, Id::new(("titlebar_tab", mode as u8)), Sense::click()).on_hover_text(tip);
                     let active = self.mode == mode;
                     if active {
-                        painter.rect_filled(r, 6.0, style::ACCENT.gamma_multiply(0.22));
-                        painter.line_segment([Pos2::new(r.left() + 8.0, r.bottom() + 3.0), Pos2::new(r.right() - 8.0, r.bottom() + 3.0)], Stroke::new(2.0_f32, style::ACCENT));
+                        painter.rect_filled(r, 6.0, style::accent().gamma_multiply(0.22));
+                        painter.line_segment([Pos2::new(r.left() + 8.0, r.bottom() + 3.0), Pos2::new(r.right() - 8.0, r.bottom() + 3.0)], Stroke::new(2.0_f32, style::accent()));
                     } else if resp.hovered() {
                         painter.rect_filled(r, 6.0, Color32::from_white_alpha(14));
                     }
-                    style::paint_icon(painter, icon, r.center(), if active { style::ACCENT } else { fg });
+                    style::paint_icon(painter, icon, r.center(), if active { style::accent() } else { fg });
                     if resp.clicked() {
                         self.set_mode(mode);
                     }

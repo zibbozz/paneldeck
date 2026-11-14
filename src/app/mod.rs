@@ -33,6 +33,7 @@ mod dialogs;
 mod dragdrop;
 mod mcp;
 mod panels;
+mod planning_ui;
 mod settings;
 mod sidebar;
 mod tasks_ui;
@@ -522,6 +523,7 @@ pub struct App {
     db: Option<crate::db::Db>,
     db_error: Option<String>,
     tasks: tasks_ui::TasksUi,
+    plan: planning_ui::PlanUi,
     backup_rx: Option<std::sync::mpsc::Receiver<Result<crate::backup::BackupInfo, String>>>,
     backup_checked: Instant,
     backup_msg: Option<String>,
@@ -730,6 +732,7 @@ impl App {
             db,
             db_error,
             tasks: tasks_ui::TasksUi::default(),
+            plan: planning_ui::PlanUi::default(),
             backup_rx: None,
             backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
             backup_msg: None,
@@ -2652,8 +2655,9 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_accent();
         let theme = self.theme();
-        let key = format!("{}|{}|{}", theme.name, theme.bg.a(), self.settings.animations);
+        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
         if self.applied_theme != key {
             style::set_animations(self.settings.animations);
             style::apply(ctx, &theme, self.settings.opacity);

@@ -30,6 +30,28 @@ pub fn save_file(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Speichern-Dialog für JSON-Dateien (Vorlagen); anderswo `None`.
+#[cfg(windows)]
+pub fn save_json(default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_file_name(default_name).add_filter("JSON", &["json"]).save_file()
+}
+
+#[cfg(not(windows))]
+pub fn save_json(_default_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Öffnen-Dialog für JSON-Dateien (Vorlagen); anderswo `None`.
+#[cfg(windows)]
+pub fn open_json() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file()
+}
+
+#[cfg(not(windows))]
+pub fn open_json() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Ordner-Auswahldialog.
 #[cfg(windows)]
 pub fn pick_folder(start: &str) -> Option<String> {

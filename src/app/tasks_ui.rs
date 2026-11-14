@@ -241,7 +241,7 @@ fn chip(ui: &mut Ui, text: &str, color: Option<Color32>, removable: bool, active
 fn paint_chip(p: &Painter, rect: Rect, text: &str, color: Option<Color32>, removable: bool, active: bool, hovered: bool, strong: Color32, dim: Color32, fade: f32) {
     let base = color.unwrap_or(dim);
     let fill = base.gamma_multiply((if hovered { 0.34 } else { 0.2 }) * fade);
-    let stroke = if active { style::ACCENT } else { base.gamma_multiply(0.6 * fade) };
+    let stroke = if active { style::accent() } else { base.gamma_multiply(0.6 * fade) };
     p.rect(rect, 9.0, fill, Stroke::new(if active { 1.5_f32 } else { 1.0_f32 }, stroke), StrokeKind::Inside);
     let tc = style::mix(base, strong, 0.35).gamma_multiply(fade);
     let g = p.layout_no_wrap(text.to_string(), FontId::proportional(11.5), tc);
@@ -347,7 +347,7 @@ fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors
     let fade = if it.done { 0.5 } else { 1.0 };
     let o = rect.min.to_vec2();
     let fill = if hv.card || ghost { col.fill_hover } else { col.fill };
-    let stroke = if ghost { style::ACCENT } else if hv.card { style::mix(col.stroke, col.text, 0.3) } else { col.stroke };
+    let stroke = if ghost { style::accent() } else if hv.card { style::mix(col.stroke, col.text, 0.3) } else { col.stroke };
     p.rect(rect, 10.0, fill, Stroke::new(if ghost { 1.5_f32 } else { 1.0_f32 }, stroke), StrokeKind::Inside);
     p.galley(Pos2::ZERO + lay.key_pos + o, lay.key.clone(), col.dim);
     if let Some((g, pos)) = &lay.title {
@@ -371,15 +371,15 @@ fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors
     // Checkbox
     let cb = lay.check.translate(o);
     if it.done {
-        p.rect_filled(cb, 5.0, style::ACCENT.gamma_multiply(0.75));
+        p.rect_filled(cb, 5.0, style::accent().gamma_multiply(0.75));
         let c = cb.center();
         let s = Stroke::new(1.8_f32, Color32::WHITE);
         p.line_segment([c + Vec2::new(-4.5, 0.5), c + Vec2::new(-1.5, 3.5)], s);
         p.line_segment([c + Vec2::new(-1.5, 3.5), c + Vec2::new(4.5, -3.5)], s);
     } else {
-        p.rect_stroke(cb, 5.0, Stroke::new(1.5_f32, if hv.check { style::ACCENT } else { col.dim }), StrokeKind::Inside);
+        p.rect_stroke(cb, 5.0, Stroke::new(1.5_f32, if hv.check { style::accent() } else { col.dim }), StrokeKind::Inside);
         if hv.check {
-            p.rect_filled(cb.shrink(1.0), 4.0, style::ACCENT.gamma_multiply(0.15));
+            p.rect_filled(cb.shrink(1.0), 4.0, style::accent().gamma_multiply(0.15));
         }
     }
 }
@@ -677,7 +677,7 @@ impl TasksUi {
                     self.create_err = None;
                 }
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                let add = ui.add_sized([btn_w, 32.0], egui::Button::new(lang.t("Hinzufügen", "Add")).fill(style::ACCENT.gamma_multiply(0.35))).clicked();
+                let add = ui.add_sized([btn_w, 32.0], egui::Button::new(lang.t("Hinzufügen", "Add")).fill(style::accent().gamma_multiply(0.35))).clicked();
                 if enter || add {
                     let text = std::mem::take(&mut self.quick);
                     match tasks::create_item(conn, "", &text, &[]) {
@@ -714,7 +714,7 @@ impl TasksUi {
                 ui.add_space(S2);
                 let mut create = submit;
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(lang.t("Anlegen", "Create")).fill(style::ACCENT.gamma_multiply(0.45)).min_size(Vec2::new(96.0, 28.0))).on_hover_text(lang.t("Strg+Enter", "Ctrl+Enter")).clicked() {
+                    if ui.add(egui::Button::new(lang.t("Anlegen", "Create")).fill(style::accent().gamma_multiply(0.45)).min_size(Vec2::new(96.0, 28.0))).on_hover_text(lang.t("Strg+Enter", "Ctrl+Enter")).clicked() {
                         create = true;
                     }
                     if ui.add(egui::Button::new(lang.t("Weniger", "Less")).min_size(Vec2::new(80.0, 28.0))).on_hover_text(lang.t("Formular einklappen (Entwurf bleibt)", "Collapse the form (draft is kept)")).clicked() {
@@ -892,7 +892,7 @@ impl TasksUi {
                 }
                 if dragging_this {
                     // Platzhalter statt der Karte; die Karte selbst hängt am Zeiger
-                    ui.painter().rect(rect, 10.0, col.fill.gamma_multiply(0.5), Stroke::new(1.0_f32, style::ACCENT.gamma_multiply(0.5)), StrokeKind::Inside);
+                    ui.painter().rect(rect, 10.0, col.fill.gamma_multiply(0.5), Stroke::new(1.0_f32, style::accent().gamma_multiply(0.5)), StrokeKind::Inside);
                     ghost = Some((lay.clone(), it.clone()));
                 } else {
                     paint_card(ui.painter(), rect, &lay, it, &col, hv, false);
@@ -920,7 +920,7 @@ impl TasksUi {
                     None => (None, others.last().map_or(viewport.top() + 4.0, |(_, r)| r.bottom() + 4.0)),
                 };
                 ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-                ui.painter().line_segment([Pos2::new(cx - w / 2.0, line_y), Pos2::new(cx + w / 2.0, line_y)], Stroke::new(2.5_f32, style::ACCENT));
+                ui.painter().line_segment([Pos2::new(cx - w / 2.0, line_y), Pos2::new(cx + w / 2.0, line_y)], Stroke::new(2.5_f32, style::accent()));
                 if let Some((lay, it)) = &ghost {
                     let grab = self.drag.as_ref().map(|d| d.grab).or(start_drag.as_ref().map(|d| d.grab)).unwrap_or(Vec2::ZERO);
                     let rect = Rect::from_min_size(Pos2::new(cx - w / 2.0, p.y - grab.y), lay.size);
@@ -1017,7 +1017,7 @@ impl TasksUi {
                 ui.add_space(S1);
             }
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(lang.t("Speichern", "Save")).fill(style::ACCENT.gamma_multiply(0.45)).min_size(Vec2::new(96.0, 28.0))).on_hover_text(lang.t("Strg+Enter", "Ctrl+Enter")).clicked() {
+                if ui.add(egui::Button::new(lang.t("Speichern", "Save")).fill(style::accent().gamma_multiply(0.45)).min_size(Vec2::new(96.0, 28.0))).on_hover_text(lang.t("Strg+Enter", "Ctrl+Enter")).clicked() {
                     save = true;
                 }
                 if ui.add(egui::Button::new(lang.t("Abbrechen", "Cancel")).min_size(Vec2::new(90.0, 28.0))).clicked() {
@@ -1174,7 +1174,7 @@ impl TasksUi {
             )).small().color(style::dim(ui)));
             ui.add_space(S3);
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(lang.t("Zusammenführen", "Merge")).fill(style::ACCENT.gamma_multiply(0.45)).min_size(Vec2::new(120.0, 28.0))).clicked() {
+                if ui.add(egui::Button::new(lang.t("Zusammenführen", "Merge")).fill(style::accent().gamma_multiply(0.45)).min_size(Vec2::new(120.0, 28.0))).clicked() {
                     go = true;
                 }
                 if ui.add(egui::Button::new(lang.t("Abbrechen", "Cancel")).min_size(Vec2::new(90.0, 28.0))).clicked() {
@@ -1259,7 +1259,7 @@ impl TasksUi {
                                 let col = Color32::from_rgb(cr, cg, cb);
                                 ui.painter().circle_filled(r.center(), 8.0, col);
                                 if t.color.eq_ignore_ascii_case(c) {
-                                    ui.painter().circle_stroke(r.center(), 10.0, Stroke::new(1.5_f32, style::ACCENT));
+                                    ui.painter().circle_stroke(r.center(), 10.0, Stroke::new(1.5_f32, style::accent()));
                                 }
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     recolor.push((t.id, c));
@@ -1321,13 +1321,30 @@ impl TasksUi {
 // ------------------------------------------------------------------ Anbindung an die Anwendung
 
 impl App {
-    /// Reiter „Todo-Liste“ zeichnen.
+    /// Reiter „Todo-Liste“ zeichnen: Kopf mit dem Schalter „Expertenmodus“, darunter die einfache Liste oder die Projektansicht.
     pub(super) fn tasks_view(&mut self, ctx: &egui::Context) {
         let env = Env { db: self.db.as_ref(), db_error: self.db_error.as_deref(), lang: self.settings.language, bg: self.theme().bg, undo_steps: self.settings.undo_steps as usize };
+        if let Some(db) = env.db {
+            self.plan.ensure_loaded(Some(db));
+            self.plan.header(ctx, &env, db);
+            if self.plan.expert {
+                self.plan.page(ctx, &env, db);
+                return;
+            }
+        }
         self.tasks.show(ctx, &env);
         if let Some(n) = self.tasks.notice.take() {
             self.notice = Some((n, Instant::now()));
         }
+    }
+
+    /// Akzentfarbe setzen: im Reiter „Todo-Liste“ im Expertenmodus die Farbe des gewählten Projekts, sonst der Standard.
+    pub(super) fn sync_accent(&mut self) {
+        if self.mode == titlebar::Mode::Tasks {
+            self.plan.ensure_loaded(self.db.as_ref());
+        }
+        let c = if self.mode == titlebar::Mode::Tasks { self.plan.accent() } else { None };
+        style::set_accent(c.unwrap_or(style::ACCENT));
     }
 
     /// Auswahl „Änderungshistorie“ im Tab „Daten & Sicherung“.
