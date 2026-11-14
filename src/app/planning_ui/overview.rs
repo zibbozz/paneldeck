@@ -21,6 +21,8 @@ pub(super) struct Todo {
     tags: Vec<Tag>,
     total: usize,
     done: usize,
+    /// Karten, die schon in Tickets umgewandelt wurden: Karte → Ticket.
+    converted: std::collections::HashMap<i64, i64>,
 }
 
 impl Todo {
@@ -31,6 +33,7 @@ impl Todo {
         let (total, done) = tasks::counts(conn).unwrap_or((0, 0));
         self.total = total;
         self.done = done;
+        self.converted = super::ticket_data::conversions(conn);
     }
 }
 
@@ -160,11 +163,24 @@ impl PlanUi {
             }
         });
         ui.add_space(S3);
-        // Platzhalter, bis es die Tickets gibt
+        // Tickets des Projekts
+        let (total, done) = self.tickets.counts;
         widgets::card(ui, |ui| {
-            ui.label(RichText::new(lang.t("Noch nicht verfügbar", "Not available yet")).strong());
-            ui.add_space(S1);
-            ui.label(RichText::new(lang.t("Tickets, Boards und Sprints kommen in den nächsten Schritten.", "Tickets, boards and sprints come in the next steps.")).color(style::dim(ui)));
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(lang.t("Tickets", "Tickets")).strong());
+                    ui.add_space(S1);
+                    ui.label(RichText::new(match lang {
+                        Lang::De => format!("{total} Ticket(s), davon {done} erledigt"),
+                        Lang::En => format!("{total} ticket(s), {done} done"),
+                    }).color(style::dim(ui)));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::primary(ui, lang.t("Tickets öffnen", "Open tickets")).clicked() {
+                        self.tab = Tab::Tickets;
+                    }
+                });
+            });
         });
     }
 
@@ -184,8 +200,8 @@ impl PlanUi {
         });
         ui.add_space(S1);
         hint(ui, lang.t(
-            "Die Einträge der einfachen Todo-Liste. Bearbeitet wird sie im normalen Modus (Expertenmodus aus); hier lassen sie sich später in Tickets umwandeln.",
-            "The entries of the simple to-do list. You edit them in normal mode (expert mode off); here they can later be converted into tickets.",
+            "Die Einträge der einfachen Todo-Liste. Bearbeitet wird sie im normalen Modus (Expertenmodus aus); hier lassen sie sich in Tickets umwandeln.",
+            "The entries of the simple to-do list. You edit them in normal mode (expert mode off); here they can be converted into tickets.",
         ));
         ui.add_space(S2);
         ui.label(RichText::new(count_text(self.todo.total, self.todo.done, lang)).small().color(style::dim(ui)));
@@ -197,8 +213,14 @@ impl PlanUi {
         }
         // Karten dieses Bildes zeichnen; bei sehr langen Listen nur die ersten (die einfache Liste zeigt alles).
         let items = std::mem::take(&mut self.todo.items);
+        let (mut convert, mut open): (Option<i64>, Option<i64>) = (None, None);
         for it in items.iter().take(TODO_SHOW_MAX) {
-            todo_card(ui, it, &self.todo.tags, lang);
+            let conv = self.todo.converted.get(&it.id).copied();
+            match todo_card(ui, it, &self.todo.tags, conv, lang) {
+                Some(TodoAct::Convert) => convert = Some(it.id),
+                Some(TodoAct::OpenTicket(t)) => open = Some(t),
+                None => {}
+            }
             ui.add_space(8.0);
         }
         if items.len() > TODO_SHOW_MAX {
@@ -209,11 +231,25 @@ impl PlanUi {
             });
         }
         self.todo.items = items;
+        if let Some(id) = convert {
+            self.ask_convert(cx, id);
+        }
+        if let Some(t) = open {
+            if let Ok(tk) = crate::planning::tickets::get_ticket(cx.conn, t) {
+                self.open_ticket_anywhere(cx, tk.id, tk.project_id);
+            }
+        }
     }
 }
 
 /// Schreibgeschützte Karte: Schlüssel, Titel, Text, Tags; ohne Bearbeiten, Abhaken und Löschen.
-fn todo_card(ui: &mut Ui, it: &Item, tags: &[Tag], lang: Lang) {
+enum TodoAct {
+    Convert,
+    OpenTicket(i64),
+}
+
+fn todo_card(ui: &mut Ui, it: &Item, tags: &[Tag], converted: Option<i64>, lang: Lang) -> Option<TodoAct> {
+    let mut act = None;
     let v = ui.visuals();
     let dim = v.weak_text_color();
     let fade = if it.done { 0.6 } else { 1.0 };
@@ -230,7 +266,18 @@ fn todo_card(ui: &mut Ui, it: &Item, tags: &[Tag], lang: Lang) {
                     ui.label(RichText::new(lang.t("erledigt", "done")).small().color(dim));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_enabled(false, egui::Button::new(RichText::new(lang.t("In Ticket umwandeln", "Convert to ticket")).small())).on_disabled_hover_text(lang.t("Noch nicht verfügbar", "Not available yet"));
+                    match converted {
+                        Some(t) => {
+                            if ui.add(egui::Button::new(RichText::new(lang.t("Umgewandelt – Ticket öffnen", "Converted – open ticket")).small())).on_hover_text(lang.t("Das Ticket zu dieser Karte öffnen", "Open the ticket made from this card")).clicked() {
+                                act = Some(TodoAct::OpenTicket(t));
+                            }
+                        }
+                        None => {
+                            if ui.add(egui::Button::new(RichText::new(lang.t("In Ticket umwandeln …", "Convert to ticket …")).small())).on_hover_text(lang.t("Aus dieser Karte ein Ticket in einem Projekt machen", "Turn this card into a ticket in a project")).clicked() {
+                                act = Some(TodoAct::Convert);
+                            }
+                        }
+                    }
                 });
             });
             if !it.title.is_empty() {
@@ -264,6 +311,7 @@ fn todo_card(ui: &mut Ui, it: &Item, tags: &[Tag], lang: Lang) {
                 });
             }
         });
+    act
 }
 
 #[cfg(test)]
