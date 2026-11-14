@@ -127,6 +127,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1320.0, 820.0])
             .with_min_inner_size([640.0, 400.0])
             .with_transparent(true)
+            .with_decorations(false)
             .with_icon(app_icon()),
         ..Default::default()
     };
