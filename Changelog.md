@@ -6,6 +6,16 @@ Das Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 und dieses Projekt hält sich an [Semantic Versioning](https://semver.org/lang/de/).
 Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen unter der Nummer des nächsten Releases mit `WIP` statt Datum (z. B. `## [1.1.0] - WIP`).
 
+## [2.0.0] - WIP
+
+### Fixed
+
+- **Boards:** Wird ein Status, ein Typ oder ein Feld gelöscht, verschwindet er auch aus den Boards (Spalten, Typ-Filter, Kartenfelder). Bisher blieben leere Spalten oder ein Typ-Filter ohne Treffer zurück, und das Board ließ sich nicht mehr speichern.
+- **Workflows:** Wird eine Dropdown-Option, eine Version oder ein Meilenstein gelöscht, verschwindet sie aus den Bedingungen und „Wert setzen“-Regeln der Übergänge (oder wird durch den gewählten Ersatz ersetzt). Bisher sperrte eine „erlauben“-Bedingung auf eine gelöschte Option den Übergang dauerhaft, und ein „Wert setzen“ auf eine gelöschte Version ließ jeden Wechsel in den Status – auch das Ziehen auf dem Board – scheitern.
+- **Typ-Vorlagen:** Der Export lässt Bedingungen und „Wert setzen“-Regeln mit Verweisen auf Versionen, Meilensteine, Tickets oder Sitzungen weg (die Kennungen gelten nur im eigenen Projekt); importiert wurden sie sonst als ungültige Regeln.
+- **Sprints:** Beim Starten hält der Sprint die Story Points der Tickets fest. Bisher rechneten Burndown, Bericht und Velocity mit den Punkten vom Zeitpunkt des Einplanens, sodass nachträglich geschätzte Tickets nicht zählten.
+- **Dashboards:** Die Sprint- und die Burndown-Kachel zählen Tickets ohne Punkte wie die Sprint-Seite als 1 und folgen dem Kalender des Projekts (Wochenenden, Feiertage). „Rest“ in der Burndown-Kachel berücksichtigt auch Arbeit an freien Tagen.
+
 ## [1.0.1] - 2026-11-14
 
 ### Changed
@@ -38,5 +48,6 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Alle `unwrap()`/`expect()` im Programmcode sind durch Fehlerbehandlung ersetzt (der Release-Build bricht bei einem Panic komplett ab); die `unsafe`-Blöcke sind begründet.
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
+[2.0.0]: https://github.com/zibbozz/paneldeck/compare/v1.0.1...HEAD
 [1.0.1]: https://github.com/zibbozz/paneldeck/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/zibbozz/paneldeck/releases/tag/v1.0.0
