@@ -511,3 +511,347 @@ fn switching_projects_resets_the_ticket_view() {
     assert_eq!(h.ui.selected, h.project);
     assert_eq!(h.ui.tickets.open, Some(t));
 }
+
+// ------------------------------------------------------------------ Version, Meilenstein und Terminal
+
+use super::ref_inputs;
+use crate::app::terminal_links::{self, LiveSession};
+use crate::planning::fields::{create_field, Field, NewField};
+use crate::planning::projects::{update_project, UpdateProject};
+use crate::planning::sprints::releases::{create_milestone, create_version, NewRelease, ReleaseKind};
+
+/// Felder der Arten Version/Meilenstein am Devtask und zwei Versionen, ein Meilenstein im Projekt (Versionen eingeschaltet).
+struct Rel {
+    task: i64,
+    vf: i64,
+    mf: i64,
+    v1: i64,
+    v2: i64,
+    m1: i64,
+}
+
+fn release_setup(h: &mut H) -> Rel {
+    update_project(&h.db.conn, h.project, &UpdateProject { use_versions: Some(true), ..Default::default() }).unwrap();
+    let task = h.type_id("devtask");
+    let vf = create_field(&h.db.conn, &NewField::new(task, "Fix version", FieldKind::Version)).unwrap();
+    let mf = create_field(&h.db.conn, &NewField::new(task, "Target milestone", FieldKind::Milestone)).unwrap();
+    let v1 = create_version(&h.db.conn, &NewRelease::new(h.project, "1.0")).unwrap();
+    let v2 = create_version(&h.db.conn, &NewRelease::new(h.project, "2.0")).unwrap();
+    let m1 = create_milestone(&h.db.conn, &NewRelease::new(h.project, "Beta")).unwrap();
+    ref_inputs::clear_release_cache();
+    h.ui.dirty = true;
+    h.frames(2);
+    Rel { task, vf, mf, v1, v2, m1 }
+}
+
+fn stored(h: &H, fid: i64) -> Option<serde_json::Value> {
+    h.ui.tickets.detail.as_ref().unwrap().stored.get(&fid).cloned()
+}
+
+fn set_draft(h: &mut H, fid: i64, v: serde_json::Value) {
+    let dr = h.ui.tickets.view.drafts.get_mut(&fid).unwrap();
+    dr.value = v;
+    dr.edited = true;
+}
+
+#[test]
+fn version_and_milestone_fields_save_clear_and_undo() {
+    both(|h| {
+        let r = release_setup(h);
+        let t = h.mk("devtask", "Mit Version");
+        h.open(t);
+        h.frames(2);
+        // setzen
+        set_draft(h, r.vf, json!(r.v1));
+        set_draft(h, r.mf, json!(r.m1));
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(r.vf)));
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(r.mf)));
+        h.frames(3);
+        assert_eq!(stored(h, r.vf), Some(json!(r.v1)));
+        assert_eq!(stored(h, r.mf), Some(json!(r.m1)));
+        // umsetzen
+        set_draft(h, r.vf, json!(r.v2));
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(r.vf)));
+        h.frames(3);
+        assert_eq!(stored(h, r.vf), Some(json!(r.v2)));
+        // leeren („Keine“)
+        set_draft(h, r.vf, serde_json::Value::Null);
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(r.vf)));
+        h.frames(3);
+        assert_eq!(stored(h, r.vf), None);
+        // Rückgängig: leeren, dann umsetzen
+        h.with(|ui, cx| ui.ticket_undo(cx, false));
+        h.frames(3);
+        assert_eq!(stored(h, r.vf), Some(json!(r.v2)));
+        h.with(|ui, cx| ui.ticket_undo(cx, false));
+        h.frames(3);
+        assert_eq!(stored(h, r.vf), Some(json!(r.v1)));
+        // die Quelle ist die Oberfläche
+        let hist = &h.ui.tickets.detail.as_ref().unwrap().history;
+        assert!(hist.iter().all(|(_, text)| text.starts_with(if h.lang == Lang::En { "User interface" } else { "Oberfläche" })), "{hist:?}");
+    });
+}
+
+#[test]
+fn a_version_of_another_project_is_refused_at_the_field() {
+    both(|h| {
+        let r = release_setup(h);
+        let p2 = create_project(&h.db.conn, &NewProject::new("ZWEI", "Zweites", "#7FBF6A")).unwrap();
+        update_project(&h.db.conn, p2, &UpdateProject { use_versions: Some(true), ..Default::default() }).unwrap();
+        let foreign = create_version(&h.db.conn, &NewRelease::new(p2, "9.9")).unwrap();
+        let t = h.mk("devtask", "T");
+        h.open(t);
+        set_draft(h, r.vf, json!(foreign));
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(r.vf)));
+        h.frames(3);
+        assert!(h.ui.tickets.view.drafts[&r.vf].err.is_some(), "Fehler steht am Feld");
+        assert_eq!(stored(h, r.vf), None);
+        // die Auswahl bietet nur Versionen des eigenen Projekts an
+        match ref_inputs::offer(&h.db.conn, ReleaseKind::Version, h.project) {
+            ref_inputs::Offer::Items(v) => assert_eq!(v.iter().map(|x| x.id).collect::<Vec<_>>(), vec![r.v1, r.v2]),
+            ref_inputs::Offer::Off => panic!("Versionen sind eingeschaltet"),
+        }
+    });
+}
+
+#[test]
+fn the_view_still_draws_when_versions_are_turned_off() {
+    both(|h| {
+        let r = release_setup(h);
+        let t = h.mk("devtask", "T");
+        h.open(t);
+        set_draft(h, r.vf, json!(r.v1));
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(r.vf)));
+        update_project(&h.db.conn, h.project, &UpdateProject { use_versions: Some(false), ..Default::default() }).unwrap();
+        h.ui.dirty = true;
+        h.ui.tickets.invalidate();
+        h.frames(4);
+        assert_eq!(ref_inputs::offer(&h.db.conn, ReleaseKind::Version, h.project), ref_inputs::Offer::Off);
+        assert_eq!(stored(h, r.vf), Some(json!(r.v1)), "der Wert bleibt erhalten und wird weiter angezeigt");
+        h.open(t);
+        h.frames(2);
+    });
+}
+
+#[test]
+fn required_version_and_terminal_can_be_filled_in_the_create_dialog() {
+    both(|h| {
+        let r = release_setup(h);
+        let mut nf = NewField::new(r.task, "Terminal", FieldKind::Terminal);
+        nf.required = true;
+        let tf = create_field(&h.db.conn, &nf).unwrap();
+        let mut nv = NewField::new(r.task, "Pflicht-Version", FieldKind::Version);
+        nv.required = true;
+        let rv = create_field(&h.db.conn, &nv).unwrap();
+        h.ui.dirty = true;
+        h.frames(2);
+        h.with(|ui, cx| ui.open_create(cx, None));
+        h.frames(2);
+        {
+            let dlg = h.ui.tickets.create.as_mut().unwrap();
+            let sum = crate::planning::summary::project_summary(&h.db.conn, h.project).unwrap();
+            let ty = sum.type_by_id(r.task).unwrap().clone();
+            dlg.type_id = ty.ticket_type.id;
+            dlg.drafts = ty.fields.iter().map(|f| (f.id, super::ticket_draft::Draft::from_value(f, f.default_value.as_ref()))).collect();
+            dlg.title = "Braucht Verweise".into();
+        }
+        h.frame(vec![ctrl(Key::Enter)]);
+        h.frames(2);
+        assert_eq!(h.count(), 0, "ohne Pflichtfelder wird nichts angelegt");
+        assert!(h.ui.tickets.create.as_ref().is_some_and(|d| d.err.is_some()));
+        {
+            let d = h.ui.tickets.create.as_mut().unwrap().drafts.get_mut(&rv).unwrap();
+            d.value = json!(r.v2);
+            d.edited = true;
+        }
+        h.frame(vec![ctrl(Key::Enter)]);
+        h.frames(2);
+        assert_eq!(h.count(), 0, "das Terminal fehlt noch");
+        {
+            let d = h.ui.tickets.create.as_mut().unwrap().drafts.get_mut(&tf).unwrap();
+            d.text = terminal_links::target_of(7);
+            d.edited = true;
+        }
+        h.frame(vec![ctrl(Key::Enter)]);
+        h.frames(3);
+        assert_eq!(h.count(), 1);
+        let id = list_tickets(&h.db.conn, Some(h.project), &TicketFilter::default()).unwrap().items[0].id;
+        let vals = crate::planning::values::load_values(&h.db.conn, id).unwrap();
+        assert_eq!(vals.get(&rv), Some(&json!(r.v2)));
+        assert_eq!(vals.get(&tf), Some(&json!("session:7")));
+    });
+}
+
+#[test]
+fn a_required_version_blocks_the_transition_until_it_is_picked() {
+    both(|h| {
+        let r = release_setup(h);
+        let t = h.mk("devtask", "Bald fertig");
+        let trs = list_transitions(&h.db.conn, r.task).unwrap();
+        let tr = trs.iter().find(|t| t.def.to_status_id != t.def.from_status_id && h.ui.sum.as_ref().map(|s| s.status(t.def.to_status_id).is_some_and(|s| s.category == crate::planning::statuses::StatusCategory::Done)).unwrap_or(false)).unwrap();
+        let mut def: TransitionDef = tr.def.clone();
+        def.required_fields = vec![r.vf];
+        set_transition(&h.db.conn, r.task, &def).unwrap();
+        h.ui.dirty = true;
+        h.open(t);
+        let (to, from) = (def.to_status_id, def.from_status_id);
+        let opt = h.ui.tickets.detail.as_ref().unwrap().transitions.iter().find(|o| o.status_id == to).cloned().unwrap();
+        assert_eq!(opt.needs_fields.len(), 1, "die Version fehlt");
+        h.with(|ui, cx| ui.ticket_act(cx, Act::Transition { to, needs: opt.needs_fields.clone() }));
+        h.frames(3);
+        assert!(h.ui.tickets.transition.is_some(), "der Dialog zeigt die Versionsauswahl");
+        h.frame(vec![ctrl(Key::Enter)]);
+        h.frames(1);
+        assert_eq!(get_ticket(&h.db.conn, t).unwrap().status_id, Some(from), "ohne Version bleibt der Status");
+        assert!(h.ui.tickets.transition.is_some());
+        {
+            let d = h.ui.tickets.transition.as_mut().unwrap().drafts.get_mut(&r.vf).unwrap();
+            d.value = json!(r.v1);
+            d.edited = true;
+        }
+        h.frame(vec![ctrl(Key::Enter)]);
+        h.frames(2);
+        assert!(h.ui.tickets.transition.is_none());
+        assert_eq!(get_ticket(&h.db.conn, t).unwrap().status_id, Some(to));
+        h.open(t);
+        assert_eq!(stored(h, r.vf), Some(json!(r.v1)));
+    });
+}
+
+#[test]
+fn moving_a_ticket_offers_only_versions_of_the_new_project() {
+    let mut h = H::new(Lang::En);
+    // Projekt 1: Version-Feld an der Story; Projekt 2: eigene Version über die Standardfelder (`release_version`)
+    update_project(&h.db.conn, h.project, &UpdateProject { use_versions: Some(true), ..Default::default() }).unwrap();
+    let story = h.type_id("userstory");
+    let f1 = create_field(&h.db.conn, &NewField::new(story, "Release", FieldKind::Version)).unwrap();
+    let v1 = create_version(&h.db.conn, &NewRelease::new(h.project, "1.0")).unwrap();
+    let mut np = NewProject::new("ZWEI", "Zweites", "#7FBF6A");
+    np.with_defaults = true;
+    np.use_versions = true;
+    let p2 = create_project(&h.db.conn, &np).unwrap();
+    let w1 = create_version(&h.db.conn, &NewRelease::new(p2, "7.0")).unwrap();
+    let story2 = list_types(&h.db.conn, p2).unwrap().into_iter().find(|t| t.key.as_deref() == Some("userstory")).unwrap().id;
+    let f2 = list_fields(&h.db.conn, story2).unwrap().into_iter().find(|f| f.kind == FieldKind::Version).unwrap().id;
+    ref_inputs::clear_release_cache();
+    h.ui.dirty = true;
+    h.frames(2);
+    let t = h.mk("userstory", "Wandert");
+    h.with(|_, cx| crate::planning::tickets::set_field(cx.conn, t, f1, json!(v1), &Source::ui()).unwrap());
+    h.with(|ui, cx| ui.ask_change_type(cx, t));
+    h.frames(2);
+    let report = h.with(|ui, cx| {
+        let dlg = ui.tickets.change.as_mut().unwrap();
+        dlg.project = p2;
+        dlg.to = story2;
+        dlg.refresh(cx);
+        let p = dlg.preview.as_ref().unwrap();
+        assert!(p.project_change);
+        assert!(p.lost.iter().any(|(f, _)| f.id == f1), "die Version des alten Projekts fällt weg");
+        assert!(p.added.iter().any(|f| f.id == f2), "das Versionsfeld des Zielprojekts ist neu und lässt sich setzen");
+        match ref_inputs::offer(cx.conn, ReleaseKind::Version, dlg.project) {
+            ref_inputs::Offer::Items(v) => assert_eq!(v.iter().map(|x| x.id).collect::<Vec<_>>(), vec![w1], "nur Versionen des Zielprojekts"),
+            ref_inputs::Offer::Off => panic!("das Zielprojekt nutzt Versionen"),
+        }
+        dlg.set_on.insert(f2);
+        let d = dlg.drafts.get_mut(&f2).unwrap();
+        d.value = json!(w1);
+        d.edited = true;
+        dlg.execute(cx).unwrap()
+    });
+    assert_eq!(report.ticket.project_id, p2);
+    let vals = crate::planning::values::load_values(&h.db.conn, t).unwrap();
+    assert_eq!(vals.get(&f2), Some(&json!(w1)));
+    assert_eq!(vals.get(&f1), None);
+    // der Dialog zeichnet das Versionsfeld in beiden Sprachen
+    h.ui.tickets.change = None;
+    h.with(|ui, cx| ui.ask_change_type(cx, t));
+    h.frames(3);
+    h.lang = Lang::De;
+    h.frames(3);
+}
+
+#[test]
+fn terminal_fields_show_names_ended_state_and_can_be_cleared() {
+    both(|h| {
+        let task = h.type_id("devtask");
+        let tf = create_field(&h.db.conn, &NewField::new(task, "Terminal", FieldKind::Terminal)).unwrap();
+        h.ui.dirty = true;
+        h.frames(2);
+        terminal_links::set_live_for_test(vec![
+            LiveSession { id: 7, name: "Build".into(), folder: "app".into(), running: true },
+            LiveSession { id: 8, name: "Old".into(), folder: String::new(), running: false },
+        ]);
+        let ended = if h.lang == Lang::En { "ended" } else { "beendet" };
+        assert_eq!(ref_inputs::terminal_text("session:7", h.lang), "Build");
+        assert_eq!(ref_inputs::terminal_text("session:8", h.lang), format!("Old ({ended})"));
+        assert_eq!(ref_inputs::terminal_text("session:99", h.lang), format!("Terminal 99 ({ended})"));
+        assert_eq!(ref_inputs::terminal_text("term-1", h.lang), "term-1", "freier Text bleibt unverändert");
+        let t = h.mk("devtask", "Mit Terminal");
+        h.open(t);
+        // laufende Sitzung
+        {
+            let d = h.ui.tickets.view.drafts.get_mut(&tf).unwrap();
+            d.text = "session:7".into();
+            d.edited = true;
+        }
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(tf)));
+        h.frames(3);
+        assert_eq!(stored(h, tf), Some(json!("session:7")));
+        // beendete Sitzung: wird weiter angezeigt, nichts bricht
+        {
+            let d = h.ui.tickets.view.drafts.get_mut(&tf).unwrap();
+            d.text = "session:8".into();
+            d.edited = true;
+        }
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(tf)));
+        h.frames(3);
+        assert_eq!(stored(h, tf), Some(json!("session:8")));
+        // leeren
+        {
+            let d = h.ui.tickets.view.drafts.get_mut(&tf).unwrap();
+            d.text.clear();
+            d.edited = true;
+        }
+        h.with(|ui, cx| ui.ticket_act(cx, Act::CommitField(tf)));
+        h.frames(3);
+        assert_eq!(stored(h, tf), None);
+        h.with(|ui, cx| ui.ticket_undo(cx, false));
+        h.frames(3);
+        assert_eq!(stored(h, tf), Some(json!("session:8")), "Rückgängig bringt den Verweis zurück");
+        // der Sprung zur Sitzung wird für die Anwendung vorgemerkt (einmalig)
+        terminal_links::request_jump(7);
+        assert_eq!(terminal_links::take_jump(), Some(7));
+        assert_eq!(terminal_links::take_jump(), None);
+        terminal_links::set_live_for_test(Vec::new());
+    });
+}
+
+#[test]
+fn clone_and_move_previews_show_names_instead_of_ids() {
+    both(|h| {
+        let r = release_setup(h);
+        let fields: Vec<Field> = list_fields(&h.db.conn, r.task).unwrap();
+        let by = |kind: FieldKind| fields.iter().find(|f| f.kind == kind).unwrap().clone();
+        let (vf, mf) = (by(FieldKind::Version), by(FieldKind::Milestone));
+        assert_eq!(super::ticket_dialogs::preview_value(&h.db.conn, &vf, &json!(r.v2), h.lang), "2.0");
+        assert_eq!(super::ticket_dialogs::preview_value(&h.db.conn, &mf, &json!(r.m1), h.lang), "Beta");
+        assert_eq!(super::ticket_dialogs::preview_value(&h.db.conn, &vf, &json!(4242), h.lang), "#4242");
+        // der Klon-Dialog zeichnet Version und Meilenstein in der Vorschau
+        let t = h.mk("devtask", "Original");
+        h.with(|_, cx| {
+            crate::planning::tickets::set_field(cx.conn, t, r.vf, json!(r.v1), &Source::ui()).unwrap();
+            crate::planning::tickets::set_field(cx.conn, t, r.mf, json!(r.m1), &Source::ui()).unwrap();
+        });
+        h.open(t);
+        h.with(|ui, cx| ui.ask_clone(cx, t));
+        h.frames(3);
+        h.frame(vec![ctrl(Key::Enter)]);
+        h.frames(3);
+        let clone = h.ui.tickets.open.unwrap();
+        assert_ne!(clone, t);
+        let vals = crate::planning::values::load_values(&h.db.conn, clone).unwrap();
+        assert_eq!(vals.get(&r.vf), Some(&json!(r.v1)), "die Version wird mitgeklont");
+        assert_eq!(vals.get(&r.mf), Some(&json!(r.m1)));
+    });
+}
