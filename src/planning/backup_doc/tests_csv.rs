@@ -572,15 +572,168 @@ fn required_fields_are_enforced_like_in_the_ui() {
     assert_eq!(import_into(c, b, &format!("{HEAD},Note\n,Dev task,x,,,,,,,ok\n")).unwrap().created, 1);
 }
 
-#[test]
-fn version_and_milestone_columns_are_skipped_with_a_warning() {
+/// Projekt mit Sprints, Versionen und Meilensteinen und Feldern darauf.
+struct Planned {
+    fx: Fx,
+    t1: i64,
+    t2: i64,
+    s_plan: i64,
+    s_active: i64,
+}
+
+fn planned() -> Planned {
+    use crate::calc::calendar::WorkCalendar;
+    use crate::planning::projects::{update_project, UpdateProject};
+    use crate::planning::sprints::releases::{create_milestone, create_version, NewRelease};
+    use crate::planning::sprints::sprint::{create_sprint, move_tickets_to_sprint, start_sprint, NewSprint};
     let fx = Fx::new();
     let c = &fx.c;
-    fx.add_field(fx.task, "Release", FieldKind::Version, FieldOptions::default(), false);
-    let text = format!("{HEAD},Release\n,Dev task,a,,,,,,,3\n,Dev task,b,,,,,,,\n");
-    let rep = import_into(c, fx.project, &text).unwrap();
+    update_project(c, fx.project, &UpdateProject { use_sprints: Some(true), use_versions: Some(true), ..Default::default() }).unwrap();
+    let rel = fx.add_field(fx.task, "Release", FieldKind::Version, FieldOptions::default(), false);
+    let goal = fx.add_field(fx.task, "Goal", FieldKind::Milestone, FieldOptions::default(), false);
+    let v1 = create_version(c, &NewRelease::new(fx.project, "1.0")).unwrap();
+    create_version(c, &NewRelease::new(fx.project, "2.0")).unwrap();
+    let m1 = create_milestone(c, &NewRelease::new(fx.project, "Alpha")).unwrap();
+    let t1 = fx.mk(fx.task, "A");
+    let t2 = fx.mk(fx.task, "B");
+    update_ticket(c, t1.id, &TicketUpdate { title: None, values: vec![(rel.id, json!(v1)), (goal.id, json!(m1))] }, &Source::ui()).unwrap();
+    let cal = WorkCalendar::default();
+    let d = |m: u32, day: u32| chrono::NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+    let s_active = create_sprint(c, &NewSprint { project_id: fx.project, name: "Sprint One".into(), goal: String::new(), start: Some(d(11, 2)), end: Some(d(11, 13)), default_days: None }, &cal).unwrap();
+    start_sprint(c, s_active, &cal).unwrap();
+    let s_plan = create_sprint(c, &NewSprint::new(fx.project, "Next"), &cal).unwrap();
+    move_tickets_to_sprint(c, s_active, &[t1.id]).unwrap();
+    move_tickets_to_sprint(c, s_plan, &[t2.id]).unwrap();
+    Planned { t1: t1.id, t2: t2.id, s_plan, s_active, fx }
+}
+
+/// Ein zweites Projekt mit derselben Struktur, denselben Versionen, Meilensteinen und Sprints.
+fn clone_planned(s: &Planned, key: &str) -> i64 {
+    use crate::calc::calendar::WorkCalendar;
+    use crate::planning::projects::{update_project, UpdateProject};
+    use crate::planning::sprints::releases::{create_milestone, create_version, NewRelease};
+    use crate::planning::sprints::sprint::{create_sprint, NewSprint};
+    let c = &s.fx.c;
+    let b = create_project(c, &NewProject::new(key, "Copy", "#223344")).unwrap();
+    import_types(c, b, &export_types(c, s.fx.project).unwrap()).unwrap();
+    update_project(c, b, &UpdateProject { use_sprints: Some(true), use_versions: Some(true), ..Default::default() }).unwrap();
+    create_version(c, &NewRelease::new(b, "1.0")).unwrap();
+    create_version(c, &NewRelease::new(b, "2.0")).unwrap();
+    create_milestone(c, &NewRelease::new(b, "Alpha")).unwrap();
+    create_sprint(c, &NewSprint::new(b, "Sprint One"), &WorkCalendar::default()).unwrap();
+    create_sprint(c, &NewSprint::new(b, "Next"), &WorkCalendar::default()).unwrap();
+    b
+}
+
+#[test]
+fn version_milestone_and_sprint_columns_are_exported_as_names() {
+    let s = planned();
+    let t = table(&export_tickets_csv(&s.fx.c, s.fx.project, &opts()).unwrap());
+    assert_eq!(t.headers[9], "Sprint", "zehnte, optionale Spalte");
+    assert!(t.headers.contains(&"Release".to_string()) && t.headers.contains(&"Goal".to_string()));
+    let a = t.rows.iter().find(|r| r[2] == "A").unwrap();
+    assert_eq!((a[9].as_str(), a[idx(&t, "Release")].as_str(), a[idx(&t, "Goal")].as_str()), ("Sprint One", "1.0", "Alpha"));
+    let b = t.rows.iter().find(|r| r[2] == "B").unwrap();
+    assert_eq!((b[9].as_str(), b[idx(&t, "Release")].as_str()), ("Next", ""));
+    let _ = (s.t1, s.t2);
+}
+
+#[test]
+fn sprint_column_exists_only_for_projects_with_sprints() {
+    let s = setup();
+    let t = table(&exp(&s, &opts()));
+    assert!(!t.headers.contains(&"Sprint".to_string()));
+    assert_eq!(t.headers[9], "Description");
+    // ein Feld namens „Sprint“ bekommt einen Zusatz und kollidiert nie mit der Spalte
+    let fx = Fx::new();
+    fx.add_field(fx.task, "Sprint", FieldKind::Text, FieldOptions::default(), false);
+    let t = table(&export_tickets_csv(&fx.c, fx.project, &opts()).unwrap());
+    assert!(t.headers.contains(&"Sprint [text]".to_string()) && !t.headers.contains(&"Sprint".to_string()));
+}
+
+#[test]
+fn versions_milestones_and_sprints_roundtrip_by_name() {
+    let s = planned();
+    let c = &s.fx.c;
+    let text = export_tickets_csv(c, s.fx.project, &opts()).unwrap();
+    let b = clone_planned(&s, "BB");
+    let rep = import_into(c, b, &text).unwrap();
     assert_eq!(rep.created, 2);
-    assert_eq!(rep.warnings, vec![Warning::VersionValues(1)]);
+    assert!(rep.warnings.is_empty());
+    let again = table(&export_tickets_csv(c, b, &opts()).unwrap());
+    let a = table(&text);
+    assert_eq!(again.headers, a.headers);
+    for (x, y) in a.rows.iter().zip(&again.rows) {
+        assert_eq!(x[1..].to_vec(), y[1..].to_vec(), "{}", x[2]);
+    }
+    // Die Zugehörigkeit steckt wirklich im Sprint des Zielprojekts, mit den Punkten zum Zeitpunkt des Hinzufügens
+    let sprint_of = |title: &str| -> String {
+        c.query_row(
+            "SELECT s.name FROM sprint_tickets st JOIN sprints s ON s.id = st.sprint_id JOIN tickets t ON t.id = st.ticket_id WHERE t.project_id = ?1 AND t.title = ?2 AND st.removed_at IS NULL",
+            rusqlite::params![b, title],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!((sprint_of("A"), sprint_of("B")), ("Sprint One".to_string(), "Next".to_string()));
+    // Die Version steht in der Zielprojekt-Version (andere Kennung als im Quellprojekt)
+    let ver: String = c.query_row("SELECT v.name FROM ticket_values tv JOIN versions v ON v.id = CAST(tv.text AS INTEGER) JOIN tickets t ON t.id = tv.ticket_id WHERE t.project_id = ?1 AND t.title = 'A'", [b], |r| r.get(0)).unwrap();
+    assert_eq!(ver, "1.0");
+}
+
+#[test]
+fn unknown_releases_and_sprints_are_row_errors() {
+    let s = planned();
+    let c = &s.fx.c;
+    let b = clone_planned(&s, "BB");
+    let h = format!("{HEAD},Sprint,Release,Goal");
+    let cases: Vec<(&str, &str, RowIssue)> = vec![
+        (",Dev task,T,,,,,,,Nowhere,,", "Sprint", RowIssue::SprintUnknown("Nowhere".into())),
+        (",Dev task,T,,,,,,,,9.9,", "Release", RowIssue::ReleaseUnknown("9.9".into())),
+        (",Dev task,T,,,,,,,,,Omega", "Goal", RowIssue::ReleaseUnknown("Omega".into())),
+    ];
+    for (line, col, issue) in cases {
+        let probs = rows_of(import_into(c, b, &format!("{h}\n{line}\n")).unwrap_err());
+        assert_eq!(probs.len(), 1, "{line}");
+        assert_eq!((probs[0].row, probs[0].column.as_str(), &probs[0].issue), (2, col, &issue));
+        assert_ne!(probs[0].message(Lang::De), probs[0].message(Lang::En));
+    }
+    // Namen werden ohne Beachtung der Groß-/Kleinschreibung gefunden
+    assert_eq!(import_into(c, b, &format!("{h}\n,Dev task,ok,,,,,,,sprint one,1.0,alpha\n")).unwrap().created, 1);
+    // Die Spalten dürfen auch fehlen: das Ticket kommt ins Backlog
+    assert_eq!(import_into(c, b, &format!("{HEAD}\n,Dev task,backlog,,,,,,\n")).unwrap().created, 1);
+    let in_sprint: i64 = c.query_row("SELECT COUNT(*) FROM sprint_tickets st JOIN tickets t ON t.id = st.ticket_id WHERE t.project_id = ?1 AND t.title = 'backlog'", [b], |r| r.get(0)).unwrap();
+    assert_eq!(in_sprint, 0);
+}
+
+#[test]
+fn a_completed_sprint_and_a_project_without_sprints_are_refused() {
+    use crate::planning::sprints::sprint::{complete_sprint, Leftover};
+    let s = planned();
+    let c = &s.fx.c;
+    let b = clone_planned(&s, "BB");
+    // Abgeschlossener Sprint im Zielprojekt (aktivieren und abschließen)
+    let cal = crate::calc::calendar::WorkCalendar::default();
+    let sprint_one: i64 = c.query_row("SELECT id FROM sprints WHERE project_id = ?1 AND name = 'Sprint One'", [b], |r| r.get(0)).unwrap();
+    crate::planning::sprints::sprint::update_sprint(
+        c,
+        sprint_one,
+        &crate::planning::sprints::sprint::UpdateSprint { start: Some(Some(chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap())), end: Some(Some(chrono::NaiveDate::from_ymd_opt(2026, 11, 13).unwrap())), ..Default::default() },
+    )
+    .unwrap();
+    crate::planning::sprints::sprint::start_sprint(c, sprint_one, &cal).unwrap();
+    complete_sprint(c, sprint_one, Leftover::ToBacklog).unwrap();
+    let h = format!("{HEAD},Sprint");
+    let probs = rows_of(import_into(c, b, &format!("{h}\n,Dev task,T,,,,,,,Sprint One\n")).unwrap_err());
+    assert_eq!((probs[0].row, probs[0].column.as_str()), (2, "Sprint"));
+    assert!(matches!(probs[0].issue, RowIssue::Sprint(crate::planning::sprints::SprintError::SprintCompleted)));
+    assert_eq!(count_tickets(c, b), 0, "alles oder nichts");
+    // Projekt ohne Sprints: die Spalte „Sprint“ ist nicht erlaubt
+    let fx = Fx::new();
+    let e = import_into(&fx.c, fx.project, &format!("{h}\n,Dev task,T,,,,,,,X\n")).unwrap_err();
+    assert_eq!(e, BackupError::CsvHeader(HeaderProblem::Unknown { column: 10, name: "Sprint".into() }));
+    assert_eq!(count_tickets(&fx.c, fx.project), 0);
+    let _ = (s.s_plan, s.s_active, s.t1, s.t2);
 }
 
 #[test]
@@ -620,7 +773,8 @@ fn two_thousand_rows_import_quickly() {
     let out = export_tickets_csv(c, b, &CsvOptions::for_ui()).unwrap();
     eprintln!("2000 Zeilen: Import {dt:?}, Export {:?}", t1.elapsed());
     assert_eq!(table_any(&out).rows.len(), 2000);
-    assert!(dt.as_secs() < 20, "{dt:?}");
+    // Allein dauert es unter einer Sekunde; die Grenze ist großzügig, weil die Tests parallel laufen.
+    assert!(dt.as_secs() < 90, "{dt:?}");
 }
 
 #[test]

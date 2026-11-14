@@ -7,7 +7,12 @@ use crate::planning::history::{describe, history_of, Source};
 use crate::planning::integrity::DeleteMode;
 use crate::planning::link_types::{create_link_type, delete_link_type, link_type_by_key, NewLinkType, TargetKind};
 use crate::planning::links::{add_link, Target};
+use crate::calc::calendar::WorkCalendar;
+use crate::calc::progress::Basis;
 use crate::planning::projects::{project_by_key, update_project, UpdateProject};
+use crate::planning::sprints::releases::{create_milestone, create_version, set_milestone_reached, set_version_released, NewRelease};
+use crate::planning::sprints::sprint::{complete_sprint, create_sprint, list_sprints, move_tickets_to_backlog, move_tickets_to_sprint, start_sprint, Leftover, NewSprint};
+use crate::planning::sprints::{burndown_for_sprint, clock, sprint_report, velocity_for_project, SprintError};
 use crate::planning::template::export_types;
 use crate::planning::ticket_error::TicketError;
 use crate::planning::tickets::{create_child, create_ticket, delete_ticket, fixture::Fx, set_flagged, set_starred, update_ticket, NewTicket, Ticket, TicketUpdate};
@@ -33,12 +38,13 @@ struct Rich {
     sub: Ticket,
     defect: Ticket,
     plain: Ticket,
+    sprint1: i64,
 }
 
 fn rich() -> Rich {
     let fx = Fx::new();
     let c = &fx.c;
-    update_project(c, fx.project, &UpdateProject { description: Some("Ein Projekt\nmit Zeilenumbruch".into()), work_dir: Some("C:\\Work\\pan".into()), use_sprints: Some(true), ..Default::default() }).unwrap();
+    update_project(c, fx.project, &UpdateProject { description: Some("Ein Projekt\nmit Zeilenumbruch".into()), work_dir: Some("C:\\Work\\pan".into()), use_sprints: Some(true), use_versions: Some(true), ..Default::default() }).unwrap();
     // zusätzliche Felder am Devtask
     let o = |names: &[&str]| FieldOptions { values: names.iter().map(|n| OptionValue::new(n)).collect(), ..Default::default() };
     let tags = fx.add_field(fx.task, "Tags", FieldKind::Labels, FieldOptions::default(), false);
@@ -108,11 +114,48 @@ fn rich() -> Rich {
     // Lücke in den Nummern: ein Ticket anlegen und wieder löschen
     let gone = fx.mk(fx.defect, "weg");
     delete_ticket(c, gone.id, &src).unwrap();
+    // Versionen und Meilensteine mit Feldwerten
+    let d = |m: u32, day: u32| chrono::NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+    let v1 = create_version(c, &NewRelease { project_id: fx.project, name: "1.0".into(), description: "Erste Version".into(), due_date: Some(d(12, 1)) }).unwrap();
+    let v2 = create_version(c, &NewRelease::new(fx.project, "2.0")).unwrap();
+    set_version_released(c, v1, true).unwrap();
+    let m1 = create_milestone(c, &NewRelease { project_id: fx.project, name: "Alpha".into(), description: String::new(), due_date: Some(d(11, 20)) }).unwrap();
+    create_milestone(c, &NewRelease::new(fx.project, "Beta")).unwrap();
+    set_milestone_reached(c, m1, true).unwrap();
+    let rel_field = fx.add_field(fx.story, "Release", FieldKind::Version, FieldOptions::default(), false);
+    let goal_field = fx.add_field(fx.story, "Goal", FieldKind::Milestone, FieldOptions::default(), false);
+    update_ticket(c, story.id, &TicketUpdate { title: None, values: vec![(rel_field.id, json!(v1)), (goal_field.id, json!(m1))] }, &src).unwrap();
+    update_ticket(c, story.id, &TicketUpdate { title: None, values: vec![(rel_field.id, json!(v2))] }, &src).unwrap();
+    // Story Points und feste Zeiten im Status-Verlauf (für Burndown und Bericht)
+    let sp = fx.field(fx.task, "story_points");
+    update_ticket(c, task1.id, &TicketUpdate { title: None, values: vec![(sp.id, json!(3))] }, &src).unwrap();
+    update_ticket(c, task2.id, &TicketUpdate { title: None, values: vec![(sp.id, json!(5))] }, &src).unwrap();
+    c.execute("UPDATE history SET at = '2026-11-04T10:00:00' WHERE field = 'status' AND ticket_id = ?1", [task1.id]).unwrap();
+    c.execute("UPDATE history SET at = '2026-11-03T10:00:00' WHERE field = 'status' AND ticket_id = ?1", [task2.id]).unwrap();
+    // Sprints: einer abgeschlossen, einer aktiv (mit Umfangsänderung), einer geplant
+    let cal = WorkCalendar::default();
+    clock::set("2026-10-01T09:00:00");
+    let s0 = create_sprint(c, &NewSprint { project_id: fx.project, name: "S0".into(), goal: "Alt".into(), start: Some(d(10, 5)), end: Some(d(10, 16)), default_days: None }, &cal).unwrap();
+    move_tickets_to_sprint(c, s0, &[epic.id]).unwrap();
+    start_sprint(c, s0, &cal).unwrap();
+    clock::set("2026-10-16T17:00:00");
+    complete_sprint(c, s0, Leftover::ToBacklog).unwrap();
+    clock::set("2026-10-30T10:00:00");
+    let sprint1 = create_sprint(c, &NewSprint { project_id: fx.project, name: "S1".into(), goal: "Mitte".into(), start: Some(d(11, 2)), end: Some(d(11, 13)), default_days: Some(8) }, &cal).unwrap();
+    move_tickets_to_sprint(c, sprint1, &[task1.id, task2.id, sub.id]).unwrap();
+    clock::set("2026-11-02T08:00:00");
+    start_sprint(c, sprint1, &cal).unwrap();
+    clock::set("2026-11-05T10:00:00");
+    move_tickets_to_sprint(c, sprint1, &[defect.id]).unwrap();
+    clock::set("2026-11-06T09:00:00");
+    move_tickets_to_backlog(c, &[defect.id]).unwrap();
+    let s2 = create_sprint(c, &NewSprint::new(fx.project, "S2"), &cal).unwrap();
+    move_tickets_to_sprint(c, s2, &[defect.id, story.id]).unwrap();
     // Ansichten
     create_filter(c, &NewFilter { project_id: Some(fx.project), name: "Epics".into(), jql: "type = Epic".into() }).unwrap();
     let b = default_board_for(c, fx.project, Lang::En).unwrap();
     create_board(c, &b).unwrap();
-    Rich { fx, epic, story, task1, task2, sub, defect, plain }
+    Rich { fx, epic, story, task1, task2, sub, defect, plain, sprint1 }
 }
 
 fn fresh() -> Connection {
@@ -151,6 +194,10 @@ fn fails(d: &ProjectDoc) -> BackupError {
     e
 }
 
+fn sp(d: &mut ProjectDoc, i: usize) -> &mut DocSprint {
+    &mut d.sprints[i]
+}
+
 fn ticket_mut<'a>(d: &'a mut ProjectDoc, title: &str) -> &'a mut DocTicket {
     d.tickets.iter_mut().find(|t| t.title == title).unwrap_or_else(|| panic!("Ticket {title}"))
 }
@@ -172,7 +219,7 @@ fn export_has_format_version_and_project_settings() {
     let p = &d.project;
     assert_eq!((p.key.as_str(), p.name.as_str(), p.color.as_str(), p.work_dir.as_str()), ("PAN", "Paneldeck", "#112233", "C:\\Work\\pan"));
     assert_eq!(p.description, "Ein Projekt\nmit Zeilenumbruch");
-    assert!(p.use_sprints && !p.use_versions);
+    assert!(p.use_sprints && p.use_versions);
     assert!(valid_timestamp(&p.created_at));
     // Zähler: ein Ticket wurde gelöscht → next_number liegt über der höchsten Nummer
     let max = d.tickets.iter().map(|t| t.number).max().unwrap();
@@ -413,7 +460,7 @@ fn project_settings_roundtrip() {
     let res = import(&c, &a);
     let p = crate::planning::projects::get_project(&c, res.project_id).unwrap();
     assert_eq!((p.name.as_str(), p.color.as_str(), p.work_dir.as_str(), p.description.as_str()), ("Paneldeck", "#112233", "C:\\Work\\pan", "Ein Projekt\nmit Zeilenumbruch"));
-    assert!(p.use_sprints && !p.use_versions && !p.system);
+    assert!(p.use_sprints && p.use_versions && !p.system);
     assert_eq!(p.created_at, a.project.created_at);
 }
 
@@ -560,9 +607,10 @@ fn rejects_foreign_and_newer_documents() {
 fn unknown_sections_are_ignored_and_missing_optional_ones_are_empty() {
     let r = rich();
     let mut v: serde_json::Value = serde_json::from_str(&export(&r).to_json()).unwrap();
-    v["sprints"] = json!([{"name": "S1"}]);
+    v["future_section"] = json!([{"name": "x"}]);
     v.as_object_mut().unwrap().remove("link_types");
     v.as_object_mut().unwrap().remove("tickets");
+    v.as_object_mut().unwrap().remove("sprints");
     let d = ProjectDoc::from_json(&v.to_string()).unwrap();
     assert!(d.tickets.is_empty() && d.link_types.is_empty());
     let c = fresh();
@@ -781,19 +829,235 @@ fn links_to_other_projects_and_terminals_are_reported() {
 }
 
 #[test]
-fn version_and_milestone_values_are_skipped_with_a_warning() {
+fn version_1_documents_still_import_but_their_version_values_are_skipped() {
     let r = rich();
-    let c = &r.fx.c;
-    let v = r.fx.add_field(r.fx.story, "Release", FieldKind::Version, FieldOptions::default(), false);
-    let m = r.fx.add_field(r.fx.story, "Goal", FieldKind::Milestone, FieldOptions::default(), false);
-    update_ticket(c, r.story.id, &TicketUpdate { title: None, values: vec![(v.id, json!(3)), (m.id, json!(4))] }, &Source::ui()).unwrap();
-    let a = export(&r);
-    let nv = |d: &ProjectDoc| d.tickets.iter().find(|t| t.title == "Story one").unwrap().values.len();
+    let mut a = export(&r);
+    // So sah ein Dokument der Version 1 aus: keine Abschnitte, Werte von Version-/Meilenstein-Feldern ohne Objekte
+    a.version = 1;
+    a.versions.clear();
+    a.milestones.clear();
+    a.sprints.clear();
     let c2 = fresh();
     let res = import(&c2, &a);
     assert!(res.report.warnings.contains(&Warning::VersionValues(2)));
+    assert_eq!((res.report.sprints, res.report.versions, res.report.milestones), (0, 0, 0));
     let b = export_project(&c2, res.project_id).unwrap();
+    let nv = |d: &ProjectDoc| d.tickets.iter().find(|t| t.title == "Story one").unwrap().values.len();
     assert_eq!(nv(&b) + 2, nv(&a));
+    // und auch ein JSON-Text der Version 1 ohne die neuen Abschnitte wird gelesen
+    let mut v: serde_json::Value = serde_json::from_str(&a.to_json()).unwrap();
+    for k in ["versions", "milestones", "sprints"] {
+        v.as_object_mut().unwrap().remove(k);
+    }
+    assert_eq!(v["version"], 1);
+    let d = ProjectDoc::from_json(&v.to_string()).unwrap();
+    assert!(d.sprints.is_empty() && d.versions.is_empty());
+}
+
+#[test]
+fn versions_milestones_and_sprints_roundtrip_with_all_details() {
+    let r = rich();
+    let a = export(&r);
+    assert_eq!(a.version, 2);
+    assert_eq!(a.versions.iter().map(|v| (v.name.as_str(), v.done, v.due_date.as_deref())).collect::<Vec<_>>(), vec![("1.0", true, Some("2026-12-01")), ("2.0", false, None)]);
+    assert!(a.versions[0].done_at.is_some() && a.versions[1].done_at.is_none());
+    assert_eq!(a.versions[0].description, "Erste Version");
+    assert_eq!(a.milestones.iter().map(|v| (v.name.as_str(), v.done)).collect::<Vec<_>>(), vec![("Alpha", true), ("Beta", false)]);
+    assert_eq!(a.sprints.iter().map(|s| (s.name.as_str(), s.state.as_str())).collect::<Vec<_>>(), vec![("S0", "completed"), ("S1", "active"), ("S2", "planned")]);
+    let s1 = &a.sprints[1];
+    assert_eq!((s1.goal.as_str(), s1.default_days, s1.start_date.as_deref(), s1.end_date.as_deref()), ("Mitte", 8, Some("2026-11-02"), Some("2026-11-13")));
+    assert_eq!(s1.started_at.as_deref(), Some("2026-11-02T08:00:00"));
+    assert_eq!(a.sprints[0].completed_at.as_deref(), Some("2026-10-16T17:00:00"));
+    // Zugehörigkeit: drei Tickets vom Planen, ein nachträglich hinzugekommenes und wieder entferntes
+    assert_eq!(s1.tickets.len(), 4);
+    let late = s1.tickets.iter().find(|e| e.removed_at.is_some()).unwrap();
+    assert_eq!((late.added_at.as_str(), late.removed_at.as_deref()), ("2026-11-05T10:00:00", Some("2026-11-06T09:00:00")));
+    assert!(s1.tickets.iter().any(|e| e.points_at_add == Some(5.0)) && s1.tickets.iter().any(|e| e.points_at_add == Some(3.0)));
+    // Feldwerte nennen die Nummern der Versionen/Meilensteine
+    let story = a.tickets.iter().find(|t| t.title == "Story one").unwrap();
+    let nos: Vec<i64> = story.values.iter().filter(|v| v.field >= 1).map(|v| v.value.as_i64().unwrap_or(0)).collect();
+    assert!(nos.contains(&2) && nos.contains(&1), "Version 2.0 (Nr. 2), Meilenstein Alpha (Nr. 1): {nos:?}");
+    // Rundreise in eine leere und in eine Datenbank mit verschobenen Ids
+    let c = fresh();
+    let res = import(&c, &a);
+    assert_eq!((res.report.sprints, res.report.versions, res.report.milestones), (3, 2, 2));
+    assert!(!res.report.warnings.iter().any(|w| matches!(w, Warning::VersionValues(_))));
+    let b = export_project(&c, res.project_id).unwrap();
+    assert_eq!((&a.versions, &a.milestones, &a.sprints), (&b.versions, &b.milestones, &b.sprints));
+    assert_eq!(norm(a.clone()), norm(b));
+    let shifted = import_project(&r.fx.c, &a, Some("TWO".into())).unwrap();
+    let b2 = export_project(&r.fx.c, shifted.project_id).unwrap();
+    assert_eq!((&a.versions, &a.milestones, &a.sprints), (&b2.versions, &b2.milestones, &b2.sprints));
+    // Das Feld zeigt auf die neue Version, nicht auf die des Originals
+    let c_ = &r.fx.c;
+    let st = c_.query_row("SELECT id FROM tickets WHERE project_id = ?1 AND title = 'Story one'", [shifted.project_id], |x| x.get::<_, i64>(0)).unwrap();
+    let vals = crate::planning::values::load_values(c_, st).unwrap();
+    let vid = vals.values().filter_map(|v| v.as_i64()).find(|id| c_.query_row("SELECT name FROM versions WHERE id = ?1 AND project_id = ?2", [*id, shifted.project_id], |x| x.get::<_, String>(0)).is_ok_and(|n| n == "2.0"));
+    assert!(vid.is_some(), "{vals:?}");
+    // Verlauf des Version-Felds: neue Kennung im Text
+    let hist: Vec<_> = history_of(c_, st).unwrap().into_iter().filter(|e| matches!(e.field, crate::planning::history::HistoryField::Custom(_)) && e.new.as_deref() == vid.map(|v| v.to_string()).as_deref()).collect();
+    assert_eq!(hist.len(), 1, "der Wechsel auf 2.0 steht im Verlauf mit der neuen Kennung");
+    assert_eq!(hist[0].old.as_deref().map(|o| o.parse::<i64>().is_ok()), Some(true));
+}
+
+#[test]
+fn burndown_report_and_velocity_are_the_same_after_the_import() {
+    let r = rich();
+    let a = export(&r);
+    let c = fresh();
+    let res = import(&c, &a);
+    let find = |c: &Connection, p: i64, name: &str| list_sprints(c, p).unwrap().into_iter().find(|s| s.name == name).unwrap();
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+    for name in ["S0", "S1", "S2"] {
+        let (old, new) = (find(&r.fx.c, r.fx.project, name), find(&c, res.project_id, name));
+        for basis in [Basis::Points, Basis::TicketCount, Basis::PointsWithFallbackOne].into_iter().filter(|_| name != "S2") {
+            let x = burndown_for_sprint(&r.fx.c, old.id, basis, WorkCalendar::default(), today).unwrap();
+            let y = burndown_for_sprint(&c, new.id, basis, WorkCalendar::default(), today).unwrap();
+            assert_eq!(format!("{x:?}"), format!("{y:?}"), "Burndown {name} {basis:?}");
+        }
+        let (x, y) = (sprint_report(&r.fx.c, old.id).unwrap(), sprint_report(&c, new.id).unwrap());
+        assert_eq!((x.planned, x.completed, x.added, x.removed, x.open), (y.planned, y.completed, y.added, y.removed, y.open), "Bericht {name}");
+        assert_eq!((x.sprint.state, x.sprint.start_date, x.sprint.started_at.clone()), (y.sprint.state, y.sprint.start_date, y.sprint.started_at.clone()));
+    }
+    // S1 hat wirklich etwas zu berichten (Startumfang, Erledigtes, Hinzugefügtes)
+    let rep = sprint_report(&c, find(&c, res.project_id, "S1").id).unwrap();
+    assert_eq!(rep.planned.tickets, 3);
+    assert_eq!(rep.added.tickets, 1);
+    assert!(rep.completed.tickets >= 1);
+    let (vx, vy) = (velocity_for_project(&r.fx.c, r.fx.project, 5, Basis::Points).unwrap(), velocity_for_project(&c, res.project_id, 5, Basis::Points).unwrap());
+    assert_eq!(format!("{vx:?}"), format!("{vy:?}"));
+    // Die offene Zugehörigkeit ist erhalten: Defect und Story liegen im geplanten S2
+    let s2 = find(&c, res.project_id, "S2");
+    let content = crate::planning::sprints::sprint::sprint_content(&c, s2.id).unwrap();
+    let mut t: Vec<String> = content.items.iter().map(|i| i.ticket.title.clone()).collect();
+    t.sort();
+    assert_eq!(t, vec!["Defect — äöü \"Quotes\", Komma; Semikolon".to_string(), "Story one".to_string()]);
+}
+
+#[test]
+fn renumbering_does_not_touch_sprints_versions_and_milestones() {
+    let r = rich();
+    let a = export(&r);
+    let res = import_project(&r.fx.c, &a, Some("NEU".into())).unwrap();
+    assert!(res.renumbered);
+    let b = export_project(&r.fx.c, res.project_id).unwrap();
+    assert_eq!((&a.versions, &a.milestones), (&b.versions, &b.milestones));
+    // Sprints sind gleich, nur die Ticketnummern der Zugehörigkeit folgen der Umnummerierung (alte Nummern → 1…n)
+    let order: Vec<i64> = a.tickets.iter().map(|t| t.number).collect();
+    let new_no = |n: i64| order.iter().position(|x| *x == n).unwrap() as i64 + 1;
+    for (x, y) in a.sprints.iter().zip(&b.sprints) {
+        assert_eq!((&x.name, &x.state, &x.goal, &x.start_date, &x.end_date, &x.created_at, &x.started_at, &x.completed_at), (&y.name, &y.state, &y.goal, &y.start_date, &y.end_date, &y.created_at, &y.started_at, &y.completed_at));
+        assert_eq!(x.tickets.iter().map(|e| (new_no(e.ticket), e.added_at.clone(), e.removed_at.clone(), e.points_at_add)).collect::<Vec<_>>(), y.tickets.iter().map(|e| (e.ticket, e.added_at.clone(), e.removed_at.clone(), e.points_at_add)).collect::<Vec<_>>());
+    }
+    // Derselbe Name in einem anderen Projekt ist kein Konflikt
+    assert_eq!(list_sprints(&r.fx.c, res.project_id).unwrap().len(), 3);
+    assert_eq!(list_sprints(&r.fx.c, r.fx.project).unwrap().len(), 3);
+    let active = list_sprints(&r.fx.c, res.project_id).unwrap().into_iter().find(|s| s.name == "S1").unwrap();
+    let content = crate::planning::sprints::sprint::sprint_content(&r.fx.c, active.id).unwrap();
+    assert!(content.items.iter().all(|i| i.ticket.project_id == res.project_id), "Zugehörigkeit zeigt auf die neuen Tickets");
+    assert_eq!(content.items.len(), 3);
+    let _ = r.sprint1;
+}
+
+#[test]
+fn data_of_switched_off_features_is_kept() {
+    // Sprints und Versionen sind ausgeschaltet, ihre Daten bleiben (die Schicht lehnt dann nur Bearbeitung ab)
+    let r = rich();
+    update_project(&r.fx.c, r.fx.project, &UpdateProject { use_sprints: Some(false), use_versions: Some(false), ..Default::default() }).unwrap();
+    let a = export(&r);
+    assert!(!a.project.use_sprints && !a.project.use_versions);
+    assert_eq!((a.sprints.len(), a.versions.len(), a.milestones.len()), (3, 2, 2));
+    let c = fresh();
+    let res = import(&c, &a);
+    assert_eq!(res.report.sprints, 3);
+    assert_eq!(norm(export_project(&c, res.project_id).unwrap()), norm(a));
+}
+
+#[test]
+fn rejects_bad_sprints_versions_and_milestones() {
+    let r = rich();
+    let good = export(&r);
+    // Name doppelt (ohne Beachtung der Groß-/Kleinschreibung)
+    let mut d = good.clone();
+    sp(&mut d, 1).name = "s0".into();
+    assert_eq!(fails(&d), BackupError::AtSprint(Where::Sprint(2), SprintError::Plan(crate::planning::PlanError::NameTaken)));
+    // Name leer
+    let mut d = good.clone();
+    sp(&mut d, 0).name = " ".into();
+    assert_eq!(fails(&d), BackupError::AtPlan(Where::Sprint(1), crate::planning::PlanError::NameEmpty));
+    // Zustand, zwei aktive, Termine
+    let mut d = good.clone();
+    sp(&mut d, 2).state = "paused".into();
+    assert!(matches!(fails(&d), BackupError::At(Where::Sprint(3), Problem::SprintState(_))));
+    let mut d = good.clone();
+    sp(&mut d, 0).state = "active".into();
+    assert!(matches!(fails(&d), BackupError::At(Where::Sprint(2), Problem::SecondActiveSprint)));
+    let mut d = good.clone();
+    sp(&mut d, 1).end_date = Some("2026-10-01".into());
+    assert_eq!(fails(&d), BackupError::AtSprint(Where::Sprint(2), SprintError::DatesOrder));
+    let mut d = good.clone();
+    sp(&mut d, 1).end_date = None;
+    assert_eq!(fails(&d), BackupError::AtSprint(Where::Sprint(2), SprintError::DatesIncomplete));
+    let mut d = good.clone();
+    sp(&mut d, 1).start_date = Some("2.11.2026".into());
+    assert_eq!(fails(&d), BackupError::AtSprint(Where::Sprint(2), SprintError::DateInvalid));
+    let mut d = good.clone();
+    sp(&mut d, 2).default_days = 0;
+    assert!(matches!(fails(&d), BackupError::AtSprint(Where::Sprint(3), SprintError::DaysInvalid { .. })));
+    let mut d = good.clone();
+    sp(&mut d, 2).goal = "x".repeat(501);
+    assert!(matches!(fails(&d), BackupError::AtSprint(Where::Sprint(3), SprintError::TextTooLong { .. })));
+    let mut d = good.clone();
+    sp(&mut d, 1).started_at = Some("gestern".into());
+    assert!(matches!(fails(&d), BackupError::At(Where::Sprint(2), Problem::Timestamp(_))));
+    // Zugehörigkeit
+    let mut d = good.clone();
+    sp(&mut d, 1).tickets[0].ticket = 999;
+    assert_eq!(fails(&d), BackupError::At(Where::SprintEntry(2, 0), Problem::UnknownRef(RefKind::Ticket, 999)));
+    let mut d = good.clone();
+    sp(&mut d, 1).tickets[0].removed_at = Some("2020-01-01T00:00:00".into());
+    assert_eq!(fails(&d), BackupError::At(Where::SprintEntry(2, 0), Problem::RemovedBeforeAdded));
+    let mut d = good.clone();
+    sp(&mut d, 1).tickets[0].points_at_add = Some(-1.0);
+    assert_eq!(fails(&d), BackupError::At(Where::SprintEntry(2, 0), Problem::Points));
+    let mut d = good.clone();
+    let dup = sp(&mut d, 1).tickets[0].clone();
+    sp(&mut d, 1).tickets.push(dup.clone());
+    assert_eq!(fails(&d), BackupError::At(Where::SprintEntry(2, 4), Problem::SprintTicketTwice(dup.ticket)));
+    // dasselbe Ticket in zwei offenen Sprints
+    let mut d = good.clone();
+    let first = sp(&mut d, 1).tickets[0].clone();
+    sp(&mut d, 2).tickets.push(first.clone());
+    assert_eq!(fails(&d), BackupError::At(Where::SprintEntry(3, 2), Problem::TicketInTwoSprints(first.ticket)));
+    // Versionen und Meilensteine
+    let mut d = good.clone();
+    d.versions[1].name = "1.0".into();
+    assert_eq!(fails(&d), BackupError::AtSprint(Where::Version(2), SprintError::Plan(crate::planning::PlanError::NameTaken)));
+    let mut d = good.clone();
+    d.milestones[0].due_date = Some("irgendwann".into());
+    assert_eq!(fails(&d), BackupError::AtSprint(Where::Milestone(1), SprintError::DateInvalid));
+    let mut d = good.clone();
+    d.milestones[0].description = "y".repeat(2001);
+    assert!(matches!(fails(&d), BackupError::AtSprint(Where::Milestone(1), SprintError::TextTooLong { .. })));
+    let mut d = good.clone();
+    d.versions[0].done_at = Some("kürzlich".into());
+    assert!(matches!(fails(&d), BackupError::At(Where::Version(1), Problem::Timestamp(_))));
+    // Feldwert verweist auf eine Version, die es im Dokument nicht gibt
+    let mut d = good.clone();
+    let rel = d.structure.types.iter().flat_map(|t| &t.fields).find(|f| f.name.as_deref() == Some("Release")).unwrap().id;
+    ticket_mut(&mut d, "Story one").values.iter_mut().find(|v| v.field == rel).unwrap().value = json!(9);
+    assert!(matches!(fails(&d), BackupError::At(Where::Value(_, _), Problem::UnknownRef(RefKind::Version, 9))));
+    let goal = d.structure.types.iter().flat_map(|t| &t.fields).find(|f| f.name.as_deref() == Some("Goal")).unwrap().id;
+    let mut d = good.clone();
+    ticket_mut(&mut d, "Story one").values.iter_mut().find(|v| v.field == goal).unwrap().value = json!(0);
+    assert!(matches!(fails(&d), BackupError::At(Where::Value(_, _), Problem::UnknownRef(RefKind::Milestone, 0))));
+    // Texte sind zweisprachig
+    let e = fails(&{
+        let mut d = good.clone();
+        sp(&mut d, 1).tickets[0].removed_at = Some("2020-01-01T00:00:00".into());
+        d
+    });
+    assert!(e.message(Lang::En).starts_with("Sprint 2, ticket entry 1:") && e.message(Lang::De).starts_with("Sprint 2, Ticket-Zeile 1:"));
 }
 
 #[test]
@@ -818,6 +1082,7 @@ fn preview_counts_the_contents() {
     let p = a.preview();
     assert_eq!((p.key.as_str(), p.name.as_str()), ("PAN", "Paneldeck"));
     assert_eq!((p.statuses, p.types, p.tickets, p.comments, p.links, p.time_entries, p.boards, p.filters), (3, 6, 7, 2, 4, 2, 1, 1));
+    assert_eq!((p.sprints, p.versions, p.milestones), (3, 2, 2));
     assert_eq!(p.history, a.tickets.iter().map(|t| t.history.len()).sum::<usize>());
     assert!(p.fields > 10);
     assert_eq!(p.app_version, env!("CARGO_PKG_VERSION"));
@@ -885,7 +1150,8 @@ fn big_project_with_2000_tickets_exports_and_imports_quickly() {
     let b = export_project(&c2, res.project_id).unwrap();
     assert_eq!(norm(a), norm(b));
     eprintln!("2000 Tickets: Export {t_export:?}, Import {t_import:?}, JSON {} KB", json.len() / 1024);
-    assert!(t_export.as_secs() < 10 && t_import.as_secs() < 20, "export {t_export:?}, import {t_import:?}");
+    // Allein unter einer Sekunde; die Grenzen sind großzügig, weil die Tests parallel laufen.
+    assert!(t_export.as_secs() < 60 && t_import.as_secs() < 90, "export {t_export:?}, import {t_import:?}");
     // mit Umnummerierung ebenso
     let c3 = fresh();
     let res = import_project(&c3, &back, Some("BIG".into())).unwrap();

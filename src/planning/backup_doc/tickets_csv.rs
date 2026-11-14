@@ -12,6 +12,13 @@
 //! * `Key` ist der Schlüssel (`PAN-12`), `Parent` der Schlüssel des Eltern-Tickets (in derselben Datei); `Flagged`/`Starred`
 //!   sind `true`/`false`; `Created`/`Updated` ISO `JJJJ-MM-TTTHH:MM:SS`. Typ, Status und Werte von Dropdown/Mehrfachauswahl
 //!   stehen mit ihrem Namen (Export englisch; der Import erkennt Deutsch und Englisch).
+//! * Version- und Meilenstein-Felder stehen mit dem **Namen** der Version/des Meilensteins; der Import ordnet sie über den Namen
+//!   (ohne Beachtung der Groß-/Kleinschreibung) den vorhandenen Einträgen des Zielprojekts zu – gibt es den Namen dort nicht,
+//!   ist das ein Fehler mit Zeile und Spalte.
+//! * Nutzt das Projekt Sprints (`use_sprints`), folgt als **zehnte, optionale Spalte `Sprint`** der Name des offenen (geplanten
+//!   oder aktiven) Sprints des Tickets. Der Import legt das neue Ticket in den gleichnamigen Sprint des Zielprojekts (ohne
+//!   Beachtung der Groß-/Kleinschreibung; unbekannter oder abgeschlossener Sprint = Fehler mit Zeile und Spalte). Die Spalte ist
+//!   bei Projekten ohne Sprints nicht erlaubt; fehlt sie in der Datei, kommen die Tickets ins Backlog.
 //! * Mehrfachwerte (Mehrfachauswahl, Labels) sind mit `|` verbunden; `|` und `\` im Wert werden als `\|` und `\\`
 //!   geschrieben. Datum und Datum+Uhrzeit sind ISO, Checkboxen `true`/`false`, Zahlen mit Punkt, Ticket-Felder der Schlüssel
 //!   des Ziels. Rich-Text bleibt unverändert (mit Zeilenumbrüchen).
@@ -29,8 +36,7 @@
 //! Feld-Spalten sind erlaubt – dann gilt der Standardwert). Wird ein Feld gesetzt, das der Typ des Tickets nicht hat, ist das
 //! ein Fehler. Leere Zellen in vorhandenen Feld-Spalten heißen „leer“ (kein Standardwert); Pflichtfelder prüft die Datenschicht
 //! wie beim Anlegen in der Oberfläche. **Alles oder nichts:** gibt es Fehler (Zeile und Spalte, höchstens 50), wird nichts
-//! angelegt. Die Reihenfolge der Datei wird zur Reihenfolge im Backlog. Werte von Version-/Meilenstein-Feldern werden
-//! übersprungen (Hinweis).
+//! angelegt. Die Reihenfolge der Datei wird zur Reihenfolge im Backlog.
 
 use super::error::{BackupError, HeaderProblem, RowIssue, RowProblem, Warning, MAX_ROW_PROBLEMS};
 use super::valid_timestamp;
@@ -39,6 +45,7 @@ use crate::planning::common::{self, labels, same_label};
 use crate::planning::fields::{Field, FieldKind};
 use crate::planning::history::Source;
 use crate::planning::projects::editable;
+use crate::planning::sprints::sprint::move_tickets_to_sprint;
 use crate::planning::statuses::Status;
 use crate::planning::summary::{project_summary, ProjectSummary};
 use crate::planning::ticket_error::TicketError;
@@ -48,6 +55,9 @@ use crate::state::Lang;
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+/// Optionale zehnte Spalte bei Projekten mit Sprints.
+pub const SPRINT_COLUMN: &str = "Sprint";
 
 /// Die festen Spalten am Anfang jeder Datei.
 pub const FIXED_COLUMNS: [&str; 9] = ["Key", "Type", "Title", "Status", "Parent", "Flagged", "Starred", "Created", "Updated"];
@@ -143,6 +153,7 @@ fn columns(sum: &ProjectSummary) -> Vec<Col> {
         }
     }
     let mut used: HashSet<String> = FIXED_COLUMNS.iter().map(|c| c.to_lowercase()).collect();
+    used.insert(SPRINT_COLUMN.to_lowercase());
     let mut out = Vec::new();
     for (_, mut c) in cols {
         let base = c.header.clone();
@@ -168,7 +179,38 @@ fn bool_text(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
 
-fn render(field: &Field, v: &Value, key_of: &HashMap<i64, String>) -> String {
+/// Namen der Versionen und Meilensteine des Projekts (nach Kennung).
+#[derive(Default)]
+struct Releases {
+    versions: Vec<(i64, String)>,
+    milestones: Vec<(i64, String)>,
+}
+
+impl Releases {
+    fn load(conn: &Connection, project_id: i64) -> Result<Releases, BackupError> {
+        let read = |table: &str| -> Result<Vec<(i64, String)>, BackupError> {
+            let mut st = conn.prepare(&format!("SELECT id, name FROM {table} WHERE project_id = ?1 ORDER BY position, id"))?;
+            let rows = st.query_map([project_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        Ok(Releases { versions: read("versions")?, milestones: read("milestones")? })
+    }
+
+    fn list(&self, kind: FieldKind) -> &[(i64, String)] {
+        if kind == FieldKind::Version { &self.versions } else { &self.milestones }
+    }
+
+    fn name(&self, kind: FieldKind, id: i64) -> Option<&str> {
+        self.list(kind).iter().find(|(i, _)| *i == id).map(|(_, n)| n.as_str())
+    }
+
+    fn id(&self, kind: FieldKind, name: &str) -> Option<i64> {
+        let want = name.trim().to_lowercase();
+        self.list(kind).iter().find(|(_, n)| n.to_lowercase() == want).map(|(i, _)| *i)
+    }
+}
+
+fn render(field: &Field, v: &Value, key_of: &HashMap<i64, String>, releases: &Releases) -> String {
     let option = |id: i64| field.options.values.iter().find(|o| o.id == id).map(|o| o.display(Lang::En)).unwrap_or_else(|| format!("#{id}"));
     match (field.kind, v) {
         (FieldKind::Checkbox, v) => bool_text(v.as_bool().unwrap_or(false)).to_string(),
@@ -176,6 +218,7 @@ fn render(field: &Field, v: &Value, key_of: &HashMap<i64, String>) -> String {
         (FieldKind::Multi, Value::Array(a)) => join_list(&a.iter().map(|x| option(x.as_i64().unwrap_or(0))).collect::<Vec<_>>()),
         (FieldKind::Labels, Value::Array(a)) => join_list(&a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect::<Vec<_>>()),
         (FieldKind::Ticket, v) => v.as_i64().and_then(|id| key_of.get(&id).cloned()).unwrap_or_default(),
+        (FieldKind::Version | FieldKind::Milestone, v) => v.as_i64().and_then(|id| releases.name(field.kind, id)).unwrap_or_default().to_string(),
         (_, Value::String(s)) => s.clone(),
         (_, other) => other.to_string(),
     }
@@ -183,9 +226,21 @@ fn render(field: &Field, v: &Value, key_of: &HashMap<i64, String>) -> String {
 
 /// Exportiert alle Tickets des Projekts (in der Reihenfolge des Backlogs) im oben beschriebenen Format.
 pub fn export_tickets_csv(conn: &Connection, project_id: i64, opts: &CsvOptions) -> Result<String, BackupError> {
-    editable(conn, project_id)?;
+    let project = editable(conn, project_id)?;
     let sum = project_summary(conn, project_id)?;
     let cols = columns(&sum);
+    let releases = Releases::load(conn, project_id)?;
+    // Offener Sprint je Ticket (nur bei Projekten mit Sprints)
+    let mut sprint_of: HashMap<i64, String> = HashMap::new();
+    if project.use_sprints {
+        let mut st = conn.prepare(
+            "SELECT st.ticket_id, s.name FROM sprint_tickets st JOIN sprints s ON s.id = st.sprint_id WHERE s.project_id = ?1 AND st.removed_at IS NULL AND s.state IN ('planned', 'active')",
+        )?;
+        for row in st.query_map([project_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+            let (t, n) = row?;
+            sprint_of.insert(t, n);
+        }
+    }
     let tickets = {
         let mut st = conn.prepare(&format!("SELECT {} {} WHERE t.project_id = ?1 ORDER BY t.rank, t.number", crate::planning::tickets::COLS, crate::planning::tickets::FROM))?;
         let rows = st.query_map([project_id], crate::planning::tickets::from_row)?.collect::<Result<Vec<_>, _>>()?;
@@ -206,7 +261,8 @@ pub fn export_tickets_csv(conn: &Connection, project_id: i64, opts: &CsvOptions)
         }
     }
     let cell = |s: String| if opts.excel_safe { guard(&s) } else { s };
-    let mut table = CsvTable::new(FIXED_COLUMNS.iter().map(|h| cell(h.to_string())).chain(cols.iter().map(|c| cell(c.header.clone()))));
+    let sprint_header: Option<&str> = project.use_sprints.then_some(SPRINT_COLUMN);
+    let mut table = CsvTable::new(FIXED_COLUMNS.iter().copied().chain(sprint_header).map(|h| cell(h.to_string())).chain(cols.iter().map(|c| cell(c.header.clone()))));
     for t in &tickets {
         let ty = sum.type_by_id(t.type_id);
         let mut row: Vec<String> = vec![
@@ -220,12 +276,15 @@ pub fn export_tickets_csv(conn: &Connection, project_id: i64, opts: &CsvOptions)
             t.created_at.clone(),
             t.updated_at.clone(),
         ];
+        if project.use_sprints {
+            row.push(sprint_of.get(&t.id).cloned().unwrap_or_default());
+        }
         let mine = values.remove(&t.id).unwrap_or_default();
         for c in &cols {
             let text = c
                 .members
                 .get(&t.type_id)
-                .and_then(|f| mine.get(&f.id).and_then(|(kind, rows)| decode(*kind, rows)).map(|v| render(f, &v, &key_of)))
+                .and_then(|f| mine.get(&f.id).and_then(|(kind, rows)| decode(*kind, rows)).map(|v| render(f, &v, &key_of, &releases)))
                 .unwrap_or_default();
             row.push(text);
         }
@@ -250,8 +309,6 @@ enum Cell {
     Value(Value),
     /// Schlüssel eines Tickets in der Datei (wird erst nach dem Anlegen aufgelöst).
     TicketKey(String),
-    /// Wert eines Version-/Meilenstein-Felds (nicht Teil des Formats).
-    Skipped,
 }
 
 fn parse_bool(s: &str) -> Option<bool> {
@@ -267,7 +324,7 @@ fn option_id(field: &Field, name: &str) -> Option<i64> {
     field.options.values.iter().find(|o| labels(o.key.as_deref(), o.name.as_deref()).contains(&want)).map(|o| o.id)
 }
 
-fn parse_cell(field: &Field, cell: &str) -> Result<Cell, RowIssue> {
+fn parse_cell(field: &Field, cell: &str, releases: &Releases) -> Result<Cell, RowIssue> {
     let invalid = || RowIssue::CellInvalid(cell.to_string());
     Ok(match field.kind {
         FieldKind::Text | FieldKind::Rich | FieldKind::Terminal | FieldKind::Date | FieldKind::Datetime => Cell::Value(Value::String(cell.to_string())),
@@ -292,7 +349,7 @@ fn parse_cell(field: &Field, cell: &str) -> Result<Cell, RowIssue> {
             let (k, n) = parse_key(cell).ok_or_else(invalid)?;
             Cell::TicketKey(format!("{k}-{n}"))
         }
-        FieldKind::Version | FieldKind::Milestone => Cell::Skipped,
+        FieldKind::Version | FieldKind::Milestone => Cell::Value(Value::from(releases.id(field.kind, cell).ok_or_else(|| RowIssue::ReleaseUnknown(cell.to_string()))?)),
     })
 }
 
@@ -313,6 +370,8 @@ struct ParsedRow {
     values: Vec<(i64, Value)>,
     /// (Feld, Schlüssel des Ziel-Tickets, Spaltenüberschrift)
     ticket_values: Vec<(Field, String, String)>,
+    /// Sprint (Kennung), in den das Ticket kommt.
+    sprint: Option<i64>,
 }
 
 struct Problems(Vec<RowProblem>);
@@ -348,10 +407,23 @@ pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: 
             return Err(BackupError::CsvHeader(HeaderProblem::Fixed { column: i + 1, expected: fixed.to_string(), found: table.headers.get(i).cloned().unwrap_or_default() }));
         }
     }
+    let project = editable(conn, project_id)?;
     let sum = project_summary(conn, project_id)?;
     let cols = columns(&sum);
+    // Die optionale Spalte „Sprint“ steht an zehnter Stelle und nur bei Projekten mit Sprints.
+    let has_sprint_col = table.headers.get(FIXED_COLUMNS.len()).map(String::as_str) == Some(SPRINT_COLUMN);
+    if has_sprint_col && !project.use_sprints {
+        return Err(BackupError::CsvHeader(HeaderProblem::Unknown { column: FIXED_COLUMNS.len() + 1, name: SPRINT_COLUMN.to_string() }));
+    }
+    let first_field = FIXED_COLUMNS.len() + has_sprint_col as usize;
+    let sprints: Vec<(i64, String)> = {
+        let mut st = conn.prepare("SELECT id, name FROM sprints WHERE project_id = ?1 ORDER BY id")?;
+        let rows = st.query_map([project_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let releases = Releases::load(conn, project_id)?;
     let mut col_of: Vec<usize> = Vec::new();
-    for (i, h) in table.headers.iter().enumerate().skip(FIXED_COLUMNS.len()) {
+    for (i, h) in table.headers.iter().enumerate().skip(first_field) {
         let Some(ci) = cols.iter().position(|c| c.header == *h) else {
             return Err(BackupError::CsvHeader(HeaderProblem::Unknown { column: i + 1, name: h.clone() }));
         };
@@ -366,7 +438,6 @@ pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: 
     let mut problems = Problems(Vec::new());
     let mut rows: Vec<ParsedRow> = Vec::new();
     let mut key_row: HashMap<String, usize> = HashMap::new();
-    let mut skipped_versions = 0usize;
     for (ri, r) in table.rows.iter().enumerate() {
         if problems.full() {
             break;
@@ -455,13 +526,27 @@ pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: 
             }
         };
         let (created, updated) = (ts(7, &mut problems), ts(8, &mut problems));
+        let sprint = if has_sprint_col {
+            match get(FIXED_COLUMNS.len()).trim() {
+                "" => None,
+                n => match sprints.iter().find(|(_, s)| s.to_lowercase() == n.to_lowercase()) {
+                    Some((id, _)) => Some(*id),
+                    None => {
+                        problems.add(row, SPRINT_COLUMN, RowIssue::SprintUnknown(n.to_string()));
+                        None
+                    }
+                },
+            }
+        } else {
+            None
+        };
         // Feldwerte
         let mut values = Vec::new();
         let mut ticket_values = Vec::new();
         if let Some(t) = ty {
             for (k, ci) in col_of.iter().enumerate() {
-                let header = &table.headers[FIXED_COLUMNS.len() + k];
-                let cell = get(FIXED_COLUMNS.len() + k);
+                let header = &table.headers[first_field + k];
+                let cell = get(first_field + k);
                 let Some(field) = cols[*ci].members.get(&t.ticket_type.id) else {
                     if !cell.is_empty() {
                         problems.add(row, header, RowIssue::FieldNotInType(t.ticket_type.display(Lang::En)));
@@ -472,20 +557,19 @@ pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: 
                     values.push((field.id, Value::Null));
                     continue;
                 }
-                match parse_cell(field, cell) {
+                match parse_cell(field, cell, &releases) {
                     Ok(Cell::Value(v)) => values.push((field.id, v)),
                     Ok(Cell::TicketKey(k)) => {
                         values.push((field.id, Value::Null));
                         ticket_values.push((field.clone(), k, header.clone()));
                     }
-                    Ok(Cell::Skipped) => skipped_versions += 1,
                     Err(issue) => problems.add(row, header, issue),
                 }
             }
         }
         if problems.0.len() == before {
             if let Some(t) = ty {
-                rows.push(ParsedRow { row, old_key, type_id: t.ticket_type.id, title, status, parent_key, flagged, starred, created, updated, values, ticket_values });
+                rows.push(ParsedRow { row, old_key, type_id: t.ticket_type.id, title, status, parent_key, flagged, starred, created, updated, values, ticket_values, sprint });
             }
         } else if let Some(k) = &old_key {
             // Ein fehlerhaftes Ticket soll Verweise darauf nicht zusätzlich als „fehlt“ melden.
@@ -512,11 +596,8 @@ pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: 
     // Anlegen (alles oder nichts)
     conn.execute_batch("SAVEPOINT csv_import")?;
     match create_all(conn, project_id, &rows, &key_row) {
-        Ok(mut report) => {
+        Ok(report) => {
             conn.execute_batch("RELEASE csv_import")?;
-            if skipped_versions > 0 {
-                report.warnings.push(Warning::VersionValues(skipped_versions));
-            }
             Ok(report)
         }
         Err(e) => {
@@ -598,6 +679,17 @@ fn create_all(conn: &Connection, project_id: i64, rows: &[ParsedRow], key_row: &
         report.keys.push((r.old_key.clone().unwrap_or_default(), new_key));
     }
     raw_set_ranks(conn, &ranks).map_err(|e: TicketError| BackupError::Ticket(e))?;
+    // Sprints zuletzt: Punkte und Werte der Tickets stehen dann fest (`points_at_add`)
+    for (i, r) in rows.iter().enumerate() {
+        if let Some(sprint) = r.sprint {
+            if let Err(e) = move_tickets_to_sprint(conn, sprint, &[ids[i].expect("angelegt")]) {
+                problems.add(r.row, SPRINT_COLUMN, RowIssue::Sprint(e));
+            }
+        }
+    }
+    if !problems.0.is_empty() {
+        return Err(BackupError::CsvRows(problems.0));
+    }
     report.created = rows.len();
     Ok(report)
 }

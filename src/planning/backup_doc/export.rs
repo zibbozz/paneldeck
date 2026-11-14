@@ -1,7 +1,7 @@
 //! Export einer Projektsicherung (siehe Moduldoku in `mod.rs`).
 
 use super::refmap::{translate_history, IdMap, Ref};
-use super::{BackupError, DocComment, DocHistory, DocLink, DocLinkType, DocProject, DocTarget, DocTicket, DocTime, DocValue, ProjectDoc, FORMAT, VERSION};
+use super::{BackupError, DocComment, DocHistory, DocLink, DocLinkType, DocProject, DocRelease, DocSprint, DocSprintTicket, DocTarget, DocTicket, DocTime, DocValue, ProjectDoc, FORMAT, VERSION};
 use crate::planning::fields::FieldKind;
 use crate::planning::link_types::get_link_type;
 use crate::planning::projects::editable;
@@ -22,6 +22,8 @@ struct ExportMap<'a> {
     field_kinds: HashMap<i64, FieldKind>,
     work_kinds: HashMap<i64, i64>,
     tickets: HashMap<i64, i64>,
+    versions: HashMap<i64, i64>,
+    milestones: HashMap<i64, i64>,
     link_type_no: HashMap<i64, i64>,
     link_types: Vec<DocLinkType>,
 }
@@ -48,6 +50,8 @@ impl IdMap for ExportMap<'_> {
             Ref::Field => self.fields.get(&id).copied(),
             Ref::Ticket => self.tickets.get(&id).copied(),
             Ref::WorkKind => self.work_kinds.get(&id).copied(),
+            Ref::Version => self.versions.get(&id).copied(),
+            Ref::Milestone => self.milestones.get(&id).copied(),
             Ref::LinkType => self.link_type(id),
         }
         .unwrap_or(0)
@@ -73,6 +77,8 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
         field_kinds: HashMap::new(),
         work_kinds: HashMap::new(),
         tickets: HashMap::new(),
+        versions: HashMap::new(),
+        milestones: HashMap::new(),
         link_type_no: HashMap::new(),
         link_types: Vec::new(),
     };
@@ -94,6 +100,10 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
     if map.status.len() != structure.statuses.len() || map.types.len() != structure.types.len() {
         return Err(BackupError::Db("structure numbering".to_string()));
     }
+
+    // Versionen und Meilensteine (unabhängig von den Projektschaltern: die Daten bleiben auch bei ausgeschalteter Funktion erhalten)
+    let versions = load_releases(conn, "versions", "released", "released_at", project_id, &mut map.versions)?;
+    let milestones = load_releases(conn, "milestones", "reached", "reached_at", project_id, &mut map.milestones)?;
 
     // Tickets (aufsteigend nach Nummer)
     let tickets: Vec<Ticket> = {
@@ -196,8 +206,14 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
         for (fid, (kind, rows)) in values.remove(&t.id).unwrap_or_default() {
             let Some(no) = map.fields.get(&fid).copied() else { continue };
             let Some(mut v) = decode(kind, &rows) else { continue };
-            if kind == FieldKind::Ticket {
-                let Some(n) = v.as_i64().and_then(|id| map.tickets.get(&id).copied()) else { continue };
+            let target = match kind {
+                FieldKind::Ticket => Some(&map.tickets),
+                FieldKind::Version => Some(&map.versions),
+                FieldKind::Milestone => Some(&map.milestones),
+                _ => None,
+            };
+            if let Some(numbers) = target {
+                let Some(n) = v.as_i64().and_then(|id| numbers.get(&id).copied()) else { continue };
                 v = serde_json::Value::from(n);
             }
             vals.push(DocValue { field: no, value: v });
@@ -229,6 +245,8 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
         });
     }
 
+    let sprints = load_sprints(conn, project_id, &map.tickets)?;
+
     Ok(ProjectDoc {
         format: FORMAT.to_string(),
         version: VERSION,
@@ -250,5 +268,64 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
         link_types: map.link_types,
         views,
         tickets: out_tickets,
+        versions,
+        milestones,
+        sprints,
     })
+}
+
+/// Versionen bzw. Meilensteine des Projekts in der Reihenfolge der Konfiguration; trägt die Nummern (1, 2, …) in `numbers` ein.
+fn load_releases(conn: &Connection, table: &str, done: &str, done_at: &str, project_id: i64, numbers: &mut HashMap<i64, i64>) -> Result<Vec<DocRelease>, BackupError> {
+    let mut st = conn.prepare(&format!("SELECT id, name, description, due_date, {done}, {done_at} FROM {table} WHERE project_id = ?1 ORDER BY position, id"))?;
+    let rows = st.query_map([project_id], |r| Ok((r.get::<_, i64>(0)?, DocRelease { name: r.get(1)?, description: r.get(2)?, due_date: r.get(3)?, done: r.get::<_, i64>(4)? != 0, done_at: r.get(5)? })))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, d) = row?;
+        out.push(d);
+        numbers.insert(id, out.len() as i64);
+    }
+    Ok(out)
+}
+
+/// Sprints des Projekts (in der Reihenfolge des Anlegens) samt den Zeilen der Ticket-Zugehörigkeit.
+fn load_sprints(conn: &Connection, project_id: i64, tickets: &HashMap<i64, i64>) -> Result<Vec<DocSprint>, BackupError> {
+    let mut ids: Vec<i64> = Vec::new();
+    let mut out: Vec<DocSprint> = Vec::new();
+    {
+        let mut st = conn.prepare("SELECT id, name, goal, start_date, end_date, state, default_days, created_at, started_at, completed_at FROM sprints WHERE project_id = ?1 ORDER BY id")?;
+        let rows = st.query_map([project_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                DocSprint {
+                    name: r.get(1)?,
+                    goal: r.get(2)?,
+                    start_date: r.get(3)?,
+                    end_date: r.get(4)?,
+                    state: r.get(5)?,
+                    default_days: r.get(6)?,
+                    created_at: r.get(7)?,
+                    started_at: r.get(8)?,
+                    completed_at: r.get(9)?,
+                    tickets: Vec::new(),
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, s) = row?;
+            ids.push(id);
+            out.push(s);
+        }
+    }
+    let mut st = conn.prepare(
+        "SELECT st.sprint_id, st.ticket_id, st.added_at, st.removed_at, st.points_at_add FROM sprint_tickets st JOIN sprints s ON s.id = st.sprint_id
+         WHERE s.project_id = ?1 ORDER BY st.sprint_id, st.id",
+    )?;
+    let rows = st.query_map([project_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, DocSprintTicket { ticket: 0, added_at: r.get(2)?, removed_at: r.get(3)?, points_at_add: r.get(4)? })))?;
+    for row in rows {
+        let (sprint, ticket, mut e) = row?;
+        let (Some(i), Some(n)) = (ids.iter().position(|s| *s == sprint), tickets.get(&ticket)) else { continue };
+        e.ticket = *n;
+        out[i].tickets.push(e);
+    }
+    Ok(out)
 }

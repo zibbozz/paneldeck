@@ -5,6 +5,7 @@
 //! * [`Warning`] meldet, was beim Import bewusst nicht übernommen wurde (der Import läuft dann trotzdem durch).
 
 use crate::calc::csv::CsvError;
+use crate::planning::sprints::SprintError;
 use crate::planning::ticket_error::TicketError;
 use crate::planning::views::transfer::Unresolved;
 use crate::planning::views::ViewError;
@@ -20,6 +21,9 @@ pub enum RefKind {
     WorkKind,
     LinkType,
     Ticket,
+    Version,
+    Milestone,
+    Sprint,
 }
 
 impl RefKind {
@@ -31,6 +35,9 @@ impl RefKind {
             RefKind::WorkKind => lang.t("Art der Arbeit", "kind of work"),
             RefKind::LinkType => lang.t("Verknüpfungstyp", "link type"),
             RefKind::Ticket => lang.t("Ticket", "ticket"),
+            RefKind::Version => lang.t("Version", "version"),
+            RefKind::Milestone => lang.t("Meilenstein", "milestone"),
+            RefKind::Sprint => lang.t("Sprint", "sprint"),
         }
     }
 }
@@ -64,6 +71,18 @@ pub enum Problem {
     LinkDuplicate,
     /// Eine Dauer von 0 Minuten.
     Minutes,
+    /// Unbekannter Zustand eines Sprints.
+    SprintState(String),
+    /// Zwei aktive Sprints im Projekt.
+    SecondActiveSprint,
+    /// Ein Ticket steckt in mehr als einem offenen (geplanten oder aktiven) Sprint (Ticketnummer).
+    TicketInTwoSprints(i64),
+    /// Dasselbe Ticket ist zweimal gleichzeitig im selben Sprint.
+    SprintTicketTwice(i64),
+    /// Entfernt, bevor es hinzugefügt wurde.
+    RemovedBeforeAdded,
+    /// Punkte beim Hinzufügen sind keine Zahl ab 0.
+    Points,
 }
 
 /// Fundstelle im Dokument.
@@ -80,6 +99,11 @@ pub enum Where {
     History(i64, usize),
     Link(i64, usize),
     Time(i64, usize),
+    Version(i64),
+    Milestone(i64),
+    Sprint(i64),
+    /// Eintrag der Sprint-Zugehörigkeit (Sprint-Nummer, Position).
+    SprintEntry(i64, usize),
 }
 
 impl Where {
@@ -102,6 +126,14 @@ impl Where {
             (Where::Link(t, i), Lang::En) => format!("Ticket {t}, link {}", i + 1),
             (Where::Time(t, i), Lang::De) => format!("Ticket {t}, Zeiteintrag {}", i + 1),
             (Where::Time(t, i), Lang::En) => format!("Ticket {t}, time entry {}", i + 1),
+            (Where::Version(n), Lang::De) => format!("Version {n}"),
+            (Where::Version(n), Lang::En) => format!("Version {n}"),
+            (Where::Milestone(n), Lang::De) => format!("Meilenstein {n}"),
+            (Where::Milestone(n), Lang::En) => format!("Milestone {n}"),
+            (Where::Sprint(n), Lang::De) => format!("Sprint {n}"),
+            (Where::Sprint(n), Lang::En) => format!("Sprint {n}"),
+            (Where::SprintEntry(s, i), Lang::De) => format!("Sprint {s}, Ticket-Zeile {}", i + 1),
+            (Where::SprintEntry(s, i), Lang::En) => format!("Sprint {s}, ticket entry {}", i + 1),
         }
     }
 }
@@ -141,6 +173,12 @@ pub enum RowIssue {
     TicketRefUnknown(String),
     /// Regel der Datenschicht verletzt.
     Ticket(TicketError),
+    /// Version oder Meilenstein gibt es im Projekt nicht (Name).
+    ReleaseUnknown(String),
+    /// Sprint gibt es im Projekt nicht (Name).
+    SprintUnknown(String),
+    /// Regel der Sprint-Schicht verletzt (z. B. abgeschlossener Sprint).
+    Sprint(SprintError),
 }
 
 /// Fundstelle und Art eines Problems in der Ticket-CSV. `row` zählt die Zeilen der Tabelle (Kopfzeile = 1).
@@ -170,6 +208,7 @@ pub enum BackupError {
     AtPlan(Where, PlanError),
     AtTicket(Where, TicketError),
     AtView(Where, ViewError),
+    AtSprint(Where, SprintError),
     Csv(CsvError),
     CsvHeader(HeaderProblem),
     /// Probleme in den Zeilen (höchstens [`MAX_ROW_PROBLEMS`]); die Datei wird dann gar nicht importiert.
@@ -235,6 +274,15 @@ impl Problem {
             (Problem::LinkTypeUnnamed, _) => s("Der Verknüpfungstyp hat keinen Namen.", "The link type has no name."),
             (Problem::LinkDuplicate, _) => s("Diese Verknüpfung steht doppelt im Dokument.", "This link appears twice in the document."),
             (Problem::Minutes, _) => s("Die Dauer muss größer als null sein.", "The duration must be greater than zero."),
+            (Problem::SprintState(t), Lang::De) => format!("Unbekannter Zustand {} des Sprints.", lang.q(t)),
+            (Problem::SprintState(t), Lang::En) => format!("Unknown sprint state {}.", lang.q(t)),
+            (Problem::SecondActiveSprint, _) => s("Im Projekt gibt es mehr als einen aktiven Sprint.", "The project has more than one active sprint."),
+            (Problem::TicketInTwoSprints(n), Lang::De) => format!("Das Ticket {n} steckt in mehr als einem offenen Sprint."),
+            (Problem::TicketInTwoSprints(n), Lang::En) => format!("Ticket {n} is in more than one open sprint."),
+            (Problem::SprintTicketTwice(n), Lang::De) => format!("Das Ticket {n} steht doppelt im selben Sprint."),
+            (Problem::SprintTicketTwice(n), Lang::En) => format!("Ticket {n} appears twice in the same sprint."),
+            (Problem::RemovedBeforeAdded, _) => s("Das Ticket wurde vor dem Hinzufügen entfernt.", "The ticket was removed before it was added."),
+            (Problem::Points, _) => s("Die Punkte beim Hinzufügen müssen eine Zahl ab 0 sein.", "The points at the time of adding must be a number from 0."),
         }
     }
 }
@@ -282,6 +330,11 @@ impl RowIssue {
             (RowIssue::FieldNotInType(t), Lang::En) => format!("The type {} has no such field.", q(t)),
             (RowIssue::TicketRefUnknown(t), Lang::De) => format!("Das Ticket {} steht nicht in der Datei.", q(t)),
             (RowIssue::TicketRefUnknown(t), Lang::En) => format!("The ticket {} is not in the file.", q(t)),
+            (RowIssue::ReleaseUnknown(t), Lang::De) => format!("Eine Version/einen Meilenstein {} gibt es in diesem Projekt nicht.", q(t)),
+            (RowIssue::ReleaseUnknown(t), Lang::En) => format!("This project has no version/milestone {}.", q(t)),
+            (RowIssue::SprintUnknown(t), Lang::De) => format!("Den Sprint {} gibt es in diesem Projekt nicht.", q(t)),
+            (RowIssue::SprintUnknown(t), Lang::En) => format!("This project has no sprint {}.", q(t)),
+            (RowIssue::Sprint(e), l) => e.message(l),
             (RowIssue::Ticket(e), l) => e.message(l),
         }
     }
@@ -321,6 +374,7 @@ impl BackupError {
             BackupError::AtPlan(w, e) => format!("{}: {}", w.text(lang), e.message(lang)),
             BackupError::AtTicket(w, e) => format!("{}: {}", w.text(lang), e.message(lang)),
             BackupError::AtView(w, e) => format!("{}: {}", w.text(lang), e.message(lang)),
+            BackupError::AtSprint(w, e) => format!("{}: {}", w.text(lang), e.message(lang)),
             BackupError::Csv(e) => e.message(lang),
             BackupError::CsvHeader(h) => h.message(lang),
             BackupError::CsvRows(rows) => {
@@ -394,6 +448,7 @@ mod tests {
             BackupError::AtPlan(Where::Structure, PlanError::KeyInvalid),
             BackupError::AtTicket(Where::Comment(1, 0), t()),
             BackupError::AtView(Where::Views, ViewError::ColumnEmpty),
+            BackupError::AtSprint(Where::Sprint(1), SprintError::SprintsDisabled),
             BackupError::CsvHeader(HeaderProblem::Fixed { column: 1, expected: "Key".into(), found: "x".into() }),
             BackupError::CsvHeader(HeaderProblem::Unknown { column: 10, name: "x".into() }),
             BackupError::CsvHeader(HeaderProblem::Duplicate { column: 11, name: "x".into() }),
@@ -424,13 +479,24 @@ mod tests {
             Problem::LinkTypeUnnamed,
             Problem::LinkDuplicate,
             Problem::Minutes,
+            Problem::SprintState("x".into()),
+            Problem::SecondActiveSprint,
+            Problem::TicketInTwoSprints(3),
+            Problem::SprintTicketTwice(3),
+            Problem::RemovedBeforeAdded,
+            Problem::Points,
+            Problem::UnknownRef(RefKind::Version, 1),
+            Problem::UnknownRef(RefKind::Milestone, 1),
+            Problem::UnknownRef(RefKind::Sprint, 1),
         ] {
             assert_ne!(p.message(Lang::De), p.message(Lang::En), "{p:?}");
         }
-        for w in [Where::Project, Where::Structure, Where::Views, Where::LinkType(1), Where::Value(2, 3), Where::Comment(1, 0), Where::History(1, 0), Where::Link(1, 0), Where::Time(1, 0)] {
+        for w in [Where::Project, Where::Structure, Where::Views, Where::LinkType(1), Where::Value(2, 3), Where::Comment(1, 0), Where::History(1, 0), Where::Link(1, 0), Where::Time(1, 0), Where::Milestone(1), Where::SprintEntry(1, 0)] {
             assert_ne!(w.text(Lang::De), w.text(Lang::En), "{w:?}");
         }
         assert_eq!(Where::Ticket(4).text(Lang::En), Where::Ticket(4).text(Lang::De), "„Ticket“ ist in beiden Sprachen gleich");
+        assert_eq!(Where::Version(2).text(Lang::En), "Version 2");
+        assert_eq!(Where::Sprint(2).text(Lang::De), "Sprint 2");
         for i in [
             RowIssue::KeyInvalid("x".into()),
             RowIssue::KeyDuplicate("x".into()),
@@ -447,6 +513,9 @@ mod tests {
             RowIssue::FieldNotInType("x".into()),
             RowIssue::TicketRefUnknown("x".into()),
             RowIssue::Ticket(TicketError::TitleEmpty),
+            RowIssue::ReleaseUnknown("x".into()),
+            RowIssue::SprintUnknown("x".into()),
+            RowIssue::Sprint(SprintError::SprintCompleted),
         ] {
             assert_ne!(i.message(Lang::De), i.message(Lang::En), "{i:?}");
         }

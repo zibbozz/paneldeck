@@ -1,7 +1,7 @@
 //! Import einer Projektsicherung als **neues** Projekt (siehe Moduldoku in `mod.rs`).
 
 use super::refmap::{translate_history, IdMap, Ref};
-use super::{valid_timestamp, BackupError, DocLinkType, DocTarget, DocTicket, ProjectDoc, Problem, RefKind, Warning, Where, FORMAT, VERSION};
+use super::{valid_timestamp, BackupError, DocLinkType, DocRelease, DocTarget, DocTicket, ProjectDoc, Problem, RefKind, Warning, Where, FORMAT, VERSION};
 use crate::planning::comments::MAX_COMMENT_CHARS;
 use crate::planning::common::{self, normalize_key, validate_key};
 use crate::planning::fields::{list_fields, Field, FieldKind};
@@ -10,6 +10,7 @@ use crate::planning::link_types::{create_link_type, get_link_type, list_link_typ
 use crate::planning::links::{clean_target, Target};
 use crate::planning::names;
 use crate::planning::projects::{create_project, project_by_key, NewProject};
+use crate::planning::sprints::{ensure_name_free, fmt_date, parse_date, SprintError, MAX_DESCRIPTION_CHARS, MAX_GOAL_CHARS, MAX_SPRINT_DAYS};
 use crate::planning::statuses::list_statuses;
 use crate::planning::template::import_types;
 use crate::planning::ticket_error::TicketError;
@@ -36,6 +37,9 @@ pub struct ImportReport {
     pub boards: usize,
     pub filters: usize,
     pub tickets: usize,
+    pub sprints: usize,
+    pub versions: usize,
+    pub milestones: usize,
     pub comments: usize,
     pub links: usize,
     pub time_entries: usize,
@@ -112,6 +116,8 @@ struct ImportMap {
     work_kinds: HashMap<i64, i64>,
     tickets: HashMap<i64, i64>,
     link_types: HashMap<i64, i64>,
+    versions: HashMap<i64, i64>,
+    milestones: HashMap<i64, i64>,
 }
 
 impl IdMap for ImportMap {
@@ -123,6 +129,8 @@ impl IdMap for ImportMap {
             Ref::Ticket => self.tickets.get(&id),
             Ref::WorkKind => self.work_kinds.get(&id),
             Ref::LinkType => self.link_types.get(&id),
+            Ref::Version => self.versions.get(&id),
+            Ref::Milestone => self.milestones.get(&id),
         }
         .copied()
         .unwrap_or(0)
@@ -213,6 +221,12 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
     report.filters = v.created_filters;
     report.warnings.extend(v.unresolved.into_iter().map(Warning::View));
 
+    // 3b. Versionen, Meilensteine und Sprints (vor den Tickets: Feldwerte und Zugehörigkeit verweisen darauf)
+    report.versions = import_releases(conn, pid, "versions", "released", "released_at", &doc.versions, &mut map.versions, Where::Version)?;
+    report.milestones = import_releases(conn, pid, "milestones", "reached", "reached_at", &doc.milestones, &mut map.milestones, Where::Milestone)?;
+    let sprint_ids = import_sprints(conn, pid, doc)?;
+    report.sprints = sprint_ids.len();
+
     // 4. Tickets anlegen (ohne Eltern: die brauchen alle Tickets)
     let mut order: Vec<&DocTicket> = doc.tickets.iter().collect();
     order.sort_by_key(|t| t.number);
@@ -276,14 +290,21 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
             if field.type_id != real_type[&t.number] {
                 return Err(BackupError::At(w(), Problem::FieldNotInType));
             }
-            if matches!(field.kind, FieldKind::Version | FieldKind::Milestone) {
+            let release = matches!(field.kind, FieldKind::Version | FieldKind::Milestone);
+            if release && doc.version < 2 {
+                // Version-1-Dokumente tragen Datenbank-Ids ohne die zugehörigen Objekte.
                 count_version_value(&mut report.warnings);
                 continue;
             }
             let mut value = dv.value.clone();
-            if field.kind == FieldKind::Ticket {
+            if release || field.kind == FieldKind::Ticket {
                 let n = value.as_i64().ok_or_else(|| BackupError::AtTicket(w(), TicketError::ValueInvalid(crate::planning::ticket_error::FieldLabel::of(field))))?;
-                let target = *map.tickets.get(&n).ok_or_else(|| unknown(w(), RefKind::Ticket, n))?;
+                let (numbers, what) = match field.kind {
+                    FieldKind::Version => (&map.versions, RefKind::Version),
+                    FieldKind::Milestone => (&map.milestones, RefKind::Milestone),
+                    _ => (&map.tickets, RefKind::Ticket),
+                };
+                let target = *numbers.get(&n).ok_or_else(|| unknown(w(), what, n))?;
                 value = serde_json::Value::from(target);
             }
             let ctx = RefCtx { project_id: pid, ticket_id: Some(id) };
@@ -293,6 +314,9 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
             }
         }
     }
+
+    // 6b. Zugehörigkeit der Tickets zu den Sprints
+    import_sprint_tickets(conn, doc, &sprint_ids, &map.tickets)?;
 
     // 7. Kommentare
     for t in &order {
@@ -419,6 +443,128 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
         report.warnings.insert(0, Warning::Renumbered { from_key: normalize_key(&p.key), to_key: key.to_string() });
     }
     Ok(ImportResult { project_id: pid, key: key.to_string(), renumbered: renumber, report })
+}
+
+/// Versionen bzw. Meilensteine anlegen (Name eindeutig, Texte und Termine geprüft). Trägt die Nummern (1, 2, …) → Ids ein.
+fn import_releases(
+    conn: &Connection,
+    pid: i64,
+    table: &str,
+    done_col: &str,
+    done_at_col: &str,
+    items: &[DocRelease],
+    numbers: &mut HashMap<i64, i64>,
+    place: fn(i64) -> Where,
+) -> Result<usize, BackupError> {
+    for (i, d) in items.iter().enumerate() {
+        let n = i as i64 + 1;
+        let name = common::clean_name(&d.name).map_err(|e| BackupError::AtPlan(place(n), e))?;
+        ensure_name_free(conn, table, pid, &name, None).map_err(|e| BackupError::AtSprint(place(n), e))?;
+        let description = d.description.trim();
+        if description.chars().count() > MAX_DESCRIPTION_CHARS {
+            return Err(BackupError::AtSprint(place(n), SprintError::TextTooLong { max: MAX_DESCRIPTION_CHARS }));
+        }
+        let due = match &d.due_date {
+            Some(s) => Some(fmt_date(parse_date(s).map_err(|e| BackupError::AtSprint(place(n), e))?)),
+            None => None,
+        };
+        if let Some(t) = &d.done_at {
+            check_ts(|| place(n), t)?;
+        }
+        conn.execute(
+            &format!("INSERT INTO {table} (project_id, name, description, due_date, {done_col}, {done_at_col}, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"),
+            params![pid, name, description, due, d.done as i64, d.done_at, i as i64],
+        )?;
+        numbers.insert(n, conn.last_insert_rowid());
+    }
+    Ok(items.len())
+}
+
+/// Sprints anlegen (ohne Zugehörigkeit); liefert die Ids in der Reihenfolge des Dokuments.
+fn import_sprints(conn: &Connection, pid: i64, doc: &ProjectDoc) -> Result<Vec<i64>, BackupError> {
+    let mut ids = Vec::with_capacity(doc.sprints.len());
+    let mut active = false;
+    for (i, s) in doc.sprints.iter().enumerate() {
+        let n = i as i64 + 1;
+        let w = || Where::Sprint(n);
+        let at = |e: SprintError| BackupError::AtSprint(w(), e);
+        let name = common::clean_name(&s.name).map_err(|e| BackupError::AtPlan(w(), e))?;
+        ensure_name_free(conn, "sprints", pid, &name, None).map_err(at)?;
+        let goal = s.goal.trim();
+        if goal.chars().count() > MAX_GOAL_CHARS {
+            return Err(at(SprintError::TextTooLong { max: MAX_GOAL_CHARS }));
+        }
+        if !(1..=MAX_SPRINT_DAYS).contains(&s.default_days) {
+            return Err(at(SprintError::DaysInvalid { max: MAX_SPRINT_DAYS }));
+        }
+        let start = s.start_date.as_deref().map(parse_date).transpose().map_err(at)?;
+        let end = s.end_date.as_deref().map(parse_date).transpose().map_err(at)?;
+        if end.is_some() && start.is_none() {
+            return Err(at(SprintError::DatesIncomplete));
+        }
+        if let (Some(a), Some(b)) = (start, end) {
+            if b < a {
+                return Err(at(SprintError::DatesOrder));
+            }
+        }
+        let state = match s.state.as_str() {
+            "planned" | "active" | "completed" => s.state.as_str(),
+            other => return Err(BackupError::At(w(), Problem::SprintState(other.to_string()))),
+        };
+        if state != "planned" && (start.is_none() || end.is_none()) {
+            return Err(at(SprintError::DatesIncomplete));
+        }
+        if state == "active" {
+            if active {
+                return Err(BackupError::At(w(), Problem::SecondActiveSprint));
+            }
+            active = true;
+        }
+        check_ts(w, &s.created_at)?;
+        for t in [&s.started_at, &s.completed_at].into_iter().flatten() {
+            check_ts(w, t)?;
+        }
+        conn.execute(
+            "INSERT INTO sprints (project_id, name, goal, start_date, end_date, state, default_days, created_at, started_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![pid, name, goal, start.map(fmt_date), end.map(fmt_date), state, s.default_days, s.created_at, s.started_at, s.completed_at],
+        )?;
+        ids.push(conn.last_insert_rowid());
+    }
+    Ok(ids)
+}
+
+/// Zeilen der Sprint-Zugehörigkeit: ein Ticket steckt höchstens in einem offenen (geplanten/aktiven) Sprint.
+fn import_sprint_tickets(conn: &Connection, doc: &ProjectDoc, sprint_ids: &[i64], tickets: &HashMap<i64, i64>) -> Result<(), BackupError> {
+    let mut open_in: HashMap<i64, i64> = HashMap::new();
+    let mut open_rows: HashSet<(i64, i64)> = HashSet::new();
+    for (si, s) in doc.sprints.iter().enumerate() {
+        let n = si as i64 + 1;
+        for (j, e) in s.tickets.iter().enumerate() {
+            let w = || Where::SprintEntry(n, j);
+            let ticket = *tickets.get(&e.ticket).ok_or_else(|| unknown(w(), RefKind::Ticket, e.ticket))?;
+            check_ts(w, &e.added_at)?;
+            if let Some(r) = &e.removed_at {
+                check_ts(w, r)?;
+                if *r < e.added_at {
+                    return Err(BackupError::At(w(), Problem::RemovedBeforeAdded));
+                }
+            }
+            if e.points_at_add.is_some_and(|p| !p.is_finite() || p < 0.0) {
+                return Err(BackupError::At(w(), Problem::Points));
+            }
+            if e.removed_at.is_none() {
+                if !open_rows.insert((sprint_ids[si], ticket)) {
+                    return Err(BackupError::At(w(), Problem::SprintTicketTwice(e.ticket)));
+                }
+                if s.state != "completed" && open_in.insert(ticket, n).is_some_and(|other| other != n) {
+                    return Err(BackupError::At(w(), Problem::TicketInTwoSprints(e.ticket)));
+                }
+            }
+            conn.prepare_cached("INSERT INTO sprint_tickets (sprint_id, ticket_id, added_at, removed_at, points_at_add) VALUES (?1, ?2, ?3, ?4, ?5)")?
+                .execute(params![sprint_ids[si], ticket, e.added_at, e.removed_at, e.points_at_add])?;
+        }
+    }
+    Ok(())
 }
 
 /// Zählt übersprungene Version-/Meilenstein-Werte in der Warnung (eine Warnung für alle).

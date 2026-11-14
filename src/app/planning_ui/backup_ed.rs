@@ -49,12 +49,12 @@ struct CsvImport {
 fn counts_line(lang: Lang, p: &Preview) -> String {
     match lang {
         Lang::De => format!(
-            "{} Ticket(s), {} Kommentar(e), {} Verknüpfung(en), {} Zeiteintrag/-einträge, {} Verlaufseinträge · {} Typ(en) mit {} Feld(ern), {} Status, {} Board(s), {} Filter",
-            p.tickets, p.comments, p.links, p.time_entries, p.history, p.types, p.fields, p.statuses, p.boards, p.filters
+            "{} Ticket(s), {} Kommentar(e), {} Verknüpfung(en), {} Zeiteintrag/-einträge, {} Verlaufseinträge · {} Sprint(s), {} Version(en), {} Meilenstein(e) · {} Typ(en) mit {} Feld(ern), {} Status, {} Board(s), {} Filter",
+            p.tickets, p.comments, p.links, p.time_entries, p.history, p.sprints, p.versions, p.milestones, p.types, p.fields, p.statuses, p.boards, p.filters
         ),
         Lang::En => format!(
-            "{} ticket(s), {} comment(s), {} link(s), {} time entr(ies), {} history entries · {} type(s) with {} field(s), {} status(es), {} board(s), {} filter(s)",
-            p.tickets, p.comments, p.links, p.time_entries, p.history, p.types, p.fields, p.statuses, p.boards, p.filters
+            "{} ticket(s), {} comment(s), {} link(s), {} time entr(ies), {} history entries · {} sprint(s), {} version(s), {} milestone(s) · {} type(s) with {} field(s), {} status(es), {} board(s), {} filter(s)",
+            p.tickets, p.comments, p.links, p.time_entries, p.history, p.sprints, p.versions, p.milestones, p.types, p.fields, p.statuses, p.boards, p.filters
         ),
     }
 }
@@ -75,8 +75,8 @@ impl PlanUi {
             ui.label(RichText::new(lang.t("Projektsicherung (JSON)", "Project backup (JSON)")).strong());
             ui.label(
                 RichText::new(lang.t(
-                    "Sichert das ganze Projekt: Einstellungen, Typen, Felder, Workflows, Boards, Filter, Tickets mit Werten, Kommentaren, Verlauf, Verknüpfungen und Zeiteinträgen. Der Import legt immer ein neues Projekt an und ändert nie Bestehendes.",
-                    "Backs up the whole project: settings, types, fields, workflows, boards, filters, tickets with values, comments, history, links and time entries. Importing always creates a new project and never changes existing data.",
+                    "Sichert das ganze Projekt: Einstellungen, Typen, Felder, Workflows, Boards, Filter, Sprints, Versionen, Meilensteine, Tickets mit Werten, Kommentaren, Verlauf, Verknüpfungen und Zeiteinträgen. Der Import legt immer ein neues Projekt an und ändert nie Bestehendes.",
+                    "Backs up the whole project: settings, types, fields, workflows, boards, filters, sprints, versions, milestones, tickets with values, comments, history, links and time entries. Importing always creates a new project and never changes existing data.",
                 ))
                 .small()
                 .color(style::dim(ui)),
@@ -96,8 +96,8 @@ impl PlanUi {
             ui.label(RichText::new(lang.t("Tickets (CSV)", "Tickets (CSV)")).strong());
             ui.label(
                 RichText::new(lang.t(
-                    "Eine Zeile je Ticket: Schlüssel, Typ, Titel, Status, Eltern-Schlüssel, Markierungen, Zeitstempel und je Feld eine Spalte. Der Import nimmt genau dieses Format (kein fremdes) und legt immer neue Tickets in diesem Projekt an; Schlüssel der Datei werden nur zum Auflösen von Eltern und Ticket-Feldern benutzt.",
-                    "One row per ticket: key, type, title, status, parent key, flags, timestamps and one column per field. The import accepts exactly this format (no foreign formats) and always creates new tickets in this project; keys in the file are only used to resolve parents and ticket fields.",
+                    "Eine Zeile je Ticket: Schlüssel, Typ, Titel, Status, Eltern-Schlüssel, Markierungen, Zeitstempel, bei Projekten mit Sprints der Sprint und je Feld eine Spalte (Versionen und Meilensteine mit ihrem Namen). Der Import nimmt genau dieses Format (kein fremdes) und legt immer neue Tickets in diesem Projekt an; Schlüssel der Datei werden nur zum Auflösen von Eltern und Ticket-Feldern benutzt.",
+                    "One row per ticket: key, type, title, status, parent key, flags, timestamps, the sprint (for projects with sprints) and one column per field (versions and milestones by name). The import accepts exactly this format (no foreign formats) and always creates new tickets in this project; keys in the file are only used to resolve parents and ticket fields.",
                 ))
                 .small()
                 .color(style::dim(ui)),
@@ -327,12 +327,12 @@ impl PlanUi {
             ui.add_space(S1);
             ui.label(match lang {
                 Lang::De => format!(
-                    "{} Ticket(s), {} Kommentar(e), {} Verknüpfung(en), {} Zeiteintrag/-einträge, {} Verlaufseinträge · {} Typ(en), {} Feld(er), {} Status, {} Board(s), {} Filter, {} Quick-Action(s)",
-                    r.tickets, r.comments, r.links, r.time_entries, r.history, r.types, r.fields, r.statuses, r.boards, r.filters, r.quick_actions
+                    "{} Ticket(s), {} Kommentar(e), {} Verknüpfung(en), {} Zeiteintrag/-einträge, {} Verlaufseinträge · {} Sprint(s), {} Version(en), {} Meilenstein(e) · {} Typ(en), {} Feld(er), {} Status, {} Board(s), {} Filter, {} Quick-Action(s)",
+                    r.tickets, r.comments, r.links, r.time_entries, r.history, r.sprints, r.versions, r.milestones, r.types, r.fields, r.statuses, r.boards, r.filters, r.quick_actions
                 ),
                 Lang::En => format!(
-                    "{} ticket(s), {} comment(s), {} link(s), {} time entr(ies), {} history entries · {} type(s), {} field(s), {} status(es), {} board(s), {} filter(s), {} quick action(s)",
-                    r.tickets, r.comments, r.links, r.time_entries, r.history, r.types, r.fields, r.statuses, r.boards, r.filters, r.quick_actions
+                    "{} ticket(s), {} comment(s), {} link(s), {} time entr(ies), {} history entries · {} sprint(s), {} version(s), {} milestone(s) · {} type(s), {} field(s), {} status(es), {} board(s), {} filter(s), {} quick action(s)",
+                    r.tickets, r.comments, r.links, r.time_entries, r.history, r.sprints, r.versions, r.milestones, r.types, r.fields, r.statuses, r.boards, r.filters, r.quick_actions
                 ),
             });
             ui.add_space(S2);

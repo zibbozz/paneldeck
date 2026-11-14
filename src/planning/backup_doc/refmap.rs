@@ -16,6 +16,8 @@ pub(super) enum Ref {
     Ticket,
     LinkType,
     WorkKind,
+    Version,
+    Milestone,
 }
 
 pub(super) trait IdMap {
@@ -56,10 +58,15 @@ pub(super) fn translate_history(col: &str, old: Option<&str>, new: Option<&str>,
         c => match c.strip_prefix("field:").and_then(|n| n.parse::<i64>().ok()) {
             Some(src) => {
                 let to = m.map(Ref::Field, src);
-                if m.field_kind(src) == Some(FieldKind::Ticket) {
-                    (format!("field:{to}"), id_text(m, Ref::Ticket, old), id_text(m, Ref::Ticket, new))
-                } else {
-                    (format!("field:{to}"), old.map(str::to_string), new.map(str::to_string))
+                let target = match m.field_kind(src) {
+                    Some(FieldKind::Ticket) => Some(Ref::Ticket),
+                    Some(FieldKind::Version) => Some(Ref::Version),
+                    Some(FieldKind::Milestone) => Some(Ref::Milestone),
+                    _ => None,
+                };
+                match target {
+                    Some(r) => (format!("field:{to}"), id_text(m, r, old), id_text(m, r, new)),
+                    None => (format!("field:{to}"), old.map(str::to_string), new.map(str::to_string)),
                 }
             }
             None => (c.to_string(), old.map(str::to_string), new.map(str::to_string)),
@@ -80,7 +87,13 @@ mod tests {
         }
 
         fn field_kind(&self, f: i64) -> Option<FieldKind> {
-            if f == 7 { Some(FieldKind::Ticket) } else if f == 8 { Some(FieldKind::Text) } else { None }
+            match f {
+                7 => Some(FieldKind::Ticket),
+                8 => Some(FieldKind::Text),
+                9 => Some(FieldKind::Version),
+                10 => Some(FieldKind::Milestone),
+                _ => None,
+            }
         }
     }
 
@@ -95,6 +108,9 @@ mod tests {
         assert_eq!(translate_history("field:7", Some("3"), Some("4"), &mut m), ("field:14".into(), Some("6".into()), Some("8".into())));
         assert_eq!(translate_history("field:8", Some("\"3\""), Some("\"x\""), &mut m), ("field:16".into(), Some("\"3\"".into()), Some("\"x\"".into())));
         assert_eq!(translate_history("field:99", Some("1"), None, &mut m).0, "field:0");
+        // Version-/Meilenstein-Felder übersetzen den Wert ebenfalls (unbekannte werden 0)
+        assert_eq!(translate_history("field:9", Some("2"), Some("99"), &mut m), ("field:18".into(), Some("4".into()), Some("0".into())));
+        assert_eq!(translate_history("field:10", None, Some("5"), &mut m), ("field:20".into(), None, Some("10".into())));
         // Texte bleiben
         assert_eq!(translate_history("title", Some("a"), Some("b"), &mut m), ("title".into(), Some("a".into()), Some("b".into())));
         assert_eq!(translate_history("moved", Some("OLD-1"), Some("NEW-2"), &mut m).1.as_deref(), Some("OLD-1"));

@@ -22,16 +22,29 @@
 //!   Status gegen den Workflow des Typs. **Verletzt ein Element eine Regel, bricht der Import mit einem Fehler samt
 //!   Fundstelle ab** (z. B. „Ticket 12, Feld 3: …“). Nicht geprüft werden Pflichtfelder: Ein Ticket, das nach dem
 //!   Anlegen eines Pflichtfelds noch leer ist, gehört zum Bestand und wird so wiederhergestellt.
-//!   Was das Format (noch) nicht abbildet, wird übersprungen und im Bericht gemeldet ([`Warning`]): Verknüpfungen zu
-//!   Tickets anderer Projekte, Werte von Version-/Meilenstein-Feldern. Terminal-Verknüpfungen bleiben als Text erhalten.
+//!   Was das Format nicht abbildet, wird übersprungen und im Bericht gemeldet ([`Warning`]): Verknüpfungen zu
+//!   Tickets anderer Projekte (und bei Version-1-Dokumenten Version-/Meilenstein-Werte). Terminal-Verknüpfungen bleiben
+//!   als Text erhalten.
 //! * Der Ticket-Zähler (`next_number`) wird fortgesetzt (nie kleiner als höchste Nummer + 1).
+//!
+//! # Sprints, Versionen, Meilensteine (ab Format-Version 2)
+//!
+//! * Die optionalen Abschnitte `versions`, `milestones` und `sprints` (letzterer mit den Zeilen der Sprint-Zugehörigkeit,
+//!   `tickets` mit `added_at`, `removed_at`, `points_at_add`) stehen im Dokument unabhängig von den Projektschaltern
+//!   `use_sprints`/`use_versions`: Die Daten bleiben auch bei ausgeschalteter Funktion erhalten und werden so gesichert.
+//!   Versionen, Meilensteine und Sprints tragen Nummern (1, 2, … in der Reihenfolge der Konfiguration bzw. des Anlegens);
+//!   Feldwerte vom Typ Version/Meilenstein und der Verlauf dieser Felder nennen diese Nummern.
+//! * Reihenfolge beim Import: Projekt → Struktur → Versionen/Meilensteine → Sprints → Tickets samt Feldwerten → Zeilen der
+//!   Sprint-Zugehörigkeit. Namen, Termine, Zustände (höchstens ein aktiver Sprint) und „ein Ticket in höchstens einem offenen
+//!   Sprint“ werden mit den Regeln der Sprint-Schicht geprüft; Burndown und Bericht ergeben nach dem Import dasselbe wie vorher.
+//! * Ein Dokument der **Version 1** bleibt importierbar (die Abschnitte fehlen dann); seine Version-/Meilenstein-Werte sind
+//!   Datenbank-Ids ohne Objekte und werden wie bisher übersprungen und gemeldet ([`Warning::VersionValues`]).
 //!
 //! # Erweiterbarkeit
 //!
-//! Das Dokument ist für weitere Abschnitte gebaut (Sprints, Versionen, Meilensteine): neue Abschnitte werden als
-//! `#[serde(default)]`-Felder von [`ProjectDoc`] ergänzt, ihre Verweise benutzen dieselben Nummern, und die
-//! [`VERSION`] wird erhöht – ältere Programmversionen lehnen ein neueres Dokument ab (statt Teile zu verlieren). Ein Dokument
-//! mit niedrigerer Version bleibt lesbar, weil fehlende Abschnitte leer sind.
+//! Neue Abschnitte werden als `#[serde(default)]`-Felder von [`ProjectDoc`] ergänzt, ihre Verweise benutzen dieselben
+//! Nummern, und die [`VERSION`] wird erhöht – ältere Programmversionen lehnen ein neueres Dokument ab (statt Teile zu
+//! verlieren). Ein Dokument mit niedrigerer Version bleibt lesbar, weil fehlende Abschnitte leer sind.
 //!
 //! # Tickets als CSV
 //!
@@ -63,7 +76,7 @@ use serde_json::Value;
 /// Kennung des Dokumentformats.
 pub const FORMAT: &str = "paneldeck-project";
 /// Aktuelle Format-Version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDoc {
@@ -86,6 +99,66 @@ pub struct ProjectDoc {
     /// Alle Tickets, aufsteigend nach Nummer.
     #[serde(default)]
     pub tickets: Vec<DocTicket>,
+    /// Versionen in der Reihenfolge der Konfiguration (Nummer = Position, von 1 an). Ab Version 2.
+    #[serde(default)]
+    pub versions: Vec<DocRelease>,
+    /// Meilensteine (wie Versionen). Ab Version 2.
+    #[serde(default)]
+    pub milestones: Vec<DocRelease>,
+    /// Sprints in der Reihenfolge des Anlegens (Nummer = Position, von 1 an). Ab Version 2.
+    #[serde(default)]
+    pub sprints: Vec<DocSprint>,
+}
+
+/// Eine Version oder ein Meilenstein.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocRelease {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Fälligkeit `JJJJ-MM-TT`.
+    #[serde(default)]
+    pub due_date: Option<String>,
+    /// Erschienen (Version) bzw. erreicht (Meilenstein).
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub done_at: Option<String>,
+}
+
+/// Ein Sprint samt der Zeilen seiner Ticket-Zugehörigkeit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocSprint {
+    pub name: String,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    /// `planned`, `active` oder `completed`.
+    pub state: String,
+    /// Dauer-Vorlage in Arbeitstagen.
+    pub default_days: u32,
+    pub created_at: String,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    /// Zugehörigkeit der Tickets (auch frühere, mit `removed_at`), in der Reihenfolge der Datenbank.
+    #[serde(default)]
+    pub tickets: Vec<DocSprintTicket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocSprintTicket {
+    /// Ticketnummer.
+    pub ticket: i64,
+    pub added_at: String,
+    #[serde(default)]
+    pub removed_at: Option<String>,
+    #[serde(default)]
+    pub points_at_add: Option<f64>,
 }
 
 /// Die Einstellungen des Projekts.
@@ -254,6 +327,9 @@ impl ProjectDoc {
             boards: self.views.boards.len(),
             filters: self.views.filters.len(),
             tickets: self.tickets.len(),
+            sprints: self.sprints.len(),
+            versions: self.versions.len(),
+            milestones: self.milestones.len(),
             comments: self.tickets.iter().map(|t| t.comments.len()).sum(),
             links: self.tickets.iter().map(|t| t.links.len()).sum(),
             time_entries: self.tickets.iter().map(|t| t.time_entries.len()).sum(),
@@ -275,6 +351,9 @@ pub struct Preview {
     pub boards: usize,
     pub filters: usize,
     pub tickets: usize,
+    pub sprints: usize,
+    pub versions: usize,
+    pub milestones: usize,
     pub comments: usize,
     pub links: usize,
     pub time_entries: usize,
