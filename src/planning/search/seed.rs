@@ -9,8 +9,11 @@
 //! * Die Schlüssel der Tickets bleiben erhalten (`WEB-12` wird die Nummer 12); die Nummern müssen zum Projektschlüssel passen.
 //! * `changed_by` (Quelle der letzten Änderung): alle Schreibvorgänge eines Tickets laufen mit dieser Quelle; ohne Angabe wird der
 //!   Verlauf des Tickets am Ende gelöscht (dann ist `changedBy` leer, wie in der Referenz-Auswertung).
-//! * **Nicht angelegt** (und in [`SeededDemo::skipped`] gemeldet), solange es die Tabellen nicht gibt: Sprints, Versionen und
-//!   Meilensteine (Felder dieser Art werden angelegt, ihre Werte nicht). EINHÄNGEPUNKT: hier ergänzen, sobald die Tabellen da sind.
+//! * **Sprints, Versionen, Meilensteine:** Die Sprints der Beschreibung entstehen in ihrer Reihenfolge (geplant), die Tickets kommen
+//!   hinein, danach werden die abgeschlossenen gestartet und abgeschlossen (unerledigte Tickets bleiben im Sprint stehen) und der
+//!   aktive gestartet – alles über `planning::sprints`. Versionen (mit „erschienen“) und Meilensteine (die Werte der Meilenstein-Felder)
+//!   werden vor den Tickets angelegt; Feldwerte verweisen auf ihre Kennung. Die Projektschalter `use_sprints`/`use_versions` stehen
+//!   dann an.
 //! * Das Datum „heute“ löst relative Angaben (`@-3`) auf, siehe [`DemoSpec::resolved`].
 
 use crate::planning::fields::{self, create_field, Field, FieldKind, FieldOptions, NewField, OptionValue};
@@ -18,8 +21,12 @@ use crate::planning::history::Source;
 use crate::planning::link_types::link_type_by_key;
 use crate::planning::links::{add_link, Target};
 use crate::planning::names::translate;
+use crate::calc::calendar::WorkCalendar;
 use crate::planning::projects::{create_project, NewProject};
-use crate::planning::query_help::{DemoField, DemoSpec, DemoTicket, DemoValue};
+use crate::planning::sprints::releases::{create_milestone, create_version, set_version_released, NewRelease};
+use crate::planning::sprints::sprint::{complete_sprint, create_sprint, move_tickets_to_sprint, start_sprint, Leftover, NewSprint};
+use crate::planning::sprints::{parse_date, SprintError};
+use crate::planning::query_help::{DemoSpec, DemoTicket, DemoValue, SprintState as DemoSprintState};
 use crate::planning::statuses::{create_status, NewStatus, StatusCategory};
 use crate::planning::ticket_error::TicketError;
 use crate::planning::tickets::{create_ticket, parse_key, raw_set_status, set_field, set_flagged, set_parent, set_starred, NewTicket};
@@ -66,6 +73,12 @@ impl From<TicketError> for SeedError {
     }
 }
 
+impl From<SprintError> for SeedError {
+    fn from(e: SprintError) -> Self {
+        SeedError::Db(e.message(Lang::En))
+    }
+}
+
 impl From<rusqlite::Error> for SeedError {
     fn from(e: rusqlite::Error) -> Self {
         SeedError::Db(e.to_string())
@@ -82,7 +95,7 @@ pub struct SeededDemo {
     pub terminals: Vec<String>,
     /// Das aufgelöste „heute“ (`JJJJ-MM-TT`).
     pub today: String,
-    /// Was nicht angelegt wurde und warum (z. B. `sprints`, `versions`).
+    /// Was nicht angelegt wurde und warum (seit der Anbindung von Sprints und Versionen immer leer; bleibt für die Schnittstelle).
     pub skipped: Vec<String>,
 }
 
@@ -135,12 +148,9 @@ struct Seeder<'a> {
     /// (Typ-Kennung, Feldname klein) → Feld
     fields: HashMap<(i64, String), Made>,
     skipped: Vec<String>,
-}
-
-fn skip(list: &mut Vec<String>, what: &str) {
-    if !list.iter().any(|s| s == what) {
-        list.push(what.to_string());
-    }
+    /// Name (klein) → Kennung der angelegten Versionen und Meilensteine
+    version_ids: HashMap<String, i64>,
+    milestone_ids: HashMap<String, i64>,
 }
 
 fn source_of(t: &DemoTicket) -> Source {
@@ -177,23 +187,28 @@ fn seed_inner(conn: &Connection, spec: &DemoSpec, today: &str) -> Result<SeededD
     if key_taken > 0 {
         return Err(SeedError::NotFresh);
     }
-    let mut skipped = Vec::new();
-    // EINHÄNGEPUNKT Sprints/Versionen: hier die Tabellen befüllen; bis dahin nur melden
-    if !spec.sprints.is_empty() {
-        skip(&mut skipped, "sprints");
-    }
-    if !spec.versions.is_empty() || spec.fields.iter().any(|f| matches!(f.kind, FieldKind::Version | FieldKind::Milestone)) {
-        skip(&mut skipped, "versions");
-    }
+    let skipped = Vec::new();
     let mut np = NewProject::new(&spec.project_key, &spec.project_name, "#4C8BF5");
     np.with_defaults = false;
-    // die Schalter stehen, damit die Felder `sprint`/Versionen im Schema erscheinen (ausgewertet werden sie erst mit den Tabellen)
+    // die Schalter stehen, damit die Felder `sprint`/Versionen im Schema erscheinen
     np.use_sprints = !spec.sprints.is_empty();
-    np.use_versions = !spec.versions.is_empty();
+    np.use_versions = !spec.versions.is_empty() || spec.fields.iter().any(|f| matches!(f.kind, FieldKind::Version | FieldKind::Milestone));
     let project_id = create_project(conn, &np)?;
-    let mut s = Seeder { conn, spec, project_id, status_ids: HashMap::new(), type_ids: Vec::new(), fields: HashMap::new(), skipped };
+    let mut s = Seeder {
+        conn,
+        spec,
+        project_id,
+        status_ids: HashMap::new(),
+        type_ids: Vec::new(),
+        fields: HashMap::new(),
+        skipped,
+        version_ids: HashMap::new(),
+        milestone_ids: HashMap::new(),
+    };
+    s.releases()?;
     s.config()?;
     let tickets = s.tickets()?;
+    s.sprints(&tickets)?;
     Ok(SeededDemo {
         project_id,
         tickets,
@@ -204,6 +219,61 @@ fn seed_inner(conn: &Connection, spec: &DemoSpec, today: &str) -> Result<SeededD
 }
 
 impl Seeder<'_> {
+    /// Versionen (mit „erschienen“) und Meilensteine (die Werte der Meilenstein-Felder).
+    fn releases(&mut self) -> Result<(), SeedError> {
+        let (conn, pid) = (self.conn, self.project_id);
+        for v in self.spec.versions.clone() {
+            let due = v.due.as_deref().and_then(|d| parse_date(d).ok());
+            let id = create_version(conn, &NewRelease { project_id: pid, name: v.name.clone(), description: String::new(), due_date: due })?;
+            if v.released {
+                set_version_released(conn, id, true)?;
+            }
+            self.version_ids.insert(v.name.to_lowercase(), id);
+        }
+        for f in self.spec.fields.clone().iter().filter(|f| f.kind == FieldKind::Milestone) {
+            for name in &f.options {
+                if !self.milestone_ids.contains_key(&name.to_lowercase()) {
+                    let id = create_milestone(conn, &NewRelease::new(pid, name))?;
+                    self.milestone_ids.insert(name.to_lowercase(), id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sprints in der Reihenfolge der Beschreibung anlegen, Tickets hineinlegen, abgeschlossene und aktiven Sprint starten.
+    fn sprints(&mut self, made: &[(String, i64)]) -> Result<(), SeedError> {
+        let (conn, pid) = (self.conn, self.project_id);
+        let cal = WorkCalendar::default();
+        let mut ids: Vec<(String, i64, DemoSprintState)> = Vec::new();
+        for sp in self.spec.sprints.clone() {
+            let n = NewSprint { project_id: pid, name: sp.name.clone(), goal: String::new(), start: parse_date(&sp.start).ok(), end: parse_date(&sp.end).ok(), default_days: None };
+            ids.push((sp.name.clone(), create_sprint(conn, &n, &cal)?, sp.state));
+        }
+        for (name, sprint_id, _) in &ids {
+            let tickets: Vec<i64> = self
+                .spec
+                .tickets
+                .iter()
+                .zip(made)
+                .filter(|(t, _)| t.sprint.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(name)))
+                .map(|(_, (_, id))| *id)
+                .collect();
+            if !tickets.is_empty() {
+                move_tickets_to_sprint(conn, *sprint_id, &tickets)?;
+            }
+        }
+        // zuerst die abgeschlossenen (je Projekt läuft höchstens ein Sprint), dann der aktive
+        for (_, sprint_id, _) in ids.iter().filter(|(_, _, st)| *st == DemoSprintState::Closed) {
+            start_sprint(conn, *sprint_id, &cal)?;
+            complete_sprint(conn, *sprint_id, Leftover::ToBacklog)?;
+        }
+        for (_, sprint_id, _) in ids.iter().filter(|(_, _, st)| *st == DemoSprintState::Active) {
+            start_sprint(conn, *sprint_id, &cal)?;
+        }
+        Ok(())
+    }
+
     /// Status, Typen, Hierarchie und Felder.
     fn config(&mut self) -> Result<(), SeedError> {
         let conn = self.conn;
@@ -283,7 +353,7 @@ impl Seeder<'_> {
     }
 
     /// JSON-Wert für ein Feld; `None` = wird nicht gesetzt (Version/Meilenstein; Ticket-Verweise kommen später).
-    fn json_value(&mut self, f: &Field, def: &DemoField, v: &DemoValue) -> Option<Value> {
+    fn json_value(&mut self, f: &Field, v: &DemoValue) -> Option<Value> {
         match (f.kind, v) {
             (FieldKind::Checkbox, DemoValue::Bool(b)) => Some(json!(b)),
             (FieldKind::Number, DemoValue::Number(n)) => Some(json!(n)),
@@ -294,11 +364,8 @@ impl Seeder<'_> {
                 let ids: Vec<Value> = l.iter().filter_map(|s| f.options.values.iter().find(|o| o.display(Lang::En).eq_ignore_ascii_case(s)).map(|o| json!(o.id))).collect();
                 Some(Value::Array(ids))
             }
-            (FieldKind::Version | FieldKind::Milestone, _) => {
-                skip(&mut self.skipped, "versions");
-                let _ = def;
-                None
-            }
+            (FieldKind::Version, DemoValue::Text(s)) => self.version_ids.get(&s.to_lowercase()).map(|id| json!(id)),
+            (FieldKind::Milestone, DemoValue::Text(s)) => self.milestone_ids.get(&s.to_lowercase()).map(|id| json!(id)),
             _ => None,
         }
     }
@@ -331,7 +398,7 @@ impl Seeder<'_> {
                     continue; // Phase 2
                 }
                 let field = m.field.clone();
-                if let Some(j) = self.json_value(&field, def, v) {
+                if let Some(j) = self.json_value(&field, v) {
                     if def.kind == FieldKind::Terminal {
                         if let DemoValue::Text(s) = v {
                             terminal_names.push(s.clone());
@@ -380,9 +447,6 @@ impl Seeder<'_> {
                 let (Some(m), DemoValue::Text(target)) = (self.fields.get(&(tid, name.to_lowercase())), v) else { continue };
                 let target_id = made.iter().find(|(k, _)| k.eq_ignore_ascii_case(target)).map(|(_, i)| *i).unwrap_or(0);
                 set_field(conn, *id, m.field.id, json!(target_id), &source)?;
-            }
-            if t.sprint.is_some() {
-                skip(&mut self.skipped, "sprints");
             }
         }
         // ohne `changed_by`: kein Verlauf (`changedBy` ist dann leer)

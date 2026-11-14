@@ -216,24 +216,45 @@ impl PlanUi {
                         }
                     }
                 });
-                // ---- Quelle und Sprint (noch nicht angeschlossen)
+                // ---- Quelle und Sprint
                 label(ui, lang.t("Quelle", "Source"));
-                ui.add_enabled_ui(false, |ui| {
-                    let sel = d.config.source_filter_id.and_then(|id| filters.iter().find(|f| f.id == id)).map(|f| f.name.clone()).unwrap_or_else(|| lang.t("Alle Tickets", "All tickets").to_string());
-                    egui::ComboBox::from_id_salt("board_source").selected_text(sel).width(260.0).show_ui(ui, |_| {});
+                let sel = d.config.source_filter_id.and_then(|id| filters.iter().find(|f| f.id == id)).map(|f| f.name.clone()).unwrap_or_else(|| lang.t("Alle Tickets", "All tickets").to_string());
+                egui::ComboBox::from_id_salt("board_source").selected_text(sel).width(260.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(d.config.source_filter_id.is_none(), lang.t("Alle Tickets", "All tickets")).clicked() {
+                        d.config.source_filter_id = None;
+                    }
+                    for f in &filters {
+                        let name = if f.project_id.is_none() { format!("{} ({})", f.name, lang.t("global", "global")) } else { f.name.clone() };
+                        if ui.selectable_label(d.config.source_filter_id == Some(f.id), name).clicked() {
+                            d.config.source_filter_id = Some(f.id);
+                        }
+                    }
                 });
-                widgets::hint(ui, lang.t("Ein gespeicherter Filter als Quelle braucht die Abfrage-Suche – noch nicht verfügbar.", "A saved filter as the source needs the query search — not available yet."));
-                // TODO search: Auswahl gespeicherter Filter (`filters`) freischalten und in `load_board` auswerten.
+                widgets::hint(
+                    ui,
+                    lang.t(
+                        "Mit einem gespeicherten Filter zeigt das Board nur dessen Treffer (seine Sortierung zählt nicht; die Karten bleiben nach Rang sortiert).",
+                        "With a saved filter the board shows only its matches (its sorting is ignored; cards stay in rank order).",
+                    ),
+                );
                 label(ui, lang.t("Umfang", "Scope"));
-                ui.add_enabled_ui(false, |ui| {
+                let sprints = sum.project.use_sprints;
+                ui.add_enabled_ui(sprints, |ui| {
                     let mut only = d.config.only_active_sprint;
                     ui.horizontal(|ui| {
                         widgets::radio(ui, &mut only, false, lang.t("Alle Tickets", "All tickets"));
                         widgets::radio(ui, &mut only, true, lang.t("Nur aktiver Sprint", "Only the active sprint"));
                     });
+                    d.config.only_active_sprint = only;
                 });
-                widgets::hint(ui, lang.t("„Nur aktiver Sprint“ braucht Sprints – noch nicht verfügbar.", "“Only the active sprint” needs sprints — not available yet."));
-                // TODO sprints: Schalter freischalten und `cfg.only_active_sprint` in `load_board` auswerten.
+                widgets::hint(
+                    ui,
+                    if sprints {
+                        lang.t("„Nur aktiver Sprint“ zeigt die Tickets des laufenden Sprints; ohne laufenden Sprint bleibt das Board leer.", "“Only the active sprint” shows the tickets of the running sprint; without a running sprint the board stays empty.")
+                    } else {
+                        lang.t("Dieses Projekt nutzt keine Sprints. Schalte Sprints in den Projekteinstellungen ein, dann lässt sich das Board auf den aktiven Sprint beschränken.", "This project does not use sprints. Turn sprints on in the project settings to limit the board to the active sprint.")
+                    },
+                );
                 // ---- Karte
                 label(ui, lang.t("Karte", "Card"));
                 ui.horizontal(|ui| {
