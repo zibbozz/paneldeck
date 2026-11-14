@@ -6,7 +6,7 @@
 //!   Reiter gibt es in jedem Projekt (dann Projekt- und globale Dashboards) und im System-Projekt (nur die globalen Dashboards).
 //! * `PlanUi::dash_dialogs` (in `dash_dialogs.rs`) zeichnet die Dialoge.
 //! * Klicks auf Zeilen öffnen das Ticket (`PlanUi::open_ticket`), Klicks auf Diagramm-Segmente und „Filter öffnen“ die Suche mit der
-//!   Abfrage (`PlanUi::open_search_query`), beides in `ticket_nav.rs`; „Zurück“ der Ticket-Ansicht führt wieder zum Dashboard.
+//!   Abfrage (`PlanUi::open_search_in_project`), beides in `ticket_nav.rs`; „Zurück“ der Ticket-Ansicht führt wieder zum Dashboard.
 //!
 //! **Daten:** Jede Kachel liest über `dash_data.rs` und wird **zwischengespeichert** (`State::cache`): neu geladen wird beim Öffnen des
 //! Reiters, bei geänderten Einstellungen der Kachel, nach Änderungen von außen (`PlanUi::invalidate`) und alle [`TTL`] Sekunden – nie
@@ -530,7 +530,7 @@ impl PlanUi {
                 Event::OpenTicket(id) => {
                     self.open_ticket(cx, id);
                 }
-                Event::OpenFilter { jql } => self.open_search_query(cx, &jql, cur.project_id),
+                Event::OpenFilter { jql } => self.open_search_in_project(cx, &jql, cur.project_id),
                 Event::JumpProject(id) => {
                     self.select(cx, id);
                     self.tab = Tab::Overview;

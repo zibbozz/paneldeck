@@ -260,13 +260,13 @@ fn a_dashboard_filter_opens_the_search_tab_with_the_query_in_the_field() {
     both(|h| {
         h.ui.tab = Tab::Dashboards;
         let p2 = h.p2;
-        h.with(|ui, cx| ui.open_search_query(cx, "status = Done", Some(p2)));
+        h.with(|ui, cx| ui.open_search_in_project(cx, "status = Done", Some(p2)));
         h.frames(2);
         assert_eq!((h.ui.tab, h.ui.selected), (Tab::Search, h.p2));
         assert_eq!(h.ui.search.bar.text, "status = Done");
         // ohne Projekt (alle Projekte): im aktuellen Projekt bleiben
         h.ui.tab = Tab::Dashboards;
-        h.with(|ui, cx| ui.open_search_query(cx, "type = Bug", None));
+        h.with(|ui, cx| ui.open_search_in_project(cx, "type = Bug", None));
         h.frames(2);
         assert_eq!((h.ui.tab, h.ui.selected), (Tab::Search, h.p2));
         assert_eq!(h.ui.search.bar.text, "type = Bug");

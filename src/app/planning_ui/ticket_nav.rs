@@ -9,7 +9,7 @@
 //!   Wer den Reiter von Hand wechselt, vergisst den Rückweg (`TicketUi::return_tab`).
 //! * **Terminal Hub:** `App::open_ticket_from_anywhere` (`terminal_links.rs`) schaltet auf den Todo-Reiter und meldet das Ticket
 //!   mit [`PlanUi::request_open_ticket`] an; `PlanUi::header` öffnet es im selben Bild (der Expertenmodus wird dafür eingeschaltet).
-//! * **Dashboard → Suche:** [`PlanUi::open_search_query`] zeigt den Reiter „Suche“ des Projekts mit der Abfrage im Feld. Sie wird
+//! * **Dashboard → Suche:** [`PlanUi::open_search_in_project`] zeigt den Reiter „Suche“ des Projekts mit der Abfrage im Feld. Sie wird
 //!   *nicht* ausgeführt, solange `run_search` (search_tab.rs) nur ein Platzhalter ist; mit der angeschlossenen Suche genügt dort ein
 //!   Aufruf von `self.run_search(jql)` an der markierten Stelle.
 //! * Der **Entwurf** „Neues Ticket“ (`TicketUi::create`) und alle anderen Dialoge bleiben bei der Navigation unberührt.
@@ -135,17 +135,15 @@ impl PlanUi {
         }
     }
 
-    /// Reiter „Suche“ zeigen, die Abfrage ins Feld setzen (ohne sie auszuführen) und dafür bei Bedarf das Projekt wechseln
-    /// (`None` = im aktuellen Projekt bleiben, z. B. Dashboards über alle Projekte).
-    pub(super) fn open_search_query(&mut self, cx: &Cx, jql: &str, project: Option<i64>) {
+    /// Reiter „Suche“ des Projekts zeigen und die Abfrage ausführen; dafür wird bei Bedarf das Projekt gewechselt
+    /// (`None` = im aktuellen Projekt bleiben, Bereich „alle Projekte“, z. B. Dashboards über alle Projekte).
+    pub(super) fn open_search_in_project(&mut self, cx: &Cx, jql: &str, project: Option<i64>) {
         if let Some(p) = project.filter(|p| *p != self.selected && self.projects.iter().any(|x| x.id == *p)) {
             self.select(cx, p);
         }
         self.help.open = false;
         self.msg = None;
-        self.search.bar.set_query(jql);
-        self.tab = Tab::Search;
-        // TODO query-ui: sobald `run_search` die Suche ausführt, hier `self.run_search(jql)` aufrufen.
+        self.open_search_query(jql, Some(project.is_none()));
     }
 }
 
