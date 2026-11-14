@@ -145,6 +145,10 @@ pub fn load_backlog(conn: &Connection, sum: &ProjectSummary, show_done: bool, la
 // ------------------------------------------------------------------ Fallenlassen und Verschieben
 
 /// Führt einen Drop-Plan aus: erst die Zugehörigkeit (Sprint/Backlog), dann der Rang. Liefert, wie viele Tickets den Bereich gewechselt haben.
+///
+/// Bekannte Lücke: Nicht über Strg+Z rückgängig zu machen. Die Zugehörigkeit zu einem Sprint hat keine `TicketOp` (sie schreibt
+/// zusätzlich Sprint-Ereignisse für Burndown und Bericht); eine Umkehrung bräuchte eine neue Operationsart samt Gegenbuchung
+/// der Ereignisse. Nur der Rang ließe sich umkehren, das wäre als halber Schritt irreführend.
 pub fn apply_drop(conn: &Connection, plan: &DropPlan) -> Result<usize, SprintError> {
     let moved = match plan.target {
         Section::Backlog => move_tickets_to_backlog(conn, &plan.ids)?,
