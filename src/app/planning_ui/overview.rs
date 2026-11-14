@@ -10,6 +10,9 @@ use crate::style::{self, S1, S2, S3};
 use crate::tasks::{self, Item, ItemFilter, Tag};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Ui, Vec2};
 
+/// So viele Karten zeigt die schreibgeschützte Ansicht höchstens.
+const TODO_SHOW_MAX: usize = 300;
+
 /// Die Einträge der einfachen Liste für die schreibgeschützte Ansicht.
 #[derive(Default)]
 pub(super) struct Todo {
@@ -192,11 +195,20 @@ impl PlanUi {
             ui.vertical_centered(|ui| ui.label(RichText::new(lang.t("Die Todo-Liste ist leer.", "The to-do list is empty.")).color(style::dim(ui))));
             return;
         }
-        let items = self.todo.items.clone();
-        for it in &items {
+        // Karten dieses Bildes zeichnen; bei sehr langen Listen nur die ersten (die einfache Liste zeigt alles).
+        let items = std::mem::take(&mut self.todo.items);
+        for it in items.iter().take(TODO_SHOW_MAX) {
             todo_card(ui, it, &self.todo.tags, lang);
             ui.add_space(8.0);
         }
+        if items.len() > TODO_SHOW_MAX {
+            let more = items.len() - TODO_SHOW_MAX;
+            hint(ui, &match lang {
+                Lang::De => format!("… und {more} weitere Einträge (alle siehst du in der einfachen Liste mit ausgeschaltetem Expertenmodus)."),
+                Lang::En => format!("… and {more} more entries (see them all in the simple list with expert mode off)."),
+            });
+        }
+        self.todo.items = items;
     }
 }
 

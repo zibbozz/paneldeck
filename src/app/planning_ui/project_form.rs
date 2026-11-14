@@ -187,9 +187,9 @@ fn form_ui(ui: &mut Ui, f: &mut Form, lang: Lang, new: bool) -> bool {
     ui.add_space(S2);
     ui.label(RichText::new(lang.t("Farbe neuer Tags", "Color of new tags")).strong());
     ui.horizontal_wrapped(|ui| {
-        ui.radio_value(&mut f.tag_mode, TagColorMode::Default, lang.t("Standardfarbe", "Default color"));
-        ui.radio_value(&mut f.tag_mode, TagColorMode::Accent, lang.t("Projektfarbe", "Project color"));
-        ui.radio_value(&mut f.tag_mode, TagColorMode::Random, lang.t("Zufällig", "Random"));
+        widgets::radio(ui, &mut f.tag_mode, TagColorMode::Default, lang.t("Standardfarbe", "Default color"));
+        widgets::radio(ui, &mut f.tag_mode, TagColorMode::Accent, lang.t("Projektfarbe", "Project color"));
+        widgets::radio(ui, &mut f.tag_mode, TagColorMode::Random, lang.t("Zufällig", "Random"));
     });
     if new {
         ui.add_space(S2);

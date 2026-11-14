@@ -129,7 +129,7 @@ pub fn kind_label(k: FieldKind, lang: Lang) -> &'static str {
 
 pub fn category_label(c: StatusCategory, lang: Lang) -> &'static str {
     match c {
-        StatusCategory::Todo => lang.t("To Do", "To Do"),
+        StatusCategory::Todo => lang.t("Zu erledigen", "To Do"),
         StatusCategory::Progress => lang.t("In Arbeit", "In Progress"),
         StatusCategory::Done => lang.t("Erledigt", "Done"),
     }

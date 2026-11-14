@@ -101,6 +101,31 @@ pub fn check(ui: &mut Ui, on: &mut bool, label: impl AsRef<str>) -> Response {
     resp
 }
 
+/// Eigener Radioknopf mit gut sichtbarem Rahmen; wählt `value`, wenn angeklickt.
+pub fn radio<T: PartialEq>(ui: &mut Ui, cur: &mut T, value: T, label: impl AsRef<str>) -> Response {
+    let label = label.as_ref();
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font, ui.visuals().text_color());
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(18.0 + galley.size().x + 8.0, 22.0), Sense::click());
+    let selected = *cur == value;
+    if resp.clicked() && !selected {
+        *cur = value;
+        resp.mark_changed();
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let c = Pos2::new(rect.left() + 9.0, rect.center().y);
+    let a = style::accent();
+    let ring = if selected || resp.hovered() { a } else { ui.visuals().text_color().gamma_multiply(0.45) };
+    ui.painter().circle_stroke(c, 8.0, Stroke::new(1.3_f32, ring));
+    if selected {
+        ui.painter().circle_filled(c, 4.5, a);
+    }
+    ui.painter().galley(Pos2::new(rect.left() + 26.0, rect.center().y - galley.size().y / 2.0), galley, ui.visuals().text_color());
+    resp
+}
+
 /// Das Kästchen einer Checkbox (angehakt = Akzentfarbe mit Haken, sonst Rahmen).
 pub fn paint_box(ui: &Ui, rect: Rect, on: bool, hovered: bool) {
     let a = style::accent();

@@ -383,7 +383,7 @@ fn field_form(ui: &mut Ui, d: &mut FieldDlg, sum: Option<&ProjectSummary>, lang:
                 ui.label(format!("{} ({})", kind_label(d.kind, lang), lang.t("nach dem Anlegen nicht änderbar", "cannot be changed after creation")));
             } else {
                 let before = d.kind;
-                egui::ComboBox::from_id_salt("field_kind").selected_text(kind_label(d.kind, lang)).width(240.0).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("field_kind").selected_text(kind_label(d.kind, lang)).width(240.0).height(420.0).show_ui(ui, |ui| {
                     for k in FieldKind::ALL {
                         ui.selectable_value(&mut d.kind, k, kind_label(k, lang));
                     }

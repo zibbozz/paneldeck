@@ -147,7 +147,7 @@ impl PlanUi {
                 ui.label(lang.t("Ersatz wählen oder verwerfen:", "Choose a replacement or discard:"));
                 ui.add_space(S1);
                 ui.add_enabled_ui(!d.cands.is_empty(), |ui| {
-                    if ui.radio_value(&mut d.replace, true, lang.t("Auf einen Ersatz umhängen:", "Move to a replacement:")).changed() {
+                    if widgets::radio(ui, &mut d.replace, true, lang.t("Auf einen Ersatz umhängen:", "Move to a replacement:")).changed() {
                         remap = true;
                     }
                 });
@@ -196,7 +196,7 @@ impl PlanUi {
                     d.replace = false;
                     ui.label(RichText::new(lang.t("Es gibt keinen passenden Ersatz.", "There is no suitable replacement.")).small().color(egui::Color32::from_rgb(0xe5, 0xa0, 0x4b)));
                 }
-                ui.radio_value(&mut d.replace, false, lang.t("Verwerfen:", "Discard:"));
+                widgets::radio(ui, &mut d.replace, false, lang.t("Verwerfen:", "Discard:"));
                 ui.indent("del_discard", |ui| {
                     ui.label(RichText::new(on_discard).small());
                 });
@@ -288,6 +288,94 @@ impl Dlg {
                 };
                 types::delete_type(cx.conn, id, tm)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planning::fields::{create_field, FieldKind, NewField};
+    use crate::planning::integrity::test_hook;
+    use crate::planning::projects::{create_project, NewProject};
+    use crate::planning::statuses::{create_status, list_statuses, NewStatus, StatusCategory};
+    use crate::planning::types::{create_type, list_types, NewType};
+
+    /// Ein Dialog ohne Oberfläche, nur mit den Daten, die `execute` braucht.
+    fn dlg(target: Target, usage: i64, replace: bool, to: Option<i64>, map: Vec<FieldMapEntry>) -> Dlg {
+        Dlg { target, name: String::new(), usage, replace, to, cands: Vec::new(), map, err: None }
+    }
+
+    fn cx<'a>(conn: &'a rusqlite::Connection, db: &'a crate::db::Db) -> Cx<'a> {
+        Cx { conn, db, lang: Lang::En }
+    }
+
+    fn open_db() -> crate::db::Db {
+        let d = std::env::temp_dir().join(format!("paneldeck-test-delui-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        crate::db::open(&d, &d.join("backups")).unwrap()
+    }
+
+    #[test]
+    fn unused_entries_delete_without_a_mode() {
+        let db = open_db();
+        let p = create_project(&db.conn, &NewProject::new("AB", "P", "#112233")).unwrap();
+        let s = create_status(&db.conn, &NewStatus { project_id: p, key: None, name: Some("X".into()), color: "#445566".into(), category: StatusCategory::Todo }).unwrap();
+        dlg(Target::Status(s), 0, false, None, Vec::new()).execute(&cx(&db.conn, &db)).unwrap();
+        assert!(list_statuses(&db.conn, p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn used_entries_need_a_valid_choice() {
+        let db = open_db();
+        let p = create_project(&db.conn, &NewProject::new("AB", "P", "#112233")).unwrap();
+        let mk = |n: &str| create_status(&db.conn, &NewStatus { project_id: p, key: None, name: Some(n.into()), color: "#445566".into(), category: StatusCategory::Todo }).unwrap();
+        let (a, b) = (mk("A"), mk("B"));
+        // „in Benutzung“ simulieren (die Ticket-Tabellen gibt es noch nicht)
+        test_hook::add("status", "SELECT 2 + 0 * ?1");
+        // Ersatz fehlt → Fehler, nichts gelöscht
+        let r = dlg(Target::Status(a), 2, true, None, Vec::new()).execute(&cx(&db.conn, &db));
+        assert_eq!(r, Err(PlanError::ReplacementInvalid));
+        assert_eq!(list_statuses(&db.conn, p).unwrap().len(), 2);
+        // sich selbst als Ersatz ist unzulässig
+        let r = dlg(Target::Status(a), 2, true, Some(a), Vec::new()).execute(&cx(&db.conn, &db));
+        assert_eq!(r, Err(PlanError::ReplacementInvalid));
+        // gültiger Ersatz
+        dlg(Target::Status(a), 2, true, Some(b), Vec::new()).execute(&cx(&db.conn, &db)).unwrap();
+        assert_eq!(list_statuses(&db.conn, p).unwrap().len(), 1);
+        // Verwerfen
+        dlg(Target::Status(b), 2, false, None, Vec::new()).execute(&cx(&db.conn, &db)).unwrap();
+        assert!(list_statuses(&db.conn, p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn type_deletion_carries_the_field_mapping() {
+        let db = open_db();
+        let p = create_project(&db.conn, &NewProject::new("AB", "P", "#112233")).unwrap();
+        let mk_type = |n: &str| create_type(&db.conn, &NewType { project_id: p, key: None, name: Some(n.into()), icon: None, color: "#445566".into(), workflow: false }).unwrap();
+        let (from, to) = (mk_type("Alt"), mk_type("Neu"));
+        let f_from = create_field(&db.conn, &NewField::new(from, "Aufwand", FieldKind::Number)).unwrap();
+        let f_to = create_field(&db.conn, &NewField::new(to, "Aufwand", FieldKind::Number)).unwrap();
+        let mut d = dlg(Target::Type(from), 1, true, Some(to), Vec::new());
+        d.refresh_map(&cx(&db.conn, &db));
+        assert_eq!(d.map, vec![FieldMapEntry { from_field: f_from, to_field: Some(f_to) }], "gleichnamiges Feld mit gleichem Feldtyp wird vorgeschlagen");
+        test_hook::add("type", "SELECT 1 + 0 * ?1");
+        d.execute(&cx(&db.conn, &db)).unwrap();
+        let left: Vec<i64> = list_types(&db.conn, p).unwrap().iter().map(|t| t.id).collect();
+        assert_eq!(left, vec![to]);
+        // ohne Ersatz-Typ gibt es keine Zuordnung
+        let mut d = dlg(Target::Type(to), 1, false, None, Vec::new());
+        d.refresh_map(&cx(&db.conn, &db));
+        assert!(d.map.is_empty());
+    }
+
+    #[test]
+    fn every_target_has_words_in_both_languages() {
+        for t in [Target::Status(1), Target::Type(1), Target::Field(1), Target::LinkType(1), Target::WorkKind(1)] {
+            let (de, en) = (words(t, Lang::De), words(t, Lang::En));
+            assert_ne!(de.0, en.0, "{t:?}");
+            assert!(!de.1.is_empty() && !de.2.is_empty() && !de.3.is_empty() && !en.1.is_empty() && !en.2.is_empty() && !en.3.is_empty());
         }
     }
 }
