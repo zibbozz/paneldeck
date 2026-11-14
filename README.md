@@ -79,8 +79,8 @@ Everything lives in the `paneldeck-data` folder next to the `.exe` (if that is n
     rustup target add x86_64-pc-windows-gnu && apt install gcc-mingw-w64-x86-64
     cargo build --release --target x86_64-pc-windows-gnu
 
-Release files (portable ZIP with `paneldeck.exe` and licenses, installer), commit and tag: `tools/release.sh <version> "<message>"` – on Windows from Git Bash; needs Python 3 and, for the installer, NSIS (`makensis`).
-`--publish` also creates the GitHub release (GitHub CLI `gh`, logged in); `--no-git` only builds and packages.
+Release files (portable ZIP with `paneldeck.exe` and licenses, installer) are built from a `release/x.y` branch with `tools/release.sh <version>` (see `CLAUDE.md` for the branching and release process) – on Windows from Git Bash; needs Python 3 and, for the installer, NSIS (`makensis`).
+`--publish` also pushes the tag and creates the GitHub release (GitHub CLI `gh`, logged in); `--no-git` only builds and packages.
 
 The changelog (`Changelog.md`) and the developer notes (`CLAUDE.md`, `TESTPLAN.md`) are written in German.
 
