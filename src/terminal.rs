@@ -152,10 +152,8 @@ impl Session {
         if let Some(text) = opts.restore_text {
             let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
             processor.advance(&mut term, text.as_bytes());
-            processor.advance(
-                &mut term,
-                b"\r\n\x1b[2m\xe2\x94\x80\xe2\x94\x80 wiederhergestellter Verlauf \xe2\x94\x80\xe2\x94\x80\x1b[0m\r\n",
-            );
+            let sep = format!("\r\n\x1b[2m\u{2500}\u{2500} {} \u{2500}\u{2500}\x1b[0m\r\n", crate::state::t("wiederhergestellter Verlauf", "restored history"));
+            processor.advance(&mut term, sep.as_bytes());
         }
 
         let term = Arc::new(Mutex::new(term));

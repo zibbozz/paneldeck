@@ -26,7 +26,13 @@ BrandingText "Paneldeck ${VERSION}"
 !define MUI_UNICON "..\assets\icon.ico"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\paneldeck.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Paneldeck jetzt starten / Start Paneldeck now"
+!define MUI_FINISHPAGE_RUN_TEXT "$(STR_RunNow)"
+; Sprachauswahl beim Start (Englisch = Vorgabe/Fallback, Deutsch wird auf deutschen Systemen vorausgewählt); die Wahl merkt sich
+; der Deinstaller. Im stillen Modus (/S) erscheint kein Dialog.
+!define MUI_LANGDLL_ALWAYSSHOW
+!define MUI_LANGDLL_REGISTRY_ROOT HKCU
+!define MUI_LANGDLL_REGISTRY_KEY "Software\Paneldeck"
+!define MUI_LANGDLL_REGISTRY_VALUENAME "InstallerLanguage"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "..\LICENSE"
@@ -36,10 +42,35 @@ BrandingText "Paneldeck ${VERSION}"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_LANGUAGE "German"
 !insertmacro MUI_LANGUAGE "English"
+!insertmacro MUI_LANGUAGE "German"
 
-Section "Paneldeck (erforderlich)" SecMain
+LangString STR_RunNow ${LANG_ENGLISH} "Start Paneldeck now"
+LangString STR_RunNow ${LANG_GERMAN} "Paneldeck jetzt starten"
+LangString NAME_Main ${LANG_ENGLISH} "Paneldeck (required)"
+LangString NAME_Main ${LANG_GERMAN} "Paneldeck (erforderlich)"
+LangString NAME_Desktop ${LANG_ENGLISH} "Desktop shortcut"
+LangString NAME_Desktop ${LANG_GERMAN} "Desktop-Verknüpfung"
+LangString NAME_Auto ${LANG_ENGLISH} "Start with Windows (minimized in the tray)"
+LangString NAME_Auto ${LANG_GERMAN} "Mit Windows starten (minimiert im Tray)"
+LangString NAME_Ctx ${LANG_ENGLISH} "Explorer context menu 'Open in Paneldeck'"
+LangString NAME_Ctx ${LANG_GERMAN} "Explorer-Kontextmenü „In Paneldeck öffnen“"
+LangString STR_CtxOpen ${LANG_ENGLISH} "Open in Paneldeck"
+LangString STR_CtxOpen ${LANG_GERMAN} "In Paneldeck öffnen"
+LangString STR_CtxClaude ${LANG_ENGLISH} "Start with Claude in Paneldeck"
+LangString STR_CtxClaude ${LANG_GERMAN} "Mit Claude in Paneldeck starten"
+LangString STR_Uninst ${LANG_ENGLISH} "Uninstall Paneldeck"
+LangString STR_Uninst ${LANG_GERMAN} "Paneldeck deinstallieren"
+
+Function .onInit
+  !insertmacro MUI_LANGDLL_DISPLAY
+FunctionEnd
+
+Function un.onInit
+  !insertmacro MUI_UNGETLANGUAGE
+FunctionEnd
+
+Section "$(NAME_Main)" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
   ; Läuft Paneldeck gerade (Update), ist die .exe gesperrt – umbenennen darf Windows aber. Die laufende Instanz
@@ -67,7 +98,7 @@ Section "Paneldeck (erforderlich)" SecMain
 
   CreateDirectory "$SMPROGRAMS\Paneldeck"
   CreateShortcut "$SMPROGRAMS\Paneldeck\Paneldeck.lnk" "$INSTDIR\paneldeck.exe"
-  CreateShortcut "$SMPROGRAMS\Paneldeck\Paneldeck deinstallieren.lnk" "$INSTDIR\Uninstall.exe"
+  CreateShortcut "$SMPROGRAMS\Paneldeck\$(STR_Uninst).lnk" "$INSTDIR\Uninstall.exe"
 
   WriteRegStr HKCU "Software\Paneldeck" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Paneldeck" "DisplayName" "Paneldeck"
@@ -80,25 +111,25 @@ Section "Paneldeck (erforderlich)" SecMain
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Paneldeck" "NoRepair" 1
 SectionEnd
 
-Section "Desktop-Verknüpfung" SecDesktop
+Section "$(NAME_Desktop)" SecDesktop
   CreateShortcut "$DESKTOP\Paneldeck.lnk" "$INSTDIR\paneldeck.exe"
 SectionEnd
 
-Section /o "Mit Windows starten (minimiert im Tray)" SecAutostart
+Section /o "$(NAME_Auto)" SecAutostart
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Paneldeck" '"$INSTDIR\paneldeck.exe" --tray'
 SectionEnd
 
-Section "Explorer-Kontextmenü „In Paneldeck öffnen“" SecContext
-  WriteRegStr HKCU "Software\Classes\Directory\shell\Paneldeck" "" "In Paneldeck öffnen"
+Section "$(NAME_Ctx)" SecContext
+  WriteRegStr HKCU "Software\Classes\Directory\shell\Paneldeck" "" "$(STR_CtxOpen)"
   WriteRegStr HKCU "Software\Classes\Directory\shell\Paneldeck" "Icon" '"$INSTDIR\paneldeck.exe"'
   WriteRegStr HKCU "Software\Classes\Directory\shell\Paneldeck\command" "" '"$INSTDIR\paneldeck.exe" --open "%1"'
-  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\Paneldeck" "" "In Paneldeck öffnen"
+  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\Paneldeck" "" "$(STR_CtxOpen)"
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\Paneldeck" "Icon" '"$INSTDIR\paneldeck.exe"'
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\Paneldeck\command" "" '"$INSTDIR\paneldeck.exe" --open "%V"'
-  WriteRegStr HKCU "Software\Classes\Directory\shell\PaneldeckClaude" "" "Mit Claude in Paneldeck starten"
+  WriteRegStr HKCU "Software\Classes\Directory\shell\PaneldeckClaude" "" "$(STR_CtxClaude)"
   WriteRegStr HKCU "Software\Classes\Directory\shell\PaneldeckClaude" "Icon" '"$INSTDIR\paneldeck.exe"'
   WriteRegStr HKCU "Software\Classes\Directory\shell\PaneldeckClaude\command" "" '"$INSTDIR\paneldeck.exe" --claude --open "%1"'
-  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\PaneldeckClaude" "" "Mit Claude in Paneldeck starten"
+  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\PaneldeckClaude" "" "$(STR_CtxClaude)"
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\PaneldeckClaude" "Icon" '"$INSTDIR\paneldeck.exe"'
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\PaneldeckClaude\command" "" '"$INSTDIR\paneldeck.exe" --claude --open "%V"'
 SectionEnd
@@ -134,6 +165,7 @@ Section "Uninstall"
   RMDir "$INSTDIR\licenses"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$SMPROGRAMS\Paneldeck\Paneldeck.lnk"
+  Delete "$SMPROGRAMS\Paneldeck\Uninstall Paneldeck.lnk"
   Delete "$SMPROGRAMS\Paneldeck\Paneldeck deinstallieren.lnk"
   RMDir "$SMPROGRAMS\Paneldeck"
   Delete "$DESKTOP\Paneldeck.lnk"
