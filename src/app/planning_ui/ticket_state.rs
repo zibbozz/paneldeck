@@ -252,6 +252,9 @@ pub struct TicketUi {
     pub open: Option<i64>,
     /// Vorherige Tickets beim Navigieren über Verweise (Zurück-Pfeil).
     pub back: Vec<i64>,
+    /// Ungespeicherte Eingaben (Entwürfe, Kommentartext) der Tickets in `back`: Wer einem Verweis folgt und zurückgeht, findet sie
+    /// wieder vor. Geleert, sobald die Verweiskette endet (Liste, Schließen, Projektwechsel).
+    pub saved_views: HashMap<i64, ViewState>,
     pub mode: ViewMode,
     pub mode_loaded: bool,
     pub detail: Option<Detail>,
@@ -307,6 +310,7 @@ impl Default for TicketUi {
             project_total: 0,
             open: None,
             back: Vec::new(),
+            saved_views: HashMap::new(),
             mode: ViewMode::Page,
             mode_loaded: false,
             detail: None,
@@ -351,6 +355,7 @@ impl TicketUi {
             self.scroll_offset = None;
             self.open = None;
             self.back.clear();
+            self.saved_views.clear();
             self.return_tab = None;
             self.hover = None;
             self.detail = None;
@@ -373,9 +378,12 @@ impl TicketUi {
         if from_link {
             if let Some(cur) = self.open.filter(|c| *c != id) {
                 self.back.push(cur);
+                // die Eingaben des verlassenen Tickets aufheben (siehe `saved_views`)
+                self.saved_views.insert(cur, std::mem::take(&mut self.view));
             }
         } else {
             self.back.clear();
+            self.saved_views.clear();
         }
         if self.open != Some(id) {
             self.view = ViewState { ticket: id, ..Default::default() };
@@ -392,7 +400,7 @@ impl TicketUi {
             Some(prev) => {
                 self.open = Some(prev);
                 self.scroll_to = Some(prev);
-                self.view = ViewState { ticket: prev, ..Default::default() };
+                self.view = ViewState { ticket: prev, ..self.saved_views.remove(&prev).unwrap_or_default() };
                 self.detail = None;
                 self.detail_dirty = true;
                 false
@@ -410,6 +418,7 @@ impl TicketUi {
         self.open = None;
         self.detail = None;
         self.back.clear();
+        self.saved_views.clear();
         self.view = ViewState::default();
     }
 
@@ -593,6 +602,36 @@ mod tests {
         // dasselbe Ticket noch einmal über einen Verweis: kein Eintrag auf sich selbst
         u.open_ticket(5, true);
         assert!(u.back.is_empty());
+    }
+
+    #[test]
+    fn unsaved_input_survives_following_a_link_and_going_back() {
+        let mut u = TicketUi::default();
+        u.open_ticket(1, false);
+        u.view.comment = "halber Kommentar".into();
+        u.view.parent_open = true;
+        u.open_ticket(2, true);
+        assert!(u.view.comment.is_empty(), "das andere Ticket startet leer");
+        u.view.comment = "Kommentar an B".into();
+        u.open_ticket(3, true);
+        assert!(!u.go_back());
+        assert_eq!(u.open, Some(2));
+        assert_eq!(u.view.comment, "Kommentar an B");
+        assert!(!u.go_back());
+        assert_eq!((u.open, u.view.comment.as_str(), u.view.ticket, u.view.parent_open), (Some(1), "halber Kommentar", 1, true));
+        // ein Ticket aus der Liste öffnen oder die Ansicht schließen beendet die Kette: nichts bleibt hängen
+        u.open_ticket(2, true);
+        u.close();
+        assert!(u.saved_views.is_empty());
+        u.open_ticket(1, false);
+        assert!(u.view.comment.is_empty());
+        u.view.comment = "x".into();
+        u.open_ticket(2, true);
+        u.open_ticket(5, false);
+        assert!(u.saved_views.is_empty(), "aus der Liste: neue Kette");
+        u.open_ticket(6, true);
+        u.switch_project(9);
+        assert!(u.saved_views.is_empty());
     }
 
     #[test]

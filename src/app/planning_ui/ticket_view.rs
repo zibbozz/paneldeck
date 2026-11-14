@@ -561,6 +561,8 @@ fn links_section(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState, acts: 
                                 let resp = ui.add_sized([w, 24.0], egui::Button::new(RichText::new(format!("⌨ {name}")).monospace().color(style::accent())).frame(false).truncate());
                                 if resp.on_hover_text(tip).clicked() {
                                     acts.push(Act::OpenSession(session));
+                                    // Der Sprung wird erst im nächsten Bild abgeholt: ohne neues Bild bliebe er bis zur nächsten Eingabe liegen.
+                                    ui.ctx().request_repaint();
                                 }
                             }
                             None => {

@@ -197,6 +197,38 @@ fn ctrl_n_opens_the_dialog_and_ctrl_enter_creates_the_ticket() {
     });
 }
 
+/// Linksklick an einer Stelle (Bildschirmkoordinaten) in zwei Bildern: drücken, loslassen.
+fn click_at(h: &mut H, pos: Pos2) {
+    let btn = |pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    h.frame(vec![Event::PointerMoved(pos)]);
+    h.frame(vec![btn(true)]);
+    h.frame(vec![btn(false)]);
+    h.frames(1);
+}
+
+#[test]
+fn a_click_beside_the_create_dialog_keeps_a_started_draft() {
+    both(|h| {
+        h.frame(vec![ctrl(Key::N)]);
+        h.frames(2);
+        assert!(h.ui.tickets.create.is_some());
+        // leerer Dialog: ein Klick daneben schließt ihn (nichts zu verlieren)
+        click_at(h, Pos2::new(8.0, 8.0));
+        assert!(h.ui.tickets.create.is_none(), "ohne Eingabe schließt der Klick daneben");
+        // angefangener Entwurf: der Fehlklick darf ihn nicht verwerfen
+        h.frame(vec![ctrl(Key::N)]);
+        h.frames(2);
+        h.ui.tickets.create.as_mut().unwrap().title = "Lange Beschreibung folgt".into();
+        click_at(h, Pos2::new(8.0, 8.0));
+        let dlg = h.ui.tickets.create.as_ref();
+        assert_eq!(dlg.map(|d| d.title.as_str()), Some("Lange Beschreibung folgt"), "Entwurf bleibt nach dem Fehlklick");
+        // Esc verwirft ihn bewusst
+        h.frame(vec![Event::Key { key: Key::Escape, physical_key: Some(Key::Escape), pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+        h.frames(2);
+        assert!(h.ui.tickets.create.is_none(), "Esc schließt auch mit Entwurf");
+    });
+}
+
 #[test]
 fn create_another_keeps_the_dialog_open_and_resets_the_fields() {
     both(|h| {
