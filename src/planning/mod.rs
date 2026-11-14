@@ -20,6 +20,7 @@ pub mod statuses;
 pub mod summary;
 pub mod template;
 pub mod types;
+pub mod views;
 pub mod work_kinds;
 pub mod workflow;
 
