@@ -268,8 +268,10 @@ import sqlite3, sys, json
 c = sqlite3.connect(sys.argv[1])
 c.execute('PRAGMA foreign_keys=ON')
 now = '2026-01-01T00:00:00'
-c.execute("INSERT INTO projects (key,name,description,color,work_dir,next_number,position,created_at) VALUES ('PAN','Smoke','','#112233','',1,1,?)", (now,))
+c.execute("INSERT INTO projects (key,name,description,color,work_dir,use_sprints,use_versions,next_number,position,created_at) VALUES ('PAN','Smoke','','#112233','',1,1,1,1,?)", (now,))
 pid = c.execute("SELECT id FROM projects WHERE key='PAN'").fetchone()[0]
+c.execute("INSERT INTO sprints (project_id,name,goal,start_date,end_date,state,default_days,created_at,started_at) VALUES (?,?,?,?,?,'active',10,?,?)", (pid, 'Sprint 1', 'Smoke goal', '2026-01-01', '2026-01-14', now, now))
+c.execute("INSERT INTO versions (project_id,name,position) VALUES (?,?,0)", (pid, '1.0'))
 st = {}
 for i, (n, cat) in enumerate([('To Do', 'todo'), ('In Progress', 'progress'), ('Done', 'done')]):
     c.execute("INSERT INTO statuses (project_id,name,color,category,position) VALUES (?,?,?,?,?)", (pid, n, '#888888', cat, i))
@@ -300,7 +302,7 @@ c.close()
     $script:prestart = $null
     [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
     $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
-    $expectTools = @('list_projects', 'get_project', 'search_tickets', 'get_ticket', 'get_time_entries', 'create_ticket', 'update_ticket', 'transition_ticket', 'add_comment', 'log_time', 'link_ticket', 'link_terminal')
+    $expectTools = @('list_projects', 'get_project', 'search_tickets', 'get_ticket', 'get_time_entries', 'list_sprints', 'get_sprint', 'list_versions', 'create_ticket', 'update_ticket', 'transition_ticket', 'add_comment', 'log_time', 'link_ticket', 'link_terminal')
     Check 'Expertenmodus: tools/list hat die Ticket-Werkzeuge' (@($expectTools | Where-Object { $names -notcontains $_ }).Count -eq 0)
     Check 'Expertenmodus: keine schreibenden Todo-Werkzeuge, list_todos bleibt' ($names -notcontains 'add_todo' -and $names -notcontains 'set_todo_done' -and $names -contains 'list_todos')
     Check 'Expertenmodus: add_todo -> wrong_mode' ((Code (Tool 'add_todo' @{ title = 'x' })) -eq 'wrong_mode')
@@ -350,6 +352,18 @@ c.close()
     Check 'search_tickets: nach Status' ($s1.data.total -eq 1 -and $s1.data.tickets[0].key -eq 'PAN-1')
     Check 'search_tickets: Text, Seiten' ((Tool 'search_tickets' @{ text = 'notiz' }).data.total -eq 1 -and (Tool 'search_tickets' @{ limit = 1; offset = 1 }).data.tickets.Count -eq 1)
     Check 'search_tickets: type ohne project -> bad_args' ((Code (Tool 'search_tickets' @{ type = 'Task' })) -eq 'bad_args')
+    $q1 = Tool 'search_tickets' @{ project = 'PAN'; query = 'status = Done ORDER BY key' }
+    Check 'search_tickets: query (Abfragesprache)' (-not $q1.err -and $q1.data.total -eq 1 -and $q1.data.tickets[0].key -eq 'PAN-1') $q1.text
+    Check 'search_tickets: query mit Sprint-Funktion (leerer Sprint)' ((Tool 'search_tickets' @{ project = 'PAN'; query = 'sprint = activeSprint()' }).data.total -eq 0)
+    $q2 = Tool 'search_tickets' @{ project = 'PAN'; query = 'type = Task AND nonsense = 1' }
+    Check 'search_tickets: ungueltige query -> invalid_query mit Position' ((Code $q2) -eq 'invalid_query' -and $q2.text -match 'Position 17')
+    Check 'search_tickets: query mit text -> bad_args' ((Code (Tool 'search_tickets' @{ query = ''; text = 'x' })) -eq 'bad_args')
+    $ls = Tool 'list_sprints' @{ project = 'PAN' }
+    Check 'list_sprints: Name, Ziel, Status' (-not $ls.err -and $ls.data.total -eq 1 -and $ls.data.sprints[0].name -eq 'Sprint 1' -and $ls.data.sprints[0].goal -eq 'Smoke goal' -and $ls.data.sprints[0].state -eq 'active') $ls.text
+    $gs = Tool 'get_sprint' @{ project = 'PAN'; sprint = 'sprint 1' }
+    Check 'get_sprint: Name mit project, Bericht' (-not $gs.err -and $gs.data.sprint.name -eq 'Sprint 1' -and $null -ne $gs.data.report.planned) $gs.text
+    Check 'get_sprint: unbekannter Sprint -> not_found' ((Code (Tool 'get_sprint' @{ project = 'PAN'; sprint = 'Nope' })) -eq 'not_found')
+    Check 'list_versions: Version 1.0' ((Tool 'list_versions' @{ project = 'PAN' }).data.versions[0].name -eq '1.0')
     $gt = Tool 'get_ticket' @{ ticket = 'PAN-1' }
     Check 'get_ticket: Kommentar, Zeit, Verknuepfung, Verlauf' (-not $gt.err -and $gt.data.comments_total -eq 1 -and $gt.data.time.entries_total -eq 2 -and @($gt.data.links).Count -eq 1 -and @($gt.data.history | Where-Object source -eq 'agent').Count -ge 5)
     Check 'get_ticket: Hinweis auf nicht vertrauenswuerdige Texte' ($gt.data.note -match 'untrusted')
@@ -382,6 +396,7 @@ c.close()
     Check 'Expert + Nur lesen: Ticket-Lesewerkzeuge ja, schreibende nein' ($names -contains 'get_ticket' -and $names -contains 'search_tickets' -and $names -notcontains 'create_ticket' -and $names -notcontains 'link_terminal')
     Check 'Expert + Nur lesen: create_ticket verboten' ((Code (Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'x' })) -eq 'forbidden')
     Check 'Expert + Nur lesen: get_ticket liest' ((Tool 'get_ticket' @{ ticket = 'PAN-1' }).data.key -eq 'PAN-1')
+    Check 'Expert + Nur lesen: list_sprints, list_versions und query lesen' ($names -contains 'list_sprints' -and $names -contains 'get_sprint' -and $names -contains 'list_versions' -and (Tool 'list_sprints' @{ project = 'PAN' }).data.total -eq 1 -and (Tool 'search_tickets' @{ query = 'type = Task' }).data.total -ge 1)
   }
 } finally {
   Stop-Hub

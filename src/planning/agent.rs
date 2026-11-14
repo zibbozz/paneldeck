@@ -10,7 +10,8 @@
 //!   mit dem Hinweis `note`, dass sie nicht vertrauenswürdig sind.
 //! * Fehler haben englische Codes (öffentliche API) und eine Meldung in der Sprache der Oberfläche; bei fehlenden Pflichtfeldern
 //!   nennt `details.missing_fields` die Felder.
-//! * Die Ticket-Suche steht hinter [`run_search`]; dort wird später die Abfragesprache (JQL) angeschlossen.
+//! * Die Ticket-Suche steht hinter [`run_search`]; `search_tickets` kennt zusätzlich eine Abfrage (`query`, siehe `query.rs`).
+//! * Lesende Werkzeuge für Sprints, Versionen und Meilensteine stehen in `sprints.rs`.
 
 use super::comments::{add_comment, comments_of};
 use super::fields::{list_fields, Field, FieldKind};
@@ -35,6 +36,9 @@ use crate::tasks::{self, ItemFilter, TaskError};
 use chrono::NaiveDateTime;
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
+
+mod query;
+mod sprints;
 
 /// Längster Freitext (Kommentar, Todo-Text, Textwert eines Felds) in Zeichen.
 pub const MAX_TEXT_CHARS: usize = 20_000;
@@ -680,8 +684,19 @@ pub fn run_search(conn: &Connection, spec: &SearchSpec) -> TRes<TicketPage> {
 }
 
 fn search_tickets_tool(ctx: &Ctx, v: &Value) -> R {
-    let a = args(ctx, v, &["project", "text", "type", "status", "starred", "flagged", "parent", "no_parent", "order", "limit", "offset"])?;
+    let a = args(ctx, v, &["project", "query", "text", "type", "status", "starred", "flagged", "parent", "no_parent", "order", "limit", "offset"])?;
     let project = if a.get("project").is_some() { Some(project_arg(ctx, &a, "project")?) } else { None };
+    // Abfrage der Abfragesprache (nur lesen): ersetzt die einfachen Filter
+    if let Some(q) = a.opt_str("query", crate::planning::search::MAX_QUERY_CHARS)? {
+        if let Some(k) = query::CONFLICTING.iter().find(|k| a.get(k).is_some()) {
+            return Err(ctx.bad(
+                format!("query lässt sich nicht mit {k} verbinden (Sortierung per ORDER BY in der Abfrage); nur project, limit und offset gelten zusätzlich"),
+                format!("query cannot be combined with {k} (sort with ORDER BY in the query); only project, limit and offset apply besides"),
+            ));
+        }
+        let (limit, offset) = a.paging()?;
+        return query::run(ctx, project.as_ref(), &q, limit, offset);
+    }
     let types_in = a.str_list("type", 20, MAX_NAME_CHARS)?;
     let status_in = a.str_list("status", 20, MAX_NAME_CHARS)?;
     if (!types_in.is_empty() || !status_in.is_empty()) && project.is_none() {
@@ -1082,7 +1097,7 @@ fn set_todo_done_tool(ctx: &Ctx, v: &Value) -> R {
 // ------------------------------------------------------------------ Einstieg
 
 /// Alle Werkzeuge dieser Datei (ohne `link_terminal`, das die Anwendung selbst aufruft, weil es Sitzungen kennen muss).
-pub const TOOLS: [&str; 15] = [
+pub const TOOLS: [&str; 18] = [
     "list_todos",
     "add_todo",
     "set_todo_done",
@@ -1091,6 +1106,9 @@ pub const TOOLS: [&str; 15] = [
     "search_tickets",
     "get_ticket",
     "get_time_entries",
+    "list_sprints",
+    "get_sprint",
+    "list_versions",
     "create_ticket",
     "update_ticket",
     "transition_ticket",
@@ -1112,6 +1130,9 @@ pub fn call(ctx: &Ctx, tool: &str, v: &Value, todos_read_only: bool) -> R {
         "search_tickets" => search_tickets_tool(ctx, v),
         "get_ticket" => get_ticket_tool(ctx, v),
         "get_time_entries" => get_time_entries_tool(ctx, v),
+        "list_sprints" => sprints::list_sprints_tool(ctx, v),
+        "get_sprint" => sprints::get_sprint_tool(ctx, v),
+        "list_versions" => sprints::list_versions_tool(ctx, v),
         "create_ticket" => create_ticket_tool(ctx, v),
         "update_ticket" => update_ticket_tool(ctx, v),
         "transition_ticket" => transition_ticket_tool(ctx, v),
