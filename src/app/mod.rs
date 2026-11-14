@@ -353,13 +353,13 @@ impl Editor {
         let home = hooks::global_settings_path().and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let proj = PathBuf::from(project_dir);
         let mut files = vec![
-            EditorFile { label: "CLAUDE.md (Projekt)".into(), path: proj.join("CLAUDE.md") },
-            EditorFile { label: ".claude/settings.json (Projekt)".into(), path: proj.join(".claude").join("settings.json") },
-            EditorFile { label: ".claude/settings.local.json (Projekt)".into(), path: proj.join(".claude").join("settings.local.json") },
+            EditorFile { label: format!("CLAUDE.md ({})", state::t("Projekt", "project")), path: proj.join("CLAUDE.md") },
+            EditorFile { label: format!(".claude/settings.json ({})", state::t("Projekt", "project")), path: proj.join(".claude").join("settings.json") },
+            EditorFile { label: format!(".claude/settings.local.json ({})", state::t("Projekt", "project")), path: proj.join(".claude").join("settings.local.json") },
         ];
         if let Some(h) = home {
-            files.push(EditorFile { label: "~/.claude/CLAUDE.md (global)".into(), path: h.join("CLAUDE.md") });
-            files.push(EditorFile { label: "~/.claude/settings.json (global)".into(), path: h.join("settings.json") });
+            files.push(EditorFile { label: format!("~/.claude/CLAUDE.md ({})", state::t("global", "global")), path: h.join("CLAUDE.md") });
+            files.push(EditorFile { label: format!("~/.claude/settings.json ({})", state::t("global", "global")), path: h.join("settings.json") });
         }
         let mut e = Editor { files, sel: 0, text: String::new(), orig: String::new(), drafts: HashMap::new(), msg: String::new(), msg_ok: true, readonly: false };
         e.load();
@@ -375,7 +375,7 @@ impl Editor {
                     // Keine stille Datenverfälschung: verlustbehaftet anzeigen, aber Speichern sperren.
                     self.text = String::from_utf8_lossy(e.as_bytes()).to_string();
                     self.readonly = true;
-                    self.msg = "Datei ist nicht UTF-8 (z. B. Latin-1) – nur Ansicht, Speichern ist gesperrt, um sie nicht zu beschädigen.".into();
+                    self.msg = state::t("Datei ist nicht UTF-8 (z. B. Latin-1) – nur Ansicht, Speichern ist gesperrt, um sie nicht zu beschädigen.", "File is not UTF-8 (e.g. Latin-1) – view only, saving is disabled so it is not damaged.").into();
                     self.msg_ok = false;
                 }
             },
@@ -407,14 +407,14 @@ impl Editor {
 
     fn save(&mut self) {
         if self.readonly {
-            self.msg = "Speichern gesperrt: Datei ist nicht UTF-8.".into();
+            self.msg = state::t("Speichern gesperrt: Datei ist nicht UTF-8.", "Saving disabled: file is not UTF-8.").into();
             self.msg_ok = false;
             return;
         }
         let path = self.files[self.sel].path.clone();
         if path.extension().is_some_and(|e| e == "json") && !self.text.trim().is_empty() {
             if let Err(e) = serde_json::from_str::<serde_json::Value>(&self.text) {
-                self.msg = format!("Ungültiges JSON: {e}");
+                self.msg = format!("{}: {e}", state::t("Ungültiges JSON", "Invalid JSON"));
                 self.msg_ok = false;
                 return;
             }
@@ -425,11 +425,11 @@ impl Editor {
         match crate::state::write_atomic(&path, self.text.as_bytes()) {
             Ok(()) => {
                 self.orig = self.text.clone();
-                self.msg = "Gespeichert".into();
+                self.msg = state::t("Gespeichert", "Saved").into();
                 self.msg_ok = true;
             }
             Err(e) => {
-                self.msg = format!("Fehler beim Speichern: {e}");
+                self.msg = format!("{}: {e}", state::t("Fehler beim Speichern", "Error while saving"));
                 self.msg_ok = false;
             }
         }
@@ -663,6 +663,7 @@ impl App {
         let dir = state::data_dir();
         let mut settings: Settings = state::load_json(&dir.join("settings.json")).unwrap_or_default();
         settings.sanitize();
+        state::set_lang(settings.language);
         let (saved, startup_note) = state::load_saved(&dir.join("state.json"));
         let shells = shells::detect();
         let bg = std::sync::mpsc::channel::<String>();
@@ -771,7 +772,7 @@ impl App {
         }
         clip::init(&app.dir);
         app.reload_themes();
-        app.prompts = state::load_json(&app.dir.join("prompts.json")).unwrap_or_else(prompts::defaults);
+        app.prompts = state::load_json(&app.dir.join("prompts.json")).unwrap_or_else(|| prompts::defaults(app.settings.language));
         if let Some(h) = &app.hook_server {
             hooks::write_ipc_file(&app.dir, h.port, &h.ipc_token);
         }
@@ -870,32 +871,56 @@ impl App {
         let font_files = ["seguisym.ttf", "segoeui.ttf", "msyh.ttc", "msjh.ttc", "YuGothM.ttc", "meiryo.ttc", "malgun.ttf", "simsun.ttc", "Nirmala.ttc", "LeelawUI.ttf", "seguihis.ttf", "cambria.ttc", "arial.ttf", "consola.ttf"];
         let fonts: Vec<&str> = font_files.iter().copied().filter(|f| std::path::Path::new(&format!(r"C:\Windows\Fonts\{f}")).exists()).collect();
         let crash = self.dir.join("crash.log");
-        format!(
-            "Paneldeck {}\nOS: {} {}\nEXE: {}\nDaten: {}\nShells: {}\nSitzungen: {} (davon beendet: {}) · Projekte: {} · abgedockt: {}\nHook-Server: {} · Hooks global: {} · Claude-Modus: {}\nTheme: {} · Schrift: {} · Deckkraft: {:.0} % · Animationen: {} · Sprache: {:?}\nTray: {} · Schließen minimiert: {}\nSystemschriften gefunden: {}\nabweichende Kürzel: {}\nAbsturzprotokoll: {}\n",
-            env!("CARGO_PKG_VERSION"),
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            self.exe.display(),
-            self.dir.display(),
-            self.shells.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", "),
-            self.entries.len(),
-            self.entries.values().filter(|e| e.exited()).count(),
-            self.projects.len(),
-            self.detached.len(),
-            self.hook_server.as_ref().map(|h| format!("Port {}", h.port)).unwrap_or_else(|| "aus".into()),
-            self.hooks_global,
-            self.settings.claude_mode,
-            self.settings.theme,
-            self.settings.terminal_font,
-            self.settings.opacity * 100.0,
-            self.settings.animations,
-            self.settings.language,
-            self.tray.is_some(),
-            self.settings.close_to_tray,
-            if fonts.is_empty() { "keine".to_string() } else { fonts.join(", ") },
-            self.settings.keys.len(),
-            if crash.exists() { format!("vorhanden ({})", crash.display()) } else { "keins".to_string() },
-        )
+        let l = self.settings.language;
+        let t = |de: &'static str, en: &'static str| l.t(de, en);
+        let lines = [
+            format!("Paneldeck {}", env!("CARGO_PKG_VERSION")),
+            format!("OS: {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            format!("EXE: {}", self.exe.display()),
+            format!("{}: {}", t("Daten", "Data"), self.dir.display()),
+            format!("Shells: {}", self.shells.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")),
+            format!(
+                "{}: {} ({}: {}) · {}: {} · {}: {}",
+                t("Sitzungen", "Sessions"),
+                self.entries.len(),
+                t("davon beendet", "of which exited"),
+                self.entries.values().filter(|e| e.exited()).count(),
+                t("Projekte", "Projects"),
+                self.projects.len(),
+                t("abgedockt", "detached"),
+                self.detached.len()
+            ),
+            format!(
+                "{}: {} · {}: {} · {}: {}",
+                t("Hook-Server", "Hook server"),
+                self.hook_server.as_ref().map(|h| format!("Port {}", h.port)).unwrap_or_else(|| t("aus", "off").into()),
+                t("Hooks global", "Global hooks"),
+                self.hooks_global,
+                t("Claude-Modus", "Claude mode"),
+                self.settings.claude_mode
+            ),
+            format!(
+                "Theme: {} · {}: {} · {}: {:.0} % · {}: {} · {}: {:?}",
+                self.settings.theme,
+                t("Schrift", "Font"),
+                self.settings.terminal_font,
+                t("Deckkraft", "Opacity"),
+                self.settings.opacity * 100.0,
+                t("Animationen", "Animations"),
+                self.settings.animations,
+                t("Sprache", "Language"),
+                self.settings.language
+            ),
+            format!("Tray: {} · {}: {}", self.tray.is_some(), t("Schließen minimiert", "Close minimizes"), self.settings.close_to_tray),
+            format!("{}: {}", t("Systemschriften gefunden", "System fonts found"), if fonts.is_empty() { t("keine", "none").to_string() } else { fonts.join(", ") }),
+            format!("{}: {}", t("abweichende Kürzel", "Custom shortcuts"), self.settings.keys.len()),
+            format!(
+                "{}: {}",
+                t("Absturzprotokoll", "Crash log"),
+                if crash.exists() { format!("{} ({})", t("vorhanden", "present"), crash.display()) } else { t("keins", "none").to_string() }
+            ),
+        ];
+        lines.join("\n") + "\n"
     }
 
     /// Diagnose plus die letzten Zeilen des Absturzprotokolls – ein Klick für Fehlerberichte.
@@ -1084,7 +1109,7 @@ impl App {
 
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
         let Some(shell) = self.shell_by_id(&entry.meta.shell_id) else {
-            entry.error = Some("Keine Shell gefunden".into());
+            entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
         };
         let restore_text = if l.restore {
@@ -1917,7 +1942,7 @@ impl App {
                 }
             }
             for (name, c) in over {
-                let msg = format!("{} „{name}“ ≈ ${c:.2} > ${limit:.2}", lang.t("Sitzungsbudget überschritten:", "Session budget exceeded:"));
+                let msg = format!("{} {} ≈ ${c:.2} > ${limit:.2}", lang.t("Sitzungsbudget überschritten:", "Session budget exceeded:"), lang.q(&name));
                 self.notify_text(msg.clone());
                 if !ctx.input(|i| i.viewport().focused.unwrap_or(true)) && self.settings.notify_toast {
                     notify::toast("Paneldeck", &msg, self.settings.notify_sound);
@@ -2348,11 +2373,11 @@ impl App {
                     self.notify_text(lang.t("Keine Sitzungen zum Speichern", "No sessions to save").to_string());
                 } else {
                     let n = items.len();
-                    let name = if name.trim().is_empty() { format!("Vorlage {}", self.templates.len() + 1) } else { name.trim().to_string() };
+                    let name = if name.trim().is_empty() { format!("{} {}", lang.t("Vorlage", "Template"), self.templates.len() + 1) } else { name.trim().to_string() };
                     self.templates.retain(|t| t.name != name);
                     self.templates.push(Template { name: name.clone(), grid: n > 1, items });
                     templates::save(&self.dir, &self.templates);
-                    self.notify_text(format!("{} „{}“ ({} {})", lang.t("Vorlage gespeichert:", "Template saved:"), name, n, lang.t("Sitzungen", "sessions")));
+                    self.notify_text(format!("{} {} ({} {})", lang.t("Vorlage gespeichert:", "Template saved:"), lang.q(&name), n, lang.t("Sitzungen", "sessions")));
                 }
             }
             Action::TemplateStart(i) => {
@@ -3072,15 +3097,15 @@ fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
             .spawn()
             .is_ok();
         return if ok {
-            "Als Administrator in einem eigenen Fenster gestartet (UAC-Abfrage). Dieses Terminal ist nicht eingebettet.".to_string()
+            state::t("Als Administrator in einem eigenen Fenster gestartet (UAC-Abfrage). Dieses Terminal ist nicht eingebettet.", "Started as administrator in its own window (UAC prompt). This terminal is not embedded.").to_string()
         } else {
-            "Start als Administrator fehlgeschlagen.".to_string()
+            state::t("Start als Administrator fehlgeschlagen.", "Starting as administrator failed.").to_string()
         };
     }
     #[cfg(not(windows))]
     {
         let _ = (shell, cwd);
-        "Start als Administrator wird nur unter Windows unterstützt.".to_string()
+        state::t("Start als Administrator wird nur unter Windows unterstützt.", "Starting as administrator is only supported on Windows.").to_string()
     }
 }
 

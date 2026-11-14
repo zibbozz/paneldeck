@@ -381,7 +381,7 @@ impl App {
                 if let Some(pr) = self.projects.iter().find(|p| p.id == self.active_project) {
                     if !pr.folders.is_empty() {
                         ui.add_space(S2);
-                        ui.label(RichText::new(format!("{} „{}“", lang.t("Nach Ordner in", "By folder in"), pr.name)).strong());
+                        ui.label(RichText::new(format!("{} {}", lang.t("Nach Ordner in", "By folder in"), lang.q(&pr.name))).strong());
                         let mut fs: Vec<&state::Folder> = pr.folders.iter().collect();
                         fs.sort_by_key(|f| f.path.to_lowercase());
                         for f in fs {
