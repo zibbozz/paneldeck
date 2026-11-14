@@ -19,10 +19,10 @@ PRODUCTVERSION {a},{b},{c},{d}
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
-    BLOCK "040704b0"
+    BLOCK "040904b0"
     BEGIN
       VALUE "ProductName", "Paneldeck"
-      VALUE "FileDescription", "Paneldeck - Terminal-Zentrale"
+      VALUE "FileDescription", "Paneldeck - Terminal hub"
       VALUE "FileVersion", "{version}"
       VALUE "ProductVersion", "{version}"
       VALUE "OriginalFilename", "paneldeck.exe"
@@ -30,7 +30,7 @@ BEGIN
   END
   BLOCK "VarFileInfo"
   BEGIN
-    VALUE "Translation", 0x0407, 1200
+    VALUE "Translation", 0x0409, 1200
   END
 END
 "#,
