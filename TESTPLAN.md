@@ -307,7 +307,7 @@ Automatisch: `tools/smoke-mcp.ps1` (Abschnitte „Aufgaben-Werkzeuge“; der Tic
 Neu in 2.0.0: Fensterleiste mit Reitern, lokale Datenbank mit Sicherungen, Reiter „Todo-Liste“ (einfach und Expertenmodus), Boards, Terminal-Verknüpfung, Sprints, Abfragesprache, Schnellmenü, Dashboards, Export/Import, MCP-Werkzeuge für Todo-Liste und Tickets. Die Abschnitte 34–46 sind nach Funktionen gegliedert.
 - **Vorbereitung A (frischer Start):** `paneldeck.exe` in einen leeren Ordner kopieren, starten – es entstehen `paneldeck-data\paneldeck.db` und (nach der ersten Sicherung) `backups\`. Fenster startet immer auf dem Reiter **Terminal Hub**, Expertenmodus ist aus.
 - **Vorbereitung B (Update von 1.0.x):** Datenordner einer 1.0.x-Installation mit Sitzungen, Projekten, Prompts, Themes und `settings.json` von Hand kopieren, 2.0.0 darauf starten → alles ist wie vorher da (Sitzungen, Layout, Verlauf, Prompts, Themes, Einstellungen); neue Einstellungen haben Standardwerte; es entsteht `paneldeck.db`.
-- **Vorbereitung C (Testdaten für Tickets):** Solange die Ticket-Oberfläche (Abschnitt 40) fehlt, Tickets für die Prüfungen über einen Agenten (`create_ticket`, Stufe „Steuern“, Expertenmodus an) anlegen oder die in `tools\smoke-mcp.ps1` präparierte Datenbank benutzen. Beispielprojekt `PAN` mit den Standard-Typen und ca. vier Tickets: „Fix login“, „Dark mode“, „Login page redesign“, „Export CSV“.
+- **Vorbereitung C (Testdaten für Tickets):** Tickets für die Prüfungen über die Ticket-Oberfläche (Abschnitt 40, `Strg+N`) oder über einen Agenten (`create_ticket`, Stufe „Steuern“, Expertenmodus an) anlegen bzw. die in `tools\smoke-mcp.ps1` präparierte Datenbank benutzen. Beispielprojekt `PAN` mit den Standard-Typen und ca. vier Tickets: „Fix login“, „Dark mode“, „Login page redesign“, „Export CSV“.
 - **Immer beide Sprachen prüfen:** *Einstellungen → Allgemein → Sprache* auf Englisch und Deutsch stellen; kein sichtbarer Text darf nur in einer Sprache erscheinen.
 - **Nie** mit dem echten Datenordner testen: Testinstanzen laufen aus einer Kopie der .exe mit eigenem Datenordner. Es darf immer nur **eine** Testinstanz laufen (Fokusklau); nach dem Test beenden.
 
@@ -378,6 +378,7 @@ Vorbereitung: Projekt `PAN` mit Standard-Typen und ca. 30 Tickets in verschieden
 - [ ] **Abbruch:** `Esc` während des Ziehens bricht ab, die Karte bleibt.
 - [ ] **Umsortieren:** Karte innerhalb einer Spalte nach oben/unten ziehen → neue Reihenfolge (Backlog-Rang) bleibt nach Neustart und gilt auch in anderen Ansichten.
 - [ ] **Auto-Scroll:** Beim Ziehen einer Karte an den Rand einer langen Spalte bzw. des Boards scrollt die Ansicht mit.
+- [ ] **Rückgängig/Wiederholen auf dem Board:** Karte in eine andere Spalte ziehen, `Strg+Z` → Karte und Status sind wie vorher (Hinweis „Rückgängig“), `Strg+Y` bzw. `Strg+Umschalt+Z` stellt wieder her; ebenso Umsortieren sowie Stern und Flagge einer Karte. Bei offenem Textfeld, Dialog, laufendem Ziehen oder offenem Schnellmenü passiert nichts.
 - [ ] **Lange Spalten:** Mehr als 25 Karten → „n weitere …“ am Ende der Spalte, ein Klick lädt weitere 25.
 - [ ] **Pflichtfeld-Dialog:** Übergang mit Pflichtfeldern (Regel im Workflow-Editor, z. B. „Resolution“ beim Wechsel nach Done) → beim Ziehen öffnet sich „Pflichtfelder ausfüllen“; „Verschieben“ ist erst mit gültigen Werten möglich, „Abbrechen“ lässt die Karte stehen; ein Feld, das hier nicht ausfüllbar ist (z. B. Rich Text), nennt den Weg über das Ticket. Bedingungen eines Übergangs („gesperrt durch eine Bedingung“) werden beim Ziehen erklärt.
 - [ ] **Board konfigurieren:** „Neues Board“ / „Bearbeiten“: Name (nicht leer), Beschreibung, Spalten mit **mehreren Status je Spalte** (Status hinzufügen/entfernen, Spalte nach links/rechts, Spalte löschen → Status wandern nach „nicht auf dem Board“), Typ-Filter (mehrere Typen; keine Auswahl = alle mit Workflow), Karteninhalt (Schlüssel, Typ-Symbol, weitere Felder in Reihenfolge); Quelle „Alle Tickets“ (gespeicherter Filter und „Nur aktiver Sprint“ sind grau mit Hinweis, bis Abfrage-Leiste und Sprints da sind – danach hier prüfen).
@@ -397,15 +398,15 @@ Vorbereitung: Expertenmodus an, Projekt `PAN` mit ca. vier Tickets (Abschnitt 33
 - [ ] **Verknüpfen:** Enter auf einem Treffer verknüpft; ein Hinweis (Toast) bestätigt; der **Chip** mit der Ticket-Kennung (`PAN-2`) erscheint im Terminalkopf und in der Seitenleiste.
 - [ ] **Doppelte Verknüpfung:** dasselbe Ticket nochmal wählen → Treffer ist gedimmt, ein Warn-Hinweis erscheint, es entsteht keine zweite Verknüpfung.
 - [ ] **Mehrere Tickets:** drei Tickets mit A verknüpfen → Chip „PAN-1 +2“; Tooltip bzw. Liste zeigt alle drei.
-- [ ] **Chip anklicken:** öffnet das Ticket (solange die Ticket-Oberfläche fehlt: wechselt zum Reiter „Todo-Liste“ und merkt das Ticket); **Entfernen** der Verknüpfung (Kreuz im Chip/Liste) nimmt den Chip weg.
+- [ ] **Chip anklicken:** öffnet das Ticket im Reiter „Todo-Liste“ (der Expertenmodus wird bei Bedarf eingeschaltet; „Zurück“ führt zum Terminal Hub zurück); **Entfernen** der Verknüpfung (Kreuz im Chip/Liste) nimmt den Chip weg.
 - [ ] **Sitzung schließen:** A schließen → die Verknüpfung bleibt in der Datenbank (Ticket zeigt sie später als „beendet“, grau); Sitzung per „Fortsetzen“/Neustart der App wieder aktiv → Verknüpfung wieder „läuft“ (gleiche Sitzungs-ID).
 - [ ] **Befehls-Palette:** `Strg+Umschalt+P`, `pan-2` bzw. `login` → Ticket-Treffer (höchstens 8) unter den Befehlen; Enter öffnet das Ticket und schaltet auf den Reiter „Todo-Liste“.
 - [ ] **Feld „Terminal“:** Ein Typ mit Feld vom Typ „Terminal“ (Abschnitt 37) → im Ticket Auswahldialog der laufenden Sitzungen; Auswahl speichert `session:<id>`; ein beendeter Eintrag erscheint grau mit „beendet“.
 - [ ] **Agent:** `link_terminal` verknüpft die eigene Sitzung des Agenten → Chip erscheint ohne Neustart; fremde Sitzung → Fehler.
 - [ ] **Deutsch/Englisch** und **schmale Seitenleiste:** Bei schmaler Seitenleiste weicht der Chip dem Namen (kein Überlappen); Texte in beiden Sprachen.
 
-## 40 · Tickets: Anlegen, Detailansicht, Aktionen (2.0.0 – noch nicht gemergt: #42, #43, #44)
-Nach dem Merge der Ticket-Oberfläche prüfen (Datenschicht und MCP sind schon in `feature/next`).
+## 40 · Tickets: Anlegen, Detailansicht, Aktionen (2.0.0)
+Vorbereitung: Projekt `PAN` mit Standard-Typen (Abschnitt 33, Vorbereitung C), Reiter „Tickets“.
 - [ ] **Anlegen-Dialog:** Typ wählen (nur Typen des Projekts, die als Wurzel oder Kind erlaubt sind), Titel, Felder des Typs mit Pflichtfeld-Markierung und Hilfetext, Standardwerte vorbelegt, „Weiteres anlegen“-Haken; Anlegen nur im Reiter „Todo-Liste“; neuer Schlüssel zählt hoch (`PAN-n`), nie wiederverwendet (auch nach Löschen).
 - [ ] **Detailansicht:** Standard = eigene Seite mit Zurück-Knopf, per Symbol auf Seitenpanel umschaltbar (und zurück); die Wahl wird gemerkt; alle Felder des Typs nach Abschnitten (ein-/ausklappbar), Status-Auswahl nur mit erlaubten Übergängen (Pflichtfeld-Dialog, Bedingungen), Eltern/Kinder-Liste mit Fortschritt („2 von 5 erledigt“) und „Kind anlegen“, Verknüpfungen (Ticket, Terminal, URL, Branch).
 - [ ] **Rich-Text-Felder:** Umschalter „Text | Visuell“: Text = editierbar mit Formatierungsleiste (Fett, Kursiv, Überschrift, Listen, Aufgabenliste, Zitat, Code, Tabelle), Visuell = nur gerendert, nicht editierbar; Ticket-Schlüssel im Text (`PAN-12`) sind klickbar; keine Dateien/Bilder-Anhänge.
@@ -417,9 +418,11 @@ Nach dem Merge der Ticket-Oberfläche prüfen (Datenschicht und MCP sind schon i
 - [ ] **Flagge und Stern:** im Ticket, auf der Board-Karte und in Listen setzen/entfernen; wirken in der Abfragesprache (`IS favorite`, `IS blocked`, `SORT BY favorites`).
 - [ ] **Zeiterfassung:** Knopf „Zeit erfassen“ → Dialog: Dauer (`30m`, `1h 30m`, `2d`; nur Zahl = Stunden; ungültig → Meldung), Art der Arbeit (Dropdown aus dem Projekt, Standard Entwicklung), Start (nur Datum → 08:00; leer → jetzt minus Dauer), Kommentar (Rich Text); Eintrag erscheint in der Übersicht mit Gesamtsumme und im Verlauf; Bearbeiten und Löschen mit Bestätigung.
 - [ ] **Todo umwandeln:** Im Projekt „TODO“ („In Ticket umwandeln“): Zieltyp/-projekt wählen; Titel (sonst erste Textzeile), Text (in „Description“) und Tags (in das erste Labels-Feld, sonst verworfen und gemeldet) werden übernommen; die Karte wird abgehakt und als umgewandelt gemerkt; nur einmal möglich.
-- [ ] **Liste und Suche:** Ticket-Liste mit Spalten und Sortierung, Filterleiste, Volltext, Mehrfachauswahl und Sammelaktionen; 10.000 Tickets bleiben flüssig (virtualisierte Liste).
+- [ ] **Liste:** Reiter „Tickets“ mit Spalten (Schlüssel, Titel, Typ, Status, Priorität, Punkte) und Sortierung per Klick auf die Spaltenköpfe, Textsuche (Titel, Schlüssel, Text), Typ-/Status-Chips, „nur Favoriten“, „nur Markierte“, „Filter löschen“; Klick auf eine Zeile öffnet das Ticket; 10.000 Tickets bleiben flüssig.
+- [ ] **Zurück-Weg:** Ticket aus Board, Suche, Backlog, Dashboard, Übersicht und aus dem Terminal Hub (Chip) öffnen → „Zurück“ bzw. `Esc` führt zur Ausgangsansicht (bei Ticket-Verweisen zum vorherigen Ticket); ein Ticket eines anderen Projekts wechselt das Projekt.
+- [ ] **Editoren für Version, Meilenstein, Terminal:** In einem Typ mit Feldern dieser Arten Auswahl öffnen: Versionen/Meilensteine **des Projekts** (leeren geht nur bei Nicht-Pflichtfeldern), Terminal = Liste der Sitzungen; Wert speichern, Ticket neu öffnen → Wert steht da.
 
-## 41 · Abfragesprache, Suche und Hilfeseite (2.0.0 – noch nicht gemergt: #44, #45)
+## 41 · Abfragesprache, Suche und Hilfeseite (2.0.0)
 Automatisch: Unit-Tests `query`, `planning::search`, `planning::query_help` (Parser, Prüfer, Vorschläge, SQL-Übersetzung, jedes Beispiel der Hilfe).
 - [ ] **Abfrage-Leiste:** `type = Epic AND "Release version" = 2.0.0 AND status IN (Done, "Development finished") ORDER BY priority` → Treffer wie erwartet; Syntax-Hervorhebung, rote Unterstreichung bei Fehlern mit Meldung in der Sprache der Oberfläche und Vorschlag („meinten Sie …?“); die Position des Fehlers stimmt auch mit Umlauten.
 - [ ] **Autovervollständigung:** nach dem Tippen von `st` erscheinen Felder, nach `status =` die Werte, nach `ORDER BY` Felder/Schlüsselwörter, nach `IS` Prädikate (`favorite`, `blocked`), Funktionen mit Klammern; Pfeiltasten/Tab/Enter übernehmen, `Esc` schließt.
@@ -429,24 +432,26 @@ Automatisch: Unit-Tests `query`, `planning::search`, `planning::query_help` (Par
 - [ ] **Gespeicherte Filter:** speichern (Name, je Projekt oder global), aufrufen, ändern, löschen; als Quelle eines Boards wählen (Board-Dialog, Abschnitt 38); wird ein Feld/Status gelöscht, auf das ein Filter verweist, meldet der Filter den Fehler statt zu fehlen.
 - [ ] **Schlüsselwort-Editor:** eigenes Prädikat/Sortier-Schlüsselwort anlegen (Name, Bedingung, Sortierung), in der Suche benutzen; eingebaute (`favorite`, `blocked`, `favorites`) sind nicht löschbar.
 - [ ] **Hilfeseite:** Fragezeichen-Knopf neben dem Suchfeld → Hilfe öffnet sich wie ein Ticket über der aktuellen Ansicht, mit **X oben rechts** statt Zurück-Knopf; Abschnitte Einstieg, Beispiele (einfach bis komplex, jeweils mit Screenshot des Ergebnisses), Fehlersuche, Referenz, Grammatik; Volltextsuche in der Hilfe; Hilfetext zweisprachig, Screenshots nur englisch; Beispiel anklicken übernimmt die Abfrage in die Suche.
+- [ ] **Reiter „Suche“:** Abfrage + Enter (oder „Suchen“) → Treffer als Tabelle; Umschalter „Suchen in“ (dieses Projekt / alle Projekte – Felder gleichen Namens werden zusammengefasst); Klick auf eine Zeile öffnet das Ticket (Zurück kommt wieder zu den Treffern); Verlauf mit `↑`/`↓` im Feld; ungültige Abfrage zeigt Meldung statt Treffer. **Abfrage-Leiste in der Ticket-Liste:** eine gültige Abfrage ersetzt dort die lokalen Filter, „Abfrage löschen“ kehrt zurück, ein Projektwechsel löscht die Abfrage.
 - [ ] **Screenshots der Hilfe:** Jedes Beispiel hat seine Datei (`Example::screenshot_file`) und zeigt genau die Treffer, die der Text nennt (Abgleich mit der Referenz-Auswertung).
 
-## 42 · Schnellaktionen und Schnellmenü (2.0.0 – noch nicht gemergt: #47)
-- [ ] **Editor im Typ-Editor:** Schnellaktion anlegen: Name der Schaltfläche (z. B. „Create Devtask“), Aktionsart (**Ticket anlegen**, **Status ändern**, **Terminal-/Claude-Sitzung starten**), je Art die Parameter; bei „Ticket anlegen“: Ziel-Typ, Defaults als hinzufügbare Liste (nur Felder, die der Typ hat), Relation (z. B. „Devtask from“ aus Sicht einer Userstory), Release version, Meilenstein, Titel, Beschreibung (Rich Text = größeres Feld); Duplizieren, Reihenfolge, Löschen.
+## 42 · Schnellaktionen und Schnellmenü (2.0.0)
+- [ ] **Editor (Reiter „Schnellaktionen“):** Schnellaktion anlegen: Name der Schaltfläche (z. B. „Create Devtask“), Aktionsart (**Ticket anlegen**, **Status ändern**, **Terminal-/Claude-Sitzung starten**), je Art die Parameter; bei „Ticket anlegen“: Ziel-Typ, Defaults als hinzufügbare Liste (nur Felder, die der Typ hat), Relation (z. B. „Devtask from“ aus Sicht einer Userstory), Release version, Meilenstein, Titel, Beschreibung (Rich Text = größeres Feld); Duplizieren, Reihenfolge, Löschen.
 - [ ] **Ausführen:** Schaltfläche im Ticket legt das Kind-Ticket mit den Defaults an (Pflichtfelder fehlen → Dialog); „Status ändern“ beachtet Workflow und Pflichtfelder; „Sitzung starten“ öffnet eine Sitzung im Arbeitsordner des Projekts, verknüpft sie mit dem Ticket und sendet auf Wunsch den Ticketinhalt als Prompt.
 - [ ] **Schnellmenü (`.`):** Im Ticket (Fokus nicht in einem Textfeld) öffnet die Taste `.` – auf deutscher und US-Tastatur ohne Umschalt – das Menü; Eingabe sucht tolerant über **Felder des Tickettyps**, **Status** (nur erlaubte Übergänge) und **Schnellaktionen**; Enter bei einem Feld → Wert direkt in der Menüzeile eingeben (Dropdown, Datum, Zahl, Checkbox je nach Feldtyp), Enter speichert, ungültige Eingabe zeigt eine Meldung; `Esc` schließt; Änderungen stehen im Verlauf mit Quelle „Schnellmenü“.
 - [ ] **Gleiche Regeln:** Pflichtfelder/Bedingungen eines Übergangs gelten im Schnellmenü wie im Fenster und für Agenten.
+- [ ] **Pflichtfeld-Formular im Schnellmenü:** Status wählen, dessen Übergang Pflichtfelder verlangt → ein kleines Formular fragt sie ab (statt Fehlermeldung); „Abbrechen“ lässt das Ticket unverändert, „OK“ setzt Werte und Status in einem Schritt.
 - [ ] **Typ-Defaults:** Im Typ-Editor gesetzte Standardwerte aller Felder erscheinen im Anlegen-Dialog und bei „Ticket anlegen“-Aktionen.
 - [ ] **Vorlagen-Rundreise:** Typ mit Schnellaktionen exportieren und in ein anderes Projekt importieren → Aktionen sind mitgekommen (mit richtigen Verweisen auf Typ/Felder).
 
-## 43 · Dashboards (2.0.0 – noch nicht gemergt: #48)
+## 43 · Dashboards (2.0.0)
 - [ ] **Standard-Dashboard:** eine große Kachel „Suche“; Dashboard-Wechsler (Auswahl), neues Dashboard, umbenennen, löschen (Sicherheitsabfrage), **Stern** markiert das Standard-Dashboard (wird beim Start des Reiters geladen); je Projekt oder **global**.
 - [ ] **Kachel hinzufügen:** Suche (Dialog zum Hinterlegen eines Abfragetexts, der beim Öffnen läuft, z. B. für ein Defect-Dashboard), Sprint, Burndown, Zahl/Diagramm (Anzahl nach Status/Typ/Priorität als Torte/Balken), Zeiterfassung (je Tag/Woche/Ticket), Favoriten/Markierte, **Alle Projekte** (Klick springt zum Projekt).
 - [ ] **Anordnen:** Kacheln per Drag & Drop verschieben und in der Größe ändern (12-Spalten-Raster, keine Überlappung; Packen schließt Lücken); Layout bleibt nach Neustart.
 - [ ] **Export/Import:** Dashboard als JSON exportieren, importieren (immer neu, Name „ (2)“ bei Konflikt), fremde Datei wird abgelehnt.
 - [ ] **Leere und fehlerhafte Kacheln:** ungültige Abfrage in einer Kachel zeigt eine Meldung in der Kachel (nicht das ganze Dashboard); Projekt gelöscht → Kachel meldet es.
 
-## 44 · Sprints, Versionen und Meilensteine (2.0.0 – Datenschicht gemergt, Oberfläche: #46)
+## 44 · Sprints, Versionen und Meilensteine (2.0.0)
 Automatisch: Unit-Tests `planning::sprints` (Sprints, Burndown, Velocity, Versionen).
 - [ ] **Optional:** Im Projekt „Sprints verwenden“ **aus** → keine Sprint-Oberfläche, Board und Liste funktionieren ohne; **an** → Backlog und Sprint-Board erscheinen. Schalter „Versionen/Meilensteine“ ebenso; erneutes Ausschalten und Einschalten lässt alle Daten unverändert.
 - [ ] **Sprint anlegen:** Name, Ziel, Dauer-Vorlage (z. B. 10 Arbeitstage → Ende = Freitag der 2. Woche), Start/Ende änderbar.
@@ -457,7 +462,7 @@ Automatisch: Unit-Tests `planning::sprints` (Sprints, Burndown, Velocity, Versio
 - [ ] **Versionen und Meilensteine:** anlegen (Name, Fälligkeit), „veröffentlicht“ setzen, Fortschrittsübersicht (erledigte/alle Tickets); im Feld „Release version“ erscheinen nur Versionen **des Projekts**; Löschen einer benutzten Version fragt nach Ersatz oder bewusstem Verwerfen.
 - [ ] **Abfrage:** `sprint = activeSprint()` liefert die Tickets des aktiven Sprints; im Board „Nur aktiver Sprint“ (Abschnitt 38) funktioniert jetzt.
 
-## 45 · Export und Import (2.0.0 – noch nicht gemergt: #51)
+## 45 · Export und Import (2.0.0)
 Der Import nimmt **genau** das Exportformat von Paneldeck.
 - [ ] **Projektsicherung (JSON):** Projekt mit Typen, Feldern, Workflows, Tickets, Kommentaren, Verlauf, Zeiten, Boards, Filtern, Sprints exportieren; die Datei ist gültiges JSON mit Kennung und Format-Version.
 - [ ] **Import als neues Projekt:** Import legt **immer ein neues** Projekt an; bei gleichem Kürzel fragt Paneldeck nach einem neuen Kürzel (Tickets werden umnummeriert, Verknüpfungen angepasst); bestehende Daten bleiben unverändert (Gegenprobe: vorher/nachher `paneldeck.db`-Kopie vergleichen).
@@ -468,7 +473,7 @@ Der Import nimmt **genau** das Exportformat von Paneldeck.
 
 ## 46 · Agenten-Werkzeuge und Hinweise (2.0.0)
 Automatisch: siehe Abschnitt 32a (`tools\smoke-mcp.ps1`, Unit-Tests). Zusätzlich von Hand:
-- [ ] **Werkzeugzahl:** `tools/list` meldet 30 Werkzeuge in der Stufe „Steuern“ (15 bisherige + 15 neue); mit Expertenmodus aus sind es 18, mit Expertenmodus an 28 (`add_todo`, `set_todo_done` bzw. die zwölf Ticket-Werkzeuge gibt es nur im jeweiligen Modus, `list_todos` immer).
+- [ ] **Werkzeugzahl:** `tools/list` meldet 33 Werkzeuge in der Stufe „Steuern“ (15 bisherige + 18 neue); mit Expertenmodus aus sind es 18, mit Expertenmodus an 31 (`add_todo`, `set_todo_done` bzw. die fünfzehn Ticket-Werkzeuge gibt es nur im jeweiligen Modus, `list_todos` immer).
 - [ ] **Modus wechseln:** Während eine Agent-Sitzung läuft, den Expertenmodus umschalten → der nächste Aufruf eines Werkzeugs des anderen Modus liefert `wrong_mode` mit Erklärung; nach dem Neuladen der Werkzeugliste (`/mcp` in Claude Code) stimmt die Liste.
 - [ ] **Echter Agent (Claude Code):** „Lege ein To-do an: …“ (Modus aus), „Lege in PAN ein Ticket vom Typ Devtask an und verknüpfe diese Sitzung damit“ (Modus an) → Karte/Ticket erscheint ohne Neustart; Toast „Agent (Sitzungsname): …“ erscheint unten rechts, bis zu fünf gestapelt (älteste werden verdrängt), jeder ca. 10 s, Klick schließt; im Ticket-Verlauf steht die Quelle „Agent (Sitzungsname)“.
 - [ ] **Grenzen:** Ein Agent kann nichts löschen und keine Typen/Workflows/Projekte ändern; Pflichtfelder und Übergangsregeln werden wie im Fenster geprüft (`required_missing`, `transition_not_allowed`, `conditions_not_met`, `transition_needs_fields`); `link_terminal` nur für die eigene oder eine selbst angelegte Sitzung.
