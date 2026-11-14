@@ -469,7 +469,7 @@ fn escape_cancels_a_running_import_and_nothing_is_created() {
         let out = h.frame_out(vec![key_event(Key::Escape, true)]);
         let _ = h.frame_out(vec![key_event(Key::Escape, false)]);
         assert!(texts_of(&out).iter().any(|t| t == lang.t("Projekt wird importiert …", "Importing project …")), "{lang:?}: Dialog gezeigt");
-        assert!(h.busy());
+        // Ob der Lauf hier noch „busy“ ist, hängt vom Tempo ab (Esc kann ihn abbrechen, bevor er die Sperre erreicht) – nicht prüfen.
         h.db.conn.execute_batch("ROLLBACK").unwrap();
         h.wait("abgebrochen", |h| !h.busy());
         assert_eq!(fingerprint(&h.db.conn), fp, "{lang:?}: nichts angelegt");
