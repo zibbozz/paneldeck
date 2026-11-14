@@ -40,6 +40,13 @@
 //! * Ein Dokument der **Version 1** bleibt importierbar (die Abschnitte fehlen dann); seine Version-/Meilenstein-Werte sind
 //!   Datenbank-Ids ohne Objekte und werden wie bisher übersprungen und gemeldet ([`Warning::VersionValues`]).
 //!
+//! # Große Dateien: Fortschritt und Abbruch
+//!
+//! [`import_project_with`] und [`tickets_csv::import_tickets_csv_with`] melden den Fortschritt an einen [`Progress`] und brechen ab,
+//! wenn er es verlangt ([`BackupError::Cancelled`]); weil beides in einem SAVEPOINT läuft, entsteht dann nichts. Die Oberfläche
+//! benutzt das, um den Import in einem Hintergrund-Faden auf einer eigenen Verbindung laufen zu lassen (`planning_ui/backup_run.rs`).
+//! [`import_project`] und [`tickets_csv::import_tickets_csv`] sind dieselben Läufe ohne Beobachter.
+//!
 //! # Erweiterbarkeit
 //!
 //! Neue Abschnitte werden als `#[serde(default)]`-Felder von [`ProjectDoc`] ergänzt, ihre Verweise benutzen dieselben
@@ -53,6 +60,7 @@
 pub mod error;
 mod export;
 mod import;
+pub mod progress;
 mod refmap;
 pub mod tickets_csv;
 
@@ -65,7 +73,8 @@ mod tests_csv;
 pub use error::{BackupError, HeaderProblem, Problem, RefKind, RowIssue, RowProblem, Warning, Where};
 pub use export::export_project;
 #[allow(unused_imports)]
-pub use import::{check_new_key, import_project, ImportReport, ImportResult, MAX_RANK, MAX_TICKET_NUMBER};
+pub use import::{check_new_key, import_project, import_project_with, ImportReport, ImportResult, MAX_RANK, MAX_TICKET_NUMBER};
+pub use progress::Progress;
 
 use crate::planning::projects::TagColorMode;
 use crate::planning::template::TemplateDoc;

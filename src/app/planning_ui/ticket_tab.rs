@@ -171,7 +171,7 @@ impl PlanUi {
             self.todo_keys(ctx, cx);
             return;
         }
-        if self.tab != Tab::Tickets || self.tickets.any_modal() || self.quick.is_open() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() {
+        if self.tab != Tab::Tickets || self.tickets.any_modal() || self.quick.is_open() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() || self.backup_running() {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::N)) {
