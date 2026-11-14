@@ -313,7 +313,8 @@ impl App {
                 .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
                 .show(ctx, |ui| {
                     ui.label(format!(
-                        "„{name}“ {}",
+                        "{} {}",
+                        lang.q(&name),
                         lang.t("läuft noch. Beim Schließen wird der Prozess beendet.", "is still running. Closing will terminate the process.")
                     ));
                     ui.horizontal(|ui| {
@@ -471,7 +472,7 @@ impl App {
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label(format!("„{name}“"));
+                ui.label(lang.q(&name));
                 ui.label(RichText::new(format!("{}: {}\n{}: {}", lang.t("Branch", "Branch"), wt.branch, lang.t("Ordner", "Folder"), wt.path)).small().color(style::dim(ui)));
                 ui.add_space(S2);
                 if w.changes > 0 {
@@ -512,7 +513,7 @@ impl App {
                         gitops::branch_delete(&repo, &branch, true)?;
                     } else if gitops::branch_delete(&repo, &branch, false).is_err() {
                         // „-d“ statt „-D“: Commits, die noch nirgends gemergt sind, nicht still verwerfen.
-                        return Err(format!("{} „{branch}“", lang.t("Worktree entfernt; Branch mit nicht gemergten Commits wurde behalten:", "Worktree removed; branch with unmerged commits was kept:")));
+                        return Err(format!("{} {}", lang.t("Worktree entfernt; Branch mit nicht gemergten Commits wurde behalten:", "Worktree removed; branch with unmerged commits was kept:"), lang.q(&branch)));
                     }
                     Ok(String::new())
                 });
