@@ -11,7 +11,7 @@ use eframe::egui::{
     StrokeKind, TextStyle, Ui, Vec2,
 };
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 // Motion-Tokens: Hover/Klick ~120 ms, Zustandswechsel ~200 ms, Layout ~280 ms; Kurve: ease-out.
 pub const D_FAST: f32 = 0.12;
@@ -29,7 +29,21 @@ pub fn anim(ctx: &egui::Context, id: egui::Id, target: bool, dur: f32) -> f32 {
     ctx.animate_bool_with_time_and_easing(id, target, d, egui::emath::easing::cubic_out)
 }
 
+/// Standard-Akzentfarbe (Terminal Hub). Im Todolist-Reiter ersetzt die Projektfarbe sie (siehe [`accent`]).
 pub const ACCENT: Color32 = Color32::from_rgb(0xd9, 0x77, 0x57);
+
+static ACCENT_RGB: AtomicU32 = AtomicU32::new(0x00d9_7757);
+
+/// Aktuelle Akzentfarbe: Standard ([`ACCENT`]) oder die Farbe des gewählten Projekts im Todolist-Reiter.
+pub fn accent() -> Color32 {
+    let v = ACCENT_RGB.load(Ordering::Relaxed);
+    Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+/// Setzt die Akzentfarbe (jedes Bild von der Anwendung aufgerufen).
+pub fn set_accent(c: Color32) {
+    ACCENT_RGB.store(((c.r() as u32) << 16) | ((c.g() as u32) << 8) | c.b() as u32, Ordering::Relaxed);
+}
 
 // Abstände (4-px-Raster)
 pub const S1: f32 = 4.0;
@@ -75,10 +89,10 @@ pub fn apply(ctx: &egui::Context, theme: &Theme, opacity: f32) {
     v.extreme_bg_color = input;
     v.code_bg_color = input;
     v.override_text_color = None;
-    v.hyperlink_color = ACCENT;
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
-    v.text_cursor.stroke = Stroke::new(1.5_f32, ACCENT);
+    v.hyperlink_color = accent();
+    v.selection.bg_fill = accent().gamma_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0_f32, accent());
+    v.text_cursor.stroke = Stroke::new(1.5_f32, accent());
 
     let r = CornerRadius::same(RADIUS);
     let w = &mut v.widgets;
@@ -97,9 +111,9 @@ pub fn apply(ctx: &egui::Context, theme: &Theme, opacity: f32) {
     w.hovered.bg_stroke = Stroke::new(1.0_f32, mix(border, text, 0.25));
     w.hovered.fg_stroke = Stroke::new(1.0_f32, if dark { white } else { black });
     w.hovered.corner_radius = r;
-    w.active.bg_fill = ACCENT.gamma_multiply(0.45);
-    w.active.weak_bg_fill = ACCENT.gamma_multiply(0.45);
-    w.active.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    w.active.bg_fill = accent().gamma_multiply(0.45);
+    w.active.weak_bg_fill = accent().gamma_multiply(0.45);
+    w.active.bg_stroke = Stroke::new(1.0_f32, accent());
     w.active.fg_stroke = Stroke::new(1.0_f32, if dark { white } else { black });
     w.active.corner_radius = r;
     w.open = w.hovered.clone();
@@ -161,6 +175,8 @@ pub enum Icon {
     Minimize,
     Maximize,
     Restore,
+    /// Kettenglieder (Ticket verknüpfen).
+    Link,
 }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, st: Stroke) {
@@ -195,6 +211,10 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
             for (a, b) in [(v(0.0, -4.0), v(0.0, 4.0)), (v(-4.0, 0.0), v(4.0, 0.0)), (v(-2.8, -2.8), v(2.8, 2.8)), (v(-2.8, 2.8), v(2.8, -2.8))] {
                 p.line_segment([c + a, c + b], st2);
             }
+        }
+        Icon::Link => {
+            p.rect_stroke(Rect::from_center_size(c + v(-3.0, 0.0), v(9.5, 6.0)), 3.0, st, StrokeKind::Inside);
+            p.rect_stroke(Rect::from_center_size(c + v(3.0, 0.0), v(9.5, 6.0)), 3.0, st, StrokeKind::Inside);
         }
         Icon::Search => {
             p.circle_stroke(c + v(-1.5, -1.5), 4.6, st);
@@ -359,10 +379,10 @@ pub fn icon_btn(ui: &mut Ui, icon: Icon, tip: &str, active: bool) -> Response {
     let h = anim(ui.ctx(), resp.id.with("h"), resp.hovered(), D_FAST);
     let on = anim(ui.ctx(), resp.id.with("on"), active, D_BASE);
     ui.painter().rect_filled(rect, RADIUS as f32, hover_bg.gamma_multiply(h));
-    ui.painter().rect_filled(rect, RADIUS as f32, ACCENT.gamma_multiply(0.28 * on));
+    ui.painter().rect_filled(rect, RADIUS as f32, accent().gamma_multiply(0.28 * on));
     let base = mix(text.gamma_multiply(0.78), strong, h);
-    let col = mix(base, ACCENT, on);
-    paint_icon(ui.painter(), icon, rect.center(), if icon == Icon::Spark && !active { ACCENT } else { col });
+    let col = mix(base, accent(), on);
+    paint_icon(ui.painter(), icon, rect.center(), if icon == Icon::Spark && !active { accent() } else { col });
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -434,7 +454,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
     }
     let t = anim(ui.ctx(), resp.id.with("t"), *on, D_BASE);
     let off_col = ui.visuals().widgets.inactive.bg_fill.gamma_multiply(1.6);
-    let track = mix(off_col, ACCENT, t);
+    let track = mix(off_col, accent(), t);
     ui.painter().rect_filled(rect, 10.0, track);
     let x = rect.min.x + 10.0 + (rect.width() - 20.0) * t;
     ui.painter().circle_filled(Pos2::new(x, rect.center().y), 7.0, Color32::from_rgb(0xf4, 0xf4, 0xf6));
@@ -450,7 +470,7 @@ pub fn tab(ui: &mut Ui, text: &str, active: bool) -> Response {
     let h = anim(ui.ctx(), resp.id.with("h"), resp.hovered(), D_FAST);
     let on = anim(ui.ctx(), resp.id.with("on"), active, D_BASE);
     ui.painter().rect_filled(rect, 13.0, hover_bg.gamma_multiply(h * (1.0 - on)));
-    ui.painter().rect_filled(rect, 13.0, ACCENT.gamma_multiply(0.25 * on));
+    ui.painter().rect_filled(rect, 13.0, accent().gamma_multiply(0.25 * on));
     let tc = mix(text_c.gamma_multiply(0.72), text_c, on.max(h * 0.6));
     ui.painter().galley(Pos2::new(rect.min.x + 12.0, rect.center().y - g.size().y / 2.0), g, tc);
     if resp.hovered() {

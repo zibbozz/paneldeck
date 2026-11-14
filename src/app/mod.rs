@@ -33,9 +33,11 @@ mod dialogs;
 mod dragdrop;
 mod mcp;
 mod panels;
+mod planning_ui;
 mod settings;
 mod sidebar;
 mod tasks_ui;
+mod terminal_links;
 mod titlebar;
 mod toasts;
 mod winchrome;
@@ -232,6 +234,12 @@ enum Action {
     OpenSettings,
     OpenPrompts,
     OpenNotes(u64),
+    /// Mini-Suche „Ticket verknüpfen“ für die Sitzung öffnen.
+    LinkTicket(u64),
+    /// Ticket öffnen (Chip, Palette).
+    OpenTicket(i64),
+    /// Verknüpfung zwischen Sitzung und Ticket entfernen.
+    UnlinkTicket(u64, i64),
     NewDialog(bool),
     ToggleBroadcast,
     SendSnippet(usize),
@@ -524,6 +532,9 @@ pub struct App {
     db: Option<crate::db::Db>,
     db_error: Option<String>,
     tasks: tasks_ui::TasksUi,
+    plan: planning_ui::PlanUi,
+    /// Ticket↔Terminal-Verknüpfung (`terminal_links.rs`).
+    tlinks: terminal_links::TLinks,
     backup_rx: Option<std::sync::mpsc::Receiver<Result<crate::backup::BackupInfo, String>>>,
     backup_checked: Instant,
     backup_msg: Option<String>,
@@ -736,6 +747,7 @@ impl App {
             db,
             db_error,
             tasks: tasks_ui::TasksUi::default(),
+            plan: planning_ui::PlanUi::default(),
             backup_rx: None,
             backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
             backup_msg: None,
@@ -749,6 +761,7 @@ impl App {
             hooks_msg: String::new(),
             exe: std::env::current_exe().unwrap_or_default(),
             palette: None,
+            tlinks: Default::default(),
             prompts: Vec::new(),
             prompts_open: false,
             prompt_sel: 0,
@@ -1741,6 +1754,7 @@ impl App {
                     detached: false,
                     themes: &self.themes,
                     profiles: &self.settings.profiles,
+                    tl: &self.tlinks,
                 };
                 show_node(ui, &mut layout, rect, &mut cx);
                 self.layout = Some(layout);
@@ -2300,6 +2314,9 @@ impl App {
             Action::OpenNotes(id) => {
                 self.notes_open = if self.notes_open == Some(id) { None } else { Some(id) };
             }
+            Action::LinkTicket(id) => self.tlinks_open_picker(id),
+            Action::OpenTicket(id) => self.request_open_ticket(id),
+            Action::UnlinkTicket(session, ticket) => self.tlinks_unlink(ticket, session),
             Action::OpenSearch => {
                 if let Some(s) = self.entries.get_mut(&self.focused).and_then(|e| e.live.as_mut()) {
                     if s.search.is_some() {
@@ -2669,8 +2686,9 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_accent();
         let theme = self.theme();
-        let key = format!("{}|{}|{}", theme.name, theme.bg.a(), self.settings.animations);
+        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
         if self.applied_theme != key {
             style::set_animations(self.settings.animations);
             style::apply(ctx, &theme, self.settings.opacity);
@@ -2690,6 +2708,7 @@ impl eframe::App for App {
         self.poll_shell(ctx);
         self.poll_background(ctx);
         self.sync_watchers(ctx);
+        self.tlinks_frame();
         self.poll_history();
         self.check_budget(ctx);
         self.handle_drops(ctx);
@@ -2724,6 +2743,7 @@ impl eframe::App for App {
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
         self.dialogs(ctx, &mut actions);
+        self.tlinks_picker_ui(ctx);
         self.restore_dialog(ctx);
         for a in actions {
             self.apply(ctx, a);
@@ -2774,6 +2794,8 @@ struct PaneCx<'a> {
     detached: bool,
     themes: &'a [Theme],
     profiles: &'a [Profile],
+    /// Verknüpfte Tickets je Sitzung (Chips im Kopf).
+    tl: &'a terminal_links::TLinks,
 }
 
 
@@ -2854,6 +2876,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     };
     let accent = entry.color();
     let name = entry.display_name();
+    let tl_enabled = cx.tl.enabled && !cx.detached;
 
     // Kopfzeile
     let t = ui.input(|i| i.time);
@@ -2874,6 +2897,14 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if hresp.clicked() {
         cx.actions.push(Action::Focus(id));
     }
+    if tl_enabled {
+        hresp.context_menu(|ui| {
+            if ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
+                cx.actions.push(Action::LinkTicket(id));
+                ui.close();
+            }
+        });
+    }
     let claude = entry.meta.claude && cx.claude_mode;
     let status_label = entry.status_label(lang);
     let status_col = entry.status_color(t);
@@ -2890,9 +2921,14 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
-    let right_edge = header.max.x - if cx.detached { 34.0 } else { 108.0 };
+    // Breite des Knopfbereichs rechts: vier Knöpfe, mit Ticket-Verknüpfung ein fünfter.
+    let tl_btn = tl_enabled;
+    let btns_w = if cx.detached { 30.0 } else { 104.0 + if tl_btn { 26.0 } else { 0.0 } };
+    let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
-    let pill_est = if status_label.is_empty() { 0.0 } else { status_label.chars().count() as f32 * 7.0 + 26.0 };
+    let chips = cx.tl.chips_of(id);
+    let chip_est = if chips.is_empty() { 0.0 } else { terminal_links::chip_label(&chips.iter().map(|c| c.key.as_str()).collect::<Vec<_>>()).chars().count() as f32 * 7.0 + 46.0 };
+    let pill_est = chip_est + if status_label.is_empty() { 0.0 } else { status_label.chars().count() as f32 * 7.0 + 26.0 };
     // Der Name hat Vorrang vor Zusatzinfos; die Status-Pille bekommt Platz, solange der Name noch ~90 px behält.
     let name_w = if avail - pill_est >= 90.0 { avail - pill_est } else { avail }.max(30.0);
     let mut job = egui::text::LayoutJob::simple_singleline(name, FontId::proportional(13.0), name_col);
@@ -2902,7 +2938,13 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     ui.painter().with_clip_rect(header).galley(Pos2::new(hx, cy - name_galley.size().y / 2.0), name_galley, name_col);
 
     // rechts (von rechts nach links, nur wenn Platz ist): Status-Pille, Token/Kosten, Git
-    let mut x = header.max.x - if cx.detached { 34.0 } else { 108.0 };
+    let mut x = right_edge;
+    if !chips.is_empty() {
+        let w = terminal_links::chip_row(ui, Id::new(("tlchip", id)), id, chips, Pos2::new(x, cy), x - name_end - 16.0, lang, cx.actions);
+        if w > 0.0 {
+            x -= w + 10.0;
+        }
+    }
     if !status_label.is_empty() && x - name_end > pill_est * 0.8 {
         let w = style::status_pill(ui.painter(), Pos2::new(x, cy), status_label, status_col);
         x -= w + 10.0;
@@ -2930,7 +2972,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     }
     ui.scope_builder(
         UiBuilder::new().max_rect(Rect::from_min_max(
-            Pos2::new(header.max.x - if cx.detached { 30.0 } else { 104.0 }, header.min.y + 2.0),
+            Pos2::new(header.max.x - btns_w, header.min.y + 2.0),
             Pos2::new(header.max.x - 4.0, header.max.y),
         )),
         |ui| {
@@ -2953,6 +2995,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                 }
                 if style::icon_btn_small(ui, SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)")).clicked() {
                     cx.actions.push(Action::Split(id, Dir::Horizontal));
+                }
+                if tl_btn && style::icon_btn_small(ui, SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
+                    cx.actions.push(Action::LinkTicket(id));
                 }
             });
         },
