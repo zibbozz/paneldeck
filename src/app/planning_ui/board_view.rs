@@ -11,6 +11,7 @@
 use super::board_cfg::{CfgDlg, DeleteDlg, NeedsDlg};
 use super::board_logic::{self as logic, BoardData, Card, Pick, Quick};
 use super::helpers::color_of;
+use super::quick_menu::QuickTarget;
 use super::widgets;
 use super::{Cx, PlanUi};
 use crate::planning::history::Source;
@@ -67,6 +68,8 @@ pub(super) struct State {
     /// Sichtbare Seiten je (Board, Spalte).
     pages: HashMap<(i64, usize), usize>,
     drag: Option<Drag>,
+    /// Karte unter dem Mauszeiger im letzten Bild (Ziel der Taste `.`).
+    hover: Option<i64>,
     h_off: f32,
     col_off: HashMap<usize, f32>,
     pending_h: Option<f32>,
@@ -91,6 +94,7 @@ impl Default for State {
             stale: true,
             pages: HashMap::new(),
             drag: None,
+            hover: None,
             h_off: 0.0,
             col_off: HashMap::new(),
             pending_h: None,
@@ -124,6 +128,10 @@ enum Act {
     Flag(i64, bool),
     More(usize),
     Start { ticket: i64, grab: Vec2 },
+    /// Mauszeiger über der Karte.
+    Hover(i64),
+    /// Schnellmenü für die Karte öffnen (Kontextmenü).
+    Quick(i64),
 }
 
 impl PlanUi {
@@ -217,6 +225,9 @@ impl PlanUi {
         self.boards_quick(ui, cx, &sum, &board);
         self.boards_data(cx, &sum);
         if let Some(d) = &self.boards.data {
+            if let Some(p) = &d.source_problem {
+                widgets::error(ui, &format!("{} {p}", lang.t("Die Quelle des Boards lässt sich nicht auswerten:", "The board's source cannot be evaluated:")));
+            }
             if !d.unassigned.is_empty() {
                 let names: Vec<String> = d.unassigned.iter().filter_map(|id| sum.status(*id)).map(|s| s.display(lang)).collect();
                 widgets::hint(ui, &format!("{} {}", lang.t("Status ohne Spalte (nicht auf dem Board):", "Statuses without a column (not on the board):"), names.join(", ")));
@@ -492,8 +503,11 @@ impl PlanUi {
             }
         }
         // Ereignisse der Karten
+        self.boards.hover = None;
         for a in acts {
             match a {
+                Act::Hover(id) => self.boards.hover = Some(id),
+                Act::Quick(id) => self.open_quick_menu(vec![id]),
                 Act::Open(id) => self.request_open_board_ticket(id),
                 Act::Star(id, on) => self.board_mark(cx, id, true, on),
                 Act::Flag(id, on) => self.board_mark(cx, id, false, on),
@@ -509,6 +523,10 @@ impl PlanUi {
         }
         if self.boards.data.is_none() {
             self.boards.data = Some(data);
+        }
+        // Taste „.“: Schnellmenü für die Karte unter dem Mauszeiger (nicht beim Ziehen).
+        if let (Some(id), None) = (self.boards.hover, self.boards.drag.as_ref()) {
+            self.quick_shortcut(&ctx, &[QuickTarget { ticket_id: id }]);
         }
     }
 
@@ -638,6 +656,7 @@ fn draw_column(ui: &mut Ui, lang: Lang, cfg: &BoardConfig, board_id: i64, ci: us
                     .inner;
                 let resp = ui.interact(rect, Id::new(("board_card", card.ticket.id)), Sense::click_and_drag());
                 if resp.hovered() && dragging.is_none() {
+                    acts.push(Act::Hover(card.ticket.id));
                     ui.painter().rect_stroke(rect, 7.0, Stroke::new(1.2_f32, style::accent().gamma_multiply(0.8)), StrokeKind::Inside);
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
@@ -660,6 +679,10 @@ fn draw_column(ui: &mut Ui, lang: Lang, cfg: &BoardConfig, board_id: i64, ci: us
                     let flag = if card.ticket.flagged { lang.t("Markierung entfernen", "Remove flag") } else { lang.t("Markieren (Flagge)", "Flag") };
                     if ui.button(flag).clicked() {
                         acts.push(Act::Flag(card.ticket.id, !card.ticket.flagged));
+                        ui.close();
+                    }
+                    if ui.button(format!("{} (.)", lang.t("Schnellmenü …", "Quick menu …"))).clicked() {
+                        acts.push(Act::Quick(card.ticket.id));
                         ui.close();
                     }
                 });

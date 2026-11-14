@@ -2,12 +2,12 @@
 //! beim Ziehen wählen, Einfüge-Position, Bearbeiten der Board-Konfiguration (Spalten, Status, Typen, Kartenfelder).
 //! Die Oberfläche (`board_view.rs`, `board_cfg.rs`) ruft nur diese Funktionen auf; alles hier ist ohne Fenster testbar.
 //!
-//! Einhängepunkte für die noch fehlenden Teile:
-//! * `// TODO search` – der Quellfilter (gespeicherte Abfrage) wird noch nicht ausgewertet ([`load_board`]),
-//! * `// TODO sprints` – „nur aktiver Sprint“ wird noch nicht ausgewertet ([`load_board`]).
+//! Die Quelle des Boards (gespeicherter Filter, „nur aktiver Sprint“) wertet `planning::search::board_source_ids` aus ([`load_board`]);
+//! die Karten selbst kommen weiter aus der Ticket-Liste (Rang-Reihenfolge, Schnellfilter).
 
 use super::values::show_value;
 use crate::planning::fields::{Field, FieldKind};
+use crate::planning::search;
 use crate::planning::statuses::StatusCategory;
 use crate::planning::summary::ProjectSummary;
 use crate::planning::ticket_error::{TRes, TicketError};
@@ -102,6 +102,9 @@ pub struct BoardData {
     /// Status der Workflows, die in keiner Spalte stehen (erscheinen nicht auf dem Board).
     pub unassigned: Vec<i64>,
     pub total: usize,
+    /// Die Quelle des Boards (gespeicherter Filter) ließ sich nicht auswerten (Meldung in der Sprache beim Laden); dann zeigt das
+    /// Board keine Karten.
+    pub source_problem: Option<String>,
 }
 
 impl BoardData {
@@ -180,14 +183,21 @@ pub fn load_board(conn: &Connection, sum: &ProjectSummary, cfg: &BoardConfig, q:
         .collect();
     let on_board: HashSet<i64> = cfg.status_ids().into_iter().collect();
     let unassigned: Vec<i64> = workflow_status_ids(sum).into_iter().filter(|s| !on_board.contains(s)).collect();
-    let mut data = BoardData { columns: Vec::new(), has_points, unassigned, total: 0 };
+    let mut data = BoardData { columns: Vec::new(), has_points, unassigned, total: 0, source_problem: None };
     let types = effective_types(&cfg.type_filter, &q.types);
     let (Some(types), false) = (types, on_board.is_empty()) else {
         data.columns = columns;
         return Ok(data);
     };
-    // TODO search: cfg.source_filter_id (gespeicherte Abfrage als Quelle) einschränken, sobald `planning::search` da ist.
-    // TODO sprints: cfg.only_active_sprint – nur Tickets des aktiven Sprints, sobald es Sprints gibt.
+    // Quelle: gespeicherter Filter und „nur aktiver Sprint“ (ohne beides: alle Tickets des Projekts)
+    let source = match search::board_source_ids(conn, &search::Ctx::today_local(lang), sum.project.id, cfg) {
+        Ok(ids) => ids,
+        Err(e) => {
+            data.source_problem = Some(e.message(lang));
+            data.columns = columns;
+            return Ok(data);
+        }
+    };
     let filter = TicketFilter {
         types,
         statuses: cfg.status_ids(),
@@ -222,6 +232,9 @@ pub fn load_board(conn: &Connection, sum: &ProjectSummary, cfg: &BoardConfig, q:
         }
     }
     for t in page.items {
+        if source.as_ref().is_some_and(|ids| !ids.contains(&t.id)) {
+            continue;
+        }
         let Some(ci) = t.status_id.and_then(|s| cfg.column_of(s)) else { continue };
         let Some(ty) = sum.type_by_id(t.type_id) else { continue };
         let value_of = |fid: i64| -> Option<Value> {
@@ -703,6 +716,50 @@ mod tests {
         assert_eq!(titles(Quick { flagged: true, ..Quick::default() }), vec!["Logout button"]);
         assert_eq!(titles(Quick { types: vec![f.defect], ..Quick::default() }), vec!["Crash"]);
         assert_eq!(titles(Quick { types: vec![f.defect], starred: true, ..Quick::default() }), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_source_filter_and_the_active_sprint_limit_the_cards() {
+        use crate::calc::calendar::WorkCalendar;
+        use crate::planning::projects::{update_project, UpdateProject};
+        use crate::planning::sprints::sprint::{create_sprint, move_tickets_to_sprint, start_sprint, NewSprint};
+        use crate::planning::views::filters::{create_filter, NewFilter};
+        let f = Fx::new();
+        let a = f.mk(f.story, "Login page");
+        let b = f.mk(f.task, "Logout button");
+        let c = f.mk(f.defect, "Crash");
+        let titles = |cfg: &BoardConfig, q: &Quick| -> (Vec<String>, Option<String>) {
+            let sum = project_summary(&f.c, f.project).unwrap();
+            let d = load_board(&f.c, &sum, cfg, q, Lang::En).unwrap();
+            let mut t: Vec<String> = d.columns.iter().flat_map(|c| c.cards.iter().map(|k| k.ticket.title.clone())).collect();
+            t.sort();
+            (t, d.source_problem)
+        };
+        let (_, base) = default_cfg(&f);
+        assert_eq!(titles(&base, &Quick::default()).0.len(), 3);
+        // gespeicherter Filter als Quelle (seine Sortierung zählt nicht), zusammen mit dem Schnellfilter
+        let flt = create_filter(&f.c, &NewFilter { project_id: Some(f.project), name: "Log".into(), jql: "summary ~ log ORDER BY summary DESC".into() }).unwrap();
+        let cfg = BoardConfig { source_filter_id: Some(flt), ..base.clone() };
+        assert_eq!(titles(&cfg, &Quick::default()), (vec!["Login page".to_string(), "Logout button".to_string()], None));
+        assert_eq!(titles(&cfg, &Quick { text: "out".into(), ..Quick::default() }).0, vec!["Logout button"]);
+        // ungültige Abfrage: keine Karten und eine Meldung (zweisprachig)
+        let bad = create_filter(&f.c, &NewFilter { project_id: Some(f.project), name: "Kaputt".into(), jql: "nonsense = 1".into() }).unwrap();
+        let (cards, problem) = titles(&BoardConfig { source_filter_id: Some(bad), ..base.clone() }, &Quick::default());
+        assert!(cards.is_empty() && problem.is_some_and(|p| p.contains("nonsense")));
+        // „nur aktiver Sprint“: ohne Sprints im Projekt wirkungslos, danach nur die Tickets des aktiven Sprints
+        let only = BoardConfig { only_active_sprint: true, ..base.clone() };
+        assert_eq!(titles(&only, &Quick::default()).0.len(), 3);
+        update_project(&f.c, f.project, &UpdateProject { use_sprints: Some(true), ..Default::default() }).unwrap();
+        assert!(titles(&only, &Quick::default()).0.is_empty(), "mit Sprints, aber ohne aktiven Sprint");
+        let cal = WorkCalendar::default();
+        let sp = create_sprint(&f.c, &NewSprint::new(f.project, "Sprint 1"), &cal).unwrap();
+        move_tickets_to_sprint(&f.c, sp, &[b.id, c.id]).unwrap();
+        start_sprint(&f.c, sp, &cal).unwrap();
+        assert_eq!(titles(&only, &Quick::default()).0, vec!["Crash", "Logout button"]);
+        // Quelle und Sprint zusammen
+        let both = BoardConfig { source_filter_id: Some(flt), only_active_sprint: true, ..base };
+        assert_eq!(titles(&both, &Quick::default()).0, vec!["Logout button"]);
+        let _ = a;
     }
 
     #[test]

@@ -105,7 +105,7 @@ pub(crate) struct Cx<'a> {
 
 /// Betriebsart eines Textvergleichs.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
+pub(super) enum Mode {
     Eq,
     Contains,
 }
@@ -330,7 +330,7 @@ impl<'a> Cx<'a> {
                     if matches!(v.kind, ValueKind::Null) {
                         with_null = true;
                     } else {
-                        vals.extend(self.value_texts(v)?);
+                        vals.extend(self.value_texts(v, b)?);
                     }
                 }
                 let mut parts = vec![self.pos(b, CmpOp::Eq, &vals)?];
@@ -360,7 +360,7 @@ impl<'a> Cx<'a> {
                 _ => internal("NULL mit anderem Operator"),
             };
         }
-        let vals = self.value_texts(value)?;
+        let vals = self.value_texts(value, b)?;
         let negate = matches!(op, CmpOp::Ne | CmpOp::NotContains);
         let pos_op = match op {
             CmpOp::Ne => CmpOp::Eq,
@@ -372,14 +372,14 @@ impl<'a> Cx<'a> {
     }
 
     /// Der Wert der rechten Seite als Texte (Funktionen werden ausgewertet; eine Funktion kann mehrere Werte liefern).
-    fn value_texts(&mut self, v: &Value) -> SRes<Vec<String>> {
+    fn value_texts(&mut self, v: &Value, b: &Binding) -> SRes<Vec<String>> {
         match &v.kind {
             ValueKind::Number(s) | ValueKind::Date(s) | ValueKind::DateTime(s) | ValueKind::Word(s) | ValueKind::Text(s) => Ok(vec![s.clone()]),
             ValueKind::Null => Ok(Vec::new()),
             ValueKind::Func { name, .. } => match name.text.to_lowercase().as_str() {
                 "currentdate" => Ok(vec![self.ctx.today.clone()]),
                 "linkedterminal" => Ok(self.ctx.terminals.clone()),
-                "activesprint" => pending::active_sprint_name(self),
+                "activesprint" => pending::active_sprint_name(self, matches!(b.store, Store::Sprint)),
                 other => Err(SearchError::Internal(format!("unbekannte Funktion {other}"))),
             },
         }
@@ -401,7 +401,7 @@ impl<'a> Cx<'a> {
     }
 
     /// `col` stimmt mit einem der Texte überein (ohne Beachtung der Schreibweise).
-    fn ci_any(&mut self, col: &str, vals: &[String], mode: Mode) -> String {
+    pub(super) fn ci_any(&mut self, col: &str, vals: &[String], mode: Mode) -> String {
         let mut parts = Vec::new();
         for v in vals {
             let (ph, glob) = self.ci_pattern(v, mode);
@@ -424,7 +424,7 @@ impl<'a> Cx<'a> {
 
     /// `EXISTS`-Aussage über die Werte der Felder (das `+` vor `v.field_id` hält SQLite davon ab, die Indizes über `field_id` zu wählen und
     /// je Ticket alle Werte des Feldes zu durchsuchen; gewünscht ist der Zugriff über den Schlüssel `(ticket_id, …)`); `cond` = zusätzliche Bedingung an die Zeile `v` (`1` = keine).
-    fn exists_v(&mut self, ids: &[i64], cond: &str) -> String {
+    pub(super) fn exists_v(&mut self, ids: &[i64], cond: &str) -> String {
         if ids.is_empty() {
             return "0".to_string();
         }
@@ -626,8 +626,7 @@ impl<'a> Cx<'a> {
                 let cond = or_join(parts);
                 if cond == "0" { Ok(cond) } else { Ok(self.exists_v(&ids, &cond)) }
             }
-            // EINHÄNGEPUNKT Versionen
-            Class::Version | Class::Milestone => pending::version_condition(self, &ids, Some(op), vals),
+            Class::Version | Class::Milestone => pending::version_condition(self, &ids, v.class == Class::Milestone, Some(op), vals),
         }
     }
 
@@ -644,7 +643,7 @@ impl<'a> Cx<'a> {
             Store::Values(v) => {
                 let ids: Vec<i64> = v.fields.iter().map(|f| f.id).collect();
                 if matches!(v.class, Class::Version | Class::Milestone) {
-                    return pending::version_condition(self, &ids, None, &[]);
+                    return pending::version_condition(self, &ids, v.class == Class::Milestone, None, &[]);
                 }
                 // Text-Werte ohne Inhalt zählen als leer
                 let cond = if matches!(v.class, Class::Text | Class::Terminal | Class::Labels | Class::Date | Class::DateTime) { "COALESCE(v.text, '') <> ''" } else { "1" };
@@ -885,8 +884,10 @@ impl<'a> Cx<'a> {
                 vec![OExpr { sql: agg(&sql, &f), nocase: false, nullable: true }]
             }
             Class::Multi | Class::Labels => return internal("Mehrfachfeld ist nicht sortierbar"),
-            // EINHÄNGEPUNKT Versionen
-            Class::Version | Class::Milestone => return Err(SearchError::NotAvailableYet(super::error::Feature::Versions)),
+            Class::Version | Class::Milestone => {
+                let exprs = pending::version_order(self, &ids, v.class == Class::Milestone)?;
+                exprs.into_iter().map(|sql| OExpr { sql, nocase: false, nullable: true }).collect()
+            }
         })
     }
 }

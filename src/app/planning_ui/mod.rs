@@ -25,11 +25,22 @@ mod kinds_ed;
 mod links_ed;
 mod overview;
 mod project_form;
+mod quick_ed;
+mod quick_exec;
+mod quick_logic;
+mod quick_menu;
 mod query_bar;
 mod query_help_ui;
 mod query_logic;
+mod release_view;
 mod saved_filters;
 mod search_tab;
+mod sprint_chart;
+mod sprint_data;
+mod sprint_detail;
+mod sprint_dlg;
+mod sprint_logic;
+mod sprint_view;
 mod status_ed;
 mod template_ed;
 mod ticket_create;
@@ -47,7 +58,12 @@ mod values;
 mod widgets;
 mod workflow_ed;
 
+#[cfg(test)]
+mod sprint_ui_tests;
+
 pub(super) use helpers::color_of;
+pub(super) use quick_exec::SessionRequest;
+pub(super) use quick_menu::Out as QuickOut;
 pub(super) use widgets::type_icon;
 
 use super::tasks_ui::Env;
@@ -76,6 +92,8 @@ enum Tab {
     Search,
     Boards,
     Dashboards,
+    Backlog,
+    Releases,
     Types,
     Fields,
     Statuses,
@@ -83,6 +101,7 @@ enum Tab {
     Links,
     WorkKinds,
     Templates,
+    Quick,
 }
 
 /// Rückmeldung unter den Reitern (Fehler rot, Erfolg gedämpft); verschwindet nach einigen Sekunden.
@@ -126,6 +145,10 @@ pub(super) struct PlanUi {
     tickets: ticket_state::TicketUi,
     boards: board_view::State,
     dash: dash_view::State,
+    sprints: sprint_view::State,
+    releases: release_view::State,
+    quick: quick_menu::State,
+    quick_ed: quick_ed::State,
 }
 
 impl Default for PlanUi {
@@ -158,6 +181,10 @@ impl Default for PlanUi {
             tickets: Default::default(),
             boards: Default::default(),
             dash: Default::default(),
+            sprints: Default::default(),
+            releases: Default::default(),
+            quick: Default::default(),
+            quick_ed: Default::default(),
         }
     }
 }
@@ -389,6 +416,12 @@ impl PlanUi {
         v.push((Tab::Search, lang.t("Suche", "Search")));
         if !system {
             v.push((Tab::Boards, lang.t("Boards", "Boards")));
+            if self.project().is_some_and(|p| p.use_sprints) {
+                v.push((Tab::Backlog, lang.t("Backlog", "Backlog")));
+            }
+            if self.project().is_some_and(|p| p.use_versions) {
+                v.push((Tab::Releases, lang.t("Releases", "Releases")));
+            }
         }
         v.push((Tab::Dashboards, lang.t("Dashboards", "Dashboards")));
         if !system {
@@ -397,6 +430,7 @@ impl PlanUi {
                 (Tab::Fields, lang.t("Felder", "Fields")),
                 (Tab::Statuses, lang.t("Status", "Statuses")),
                 (Tab::Workflows, lang.t("Workflows", "Workflows")),
+                (Tab::Quick, lang.t("Schnellaktionen", "Quick actions")),
             ]);
         }
         v.push((Tab::Links, lang.t("Verknüpfungstypen", "Link types")));
@@ -464,6 +498,8 @@ impl PlanUi {
                     Tab::Overview => self.overview(ui, cx, &proj),
                     Tab::Search => self.search_tab(ui, cx),
                     Tab::Boards | Tab::Dashboards => {}
+                    Tab::Backlog => self.backlog_tab(ui, cx, &proj),
+                    Tab::Releases => self.releases_tab(ui, cx, &proj),
                     Tab::Types => self.types_tab(ui, cx),
                     Tab::Fields => self.fields_tab(ui, cx),
                     Tab::Statuses => self.statuses_tab(ui, cx),
@@ -471,6 +507,7 @@ impl PlanUi {
                     Tab::Links => self.links_tab(ui, cx),
                     Tab::WorkKinds => self.kinds_tab(ui, cx),
                     Tab::Templates => self.templates_tab(ui, cx),
+                    Tab::Quick => self.quick_tab(ui, cx),
                 }
                 ui.add_space(40.0);
             });
@@ -488,12 +525,15 @@ impl PlanUi {
         self.wizard_dialog(ctx, cx);
         self.board_dialogs(ctx, cx);
         self.dash_dialogs(ctx, cx);
+        self.sprint_dialogs(ctx, cx);
         self.settings_dialog(ctx, cx);
         self.fields_dialogs(ctx, cx);
         self.workflow_dialogs(ctx, cx);
         self.template_dialogs(ctx, cx);
         self.delete_dialog(ctx, cx);
         self.delete_project_dialog(ctx, cx);
+        self.quick_ed_dialogs(ctx, cx);
+        self.quick_dialogs(ctx, cx);
         self.keywords_dialog_ui(ctx, cx);
         self.ticket_dialogs(ctx, cx);
     }
