@@ -73,6 +73,7 @@ Die Abfrage-Leiste sitzt über der Ticket-Liste (eine gültige Abfrage ersetzt d
 <!-- TODO screenshot: Beispielbilder der Hilfeseite zur Abfragesprache, nur englisch: assets/query-help/query-help-<id>.png, eingetragen in src/app/planning_ui/help_shots.rs -->
 
 **Schnellaktionen und Schnellmenü:** Ein Typ kann Schaltflächen definieren (z. B. „Create Devtask“), die ein Ticket mit vorbelegten Werten anlegen, den Status wechseln oder eine mit dem Ticket verknüpfte Terminal-/Claude-Sitzung starten. Im Ticket öffnet die Taste **`.`** das Schnellmenü: Felder des Tickets suchen, Enter drücken und den Wert direkt eingeben, den Status wechseln (nur erlaubte Übergänge) oder eine Schnellaktion ausführen.
+Die Schnellaktionen des Tickettyps stehen außerdem als **Knöpfe direkt im Ticket** (unter dem Status); ein Klick führt die Aktion über das Schnellmenü aus und fragt vorher bei Bedarf Titel oder Pflichtfelder ab.
 Die Schnellaktionen bearbeitest du im Reiter **Schnellaktionen** des Projekts; das Schnellmenü fragt auch fehlende Pflichtfelder ab, wenn ein Statuswechsel sie braucht.
 
 **Dashboards:** frei angeordnete Kacheln auf einem Raster – gespeicherte Suchen (die Standard-Kachel ist eine große Suche), Sprint und Burndown, Anzahl nach Status/Typ/Priorität als Torte oder Balken, gebuchte Zeit, Favoriten und markierte Tickets sowie „Alle Projekte“; je Projekt oder global, mehrere Dashboards mit einem Standard, als JSON exportierbar.
