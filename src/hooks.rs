@@ -156,18 +156,25 @@ static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 const MAX_CONN: usize = 32;
 
 fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::sync::mpsc::Sender<HookMsg>, cmd_tx: &std::sync::mpsc::Sender<IpcCmd>, mcp_tx: &std::sync::mpsc::Sender<McpJob>, ctx: &egui::Context) {
-    const MAX: usize = 64 * 1024;
+    // Ein Werkzeugaufruf darf bis zu 64 Felder mit je 20 000 Zeichen tragen (bis zu 4 Byte je Zeichen); größere Anfragen sind zu groß.
+    const MAX: usize = 512 * 1024;
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let _ = s.set_read_timeout(Some(Duration::from_millis(250)));
     let mut data: Vec<u8> = Vec::new();
+    let mut too_big = false;
     let mut chunk = [0u8; 4096];
     loop {
         match s.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                data.extend_from_slice(&chunk[..n]);
-                if data.len() > MAX {
-                    return;
+                // Zu große Anfragen werden weiter gelesen (und verworfen), damit der Absender nicht mit einem Verbindungsabbruch
+                // statt der Antwort „too_large“ dasteht.
+                if !too_big {
+                    data.extend_from_slice(&chunk[..n]);
+                    if data.len() > MAX {
+                        too_big = true;
+                        data = Vec::new();
+                    }
                 }
             }
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
@@ -176,6 +183,10 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
         if std::time::Instant::now() > deadline {
             return;
         }
+    }
+    if too_big {
+        let _ = s.write_all(mcp_err("too_large", crate::state::t("Die Anfrage ist zu groß", "The request is too large")).to_string().as_bytes());
+        return;
     }
     let Ok(buf) = String::from_utf8(data) else { return };
     if buf.contains("\"mcp\"") {
@@ -585,6 +596,22 @@ mod tests {
         // die Stufe geht dem Modus vor: „Nur lesen“ meldet forbidden
         LEVEL.store(McpLevel::Read.as_u8(), Ordering::Relaxed);
         assert_eq!(code(call_mcp(&dir, "create_ticket", &json!({}), None, None)), "forbidden");
+        EXPERT.store(false, Ordering::Relaxed);
+        // Eine Anfrage über der Größengrenze bekommt den Fehler „too_large“ (statt eines abgerissenen Verbindungsaufbaus).
+        LEVEL.store(McpLevel::Control.as_u8(), Ordering::Relaxed);
+        EXPERT.store(true, Ordering::Relaxed);
+        assert_eq!(code(call_mcp(&dir, "add_comment", &json!({"ticket": "PAN-1", "body": "x".repeat(2_000_000)}), None, None)), "too_large");
+        // dagegen geht ein Kommentar mit der größten erlaubten Länge aus 4-Byte-Zeichen (20 000 Zeichen = 80 KB) bis in die UI-Schleife
+        let big_ok = std::thread::spawn({
+            let dir = dir.clone();
+            move || call_mcp(&dir, "add_comment", &json!({"ticket": "PAN-1", "body": "😀".repeat(20_000)}), None, None)
+        });
+        let job = srv.mcp_rx.recv_timeout(Duration::from_secs(3)).expect("80 KB kommen an");
+        assert_eq!(job.tool, "add_comment");
+        assert_eq!(job.args["body"].as_str().map(|s| s.chars().count()), Some(20_000));
+        job.reply.send(Ok(json!({"comment_id": 1}))).unwrap();
+        assert_eq!(big_ok.join().unwrap().unwrap()["comment_id"], 1);
+        LEVEL.store(McpLevel::Read.as_u8(), Ordering::Relaxed);
         EXPERT.store(false, Ordering::Relaxed);
         // Ein Lese-Werkzeug erreicht die UI-Schleife (hier: ein Test, der sie spielt).
         let reply = std::thread::spawn({
