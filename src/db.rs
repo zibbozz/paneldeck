@@ -43,6 +43,8 @@ const MIGRATIONS: &[&str] = &[
     crate::planning::schema::MIGRATION,
     // 4: Konfiguration der Ansichten (Boards, gespeicherte Filter, JQL-Schlüsselwörter, Dashboards), SQL in `planning/views/schema.rs`
     crate::planning::views::schema::SQL,
+    // 5: Quick-Actions (Schnellaktionen) der Tickettypen, SQL in `planning/quick/schema.rs`
+    crate::planning::quick::schema::MIGRATION,
 ];
 
 /// Aktuelle Schema-Version dieser Programmversion.
