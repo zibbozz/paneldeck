@@ -536,7 +536,7 @@ pub fn reorder_fields(conn: &Connection, type_id: i64, ids: &[i64]) -> Res<()> {
     common::reorder(conn, "fields", "type_id = ?1", &[type_id], ids)
 }
 
-/// Wie oft das Feld mit einem Wert belegt ist (bis zum Ticket-Schritt 0).
+/// Wie oft das Feld mit einem Wert belegt ist (Tickets mit einem Wert).
 pub fn usage(conn: &Connection, id: i64) -> Res<i64> {
     get_field(conn, id)?;
     integrity::usage_count_field(conn, id)

@@ -45,6 +45,8 @@ const MIGRATIONS: &[&str] = &[
     crate::planning::views::schema::SQL,
     // 5: Quick-Actions (Schnellaktionen) der Tickettypen, SQL in `planning/quick/schema.rs`
     crate::planning::quick::schema::MIGRATION,
+    // 6: Tickets (Tickets, Feldwerte, Verknüpfungen, Kommentare, Verlauf, Zeiteinträge, Todo-Umwandlungen), SQL in `planning/ticket_schema.rs`
+    crate::planning::ticket_schema::MIGRATION,
 ];
 
 /// Aktuelle Schema-Version dieser Programmversion.
@@ -175,6 +177,38 @@ mod tests {
         // erneutes Öffnen ändert nichts und legt keine Sicherung an
         let db = open(&d, &d.join("backups")).unwrap();
         assert!(backup::list(&d.join("backups")).is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn upgrades_a_configuration_only_database_and_keeps_its_data() {
+        use crate::planning::projects::{create_project, get_project, NewProject};
+        use crate::planning::tickets::{create_ticket, NewTicket};
+        let d = tmp("db-v3");
+        let bdir = d.join("backups");
+        let pid = {
+            let db = open_with(&d, &bdir, &MIGRATIONS[..3]).unwrap();
+            let v: u32 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            assert_eq!(v, 3);
+            assert!(db.conn.prepare("SELECT * FROM tickets").is_err(), "Tickets gibt es erst ab Version 4");
+            let mut np = NewProject::new("PAN", "Paneldeck", "#112233");
+            np.with_defaults = true;
+            create_project(&db.conn, &np).unwrap()
+        };
+        let db = open(&d, &bdir).unwrap();
+        let v: u32 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, latest_version());
+        assert_eq!(get_project(&db.conn, pid).unwrap().key, "PAN", "Konfiguration bleibt");
+        for t in ["tickets", "ticket_values", "links", "comments", "history", "time_entries", "todo_conversions"] {
+            db.conn.prepare(&format!("SELECT * FROM {t}")).unwrap();
+        }
+        let ty = crate::planning::types::list_types(&db.conn, pid).unwrap()[0].id;
+        let (t, _) = create_ticket(&db.conn, &NewTicket::new(pid, ty, "Erstes"), &crate::planning::history::Source::ui()).unwrap();
+        assert_eq!(t.key(), "PAN-1");
+        let l = backup::list(&bdir);
+        assert_eq!(l.len(), 1);
+        assert!(matches!(l[0].kind, backup::Kind::PreMigration { from: 3, to } if to == latest_version()));
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
     }
