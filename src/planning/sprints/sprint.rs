@@ -14,7 +14,7 @@
 //! * Die Dauer-Vorlage: Ende = der `default_days`-te Arbeitstag ab dem Start (der Starttag zählt mit, ist er ein Arbeitstag).
 
 use super::{
-    atomic, clock, ensure_name_free, fmt_date, parse_date, sprint_project, Figure, SRes, SprintError, DEFAULT_SPRINT_DAYS, MAX_GOAL_CHARS, MAX_SPRINT_DAYS,
+    atomic, clock, ensure_name_free, fmt_date, parse_date, sprint_project, Figure, SRes, SprintError, DEFAULT_SPRINT_DAYS, MAX_GOAL_CHARS, MAX_SPRINT_DAYS, MAX_SPRINT_SPAN_DAYS,
 };
 use crate::calc::calendar::WorkCalendar;
 use crate::planning::common;
@@ -235,6 +235,9 @@ fn check_dates(start: Option<NaiveDate>, end: Option<NaiveDate>) -> SRes<()> {
     if let (Some(s), Some(e)) = (start, end) {
         if e < s {
             return Err(SprintError::DatesOrder);
+        }
+        if (e - s).num_days() > MAX_SPRINT_SPAN_DAYS {
+            return Err(SprintError::DatesTooLong { max: MAX_SPRINT_SPAN_DAYS });
         }
     }
     Ok(())

@@ -202,13 +202,22 @@ pub fn apply_pending_restore(data_dir: &Path, db_file: &str) -> Option<Result<Pa
             create(&db, &dest, Kind::PreRestore)?;
             rotate(&dest, usize::MAX);
         }
+        // Erst neben die Datenbank kopieren (scheitert das, z. B. Datenträger voll, bleibt die alte Datenbank unberührt), dann tauschen.
+        let staged = data_dir.join(format!("{db_file}.restoring"));
+        if let Err(e) = std::fs::copy(&backup, &staged) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!("{}: {e}", staged.display()));
+        }
         for suffix in ["", "-wal", "-shm"] {
             let f = data_dir.join(format!("{db_file}{suffix}"));
             if f.exists() {
-                std::fs::remove_file(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+                if let Err(e) = std::fs::remove_file(&f) {
+                    let _ = std::fs::remove_file(&staged);
+                    return Err(format!("{}: {e}", f.display()));
+                }
             }
         }
-        std::fs::copy(&backup, &db).map_err(|e| e.to_string())?;
+        std::fs::rename(&staged, &db).map_err(|e| e.to_string())?;
         Ok(backup.clone())
     };
     Some(run())
@@ -297,6 +306,25 @@ mod tests {
         assert_eq!(pre.len(), 1, "der Stand vor der Wiederherstellung wurde gesichert");
         assert_eq!(marker(&pre[0].path), "neu");
         assert!(apply_pending_restore(&d, "paneldeck.db").is_none(), "Marker ist verbraucht");
+        assert!(!d.join("paneldeck.db.restoring").exists(), "die Zwischendatei wird umbenannt, nicht liegengelassen");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Kann die Sicherung nicht zur Wiederherstellung kopiert werden, bleibt die alte Datenbank unberührt (nichts wird vorher gelöscht).
+    #[test]
+    fn failed_restore_leaves_the_database_alone() {
+        let d = tmp("bk-restore-fail");
+        let db = d.join("paneldeck.db");
+        make_db(&db, "jetzt");
+        let bdir = d.join("backups");
+        let b = create(&db, &bdir, Kind::Manual).unwrap();
+        schedule_restore(&d, &b.path).unwrap();
+        // Die Zwischendatei lässt sich nicht anlegen: an ihrer Stelle steht ein Ordner.
+        std::fs::create_dir_all(d.join("paneldeck.db.restoring")).unwrap();
+        make_db(&db, "neuer");
+        let r = apply_pending_restore(&d, "paneldeck.db").expect("vorgemerkt");
+        assert!(r.is_err());
+        assert_eq!(marker(&db), "neuer", "die Datenbank ist unverändert");
         let _ = std::fs::remove_dir_all(&d);
     }
 

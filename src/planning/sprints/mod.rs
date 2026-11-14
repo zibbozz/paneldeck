@@ -62,6 +62,10 @@ pub const DEFAULT_SPRINT_DAYS: u32 = 10;
 /// Höchste Dauer-Vorlage in Arbeitstagen.
 pub const MAX_SPRINT_DAYS: u32 = 366;
 
+/// Längster Zeitraum eines Sprints in Kalendertagen (Ende minus Start). Ein Tippfehler wie das Jahr 0026 statt 2026 ergäbe sonst
+/// einen Burndown mit hunderttausenden Tagen (Speicher und Zeichnen jedes Frames).
+pub const MAX_SPRINT_SPAN_DAYS: i64 = 4000;
+
 /// Längster Text für das Sprintziel in Zeichen.
 pub const MAX_GOAL_CHARS: usize = 500;
 

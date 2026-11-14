@@ -10,7 +10,7 @@ use crate::planning::link_types::{create_link_type, get_link_type, list_link_typ
 use crate::planning::links::{clean_target, Target};
 use crate::planning::names;
 use crate::planning::projects::{create_project, project_by_key, NewProject};
-use crate::planning::sprints::{ensure_name_free, fmt_date, parse_date, SprintError, MAX_DESCRIPTION_CHARS, MAX_GOAL_CHARS, MAX_SPRINT_DAYS};
+use crate::planning::sprints::{ensure_name_free, fmt_date, parse_date, SprintError, MAX_DESCRIPTION_CHARS, MAX_GOAL_CHARS, MAX_SPRINT_DAYS, MAX_SPRINT_SPAN_DAYS};
 use crate::planning::statuses::list_statuses;
 use crate::planning::template::import_types;
 use crate::planning::ticket_error::TicketError;
@@ -81,6 +81,7 @@ pub fn import_project(conn: &Connection, doc: &ProjectDoc, new_key: Option<Strin
     if doc.version > VERSION {
         return Err(BackupError::Version { found: doc.version, supported: VERSION });
     }
+    check_number_limits(doc)?;
     let doc_key = normalize_key(&doc.project.key);
     let (key, renumber) = match new_key {
         Some(k) => {
@@ -104,6 +105,29 @@ pub fn import_project(conn: &Connection, doc: &ProjectDoc, new_key: Option<Strin
             Err(e)
         }
     }
+}
+
+/// Höchste Ticketnummer (und höchster Zähler `next_number`), die ein Dokument tragen darf. Größere Werte würden beim Weiterzählen
+/// überlaufen (in der Release-Fassung ohne Fehlermeldung, mit negativen Nummern als Folge).
+pub const MAX_TICKET_NUMBER: i64 = 1_000_000_000;
+/// Größter Betrag der Reihenfolge-Zahl (`rank`) eines Tickets. Ein Wert nahe `i64::MAX` ließe `MAX(rank) + 1` in SQLite zur
+/// Kommazahl überlaufen, die sich dann nicht mehr als Ganzzahl lesen lässt (die Ticketliste des Projekts wäre kaputt).
+pub const MAX_RANK: i64 = 1_000_000_000_000;
+
+/// Prüft die Zahlenbereiche des Dokuments, bevor irgendetwas angelegt wird.
+fn check_number_limits(doc: &ProjectDoc) -> Result<(), BackupError> {
+    if doc.project.next_number > MAX_TICKET_NUMBER {
+        return Err(BackupError::At(Where::Project, Problem::TicketNumber(doc.project.next_number)));
+    }
+    for t in &doc.tickets {
+        if t.number > MAX_TICKET_NUMBER {
+            return Err(BackupError::At(Where::Ticket(t.number), Problem::TicketNumber(t.number)));
+        }
+        if t.rank.unsigned_abs() > MAX_RANK.unsigned_abs() {
+            return Err(BackupError::At(Where::Ticket(t.number), Problem::Rank(t.rank)));
+        }
+    }
+    Ok(())
 }
 
 /// Zuordnung Dokument-Nummer → Datenbank-Id.
@@ -505,6 +529,9 @@ fn import_sprints(conn: &Connection, pid: i64, doc: &ProjectDoc) -> Result<Vec<i
         if let (Some(a), Some(b)) = (start, end) {
             if b < a {
                 return Err(at(SprintError::DatesOrder));
+            }
+            if (b - a).num_days() > MAX_SPRINT_SPAN_DAYS {
+                return Err(at(SprintError::DatesTooLong { max: MAX_SPRINT_SPAN_DAYS }));
             }
         }
         let state = match s.state.as_str() {

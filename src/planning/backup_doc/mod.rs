@@ -65,13 +65,35 @@ mod tests_csv;
 pub use error::{BackupError, HeaderProblem, Problem, RefKind, RowIssue, RowProblem, Warning, Where};
 pub use export::export_project;
 #[allow(unused_imports)]
-pub use import::{check_new_key, import_project, ImportReport, ImportResult};
+pub use import::{check_new_key, import_project, ImportReport, ImportResult, MAX_RANK, MAX_TICKET_NUMBER};
 
 use crate::planning::projects::TagColorMode;
 use crate::planning::template::TemplateDoc;
 use crate::planning::views::transfer::ViewsDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Größte Datei (JSON-Sicherung oder Ticket-CSV), die zum Import gelesen wird. Eine größere Datei ist fast sicher kein Projekt
+/// und würde den Arbeitsspeicher füllen, bevor irgendetwas geprüft ist.
+pub const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Liest eine Importdatei höchstens bis [`MAX_FILE_BYTES`]; eine größere Datei ergibt `BackupError::TooLarge` (der Inhalt wird
+/// dann nicht gelesen). Der äußere Fehler ist ein Lesefehler des Dateisystems.
+pub fn read_limited(path: &std::path::Path) -> std::io::Result<Result<Vec<u8>, BackupError>> {
+    use std::io::Read;
+    let too_large = || BackupError::TooLarge { max_mb: MAX_FILE_BYTES / (1024 * 1024) };
+    let file = std::fs::File::open(path)?;
+    if file.metadata().map(|m| m.len() > MAX_FILE_BYTES).unwrap_or(false) {
+        return Ok(Err(too_large()));
+    }
+    // auch lesen, wenn die Länge nicht stimmt (Pipes, wachsende Dateien): eine Grenze mehr als erlaubt, dann ist sie überschritten
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Ok(Err(too_large()));
+    }
+    Ok(Ok(bytes))
+}
 
 /// Kennung des Dokumentformats.
 pub const FORMAT: &str = "paneldeck-project";
