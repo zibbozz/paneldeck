@@ -7,6 +7,9 @@
 //! * Jeder sichtbare Text steht in beiden Sprachen (`lang.t(de, en)`), Fehler der Datenschicht über `PlanError::message`.
 
 mod backup_ed;
+mod backup_run;
+#[cfg(test)]
+mod backup_ui_tests;
 mod board_cfg;
 mod board_logic;
 mod board_view;

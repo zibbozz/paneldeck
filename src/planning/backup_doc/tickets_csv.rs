@@ -39,6 +39,7 @@
 //! angelegt. Die Reihenfolge der Datei wird zur Reihenfolge im Backlog.
 
 use super::error::{BackupError, HeaderProblem, RowIssue, RowProblem, Warning, MAX_ROW_PROBLEMS};
+use super::progress::Progress;
 use super::valid_timestamp;
 use crate::calc::csv::{detect_delimiter, read_csv, write_csv, CsvTable, Delimiter, WriteOptions};
 use crate::planning::common::{self, labels, same_label};
@@ -395,9 +396,17 @@ fn status_of<'a>(statuses: &'a [Status], name: &str) -> Option<&'a Status> {
 
 /// Liest Tickets im Format von [`export_tickets_csv`] und legt sie im Projekt **neu** an (siehe Moduldoku).
 pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: &CsvImportOptions) -> Result<CsvImportReport, BackupError> {
+    import_tickets_csv_with(conn, project_id, text, opts, &Progress::default())
+}
+
+/// Wie [`import_tickets_csv`], mit Fortschritt und Abbruch: `progress` zählt die Schritte (drei Läufe über die Zeilen: prüfen, anlegen,
+/// nachbearbeiten) und bricht mit [`BackupError::Cancelled`] ab, wenn es verlangt wird – nach dem Anlegen wird dann alles zurückgenommen.
+pub fn import_tickets_csv_with(conn: &Connection, project_id: i64, text: &str, opts: &CsvImportOptions, progress: &Progress) -> Result<CsvImportReport, BackupError> {
     editable(conn, project_id)?;
     let delimiter = detect_delimiter(text);
     let mut table = read_csv(text, delimiter)?;
+    progress.set_total(table.rows.len() * CSV_PASSES);
+    progress.check()?;
     if opts.unprotect {
         table.headers.iter_mut().for_each(|h| *h = unguard(h).to_string());
         table.rows.iter_mut().flatten().for_each(|c| *c = unguard(c).to_string());
@@ -443,6 +452,7 @@ pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: 
         if problems.full() {
             break;
         }
+        progress.step()?;
         let row = ri + 2;
         let before = problems.0.len();
         let get = |i: usize| r[i].as_str();
@@ -596,7 +606,7 @@ pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: 
 
     // Anlegen (alles oder nichts)
     conn.execute_batch("SAVEPOINT csv_import")?;
-    match create_all(conn, project_id, &rows, &key_row) {
+    match create_all(conn, project_id, &rows, &key_row, progress) {
         Ok(report) => {
             conn.execute_batch("RELEASE csv_import")?;
             Ok(report)
@@ -608,13 +618,16 @@ pub fn import_tickets_csv(conn: &Connection, project_id: i64, text: &str, opts: 
     }
 }
 
-fn create_all(conn: &Connection, project_id: i64, rows: &[ParsedRow], key_row: &HashMap<String, usize>) -> Result<CsvImportReport, BackupError> {
+/// So viele Läufe über die Zeilen macht der CSV-Import (prüfen, anlegen, nachbearbeiten); jeder zählt einen Schritt je Zeile.
+const CSV_PASSES: usize = 3;
+
+fn create_all(conn: &Connection, project_id: i64, rows: &[ParsedRow], key_row: &HashMap<String, usize>, progress: &Progress) -> Result<CsvImportReport, BackupError> {
     let source = Source::import();
     let mut ids: Vec<Option<i64>> = vec![None; rows.len()];
     let mut problems = Problems(Vec::new());
     // Eltern zuerst; sonst in Dateireihenfolge
     loop {
-        let mut progress = false;
+        let mut progress_made = false;
         for (i, r) in rows.iter().enumerate() {
             if ids[i].is_some() {
                 continue;
@@ -626,7 +639,8 @@ fn create_all(conn: &Connection, project_id: i64, rows: &[ParsedRow], key_row: &
                     None => continue,
                 },
             };
-            progress = true;
+            progress_made = true;
+            progress.step()?;
             let new = NewTicket { project_id, type_id: r.type_id, title: r.title.clone(), parent_id: parent, values: r.values.clone() };
             let note = Some(match &r.old_key {
                 Some(k) => format!("import:{k}"),
@@ -641,7 +655,7 @@ fn create_all(conn: &Connection, project_id: i64, rows: &[ParsedRow], key_row: &
                 }
             }
         }
-        if !progress {
+        if !progress_made {
             break;
         }
     }
@@ -659,6 +673,7 @@ fn create_all(conn: &Connection, project_id: i64, rows: &[ParsedRow], key_row: &
     let mut ranks = Vec::new();
     let mut report = CsvImportReport::default();
     for (i, r) in rows.iter().enumerate() {
+        progress.step()?;
         let id = ids[i].expect("angelegt");
         if let Some(s) = r.status {
             conn.execute("UPDATE tickets SET status_id = ?1 WHERE id = ?2", [s, id])?;

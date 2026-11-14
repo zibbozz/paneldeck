@@ -6,12 +6,14 @@
 //! * [`SchemaCache`] baut das Schema des Bereichs (`planning::search::search_schema`) nur bei Bedarf neu: anderer Bereich, andere
 //!   Sprache oder als veraltet markiert (Daten oder Schlüsselwörter geändert).
 
+use super::ref_display::{load_refs_for, RowRefs};
 use crate::db::Db;
 use crate::planning::search::{run_query, search_schema, Conflict, Ctx, Page, Scope, SearchError, SearchPage, TicketRow};
 use crate::query::Schema;
 use crate::state::Lang;
 use eframe::egui;
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -35,6 +37,8 @@ pub struct Request {
 pub struct Finished {
     pub req: Request,
     pub result: Result<SearchPage, SearchError>,
+    /// Version, Meilenstein und Terminal der Tickets dieser Seite (im Hintergrund mitgeladen, beim Zeichnen wird nichts gefragt).
+    pub refs: HashMap<i64, RowRefs>,
     pub took: Duration,
 }
 
@@ -43,7 +47,11 @@ pub fn execute(conn: &Connection, req: &Request) -> Finished {
     let t = Instant::now();
     let ctx = Ctx::today_local(req.lang).with_timeout(TIMEOUT);
     let result = run_query(conn, &ctx, req.scope, &req.jql, Page::new(PAGE_SIZE, req.page.max(0) * PAGE_SIZE));
-    Finished { req: req.clone(), result, took: t.elapsed() }
+    let refs = match &result {
+        Ok(p) => load_refs_for(conn, &p.rows.iter().map(|r| r.id).collect::<Vec<_>>()),
+        Err(_) => HashMap::new(),
+    };
+    Finished { req: req.clone(), result, refs, took: t.elapsed() }
 }
 
 // ------------------------------------------------------------------ Hintergrund-Faden
@@ -88,7 +96,7 @@ impl Worker {
                     let c = conn.get_or_insert_with(|| open_reader(&path));
                     let fin = match c {
                         Ok(c) => execute(c, &job.req),
-                        Err(e) => Finished { req: job.req.clone(), result: Err(SearchError::Db(e.clone())), took: Duration::ZERO },
+                        Err(e) => Finished { req: job.req.clone(), result: Err(SearchError::Db(e.clone())), refs: HashMap::new(), took: Duration::ZERO },
                     };
                     if done_tx.send(Done { id: job.id, fin }).is_err() {
                         break;
@@ -141,6 +149,11 @@ impl QueryRun {
             Some(Ok(p)) => &p.rows,
             _ => &[],
         }
+    }
+
+    /// Version, Meilenstein und Terminal der gezeigten Zeilen (`None`, solange noch nichts da ist).
+    pub fn refs(&self) -> Option<&HashMap<i64, RowRefs>> {
+        self.shown.as_ref().filter(|f| f.result.is_ok()).map(|f| &f.refs)
     }
 
     pub fn total(&self) -> i64 {

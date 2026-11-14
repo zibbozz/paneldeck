@@ -1,49 +1,120 @@
 //! Projektsicherung (JSON) und Tickets als CSV im Reiter „Vorlagen & Sicherung“: exportieren, importieren, Vorschau und
 //! Bericht. Ein Projekt-Import legt immer ein **neues** Projekt an (bei vergebenem Kürzel mit Eingabe eines neuen Kürzels);
 //! der CSV-Import legt neue Tickets im gewählten Projekt an. Die Logik steckt in `crate::planning::backup_doc`.
+//!
+//! **Große Dateien:** Lesen, Parsen, Prüfen und Schreiben laufen in einem Hintergrund-Faden (`backup_run.rs`), die Oberfläche zeigt
+//! währenddessen den Dialog „Import läuft“ mit Fortschritt und „Abbrechen“. Der Import ist eine einzige Transaktion: Fehler und
+//! Abbruch nehmen alles zurück. Ergebnis und Fehler erscheinen danach wie bisher in den Dialogen.
 
+use super::backup_run::{self as run, LoadFail, LoadedCsv, LoadedProject, Poll, Task};
 use super::helpers::suggest_key;
 use super::widgets::{self, hint};
 use super::{Cx, Msg, PlanUi};
-use crate::calc::csv::{detect_delimiter, read_csv};
-use crate::planning::backup_doc::tickets_csv::{export_tickets_csv, import_tickets_csv, CsvImportOptions, CsvImportReport, CsvOptions};
-use crate::planning::backup_doc::{check_new_key, export_project, import_project, BackupError, ImportResult, Preview, ProjectDoc};
+use crate::planning::backup_doc::tickets_csv::{export_tickets_csv, CsvImportReport, CsvOptions};
+use crate::planning::backup_doc::{check_new_key, export_project, BackupError, ImportResult, Preview, ProjectDoc, Progress};
 use crate::state::Lang;
 use crate::style::{self, S1, S2, S3};
 use eframe::egui::{self, Key, RichText, Ui};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub(super) struct State {
-    project: Option<ProjectImport>,
-    project_report: Option<ImportResult>,
+    pub(super) project: Option<ProjectImport>,
+    pub(super) project_report: Option<ImportResult>,
     /// Formel-Schutz beim CSV-Export (Standard an).
     csv_safe: bool,
-    csv: Option<CsvImport>,
-    csv_report: Option<(String, CsvImportReport)>,
+    pub(super) csv: Option<CsvImport>,
+    pub(super) csv_report: Option<(String, CsvImportReport)>,
+    /// Ein Lauf im Hintergrund (Datei lesen oder importieren); solange er besteht, zeigt der Dialog „Import läuft“ den Fortschritt.
+    pub(super) job: Option<Job>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { project: None, project_report: None, csv_safe: true, csv: None, csv_report: None }
+        State { project: None, project_report: None, csv_safe: true, csv: None, csv_report: None, job: None }
     }
 }
 
-struct ProjectImport {
-    file: String,
-    doc: ProjectDoc,
-    preview: Preview,
+pub(super) struct ProjectImport {
+    pub(super) file: String,
+    /// Mit dem Import-Lauf geteilt (nicht kopiert: die Datei kann 128 MB groß sein).
+    pub(super) doc: Arc<ProjectDoc>,
+    pub(super) preview: Preview,
     /// Eingabe des neuen Kürzels (nur bei Kollision).
-    new_key: String,
-    error: Option<BackupError>,
+    pub(super) new_key: String,
+    pub(super) error: Option<BackupError>,
 }
 
-struct CsvImport {
-    file: String,
-    text: String,
-    rows: usize,
-    project_id: i64,
-    project_key: String,
-    error: Option<BackupError>,
+pub(super) struct CsvImport {
+    pub(super) file: String,
+    pub(super) text: Arc<String>,
+    pub(super) rows: usize,
+    pub(super) project_id: i64,
+    pub(super) project_key: String,
+    pub(super) error: Option<BackupError>,
+}
+
+/// Ein Lauf im Hintergrund. Beim Import bleibt der Dialogzustand (`p`) hier, damit ein Fehler den Dialog wieder öffnen kann.
+pub(super) enum Job {
+    LoadProject { file: String, task: Task<Result<LoadedProject, LoadFail>> },
+    LoadCsv { file: String, project_id: i64, project_key: String, task: Task<Result<LoadedCsv, LoadFail>> },
+    ImportProject { p: ProjectImport, task: Task<Result<ImportResult, BackupError>>, cancelling: bool },
+    ImportCsv { p: CsvImport, task: Task<Result<CsvImportReport, BackupError>>, cancelling: bool },
+}
+
+impl Job {
+    fn file(&self) -> &str {
+        match self {
+            Job::LoadProject { file, .. } | Job::LoadCsv { file, .. } => file,
+            Job::ImportProject { p, .. } => &p.file,
+            Job::ImportCsv { p, .. } => &p.file,
+        }
+    }
+
+    fn title(&self, lang: Lang) -> &'static str {
+        match self {
+            Job::LoadProject { .. } | Job::LoadCsv { .. } => lang.t("Datei wird gelesen …", "Reading the file …"),
+            Job::ImportProject { .. } => lang.t("Projekt wird importiert …", "Importing project …"),
+            Job::ImportCsv { .. } => lang.t("Tickets werden importiert …", "Importing tickets …"),
+        }
+    }
+
+    /// Schreibt der Lauf in die Datenbank (dann lässt er sich nur mit Rücknahme abbrechen)?
+    pub(super) fn importing(&self) -> bool {
+        matches!(self, Job::ImportProject { .. } | Job::ImportCsv { .. })
+    }
+
+    fn cancelling(&self) -> bool {
+        matches!(self, Job::ImportProject { cancelling: true, .. } | Job::ImportCsv { cancelling: true, .. })
+    }
+
+    pub(super) fn progress(&self) -> &Arc<Progress> {
+        match self {
+            Job::LoadProject { task, .. } => &task.progress,
+            Job::LoadCsv { task, .. } => &task.progress,
+            Job::ImportProject { task, .. } => &task.progress,
+            Job::ImportCsv { task, .. } => &task.progress,
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        match self {
+            Job::LoadProject { task, .. } => task.elapsed(),
+            Job::LoadCsv { task, .. } => task.elapsed(),
+            Job::ImportProject { task, .. } => task.elapsed(),
+            Job::ImportCsv { task, .. } => task.elapsed(),
+        }
+    }
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// Weckt die Oberfläche aus dem Hintergrund-Faden.
+fn waker(ctx: &egui::Context) -> impl Fn() + Send + 'static {
+    let ctx = ctx.clone();
+    move || ctx.request_repaint()
 }
 
 fn counts_line(lang: Lang, p: &Preview) -> String {
@@ -60,6 +131,11 @@ fn counts_line(lang: Lang, p: &Preview) -> String {
 }
 
 impl PlanUi {
+    /// Läuft gerade ein Lese- oder Import-Lauf (Dialog „Import läuft“)? Dann gehören Esc und Strg+Z dem Dialog, nicht der Ticket-Liste.
+    pub(super) fn backup_running(&self) -> bool {
+        self.templates.backup.job.is_some()
+    }
+
     fn backup_error(&mut self, cx: &Cx, e: &BackupError) {
         self.msg = Some(Msg { text: e.message(cx.lang), ok: false, at: Instant::now() });
     }
@@ -87,7 +163,7 @@ impl PlanUi {
                     self.export_backup(cx, project_id, key);
                 }
                 if ui.button(lang.t("Projekt importieren …", "Import project …")).clicked() {
-                    self.pick_backup(cx);
+                    self.pick_backup(ui.ctx());
                 }
             });
         });
@@ -117,7 +193,7 @@ impl PlanUi {
                     self.export_csv(cx, project_id, key);
                 }
                 if ui.button(lang.t("Tickets importieren (CSV) …", "Import tickets (CSV) …")).clicked() {
-                    self.pick_csv(cx, project_id, key);
+                    self.pick_csv(ui.ctx(), project_id, key);
                 }
             });
         });
@@ -141,23 +217,20 @@ impl PlanUi {
         }
     }
 
-    fn pick_backup(&mut self, cx: &Cx) {
-        let Some(path) = crate::notify::open_json() else { return };
-        let text = match crate::planning::backup_doc::read_limited(&path) {
-            Ok(Ok(b)) => String::from_utf8_lossy(&b).to_string(),
-            Ok(Err(e)) => return self.backup_error(cx, &e),
-            Err(e) => return self.backup_io_error(cx, ("Die Datei konnte nicht gelesen werden", "The file could not be read"), &e),
-        };
-        match ProjectDoc::from_json(&text) {
-            Ok(doc) => {
-                let taken: Vec<String> = self.projects.iter().map(|p| p.key.clone()).collect();
-                let new_key = suggest_key(&doc.project.key.to_lowercase(), &taken);
-                let preview = doc.preview();
-                self.templates.backup.project = Some(ProjectImport { file: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), doc, preview, new_key, error: None });
-                self.msg = None;
-            }
-            Err(e) => self.backup_error(cx, &e),
+    fn pick_backup(&mut self, ctx: &egui::Context) {
+        if self.templates.backup.job.is_some() {
+            return;
         }
+        let Some(path) = crate::notify::open_json() else { return };
+        self.begin_load_project(ctx, path);
+    }
+
+    /// Eine Projektsicherung im Hintergrund lesen; danach öffnet sich der Vorschau-Dialog (siehe [`PlanUi::backup_poll`]).
+    pub(super) fn begin_load_project(&mut self, ctx: &egui::Context, path: std::path::PathBuf) {
+        let file = file_name(&path);
+        self.templates.backup.job = Some(Job::LoadProject { file, task: run::start_load_project(waker(ctx), path) });
+        self.msg = None;
+        ctx.request_repaint();
     }
 
     // ------------------------------------------------------------------ CSV
@@ -179,36 +252,185 @@ impl PlanUi {
         }
     }
 
-    fn pick_csv(&mut self, cx: &Cx, project_id: i64, key: &str) {
-        let Some(path) = crate::notify::open_csv() else { return };
-        let bytes = match crate::planning::backup_doc::read_limited(&path) {
-            Ok(Ok(b)) => b,
-            Ok(Err(e)) => return self.backup_error(cx, &e),
-            Err(e) => return self.backup_io_error(cx, ("Die Datei konnte nicht gelesen werden", "The file could not be read"), &e),
-        };
-        let text = match String::from_utf8(bytes) {
-            Ok(t) => t,
-            Err(_) => return self.backup_error(cx, &BackupError::Csv(crate::calc::csv::CsvError { kind: crate::calc::csv::CsvErrorKind::InvalidUtf8, line: 1, column: 1 })),
-        };
-        match read_csv(&text, detect_delimiter(&text)) {
-            Ok(t) => {
-                self.templates.backup.csv = Some(CsvImport {
-                    file: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                    text,
-                    rows: t.rows.len(),
-                    project_id,
-                    project_key: key.to_string(),
-                    error: None,
-                });
-                self.msg = None;
-            }
-            Err(e) => self.backup_error(cx, &BackupError::Csv(e)),
+    fn pick_csv(&mut self, ctx: &egui::Context, project_id: i64, key: &str) {
+        if self.templates.backup.job.is_some() {
+            return;
         }
+        let Some(path) = crate::notify::open_csv() else { return };
+        self.begin_load_csv(ctx, path, project_id, key);
+    }
+
+    /// Eine Ticket-CSV im Hintergrund lesen; danach öffnet sich der Dialog (siehe [`PlanUi::backup_poll`]).
+    pub(super) fn begin_load_csv(&mut self, ctx: &egui::Context, path: std::path::PathBuf, project_id: i64, key: &str) {
+        let file = file_name(&path);
+        self.templates.backup.job = Some(Job::LoadCsv { file, project_id, project_key: key.to_string(), task: run::start_load_csv(waker(ctx), path) });
+        self.msg = None;
+        ctx.request_repaint();
+    }
+
+    /// Den Import der Projektsicherung im Hintergrund starten (Transaktion auf eigener Verbindung, siehe `backup_run`).
+    pub(super) fn begin_project_import(&mut self, ctx: &egui::Context, cx: &Cx, p: ProjectImport, key: Option<String>) {
+        let task = run::start_project_import(waker(ctx), cx.db, p.doc.clone(), key);
+        self.templates.backup.job = Some(Job::ImportProject { p, task, cancelling: false });
+        ctx.request_repaint();
+    }
+
+    /// Den Import der Ticket-CSV im Hintergrund starten.
+    pub(super) fn begin_csv_import(&mut self, ctx: &egui::Context, cx: &Cx, p: CsvImport) {
+        let task = run::start_csv_import(waker(ctx), cx.db, p.project_id, p.text.clone());
+        self.templates.backup.job = Some(Job::ImportCsv { p, task, cancelling: false });
+        ctx.request_repaint();
+    }
+
+    /// Meldung zu einer Datei, die nicht gelesen werden konnte.
+    fn load_fail(&mut self, cx: &Cx, f: LoadFail) {
+        match f {
+            LoadFail::Backup(e) => self.backup_error(cx, &e),
+            LoadFail::Io(e) => self.backup_io_error(cx, ("Die Datei konnte nicht gelesen werden", "The file could not be read"), &e),
+        }
+    }
+
+    /// Pro Bild: ein fertiger Lauf wird ausgewertet. Gelesene Dateien öffnen ihren Dialog, ein gelungener Import lädt neu und zeigt den
+    /// Bericht, ein misslungener öffnet den Dialog mit dem Fehler wieder, ein abgebrochener hinterlässt nichts.
+    pub(super) fn backup_poll(&mut self, cx: &Cx) {
+        let lang = cx.lang;
+        let Some(job) = self.templates.backup.job.take() else { return };
+        let lost = || BackupError::Db(lang.t("Der Import-Faden wurde unerwartet beendet", "The import thread ended unexpectedly").to_string());
+        match job {
+            Job::LoadProject { file, mut task } => match task.poll() {
+                Poll::Pending => self.templates.backup.job = Some(Job::LoadProject { file, task }),
+                Poll::Done(Ok(l)) => {
+                    let taken: Vec<String> = self.projects.iter().map(|p| p.key.clone()).collect();
+                    let new_key = suggest_key(&l.doc.project.key.to_lowercase(), &taken);
+                    self.templates.backup.project = Some(ProjectImport { file, doc: l.doc, preview: l.preview, new_key, error: None });
+                    self.msg = None;
+                }
+                Poll::Done(Err(f)) => self.load_fail(cx, f),
+                Poll::Lost => self.backup_error(cx, &lost()),
+            },
+            Job::LoadCsv { file, project_id, project_key, mut task } => match task.poll() {
+                Poll::Pending => self.templates.backup.job = Some(Job::LoadCsv { file, project_id, project_key, task }),
+                Poll::Done(Ok(l)) => {
+                    self.templates.backup.csv = Some(CsvImport { file, text: l.text, rows: l.rows, project_id, project_key, error: None });
+                    self.msg = None;
+                }
+                Poll::Done(Err(f)) => self.load_fail(cx, f),
+                Poll::Lost => self.backup_error(cx, &lost()),
+            },
+            Job::ImportProject { mut p, mut task, cancelling } => match task.poll() {
+                Poll::Pending => self.templates.backup.job = Some(Job::ImportProject { p, task, cancelling }),
+                Poll::Done(Ok(res)) => {
+                    self.invalidate();
+                    self.select(cx, res.project_id);
+                    self.note(match lang {
+                        Lang::De => format!("Projekt {} importiert ({} Tickets)", res.key, res.report.tickets),
+                        Lang::En => format!("Project {} imported ({} tickets)", res.key, res.report.tickets),
+                    });
+                    self.templates.backup.project_report = Some(res);
+                }
+                Poll::Done(Err(BackupError::Cancelled)) => self.note(BackupError::Cancelled.message(lang)),
+                Poll::Done(Err(e)) => {
+                    p.error = Some(e);
+                    self.templates.backup.project = Some(p);
+                }
+                Poll::Lost => {
+                    p.error = Some(lost());
+                    self.templates.backup.project = Some(p);
+                }
+            },
+            Job::ImportCsv { mut p, mut task, cancelling } => match task.poll() {
+                Poll::Pending => self.templates.backup.job = Some(Job::ImportCsv { p, task, cancelling }),
+                Poll::Done(Ok(rep)) => {
+                    self.invalidate();
+                    self.note(match lang {
+                        Lang::De => format!("{} Ticket(s) importiert", rep.created),
+                        Lang::En => format!("{} ticket(s) imported", rep.created),
+                    });
+                    self.templates.backup.csv_report = Some((p.project_key.clone(), rep));
+                }
+                Poll::Done(Err(BackupError::Cancelled)) => self.note(BackupError::Cancelled.message(lang)),
+                Poll::Done(Err(e)) => {
+                    p.error = Some(e);
+                    self.templates.backup.csv = Some(p);
+                }
+                Poll::Lost => {
+                    p.error = Some(lost());
+                    self.templates.backup.csv = Some(p);
+                }
+            },
+        }
+    }
+
+    /// Dialog „Import läuft“: Fortschritt und Abbrechen. Das Lesen einer Datei wird mit „Abbrechen“ vergessen (das Ergebnis wird
+    /// verworfen); ein laufender Import bekommt den Abbruch gemeldet und nimmt dann alles zurück.
+    fn backup_busy_dialog(&mut self, ctx: &egui::Context, cx: &Cx) {
+        let lang = cx.lang;
+        let Some(job) = &self.templates.backup.job else { return };
+        let (title, file, importing, cancelling) = (job.title(lang), job.file().to_string(), job.importing(), job.cancelling());
+        let progress = job.progress().clone();
+        let secs = job.elapsed().as_secs();
+        // Esc bricht ab (vor dem Dialog gelesen: er verbraucht die Taste selbst); ein Klick daneben nicht, damit ein langer Import
+        // nicht aus Versehen endet.
+        let mut cancel = ctx.input(|i| i.key_pressed(Key::Escape));
+        egui::Modal::new(Self::modal_id("backup_busy")).show(ctx, |ui| {
+            ui.set_width(widgets::modal_width(ctx, 460.0));
+            widgets::dialog_title(ui, title);
+            ui.label(RichText::new(&file).monospace());
+            ui.add_space(S2);
+            match progress.fraction() {
+                Some(f) if importing => {
+                    ui.add(egui::ProgressBar::new(f).show_percentage().desired_width(ui.available_width()));
+                }
+                _ => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(16.0));
+                        ui.label(RichText::new(if importing { lang.t("Läuft …", "Running …") } else { lang.t("Große Dateien brauchen einen Moment.", "Large files take a moment.") }).color(style::dim(ui)));
+                    });
+                }
+            }
+            ui.add_space(S1);
+            ui.label(RichText::new(format!("{secs} s")).small().color(style::dim(ui)));
+            if importing {
+                hint(
+                    ui,
+                    lang.t(
+                        "Alles oder nichts: Bei „Abbrechen“ oder einem Fehler wird nichts angelegt.",
+                        "All or nothing: if you cancel or an error occurs, nothing is created.",
+                    ),
+                );
+            }
+            ui.add_space(S3);
+            ui.horizontal(|ui| {
+                if cancelling {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.label(RichText::new(lang.t("Wird abgebrochen …", "Cancelling …")).color(style::dim(ui)));
+                } else if widgets::secondary(ui, lang.t("Abbrechen", "Cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if cancel {
+            match &mut self.templates.backup.job {
+                Some(Job::ImportProject { task, cancelling, .. }) => {
+                    task.progress.cancel();
+                    *cancelling = true;
+                }
+                Some(Job::ImportCsv { task, cancelling, .. }) => {
+                    task.progress.cancel();
+                    *cancelling = true;
+                }
+                // Lesen: vergessen (der Faden läuft zu Ende, sein Ergebnis wird nicht mehr abgeholt)
+                other => *other = None,
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(120));
     }
 
     // ------------------------------------------------------------------ Dialoge
 
     pub(super) fn backup_dialogs(&mut self, ctx: &egui::Context, cx: &Cx) {
+        self.backup_poll(cx);
+        self.backup_busy_dialog(ctx, cx);
         self.project_import_dialog(ctx, cx);
         self.project_report_dialog(ctx, cx);
         self.csv_import_dialog(ctx, cx);
@@ -293,21 +515,12 @@ impl PlanUi {
         if m.should_close() {
             close = true;
         }
-        if go && live.is_ok() {
+        if go && live.is_ok() && !close {
+            // der Import läuft im Hintergrund; das Ergebnis (oder der Fehler) kommt über `backup_poll` zurück in den Dialog
+            p.error = None;
             let key = if need_new { Some(p.new_key.clone()) } else { None };
-            match import_project(cx.conn, &p.doc, key) {
-                Ok(res) => {
-                    self.dirty = true;
-                    self.select(cx, res.project_id);
-                    self.note(match lang {
-                        Lang::De => format!("Projekt {} importiert ({} Tickets)", res.key, res.report.tickets),
-                        Lang::En => format!("Project {} imported ({} tickets)", res.key, res.report.tickets),
-                    });
-                    self.templates.backup.project_report = Some(res);
-                    return;
-                }
-                Err(e) => p.error = Some(e),
-            }
+            self.begin_project_import(ctx, cx, p, key);
+            return;
         }
         if !close {
             self.templates.backup.project = Some(p);
@@ -410,19 +623,10 @@ impl PlanUi {
         if m.should_close() {
             close = true;
         }
-        if go {
-            match import_tickets_csv(cx.conn, p.project_id, &p.text, &CsvImportOptions::default()) {
-                Ok(rep) => {
-                    self.dirty = true;
-                    self.note(match lang {
-                        Lang::De => format!("{} Ticket(s) importiert", rep.created),
-                        Lang::En => format!("{} ticket(s) imported", rep.created),
-                    });
-                    self.templates.backup.csv_report = Some((p.project_key.clone(), rep));
-                    return;
-                }
-                Err(e) => p.error = Some(e),
-            }
+        if go && !close {
+            p.error = None;
+            self.begin_csv_import(ctx, cx, p);
+            return;
         }
         if !close {
             self.templates.backup.csv = Some(p);

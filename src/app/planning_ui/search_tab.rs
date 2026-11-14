@@ -146,6 +146,10 @@ impl PlanUi {
             three_state: true,
             empty_text: lang.t("Kein Ticket passt zur Abfrage.", "No ticket matches the query."),
         };
+        // Kommt man vom geöffneten Ticket zurück (Zurück, Schließen), steht dessen Zeile in der Liste im Bild – wie in der Ticket-Liste.
+        if let Some(id) = self.tickets.scroll_to.take() {
+            self.search.res.scroll_to = Some(id);
+        }
         let o = self.search.res.draw(ui, &cfg, self.search.scope_all);
         if let Some(id) = o.open {
             self.open_ticket(cx, id);

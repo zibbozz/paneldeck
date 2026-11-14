@@ -115,6 +115,40 @@ pub fn load_row_refs(conn: &Connection, project_id: i64) -> HashMap<i64, RowRefs
     out
 }
 
+/// Wie [`load_row_refs`], aber nur für die genannten Tickets (egal in welchem Projekt): die Namen kommen gleich mit der Abfrage
+/// (Verknüpfung mit `versions`/`milestones`), es gibt keine zweite Abfrage je Projekt. Gedacht für Ergebnislisten, die im
+/// Hintergrund-Faden geladen werden (`search_run`): die Werte kommen gebündelt mit dem Ergebnis, beim Zeichnen wird nichts gefragt.
+/// Ein Eintrag, den es nicht mehr gibt, erscheint als `#<id>` (wie [`release_label`]).
+pub fn load_refs_for(conn: &Connection, ticket_ids: &[i64]) -> HashMap<i64, RowRefs> {
+    let mut out: HashMap<i64, RowRefs> = HashMap::new();
+    if ticket_ids.is_empty() {
+        return out;
+    }
+    // Kennungen sind Zahlen: direkt in den Text, kein Platzhalter je Wert nötig
+    let list = ticket_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT v.ticket_id, f.kind, v.text, ver.name, ms.name FROM ticket_values v JOIN fields f ON f.id = v.field_id
+         LEFT JOIN versions ver ON f.kind = 'version' AND ver.id = CAST(v.text AS INTEGER)
+         LEFT JOIN milestones ms ON f.kind = 'milestone' AND ms.id = CAST(v.text AS INTEGER)
+         WHERE v.ticket_id IN ({list}) AND f.kind IN ('version', 'milestone', 'terminal') AND v.text IS NOT NULL AND v.text <> ''
+         ORDER BY v.ticket_id, v.field_id, v.pos"
+    );
+    let Ok(mut st) = conn.prepare(&sql) else { return out };
+    let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?))) else { return out };
+    for (ticket, kind, text, ver, ms) in rows.flatten() {
+        let e = out.entry(ticket).or_default();
+        let id = text.trim().parse::<i64>().ok().filter(|i| *i > 0);
+        match (kind.as_str(), id) {
+            ("version", Some(id)) if e.version.is_none() => e.version = Some(ver.unwrap_or_else(|| format!("#{id}"))),
+            ("milestone", Some(id)) if e.milestone.is_none() => e.milestone = Some(ms.unwrap_or_else(|| format!("#{id}"))),
+            ("terminal", _) if e.terminal.is_none() => e.terminal = Some(text.trim().to_string()),
+            _ => {}
+        }
+    }
+    out.retain(|_, r| *r != RowRefs::default());
+    out
+}
+
 /// Art eines Chips in der Liste (bestimmt die Farbe).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ChipKind {
@@ -316,5 +350,32 @@ mod tests {
         assert!(row_chips(&RowRefs::default(), Lang::En).is_empty());
         assert_eq!(row_tooltip(&RowRefs::default(), Lang::En), "");
         assert!(load_row_refs(&f.c, 9999).is_empty());
+    }
+
+    #[test]
+    fn refs_for_given_tickets_match_the_project_wide_loader_and_work_across_projects() {
+        let f = Fx::new();
+        crate::planning::projects::update_project(&f.c, f.project, &crate::planning::projects::UpdateProject { use_versions: Some(true), ..Default::default() }).unwrap();
+        let vf = create_field(&f.c, &NewField::new(f.task, "Fix version", FieldKind::Version)).unwrap();
+        let mf = create_field(&f.c, &NewField::new(f.task, "Target milestone", FieldKind::Milestone)).unwrap();
+        let tf = create_field(&f.c, &NewField::new(f.task, "Session", FieldKind::Terminal)).unwrap();
+        let v = create_version(&f.c, &NewRelease::new(f.project, "1.0")).unwrap();
+        let m = create_milestone(&f.c, &NewRelease::new(f.project, "Beta")).unwrap();
+        let full = create_ticket(&f.c, &NewTicket { values: vec![(vf, json!(v)), (mf, json!(m)), (tf, json!("session:7"))], ..NewTicket::new(f.project, f.task, "Voll") }, &Source::ui()).unwrap().0;
+        let only_ms = create_ticket(&f.c, &NewTicket { values: vec![(mf, json!(m))], ..NewTicket::new(f.project, f.task, "Nur Meilenstein") }, &Source::ui()).unwrap().0;
+        let bare = f.mk(f.task, "Leer");
+        let all = load_row_refs(&f.c, f.project);
+        let some = load_refs_for(&f.c, &[full.id, only_ms.id, bare.id]);
+        assert_eq!(some, all, "gleiche Werte wie der Lader für das ganze Projekt");
+        assert_eq!(some.len(), 2, "Tickets ohne Werte tauchen nicht auf");
+        assert_eq!(some[&only_ms.id], RowRefs { version: None, milestone: Some("Beta".into()), terminal: None });
+        // nur die genannten Tickets
+        let one = load_refs_for(&f.c, &[only_ms.id]);
+        assert_eq!(one.len(), 1);
+        assert!(load_refs_for(&f.c, &[]).is_empty());
+        assert!(load_refs_for(&f.c, &[999_999]).is_empty());
+        // ein Eintrag, den es nicht mehr gibt, steht als #<id> da (Daten direkt gesetzt, wie nach einem Löschen ohne Aufräumen)
+        f.c.execute("UPDATE ticket_values SET text = '424242' WHERE ticket_id = ?1 AND field_id = ?2", rusqlite::params![full.id, vf]).unwrap();
+        assert_eq!(load_refs_for(&f.c, &[full.id])[&full.id].version.as_deref(), Some("#424242"));
     }
 }
