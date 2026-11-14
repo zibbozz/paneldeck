@@ -21,7 +21,7 @@ use crate::planning::summary::ProjectSummary;
 use crate::planning::ticket_error::TicketError;
 use crate::planning::tickets::{get_ticket, move_rank, set_flagged, set_starred};
 use crate::planning::transition::{available_transitions, transition_ticket, TransitionOption};
-use crate::planning::views::boards::{default_board_for, duplicate_board, ensure_default_board, list_boards, Board, BoardConfig};
+use crate::planning::views::boards::{default_board_for, duplicate_board, ensure_default_board, list_boards, prune_board_refs, Board, BoardConfig};
 use crate::state::Lang;
 use crate::style::{self, S1, S2};
 use eframe::egui::{self, Align, Color32, Id, Key, Layout, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
@@ -150,6 +150,8 @@ impl PlanUi {
         }
         st.stale = false;
         st.sum_seen = Some(sum.clone());
+        // Verwaiste Verweise (gelöschte Status, Typen, Felder) aus älteren Ständen heilen
+        let _ = prune_board_refs(cx.conn, proj.id);
         let mut list = list_boards(cx.conn, proj.id).unwrap_or_default();
         // Standard-Board beim ersten Öffnen eines Projekts mit Workflow-Typen (nur einmal, auch wenn später alle gelöscht werden)
         let seeded_key = format!("boards_seeded_{}", proj.id);

@@ -248,6 +248,7 @@ pub fn delete_release(conn: &Connection, kind: ReleaseKind, id: i64, mode: Optio
     };
     atomic(conn, || {
         integrity::migrate_values_release(conn, kind.field_kind(), id, to)?;
+        crate::planning::workflow::scrub_release_refs(conn, kind.field_kind(), id, to)?;
         conn.execute(&format!("DELETE FROM {} WHERE id = ?1", kind.table()), [id])?;
         Ok(())
     })

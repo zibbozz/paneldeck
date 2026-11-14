@@ -1,5 +1,6 @@
 //! Import einer Projektsicherung als **neues** Projekt (siehe Moduldoku in `mod.rs`).
 
+use super::progress::Progress;
 use super::refmap::{translate_history, IdMap, Ref};
 use super::{valid_timestamp, BackupError, DocLinkType, DocRelease, DocTarget, DocTicket, ProjectDoc, Problem, RefKind, Warning, Where, FORMAT, VERSION};
 use crate::planning::comments::MAX_COMMENT_CHARS;
@@ -75,6 +76,12 @@ pub fn check_new_key(conn: &Connection, key: &str) -> Result<String, BackupError
 /// vergeben, kommt `KeyTaken` und der Aufrufer fragt ein neues Kürzel ab). Ein anderes Kürzel als das des Dokuments
 /// nummeriert die Tickets von 1 an neu. Atomar: bei einem Fehler bleibt die Datenbank unverändert.
 pub fn import_project(conn: &Connection, doc: &ProjectDoc, new_key: Option<String>) -> Result<ImportResult, BackupError> {
+    import_project_with(conn, doc, new_key, &Progress::default())
+}
+
+/// Wie [`import_project`], mit Fortschritt und Abbruch: `progress` zählt die Schritte (sieben Läufe über alle Tickets) und
+/// bricht den Import mit [`BackupError::Cancelled`] ab, wenn es verlangt wird – dann wird alles zurückgenommen.
+pub fn import_project_with(conn: &Connection, doc: &ProjectDoc, new_key: Option<String>, progress: &Progress) -> Result<ImportResult, BackupError> {
     if doc.format != FORMAT {
         return Err(BackupError::Format);
     }
@@ -82,6 +89,8 @@ pub fn import_project(conn: &Connection, doc: &ProjectDoc, new_key: Option<Strin
         return Err(BackupError::Version { found: doc.version, supported: VERSION });
     }
     check_number_limits(doc)?;
+    progress.set_total(doc.tickets.len() * TICKET_PASSES);
+    progress.check()?;
     let doc_key = normalize_key(&doc.project.key);
     let (key, renumber) = match new_key {
         Some(k) => {
@@ -95,7 +104,7 @@ pub fn import_project(conn: &Connection, doc: &ProjectDoc, new_key: Option<Strin
         })?, false),
     };
     conn.execute_batch("SAVEPOINT backup_import")?;
-    match run(conn, doc, &key, renumber) {
+    match run(conn, doc, &key, renumber, progress) {
         Ok(v) => {
             conn.execute_batch("RELEASE backup_import")?;
             Ok(v)
@@ -106,6 +115,10 @@ pub fn import_project(conn: &Connection, doc: &ProjectDoc, new_key: Option<Strin
         }
     }
 }
+
+/// So viele Läufe über alle Tickets macht der Import (anlegen, Eltern, Feldwerte, Kommentare, Verknüpfungen, Zeiteinträge, Verlauf);
+/// jeder zählt einen Schritt je Ticket.
+const TICKET_PASSES: usize = 7;
 
 /// Höchste Ticketnummer (und höchster Zähler `next_number`), die ein Dokument tragen darf. Größere Werte würden beim Weiterzählen
 /// überlaufen (in der Release-Fassung ohne Fehlermeldung, mit negativen Nummern als Folge).
@@ -173,7 +186,7 @@ fn check_ts(w: impl Fn() -> Where, s: &str) -> Result<(), BackupError> {
     if valid_timestamp(s) { Ok(()) } else { Err(BackupError::At(w(), Problem::Timestamp(s.to_string()))) }
 }
 
-fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result<ImportResult, BackupError> {
+fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress: &Progress) -> Result<ImportResult, BackupError> {
     let mut report = ImportReport::default();
     let p = &doc.project;
     let pid = create_project(
@@ -259,6 +272,7 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
     let mut real_type: HashMap<i64, i64> = HashMap::new();
     let mut new_number: HashMap<i64, i64> = HashMap::new();
     for (i, t) in order.iter().enumerate() {
+        progress.step()?;
         let w = || Where::Ticket(t.number);
         if t.number <= 0 || !seen.insert(t.number) {
             return Err(BackupError::At(w(), Problem::TicketNumber(t.number)));
@@ -297,6 +311,7 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
 
     // 5. Eltern (mit den Regeln der Hierarchie; Kreise werden erkannt)
     for t in &order {
+        progress.step()?;
         let Some(parent) = t.parent else { continue };
         let w = || Where::Ticket(t.number);
         let parent_id = *map.tickets.get(&parent).ok_or_else(|| unknown(w(), RefKind::Ticket, parent))?;
@@ -307,6 +322,7 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
 
     // 6. Feldwerte (über die Prüfung der Datenschicht)
     for t in &order {
+        progress.step()?;
         let id = map.tickets[&t.number];
         for dv in &t.values {
             let w = || Where::Value(t.number, dv.field);
@@ -344,6 +360,7 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
 
     // 7. Kommentare
     for t in &order {
+        progress.step()?;
         let id = map.tickets[&t.number];
         for (i, c) in t.comments.iter().enumerate() {
             let w = || Where::Comment(t.number, i);
@@ -365,6 +382,7 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
     let mut link_seen: HashSet<(i64, i64, &'static str, Option<i64>, Option<String>)> = HashSet::new();
     let (mut external, mut terminal) = (0usize, 0usize);
     for t in &order {
+        progress.step()?;
         let from = map.tickets[&t.number];
         for (i, l) in t.links.iter().enumerate() {
             let w = || Where::Link(t.number, i);
@@ -417,6 +435,7 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
 
     // 9. Zeiteinträge
     for t in &order {
+        progress.step()?;
         let id = map.tickets[&t.number];
         for (i, e) in t.time_entries.iter().enumerate() {
             let w = || Where::Time(t.number, i);
@@ -441,6 +460,7 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool) -> Result
     // 10. Verlauf (Kennungen übersetzt, Aktions-Nummern neu vergeben)
     let mut batches: HashMap<i64, i64> = HashMap::new();
     for t in &order {
+        progress.step()?;
         let id = map.tickets[&t.number];
         for (i, h) in t.history.iter().enumerate() {
             let w = || Where::History(t.number, i);

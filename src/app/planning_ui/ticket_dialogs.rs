@@ -51,6 +51,14 @@ pub fn preview_value(conn: &rusqlite::Connection, f: &Field, v: &Value, lang: La
     }
 }
 
+/// Soll der Dialog schließen? Esc und der Schließen-Weg des Dialogs wirken immer; ein Klick auf den Hintergrund neben dem Dialog
+/// nur, solange nichts eingegeben ist – ein Fehlklick würde sonst einen angefangenen Entwurf (Titel, Beschreibung, Kommentar) verwerfen.
+pub(super) fn modal_closes<T>(ctx: &egui::Context, m: &egui::ModalResponse<T>, has_input: bool) -> bool {
+    let backdrop = m.backdrop_response.clicked();
+    let esc = ctx.input(|i| i.key_pressed(Key::Escape));
+    m.should_close() && !(backdrop && !esc && has_input)
+}
+
 /// Strg+Enter als Bestätigung in Dialogen.
 fn ctrl_enter(ctx: &egui::Context) -> bool {
     ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter))
@@ -131,6 +139,19 @@ pub(super) struct TimeDlg {
     pub mode: FieldMode,
     pub err: Option<String>,
     pub focus: bool,
+    /// Der Start, wie er beim Öffnen im Feld stand (nur Minuten): bleibt er unverändert, behält der Eintrag seinen genauen Start.
+    pub start_orig: String,
+}
+
+/// Der Start, den der Dialog an die Datenschicht gibt. Leer = keine Angabe (neuer Eintrag: jetzt − Dauer; Bearbeiten: unverändert).
+/// Beim Bearbeiten bleibt auch ein **unveränderter** Text ohne Wirkung: das Feld zeigt nur Minuten, ein Rückschreiben würde die
+/// Sekunden eines Eintrags („jetzt − Dauer“) beim bloßen Ändern des Kommentars stillschweigend abschneiden.
+pub(super) fn dialog_start(editing: bool, text: &str, original: &str) -> Result<Option<StartInput>, TicketError> {
+    let t = text.trim();
+    if t.is_empty() || (editing && t == original.trim()) {
+        return Ok(None);
+    }
+    StartInput::parse(t).map(Some).ok_or(TicketError::StartInvalid)
 }
 
 // ------------------------------------------------------------------ Todo → Ticket
@@ -696,12 +717,13 @@ impl PlanUi {
             }
         };
         let kinds: Vec<(i64, String)> = list_work_kinds(cx.conn, t.project_id).unwrap_or_default().into_iter().map(|k| (k.id, k.display(lang))).collect();
-        let mut dlg = TimeDlg { ticket: ticket_id, key: t.key(), edit, duration: String::new(), start: String::new(), kind: default_work_kind(cx.conn, t.project_id).ok().flatten(), kinds, comment: String::new(), mode: FieldMode::Text, err: None, focus: true };
+        let mut dlg = TimeDlg { ticket: ticket_id, key: t.key(), edit, duration: String::new(), start: String::new(), kind: default_work_kind(cx.conn, t.project_id).ok().flatten(), kinds, comment: String::new(), mode: FieldMode::Text, err: None, focus: true, start_orig: String::new() };
         if let Some(id) = edit {
             match get_time_entry(cx.conn, id) {
                 Ok(e) => {
                     dlg.duration = format_duration(e.minutes, DEFAULT_WORK_HOURS_PER_DAY, lang);
                     dlg.start = e.start.replace('T', " ").chars().take(16).collect();
+                    dlg.start_orig = dlg.start.clone();
                     dlg.kind = e.work_kind_id;
                     dlg.comment = e.comment.clone();
                     dlg.mode = if e.comment.trim().is_empty() { FieldMode::Text } else { FieldMode::Visual };
@@ -814,15 +836,11 @@ impl PlanUi {
                 }
             });
         });
-        if m.should_close() {
+        if modal_closes(ctx, &m, !dlg.duration.trim().is_empty() || !dlg.comment.trim().is_empty() || dlg.start.trim() != dlg.start_orig.trim()) {
             close = true;
         }
         if go && !close {
-            let start = if dlg.start.trim().is_empty() {
-                Ok(None)
-            } else {
-                StartInput::parse(&dlg.start).map(Some).ok_or(TicketError::StartInvalid)
-            };
+            let start = dialog_start(dlg.edit.is_some(), &dlg.start, &dlg.start_orig);
             let res = start.and_then(|start| match dlg.edit {
                 None => log_time(cx.conn, dlg.ticket, &dlg.duration, start, dlg.kind, &dlg.comment, chrono::Local::now().naive_local(), &Source::ui()).map(|(_, op)| Some(op)),
                 Some(id) => edit_time_entry(cx.conn, id, &TimeEdit { duration: Some(dlg.duration.clone()), start, work_kind: Some(dlg.kind), comment: Some(dlg.comment.clone()) }, &Source::ui()),
@@ -1152,6 +1170,32 @@ mod tests {
     use crate::planning::fields::FieldOptions;
     use crate::planning::tickets::fixture::Fx;
     use serde_json::json;
+
+    #[test]
+    fn editing_a_time_entry_keeps_its_exact_start_unless_the_field_changed() {
+        use crate::planning::time_entries::{edit_time_entry, get_time_entry, log_time};
+        let f = Fx::new();
+        let t = f.mk(f.task, "T");
+        // Start „jetzt − Dauer“ hat Sekunden: 12:00:41 − 1 h = 11:00:41 (das Feld zeigt nur 11:00)
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(12, 0, 41).unwrap();
+        let (id, _) = log_time(&f.c, t.id, "1h", None, None, "alt", now, &Source::ui()).unwrap();
+        let shown: String = get_time_entry(&f.c, id).unwrap().start.replace('T', " ").chars().take(16).collect();
+        assert_eq!(shown, "2026-11-14 11:00");
+        // nur den Kommentar ändern: der Start bleibt, wie er war
+        let start = dialog_start(true, &shown, &shown).unwrap();
+        assert_eq!(start, None);
+        edit_time_entry(&f.c, id, &TimeEdit { comment: Some("neu".into()), start, ..Default::default() }, &Source::ui()).unwrap();
+        assert_eq!(get_time_entry(&f.c, id).unwrap().start, "2026-11-14T11:00:41");
+        // den Start tatsächlich ändern wirkt
+        let start = dialog_start(true, "2026-11-14 09:00", &shown).unwrap();
+        assert!(start.is_some());
+        edit_time_entry(&f.c, id, &TimeEdit { start, ..Default::default() }, &Source::ui()).unwrap();
+        assert_eq!(get_time_entry(&f.c, id).unwrap().start, "2026-11-14T09:00:00");
+        // neuer Eintrag: gleicher Text wie „original“ zählt als Eingabe, leer als keine Angabe, Unsinn als Fehler
+        assert!(dialog_start(false, "2026-11-14 09:00", "").unwrap().is_some());
+        assert_eq!(dialog_start(false, "  ", "").unwrap(), None);
+        assert_eq!(dialog_start(true, "gestern", &shown).unwrap_err(), TicketError::StartInvalid);
+    }
 
     #[test]
     fn values_are_previewed_in_one_line() {

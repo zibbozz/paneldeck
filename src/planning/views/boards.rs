@@ -391,6 +391,19 @@ pub fn prune_board_refs(conn: &Connection, project_id: i64) -> Res<usize> {
     })
 }
 
+/// Aufräumen für die Löschfunktionen von Status, Typ und Feld (`PlanError` statt `ViewError`): Ohne das behielten die Boards die
+/// Kennungen des Gelöschten (leere Spalte, Typ-Filter ohne Treffer, Board lässt sich nicht mehr speichern).
+pub(crate) fn prune_after_delete(conn: &Connection, project_id: i64) -> Result<(), crate::planning::PlanError> {
+    match prune_board_refs(conn, project_id) {
+        Ok(_) => {}
+        Err(ViewError::Plan(e)) => return Err(e),
+        Err(other) => return Err(crate::planning::PlanError::Db(other.message(crate::state::lang()))),
+    }
+    // Schnellaktionen verweisen ebenfalls auf Status, Typen und Felder: Verwaistes reparieren bzw. als ungültig markieren.
+    crate::planning::quick::actions::prune_quick_action_refs(conn, crate::planning::quick::actions::PruneScope::Project(project_id))?;
+    Ok(())
+}
+
 /// Wie [`prune_board_refs`] für alle Projekte (z. B. nach dem Löschen eines globalen Filters).
 pub fn prune_all_board_refs(conn: &Connection) -> Res<usize> {
     atomic(conn, || {
@@ -759,11 +772,10 @@ mod tests {
         let us = type_by_key(&c, p, "userstory").id;
         let sp = list_fields(&c, us).unwrap().into_iter().find(|f| f.key.as_deref() == Some("story_points")).unwrap().id;
         let id = create_board(&c, &new_board(p, "B", BoardConfig { card_fields: vec![sp], ..Default::default() })).unwrap();
+        // die Löschfunktion räumt die Boards selbst auf; ein weiteres Aufräumen ändert nichts mehr
         delete_field(&c, sp, None).unwrap();
-        // die Konfiguration kennt das Feld noch, bis aufgeräumt wird; danach nicht mehr
-        assert_eq!(get_board(&c, id).unwrap().config.card_fields, vec![sp]);
-        prune_board_refs(&c, p).unwrap();
         assert!(get_board(&c, id).unwrap().config.card_fields.is_empty());
+        assert_eq!(prune_board_refs(&c, p).unwrap(), 0);
     }
 
     #[test]

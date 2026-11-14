@@ -478,3 +478,26 @@ fn the_burndown_of_the_second_sprint_starts_with_the_carried_over_work() {
     assert_eq!(b3.actual[0], Some(4.0));
     assert!(b3.actual[1].is_none());
 }
+
+#[test]
+fn points_estimated_during_planning_count_for_the_committed_scope_at_the_start() {
+    let s = S::new();
+    let sp = s.dated("S");
+    let t = s.task("Unestimated when planned", None);
+    let u = s.task("Estimated before", Some(3.0));
+    s.at("2026-10-30T10:00:00");
+    move_tickets_to_sprint(s.c(), sp, &[t.id, u.id]).unwrap();
+    // Die Schätzung kommt erst in der Planung dazu (üblicher Ablauf: erst einplanen, dann schätzen) und ändert eine bestehende.
+    s.set_points(&t, 5.0);
+    s.set_points(&u, 8.0);
+    s.at("2026-11-02T08:00:00");
+    start_sprint(s.c(), sp, &s.cal).unwrap();
+    let b = series(&s, sp, Basis::Points);
+    assert_eq!(b.scope_total_start, 13.0, "der zugesagte Umfang trägt die Punkte beim Start");
+    let r = sprint_report(s.c(), sp).unwrap();
+    assert_eq!((r.planned.points, r.planned.without_points), (13.0, 0));
+    // Nach dem Start geänderte Punkte verfälschen die Linie weiterhin nicht
+    s.at("2026-11-03T09:00:00");
+    s.set_points(&t, 1.0);
+    assert_eq!(series(&s, sp, Basis::Points).scope_total_start, 13.0);
+}
