@@ -38,6 +38,8 @@ mod settings;
 mod sidebar;
 mod tasks_ui;
 mod titlebar;
+mod toasts;
+mod winchrome;
 
 const PALETTE: [[u8; 3]; 8] = [
     [0x61, 0xaf, 0xef],
@@ -597,6 +599,10 @@ pub struct App {
     wt_close: Option<WtClose>,
     gsearch: Option<GlobalSearch>,
     notice: Option<(String, Instant)>,
+    /// Toast-Stapel unten rechts (`toasts.rs`), Uhr dafür und Toast unter dem Mauszeiger.
+    toasts: toasts::ToastQueue,
+    toasts_epoch: Instant,
+    toasts_hover: Option<u64>,
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
@@ -802,6 +808,9 @@ impl App {
             wt_close: None,
             gsearch: None,
             notice: None,
+            toasts: Default::default(),
+            toasts_epoch: Instant::now(),
+            toasts_hover: None,
             hwnd: crate::winctl::hwnd_from(cc),
             in_tray: false,
             editor: None,
@@ -812,6 +821,9 @@ impl App {
             let l = app.settings.language;
             app.tray = Tray::create(&cc.egui_ctx, tx, l.t("Paneldeck anzeigen", "Show Paneldeck"), l.t("Beenden", "Quit"));
             app.tray_rx = rx;
+        }
+        if let Some(h) = app.hwnd {
+            winchrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
         }
         clip::init(&app.dir);
         app.reload_themes();
@@ -1546,7 +1558,12 @@ impl App {
         if self.capture_key.is_some() {
             return;
         }
-        for (id, mode) in [("mode_terminals", titlebar::Mode::Terminals), ("mode_tasks", titlebar::Mode::Tasks)] {
+        for (id, mode) in [
+            ("mode_terminals", titlebar::Mode::Terminals),
+            ("mode_tasks", titlebar::Mode::Tasks),
+            ("mode_terminals_alt", titlebar::Mode::Terminals),
+            ("mode_tasks_alt", titlebar::Mode::Tasks),
+        ] {
             if let Some((m, k)) = self.binding(id) {
                 if ctx.input_mut(|i| consume_key_physical(i, m, k)) {
                     self.set_mode(mode);
@@ -2707,6 +2724,7 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(500));
             }
         }
+        self.toasts_ui(ctx);
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
         self.dialogs(ctx, &mut actions);
@@ -2736,6 +2754,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        winchrome::shutdown();
         self.save_all();
     }
 }

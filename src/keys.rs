@@ -26,6 +26,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // Reiterwechsel der Fensterleiste (nicht Strg+Alt+Zahl: das ist AltGr auf deutschen Tastaturen)
     ("mode_terminals", "Alt+Shift+1"),
     ("mode_tasks", "Alt+Shift+2"),
+    // Zweite Belegung ohne Alt+Shift (Windows schaltet damit die Eingabesprache um); Strg+Zahl sendet das Terminal ohnehin nicht
+    ("mode_terminals_alt", "Ctrl+1"),
+    ("mode_tasks_alt", "Ctrl+2"),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
@@ -56,6 +59,8 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "prev" => ("Vorherige Sitzung", "Previous session"),
         "mode_terminals" => ("Reiter „Terminal Hub“", "“Terminal Hub” tab"),
         "mode_tasks" => ("Reiter „Todo-Liste“", "“Todo list” tab"),
+        "mode_terminals_alt" => ("Reiter „Terminal Hub“ (zweite Belegung)", "“Terminal Hub” tab (alternative)"),
+        "mode_tasks_alt" => ("Reiter „Todo-Liste“ (zweite Belegung)", "“Todo list” tab (alternative)"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
