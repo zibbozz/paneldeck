@@ -20,6 +20,9 @@ mod values;
 mod widgets;
 mod workflow_ed;
 
+pub(super) use helpers::color_of;
+pub(super) use widgets::type_icon;
+
 use super::tasks_ui::Env;
 use crate::db::Db;
 use crate::planning::link_types::{list_link_types, LinkType};
