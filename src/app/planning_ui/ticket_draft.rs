@@ -9,7 +9,7 @@ use crate::markdown::FieldMode;
 use crate::planning::fields::{Field, FieldKind};
 use crate::planning::values::canon_number;
 use crate::state::Lang;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::{json, Value};
 
 #[derive(Clone, Debug)]
@@ -43,6 +43,12 @@ impl DraftError {
     }
 }
 
+/// Eingabe „Label“ in einzelne Labels zerlegen: Komma und Semikolon trennen (wie im Schnellmenü, sonst würde ein Label „a, b“ dort
+/// beim Bearbeiten in zwei zerfallen), Leerraum wird zusammengefasst, Leeres entfällt.
+pub fn split_labels(input: &str) -> Vec<String> {
+    input.split([',', ';']).map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|p| !p.is_empty()).collect()
+}
+
 /// Zahl als Text ohne überflüssige Nachkommastellen (`5`, `2.5`).
 pub fn number_text(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 && x.abs() < 1.0e15 {
@@ -61,10 +67,11 @@ pub fn parse_number(s: &str) -> Result<Option<f64>, DraftError> {
     t.replace(',', ".").parse::<f64>().ok().filter(|x| x.is_finite()).map(Some).ok_or(DraftError::NotANumber)
 }
 
-/// Datum lesen (`JJJJ-MM-TT`, `TT.MM.JJJJ`, `JJJJ/MM/TT`).
+/// Datum lesen (`JJJJ-MM-TT`, `TT.MM.JJJJ`, `JJJJ/MM/TT`). Das Jahr muss vierstellig sein: chrono liest „14.11.26“ sonst als
+/// Jahr 26 n. Chr. und das Ticket bekäme still ein Datum vor fast zweitausend Jahren.
 pub fn parse_date(s: &str) -> Option<NaiveDate> {
     let t = s.trim();
-    ["%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d"].iter().find_map(|f| NaiveDate::parse_from_str(t, f).ok())
+    ["%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d"].iter().find_map(|f| NaiveDate::parse_from_str(t, f).ok()).filter(|d| (1000..=9999).contains(&d.year()))
 }
 
 /// Datum mit Uhrzeit lesen (`JJJJ-MM-TT HH:MM[:SS]`, auch mit `T`; deutsches Datum erlaubt).
@@ -131,9 +138,10 @@ impl Draft {
             FieldKind::Labels => {
                 // Ein noch nicht mit Enter bestätigtes Label zählt mit.
                 let mut list: Vec<Value> = self.value.as_array().cloned().unwrap_or_default();
-                let pending = self.text.split_whitespace().collect::<Vec<_>>().join(" ");
-                if !pending.is_empty() && !list.iter().any(|x| x.as_str().is_some_and(|s| s.eq_ignore_ascii_case(&pending))) {
-                    list.push(Value::String(pending));
+                for pending in split_labels(&self.text) {
+                    if !list.iter().any(|x| x.as_str().is_some_and(|s| s.to_lowercase() == pending.to_lowercase())) {
+                        list.push(Value::String(pending));
+                    }
                 }
                 Value::Array(list)
             }
@@ -143,14 +151,16 @@ impl Draft {
 
     /// Fügt ein Label (bereinigt, ohne Doppelte) hinzu und leert den Suchtext.
     pub fn add_label(&mut self, label: &str) {
-        let l = label.split_whitespace().collect::<Vec<_>>().join(" ");
         self.text.clear();
-        if l.is_empty() {
+        let new = split_labels(label);
+        if new.is_empty() {
             return;
         }
         let mut list = self.value.as_array().cloned().unwrap_or_default();
-        if !list.iter().any(|x| x.as_str().is_some_and(|s| s.to_lowercase() == l.to_lowercase())) {
-            list.push(Value::String(l));
+        for l in new {
+            if !list.iter().any(|x| x.as_str().is_some_and(|s| s.to_lowercase() == l.to_lowercase())) {
+                list.push(Value::String(l));
+            }
         }
         self.value = Value::Array(list);
         self.edited = true;
@@ -256,6 +266,11 @@ mod tests {
         assert_eq!(parse_date("14.11.2026"), Some(d));
         assert_eq!(parse_date("2026/11/14"), Some(d));
         assert_eq!(parse_date("2026-13-40"), None);
+        // zweistelliges Jahr: nicht als Jahr 26 lesen, sondern ablehnen
+        assert_eq!(parse_date("14.11.26"), None);
+        assert_eq!(parse_date("26-11-14"), None);
+        assert_eq!(parse_datetime("14.11.26 9:30"), None);
+        assert_eq!(parse_date("0000-01-01"), None);
         assert_eq!(parse_date(""), None);
         let dt = parse_datetime("2026-11-14T09:30:15").unwrap();
         assert_eq!(dt.format("%H:%M:%S").to_string(), "09:30:15");
@@ -312,6 +327,11 @@ mod tests {
         assert_eq!(d.value, json!(["Backend"]));
         d.add_label("   ");
         assert!(d.text.is_empty());
+        // Komma und Semikolon trennen Labels (kein Label enthält sie – das Schnellmenü würde es sonst zerlegen)
+        d.add_label("Alpha, beta ; UI,,");
+        assert_eq!(d.value, json!(["Backend", "Alpha", "beta", "UI"]));
+        d.text = "gamma; BETA".into();
+        assert_eq!(d.to_value(&l), Ok(json!(["Backend", "Alpha", "beta", "UI", "gamma"])));
     }
 
     #[test]

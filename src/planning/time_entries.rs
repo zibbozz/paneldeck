@@ -14,7 +14,7 @@ use super::tickets::{get_ticket, touch};
 use super::work_kinds::{get_work_kind, list_work_kinds};
 use crate::calc::duration::{parse_duration, Minutes};
 use crate::calc::progress::{sum_by_day, sum_minutes};
-use chrono::{Duration, NaiveDate, NaiveDateTime};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -45,14 +45,16 @@ impl From<NaiveDate> for StartInput {
 
 impl StartInput {
     /// Liest `JJJJ-MM-TT`, `JJJJ-MM-TT HH:MM[:SS]` oder `JJJJ-MM-TTTHH:MM[:SS]`. Leere oder unlesbare Eingabe: `None`.
+    /// Das Jahr muss vierstellig sein (sonst würde „26-11-14“ als Jahr 26 gelesen).
     pub fn parse(s: &str) -> Option<StartInput> {
         let s = s.trim();
+        let year_ok = |y: i32| (1000..=9999).contains(&y);
         for f in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"] {
             if let Ok(d) = NaiveDateTime::parse_from_str(s, f) {
-                return Some(StartInput::DateTime(d));
+                return Some(StartInput::DateTime(d)).filter(|_| year_ok(d.year()));
             }
         }
-        NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().map(StartInput::Date)
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().filter(|d| year_ok(d.year())).map(StartInput::Date)
     }
 
     /// Der Zeitpunkt, den die Vorgabe meint.
@@ -446,7 +448,7 @@ mod tests {
         assert_eq!(StartInput::parse(" 2026-11-14 09:30 "), Some(StartInput::DateTime(dt(2026, 11, 14, 9, 30))));
         assert_eq!(StartInput::parse("2026-11-14T09:30:15").unwrap().resolve().format(ISO).to_string(), "2026-11-14T09:30:15");
         assert_eq!(StartInput::parse("2026-11-14").unwrap().resolve(), dt(2026, 11, 14, 8, 0));
-        for bad in ["", "gestern", "14.11.2026", "2026-13-01"] {
+        for bad in ["", "gestern", "14.11.2026", "2026-13-01", "26-11-14", "0026-11-14 09:30", "10000-01-01"] {
             assert_eq!(StartInput::parse(bad), None, "{bad}");
         }
     }

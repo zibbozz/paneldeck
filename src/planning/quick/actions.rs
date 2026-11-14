@@ -987,9 +987,10 @@ mod tests {
         let desc = f.field(f.dev, "description");
         let sp = f.field(f.dev, "story_points");
         let id = mk(&f, f.story, "Create", with_defaults(f.dev, vec![(FieldRef::Title, json!("T")), (FieldRef::Field(desc.id), json!("D")), (FieldRef::Field(sp.id), json!(3))]));
+        // Die Löschfunktion räumt die Schnellaktionen des Projekts selbst auf.
         delete_field(&f.c, sp.id, None).unwrap();
         let rep = prune_quick_action_refs(&f.c, PruneScope::Type(f.story)).unwrap();
-        assert_eq!((rep.checked, rep.repaired, rep.removed_defaults, rep.invalidated), (1, 1, 1, 0));
+        assert_eq!((rep.checked, rep.repaired, rep.removed_defaults, rep.invalidated), (1, 0, 0, 0), "schon beim Löschen bereinigt");
         let a = get_quick_action(&f.c, id).unwrap();
         assert!(!a.invalid);
         let ActionParams::CreateTicket(c) = a.params else { panic!() };
@@ -1022,7 +1023,7 @@ mod tests {
         // Typ-Bereich sieht die Aktion des anderen Typs nicht; Projekt-Bereich schon
         assert_eq!(prune_quick_action_refs(&f.c, PruneScope::Type(f.epic)).unwrap().invalidated, 0);
         let rep = prune_quick_action_refs(&f.c, PruneScope::Project(f.project)).unwrap();
-        assert_eq!((rep.checked, rep.invalidated), (2, 1));
+        assert_eq!((rep.checked, rep.invalidated), (2, 0), "schon beim Löschen als ungültig markiert");
         assert!(get_quick_action(&f.c, id).unwrap().invalid);
         assert!(!get_quick_action(&f.c, other).unwrap().invalid);
         assert_eq!(check_quick_action(&f.c, id), Err(QuickError::TargetType));
@@ -1056,7 +1057,9 @@ mod tests {
         delete_field(&f.c, prio.id, None).unwrap();
         delete_status(&f.c, f.progress, None).unwrap();
         let rep = prune_quick_action_refs(&f.c, PruneScope::Project(f.project)).unwrap();
-        assert_eq!((rep.removed_set_values, rep.invalidated), (1, 1));
+        assert_eq!((rep.removed_set_values, rep.invalidated), (0, 0), "schon beim Löschen bereinigt");
+        let ActionParams::ChangeStatus(c) = get_quick_action(&f.c, id).unwrap().params else { panic!() };
+        assert!(c.set_values.is_empty(), "der Setze-Wert des gelöschten Felds ist entfernt");
         assert!(!get_quick_action(&f.c, id).unwrap().invalid, "Ziel-Status Done existiert noch");
         assert!(get_quick_action(&f.c, id2).unwrap().invalid);
     }
@@ -1079,7 +1082,8 @@ mod tests {
         let desc_dev = f.field(f.dev, "description");
         let a = mk(&f, f.story, "A", with_defaults(f.dev, vec![(FieldRef::Field(desc_dev.id), json!("x"))]));
         let b = mk(&f, f.epic, "B", with_defaults(f.dev, vec![(FieldRef::Field(desc_dev.id), json!("x"))]));
-        delete_field(&f.c, desc_dev.id, None).unwrap();
+        // Roh löschen (ohne das Aufräumen der Löschfunktion), damit der Bereich der Aufräum-Funktion geprüft wird
+        f.c.execute("DELETE FROM fields WHERE id = ?1", [desc_dev.id]).unwrap();
         // Typ-Bereich: nur die Aktionen dieses Typs
         prune_quick_action_refs(&f.c, PruneScope::Type(f.story)).unwrap();
         let has = |id: i64| match get_quick_action(&f.c, id).unwrap().params {

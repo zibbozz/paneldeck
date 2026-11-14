@@ -522,6 +522,12 @@ pub fn update_field(conn: &Connection, id: i64, u: &UpdateField) -> Res<()> {
             "UPDATE fields SET name = ?1, options = ?2, required = ?3, default_value = ?4, help = ?5, section = ?6, show_on_card = ?7 WHERE id = ?8",
             params![name, options_json(&options), bool_i(u.required.unwrap_or(cur.required)), default.as_ref().map(|v| v.to_string()), help, section, bool_i(u.show_on_card.unwrap_or(cur.show_on_card)), id],
         )?;
+        if cur.kind.has_values() {
+            let removed: Vec<i64> = cur.options.values.iter().filter(|o| !options.values.iter().any(|n| n.id == o.id)).map(|o| o.id).collect();
+            if !removed.is_empty() {
+                super::workflow::scrub_option_refs(conn, cur.type_id, id, &removed)?;
+            }
+        }
         Ok(())
     })
 }
@@ -546,7 +552,7 @@ pub fn usage(conn: &Connection, id: i64) -> Res<i64> {
 /// mit gleichem Feldtyp**, `Discard` verwirft sie. Verweise in Übergangsregeln (Pflichtfeld, Bedingung, Setzen) entfallen.
 pub fn delete_field(conn: &Connection, id: i64, mode: Option<DeleteMode>) -> Res<()> {
     let cur = get_field(conn, id)?;
-    editable_type(conn, cur.type_id)?;
+    let owner = editable_type(conn, cur.type_id)?;
     let count = integrity::usage_count_field(conn, id)?;
     integrity::require_mode(count, mode.is_some())?;
     let to = match &mode {
@@ -563,6 +569,7 @@ pub fn delete_field(conn: &Connection, id: i64, mode: Option<DeleteMode>) -> Res
         integrity::migrate_values_field(conn, id, to)?;
         super::workflow::scrub_field_refs(conn, cur.type_id, id)?;
         conn.execute("DELETE FROM fields WHERE id = ?1", [id])?;
+        super::views::boards::prune_after_delete(conn, owner.project_id)?;
         Ok(())
     })
 }

@@ -125,6 +125,11 @@ impl CreateDlg {
         self.err = None;
     }
 
+    /// Hat der Nutzer schon etwas eingegeben (Titel oder ein verändertes Feld)?
+    pub fn has_draft(&self) -> bool {
+        !self.title.trim().is_empty() || self.drafts.values().any(|d| d.edited)
+    }
+
     /// Titel und Felder leeren (für „Weiteres anlegen“); Typ und Eltern bleiben.
     fn reset(&mut self, ty: &TypeSummary) {
         self.title.clear();
@@ -336,7 +341,8 @@ impl PlanUi {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
             submit = true;
         }
-        if m.should_close() {
+        // Ein Klick neben den Dialog verwirft keinen angefangenen Entwurf (ein Fehlklick würde Titel und Beschreibung kosten).
+        if super::ticket_dialogs::modal_closes(ctx, &m, dlg.has_draft()) {
             close = true;
         }
         self.tickets.create_another = another;
