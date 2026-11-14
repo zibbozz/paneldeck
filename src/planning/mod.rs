@@ -28,6 +28,7 @@ pub mod links;
 pub mod names;
 pub mod ops;
 pub mod projects;
+pub mod quick;
 pub mod schema;
 pub mod statuses;
 pub mod summary;
@@ -41,6 +42,7 @@ pub mod todo_bridge;
 pub mod transition;
 pub mod types;
 pub mod values;
+pub mod views;
 pub mod work_kinds;
 pub mod workflow;
 

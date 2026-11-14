@@ -41,7 +41,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX todo_item_tags_tag ON todo_item_tags (tag_id);",
     // 3: Konfiguration der Projekte (Projekte, Status, Typen, Felder, Workflows, Verknüpfungstypen, Arten der Arbeit), SQL in `planning/schema.rs`
     crate::planning::schema::MIGRATION,
-    // 4: Tickets (Tickets, Feldwerte, Verknüpfungen, Kommentare, Verlauf, Zeiteinträge, Todo-Umwandlungen), SQL in `planning/ticket_schema.rs`
+    // 4: Konfiguration der Ansichten (Boards, gespeicherte Filter, JQL-Schlüsselwörter, Dashboards), SQL in `planning/views/schema.rs`
+    crate::planning::views::schema::SQL,
+    // 5: Quick-Actions (Schnellaktionen) der Tickettypen, SQL in `planning/quick/schema.rs`
+    crate::planning::quick::schema::MIGRATION,
+    // 6: Tickets (Tickets, Feldwerte, Verknüpfungen, Kommentare, Verlauf, Zeiteinträge, Todo-Umwandlungen), SQL in `planning/ticket_schema.rs`
     crate::planning::ticket_schema::MIGRATION,
 ];
 
@@ -204,7 +208,7 @@ mod tests {
         assert_eq!(t.key(), "PAN-1");
         let l = backup::list(&bdir);
         assert_eq!(l.len(), 1);
-        assert!(matches!(l[0].kind, backup::Kind::PreMigration { from: 3, to: 4 }));
+        assert!(matches!(l[0].kind, backup::Kind::PreMigration { from: 3, to } if to == latest_version()));
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
     }
