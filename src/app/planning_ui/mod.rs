@@ -27,6 +27,7 @@ mod overview;
 mod project_form;
 mod quick_ed;
 mod quick_exec;
+mod quick_fill;
 mod quick_logic;
 mod quick_menu;
 mod query_bar;

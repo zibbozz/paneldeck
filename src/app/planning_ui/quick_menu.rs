@@ -15,6 +15,7 @@
 
 use super::helpers::color_of;
 use super::quick_exec::{self as exec, BatchResult, SessionRequest};
+use super::quick_fill::{self, Fill};
 use super::quick_logic::{self as logic, FormState, Item, ItemKey, Row};
 use super::widgets;
 use super::{Cx, PlanUi};
@@ -45,6 +46,8 @@ const ROW_H: f32 = 42.0;
 enum Stage {
     List,
     Form { item: usize, form: FormState },
+    /// Statuswechsel mit fehlenden Pflichtfeldern: Formular für genau diese Felder.
+    Fill { item: usize, fill: Fill },
     /// Ergebnis mit Fehlschlägen (Zeilen „PAN-5: Grund“).
     Result { text: String, lines: Vec<String> },
 }
@@ -92,14 +95,15 @@ struct Keys {
     digit: Option<usize>,
 }
 
-fn collect_keys(ctx: &egui::Context, take_digits: bool) -> Keys {
+/// `keep_enter`: ein mehrzeiliges Feld ist offen, Enter bleibt für den Zeilenumbruch (bestätigt wird mit Strg+Enter).
+fn collect_keys(ctx: &egui::Context, take_digits: bool, keep_enter: bool) -> Keys {
     ctx.input_mut(|i| {
         let mut k = Keys::default();
         k.esc = i.consume_key(Modifiers::NONE, Key::Escape);
         k.up = i.consume_key(Modifiers::NONE, Key::ArrowUp);
         k.down = i.consume_key(Modifiers::NONE, Key::ArrowDown);
         k.ctrl_enter = i.consume_key(Modifiers::COMMAND, Key::Enter);
-        k.enter = i.consume_key(Modifiers::NONE, Key::Enter);
+        k.enter = !keep_enter && i.consume_key(Modifiers::NONE, Key::Enter);
         if take_digits {
             let mut found = None;
             i.events.retain(|e| match e {
@@ -174,7 +178,13 @@ impl PlanUi {
 
         // Tasten dieses Bildes. Ziffern nur in der Liste bei leerem Suchfeld.
         let in_list = matches!(m.stage, Stage::List);
-        let keys = collect_keys(ctx, in_list && m.query.is_empty());
+        let keep_enter = match &m.stage {
+            Stage::Form { item, .. } => matches!(m.items.get(*item).map(|i| (&i.key, &i.input)), Some((ItemKey::Comment, _)) | Some((_, Some(InputKind::RichTextEditor { .. })))),
+            Stage::Fill { fill, .. } => !fill.enter_submits(),
+            _ => false,
+        };
+        let keys = collect_keys(ctx, in_list && m.query.is_empty(), keep_enter);
+        let prefixes: Vec<String> = self.projects.iter().map(|p| p.key.clone()).collect();
         let rows: Vec<Row> = if in_list { logic::layout(&m.items, &m.query, &m.recent, lang) } else { Vec::new() };
         let numbered = logic::numbered(&rows, &m.items);
         let mut run: Option<usize> = None;
@@ -206,6 +216,7 @@ impl PlanUi {
                 let multiline = matches!(m.items.get(*item).map(|i| (&i.key, &i.input)), Some((ItemKey::Comment, _)) | Some((_, Some(InputKind::RichTextEditor { .. }))));
                 (keys.ctrl_enter || (keys.enter && !multiline)).then_some(())
             }
+            Stage::Fill { fill, .. } => (keys.ctrl_enter || (keys.enter && fill.enter_submits())).then_some(()),
             _ => None,
         };
 
@@ -272,6 +283,12 @@ impl PlanUi {
                     back = b;
                     apply = a;
                 }
+                Stage::Fill { fill, .. } => {
+                    m.focus = false;
+                    let (b, a) = quick_fill::draw(ui, cx, &m.ids, &prefixes, fill);
+                    back = b;
+                    apply = a;
+                }
                 Stage::Result { text, lines } => {
                     ui.label(RichText::new(text.as_str()).strong());
                     ui.add_space(S1);
@@ -330,6 +347,20 @@ impl PlanUi {
             return;
         }
         m.note = None;
+        // Statuswechsel mit leeren Pflichtfeldern: erst das Formular für diese Felder.
+        if let ItemKey::Transition(to) = it.key {
+            match quick_fill::prepare(cx.conn, &m.ids, to, cx.lang) {
+                Ok(Some(fill)) => {
+                    m.stage = Stage::Fill { item: idx, fill };
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    m.note = Some(e);
+                    return;
+                }
+            }
+        }
         if it.needs_form() {
             m.stage = Stage::Form { item: idx, form: FormState::for_item(&it) };
             m.focus = true;
@@ -340,7 +371,32 @@ impl PlanUi {
         }
     }
 
+    /// „Verschieben“ im Pflichtfeld-Formular: Werte prüfen, Wechsel mit den Werten ausführen.
+    fn quick_submit_fill(&mut self, cx: &Cx, m: &mut Menu) {
+        let lang = cx.lang;
+        let Stage::Fill { item, fill } = &mut m.stage else { return };
+        let Some(it) = m.items.get(*item).cloned() else { return };
+        let Some(values) = quick_fill::collect(fill, lang) else {
+            fill.error = Some(lang.t("Bitte die markierten Felder prüfen.", "Please check the marked fields.").to_string());
+            return;
+        };
+        fill.error = None;
+        let res = exec::run_transition_with(cx.conn, &m.ids, fill.to, &values, lang);
+        // Fehler eines einzelnen Tickets (z. B. ein noch leeres Pflichtfeld) bleiben im Formular sichtbar.
+        if res.ok.is_empty() && m.ids.len() == 1 {
+            if let Some((_, why)) = res.failed.first() {
+                fill.error = Some(why.clone());
+                return;
+            }
+        }
+        self.quick_finish(cx, m, &it, res);
+    }
+
     fn quick_submit(&mut self, cx: &Cx, m: &mut Menu, now: chrono::NaiveDateTime) {
+        if matches!(m.stage, Stage::Fill { .. }) {
+            self.quick_submit_fill(cx, m);
+            return;
+        }
         let lang = cx.lang;
         let Stage::Form { item, form } = &mut m.stage else { return };
         let Some(it) = m.items.get(*item).cloned() else { return };
@@ -721,6 +777,141 @@ mod tests {
             ui.quick_run_item(&cx, &mut m, idx, chrono::Local::now().naive_local());
             assert!(m.note.is_some());
         }
+    }
+
+    /// Menü für `ids` laden und die Zeile des Zielstatus `to` ausführen; liefert das Menü.
+    fn run_status_row(ui: &mut PlanUi, ctx: &egui::Context, cx: &Cx, ids: Vec<i64>, to: i64) -> Menu {
+        ui.open_quick_menu(ids);
+        frame(ui, ctx, cx, vec![]);
+        let mut m = ui.quick.menu.take().expect("Menü geladen");
+        let idx = m.items.iter().position(|i| i.key == ItemKey::Transition(to)).expect("Zeile des Zielstatus");
+        ui.quick_run_item(cx, &mut m, idx, chrono::Local::now().naive_local());
+        m
+    }
+
+    fn require_on_transition(f: &Fx, ty: i64, field: i64, from: i64, to: i64) {
+        use crate::planning::workflow::{set_transition, TransitionDef};
+        set_transition(&f.c, ty, &TransitionDef { from_status_id: from, to_status_id: to, required_fields: vec![field], ..Default::default() }).unwrap();
+    }
+
+    fn draft_of(m: &mut Menu, n: usize) -> &mut crate::app::planning_ui::ticket_draft::Draft {
+        let Stage::Fill { fill, .. } = &mut m.stage else { panic!("Pflichtfeld-Formular erwartet") };
+        &mut fill.fields[n].1
+    }
+
+    #[test]
+    fn status_row_with_required_fields_opens_a_form_and_moves_with_the_values() {
+        use crate::planning::fields::{FieldKind, FieldOptions};
+        let f = Fx::new();
+        let result = f.add_field(f.task, "Result", FieldKind::Text, FieldOptions::default(), false);
+        require_on_transition(&f, f.task, result.id, f.todo, f.progress);
+        let t = f.mk(f.task, "Needs a result");
+        let db = db_of(f.c);
+        let cx = Cx { conn: &db.conn, db: &db, lang: Lang::En };
+        let ctx = egui::Context::default();
+        let mut ui = PlanUi::default();
+        let m = run_status_row(&mut ui, &ctx, &cx, vec![t.id], f.progress);
+        let Stage::Fill { fill, .. } = &m.stage else { panic!("statt der Fehlermeldung kommt das Formular") };
+        assert_eq!(fill.fields.len(), 1);
+        assert_eq!(fill.fields[0].0.id, result.id);
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.todo), "noch nichts verschoben");
+        // Das Formular wird gezeichnet; „Verschieben“ ohne Wert zeigt den Fehler im Formular
+        ui.quick.menu = Some(m);
+        frame(&mut ui, &ctx, &cx, vec![]);
+        let mut m = ui.quick.menu.take().unwrap();
+        ui.quick_submit(&cx, &mut m, chrono::Local::now().naive_local());
+        let Stage::Fill { fill, .. } = &m.stage else { panic!("bleibt im Formular") };
+        assert!(fill.error.as_deref().is_some_and(|e| e.contains("Result")), "{:?}", fill.error);
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.todo));
+        // mit Wert: Wechsel, Wert gespeichert, Rückgängig stellt beides her
+        draft_of(&mut m, 0).text = "done well".into();
+        ui.quick_submit(&cx, &mut m, chrono::Local::now().naive_local());
+        assert!(m.ids.is_empty(), "erfolgreich = Menü schließt");
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.progress));
+        assert_eq!(crate::planning::values::load_values(&db.conn, t.id).unwrap().get(&result.id), Some(&serde_json::json!("done well")));
+        let Some(Out::Toast { undo: Some(token), error: false, .. }) = ui.take_quick_out().into_iter().next() else { panic!("Toast mit Rückgängig erwartet") };
+        assert!(ui.quick_undo(&db.conn, token, Lang::En).is_ok());
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.todo));
+        assert!(crate::planning::values::load_values(&db.conn, t.id).unwrap().get(&result.id).is_none());
+    }
+
+    #[test]
+    fn required_field_form_is_drawn_in_both_languages_and_keys_work() {
+        use crate::planning::fields::{FieldKind, FieldOptions};
+        use crate::planning::sprints::releases::{create_release, NewRelease, ReleaseKind};
+        use crate::planning::workflow::{set_transition, TransitionDef};
+        let f = Fx::new();
+        let result = f.add_field(f.task, "Result", FieldKind::Text, FieldOptions::default(), false);
+        let version = f.add_field(f.task, "Fix version", FieldKind::Version, FieldOptions::default(), false);
+        let term = f.add_field(f.task, "Session", FieldKind::Terminal, FieldOptions::default(), false);
+        set_transition(&f.c, f.task, &TransitionDef { from_status_id: f.todo, to_status_id: f.progress, required_fields: vec![result.id, version.id, term.id], ..Default::default() }).unwrap();
+        crate::planning::projects::update_project(&f.c, f.project, &crate::planning::projects::UpdateProject { use_versions: Some(true), ..Default::default() }).unwrap();
+        let rel = create_release(&f.c, ReleaseKind::Version, &NewRelease::new(f.project, "1.0")).unwrap();
+        let t = f.mk(f.task, "Many fields");
+        let db = db_of(f.c);
+        for lang in [Lang::De, Lang::En] {
+            let cx = Cx { conn: &db.conn, db: &db, lang };
+            let ctx = egui::Context::default();
+            let mut ui = PlanUi::default();
+            let m = run_status_row(&mut ui, &ctx, &cx, vec![t.id], f.progress);
+            let Stage::Fill { fill, .. } = &m.stage else { panic!("Formular erwartet") };
+            assert_eq!(fill.fields.len(), 3);
+            assert!(fill.enter_submits());
+            ui.quick.menu = Some(m);
+            frame(&mut ui, &ctx, &cx, vec![]);
+            // Esc: zurück zur Liste, das Menü bleibt offen
+            frame(&mut ui, &ctx, &cx, key(Key::Escape));
+            assert!(matches!(ui.quick.menu.as_ref().unwrap().stage, Stage::List));
+        }
+        // Version aus der Liste wählen, Terminal tippen, Enter bestätigt
+        let cx = Cx { conn: &db.conn, db: &db, lang: Lang::En };
+        let ctx = egui::Context::default();
+        let mut ui = PlanUi::default();
+        let mut m = run_status_row(&mut ui, &ctx, &cx, vec![t.id], f.progress);
+        draft_of(&mut m, 0).text = "r".into();
+        draft_of(&mut m, 1).value = serde_json::json!(rel);
+        draft_of(&mut m, 2).text = "term A".into();
+        ui.quick.menu = Some(m);
+        frame(&mut ui, &ctx, &cx, vec![]);
+        frame(&mut ui, &ctx, &cx, key(Key::Enter));
+        assert!(ui.quick.menu.is_none(), "Enter führt den Wechsel aus und schließt");
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.progress));
+        let vals = crate::planning::values::load_values(&db.conn, t.id).unwrap();
+        assert_eq!(vals.get(&version.id), Some(&serde_json::json!(rel)));
+        assert_eq!(vals.get(&term.id), Some(&serde_json::json!("term A")));
+    }
+
+    #[test]
+    fn several_tickets_share_one_form_and_each_gets_only_its_own_fields() {
+        use crate::planning::fields::{FieldKind, FieldOptions};
+        let f = Fx::new();
+        let result = f.add_field(f.task, "Result", FieldKind::Text, FieldOptions::default(), false);
+        require_on_transition(&f, f.task, result.id, f.todo, f.progress);
+        let a = f.mk(f.task, "A");
+        let b = f.mk(f.task, "B");
+        let s = f.mk(f.story, "S");
+        let db = db_of(f.c);
+        let cx = Cx { conn: &db.conn, db: &db, lang: Lang::En };
+        let ctx = egui::Context::default();
+        let mut ui = PlanUi::default();
+        let mut m = run_status_row(&mut ui, &ctx, &cx, vec![a.id, b.id], f.progress);
+        assert!(matches!(m.stage, Stage::Fill { .. }));
+        draft_of(&mut m, 0).text = "same for both".into();
+        ui.quick_submit(&cx, &mut m, chrono::Local::now().naive_local());
+        for id in [a.id, b.id] {
+            assert_eq!(get_ticket(&db.conn, id).unwrap().status_id, Some(f.progress));
+            assert_eq!(crate::planning::values::load_values(&db.conn, id).unwrap().get(&result.id), Some(&serde_json::json!("same for both")));
+        }
+        // Werte fremder Felder werden pro Ticket herausgefiltert: eine Story ohne dieses Feld bewegt sich trotzdem
+        let res = exec::run_transition_with(&db.conn, &[s.id], f.progress, &[(result.id, serde_json::json!("x"))], Lang::En);
+        assert_eq!(res.ok.len(), 1, "{:?}", res.failed);
+    }
+
+    #[test]
+    fn status_row_without_required_fields_needs_no_form() {
+        let f = Fx::new();
+        let t = f.mk(f.task, "Plain");
+        assert!(super::quick_fill::prepare(&f.c, &[t.id], f.progress, Lang::En).unwrap().is_none());
     }
 
     #[test]
