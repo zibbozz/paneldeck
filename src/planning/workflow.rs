@@ -424,6 +424,83 @@ pub(crate) fn scrub_field_refs(conn: &Connection, type_id: i64, field_id: i64) -
     Ok(())
 }
 
+/// Schreibt Zahlen-Verweise (Option, Version, Meilenstein) in den Bedingungen und Setze-Werten der Übergänge um: `map(id)` liefert
+/// `Some(Some(neu))` zum Ersetzen, `Some(None)` zum Entfernen (eine Bedingung oder ein Wert ohne Rest entfällt ganz) und `None`,
+/// wenn der Verweis bleibt. `fields` sind die Felder, deren Werte gemeint sind. Ohne das bliebe z. B. eine „erlauben“-Bedingung auf
+/// eine nicht mehr vorhandene Option für immer bestehen, und ein Setze-Wert auf eine gelöschte Version ließe jeden Wechsel in den
+/// Status mit einem Fehler scheitern.
+fn rewrite_value_refs(conn: &Connection, type_id: i64, fields: &HashSet<i64>, map: &dyn Fn(i64) -> Option<Option<i64>>) -> Res<()> {
+    let rewrite = |v: &Value| -> Option<Value> {
+        match v {
+            Value::Array(a) => {
+                let rest: Vec<Value> = a
+                    .iter()
+                    .filter_map(|x| match x.as_i64().and_then(map) {
+                        Some(Some(n)) => Some(Value::from(n)),
+                        Some(None) => None,
+                        None => Some(x.clone()),
+                    })
+                    .collect();
+                if rest.is_empty() { None } else { Some(Value::Array(rest)) }
+            }
+            other => match other.as_i64().and_then(map) {
+                Some(Some(n)) => Some(Value::from(n)),
+                Some(None) => None,
+                None => Some(other.clone()),
+            },
+        }
+    };
+    for t in list_transitions(conn, type_id)? {
+        let mut d = t.def.clone();
+        d.conditions = d
+            .conditions
+            .into_iter()
+            .filter_map(|mut c| {
+                if !fields.contains(&c.field_id) || matches!(c.op, ConditionOp::IsEmpty | ConditionOp::IsNotEmpty) {
+                    return Some(c);
+                }
+                c.value = rewrite(&c.value)?;
+                Some(c)
+            })
+            .collect();
+        d.set_values = d
+            .set_values
+            .into_iter()
+            .filter_map(|mut s| {
+                if !fields.contains(&s.field_id) {
+                    return Some(s);
+                }
+                s.value = rewrite(&s.value)?;
+                Some(s)
+            })
+            .collect();
+        if d != t.def {
+            conn.execute("UPDATE transitions SET conditions = ?1, set_values = ?2 WHERE id = ?3", params![json_of(&d.conditions), json_of(&d.set_values), t.id])?;
+        }
+    }
+    Ok(())
+}
+
+/// Entfernt gelöschte Dropdown-/Mehrfachauswahl-Optionen (`removed`) des Feldes aus den Übergangsregeln des Typs.
+pub(crate) fn scrub_option_refs(conn: &Connection, type_id: i64, field_id: i64, removed: &[i64]) -> Res<()> {
+    rewrite_value_refs(conn, type_id, &HashSet::from([field_id]), &|i| removed.contains(&i).then_some(None))
+}
+
+/// Eine gelöschte Version bzw. ein gelöschter Meilenstein (`field_kind`: `version` oder `milestone`) verschwindet aus den
+/// Übergangsregeln aller Typen oder wird durch den Ersatz `to` ersetzt.
+pub(crate) fn scrub_release_refs(conn: &Connection, field_kind: &str, from: i64, to: Option<i64>) -> Res<()> {
+    let mut st = conn.prepare("SELECT id, type_id FROM fields WHERE kind = ?1")?;
+    let rows: Vec<(i64, i64)> = st.query_map([field_kind], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+    let mut by_type: std::collections::BTreeMap<i64, HashSet<i64>> = std::collections::BTreeMap::new();
+    for (field, ty) in rows {
+        by_type.entry(ty).or_default().insert(field);
+    }
+    for (ty, fields) in by_type {
+        rewrite_value_refs(conn, ty, &fields, &|i| (i == from).then_some(to))?;
+    }
+    Ok(())
+}
+
 /// Was an einem eingeschalteten Workflow noch fehlt („komplett definiert“). Nur Hinweise – gespeichert werden darf immer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkflowProblem {

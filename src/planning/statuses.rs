@@ -160,6 +160,7 @@ pub fn delete_status(conn: &Connection, id: i64, mode: Option<DeleteMode>) -> Re
         }
         integrity::migrate_tickets_status(conn, id, to)?;
         conn.execute("DELETE FROM statuses WHERE id = ?1", [id])?;
+        super::views::boards::prune_after_delete(conn, cur.project_id)?;
         Ok(())
     })
 }

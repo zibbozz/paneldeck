@@ -151,6 +151,8 @@ pub fn export_types(conn: &Connection, project_id: i64) -> Res<TemplateDoc> {
             field_no.insert(f.id, n);
         }
     }
+    // Verweise auf Tickets, Versionen, Meilensteine und Sitzungen gelten nur in diesem Projekt: Werte und Vergleiche darauf gehören nicht in die Vorlage
+    let ref_fields: std::collections::HashSet<i64> = types.iter().flat_map(|t| t.fields.iter()).filter(|f| f.kind.is_reference()).map(|f| f.id).collect();
     let map_all = |ids: &[i64], m: &HashMap<i64, i64>| ids.iter().filter_map(|i| m.get(i).copied()).collect::<Vec<_>>();
     let mut quick: HashMap<i64, Vec<quick_tpl::TplQuickAction>> = HashMap::new();
     {
@@ -179,8 +181,14 @@ pub fn export_types(conn: &Connection, project_id: i64) -> Res<TemplateDoc> {
                         from_status_id: status_no[&x.def.from_status_id],
                         to_status_id: status_no[&x.def.to_status_id],
                         required_fields: map_all(&x.def.required_fields, &field_no),
-                        conditions: x.def.conditions.iter().filter_map(|c| field_no.get(&c.field_id).map(|n| super::workflow::Condition { field_id: *n, ..c.clone() })).collect(),
-                        set_values: x.def.set_values.iter().filter_map(|c| field_no.get(&c.field_id).map(|n| super::workflow::SetValue { field_id: *n, value: c.value.clone() })).collect(),
+                        conditions: x
+                            .def
+                            .conditions
+                            .iter()
+                            .filter(|c| !ref_fields.contains(&c.field_id) || matches!(c.op, super::workflow::ConditionOp::IsEmpty | super::workflow::ConditionOp::IsNotEmpty))
+                            .filter_map(|c| field_no.get(&c.field_id).map(|n| super::workflow::Condition { field_id: *n, ..c.clone() }))
+                            .collect(),
+                        set_values: x.def.set_values.iter().filter(|c| !ref_fields.contains(&c.field_id)).filter_map(|c| field_no.get(&c.field_id).map(|n| super::workflow::SetValue { field_id: *n, value: c.value.clone() })).collect(),
                     })
                     .collect(),
                 fields: t
