@@ -6,6 +6,7 @@
 //! * Die Farbe des gewählten Projekts ist im ganzen Reiter die Akzentfarbe ([`PlanUi::accent`], gesetzt von der Anwendung).
 //! * Jeder sichtbare Text steht in beiden Sprachen (`lang.t(de, en)`), Fehler der Datenschicht über `PlanError::message`.
 
+mod backup_ed;
 mod board_cfg;
 mod board_logic;
 mod board_view;
@@ -387,7 +388,7 @@ impl PlanUi {
         }
         v.push((Tab::Links, lang.t("Verknüpfungstypen", "Link types")));
         if !system {
-            v.extend([(Tab::WorkKinds, lang.t("Arten der Arbeit", "Kinds of work")), (Tab::Templates, lang.t("Vorlagen", "Templates"))]);
+            v.extend([(Tab::WorkKinds, lang.t("Arten der Arbeit", "Kinds of work")), (Tab::Templates, lang.t("Vorlagen & Sicherung", "Templates & backup"))]);
         }
         v
     }
