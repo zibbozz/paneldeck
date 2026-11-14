@@ -71,6 +71,10 @@ pub(super) struct Dlg {
     pub prompt: bool,
     pub cwd: bool,
     pub err: Option<String>,
+    /// Stand der Eingaben, als `err` gesetzt wurde: ändert sich etwas, ist der Fehler überholt und verschwindet.
+    pub err_fp: String,
+    /// Der Name wurde schon bearbeitet: erst dann erscheint „Der Name darf nicht leer sein.“ in Rot (nicht gleich beim Öffnen).
+    pub touched: bool,
 }
 
 impl Dlg {
@@ -91,6 +95,8 @@ impl Dlg {
             prompt: false,
             cwd: false,
             err: None,
+            err_fp: String::new(),
+            touched: false,
         }
     }
 
@@ -146,9 +152,32 @@ impl Dlg {
         if self.default_name.as_deref() == Some(self.name.as_str()) { None } else { Some(self.name.clone()) }
     }
 
+    /// Fehlt der Name noch (und die Aktion hat keinen Standardnamen)?
+    pub fn name_missing(&self) -> bool {
+        self.name.trim().is_empty() && !self.has_key
+    }
+
+    /// Stand der Eingaben für die Erkennung „seit dem Fehler geändert“.
+    fn fingerprint(&self) -> String {
+        format!("{}|{:?}", self.name, self.params())
+    }
+
+    /// Fehler des letzten Speicherversuchs merken (samt Stand der Eingaben).
+    pub fn set_err(&mut self, e: String) {
+        self.err = Some(e);
+        self.err_fp = self.fingerprint();
+    }
+
+    /// Hat sich seit dem Fehler etwas geändert, ist er überholt: entfernen.
+    pub fn drop_stale_err(&mut self) {
+        if self.err.is_some() && self.err_fp != self.fingerprint() {
+            self.err = None;
+        }
+    }
+
     /// Live-Prüfung: Fehlertext der Datenschicht (zweisprachig) oder `None`.
     pub fn problem(&self, conn: &rusqlite::Connection, lang: Lang) -> Option<String> {
-        if self.name.trim().is_empty() && !self.has_key {
+        if self.name_missing() {
             return Some(crate::planning::PlanError::NameEmpty.message(lang));
         }
         validate_params(conn, self.type_id, &self.params()).err().map(|e| e.message(lang))
@@ -417,7 +446,9 @@ impl PlanUi {
                 hint(ui, kind_hint(d.kind, lang));
                 ui.add_space(S1);
                 ui.label(RichText::new(lang.t("Name (Text im Menü)", "Name (text in the menu)")).strong());
-                ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(8, 5)));
+                if ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(8, 5))).changed() {
+                    d.touched = true;
+                }
                 if d.default_name.is_some() {
                     hint(ui, lang.t("Standardname – er wird automatisch übersetzt, bis du ihn änderst.", "Default name – it is translated automatically until you change it."));
                 }
@@ -429,8 +460,17 @@ impl PlanUi {
                 }
             });
             ui.add_space(S2);
-            if let Some(e) = d.err.as_ref().or(problem.as_ref()) {
+            d.drop_stale_err();
+            if let Some(e) = d.err.as_ref() {
                 ui.horizontal_wrapped(|ui| widgets::error(ui, e));
+                ui.add_space(S1);
+            } else if let Some(p) = problem.as_ref() {
+                // ein noch leerer Name ist beim Öffnen kein Fehler, sondern ein Hinweis (das Speichern bleibt gesperrt)
+                if d.name_missing() && !d.touched {
+                    hint(ui, p);
+                } else {
+                    ui.horizontal_wrapped(|ui| widgets::error(ui, p));
+                }
                 ui.add_space(S1);
             }
             ui.horizontal(|ui| {
@@ -458,7 +498,7 @@ impl PlanUi {
                     self.msg = None;
                     return;
                 }
-                Err(e) => d.err = Some(e.message(lang)),
+                Err(e) => d.set_err(e.message(lang)),
             }
         }
         if !close {
@@ -703,6 +743,27 @@ mod tests {
         assert!(c.problem(&f.c, Lang::En).unwrap().contains("Claude"), "Prompt braucht Claude");
         c.claude = true;
         assert_eq!(c.problem(&f.c, Lang::En), None);
+    }
+
+    #[test]
+    fn an_empty_name_is_a_hint_until_edited_and_a_stale_save_error_disappears_after_a_change() {
+        let f = fx();
+        let mut d = dlg(&f, ActionKind::ChangeStatus);
+        // frisch geöffnet: Name fehlt, aber noch nicht bearbeitet (die Oberfläche zeigt dann nur einen Hinweis)
+        assert!(d.name_missing() && !d.touched && d.problem(&f.c, Lang::En).is_some());
+        d.name = "Done".into();
+        assert!(!d.name_missing());
+        // Fehler des Speicherversuchs bleibt, solange nichts geändert wird, und verschwindet nach der ersten Änderung
+        d.set_err("Boom".into());
+        d.drop_stale_err();
+        assert_eq!(d.err.as_deref(), Some("Boom"));
+        d.name.push('!');
+        d.drop_stale_err();
+        assert_eq!(d.err, None);
+        d.set_err("Boom".into());
+        d.to_status += 1;
+        d.drop_stale_err();
+        assert_eq!(d.err, None, "auch eine geänderte Auswahl macht den Fehler überholt");
     }
 
     #[test]

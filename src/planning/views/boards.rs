@@ -328,9 +328,24 @@ pub fn default_board_for(conn: &Connection, project_id: i64, lang: Lang) -> Res<
     Ok(NewBoard {
         project_id,
         name: lang.t("Board", "Board").to_string(),
-        description: lang.t("Alle Status der Workflows des Projekts.", "All statuses of the project's workflows.").to_string(),
+        description: default_description(lang).to_string(),
         config,
     })
+}
+
+/// Beschreibung des Standard-Boards in der Sprache `lang`.
+fn default_description(lang: Lang) -> &'static str {
+    lang.t("Alle Status der Workflows des Projekts.", "All statuses of the project's workflows.")
+}
+
+/// Beschreibung zur Anzeige: Der Text des Standard-Boards wird beim Anlegen in der damaligen Sprache gespeichert; steht er
+/// unverändert da (in einer der beiden Sprachen), erscheint er in der aktuellen Sprache. Eigene Texte bleiben unberührt.
+pub fn display_description(description: &str, lang: Lang) -> String {
+    if description == default_description(Lang::De) || description == default_description(Lang::En) {
+        default_description(lang).to_string()
+    } else {
+        description.to_string()
+    }
 }
 
 /// Legt das Standard-Board an, wenn das Projekt noch kein Board hat; sonst das erste Board. Liefert die Board-Kennung.
@@ -659,6 +674,16 @@ mod tests {
         assert_eq!(get_board(&c, id).unwrap().config, nb.config);
         assert_eq!(default_board_for(&c, p, Lang::De).unwrap().name, "Board");
         assert_ne!(default_board_for(&c, p, Lang::De).unwrap().description, nb.description);
+    }
+
+    #[test]
+    fn the_default_description_is_shown_in_the_current_language_but_custom_text_stays() {
+        let en = default_description(Lang::En).to_string();
+        assert_eq!(display_description(&en, Lang::De), default_description(Lang::De));
+        assert_eq!(display_description(default_description(Lang::De), Lang::En), en);
+        assert_eq!(display_description(&en, Lang::En), en);
+        assert_eq!(display_description("Mein Text", Lang::De), "Mein Text");
+        assert_eq!(display_description("", Lang::De), "");
     }
 
     #[test]
