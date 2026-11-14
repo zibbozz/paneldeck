@@ -395,10 +395,13 @@ pub fn prune_board_refs(conn: &Connection, project_id: i64) -> Res<usize> {
 /// Kennungen des Gelöschten (leere Spalte, Typ-Filter ohne Treffer, Board lässt sich nicht mehr speichern).
 pub(crate) fn prune_after_delete(conn: &Connection, project_id: i64) -> Result<(), crate::planning::PlanError> {
     match prune_board_refs(conn, project_id) {
-        Ok(_) => Ok(()),
-        Err(ViewError::Plan(e)) => Err(e),
-        Err(other) => Err(crate::planning::PlanError::Db(other.message(crate::state::lang()))),
+        Ok(_) => {}
+        Err(ViewError::Plan(e)) => return Err(e),
+        Err(other) => return Err(crate::planning::PlanError::Db(other.message(crate::state::lang()))),
     }
+    // Schnellaktionen verweisen ebenfalls auf Status, Typen und Felder: Verwaistes reparieren bzw. als ungültig markieren.
+    crate::planning::quick::actions::prune_quick_action_refs(conn, crate::planning::quick::actions::PruneScope::Project(project_id))?;
+    Ok(())
 }
 
 /// Wie [`prune_board_refs`] für alle Projekte (z. B. nach dem Löschen eines globalen Filters).
