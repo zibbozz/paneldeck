@@ -13,7 +13,8 @@
 //!   Wird die Sitzung neu gestartet oder die App neu gestartet (gleiche ID), ist die Verknüpfung automatisch wieder aktiv.
 //! * **Sichtbarkeit:** Alles hier erscheint nur, wenn der Expertenmodus an ist und es mindestens ein Experten-Projekt gibt
 //!   (das schreibgeschützte Todolist-Projekt zählt nicht); sonst bleibt der Terminal Hub unverändert.
-//! * **Ticket öffnen:** [`App::request_open_ticket`] ist vorerst ein Stub (Todolist-Reiter aktivieren, Ticket merken).
+//! * **Ticket öffnen:** [`App::open_ticket_from_anywhere`] schaltet auf den Todolist-Reiter und öffnet das Ticket in der Ticket-Ansicht
+//!   (Projektwechsel, Expertenmodus bei Bedarf); die Navigation steht in `planning_ui/ticket_nav.rs`.
 
 use super::*;
 use crate::planning::history::Source;
@@ -71,6 +72,26 @@ static LIVE: Mutex<Vec<LiveSession>> = Mutex::new(Vec::new());
 
 fn live() -> Vec<LiveSession> {
     LIVE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Gewünschter Sprung zu einer Sitzung (aus der Ticket-Ansicht): die Oberfläche der Todo-Liste kennt die Anwendung nicht und
+/// legt den Wunsch hier ab; `App::tlinks_frame` holt ihn im nächsten Bild ab.
+static JUMP: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Merkt den Sprung zur Sitzung `session` (Klick auf den Terminal-Chip eines Felds).
+pub fn request_jump(session: u64) {
+    *JUMP.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
+}
+
+/// Holt den gemerkten Sprung ab (einmalig).
+pub fn take_jump() -> Option<u64> {
+    JUMP.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Nur für Tests: setzt die Liste der Sitzungen, wie sie die Anwendung jedes Bild veröffentlicht.
+#[cfg(test)]
+pub fn set_live_for_test(sessions: Vec<LiveSession>) {
+    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = sessions;
 }
 
 /// Zustand der Verknüpfung mit diesem Ziel (siehe Modul-Doku). Nur im UI-Thread der App sinnvoll.
@@ -202,21 +223,12 @@ pub struct TLinks {
     dirty: bool,
     picker: Option<Picker>,
     pal: Option<(String, Instant, Vec<Hit>)>,
-    /// Vom Stub [`App::request_open_ticket`] gemerktes Ticket; die Ticket-Ansicht holt es mit [`TLinks::take_requested`].
-    #[allow(dead_code)] // wird mit der Ticket-Ansicht gelesen
-    requested: Option<i64>,
 }
 
 impl TLinks {
     /// Chips der Sitzung (leer, wenn die Funktion aus ist).
     pub(super) fn chips_of(&self, session: u64) -> &[Chip] {
         if self.enabled { self.chips.get(&session).map(Vec::as_slice).unwrap_or(&[]) } else { &[] }
-    }
-
-    /// Das zuletzt per [`App::request_open_ticket`] gewünschte Ticket (einmalig).
-    #[allow(dead_code)] // API für die Ticket-Ansicht
-    pub fn take_requested(&mut self) -> Option<i64> {
-        self.requested.take()
     }
 }
 
@@ -465,7 +477,7 @@ pub(super) fn chip_row(ui: &mut Ui, salt: Id, session: u64, chips: &[Chip], righ
 
 impl App {
     /// Pro Bild: Sitzungen veröffentlichen und die Chips ab und zu (oder nach einer Änderung) neu laden.
-    pub(super) fn tlinks_frame(&mut self) {
+    pub(super) fn tlinks_frame(&mut self, ctx: &egui::Context) {
         let sessions: Vec<LiveSession> = self
             .entries
             .values()
@@ -476,6 +488,10 @@ impl App {
             })
             .collect();
         *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = sessions;
+        // Sprung aus einem Terminal-Feld der Ticket-Ansicht (Klick auf den Chip).
+        if let Some(id) = take_jump() {
+            self.open_session_from_ticket(ctx, id);
+        }
 
         if !self.tlinks.dirty && self.tlinks.stamp.is_some_and(|t| t.elapsed() < Duration::from_millis(1000)) {
             return;
@@ -493,11 +509,15 @@ impl App {
         self.tlinks.chips = if self.tlinks.enabled { build_chips(&db.conn, lang) } else { HashMap::new() };
     }
 
-    /// Ticket in der Ticket-Ansicht öffnen. **Stub:** aktiviert nur den Todolist-Reiter und merkt das Ticket
-    /// ([`TLinks::take_requested`]); die Verdrahtung auf die Detailseite folgt.
-    pub(super) fn request_open_ticket(&mut self, ticket_id: i64) {
+    /// Ticket in der Ticket-Ansicht öffnen, von überall (Chip, Befehls-Palette, Mini-Suche): schaltet auf den Todolist-Reiter der
+    /// Titelleiste und meldet das Ticket an; `PlanUi::header` öffnet es im selben Bild (Projektwechsel, Seite oder Panel je nach
+    /// Modus, Expertenmodus wird bei Bedarf eingeschaltet). Ohne Datenbank passiert nichts.
+    pub(super) fn open_ticket_from_anywhere(&mut self, ticket_id: i64) {
+        if self.db.is_none() {
+            return;
+        }
         self.set_mode(titlebar::Mode::Tasks);
-        self.tlinks.requested = Some(ticket_id);
+        self.plan.request_open_ticket(ticket_id);
     }
 
     /// Zur Sitzung springen (aus der Ticket-Ansicht): schaltet auf den Terminal Hub und aktiviert die Sitzung.

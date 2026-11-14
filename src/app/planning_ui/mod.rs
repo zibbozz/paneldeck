@@ -32,6 +32,7 @@ mod quick_menu;
 mod query_bar;
 mod query_help_ui;
 mod query_logic;
+mod ref_inputs;
 mod release_view;
 mod saved_filters;
 mod search_logic;
@@ -53,6 +54,9 @@ mod ticket_data;
 mod ticket_dialogs;
 mod ticket_draft;
 mod ticket_inputs;
+mod ticket_nav;
+#[cfg(test)]
+mod ticket_nav_tests;
 mod ticket_query;
 mod ticket_state;
 mod ticket_tab;
@@ -306,6 +310,8 @@ impl PlanUi {
         if self.dirty {
             self.reload(&cx);
         }
+        // Ticket aus dem Terminal Hub (Chip, Palette, Mini-Suche): vor dem Lesen des Expertenmodus öffnen, es kann ihn einschalten
+        self.run_requested_open(&cx);
         let fill = env.bg;
         let mut new_project = false;
         let mut pick: Option<i64> = None;
@@ -481,6 +487,8 @@ impl PlanUi {
                     if style::tab(ui, label, self.tab == *t).clicked() {
                         self.tab = *t;
                         self.msg = None;
+                        // von Hand gewechselt: der Rückweg des Tickets (Board, Backlog …) gilt nicht mehr
+                        self.tickets.return_tab = None;
                     }
                 }
             });

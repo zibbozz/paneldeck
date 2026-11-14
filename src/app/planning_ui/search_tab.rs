@@ -6,8 +6,8 @@
 //! * [`PlanUi::run_search`] bekommt jede abgeschickte Abfrage (Leiste, gespeicherter Filter, Hilfeseite) und merkt sie; der Reiter führt sie
 //!   im nächsten Bild über [`Results`] aus (Hintergrund-Faden mit eigener Verbindung, siehe `search_run`).
 //! * [`PlanUi::open_search_query`]: Abfrage von außen in die Suche übernehmen **und ausführen** (Hilfeseite „In Suche übernehmen“, später
-//!   „Filter öffnen“ der Dashboards).
-//! * [`PlanUi::request_open_search_ticket`] (leer): ein Klick auf eine Ergebniszeile; die Navigation zum Ticket kommt später.
+//!   „Filter öffnen“ der Dashboards über `open_search_in_project`).
+//! * Ein Klick auf eine Ergebniszeile öffnet das Ticket über die zentrale Navigation (`PlanUi::open_ticket`, `ticket_nav.rs`).
 //!
 //! **Schema:** Die Leiste benutzt `planning::search::search_schema` (Felder des Bereichs, Sprints, Versionen, Schlüsselwörter). Der Bereich
 //! ist das gewählte Projekt oder „alle Projekte“; beim Umschalten ändert sich das Schema und die Abfrage läuft neu. Gleichnamige Felder
@@ -148,7 +148,7 @@ impl PlanUi {
         };
         let o = self.search.res.draw(ui, &cfg, self.search.scope_all);
         if let Some(id) = o.open {
-            self.request_open_search_ticket(id);
+            self.open_ticket(cx, id);
         }
         if let Some((id, is_star, on)) = o.mark {
             let r = if is_star { set_starred(cx.conn, id, on, &Source::ui()) } else { set_flagged(cx.conn, id, on, &Source::ui()) };
@@ -172,12 +172,6 @@ impl PlanUi {
         self.search.bar.set_query(query);
         self.show_search_tab();
         self.run_search(query);
-    }
-
-    /// Einsprung „Ticket öffnen“ (Klick auf eine Ergebniszeile oder „Öffnen“ im Kontextmenü). Bleibt leer, bis die Navigation zur
-    /// Ticket-Detailseite angebunden ist.
-    pub(super) fn request_open_search_ticket(&mut self, _ticket_id: i64) {
-        // TODO tickets-ui: hier die Detailseite des Tickets öffnen.
     }
 
     /// Den Schlüsselwort-Dialog zeichnen (aus `dialogs`); Änderungen machen das Schema der Leiste ungültig.

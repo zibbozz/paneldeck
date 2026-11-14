@@ -2,6 +2,7 @@
 //! Typ ändern / in ein anderes Projekt verschieben, Zeit erfassen, Todo in Ticket umwandeln, Bestätigungen.
 
 use super::helpers::color_of;
+use super::ref_inputs::{release_label, terminal_text};
 use super::ticket_draft::{group_sections, Draft};
 use super::ticket_inputs::{dot_item, field_block, InCx};
 use super::ticket_state::countdown_secs;
@@ -15,6 +16,7 @@ use crate::planning::comments::delete_comment;
 use crate::planning::fields::{list_fields, Field, FieldKind};
 use crate::planning::history::Source;
 use crate::planning::projects::list_projects;
+use crate::planning::sprints::releases::ReleaseKind;
 use crate::planning::ticket_error::{FieldLabel, TicketError};
 use crate::planning::tickets::{delete_impact, delete_ticket, get_ticket, DeleteImpact};
 use crate::planning::time_entries::{default_work_kind, delete_time_entry, edit_time_entry, get_time_entry, log_time, StartInput, TimeEdit};
@@ -35,7 +37,9 @@ use std::time::Instant;
 pub fn preview_value(conn: &rusqlite::Connection, f: &Field, v: &Value, lang: Lang) -> String {
     let s = match f.kind {
         FieldKind::Ticket => v.as_i64().and_then(|id| get_ticket(conn, id).ok()).map(|t| format!("{} {}", t.key(), t.title)).unwrap_or_else(|| "–".to_string()),
-        FieldKind::Version | FieldKind::Milestone => v.as_i64().map(|i| format!("#{i}")).unwrap_or_default(),
+        FieldKind::Version => v.as_i64().map(|i| release_label(conn, ReleaseKind::Version, i)).unwrap_or_default(),
+        FieldKind::Milestone => v.as_i64().map(|i| release_label(conn, ReleaseKind::Milestone, i)).unwrap_or_default(),
+        FieldKind::Terminal => v.as_str().map(|s| terminal_text(s, lang)).unwrap_or_default(),
         FieldKind::Datetime => v.as_str().map(super::ticket_draft::datetime_text).unwrap_or_default(),
         _ => show_value(f.kind, &f.options, v, lang),
     };
@@ -321,7 +325,7 @@ impl PlanUi {
                     self.tickets.forget_tickets(&[dlg.ticket]);
                     self.tickets.back.retain(|b| *b != dlg.ticket);
                     if self.tickets.open == Some(dlg.ticket) {
-                        self.tickets.go_back();
+                        self.ticket_back();
                     }
                     self.tickets.invalidate();
                     self.dirty = true;

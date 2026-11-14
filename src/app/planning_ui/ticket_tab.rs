@@ -3,6 +3,7 @@
 //! zum Auswerten von Änderungen der Datenschicht.
 
 use super::helpers::color_of;
+use super::quick_menu::QuickTarget;
 use super::ticket_data::{load_rows, Row};
 use super::ticket_state::{sort_rows, Filters, SortCol, SortCtx, ViewMode};
 use super::widgets;
@@ -139,7 +140,7 @@ impl PlanUi {
                 Err(e) if e.is_not_found() => {
                     // das Ticket gibt es nicht mehr (gelöscht, Undo des Anlegens …)
                     self.tickets.back.retain(|b| *b != id);
-                    self.tickets.go_back();
+                    self.ticket_back();
                 }
                 Err(e) => self.t_fail(cx, &e),
             }
@@ -159,7 +160,7 @@ impl PlanUi {
     /// Strg+N (neues Ticket), Strg+Z / Strg+Y (rückgängig/wiederholen), Esc (zurück) im Ticketbereich.
     pub(super) fn ticket_keys(&mut self, ctx: &egui::Context, cx: &Cx) {
         let Some(sum) = self.sum.clone() else { return };
-        if sum.project.system || self.tab != Tab::Tickets || self.tickets.any_modal() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() {
+        if sum.project.system || self.tab != Tab::Tickets || self.tickets.any_modal() || self.quick.is_open() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::N)) {
@@ -180,7 +181,10 @@ impl PlanUi {
         } else if redo {
             self.ticket_undo(cx, true);
         } else if esc && self.tickets.open.is_some() {
-            self.tickets.go_back();
+            self.ticket_back();
+        } else if let Some(id) = super::ticket_nav::quick_target(self.tickets.open, self.tickets.mode, self.tickets.hover) {
+            // Taste „.“: Schnellmenü für das geöffnete Ticket bzw. die Zeile unter dem Mauszeiger
+            self.quick_shortcut(ctx, &[QuickTarget { ticket_id: id }]);
         }
     }
 
@@ -213,6 +217,7 @@ impl PlanUi {
     pub(super) fn tickets_tab(&mut self, ui: &mut Ui, cx: &Cx, proj: &Project) {
         let lang = cx.lang;
         let Some(sum) = self.sum.clone() else { return };
+        self.tickets.hover = None;
         // Fehler (nicht Erfolg) über der Liste
         if let Some(m) = self.msg.as_ref().filter(|m| !m.ok) {
             let t = m.text.clone();
@@ -383,6 +388,9 @@ impl PlanUi {
         let open = self.tickets.open;
         let mut click: Option<i64> = None;
         let mut mark: Option<(i64, bool, bool)> = None; // (Ticket, Stern?, neuer Wert)
+        let mut quick: Option<i64> = None;
+        self.tickets.hover = None;
+        let mut hover: Option<i64> = None;
         ui.spacing_mut().item_spacing.y = 0.0;
         egui::ScrollArea::vertical().id_salt("ticket_rows").auto_shrink([false, false]).show_rows(ui, ROW_H, n, |ui, range| {
             for i in range {
@@ -477,11 +485,29 @@ impl PlanUi {
                 if resp.clicked() && !hit_mark {
                     click = Some(t.id);
                 }
-                resp.on_hover_text(&t.title);
+                if resp.hovered() {
+                    hover = Some(t.id);
+                }
+                let tid = t.id;
+                resp.on_hover_text(&t.title).context_menu(|ui| {
+                    if ui.button(lang.t("Öffnen", "Open")).clicked() {
+                        click = Some(tid);
+                        ui.close();
+                    }
+                    if ui.button(format!("{} (.)", lang.t("Schnellmenü …", "Quick menu …"))).clicked() {
+                        quick = Some(tid);
+                        ui.close();
+                    }
+                });
             }
         });
+        self.tickets.hover = hover;
+        if let Some(id) = quick {
+            self.open_quick_menu(vec![id]);
+        }
         if let Some(id) = click {
             self.tickets.open_ticket(id, false);
+            self.tickets.return_tab = None;
         }
         if let Some((id, is_star, on)) = mark {
             let r = if is_star { set_starred(cx.conn, id, on, &Source::ui()) } else { set_flagged(cx.conn, id, on, &Source::ui()) };
