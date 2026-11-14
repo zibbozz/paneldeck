@@ -41,6 +41,13 @@ impl ToastKind {
     }
 }
 
+/// Ein Knopf im Toast; `token` ordnet den Klick dem Auslöser zu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToastAction {
+    pub label: String,
+    pub token: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Toast {
     pub id: u64,
@@ -49,6 +56,8 @@ pub struct Toast {
     /// Zielhinweis (z. B. Sitzungs- oder Ticket-Kennung) als Text. Hook für später:
     /// Klick darauf soll einmal dorthin springen; heute wird er nur angezeigt.
     pub target: Option<String>,
+    /// Knopf unter dem Text (z. B. „Rückgängig“); Klick meldet `token` an die Anwendung.
+    pub action: Option<ToastAction>,
     /// Zeitpunkt des Erscheinens (Sekunden der injizierten Uhr).
     born: f64,
     /// Bisher angezeigte Zeit ohne Pausen.
@@ -85,11 +94,16 @@ impl ToastQueue {
 
     /// Neuen Toast ganz unten einreihen. Sind schon `MAX_TOASTS` aktiv, wird der älteste verdrängt.
     pub fn push(&mut self, now: f64, text: String, kind: ToastKind, target: Option<String>) -> u64 {
+        self.push_with_action(now, text, kind, target, None)
+    }
+
+    /// Wie [`ToastQueue::push`], mit einem Knopf (z. B. „Rückgängig“).
+    pub fn push_with_action(&mut self, now: f64, text: String, kind: ToastKind, target: Option<String>, action: Option<ToastAction>) -> u64 {
         // Zeit nachziehen, damit die Pause-Rechnung nicht rückwirkend auf den neuen Toast fällt.
         self.last_tick = self.last_tick.max(now);
         let id = self.next_id;
         self.next_id += 1;
-        self.items.push(Toast { id, text, kind, target, born: now, age: 0.0, closing: None });
+        self.items.push(Toast { id, text, kind, target, action, born: now, age: 0.0, closing: None });
         while self.active_len() > MAX_TOASTS {
             if let Some(old) = self.items.iter_mut().find(|t| t.closing.is_none()) {
                 old.closing = Some(now);
@@ -175,9 +189,14 @@ impl App {
 
     /// Toast mit Art und optionalem Zielhinweis (z. B. Sitzungs-/Ticket-Kennung) anzeigen.
     pub(super) fn push_toast(&mut self, text: String, kind: ToastKind, target: Option<String>) {
+        self.push_toast_action(text, kind, target, None);
+    }
+
+    /// Toast mit Knopf (z. B. „Rückgängig“); ein Klick darauf landet in `toast_clicked` (siehe `toasts_ui`).
+    pub(super) fn push_toast_action(&mut self, text: String, kind: ToastKind, target: Option<String>, action: Option<ToastAction>) {
         let now = self.toasts_epoch.elapsed().as_secs_f64();
         self.toasts.set_fade_out(if self.settings.animations { FADE_OUT } else { 0.0 });
-        self.toasts.push(now, text, kind, target);
+        self.toasts.push_with_action(now, text, kind, target, action);
     }
 
     /// Toasts zeichnen (am Ende von `update`): rechts unten, neueste ganz unten, ältere darüber.
@@ -199,18 +218,19 @@ impl App {
         let pointer = ctx.input(|i| i.pointer.hover_pos());
 
         // Momentaufnahme (neueste zuerst = unterste Position; die Höhe wird je Toast beim Zeichnen gemessen), damit beim Zeichnen nichts geliehen bleibt.
-        let snap: Vec<(u64, String, ToastKind, Option<String>, f32)> = self
+        let snap: Vec<(u64, String, ToastKind, Option<String>, Option<ToastAction>, f32)> = self
             .toasts
             .items()
             .iter()
             .rev()
-            .map(|t| (t.id, t.text.clone(), t.kind, t.target.clone(), self.toasts.alpha(t, now)))
+            .map(|t| (t.id, t.text.clone(), t.kind, t.target.clone(), t.action.clone(), self.toasts.alpha(t, now)))
             .collect();
 
         let mut clicked: Option<u64> = None;
+        let mut action_token: Option<u64> = None;
         let mut new_hover: Option<u64> = None;
         let mut offset = EDGE;
-        for (id, text, kind, target, alpha) in snap {
+        for (id, text, kind, target, action, alpha) in snap {
             // Stapelposition weich nachführen (rückt auf, wenn darunter einer verschwindet).
             let y = if animate { ctx.animate_value_with_time(Id::new(("toast-y", id)), offset, style::D_BASE) } else { offset };
             let slide = if animate { (1.0 - alpha) * 14.0 } else { 0.0 };
@@ -228,6 +248,8 @@ impl App {
                     .corner_radius(CornerRadius::same(RADIUS))
                     .shadow(vis.popup_shadow)
                     .inner_margin(Margin { left: 16, right: 12, top: 8, bottom: 8 });
+                let mut action_hit = false;
+                let mut button_top: Option<f32> = None;
                 let r = frame.show(ui, |ui| {
                     ui.set_min_width(WIDTH_MIN);
                     ui.set_max_width(WIDTH_MAX);
@@ -235,8 +257,17 @@ impl App {
                     if let Some(tg) = &target {
                         ui.add(egui::Label::new(RichText::new(tg).small().color(vis.weak_text_color())).wrap());
                     }
+                    if let Some(a) = &action {
+                        ui.add_space(4.0);
+                        let b = ui.add(egui::Button::new(RichText::new(&a.label).small()).small());
+                        button_top = Some(b.rect.top());
+                        action_hit = b.clicked();
+                    }
                 });
                 let rect = r.response.rect;
+                if action_hit {
+                    action_token = action.as_ref().map(|a| a.token);
+                }
                 // Akzentstreifen links (folgt der Rundung der Ecken).
                 let strip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + STRIP, rect.max.y));
                 ui.painter().rect_filled(
@@ -244,11 +275,16 @@ impl App {
                     CornerRadius { nw: RADIUS, sw: RADIUS, ne: 0, se: 0 },
                     kind.color().gamma_multiply(alpha),
                 );
-                let resp = ui.interact(rect, Id::new(("toast-hit", id)), Sense::click());
-                (rect, resp.on_hover_text(tip))
+                // Der Knopf bleibt frei: nur der Bereich darüber schließt den Toast per Klick.
+                let hit = match button_top {
+                    Some(top) => egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, top - 2.0)),
+                    None => rect,
+                };
+                let resp = ui.interact(hit, Id::new(("toast-hit", id)), Sense::click());
+                (rect, resp.on_hover_text(tip), action_hit)
             });
-            let (rect, resp) = out.inner;
-            if resp.clicked() {
+            let (rect, resp, hit_action) = out.inner;
+            if resp.clicked() || hit_action {
                 // Hook: Klick auf einen Toast mit Zielhinweis soll später dorthin springen (#50).
                 clicked = Some(id);
             }
@@ -260,6 +296,9 @@ impl App {
         self.toasts_hover = new_hover;
         if let Some(id) = clicked {
             self.toasts.dismiss(now, id);
+        }
+        if let Some(t) = action_token {
+            self.toast_action_clicked(ctx, t);
         }
         // Für Ein-/Ausblenden und den Ablauf alle ~33 ms neu zeichnen, solange Toasts stehen.
         ctx.request_repaint_after(Duration::from_millis(33));
@@ -286,6 +325,15 @@ mod tests {
         assert_eq!(texts(&q), ["a", "b"]);
         assert_eq!(q.items()[1].kind, ToastKind::Warning);
         assert_eq!(q.items()[1].target.as_deref(), Some("S1"));
+    }
+
+    #[test]
+    fn toast_can_carry_an_action_button() {
+        let mut q = q();
+        q.push(0.0, "plain".into(), ToastKind::Info, None);
+        q.push_with_action(0.1, "undoable".into(), ToastKind::Info, None, Some(ToastAction { label: "Undo".into(), token: 7 }));
+        assert_eq!(q.items()[0].action, None);
+        assert_eq!(q.items()[1].action, Some(ToastAction { label: "Undo".into(), token: 7 }));
     }
 
     #[test]
