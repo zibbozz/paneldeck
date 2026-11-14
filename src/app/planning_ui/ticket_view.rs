@@ -11,7 +11,7 @@ use super::ticket_draft::group_sections;
 use super::ticket_inputs::{dot_item, field_block, open_url, ticket_search, InCx};
 use super::ticket_state::{ViewMode, ViewState};
 use super::widgets;
-use super::{Cx, PlanUi, Tab};
+use super::{Cx, PlanUi};
 use crate::calc::duration::{format_duration, DEFAULT_WORK_HOURS_PER_DAY};
 use crate::markdown::{parse, render, rich_text_field_ex, FieldMode, FieldOpts, RenderOpts};
 use crate::planning::comments::{add_comment, edit_comment, Comment};
@@ -34,6 +34,8 @@ const FLAG_RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
 pub(super) enum Act {
     Back,
     Close,
+    /// Schnellmenü („.“) für dieses Ticket öffnen.
+    Quick,
     SetMode(ViewMode),
     /// Ticket über den Schlüssel öffnen (`PAN-12`).
     OpenKey(String),
@@ -71,6 +73,8 @@ pub(super) struct VCx<'a> {
     pub panel: bool,
     /// Es gibt ein vorheriges Ticket (Navigation über Verweise).
     pub has_back: bool,
+    /// Name des Reiters, zu dem „Zurück“ führt (Board, Backlog …), wenn das Ticket von dort geöffnet wurde.
+    pub back_to: Option<&'static str>,
 }
 
 // ------------------------------------------------------------------ Werkzeug-Icons
@@ -220,7 +224,7 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
             if style::icon_btn(ui, style::Icon::Close, lang.t("Schließen (Esc)", "Close (Esc)"), false).clicked() {
                 acts.push(Act::Close);
             }
-        } else if tool_btn(ui, Tool::Back, if vc.has_back { lang.t("Zurück zum vorherigen Ticket (Esc)", "Back to the previous ticket (Esc)") } else { lang.t("Zurück zur Liste (Esc)", "Back to the list (Esc)") }, false, None).clicked() {
+        } else if tool_btn(ui, Tool::Back, &back_tip(lang, vc.has_back, vc.back_to), false, None).clicked() {
             acts.push(Act::Back);
         }
         if vc.panel && vc.has_back && tool_btn(ui, Tool::Back, lang.t("Zurück zum vorherigen Ticket", "Back to the previous ticket"), false, None).clicked() {
@@ -238,6 +242,10 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
         ui.label(RichText::new(t.key()).monospace().strong());
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.menu_button(RichText::new("⋯").strong(), |ui| {
+                if ui.button(format!("{} (.)", lang.t("Schnellmenü …", "Quick menu …"))).clicked() {
+                    acts.push(Act::Quick);
+                    ui.close();
+                }
                 if ui.button(lang.t("Klonen …", "Clone …")).clicked() {
                     acts.push(Act::Clone);
                     ui.close();
@@ -308,6 +316,11 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
                     }
                     if let Some(k) = ev.open_key {
                         acts.push(Act::OpenKey(k));
+                    }
+                    if let Some(s) = ev.open_session {
+                        // Die Anwendung holt den Sprung im nächsten Bild ab (siehe `terminal_links::request_jump`).
+                        crate::app::terminal_links::request_jump(s);
+                        ui.ctx().request_repaint();
                     }
                 }
             };
@@ -807,7 +820,7 @@ impl PlanUi {
         }
         let prefixes: Vec<String> = self.projects.iter().map(|p| p.key.clone()).collect();
         let labels = std::mem::take(&mut self.tickets.labels);
-        let vc = VCx { conn: cx.conn, lang, link_types: &self.links, prefixes: &prefixes, labels: &labels, mode: self.tickets.mode, panel, has_back: !self.tickets.back.is_empty() };
+        let vc = VCx { conn: cx.conn, lang, link_types: &self.links, prefixes: &prefixes, labels: &labels, mode: self.tickets.mode, panel, has_back: !self.tickets.back.is_empty(), back_to: self.back_target_label(lang) };
         let mut acts: Vec<Act> = Vec::new();
         if let Some(m) = self.msg.as_ref().filter(|m| !m.ok) {
             let text = m.text.clone();
@@ -838,10 +851,9 @@ impl PlanUi {
         let Some(tid) = self.tickets.open else { return };
         let src = Source::ui();
         match act {
-            Act::Back => {
-                self.tickets.go_back();
-            }
-            Act::Close => self.tickets.close(),
+            Act::Back => self.ticket_back(),
+            Act::Close => self.ticket_close(),
+            Act::Quick => self.open_quick_menu(vec![tid]),
             Act::SetMode(m) => {
                 self.tickets.mode = m;
                 cx.db.set_meta("ticket_view_mode", m.as_str());
@@ -954,19 +966,16 @@ impl PlanUi {
             },
         }
     }
+}
 
-    /// Ein Ticket öffnen, auch wenn es in einem anderen Projekt liegt (Verweise, Verknüpfungen, Eltern).
-    pub(super) fn open_ticket_anywhere(&mut self, cx: &Cx, id: i64, project: i64) {
-        let back = self.tickets.open;
-        if project != self.selected {
-            self.select(cx, project);
-            // der Projektwechsel räumt die Navigation auf; das bisherige Ticket bleibt für „Zurück“ nicht erhalten
-            self.tab = Tab::Tickets;
-            self.tickets.open_ticket(id, false);
-            self.tickets.invalidate();
-            return;
-        }
-        self.tab = Tab::Tickets;
-        self.tickets.open_ticket(id, back.is_some());
+/// Hinweistext des Zurück-Pfeils: vorheriges Ticket, Ursprungs-Reiter (Board, Backlog …) oder Liste.
+fn back_tip(lang: Lang, has_back: bool, back_to: Option<&str>) -> String {
+    match (has_back, back_to) {
+        (true, _) => lang.t("Zurück zum vorherigen Ticket (Esc)", "Back to the previous ticket (Esc)").to_string(),
+        (false, Some(tab)) => match lang {
+            Lang::De => format!("Zurück zu „{tab}“ (Esc)"),
+            Lang::En => format!("Back to “{tab}” (Esc)"),
+        },
+        (false, None) => lang.t("Zurück zur Liste (Esc)", "Back to the list (Esc)").to_string(),
     }
 }

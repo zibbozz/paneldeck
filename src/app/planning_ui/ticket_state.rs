@@ -276,6 +276,13 @@ pub struct TicketUi {
     pub create_last_type: Option<i64>,
     /// Größe der Rückgängig-Historie (Einstellung).
     pub undo_cap: usize,
+    /// Reiter, von dem aus das Ticket geöffnet wurde (Board, Backlog, Dashboard …): „Zurück“ und „Schließen“ führen dorthin
+    /// zurück, sobald das Ticket verlassen wird (siehe `ticket_nav.rs`). `None` = zur Liste.
+    pub return_tab: Option<super::Tab>,
+    /// Ticket unter dem Mauszeiger in der Liste (für die Taste „.“ und das Kontextmenü).
+    pub hover: Option<i64>,
+    /// Von außerhalb (Terminal Hub) gewünschtes Ticket; wird im nächsten Bild von `PlanUi::header` geöffnet.
+    pub requested_open: Option<i64>,
 }
 
 impl Default for TicketUi {
@@ -311,6 +318,9 @@ impl Default for TicketUi {
             counts_dirty: true,
             create_last_type: None,
             undo_cap: 25,
+            return_tab: None,
+            hover: None,
+            requested_open: None,
         }
     }
 }
@@ -324,6 +334,8 @@ impl TicketUi {
             self.rows.clear();
             self.open = None;
             self.back.clear();
+            self.return_tab = None;
+            self.hover = None;
             self.detail = None;
             self.view = ViewState::default();
             self.list_dirty = true;

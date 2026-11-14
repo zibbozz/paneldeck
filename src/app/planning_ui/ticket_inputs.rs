@@ -4,6 +4,7 @@
 //! Typwechsel und „In Ticket umwandeln“. Gespeichert wird nicht hier, sondern vom Aufrufer anhand des [`Event`].
 
 use super::helpers::color_of;
+use super::ref_inputs::ref_value_editor;
 use super::ticket_data::search_tickets;
 use super::ticket_draft::{field_hint, Draft};
 use super::widgets;
@@ -44,6 +45,8 @@ pub(super) struct Event {
     pub enter: bool,
     /// Angeklickter Ticket-Verweis im Markdown (`PAN-12`).
     pub open_key: Option<String>,
+    /// Angeklickter Terminal-Chip einer laufenden Sitzung (Sprung zur Sitzung).
+    pub open_session: Option<u64>,
 }
 
 /// Adresse im Browser öffnen (nur http/https/mailto).
@@ -400,14 +403,22 @@ pub(super) fn field_input(ui: &mut Ui, ic: &InCx, f: &Field, d: &mut Draft, expl
             }
         }
         FieldKind::Terminal | FieldKind::Version | FieldKind::Milestone => {
-            ui.horizontal(|ui| {
-                let shown = match f.kind {
-                    FieldKind::Terminal => (!d.text.is_empty()).then(|| d.text.clone()),
-                    _ => d.value.as_i64().map(|i| format!("#{i}")),
-                };
-                ui.label(shown.unwrap_or_else(|| "–".to_string()));
-                ui.label(RichText::new(lang.t("– kommt in einem späteren Schritt", "– comes in a later step")).small().color(style::dim(ui)));
-            });
+            // Der Terminal-Wert steht im Text, Version/Meilenstein als Kennung im Wert.
+            let mut v = if f.kind == FieldKind::Terminal { Value::String(d.text.clone()) } else { d.value.clone() };
+            let allow_clear = !f.required || ic.ticket_id.is_none();
+            let mut jump = None;
+            if ref_value_editor(ui, ic, salt, f.kind, &mut v, allow_clear, &mut jump) {
+                if f.kind == FieldKind::Terminal {
+                    d.text = v.as_str().unwrap_or("").to_string();
+                } else {
+                    d.value = v;
+                }
+                d.edited = true;
+                d.err = None;
+                ev.changed = true;
+                ev.commit = true;
+            }
+            ev.open_session = jump;
         }
         FieldKind::Rich => {
             let rows = f.options.rows.unwrap_or(6).clamp(2, 40) as usize;
@@ -447,7 +458,7 @@ pub(super) fn field_input(ui: &mut Ui, ic: &InCx, f: &Field, d: &mut Draft, expl
 pub(super) fn field_block(ui: &mut Ui, ic: &InCx, f: &Field, d: &mut Draft, explicit_save: bool, extra_err: Option<&str>) -> Event {
     let lang = ic.lang;
     let name = f.display(lang);
-    let wide = matches!(f.kind, FieldKind::Rich | FieldKind::Multi | FieldKind::Labels | FieldKind::Ticket);
+    let wide = matches!(f.kind, FieldKind::Rich | FieldKind::Multi | FieldKind::Labels | FieldKind::Ticket | FieldKind::Terminal);
     let label = |ui: &mut Ui| {
         let mut t = RichText::new(&name).color(style::dim(ui));
         if f.required {

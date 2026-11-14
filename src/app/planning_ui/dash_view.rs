@@ -5,8 +5,8 @@
 //! * `PlanUi::dash_tab` wird vom Reiter „Dashboards“ aufgerufen (`mod.rs`, volle Breite und Höhe, ohne die gemeinsame Rollfläche). Der
 //!   Reiter gibt es in jedem Projekt (dann Projekt- und globale Dashboards) und im System-Projekt (nur die globalen Dashboards).
 //! * `PlanUi::dash_dialogs` (in `dash_dialogs.rs`) zeichnet die Dialoge.
-//! * `PlanUi::request_open_dashboard_ticket` und `PlanUi::request_open_dashboard_filter` sind die (noch leeren) Einsprünge „Ticket
-//!   öffnen“ und „Abfrage in der Suche öffnen“ für Klicks auf Zeilen und Diagramm-Segmente.
+//! * Klicks auf Zeilen öffnen das Ticket (`PlanUi::open_ticket`), Klicks auf Diagramm-Segmente und „Filter öffnen“ die Suche mit der
+//!   Abfrage (`PlanUi::open_search_in_project`), beides in `ticket_nav.rs`; „Zurück“ der Ticket-Ansicht führt wieder zum Dashboard.
 //!
 //! **Daten:** Jede Kachel liest über `dash_data.rs` und wird **zwischengespeichert** (`State::cache`): neu geladen wird beim Öffnen des
 //! Reiters, bei geänderten Einstellungen der Kachel, nach Änderungen von außen (`PlanUi::invalidate`) und alle [`TTL`] Sekunden – nie
@@ -153,17 +153,6 @@ enum TileAct {
 }
 
 impl PlanUi {
-    /// Einsprung „Ticket öffnen“ (Klick auf eine Zeile einer Kachel). Bleibt leer, bis die Ticket-Detailseite angebunden ist.
-    pub(super) fn request_open_dashboard_ticket(&mut self, _ticket_id: i64) {
-        // TODO tickets-ui: hier die Detailseite des Tickets öffnen.
-    }
-
-    /// Einsprung „Abfrage in der Suche öffnen“ (Klick auf ein Diagramm-Segment oder „Filter öffnen“ in der Kachel). `project` ist das
-    /// Projekt des Dashboards (`None` = alle Projekte). Bleibt leer, bis die Abfrage-Leiste angebunden ist.
-    pub(super) fn request_open_dashboard_filter(&mut self, _jql: &str, _project: Option<i64>) {
-        // TODO query-ui: hier die Suche mit dieser Abfrage öffnen.
-    }
-
     /// Die Daten haben sich außerhalb des Reiters geändert: Liste und alle Kacheln beim nächsten Bild neu lesen.
     pub(super) fn dash_invalidate(&mut self) {
         self.dash.stale = true;
@@ -538,8 +527,10 @@ impl PlanUi {
         self.dash_tile_acts(cx, cur.id, acts);
         for e in events {
             match e {
-                Event::OpenTicket(id) => self.request_open_dashboard_ticket(id),
-                Event::OpenFilter { jql } => self.request_open_dashboard_filter(&jql, cur.project_id),
+                Event::OpenTicket(id) => {
+                    self.open_ticket(cx, id);
+                }
+                Event::OpenFilter { jql } => self.open_search_in_project(cx, &jql, cur.project_id),
                 Event::JumpProject(id) => {
                     self.select(cx, id);
                     self.tab = Tab::Overview;
