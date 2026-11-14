@@ -238,7 +238,9 @@ impl PlanUi {
         }
         self.sprints.detail = Some(cache);
         match act {
-            Some(Act::Open(t)) => self.request_open_sprint_ticket(t),
+            Some(Act::Open(t)) => {
+                self.open_ticket(cx, t);
+            }
             Some(Act::Complete(s)) => self.open_complete(cx, s),
             Some(Act::Edit(s)) => {
                 if let Ok(sp) = crate::planning::sprints::sprint::get_sprint(cx.conn, s) {

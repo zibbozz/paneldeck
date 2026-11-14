@@ -321,7 +321,7 @@ impl PlanUi {
                     self.tickets.forget_tickets(&[dlg.ticket]);
                     self.tickets.back.retain(|b| *b != dlg.ticket);
                     if self.tickets.open == Some(dlg.ticket) {
-                        self.tickets.go_back();
+                        self.ticket_back();
                     }
                     self.tickets.invalidate();
                     self.dirty = true;

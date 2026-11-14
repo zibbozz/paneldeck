@@ -2315,7 +2315,7 @@ impl App {
                 self.notes_open = if self.notes_open == Some(id) { None } else { Some(id) };
             }
             Action::LinkTicket(id) => self.tlinks_open_picker(id),
-            Action::OpenTicket(id) => self.request_open_ticket(id),
+            Action::OpenTicket(id) => self.open_ticket_from_anywhere(id),
             Action::UnlinkTicket(session, ticket) => self.tlinks_unlink(ticket, session),
             Action::OpenSearch => {
                 if let Some(s) = self.entries.get_mut(&self.focused).and_then(|e| e.live.as_mut()) {
