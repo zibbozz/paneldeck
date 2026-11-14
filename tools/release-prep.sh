@@ -31,13 +31,13 @@ printf '%s|%s\n' "$V" "$TITLE" >> tools/titles.txt
 "$PY" tools/gen_licenses.py --check
 git add -A
 git commit -q -F - <<MSGEOF
-Release-Vorbereitung $V
+Prepare release $V
 
 ${ATTRIBUTION:-}
 MSGEOF
 git log --oneline -1
 if [ "$PR" = 1 ]; then
   git push -u origin "$BR"
-  "$GH" pr create --base "$REL" --head "$BR" --title "Release $V vorbereiten" \
-    --body "Setzt Version, Changelog-Datum und Titel für **$V**. Nach dem Merge: \`tools/release.sh $V --publish\` auf \`$REL\` (Datum im Changelog muss dem Tag-Datum entsprechen)."
+  "$GH" pr create --base "$REL" --head "$BR" --title "Prepare release $V" \
+    --body "Sets the version, changelog date and title for **$V**. After the merge: \`tools/release.sh $V --publish\` on \`$REL\` (the changelog date must equal the tag date, i.e. today)."
 fi
