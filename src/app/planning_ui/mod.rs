@@ -6,17 +6,25 @@
 //! * Die Farbe des gewählten Projekts ist im ganzen Reiter die Akzentfarbe ([`PlanUi::accent`], gesetzt von der Anwendung).
 //! * Jeder sichtbare Text steht in beiden Sprachen (`lang.t(de, en)`), Fehler der Datenschicht über `PlanError::message`.
 
+mod backup_ed;
 mod board_cfg;
 mod board_logic;
 mod board_view;
 mod delete;
 mod fields_ed;
+mod help_shots;
 mod helpers;
+mod keywords_ed;
 mod kinds_ed;
 mod links_ed;
 mod overview;
 mod project_form;
+mod query_bar;
+mod query_help_ui;
+mod query_logic;
 mod release_view;
+mod saved_filters;
+mod search_tab;
 mod sprint_chart;
 mod sprint_data;
 mod sprint_detail;
@@ -25,6 +33,16 @@ mod sprint_logic;
 mod sprint_view;
 mod status_ed;
 mod template_ed;
+mod ticket_create;
+mod ticket_data;
+mod ticket_dialogs;
+mod ticket_draft;
+mod ticket_inputs;
+mod ticket_state;
+mod ticket_tab;
+#[cfg(test)]
+mod ticket_ui_tests;
+mod ticket_view;
 mod types_ed;
 mod values;
 mod widgets;
@@ -57,7 +75,9 @@ pub(super) struct Cx<'a> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
+    Tickets,
     Overview,
+    Search,
     Boards,
     Backlog,
     Releases,
@@ -101,6 +121,14 @@ pub(super) struct PlanUi {
     kinds: kinds_ed::State,
     templates: template_ed::State,
     todo: overview::Todo,
+    /// Reiter „Suche“ (Abfrage-Leiste, siehe `search_tab`)
+    search: search_tab::State,
+    /// Hilfeseite der Abfragesprache (Vollfläche über dem Reiterinhalt)
+    help: query_help_ui::HelpState,
+    /// Dialog „JQL-Schlüsselwörter“
+    kw: keywords_ed::State,
+    /// Ticket-Oberfläche (Liste, Ansicht, Dialoge, Rückgängig-Historie).
+    tickets: ticket_state::TicketUi,
     boards: board_view::State,
     sprints: sprint_view::State,
     releases: release_view::State,
@@ -116,7 +144,7 @@ impl Default for PlanUi {
             selected: 0,
             sum: None,
             links: Vec::new(),
-            tab: Tab::Overview,
+            tab: Tab::Tickets,
             msg: None,
             wizard: None,
             settings: None,
@@ -130,6 +158,10 @@ impl Default for PlanUi {
             kinds: Default::default(),
             templates: Default::default(),
             todo: Default::default(),
+            search: Default::default(),
+            help: Default::default(),
+            kw: Default::default(),
+            tickets: Default::default(),
             boards: Default::default(),
             sprints: Default::default(),
             releases: Default::default(),
@@ -171,6 +203,9 @@ impl PlanUi {
         self.sum = project_summary(cx.conn, self.selected).ok().map(Rc::new);
         self.links = list_link_types(cx.conn).unwrap_or_default();
         self.todo.dirty = true;
+        self.search.stale = true;
+        self.tickets.invalidate();
+        self.tickets.counts_dirty = true;
     }
 
     fn project(&self) -> Option<&Project> {
@@ -181,6 +216,7 @@ impl PlanUi {
         if id != self.selected {
             self.selected = id;
             cx.db.set_meta("expert_project", &id.to_string());
+            self.tickets.switch_project(id);
             self.types = Default::default();
             self.fields = Default::default();
             self.workflow = Default::default();
@@ -190,6 +226,11 @@ impl PlanUi {
                 self.tab = Tab::Overview;
             }
         }
+    }
+
+    /// Hinweise der Ticket-Oberfläche für den Toast-Stapel der Anwendung abholen.
+    pub(super) fn take_toasts(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.tickets.toasts)
     }
 
     /// Die Daten haben sich außerhalb der Oberfläche geändert (z. B. durch einen Agenten): beim nächsten Bild neu laden.
@@ -299,8 +340,26 @@ impl PlanUi {
         if self.dirty {
             self.reload(&cx);
         }
+        self.ticket_refresh(&cx, env.undo_steps);
+        self.ticket_keys(ctx, &cx);
+        let side = self.tab == Tab::Tickets && self.tickets.open.is_some() && self.tickets.mode == ticket_state::ViewMode::Panel && !self.project().is_some_and(|p| p.system);
+        if side {
+            self.ticket_panel(ctx, &cx, env.bg);
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(env.bg)).show(ctx, |ui| {
-            self.body(ui, &cx);
+            if self.help.open {
+                // Die Hilfe liegt wie ein Ticket über dem Reiterinhalt (Vollfläche); „X“ oder Esc schließt sie.
+                let out = query_help_ui::help_page(ui, &mut self.help, cx.lang, true);
+                if let Some(q) = out.use_query {
+                    self.search.bar.set_query(&q);
+                    self.show_search_tab();
+                    self.help.open = false;
+                } else if out.close {
+                    self.help.open = false;
+                }
+            } else {
+                self.body(ui, &cx);
+            }
         });
         self.dialogs(ctx, &cx);
         self.toast(ctx);
@@ -328,7 +387,12 @@ impl PlanUi {
 
     fn tabs(&self, lang: Lang) -> Vec<(Tab, &'static str)> {
         let system = self.project().is_some_and(|p| p.system);
-        let mut v = vec![(Tab::Overview, lang.t("Übersicht", "Overview"))];
+        let mut v = Vec::new();
+        if !system {
+            v.push((Tab::Tickets, lang.t("Tickets", "Tickets")));
+        }
+        v.push((Tab::Overview, lang.t("Übersicht", "Overview")));
+        v.push((Tab::Search, lang.t("Suche", "Search")));
         if !system {
             v.push((Tab::Boards, lang.t("Boards", "Boards")));
             if self.project().is_some_and(|p| p.use_sprints) {
@@ -346,7 +410,7 @@ impl PlanUi {
         }
         v.push((Tab::Links, lang.t("Verknüpfungstypen", "Link types")));
         if !system {
-            v.extend([(Tab::WorkKinds, lang.t("Arten der Arbeit", "Kinds of work")), (Tab::Templates, lang.t("Vorlagen", "Templates"))]);
+            v.extend([(Tab::WorkKinds, lang.t("Arten der Arbeit", "Kinds of work")), (Tab::Templates, lang.t("Vorlagen & Sicherung", "Templates & backup"))]);
         }
         v
     }
@@ -361,11 +425,17 @@ impl PlanUi {
             return;
         };
         let avail = ui.available_rect_before_wrap();
-        let w = (avail.width() - 40.0).clamp(300.0, 1040.0);
+        let wide = self.tab == Tab::Tickets;
+        let w = (avail.width() - 40.0).clamp(300.0, if wide { 1600.0 } else { 1040.0 });
         let x0 = avail.center().x - w / 2.0;
         let col = Rect::from_min_size(Pos2::new(x0, avail.top() + S3), Vec2::new(w, avail.height() - S3));
         let mut below = avail.top() + S3;
         ui.scope_builder(UiBuilder::new().max_rect(col), |ui| {
+            // Ticket als eigene Seite: ohne Reiter, mit Zurück-Pfeil
+            if self.tab == Tab::Tickets && self.tickets.open.is_some() && self.tickets.mode == ticket_state::ViewMode::Page && !proj.system {
+                self.ticket_page(ui, cx);
+                return;
+            }
             // Reiter innerhalb des Projekts
             let tabs = self.tabs(lang);
             if !tabs.iter().any(|(t, _)| *t == self.tab) {
@@ -381,6 +451,10 @@ impl PlanUi {
                 }
             });
             ui.add_space(S2);
+            if self.tab == Tab::Tickets {
+                self.tickets_tab(ui, cx, &proj);
+                return;
+            }
             // Fehler stehen unter den Reitern (bis zur nächsten gelungenen Änderung), Erfolgsmeldungen als kurzer Hinweis unten.
             if let Some(m) = self.msg.as_ref().filter(|m| !m.ok) {
                 let text = m.text.clone();
@@ -395,7 +469,9 @@ impl PlanUi {
             egui::ScrollArea::vertical().id_salt(("plan_page", self.tab as u8)).auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(w - 8.0);
                 match self.tab {
+                    Tab::Tickets => {}
                     Tab::Overview => self.overview(ui, cx, &proj),
+                    Tab::Search => self.search_tab(ui, cx),
                     Tab::Boards => {}
                     Tab::Backlog => self.backlog_tab(ui, cx, &proj),
                     Tab::Releases => self.releases_tab(ui, cx, &proj),
@@ -426,6 +502,8 @@ impl PlanUi {
         self.template_dialogs(ctx, cx);
         self.delete_dialog(ctx, cx);
         self.delete_project_dialog(ctx, cx);
+        self.keywords_dialog_ui(ctx, cx);
+        self.ticket_dialogs(ctx, cx);
     }
 
     /// Schnellzugriff für Dialoge: Id eines Modals dieses Bereichs.
