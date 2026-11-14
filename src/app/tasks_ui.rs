@@ -529,6 +529,11 @@ impl TasksUi {
         }
     }
 
+    /// Die Daten haben sich außerhalb der Oberfläche geändert (z. B. durch einen Agenten): beim nächsten Bild neu laden.
+    pub(super) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
     fn fail(&mut self, lang: Lang, e: &TaskError) {
         self.notice = Some(e.message(lang));
         self.dirty = true;
