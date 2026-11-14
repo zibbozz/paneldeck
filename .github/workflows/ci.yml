@@ -1,0 +1,49 @@
+name: CI
+
+# Prüft jede Änderung: Build, Tests, Changelog-Format, Lizenztexte der Abhängigkeiten, Syntax der Shell-Skripte.
+# Läuft im öffentlichen Repository auf den kostenlosen Standard-Runnern.
+on:
+  pull_request:
+  push:
+    branches: [develop, "release/**", "feature/next"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          python --version
+      - name: Build (release)
+        run: cargo build --release --locked
+      - name: Tests
+        run: cargo test --release --locked
+      - name: Changelog format
+        run: python tools/changelog.py check
+      - name: Third-party licenses are up to date
+        run: python tools/gen_licenses.py --check
+      - name: Shell script syntax
+        shell: bash
+        run: |
+          for f in tools/*.sh tools/git-hooks/*; do
+            bash -n "$f" || exit 1
+          done
