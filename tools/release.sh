@@ -1,23 +1,25 @@
 #!/bin/bash
-# Verwendung: tools/release.sh <version> "<commit-nachricht>" [--publish] [--final] [--no-git]
-#   (ohne Optionen)  testet, baut, packt nach dist/, committet und setzt das Tag v<version>
-#   --publish        zusätzlich: Branch + Tag pushen und das GitHub-Release anlegen (braucht `gh`, angemeldet)
-#   --final          Release nicht als Pre-release markieren (Standard: Pre-release)
-#   --no-git         nur bauen und packen; kein Commit, kein Tag, kein Push (zum Ausprobieren)
-#   --skip-smoke     Smoke-Test der Agenten-Schnittstelle (tools/smoke-mcp.ps1) und Installer-Update-Test (tools/update-test.ps1), nur Windows, überspringen
-# Voraussetzungen: vorher Cargo.toml-Version setzen, `python tools/changelog.py release <version>` ausführen (verschiebt [Unreleased]
-# in den neuen Abschnitt, Format Keep a Changelog) und tools/titles.txt pflegen.
+# Verwendung: tools/release.sh <version> [--publish] [--skip-smoke] [--no-git]
+#
+# Release-Lauf für den Branch release/x.y (siehe CLAUDE.md, „Branching- und Release-Strategie“). Dieses Skript committet NICHT:
+# Versionsnummer, Changelog-Datum und Titel kommen vorher über einen Pull Request in release/x.y (tools/release-prep.sh).
+#   (ohne Optionen)  prüft, testet, baut, packt nach dist/ und setzt lokal das Tag v<version> auf den Stand von release/x.y
+#   --publish        zusätzlich: nur das Tag pushen und das GitHub-Release anlegen (braucht `gh`, angemeldet)
+#   --no-git         nur bauen und packen (Probelauf auf jedem Branch; kein Tag, kein Push)
+#   --skip-smoke     Smoke-Test und Update-Test (tools/smoke-mcp.ps1, tools/update-test.ps1; nur Windows) überspringen
+# Prüfungen (außer mit --no-git): Branch ist release/<x.y> passend zur Version · Arbeitsbaum sauber · Stand == origin/release/<x.y> ·
+#   Cargo.toml-Version · Changelog-Abschnitt mit heutigem Datum (= Tag-Datum) · englischer Text docs/release-notes/<v>.en.md · Titel.
+# Das GitHub-Release ist ein normales Release (Pre-release nur, wenn die Version ein „-“ enthält; Release Candidates nutzen wir nicht).
 # Windows: nativer MSVC-Build (target/release), Installer mit NSIS (makensis). Linux: Cross-Build nach windows-gnu.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-V="${1:?Version fehlt}"; MSG="${2:?Commit-Nachricht fehlt}"; shift 2
-PUBLISH=0; FINAL=0; NOGIT=0; SKIP_SMOKE=0
+V="${1:?Version fehlt}"; shift
+PUBLISH=0; NOGIT=0; SKIP_SMOKE=0
 for a in "$@"; do
   case "$a" in
     --publish) PUBLISH=1 ;;
-    --final) FINAL=1 ;;
     --no-git) NOGIT=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     *) echo "Unbekannte Option: $a"; exit 1 ;;
@@ -25,11 +27,27 @@ for a in "$@"; do
 done
 [ "$PUBLISH" = 1 ] && [ "$NOGIT" = 1 ] && { echo "--publish und --no-git passen nicht zusammen"; exit 1; }
 [ "$PUBLISH" = 1 ] && [ -z "$GH" ] && { echo "gh (GitHub CLI) nicht gefunden: winget install GitHub.cli"; exit 1; }
+[[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Ungültige Version (erwartet x.y.z): $V"; exit 1; }
+
+if [ "$NOGIT" = 0 ]; then
+  BRANCH_WANT="release/${V%.*}"
+  BRANCH="$(git symbolic-ref --short -q HEAD || true)"
+  [ "$BRANCH" = "$BRANCH_WANT" ] || { echo "Releases entstehen nur auf $BRANCH_WANT (aktuell: ${BRANCH:-detached HEAD})"; exit 1; }
+  [ -z "$(git status --porcelain)" ] || { echo "Arbeitsbaum nicht sauber – alles muss per Pull Request in $BRANCH_WANT gelandet sein"; git status --short; exit 1; }
+  git fetch -q origin "$BRANCH_WANT" "+refs/tags/*:refs/tags/*" 2>/dev/null || git fetch -q origin "$BRANCH_WANT"
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH_WANT")" ] || { echo "Lokaler Stand ≠ origin/$BRANCH_WANT (git pull --ff-only bzw. ungemergte Änderungen)"; exit 1; }
+  ! git rev-parse -q --verify "refs/tags/v$V" >/dev/null || { echo "Tag v$V existiert schon – veröffentlichte Versionen werden nie verändert (nächste PATCH-Version nehmen)"; exit 1; }
+fi
 
 grep -q "^version = \"$V\"" Cargo.toml || { echo "Cargo.toml hat nicht Version $V"; exit 1; }
-"$PY" tools/changelog.py check "$V"   # Keep a Changelog: Format, Reihenfolge, Datum, Links, Abschnitt [$V] vorhanden
+if [ "$NOGIT" = 0 ]; then
+  "$PY" tools/changelog.py check "$V"   # Abschnitt [$V] existiert, nicht leer, nicht WIP, Datum == heute (= Tag-Datum)
+else
+  "$PY" tools/changelog.py check        # Probelauf: nur Format
+fi
 "$PY" tools/gen_licenses.py --check   # Lizenztexte der Abhängigkeiten passen zu Cargo.lock (sonst: python tools/gen_licenses.py)
-grep -q "^$V|" tools/titles.txt || { echo "tools/titles.txt hat keinen Titel für $V"; exit 1; }
+grep -q "^$V|" tools/titles.txt || { echo "tools/titles.txt hat keinen (englischen) Titel für $V"; exit 1; }
+[ -f "docs/release-notes/$V.en.md" ] || { echo "docs/release-notes/$V.en.md fehlt (englischer Release-Text)"; exit 1; }
 
 cargo test --release --quiet  # bricht bei fehlschlagenden Tests ab (set -e)
 cargo build --release ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} 2>&1 | grep -E "^error|Finished"
@@ -42,6 +60,11 @@ else
   echo "Hinweis: makensis nicht gefunden – kein Installer (Windows: winget install NSIS.NSIS)"
 fi
 sha256sum "dist/paneldeck-$V.exe" | tee "dist/paneldeck-$V.sha256"
+# Keine Pfade/Namen des Build-Rechners in der Programmdatei
+if [ "$IS_WIN" = 1 ]; then
+  n="$(grep -a -c -i -E 'C:\\Users|E:\\claude|E:\\paneldeck' "dist/paneldeck-$V.exe" || true)"
+  [ "$n" = 0 ] || { echo "Programmdatei enthält Pfade des Build-Rechners ($n Treffer)"; exit 1; }
+fi
 
 # Ende-zu-Ende-Test der gebauten .exe (Windows): startet sie in einem Temp-Ordner und prüft die Agenten-Schnittstelle.
 if [ "$IS_WIN" = 1 ] && [ "$SKIP_SMOKE" = 0 ]; then
@@ -55,23 +78,17 @@ if [ "$IS_WIN" = 1 ] && [ "$SKIP_SMOKE" = 0 ]; then
 fi
 
 if [ "$NOGIT" = 0 ]; then
-  git add -A
-  git commit -q -F - <<MSGEOF
-$MSG
-
-${ATTRIBUTION:-}
-MSGEOF
   git tag -a "v$V" -m "Paneldeck $V"
-  git log --oneline -1
+  git log --oneline -1 "v$V"
 fi
 
 tools/package.sh "$V"
 
 if [ "$PUBLISH" = 1 ]; then
-  git push origin HEAD "v$V"
+  git push origin "v$V"
   ASSETS=("dist/paneldeck-$V-windows-x64.zip")
   [ -f "dist/Paneldeck-Setup-$V.exe" ] && ASSETS+=("dist/Paneldeck-Setup-$V.exe")
-  PRE=(--prerelease); [ "$FINAL" = 1 ] && PRE=()
+  PRE=(); [[ "$V" == *-* ]] && PRE=(--prerelease)
   "$GH" release create "v$V" "${ASSETS[@]}" --verify-tag ${PRE[@]+"${PRE[@]}"} \
     --title "$(cat "dist/gh-title-$V.txt")" --notes-file "dist/gh-notes-$V.md"
 fi
