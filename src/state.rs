@@ -63,6 +63,39 @@ impl Lang {
     }
 }
 
+impl Lang {
+    /// Text in landesüblichen Anführungszeichen: „…“ (Deutsch) bzw. “…” (Englisch).
+    pub fn q(self, s: &str) -> String {
+        match self {
+            Lang::De => format!("„{s}“"),
+            Lang::En => format!("“{s}”"),
+        }
+    }
+}
+
+/// Globale Sprache für Stellen ohne Zugriff auf die Einstellungen (Hook-/MCP-Server, Git-Hilfen, Brücke).
+/// Standard ist Englisch; die Oberfläche schreibt sie nach dem Laden der Einstellungen und bei jeder Änderung.
+static LANG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+pub fn set_lang(l: Lang) {
+    LANG.store(if l == Lang::De { 0 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn lang() -> Lang {
+    if LANG.load(std::sync::atomic::Ordering::Relaxed) == 0 { Lang::De } else { Lang::En }
+}
+
+/// Text in der globalen Sprache.
+pub fn t(de: &'static str, en: &'static str) -> &'static str {
+    lang().t(de, en)
+}
+
+/// Sprache aus `settings.json` des Datenordners übernehmen (für Prozesse ohne Oberfläche, z. B. die MCP-Brücke).
+pub fn init_lang_from_disk(dir: &std::path::Path) {
+    let l = load_json::<Settings>(&dir.join("settings.json")).map(|s| s.language).unwrap_or(Lang::En);
+    set_lang(l);
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -457,7 +490,9 @@ pub fn load_saved(path: &std::path::Path) -> (SavedState, Option<String>) {
     let Ok(text) = std::fs::read_to_string(path) else { return (SavedState::default(), None) };
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(strip_bom(&text)) else {
         let b = backup_corrupt(path);
-        return (SavedState::default(), Some(format!("Zustandsdatei war beschädigt – Sicherung: {}", b.map(|p| p.display().to_string()).unwrap_or_default())));
+        let bk = b.map(|p| p.display().to_string()).unwrap_or_default();
+        let msg = if lang() == Lang::De { format!("Zustandsdatei war beschädigt – Sicherung: {bk}") } else { format!("State file was corrupt – backup: {bk}") };
+        return (SavedState::default(), Some(msg));
     };
     let sessions_v = v.as_object_mut().and_then(|o| o.remove("sessions"));
     let mut note: Option<String> = None;
@@ -465,7 +500,8 @@ pub fn load_saved(path: &std::path::Path) -> (SavedState, Option<String>) {
         Ok(s) => s,
         Err(_) => {
             let b = backup_corrupt(path);
-            note = Some(format!("Teile der Zustandsdatei waren ungültig (Sicherung: {})", b.map(|p| p.display().to_string()).unwrap_or_default()));
+            let bk = b.map(|p| p.display().to_string()).unwrap_or_default();
+            note = Some(if lang() == Lang::De { format!("Teile der Zustandsdatei waren ungültig (Sicherung: {bk})") } else { format!("Parts of the state file were invalid (backup: {bk})") });
             SavedState::default()
         }
     };
@@ -481,7 +517,8 @@ pub fn load_saved(path: &std::path::Path) -> (SavedState, Option<String>) {
     }
     if skipped > 0 {
         let b = backup_corrupt(path);
-        note = Some(format!("{skipped} ungültige Sitzung(en) übersprungen (Sicherung: {})", b.map(|p| p.display().to_string()).unwrap_or_default()));
+        let bk = b.map(|p| p.display().to_string()).unwrap_or_default();
+        note = Some(if lang() == Lang::De { format!("{skipped} ungültige Sitzung(en) übersprungen (Sicherung: {bk})") } else { format!("{skipped} invalid session(s) skipped (backup: {bk})") });
     }
     (st, note)
 }
@@ -522,6 +559,16 @@ impl Settings {
 #[cfg(test)]
 mod folder_tests {
     use super::*;
+    /// Die Standardsprache ist Englisch (Issue #11); Deutsch nur auf ausdrücklichen Wunsch.
+    /// Setzt die globale Sprache absichtlich nie auf Deutsch (andere Tests laufen parallel).
+    #[test]
+    fn default_language_is_english() {
+        assert_eq!(Settings::default().language, Lang::En);
+        assert_eq!(lang(), Lang::En);
+        assert_eq!(t("Hallo", "Hello"), "Hello");
+        assert_eq!(Lang::En.q("x"), "\u{201c}x\u{201d}");
+        assert_eq!(Lang::De.q("x"), "\u{201e}x\u{201c}");
+    }
     #[test]
     fn write_atomic_replaces_and_leaves_no_temp() {
         let d = std::env::temp_dir().join(format!("wa-{}", std::process::id()));

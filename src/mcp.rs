@@ -330,6 +330,7 @@ pub fn tool_reply(id: Value, result: Result<Value, (String, String)>) -> Value {
 /// stdout landen. Gibt den Prozess-Exitcode zurück.
 pub fn run_bridge() -> i32 {
     let dir = crate::state::data_dir();
+    crate::state::init_lang_from_disk(&dir);
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let caller: Option<u64> = std::env::var(crate::hooks::ENV_SESSION).ok().and_then(|s| s.parse().ok());
     let me = std::process::id();
