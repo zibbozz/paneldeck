@@ -446,9 +446,42 @@ pub fn dialog_title(ui: &mut Ui, text: &str) {
     ui.add_space(S2);
 }
 
+/// Breite der Füllung eines Balkens: bei 0 % gar keine (kein Knopf, der den Anfang der Beschriftung überdeckt), sonst anteilig.
+pub fn bar_fill_width(total: f32, fraction: f32) -> f32 {
+    if !fraction.is_finite() || fraction <= 0.0 || total <= 0.0 {
+        return 0.0;
+    }
+    total * fraction.min(1.0)
+}
+
+/// Fortschrittsbalken mit Beschriftung: die Füllung (Akzentfarbe, abgeschwächt) liegt unter dem Text, der Text steht immer
+/// ungekürzt und gut lesbar links darüber – auch bei 0 %.
+pub fn labeled_bar(ui: &mut Ui, fraction: f32, text: &str, max_width: f32) -> Response {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, ui.visuals().text_color());
+    let width = max_width.min(ui.available_width()).max(galley.size().x + 16.0).min(ui.available_width().max(1.0));
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, (galley.size().y + 6.0).max(18.0)), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 4.0, ui.visuals().widgets.inactive.bg_fill);
+    let w = bar_fill_width(rect.width(), fraction);
+    if w > 0.0 {
+        p.rect_filled(Rect::from_min_size(rect.min, Vec2::new(w, rect.height())), 4.0, style::accent().gamma_multiply(0.55));
+    }
+    p.with_clip_rect(rect).galley(Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, ui.visuals().text_color());
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bar_fill_has_no_width_at_zero_percent() {
+        assert_eq!(bar_fill_width(200.0, 0.0), 0.0);
+        assert_eq!(bar_fill_width(200.0, f32::NAN), 0.0);
+        assert_eq!(bar_fill_width(200.0, 0.5), 100.0);
+        assert_eq!(bar_fill_width(200.0, 3.0), 200.0);
+    }
 
     #[test]
     fn every_icon_name_has_a_drawing() {

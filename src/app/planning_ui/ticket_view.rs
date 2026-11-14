@@ -496,7 +496,7 @@ fn hierarchy(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState, acts: &mut
             });
             if let Some(p) = &d.progress {
                 let frac = p.fraction as f32;
-                ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width().min(420.0)).fill(style::accent()).text(progress_text(p, lang)));
+                widgets::labeled_bar(ui, frac, &progress_text(p, lang), 420.0);
                 ui.add_space(S1);
             }
             for ChildRow { ticket, done } in &d.children {

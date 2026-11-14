@@ -21,7 +21,7 @@ use crate::planning::summary::ProjectSummary;
 use crate::planning::ticket_error::TicketError;
 use crate::planning::tickets::{get_ticket, move_rank, set_flagged, set_starred};
 use crate::planning::transition::{available_transitions, transition_ticket, TransitionOption};
-use crate::planning::views::boards::{default_board_for, duplicate_board, ensure_default_board, list_boards, prune_board_refs, Board, BoardConfig};
+use crate::planning::views::boards::{default_board_for, display_description, duplicate_board, ensure_default_board, list_boards, prune_board_refs, Board, BoardConfig};
 use crate::state::Lang;
 use crate::style::{self, S1, S2};
 use eframe::egui::{self, Align, Color32, Id, Key, Layout, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
@@ -304,7 +304,7 @@ impl PlanUi {
         }
         if let Some(b) = self.boards.current() {
             if !b.description.trim().is_empty() {
-                ui.label(RichText::new(&b.description).small().color(style::dim(ui)));
+                ui.label(RichText::new(display_description(&b.description, lang)).small().color(style::dim(ui)));
             }
         }
     }
@@ -324,9 +324,8 @@ impl PlanUi {
     }
 
     fn open_edit_board(&mut self, cx: &Cx) {
-        let _ = cx;
         if let Some(b) = self.boards.current() {
-            self.boards.cfg = Some(CfgDlg::new(Some(b.id), b.name.clone(), b.description.clone(), b.config.clone()));
+            self.boards.cfg = Some(CfgDlg::new(Some(b.id), b.name.clone(), display_description(&b.description, cx.lang), b.config.clone()));
         }
     }
 
