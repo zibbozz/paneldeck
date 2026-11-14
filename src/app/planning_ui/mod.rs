@@ -11,11 +11,18 @@ mod board_logic;
 mod board_view;
 mod delete;
 mod fields_ed;
+mod help_shots;
 mod helpers;
+mod keywords_ed;
 mod kinds_ed;
 mod links_ed;
 mod overview;
 mod project_form;
+mod query_bar;
+mod query_help_ui;
+mod query_logic;
+mod saved_filters;
+mod search_tab;
 mod status_ed;
 mod template_ed;
 mod ticket_create;
@@ -59,6 +66,7 @@ pub(super) struct Cx<'a> {
 enum Tab {
     Tickets,
     Overview,
+    Search,
     Boards,
     Types,
     Fields,
@@ -100,6 +108,12 @@ pub(super) struct PlanUi {
     kinds: kinds_ed::State,
     templates: template_ed::State,
     todo: overview::Todo,
+    /// Reiter „Suche“ (Abfrage-Leiste, siehe `search_tab`)
+    search: search_tab::State,
+    /// Hilfeseite der Abfragesprache (Vollfläche über dem Reiterinhalt)
+    help: query_help_ui::HelpState,
+    /// Dialog „JQL-Schlüsselwörter“
+    kw: keywords_ed::State,
     /// Ticket-Oberfläche (Liste, Ansicht, Dialoge, Rückgängig-Historie).
     tickets: ticket_state::TicketUi,
     boards: board_view::State,
@@ -129,6 +143,9 @@ impl Default for PlanUi {
             kinds: Default::default(),
             templates: Default::default(),
             todo: Default::default(),
+            search: Default::default(),
+            help: Default::default(),
+            kw: Default::default(),
             tickets: Default::default(),
             boards: Default::default(),
         }
@@ -169,6 +186,7 @@ impl PlanUi {
         self.sum = project_summary(cx.conn, self.selected).ok().map(Rc::new);
         self.links = list_link_types(cx.conn).unwrap_or_default();
         self.todo.dirty = true;
+        self.search.stale = true;
         self.tickets.invalidate();
         self.tickets.counts_dirty = true;
     }
@@ -312,7 +330,19 @@ impl PlanUi {
             self.ticket_panel(ctx, &cx, env.bg);
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(env.bg)).show(ctx, |ui| {
-            self.body(ui, &cx);
+            if self.help.open {
+                // Die Hilfe liegt wie ein Ticket über dem Reiterinhalt (Vollfläche); „X“ oder Esc schließt sie.
+                let out = query_help_ui::help_page(ui, &mut self.help, cx.lang, true);
+                if let Some(q) = out.use_query {
+                    self.search.bar.set_query(&q);
+                    self.show_search_tab();
+                    self.help.open = false;
+                } else if out.close {
+                    self.help.open = false;
+                }
+            } else {
+                self.body(ui, &cx);
+            }
         });
         self.dialogs(ctx, &cx);
         self.toast(ctx);
@@ -345,6 +375,7 @@ impl PlanUi {
             v.push((Tab::Tickets, lang.t("Tickets", "Tickets")));
         }
         v.push((Tab::Overview, lang.t("Übersicht", "Overview")));
+        v.push((Tab::Search, lang.t("Suche", "Search")));
         if !system {
             v.push((Tab::Boards, lang.t("Boards", "Boards")));
             v.extend([
@@ -417,6 +448,7 @@ impl PlanUi {
                 match self.tab {
                     Tab::Tickets => {}
                     Tab::Overview => self.overview(ui, cx, &proj),
+                    Tab::Search => self.search_tab(ui, cx),
                     Tab::Boards => {}
                     Tab::Types => self.types_tab(ui, cx),
                     Tab::Fields => self.fields_tab(ui, cx),
@@ -444,6 +476,7 @@ impl PlanUi {
         self.template_dialogs(ctx, cx);
         self.delete_dialog(ctx, cx);
         self.delete_project_dialog(ctx, cx);
+        self.keywords_dialog_ui(ctx, cx);
         self.ticket_dialogs(ctx, cx);
     }
 
