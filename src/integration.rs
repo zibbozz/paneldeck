@@ -26,10 +26,10 @@ const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 fn context_entries(exe: &Path) -> Vec<(String, &'static str, String)> {
     let e = exe.to_string_lossy();
     vec![
-        (r"HKCU\Software\Classes\Directory\shell\Paneldeck".into(), "In Paneldeck öffnen", format!("\"{e}\" --open \"%1\"")),
-        (r"HKCU\Software\Classes\Directory\Background\shell\Paneldeck".into(), "In Paneldeck öffnen", format!("\"{e}\" --open \"%V\"")),
-        (r"HKCU\Software\Classes\Directory\shell\PaneldeckClaude".into(), "Mit Claude in Paneldeck starten", format!("\"{e}\" --claude --open \"%1\"")),
-        (r"HKCU\Software\Classes\Directory\Background\shell\PaneldeckClaude".into(), "Mit Claude in Paneldeck starten", format!("\"{e}\" --claude --open \"%V\"")),
+        (r"HKCU\Software\Classes\Directory\shell\Paneldeck".into(), crate::state::t("In Paneldeck öffnen", "Open in Paneldeck"), format!("\"{e}\" --open \"%1\"")),
+        (r"HKCU\Software\Classes\Directory\Background\shell\Paneldeck".into(), crate::state::t("In Paneldeck öffnen", "Open in Paneldeck"), format!("\"{e}\" --open \"%V\"")),
+        (r"HKCU\Software\Classes\Directory\shell\PaneldeckClaude".into(), crate::state::t("Mit Claude in Paneldeck starten", "Start with Claude in Paneldeck"), format!("\"{e}\" --claude --open \"%1\"")),
+        (r"HKCU\Software\Classes\Directory\Background\shell\PaneldeckClaude".into(), crate::state::t("Mit Claude in Paneldeck starten", "Start with Claude in Paneldeck"), format!("\"{e}\" --claude --open \"%V\"")),
     ]
 }
 
@@ -73,7 +73,7 @@ pub fn autostart_enabled() -> bool {
 }
 #[cfg(not(windows))]
 pub fn set_autostart(_on: bool, _exe: &Path) -> Result<(), String> {
-    Err("nur unter Windows".into())
+    Err(crate::state::t("nur unter Windows", "Windows only").into())
 }
 #[cfg(not(windows))]
 pub fn context_enabled() -> bool {
@@ -81,5 +81,5 @@ pub fn context_enabled() -> bool {
 }
 #[cfg(not(windows))]
 pub fn set_context(_on: bool, _exe: &Path) -> Result<(), String> {
-    Err("nur unter Windows".into())
+    Err(crate::state::t("nur unter Windows", "Windows only").into())
 }
