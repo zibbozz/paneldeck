@@ -323,6 +323,7 @@ fn execute(conn: &Connection, p: Plan, set_values: Vec<(i64, Option<Value>)>, de
         conn.execute("UPDATE projects SET next_number = ?1 WHERE id = ?2", [proj.next_number + 1, proj.id])?;
         let rank: i64 = conn.query_row("SELECT COALESCE(MAX(rank) + 1, 0) FROM tickets WHERE project_id = ?1", [proj.id], |r| r.get(0))?;
         remap_work_kinds(conn, t.id, t.project_id, proj.id)?;
+        super::sprints::sprint::on_ticket_left_project(conn, t.id)?;
         (proj.next_number, rank)
     } else {
         (t.number, t.rank)

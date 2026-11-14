@@ -8,6 +8,8 @@
 use super::*;
 use crate::hooks::McpJob;
 use crate::mcp::{self, LogEntry, McpLevel};
+use crate::planning::agent;
+use crate::planning::history::Source;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::SyncSender;
@@ -20,6 +22,10 @@ fn tr(de: &'static str, en: &'static str) -> &'static str {
 
 fn de() -> bool {
     state::lang() == Lang::De
+}
+
+fn ctx_err(ctx: &agent::Ctx, de: &str, en: &str) -> agent::ToolError {
+    agent::ToolError { code: "bad_args", message: if ctx.lang == Lang::De { de.to_string() } else { en.to_string() }, details: None }
 }
 
 fn er(code: &str, msg: impl Into<String>) -> (String, String) {
@@ -85,6 +91,38 @@ fn parse_status(s: &str) -> Option<ClaudeStatus> {
     })
 }
 
+/// Kurzfassung eines Aufrufs der Todo-/Ticket-Werkzeuge für das Aufrufprotokoll (ohne große Texte).
+fn planning_log_info(tool: &str, args: &Value) -> String {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let info = match tool {
+        "create_ticket" => format!("{} {}: {}", s("project"), s("type"), mcp::short(&s("title"), 60)),
+        "add_todo" => mcp::short(&if s("title").is_empty() { s("text") } else { s("title") }, 80),
+        "set_todo_done" => format!("{}", args.get("id").map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default()),
+        "get_project" => s("project"),
+        "search_tickets" => mcp::short(&s("text"), 60),
+        "log_time" => format!("{} {}", s("ticket"), args.get("duration").map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default()),
+        "transition_ticket" => format!("{} -> {}", s("ticket"), s("status")),
+        "list_todos" | "list_projects" => String::new(),
+        _ => s("ticket"),
+    };
+    mcp::short(&info, 120)
+}
+
+/// Darf der Agent diese Sitzung mit einem Ticket verknüpfen? Die eigene Sitzung oder eine, die er selbst angelegt hat
+/// (`created`: Sitzung → Anleger). Es wird nichts ins Terminal geschrieben – die Verknüpfung ist nur ein Datensatz.
+fn terminal_link_allowed(caller: Option<u64>, session: u64, created: &HashMap<u64, Option<u64>>) -> bool {
+    caller == Some(session) || created.get(&session).is_some_and(|creator| *creator == caller)
+}
+
+/// Fehler eines Werkzeugs der Datenschicht in den (Code, Text) der Brücke übersetzen; Einzelheiten hängen am Text.
+fn tool_err(e: agent::ToolError) -> (String, String) {
+    let message = match &e.details {
+        Some(d) => mcp::with_details(&e.message, d),
+        None => e.message,
+    };
+    (e.code.to_string(), message)
+}
+
 fn clamp_str(mut s: String, max: usize) -> String {
     if s.len() > max {
         let mut cut = s.len() - max;
@@ -100,6 +138,9 @@ impl App {
     /// Pro Frame: Stufe veröffentlichen, wartende Aufrufe prüfen, neue Anfragen abarbeiten.
     pub(super) fn poll_mcp(&mut self, ctx: &egui::Context) {
         mcp::LEVEL.store(self.settings.mcp_level.as_u8(), std::sync::atomic::Ordering::Relaxed);
+        // Modus (Expertenmodus des Todo-Reiters) veröffentlichen; auch wenn der Reiter noch nie offen war, steht er in der Datenbank.
+        self.plan.ensure_loaded(self.db.as_ref());
+        mcp::EXPERT.store(self.plan.expert, std::sync::atomic::Ordering::Relaxed);
         state::set_lang(self.settings.language);
         // Fertige Screenshots (kommen einen Frame nach der Anforderung als Ereignis).
         let shots: Vec<(u64, std::sync::Arc<egui::ColorImage>)> = ctx.input(|i| {
@@ -135,13 +176,10 @@ impl App {
             let McpJob { tool, args, caller: env_caller, caller_pid, reply } = job;
             let (caller, how) = self.mcp_resolve_caller(env_caller, caller_pid);
             self.mcp.last = Some(Instant::now());
-            // Stufe hier noch einmal prüfen: sie kann sich zwischen Verbindung und UI geändert haben.
-            let level = self.settings.mcp_level;
-            let allowed = level != McpLevel::Off && mcp::tool_level(&tool).is_some_and(|l| l <= level);
-            let out = if !allowed {
-                Out::Now(Err(er("mcp_disabled", tr("Die Agenten-Schnittstelle ist aus oder die Stufe reicht nicht (Einstellungen → Agenten).", "The agent interface is off or the level is not sufficient (Settings → Agents)."))))
-            } else {
-                self.mcp_call(ctx, &tool, &args, caller, how, &reply)
+            // Stufe und Modus hier noch einmal prüfen: sie können sich zwischen Verbindung und UI geändert haben.
+            let out = match mcp::check_access(&tool, self.settings.mcp_level, self.plan.expert) {
+                Err(e) => Out::Now(Err(e)),
+                Ok(()) => self.mcp_call(ctx, &tool, &args, caller, how, &reply),
             };
             if let Out::Now(r) = out {
                 self.mcp_finish(&reply, &tool, &args, caller, r);
@@ -181,6 +219,8 @@ impl App {
             (_, "queue_prompt") => mcp::short(args["prompt"].as_str().unwrap_or(""), 120),
             (_, "search_history") => mcp::short(args["query"].as_str().unwrap_or(""), 120),
             (_, "rename_session") | (_, "create_session") => mcp::short(args["name"].as_str().unwrap_or(""), 120),
+            // Todo-Liste und Tickets: nur Kennungen und Kurztitel ins Protokoll, nie Kommentar- oder Beschreibungstexte.
+            (_, t) if agent::TOOLS.contains(&t) => planning_log_info(t, args),
             _ => String::new(),
         };
         let entry = LogEntry { ts: usage::today_secs(), tool: tool.to_string(), session, caller, ok: r.is_ok(), info };
@@ -259,7 +299,53 @@ impl App {
             "rename_session" => Out::Now(self.mcp_rename(args, caller)),
             "focus_session" => Out::Now(self.mcp_focus(ctx, args)),
             "close_session" => Out::Now(self.mcp_close(args, caller)),
+            t if agent::TOOLS.contains(&t) => Out::Now(self.mcp_planning(t, args, caller)),
             _ => Out::Now(Err(er("not_found", tr("Unbekanntes Werkzeug", "Unknown tool")))),
+        }
+    }
+
+    /// Todo-Liste und Tickets (`planning::agent`): läuft kurz in der UI-Schleife auf der Datenbank der Anwendung. Jede Änderung
+    /// geht mit der Quelle „Agent (Sitzungsname)“ in den Verlauf, löst einen kurzen Hinweis aus und lässt die Ansichten neu laden.
+    fn mcp_planning(&mut self, tool: &str, args: &Value, caller: Option<u64>) -> R {
+        let Some(db) = self.db.as_ref() else {
+            return Err(er("db_unavailable", tr("Die Datenbank ist nicht verfügbar.", "The database is not available.")));
+        };
+        let lang = state::lang();
+        let who = caller
+            .and_then(|id| self.entries.get(&id).map(|e| (id, e.display_name().to_string())))
+            .map(|(id, name)| if name.trim().is_empty() { format!("#{id}") } else { name })
+            .unwrap_or_default();
+        let source = Source::agent(&who);
+        let ctx = agent::Ctx { conn: &db.conn, lang, source: source.clone(), now: chrono::Local::now().naive_local() };
+        let res = if tool == "link_terminal" {
+            (|| {
+                let (key, session) = agent::ticket_param(&ctx, args)?;
+                let Some(sid) = session.or(caller) else {
+                    return Err(ctx_err(&ctx, "session fehlt: Der Agent läuft in keiner Paneldeck-Sitzung (siehe whoami)", "session is missing: you do not run inside a Paneldeck session (see whoami)"));
+                };
+                let Some(e) = self.entries.get(&sid) else {
+                    return Err(agent::ToolError { code: "not_found", message: if de() { format!("Keine Sitzung mit id {sid} (siehe list_sessions)") } else { format!("No session with id {sid} (see list_sessions)") }, details: None });
+                };
+                if !terminal_link_allowed(caller, sid, &self.mcp.created) {
+                    return Err(agent::ToolError { code: "forbidden", message: tr("Ein Agent darf nur seine eigene oder eine selbst angelegte Sitzung verknüpfen.", "An agent may only link its own session or one it created itself.").to_string(), details: None });
+                }
+                agent::link_terminal(&ctx, &key, sid, &e.display_name())
+            })()
+        } else {
+            agent::call(&ctx, tool, args, self.plan.expert)
+        };
+        drop(ctx);
+        match res {
+            Ok(done) => {
+                if let Some(c) = done.change {
+                    let text = mcp::short(&format!("{}: {}", source.label(lang), c.text), 140);
+                    self.push_toast(text, super::toasts::ToastKind::Info, c.target);
+                    self.tasks.invalidate();
+                    self.plan.invalidate();
+                }
+                Ok(done.result)
+            }
+            Err(e) => Err(tool_err(e)),
         }
     }
 
@@ -844,7 +930,7 @@ impl App {
             (
                 McpLevel::Control,
                 lang.t("Steuern", "Control"),
-                lang.t("Zusätzlich Text eingeben, Befehle ausführen, Sitzungen anlegen und schließen. Der Agent tippt dann in deine echten Terminals.", "Also type text, run commands, create and close sessions. The agent then types into your real terminals."),
+                lang.t("Zusätzlich Text eingeben, Befehle ausführen, Sitzungen anlegen und schließen; Todo-Karten anlegen und abhaken bzw. Tickets anlegen und ändern. Der Agent tippt dann in deine echten Terminals.", "Also type text, run commands, create and close sessions; add and tick off to-do cards or create and change tickets. The agent then types into your real terminals."),
             ),
         ] {
             ui.horizontal(|ui| {
@@ -859,6 +945,28 @@ impl App {
         if self.settings.mcp_level == McpLevel::Control {
             ui.label(RichText::new(lang.t("Achtung: Terminalinhalt kann Anweisungen enthalten, denen ein Agent fälschlich folgt. Nutze „Steuern“ nur mit Agenten, denen du vertraust.", "Warning: terminal content may contain instructions an agent follows by mistake. Use “Control” only with agents you trust.")).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
         }
+        ui.add_space(S1);
+        // Welche Werkzeug-Gruppe für Aufgaben gerade gilt: der Agent hat immer nur die Möglichkeiten des eingestellten Modus.
+        let (group, hint) = if self.plan.expert {
+            (
+                lang.t("Projekte und Tickets (Expertenmodus an)", "Projects and tickets (expert mode on)"),
+                lang.t(
+                    "Agenten lesen Projekte und Tickets; mit „Steuern“ legen sie Tickets an, ändern Felder, wechseln den Status (nach denselben Workflow-Regeln wie im Fenster), kommentieren, erfassen Zeit und verknüpfen. Die Todo-Liste ist für sie nur lesbar. Tickets löschen oder Typen, Workflows und Projekte ändern können sie nie; jede Änderung erscheint kurz als Hinweis.",
+                    "Agents read projects and tickets; with “Control” they create tickets, change fields, change the status (under the same workflow rules as in the window), comment, log time and link. The to-do list is read-only for them. They can never delete tickets or change types, workflows and projects; every change shows briefly as a notice.",
+                ),
+            )
+        } else {
+            (
+                lang.t("Einfache Todo-Liste (Expertenmodus aus)", "Simple to-do list (expert mode off)"),
+                lang.t(
+                    "Agenten lesen die Liste; mit „Steuern“ legen sie Karten an und haken sie ab. Löschen können sie nie; jede Änderung erscheint kurz als Hinweis.",
+                    "Agents read the list; with “Control” they add cards and tick them off. They can never delete; every change shows briefly as a notice.",
+                ),
+            )
+        };
+        ui.label(RichText::new(format!("{}: {}", lang.t("Aktive Werkzeug-Gruppe", "Active tool group"), group)).strong());
+        ui.label(RichText::new(hint).small().color(style::dim(ui)));
+        ui.label(RichText::new(lang.t("Der Modus wird mit dem Schalter „Expertenmodus“ im Reiter „Todo-Liste“ umgestellt.", "The mode is switched with the “Expert mode” toggle in the “Todo list” tab.")).small().color(style::dim(ui)));
         ui.add_space(S1);
         ui.horizontal(|ui| {
             style::toggle(ui, &mut self.settings.mcp_close_any);
@@ -940,5 +1048,49 @@ impl App {
         let col = if active { Color32::from_rgb(0xd9, 0x77, 0x57) } else { Color32::from_rgb(0x4c, 0xc2, 0x6a) };
         let tip = format!("{}: {}\n{}", lang.t("Agenten-Schnittstelle", "Agent interface"), level_txt, lang.t("Klicken für die Einstellungen", "Click for settings"));
         ui.add(egui::Label::new(RichText::new(label).small().color(col)).sense(Sense::click())).on_hover_text(tip).clicked()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_links_only_for_own_or_self_created_sessions() {
+        let mut created: HashMap<u64, Option<u64>> = HashMap::new();
+        created.insert(8, Some(3));
+        created.insert(9, Some(4));
+        created.insert(10, None);
+        // eigene Sitzung
+        assert!(terminal_link_allowed(Some(3), 3, &created));
+        // selbst angelegt
+        assert!(terminal_link_allowed(Some(3), 8, &created));
+        // von einem anderen Agenten angelegt, Sitzung des Nutzers
+        assert!(!terminal_link_allowed(Some(3), 9, &created));
+        assert!(!terminal_link_allowed(Some(3), 5, &created));
+        // Agent außerhalb von Paneldeck: nur Sitzungen ohne Anleger-Sitzung (ebenfalls von außen angelegt)
+        assert!(terminal_link_allowed(None, 10, &created));
+        assert!(!terminal_link_allowed(None, 8, &created));
+        assert!(!terminal_link_allowed(None, 5, &created));
+    }
+
+    #[test]
+    fn log_info_never_contains_long_texts() {
+        let long = "geheim ".repeat(100);
+        let i = planning_log_info("add_comment", &json!({"ticket": "PAN-1", "body": long}));
+        assert_eq!(i, "PAN-1");
+        let i = planning_log_info("create_ticket", &json!({"project": "PAN", "type": "Epic", "title": long, "fields": {"x": long}}));
+        assert!(i.chars().count() <= 121 && i.starts_with("PAN Epic: "), "{i}");
+        assert_eq!(planning_log_info("log_time", &json!({"ticket": "PAN-1", "duration": 2})), "PAN-1 2");
+        assert_eq!(planning_log_info("set_todo_done", &json!({"id": "TODO-4"})), "TODO-4");
+        assert!(planning_log_info("add_todo", &json!({"text": long})).chars().count() <= 81);
+    }
+
+    #[test]
+    fn tool_errors_keep_their_details() {
+        let e = agent::ToolError { code: "required_missing", message: "Missing".into(), details: Some(json!({"missing_fields": []})) };
+        let (c, m) = tool_err(e);
+        assert_eq!(c, "required_missing");
+        assert!(m.starts_with("Missing") && m.contains(mcp::DETAILS_SEP));
     }
 }

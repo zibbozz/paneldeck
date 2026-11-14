@@ -253,17 +253,13 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
         return reply(mcp_err("bad_args", crate::state::t("tool fehlt", "tool is missing")));
     };
     let level = mcp::current_level();
+    let expert = mcp::expert_mode();
     if tool == "_level" {
-        return reply(json!({"ok": true, "result": {"level": level.as_u8()}}));
+        return reply(json!({"ok": true, "result": {"level": level.as_u8(), "expert": expert}}));
     }
-    if level == mcp::McpLevel::Off {
-        return reply(mcp_err("mcp_disabled", crate::state::t("Die Agenten-Schnittstelle ist in Paneldeck ausgeschaltet (Einstellungen → Agenten).", "The agent interface is switched off in Paneldeck (Settings → Agents).")));
-    }
-    let Some(required) = mcp::tool_level(tool) else {
-        return reply(mcp_err("not_found", crate::state::t("Unbekanntes Werkzeug", "Unknown tool")));
-    };
-    if required > level {
-        return reply(mcp_err("forbidden", crate::state::t("Die Stufe „Nur lesen“ erlaubt dieses Werkzeug nicht (Einstellungen → Agenten → Steuern).", "The “Read only” level does not allow this tool (Settings → Agents → Control).")));
+    // Stufe und Modus (einfache Todo-Liste / Tickets) prüft der Hub selbst; die UI-Schleife prüft nach dem Warten noch einmal.
+    if let Err((code, message)) = mcp::check_access(tool, level, expert) {
+        return reply(mcp_err(&code, &message));
     }
     if mcp::ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= mcp::MAX_ACTIVE {
         mcp::ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -548,7 +544,7 @@ mod tests {
     /// Berührt die globale Stufe (`mcp::LEVEL`) – deshalb nur dieser eine Test.
     #[test]
     fn mcp_access_checks() {
-        use crate::mcp::{McpLevel, LEVEL};
+        use crate::mcp::{McpLevel, EXPERT, LEVEL};
         use std::sync::atomic::Ordering;
         let ctx = egui::Context::default();
         let srv = HookServer::start(&ctx).unwrap();
@@ -575,6 +571,21 @@ mod tests {
         assert_eq!(code(call_mcp(&dir, "gibt_es_nicht", &json!({}), None, None)), "not_found");
         english(msg(call_mcp(&dir, "gibt_es_nicht", &json!({}), None, None)));
         english(msg(call_mcp(&dir, "run_command", &json!({"session": 1, "command": "dir"}), None, None)));
+        // Modus: Ticket-Werkzeuge gibt es nur im Expertenmodus, das Schreiben der Todo-Liste nur im einfachen Modus.
+        LEVEL.store(McpLevel::Control.as_u8(), Ordering::Relaxed);
+        EXPERT.store(false, Ordering::Relaxed);
+        assert_eq!(call_mcp(&dir, "_level", &json!({}), None, None).unwrap()["expert"], false);
+        assert_eq!(code(call_mcp(&dir, "create_ticket", &json!({"project": "PAN", "type": "x", "title": "t"}), None, None)), "wrong_mode");
+        english(msg(call_mcp(&dir, "get_ticket", &json!({"ticket": "PAN-1"}), None, None)));
+        EXPERT.store(true, Ordering::Relaxed);
+        assert_eq!(call_mcp(&dir, "_level", &json!({}), None, None).unwrap()["expert"], true);
+        assert_eq!(code(call_mcp(&dir, "add_todo", &json!({"title": "x"}), None, None)), "wrong_mode");
+        assert_eq!(code(call_mcp(&dir, "set_todo_done", &json!({"id": 1}), None, None)), "wrong_mode");
+        english(msg(call_mcp(&dir, "add_todo", &json!({"title": "x"}), None, None)));
+        // die Stufe geht dem Modus vor: „Nur lesen“ meldet forbidden
+        LEVEL.store(McpLevel::Read.as_u8(), Ordering::Relaxed);
+        assert_eq!(code(call_mcp(&dir, "create_ticket", &json!({}), None, None)), "forbidden");
+        EXPERT.store(false, Ordering::Relaxed);
         // Ein Lese-Werkzeug erreicht die UI-Schleife (hier: ein Test, der sie spielt).
         let reply = std::thread::spawn({
             let dir = dir.clone();
@@ -594,6 +605,7 @@ mod tests {
         assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "hub_not_running");
         english(msg(call_mcp(&dir, "list_sessions", &json!({}), None, None)));
         LEVEL.store(McpLevel::Off.as_u8(), Ordering::Relaxed);
+        EXPERT.store(false, Ordering::Relaxed);
     }
 
     #[test]

@@ -63,6 +63,10 @@ const FIELD_USAGE: &[&str] = &["SELECT COUNT(DISTINCT ticket_id) FROM ticket_val
 const OPTION_USAGE: &[&str] = &["SELECT COUNT(DISTINCT ticket_id) FROM ticket_values WHERE field_id = ?1 AND num = ?2"];
 /// Verknüpfungen dieses Typs.
 const LINK_TYPE_USAGE: &[&str] = &["SELECT COUNT(*) FROM links WHERE link_type_id = ?1"];
+/// Tickets, deren Feld vom Typ „Version“ auf diese Version zeigt.
+const VERSION_USAGE: &[&str] = &["SELECT COUNT(DISTINCT v.ticket_id) FROM ticket_values v JOIN fields f ON f.id = v.field_id WHERE f.kind = 'version' AND v.text = CAST(?1 AS TEXT)"];
+/// Tickets, deren Feld vom Typ „Meilenstein“ auf diesen Meilenstein zeigt.
+const MILESTONE_USAGE: &[&str] = &["SELECT COUNT(DISTINCT v.ticket_id) FROM ticket_values v JOIN fields f ON f.id = v.field_id WHERE f.kind = 'milestone' AND v.text = CAST(?1 AS TEXT)"];
 /// Zeit-Einträge mit dieser Art der Arbeit.
 const WORK_KIND_USAGE: &[&str] = &["SELECT COUNT(*) FROM time_entries WHERE work_kind_id = ?1"];
 /// Tickets des Projekts.
@@ -143,6 +147,16 @@ pub fn usage_count_option(conn: &Connection, field_id: i64, option_id: i64) -> R
 
 pub fn usage_count_link_type(conn: &Connection, link_type_id: i64) -> Res<i64> {
     sum(conn, "link_type", LINK_TYPE_USAGE, &[link_type_id])
+}
+
+/// Tickets, deren Versions-Feld auf die Version zeigt.
+pub fn usage_count_version(conn: &Connection, version_id: i64) -> Res<i64> {
+    sum(conn, "version", VERSION_USAGE, &[version_id])
+}
+
+/// Tickets, deren Meilenstein-Feld auf den Meilenstein zeigt.
+pub fn usage_count_milestone(conn: &Connection, milestone_id: i64) -> Res<i64> {
+    sum(conn, "milestone", MILESTONE_USAGE, &[milestone_id])
 }
 
 pub fn usage_count_work_kind(conn: &Connection, work_kind_id: i64) -> Res<i64> {
@@ -268,6 +282,18 @@ pub(crate) fn migrate_links(conn: &Connection, from: i64, to: Option<i64>) -> Re
         conn.execute("UPDATE OR IGNORE links SET link_type_id = ?1 WHERE link_type_id = ?2", [to, from])?;
     }
     conn.execute("DELETE FROM links WHERE link_type_id = ?1", [from])?;
+    Ok(())
+}
+
+/// Werte der Felder der Art `field_kind` (`version` oder `milestone`), die auf `from` zeigen, wandern auf `to` bzw. werden gelöscht.
+pub(crate) fn migrate_values_release(conn: &Connection, field_kind: &str, from: i64, to: Option<i64>) -> Res<()> {
+    let sel = "SELECT v.ticket_id FROM ticket_values v JOIN fields f ON f.id = v.field_id WHERE f.kind = ?1 AND v.text = ?2";
+    conn.execute(&format!("UPDATE tickets SET updated_at = ?3 WHERE id IN ({sel})"), params![field_kind, from.to_string(), super::common::now()])?;
+    let fields = "field_id IN (SELECT id FROM fields WHERE kind = ?1) AND text = ?2";
+    match to {
+        Some(to) => conn.execute(&format!("UPDATE ticket_values SET text = ?3 WHERE {fields}"), params![field_kind, from.to_string(), to.to_string()])?,
+        None => conn.execute(&format!("DELETE FROM ticket_values WHERE {fields}"), params![field_kind, from.to_string()])?,
+    };
     Ok(())
 }
 

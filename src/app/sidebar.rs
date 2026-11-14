@@ -499,6 +499,13 @@ impl App {
             p.rect_stroke(Rect::from_center_size(Pos2::new(mark_x - 4.0, name_y), Vec2::new(9.0, 7.0)), 1.5, Stroke::new(1.2_f32, weak_c), StrokeKind::Inside);
             mark_x -= 18.0;
         }
+        // Chip der verknüpften Tickets (links neben den Markierungen)
+        if !self.rename.as_ref().is_some_and(|(rid, _)| *rid == id) {
+            let chip_w = terminal_links::chip_row(ui, resp.id.with("tlchip"), id, self.tlinks.chips_of(id), Pos2::new(mark_x, name_y), (mark_x - text_x - 70.0).max(0.0), lang, actions);
+            if chip_w > 0.0 {
+                mark_x -= chip_w + 6.0;
+            }
+        }
         let text_clip = Rect::from_min_max(Pos2::new(text_x, rect.min.y), Pos2::new(mark_x.max(text_x + 20.0), rect.max.y));
 
         if let Some((_, buf)) = self.rename.as_mut().filter(|(rid, _)| *rid == id) {
@@ -610,6 +617,10 @@ impl App {
             }
             if ui.button(lang.t("Notizen …", "Notes …")).clicked() {
                 actions.push(Action::OpenNotes(id));
+                ui.close();
+            }
+            if self.tlinks.enabled && ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
+                actions.push(Action::LinkTicket(id));
                 ui.close();
             }
             ui.separator();
