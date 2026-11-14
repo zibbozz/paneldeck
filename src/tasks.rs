@@ -114,8 +114,23 @@ pub struct ItemFilter {
     pub tags: Vec<i64>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIXED_NOW: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Nur für Tests: legt „jetzt“ für diesen Thread fest (`None` = wieder die echte Uhr). Für das Erzeugen der Demo-Datenbank der Screenshots.
+#[cfg(test)]
+pub fn set_fixed_now(t: Option<&str>) {
+    FIXED_NOW.with(|f| *f.borrow_mut() = t.map(String::from));
+}
+
 /// Lokale Zeit als ISO-Text wie `meta.created_at`.
 pub fn now() -> String {
+    #[cfg(test)]
+    if let Some(t) = FIXED_NOW.with(|f| f.borrow().clone()) {
+        return t;
+    }
     chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
