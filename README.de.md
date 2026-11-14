@@ -37,8 +37,6 @@ Installer und `paneldeck.exe` sind **nicht code-signiert**. Ein Zertifikat koste
 ## Todo-Liste und Tickets
 Die Fensterleiste oben hat zwei Reiter: **Terminal Hub** (alles bisher Beschriebene, unverändert) und **Todo-Liste**. Umgeschaltet wird per Klick, `Strg+1` / `Strg+2` oder `Alt+Umschalt+1` / `Alt+Umschalt+2`. Paneldeck startet immer im Terminal Hub. Die Fensterknöpfe (Minimieren, Maximieren, Schließen) sitzen rechts in der Fensterleiste; unter Windows 11 zeigt der Maximieren-Knopf auch das Snap-Layouts-Menü.
 
-<!-- TODO screenshot: Fensterleiste mit den Reitern „Terminal Hub“ und „Todo-Liste“ (docs/images/titlebar.png und docs/images/de/titlebar.png) -->
-
 ### Einfacher Modus (Standard)
 Ist der Schalter **Expertenmodus** im Kopf des Reiters *Todo-Liste* aus, ist der Reiter eine schlichte Todo-Liste:
 
@@ -47,8 +45,6 @@ Ist der Schalter **Expertenmodus** im Kopf des Reiters *Todo-Liste* aus, ist der
 - Die Mülltonne oben rechts löscht eine Karte endgültig – nach einer Warnung mit **3-Sekunden-Sicherheitstimer**. *Erledigte löschen* entfernt alle abgehakten Karten auf dieselbe Weise, *Erledigte ausblenden* blendet sie nur aus.
 - **Tags** entstehen beim Eintippen (wie Labels in Jira) und bekommen eine Farbe; *Tags verwalten* benennt um, färbt um, führt zusammen und löscht. Gefiltert wird nach Tags (alle gewählten müssen passen) und nach offen/erledigt.
 - **Rückgängig / Wiederholen** mit `Strg+Z` und `Strg+Y`; wie viele Schritte gemerkt werden (3 bis 100, Standard 25), steht unter *Einstellungen → Daten & Sicherung*.
-
-<!-- TODO screenshot: einfache Todo-Liste mit Karten, Tags und einer erledigten Karte (docs/images/todo-simple.png und docs/images/de/todo-simple.png) -->
 
 ### Expertenmodus (ein kleines Jira)
 Schalte **Expertenmodus** ein (der Zustand wird gemerkt), und der Reiter wird zur Projektverwaltung. Die einfache Todo-Liste bleibt als schreibgeschütztes System-Projekt `TODO` erhalten (Karten heißen `TODO-12`); eine Karte lässt sich in ein Ticket umwandeln. Die Reiter eines Projekts sind *Tickets*, *Übersicht*, *Suche*, *Boards*, *Backlog* und *Releases* (wenn das Projekt Sprints bzw. Versionen nutzt), *Dashboards* sowie die Konfigurations-Reiter *Typen*, *Felder*, *Status*, *Workflows*, *Schnellaktionen*, *Verknüpfungstypen*, *Arten der Arbeit* und *Vorlagen & Sicherung*.
@@ -62,13 +58,11 @@ Schalte **Expertenmodus** ein (der Zustand wird gemerkt), und der Reiter wird zu
 - **Tickets** haben Felder je Typ, Eltern und Kinder (mit Fortschritt), Flagge und Stern, Kommentare, Verknüpfungen, **Zeiterfassung** (`1h 30m`, `2d`; eine Zahl allein sind Stunden) und einen Änderungsverlauf, der festhält, ob das Fenster, das Schnellmenü, ein Agent (mit Sitzungsname) oder ein Import etwas geändert hat. Tickets lassen sich klonen und in einen anderen Typ oder ein anderes Projekt verschieben.
 - **Kanban-Boards:** mehrere Boards je Projekt mit eigenen Spalten (auch mehrere Status je Spalte), Typ-Filter und Karteninhalt. Eine Karte in eine andere Spalte zu ziehen ist ein Statuswechsel mit allen Workflow-Regeln; innerhalb einer Spalte lässt sie sich umsortieren; Schnellfilter nach Text, Typ, Favoriten und markierten Tickets. Ein Board bezieht seine Tickets aus *Alle Tickets* oder aus einem gespeicherten Filter (auch projektübergreifend), und *Nur aktiver Sprint* zeigt nur die Tickets des aktiven Sprints. `Strg+Z` / `Strg+Y` machen Verschieben, Umsortieren, Stern und Flagge auf dem Board rückgängig bzw. wiederholen sie. Karten zeigen auch die Felder *Version*, *Meilenstein* und *Terminal* (beendete Sitzungen grau).
 
-<!-- TODO screenshot: Expertenmodus, Kanban-Board eines Projekts mit farbigen Karten (docs/images/todo-board.png und docs/images/de/todo-board.png) -->
-<!-- TODO screenshot: Expertenmodus, Typ-Editor / Feld-Editor / Workflow-Matrix (docs/images/todo-config.png und docs/images/de/todo-config.png) -->
 **Ticket-Oberfläche:** Der Reiter *Tickets* listet die Tickets eines Projekts (sortierbare Spalten, Textsuche, Typ-/Status-Chips, nur Favoriten, nur Markierte) mit einer **Abfrage-Leiste** darüber; *Neues Ticket* (`Strg+N`) öffnet den Anlege-Dialog (Typ wählen, optional ein Eltern-Ticket, *Weiteres anlegen*). Ein Ticket öffnet sich auf einer eigenen Seite oder in einem **Seitenpanel** neben der Liste (umschaltbar, die Wahl wird gemerkt) mit Feldern in Abschnitten, Kommentaren, Verknüpfungen, Kind-Tickets, Verlauf, Zeiterfassung und einem Status-Knopf, der nur erlaubte Übergänge anbietet (fehlende Pflichtfelder werden im selben Dialog abgefragt). *Rich-Text*-Felder sind Markdown mit Umschalter **Text | Visuell** und Formatierungsleiste; Ticket-Kennungen im Text (`PAN-12`) sind klickbar. *Weitere Aktionen* bietet **Klonen …**, **Typ ändern / verschieben …** (ein Dialog listet die Felder, die mitgehen, wegfallen oder neu sind) und **Löschen …** (endgültig, mit 3-Sekunden-Timer). `Strg+Z` / `Strg+Y` machen Ticket-Änderungen rückgängig bzw. wiederholen sie, auch das Umwandeln einer Todo-Karte in ein Ticket (ebenso in der Todolist-Übersicht). Ab 900 px Breite hat die Liste eine Chip-Spalte mit Version, Meilenstein und Terminal; sie scrollt zum geöffneten oder gerade geschlossenen Ticket. Ein laufender *Terminal*-Eintrag im Ticket springt zu dieser Sitzung. Wer ein Ticket aus Board, Suche, Backlog, Dashboard, Übersicht oder dem Terminal Hub öffnet, kommt mit *Zurück* (`Esc`) wieder dorthin.
-<!-- TODO screenshot: Ticket-Liste und Ticket-Detailseite (docs/images/todo-tickets.png und docs/images/de/todo-tickets.png) -->
+
+<p align="center"><img src="docs/images/de/todo-tickets.png" alt="Ticket-Liste mit einem im Seitenpanel geöffneten Ticket" width="100%"><br><sub>Die Ticket-Liste mit einem Ticket im Seitenpanel: Felder, Hierarchie mit Fortschritt, Verknüpfungen und Zeiterfassung neben der Liste (Demo-Daten, Projekt „Acme Shop“).</sub></p>
 
 **Backlog und Sprints** (optional, je Projekt – ohne sie arbeitet ein Projekt im Kanban-Stil): ein aktiver Sprint mit Ziel, Start, Ende und Dauer-Vorlage; Tickets zwischen Backlog und Sprints ziehen; beim Abschließen eines Sprints gehen offene Tickets ins Backlog oder in den nächsten Sprint; Burndown-Diagramm mit Ideal-Linie (nur Arbeitstage), Sprint-Bericht und Velocity über mehrere Sprints; Versionen und Meilensteine mit Fälligkeit, Veröffentlicht-Markierung und Fortschritt. Ziehen und *Verschieben nach* im Backlog lassen sich mit `Strg+Z` / `Strg+Y` rückgängig machen (Sprint starten, abschließen oder löschen sowie die Release-Aktionen nicht); ein Sprint dauert höchstens 4000 Tage.
-<!-- TODO screenshot: Backlog mit einem Sprint und Burndown-Diagramm (docs/images/todo-sprint.png und docs/images/de/todo-sprint.png) -->
 
 **Abfragesprache:** eine JQL-artige Suche über alle Tickets, mit Fehlermeldungen und Vorschlägen beim Tippen auf Englisch und Deutsch und einer **Hilfeseite** (Fragezeichen-Knopf neben dem Suchfeld) mit einer Komplettanleitung und Beispielen. Zum Beispiel:
 
@@ -76,22 +70,21 @@ Schalte **Expertenmodus** ein (der Zustand wird gemerkt), und der Reiter wird zu
 
 Operatoren: `=` `!=` `~` `!~` `<` `>` `<=` `>=` `IN` `NOT IN` `IS EMPTY`; verbunden mit `AND`, `OR`, `NOT` und Klammern; sortiert mit `ORDER BY` (oder `SORT BY`); Funktionen `activeSprint()`, `currentDate()`, `linkedTerminal()`; Schlüsselwörter wie `IS favorite`, `IS NOT blocked` und `SORT BY favorites`, die du im Schlüsselwort-Editor auch selbst definieren kannst. Suchen lassen sich als Filter speichern und als Quelle eines Boards verwenden.
 Die Abfrage-Leiste sitzt über der Ticket-Liste (eine gültige Abfrage ersetzt dort die lokalen Filter) und im Reiter **Suche**, der die Treffer als Tabelle für dieses Projekt oder für alle Projekte zeigt. Sie bietet Autovervollständigung (`↑↓`, `Tab`/`Enter`), einen Verlauf der letzten Abfragen und **Filter speichern** (je Projekt oder global); *Filter verwalten* benennt um, ersetzt und löscht sie, *Schlüsselwörter* öffnet den Schlüsselwort-Editor.
-<!-- TODO screenshot: Reiter Suche mit Abfrage-Leiste, Autovervollständigung und Treffern (docs/images/todo-search.png und docs/images/de/todo-search.png); Screenshots der Hilfeseite nur englisch: assets/query-help/query-help-<id>.png, registered in src/app/planning_ui/help_shots.rs -->
+<!-- TODO screenshot: Beispielbilder der Hilfeseite zur Abfragesprache, nur englisch: assets/query-help/query-help-<id>.png, eingetragen in src/app/planning_ui/help_shots.rs -->
 
 **Schnellaktionen und Schnellmenü:** Ein Typ kann Schaltflächen definieren (z. B. „Create Devtask“), die ein Ticket mit vorbelegten Werten anlegen, den Status wechseln oder eine mit dem Ticket verknüpfte Terminal-/Claude-Sitzung starten. Im Ticket öffnet die Taste **`.`** das Schnellmenü: Felder des Tickets suchen, Enter drücken und den Wert direkt eingeben, den Status wechseln (nur erlaubte Übergänge) oder eine Schnellaktion ausführen.
 Die Schnellaktionen bearbeitest du im Reiter **Schnellaktionen** des Projekts; das Schnellmenü fragt auch fehlende Pflichtfelder ab, wenn ein Statuswechsel sie braucht.
 
 **Dashboards:** frei angeordnete Kacheln auf einem Raster – gespeicherte Suchen (die Standard-Kachel ist eine große Suche), Sprint und Burndown, Anzahl nach Status/Typ/Priorität als Torte oder Balken, gebuchte Zeit, Favoriten und markierte Tickets sowie „Alle Projekte“; je Projekt oder global, mehrere Dashboards mit einem Standard, als JSON exportierbar.
 Der Reiter **Dashboards** hat einen Bearbeitungsmodus (Kacheln verschieben und in der Größe ändern, *Aufräumen*); ein Klick auf eine Zeile öffnet das Ticket, ein Klick auf ein Diagramm-Segment die Suche mit diesem Filter.
-<!-- TODO screenshot: ein Dashboard mit mehreren Kacheln (docs/images/todo-dashboard.png und docs/images/de/todo-dashboard.png) -->
+
+<p align="center"><img src="docs/images/de/todo-dashboard.png" alt="Ein Dashboard mit Burndown-Diagramm, Sprint-Fortschritt und Diagrammen" width="100%"><br><sub>Ein Dashboard: Burndown-Diagramm des aktiven Sprints, Sprint-Fortschritt, Tickets nach Status und Priorität und erfasste Zeit pro Woche.</sub></p>
 
 **Export und Import** (Projektsicherung als JSON, Tickets als CSV, Typ-/Feld-Vorlagen): Der Import akzeptiert nur das eigene Exportformat von Paneldeck, legt immer ein **neues** Projekt an (bei vergebenem Kürzel wird nach einem neuen gefragt) und verändert nie bestehende Daten. Dateien über 128 MB werden abgelehnt.
 Export und Import findest du im Reiter **Vorlagen & Sicherung**: *Projekt exportieren (JSON)*, *Tickets exportieren (CSV)* (auf Wunsch Excel-sicher, Formeln werden geschützt, auch bei Zellen, die mit Tabulator oder Wagenrücklauf beginnen), *Projekt importieren …*, *Tickets importieren (CSV) …* und der Vorlagen-Export/-Import.
 
 ### Tickets und Terminals
 Im Terminal Hub (bei eingeschaltetem Expertenmodus und mindestens einem Projekt) hat jedes Terminal ein kleines Verknüpfungs-Symbol im Kopf – auch per Rechtsklick auf den Kopf oder in der Seitenleiste erreichbar. Es öffnet eine Mini-Suche nach Ticket-Kennung oder Titel (`PAN-423`, `login`) und verknüpft das Ticket mit der Sitzung. Die Ticket-Kennung erscheint danach als **Chip** im Terminalkopf und in der Seitenleiste, und auch die Befehls-Palette (`Strg+Umschalt+P`) findet Tickets. Ein Klick auf den Chip öffnet das Ticket im Reiter *Todo-Liste* (der Expertenmodus wird bei Bedarf eingeschaltet). Felder vom Typ *Terminal* wählen eine Sitzung aus einer Liste. Schließt du eine Sitzung, bleibt die Verknüpfung als „beendet“ (grau) erhalten und wird beim Fortsetzen der Sitzung wieder aktiv.
-
-<!-- TODO screenshot: Terminalkopf mit Ticket-Chip und Verknüpfungs-Suche (docs/images/todo-terminal-link.png und docs/images/de/todo-terminal-link.png) -->
 
 ### Tastenkürzel
 | Kürzel | Aktion |

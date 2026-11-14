@@ -23,6 +23,8 @@ pub mod backup_doc;
 pub mod clone_move;
 pub mod comments;
 pub mod defaults;
+#[cfg(test)]
+mod demo_shots;
 pub mod fields;
 pub mod history;
 pub mod icons;

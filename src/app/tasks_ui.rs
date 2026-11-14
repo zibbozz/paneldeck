@@ -1332,6 +1332,8 @@ impl App {
         if let Some(db) = env.db {
             self.plan.ensure_loaded(Some(db));
             self.plan.header(ctx, &env, db);
+            #[cfg(feature = "readme-shots")]
+            self.plan.dev_view(db, env.lang);
             if self.plan.expert {
                 self.plan.page(ctx, &env, db);
                 if self.plan.take_leave_to_terminals() {
