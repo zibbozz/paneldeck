@@ -169,6 +169,7 @@ pub fn delete_type(conn: &Connection, id: i64, mode: Option<TypeDeleteMode>) -> 
         })?;
         conn.execute("DELETE FROM ticket_types WHERE id = ?1", [id])?;
         scrub_target_type(conn, cur.project_id, id)?;
+        super::views::boards::prune_after_delete(conn, cur.project_id)?;
         Ok(())
     })
 }

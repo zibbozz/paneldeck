@@ -333,6 +333,14 @@ pub fn start_sprint(conn: &Connection, id: i64, cal: &WorkCalendar) -> SRes<Spri
             "UPDATE sprints SET state = 'active', start_date = ?1, end_date = ?2, started_at = ?3 WHERE id = ?4",
             params![fmt_date(start), fmt_date(end), clock::now(), id],
         )?;
+        // Zugesagt sind die Punkte beim Start: Was nach dem Einplanen geschätzt oder geändert wurde, gilt für Burndown, Bericht und Velocity.
+        let rows: Vec<(i64, i64)> = {
+            let mut st = conn.prepare("SELECT id, ticket_id FROM sprint_tickets WHERE sprint_id = ?1 AND removed_at IS NULL")?;
+            st.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?
+        };
+        for (row, ticket) in rows {
+            conn.execute("UPDATE sprint_tickets SET points_at_add = ?1 WHERE id = ?2", params![ticket_points(conn, ticket)?, row])?;
+        }
         get_sprint(conn, id)
     })
 }
