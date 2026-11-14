@@ -47,6 +47,8 @@ const MIGRATIONS: &[&str] = &[
     crate::planning::quick::schema::MIGRATION,
     // 6: Tickets (Tickets, Feldwerte, Verknüpfungen, Kommentare, Verlauf, Zeiteinträge, Todo-Umwandlungen), SQL in `planning/ticket_schema.rs`
     crate::planning::ticket_schema::MIGRATION,
+    // 7: Sprints, Zugehörigkeit der Tickets, Versionen und Meilensteine, SQL in `planning/sprints/schema.rs`
+    crate::planning::sprints::schema::MIGRATION,
 ];
 
 /// Aktuelle Schema-Version dieser Programmversion.
