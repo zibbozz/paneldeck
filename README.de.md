@@ -82,6 +82,9 @@ Alles liegt im Ordner `paneldeck-data` neben der `.exe` (falls nicht beschreibba
 Release-Dateien (portables ZIP mit `paneldeck.exe` und Lizenzen, Installer) entstehen auf einem Branch `release/x.y` mit `tools/release.sh <version>` (Ablauf siehe `CLAUDE.md`, Branching- und Release-Strategie) – unter Windows aus Git Bash, braucht Python 3 und für den Installer NSIS (`makensis`).
 Mit `--publish` wird zusätzlich das Tag gepusht und das GitHub-Release angelegt (GitHub CLI `gh`, angemeldet), mit `--no-git` nur gebaut und gepackt.
 
+## Issues und Mitarbeit
+Paneldeck ist noch ein junges Projekt. Issues und Beiträge werden für alle geöffnet, sobald das Projekt einen Stand erreicht hat, mit dem ich zufrieden bin und bei dem ich mich wohlfühle, die Öffentlichkeit mitarbeiten zu lassen. Bis dahin bitte ich um Geduld – danke für das Verständnis.
+
 ## Rechtliches
 - **Lizenz:** MIT (`LICENSE`). Die Software wird ohne jede Gewährleistung bereitgestellt; die Nutzung erfolgt auf eigene Gefahr – das gilt besonders für die Agenten-Schnittstelle, die KI-Agenten in deine Terminals schreiben lässt.
 - **Keine Verbindung zu Anthropic:** Paneldeck ist ein unabhängiges Projekt. „Claude“ und „Claude Code“ sind Marken von Anthropic, PBC und werden hier nur genannt, um zu beschreiben, mit welchem Programm Paneldeck zusammenarbeitet. Paneldeck enthält keinen Code und keine Logos von Anthropic.
