@@ -16,6 +16,7 @@ mod keys;
 mod notify;
 mod osc;
 mod prompts;
+mod query;
 mod search;
 mod layout;
 mod links;
