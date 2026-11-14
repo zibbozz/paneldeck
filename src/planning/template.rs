@@ -10,11 +10,13 @@
 //!   umbenannt, sondern im [`ImportReport`] gemeldet und übersprungen (ein gleichnamiger Status wird für die Workflows der
 //!   neuen Typen mitbenutzt, ein gleichnamiger Typ samt seinen Feldern/Regeln nicht angefasst). Der Import ist atomar:
 //!   bei einem Fehler bleibt das Projekt unverändert.
-//! * `quick_actions` ist ein Platzhalter für die später folgenden Schnellaktionen; heute leer und beim Import ignoriert.
+//! * `quick_actions` enthält die Quick-Actions des Typs (`quick/tpl.rs`) mit Vorlagen-Nummern statt Datenbank-Ids; sie werden
+//!   zusammen mit dem Typ angelegt (bei gleichnamigen, übersprungenen Typen nicht).
 
-use super::fields::{create_field, FieldKind, FieldOptions, NewField};
+use super::fields::{create_field, list_fields, FieldKind, FieldOptions, NewField};
 use super::names;
 use super::projects::editable;
+use super::quick::tpl as quick_tpl;
 use super::statuses::{create_status, NewStatus, StatusCategory};
 use super::summary::project_summary;
 use super::types::{create_type, set_parents, NewType};
@@ -77,9 +79,9 @@ pub struct TplType {
     pub transitions: Vec<TransitionDef>,
     #[serde(default)]
     pub fields: Vec<TplField>,
-    /// Platzhalter für Schnellaktionen (derzeit immer leer).
+    /// Quick-Actions des Typs (Vorlagen-Nummern statt Datenbank-Ids).
     #[serde(default)]
-    pub quick_actions: Vec<Value>,
+    pub quick_actions: Vec<quick_tpl::TplQuickAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +152,13 @@ pub fn export_types(conn: &Connection, project_id: i64) -> Res<TemplateDoc> {
         }
     }
     let map_all = |ids: &[i64], m: &HashMap<i64, i64>| ids.iter().filter_map(|i| m.get(i).copied()).collect::<Vec<_>>();
+    let mut quick: HashMap<i64, Vec<quick_tpl::TplQuickAction>> = HashMap::new();
+    {
+        let maps = quick_tpl::Maps { types: &type_no, statuses: &status_no, fields: &field_no };
+        for t in &types {
+            quick.insert(t.ticket_type.id, quick_tpl::export_actions(conn, t.ticket_type.id, &maps)?);
+        }
+    }
     let out_types = types
         .iter()
         .map(|t| {
@@ -195,7 +204,7 @@ pub fn export_types(conn: &Connection, project_id: i64) -> Res<TemplateDoc> {
                         }
                     })
                     .collect(),
-                quick_actions: Vec::new(),
+                quick_actions: quick.remove(&tt.id).unwrap_or_default(),
             }
         })
         .collect();
@@ -215,6 +224,8 @@ pub enum ConflictKind {
     Status,
     Type,
     WorkKind,
+    /// Eine Quick-Action wurde ohne Teile übernommen, auf die sie verweist (z. B. Verknüpfungstyp, Feld eines vorhandenen Typs).
+    QuickAction,
 }
 
 /// Etwas aus der Vorlage gibt es im Projekt schon (gleicher Schlüssel oder Name in irgendeiner Sprache) und wurde nicht angefasst.
@@ -236,6 +247,8 @@ impl ImportConflict {
             (ConflictKind::Type, Lang::En) => format!("The type {q} already exists – not imported (including its fields and workflow)."),
             (ConflictKind::WorkKind, Lang::De) => format!("Die Art der Arbeit {q} gibt es schon – nicht importiert."),
             (ConflictKind::WorkKind, Lang::En) => format!("The kind of work {q} already exists – not imported."),
+            (ConflictKind::QuickAction, Lang::De) => format!("Die Schnellaktion {q} wurde ohne einige Verweise importiert, die es hier nicht gibt."),
+            (ConflictKind::QuickAction, Lang::En) => format!("The quick action {q} was imported without some references that do not exist here."),
         }
     }
 }
@@ -246,6 +259,7 @@ pub struct ImportReport {
     pub created_types: usize,
     pub created_fields: usize,
     pub created_work_kinds: usize,
+    pub created_quick_actions: usize,
     pub conflicts: Vec<ImportConflict>,
 }
 
@@ -337,6 +351,19 @@ pub fn import_types(conn: &Connection, project_id: i64, doc: &TemplateDoc) -> Re
                 insert_unique(&mut field_map, f.id, id, "field")?;
             }
         }
+        // Felder schon vorhandener gleichnamiger Typen: für Verweise der Quick-Actions (Zuordnung über den Namen)
+        for t in &doc.types {
+            let Some(real) = type_map.get(&t.id) else { continue };
+            if created.iter().any(|(_, id)| id == real) {
+                continue;
+            }
+            let have = list_fields(conn, *real)?;
+            for f in &t.fields {
+                if let Some(e) = have.iter().find(|e| common::same_label(f.key.as_deref(), f.name.as_deref(), e.key.as_deref(), e.name.as_deref())) {
+                    field_map.entry(f.id).or_insert(e.id);
+                }
+            }
+        }
         // 4. Hierarchie-Regeln der neuen Typen (Eltern: neue oder bereits vorhandene Typen)
         for (t, type_id) in &created {
             if t.parents.is_empty() {
@@ -368,6 +395,18 @@ pub fn import_types(conn: &Connection, project_id: i64, doc: &TemplateDoc) -> Re
                 });
             }
             replace_transitions(conn, *type_id, &defs)?;
+        }
+        // 5b. Quick-Actions der neuen Typen (brauchen Typen, Felder und Workflows)
+        let maps = quick_tpl::Maps { types: &type_map, statuses: &status_map, fields: &field_map };
+        for (t, type_id) in &created {
+            if t.quick_actions.is_empty() {
+                continue;
+            }
+            let out = quick_tpl::import_actions(conn, *type_id, &t.quick_actions, &maps)?;
+            rep.created_quick_actions += out.created;
+            for (key, name) in out.incomplete {
+                rep.conflicts.push(ImportConflict { kind: ConflictKind::QuickAction, key, name });
+            }
         }
         // 6. Arten der Arbeit
         for w in &doc.work_kinds {

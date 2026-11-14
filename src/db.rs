@@ -41,6 +41,8 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX todo_item_tags_tag ON todo_item_tags (tag_id);",
     // 3: Konfiguration der Projekte (Projekte, Status, Typen, Felder, Workflows, Verknüpfungstypen, Arten der Arbeit), SQL in `planning/schema.rs`
     crate::planning::schema::MIGRATION,
+    // 4: Quick-Actions (Schnellaktionen) der Tickettypen, SQL in `planning/quick/schema.rs`
+    crate::planning::quick::schema::MIGRATION,
 ];
 
 /// Aktuelle Schema-Version dieser Programmversion.
