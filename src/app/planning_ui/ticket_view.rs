@@ -309,6 +309,11 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
                     if let Some(k) = ev.open_key {
                         acts.push(Act::OpenKey(k));
                     }
+                    if let Some(s) = ev.open_session {
+                        // Die Anwendung holt den Sprung im nächsten Bild ab (siehe `terminal_links::request_jump`).
+                        crate::app::terminal_links::request_jump(s);
+                        ui.ctx().request_repaint();
+                    }
                 }
             };
             if name.is_empty() {
