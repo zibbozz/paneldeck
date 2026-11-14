@@ -116,6 +116,9 @@ pub struct Conversion {
     /// Macht das Anlegen des Tickets rückgängig (und entfernt die Zuordnung).
     pub op: TicketOp,
     /// Das Abhaken der Karte (`None`, wenn sie schon erledigt war) für die History der Todo-Liste.
+    /// Bekannte Lücke: Die Umwandlung läuft in der Übersicht des Expertenmodus, die (anders als die einfache Liste in
+    /// `tasks_ui.rs`) keine eigene Todo-Historie hat; die Oberfläche legt `todo_op` deshalb nirgends ab. Strg+Z auf der
+    /// Umwandlung entfernt das Ticket (`op`), die Karte bleibt abgehakt und lässt sich von Hand wieder öffnen.
     pub todo_op: Option<TaskOp>,
     /// Tags, die nicht übernommen werden konnten (kein Labels-Feld am Typ).
     pub dropped_tags: Vec<String>,

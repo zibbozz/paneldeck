@@ -204,6 +204,21 @@ pub fn run_transition(conn: &Connection, ids: &[i64], to: i64, lang: Lang) -> Ba
     out
 }
 
+/// Statuswechsel mit Feldwerten (Pflichtfelder des Übergangs). Jedes Ticket bekommt nur die Werte der Felder seines Typs, damit
+/// ein Lauf über Tickets verschiedener Typen nicht an fremden Feldern scheitert.
+pub fn run_transition_with(conn: &Connection, ids: &[i64], to: i64, values: &[(i64, Value)], lang: Lang) -> BatchResult {
+    let mut out = BatchResult::default();
+    for id in ids {
+        let own: Vec<(i64, Value)> = match get_ticket(conn, *id).ok().and_then(|t| list_fields(conn, t.type_id).ok()) {
+            Some(fields) => values.iter().filter(|(fid, _)| fields.iter().any(|f| f.id == *fid)).cloned().collect(),
+            None => Vec::new(),
+        };
+        let r = transition_ticket(conn, *id, to, &own, &Source::quick()).map_err(|e| e.message(lang));
+        out.record(key_of(conn, *id), r);
+    }
+    out
+}
+
 /// Geprüfte Eingabe (Titel, Feld, Kommentar, Zeit) für jedes Ticket ausführen.
 pub fn run_submit(conn: &Connection, ids: &[i64], s: &Submit, now: NaiveDateTime, lang: Lang) -> BatchResult {
     let mut out = BatchResult::default();
