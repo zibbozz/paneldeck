@@ -24,6 +24,6 @@ done
 git log --oneline "origin/$REL..HEAD"
 if [ "$PR" = 1 ]; then
   git push -u origin "$BR"
-  "$GH" pr create --base "$REL" --head "$BR" --title "Backport nach $REL: $NAME" \
-    --body "Cherry-Pick (\`-x\`) aus \`develop\` nach \`$REL\`: ${COMMITS[*]}"
+  "$GH" pr create --base "$REL" --head "$BR" --title "Backport to $REL: $NAME" \
+    --body "Cherry-pick (\`-x\`) from \`develop\` into \`$REL\`: ${COMMITS[*]}"
 fi
