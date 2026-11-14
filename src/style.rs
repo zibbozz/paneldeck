@@ -175,6 +175,8 @@ pub enum Icon {
     Minimize,
     Maximize,
     Restore,
+    /// Kettenglieder (Ticket verknüpfen).
+    Link,
 }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, st: Stroke) {
@@ -209,6 +211,10 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
             for (a, b) in [(v(0.0, -4.0), v(0.0, 4.0)), (v(-4.0, 0.0), v(4.0, 0.0)), (v(-2.8, -2.8), v(2.8, 2.8)), (v(-2.8, 2.8), v(2.8, -2.8))] {
                 p.line_segment([c + a, c + b], st2);
             }
+        }
+        Icon::Link => {
+            p.rect_stroke(Rect::from_center_size(c + v(-3.0, 0.0), v(9.5, 6.0)), 3.0, st, StrokeKind::Inside);
+            p.rect_stroke(Rect::from_center_size(c + v(3.0, 0.0), v(9.5, 6.0)), 3.0, st, StrokeKind::Inside);
         }
         Icon::Search => {
             p.circle_stroke(c + v(-1.5, -1.5), 4.6, st);
