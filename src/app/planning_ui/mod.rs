@@ -8,11 +8,18 @@
 
 mod delete;
 mod fields_ed;
+mod help_shots;
 mod helpers;
+mod keywords_ed;
 mod kinds_ed;
 mod links_ed;
 mod overview;
 mod project_form;
+mod query_bar;
+mod query_help_ui;
+mod query_logic;
+mod saved_filters;
+mod search_tab;
 mod status_ed;
 mod template_ed;
 mod types_ed;
@@ -42,6 +49,7 @@ pub(super) struct Cx<'a> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
     Overview,
+    Search,
     Types,
     Fields,
     Statuses,
@@ -82,6 +90,12 @@ pub(super) struct PlanUi {
     kinds: kinds_ed::State,
     templates: template_ed::State,
     todo: overview::Todo,
+    /// Reiter „Suche“ (Abfrage-Leiste, siehe `search_tab`)
+    search: search_tab::State,
+    /// Hilfeseite der Abfragesprache (Vollfläche über dem Reiterinhalt)
+    help: query_help_ui::HelpState,
+    /// Dialog „JQL-Schlüsselwörter“
+    kw: keywords_ed::State,
 }
 
 impl Default for PlanUi {
@@ -108,6 +122,9 @@ impl Default for PlanUi {
             kinds: Default::default(),
             templates: Default::default(),
             todo: Default::default(),
+            search: Default::default(),
+            help: Default::default(),
+            kw: Default::default(),
         }
     }
 }
@@ -146,6 +163,7 @@ impl PlanUi {
         self.sum = project_summary(cx.conn, self.selected).ok().map(Rc::new);
         self.links = list_link_types(cx.conn).unwrap_or_default();
         self.todo.dirty = true;
+        self.search.stale = true;
     }
 
     fn project(&self) -> Option<&Project> {
@@ -270,7 +288,19 @@ impl PlanUi {
             self.reload(&cx);
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(env.bg)).show(ctx, |ui| {
-            self.body(ui, &cx);
+            if self.help.open {
+                // Die Hilfe liegt wie ein Ticket über dem Reiterinhalt (Vollfläche); „X“ oder Esc schließt sie.
+                let out = query_help_ui::help_page(ui, &mut self.help, cx.lang, true);
+                if let Some(q) = out.use_query {
+                    self.search.bar.set_query(&q);
+                    self.show_search_tab();
+                    self.help.open = false;
+                } else if out.close {
+                    self.help.open = false;
+                }
+            } else {
+                self.body(ui, &cx);
+            }
         });
         self.dialogs(ctx, &cx);
         self.toast(ctx);
@@ -298,7 +328,7 @@ impl PlanUi {
 
     fn tabs(&self, lang: Lang) -> Vec<(Tab, &'static str)> {
         let system = self.project().is_some_and(|p| p.system);
-        let mut v = vec![(Tab::Overview, lang.t("Übersicht", "Overview"))];
+        let mut v = vec![(Tab::Overview, lang.t("Übersicht", "Overview")), (Tab::Search, lang.t("Suche", "Search"))];
         if !system {
             v.extend([
                 (Tab::Types, lang.t("Typen", "Types")),
@@ -353,6 +383,7 @@ impl PlanUi {
                 ui.set_width(w - 8.0);
                 match self.tab {
                     Tab::Overview => self.overview(ui, cx, &proj),
+                    Tab::Search => self.search_tab(ui, cx),
                     Tab::Types => self.types_tab(ui, cx),
                     Tab::Fields => self.fields_tab(ui, cx),
                     Tab::Statuses => self.statuses_tab(ui, cx),
@@ -374,6 +405,7 @@ impl PlanUi {
         self.template_dialogs(ctx, cx);
         self.delete_dialog(ctx, cx);
         self.delete_project_dialog(ctx, cx);
+        self.keywords_dialog_ui(ctx, cx);
     }
 
     /// Schnellzugriff für Dialoge: Id eines Modals dieses Bereichs.
