@@ -39,6 +39,8 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (item_id, tag_id)
     ) WITHOUT ROWID;
     CREATE INDEX todo_item_tags_tag ON todo_item_tags (tag_id);",
+    // 3: Konfiguration der Projekte (Projekte, Status, Typen, Felder, Workflows, Verknüpfungstypen, Arten der Arbeit), SQL in `planning/schema.rs`
+    crate::planning::schema::MIGRATION,
 ];
 
 /// Aktuelle Schema-Version dieser Programmversion.

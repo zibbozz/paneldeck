@@ -18,6 +18,7 @@ mod integration;
 mod keys;
 mod notify;
 mod osc;
+mod planning;
 mod prompts;
 mod query;
 mod search;
