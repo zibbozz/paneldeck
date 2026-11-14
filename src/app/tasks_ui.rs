@@ -1336,6 +1336,9 @@ impl App {
                 self.plan.page(ctx, &env, db);
                 let outs = self.plan.take_quick_out();
                 self.handle_quick_out(ctx, outs);
+                for t in self.plan.take_toasts() {
+                    self.toast(t);
+                }
                 return;
             }
         }
