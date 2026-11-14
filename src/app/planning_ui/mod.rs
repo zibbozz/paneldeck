@@ -70,6 +70,8 @@ mod ticket_query;
 mod ticket_state;
 mod ticket_tab;
 #[cfg(test)]
+mod quick_btn_tests;
+#[cfg(test)]
 mod ticket_ui_tests;
 mod ticket_view;
 mod types_ed;

@@ -68,11 +68,14 @@ struct Menu {
     /// Das nächste Bild setzt den Fokus ins erste Eingabefeld.
     focus: bool,
     scroll_to_sel: bool,
+    /// Vom Knopf in der Ticket-Ansicht geöffnet (eine bestimmte Aktion): Zurück/Esc schließt das Menü, statt die Liste zu zeigen.
+    direct: bool,
 }
 
 #[derive(Default)]
 pub(super) struct State {
-    pending: Option<Vec<i64>>,
+    /// Tickets und (bei einem Knopf der Ticket-Ansicht) die Schnellaktion, die sofort gestartet wird.
+    pending: Option<(Vec<i64>, Option<i64>)>,
     menu: Option<Menu>,
     out: Vec<Out>,
     undo: VecDeque<(u64, TicketOp)>,
@@ -127,7 +130,17 @@ impl PlanUi {
     /// Öffnet das Schnellmenü für die Tickets. Das Menü wird im nächsten Bild geladen (Datenbank), leere Liste = nichts tun.
     pub(in crate::app) fn open_quick_menu(&mut self, target: Vec<i64>) {
         if !target.is_empty() {
-            self.quick.pending = Some(target);
+            self.quick.pending = Some((target, None));
+        }
+    }
+
+    /// Startet die Schnellaktion `action_id` für die Tickets, so als wäre sie im Schnellmenü gewählt worden (Knöpfe der
+    /// Ticket-Ansicht): erst das Pflichtfeld-Formular bzw. die Titel-Eingabe, wenn nötig, sonst sofort ausführen; Ergebnis als
+    /// Toast mit „Rückgängig“ bzw. Sitzungsstart über [`PlanUi::take_quick_out`]. Das Menü selbst bleibt unsichtbar, solange
+    /// nichts einzugeben ist.
+    pub(in crate::app) fn open_quick_action(&mut self, target: Vec<i64>, action_id: i64) {
+        if !target.is_empty() {
+            self.quick.pending = Some((target, Some(action_id)));
         }
     }
 
@@ -160,11 +173,29 @@ impl PlanUi {
         Ok(lang.t("Rückgängig gemacht.", "Undone.").to_string())
     }
 
-    fn quick_open(&mut self, cx: &Cx, ids: Vec<i64>) {
+    fn quick_open(&mut self, cx: &Cx, ids: Vec<i64>, action: Option<i64>) {
         match exec::load(cx.conn, &ids, cx.lang) {
             Ok(l) => {
                 let recent = cx.db.meta(&format!("quick_recent_{}", l.project_id)).map(|s| logic::recent_from_text(&s)).unwrap_or_default();
-                self.quick.menu = Some(Menu { ids, project_id: l.project_id, title: l.title, items: l.items, work_kinds: l.work_kinds, query: String::new(), sel: 0, stage: Stage::List, recent, note: None, focus: true, scroll_to_sel: false });
+                let mut m = Menu { ids, project_id: l.project_id, title: l.title, items: l.items, work_kinds: l.work_kinds, query: String::new(), sel: 0, stage: Stage::List, recent, note: None, focus: true, scroll_to_sel: false, direct: action.is_some() };
+                if let Some(id) = action {
+                    // Knopf in der Ticket-Ansicht: genau diese Zeile wie im Menü ausführen (Formular, Titel, Ausführen).
+                    let Some(idx) = m.items.iter().position(|i| i.key == ItemKey::Action(id)) else {
+                        let text = cx.lang.t("Die Aktion ist hier nicht verfügbar.", "The action is not available here.").to_string();
+                        self.quick.out.push(Out::Toast { text, error: true, undo: None });
+                        return;
+                    };
+                    self.quick_run_item(cx, &mut m, idx, chrono::Local::now().naive_local());
+                    if m.ids.is_empty() {
+                        return; // schon ausgeführt, nichts mehr zu zeigen
+                    }
+                    if let (Stage::List, Some(note)) = (&m.stage, m.note.take()) {
+                        // nicht ausführbar (ausgegraut, ungültig): als Hinweis melden, die Liste würde hier nur verwirren
+                        self.quick.out.push(Out::Toast { text: note, error: true, undo: None });
+                        return;
+                    }
+                }
+                self.quick.menu = Some(m);
             }
             Err(e) => self.quick.out.push(Out::Toast { text: e, error: true, undo: None }),
         }
@@ -172,8 +203,8 @@ impl PlanUi {
 
     /// Zeichnet das Menü (aus `PlanUi::dialogs`).
     pub(super) fn quick_dialogs(&mut self, ctx: &egui::Context, cx: &Cx) {
-        if let Some(ids) = self.quick.pending.take() {
-            self.quick_open(cx, ids);
+        if let Some((ids, action)) = self.quick.pending.take() {
+            self.quick_open(cx, ids, action);
         }
         let Some(mut m) = self.quick.menu.take() else { return };
         let lang = cx.lang;
@@ -212,8 +243,12 @@ impl PlanUi {
                 close = true;
             }
         } else if keys.esc {
-            m.stage = Stage::List;
-            m.focus = true;
+            if m.direct {
+                close = true;
+            } else {
+                m.stage = Stage::List;
+                m.focus = true;
+            }
         }
         let submit = match &m.stage {
             Stage::Form { item, .. } => {
@@ -322,8 +357,12 @@ impl PlanUi {
             m.scroll_to_sel = true;
         }
         if back {
-            m.stage = Stage::List;
-            m.focus = true;
+            if m.direct {
+                close = true;
+            } else {
+                m.stage = Stage::List;
+                m.focus = true;
+            }
         }
         if clicked.is_some() {
             run = clicked;
@@ -763,7 +802,7 @@ mod tests {
         let no_wf = crate::planning::types::create_type(&db.conn, &crate::planning::types::NewType { project_id: f.project, key: None, name: Some("Note".into()), icon: None, color: "#445566".into(), workflow: false }).unwrap();
         let note = crate::planning::tickets::create_ticket(&db.conn, &crate::planning::tickets::NewTicket::new(f.project, no_wf, "N"), &Source::ui()).unwrap().0;
         let res = exec::run_transition(&db.conn, &[a.id, note.id], f.done, Lang::En);
-        let mut m2 = Menu { ids: vec![a.id, note.id], project_id: f.project, title: String::new(), items: vec![], work_kinds: vec![], query: String::new(), sel: 0, stage: Stage::List, recent: vec![], note: None, focus: false, scroll_to_sel: false };
+        let mut m2 = Menu { ids: vec![a.id, note.id], project_id: f.project, title: String::new(), items: vec![], work_kinds: vec![], query: String::new(), sel: 0, stage: Stage::List, recent: vec![], note: None, focus: false, scroll_to_sel: false, direct: false };
         let it = Item { key: ItemKey::Transition(f.done), group: logic::Group::Status, label: "Done".into(), aliases: vec![], detail: String::new(), input: None, current: None, color: None, disabled: None, ask_title: false };
         ui.quick_finish(&cx, &mut m2, &it, res);
         let Stage::Result { text, lines } = &m2.stage else { panic!("Zusammenfassung erwartet") };
@@ -1096,6 +1135,89 @@ mod tests {
         let now = chrono::Local::now().naive_local();
         assert!(quick_fill::prepare_action(&f.c, &[story.id], act, now, Lang::En).unwrap().is_none());
         assert!(quick_fill::prepare_action(&f.c, &[story.id], 99_999, now, Lang::En).unwrap().is_none(), "unbekannte Aktion: der Lauf meldet es");
+    }
+
+    /// Knopf in der Ticket-Ansicht (`open_quick_action`): dieselbe Logik wie die Zeile im Menü, aber ohne Liste dazwischen.
+    fn direct_case(lang: Lang) {
+        use crate::planning::fields::{FieldKind, FieldOptions};
+        use crate::planning::quick::params::{ActionParams, ChangeStatusParams, CreateTicketParams, DefaultValue, FieldRef, StartSessionParams};
+        let f = Fx::new();
+        let result = f.add_field(f.task, "Result", FieldKind::Text, FieldOptions::default(), false);
+        require_on_transition(&f, f.task, result.id, f.todo, f.progress);
+        let t = f.mk(f.task, "Needs a result");
+        let story = f.mk(f.story, "Login");
+        let start = add_action(&f, f.task, "Start", ActionParams::ChangeStatus(ChangeStatusParams { to_status_id: f.progress, set_values: vec![] }));
+        let ask = add_action(&f, f.story, "Task ask", ActionParams::CreateTicket(CreateTicketParams { ticket_type_id: f.task, relation: None, defaults: vec![] }));
+        let fixed = add_action(&f, f.story, "Task fixed", ActionParams::CreateTicket(CreateTicketParams { ticket_type_id: f.task, relation: None, defaults: vec![DefaultValue { field_id: FieldRef::Title, value: serde_json::json!("Fixed") }] }));
+        let shell = add_action(&f, f.story, "Shell", ActionParams::StartSession(StartSessionParams::default()));
+        let broken = add_action(&f, f.story, "Broken", ActionParams::StartSession(StartSessionParams::default()));
+        f.c.execute("UPDATE quick_actions SET invalid = 1 WHERE id = ?1", [broken]).unwrap();
+        let db = db_of(f.c);
+        let cx = Cx { conn: &db.conn, db: &db, lang };
+        let ctx = egui::Context::default();
+        let mut ui = PlanUi::default();
+        let count = || db.conn.query_row("SELECT COUNT(*) FROM tickets", [], |r| r.get::<_, i64>(0)).unwrap();
+        // Ticket anlegen mit Titelvorgabe: sofort angelegt, kein Menü, Toast mit Rückgängig
+        let before = count();
+        ui.open_quick_action(vec![story.id], fixed);
+        assert!(ui.quick.is_open());
+        frame(&mut ui, &ctx, &cx, vec![]);
+        assert!(ui.quick.menu.is_none(), "nichts einzugeben: kein Menü");
+        assert_eq!(count(), before + 1);
+        let Some(Out::Toast { undo: Some(token), error: false, .. }) = ui.take_quick_out().into_iter().next() else { panic!("Toast mit Rückgängig erwartet") };
+        assert!(ui.quick_undo(&db.conn, token, lang).is_ok());
+        assert_eq!(count(), before);
+        // Sitzungsaktion: wie im Menü eine Anfrage an die Anwendung, nichts in der Datenbank
+        ui.open_quick_action(vec![story.id], shell);
+        frame(&mut ui, &ctx, &cx, vec![]);
+        assert!(ui.quick.menu.is_none());
+        let outs = ui.take_quick_out();
+        assert!(outs.iter().any(|o| matches!(o, Out::Session(s) if s.ticket_id == story.id)), "Sitzungsanfrage erwartet");
+        assert_eq!(count(), before);
+        // Pflichtfeld: das Formular öffnet sich direkt (ohne Liste); Esc schließt das ganze Menü
+        ui.open_quick_action(vec![t.id], start);
+        frame(&mut ui, &ctx, &cx, vec![]);
+        assert!(matches!(ui.quick.menu.as_ref().map(|m| (&m.stage, m.direct)), Some((Stage::Fill { .. }, true))));
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.todo));
+        frame(&mut ui, &ctx, &cx, key(Key::Escape));
+        assert!(ui.quick.menu.is_none(), "Esc schließt, statt die Liste zu zeigen");
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.todo));
+        // mit Wert: verschoben, ein Rückgängig-Schritt
+        ui.open_quick_action(vec![t.id], start);
+        frame(&mut ui, &ctx, &cx, vec![]);
+        let mut m = ui.quick.menu.take().unwrap();
+        draft_of(&mut m, 0).text = "ready".into();
+        ui.quick_submit(&cx, &mut m, chrono::Local::now().naive_local());
+        assert!(m.ids.is_empty());
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.progress));
+        let Some(Out::Toast { undo: Some(token), .. }) = ui.take_quick_out().into_iter().next() else { panic!("Toast erwartet") };
+        assert!(ui.quick_undo(&db.conn, token, lang).is_ok());
+        assert_eq!(get_ticket(&db.conn, t.id).unwrap().status_id, Some(f.todo));
+        // Ticket anlegen ohne Titelvorgabe: erst die Titel-Eingabe; Esc schließt
+        ui.open_quick_action(vec![story.id], ask);
+        frame(&mut ui, &ctx, &cx, vec![]);
+        assert!(matches!(ui.quick.menu.as_ref().map(|m| &m.stage), Some(Stage::Form { .. })));
+        assert_eq!(count(), before);
+        frame(&mut ui, &ctx, &cx, key(Key::Escape));
+        assert!(ui.quick.menu.is_none());
+        // ungültige Aktion und Aktion eines anderen Typs: nicht ausführbar, als Fehler-Toast gemeldet
+        for id in [broken, start] {
+            ui.open_quick_action(vec![story.id], id);
+            frame(&mut ui, &ctx, &cx, vec![]);
+            assert!(ui.quick.menu.is_none());
+            let outs = ui.take_quick_out();
+            assert!(matches!(outs.as_slice(), [Out::Toast { error: true, undo: None, .. }]));
+            assert_eq!(count(), before);
+        }
+        // leere Liste öffnet nichts
+        ui.open_quick_action(vec![], fixed);
+        assert!(!ui.quick.is_open());
+    }
+
+    #[test]
+    fn open_quick_action_runs_the_action_like_a_menu_row_in_both_languages() {
+        direct_case(Lang::En);
+        direct_case(Lang::De);
     }
 
     #[test]

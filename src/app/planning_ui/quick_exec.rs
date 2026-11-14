@@ -16,7 +16,7 @@ use crate::planning::history::Source;
 use crate::planning::links::{add_link, Target};
 use crate::planning::ops::TicketOp;
 use crate::planning::projects::get_project;
-use crate::planning::quick::actions::{get_quick_action, list_project_quick_actions, QuickAction};
+use crate::planning::quick::actions::{get_quick_action, list_project_quick_actions, list_quick_actions, QuickAction};
 use crate::planning::quick::input::InputKind;
 use crate::planning::quick::menu::{MenuConfig, TicketContext};
 use crate::planning::quick::params::{ActionParams, LinkDirection};
@@ -104,6 +104,50 @@ pub fn load(conn: &Connection, ids: &[i64], lang: Lang) -> Result<Loaded, String
         }
     };
     Ok(Loaded { project_id, items, work_kinds, title })
+}
+
+/// Eine Schnellaktion als Knopf in der Ticket-Ansicht (siehe [`buttons_for`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuickButton {
+    pub action_id: i64,
+    /// Beschriftung (Name der Aktion).
+    pub label: String,
+    /// Hinweistext: was die Aktion tut (Status setzen, Ticket anlegen, Sitzung starten).
+    pub tip: String,
+    /// `Some(Grund)`: nicht ausführbar (ausgegraut, der Grund steht im Hinweis).
+    pub disabled: Option<String>,
+}
+
+/// Die Knöpfe für die Schnellaktionen des Typs von `t`, in der Reihenfolge der Aktionen des Typs. Dieselbe Logik wie das
+/// Schnellmenü (`items_for`): ungültige Aktionen und Statuswechsel, die eine Bedingung sperrt, sind ausgegraut; ein
+/// Statuswechsel in den aktuellen Status entfällt (nichts zu tun). Liest nur; wird beim Laden der Ticket-Ansicht aufgerufen.
+pub fn buttons_for(conn: &Connection, sum: &ProjectSummary, t: &Ticket, lang: Lang) -> Vec<QuickButton> {
+    let Ok(actions) = list_quick_actions(conn, t.type_id) else { return Vec::new() };
+    if actions.is_empty() {
+        return Vec::new();
+    }
+    let Some(cfg) = MenuConfig::from_summary(sum, t.type_id, actions) else { return Vec::new() };
+    let Ok(ctx) = context_of(conn, t, &cfg, lang) else { return Vec::new() };
+    let items = items_for(&cfg, &ctx, lang);
+    cfg.actions
+        .iter()
+        .filter_map(|a| {
+            let it = items.iter().find(|i| i.key == ItemKey::Action(a.id))?;
+            if let ActionParams::ChangeStatus(c) = &a.params {
+                if !a.invalid && ctx.status_id == Some(c.to_status_id) {
+                    return None;
+                }
+            }
+            let mut tip = it.detail.clone();
+            if it.ask_title {
+                tip = format!("{tip} · {}", lang.t("fragt zuerst den Titel", "asks for the title first"));
+            }
+            if let Some(why) = &it.disabled {
+                tip = format!("{}: {why}", lang.t("Nicht verfügbar", "Not available"));
+            }
+            Some(QuickButton { action_id: a.id, label: it.label.clone(), tip, disabled: it.disabled.clone() })
+        })
+        .collect()
 }
 
 /// Auswahl für eine Listen-Eingabe, gefiltert nach `query` (Teilwort, Groß-/Kleinschreibung egal): (Kennung, Anzeigetext).
