@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod data;
 mod dialogs;
 mod dragdrop;
 mod mcp;
@@ -517,6 +518,15 @@ pub struct App {
     applied_theme: String,
     last_title: String,
     mode: titlebar::Mode,
+    db: Option<crate::db::Db>,
+    db_error: Option<String>,
+    backup_rx: Option<std::sync::mpsc::Receiver<Result<crate::backup::BackupInfo, String>>>,
+    backup_checked: Instant,
+    backup_msg: Option<String>,
+    backups_cache: Option<Vec<crate::backup::BackupInfo>>,
+    backups_dirty: bool,
+    confirm_restore: Option<PathBuf>,
+    restore_error: Option<String>,
     hook_server: Option<HookServer>,
     hooks_file: Option<PathBuf>,
     hooks_global: bool,
@@ -667,6 +677,13 @@ impl App {
         settings.sanitize();
         state::set_lang(settings.language);
         let (saved, startup_note) = state::load_saved(&dir.join("state.json"));
+        // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
+        let restore_result = crate::backup::apply_pending_restore(&dir, crate::db::FILE);
+        let backup_dir = crate::backup::dir(&dir, &settings.backup_dir);
+        let (db, db_error) = match crate::db::open(&dir, &backup_dir) {
+            Ok(d) => (Some(d), None),
+            Err(e) => (None, Some(e.message(settings.language))),
+        };
         let shells = shells::detect();
         let bg = std::sync::mpsc::channel::<String>();
         let mut app = App {
@@ -700,6 +717,15 @@ impl App {
             applied_theme: String::new(),
             last_title: String::new(),
             mode: titlebar::Mode::default(),
+            db,
+            db_error,
+            backup_rx: None,
+            backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
+            backup_msg: None,
+            backups_cache: None,
+            backups_dirty: true,
+            confirm_restore: None,
+            restore_error: None,
             hook_server: HookServer::start(&cc.egui_ctx),
             hooks_file: None,
             hooks_global: false,
@@ -840,6 +866,16 @@ impl App {
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
             app.notify_text(n);
+        }
+        let lang = app.settings.language;
+        if let Some(r) = restore_result {
+            app.notify_text(match r {
+                Ok(p) => format!("{} {}", lang.t("Sicherung wiederhergestellt:", "Backup restored:"), p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                Err(e) => format!("{}: {e}", lang.t("Wiederherstellung fehlgeschlagen", "Restore failed")),
+            });
+        }
+        if let Some(e) = app.db_error.clone() {
+            app.notify_text(e);
         }
         app
     }
@@ -2593,6 +2629,7 @@ impl eframe::App for App {
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = Vec::new();
         self.titlebar(ctx);
+        self.backup_tick(ctx);
         self.window_edges(ctx);
         if self.mode == titlebar::Mode::Terminals {
             self.shortcuts(ctx, &mut actions);
@@ -2619,6 +2656,7 @@ impl eframe::App for App {
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
         self.dialogs(ctx, &mut actions);
+        self.restore_dialog(ctx);
         for a in actions {
             self.apply(ctx, a);
         }

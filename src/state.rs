@@ -142,6 +142,12 @@ pub struct Settings {
     pub mcp_level: crate::mcp::McpLevel,
     /// Agenten dürfen auch Sitzungen schließen, die sie nicht selbst angelegt haben.
     pub mcp_close_any: bool,
+    /// Automatische Datenbank-Sicherung: Intervall in Stunden (0 = aus).
+    pub backup_interval_hours: u32,
+    /// Wie viele automatische Sicherungen behalten werden (zusätzlich zur Datenbank selbst).
+    pub backup_keep: u32,
+    /// Sicherungsordner (leer = `backups/` im Datenordner).
+    pub backup_dir: String,
 }
 
 impl Default for Settings {
@@ -174,6 +180,9 @@ impl Default for Settings {
             session_budget: 0.0,
             mcp_level: crate::mcp::McpLevel::Off,
             mcp_close_any: false,
+            backup_interval_hours: 24,
+            backup_keep: 2,
+            backup_dir: String::new(),
         }
     }
 }
@@ -542,6 +551,8 @@ impl Settings {
         self.ui_scale = clamp_f32(self.ui_scale, 0.7, 2.5, 1.0);
         self.scrollback_lines = self.scrollback_lines.clamp(1000, 100_000);
         self.cmd_notify_secs = self.cmd_notify_secs.min(3600);
+        self.backup_interval_hours = self.backup_interval_hours.min(720);
+        self.backup_keep = self.backup_keep.clamp(1, 50);
         for p in &mut self.profiles {
             p.font_size = if p.font_size.is_finite() && p.font_size >= 6.0 { p.font_size.min(48.0) } else { 0.0 };
         }
