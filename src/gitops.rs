@@ -17,7 +17,7 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.output().map_err(|e| format!("git nicht gefunden: {e}"))?;
+    let out = cmd.output().map_err(|e| format!("{}: {e}", crate::state::t("git nicht gefunden", "git not found")))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
@@ -95,15 +95,15 @@ pub fn diff_of(repo: &Path, c: &Change, staged: bool) -> String {
                     b.truncate(n);
                     Ok(String::from_utf8(b).unwrap_or_default())
                 }
-                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "binär")),
+                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "binary")),
             }
         };
         match read_head(&repo.join(&c.path)) {
             Ok(t) => {
                 let body: String = t.lines().take(2000).map(|l| format!("+{l}\n")).collect();
-                format!("neue Datei: {}\n@@ -0,0 +1,{} @@\n{body}", c.path, t.lines().count())
+                format!("{}: {}\n@@ -0,0 +1,{} @@\n{body}", crate::state::t("neue Datei", "new file"), c.path, t.lines().count())
             }
-            Err(_) => format!("neue Datei: {} (nicht als Text lesbar)", c.path),
+            Err(_) => format!("{}: {} {}", crate::state::t("neue Datei", "new file"), c.path, crate::state::t("(nicht als Text lesbar)", "(not readable as text)")),
         }
     } else {
         let args: Vec<&str> = if staged {
@@ -121,7 +121,7 @@ pub fn diff_of(repo: &Path, c: &Change, staged: bool) -> String {
             cut -= 1;
         }
         t.truncate(cut);
-        t.push_str("\n… (Diff gekürzt)");
+        t.push_str(crate::state::t("\n… (Diff gekürzt)", "\n… (diff truncated)"));
         t
     } else {
         text
@@ -185,7 +185,7 @@ pub fn merge(repo: &Path, branch: &str) -> Result<(), String> {
     // Läuft im Haupt-Repo schon ein Merge des Nutzers, nicht dazwischenfunken – ein „merge --abort“
     // würde sonst dessen halb gelöste Konflikte verwerfen.
     if git(repo, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok() {
-        return Err("im Haupt-Repository läuft bereits ein Merge".into());
+        return Err(crate::state::t("im Haupt-Repository läuft bereits ein Merge", "a merge is already in progress in the main repository").into());
     }
     match git(repo, &["merge", "--no-ff", "--no-edit", branch]) {
         Ok(_) => Ok(()),
@@ -246,7 +246,7 @@ impl DiffWatcher {
             let snap = match &target.dir {
                 None => Snapshot::default(),
                 Some(dir) => match repo_root(dir) {
-                    None => Snapshot { error: Some("Kein Git-Repository".into()), ..Snapshot::default() },
+                    None => Snapshot { error: Some(crate::state::t("Kein Git-Repository", "Not a Git repository").into()), ..Snapshot::default() },
                     Some(repo) => match status(&repo) {
                         Err(e) => Snapshot { repo: Some(repo), error: Some(e), ..Snapshot::default() },
                         Ok(changes) => {

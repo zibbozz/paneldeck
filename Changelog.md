@@ -6,6 +6,17 @@ Das Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 und dieses Projekt hält sich an [Semantic Versioning](https://semver.org/lang/de/).
 Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen unter der Nummer des nächsten Releases mit `WIP` statt Datum (z. B. `## [1.1.0] - WIP`).
 
+## [1.0.1] - WIP
+
+### Changed
+
+- Der Installer bietet beim Start eine Sprachauswahl (English/Deutsch) an; die Namen der Komponenten, die Einträge im Explorer-Kontextmenü und die Verknüpfung zum Deinstallieren folgen der gewählten Sprache.
+- Alle Texte der Agenten-Schnittstelle (Fehlermeldungen und Hinweise; Fehlercodes und Feldnamen bleiben unverändert), Statusmeldungen, Diagnoseinfos, Standard-Prompts und Meldungen der Git-Funktionen sind jetzt standardmäßig Englisch; Deutsch erscheint, wenn die Sprache in den Einstellungen auf Deutsch steht.
+
+### Fixed
+
+- Der Installer fällt auf Systemen mit anderer Sprache als Deutsch oder Englisch nicht mehr auf Deutsch, sondern auf Englisch zurück.
+
 ## [1.0.0] - 2026-11-14
 
 Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle, Kommandozeile, Datenformate im Datenordner) im Sinne von Semantic Versioning als verbindlich; frühere Entwicklungsstände wurden nicht veröffentlicht.
@@ -27,4 +38,5 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Alle `unwrap()`/`expect()` im Programmcode sind durch Fehlerbehandlung ersetzt (der Release-Build bricht bei einem Panic komplett ab); die `unsafe`-Blöcke sind begründet.
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
+[1.0.1]: https://github.com/zibbozz/paneldeck/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/zibbozz/paneldeck/releases/tag/v1.0.0
