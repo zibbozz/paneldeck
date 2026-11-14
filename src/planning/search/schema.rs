@@ -411,7 +411,7 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             false,
             Store::Values(Vals { class: Class::Terminal, fields: Vec::new(), opts: OptionSet::default(), links: true }),
         )
-        .expect("`terminal` ist beim Aufbau noch frei");
+        .ok_or_else(|| SearchError::Internal("Feld `terminal` beim Aufbau schon belegt".to_string()))?;
 
     // ---- benutzerdefinierte Felder: nach Name und Art gruppieren
     struct Group {

@@ -16,4 +16,6 @@ pub mod burndown;
 pub mod calendar;
 pub mod csv;
 pub mod duration;
+#[cfg(test)]
+mod fuzz_tests;
 pub mod progress;

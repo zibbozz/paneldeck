@@ -33,6 +33,8 @@ mod tests;
 #[cfg(test)]
 mod tests_board;
 #[cfg(test)]
+mod tests_diff;
+#[cfg(test)]
 mod tests_seed;
 #[cfg(test)]
 mod tests_sprints;

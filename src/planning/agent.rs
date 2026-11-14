@@ -39,6 +39,8 @@ use serde_json::{json, Map, Value};
 
 mod query;
 mod sprints;
+#[cfg(test)]
+mod tool_tests;
 
 /// Längster Freitext (Kommentar, Todo-Text, Textwert eines Felds) in Zeichen.
 pub const MAX_TEXT_CHARS: usize = 20_000;
