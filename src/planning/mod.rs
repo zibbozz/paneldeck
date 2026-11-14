@@ -13,6 +13,7 @@
 //!   Tickets umwandeln);
 //! * `ops` (Rückgängig/Wiederholen über `undo::History`);
 //! * `agent` (die MCP-Werkzeuge für Todo-Liste und Tickets: JSON hinein, JSON heraus, mit denselben Regeln wie die Oberfläche).
+//! * `search` (Abfrage-Ausführung: Schema, Abfragesprache nach SQL, Boards, Beispieldaten für die Hilfe).
 
 // Die Schicht ist vollständig, die Oberfläche und die Tickets (nächste Schritte) nutzen sie erst nach und nach.
 #![allow(dead_code)]
@@ -33,6 +34,7 @@ pub mod projects;
 pub mod quick;
 pub mod query_help;
 pub mod schema;
+pub mod search;
 pub mod sprints;
 pub mod statuses;
 pub mod summary;
