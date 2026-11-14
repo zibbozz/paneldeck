@@ -16,12 +16,22 @@ mod kinds_ed;
 mod links_ed;
 mod overview;
 mod project_form;
+mod release_view;
+mod sprint_chart;
+mod sprint_data;
+mod sprint_detail;
+mod sprint_dlg;
+mod sprint_logic;
+mod sprint_view;
 mod status_ed;
 mod template_ed;
 mod types_ed;
 mod values;
 mod widgets;
 mod workflow_ed;
+
+#[cfg(test)]
+mod sprint_ui_tests;
 
 pub(super) use helpers::color_of;
 pub(super) use widgets::type_icon;
@@ -49,6 +59,8 @@ pub(super) struct Cx<'a> {
 enum Tab {
     Overview,
     Boards,
+    Backlog,
+    Releases,
     Types,
     Fields,
     Statuses,
@@ -90,6 +102,8 @@ pub(super) struct PlanUi {
     templates: template_ed::State,
     todo: overview::Todo,
     boards: board_view::State,
+    sprints: sprint_view::State,
+    releases: release_view::State,
 }
 
 impl Default for PlanUi {
@@ -117,6 +131,8 @@ impl Default for PlanUi {
             templates: Default::default(),
             todo: Default::default(),
             boards: Default::default(),
+            sprints: Default::default(),
+            releases: Default::default(),
         }
     }
 }
@@ -315,6 +331,12 @@ impl PlanUi {
         let mut v = vec![(Tab::Overview, lang.t("Übersicht", "Overview"))];
         if !system {
             v.push((Tab::Boards, lang.t("Boards", "Boards")));
+            if self.project().is_some_and(|p| p.use_sprints) {
+                v.push((Tab::Backlog, lang.t("Backlog", "Backlog")));
+            }
+            if self.project().is_some_and(|p| p.use_versions) {
+                v.push((Tab::Releases, lang.t("Releases", "Releases")));
+            }
             v.extend([
                 (Tab::Types, lang.t("Typen", "Types")),
                 (Tab::Fields, lang.t("Felder", "Fields")),
@@ -375,6 +397,8 @@ impl PlanUi {
                 match self.tab {
                     Tab::Overview => self.overview(ui, cx, &proj),
                     Tab::Boards => {}
+                    Tab::Backlog => self.backlog_tab(ui, cx, &proj),
+                    Tab::Releases => self.releases_tab(ui, cx, &proj),
                     Tab::Types => self.types_tab(ui, cx),
                     Tab::Fields => self.fields_tab(ui, cx),
                     Tab::Statuses => self.statuses_tab(ui, cx),
@@ -395,6 +419,7 @@ impl PlanUi {
     fn dialogs(&mut self, ctx: &egui::Context, cx: &Cx) {
         self.wizard_dialog(ctx, cx);
         self.board_dialogs(ctx, cx);
+        self.sprint_dialogs(ctx, cx);
         self.settings_dialog(ctx, cx);
         self.fields_dialogs(ctx, cx);
         self.workflow_dialogs(ctx, cx);
