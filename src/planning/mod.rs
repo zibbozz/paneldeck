@@ -15,6 +15,7 @@ pub mod integrity;
 pub mod link_types;
 pub mod names;
 pub mod projects;
+pub mod query_help;
 pub mod schema;
 pub mod statuses;
 pub mod summary;
