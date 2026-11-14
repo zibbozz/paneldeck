@@ -2,7 +2,7 @@
 # Verhindert Pushes auf develop, main und release/* (Tags sind erlaubt). Änderungen dort kommen nur über Pull Requests.
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
-    refs/heads/develop|refs/heads/main|refs/heads/release/*)
+    refs/heads/develop|refs/heads/main|refs/heads/release/*|refs/heads/feature/next)
       echo "Gesperrt: Push auf '${remote_ref#refs/heads/}'. Bitte einen Branch pushen und einen Pull Request öffnen." >&2
       exit 1 ;;
   esac
