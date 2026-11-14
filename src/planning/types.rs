@@ -146,7 +146,7 @@ pub fn reorder_types(conn: &Connection, project_id: i64, ids: &[i64]) -> Res<()>
     common::reorder(conn, "ticket_types", "project_id = ?1", &[project_id], ids)
 }
 
-/// Tickets dieses Typs (bis zum Ticket-Schritt 0).
+/// Tickets dieses Typs.
 pub fn usage(conn: &Connection, id: i64) -> Res<i64> {
     get_type(conn, id)?;
     integrity::usage_count_type(conn, id)

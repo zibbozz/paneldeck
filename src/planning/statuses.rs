@@ -131,7 +131,7 @@ pub fn reorder_statuses(conn: &Connection, project_id: i64, ids: &[i64]) -> Res<
     common::reorder(conn, "statuses", "project_id = ?1", &[project_id], ids)
 }
 
-/// Wie oft der Status benutzt wird (Tickets; bis zum Ticket-Schritt 0).
+/// Wie oft der Status benutzt wird (Tickets).
 pub fn usage(conn: &Connection, id: i64) -> Res<i64> {
     get_status(conn, id)?;
     integrity::usage_count_status(conn, id)
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn in_use_requires_a_mode() {
-        // Die Nutzungszähler kommen im Ticket-Schritt; hier prüfen wir die Regel an der Nahtstelle.
+        // Die Regel an der Nahtstelle; die Zähler mit echten Tickets prüft `ticket_integrity_tests.rs`.
         assert_eq!(integrity::require_mode(2, false), Err(PlanError::InUse { count: 2 }));
         assert!(integrity::require_mode(2, true).is_ok());
         let c = db();

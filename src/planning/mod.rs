@@ -4,29 +4,53 @@
 //! * Übersetzbare Standardnamen: `key` gesetzt und `name` leer → Anzeige aus `names.rs`; Umbenennen setzt `name`.
 //! * Löschen mit Integritätsregel: Was „in Benutzung“ ist, lässt sich nur mit [`DeleteMode`] löschen (`integrity.rs`).
 //! * Alle mehrstufigen Änderungen laufen atomar (SAVEPOINT) und lassen sich in einer äußeren Transaktion verschachteln.
+//!
+//! Die Tickets stehen in eigenen Untermodulen mit eigener Fehlerart ([`ticket_error::TicketError`], zweisprachig):
+//! * `tickets` (Anlegen, Ändern, Löschen, Markierung/Stern, Eltern/Kinder, Fortschritt, Reihenfolge), `values` (Feldwerte),
+//!   `transition` (Statuswechsel mit allen Regeln), `clone_move` (Klonen, Typ ändern, verschieben), `ticket_list` (einfache
+//!   Abfrage mit Seiten);
+//! * `links`, `comments`, `time_entries`, `history` (Quelle und Verlaufstexte), `todo_bridge` (einfache Todo-Liste lesen und in
+//!   Tickets umwandeln);
+//! * `ops` (Rückgängig/Wiederholen über `undo::History`).
 
 // Die Schicht ist vollständig, die Oberfläche und die Tickets (nächste Schritte) nutzen sie erst nach und nach.
 #![allow(dead_code)]
 
+pub mod clone_move;
+pub mod comments;
 pub mod defaults;
 pub mod fields;
+pub mod history;
 pub mod icons;
 pub mod integrity;
 pub mod link_types;
+pub mod links;
 pub mod names;
+pub mod ops;
 pub mod projects;
+pub mod quick;
 pub mod query_help;
 pub mod schema;
 pub mod statuses;
 pub mod summary;
 pub mod template;
+pub mod ticket_error;
+pub mod ticket_list;
+pub mod ticket_schema;
+pub mod tickets;
+pub mod time_entries;
+pub mod todo_bridge;
+pub mod transition;
 pub mod types;
+pub mod values;
 pub mod views;
 pub mod work_kinds;
 pub mod workflow;
 
 pub(crate) mod common;
 
+#[cfg(test)]
+mod ticket_integrity_tests;
 #[cfg(test)]
 mod usage_tests;
 

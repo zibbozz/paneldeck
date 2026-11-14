@@ -1,7 +1,7 @@
 //! Projekte: anlegen (mit oder ohne Standard-Inhalte), ändern, Reihenfolge, löschen, nachschlagen.
 //!
 //! Das System-Projekt `TODO` („Todolist“) wird von der Migration angelegt und ist weder änderbar noch löschbar.
-//! Der Ticket-Zähler `next_number` wird hier nur angelegt (1); vergeben wird er im Ticket-Schritt.
+//! Der Ticket-Zähler `next_number` wird hier nur angelegt (1); vergeben wird er beim Anlegen der Tickets (`tickets.rs`).
 
 use super::common::{self, atomic, bool_i, clean_name, normalize_color, normalize_key, validate_key};
 use super::{defaults, integrity, PlanError, Res};
@@ -215,19 +215,24 @@ pub fn reorder_projects(conn: &Connection, ids: &[i64]) -> Res<()> {
     common::reorder(conn, "projects", "system = 0", &[], ids)
 }
 
-/// Wie viele Tickets beim Löschen verloren gehen (für die Warnung); bis die Tickets existieren: 0.
+/// Wie viele Tickets beim Löschen verloren gehen (für die Warnung).
 pub fn delete_impact(conn: &Connection, id: i64) -> Res<i64> {
     editable(conn, id)?;
     integrity::usage_count_project(conn, id)
 }
 
 /// Löscht das Projekt samt allen Status, Typen, Feldern, Workflows und Arten der Arbeit (Kaskade; die Tickets des Projekts
-/// hängen im Ticket-Schritt mit `ON DELETE CASCADE` ebenfalls daran). Liefert die Zahl der mitgelöschten Tickets – die
+/// hängen mit `ON DELETE CASCADE` ebenfalls daran). Liefert die Zahl der mitgelöschten Tickets – die
 /// Oberfläche warnt vorher mit [`delete_impact`]. System-Projekte lassen sich nicht löschen.
 pub fn delete_project(conn: &Connection, id: i64) -> Res<i64> {
     editable(conn, id)?;
     atomic(conn, || {
         let tickets = integrity::usage_count_project(conn, id)?;
+        // Ticket-Felder anderer Projekte, die auf Tickets dieses Projekts verweisen, werden geleert.
+        super::tickets::before_project_delete(conn, id).map_err(|e| match e {
+            super::ticket_error::TicketError::Plan(p) => p,
+            other => PlanError::Db(other.message(crate::state::lang())),
+        })?;
         conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
         Ok(tickets)
     })

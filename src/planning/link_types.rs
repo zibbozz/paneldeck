@@ -193,7 +193,7 @@ pub fn reorder_link_types(conn: &Connection, ids: &[i64]) -> Res<()> {
     common::reorder(conn, "link_types", "1 = 1", &[], ids)
 }
 
-/// Verknüpfungen dieses Typs (bis zum Ticket-Schritt 0).
+/// Verknüpfungen dieses Typs.
 pub fn usage(conn: &Connection, id: i64) -> Res<i64> {
     get_link_type(conn, id)?;
     integrity::usage_count_link_type(conn, id)
