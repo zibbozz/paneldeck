@@ -624,6 +624,16 @@ impl App {
             items.sort_by(|a, b| b.0.cmp(&a.0));
         }
         items.truncate(14);
+        // Ticket-Treffer (Experten-Projekte): bei einer Ticketnummer zuerst, sonst nach den Befehlen
+        let tickets = self.tlinks_palette_hits(&p.query);
+        if !tickets.is_empty() {
+            let rows = tickets.into_iter().map(|(l, h, a)| (0, l, h, a));
+            if terminal_links::normalize_key_query(&p.query).is_some() {
+                items.splice(0..0, rows);
+            } else {
+                items.extend(rows);
+            }
+        }
         if down && !items.is_empty() {
             p.sel = (p.sel + 1) % items.len();
         }
@@ -646,7 +656,11 @@ impl App {
                 let te = ui.add(
                     egui::TextEdit::singleline(&mut p.query)
                         .desired_width(f32::INFINITY)
-                        .hint_text(lang.t("Befehl oder Sitzung suchen …", "Search command or session …")),
+                        .hint_text(if self.tlinks.enabled {
+                            lang.t("Befehl, Sitzung oder Ticket suchen …", "Search command, session or ticket …")
+                        } else {
+                            lang.t("Befehl oder Sitzung suchen …", "Search command or session …")
+                        }),
                 );
                 te.request_focus();
                 if p.query != before {

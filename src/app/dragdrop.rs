@@ -298,6 +298,7 @@ impl App {
                         detached: true,
                         themes: &self.themes,
                         profiles: &self.settings.profiles,
+                        tl: &self.tlinks,
                     };
                     show_pane(ui, id, rect, &mut cx);
                 });
