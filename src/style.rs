@@ -155,6 +155,11 @@ pub enum Icon {
     List,
     FolderPlus,
     Template,
+    Terminal,
+    Checklist,
+    Minimize,
+    Maximize,
+    Restore,
 }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, st: Stroke) {
@@ -245,6 +250,36 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
             p.rect_stroke(r, 2.0, st, StrokeKind::Inside);
             l(v(-3.0, 3.8), v(-3.0, 6.5));
             l(v(-3.0, 6.5), v(0.0, 3.8));
+        }
+        Icon::Terminal => {
+            let r = Rect::from_center_size(c, v(15.0, 11.0));
+            p.rect_stroke(r, 2.5, st, StrokeKind::Inside);
+            l(v(-4.0, -2.0), v(-1.5, 0.0));
+            l(v(-1.5, 0.0), v(-4.0, 2.0));
+            l(v(0.5, 2.5), v(4.0, 2.5));
+        }
+        Icon::Checklist => {
+            for (y, check) in [(-5.0_f32, true), (0.0, true), (5.0, false)] {
+                if check {
+                    l(v(-6.5, y), v(-5.0, y + 1.5));
+                    l(v(-5.0, y + 1.5), v(-2.5, y - 1.5));
+                } else {
+                    p.rect_stroke(Rect::from_center_size(c + v(-4.5, y), v(4.0, 4.0)), 0.5, st, StrokeKind::Inside);
+                }
+                l(v(0.0, y), v(6.5, y));
+            }
+        }
+        Icon::Minimize => {
+            l(v(-5.0, 0.5), v(5.0, 0.5));
+        }
+        Icon::Maximize => {
+            p.rect_stroke(Rect::from_center_size(c, v(9.0, 9.0)), 0.0, st, StrokeKind::Inside);
+        }
+        Icon::Restore => {
+            p.rect_stroke(Rect::from_center_size(c + v(-1.0, 1.0), v(7.5, 7.5)), 0.0, st, StrokeKind::Inside);
+            l(v(0.0, -4.5), v(4.5, -4.5));
+            l(v(4.5, -4.5), v(4.5, 0.0));
+            l(v(0.0, -4.5), v(0.0, -2.8));
         }
         Icon::Close => {
             l(v(-4.0, -4.0), v(4.0, 4.0));

@@ -34,6 +34,7 @@ mod mcp;
 mod panels;
 mod settings;
 mod sidebar;
+mod titlebar;
 
 const PALETTE: [[u8; 3]; 8] = [
     [0x61, 0xaf, 0xef],
@@ -515,6 +516,7 @@ pub struct App {
     last_save: Instant,
     applied_theme: String,
     last_title: String,
+    mode: titlebar::Mode,
     hook_server: Option<HookServer>,
     hooks_file: Option<PathBuf>,
     hooks_global: bool,
@@ -697,6 +699,7 @@ impl App {
             last_save: Instant::now(),
             applied_theme: String::new(),
             last_title: String::new(),
+            mode: titlebar::Mode::default(),
             hook_server: HookServer::start(&cc.egui_ctx),
             hooks_file: None,
             hooks_global: false,
@@ -2589,11 +2592,17 @@ impl eframe::App for App {
         self.check_budget(ctx);
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = Vec::new();
-        self.shortcuts(ctx, &mut actions);
-        self.sidebar(ctx, &mut actions);
-        self.files_ui(ctx, &mut actions);
-        self.central(ctx, &mut actions);
-        self.handle_drag(ctx);
+        self.titlebar(ctx);
+        self.window_edges(ctx);
+        if self.mode == titlebar::Mode::Terminals {
+            self.shortcuts(ctx, &mut actions);
+            self.sidebar(ctx, &mut actions);
+            self.files_ui(ctx, &mut actions);
+            self.central(ctx, &mut actions);
+            self.handle_drag(ctx);
+        } else {
+            self.empty_area(ctx);
+        }
         if let Some((text, t0)) = &self.notice {
             if t0.elapsed() > Duration::from_secs(5) {
                 self.notice = None;
