@@ -34,7 +34,12 @@ mod query_help_ui;
 mod query_logic;
 mod release_view;
 mod saved_filters;
+mod search_logic;
+mod search_run;
 mod search_tab;
+mod search_table;
+#[cfg(test)]
+mod search_ui_tests;
 mod sprint_chart;
 mod sprint_data;
 mod sprint_detail;
@@ -48,6 +53,7 @@ mod ticket_data;
 mod ticket_dialogs;
 mod ticket_draft;
 mod ticket_inputs;
+mod ticket_query;
 mod ticket_state;
 mod ticket_tab;
 #[cfg(test)]
@@ -137,6 +143,8 @@ pub(super) struct PlanUi {
     todo: overview::Todo,
     /// Reiter „Suche“ (Abfrage-Leiste, siehe `search_tab`)
     search: search_tab::State,
+    /// Abfrage-Leiste über der Ticket-Liste (siehe `ticket_query`)
+    tq: ticket_query::State,
     /// Hilfeseite der Abfragesprache (Vollfläche über dem Reiterinhalt)
     help: query_help_ui::HelpState,
     /// Dialog „JQL-Schlüsselwörter“
@@ -176,6 +184,7 @@ impl Default for PlanUi {
             templates: Default::default(),
             todo: Default::default(),
             search: Default::default(),
+            tq: Default::default(),
             help: Default::default(),
             kw: Default::default(),
             tickets: Default::default(),
@@ -372,8 +381,8 @@ impl PlanUi {
                 // Die Hilfe liegt wie ein Ticket über dem Reiterinhalt (Vollfläche); „X“ oder Esc schließt sie.
                 let out = query_help_ui::help_page(ui, &mut self.help, cx.lang, true);
                 if let Some(q) = out.use_query {
-                    self.search.bar.set_query(&q);
-                    self.show_search_tab();
+                    // „In Suche übernehmen“ führt die Abfrage gleich aus
+                    self.open_search_query(&q, None);
                     self.help.open = false;
                 } else if out.close {
                     self.help.open = false;

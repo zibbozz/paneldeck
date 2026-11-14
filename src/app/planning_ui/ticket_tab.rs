@@ -22,8 +22,8 @@ use rusqlite::Connection;
 use std::time::Instant;
 
 const ROW_H: f32 = 30.0;
-const GOLD: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
-const FLAG_RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+pub(super) const GOLD: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+pub(super) const FLAG_RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
 
 /// Alle Tickets des Projekts und davon erledigte (für die Übersicht).
 pub fn project_counts(conn: &Connection, project_id: i64) -> (usize, usize) {
@@ -110,16 +110,22 @@ impl PlanUi {
         }
         if self.tab == Tab::Tickets && self.tickets.list_dirty {
             self.tickets.list_dirty = false;
-            let types: Vec<i64> = sum.types.iter().map(|t| t.ticket_type.id).collect();
-            let statuses: Vec<i64> = sum.statuses.iter().map(|s| s.id).collect();
-            self.tickets.filters.retain_known(&types, &statuses);
-            match load_rows(cx.conn, sum.project.id, &self.tickets.filters) {
-                Ok((rows, total)) => {
-                    self.tickets.rows = rows;
-                    self.tickets.project_total = total;
-                    self.resort(&sum);
+            self.tq_sync(sum.project.id);
+            if self.tq_active() {
+                // Eine Abfrage ist aktiv: die Liste lädt über die Suche (`ticket_query`), die lokalen Zeilen ruhen.
+                self.tq_data_changed();
+            } else {
+                let types: Vec<i64> = sum.types.iter().map(|t| t.ticket_type.id).collect();
+                let statuses: Vec<i64> = sum.statuses.iter().map(|s| s.id).collect();
+                self.tickets.filters.retain_known(&types, &statuses);
+                match load_rows(cx.conn, sum.project.id, &self.tickets.filters) {
+                    Ok((rows, total)) => {
+                        self.tickets.rows = rows;
+                        self.tickets.project_total = total;
+                        self.resort(&sum);
+                    }
+                    Err(e) => self.t_fail(cx, &e),
                 }
-                Err(e) => self.t_fail(cx, &e),
             }
         }
         if self.tickets.detail_dirty && self.tickets.open.is_some() {
@@ -213,6 +219,12 @@ impl PlanUi {
             ui.horizontal_wrapped(|ui| widgets::error(ui, &t));
             ui.add_space(S1);
         }
+        // Abfrage-Leiste (siehe `ticket_query`): ist eine Abfrage aktiv, ersetzt sie die lokalen Filter.
+        self.tq_sync(sum.project.id);
+        if self.tq_active() {
+            self.tq_tab(ui, cx, proj);
+            return;
+        }
         let mut changed = false;
         // ---- Zeile 1: Neu, Suche, Stern/Markierung, Zähler
         ui.horizontal(|ui| {
@@ -260,6 +272,9 @@ impl PlanUi {
                 ui.label(RichText::new(text).small().color(style::dim(ui)));
             });
         });
+        if self.tq_bar_row(ui, cx, proj) {
+            return;
+        }
         ui.add_space(S2);
         // ---- Zeile 2: Typ- und Status-Chips
         ui.horizontal_wrapped(|ui| {
