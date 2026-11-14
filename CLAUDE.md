@@ -57,7 +57,7 @@ Branches: **`develop`** (Standard-Branch auf GitHub, enthält immer alle Entwick
 ## Neue Features testen (Vorgabe des Nutzers)
 
 **Jedes neue Feature wird getestet, bevor es released wird – über MCP UND per Maus/Tastatur**, nicht nur eines von beiden.
-- **MCP / Ende-zu-Ende:** `tools/smoke-mcp.ps1 [-Visible]` (über 130 Prüfungen, mit `-Visible` mehr; die genaue Zahl steht am Ende der Ausgabe, „Ergebnis: N bestanden“) startet eine Kopie der .exe in einem Temp-Ordner (eigener Datenordner) und spricht per JSON-RPC mit `paneldeck.exe mcp`.
+- **MCP / Ende-zu-Ende:** `tools/smoke-mcp.ps1 [-Visible]` (136 Prüfungen, mit `-Visible` mehr; die genaue Zahl steht am Ende der Ausgabe, „Ergebnis: N bestanden“) startet eine Kopie der .exe in einem Temp-Ordner (eigener Datenordner) und spricht per JSON-RPC mit `paneldeck.exe mcp`.
   Neue Werkzeuge/Verhalten dort ergänzen. Kein Eingriff in Maus/Tastatur des Nutzers.
 - **Installer-Update:** `tools/update-test.ps1 [-Old <Setup.exe>] [-New <Setup.exe>]` installiert eine alte Version (Standard 0.19.1) in einen Temp-Ordner mit Schein-Profil, legt Daten/Autostart/Kontextmenü an, spielt den neuen Installer darüber (ruhender und laufender Hub) und räumt auf (27 Prüfungen). Bricht ab, wenn Paneldeck real installiert ist.
 - **Maus/Tastatur/Screenshot:** `. tools\gui-test.ps1` (Win32: `Focus`, `Top`, `Click`, `Drag`, `Wheel`, `Press 'ctrl+x'`, `TypeText`, `MoveAbs`, `ShotPW`). `ShotPW` nutzt PrintWindow und funktioniert auch bei verdecktem Fenster.
