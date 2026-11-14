@@ -234,7 +234,7 @@ impl Ctx<'_> {
     // -----------------------------------------------------------------------------------------
 
     fn compare_by(&self, key: &str, a: &DemoTicket, b: &DemoTicket, dir: SortDir) -> Result<Ordering, String> {
-        if self.schema.field(key).is_none() {
+        let Some(def) = self.schema.field(key) else {
             // Sortier-Schlüsselwort
             return match key.to_lowercase().as_str() {
                 "favorites" => {
@@ -243,8 +243,7 @@ impl Ctx<'_> {
                 }
                 other => Err(format!("unknown sort keyword {other}")),
             };
-        }
-        let def = self.schema.field(key).expect("geprüft");
+        };
         let (va, vb) = (self.values_of(a, key).into_iter().next(), self.values_of(b, key).into_iter().next());
         let o = match (va, vb) {
             (None, None) => return Ok(Ordering::Equal),
