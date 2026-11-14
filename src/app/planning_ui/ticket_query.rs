@@ -181,9 +181,16 @@ impl PlanUi {
             three_state: false,
             empty_text: lang.t("Kein Ticket passt zur Abfrage.", "No ticket matches the query."),
         };
+        // Zum geöffneten (oder gerade verlassenen) Ticket scrollen – wie in der lokalen Liste, nur wenn die Zeile nicht zu sehen ist.
+        if let Some(id) = self.tickets.scroll_to.take() {
+            self.tq.res.scroll_to = Some(id);
+        }
         let o = self.tq.res.draw(ui, &cfg, false);
         if let Some(id) = o.open {
             self.tickets.open_ticket(id, false);
+            // die angeklickte Zeile ist zu sehen: die Liste soll nicht springen
+            self.tickets.scroll_to = None;
+            self.tq.res.scroll_to = None;
         }
         if let Some((id, is_star, on)) = o.mark {
             let r = if is_star { set_starred(cx.conn, id, on, &Source::ui()) } else { set_flagged(cx.conn, id, on, &Source::ui()) };
