@@ -167,6 +167,11 @@ impl PlanUi {
         }
     }
 
+    /// Die Daten haben sich außerhalb der Oberfläche geändert (z. B. durch einen Agenten): beim nächsten Bild neu laden.
+    pub(super) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
     pub(super) fn set_expert(&mut self, db: &Db, on: bool) {
         self.expert = on;
         db.set_meta("expert_mode", if on { "1" } else { "0" });
