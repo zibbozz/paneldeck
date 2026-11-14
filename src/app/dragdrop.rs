@@ -321,6 +321,7 @@ impl App {
     pub(super) fn from_tray(&mut self, ctx: &egui::Context) {
         if let (Some(h), true) = (self.hwnd, self.in_tray) {
             crate::winctl::set_tray_hidden(h, false);
+            super::winchrome::apply_corners(h); // nach dem Wiederherstellen aus dem Tray die runden Ecken erneut verlangen
         }
         self.in_tray = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
