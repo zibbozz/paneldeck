@@ -773,6 +773,7 @@ fn moving_a_ticket_offers_only_versions_of_the_new_project() {
 
 #[test]
 fn terminal_fields_show_names_ended_state_and_can_be_cleared() {
+    let _live = terminal_links::live_test_guard();
     both(|h| {
         let task = h.type_id("devtask");
         let tf = create_field(&h.db.conn, &NewField::new(task, "Terminal", FieldKind::Terminal)).unwrap();

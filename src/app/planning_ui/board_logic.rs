@@ -5,6 +5,7 @@
 //! Die Quelle des Boards (gespeicherter Filter, „nur aktiver Sprint“) wertet `planning::search::board_source_ids` aus ([`load_board`]);
 //! die Karten selbst kommen weiter aus der Ticket-Liste (Rang-Reihenfolge, Schnellfilter).
 
+use super::ref_display::{ref_text, RefNames};
 use super::values::show_value;
 use crate::planning::fields::{Field, FieldKind};
 use crate::planning::search;
@@ -67,6 +68,8 @@ pub struct CardField {
     pub text: String,
     /// `#RRGGBB` (z. B. Farbe des Dropdown-Werts).
     pub color: Option<String>,
+    /// Gedämpft darstellen (Terminal-Sitzung beendet).
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,9 +122,9 @@ pub fn workflow_status_ids(sum: &ProjectSummary) -> Vec<i64> {
     sum.statuses.iter().map(|s| s.id).filter(|id| used.contains(id)).collect()
 }
 
-/// Felder, die sich als Kartenfeld darstellen lassen (lange Texte und Verweise ohne Namen nicht).
+/// Felder, die sich als Kartenfeld darstellen lassen (lange Texte nicht; Version, Meilenstein und Terminal mit ihrem Namen).
 pub fn renderable(kind: FieldKind) -> bool {
-    !matches!(kind, FieldKind::Rich | FieldKind::Terminal | FieldKind::Version | FieldKind::Milestone)
+    !matches!(kind, FieldKind::Rich)
 }
 
 fn field_rows(conn: &Connection, project_id: i64, field_ids: &[i64]) -> TRes<HashMap<(i64, i64), Vec<Row>>> {
@@ -145,10 +148,24 @@ fn field_rows(conn: &Connection, project_id: i64, field_ids: &[i64]) -> TRes<Has
     Ok(out)
 }
 
-/// Text (und Farbe) eines Kartenfelds; `None` = nichts anzuzeigen.
-fn card_field_text(f: &Field, v: &Value, refs: &HashMap<i64, String>, lang: Lang) -> Option<(String, Option<String>)> {
+/// Was zum Anzeigetext eines Kartenfelds gehört: die Namen der Versionen/Meilensteine (einmal je Laden geholt) und die Datenbank
+/// für Kennungen anderer Projekte.
+struct CardCx<'a> {
+    conn: &'a Connection,
+    names: RefNames,
+    refs: HashMap<i64, String>,
+    lang: Lang,
+}
+
+/// Text, Farbe und „gedämpft“ eines Kartenfelds; `None` = nichts anzuzeigen.
+fn card_field_text(f: &Field, v: &Value, cx: &CardCx) -> Option<(String, Option<String>, bool)> {
+    let (refs, lang) = (&cx.refs, cx.lang);
     let (text, color) = match f.kind {
-        FieldKind::Rich | FieldKind::Terminal | FieldKind::Version | FieldKind::Milestone | FieldKind::Labels => return None,
+        FieldKind::Rich | FieldKind::Labels => return None,
+        FieldKind::Version | FieldKind::Milestone | FieldKind::Terminal => {
+            let (text, muted) = ref_text(&cx.names, cx.conn, f.kind, v, lang)?;
+            return Some((text, None, muted));
+        }
         FieldKind::Checkbox => {
             if v.as_bool() != Some(true) {
                 return None;
@@ -162,7 +179,7 @@ fn card_field_text(f: &Field, v: &Value, refs: &HashMap<i64, String>, lang: Lang
         }
         _ => (show_value(f.kind, &f.options, v, lang), None),
     };
-    if text.trim().is_empty() { None } else { Some((text, color)) }
+    if text.trim().is_empty() { None } else { Some((text, color, false)) }
 }
 
 /// Stellt die Spalten mit ihren Karten zusammen: Tickets der Status der Spalten (und Typ-/Schnellfilter) in
@@ -218,6 +235,8 @@ pub fn load_board(conn: &Connection, sum: &ProjectSummary, cfg: &BoardConfig, q:
     wanted.dedup();
     let rows = field_rows(conn, sum.project.id, &wanted)?;
     let mut refs: HashMap<i64, String> = HashMap::new();
+    let has_release_fields = wanted.iter().any(|id| all_fields.get(id).is_some_and(|f| matches!(f.kind, FieldKind::Version | FieldKind::Milestone)));
+    let names = if has_release_fields { RefNames::load(conn, sum.project.id) } else { RefNames::default() };
     for ((_, fid), r) in &rows {
         if all_fields.get(fid).is_some_and(|f| f.kind == FieldKind::Ticket) {
             if let Some(Value::Number(n)) = decode(FieldKind::Ticket, r) {
@@ -231,6 +250,7 @@ pub fn load_board(conn: &Connection, sum: &ProjectSummary, cfg: &BoardConfig, q:
             }
         }
     }
+    let ccx = CardCx { conn, names, refs, lang };
     for t in page.items {
         if source.as_ref().is_some_and(|ids| !ids.contains(&t.id)) {
             continue;
@@ -258,9 +278,9 @@ pub fn load_board(conn: &Connection, sum: &ProjectSummary, cfg: &BoardConfig, q:
                         }
                     }
                 }
-            } else if let Some((text, color)) = card_field_text(f, &v, &refs, lang) {
+            } else if let Some((text, color, muted)) = card_field_text(f, &v, &ccx) {
                 if !fields.iter().any(|c: &CardField| c.name == f.display(lang) && c.text == text) {
-                    fields.push(CardField { name: f.display(lang), text, color });
+                    fields.push(CardField { name: f.display(lang), text, color, muted });
                 }
             }
         }
@@ -693,6 +713,58 @@ mod tests {
         assert!(data.unassigned.is_empty());
         assert_eq!(data.card(c.id).unwrap().ticket.title, "Gamma");
         assert_eq!(data.columns.iter().position(|k| k.cards.iter().any(|x| x.ticket.id == c.id)), cfg.column_of(f.progress));
+    }
+
+    #[test]
+    fn version_milestone_and_terminal_fields_show_on_cards() {
+        use crate::app::terminal_links::{live_test_guard, set_live_for_test, LiveSession};
+        use crate::planning::sprints::releases::{create_milestone, create_version, NewRelease};
+        let _live = live_test_guard();
+        set_live_for_test(vec![LiveSession { id: 7, name: "Build".into(), folder: String::new(), running: true }]);
+        let f = Fx::new();
+        crate::planning::projects::update_project(&f.c, f.project, &crate::planning::projects::UpdateProject { use_versions: Some(true), ..Default::default() }).unwrap();
+        let vf = f.add_field(f.story, "Fix version", FieldKind::Version, Default::default(), false);
+        let mf = f.add_field(f.story, "Target milestone", FieldKind::Milestone, Default::default(), false);
+        let tf = f.add_field(f.story, "Session", FieldKind::Terminal, Default::default(), false);
+        let v = create_version(&f.c, &NewRelease::new(f.project, "1.0")).unwrap();
+        let m = create_milestone(&f.c, &NewRelease::new(f.project, "Beta")).unwrap();
+        let a = f.mk(f.story, "Alpha");
+        let b = f.mk(f.story, "Beta card");
+        f.mk(f.story, "Plain");
+        for (t, term) in [(&a, "session:7"), (&b, "session:9")] {
+            set_field(&f.c, t.id, vf.id, json!(v), &Source::ui()).unwrap();
+            set_field(&f.c, t.id, mf.id, json!(m), &Source::ui()).unwrap();
+            set_field(&f.c, t.id, tf.id, json!(term), &Source::ui()).unwrap();
+        }
+        let (sum, mut cfg) = default_cfg(&f);
+        // die drei Feldarten lassen sich als Kartenfelder wählen
+        let kinds: Vec<FieldKind> = field_groups(&sum, Lang::En).iter().map(|g| g.kind).collect();
+        for k in [FieldKind::Version, FieldKind::Milestone, FieldKind::Terminal] {
+            assert!(renderable(k) && kinds.contains(&k), "{k:?}");
+        }
+        assert!(!renderable(FieldKind::Rich));
+        cfg.card_fields = vec![vf.id, mf.id, tf.id];
+        for (lang, ended) in [(Lang::En, "ended"), (Lang::De, "beendet")] {
+            let data = load_board(&f.c, &sum, &cfg, &Quick::default(), lang).unwrap();
+            let field = |card: &Card, name: &str| card.fields.iter().find(|x| x.name == name).cloned();
+            let ca = data.card(a.id).unwrap();
+            let (vn, mn, tn) = ("Fix version", "Target milestone", "Session");
+            assert_eq!(field(ca, vn).map(|x| (x.text, x.muted)), Some(("1.0".into(), false)));
+            assert_eq!(field(ca, mn).map(|x| (x.text, x.muted)), Some(("Beta".into(), false)));
+            assert_eq!(field(ca, tn).map(|x| (x.text, x.muted)), Some(("Build".into(), false)), "laufende Sitzung: Name, nicht gedämpft");
+            let cb = data.card(b.id).unwrap();
+            let t = field(cb, tn).unwrap();
+            assert!(t.muted && t.text == format!("Terminal 9 ({ended})"), "beendete Sitzung gedämpft: {t:?}");
+            assert!(data.card(a.id).is_some() && data.total == 3);
+            let plain = data.columns.iter().flat_map(|c| c.cards.iter()).find(|c| c.ticket.title == "Plain").unwrap();
+            assert!(plain.fields.iter().all(|x| x.name != vn && x.name != mn && x.name != tn), "ohne Wert kein Chip");
+        }
+        // umbenannte Version erscheint beim nächsten Laden
+        crate::planning::sprints::releases::update_version(&f.c, v, &crate::planning::sprints::releases::UpdateRelease { name: Some("2.0".into()), ..Default::default() }).unwrap();
+        super::super::ref_inputs::clear_release_cache();
+        let data = load_board(&f.c, &sum, &cfg, &Quick::default(), Lang::En).unwrap();
+        assert_eq!(data.card(a.id).unwrap().fields.iter().find(|x| x.name == "Fix version").map(|x| x.text.clone()), Some("2.0".into()));
+        set_live_for_test(Vec::new());
     }
 
     #[test]

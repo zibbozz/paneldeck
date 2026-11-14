@@ -4,6 +4,7 @@
 
 use super::helpers::color_of;
 use super::quick_menu::QuickTarget;
+use super::ref_display::{load_row_refs, paint_chips, row_chips, row_tooltip, scroll_target};
 use super::ticket_data::{load_rows, Row};
 use super::ticket_state::{sort_rows, Filters, SortCol, SortCtx, ViewMode};
 use super::widgets;
@@ -23,6 +24,10 @@ use rusqlite::Connection;
 use std::time::Instant;
 
 const ROW_H: f32 = 30.0;
+/// Breite der Spalte mit den Chips für Version, Meilenstein und Terminal.
+const W_REFS: f32 = 200.0;
+/// Ab dieser Listenbreite erscheint die Spalte (und nur, wenn mindestens ein Ticket einen Wert hat).
+const REFS_MIN_WIDTH: f32 = 900.0;
 pub(super) const GOLD: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
 pub(super) const FLAG_RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
 
@@ -122,6 +127,7 @@ impl PlanUi {
                 match load_rows(cx.conn, sum.project.id, &self.tickets.filters) {
                     Ok((rows, total)) => {
                         self.tickets.rows = rows;
+                        self.tickets.row_refs = load_row_refs(cx.conn, sum.project.id);
                         self.tickets.project_total = total;
                         self.resort(&sum);
                     }
@@ -340,44 +346,51 @@ impl PlanUi {
         let w_prio = if cols.prio { 112.0 } else { 0.0 };
         let w_points = if cols.points { 54.0 } else { 0.0 };
         let w_marks = 56.0;
-        let w_title = (width - 8.0 - w_badge - w_key - w_status - w_prio - w_points - w_marks - 8.0).max(80.0);
+        let show_refs = width >= REFS_MIN_WIDTH && !self.tickets.row_refs.is_empty();
+        let w_refs = if show_refs { W_REFS } else { 0.0 };
+        let w_title = (width - 8.0 - w_badge - w_key - w_status - w_prio - w_points - w_refs - w_marks - 8.0).max(80.0);
         // Kopfzeile
         let mut new_sort: Option<SortCol> = None;
         let (hrect, _) = ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::hover());
         ui.painter().rect_filled(hrect, 6.0, ui.visuals().faint_bg_color);
         let mut x = hrect.left() + 8.0;
         let sort = self.tickets.sort;
-        let mut head = |ui: &mut Ui, label: &str, col: SortCol, w: f32, align_right: bool| {
+        let mut head = |ui: &mut Ui, label: &str, col: Option<SortCol>, w: f32, align_right: bool| {
             let r = Rect::from_min_size(Pos2::new(x, hrect.top()), Vec2::new(w, 26.0));
-            let resp = ui.interact(r, egui::Id::new(("tcol", col as u8)), Sense::click());
-            let active = sort.col == col;
+            let resp = ui.interact(r, egui::Id::new(("tcol", col.map_or(255, |c| c as u8))), if col.is_some() { Sense::click() } else { Sense::hover() });
+            let active = col.is_some_and(|c| sort.col == c);
             let arrow = if active { if sort.desc { " ▼" } else { " ▲" } } else { "" };
             let color = if active { ui.visuals().strong_text_color() } else { style::dim(ui) };
             let g = ui.painter().layout_no_wrap(format!("{label}{arrow}"), egui::FontId::proportional(12.0), color);
             let px = if align_right { r.right() - g.size().x - 4.0 } else { r.left() };
             ui.painter().galley(Pos2::new(px, r.center().y - g.size().y / 2.0), g, color);
-            if resp.hovered() {
+            if resp.hovered() && col.is_some() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             if resp.clicked() {
-                new_sort = Some(col);
+                new_sort = col;
             }
-            resp.on_hover_text(lang.t("Nach dieser Spalte sortieren", "Sort by this column"));
+            if col.is_some() {
+                resp.on_hover_text(lang.t("Nach dieser Spalte sortieren", "Sort by this column"));
+            }
             x += w;
         };
-        head(ui, "", SortCol::Type, w_badge, false);
-        head(ui, lang.t("Schlüssel", "Key"), SortCol::Key, w_key, false);
-        head(ui, lang.t("Titel", "Title"), SortCol::Title, w_title, false);
+        head(ui, "", Some(SortCol::Type), w_badge, false);
+        head(ui, lang.t("Schlüssel", "Key"), Some(SortCol::Key), w_key, false);
+        head(ui, lang.t("Titel", "Title"), Some(SortCol::Title), w_title, false);
         if cols.status {
-            head(ui, lang.t("Status", "Status"), SortCol::Status, w_status, false);
+            head(ui, lang.t("Status", "Status"), Some(SortCol::Status), w_status, false);
         }
         if cols.prio {
-            head(ui, lang.t("Priorität", "Priority"), SortCol::Priority, w_prio, false);
+            head(ui, lang.t("Priorität", "Priority"), Some(SortCol::Priority), w_prio, false);
         }
         if cols.points {
-            head(ui, lang.t("Pkt.", "Pts"), SortCol::Points, w_points, true);
+            head(ui, lang.t("Pkt.", "Pts"), Some(SortCol::Points), w_points, true);
         }
-        head(ui, "★ ⚑", SortCol::Marks, w_marks, true);
+        if show_refs {
+            head(ui, lang.t("Version · Meilenstein · Terminal", "Version · Milestone · Terminal"), None, w_refs, false);
+        }
+        head(ui, "★ ⚑", Some(SortCol::Marks), w_marks, true);
         if let Some(c) = new_sort {
             self.tickets.sort = self.tickets.sort.toggled(c);
             self.resort(sum);
@@ -392,7 +405,16 @@ impl PlanUi {
         self.tickets.hover = None;
         let mut hover: Option<i64> = None;
         ui.spacing_mut().item_spacing.y = 0.0;
-        egui::ScrollArea::vertical().id_salt("ticket_rows").auto_shrink([false, false]).show_rows(ui, ROW_H, n, |ui, range| {
+        let mut area = egui::ScrollArea::vertical().id_salt("ticket_rows").auto_shrink([false, false]);
+        // gewünschte Position (aus dem Vorbild berechnet) genau ein Mal anwenden
+        let applied = match self.tickets.scroll_offset.take() {
+            Some(off) => {
+                area = area.vertical_scroll_offset(off);
+                true
+            }
+            None => false,
+        };
+        let out = area.show_rows(ui, ROW_H, n, |ui, range| {
             for i in range {
                 let row = &self.tickets.rows[i];
                 let t = &row.ticket;
@@ -460,6 +482,12 @@ impl PlanUi {
                     }
                     x += w_points;
                 }
+                if show_refs {
+                    if let Some(r) = self.tickets.row_refs.get(&t.id) {
+                        paint_chips(ui, ui.painter(), Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(w_refs - 8.0, ROW_H)), &row_chips(r, lang));
+                    }
+                    x += w_refs;
+                }
                 // Stern und Markierung (klickbar, vor dem Zeilenklick ausgewertet)
                 let star_r = Rect::from_center_size(Pos2::new(x + 14.0, rect.center().y), Vec2::splat(22.0));
                 let flag_r = Rect::from_center_size(Pos2::new(x + 40.0, rect.center().y), Vec2::splat(22.0));
@@ -489,7 +517,12 @@ impl PlanUi {
                     hover = Some(t.id);
                 }
                 let tid = t.id;
-                resp.on_hover_text(&t.title).context_menu(|ui| {
+                let tip = match self.tickets.row_refs.get(&t.id) {
+                    Some(r) => format!("{}
+{}", t.title, row_tooltip(r, lang)),
+                    None => t.title.clone(),
+                };
+                resp.on_hover_text(tip).context_menu(|ui| {
                     if ui.button(lang.t("Öffnen", "Open")).clicked() {
                         click = Some(tid);
                         ui.close();
@@ -502,11 +535,31 @@ impl PlanUi {
             }
         });
         self.tickets.hover = hover;
+        self.tickets.list_offset = out.state.offset.y;
+        // Zum geöffneten (oder gerade verlassenen) Ticket scrollen – aber nur, wenn die Zeile nicht ohnehin zu sehen ist
+        if let Some(id) = self.tickets.scroll_to {
+            if applied {
+                self.tickets.scroll_to = None;
+            } else if let Some(i) = self.tickets.rows.iter().position(|r| r.ticket.id == id) {
+                match scroll_target(i, ROW_H, out.state.offset.y, out.inner_rect.height(), out.content_size.y) {
+                    None => self.tickets.scroll_to = None,
+                    Some(off) => {
+                        self.tickets.scroll_offset = Some(off);
+                        ui.ctx().request_repaint();
+                    }
+                }
+            } else if !self.tickets.list_dirty {
+                // das Ticket steht nicht in der Liste (gefiltert, gelöscht): nichts zu tun
+                self.tickets.scroll_to = None;
+            }
+        }
         if let Some(id) = quick {
             self.open_quick_menu(vec![id]);
         }
         if let Some(id) = click {
             self.tickets.open_ticket(id, false);
+            // die angeklickte Zeile ist zu sehen: die Liste soll nicht springen
+            self.tickets.scroll_to = None;
             self.tickets.return_tab = None;
         }
         if let Some((id, is_star, on)) = mark {
