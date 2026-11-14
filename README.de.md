@@ -79,8 +79,8 @@ Alles liegt im Ordner `paneldeck-data` neben der `.exe` (falls nicht beschreibba
     rustup target add x86_64-pc-windows-gnu && apt install gcc-mingw-w64-x86-64
     cargo build --release --target x86_64-pc-windows-gnu
 
-Release-Dateien (portables ZIP mit `paneldeck.exe` und Lizenzen, Installer), Commit und Tag: `tools/release.sh <version> "<Nachricht>"` – unter Windows aus Git Bash, braucht Python 3 und für den Installer NSIS (`makensis`).
-Mit `--publish` wird zusätzlich das GitHub-Release angelegt (GitHub CLI `gh`, angemeldet), mit `--no-git` nur gebaut und gepackt.
+Release-Dateien (portables ZIP mit `paneldeck.exe` und Lizenzen, Installer) entstehen auf einem Branch `release/x.y` mit `tools/release.sh <version>` (Ablauf siehe `CLAUDE.md`, Branching- und Release-Strategie) – unter Windows aus Git Bash, braucht Python 3 und für den Installer NSIS (`makensis`).
+Mit `--publish` wird zusätzlich das Tag gepusht und das GitHub-Release angelegt (GitHub CLI `gh`, angemeldet), mit `--no-git` nur gebaut und gepackt.
 
 ## Rechtliches
 - **Lizenz:** MIT (`LICENSE`). Die Software wird ohne jede Gewährleistung bereitgestellt; die Nutzung erfolgt auf eigene Gefahr – das gilt besonders für die Agenten-Schnittstelle, die KI-Agenten in deine Terminals schreiben lässt.
