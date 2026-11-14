@@ -331,7 +331,7 @@ pub fn allowed_targets(conn: &Connection, type_id: i64, from: i64) -> Res<Vec<i6
 }
 
 /// Ist der Statuswechsel laut Matrix erlaubt? (Die Bedingungen des Übergangs prüft [`evaluate_conditions`] mit den Feldwerten
-/// des Tickets – das geschieht im Ticket-Schritt.)
+/// des Tickets – das geschieht in `transition.rs`.)
 pub fn is_transition_allowed(conn: &Connection, type_id: i64, from: i64, to: i64) -> Res<bool> {
     Ok(allowed_targets(conn, type_id, from)?.contains(&to))
 }

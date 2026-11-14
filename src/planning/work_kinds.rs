@@ -77,7 +77,7 @@ pub fn reorder_work_kinds(conn: &Connection, project_id: i64, ids: &[i64]) -> Re
     common::reorder(conn, "work_kinds", "project_id = ?1", &[project_id], ids)
 }
 
-/// Zeit-Einträge mit dieser Art der Arbeit (bis zum Ticket-Schritt 0).
+/// Zeit-Einträge mit dieser Art der Arbeit.
 pub fn usage(conn: &Connection, id: i64) -> Res<i64> {
     get_work_kind(conn, id)?;
     integrity::usage_count_work_kind(conn, id)
