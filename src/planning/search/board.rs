@@ -19,11 +19,12 @@ use crate::planning::ticket_error::{FieldLabel, TicketError};
 use crate::planning::tickets::{get_ticket, move_rank};
 use crate::planning::transition::{plan_transition, transition_ticket};
 use crate::planning::types::get_type;
-use crate::planning::views::boards::{column_title, get_board};
+use crate::planning::views::boards::{column_title, get_board, BoardConfig};
 use crate::planning::views::filters::get_filter;
 use crate::state::Lang;
 use rusqlite::{params_from_iter, Connection};
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// Wie viele Karten je Spalte (eine Seite) die Ansicht lädt.
 pub const DEFAULT_COLUMN_LIMIT: i64 = 50;
@@ -113,6 +114,32 @@ pub fn board_view_with(conn: &Connection, board_id: i64, ctx: &Ctx, paging: &Boa
         }
         Ok(BoardView { board_id, project_id: pid, name: board.name.clone(), description: board.description.clone(), columns })
     })
+}
+
+/// Welche Tickets des Projekts ein Board nach seiner **Quelle** zeigen darf: der gespeicherte Filter (seine Sortierung zählt nicht)
+/// und „nur aktiver Sprint“. `None` = keine Einschränkung (weder Filter noch Sprint-Schalter). Für Oberflächen, die die Karten
+/// selbst laden und nur die Quelle auswerten wollen; Fehler wie in [`board_view`] (z. B. ungültige Abfrage des Filters).
+pub fn board_source_ids(conn: &Connection, ctx: &Ctx, project_id: i64, cfg: &BoardConfig) -> SRes<Option<HashSet<i64>>> {
+    if cfg.source_filter_id.is_none() && !cfg.only_active_sprint {
+        return Ok(None);
+    }
+    let jql = match cfg.source_filter_id {
+        Some(f) => get_filter(conn, f)?.jql,
+        None => String::new(),
+    };
+    let (schema, base) = prepare(conn, ctx, Scope::Project(project_id), &jql)?;
+    let ids = with_timeout(conn, ctx.timeout, || {
+        let mut cx = Cx::continuing(&schema, ctx, base.params[..base.where_params.min(base.params.len())].to_vec());
+        let mut where_sql = base.where_sql.clone();
+        if cfg.only_active_sprint {
+            where_sql.push_str(&format!(" AND {}", pending::active_sprint_condition(&mut cx, project_id)?));
+        }
+        let mut st = conn.prepare(&format!("SELECT t.id {FROM} WHERE {where_sql}"))?;
+        let n = st.parameter_count().min(cx.params.len());
+        let rows = st.query_map(params_from_iter(cx.params[..n].iter()), |r| r.get::<_, i64>(0))?.collect::<Result<HashSet<i64>, _>>()?;
+        Ok(rows)
+    })?;
+    Ok(Some(ids))
 }
 
 // ------------------------------------------------------------------ Karte verschieben

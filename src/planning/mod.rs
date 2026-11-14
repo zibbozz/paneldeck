@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 pub mod agent;
+pub mod backup_doc;
 pub mod clone_move;
 pub mod comments;
 pub mod defaults;

@@ -6,24 +6,74 @@
 //! * Die Farbe des gewählten Projekts ist im ganzen Reiter die Akzentfarbe ([`PlanUi::accent`], gesetzt von der Anwendung).
 //! * Jeder sichtbare Text steht in beiden Sprachen (`lang.t(de, en)`), Fehler der Datenschicht über `PlanError::message`.
 
+mod backup_ed;
 mod board_cfg;
 mod board_logic;
 mod board_view;
+mod dash_charts;
+mod dash_data;
+mod dash_dialogs;
+mod dash_logic;
+mod dash_tiles;
+mod dash_view;
 mod delete;
 mod fields_ed;
+mod help_shots;
 mod helpers;
+mod keywords_ed;
 mod kinds_ed;
 mod links_ed;
 mod overview;
 mod project_form;
+mod quick_ed;
+mod quick_exec;
+mod quick_logic;
+mod quick_menu;
+mod query_bar;
+mod query_help_ui;
+mod query_logic;
+mod ref_inputs;
+mod release_view;
+mod saved_filters;
+mod search_logic;
+mod search_run;
+mod search_tab;
+mod search_table;
+#[cfg(test)]
+mod search_ui_tests;
+mod sprint_chart;
+mod sprint_data;
+mod sprint_detail;
+mod sprint_dlg;
+mod sprint_logic;
+mod sprint_view;
 mod status_ed;
 mod template_ed;
+mod ticket_create;
+mod ticket_data;
+mod ticket_dialogs;
+mod ticket_draft;
+mod ticket_inputs;
+mod ticket_nav;
+#[cfg(test)]
+mod ticket_nav_tests;
+mod ticket_query;
+mod ticket_state;
+mod ticket_tab;
+#[cfg(test)]
+mod ticket_ui_tests;
+mod ticket_view;
 mod types_ed;
 mod values;
 mod widgets;
 mod workflow_ed;
 
+#[cfg(test)]
+mod sprint_ui_tests;
+
 pub(super) use helpers::color_of;
+pub(super) use quick_exec::SessionRequest;
+pub(super) use quick_menu::Out as QuickOut;
 pub(super) use widgets::type_icon;
 
 use super::tasks_ui::Env;
@@ -47,8 +97,13 @@ pub(super) struct Cx<'a> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
+    Tickets,
     Overview,
+    Search,
     Boards,
+    Dashboards,
+    Backlog,
+    Releases,
     Types,
     Fields,
     Statuses,
@@ -56,6 +111,7 @@ enum Tab {
     Links,
     WorkKinds,
     Templates,
+    Quick,
 }
 
 /// Rückmeldung unter den Reitern (Fehler rot, Erfolg gedämpft); verschwindet nach einigen Sekunden.
@@ -89,7 +145,22 @@ pub(super) struct PlanUi {
     kinds: kinds_ed::State,
     templates: template_ed::State,
     todo: overview::Todo,
+    /// Reiter „Suche“ (Abfrage-Leiste, siehe `search_tab`)
+    search: search_tab::State,
+    /// Abfrage-Leiste über der Ticket-Liste (siehe `ticket_query`)
+    tq: ticket_query::State,
+    /// Hilfeseite der Abfragesprache (Vollfläche über dem Reiterinhalt)
+    help: query_help_ui::HelpState,
+    /// Dialog „JQL-Schlüsselwörter“
+    kw: keywords_ed::State,
+    /// Ticket-Oberfläche (Liste, Ansicht, Dialoge, Rückgängig-Historie).
+    tickets: ticket_state::TicketUi,
     boards: board_view::State,
+    dash: dash_view::State,
+    sprints: sprint_view::State,
+    releases: release_view::State,
+    quick: quick_menu::State,
+    quick_ed: quick_ed::State,
 }
 
 impl Default for PlanUi {
@@ -102,7 +173,7 @@ impl Default for PlanUi {
             selected: 0,
             sum: None,
             links: Vec::new(),
-            tab: Tab::Overview,
+            tab: Tab::Tickets,
             msg: None,
             wizard: None,
             settings: None,
@@ -116,7 +187,17 @@ impl Default for PlanUi {
             kinds: Default::default(),
             templates: Default::default(),
             todo: Default::default(),
+            search: Default::default(),
+            tq: Default::default(),
+            help: Default::default(),
+            kw: Default::default(),
+            tickets: Default::default(),
             boards: Default::default(),
+            dash: Default::default(),
+            sprints: Default::default(),
+            releases: Default::default(),
+            quick: Default::default(),
+            quick_ed: Default::default(),
         }
     }
 }
@@ -155,6 +236,9 @@ impl PlanUi {
         self.sum = project_summary(cx.conn, self.selected).ok().map(Rc::new);
         self.links = list_link_types(cx.conn).unwrap_or_default();
         self.todo.dirty = true;
+        self.search.stale = true;
+        self.tickets.invalidate();
+        self.tickets.counts_dirty = true;
     }
 
     fn project(&self) -> Option<&Project> {
@@ -165,20 +249,27 @@ impl PlanUi {
         if id != self.selected {
             self.selected = id;
             cx.db.set_meta("expert_project", &id.to_string());
+            self.tickets.switch_project(id);
             self.types = Default::default();
             self.fields = Default::default();
             self.workflow = Default::default();
             self.dirty = true;
             self.msg = None;
-            if self.projects.iter().find(|p| p.id == id).is_some_and(|p| p.system) && !matches!(self.tab, Tab::Overview | Tab::Links) {
+            if self.projects.iter().find(|p| p.id == id).is_some_and(|p| p.system) && !matches!(self.tab, Tab::Overview | Tab::Dashboards | Tab::Links) {
                 self.tab = Tab::Overview;
             }
         }
     }
 
+    /// Hinweise der Ticket-Oberfläche für den Toast-Stapel der Anwendung abholen.
+    pub(super) fn take_toasts(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.tickets.toasts)
+    }
+
     /// Die Daten haben sich außerhalb der Oberfläche geändert (z. B. durch einen Agenten): beim nächsten Bild neu laden.
     pub(super) fn invalidate(&mut self) {
         self.dirty = true;
+        self.dash_invalidate();
     }
 
     pub(super) fn set_expert(&mut self, db: &Db, on: bool) {
@@ -219,6 +310,8 @@ impl PlanUi {
         if self.dirty {
             self.reload(&cx);
         }
+        // Ticket aus dem Terminal Hub (Chip, Palette, Mini-Suche): vor dem Lesen des Expertenmodus öffnen, es kann ihn einschalten
+        self.run_requested_open(&cx);
         let fill = env.bg;
         let mut new_project = false;
         let mut pick: Option<i64> = None;
@@ -283,8 +376,26 @@ impl PlanUi {
         if self.dirty {
             self.reload(&cx);
         }
+        self.ticket_refresh(&cx, env.undo_steps);
+        self.ticket_keys(ctx, &cx);
+        let side = self.tab == Tab::Tickets && self.tickets.open.is_some() && self.tickets.mode == ticket_state::ViewMode::Panel && !self.project().is_some_and(|p| p.system);
+        if side {
+            self.ticket_panel(ctx, &cx, env.bg);
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(env.bg)).show(ctx, |ui| {
-            self.body(ui, &cx);
+            if self.help.open {
+                // Die Hilfe liegt wie ein Ticket über dem Reiterinhalt (Vollfläche); „X“ oder Esc schließt sie.
+                let out = query_help_ui::help_page(ui, &mut self.help, cx.lang, true);
+                if let Some(q) = out.use_query {
+                    // „In Suche übernehmen“ führt die Abfrage gleich aus
+                    self.open_search_query(&q, None);
+                    self.help.open = false;
+                } else if out.close {
+                    self.help.open = false;
+                }
+            } else {
+                self.body(ui, &cx);
+            }
         });
         self.dialogs(ctx, &cx);
         self.toast(ctx);
@@ -312,19 +423,34 @@ impl PlanUi {
 
     fn tabs(&self, lang: Lang) -> Vec<(Tab, &'static str)> {
         let system = self.project().is_some_and(|p| p.system);
-        let mut v = vec![(Tab::Overview, lang.t("Übersicht", "Overview"))];
+        let mut v = Vec::new();
+        if !system {
+            v.push((Tab::Tickets, lang.t("Tickets", "Tickets")));
+        }
+        v.push((Tab::Overview, lang.t("Übersicht", "Overview")));
+        v.push((Tab::Search, lang.t("Suche", "Search")));
         if !system {
             v.push((Tab::Boards, lang.t("Boards", "Boards")));
+            if self.project().is_some_and(|p| p.use_sprints) {
+                v.push((Tab::Backlog, lang.t("Backlog", "Backlog")));
+            }
+            if self.project().is_some_and(|p| p.use_versions) {
+                v.push((Tab::Releases, lang.t("Releases", "Releases")));
+            }
+        }
+        v.push((Tab::Dashboards, lang.t("Dashboards", "Dashboards")));
+        if !system {
             v.extend([
                 (Tab::Types, lang.t("Typen", "Types")),
                 (Tab::Fields, lang.t("Felder", "Fields")),
                 (Tab::Statuses, lang.t("Status", "Statuses")),
                 (Tab::Workflows, lang.t("Workflows", "Workflows")),
+                (Tab::Quick, lang.t("Schnellaktionen", "Quick actions")),
             ]);
         }
         v.push((Tab::Links, lang.t("Verknüpfungstypen", "Link types")));
         if !system {
-            v.extend([(Tab::WorkKinds, lang.t("Arten der Arbeit", "Kinds of work")), (Tab::Templates, lang.t("Vorlagen", "Templates"))]);
+            v.extend([(Tab::WorkKinds, lang.t("Arten der Arbeit", "Kinds of work")), (Tab::Templates, lang.t("Vorlagen & Sicherung", "Templates & backup"))]);
         }
         v
     }
@@ -339,11 +465,17 @@ impl PlanUi {
             return;
         };
         let avail = ui.available_rect_before_wrap();
-        let w = (avail.width() - 40.0).clamp(300.0, 1040.0);
+        let wide = self.tab == Tab::Tickets;
+        let w = (avail.width() - 40.0).clamp(300.0, if wide { 1600.0 } else { 1040.0 });
         let x0 = avail.center().x - w / 2.0;
         let col = Rect::from_min_size(Pos2::new(x0, avail.top() + S3), Vec2::new(w, avail.height() - S3));
         let mut below = avail.top() + S3;
         ui.scope_builder(UiBuilder::new().max_rect(col), |ui| {
+            // Ticket als eigene Seite: ohne Reiter, mit Zurück-Pfeil
+            if self.tab == Tab::Tickets && self.tickets.open.is_some() && self.tickets.mode == ticket_state::ViewMode::Page && !proj.system {
+                self.ticket_page(ui, cx);
+                return;
+            }
             // Reiter innerhalb des Projekts
             let tabs = self.tabs(lang);
             if !tabs.iter().any(|(t, _)| *t == self.tab) {
@@ -355,26 +487,36 @@ impl PlanUi {
                     if style::tab(ui, label, self.tab == *t).clicked() {
                         self.tab = *t;
                         self.msg = None;
+                        // von Hand gewechselt: der Rückweg des Tickets (Board, Backlog …) gilt nicht mehr
+                        self.tickets.return_tab = None;
                     }
                 }
             });
             ui.add_space(S2);
+            if self.tab == Tab::Tickets {
+                self.tickets_tab(ui, cx, &proj);
+                return;
+            }
             // Fehler stehen unter den Reitern (bis zur nächsten gelungenen Änderung), Erfolgsmeldungen als kurzer Hinweis unten.
             if let Some(m) = self.msg.as_ref().filter(|m| !m.ok) {
                 let text = m.text.clone();
                 ui.horizontal_wrapped(|ui| widgets::error(ui, &text));
                 ui.add_space(S1);
             }
-            // Die Boards brauchen die ganze Breite und Höhe (eigene Rollflächen) – sie werden unterhalb gezeichnet.
-            if self.tab == Tab::Boards {
+            // Boards und Dashboards brauchen die ganze Breite und Höhe (eigene Rollflächen) – sie werden unterhalb gezeichnet.
+            if matches!(self.tab, Tab::Boards | Tab::Dashboards) {
                 below = ui.cursor().top();
                 return;
             }
             egui::ScrollArea::vertical().id_salt(("plan_page", self.tab as u8)).auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(w - 8.0);
                 match self.tab {
+                    Tab::Tickets => {}
                     Tab::Overview => self.overview(ui, cx, &proj),
-                    Tab::Boards => {}
+                    Tab::Search => self.search_tab(ui, cx),
+                    Tab::Boards | Tab::Dashboards => {}
+                    Tab::Backlog => self.backlog_tab(ui, cx, &proj),
+                    Tab::Releases => self.releases_tab(ui, cx, &proj),
                     Tab::Types => self.types_tab(ui, cx),
                     Tab::Fields => self.fields_tab(ui, cx),
                     Tab::Statuses => self.statuses_tab(ui, cx),
@@ -382,25 +524,35 @@ impl PlanUi {
                     Tab::Links => self.links_tab(ui, cx),
                     Tab::WorkKinds => self.kinds_tab(ui, cx),
                     Tab::Templates => self.templates_tab(ui, cx),
+                    Tab::Quick => self.quick_tab(ui, cx),
                 }
                 ui.add_space(40.0);
             });
         });
-        if self.tab == Tab::Boards {
+        if matches!(self.tab, Tab::Boards | Tab::Dashboards) {
             let full = Rect::from_min_max(Pos2::new(avail.left() + S3, below), Pos2::new(avail.right() - S3, avail.bottom()));
-            ui.scope_builder(UiBuilder::new().max_rect(full), |ui| self.boards_tab(ui, cx, &proj));
+            ui.scope_builder(UiBuilder::new().max_rect(full), |ui| match self.tab {
+                Tab::Dashboards => self.dash_tab(ui, cx, &proj),
+                _ => self.boards_tab(ui, cx, &proj),
+            });
         }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, cx: &Cx) {
         self.wizard_dialog(ctx, cx);
         self.board_dialogs(ctx, cx);
+        self.dash_dialogs(ctx, cx);
+        self.sprint_dialogs(ctx, cx);
         self.settings_dialog(ctx, cx);
         self.fields_dialogs(ctx, cx);
         self.workflow_dialogs(ctx, cx);
         self.template_dialogs(ctx, cx);
         self.delete_dialog(ctx, cx);
         self.delete_project_dialog(ctx, cx);
+        self.quick_ed_dialogs(ctx, cx);
+        self.quick_dialogs(ctx, cx);
+        self.keywords_dialog_ui(ctx, cx);
+        self.ticket_dialogs(ctx, cx);
     }
 
     /// Schnellzugriff für Dialoge: Id eines Modals dieses Bereichs.

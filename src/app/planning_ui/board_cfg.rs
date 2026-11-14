@@ -5,6 +5,8 @@
 
 use super::board_logic as logic;
 use super::helpers::color_of;
+use super::ref_inputs::ref_value_editor;
+use super::ticket_inputs::InCx;
 use super::values;
 use super::widgets;
 use super::{Cx, PlanUi};
@@ -51,6 +53,8 @@ struct NeedField {
 /// Dialog „Pflichtfelder ausfüllen“: die Karte wurde auf einen Status gezogen, dessen Übergang Felder verlangt.
 pub(super) struct NeedsDlg {
     ticket_id: i64,
+    /// Projekt des Tickets (Versionen/Meilensteine kommen aus diesem Projekt).
+    project_id: i64,
     key: String,
     title: String,
     to_status: i64,
@@ -68,12 +72,22 @@ impl NeedsDlg {
             .iter()
             .map(|l| {
                 let field = ty.and_then(|t| t.field(l.id)).cloned();
-                let value = field.as_ref().map(|f| values::blank_full(f.kind, &f.options)).unwrap_or(Value::Null);
+                let value = field.as_ref().map(|f| if matches!(f.kind, FieldKind::Version | FieldKind::Milestone) { Value::Null } else { values::blank_full(f.kind, &f.options) }).unwrap_or(Value::Null);
                 NeedField { label: l.clone(), field, value }
             })
             .collect();
-        NeedsDlg { ticket_id: ticket.id, key: ticket.key(), title: ticket.title.clone(), to_status, to_name, before, fields, err: None }
+        NeedsDlg { ticket_id: ticket.id, project_id: ticket.project_id, key: ticket.key(), title: ticket.title.clone(), to_status, to_name, before, fields, err: None }
     }
+}
+
+/// Version, Meilenstein und Terminal füllen die Eingaben aus `ref_inputs`.
+fn is_release_or_terminal(kind: FieldKind) -> bool {
+    matches!(kind, FieldKind::Version | FieldKind::Milestone | FieldKind::Terminal)
+}
+
+/// Felder, die der Dialog „Pflichtfelder ausfüllen“ selbst ausfüllen kann: alle außer dem Ticket-Verweis.
+fn fillable(kind: FieldKind) -> bool {
+    !kind.is_reference() || is_release_or_terminal(kind)
 }
 
 /// Aktion aus dem Spalten-Editor (wird nach dem Zeichnen angewendet).
@@ -216,24 +230,45 @@ impl PlanUi {
                         }
                     }
                 });
-                // ---- Quelle und Sprint (noch nicht angeschlossen)
+                // ---- Quelle und Sprint
                 label(ui, lang.t("Quelle", "Source"));
-                ui.add_enabled_ui(false, |ui| {
-                    let sel = d.config.source_filter_id.and_then(|id| filters.iter().find(|f| f.id == id)).map(|f| f.name.clone()).unwrap_or_else(|| lang.t("Alle Tickets", "All tickets").to_string());
-                    egui::ComboBox::from_id_salt("board_source").selected_text(sel).width(260.0).show_ui(ui, |_| {});
+                let sel = d.config.source_filter_id.and_then(|id| filters.iter().find(|f| f.id == id)).map(|f| f.name.clone()).unwrap_or_else(|| lang.t("Alle Tickets", "All tickets").to_string());
+                egui::ComboBox::from_id_salt("board_source").selected_text(sel).width(260.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(d.config.source_filter_id.is_none(), lang.t("Alle Tickets", "All tickets")).clicked() {
+                        d.config.source_filter_id = None;
+                    }
+                    for f in &filters {
+                        let name = if f.project_id.is_none() { format!("{} ({})", f.name, lang.t("global", "global")) } else { f.name.clone() };
+                        if ui.selectable_label(d.config.source_filter_id == Some(f.id), name).clicked() {
+                            d.config.source_filter_id = Some(f.id);
+                        }
+                    }
                 });
-                widgets::hint(ui, lang.t("Ein gespeicherter Filter als Quelle braucht die Abfrage-Suche – noch nicht verfügbar.", "A saved filter as the source needs the query search — not available yet."));
-                // TODO search: Auswahl gespeicherter Filter (`filters`) freischalten und in `load_board` auswerten.
+                widgets::hint(
+                    ui,
+                    lang.t(
+                        "Mit einem gespeicherten Filter zeigt das Board nur dessen Treffer (seine Sortierung zählt nicht; die Karten bleiben nach Rang sortiert).",
+                        "With a saved filter the board shows only its matches (its sorting is ignored; cards stay in rank order).",
+                    ),
+                );
                 label(ui, lang.t("Umfang", "Scope"));
-                ui.add_enabled_ui(false, |ui| {
+                let sprints = sum.project.use_sprints;
+                ui.add_enabled_ui(sprints, |ui| {
                     let mut only = d.config.only_active_sprint;
                     ui.horizontal(|ui| {
                         widgets::radio(ui, &mut only, false, lang.t("Alle Tickets", "All tickets"));
                         widgets::radio(ui, &mut only, true, lang.t("Nur aktiver Sprint", "Only the active sprint"));
                     });
+                    d.config.only_active_sprint = only;
                 });
-                widgets::hint(ui, lang.t("„Nur aktiver Sprint“ braucht Sprints – noch nicht verfügbar.", "“Only the active sprint” needs sprints — not available yet."));
-                // TODO sprints: Schalter freischalten und `cfg.only_active_sprint` in `load_board` auswerten.
+                widgets::hint(
+                    ui,
+                    if sprints {
+                        lang.t("„Nur aktiver Sprint“ zeigt die Tickets des laufenden Sprints; ohne laufenden Sprint bleibt das Board leer.", "“Only the active sprint” shows the tickets of the running sprint; without a running sprint the board stays empty.")
+                    } else {
+                        lang.t("Dieses Projekt nutzt keine Sprints. Schalte Sprints in den Projekteinstellungen ein, dann lässt sich das Board auf den aktiven Sprint beschränken.", "This project does not use sprints. Turn sprints on in the project settings to limit the board to the active sprint.")
+                    },
+                );
                 // ---- Karte
                 label(ui, lang.t("Karte", "Card"));
                 ui.horizontal(|ui| {
@@ -366,7 +401,8 @@ impl PlanUi {
         let Some(mut d) = self.boards.needs.take() else { return };
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let can_submit = d.fields.iter().all(|f| f.field.as_ref().is_some_and(|f| !f.kind.is_reference()));
+        let can_submit = d.fields.iter().all(|f| f.field.as_ref().is_some_and(|f| fillable(f.kind)));
+        let (project_id, ticket_id) = (d.project_id, d.ticket_id);
         let m = egui::Modal::new(Self::modal_id("board_needs")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 480.0));
             widgets::dialog_title(ui, lang.t("Pflichtfelder ausfüllen", "Fill in required fields"));
@@ -379,9 +415,13 @@ impl PlanUi {
             for (i, f) in d.fields.iter_mut().enumerate() {
                 ui.label(RichText::new(f.label.text(lang)).strong());
                 match &f.field {
-                    Some(field) if !field.kind.is_reference() => {
+                    Some(field) if fillable(field.kind) => {
                         let salt = Id::new(("board_need", i));
-                        if field.kind == FieldKind::Rich {
+                        if is_release_or_terminal(field.kind) {
+                            // dieselben Eingaben wie in der Ticket-Ansicht (Versionen des Ticket-Projekts, laufende Sitzungen)
+                            let ic = InCx { conn: cx.conn, lang, project_id, ticket_id: Some(ticket_id), prefixes: &[], labels: &[], id: Id::new(("board_need_in", i)) };
+                            ref_value_editor(ui, &ic, salt, field.kind, &mut f.value, true, &mut None);
+                        } else if field.kind == FieldKind::Rich {
                             let mut s = f.value.as_str().unwrap_or("").to_string();
                             if ui.add(egui::TextEdit::multiline(&mut s).id(salt).desired_rows(3).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(8, 5))).changed() {
                                 f.value = Value::String(s);
@@ -433,5 +473,19 @@ impl PlanUi {
         if !close {
             self.boards.needs = Some(d);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_needs_dialog_fills_everything_but_ticket_references() {
+        for k in [FieldKind::Version, FieldKind::Milestone, FieldKind::Terminal, FieldKind::Text, FieldKind::Rich, FieldKind::Dropdown, FieldKind::Date] {
+            assert!(fillable(k), "{k:?}");
+        }
+        assert!(!fillable(FieldKind::Ticket), "Ticket-Verweise lassen sich dort nicht ausfüllen");
+        assert!(is_release_or_terminal(FieldKind::Terminal) && !is_release_or_terminal(FieldKind::Ticket));
     }
 }

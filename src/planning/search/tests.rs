@@ -6,7 +6,6 @@ use crate::planning::fields::{FieldKind, FieldOptions};
 use crate::planning::history::Source;
 use crate::planning::link_types::link_type_by_key;
 use crate::planning::links::{add_link, Target};
-use crate::planning::projects::{update_project, UpdateProject};
 use crate::planning::tickets::fixture::Fx;
 use crate::planning::tickets::{create_ticket, set_field, set_flagged, set_starred, NewTicket};
 use crate::planning::transition::transition_ticket;
@@ -452,40 +451,11 @@ fn a_custom_field_named_like_a_builtin_is_reported_not_used() {
 }
 
 #[test]
-fn sprint_field_exists_with_sprints_but_is_not_available_yet() {
-    let s = Sx::new();
-    update_project(&s.f.c, s.f.project, &UpdateProject { use_sprints: Some(true), ..Default::default() }).unwrap();
-    let schema = schema_for(&s.f.c, s.scope(), Lang::En).unwrap();
-    assert!(schema.field("sprint").is_some());
-    for jql in ["sprint = activeSprint()", "sprint = \"Sprint 1\"", "sprint IS EMPTY", "sprint IS NOT EMPTY", "ORDER BY sprint"] {
-        let e = s.err(jql);
-        assert_eq!(e, SearchError::NotAvailableYet(Feature::Sprints), "{jql}");
-        assert!(!e.message(Lang::De).is_empty() && e.message(Lang::De) != e.message(Lang::En));
-    }
-}
-
-#[test]
-fn active_sprint_function_is_not_available_yet_anywhere() {
-    let s = Sx::new();
-    let e = s.err("summary = activeSprint()");
-    assert_eq!(e, SearchError::NotAvailableYet(Feature::Sprints));
-}
-
-#[test]
 fn unknown_field_without_sprints_is_a_validation_error() {
     let s = Sx::new();
     match s.err("sprint = activeSprint()") {
         SearchError::Invalid { issues, .. } => assert!(issues[0].message(Lang::En).contains("sprint")),
         e => panic!("{e:?}"),
-    }
-}
-
-#[test]
-fn version_fields_are_not_available_yet() {
-    let s = Sx::new();
-    s.f.add_field(s.f.epic, "Release version", FieldKind::Version, FieldOptions::default(), false);
-    for jql in [r#""Release version" = 2.0.0"#, r#""Release version" IS EMPTY"#, r#""Release version" IN (1, 2)"#, r#"ORDER BY "Release version""#] {
-        assert_eq!(s.err(jql), SearchError::NotAvailableYet(Feature::Versions), "{jql}");
     }
 }
 

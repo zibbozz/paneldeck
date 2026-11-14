@@ -29,10 +29,6 @@ fn keys_of(c: &Connection, ctx: &Ctx, d: &SeededDemo, jql: &str) -> Result<Vec<S
     Ok(run_query(c, ctx, Scope::Project(d.project_id), jql, Page::ALL)?.rows.into_iter().map(|r| r.key).collect())
 }
 
-/// Beispiele, die Sprints oder Versionen brauchen (die Tabellen gibt es noch nicht, siehe `pending.rs`).
-// TODO sprints: sobald Sprints und Versionen im Seeding angelegt werden, diese Liste leeren.
-const NEEDS_SPRINTS_OR_VERSIONS: [&str; 7] = ["basics-quotes", "empty-is-empty", "sprint-active", "sprint-backlog", "sort-multi", "epics-release", "combo-sprint"];
-
 #[test]
 fn seeds_the_shop_project() {
     let (c, d, spec) = seeded();
@@ -48,9 +44,20 @@ fn seeds_the_shop_project() {
 }
 
 #[test]
-fn reports_what_it_skipped() {
-    let (_, d, _) = seeded();
-    assert!(d.skipped.contains(&"sprints".to_string()) && d.skipped.contains(&"versions".to_string()), "{:?}", d.skipped);
+fn seeds_sprints_versions_and_their_values() {
+    use crate::planning::sprints::releases::list_versions;
+    use crate::planning::sprints::sprint::{active_sprint, list_sprints, sprint_content, SprintState};
+    let (c, d, _) = seeded();
+    assert!(d.skipped.is_empty(), "{:?}", d.skipped);
+    let sprints = list_sprints(&c, d.project_id).unwrap();
+    assert_eq!(sprints.iter().map(|s| (s.name.as_str(), s.state)).collect::<Vec<_>>(), vec![("Sprint 14", SprintState::Completed), ("Sprint 15", SprintState::Active), ("Sprint 16", SprintState::Planned)]);
+    assert_eq!(active_sprint(&c, d.project_id).unwrap().name, "Sprint 15");
+    let in_sprint = |i: usize| sprint_content(&c, sprints[i].id).unwrap().items.iter().map(|x| x.ticket.key()).collect::<Vec<_>>();
+    assert_eq!(in_sprint(0), vec!["WEB-6", "WEB-7", "WEB-18"]);
+    assert_eq!(in_sprint(1), vec!["WEB-8", "WEB-9", "WEB-10", "WEB-11", "WEB-12", "WEB-14", "WEB-15", "WEB-19", "WEB-20"]);
+    assert_eq!(in_sprint(2), vec!["WEB-13"]);
+    let versions = list_versions(&c, d.project_id).unwrap();
+    assert_eq!(versions.iter().map(|v| (v.name.as_str(), v.done)).collect::<Vec<_>>(), vec![("1.0.0", true), ("1.1.0", true), ("2.0.0", false), ("2.1.0", false)]);
 }
 
 #[test]
@@ -207,9 +214,8 @@ fn seeded_cards_show_the_priority_and_points() {
 }
 
 /// Die Kreuzprobe: jedes Beispiel der Hilfe, auf frisch gesäten Daten, liefert genau `expected_keys()` (auch die Reihenfolge).
-fn cross_check(lang: Lang) -> (usize, Vec<&'static str>) {
+fn cross_check(lang: Lang) -> usize {
     let mut checked = 0;
-    let mut skipped = Vec::new();
     for e in HelpDoc::builtin().examples() {
         let c = fresh();
         let d = seed_demo(&c, &e.demo, REFERENCE_TODAY).unwrap();
@@ -219,46 +225,30 @@ fn cross_check(lang: Lang) -> (usize, Vec<&'static str>) {
                 assert_eq!(keys, e.expected_keys(), "{} ({:?}): {}", e.id, lang, e.jql);
                 checked += 1;
             }
-            Err(SearchError::NotAvailableYet(_)) => skipped.push(e.id),
             Err(err) => panic!("{}: {}", e.id, err.message(Lang::En)),
         }
     }
-    (checked, skipped)
+    checked
 }
 
 #[test]
 fn cross_check_with_the_help_examples_in_english() {
-    let (checked, skipped) = cross_check(Lang::En);
-    assert_eq!(skipped, NEEDS_SPRINTS_OR_VERSIONS, "genau diese Beispiele brauchen Sprints oder Versionen");
-    assert_eq!(checked + skipped.len(), HelpDoc::builtin().examples().len());
-    assert!(checked >= 22);
+    let checked = cross_check(Lang::En);
+    assert_eq!(checked, HelpDoc::builtin().examples().len(), "jedes Beispiel der Hilfe stimmt mit der Referenz überein");
+    assert_eq!(checked, 29);
 }
 
 #[test]
 fn cross_check_with_the_help_examples_in_german() {
-    let (checked, skipped) = cross_check(Lang::De);
-    assert_eq!(skipped, NEEDS_SPRINTS_OR_VERSIONS);
-    assert!(checked >= 22);
+    assert_eq!(cross_check(Lang::De), HelpDoc::builtin().examples().len());
 }
 
 #[test]
 fn every_example_count_matches_the_expected_total() {
     for e in HelpDoc::builtin().examples() {
-        if NEEDS_SPRINTS_OR_VERSIONS.contains(&e.id) {
-            continue;
-        }
         let c = fresh();
         let d = seed_demo(&c, &e.demo, REFERENCE_TODAY).unwrap();
         let n = count(&c, &ctx_for(&d, Lang::En), Scope::Project(d.project_id), &e.jql).unwrap();
         assert_eq!(n as usize, e.expected_keys().len(), "{}", e.id);
     }
-}
-
-#[test]
-fn examples_that_need_sprints_report_not_available_yet() {
-    let c = fresh();
-    let doc = HelpDoc::builtin();
-    let e = doc.example("sprint-active").unwrap();
-    let d = seed_demo(&c, &e.demo, REFERENCE_TODAY).unwrap();
-    assert_eq!(keys_of(&c, &ctx_for(&d, Lang::En), &d, &e.jql), Err(SearchError::NotAvailableYet(Feature::Sprints)));
 }

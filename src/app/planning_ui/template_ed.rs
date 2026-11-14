@@ -1,5 +1,5 @@
-//! Reiter „Vorlagen“: Typen, Felder, Status und Workflows eines Projekts als JSON-Datei exportieren und in ein Projekt
-//! importieren. Der Import legt nur an, was fehlt, und meldet Gleichnamiges (Konflikte); Bestehendes bleibt unberührt.
+//! Reiter „Vorlagen & Sicherung“: Typen, Felder, Status und Workflows eines Projekts als JSON-Datei exportieren und in ein
+//! Projekt importieren (darunter Projektsicherung und Ticket-CSV, siehe `backup_ed.rs`). Der Import legt nur an, was fehlt, und meldet Gleichnamiges (Konflikte); Bestehendes bleibt unberührt.
 
 use super::widgets::{self, hint};
 use super::{Cx, PlanUi};
@@ -12,6 +12,8 @@ use eframe::egui::{self, RichText, Ui};
 pub(super) struct State {
     preview: Option<Preview>,
     report: Option<ImportReport>,
+    /// Projektsicherung und Ticket-CSV (eigener Zustand in `backup_ed.rs`).
+    pub(super) backup: super::backup_ed::State,
 }
 
 struct Preview {
@@ -48,6 +50,8 @@ impl PlanUi {
                 self.pick_template(cx);
             }
         });
+        ui.add_space(S2);
+        self.backup_cards(ui, cx, sum.project.id, &sum.project.key);
     }
 
     fn export_template(&mut self, cx: &Cx, project_id: i64, key: &str) {
@@ -87,6 +91,7 @@ impl PlanUi {
 
     pub(super) fn template_dialogs(&mut self, ctx: &egui::Context, cx: &Cx) {
         let lang = cx.lang;
+        self.backup_dialogs(ctx, cx);
         // Vorschau vor dem Import
         if let Some(p) = self.templates.preview.take() {
             let mut go = false;
