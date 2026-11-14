@@ -17,6 +17,8 @@ Paneldeck ist aus freier Software aufgebaut. Die wichtigsten Bestandteile und ih
 | arboard | Zwischenablage (Bilder) | MIT oder Apache-2.0 |
 | windows-sys, raw-window-handle | Windows-Fensterfunktionen | MIT oder Apache-2.0 |
 | embed-resource | Icon/Versionsinfo in der .exe | MIT |
+| rusqlite (mit eingebautem SQLite) | lokale Datenbank und Sicherungen | MIT (SQLite selbst: gemeinfrei/Public Domain) |
+| chrono | Datum und Uhrzeit | MIT oder Apache-2.0 |
 
 Alle weiteren transitiven Abhängigkeiten stehen unter MIT, Apache-2.0, BSD, Zlib, ISC, BSL-1.0, Unicode, CC0 oder Unlicense (teils wahlweise); eine Ausnahme ist `option-ext` unter der MPL-2.0 (Copyleft nur für die Datei selbst; Paneldeck bindet sie unverändert ein, der Quelltext liegt bei crates.io). `r-efi` bietet LGPL-2.1 nur als Wahloption neben MIT/Apache an. Die **vollständigen Lizenztexte** aller Pakete stehen in `THIRD_PARTY_LICENSES.txt` (erzeugt mit `python tools/gen_licenses.py`), die genaue Liste ergibt sich aus `Cargo.lock`.
 

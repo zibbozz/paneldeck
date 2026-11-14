@@ -28,12 +28,23 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod data;
 mod dialogs;
 mod dragdrop;
+#[cfg(test)]
+mod glyph_tests;
 mod mcp;
 mod panels;
+mod planning_ui;
 mod settings;
+#[cfg(feature = "readme-shots")]
+mod shot_start;
 mod sidebar;
+mod tasks_ui;
+mod terminal_links;
+mod titlebar;
+mod toasts;
+mod winchrome;
 
 const PALETTE: [[u8; 3]; 8] = [
     [0x61, 0xaf, 0xef],
@@ -227,6 +238,12 @@ enum Action {
     OpenSettings,
     OpenPrompts,
     OpenNotes(u64),
+    /// Mini-Suche „Ticket verknüpfen“ für die Sitzung öffnen.
+    LinkTicket(u64),
+    /// Ticket öffnen (Chip, Palette).
+    OpenTicket(i64),
+    /// Verknüpfung zwischen Sitzung und Ticket entfernen.
+    UnlinkTicket(u64, i64),
     NewDialog(bool),
     ToggleBroadcast,
     SendSnippet(usize),
@@ -515,6 +532,20 @@ pub struct App {
     last_save: Instant,
     applied_theme: String,
     last_title: String,
+    mode: titlebar::Mode,
+    db: Option<crate::db::Db>,
+    db_error: Option<String>,
+    tasks: tasks_ui::TasksUi,
+    plan: planning_ui::PlanUi,
+    /// Ticket↔Terminal-Verknüpfung (`terminal_links.rs`).
+    tlinks: terminal_links::TLinks,
+    backup_rx: Option<std::sync::mpsc::Receiver<Result<crate::backup::BackupInfo, String>>>,
+    backup_checked: Instant,
+    backup_msg: Option<String>,
+    backups_cache: Option<Vec<crate::backup::BackupInfo>>,
+    backups_dirty: bool,
+    confirm_restore: Option<PathBuf>,
+    restore_error: Option<String>,
     hook_server: Option<HookServer>,
     hooks_file: Option<PathBuf>,
     hooks_global: bool,
@@ -581,6 +612,10 @@ pub struct App {
     wt_close: Option<WtClose>,
     gsearch: Option<GlobalSearch>,
     notice: Option<(String, Instant)>,
+    /// Toast-Stapel unten rechts (`toasts.rs`), Uhr dafür und Toast unter dem Mauszeiger.
+    toasts: toasts::ToastQueue,
+    toasts_epoch: Instant,
+    toasts_hover: Option<u64>,
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
@@ -594,6 +629,12 @@ fn home_dir() -> String {
 }
 
 fn setup_fonts(ctx: &egui::Context, choice: &str) {
+    ctx.set_fonts(build_fonts(choice));
+}
+
+/// Baut die Schriftdefinitionen der App (eingebettete + vorhandene Systemschriften); getrennt von `setup_fonts`,
+/// damit Tests die Glyph-Abdeckung ohne Fenster prüfen können.
+fn build_fonts(choice: &str) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     // Cascadia Mono (SIL OFL) ist eingebettet und die bevorzugte Terminal-Schrift; Hack bleibt Fallback.
     fonts.font_data.insert(
@@ -633,6 +674,14 @@ fn setup_fonts(ctx: &egui::Context, choice: &str) {
         fam.retain(|n| n != "segoeui");
         fam.insert(0, "segoeui".to_owned());
     }
+    // Fette UI-Schrift (Titel der Todo-Karten): Segoe UI Bold, sonst die normale UI-Schrift als Ersatz.
+    let mut bold: Vec<String> = Vec::new();
+    if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\segoeuib.ttf") {
+        fonts.font_data.insert("segoeuib".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        bold.push("segoeuib".to_owned());
+    }
+    bold.extend(fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default());
+    fonts.families.insert(egui::FontFamily::Name("bold".into()), bold);
     // Gewählte Terminalschrift an die erste Stelle setzen (Fallbacks bleiben dahinter).
     let key = match choice {
         "Hack" => Some("Hack".to_string()),
@@ -654,7 +703,7 @@ fn setup_fonts(ctx: &egui::Context, choice: &str) {
         fam.retain(|n| n != &k);
         fam.insert(0, k);
     }
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 impl App {
@@ -665,6 +714,13 @@ impl App {
         settings.sanitize();
         state::set_lang(settings.language);
         let (saved, startup_note) = state::load_saved(&dir.join("state.json"));
+        // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
+        let restore_result = crate::backup::apply_pending_restore(&dir, crate::db::FILE);
+        let backup_dir = crate::backup::dir(&dir, &settings.backup_dir);
+        let (db, db_error) = match crate::db::open(&dir, &backup_dir) {
+            Ok(d) => (Some(d), None),
+            Err(e) => (None, Some(e.message(settings.language))),
+        };
         let shells = shells::detect();
         let bg = std::sync::mpsc::channel::<String>();
         let mut app = App {
@@ -697,12 +753,25 @@ impl App {
             last_save: Instant::now(),
             applied_theme: String::new(),
             last_title: String::new(),
+            mode: titlebar::Mode::default(),
+            db,
+            db_error,
+            tasks: tasks_ui::TasksUi::default(),
+            plan: planning_ui::PlanUi::default(),
+            backup_rx: None,
+            backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
+            backup_msg: None,
+            backups_cache: None,
+            backups_dirty: true,
+            confirm_restore: None,
+            restore_error: None,
             hook_server: HookServer::start(&cc.egui_ctx),
             hooks_file: None,
             hooks_global: false,
             hooks_msg: String::new(),
             exe: std::env::current_exe().unwrap_or_default(),
             palette: None,
+            tlinks: Default::default(),
             prompts: Vec::new(),
             prompts_open: false,
             prompt_sel: 0,
@@ -759,6 +828,9 @@ impl App {
             wt_close: None,
             gsearch: None,
             notice: None,
+            toasts: Default::default(),
+            toasts_epoch: Instant::now(),
+            toasts_hover: None,
             hwnd: crate::winctl::hwnd_from(cc),
             in_tray: false,
             editor: None,
@@ -769,6 +841,9 @@ impl App {
             let l = app.settings.language;
             app.tray = Tray::create(&cc.egui_ctx, tx, l.t("Paneldeck anzeigen", "Show Paneldeck"), l.t("Beenden", "Quit"));
             app.tray_rx = rx;
+        }
+        if let Some(h) = app.hwnd {
+            winchrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
         }
         clip::init(&app.dir);
         app.reload_themes();
@@ -837,6 +912,16 @@ impl App {
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
             app.notify_text(n);
+        }
+        let lang = app.settings.language;
+        if let Some(r) = restore_result {
+            app.notify_text(match r {
+                Ok(p) => format!("{} {}", lang.t("Sicherung wiederhergestellt:", "Backup restored:"), p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                Err(e) => format!("{}: {e}", lang.t("Wiederherstellung fehlgeschlagen", "Restore failed")),
+            });
+        }
+        if let Some(e) = app.db_error.clone() {
+            app.notify_text(e);
         }
         app
     }
@@ -1488,12 +1573,42 @@ impl App {
 
     // ---------------------------------------------------------------- UI
 
+    /// Reiterwechsel per Tastatur (gilt in jedem Bereich; Terminals laufen im Hintergrund unverändert weiter).
+    fn mode_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.capture_key.is_some() {
+            return;
+        }
+        for (id, mode) in [
+            ("mode_terminals", titlebar::Mode::Terminals),
+            ("mode_tasks", titlebar::Mode::Tasks),
+            ("mode_terminals_alt", titlebar::Mode::Terminals),
+            ("mode_tasks_alt", titlebar::Mode::Tasks),
+        ] {
+            if let Some((m, k)) = self.binding(id) {
+                if ctx.input_mut(|i| consume_key_physical(i, m, k)) {
+                    self.set_mode(mode);
+                }
+            }
+        }
+    }
+
+    /// Bereich wechseln; beim Zurück in die Terminals bekommt das zuletzt aktive Terminal wieder den Fokus.
+    fn set_mode(&mut self, mode: titlebar::Mode) {
+        if self.mode != mode && mode == titlebar::Mode::Terminals {
+            self.want_focus = Some(self.focused);
+        }
+        if mode != titlebar::Mode::Tasks {
+            self.plan.forget_terminal_return(); // von Hand weggeschaltet: der Rückweg „Zurück zum Terminal Hub“ gilt nicht mehr
+        }
+        self.mode = mode;
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         if self.capture_key.is_some() {
             return; // gerade wird ein Kürzel aufgenommen
         }
         let mut binds: Vec<(&'static str, Modifiers, Key)> =
-            keys::DEFAULTS.iter().filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
+            keys::DEFAULTS.iter().filter(|(id, _)| !keys::is_global(id)).filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
         // Spezifischere Kürzel (mehr Modifikatoren) zuerst prüfen.
         binds.sort_by_key(|b| std::cmp::Reverse(b.1.ctrl as u8 + b.1.shift as u8 + b.1.alt as u8));
         let mut fired: Vec<&'static str> = Vec::new();
@@ -1652,6 +1767,7 @@ impl App {
                     detached: false,
                     themes: &self.themes,
                     profiles: &self.settings.profiles,
+                    tl: &self.tlinks,
                 };
                 show_node(ui, &mut layout, rect, &mut cx);
                 self.layout = Some(layout);
@@ -2211,6 +2327,9 @@ impl App {
             Action::OpenNotes(id) => {
                 self.notes_open = if self.notes_open == Some(id) { None } else { Some(id) };
             }
+            Action::LinkTicket(id) => self.tlinks_open_picker(id),
+            Action::OpenTicket(id) => self.open_ticket_from_anywhere(id),
+            Action::UnlinkTicket(session, ticket) => self.tlinks_unlink(ticket, session),
             Action::OpenSearch => {
                 if let Some(s) = self.entries.get_mut(&self.focused).and_then(|e| e.live.as_mut()) {
                     if s.search.is_some() {
@@ -2558,14 +2677,31 @@ impl App {
     }
 }
 
+/// Wie `consume_key`, erkennt aber auch die physische Taste: mit Umschalt liefert die Tastatur eine andere logische Taste
+/// (Umschalt+1 = „!“), `consume_key` sähe dann nicht `Key::Num1`.
+fn consume_key_physical(i: &mut egui::InputState, m: Modifiers, k: Key) -> bool {
+    let pos = i.events.iter().position(|e| {
+        matches!(e, Event::Key { key, physical_key, pressed: true, modifiers, .. }
+            if (*key == k || *physical_key == Some(k)) && modifiers.matches_logically(m))
+    });
+    match pos {
+        Some(p) => {
+            i.events.remove(p);
+            true
+        }
+        None => false,
+    }
+}
+
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         egui::Rgba::TRANSPARENT.to_array()
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_accent();
         let theme = self.theme();
-        let key = format!("{}|{}|{}", theme.name, theme.bg.a(), self.settings.animations);
+        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
         if self.applied_theme != key {
             style::set_animations(self.settings.animations);
             style::apply(ctx, &theme, self.settings.opacity);
@@ -2576,6 +2712,8 @@ impl eframe::App for App {
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 0.001 {
             ctx.set_zoom_factor(self.settings.ui_scale);
         }
+        #[cfg(feature = "readme-shots")]
+        self.dev_shot_mode();
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
         crate::usage::set_prices(self.settings.prices.clone());
@@ -2585,15 +2723,24 @@ impl eframe::App for App {
         self.poll_shell(ctx);
         self.poll_background(ctx);
         self.sync_watchers(ctx);
+        self.tlinks_frame(ctx);
         self.poll_history();
         self.check_budget(ctx);
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = Vec::new();
-        self.shortcuts(ctx, &mut actions);
-        self.sidebar(ctx, &mut actions);
-        self.files_ui(ctx, &mut actions);
-        self.central(ctx, &mut actions);
-        self.handle_drag(ctx);
+        self.titlebar(ctx);
+        self.backup_tick(ctx);
+        self.window_edges(ctx);
+        self.mode_shortcuts(ctx);
+        if self.mode == titlebar::Mode::Terminals {
+            self.shortcuts(ctx, &mut actions);
+            self.sidebar(ctx, &mut actions);
+            self.files_ui(ctx, &mut actions);
+            self.central(ctx, &mut actions);
+            self.handle_drag(ctx);
+        } else {
+            self.tasks_view(ctx);
+        }
         if let Some((text, t0)) = &self.notice {
             if t0.elapsed() > Duration::from_secs(5) {
                 self.notice = None;
@@ -2607,9 +2754,12 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(500));
             }
         }
+        self.toasts_ui(ctx);
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
         self.dialogs(ctx, &mut actions);
+        self.tlinks_picker_ui(ctx);
+        self.restore_dialog(ctx);
         for a in actions {
             self.apply(ctx, a);
         }
@@ -2635,6 +2785,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        winchrome::shutdown();
         self.save_all();
     }
 }
@@ -2658,6 +2809,8 @@ struct PaneCx<'a> {
     detached: bool,
     themes: &'a [Theme],
     profiles: &'a [Profile],
+    /// Verknüpfte Tickets je Sitzung (Chips im Kopf).
+    tl: &'a terminal_links::TLinks,
 }
 
 
@@ -2738,6 +2891,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     };
     let accent = entry.color();
     let name = entry.display_name();
+    let tl_enabled = cx.tl.enabled && !cx.detached;
 
     // Kopfzeile
     let t = ui.input(|i| i.time);
@@ -2758,6 +2912,14 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if hresp.clicked() {
         cx.actions.push(Action::Focus(id));
     }
+    if tl_enabled {
+        hresp.context_menu(|ui| {
+            if ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
+                cx.actions.push(Action::LinkTicket(id));
+                ui.close();
+            }
+        });
+    }
     let claude = entry.meta.claude && cx.claude_mode;
     let status_label = entry.status_label(lang);
     let status_col = entry.status_color(t);
@@ -2774,9 +2936,14 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
-    let right_edge = header.max.x - if cx.detached { 34.0 } else { 108.0 };
+    // Breite des Knopfbereichs rechts: vier Knöpfe, mit Ticket-Verknüpfung ein fünfter.
+    let tl_btn = tl_enabled;
+    let btns_w = if cx.detached { 30.0 } else { 104.0 + if tl_btn { 26.0 } else { 0.0 } };
+    let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
-    let pill_est = if status_label.is_empty() { 0.0 } else { status_label.chars().count() as f32 * 7.0 + 26.0 };
+    let chips = cx.tl.chips_of(id);
+    let chip_est = if chips.is_empty() { 0.0 } else { terminal_links::chip_label(&chips.iter().map(|c| c.key.as_str()).collect::<Vec<_>>()).chars().count() as f32 * 7.0 + 46.0 };
+    let pill_est = chip_est + if status_label.is_empty() { 0.0 } else { status_label.chars().count() as f32 * 7.0 + 26.0 };
     // Der Name hat Vorrang vor Zusatzinfos; die Status-Pille bekommt Platz, solange der Name noch ~90 px behält.
     let name_w = if avail - pill_est >= 90.0 { avail - pill_est } else { avail }.max(30.0);
     let mut job = egui::text::LayoutJob::simple_singleline(name, FontId::proportional(13.0), name_col);
@@ -2786,7 +2953,13 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     ui.painter().with_clip_rect(header).galley(Pos2::new(hx, cy - name_galley.size().y / 2.0), name_galley, name_col);
 
     // rechts (von rechts nach links, nur wenn Platz ist): Status-Pille, Token/Kosten, Git
-    let mut x = header.max.x - if cx.detached { 34.0 } else { 108.0 };
+    let mut x = right_edge;
+    if !chips.is_empty() {
+        let w = terminal_links::chip_row(ui, Id::new(("tlchip", id)), id, chips, Pos2::new(x, cy), x - name_end - 16.0, lang, cx.actions);
+        if w > 0.0 {
+            x -= w + 10.0;
+        }
+    }
     if !status_label.is_empty() && x - name_end > pill_est * 0.8 {
         let w = style::status_pill(ui.painter(), Pos2::new(x, cy), status_label, status_col);
         x -= w + 10.0;
@@ -2814,7 +2987,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     }
     ui.scope_builder(
         UiBuilder::new().max_rect(Rect::from_min_max(
-            Pos2::new(header.max.x - if cx.detached { 30.0 } else { 104.0 }, header.min.y + 2.0),
+            Pos2::new(header.max.x - btns_w, header.min.y + 2.0),
             Pos2::new(header.max.x - 4.0, header.max.y),
         )),
         |ui| {
@@ -2837,6 +3010,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                 }
                 if style::icon_btn_small(ui, SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)")).clicked() {
                     cx.actions.push(Action::Split(id, Dir::Horizontal));
+                }
+                if tl_btn && style::icon_btn_small(ui, SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
+                    cx.actions.push(Action::LinkTicket(id));
                 }
             });
         },

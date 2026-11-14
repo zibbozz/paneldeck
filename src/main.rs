@@ -1,7 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod backup;
 mod boxdraw;
+mod calc;
+mod db;
 mod clip;
 mod emoji;
 mod pathfmt;
@@ -15,16 +18,21 @@ mod integration;
 mod keys;
 mod notify;
 mod osc;
+mod planning;
 mod prompts;
+mod query;
 mod search;
 mod layout;
 mod links;
+mod markdown;
 mod mcp;
 mod shells;
 mod state;
 mod style;
+mod tasks;
 mod templates;
 mod terminal;
+mod undo;
 mod tray;
 mod termview;
 mod theme;
@@ -127,6 +135,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1320.0, 820.0])
             .with_min_inner_size([640.0, 400.0])
             .with_transparent(true)
+            .with_decorations(false)
             .with_icon(app_icon()),
         ..Default::default()
     };

@@ -29,6 +29,7 @@ impl App {
                     lang.t("Tastenkürzel", "Shortcuts"),
                     lang.t("Profile", "Profiles"),
                     lang.t("Agenten", "Agents"),
+                    lang.t("Daten & Sicherung", "Data & backup"),
                     lang.t("Info", "About"),
                 ];
                 ui.horizontal_wrapped(|ui| {
@@ -383,7 +384,8 @@ impl App {
                         }
                     }
                     7 => self.mcp_settings_ui(ui, ctx),
-                    8 => {
+                    8 => self.data_settings_ui(ui),
+                    9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
                         ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – komplett offline.", "Terminal hub for Claude Code and many terminals – fully offline.")).color(style::dim(ui)));
                         ui.add_space(S2);

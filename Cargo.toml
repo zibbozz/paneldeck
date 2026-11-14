@@ -12,6 +12,12 @@ serde_json = "1"
 getrandom = "0.3"
 ttf-parser = "0.25"
 image = { version = "0.25", default-features = false, features = ["png"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+
+[features]
+# Nur für die README-Screenshots (tools/readme-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.
+readme-shots = []
 
 [build-dependencies]
 embed-resource = "3"
@@ -20,7 +26,7 @@ embed-resource = "3"
 tauri-winrt-notification = "0.8"
 tray-icon = { version = "0.21", default-features = false }
 raw-window-handle = "0.6"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Diagnostics_ToolHelp", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 rfd = { version = "0.17", default-features = false }
 

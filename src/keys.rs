@@ -23,7 +23,18 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("next_cmd", "Ctrl+Shift+Down"),
     ("next", "Ctrl+Tab"),
     ("prev", "Ctrl+Shift+Tab"),
+    // Reiterwechsel der Fensterleiste (nicht Strg+Alt+Zahl: das ist AltGr auf deutschen Tastaturen)
+    ("mode_terminals", "Alt+Shift+1"),
+    ("mode_tasks", "Alt+Shift+2"),
+    // Zweite Belegung ohne Alt+Shift (Windows schaltet damit die Eingabesprache um); Strg+Zahl sendet das Terminal ohnehin nicht
+    ("mode_terminals_alt", "Ctrl+1"),
+    ("mode_tasks_alt", "Ctrl+2"),
 ];
+
+/// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
+pub fn is_global(id: &str) -> bool {
+    id.starts_with("mode_")
+}
 
 pub fn label(id: &str, de: bool) -> &'static str {
     let (d, e) = match id {
@@ -46,6 +57,10 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "next_cmd" => ("Zum nächsten Befehl springen", "Jump to next command"),
         "next" => ("Nächste Sitzung", "Next session"),
         "prev" => ("Vorherige Sitzung", "Previous session"),
+        "mode_terminals" => ("Reiter „Terminal Hub“", "“Terminal Hub” tab"),
+        "mode_tasks" => ("Reiter „Todo-Liste“", "“Todo list” tab"),
+        "mode_terminals_alt" => ("Reiter „Terminal Hub“ (zweite Belegung)", "“Terminal Hub” tab (alternative)"),
+        "mode_tasks_alt" => ("Reiter „Todo-Liste“ (zweite Belegung)", "“Todo list” tab (alternative)"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
@@ -71,11 +86,11 @@ pub fn format(m: Modifiers, k: Key) -> String {
     if m.ctrl {
         v.push("Ctrl");
     }
-    if m.shift {
-        v.push("Shift");
-    }
     if m.alt {
         v.push("Alt");
+    }
+    if m.shift {
+        v.push("Shift");
     }
     v.push(k.name());
     v.join("+")
@@ -101,5 +116,21 @@ mod tests {
             assert_eq!(&format(m, k), d);
         }
         assert!(parse("Ctrl+Shift+").is_none());
+        // Reihenfolge der Modifikatoren beim Parsen egal, beim Formatieren Ctrl, Alt, Shift
+        let (m, k) = parse("Shift+Alt+1").unwrap();
+        assert!(m.alt && m.shift && !m.ctrl);
+        assert_eq!(format(m, k), "Alt+Shift+1");
+        assert_eq!(parse("Alt+Shift+1"), parse("Shift+Alt+1"));
+    }
+
+    #[test]
+    fn defaults_are_unique_and_labelled() {
+        let mut seen = std::collections::HashSet::new();
+        for (id, d) in DEFAULTS {
+            assert!(seen.insert(*d), "Kürzel {d} doppelt");
+            assert_ne!(label(id, true), "?", "{id} ohne Beschriftung");
+            assert_ne!(label(id, true), label(id, false), "{id}: Texte gleich in beiden Sprachen");
+        }
+        assert!(is_global("mode_tasks") && is_global("mode_terminals") && !is_global("new"));
     }
 }
