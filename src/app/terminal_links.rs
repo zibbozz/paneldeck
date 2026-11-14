@@ -13,7 +13,8 @@
 //!   Wird die Sitzung neu gestartet oder die App neu gestartet (gleiche ID), ist die Verknüpfung automatisch wieder aktiv.
 //! * **Sichtbarkeit:** Alles hier erscheint nur, wenn der Expertenmodus an ist und es mindestens ein Experten-Projekt gibt
 //!   (das schreibgeschützte Todolist-Projekt zählt nicht); sonst bleibt der Terminal Hub unverändert.
-//! * **Ticket öffnen:** [`App::request_open_ticket`] ist vorerst ein Stub (Todolist-Reiter aktivieren, Ticket merken).
+//! * **Ticket öffnen:** [`App::open_ticket_from_anywhere`] schaltet auf den Todolist-Reiter und öffnet das Ticket in der Ticket-Ansicht
+//!   (Projektwechsel, Expertenmodus bei Bedarf); die Navigation steht in `planning_ui/ticket_nav.rs`.
 
 use super::*;
 use crate::planning::history::Source;
@@ -222,21 +223,12 @@ pub struct TLinks {
     dirty: bool,
     picker: Option<Picker>,
     pal: Option<(String, Instant, Vec<Hit>)>,
-    /// Vom Stub [`App::request_open_ticket`] gemerktes Ticket; die Ticket-Ansicht holt es mit [`TLinks::take_requested`].
-    #[allow(dead_code)] // wird mit der Ticket-Ansicht gelesen
-    requested: Option<i64>,
 }
 
 impl TLinks {
     /// Chips der Sitzung (leer, wenn die Funktion aus ist).
     pub(super) fn chips_of(&self, session: u64) -> &[Chip] {
         if self.enabled { self.chips.get(&session).map(Vec::as_slice).unwrap_or(&[]) } else { &[] }
-    }
-
-    /// Das zuletzt per [`App::request_open_ticket`] gewünschte Ticket (einmalig).
-    #[allow(dead_code)] // API für die Ticket-Ansicht
-    pub fn take_requested(&mut self) -> Option<i64> {
-        self.requested.take()
     }
 }
 
@@ -517,11 +509,15 @@ impl App {
         self.tlinks.chips = if self.tlinks.enabled { build_chips(&db.conn, lang) } else { HashMap::new() };
     }
 
-    /// Ticket in der Ticket-Ansicht öffnen. **Stub:** aktiviert nur den Todolist-Reiter und merkt das Ticket
-    /// ([`TLinks::take_requested`]); die Verdrahtung auf die Detailseite folgt.
-    pub(super) fn request_open_ticket(&mut self, ticket_id: i64) {
+    /// Ticket in der Ticket-Ansicht öffnen, von überall (Chip, Befehls-Palette, Mini-Suche): schaltet auf den Todolist-Reiter der
+    /// Titelleiste und meldet das Ticket an; `PlanUi::header` öffnet es im selben Bild (Projektwechsel, Seite oder Panel je nach
+    /// Modus, Expertenmodus wird bei Bedarf eingeschaltet). Ohne Datenbank passiert nichts.
+    pub(super) fn open_ticket_from_anywhere(&mut self, ticket_id: i64) {
+        if self.db.is_none() {
+            return;
+        }
         self.set_mode(titlebar::Mode::Tasks);
-        self.tlinks.requested = Some(ticket_id);
+        self.plan.request_open_ticket(ticket_id);
     }
 
     /// Zur Sitzung springen (aus der Ticket-Ansicht): schaltet auf den Terminal Hub und aktiviert die Sitzung.

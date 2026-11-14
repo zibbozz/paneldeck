@@ -3,7 +3,7 @@
 //!
 //! Einhängepunkte:
 //! * `PlanUi::boards_tab` wird vom Reiter „Boards“ aufgerufen (`mod.rs`, volle Breite und Höhe, ohne die gemeinsame Rollfläche);
-//! * `PlanUi::request_open_board_ticket` ist der (noch leere) Einsprung „Karte öffnen“ für die Ticket-Detailseite;
+//! * „Karte öffnen“ ruft `PlanUi::open_ticket` (`ticket_nav.rs`); „Zurück“ der Ticket-Ansicht führt wieder zum Board;
 //! * `PlanUi::board_dialogs` (in `board_cfg.rs`) zeichnet die Dialoge.
 //!
 //! Die reine Logik steht in `board_logic.rs`; hier ist nur Zeichnen und Ereignisse einsammeln.
@@ -135,11 +135,6 @@ enum Act {
 }
 
 impl PlanUi {
-    /// Einsprung „Karte öffnen“ (Klick auf eine Karte). Bleibt leer, bis die Ticket-Detailseite angebunden ist.
-    pub(super) fn request_open_board_ticket(&mut self, _ticket_id: i64) {
-        // TODO tickets-ui: hier die Detailseite des Tickets öffnen.
-    }
-
     // ------------------------------------------------------------------ Laden
 
     /// Liste der Boards, Auswahl und Standard-Board bereitstellen.
@@ -508,7 +503,9 @@ impl PlanUi {
             match a {
                 Act::Hover(id) => self.boards.hover = Some(id),
                 Act::Quick(id) => self.open_quick_menu(vec![id]),
-                Act::Open(id) => self.request_open_board_ticket(id),
+                Act::Open(id) => {
+                    self.open_ticket(cx, id);
+                }
                 Act::Star(id, on) => self.board_mark(cx, id, true, on),
                 Act::Flag(id, on) => self.board_mark(cx, id, false, on),
                 Act::More(ci) => {

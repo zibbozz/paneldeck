@@ -3,12 +3,13 @@
 //!
 //! Einhängepunkte:
 //! * `PlanUi::backlog_tab` wird vom Reiter „Backlog“ aufgerufen (`mod.rs`, in der gemeinsamen Rollfläche);
-//! * `PlanUi::request_open_sprint_ticket` ist der (noch leere) Einsprung „Ticket öffnen“ für die Ticket-Detailseite;
+//! * „Ticket öffnen“ (Doppelklick, Kontextmenü) ruft `PlanUi::open_ticket` (`ticket_nav.rs`); „Zurück“ führt wieder zum Backlog;
 //! * `PlanUi::sprint_dialogs` (in `sprint_dlg.rs`) zeichnet die Dialoge der Sprints und der Releases.
 //!
 //! Die reine Logik steht in `sprint_logic.rs` und `sprint_chart.rs`, die Daten in `sprint_data.rs`; hier ist nur Zeichnen und
 //! Ereignisse einsammeln.
 
+use super::quick_menu::QuickTarget;
 use super::sprint_data::{self as data, BacklogData, Row};
 use super::sprint_detail::{DetailCache, VelCache};
 use super::sprint_dlg::{CalDlg, CompleteDlg, DeleteAsk, SprintForm};
@@ -148,6 +149,8 @@ pub(super) enum Act {
     Click { id: i64, ctrl: bool, shift: bool },
     Select(i64),
     Open(i64),
+    /// Schnellmenü für diese Tickets öffnen (Kontextmenü, Taste „.“).
+    Quick(Vec<i64>),
     DragStart(i64),
     MoveTo { ids: Vec<i64>, target: Section },
     Toggle(Section),
@@ -174,11 +177,6 @@ struct DrawCx<'a> {
 }
 
 impl PlanUi {
-    /// Einsprung „Ticket öffnen“ (Doppelklick auf eine Zeile, Kontextmenü). Bleibt leer, bis die Ticket-Detailseite angebunden ist.
-    pub(super) fn request_open_sprint_ticket(&mut self, _ticket_id: i64) {
-        // TODO tickets-ui: hier die Detailseite des Tickets öffnen.
-    }
-
     /// Fehler der Sprint-Schicht unter den Reitern anzeigen.
     pub(super) fn sprint_fail(&mut self, lang: Lang, e: &SprintError) {
         self.msg = Some(super::Msg { text: e.message(lang), ok: false, at: Instant::now() });
@@ -411,6 +409,11 @@ impl PlanUi {
         for a in acts {
             self.sprint_act(cx, &order, &data, a);
         }
+        // Taste „.“: Schnellmenü für die ausgewählten Tickets (nicht beim Ziehen)
+        if self.sprints.drag.is_none() && !self.sprints.selection.is_empty() {
+            let targets: Vec<QuickTarget> = self.sprints.selection.in_order(&order).into_iter().map(|ticket_id| QuickTarget { ticket_id }).collect();
+            self.quick_shortcut(&ctx, &targets);
+        }
         if self.sprints.data.is_none() {
             self.sprints.data = Some(data);
         }
@@ -452,7 +455,10 @@ impl PlanUi {
                     self.sprints.selection.click(id, false, false, order);
                 }
             }
-            Act::Open(id) => self.request_open_sprint_ticket(id),
+            Act::Open(id) => {
+                self.open_ticket(cx, id);
+            }
+            Act::Quick(ids) => self.open_quick_menu(ids),
             Act::DragStart(id) => {
                 let ids = self.sprints.selection.drag_set(id, order);
                 if !self.sprints.selection.contains(id) {
@@ -717,6 +723,10 @@ fn row_menu(ui: &mut Ui, d: &DrawCx, id: i64, sec: Section, acts: &mut Vec<Act>)
     let ids = d.selection.targets(id, d.order);
     if ui.button(lang.t("Öffnen", "Open")).clicked() {
         acts.push(Act::Open(id));
+        ui.close();
+    }
+    if ui.button(format!("{} (.)", lang.t("Schnellmenü …", "Quick menu …"))).clicked() {
+        acts.push(Act::Quick(ids.clone()));
         ui.close();
     }
     ui.separator();
