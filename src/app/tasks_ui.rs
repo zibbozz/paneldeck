@@ -1329,6 +1329,9 @@ impl App {
             self.plan.header(ctx, &env, db);
             if self.plan.expert {
                 self.plan.page(ctx, &env, db);
+                for t in self.plan.take_toasts() {
+                    self.toast(t);
+                }
                 return;
             }
         }
