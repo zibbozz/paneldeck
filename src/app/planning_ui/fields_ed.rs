@@ -197,6 +197,10 @@ impl PlanUi {
             if widgets::primary(ui, &format!("+ {}", lang.t("Neues Feld", "New field"))).clicked() {
                 self.fields.dlg = Some(FieldDlg::new(t.ticket_type.id));
             }
+            // Einhängepunkt Schlüsselwort-Editor: eigene JQL-Schlüsselwörter bauen auf diesen Feldern auf.
+            if ui.button(format!("{} …", lang.t("JQL-Schlüsselwörter", "JQL keywords"))).on_hover_text(lang.t("Eigene Schlüsselwörter für die Abfragesprache verwalten", "Manage your own keywords for the query language")).clicked() {
+                self.kw.open();
+            }
         });
         ui.add_space(S2);
         if t.fields.is_empty() {
