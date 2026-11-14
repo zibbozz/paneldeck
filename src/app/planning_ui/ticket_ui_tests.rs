@@ -488,8 +488,52 @@ fn todo_cards_convert_into_tickets() {
         assert!(h.ui.tickets.convert.is_none(), "{:?}", h.ui.tickets.convert.as_ref().map(|c| c.err.clone()));
         assert_eq!(h.count(), 1);
         assert!(crate::planning::todo_bridge::converted_ticket_of(&h.db.conn, item.id).unwrap().is_some());
-        // das Zurücknehmen entfernt das Ticket wieder
-        h.with(|ui, cx| ui.ticket_undo(cx, false));
+        // Strg+Z in der Todo-Übersicht nimmt die ganze Umwandlung zurück: Ticket weg, Zuordnung gelöst, Karte wieder offen
+        h.ui.tickets.toasts.clear();
+        h.frame(vec![ctrl(Key::Z)]);
+        h.frames(2);
+        assert_eq!(h.count(), 0);
+        assert!(!crate::tasks::get_item(&h.db.conn, item.id).unwrap().done, "die Karte ist wieder offen");
+        assert!(crate::planning::todo_bridge::converted_ticket_of(&h.db.conn, item.id).unwrap().is_none());
+        assert!(h.ui.tickets.toasts.last().is_some_and(|t| t.starts_with(h.lang.t("Rückgängig", "Undone"))), "{:?}", h.ui.tickets.toasts);
+        assert!(h.ui.todo_card_done(item.id) == Some(false), "auch die Anzeige der Karten wurde neu geladen");
+        // Strg+Y (und Strg+Umschalt+Z) wiederholen: Ticket, Zuordnung und Haken sind wieder da
+        h.frame(vec![ctrl(Key::Y)]);
+        h.frames(2);
+        assert_eq!(h.count(), 1);
+        assert!(crate::tasks::get_item(&h.db.conn, item.id).unwrap().done);
+        assert!(crate::planning::todo_bridge::converted_ticket_of(&h.db.conn, item.id).unwrap().is_some());
+        assert!(h.ui.todo_card_done(item.id) == Some(true));
+        // noch einmal zurück; danach lässt sich die Karte erneut umwandeln
+        h.frame(vec![ctrl(Key::Z)]);
+        h.frames(2);
+        assert_eq!(h.count(), 0);
+        h.with(|ui, cx| ui.ask_convert(cx, item.id));
+        h.frames(2);
+        assert!(h.ui.tickets.convert.is_some());
+    });
+}
+
+#[test]
+fn ctrl_z_in_the_todo_overview_waits_for_dialogs_and_text_fields() {
+    both(|h| {
+        let (item, _) = crate::tasks::create_item(&h.db.conn, "Idee", "", &[]).unwrap();
+        let todo = crate::planning::projects::list_projects(&h.db.conn).unwrap().into_iter().find(|p| p.system).unwrap().id;
+        h.with(|ui, cx| ui.select(cx, todo));
+        h.frames(3);
+        h.with(|ui, cx| ui.ask_convert(cx, item.id));
+        h.frames(2);
+        h.frame(vec![ctrl(Key::Enter)]);
+        h.frames(2);
+        assert_eq!(h.count(), 1);
+        // der Umwandeln-Dialog (oder irgendein Dialog) ist offen: die Taste gehört ihm, es passiert nichts
+        h.with(|ui, cx| ui.ask_convert(cx, item.id));
+        h.frames(1);
+        h.frame(vec![ctrl(Key::Z)]);
+        assert_eq!(h.count(), 1, "bei offenem Dialog nicht zurückgenommen");
+        h.ui.tickets.convert = None;
+        h.frames(2);
+        h.frame(vec![ctrl(Key::Z)]);
         assert_eq!(h.count(), 0);
     });
 }
@@ -773,6 +817,7 @@ fn moving_a_ticket_offers_only_versions_of_the_new_project() {
 
 #[test]
 fn terminal_fields_show_names_ended_state_and_can_be_cleared() {
+    let _live = terminal_links::live_test_guard();
     both(|h| {
         let task = h.type_id("devtask");
         let tf = create_field(&h.db.conn, &NewField::new(task, "Terminal", FieldKind::Terminal)).unwrap();

@@ -209,14 +209,23 @@ pub fn run_transition(conn: &Connection, ids: &[i64], to: i64, lang: Lang) -> Ba
 pub fn run_transition_with(conn: &Connection, ids: &[i64], to: i64, values: &[(i64, Value)], lang: Lang) -> BatchResult {
     let mut out = BatchResult::default();
     for id in ids {
-        let own: Vec<(i64, Value)> = match get_ticket(conn, *id).ok().and_then(|t| list_fields(conn, t.type_id).ok()) {
-            Some(fields) => values.iter().filter(|(fid, _)| fields.iter().any(|f| f.id == *fid)).cloned().collect(),
-            None => Vec::new(),
+        let own = match get_ticket(conn, *id) {
+            Ok(t) => values_of_type(conn, t.type_id, values),
+            Err(_) => Vec::new(),
         };
         let r = transition_ticket(conn, *id, to, &own, &Source::quick()).map_err(|e| e.message(lang));
         out.record(key_of(conn, *id), r);
     }
     out
+}
+
+/// Die Werte, deren Felder zum Typ `type_id` gehören (ein Lauf über Tickets verschiedener Typen scheitert so nicht an
+/// fremden Feldern).
+fn values_of_type(conn: &Connection, type_id: i64, values: &[(i64, Value)]) -> Vec<(i64, Value)> {
+    match list_fields(conn, type_id) {
+        Ok(fields) => values.iter().filter(|(fid, _)| fields.iter().any(|f| f.id == *fid)).cloned().collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Geprüfte Eingabe (Titel, Feld, Kommentar, Zeit) für jedes Ticket ausführen.
@@ -248,7 +257,7 @@ fn source_context(conn: &Connection, t: &Ticket, lang: Lang) -> TRes<SourceConte
     Ok(SourceContext { id: t.id, key: t.key(), number: t.number, title: t.title.clone(), type_name: ty.display(lang), status_name, description })
 }
 
-fn resolve_context(conn: &Connection, t: &Ticket, lang: Lang, today: &str) -> TRes<ResolveContext> {
+pub(super) fn resolve_context(conn: &Connection, t: &Ticket, lang: Lang, today: &str) -> TRes<ResolveContext> {
     let p = get_project(conn, t.project_id)?;
     Ok(ResolveContext { source: Some(source_context(conn, t, lang)?), project_key: p.key, project_name: p.name, today: today.to_string() })
 }
@@ -259,6 +268,13 @@ fn quick_err(e: QuickError, lang: Lang) -> String {
 
 /// Eine Schnellaktion für jedes Ticket ausführen. `new_title` ersetzt den Titel bei „Ticket anlegen“ ohne Titelvorgabe.
 pub fn run_action(conn: &Connection, ids: &[i64], action_id: i64, new_title: Option<&str>, now: NaiveDateTime, lang: Lang) -> BatchResult {
+    run_action_with(conn, ids, action_id, new_title, &[], now, lang)
+}
+
+/// Wie [`run_action`], mit zusätzlichen Feldwerten (die Eingaben des Pflichtfeld-Formulars): beim Statuswechsel gehen sie in
+/// denselben Wechsel, beim Anlegen in das neue Ticket – jeweils nur die Werte, deren Feld zum Typ gehört. Sie ergänzen die
+/// Vorgaben der Aktion und überschreiben gleiche Felder.
+pub fn run_action_with(conn: &Connection, ids: &[i64], action_id: i64, new_title: Option<&str>, extra: &[(i64, Value)], now: NaiveDateTime, lang: Lang) -> BatchResult {
     let mut out = BatchResult::default();
     let action: QuickAction = match get_quick_action(conn, action_id) {
         Ok(a) => a,
@@ -283,7 +299,8 @@ pub fn run_action(conn: &Connection, ids: &[i64], action_id: i64, new_title: Opt
             }
             match &action.params {
                 ActionParams::ChangeStatus(c) => {
-                    let vals: Vec<(i64, Value)> = c.set_values.iter().map(|s| (s.field_id, s.value.clone())).collect();
+                    let mut vals: Vec<(i64, Value)> = c.set_values.iter().map(|s| (s.field_id, s.value.clone())).collect();
+                    vals.extend(values_of_type(conn, t.type_id, extra));
                     transition_ticket(conn, *id, c.to_status_id, &vals, &Source::quick()).map_err(|e| e.message(lang))
                 }
                 ActionParams::CreateTicket(_) => {
@@ -294,7 +311,9 @@ pub fn run_action(conn: &Connection, ids: &[i64], action_id: i64, new_title: Opt
                         None => resolved.title.clone(),
                     };
                     let (ticket, op) = atomic(conn, || {
-                        let n = NewTicket { project_id: t.project_id, type_id: resolved.ticket_type_id, title, parent_id: None, values: resolved.values.clone() };
+                        let mut values = resolved.values.clone();
+                        values.extend(values_of_type(conn, resolved.ticket_type_id, extra));
+                        let n = NewTicket { project_id: t.project_id, type_id: resolved.ticket_type_id, title, parent_id: None, values };
                         let (new, created) = create_ticket(conn, &n, &Source::quick())?;
                         let mut ops = vec![created];
                         if let Some(rel) = &resolved.relation {

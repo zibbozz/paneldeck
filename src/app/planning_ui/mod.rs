@@ -33,6 +33,9 @@ mod quick_menu;
 mod query_bar;
 mod query_help_ui;
 mod query_logic;
+mod ref_display;
+#[cfg(test)]
+mod ref_display_ui_tests;
 mod ref_inputs;
 mod release_view;
 mod saved_filters;
@@ -65,6 +68,7 @@ mod ticket_tab;
 mod ticket_ui_tests;
 mod ticket_view;
 mod types_ed;
+mod undo_keys;
 mod values;
 mod widgets;
 mod workflow_ed;

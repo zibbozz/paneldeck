@@ -833,8 +833,8 @@ fn paint_card(ui: &mut Ui, card: &Card, cfg: &BoardConfig, lang: Lang, ghost: bo
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
                 for f in &card.fields {
-                    let col = f.color.as_deref().map(color_of);
-                    let text = if col.is_some() { f.text.clone() } else { format!("{}: {}", f.name, f.text) };
+                    let col = if f.muted { Some(style::dim(ui)) } else { f.color.as_deref().map(color_of) };
+                    let text = if f.color.is_some() { f.text.clone() } else { format!("{}: {}", f.name, f.text) };
                     chip(ui, &text, col);
                 }
                 for l in &card.labels {

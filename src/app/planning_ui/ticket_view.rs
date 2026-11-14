@@ -6,6 +6,7 @@
 //! [`PlanUi::ticket_act`] über die Datenschicht ausgeführt werden (immer mit der Quelle „Oberfläche“).
 
 use super::helpers::color_of;
+use super::ref_display::terminal_link_view;
 use super::ticket_data::{link_offers, progress_text, ChildRow, Detail, LinkOffer};
 use super::ticket_draft::group_sections;
 use super::ticket_inputs::{dot_item, field_block, open_url, ticket_search, InCx};
@@ -40,6 +41,8 @@ pub(super) enum Act {
     /// Ticket über den Schlüssel öffnen (`PAN-12`).
     OpenKey(String),
     OpenId(i64),
+    /// Zur Terminal-Sitzung springen (Sitzungskennung).
+    OpenSession(u64),
     Title(String),
     Star(bool),
     Flag(bool),
@@ -550,8 +553,20 @@ fn links_section(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState, acts: 
                     LinkTarget::Branch { .. } => {
                         ui.add_sized([w, 24.0], egui::Label::new(RichText::new(format!("⎇ {text}")).monospace()).truncate());
                     }
-                    LinkTarget::Terminal(_) => {
-                        ui.add_sized([w, 24.0], egui::Label::new(RichText::new(format!("⌨ {text}")).monospace()).truncate()).on_hover_text(lang.t("Terminal-Sitzung (nur Anzeige – das Springen zur Sitzung kommt später)", "Terminal session (display only – jumping to the session comes later)"));
+                    LinkTarget::Terminal(target) => {
+                        // laufende Sitzung: Klick springt hin; beendet oder fremd: grau, nur Anzeige
+                        let (name, running, tip) = terminal_link_view(target, lang);
+                        match running {
+                            Some(session) => {
+                                let resp = ui.add_sized([w, 24.0], egui::Button::new(RichText::new(format!("⌨ {name}")).monospace().color(style::accent())).frame(false).truncate());
+                                if resp.on_hover_text(tip).clicked() {
+                                    acts.push(Act::OpenSession(session));
+                                }
+                            }
+                            None => {
+                                ui.add_sized([w, 24.0], egui::Label::new(RichText::new(format!("⌨ {name}")).monospace().color(style::dim(ui))).truncate()).on_hover_text(tip);
+                            }
+                        }
                     }
                 }
                 if style::icon_btn_small(ui, style::Icon::Close, lang.t("Verknüpfung entfernen", "Remove the link")).clicked() {
@@ -865,6 +880,8 @@ impl PlanUi {
                     Lang::En => format!("There is no ticket {key}."),
                 }),
             },
+            // Die Anwendung holt den Sprung im nächsten Bild ab (siehe `terminal_links::request_jump`).
+            Act::OpenSession(session) => crate::app::terminal_links::request_jump(session),
             Act::OpenId(id) => match get_ticket(cx.conn, id) {
                 Ok(t) => self.open_ticket_anywhere(cx, t.id, t.project_id),
                 Err(e) => self.t_fail(cx, &e),
