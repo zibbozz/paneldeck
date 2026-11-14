@@ -74,7 +74,7 @@ try {
   Write-Host '== Nutzerdaten und Autostart anlegen'
   New-Item -ItemType Directory -Force "$data\themes" | Out-Null
   $u8 = New-Object Text.UTF8Encoding($false)
-  [IO.File]::WriteAllText("$data\settings.json", '{"language":"en","mcp_level":"control","font_size":17.5,"marker":"vor-dem-update"}', $u8)
+  [IO.File]::WriteAllText("$data\settings.json", '{"language":"En","mcp_level":"control","font_size":17.5,"marker":"vor-dem-update"}', $u8)
   [IO.File]::WriteAllText("$data\state.json", '{"projects":[{"id":1,"name":"Mein Projekt"}],"note":"Sitzungen müssen bleiben"}', $u8)
   [IO.File]::WriteAllText("$data\prompts.json", '[{"title":"Test","text":"hallo"}]', $u8)
   [IO.File]::WriteAllText("$data\themes\mein-theme.json", '{"name":"Mein Theme"}', $u8)
