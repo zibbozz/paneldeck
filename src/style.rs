@@ -157,6 +157,7 @@ pub enum Icon {
     Template,
     Terminal,
     Checklist,
+    Trash,
     Minimize,
     Maximize,
     Restore,
@@ -268,6 +269,18 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
                 }
                 l(v(0.0, y), v(6.5, y));
             }
+        }
+        Icon::Trash => {
+            // Deckel mit Griff, Eimer mit zwei Rillen
+            l(v(-6.0, -4.0), v(6.0, -4.0));
+            l(v(-2.0, -4.0), v(-2.0, -6.0));
+            l(v(-2.0, -6.0), v(2.0, -6.0));
+            l(v(2.0, -6.0), v(2.0, -4.0));
+            l(v(-4.5, -4.0), v(-3.7, 6.0));
+            l(v(-3.7, 6.0), v(3.7, 6.0));
+            l(v(3.7, 6.0), v(4.5, -4.0));
+            l(v(-1.5, -1.5), v(-1.5, 3.5));
+            l(v(1.5, -1.5), v(1.5, 3.5));
         }
         Icon::Minimize => {
             l(v(-5.0, 0.5), v(5.0, 0.5));

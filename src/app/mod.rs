@@ -35,6 +35,7 @@ mod mcp;
 mod panels;
 mod settings;
 mod sidebar;
+mod tasks_ui;
 mod titlebar;
 
 const PALETTE: [[u8; 3]; 8] = [
@@ -520,6 +521,7 @@ pub struct App {
     mode: titlebar::Mode,
     db: Option<crate::db::Db>,
     db_error: Option<String>,
+    tasks: tasks_ui::TasksUi,
     backup_rx: Option<std::sync::mpsc::Receiver<Result<crate::backup::BackupInfo, String>>>,
     backup_checked: Instant,
     backup_msg: Option<String>,
@@ -645,6 +647,14 @@ fn setup_fonts(ctx: &egui::Context, choice: &str) {
         fam.retain(|n| n != "segoeui");
         fam.insert(0, "segoeui".to_owned());
     }
+    // Fette UI-Schrift (Titel der Todo-Karten): Segoe UI Bold, sonst die normale UI-Schrift als Ersatz.
+    let mut bold: Vec<String> = Vec::new();
+    if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\segoeuib.ttf") {
+        fonts.font_data.insert("segoeuib".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        bold.push("segoeuib".to_owned());
+    }
+    bold.extend(fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default());
+    fonts.families.insert(egui::FontFamily::Name("bold".into()), bold);
     // Gewählte Terminalschrift an die erste Stelle setzen (Fallbacks bleiben dahinter).
     let key = match choice {
         "Hack" => Some("Hack".to_string()),
@@ -719,6 +729,7 @@ impl App {
             mode: titlebar::Mode::default(),
             db,
             db_error,
+            tasks: tasks_ui::TasksUi::default(),
             backup_rx: None,
             backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
             backup_msg: None,
@@ -1527,12 +1538,34 @@ impl App {
 
     // ---------------------------------------------------------------- UI
 
+    /// Reiterwechsel per Tastatur (gilt in jedem Bereich; Terminals laufen im Hintergrund unverändert weiter).
+    fn mode_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.capture_key.is_some() {
+            return;
+        }
+        for (id, mode) in [("mode_terminals", titlebar::Mode::Terminals), ("mode_tasks", titlebar::Mode::Tasks)] {
+            if let Some((m, k)) = self.binding(id) {
+                if ctx.input_mut(|i| consume_key_physical(i, m, k)) {
+                    self.set_mode(mode);
+                }
+            }
+        }
+    }
+
+    /// Bereich wechseln; beim Zurück in die Terminals bekommt das zuletzt aktive Terminal wieder den Fokus.
+    fn set_mode(&mut self, mode: titlebar::Mode) {
+        if self.mode != mode && mode == titlebar::Mode::Terminals {
+            self.want_focus = Some(self.focused);
+        }
+        self.mode = mode;
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         if self.capture_key.is_some() {
             return; // gerade wird ein Kürzel aufgenommen
         }
         let mut binds: Vec<(&'static str, Modifiers, Key)> =
-            keys::DEFAULTS.iter().filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
+            keys::DEFAULTS.iter().filter(|(id, _)| !keys::is_global(id)).filter_map(|(id, _)| self.binding(id).map(|(m, k)| (*id, m, k))).collect();
         // Spezifischere Kürzel (mehr Modifikatoren) zuerst prüfen.
         binds.sort_by_key(|b| std::cmp::Reverse(b.1.ctrl as u8 + b.1.shift as u8 + b.1.alt as u8));
         let mut fired: Vec<&'static str> = Vec::new();
@@ -2597,6 +2630,22 @@ impl App {
     }
 }
 
+/// Wie `consume_key`, erkennt aber auch die physische Taste: mit Umschalt liefert die Tastatur eine andere logische Taste
+/// (Umschalt+1 = „!“), `consume_key` sähe dann nicht `Key::Num1`.
+fn consume_key_physical(i: &mut egui::InputState, m: Modifiers, k: Key) -> bool {
+    let pos = i.events.iter().position(|e| {
+        matches!(e, Event::Key { key, physical_key, pressed: true, modifiers, .. }
+            if (*key == k || *physical_key == Some(k)) && modifiers.matches_logically(m))
+    });
+    match pos {
+        Some(p) => {
+            i.events.remove(p);
+            true
+        }
+        None => false,
+    }
+}
+
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         egui::Rgba::TRANSPARENT.to_array()
@@ -2631,6 +2680,7 @@ impl eframe::App for App {
         self.titlebar(ctx);
         self.backup_tick(ctx);
         self.window_edges(ctx);
+        self.mode_shortcuts(ctx);
         if self.mode == titlebar::Mode::Terminals {
             self.shortcuts(ctx, &mut actions);
             self.sidebar(ctx, &mut actions);
@@ -2638,7 +2688,7 @@ impl eframe::App for App {
             self.central(ctx, &mut actions);
             self.handle_drag(ctx);
         } else {
-            self.empty_area(ctx);
+            self.tasks_view(ctx);
         }
         if let Some((text, t0)) = &self.notice {
             if t0.elapsed() > Duration::from_secs(5) {

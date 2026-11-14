@@ -133,6 +133,10 @@ impl App {
                 });
             }
         });
+        ui.add_space(S2);
+        ui.separator();
+        ui.add_space(S2);
+        self.undo_steps_ui(ui);
     }
 
     /// Sicherheitsabfrage für das Wiederherstellen.

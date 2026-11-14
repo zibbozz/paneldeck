@@ -148,7 +148,12 @@ pub struct Settings {
     pub backup_keep: u32,
     /// Sicherungsordner (leer = `backups/` im Datenordner).
     pub backup_dir: String,
+    /// Wie viele Änderungen der Todo-Liste sich rückgängig machen lassen (3, 5, 10, 25, 50, 100).
+    pub undo_steps: u32,
 }
+
+/// Auswahl für `Settings::undo_steps`.
+pub const UNDO_STEP_CHOICES: [u32; 6] = [3, 5, 10, 25, 50, 100];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -183,6 +188,7 @@ impl Default for Settings {
             backup_interval_hours: 24,
             backup_keep: 2,
             backup_dir: String::new(),
+            undo_steps: 25,
         }
     }
 }
@@ -553,6 +559,8 @@ impl Settings {
         self.cmd_notify_secs = self.cmd_notify_secs.min(3600);
         self.backup_interval_hours = self.backup_interval_hours.min(720);
         self.backup_keep = self.backup_keep.clamp(1, 50);
+        // auf den nächsten erlaubten Wert einrasten (0 aus einer alten/handbearbeiteten Datei → Standard 25)
+        self.undo_steps = if self.undo_steps == 0 { 25 } else { *UNDO_STEP_CHOICES.iter().min_by_key(|c| c.abs_diff(self.undo_steps)).unwrap_or(&25) };
         for p in &mut self.profiles {
             p.font_size = if p.font_size.is_finite() && p.font_size >= 6.0 { p.font_size.min(48.0) } else { 0.0 };
         }
@@ -642,5 +650,25 @@ mod folder_tests {
         assert_eq!(strip_bom("\u{feff}x"), "x");
         assert_eq!(strip_bom("x"), "x");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn undo_steps_snap_to_allowed_values() {
+        let mut s = Settings::default();
+        assert_eq!(s.undo_steps, 25);
+        for (given, want) in [(0, 25), (1, 3), (4, 3), (6, 5), (9, 10), (25, 25), (40, 50), (74, 50), (76, 100), (5000, 100)] {
+            s.undo_steps = given;
+            s.sanitize();
+            assert_eq!(s.undo_steps, want, "{given}");
+        }
+        // fehlt der Wert in einer alten settings.json, gilt der Standard
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.undo_steps, 25);
+        assert!(UNDO_STEP_CHOICES.contains(&s.undo_steps));
     }
 }
