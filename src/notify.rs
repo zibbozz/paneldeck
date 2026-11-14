@@ -52,6 +52,28 @@ pub fn open_json() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Speichern-Dialog für CSV-Dateien (Ticket-Export); anderswo `None`.
+#[cfg(windows)]
+pub fn save_csv(default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_file_name(default_name).add_filter("CSV", &["csv"]).save_file()
+}
+
+#[cfg(not(windows))]
+pub fn save_csv(_default_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Öffnen-Dialog für CSV-Dateien (Ticket-Import); anderswo `None`.
+#[cfg(windows)]
+pub fn open_csv() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("CSV", &["csv"]).pick_file()
+}
+
+#[cfg(not(windows))]
+pub fn open_csv() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Ordner-Auswahldialog.
 #[cfg(windows)]
 pub fn pick_folder(start: &str) -> Option<String> {

@@ -41,6 +41,16 @@ impl<O: Op> History<O> {
         self.cursor > 0
     }
 
+    /// Die Änderung, die `undo` als Nächstes zurücknimmt (für Hinweise wie „Rückgängig: …“).
+    pub fn next_undo(&self) -> Option<&O> {
+        self.cursor.checked_sub(1).and_then(|i| self.ops.get(i))
+    }
+
+    /// Die Änderung, die `redo` als Nächstes wiederholt.
+    pub fn next_redo(&self) -> Option<&O> {
+        self.ops.get(self.cursor)
+    }
+
     pub fn can_redo(&self) -> bool {
         self.cursor < self.ops.len()
     }

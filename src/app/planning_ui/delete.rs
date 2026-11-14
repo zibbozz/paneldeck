@@ -227,6 +227,8 @@ impl PlanUi {
                 Ok(()) => {
                     self.dirty = true;
                     self.forget(d.target);
+                    // Typen, Status und Felder können in Rückgängig-Schritten stecken: lieber alles vergessen
+                    self.tickets.reset_history();
                     self.note(match lang {
                         Lang::De => format!("{noun} {} gelöscht.", lang.q(&d.name)),
                         Lang::En => format!("Deleted {noun} {}.", lang.q(&d.name)),

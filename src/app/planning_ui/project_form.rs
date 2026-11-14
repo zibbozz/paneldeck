@@ -396,6 +396,7 @@ impl PlanUi {
                     self.selected = self.projects.iter().find(|p| p.system).map(|p| p.id).unwrap_or(0);
                     cx.db.set_meta("expert_project", &self.selected.to_string());
                     self.tab = Tab::Overview;
+                    self.tickets.reset_history();
                     self.note(match lang {
                         Lang::De => format!("Projekt {} gelöscht.", lang.q(&ask.name)),
                         Lang::En => format!("Project {} deleted.", lang.q(&ask.name)),
