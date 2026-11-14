@@ -37,6 +37,7 @@ mod settings;
 mod sidebar;
 mod tasks_ui;
 mod titlebar;
+mod winchrome;
 
 const PALETTE: [[u8; 3]; 8] = [
     [0x61, 0xaf, 0xef],
@@ -810,6 +811,9 @@ impl App {
             app.tray = Tray::create(&cc.egui_ctx, tx, l.t("Paneldeck anzeigen", "Show Paneldeck"), l.t("Beenden", "Quit"));
             app.tray_rx = rx;
         }
+        if let Some(h) = app.hwnd {
+            winchrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
+        }
         clip::init(&app.dir);
         app.reload_themes();
         app.prompts = state::load_json(&app.dir.join("prompts.json")).unwrap_or_else(|| prompts::defaults(app.settings.language));
@@ -1543,7 +1547,12 @@ impl App {
         if self.capture_key.is_some() {
             return;
         }
-        for (id, mode) in [("mode_terminals", titlebar::Mode::Terminals), ("mode_tasks", titlebar::Mode::Tasks)] {
+        for (id, mode) in [
+            ("mode_terminals", titlebar::Mode::Terminals),
+            ("mode_tasks", titlebar::Mode::Tasks),
+            ("mode_terminals_alt", titlebar::Mode::Terminals),
+            ("mode_tasks_alt", titlebar::Mode::Tasks),
+        ] {
             if let Some((m, k)) = self.binding(id) {
                 if ctx.input_mut(|i| consume_key_physical(i, m, k)) {
                     self.set_mode(mode);
@@ -2732,6 +2741,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        winchrome::shutdown();
         self.save_all();
     }
 }
