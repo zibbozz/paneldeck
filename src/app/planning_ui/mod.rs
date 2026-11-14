@@ -65,6 +65,7 @@ mod ticket_tab;
 mod ticket_ui_tests;
 mod ticket_view;
 mod types_ed;
+mod undo_keys;
 mod values;
 mod widgets;
 mod workflow_ed;

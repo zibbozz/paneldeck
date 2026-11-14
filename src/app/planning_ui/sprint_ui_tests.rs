@@ -382,3 +382,188 @@ fn many_tickets_are_paged_in_both_languages() {
         assert_eq!(h.geom(Section::Backlog).rows.len(), super::sprint_view::PAGE);
     }
 }
+
+// ------------------------------------------------------------------ Strg+Z / Strg+Y im Backlog
+
+fn ctrl_mods(shift: bool) -> Modifiers {
+    Modifiers { ctrl: true, command: true, shift, ..Default::default() }
+}
+
+impl H {
+    /// Strg+Z (`redo = false`), Strg+Y (`redo = true, shift = false`) bzw. Strg+Umschalt+Z (`shift = true`) in einem Bild.
+    fn undo_key(&mut self, redo: bool, shift: bool) {
+        let (key, mods) = if redo && !shift { (egui::Key::Y, ctrl_mods(false)) } else { (egui::Key::Z, ctrl_mods(shift)) };
+        self.frame_with(vec![Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers: mods }], mods);
+        self.frames(2);
+    }
+
+    fn note(&self) -> String {
+        self.ui.msg.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+    }
+}
+
+#[test]
+fn ctrl_z_and_ctrl_y_undo_and_redo_a_drop_into_a_sprint_with_the_notice() {
+    for lang in [Lang::En, Lang::De] {
+        let (mut h, ids) = H::new(lang, setup_three);
+        let (a, s) = (ids[0], ids[3]);
+        let g = h.geom(Section::Sprint(s));
+        h.drag(a, Pos2::new(h.x_mid(), g.body_top + 12.0));
+        assert_eq!(h.sprint_ids(s), vec![a]);
+        h.undo_key(false, false);
+        assert!(h.sprint_ids(s).is_empty(), "zurück im Backlog");
+        assert_eq!(h.backlog_ids(), vec![ids[0], ids[1], ids[2]]);
+        assert!(h.note().starts_with(lang.t("Rückgängig: Sprint-Zuordnung", "Undone: sprint assignment")), "{}", h.note());
+        assert_eq!(h.ui.sprints.data.as_ref().unwrap().sprints[0].rows.len(), 0, "die Ansicht hat neu geladen");
+        h.undo_key(true, false);
+        assert_eq!(h.sprint_ids(s), vec![a]);
+        assert!(h.note().starts_with(lang.t("Wiederholt", "Redone")), "{}", h.note());
+        // Strg+Umschalt+Z wiederholt ebenfalls (erst zurück, dann so vor)
+        h.undo_key(false, false);
+        h.undo_key(true, true);
+        assert_eq!(h.sprint_ids(s), vec![a]);
+        // nichts mehr zu wiederholen: keine Änderung, kein Fehler
+        h.undo_key(true, false);
+        assert_eq!(h.sprint_ids(s), vec![a]);
+        assert!(h.ui.msg.as_ref().is_none_or(|m| m.ok));
+    }
+}
+
+#[test]
+fn reordering_inside_the_backlog_and_moving_with_the_context_menu_can_be_undone() {
+    let (mut h, ids) = H::new(Lang::En, setup_three);
+    let (a, b, c, s) = (ids[0], ids[1], ids[2], ids[3]);
+    let (top_of_a, x) = (h.row(a).top() + 2.0, h.x_mid());
+    h.drag(c, Pos2::new(x, top_of_a));
+    assert_eq!(h.backlog_ids(), vec![c, a, b]);
+    h.undo_key(false, false);
+    assert_eq!(h.backlog_ids(), vec![a, b, c], "die alte Reihenfolge");
+    assert!(h.note().contains("order"), "{}", h.note());
+    // Kontextmenü „Verschieben nach …“ (ohne Rang)
+    let data = h.ui.sprints.data.clone().unwrap();
+    let cx = cx!(h);
+    h.ui.sprint_act(&cx, &[a, b, c], &data, super::sprint_view::Act::MoveTo { ids: vec![b, a], target: Section::Sprint(s) });
+    h.frames(3);
+    assert_eq!(h.sprint_ids(s), vec![a, b]);
+    h.undo_key(false, false);
+    assert!(h.sprint_ids(s).is_empty());
+    h.undo_key(true, false);
+    assert_eq!(h.sprint_ids(s), vec![a, b]);
+}
+
+#[test]
+fn moving_several_tickets_is_one_undo_step() {
+    let (mut h, ids) = H::new(Lang::En, setup_three);
+    let (a, c, s) = (ids[0], ids[2], ids[3]);
+    h.click(a, Modifiers::NONE);
+    h.click(c, Modifiers::COMMAND);
+    h.frames(2);
+    let g = h.geom(Section::Sprint(s));
+    h.drag(c, Pos2::new(h.x_mid(), g.body_top + 12.0));
+    assert_eq!(h.sprint_ids(s), vec![a, c]);
+    assert_eq!(h.ui.tickets.history.len(), 1, "beide Tickets samt Rang: ein Schritt");
+    h.undo_key(false, false);
+    assert!(h.sprint_ids(s).is_empty());
+    assert_eq!(h.backlog_ids().len(), 3);
+}
+
+#[test]
+fn the_burndown_and_report_are_unchanged_after_undoing_a_drop_into_the_running_sprint() {
+    let (mut h, ids) = H::new(Lang::En, |f| {
+        let cal = WorkCalendar::default();
+        let a = f.mk(f.task, "Geplant");
+        let b = f.mk(f.task, "Nachzügler");
+        let mut n = NewSprint::new(f.project, "S1");
+        n.start = Some(d(2026, 11, 2));
+        let s1 = create_sprint(&f.c, &n, &cal).unwrap();
+        move_tickets_to_sprint(&f.c, s1, &[a.id]).unwrap();
+        start_sprint(&f.c, s1, &cal).unwrap();
+        vec![a.id, b.id, s1]
+    });
+    let (b, s1) = (ids[1], ids[2]);
+    let cal = WorkCalendar::default();
+    let today = d(2026, 11, 6);
+    let basis = crate::calc::progress::Basis::TicketCount;
+    let burn = |h: &H| crate::planning::sprints::burndown_for_sprint(&h.db.conn, s1, basis, cal.clone(), today).unwrap();
+    let rows = |h: &H| -> i64 { h.db.conn.query_row("SELECT COUNT(*) FROM sprint_tickets WHERE sprint_id = ?1", [s1], |r| r.get(0)).unwrap() };
+    let before = (burn(&h), crate::planning::sprints::sprint_report(&h.db.conn, s1).unwrap(), rows(&h));
+    clock::set("2026-11-04T10:00:00");
+    h.frames(2);
+    let g = h.geom(Section::Sprint(s1));
+    h.drag(b, Pos2::new(h.x_mid(), g.body_top + 12.0));
+    assert_eq!(h.sprint_ids(s1).len(), 2);
+    assert_eq!(burn(&h).scope_added, 1.0);
+    clock::set("2026-11-05T10:00:00");
+    h.undo_key(false, false);
+    let after_undo = (burn(&h), crate::planning::sprints::sprint_report(&h.db.conn, s1).unwrap(), rows(&h));
+    assert_eq!(after_undo.0, before.0, "Burndown wie vorher");
+    assert_eq!(after_undo.1, before.1, "Bericht wie vorher: nichts hinzugefügt oder entfernt");
+    assert_eq!(after_undo.2, before.2, "keine Zeile übrig");
+    h.undo_key(true, false);
+    assert_eq!(burn(&h).scope_added, 1.0);
+    assert_eq!(crate::planning::sprints::sprint_report(&h.db.conn, s1).unwrap().added.tickets, 1);
+}
+
+#[test]
+fn ctrl_z_in_the_backlog_waits_for_drags_dialogs_the_quick_menu_and_text_fields() {
+    let (mut h, ids) = H::new(Lang::En, setup_three);
+    let (a, s) = (ids[0], ids[3]);
+    let g = h.geom(Section::Sprint(s));
+    h.drag(a, Pos2::new(h.x_mid(), g.body_top + 12.0));
+    assert_eq!(h.sprint_ids(s), vec![a]);
+    // 1. mitten im Ziehen eines anderen Tickets
+    let b = ids[1];
+    let from = h.row(b).center();
+    h.button(from, true, Modifiers::NONE);
+    h.moved(from + Vec2::new(30.0, 12.0));
+    h.moved(from + Vec2::new(40.0, 40.0));
+    h.undo_key(false, false);
+    assert_eq!(h.sprint_ids(s), vec![a], "beim Ziehen gehört die Taste nicht dem Rückgängig");
+    h.frame_with(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }], Modifiers::NONE);
+    h.button(from + Vec2::new(40.0, 40.0), false, Modifiers::NONE);
+    h.frames(2);
+    // 2. Dialog „Neuer Sprint“
+    let proj = h.ui.project().cloned().unwrap();
+    h.ui.open_new_sprint(&cx!(h), &proj);
+    h.frames(2);
+    h.undo_key(false, false);
+    assert_eq!(h.sprint_ids(s), vec![a], "bei offenem Dialog nicht");
+    h.ui.sprints.form = None;
+    h.frames(2);
+    // 3. Schnellmenü
+    h.ui.open_quick_menu(vec![a]);
+    h.frames(2);
+    h.undo_key(false, false);
+    assert_eq!(h.sprint_ids(s), vec![a], "bei offenem Schnellmenü nicht");
+    h.ui.quick = Default::default();
+    h.frames(2);
+    // 4. Dialog der Ticket-Oberfläche (z. B. Anlegen)
+    h.ui.open_create(&cx!(h), None);
+    h.frames(2);
+    h.undo_key(false, false);
+    assert_eq!(h.sprint_ids(s), vec![a], "bei offenem Ticket-Dialog nicht");
+    h.ui.tickets.create = None;
+    h.frames(2);
+    // frei: jetzt geht es
+    h.undo_key(false, false);
+    assert!(h.sprint_ids(s).is_empty());
+}
+
+#[test]
+fn undoing_after_the_sprint_was_started_reports_an_error_and_changes_nothing() {
+    for (lang, needle) in [(Lang::En, "Cannot undo"), (Lang::De, "Rückgängig nicht möglich")] {
+        let (mut h, ids) = H::new(lang, setup_three);
+        let (a, s) = (ids[0], ids[3]);
+        let g = h.geom(Section::Sprint(s));
+        h.drag(a, Pos2::new(h.x_mid(), g.body_top + 12.0));
+        assert_eq!(h.sprint_ids(s), vec![a]);
+        // der Sprint wird gestartet (kein Teil der Historie): der zugesagte Umfang darf nicht mehr verfälscht werden
+        h.ui.start_sprint_now(&cx!(h), s);
+        h.frames(2);
+        h.undo_key(false, false);
+        let m = h.ui.msg.as_ref().expect("Fehlermeldung");
+        assert!(!m.ok && m.text.starts_with(needle), "{}", m.text);
+        assert_eq!(h.sprint_ids(s), vec![a], "unverändert");
+        assert!(!h.ui.tickets.history.can_undo(), "der Eintrag wurde verworfen");
+    }
+}
