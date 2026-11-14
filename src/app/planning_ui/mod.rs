@@ -496,7 +496,7 @@ impl PlanUi {
                         self.tab = *t;
                         self.msg = None;
                         // von Hand gewechselt: der Rückweg des Tickets (Board, Backlog …) gilt nicht mehr
-                        self.tickets.return_tab = None;
+                        self.tickets.forget_return();
                     }
                 }
             });

@@ -284,6 +284,11 @@ pub struct TicketUi {
     /// Reiter, von dem aus das Ticket geöffnet wurde (Board, Backlog, Dashboard …): „Zurück“ und „Schließen“ führen dorthin
     /// zurück, sobald das Ticket verlassen wird (siehe `ticket_nav.rs`). `None` = zur Liste.
     pub return_tab: Option<super::Tab>,
+    /// Das Ticket wurde aus dem Terminal Hub geöffnet (Chip, Palette, Mini-Suche): „Zurück“ führt am Ende der Verweiskette dorthin
+    /// zurück (statt zur Liste). Wird wie `return_tab` vergessen, sobald man den Reiter oder das Projekt von Hand wechselt.
+    pub from_terminal: bool,
+    /// „Zurück“ hat den Terminal-Rückweg genommen: die Anwendung schaltet beim nächsten Bild auf den Terminal Hub (einmal abgeholt).
+    pub leave_to_terminals: bool,
     /// Ticket unter dem Mauszeiger in der Liste (für die Taste „.“ und das Kontextmenü).
     pub hover: Option<i64>,
     /// Von außerhalb (Terminal Hub) gewünschtes Ticket; wird im nächsten Bild von `PlanUi::header` geöffnet.
@@ -333,6 +338,8 @@ impl Default for TicketUi {
             create_last_type: None,
             undo_cap: 25,
             return_tab: None,
+            from_terminal: false,
+            leave_to_terminals: false,
             hover: None,
             requested_open: None,
             row_refs: Default::default(),
@@ -356,7 +363,7 @@ impl TicketUi {
             self.open = None;
             self.back.clear();
             self.saved_views.clear();
-            self.return_tab = None;
+            self.forget_return();
             self.hover = None;
             self.detail = None;
             self.view = ViewState::default();
@@ -365,6 +372,12 @@ impl TicketUi {
             self.counts_dirty = true;
             self.create_last_type = None;
         }
+    }
+
+    /// Den Rückweg des Tickets (Ursprungs-Reiter, Terminal Hub) vergessen: „Zurück“ führt dann zur Liste.
+    pub fn forget_return(&mut self) {
+        self.return_tab = None;
+        self.from_terminal = false;
     }
 
     /// Daten (Liste und Detail) beim nächsten Bild neu laden.

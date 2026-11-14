@@ -9,6 +9,9 @@
 //!   Wer den Reiter von Hand wechselt, vergisst den Rückweg (`TicketUi::return_tab`).
 //! * **Terminal Hub:** `App::open_ticket_from_anywhere` (`terminal_links.rs`) schaltet auf den Todo-Reiter und meldet das Ticket
 //!   mit [`PlanUi::request_open_ticket`] an; `PlanUi::header` öffnet es im selben Bild (der Expertenmodus wird dafür eingeschaltet).
+//!   Der Rückweg ist dann der **Terminal Hub** (`TicketUi::from_terminal`): am Ende der Verweiskette setzt „Zurück“ bzw. Esc
+//!   `leave_to_terminals`, und `App::tasks_view` schaltet darauf um (`take_leave_to_terminals`). Wer von Hand den Modus, den Reiter
+//!   oder das Projekt wechselt, vergisst diesen Rückweg.
 //! * **Dashboard → Suche:** [`PlanUi::open_search_in_project`] zeigt den Reiter „Suche“ des Projekts mit der Abfrage im Feld. Sie wird
 //!   *nicht* ausgeführt, solange `run_search` (search_tab.rs) nur ein Platzhalter ist; mit der angeschlossenen Suche genügt dort ein
 //!   Aufruf von `self.run_search(jql)` an der markierten Stelle.
@@ -89,17 +92,34 @@ impl PlanUi {
             // der Projektwechsel räumt die Navigation auf; das bisherige Ticket bleibt für „Zurück“ nicht erhalten
             self.select(cx, project);
         }
+        // Nach dem Programmstart kennt `TicketUi` das gespeicherte Projekt noch nicht (erst `ticket_refresh` gleicht ab und würde
+        // das gerade geöffnete Ticket verwerfen): hier schon abgleichen, bevor das Ticket gesetzt wird.
+        self.tickets.switch_project(project);
         self.tab = Tab::Tickets;
         self.tickets.open_ticket(id, viewing);
         self.tickets.return_tab = ret;
         self.tickets.invalidate();
     }
 
-    /// Das Ticket-Anzeigen verlassen: zurück zum Reiter, von dem aus es geöffnet wurde (falls es einen gibt).
+    /// Das Ticket-Anzeigen verlassen: zurück zum Terminal Hub, wenn das Ticket von dort kam, sonst zum Reiter, von dem aus es
+    /// geöffnet wurde (falls es einen gibt).
     fn leave_ticket_view(&mut self) {
-        if let Some(t) = self.tickets.return_tab.take() {
+        let origin = self.tickets.return_tab.take();
+        if std::mem::take(&mut self.tickets.from_terminal) {
+            self.tickets.leave_to_terminals = true;
+        } else if let Some(t) = origin {
             self.tab = t;
         }
+    }
+
+    /// Hat „Zurück“ gerade den Weg zum Terminal Hub genommen? Die Anwendung schaltet dann um (wird einmal abgeholt).
+    pub(in crate::app) fn take_leave_to_terminals(&mut self) -> bool {
+        std::mem::take(&mut self.tickets.leave_to_terminals)
+    }
+
+    /// Der Terminal Hub ist (von Hand) wieder aktiv: der Rückweg dorthin gilt nicht mehr.
+    pub(in crate::app) fn forget_terminal_return(&mut self) {
+        self.tickets.from_terminal = false;
     }
 
     /// Zurück (Pfeil, Esc): zum vorherigen Ticket der Verweiskette, danach zum Ursprungs-Reiter bzw. zur Liste.
@@ -120,6 +140,9 @@ impl PlanUi {
         if !self.tickets.back.is_empty() {
             return None;
         }
+        if self.tickets.from_terminal {
+            return Some(lang.t("Terminal Hub", "Terminal Hub"));
+        }
         self.tickets.return_tab.map(|t| tab_label(t, lang))
     }
 
@@ -131,7 +154,9 @@ impl PlanUi {
     /// Angefordertes Ticket jetzt öffnen (aus `header`, sobald Projekte und Datenbank bereit sind).
     pub(super) fn run_requested_open(&mut self, cx: &Cx) {
         if let Some(id) = self.tickets.requested_open.take() {
-            self.open_ticket(cx, id);
+            if self.open_ticket(cx, id) {
+                self.tickets.from_terminal = true;
+            }
         }
     }
 

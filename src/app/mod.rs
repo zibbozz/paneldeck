@@ -1595,6 +1595,9 @@ impl App {
         if self.mode != mode && mode == titlebar::Mode::Terminals {
             self.want_focus = Some(self.focused);
         }
+        if mode != titlebar::Mode::Tasks {
+            self.plan.forget_terminal_return(); // von Hand weggeschaltet: der Rückweg „Zurück zum Terminal Hub“ gilt nicht mehr
+        }
         self.mode = mode;
     }
 

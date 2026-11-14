@@ -567,7 +567,7 @@ impl PlanUi {
             self.tickets.open_ticket(id, false);
             // die angeklickte Zeile ist zu sehen: die Liste soll nicht springen
             self.tickets.scroll_to = None;
-            self.tickets.return_tab = None;
+            self.tickets.forget_return();
         }
         if let Some((id, is_star, on)) = mark {
             let r = if is_star { set_starred(cx.conn, id, on, &Source::ui()) } else { set_flagged(cx.conn, id, on, &Source::ui()) };
