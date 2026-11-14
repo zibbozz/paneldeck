@@ -29,6 +29,7 @@ pub mod names;
 pub mod ops;
 pub mod projects;
 pub mod quick;
+pub mod query_help;
 pub mod schema;
 pub mod statuses;
 pub mod summary;
