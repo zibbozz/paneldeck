@@ -7,7 +7,7 @@ For Windows 10 (1809+) / 11 (x64), **fully offline**: either as an installer (pe
 
 > Independent open-source project – not affiliated with, endorsed by or reviewed by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, PBC. See [Legal](#legal).
 
-<p align="center"><img src="docs/images/app.png" alt="Paneldeck with split terminals, an approval prompt and the sidebar" width="100%"><br><sub>Several sessions in projects and folders, split panes, a "Waiting for you" inbox – all in one window. (The screenshots show the German interface; the default language is English.)</sub></p>
+<p align="center"><img src="docs/images/app.png" alt="Paneldeck with split terminals, an approval prompt and the sidebar" width="100%"><br><sub>Several sessions in projects and folders, split panes, a "Waiting for you" inbox – all in one window.</sub></p>
 
 ## Features
 - **Terminals** with full emulation (ConPTY): PowerShell 7, Windows PowerShell, CMD, Git Bash, WSL distributions; colors, alt screen, mouse, Unicode, color emoji, CJK, seamless box-drawing characters.
