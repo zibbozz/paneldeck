@@ -201,6 +201,8 @@ pub fn op_label(op: &TicketOp, lang: Lang) -> String {
         TicketOp::Link { .. } => s("Verknüpfung geändert", "link changed"),
         TicketOp::Comment { .. } | TicketOp::CommentEdit { .. } => s("Kommentar geändert", "comment changed"),
         TicketOp::Time { .. } | TicketOp::TimeEdit { .. } => s("Zeiteintrag geändert", "time entry changed"),
+        TicketOp::Sprint(_) => s("Sprint-Zuordnung geändert", "sprint assignment changed"),
+        TicketOp::TodoConversion { .. } => s("Todo-Karte umgewandelt", "todo card converted"),
         TicketOp::Batch(ops) => ops.first().map(|o| op_label(o, lang)).unwrap_or_default(),
     }
 }

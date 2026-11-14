@@ -10,11 +10,16 @@
 //!   History verwirft den Eintrag. Wiederholen legt es mit derselben Kennung und demselben Schlüssel wieder an.
 //! * **Löschen** ist nicht rückgängig zu machen und hat keine Operation. Nach einem Löschen sollte die Oberfläche die
 //!   History mit [`TicketOp::touches`] bereinigen (`History::retain`).
+//! * **Sprint-Zuordnung** ([`TicketOp::Sprint`]): stellt die Zeilen von `sprint_tickets` samt Zeitstempeln wieder her (Begründung und
+//!   Grenzen in `sprints::membership`); **Todo-Umwandlung** ([`TicketOp::TodoConversion`], hinter dem Anlegen in einer `Batch`):
+//!   Zuordnung der Karte und Abhaken.
 //! * Mehrere Änderungen einer Aktion (z. B. Statuswechsel samt Werten) bilden eine [`TicketOp::Batch`].
 
 use super::comments::{self, Comment};
 use super::history::{self, HistoryField, Source};
 use super::links::{self, LinkRecord};
+use super::sprints::membership::SprintChange;
+use super::todo_bridge;
 use super::ticket_error::{atomic, TRes, TicketError};
 use super::tickets::{self, Ticket};
 use super::time_entries::{self, TimeEntry, TimeState};
@@ -68,6 +73,11 @@ pub enum TicketOp {
     /// Zeiteintrag ist (nicht) vorhanden.
     Time { entry: TimeEntry, present: bool, source: Source },
     TimeEdit { ticket: i64, entry: i64, before: TimeState, after: TimeState, source: Source },
+    /// Zugehörigkeit zu Sprints (Backlog/Sprint per Ziehen oder Menü): stellt die Zeilen von `sprint_tickets` samt Zeitstempeln her.
+    Sprint(SprintChange),
+    /// Umwandlung einer Todo-Karte: `present` = die Karte ist abgehakt und dem Ticket zugeordnet; rückwärts wird die Zuordnung
+    /// gelöst und die Karte wieder geöffnet (wenn sie es vorher war: `was_done = false`). Steht in einer [`TicketOp::Batch`] hinter dem Anlegen.
+    TodoConversion { todo: i64, ticket: i64, was_done: bool, present: bool },
     /// Mehrere Änderungen einer Aktion; rückwärts in umgekehrter Reihenfolge.
     Batch(Vec<TicketOp>),
 }
@@ -97,6 +107,8 @@ impl TicketOp {
             TicketOp::Link { link, .. } => ids.contains(&link.from_ticket_id) || matches!(link.target, links::Target::Ticket(t) if ids.contains(&t)),
             TicketOp::Comment { comment, .. } => ids.contains(&comment.ticket_id),
             TicketOp::Time { entry, .. } => ids.contains(&entry.ticket_id),
+            TicketOp::Sprint(c) => c.touches(ids),
+            TicketOp::TodoConversion { ticket, .. } => ids.contains(ticket),
             TicketOp::Batch(v) => v.iter().any(|o| o.touches(ids)),
         }
     }
@@ -186,6 +198,12 @@ fn run(conn: &Connection, op: &TicketOp) -> TRes<()> {
             TicketOp::TimeEdit { entry, after, source, .. } => {
                 time_entries::raw_set_state(conn, *entry, after, source, batch)?;
             }
+            TicketOp::Sprint(change) => {
+                change.apply(conn)?;
+            }
+            TicketOp::TodoConversion { todo, ticket, was_done, present } => {
+                todo_bridge::run_conversion(conn, *todo, *ticket, *was_done, *present)?;
+            }
             TicketOp::Batch(ops) => {
                 for o in ops {
                     run(conn, o)?;
@@ -221,6 +239,8 @@ impl Op for TicketOp {
             TicketOp::CommentEdit { ticket, comment, before, after, source } => TicketOp::CommentEdit { ticket: *ticket, comment: *comment, before: after.clone(), after: before.clone(), source: source.clone() },
             TicketOp::Time { entry, present, source } => TicketOp::Time { entry: entry.clone(), present: !present, source: source.clone() },
             TicketOp::TimeEdit { ticket, entry, before, after, source } => TicketOp::TimeEdit { ticket: *ticket, entry: *entry, before: after.clone(), after: before.clone(), source: source.clone() },
+            TicketOp::Sprint(c) => TicketOp::Sprint(c.inverse()),
+            TicketOp::TodoConversion { todo, ticket, was_done, present } => TicketOp::TodoConversion { todo: *todo, ticket: *ticket, was_done: *was_done, present: !present },
             TicketOp::Batch(ops) => TicketOp::Batch(ops.iter().rev().map(|o| o.inverse()).collect()),
         }
     }

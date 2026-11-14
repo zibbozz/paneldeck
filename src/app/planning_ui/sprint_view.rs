@@ -126,6 +126,11 @@ impl State {
         }
     }
 
+    /// Läuft gerade eine Ziehaktion?
+    pub(super) fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
     /// Daten der Unteransichten verwerfen (nach Änderungen).
     pub(super) fn invalidate(&mut self) {
         self.stale = true;
@@ -195,6 +200,9 @@ impl PlanUi {
     pub(super) fn backlog_tab(&mut self, ui: &mut Ui, cx: &Cx, proj: &Project) {
         let Some(sum) = self.sum.clone() else { return };
         self.sprints_sync(cx, &sum, proj);
+        if self.sprints.sub == Sub::Backlog {
+            self.sprint_keys(ui.ctx(), cx);
+        }
         self.sprints_toolbar(ui, cx, proj);
         ui.add_space(S2);
         match self.sprints.sub {
@@ -428,7 +436,9 @@ impl PlanUi {
     fn drop_tickets(&mut self, cx: &Cx, data: &BacklogData, plan: logic::DropPlan) {
         let lang = cx.lang;
         match data::apply_drop(cx.conn, &plan) {
-            Ok(moved) => {
+            Ok((moved, op)) => {
+                // gemeinsame Rückgängig-Historie der Ticket-Oberfläche (Strg+Z / Strg+Y, siehe `undo_keys.rs`)
+                self.tickets.commit(op);
                 self.sprint_changed();
                 if moved > 0 {
                     let to = match plan.target {
@@ -467,7 +477,10 @@ impl PlanUi {
                 self.sprints.drag = Some(Drag { ids, lead: id });
             }
             Act::MoveTo { ids, target } => match data::move_to(cx.conn, target, &ids) {
-                Ok(_) => self.sprint_changed(),
+                Ok((_, op)) => {
+                    self.tickets.commit(op);
+                    self.sprint_changed();
+                }
                 Err(e) => self.sprint_fail(lang, &e),
             },
             Act::Toggle(sec) => {
