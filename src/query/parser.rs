@@ -583,8 +583,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Funktionsaufruf; Name schon verbraucht, aktuelles Token ist `(`.
+    /// Funktionsaufruf; Name schon verbraucht, aktuelles Token ist `(`. Verschachtelte Aufrufe zählen wie Klammern zur Tiefe
+    /// (sonst läuft `a(a(a(…` bei langer Eingabe über den Stapel).
     fn parse_call(&mut self, name: Name) -> Option<Value> {
+        if self.depth >= MAX_DEPTH {
+            let open = self.at_span();
+            self.err(open, ErrorCode::TooDeep);
+            self.pos = self.toks.len();
+            return None;
+        }
+        self.depth += 1;
+        let r = self.parse_call_inner(name);
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_call_inner(&mut self, name: Name) -> Option<Value> {
         let open = self.at_span();
         self.pos += 1;
         let mut args = Vec::new();

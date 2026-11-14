@@ -27,6 +27,13 @@ struct H {
 
 impl H {
     fn new(lang: Lang) -> H {
+        let mut h = H::cold(lang);
+        h.frames(3);
+        h
+    }
+
+    /// Wie `new`, aber ohne ein einziges Bild: so sieht die Oberfläche nach dem Programmstart aus, bevor der Reiter besucht wurde.
+    fn cold(lang: Lang) -> H {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("paneldeck-test-ticketnav-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
         let _ = std::fs::remove_dir_all(&dir);
@@ -42,9 +49,7 @@ impl H {
         crate::planning::projects::update_project(&db.conn, p1, &crate::planning::projects::UpdateProject { use_sprints: Some(true), ..Default::default() }).unwrap();
         db.set_meta("expert_mode", "1");
         db.set_meta("expert_project", &p1.to_string());
-        let mut h = H { ctx: egui::Context::default(), db, ui: PlanUi::default(), lang, time: 0.0, p1, p2 };
-        h.frames(3);
-        h
+        H { ctx: egui::Context::default(), db, ui: PlanUi::default(), lang, time: 0.0, p1, p2 }
     }
 
     fn frame(&mut self, events: Vec<Event>) {
@@ -252,6 +257,64 @@ fn the_terminal_hub_request_switches_expert_mode_on_and_opens_the_ticket() {
         h.ui.request_open_ticket(t);
         h.frames(3);
         assert_eq!(h.ui.tickets.open, Some(t));
+    });
+}
+
+#[test]
+fn a_terminal_hub_request_before_the_first_visit_of_the_tab_opens_the_ticket() {
+    // Nach dem Programmstart ist `PlanUi` noch nicht geladen: der Öffnungswunsch darf beim Laden/Abgleichen nicht verloren gehen.
+    for lang in [Lang::En, Lang::De] {
+        let mut h = H::cold(lang);
+        let t = h.mk(h.p1, "Gleich beim ersten Klick");
+        h.ui.request_open_ticket(t);
+        h.frames(4);
+        assert_eq!((h.ui.selected, h.ui.tab, h.ui.tickets.open), (h.p1, Tab::Tickets, Some(t)), "Ticket geöffnet, nicht nur die Liste");
+        assert_eq!(h.ui.tickets.detail.as_ref().map(|d| d.ticket.id), Some(t));
+        // auch in ein anderes Projekt als das gespeicherte
+        let mut h = H::cold(lang);
+        let t = h.mk(h.p2, "Anderes Projekt");
+        h.ui.request_open_ticket(t);
+        h.frames(4);
+        assert_eq!((h.ui.selected, h.ui.tab, h.ui.tickets.open), (h.p2, Tab::Tickets, Some(t)));
+    }
+}
+
+#[test]
+fn back_from_a_ticket_opened_in_the_terminal_hub_returns_to_the_terminal_hub() {
+    both(|h| {
+        let (a, b) = (h.mk(h.p1, "A"), h.mk(h.p1, "B"));
+        h.ui.request_open_ticket(a);
+        h.frames(3);
+        assert!(h.ui.tickets.from_terminal);
+        assert_eq!(h.ui.back_target_label(h.lang), Some("Terminal Hub"));
+        // Verweiskette: erst zum vorherigen Ticket, dann zum Terminal Hub
+        h.with(|ui, cx| ui.open_ticket(cx, b));
+        h.frames(2);
+        h.key(Key::Escape);
+        assert_eq!(h.ui.tickets.open, Some(a));
+        assert!(!h.ui.take_leave_to_terminals(), "noch im Ticket");
+        h.key(Key::Escape);
+        assert_eq!(h.ui.tickets.open, None);
+        assert!(h.ui.take_leave_to_terminals(), "der Rückweg führt zum Terminal Hub");
+        assert!(!h.ui.take_leave_to_terminals(), "nur einmal");
+        assert!(!h.ui.tickets.from_terminal);
+        // Kreuz (Panel) verhält sich gleich
+        h.ui.tickets.mode = ViewMode::Panel;
+        h.ui.request_open_ticket(a);
+        h.frames(3);
+        h.with(|ui, cx| ui.ticket_act(cx, Act::Close));
+        assert!(h.ui.take_leave_to_terminals());
+        // von Hand weggeschaltet: der Rückweg gilt nicht mehr, „Zurück“ führt zur Liste
+        h.ui.tickets.mode = ViewMode::Page;
+        h.ui.request_open_ticket(a);
+        h.frames(3);
+        h.ui.forget_terminal_return();
+        h.key(Key::Escape);
+        assert!(!h.ui.take_leave_to_terminals());
+        assert_eq!((h.ui.tab, h.ui.tickets.open), (Tab::Tickets, None));
+        // ein Ticket aus dem Board bekommt den Terminal-Rückweg nicht
+        h.open_from(Tab::Boards, a);
+        assert!(!h.ui.tickets.from_terminal);
     });
 }
 

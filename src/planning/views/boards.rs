@@ -328,9 +328,24 @@ pub fn default_board_for(conn: &Connection, project_id: i64, lang: Lang) -> Res<
     Ok(NewBoard {
         project_id,
         name: lang.t("Board", "Board").to_string(),
-        description: lang.t("Alle Status der Workflows des Projekts.", "All statuses of the project's workflows.").to_string(),
+        description: default_description(lang).to_string(),
         config,
     })
+}
+
+/// Beschreibung des Standard-Boards in der Sprache `lang`.
+fn default_description(lang: Lang) -> &'static str {
+    lang.t("Alle Status der Workflows des Projekts.", "All statuses of the project's workflows.")
+}
+
+/// Beschreibung zur Anzeige: Der Text des Standard-Boards wird beim Anlegen in der damaligen Sprache gespeichert; steht er
+/// unverändert da (in einer der beiden Sprachen), erscheint er in der aktuellen Sprache. Eigene Texte bleiben unberührt.
+pub fn display_description(description: &str, lang: Lang) -> String {
+    if description == default_description(Lang::De) || description == default_description(Lang::En) {
+        default_description(lang).to_string()
+    } else {
+        description.to_string()
+    }
 }
 
 /// Legt das Standard-Board an, wenn das Projekt noch kein Board hat; sonst das erste Board. Liefert die Board-Kennung.
@@ -389,6 +404,19 @@ pub fn prune_board_refs(conn: &Connection, project_id: i64) -> Res<usize> {
         }
         Ok(changed)
     })
+}
+
+/// Aufräumen für die Löschfunktionen von Status, Typ und Feld (`PlanError` statt `ViewError`): Ohne das behielten die Boards die
+/// Kennungen des Gelöschten (leere Spalte, Typ-Filter ohne Treffer, Board lässt sich nicht mehr speichern).
+pub(crate) fn prune_after_delete(conn: &Connection, project_id: i64) -> Result<(), crate::planning::PlanError> {
+    match prune_board_refs(conn, project_id) {
+        Ok(_) => {}
+        Err(ViewError::Plan(e)) => return Err(e),
+        Err(other) => return Err(crate::planning::PlanError::Db(other.message(crate::state::lang()))),
+    }
+    // Schnellaktionen verweisen ebenfalls auf Status, Typen und Felder: Verwaistes reparieren bzw. als ungültig markieren.
+    crate::planning::quick::actions::prune_quick_action_refs(conn, crate::planning::quick::actions::PruneScope::Project(project_id))?;
+    Ok(())
 }
 
 /// Wie [`prune_board_refs`] für alle Projekte (z. B. nach dem Löschen eines globalen Filters).
@@ -649,6 +677,16 @@ mod tests {
     }
 
     #[test]
+    fn the_default_description_is_shown_in_the_current_language_but_custom_text_stays() {
+        let en = default_description(Lang::En).to_string();
+        assert_eq!(display_description(&en, Lang::De), default_description(Lang::De));
+        assert_eq!(display_description(default_description(Lang::De), Lang::En), en);
+        assert_eq!(display_description(&en, Lang::En), en);
+        assert_eq!(display_description("Mein Text", Lang::De), "Mein Text");
+        assert_eq!(display_description("", Lang::De), "");
+    }
+
+    #[test]
     fn default_board_skips_unused_statuses_and_missing_fields() {
         let c = db();
         let p = project(&c, "AA", false);
@@ -759,11 +797,10 @@ mod tests {
         let us = type_by_key(&c, p, "userstory").id;
         let sp = list_fields(&c, us).unwrap().into_iter().find(|f| f.key.as_deref() == Some("story_points")).unwrap().id;
         let id = create_board(&c, &new_board(p, "B", BoardConfig { card_fields: vec![sp], ..Default::default() })).unwrap();
+        // die Löschfunktion räumt die Boards selbst auf; ein weiteres Aufräumen ändert nichts mehr
         delete_field(&c, sp, None).unwrap();
-        // die Konfiguration kennt das Feld noch, bis aufgeräumt wird; danach nicht mehr
-        assert_eq!(get_board(&c, id).unwrap().config.card_fields, vec![sp]);
-        prune_board_refs(&c, p).unwrap();
         assert!(get_board(&c, id).unwrap().config.card_fields.is_empty());
+        assert_eq!(prune_board_refs(&c, p).unwrap(), 0);
     }
 
     #[test]

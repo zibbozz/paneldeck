@@ -218,6 +218,8 @@ pub enum BackupError {
     Db(String),
     /// Die Datei ist größer als [`super::MAX_FILE_BYTES`] und wird gar nicht erst gelesen.
     TooLarge { max_mb: u64 },
+    /// Der Import wurde abgebrochen (siehe [`super::Progress`]); es wurde nichts angelegt.
+    Cancelled,
 }
 
 /// So viele Zeilenprobleme werden höchstens gesammelt.
@@ -396,6 +398,7 @@ impl BackupError {
                 Lang::De => format!("Die Datei ist zu groß (höchstens {max_mb} MB)."),
                 Lang::En => format!("The file is too large (at most {max_mb} MB)."),
             },
+            BackupError::Cancelled => s("Der Import wurde abgebrochen – es wurde nichts angelegt.", "The import was cancelled – nothing was created."),
         }
     }
 }

@@ -21,6 +21,9 @@ pub mod keywords;
 pub mod schema;
 pub mod transfer;
 
+#[cfg(test)]
+mod tests_review;
+
 use super::PlanError;
 use crate::state::Lang;
 use rusqlite::{params_from_iter, Connection};

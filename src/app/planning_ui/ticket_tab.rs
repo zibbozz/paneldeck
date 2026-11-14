@@ -25,9 +25,9 @@ use std::time::Instant;
 
 const ROW_H: f32 = 30.0;
 /// Breite der Spalte mit den Chips für Version, Meilenstein und Terminal.
-const W_REFS: f32 = 200.0;
+pub(super) const W_REFS: f32 = 200.0;
 /// Ab dieser Listenbreite erscheint die Spalte (und nur, wenn mindestens ein Ticket einen Wert hat).
-const REFS_MIN_WIDTH: f32 = 900.0;
+pub(super) const REFS_MIN_WIDTH: f32 = 900.0;
 pub(super) const GOLD: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
 pub(super) const FLAG_RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
 
@@ -171,7 +171,7 @@ impl PlanUi {
             self.todo_keys(ctx, cx);
             return;
         }
-        if self.tab != Tab::Tickets || self.tickets.any_modal() || self.quick.is_open() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() {
+        if self.tab != Tab::Tickets || self.tickets.any_modal() || self.quick.is_open() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() || self.backup_running() {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::N)) {
@@ -567,7 +567,7 @@ impl PlanUi {
             self.tickets.open_ticket(id, false);
             // die angeklickte Zeile ist zu sehen: die Liste soll nicht springen
             self.tickets.scroll_to = None;
-            self.tickets.return_tab = None;
+            self.tickets.forget_return();
         }
         if let Some((id, is_star, on)) = mark {
             let r = if is_star { set_starred(cx.conn, id, on, &Source::ui()) } else { set_flagged(cx.conn, id, on, &Source::ui()) };

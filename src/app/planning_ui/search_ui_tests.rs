@@ -55,17 +55,22 @@ impl H {
     }
 
     fn frame(&mut self, events: Vec<Event>) {
+        let _ = self.frame_out(events);
+    }
+
+    /// Ein Bild; liefert die Ausgabe (für die gezeichneten Texte).
+    fn frame_out(&mut self, events: Vec<Event>) -> egui::FullOutput {
         self.time += 0.1;
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))), time: Some(self.time), events, focused: true, ..Default::default() };
         let H { ctx, db, ui, lang, .. } = self;
         let env = Env { db: Some(db), db_error: None, lang: *lang, bg: Color32::from_rgb(24, 24, 28), undo_steps: 25 };
-        let _ = ctx.run(input, |ctx| {
+        ctx.run(input, |ctx| {
             ui.ensure_loaded(Some(db));
             ui.header(ctx, &env, db);
             if ui.expert {
                 ui.page(ctx, &env, db);
             }
-        });
+        })
     }
 
     fn frames(&mut self, n: usize) {
@@ -475,7 +480,7 @@ fn table_frame(ctx: &egui::Context, events: Vec<Event>, width: f32, rows: &[Tick
     let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width + 40.0, 700.0))), events, focused: true, ..Default::default() };
     let _ = ctx.run(input, |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
-            let cfg = TableCfg { lang: Lang::En, show_project: project, sort: Some(SortBy { col: Col::Title, desc: false }), sort_locked: locked, sortable: &sortable, selected: Some(101), scroll_height: scroll, salt: "t", };
+            let cfg = TableCfg { lang: Lang::En, show_project: project, sort: Some(SortBy { col: Col::Title, desc: false }), sort_locked: locked, sortable: &sortable, selected: Some(101), scroll_height: scroll, salt: "t", refs: None, scroll_to: None, scroll_offset: None };
             draw_table(ui, &cfg, rows, &mut out);
         });
     });
@@ -518,7 +523,7 @@ fn clicking_a_row_opens_it_and_clicking_a_header_asks_for_a_sort() {
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, 700.0))), events, focused: true, ..Default::default() };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let cfg = TableCfg { lang: Lang::En, show_project: false, sort: None, sort_locked: locked, sortable: &sortable, selected: None, scroll_height: None, salt: "c" };
+                let cfg = TableCfg { lang: Lang::En, show_project: false, sort: None, sort_locked: locked, sortable: &sortable, selected: None, scroll_height: None, salt: "c", refs: None, scroll_to: None, scroll_offset: None };
                 draw_table(ui, &cfg, &rows, out);
             });
         });
@@ -668,4 +673,305 @@ fn query_mode_keeps_local_filters_out_of_the_way_and_tickets_open_in_panel_mode(
     h.ui.tickets.open_ticket(id, false);
     h.frames(4);
     assert_eq!(h.ui.tickets.open, Some(id));
+}
+
+// ------------------------------------------------------------------ Version · Meilenstein · Terminal und Scrollen zum Ticket
+
+/// Alle gezeichneten Texte einer Ausgabe.
+fn texts_of(out: &egui::FullOutput) -> Vec<String> {
+    fn walk(s: &egui::Shape, acc: &mut Vec<String>) {
+        match s {
+            egui::Shape::Text(t) => acc.push(t.galley.text().to_string()),
+            egui::Shape::Vec(v) => v.iter().for_each(|x| walk(x, acc)),
+            _ => {}
+        }
+    }
+    let mut acc = Vec::new();
+    out.shapes.iter().for_each(|c| walk(&c.shape, &mut acc));
+    acc
+}
+
+/// Felder Version, Meilenstein und Terminal am Typ „Dev task“ des Projekts (Versionen im Projekt eingeschaltet).
+struct RefFields {
+    vf: i64,
+    mf: i64,
+    tf: i64,
+}
+
+impl H {
+    /// Bilder laufen lassen, bis die Ergebnisliste der Ticket-Liste fertig geladen und alle Scroll-Wünsche erledigt sind.
+    fn settle_tq(&mut self) {
+        self.wait("Liste ruhig", |h| !h.ui.tq.res.run.loading() && h.ui.tq.res.scroll_to.is_none() && h.ui.tq.res.scroll_offset.is_none() && h.ui.tickets.scroll_to.is_none());
+        self.frames(2);
+    }
+
+    /// Dasselbe für den Reiter „Suche“.
+    fn settle_search(&mut self) {
+        self.wait("Suche ruhig", |h| !h.ui.search.res.run.loading() && h.ui.search.res.scroll_to.is_none() && h.ui.tickets.scroll_to.is_none());
+        // das Rollen der Seite ist animiert: warten, bis die Tabelle still steht
+        let mut last = f32::NAN;
+        let mut same = 0;
+        for _ in 0..200 {
+            self.frame(Vec::new());
+            let top = self.ui.search.res.first_row.map_or(f32::NAN, |r| r.top());
+            same = if top == last { same + 1 } else { 0 };
+            last = top;
+            if same >= 4 {
+                break;
+            }
+        }
+    }
+
+    fn ref_fields(&self, project: i64) -> RefFields {
+        use crate::planning::fields::{create_field, FieldKind, NewField};
+        use crate::planning::projects::{update_project, UpdateProject};
+        update_project(&self.db.conn, project, &UpdateProject { use_versions: Some(true), ..Default::default() }).unwrap();
+        let task = self.type_id(project, "devtask");
+        RefFields {
+            vf: create_field(&self.db.conn, &NewField::new(task, "Fix version", FieldKind::Version)).unwrap(),
+            mf: create_field(&self.db.conn, &NewField::new(task, "Target milestone", FieldKind::Milestone)).unwrap(),
+            tf: create_field(&self.db.conn, &NewField::new(task, "Session", FieldKind::Terminal)).unwrap(),
+        }
+    }
+
+    fn with<R>(&mut self, f: impl FnOnce(&mut PlanUi, &Cx) -> R) -> R {
+        let cx = Cx { conn: &self.db.conn, db: &self.db, lang: self.lang };
+        f(&mut self.ui, &cx)
+    }
+
+    fn mk_with(&self, project: i64, title: &str, values: Vec<(i64, serde_json::Value)>) -> i64 {
+        create_ticket(&self.db.conn, &NewTicket { values, ..NewTicket::new(project, self.type_id(project, "devtask"), title) }, &Source::ui()).unwrap().0.id
+    }
+}
+
+#[test]
+fn search_results_show_version_milestone_and_terminal_loaded_with_the_result() {
+    use crate::app::terminal_links::{live_test_guard, set_live_for_test, LiveSession};
+    use crate::planning::sprints::releases::{create_milestone, create_version, NewRelease};
+    use serde_json::json;
+    let _live = live_test_guard();
+    both(|h| {
+        set_live_for_test(vec![LiveSession { id: 7, name: "Build".into(), folder: String::new(), running: true }]);
+        let f = h.ref_fields(h.project);
+        let v = create_version(&h.db.conn, &NewRelease::new(h.project, "1.0")).unwrap();
+        let m = create_milestone(&h.db.conn, &NewRelease::new(h.project, "Beta")).unwrap();
+        let full = h.mk_with(h.project, "Full ticket", vec![(f.vf, json!(v)), (f.mf, json!(m)), (f.tf, json!("session:7"))]);
+        let plain = h.mk(h.project, "devtask", "Plain ticket");
+        // anderes Projekt mit eigener Version
+        let g = h.ref_fields(h.other);
+        let fremd = create_version(&h.db.conn, &NewRelease::new(h.other, "Fremd 9")).unwrap();
+        let foreign = h.mk_with(h.other, "Foreign ticket", vec![(g.vf, json!(fremd))]);
+        h.ui.invalidate();
+        h.submit_search("type = \"Dev task\"");
+        let refs = h.ui.search.res.run.refs().expect("mit dem Ergebnis geladen");
+        assert_eq!(refs.len(), 1, "{:?}: nur das Ticket des Projekts hat Werte", h.lang);
+        assert_eq!(refs[&full].version.as_deref(), Some("1.0"));
+        assert_eq!(refs[&full].milestone.as_deref(), Some("Beta"));
+        assert_eq!(refs[&full].terminal.as_deref(), Some("session:7"));
+        assert!(!refs.contains_key(&plain));
+        // gezeichnet: Spaltenkopf (je Sprache) und die drei Chips
+        let out = h.frame_out(Vec::new());
+        let texts = texts_of(&out);
+        let head = h.lang.t("Version · Meilenstein · Terminal", "Version · Milestone · Terminal");
+        assert!(texts.iter().any(|t| t == head), "{:?}: Kopf {head:?} fehlt in {texts:?}", h.lang);
+        for chip in ["1.0", "Beta", "⌨ Build"] {
+            assert!(texts.iter().any(|t| t == chip), "{:?}: Chip {chip:?} fehlt in {texts:?}", h.lang);
+        }
+        // „alle Projekte“: auch das Ticket des anderen Projekts zeigt seine Version
+        h.ui.search.scope_all = true;
+        h.submit_search("type = \"Dev task\" ORDER BY key");
+        let refs = h.ui.search.res.run.refs().unwrap();
+        assert_eq!(refs[&foreign].version.as_deref(), Some("Fremd 9"));
+        assert_eq!(refs[&full].version.as_deref(), Some("1.0"));
+        assert!(texts_of(&h.frame_out(Vec::new())).iter().any(|t| t == "Fremd 9"));
+        // eine Abfrage ohne Treffer mit Werten: keine Spalte
+        h.ui.search.scope_all = false;
+        h.submit_search("title ~ Plain");
+        assert!(h.ui.search.res.run.refs().unwrap().is_empty());
+        assert!(!texts_of(&h.frame_out(Vec::new())).iter().any(|t| t == head), "ohne Werte keine Spalte");
+        set_live_for_test(Vec::new());
+    });
+}
+
+#[test]
+fn the_query_list_in_the_ticket_tab_shows_the_refs_too() {
+    use crate::planning::sprints::releases::{create_version, NewRelease};
+    use serde_json::json;
+    both(|h| {
+        let f = h.ref_fields(h.project);
+        let v = create_version(&h.db.conn, &NewRelease::new(h.project, "3.1")).unwrap();
+        h.mk_with(h.project, "Mit Version", vec![(f.vf, json!(v))]);
+        h.ui.invalidate();
+        h.frames(3);
+        h.submit_tickets("type = \"Dev task\"");
+        h.wait("Liste mit Abfrage", |h| h.ui.tq.res.run.shown.is_some() && !h.ui.tq.res.run.loading());
+        let out = h.frame_out(Vec::new());
+        let texts = texts_of(&out);
+        assert!(texts.iter().any(|t| t == "3.1"), "{:?}: {texts:?}", h.lang);
+    });
+}
+
+/// Ein Bild der Tabelle mit Wunsch zum Scrollen; liefert Ausgabe und gezeichnete Texte.
+fn scroll_frame(ctx: &egui::Context, rows: &[TicketRow], height: Option<f32>, scroll_to: Option<i64>, scroll_offset: Option<f32>) -> TableOut {
+    let mut out = TableOut::default();
+    let sortable = [Col::Title];
+    let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))), focused: true, ..Default::default() };
+    let _ = ctx.run(input, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let cfg = TableCfg { lang: Lang::En, show_project: false, sort: None, sort_locked: false, sortable: &sortable, selected: None, scroll_height: height, salt: "s", refs: None, scroll_to, scroll_offset };
+            draw_table(ui, &cfg, rows, &mut out);
+        });
+    });
+    out
+}
+
+#[test]
+fn the_table_scrolls_to_a_wanted_row_only_when_it_is_not_visible_and_only_once() {
+    let rows: Vec<TicketRow> = (1..=100).map(row).collect();
+    let ctx = egui::Context::default();
+    scroll_frame(&ctx, &rows, Some(300.0), None, None);
+    let out = scroll_frame(&ctx, &rows, Some(300.0), None, None);
+    assert!(!out.scroll_done && out.scroll_offset.is_none(), "ohne Wunsch passiert nichts");
+    // sichtbare Zeile (die dritte): erledigt, keine Bewegung
+    let out = scroll_frame(&ctx, &rows, Some(300.0), Some(103), None);
+    assert!(out.scroll_done && out.scroll_offset.is_none());
+    assert_eq!(out.list_offset, 0.0);
+    // weit unten: eine neue Position wird berechnet, noch nicht erledigt
+    let out = scroll_frame(&ctx, &rows, Some(300.0), Some(170), None);
+    let off = out.scroll_offset.expect("Position berechnet");
+    assert!(!out.scroll_done && off > 0.0);
+    let top = 69.0 * 30.0;
+    assert!(off <= top && top + 30.0 <= off + 300.0, "Zeile {top} liegt im Ausschnitt ab {off}");
+    // im nächsten Bild angewendet: erledigt, Position stimmt
+    let out = scroll_frame(&ctx, &rows, Some(300.0), Some(170), Some(off));
+    assert!(out.scroll_done && out.scroll_offset.is_none());
+    assert_eq!(out.list_offset, off);
+    // danach ist die Zeile zu sehen: ein weiterer Wunsch bewegt nichts
+    let out = scroll_frame(&ctx, &rows, Some(300.0), Some(170), None);
+    assert!(out.scroll_done && out.scroll_offset.is_none());
+    assert_eq!(out.list_offset, off);
+    // ein Ticket, das nicht im Ergebnis steht: erledigt, keine Bewegung
+    let out = scroll_frame(&ctx, &rows, Some(300.0), Some(99_999), None);
+    assert!(out.scroll_done && out.scroll_offset.is_none());
+    assert_eq!(out.list_offset, off);
+    // ohne eigene Rollfläche (Seite des Aufrufers): erledigt, wenn die Zeile da ist oder fehlt
+    let ctx2 = egui::Context::default();
+    scroll_frame(&ctx2, &rows, None, None, None);
+    assert!(scroll_frame(&ctx2, &rows, None, Some(150), None).scroll_done);
+    assert!(scroll_frame(&ctx2, &rows, None, Some(99_999), None).scroll_done);
+}
+
+fn seed_many(h: &H, n: usize) -> Vec<i64> {
+    (0..n).map(|i| h.mk(h.project, "devtask", &format!("Ticket {i:02}"))).collect()
+}
+
+#[test]
+fn the_query_list_scrolls_to_the_open_ticket_like_the_local_list() {
+    both(|h| {
+        seed_many(h, 90);
+        h.ui.tickets.mode = super::ticket_state::ViewMode::Panel;
+        h.ui.invalidate();
+        h.frames(3);
+        h.submit_tickets("type = \"Dev task\"");
+        h.wait("Liste", |h| h.ui.tq.res.run.rows().len() == 90 && !h.ui.tq.res.run.loading());
+        h.frames(3);
+        assert_eq!(h.ui.tq.res.list_offset, 0.0);
+        let ids: Vec<i64> = h.ui.tq.res.run.rows().iter().map(|r| r.id).collect();
+        let visible = |h: &H, id: i64| {
+            let top = ids.iter().position(|x| *x == id).unwrap() as f32 * 30.0;
+            let off = h.ui.tq.res.list_offset;
+            top >= off && top + 30.0 <= off + 900.0
+        };
+        // von außen (Board) ein Ticket weit unten öffnen: die Liste rollt hin
+        let far = ids[70];
+        h.ui.tab = Tab::Boards;
+        h.frames(2);
+        assert!(h.with(|ui, cx| ui.open_ticket(cx, far)));
+        h.settle_tq();
+        assert_eq!(h.ui.tab, Tab::Tickets);
+        assert!(h.ui.tq.res.list_offset > 0.0, "{:?}: die Liste ist gerollt", h.lang);
+        assert!(visible(h, far));
+        assert!(h.ui.tq.res.scroll_to.is_none() && h.ui.tq.res.scroll_offset.is_none() && h.ui.tickets.scroll_to.is_none(), "erledigt");
+        let off = h.ui.tq.res.list_offset;
+        // eine ohnehin sichtbare Zeile: keine Bewegung
+        let near = ids[(off / 30.0) as usize + 3];
+        h.ui.tab = Tab::Boards;
+        h.with(|ui, cx| ui.open_ticket(cx, near));
+        h.settle_tq();
+        assert_eq!(h.ui.tq.res.list_offset, off, "sichtbare Zeile: die Position bleibt");
+        // ganz nach oben
+        h.ui.tab = Tab::Boards;
+        h.with(|ui, cx| ui.open_ticket(cx, ids[0]));
+        h.settle_tq();
+        assert_eq!(h.ui.tq.res.list_offset, 0.0);
+        // ein Ticket, das nicht im Ergebnis steht: nichts passiert, der Wunsch verschwindet
+        let other = h.mk(h.other, "epic", "Anderes Projekt");
+        h.ui.tickets.scroll_to = Some(other);
+        h.settle_tq();
+        assert!(h.ui.tickets.scroll_to.is_none() && h.ui.tq.res.scroll_to.is_none());
+        assert_eq!(h.ui.tq.res.list_offset, 0.0);
+    });
+}
+
+#[test]
+fn leaving_the_ticket_page_shows_the_query_list_at_the_ticket_just_closed() {
+    both(|h| {
+        seed_many(h, 90);
+        h.ui.tickets.mode = super::ticket_state::ViewMode::Page;
+        h.ui.invalidate();
+        h.frames(3);
+        h.submit_tickets("type = \"Dev task\"");
+        h.wait("Liste", |h| h.ui.tq.res.run.rows().len() == 90 && !h.ui.tq.res.run.loading());
+        h.frames(3);
+        let ids: Vec<i64> = h.ui.tq.res.run.rows().iter().map(|r| r.id).collect();
+        let far = ids[80];
+        h.ui.tickets.open_ticket(far, false);
+        h.frames(4);
+        assert_eq!(h.ui.tickets.open, Some(far));
+        h.ui.ticket_back();
+        h.settle_tq();
+        assert!(h.ui.tickets.open.is_none());
+        let top = 80.0 * 30.0;
+        let off = h.ui.tq.res.list_offset;
+        assert!(off > 0.0 && top >= off && top + 30.0 <= off + 900.0, "{:?}: Zeile {top}, Position {off}", h.lang);
+    });
+}
+
+#[test]
+fn the_search_tab_scrolls_back_to_the_ticket_it_opened() {
+    both(|h| {
+        seed_many(h, 90);
+        h.ui.tickets.mode = super::ticket_state::ViewMode::Page;
+        h.ui.invalidate();
+        h.submit_search("type = \"Dev task\" ORDER BY key");
+        h.frames(4);
+        let ids: Vec<i64> = h.ui.search.res.run.rows().iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 90);
+        let top0 = h.ui.search.res.first_row.expect("gezeichnet").top();
+        // Zeilenmitte der Zeile `i` im Bild
+        let row_y = |h: &H, i: usize| h.ui.search.res.first_row.unwrap().top() + i as f32 * 30.0;
+        let far = ids[75];
+        // aus der Suche ein Ticket weit unten öffnen (wie ein Klick) und zurückkehren
+        assert!(h.with(|ui, cx| ui.open_ticket(cx, far)));
+        h.frames(4);
+        assert_eq!(h.ui.tab, Tab::Tickets);
+        assert_eq!(h.ui.tickets.return_tab, Some(Tab::Search));
+        h.ui.ticket_back();
+        h.settle_search();
+        assert_eq!(h.ui.tab, Tab::Search);
+        let y = row_y(h, 75);
+        assert!(h.ui.search.res.first_row.unwrap().top() < top0, "{:?}: die Seite ist gerollt", h.lang);
+        assert!(y >= 0.0 && y + 30.0 <= 900.0, "{:?}: die Zeile liegt im Bild (y = {y})", h.lang);
+        assert!(h.ui.search.res.scroll_to.is_none() && h.ui.tickets.scroll_to.is_none(), "erledigt");
+        // eine sichtbare Zeile: die Seite bleibt, wie sie ist
+        let top1 = h.ui.search.res.first_row.unwrap().top();
+        // eine Zeile mitten im Bild (y = 450)
+        let near = ids[((450.0 - top1) / 30.0) as usize];
+        assert!(h.with(|ui, cx| ui.open_ticket(cx, near)));
+        h.frames(3);
+        h.ui.ticket_back();
+        h.settle_search();
+        assert_eq!(h.ui.tab, Tab::Search);
+        assert_eq!(h.ui.search.res.first_row.unwrap().top(), top1, "{:?}: sichtbare Zeile, keine Bewegung", h.lang);
+    });
 }

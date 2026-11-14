@@ -30,11 +30,30 @@ pub(super) struct CfgDlg {
     description: String,
     config: BoardConfig,
     err: Option<String>,
+    /// Stand der Eingaben, als `err` gesetzt wurde: ändert sich etwas, ist der Fehler überholt und verschwindet.
+    err_fp: String,
 }
 
 impl CfgDlg {
     pub(super) fn new(id: Option<i64>, name: String, description: String, config: BoardConfig) -> Self {
-        CfgDlg { id, name, description, config, err: None }
+        CfgDlg { id, name, description, config, err: None, err_fp: String::new() }
+    }
+
+    fn fingerprint(&self) -> String {
+        format!("{}|{}|{:?}", self.name, self.description, self.config)
+    }
+
+    /// Fehler des letzten Speicherversuchs merken (samt Stand der Eingaben).
+    fn set_err(&mut self, e: String) {
+        self.err = Some(e);
+        self.err_fp = self.fingerprint();
+    }
+
+    /// Hat sich seit dem Fehler etwas geändert, ist er überholt: entfernen.
+    fn drop_stale_err(&mut self) {
+        if self.err.is_some() && self.err_fp != self.fingerprint() {
+            self.err = None;
+        }
     }
 }
 
@@ -306,6 +325,7 @@ impl PlanUi {
             } else if name_empty {
                 widgets::error(ui, lang.t("Der Name darf nicht leer sein.", "The name must not be empty."));
             }
+            d.drop_stale_err();
             if let Some(e) = &d.err {
                 widgets::error(ui, e);
             }
@@ -349,7 +369,7 @@ impl PlanUi {
                     self.dirty = true;
                     close = true;
                 }
-                Err(e) => d.err = Some(e.message(lang)),
+                Err(e) => d.set_err(e.message(lang)),
             }
         }
         if !close {

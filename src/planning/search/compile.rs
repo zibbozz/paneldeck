@@ -510,7 +510,9 @@ impl<'a> Cx<'a> {
             }
             Store::Sprint => pending::sprint_condition(self, Some(op), vals),
             Store::Type(set) => Ok(self.col_in("t.type_id", set, vals)),
-            Store::Status(set) => Ok(self.col_in("t.status_id", set, vals)),
+            // Tickets von Typen ohne Workflow haben keinen Status (`NULL`): die positive Aussage muss trotzdem 0/1 sein, sonst fielen
+            // sie bei `!=` und `NOT IN` heraus (`NOT NULL` ist `NULL`).
+            Store::Status(set) => Ok(format!("COALESCE({}, 0)", self.col_in("t.status_id", set, vals))),
             Store::Project(set) => Ok(self.col_in("t.project_id", set, vals)),
             Store::Values(v) => self.values_pos(v, op, vals),
         }

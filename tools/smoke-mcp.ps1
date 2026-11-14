@@ -364,6 +364,18 @@ c.close()
     Check 'get_sprint: Name mit project, Bericht' (-not $gs.err -and $gs.data.sprint.name -eq 'Sprint 1' -and $null -ne $gs.data.report.planned) $gs.text
     Check 'get_sprint: unbekannter Sprint -> not_found' ((Code (Tool 'get_sprint' @{ project = 'PAN'; sprint = 'Nope' })) -eq 'not_found')
     Check 'list_versions: Version 1.0' ((Tool 'list_versions' @{ project = 'PAN' }).data.versions[0].name -eq '1.0')
+    $gsid = Tool 'get_sprint' @{ sprint = $ls.data.sprints[0].id }
+    Check 'get_sprint: ueber die Kennung ohne project' (-not $gsid.err -and $gsid.data.sprint.name -eq 'Sprint 1') $gsid.text
+    Check 'list_sprints: state-Filter und Seite hinter dem Ende' ((Tool 'list_sprints' @{ project = 'PAN'; state = 'planned' }).data.total -eq 0 -and (Tool 'list_sprints' @{ project = 'PAN'; limit = 1; offset = 5 }).data.sprints.Count -eq 0)
+    Check 'list_sprints: Projekt ohne Sprints -> feature_disabled' ((Code (Tool 'list_sprints' @{ project = 'TODO' })) -eq 'feature_disabled')
+    Check 'list_sprints: falscher state -> bad_args' ((Code (Tool 'list_sprints' @{ project = 'PAN'; state = 'x' })) -eq 'bad_args')
+    $lv = Tool 'list_versions' @{ project = 'PAN' }
+    Check 'list_versions: Summen und Meilenstein-Liste vorhanden' (-not $lv.err -and $lv.data.versions_total -ge 1 -and $null -ne $lv.data.milestones_total) $lv.text
+    Check 'search_tickets: query mit Seite, total bleibt die Gesamtzahl' ((Tool 'search_tickets' @{ query = 'ORDER BY key'; limit = 1; offset = 1 }).data.tickets.Count -eq 1 -and (Tool 'search_tickets' @{ query = ''; limit = 1 }).data.total -ge 2)
+    Check 'search_tickets: zu lange query -> too_large' ((Code (Tool 'search_tickets' @{ query = ('x' * 4001) })) -eq 'too_large')
+    $uml = [string][char]0xD6
+    $q3 = Tool 'search_tickets' @{ project = 'PAN'; query = ('summary ~ "' + $uml + $uml + '" AND nonsense = 1') }
+    Check 'search_tickets: Fehlerposition zaehlt Zeichen, nicht Bytes (Umlaute)' ((Code $q3) -eq 'invalid_query' -and $q3.text -match 'Position 20' -and $q3.data.error.details.problems[0].position -eq 20) $q3.text
     $gt = Tool 'get_ticket' @{ ticket = 'PAN-1' }
     Check 'get_ticket: Kommentar, Zeit, Verknuepfung, Verlauf' (-not $gt.err -and $gt.data.comments_total -eq 1 -and $gt.data.time.entries_total -eq 2 -and @($gt.data.links).Count -eq 1 -and @($gt.data.history | Where-Object source -eq 'agent').Count -ge 5)
     Check 'get_ticket: Hinweis auf nicht vertrauenswuerdige Texte' ($gt.data.note -match 'untrusted')
@@ -397,6 +409,7 @@ c.close()
     Check 'Expert + Nur lesen: create_ticket verboten' ((Code (Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'x' })) -eq 'forbidden')
     Check 'Expert + Nur lesen: get_ticket liest' ((Tool 'get_ticket' @{ ticket = 'PAN-1' }).data.key -eq 'PAN-1')
     Check 'Expert + Nur lesen: list_sprints, list_versions und query lesen' ($names -contains 'list_sprints' -and $names -contains 'get_sprint' -and $names -contains 'list_versions' -and (Tool 'list_sprints' @{ project = 'PAN' }).data.total -eq 1 -and (Tool 'search_tickets' @{ query = 'type = Task' }).data.total -ge 1)
+    Check 'Expert + Nur lesen: get_sprint und list_versions lesen' ((Tool 'get_sprint' @{ project = 'PAN'; sprint = 'Sprint 1' }).data.sprint.state -eq 'active' -and (Tool 'list_versions' @{ project = 'PAN' }).data.versions_total -ge 1)
   }
 } finally {
   Stop-Hub

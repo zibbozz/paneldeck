@@ -1336,6 +1336,11 @@ impl App {
             self.plan.dev_view(db, env.lang);
             if self.plan.expert {
                 self.plan.page(ctx, &env, db);
+                if self.plan.take_leave_to_terminals() {
+                    // „Zurück“ aus einem Ticket, das vom Terminal Hub aus geöffnet wurde (Chip, Palette, Mini-Suche)
+                    self.set_mode(titlebar::Mode::Terminals);
+                    ctx.request_repaint();
+                }
                 let outs = self.plan.take_quick_out();
                 self.handle_quick_out(ctx, outs);
                 for t in self.plan.take_toasts() {

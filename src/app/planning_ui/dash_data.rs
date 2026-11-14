@@ -4,6 +4,7 @@
 //! eine kaputte Kachel stört die anderen nicht. Reine Lesefunktionen auf `&Connection`, keine Oberfläche.
 
 use super::dash_logic::{self as logic, Bucket, Group, FAVORITES_JQL, FLAGGED_JQL, LIST_COLUMNS, MAX_GROUPS};
+use super::sprint_logic::CalSettings;
 use crate::calc::burndown::BurndownSeries;
 use crate::calc::calendar::WorkCalendar;
 use crate::calc::duration::format_duration;
@@ -26,9 +27,17 @@ pub const LIST_LIMIT: i64 = 50;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// Wie viele abgeschlossene Sprints die mittlere Velocity einbeziehen.
 const VELOCITY_SPRINTS: usize = 5;
-/// Arbeitstage-Rechnung des Dashboards: Wochenende frei.
+/// Arbeitstage-Rechnung eines Projekts wie auf der Sprint-Seite: die Kalender-Einstellungen des Projekts (Wochenenden, Feiertage).
+fn project_calendar(conn: &Connection, project: i64) -> WorkCalendar {
+    let (kw, kh) = CalSettings::meta_keys(project);
+    let get = |k: &str| conn.query_row("SELECT value FROM meta WHERE key = ?1", [k], |r| r.get::<_, String>(0)).ok();
+    CalSettings::from_meta(get(&kw).as_deref(), get(&kh).as_deref()).calendar()
+}
+
+/// Standard-Kalender (Montag bis Freitag) für die Tests.
+#[cfg(test)]
 fn calendar() -> WorkCalendar {
-    WorkCalendar::with_weekend_switch(true)
+    WorkCalendar::default()
 }
 
 /// Ein Projekt in der Projekt-Kachel.
@@ -274,9 +283,9 @@ impl Loader<'_> {
         };
         let t = content.totals;
         let points = t.total.points > 0.0;
-        let basis = if points { Basis::Points } else { Basis::TicketCount };
-        let work_days_left = s.end_date.map(|end| if self.today > end { 0 } else { calendar().work_days_inclusive(self.today, end) });
-        let velocity = velocity_for_project(self.conn, p.id, VELOCITY_SPRINTS, if points { Basis::Points } else { Basis::TicketCount })
+        let basis = if points { Basis::PointsWithFallbackOne } else { Basis::TicketCount };
+        let work_days_left = s.end_date.map(|end| if self.today > end { 0 } else { project_calendar(self.conn, p.id).work_days_inclusive(self.today, end) });
+        let velocity = velocity_for_project(self.conn, p.id, VELOCITY_SPRINTS, basis)
             .ok()
             .filter(|v| !v.is_empty())
             .map(|v| v.iter().map(|x| x.completed).sum::<f64>() / v.len() as f64);
@@ -304,8 +313,8 @@ impl Loader<'_> {
         };
         // Punkte, wenn der Sprint welche hat, sonst Tickets (wie die Sprint-Kachel)
         let points = sprint_content(self.conn, s.id).map(|c| c.totals.total.points > 0.0).unwrap_or(false);
-        let basis = if points { Basis::Points } else { Basis::TicketCount };
-        let cal = calendar();
+        let basis = if points { Basis::PointsWithFallbackOne } else { Basis::TicketCount };
+        let cal = project_calendar(self.conn, p.id);
         match burndown_for_sprint(self.conn, s.id, basis, cal.clone(), self.today) {
             Ok(series) => {
                 let (days, ideal, actual) = work_day_points(&series, &cal);
@@ -313,7 +322,7 @@ impl Loader<'_> {
                     project_key: p.key,
                     sprint: s.name,
                     labels: days.iter().map(|d| logic::short_date(*d, lang)).collect(),
-                    remaining: actual.iter().rev().find_map(|a| *a),
+                    remaining: remaining_now(&series),
                     ideal,
                     actual,
                     points,
@@ -360,6 +369,12 @@ pub fn work_day_points(series: &BurndownSeries, cal: &WorkCalendar) -> (Vec<Naiv
         }
     }
     (days, ideal, actual)
+}
+
+/// Rest heute: der letzte bekannte Ist-Wert der **ganzen** Reihe. Die Linie zeigt nur Arbeitstage, aber Arbeit an einem freien Tag
+/// (z. B. Samstag) gehört zum Rest.
+pub fn remaining_now(series: &BurndownSeries) -> Option<f64> {
+    series.actual.iter().rev().find_map(|a| *a)
 }
 
 /// Gebuchte Zeit kurz („1d 2h 30m“ bei 8-Stunden-Tag).
@@ -595,6 +610,84 @@ mod tests {
         assert_eq!(d, vec![day(2026, 11, 6), day(2026, 11, 9), day(2026, 11, 10)]);
         assert_eq!(i, vec![4.0, 1.0, 0.0]);
         assert_eq!(a, vec![Some(4.0), None, None]);
+    }
+
+    #[test]
+    fn dashboard_tiles_follow_the_calendar_of_the_project() {
+        let f = fx();
+        update_project(&f.c, f.project, &UpdateProject { use_sprints: Some(true), ..Default::default() }).unwrap();
+        let mut n = NewSprint::new(f.project, "Sprint 1");
+        n.start = Some(day(2026, 11, 9));
+        n.end = Some(day(2026, 11, 20));
+        let sid = create_sprint(&f.c, &n, &calendar()).unwrap();
+        let ids: Vec<i64> = crate::planning::search::run_query(&f.c, &Ctx::new("2026-11-11", Lang::En), Scope::Project(f.project), "", Page::ALL).unwrap().rows.iter().map(|r| r.id).collect();
+        move_tickets_to_sprint(&f.c, sid, &ids).unwrap();
+        start_sprint(&f.c, sid, &calendar()).unwrap();
+        let set = |k: String, v: &str| {
+            f.c.execute("INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [k.as_str(), v]).unwrap();
+        };
+        let (kw, kh) = CalSettings::meta_keys(f.project);
+        let l = loader(&f, Some(f.project));
+        let shape = |l: &Loader| {
+            let work_days_left = match l.load(&TileKind::Sprint { project_id: None }) {
+                TileData::Sprint(s) => s.work_days_left,
+                other => panic!("{other:?}"),
+            };
+            match l.load(&TileKind::Burndown { project_id: None }) {
+                TileData::Burndown(b) => (b.labels.len(), work_days_left),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(shape(&l), (10, Some(8)), "Standard: Montag bis Freitag");
+        set(kh.clone(), "2026-11-12");
+        assert_eq!(shape(&l), (9, Some(7)), "ein Feiertag des Projekts fällt aus");
+        set(kw, "0");
+        set(kh, "");
+        assert_eq!(shape(&l), (12, Some(10)), "Wochenenden zählen, wenn das Projekt es so einstellt");
+    }
+
+    #[test]
+    fn the_remainder_today_counts_work_on_free_days() {
+        let start = day(2026, 11, 6); // Freitag
+        let days: Vec<NaiveDate> = (0..5).map(|i| start + chrono::Duration::days(i)).collect(); // Fr Sa So Mo Di
+        // Heute ist Sonntag: am Samstag wurde ein Punkt erledigt, am Sonntag noch einer
+        let series = BurndownSeries { days, ideal: vec![4.0, 3.0, 2.0, 1.0, 0.0], actual: vec![Some(4.0), Some(3.0), Some(2.0), None, None], scope_total_start: 4.0, scope_added: 0.0, scope_removed: 0.0, completed: 2.0 };
+        assert_eq!(remaining_now(&series), Some(2.0), "die Arbeit am Wochenende gehört zum Rest heute");
+    }
+
+    #[test]
+    fn dashboard_tiles_count_tickets_without_points_like_the_sprint_page() {
+        use crate::planning::tickets::set_field;
+        let f = Fx::new();
+        update_project(&f.c, f.project, &UpdateProject { use_sprints: Some(true), ..Default::default() }).unwrap();
+        let sp = f.field(f.story, "story_points");
+        let a = f.mk(f.story, "With points");
+        let b = f.mk(f.story, "Without points");
+        set_field(&f.c, a.id, sp.id, serde_json::json!(5), &Source::ui()).unwrap();
+        let cal = calendar();
+        let mut n = NewSprint::new(f.project, "Sprint 1");
+        n.start = Some(day(2026, 11, 9));
+        n.end = Some(day(2026, 11, 20));
+        let sid = create_sprint(&f.c, &n, &cal).unwrap();
+        move_tickets_to_sprint(&f.c, sid, &[a.id, b.id]).unwrap();
+        start_sprint(&f.c, sid, &cal).unwrap();
+        let l = loader(&f, Some(f.project));
+        // Die Sprint-Seite zählt ein Ticket ohne Punkte als 1 (Standard-Zählweise): 5 + 1 Punkte.
+        match l.load(&TileKind::Sprint { project_id: None }) {
+            TileData::Sprint(s) => {
+                assert!(s.points);
+                assert_eq!((s.done, s.total), (0.0, 6.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        match l.load(&TileKind::Burndown { project_id: None }) {
+            TileData::Burndown(b) => {
+                assert!(b.points);
+                // 10 Arbeitstage: die Ideal-Linie fällt von 6 (nicht 5) Punkten auf 0
+                assert!((b.ideal[0] - 5.4).abs() < 1e-9, "{:?}", b.ideal);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

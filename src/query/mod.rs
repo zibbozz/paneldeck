@@ -62,6 +62,8 @@ mod suggest;
 mod validate;
 
 #[cfg(test)]
+mod fuzz_tests;
+#[cfg(test)]
 mod tests;
 
 pub use ast::{CmpOp, Expr, Loc, Name, OrderTerm, Query, SortDir, Span, Value, ValueKind, name_literal, quote_string};
