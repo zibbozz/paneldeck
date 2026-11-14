@@ -389,6 +389,9 @@ impl PlanUi {
         if go {
             match delete_project(cx.conn, ask.id) {
                 Ok(_) => {
+                    // Kacheln anderer Dashboards, die das Projekt nannten, aufräumen
+                    let _ = crate::planning::views::dashboards::prune_dashboard_refs(cx.conn);
+                    self.dash_invalidate();
                     self.dirty = true;
                     self.selected = self.projects.iter().find(|p| p.system).map(|p| p.id).unwrap_or(0);
                     cx.db.set_meta("expert_project", &self.selected.to_string());

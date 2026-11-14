@@ -10,6 +10,12 @@ mod backup_ed;
 mod board_cfg;
 mod board_logic;
 mod board_view;
+mod dash_charts;
+mod dash_data;
+mod dash_dialogs;
+mod dash_logic;
+mod dash_tiles;
+mod dash_view;
 mod delete;
 mod fields_ed;
 mod help_shots;
@@ -85,6 +91,7 @@ enum Tab {
     Overview,
     Search,
     Boards,
+    Dashboards,
     Backlog,
     Releases,
     Types,
@@ -137,6 +144,7 @@ pub(super) struct PlanUi {
     /// Ticket-Oberfläche (Liste, Ansicht, Dialoge, Rückgängig-Historie).
     tickets: ticket_state::TicketUi,
     boards: board_view::State,
+    dash: dash_view::State,
     sprints: sprint_view::State,
     releases: release_view::State,
     quick: quick_menu::State,
@@ -172,6 +180,7 @@ impl Default for PlanUi {
             kw: Default::default(),
             tickets: Default::default(),
             boards: Default::default(),
+            dash: Default::default(),
             sprints: Default::default(),
             releases: Default::default(),
             quick: Default::default(),
@@ -233,7 +242,7 @@ impl PlanUi {
             self.workflow = Default::default();
             self.dirty = true;
             self.msg = None;
-            if self.projects.iter().find(|p| p.id == id).is_some_and(|p| p.system) && !matches!(self.tab, Tab::Overview | Tab::Links) {
+            if self.projects.iter().find(|p| p.id == id).is_some_and(|p| p.system) && !matches!(self.tab, Tab::Overview | Tab::Dashboards | Tab::Links) {
                 self.tab = Tab::Overview;
             }
         }
@@ -247,6 +256,7 @@ impl PlanUi {
     /// Die Daten haben sich außerhalb der Oberfläche geändert (z. B. durch einen Agenten): beim nächsten Bild neu laden.
     pub(super) fn invalidate(&mut self) {
         self.dirty = true;
+        self.dash_invalidate();
     }
 
     pub(super) fn set_expert(&mut self, db: &Db, on: bool) {
@@ -412,6 +422,9 @@ impl PlanUi {
             if self.project().is_some_and(|p| p.use_versions) {
                 v.push((Tab::Releases, lang.t("Releases", "Releases")));
             }
+        }
+        v.push((Tab::Dashboards, lang.t("Dashboards", "Dashboards")));
+        if !system {
             v.extend([
                 (Tab::Types, lang.t("Typen", "Types")),
                 (Tab::Fields, lang.t("Felder", "Fields")),
@@ -473,8 +486,8 @@ impl PlanUi {
                 ui.horizontal_wrapped(|ui| widgets::error(ui, &text));
                 ui.add_space(S1);
             }
-            // Die Boards brauchen die ganze Breite und Höhe (eigene Rollflächen) – sie werden unterhalb gezeichnet.
-            if self.tab == Tab::Boards {
+            // Boards und Dashboards brauchen die ganze Breite und Höhe (eigene Rollflächen) – sie werden unterhalb gezeichnet.
+            if matches!(self.tab, Tab::Boards | Tab::Dashboards) {
                 below = ui.cursor().top();
                 return;
             }
@@ -484,7 +497,7 @@ impl PlanUi {
                     Tab::Tickets => {}
                     Tab::Overview => self.overview(ui, cx, &proj),
                     Tab::Search => self.search_tab(ui, cx),
-                    Tab::Boards => {}
+                    Tab::Boards | Tab::Dashboards => {}
                     Tab::Backlog => self.backlog_tab(ui, cx, &proj),
                     Tab::Releases => self.releases_tab(ui, cx, &proj),
                     Tab::Types => self.types_tab(ui, cx),
@@ -499,15 +512,19 @@ impl PlanUi {
                 ui.add_space(40.0);
             });
         });
-        if self.tab == Tab::Boards {
+        if matches!(self.tab, Tab::Boards | Tab::Dashboards) {
             let full = Rect::from_min_max(Pos2::new(avail.left() + S3, below), Pos2::new(avail.right() - S3, avail.bottom()));
-            ui.scope_builder(UiBuilder::new().max_rect(full), |ui| self.boards_tab(ui, cx, &proj));
+            ui.scope_builder(UiBuilder::new().max_rect(full), |ui| match self.tab {
+                Tab::Dashboards => self.dash_tab(ui, cx, &proj),
+                _ => self.boards_tab(ui, cx, &proj),
+            });
         }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, cx: &Cx) {
         self.wizard_dialog(ctx, cx);
         self.board_dialogs(ctx, cx);
+        self.dash_dialogs(ctx, cx);
         self.sprint_dialogs(ctx, cx);
         self.settings_dialog(ctx, cx);
         self.fields_dialogs(ctx, cx);
