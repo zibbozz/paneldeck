@@ -88,7 +88,7 @@ impl App {
                     }
                     style::paint_icon(painter, icon, r.center(), if active { style::ACCENT } else { fg });
                     if resp.clicked() {
-                        self.mode = mode;
+                        self.set_mode(mode);
                     }
                     x += 44.0;
                 }
@@ -155,16 +155,5 @@ impl App {
                 }
             }
         }
-    }
-
-    /// Platzhalter für Bereiche, die in diesem Zwischenstand noch keinen Inhalt haben.
-    pub(super) fn empty_area(&mut self, ctx: &egui::Context) {
-        let lang = self.settings.language;
-        let theme = self.theme();
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme.bg)).show(ctx, |ui| {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(lang.t("Dieser Bereich ist noch nicht verfügbar.", "This area is not available yet.")).color(style::dim(ui)));
-            });
-        });
     }
 }
