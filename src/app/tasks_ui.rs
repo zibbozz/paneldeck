@@ -1334,6 +1334,8 @@ impl App {
             self.plan.header(ctx, &env, db);
             if self.plan.expert {
                 self.plan.page(ctx, &env, db);
+                let outs = self.plan.take_quick_out();
+                self.handle_quick_out(ctx, outs);
                 for t in self.plan.take_toasts() {
                     self.toast(t);
                 }
@@ -1343,6 +1345,53 @@ impl App {
         self.tasks.show(ctx, &env);
         if let Some(n) = self.tasks.notice.take() {
             self.notice = Some((n, Instant::now()));
+        }
+    }
+
+    /// Ergebnisse des Schnellmenüs: Toasts (mit „Rückgängig“) zeigen und gewünschte Sitzungen starten.
+    fn handle_quick_out(&mut self, ctx: &egui::Context, outs: Vec<super::planning_ui::QuickOut>) {
+        use super::planning_ui::QuickOut;
+        use super::toasts::{ToastAction, ToastKind};
+        let lang = self.settings.language;
+        for o in outs {
+            match o {
+                QuickOut::Toast { text, error, undo } => {
+                    let action = undo.map(|token| ToastAction { label: lang.t("Rückgängig", "Undo").to_string(), token });
+                    self.push_toast_action(text, if error { ToastKind::Error } else { ToastKind::Info }, None, action);
+                }
+                QuickOut::Session(req) => self.quick_start_session(ctx, req),
+            }
+        }
+    }
+
+    /// „Sitzung starten“ aus dem Schnellmenü: neue Sitzung (Shell nur, wenn sie bekannt ist), mit dem Ticket verknüpft.
+    fn quick_start_session(&mut self, ctx: &egui::Context, req: super::planning_ui::SessionRequest) {
+        use super::toasts::ToastKind;
+        let lang = self.settings.language;
+        let shell_id = req.shell.clone().filter(|s| self.shell_by_id(s).is_some());
+        let unknown_shell = req.shell.is_some() && shell_id.is_none();
+        let id = self.new_session(ctx, super::NewOpts { shell_id, cwd: req.cwd.clone(), name: Some(req.ticket_key.clone()), claude: req.claude, prompt: req.prompt.clone(), ..Default::default() });
+        let linked = match self.db.as_ref() {
+            Some(db) => super::terminal_links::link_ticket_to(&db.conn, req.ticket_id, id),
+            None => Ok(()),
+        };
+        self.tlinks_invalidate();
+        match linked {
+            Ok(()) if unknown_shell => self.push_toast(lang.t("Die Shell der Aktion ist unbekannt – es wurde die Standard-Shell benutzt.", "The action's shell is unknown – the default shell was used.").to_string(), ToastKind::Warning, Some(req.ticket_key)),
+            Ok(()) => self.push_toast(format!("{} {}", req.ticket_key, lang.t("mit neuer Sitzung verknüpft.", "linked to a new session.")), ToastKind::Info, Some(req.ticket_key.clone())),
+            Err(e) => self.push_toast(e.message(lang), ToastKind::Error, None),
+        }
+    }
+
+    /// Klick auf den Knopf eines Toasts (heute nur „Rückgängig“ des Schnellmenüs).
+    pub(super) fn toast_action_clicked(&mut self, _ctx: &egui::Context, token: u64) {
+        use super::toasts::ToastKind;
+        let lang = self.settings.language;
+        let Some(db) = self.db.as_ref() else { return };
+        match self.plan.quick_undo(&db.conn, token, lang) {
+            Ok(text) => self.push_toast(text, ToastKind::Info, None),
+            Err(e) if e.is_empty() => {}
+            Err(e) => self.push_toast(e, ToastKind::Error, None),
         }
     }
 
