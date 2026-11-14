@@ -10,6 +10,26 @@ Funktionen und Datenordner: `README.md` (Englisch, Hauptseite) / `README.de.md` 
 3. **Nichts einbauen, was Geld kostet** (kein GitHub-Actions-CI, keine Zertifikate/Dienste). Tests laufen lokal.
 4. **Jedes neue Feature testen – über MCP UND per Maus/Tastatur** (Abschnitt „Neue Features testen“).
 5. **Push, Tags und Releases nur auf ausdrücklichen Wunsch** des Nutzers.
+6. **Branching- und Release-Strategie (ab 1.0.0) – siehe nächster Abschnitt.** Sie ist unsere Basis; nicht davon abweichen, ohne dass der Nutzer es sagt.
+
+## ⚠ Branching- und Release-Strategie (Vorgabe des Nutzers, gilt ab 1.0.0)
+
+1. **`develop`** enthält immer alle Entwicklungen. Hier wird gearbeitet.
+2. **`release/x.y`** (z. B. `release/1.1`) wird angelegt, wenn ein Release ansteht bzw. kurz bevorsteht. Ab dann landet jede Entwicklung, die zu diesem Release gehört, **sowohl in `develop` als auch in `release/x.y`**.
+3. **Das Release passiert auf `release/x.y`:** Zum Zeitpunkt des Releases wird dort der **Tag `vx.y.z`** gesetzt (x = Major, y = Minor, z = Patch, z. B. `v1.1.0`). Aus genau diesem Tag werden `.exe`/Installer/ZIP gebaut und das GitHub-Release erstellt.
+4. **Patches:** Ein Fix für eine veröffentlichte Version (z. B. 1.0) landet in `develop` **und** in `release/1.0`. Dann Tag `v1.0.1` auf `release/1.0`, daraus bauen und das GitHub-Release anlegen.
+
+Daraus folgt (Festlegungen, bis der Nutzer etwas anderes sagt):
+- Releases werden **nie** von `develop` oder `main` aus getaggt, sondern nur von `release/x.y`. Release-Branches werden nicht gelöscht.
+- Vor jedem Release-Lauf prüfen: aktueller Branch ist `release/x.y`, `Cargo.toml`-Version hat dasselbe `x.y`, Arbeitsbaum sauber. (`tools/release.sh` soll das erzwingen – noch anzupassen.)
+- Alles Veröffentlichte (Push, Tags, Releases) weiterhin **nur auf ausdrücklichen Wunsch** (Projektregel 5).
+- Stand: `v1.0.0` wurde noch vor dieser Regel von `main` aus erstellt; `release/1.0` und `develop` zeigen auf denselben Commit (`b1c0c23`).
+
+**Noch zu klären (Vorschläge, bisher nicht bestätigt – Nutzer fragen, bevor man sich darauf verlässt):**
+- Rolle von `main`: Vorschlag = zeigt immer auf den letzten Release (nach dem Tag `release/x.y` per Fast-Forward nachziehen) und bleibt Standard-Branch auf GitHub, damit Besucher die README der aktuellen Version sehen.
+- Wie „in beide Branches“ erfolgt: Vorschlag = zuerst `develop`, dann `git cherry-pick -x` nach `release/x.y`; nach dem Release `release/x.y` zurück in `develop` mergen (damit Versions-/Changelog-Commits nicht verloren gehen).
+- Changelog/Version: `[Unreleased]` lebt in `develop`; auf `release/x.y` wird der Abschnitt `[x.y.z]` angelegt (`changelog.py release`), `Cargo.toml`-Version dort gesetzt. Fixes müssen in beiden Changelogs eingetragen werden.
+- Feature-Branches oder direkt auf `develop`? Pre-Releases (`vx.y.0-rc.1`) ebenfalls von `release/x.y`? Welche Release-Branches bekommen noch Patches (nur der neueste)?
 
 ## Entwicklungsumgebung
 
@@ -85,7 +105,7 @@ Wir halten uns **immer** an https://semver.org/lang/de/ (Version 2.0.0). Die Ver
   - `--publish`: zusätzlich Branch + Tag pushen und GitHub-Release anlegen (`gh release create`, Titel/Text aus `dist/gh-title-<v>.txt` / `dist/gh-notes-<v>.md`, Assets: portables ZIP + Installer).
     Standard ist **Pre-release** wie bei allen bisherigen Releases; `--final` für ein normales Release (ab 1.0).
   - Commit-Nachricht endet mit der Attribution (`ATTRIBUTION="Co-Authored-By: …"` setzen).
-- Remote `origin` = `github.com/zibbozz/paneldeck` (Branch `main`). Die Historie beginnt mit 1.0.0; die frühere Entwicklung (0.x, anderer Projektname) liegt in einem getrennten, privaten Archiv. Push, Tags und Releases nur auf ausdrücklichen Wunsch.
+- Remote `origin` = `github.com/zibbozz/paneldeck` (Branches `main`, `develop`, `release/x.y` – siehe „Branching- und Release-Strategie“). Die Historie beginnt mit 1.0.0; die frühere Entwicklung (0.x, anderer Projektname) liegt in einem getrennten, privaten Archiv. Push, Tags und Releases nur auf ausdrücklichen Wunsch.
 - Push, Tags und Releases sind nach außen sichtbar → **nur auf ausdrücklichen Wunsch** (`--publish` nicht von selbst setzen).
 
 ## Bekannte Stolpersteine
