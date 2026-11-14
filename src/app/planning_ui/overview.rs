@@ -37,6 +37,14 @@ impl Todo {
     }
 }
 
+#[cfg(test)]
+impl PlanUi {
+    /// Test: Ist die Karte in der geladenen Ansicht der Todo-Übersicht abgehakt? (`None`: nicht geladen)
+    pub(super) fn todo_card_done(&self, id: i64) -> Option<bool> {
+        self.todo.items.iter().find(|i| i.id == id).map(|i| i.done)
+    }
+}
+
 /// Zählzeile „n offen · m erledigt“.
 pub(super) fn count_text(total: usize, done: usize, lang: Lang) -> String {
     let open = total.saturating_sub(done);

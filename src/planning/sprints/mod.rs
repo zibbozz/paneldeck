@@ -25,12 +25,15 @@
 
 pub mod analysis;
 pub mod error;
+pub mod membership;
 pub mod releases;
 pub mod schema;
 pub mod sprint;
 
 #[cfg(test)]
 mod tests_analysis;
+#[cfg(test)]
+mod tests_membership;
 #[cfg(test)]
 mod tests_releases;
 #[cfg(test)]
