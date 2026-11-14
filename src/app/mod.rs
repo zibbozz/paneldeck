@@ -37,6 +37,8 @@ mod mcp;
 mod panels;
 mod planning_ui;
 mod settings;
+#[cfg(feature = "readme-shots")]
+mod shot_start;
 mod sidebar;
 mod tasks_ui;
 mod terminal_links;
@@ -2707,6 +2709,8 @@ impl eframe::App for App {
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 0.001 {
             ctx.set_zoom_factor(self.settings.ui_scale);
         }
+        #[cfg(feature = "readme-shots")]
+        self.dev_shot_mode();
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
         crate::usage::set_prices(self.settings.prices.clone());

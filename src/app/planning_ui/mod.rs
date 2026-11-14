@@ -45,6 +45,8 @@ mod search_tab;
 mod search_table;
 #[cfg(test)]
 mod search_ui_tests;
+#[cfg(feature = "readme-shots")]
+pub(super) mod shot_view;
 mod sprint_chart;
 mod sprint_data;
 mod sprint_detail;
