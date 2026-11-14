@@ -31,6 +31,7 @@ pub mod projects;
 pub mod quick;
 pub mod query_help;
 pub mod schema;
+pub mod sprints;
 pub mod statuses;
 pub mod summary;
 pub mod template;
