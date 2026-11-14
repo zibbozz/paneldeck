@@ -6,17 +6,19 @@
 //! * Titel = Titel der Karte, sonst die erste Textzeile (höchstens 255 Zeichen);
 //! * der Text der Karte kommt in das Feld „Description“ (Schlüssel `description`, Rich-Text oder Text), falls der Typ eines hat;
 //! * die Tags werden zu Werten des ersten Labels-Felds, falls der Typ eines hat – sonst verworfen und gemeldet;
-//! * danach ist die Karte erledigt und als umgewandelt vermerkt; eine Karte lässt sich nur einmal umwandeln.
+//! * danach ist die Karte erledigt und als umgewandelt vermerkt; eine Karte lässt sich nur einmal umwandeln;
+//! * die ganze Umwandlung (Ticket, Zuordnung, Abhaken) ist **eine** [`TicketOp`] für Strg+Z / Strg+Y: Rückgängig öffnet die
+//!   Karte wieder (war sie schon erledigt, bleibt sie es), löst die Zuordnung und entfernt das Ticket.
 
 use super::fields::{list_fields, Field, FieldKind};
 use super::history::Source;
 use super::ops::TicketOp;
 use super::statuses::StatusCategory;
 use super::ticket_error::{atomic, TRes, TicketError};
-use super::tickets::{create_ticket, delete_ticket, get_ticket, NewTicket, Ticket, MAX_TITLE_CHARS};
+use super::tickets::{create_ticket, get_ticket, NewTicket, Ticket, MAX_TITLE_CHARS};
 use super::values::{normalize_value, RefCtx};
 use super::{common, projects};
-use crate::tasks::{self, ItemFilter, TaskError, TaskOp};
+use crate::tasks::{self, ItemFilter, TaskError};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -113,13 +115,10 @@ pub fn converted_ticket_of(conn: &Connection, todo_id: i64) -> TRes<Option<i64>>
 #[derive(Debug, Clone, PartialEq)]
 pub struct Conversion {
     pub ticket: Ticket,
-    /// Macht das Anlegen des Tickets rückgängig (und entfernt die Zuordnung).
+    /// Die ganze Umwandlung für Strg+Z / Strg+Y: Anlegen des Tickets **und** Zuordnung samt Abhaken der Karte
+    /// ([`TicketOp::TodoConversion`]) in einem Schritt. Rückgängig löst die Zuordnung, öffnet die Karte wieder (war sie vorher
+    /// schon erledigt, bleibt sie es) und entfernt das Ticket; Wiederholen legt es mit derselben Kennung an und hakt die Karte erneut ab.
     pub op: TicketOp,
-    /// Das Abhaken der Karte (`None`, wenn sie schon erledigt war) für die History der Todo-Liste.
-    /// Bekannte Lücke: Die Umwandlung läuft in der Übersicht des Expertenmodus, die (anders als die einfache Liste in
-    /// `tasks_ui.rs`) keine eigene Todo-Historie hat; die Oberfläche legt `todo_op` deshalb nirgends ab. Strg+Z auf der
-    /// Umwandlung entfernt das Ticket (`op`), die Karte bleibt abgehakt und lässt sich von Hand wieder öffnen.
-    pub todo_op: Option<TaskOp>,
     /// Tags, die nicht übernommen werden konnten (kein Labels-Feld am Typ).
     pub dropped_tags: Vec<String>,
     /// Der Text der Karte konnte nicht übernommen werden (kein Description-Feld oder Wert unzulässig).
@@ -141,7 +140,7 @@ pub fn convert_todo_to_ticket(conn: &Connection, todo_id: i64, project_id: i64, 
 /// Wie [`convert_todo_to_ticket`], mit zusätzlichen Feldwerten (z. B. für Pflichtfelder des Typs); sie haben Vorrang vor
 /// den aus der Karte übernommenen.
 pub fn convert_todo_with_values(conn: &Connection, todo_id: i64, project_id: i64, type_id: i64, extra: &[(i64, Value)], source: &Source) -> TRes<Conversion> {
-    let mut conv = atomic(conn, || {
+    atomic(conn, || {
             let item = tasks::get_item(conn, todo_id).map_err(task_err)?;
             if let Some(tid) = converted_ticket_of(conn, todo_id)? {
                 return Err(TicketError::TodoAlreadyConverted { ticket_id: tid });
@@ -181,19 +180,41 @@ pub fn convert_todo_with_values(conn: &Connection, todo_id: i64, project_id: i64
                 values.push((*fid, v.clone()));
             }
             let (ticket, op) = create_ticket(conn, &NewTicket { project_id, type_id, title, parent_id: None, values }, source)?;
-            conn.execute("INSERT INTO todo_conversions (todo_id, ticket_id) VALUES (?1, ?2)", params![todo_id, ticket.id])?;
-            Ok(Conversion { ticket, op, todo_op: None, dropped_tags, body_dropped })
-    })?;
-    // Das Abhaken läuft in einer eigenen Transaktion der Todo-Liste; scheitert es, wird das Ticket wieder entfernt.
-    match tasks::set_done(conn, todo_id, true) {
-        Ok(op) => conv.todo_op = op,
-        Err(e) => {
-            let _ = delete_ticket(conn, conv.ticket.id, source);
-            return Err(task_err(e));
+            // Zuordnung und Abhaken über dieselbe Operation wie beim Wiederholen (Strg+Y), damit beides gleich aussieht
+            let link = TicketOp::TodoConversion { todo: todo_id, ticket: ticket.id, was_done: item.done, present: true };
+            run_conversion(conn, todo_id, ticket.id, item.done, true)?;
+            let ticket = get_ticket(conn, ticket.id)?;
+            Ok(Conversion { ticket, op: TicketOp::Batch(vec![op, link]), dropped_tags, body_dropped })
+    })
+}
+
+/// Karte direkt abhaken oder öffnen, ohne eigene Transaktion (läuft in der Transaktion der Ticket-Operation). Ändert nur bei
+/// echtem Wechsel, damit der Zeitpunkt des Abhakens erhalten bleibt.
+fn raw_set_card_done(conn: &Connection, todo_id: i64, done: bool) -> TRes<()> {
+    conn.execute(
+        "UPDATE todo_items SET done = ?2, done_at = ?3, updated_at = ?4 WHERE id = ?1 AND done <> ?2",
+        params![todo_id, done as i64, if done { Some(tasks::now()) } else { None }, tasks::now()],
+    )?;
+    Ok(())
+}
+
+/// Ausführung von [`TicketOp::TodoConversion`]. `present`: Karte abhaken und dem Ticket zuordnen; sonst Zuordnung lösen und die
+/// Karte wieder öffnen (falls sie vorher offen war). Ist die Karte inzwischen gelöscht, gibt es beim Rückwärtsgehen nichts mehr zu tun.
+pub(crate) fn run_conversion(conn: &Connection, todo_id: i64, ticket_id: i64, was_done: bool, present: bool) -> TRes<()> {
+    if present {
+        tasks::get_item(conn, todo_id).map_err(task_err)?;
+        match converted_ticket_of(conn, todo_id)? {
+            Some(t) if t != ticket_id => return Err(TicketError::TodoAlreadyConverted { ticket_id: t }),
+            Some(_) => {}
+            None => {
+                conn.execute("INSERT INTO todo_conversions (todo_id, ticket_id) VALUES (?1, ?2)", params![todo_id, ticket_id])?;
+            }
         }
+        raw_set_card_done(conn, todo_id, true)
+    } else {
+        conn.execute("DELETE FROM todo_conversions WHERE todo_id = ?1 AND ticket_id = ?2", params![todo_id, ticket_id])?;
+        if was_done { Ok(()) } else { raw_set_card_done(conn, todo_id, false) }
     }
-    conv.ticket = get_ticket(conn, conv.ticket.id)?;
-    Ok(conv)
 }
 
 #[cfg(test)]
@@ -260,8 +281,14 @@ mod tests {
         assert!(t.done);
         assert_eq!(t.converted_to, Some(conv.ticket.id));
         assert_eq!(converted_ticket_of(&f.c, a).unwrap(), Some(conv.ticket.id));
-        assert!(conv.todo_op.is_some(), "für die History der Todo-Liste");
-        assert!(matches!(conv.op, TicketOp::Created { .. }));
+        // Anlegen und Zuordnung/Abhaken sind ein Schritt für Strg+Z
+        match &conv.op {
+            TicketOp::Batch(v) => {
+                assert!(matches!(v[0], TicketOp::Created { .. }));
+                assert_eq!(v[1], TicketOp::TodoConversion { todo: a, ticket: conv.ticket.id, was_done: false, present: true });
+            }
+            other => panic!("Batch erwartet: {other:?}"),
+        }
         // nur einmal
         assert_eq!(convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap_err(), TicketError::TodoAlreadyConverted { ticket_id: conv.ticket.id });
         assert_eq!(crate::planning::ticket_list::list_tickets(&f.c, Some(f.project), &Default::default()).unwrap().total, 1);
@@ -334,8 +361,8 @@ Zweite")));
         let a = todo(&f.c, "A", "", &[]);
         tasks::set_done(&f.c, a, true).unwrap();
         let conv = convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap();
-        assert!(conv.todo_op.is_none());
-        delete_ticket(&f.c, conv.ticket.id, &ui()).unwrap();
+        assert!(matches!(&conv.op, TicketOp::Batch(v) if matches!(v[1], TicketOp::TodoConversion { was_done: true, .. })));
+        crate::planning::tickets::delete_ticket(&f.c, conv.ticket.id, &ui()).unwrap();
         assert_eq!(converted_ticket_of(&f.c, a).unwrap(), None, "Zuordnung kaskadiert");
         let again = convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap();
         assert_eq!(again.ticket.key(), "PAN-2", "Nummer 1 wird nicht wiederverwendet");
@@ -345,15 +372,76 @@ Zweite")));
         assert!(get_ticket(&f.c, again.ticket.id).is_ok(), "das Ticket bleibt");
     }
 
+    fn card_done(c: &Connection, id: i64) -> bool {
+        todo_ticket(c, id).unwrap().done
+    }
+
     #[test]
-    fn the_todo_check_can_be_undone_with_the_task_history() {
+    fn undoing_a_conversion_reopens_the_card_and_releases_it_and_redo_converts_again() {
+        let f = Fx::new();
+        let a = todo(&f.c, "A", "Text", &["x"]);
+        let conv = convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap();
+        let id = conv.ticket.id;
+        assert!(card_done(&f.c, a));
+        let mut h: crate::undo::History<TicketOp> = crate::undo::History::new(5);
+        h.push(conv.op.clone());
+        // Rückgängig: Ticket weg, Karte wieder offen und wieder umwandelbar
+        assert!(h.undo(&f.c).unwrap());
+        assert!(get_ticket(&f.c, id).unwrap_err().is_not_found());
+        assert!(!card_done(&f.c, a));
+        assert_eq!(converted_ticket_of(&f.c, a).unwrap(), None);
+        assert!(todo_ticket(&f.c, a).unwrap().converted_to.is_none());
+        // Wiederholen: dasselbe Ticket (Kennung, Schlüssel, Beschreibung), Karte abgehakt und zugeordnet
+        assert!(h.redo(&f.c).unwrap());
+        assert_eq!(get_ticket(&f.c, id).unwrap().key(), "PAN-1");
+        assert!(card_done(&f.c, a));
+        assert_eq!(converted_ticket_of(&f.c, a).unwrap(), Some(id));
+        assert_eq!(convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap_err(), TicketError::TodoAlreadyConverted { ticket_id: id });
+        // und wieder zurück, mehrfach
+        assert!(h.undo(&f.c).unwrap());
+        assert!(h.redo(&f.c).unwrap());
+        assert!(h.undo(&f.c).unwrap());
+        assert!(!card_done(&f.c, a) && converted_ticket_of(&f.c, a).unwrap().is_none());
+        // nach dem Rückgängig lässt sich die Karte neu umwandeln (die Nummer 1 wird nicht wiederverwendet)
+        let again = convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap();
+        assert_eq!(again.ticket.key(), "PAN-2");
+    }
+
+    #[test]
+    fn undoing_a_conversion_keeps_a_card_done_that_was_done_before() {
         let f = Fx::new();
         let a = todo(&f.c, "A", "", &[]);
+        tasks::set_done(&f.c, a, true).unwrap();
         let conv = convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap();
-        let mut h: crate::undo::History<TaskOp> = crate::undo::History::new(5);
-        h.push(conv.todo_op.unwrap());
-        h.undo(&f.c).unwrap();
-        assert!(!todo_ticket(&f.c, a).unwrap().done);
-        assert_eq!(todo_ticket(&f.c, a).unwrap().converted_to, Some(conv.ticket.id), "die Zuordnung bleibt");
+        let mut h: crate::undo::History<TicketOp> = crate::undo::History::new(5);
+        h.push(conv.op);
+        assert!(h.undo(&f.c).unwrap());
+        assert!(card_done(&f.c, a), "war schon erledigt, bleibt es");
+        assert_eq!(converted_ticket_of(&f.c, a).unwrap(), None);
+        assert!(h.redo(&f.c).unwrap());
+        assert!(card_done(&f.c, a) && converted_ticket_of(&f.c, a).unwrap().is_some());
+    }
+
+    #[test]
+    fn undo_and_redo_of_a_conversion_cope_with_a_deleted_card_and_a_ticket_with_data() {
+        let f = Fx::new();
+        // Karte nach der Umwandlung gelöscht: Rückgängig entfernt das Ticket trotzdem, Wiederholen meldet es und ändert nichts
+        let a = todo(&f.c, "A", "", &[]);
+        let conv = convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap();
+        let mut h: crate::undo::History<TicketOp> = crate::undo::History::new(5);
+        h.push(conv.op);
+        tasks::delete_item(&f.c, a).unwrap();
+        assert!(h.undo(&f.c).unwrap());
+        assert!(get_ticket(&f.c, conv.ticket.id).unwrap_err().is_not_found());
+        assert!(h.redo(&f.c).is_err(), "die Karte gibt es nicht mehr");
+        assert!(get_ticket(&f.c, conv.ticket.id).unwrap_err().is_not_found(), "alles zurückgerollt, kein halbes Ticket");
+        // Ticket hat inzwischen einen Kommentar: das Zurücknehmen scheitert und lässt auch die Karte unberührt
+        let b = todo(&f.c, "B", "", &[]);
+        let conv = convert_todo_to_ticket(&f.c, b, f.project, f.task, &ui()).unwrap();
+        crate::planning::comments::add_comment(&f.c, conv.ticket.id, "x", &ui()).unwrap();
+        let mut h: crate::undo::History<TicketOp> = crate::undo::History::new(5);
+        h.push(conv.op);
+        assert!(h.undo(&f.c).is_err());
+        assert!(card_done(&f.c, b) && converted_ticket_of(&f.c, b).unwrap() == Some(conv.ticket.id), "nichts halb zurückgenommen");
     }
 }

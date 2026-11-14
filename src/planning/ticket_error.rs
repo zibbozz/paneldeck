@@ -86,6 +86,8 @@ pub enum TicketError {
     WorkKindInvalid,
     /// Das Anlegen lässt sich nicht zurücknehmen, weil das Ticket inzwischen weitere Daten hat.
     CannotUndoCreate,
+    /// Die Zuordnung zu Sprints lässt sich nicht zurücknehmen oder wiederholen, weil sich Sprints oder Zeilen inzwischen geändert haben.
+    SprintChanged,
     /// Die Todo-Karte wurde schon in ein Ticket umgewandelt.
     TodoAlreadyConverted { ticket_id: i64 },
     Db(String),
@@ -169,6 +171,10 @@ impl TicketError {
                 "Das Anlegen lässt sich nicht zurücknehmen: Das Ticket hat inzwischen Kommentare, Zeiten, Verknüpfungen oder Kinder.",
                 "Creating cannot be undone: the ticket now has comments, time entries, links or children.",
             ),
+            TicketError::SprintChanged => s(
+                "Die Sprint-Zuordnung lässt sich nicht mehr zurücknehmen oder wiederholen: Der Sprint wurde inzwischen gestartet, abgeschlossen, gelöscht oder anders geändert.",
+                "The sprint assignment can no longer be undone or redone: the sprint has been started, completed, deleted or changed in the meantime.",
+            ),
             TicketError::TodoAlreadyConverted { .. } => s("Diese Todo-Karte wurde schon in ein Ticket umgewandelt.", "This todo card has already been converted to a ticket."),
             TicketError::Db(e) => format!("{}: {e}", lang.t("Datenbankfehler", "Database error")),
         }
@@ -233,6 +239,7 @@ mod tests {
             TicketError::StartInvalid,
             TicketError::WorkKindInvalid,
             TicketError::CannotUndoCreate,
+            TicketError::SprintChanged,
             TicketError::TodoAlreadyConverted { ticket_id: 4 },
             TicketError::Db("x".into()),
         ];

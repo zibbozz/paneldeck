@@ -8,7 +8,9 @@ use crate::calc::calendar::WorkCalendar;
 use crate::calc::progress::Basis;
 use crate::db::Db;
 use crate::planning::sprints::releases::{list_releases, release_progress, Release, ReleaseKind, ReleaseProgress};
-use crate::planning::sprints::sprint::{backlog, get_sprint, list_sprints, move_tickets_to_backlog, move_tickets_to_sprint, sprint_content, Sprint, SprintContent, SprintState};
+use crate::planning::ops::TicketOp;
+use crate::planning::sprints::membership::{move_tickets_to_backlog_tracked, move_tickets_to_sprint_tracked};
+use crate::planning::sprints::sprint::{backlog, get_sprint, list_sprints, sprint_content, Sprint, SprintContent, SprintState};
 use crate::planning::sprints::{burndown_for_sprint, sprint_report, velocity_for_project, SRes, SprintError, SprintReport, SprintTotals};
 use crate::planning::statuses::StatusCategory;
 use crate::planning::summary::ProjectSummary;
@@ -144,28 +146,28 @@ pub fn load_backlog(conn: &Connection, sum: &ProjectSummary, show_done: bool, la
 
 // ------------------------------------------------------------------ Fallenlassen und Verschieben
 
-/// Führt einen Drop-Plan aus: erst die Zugehörigkeit (Sprint/Backlog), dann der Rang. Liefert, wie viele Tickets den Bereich gewechselt haben.
-///
-/// Bekannte Lücke: Nicht über Strg+Z rückgängig zu machen. Die Zugehörigkeit zu einem Sprint hat keine `TicketOp` (sie schreibt
-/// zusätzlich Sprint-Ereignisse für Burndown und Bericht); eine Umkehrung bräuchte eine neue Operationsart samt Gegenbuchung
-/// der Ereignisse. Nur der Rang ließe sich umkehren, das wäre als halber Schritt irreführend.
-pub fn apply_drop(conn: &Connection, plan: &DropPlan) -> Result<usize, SprintError> {
-    let moved = match plan.target {
-        Section::Backlog => move_tickets_to_backlog(conn, &plan.ids)?,
-        Section::Sprint(id) => move_tickets_to_sprint(conn, id, &plan.ids)?,
+/// Führt einen Drop-Plan aus: erst die Zugehörigkeit (Sprint/Backlog), dann der Rang. Liefert, wie viele Tickets den Bereich gewechselt haben,
+/// und die Operation für Strg+Z / Strg+Y: Zugehörigkeit (samt Sprint-Zeilen für Burndown und Bericht, siehe `sprints::membership`) und
+/// Rang bilden **einen** Schritt (`None`, wenn sich nichts geändert hat).
+pub fn apply_drop(conn: &Connection, plan: &DropPlan) -> Result<(usize, Option<TicketOp>), SprintError> {
+    let (moved, change) = match plan.target {
+        Section::Backlog => move_tickets_to_backlog_tracked(conn, &plan.ids)?,
+        Section::Sprint(id) => move_tickets_to_sprint_tracked(conn, id, &plan.ids)?,
     };
+    let mut ops: Vec<TicketOp> = change.map(TicketOp::Sprint).into_iter().collect();
     for id in &plan.ids {
-        move_rank(conn, *id, plan.before)?;
+        ops.extend(move_rank(conn, *id, plan.before)?);
     }
-    Ok(moved)
+    Ok((moved, TicketOp::combine(ops)))
 }
 
-/// Verschiebt Tickets aus dem Kontextmenü (ohne Rang zu ändern).
-pub fn move_to(conn: &Connection, target: Section, ids: &[i64]) -> Result<usize, SprintError> {
-    match target {
-        Section::Backlog => move_tickets_to_backlog(conn, ids),
-        Section::Sprint(id) => move_tickets_to_sprint(conn, id, ids),
-    }
+/// Verschiebt Tickets aus dem Kontextmenü (ohne Rang zu ändern); liefert dazu die Operation für Strg+Z.
+pub fn move_to(conn: &Connection, target: Section, ids: &[i64]) -> Result<(usize, Option<TicketOp>), SprintError> {
+    let (moved, change) = match target {
+        Section::Backlog => move_tickets_to_backlog_tracked(conn, ids)?,
+        Section::Sprint(id) => move_tickets_to_sprint_tracked(conn, id, ids)?,
+    };
+    Ok((moved, change.map(TicketOp::Sprint)))
 }
 
 // ------------------------------------------------------------------ Kalender
@@ -327,7 +329,7 @@ pub fn bar_widths(parts: [u32; 3], w: f32) -> [f32; 3] {
 mod tests {
     use super::*;
     use crate::planning::projects::{update_project, UpdateProject};
-    use crate::planning::sprints::sprint::{create_sprint, start_sprint, NewSprint};
+    use crate::planning::sprints::sprint::{create_sprint, move_tickets_to_sprint, start_sprint, NewSprint};
     use crate::planning::summary::project_summary;
     use crate::planning::tickets::fixture::Fx;
 
@@ -426,19 +428,19 @@ mod tests {
         let sp = sprint(&f, "S", None);
         // B und C in den Sprint, C vor B
         let plan = DropPlan { target: Section::Sprint(sp), before: None, ids: vec![b.id, c.id] };
-        assert_eq!(apply_drop(&f.c, &plan).unwrap(), 2);
+        assert_eq!(apply_drop(&f.c, &plan).unwrap().0, 2);
         let sum = project_summary(&f.c, f.project).unwrap();
         let data = load_backlog(&f.c, &sum, true, Lang::En).unwrap();
         assert_eq!(data.section_ids(Section::Sprint(sp)), vec![b.id, c.id]);
         assert_eq!(data.section_ids(Section::Backlog), vec![a.id]);
         // C vor B (innerhalb des Sprints): nur Rang, niemand wechselt den Bereich
         let plan = DropPlan { target: Section::Sprint(sp), before: Some(b.id), ids: vec![c.id] };
-        assert_eq!(apply_drop(&f.c, &plan).unwrap(), 0);
+        assert_eq!(apply_drop(&f.c, &plan).unwrap().0, 0);
         let data = load_backlog(&f.c, &sum, true, Lang::En).unwrap();
         assert_eq!(data.section_ids(Section::Sprint(sp)), vec![c.id, b.id]);
         // beide ins Backlog vor A, in der gezogenen Reihenfolge
         let plan = DropPlan { target: Section::Backlog, before: Some(a.id), ids: vec![b.id, c.id] };
-        assert_eq!(apply_drop(&f.c, &plan).unwrap(), 2);
+        assert_eq!(apply_drop(&f.c, &plan).unwrap().0, 2);
         let data = load_backlog(&f.c, &sum, true, Lang::En).unwrap();
         assert_eq!(data.section_ids(Section::Backlog), vec![b.id, c.id, a.id]);
         assert!(data.section_ids(Section::Sprint(sp)).is_empty());
@@ -452,7 +454,7 @@ mod tests {
         start_sprint(&f.c, sp, &WorkCalendar::default()).unwrap();
         crate::planning::sprints::sprint::complete_sprint(&f.c, sp, crate::planning::sprints::Leftover::ToBacklog).unwrap();
         let plan = DropPlan { target: Section::Sprint(sp), before: None, ids: vec![a.id] };
-        assert_eq!(apply_drop(&f.c, &plan), Err(SprintError::SprintCompleted));
+        assert_eq!(apply_drop(&f.c, &plan).unwrap_err(), SprintError::SprintCompleted);
     }
 
     #[test]
@@ -461,11 +463,11 @@ mod tests {
         let a = f.mk(f.task, "A");
         let b = f.mk(f.task, "B");
         let sp = sprint(&f, "S", None);
-        assert_eq!(move_to(&f.c, Section::Sprint(sp), &[b.id, a.id]).unwrap(), 2);
+        assert_eq!(move_to(&f.c, Section::Sprint(sp), &[b.id, a.id]).unwrap().0, 2);
         let sum = project_summary(&f.c, f.project).unwrap();
         let data = load_backlog(&f.c, &sum, true, Lang::En).unwrap();
         assert_eq!(data.section_ids(Section::Sprint(sp)), vec![a.id, b.id], "nach Rang, nicht nach Reihenfolge der Auswahl");
-        assert_eq!(move_to(&f.c, Section::Backlog, &[a.id]).unwrap(), 1);
+        assert_eq!(move_to(&f.c, Section::Backlog, &[a.id]).unwrap().0, 1);
     }
 
     #[test]

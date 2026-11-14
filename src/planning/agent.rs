@@ -159,7 +159,7 @@ pub fn ticket_err(lang: Lang, e: TicketError) -> ToolError {
         TicketError::LinkTargetMismatch | TicketError::LinkSelf => mk("link_not_allowed", None),
         TicketError::LinkDuplicate => mk("already_exists", None),
         TicketError::LinkTargetMissing => mk("not_found", None),
-        TicketError::TodoAlreadyConverted { .. } | TicketError::CannotUndoCreate => mk("conflict", None),
+        TicketError::TodoAlreadyConverted { .. } | TicketError::CannotUndoCreate | TicketError::SprintChanged => mk("conflict", None),
         TicketError::TitleEmpty
         | TicketError::TitleTooLong { .. }
         | TicketError::TypeNotInProject

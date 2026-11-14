@@ -166,7 +166,12 @@ impl PlanUi {
     /// Strg+N (neues Ticket), Strg+Z / Strg+Y (rückgängig/wiederholen), Esc (zurück) im Ticketbereich.
     pub(super) fn ticket_keys(&mut self, ctx: &egui::Context, cx: &Cx) {
         let Some(sum) = self.sum.clone() else { return };
-        if sum.project.system || self.tab != Tab::Tickets || self.tickets.any_modal() || self.quick.is_open() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() {
+        if sum.project.system {
+            // System-Projekt „Todolist“: nur Strg+Z / Strg+Y (Umwandlung einer Karte zurücknehmen), siehe `undo_keys.rs`
+            self.todo_keys(ctx, cx);
+            return;
+        }
+        if self.tab != Tab::Tickets || self.tickets.any_modal() || self.quick.is_open() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::N)) {
@@ -215,6 +220,8 @@ impl PlanUi {
             }
         }
         self.tickets.invalidate();
+        // eine Umwandlung zurückzunehmen ändert auch die Karten der Todo-Liste
+        self.todo.dirty = true;
         self.dirty = true;
     }
 
