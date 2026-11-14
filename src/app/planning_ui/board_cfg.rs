@@ -437,8 +437,8 @@ impl PlanUi {
             let entries: Vec<(i64, Value)> = d.fields.iter().map(|f| (f.label.id, f.value.clone())).collect();
             let vals = logic::collect_values(&entries);
             match transition_ticket(cx.conn, d.ticket_id, d.to_status, &vals, &Source::ui()) {
-                Ok(_) => {
-                    self.board_rank(cx, d.ticket_id, d.before);
+                Ok(op) => {
+                    self.board_rank(cx, d.ticket_id, d.before, op);
                     return;
                 }
                 Err(TicketError::TransitionNeedsFields(missing)) => {
