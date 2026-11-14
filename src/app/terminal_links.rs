@@ -74,6 +74,26 @@ fn live() -> Vec<LiveSession> {
     LIVE.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// Gewünschter Sprung zu einer Sitzung (aus der Ticket-Ansicht): die Oberfläche der Todo-Liste kennt die Anwendung nicht und
+/// legt den Wunsch hier ab; `App::tlinks_frame` holt ihn im nächsten Bild ab.
+static JUMP: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Merkt den Sprung zur Sitzung `session` (Klick auf den Terminal-Chip eines Felds).
+pub fn request_jump(session: u64) {
+    *JUMP.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
+}
+
+/// Holt den gemerkten Sprung ab (einmalig).
+pub fn take_jump() -> Option<u64> {
+    JUMP.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Nur für Tests: setzt die Liste der Sitzungen, wie sie die Anwendung jedes Bild veröffentlicht.
+#[cfg(test)]
+pub fn set_live_for_test(sessions: Vec<LiveSession>) {
+    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = sessions;
+}
+
 /// Zustand der Verknüpfung mit diesem Ziel (siehe Modul-Doku). Nur im UI-Thread der App sinnvoll.
 #[allow(dead_code)] // API für die Ticket-Ansicht
 pub fn terminal_link_state(target: &str) -> LinkState {
@@ -457,7 +477,7 @@ pub(super) fn chip_row(ui: &mut Ui, salt: Id, session: u64, chips: &[Chip], righ
 
 impl App {
     /// Pro Bild: Sitzungen veröffentlichen und die Chips ab und zu (oder nach einer Änderung) neu laden.
-    pub(super) fn tlinks_frame(&mut self) {
+    pub(super) fn tlinks_frame(&mut self, ctx: &egui::Context) {
         let sessions: Vec<LiveSession> = self
             .entries
             .values()
@@ -468,6 +488,10 @@ impl App {
             })
             .collect();
         *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = sessions;
+        // Sprung aus einem Terminal-Feld der Ticket-Ansicht (Klick auf den Chip).
+        if let Some(id) = take_jump() {
+            self.open_session_from_ticket(ctx, id);
+        }
 
         if !self.tlinks.dirty && self.tlinks.stamp.is_some_and(|t| t.elapsed() < Duration::from_millis(1000)) {
             return;

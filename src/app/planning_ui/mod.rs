@@ -32,6 +32,7 @@ mod quick_menu;
 mod query_bar;
 mod query_help_ui;
 mod query_logic;
+mod ref_inputs;
 mod release_view;
 mod saved_filters;
 mod search_tab;

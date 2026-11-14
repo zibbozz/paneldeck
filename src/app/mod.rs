@@ -2708,7 +2708,7 @@ impl eframe::App for App {
         self.poll_shell(ctx);
         self.poll_background(ctx);
         self.sync_watchers(ctx);
-        self.tlinks_frame();
+        self.tlinks_frame(ctx);
         self.poll_history();
         self.check_budget(ctx);
         self.handle_drops(ctx);
