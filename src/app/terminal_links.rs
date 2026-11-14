@@ -319,7 +319,7 @@ fn search_hits(conn: &Connection, query: &str, lang: Lang, linked: &[i64], limit
 }
 
 /// Legt die Verknüpfung an (System-Typ `terminal`).
-fn link_ticket_to(conn: &Connection, ticket: i64, session: u64) -> Result<(), TicketError> {
+pub(super) fn link_ticket_to(conn: &Connection, ticket: i64, session: u64) -> Result<(), TicketError> {
     let lt = link_type_by_key(conn, "terminal")?;
     add_link(conn, ticket, lt.id, Target::Terminal(target_of(session)), &Source::ui())?;
     Ok(())
@@ -517,6 +517,12 @@ impl App {
     }
 
     /// Verknüpfung entfernen (Chip: „×“ oder Rechtsklick).
+    /// Die Verknüpfungs-Chips beim nächsten Bild neu laden (nach Änderungen von außen, z. B. dem Schnellmenü).
+    pub(super) fn tlinks_invalidate(&mut self) {
+        self.tlinks.dirty = true;
+        self.tlinks.stamp = None;
+    }
+
     pub(super) fn tlinks_unlink(&mut self, ticket: i64, session: u64) {
         let lang = self.settings.language;
         let Some(db) = self.db.as_ref() else { return };

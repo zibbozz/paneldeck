@@ -197,6 +197,8 @@ pub struct SearchSchema {
     preds: Vec<(String, Pred)>,
     sorts: Vec<(String, SortKw)>,
     pub(super) kw_fields: HashMap<i64, Field>,
+    /// Die aktiven Sprints des Bereichs (Kennung, Name) für `activeSprint()` (Stand beim Aufbau des Schemas).
+    pub(super) active_sprints: Vec<(i64, String)>,
 }
 
 impl SearchSchema {
@@ -398,12 +400,8 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     reg.add(&nm("starred", "Stern"), FieldType::Bool, false, Store::Starred);
     reg.add(&nm("project", "Projekt"), FieldType::Option(project_set.flat_names()), false, Store::Project(project_set));
     if projects.iter().any(|p| p.use_sprints) {
-        // EINHÄNGEPUNKT Sprints: ohne Tabelle steht das Feld als Text im Schema, die Auswertung meldet `NotAvailableYet`.
-        let ty = match pending::sprint_names(conn, scope) {
-            Some(names) => FieldType::Option(names),
-            None => FieldType::Text,
-        };
-        reg.add(&["sprint".to_string()], ty, false, Store::Sprint);
+        // Auswahlwerte: die Namen der Sprints (siehe `pending.rs`)
+        reg.add(&["sprint".to_string()], FieldType::Option(pending::sprint_names(conn, scope)?), false, Store::Sprint);
     }
     reg.add(&nm("changedBy", "GeändertVon"), FieldType::Option(CHANGED_BY.iter().map(|s| s.to_string()).collect()), false, Store::ChangedBy);
     let terminal_idx = reg
@@ -453,8 +451,13 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             conflicts.push(Conflict { name: groups[win].names[0].clone(), kept: groups[win].fields.first().map(|f| f.0.kind), dropped });
         }
     }
+    let versions_on = pending::versions_enabled(conn, scope)?;
     for wi in winners {
         let g = &groups[wi];
+        // ohne Versionen im Bereich (Schalter `use_versions` überall aus) gibt es diese Felder in der Abfrage nicht
+        if matches!(g.class, Class::Version | Class::Milestone) && !versions_on {
+            continue;
+        }
         // Terminal-Felder namens „terminal“ gehören zum eingebauten Feld
         if g.class == Class::Terminal && g.name_lc == "terminal" {
             if let Store::Values(v) = &mut reg.bindings[terminal_idx].store {
@@ -481,11 +484,7 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             Class::Labels => (FieldType::Labels, true),
             Class::Ticket => (FieldType::TicketRef, false),
             Class::Terminal => (FieldType::Terminal, false),
-            // EINHÄNGEPUNKT Versionen: ohne Tabelle als Text im Schema, die Auswertung meldet `NotAvailableYet`.
-            Class::Version | Class::Milestone => match pending::version_names(conn, scope, g.class == Class::Milestone) {
-                Some(v) => (FieldType::Option(v.into_iter().map(|(_, n)| n).collect()), false),
-                None => (FieldType::Text, false),
-            },
+            Class::Version | Class::Milestone => (FieldType::Option(pending::version_names(conn, scope, g.class == Class::Milestone)?), false),
         };
         let store = Store::Values(Vals { class: g.class, fields: g.fields.iter().map(|f| f.0).collect(), opts, links: false });
         if reg.add(&g.names, ty, multi, store).is_none() {
@@ -527,7 +526,8 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     schema.fields = reg.defs;
     schema.predicates = keyword_names(conn, true, &broken)?;
     schema.sort_keywords = keyword_names(conn, false, &broken)?;
-    Ok(SearchSchema { schema, scope, conflicts, bindings: reg.bindings, by_name: reg.by_name, preds, sorts, kw_fields })
+    let active_sprints = if projects.iter().any(|p| p.use_sprints) { pending::active_sprints(conn, scope)? } else { Vec::new() };
+    Ok(SearchSchema { schema, scope, conflicts, bindings: reg.bindings, by_name: reg.by_name, preds, sorts, kw_fields, active_sprints })
 }
 
 fn keyword_names(conn: &Connection, predicates: bool, broken: &[i64]) -> SRes<Vec<String>> {

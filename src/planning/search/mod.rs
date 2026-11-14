@@ -9,7 +9,7 @@
 //! * [`run_query`], [`run_saved_filter`], [`count`] – parsen, prüfen, übersetzen und mit Zeitlimit ausführen.
 //! * `board` – [`board_view`] und [`move_card`] (Karte in eine Spalte ziehen, mit Workflow-Regeln).
 //! * `seed` – [`seed_demo`]: legt aus einer `query_help::DemoSpec` Projekt, Typen, Felder, Status und Tickets an.
-//! * `pending` – die Einhängepunkte für Sprints und Versionen (bis dahin `SearchError::NotAvailableYet`).
+//! * `pending` – Anschluss an `planning::sprints`: Sprints, Versionen und Meilensteine in der Abfrage (Entscheidungen in der Moduldoku dort).
 //!
 //! # Grenzen und Fehler
 //!
@@ -34,8 +34,10 @@ mod tests;
 mod tests_board;
 #[cfg(test)]
 mod tests_seed;
+#[cfg(test)]
+mod tests_sprints;
 
-pub use board::{board_view, board_view_with, move_card, move_card_with_values, BoardColumnView, BoardPaging, BoardView, MoveError, MoveOutcome, DEFAULT_COLUMN_LIMIT};
+pub use board::{board_source_ids, board_view, board_view_with, move_card, move_card_with_values, BoardColumnView, BoardPaging, BoardView, MoveError, MoveOutcome, DEFAULT_COLUMN_LIMIT};
 pub use compile::{compile, Compiled, MAX_DEPTH, MAX_NODES, MAX_SQL_LEN};
 pub use error::{Feature, Problem, SRes, SearchError};
 pub use rows::{TicketRow, PRIORITY_FIELD_KEY};

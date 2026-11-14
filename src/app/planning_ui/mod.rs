@@ -19,6 +19,10 @@ mod kinds_ed;
 mod links_ed;
 mod overview;
 mod project_form;
+mod quick_ed;
+mod quick_exec;
+mod quick_logic;
+mod quick_menu;
 mod query_bar;
 mod query_help_ui;
 mod query_logic;
@@ -52,6 +56,8 @@ mod workflow_ed;
 mod sprint_ui_tests;
 
 pub(super) use helpers::color_of;
+pub(super) use quick_exec::SessionRequest;
+pub(super) use quick_menu::Out as QuickOut;
 pub(super) use widgets::type_icon;
 
 use super::tasks_ui::Env;
@@ -88,6 +94,7 @@ enum Tab {
     Links,
     WorkKinds,
     Templates,
+    Quick,
 }
 
 /// Rückmeldung unter den Reitern (Fehler rot, Erfolg gedämpft); verschwindet nach einigen Sekunden.
@@ -132,6 +139,8 @@ pub(super) struct PlanUi {
     boards: board_view::State,
     sprints: sprint_view::State,
     releases: release_view::State,
+    quick: quick_menu::State,
+    quick_ed: quick_ed::State,
 }
 
 impl Default for PlanUi {
@@ -165,6 +174,8 @@ impl Default for PlanUi {
             boards: Default::default(),
             sprints: Default::default(),
             releases: Default::default(),
+            quick: Default::default(),
+            quick_ed: Default::default(),
         }
     }
 }
@@ -406,6 +417,7 @@ impl PlanUi {
                 (Tab::Fields, lang.t("Felder", "Fields")),
                 (Tab::Statuses, lang.t("Status", "Statuses")),
                 (Tab::Workflows, lang.t("Workflows", "Workflows")),
+                (Tab::Quick, lang.t("Schnellaktionen", "Quick actions")),
             ]);
         }
         v.push((Tab::Links, lang.t("Verknüpfungstypen", "Link types")));
@@ -482,6 +494,7 @@ impl PlanUi {
                     Tab::Links => self.links_tab(ui, cx),
                     Tab::WorkKinds => self.kinds_tab(ui, cx),
                     Tab::Templates => self.templates_tab(ui, cx),
+                    Tab::Quick => self.quick_tab(ui, cx),
                 }
                 ui.add_space(40.0);
             });
@@ -502,6 +515,8 @@ impl PlanUi {
         self.template_dialogs(ctx, cx);
         self.delete_dialog(ctx, cx);
         self.delete_project_dialog(ctx, cx);
+        self.quick_ed_dialogs(ctx, cx);
+        self.quick_dialogs(ctx, cx);
         self.keywords_dialog_ui(ctx, cx);
         self.ticket_dialogs(ctx, cx);
     }
