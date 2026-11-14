@@ -304,7 +304,14 @@ pub fn describe(conn: &Connection, e: &HistoryEntry, lang: Lang) -> String {
     match &e.field {
         HistoryField::Created => match e.new.as_deref().and_then(|n| n.strip_prefix("clone:")) {
             Some(src) => format!("{} {src}", lang.t("Als Kopie angelegt von", "Created as a copy of")),
-            None => lang.t("Angelegt", "Created").to_string(),
+            None => match e.new.as_deref() {
+                // Import einer Ticket-CSV: der Schlüssel in der Datei steht als Anmerkung (`import:PAN-12`).
+                Some(n) if n == "import" || n.starts_with("import:") => match n.strip_prefix("import:").filter(|k| !k.is_empty()) {
+                    Some(old_key) => format!("{} {old_key})", lang.t("Importiert (Schlüssel in der Datei:", "Imported (key in the file:")),
+                    None => lang.t("Importiert", "Imported").to_string(),
+                },
+                _ => lang.t("Angelegt", "Created").to_string(),
+            },
         },
         HistoryField::Title => format!("{}: {}", lang.t("Titel", "Title"), arrow(quote(lang, e.old.as_deref().unwrap_or("")), quote(lang, e.new.as_deref().unwrap_or("")))),
         HistoryField::Status => format!("Status: {}", arrow(status_text(conn, &e.old, lang), status_text(conn, &e.new, lang))),

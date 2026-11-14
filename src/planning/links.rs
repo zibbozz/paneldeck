@@ -79,7 +79,7 @@ pub fn get_link(conn: &Connection, id: i64) -> TRes<LinkRecord> {
 }
 
 /// Eine Terminal-Kennung, URL oder einen Branch bereinigen und prüfen.
-fn clean_target(t: &Target) -> TRes<Target> {
+pub(crate) fn clean_target(t: &Target) -> TRes<Target> {
     let bad = || TicketError::LinkTargetInvalid;
     Ok(match t {
         Target::Ticket(id) => Target::Ticket(*id),

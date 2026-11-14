@@ -16,6 +16,7 @@
 // Die Schicht ist vollständig, die Oberfläche und die Tickets (nächste Schritte) nutzen sie erst nach und nach.
 #![allow(dead_code)]
 
+pub mod backup_doc;
 pub mod clone_move;
 pub mod comments;
 pub mod defaults;
