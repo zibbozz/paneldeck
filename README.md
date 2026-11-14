@@ -37,8 +37,6 @@ The installer and `paneldeck.exe` are **not code-signed**. A certificate costs m
 ## Todo list and tickets
 The title bar at the top of the window has two tabs: **Terminal Hub** (everything described above, unchanged) and **Todo list**. Switch with a click, `Ctrl+1` / `Ctrl+2` or `Alt+Shift+1` / `Alt+Shift+2`. Paneldeck always starts in the Terminal Hub. Window controls (minimize, maximize, close) sit at the right of the title bar; on Windows 11 the maximize button also shows the Snap Layouts menu.
 
-<!-- TODO screenshot: title bar with the two tabs "Terminal Hub" and "Todo list" (docs/images/titlebar.png and docs/images/de/titlebar.png) -->
-
 ### Simple mode (default)
 With the **Expert mode** switch in the header of the *Todo list* tab turned off, the tab is a plain to-do list:
 
@@ -47,8 +45,6 @@ With the **Expert mode** switch in the header of the *Todo list* tab turned off,
 - The trash icon at the top right deletes a card permanently – after a warning with a **3-second safety timer**. *Delete completed* removes all finished cards the same way; *Hide completed* only hides them.
 - **Tags** are created while you type (like labels in Jira) and get a color; *Manage tags* renames, recolors, merges and deletes them. Filter by tags (all selected tags must match) and by open/done.
 - **Undo / redo** with `Ctrl+Z` and `Ctrl+Y`; the number of remembered steps (3 to 100, default 25) is set under *Settings → Data & backup*.
-
-<!-- TODO screenshot: simple to-do list with cards, tags and a completed card (docs/images/todo-simple.png and docs/images/de/todo-simple.png) -->
 
 ### Expert mode (a small Jira)
 Turn on the **Expert mode** switch (it remembers its state) and the tab becomes a project manager. The simple to-do list stays available as the read-only system project `TODO` (cards are `TODO-12`); a card can be converted into a ticket. The tabs of a project are *Tickets*, *Overview*, *Search*, *Boards*, *Backlog* and *Releases* (if the project uses sprints / versions), *Dashboards*, and the configuration tabs *Types*, *Fields*, *Statuses*, *Workflows*, *Quick actions*, *Link types*, *Kinds of work* and *Templates & backup*.
@@ -62,13 +58,11 @@ Turn on the **Expert mode** switch (it remembers its state) and the tab becomes 
 - **Tickets** have fields per type, parents and children (with progress), a flag and a star, comments, links, **time tracking** (`1h 30m`, `2d`; a bare number means hours) and a change history that records whether the window, the quick menu, an agent (with its session name) or an import made a change. Tickets can be cloned and moved to another type or project.
 - **Kanban boards:** several boards per project with their own columns (several statuses per column), type filter and card contents. Dragging a card to another column is a status change with all workflow rules; reorder inside a column; quick filters for text, type, favorites and flagged tickets. A board takes its tickets from *All tickets* or from a saved filter (also across projects), and *Only the active sprint* shows just the tickets of the active sprint. `Ctrl+Z` / `Ctrl+Y` undo and redo moves, reordering, stars and flags on the board. Cards also show the *Version*, *Milestone* and *Terminal* fields (ended sessions grayed).
 
-<!-- TODO screenshot: expert mode, kanban board of a project with colored cards (docs/images/todo-board.png and docs/images/de/todo-board.png) -->
-<!-- TODO screenshot: expert mode, type editor / field editor / workflow matrix (docs/images/todo-config.png and docs/images/de/todo-config.png) -->
 **Ticket screens:** the *Tickets* tab lists a project's tickets (sortable columns, text search, type/status chips, starred and flagged only) with a **query bar** above it; *New ticket* (`Ctrl+N`) opens the create dialog (choose the type, optionally a parent, *Create another*). A ticket opens on its own page or in a **side panel** next to the list (switchable, remembered) with its fields in sections, comments, links, child tickets, history, time tracking and a status button that offers allowed transitions only (missing required fields are asked in the same dialog). *Rich text* fields are Markdown with a **Text | Visual** switch and a formatting toolbar; ticket keys in the text (`PAN-12`) are clickable. *More actions* has **Clone …**, **Change type / move …** (a dialog lists the fields that move along, are dropped or are new) and **Delete …** (permanent, with the 3-second timer). `Ctrl+Z` / `Ctrl+Y` undo and redo ticket changes, including turning a to-do card into a ticket (also in the to-do overview). From 900 px width the list adds a chip column with version, milestone and terminal; it scrolls to the ticket you opened or just closed. A running *Terminal* entry in a ticket jumps to that session. Whoever opens a ticket from the board, the search, the backlog, a dashboard, the overview or the Terminal Hub gets back with *Back* (`Esc`).
-<!-- TODO screenshot: ticket list and ticket detail page (docs/images/todo-tickets.png and docs/images/de/todo-tickets.png) -->
+
+<p align="center"><img src="docs/images/todo-tickets.png" alt="Ticket list with a ticket open in the side panel" width="100%"><br><sub>The ticket list with a ticket open in the side panel: fields, hierarchy with progress, links and time tracking next to the list (demo data, project "Acme Shop").</sub></p>
 
 **Backlog and sprints** (optional, per project – a project works kanban-style without them): one active sprint with goal, start, end and a duration template; drag tickets between the backlog and sprints; completing a sprint moves open tickets to the backlog or the next sprint; burndown chart with ideal line (work days only), sprint report and velocity over several sprints; versions and milestones with due date, released flag and progress. Drops and *Move to* in the backlog can be undone with `Ctrl+Z` / `Ctrl+Y` (starting, completing or deleting a sprint and the release actions cannot); a sprint lasts at most 4000 days.
-<!-- TODO screenshot: backlog with a sprint and the burndown chart (docs/images/todo-sprint.png and docs/images/de/todo-sprint.png) -->
 
 **Query language:** a JQL-like search over all tickets, with live error messages and suggestions in English and German and a **help page** (question-mark button next to the search field) with a full tutorial and examples. For example:
 
@@ -76,22 +70,21 @@ Turn on the **Expert mode** switch (it remembers its state) and the tab becomes 
 
 Operators: `=` `!=` `~` `!~` `<` `>` `<=` `>=` `IN` `NOT IN` `IS EMPTY`; combine with `AND`, `OR`, `NOT` and parentheses; sort with `ORDER BY` (or `SORT BY`); functions `activeSprint()`, `currentDate()`, `linkedTerminal()`; keywords such as `IS favorite`, `IS NOT blocked` and `SORT BY favorites`, which you can define yourself in the keyword editor. Searches can be saved as filters and used as the source of a board.
 The query bar sits above the ticket list (a valid query replaces the local filters there) and in the **Search** tab, which shows the hits as a table for this project or for all projects. It offers autocomplete (`↑↓`, `Tab`/`Enter`), a history of recent queries and **Save filter** (per project or global); *Manage filters* renames, replaces and deletes them, and *Keywords* opens the keyword editor.
-<!-- TODO screenshot: search tab with the query bar, autocomplete and results (docs/images/todo-search.png and docs/images/de/todo-search.png); help page screenshots are English only: assets/query-help/query-help-<id>.png, registered in src/app/planning_ui/help_shots.rs -->
+<!-- TODO screenshot: help page example images of the query language, English only: assets/query-help/query-help-<id>.png, registered in src/app/planning_ui/help_shots.rs -->
 
 **Quick actions and the quick menu:** a type can define buttons (e.g. "Create Devtask") that create a ticket with preset values, change the status or start a terminal/Claude session linked to the ticket. In a ticket, the **`.`** key opens the quick menu: search the fields of the ticket, press Enter and type the value right there, switch the status (allowed transitions only) or run a quick action.
 Quick actions are edited in the **Quick actions** tab of the project; the quick menu also asks for required fields when a status change needs them.
 
 **Dashboards:** freely arranged tiles on a grid – saved searches (the default tile is one big search), sprint and burndown, counts by status/type/priority as pie or bar charts, booked time, favorites and flagged tickets, and "All projects"; per project or global, several dashboards with one marked as default, exportable as JSON.
 The **Dashboards** tab has an edit mode (move and resize tiles, *Tidy up*); a click on a row opens the ticket, a click on a chart segment opens the search with that filter.
-<!-- TODO screenshot: a dashboard with several tiles (docs/images/todo-dashboard.png and docs/images/de/todo-dashboard.png) -->
+
+<p align="center"><img src="docs/images/todo-dashboard.png" alt="A dashboard with burndown chart, sprint progress and charts" width="100%"><br><sub>A dashboard: burndown chart of the active sprint, sprint progress, tickets by status and priority and booked time per week.</sub></p>
 
 **Export and import** (project backup as JSON, tickets as CSV, type/field templates): the import only accepts Paneldeck's own export format, always creates a **new** project (asking for a new key if it is taken) and never changes existing data. Files over 128 MB are refused.
 The export and import functions live in the **Templates & backup** tab: *Export project (JSON)*, *Export tickets (CSV)* (optionally Excel-safe, formulas are protected, also for cells starting with a tab or carriage return), *Import project …*, *Import tickets (CSV) …* and the template export/import.
 
 ### Tickets and terminals
 In the Terminal Hub (with expert mode on and at least one project) every terminal gets a small link icon in its header – also reachable with a right click on the header or in the sidebar. It opens a mini search for a ticket key or title (`PAN-423`, `login`) and links the ticket to the session. The ticket key then appears as a **chip** in the terminal header and in the sidebar, and the command palette (`Ctrl+Shift+P`) finds tickets too. Clicking the chip opens the ticket in the *Todo list* tab (expert mode is switched on if necessary). Fields of type *Terminal* pick a session from a list. If you close a session, the link stays as "ended" (gray) and becomes active again when the session is resumed.
-
-<!-- TODO screenshot: terminal header with a ticket chip and the link search (docs/images/todo-terminal-link.png and docs/images/de/todo-terminal-link.png) -->
 
 ### Keyboard shortcuts
 | Shortcut | Action |
