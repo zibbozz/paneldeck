@@ -149,6 +149,7 @@ try {
     Check "close_session $sh (selbst angelegt)" (-not (Tool 'close_session' @{ session = $id }).err)
   }
   Check 'unbekannte Sitzung' ((Code (Tool 'send_text' @{ session = 99999; text = 'x' })) -eq 'not_found')
+  Check 'Fehlertexte sind standardmaessig englisch (keine Umlaute)' ((Tool 'send_text' @{ session = 99999; text = 'x' }).text -notmatch '[äöüÄÖÜß]')
   Check 'fremde Sitzung nicht schliessbar' ((Code (Tool 'close_session' @{ session = $sid })) -eq 'forbidden')
   Check 'unbekannte Shell' ((Code (Tool 'create_session' @{ shell = 'gibtsnicht' })) -eq 'bad_args')
   Check 'ungueltiger Ordner' ((Code (Tool 'create_session' @{ cwd = "$work\gibtsnicht" })) -eq 'bad_args')
