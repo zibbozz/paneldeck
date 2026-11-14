@@ -14,12 +14,48 @@ pub const FILE: &str = "paneldeck.db";
 const MIGRATIONS: &[&str] = &[
     // 1: Meta-Tabelle (Schlüssel/Wert)
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;",
+    // 2: Todo-Liste (Einträge, Tags, Zuordnung). `id` wird nie wiederverwendet (AUTOINCREMENT) und ist die Nummer von „TODO-<id>“.
+    // `name_key` ist der kleingeschriebene Tag-Name (Vergleich ohne Groß-/Kleinschreibung); `color` ein „#RRGGBB“-Text.
+    "CREATE TABLE todo_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL DEFAULT '',
+        done INTEGER NOT NULL DEFAULT 0,
+        position INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        done_at TEXT
+    );
+    CREATE INDEX todo_items_position ON todo_items (position);
+    CREATE TABLE todo_tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL UNIQUE,
+        color TEXT NOT NULL
+    );
+    CREATE TABLE todo_item_tags (
+        item_id INTEGER NOT NULL REFERENCES todo_items (id) ON DELETE CASCADE,
+        tag_id INTEGER NOT NULL REFERENCES todo_tags (id) ON DELETE CASCADE,
+        PRIMARY KEY (item_id, tag_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX todo_item_tags_tag ON todo_item_tags (tag_id);",
 ];
 
 /// Aktuelle Schema-Version dieser Programmversion.
 #[cfg(test)]
 pub fn latest_version() -> u32 {
     MIGRATIONS.len() as u32
+}
+
+/// Datenbank im Speicher mit allen Migrationen (für Tests anderer Module).
+#[cfg(test)]
+pub fn open_memory() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", true).unwrap();
+    for m in MIGRATIONS {
+        conn.execute_batch(m).unwrap();
+    }
+    conn
 }
 
 pub struct Db {
