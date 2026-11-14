@@ -6,6 +6,9 @@
 //! * Die Farbe des gewählten Projekts ist im ganzen Reiter die Akzentfarbe ([`PlanUi::accent`], gesetzt von der Anwendung).
 //! * Jeder sichtbare Text steht in beiden Sprachen (`lang.t(de, en)`), Fehler der Datenschicht über `PlanError::message`.
 
+mod board_cfg;
+mod board_logic;
+mod board_view;
 mod delete;
 mod fields_ed;
 mod helpers;
@@ -45,6 +48,7 @@ pub(super) struct Cx<'a> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
     Overview,
+    Boards,
     Types,
     Fields,
     Statuses,
@@ -85,6 +89,7 @@ pub(super) struct PlanUi {
     kinds: kinds_ed::State,
     templates: template_ed::State,
     todo: overview::Todo,
+    boards: board_view::State,
 }
 
 impl Default for PlanUi {
@@ -111,6 +116,7 @@ impl Default for PlanUi {
             kinds: Default::default(),
             templates: Default::default(),
             todo: Default::default(),
+            boards: Default::default(),
         }
     }
 }
@@ -303,6 +309,7 @@ impl PlanUi {
         let system = self.project().is_some_and(|p| p.system);
         let mut v = vec![(Tab::Overview, lang.t("Übersicht", "Overview"))];
         if !system {
+            v.push((Tab::Boards, lang.t("Boards", "Boards")));
             v.extend([
                 (Tab::Types, lang.t("Typen", "Types")),
                 (Tab::Fields, lang.t("Felder", "Fields")),
@@ -330,6 +337,7 @@ impl PlanUi {
         let w = (avail.width() - 40.0).clamp(300.0, 1040.0);
         let x0 = avail.center().x - w / 2.0;
         let col = Rect::from_min_size(Pos2::new(x0, avail.top() + S3), Vec2::new(w, avail.height() - S3));
+        let mut below = avail.top() + S3;
         ui.scope_builder(UiBuilder::new().max_rect(col), |ui| {
             // Reiter innerhalb des Projekts
             let tabs = self.tabs(lang);
@@ -352,10 +360,16 @@ impl PlanUi {
                 ui.horizontal_wrapped(|ui| widgets::error(ui, &text));
                 ui.add_space(S1);
             }
+            // Die Boards brauchen die ganze Breite und Höhe (eigene Rollflächen) – sie werden unterhalb gezeichnet.
+            if self.tab == Tab::Boards {
+                below = ui.cursor().top();
+                return;
+            }
             egui::ScrollArea::vertical().id_salt(("plan_page", self.tab as u8)).auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(w - 8.0);
                 match self.tab {
                     Tab::Overview => self.overview(ui, cx, &proj),
+                    Tab::Boards => {}
                     Tab::Types => self.types_tab(ui, cx),
                     Tab::Fields => self.fields_tab(ui, cx),
                     Tab::Statuses => self.statuses_tab(ui, cx),
@@ -367,10 +381,15 @@ impl PlanUi {
                 ui.add_space(40.0);
             });
         });
+        if self.tab == Tab::Boards {
+            let full = Rect::from_min_max(Pos2::new(avail.left() + S3, below), Pos2::new(avail.right() - S3, avail.bottom()));
+            ui.scope_builder(UiBuilder::new().max_rect(full), |ui| self.boards_tab(ui, cx, &proj));
+        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, cx: &Cx) {
         self.wizard_dialog(ctx, cx);
+        self.board_dialogs(ctx, cx);
         self.settings_dialog(ctx, cx);
         self.fields_dialogs(ctx, cx);
         self.workflow_dialogs(ctx, cx);
