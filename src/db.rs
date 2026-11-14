@@ -232,6 +232,155 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    fn user_version(c: &Connection) -> u32 {
+        c.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap()
+    }
+
+    /// Fremdschlüssel und Datei in Ordnung?
+    fn assert_healthy(c: &Connection) {
+        let ic: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(ic, "ok");
+        let bad: i64 = c.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(bad, 0, "Fremdschlüssel verletzt");
+    }
+
+    /// Ein Datenordner, wie ihn 1.0.x hinterlässt (es gibt dort noch keine Datenbank): Einstellungen, Zustand, Prompts, Themes, Agentenprotokoll.
+    /// Das Öffnen der Datenbank legt sie neu an (ohne Sicherung, es gibt nichts zu sichern) und lässt alle alten Dateien unverändert.
+    #[test]
+    fn upgrade_from_a_1_0_data_folder_creates_the_database_and_leaves_the_old_files_alone() {
+        let d = tmp("db-from-1-0");
+        let files: [(&str, &str); 5] = [
+            ("settings.json", "{\n  \"language\": \"De\",\n  \"ui_scale\": 1.25,\n  \"mcp_level\": 2,\n  \"scrollback_lines\": 20000\n}"),
+            ("state.json", "{\"sessions\": [], \"focused\": 0, \"next_id\": 7, \"projects\": []}"),
+            ("prompts.json", "[{\"name\": \"Größe ä\", \"text\": \"Hallo 😀\"}]"),
+            ("mcp-log.jsonl", "{\"t\":\"2026-01-01T00:00:00\",\"tool\":\"list_sessions\"}\n"),
+            ("themes/mein.json", "{\"name\": \"mein\"}"),
+        ];
+        std::fs::create_dir_all(d.join("themes")).unwrap();
+        for (n, c) in files {
+            std::fs::write(d.join(n), c).unwrap();
+        }
+        let bdir = d.join("backups");
+        let db = open(&d, &bdir).unwrap();
+        assert_eq!(user_version(&db.conn), latest_version());
+        assert!(backup::list(&bdir).is_empty(), "eine neue Datenbank braucht keine Sicherung vor der Migration");
+        // WAL, Fremdschlüssel an
+        let mode: String = db.conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        let fk: i64 = db.conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 1);
+        assert_healthy(&db.conn);
+        drop(db);
+        for (n, c) in files {
+            assert_eq!(std::fs::read_to_string(d.join(n)).unwrap(), c, "{n} darf nicht verändert werden");
+        }
+        // die alten Einstellungen/der alte Zustand sind weiter lesbar, neue Felder bekommen Standardwerte
+        let mut s: crate::state::Settings = crate::state::load_json(&d.join("settings.json")).unwrap();
+        s.sanitize();
+        assert_eq!(s.undo_steps, 25);
+        assert_eq!(s.backup_keep, 2);
+        assert_eq!(s.backup_interval_hours, 24);
+        assert!(s.backup_dir.is_empty());
+        let (saved, note) = crate::state::load_saved(&d.join("state.json"));
+        assert!(note.is_none());
+        assert_eq!(saved.next_id, 7);
+        // zweites Öffnen (Neustart): nichts ändert sich
+        let db = open(&d, &bdir).unwrap();
+        assert_eq!(user_version(&db.conn), latest_version());
+        assert!(backup::list(&bdir).is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Jede Zwischenversion (auch von Entwicklungsständen) lässt sich auf den aktuellen Stand heben, die Daten bleiben erhalten.
+    #[test]
+    fn every_older_schema_version_upgrades_and_keeps_its_data() {
+        for from in 2..latest_version() as usize {
+            let d = tmp(&format!("db-from-v{from}"));
+            let bdir = d.join("backups");
+            {
+                let db = open_with(&d, &bdir, &MIGRATIONS[..from]).unwrap();
+                assert_eq!(user_version(&db.conn), from as u32);
+                let c = &db.conn;
+                c.execute_batch(
+                    "INSERT INTO todo_tags (name, name_key, color) VALUES ('Zuhause', 'zuhause', '#336699');
+                     INSERT INTO todo_items (title, body, done, position, created_at, updated_at) VALUES ('Karte ä😀', 'Text', 0, 1, '2026-01-01T00:00:00', '2026-01-01T00:00:00');
+                     INSERT INTO todo_item_tags (item_id, tag_id) VALUES (1, 1);",
+                )
+                .unwrap();
+                if from >= 3 {
+                    let mut np = crate::planning::projects::NewProject::new("PAN", "Paneldeck", "#112233");
+                    np.with_defaults = true;
+                    crate::planning::projects::create_project(c, &np).unwrap();
+                }
+                db.set_meta("marker", "vorher");
+            }
+            let db = open(&d, &bdir).unwrap();
+            assert_eq!(user_version(&db.conn), latest_version(), "von {from}");
+            assert_healthy(&db.conn);
+            assert_eq!(db.meta("marker").as_deref(), Some("vorher"));
+            let items = crate::tasks::list_items(&db.conn, &crate::tasks::ItemFilter { show_done: true, tags: Vec::new() }).unwrap();
+            assert_eq!(items.len(), 1, "von {from}: Todo-Karte bleibt");
+            assert_eq!(items[0].title, "Karte ä😀");
+            assert_eq!(items[0].tags.len(), 1, "von {from}: Tag-Zuordnung bleibt");
+            let tags = crate::tasks::list_tags(&db.conn).unwrap();
+            assert_eq!((tags.len(), tags[0].name.as_str(), tags[0].color.as_str()), (1, "Zuhause", "#336699"));
+            if from >= 3 {
+                assert_eq!(crate::planning::projects::project_by_key(&db.conn, "PAN").unwrap().name, "Paneldeck");
+            }
+            // neue Tabellen sind benutzbar
+            for t in ["tickets", "sprints", "versions", "milestones", "sprint_tickets", "boards", "saved_filters", "quick_actions"] {
+                db.conn.prepare(&format!("SELECT * FROM {t}")).unwrap_or_else(|e| panic!("{t}: {e}"));
+            }
+            let l = backup::list(&bdir);
+            assert_eq!(l.len(), 1, "von {from}: genau eine Sicherung vor der Migration");
+            assert!(matches!(l[0].kind, backup::Kind::PreMigration { from: f, to } if f == from as u32 && to == latest_version()));
+            // die Sicherung ist der alte Stand
+            let old = Connection::open(&l[0].path).unwrap();
+            let v: u32 = old.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            assert_eq!(v, from as u32);
+            drop(old);
+            drop(db);
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// Eine fehlschlagende Migration lässt nichts Halbes zurück: gleiche Version, keine neue Tabelle, Sicherung vorhanden,
+    /// und ein späterer Lauf mit der korrigierten Migration funktioniert (abbrechbar und wiederholbar).
+    #[test]
+    fn a_failing_migration_is_rolled_back_and_can_be_retried() {
+        let d = tmp("db-fail");
+        let bdir = d.join("backups");
+        let m1 = "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;";
+        let m2 = "CREATE TABLE a (id INTEGER PRIMARY KEY);";
+        let broken = "CREATE TABLE b (id INTEGER PRIMARY KEY); INSERT INTO a VALUES (1); THIS IS NOT SQL;";
+        let fixed = "CREATE TABLE b (id INTEGER PRIMARY KEY); INSERT INTO a VALUES (1);";
+        {
+            let db = open_with(&d, &bdir, &[m1, m2]).unwrap();
+            db.set_meta("marker", "vorher");
+        }
+        match open_with(&d, &bdir, &[m1, m2, broken]) {
+            Err(OpenError::Other(_)) => {}
+            Err(e) => panic!("falscher Fehler: {e:?}"),
+            Ok(_) => panic!("die kaputte Migration muss scheitern"),
+        }
+        {
+            let c = Connection::open(d.join(FILE)).unwrap();
+            assert_eq!(user_version(&c), 2, "Version bleibt");
+            assert!(c.prepare("SELECT * FROM b").is_err(), "Tabelle der kaputten Migration wurde zurückgenommen");
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM a", [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0, "Einfügen der kaputten Migration wurde zurückgenommen");
+        }
+        assert_eq!(backup::list(&bdir).len(), 1, "Sicherung vor dem Versuch");
+        let db = open_with(&d, &bdir, &[m1, m2, fixed]).unwrap();
+        assert_eq!(user_version(&db.conn), 3);
+        assert_eq!(db.meta("marker").as_deref(), Some("vorher"));
+        let n: i64 = db.conn.query_row("SELECT COUNT(*) FROM a", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn backs_up_before_migration_and_keeps_data() {
         let d = tmp("db-migrate");

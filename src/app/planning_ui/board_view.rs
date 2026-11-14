@@ -15,6 +15,7 @@ use super::quick_menu::QuickTarget;
 use super::widgets;
 use super::{Cx, PlanUi};
 use crate::planning::history::Source;
+use crate::planning::ops::TicketOp;
 use crate::planning::projects::Project;
 use crate::planning::summary::ProjectSummary;
 use crate::planning::ticket_error::TicketError;
@@ -23,7 +24,7 @@ use crate::planning::transition::{available_transitions, transition_ticket, Tran
 use crate::planning::views::boards::{default_board_for, duplicate_board, ensure_default_board, list_boards, Board, BoardConfig};
 use crate::state::Lang;
 use crate::style::{self, S1, S2};
-use eframe::egui::{self, Align, Color32, Id, Key, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use eframe::egui::{self, Align, Color32, Id, Key, Layout, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -207,6 +208,7 @@ impl PlanUi {
         let lang = cx.lang;
         let Some(sum) = self.sum.clone() else { return };
         self.boards_sync(cx, &sum, proj);
+        self.board_keys(ui.ctx(), cx);
         self.boards_header(ui, cx, &sum);
         let Some(board) = self.boards.current().cloned() else {
             ui.add_space(S2);
@@ -545,9 +547,9 @@ impl PlanUi {
         let before = logic::rank_before(&ids, id, idx);
         let key = ticket.key();
         match logic::pick_target(&col.status_ids, ticket.status_id, &drag.options) {
-            Pick::Stay => self.board_rank(cx, id, before),
+            Pick::Stay => self.board_rank(cx, id, before, None),
             Pick::Go { status_id, .. } => match transition_ticket(cx.conn, id, status_id, &[], &Source::ui()) {
-                Ok(_) => self.board_rank(cx, id, before),
+                Ok(op) => self.board_rank(cx, id, before, op),
                 Err(TicketError::TransitionNeedsFields(missing)) => {
                     let to_name = sum.status(status_id).map(|s| s.display(lang)).unwrap_or_default();
                     self.boards.needs = Some(NeedsDlg::new(sum, &ticket, status_id, to_name, before, &missing));
@@ -561,20 +563,72 @@ impl PlanUi {
         }
     }
 
-    /// Rang setzen (nach dem Statuswechsel oder beim Umsortieren).
-    pub(super) fn board_rank(&mut self, cx: &Cx, id: i64, before: Option<i64>) {
+    /// Rang setzen (nach dem Statuswechsel oder beim Umsortieren). `first` ist die Operation des vorangegangenen Statuswechsels:
+    /// beide zusammen sind **ein** Schritt für Strg+Z (Karte verschieben = Status + Rang).
+    pub(super) fn board_rank(&mut self, cx: &Cx, id: i64, before: Option<i64>, first: Option<TicketOp>) {
+        let mut ops: Vec<TicketOp> = first.into_iter().collect();
         match move_rank(cx.conn, id, before) {
-            Ok(_) => self.boards.stale = true,
+            Ok(op) => ops.extend(op),
             Err(e) => self.boards.notify(e.message(cx.lang), true),
         }
+        // Gemeinsame Rückgängig-Historie der Ticket-Oberfläche (hängt auch den Ticket-Cache an).
+        self.tickets.commit(TicketOp::combine(ops));
+        self.dirty = true;
+        self.boards.stale = true;
+        self.boards.data_key = None;
+    }
+
+    /// Strg+Z / Strg+Y auf dem Board: letzte Board-Aktion (Verschieben, Umsortieren, Stern/Markierung) zurücknehmen bzw. wiederholen.
+    /// Solange ein Textfeld oder ein Dialog offen ist, gehört die Taste dem Feld.
+    fn board_keys(&mut self, ctx: &egui::Context, cx: &Cx) {
+        if self.boards.cfg.is_some() || self.boards.del.is_some() || self.boards.needs.is_some() || self.boards.drag.is_some() || self.quick.is_open() {
+            return;
+        }
+        if self.tickets.any_modal() || self.wizard.is_some() || self.settings.is_some() || self.delete_project.is_some() || self.del.is_some() || ctx.wants_keyboard_input() {
+            return;
+        }
+        let (redo, undo) = ctx.input_mut(|i| {
+            let redo = i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::CTRL, Key::Y);
+            (redo, !redo && i.consume_key(Modifiers::CTRL, Key::Z))
+        });
+        if undo || redo {
+            self.board_undo(cx, redo);
+        }
+    }
+
+    /// Nimmt die letzte Änderung der gemeinsamen Historie zurück (`redo = false`) bzw. stellt sie wieder her; Meldung unten im Board.
+    pub(super) fn board_undo(&mut self, cx: &Cx, redo: bool) {
+        let lang = cx.lang;
+        let label = if redo { self.tickets.history.next_redo() } else { self.tickets.history.next_undo() }.map(|op| super::ticket_state::op_label(op, lang));
+        let r = if redo { self.tickets.history.redo(cx.conn) } else { self.tickets.history.undo(cx.conn) };
+        match r {
+            Ok(true) => {
+                let l = label.unwrap_or_default();
+                let text = match (lang, redo) {
+                    (Lang::De, false) => format!("Rückgängig: {l}"),
+                    (Lang::En, false) => format!("Undone: {l}"),
+                    (Lang::De, true) => format!("Wiederholt: {l}"),
+                    (Lang::En, true) => format!("Redone: {l}"),
+                };
+                self.boards.notify(text, false);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                let what = if redo { lang.t("Wiederholen nicht möglich", "Cannot redo") } else { lang.t("Rückgängig nicht möglich", "Cannot undo") };
+                self.boards.notify(format!("{what}: {e}"), true);
+            }
+        }
+        self.tickets.invalidate();
+        self.dirty = true;
         self.boards.stale = true;
         self.boards.data_key = None;
     }
 
     fn board_mark(&mut self, cx: &Cx, id: i64, star: bool, on: bool) {
         let r = if star { set_starred(cx.conn, id, on, &Source::ui()) } else { set_flagged(cx.conn, id, on, &Source::ui()) };
-        if let Err(e) = r {
-            self.boards.notify(e.message(cx.lang), true);
+        match r {
+            Ok(op) => self.tickets.commit(op),
+            Err(e) => self.boards.notify(e.message(cx.lang), true),
         }
         self.boards.data_key = None;
     }
@@ -779,8 +833,8 @@ fn paint_card(ui: &mut Ui, card: &Card, cfg: &BoardConfig, lang: Lang, ghost: bo
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
                 for f in &card.fields {
-                    let col = f.color.as_deref().map(color_of);
-                    let text = if col.is_some() { f.text.clone() } else { format!("{}: {}", f.name, f.text) };
+                    let col = if f.muted { Some(style::dim(ui)) } else { f.color.as_deref().map(color_of) };
+                    let text = if f.color.is_some() { f.text.clone() } else { format!("{}: {}", f.name, f.text) };
                     chip(ui, &text, col);
                 }
                 for l in &card.labels {
@@ -793,4 +847,134 @@ fn paint_card(ui: &mut Ui, card: &Card, cfg: &BoardConfig, lang: Lang, ghost: bo
     // Farbstreifen des Typs links
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(rect.left() + 1.0, rect.top() + 5.0), Pos2::new(rect.left() + 4.0, rect.bottom() - 5.0)), 1.5, type_col.gamma_multiply(if dimmed { 0.5 } else { 1.0 }));
     rect
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::planning::summary::project_summary;
+    use crate::planning::tickets::fixture::Fx;
+    use eframe::egui::{Event, RawInput};
+
+    fn db_of(conn: rusqlite::Connection) -> Db {
+        Db { conn, path: std::path::PathBuf::new() }
+    }
+
+    /// Karte `ticket` auf die Spalte mit dem Status `to_status` an Position `idx` fallen lassen (wie beim Ziehen mit der Maus).
+    fn drop_on(ui: &mut PlanUi, cx: &Cx, project: i64, ticket: i64, to_status: i64, idx: usize) {
+        let sum = project_summary(cx.conn, project).unwrap();
+        let bid = ensure_default_board(cx.conn, project, cx.lang).unwrap();
+        let board = list_boards(cx.conn, project).unwrap().into_iter().find(|b| b.id == bid).unwrap();
+        let data = logic::load_board(cx.conn, &sum, &board.config, &Quick::default(), cx.lang).unwrap();
+        let ci = data.columns.iter().position(|c| c.status_ids.contains(&to_status)).expect("Spalte des Zielstatus");
+        let t = get_ticket(cx.conn, ticket).unwrap();
+        let drag = Drag { ticket_id: ticket, grab: Vec2::ZERO, options: available_transitions(cx.conn, ticket).unwrap(), status_id: t.status_id };
+        ui.board_drop(cx, &sum, &data, drag, ci, idx);
+    }
+
+    fn ctrl(key: Key, shift: bool) -> Event {
+        Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers: Modifiers { ctrl: true, command: true, shift, ..Default::default() } }
+    }
+
+    /// Ein Bild lang `board_keys` mit den Ereignissen laufen lassen.
+    fn press(ui: &mut PlanUi, cx: &Cx, events: Vec<Event>) {
+        let ctx = egui::Context::default();
+        let input = RawInput { events, screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))), ..Default::default() };
+        let _ = ctx.run(input, |ctx| ui.board_keys(ctx, cx));
+    }
+
+    fn notice(ui: &PlanUi) -> String {
+        ui.boards.notice.as_ref().map(|n| n.text.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn moving_a_card_is_one_undo_step_for_status_and_rank_and_can_be_redone() {
+        for lang in [Lang::En, Lang::De] {
+            let f = Fx::new();
+            let a = f.mk(f.task, "A");
+            let b = f.mk(f.task, "B");
+            let (project, progress, todo) = (f.project, f.progress, f.todo);
+            let db = db_of(f.c);
+            let cx = Cx { conn: &db.conn, db: &db, lang };
+            let mut ui = PlanUi::default();
+            let (rank_a, rank_b) = (get_ticket(&db.conn, a.id).unwrap().rank, get_ticket(&db.conn, b.id).unwrap().rank);
+            assert!(rank_a < rank_b);
+            // B in die Spalte „In Progress“ und dort vor die (noch nicht vorhandene) Karte: Status + Rang
+            drop_on(&mut ui, &cx, project, b.id, progress, 0);
+            assert_eq!(get_ticket(&db.conn, b.id).unwrap().status_id, Some(progress));
+            assert_eq!(ui.tickets.history.len(), 1, "Status und Rang sind ein Schritt");
+            ui.board_undo(&cx, false);
+            assert_eq!(get_ticket(&db.conn, b.id).unwrap().status_id, Some(todo));
+            assert_eq!((get_ticket(&db.conn, a.id).unwrap().rank, get_ticket(&db.conn, b.id).unwrap().rank), (rank_a, rank_b));
+            assert!(notice(&ui).starts_with(lang.t("Rückgängig", "Undone")), "{}", notice(&ui));
+            ui.board_undo(&cx, true);
+            assert_eq!(get_ticket(&db.conn, b.id).unwrap().status_id, Some(progress));
+            assert!(notice(&ui).starts_with(lang.t("Wiederholt", "Redone")), "{}", notice(&ui));
+        }
+    }
+
+    #[test]
+    fn reordering_inside_a_column_can_be_undone() {
+        let f = Fx::new();
+        let a = f.mk(f.task, "A");
+        let b = f.mk(f.task, "B");
+        let (project, todo) = (f.project, f.todo);
+        let db = db_of(f.c);
+        let cx = Cx { conn: &db.conn, db: &db, lang: Lang::En };
+        let mut ui = PlanUi::default();
+        // B vor A: gleiche Spalte, nur der Rang ändert sich
+        drop_on(&mut ui, &cx, project, b.id, todo, 0);
+        let (ra, rb) = (get_ticket(&db.conn, a.id).unwrap().rank, get_ticket(&db.conn, b.id).unwrap().rank);
+        assert!(rb < ra, "B steht jetzt vor A");
+        ui.board_undo(&cx, false);
+        let (ra, rb) = (get_ticket(&db.conn, a.id).unwrap().rank, get_ticket(&db.conn, b.id).unwrap().rank);
+        assert!(ra < rb, "wieder wie vorher");
+        assert!(notice(&ui).contains("order"), "{}", notice(&ui));
+    }
+
+    #[test]
+    fn ctrl_z_and_ctrl_y_work_on_the_board_but_not_while_dragging_or_with_the_quick_menu() {
+        let f = Fx::new();
+        let a = f.mk(f.task, "A");
+        let (project, progress, todo) = (f.project, f.progress, f.todo);
+        let db = db_of(f.c);
+        let cx = Cx { conn: &db.conn, db: &db, lang: Lang::En };
+        let mut ui = PlanUi::default();
+        drop_on(&mut ui, &cx, project, a.id, progress, 0);
+        // während des Ziehens und bei offenem Schnellmenü passiert nichts
+        ui.boards.drag = Some(Drag { ticket_id: a.id, grab: Vec2::ZERO, options: vec![], status_id: Some(progress) });
+        press(&mut ui, &cx, vec![ctrl(Key::Z, false)]);
+        assert_eq!(get_ticket(&db.conn, a.id).unwrap().status_id, Some(progress));
+        ui.boards.drag = None;
+        ui.open_quick_menu(vec![a.id]);
+        press(&mut ui, &cx, vec![ctrl(Key::Z, false)]);
+        assert_eq!(get_ticket(&db.conn, a.id).unwrap().status_id, Some(progress));
+        ui.quick = Default::default();
+        // Strg+Z macht rückgängig, Strg+Y und Strg+Umschalt+Z wiederholen
+        press(&mut ui, &cx, vec![ctrl(Key::Z, false)]);
+        assert_eq!(get_ticket(&db.conn, a.id).unwrap().status_id, Some(todo));
+        press(&mut ui, &cx, vec![ctrl(Key::Y, false)]);
+        assert_eq!(get_ticket(&db.conn, a.id).unwrap().status_id, Some(progress));
+        press(&mut ui, &cx, vec![ctrl(Key::Z, false)]);
+        press(&mut ui, &cx, vec![ctrl(Key::Z, true)]);
+        assert_eq!(get_ticket(&db.conn, a.id).unwrap().status_id, Some(progress));
+        // nichts mehr zu wiederholen: kein Fehler, keine Änderung
+        press(&mut ui, &cx, vec![ctrl(Key::Y, false)]);
+        assert_eq!(get_ticket(&db.conn, a.id).unwrap().status_id, Some(progress));
+    }
+
+    #[test]
+    fn star_and_flag_toggles_on_the_board_are_undoable_too() {
+        let f = Fx::new();
+        let a = f.mk(f.task, "A");
+        let db = db_of(f.c);
+        let cx = Cx { conn: &db.conn, db: &db, lang: Lang::En };
+        let mut ui = PlanUi::default();
+        ui.board_mark(&cx, a.id, true, true);
+        assert!(get_ticket(&db.conn, a.id).unwrap().starred);
+        ui.board_undo(&cx, false);
+        assert!(!get_ticket(&db.conn, a.id).unwrap().starred);
+        assert!(notice(&ui).contains("star"), "{}", notice(&ui));
+    }
 }

@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 mod data;
 mod dialogs;
 mod dragdrop;
+#[cfg(test)]
+mod glyph_tests;
 mod mcp;
 mod panels;
 mod planning_ui;
@@ -625,6 +627,12 @@ fn home_dir() -> String {
 }
 
 fn setup_fonts(ctx: &egui::Context, choice: &str) {
+    ctx.set_fonts(build_fonts(choice));
+}
+
+/// Baut die Schriftdefinitionen der App (eingebettete + vorhandene Systemschriften); getrennt von `setup_fonts`,
+/// damit Tests die Glyph-Abdeckung ohne Fenster prüfen können.
+fn build_fonts(choice: &str) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     // Cascadia Mono (SIL OFL) ist eingebettet und die bevorzugte Terminal-Schrift; Hack bleibt Fallback.
     fonts.font_data.insert(
@@ -693,7 +701,7 @@ fn setup_fonts(ctx: &egui::Context, choice: &str) {
         fam.retain(|n| n != &k);
         fam.insert(0, k);
     }
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 impl App {

@@ -143,8 +143,9 @@ impl PlanUi {
 
     fn pick_backup(&mut self, cx: &Cx) {
         let Some(path) = crate::notify::open_json() else { return };
-        let text = match std::fs::read(&path) {
-            Ok(b) => String::from_utf8_lossy(&b).to_string(),
+        let text = match crate::planning::backup_doc::read_limited(&path) {
+            Ok(Ok(b)) => String::from_utf8_lossy(&b).to_string(),
+            Ok(Err(e)) => return self.backup_error(cx, &e),
             Err(e) => return self.backup_io_error(cx, ("Die Datei konnte nicht gelesen werden", "The file could not be read"), &e),
         };
         match ProjectDoc::from_json(&text) {
@@ -180,8 +181,9 @@ impl PlanUi {
 
     fn pick_csv(&mut self, cx: &Cx, project_id: i64, key: &str) {
         let Some(path) = crate::notify::open_csv() else { return };
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
+        let bytes = match crate::planning::backup_doc::read_limited(&path) {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => return self.backup_error(cx, &e),
             Err(e) => return self.backup_io_error(cx, ("Die Datei konnte nicht gelesen werden", "The file could not be read"), &e),
         };
         let text = match String::from_utf8(bytes) {

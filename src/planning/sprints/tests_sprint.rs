@@ -794,3 +794,17 @@ fn points_are_read_only_from_the_number_field_story_points() {
     s.set_points(&t, 8.0);
     assert_eq!(ticket_points(s.c(), t.id).unwrap(), Some(8.0));
 }
+
+/// Ein Tippfehler im Jahr (0026 statt 2026) darf keinen Sprint mit hunderttausenden Tagen ergeben (Burndown, Diagramm).
+#[test]
+fn an_absurdly_long_period_is_refused() {
+    let s = S::new();
+    let mut n = NewSprint::new(s.p(), "Lang");
+    n.start = Some(d(26, 11, 2));
+    n.end = Some(d(2026, 11, 3));
+    assert_eq!(create_sprint(s.c(), &n, &s.cal), Err(SprintError::DatesTooLong { max: MAX_SPRINT_SPAN_DAYS }));
+    n.start = Some(d(2026, 11, 3) - chrono::Duration::days(MAX_SPRINT_SPAN_DAYS));
+    let id = create_sprint(s.c(), &n, &s.cal).expect("genau die Obergrenze geht");
+    assert_eq!(update_sprint(s.c(), id, &UpdateSprint { start: Some(Some(d(1000, 1, 1))), ..Default::default() }), Err(SprintError::DatesTooLong { max: MAX_SPRINT_SPAN_DAYS }));
+    assert!(SprintError::DatesTooLong { max: MAX_SPRINT_SPAN_DAYS }.message(Lang::De).contains("4000"));
+}

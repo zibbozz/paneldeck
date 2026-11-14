@@ -18,6 +18,8 @@ pub enum SprintError {
     DatesOrder,
     /// Start oder Ende fehlt (nur Ende ohne Start; aktive Sprints brauchen beide).
     DatesIncomplete,
+    /// Der Zeitraum ist länger als `max` Tage.
+    DatesTooLong { max: i64 },
     /// Dauer außerhalb von 1 bis `max` Arbeitstagen.
     DaysInvalid { max: u32 },
     /// Ein Text (Ziel, Beschreibung) ist zu lang.
@@ -82,6 +84,10 @@ impl SprintError {
             SprintError::DateInvalid => s("Das Datum muss die Form JJJJ-MM-TT haben.", "The date must look like YYYY-MM-DD."),
             SprintError::DatesOrder => s("Das Ende darf nicht vor dem Start liegen.", "The end must not be before the start."),
             SprintError::DatesIncomplete => s("Start und Ende müssen beide gesetzt sein.", "Both start and end must be set."),
+            SprintError::DatesTooLong { max } => match lang {
+                Lang::De => format!("Der Zeitraum darf höchstens {max} Tage lang sein."),
+                Lang::En => format!("The period must not be longer than {max} days."),
+            },
             SprintError::DaysInvalid { max } => match lang {
                 Lang::De => format!("Die Dauer muss zwischen 1 und {max} Arbeitstagen liegen."),
                 Lang::En => format!("The duration must be between 1 and {max} work days."),
@@ -117,6 +123,7 @@ mod tests {
             SprintError::DateInvalid,
             SprintError::DatesOrder,
             SprintError::DatesIncomplete,
+            SprintError::DatesTooLong { max: 4000 },
             SprintError::DaysInvalid { max: 366 },
             SprintError::TextTooLong { max: 500 },
             SprintError::NoWorkDays,

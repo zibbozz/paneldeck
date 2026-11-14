@@ -201,6 +201,8 @@ pub fn op_label(op: &TicketOp, lang: Lang) -> String {
         TicketOp::Link { .. } => s("Verknüpfung geändert", "link changed"),
         TicketOp::Comment { .. } | TicketOp::CommentEdit { .. } => s("Kommentar geändert", "comment changed"),
         TicketOp::Time { .. } | TicketOp::TimeEdit { .. } => s("Zeiteintrag geändert", "time entry changed"),
+        TicketOp::Sprint(_) => s("Sprint-Zuordnung geändert", "sprint assignment changed"),
+        TicketOp::TodoConversion { .. } => s("Todo-Karte umgewandelt", "todo card converted"),
         TicketOp::Batch(ops) => ops.first().map(|o| op_label(o, lang)).unwrap_or_default(),
     }
 }
@@ -283,6 +285,14 @@ pub struct TicketUi {
     pub hover: Option<i64>,
     /// Von außerhalb (Terminal Hub) gewünschtes Ticket; wird im nächsten Bild von `PlanUi::header` geöffnet.
     pub requested_open: Option<i64>,
+    /// Version, Meilenstein und Terminal je Ticket für die Chips der Liste (ein Mal mit der Liste geladen).
+    pub row_refs: std::collections::HashMap<i64, super::ref_display::RowRefs>,
+    /// Diese Zeile soll in der Liste sichtbar werden (geöffnetes Ticket, zuletzt verlassenes Ticket); erledigt, sobald sie zu sehen ist.
+    pub scroll_to: Option<i64>,
+    /// Neue Scroll-Position der Liste für das nächste Bild (aus `scroll_to` berechnet).
+    pub scroll_offset: Option<f32>,
+    /// Scroll-Position der Liste im letzten Bild (für Tests und die Rechnung).
+    pub list_offset: f32,
 }
 
 impl Default for TicketUi {
@@ -321,6 +331,10 @@ impl Default for TicketUi {
             return_tab: None,
             hover: None,
             requested_open: None,
+            row_refs: Default::default(),
+            scroll_to: None,
+            scroll_offset: None,
+            list_offset: 0.0,
         }
     }
 }
@@ -332,6 +346,9 @@ impl TicketUi {
             self.project = project;
             self.filters = Filters::default();
             self.rows.clear();
+            self.row_refs.clear();
+            self.scroll_to = None;
+            self.scroll_offset = None;
             self.open = None;
             self.back.clear();
             self.return_tab = None;
@@ -365,6 +382,7 @@ impl TicketUi {
             self.detail = None;
         }
         self.open = Some(id);
+        self.scroll_to = Some(id);
         self.detail_dirty = true;
     }
 
@@ -373,6 +391,7 @@ impl TicketUi {
         match self.back.pop() {
             Some(prev) => {
                 self.open = Some(prev);
+                self.scroll_to = Some(prev);
                 self.view = ViewState { ticket: prev, ..Default::default() };
                 self.detail = None;
                 self.detail_dirty = true;
@@ -386,6 +405,8 @@ impl TicketUi {
     }
 
     pub fn close(&mut self) {
+        // die Liste zeigt danach das Ticket, das man gerade verlassen hat
+        self.scroll_to = self.open.or(self.scroll_to);
         self.open = None;
         self.detail = None;
         self.back.clear();
