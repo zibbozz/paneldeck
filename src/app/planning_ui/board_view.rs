@@ -217,6 +217,9 @@ impl PlanUi {
         self.boards_quick(ui, cx, &sum, &board);
         self.boards_data(cx, &sum);
         if let Some(d) = &self.boards.data {
+            if let Some(p) = &d.source_problem {
+                widgets::error(ui, &format!("{} {p}", lang.t("Die Quelle des Boards lässt sich nicht auswerten:", "The board's source cannot be evaluated:")));
+            }
             if !d.unassigned.is_empty() {
                 let names: Vec<String> = d.unassigned.iter().filter_map(|id| sum.status(*id)).map(|s| s.display(lang)).collect();
                 widgets::hint(ui, &format!("{} {}", lang.t("Status ohne Spalte (nicht auf dem Board):", "Statuses without a column (not on the board):"), names.join(", ")));
