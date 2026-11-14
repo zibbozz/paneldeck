@@ -1,0 +1,4 @@
+Noto Color Emoji (NotoColorEmoji.ttf)
+Copyright 2013 Google LLC. Licensed under the SIL Open Font License, Version 1.1.
+Full text: https://openfontlicense.org/ and https://github.com/googlefonts/noto-emoji/blob/main/fonts/LICENSE
+Source: Debian/Ubuntu package fonts-noto-color-emoji 2.047

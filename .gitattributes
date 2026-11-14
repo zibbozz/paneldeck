@@ -1,0 +1,2 @@
+# Shell-Skripte müssen LF behalten (Git Bash unter Windows scheitert sonst an CRLF).
+*.sh text eol=lf

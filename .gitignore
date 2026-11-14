@@ -1,0 +1,4 @@
+target/
+dist/
+paneldeck-data/
+__pycache__/

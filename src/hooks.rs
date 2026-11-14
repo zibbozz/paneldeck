@@ -1,0 +1,595 @@
+//! Claude-Code-Hooks: Status der Claude-Sitzungen ohne Bildschirmanalyse.
+//!
+//! Ablauf: Claude ruft bei Ereignissen `paneldeck.exe --hook` auf (Hook-Befehl). Dieser Aufruf liest
+//! das Ereignis-JSON von stdin und schickt es per TCP an die laufende Hub-Instanz (127.0.0.1).
+//! Sitzung und Token kommen über Umgebungsvariablen, die der Hub in jedes Terminal setzt.
+
+use eframe::egui;
+use serde_json::{json, Value};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver};
+use std::time::Duration;
+
+pub const ENV_SESSION: &str = "PANELDECK_SESSION";
+pub const ENV_PORT: &str = "PANELDECK_PORT";
+pub const ENV_TOKEN: &str = "PANELDECK_TOKEN";
+
+const EVENTS: [&str; 7] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Notification",
+    "Stop",
+    "SessionEnd",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ClaudeStatus {
+    /// Keine Hook-Daten (kein Claude oder Hooks nicht aktiv).
+    #[default]
+    Unknown,
+    /// Claude läuft, wartet auf den nächsten Prompt.
+    Idle,
+    Working,
+    /// Claude fragt nach einer Freigabe.
+    Permission,
+    /// Claude braucht sonstige Eingabe.
+    Input,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HookMsg {
+    pub session: u64,
+    pub event: String,
+    pub kind: Option<String>,
+    pub message: Option<String>,
+    pub claude_session: Option<String>,
+    pub transcript_path: Option<String>,
+    pub cwd: Option<String>,
+}
+
+pub fn status_after(cur: ClaudeStatus, m: &HookMsg) -> ClaudeStatus {
+    match m.event.as_str() {
+        "SessionStart" | "Stop" => ClaudeStatus::Idle,
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => ClaudeStatus::Working,
+        "Notification" => match m.kind.as_deref() {
+            Some("permission_prompt") => ClaudeStatus::Permission,
+            Some("idle_prompt") => ClaudeStatus::Idle,
+            _ => ClaudeStatus::Input,
+        },
+        "SessionEnd" => ClaudeStatus::Unknown,
+        _ => cur,
+    }
+}
+
+/// 32 Zufallsbytes aus dem Betriebssystem (Hex). Fällt nur im Notfall auf einen schwächeren Wert zurück.
+fn random_hex() -> String {
+    let mut b = [0u8; 32];
+    if getrandom::fill(&mut b).is_err() {
+        let a = RandomState::new().build_hasher().finish();
+        let c = RandomState::new().build_hasher().finish();
+        b[..8].copy_from_slice(&a.to_le_bytes());
+        b[8..16].copy_from_slice(&c.to_le_bytes());
+    }
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// UUID v4 (für `claude --session-id`).
+pub fn new_uuid() -> String {
+    let h = random_hex();
+    let mut b: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap_or(0)).collect();
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let x: String = b.iter().map(|v| format!("{v:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &x[0..8], &x[8..12], &x[12..16], &x[16..20], &x[20..32])
+}
+
+/// Befehle einer zweiten Programminstanz (z. B. Explorer-Kontextmenü).
+#[derive(Debug, Clone, PartialEq)]
+pub enum IpcCmd {
+    Show,
+    Open { path: String, claude: bool },
+}
+
+pub struct HookServer {
+    pub port: u16,
+    /// Token für Hook-Meldungen (wird in jedes Hub-Terminal exportiert).
+    pub token: String,
+    /// Eigener Token für Befehle an die laufende Instanz (nur in `ipc.json`, nie in Terminal-Umgebungen) –
+    /// sonst könnte jedes Programm in einem Hub-Terminal neue Sitzungen öffnen lassen.
+    pub ipc_token: String,
+    pub rx: Receiver<HookMsg>,
+    pub cmd_rx: Receiver<IpcCmd>,
+    /// Anfragen des MCP-Servers (Agenten-Schnittstelle); werden in der UI-Schleife beantwortet.
+    pub mcp_rx: Receiver<McpJob>,
+}
+
+/// Eine Anfrage des MCP-Servers an die UI-Schleife. Die Antwort geht über `reply` zurück an den wartenden
+/// Verbindungs-Thread; ist dieser schon weg (Zeitüberschreitung), schlägt `send` fehl und die Anfrage wird verworfen.
+pub struct McpJob {
+    pub tool: String,
+    pub args: Value,
+    /// Sitzung, aus der der Agent aufruft (Umgebungsvariable `PANELDECK_SESSION` der Brücke), falls bekannt.
+    pub caller: Option<u64>,
+    /// Prozess-ID der Brücke: der Hub ordnet sie über den Prozessbaum einer Sitzung zu (zuverlässiger als die Umgebungsvariable).
+    pub caller_pid: Option<u32>,
+    pub reply: std::sync::mpsc::SyncSender<Result<Value, (String, String)>>,
+}
+
+impl HookServer {
+    pub fn start(ctx: &egui::Context) -> Option<HookServer> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
+        let port = listener.local_addr().ok()?.port();
+        let token = random_hex();
+        let ipc_token = random_hex();
+        let (tx, rx) = channel();
+        let (cmd_tx, cmd_rx) = channel();
+        let (mcp_tx, mcp_rx) = channel::<McpJob>();
+        let (tok, ipc_tok) = (token.clone(), ipc_token.clone());
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(s) = stream else { continue };
+                // Jede Verbindung in eigenem Thread mit Gesamtfrist und Größenlimit – eine langsame oder stumme
+                // Verbindung (Slowloris) darf andere Anfragen nicht blockieren. Gleichzeitige Verbindungen sind begrenzt.
+                if ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONN {
+                    ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    continue;
+                }
+                let (tx, cmd_tx, mcp_tx, tok, ipc_tok, ctx) = (tx.clone(), cmd_tx.clone(), mcp_tx.clone(), tok.clone(), ipc_tok.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    handle_connection(s, &tok, &ipc_tok, &tx, &cmd_tx, &mcp_tx, &ctx);
+                    ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+        });
+        Some(HookServer { port, token, ipc_token, rx, cmd_rx, mcp_rx })
+    }
+}
+
+static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CONN: usize = 32;
+
+fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::sync::mpsc::Sender<HookMsg>, cmd_tx: &std::sync::mpsc::Sender<IpcCmd>, mcp_tx: &std::sync::mpsc::Sender<McpJob>, ctx: &egui::Context) {
+    const MAX: usize = 64 * 1024;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let _ = s.set_read_timeout(Some(Duration::from_millis(250)));
+    let mut data: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match s.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                data.extend_from_slice(&chunk[..n]);
+                if data.len() > MAX {
+                    return;
+                }
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(_) => return,
+        }
+        if std::time::Instant::now() > deadline {
+            return;
+        }
+    }
+    let Ok(buf) = String::from_utf8(data) else { return };
+    if buf.contains("\"mcp\"") {
+        if let Ok(v) = serde_json::from_str::<Value>(&buf) {
+            if v.get("cmd").and_then(|c| c.as_str()) == Some("mcp") {
+                handle_mcp(&mut s, &v, ipc_token, mcp_tx, ctx);
+                return;
+            }
+        }
+    }
+    if let Some(cmd) = parse_cmd(&buf, ipc_token) {
+        let _ = cmd_tx.send(cmd);
+        let _ = s.write_all(b"ok");
+        ctx.request_repaint();
+    } else if let Some(msg) = parse_message(&buf, token) {
+        let _ = tx.send(msg);
+        ctx.request_repaint();
+    }
+}
+
+fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
+    let v: Value = serde_json::from_str(raw).ok()?;
+    if v.get("token")?.as_str()? != token {
+        return None;
+    }
+    match v.get("cmd")?.as_str()? {
+        "show" => Some(IpcCmd::Show),
+        "open" => Some(IpcCmd::Open { path: v.get("path")?.as_str()?.to_string(), claude: v.get("claude").and_then(|c| c.as_bool()).unwrap_or(false) }),
+        _ => None,
+    }
+}
+
+/// Port und Token für zweite Instanzen im Datenordner ablegen.
+pub fn write_ipc_file(dir: &Path, port: u16, token: &str) {
+    let _ = crate::state::write_atomic(&dir.join("ipc.json"), json!({"port": port, "token": token}).to_string().as_bytes());
+}
+
+/// Befehl an eine bereits laufende Instanz mit demselben Datenordner schicken.
+/// Gibt `true` zurück, wenn sie ihn bestätigt hat.
+pub fn forward_to_running(dir: &Path, cmd: &IpcCmd) -> bool {
+    let Ok(s) = std::fs::read_to_string(dir.join("ipc.json")) else { return false };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else { return false };
+    let (Some(port), Some(token)) = (v["port"].as_u64(), v["token"].as_str()) else { return false };
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port as u16));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else { return false };
+    let body = match cmd {
+        IpcCmd::Show => json!({"token": token, "cmd": "show"}),
+        IpcCmd::Open { path, claude } => json!({"token": token, "cmd": "open", "path": path, "claude": claude}),
+    };
+    if stream.write_all(body.to_string().as_bytes()).is_err() {
+        return false;
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+    let mut reply = String::new();
+    let _ = stream.read_to_string(&mut reply);
+    reply == "ok"
+}
+
+fn mcp_err(code: &str, message: &str) -> Value {
+    json!({"ok": false, "error": {"code": code, "message": message}})
+}
+
+/// Eine MCP-Anfrage entgegennehmen: Token und Stufe prüfen, an die UI weiterreichen, Antwort zurückschreiben.
+/// Die Prüfung der Stufe passiert hier im Hub (nicht erst in der Brücke), damit ein anderer Client sie nicht umgehen kann.
+fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync::mpsc::Sender<McpJob>, ctx: &egui::Context) {
+    use crate::mcp;
+    let mut reply = |r: Value| {
+        let _ = s.write_all(r.to_string().as_bytes());
+    };
+    if v.get("token").and_then(|t| t.as_str()) != Some(ipc_token) {
+        return reply(mcp_err("unauthorized", "Ungültiger Token"));
+    }
+    let Some(tool) = v.get("tool").and_then(|t| t.as_str()) else {
+        return reply(mcp_err("bad_args", "tool fehlt"));
+    };
+    let level = mcp::current_level();
+    if tool == "_level" {
+        return reply(json!({"ok": true, "result": {"level": level.as_u8()}}));
+    }
+    if level == mcp::McpLevel::Off {
+        return reply(mcp_err("mcp_disabled", "Die Agenten-Schnittstelle ist in Paneldeck ausgeschaltet (Einstellungen → Agenten)."));
+    }
+    let Some(required) = mcp::tool_level(tool) else {
+        return reply(mcp_err("not_found", "Unbekanntes Werkzeug"));
+    };
+    if required > level {
+        return reply(mcp_err("forbidden", "Die Stufe „Nur lesen“ erlaubt dieses Werkzeug nicht (Einstellungen → Agenten → Steuern)."));
+    }
+    if mcp::ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= mcp::MAX_ACTIVE {
+        mcp::ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return reply(mcp_err("busy", "Zu viele gleichzeitige Anfragen"));
+    }
+    let args = v.get("args").cloned().unwrap_or_else(|| json!({}));
+    // Wartezeit: bei Werkzeugen mit eigener Frist deren Wert (+ Reserve), sonst kurz.
+    let wait = args.get("timeout_secs").and_then(|t| t.as_u64()).map(|t| t.clamp(1, mcp::MAX_WAIT_SECS) + 10).unwrap_or(30);
+    let caller = v.get("caller").and_then(|c| c.as_u64());
+    let caller_pid = v.get("caller_pid").and_then(|c| c.as_u64()).and_then(|p| u32::try_from(p).ok());
+    let (rtx, rrx) = std::sync::mpsc::sync_channel(1);
+    let out = if mcp_tx.send(McpJob { tool: tool.to_string(), args, caller, caller_pid, reply: rtx }).is_err() {
+        mcp_err("internal", "Hub nicht bereit")
+    } else {
+        ctx.request_repaint();
+        match rrx.recv_timeout(Duration::from_secs(wait)) {
+            Ok(Ok(result)) => json!({"ok": true, "result": result}),
+            Ok(Err((code, message))) => mcp_err(&code, &message),
+            Err(_) => mcp_err("timeout", "Der Hub hat nicht rechtzeitig geantwortet (läuft die Oberfläche noch?)"),
+        }
+    };
+    mcp::ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    reply(out);
+}
+
+/// Werkzeugaufruf an die laufende Instanz (Brücke → Hub). Fehler als `(Code, Text)`.
+pub fn call_mcp(dir: &Path, tool: &str, args: &Value, caller: Option<u64>, pid: Option<u32>) -> Result<Value, (String, String)> {
+    let down = || ("hub_not_running".to_string(), "Paneldeck läuft nicht (oder nutzt einen anderen Datenordner). Bitte Paneldeck starten.".to_string());
+    let s = std::fs::read_to_string(dir.join("ipc.json")).map_err(|_| down())?;
+    let v: Value = serde_json::from_str(crate::state::strip_bom(&s)).map_err(|_| down())?;
+    let (Some(port), Some(token)) = (v["port"].as_u64(), v["token"].as_str()) else { return Err(down()) };
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port as u16));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(800)).map_err(|_| down())?;
+    let body = json!({"token": token, "cmd": "mcp", "tool": tool, "args": args, "caller": caller, "caller_pid": pid});
+    stream.write_all(body.to_string().as_bytes()).map_err(|_| down())?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(crate::mcp::MAX_WAIT_SECS + 30)));
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).map_err(|e| ("io".to_string(), format!("Verbindung zum Hub abgebrochen: {e}")))?;
+    let r: Value = serde_json::from_str(&reply).map_err(|_| ("io".to_string(), "Ungültige Antwort des Hubs".to_string()))?;
+    if r["ok"].as_bool() == Some(true) {
+        Ok(r["result"].clone())
+    } else {
+        Err((r["error"]["code"].as_str().unwrap_or("error").to_string(), r["error"]["message"].as_str().unwrap_or("Fehler").to_string()))
+    }
+}
+
+fn parse_message(raw: &str, token: &str) -> Option<HookMsg> {
+    let v: Value = serde_json::from_str(raw).ok()?;
+    if v.get("token")?.as_str()? != token {
+        return None;
+    }
+    let session = v.get("session")?.as_u64()?;
+    let p = v.get("payload").cloned().unwrap_or(Value::Null);
+    let s = |k: &str| p.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
+    Some(HookMsg {
+        session,
+        event: s("hook_event_name").unwrap_or_default(),
+        kind: s("notification_type"),
+        message: s("message"),
+        claude_session: s("session_id"),
+        transcript_path: s("transcript_path"),
+        cwd: s("cwd"),
+    })
+}
+
+/// Wird mit `paneldeck.exe --hook` aufgerufen. Gibt immer 0 zurück, damit Claude nie blockiert wird.
+pub fn run_hook_client() -> i32 {
+    let get = |k: &str| std::env::var(k).ok();
+    let (Some(port), Some(token), Some(session)) = (get(ENV_PORT), get(ENV_TOKEN), get(ENV_SESSION)) else {
+        return 0; // nicht in einem Hub-Terminal gestartet
+    };
+    let (Ok(port), Ok(session)) = (port.parse::<u16>(), session.parse::<u64>()) else { return 0 };
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+    // Nur die vom Hub benutzten Felder weiterreichen: Prompts, Tool-Eingaben und -Ausgaben sind oft > 64 KiB und
+    // würden vom Server verworfen (→ Status/Fortsetzen/„Fertig“ gingen verloren).
+    const KEEP: [&str; 7] = ["hook_event_name", "notification_type", "message", "tool_name", "session_id", "transcript_path", "cwd"];
+    let payload = match payload {
+        Value::Object(m) => Value::Object(m.into_iter().filter(|(k, _)| KEEP.contains(&k.as_str())).collect()),
+        other => other,
+    };
+    send_event(port, &token, session, payload);
+    0
+}
+
+pub fn send_event(port: u16, token: &str, session: u64, payload: Value) {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
+        let body = json!({"token": token, "session": session, "payload": payload}).to_string();
+        let _ = s.write_all(body.as_bytes());
+    }
+}
+
+// ------------------------------------------------------------ Settings-Dateien
+
+pub fn hook_command(exe: &Path) -> String {
+    format!("\"{}\" --hook", exe.to_string_lossy().replace('\\', "/"))
+}
+
+fn hooks_value(cmd: &str) -> Value {
+    let mut hooks = serde_json::Map::new();
+    for ev in EVENTS {
+        let mut group = json!({"hooks": [{"type": "command", "command": cmd}]});
+        if matches!(ev, "PreToolUse" | "PostToolUse") {
+            group["matcher"] = json!("*");
+        }
+        hooks.insert(ev.to_string(), json!([group]));
+    }
+    Value::Object(hooks)
+}
+
+/// Settings-Datei für `claude --settings <datei>` (nur Hooks).
+pub fn write_session_settings(dir: &Path, exe: &Path) -> Option<PathBuf> {
+    let path = dir.join("claude-hooks.json");
+    let v = json!({ "hooks": hooks_value(&hook_command(exe)) });
+    std::fs::write(&path, serde_json::to_string_pretty(&v).ok()?).ok()?;
+    Some(path)
+}
+
+/// Wie `write_session_settings`, aber mit WSL-Pfad zur .exe (Aufruf über WSL-Interop).
+pub fn write_session_settings_wsl(dir: &Path, exe: &Path, shell_id: &str) -> Option<PathBuf> {
+    let path = dir.join("claude-hooks-wsl.json");
+    let wsl_exe = crate::pathfmt::convert(shell_id, &exe.to_string_lossy());
+    let cmd = format!("\"{wsl_exe}\" --hook");
+    let v = json!({ "hooks": hooks_value(&cmd) });
+    std::fs::write(&path, serde_json::to_string_pretty(&v).ok()?).ok()?;
+    Some(path)
+}
+
+pub fn global_settings_path() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(PathBuf::from(home).join(".claude").join("settings.json"))
+}
+
+fn is_hub_entry(group: &Value) -> bool {
+    group["hooks"].as_array().is_some_and(|hs| {
+        hs.iter().any(|h| {
+            h["command"].as_str().is_some_and(|c| c.contains("--hook") && c.to_lowercase().contains("paneldeck"))
+        })
+    })
+}
+
+pub fn global_installed(path: &Path) -> bool {
+    let Ok(s) = std::fs::read_to_string(path) else { return false };
+    let Ok(v) = serde_json::from_str::<Value>(crate::state::strip_bom(&s)) else { return false };
+    v["hooks"]["Stop"].as_array().is_some_and(|a| a.iter().any(is_hub_entry))
+}
+
+fn load_settings(path: &Path) -> Result<Value, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) if crate::state::strip_bom(&s).trim().is_empty() => Ok(json!({})),
+        Ok(s) => serde_json::from_str(crate::state::strip_bom(&s)).map_err(|e| format!("{}: {e}", path.display())),
+        // Nur eine wirklich fehlende Datei gilt als leer; bei anderen Fehlern (gesperrt, keine Rechte) NICHT überschreiben.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+fn store_settings(path: &Path, v: &Value) -> Result<(), String> {
+    // Original genau einmal sichern (nicht bei jeder Installation überschreiben); schlägt das Backup fehl, wird abgebrochen.
+    if path.exists() {
+        let backup = path.with_extension("json.paneldeck-backup");
+        if !backup.exists() {
+            std::fs::copy(path, &backup).map_err(|e| format!("Backup fehlgeschlagen ({}): {e}", backup.display()))?;
+        }
+    }
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    // Atomar schreiben: erst temporäre Datei, dann umbenennen.
+    let tmp = path.with_extension("json.paneldeck-tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// Trägt die Hooks in die globale Claude-Konfiguration ein (bestehende Hooks bleiben erhalten).
+pub fn install_global(path: &Path, exe: &Path) -> Result<(), String> {
+    let mut v = load_settings(path)?;
+    let Some(root) = v.as_object_mut() else {
+        return Err("settings.json ist kein JSON-Objekt".into());
+    };
+    let ours = hooks_value(&hook_command(exe));
+    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+    let hooks = hooks.as_object_mut().ok_or("\"hooks\" ist kein Objekt")?;
+    for (ev, groups) in ours.as_object().into_iter().flatten() {
+        let arr = hooks.entry(ev.clone()).or_insert_with(|| json!([]));
+        let arr = arr.as_array_mut().ok_or("Hook-Eintrag ist keine Liste")?;
+        arr.retain(|g| !is_hub_entry(g));
+        arr.extend(groups.as_array().into_iter().flatten().cloned());
+    }
+    store_settings(path, &v)
+}
+
+pub fn uninstall_global(path: &Path) -> Result<(), String> {
+    let mut v = load_settings(path)?;
+    let mut hooks_empty = false;
+    if let Some(hooks) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        for (_, arr) in hooks.iter_mut() {
+            if let Some(a) = arr.as_array_mut() {
+                a.retain(|g| !is_hub_entry(g));
+            }
+        }
+        hooks.retain(|_, arr| arr.as_array().map(|a| !a.is_empty()).unwrap_or(true));
+        hooks_empty = hooks.is_empty();
+    }
+    if hooks_empty {
+        if let Some(root) = v.as_object_mut() {
+            root.remove("hooks");
+        }
+    }
+    store_settings(path, &v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_roundtrip_and_status() {
+        let ctx = egui::Context::default();
+        let srv = HookServer::start(&ctx).unwrap();
+        // falscher Token wird ignoriert
+        send_event(srv.port, "falsch", 1, json!({"hook_event_name": "Stop"}));
+        send_event(
+            srv.port,
+            &srv.token,
+            7,
+            json!({"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs permission", "session_id": "abc"}),
+        );
+        let m = srv.rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(m.session, 7);
+        assert_eq!(m.claude_session.as_deref(), Some("abc"));
+        assert_eq!(status_after(ClaudeStatus::Working, &m), ClaudeStatus::Permission);
+        assert!(srv.rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn global_install_keeps_foreign_hooks() {
+        let dir = std::env::temp_dir().join(format!("hubtest-{}", random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("settings.json");
+        std::fs::write(
+            &f,
+            r#"{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo fremd"}]}]}}"#,
+        )
+        .unwrap();
+        let exe = Path::new("C:\\Tools\\paneldeck.exe");
+        install_global(&f, exe).unwrap();
+        install_global(&f, exe).unwrap(); // idempotent
+        assert!(global_installed(&f));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(v["model"], "opus");
+        uninstall_global(&f).unwrap();
+        assert!(!global_installed(&f));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert!(v["hooks"].get("PreToolUse").is_none());
+    }
+
+    #[test]
+    fn ipc_roundtrip() {
+        let ctx = egui::Context::default();
+        let srv = HookServer::start(&ctx).unwrap();
+        let dir = std::env::temp_dir().join(format!("ipc-{}", random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_ipc_file(&dir, srv.port, &srv.ipc_token);
+        // Der Hook-Token (steht in Terminal-Umgebungen) darf keine Befehle auslösen.
+        write_ipc_file(&dir, srv.port, &srv.token);
+        assert!(!forward_to_running(&dir, &IpcCmd::Show));
+        write_ipc_file(&dir, srv.port, &srv.ipc_token);
+        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true }));
+        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Open { path: "C:\\x".into(), claude: true });
+        // veraltete Datei (falscher Port) → keine Bestätigung
+        write_ipc_file(&dir, 1, "x");
+        assert!(!forward_to_running(&dir, &IpcCmd::Show));
+    }
+
+    /// Zugriffsprüfung der Agenten-Schnittstelle im Hub (ohne UI): Token, Stufe, unbekanntes Werkzeug.
+    /// Berührt die globale Stufe (`mcp::LEVEL`) – deshalb nur dieser eine Test.
+    #[test]
+    fn mcp_access_checks() {
+        use crate::mcp::{McpLevel, LEVEL};
+        use std::sync::atomic::Ordering;
+        let ctx = egui::Context::default();
+        let srv = HookServer::start(&ctx).unwrap();
+        let dir = std::env::temp_dir().join(format!("mcp-{}", random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_ipc_file(&dir, srv.port, &srv.ipc_token);
+        let code = |r: Result<Value, (String, String)>| r.err().map(|e| e.0).unwrap_or_default();
+        // Stufe „Aus“: Stufenabfrage geht (für tools/list), alles andere nicht.
+        LEVEL.store(McpLevel::Off.as_u8(), Ordering::Relaxed);
+        assert_eq!(call_mcp(&dir, "_level", &json!({}), None, None).unwrap()["level"], 0);
+        assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "mcp_disabled");
+        assert_eq!(code(call_mcp(&dir, "send_text", &json!({"session": 1, "text": "x"}), None, None)), "mcp_disabled");
+        // „Nur lesen“: Steuer-Werkzeuge sind verboten, unbekannte gibt es nicht.
+        LEVEL.store(McpLevel::Read.as_u8(), Ordering::Relaxed);
+        assert_eq!(call_mcp(&dir, "_level", &json!({}), None, None).unwrap()["level"], 1);
+        assert_eq!(code(call_mcp(&dir, "run_command", &json!({"session": 1, "command": "dir"}), None, None)), "forbidden");
+        assert_eq!(code(call_mcp(&dir, "close_session", &json!({"session": 1}), None, None)), "forbidden");
+        assert_eq!(code(call_mcp(&dir, "gibt_es_nicht", &json!({}), None, None)), "not_found");
+        // Ein Lese-Werkzeug erreicht die UI-Schleife (hier: ein Test, der sie spielt).
+        let reply = std::thread::spawn({
+            let dir = dir.clone();
+            move || call_mcp(&dir, "list_sessions", &json!({"include_exited": false}), Some(7), None)
+        });
+        let job = srv.mcp_rx.recv_timeout(Duration::from_secs(3)).expect("Anfrage kommt in der UI-Schleife an");
+        assert_eq!((job.tool.as_str(), job.caller, job.caller_pid), ("list_sessions", Some(7), None));
+        assert_eq!(job.args["include_exited"], false);
+        job.reply.send(Ok(json!({"sessions": []}))).unwrap();
+        assert_eq!(reply.join().unwrap().unwrap()["sessions"], json!([]));
+        // Falscher Token (der Hook-Token aus den Terminal-Umgebungen) wird abgewiesen.
+        write_ipc_file(&dir, srv.port, &srv.token);
+        assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "unauthorized");
+        // Hub nicht erreichbar → verständlicher Fehler
+        write_ipc_file(&dir, 1, "x");
+        assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "hub_not_running");
+        LEVEL.store(McpLevel::Off.as_u8(), Ordering::Relaxed);
+    }
+
+    #[test]
+    fn uuid_shape() {
+        let u = new_uuid();
+        assert_eq!(u.len(), 36);
+        assert_eq!(&u[14..15], "4");
+    }
+}

@@ -1,0 +1,105 @@
+//! Tastenkürzel: Standardbelegung, Parsen und Formatieren ("Ctrl+Shift+T").
+
+use eframe::egui::{Key, Modifiers};
+
+/// (Kennung, Standardkürzel)
+pub const DEFAULTS: &[(&str, &str)] = &[
+    ("new", "Ctrl+Shift+T"),
+    ("split_r", "Ctrl+Shift+D"),
+    ("split_d", "Ctrl+Shift+E"),
+    ("hide", "Ctrl+Shift+W"),
+    ("rename", "Ctrl+Shift+R"),
+    ("palette", "Ctrl+Shift+P"),
+    ("search", "Ctrl+Shift+F"),
+    ("broadcast", "Ctrl+Shift+B"),
+    ("notes", "Ctrl+Shift+N"),
+    ("files", "Ctrl+Shift+O"),
+    ("editor", "Ctrl+Shift+K"),
+    ("diff", "Ctrl+Shift+H"),
+    ("queue", "Ctrl+Shift+Q"),
+    ("composer", "Ctrl+Shift+M"),
+    ("search_all", "Ctrl+Shift+G"),
+    ("prev_cmd", "Ctrl+Shift+Up"),
+    ("next_cmd", "Ctrl+Shift+Down"),
+    ("next", "Ctrl+Tab"),
+    ("prev", "Ctrl+Shift+Tab"),
+];
+
+pub fn label(id: &str, de: bool) -> &'static str {
+    let (d, e) = match id {
+        "new" => ("Neue Sitzung", "New session"),
+        "split_r" => ("Bereich rechts teilen", "Split pane right"),
+        "split_d" => ("Bereich darunter teilen", "Split pane below"),
+        "hide" => ("Bereich ausblenden", "Hide pane"),
+        "rename" => ("Sitzung umbenennen", "Rename session"),
+        "palette" => ("Befehle (Palette)", "Commands (palette)"),
+        "search" => ("Im Verlauf suchen", "Search scrollback"),
+        "broadcast" => ("Broadcast an/aus", "Toggle broadcast"),
+        "notes" => ("Notizen", "Notes"),
+        "files" => ("Dateibaum", "File tree"),
+        "editor" => ("CLAUDE.md / Claude-Dateien", "CLAUDE.md / Claude files"),
+        "diff" => ("Änderungen (Diff)", "Changes (diff)"),
+        "queue" => ("Warteschlange der Sitzung", "Session queue"),
+        "composer" => ("Prompt-Composer", "Prompt composer"),
+        "search_all" => ("Alle Sitzungen durchsuchen", "Search all sessions"),
+        "prev_cmd" => ("Zum vorherigen Befehl springen", "Jump to previous command"),
+        "next_cmd" => ("Zum nächsten Befehl springen", "Jump to next command"),
+        "next" => ("Nächste Sitzung", "Next session"),
+        "prev" => ("Vorherige Sitzung", "Previous session"),
+        _ => ("?", "?"),
+    };
+    if de { d } else { e }
+}
+
+pub fn parse(s: &str) -> Option<(Modifiers, Key)> {
+    let mut m = Modifiers::NONE;
+    let mut key = None;
+    for part in s.split('+').map(|p| p.trim()) {
+        match part.to_lowercase().as_str() {
+            "ctrl" | "strg" => m.ctrl = true,
+            "shift" | "umschalt" => m.shift = true,
+            "alt" => m.alt = true,
+            "" => {}
+            _ => key = Key::from_name(part),
+        }
+    }
+    key.map(|k| (m, k))
+}
+
+pub fn format(m: Modifiers, k: Key) -> String {
+    let mut v = Vec::new();
+    if m.ctrl {
+        v.push("Ctrl");
+    }
+    if m.shift {
+        v.push("Shift");
+    }
+    if m.alt {
+        v.push("Alt");
+    }
+    v.push(k.name());
+    v.join("+")
+}
+
+/// Anzeige im Menü/Tooltip (deutsch: Strg/Umschalt).
+pub fn pretty(s: &str, de: bool) -> String {
+    if de {
+        s.replace("Ctrl", "Strg").replace("Shift", "Umschalt")
+    } else {
+        s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip() {
+        for (_, d) in DEFAULTS {
+            let (m, k) = parse(d).unwrap_or_else(|| panic!("parse {d}"));
+            assert_eq!(&format(m, k), d);
+        }
+        assert!(parse("Ctrl+Shift+").is_none());
+    }
+}

@@ -1,0 +1,655 @@
+//! Ein Terminal: PTY (ConPTY unter Windows) + VT-Emulation (alacritty_terminal).
+
+use crate::shells::ShellSpec;
+use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::{test::TermSize, Config, Term};
+use alacritty_terminal::vte::ansi::Processor;
+use eframe::egui;
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use std::io::{Read, Write};
+use crate::osc::{OscEvent, OscScanner};
+use crate::search::SearchState;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+#[derive(Clone)]
+pub struct Listener {
+    title: Arc<Mutex<Option<String>>>,
+    writer: SharedWriter,
+    bell: Arc<AtomicBool>,
+}
+
+impl EventListener for Listener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::Title(t) => *self.title.lock().unwrap_or_else(|e| e.into_inner()) = Some(t),
+            Event::ResetTitle => *self.title.lock().unwrap_or_else(|e| e.into_inner()) = None,
+            // Antworten der Emulation (z.B. Cursorposition) zurück an die Shell.
+            Event::PtyWrite(s) => {
+                let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = w.write_all(s.as_bytes());
+                let _ = w.flush();
+            }
+            Event::Bell => self.bell.store(true, Ordering::Relaxed),
+            _ => {}
+        }
+    }
+}
+
+/// Von der Shell-Integration gemeldete Zustände.
+#[derive(Default)]
+pub struct ShellState {
+    pub cwd: Option<String>,
+    pub last_exit: Option<i32>,
+    pub last_dur_ms: Option<u64>,
+    /// Absolute Zeilen (ab Anfang des Verlaufs) der Prompt-Anfänge.
+    pub marks: Vec<u64>,
+    /// Beendete Befehle, die noch nicht ausgewertet wurden (Benachrichtigungen).
+    pub done: Vec<CmdDone>,
+    /// Monotone Zähler (nie zurückgesetzt, anders als `done`): Prompts, beendete Befehle, Ordnermeldungen.
+    /// Die Agenten-Schnittstelle wartet damit auf „Prompt ist zurück“.
+    pub prompt_seq: u64,
+    pub done_seq: u64,
+    pub cwd_seq: u64,
+    /// Es kamen schon Meldungen der Shell-Integration (sonst gibt es keine Befehlsgrenzen).
+    pub integration_seen: bool,
+    pending_dur: Option<u64>,
+    cmd_start: Option<std::time::Instant>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CmdDone {
+    pub exit: Option<i32>,
+    pub dur_ms: Option<u64>,
+}
+
+pub struct Session {
+    pub shell_state: Arc<Mutex<ShellState>>,
+    pub term: Arc<Mutex<Term<Listener>>>,
+    writer: SharedWriter,
+    master: Box<dyn MasterPty + Send>,
+    child: Mutex<Box<dyn Child + Send + Sync>>,
+    title: Arc<Mutex<Option<String>>>,
+    exited: Arc<AtomicBool>,
+    #[allow(dead_code)] // wird gesetzt (Event::Bell); eine Anzeige dafür ist noch nicht eingebaut
+    pub bell: Arc<AtomicBool>,
+    pub cols: u16,
+    pub rows: u16,
+    /// Rest-Scrollwert (Bruchteil einer Zeile) für sanftes Scrollen.
+    pub scroll_acc: f32,
+    pub search: Option<SearchState>,
+    pub shell_id: String,
+    pub mouse_down: Option<u8>,
+    pub mouse_last: Option<(usize, usize)>,
+    /// Link unter dem Mauszeiger bei gedrückter Strg-Taste: (Zeile, Start, Ende, Ziel)
+    pub hover_link: Option<(usize, usize, usize, String)>,
+    tee_on: AtomicBool,
+    tee: Mutex<Vec<u8>>,
+    /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
+    last_activity: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
+fn mono_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+pub struct SpawnOptions<'a> {
+    pub shell: &'a ShellSpec,
+    pub cwd: Option<&'a str>,
+    /// Text, der vor dem Start der Shell in den Verlauf geschrieben wird.
+    pub restore_text: Option<&'a str>,
+    /// Wird direkt nach dem Start an die Shell gesendet (z.B. "claude\r").
+    pub initial_input: Option<&'a str>,
+    pub scrollback_lines: usize,
+    pub env: Vec<(String, String)>,
+}
+
+impl Session {
+    pub fn spawn(ctx: &egui::Context, opts: SpawnOptions) -> Result<Session, String> {
+        let (cols, rows) = (100u16, 30u16);
+        let pty = native_pty_system();
+        let pair = pty
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| e.to_string())?;
+
+        let mut cmd = CommandBuilder::new(&opts.shell.program);
+        for a in &opts.shell.args {
+            cmd.arg(a);
+        }
+        if let Some(cwd) = opts.cwd {
+            if std::path::Path::new(cwd).is_dir() {
+                cmd.cwd(cwd);
+            }
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        for (k, v) in &opts.env {
+            cmd.env(k, v);
+        }
+
+        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+        drop(pair.slave);
+
+        let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+        let writer: SharedWriter = Arc::new(Mutex::new(
+            pair.master.take_writer().map_err(|e| e.to_string())?,
+        ));
+
+        let title = Arc::new(Mutex::new(None));
+        let bell = Arc::new(AtomicBool::new(false));
+        let listener = Listener { title: title.clone(), writer: writer.clone(), bell: bell.clone() };
+
+        let config = Config { scrolling_history: opts.scrollback_lines, ..Config::default() };
+        let mut term = Term::new(config, &TermSize::new(cols as usize, rows as usize), listener);
+        let mut processor: Processor = Processor::new();
+
+        if let Some(text) = opts.restore_text {
+            let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
+            processor.advance(&mut term, text.as_bytes());
+            processor.advance(
+                &mut term,
+                b"\r\n\x1b[2m\xe2\x94\x80\xe2\x94\x80 wiederhergestellter Verlauf \xe2\x94\x80\xe2\x94\x80\x1b[0m\r\n",
+            );
+        }
+
+        let term = Arc::new(Mutex::new(term));
+        let exited = Arc::new(AtomicBool::new(false));
+        let shell_state: Arc<Mutex<ShellState>> = Arc::new(Mutex::new(ShellState::default()));
+        let last_activity = Arc::new(std::sync::atomic::AtomicU64::new(mono_ms()));
+
+        {
+            let term = term.clone();
+            let exited = exited.clone();
+            let ctx = ctx.clone();
+            let shell_state = shell_state.clone();
+            let activity = last_activity.clone();
+            // Lesen und Verarbeiten getrennt: Der Verarbeitungs-Thread muss die Frist eines „Synchronized Update“
+            // (CSI ?2026h) selbst durchsetzen. vte puffert sonst nach einem abgebrochenen Update (Programm stirbt
+            // mitten im Frame, `cat` einer Datei mit ESC[?2026h) bis zu 2 MiB und das Terminal zeigt nichts mehr an.
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+            std::thread::spawn(move || {
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if tx.send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            std::thread::spawn(move || {
+                use std::sync::mpsc::RecvTimeoutError;
+                let mut scanner = OscScanner::default();
+                loop {
+                    let msg = match processor.sync_timeout().sync_timeout() {
+                        Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
+                        None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    };
+                    match msg {
+                        Ok(bytes) => {
+                            activity.store(mono_ms(), Ordering::Relaxed);
+                            let (events, positions) = scanner.feed_at(&bytes);
+                            {
+                                let mut t = term.lock().unwrap_or_else(|e| e.into_inner());
+                                if processor.sync_timeout().sync_timeout().is_some_and(|d| d <= std::time::Instant::now()) {
+                                    processor.stop_sync(&mut *t);
+                                }
+                                if events.is_empty() {
+                                    processor.advance(&mut *t, &bytes);
+                                } else {
+                                    // Den Chunk an den Ereignissen teilen: die Cursorzeile (z. B. Prompt-Anfang) wird dort ausgelesen,
+                                    // wo die Sequenz steht – nicht erst am Chunk-Ende, wo ein mehrzeiliger Prompt schon fertig gedruckt ist.
+                                    let mut done = 0usize;
+                                    for (ev, end) in events.into_iter().zip(positions) {
+                                        let end = end.clamp(done, bytes.len());
+                                        processor.advance(&mut *t, &bytes[done..end]);
+                                        done = end;
+                                        let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
+                                        let line = t.grid().cursor.point.line.0 as i64;
+                                        apply_events(&shell_state, vec![ev], (hist + line).max(0) as u64);
+                                    }
+                                    processor.advance(&mut *t, &bytes[done..]);
+                                }
+                            }
+                            ctx.request_repaint();
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            processor.stop_sync(&mut *term.lock().unwrap_or_else(|e| e.into_inner()));
+                            ctx.request_repaint();
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                // Restpuffer eines offenen Updates noch anzeigen.
+                if processor.sync_timeout().sync_timeout().is_some() {
+                    processor.stop_sync(&mut *term.lock().unwrap_or_else(|e| e.into_inner()));
+                }
+                exited.store(true, Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+        }
+
+        let session = Session {
+            term,
+            shell_state,
+            writer,
+            master: pair.master,
+            child: Mutex::new(child),
+            title,
+            exited,
+            bell,
+            cols,
+            rows,
+            scroll_acc: 0.0,
+            search: None,
+            shell_id: opts.shell.id.clone(),
+            mouse_down: None,
+            mouse_last: None,
+            hover_link: None,
+            tee_on: AtomicBool::new(false),
+            tee: Mutex::new(Vec::new()),
+            last_activity,
+        };
+        if let Some(input) = opts.initial_input {
+            session.write(input.as_bytes());
+        }
+        Ok(session)
+    }
+
+    pub fn write(&self, bytes: &[u8]) {
+        if self.tee_on.load(Ordering::Relaxed) {
+            self.tee.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(bytes);
+        }
+        self.write_raw(bytes);
+    }
+
+    /// Wie `write`, aber ohne Broadcast-Mitschnitt: Eingaben eines Agenten dürfen nicht in fremden Terminals landen.
+    pub fn write_raw(&self, bytes: &[u8]) {
+        let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = w.write_all(bytes);
+        let _ = w.flush();
+    }
+
+    /// Eingabe eines Agenten: Text wie eingefügt (Bracketed Paste, falls angefordert), optional mit Enter, in EINEM
+    /// Schreibvorgang, ohne Broadcast; scrollt vorher ans Ende.
+    pub fn send_text_agent(&self, text: &str, submit: bool) {
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
+        let bracketed = {
+            let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+            t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+            t.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+        };
+        let mut out: Vec<u8> = Vec::new();
+        if bracketed {
+            let text: String = text.chars().filter(|&c| c >= ' ' && c != '\u{7f}' || c == '\t' || c == '\r').collect();
+            out.extend_from_slice(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+        } else {
+            out.extend_from_slice(text.as_bytes());
+        }
+        if submit {
+            out.push(b'\r');
+        }
+        self.write_raw(&out);
+    }
+
+    /// Wie lange das Programm schon nichts mehr ausgegeben hat.
+    pub fn quiet_for(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(mono_ms().saturating_sub(self.last_activity.load(Ordering::Relaxed)))
+    }
+
+    /// Prozess-ID der Shell dieser Sitzung (Kind des Pseudo-Terminals).
+    pub fn pid(&self) -> Option<u32> {
+        self.child.try_lock().ok().and_then(|c| c.process_id())
+    }
+
+    /// Wie `lines_abs`, aber umgebrochene Zeilen sind zu einer logischen Zeile zusammengefügt (für Ausgaben an Leser).
+    pub fn text_abs(&self, from: u64, to: u64) -> Vec<String> {
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let g = t.grid();
+        let hist = g.total_lines().saturating_sub(g.screen_lines()) as i64;
+        let top = -hist;
+        let bottom = g.bottommost_line().0 as i64;
+        let a = (from as i64 - hist).clamp(top, bottom);
+        let b = (to as i64 - hist).clamp(top, bottom);
+        if b < a {
+            return vec![];
+        }
+        let text = t.bounds_to_string(Point::new(Line(a as i32), Column(0)), Point::new(Line(b as i32), Column(g.columns() - 1)));
+        text.lines().map(|l| l.trim_end().to_string()).collect()
+    }
+
+    /// Anwendung hat den Cursor-Tasten-Modus (Pfeile als `ESC O A`) gesetzt.
+    pub fn app_cursor(&self) -> bool {
+        self.term.lock().unwrap_or_else(|e| e.into_inner()).mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR)
+    }
+
+    pub fn alt_screen(&self) -> bool {
+        self.term.lock().unwrap_or_else(|e| e.into_inner()).mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+    }
+
+    /// Absolute Zeilennummer (ab Anfang des Verlaufs) der Cursorzeile.
+    pub fn abs_cursor_line(&self) -> u64 {
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
+        (hist + t.grid().cursor.point.line.0 as i64).max(0) as u64
+    }
+
+    /// Beginn der (ggf. umgebrochenen) Zeile, zu der `abs` gehört: läuft eine Zeile am Rand in die nächste über,
+    /// gehört sie zur selben logischen Zeile (lange Prompts in schmalen Terminals).
+    pub fn unwrap_start(&self, mut abs: u64) -> u64 {
+        use alacritty_terminal::term::cell::Flags;
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let g = t.grid();
+        let hist = g.total_lines().saturating_sub(g.screen_lines()) as i64;
+        let top = -hist;
+        let last_col = Column(g.columns() - 1);
+        while abs > 0 {
+            let prev = abs as i64 - 1 - hist;
+            if prev < top || prev > g.bottommost_line().0 as i64 {
+                break;
+            }
+            if g[Line(prev as i32)][last_col].flags.contains(Flags::WRAPLINE) {
+                abs -= 1;
+            } else {
+                break;
+            }
+        }
+        abs
+    }
+
+    /// Letzte Zeile der (ggf. umgebrochenen) logischen Zeile, die bei `abs` beginnt: läuft eine Zeile am Rand in die
+    /// nächste über, gehört diese noch dazu (lange eingegebene Befehle in schmalen Terminals).
+    pub fn wrap_end(&self, mut abs: u64) -> u64 {
+        use alacritty_terminal::term::cell::Flags;
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let g = t.grid();
+        let hist = g.total_lines().saturating_sub(g.screen_lines()) as i64;
+        let bottom = g.bottommost_line().0 as i64;
+        let last_col = Column(g.columns() - 1);
+        loop {
+            let row = abs as i64 - hist;
+            if row < -hist || row >= bottom || !g[Line(row as i32)][last_col].flags.contains(Flags::WRAPLINE) {
+                return abs;
+            }
+            abs += 1;
+        }
+    }
+
+    /// Terminal-Zeilen von `from` bis `to` (absolut, einschließlich), je Zeile ein Eintrag, ohne Leerraum am Zeilenende.
+    pub fn lines_abs(&self, from: u64, to: u64) -> Vec<String> {
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let g = t.grid();
+        let hist = g.total_lines().saturating_sub(g.screen_lines()) as i64;
+        let top = -(hist);
+        let bottom = g.bottommost_line().0 as i64;
+        let a = (from as i64 - hist).clamp(top, bottom);
+        let b = (to as i64 - hist).clamp(top, bottom);
+        if b < a {
+            return vec![];
+        }
+        // Zeile für Zeile (Index = Zeilennummer − from): `bounds_to_string` über mehrere Zeilen fügt umgebrochene Zeilen
+        // zu einer zusammen, dann stimmten die Indizes für Aufrufer nicht mehr.
+        let last_col = Column(g.columns() - 1);
+        (a..=b)
+            .map(|r| t.bounds_to_string(Point::new(Line(r as i32), Column(0)), Point::new(Line(r as i32), last_col)).trim_end().to_string())
+            .collect()
+    }
+
+    /// Letzte `n` Zeilen des Verlaufs (ohne leere Zeilen am Ende) und ob es davor noch mehr gab.
+    pub fn tail_text(&self, n: usize) -> (String, bool) {
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let g = t.grid();
+        let top = g.topmost_line();
+        let bottom = g.bottommost_line();
+        // Etwas mehr als n Zeilen holen (leere Zeilen unter dem Cursor werden danach abgeschnitten).
+        let want = n as i32 + g.screen_lines() as i32;
+        let start = Line((bottom.0 - want).max(top.0));
+        let text = t.bounds_to_string(Point::new(start, Column(0)), Point::new(bottom, Column(g.columns() - 1)));
+        let mut lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        let more = start.0 > top.0 || lines.len() > n;
+        let from = lines.len().saturating_sub(n);
+        (lines[from..].join("\n"), more)
+    }
+
+    /// Nur der sichtbare Bildschirm (unabhängig davon, wie weit der Nutzer gescrollt hat).
+    pub fn screen_text(&self) -> String {
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let g = t.grid();
+        let text = t.bounds_to_string(Point::new(Line(0), Column(0)), Point::new(Line(g.screen_lines() as i32 - 1), Column(g.columns() - 1)));
+        let mut lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    /// Eingaben mitschneiden (für Broadcast an andere Terminals).
+    pub fn set_tee(&self, on: bool) {
+        self.tee_on.store(on, Ordering::Relaxed);
+        if !on {
+            self.tee.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+    }
+
+    pub fn take_tee(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.tee.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Text wie eingefügt senden (Bracketed Paste, falls die Anwendung es anfordert).
+    pub fn send_text(&self, text: &str, submit: bool) {
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
+        let bracketed = self.term.lock().unwrap_or_else(|e| e.into_inner()).mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
+        if bracketed {
+            // Steuerzeichen (v. a. ESC) entfernen: ein eingefügtes „\e[201~“ beendete sonst den Paste-Modus
+            // vorzeitig und der Rest liefe als getippte Befehle.
+            let text: String = text.chars().filter(|&c| c >= ' ' && c != '\u{7f}' || c == '\t' || c == '\r').collect();
+            self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+        } else {
+            self.write(text.as_bytes());
+        }
+        if submit {
+            self.write(b"\r");
+        }
+    }
+
+    /// Zeichen einer sichtbaren Zeile (nach Spalten, Platzhalterzellen als Leerzeichen).
+    pub fn row_chars(&self, viewport_row: usize) -> Vec<char> {
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let off = t.grid().display_offset() as i32;
+        let line = alacritty_terminal::index::Line(viewport_row as i32 - off);
+        if viewport_row >= self.rows as usize {
+            return vec![];
+        }
+        (0..t.grid().columns())
+            .map(|c| {
+                let cell = &t.grid()[line][alacritty_terminal::index::Column(c)];
+                if cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) || cell.c == '\0' { ' ' } else { cell.c }
+            })
+            .collect()
+    }
+
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|t| !t.trim().is_empty())
+    }
+
+    pub fn has_exited(&self) -> bool {
+        if self.exited.load(Ordering::Relaxed) {
+            return true;
+        }
+        // Unter ConPTY kommt das EOF am Ausgabekanal erst mit ClosePseudoConsole – also den Prozess selbst fragen.
+        let gone = self.child.try_lock().is_ok_and(|mut c| matches!(c.try_wait(), Ok(Some(_))));
+        if gone {
+            self.exited.store(true, Ordering::Relaxed);
+        }
+        gone
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = (cols.max(2), rows.max(1));
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.term.lock().unwrap_or_else(|e| e.into_inner()).resize(TermSize::new(cols as usize, rows as usize));
+        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+    }
+
+    /// Gesamten Verlauf (Scrollback + sichtbarer Bereich) als Text, auf `max_lines` begrenzt.
+    pub fn dump_text(&self, max_lines: usize) -> String {
+        let term = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let grid = term.grid();
+        let top = grid.topmost_line();
+        let bottom = grid.bottommost_line();
+        let text = term.bounds_to_string(
+            Point::new(top, Column(0)),
+            Point::new(bottom, Column(grid.columns() - 1)),
+        );
+        let mut lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        let start = lines.len().saturating_sub(max_lines);
+        let _ = Line(0);
+        lines[start..].join("\n")
+    }
+}
+
+fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line: u64) {
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    for ev in events {
+        st.integration_seen = true;
+        match ev {
+            OscEvent::PromptStart => {
+                st.prompt_seq += 1;
+                if st.marks.last() != Some(&abs_line) {
+                    st.marks.push(abs_line);
+                    if st.marks.len() > 2000 {
+                        st.marks.remove(0);
+                    }
+                }
+            }
+            OscEvent::CommandStart => st.cmd_start = Some(std::time::Instant::now()),
+            OscEvent::CommandDone { exit } => {
+                // Dauer exakt (PowerShell: Historie) oder ab Befehlsstart (bash: PS0); ohne Quelle keine Dauer (kein Fehlalarm).
+                let dur = st.pending_dur.take().or_else(|| st.cmd_start.map(|t| t.elapsed().as_millis() as u64));
+                st.cmd_start = None;
+                st.done_seq += 1;
+                st.last_exit = exit;
+                st.last_dur_ms = dur;
+                st.done.push(CmdDone { exit, dur_ms: dur });
+                if st.done.len() > 50 {
+                    st.done.remove(0);
+                }
+            }
+            OscEvent::Cwd(p) => {
+                st.cwd_seq += 1;
+                st.cwd = Some(p);
+            }
+            OscEvent::DurationMs(ms) => st.pending_dur = Some(ms),
+        }
+    }
+}
+
+impl Session {
+    /// Springt zum vorherigen (`delta < 0`) bzw. nächsten (`delta > 0`) Prompt.
+    pub fn jump_mark(&self, delta: i32) {
+        let marks = self.shell_state.lock().unwrap_or_else(|e| e.into_inner()).marks.clone();
+        let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
+        let top = hist - t.grid().display_offset() as i64;
+        let target = if delta < 0 {
+            marks.iter().rev().find(|m| (**m as i64) < top).copied()
+        } else {
+            marks.iter().find(|m| (**m as i64) > top).copied()
+        };
+        let offset = match target {
+            Some(m) => (hist - m as i64).clamp(0, hist),
+            None if delta > 0 => 0,
+            None => hist,
+        };
+        let cur = t.grid().display_offset() as i64;
+        t.scroll_display(alacritty_terminal::grid::Scroll::Delta((offset - cur) as i32));
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.child.get_mut().unwrap_or_else(|e| e.into_inner()).kill();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_echo_and_read_grid() {
+        let ctx = egui::Context::default();
+        let shell = ShellSpec {
+            id: "sh".into(),
+            label: "sh".into(),
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo hallo-paneldeck; sleep 0.3".into()],
+        };
+        let s = Session::spawn(
+            &ctx,
+            SpawnOptions {
+                shell: &shell,
+                cwd: None,
+                restore_text: Some("alter verlauf"),
+                initial_input: None,
+                scrollback_lines: 1000,
+                env: vec![],
+            },
+        )
+        .unwrap();
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if s.dump_text(100).contains("hallo-paneldeck") {
+                break;
+            }
+        }
+        let dump = s.dump_text(100);
+        assert!(dump.contains("hallo-paneldeck"), "dump: {dump}");
+        assert!(dump.contains("alter verlauf"), "dump: {dump}");
+    }
+
+    #[test]
+    fn unterminated_sync_update_still_shows_output() {
+        // Programm beginnt ein Synchronized Update und beendet es nie, läuft aber weiter.
+        let ctx = egui::Context::default();
+        let shell = ShellSpec {
+            id: "sh".into(),
+            label: "sh".into(),
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf '\\033[?2026hsichtbar-nach-frist'; sleep 2".into()],
+        };
+        let s = Session::spawn(
+            &ctx,
+            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![] },
+        )
+        .unwrap();
+        let mut ok = false;
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if s.dump_text(10).contains("sichtbar-nach-frist") {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "Ausgabe blieb im Sync-Puffer hängen: {}", s.dump_text(10));
+    }
+}

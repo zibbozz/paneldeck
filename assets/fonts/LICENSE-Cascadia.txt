@@ -1,0 +1,5 @@
+Cascadia Mono (CascadiaMono-Regular.ttf)
+Copyright (c) 2019 - Present, Microsoft Corporation, with Reserved Font Name Cascadia Code.
+Licensed under the SIL Open Font License, Version 1.1.
+Full text: https://openfontlicense.org/ and https://github.com/microsoft/cascadia-code/blob/main/LICENSE
+Source: https://github.com/microsoft/cascadia-code (release v2407.24)
