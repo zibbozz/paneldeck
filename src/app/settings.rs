@@ -210,7 +210,7 @@ impl App {
                                         self.hooks_msg = match hooks::global_settings_path().map(|p| hooks::uninstall_global(&p)) {
                                             Some(Ok(())) => String::new(),
                                             Some(Err(e)) => e,
-                                            None => "~/.claude nicht gefunden".into(),
+                                            None => state::t("~/.claude nicht gefunden", "~/.claude not found").into(),
                                         };
                                         self.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
                                     }
@@ -218,7 +218,7 @@ impl App {
                                     self.hooks_msg = match hooks::global_settings_path().map(|p| hooks::install_global(&p, &self.exe)) {
                                         Some(Ok(())) => String::new(),
                                         Some(Err(e)) => e,
-                                        None => "~/.claude nicht gefunden".into(),
+                                        None => state::t("~/.claude nicht gefunden", "~/.claude not found").into(),
                                     };
                                     self.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
                                 }
