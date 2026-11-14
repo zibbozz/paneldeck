@@ -10,6 +10,7 @@
 //! gleiche Werte auch als JSON gleich sind.
 
 use super::fields::{check_value, list_fields, Field, FieldKind};
+use super::sprints::releases::{exists_in_project, ReleaseKind};
 use super::ticket_error::{FieldLabel, TRes, TicketError};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -196,8 +197,11 @@ pub fn normalize_value(conn: &Connection, ctx: &RefCtx, field: &Field, v: &Value
             }
         }
         FieldKind::Version | FieldKind::Milestone => {
-            if v.as_i64().is_none_or(|i| i <= 0) {
-                return Err(bad());
+            let id = v.as_i64().filter(|i| *i > 0).ok_or_else(bad)?;
+            // Die Kennung muss zu einer Version/einem Meilenstein desselben Projekts gehören.
+            let kind = if field.kind == FieldKind::Version { ReleaseKind::Version } else { ReleaseKind::Milestone };
+            if !exists_in_project(conn, kind, id, ctx.project_id)? {
+                return Err(TicketError::RefInvalid(FieldLabel::of(field)));
             }
         }
         _ => {}
@@ -253,6 +257,9 @@ mod tests {
         let c = db();
         let (p, t) = setup(&c);
         let ctx = RefCtx { project_id: p, ticket_id: None };
+        // Versionen und Meilensteine müssen zum Projekt gehören (Kennung 1 jeweils).
+        c.execute("INSERT INTO versions (project_id, name) VALUES (?1, 'v')", [p]).unwrap();
+        c.execute("INSERT INTO milestones (project_id, name) VALUES (?1, 'm')", [p]).unwrap();
         let cases: Vec<(FieldKind, FieldOptions, Value)> = vec![
             (FieldKind::Text, FieldOptions::default(), json!("hallo")),
             (FieldKind::Rich, FieldOptions::default(), json!("# Titel\n\ntext")),
@@ -262,8 +269,8 @@ mod tests {
             (FieldKind::Number, FieldOptions::default(), json!(3.5)),
             (FieldKind::Number, FieldOptions::default(), json!(7)),
             (FieldKind::Terminal, FieldOptions::default(), json!("term-1")),
-            (FieldKind::Version, FieldOptions::default(), json!(4)),
-            (FieldKind::Milestone, FieldOptions::default(), json!(5)),
+            (FieldKind::Version, FieldOptions::default(), json!(1)),
+            (FieldKind::Milestone, FieldOptions::default(), json!(1)),
             (FieldKind::Date, FieldOptions::default(), json!("2026-11-14")),
             (FieldKind::Datetime, FieldOptions::default(), json!("2026-11-14T09:30:15")),
             (FieldKind::Multi, dd(&["a", "b", "c"]), json!([3, 1])),
@@ -365,7 +372,9 @@ mod tests {
         assert!(normalize_value(&c, &ctx, &f, &json!(5)).is_err());
         let v = field(&c, t, "V", FieldKind::Version, FieldOptions::default());
         assert!(normalize_value(&c, &ctx, &v, &json!(0)).is_err());
-        assert!(normalize_value(&c, &ctx, &v, &json!(3)).is_ok());
+        assert!(normalize_value(&c, &ctx, &v, &json!(3)).is_err(), "es gibt keine Version 3");
+        c.execute("INSERT INTO versions (project_id, name) VALUES (?1, 'v')", [p]).unwrap();
+        assert!(normalize_value(&c, &ctx, &v, &json!(1)).is_ok());
     }
 
     #[test]

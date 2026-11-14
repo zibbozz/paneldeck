@@ -11,11 +11,13 @@
 //!   Abfrage mit Seiten);
 //! * `links`, `comments`, `time_entries`, `history` (Quelle und Verlaufstexte), `todo_bridge` (einfache Todo-Liste lesen und in
 //!   Tickets umwandeln);
-//! * `ops` (Rückgängig/Wiederholen über `undo::History`).
+//! * `ops` (Rückgängig/Wiederholen über `undo::History`);
+//! * `agent` (die MCP-Werkzeuge für Todo-Liste und Tickets: JSON hinein, JSON heraus, mit denselben Regeln wie die Oberfläche).
 
 // Die Schicht ist vollständig, die Oberfläche und die Tickets (nächste Schritte) nutzen sie erst nach und nach.
 #![allow(dead_code)]
 
+pub mod agent;
 pub mod backup_doc;
 pub mod clone_move;
 pub mod comments;
@@ -32,6 +34,7 @@ pub mod projects;
 pub mod quick;
 pub mod query_help;
 pub mod schema;
+pub mod sprints;
 pub mod statuses;
 pub mod summary;
 pub mod template;

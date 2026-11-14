@@ -7,6 +7,9 @@
   startet sie minimiert und spricht per JSON-RPC mit `paneldeck.exe mcp` – so wie es ein Agent tut.
   Geprüft werden Protokoll, die drei Stufen (Aus/Lesen/Steuern), Lese- und Steuer-Werkzeuge, run_command in
   allen vorhandenen Shells, simulierte Claude-Hooks (queue_prompt/wait_for_status) und die Sicherheitsregeln.
+  Dazu die Aufgaben-Werkzeuge je Modus: einfache Todo-Liste (Expertenmodus aus) und Projekte/Tickets (Expertenmodus an).
+  Für den Ticket-Teil wird die Datenbank des Test-Datenordners per Python (sqlite3) mit einem kleinen Projekt "PAN"
+  (Typ Task mit Workflow, Pflichtfeld "Area", Übergangsregel "Result", Dropdown "Priority") und dem Expertenmodus präpariert.
   Mit -Visible zusätzlich: Screenshot-Werkzeug (braucht ein sichtbares Fenster).
   Es werden weder Maus noch Tastatur benutzt.
 
@@ -24,6 +27,7 @@ $Exe = (Resolve-Path $Exe).Path
 $work = Join-Path $env:TEMP ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $dir = New-Item -ItemType Directory -Force "$work\hub"; $proj = New-Item -ItemType Directory -Force "$work\proj"
 Copy-Item $Exe "$dir\paneldeck.exe"
+$script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
 
 function Check($name, [bool]$ok, $detail = '') {
@@ -38,6 +42,7 @@ function Set-Level($level) {
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  if ($script:prestart) { & $script:prestart }
   $style = if ($Visible) { 'Normal' } else { 'Minimized' }
   $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
   $t0 = Get-Date
@@ -222,6 +227,161 @@ try {
     Send-Raw (@{ jsonrpc = '2.0'; id = 951; method = 'tools/call'; params = @{ name = 'screenshot'; arguments = @{ session = $any.id } } } | ConvertTo-Json -Depth 5 -Compress)
     $s2 = Read-Line 20000; $img2 = $s2.result.content | Where-Object type -eq 'image' | Select-Object -First 1
     Check 'screenshot (Sitzungs-Ausschnitt kleiner als Fenster)' ($null -ne $img2 -and $s2.result.structuredContent.height -lt $s1.result.structuredContent.height + 1)
+  }
+
+  Write-Host "== Aufgaben-Werkzeuge: einfache Todo-Liste (Expertenmodus aus)" -ForegroundColor Cyan
+  Set-Level 'Control'
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'einfacher Modus: tools/list hat die Todo-Werkzeuge' ($names -contains 'list_todos' -and $names -contains 'add_todo' -and $names -contains 'set_todo_done')
+  Check 'einfacher Modus: tools/list hat keine Ticket-Werkzeuge' ($names -notcontains 'create_ticket' -and $names -notcontains 'get_ticket' -and $names -notcontains 'link_terminal')
+  Check 'kein Werkzeug zum Loeschen von Tickets/Karten' (-not ($names | Where-Object { $_ -match 'delete|remove' }))
+  $t1 = Tool 'add_todo' @{ title = 'Milch kaufen'; text = '2 Liter'; tags = @('Haushalt', 'haushalt', 'Einkauf') }
+  Check 'add_todo legt eine Karte an (Tags automatisch, ohne Doppelte)' (-not $t1.err -and $t1.data.todo.key -eq 'TODO-1' -and $t1.data.todo.tags.Count -eq 2) $t1.text
+  Check 'add_todo ohne Titel und Text: bad_args' ((Code (Tool 'add_todo' @{})) -eq 'bad_args')
+  Check 'add_todo: unbekannter Parameter: bad_args' ((Code (Tool 'add_todo' @{ title = 'x'; bogus = 1 })) -eq 'bad_args')
+  Check 'add_todo: zu langer Titel: too_large' ((Code (Tool 'add_todo' @{ title = ('x' * 300) })) -eq 'too_large')
+  $lt = Tool 'list_todos'
+  Check 'list_todos: eine offene Karte, nicht nur lesbar' ($lt.data.total -eq 1 -and $lt.data.read_only -eq $false -and $lt.data.todos[0].title -eq 'Milch kaufen')
+  Check 'list_todos: Filter nach Tag' ((Tool 'list_todos' @{ tags = @('einkauf') }).data.total -eq 1 -and (Tool 'list_todos' @{ tags = @('gibts-nicht') }).data.total -eq 0)
+  $sd = Tool 'set_todo_done' @{ id = 'TODO-1' }
+  Check 'set_todo_done hakt ab' (-not $sd.err -and $sd.data.todo.done -eq $true -and $sd.data.changed -eq $true)
+  Check 'set_todo_done erneut: keine Aenderung' ((Tool 'set_todo_done' @{ id = 1 }).data.changed -eq $false)
+  Check 'list_todos: erledigte standardmaessig ausgeblendet' ((Tool 'list_todos').data.total -eq 0 -and (Tool 'list_todos' @{ state = 'all' }).data.total -eq 1)
+  Check 'einfacher Modus: create_ticket -> wrong_mode' ((Code (Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'x' })) -eq 'wrong_mode')
+  Check 'einfacher Modus: get_ticket -> wrong_mode (englische Meldung)' ((Tool 'get_ticket' @{ ticket = 'PAN-1' }).text -match 'Expert mode is off')
+  Check 'Todo-Aufruf im Protokoll ohne Langtext' ((Get-Content "$dir\paneldeck-data\mcp-log.jsonl" -Raw) -notmatch '2 Liter')
+
+  Write-Host "== Aufgaben-Werkzeuge: Stufe Nur lesen" -ForegroundColor Cyan
+  Set-Level 'Read'
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Nur lesen: list_todos ja, add_todo nein' ($names -contains 'list_todos' -and $names -notcontains 'add_todo' -and $names -notcontains 'set_todo_done')
+  Check 'Nur lesen: add_todo verboten' ((Code (Tool 'add_todo' @{ title = 'x' })) -eq 'forbidden')
+  Check 'Nur lesen: list_todos liest die Karte' ((Tool 'list_todos' @{ state = 'all' }).data.total -eq 1)
+
+  Write-Host "== Aufgaben-Werkzeuge: Projekte und Tickets (Expertenmodus an)" -ForegroundColor Cyan
+  $py = Get-Command python -ErrorAction SilentlyContinue
+  Check 'python fuer die Praeparierung der Datenbank vorhanden' ($null -ne $py)
+  if ($py) {
+    $seed = @'
+import sqlite3, sys, json
+c = sqlite3.connect(sys.argv[1])
+c.execute('PRAGMA foreign_keys=ON')
+now = '2026-01-01T00:00:00'
+c.execute("INSERT INTO projects (key,name,description,color,work_dir,next_number,position,created_at) VALUES ('PAN','Smoke','','#112233','',1,1,?)", (now,))
+pid = c.execute("SELECT id FROM projects WHERE key='PAN'").fetchone()[0]
+st = {}
+for i, (n, cat) in enumerate([('To Do', 'todo'), ('In Progress', 'progress'), ('Done', 'done')]):
+    c.execute("INSERT INTO statuses (project_id,name,color,category,position) VALUES (?,?,?,?,?)", (pid, n, '#888888', cat, i))
+    st[cat] = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+c.execute("INSERT INTO ticket_types (project_id,name,color,workflow,system,position) VALUES (?,?,?,?,0,0)", (pid, 'Task', '#3366cc', 1))
+tt = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+c.execute("INSERT INTO ticket_types (project_id,name,color,workflow,system,position) VALUES (?,?,?,?,0,1)", (pid, 'Note', '#999999', 0))
+for i, cat in enumerate(['todo', 'progress', 'done']):
+    c.execute("INSERT INTO type_statuses (type_id,status_id,position) VALUES (?,?,?)", (tt, st[cat], i))
+def field(name, kind, required, options='{}', pos=0):
+    c.execute("INSERT INTO fields (type_id,name,kind,options,required,position) VALUES (?,?,?,?,?,?)", (tt, name, kind, options, required, pos))
+    return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+field('Area', 'text', 1, pos=0)
+res = field('Result', 'text', 0, pos=1)
+field('Priority', 'dropdown', 0, json.dumps({'values': [{'id': 1, 'name': 'Low'}, {'id': 2, 'name': 'High'}]}), pos=2)
+def tr(a, b, req=()):
+    c.execute("INSERT INTO transitions (type_id,from_status_id,to_status_id,required_fields) VALUES (?,?,?,?)", (tt, st[a], st[b], json.dumps(list(req))))
+tr('todo', 'progress'); tr('progress', 'done', [res]); tr('progress', 'todo'); tr('done', 'todo')
+for i, n in enumerate(['Development', 'Testing']):
+    c.execute("INSERT INTO work_kinds (project_id,name,position) VALUES (?,?,?)", (pid, n, i))
+c.execute("INSERT INTO meta (key,value) VALUES ('expert_mode','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+c.commit()
+c.close()
+'@
+    $seedFile = "$work\seed.py"; [IO.File]::WriteAllText($seedFile, $seed, (New-Object Text.UTF8Encoding $false))
+    $script:prestart = { $env:PYTHONUTF8 = '1'; & python -I $seedFile "$dir\paneldeck-data\paneldeck.db"; if ($LASTEXITCODE -ne 0) { throw 'seed.py fehlgeschlagen' } }
+    Set-Level 'Control'
+    $script:prestart = $null
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+    $expectTools = @('list_projects', 'get_project', 'search_tickets', 'get_ticket', 'get_time_entries', 'create_ticket', 'update_ticket', 'transition_ticket', 'add_comment', 'log_time', 'link_ticket', 'link_terminal')
+    Check 'Expertenmodus: tools/list hat die Ticket-Werkzeuge' (@($expectTools | Where-Object { $names -notcontains $_ }).Count -eq 0)
+    Check 'Expertenmodus: keine schreibenden Todo-Werkzeuge, list_todos bleibt' ($names -notcontains 'add_todo' -and $names -notcontains 'set_todo_done' -and $names -contains 'list_todos')
+    Check 'Expertenmodus: add_todo -> wrong_mode' ((Code (Tool 'add_todo' @{ title = 'x' })) -eq 'wrong_mode')
+    Check 'Expertenmodus: set_todo_done -> wrong_mode' ((Code (Tool 'set_todo_done' @{ id = 1 })) -eq 'wrong_mode')
+    $lt = Tool 'list_todos' @{ state = 'all' }
+    Check 'Expertenmodus: list_todos nur lesbar (read_only)' ($lt.data.read_only -eq $true -and $lt.data.total -eq 1)
+    $lp = Tool 'list_projects'
+    Check 'list_projects: TODO (schreibgeschuetzt) und PAN' (@($lp.data.projects | Where-Object { $_.key -eq 'TODO' -and $_.read_only }).Count -eq 1 -and @($lp.data.projects | Where-Object key -eq 'PAN').Count -eq 1)
+    $gp = Tool 'get_project' @{ project = 'pan' }
+    $task = $gp.data.types | Where-Object name -eq 'Task'
+    Check 'get_project: Typ, Felder, Workflow, Uebergaenge' (-not $gp.err -and @($task.fields).Count -eq 3 -and @($task.workflow.transitions).Count -eq 4 -and (($task.workflow.transitions | Where-Object { $_.to -eq 'Done' }).required_fields -contains 'Result'))
+    Check 'get_project: unbekanntes Projekt nennt die verfuegbaren' ((Tool 'get_project' @{ project = 'ZZZ' }).data.error.details.available -contains 'PAN')
+    $c1 = Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'Login reparieren' }
+    Check 'create_ticket ohne Pflichtfeld: required_missing mit Liste' ((Code $c1) -eq 'required_missing' -and $c1.data.error.details.missing_fields[0].name -eq 'Area') $c1.text
+    $c1 = Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'Login reparieren'; fields = @{ Area = 'auth'; Priority = 'High' } }
+    Check 'create_ticket: Schluessel, Startstatus, Dropdown per Name' (-not $c1.err -and $c1.data.ticket.key -eq 'PAN-1' -and $c1.data.ticket.status -eq 'To Do' -and (($c1.data.ticket.fields | Where-Object name -eq 'Priority').value -eq 'High')) $c1.text
+    Check 'create_ticket: unbekannter Typ nennt die Typen' ((Tool 'create_ticket' @{ project = 'PAN'; type = 'Epic'; title = 'x' }).data.error.details.available -contains 'Task')
+    Check 'create_ticket: ungueltiger Dropdown-Wert: invalid_value' ((Code (Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'x'; fields = @{ Area = 'a'; Priority = 'Gigantisch' } })) -eq 'invalid_value')
+    Check 'create_ticket: Feld, das der Typ nicht hat: bad_args' ((Code (Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'x'; fields = @{ Area = 'a'; Nope = 1 } })) -eq 'bad_args')
+    Check 'create_ticket im System-Projekt TODO: forbidden' ((Code (Tool 'create_ticket' @{ project = 'TODO'; type = 'todolist'; title = 'x' })) -eq 'forbidden')
+    $n2 = Tool 'create_ticket' @{ project = 'PAN'; type = 'Note'; title = 'Notiz ohne Workflow'; fields = @{} }
+    Check 'Typ ohne Workflow: kein Status, transition_ticket -> no_workflow' ($n2.data.ticket.key -eq 'PAN-2' -and $null -eq $n2.data.ticket.status -and (Code (Tool 'transition_ticket' @{ ticket = 'PAN-2'; status = 'Done' })) -eq 'no_workflow')
+    $u = Tool 'update_ticket' @{ ticket = 'PAN-1'; title = 'Login endgueltig reparieren'; fields = @{ Result = 'noch offen' } }
+    Check 'update_ticket: Titel und Feld' (-not $u.err -and $u.data.changed -eq $true -and $u.data.ticket.title -eq 'Login endgueltig reparieren') $u.text
+    Check 'update_ticket ohne Aenderung: changed=false' ((Tool 'update_ticket' @{ ticket = 'PAN-1'; title = 'Login endgueltig reparieren' }).data.changed -eq $false)
+    Check 'update_ticket: Status nur ueber transition_ticket (Parameter status unbekannt)' ((Code (Tool 'update_ticket' @{ ticket = 'PAN-1'; status = 'Done' })) -eq 'bad_args')
+    Check 'transition_ticket: nicht erlaubter Uebergang' ((Code (Tool 'transition_ticket' @{ ticket = 'PAN-1'; status = 'Done' })) -eq 'transition_not_allowed')
+    Check 'transition_ticket: erlaubter Uebergang' ((Tool 'transition_ticket' @{ ticket = 'PAN-1'; status = 'In Progress' }).data.ticket.status -eq 'In Progress')
+    $e3 = Tool 'update_ticket' @{ ticket = 'PAN-1'; fields = @{ Result = $null } }
+    $e4 = Tool 'transition_ticket' @{ ticket = 'PAN-1'; status = 'Done' }
+    Check 'transition_ticket: fehlende Pflichtfelder des Uebergangs mit Liste' ((Code $e4) -eq 'transition_needs_fields' -and $e4.data.error.details.missing_fields[0].name -eq 'Result') $e4.text
+    $e5 = Tool 'transition_ticket' @{ ticket = 'PAN-1'; status = 'Done'; fields = @{ Result = 'behoben' } }
+    Check 'transition_ticket: Pflichtfeld in derselben Operation mitgeben' (-not $e5.err -and $e5.data.ticket.status -eq 'Done') $e5.text
+    Check 'add_comment' (-not (Tool 'add_comment' @{ ticket = 'PAN-1'; body = 'GEHEIM-KOMMENTAR-XYZ' }).err)
+    Check 'add_comment: leer -> bad_args' ((Code (Tool 'add_comment' @{ ticket = 'PAN-1'; body = '  ' })) -eq 'bad_args')
+    $lg = Tool 'log_time' @{ ticket = 'PAN-1'; duration = '1h 30m'; comment = 'Review' }
+    Check 'log_time: 1h 30m = 90 Minuten, Standard-Art Development' ($lg.data.entry.minutes -eq 90 -and $lg.data.entry.work_kind -eq 'Development') $lg.text
+    $lg2 = Tool 'log_time' @{ ticket = 'PAN-1'; duration = 2; start = '2026-11-13'; work_kind = 'Testing' }
+    Check 'log_time: bloße Zahl = Stunden, Datum = 08:00' ($lg2.data.entry.minutes -eq 120 -and $lg2.data.entry.start -eq '2026-11-13T08:00:00' -and $lg2.data.ticket_total_minutes -eq 210) $lg2.text
+    Check 'log_time: ungueltige Dauer -> bad_args' ((Code (Tool 'log_time' @{ ticket = 'PAN-1'; duration = 'abc' })) -eq 'bad_args')
+    Check 'get_time_entries' ((Tool 'get_time_entries' @{ ticket = 'PAN-1' }).data.entries_total -eq 2)
+    $lk = Tool 'link_ticket' @{ ticket = 'PAN-1'; to_ticket = 'PAN-2'; type = 'blocks' }
+    Check 'link_ticket: Ticket mit Ticket' (-not $lk.err -and $lk.data.type -eq 'blocks') $lk.text
+    Check 'link_ticket: doppelt -> already_exists' ((Code (Tool 'link_ticket' @{ ticket = 'PAN-1'; to_ticket = 'PAN-2'; type = 'blocks' })) -eq 'already_exists')
+    Check 'link_ticket: mit sich selbst -> link_not_allowed' ((Code (Tool 'link_ticket' @{ ticket = 'PAN-1'; to_ticket = 'PAN-1' })) -eq 'link_not_allowed')
+    $s1 = Tool 'search_tickets' @{ project = 'PAN'; status = 'Done' }
+    Check 'search_tickets: nach Status' ($s1.data.total -eq 1 -and $s1.data.tickets[0].key -eq 'PAN-1')
+    Check 'search_tickets: Text, Seiten' ((Tool 'search_tickets' @{ text = 'notiz' }).data.total -eq 1 -and (Tool 'search_tickets' @{ limit = 1; offset = 1 }).data.tickets.Count -eq 1)
+    Check 'search_tickets: type ohne project -> bad_args' ((Code (Tool 'search_tickets' @{ type = 'Task' })) -eq 'bad_args')
+    $gt = Tool 'get_ticket' @{ ticket = 'PAN-1' }
+    Check 'get_ticket: Kommentar, Zeit, Verknuepfung, Verlauf' (-not $gt.err -and $gt.data.comments_total -eq 1 -and $gt.data.time.entries_total -eq 2 -and @($gt.data.links).Count -eq 1 -and @($gt.data.history | Where-Object source -eq 'agent').Count -ge 5)
+    Check 'get_ticket: Hinweis auf nicht vertrauenswuerdige Texte' ($gt.data.note -match 'untrusted')
+    Check 'Ticket-Aufruf im Protokoll ohne Kommentartext' ((Get-Content "$dir\paneldeck-data\mcp-log.jsonl" -Raw) -notmatch 'GEHEIM-KOMMENTAR')
+
+    Write-Host "== Aufgaben-Werkzeuge: Sitzung und Ticket verknuepfen, Quelle im Verlauf" -ForegroundColor Cyan
+    $foreign = ((Tool 'list_sessions').data.sessions | Select-Object -First 1).id
+    Check 'link_terminal: Sitzung des Nutzers (nicht selbst angelegt) -> forbidden' ((Code (Tool 'link_terminal' @{ ticket = 'PAN-1'; session = $foreign })) -eq 'forbidden')
+    Check 'link_terminal von aussen ohne session -> bad_args' ((Code (Tool 'link_terminal' @{ ticket = 'PAN-1' })) -eq 'bad_args')
+    $pc = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Plan-Agent' }; $A = $pc.data.id; Start-Sleep 4
+    $ow = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Von-aussen' }; $O = $ow.data.id
+    $lt1 = Tool 'link_terminal' @{ ticket = 'PAN-1'; session = $O }
+    Check 'link_terminal: selbst angelegte Sitzung (von aussen) -> session:<id>' (-not $lt1.err -and $lt1.data.terminal -eq "session:$O") $lt1.text
+    Check 'link_terminal: doppelt -> already_exists' ((Code (Tool 'link_terminal' @{ ticket = 'PAN-1'; session = $O })) -eq 'already_exists')
+    $own = InA 'link_terminal' @{ ticket = 'PAN-2' }
+    Check 'link_terminal: eigene Sitzung (Prozessbaum) ohne session-Angabe' ($own.isError -ne $true -and $own.structuredContent.terminal -eq "session:$A") ($own | ConvertTo-Json -Compress -Depth 5)
+    $oth = InA 'link_terminal' @{ ticket = 'PAN-2'; session = $O }
+    Check 'link_terminal: Sitzung eines anderen Agenten -> forbidden' ($oth.isError -eq $true -and $oth.content[0].text -like 'forbidden*')
+    Check 'get_ticket: linked_terminals' ((Tool 'get_ticket' @{ ticket = 'PAN-2' }).data.linked_terminals -contains "session:$A")
+    $cm = InA 'add_comment' @{ ticket = 'PAN-2'; body = 'vom Plan-Agent' }
+    Check 'Agent in Sitzung schreibt einen Kommentar' ($cm.isError -ne $true) ($cm | ConvertTo-Json -Compress -Depth 5)
+    $h = (Tool 'get_ticket' @{ ticket = 'PAN-2' }).data.history
+    Check 'Verlauf: Quelle agent mit Sitzungsname (Plan-Agent)' (@($h | Where-Object { $_.source -eq 'agent' -and $_.source_detail -eq 'Plan-Agent' }).Count -ge 1)
+    Check 'Verlauf: Aufruf von aussen ohne Sitzung hat Quelle agent ohne Namen' (@((Tool 'get_ticket' @{ ticket = 'PAN-1' }).data.history | Where-Object { $_.source -eq 'agent' -and $null -eq $_.source_detail }).Count -ge 1)
+    [void](Tool 'close_session' @{ session = $A }); [void](Tool 'close_session' @{ session = $O })
+
+    Write-Host "== Aufgaben-Werkzeuge: Expertenmodus, Stufe Nur lesen" -ForegroundColor Cyan
+    Set-Level 'Read'
+    $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+    Check 'Expert + Nur lesen: Ticket-Lesewerkzeuge ja, schreibende nein' ($names -contains 'get_ticket' -and $names -contains 'search_tickets' -and $names -notcontains 'create_ticket' -and $names -notcontains 'link_terminal')
+    Check 'Expert + Nur lesen: create_ticket verboten' ((Code (Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'x' })) -eq 'forbidden')
+    Check 'Expert + Nur lesen: get_ticket liest' ((Tool 'get_ticket' @{ ticket = 'PAN-1' }).data.key -eq 'PAN-1')
   }
 } finally {
   Stop-Hub
