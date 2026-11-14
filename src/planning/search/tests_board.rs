@@ -134,10 +134,30 @@ fn an_invalid_source_filter_is_reported() {
 }
 
 #[test]
-fn only_active_sprint_is_not_available_yet() {
+fn only_active_sprint_shows_the_cards_of_the_active_sprint() {
+    use crate::calc::calendar::WorkCalendar;
+    use crate::planning::projects::{update_project, UpdateProject};
+    use crate::planning::sprints::sprint::{create_sprint, move_tickets_to_sprint, start_sprint, NewSprint};
     let s = Sx::new();
-    let b = board(&s, BoardConfig { columns: vec![col(&[s.f.todo])], only_active_sprint: true, ..BoardConfig::default() });
-    assert_eq!(board_view(&s.f.c, b, &s.ctx).unwrap_err(), SearchError::NotAvailableYet(Feature::Sprints));
+    let b = board(&s, BoardConfig { columns: vec![col(&[s.f.todo, s.f.progress])], only_active_sprint: true, ..BoardConfig::default() });
+    // Projekt ohne Sprints: der Schalter wirkt nicht
+    assert_eq!(column_keys(&board_view(&s.f.c, b, &s.ctx).unwrap(), 0), ks(&[1, 3, 4, 5, 6, 7, 8, 10, 11]));
+    update_project(&s.f.c, s.f.project, &UpdateProject { use_sprints: Some(true), ..Default::default() }).unwrap();
+    // mit Sprints, aber ohne aktiven Sprint: keine Karten
+    let cal = WorkCalendar::default();
+    let sp = create_sprint(&s.f.c, &NewSprint::new(s.f.project, "Sprint 1"), &cal).unwrap();
+    move_tickets_to_sprint(&s.f.c, sp, &[s.ids[2], s.ids[3], s.ids[1]]).unwrap();
+    let v = board_view(&s.f.c, b, &s.ctx).unwrap();
+    assert!(column_keys(&v, 0).is_empty() && v.columns[0].total == 0);
+    // aktiv: PAN-3 (To Do) und PAN-4 (In Progress); PAN-2 (Done) liegt nicht in einer Spalte des Boards
+    start_sprint(&s.f.c, sp, &cal).unwrap();
+    let v = board_view(&s.f.c, b, &s.ctx).unwrap();
+    assert_eq!(column_keys(&v, 0), ks(&[3, 4]));
+    assert_eq!(v.columns[0].total, 2);
+    // ohne den Schalter sind es wieder alle
+    let cfg = BoardConfig { columns: vec![col(&[s.f.todo, s.f.progress])], only_active_sprint: false, ..BoardConfig::default() };
+    let b2 = create_board(&s.f.c, &NewBoard { project_id: s.f.project, name: "Alle".into(), description: String::new(), config: cfg }).unwrap();
+    assert_eq!(board_view(&s.f.c, b2, &s.ctx).unwrap().columns[0].total, 9);
 }
 
 #[test]
