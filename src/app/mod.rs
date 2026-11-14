@@ -37,6 +37,7 @@ mod settings;
 mod sidebar;
 mod tasks_ui;
 mod titlebar;
+mod toasts;
 
 const PALETTE: [[u8; 3]; 8] = [
     [0x61, 0xaf, 0xef],
@@ -595,6 +596,10 @@ pub struct App {
     wt_close: Option<WtClose>,
     gsearch: Option<GlobalSearch>,
     notice: Option<(String, Instant)>,
+    /// Toast-Stapel unten rechts (`toasts.rs`), Uhr dafür und Toast unter dem Mauszeiger.
+    toasts: toasts::ToastQueue,
+    toasts_epoch: Instant,
+    toasts_hover: Option<u64>,
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
@@ -799,6 +804,9 @@ impl App {
             wt_close: None,
             gsearch: None,
             notice: None,
+            toasts: Default::default(),
+            toasts_epoch: Instant::now(),
+            toasts_hover: None,
             hwnd: crate::winctl::hwnd_from(cc),
             in_tray: false,
             editor: None,
@@ -2703,6 +2711,7 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(500));
             }
         }
+        self.toasts_ui(ctx);
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
         self.dialogs(ctx, &mut actions);
