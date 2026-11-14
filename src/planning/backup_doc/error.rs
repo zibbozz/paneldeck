@@ -45,8 +45,10 @@ impl RefKind {
 /// Was an einem Element des Dokuments nicht stimmt (ohne Fundstelle).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Problem {
-    /// Zwei Tickets haben dieselbe Nummer, oder eine Nummer ist nicht positiv.
+    /// Zwei Tickets haben dieselbe Nummer, oder eine Nummer ist nicht positiv oder zu groß.
     TicketNumber(i64),
+    /// Die Reihenfolge-Zahl (`rank`) eines Tickets liegt außerhalb des erlaubten Bereichs.
+    Rank(i64),
     /// Status, Typen oder Arten der Arbeit der Struktur heißen doppelt.
     StructureNames,
     /// Interner Abgleich zwischen Struktur und angelegtem Projekt stimmt nicht.
@@ -214,6 +216,8 @@ pub enum BackupError {
     /// Probleme in den Zeilen (höchstens [`MAX_ROW_PROBLEMS`]); die Datei wird dann gar nicht importiert.
     CsvRows(Vec<RowProblem>),
     Db(String),
+    /// Die Datei ist größer als [`super::MAX_FILE_BYTES`] und wird gar nicht erst gelesen.
+    TooLarge { max_mb: u64 },
 }
 
 /// So viele Zeilenprobleme werden höchstens gesammelt.
@@ -253,8 +257,10 @@ impl Problem {
     pub fn message(&self, lang: Lang) -> String {
         let s = |de: &'static str, en: &'static str| lang.t(de, en).to_string();
         match (self, lang) {
-            (Problem::TicketNumber(n), Lang::De) => format!("Die Ticketnummer {n} ist ungültig oder kommt doppelt vor."),
-            (Problem::TicketNumber(n), Lang::En) => format!("The ticket number {n} is invalid or appears twice."),
+            (Problem::TicketNumber(n), Lang::De) => format!("Die Ticketnummer {n} ist ungültig, zu groß oder kommt doppelt vor."),
+            (Problem::TicketNumber(n), Lang::En) => format!("The ticket number {n} is invalid, too large or appears twice."),
+            (Problem::Rank(n), Lang::De) => format!("Die Reihenfolge-Zahl {n} liegt außerhalb des erlaubten Bereichs."),
+            (Problem::Rank(n), Lang::En) => format!("The order value {n} is outside the allowed range."),
             (Problem::StructureNames, _) => s("Status, Typen oder Arten der Arbeit heißen doppelt.", "Statuses, types or kinds of work have duplicate names."),
             (Problem::StructureMismatch, _) => s("Die Struktur lässt sich nicht eindeutig zuordnen.", "The structure cannot be matched unambiguously."),
             (Problem::UnknownRef(k, n), Lang::De) => format!("Verweist auf {} {n}, das im Dokument fehlt.", k.name(lang)),
@@ -386,6 +392,10 @@ impl BackupError {
                 out
             }
             BackupError::Db(e) => format!("{}: {e}", lang.t("Datenbankfehler", "Database error")),
+            BackupError::TooLarge { max_mb } => match lang {
+                Lang::De => format!("Die Datei ist zu groß (höchstens {max_mb} MB)."),
+                Lang::En => format!("The file is too large (at most {max_mb} MB)."),
+            },
         }
     }
 }
@@ -454,6 +464,7 @@ mod tests {
             BackupError::CsvHeader(HeaderProblem::Duplicate { column: 11, name: "x".into() }),
             BackupError::CsvRows(vec![RowProblem { row: 2, column: "Title".into(), issue: RowIssue::TypeMissing }]),
             BackupError::Db("x".into()),
+            BackupError::TooLarge { max_mb: 128 },
         ];
         for e in all {
             let (de, en) = (e.message(Lang::De), e.message(Lang::En));
@@ -466,6 +477,7 @@ mod tests {
     fn problems_where_and_issues_are_bilingual() {
         for p in [
             Problem::TicketNumber(1),
+            Problem::Rank(1),
             Problem::StructureNames,
             Problem::StructureMismatch,
             Problem::UnknownRef(RefKind::Status, 3),

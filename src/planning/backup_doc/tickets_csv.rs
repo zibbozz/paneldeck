@@ -22,7 +22,7 @@
 //! * Mehrfachwerte (Mehrfachauswahl, Labels) sind mit `|` verbunden; `|` und `\` im Wert werden als `\|` und `\\`
 //!   geschrieben. Datum und Datum+Uhrzeit sind ISO, Checkboxen `true`/`false`, Zahlen mit Punkt, Ticket-Felder der Schlüssel
 //!   des Ziels. Rich-Text bleibt unverändert (mit Zeilenumbrüchen).
-//! * **Formel-Schutz** (`excel_safe`): Zellen, die mit `=`, `+`, `-` oder `@` beginnen (auch nach führenden `'`), bekommen beim
+//! * **Formel-Schutz** (`excel_safe`): Zellen, die mit `=`, `+`, `-`, `@`, Tabulator oder Wagenrücklauf beginnen (auch nach führenden `'`), bekommen beim
 //!   Schreiben ein führendes `'`; der Import entfernt es wieder (`CsvImportOptions::unprotect`, Standard an). Wurde eine Datei
 //!   *ohne* Schutz geschrieben und enthält Zellen, die mit `'` und dann `=`/`+`/`-`/`@` beginnen, muss der Import mit
 //!   `unprotect: false` laufen (sonst fehlt ihnen das erste `'`).
@@ -99,7 +99,8 @@ impl Default for CsvImportOptions {
 // ------------------------------------------------------------------ Formel-Schutz und Listen
 
 fn is_trigger(c: char) -> bool {
-    matches!(c, '=' | '+' | '-' | '@')
+    // `=`, `+`, `-`, `@` sowie Tabulator und Wagenrücklauf (OWASP „CSV Injection“: Excel wertet auch diese als Beginn einer Formel)
+    matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r')
 }
 
 /// Setzt ein `'` vor Zellen, die (nach beliebig vielen `'`) mit `=`, `+`, `-` oder `@` beginnen.
@@ -700,9 +701,13 @@ mod unit {
 
     #[test]
     fn guard_and_unguard_are_inverse() {
-        for s in ["=1+1", "+x", "-5", "@a", "'=x", "''-1", "plain", "'plain", "", "'", "a=b", "-"] {
+        for s in ["=1+1", "+x", "-5", "@a", "'=x", "''-1", "plain", "'plain", "", "'", "a=b", "-", "\t=cmd", "\r=cmd", "'\tx", "x\t=1"] {
             assert_eq!(unguard(&guard(s)), s, "{s:?}");
         }
+        // OWASP: auch Zellen, die mit Tabulator oder Wagenrücklauf beginnen, können in Excel eine Formel einleiten
+        assert_eq!(guard("\t=1+1"), "'\t=1+1");
+        assert_eq!(guard("\r=1+1"), "'\r=1+1");
+        assert_eq!(guard("a\t=1"), "a\t=1", "nur der Anfang zählt");
         assert_eq!(guard("=A1"), "'=A1");
         assert_eq!(guard("'=A1"), "''=A1");
         assert_eq!(guard("x=1"), "x=1");

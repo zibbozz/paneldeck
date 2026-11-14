@@ -1158,3 +1158,120 @@ fn big_project_with_2000_tickets_exports_and_imports_quickly() {
     assert!(res.renumbered);
     assert_eq!(titles(&c3, res.project_id).len(), 2000);
 }
+
+// ------------------------------------------------------------------ Grenzen (Audit vor 2.0.0)
+
+/// Ein Dokument mit Zählern nahe `i64::MAX` darf nicht angelegt werden: Beim Weiterzählen liefe `next_number + 1` über
+/// (Release: wird negativ), und `MAX(rank) + 1` in SQLite würde zur Kommazahl, die sich nicht mehr als Ganzzahl lesen lässt.
+#[test]
+fn rejects_counters_and_ranks_that_would_overflow() {
+    let r = rich();
+    let good = export(&r);
+    for n in [i64::MAX, MAX_TICKET_NUMBER + 1] {
+        let mut d = good.clone();
+        d.project.next_number = n;
+        assert_eq!(fails(&d), BackupError::At(Where::Project, Problem::TicketNumber(n)), "next_number {n}");
+    }
+    for n in [i64::MAX, MAX_TICKET_NUMBER + 1] {
+        let mut d = good.clone();
+        d.tickets[0].number = n;
+        assert_eq!(fails(&d), BackupError::At(Where::Ticket(n), Problem::TicketNumber(n)), "Ticketnummer {n}");
+    }
+    for rk in [i64::MAX, i64::MIN, MAX_RANK + 1, -MAX_RANK - 1] {
+        let mut d = good.clone();
+        let number = d.tickets[0].number;
+        d.tickets[0].rank = rk;
+        assert_eq!(fails(&d), BackupError::At(Where::Ticket(number), Problem::Rank(rk)), "rank {rk}");
+    }
+    // die Grenzwerte selbst gehen, und das Projekt bleibt benutzbar (Ticket anlegen, Liste lesen)
+    let mut d = good.clone();
+    d.project.next_number = MAX_TICKET_NUMBER;
+    let last = d.tickets.len() - 1;
+    d.tickets[last].rank = MAX_RANK;
+    d.tickets[0].rank = -MAX_RANK;
+    let c = fresh();
+    let res = import_project(&c, &d, None).unwrap();
+    let ty = crate::planning::types::list_types(&c, res.project_id).unwrap()[0].id;
+    let (t, _) = create_ticket(&c, &NewTicket::new(res.project_id, ty, "Danach"), &Source::ui()).unwrap();
+    assert_eq!(t.number, MAX_TICKET_NUMBER);
+    let page = crate::planning::ticket_list::list_tickets(&c, Some(res.project_id), &Default::default()).unwrap();
+    assert_eq!(page.items.len(), d.tickets.len() + 1);
+}
+
+#[test]
+fn malicious_json_is_rejected_without_panic() {
+    let r = rich();
+    let good = export(&r).to_json();
+    // zu tief verschachtelt (serde_json begrenzt die Tiefe, kein Stapelüberlauf)
+    let deep = format!("{{\"format\":\"{FORMAT}\",\"version\":2,\"x\":{}{}}}", "[".repeat(100_000), "]".repeat(100_000));
+    assert!(matches!(ProjectDoc::from_json(&deep), Err(BackupError::Json(_))));
+    // falsche Typen, Null, Zahlen als Text, abgeschnitten, nur BOM
+    for bad in ["null", "\"x\"", "42", "{\"format\": 5}", "{\"format\":\"paneldeck-project\",\"version\":\"2\"}", "\u{feff}", "", "{\"format\":\"paneldeck-project\",\"version\":-1}", "{\"format\":\"paneldeck-project\",\"version\":99999999999}"] {
+        assert!(ProjectDoc::from_json(bad).is_err(), "{bad:?}");
+    }
+    assert!(ProjectDoc::from_json(&good[..good.len() / 2]).is_err(), "abgeschnitten");
+    // mit BOM ist das gute Dokument lesbar
+    assert!(ProjectDoc::from_json(&format!("\u{feff}{good}")).is_ok());
+}
+
+/// Doppelte Verweise, Selbst- und Kreis-Eltern, Verweise ins Leere: der Import bricht ab und lässt die Datenbank unverändert.
+#[test]
+fn cycles_duplicates_and_dangling_references_roll_back() {
+    let r = rich();
+    let good = export(&r);
+    let (a, b) = (good.tickets[0].number, good.tickets[1].number);
+    // Eltern-Kreis a <-> b
+    let mut d = good.clone();
+    d.tickets[0].parent = Some(b);
+    d.tickets[1].parent = Some(a);
+    assert!(matches!(fails(&d), BackupError::AtTicket(_, _) | BackupError::At(_, _)));
+    // Verknüpfung auf sich selbst
+    let mut d = good.clone();
+    let lt = d.link_types.iter().find(|l| l.target_kind == "ticket").unwrap().id;
+    d.tickets[0].links.push(DocLink { link_type: lt, target: DocTarget::Ticket { number: a }, created_at: "2026-01-01T00:00:00".into() });
+    assert!(matches!(fails(&d), BackupError::AtTicket(_, TicketError::LinkSelf)));
+    // Verweis auf Sprint-Ticket, das es nicht gibt
+    let mut d = good.clone();
+    d.sprints[0].tickets.push(DocSprintTicket { ticket: 99_999, added_at: "2026-01-01T00:00:00".into(), removed_at: None, points_at_add: None });
+    assert!(matches!(fails(&d), BackupError::At(Where::SprintEntry(..), Problem::UnknownRef(RefKind::Ticket, 99_999))));
+    // Verlauf mit Zeitstempel-Müll und Quelle
+    let mut d = good.clone();
+    d.tickets[0].history.push(DocHistory { at: "gestern".into(), source: "ui".into(), source_detail: None, field: "title".into(), old: None, new: None, batch: 1 });
+    assert!(matches!(fails(&d), BackupError::At(Where::History(..), Problem::Timestamp(_))));
+}
+
+#[test]
+fn oversized_files_are_not_read() {
+    let dir = std::env::temp_dir().join(format!("paneldeck-test-readlimit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let small = dir.join("klein.json");
+    std::fs::write(&small, b"{}").unwrap();
+    assert_eq!(read_limited(&small).unwrap().unwrap(), b"{}");
+    let big = dir.join("gross.json");
+    let f = std::fs::File::create(&big).unwrap();
+    f.set_len(MAX_FILE_BYTES + 1).unwrap();
+    drop(f);
+    assert_eq!(read_limited(&big).unwrap().unwrap_err(), BackupError::TooLarge { max_mb: 128 });
+    assert!(read_limited(&dir.join("gibt-es-nicht.json")).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_sprint_with_an_absurd_period_is_rejected_by_the_import() {
+    let r = rich();
+    let mut d = export(&r);
+    d.sprints[0].start_date = Some("0026-10-05".into());
+    assert!(matches!(fails(&d), BackupError::AtSprint(Where::Sprint(1), SprintError::DatesTooLong { .. })));
+}
+
+/// Warum `MAX_RANK` und `MAX_TICKET_NUMBER` nötig sind: SQLite rechnet über `i64::MAX` hinaus in Kommazahlen weiter.
+#[test]
+fn sqlite_turns_integer_overflow_into_a_float() {
+    let c = fresh();
+    let v: rusqlite::types::Value = c.query_row("SELECT 9223372036854775807 + 1", [], |r| r.get(0)).unwrap();
+    assert!(matches!(v, rusqlite::types::Value::Real(_)), "{v:?}");
+    c.execute_batch("CREATE TABLE t (rank INTEGER); INSERT INTO t VALUES (9223372036854775807);").unwrap();
+    let n: rusqlite::Result<i64> = c.query_row("SELECT MAX(rank) + 1 FROM t", [], |r| r.get(0));
+    assert!(n.is_err(), "die Zahl ist als Ganzzahl nicht mehr lesbar");
+}
