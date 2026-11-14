@@ -22,6 +22,7 @@ mod query;
 mod search;
 mod layout;
 mod links;
+mod markdown;
 mod mcp;
 mod shells;
 mod state;
