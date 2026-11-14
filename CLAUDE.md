@@ -6,10 +6,33 @@ Funktionen und Datenordner: `README.md` (Englisch, Hauptseite) / `README.de.md` 
 ## ⚠ Verbindliche Projektregeln (Vorgaben des Nutzers – immer einhalten)
 
 1. **Versionierung: Semantic Versioning 2.0.0** – https://semver.org/lang/de/ (Details und öffentliche API: Abschnitt „Versionierung“ unten).
-2. **Changelog: Keep a Changelog 1.1.0** – https://keepachangelog.com/de/1.1.0/ (Details: Abschnitt „Changelog“ unten). **Jede Änderung, die Nutzer betrifft, wird sofort unter `## [Unreleased]` eingetragen** – nicht erst beim Release.
+2. **Changelog: Keep a Changelog 1.1.0** – https://keepachangelog.com/de/1.1.0/ (Details: Abschnitt „Changelog“ unten). **Jede Änderung, die Nutzer betrifft, wird sofort im Changelog unter der Nummer des nächsten Releases mit `WIP` statt Datum eingetragen** (z. B. `## [1.1.0] - WIP`; es gibt kein `[Unreleased]` mehr) – nicht erst beim Release.
 3. **Nichts einbauen, was Geld kostet** (kein GitHub-Actions-CI, keine Zertifikate/Dienste). Tests laufen lokal.
 4. **Jedes neue Feature testen – über MCP UND per Maus/Tastatur** (Abschnitt „Neue Features testen“).
-5. **Push, Tags und Releases nur auf ausdrücklichen Wunsch** des Nutzers.
+5. **Nie selbst nach `develop` oder `release/*` mergen oder dort committen** – nur Pull Requests öffnen; gemergt wird ausschließlich vom Nutzer auf GitHub. **Tags und Releases nur auf ausdrücklichen Wunsch.** Das Pushen von Arbeits-Branches (`feature/`, `fix/`, `chore/`, `backport/`, `release-prep/`) und das Öffnen der zugehörigen Pull Requests gehört zum normalen Ablauf, sobald der Nutzer eine Änderung beauftragt hat.
+6. **Branching- und Release-Strategie (ab 1.0.0) – siehe nächster Abschnitt.** Sie ist unsere Basis; nicht davon abweichen, ohne dass der Nutzer es sagt.
+7. **Wir sind international:** `README.md` (Englisch) ist die Hauptseite, `README.de.md` die deutsche Fassung (beide synchron halten); Titel und Text der GitHub-Releases sind **zweisprachig – Englisch oben, Deutsch darunter**; Issues, Pull Requests und alles Öffentliche dürfen Englisch sein (neu: bevorzugt Englisch). Der Changelog und diese Datei bleiben vorerst Deutsch.
+8. **Aufgaben als GitHub-Issues** führen, mit **Meilenstein** (= Release-Nummer, z. B. `1.0.1`; zeigt, wie viel bis zum Release fehlt) und **Labels** (`bug`/`enhancement`/`documentation` + `area: …` + `security`/`later`). Pull Requests verweisen mit `Closes #n` auf das Issue und tragen denselben Meilenstein.
+
+## ⚠ Branching- und Release-Strategie (Vorgabe des Nutzers, gilt ab 1.0.0)
+
+Branches: **`develop`** (Standard-Branch auf GitHub, enthält immer alle Entwicklungen) · **`release/x.y`** (ein Branch je Minor-Version, z. B. `release/1.1`; wird nie gelöscht) · kurzlebige Arbeits-Branches. **Es gibt kein `main`.**
+
+1. **Entwicklung** läuft auf Arbeits-Branches von `develop`: **`feature/<name>`** für neue Funktionen, **`fix/<name>`** für Fehlerbehebungen (gerne mehrere zusammengehörige Fixes in einem Branch/PR bündeln, nicht für jeden Kleinkram einen eigenen), `chore/…` für Werkzeuge/Doku. Jeder Branch bekommt einen **Pull Request nach `develop`**, den **der Nutzer selbst mergt** (Empfehlung: „Squash and merge“ → genau ein Commit je PR, das macht das Cherry-Pick einfach). **Du (Claude) mergst nie.**
+2. **`release/x.y`** wird von `develop` abgezweigt, wenn ein Release ansteht bzw. kurz bevorsteht. Ab dann landet jede Entwicklung, die zu diesem Release gehört, **sowohl in `develop` als auch in `release/x.y`**: zuerst per PR nach `develop` (Nutzer mergt), dann **per Cherry-Pick** nach `release/x.y` – wieder per PR, den der Nutzer mergt. Cherry-Pick-PR erzeugt `tools/backport.sh <x.y> <name> <commit>… --pr` (Branch `backport/<x.y>/<name>`, `git cherry-pick -x`).
+3. **Das Release passiert auf `release/x.y`:** Beim Release wird dort der **Tag `vx.y.z`** gesetzt (x = Major, y = Minor, z = Patch). Aus genau diesem Tag werden `.exe`/Installer/ZIP gebaut und das GitHub-Release erstellt.
+4. **Patches** (z. B. `1.0.1`): Fix landet in `develop` **und** in `release/1.0` (Schritt 1 und 2), dann Tag `v1.0.1` auf `release/1.0`, bauen, GitHub-Release.
+5. **Keine Release Candidates.** Ist eine Version fertig (z. B. 1.1.0 oder auf Wunsch 1.0.1), wird sie komplett fertig gemacht und direkt veröffentlicht. **Patches gibt es nur für den neuesten Release-Branch.**
+6. **Ablauf eines Releases** (alle Schritte außer 3 und 5 ohne Rückfrage vorbereiten, 3 und 5 macht der Nutzer bzw. nur auf sein Wort):
+   1. Alles für die Version ist in `develop` **und** (per Backport-PR) in `release/x.y` gelandet; Issues des Meilensteins sind geschlossen; `docs/release-notes/<x.y.z>.en.md` (englischer Release-Text) ist geschrieben.
+   2. `tools/release-prep.sh <x.y.z> "<englischer Titel>" --pr` → PR „Release x.y.z vorbereiten“ nach `release/x.y` (setzt Version in `Cargo.toml`/`Cargo.lock`, Changelog `WIP` → heutiges Datum, Titel).
+   3. **Nutzer mergt diesen PR.**
+   4. Auf `release/x.y` (aktuell gezogen, sauber; Changelog-Datum muss **heute** sein, sonst Schritt 2 am Release-Tag wiederholen): `tools/release.sh <x.y.z>` – prüft, testet, baut, setzt das lokale Tag.
+   5. Auf Wunsch des Nutzers: `tools/release.sh <x.y.z> --publish` (pusht nur das Tag, legt das Release an) bzw. direkt in Schritt 4 mit `--publish`.
+   6. Danach: PR `chore/changelog-<x.y.z>` nach `develop`, der dort nur das `WIP` des Abschnitts `[x.y.z]` durch das Release-Datum ersetzt (`python tools/changelog.py release <x.y.z>` auf einem Branch von `develop`), damit beide Branches übereinstimmen. Meilenstein schließen, nächsten anlegen.
+7. **Versionsnummern in `develop`:** `Cargo.toml` auf `develop` trägt die Nummer des obersten `WIP`-Abschnitts; steht dort nur `Fixed`/`Security`, ist es die nächste PATCH-Nummer, kommt eine Funktion dazu, wird der Abschnitt zur nächsten MINOR-Nummer umbenannt (`python tools/changelog.py new <x.y.z>` legt einen leeren WIP-Abschnitt an). Die Changelog-Einträge eines Fixes, der in beiden Branches landet, stehen in beiden Changelogs (bei Backport-Konflikten in `Changelog.md` von Hand lösen).
+8. **Schutz:** Lokal sperren Git-Hooks (`git config core.hooksPath tools/git-hooks`, in jedem Klon einmal setzen) Commits, Merges und Pushes auf `develop`/`release/*` (Tags sind erlaubt) – **nie mit `--no-verify` umgehen**. Auf GitHub sollen `develop` und `release/*` per Ruleset geschützt werden (nur Pull Requests, kein Force-Push, kein Löschen); das geht auf einem privaten Repo mit kostenlosem Konto nicht, deshalb direkt nach dem Öffentlichschalten einrichten (Issue „Branch-Schutz“).
+9. Veröffentlichte Tags und Release-Dateien werden nie verändert oder verschoben (nur Titel/Text des GitHub-Releases dürfen korrigiert werden).
 
 ## Entwicklungsumgebung
 
@@ -22,7 +45,7 @@ Funktionen und Datenordner: `README.md` (Englisch, Hauptseite) / `README.de.md` 
 - Installiert (winget): GitHub CLI `gh` (angemeldet), NSIS 3.13 (`C:\Program Files (x86)\NSIS\makensis.exe`). In bereits laufenden Shells fehlen sie evtl. im PATH → volle Pfade
   (`C:\Program Files\GitHub CLI\gh.exe`); die Skripte unter `tools/` suchen sie selbst.
 - Der Datenordner `paneldeck-data` liegt neben der `.exe` (also unter `target\release\`); er sowie `target/` und `dist/` sind git-ignoriert.
-- `.gitattributes` erzwingt LF für `*.sh` (CRLF bricht Git Bash). Skripte sind im Index ausführbar (`git update-index --chmod=+x`), Windows meldet sonst Modus-Änderungen.
+- `.gitattributes` erzwingt LF für `*.sh` und `tools/git-hooks/*` (CRLF bricht Git Bash). Skripte sind im Index ausführbar (`git update-index --chmod=+x`), Windows meldet sonst Modus-Änderungen.
 
 ## Neue Features testen (Vorgabe des Nutzers)
 
@@ -39,10 +62,10 @@ Funktionen und Datenordner: `README.md` (Englisch, Hauptseite) / `README.de.md` 
 ## Changelog: Keep a Changelog 1.1.0 (Vorgabe des Nutzers)
 
 `Changelog.md` folgt https://keepachangelog.com/de/1.1.0/ und wird mit `tools/changelog.py` geprüft (`python tools/changelog.py check`; `release.sh` ruft es auf und bricht bei Formatfehlern ab).
-- **Aufbau:** `# Changelog`, Einleitung mit Verweis auf Keep a Changelog und Semantic Versioning, dann `## [Unreleased]`, darunter die Versionen **neueste zuerst** als `## [X.Y.Z] - JJJJ-MM-TT` (ISO-Datum), am Dateiende je eine Link-Definition `[X.Y.Z]: …/compare/v<vorherige>...v<X.Y.Z>` (und `[Unreleased]: …/compare/v<neueste>...HEAD`). Zurückgezogene Versionen bleiben stehen und bekommen `[YANKED]` hinter dem Datum.
-- **Datum** = Datum des Git-Tags der Version (Entscheidung des Nutzers), nicht das spätere Veröffentlichungsdatum des GitHub-Releases; `changelog.py release` setzt das heutige Datum, das beim Release dem Tag-Datum entspricht.
+- **Aufbau:** `# Changelog`, Einleitung mit Verweis auf Keep a Changelog und Semantic Versioning, dann die Versionen **neueste zuerst** als `## [X.Y.Z] - JJJJ-MM-TT` (ISO-Datum) bzw. `## [X.Y.Z] - WIP` für noch nicht veröffentlichte Versionen (**kein `[Unreleased]`**, Entscheidung des Nutzers), am Dateiende je eine Link-Definition `[X.Y.Z]: …/compare/v<vorherige>...v<X.Y.Z>` (bei WIP `...HEAD`). Zurückgezogene Versionen bleiben stehen und bekommen `[YANKED]` hinter dem Datum.
+- **Datum** = Datum des Git-Tags der Version (Entscheidung des Nutzers), nicht das spätere Veröffentlichungsdatum des GitHub-Releases; `changelog.py release` ersetzt `WIP` durch das heutige Datum (in der Release-Vorbereitung, am Release-Tag); `release.sh` bricht ab, wenn das Datum nicht heute ist.
 - **Änderungstypen** (englische Überschriften wie auf der Seite, genau in dieser Reihenfolge, leere weglassen): `### Added` (neue Funktionen) · `### Changed` (Änderungen an bestehenden Funktionen) · `### Deprecated` (bald entfernt) · `### Removed` (entfernt) · `### Fixed` (Fehlerbehebungen) · `### Security` (Sicherheitslücken/Härtung). Einträge deutsch, für Menschen geschrieben (kein Commit-Log), Veraltetes/Entferntes/Inkompatibles immer nennen.
-- **Arbeitsweise:** Änderungen laufend unter `## [Unreleased]` eintragen. Vor dem Release `python tools/changelog.py release <version>` (verschiebt den Inhalt in `## [<version>] - <heute>`, legt einen leeren `[Unreleased]` an, zieht die Links nach), dann Version in `Cargo.toml` und `tools/titles.txt` setzen, dann `release.sh`. Der Text des GitHub-Releases ist der Abschnitt der Version (`tools/release_notes.py`).
+- **Arbeitsweise:** Änderungen laufend unter `## [X.Y.Z] - WIP` eintragen (`python tools/changelog.py new <x.y.z>` legt den Abschnitt an; nur Fehlerbehebungen → nächste PATCH-Nummer, neue Funktionen → nächste MINOR-Nummer, Abschnitt bei Bedarf umbenennen). Beim Release setzt `tools/release-prep.sh` das Datum (`changelog.py release`). Der englische Release-Text steht in `docs/release-notes/<version>.en.md`; der GitHub-Release-Text ist Englisch + Deutsch (Abschnitt der Version, `tools/release_notes.py`).
 - Typ passend zur Versionsnummer wählen (siehe SemVer): `Fixed`/`Security` allein → PATCH; `Added`/`Changed` abwärtskompatibel → MINOR; nicht abwärtskompatibel oder `Removed` an der öffentlichen API → MAJOR.
 
 ## Agenten-Schnittstelle (MCP)
@@ -58,7 +81,7 @@ Funktionen und Datenordner: `README.md` (Englisch, Hauptseite) / `README.de.md` 
 ## Versionierung: Semantic Versioning 2.0.0 (Vorgabe des Nutzers)
 
 Wir halten uns **immer** an https://semver.org/lang/de/ (Version 2.0.0). Die Version steht in `Cargo.toml`, im Git-Tag (`v<MAJOR>.<MINOR>.<PATCH>`; das `v` ist nur Tag-Konvention, die Version selbst hat keins), im Changelog-Abschnitt und in `tools/titles.txt`.
-- **Format:** `X.Y.Z` mit nichtnegativen ganzen Zahlen ohne führende Nullen, aufsteigend (`0.9.0 < 0.10.0`). Pre-Release nur als `1.0.0-rc.1` (nie als Namenszusatz im Titel wie „Release Candidate“ bei einer normalen Nummer); Build-Metadaten (`+…`) zählen nicht für die Rangfolge.
+- **Format:** `X.Y.Z` mit nichtnegativen ganzen Zahlen ohne führende Nullen, aufsteigend (`0.9.0 < 0.10.0`). Pre-Release-Nummern (`1.0.0-rc.1`) wären nach SemVer möglich, wir nutzen aber keine Release Candidates; Build-Metadaten (`+…`) zählen nicht für die Rangfolge.
 - **Öffentliche API** (SemVer verlangt, sie festzulegen):
   1. die **MCP-Schnittstelle**: Werkzeugnamen, Parameter, Felder der Antworten, Fehlercodes, Stufen;
   2. die **Kommandozeile**: `--open`, `--claude`, `--tray`, `mcp` (sowie `--hook`/`--uninstall-hooks` für Installer und Claude-Hooks);
@@ -69,7 +92,6 @@ Wir halten uns **immer** an https://semver.org/lang/de/ (Version 2.0.0). Die Ver
 - **Veraltete API zuerst als „deprecated“ im Changelog** (in einer MINOR-Version) markieren und erst in der nächsten MAJOR-Version entfernen.
 - **`0.y.z` ist „initiale Entwicklung“** (alles darf sich ändern) – das galt bis 0.20.0. Ab **1.0.0** ist die öffentliche API oben verbindlich; vor 1.0.0 trotzdem schon so versionieren (PATCH = nur Fehlerbehebungen).
 - Bis einschließlich 0.20.0 gab es PATCH-Versionen mit neuen Funktionen (0.15.2–0.15.5, 0.17.1–0.17.3); das ist in der initialen Entwicklung erlaubt, wiederholt sich aber nicht.
-- Pre-Release-Nummern (`1.0.0-rc.1`) funktionieren mit `release.sh` (Dateinamen enthalten die volle Version); den GitHub-Haken „Pre-release“ dann gesetzt lassen, `--final` nur für Versionen ohne `-`.
 
 ## Release
 
@@ -78,20 +100,20 @@ Wir halten uns **immer** an https://semver.org/lang/de/ (Version 2.0.0). Die Ver
   (Die Programmdatei heißt immer `paneldeck.exe`, weil Autostart, Kontextmenü, Hooks und der MCP-Eintrag darauf verweisen; `dist/paneldeck-<version>.exe` ist nur das Zwischenprodukt des Release-Skripts.)
 - **Lizenztexte der Abhängigkeiten:** `python tools/gen_licenses.py` erzeugt `THIRD_PARTY_LICENSES.txt` aus `Cargo.lock` (fehlende Crate-Lizenzen aus `tools/license-extra/`); `release.sh` prüft per `--check`, dass sie aktuell ist. Nach jeder Änderung an Abhängigkeiten neu erzeugen.
 - **Keine Pfade des Build-Rechners in der .exe:** `tools/common.sh` setzt `RUSTFLAGS` mit `--remap-path-prefix` (Cargo-, Rustup- und Projektordner). Beim Release prüfen: `grep -a -c "C:\Users" dist/paneldeck-<v>.exe` muss 0 ergeben.
-- Vorher: `python tools/changelog.py release <version>` (siehe „Changelog“), `Cargo.toml`-Version setzen, `tools/titles.txt` (`<version>|Paneldeck <version> – Titel`) ergänzen. Das Skript prüft alle drei (Changelog über `tools/changelog.py check`).
-- **`tools/release.sh <version> "<Nachricht>" [--publish] [--final] [--no-git] [--skip-smoke]`** (aus Git Bash: `bash tools/release.sh …`) – läuft unter Windows und Linux (`tools/common.sh` erkennt die Umgebung):
-  Tests → Release-Build → `dist/paneldeck-<v>.exe` → Installer (NSIS, Icon aus `assets\icon.ico` via `MUI_ICON`/`MUI_UNICON`) → SHA-256 → **Smoke-Test** (`tools/smoke-mcp.ps1` gegen die gebaute .exe, nur Windows) → **Update-Test** (`tools/update-test.ps1`) → Commit + Tag `v<v>` → ZIP + `release-notes-<v>.md`.
-  - `--no-git`: nur bauen/packen (Probelauf, kein Commit/Tag/Push).
-  - `--publish`: zusätzlich Branch + Tag pushen und GitHub-Release anlegen (`gh release create`, Titel/Text aus `dist/gh-title-<v>.txt` / `dist/gh-notes-<v>.md`, Assets: portables ZIP + Installer).
-    Standard ist **Pre-release** wie bei allen bisherigen Releases; `--final` für ein normales Release (ab 1.0).
-  - Commit-Nachricht endet mit der Attribution (`ATTRIBUTION="Co-Authored-By: …"` setzen).
-- Remote `origin` = `github.com/zibbozz/paneldeck` (Branch `main`). Die Historie beginnt mit 1.0.0; die frühere Entwicklung (0.x, anderer Projektname) liegt in einem getrennten, privaten Archiv. Push, Tags und Releases nur auf ausdrücklichen Wunsch.
-- Push, Tags und Releases sind nach außen sichtbar → **nur auf ausdrücklichen Wunsch** (`--publish` nicht von selbst setzen).
+- **Ablauf siehe „Branching- und Release-Strategie“, Punkt 6.** Vorbereitung per PR mit `tools/release-prep.sh <version> "<englischer Titel>" --pr` (Version in `Cargo.toml`/`Cargo.lock`, Changelog-Datum, Titel in `tools/titles.txt`, **englisch**); der englische Text liegt in `docs/release-notes/<version>.en.md`.
+- **`tools/release.sh <version> [--publish] [--skip-smoke] [--no-git]`** (aus Git Bash: `bash tools/release.sh …`) – läuft unter Windows und Linux (`tools/common.sh` erkennt die Umgebung). **Es committet nicht**, und es läuft nur auf `release/<x.y>` bei sauberem Arbeitsbaum und Stand == `origin/release/<x.y>` (Prüfungen: Branch, Cargo-Version, Changelog mit heutigem Datum, englischer Text, Titel, Lizenztexte):
+  Tests → Release-Build → `dist/paneldeck-<v>.exe` → Installer (NSIS, Icon aus `assets\icon.ico` via `MUI_ICON`/`MUI_UNICON`) → SHA-256 + Pfad-Prüfung → **Smoke-Test** (`tools/smoke-mcp.ps1`, nur Windows) → **Update-Test** (`tools/update-test.ps1`) → Tag `v<v>` (lokal) → ZIP + Release-Texte.
+  - `--no-git`: Probelauf auf jedem Branch (nur bauen/packen, kein Tag/Push, Changelog nur auf Format geprüft).
+  - `--publish`: zusätzlich **nur das Tag** pushen und das GitHub-Release anlegen (`gh release create`, Titel/Text aus `dist/gh-title-<v>.txt` / `dist/gh-notes-<v>.md`, Assets: portables ZIP + Installer). Normales Release; Pre-release nur bei Versionen mit `-` (Release Candidates nutzen wir nicht).
+  - **Nie zwei Release-Läufe parallel** (ein per Tool „gestoppter“ Lauf kann im Hintergrund weiterlaufen – vorher mit `ps -W`/`tasklist` prüfen) und nach dem Veröffentlichen die Dateien aus dem Release herunterladen und per SHA-256 mit `dist/` vergleichen.
+- `tools/backport.sh <x.y> <name> <commit>… [--pr]` überträgt Commits aus `develop` per Cherry-Pick als PR nach `release/x.y` (siehe Strategie, Punkt 2).
+- Remote `origin` = `github.com/zibbozz/paneldeck` (Branches `develop` = Standard, `release/x.y`; kein `main`). Die Historie beginnt mit 1.0.0; die frühere Entwicklung (0.x, anderer Projektname) liegt in einem getrennten, privaten Archiv.
+- Push von Arbeits-Branches und PRs gehören zum normalen Ablauf (Regel 5); **Tags und Releases** sind nach außen sichtbar → **nur auf ausdrücklichen Wunsch** (`--publish` nicht von selbst setzen).
 
 ## Bekannte Stolpersteine
 
 - NSIS findet Pfade mit `/` nicht → `abspath` in `tools/common.sh` liefert unter Windows Backslashes.
-- `tools/release_notes.py`/`release_texts.py` lesen/schreiben jetzt explizit UTF-8; ohne das bricht Python unter Windows ab.
+- `tools/release_notes.py` liest/schreibt explizit UTF-8; ohne das bricht Python unter Windows ab.
 - Die Setup-`.exe` aus dem Probelauf enthält denselben Code wie die veröffentlichte, ist aber nicht byte-identisch (Build ist nicht reproduzierbar) – Release-Assets nur aus dem echten Lauf hochladen.
 - Das Hub-Fenster ist transparent; Screenshots per Bildschirmkopie zeigen dann, was dahinter liegt → `ShotPW` oder das MCP-Werkzeug `screenshot` nehmen.
 - Ein im Tray versteckter Hub ist „minimiert + ohne Taskleistenbutton“ (`IsWindowVisible` bleibt wahr; `IsIconic` prüfen).
