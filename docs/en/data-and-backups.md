@@ -24,6 +24,7 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | `paneldeck.db` | the local database (SQLite) with the to-do list, projects and tickets (`paneldeck.db-wal` / `-shm` exist while the app runs) |
 | `backups/` | automatic and manual copies of the database (the folder can be changed) |
 | `scrollback/` | saved terminal history |
+| `chats/` | histories of the [chats](chat.md), one `<id>.json` per chat (see [Chat histories](#chat-histories)) |
 | `prompts.json` | prompt library |
 | `themes/*.json` | custom themes (an example is included) |
 | `system-prompt.md` | your own template of the [system prompt for agents](agent-interface.md#system-prompt) (only if you saved one); `system-prompt.md.bak` = the previous template after *Reset to default* |
@@ -34,7 +35,36 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | `profiles/<name>/` | data folders of the [profiles](command-line.md#profiles-and-several-instances), each with the same structure |
 | `ipc.json` | port and token of the running instance (internal) |
 
-`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md` and `mcp-log.jsonl` are stable formats: newer versions keep reading older files, and new fields are optional.
+`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json` and `mcp-log.jsonl` are stable formats: newer versions keep reading older files, and new fields are optional.
+
+## Chat histories
+Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the session id; format version 1, since 2.2.0):
+
+```json
+{
+  "version": 1,
+  "context_start": 2,
+  "messages": [
+    { "role": "user", "content": "Which sessions are open?", "ts": 1763200000 },
+    { "role": "assistant", "content": "", "ts": 1763200001,
+      "tool_calls": [ { "id": "c1", "name": "list_sessions", "arguments": {} } ] },
+    { "role": "tool", "content": "{\"sessions\":[]}", "ts": 1763200002,
+      "tool_call_id": "c1", "tool_name": "list_sessions", "status": "ok" },
+    { "role": "assistant", "content": "There are no sessions.", "ts": 1763200003 },
+    { "role": "assistant", "content": "", "ts": 1763200010, "error": "connection refused" }
+  ]
+}
+```
+
+- `role` is `user`, `assistant`, `tool` or `system`; `ts` = seconds since 1970 (UTC). An answer can carry `tool_calls`, an `error` (shown with *Retry*) or a `note` (e.g. "cut off at the token limit"; not sent to the model). A tool result has `tool_call_id`, `tool_name` and `status` (`ok`, `error`, `denied`). `context_start` = the first message the model still saw at the last request (missing while nothing was left out). The tools allowed with *Always for this chat* are stored in the file as well.
+- The file is written **atomically** (temporary file, then rename). Reading is tolerant: a BOM is allowed, unknown fields are ignored, a single invalid message is skipped. A corrupt or too large file (over 8 MB) gives an empty chat with a notice; the file is first saved as `chats/<id>.defekt-<time>.json`. When saving, a history over 8 MB loses its oldest messages.
+- A history file that does not belong to a session (e.g. after `state.json` was reset) is never loaded into a new chat: it is moved aside as `chats/<id>.orphan-<time>.json`.
+- **Closing a chat deletes its file** (and its `.defekt-…` backups). *Save history to file …* in the chat's context menu exports it as Markdown first.
+
+## Chat fields in settings.json and state.json
+- `settings.json` → `llm_servers`: the servers of *Settings → Models*, each with `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 of a Windows DPAPI blob – never plain text; only the same Windows user on the same computer can decrypt it), optional `receive_timeout_secs`, `models` (settings per model: `name`, `level`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`) and `last_models` (the result of the last *Connect*). A server entry that cannot be read (e.g. an unknown `kind` from a newer version) is kept unchanged and shown read-only with *Remove*.
+- `settings.json` → `last_chat_model`: `{ "server": "<id>", "model": "<name>" }`, the last choice in the *New chat* dialog.
+- `state.json` → per session `kind` (`"chat"`; missing = terminal) and `chat` (`{ "server": "<id>", "model": "<name>" }`). An older Paneldeck (2.1) opening this file shows chats as terminals and leaves `chats/*.json` alone.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
@@ -45,3 +75,5 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 
 ## Moving or copying the data
 Quit Paneldeck, then copy the whole data folder. To use it from another place, start Paneldeck with `--data-dir <folder>` or set `PANELDECK_DATA`.
+
+API keys of [chat servers](chat.md#api-key) are encrypted for your Windows user: on another user account or computer they cannot be decrypted – enter them again in *Settings → Models*.

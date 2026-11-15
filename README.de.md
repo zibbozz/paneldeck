@@ -4,7 +4,7 @@
 
 Zentrale für viele Terminals – gebaut für Claude Code, nutzbar als allgemeiner Terminal-Manager.
 Für Windows 10 (1809+) / 11 (x64): wahlweise als Installer (pro Benutzer, ohne Administratorrechte) oder als portables ZIP mit einer einzelnen `paneldeck.exe`.
-Paneldeck arbeitet **offline**: Es meldet sich nur bei GitHub, wenn du selbst nach Updates suchst oder die automatische Update-Prüfung einschaltest (siehe [Datenschutz](#datenschutz-privacy)).
+Paneldeck arbeitet **offline**: Es meldet sich nur bei GitHub, wenn du selbst nach Updates suchst oder die automatische Update-Prüfung einschaltest, und Chats sprechen nur mit den lokalen Modell-Servern, die du einrichtest (siehe [Datenschutz](#datenschutz-privacy)).
 
 > Unabhängiges Open-Source-Projekt – nicht mit Anthropic verbunden und nicht von Anthropic unterstützt oder geprüft. „Claude“ und „Claude Code“ sind Marken von Anthropic, PBC. Details unter [Rechtliches](#rechtliches).
 
@@ -14,6 +14,7 @@ Paneldeck arbeitet **offline**: Es meldet sich nur bei GitHub, wenn du selbst na
 - **Terminals** mit voller Emulation (ConPTY): PowerShell 7, Windows PowerShell, CMD, Git Bash, WSL-Distributionen – geordnet in Projekten, mit frei teilbaren Bereichen, mehreren Fenstern und einer Befehls-Palette.
 - **Claude-Modus** (abschaltbar): Statusanzeige per Hooks (arbeitet / Freigabe? / bereit), Benachrichtigungen, Token- und Kostenschätzung, Verlauf mit exaktem Fortsetzen.
 - **Todo-Liste und Tickets:** eine einfache Todo-Liste, die im *Expertenmodus* zu einem kleinen Jira wird – Projekte, Tickettypen, Workflows, Boards, eine Abfragesprache, Sprints und Dashboards, alles lokal gespeichert.
+- **Chats mit lokalen Modellen:** mit Ollama, LM Studio, llama.cpp oder vLLM auf diesem Rechner oder im eigenen Netz sprechen, direkt neben deinen Terminals – das Modell kann Paneldecks Werkzeuge nutzen, in Grenzen, die du je Modell festlegst.
 - **Agenten-Schnittstelle (MCP):** KI-Agenten können Sitzungen sehen, Terminals lesen, Befehle ausführen und mit deiner Todo-Liste und deinen Tickets arbeiten – standardmäßig aus, mit einstellbarem Systemprompt.
 - **Kommandozeile und Profile:** getrennte Datenordner und Profile, die nebeneinander laufen, jedes mit eigenem Autostart- und MCP-Eintrag.
 - **Selbst-Update** aus den GitHub-Releases auf Wunsch, geprüft gegen `SHA256SUMS.txt`.
@@ -47,6 +48,7 @@ Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en
 - [Claude Code](docs/de/claude-code.md) – Claude-Modus, Status, Kosten, Verlauf
 - [Todo-Liste und Tickets](docs/de/todo-and-tickets.md) – einfacher und Expertenmodus, Boards, Sprints, Dashboards, Schnellaktionen
 - [Abfragesprache](docs/de/query-language.md) – Tickets suchen, Beispiele, Referenz
+- [Chats mit lokalen Modellen](docs/de/chat.md) – Ollama und OpenAI-kompatible Server, Modelle, Werkzeuge und Freigaben, Sicherheit
 - [Agenten-Schnittstelle (MCP)](docs/de/agent-interface.md) – Stufen, Werkzeuge, Sicherheit, Systemprompt
 - [Kommandozeile](docs/de/command-line.md) – alle Optionen, Suche des Datenordners, Profile, Exit-Codes
 - [Datenordner und Sicherungen](docs/de/data-and-backups.md) – Dateien, Sicherungen, portabel oder installiert
@@ -63,6 +65,7 @@ Dieses Programm überträgt keine Informationen an andere Systeme im Netzwerk, a
 - Paneldeck sendet keine Telemetrie. Es liest lokal Claude-Transkripte (`~/.claude`) für Verlauf und Kostenschätzung; alles bleibt auf deinem Rechner, auch deine Todo-Liste und deine Tickets (lokale Datenbank `paneldeck.db`).
 - **Update-Prüfung:** Paneldeck fragt GitHub nur dann nach dem neuesten Release, wenn du auf *Nach Updates suchen* klickst (*Einstellungen → Info*) oder dort die automatische Prüfung einschaltest (standardmäßig aus; beim Start, höchstens einmal am Tag). Die Anfrage geht an die öffentliche GitHub-API (`api.github.com`), Downloads kommen von `github.com` und den Download-Servern von GitHub – alles über HTTPS, ohne Anmeldung. GitHub sieht dabei deine IP-Adresse und die Paneldeck-Version (im `User-Agent`, z. B. `Paneldeck/2.1.0`); weitere Daten werden nicht gesendet. Siehe [Updates](docs/de/updates.md).
 - Die Agenten-Schnittstelle (MCP) ist standardmäßig aus und nur vom eigenen Rechner aus erreichbar (`127.0.0.1`).
+- **Chats mit lokalen Modellen** verbinden sich nur mit den Modell-Servern, die du selbst einrichtest, und nur auf diesem Rechner oder in privaten Netzen (siehe [Chats](docs/de/chat.md#datenschutz)).
 - Links in Terminals und Tickets öffnen sich nur auf Klick im Browser.
 
 ## Issues und Mitarbeit

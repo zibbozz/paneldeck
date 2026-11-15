@@ -2,7 +2,7 @@
 
 # Agent interface (MCP)
 
-Paneldeck includes an MCP server (Model Context Protocol) so that AI agents – Claude Code, Claude Desktop, Cursor, local models and other MCP clients – can see and control your sessions and work with your to-do list and tickets.
+Paneldeck includes an MCP server (Model Context Protocol) so that AI agents – Claude Code, Claude Desktop, Cursor, local models and other MCP clients – can see and control your sessions, talk to your [chats with local models](chat.md) and work with your to-do list and tickets.
 
 ## Setting it up
 1. **Turn it on:** *Settings → Agents* → **Read only** or **Control**. The default is **Off**; without this step the hub rejects every request (`mcp_disabled`).
@@ -35,16 +35,16 @@ If no hub runs there, the error `hub_not_running` names the data folder that was
 | Level | What the agent can do |
 |---|---|
 | **Off** (default) | nothing – every call returns `mcp_disabled` |
-| **Read only** | read sessions, terminal content, screenshots, costs, the Claude history and the to-do list or tickets |
-| **Control** | additionally type text, send keys, run commands, create, rename, focus and close sessions, and change the to-do list or tickets |
+| **Read only** | read sessions, terminal content, chats, screenshots, costs, the Claude history and the to-do list or tickets |
+| **Control** | additionally type text, send keys, run commands, send messages to chats, create, rename, focus and close sessions, and change the to-do list or tickets |
 
 A tool above the current level returns `forbidden`. The level is checked in the hub itself, not only in the bridge.
 
 ## Tools
 | Tool | Level | Purpose |
 |---|---|---|
-| `whoami`, `list_sessions`, `read_terminal`, `screenshot`, `get_usage`, `search_history` | Read | Who am I (the agent's own session), sessions (with the `window` they belong to), terminal text, image of window/session, costs, Claude history |
-| `create_session`, `send_text`, `send_keys`, `run_command`, `queue_prompt`, `wait_for_status`, `rename_session`, `focus_session`, `close_session` | Control | Create/control sessions, commands with output and exit code, wait for Claude status |
+| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `screenshot`, `get_usage`, `search_history` | Read | Who am I (the agent's own session), sessions (with their `kind` and the `window` they belong to), terminal text, the messages of a chat, image of window/session, costs, Claude history |
+| `create_session`, `send_text`, `send_keys`, `run_command`, `queue_prompt`, `wait_for_status`, `rename_session`, `focus_session`, `close_session`, `send_chat_message` | Control | Create/control sessions (also chats), commands with output and exit code, wait for Claude or chat status, send a message to a chat |
 | `list_todos` | Read | The cards of the simple to-do list (every mode; read-only when expert mode is on) |
 | `add_todo`, `set_todo_done` | Control | **Expert mode off:** add a card, tick it off or reopen it |
 | `list_projects`, `get_project`, `search_tickets`, `get_ticket`, `get_time_entries`, `list_sprints`, `get_sprint`, `list_versions` | Read | **Expert mode on:** projects with their types, fields and workflows, tickets (also by query language), comments, history, time entries, sprints with their report, versions and milestones |
@@ -58,6 +58,17 @@ An agent always has only the options of the mode that is currently set (switch *
 
 **Agents cannot trigger updates** of Paneldeck.
 
+## Chats
+[Chats with local models](chat.md) are sessions too, and agents can use them:
+
+- **`list_sessions`** reports `kind` (`terminal` or `chat`) for every session and, for chats, `model` (the model name; `null` for terminals).
+- Terminal tools (`read_terminal`, `send_text`, `send_keys`, `run_command` …) on a chat return **`not_a_terminal`**; chat tools on a terminal return **`not_a_chat`**.
+- **`read_chat`** (Read): parameters `session` (id or name, as for the other tools) and optional `last` (number of messages, default 20, at most 200). Returns `session`, `model`, `status` (`ready`, `working` or `needs_approval`), `total` (messages in the chat) and `messages` – each with `index`, `role`, `content` and, where present, `tool_calls`, `tool_name`, `status`, `error`, `note`. Long messages are shortened and marked as such. Chat content is marked as **untrusted**, like terminal content.
+- **`send_chat_message`** (Control): parameters `session` and `text`. Sends the text as if you had typed it and pressed Enter; the chat answers with its own model, and the [settings of that model](chat.md#settings-per-model) decide which tools it may use. Returns `{ "ok": true, "index": <index of the new message> }` right away – wait with `wait_for_status` (statuses `ready`/`approval`) and read the answer with `read_chat`. Errors: `busy` (an answer is running or a tool call waits for approval), `no_model` (the chat's server or model is no longer set up), `not_a_chat`, `forbidden`.
+- **`create_session`** with `kind: "chat"`, `server` (id or name of a server from *Settings → Models*) and `model` creates a chat – as a child session of the agent, like a terminal. An unknown server or model returns `bad_args` with the names of the configured servers and models (never addresses with secrets or API keys).
+
+**Chats use the same tools – from the inside:** when the model of a chat calls a tool, Paneldeck runs it in-process with the chat as the caller, under the [model's level](chat.md#settings-per-model) (independent of the level on this page) and with the same safety rules as below. Calls of a chat appear in the call log as well. **External agents can never approve a chat's tool calls** – approvals happen only in the chat window – and they cannot change model settings or type into a chat's input box; they can only send complete messages.
+
 ## Security
 - Access only runs locally through the running instance (`127.0.0.1`, own token). The level is **Off** by default.
 - "Control" lets the agent type into your real terminals – use it only with agents you trust. Terminal content can contain instructions that an agent might wrongly follow; Paneldeck marks terminal content in its answers as untrusted.
@@ -65,7 +76,7 @@ An agent always has only the options of the mode that is currently set (switch *
 - All calls are listed in the call log (*Settings → Agents*, file `mcp-log.jsonl` in the data folder). Screenshots need a visible (not minimized) window.
 
 ## System prompt
-When an agent connects, Paneldeck sends it a guide in the MCP `initialize` reply (field `instructions`): what Paneldeck is, the levels, calling `whoami` first, the safety rules, terminal content as untrusted data, simple vs. expert mode, the limits of `run_command`, the error codes and the tools it can use right now. MCP clients that honour `instructions` pick it up automatically; for other programs (e.g. local models) you can copy it into their system prompt.
+When an agent connects, Paneldeck sends it a guide in the MCP `initialize` reply (field `instructions`): what Paneldeck is, the levels, calling `whoami` first, the safety rules, terminal content as untrusted data, simple vs. expert mode, the limits of `run_command`, the error codes and the tools it can use right now. MCP clients that honour `instructions` pick it up automatically; for other programs you can copy it into their system prompt. [Chats with local models](chat.md) get the same prompt automatically, rendered for the model's level.
 
 *Settings → Agents → System prompt*:
 - **Prompt language:** English (default) or German – independent of the interface language (small local models often follow English instructions best). Stored as `mcp_prompt_lang` in `settings.json`.
@@ -87,6 +98,7 @@ When an agent connects, Paneldeck sends it a guide in the MCP `initialize` reply
 A failed call returns `isError` with a code at the start of the text (`code: message`) and may carry details (e.g. `details.missing_fields`). The most important codes:
 - `mcp_disabled` (interface switched off), `hub_not_running` (Paneldeck not running, or another data folder), `forbidden` (level or safety rules), `not_found`, `wrong_mode`, `permission_pending`.
 - `bad_args`, `too_large`, `timeout`, `busy`, `internal`.
+- Chats: `not_a_terminal`, `not_a_chat`, `busy`, `no_model`.
 - Sessions: `admin_profile`, `spawn_failed`, `session_not_running`, `session_exited`, `session_closed`, `not_claude`, `claude_session`, `claude_mode_off`, `status_unavailable`, `no_shell_integration`, `fullscreen_program`.
 - Screenshots: `window_hidden`, `not_visible`, `screenshot_timeout`, `empty_image`.
 - Tickets and to-do list: `invalid_value`, `required_missing`, `transition_needs_fields`, `transition_not_allowed`, `conditions_not_met`, `hierarchy_violation`, `link_not_allowed`, `already_exists`, `invalid_query`, `feature_disabled`, `no_workflow`, `status_not_in_workflow`, `conflict`, `db_error`, `db_unavailable`.
