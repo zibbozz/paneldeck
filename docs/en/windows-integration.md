@@ -1,0 +1,42 @@
+[← README](../../README.md) · **English** · [Deutsch](../de/windows-integration.md)
+
+# Windows integration
+
+Everything Paneldeck sets up in Windows is per user (`HKCU`, no administrator rights) and can be switched off again. The settings are under *Settings → Window*.
+
+## Tray
+- **Close → tray:** the window goes to the tray instead of quitting (quit via the tray menu).
+- **Minimize → tray:** no taskbar button while minimized; clicking the tray icon brings the window back.
+- `--no-tray` starts without a tray icon; both options then behave like a normal window for that start (see [Command line](command-line.md#--no-tray)).
+- Further windows (Ctrl+click on a tab) stay open and keep updating while the main window is in the tray.
+
+## Start with Windows (autostart)
+Starts Paneldeck minimized in the tray after login (`"<exe>" --tray`, Run value `Paneldeck` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
+
+**Per instance:** an instance started with `--profile` or `--data-dir` gets its own Run value with its own parameters, so every instance can start with Windows independently:
+
+| Instance | Run value | Command |
+|---|---|---|
+| default | `Paneldeck` | `"<exe>" --tray` |
+| `--profile work` | `Paneldeck (work)` | `"<exe>" --profile work --tray` |
+| `--data-dir D:\pd` | `Paneldeck (<hash>)` | `"<exe>" --data-dir "D:\pd" --tray` |
+| both | `Paneldeck (work-<hash>)` | `"<exe>" --data-dir "D:\pd" --profile work --tray` |
+
+`<hash>` is a short, stable 8-character hash of the data folder. Switching autostart off in an instance removes only its own value.
+
+## Explorer context menu
+Right-click a folder, a drive or the empty background of a folder window: **Open in Paneldeck** / **Start with Claude in Paneldeck**. The commands are `"<exe>" [instance options] --open "%1"` and `"<exe>" [instance options] --claude --open "%1"` (`%V` for the background).
+
+There is **only one context menu**: the instance that switches it on last is the one it starts. Another instance then shows "→ another Paneldeck" next to the switch (the command is in the tooltip); switching it on there takes it over.
+
+## Status in the settings
+For autostart and the context menu, *Settings → Window* shows whether the entry is **off**, **on** (exactly this instance's command) or points to **another Paneldeck** (another `.exe` or another instance).
+
+If the path of `paneldeck.exe` contains a `%` character, Paneldeck cannot write these commands safely and refuses them with a message.
+
+## Installer and uninstaller
+- The installer offers a desktop shortcut, autostart and the context menu for the **default instance** only. A silent update (also the [self-update](updates.md)) keeps your choice: a deleted desktop shortcut or a switched-off context menu does not come back.
+- The uninstaller removes the default entries, the autostart values `Paneldeck (…)` of profile instances that point to the installed program, the Claude Code hooks and the MCP registrations of this Paneldeck (see [Agent interface](agent-interface.md#uninstalling)). Foreign entries stay untouched. It asks whether the data folder should be deleted.
+
+## Language
+The labels of the context menu are written in the saved language of the instance that switched it on (English or German; `--lang` does not change them).
