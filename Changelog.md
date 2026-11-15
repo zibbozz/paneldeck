@@ -30,6 +30,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - **Paneldeck starts without an open terminal (#111)** when there are no sessions to restore. The empty Terminal Hub offers "New terminal" and "New Claude session"; its shortcut hints follow your key bindings and language. Restored sessions are unchanged.
 - MCP: `focused` in `list_sessions` refers to the session's own window, so with several windows more than one session can be focused.
 
+### Fixed
+
+- MCP `run_command`: the output no longer starts with the rest of the echoed command when a long command wraps over several terminal lines (e.g. ` mcp | Out-String`); the echo is now removed completely in PowerShell, cmd and bash (#122).
+
 ## [2.0.0] - 2026-11-15
 
 Next to the Terminal Hub, Paneldeck gets a second main area: a to-do list that grows into a small ticket system (projects, ticket types, fields, workflows, boards) with "Expert mode". A new main area counts as a MAJOR version; the existing functions, settings and data stay compatible: the MCP interface only gains new tools (none changed or removed), the command line is unchanged, and the database `paneldeck.db` is new (see "Changed").
