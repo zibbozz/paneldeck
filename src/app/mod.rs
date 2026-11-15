@@ -541,6 +541,8 @@ pub struct App {
     dir: PathBuf,
     last_save: Instant,
     applied_theme: String,
+    /// Fertige egui-Stile je Schlüssel von `applied_theme` (Fenster mit anderer Akzentfarbe tauschen nur den Zeiger).
+    style_cache: Vec<(String, std::sync::Arc<egui::Style>)>,
     last_title: String,
     mode: titlebar::Mode,
     db: Option<crate::db::Db>,
@@ -769,6 +771,7 @@ impl App {
             dir,
             last_save: Instant::now(),
             applied_theme: String::new(),
+            style_cache: Vec::new(),
             last_title: String::new(),
             mode: titlebar::Mode::default(),
             db,
@@ -1615,6 +1618,29 @@ impl App {
                 let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
             }
         }
+    }
+
+    /// Stil (Thema, Deckkraft, Animationen, Akzentfarbe) auf den Kontext anwenden. Der egui-Stil gilt für alle Fenster
+    /// gemeinsam; jedes Fenster setzt vor dem Zeichnen seinen eigenen (Akzent = Projektfarbe seiner Todo-Ansicht, #110).
+    /// Fertige Stile liegen im Zwischenspeicher, damit der Wechsel zwischen Fenstern `style::apply` nicht jedes Bild neu rechnet.
+    fn ensure_style(&mut self, ctx: &egui::Context) {
+        let theme = self.theme();
+        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
+        if self.applied_theme == key {
+            return;
+        }
+        style::set_animations(self.settings.animations);
+        match self.style_cache.iter().find(|(k, _)| *k == key) {
+            Some((_, s)) => ctx.set_style(s.clone()),
+            None => {
+                style::apply(ctx, &theme, self.settings.opacity);
+                if self.style_cache.len() >= 16 {
+                    self.style_cache.remove(0);
+                }
+                self.style_cache.push((key.clone(), ctx.style()));
+            }
+        }
+        self.applied_theme = key;
     }
 
     fn theme(&self) -> Theme {
@@ -2744,13 +2770,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_accent();
-        let theme = self.theme();
-        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
-        if self.applied_theme != key {
-            style::set_animations(self.settings.animations);
-            style::apply(ctx, &theme, self.settings.opacity);
-            self.applied_theme = key;
-        }
+        self.ensure_style(ctx);
         self.apply_font(ctx);
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 0.001 {

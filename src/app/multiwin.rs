@@ -600,6 +600,9 @@ impl App {
         // Während des Zeichnens neu angelegte Fenster (Strg+Klick im weiteren Fenster) anhängen.
         list.append(&mut self.wins.list);
         self.wins.list = list;
+        // Akzent und Stil des Hauptfensters wiederherstellen (aus dem Zwischenspeicher, kein neues `style::apply`).
+        self.sync_accent();
+        self.ensure_style(ctx);
         if self.wins.exit_after_save {
             self.save_all();
             std::process::exit(0);
@@ -624,6 +627,9 @@ impl App {
 
     /// Ein Bild eines weiteren Fensters (die Ansicht ist schon eingetauscht).
     fn child_frame(&mut self, ctx: &egui::Context, w: &mut HubWindow) {
+        // Eigene Akzentfarbe (Projektfarbe der Todo-Ansicht dieses Fensters); der Stil kommt aus dem Zwischenspeicher.
+        self.sync_accent();
+        self.ensure_style(ctx);
         let (close_req, focused, minimized, maximized, outer, inner) = ctx.input(|i| {
             let v = i.viewport();
             (v.close_requested(), v.focused.unwrap_or(false), v.minimized.unwrap_or(false), v.maximized.unwrap_or(false), v.outer_rect, v.inner_rect)
