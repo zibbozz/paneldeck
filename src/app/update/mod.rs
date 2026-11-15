@@ -179,7 +179,7 @@ impl Updater {
         self.total.store(asset.size, Ordering::Relaxed);
         let (tx, ctx, cancel, done, total) = (self.tx.clone(), ctx.clone(), self.cancel.clone(), self.done.clone(), self.total.clone());
         std::thread::spawn(move || {
-            let res = http::system_transport().and_then(|t| download(t.as_ref(), &asset, &sums, &version, &download_dir(), lang, &cancel, &mut |d, tot| {
+            let res = http::system_transport().map_err(|e| e.text(lang)).and_then(|t| download(t.as_ref(), &asset, &sums, &version, &download_dir(), lang, &cancel, &mut |d, tot| {
                 done.store(d, Ordering::Relaxed);
                 if let Some(t) = tot {
                     total.store(t, Ordering::Relaxed);
@@ -285,7 +285,7 @@ impl Updater {
 
 /// Abfrage der API und Entscheidung.
 fn check(exe: &Path, skip: &str, lang: Lang, cancel: &AtomicBool) -> Result<Outcome, String> {
-    let t = http::system_transport()?;
+    let t = http::system_transport().map_err(|e| e.text(lang))?;
     check_with(t.as_ref(), &Version::current(), install::detect(exe), skip, lang, cancel)
 }
 
@@ -329,7 +329,8 @@ fn download(
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(PathBuf, [u8; 32]), String> {
     use std::io::Write;
-    let text = http::fetch_bytes(t, &sums.url, "application/octet-stream", release::MAX_SUMS, cancel).map_err(|e| format!("{}: {}", release::SUMS_NAME, e.text(lang)))?;
+    let text = http::fetch_bytes(t, &sums.url, "application/octet-stream", release::MAX_SUMS, cancel)
+        .map_err(|e| format!("{} ({}): {}", lang.t("Prüfsummen-Datei nicht geladen", "Could not load the checksum file"), release::SUMS_NAME, e.text(lang)))?;
     let list = release::parse_sums(&String::from_utf8_lossy(&text));
     let want = release::expected_hash(&list, &asset.name).ok_or_else(|| format!("{} {} {}", release::SUMS_NAME, lang.t("enthält keine Prüfsumme für", "has no checksum for"), asset.name))?;
     if asset.name.contains(['/', '\\']) || asset.name.contains("..") {

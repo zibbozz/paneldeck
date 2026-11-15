@@ -6,8 +6,9 @@
 #   <feed-ordner>/paneldeck-<v>-windows-x64.zip       portables ZIP (Ordner paneldeck-<v>/ mit paneldeck.exe)
 #   <feed-ordner>/Paneldeck-Setup-<v>.exe             Installer (nur wenn makensis vorhanden)
 #   <feed-ordner>/SHA256SUMS.txt                      Prüfsummen wie in tools/release.sh
-# Genutzt wird der Feed nur von einem DEBUG-Build (`cargo build` ohne --release) mit PANELDECK_UPDATE_TEST_FEED=<feed-ordner>;
-# Release-Builds enthalten diesen Testweg nicht. Die „neue“ Programmdatei ist standardmäßig der Release-Build
+# Genutzt wird der Feed nur von einem Build mit dem Cargo-Feature `update-test-feed` (Standard: aus) und
+# PANELDECK_UPDATE_TEST_FEED=<feed-ordner>, z. B. `cargo build --release --features update-test-feed`;
+# Release-Builds (tools/release.sh) enthalten diesen Testweg nie. Die „neue“ Programmdatei ist standardmäßig der Release-Build
 # ($CARGO_TARGET_DIR bzw. target/release/paneldeck.exe). Optionen über Umgebungsvariablen:
 #   NO_SUMS=1  kein SHA256SUMS.txt (prüft „nur ankündigen“)   BAD_SUM=1  falsche Prüfsumme für das ZIP (prüft das Verwerfen)
 set -euo pipefail

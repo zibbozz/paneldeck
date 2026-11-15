@@ -69,6 +69,10 @@ if [ "$IS_WIN" = 1 ]; then
   n="$(grep -a -c -i -E 'C:\\Users|E:\\claude|E:\\paneldeck' "dist/paneldeck-$V.exe" || true)"
   [ "$n" = 0 ] || { echo "Programmdatei enthält Pfade des Build-Rechners ($n Treffer)"; exit 1; }
 fi
+# Der lokale Test-Feed des Selbst-Updates (Cargo-Feature update-test-feed) darf nie im Release stecken.
+if grep -a -q 'PANELDECK_UPDATE_TEST_FEED' "dist/paneldeck-$V.exe"; then
+  echo "Programmdatei enthält den Update-Test-Feed (Feature update-test-feed) – so nicht veröffentlichen"; exit 1
+fi
 
 # Defender-Prüfung auf Fehlalarme (Windows): paneldeck.exe (steckt unverändert auch im ZIP) und der Installer.
 if [ "$IS_WIN" = 1 ]; then

@@ -5,6 +5,7 @@
 //! Attrappe, Unit-Tests gehen nie ins Internet. `fetch` folgt Weiterleitungen nur zu den Hosts aus `release::HOSTS`.
 
 use super::release::allowed_url;
+use crate::state::Lang;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Antwort auf eine einzelne Anfrage (ohne Weiterleitungen zu folgen).
@@ -13,12 +14,12 @@ pub trait Response {
     fn location(&self) -> Option<String>;
     fn content_length(&self) -> Option<u64>;
     /// Liest den nächsten Block; `Ok(0)` = Ende.
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, String>;
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, FetchError>;
 }
 
 pub trait Transport {
     /// Eine GET-Anfrage. `accept` landet im `Accept`-Kopf.
-    fn get(&self, url: &str, accept: &str) -> Result<Box<dyn Response + '_>, String>;
+    fn get(&self, url: &str, accept: &str) -> Result<Box<dyn Response + '_>, FetchError>;
 }
 
 pub const MAX_REDIRECTS: usize = 5;
@@ -30,19 +31,81 @@ pub enum FetchError {
     Status(u16),
     TooLarge,
     Cancelled,
+    /// Fehler mit fertigem (zweisprachigem) Text.
     Net(String),
+    /// Fehler eines WinHTTP-Aufrufs: Fehlercode, Flags der TLS-Prüfung (`WINHTTP_CALLBACK_STATUS_FLAG_*`, 0 = keine), Aufruf.
+    Sys { code: u32, tls: u32, call: &'static str },
+}
+
+/// Fehlercodes und Flags von WinHTTP (winhttp.h) als Zahlen, damit die Texte auch ohne Windows testbar sind.
+mod code {
+    pub const TIMEOUT: u32 = 12002;
+    pub const NAME_NOT_RESOLVED: u32 = 12007;
+    pub const CANNOT_CONNECT: u32 = 12029;
+    pub const CONNECTION_ERROR: u32 = 12030;
+    pub const CERT_REV_FAILED: u32 = 12057;
+    pub const CERT_REVOKED: u32 = 12170;
+    pub const SECURE_FAILURE: u32 = 12175;
+    /// Weitere TLS-/Zertifikatsfehler (Datum, Name, Aussteller, Kanal, Verwendung, Proxy).
+    pub const TLS: [u32; 7] = [12037, 12038, 12045, 12157, 12169, 12179, 12188];
+    pub const FLAG_REV_FAILED: u32 = 1;
+    pub const FLAG_REVOKED: u32 = 4;
+}
+
+/// Verständlicher Text für einen WinHTTP-Fehler; das Technische folgt in Klammern.
+fn sys_text(c: u32, tls: u32, call: &str, lang: Lang) -> String {
+    let secure = c == code::SECURE_FAILURE;
+    let msg = if c == code::CERT_REVOKED || (secure && tls & code::FLAG_REVOKED != 0) {
+        lang.t(
+            "Das Zertifikat des Servers wurde widerrufen – die Verbindung ist nicht vertrauenswürdig, es wird nichts geladen.",
+            "The server's certificate has been revoked – the connection is not trustworthy, nothing is downloaded.",
+        )
+    } else if c == code::CERT_REV_FAILED || (secure && tls & code::FLAG_REV_FAILED != 0) {
+        lang.t(
+            "Die Sperrprüfung des Zertifikats war nicht möglich (Server für Sperrlisten nicht erreichbar). Aus Sicherheitsgründen wird nichts geladen – später erneut versuchen oder Firewall/Proxy prüfen.",
+            "The certificate revocation check could not be done (revocation server unreachable). For safety nothing is downloaded – try again later or check the firewall/proxy.",
+        )
+    } else if secure || code::TLS.contains(&c) {
+        lang.t(
+            "Sichere Verbindung fehlgeschlagen (TLS/Zertifikat) – evtl. prüft ein Proxy oder Virenscanner HTTPS-Verbindungen.",
+            "Secure connection failed (TLS/certificate) – a proxy or antivirus program may be intercepting HTTPS.",
+        )
+    } else {
+        match c {
+            code::TIMEOUT => lang.t("Zeitüberschreitung – der Server hat nicht rechtzeitig geantwortet.", "Timed out – the server did not answer in time."),
+            code::NAME_NOT_RESOLVED => lang.t(
+                "Servername konnte nicht aufgelöst werden – keine Internetverbindung oder ein DNS-Problem.",
+                "The server name could not be resolved – no internet connection or a DNS problem.",
+            ),
+            code::CANNOT_CONNECT => lang.t(
+                "Keine Verbindung zum Server – Internetverbindung, Proxy oder Firewall prüfen.",
+                "Could not connect to the server – check the internet connection, proxy or firewall.",
+            ),
+            code::CONNECTION_ERROR => lang.t("Die Verbindung wurde unterbrochen.", "The connection was interrupted."),
+            _ => lang.t("Netzwerkfehler.", "Network error."),
+        }
+    };
+    let flags = if tls != 0 { format!(", TLS 0x{tls:x}") } else { String::new() };
+    format!("{msg} (WinHTTP {c}{flags}, {call})")
 }
 
 impl FetchError {
-    pub fn text(&self, lang: crate::state::Lang) -> String {
+    pub fn text(&self, lang: Lang) -> String {
         match self {
-            FetchError::Blocked(u) => format!("{} {u}", lang.t("Adresse nicht erlaubt:", "Address not allowed:")),
-            FetchError::Status(404) => lang.t("nicht gefunden (HTTP 404)", "not found (HTTP 404)").into(),
-            FetchError::Status(403) => lang.t("von GitHub abgelehnt (HTTP 403, evtl. zu viele Abfragen – später erneut versuchen)", "refused by GitHub (HTTP 403, possibly rate limited – try again later)").into(),
-            FetchError::Status(s) => format!("HTTP {s}"),
-            FetchError::TooLarge => lang.t("Antwort zu groß", "response too large").into(),
-            FetchError::Cancelled => lang.t("abgebrochen", "cancelled").into(),
-            FetchError::Net(e) => format!("{}: {e}", lang.t("Netzwerkfehler", "network error")),
+            FetchError::Blocked(u) => format!("{} ({u})", lang.t("Adresse nicht erlaubt – nur GitHub über HTTPS", "Address not allowed – only GitHub over HTTPS")),
+            FetchError::Status(404) => lang.t("Nicht gefunden (HTTP 404).", "Not found (HTTP 404).").into(),
+            FetchError::Status(403) => lang.t("Von GitHub abgelehnt, evtl. zu viele Abfragen – später erneut versuchen (HTTP 403).", "Refused by GitHub, possibly rate limited – try again later (HTTP 403).").into(),
+            FetchError::Status(407) => lang
+                .t(
+                    "Der Proxy verlangt eine Anmeldung – das unterstützt Paneldeck nicht. Bitte das Update von der Release-Seite laden (HTTP 407).",
+                    "The proxy requires a login – Paneldeck does not support that. Please download the update from the release page (HTTP 407).",
+                )
+                .into(),
+            FetchError::Status(s) => format!("{} (HTTP {s})", lang.t("Unerwartete Antwort des Servers", "Unexpected answer from the server")),
+            FetchError::TooLarge => lang.t("Die Antwort ist größer als erlaubt.", "The response is larger than allowed.").into(),
+            FetchError::Cancelled => lang.t("Abgebrochen.", "Cancelled.").into(),
+            FetchError::Net(e) => format!("{} ({e})", lang.t("Netzwerkfehler", "Network error")),
+            FetchError::Sys { code, tls, call } => sys_text(*code, *tls, call, lang),
         }
     }
 }
@@ -67,7 +130,7 @@ pub fn fetch(
         if cancel.load(Ordering::Relaxed) {
             return Err(FetchError::Cancelled);
         }
-        let mut r = t.get(&url, accept).map_err(FetchError::Net)?;
+        let mut r = t.get(&url, accept)?;
         match r.status() {
             301 | 302 | 303 | 307 | 308 => {
                 let loc = r.location().ok_or_else(|| FetchError::Net(crate::state::t("Weiterleitung ohne Ziel", "redirect without location").into()))?;
@@ -88,7 +151,7 @@ pub fn fetch(
             if cancel.load(Ordering::Relaxed) {
                 return Err(FetchError::Cancelled);
             }
-            let n = r.read(&mut buf).map_err(FetchError::Net)?;
+            let n = r.read(&mut buf)?;
             if n == 0 {
                 break;
             }
@@ -100,7 +163,7 @@ pub fn fetch(
             progress(done, total);
         }
         if total.is_some_and(|n| n != done) {
-            return Err(FetchError::Net(format!("{} ({done} / {} bytes)", crate::state::t("unvollständig", "incomplete"), total.unwrap_or(0))));
+            return Err(FetchError::Net(format!("{} {done} / {} bytes", crate::state::t("unvollständig:", "incomplete:"), total.unwrap_or(0))));
         }
         return Ok(done);
     }
@@ -123,10 +186,10 @@ pub fn user_agent() -> String {
 }
 
 /// Die Verbindung für den echten Betrieb.
-pub fn system_transport() -> Result<Box<dyn Transport>, String> {
-    #[cfg(debug_assertions)]
+pub fn system_transport() -> Result<Box<dyn Transport>, FetchError> {
+    #[cfg(feature = "update-test-feed")]
     if let Some(dir) = std::env::var_os("PANELDECK_UPDATE_TEST_FEED") {
-        // Nur in Debug-Builds (`cargo build` ohne --release): lokales Schein-Release zum Testen, siehe `feed::FeedTransport`.
+        // Nur mit dem Cargo-Feature `update-test-feed` (Standard: aus, nie im Release): lokales Schein-Release, siehe `feed`.
         return Ok(Box::new(feed::FeedTransport { dir: dir.into() }));
     }
     #[cfg(windows)]
@@ -135,14 +198,15 @@ pub fn system_transport() -> Result<Box<dyn Transport>, String> {
     }
     #[cfg(not(windows))]
     {
-        Err(crate::state::t("nur unter Windows", "Windows only").into())
+        Err(FetchError::Net(crate::state::t("nur unter Windows", "Windows only").into()))
     }
 }
 
 #[cfg(windows)]
 mod winhttp {
-    use super::{Response, Transport};
+    use super::{FetchError, Response, Transport};
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER};
     use windows_sys::Win32::Networking::WinHttp::*;
 
@@ -150,9 +214,20 @@ mod winhttp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    fn last_err(what: &str) -> String {
+    fn sys(call: &'static str, tls: u32) -> FetchError {
         // SAFETY: GetLastError liest nur den Fehlerwert des aktuellen Threads.
-        format!("{what} (WinHTTP {})", unsafe { GetLastError() })
+        FetchError::Sys { code: unsafe { GetLastError() }, tls, call }
+    }
+
+    /// Meldet WinHTTP einen TLS-Fehler, sammelt dieser Rückruf die Gründe (z. B. „Sperrprüfung nicht möglich“) in dem
+    /// `AtomicU32`, dessen Adresse als Kontext an `WinHttpSendRequest` ging.
+    unsafe extern "system" fn on_status(_h: *mut c_void, ctx: usize, status: u32, info: *mut c_void, len: u32) {
+        if status == WINHTTP_CALLBACK_STATUS_SECURE_FAILURE && ctx != 0 && !info.is_null() && len >= 4 {
+            // SAFETY: bei SECURE_FAILURE zeigt `info` auf ein DWORD mit Flags; `ctx` ist die Adresse des `AtomicU32` in `Resp`
+            // bzw. in `get`, der länger lebt als das Anfrage-Handle.
+            let (flags, cell) = unsafe { (*(info as *const u32), &*(ctx as *const AtomicU32)) };
+            cell.fetch_or(flags, Ordering::Relaxed);
+        }
     }
 
     /// Besitzt ein WinHTTP-Handle und schließt es beim Verlassen.
@@ -177,7 +252,7 @@ mod winhttp {
 
     // Das Handle wird nur im Faden benutzt, der es angelegt hat (die Prüfung läuft komplett in einem Hintergrundfaden).
     impl WinHttp {
-        pub fn open() -> Result<Self, String> {
+        pub fn open() -> Result<Self, FetchError> {
             let ua = wide(&super::user_agent());
             // SAFETY: Zeiger auf gültige, nullterminierte UTF-16-Puffer; Proxy-Einstellungen des Systems (Windows 8.1+).
             let mut s = unsafe { WinHttpOpen(ua.as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, std::ptr::null(), std::ptr::null(), 0) };
@@ -187,15 +262,19 @@ mod winhttp {
                 s = unsafe { WinHttpOpen(ua.as_ptr(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, std::ptr::null(), std::ptr::null(), 0) };
             }
             if s.is_null() {
-                return Err(last_err("WinHttpOpen"));
+                return Err(sys("WinHttpOpen", 0));
             }
             let session = H(s);
             // Nur TLS 1.2/1.3 (1.3 kennt nicht jedes Windows 10 – dann nur 1.2).
-            if !set_u32(s, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3) {
-                set_u32(s, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2);
+            if !set_u32(s, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3)
+                && !set_u32(s, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2)
+            {
+                return Err(sys("WinHttpSetOption(SECURE_PROTOCOLS)", 0));
             }
-            // Weiterleitungen prüft `fetch` selbst.
-            set_u32(s, WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_NEVER);
+            // Weiterleitungen prüft `fetch` selbst – ohne diese Einstellung keine Anfrage.
+            if !set_u32(s, WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_NEVER) {
+                return Err(sys("WinHttpSetOption(REDIRECT_POLICY)", 0));
+            }
             // Zeitlimits: Namensauflösung, Verbindung, Senden, Empfangen (je Block).
             // SAFETY: gültiges Session-Handle.
             unsafe { WinHttpSetTimeouts(s, 15_000, 15_000, 30_000, 30_000) };
@@ -203,9 +282,11 @@ mod winhttp {
         }
     }
 
+    /// Felder in Schließ-Reihenfolge: erst die Anfrage, dann die Verbindung, zuletzt der Kontext des Rückrufs.
     struct Resp {
-        _conn: H,
         req: H,
+        _conn: H,
+        tls: Box<AtomicU32>,
     }
 
     impl Resp {
@@ -245,25 +326,45 @@ mod winhttp {
             self.query_u32(WINHTTP_QUERY_CONTENT_LENGTH).map(u64::from)
         }
 
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, FetchError> {
             let mut n: u32 = 0;
             let want = buf.len().min(u32::MAX as usize) as u32;
             // SAFETY: `buf` hat mindestens `want` Bytes.
             if unsafe { WinHttpReadData(self.req.0, buf.as_mut_ptr() as *mut c_void, want, &mut n) } == 0 {
-                return Err(last_err("WinHttpReadData"));
+                return Err(sys("WinHttpReadData", self.tls.load(Ordering::Relaxed)));
             }
             Ok(n as usize)
         }
     }
 
+    /// Adresse, die WinHTTP tatsächlich abgerufen hat (`WINHTTP_OPTION_URL`).
+    fn final_url(req: *mut c_void) -> Option<String> {
+        let mut len: u32 = 0;
+        // SAFETY: erster Aufruf nur zur Größenabfrage (Puffer null).
+        unsafe { WinHttpQueryOption(req, WINHTTP_OPTION_URL, std::ptr::null_mut(), &mut len) };
+        // SAFETY: liest nur den Fehlerwert.
+        if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER || len == 0 || len > 64 << 10 {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize / 2 + 1];
+        // SAFETY: Puffer mit mindestens `len` Bytes Platz.
+        if unsafe { WinHttpQueryOption(req, WINHTTP_OPTION_URL, buf.as_mut_ptr() as *mut c_void, &mut len) } == 0 {
+            return None;
+        }
+        buf.truncate(len as usize / 2);
+        String::from_utf16(&buf).ok().map(|s| s.trim_end_matches('\0').to_string())
+    }
+
     impl Transport for WinHttp {
-        fn get(&self, url: &str, accept: &str) -> Result<Box<dyn Response + '_>, String> {
-            let (host, path) = super::super::release::split_https(url).ok_or("url")?;
+        fn get(&self, url: &str, accept: &str) -> Result<Box<dyn Response + '_>, FetchError> {
+            let (host, path) = super::super::release::split_https(url).ok_or_else(|| FetchError::Blocked(url.to_string()))?;
             let whost = wide(&host);
+            // Kontext des Rückrufs (Adresse bleibt fest, weil im Box); vor den Handles angelegt, damit er sie überlebt.
+            let tls = Box::new(AtomicU32::new(0));
             // SAFETY: gültiges Session-Handle und nullterminierter Hostname.
             let conn = H(unsafe { WinHttpConnect(self.session.0, whost.as_ptr(), INTERNET_DEFAULT_HTTPS_PORT, 0) });
             if conn.0.is_null() {
-                return Err(last_err("WinHttpConnect"));
+                return Err(sys("WinHttpConnect", 0));
             }
             let verb = wide("GET");
             let wpath = wide(&path);
@@ -273,32 +374,53 @@ mod winhttp {
                 WinHttpOpenRequest(conn.0, verb.as_ptr(), wpath.as_ptr(), std::ptr::null(), std::ptr::null(), std::ptr::null(), WINHTTP_FLAG_SECURE | WINHTTP_FLAG_ESCAPE_DISABLE | WINHTTP_FLAG_REFRESH)
             });
             if req.0.is_null() {
-                return Err(last_err("WinHttpOpenRequest"));
+                return Err(sys("WinHttpOpenRequest", 0));
             }
-            // Keine Cookies, keine Weiterleitungen, keine automatische Anmeldung (weder NTLM noch Kerberos).
-            set_u32(req.0, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION);
-            set_u32(req.0, WINHTTP_OPTION_AUTOLOGON_POLICY, WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH);
+            // Pflicht (sonst keine Anfrage): keine Cookies, keine Weiterleitungen, keine automatische Anmeldung (weder NTLM noch
+            // Kerberos), Sperrprüfung der Zertifikate. Ist ein Sperrlisten-Server nicht erreichbar, scheitert die Anfrage mit
+            // einer eigenen Meldung (`sys_text`) – die Prüfung wird nie still abgeschaltet.
+            for (opt, v, call) in [
+                (WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION, "WinHttpSetOption(DISABLE_FEATURE)"),
+                (WINHTTP_OPTION_AUTOLOGON_POLICY, WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH, "WinHttpSetOption(AUTOLOGON_POLICY)"),
+                (WINHTTP_OPTION_ENABLE_FEATURE, WINHTTP_ENABLE_SSL_REVOCATION, "WinHttpSetOption(ENABLE_SSL_REVOCATION)"),
+            ] {
+                if !set_u32(req.0, opt, v) {
+                    return Err(sys(call, 0));
+                }
+            }
+            // SAFETY: gültiges Anfrage-Handle; der Rückruf liest nur `info` und den Kontext (siehe `on_status`). Scheitert das
+            // Setzen, fehlen nur die Gründe in der Fehlermeldung.
+            unsafe { WinHttpSetStatusCallback(req.0, Some(on_status), WINHTTP_CALLBACK_FLAG_SECURE_FAILURE, 0) };
+            let ctx = &*tls as *const AtomicU32 as usize;
             let headers = wide(&format!("Accept: {accept}\r\nX-GitHub-Api-Version: 2022-11-28\r\n"));
-            // SAFETY: Kopfzeilen als nullterminierter Puffer (Länge u32::MAX = bis zur Null), kein Rumpf.
-            if unsafe { WinHttpSendRequest(req.0, headers.as_ptr(), u32::MAX, std::ptr::null(), 0, 0, 0) } == 0 {
-                return Err(last_err("WinHttpSendRequest"));
+            // SAFETY: Kopfzeilen als nullterminierter Puffer (Länge u32::MAX = bis zur Null), kein Rumpf, Kontext s. o.
+            if unsafe { WinHttpSendRequest(req.0, headers.as_ptr(), u32::MAX, std::ptr::null(), 0, 0, ctx) } == 0 {
+                return Err(sys("WinHttpSendRequest", tls.load(Ordering::Relaxed)));
             }
             // SAFETY: gültiges Anfrage-Handle.
             if unsafe { WinHttpReceiveResponse(req.0, std::ptr::null_mut()) } == 0 {
-                return Err(last_err("WinHttpReceiveResponse"));
+                return Err(sys("WinHttpReceiveResponse", tls.load(Ordering::Relaxed)));
             }
-            Ok(Box::new(Resp { _conn: conn, req }))
+            // Zusätzlich: die tatsächlich abgerufene Adresse muss erlaubt sein und denselben Host haben (WinHTTP darf hier
+            // nirgendwohin weitergeleitet haben).
+            let got = final_url(req.0).unwrap_or_default();
+            let same_host = super::super::release::split_https(&got).is_some_and(|(h, _)| h == host);
+            if !super::allowed_url(&got) || !same_host {
+                return Err(FetchError::Blocked(if got.is_empty() { url.to_string() } else { got }));
+            }
+            Ok(Box::new(Resp { req, _conn: conn, tls }))
         }
     }
 }
 
-/// Lokales Schein-Release für Ende-zu-Ende-Tests – **nur in Debug-Builds** (`cargo build` ohne `--release`) und nur über die
+/// Lokales Schein-Release für Ende-zu-Ende-Tests – **nur mit dem Cargo-Feature `update-test-feed`** (Standard: aus; Release-Builds
+/// über `tools/release.sh` haben es nie, das Skript prüft das) und nur über die
 /// Umgebungsvariable `PANELDECK_UPDATE_TEST_FEED=<ordner>`. Der Ordner enthält `latest.json` (Antwort wie von der API) und die
 /// Release-Dateien; Adressen der Form `…/releases/download/<tag>/<datei>` werden auf `<ordner>/<datei>` abgebildet. Alle Prüfungen
-/// (Hosts, Größen, Prüfsummen) laufen wie im echten Betrieb. Ein Release-Build enthält diesen Code nicht.
-#[cfg(any(debug_assertions, test))]
+/// (Hosts, Größen, Prüfsummen) laufen wie im echten Betrieb. Ohne das Feature enthält die .exe diesen Code nicht.
+#[cfg(any(feature = "update-test-feed", test))]
 pub mod feed {
-    use super::{Response, Transport};
+    use super::{FetchError, Response, Transport};
     use std::io::Read;
     use std::path::PathBuf;
 
@@ -322,16 +444,16 @@ pub mod feed {
         fn content_length(&self) -> Option<u64> {
             self.len
         }
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, FetchError> {
             match &mut self.file {
-                Some(f) => f.read(buf).map_err(|e| e.to_string()),
+                Some(f) => f.read(buf).map_err(|e| FetchError::Net(e.to_string())),
                 None => Ok(0),
             }
         }
     }
 
     impl Transport for FeedTransport {
-        fn get(&self, url: &str, _accept: &str) -> Result<Box<dyn Response + '_>, String> {
+        fn get(&self, url: &str, _accept: &str) -> Result<Box<dyn Response + '_>, FetchError> {
             let name = if url == super::super::release::LATEST_URL {
                 Some("latest.json".to_string())
             } else {
@@ -349,7 +471,7 @@ pub mod feed {
 #[cfg(test)]
 pub mod fake {
     //! Attrappe für die Tests: feste Antworten je Adresse, protokolliert alle Anfragen.
-    use super::{Response, Transport};
+    use super::{FetchError, Response, Transport};
     use std::cell::RefCell;
     use std::collections::HashMap;
 
@@ -402,7 +524,7 @@ pub mod fake {
         fn content_length(&self) -> Option<u64> {
             self.c.claimed_len.unwrap_or(Some(self.c.body.len() as u64))
         }
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, FetchError> {
             // In kleinen Stücken liefern (prüft das Zusammensetzen)
             let n = (self.c.body.len() - self.pos).min(buf.len()).min(7);
             buf[..n].copy_from_slice(&self.c.body[self.pos..self.pos + n]);
@@ -412,9 +534,9 @@ pub mod fake {
     }
 
     impl Transport for Fake {
-        fn get(&self, url: &str, _accept: &str) -> Result<Box<dyn Response + '_>, String> {
+        fn get(&self, url: &str, _accept: &str) -> Result<Box<dyn Response + '_>, FetchError> {
             self.log.borrow_mut().push(url.to_string());
-            let c = self.map.get(url).cloned().ok_or_else(|| format!("unexpected request {url}"))?;
+            let c = self.map.get(url).cloned().ok_or_else(|| FetchError::Net(format!("unexpected request {url}")))?;
             Ok(Box::new(R { c, pos: 0 }))
         }
     }
@@ -511,6 +633,27 @@ mod tests {
         assert_eq!(fetch_bytes(&t, GH, "*/*", 10, &cancel).unwrap(), b"zip");
         assert_eq!(fetch_bytes(&t, "https://github.com/zibbozz/paneldeck/releases/download/v9.0.0/..%2Fx", "*/*", 10, &cancel), Err(FetchError::Status(404)));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn error_texts_are_explained() {
+        let t = |e: FetchError, l| e.text(l);
+        let sys = |code, tls| FetchError::Sys { code, tls, call: "WinHttpSendRequest" };
+        assert!(t(FetchError::Status(407), Lang::En).contains("proxy requires a login"));
+        assert!(t(FetchError::Status(407), Lang::De).contains("Proxy verlangt eine Anmeldung"));
+        assert!(t(sys(12002, 0), Lang::En).starts_with("Timed out"));
+        assert!(t(sys(12007, 0), Lang::De).contains("nicht aufgelöst"));
+        assert!(t(sys(12029, 0), Lang::En).contains("Could not connect"));
+        assert!(t(sys(12175, 0), Lang::En).contains("Secure connection failed"));
+        // Sperrprüfung nicht möglich: eigene Meldung (über den Fehlercode oder die Flags des Rückrufs)
+        assert!(t(sys(12175, 1), Lang::En).contains("revocation check could not be done"), "{}", t(sys(12175, 1), Lang::En));
+        assert!(t(sys(12057, 0), Lang::De).contains("Sperrprüfung"));
+        assert!(t(sys(12175, 4), Lang::En).contains("revoked"));
+        // Technisches nur in Klammern dahinter
+        let s = t(sys(12029, 0), Lang::En);
+        assert!(s.ends_with("(WinHTTP 12029, WinHttpSendRequest)"), "{s}");
+        assert!(t(sys(12345, 0), Lang::En).starts_with("Network error."));
+        assert!(t(FetchError::Blocked("https://evil.example/".into()), Lang::En).starts_with("Address not allowed"));
     }
 
     #[test]
