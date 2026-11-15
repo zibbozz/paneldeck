@@ -2,17 +2,28 @@
 //!
 //! Ist die Umgebungsvariable `PANELDECK_SHOT` gesetzt, springt die Anwendung beim Start in den Reiter „Todo-Liste“ (Expertenmodus,
 //! erstes echtes Projekt) und zeigt die genannte Ansicht – ganz ohne Maus und Tastatur. Werte (optional mit `:`-Argument):
-//! `tickets[:SCHLÜSSEL]` (Liste mit Seitenpanel des Tickets), `board`, `backlog`, `releases`, `dashboard`, `overview`, `search`.
-//! Siehe `tools/readme-shots.ps1`.
+//! `tickets[:SCHLÜSSEL]` (Liste mit Seitenpanel des Tickets), `board`, `backlog`, `releases`, `dashboard`, `overview`, `search`,
+//! `search-example:<id>` (Suche mit der Abfrage des Hilfe-Beispiels `<id>` ausgeführt; `linkedTerminal()` ist dann das Terminal der
+//! Beispieldaten, siehe [`terminals`]).
+//! Siehe `tools/readme-shots.ps1` und `tools/query-help-shots.ps1`.
 
 use super::ticket_state::ViewMode;
 use super::{Cx, PlanUi, Tab};
 use crate::db::Db;
 use crate::planning::tickets::ticket_by_key;
 use crate::state::Lang;
+use crate::planning::query_help::HelpDoc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static DONE: AtomicBool = AtomicBool::new(false);
+/// Das „aktuelle Terminal“ der Suche bei `search-example:<id>` (die echte Suche der Oberfläche kennt keins).
+static TERMINALS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Terminals für `Ctx::with_terminals` der Suche (leer außer bei `search-example:<id>`).
+pub(in crate::app) fn terminals() -> Vec<String> {
+    TERMINALS.get().cloned().unwrap_or_default()
+}
 
 /// Der Wert von `PANELDECK_SHOT`, solange die Ansicht noch nicht angewendet wurde.
 pub(in crate::app) fn pending_spec() -> Option<String> {
@@ -47,6 +58,14 @@ impl PlanUi {
             "dashboard" => self.tab = Tab::Dashboards,
             "overview" => self.tab = Tab::Overview,
             "search" => self.tab = Tab::Search,
+            "search-example" => {
+                if let Some(e) = HelpDoc::builtin().example(arg) {
+                    let _ = TERMINALS.set(e.demo.current_terminal.iter().cloned().collect());
+                    self.open_search_query(&e.jql, Some(false));
+                } else {
+                    self.tab = Tab::Search;
+                }
+            }
             _ => {
                 self.tab = Tab::Tickets;
                 if let Ok(t) = ticket_by_key(cx.conn, arg) {
