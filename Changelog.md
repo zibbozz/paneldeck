@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.2.0] - WIP
 
+### Fixed
+
+- A maximized window no longer has a transparent gap on all sides through which the desktop showed (#134).
+
 ## [2.1.0] - 2026-11-15
 
 ### Added

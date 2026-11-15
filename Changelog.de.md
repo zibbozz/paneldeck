@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.2.0] - WIP
 
+### Fixed
+
+- Ein maximiertes Fenster hat keinen durchsichtigen Rand mehr, durch den der Desktop zu sehen war (#134).
+
 ## [2.1.0] - 2026-11-15
 
 ### Added
