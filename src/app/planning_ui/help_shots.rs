@@ -1,5 +1,8 @@
 //! Die Screenshots der Abfrage-Hilfe (ein Bild je Beispiel, nur Englisch), in die `.exe` eingebettet.
 //!
+//! **Bilder erzeugen:** `tools/query-help-shots.ps1` (alle oder `-Only <id>`) nimmt jedes Beispiel ohne Maus/Tastatur aus der gebauten
+//! Software auf und legt es im Ordner unten ab.
+//!
 //! **Neuen Screenshot ergänzen:** Datei `assets/query-help/query-help-<id>.png` ablegen (`<id>` = `Example::id`, der Name ist
 //! `Example::screenshot_file()`) und unten in [`SHOTS`] eine Zeile `("<id>", include_bytes!("../../../assets/query-help/query-help-<id>.png"))`
 //! eintragen. Beispiele ohne Eintrag zeigen den Platzhalter „Screenshot folgt“. Der Test `table_matches_the_directory` stellt sicher,
@@ -7,9 +10,38 @@
 
 use eframe::egui::ColorImage;
 
-/// Beispiel-ID → PNG-Daten. Noch gibt es keine Screenshots; die Bilder entstehen später aus der gebauten Software.
+/// Beispiel-ID → PNG-Daten, in Dokument-Reihenfolge. Die Bilder erzeugt `tools/query-help-shots.ps1` aus der gebauten Software
+/// (frische Datenbank aus `Example::demo`, Abfrage in der Suche ausgeführt, auf Abfrage-Leiste und Ergebnis zugeschnitten).
 pub const SHOTS: &[(&str, &[u8])] = &[
-    // ("epics-release", include_bytes!("../../../assets/query-help/query-help-epics-release.png")),
+    ("basics-field-value", include_bytes!("../../../assets/query-help/query-help-basics-field-value.png")),
+    ("basics-quotes", include_bytes!("../../../assets/query-help/query-help-basics-quotes.png")),
+    ("filters-not-equal", include_bytes!("../../../assets/query-help/query-help-filters-not-equal.png")),
+    ("filters-in", include_bytes!("../../../assets/query-help/query-help-filters-in.png")),
+    ("filters-not-in", include_bytes!("../../../assets/query-help/query-help-filters-not-in.png")),
+    ("filters-range", include_bytes!("../../../assets/query-help/query-help-filters-range.png")),
+    ("text-contains", include_bytes!("../../../assets/query-help/query-help-text-contains.png")),
+    ("text-not-contains", include_bytes!("../../../assets/query-help/query-help-text-not-contains.png")),
+    ("text-free", include_bytes!("../../../assets/query-help/query-help-text-free.png")),
+    ("text-labels", include_bytes!("../../../assets/query-help/query-help-text-labels.png")),
+    ("empty-is-empty", include_bytes!("../../../assets/query-help/query-help-empty-is-empty.png")),
+    ("empty-parent", include_bytes!("../../../assets/query-help/query-help-empty-parent.png")),
+    ("dates-range", include_bytes!("../../../assets/query-help/query-help-dates-range.png")),
+    ("dates-overdue", include_bytes!("../../../assets/query-help/query-help-dates-overdue.png")),
+    ("sprint-active", include_bytes!("../../../assets/query-help/query-help-sprint-active.png")),
+    ("sprint-backlog", include_bytes!("../../../assets/query-help/query-help-sprint-backlog.png")),
+    ("terminal-any", include_bytes!("../../../assets/query-help/query-help-terminal-any.png")),
+    ("terminal-linked", include_bytes!("../../../assets/query-help/query-help-terminal-linked.png")),
+    ("flags-favorite", include_bytes!("../../../assets/query-help/query-help-flags-favorite.png")),
+    ("flags-not-blocked", include_bytes!("../../../assets/query-help/query-help-flags-not-blocked.png")),
+    ("flags-changed-by", include_bytes!("../../../assets/query-help/query-help-flags-changed-by.png")),
+    ("logic-precedence", include_bytes!("../../../assets/query-help/query-help-logic-precedence.png")),
+    ("logic-parentheses", include_bytes!("../../../assets/query-help/query-help-logic-parentheses.png")),
+    ("logic-not", include_bytes!("../../../assets/query-help/query-help-logic-not.png")),
+    ("sort-priority", include_bytes!("../../../assets/query-help/query-help-sort-priority.png")),
+    ("sort-multi", include_bytes!("../../../assets/query-help/query-help-sort-multi.png")),
+    ("epics-release", include_bytes!("../../../assets/query-help/query-help-epics-release.png")),
+    ("combo-sprint", include_bytes!("../../../assets/query-help/query-help-combo-sprint.png")),
+    ("combo-attention", include_bytes!("../../../assets/query-help/query-help-combo-attention.png")),
 ];
 
 /// Die eingebetteten PNG-Daten des Beispiels, falls es einen Screenshot gibt.

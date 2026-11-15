@@ -46,6 +46,12 @@ pub struct Finished {
 pub fn execute(conn: &Connection, req: &Request) -> Finished {
     let t = Instant::now();
     let ctx = Ctx::today_local(req.lang).with_timeout(TIMEOUT);
+    // nur für die Screenshots der Hilfe: `linkedTerminal()` wie in den Beispieldaten (nie im Release)
+    #[cfg(feature = "readme-shots")]
+    let ctx = {
+        let t = super::shot_view::terminals();
+        ctx.with_terminals(&t.iter().map(String::as_str).collect::<Vec<_>>())
+    };
     let result = run_query(conn, &ctx, req.scope, &req.jql, Page::new(PAGE_SIZE, req.page.max(0) * PAGE_SIZE));
     let refs = match &result {
         Ok(p) => load_refs_for(conn, &p.rows.iter().map(|r| r.id).collect::<Vec<_>>()),

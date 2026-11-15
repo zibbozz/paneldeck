@@ -252,3 +252,39 @@ fn every_example_count_matches_the_expected_total() {
         assert_eq!(n as usize, e.expected_keys().len(), "{}", e.id);
     }
 }
+
+/// Erzeugt für die Screenshots der Abfrage-Hilfe (`tools/query-help-shots.ps1`) je Beispiel einen frischen Datenordner
+/// `PANELDECK_QHELP_DIR/<id>/paneldeck-data` (Datenbank aus `Example::demo` mit dem heutigen Datum, Expertenmodus, englische
+/// Oberfläche, MCP-Stufe „Steuern“ für das Werkzeug `screenshot`). Vorher wird geprüft, dass die echte Suche auf diesen Daten genau
+/// `Example::expected_keys` liefert. Optional `PANELDECK_QHELP_ONLY` = kommagetrennte Beispiel-IDs.
+#[test]
+#[ignore = "erzeugt Dateien für die Screenshots; mit --ignored und PANELDECK_QHELP_DIR starten"]
+fn query_help_shot_data() {
+    let root = std::env::var("PANELDECK_QHELP_DIR").expect("PANELDECK_QHELP_DIR fehlt");
+    let only: Vec<String> = std::env::var("PANELDECK_QHELP_ONLY").unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let today = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+    let mut made = 0;
+    for e in HelpDoc::builtin().examples() {
+        if !only.is_empty() && !only.iter().any(|o| o == e.id) {
+            continue;
+        }
+        let dir = std::path::Path::new(&root).join(e.id).join("paneldeck-data");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!dir.join(crate::db::FILE).exists(), "{}: Datenordner ist nicht leer", dir.display());
+        let db = crate::db::open(&dir, &dir.join("backups")).unwrap_or_else(|e| panic!("Datenbank: {e:?}"));
+        let d = seed_demo(&db.conn, &e.demo, &today).unwrap_or_else(|err| panic!("{}: {}", e.id, err.message(Lang::En)));
+        let keys = keys_of(&db.conn, &ctx_for(&d, Lang::En), &d, &e.jql).unwrap_or_else(|err| panic!("{}: {}", e.id, err.message(Lang::En)));
+        assert_eq!(keys, e.expected_keys(), "{}: {}", e.id, e.jql);
+        db.set_meta("expert_mode", "1");
+        db.set_meta("expert_project", &d.project_id.to_string());
+        drop(db);
+        let mut settings = crate::state::Settings::default();
+        settings.language = Lang::En;
+        settings.backup_interval_hours = 0;
+        settings.mcp_level = crate::mcp::McpLevel::Control;
+        crate::state::save_json(&dir.join("settings.json"), &settings);
+        println!("Beispiel {}: {} Treffer {}", e.id, keys.len(), keys.join(","));
+        made += 1;
+    }
+    assert!(made > 0, "kein Beispiel erzeugt");
+}
