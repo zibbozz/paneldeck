@@ -33,6 +33,6 @@ Mit `--publish` wird zusätzlich das Tag gepusht und das GitHub-Release angelegt
 - `cargo test --release` – Unit-Tests und Oberflächen-Tests ohne Fenster.
 - `tools/smoke-mcp.ps1` – Ende-zu-Ende-Test der Agenten-Schnittstelle gegen eine Kopie der gebauten `paneldeck.exe` mit eigenem temporärem Datenordner.
 - `tools/update-test.ps1` – installiert eine ältere Version in einen Temp-Ordner mit Schein-Benutzerprofil und aktualisiert sie mit dem neuen Installer.
-- `tools/update-feed.sh <version> <ordner>` – legt ein lokales Schein-Release an (mit `latest.json`, ZIP, Installer und `SHA256SUMS.txt`), um das Selbst-Update mit einem Debug-Build zu testen; veröffentlicht wird nichts.
+- `tools/update-feed.sh <version> <ordner>` – legt ein lokales Schein-Release an (mit `latest.json`, ZIP, Installer und `SHA256SUMS.txt`), um das Selbst-Update mit einem Build mit dem Cargo-Feature `update-test-feed` zu testen (gestartet mit `PANELDECK_UPDATE_TEST_FEED=<ordner>`; siehe [Updates](updates.md#selbst-update-testen-entwicklung)); veröffentlicht wird nichts.
 
 Der manuelle Testplan ist `TESTPLAN.md` (Deutsch).

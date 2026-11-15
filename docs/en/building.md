@@ -33,6 +33,6 @@ Releases are built from a `release/x.y` branch with `tools/release.sh <version>`
 - `cargo test --release` – unit tests and headless UI tests.
 - `tools/smoke-mcp.ps1` – end-to-end test of the agent interface against a copy of the built `paneldeck.exe` in its own temporary data folder.
 - `tools/update-test.ps1` – installs an older version into a temporary folder with a fake user profile and updates it with the new installer.
-- `tools/update-feed.sh <version> <folder>` – creates a local fake release (with `latest.json`, ZIP, installer and `SHA256SUMS.txt`) for testing the self-update with a debug build; nothing is published.
+- `tools/update-feed.sh <version> <folder>` – creates a local fake release (with `latest.json`, ZIP, installer and `SHA256SUMS.txt`) for testing the self-update with a build that has the Cargo feature `update-test-feed` (started with `PANELDECK_UPDATE_TEST_FEED=<folder>`; see [Updates](updates.md#testing-the-self-update-developers)); nothing is published.
 
 The manual test plan is `TESTPLAN.md` (German).
