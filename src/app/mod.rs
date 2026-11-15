@@ -31,9 +31,11 @@ use std::time::{Duration, Instant};
 mod data;
 mod dialogs;
 mod dragdrop;
+mod empty_hub;
 #[cfg(test)]
 mod glyph_tests;
 mod mcp;
+mod multiwin;
 mod panels;
 mod planning_ui;
 mod settings;
@@ -261,6 +263,8 @@ enum Action {
     SplitAt(u64, Dir, bool),
     HidePane(u64),
     Focus(u64),
+    /// Zur Sitzung springen (aus einem Ticket): Terminal Hub ihres Fensters zeigen und sie aktivieren.
+    JumpTo(u64),
     NewQuick,
 }
 
@@ -306,6 +310,11 @@ struct NewOpts {
     group: Option<String>,
     /// Sitzung nur anlegen, nicht im Fenster aktivieren (Agenten-Schnittstelle: kein Fokusklau).
     quiet: bool,
+    /// Fenster der Sitzung (#110); None = das gerade gezeichnete Fenster. Für Anlagen, die erst später im Hauptbild
+    /// fertig werden (Worktree) oder von dort aus für ein anderes Fenster laufen (MCP, abgedockte Bereiche).
+    window: Option<u64>,
+    /// Projekt der Sitzung; None = aktives Projekt ihres Fensters.
+    project: Option<u64>,
 }
 
 struct Launch<'a> {
@@ -532,6 +541,8 @@ pub struct App {
     dir: PathBuf,
     last_save: Instant,
     applied_theme: String,
+    /// Fertige egui-Stile je Schlüssel von `applied_theme` (Fenster mit anderer Akzentfarbe tauschen nur den Zeiger).
+    style_cache: Vec<(String, std::sync::Arc<egui::Style>)>,
     last_title: String,
     mode: titlebar::Mode,
     db: Option<crate::db::Db>,
@@ -621,6 +632,8 @@ pub struct App {
     in_tray: bool,
     editor: Option<Editor>,
     applied_font: String,
+    /// Weitere Fenster (`multiwin.rs`, #110).
+    wins: multiwin::Wins,
 }
 
 fn home_dir() -> String {
@@ -758,6 +771,7 @@ impl App {
             dir,
             last_save: Instant::now(),
             applied_theme: String::new(),
+            style_cache: Vec::new(),
             last_title: String::new(),
             mode: titlebar::Mode::default(),
             db,
@@ -841,6 +855,7 @@ impl App {
             in_tray: false,
             editor: None,
             applied_font: String::new(),
+            wins: Default::default(),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
@@ -894,6 +909,8 @@ impl App {
                 e.meta.project = first_project;
             }
         }
+        let ppp = cc.egui_ctx.native_pixels_per_point().unwrap_or(1.0) * app.settings.ui_scale;
+        app.restore_windows(&saved.extra_windows, ppp);
         let p = app.projects.iter().find(|p| p.id == app.active_project).cloned().unwrap_or_default();
         app.load_project_view(p.layout, p.focused);
         app.detached.retain(|id| app.entries.contains_key(id));
@@ -903,9 +920,7 @@ impl App {
                 app.hide_pane(id);
             }
         }
-        if app.entries.is_empty() {
-            app.new_session(&cc.egui_ctx, NewOpts::default());
-        }
+        // Ohne wiederhergestellte Sitzungen startet Paneldeck ohne Terminal (leerer Hub mit Startknöpfen, #111).
         let tr: Vec<(u64, String)> = app.entries.iter().map(|(i, e)| (*i, e.meta.transcript.clone())).collect();
         for (i, t) in tr {
             if !t.is_empty() {
@@ -1071,7 +1086,7 @@ impl App {
     /// Layout/Fokus des aktiven Projekts übernehmen (nur gültige Sitzungen des Projekts).
     fn load_project_view(&mut self, layout: Option<Node>, focused: u64) {
         let pid = self.active_project;
-        let ok = |id: &u64, s: &App| s.entries.get(id).is_some_and(|e| e.meta.project == pid);
+        let ok = |id: &u64, s: &App| s.entries.get(id).is_some_and(|e| e.meta.project == pid && s.in_win(e));
         self.layout = layout.filter(|l| {
             let mut v = Vec::new();
             l.leaves(&mut v);
@@ -1095,7 +1110,7 @@ impl App {
     }
 
     fn project_ids(&self) -> Vec<u64> {
-        self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project).map(|(i, _)| *i).collect()
+        self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && self.in_win(e)).map(|(i, _)| *i).collect()
     }
 
     /// Neue Profil-ID, die auch von keiner Sitzung, keinem Projekt/Ordner und keiner Vorlage mehr
@@ -1133,6 +1148,9 @@ impl App {
     }
 
     fn sidebar_match(&self, e: &Entry) -> bool {
+        if !self.in_win(e) {
+            return false;
+        }
         let f = self.filter.trim().to_lowercase();
         if f.is_empty() {
             return e.meta.project == self.active_project;
@@ -1328,7 +1346,8 @@ impl App {
         let quiet = o.quiet;
         let id = self.next_id;
         self.next_id += 1;
-        let pid = o.profile.unwrap_or_else(|| self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0));
+        let (window, project) = self.session_home(o.window, o.project);
+        let pid = o.profile.unwrap_or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0));
         let prof = self.profile(pid).cloned();
         let shell_id = match &prof {
             Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
@@ -1347,8 +1366,8 @@ impl App {
             name,
             custom_name: custom,
             shell_id,
-            cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.folder.clone())).unwrap_or_default(),
-            project: self.active_project,
+            cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.folder.clone())).unwrap_or_default(),
+            project,
             color: prof.as_ref().and_then(|p| p.color).unwrap_or(PALETTE[(id as usize) % PALETTE.len()]),
             profile: pid,
             claude: o.claude,
@@ -1357,6 +1376,7 @@ impl App {
             claude_started: o.resume_id.is_some(),
             transcript: o.transcript.clone(),
             group: o.group.as_deref().map(state::clean_folder_path).unwrap_or_default(),
+            window,
             ..SessionMeta::default()
         };
         if !meta.group.is_empty() {
@@ -1373,7 +1393,12 @@ impl App {
         );
         self.entries.insert(id, entry);
         if !quiet {
-            self.activate(id);
+            if window == self.wins.cur {
+                self.activate(id);
+            } else {
+                // Anderes Fenster: dort zeigen (es kommt nach vorn), nicht im gerade gezeichneten Layout.
+                self.route_to(ctx, window, Action::Activate(id));
+            }
         }
         id
     }
@@ -1435,7 +1460,7 @@ impl App {
 
     /// Sitzungen des aktiven Projekts in diesem Ordner (inkl. Unterordner), nach Id sortiert.
     fn folder_sessions(&self, path: &str) -> Vec<u64> {
-        self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path)).map(|(i, _)| *i).collect()
+        self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && self.in_win(e) && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path)).map(|(i, _)| *i).collect()
     }
 
     fn set_group(&mut self, id: u64, g: String) {
@@ -1497,6 +1522,8 @@ impl App {
     fn split_at(&mut self, ctx: &egui::Context, target: u64, dir: Dir, before: bool) {
         let Some(src) = self.entries.get(&target) else { return };
         let (shell, cwd) = (src.meta.shell_id.clone(), src.cwd_now());
+        // Fenster und Projekt der geteilten Sitzung (ein abgedockter Bereich eines weiteren Fensters wird im Hauptbild gezeichnet).
+        let (window, project) = (src.meta.window, src.meta.project);
         let id = self.next_id;
         self.next_id += 1;
         let label = self.shell_by_id(&shell).map(|s| s.label).unwrap_or_else(|| "Shell".into());
@@ -1508,13 +1535,17 @@ impl App {
             cwd,
             color: PALETTE[(id as usize) % PALETTE.len()],
             group: self.entries[&target].meta.group.clone(),
-            project: self.active_project,
+            project,
             profile: self.entries[&target].meta.profile,
+            window,
             ..SessionMeta::default()
         };
         let mut entry = Entry::new(meta);
         self.spawn_into(ctx, &mut entry, Launch { restore: false, restart: false, continue_last: false, prompt: None, resume_id: None });
         self.entries.insert(id, entry);
+        if window != self.wins.cur {
+            return; // steht in der Seitenleiste seines Fensters; das hier gezeichnete Layout bleibt unberührt
+        }
         if let Some(l) = &mut self.layout {
             l.split_leaf_at(target, id, dir, before);
         }
@@ -1580,6 +1611,7 @@ impl App {
             active_project: self.active_project,
             detached: self.detached.clone(),
             composer_draft: self.composer_text.clone(),
+            extra_windows: self.saved_windows(),
         };
         state::save_json(&self.dir.join("state.json"), &saved);
         for (id, e) in &self.entries {
@@ -1587,6 +1619,29 @@ impl App {
                 let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
             }
         }
+    }
+
+    /// Stil (Thema, Deckkraft, Animationen, Akzentfarbe) auf den Kontext anwenden. Der egui-Stil gilt für alle Fenster
+    /// gemeinsam; jedes Fenster setzt vor dem Zeichnen seinen eigenen (Akzent = Projektfarbe seiner Todo-Ansicht, #110).
+    /// Fertige Stile liegen im Zwischenspeicher, damit der Wechsel zwischen Fenstern `style::apply` nicht jedes Bild neu rechnet.
+    fn ensure_style(&mut self, ctx: &egui::Context) {
+        let theme = self.theme();
+        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
+        if self.applied_theme == key {
+            return;
+        }
+        style::set_animations(self.settings.animations);
+        match self.style_cache.iter().find(|(k, _)| *k == key) {
+            Some((_, s)) => ctx.set_style(s.clone()),
+            None => {
+                style::apply(ctx, &theme, self.settings.opacity);
+                if self.style_cache.len() >= 16 {
+                    self.style_cache.remove(0);
+                }
+                self.style_cache.push((key.clone(), ctx.style()));
+            }
+        }
+        self.applied_theme = key;
     }
 
     fn theme(&self) -> Theme {
@@ -1719,7 +1774,7 @@ impl App {
         }
         {
             let n = self.layout.as_ref().map(|l| { let mut v = Vec::new(); l.leaves(&mut v); v.len() }).unwrap_or(0);
-            egui::TopBottomPanel::top("bcbar")
+            egui::TopBottomPanel::top(style::salted(Id::new("bcbar")))
                 .frame(egui::Frame::NONE.fill(Color32::from_rgb(0x8a, 0x4b, 0x2f)).inner_margin(egui::Margin::symmetric(10, 4)))
                 .show_animated(ctx, self.broadcast, |ui| {
                     ui.horizontal(|ui| {
@@ -1744,40 +1799,9 @@ impl App {
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 let Some(mut layout) = self.layout.take() else {
-                    let first_run = self.entries.is_empty();
-                    let claude_mode = self.settings.claude_mode;
-                    ui.scope_builder(UiBuilder::new().max_rect(Rect::from_center_size(rect.center(), Vec2::new(420.0, 300.0))), |ui| {
-                        ui.vertical_centered(|ui| {
-                            let (r, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
-                            ui.painter().rect_filled(r, 14.0, style::ACCENT.gamma_multiply(0.18));
-                            style::paint_icon(ui.painter(), SIcon::Spark, r.center(), style::ACCENT);
-                            ui.add_space(S3);
-                            ui.heading(if first_run { lang.t("Willkommen bei Paneldeck", "Welcome to Paneldeck") } else { lang.t("Keine Sitzung in diesem Projekt", "No session in this project") });
-                            ui.add_space(S1);
-                            ui.label(RichText::new(lang.t("Starte ein Terminal oder eine Claude-Sitzung – alles an einem Ort.", "Start a terminal or a Claude session – all in one place.")).color(style::dim(ui)));
-                            ui.add_space(S3);
-                            ui.horizontal(|ui| {
-                                ui.add_space((ui.available_width() - if claude_mode { 300.0 } else { 150.0 }) / 2.0);
-                                if ui.add(egui::Button::new(RichText::new(lang.t("Neue Sitzung", "New session")).strong()).fill(style::ACCENT.gamma_multiply(0.85)).min_size(Vec2::new(140.0, 32.0))).clicked() {
-                                    actions.push(Action::NewQuick);
-                                }
-                                if claude_mode && ui.add(egui::Button::new(lang.t("Claude starten …", "Start Claude …")).min_size(Vec2::new(140.0, 32.0))).clicked() {
-                                    actions.push(Action::NewDialog(true));
-                                }
-                            });
-                            ui.add_space(S3 * 1.5);
-                            let hint = |ui: &mut Ui, keys: &str, what: &str| {
-                                ui.horizontal(|ui| {
-                                    ui.add_space((ui.available_width() - 330.0).max(0.0) / 2.0);
-                                    ui.label(RichText::new(keys).monospace().color(style::dim(ui)));
-                                    ui.label(RichText::new(what).color(style::dim(ui)));
-                                });
-                            };
-                            hint(ui, "Strg+Umschalt+P", lang.t("Befehle & Suche", "Commands & search"));
-                            hint(ui, "Strg+Umschalt+T", lang.t("Neue Sitzung", "New session"));
-                            hint(ui, "Strg+Umschalt+D/E", lang.t("Bereich teilen", "Split pane"));
-                        });
-                    });
+                    let kind = self.empty_heading();
+                    let hints = self.empty_hints();
+                    empty_hub::empty_state(ui, rect, lang, self.settings.claude_mode, kind, &hints, actions);
                     return;
                 };
                 let mut cx = PaneCx {
@@ -1832,7 +1856,7 @@ impl App {
         if scan_now {
             self.last_transcript_scan = Instant::now();
         }
-        let mut fallback_done: Vec<String> = Vec::new();
+        let mut fallback_done: Vec<(u64, String)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             self.git.set_dir(*id, PathBuf::from(e.cwd_now()));
             // Transkript über die Konversations-ID finden, falls noch nicht bekannt.
@@ -1864,7 +1888,7 @@ impl App {
                     let old = e.status;
                     e.status = if recent { ClaudeStatus::Working } else { ClaudeStatus::Idle };
                     if e.queue_tick(old, e.status) {
-                        fallback_done.push(e.display_name());
+                        fallback_done.push((*id, e.display_name()));
                     }
                 }
             }
@@ -1878,7 +1902,7 @@ impl App {
         let projects: Vec<(u64, String, [u8; 3], usize)> = self
             .projects
             .iter()
-            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id).count()))
+            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count()))
             .collect();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
@@ -2000,11 +2024,11 @@ impl App {
 
     /// Ordner (OSC) und beendete Befehle der Shell-Integration auswerten.
     fn poll_shell(&mut self, ctx: &egui::Context) {
-        let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        // Angesehen ist die fokussierte Sitzung des Fensters im Vordergrund (auch eines weiteren Fensters).
+        let (window_focused, focused_id) = self.seen_focus();
         let threshold = self.settings.cmd_notify_secs as u64 * 1000;
         let lang = self.settings.language;
-        let focused_id = self.focused;
-        let mut toasts: Vec<(String, CmdDone)> = Vec::new();
+        let mut toasts: Vec<(u64, String, CmdDone)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else { continue };
             let (cwd, done) = {
@@ -2017,11 +2041,11 @@ impl App {
             for d in done {
                 if threshold > 0 && d.dur_ms.unwrap_or(0) >= threshold && (!window_focused || *id != focused_id) {
                     e.attention = true;
-                    toasts.push((e.display_name(), d));
+                    toasts.push((*id, e.display_name(), d));
                 }
             }
         }
-        for (name, d) in toasts {
+        for (sid, name, d) in toasts {
             let secs = d.dur_ms.unwrap_or(0) / 1000;
             let dur = if secs >= 60 { format!("{} min {} s", secs / 60, secs % 60) } else { format!("{secs} s") };
             let ok = d.exit.unwrap_or(0) == 0;
@@ -2036,7 +2060,7 @@ impl App {
                     notify::toast(&name, &body, self.settings.notify_sound);
                 }
                 if self.settings.notify_flash {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                    ctx.send_viewport_cmd_to(self.attention_viewport(sid), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
             } else {
                 self.notify_text(format!("{name}: {body}"));
@@ -2119,13 +2143,18 @@ impl App {
         }
     }
 
-    fn poll_history(&mut self) {
+    /// Ergebnis der Verlaufssuche des gerade gezeichneten Fensters abholen (jedes Fenster hat seine eigene Suche).
+    fn poll_history_hits(&mut self) {
         if let Some(rx) = &self.history_hits_rx {
             if let Ok(h) = rx.try_recv() {
                 self.history_hits = Some(h);
                 self.history_hits_rx = None;
             }
         }
+    }
+
+    fn poll_history(&mut self) {
+        self.poll_history_hits();
         if let Some(rx) = &self.history_rx {
             if let Ok(items) = rx.try_recv() {
                 self.history = items;
@@ -2135,18 +2164,18 @@ impl App {
     }
 
     fn poll_hooks(&mut self, ctx: &egui::Context) {
-        let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let (window_focused, seen_id) = self.seen_focus();
         // Ereignisse in der angesehenen Sitzung gelten als gesehen.
         if window_focused {
-            if let Some(e) = self.entries.get_mut(&self.focused) {
+            if let Some(e) = self.entries.get_mut(&seen_id) {
                 e.attention = false;
             }
         }
         let msgs: Vec<HookMsg> = self.hook_server.as_ref().map(|s| s.rx.try_iter().collect()).unwrap_or_default();
         let lang = self.settings.language;
-        let mut queue_done: Vec<String> = Vec::new();
+        let mut queue_done: Vec<(u64, String)> = Vec::new();
         for m in msgs {
-            let focused_id = self.focused;
+            let focused_id = seen_id;
             let Some(e) = self.entries.get_mut(&m.session) else { continue };
             let old = e.status;
             e.hook_seen = true;
@@ -2179,7 +2208,7 @@ impl App {
                 e.perm_since = Some(std::time::Instant::now());
             }
             if e.queue_tick(old, new) {
-                queue_done.push(e.display_name());
+                queue_done.push((m.session, e.display_name()));
             }
             if new != old {
                 e.status_msg = m.message.clone().unwrap_or_default();
@@ -2205,17 +2234,17 @@ impl App {
                     notify::toast(&name, &body, self.settings.notify_sound);
                 }
                 if self.settings.notify_flash {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                    ctx.send_viewport_cmd_to(self.attention_viewport(m.session), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
             }
         }
         self.queue_finished(ctx, queue_done);
     }
 
-    fn queue_finished(&mut self, ctx: &egui::Context, names: Vec<String>) {
+    fn queue_finished(&mut self, ctx: &egui::Context, names: Vec<(u64, String)>) {
         let lang = self.settings.language;
-        let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        for name in names {
+        let window_focused = self.seen_focus().0;
+        for (sid, name) in names {
             let body = lang.t("Warteschlange abgearbeitet", "Queue finished");
             if window_focused {
                 self.notify_text(format!("{name}: {body}"));
@@ -2224,13 +2253,17 @@ impl App {
                     notify::toast(&name, body, self.settings.notify_sound);
                 }
                 if self.settings.notify_flash {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                    ctx.send_viewport_cmd_to(self.attention_viewport(sid), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
             }
         }
     }
 
     fn apply(&mut self, ctx: &egui::Context, a: Action) {
+        // Sitzung eines anderen Fensters: dort ausführen (das Fenster kommt nach vorn).
+        if self.route(ctx, &a) {
+            return;
+        }
         match a {
             Action::ToggleFiles => self.files_open = !self.files_open,
             Action::Cycle(d) => self.cycle(d),
@@ -2475,6 +2508,12 @@ impl App {
                 }
                 self.activate(id)
             }
+            Action::JumpTo(id) => {
+                if self.entries.contains_key(&id) {
+                    self.set_mode(titlebar::Mode::Terminals);
+                    self.apply(ctx, Action::Activate(id));
+                }
+            }
             Action::StartRename(id) => {
                 if let Some(e) = self.entries.get(&id) {
                     self.rename = Some((id, e.display_name()));
@@ -2499,7 +2538,7 @@ impl App {
                 let mut ids: Vec<u64> = self
                     .entries
                     .iter()
-                    .filter(|(_, e)| e.meta.project == pid && folder.as_ref().is_none_or(|f| !e.meta.group.is_empty() && state::folder_within(&e.meta.group, f)))
+                    .filter(|(_, e)| e.meta.project == pid && self.in_win(e) && folder.as_ref().is_none_or(|f| !e.meta.group.is_empty() && state::folder_within(&e.meta.group, f)))
                     .map(|(i, _)| *i)
                     .collect();
                 ids.sort();
@@ -2664,6 +2703,8 @@ impl App {
                         claude: src.meta.claude,
                         claude_args: src.meta.claude_args.clone(),
                         profile: Some(src.meta.profile),
+                        window: Some(src.meta.window),
+                        project: Some(src.meta.project),
                         ..NewOpts::default()
                     };
                     let new = self.new_session(ctx, o);
@@ -2730,13 +2771,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_accent();
-        let theme = self.theme();
-        let key = format!("{}|{}|{}|{:?}", theme.name, theme.bg.a(), self.settings.animations, style::accent());
-        if self.applied_theme != key {
-            style::set_animations(self.settings.animations);
-            style::apply(ctx, &theme, self.settings.opacity);
-            self.applied_theme = key;
-        }
+        self.ensure_style(ctx);
         self.apply_font(ctx);
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 0.001 {
@@ -2744,6 +2779,7 @@ impl eframe::App for App {
         }
         #[cfg(feature = "readme-shots")]
         self.dev_shot_mode();
+        self.track_focus(ctx);
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
         crate::usage::set_prices(self.settings.prices.clone());
@@ -2757,7 +2793,7 @@ impl eframe::App for App {
         self.poll_history();
         self.check_budget(ctx);
         self.handle_drops(ctx);
-        let mut actions: Vec<Action> = Vec::new();
+        let mut actions: Vec<Action> = self.main_frame_begin(ctx);
         self.titlebar(ctx);
         self.backup_tick(ctx);
         self.window_edges(ctx);
@@ -2771,24 +2807,16 @@ impl eframe::App for App {
         } else {
             self.tasks_view(ctx);
         }
-        if let Some((text, t0)) = &self.notice {
-            if t0.elapsed() > Duration::from_secs(5) {
-                self.notice = None;
-            } else {
-                let text = text.clone();
-                egui::Area::new(Id::new("notice")).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -18.0)).order(egui::Order::Tooltip).show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(10)).show(ui, |ui| {
-                        ui.label(text);
-                    });
-                });
-                ctx.request_repaint_after(Duration::from_millis(500));
-            }
+        if self.main_overlay() {
+            self.notice_ui(ctx);
+            self.toasts_ui(ctx);
         }
-        self.toasts_ui(ctx);
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
         self.dialogs(ctx, &mut actions);
-        self.tlinks_picker_ui(ctx);
+        if self.picker_here() {
+            self.tlinks_picker_ui(ctx);
+        }
         self.restore_dialog(ctx);
         for a in actions {
             self.apply(ctx, a);
@@ -2805,6 +2833,8 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+        // Weitere Fenster (Strg+Klick auf einen Reiter) nach dem Hauptfenster zeichnen.
+        self.hub_windows(ctx);
 
         if self.last_save.elapsed() > Duration::from_secs(60) {
             self.save_all();

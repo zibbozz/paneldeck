@@ -180,6 +180,9 @@ impl App {
                             });
                             let mut opts = opts;
                             opts.cwd = Some(path.to_string_lossy().to_string());
+                            // Fertig wird die Anlage im Hauptbild: Fenster und Projekt des Dialogs mitnehmen (#110).
+                            opts.window = Some(self.wins.cur);
+                            opts.project = Some(self.active_project);
                             self.pending_wt = Some(PendingWt {
                                 rx,
                                 opts,

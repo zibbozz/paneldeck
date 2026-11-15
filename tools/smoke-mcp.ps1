@@ -43,7 +43,7 @@ function Check($name, [bool]$ok, $detail = '') {
   else { $script:fail++; Write-Host "  FAIL  $name  $detail" -ForegroundColor Red }
   $script:lastOk = $ok
 }
-function Set-Level($level) {
+function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   Stop-Hub
   $f = "$data\settings.json"
   New-Item -ItemType Directory -Force "$data" | Out-Null
@@ -52,7 +52,16 @@ function Set-Level($level) {
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
   $style = if ($Visible) { 'Normal' } else { 'Minimized' }
-  $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
+  # Paneldeck startet ohne Terminal (#111); sonst eine Sitzung des Nutzers per --open anlegen (wie ein Start aus dem Explorer).
+  if ($Empty) {
+    Remove-Item -LiteralPath "$data\state.json" -ErrorAction SilentlyContinue
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
+  } elseif ($Tray) {
+    # Vorbereiteten state.json behalten; mit --tray bleiben auch wiederhergestellte weitere Fenster verborgen (#110).
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--tray'
+  } else {
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--open', "`"$proj`""
+  }
   $t0 = Get-Date
   while (-not (Test-Path "$data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
   Start-Sleep 2
@@ -101,12 +110,15 @@ try {
   Check 'Stufe Aus: Aufruf verweigert' ((Code (Tool 'list_sessions')) -eq 'mcp_disabled')
 
   Write-Host "== Stufe: Nur lesen" -ForegroundColor Cyan
+  Set-Level 'Read' -Empty
+  $ls0 = Tool 'list_sessions'; Check 'Start ohne Terminal (#111): keine Sitzung' (-not $ls0.err -and @($ls0.data.sessions).Count -eq 0) $ls0.text
   Set-Level 'Read'
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   $l = Rpc 'tools/list'; $names = @($l.result.tools | ForEach-Object name)
   Check 'tools/list nur Lese-Werkzeuge' ($names -contains 'list_sessions' -and $names -contains 'read_terminal' -and $names -notcontains 'send_text')
   $ls = Tool 'list_sessions'; Check 'list_sessions' (-not $ls.err -and $ls.data.sessions.Count -ge 1)
   $sid = $ls.data.sessions[0].id
+  Check 'list_sessions: Feld window (0 = Hauptfenster)' ($ls.data.sessions[0].PSObject.Properties.Name -contains 'window' -and $ls.data.sessions[0].window -eq 0)
   $rt = Tool 'read_terminal' @{ session = $sid; lines = 5 }; Check 'read_terminal' (-not $rt.err -and $null -ne $rt.data.text)
   Check 'get_usage' (-not (Tool 'get_usage').err)
   Check 'search_history' (-not (Tool 'search_history' @{ query = 'smoke-test-gibt-es-nicht-xyz' }).err)
@@ -540,6 +552,28 @@ c.close()
   Start-Sleep -Milliseconds 800
   $after = if (Test-Path "$rs\settings.json") { [IO.File]::ReadAllText("$rs\settings.json") } else { '' }
   Check '--reset-settings: keine alte Stufe in settings.json' ($after -notmatch '"mcp_level":\s*"Read"') $after
+
+  Write-Host "== Weitere Fenster (#110): Sitzung in Fenster 2, Kind eines Agenten dort" -ForegroundColor Cyan
+  Stop-Hub
+  $st = [ordered]@{
+    sessions = @([ordered]@{ id = 900; name = 'Fenster2-Agent'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1; window = 2 })
+    next_id = 901; projects = @([ordered]@{ id = 1; name = 'Standard' }); active_project = 1
+    extra_windows = @([ordered]@{ id = 2; tab = 'terminals'; project = 1; focused = 900 })
+  }
+  [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+  Set-Level 'Control' -Tray
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 4
+  $w2 = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq 900 })
+  Check 'list_sessions: wiederhergestellte Sitzung in Fenster 2 (window = 2)' ($w2.window -eq 2) ($w2 | ConvertTo-Json -Compress)
+  $A = 900
+  $kid2 = InA 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Kind-F2' }; $K2 = $kid2.structuredContent.id
+  Check 'create_session aus einer Sitzung in Fenster 2 angelegt' ($K2 -gt 0 -and $kid2.structuredContent.parent -eq 900) ($kid2 | ConvertTo-Json -Compress -Depth 5)
+  $k2 = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $K2 })
+  Check 'Kind-Sitzung liegt im Fenster des Eltern-Agenten (window = 2)' ($k2.window -eq 2) ($k2 | ConvertTo-Json -Compress)
+  $kx = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Von-aussen-F' }
+  Check 'create_session von aussen: Hauptfenster (window = 0)' (((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $kx.data.id }).window -eq 0)
+  [void](InA 'close_session' @{ session = $K2 }); [void](Tool 'close_session' @{ session = $kx.data.id })
 } finally {
   Stop-Hub
   foreach ($h in $script:extra) { if ($h -and -not $h.HasExited) { $h.Kill() } }

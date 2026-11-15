@@ -12,7 +12,7 @@ impl App {
             self.tree_stamp = Instant::now();
         }
         let hidden = self.files_hidden;
-        egui::SidePanel::right("files").resizable(true).default_width(270.0).width_range(180.0..=520.0).show_animated(ctx, self.files_open, |ui| {
+        egui::SidePanel::right(style::salted(Id::new("files"))).resizable(true).default_width(270.0).width_range(180.0..=520.0).show_animated(ctx, self.files_open, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.strong(lang.t("Dateien", "Files"));

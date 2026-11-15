@@ -174,7 +174,7 @@ impl App {
 
     pub(super) fn tree_ui(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let folders: Vec<state::Folder> = self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.folders.clone()).unwrap_or_default();
-        if folders.is_empty() && !self.entries.values().any(|e| e.meta.project == self.active_project) {
+        if folders.is_empty() && !self.entries.values().any(|e| e.meta.project == self.active_project && self.in_win(e)) {
             ui.add_space(S3);
             ui.label(RichText::new(self.settings.language.t("Noch keine Sitzungen in diesem Projekt.", "No sessions in this project yet.")).color(style::dim(ui)));
             return;
@@ -211,7 +211,7 @@ impl App {
             self.folder_rects.push((f.path.clone(), full));
             self.tree_geo.full.insert(f.path.clone(), full);
         }
-        let mut ids: Vec<u64> = self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && e.meta.group == parent).map(|(i, _)| *i).collect();
+        let mut ids: Vec<u64> = self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && self.in_win(e) && e.meta.group == parent).map(|(i, _)| *i).collect();
         ids.sort();
         for id in ids {
             self.session_row(ui, id, actions);

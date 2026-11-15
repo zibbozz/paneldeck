@@ -179,6 +179,8 @@ impl App {
             });
         if go {
             match backup::schedule_restore(&self.dir, &path) {
+                // Speichern geht nur mit dem Hauptfenster in den Feldern: aus einem weiteren Fenster erst nach dessen Bild (#110).
+                Ok(()) if self.wins.cur != 0 => self.wins.exit_after_save = true,
                 Ok(()) => {
                     self.save_all();
                     std::process::exit(0);

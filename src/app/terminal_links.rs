@@ -531,10 +531,13 @@ impl App {
     /// Zur Sitzung springen (aus der Ticket-Ansicht): schaltet auf den Terminal Hub und aktiviert die Sitzung.
     #[allow(dead_code)] // API für die Ticket-Ansicht
     pub(super) fn open_session_from_ticket(&mut self, ctx: &egui::Context, session: u64) {
-        if self.entries.contains_key(&session) {
-            self.set_mode(titlebar::Mode::Terminals);
-            self.apply(ctx, Action::Activate(session));
-        }
+        // `JumpTo` landet im Fenster der Sitzung (auch in einem weiteren Fenster, #110).
+        self.apply(ctx, Action::JumpTo(session));
+    }
+
+    /// Sitzung, für die die Mini-Suche „Ticket verknüpfen“ offen ist (sie erscheint im Fenster dieser Sitzung).
+    pub(super) fn tlinks_picker_session(&self) -> Option<u64> {
+        self.tlinks.picker.as_ref().map(|p| p.session)
     }
 
     /// Mini-Suche öffnen (nur, wenn die Funktion sichtbar ist).
