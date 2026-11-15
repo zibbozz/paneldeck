@@ -24,6 +24,9 @@ if ($existing) { Write-Host "Abbruch: Paneldeck ist auf diesem Rechner installie
 
 $tmp = Join-Path $env:TEMP ('hub-update-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $prof = Join-Path $tmp 'profile'; $inst = Join-Path $tmp 'inst'; $data = Join-Path $inst 'paneldeck-data'
+# Autostart-Werte von Instanzen mit Profil (`Paneldeck (<profil>)`) – eindeutige Testnamen, kollidieren nie mit echten.
+$tid = Split-Path -Leaf $tmp
+$p1Name = "Paneldeck (updtest-$tid)"; $foreignName = "Paneldeck (updtest-$tid-fremd)"
 New-Item -ItemType Directory -Force $prof, (Join-Path $prof 'Desktop'), (Join-Path $prof 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs') | Out-Null
 $realDesktopLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Paneldeck.lnk'
 $realStart = Join-Path ([Environment]::GetFolderPath('Programs')) 'Paneldeck'
@@ -119,6 +122,32 @@ try {
   $env:USERPROFILE = $oldProfile
   $t0 = Get-Date; while ((Test-Path "$inst\paneldeck.exe.old") -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 300 }
   Check 'paneldeck.exe.old ist nach dem Start weg' (-not (Test-Path "$inst\paneldeck.exe.old"))
+
+  Write-Host '== Deinstallation: Instanz-Autostart und eigene MCP-Einträge entfernen, fremde behalten'
+  Stop-Process -Id $hub2.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800
+  Remove-Item $data -Recurse -Force -ErrorAction SilentlyContinue   # sonst fragt der Deinstaller nach den Daten
+  $p1Val = '"' + $inst + '\paneldeck.exe" --profile p1 --tray'
+  $foreignVal = '"' + $tmp + '\other\paneldeck.exe" --profile p1 --tray'
+  New-ItemProperty -Path $runKey -Name $p1Name -Value $p1Val -PropertyType String -Force | Out-Null
+  New-ItemProperty -Path $runKey -Name $foreignName -Value $foreignVal -PropertyType String -Force | Out-Null
+  $claudeJson = Join-Path $prof '.claude.json'
+  $cj = @{ numStartups = 1; mcpServers = @{ 'paneldeck' = @{ command = "$inst\paneldeck.exe"; args = @('mcp') }; 'paneldeck-p1' = @{ command = "$inst\paneldeck.exe"; args = @('mcp', '--profile', 'p1') }; 'paneldeck-other' = @{ command = "$tmp\other\paneldeck.exe"; args = @('mcp') } } }
+  [IO.File]::WriteAllText($claudeJson, ($cj | ConvertTo-Json -Depth 6), $u8)
+  # Ohne echtes `claude` im PATH und ohne CLAUDE_CONFIG_DIR: sonst könnte `claude mcp remove` die echte Konfiguration ändern.
+  # Der Deinstaller nimmt dann den Ersatzweg (Einträge direkt aus der Schein-.claude.json entfernen).
+  $oldPath = $env:PATH; $oldCfg = $env:CLAUDE_CONFIG_DIR
+  $env:USERPROFILE = $prof; $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"; Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+  try { $u = Start-Process "$inst\Uninstall.exe" -ArgumentList '/S', "_?=$inst" -PassThru; $uok = $u.WaitForExit(120000); if (-not $uok) { $u.Kill() } }
+  finally { $env:USERPROFILE = $oldProfile; $env:PATH = $oldPath; if ($oldCfg) { $env:CLAUDE_CONFIG_DIR = $oldCfg } }
+  Check 'Deinstaller endet' $uok
+  Check 'Instanz-Autostart dieser exe entfernt' (-not (Reg $runKey $p1Name))
+  Check 'Instanz-Autostart einer fremden exe bleibt' ((Reg $runKey $foreignName) -eq $foreignVal)
+  Check 'Standard-Autostart entfernt' (-not (Reg $runKey 'Paneldeck'))
+  Check 'Kontextmenü entfernt' (-not (@($regKeys | Where-Object { $_ -like '*Classes*' -and (Test-Path $_) }).Count))
+  $cjAfter = (Get-Content -Raw $claudeJson) | ConvertFrom-Json
+  $names = @($cjAfter.mcpServers.PSObject.Properties.Name)
+  Check 'MCP: paneldeck und paneldeck-p1 (diese exe) entfernt' (-not ($names -contains 'paneldeck') -and -not ($names -contains 'paneldeck-p1')) ($names -join ',')
+  Check 'MCP: fremder Eintrag paneldeck-other bleibt' ($names -contains 'paneldeck-other') ($names -join ',')
 }
 finally {
   $env:USERPROFILE = $oldProfile
@@ -126,8 +155,9 @@ finally {
   Start-Sleep -Milliseconds 700
   foreach ($k in $regKeys) { Remove-Item $k -Recurse -Force -ErrorAction SilentlyContinue }
   Remove-ItemProperty -Path $runKey -Name Paneldeck -ErrorAction SilentlyContinue
+  foreach ($n in $p1Name, $foreignName) { Remove-ItemProperty -Path $runKey -Name $n -ErrorAction SilentlyContinue }
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  Check 'Aufgeräumt: kein Registry-Rest' (-not (@($regKeys | Where-Object { Test-Path $_ }).Count) -and -not (Get-ItemProperty $runKey -Name Paneldeck -ErrorAction SilentlyContinue))
+  Check 'Aufgeräumt: kein Registry-Rest' (-not (@($regKeys | Where-Object { Test-Path $_ }).Count) -and -not (Get-ItemProperty $runKey -Name Paneldeck, $p1Name, $foreignName -ErrorAction SilentlyContinue))
   Check 'Echter Desktop/Startmenü unberührt' (((Test-Path $realDesktopLnk) -eq $beforeDesktop) -and ((Test-Path $realStart) -eq $beforeStart))
   Check 'Temp-Ordner entfernt' (-not (Test-Path $tmp))
 }
