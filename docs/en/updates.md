@@ -37,7 +37,7 @@ A copy counts as *installed* when the installer's uninstall entry points to exac
 - Releases **without** `SHA256SUMS.txt` (2.0.0 and older) are only announced, never installed automatically.
 - Downloads only go over HTTPS to a fixed list of GitHub hosts (`api.github.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`; redirects only between them, at most 5) and only for this repository. A release file may be at most 64 MiB.
 - The revocation status of the server certificate is checked. If the certificate has been revoked, or the revocation check cannot be done (e.g. the revocation server is unreachable because of a firewall or proxy), nothing is downloaded.
-- Without code signing (see the [code signing policy](../../README.md#code-signing-policy)) this protects against corrupted or incomplete downloads, **not** against a compromised GitHub account.
+- Without code signing (see the [note in the README](../../README.md#note-the-program-is-not-yet-code-signed)) this protects against corrupted or incomplete downloads, **not** against a compromised GitHub account.
 
 You can check a manually downloaded file yourself, e.g. in PowerShell: `Get-FileHash .\Paneldeck-Setup-2.1.0.exe` and compare with the line in `SHA256SUMS.txt`; in Git Bash: `sha256sum -c SHA256SUMS.txt`.
 

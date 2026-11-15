@@ -25,13 +25,11 @@ Paneldeck arbeitet **offline**: Es meldet sich nur bei GitHub, wenn du selbst na
 
 ## Download
 Paneldeck gibt es nur über **GitHub Releases**: https://github.com/zibbozz/paneldeck/releases – je Release ein Installer (`Paneldeck-Setup-<Version>.exe`), ein portables ZIP (`paneldeck-<Version>-windows-x64.zip`) und ab 2.1.0 `SHA256SUMS.txt` mit den Prüfsummen beider Dateien, alles aus diesem Repository gebaut.
-Code-Signatur: Die Releases sind derzeit **nicht signiert**. Paneldeck will die kostenlose Code-Signatur für Open-Source-Projekte bei der SignPath Foundation beantragen; siehe [Richtlinie zur Code-Signatur](#richtlinie-zur-code-signatur-code-signing-policy).
 
 ### Hinweis: Programm ist (noch) nicht signiert
 Installer und `paneldeck.exe` sind **nicht code-signiert**. Ein Zertifikat kostet Geld, und Paneldeck soll ein kostenloses Hobbyprojekt bleiben. Deshalb gilt bis auf Weiteres:
 - Beim ersten Start zeigt **Windows SmartScreen** evtl. „Der Computer wurde durch Windows geschützt“. Auf **„Weitere Informationen“ → „Trotzdem ausführen“** klicken.
 - Manche Virenscanner (auch Microsoft Defender) schlagen bei neuen, unsignierten Programmen mit Tray-Symbol und Autostart gelegentlich fälschlich an. Der Quelltext ist offen einsehbar, und du kannst Paneldeck selbst bauen (siehe [Bauen](docs/de/building.md)); siehe auch [Fehlersuche](docs/de/troubleshooting.md#fehlalarme-von-virenscannern).
-- **Geplant:** Paneldeck will die kostenlose Code-Signatur für Open-Source-Projekte bei der SignPath Foundation beantragen (siehe [Richtlinie zur Code-Signatur](#richtlinie-zur-code-signatur-code-signing-policy)). Sobald die Releases signiert sind, steht es hier und im Changelog.
 
 ## Erste Schritte
 1. **Installer** `Paneldeck-Setup-<Version>.exe` ausführen – oder das **portable ZIP** entpacken und `paneldeck.exe` starten.
@@ -58,13 +56,6 @@ Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en
 - [Bauen](docs/de/building.md) – aus dem Quelltext bauen, Release-Dateien
 
 Den Changelog gibt es auf Deutsch ([`Changelog.de.md`](Changelog.de.md)) und Englisch ([`Changelog.md`](Changelog.md)); die Entwickler-Notizen (`CLAUDE.md`, `TESTPLAN.md`) sind auf Deutsch.
-
-## Richtlinie zur Code-Signatur (Code signing policy)
-- **Stand:** Die Releases sind derzeit **nicht signiert**. Paneldeck will die kostenlose Code-Signatur bei der [SignPath Foundation](https://signpath.org) beantragen; bisher wurde nichts von ihr signiert (siehe [Hinweis oben](#hinweis-programm-ist-noch-nicht-signiert)). Wird ein Antrag angenommen, steht es hier.
-- **Was signiert würde:** nur die Release-Dateien, die der GitHub-Actions-Workflow `.github/workflows/release-build.yml` aus diesem Repository baut (Installer `Paneldeck-Setup-<Version>.exe` und `paneldeck.exe` im portablen ZIP). Sonst wird nichts mit diesem Zertifikat signiert.
-- **Committer und Reviewer:** [zibbozz](https://github.com/zibbozz) (Eigentümer des Repositorys). Änderungen anderer Personen werden nur nach Prüfung durch einen Committer übernommen.
-- **Freigabe (Approver):** [zibbozz](https://github.com/zibbozz). Jede Signatur würde einzeln von Hand freigegeben.
-- **Datenschutz:** siehe [Datenschutz](#datenschutz-privacy).
 
 ## Datenschutz (Privacy)
 Dieses Programm überträgt keine Informationen an andere Systeme im Netzwerk, außer der Nutzer oder die Person, die es installiert oder bedient, verlangt das ausdrücklich. (This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.)

@@ -37,7 +37,7 @@ Als *installiert* gilt eine Kopie, wenn der Deinstallations-Eintrag des Installe
 - Releases **ohne** `SHA256SUMS.txt` (2.0.0 und älter) werden nur angekündigt, nie automatisch installiert.
 - Downloads gehen nur über HTTPS an eine feste Liste von GitHub-Hosts (`api.github.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`; Weiterleitungen nur zwischen diesen, höchstens 5) und nur für dieses Repository. Eine Release-Datei darf höchstens 64 MiB groß sein.
 - Der Sperrstatus des Zertifikats wird geprüft. Ist das Zertifikat widerrufen oder lässt sich die Sperrprüfung nicht durchführen (z. B. weil eine Firewall oder ein Proxy den Server für Sperrlisten blockiert), wird nichts geladen.
-- Ohne Code-Signatur (siehe [Richtlinie zur Code-Signatur](../../README.de.md#richtlinie-zur-code-signatur-code-signing-policy)) schützt das vor beschädigten oder unvollständigen Downloads, **nicht** vor einem kompromittierten GitHub-Konto.
+- Ohne Code-Signatur (siehe [Hinweis in der README](../../README.de.md#hinweis-programm-ist-noch-nicht-signiert)) schützt das vor beschädigten oder unvollständigen Downloads, **nicht** vor einem kompromittierten GitHub-Konto.
 
 Eine von Hand heruntergeladene Datei kannst du selbst prüfen, z. B. in PowerShell: `Get-FileHash .\Paneldeck-Setup-2.1.0.exe` und mit der Zeile in `SHA256SUMS.txt` vergleichen; in Git Bash: `sha256sum -c SHA256SUMS.txt`.
 
