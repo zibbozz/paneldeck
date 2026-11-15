@@ -22,7 +22,7 @@ Für Windows 10 (1809+) / 11 (x64), **komplett offline lauffähig**: wahlweise a
 
 ## Download
 Paneldeck gibt es nur über **GitHub Releases**: https://github.com/zibbozz/paneldeck/releases – je Release ein Installer (`Paneldeck-Setup-<Version>.exe`) und ein portables ZIP (`paneldeck-<Version>-windows-x64.zip`), beide aus diesem Repository gebaut.
-Code-Signatur: siehe [Richtlinie zur Code-Signatur](#richtlinie-zur-code-signatur-code-signing-policy) – Free code signing provided by SignPath.io, certificate by SignPath Foundation (Antrag läuft; bis zur Zusage sind die Releases nicht signiert).
+Code-Signatur: Die Releases sind derzeit **nicht signiert**. Paneldeck will die kostenlose Code-Signatur für Open-Source-Projekte bei der SignPath Foundation beantragen; siehe [Richtlinie zur Code-Signatur](#richtlinie-zur-code-signatur-code-signing-policy).
 
 ## Erste Schritte
 1. **Installer** `Paneldeck-Setup-<Version>.exe` ausführen – oder das **portable ZIP** entpacken und `paneldeck.exe` starten.
@@ -36,7 +36,7 @@ Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 Installer und `paneldeck.exe` sind **nicht code-signiert**. Ein Zertifikat kostet Geld, und Paneldeck soll ein kostenloses Hobbyprojekt bleiben. Deshalb gilt bis auf Weiteres:
 - Beim ersten Start zeigt **Windows SmartScreen** evtl. „Der Computer wurde durch Windows geschützt“. Auf **„Weitere Informationen“ → „Trotzdem ausführen“** klicken.
 - Manche Virenscanner schlagen bei neuen, unsignierten Programmen mit Tray-Symbol und Autostart fälschlich an. Der Quelltext ist offen einsehbar, und du kannst Paneldeck selbst bauen (siehe [Bauen](#bauen)).
-- **Geplant:** Paneldeck beantragt die kostenlose Code-Signatur für Open-Source-Projekte bei der SignPath Foundation (siehe [Richtlinie zur Code-Signatur](#richtlinie-zur-code-signatur-code-signing-policy)). Sobald die Releases signiert sind, steht es hier und im Changelog.
+- **Geplant:** Paneldeck will die kostenlose Code-Signatur für Open-Source-Projekte bei der SignPath Foundation beantragen (siehe [Richtlinie zur Code-Signatur](#richtlinie-zur-code-signatur-code-signing-policy)). Sobald die Releases signiert sind, steht es hier und im Changelog.
 
 ## Todo-Liste und Tickets
 Die Fensterleiste oben hat zwei Reiter: **Terminal Hub** (alles bisher Beschriebene, unverändert) und **Todo-Liste**. Umgeschaltet wird per Klick, `Strg+1` / `Strg+2` oder `Alt+Umschalt+1` / `Alt+Umschalt+2`. Paneldeck startet immer im Terminal Hub. Die Fensterknöpfe (Minimieren, Maximieren, Schließen) sitzen rechts in der Fensterleiste; unter Windows 11 zeigt der Maximieren-Knopf auch das Snap-Layouts-Menü.
@@ -166,12 +166,10 @@ Release-Dateien (portables ZIP mit `paneldeck.exe` und Lizenzen, Installer) ents
 Mit `--publish` wird zusätzlich das Tag gepusht und das GitHub-Release angelegt (GitHub CLI `gh`, angemeldet), mit `--no-git` nur gebaut und gepackt.
 
 ## Richtlinie zur Code-Signatur (Code signing policy)
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-- **Stand:** Der Antrag läuft; bis zur Zusage sind die Releases nicht signiert (siehe [Hinweis oben](#hinweis-programm-ist-noch-nicht-signiert)).
-- **Was signiert wird:** nur die Release-Dateien, die der GitHub-Actions-Workflow `.github/workflows/release-build.yml` aus diesem Repository baut (Installer `Paneldeck-Setup-<Version>.exe` und `paneldeck.exe` im portablen ZIP). Sonst wird nichts mit diesem Zertifikat signiert.
+- **Stand:** Die Releases sind derzeit **nicht signiert**. Paneldeck will die kostenlose Code-Signatur bei der [SignPath Foundation](https://signpath.org) beantragen; bisher wurde nichts von ihr signiert (siehe [Hinweis oben](#hinweis-programm-ist-noch-nicht-signiert)). Wird ein Antrag angenommen, steht es hier.
+- **Was signiert würde:** nur die Release-Dateien, die der GitHub-Actions-Workflow `.github/workflows/release-build.yml` aus diesem Repository baut (Installer `Paneldeck-Setup-<Version>.exe` und `paneldeck.exe` im portablen ZIP). Sonst wird nichts mit diesem Zertifikat signiert.
 - **Committer und Reviewer:** [zibbozz](https://github.com/zibbozz) (Eigentümer des Repositorys). Änderungen anderer Personen werden nur nach Prüfung durch einen Committer übernommen.
-- **Freigabe (Approver):** [zibbozz](https://github.com/zibbozz). Jede Signatur wird einzeln von Hand freigegeben.
+- **Freigabe (Approver):** [zibbozz](https://github.com/zibbozz). Jede Signatur würde einzeln von Hand freigegeben.
 - **Datenschutz:** siehe [Datenschutz](#datenschutz-privacy).
 
 ## Datenschutz (Privacy)
