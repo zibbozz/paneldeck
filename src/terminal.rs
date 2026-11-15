@@ -583,6 +583,51 @@ impl Session {
     }
 }
 
+/// Sucht in Terminal-Zeilen (eine Bildschirmzeile je Eintrag, wie `Session::lines_abs`) das Echo eines eingegebenen
+/// Befehls und liefert die erste und letzte Zeile davon (Indizes in `rows`).
+///
+/// Ein langer Befehl läuft über mehrere Zeilen. Auf das WRAPLINE-Flag ist dabei kein Verlass: ConPTY und PSReadLine
+/// zeichnen die Eingabezeile oft mit eigenen Zeilenvorschüben bzw. Cursorsprüngen neu, dann fehlt das Flag, und
+/// Leerzeichen am Zeilenrand gehen durch das Abschneiden am Zeilenende verloren. Deshalb wird der Befehlstext selbst
+/// verfolgt (ohne Leerraum verglichen): Er beginnt irgendwo in einer Zeile (nach dem Prompt) und setzt sich in den
+/// folgenden Zeilen fort, bis er vollständig ist. `None`, wenn kein vollständiges Echo gefunden wird.
+pub fn find_echo(rows: &[String], cmd: &str) -> Option<(usize, usize)> {
+    let strip = |s: &str| -> Vec<char> { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    let want = strip(cmd);
+    if want.is_empty() {
+        return None;
+    }
+    let rows: Vec<Vec<char>> = rows.iter().map(|r| strip(r)).collect();
+    for (i, r) in rows.iter().enumerate() {
+        // Ganzer Befehl in einer Zeile (kurze Befehle, wie bisher).
+        if r.windows(want.len()).any(|w| w == want.as_slice()) {
+            return Some((i, i));
+        }
+        // Sonst: ein Zeilenende, das ein Anfang des Befehls ist (längster Kandidat zuerst), und die Fortsetzung danach.
+        'cand: for p in 0..r.len() {
+            let head = &r[p..];
+            if !want.starts_with(head) {
+                continue;
+            }
+            let mut done = head.len();
+            for (j, next) in rows.iter().enumerate().skip(i + 1) {
+                let rest = &want[done..];
+                if next.is_empty() {
+                    continue 'cand;
+                }
+                if next.starts_with(rest) {
+                    return Some((i, j));
+                }
+                if !rest.starts_with(next) {
+                    continue 'cand;
+                }
+                done += next.len();
+            }
+        }
+    }
+    None
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.get_mut().unwrap_or_else(|e| e.into_inner()).kill();
@@ -649,5 +694,133 @@ mod tests {
             }
         }
         assert!(ok, "Ausgabe blieb im Sync-Puffer hängen: {}", s.dump_text(10));
+    }
+}
+
+#[cfg(test)]
+mod echo_tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+
+    /// Bytes durch die echte Emulation schicken und die Bildschirmzeilen wie `Session::lines_abs` lesen.
+    fn rows(cols: usize, bytes: &str) -> Vec<String> {
+        let mut term = Term::new(Config::default(), &TermSize::new(cols, 40), VoidListener);
+        let mut p: Processor = Processor::new();
+        p.advance(&mut term, bytes.as_bytes());
+        let g = term.grid();
+        let last = term.grid().cursor.point.line.0;
+        (0..=last)
+            .map(|r| term.bounds_to_string(Point::new(Line(r), Column(0)), Point::new(Line(r), Column(g.columns() - 1))).trim_end().to_string())
+            .collect()
+    }
+
+    /// Ausgabe nach dem Echo bis vor den nächsten Prompt (Zeilen, die mit `next_prompt` beginnen).
+    fn output(rows: &[String], cmd: &str, next_prompt: &str) -> String {
+        let (_, last) = find_echo(rows, cmd).unwrap_or_else(|| panic!("kein Echo in {rows:?}"));
+        let end = rows.iter().rposition(|l| l.starts_with(next_prompt)).unwrap();
+        // Leere Zeilen vor dem Prompt fallen weg (wie im run_command-Ausführer).
+        rows[last + 1..end].join("\n").trim_end_matches('\n').to_string()
+    }
+
+    /// Text auf Zeilen der Breite `cols` mit festen Zeilenvorschüben verteilen (so zeichnet ConPTY/PSReadLine oft neu:
+    /// ohne WRAPLINE). `start` = Spalte, an der der Text beginnt.
+    fn hard_wrapped(text: &str, start: usize, cols: usize) -> String {
+        let mut out = String::new();
+        let mut col = start;
+        for c in text.chars() {
+            if col == cols {
+                out.push_str("\r\n");
+                col = 0;
+            }
+            out.push(c);
+            col += 1;
+        }
+        out
+    }
+
+    const PS_CMD: &str = "$env:PANELDECK_SESSION=$null; '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"whoami\",\"arguments\":{}}}' | & 'E:\\paneldeck-test\\tmp-wrap-long-path-test\\smoke\\paneldeck.exe' mcp | Out-String";
+
+    #[test]
+    fn powershell_long_command_soft_wrapped() {
+        let prompt = "PS E:\\paneldeck-test\\tmp-wrap-long-path-test\\smoke\\proj> ";
+        let r = rows(80, &format!("{prompt}{PS_CMD}\r\n{{\"result\":{{}}}}\r\n\r\n{prompt}"));
+        assert!(r.len() >= 5, "soll über mehrere Zeilen laufen: {r:?}");
+        assert_eq!(output(&r, PS_CMD, "PS "), "{\"result\":{}}");
+    }
+
+    #[test]
+    fn powershell_long_command_hard_wrapped_without_wrapline() {
+        // Wie in der Fehlermeldung: der Umbruch fällt genau vor „ mcp“ – mit festem Zeilenvorschub statt WRAPLINE.
+        let at = PS_CMD.find(" mcp |").unwrap();
+        let base = "PS E:\\paneldeck-test\\tmp-wrap-long-path-test\\proj";
+        // Ordnername so auffüllen, dass „ mcp“ (bzw. das Leerzeichen davor am Zeilenende) genau am Rand einer 100er-Zeile liegt.
+        for (cols, shift) in [(100, 0), (100, 1), (97, 0), (64, 0), (120, 0)] {
+            let pad = if cols == 100 { (200 - (base.len() + 2 + at + shift) % 100) % 100 } else { 0 };
+            let prompt = format!("{base}{}> ", "x".repeat(pad));
+            if cols == 100 {
+                assert_eq!((prompt.len() + at + shift) % 100, 0);
+            }
+            let echo = hard_wrapped(&format!("{prompt}{PS_CMD}"), 0, cols);
+            let r = rows(cols, &format!("{echo}\r\n{{\"result\":{{}}}}\r\n\r\n{prompt}"));
+            let out = output(&r, PS_CMD, "PS ");
+            assert_eq!(out, "{\"result\":{}}", "Breite {cols}: {r:?}");
+            assert!(!out.contains("Out-String"));
+        }
+    }
+
+    #[test]
+    fn command_start_split_across_rows() {
+        // Der Prompt füllt die Zeile fast: schon der Befehlsanfang (die ersten 12 Zeichen) wird geteilt.
+        let prompt = "PS E:\\".to_string() + &"x".repeat(32) + "> ";
+        let cmd = "Get-ChildItem -Path . -Recurse -Filter *.rs | Measure-Object";
+        let echo = hard_wrapped(&format!("{prompt}{cmd}"), 0, 45);
+        let r = rows(45, &format!("{echo}\r\nCount : 3\r\n\r\n{prompt}"));
+        assert_eq!(output(&r, cmd, "PS "), "Count : 3");
+    }
+
+    #[test]
+    fn cmd_long_command_three_rows() {
+        let prompt = "C:\\Users\\nutzer\\Projekte\\ein-recht-langer-ordnername>";
+        let cmd = "echo eins zwei drei vier fuenf sechs sieben acht neun zehn elf zwoelf dreizehn vierzehn";
+        let r = rows(60, &format!("{prompt}{cmd}\r\neins zwei drei vier fuenf sechs sieben acht neun zehn elf zwoelf dreizehn vierzehn\r\n\r\n{prompt}"));
+        let (first, last) = find_echo(&r, cmd).unwrap();
+        assert_eq!((first, last), (0, 2), "{r:?}");
+        let out = output(&r, cmd, "C:\\");
+        assert!(out.starts_with("eins zwei") && !out.contains(prompt), "{out}");
+    }
+
+    #[test]
+    fn bash_two_line_prompt_long_command() {
+        let p1 = "nutzer@rechner MINGW64 /e/paneldeck-test/tmp-wrap-long-path-test (main)";
+        let cmd = "printf '%s\\n' alpha beta gamma delta epsilon zeta eta theta iota kappa lambda my && echo fertig";
+        // Readline erzwingt den Umbruch am Rand mit Leerzeichen + CR (das Leerzeichen wird danach überschrieben).
+        let echo = hard_wrapped(&format!("$ {cmd}"), 0, 50).replace("\r\n", " \r");
+        let r = rows(50, &format!("{p1}\r\n{echo}\r\nalpha\r\nfertig\r\n{p1}\r\n$ "));
+        let (first, last) = find_echo(&r, cmd).unwrap();
+        // Die erste Prompt-Zeile ist selbst umbrochen; das Echo beginnt in der Zeile mit „$ “ und läuft über zwei Zeilen.
+        assert_eq!(first, r.iter().position(|l| l.starts_with("$ printf")).unwrap(), "{r:?}");
+        assert_eq!(last, first + 1, "{r:?}");
+        let end = r.iter().rposition(|l| l.starts_with("nutzer@")).unwrap();
+        assert_eq!(r[last + 1..end].join("\n"), "alpha\nfertig");
+    }
+
+    #[test]
+    fn short_command_unchanged() {
+        let r = rows(80, "PS C:\\> echo kind-ok\r\nkind-ok\r\nPS C:\\> ");
+        assert_eq!(find_echo(&r, "echo kind-ok"), Some((0, 0)));
+        assert_eq!(output(&r, "echo kind-ok", "PS "), "kind-ok");
+        // Erste Zeile mit dem Echo gewinnt, auch wenn die Ausgabe den Befehl wiederholt.
+        let r = rows(80, "PS C:\\> echo x\r\necho x\r\nPS C:\\> ");
+        assert_eq!(find_echo(&r, "echo x"), Some((0, 0)));
+    }
+
+    #[test]
+    fn no_or_incomplete_echo() {
+        let r = rows(80, "PS C:\\> \r\nirgendwas\r\nPS C:\\> ");
+        assert_eq!(find_echo(&r, "Get-Date"), None);
+        // Nur der Anfang ist da (Rest fehlt): kein vollständiges Echo.
+        let r = rows(20, "PS C:\\> Get-ChildIt\r\nanderes\r\n");
+        assert_eq!(find_echo(&r, "Get-ChildItem -Force"), None);
+        assert_eq!(find_echo(&r, "   "), None);
     }
 }

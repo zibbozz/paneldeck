@@ -783,13 +783,18 @@ impl App {
                 // beim Senden ist unsicher, weil langsame Prompts (z. B. Git Bash mit Git-Status) zeilenweise mit Pausen erscheinen.
                 let scan_from = mark0.map_or(*start_abs, |m| m.min(*start_abs));
                 let all = s.lines_abs(scan_from, end_incl.max(scan_from));
-                let key: String = cmd.chars().take(12).collect();
-                let echo_idx = all.iter().position(|l| l.contains(key.as_str()));
-                let first_ok = echo_idx.is_some();
-                // Ein langer Befehl kann umbrochen sein: den ganzen Eingabeblock überspringen, nicht nur die erste Zeile.
-                let skip = match echo_idx {
-                    Some(i) => (s.wrap_end(scan_from + i as u64) - scan_from) as usize + 1,
-                    None => (*start_abs - scan_from) as usize + 1,
+                // Ein langer Befehl kann umbrochen sein: den ganzen Eingabeblock überspringen, nicht nur die erste Zeile. Das Echo
+                // wird am Befehlstext selbst verfolgt (WRAPLINE fehlt, wenn ConPTY/PSReadLine die Eingabe neu zeichnen).
+                let (first_ok, skip) = match crate::terminal::find_echo(&all, cmd) {
+                    Some((_, last)) => (true, last + 1),
+                    None => {
+                        // Rückfall (Echo unvollständig, z. B. aus dem Verlauf gefallen): erste Zeile mit dem Befehlsanfang.
+                        let key: String = cmd.chars().take(12).collect();
+                        match all.iter().position(|l| l.contains(key.as_str())) {
+                            Some(i) => (true, (s.wrap_end(scan_from + i as u64) - scan_from) as usize + 1),
+                            None => (false, (*start_abs - scan_from) as usize + 1),
+                        }
+                    }
                 };
                 // Ausgabe mit zusammengefügten Zeilenumbrüchen des Terminals (eine 300 Zeichen lange Zeile bleibt eine Zeile).
                 let first_out = scan_from + skip as u64;
