@@ -344,6 +344,7 @@ impl App {
                     self.push_toast(text, super::toasts::ToastKind::Info, c.target);
                     self.tasks.invalidate();
                     self.plan.invalidate();
+                    self.wins.data_gen += 1; // weitere Fenster laden ihre Todo-Ansicht ebenfalls neu
                 }
                 Ok(done.result)
             }
@@ -361,6 +362,9 @@ impl App {
                 Ok(id) => id,
                 Err(e) => return Out::Now(Err(e)),
             };
+            if self.window_of(id).unwrap_or(0) != 0 {
+                return Out::Now(Err(er("not_visible", tr("Die Sitzung liegt in einem weiteren Paneldeck-Fenster – Screenshots einzelner Sitzungen gehen nur im Hauptfenster.", "The session is in another Paneldeck window – screenshots of single sessions only work in the main window."))));
+            }
             match self.pane_rects.get(&id).copied() {
                 Some(r) => (id, Some(r)),
                 None => return Out::Now(Err(er("not_visible", tr("Die Sitzung ist im Fenster nicht zu sehen (anderes Projekt oder ausgeblendet) – erst focus_session aufrufen.", "The session is not visible in the window (other project or hidden) – call focus_session first.")))),
@@ -435,7 +439,6 @@ impl App {
 
     fn mcp_list(&self, args: &Value, caller: Option<u64>) -> Value {
         let include_exited = args.get("include_exited").and_then(|v| v.as_bool()).unwrap_or(true);
-        let docked = self.docked_ids();
         let sessions: Vec<Value> = self
             .entries
             .iter()
@@ -444,6 +447,8 @@ impl App {
                 let usage = self.usage.get(*id);
                 let git = self.git.get(*id);
                 let project = self.projects.iter().find(|p| p.id == e.meta.project).map(|p| p.name.clone()).unwrap_or_default();
+                // Fenster der Sitzung (0 = Hauptfenster); fokussiert/sichtbar gelten in diesem Fenster.
+                let (window, focused, visible) = self.session_view_info(*id);
                 json!({
                     "id": id,
                     "name": e.display_name(),
@@ -453,8 +458,9 @@ impl App {
                     "shell": e.eff_shell(),
                     "claude": e.meta.claude,
                     "status": status_str(e),
-                    "focused": *id == self.focused,
-                    "visible": docked.contains(id) || self.detached.contains(id),
+                    "focused": focused,
+                    "visible": visible,
+                    "window": window,
                     "queue_len": e.meta.queue.len(),
                     "cost_usd": usage.as_ref().map(|u| (u.cost() * 100.0).round() / 100.0),
                     "git": git.map(|g| json!({"branch": g.branch, "changed_files": g.changed})),
@@ -840,14 +846,8 @@ impl App {
 
     fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value) -> R {
         let id = self.mcp_target(args, None, false)?;
-        if self.detached.contains(&id) {
-            ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of(("detached", id)), egui::ViewportCommand::Focus);
-        } else {
-            if let Some(pid) = self.entries.get(&id).map(|e| e.meta.project) {
-                self.switch_project(pid);
-            }
-            self.activate(id);
-        }
+        // Abgedockt: dieses Fenster nach vorn; Sitzung eines weiteren Fensters: dort aktivieren, Fenster nach vorn.
+        self.apply(ctx, Action::Focus(id));
         Ok(json!({"ok": true}))
     }
 

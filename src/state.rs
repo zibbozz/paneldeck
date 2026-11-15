@@ -281,6 +281,14 @@ pub struct SessionMeta {
     /// Projekt (0 = noch keinem zugeordnet; wird beim Laden dem ersten Projekt zugewiesen).
     pub project: u64,
     pub tags: Vec<String>,
+    /// Fenster der Sitzung: 0 = Hauptfenster, sonst die Kennung eines weiteren Fensters (`SavedState::extra_windows`).
+    /// Fehlt bei Sitzungen des Hauptfensters (ältere Versionen kennen das Feld nicht und zeigen alles im Hauptfenster).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub window: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl Default for SessionMeta {
@@ -305,6 +313,7 @@ impl Default for SessionMeta {
             worktree: None,
             project: 0,
             tags: Vec::new(),
+            window: 0,
         }
     }
 }
@@ -464,6 +473,39 @@ pub struct SavedState {
     /// In eigenen Fenstern abgedockte Sitzungen.
     pub detached: Vec<u64>,
     pub composer_draft: String,
+    /// Weitere Fenster (Strg+Klick auf einen Reiter); fehlt, solange es keine gibt.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_windows: Vec<SavedWindow>,
+}
+
+/// Ein weiteres Fenster (#110): Reiter, Projekt und Layout des Terminal Hubs, Lage auf dem Bildschirm.
+/// Seine Sitzungen stehen in `sessions` mit `window = id`.
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SavedWindow {
+    /// Kennung (ab 1; 0 ist das Hauptfenster).
+    pub id: u64,
+    /// Angezeigter Reiter: `"terminals"` oder `"tasks"`.
+    pub tab: String,
+    /// Aktives Projekt des Terminal Hubs in diesem Fenster.
+    pub project: u64,
+    pub layout: Option<Node>,
+    pub focused: u64,
+    /// Layouts der übrigen Projekte in diesem Fenster.
+    pub views: Vec<SavedProjectView>,
+    /// Position (links oben) und Innengröße in Punkten.
+    pub pos: Option<[f32; 2]>,
+    pub size: Option<[f32; 2]>,
+    pub maximized: bool,
+}
+
+/// Layout eines Projekts in einem weiteren Fenster.
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SavedProjectView {
+    pub project: u64,
+    pub layout: Option<Node>,
+    pub focused: u64,
 }
 
 /// Datenordner dieses Prozesses (einmal aufgelöst, siehe `paths`): `--data-dir` > `PANELDECK_DATA` >

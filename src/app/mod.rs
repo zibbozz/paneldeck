@@ -35,6 +35,7 @@ mod empty_hub;
 #[cfg(test)]
 mod glyph_tests;
 mod mcp;
+mod multiwin;
 mod panels;
 mod planning_ui;
 mod settings;
@@ -262,6 +263,8 @@ enum Action {
     SplitAt(u64, Dir, bool),
     HidePane(u64),
     Focus(u64),
+    /// Zur Sitzung springen (aus einem Ticket): Terminal Hub ihres Fensters zeigen und sie aktivieren.
+    JumpTo(u64),
     NewQuick,
 }
 
@@ -622,6 +625,8 @@ pub struct App {
     in_tray: bool,
     editor: Option<Editor>,
     applied_font: String,
+    /// Weitere Fenster (`multiwin.rs`, #110).
+    wins: multiwin::Wins,
 }
 
 fn home_dir() -> String {
@@ -842,6 +847,7 @@ impl App {
             in_tray: false,
             editor: None,
             applied_font: String::new(),
+            wins: Default::default(),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
@@ -895,6 +901,7 @@ impl App {
                 e.meta.project = first_project;
             }
         }
+        app.restore_windows(&saved.extra_windows);
         let p = app.projects.iter().find(|p| p.id == app.active_project).cloned().unwrap_or_default();
         app.load_project_view(p.layout, p.focused);
         app.detached.retain(|id| app.entries.contains_key(id));
@@ -1070,7 +1077,7 @@ impl App {
     /// Layout/Fokus des aktiven Projekts übernehmen (nur gültige Sitzungen des Projekts).
     fn load_project_view(&mut self, layout: Option<Node>, focused: u64) {
         let pid = self.active_project;
-        let ok = |id: &u64, s: &App| s.entries.get(id).is_some_and(|e| e.meta.project == pid);
+        let ok = |id: &u64, s: &App| s.entries.get(id).is_some_and(|e| e.meta.project == pid && s.in_win(e));
         self.layout = layout.filter(|l| {
             let mut v = Vec::new();
             l.leaves(&mut v);
@@ -1094,7 +1101,7 @@ impl App {
     }
 
     fn project_ids(&self) -> Vec<u64> {
-        self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project).map(|(i, _)| *i).collect()
+        self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && self.in_win(e)).map(|(i, _)| *i).collect()
     }
 
     /// Neue Profil-ID, die auch von keiner Sitzung, keinem Projekt/Ordner und keiner Vorlage mehr
@@ -1132,6 +1139,9 @@ impl App {
     }
 
     fn sidebar_match(&self, e: &Entry) -> bool {
+        if !self.in_win(e) {
+            return false;
+        }
         let f = self.filter.trim().to_lowercase();
         if f.is_empty() {
             return e.meta.project == self.active_project;
@@ -1356,6 +1366,7 @@ impl App {
             claude_started: o.resume_id.is_some(),
             transcript: o.transcript.clone(),
             group: o.group.as_deref().map(state::clean_folder_path).unwrap_or_default(),
+            window: self.wins.cur,
             ..SessionMeta::default()
         };
         if !meta.group.is_empty() {
@@ -1434,7 +1445,7 @@ impl App {
 
     /// Sitzungen des aktiven Projekts in diesem Ordner (inkl. Unterordner), nach Id sortiert.
     fn folder_sessions(&self, path: &str) -> Vec<u64> {
-        self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path)).map(|(i, _)| *i).collect()
+        self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && self.in_win(e) && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path)).map(|(i, _)| *i).collect()
     }
 
     fn set_group(&mut self, id: u64, g: String) {
@@ -1509,6 +1520,7 @@ impl App {
             group: self.entries[&target].meta.group.clone(),
             project: self.active_project,
             profile: self.entries[&target].meta.profile,
+            window: self.wins.cur,
             ..SessionMeta::default()
         };
         let mut entry = Entry::new(meta);
@@ -1579,6 +1591,7 @@ impl App {
             active_project: self.active_project,
             detached: self.detached.clone(),
             composer_draft: self.composer_text.clone(),
+            extra_windows: self.saved_windows(),
         };
         state::save_json(&self.dir.join("state.json"), &saved);
         for (id, e) in &self.entries {
@@ -1846,7 +1859,7 @@ impl App {
         let projects: Vec<(u64, String, [u8; 3], usize)> = self
             .projects
             .iter()
-            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id).count()))
+            .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count()))
             .collect();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
@@ -1968,10 +1981,10 @@ impl App {
 
     /// Ordner (OSC) und beendete Befehle der Shell-Integration auswerten.
     fn poll_shell(&mut self, ctx: &egui::Context) {
-        let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        // Angesehen ist die fokussierte Sitzung des Fensters im Vordergrund (auch eines weiteren Fensters).
+        let (window_focused, focused_id) = self.seen_focus(ctx);
         let threshold = self.settings.cmd_notify_secs as u64 * 1000;
         let lang = self.settings.language;
-        let focused_id = self.focused;
         let mut toasts: Vec<(String, CmdDone)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else { continue };
@@ -2103,10 +2116,10 @@ impl App {
     }
 
     fn poll_hooks(&mut self, ctx: &egui::Context) {
-        let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let (window_focused, seen_id) = self.seen_focus(ctx);
         // Ereignisse in der angesehenen Sitzung gelten als gesehen.
         if window_focused {
-            if let Some(e) = self.entries.get_mut(&self.focused) {
+            if let Some(e) = self.entries.get_mut(&seen_id) {
                 e.attention = false;
             }
         }
@@ -2114,7 +2127,7 @@ impl App {
         let lang = self.settings.language;
         let mut queue_done: Vec<String> = Vec::new();
         for m in msgs {
-            let focused_id = self.focused;
+            let focused_id = seen_id;
             let Some(e) = self.entries.get_mut(&m.session) else { continue };
             let old = e.status;
             e.hook_seen = true;
@@ -2182,7 +2195,7 @@ impl App {
 
     fn queue_finished(&mut self, ctx: &egui::Context, names: Vec<String>) {
         let lang = self.settings.language;
-        let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let window_focused = self.seen_focus(ctx).0;
         for name in names {
             let body = lang.t("Warteschlange abgearbeitet", "Queue finished");
             if window_focused {
@@ -2199,6 +2212,10 @@ impl App {
     }
 
     fn apply(&mut self, ctx: &egui::Context, a: Action) {
+        // Sitzung eines anderen Fensters: dort ausführen (das Fenster kommt nach vorn).
+        if self.route(ctx, &a) {
+            return;
+        }
         match a {
             Action::ToggleFiles => self.files_open = !self.files_open,
             Action::Cycle(d) => self.cycle(d),
@@ -2443,6 +2460,12 @@ impl App {
                 }
                 self.activate(id)
             }
+            Action::JumpTo(id) => {
+                if self.entries.contains_key(&id) {
+                    self.set_mode(titlebar::Mode::Terminals);
+                    self.apply(ctx, Action::Activate(id));
+                }
+            }
             Action::StartRename(id) => {
                 if let Some(e) = self.entries.get(&id) {
                     self.rename = Some((id, e.display_name()));
@@ -2467,7 +2490,7 @@ impl App {
                 let mut ids: Vec<u64> = self
                     .entries
                     .iter()
-                    .filter(|(_, e)| e.meta.project == pid && folder.as_ref().is_none_or(|f| !e.meta.group.is_empty() && state::folder_within(&e.meta.group, f)))
+                    .filter(|(_, e)| e.meta.project == pid && self.in_win(e) && folder.as_ref().is_none_or(|f| !e.meta.group.is_empty() && state::folder_within(&e.meta.group, f)))
                     .map(|(i, _)| *i)
                     .collect();
                 ids.sort();
@@ -2725,7 +2748,7 @@ impl eframe::App for App {
         self.poll_history();
         self.check_budget(ctx);
         self.handle_drops(ctx);
-        let mut actions: Vec<Action> = Vec::new();
+        let mut actions: Vec<Action> = self.main_frame_begin(ctx);
         self.titlebar(ctx);
         self.backup_tick(ctx);
         self.window_edges(ctx);
@@ -2739,24 +2762,16 @@ impl eframe::App for App {
         } else {
             self.tasks_view(ctx);
         }
-        if let Some((text, t0)) = &self.notice {
-            if t0.elapsed() > Duration::from_secs(5) {
-                self.notice = None;
-            } else {
-                let text = text.clone();
-                egui::Area::new(Id::new("notice")).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -18.0)).order(egui::Order::Tooltip).show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(10)).show(ui, |ui| {
-                        ui.label(text);
-                    });
-                });
-                ctx.request_repaint_after(Duration::from_millis(500));
-            }
+        if self.main_overlay() {
+            self.notice_ui(ctx);
+            self.toasts_ui(ctx);
         }
-        self.toasts_ui(ctx);
         self.detached_windows(ctx, &mut actions);
         self.text_prompt_ui(ctx, &mut actions);
         self.dialogs(ctx, &mut actions);
-        self.tlinks_picker_ui(ctx);
+        if self.picker_here() {
+            self.tlinks_picker_ui(ctx);
+        }
         self.restore_dialog(ctx);
         for a in actions {
             self.apply(ctx, a);
@@ -2773,6 +2788,8 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+        // Weitere Fenster (Strg+Klick auf einen Reiter) nach dem Hauptfenster zeichnen.
+        self.hub_windows(ctx);
 
         if self.last_save.elapsed() > Duration::from_secs(60) {
             self.save_all();

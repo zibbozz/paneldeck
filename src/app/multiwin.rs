@@ -1,0 +1,847 @@
+//! Weitere Fenster (#110): Strg+Klick auf einen Reiter der Fensterleiste öffnet ihn in einem neuen Fenster.
+//!
+//! Alle Fenster laufen im selben Prozess als zusätzliche egui-Viewports (`show_viewport_immediate`) und teilen sich einen
+//! Zustand im Speicher: Einstellungen, Datenbank, Tray, MCP, IPC und alle Sitzungen (`App::entries`) gibt es genau einmal.
+//! Eigen ist jedem Fenster nur seine Ansicht (`WinView`): Layout, Fokus, aktives Projekt, Reiter, Seitenleisten-Filter,
+//! offene Dialoge sowie die Zustände des Todo-Reiters. Jede Sitzung gehört genau einem Fenster (`SessionMeta::window`,
+//! 0 = Hauptfenster); Seitenleiste, Layout und Kürzel eines Fensters sehen nur seine Sitzungen.
+//!
+//! Umsetzung: Die Felder der App beschreiben immer das *gerade gezeichnete* Fenster. Vor dem Zeichnen eines weiteren Fensters
+//! tauscht `enter` dessen `WinView` mit den Feldern der App (das Hauptfenster wandert in die `WinView`), `leave` tauscht zurück.
+//! So läuft der vorhandene Code (Seitenleiste, Bereiche, Dialoge, `apply`) unverändert für jedes Fenster. Alles Globale
+//! (Hooks, MCP, Tray, Speichern) läuft nur mit dem Hauptfenster in den Feldern (`wins.cur == 0`).
+//!
+//! Aktionen, die eine Sitzung eines anderen Fensters zeigen sollen (aktivieren, anheften, Sprung aus Suche/Ticket), werden an
+//! dieses Fenster weitergereicht (`route`) und dort im nächsten Bild ausgeführt; das Fenster kommt dabei nach vorn.
+
+use super::*;
+use crate::state::{SavedProjectView, SavedWindow};
+use std::sync::{Arc, OnceLock};
+
+/// Ansicht eines Fensters. Die Feldnamen entsprechen den Feldern von `App` (siehe `swap_view`).
+pub(super) struct WinView {
+    layout: Option<Node>,
+    focused: u64,
+    want_focus: Option<u64>,
+    active_project: u64,
+    mode: titlebar::Mode,
+    filter: String,
+    pane_rects: HashMap<u64, Rect>,
+    last_title: String,
+    rename: Option<(u64, String)>,
+    group_prompt: Option<Prompt>,
+    new_dialog: Option<NewDialog>,
+    confirm_close: Option<u64>,
+    settings_open: bool,
+    palette: Option<Palette>,
+    text_prompt: Option<TextPrompt>,
+    folder_prompt: Option<FolderPrompt>,
+    notes_open: Option<u64>,
+    queue_open: Option<u64>,
+    files_open: bool,
+    diff_open: bool,
+    diff_sel: Option<(String, bool)>,
+    composer_open: bool,
+    composer_focus: bool,
+    history_open: bool,
+    templates_open: bool,
+    cost_open: bool,
+    gsearch: Option<GlobalSearch>,
+    prompts_open: bool,
+    broadcast: bool,
+    wt_close: Option<WtClose>,
+    editor: Option<Editor>,
+    dragging: Option<u64>,
+    dragging_folder: Option<String>,
+    folder_rects: Vec<(String, Rect)>,
+    tree_geo: TreeGeo,
+    tree_root: String,
+    plan: planning_ui::PlanUi,
+    tasks: tasks_ui::TasksUi,
+    /// Layouts der Projekte, die in diesem Fenster gerade nicht aktiv sind: (Projekt, Layout, Fokus).
+    /// Die App hält diese in `Project::layout`/`focused`; `swap_project_views` tauscht sie mit.
+    proj_views: Vec<(u64, Option<Node>, u64)>,
+}
+
+impl WinView {
+    /// Leere Ansicht: keine Sitzung (#111), gewünschter Reiter, Projekt wie im Fenster, aus dem sie geöffnet wurde.
+    pub(super) fn new(mode: titlebar::Mode, project: u64) -> Self {
+        WinView {
+            layout: None,
+            focused: 0,
+            want_focus: None,
+            active_project: project,
+            mode,
+            filter: String::new(),
+            pane_rects: HashMap::new(),
+            last_title: String::new(),
+            rename: None,
+            group_prompt: None,
+            new_dialog: None,
+            confirm_close: None,
+            settings_open: false,
+            palette: None,
+            text_prompt: None,
+            folder_prompt: None,
+            notes_open: None,
+            queue_open: None,
+            files_open: false,
+            diff_open: false,
+            diff_sel: None,
+            composer_open: false,
+            composer_focus: false,
+            history_open: false,
+            templates_open: false,
+            cost_open: false,
+            gsearch: None,
+            prompts_open: false,
+            broadcast: false,
+            wt_close: None,
+            editor: None,
+            dragging: None,
+            dragging_folder: None,
+            folder_rects: Vec::new(),
+            tree_geo: TreeGeo::default(),
+            tree_root: String::new(),
+            plan: planning_ui::PlanUi::default(),
+            tasks: tasks_ui::TasksUi::default(),
+            proj_views: Vec::new(),
+        }
+    }
+}
+
+/// Ansicht `v` mit den Feldern der App tauschen (zweimal aufgerufen = wieder wie vorher).
+fn swap_view(app: &mut App, v: &mut WinView) {
+    macro_rules! sw {
+        ($($f:ident),* $(,)?) => { $( std::mem::swap(&mut app.$f, &mut v.$f); )* };
+    }
+    sw!(
+        layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, confirm_close,
+        settings_open, palette, text_prompt, folder_prompt, notes_open, queue_open, files_open, diff_open, diff_sel, composer_open,
+        composer_focus, history_open, templates_open, cost_open, gsearch, prompts_open, broadcast, wt_close, editor, dragging,
+        dragging_folder, folder_rects, tree_geo, tree_root, plan, tasks,
+    );
+    swap_project_views(&mut app.projects, &mut v.proj_views);
+}
+
+/// Layout/Fokus je Projekt tauschen: danach stehen in `projects` die Werte aus `stash` (fehlende: kein Layout) und in `stash`
+/// die bisherigen der Projekte. Gelöschte Projekte fallen weg, neue bekommen im anderen Fenster kein Layout.
+pub(super) fn swap_project_views(projects: &mut [Project], stash: &mut Vec<(u64, Option<Node>, u64)>) {
+    let mut out = Vec::with_capacity(projects.len());
+    for p in projects.iter_mut() {
+        let (l, f) = stash.iter_mut().find(|s| s.0 == p.id).map(|s| (s.1.take(), s.2)).unwrap_or((None, 0));
+        out.push((p.id, std::mem::replace(&mut p.layout, l), std::mem::replace(&mut p.focused, f)));
+    }
+    *stash = out;
+}
+
+/// Blätter entfernen, die nicht (mehr) in die Ansicht gehören; `None`, wenn nichts übrig bleibt.
+pub(super) fn prune_layout(layout: Node, ok: impl Fn(u64) -> bool) -> Option<Node> {
+    let mut leaves = Vec::new();
+    layout.leaves(&mut leaves);
+    let mut l = Some(layout);
+    for id in leaves.into_iter().filter(|id| !ok(*id)) {
+        l = l.and_then(|n| n.remove_leaf(id));
+    }
+    l
+}
+
+/// Welche Sitzung sieht der Nutzer gerade? Hauptfenster im Vordergrund → dessen Fokus, sonst das Fenster im Vordergrund.
+/// `(irgendein Fenster im Vordergrund, angesehene Sitzung)`.
+pub(super) fn pick_seen(main_focused: bool, main_session: u64, others: impl Iterator<Item = (bool, u64)>) -> (bool, u64) {
+    if main_focused {
+        return (true, main_session);
+    }
+    for (focused, session) in others {
+        if focused {
+            return (true, session);
+        }
+    }
+    (false, main_session)
+}
+
+/// Fenster, an das eine Aktion weitergereicht werden muss (`None` = hier ausführen).
+/// `session_window`: Fenster der Zielsitzung (falls es sie gibt); abgedockte Sitzungen holt jedes Fenster selbst nach vorn.
+pub(super) fn route_target(action: &Action, session_window: impl Fn(u64) -> Option<u64>, detached: impl Fn(u64) -> bool, cur: u64) -> Option<u64> {
+    let (id, follows_detached) = match action {
+        Action::Activate(id) | Action::Focus(id) | Action::JumpTo(id) => (*id, true),
+        Action::GlobalJump(id, ..) => (*id, true),
+        Action::Attach(id) => (*id, false),
+        _ => return None,
+    };
+    if follows_detached && detached(id) {
+        return None;
+    }
+    session_window(id).filter(|w| *w != cur)
+}
+
+/// Strg+Klick auf einen Reiter öffnet ihn in einem neuen Fenster, ein normaler Klick wechselt nur den Reiter.
+pub(super) fn opens_window(modifiers: Modifiers) -> bool {
+    modifiers.command && !modifiers.shift && !modifiers.alt
+}
+
+pub(super) fn mode_key(m: titlebar::Mode) -> &'static str {
+    match m {
+        titlebar::Mode::Terminals => "terminals",
+        titlebar::Mode::Tasks => "tasks",
+    }
+}
+
+pub(super) fn mode_from_key(s: &str) -> titlebar::Mode {
+    if s == "tasks" { titlebar::Mode::Tasks } else { titlebar::Mode::Terminals }
+}
+
+/// Sitzungen, deren Fenster es nicht (mehr) gibt, gehören dem Hauptfenster.
+pub(super) fn adopt_orphans<'a>(windows: impl Iterator<Item = &'a mut u64>, existing: &[u64]) {
+    for w in windows {
+        if *w != 0 && !existing.contains(w) {
+            *w = 0;
+        }
+    }
+}
+
+/// Wunsch „neues Fenster“ (aus der Fensterleiste).
+struct OpenReq {
+    mode: titlebar::Mode,
+    project: u64,
+    /// Äußeres Rechteck des Fensters, aus dem geöffnet wurde (neues Fenster leicht versetzt daneben).
+    from: Option<Rect>,
+    size: Option<Vec2>,
+}
+
+/// Ein weiteres Fenster.
+pub(super) struct HubWindow {
+    pub(super) id: u64,
+    view: WinView,
+    /// Stand der Daten (`Wins::data_gen`), den die Todo-Ansicht dieses Fensters kennt.
+    data_gen: u64,
+    os_focused: bool,
+    hwnd: Option<isize>,
+    hwnd_tries: u32,
+    init_pos: Option<Pos2>,
+    init_size: Vec2,
+    init_max: bool,
+    outer: Option<Rect>,
+    inner: Option<Rect>,
+    maximized: bool,
+    /// Rückfrage „Fenster schließen?“ ist offen.
+    ask_close: bool,
+    close: bool,
+    /// Layout beim ersten Zeichnen prüfen (wiederhergestellte Fenster).
+    needs_load: bool,
+}
+
+impl HubWindow {
+    pub(super) fn new(id: u64, view: WinView, pos: Option<Pos2>, size: Vec2, maximized: bool) -> Self {
+        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, outer: None, inner: None, maximized, ask_close: false, close: false, needs_load: true }
+    }
+    fn viewport(&self) -> egui::ViewportId {
+        viewport_of(self.id)
+    }
+}
+
+pub(super) fn viewport_of(window: u64) -> egui::ViewportId {
+    if window == 0 { egui::ViewportId::ROOT } else { egui::ViewportId::from_hash_of(("hubwin", window)) }
+}
+
+/// Alle weiteren Fenster und was zwischen ihnen vermittelt wird.
+#[derive(Default)]
+pub(super) struct Wins {
+    /// Gerade gezeichnetes Fenster (0 = Hauptfenster).
+    pub(super) cur: u64,
+    list: Vec<HubWindow>,
+    next: u64,
+    /// Weitergereichte Aktionen: (Zielfenster, Aktion).
+    queue: Vec<(u64, Action)>,
+    open_req: Option<OpenReq>,
+    /// Zähler für Datenänderungen (Eingaben in einem Fenster, Änderungen durch Agenten); Fenster mit älterem Stand laden die
+    /// Todo-Ansicht neu, damit Änderungen aus einem Fenster im anderen erscheinen.
+    pub(super) data_gen: u64,
+    main_gen: u64,
+    main_focused: bool,
+}
+
+impl Wins {
+    pub(super) fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+}
+
+fn icon() -> Arc<egui::IconData> {
+    static ICON: OnceLock<Arc<egui::IconData>> = OnceLock::new();
+    ICON.get_or_init(|| Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon64.png")).unwrap_or_default())).clone()
+}
+
+/// Gab es in diesem Bild eine Eingabe, die Daten ändern kann? Im Terminal Hub zählen nur Klicks (Tippen geht an die Shell).
+fn data_input(ctx: &egui::Context, tasks: bool) -> bool {
+    ctx.input(|i| {
+        i.events.iter().any(|e| match e {
+            Event::PointerButton { pressed: false, .. } => true,
+            Event::Key { pressed: true, .. } | Event::Text(_) | Event::Paste(_) => tasks,
+            _ => false,
+        })
+    })
+}
+
+impl App {
+    /// Gehört die Sitzung zum gerade gezeichneten Fenster?
+    pub(super) fn in_win(&self, e: &Entry) -> bool {
+        e.meta.window == self.wins.cur
+    }
+
+    /// Fenster der Sitzung (falls es sie gibt).
+    pub(super) fn window_of(&self, id: u64) -> Option<u64> {
+        self.entries.get(&id).map(|e| e.meta.window)
+    }
+
+    /// Aktion an das Fenster der Zielsitzung weiterreichen, wenn es ein anderes ist. `true` = weitergereicht.
+    pub(super) fn route(&mut self, ctx: &egui::Context, a: &Action) -> bool {
+        let Some(w) = route_target(a, |id| self.window_of(id), |id| self.detached.contains(&id), self.wins.cur) else { return false };
+        self.wins.queue.push((w, a.clone()));
+        ctx.request_repaint();
+        true
+    }
+
+    /// Weitergereichte Aktionen für das gerade gezeichnete Fenster; das Fenster kommt dabei nach vorn.
+    fn take_routed(&mut self, ctx: &egui::Context) -> Vec<Action> {
+        let cur = self.wins.cur;
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.wins.queue).into_iter().partition(|(w, _)| *w == cur);
+        self.wins.queue = rest;
+        if mine.is_empty() {
+            return Vec::new();
+        }
+        if cur == 0 && self.in_tray {
+            self.from_tray(ctx);
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        mine.into_iter().map(|(_, a)| a).collect()
+    }
+
+    /// Strg+Klick auf einen Reiter: neues Fenster mit diesem Reiter vormerken (wird nach dem Bild angelegt).
+    pub(super) fn request_window(&mut self, ctx: &egui::Context, mode: titlebar::Mode) {
+        let (from, size) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect.map(|r| r.size())));
+        self.wins.open_req = Some(OpenReq { mode, project: self.active_project, from, size });
+        ctx.request_repaint();
+    }
+
+    /// Hauptfenster, Beginn des Bildes: Fokuszustand merken, Ansicht prüfen, Todo-Ansicht ggf. neu laden, weitergereichte Aktionen.
+    pub(super) fn main_frame_begin(&mut self, ctx: &egui::Context) -> Vec<Action> {
+        debug_assert_eq!(self.wins.cur, 0);
+        self.wins.main_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if self.wins.main_gen != self.wins.data_gen {
+            self.wins.main_gen = self.wins.data_gen;
+            self.plan.invalidate();
+            self.tasks.invalidate();
+        }
+        if !self.wins.is_empty() {
+            self.prune_view();
+        }
+        self.take_routed(ctx)
+    }
+
+    /// Hinweise und Toasts erscheinen im Fenster, das der Nutzer gerade benutzt: im Hauptfenster, außer ein weiteres Fenster
+    /// ist im Vordergrund (dann zeichnet dieses sie, siehe `child_frame`).
+    pub(super) fn main_overlay(&self) -> bool {
+        self.wins.main_focused || !self.wins.list.iter().any(|w| w.os_focused)
+    }
+
+    /// Ist der Ticket-Verknüpfungsdialog für eine Sitzung dieses Fensters offen?
+    pub(super) fn picker_here(&self) -> bool {
+        self.tlinks_picker_session().is_none_or(|s| self.window_of(s).unwrap_or(0) == self.wins.cur)
+    }
+
+    /// Angesehene Sitzung über alle Fenster (für „gesehen“ und Benachrichtigungen). Nur mit dem Hauptfenster in den Feldern.
+    pub(super) fn seen_focus(&self, ctx: &egui::Context) -> (bool, u64) {
+        let main = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        pick_seen(main, self.focused, self.wins.list.iter().map(|w| (w.os_focused, w.view.focused)))
+    }
+
+    /// Für `list_sessions`: (Fenster, im Fenster fokussiert, sichtbar). „Sichtbar“ wie bisher: im aktiven Projekt seines Fensters
+    /// (Seitenleiste) oder abgedockt. Nur mit dem Hauptfenster in den Feldern.
+    pub(super) fn session_view_info(&self, id: u64) -> (u64, bool, bool) {
+        let Some(e) = self.entries.get(&id) else { return (0, false, false) };
+        let w = e.meta.window;
+        let detached = self.detached.contains(&id);
+        if w == 0 {
+            return (0, self.focused == id, detached || e.meta.project == self.active_project);
+        }
+        match self.wins.list.iter().find(|x| x.id == w) {
+            Some(x) => (w, x.view.focused == id, detached || e.meta.project == x.view.active_project),
+            None => (w, false, detached),
+        }
+    }
+
+    /// Layout der gerade gezeichneten Ansicht bereinigen: nur Sitzungen dieses Fensters und Projekts, nichts Abgedocktes.
+    fn prune_view(&mut self) {
+        if !self.projects.iter().any(|p| p.id == self.active_project) {
+            if let Some(first) = self.projects.first().map(|p| p.id) {
+                self.active_project = first;
+                let f = self.focused;
+                self.load_project_view(None, f);
+            }
+        }
+        let (pid, win) = (self.active_project, self.wins.cur);
+        if let Some(l) = self.layout.take() {
+            let entries = &self.entries;
+            let detached = &self.detached;
+            self.layout = prune_layout(l, |id| entries.get(&id).is_some_and(|e| e.meta.project == pid && e.meta.window == win) && !detached.contains(&id));
+        }
+        let ok = self.layout.as_ref().is_some_and(|l| l.contains(self.focused));
+        if !ok {
+            let mut v = Vec::new();
+            if let Some(l) = &self.layout {
+                l.leaves(&mut v);
+            }
+            self.focused = v.first().copied().unwrap_or(0);
+        }
+    }
+
+    fn enter(&mut self, w: &mut HubWindow) {
+        swap_view(self, &mut w.view);
+        self.wins.cur = w.id;
+        if w.data_gen != self.wins.data_gen {
+            w.data_gen = self.wins.data_gen;
+            self.plan.invalidate();
+            self.tasks.invalidate();
+        }
+        if w.needs_load {
+            w.needs_load = false;
+            let (l, f) = (self.layout.take(), self.focused);
+            self.load_project_view(l, f);
+        }
+        self.prune_view();
+    }
+
+    fn leave(&mut self, w: &mut HubWindow) {
+        swap_view(self, &mut w.view);
+        self.wins.cur = 0;
+    }
+
+    /// Laufende Sitzungen eines Fensters.
+    fn running_in(&self, window: u64) -> usize {
+        self.entries.values().filter(|e| e.meta.window == window && !e.exited()).count()
+    }
+
+    /// Weitere Fenster anlegen, zeichnen und schließen. Im Hauptfenster nach dessen Aktionen aufrufen.
+    pub(super) fn hub_windows(&mut self, ctx: &egui::Context) {
+        debug_assert_eq!(self.wins.cur, 0);
+        if !self.wins.is_empty() && data_input(ctx, self.mode == titlebar::Mode::Tasks) {
+            self.wins.data_gen += 1;
+            self.wins.main_gen = self.wins.data_gen;
+        }
+        if let Some(req) = self.wins.open_req.take() {
+            self.open_window(req);
+        }
+        let mut list = std::mem::take(&mut self.wins.list);
+        for w in list.iter_mut() {
+            self.enter(w);
+            let title = if w.hwnd.is_none() && w.hwnd_tries < 120 { format!("Paneldeck #{}", w.id) } else if self.last_title.is_empty() { "Paneldeck".to_string() } else { self.last_title.clone() };
+            let mut b = egui::ViewportBuilder::default()
+                .with_title(title.clone())
+                .with_inner_size(w.init_size)
+                .with_min_inner_size([640.0, 400.0])
+                .with_transparent(true)
+                .with_decorations(false)
+                .with_icon(icon());
+            if let Some(p) = w.init_pos {
+                b = b.with_position(p);
+            }
+            if w.init_max {
+                b = b.with_maximized(true);
+            }
+            ctx.show_viewport_immediate(w.viewport(), b, |ctx, class| {
+                if class == egui::ViewportClass::Embedded {
+                    return; // ohne echte Fenster (nur in Tests/anderen Oberflächen) gibt es keine weiteren Fenster
+                }
+                self.child_frame(ctx, w);
+            });
+            if w.hwnd.is_none() && w.hwnd_tries < 120 {
+                w.hwnd_tries += 1;
+                if let Some(h) = crate::winctl::find_own_window(&title) {
+                    w.hwnd = Some(h);
+                    winchrome::apply_corners(h);
+                }
+            }
+            if w.close {
+                let ids: Vec<u64> = self.entries.iter().filter(|(_, e)| e.meta.window == w.id).map(|(i, _)| *i).collect();
+                for id in ids {
+                    self.close_session(id);
+                }
+            }
+            self.leave(w);
+        }
+        list.retain(|w| !w.close);
+        let closed: Vec<u64> = self.wins.queue.iter().map(|(w, _)| *w).filter(|w| *w != 0 && !list.iter().any(|x| x.id == *w)).collect();
+        self.wins.queue.retain(|(w, _)| !closed.contains(w));
+        // Während des Zeichnens neu angelegte Fenster (Strg+Klick im weiteren Fenster) anhängen.
+        list.append(&mut self.wins.list);
+        self.wins.list = list;
+        if let Some(req) = self.wins.open_req.take() {
+            self.open_window(req);
+        }
+    }
+
+    fn open_window(&mut self, req: OpenReq) {
+        self.wins.next = self.wins.next.max(1);
+        let id = self.wins.next;
+        self.wins.next += 1;
+        let project = if self.projects.iter().any(|p| p.id == req.project) { req.project } else { self.projects.first().map(|p| p.id).unwrap_or(0) };
+        let pos = req.from.map(|r| r.min + Vec2::splat(32.0));
+        let size = req.size.unwrap_or(Vec2::new(1100.0, 720.0)).max(Vec2::new(640.0, 400.0));
+        let mut w = HubWindow::new(id, WinView::new(req.mode, project), pos, size, false);
+        w.needs_load = false; // leer, nichts zu prüfen
+        w.data_gen = self.wins.data_gen;
+        self.wins.list.push(w);
+    }
+
+    /// Ein Bild eines weiteren Fensters (die Ansicht ist schon eingetauscht).
+    fn child_frame(&mut self, ctx: &egui::Context, w: &mut HubWindow) {
+        let (close_req, focused, minimized, maximized, outer, inner) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.close_requested(), v.focused.unwrap_or(false), v.minimized.unwrap_or(false), v.maximized.unwrap_or(false), v.outer_rect, v.inner_rect)
+        });
+        w.os_focused = focused;
+        w.maximized = maximized;
+        if !minimized && !maximized {
+            w.outer = outer.or(w.outer);
+            w.inner = inner.or(w.inner);
+        }
+        if close_req && !w.close {
+            if self.running_in(w.id) > 0 && self.settings.confirm_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                w.ask_close = true;
+            } else {
+                w.close = true;
+            }
+        }
+        let mut actions = self.take_routed(ctx);
+        self.handle_drops(ctx);
+        self.titlebar(ctx);
+        self.window_edges(ctx);
+        self.mode_shortcuts(ctx);
+        let tasks = self.mode == titlebar::Mode::Tasks;
+        if !tasks {
+            self.shortcuts(ctx, &mut actions);
+            self.sidebar(ctx, &mut actions);
+            self.files_ui(ctx, &mut actions);
+            self.central(ctx, &mut actions);
+            self.handle_drag(ctx);
+        } else {
+            self.tasks_view(ctx);
+        }
+        if w.os_focused && !self.wins.main_focused {
+            self.notice_ui(ctx);
+            self.toasts_ui(ctx);
+        }
+        self.text_prompt_ui(ctx, &mut actions);
+        self.dialogs(ctx, &mut actions);
+        if self.picker_here() {
+            self.tlinks_picker_ui(ctx);
+        }
+        if w.ask_close {
+            self.close_window_dialog(ctx, w);
+        }
+        for a in actions {
+            self.apply(ctx, a);
+        }
+        let title = self.view_title(w.id);
+        if title != self.last_title {
+            self.last_title = title;
+        }
+        if data_input(ctx, tasks) {
+            self.wins.data_gen += 1;
+            w.data_gen = self.wins.data_gen;
+        }
+        let animating = self.entries.values().any(|e| e.meta.window == w.id && e.status == ClaudeStatus::Working && !e.exited());
+        if animating {
+            ctx.request_repaint_after(Duration::from_millis(80));
+        }
+    }
+
+    /// Fenstertitel der gerade gezeichneten Ansicht (weitere Fenster tragen ihre Nummer).
+    fn view_title(&self, window: u64) -> String {
+        let waiting = self.entries.values().filter(|e| e.needs_you()).count();
+        let prefix = if waiting > 0 { format!("({waiting}) ") } else { String::new() };
+        let base = match self.entries.get(&self.focused) {
+            Some(e) if self.mode == titlebar::Mode::Terminals => format!("{prefix}{} – Paneldeck", e.display_name()),
+            _ => format!("{prefix}Paneldeck"),
+        };
+        if window == 0 { base } else { format!("{base} ({})", window + 1) }
+    }
+
+    /// Kurzer Hinweis unten in der Mitte (`notify_text`).
+    pub(super) fn notice_ui(&mut self, ctx: &egui::Context) {
+        if let Some((text, t0)) = &self.notice {
+            if t0.elapsed() > Duration::from_secs(5) {
+                self.notice = None;
+            } else {
+                let text = text.clone();
+                egui::Area::new(Id::new("notice")).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -18.0)).order(egui::Order::Tooltip).show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(10)).show(ui, |ui| {
+                        ui.label(text);
+                    });
+                });
+                ctx.request_repaint_after(Duration::from_millis(500));
+            }
+        }
+    }
+
+    /// Rückfrage beim Schließen eines weiteren Fensters mit laufenden Sitzungen.
+    fn close_window_dialog(&mut self, ctx: &egui::Context, w: &mut HubWindow) {
+        let lang = self.settings.language;
+        let n = self.running_in(w.id);
+        if n == 0 {
+            w.ask_close = false;
+            w.close = true;
+            return;
+        }
+        egui::Window::new(lang.t("Fenster schließen?", "Close window?"))
+            .id(Id::new(("close_win_ask", w.id)))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(if n == 1 {
+                    lang.t("In diesem Fenster läuft noch eine Sitzung. Beim Schließen wird sie beendet.", "One session is still running in this window. Closing the window will end it.").to_string()
+                } else if lang == Lang::De {
+                    format!("In diesem Fenster laufen noch {n} Sitzungen. Beim Schließen werden sie beendet.")
+                } else {
+                    format!("{n} sessions are still running in this window. Closing the window will end them.")
+                });
+                ui.horizontal(|ui| {
+                    if ui.button(lang.t("Fenster schließen", "Close window")).clicked() {
+                        w.ask_close = false;
+                        w.close = true;
+                    }
+                    if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
+                        w.ask_close = false;
+                    }
+                });
+            });
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            w.ask_close = false;
+        }
+    }
+
+    /// Weitere Fenster für `state.json`. Nur mit dem Hauptfenster in den Feldern aufrufen.
+    pub(super) fn saved_windows(&self) -> Vec<SavedWindow> {
+        self.wins
+            .list
+            .iter()
+            .map(|w| SavedWindow {
+                id: w.id,
+                tab: mode_key(w.view.mode).to_string(),
+                project: w.view.active_project,
+                layout: w.view.layout.clone(),
+                focused: w.view.focused,
+                views: w.view.proj_views.iter().filter(|(p, _, _)| *p != w.view.active_project).map(|(p, l, f)| SavedProjectView { project: *p, layout: l.clone(), focused: *f }).collect(),
+                pos: w.outer.or(w.init_pos.map(|p| Rect::from_min_size(p, Vec2::ZERO))).map(|r| [r.min.x, r.min.y]),
+                size: Some(w.inner.map(|r| r.size()).unwrap_or(w.init_size)).map(|s| [s.x, s.y]),
+                maximized: w.maximized,
+            })
+            .collect()
+    }
+
+    /// Weitere Fenster aus `state.json` wiederherstellen (nach dem Laden der Sitzungen und Projekte, vor der Ansicht des
+    /// Hauptfensters). Sitzungen ohne gültiges Fenster gehen ans Hauptfenster.
+    pub(super) fn restore_windows(&mut self, saved: &[SavedWindow]) {
+        let mut ids: Vec<u64> = Vec::new();
+        for s in saved {
+            if s.id == 0 || ids.contains(&s.id) {
+                continue;
+            }
+            ids.push(s.id);
+            let project = if self.projects.iter().any(|p| p.id == s.project) { s.project } else { self.projects.first().map(|p| p.id).unwrap_or(0) };
+            let mut view = WinView::new(mode_from_key(&s.tab), project);
+            view.layout = s.layout.clone();
+            view.focused = s.focused;
+            view.proj_views = s.views.iter().filter(|v| v.project != project).map(|v| (v.project, v.layout.clone(), v.focused)).collect();
+            let pos = s.pos.map(|p| Pos2::new(p[0], p[1])).filter(|p| crate::winctl::point_on_screen(p.x, p.y));
+            let size = s.size.map(|v| Vec2::new(v[0], v[1])).unwrap_or(Vec2::new(1100.0, 720.0)).max(Vec2::new(640.0, 400.0));
+            self.wins.list.push(HubWindow::new(s.id, view, pos, size, s.maximized));
+        }
+        self.wins.next = ids.iter().copied().max().unwrap_or(0) + 1;
+        adopt_orphans(self.entries.values_mut().map(|e| &mut e.meta.window), &ids);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{SavedState, SessionMeta};
+
+    fn leaves(n: &Option<Node>) -> Vec<u64> {
+        let mut v = Vec::new();
+        if let Some(n) = n {
+            n.leaves(&mut v);
+        }
+        v
+    }
+
+    fn project(id: u64, layout: Option<Node>, focused: u64) -> Project {
+        Project { id, layout, focused, ..Project::default() }
+    }
+
+    #[test]
+    fn project_views_swap_back_and_forth() {
+        // Hauptfenster: Projekt 1 hat Layout [1], Projekt 2 [2]; das weitere Fenster kennt nur Projekt 2 mit [7].
+        let mut projects = vec![project(1, Some(Node::Leaf(1)), 1), project(2, Some(Node::Leaf(2)), 2)];
+        let mut stash = vec![(2, Some(Node::Leaf(7)), 7), (99, Some(Node::Leaf(9)), 9)];
+        swap_project_views(&mut projects, &mut stash);
+        assert_eq!(leaves(&projects[0].layout), Vec::<u64>::new(), "Projekt 1 ist im weiteren Fenster leer");
+        assert_eq!(leaves(&projects[1].layout), vec![7]);
+        assert_eq!(projects[1].focused, 7);
+        // Während das weitere Fenster aktiv ist, entsteht ein neues Projekt.
+        projects.push(project(3, Some(Node::Leaf(30)), 30));
+        swap_project_views(&mut projects, &mut stash);
+        assert_eq!(leaves(&projects[0].layout), vec![1], "zurück: Hauptfenster hat seine Layouts wieder");
+        assert_eq!(leaves(&projects[1].layout), vec![2]);
+        assert_eq!(leaves(&projects[2].layout), Vec::<u64>::new(), "neues Projekt hat im Hauptfenster noch kein Layout");
+        let in_stash: Vec<u64> = stash.iter().map(|s| s.0).collect();
+        assert_eq!(in_stash, vec![1, 2, 3], "gelöschtes Projekt 99 fällt weg");
+        assert_eq!(leaves(&stash[2].1), vec![30], "das weitere Fenster behält sein Layout des neuen Projekts");
+    }
+
+    #[test]
+    fn prune_removes_foreign_and_missing_sessions() {
+        let l = Node::grid(&[1, 2, 3, 4], Dir::Horizontal).unwrap();
+        let kept = prune_layout(l, |id| id % 2 == 0);
+        assert_eq!(leaves(&kept), vec![2, 4]);
+        assert!(prune_layout(Node::Leaf(5), |_| false).is_none(), "nichts übrig → kein Layout (leerer Hub)");
+    }
+
+    #[test]
+    fn seen_session_follows_the_foreground_window() {
+        assert_eq!(pick_seen(true, 1, [(true, 5)].into_iter()), (true, 1));
+        assert_eq!(pick_seen(false, 1, [(false, 4), (true, 5)].into_iter()), (true, 5));
+        assert_eq!(pick_seen(false, 1, [(false, 4)].into_iter()), (false, 1), "kein Fenster vorn: nichts gilt als gesehen");
+    }
+
+    #[test]
+    fn actions_for_sessions_of_other_windows_are_routed() {
+        let window = |id: u64| match id {
+            1 => Some(0),
+            2 => Some(3),
+            _ => None,
+        };
+        let detached = |id: u64| id == 9;
+        assert_eq!(route_target(&Action::Activate(2), window, detached, 0), Some(3));
+        assert_eq!(route_target(&Action::Focus(2), window, detached, 0), Some(3));
+        assert_eq!(route_target(&Action::JumpTo(1), window, detached, 3), Some(0));
+        assert_eq!(route_target(&Action::GlobalJump(2, 4, "x".into()), window, detached, 0), Some(3));
+        assert_eq!(route_target(&Action::Attach(2), window, detached, 0), Some(3));
+        assert_eq!(route_target(&Action::Activate(2), window, detached, 3), None, "eigenes Fenster: hier ausführen");
+        assert_eq!(route_target(&Action::Activate(42), window, detached, 0), None, "unbekannte Sitzung");
+        assert_eq!(route_target(&Action::NewQuick, window, detached, 0), None);
+        let det_other = |id: u64| if id == 9 { Some(3) } else { None };
+        assert_eq!(route_target(&Action::Activate(9), det_other, detached, 0), None, "abgedockt: das Fenster der Sitzung holt jeder nach vorn");
+        assert_eq!(route_target(&Action::Attach(9), det_other, detached, 0), Some(3), "Anheften gehört ins Fenster der Sitzung");
+    }
+
+    #[test]
+    fn ctrl_click_opens_a_window_plain_click_switches() {
+        assert!(opens_window(Modifiers::COMMAND));
+        assert!(opens_window(Modifiers::CTRL | Modifiers::COMMAND));
+        assert!(!opens_window(Modifiers::NONE));
+        assert!(!opens_window(Modifiers::COMMAND | Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn mode_keys_round_trip_and_unknown_is_terminals() {
+        for m in [titlebar::Mode::Terminals, titlebar::Mode::Tasks] {
+            assert_eq!(mode_from_key(mode_key(m)), m);
+        }
+        assert_eq!(mode_from_key(""), titlebar::Mode::Terminals);
+        assert_eq!(mode_from_key("editor"), titlebar::Mode::Terminals);
+    }
+
+    #[test]
+    fn orphaned_sessions_return_to_the_main_window() {
+        let mut w = [0u64, 2, 5, 2];
+        adopt_orphans(w.iter_mut(), &[2]);
+        assert_eq!(w, [0, 2, 0, 2]);
+    }
+
+    #[test]
+    fn new_window_view_starts_empty_with_the_clicked_tab() {
+        let v = WinView::new(titlebar::Mode::Tasks, 4);
+        assert!(v.layout.is_none() && v.focused == 0, "neues Fenster ohne Sitzung (#111)");
+        assert_eq!(v.mode, titlebar::Mode::Tasks);
+        assert_eq!(v.active_project, 4);
+        assert!(v.proj_views.is_empty());
+    }
+
+    #[test]
+    fn state_without_windows_loads_and_stays_compact() {
+        // Alter Stand (vor 2.1.0): keine Fenster, kein `window`-Feld.
+        let dir = std::env::temp_dir().join(format!("paneldeck-test-multiwin-old-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("state.json");
+        std::fs::write(&p, r#"{"sessions":[{"id":3,"name":"pwsh","project":1}],"next_id":4,"projects":[{"id":1,"name":"Standard"}],"active_project":1}"#).unwrap();
+        let (st, note) = crate::state::load_saved(&p);
+        assert!(note.is_none());
+        assert_eq!(st.sessions.len(), 1);
+        assert_eq!(st.sessions[0].window, 0);
+        assert!(st.extra_windows.is_empty());
+        // Ohne weitere Fenster schreibt Paneldeck weder `extra_windows` noch `window` (ältere Versionen sehen dieselbe Datei).
+        let v = serde_json::to_value(&st).unwrap();
+        assert!(v.get("extra_windows").is_none());
+        assert!(v["sessions"][0].get("window").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_with_windows_round_trips() {
+        let dir = std::env::temp_dir().join(format!("paneldeck-test-multiwin-new-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("state.json");
+        let st = SavedState {
+            sessions: vec![SessionMeta { id: 3, project: 1, ..SessionMeta::default() }, SessionMeta { id: 4, project: 1, window: 2, ..SessionMeta::default() }],
+            next_id: 5,
+            projects: vec![Project { id: 1, ..Project::default() }],
+            active_project: 1,
+            extra_windows: vec![SavedWindow {
+                id: 2,
+                tab: "tasks".into(),
+                project: 1,
+                layout: Some(Node::Leaf(4)),
+                focused: 4,
+                views: vec![SavedProjectView { project: 7, layout: None, focused: 0 }],
+                pos: Some([100.0, 80.0]),
+                size: Some([900.0, 600.0]),
+                maximized: true,
+            }],
+            ..SavedState::default()
+        };
+        crate::state::save_json(&p, &st);
+        let (back, note) = crate::state::load_saved(&p);
+        assert!(note.is_none());
+        assert_eq!(back.sessions.iter().map(|s| (s.id, s.window)).collect::<Vec<_>>(), vec![(3, 0), (4, 2)]);
+        assert_eq!(back.extra_windows.len(), 1);
+        let w = &back.extra_windows[0];
+        assert_eq!((w.id, w.tab.as_str(), w.project, w.focused, w.maximized), (2, "tasks", 1, 4, true));
+        assert_eq!(leaves(&w.layout), vec![4]);
+        assert_eq!(w.pos, Some([100.0, 80.0]));
+        assert_eq!(w.size, Some([900.0, 600.0]));
+        assert_eq!(w.views.len(), 1);
+        // Eine ältere Version (ohne die neuen Felder) liest die Datei weiter: unbekannte Felder werden ignoriert.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OldMeta {
+            id: u64,
+            project: u64,
+        }
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OldState {
+            sessions: Vec<OldMeta>,
+            next_id: u64,
+        }
+        let text = std::fs::read_to_string(&p).unwrap();
+        let old: OldState = serde_json::from_str(crate::state::strip_bom(&text)).unwrap();
+        assert_eq!(old.sessions.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

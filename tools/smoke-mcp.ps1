@@ -115,6 +115,7 @@ try {
   Check 'tools/list nur Lese-Werkzeuge' ($names -contains 'list_sessions' -and $names -contains 'read_terminal' -and $names -notcontains 'send_text')
   $ls = Tool 'list_sessions'; Check 'list_sessions' (-not $ls.err -and $ls.data.sessions.Count -ge 1)
   $sid = $ls.data.sessions[0].id
+  Check 'list_sessions: Feld window (0 = Hauptfenster)' ($ls.data.sessions[0].PSObject.Properties.Name -contains 'window' -and $ls.data.sessions[0].window -eq 0)
   $rt = Tool 'read_terminal' @{ session = $sid; lines = 5 }; Check 'read_terminal' (-not $rt.err -and $null -ne $rt.data.text)
   Check 'get_usage' (-not (Tool 'get_usage').err)
   Check 'search_history' (-not (Tool 'search_history' @{ query = 'smoke-test-gibt-es-nicht-xyz' }).err)

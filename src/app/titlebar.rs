@@ -75,10 +75,11 @@ impl App {
                     (Mode::Terminals, SIcon::Terminal, lang.t("Terminal Hub", "Terminal Hub")),
                     (Mode::Tasks, SIcon::Checklist, lang.t("Todo-Liste", "Todo list")),
                 ];
+                let ctrl_hint = lang.t("Strg+Klick: in neuem Fenster öffnen", "Ctrl+click: open in a new window");
                 let mut x = rect.left() + 42.0;
                 for (mode, icon, tip) in tabs {
                     let r = Rect::from_min_size(Pos2::new(x, rect.top() + 4.0), Vec2::new(40.0, BAR_HEIGHT - 8.0));
-                    let resp = ui.interact(r, Id::new(("titlebar_tab", mode as u8)), Sense::click()).on_hover_text(tip);
+                    let resp = ui.interact(r, Id::new(("titlebar_tab", mode as u8)), Sense::click()).on_hover_text(format!("{tip}\n{ctrl_hint}"));
                     let active = self.mode == mode;
                     if active {
                         painter.rect_filled(r, 6.0, style::accent().gamma_multiply(0.22));
@@ -88,7 +89,12 @@ impl App {
                     }
                     style::paint_icon(painter, icon, r.center(), if active { style::accent() } else { fg });
                     if resp.clicked() {
-                        self.set_mode(mode);
+                        // Strg+Klick: Reiter in einem neuen Fenster öffnen (#110), sonst nur umschalten.
+                        if super::multiwin::opens_window(ui.input(|i| i.modifiers)) {
+                            self.request_window(ctx, mode);
+                        } else {
+                            self.set_mode(mode);
+                        }
                     }
                     x += 44.0;
                 }
@@ -103,9 +109,11 @@ impl App {
                     let r = Rect::from_min_size(Pos2::new(bx, rect.top()), Vec2::new(bw, BAR_HEIGHT));
                     let resp = ui.interact(r, Id::new(("titlebar_btn", i)), Sense::click());
                     let close = i == 2;
-                    // Maximieren-Knopf: Rechteck ans System melden (Snap-Layouts); dort kommt der Hover nicht mehr von egui
-                    let snap_hover = i == 1 && winchrome::max_hover();
-                    if i == 1 {
+                    // Maximieren-Knopf: Rechteck ans System melden (Snap-Layouts); dort kommt der Hover nicht mehr von egui.
+                    // Nur im Hauptfenster: weitere Fenster haben keine eigene Fensterprozedur (dort ohne Snap-Layouts).
+                    let main = self.wins.cur == 0;
+                    let snap_hover = main && i == 1 && winchrome::max_hover();
+                    if main && i == 1 {
                         winchrome::report_max_button(r, ctx.pixels_per_point(), if maximized { 0.0 } else { EDGE });
                     }
                     if resp.hovered() || snap_hover {

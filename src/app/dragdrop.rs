@@ -14,7 +14,7 @@ impl App {
         }
         let end = if target.is_empty() { full.max.y - 1.0 } else { full.max.y - 5.0 };
         let proj = self.projects.iter().find(|p| p.id == self.active_project)?;
-        let mut sess: Vec<u64> = self.entries.iter().filter(|(i, e)| e.meta.project == self.active_project && e.meta.group == target && **i != dragged).map(|(i, _)| *i).collect();
+        let mut sess: Vec<u64> = self.entries.iter().filter(|(i, e)| e.meta.project == self.active_project && self.in_win(e) && e.meta.group == target && **i != dragged).map(|(i, _)| *i).collect();
         sess.sort();
         let nsubs = proj.folders.iter().filter(|f| state::folder_parent(&f.path) == target && Some(f.path.as_str()) != folder_drag).count();
         if sess.is_empty() && nsubs == 0 {
