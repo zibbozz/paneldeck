@@ -1,5 +1,5 @@
 #!/bin/bash
-# Verwendung: tools/release.sh <version> [--publish] [--skip-smoke] [--no-git]
+# Verwendung: tools/release.sh <version> [--publish] [--skip-smoke] [--no-git] [--ignore-defender]
 #
 # Release-Lauf für den Branch release/x.y (siehe CLAUDE.md, „Branching- und Release-Strategie“). Dieses Skript committet NICHT:
 # Versionsnummer, Changelog-Datum und Titel kommen vorher über einen Pull Request in release/x.y (tools/release-prep.sh).
@@ -7,6 +7,9 @@
 #   --publish        zusätzlich: nur das Tag pushen und das GitHub-Release anlegen (braucht `gh`, angemeldet)
 #   --no-git         nur bauen und packen (Probelauf auf jedem Branch; kein Tag, kein Push)
 #   --skip-smoke     Smoke-Test und Update-Test (tools/smoke-mcp.ps1, tools/update-test.ps1; nur Windows) überspringen
+#   --ignore-defender  trotz Defender-Treffer weitermachen (nur nach Rücksprache mit dem Nutzer; Fehlalarm vorher bei Microsoft melden)
+# Defender-Prüfung (Windows, Vorgabe des Nutzers): paneldeck.exe und Installer werden vor Tag/Veröffentlichung mit
+#   tools/defender-scan.ps1 geprüft; bei einem Treffer bricht das Skript ab und gibt die Werte für das Microsoft-Formular aus.
 # Prüfungen (außer mit --no-git): Branch ist release/<x.y> passend zur Version · Arbeitsbaum sauber · Stand == origin/release/<x.y> ·
 #   Cargo.toml-Version · Changelog-Abschnitt mit heutigem Datum (= Tag-Datum) in Changelog.md und Changelog.de.md · englischer Text docs/release-notes/<v>.en.md · Titel.
 # Das GitHub-Release ist ein normales Release (Pre-release nur, wenn die Version ein „-“ enthält; Release Candidates nutzen wir nicht).
@@ -16,10 +19,11 @@ cd "$(dirname "$0")/.."
 source tools/common.sh
 
 V="${1:?Version fehlt}"; shift
-PUBLISH=0; NOGIT=0; SKIP_SMOKE=0
+PUBLISH=0; NOGIT=0; SKIP_SMOKE=0; IGNORE_DEFENDER=0
 for a in "$@"; do
   case "$a" in
     --publish) PUBLISH=1 ;;
+    --ignore-defender) IGNORE_DEFENDER=1 ;;
     --no-git) NOGIT=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     *) echo "Unbekannte Option: $a"; exit 1 ;;
@@ -64,6 +68,28 @@ sha256sum "dist/paneldeck-$V.exe" | tee "dist/paneldeck-$V.sha256"
 if [ "$IS_WIN" = 1 ]; then
   n="$(grep -a -c -i -E 'C:\\Users|E:\\claude|E:\\paneldeck' "dist/paneldeck-$V.exe" || true)"
   [ "$n" = 0 ] || { echo "Programmdatei enthält Pfade des Build-Rechners ($n Treffer)"; exit 1; }
+fi
+
+# Defender-Prüfung auf Fehlalarme (Windows): paneldeck.exe (steckt unverändert auch im ZIP) und der Installer.
+if [ "$IS_WIN" = 1 ]; then
+  echo "== Defender-Prüfung (tools/defender-scan.ps1)"
+  DEF_FILES=("$(abspath "dist/paneldeck-$V.exe")")
+  [ -f "dist/Paneldeck-Setup-$V.exe" ] && DEF_FILES+=("$(abspath "dist/Paneldeck-Setup-$V.exe")")
+  set +e
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/defender-scan.ps1 "${DEF_FILES[@]}"
+  DEF_RC=$?
+  set -e
+  if [ "$DEF_RC" = 1 ]; then
+    if [ "$IGNORE_DEFENDER" = 1 ]; then
+      echo "WARNUNG: Defender meldet einen Treffer – weiter wegen --ignore-defender."
+    else
+      echo "Defender meldet einen Treffer: Release angehalten. Fehlalarm bei Microsoft melden (Werte siehe oben),"
+      echo "dann neu prüfen oder nach Rücksprache mit dem Nutzer mit --ignore-defender fortfahren."
+      exit 1
+    fi
+  elif [ "$DEF_RC" != 0 ]; then
+    echo "WARNUNG: Defender-Prüfung nicht möglich (Exit $DEF_RC) – bitte von Hand prüfen: tools/defender-scan.ps1 <Dateien>"
+  fi
 fi
 
 # Ende-zu-Ende-Test der gebauten .exe (Windows): startet sie in einem Temp-Ordner und prüft die Agenten-Schnittstelle.
