@@ -15,17 +15,6 @@ pub(super) enum Mode {
 
 pub(super) const BAR_HEIGHT: f32 = 34.0;
 
-/// Stärke des unsichtbaren Fensterrahmens in Pixeln (Windows): so weit ragt ein maximiertes Fenster über den Bildschirmrand.
-#[cfg(windows)]
-fn frame_px() -> f32 {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXPADDEDBORDER, SM_CXSIZEFRAME};
-    // SAFETY: GetSystemMetrics liest nur Systemwerte und hat keine Voraussetzungen.
-    unsafe { (GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER)) as f32 }
-}
-#[cfg(not(windows))]
-fn frame_px() -> f32 {
-    0.0
-}
 const EDGE: f32 = 6.0;
 
 impl App {
@@ -36,18 +25,8 @@ impl App {
         let (maximized, focused) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().focused.unwrap_or(true)));
         let c = theme.bg;
         let fill = Color32::from_rgba_unmultiplied((c.r() as f32 * 0.78) as u8, (c.g() as f32 * 0.78) as u8, (c.b() as f32 * 0.78) as u8, c.a());
-        if maximized {
-            // Ein maximiertes rahmenloses Fenster ragt auf allen Seiten um die unsichtbare Rahmenstärke über den Bildschirm hinaus:
-            // Inhalt entsprechend einrücken, damit nichts abgeschnitten wird.
-            let inset = frame_px() / ctx.pixels_per_point();
-            if inset > 0.0 {
-                let none = egui::Frame::NONE;
-                egui::TopBottomPanel::top("max_inset_top").exact_height(inset).show_separator_line(false).frame(none).show(ctx, |_| {});
-                egui::TopBottomPanel::bottom("max_inset_bottom").exact_height(inset).show_separator_line(false).frame(none).show(ctx, |_| {});
-                egui::SidePanel::left("max_inset_left").exact_width(inset).show_separator_line(false).frame(none).show(ctx, |_| {});
-                egui::SidePanel::right("max_inset_right").exact_width(inset).show_separator_line(false).frame(none).show(ctx, |_| {});
-            }
-        }
+        // Kein Einrücken beim Maximieren: winit begrenzt den Client-Bereich eines maximierten rahmenlosen Fensters schon selbst
+        // auf den Arbeitsbereich des Monitors (WM_NCCALCSIZE → rcWork). Ein zusätzlicher Rand wäre durchsichtig (#134).
         let title = if self.last_title.is_empty() { "Paneldeck".to_string() } else { self.last_title.clone() };
         egui::TopBottomPanel::top("titlebar")
             .exact_height(BAR_HEIGHT)
