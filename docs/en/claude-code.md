@@ -8,7 +8,7 @@ Paneldeck is built for running many [Claude Code](https://docs.anthropic.com/en/
 
 ## Starting a Claude session
 - Click the **spark button** (or *New Claude session …* in the sidebar or the empty Terminal Hub), pick a folder, done. The start dialog also offers the model and the permission mode.
-- Right-click a folder in Explorer → *Start with Claude* (see [Windows integration](windows-integration.md)), or `paneldeck.exe --open <folder> --claude` (see [Command line](command-line.md)).
+- Right-click a folder in Explorer → *Start with Claude in Paneldeck* (see [Windows integration](windows-integration.md)), or `paneldeck.exe --open <folder> --claude` (see [Command line](command-line.md)).
 - A quick action of a ticket can start a Claude session linked to that ticket (see [Todo list and tickets](todo-and-tickets.md#quick-actions-and-the-quick-menu)).
 
 ## Status, notifications and the inbox

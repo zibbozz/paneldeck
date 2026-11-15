@@ -75,7 +75,7 @@ When an agent connects, Paneldeck sends it a guide in the MCP `initialize` reply
   | Placeholder | Replaced with |
   |---|---|
   | `{{tools}}` | the list of tools the agent can call at the current level and mode (all tools, marked with level and mode, when the level is Off or unknown) |
-  | `{{level}}` | the current level (`Off`, `Read only`, `Control`) |
+  | `{{level}}` | the current level (`Off`, `Read only`, `Control` – in the language of the prompt) |
   | `{{mode}}` | the current to-do mode (simple mode or expert mode) |
   | `{{version}}` | the Paneldeck version |
 

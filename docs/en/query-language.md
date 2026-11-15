@@ -9,7 +9,7 @@ The query bar highlights the syntax, underlines errors in red with a message and
 The **help page** (question-mark button next to the search field) contains the complete tutorial with all examples below, a troubleshooting section, the reference and the grammar, a full-text search, and a screenshot of the result for every example; a click on an example puts the query into the search.
 
 ## Basics
-A condition is *field operator value*. Field names with spaces and texts with spaces go in quotes.
+A condition is *field operator value*. Field names with spaces and texts with spaces go in quotes. Upper and lower case do not matter for keywords, field names and values; an empty query shows all tickets.
 
 | Query | Finds |
 |---|---|
