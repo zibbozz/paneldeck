@@ -15,7 +15,7 @@
     <path d="M126 96 L194 96 C210.569 96 224 109.431 224 126 L224 194 C224 210.569 210.569 224 194 224 L126 224 C109.431 224 96 210.569 96 194 L96 126 C96 109.431 109.431 96 126 96 Z" fill="#e0623f"/>
     <text transform="matrix(1 0 0 1 160 190)" x="0" y="0" xml:space="preserve" font-family="Consolas, monospace" font-size="64" font-weight="bold" fill="#ffffff" text-anchor="middle"><tspan x="0" y="0">&gt;_</tspan></text>
     <text transform="matrix(1 0 0 1 262 170)" x="0" y="0" xml:space="preserve" font-family="&apos;Segoe UI&apos;, sans-serif" font-size="84" font-weight="600" fill="#f6f3ef"><tspan x="0" y="0">Paneldeck</tspan></text>
-    <text transform="matrix(1 0 0 1 266 214)" x="0" y="0" xml:space="preserve" font-family="&apos;Segoe UI&apos;, sans-serif" font-size="27" fill="#c3bdd3"><tspan x="0" y="0">Alle deine Terminals. Ein Fenster.</tspan></text>
+    <text transform="matrix(1 0 0 1 266 214)" x="0" y="0" xml:space="preserve" font-family="&apos;Segoe UI&apos;, sans-serif" font-size="27" fill="#c3bdd3"><tspan x="0" y="0">Dein Werkzeug Nummer eins fürs agentische Coden.</tspan></text>
     <path d="M283 250 L361 250 C370.389 250 378 257.611 378 267 L378 267 C378 276.389 370.389 284 361 284 L283 284 C273.611 284 266 276.389 266 267 L266 267 C266 257.611 273.611 250 283 250 Z" fill="#ffffff" opacity="0.09"/>
     <path d="M285 262 L285 262 C287.761 262 290 264.239 290 267 L290 267 C290 269.761 287.761 272 285 272 L285 272 C282.239 272 280 269.761 280 267 L280 267 C280 264.239 282.239 262 285 262 Z" fill="#3fb950"/>
     <text transform="matrix(1 0 0 1 298 273)" x="0" y="0" xml:space="preserve" font-family="&apos;Segoe UI&apos;, sans-serif" font-size="16" fill="#e8e5f0"><tspan x="0" y="0">bereit</tspan></text>
