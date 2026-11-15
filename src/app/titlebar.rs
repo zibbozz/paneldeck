@@ -105,6 +105,7 @@ impl App {
                 // Fensterknöpfe rechts
                 let bw = 46.0;
                 let mut bx = rect.right() - bw * 3.0;
+                self.update_title_button(ui, bx); // Update-Knopf links neben Minimieren (update/ui.rs)
                 for (i, icon) in [SIcon::Minimize, if maximized { SIcon::Restore } else { SIcon::Maximize }, SIcon::Close].into_iter().enumerate() {
                     let r = Rect::from_min_size(Pos2::new(bx, rect.top()), Vec2::new(bw, BAR_HEIGHT));
                     let resp = ui.interact(r, Id::new(("titlebar_btn", i)), Sense::click());

@@ -421,6 +421,7 @@ impl App {
                                 self.show_licenses = !self.show_licenses;
                             }
                         });
+                        self.update_about_ui(ui); // Abschnitt „Updates“ (update/ui.rs)
                         if self.show_licenses {
                             ui.add_space(S1);
                             egui::ScrollArea::vertical().max_height(220.0).id_salt("lic").show(ui, |ui| {

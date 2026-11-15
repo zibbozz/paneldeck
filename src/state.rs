@@ -199,6 +199,12 @@ pub struct Settings {
     pub backup_dir: String,
     /// Wie viele Änderungen der Todo-Liste sich rückgängig machen lassen (3, 5, 10, 25, 50, 100).
     pub undo_steps: u32,
+    /// Automatisch nach Updates suchen (beim Start, höchstens einmal am Tag). Standard: aus.
+    pub update_auto_check: bool,
+    /// Zeitpunkt der letzten erfolgreichen Update-Prüfung (Unix-Sekunden, 0 = noch nie).
+    pub update_last_check: i64,
+    /// Vom Nutzer übersprungene Version (`X.Y.Z`, leer = keine); die automatische Prüfung bietet sie nicht mehr an.
+    pub update_skip_version: String,
 }
 
 /// Auswahl für `Settings::undo_steps`.
@@ -239,6 +245,9 @@ impl Default for Settings {
             backup_keep: 2,
             backup_dir: String::new(),
             undo_steps: 25,
+            update_auto_check: false,
+            update_last_check: 0,
+            update_skip_version: String::new(),
         }
     }
 }
@@ -810,5 +819,27 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&b1).unwrap(), "{\"language\":\"De\"}");
         assert_eq!(lang_from_disk(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_settings_default_and_roundtrip() {
+        // settings.json von 2.0.0 (ohne Update-Felder): automatische Prüfung bleibt aus
+        let old = r#"{"language":"De","theme":"One Dark","font_size":15.0,"backup_keep":3,"undo_steps":10}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(!s.update_auto_check);
+        assert_eq!(s.update_last_check, 0);
+        assert!(s.update_skip_version.is_empty());
+        assert_eq!(s.font_size, 15.0);
+        assert_eq!(s.backup_keep, 3);
+        assert!(!Settings::default().update_auto_check, "Standard: aus");
+        // Hin und zurück
+        let mut s = Settings::default();
+        s.update_auto_check = true;
+        s.update_last_check = 1_800_000_000;
+        s.update_skip_version = "3.0.0".into();
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.update_auto_check);
+        assert_eq!(back.update_last_check, 1_800_000_000);
+        assert_eq!(back.update_skip_version, "3.0.0");
     }
 }
