@@ -17,9 +17,8 @@ use std::path::Path;
 
 /// Startargumente dieser Instanz (`--data-dir …`, `--profile …`); leer für die Standardinstanz.
 /// Einzige Quelle für Integrationen (`integration`, Einstellungen → Agenten).
-// TODO(2.1 wiring): paths::instance_args()
 pub fn instance_args() -> Vec<String> {
-    Vec::new()
+    crate::paths::instance_args()
 }
 
 /// Identität einer Instanz, aus ihren Startargumenten gelesen.

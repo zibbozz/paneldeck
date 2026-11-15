@@ -173,12 +173,11 @@ pub fn data_dir_arg() -> Option<&'static Path> {
 /// Argumente, mit denen ein weiterer Start (Autostart, MCP-Registrierung) dieselbe Instanz trifft, z. B.
 /// `["--data-dir", "D:\\pd", "--profile", "work"]`; leer beim Standard-Datenordner. Ein über `PANELDECK_DATA`
 /// gewählter Ordner wird ebenfalls als `--data-dir` festgeschrieben (die Variable fehlt z. B. im Autostart evtl.).
-#[allow(dead_code)] // für Autostart/MCP-Registrierung (Integrationen)
+/// Genutzt von `launch::instance_args` (Autostart, Kontextmenü, MCP-Registrierung).
 pub fn instance_args() -> Vec<String> {
     instance_args_for(get())
 }
 
-#[allow(dead_code)]
 pub fn instance_args_for(d: &DataDir) -> Vec<String> {
     let mut v = Vec::new();
     if matches!(d.source, Source::Arg | Source::Env) {
