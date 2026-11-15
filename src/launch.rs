@@ -10,8 +10,17 @@
 //! - nur `--data-dir D` → `Paneldeck (<h>)` / `paneldeck-<h>`, `<h>` = 8 Hex-Zeichen FNV-1a des normalisierten Ordners
 //!   (Kleinbuchstaben, `/` → `\`, ohne abschließenden `\`), stabil über Neustarts und Versionen;
 //! - beides → `Paneldeck (work-<h>)` / `paneldeck-work-<h>` (gleiche Profilnamen in verschiedenen Ordnern kollidieren nicht).
+//!
+//! Profilnamen werden für Namen kleingeschrieben (Ordner unter Windows: `Work` = `work`).
 
 use std::path::Path;
+
+/// Startargumente dieser Instanz (`--data-dir …`, `--profile …`); leer für die Standardinstanz.
+/// Einzige Quelle für Integrationen (`integration`, Einstellungen → Agenten).
+// TODO(2.1 wiring): paths::instance_args()
+pub fn instance_args() -> Vec<String> {
+    Vec::new()
+}
 
 /// Identität einer Instanz, aus ihren Startargumenten gelesen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -44,7 +53,8 @@ impl Instance {
     /// Kennung für Namen: `None` für die Standardinstanz.
     fn tag(&self) -> Option<String> {
         let hash = self.data_dir.as_deref().map(dir_hash);
-        match (self.profile.as_deref(), hash) {
+        let profile = self.profile.as_deref().map(|p| p.trim().to_lowercase());
+        match (profile.as_deref(), hash) {
             (None, None) => None,
             (Some(p), None) => Some(p.to_string()),
             (None, Some(h)) => Some(h),
@@ -53,10 +63,24 @@ impl Instance {
     }
 }
 
-/// Stabiler Kurz-Hash eines Ordners (8 Hex-Zeichen, FNV-1a 64 Bit) – unabhängig von Groß-/Kleinschreibung,
-/// Schrägstrich-Richtung und abschließendem Trenner.
+/// Pfad so normalisieren, wie Windows vergleicht: `/` → `\`, Präfix `\\?\` (bzw. `\\?\UNC\` → `\\`) weg,
+/// Leerraum außen und abschließende Trenner weg, Kleinbuchstaben.
+pub fn norm_path(p: &str) -> String {
+    let s = p.trim().replace('/', "\\");
+    let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    };
+    s.trim_end_matches('\\').to_lowercase()
+}
+
+/// Stabiler Kurz-Hash eines Ordners (8 Hex-Zeichen, FNV-1a 64 Bit) über `norm_path` – unabhängig von
+/// Groß-/Kleinschreibung, Schrägstrich-Richtung, `\\?\`-Präfix und abschließendem Trenner.
 pub fn dir_hash(dir: &str) -> String {
-    let norm = dir.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let norm = norm_path(dir);
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in norm.bytes() {
         h ^= b as u64;
@@ -103,11 +127,17 @@ pub fn mcp_args(instance_args: &[String]) -> Vec<String> {
 /// Zeichen, die ein Argument nie enthalten darf: `"` (in Windows-Pfaden unmöglich, würde aber jede Quotierung
 /// aufbrechen), `%` (Explorer ersetzt `%1`/`%V`…, cmd.exe Umgebungsvariablen) und Steuerzeichen (Zeilenumbrüche).
 pub fn check_arg(a: &str) -> Result<(), String> {
+    check_chars(a, false)
+}
+
+fn check_chars(a: &str, program: bool) -> Result<(), String> {
     if let Some(c) = a.chars().find(|c| *c == '"' || *c == '%' || c.is_control()) {
         let shown = if c.is_control() { format!("U+{:04X}", c as u32) } else { c.to_string() };
-        return Err(match crate::state::lang() {
-            crate::state::Lang::De => format!("Ungültiges Zeichen {shown} im Startargument: {a}"),
-            crate::state::Lang::En => format!("Invalid character {shown} in launch argument: {a}"),
+        return Err(match (crate::state::lang(), program) {
+            (crate::state::Lang::De, false) => format!("Ungültiges Zeichen {shown} im Startargument: {a}"),
+            (crate::state::Lang::En, false) => format!("Invalid character {shown} in launch argument: {a}"),
+            (crate::state::Lang::De, true) => format!("Ungültiges Zeichen {shown} im Programmpfad (Integrationen nicht möglich): {a}"),
+            (crate::state::Lang::En, true) => format!("Invalid character {shown} in the program path (integrations not possible): {a}"),
         });
     }
     Ok(())
@@ -127,12 +157,11 @@ pub fn quote_arg(a: &str) -> Result<String, String> {
 }
 
 /// Kommandozeile `"<exe>" <args…>`. Die .exe steht immer in Anführungszeichen (wie bisher); für den Programmnamen
-/// gelten bei Windows keine Backslash-Regeln, er darf nur kein `"` enthalten.
+/// gelten bei Windows keine Backslash-Regeln. Für ihn gilt dieselbe Zeichenregel wie für Argumente (kein `"`, `%`,
+/// Steuerzeichen): `%` würde Explorer (`%1`…) und cmd.exe (Variablen) verwirren.
 pub fn command_line(exe: &Path, args: &[String]) -> Result<String, String> {
     let e = exe.to_string_lossy();
-    if e.contains('"') || e.chars().any(|c| c.is_control()) {
-        return Err(format!("{}: {e}", crate::state::t("Ungültiger Programmpfad", "Invalid program path")));
-    }
+    check_chars(&e, true)?;
     let mut s = format!("\"{e}\"");
     for a in args {
         s.push(' ');
@@ -158,6 +187,23 @@ pub fn claude_add_command(exe: &Path, inst_args: &[String]) -> Result<String, St
     Ok(format!("claude mcp add --scope user {} -- {}", quote_arg(&name)?, command_line(exe, &mcp_args(inst_args))?))
 }
 
+/// Argumentzeile für `cmd.exe` (per `raw_arg`), um `claude <args>` zu starten: `/d` (kein AutoRun aus der
+/// Registry), `/v:off` (keine verzögerte Erweiterung mit `!`), `/c claude …`; jedes Argument über `quote_arg`.
+pub fn claude_cmd_line(args: &[String]) -> Result<String, String> {
+    let mut s = String::from("/d /v:off /c claude");
+    for a in args {
+        s.push(' ');
+        s.push_str(&quote_arg(a)?);
+    }
+    Ok(s)
+}
+
+/// Argumente für `claude mcp add` (ohne `claude`): `mcp add --scope user <name> -- <exe> mcp <instanz…>`.
+pub fn claude_add_args(exe: &Path, inst_args: &[String]) -> Vec<String> {
+    let name = mcp_server_name(&Instance::from_args(inst_args));
+    ["mcp", "add", "--scope", "user", &name, "--"].iter().map(|s| s.to_string()).chain(std::iter::once(exe.to_string_lossy().to_string())).chain(mcp_args(inst_args)).collect()
+}
+
 /// Erstes Token einer Kommandozeile (der Programmpfad), ohne Anführungszeichen.
 pub fn program_of(cmdline: &str) -> &str {
     let s = cmdline.trim_start();
@@ -169,8 +215,7 @@ pub fn program_of(cmdline: &str) -> &str {
 
 /// Pfade vergleichen wie Windows (Groß-/Kleinschreibung und Schrägstrich egal).
 pub fn same_path(a: &str, b: &str) -> bool {
-    let n = |s: &str| s.trim().replace('/', "\\").to_lowercase();
-    n(a) == n(b)
+    norm_path(a) == norm_path(b)
 }
 
 /// Befehle vergleichen (gespeicherter Registry-Wert gegen erwarteten): Groß-/Kleinschreibung egal, Leerraum außen egal.
@@ -330,6 +375,45 @@ mod tests {
         assert_eq!(run_command(&exe, &d).unwrap(), "\"C:\\pd\\paneldeck.exe\" --data-dir \"D:\\My Data\\\\\" --tray");
         assert!(run_command(&exe, &s(&["--data-dir", "D:\\100%"])).is_err());
         assert!(command_line(Path::new("C:\\a\"b.exe"), &[]).is_err());
+    }
+
+    #[test]
+    fn profile_case_and_long_paths() {
+        let a = Instance::from_args(&s(&["--profile", "Work"]));
+        let b = Instance::from_args(&s(&["--profile", "work"]));
+        assert_eq!(run_value_name(&a), "Paneldeck (work)");
+        assert_eq!(mcp_server_name(&a), mcp_server_name(&b));
+        assert_eq!(mcp_server_name(&a), "paneldeck-work");
+        let h = dir_hash(r"D:\Data\Pd");
+        assert_eq!(dir_hash(r"\\?\D:\Data\Pd\"), h);
+        assert_eq!(dir_hash(r" D:\DATA\pd "), h);
+        assert_eq!(dir_hash(r"\\?\UNC\srv\share\pd"), dir_hash(r"\\srv\share\pd"));
+        assert!(same_path(r"\\?\C:\pd\paneldeck.exe", r"c:\PD\paneldeck.exe"));
+    }
+
+    #[test]
+    fn exe_path_rule() {
+        assert!(command_line(Path::new(r"C:\100%\paneldeck.exe"), &[]).is_err());
+        assert!(run_command(Path::new(r"C:\100%\paneldeck.exe"), &[]).is_err());
+        assert!(command_line(Path::new(r"C:\Tom & Jerry\paneldeck.exe"), &[]).is_ok());
+    }
+
+    #[test]
+    fn claude_add_full_cmd_line() {
+        let exe = PathBuf::from(r"C:\Program Files\Paneldeck\paneldeck.exe");
+        let inst = s(&["--data-dir", r"D:\Tom & Jerry\pd data\", "--profile", "Work"]);
+        let h = dir_hash(r"D:\Tom & Jerry\pd data");
+        let line = claude_cmd_line(&claude_add_args(&exe, &inst)).unwrap();
+        assert_eq!(
+            line,
+            format!(r#"/d /v:off /c claude mcp add --scope user paneldeck-work-{h} -- "C:\Program Files\Paneldeck\paneldeck.exe" mcp --data-dir "D:\Tom & Jerry\pd data\\" --profile Work"#)
+        );
+        // was cmd.exe nach `/c` an claude weiterreicht, zerlegt sich wieder in genau die Argumente
+        let after = line.strip_prefix("/d /v:off /c claude ").unwrap();
+        assert_eq!(split_args(after), claude_add_args(&exe, &inst));
+        // Standardinstanz
+        assert_eq!(claude_cmd_line(&claude_add_args(&exe, &[])).unwrap(), r#"/d /v:off /c claude mcp add --scope user paneldeck -- "C:\Program Files\Paneldeck\paneldeck.exe" mcp"#);
+        assert!(claude_cmd_line(&s(&["mcp", "remove", "100%"])).is_err());
     }
 
     #[test]

@@ -1,10 +1,12 @@
 ﻿# Update-Test des Installers: alte Version installieren, Nutzerdaten/Autostart/Kontextmenü anlegen, neuen Installer darüberspielen.
 #   .\tools\update-test.ps1 [-Old <Setup.exe>] [-New <Setup.exe>]
 # Ohne -Old: der neueste andere Installer in dist\; gibt es keinen, wird ein "Vorgänger" aus der aktuellen .exe gebaut (mit angehängten Füllbytes).
-# Ohne -New wird aus target\release\paneldeck.exe ein Probe-Installer gebaut (nach %TEMP%, nicht nach dist\).
+# Ohne -New wird aus der gebauten paneldeck.exe ein Probe-Installer gebaut (im Temp-Ordner, nicht nach dist\).
+# -Exe: die gebaute .exe (Standard: $env:CARGO_TARGET_DIR\release\paneldeck.exe, sonst target\release\paneldeck.exe).
+# -TempRoot: wo der Temp-Ordner entsteht (Standard: %TEMP%), z. B. ein vom Virenscanner ausgenommener Ordner.
 # Alles läuft in einem Temp-Ordner mit Schein-Profil (USERPROFILE); die Registry-Einträge des Installers werden am Ende entfernt.
 # Bricht ab, wenn auf dem Rechner schon eine echte Installation (Registry-Einträge von Paneldeck) existiert.
-param([string]$Old = '', [string]$New = '')
+param([string]$Old = '', [string]$New = '', [string]$Exe = '', [string]$TempRoot = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $makensis = @('C:\Program Files (x86)\NSIS\makensis.exe', 'C:\Program Files\NSIS\makensis.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -22,7 +24,9 @@ $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $existing = @($regKeys | Where-Object { Test-Path $_ }) + @(if (Get-ItemProperty $runKey -Name Paneldeck -ErrorAction SilentlyContinue) { "$runKey\Paneldeck" })
 if ($existing) { Write-Host "Abbruch: Paneldeck ist auf diesem Rechner installiert (Registry): $($existing -join ', ')" -ForegroundColor Yellow; exit 2 }
 
-$tmp = Join-Path $env:TEMP ('hub-update-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+if (-not $Exe) { $Exe = if ($env:CARGO_TARGET_DIR) { Join-Path $env:CARGO_TARGET_DIR 'release\paneldeck.exe' } else { "$root\target\release\paneldeck.exe" } }
+if (-not $TempRoot) { $TempRoot = $env:TEMP }
+$tmp = Join-Path $TempRoot ('hub-update-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $prof = Join-Path $tmp 'profile'; $inst = Join-Path $tmp 'inst'; $data = Join-Path $inst 'paneldeck-data'
 # Autostart-Werte von Instanzen mit Profil (`Paneldeck (<profil>)`) – eindeutige Testnamen, kollidieren nie mit echten.
 $tid = Split-Path -Leaf $tmp
@@ -47,7 +51,7 @@ try {
   if (-not $New) {
     if (-not $makensis) { throw 'makensis nicht gefunden' }
     $New = Join-Path $tmp 'Paneldeck-Setup-probe.exe'
-    & $makensis -V1 "-DVERSION=probe" "-DEXE=$root\target\release\paneldeck.exe" "-DOUTFILE=$New" "$root\installer\paneldeck.nsi" | Out-Null
+    & $makensis -V1 "-DVERSION=probe" "-DEXE=$Exe" "-DOUTFILE=$New" "$root\installer\paneldeck.nsi" | Out-Null
     if (-not (Test-Path $New)) { throw 'Probe-Installer nicht gebaut' }
   }
   if (-not $Old) {
@@ -56,14 +60,14 @@ try {
     else {
       if (-not $makensis) { throw 'makensis nicht gefunden (für den Vorgänger-Installer)' }
       $oldExe = Join-Path $tmp 'paneldeck-old.exe'
-      Copy-Item "$root\target\release\paneldeck.exe" $oldExe
+      Copy-Item $Exe $oldExe
       $fs = [IO.File]::Open($oldExe, 'Append'); $fs.Write([byte[]](1..64), 0, 64); $fs.Close()   # Overlay: Programm läuft unverändert, Hash anders
       $Old = Join-Path $tmp 'Paneldeck-Setup-old.exe'
       & $makensis -V1 "-DVERSION=0.0.0-old" "-DEXE=$oldExe" "-DOUTFILE=$Old" "$root\installer\paneldeck.nsi" | Out-Null
     }
   }
   if (-not (Test-Path $Old)) { throw "Alter Installer fehlt: $Old" }
-  $newExeHash = (Get-FileHash "$root\target\release\paneldeck.exe").Hash
+  $newExeHash = (Get-FileHash $Exe).Hash
   Write-Host "== Alt installieren ($(Split-Path -Leaf $Old))"
   $rc = Install $Old 'alt'
   Check 'Installer (alt) Exit 0' ($rc -eq 0) "rc=$rc"

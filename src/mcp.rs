@@ -759,7 +759,7 @@ fn hub_info(dir: &std::path::Path) -> HubInfo {
     probe_hub(dir).unwrap_or(HubInfo::UNKNOWN)
 }
 
-/// Namen aller `mcpServers`-Einträge in `~/.claude.json`, die von Paneldeck stammen (`paneldeck`, `paneldeck-*`, z. B.
+/// Namen aller `mcpServers`-Einträge in `.claude.json`, die von Paneldeck stammen (`paneldeck`, `paneldeck-*`, z. B.
 /// von Instanzen mit Profil) und deren Befehl genau diese .exe ist. Fremde Einträge zählen nicht.
 pub fn our_servers(v: &Value, exe: &str) -> Vec<String> {
     let Some(servers) = v.get("mcpServers").and_then(|s| s.as_object()) else { return Vec::new() };
@@ -770,54 +770,254 @@ pub fn our_servers(v: &Value, exe: &str) -> Vec<String> {
         .collect()
 }
 
+/// Wo Claude Code seine Benutzer-Konfiguration hält: `$CLAUDE_CONFIG_DIR/.claude.json`, sonst `~/.claude.json`.
+pub fn claude_json_path(config_dir: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    match config_dir.filter(|d| !d.is_empty()) {
+        Some(d) => Some(std::path::PathBuf::from(d).join(".claude.json")),
+        None => home.filter(|h| !h.is_empty()).map(|h| std::path::PathBuf::from(h).join(".claude.json")),
+    }
+}
+
+fn home_dir() -> Option<std::ffi::OsString> {
+    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+}
+
+/// Arbeitsordner für `claude`-Aufrufe: das Benutzerprofil, sonst der Ordner der .exe (nie ein zufälliger Ordner,
+/// aus dem cmd.exe sonst Programme gleichen Namens laden könnte).
+pub fn claude_cwd() -> std::path::PathBuf {
+    home_dir()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// `claude <args>` als Prozess vorbereiten. Unter Windows über `cmd.exe /d /v:off /c` (kein AutoRun, keine verzögerte
+/// Erweiterung; `claude` kann eine .cmd sein) mit selbst quotierter Zeile (`launch::claude_cmd_line`).
+pub fn claude_command(args: &[String], cwd: &std::path::Path) -> Result<std::process::Command, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let line = crate::launch::claude_cmd_line(args)?;
+        let mut c = std::process::Command::new("cmd.exe");
+        c.raw_arg(line).current_dir(cwd).creation_flags(0x0800_0000);
+        Ok(c)
+    }
+    #[cfg(not(windows))]
+    {
+        for a in args {
+            crate::launch::check_arg(a)?;
+        }
+        let mut c = std::process::Command::new("claude");
+        c.args(args).current_dir(cwd);
+        Ok(c)
+    }
+}
+
+/// Prozess starten und höchstens `limit` warten, sonst beenden (der Deinstaller darf nie hängen).
+fn run_with_timeout(mut cmd: std::process::Command, limit: std::time::Duration) {
+    use std::process::Stdio;
+    let Ok(mut child) = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return };
+    let until = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if std::time::Instant::now() >= until => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+}
+
+/// Ein Eintrag eines JSON-Objekts als Byte-Bereiche im Text.
+struct JsonMember {
+    key: String,
+    key_start: usize,
+    value_start: usize,
+    value_end: usize,
+}
+
+fn json_ws(s: &[u8], mut i: usize) -> usize {
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    i
+}
+
+/// Ende (Index nach dem schließenden `"`) einer Zeichenkette, die bei `i` beginnt.
+fn json_string_end(s: &[u8], i: usize) -> Option<usize> {
+    let mut j = i + 1;
+    while j < s.len() {
+        match s[j] {
+            b'\\' => j += 2,
+            b'"' => return Some(j + 1),
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+/// Ende eines beliebigen Werts, der bei `i` beginnt.
+fn json_value_end(s: &[u8], i: usize) -> Option<usize> {
+    match *s.get(i)? {
+        b'"' => json_string_end(s, i),
+        b'{' | b'[' => {
+            let (mut depth, mut j) = (0usize, i);
+            while j < s.len() {
+                match s[j] {
+                    b'"' => j = json_string_end(s, j)?,
+                    b'{' | b'[' => {
+                        depth += 1;
+                        j += 1;
+                    }
+                    b'}' | b']' => {
+                        depth -= 1;
+                        j += 1;
+                        if depth == 0 {
+                            return Some(j);
+                        }
+                    }
+                    _ => j += 1,
+                }
+            }
+            None
+        }
+        _ => {
+            let mut j = i;
+            while j < s.len() && !matches!(s[j], b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r') {
+                j += 1;
+            }
+            (j > i).then_some(j)
+        }
+    }
+}
+
+/// Einträge des Objekts, dessen `{` bei `obj` steht, und die Position seiner `}`.
+fn json_members(text: &str, obj: usize) -> Option<(Vec<JsonMember>, usize)> {
+    let s = text.as_bytes();
+    if s.get(obj) != Some(&b'{') {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut i = json_ws(s, obj + 1);
+    if s.get(i) == Some(&b'}') {
+        return Some((out, i));
+    }
+    loop {
+        if s.get(i) != Some(&b'"') {
+            return None;
+        }
+        let ke = json_string_end(s, i)?;
+        let key: String = serde_json::from_str(&text[i..ke]).ok()?;
+        let colon = json_ws(s, ke);
+        if s.get(colon) != Some(&b':') {
+            return None;
+        }
+        let vs = json_ws(s, colon + 1);
+        let ve = json_value_end(s, vs)?;
+        out.push(JsonMember { key, key_start: i, value_start: vs, value_end: ve });
+        i = json_ws(s, ve);
+        match s.get(i) {
+            Some(b',') => i = json_ws(s, i + 1),
+            Some(b'}') => return Some((out, i)),
+            _ => return None,
+        }
+    }
+}
+
+/// Die Einträge `names` aus dem obersten `mcpServers`-Objekt entfernen und den übrigen Text Byte für Byte behalten
+/// (Reihenfolge, Einrückung, Zeilenenden). `None`, wenn der Text nicht wie erwartet aufgebaut ist.
+fn remove_servers_text(text: &str, names: &[String]) -> Option<String> {
+    let mut t = text.to_string();
+    loop {
+        let s = t.as_bytes();
+        let top = json_ws(s, if t.starts_with('\u{feff}') { 3 } else { 0 });
+        let (top_members, _) = json_members(&t, top)?;
+        let mut mcp = top_members.iter().filter(|m| m.key == "mcpServers");
+        let obj = mcp.next()?.value_start;
+        if mcp.next().is_some() {
+            return None; // doppelter Schlüssel: lieber nichts anfassen
+        }
+        let (ms, close) = json_members(&t, obj)?;
+        let Some(i) = ms.iter().position(|m| names.contains(&m.key)) else { return Some(t) };
+        let (a, b) = if i + 1 < ms.len() {
+            (ms[i].key_start, ms[i + 1].key_start)
+        } else if i > 0 {
+            (ms[i - 1].value_end, ms[i].value_end)
+        } else {
+            (obj + 1, close)
+        };
+        t.replace_range(a..b, "");
+    }
+}
+
+/// Ob ein Pfad ein symbolischer Link bzw. Analysepunkt ist (dann schreiben wir nicht).
+fn is_link(path: &std::path::Path) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(path) else { return false };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if m.file_attributes() & 0x400 != 0 {
+            return true; // FILE_ATTRIBUTE_REPARSE_POINT
+        }
+    }
+    m.file_type().is_symlink()
+}
+
 /// Unsere Einträge direkt aus einer `.claude.json` entfernen (Ersatzweg, wenn `claude` nicht verfügbar ist).
-/// Schreibt nur, wenn sich etwas ändert (atomar über eine temporäre Datei); gibt die entfernten Namen zurück.
+/// Nur die betroffenen Einträge fallen aus dem Text, alles andere bleibt Byte für Byte gleich; vorher und nachher wird
+/// geprüft, dass das Ergebnis genau „vorher ohne diese Einträge“ ist. Schreibt nur, wenn sich etwas ändert (atomar
+/// über eine temporäre Datei, die bei Fehlern wieder verschwindet), nie durch einen Link. Gibt die entfernten Namen zurück.
 pub fn remove_our_servers_from(path: &std::path::Path, exe: &str) -> Result<Vec<String>, String> {
+    if is_link(path) {
+        return Err(format!("{}: symbolic link / reparse point, not changed", path.display()));
+    }
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut v = serde_json::from_str::<Value>(crate::state::strip_bom(&text)).map_err(|e| e.to_string())?;
-    let names = our_servers(&v, exe);
+    let before = serde_json::from_str::<Value>(crate::state::strip_bom(&text)).map_err(|e| e.to_string())?;
+    let names = our_servers(&before, exe);
     if names.is_empty() {
         return Ok(names);
     }
-    if let Some(servers) = v.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
-        for n in &names {
-            servers.remove(n);
-        }
+    let new_text = remove_servers_text(&text, &names).ok_or_else(|| format!("{}: unexpected structure, not changed", path.display()))?;
+    let mut expected = before;
+    if let Some(servers) = expected.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+        servers.retain(|k, _| !names.contains(k));
+    }
+    let after = serde_json::from_str::<Value>(crate::state::strip_bom(&new_text)).map_err(|e| e.to_string())?;
+    if after != expected {
+        return Err(format!("{}: verification failed, not changed", path.display()));
     }
     let tmp = path.with_extension("json.paneldeck-tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    let res = std::fs::write(&tmp, new_text.as_bytes()).and_then(|_| std::fs::rename(&tmp, path));
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
     Ok(names)
 }
 
-/// Beim Deinstallieren: die Registrierungen in Claude Code (`~/.claude.json`, Benutzerebene) entfernen – alle
-/// `paneldeck`/`paneldeck-*`, die auf genau diese .exe zeigen (fremde bleiben unangetastet). Zuerst über
-/// `claude mcp remove` (lässt die Datei sonst unverändert); was danach noch übrig ist (z. B. `claude` nicht im PATH),
-/// wird direkt aus der Datei entfernt. Best-Effort, still.
+/// Beim Deinstallieren: die Registrierungen in Claude Code (Benutzerebene) entfernen – alle `paneldeck`/`paneldeck-*`,
+/// die auf genau diese .exe zeigen (fremde bleiben unangetastet). Die Datei sucht Paneldeck wie Claude Code
+/// (`CLAUDE_CONFIG_DIR`, sonst Benutzerprofil). Zuerst über `claude mcp remove` (je höchstens 20 s); was danach noch
+/// übrig ist (z. B. `claude` nicht im PATH), wird direkt aus der Datei entfernt. Best-Effort, still.
 pub fn unregister_if_ours() {
     let Some(exe) = std::env::current_exe().ok() else { return };
     let exe = exe.to_string_lossy().to_string();
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else { return };
-    let path = std::path::Path::new(&home).join(".claude.json");
+    let Some(path) = claude_json_path(std::env::var_os("CLAUDE_CONFIG_DIR"), home_dir()) else { return };
     let Ok(text) = std::fs::read_to_string(&path) else { return };
     let Ok(v) = serde_json::from_str::<Value>(crate::state::strip_bom(&text)) else { return };
     let names = our_servers(&v, &exe);
     if names.is_empty() {
         return;
     }
+    let cwd = claude_cwd();
     for name in &names {
-        // Die Namen bestehen nur aus `[A-Za-z0-9_-]` (siehe `our_servers`/`is_our_server_name` + Prüfung hier), sicher für cmd.exe.
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            continue;
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let _ = std::process::Command::new("cmd.exe").args(["/c", "claude", "mcp", "remove", name, "--scope", "user"]).creation_flags(0x0800_0000).status();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = std::process::Command::new("claude").args(["mcp", "remove", name, "--scope", "user"]).status();
+        let args: Vec<String> = ["mcp", "remove", name.as_str(), "--scope", "user"].iter().map(|s| s.to_string()).collect();
+        if let Ok(cmd) = claude_command(&args, &cwd) {
+            run_with_timeout(cmd, std::time::Duration::from_secs(20));
         }
     }
     let _ = remove_our_servers_from(&path, &exe);
@@ -826,6 +1026,12 @@ pub fn unregister_if_ours() {
 #[cfg(test)]
 mod unregister_tests {
     use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pd-unreg-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
 
     #[test]
     fn finds_only_our_entries() {
@@ -845,37 +1051,68 @@ mod unregister_tests {
     }
 
     #[test]
-    fn rewrites_claude_json() {
+    fn config_path_like_claude_code() {
+        use std::ffi::OsString;
+        let p = claude_json_path(Some(OsString::from(r"D:\cfg")), Some(OsString::from(r"C:\Users\A")));
+        assert_eq!(p.unwrap(), std::path::Path::new(r"D:\cfg").join(".claude.json"));
+        let p = claude_json_path(Some(OsString::new()), Some(OsString::from(r"C:\Users\A")));
+        assert_eq!(p.unwrap(), std::path::Path::new(r"C:\Users\A").join(".claude.json"));
+        assert!(claude_json_path(None, None).is_none());
+    }
+
+    #[test]
+    fn text_surgery_keeps_everything_else() {
+        let names = vec!["paneldeck".to_string(), "paneldeck-work".to_string()];
+        // Reihenfolge der Schlüssel, Einrückung, CRLF und andere Felder bleiben genau erhalten
+        let text = "{\r\n  \"zeta\": 1,\r\n  \"mcpServers\": {\r\n    \"github\": {\"command\": \"npx\", \"args\": [\"}\", \"{\\\"\"]},\r\n    \"paneldeck\": {\r\n      \"command\": \"C:\\\\pd\\\\paneldeck.exe\",\r\n      \"args\": [\"mcp\"]\r\n    },\r\n    \"other\": {\"command\": \"x\"},\r\n    \"paneldeck-work\": {\"command\": \"C:\\\\pd\\\\paneldeck.exe\"}\r\n  },\r\n  \"alpha\": {\"mcpServers\": {\"paneldeck\": {}}}\r\n}\r\n";
+        let out = remove_servers_text(text, &names).unwrap();
+        let want = "{\r\n  \"zeta\": 1,\r\n  \"mcpServers\": {\r\n    \"github\": {\"command\": \"npx\", \"args\": [\"}\", \"{\\\"\"]},\r\n    \"other\": {\"command\": \"x\"}\r\n  },\r\n  \"alpha\": {\"mcpServers\": {\"paneldeck\": {}}}\r\n}\r\n";
+        assert_eq!(out, want);
+        // einziger Eintrag → leeres Objekt; erster Eintrag; mit BOM
+        assert_eq!(remove_servers_text("{\"mcpServers\": { \"paneldeck\": {\"a\": 1} }}", &names).unwrap(), "{\"mcpServers\": {}}");
+        assert_eq!(remove_servers_text("\u{feff}{\"mcpServers\":{\"paneldeck\":1,\"b\":2}}", &names).unwrap(), "\u{feff}{\"mcpServers\":{\"b\":2}}");
+        // nichts zu tun → unverändert
+        assert_eq!(remove_servers_text("{\"mcpServers\":{\"b\":2}}", &names).unwrap(), "{\"mcpServers\":{\"b\":2}}");
+        // doppelter Schlüssel / kaputt → nichts anfassen
+        assert!(remove_servers_text("{\"mcpServers\":{},\"mcpServers\":{\"paneldeck\":1}}", &names).is_none());
+        assert!(remove_servers_text("{\"mcpServers\":{\"paneldeck\":", &names).is_none());
+    }
+
+    #[test]
+    fn rewrites_claude_json_in_place() {
         let exe = r"C:\pd\paneldeck.exe";
-        let dir = std::env::temp_dir().join(format!("pd-unreg-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("rw");
         let f = dir.join(".claude.json");
-        let original = json!({
-            "numStartups": 3,
-            "projects": {"C:/x": {"mcpServers": {"paneldeck": {"command": exe}}}},
-            "mcpServers": {
-                "paneldeck": {"command": exe, "args": ["mcp"]},
-                "paneldeck-work": {"command": exe, "args": ["mcp", "--profile", "work"]},
-                "paneldeck-other": {"command": r"D:\other\paneldeck.exe", "args": ["mcp"]},
-                "github": {"command": "npx", "args": ["x"]}
-            }
-        });
-        // mit BOM, wie Windows-PowerShell schreibt
-        std::fs::write(&f, format!("\u{feff}{}", serde_json::to_string_pretty(&original).unwrap())).unwrap();
+        // mit BOM, wie Windows-PowerShell schreibt; Schlüssel bewusst nicht alphabetisch
+        let original = "\u{feff}{\n  \"numStartups\": 3,\n  \"projects\": {\"C:/x\": {\"mcpServers\": {\"paneldeck\": {\"command\": \"C:\\\\pd\\\\paneldeck.exe\"}}}},\n  \"mcpServers\": {\n    \"paneldeck\": {\"command\": \"C:\\\\pd\\\\paneldeck.exe\", \"args\": [\"mcp\"]},\n    \"paneldeck-work\": {\"command\": \"C:\\\\pd\\\\paneldeck.exe\", \"args\": [\"mcp\", \"--profile\", \"work\"]},\n    \"paneldeck-other\": {\"command\": \"D:\\\\other\\\\paneldeck.exe\", \"args\": [\"mcp\"]},\n    \"github\": {\"command\": \"npx\", \"args\": [\"x\"]}\n  },\n  \"autoUpdates\": false\n}\n";
+        std::fs::write(&f, original).unwrap();
         let mut removed = remove_our_servers_from(&f, exe).unwrap();
         removed.sort();
         assert_eq!(removed, ["paneldeck", "paneldeck-work"]);
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
-        let servers = v["mcpServers"].as_object().unwrap();
-        assert!(servers.contains_key("paneldeck-other") && servers.contains_key("github"));
-        assert!(!servers.contains_key("paneldeck") && !servers.contains_key("paneldeck-work"));
-        assert_eq!(v["numStartups"], 3);
-        // Projekt-Ebene wird nicht angefasst
-        assert!(v["projects"]["C:/x"]["mcpServers"]["paneldeck"].is_object());
+        let after = std::fs::read_to_string(&f).unwrap();
+        let want = "\u{feff}{\n  \"numStartups\": 3,\n  \"projects\": {\"C:/x\": {\"mcpServers\": {\"paneldeck\": {\"command\": \"C:\\\\pd\\\\paneldeck.exe\"}}}},\n  \"mcpServers\": {\n    \"paneldeck-other\": {\"command\": \"D:\\\\other\\\\paneldeck.exe\", \"args\": [\"mcp\"]},\n    \"github\": {\"command\": \"npx\", \"args\": [\"x\"]}\n  },\n  \"autoUpdates\": false\n}\n";
+        assert_eq!(after, want);
+        assert!(!dir.join(".claude.json.paneldeck-tmp").exists());
         // zweiter Lauf: nichts mehr zu tun, Datei bleibt unverändert
-        let before = std::fs::read(&f).unwrap();
         assert!(remove_our_servers_from(&f, exe).unwrap().is_empty());
-        assert_eq!(std::fs::read(&f).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), want);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewrite_refuses_links() {
+        let dir = temp_dir("link");
+        let target = dir.join("real.json");
+        std::fs::write(&target, "{\"mcpServers\":{\"paneldeck\":{\"command\":\"C:\\\\pd\\\\paneldeck.exe\"}}}").unwrap();
+        let link = dir.join(".claude.json");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        if made {
+            assert!(remove_our_servers_from(&link, r"C:\pd\paneldeck.exe").is_err());
+            assert!(std::fs::read_to_string(&target).unwrap().contains("paneldeck"));
+        } // ohne Recht auf symbolische Links (Windows ohne Entwicklermodus) lässt sich das hier nicht nachstellen
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
