@@ -63,6 +63,17 @@ pub fn save_csv(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Speichern-Dialog für Markdown-Dateien (Systemprompt); anderswo `None`.
+#[cfg(windows)]
+pub fn save_md(default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_file_name(default_name).add_filter("Markdown", &["md"]).save_file()
+}
+
+#[cfg(not(windows))]
+pub fn save_md(_default_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Öffnen-Dialog für CSV-Dateien (Ticket-Import); anderswo `None`.
 #[cfg(windows)]
 pub fn open_csv() -> Option<std::path::PathBuf> {

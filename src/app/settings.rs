@@ -70,8 +70,12 @@ impl App {
                 match self.settings_tab {
                     0 => {
                         row(ui, lang.t("Sprache", "Language"), "", |ui| {
-                            ui.selectable_value(&mut self.settings.language, Lang::De, "Deutsch");
-                            ui.selectable_value(&mut self.settings.language, Lang::En, "English");
+                            let a = ui.selectable_value(&mut self.settings.language, Lang::De, "Deutsch");
+                            let b = ui.selectable_value(&mut self.settings.language, Lang::En, "English");
+                            // Eine eigene Wahl beendet die Überschreibung durch `--lang` (sie wird dann gespeichert).
+                            if a.clicked() || b.clicked() {
+                                state::clear_lang_override();
+                            }
                         });
                         let cur = self.shells.iter().find(|s| s.id == self.settings.default_shell).map(|s| s.label.clone()).unwrap_or_default();
                         row(ui, lang.t("Standard-Shell", "Default shell"), lang.t("Für neue Sitzungen und Teilungen", "For new sessions and splits"), |ui| {
@@ -387,11 +391,17 @@ impl App {
                     8 => self.data_settings_ui(ui),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
-                        ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – komplett offline.", "Terminal hub for Claude Code and many terminals – fully offline.")).color(style::dim(ui)));
+                        ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – funktioniert offline; kontaktiert GitHub nur, wenn du nach Updates suchst oder die automatische Prüfung einschaltest.", "Terminal hub for Claude Code and many terminals – works offline; only contacts GitHub when you check for updates or switch on the automatic check.")).color(style::dim(ui)));
                         ui.add_space(S2);
                         for (k, v) in [
                             (lang.t("Programm", "Program"), self.exe.display().to_string()),
                             (lang.t("Datenordner", "Data folder"), self.dir.display().to_string()),
+                            (lang.t("Herkunft", "Source"), crate::paths::source_label(crate::paths::get().source, lang).to_string()),
+                            (lang.t("Profil", "Profile"), crate::paths::get().profile.clone().unwrap_or_else(|| lang.t("keins (Standard)", "none (default)").to_string())),
+                            (lang.t("Startoptionen", "Start overrides"), {
+                                let o = crate::cli::get().overrides();
+                                if o.is_empty() { lang.t("keine", "none").to_string() } else { o.join("  ") }
+                            }),
                             ("Build", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)),
                         ] {
                             ui.horizontal(|ui| {
@@ -411,6 +421,7 @@ impl App {
                                 self.show_licenses = !self.show_licenses;
                             }
                         });
+                        self.update_about_ui(ui); // Abschnitt „Updates“ (update/ui.rs)
                         if self.show_licenses {
                             ui.add_space(S1);
                             egui::ScrollArea::vertical().max_height(220.0).id_salt("lic").show(ui, |ui| {
@@ -419,6 +430,9 @@ impl App {
                         }
                     }
                     _ => {
+                        if crate::cli::get().no_tray {
+                            ui.label(RichText::new(lang.t("Gestartet mit --no-tray: kein Tray-Symbol, „Schließen → Tray“ und „Minimieren → Tray“ wirken bei diesem Start nicht.", "Started with --no-tray: no tray icon, “Close → tray” and “Minimize → tray” have no effect for this start.")).small().color(style::dim(ui)));
+                        }
                         row(ui, lang.t("Schließen → Tray", "Close → tray"), lang.t("Das Fenster verschwindet im Tray (Beenden über das Tray-Menü)", "The window goes to the tray (quit via the tray menu)"), |ui| {
                             style::toggle(ui, &mut self.settings.close_to_tray);
                         });
@@ -428,29 +442,46 @@ impl App {
                         ui.add_space(S2);
                         ui.label(RichText::new(lang.t("Windows-Integration (nur für dich, ohne Administratorrechte)", "Windows integration (current user only, no admin rights)")).strong());
                         if ui.small_button(lang.t("Status aktualisieren", "Refresh status")).clicked() || (!self.win_probed) {
-                            self.win_autostart = crate::integration::autostart_enabled();
-                            self.win_context = crate::integration::context_enabled();
+                            self.win_autostart = crate::integration::autostart_status();
+                            self.win_context = crate::integration::context_status();
                             self.win_probed = true;
                         }
                         let exe = self.exe.clone();
                         let mut err: Option<String> = None;
+                        // Zeigt der Eintrag auf ein anderes Paneldeck (andere .exe oder Instanz): Hinweis mit dessen Befehl.
+                        fn other_hint(ui: &mut Ui, lang: crate::state::Lang, status: &crate::integration::Status, what: &str) {
+                            if let Some(cmd) = status.other() {
+                                let text = match lang {
+                                    crate::state::Lang::De => format!("{what} zeigt auf ein anderes Paneldeck:\n{cmd}\n\nEinschalten übernimmt ihn für diese Instanz."),
+                                    crate::state::Lang::En => format!("{what} points to another Paneldeck:\n{cmd}\n\nTurning it on takes it over for this instance."),
+                                };
+                                ui.label(RichText::new(lang.t("→ anderes Paneldeck", "→ another Paneldeck")).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b))).on_hover_text(text);
+                            }
+                        }
                         row(ui, lang.t("Mit Windows starten", "Start with Windows"), lang.t("Startet minimiert im Tray", "Starts minimized in the tray"), |ui| {
-                            let mut v = self.win_autostart;
+                            let mut v = self.win_autostart.is_mine();
                             if style::toggle(ui, &mut v).changed() {
                                 match crate::integration::set_autostart(v, &exe) {
-                                    Ok(()) => self.win_autostart = v,
+                                    Ok(()) => self.win_autostart = if v { crate::integration::Status::Mine } else { crate::integration::Status::Off },
                                     Err(e) => err = Some(e),
                                 }
                             }
+                            other_hint(ui, lang, &self.win_autostart, lang.t("Der Autostart-Eintrag", "The autostart entry"));
                         });
                         row(ui, lang.t("Explorer-Kontextmenü", "Explorer context menu"), lang.t("Rechtsklick auf Ordner: „In Paneldeck öffnen“ / „Mit Claude starten“", "Right-click a folder: “Open in Paneldeck” / “Start with Claude”"), |ui| {
-                            let mut v = self.win_context;
+                            let mut v = self.win_context.is_mine();
                             if style::toggle(ui, &mut v).changed() {
-                                match crate::integration::set_context(v, &exe) {
-                                    Ok(()) => self.win_context = v,
+                                // Die Menütexte landen in der Registry: in der gespeicherten Sprache, nicht in der von `--lang`.
+                                let shown = state::lang();
+                                state::set_lang(state::persisted_lang(self.settings.language));
+                                let r = crate::integration::set_context(v, &exe);
+                                state::set_lang(shown);
+                                match r {
+                                    Ok(()) => self.win_context = if v { crate::integration::Status::Mine } else { crate::integration::Status::Off },
                                     Err(e) => err = Some(e),
                                 }
                             }
+                            other_hint(ui, lang, &self.win_context, lang.t("Das Kontextmenü", "The context menu"));
                         });
                         if let Some(e) = err {
                             self.hooks_msg = e.clone();

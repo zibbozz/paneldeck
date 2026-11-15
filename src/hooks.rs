@@ -298,7 +298,18 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
 
 /// Werkzeugaufruf an die laufende Instanz (Brücke → Hub). Fehler als `(Code, Text)`.
 pub fn call_mcp(dir: &Path, tool: &str, args: &Value, caller: Option<u64>, pid: Option<u32>) -> Result<Value, (String, String)> {
-    let down = || ("hub_not_running".to_string(), crate::state::t("Paneldeck läuft nicht (oder nutzt einen anderen Datenordner). Bitte Paneldeck starten.", "Paneldeck is not running (or uses a different data folder). Please start Paneldeck.").to_string());
+    let down = || {
+        let msg = format!(
+            "{} {} {}",
+            crate::state::t("Kein laufendes Paneldeck für den Datenordner", "No running Paneldeck found for the data folder"),
+            dir.display(),
+            crate::state::t(
+                "(Paneldeck läuft nicht oder nutzt einen anderen Datenordner). Bitte Paneldeck starten oder die Brücke mit --data-dir/--profile auf den richtigen Ordner richten.",
+                "(Paneldeck is not running or uses a different data folder). Please start Paneldeck or point the bridge to the right folder with --data-dir/--profile."
+            )
+        );
+        ("hub_not_running".to_string(), msg)
+    };
     let s = std::fs::read_to_string(dir.join("ipc.json")).map_err(|_| down())?;
     let v: Value = serde_json::from_str(crate::state::strip_bom(&s)).map_err(|_| down())?;
     let (Some(port), Some(token)) = (v["port"].as_u64(), v["token"].as_str()) else { return Err(down()) };

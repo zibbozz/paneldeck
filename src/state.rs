@@ -90,6 +90,49 @@ pub fn t(de: &'static str, en: &'static str) -> &'static str {
     lang().t(de, en)
 }
 
+// `--lang` gilt nur für diesen Start. Regel: Alles, was gespeichert wird (settings.json, Standard-Prompts beim
+// ersten Start, Texte im Explorer-Kontextmenü …), nutzt die GESPEICHERTE Sprache (`persisted_lang`), nur die
+// Anzeige nutzt die Startsprache. Abgelegt wird das Paar (Startsprache, gespeicherte Sprache) außerhalb von
+// `Settings` (nicht serialisiert) und threadlokal: Einstellungen werden nur im UI-Thread gespeichert, und Tests
+// (parallel) beeinflussen sich so nicht. Solange `Settings::language` gleich der Startsprache ist, schreibt
+// `ser_language` die gespeicherte Sprache. Wählt der Nutzer in den Einstellungen selbst eine Sprache, endet die
+// Überschreibung (`clear_lang_override`) und seine Wahl wird gespeichert.
+thread_local! {
+    static LANG_OVERRIDE: std::cell::Cell<Option<(Lang, Lang)>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_lang_override(start: Lang, persisted: Lang) {
+    LANG_OVERRIDE.with(|o| o.set(Some((start, persisted))));
+}
+
+pub fn clear_lang_override() {
+    LANG_OVERRIDE.with(|o| o.set(None));
+}
+
+/// Sprache für Gespeichertes, ausgehend von der aktuell angezeigten Sprache `current`.
+pub fn persisted_lang(current: Lang) -> Lang {
+    persisted_language(current, LANG_OVERRIDE.with(|o| o.get()))
+}
+
+/// Sprache, die in `settings.json` landet.
+pub fn persisted_language(l: Lang, over: Option<(Lang, Lang)>) -> Lang {
+    match over {
+        Some((start, persisted)) if start == l => persisted,
+        _ => l,
+    }
+}
+
+fn ser_language<S: serde::Serializer>(l: &Lang, s: S) -> Result<S::Ok, S::Error> {
+    persisted_lang(*l).serialize(s)
+}
+
+/// Sprache aus `settings.json` lesen, ohne etwas zu verändern (keine Sicherung defekter Dateien).
+pub fn lang_from_disk(dir: &std::path::Path) -> Option<Lang> {
+    let s = std::fs::read_to_string(dir.join("settings.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(strip_bom(&s)).ok()?;
+    serde_json::from_value(v.get("language")?.clone()).ok()
+}
+
 /// Sprache aus `settings.json` des Datenordners übernehmen (für Prozesse ohne Oberfläche, z. B. die MCP-Brücke).
 pub fn init_lang_from_disk(dir: &std::path::Path) {
     let l = load_json::<Settings>(&dir.join("settings.json")).map(|s| s.language).unwrap_or(Lang::En);
@@ -99,6 +142,8 @@ pub fn init_lang_from_disk(dir: &std::path::Path) {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Mit `--lang` überschreibt der Start die Sprache nur im Speicher; gespeichert wird die vorherige (`ser_language`).
+    #[serde(serialize_with = "ser_language")]
     pub language: Lang,
     pub theme: String,
     pub font_size: f32,
@@ -142,6 +187,10 @@ pub struct Settings {
     pub mcp_level: crate::mcp::McpLevel,
     /// Agenten dürfen auch Sitzungen schließen, die sie nicht selbst angelegt haben.
     pub mcp_close_any: bool,
+    /// Sprache des Systemprompts für Agenten (`initialize`), unabhängig von der Sprache der Oberfläche. Standard: Englisch;
+    /// ein ungültiger Wert ergibt Englisch (die Datei bleibt lesbar).
+    #[serde(deserialize_with = "crate::mcp::sysprompt::de_lang")]
+    pub mcp_prompt_lang: Lang,
     /// Automatische Datenbank-Sicherung: Intervall in Stunden (0 = aus).
     pub backup_interval_hours: u32,
     /// Wie viele automatische Sicherungen behalten werden (zusätzlich zur Datenbank selbst).
@@ -150,6 +199,12 @@ pub struct Settings {
     pub backup_dir: String,
     /// Wie viele Änderungen der Todo-Liste sich rückgängig machen lassen (3, 5, 10, 25, 50, 100).
     pub undo_steps: u32,
+    /// Automatisch nach Updates suchen (beim Start, höchstens einmal am Tag). Standard: aus.
+    pub update_auto_check: bool,
+    /// Zeitpunkt der letzten erfolgreichen Update-Prüfung (Unix-Sekunden, 0 = noch nie).
+    pub update_last_check: i64,
+    /// Vom Nutzer übersprungene Version (`X.Y.Z`, leer = keine); die automatische Prüfung bietet sie nicht mehr an.
+    pub update_skip_version: String,
 }
 
 /// Auswahl für `Settings::undo_steps`.
@@ -185,10 +240,14 @@ impl Default for Settings {
             session_budget: 0.0,
             mcp_level: crate::mcp::McpLevel::Off,
             mcp_close_any: false,
+            mcp_prompt_lang: Lang::En,
             backup_interval_hours: 24,
             backup_keep: 2,
             backup_dir: String::new(),
             undo_steps: 25,
+            update_auto_check: false,
+            update_last_check: 0,
+            update_skip_version: String::new(),
         }
     }
 }
@@ -231,6 +290,14 @@ pub struct SessionMeta {
     /// Projekt (0 = noch keinem zugeordnet; wird beim Laden dem ersten Projekt zugewiesen).
     pub project: u64,
     pub tags: Vec<String>,
+    /// Fenster der Sitzung: 0 = Hauptfenster, sonst die Kennung eines weiteren Fensters (`SavedState::extra_windows`).
+    /// Fehlt bei Sitzungen des Hauptfensters (ältere Versionen kennen das Feld nicht und zeigen alles im Hauptfenster).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub window: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl Default for SessionMeta {
@@ -255,6 +322,7 @@ impl Default for SessionMeta {
             worktree: None,
             project: 0,
             tags: Vec::new(),
+            window: 0,
         }
     }
 }
@@ -414,29 +482,66 @@ pub struct SavedState {
     /// In eigenen Fenstern abgedockte Sitzungen.
     pub detached: Vec<u64>,
     pub composer_draft: String,
+    /// Weitere Fenster (Strg+Klick auf einen Reiter); fehlt, solange es keine gibt.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_windows: Vec<SavedWindow>,
 }
 
-/// Datenordner: `paneldeck-data` neben der .exe, sonst %APPDATA%/Paneldeck.
+/// Ein weiteres Fenster (#110): Reiter, Projekt und Layout des Terminal Hubs, Lage auf dem Bildschirm.
+/// Seine Sitzungen stehen in `sessions` mit `window = id`.
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SavedWindow {
+    /// Kennung (ab 1; 0 ist das Hauptfenster).
+    pub id: u64,
+    /// Angezeigter Reiter: `"terminals"` oder `"tasks"`.
+    pub tab: String,
+    /// Aktives Projekt des Terminal Hubs in diesem Fenster.
+    pub project: u64,
+    pub layout: Option<Node>,
+    pub focused: u64,
+    /// Layouts der übrigen Projekte in diesem Fenster.
+    pub views: Vec<SavedProjectView>,
+    /// Position (links oben) und Innengröße in Punkten.
+    pub pos: Option<[f32; 2]>,
+    pub size: Option<[f32; 2]>,
+    pub maximized: bool,
+}
+
+/// Layout eines Projekts in einem weiteren Fenster.
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SavedProjectView {
+    pub project: u64,
+    pub layout: Option<Node>,
+    pub focused: u64,
+}
+
+/// Datenordner dieses Prozesses (einmal aufgelöst, siehe `paths`): `--data-dir` > `PANELDECK_DATA` >
+/// `paneldeck-data` neben der .exe > %APPDATA%/Paneldeck, mit `--profile` jeweils `profiles\<name>` darunter.
 pub fn data_dir() -> PathBuf {
-    let try_dir = |p: PathBuf| -> Option<PathBuf> {
-        std::fs::create_dir_all(&p).ok()?;
-        let probe = p.join(".probe");
-        std::fs::write(&probe, b"x").ok()?;
-        let _ = std::fs::remove_file(probe);
-        Some(p)
-    };
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if let Some(p) = try_dir(dir.join("paneldeck-data")) {
-                return p;
-            }
-        }
+    crate::paths::get().path.clone()
+}
+
+/// Sicherung der Einstellungen nach `--reset-settings` (für den Hinweis beim Start).
+pub static SETTINGS_RESET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// `--reset-settings`: `settings.json` in `settings.json.bak-<JJJJMMTT-HHMMSS>` umbenennen (bei Namensgleichheit mit
+/// Zähler). Gibt die Sicherung zurück; `Ok(None)`, wenn es keine Einstellungsdatei gab.
+pub fn reset_settings(dir: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
+    let src = dir.join("settings.json");
+    if !src.exists() {
+        return Ok(None);
     }
-    let base = std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    try_dir(base.join("Paneldeck")).unwrap_or_else(|| PathBuf::from("."))
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut target = dir.join(format!("settings.json.bak-{stamp}"));
+    let mut n = 2;
+    while target.exists() {
+        target = dir.join(format!("settings.json.bak-{stamp}-{n}"));
+        n += 1;
+    }
+    std::fs::rename(&src, &target)?;
+    Ok(Some(target))
 }
 
 /// Entfernt ein UTF-8-BOM am Textanfang. Windows-Editoren (Notepad, PowerShell 5.1 `-Encoding UTF8`) schreiben es,
@@ -670,5 +775,71 @@ mod tests {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.undo_steps, 25);
         assert!(UNDO_STEP_CHOICES.contains(&s.undo_steps));
+    }
+
+    #[test]
+    fn lang_override_is_not_persisted() {
+        // reine Funktion (der globale Zustand bleibt unberührt, Tests laufen parallel)
+        assert_eq!(persisted_language(Lang::De, Some((Lang::De, Lang::En))), Lang::En);
+        assert_eq!(persisted_language(Lang::En, Some((Lang::De, Lang::En))), Lang::En);
+        assert_eq!(persisted_language(Lang::De, Some((Lang::En, Lang::En))), Lang::De);
+        assert_eq!(persisted_language(Lang::De, None), Lang::De);
+    }
+
+    #[test]
+    fn lang_override_never_reaches_settings_json() {
+        // threadlokal: betrifft nur diesen Test-Thread
+        let mut s = Settings { language: Lang::En, ..Settings::default() };
+        set_lang_override(Lang::De, Lang::En);
+        s.language = Lang::De; // so setzt App::new die Startsprache
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["language"], "En");
+        assert_eq!(persisted_lang(s.language), Lang::En);
+        // eigene Wahl in den Einstellungen beendet die Überschreibung
+        clear_lang_override();
+        assert_eq!(serde_json::to_value(&s).unwrap()["language"], "De");
+        assert_eq!(persisted_lang(Lang::De), Lang::De);
+    }
+
+    #[test]
+    fn reset_settings_keeps_backup() {
+        let dir = std::env::temp_dir().join(format!("pd-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(reset_settings(&dir).unwrap().is_none());
+        std::fs::write(dir.join("settings.json"), "{\"language\":\"De\"}").unwrap();
+        std::fs::write(dir.join("state.json"), "{}").unwrap();
+        assert_eq!(lang_from_disk(&dir), Some(Lang::De));
+        let b1 = reset_settings(&dir).unwrap().unwrap();
+        assert!(b1.file_name().unwrap().to_string_lossy().starts_with("settings.json.bak-"));
+        assert!(!dir.join("settings.json").exists() && dir.join("state.json").exists());
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        let b2 = reset_settings(&dir).unwrap().unwrap();
+        assert_ne!(b1, b2);
+        assert_eq!(std::fs::read_to_string(&b1).unwrap(), "{\"language\":\"De\"}");
+        assert_eq!(lang_from_disk(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_settings_default_and_roundtrip() {
+        // settings.json von 2.0.0 (ohne Update-Felder): automatische Prüfung bleibt aus
+        let old = r#"{"language":"De","theme":"One Dark","font_size":15.0,"backup_keep":3,"undo_steps":10}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(!s.update_auto_check);
+        assert_eq!(s.update_last_check, 0);
+        assert!(s.update_skip_version.is_empty());
+        assert_eq!(s.font_size, 15.0);
+        assert_eq!(s.backup_keep, 3);
+        assert!(!Settings::default().update_auto_check, "Standard: aus");
+        // Hin und zurück
+        let mut s = Settings::default();
+        s.update_auto_check = true;
+        s.update_last_check = 1_800_000_000;
+        s.update_skip_version = "3.0.0".into();
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.update_auto_check);
+        assert_eq!(back.update_last_check, 1_800_000_000);
+        assert_eq!(back.update_skip_version, "3.0.0");
     }
 }

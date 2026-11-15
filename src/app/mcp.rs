@@ -344,6 +344,7 @@ impl App {
                     self.push_toast(text, super::toasts::ToastKind::Info, c.target);
                     self.tasks.invalidate();
                     self.plan.invalidate();
+                    self.wins.data_gen += 1; // weitere Fenster laden ihre Todo-Ansicht ebenfalls neu
                 }
                 Ok(done.result)
             }
@@ -361,6 +362,9 @@ impl App {
                 Ok(id) => id,
                 Err(e) => return Out::Now(Err(e)),
             };
+            if self.window_of(id).unwrap_or(0) != 0 {
+                return Out::Now(Err(er("not_visible", tr("Die Sitzung liegt in einem weiteren Paneldeck-Fenster – Screenshots einzelner Sitzungen gehen nur im Hauptfenster.", "The session is in another Paneldeck window – screenshots of single sessions only work in the main window."))));
+            }
             match self.pane_rects.get(&id).copied() {
                 Some(r) => (id, Some(r)),
                 None => return Out::Now(Err(er("not_visible", tr("Die Sitzung ist im Fenster nicht zu sehen (anderes Projekt oder ausgeblendet) – erst focus_session aufrufen.", "The session is not visible in the window (other project or hidden) – call focus_session first.")))),
@@ -435,7 +439,6 @@ impl App {
 
     fn mcp_list(&self, args: &Value, caller: Option<u64>) -> Value {
         let include_exited = args.get("include_exited").and_then(|v| v.as_bool()).unwrap_or(true);
-        let docked = self.docked_ids();
         let sessions: Vec<Value> = self
             .entries
             .iter()
@@ -444,6 +447,8 @@ impl App {
                 let usage = self.usage.get(*id);
                 let git = self.git.get(*id);
                 let project = self.projects.iter().find(|p| p.id == e.meta.project).map(|p| p.name.clone()).unwrap_or_default();
+                // Fenster der Sitzung (0 = Hauptfenster); fokussiert/sichtbar gelten in diesem Fenster.
+                let (window, focused, visible) = self.session_view_info(*id);
                 json!({
                     "id": id,
                     "name": e.display_name(),
@@ -453,8 +458,9 @@ impl App {
                     "shell": e.eff_shell(),
                     "claude": e.meta.claude,
                     "status": status_str(e),
-                    "focused": *id == self.focused,
-                    "visible": docked.contains(id) || self.detached.contains(id),
+                    "focused": focused,
+                    "visible": visible,
+                    "window": window,
                     "queue_len": e.meta.queue.len(),
                     "cost_usd": usage.as_ref().map(|u| (u.cost() * 100.0).round() / 100.0),
                     "git": git.map(|g| json!({"branch": g.branch, "changed_files": g.changed})),
@@ -546,8 +552,10 @@ impl App {
                 return Err(er("bad_args", if de() { format!("Ordner existiert nicht: {c}") } else { format!("Folder does not exist: {c}") }));
             }
         }
+        // Läuft der Agent in einer Hub-Sitzung, kommt das Kind in deren Fenster und Projekt (#110), sonst ins Hauptfenster.
+        let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
         // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
-        let default_profile = self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0);
+        let default_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
         if self.profile(default_profile).is_some_and(|p| p.admin) {
             return Err(er("admin_profile", tr("Das Standardprofil dieses Projekts startet als Administrator – über MCP nicht erlaubt.", "This project's default profile starts as administrator – not allowed via MCP.")));
         }
@@ -561,7 +569,7 @@ impl App {
             let name = if name.is_empty() { format!("{} {}", tr("Sitzung", "Session"), e.meta.id) } else { name };
             Some(if e.meta.group.is_empty() { name } else { format!("{}/{}", e.meta.group, name) })
         });
-        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, prompt, group, quiet: true, ..NewOpts::default() });
+        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, prompt, group, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
         if let Some(err) = self.entries.get(&id).and_then(|e| e.error.clone()) {
             self.close_session(id);
@@ -775,13 +783,18 @@ impl App {
                 // beim Senden ist unsicher, weil langsame Prompts (z. B. Git Bash mit Git-Status) zeilenweise mit Pausen erscheinen.
                 let scan_from = mark0.map_or(*start_abs, |m| m.min(*start_abs));
                 let all = s.lines_abs(scan_from, end_incl.max(scan_from));
-                let key: String = cmd.chars().take(12).collect();
-                let echo_idx = all.iter().position(|l| l.contains(key.as_str()));
-                let first_ok = echo_idx.is_some();
-                // Ein langer Befehl kann umbrochen sein: den ganzen Eingabeblock überspringen, nicht nur die erste Zeile.
-                let skip = match echo_idx {
-                    Some(i) => (s.wrap_end(scan_from + i as u64) - scan_from) as usize + 1,
-                    None => (*start_abs - scan_from) as usize + 1,
+                // Ein langer Befehl kann umbrochen sein: den ganzen Eingabeblock überspringen, nicht nur die erste Zeile. Das Echo
+                // wird am Befehlstext selbst verfolgt (WRAPLINE fehlt, wenn ConPTY/PSReadLine die Eingabe neu zeichnen).
+                let (first_ok, skip) = match crate::terminal::find_echo(&all, cmd) {
+                    Some((_, last)) => (true, last + 1),
+                    None => {
+                        // Rückfall (Echo unvollständig, z. B. aus dem Verlauf gefallen): erste Zeile mit dem Befehlsanfang.
+                        let key: String = cmd.chars().take(12).collect();
+                        match all.iter().position(|l| l.contains(key.as_str())) {
+                            Some(i) => (true, (s.wrap_end(scan_from + i as u64) - scan_from) as usize + 1),
+                            None => (false, (*start_abs - scan_from) as usize + 1),
+                        }
+                    }
                 };
                 // Ausgabe mit zusammengefügten Zeilenumbrüchen des Terminals (eine 300 Zeichen lange Zeile bleibt eine Zeile).
                 let first_out = scan_from + skip as u64;
@@ -840,14 +853,8 @@ impl App {
 
     fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value) -> R {
         let id = self.mcp_target(args, None, false)?;
-        if self.detached.contains(&id) {
-            ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of(("detached", id)), egui::ViewportCommand::Focus);
-        } else {
-            if let Some(pid) = self.entries.get(&id).map(|e| e.meta.project) {
-                self.switch_project(pid);
-            }
-            self.activate(id);
-        }
+        // Abgedockt: dieses Fenster nach vorn; Sitzung eines weiteren Fensters: dort aktivieren, Fenster nach vorn.
+        self.apply(ctx, Action::Focus(id));
         Ok(json!({"ok": true}))
     }
 
@@ -871,24 +878,27 @@ impl App {
         Ok(json!({"ok": true}))
     }
 
-    /// Befehl zum Registrieren in Claude Code (Benutzerebene).
-    pub(super) fn mcp_register_command(&self) -> String {
-        format!("claude mcp add --scope user paneldeck -- \"{}\" mcp", self.exe.display())
+    /// Befehl zum Registrieren in Claude Code (Benutzerebene), mit Servername und Argumenten dieser Instanz;
+    /// ein Fehler, wenn Programmpfad oder Argumente Zeichen enthalten, die sich nicht sicher übergeben lassen.
+    pub(super) fn mcp_register_command(&self) -> Result<String, String> {
+        crate::launch::claude_add_command(&self.exe, &crate::launch::instance_args())
     }
 
     /// `claude <args>` im Hintergrund ausführen; das Ergebnis erscheint in den Einstellungen.
     fn mcp_run_claude_cli(&self, ctx: &egui::Context, args: Vec<String>) {
         let msg = self.mcp.msg.clone();
+        // Über `cmd.exe /d /v:off /c` mit selbst quotierter Zeile, Arbeitsordner = Benutzerprofil (siehe `mcp::claude_command`).
+        let mut cmd = match mcp::claude_command(&args, &mcp::claude_cwd()) {
+            Ok(c) => c,
+            Err(e) => {
+                *msg.lock().unwrap_or_else(|e| e.into_inner()) = e;
+                return;
+            }
+        };
         *msg.lock().unwrap_or_else(|e| e.into_inner()) = tr("Läuft …", "Running …").to_string();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            #[cfg(windows)]
-            let out = {
-                use std::os::windows::process::CommandExt;
-                std::process::Command::new("cmd.exe").arg("/c").arg("claude").args(&args).creation_flags(0x0800_0000).output()
-            };
-            #[cfg(not(windows))]
-            let out = std::process::Command::new("claude").args(&args).output();
+            let out = cmd.stdin(std::process::Stdio::null()).output();
             let text = match out {
                 Ok(o) => {
                     let t = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)).trim().to_string();
@@ -979,21 +989,33 @@ impl App {
         ui.separator();
         ui.add_space(S1);
         ui.label(RichText::new(lang.t("In Claude Code einrichten", "Set up in Claude Code")).strong());
+        let inst_args = crate::launch::instance_args();
+        let server = crate::launch::mcp_server_name(&crate::launch::Instance::from_args(&inst_args));
+        ui.label(RichText::new(format!("{}: {server}", lang.t("Servername dieser Instanz", "Server name of this instance"))).small());
         let cmd = self.mcp_register_command();
-        ui.label(RichText::new(&cmd).small().monospace());
+        match &cmd {
+            Ok(c) => {
+                ui.label(RichText::new(c).small().monospace());
+            }
+            Err(e) => {
+                ui.colored_label(Color32::LIGHT_RED, RichText::new(e).small());
+            }
+        }
         ui.horizontal_wrapped(|ui| {
-            if ui.button(lang.t("Registrieren", "Register")).on_hover_text(lang.t("Führt den Befehl oben aus (Benutzerebene)", "Runs the command above (user scope)")).clicked() {
-                let args: Vec<String> = ["mcp", "add", "--scope", "user", "paneldeck", "--"].iter().map(|s| s.to_string()).chain([self.exe.display().to_string(), "mcp".to_string()]).collect();
+            if ui.add_enabled(cmd.is_ok(), egui::Button::new(lang.t("Registrieren", "Register"))).on_hover_text(lang.t("Führt den Befehl oben aus (Benutzerebene)", "Runs the command above (user scope)")).clicked() {
+                let args = crate::launch::claude_add_args(&self.exe, &inst_args);
                 self.mcp_run_claude_cli(ctx, args);
             }
-            if ui.button(lang.t("Entfernen", "Remove")).clicked() {
-                self.mcp_run_claude_cli(ctx, ["mcp", "remove", "paneldeck", "--scope", "user"].iter().map(|s| s.to_string()).collect());
+            if ui.button(lang.t("Entfernen", "Remove")).on_hover_text(if de() { format!("Entfernt den Server „{server}“ aus Claude Code (Benutzerebene)") } else { format!("Removes the server “{server}” from Claude Code (user scope)") }).clicked() {
+                self.mcp_run_claude_cli(ctx, ["mcp", "remove", server.as_str(), "--scope", "user"].iter().map(|s| s.to_string()).collect());
             }
-            if ui.button(lang.t("Befehl kopieren", "Copy command")).clicked() {
-                ctx.copy_text(cmd.clone());
+            if ui.add_enabled(cmd.is_ok(), egui::Button::new(lang.t("Befehl kopieren", "Copy command"))).clicked() {
+                if let Ok(c) = &cmd {
+                    ctx.copy_text(c.clone());
+                }
             }
             if ui.button(lang.t("JSON für andere Agenten", "JSON for other agents")).on_hover_text(lang.t("Eintrag für `mcpServers` (z. B. Claude Desktop, Cursor)", "Entry for `mcpServers` (e.g. Claude Desktop, Cursor)")).clicked() {
-                let v = json!({"mcpServers": {"paneldeck": {"command": self.exe.display().to_string(), "args": ["mcp"]}}});
+                let v = json!({"mcpServers": {server.as_str(): {"command": self.exe.display().to_string(), "args": crate::launch::mcp_args(&inst_args)}}});
                 ctx.copy_text(serde_json::to_string_pretty(&v).unwrap_or_default());
             }
         });
@@ -1009,6 +1031,7 @@ impl App {
             .small()
             .color(style::dim(ui)),
         );
+        self.sysprompt_settings_ui(ui);
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S1);

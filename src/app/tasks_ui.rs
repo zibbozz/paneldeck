@@ -1363,7 +1363,7 @@ impl App {
         for o in outs {
             match o {
                 QuickOut::Toast { text, error, undo } => {
-                    let action = undo.map(|token| ToastAction { label: lang.t("Rückgängig", "Undo").to_string(), token });
+                    let action = undo.map(|token| ToastAction { label: lang.t("Rückgängig", "Undo").to_string(), token, window: self.wins.cur });
                     self.push_toast_action(text, if error { ToastKind::Error } else { ToastKind::Info }, None, action);
                 }
                 QuickOut::Session(req) => self.quick_start_session(ctx, req),
@@ -1391,7 +1391,17 @@ impl App {
     }
 
     /// Klick auf den Knopf eines Toasts (heute nur „Rückgängig“ des Schnellmenüs).
-    pub(super) fn toast_action_clicked(&mut self, _ctx: &egui::Context, token: u64) {
+    /// `window`: Fenster, dessen Todo-Ansicht die Änderung gemacht hat; ihr Rückgängig-Stapel liegt dort.
+    pub(super) fn toast_action_clicked(&mut self, ctx: &egui::Context, token: u64, window: u64) {
+        if window != self.wins.cur {
+            self.wins_undo_later(ctx, window, token);
+            return;
+        }
+        self.undo_here(ctx, token);
+    }
+
+    /// „Rückgängig“ mit dem Stapel der Todo-Ansicht des gerade gezeichneten Fensters.
+    pub(super) fn undo_here(&mut self, _ctx: &egui::Context, token: u64) {
         use super::toasts::ToastKind;
         let lang = self.settings.language;
         let Some(db) = self.db.as_ref() else { return };

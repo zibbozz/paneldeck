@@ -1,5 +1,5 @@
 #!/bin/bash
-# Verwendung: tools/release.sh <version> [--publish] [--skip-smoke] [--no-git]
+# Verwendung: tools/release.sh <version> [--publish] [--skip-smoke] [--no-git] [--ignore-defender]
 #
 # Release-Lauf für den Branch release/x.y (siehe CLAUDE.md, „Branching- und Release-Strategie“). Dieses Skript committet NICHT:
 # Versionsnummer, Changelog-Datum und Titel kommen vorher über einen Pull Request in release/x.y (tools/release-prep.sh).
@@ -7,8 +7,11 @@
 #   --publish        zusätzlich: nur das Tag pushen und das GitHub-Release anlegen (braucht `gh`, angemeldet)
 #   --no-git         nur bauen und packen (Probelauf auf jedem Branch; kein Tag, kein Push)
 #   --skip-smoke     Smoke-Test und Update-Test (tools/smoke-mcp.ps1, tools/update-test.ps1; nur Windows) überspringen
+#   --ignore-defender  trotz Defender-Treffer weitermachen (nur nach Rücksprache mit dem Nutzer; Fehlalarm vorher bei Microsoft melden)
+# Defender-Prüfung (Windows, Vorgabe des Nutzers): paneldeck.exe und Installer werden vor Tag/Veröffentlichung mit
+#   tools/defender-scan.ps1 geprüft; bei einem Treffer bricht das Skript ab und gibt die Werte für das Microsoft-Formular aus.
 # Prüfungen (außer mit --no-git): Branch ist release/<x.y> passend zur Version · Arbeitsbaum sauber · Stand == origin/release/<x.y> ·
-#   Cargo.toml-Version · Changelog-Abschnitt mit heutigem Datum (= Tag-Datum) · englischer Text docs/release-notes/<v>.en.md · Titel.
+#   Cargo.toml-Version · Changelog-Abschnitt mit heutigem Datum (= Tag-Datum) in Changelog.md und Changelog.de.md · englischer Text docs/release-notes/<v>.en.md · Titel.
 # Das GitHub-Release ist ein normales Release (Pre-release nur, wenn die Version ein „-“ enthält; Release Candidates nutzen wir nicht).
 # Windows: nativer MSVC-Build (target/release), Installer mit NSIS (makensis). Linux: Cross-Build nach windows-gnu.
 set -euo pipefail
@@ -16,10 +19,11 @@ cd "$(dirname "$0")/.."
 source tools/common.sh
 
 V="${1:?Version fehlt}"; shift
-PUBLISH=0; NOGIT=0; SKIP_SMOKE=0
+PUBLISH=0; NOGIT=0; SKIP_SMOKE=0; IGNORE_DEFENDER=0
 for a in "$@"; do
   case "$a" in
     --publish) PUBLISH=1 ;;
+    --ignore-defender) IGNORE_DEFENDER=1 ;;
     --no-git) NOGIT=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     *) echo "Unbekannte Option: $a"; exit 1 ;;
@@ -65,15 +69,48 @@ if [ "$IS_WIN" = 1 ]; then
   n="$(grep -a -c -i -E 'C:\\Users|E:\\claude|E:\\paneldeck' "dist/paneldeck-$V.exe" || true)"
   [ "$n" = 0 ] || { echo "Programmdatei enthält Pfade des Build-Rechners ($n Treffer)"; exit 1; }
 fi
+# Der lokale Test-Feed des Selbst-Updates (Cargo-Feature update-test-feed) darf nie im Release stecken.
+if grep -a -q 'PANELDECK_UPDATE_TEST_FEED' "dist/paneldeck-$V.exe"; then
+  echo "Programmdatei enthält den Update-Test-Feed (Feature update-test-feed) – so nicht veröffentlichen"; exit 1
+fi
+
+# Defender-Prüfung auf Fehlalarme (Windows): paneldeck.exe (steckt unverändert auch im ZIP) und der Installer.
+if [ "$IS_WIN" = 1 ]; then
+  echo "== Defender-Prüfung (tools/defender-scan.ps1)"
+  DEF_FILES=("$(abspath "dist/paneldeck-$V.exe")")
+  [ -f "dist/Paneldeck-Setup-$V.exe" ] && DEF_FILES+=("$(abspath "dist/Paneldeck-Setup-$V.exe")")
+  set +e
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/defender-scan.ps1 "${DEF_FILES[@]}"
+  DEF_RC=$?
+  set -e
+  if [ "$DEF_RC" = 1 ]; then
+    if [ "$IGNORE_DEFENDER" = 1 ]; then
+      echo "WARNUNG: Defender meldet einen Treffer – weiter wegen --ignore-defender."
+    else
+      echo "Defender meldet einen Treffer: Release angehalten. Fehlalarm bei Microsoft melden (Werte siehe oben),"
+      echo "dann neu prüfen oder nach Rücksprache mit dem Nutzer mit --ignore-defender fortfahren."
+      exit 1
+    fi
+  elif [ "$DEF_RC" != 0 ]; then
+    echo "WARNUNG: Defender-Prüfung nicht möglich (Exit $DEF_RC) – bitte von Hand prüfen: tools/defender-scan.ps1 <Dateien>"
+  fi
+fi
 
 # Ende-zu-Ende-Test der gebauten .exe (Windows): startet sie in einem Temp-Ordner und prüft die Agenten-Schnittstelle.
+# PANELDECK_TEST_ROOT (optional): Ordner für die Temp-Ordner beider Tests statt %TEMP% – z. B. ein Ordner mit Defender-Ausnahme,
+# solange unsignierte Builds fälschlich erkannt werden (siehe CLAUDE.md, Defender-Prüfung).
 if [ "$IS_WIN" = 1 ] && [ "$SKIP_SMOKE" = 0 ]; then
+  ROOT_ARGS_SMOKE=(); ROOT_ARGS_UPD=()
+  if [ -n "${PANELDECK_TEST_ROOT:-}" ]; then
+    mkdir -p "$PANELDECK_TEST_ROOT"
+    ROOT_ARGS_SMOKE=(-WorkRoot "$(abspath "$PANELDECK_TEST_ROOT")"); ROOT_ARGS_UPD=(-TempRoot "$(abspath "$PANELDECK_TEST_ROOT")")
+  fi
   echo "== Smoke-Test (tools/smoke-mcp.ps1)"
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/smoke-mcp.ps1 -Exe "$(abspath "dist/paneldeck-$V.exe")"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/smoke-mcp.ps1 -Exe "$(abspath "dist/paneldeck-$V.exe")" ${ROOT_ARGS_SMOKE[@]+"${ROOT_ARGS_SMOKE[@]}"}
   # Update-Test des echten Installers (alte Version -> dieser Installer, ruhender und laufender Hub; Schein-Profil, räumt auf).
   if [ -f "dist/Paneldeck-Setup-$V.exe" ]; then
     echo "== Update-Test (tools/update-test.ps1)"
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/update-test.ps1 -New "$(abspath "dist/Paneldeck-Setup-$V.exe")"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/update-test.ps1 -New "$(abspath "dist/Paneldeck-Setup-$V.exe")" -Exe "$(abspath "dist/paneldeck-$V.exe")" ${ROOT_ARGS_UPD[@]+"${ROOT_ARGS_UPD[@]}"}
   fi
 fi
 
@@ -84,10 +121,23 @@ fi
 
 tools/package.sh "$V"
 
+# Prüfsummen der Release-Dateien für das Selbst-Update (Paneldeck lädt SHA256SUMS.txt und verwirft Downloads, die nicht passen).
+# Format wie `sha256sum` (`<hex>  <datei>`); der Asset-Name muss genau SHA256SUMS.txt sein, daher ein eigener Ordner je Version.
+SUMS_DIR="dist/sums-$V"
+mkdir -p "$SUMS_DIR"
+: > "$SUMS_DIR/SHA256SUMS.txt"
+for f in "Paneldeck-Setup-$V.exe" "paneldeck-$V-windows-x64.zip"; do
+  [ -f "dist/$f" ] || continue
+  printf '%s  %s\n' "$(sha256sum "dist/$f" | cut -d' ' -f1)" "$f" >> "$SUMS_DIR/SHA256SUMS.txt"
+done
+(cd dist && sha256sum -c --quiet "sums-$V/SHA256SUMS.txt") || { echo "SHA256SUMS.txt passt nicht zu den Dateien in dist/"; exit 1; }
+cat "$SUMS_DIR/SHA256SUMS.txt"
+
 if [ "$PUBLISH" = 1 ]; then
   git push origin "v$V"
   ASSETS=("dist/paneldeck-$V-windows-x64.zip")
   [ -f "dist/Paneldeck-Setup-$V.exe" ] && ASSETS+=("dist/Paneldeck-Setup-$V.exe")
+  ASSETS+=("$SUMS_DIR/SHA256SUMS.txt")
   PRE=(); [[ "$V" == *-* ]] && PRE=(--prerelease)
   "$GH" release create "v$V" "${ASSETS[@]}" --verify-tag ${PRE[@]+"${PRE[@]}"} \
     --title "$(cat "dist/gh-title-$V.txt")" --notes-file "dist/gh-notes-$V.md"

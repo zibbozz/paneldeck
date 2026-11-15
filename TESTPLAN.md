@@ -498,3 +498,98 @@ Automatisch: siehe Abschnitt 32a (`tools\smoke-mcp.ps1` mit 136 Prüfungen, Unit
 - [ ] **Leistung:** 10.000 Tickets (z. B. per Agent oder Skript angelegt): Start der Todo-Liste < 2 s, Board/Liste/Suche flüssig, Terminal Hub bleibt davon unberührt; Speicherbedarf der .exe-Datei wächst nicht merklich.
 - [ ] **Beide Sprachen:** kompletter Durchlauf der Abschnitte 34–46 auf Deutsch; Stichprobe: kein englischer/deutscher Resttext an der falschen Stelle.
 - [ ] **Dokumentation:** README (Englisch/Deutsch) und Changelog stimmen mit dem Programm überein; Screenshots für alle `TODO screenshot`-Kommentare in den READMEs sind erzeugt.
+
+## 48 · Kommandozeile, Datenordner und Profile (2.1.0)
+Vorbereitung: Kopie der .exe in einem eigenen Ordner unter `E:\paneldeck-test` (eigener Datenordner daneben), Schein-`USERPROFILE`. Automatisch: Unit-Tests `cli`, `help`, `paths` (Parser, Hilfetext mit jedem Beispiel, Suchreihenfolge, Profile, Fehler).
+- [ ] **Version:** cmd im Ordner der .exe: `paneldeck.exe --version` → Version erscheint in der Konsole, kein Fenster öffnet sich.
+- [ ] **Hilfe in der Konsole:** PowerShell: `.\paneldeck.exe --help --lang de` → deutsche Hilfe mit korrekten Umlauten; ohne `--lang` in der gespeicherten Sprache; jede Option hat Überblick, Erklärung und Beispiel.
+- [ ] **Hilfe ohne Konsole:** Win+R `<Pfad>\paneldeck.exe --help` → Meldungsfenster mit der Hilfe (Info-Symbol).
+- [ ] **Unbekannte Option:** Win+R `<Pfad>\paneldeck.exe --bogus` → Meldungsfenster mit Fehler-Symbol, „Unknown option: --bogus“ und Hinweis auf `--help`; `--bogus --lang de` → deutsch. In der Konsole: Exit-Code 2 (`echo %ERRORLEVEL%` bzw. `$LASTEXITCODE`).
+- [ ] **Profil nebeneinander:** Standardinstanz läuft; `--profile work` starten → zweites, leeres Fenster; *Einstellungen → Info* zeigt Datenordner `…\profiles\work`, Profil „work“ und die Herkunft; ein zweiter Start mit `--profile work` holt dieses Fenster nach vorn (keine dritte Instanz).
+- [ ] **`--lang`:** Gespeichert ist Englisch; mit `--lang de` starten → Oberfläche deutsch, *Info* nennt die Startoption; beenden, ohne Option neu starten → Englisch; `settings.json` enthält weiter `"En"`; `prompts.json`, Standard-Projektname und Texte des Kontextmenüs bleiben englisch. Eine Sprache, die während eines `--lang`-Starts unter *Einstellungen → Allgemein* gewählt wird, wird gespeichert.
+- [ ] **`--backup-dir D:\x`:** *Daten & Sicherung* zeigt den Ordner mit „(festgelegt mit --backup-dir)“, „Ordner wählen“/„Standard“ sind gesperrt, „Jetzt sichern“ schreibt dorthin; Neustart ohne Option → wieder der alte Ordner.
+- [ ] **`--no-tray`** bei eingeschaltetem *Schließen → Tray* / *Minimieren → Tray* → kein Tray-Symbol, Minimieren = Taskleiste, X beendet; der Reiter *Fenster* zeigt den Hinweis.
+- [ ] **`--reset-settings`** (Paneldeck beendet) → Hinweis mit dem Namen der Sicherung (`settings.json.bak-<Zeit>`), Standard-Einstellungen, Sitzungen und To-dos bleiben; bei laufender Instanz → Fehlermeldung, Exit-Code 1, das Fenster der laufenden Instanz springt nicht nach vorn.
+- [ ] **Unbrauchbarer Datenordner:** `--data-dir` unterhalb einer vorhandenen *Datei* → Fehlermeldung nennt den Ordner, Exit-Code 1, kein Rückfall auf einen anderen Ordner. Ebenso mit `PANELDECK_DATA`.
+- [ ] **`PANELDECK_DATA`:** Variable auf einen leeren Ordner setzen, starten → Datenordner dort, *Info* nennt „festgelegt mit PANELDECK_DATA“; `--data-dir` hat Vorrang vor der Variable.
+- [ ] **Diagnose:** *Info → Diagnose kopieren* → Zeile mit Herkunft des Datenordners, Profil und Startoptionen.
+- [ ] **Ordner auf die .exe ziehen:** einen Ordner, eine Datei und `C:\` auf die kopierte .exe ziehen → Sitzung öffnet sich im Ordner (bei der Datei in ihrem Ordner).
+- [ ] **Übergabe an die laufende Instanz:** Paneldeck läuft; `--open <ordner> --lang de` → nur die Sitzung öffnet sich, die Sprache bleibt; `--tray` zeigt das Fenster.
+- [ ] **Brücke aus einem Profil-Terminal:** `--profile work`, Agenten-Stufe *Lesen*; im Terminal dieser Instanz `paneldeck.exe mcp` (über Claude) → erreicht den Hub „work“, nicht die Standardinstanz; `paneldeck.exe mcp --profile work` aus einem fremden Terminal ebenso; läuft „work“ nicht, nennt `hub_not_running` den gesuchten Ordner.
+- [ ] **Beide Sprachen:** Hilfe, Fehlermeldungen und Meldungsfenster auf Deutsch und Englisch.
+
+## 49 · Integrationen je Instanz (2.1.0)
+Vorbereitung wie Abschnitt 48; Registry-Prüfungen nur mit Testinstanzen, danach alles wieder ausschalten. Automatisch: Unit-Tests `launch`, `integration` (Befehle, Namen, Hash, Pläne), `tools\update-test.ps1` (Deinstallation).
+- [ ] **MCP-Name je Profil:** Instanz `--profile work`, *Einstellungen → Agenten* zeigt „Servername dieser Instanz: paneldeck-work“ und die Befehlszeile mit `mcp --profile work`; *Registrieren* → `claude mcp list` zeigt `paneldeck-work`; JSON-Knopf → Schlüssel `paneldeck-work`; *Entfernen* → nur `paneldeck-work` verschwindet.
+- [ ] **Standardinstanz unverändert:** Name `paneldeck`, Befehl genau wie in 2.0.0 (`"<exe>" mcp`).
+- [ ] **Autostart je Instanz:** Instanz „work“: Autostart an → Run-Wert `Paneldeck (work)` = `"<exe>" --profile work --tray`; aus → nur dieser Wert verschwindet; der Schalter der Standardinstanz ist davon unabhängig.
+- [ ] **Kontextmenü – der Letzte gewinnt:** in der Standardinstanz einschalten, dann in „work“ → der Befehl trägt `--profile work`; die Standardinstanz zeigt „→ anderes Paneldeck“ mit dem Befehl im Tooltip; dort wieder einschalten übernimmt es.
+- [ ] **Kontextmenü auf einem Ordner und auf dem Ordner-Hintergrund** (auch im Hintergrund der Laufwerkswurzel `C:\`) → öffnet in der richtigen Instanz im richtigen Ordner. Auf dem Laufwerkssymbol selbst (z. B. unter *Dieser PC*) gibt es den Eintrag nicht – registriert sind nur `Directory\shell` und `Directory\Background\shell`.
+- [ ] **Datenordner mit Leerzeichen und abschließendem Backslash:** `--data-dir "D:\Pd Test\"` → Namen mit 8-stelligem Hex-Hash (`Paneldeck (<hash>)`, `paneldeck-<hash>`); der Run-Befehl hat den doppelten Backslash vor dem schließenden Anführungszeichen; nach der Anmeldung startet die Instanz mit genau diesem Ordner.
+- [ ] **`%` im Pfad:** .exe in einem Ordner mit `%` im Namen → roter Hinweis im Reiter *Agenten*, *Registrieren*/*Kopieren* gesperrt; Autostart/Kontextmenü melden einen Fehler statt etwas Falsches zu schreiben.
+- [ ] **Deinstallation** (Testinstallation, `tools\update-test.ps1` bzw. von Hand mit `/D=<Temp>`) mit Autostart von „work“ und registriertem `paneldeck-work` → beides weg, fremde Einträge bleiben, der Rest von `.claude.json` ist unverändert, die Deinstallation endet zügig auch ohne `claude` im PATH.
+- [ ] **Beide Sprachen:** Statuszeilen und Hinweise in *Fenster* und *Agenten* auf Deutsch und Englisch.
+
+## 50 · Systemprompt für Agenten (2.1.0)
+Vorbereitung: eigener Datenordner ohne `system-prompt.md`. Automatisch: Unit-Tests `sysprompt` (Platzhalter, Laden, Größe, BOM, Werkzeugbeschreibungen in beiden Sprachen), `tools\smoke-mcp.ps1` (`instructions` in `initialize`).
+- [ ] **Ohne Datei:** *Einstellungen → Agenten → Systemprompt* zeigt die englische eingebaute Vorlage, „Eingebaute Vorlage“; *Speichern*, *Verwerfen*, *Zurücksetzen* sind gesperrt.
+- [ ] **Sprache:** „Deutsch“ wählen → deutsche Vorlage, `settings.json` enthält `"mcp_prompt_lang": "De"`, Vorschau deutsch; zurück auf Englisch. Die Sprache der Oberfläche bleibt davon unberührt.
+- [ ] **Stufe und Modus:** Stufe *Lesen*, Expertenmodus aus → Vorschau ohne `send_text`/`add_todo`; *Steuern* → beide erscheinen; Expertenmodus an → `create_ticket` erscheint, `add_todo` verschwindet; der Modus heißt „expert mode“/„Expertenmodus“ ohne Zusatz.
+- [ ] **Bearbeiten:** `Test {{version}} {{foo}}` tippen → „ungespeicherte Änderungen“, gelbe Warnung zum unbekannten Platzhalter; Vorschau-Überschrift „– ungespeicherte Änderungen“; *Speichern* → `system-prompt.md` existiert, Anzeige „Eigene Vorlage“.
+- [ ] **Verwerfen/Zurücksetzen:** *Änderungen verwerfen* → gespeicherter Text kommt zurück. *Auf Standard zurücksetzen* → `system-prompt.md.bak` entsteht, die Meldung nennt sie; nochmal zurücksetzen ersetzt die `.bak`.
+- [ ] **Größe:** Text über 64 KB → rote Meldung „zu groß“, *Speichern* gesperrt.
+- [ ] **Kopieren / Als Datei speichern:** *Kopieren* → gerenderter Text in der Zwischenablage; *Als Datei speichern …* → `.md`-Dialog, Meldung „Gespeichert“; Abbrechen → nichts geschrieben, keine Meldung.
+- [ ] **Änderung von außen:** Datei im Editor ändern (ohne eigene Änderungen in Paneldeck) → der Editor lädt neu (BOM entfernt); mit ungespeicherten Änderungen → orange Warnung, *Verwerfen* lädt die Datei.
+- [ ] **Ungültige Datei:** `system-prompt.md` als UTF-16 speichern → gelbe Meldung „system-prompt.md ist kein gültiges UTF-8 – es gilt die eingebaute Vorlage.“
+- [ ] **Agent:** Claude Code (oder `tools\smoke-mcp.ps1`) verbindet sich → `instructions` in `initialize` ist der gerenderte Prompt (eigene Vorlage, falls gespeichert).
+- [ ] **Beide Sprachen:** alle Texte des Abschnitts auf Deutsch und Englisch.
+
+## 51 · Mehrere Fenster und leerer Start (2.1.0)
+Vorbereitung: eigener Datenordner. Automatisch: `tools\smoke-mcp.ps1` (Start ohne Terminal, Feld `window`), Unit-Tests der Fensteransicht.
+- [ ] **Leerer Start:** leerer Datenordner → kein Terminal, mittig ein Hinweis mit „Neues Terminal“ (im Claude-Modus auch „Neue Claude-Sitzung …“); die Kürzel-Hinweise folgen den eigenen Tastenbelegungen und der Sprache.
+- [ ] **Neues Terminal** → öffnet sich; schließen → wieder der leere Hub.
+- [ ] **Wiederherstellen:** eine Sitzung offen, beenden, neu starten → Sitzung wiederhergestellt, kein zusätzliches Terminal.
+- [ ] **Tooltips der Reiter:** „Strg+Klick: in neuem Fenster öffnen“ (EN: „Ctrl+click: open in a new window“).
+- [ ] **Neues Fenster:** Strg+Klick auf *Terminal Hub* → zweites Fenster (versetzt, gleiche Größe, eigene Fensterleiste, runde Ecken, Titel „Paneldeck (2)“ bzw. „<Sitzung> – Paneldeck (2)“), leerer Hub mit „Noch keine Sitzung in diesem Fenster“; das Hauptfenster bleibt unverändert.
+- [ ] **Eigene Sitzungen:** In Fenster 2 neues Terminal + Teilen → nur in der Seitenleiste von Fenster 2; Tippen landet im richtigen Terminal. Reiterwechsel in Fenster 2 betrifft nur Fenster 2. Ziehen, Doppelklick, Größe ändern, Minimieren funktionieren (kein Snap-Menü an weiteren Fenstern).
+- [ ] **Todo-Fenster:** Strg+Klick auf *Todo-Liste* in Fenster 2 → Fenster 3 mit der Todo-Liste; dort anlegen/ändern → erscheint im Hauptfenster und umgekehrt.
+- [ ] **Sprung über Fenster:** Palette im Hauptfenster, eine Sitzung von Fenster 2 wählen → Fenster 2 kommt mit dieser Sitzung nach vorn; ebenso der Terminal-Chip eines Tickets.
+- [ ] **Abdocken:** eine Sitzung aus Fenster 2 abdocken, das abgedockte Fenster schließen → sie kehrt nach Fenster 2 zurück.
+- [ ] **Hinweise:** Sitzung in Fenster 2 wird fertig bzw. braucht Freigabe → Hinweis/Toast in Fenster 2, Taskleiste von Fenster 2 blinkt.
+- [ ] **Schließen:** Fenster 2 mit laufenden Sitzungen schließen → Rückfrage „Fenster schließen?“ immer (auch bei ausgeschaltetem „Schließen bestätigen“) mit der Anzahl; *Abbrechen* (oder `Esc`) behält alles; *Fenster schließen* beendet die Sitzungen (`list_sessions` listet sie nicht mehr). Ein Fenster ohne Sitzungen bzw. nur mit beendeten Sitzungen schließt ohne Frage. Hauptfenster schließen → alle Fenster zu.
+- [ ] **Schließen mit Abgedocktem und Worktree:** Fenster 2 mit einer abgedockten Sitzung schließen → die Rückfrage nennt sie unter „Abgedockte Sitzungen bleiben offen und gehören danach zum Hauptfenster“; nach dem Schließen läuft sie weiter und gehört zum Hauptfenster. Mit einer Worktree-Sitzung → *Fenster schließen* ist gesperrt (Tooltip „Erst die Sitzungen mit Worktree schließen.“), *Schließen …* daneben öffnet die gewohnte Worktree-Rückfrage (behalten/entfernen/mergen); danach lässt sich das Fenster schließen.
+- [ ] **Tray:** Hauptfenster in den Tray → Fenster 2 bleibt offen und aktualisiert sich; Hauptfenster minimieren → Fenster 2 zeichnet weiter.
+- [ ] **Neustart:** Beenden mit Fenster 2 (zwei Sitzungen, verschoben) → der nächste Start stellt Fenster 2 an Position und in Größe mit seinen Sitzungen wieder her; das wiederhergestellte Fenster nimmt dem Hauptfenster nicht den Fokus. Liegt die gespeicherte Lage auf keinem Monitor mehr, wird das Fenster auf einen sichtbaren Monitor gesetzt. Start mit `--tray` → weitere Fenster bleiben verborgen, bis das Hauptfenster aus dem Tray geholt wird.
+- [ ] **Rückwärts:** optional `state.json` mit 2.0.0 öffnen → lädt, alle Sitzungen im Hauptfenster.
+- [ ] **MCP:** `list_sessions` zeigt `window: 2`; `focus_session` holt Fenster 2 nach vorn; `screenshot` dieser Sitzung → `not_visible` mit Erklärung; `create_session` eines Agenten in Fenster 2 → Kind in Fenster 2.
+- [ ] **Getrennte Ansicht:** Akzentfarbe je Fenster, Scroll-Positionen und Textfelder gehen nicht auf andere Fenster über; der Rückgängig-Hinweis wirkt in seinem Fenster.
+- [ ] **Beide Sprachen:** Schließen-Dialog, Tooltip, leerer Hub auf Deutsch und Englisch.
+
+## 52 · Selbst-Update (2.1.0)
+Vorbereitung (lokaler Test-Feed, nichts wird veröffentlicht): Test-Build mit dem Cargo-Feature `update-test-feed`, z. B. `CARGO_TARGET_DIR=/e/paneldeck-test/target-upd cargo build --release --features update-test-feed`; „neue“ Version mit `tools/update-feed.sh <version> <feed-ordner> [<paneldeck.exe>]` anlegen (`latest.json`, ZIP, Installer, `SHA256SUMS.txt`; `NO_SUMS=1` ohne Prüfsummen, `BAD_SUM=1` mit falscher ZIP-Prüfsumme); die Testkopie unter `E:\paneldeck-test` mit `PANELDECK_UPDATE_TEST_FEED=<feed-ordner>` starten. Release-Builds enthalten diesen Weg nicht. Automatisch: Unit-Tests `app::update` (Versionen, Adressen, Prüfsummen, ZIP, Tausch, Fälligkeit).
+- [ ] **Abschnitt „Updates“** unter *Einstellungen → Info*: Version, „(portabel)“ bzw. „(installiert)“, Knopf *Nach Updates suchen*, Schalter *Automatisch prüfen* aus, „Letzte Prüfung: noch nie“, Datenschutz-Hinweis.
+- [ ] **Prüfen** (Feed 2.9.9) → Spinner, „Version 2.9.9 ist verfügbar“, Dialog öffnet sich, Knopf links vom Minimieren mit Tooltip.
+- [ ] **Später** → Dialog und Knopf verschwinden; *Details …* unter *Einstellungen → Info* öffnet ihn wieder. *Später* während des Downloads → der Download läuft weiter, danach erscheint nur der Knopf „Neu starten“ (keine Abfrage).
+- [ ] **Was ist neu?** → Browser öffnet die Release-Seite des Tags.
+- [ ] **Überspringen** → „Übersprungene Version“ mit *Zurücksetzen*; die automatische Prüfung zeigt sie nicht mehr; eine Prüfung von Hand markiert sie mit „(übersprungen)“.
+- [ ] **Automatisch:** Schalter an, neu starten → nach ca. 3 s erscheint der Knopf ohne Dialog; höchstens einmal am Tag; mit `--no-update-check` keine Prüfung.
+- [ ] **Jetzt aktualisieren** mit einem laufenden Terminal → Fortschritt am Knopf und im Dialog, dann Neustart-Abfrage mit „1 Terminal läuft noch“; *Nicht jetzt* → Knopf „Neu starten“; *Neu starten und aktualisieren* → die neue .exe startet mit wiederhergestellter Sitzung (und gleichem `--profile`/`--data-dir`); `paneldeck.exe.old` ist gelöscht, nachdem die neue Version lief.
+- [ ] **Ohne Terminal** → nach dem Download trotzdem die Bestätigung „Jetzt neu starten, um zu aktualisieren?“ vor dem Neustart; ein Klick auf *Neu starten und aktualisieren* im Update-Dialog gilt ohne laufendes Terminal selbst als Bestätigung.
+- [ ] **Download-Ordner:** während des Downloads liegt die Datei unter `%LOCALAPPDATA%\Paneldeck\updates\<pid>-<zufall>\`; Ordner beendeter Instanzen räumt der nächste Start auf.
+- [ ] **Abbrechen** des Downloads → neutrale Meldung „abgebrochen“.
+- [ ] **Prüfsummen:** Feed mit `BAD_SUM=1` → „Prüfsumme stimmt nicht – der Download wurde verworfen.“, nichts installiert; Feed mit `NO_SUMS=1` → „lässt sich nicht automatisch installieren“, *Jetzt aktualisieren* gesperrt.
+- [ ] **Hauptversion:** Feed 9.0.0 → orange Warnung „Neue Hauptversion“; vor dem Update entsteht eine Datenbank-Sicherung.
+- [ ] **Installierte Kopie** (Testinstallation mit `/D=<Temp>`, Schein-Profil) → stilles Setup in denselben Ordner, Neustart klappt; eine gelöschte Desktop-Verknüpfung und ein ausgeschaltetes Kontextmenü bleiben aus.
+- [ ] **Agenten** können kein Update auslösen (kein Werkzeug dafür).
+- [ ] **Beide Sprachen:** alle Texte auf Deutsch und Englisch; `Esc` in einem Terminal schließt den Update-Dialog nicht.
+
+## 53 · Gesamtprüfung vor dem Release 2.1.0
+- [ ] **Abschnitte 48–52** komplett durchlaufen, einmal auf Deutsch und einmal auf Englisch.
+- [ ] **Update von 2.0.0:** Installer über 2.0.0 (laufend und ruhend, `tools\update-test.ps1 -Exe <exe> -TempRoot E:\paneldeck-test` → „35 bestanden“): Daten, Einstellungen, Sitzungen, Autostart, Kontextmenü bleiben; `settings.json` und `state.json` von 2.0.0 laden ohne Verlust (neue Felder fehlen dort und werden ergänzt).
+- [ ] **Portables ZIP:** entpacken, starten → leerer Terminal Hub, `paneldeck-data` neben der .exe; zweiter Start öffnet keine zweite Instanz; `--profile test` läuft daneben.
+- [ ] **Alte Verknüpfungen/Skripte:** Startaufrufe aus 2.0.0 (`--open`, `--claude`, `--tray`, `mcp`) funktionieren unverändert; eine unbekannte Option ist jetzt ein Fehler (Exit-Code 2) – im Release-Text genannt.
+- [ ] **Release-Dateien:** `tools/release.sh` erzeugt Installer, ZIP und `SHA256SUMS.txt`; `sha256sum -c SHA256SUMS.txt` im Ordner `dist/` stimmt; nach dem Veröffentlichen die Dateien aus dem Release laden und vergleichen.
+- [ ] **Defender:** `powershell -NoProfile -ExecutionPolicy Bypass -File tools\defender-scan.ps1 dist\paneldeck-2.1.0.exe dist\Paneldeck-Setup-2.1.0.exe` → Exit-Code 0 (bei Treffer: Release anhalten, Fehlalarm melden, siehe `CLAUDE.md`).
+- [ ] **Smoke-Test:** `tools\smoke-mcp.ps1 -Exe <exe> -WorkRoot E:\paneldeck-test` → alle Prüfungen bestanden („Ergebnis: 181 bestanden“, Stand 2.1.0).
+- [ ] **Selbst-Update gegen das echte Release** (nach dem Veröffentlichen, mit einer 2.1.0-Kopie ist noch nichts Neueres da): *Nach Updates suchen* → „Paneldeck ist aktuell“; Datenschutz: keine Netzwerkzugriffe ohne Prüfung (Schalter aus, Start ohne Klick).
+- [ ] **Dokumentation:** README (Englisch/Deutsch) und die Anleitungen unter `docs/en/` und `docs/de/` stimmen mit dem Programm überein, alle Links funktionieren; Changelog (beide Sprachen) und `docs/release-notes/2.1.0.en.md` sind vollständig.

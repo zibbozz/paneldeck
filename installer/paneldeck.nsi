@@ -3,6 +3,7 @@
 Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "Sections.nsh"
 
 !ifndef VERSION
   !define VERSION "0.0.0"
@@ -62,10 +63,6 @@ LangString STR_CtxClaude ${LANG_GERMAN} "Mit Claude in Paneldeck starten"
 LangString STR_Uninst ${LANG_ENGLISH} "Uninstall Paneldeck"
 LangString STR_Uninst ${LANG_GERMAN} "Paneldeck deinstallieren"
 
-Function .onInit
-  !insertmacro MUI_LANGDLL_DISPLAY
-FunctionEnd
-
 Function un.onInit
   !insertmacro MUI_UNGETLANGUAGE
 FunctionEnd
@@ -74,7 +71,7 @@ Section "$(NAME_Main)" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
   ; Läuft Paneldeck gerade (Update), ist die .exe gesperrt – umbenennen darf Windows aber. Die laufende Instanz
-  ; bleibt unberührt (alte Datei bis zum Beenden), die neue liegt sofort am Platz; der Hub räumt "*.old" beim Start auf.
+  ; bleibt unberührt (alte Datei bis zum Beenden), die neue liegt sofort am Platz; der neue Hub löscht "*.old" nach seinem ersten gezeichneten Frame.
   Delete "$INSTDIR\paneldeck.exe.old"
   IfFileExists "$INSTDIR\paneldeck.exe" 0 +2
     Rename "$INSTDIR\paneldeck.exe" "$INSTDIR\paneldeck.exe.old"
@@ -87,6 +84,7 @@ Section "$(NAME_Main)" SecMain
   File "..\README.md"
   File "..\README.de.md"
   File "..\Changelog.md"
+  File "..\Changelog.de.md"
   File "..\THIRD_PARTY.md"
   File "..\THIRD_PARTY_LICENSES.txt"
   File "..\LICENSE"
@@ -149,6 +147,25 @@ LangString DESC_Ctx ${LANG_ENGLISH} "Right-click a folder: Open in Paneldeck / S
   !insertmacro MUI_DESCRIPTION_TEXT ${SecContext} $(DESC_Ctx)
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
+; Steht hinter den Sections, damit ${SecDesktop}/${SecContext} bekannt sind.
+Function .onInit
+  !insertmacro MUI_LANGDLL_DISPLAY
+  ; Stilles Update über eine bestehende Installation (Selbst-Update aus Paneldeck: /S /D=<ordner>): die bisherige Auswahl
+  ; beibehalten, statt die Standardauswahl erneut anzuwenden – eine gelöschte Desktop-Verknüpfung oder ein abgeschaltetes
+  ; Kontextmenü kommen nicht zurück. Autostart ist ohnehin abgewählt und bleibt, wie er ist.
+  ${If} ${Silent}
+  ${AndIf} ${FileExists} "$INSTDIR\paneldeck.exe"
+    ${IfNot} ${FileExists} "$DESKTOP\Paneldeck.lnk"
+      !insertmacro UnselectSection ${SecDesktop}
+    ${EndIf}
+    ClearErrors
+    ReadRegStr $0 HKCU "Software\Classes\Directory\shell\Paneldeck\command" ""
+    ${If} ${Errors}
+      !insertmacro UnselectSection ${SecContext}
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
 Section "Uninstall"
   ; Globale Claude-Hooks entfernen, solange die .exe noch da ist
   ExecWait '"$INSTDIR\paneldeck.exe" --uninstall-hooks'
@@ -157,6 +174,7 @@ Section "Uninstall"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\README.de.md"
   Delete "$INSTDIR\Changelog.md"
+  Delete "$INSTDIR\Changelog.de.md"
   Delete "$INSTDIR\THIRD_PARTY.md"
   Delete "$INSTDIR\THIRD_PARTY_LICENSES.txt"
   Delete "$INSTDIR\LICENSE"

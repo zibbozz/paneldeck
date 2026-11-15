@@ -2,7 +2,8 @@
 # Verwendung: tools/release-prep.sh <version> "<englischer Titel>" [--pr]
 #
 # Bereitet ein Release vor: legt von origin/release/<x.y> den Branch release-prep/<version> an und committet dort
-#   Cargo.toml/Cargo.lock-Version, Changelog (`WIP` -> heutiges Datum, = späteres Tag-Datum) und den Titel in tools/titles.txt.
+#   Cargo.toml/Cargo.lock-Version, beide Changelogs (Changelog.md + Changelog.de.md: `WIP` -> heutiges Datum, = späteres Tag-Datum)
+#   und den Titel in tools/titles.txt.
 # Vorher muss docs/release-notes/<version>.en.md (englischer Release-Text) im Branch stehen bzw. hier hinzugefügt sein.
 # Mit --pr wird der Branch gepusht und ein Pull Request nach release/<x.y> geöffnet. Gemergt wird nur auf GitHub durch den Projektinhaber;
 # danach auf release/<x.y> (neu gezogen, Datum muss noch „heute“ sein): tools/release.sh <version> --publish.

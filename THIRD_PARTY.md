@@ -15,7 +15,8 @@ Paneldeck ist aus freier Software aufgebaut. Die wichtigsten Bestandteile und ih
 | tray-icon | Tray-Symbol | MIT oder Apache-2.0 |
 | rfd | Datei-/Ordnerdialoge | MIT |
 | arboard | Zwischenablage (Bilder) | MIT oder Apache-2.0 |
-| windows-sys, raw-window-handle | Windows-Fensterfunktionen | MIT oder Apache-2.0 |
+| windows-sys, raw-window-handle | Windows-Fensterfunktionen, WinHTTP (Update-Prüfung) | MIT oder Apache-2.0 |
+| miniz_oxide | Entpacken des portablen ZIPs beim Selbst-Update | MIT, Zlib oder Apache-2.0 |
 | embed-resource | Icon/Versionsinfo in der .exe | MIT |
 | rusqlite (mit eingebautem SQLite) | lokale Datenbank und Sicherungen | MIT (SQLite selbst: gemeinfrei/Public Domain) |
 | chrono | Datum und Uhrzeit | MIT oder Apache-2.0 |
