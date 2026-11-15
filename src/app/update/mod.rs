@@ -65,7 +65,7 @@ enum Msg {
     Checked { manual: bool, res: Result<Outcome, String> },
     /// Geprüfte Datei samt erwarteter Prüfsumme (wird vor der Installation erneut verglichen).
     Downloaded(Result<(PathBuf, [u8; 32]), String>),
-    Installed(Result<(), String>),
+    Installed(Result<(), InstallFail>),
 }
 
 /// Zustand des Updates in der Oberfläche (ein Feld in `App`).
@@ -261,9 +261,24 @@ impl Updater {
                 },
                 Msg::Installed(res) => match res {
                     Ok(()) => installed = true,
-                    Err(e) => {
+                    Err(InstallFail::Retry(e)) => {
                         // Datei bleibt geprüft liegen: erneut versuchen geht ohne neuen Download.
                         self.phase = Phase::Ready;
+                        self.error = Some(e);
+                        self.dialog = true;
+                    }
+                    Err(InstallFail::Discard(e)) => {
+                        // Datei fehlt/verändert: verwerfen, damit ein neuer Download möglich ist (sonst bliebe „Bereit“ hängen).
+                        self.discard_prepared();
+                        self.phase = Phase::Idle;
+                        self.error = Some(e);
+                        self.dialog = true;
+                    }
+                    Err(InstallFail::StillRunning(e)) => {
+                        // Das Setup arbeitet noch: nichts erneut anbieten (kein zweites Setup), nur melden.
+                        self.prepared = None;
+                        self.offer = None;
+                        self.phase = Phase::Idle;
                         self.error = Some(e);
                         self.dialog = true;
                     }
@@ -271,6 +286,16 @@ impl Updater {
             }
         }
         installed
+    }
+
+    /// Vorbereitete Datei vergessen und samt (dann leerem) Download-Ordner löschen.
+    fn discard_prepared(&mut self) {
+        if let Some((p, _)) = self.prepared.take() {
+            let _ = std::fs::remove_file(&p);
+            if let Some(d) = p.parent() {
+                let _ = std::fs::remove_dir(d);
+            }
+        }
     }
 
     /// Pro Frame (billig): ist eine automatische Prüfung fällig?
@@ -436,33 +461,66 @@ fn check_exe(b: &[u8], lang: Lang) -> Result<(), String> {
     Ok(())
 }
 
-/// Installieren: die heruntergeladene Datei erneut gegen die Prüfsumme vergleichen (sie lag seit dem Download im Temp-Ordner),
-/// bei einer Hauptversion vorher die Datenbank sichern (scheitert das, wird nicht aktualisiert), dann Setup still ausführen bzw.
-/// die Programmdatei tauschen.
+/// Wie lange auf das Setup gewartet wird (danach läuft es weiter, Paneldeck wartet nur nicht mehr).
+const SETUP_WAIT: Duration = Duration::from_secs(300);
+
+/// Fehlschlag der Installation – und was danach gilt.
+#[derive(Debug, PartialEq)]
+pub(super) enum InstallFail {
+    /// Die geprüfte Datei bleibt liegen: erneut versuchen geht ohne neuen Download (Sicherung, Setup-Code, Tausch).
+    Retry(String),
+    /// Die Datei fehlt, wurde verändert oder ist unbrauchbar: verworfen, ein neuer Download ist nötig.
+    Discard(String),
+    /// Das Setup läuft nach der Wartezeit noch: nicht abgebrochen, nur gemeldet.
+    StillRunning(String),
+}
+
+/// Installieren: die heruntergeladene Datei gesperrt öffnen (nur Lesen bleibt anderen erlaubt) und erneut gegen die Prüfsumme
+/// vergleichen, bei einer Hauptversion vorher die Datenbank sichern (scheitert das, wird nicht aktualisiert), dann Setup still
+/// ausführen (die Sperre hält, bis es endet) bzw. die Programmdatei tauschen.
 #[allow(clippy::too_many_arguments)]
-fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, want: &[u8; 32], offer: &Offer, backup: Option<(PathBuf, PathBuf)>, lang: Lang) -> Result<(), String> {
-    let data = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, want: &[u8; 32], offer: &Offer, backup: Option<(PathBuf, PathBuf)>, lang: Lang) -> Result<(), InstallFail> {
+    use InstallFail::*;
+    let (data, lock) = install::read_locked(file).map_err(|e| {
+        Discard(format!("{} ({}: {e})", lang.t("Die heruntergeladene Datei fehlt – bitte erneut aktualisieren", "The downloaded file is missing – please update again"), file.display()))
+    })?;
     if sha256::digest(&data) != *want {
+        drop(lock);
         let _ = std::fs::remove_file(file);
-        return Err(lang.t("Die heruntergeladene Datei wurde verändert – bitte erneut aktualisieren.", "The downloaded file was changed – please update again.").into());
+        return Err(Discard(lang.t("Die heruntergeladene Datei wurde verändert – bitte erneut aktualisieren.", "The downloaded file was changed – please update again.").into()));
     }
     if offer.major {
         if let Some((db, dir)) = backup {
-            crate::backup::create(&db, &dir, crate::backup::Kind::Manual).map_err(|e| format!("{}: {e}", lang.t("Sicherung fehlgeschlagen – Update abgebrochen", "Backup failed – update cancelled")))?;
+            crate::backup::create(&db, &dir, crate::backup::Kind::Manual).map_err(|e| Retry(format!("{} ({e})", lang.t("Sicherung fehlgeschlagen – Update abgebrochen", "Backup failed – update cancelled"))))?;
         }
     }
-    match flavor {
+    let res = match flavor {
         Some(Flavor::Installed) => {
-            let dir = exe.parent().ok_or("exe")?;
-            install::run_setup(file, dir, Duration::from_secs(300)).map_err(|e| format!("{}: {e}", lang.t("Installation fehlgeschlagen", "Installation failed")))
+            let fail = lang.t("Installation fehlgeschlagen", "Installation failed");
+            let dir = exe.parent().ok_or_else(|| Retry(format!("{fail} ({})", lang.t("Programmordner nicht gefunden", "program folder not found"))))?;
+            match install::run_setup(file, dir, SETUP_WAIT) {
+                Ok(()) => Ok(()),
+                Err(install::SetupError::StillRunning) => Err(StillRunning(
+                    lang.t(
+                        "Das Setup läuft nach 5 Minuten noch. Paneldeck wartet nicht länger – bitte später unter Einstellungen → Info prüfen, ob die neue Version installiert ist, und Paneldeck dann selbst neu starten.",
+                        "The setup is still running after 5 minutes. Paneldeck stops waiting – please check later under Settings → About whether the new version is installed, then restart Paneldeck yourself.",
+                    )
+                    .into(),
+                )),
+                Err(install::SetupError::Exit(c)) => Err(Retry(format!("{fail} ({} {c})", lang.t("Setup endete mit Code", "setup exit code")))),
+                Err(install::SetupError::Start(e) | install::SetupError::Wait(e)) => Err(Retry(format!("{fail} ({e})"))),
+            }
         }
         Some(Flavor::Portable) => {
-            let bytes = zip::extract(&data, &release::zip_exe_entry(&offer.version), release::MAX_ASSET as usize).map_err(|e| zip_err(e, lang))?;
-            check_exe(&bytes, lang)?;
-            install::swap_exe(exe, &bytes).map_err(|e| format!("{}: {e}", lang.t("paneldeck.exe konnte nicht ersetzt werden", "Could not replace paneldeck.exe")))
+            let bytes = zip::extract(&data, &release::zip_exe_entry(&offer.version), release::MAX_ASSET as usize).map_err(|e| Discard(zip_err(e, lang)))?;
+            check_exe(&bytes, lang).map_err(Discard)?;
+            install::swap_exe(exe, &bytes).map_err(|e| Retry(format!("{} ({e})", lang.t("paneldeck.exe konnte nicht ersetzt werden", "Could not replace paneldeck.exe"))))
         }
-        None => Err(lang.t("Automatische Updates gibt es nur unter Windows.", "Automatic updates are only available on Windows.").into()),
-    }
+        None => Err(Discard(lang.t("Automatische Updates gibt es nur unter Windows.", "Automatic updates are only available on Windows.").into())),
+    };
+    // Sperre erst hier lösen: das Setup ist beendet (oder läuft nach der Wartezeit allein weiter).
+    drop(lock);
+    res
 }
 
 #[cfg(test)]
@@ -581,9 +639,12 @@ mod tests {
         std::fs::write(&exe, b"MZ old").unwrap();
         let offer = Offer { version: v, html_url: String::new(), plan: Plan::Install { asset, sums }, major: false };
         let e = install(&exe, Some(Flavor::Portable), &p, &want, &offer, None, Lang::En).unwrap_err();
-        assert!(e.contains("was changed"), "{e}");
+        assert!(matches!(&e, InstallFail::Discard(t) if t.contains("was changed")), "{e:?}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"MZ old");
         assert!(!p.exists());
+        // Datei fehlt ganz: ebenfalls verwerfen (neuer Download nötig)
+        let e = install(&exe, Some(Flavor::Portable), &p, &want, &offer, None, Lang::En).unwrap_err();
+        assert!(matches!(&e, InstallFail::Discard(t) if t.contains("missing")), "{e:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -661,7 +722,7 @@ mod tests {
         let want = sha256::digest(b"not a zip");
         // Datenbank fehlt → Sicherung scheitert → nichts wird angefasst
         let e = install(&exe, Some(Flavor::Portable), &file, &want, &offer, Some((d.join("missing.db"), d.join("backups"))), Lang::En).unwrap_err();
-        assert!(e.contains("Backup failed"), "{e}");
+        assert!(matches!(&e, InstallFail::Retry(t) if t.contains("Backup failed")), "{e:?}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"MZ old");
         // Mit echter Datenbank wird gesichert
         let db = d.join("paneldeck.db");
@@ -750,6 +811,29 @@ mod tests {
         assert_eq!(s.update_last_check, 0);
         assert!(!u.result.as_ref().unwrap().1);
         assert!(u.retry_at > now_unix());
+        // Installation: Fehler mit noch gültiger Datei → erneut versuchen ohne Download
+        let f = std::env::temp_dir().join(format!("paneldeck-test-prepared-{}.zip", std::process::id()));
+        std::fs::write(&f, b"x").unwrap();
+        u.prepared = Some((f.clone(), [0; 32]));
+        u.phase = Phase::Installing;
+        u.tx.send(Msg::Installed(Err(InstallFail::Retry("setup exit code 2".into())))).unwrap();
+        assert!(!u.poll(&mut s));
+        assert_eq!(u.phase, Phase::Ready);
+        assert!(u.prepared.is_some() && u.dialog);
+        // Datei fehlt/verändert → verworfen, neuer Download möglich (nicht in „Bereit“ hängen)
+        u.phase = Phase::Installing;
+        u.tx.send(Msg::Installed(Err(InstallFail::Discard("changed".into())))).unwrap();
+        u.poll(&mut s);
+        assert_eq!(u.phase, Phase::Idle);
+        assert!(u.prepared.is_none() && !f.exists());
+        // Setup läuft noch → nichts mehr anbieten
+        let Outcome::Newer { offer, .. } = out else { panic!() };
+        u.offer = Some(offer);
+        u.phase = Phase::Installing;
+        u.tx.send(Msg::Installed(Err(InstallFail::StillRunning("still running".into())))).unwrap();
+        u.poll(&mut s);
+        assert_eq!(u.phase, Phase::Idle);
+        assert!(u.offer.is_none() && u.error.as_deref() == Some("still running"));
         // Installation fertig → Neustart verlangt
         u.tx.send(Msg::Installed(Ok(()))).unwrap();
         assert!(u.poll(&mut s));

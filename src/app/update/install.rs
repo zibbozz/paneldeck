@@ -101,12 +101,41 @@ pub fn nsis_dir_arg(dir: &Path) -> Result<String, String> {
     Ok(format!("/D={}", d.trim_end_matches('\\')))
 }
 
+/// Geprüfte Datei lesen und gesperrt halten: andere dürfen sie nur lesen (nicht schreiben, umbenennen oder löschen), bis das
+/// zurückgegebene Handle geschlossen wird. So kann zwischen der Prüfung und dem Start des Setups niemand die Datei austauschen.
+pub fn read_locked(p: &Path) -> std::io::Result<(Vec<u8>, std::fs::File)> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        o.share_mode(FILE_SHARE_READ);
+    }
+    let mut f = o.open(p)?;
+    let mut v = Vec::new();
+    std::io::Read::read_to_end(&mut f, &mut v)?;
+    Ok((v, f))
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SetupError {
+    /// Setup ließ sich nicht starten.
+    Start(String),
+    /// Setup endete mit einem Fehlercode.
+    Exit(i32),
+    /// Setup läuft nach der Wartezeit noch (wird nicht abgebrochen).
+    StillRunning,
+    Wait(String),
+}
+
 /// Setup still (`/S`) in den Ordner `dir` ausführen und auf das Ende warten. Der Installer kommt mit einer laufenden Instanz
-/// zurecht (benennt die gesperrte .exe um) und behält die bisherige Auswahl (Desktop-Verknüpfung, Kontextmenü) bei.
-pub fn run_setup(setup: &Path, dir: &Path, timeout: std::time::Duration) -> Result<(), String> {
+/// zurecht (benennt die gesperrte .exe um) und behält die bisherige Auswahl (Desktop-Verknüpfung, Kontextmenü) bei. Der Aufrufer
+/// hält die Datei dabei mit `read_locked` gesperrt.
+pub fn run_setup(setup: &Path, dir: &Path, timeout: std::time::Duration) -> Result<(), SetupError> {
     let mut cmd = std::process::Command::new(setup);
     cmd.arg("/S");
-    let d = nsis_dir_arg(dir)?;
+    let d = nsis_dir_arg(dir).map_err(SetupError::Start)?;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -114,18 +143,22 @@ pub fn run_setup(setup: &Path, dir: &Path, timeout: std::time::Duration) -> Resu
     }
     #[cfg(not(windows))]
     cmd.arg(d);
-    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", setup.display()))?;
+    let mut child = cmd.spawn().map_err(|e| SetupError::Start(format!("{}: {e}", setup.display())))?;
+    // Auch nach der Wartezeit nicht beenden: `child` wird ohne kill() freigegeben, das Setup läuft weiter.
+    wait_setup(&mut child, timeout)
+}
+
+/// Auf das Setup warten. Nach `timeout` wird es nicht abgebrochen (ein halb fertiges Setup wäre schlimmer als ein langsames),
+/// nur nicht länger gewartet.
+pub fn wait_setup(child: &mut std::process::Child, timeout: std::time::Duration) -> Result<(), SetupError> {
     let t0 = std::time::Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(st)) if st.success() => return Ok(()),
-            Ok(Some(st)) => return Err(format!("{} {}", crate::state::t("Setup endete mit Code", "setup exit code"), st.code().unwrap_or(-1))),
-            Ok(None) if t0.elapsed() > timeout => {
-                let _ = child.kill();
-                return Err(crate::state::t("Zeitüberschreitung beim Setup", "setup timed out").into());
-            }
+            Ok(Some(st)) => return Err(SetupError::Exit(st.code().unwrap_or(-1))),
+            Ok(None) if t0.elapsed() > timeout => return Err(SetupError::StillRunning),
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(SetupError::Wait(e.to_string())),
         }
     }
 }
@@ -252,6 +285,44 @@ mod tests {
         assert_eq!(nsis_dir_arg(Path::new(r"\\?\C:\X\")).unwrap(), r"/D=C:\X");
         assert!(nsis_dir_arg(Path::new("C:\\a\"b")).is_err());
         assert!(nsis_dir_arg(Path::new("")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_setup_can_run_but_not_change() {
+        let d = tmp("lock");
+        let exe = d.join("Paneldeck-Setup-9.9.9.exe");
+        std::fs::copy(r"C:\Windows\System32\whoami.exe", &exe).unwrap();
+        let (bytes, lock) = read_locked(&exe).unwrap();
+        assert_eq!(&bytes[..2], b"MZ");
+        // Gesperrt: kein Schreiben, Umbenennen oder Löschen
+        assert!(std::fs::OpenOptions::new().write(true).open(&exe).is_err());
+        assert!(std::fs::rename(&exe, d.join("x.exe")).is_err());
+        assert!(std::fs::remove_file(&exe).is_err());
+        // … aber starten lässt sie sich (whoami lehnt /S ab: Fehlercode statt Startfehler)
+        let r = run_setup(&exe, &d, std::time::Duration::from_secs(20));
+        assert!(matches!(r, Err(SetupError::Exit(_))), "{r:?}");
+        drop(lock);
+        std::fs::remove_file(&exe).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn slow_setup_is_not_killed() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "ping", "-n", "30", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        let mut child = cmd.stdout(std::process::Stdio::null()).spawn().unwrap();
+        assert_eq!(wait_setup(&mut child, std::time::Duration::from_millis(300)), Err(SetupError::StillRunning));
+        assert!(child.try_wait().unwrap().is_none(), "läuft weiter");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
