@@ -3,7 +3,7 @@
 //! Die Oberfläche besteht aus freien Funktionen über den Einstellungsdaten (headless testbar); `App` verbindet sie mit
 //! `Settings::llm_servers`, dem Speichern und dem [`Connector`] (Modellliste im Hintergrund abrufen).
 
-use crate::llm::config::{self, LlmServer};
+use crate::llm::config::{self, LlmServer, LlmServers};
 use crate::llm::{self, LlmError, ModelInfo, ServerKind, Transport};
 use crate::mcp::McpLevel;
 use crate::state::{ChatMeta, Lang, Settings};
@@ -42,9 +42,24 @@ fn default_url(k: ServerKind) -> &'static str {
 /// Ruft Modelllisten im Hintergrund ab (je Server höchstens ein Abruf). Ergebnisse holt [`Connector::poll`] ab.
 pub(super) struct Connector {
     transport: Arc<dyn Transport>,
-    jobs: HashMap<String, (Receiver<Result<Vec<ModelInfo>, LlmError>>, Arc<AtomicBool>)>,
+    jobs: HashMap<String, Job>,
     /// Letzter Fehler je Server (Text in der Sprache beim Abholen).
     pub errors: HashMap<String, String>,
+}
+
+/// Ein laufender Abruf samt der Adresse und dem Typ, für die er gestartet wurde.
+struct Job {
+    rx: Receiver<Result<Vec<ModelInfo>, LlmError>>,
+    cancel: Arc<AtomicBool>,
+    url: String,
+    kind: ServerKind,
+}
+
+impl Job {
+    /// Gehört der Abruf noch zu diesem Server (gleiche Adresse und gleicher Typ)?
+    fn matches(&self, s: &LlmServer) -> bool {
+        self.url == s.url && self.kind == s.kind
+    }
 }
 
 impl Default for Connector {
@@ -82,21 +97,30 @@ impl Connector {
             let _ = tx.send(llm::list_models(t.as_ref(), &ep, &c));
             repaint();
         });
-        self.jobs.insert(server.id.clone(), (rx, cancel));
+        self.jobs.insert(server.id.clone(), Job { rx, cancel, url: server.url.clone(), kind: server.kind });
     }
 
     /// Fertige Abrufe übernehmen: Modellliste in `last_models` des Servers. `true`, wenn sich Einstellungen änderten.
+    /// Abrufe für entfernte Server oder für eine inzwischen geänderte Adresse/einen geänderten Typ werden abgebrochen,
+    /// ihr Ergebnis verworfen.
     pub fn poll(&mut self, servers: &mut [LlmServer], lang: Lang) -> bool {
+        self.jobs.retain(|id, j| {
+            let keep = servers.iter().any(|s| &s.id == id && j.matches(s));
+            if !keep {
+                j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            keep
+        });
         let mut changed = false;
         let mut done = Vec::new();
-        for (id, (rx, _)) in &self.jobs {
-            match rx.try_recv() {
+        for (id, j) in &self.jobs {
+            match j.rx.try_recv() {
                 Ok(r) => {
                     done.push(id.clone());
                     match r {
                         Ok(mut models) => {
                             models.truncate(config::MAX_LAST_MODELS);
-                            if let Some(s) = servers.iter_mut().find(|s| &s.id == id) {
+                            if let Some(s) = servers.iter_mut().find(|s| &s.id == id && j.matches(s)) {
                                 s.last_models = models;
                                 changed = true;
                             }
@@ -116,14 +140,6 @@ impl Connector {
         for id in done {
             self.jobs.remove(&id);
         }
-        // Gelöschte Server: laufende Abrufe abbrechen.
-        self.jobs.retain(|id, (_, c)| {
-            let keep = servers.iter().any(|s| &s.id == id);
-            if !keep {
-                c.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            keep
-        });
         changed
     }
 }
@@ -131,8 +147,8 @@ impl Connector {
 // ---------------------------------------------------------------------------------------------------------------
 // Reiter „Modelle“
 
-/// Formular „Server hinzufügen / bearbeiten“.
-#[derive(Clone, Debug, PartialEq)]
+/// Formular „Server hinzufügen / bearbeiten“. `Debug` zeigt den eingegebenen Schlüssel nicht.
+#[derive(Clone, PartialEq)]
 pub(super) struct ServerForm {
     /// `None` = neuer Server.
     pub id: Option<String>,
@@ -147,6 +163,22 @@ pub(super) struct ServerForm {
     /// Wartezeit auf Daten in Sekunden (0 = Standard).
     pub timeout: u32,
     pub error: Option<String>,
+}
+
+impl std::fmt::Debug for ServerForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerForm")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("key", &if self.key.is_empty() { "" } else { "***" })
+            .field("has_key", &self.has_key)
+            .field("clear_key", &self.clear_key)
+            .field("timeout", &self.timeout)
+            .field("error", &self.error)
+            .finish()
+    }
 }
 
 impl ServerForm {
@@ -223,6 +255,13 @@ pub(super) struct ModelsUi {
     pub form: Option<ServerForm>,
     /// Server, dessen Entfernen gerade bestätigt werden muss.
     pub confirm_remove: Option<String>,
+    /// Ungespeicherte Änderung seit diesem Zeitpunkt (Speichern verzögert, siehe `App::models_save_tick`).
+    pub dirty_since: Option<std::time::Instant>,
+}
+
+/// Jetzt speichern? Sofort, wenn nicht gezogen wird; beim Ziehen spätestens nach 500 ms.
+pub(super) fn save_due(elapsed: std::time::Duration, dragging: bool) -> bool {
+    !dragging || elapsed >= std::time::Duration::from_millis(500)
 }
 
 /// Was der Reiter in diesem Bild ausgelöst hat.
@@ -246,22 +285,34 @@ fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 }
 
 /// Inhalt des Reiters „Modelle“.
-pub(super) fn models_tab(ui: &mut Ui, lang: Lang, servers: &mut Vec<LlmServer>, st: &mut ModelsUi, conn: &Connector, expert: bool) -> ModelsOut {
+pub(super) fn models_tab(ui: &mut Ui, lang: Lang, all: &mut LlmServers, st: &mut ModelsUi, conn: &Connector, expert: bool) -> ModelsOut {
     let mut out = ModelsOut::default();
     ui.label(RichText::new(lang.t(
         "Lokale Modelle (Ollama oder OpenAI-kompatible Server) antworten in Chats. Erlaubt sind nur dieser Rechner und private Netze. Die Stufe je Modell legt fest, was ein Modell in seinen Chats darf – sie ist unabhängig von der MCP-Stufe für externe Agenten (Reiter „Agenten“).",
         "Local models (Ollama or OpenAI-compatible servers) answer in chats. Only this computer and private networks are allowed. The level per model decides what a model may do in its chats – it is independent of the MCP level for external agents (“Agents” tab).",
     )).small().color(style::dim(ui)));
     ui.add_space(S2);
-    let skipped = config::skipped_entries();
-    if !skipped.is_empty() {
-        ui.label(RichText::new(format!(
-            "{} {}",
-            lang.t("Nicht lesbare Server-Einträge in settings.json wurden übersprungen (fallen beim nächsten Speichern weg):", "Unreadable server entries in settings.json were skipped (they are dropped on the next save):"),
-            skipped.join("; ")
-        )).small().color(warn_col()));
+    let mut drop_raw = None;
+    for (i, v) in all.unreadable.iter().enumerate() {
+        let (what, why) = config::describe_unreadable(v);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(what).strong());
+                ui.label(RichText::new(lang.t("Unlesbarer Eintrag (vielleicht von einer neueren Version) – bleibt unverändert erhalten.", "Unreadable entry (maybe from a newer version) – kept unchanged.")).small().color(warn_col()))
+                    .on_hover_text(why);
+                if ui.button(lang.t("Entfernen", "Remove")).clicked() {
+                    drop_raw = Some(i);
+                }
+            });
+        });
         ui.add_space(S1);
     }
+    if let Some(i) = drop_raw {
+        all.unreadable.remove(i);
+        out.changed = true;
+    }
+    let servers: &mut Vec<LlmServer> = all;
 
     if servers.is_empty() && st.form.is_none() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -488,7 +539,7 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
                 cfg.context_length = own.then(|| s.info(name).and_then(|i| i.context_length).unwrap_or(config::DEFAULT_CONTEXT).clamp(config::MIN_CONTEXT, config::MAX_CONTEXT));
             }
             if let Some(c) = cfg.context_length.as_mut() {
-                ui.add(egui::DragValue::new(c).range(config::MIN_CONTEXT..=config::MAX_CONTEXT).speed(256.0).suffix(" tokens"));
+                ui.add(egui::DragValue::new(c).range(config::MIN_CONTEXT..=config::MAX_CONTEXT).speed(256.0).suffix(lang.t(" Tokens", " tokens")));
             } else {
                 let d = s.info(name).and_then(|i| i.context_length);
                 ui.label(RichText::new(match d {
@@ -535,6 +586,9 @@ pub(super) struct NewChatDlg {
     /// Ordner und Seitenleisten-Ordner des neuen Chats (aus dem Ordner-Kontextmenü).
     pub cwd: Option<String>,
     pub group: Option<String>,
+    /// Fenster und Projekt des neuen Chats (`None` = das aktuelle), z. B. beim Duplizieren eines Chats ohne Modell.
+    pub window: Option<u64>,
+    pub project: Option<u64>,
 }
 
 impl NewChatDlg {
@@ -546,7 +600,7 @@ impl NewChatDlg {
             Some(m) => (m.server.clone(), m.model.clone()),
             None => (servers.first().map(|s| s.id.clone()).unwrap_or_default(), String::new()),
         };
-        let mut d = NewChatDlg { server, model, cwd, group };
+        let mut d = NewChatDlg { server, model, cwd, group, window: None, project: None };
         d.fix_model(servers);
         d
     }
@@ -573,7 +627,17 @@ pub(super) struct DlgOut {
     pub open_settings: bool,
 }
 
-/// Inhalt des Dialogs „Neuer Chat“. Enter legt den Chat an (wenn ein Modell gewählt ist), Esc bricht ab.
+/// Enter für den Dialog abholen (verbraucht), aber nur, wenn kein Eingabefeld die Tastatur will und kein Aufklappmenü
+/// offen ist.
+fn take_enter(ui: &Ui) -> bool {
+    if ui.ctx().wants_keyboard_input() || egui::Popup::is_any_open(ui.ctx()) {
+        return false;
+    }
+    ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+}
+
+/// Inhalt des Dialogs „Neuer Chat“. Enter legt den Chat an (wenn ein Modell gewählt ist). Esc und Klick daneben
+/// schließt der Rahmen ([`egui::Modal`], ein offenes Aufklappmenü schließt Esc zuerst).
 pub(super) fn new_chat_body(ui: &mut Ui, d: &mut NewChatDlg, servers: &[LlmServer], conn: &Connector, lang: Lang) -> DlgOut {
     let mut out = DlgOut::default();
     if servers.is_empty() {
@@ -590,8 +654,8 @@ pub(super) fn new_chat_body(ui: &mut Ui, d: &mut NewChatDlg, servers: &[LlmServe
                 out.cancel = true;
             }
         });
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            out.cancel = true;
+        if take_enter(ui) {
+            out.open_settings = true;
         }
         return out;
     }
@@ -652,14 +716,35 @@ pub(super) fn new_chat_body(ui: &mut Ui, d: &mut NewChatDlg, servers: &[LlmServe
             out.cancel = true;
         }
     });
-    let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
-    if enter && ok {
+    if ok && take_enter(ui) {
         out.create = true;
     }
-    if esc {
+    out
+}
+
+/// Der Dialog als [`egui::Modal`]: sperrt alles dahinter (auch Klicks ins Terminal), Esc/Klick daneben bricht ab.
+pub(super) fn new_chat_modal(ctx: &egui::Context, d: &mut NewChatDlg, servers: &[LlmServer], conn: &Connector, lang: Lang) -> DlgOut {
+    let mut out = DlgOut::default();
+    let r = egui::Modal::new(egui::Id::new("new_chat_modal")).show(ctx, |ui| {
+        ui.set_width(400.0);
+        ui.label(RichText::new(lang.t("Neuer Chat", "New chat")).heading());
+        ui.add_space(S1);
+        out = new_chat_body(ui, d, servers, conn, lang);
+    });
+    if r.should_close() {
         out.cancel = true;
     }
     out
+}
+
+/// Solange der Dialog offen ist, behält kein Widget dahinter den Fokus (sonst bekäme ein Terminal oder die
+/// Chat-Eingabe Enter, bevor der Dialog gezeichnet wird). Vor dem Zeichnen der Bereiche aufrufen.
+pub(super) fn release_focus(ctx: &egui::Context) {
+    ctx.memory_mut(|m| {
+        if let Some(f) = m.focused() {
+            m.surrender_focus(f);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -681,7 +766,8 @@ impl super::App {
         }
     }
 
-    /// Reiter Einstellungen → Modelle. Änderungen werden sofort gespeichert (Schlüssel und Stufen sind Sicherheitseinstellungen).
+    /// Reiter Einstellungen → Modelle. Änderungen werden gleich gespeichert (Schlüssel und Stufen sind
+    /// Sicherheitseinstellungen) – während gezogen wird (Zahlenfelder) erst beim Loslassen bzw. höchstens alle 500 ms.
     pub(super) fn models_settings_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let lang = self.settings.language;
         let out = models_tab(ui, lang, &mut self.settings.llm_servers, &mut self.models_ui, &self.llm_conn, crate::mcp::expert_mode());
@@ -689,7 +775,20 @@ impl super::App {
             self.llm_connect(ctx, id);
         }
         if out.changed {
+            self.models_ui.dirty_since.get_or_insert_with(std::time::Instant::now);
+        }
+        self.models_save_tick(ctx);
+    }
+
+    /// Verzögertes Speichern des Reiters „Modelle“ (siehe `models_settings_ui`); läuft jedes Bild im Hauptdurchgang.
+    pub(super) fn models_save_tick(&mut self, ctx: &egui::Context) {
+        let Some(t) = self.models_ui.dirty_since else { return };
+        let dragging = ctx.input(|i| i.pointer.any_down());
+        if save_due(t.elapsed(), dragging) {
+            self.models_ui.dirty_since = None;
             crate::state::save_json(&self.dir.join("settings.json"), &self.settings);
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
@@ -697,10 +796,7 @@ impl super::App {
     pub(super) fn new_chat_ui(&mut self, ctx: &egui::Context) {
         let Some(mut d) = self.new_chat.take() else { return };
         let lang = self.settings.language;
-        let mut out = DlgOut::default();
-        egui::Window::new(lang.t("Neuer Chat", "New chat")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO).show(ctx, |ui| {
-            out = new_chat_body(ui, &mut d, &self.settings.llm_servers, &self.llm_conn, lang);
-        });
+        let out = new_chat_modal(ctx, &mut d, &self.settings.llm_servers, &self.llm_conn, lang);
         if let Some(id) = &out.connect {
             self.llm_connect(ctx, id);
         }
@@ -715,7 +811,7 @@ impl super::App {
                     self.settings.last_chat_model = Some(meta.clone());
                     crate::state::save_json(&self.dir.join("settings.json"), &self.settings);
                 }
-                self.new_session(ctx, super::NewOpts { cwd: d.cwd.clone(), group: d.group.clone(), chat: Some(meta), ..super::NewOpts::default() });
+                self.new_session(ctx, super::NewOpts { cwd: d.cwd.clone(), group: d.group.clone(), window: d.window, project: d.project, chat: Some(meta), ..super::NewOpts::default() });
                 return;
             }
         }
@@ -802,7 +898,7 @@ mod tests {
     fn models_tab_suggests_ollama_adds_server_and_shows_url_errors() {
         for lang in [Lang::En, Lang::De] {
             let conn = Connector::with_transport(Arc::new(Fake::default()));
-            let mut servers: Vec<LlmServer> = Vec::new();
+            let mut servers = LlmServers::default();
             let mut st = ModelsUi::default();
             let mut h = H::new();
             h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
@@ -845,7 +941,7 @@ mod tests {
     fn model_row_controls_change_the_model_config() {
         for lang in [Lang::En, Lang::De] {
             let conn = Connector::with_transport(Arc::new(Fake::default()));
-            let mut servers = vec![LlmServer { id: "s1".into(), name: "Box".into(), url: "http://localhost:11434".into(), last_models: vec![info("llama3", Some(true)), info("tiny", Some(false))], ..Default::default() }];
+            let mut servers: LlmServers = vec![LlmServer { id: "s1".into(), name: "Box".into(), url: "http://localhost:11434".into(), last_models: vec![info("llama3", Some(true)), info("tiny", Some(false))], ..Default::default() }].into();
             let mut st = ModelsUi::default();
             let mut h = H::new();
             h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
@@ -915,6 +1011,53 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_entries_are_shown_and_can_be_removed() {
+        for lang in [Lang::En, Lang::De] {
+            let conn = Connector::with_transport(Arc::new(Fake::default()));
+            let mut all: LlmServers = serde_json::from_str(r#"[{"id":"x","name":"Future","kind":"anthropic"}]"#).unwrap();
+            let mut st = ModelsUi::default();
+            let mut h = H::new();
+            h.run(vec![], |ui| models_tab(ui, lang, &mut all, &mut st, &conn, false));
+            assert!(h.has("Future (anthropic)") && h.has(lang.t("bleibt unverändert erhalten", "kept unchanged")), "{:?}", h.texts);
+            assert!(!h.has("unknown variant"), "serde-Text nur im Tooltip");
+            assert!(h.has(lang.t("Ollama auf diesem Rechner", "Ollama on this computer")), "kein lesbarer Server: Vorschlag bleibt");
+            let o = h.click(lang.t("Entfernen", "Remove"), |ui| models_tab(ui, lang, &mut all, &mut st, &conn, false), merge_models);
+            assert!(o.changed && all.unreadable.is_empty());
+        }
+    }
+
+    #[test]
+    fn save_is_debounced_while_dragging() {
+        assert!(save_due(Duration::ZERO, false));
+        assert!(!save_due(Duration::from_millis(100), true));
+        assert!(save_due(Duration::from_millis(500), true));
+        let f = ServerForm { key: "sk-secret".into(), ..ServerForm::new_server(ServerKind::Ollama) };
+        let s = format!("{f:?}");
+        assert!(!s.contains("sk-secret") && s.contains("***"), "{s}");
+    }
+
+    #[test]
+    fn connector_drops_results_for_a_changed_server() {
+        let tags = r#"{"models":[{"name":"old-model"}]}"#;
+        let fake = Fake::default().with(Method::Get, "http://localhost:11434/api/tags", Canned::ok(tags)).with(Method::Post, "http://localhost:11434/api/show", Canned::status(404, "{}"));
+        let mut c = Connector::with_transport(Arc::new(fake));
+        let mut servers = vec![LlmServer { id: "a".into(), url: "http://localhost:11434".into(), ..Default::default() }];
+        c.start(&servers[0], Lang::En, Arc::new(|| {}));
+        // Während des Abrufs wird die Adresse geändert: das Ergebnis gehört nicht mehr zu diesem Server.
+        servers[0].url = "http://localhost:11500".into();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!c.poll(&mut servers, Lang::En));
+        assert!(servers[0].last_models.is_empty() && !c.busy("a") && !c.errors.contains_key("a"));
+        // Ebenso beim Wechsel des Typs.
+        servers[0].url = "http://localhost:11434".into();
+        c.start(&servers[0], Lang::En, Arc::new(|| {}));
+        servers[0].kind = ServerKind::OpenAi;
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!c.poll(&mut servers, Lang::En));
+        assert!(servers[0].last_models.is_empty());
+    }
+
+    #[test]
     fn connector_stores_the_model_list_and_reports_errors() {
         let tags = r#"{"models":[{"name":"llama3"},{"name":"phi"}]}"#;
         let show = r#"{"capabilities":["completion","tools"],"model_info":{"llama.context_length":8192}}"#;
@@ -945,7 +1088,7 @@ mod tests {
     }
 
     fn settings_with(servers: Vec<LlmServer>, last: Option<ChatMeta>) -> Settings {
-        Settings { llm_servers: servers, last_chat_model: last, ..Settings::default() }
+        Settings { llm_servers: servers.into(), last_chat_model: last, ..Settings::default() }
     }
 
     #[test]
@@ -978,9 +1121,61 @@ mod tests {
             assert!(h.has(lang.t("Einstellungen → Modelle", "Settings → Models")), "{:?}", h.texts);
             let o = h.click(lang.t("Einstellungen öffnen", "Open settings"), |ui| new_chat_body(ui, &mut d, &[], &conn, lang), merge_dlg);
             assert!(o.open_settings && !o.create);
-            let o = h.run(vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }], |ui| new_chat_body(ui, &mut d, &[], &conn, lang));
-            assert!(o.cancel);
         }
+    }
+
+    fn key_ev(k: Key) -> Event {
+        Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    /// Ein Bild mit Modal und einer Text-Eingabe dahinter (wie die Chat-Eingabe); liefert Dialog-Ergebnis und ob die
+    /// Eingabe Enter gesehen hat.
+    fn modal_frame(ctx: &egui::Context, t: f64, events: Vec<Event>, d: &mut NewChatDlg, servers: &[LlmServer], conn: &Connector, text: &mut String, focus_behind: bool) -> (DlgOut, bool) {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))), time: Some(t), events, ..Default::default() };
+        let mut out = DlgOut::default();
+        let mut behind_enter = false;
+        let _ = ctx.run(input, |ctx| {
+            release_focus(ctx);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = ui.add(egui::TextEdit::multiline(text).id(egui::Id::new("behind")));
+                if focus_behind {
+                    r.request_focus();
+                }
+                behind_enter = r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            });
+            out = new_chat_modal(ctx, d, servers, conn, Lang::En);
+        });
+        (out, behind_enter)
+    }
+
+    #[test]
+    fn dialog_keys_do_not_leak_and_esc_closes_popups_first() {
+        let conn = Connector::with_transport(Arc::new(Fake::default()));
+        let servers = vec![LlmServer { id: "a".into(), name: "Box".into(), last_models: vec![info("m1", None), info("m2", None)], ..Default::default() }];
+        let mut d = NewChatDlg { server: "a".into(), model: "m1".into(), ..Default::default() };
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        // Die Eingabe dahinter hatte den Fokus: der Dialog nimmt ihn weg, Enter legt den Chat an und erreicht sie nicht.
+        modal_frame(&ctx, 0.0, vec![], &mut d, &servers, &conn, &mut text, true);
+        let (o, behind) = modal_frame(&ctx, 0.1, vec![key_ev(Key::Enter)], &mut d, &servers, &conn, &mut text, false);
+        assert!(o.create && !behind && text.is_empty(), "{o:?} {behind} {text:?}");
+        // Offenes Aufklappmenü: Esc schließt nur das Menü, Enter legt nichts an.
+        egui::Popup::open_id(&ctx, egui::Id::new("some_popup"));
+        let mut frames = Vec::new();
+        for (i, ev) in [vec![], vec![key_ev(Key::Enter)]].into_iter().enumerate() {
+            frames.push(modal_frame(&ctx, 0.2 + i as f64 * 0.1, ev, &mut d, &servers, &conn, &mut text, false).0);
+        }
+        let popup_was_open = egui::Popup::is_any_open(&ctx);
+        if popup_was_open {
+            assert!(!frames[1].create, "Enter bei offenem Menü");
+            let (o, _) = modal_frame(&ctx, 0.5, vec![key_ev(Key::Escape)], &mut d, &servers, &conn, &mut text, false);
+            assert!(!o.cancel, "Esc schließt zuerst das Menü");
+        }
+        egui::Popup::close_all(&ctx);
+        let (o, _) = modal_frame(&ctx, 0.6, vec![], &mut d, &servers, &conn, &mut text, false);
+        assert!(!o.cancel);
+        let (o, _) = modal_frame(&ctx, 0.7, vec![key_ev(Key::Escape)], &mut d, &servers, &conn, &mut text, false);
+        assert!(o.cancel, "Esc ohne Menü bricht ab");
     }
 
     #[test]
@@ -992,7 +1187,7 @@ mod tests {
             let mut h = H::new();
             h.run(vec![], |ui| new_chat_body(ui, &mut d, &empty, &conn, lang));
             assert!(h.has(lang.t("Noch keine Modelle bekannt", "No models known yet")));
-            let enter = || Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+            let enter = || key_ev(Key::Enter);
             assert!(!h.run(vec![enter()], |ui| new_chat_body(ui, &mut d, &empty, &conn, lang)).create, "ohne Modell legt Enter nichts an");
             let o = h.click(lang.t("Verbinden", "Connect"), |ui| new_chat_body(ui, &mut d, &empty, &conn, lang), merge_dlg);
             assert_eq!(o.connect.as_deref(), Some("a"));

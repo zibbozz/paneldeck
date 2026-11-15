@@ -205,9 +205,9 @@ pub struct Settings {
     pub update_last_check: i64,
     /// Vom Nutzer übersprungene Version (`X.Y.Z`, leer = keine); die automatische Prüfung bietet sie nicht mehr an.
     pub update_skip_version: String,
-    /// LLM-Server für Chats (seit 2.2.0, `llm::config`). Unlesbare Einträge werden übersprungen.
-    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::llm::config::de_servers")]
-    pub llm_servers: Vec<crate::llm::config::LlmServer>,
+    /// LLM-Server für Chats (seit 2.2.0, `llm::config`). Unlesbare Einträge bleiben unverändert erhalten.
+    #[serde(skip_serializing_if = "crate::llm::config::LlmServers::is_blank")]
+    pub llm_servers: crate::llm::config::LlmServers,
     /// Zuletzt im Dialog „Neuer Chat“ gewähltes Modell (Vorauswahl beim nächsten Mal).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
     pub last_chat_model: Option<ChatMeta>,
@@ -254,7 +254,7 @@ impl Default for Settings {
             update_auto_check: false,
             update_last_check: 0,
             update_skip_version: String::new(),
-            llm_servers: Vec::new(),
+            llm_servers: Default::default(),
             last_chat_model: None,
         }
     }
@@ -910,6 +910,9 @@ mod tests {
         s.sanitize();
         assert_eq!(s.language, Lang::De);
         assert_eq!(s.llm_servers.len(), 1);
+        assert_eq!(s.llm_servers.unreadable, vec![serde_json::json!({"id":"b","kind":"gemini"})], "bleibt erhalten");
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["llm_servers"][1], serde_json::json!({"id":"b","kind":"gemini"}), "und wird zurückgeschrieben");
         assert_eq!(s.llm_servers[0].models[0].max_steps, 1, "auf 1..=100 begrenzt");
         assert!(s.last_chat_model.is_none());
         s.last_chat_model = Some(ChatMeta { server: "a".into(), model: "m".into() });

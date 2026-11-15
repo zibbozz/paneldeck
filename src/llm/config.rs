@@ -11,15 +11,17 @@
 //! ```
 //!
 //! `api_key` (nur wenn gesetzt) ist das Base64 eines DPAPI-Blobs (`secret::protect`), nie Klartext. Lesen ist tolerant:
-//! ein Server-Eintrag, der sich nicht lesen lässt (unbekannter `kind` einer neueren Version, falscher Typ …), wird
-//! übersprungen (Hinweis im Reiter „Modelle“, beim nächsten Speichern fällt er weg); fehlende Felder haben Standardwerte.
+//! ein Server-Eintrag, der sich nicht lesen lässt (unbekannter `kind` einer neueren Version, falscher Typ …), bleibt als
+//! rohes JSON erhalten und wird unverändert zurückgeschrieben ([`LlmServers::unreadable`]; im Reiter „Modelle“ nur
+//! lesbar, mit „Entfernen“). Fehlende Felder haben Standardwerte; ein Modell-Eintrag ist je Feld tolerant (siehe
+//! [`LlmModel`]).
 
 use super::{Endpoint, ModelInfo, ServerKind};
 use crate::mcp::McpLevel;
 use crate::state::Lang;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use serde_json::Value;
 use std::time::Duration;
 
 /// Kontextlänge, wenn weder eine eigene Angabe noch eine vom Server bekannt ist.
@@ -63,8 +65,10 @@ impl Default for LlmServer {
 }
 
 /// Einstellungen eines Modells für Chats (unabhängig von der MCP-Stufe für externe Agenten).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+///
+/// Lesen ist je Feld tolerant: ein unlesbares Feld bekommt seinen Standardwert, nur `level` wird dann „Aus“ (ein
+/// kaputter Eintrag darf einem Modell keine Rechte geben). Ohne lesbaren `name` fällt der Eintrag weg.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LlmModel {
     pub name: String,
     /// Welche Paneldeck-Werkzeuge das Modell nutzen darf (Aus / Lesen / Steuern). Standard: Lesen.
@@ -92,6 +96,33 @@ impl Default for LlmModel {
     }
 }
 
+impl<'de> Deserialize<'de> for LlmModel {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        let o = v.as_object().ok_or_else(|| D::Error::custom("model entry is not an object"))?;
+        let name = o.get("name").and_then(|n| n.as_str()).ok_or_else(|| D::Error::custom("model entry without name"))?;
+        fn get<T: DeserializeOwned>(o: &serde_json::Map<String, Value>, k: &str, default: T) -> T {
+            o.get(k).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or(default)
+        }
+        let def = LlmModel::named(name);
+        // Fehlt die Stufe: Standard „Lesen“. Ist sie da, aber unlesbar: „Aus“ (`McpLevel` liest Unbekanntes als Aus).
+        let level = match o.get("level") {
+            None => def.level,
+            Some(v) => serde_json::from_value(v.clone()).unwrap_or(McpLevel::Off),
+        };
+        Ok(LlmModel {
+            level,
+            disabled_tools: get(o, "disabled_tools", def.disabled_tools.clone()),
+            ask_write: get(o, "ask_write", def.ask_write),
+            max_steps: get(o, "max_steps", def.max_steps),
+            tools: get(o, "tools", None),
+            context_length: get(o, "context_length", None),
+            temperature: get(o, "temperature", None),
+            name: def.name,
+        })
+    }
+}
+
 impl LlmModel {
     pub fn named(name: &str) -> Self {
         LlmModel { name: name.to_string(), ..LlmModel::default() }
@@ -107,38 +138,81 @@ impl LlmModel {
     }
 }
 
-/// Einträge, die beim letzten Lesen übersprungen wurden (Kurzbeschreibung), für den Hinweis im Reiter „Modelle“.
-static SKIPPED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-pub fn skipped_entries() -> Vec<String> {
-    SKIPPED.lock().map(|v| v.clone()).unwrap_or_default()
-}
-
 /// Liste tolerant lesen: ungültige Einträge fallen weg, statt die ganze Datei unlesbar zu machen.
 fn lenient_vec<'de, D: serde::Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<Vec<T>, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
     Ok(v.as_array().map(|a| a.iter().filter_map(|x| serde_json::from_value(x.clone()).ok()).collect()).unwrap_or_default())
 }
 
-/// Für `Settings::llm_servers`: wie `lenient_vec`, merkt sich übersprungene Server (z. B. unbekannter `kind`).
-pub fn de_servers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<LlmServer>, D::Error> {
-    let v = serde_json::Value::deserialize(d)?;
-    let mut out = Vec::new();
-    let mut skipped = Vec::new();
-    for x in v.as_array().map(|a| a.as_slice()).unwrap_or_default() {
-        match serde_json::from_value::<LlmServer>(x.clone()) {
-            Ok(s) => out.push(s),
-            Err(e) => {
-                let name = x.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                let kind = x.get("kind").map(|k| k.to_string()).unwrap_or_default();
-                skipped.push(format!("{name} (kind {kind}): {e}"));
+/// `Settings::llm_servers`: die lesbaren Server und – unverändert – die Einträge, die sich nicht lesen ließen (z. B. ein
+/// unbekannter `kind` einer neueren Version). Beim Schreiben kommen beide in die Liste, die unlesbaren hinten.
+/// Über `Deref` verhält es sich wie `Vec<LlmServer>` (nur die lesbaren).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LlmServers {
+    pub list: Vec<LlmServer>,
+    pub unreadable: Vec<Value>,
+}
+
+impl LlmServers {
+    /// Weder lesbare noch unlesbare Einträge (dann fehlt das Feld in `settings.json`).
+    pub fn is_blank(&self) -> bool {
+        self.list.is_empty() && self.unreadable.is_empty()
+    }
+}
+
+impl From<Vec<LlmServer>> for LlmServers {
+    fn from(list: Vec<LlmServer>) -> Self {
+        LlmServers { list, unreadable: Vec::new() }
+    }
+}
+
+impl std::ops::Deref for LlmServers {
+    type Target = Vec<LlmServer>;
+    fn deref(&self) -> &Vec<LlmServer> {
+        &self.list
+    }
+}
+
+impl std::ops::DerefMut for LlmServers {
+    fn deref_mut(&mut self) -> &mut Vec<LlmServer> {
+        &mut self.list
+    }
+}
+
+impl Serialize for LlmServers {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.list.len() + self.unreadable.len()))?;
+        for x in &self.list {
+            seq.serialize_element(x)?;
+        }
+        for x in &self.unreadable {
+            seq.serialize_element(x)?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for LlmServers {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        let mut out = LlmServers::default();
+        for x in v.as_array().cloned().unwrap_or_default() {
+            match serde_json::from_value::<LlmServer>(x.clone()) {
+                Ok(s) => out.list.push(s),
+                Err(_) => out.unreadable.push(x),
             }
         }
+        Ok(out)
     }
-    if let Ok(mut s) = SKIPPED.lock() {
-        *s = skipped;
-    }
-    Ok(out)
+}
+
+/// Kurzbeschreibung eines unlesbaren Eintrags (Name, Typ) und der Grund (technisch, nur für einen Tooltip).
+pub fn describe_unreadable(v: &Value) -> (String, String) {
+    let name = v.get("name").and_then(|n| n.as_str()).or_else(|| v.get("url").and_then(|n| n.as_str())).unwrap_or("?");
+    let kind = v.get("kind").map(|k| k.as_str().map(str::to_string).unwrap_or_else(|| k.to_string())).unwrap_or_default();
+    let why = serde_json::from_value::<LlmServer>(v.clone()).err().map(|e| e.to_string()).unwrap_or_default();
+    (if kind.is_empty() { name.to_string() } else { format!("{name} ({kind})") }, why)
 }
 
 /// Neue, eindeutige Server-Kennung.
@@ -223,9 +297,23 @@ impl LlmServer {
         self.model_cfg(name).tools.or_else(|| self.info(name).and_then(|i| i.tools))
     }
 
-    /// Kontextlänge: eigene Angabe > vom Server erkannt > `DEFAULT_CONTEXT`.
+    /// Kontextlänge zur Anzeige: eigene Angabe > vom Server erkannt > `DEFAULT_CONTEXT`.
     pub fn context_length(&self, name: &str) -> u32 {
         self.model_cfg(name).context_length.or_else(|| self.info(name).and_then(|i| i.context_length)).filter(|c| *c > 0).unwrap_or(DEFAULT_CONTEXT)
+    }
+
+    /// Kontextlänge, mit der angefragt (und auf die der Verlauf gekürzt) wird. Eigene Angabe gilt immer. Ohne sie:
+    /// bei Ollama höchstens `DEFAULT_CONTEXT` (die Zahl geht als `num_ctx` mit; die volle erkannte Länge kostet viel
+    /// Speicher), bei OpenAI-kompatiblen Servern die erkannte Länge bzw. `DEFAULT_CONTEXT`.
+    pub fn request_context(&self, name: &str) -> u32 {
+        if let Some(c) = self.model_cfg(name).context_length.filter(|c| *c > 0) {
+            return c;
+        }
+        let detected = self.info(name).and_then(|i| i.context_length).filter(|c| *c > 0);
+        match self.kind {
+            ServerKind::Ollama => detected.map_or(DEFAULT_CONTEXT, |d| d.min(DEFAULT_CONTEXT)),
+            ServerKind::OpenAi => detected.unwrap_or(DEFAULT_CONTEXT),
+        }
     }
 
     /// Verbindungsangaben (entschlüsselt den Schlüssel). Fehlertext in `lang`.
@@ -289,16 +377,59 @@ mod tests {
     }
 
     #[test]
-    fn unknown_kind_is_skipped_not_fatal() {
-        #[derive(Deserialize)]
-        struct W {
-            #[serde(deserialize_with = "de_servers")]
-            s: Vec<LlmServer>,
+    fn model_entry_is_lenient_per_field_and_never_gains_rights() {
+        // Stufe Aus, ein anderes Feld kaputt: Eintrag bleibt, Stufe bleibt Aus.
+        let m: LlmModel = serde_json::from_str(r#"{"name":"x","level":"Off","max_steps":"many","ask_write":false,"tools":"yes"}"#).unwrap();
+        assert_eq!((m.level, m.max_steps, m.ask_write, m.tools), (McpLevel::Off, DEFAULT_MAX_STEPS, false, None));
+        // Unlesbare Stufe → Aus (nicht der Standard „Lesen“).
+        for lvl in [r#""ctrl""#, "null", "[1]", r#"{"a":1}"#] {
+            let m: LlmModel = serde_json::from_str(&format!(r#"{{"name":"x","level":{lvl},"disabled_tools":5}}"#)).unwrap();
+            assert_eq!(m.level, McpLevel::Off, "{lvl}");
+            assert!(m.disabled_tools.is_empty());
         }
-        let w: W = serde_json::from_str(r#"{"s":[{"id":"a","kind":"ollama","url":"http://localhost:11434"},{"id":"b","name":"Future","kind":"anthropic"},5,{"id":"c","kind":"openai","last_models":[{"name":"m"},{"bad":1}],"models":[{"name":"m","max_steps":"x"}]}]}"#).unwrap();
-        assert_eq!(w.s.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a", "c"]);
-        assert_eq!(w.s[1].last_models.len(), 1, "ungültiges Modell fällt weg, Server bleibt");
-        assert!(w.s[1].models.is_empty());
+        // Fehlende Stufe → Standard Lesen; ohne Namen kein Eintrag.
+        assert_eq!(serde_json::from_str::<LlmModel>(r#"{"name":"x"}"#).unwrap().level, McpLevel::Read);
+        assert!(serde_json::from_str::<LlmModel>(r#"{"level":"Off"}"#).is_err());
+        let s: LlmServer = serde_json::from_str(r#"{"id":"a","models":[{"name":"x","level":"Off","context_length":-1}]}"#).unwrap();
+        assert_eq!(s.model_cfg("x").level, McpLevel::Off);
+    }
+
+    #[test]
+    fn request_context_for_ollama_and_openai() {
+        let mut s = LlmServer { last_models: vec![ModelInfo { name: "big".into(), tools: None, context_length: Some(131072) }, ModelInfo { name: "small".into(), tools: None, context_length: Some(2048) }], ..Default::default() };
+        assert_eq!(s.request_context("big"), DEFAULT_CONTEXT, "Ollama: höchstens 8192 ohne eigene Angabe");
+        assert_eq!(s.request_context("small"), 2048);
+        assert_eq!(s.request_context("unknown"), DEFAULT_CONTEXT);
+        s.set_model_cfg(LlmModel { context_length: Some(32768), ..LlmModel::named("big") });
+        assert_eq!(s.request_context("big"), 32768);
+        s.kind = ServerKind::OpenAi;
+        assert_eq!(s.request_context("small"), 2048);
+        s.last_models[1].context_length = Some(65536);
+        assert_eq!(s.request_context("small"), 65536);
+    }
+
+    #[test]
+    fn unreadable_entries_are_kept_unchanged() {
+        let text = r#"[{"id":"a","kind":"ollama","url":"http://localhost:11434"},{"id":"b","name":"Future","kind":"anthropic","api_key":"BLOB","extra":{"x":[1,2]}},5,{"id":"c","kind":"openai","last_models":[{"name":"m"},{"bad":1}],"models":[{"name":"m","max_steps":"x"},{"level":"Off"}]}]"#;
+        let s: LlmServers = serde_json::from_str(text).unwrap();
+        assert_eq!(s.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+        assert_eq!(s[1].last_models.len(), 1, "ungültiges Modell fällt weg, Server bleibt");
+        assert_eq!(s[1].models.len(), 1, "Modell mit kaputtem Feld bleibt, ohne Namen fällt es weg");
+        assert_eq!(s.unreadable.len(), 2);
+        assert_eq!(describe_unreadable(&s.unreadable[0]).0, "Future (anthropic)");
+        // Hin und zurück: unlesbare Einträge (samt Schlüssel) unverändert.
+        let back: Value = serde_json::to_value(&s).unwrap();
+        let arr = back.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        let orig: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(arr[2], orig[1]);
+        assert_eq!(arr[3], orig[2]);
+        let again: LlmServers = serde_json::from_value(back).unwrap();
+        assert_eq!(again.unreadable, s.unreadable);
+        assert!(LlmServers::default().is_blank() && !s.is_blank());
+        let only_bad: LlmServers = serde_json::from_str("[5]").unwrap();
+        assert!(only_bad.is_empty() && !only_bad.is_blank(), "Deref = nur lesbare");
+        assert!(serde_json::from_str::<LlmServers>(r#""nope""#).unwrap().is_blank());
     }
 
     #[test]

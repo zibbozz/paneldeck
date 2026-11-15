@@ -1904,6 +1904,10 @@ impl App {
     }
 
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
+        if self.new_chat.is_some() {
+            models_ui::release_focus(ctx);
+        }
         let theme = self.theme();
         let font = FontId::monospace(self.settings.font_size);
         let lang = self.settings.language;
@@ -2257,7 +2261,7 @@ impl App {
         chatmod::TurnContext {
             project,
             folder: e.map(|e| e.meta.cwd.clone()).unwrap_or_default(),
-            servers: self.settings.llm_servers.clone(),
+            servers: self.settings.llm_servers.list.clone(),
             data_dir: Some(self.dir.clone()),
             prompt_lang: self.settings.mcp_prompt_lang,
             lang: self.settings.language,
@@ -2936,7 +2940,10 @@ impl App {
                     if src.is_chat() {
                         // Chat: neuer, leerer Chat mit demselben Modell im selben Ordner (ohne Modell: Dialog).
                         let Some(chat) = src.meta.chat.clone() else {
-                            self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, Some(src.meta.cwd.clone()), Some(src.meta.group.clone())));
+                            let mut d = models_ui::NewChatDlg::new(&self.settings, Some(src.meta.cwd.clone()), Some(src.meta.group.clone()));
+                            d.window = Some(src.meta.window);
+                            d.project = Some(src.meta.project);
+                            self.new_chat = Some(d);
                             return;
                         };
                         let o = NewOpts {
@@ -3052,6 +3059,7 @@ impl eframe::App for App {
         self.poll_hooks(ctx);
         self.poll_shell(ctx);
         self.poll_chats();
+        self.models_save_tick(ctx);
         self.poll_background(ctx);
         self.sync_watchers(ctx);
         self.tlinks_frame(ctx);

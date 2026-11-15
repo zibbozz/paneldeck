@@ -45,14 +45,25 @@ pub enum ServerKind {
 }
 
 /// Ein Server: Typ, Basisadresse (z. B. `http://localhost:11434`, bei OpenAI auch mit `/v1`), optionaler Klartext-Schlüssel
-/// (nur im Speicher; gespeichert wird er über `secret::protect`).
-#[derive(Clone, Debug, PartialEq)]
+/// (nur im Speicher; gespeichert wird er über `secret::protect`). `Debug` zeigt den Schlüssel nicht.
+#[derive(Clone, PartialEq)]
 pub struct Endpoint {
     pub kind: ServerKind,
     pub base_url: String,
     pub api_key: Option<String>,
     /// Wartezeit auf Daten (auch auf das erste Token); Standard 300 s.
     pub receive_timeout: Duration,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("kind", &self.kind)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("receive_timeout", &self.receive_timeout)
+            .finish()
+    }
 }
 
 impl Endpoint {
@@ -335,3 +346,18 @@ pub fn spawn_chat_with(t: Arc<dyn Transport>, endpoint: Endpoint, request: ChatR
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_never_shows_the_key() {
+        let ep = Endpoint::new(ServerKind::Ollama, "http://localhost:11434").with_key(Some("sk-secret-1".into()));
+        let s = format!("{ep:?}");
+        assert!(!s.contains("sk-secret-1") && s.contains("***"), "{s}");
+        let r = ep.request(http::Method::Post, "http://localhost:11434/api/chat", Some(b"{}"), "application/json");
+        let s = format!("{r:?}");
+        assert!(!s.contains("sk-secret-1") && s.contains("***"), "{s}");
+    }
+}

@@ -41,7 +41,7 @@ impl Method {
 }
 
 /// Eine Anfrage. `url` ist die volle Adresse; der Transport prüft sie selbst (`net::parse` + `net::check`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HttpRequest<'a> {
     pub method: Method,
     pub url: &'a str,
@@ -51,6 +51,20 @@ pub struct HttpRequest<'a> {
     pub bearer: Option<&'a str>,
     pub accept: &'a str,
     pub receive_timeout: Duration,
+}
+
+/// Ohne den Schlüssel (nur `***`), damit er nie in einer Debug-Ausgabe oder einem Protokoll landet.
+impl std::fmt::Debug for HttpRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("body_len", &self.body.map(<[u8]>::len))
+            .field("bearer", &self.bearer.map(|_| "***"))
+            .field("accept", &self.accept)
+            .field("receive_timeout", &self.receive_timeout)
+            .finish()
+    }
 }
 
 pub trait HttpResponse {
