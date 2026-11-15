@@ -82,12 +82,16 @@ pub struct Updater {
     pub(super) offer: Option<Offer>,
     /// „Später“: Knopf bis zur nächsten Prüfung bzw. zum nächsten Start ausblenden.
     hidden: bool,
+    /// „Später“ während des Downloads: danach nicht nachfragen, nur „Neu starten“ in der Fensterleiste zeigen.
+    deferred: bool,
     pub(super) dialog: bool,
     pub(super) confirm_restart: bool,
     /// Ergebnis der letzten Prüfung bzw. letzter Fehler (Text, ok).
     pub(super) result: Option<(String, bool)>,
     /// Fehler des Downloads/der Installation (im Dialog).
     pub(super) error: Option<String>,
+    /// Neutraler Hinweis im Dialog (z. B. Download abgebrochen).
+    pub(super) info: Option<String>,
     /// Heruntergeladene, geprüfte Datei und ihre erwartete SHA-256-Prüfsumme.
     prepared: Option<(PathBuf, [u8; 32])>,
     retry_at: i64,
@@ -110,10 +114,12 @@ impl Updater {
             total: Arc::new(AtomicU64::new(0)),
             offer: None,
             hidden: false,
+            deferred: false,
             dialog: false,
             confirm_restart: false,
             result: None,
             error: None,
+            info: None,
             prepared: None,
             retry_at: 0,
             // Erste automatische Prüfung kurz nach dem Start (nicht im ersten Frame, damit der Start nicht wartet).
@@ -140,9 +146,13 @@ impl Updater {
         *self.flavor.get_or_insert_with(|| install::detect(exe))
     }
 
-    /// „Später“.
+    /// „Später“. Während des Downloads: weiterladen, danach nur den Knopf „Neu starten“ zeigen (keine Nachfrage).
     pub(super) fn later(&mut self) {
-        self.hidden = true;
+        if self.phase == Phase::Downloading {
+            self.deferred = true;
+        } else {
+            self.hidden = true;
+        }
         self.dialog = false;
     }
 
@@ -174,6 +184,8 @@ impl Updater {
         let version = self.offer.as_ref().map(|o| o.version.clone()).unwrap_or(Version::new(0, 0, 0));
         self.phase = Phase::Downloading;
         self.error = None;
+        self.info = None;
+        self.deferred = false;
         self.cancel.store(false, Ordering::Relaxed);
         self.done.store(0, Ordering::Relaxed);
         self.total.store(asset.size, Ordering::Relaxed);
@@ -251,7 +263,13 @@ impl Updater {
                     Ok(p) => {
                         self.prepared = Some(p);
                         self.phase = Phase::Ready;
-                        self.confirm_restart = true;
+                        // Nie still neu starten: immer nachfragen – außer der Nutzer hat „Später“ gewählt (dann nur der Knopf).
+                        self.confirm_restart = !self.deferred;
+                    }
+                    Err(_) if self.cancel.load(Ordering::Relaxed) => {
+                        // Selbst abgebrochen: kein Fehler, nur ein Hinweis.
+                        self.phase = Phase::Idle;
+                        self.info = Some(lang.t("Download abgebrochen.", "Download cancelled.").into());
                     }
                     Err(e) => {
                         self.phase = Phase::Idle;
@@ -616,7 +634,7 @@ mod tests {
         // Portabel installieren: exe getauscht, alte als .old
         let exe = d.join("paneldeck.exe");
         std::fs::write(&exe, b"MZ old").unwrap();
-        let offer = Offer { version: v.clone(), html_url: String::new(), plan: Plan::Install { asset, sums }, major: false };
+        let offer = Offer { version: v.clone(), plan: Plan::Install { asset, sums }, major: false };
         install(&exe, Some(Flavor::Portable), &p, &want, &offer, None, Lang::En).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), fake_exe());
         assert_eq!(std::fs::read(d.join("paneldeck.exe.old")).unwrap(), b"MZ old");
@@ -637,7 +655,7 @@ mod tests {
         std::fs::write(&p, b).unwrap();
         let exe = d.join("paneldeck.exe");
         std::fs::write(&exe, b"MZ old").unwrap();
-        let offer = Offer { version: v, html_url: String::new(), plan: Plan::Install { asset, sums }, major: false };
+        let offer = Offer { version: v, plan: Plan::Install { asset, sums }, major: false };
         let e = install(&exe, Some(Flavor::Portable), &p, &want, &offer, None, Lang::En).unwrap_err();
         assert!(matches!(&e, InstallFail::Discard(t) if t.contains("was changed")), "{e:?}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"MZ old");
@@ -715,7 +733,7 @@ mod tests {
         std::fs::write(&exe, b"MZ old").unwrap();
         let v = Version::new(10, 0, 0);
         let a = release::Asset { name: "x".into(), url: String::new(), size: 0 };
-        let offer = Offer { version: v, html_url: String::new(), plan: Plan::Install { asset: a.clone(), sums: a }, major: true };
+        let offer = Offer { version: v, plan: Plan::Install { asset: a.clone(), sums: a }, major: true };
         // Eine (unbrauchbare) heruntergeladene Datei mit passender Prüfsumme
         let file = d.join("none.zip");
         std::fs::write(&file, b"not a zip").unwrap();
@@ -811,6 +829,28 @@ mod tests {
         assert_eq!(s.update_last_check, 0);
         assert!(!u.result.as_ref().unwrap().1);
         assert!(u.retry_at > now_unix());
+        // Download fertig: Nachfrage (nie still neu starten); nach „Später“ während des Downloads nur der Knopf
+        let f0 = std::env::temp_dir().join(format!("paneldeck-test-ready-{}.zip", std::process::id()));
+        u.phase = Phase::Downloading;
+        u.tx.send(Msg::Downloaded(Ok((f0.clone(), [0; 32])))).unwrap();
+        u.poll(&mut s);
+        assert!(u.phase == Phase::Ready && u.confirm_restart);
+        u.confirm_restart = false;
+        u.phase = Phase::Downloading;
+        u.later();
+        assert!(u.deferred && !u.dialog);
+        u.tx.send(Msg::Downloaded(Ok((f0, [0; 32])))).unwrap();
+        u.poll(&mut s);
+        assert!(u.phase == Phase::Ready && !u.confirm_restart && u.button_visible());
+        // Abgebrochener Download: neutraler Hinweis statt Fehler
+        u.phase = Phase::Downloading;
+        u.error = None;
+        u.cancel_download();
+        u.tx.send(Msg::Downloaded(Err("Cancelled.".into()))).unwrap();
+        u.poll(&mut s);
+        assert_eq!(u.phase, Phase::Idle);
+        assert!(u.error.is_none() && u.info.as_deref() == Some("Download cancelled."));
+        u.cancel.store(false, Ordering::Relaxed);
         // Installation: Fehler mit noch gültiger Datei → erneut versuchen ohne Download
         let f = std::env::temp_dir().join(format!("paneldeck-test-prepared-{}.zip", std::process::id()));
         std::fs::write(&f, b"x").unwrap();

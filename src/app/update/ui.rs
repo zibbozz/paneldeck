@@ -10,11 +10,32 @@ use crate::style::{self, Icon as SIcon, S1, S2};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Pos2, Rect, RichText, Sense, Vec2};
 use std::time::Duration;
 
-/// Adresse im Browser öffnen – nur Release-Seiten dieses Repositorys.
-fn open_release_page(url: &str) {
-    if super::release::safe_release_page(url) {
-        let _ = std::process::Command::new("explorer").arg(url).spawn();
+/// Release-Seite der Version im Standardbrowser öffnen. Die Adresse wird lokal aus der geprüften Versionsnummer gebaut (nichts
+/// aus der API-Antwort) und per ShellExecuteW geöffnet (kein Umweg über `explorer`).
+fn open_release_page(v: &Version) {
+    let url = super::release::release_page(v);
+    if !super::release::safe_release_page(&url) {
+        return;
     }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let op: Vec<u16> = "open".encode_utf16().chain([0]).collect();
+        let u: Vec<u16> = url.encode_utf16().chain([0]).collect();
+        // SAFETY: nullterminierte UTF-16-Puffer, die den Aufruf überleben; kein Fenster-Handle nötig.
+        unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
+    }
+}
+
+/// Esc schließt ein Update-Fenster nur, wenn es vorn liegt und weder ein Terminal noch ein Textfeld die Tastatur hat (sonst
+/// gehört Esc dorthin, z. B. beim Tippen in ein Terminal, während der Dialog offen ist).
+fn esc_for(ctx: &egui::Context, layer: Option<egui::LayerId>) -> bool {
+    let Some(layer) = layer else { return false };
+    // Nicht verschachteln: ctx.input() hält die Sperre des Kontexts.
+    let front = ctx.top_layer_id() == Some(layer);
+    let typing = ctx.wants_keyboard_input();
+    front && !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape))
 }
 
 fn fmt_mb(b: u64) -> String {
@@ -75,12 +96,9 @@ impl App {
         if matches!(self.updater.phase, Phase::Downloading | Phase::Installing | Phase::Checking { .. }) {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+        // Nie still neu starten (offene Eingaben gingen verloren): immer nachfragen, auch ohne laufende Terminals.
         if self.updater.confirm_restart && self.updater.phase == Phase::Ready {
-            if self.running_sessions() == 0 {
-                self.update_install_now(ctx);
-            } else {
-                self.update_confirm_ui(ctx);
-            }
+            self.update_confirm_ui(ctx);
         }
         if self.updater.dialog {
             self.update_dialog_ui(ctx);
@@ -138,11 +156,11 @@ impl App {
             // Kein Angebot (mehr), aber eine Meldung (z. B. Neustart fehlgeschlagen)
             if let Some(e) = self.updater.error.clone() {
                 let mut open = true;
-                egui::Window::new(lang.t("Update", "Update")).id(Id::new("update_dialog")).open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+                let r = egui::Window::new(lang.t("Update", "Update")).id(Id::new("update_dialog")).open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
                     ui.set_max_width(420.0);
                     ui.colored_label(Color32::LIGHT_RED, e);
                 });
-                if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if !open || esc_for(ctx, r.map(|r| r.response.layer_id)) {
                     self.updater.dialog = false;
                     self.updater.error = None;
                 }
@@ -156,7 +174,7 @@ impl App {
         let phase = self.updater.phase;
         let mut open = true;
         let (mut go, mut later, mut skip, mut cancel) = (false, false, false, false);
-        egui::Window::new(lang.t("Update verfügbar", "Update available"))
+        let shown = egui::Window::new(lang.t("Update verfügbar", "Update available"))
             .id(Id::new("update_dialog"))
             .open(&mut open)
             .collapsible(false)
@@ -178,8 +196,8 @@ impl App {
                     });
                     ui.add_space(S2);
                 }
-                if super::release::safe_release_page(&offer.html_url) && ui.link(lang.t("Was ist neu? (Release-Seite auf GitHub)", "What's new? (release page on GitHub)")).clicked() {
-                    open_release_page(&offer.html_url);
+                if ui.link(lang.t("Was ist neu? (Release-Seite auf GitHub)", "What's new? (release page on GitHub)")).clicked() {
+                    open_release_page(&offer.version);
                 }
                 ui.add_space(S2);
                 let installable = matches!(offer.plan, Plan::Install { .. });
@@ -230,6 +248,9 @@ impl App {
                 if let Some(e) = &self.updater.error {
                     ui.add_space(S1);
                     ui.colored_label(Color32::LIGHT_RED, e);
+                } else if let Some(i) = &self.updater.info {
+                    ui.add_space(S1);
+                    ui.label(RichText::new(i).color(dim));
                 }
                 ui.add_space(S2);
                 ui.horizontal(|ui| {
@@ -262,10 +283,13 @@ impl App {
                 });
             });
         if go {
-            if phase == Phase::Ready {
-                self.updater.confirm_restart = true;
-            } else {
+            if phase != Phase::Ready {
                 self.updater.start_download(lang, ctx);
+            } else if self.running_sessions() == 0 {
+                // Ausdrücklich „Neu starten und aktualisieren“ geklickt, kein Terminal läuft: das ist die Bestätigung.
+                self.update_install_now(ctx);
+            } else {
+                self.updater.confirm_restart = true;
             }
             self.updater.dialog = false;
         }
@@ -278,15 +302,12 @@ impl App {
             self.updater.dialog = false;
         }
         if later {
-            if phase == Phase::Downloading {
-                // „Später“ während des Downloads: weiterladen, nur den Dialog schließen.
-                self.updater.dialog = false;
-            } else {
-                self.updater.later();
-            }
+            // Während des Downloads: weiterladen, danach nur „Neu starten“ in der Fensterleiste.
+            self.updater.later();
         }
-        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !open || esc_for(ctx, shown.map(|r| r.response.layer_id)) {
             self.updater.dialog = false;
+            self.updater.info = None;
         }
     }
 
@@ -296,18 +317,26 @@ impl App {
         let n = self.running_sessions();
         let major = self.updater.offer.as_ref().is_some_and(|o| o.major);
         let (mut go, mut no) = (false, false);
-        egui::Window::new(lang.t("Paneldeck neu starten?", "Restart Paneldeck?")).id(Id::new("update_confirm")).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+        let title = if n == 0 { lang.t("Jetzt neu starten, um zu aktualisieren?", "Restart now to update?") } else { lang.t("Paneldeck neu starten?", "Restart Paneldeck?") };
+        let shown = egui::Window::new(title).id(Id::new("update_confirm")).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
             ui.set_max_width(420.0);
-            let running = if n == 1 {
-                lang.t("1 Terminal läuft noch.", "1 terminal is still running.").to_string()
+            if n == 0 {
+                ui.label(lang.t(
+                    "Das Update ist geladen und geprüft. Für die Installation startet Paneldeck neu; nicht gespeicherte Eingaben in offenen Dialogen gehen dabei verloren.",
+                    "The update is downloaded and verified. Paneldeck restarts to install it; unsaved input in open dialogs is lost.",
+                ));
             } else {
-                format!("{n} {}", lang.t("Terminals laufen noch.", "terminals are still running."))
-            };
-            ui.label(running);
-            ui.label(lang.t(
-                "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach wiederhergestellt.",
-                "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored afterwards.",
-            ));
+                let running = if n == 1 {
+                    lang.t("1 Terminal läuft noch.", "1 terminal is still running.").to_string()
+                } else {
+                    format!("{n} {}", lang.t("Terminals laufen noch.", "terminals are still running."))
+                };
+                ui.label(running);
+                ui.label(lang.t(
+                    "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach wiederhergestellt.",
+                    "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored afterwards.",
+                ));
+            }
             if major {
                 ui.label(RichText::new(lang.t("Vorher wird die Datenbank gesichert.", "The database is backed up first.")).small().color(style::dim(ui)));
             }
@@ -324,7 +353,8 @@ impl App {
         if go {
             self.update_install_now(ctx);
         }
-        if no || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if no || esc_for(ctx, shown.map(|r| r.response.layer_id)) {
+            // Der Knopf „Neu starten“ in der Fensterleiste bleibt.
             self.updater.confirm_restart = false;
         }
     }
@@ -384,8 +414,8 @@ impl App {
             });
         }
         ui.label(RichText::new(lang.t(
-            "Die Prüfung fragt nur die öffentliche GitHub-API nach dem neuesten Release; es werden keine Daten über dich gesendet.",
-            "The check only asks the public GitHub API for the latest release; no data about you is sent.",
+            "Die Prüfung fragt nur die öffentliche GitHub-API (api.github.com) nach dem neuesten Release, ein Download lädt zusätzlich von den Download-Servern von GitHub. GitHub sieht dabei deine IP-Adresse und die Paneldeck-Version (im User-Agent); weitere Daten werden nicht gesendet.",
+            "The check only asks the public GitHub API (api.github.com) for the latest release; a download also uses GitHub's download servers. GitHub sees your IP address and the Paneldeck version (in the User-Agent); no other data is sent.",
         )).small().color(dim));
     }
 }

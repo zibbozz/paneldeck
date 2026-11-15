@@ -32,7 +32,6 @@ pub struct Asset {
 pub struct Release {
     pub tag: String,
     pub version: Version,
-    pub html_url: String,
     pub assets: Vec<Asset>,
 }
 
@@ -80,6 +79,11 @@ pub fn allowed_url(url: &str) -> bool {
     split_https(url).is_some_and(|(h, _)| HOSTS.contains(&h.as_str()))
 }
 
+/// Release-Seite einer (geprüften, regulären) Version – lokal gebaut, nicht aus der API-Antwort übernommen.
+pub fn release_page(v: &Version) -> String {
+    format!("{PAGE_PREFIX}tag/v{v}")
+}
+
 /// Release-Seite dieses Repositorys (nur dann wird sie im Browser geöffnet).
 pub fn safe_release_page(url: &str) -> bool {
     url.starts_with(PAGE_PREFIX) && split_https(url).is_some() && !url[PAGE_PREFIX.len()..].contains("..")
@@ -93,7 +97,6 @@ pub fn parse_latest(json: &[u8]) -> Result<Release, String> {
     }
     let tag = v["tag_name"].as_str().ok_or("tag_name")?.to_string();
     let version = Version::from_tag(&tag).ok_or_else(|| format!("tag {tag}"))?;
-    let html_url = v["html_url"].as_str().unwrap_or_default().to_string();
     let assets = v["assets"]
         .as_array()
         .map(|a| {
@@ -108,7 +111,7 @@ pub fn parse_latest(json: &[u8]) -> Result<Release, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(Release { tag, version, html_url, assets })
+    Ok(Release { tag, version, assets })
 }
 
 impl Release {
@@ -175,7 +178,6 @@ pub enum NoInstall {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Offer {
     pub version: Version,
-    pub html_url: String,
     pub plan: Plan,
     pub major: bool,
 }
@@ -207,7 +209,7 @@ pub fn evaluate(current: &Version, rel: &Release, flavor: Option<Flavor>, skip_v
             }
         }
     };
-    let offer = Offer { version: rel.version.clone(), html_url: rel.html_url.clone(), plan, major: current.is_major_jump(&rel.version) };
+    let offer = Offer { version: rel.version.clone(), plan, major: current.is_major_jump(&rel.version) };
     Outcome::Newer { skipped: !skip_version.is_empty() && skip_version == rel.version.to_string(), offer }
 }
 
@@ -236,7 +238,8 @@ pub(super) mod tests {
         let r = parse_latest(fixture("v2.1.0", true).as_bytes()).unwrap();
         assert_eq!(r.version, Version::new(2, 1, 0));
         assert_eq!(r.tag, "v2.1.0");
-        assert_eq!(r.html_url, "https://github.com/zibbozz/paneldeck/releases/tag/v2.1.0");
+        assert_eq!(release_page(&r.version), "https://github.com/zibbozz/paneldeck/releases/tag/v2.1.0");
+        assert!(safe_release_page(&release_page(&r.version)));
         assert_eq!(r.assets.len(), 3);
         assert_eq!(r.asset("Paneldeck-Setup-2.1.0.exe").unwrap().size, 15499036);
         assert!(r.asset(SUMS_NAME).is_some());
