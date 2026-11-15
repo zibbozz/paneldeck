@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 mod data;
 mod dialogs;
 mod dragdrop;
+mod empty_hub;
 #[cfg(test)]
 mod glyph_tests;
 mod mcp;
@@ -903,9 +904,7 @@ impl App {
                 app.hide_pane(id);
             }
         }
-        if app.entries.is_empty() {
-            app.new_session(&cc.egui_ctx, NewOpts::default());
-        }
+        // Ohne wiederhergestellte Sitzungen startet Paneldeck ohne Terminal (leerer Hub mit Startknöpfen, #111).
         let tr: Vec<(u64, String)> = app.entries.iter().map(|(i, e)| (*i, e.meta.transcript.clone())).collect();
         for (i, t) in tr {
             if !t.is_empty() {
@@ -1745,39 +1744,8 @@ impl App {
                 let rect = ui.available_rect_before_wrap();
                 let Some(mut layout) = self.layout.take() else {
                     let first_run = self.entries.is_empty();
-                    let claude_mode = self.settings.claude_mode;
-                    ui.scope_builder(UiBuilder::new().max_rect(Rect::from_center_size(rect.center(), Vec2::new(420.0, 300.0))), |ui| {
-                        ui.vertical_centered(|ui| {
-                            let (r, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
-                            ui.painter().rect_filled(r, 14.0, style::ACCENT.gamma_multiply(0.18));
-                            style::paint_icon(ui.painter(), SIcon::Spark, r.center(), style::ACCENT);
-                            ui.add_space(S3);
-                            ui.heading(if first_run { lang.t("Willkommen bei Paneldeck", "Welcome to Paneldeck") } else { lang.t("Keine Sitzung in diesem Projekt", "No session in this project") });
-                            ui.add_space(S1);
-                            ui.label(RichText::new(lang.t("Starte ein Terminal oder eine Claude-Sitzung – alles an einem Ort.", "Start a terminal or a Claude session – all in one place.")).color(style::dim(ui)));
-                            ui.add_space(S3);
-                            ui.horizontal(|ui| {
-                                ui.add_space((ui.available_width() - if claude_mode { 300.0 } else { 150.0 }) / 2.0);
-                                if ui.add(egui::Button::new(RichText::new(lang.t("Neue Sitzung", "New session")).strong()).fill(style::ACCENT.gamma_multiply(0.85)).min_size(Vec2::new(140.0, 32.0))).clicked() {
-                                    actions.push(Action::NewQuick);
-                                }
-                                if claude_mode && ui.add(egui::Button::new(lang.t("Claude starten …", "Start Claude …")).min_size(Vec2::new(140.0, 32.0))).clicked() {
-                                    actions.push(Action::NewDialog(true));
-                                }
-                            });
-                            ui.add_space(S3 * 1.5);
-                            let hint = |ui: &mut Ui, keys: &str, what: &str| {
-                                ui.horizontal(|ui| {
-                                    ui.add_space((ui.available_width() - 330.0).max(0.0) / 2.0);
-                                    ui.label(RichText::new(keys).monospace().color(style::dim(ui)));
-                                    ui.label(RichText::new(what).color(style::dim(ui)));
-                                });
-                            };
-                            hint(ui, "Strg+Umschalt+P", lang.t("Befehle & Suche", "Commands & search"));
-                            hint(ui, "Strg+Umschalt+T", lang.t("Neue Sitzung", "New session"));
-                            hint(ui, "Strg+Umschalt+D/E", lang.t("Bereich teilen", "Split pane"));
-                        });
-                    });
+                    let hints = self.empty_hints();
+                    empty_hub::empty_state(ui, rect, lang, self.settings.claude_mode, first_run, &hints, actions);
                     return;
                 };
                 let mut cx = PaneCx {

@@ -43,7 +43,7 @@ function Check($name, [bool]$ok, $detail = '') {
   else { $script:fail++; Write-Host "  FAIL  $name  $detail" -ForegroundColor Red }
   $script:lastOk = $ok
 }
-function Set-Level($level) {
+function Set-Level($level, [switch]$Empty) {
   Stop-Hub
   $f = "$data\settings.json"
   New-Item -ItemType Directory -Force "$data" | Out-Null
@@ -52,7 +52,13 @@ function Set-Level($level) {
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
   $style = if ($Visible) { 'Normal' } else { 'Minimized' }
-  $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
+  # Paneldeck startet ohne Terminal (#111); sonst eine Sitzung des Nutzers per --open anlegen (wie ein Start aus dem Explorer).
+  if ($Empty) {
+    Remove-Item -LiteralPath "$dir\paneldeck-data\state.json" -ErrorAction SilentlyContinue
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
+  } else {
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--open', "`"$proj`""
+  }
   $t0 = Get-Date
   while (-not (Test-Path "$data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
   Start-Sleep 2
@@ -101,6 +107,8 @@ try {
   Check 'Stufe Aus: Aufruf verweigert' ((Code (Tool 'list_sessions')) -eq 'mcp_disabled')
 
   Write-Host "== Stufe: Nur lesen" -ForegroundColor Cyan
+  Set-Level 'Read' -Empty
+  $ls0 = Tool 'list_sessions'; Check 'Start ohne Terminal (#111): keine Sitzung' (-not $ls0.err -and @($ls0.data.sessions).Count -eq 0) $ls0.text
   Set-Level 'Read'
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   $l = Rpc 'tools/list'; $names = @($l.result.tools | ForEach-Object name)
