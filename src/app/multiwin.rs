@@ -327,11 +327,15 @@ pub(super) struct HubWindow {
     close: bool,
     /// Layout beim ersten Zeichnen prüfen (wiederhergestellte Fenster).
     needs_load: bool,
+    /// egui-Gedächtnis dieses Fensters (`Memory::data`: Bildlauf, Textfelder, aufgeklappte Abschnitte, Bereichsgrößen …).
+    /// egui hält es für alle Fenster gemeinsam und nach Id; gleiche Ids in zwei Fenstern teilten sich sonst den Zustand.
+    /// Wird für die Dauer des Fensterbildes mit dem des Hauptfensters getauscht.
+    mem: egui::util::IdTypeMap,
 }
 
 impl HubWindow {
     pub(super) fn new(id: u64, view: WinView, pos: Option<Pos2>, size: Vec2, maximized: bool) -> Self {
-        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, outer: None, inner: None, maximized, ask_close: false, close: false, needs_load: true }
+        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, outer: None, inner: None, maximized, ask_close: false, close: false, needs_load: true, mem: Default::default() }
     }
     fn viewport(&self) -> egui::ViewportId {
         viewport_of(self.id)
@@ -516,6 +520,7 @@ impl App {
     fn enter(&mut self, w: &mut HubWindow) {
         swap_view(self, &mut w.view);
         self.wins.cur = w.id;
+        style::set_id_salt(w.id); // Animationen (Hover, Fokus) je Fenster getrennt
         if w.data_gen != self.wins.data_gen {
             w.data_gen = self.wins.data_gen;
             self.plan.invalidate();
@@ -532,6 +537,7 @@ impl App {
     fn leave(&mut self, w: &mut HubWindow) {
         swap_view(self, &mut w.view);
         self.wins.cur = 0;
+        style::set_id_salt(0);
     }
 
     /// Was mit den Sitzungen von Fenster `window` beim Schließen geschieht.
@@ -570,7 +576,9 @@ impl App {
                 if class == egui::ViewportClass::Embedded {
                     return; // ohne echte Fenster (nur in Tests/anderen Oberflächen) gibt es keine weiteren Fenster
                 }
+                ctx.memory_mut(|m| std::mem::swap(&mut m.data, &mut w.mem));
                 self.child_frame(ctx, w);
+                ctx.memory_mut(|m| std::mem::swap(&mut m.data, &mut w.mem));
             });
             if w.hwnd.is_none() && w.hwnd_tries < 120 {
                 w.hwnd_tries += 1;

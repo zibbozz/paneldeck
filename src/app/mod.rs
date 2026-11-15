@@ -1773,7 +1773,7 @@ impl App {
         }
         {
             let n = self.layout.as_ref().map(|l| { let mut v = Vec::new(); l.leaves(&mut v); v.len() }).unwrap_or(0);
-            egui::TopBottomPanel::top("bcbar")
+            egui::TopBottomPanel::top(style::salted(Id::new("bcbar")))
                 .frame(egui::Frame::NONE.fill(Color32::from_rgb(0x8a, 0x4b, 0x2f)).inner_margin(egui::Margin::symmetric(10, 4)))
                 .show_animated(ctx, self.broadcast, |ui| {
                     ui.horizontal(|ui| {

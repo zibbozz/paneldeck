@@ -11,13 +11,29 @@ use eframe::egui::{
     StrokeKind, TextStyle, Ui, Vec2,
 };
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // Motion-Tokens: Hover/Klick ~120 ms, Zustandswechsel ~200 ms, Layout ~280 ms; Kurve: ease-out.
 pub const D_FAST: f32 = 0.12;
 pub const D_BASE: f32 = 0.20;
 
 static ANIMATIONS: AtomicBool = AtomicBool::new(true);
+
+/// Zusatz für Animations-Ids: das gerade gezeichnete Paneldeck-Fenster (0 = Hauptfenster, #110). egui führt Animationen
+/// für alle Fenster gemeinsam nach Id; ohne Zusatz kämpften gleiche Knöpfe zweier Fenster um denselben Wert.
+static ID_SALT: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_id_salt(window: u64) {
+    ID_SALT.store(window, Ordering::Relaxed);
+}
+
+/// Id je Fenster unterscheiden (im Hauptfenster unverändert).
+pub fn salted(id: egui::Id) -> egui::Id {
+    match ID_SALT.load(Ordering::Relaxed) {
+        0 => id,
+        w => id.with(("pd_window", w)),
+    }
+}
 
 pub fn set_animations(on: bool) {
     ANIMATIONS.store(on, Ordering::Relaxed);
@@ -26,7 +42,7 @@ pub fn set_animations(on: bool) {
 /// Weicher Übergang 0..1 hin zu `target` (ease-out). Bei abgeschalteten Animationen sofort.
 pub fn anim(ctx: &egui::Context, id: egui::Id, target: bool, dur: f32) -> f32 {
     let d = if ANIMATIONS.load(Ordering::Relaxed) { dur } else { 0.0 };
-    ctx.animate_bool_with_time_and_easing(id, target, d, egui::emath::easing::cubic_out)
+    ctx.animate_bool_with_time_and_easing(salted(id), target, d, egui::emath::easing::cubic_out)
 }
 
 /// Standard-Akzentfarbe (Terminal Hub). Im Todolist-Reiter ersetzt die Projektfarbe sie (siehe [`accent`]).
@@ -477,4 +493,22 @@ pub fn tab(ui: &mut Ui, text: &str, active: bool) -> Response {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_salted_per_window_only_outside_the_main_window() {
+        let id = egui::Id::new("tab");
+        assert_eq!(salted(id), id, "Hauptfenster: Ids wie bisher");
+        set_id_salt(3);
+        let three = salted(id);
+        set_id_salt(4);
+        let four = salted(id);
+        set_id_salt(0);
+        assert!(three != id && four != id && three != four, "jedes weitere Fenster hat eigene Animations-Ids");
+        assert_eq!(salted(id), id);
+    }
 }
