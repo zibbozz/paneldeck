@@ -16,5 +16,7 @@ z=zipfile.ZipFile(f'dist/paneldeck-{v}-windows-x64.zip','w',zipfile.ZIP_DEFLATED
 z.write(f'dist/paneldeck-{v}.exe', d+'paneldeck.exe')   # im Ordner heißt die Datei paneldeck.exe (Hooks/MCP-Eintrag verweisen auf den Namen)
 for f in ('LICENSE','THIRD_PARTY.md','THIRD_PARTY_LICENSES.txt','README.md','README.de.md','Changelog.md','Changelog.de.md'): z.write(f, d+f)
 for f in ('LICENSE-Cascadia.txt','LICENSE-NotoColorEmoji.txt'): z.write('assets/fonts/'+f, d+'licenses/'+f)
+import glob,os
+for f in sorted(glob.glob('docs/en/*.md') + glob.glob('docs/de/*.md')): z.write(f, d+f.replace(os.sep, '/'))   # Anleitungen (Bilder liegen online im Repository)
 z.close()" "$V"
 ls -la "dist/paneldeck-$V-windows-x64.zip"
