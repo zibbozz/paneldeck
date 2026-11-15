@@ -18,10 +18,15 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Per model: level Off/Read/Control (independent of the MCP level for external agents), allowed tools, ask before write actions, maximum tool calls per answer, overrides for tool calling and context length.
 - "New chat" opens a dialog to pick server and model (remembers the last choice). Chats answer with the chosen model, streamed, with the system prompt and the project and folder as context; when the context is full, older messages are left out (marked in the chat). A note shows when an answer was cut off at the token limit, the token usage is shown, and models without tool support get a notice.
 - New optional fields in `settings.json`: `llm_servers` and `last_chat_model`; `chats/<id>.json` messages can have a `note`.
+- Chats with local models can use Paneldeck's tools within the level set for the model (Settings → Models: Off/Read/Control, single tools can be blocked). Tools run inside Paneldeck with the chat as caller: a chat never writes into itself and all MCP safety rules apply. New models start with tools off; the first chat asks once whether the model may read or control Paneldeck.
+- Before tools with write access the chat asks with the full arguments and the target session: Allow / Always for this chat / Deny. "Always" applies to that tool and target session only and can be revoked in the chat header ("Permanent approvals"). While the chat waits it is marked in the sidebar.
+- At most N tool calls per answer (default 10, rejected calls count too); then the chat stops with "Continue". Tool results are shortened to fit the model's context (the end of terminal output is kept); if they no longer fit, the chat pauses with a notice instead of losing the system prompt.
+- Tool lines show their status (✓, ✗, ⊘ denied, spinner) and expand to parameters and result.
 
 ### Changed
 
 - Closing a chat that has a history asks first (when close confirmation is on), also when closing a window or a folder; the update dialog counts running chat answers separately.
+- `chats/<id>.json` has the new optional field `always_allow` (tool + session); model entries in `settings.json` have `level_chosen`; `mcp-log.jsonl` has the optional fields `how` ("chat") and `model` for tool calls from chats.
 
 ### Fixed
 
