@@ -25,6 +25,9 @@ pub enum TurnEvent {
     /// Für diese Anfrage wurden ältere Nachrichten weggelassen: Index (im übergebenen Verlauf) der ersten, die das
     /// Modell noch sieht.
     ContextStart(usize),
+    /// Platz für den Verlauf in Tokens (Kontext ohne Antwort-Reserve, Systemprompt und Werkzeug-Beschreibungen); kommt
+    /// am Anfang der Antwort. Damit hält die Werkzeug-Schleife Ergebnisse klein genug.
+    Budget(usize),
     /// Verbrauch der Anfrage laut Server (Tokens der Eingabe und der Antwort), kurz vor `Done`.
     Usage { prompt_tokens: Option<u32>, completion_tokens: Option<u32> },
     /// Hinweis zur Antwort (z. B. „an der Token-Grenze abgeschnitten“), landet in [`ChatMsg::note`].

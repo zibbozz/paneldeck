@@ -2,14 +2,15 @@
 //! Neu erzeugen und Bearbeiten meldet [`chat_body`] zurück; die App führt sie aus (`Action::Chat*`).
 
 use crate::chat::session::{CallState, UiCache};
-use crate::chat::{ChatMsg, ChatState, Decision, Role, ToolStatus};
+use crate::chat::{AllowRule, ChatMsg, ChatState, Decision, Role, ToolStatus};
+use crate::mcp::McpLevel;
 use crate::markdown::{self, RenderOpts};
 use crate::state::Lang;
 use crate::style::{self, S1, S2};
 use eframe::egui::{self, Color32, CornerRadius, Event, FontId, Id, Key, Margin, Pos2, Rect, RichText, Sense, Stroke, TextStyle, Ui, UiBuilder, Vec2};
 
 /// Was der Nutzer in diesem Bild ausgelöst hat.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub(super) struct ChatOut {
     pub send: bool,
     pub stop: bool,
@@ -17,11 +18,20 @@ pub(super) struct ChatOut {
     pub edit: bool,
     /// In den Bereich geklickt / Eingabe hat den Fokus (Bereich fokussieren).
     pub focus: bool,
-    /// Entscheidung zum wartenden schreibenden Werkzeugaufruf.
-    pub decide: Option<Decision>,
-    /// „Weiter“ nach dem Anhalten an der Höchstzahl der Werkzeugaufrufe.
+    /// Entscheidung zum wartenden Werkzeugaufruf (Kennung des Aufrufs, Entscheidung).
+    pub decide: Option<(String, Decision)>,
+    /// „Weiter“ nach dem Anhalten (Höchstzahl der Werkzeugaufrufe, Kontext voll).
     pub cont: bool,
+    /// Dauerhafte Freigabe zurücknehmen.
+    pub revoke: Option<AllowRule>,
+    /// Antwort auf die einmalige Frage nach der Stufe des Modells.
+    pub level: Option<McpLevel>,
 }
+
+/// Höhe der Kopfzeile mit den dauerhaften Freigaben.
+const HEAD_H: f32 = 24.0;
+/// Sichtbare Zeilen der Parameter in der Freigabe-Zeile (mehr: scrollen, mit Hinweis „+N Zeichen“).
+const APPROVAL_ROWS: usize = 12;
 
 const PAD: f32 = 10.0;
 const BTN_W: f32 = 76.0;
@@ -40,8 +50,15 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     let input_h = lines as f32 * row_h + 12.0;
     let edit_h = if chat.editing { 22.0 } else { 0.0 };
     let bottom_h = input_h + 2.0 * PAD + edit_h;
-    let list_rect = Rect::from_min_max(body.min, Pos2::new(body.max.x, (body.max.y - bottom_h).max(body.min.y)));
+    let head_h = if chat.file.always_allow.is_empty() { 0.0 } else { HEAD_H };
+    let head_rect = Rect::from_min_max(body.min, Pos2::new(body.max.x, body.min.y + head_h));
+    let list_rect = Rect::from_min_max(Pos2::new(body.min.x, head_rect.max.y), Pos2::new(body.max.x, (body.max.y - bottom_h).max(head_rect.max.y)));
     let bar_rect = Rect::from_min_max(Pos2::new(body.min.x, list_rect.max.y), body.max);
+    if head_h > 0.0 {
+        ui.scope_builder(UiBuilder::new().max_rect(head_rect.shrink2(Vec2::new(PAD, 2.0))), |ui| {
+            approvals_menu(ui, session, &chat.file.always_allow, lang, &mut out);
+        });
+    }
 
     // Trennlinie über der Eingabe
     ui.painter().hline(bar_rect.x_range(), bar_rect.min.y + 0.5, Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(0.7)));
@@ -53,6 +70,11 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     ui.scope_builder(UiBuilder::new().max_rect(list_rect.shrink2(Vec2::new(PAD, 0.0))), |ui| {
         messages(ui, session, chat, model, lang, &mut out);
     });
+    // Nach einer Entscheidung zurück ins Eingabefeld: der Knopf an derselben Stelle gehört sonst gleich der nächsten
+    // Frage, und Enter würde sie freigeben.
+    if out.decide.is_some() || out.level.is_some() {
+        chat.focus_input = true;
+    }
     ui.scope_builder(UiBuilder::new().max_rect(bar_rect.shrink(PAD)), |ui| {
         input_bar(ui, session, chat, lang, input_h, grab_focus, &mut out);
     });
@@ -79,6 +101,8 @@ struct RowCx<'a> {
     usage: Option<(Option<u32>, Option<u32>)>,
     /// Offene Werkzeugaufrufe: Kennung → Zustand.
     pending: std::collections::HashMap<String, CallState>,
+    /// Ziel des wartenden Aufrufs (`session 4 "build"`).
+    target: Option<String>,
 }
 
 fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: Lang, out: &mut ChatOut) {
@@ -88,7 +112,9 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let rev = chat.rev();
     let from = std::mem::replace(&mut chat.changed_from, usize::MAX);
     let pending = chat.calls.iter().map(|p| (p.call.id.clone(), p.state)).collect();
-    let paused = chat.paused.then_some(chat.steps);
+    let paused = chat.paused.then(|| (chat.steps, chat.pause_note.clone()));
+    let level_question = chat.level_question;
+    let target = chat.approval_target.clone();
     let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
@@ -124,6 +150,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         context_start: crate::chat::logic::clamp_context_start(file.context_start, n),
         usage: *usage,
         pending,
+        target,
     };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
     let jump = std::mem::take(follow);
@@ -182,10 +209,17 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
             y += mh;
         }
         // Angehalten an der Höchstzahl der Werkzeugaufrufe: Hinweis mit „Weiter“ unter der letzten Nachricht.
-        if let Some(steps) = paused {
+        if let Some((steps, note)) = paused {
             let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
             let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_paused", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
-            paused_bar(&mut bar, steps, lang, out);
+            paused_bar(&mut bar, steps, note.as_deref(), lang, out);
+            y += bar.min_rect().height() + S1;
+        }
+        // Einmalige Frage nach der Stufe (die Nachricht wartet im Eingabefeld).
+        if level_question {
+            let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
+            let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_level", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            level_bar(&mut bar, lang, out);
             y += bar.min_rect().height() + S1;
         }
         let total = Rect::from_min_size(origin, Vec2::new(width, y + S1));
@@ -233,7 +267,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
         }
         // Ergebnisse mit passendem Aufruf stehen in dessen Zeile.
         Role::Tool if cache.matched.contains(&i) => {}
-        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, lang, out),
+        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, None, lang, out),
         Role::System => {
             egui::CollapsingHeader::new(RichText::new(lang.t("Systemprompt", "System prompt")).small().color(style::dim(ui))).id_salt(("chat_sys", rc.session, i)).show(ui, |ui| {
                 ui.label(RichText::new(&m.content).small().monospace());
@@ -312,7 +346,8 @@ fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut U
     for (k, c) in m.tool_calls.iter().enumerate() {
         let result = cache.tool_results.get(&c.id).and_then(|j| msgs.get(*j));
         let state = if result.is_some() { None } else { rc.pending.get(&c.id).copied() };
-        tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some(&c.arguments), result, state, lang, out);
+        let target = if state == Some(CallState::Approval) { rc.target.as_deref() } else { None };
+        tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some((c.id.as_str(), &c.arguments)), result, state, target, lang, out);
     }
 }
 
@@ -332,7 +367,8 @@ fn tool_mark(result: Option<&ChatMsg>, state: Option<CallState>, lang: Lang, dim
 /// Eine eingeklappte Zeile je Werkzeugaufruf (`▸ name ✓`), aufgeklappt Parameter und Ergebnis (als JSON eingerückt,
 /// gekürzt). Wartet der Aufruf auf Freigabe, stehen darunter Kurzfassung und die Knöpfe Erlauben / Immer / Ablehnen.
 #[allow(clippy::too_many_arguments)]
-fn tool_line(ui: &mut Ui, id: Id, name: &str, args: Option<&serde_json::Value>, result: Option<&ChatMsg>, state: Option<CallState>, lang: Lang, out: &mut ChatOut) {
+fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::Value)>, result: Option<&ChatMsg>, state: Option<CallState>, target: Option<&str>, lang: Lang, out: &mut ChatOut) {
+    let args = call.map(|c| c.1);
     let mark = tool_mark(result, state, lang, style::dim(ui));
     let mut job = egui::text::LayoutJob::default();
     job.append(name, 0.0, egui::TextFormat { font_id: FontId::monospace(12.5), color: ui.visuals().text_color(), ..Default::default() });
@@ -357,49 +393,130 @@ fn tool_line(ui: &mut Ui, id: Id, name: &str, args: Option<&serde_json::Value>, 
             ui.add(egui::Spinner::new().size(12.0));
         }
     });
-    if state == Some(CallState::Approval) {
-        approval(ui, name, args, lang, out);
+    if let (Some(CallState::Approval), Some((call_id, args))) = (state, call) {
+        approval(ui, id, call_id, name, args, target, lang, out);
     }
 }
 
 /// Freigabe-Zeile eines schreibenden Aufrufs. Enter gilt nur, wenn ein Knopf hier den Fokus hat (Tab), nie aus der
 /// Eingabe heraus – so gibt niemand versehentlich frei, während er tippt.
-fn approval(ui: &mut Ui, name: &str, args: Option<&serde_json::Value>, lang: Lang, out: &mut ChatOut) {
+fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::Value, target: Option<&str>, lang: Lang, out: &mut ChatOut) {
     let warn = Color32::from_rgb(0xe5, 0xc0, 0x7b);
     egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        let summary = args.map(|a| crate::chat::tools::summary(a, 160)).unwrap_or_default();
         ui.label(RichText::new(lang.t("Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:", "The model wants to use a tool with write access:")).small());
-        ui.label(RichText::new(format!("{name}({summary})")).monospace().size(12.5));
+        let head = match target {
+            Some(t) => format!("{name} → {t}"),
+            None => name.to_string(),
+        };
+        ui.label(RichText::new(head).monospace().strong().size(12.5));
+        // Alle Parameter vollständig (scrollbar), damit kein gefährliches Ende verborgen bleibt.
+        let text = serde_json::to_string_pretty(args).unwrap_or_default();
+        let font = FontId::monospace(12.0);
+        let width = (ui.available_width() - 16.0).max(60.0);
+        let galley = ui.painter().layout(text.clone(), font.clone(), ui.visuals().text_color(), width);
+        let row_h = ui.fonts_mut(|f| f.row_height(&font));
+        let hidden: usize = galley.rows.iter().skip(APPROVAL_ROWS).map(|r| r.char_count_including_newline()).sum();
+        egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            egui::ScrollArea::vertical().id_salt(id.with("approval_args")).max_height(row_h * APPROVAL_ROWS as f32 + 2.0).auto_shrink([false, true]).show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(text).font(font)).wrap_mode(egui::TextWrapMode::Wrap));
+            });
+        });
+        if hidden > 0 {
+            let more = if lang == Lang::De { format!("+{hidden} Zeichen – nach unten scrollen, um alles zu sehen") } else { format!("+{hidden} characters – scroll down to see everything") };
+            ui.label(RichText::new(more).small().color(warn));
+        }
         ui.horizontal_wrapped(|ui| {
             let allow = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(style::ACCENT.gamma_multiply(0.7)));
+            let scope = match target {
+                Some(t) => format!("{name} → {t}"),
+                None => name.to_string(),
+            };
             let always = ui.button(lang.t("Immer für diesen Chat", "Always for this chat")).on_hover_text(if lang == Lang::De {
-                format!("„{name}“ in diesem Chat nicht mehr nachfragen")
+                format!("„{scope}“ in diesem Chat nicht mehr nachfragen (oben im Chat widerrufbar)")
             } else {
-                format!("Do not ask again for “{name}” in this chat")
+                format!("Do not ask again for “{scope}” in this chat (can be revoked at the top of the chat)")
             });
             let deny = ui.button(lang.t("Ablehnen", "Deny"));
-            if allow.clicked() {
-                out.decide = Some(Decision::Allow);
+            let d = if allow.clicked() {
+                Some(Decision::Allow)
             } else if always.clicked() {
-                out.decide = Some(Decision::Always);
+                Some(Decision::Always)
             } else if deny.clicked() {
-                out.decide = Some(Decision::Deny);
+                Some(Decision::Deny)
+            } else {
+                None
+            };
+            if let Some(d) = d {
+                out.decide = Some((call_id.to_string(), d));
             }
         });
     });
 }
 
-/// „Nach N Werkzeugaufrufen angehalten“ mit dem Knopf „Weiter“.
-fn paused_bar(ui: &mut Ui, steps: u32, lang: Lang, out: &mut ChatOut) {
+/// Angehalten: „Nach N Werkzeugaufrufen angehalten“ (oder der Grund, z. B. Kontext voll) mit dem Knopf „Weiter“.
+fn paused_bar(ui: &mut Ui, steps: u32, note: Option<&str>, lang: Lang, out: &mut ChatOut) {
     egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
-            let text = if lang == Lang::De { format!("Nach {steps} Werkzeugaufrufen angehalten.") } else { format!("Stopped after {steps} tool calls.") };
+            let text = match note {
+                Some(n) => n.to_string(),
+                None if lang == Lang::De => format!("Nach {steps} Werkzeugaufrufen angehalten."),
+                None => format!("Stopped after {steps} tool calls."),
+            };
             ui.label(RichText::new(text).color(style::dim(ui)));
             if ui.button(lang.t("Weiter", "Continue")).on_hover_text(lang.t("Noch einmal so viele Werkzeugaufrufe erlauben", "Allow the same number of tool calls again")).clicked() {
                 out.cont = true;
             }
+        });
+    });
+}
+
+/// Einmalige Frage vor dem ersten Senden: Darf dieses Modell Paneldeck nutzen? (Aus / Lesen / Steuern.)
+fn level_bar(ui: &mut Ui, lang: Lang, out: &mut ChatOut) {
+    let warn = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.label(RichText::new(lang.t("Darf dieses Modell Paneldeck nutzen?", "May this model use Paneldeck?")).strong());
+        ui.label(
+            RichText::new(lang.t(
+                "Aus = nur Chat · Lesen = Terminals, Sitzungen, Todos lesen · Steuern = zusätzlich in Terminals tippen, Sitzungen anlegen … (Schreibaktionen fragen vorher)",
+                "Off = chat only · Read = read terminals, sessions, to-dos · Control = also type into terminals, create sessions … (write actions ask first)",
+            ))
+            .small()
+            .color(style::dim(ui)),
+        );
+        ui.horizontal_wrapped(|ui| {
+            for (l, de, en) in [(McpLevel::Off, "Aus", "Off"), (McpLevel::Read, "Lesen", "Read"), (McpLevel::Control, "Steuern", "Control")] {
+                if ui.button(lang.t(de, en)).clicked() {
+                    out.level = Some(l);
+                }
+            }
+            ui.label(RichText::new(lang.t("(später änderbar in Einstellungen → Modelle)", "(can be changed later in Settings → Models)")).small().color(style::dim(ui)));
+        });
+    });
+}
+
+/// Kopfzeile: „Dauerhafte Freigaben (N)“ mit „Widerrufen“ je Eintrag.
+fn approvals_menu(ui: &mut Ui, session: u64, rules: &[AllowRule], lang: Lang, out: &mut ChatOut) {
+    ui.horizontal(|ui| {
+        let title = if lang == Lang::De { format!("Dauerhafte Freigaben ({})", rules.len()) } else { format!("Permanent approvals ({})", rules.len()) };
+        ui.push_id(("chat_approvals", session), |ui| {
+            ui.menu_button(RichText::new(title).small(), |ui| {
+                for r in rules {
+                    ui.horizontal(|ui| {
+                        let what = match r.session {
+                            Some(s) => format!("{} → session {s}", r.tool),
+                            None => r.tool.clone(),
+                        };
+                        ui.label(RichText::new(what).monospace().size(12.0));
+                        if ui.small_button(lang.t("Widerrufen", "Revoke")).clicked() {
+                            out.revoke = Some(r.clone());
+                        }
+                    });
+                }
+            });
         });
     });
 }
@@ -707,23 +824,139 @@ mod tests {
 
     /// Chat, dessen Antwort `send_text` verlangt und der nun auf Freigabe wartet.
     fn awaiting() -> ChatState {
-        struct One;
-        impl crate::chat::ChatBackend for One {
+        awaiting_with(vec![ToolCall { id: "w".into(), name: "send_text".into(), arguments: serde_json::json!({"session": 4, "text": "dir"}) }])
+    }
+
+    fn control() -> crate::chat::tools::ToolPolicy {
+        crate::chat::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Control, ..crate::llm::config::LlmModel::named("m") }, None, false)
+    }
+
+    /// Chat, dessen Antwort diese Aufrufe verlangt; der erste wartet auf Freigabe.
+    fn awaiting_with(calls: Vec<ToolCall>) -> ChatState {
+        struct Calls(Vec<ToolCall>);
+        impl crate::chat::ChatBackend for Calls {
             fn start(&self, _: &crate::state::ChatMeta, _: &[ChatMsg], _: &crate::chat::TurnContext, _: crate::chat::Repaint) -> crate::chat::backend::TurnHandle {
                 let (h, tx, _) = crate::chat::backend::TurnHandle::pair();
-                tx.send(crate::chat::backend::TurnEvent::ToolCall(ToolCall { id: "w".into(), name: "send_text".into(), arguments: serde_json::json!({"session": 4, "text": "dir"}) })).unwrap();
+                for c in &self.0 {
+                    tx.send(crate::chat::backend::TurnEvent::ToolCall(c.clone())).unwrap();
+                }
                 tx.send(crate::chat::backend::TurnEvent::Done).unwrap();
                 h
             }
         }
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "type dir in 4".into();
-        assert!(c.send(&One, &crate::state::ChatMeta::default(), &crate::chat::TurnContext::default(), Arc::new(|| {})));
+        assert!(c.send(&Calls(calls), &crate::state::ChatMeta::default(), &crate::chat::TurnContext::default(), Arc::new(|| {})));
         c.poll();
-        let policy = crate::chat::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Control, ..crate::llm::config::LlmModel::named("m") }, None, false);
-        assert_eq!(c.tool_step(&policy), crate::chat::ToolStep::Idle);
+        assert_eq!(c.tool_step(&control()), crate::chat::ToolStep::Idle);
         assert!(c.awaiting_approval());
         c
+    }
+
+    fn click_decide(h: &mut H, c: &mut ChatState, lang: Lang, label: &str) -> Option<(String, Decision)> {
+        let p = h.pos_of(label).unwrap_or_else(|| panic!("{label} fehlt: {:?}", h.texts));
+        let mv = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let mut got = None;
+        for evs in [vec![Event::PointerMoved(p)], vec![mv(true)], vec![mv(false)]] {
+            got = got.or(h.frame(c, lang, false, evs).decide);
+        }
+        got
+    }
+
+    #[test]
+    fn approval_shows_full_arguments_target_and_hidden_length() {
+        // Lang genug für mehr als zwölf umbrochene Zeilen im Freigabe-Feld
+        let long: String = (0..400).map(|i| format!("echo line {i}\n")).collect();
+        let mut c = awaiting_with(vec![ToolCall { id: "w".into(), name: "send_text".into(), arguments: serde_json::json!({"session": 4, "text": format!("{long}rm -rf C:\\important")}) }]);
+        c.approval_target = Some("session 4 \"build\"".into());
+        for lang in [Lang::En, Lang::De] {
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == "send_text → session 4 \"build\""), "Ziel mit Namen: {:?}", h.texts);
+            // Volle Parameter (auch das gefährliche Ende), ungekürzt im scrollbaren Bereich
+            assert!(h.texts.iter().any(|t| t.contains("rm -rf C:\\\\important")), "{:?}", h.texts.iter().map(|t| t.chars().take(40).collect::<String>()).collect::<Vec<_>>());
+            let marker = if lang == Lang::De { "Zeichen – nach unten scrollen" } else { "characters – scroll down" };
+            assert!(h.texts.iter().any(|t| t.starts_with('+') && t.contains(marker)), "Hinweis auf verborgene Länge");
+        }
+        // Kurze Parameter: kein Hinweis
+        let mut c = awaiting();
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(!h.texts.iter().any(|t| t.contains("characters – scroll down")));
+        assert!(h.texts.iter().any(|t| t.contains("\"text\": \"dir\"")), "{:?}", h.texts);
+    }
+
+    #[test]
+    fn enter_right_after_allow_does_not_approve_the_next_call() {
+        let st = |id: &str| ToolCall { id: id.into(), name: "send_text".into(), arguments: serde_json::json!({"session": 4, "text": id}) };
+        let mut c = awaiting_with(vec![st("one"), st("two")]);
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        let got = click_decide(&mut h, &mut c, Lang::En, "Allow");
+        assert_eq!(got, Some(("one".to_string(), Decision::Allow)));
+        // Hub: Entscheidung anwenden, ersten ausführen, der zweite wartet nun an derselben Stelle
+        assert!(c.decide("one", Decision::Allow));
+        let crate::chat::ToolStep::Execute(_) = c.tool_step(&control()) else { panic!() };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(Ok(serde_json::json!({"ok": true}))).unwrap();
+        c.tool_started(rx);
+        c.poll_tools();
+        assert_eq!(c.tool_step(&control()), crate::chat::ToolStep::Idle);
+        assert_eq!(c.pending_approval().map(|p| p.id.as_str()), Some("two"));
+        h.frame(&mut c, Lang::En, false, vec![]);
+        // Enter sofort danach: gibt den zweiten nicht frei (Fokus ist zurück im Eingabefeld)
+        let o = h.frame(&mut c, Lang::En, false, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(o.decide, None);
+        let o = h.frame(&mut c, Lang::En, false, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(o.decide, None);
+        assert!(h.ctx.memory(|m| m.has_focus(input_id(1))), "Eingabefeld hat den Fokus");
+    }
+
+    #[test]
+    fn level_question_and_permanent_approvals_menu() {
+        for (lang, q, off, read, ctrl) in [(Lang::En, "May this model use Paneldeck?", "Off", "Read", "Control"), (Lang::De, "Darf dieses Modell Paneldeck nutzen?", "Aus", "Lesen", "Steuern")] {
+            for (label, want) in [(off, McpLevel::Off), (read, McpLevel::Read), (ctrl, McpLevel::Control)] {
+                let mut c = ChatState::new(ChatFile::default(), None);
+                c.draft = "hello".into();
+                c.level_question = true;
+                let mut h = H::new();
+                h.frame(&mut c, lang, false, vec![]);
+                h.frame(&mut c, lang, false, vec![]);
+                assert!(h.texts.iter().any(|t| t == q), "{:?}", h.texts);
+                let p = h.pos_of(label).unwrap();
+                let mv = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+                let mut got = None;
+                for evs in [vec![Event::PointerMoved(p)], vec![mv(true)], vec![mv(false)]] {
+                    got = got.or(h.frame(&mut c, lang, false, evs).level);
+                }
+                assert_eq!(got, Some(want), "{label}");
+                assert_eq!(c.draft, "hello", "die Nachricht wartet");
+            }
+        }
+        // Dauerhafte Freigaben: Menü in der Kopfzeile, „Widerrufen“ je Eintrag
+        for (lang, title, revoke) in [(Lang::En, "Permanent approvals (2)", "Revoke"), (Lang::De, "Dauerhafte Freigaben (2)", "Widerrufen")] {
+            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4) }, AllowRule { tool: "add_todo".into(), session: None }];
+            let mut c = ChatState::new(ChatFile { always_allow: rules.clone(), ..ChatFile::default() }, None);
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            let p = h.pos_of(title).unwrap_or_else(|| panic!("{title}: {:?}", h.texts));
+            let mv = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            for evs in [vec![Event::PointerMoved(p)], vec![mv(true)], vec![mv(false)]] {
+                h.frame(&mut c, lang, false, evs);
+            }
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == "send_text → session 4"), "{:?}", h.texts);
+            let p = h.pos_of(revoke).expect("Widerrufen-Knopf");
+            let mv = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            let mut got = None;
+            for evs in [vec![Event::PointerMoved(p)], vec![mv(true)], vec![mv(false)]] {
+                got = got.or(h.frame(&mut c, lang, false, evs).revoke);
+            }
+            assert_eq!(got, Some(rules[0].clone()));
+        }
     }
 
     #[test]
@@ -738,19 +971,14 @@ mod tests {
                 h.frame(&mut c, lang, true, vec![]);
                 h.frame(&mut c, lang, false, vec![]);
                 assert!(h.texts.iter().any(|t| t == hint), "{:?}", h.texts);
-                assert!(h.texts.iter().any(|t| t == "send_text(session=4, text=\"dir\")"), "Kurzfassung: {:?}", h.texts);
+                assert!(h.texts.iter().any(|t| t == "send_text"), "Werkzeug: {:?}", h.texts);
                 assert!(h.texts.iter().any(|t| t == if lang == Lang::De { "Stopp" } else { "Stop" }), "während der Frage: Stopp");
                 // Enter im (fokussierten) Eingabefeld gibt nicht frei
                 h.frame(&mut c, lang, false, vec![Event::Text("x".into())]);
                 let o = h.frame(&mut c, lang, false, vec![key(Key::Enter, Modifiers::NONE)]);
                 assert_eq!((o.decide, o.send), (None, false));
-                let p = h.pos_of(label).unwrap_or_else(|| panic!("{label} fehlt: {:?}", h.texts));
-                let mut got = None;
-                let mv = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
-                for evs in [vec![Event::PointerMoved(p)], vec![mv(true)], vec![mv(false)]] {
-                    got = got.or(h.frame(&mut c, lang, false, evs).decide);
-                }
-                assert_eq!(got, Some(want), "{label}");
+                let got = click_decide(&mut h, &mut c, lang, label);
+                assert_eq!(got, Some(("w".to_string(), want)), "{label}");
             }
         }
     }

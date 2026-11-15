@@ -6,8 +6,10 @@
 //! * [`logic`]: reine Funktionen auf der Nachrichtenliste (Bearbeiten, Neu erzeugen, Wiederholen).
 //! * [`session`]: [`ChatState`] – Nachrichten, Eingabe, laufende Antwort, Werkzeug-Schleife.
 //! * [`tools`]: welche Paneldeck-Werkzeuge ein Modell bekommt, Prüfung der Aufrufe, Ergebnis-Nachrichten.
+//! * [`driver`]: führt die Werkzeug-Schleife je Bild weiter, über [`driver::ChatToolHost`] (umgesetzt von der App).
 
 pub mod backend;
+pub mod driver;
 pub mod llm_backend;
 pub mod logic;
 pub mod session;
@@ -18,8 +20,10 @@ pub mod tools;
 pub use backend::EchoBackend;
 pub use backend::{ChatBackend, Repaint, TurnContext};
 pub use llm_backend::LlmBackend;
-pub use session::{ChatState, Decision, ToolStep};
-pub use store::{ChatFile, ChatMsg, Role, ToolStatus};
+pub use session::{ChatState, ChatStatus, Decision};
+#[cfg(test)]
+pub use session::ToolStep;
+pub use store::{AllowRule, ChatFile, ChatMsg, Role, ToolStatus};
 
 /// Server/Modell des Echo-Backends (nur Tests; Nutzer wählen das Modell im Dialog „Neuer Chat“).
 #[cfg(test)]

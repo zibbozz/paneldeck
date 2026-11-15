@@ -2,6 +2,12 @@
 
 use super::store::{ChatMsg, Role, ToolCall, ToolStatus};
 
+/// Geschätzte Tokens einer Nachricht (wie `llm::tokens::message_tokens` für die gesendete Fassung).
+pub fn msg_tokens(m: &ChatMsg) -> usize {
+    let calls: usize = m.tool_calls.iter().map(|c| crate::llm::tokens::estimate_tokens(&c.name) + crate::llm::tokens::estimate_tokens(&c.arguments.to_string()) + 3).sum();
+    4 + crate::llm::tokens::estimate_tokens(&m.content) + calls
+}
+
 /// Ergebnis-Nachricht zu einem Werkzeugaufruf.
 pub fn tool_result(call: &ToolCall, status: ToolStatus, content: String) -> ChatMsg {
     let mut m = ChatMsg::new(Role::Tool, content);

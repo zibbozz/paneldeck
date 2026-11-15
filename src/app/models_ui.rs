@@ -507,7 +507,10 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
     egui::CollapsingHeader::new(job).id_salt(("llm_model", s.id.as_str(), name)).show(ui, |ui| {
         row(ui, lang.t("Stufe", "Level"), |ui| {
             for l in [McpLevel::Off, McpLevel::Read, McpLevel::Control] {
-                ui.selectable_value(&mut cfg.level, l, level_label(l, lang));
+                // Jede Wahl hier gilt als bewusst getroffen (der erste Chat fragt dann nicht mehr nach).
+                if ui.selectable_value(&mut cfg.level, l, level_label(l, lang)).clicked() {
+                    cfg.level_chosen = true;
+                }
             }
         });
         ui.label(RichText::new(match cfg.level {
@@ -952,6 +955,15 @@ mod tests {
                 h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
             }
             assert!(h.has(lang.t("Vor Schreib-Aktionen nachfragen", "Ask before write actions")), "{:?}", h.texts);
+            // Standard „Aus“, noch nicht gewählt: keine Werkzeugliste
+            assert!(!h.has("list_sessions"), "Standard Aus: keine Werkzeugliste");
+            assert!(!servers[0].model_cfg("llama3").level_chosen);
+            // (Ohne `o.changed`: die neu erscheinende Werkzeugliste löst in egui einen zweiten Durchgang aus, dessen
+            // Ergebnis die Hilfsfunktion zurückgibt.)
+            h.click(lang.t("Lesen", "Read"), |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            assert_eq!(servers[0].model_cfg("llama3").level, McpLevel::Read);
+            assert!(servers[0].model_cfg("llama3").level_chosen, "Wahl im Reiter gilt als getroffen");
+            h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
             assert!(h.has("list_sessions"), "Werkzeugliste bei Stufe Lesen");
             assert!(!h.has("send_text"), "Schreib-Werkzeuge erst bei Steuern");
             // Stufe Steuern

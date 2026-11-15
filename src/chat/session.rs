@@ -11,7 +11,7 @@
 
 use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
 use super::logic;
-use super::store::{ChatFile, ChatMsg, Role, ToolCall, ToolStatus};
+use super::store::{AllowRule, ChatFile, ChatMsg, Role, ToolCall, ToolStatus};
 use super::tools::{self, ToolPolicy, ToolResult};
 use crate::state::{self, ChatMeta};
 use std::cell::Cell;
@@ -91,13 +91,40 @@ pub struct ChatState {
     pub calls: Vec<PendingCall>,
     /// Nach den offenen Aufrufen folgt die nächste Anfrage an das Modell.
     next_request: bool,
-    /// In dieser Nutzer-Runde ausgeführte Werkzeugaufrufe.
+    /// In dieser Nutzer-Runde verlangte Werkzeugaufrufe (ausgeführte und abgewiesene; zählen gegen `max_steps`).
     pub steps: u32,
     /// Wie oft `max_steps` freigegeben ist (1 + „Weiter“).
     grants: u32,
-    /// Die Runde hielt an der Höchstzahl der Aufrufe an (Knopf „Weiter“).
+    /// Die Runde hielt an (Höchstzahl der Aufrufe oder Kontext voll; Knopf „Weiter“).
     pub paused: bool,
+    /// Grund des Anhaltens, wenn es nicht die Höchstzahl war (z. B. „Werkzeug-Ergebnisse passen nicht mehr in den
+    /// Kontext“); in der Sprache der Oberfläche.
+    pub pause_note: Option<String>,
+    /// Hat der aktuelle Schritt (Antwort mit Aufrufen) mindestens ein Werkzeug ausgeführt?
+    step_executed: bool,
+    /// Schritte dieser Runde in Folge, in denen kein einziger Aufruf ausgeführt wurde (nur abgewiesene).
+    idle_steps: u32,
+    /// Platz für den Verlauf laut Backend (Tokens; Kontext ohne Antwort-Reserve, Systemprompt und Werkzeuge).
+    /// `None` = unbekannt (dann gilt nur [`tools::MAX_RESULT_BYTES`]).
+    pub history_budget: Option<usize>,
+    /// Ziel des wartenden Aufrufs für die Freigabe-Zeile, z. B. `session 4 "build"` (setzt der Hub).
+    pub approval_target: Option<String>,
+    /// Einmalige Frage nach der Stufe des Modells ist offen (setzt der Hub beim ersten Senden; siehe
+    /// [`ChatState::awaiting_level_choice`]).
+    pub level_question: bool,
 }
+
+/// Status eines Chats für Seitenleiste und MCP (`ready`, `working`, `approval`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatStatus {
+    Ready,
+    Working,
+    Approval,
+}
+
+/// Kleinster sinnvoller Platz für ein neues Ergebnis (Bytes); weniger → ältere Ergebnisse der Runde entfernen bzw.
+/// anhalten.
+pub const MIN_RESULT_BYTES: usize = 1024;
 
 /// Was die Oberfläche je Chat zwischenspeichert, damit ein Bild nicht den ganzen Verlauf durchgeht.
 #[derive(Default)]
@@ -149,6 +176,12 @@ impl ChatState {
             steps: 0,
             grants: 1,
             paused: false,
+            pause_note: None,
+            step_executed: false,
+            idle_steps: 0,
+            history_budget: None,
+            approval_target: None,
+            level_question: false,
         };
         if fixed > 0 {
             c.touch();
@@ -200,6 +233,23 @@ impl ChatState {
     /// Ein schreibender Aufruf wartet auf die Entscheidung des Nutzers.
     pub fn awaiting_approval(&self) -> bool {
         self.calls.iter().any(|c| c.state == CallState::Approval)
+    }
+
+    /// Die einmalige Frage „Darf dieses Modell Paneldeck nutzen?“ wartet auf eine Antwort (die Nachricht im
+    /// Eingabefeld geht erst danach los). Zählt wie eine Freigabe als „braucht dich“.
+    pub fn awaiting_level_choice(&self) -> bool {
+        self.level_question
+    }
+
+    /// Status für Seitenleiste und MCP: Freigabe/Frage offen → `Approval`, Runde läuft → `Working`, sonst `Ready`.
+    pub fn status(&self) -> ChatStatus {
+        if self.awaiting_approval() || self.awaiting_level_choice() {
+            ChatStatus::Approval
+        } else if self.busy() {
+            ChatStatus::Working
+        } else {
+            ChatStatus::Ready
+        }
     }
 
     /// Ein Werkzeug läuft gerade im Hub.
@@ -286,6 +336,9 @@ impl ChatState {
         self.steps = 0;
         self.grants = 1;
         self.paused = false;
+        self.pause_note = None;
+        self.idle_steps = 0;
+        self.step_executed = false;
     }
 
     fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
@@ -346,6 +399,8 @@ impl ChatState {
         let fixed = logic::close_orphans(&mut self.file.messages, tools::cancelled);
         self.next_request = false;
         self.paused = false;
+        self.pause_note = None;
+        self.approval_target = None;
         if had || fixed > 0 {
             self.changed(self.turn_msg.min(self.file.messages.len()));
         }
@@ -359,45 +414,133 @@ impl ChatState {
         let p = self.calls.remove(0);
         let at = self.file.messages.len();
         self.file.messages.push(logic::tool_result(&p.call, status, content));
+        self.approval_target = None;
         self.changed(at);
+    }
+
+    fn pause(&mut self, note: Option<String>) {
+        self.paused = true;
+        self.pause_note = note;
+        self.touch();
+    }
+
+    /// Erste Nachricht der laufenden Runde (nach der letzten Nutzer-Nachricht).
+    fn round_start(&self) -> usize {
+        logic::last_user(&self.file.messages).map_or(0, |i| i + 1)
+    }
+
+    /// Größe der laufenden Runde in geschätzten Tokens (wie das Backend schätzt).
+    fn round_tokens(&self) -> usize {
+        self.file.messages[logic::last_user(&self.file.messages).unwrap_or(0)..].iter().filter(|m| logic::sendable(m)).map(logic::msg_tokens).sum()
+    }
+
+    /// Wie groß ein neues Werkzeug-Ergebnis höchstens sein darf (Bytes): [`tools::MAX_RESULT_BYTES`], bei bekanntem
+    /// Platz höchstens die Hälfte dessen, was in der Runde noch frei ist (1 Token ≈ 4 Zeichen).
+    pub fn result_cap(&self) -> usize {
+        match self.history_budget {
+            None => tools::MAX_RESULT_BYTES,
+            Some(b) => (b.saturating_sub(self.round_tokens()) * 4 / 2).min(tools::MAX_RESULT_BYTES),
+        }
+    }
+
+    /// Ältere Werkzeug-Ergebnisse der Runde durch einen kurzen Platzhalter ersetzen. `true`, wenn etwas frei wurde.
+    fn elide_round_results(&mut self) -> bool {
+        let from = self.round_start();
+        let short = tools::elided();
+        let mut any = false;
+        for i in from..self.file.messages.len() {
+            let m = &mut self.file.messages[i];
+            if m.role == Role::Tool && m.content.len() > short.len() {
+                m.content = short.clone();
+                any = true;
+                self.changed_from = self.changed_from.min(i);
+            }
+        }
+        if any {
+            self.touch();
+        }
+        any
+    }
+
+    /// Ergebnis eines ausgeführten Aufrufs eintragen – so gekürzt, dass die Runde in den Kontext passt. Reicht der
+    /// Platz auch ohne die älteren Ergebnisse der Runde nicht, wird es durch einen Platzhalter ersetzt und die Runde
+    /// hält an (der Systemprompt darf nie abgeschnitten werden).
+    fn record_result(&mut self, name: &str, r: ToolResult) {
+        let mut cap = self.result_cap();
+        if cap < MIN_RESULT_BYTES && self.elide_round_results() {
+            cap = self.result_cap();
+        }
+        if cap < MIN_RESULT_BYTES {
+            let status = if r.is_ok() { ToolStatus::Ok } else { ToolStatus::Error };
+            self.finish_first(status, tools::elided());
+            self.pause(Some(
+                state::t(
+                    "Die Werkzeug-Ergebnisse passen nicht mehr in den Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen.",
+                    "The tool results no longer fit into the model's context – raise the context length in Settings → Models.",
+                )
+                .to_string(),
+            ));
+            return;
+        }
+        let (st, content) = tools::result_message(name, r, cap);
+        self.finish_first(st, content);
     }
 
     /// Nächster Schritt der Werkzeug-Schleife (im Hauptdurchgang, jedes Bild). Ungültige oder verbotene Aufrufe
     /// bekommen hier gleich ihr Fehler-Ergebnis; die Einstellungen werden bei jedem Aufruf neu geprüft.
+    ///
+    /// Jeder verlangte Aufruf zählt gegen `max_steps` (auch abgewiesene, sonst liefe ein Modell, das immer wieder
+    /// Unsinn aufruft, endlos). Zusätzlich hält die Runde an, wenn `max_steps` Schritte in Folge keinen einzigen Aufruf
+    /// ausführen konnten.
     pub fn tool_step(&mut self, policy: &ToolPolicy) -> ToolStep {
         if self.streaming() || self.paused {
             return ToolStep::Idle;
         }
+        let max = policy.cfg.max_steps.max(1);
         loop {
             let Some(p) = self.calls.first() else {
-                if std::mem::take(&mut self.next_request) {
-                    return ToolStep::Request;
+                if !self.next_request {
+                    return ToolStep::Idle;
                 }
-                return ToolStep::Idle;
+                // Schritt zu Ende: nichts ausgeführt → zählt als leerer Schritt.
+                if std::mem::take(&mut self.step_executed) {
+                    self.idle_steps = 0;
+                } else {
+                    self.idle_steps += 1;
+                }
+                if self.idle_steps >= max {
+                    self.pause(None);
+                    return ToolStep::Idle;
+                }
+                self.next_request = false;
+                return ToolStep::Request;
             };
             match p.state {
                 CallState::Running | CallState::Approval => return ToolStep::Idle,
                 CallState::Queued | CallState::Approved => {}
             }
             let approved = p.state == CallState::Approved;
-            let write = match policy.check(&p.call) {
+            if !approved {
+                // Erster Blick auf diesen Aufruf: gegen die Höchstzahl zählen.
+                if self.steps >= max.saturating_mul(self.grants) {
+                    self.pause(None);
+                    return ToolStep::Idle;
+                }
+                self.steps += 1;
+            }
+            let ask = match policy.check(&p.call) {
                 Ok(w) => w,
                 Err((st, content)) => {
                     self.finish_first(st, content);
                     continue;
                 }
             };
-            if self.steps >= policy.cfg.max_steps.max(1).saturating_mul(self.grants) {
-                self.paused = true;
-                self.touch();
-                return ToolStep::Idle;
-            }
-            if !approved && policy.needs_approval(write, &p.call.name, &self.file.always_allow) {
+            if !approved && policy.needs_approval(ask, &p.call, &self.file.always_allow) {
                 self.calls[0].state = CallState::Approval;
                 self.touch();
                 return ToolStep::Idle;
             }
-            self.steps += 1;
+            self.step_executed = true;
             self.calls[0].state = CallState::Running;
             self.touch();
             let c = &self.calls[0].call;
@@ -422,20 +565,25 @@ impl ChatState {
             Err(TryRecvError::Disconnected) => Err(("internal".into(), "The tool ended without a result.".into())),
         };
         let name = p.call.name.clone();
-        let (st, content) = tools::result_message(&name, r);
-        self.finish_first(st, content);
+        self.record_result(&name, r);
         true
     }
 
-    /// Entscheidung des Nutzers zum wartenden Aufruf. `false`, wenn keiner wartet.
-    pub fn decide(&mut self, d: Decision) -> bool {
-        let Some(i) = self.calls.iter().position(|c| c.state == CallState::Approval) else { return false };
+    /// Der Aufruf, der gerade auf Freigabe wartet.
+    pub fn pending_approval(&self) -> Option<&ToolCall> {
+        self.calls.iter().find(|c| c.state == CallState::Approval).map(|c| &c.call)
+    }
+
+    /// Entscheidung des Nutzers zum wartenden Aufruf `call_id`. `false` (und nichts geschieht), wenn gerade kein oder
+    /// ein anderer Aufruf wartet – z. B. ein veralteter Klick nach Stopp.
+    pub fn decide(&mut self, call_id: &str, d: Decision) -> bool {
+        let Some(i) = self.calls.iter().position(|c| c.state == CallState::Approval && c.call.id == call_id) else { return false };
         match d {
             Decision::Allow => self.calls[i].state = CallState::Approved,
             Decision::Always => {
-                let name = self.calls[i].call.name.clone();
-                if !self.file.always_allow.contains(&name) {
-                    self.file.always_allow.push(name);
+                let rule = AllowRule::for_call(&self.calls[i].call);
+                if !self.file.always_allow.contains(&rule) {
+                    self.file.always_allow.push(rule);
                 }
                 self.calls[i].state = CallState::Approved;
             }
@@ -445,16 +593,31 @@ impl ChatState {
                 self.finish_first(st, content);
             }
         }
+        self.approval_target = None;
         self.touch();
         true
     }
 
-    /// „Weiter“ nach dem Anhalten an der Höchstzahl: noch einmal so viele Aufrufe freigeben.
+    /// Dauerhafte Freigabe zurücknehmen. `false`, wenn es sie nicht gab.
+    pub fn revoke(&mut self, rule: &AllowRule) -> bool {
+        let before = self.file.always_allow.len();
+        self.file.always_allow.retain(|r| r != rule);
+        let changed = self.file.always_allow.len() != before;
+        if changed {
+            self.touch();
+        }
+        changed
+    }
+
+    /// „Weiter“ nach dem Anhalten: noch einmal so viele Aufrufe freigeben (auch nach „Kontext voll“, z. B. nachdem
+    /// die Kontextlänge erhöht wurde).
     pub fn resume(&mut self) -> bool {
         if !self.paused {
             return false;
         }
         self.paused = false;
+        self.pause_note = None;
+        self.idle_steps = 0;
         self.grants += 1;
         self.touch();
         true
@@ -524,6 +687,7 @@ impl ChatState {
                 }
                 TurnEvent::ContextStart(c) => self.file.context_start = logic::clamp_context_start(Some(c), i),
                 TurnEvent::Usage { prompt_tokens, completion_tokens } => self.usage = Some((prompt_tokens, completion_tokens)),
+                TurnEvent::Budget(b) => self.history_budget = Some(b),
                 TurnEvent::Note(n) => {
                     if let Some(m) = self.file.messages.get_mut(i) {
                         m.note = Some(n);
@@ -853,7 +1017,7 @@ mod tests {
         assert!(res[1].1.contains("unknown_tool"));
         assert!(res[2].1.contains("forbidden") && res[2].0 == Some(ToolStatus::Denied), "Lesen: send_text verboten");
         assert_eq!(c.messages().last().unwrap().content, "sorry", "das Modell bekommt die Fehler und antwortet");
-        assert_eq!(c.steps, 0, "abgewiesene Aufrufe zählen nicht");
+        assert_eq!(c.steps, 3, "auch abgewiesene Aufrufe zählen (sonst Endlosschleife)");
         consistent(&c);
     }
 
@@ -896,8 +1060,10 @@ mod tests {
         assert!(drive(&mut c, &b, &p, &|_| panic!("erst nach Freigabe")).is_empty());
         assert!(c.awaiting_approval() && c.busy());
         assert!(!c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {})), "während der Frage wird nicht gesendet");
-        // Ablehnen
-        assert!(c.decide(Decision::Deny));
+        // Ablehnen (eine veraltete Kennung bewirkt nichts)
+        assert!(!c.decide("stale", Decision::Deny));
+        assert!(c.awaiting_approval());
+        assert!(c.decide("w", Decision::Deny));
         drive(&mut c, &b, &p, &|_| panic!("abgelehnt"));
         let t = c.messages().iter().find(|m| m.role == Role::Tool).unwrap();
         assert_eq!(t.status, Some(ToolStatus::Denied));
@@ -908,16 +1074,91 @@ mod tests {
         c.draft = "again".into();
         c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
         drive(&mut c, &b, &p, &|_| panic!("erst nach Freigabe"));
-        assert!(c.decide(Decision::Always));
+        let id = c.pending_approval().unwrap().id.clone();
+        assert!(c.decide(&id, Decision::Always));
         assert_eq!(drive(&mut c, &b, &p, &ok_exec), ["send_text"]);
-        assert_eq!(c.file.always_allow, ["send_text"]);
+        let rule = AllowRule { tool: "send_text".into(), session: Some(2) };
+        assert_eq!(c.file.always_allow, [rule.clone()]);
         c.draft = "third".into();
         c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
-        assert_eq!(drive(&mut c, &b, &p, &ok_exec), ["send_text"], "ohne Nachfrage");
+        assert_eq!(drive(&mut c, &b, &p, &ok_exec), ["send_text"], "gleiches Werkzeug, gleiches Ziel: ohne Nachfrage");
         assert!(!c.awaiting_approval());
-        // Erlauben (einmal) – und gespeichert/geladen bleibt „immer“ erhalten
+        // Gespeichert/geladen bleibt „immer“ erhalten
         let back = super::super::store::parse(std::str::from_utf8(&super::super::store::serialize_capped(&c.file, 1 << 20)).unwrap()).unwrap().0;
-        assert_eq!(back.always_allow, ["send_text"]);
+        assert_eq!(back.always_allow, [rule.clone()]);
+        // Anderes Ziel: wieder fragen
+        let other = Script::new(vec![vec![tc("o", "send_text", serde_json::json!({"session": 3, "text": "dir"})), TurnEvent::Done], vec![TurnEvent::Delta("c".into()), TurnEvent::Done]]);
+        c.draft = "fourth".into();
+        c.send(&other, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        drive(&mut c, &other, &p, &|_| panic!("andere Sitzung: erst nach Freigabe"));
+        assert!(c.awaiting_approval());
+        c.stop();
+        // Widerrufen: wieder fragen
+        assert!(c.revoke(&rule) && !c.revoke(&rule));
+        assert!(c.file.always_allow.is_empty());
+        c.draft = "fifth".into();
+        let b = Script::new(vec![vec![call(), TurnEvent::Done], vec![TurnEvent::Delta("e".into()), TurnEvent::Done]]);
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        drive(&mut c, &b, &p, &|_| panic!("widerrufen: erst nach Freigabe"));
+        assert!(c.awaiting_approval());
+    }
+
+    #[test]
+    fn calls_that_never_execute_stop_the_round() {
+        // Jede Antwort verlangt ein verbotenes Werkzeug: zählt, und nach `max_steps` ist Schluss.
+        let b = Script::new(vec![vec![tc("x", "send_text", serde_json::json!({"session": 1, "text": "x"})), TurnEvent::Done]]);
+        let p = policy(crate::mcp::McpLevel::Read, 5);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "go".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        assert!(drive(&mut c, &b, &p, &|_| panic!("verboten")).is_empty());
+        assert!(c.paused && !c.busy());
+        assert!(c.steps <= 5);
+        consistent(&c);
+        // Leere Schritte ohne Aufrufzählung (z. B. Höchstzahl hoch, aber nie etwas ausgeführt): eigene Grenze
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "go".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        c.grants = 1000; // Aufrufgrenze praktisch aus
+        drive(&mut c, &b, &p, &|_| panic!("verboten"));
+        assert!(c.paused, "nach {} leeren Schritten angehalten", p.cfg.max_steps);
+        let requests = c.messages().iter().filter(|m| m.role == Role::Assistant).count();
+        assert_eq!(requests, 5);
+    }
+
+    #[test]
+    fn results_shrink_to_the_context_and_the_round_pauses_when_full() {
+        let big = |_: &ToolCall| -> ToolResult { Ok(serde_json::json!({"text": "x".repeat(50_000)})) };
+        let b = Script::new(vec![vec![TurnEvent::Budget(3_000), tc("a", "read_terminal", serde_json::json!({"session": 1})), TurnEvent::Done]]);
+        let p = policy(crate::mcp::McpLevel::Read, 10);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "read".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        assert_eq!(c.result_cap(), tools::MAX_RESULT_BYTES, "ohne bekannten Platz: Höchstgrenze");
+        drive(&mut c, &b, &p, &big);
+        assert_eq!(c.history_budget, Some(3_000));
+        let tools_msgs: Vec<&ChatMsg> = c.messages().iter().filter(|m| m.role == Role::Tool).collect();
+        assert_eq!(tools_msgs.len(), 10);
+        // Jedes Ergebnis: höchstens die Hälfte des freien Platzes (am Anfang ≈ 6000 Bytes), nie 16 KiB; das Ende bleibt
+        assert!(tools_msgs.iter().all(|m| m.content.len() <= 6_000), "{:?}", tools_msgs.iter().map(|m| m.content.len()).collect::<Vec<_>>());
+        assert!(tools_msgs.last().unwrap().content.contains("truncated_front"));
+        // Wurde es eng, wurden ältere Ergebnisse der Runde entfernt – die Runde blieb immer im Platz
+        assert!(tools_msgs.iter().any(|m| m.content.contains("\"elided\"")));
+        assert!(c.round_tokens() <= 3_000, "die Runde bleibt im Platz: {}", c.round_tokens());
+        assert!(c.paused && c.pause_note.is_none(), "hier hielt die Höchstzahl an");
+        let mut saved = c.file_for_save().into_owned().messages;
+        assert_eq!(logic::close_orphans(&mut saved, tools::interrupted), 0, "gespeichert stimmig (der wartende Aufruf als unterbrochen)");
+        // Viel zu wenig Platz: auch ohne ältere Ergebnisse passt nichts → Platzhalter, Anhalten mit Hinweis
+        let tiny = Script::new(vec![vec![TurnEvent::Budget(200), tc("a", "read_terminal", serde_json::json!({"session": 1})), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "read".into();
+        c.send(&tiny, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        drive(&mut c, &tiny, &p, &big);
+        assert!(c.paused && !c.busy());
+        assert_eq!(c.pause_note.as_deref(), Some("The tool results no longer fit into the model's context – raise the context length in Settings → Models."));
+        assert!(c.messages().last().unwrap().content.contains("\"elided\""));
+        consistent(&c);
+        assert!(c.resume() && c.pause_note.is_none(), "„Weiter“ setzt fort");
     }
 
     #[test]

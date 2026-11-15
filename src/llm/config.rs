@@ -4,7 +4,7 @@
 //! "llm_servers": [
 //!   { "id": "srv-18a3f0c2b1d4e5f6", "name": "Ollama", "kind": "ollama", "url": "http://localhost:11434",
 //!     "receive_timeout_secs": 600,
-//!     "models": [ { "name": "llama3.1:8b", "level": "Read", "disabled_tools": ["read_terminal"], "ask_write": true,
+//!     "models": [ { "name": "llama3.1:8b", "level": "Read", "level_chosen": true, "disabled_tools": ["read_terminal"], "ask_write": true,
 //!                   "max_steps": 10, "tools": true, "context_length": 16384, "temperature": 0.7 } ],
 //!     "last_models": [ { "name": "llama3.1:8b", "tools": true, "context_length": 131072 } ] }
 //! ]
@@ -71,8 +71,12 @@ impl Default for LlmServer {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LlmModel {
     pub name: String,
-    /// Welche Paneldeck-Werkzeuge das Modell nutzen darf (Aus / Lesen / Steuern). Standard: Lesen.
+    /// Welche Paneldeck-Werkzeuge das Modell nutzen darf (Aus / Lesen / Steuern). Standard: Aus.
     pub level: McpLevel,
+    /// Der Nutzer hat die Stufe selbst gewählt (Reiter „Modelle“ oder die einmalige Frage im ersten Chat). Fehlt es,
+    /// fragt der erste Chat mit diesem Modell vor dem Senden nach. Nur geschrieben, wenn wahr.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub level_chosen: bool,
     /// Einzeln gesperrte Werkzeuge.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub disabled_tools: Vec<String>,
@@ -92,7 +96,7 @@ pub struct LlmModel {
 
 impl Default for LlmModel {
     fn default() -> Self {
-        LlmModel { name: String::new(), level: McpLevel::Read, disabled_tools: Vec::new(), ask_write: true, max_steps: DEFAULT_MAX_STEPS, tools: None, context_length: None, temperature: None }
+        LlmModel { name: String::new(), level: McpLevel::Off, level_chosen: false, disabled_tools: Vec::new(), ask_write: true, max_steps: DEFAULT_MAX_STEPS, tools: None, context_length: None, temperature: None }
     }
 }
 
@@ -105,13 +109,14 @@ impl<'de> Deserialize<'de> for LlmModel {
             o.get(k).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or(default)
         }
         let def = LlmModel::named(name);
-        // Fehlt die Stufe: Standard „Lesen“. Ist sie da, aber unlesbar: „Aus“ (`McpLevel` liest Unbekanntes als Aus).
+        // Fehlt die Stufe: Standard „Aus“. Ist sie da, aber unlesbar: ebenfalls „Aus“ (`McpLevel` liest Unbekanntes als Aus).
         let level = match o.get("level") {
             None => def.level,
             Some(v) => serde_json::from_value(v.clone()).unwrap_or(McpLevel::Off),
         };
         Ok(LlmModel {
             level,
+            level_chosen: get(o, "level_chosen", false),
             disabled_tools: get(o, "disabled_tools", def.disabled_tools.clone()),
             ask_write: get(o, "ask_write", def.ask_write),
             max_steps: get(o, "max_steps", def.max_steps),
@@ -363,7 +368,14 @@ mod tests {
         let j = serde_json::to_value(&s).unwrap();
         assert!(j.get("api_key").is_none() && j.get("last_models").is_none() && j.get("receive_timeout_secs").is_none(), "{j}");
         let m: LlmModel = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
-        assert_eq!((m.level, m.ask_write, m.max_steps, m.tools, m.context_length), (McpLevel::Read, true, 10, None, None));
+        assert_eq!((m.level, m.level_chosen, m.ask_write, m.max_steps, m.tools, m.context_length), (McpLevel::Off, false, true, 10, None, None));
+        // level_chosen: nur geschrieben, wenn wahr; hin und zurück
+        assert!(serde_json::to_value(&m).unwrap().get("level_chosen").is_none());
+        let chosen = LlmModel { level_chosen: true, ..m.clone() };
+        let j = serde_json::to_value(&chosen).unwrap();
+        assert_eq!(j["level_chosen"], true);
+        assert_eq!(serde_json::from_value::<LlmModel>(j).unwrap(), chosen);
+        assert!(!serde_json::from_str::<LlmModel>(r#"{"name":"x","level_chosen":"yes"}"#).unwrap().level_chosen, "unlesbar → nicht gewählt");
         let m: LlmModel = serde_json::from_str(r#"{"name":"x","level":"Control","max_steps":500,"context_length":0,"temperature":9}"#).unwrap();
         assert_eq!(m.level, McpLevel::Control);
         let mut v = vec![LlmServer { id: "a".into(), models: vec![m, LlmModel::named("x")], ..Default::default() }];
@@ -381,14 +393,14 @@ mod tests {
         // Stufe Aus, ein anderes Feld kaputt: Eintrag bleibt, Stufe bleibt Aus.
         let m: LlmModel = serde_json::from_str(r#"{"name":"x","level":"Off","max_steps":"many","ask_write":false,"tools":"yes"}"#).unwrap();
         assert_eq!((m.level, m.max_steps, m.ask_write, m.tools), (McpLevel::Off, DEFAULT_MAX_STEPS, false, None));
-        // Unlesbare Stufe → Aus (nicht der Standard „Lesen“).
+        // Unlesbare Stufe → Aus.
         for lvl in [r#""ctrl""#, "null", "[1]", r#"{"a":1}"#] {
             let m: LlmModel = serde_json::from_str(&format!(r#"{{"name":"x","level":{lvl},"disabled_tools":5}}"#)).unwrap();
             assert_eq!(m.level, McpLevel::Off, "{lvl}");
             assert!(m.disabled_tools.is_empty());
         }
-        // Fehlende Stufe → Standard Lesen; ohne Namen kein Eintrag.
-        assert_eq!(serde_json::from_str::<LlmModel>(r#"{"name":"x"}"#).unwrap().level, McpLevel::Read);
+        // Fehlende Stufe → Standard Aus; ohne Namen kein Eintrag.
+        assert_eq!(serde_json::from_str::<LlmModel>(r#"{"name":"x"}"#).unwrap().level, McpLevel::Off);
         assert!(serde_json::from_str::<LlmModel>(r#"{"level":"Off"}"#).is_err());
         let s: LlmServer = serde_json::from_str(r#"{"id":"a","models":[{"name":"x","level":"Off","context_length":-1}]}"#).unwrap();
         assert_eq!(s.model_cfg("x").level, McpLevel::Off);
@@ -455,7 +467,8 @@ mod tests {
         assert_eq!((s.tools_supported("a"), s.context_length("a")), (Some(true), 32768));
         s.set_model_cfg(LlmModel::named("zz"));
         assert_eq!(s.models.len(), 1, "Standardwerte werden nicht gespeichert");
-        s.set_model_cfg(LlmModel { level: McpLevel::Off, ..LlmModel::named("zz") });
+        // „Aus“ bewusst gewählt ist kein Standard mehr (sonst fragte der erste Chat erneut)
+        s.set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, ..LlmModel::named("zz") });
         assert_eq!(s.model_names(), ["a", "b", "zz"]);
         s.set_model_cfg(LlmModel::named("zz"));
         assert_eq!(s.models.len(), 1, "zurück auf Standard entfernt den Eintrag");

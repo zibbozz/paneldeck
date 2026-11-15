@@ -4,7 +4,7 @@
 //! {
 //!   "version": 1,
 //!   "context_start": 2,
-//!   "always_allow": ["send_text"],
+//!   "always_allow": [ { "tool": "send_text", "session": 4 }, { "tool": "add_todo", "session": null } ],
 //!   "messages": [
 //!     { "role": "user", "content": "Which sessions are open?", "ts": 1763200000 },
 //!     { "role": "assistant", "content": "", "ts": 1763200001,
@@ -102,10 +102,10 @@ pub struct ChatFile {
     /// Kontextlänge weggelassen). Fehlt, solange nichts gekürzt wurde.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_start: Option<usize>,
-    /// Schreibende Werkzeuge, die der Nutzer in diesem Chat „immer erlaubt“ hat (keine Nachfrage mehr; seit 2.2.0).
+    /// Dauerhafte Freigaben „Immer für diesen Chat“ (seit 2.2.0): je Werkzeug und Ziel-Sitzung keine Nachfrage mehr.
     /// Steht vor `messages`, weil `serialize_capped` die Nachrichten ans Ende setzt.
-    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_names")]
-    pub always_allow: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_rules")]
+    pub always_allow: Vec<AllowRule>,
     pub messages: Vec<ChatMsg>,
 }
 
@@ -115,10 +115,47 @@ impl Default for ChatFile {
     }
 }
 
-/// Liste von Werkzeugnamen tolerant lesen: Nicht-Texte fallen weg, ein falscher Typ ergibt eine leere Liste.
-fn lenient_names<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+/// Eine dauerhafte Freigabe: dieses Werkzeug für diese Ziel-Sitzung (`session` aus den Argumenten des Aufrufs;
+/// `null` bei Werkzeugen ohne Sitzung). Nur wenn beides passt, läuft ein Aufruf ohne Nachfrage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowRule {
+    pub tool: String,
+    pub session: Option<u64>,
+}
+
+impl AllowRule {
+    /// Regel für einen Aufruf (Werkzeug + Ziel-Sitzung aus `arguments.session`).
+    pub fn for_call(call: &ToolCall) -> Self {
+        AllowRule { tool: call.name.clone(), session: call.arguments.get("session").and_then(|s| s.as_u64()) }
+    }
+
+    pub fn matches(&self, call: &ToolCall) -> bool {
+        *self == AllowRule::for_call(call)
+    }
+}
+
+/// Freigaben tolerant lesen: `{"tool": …, "session": …}`; ein reiner Werkzeugname (Vorabstand) gilt als Regel ohne
+/// Sitzung; Unlesbares fällt weg, ein falscher Typ ergibt eine leere Liste.
+fn lenient_rules<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AllowRule>, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
-    Ok(v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default())
+    let one = |x: &serde_json::Value| -> Option<AllowRule> {
+        if let Some(s) = x.as_str() {
+            return Some(AllowRule { tool: s.to_string(), session: None });
+        }
+        let tool = x.get("tool")?.as_str()?.to_string();
+        let session = match x.get("session") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(s) => Some(s.as_u64()?),
+        };
+        Some(AllowRule { tool, session })
+    };
+    let mut out: Vec<AllowRule> = Vec::new();
+    for r in v.as_array().map(|a| a.iter().filter_map(one).collect::<Vec<_>>()).unwrap_or_default() {
+        if !out.contains(&r) {
+            out.push(r);
+        }
+    }
+    Ok(out)
 }
 
 /// Ordner der Verlaufsdateien im Datenordner.
@@ -307,7 +344,7 @@ mod tests {
         t.status = Some(ToolStatus::Ok);
         let mut e = ChatMsg::new(Role::Assistant, "");
         e.error = Some("connection refused".into());
-        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec!["send_text".into()], messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
+        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![AllowRule { tool: "send_text".into(), session: Some(4) }], messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
     }
 
     #[test]
@@ -319,8 +356,12 @@ mod tests {
         // Falscher Typ / falsche Einträge: kein Verlust des Verlaufs
         let (f, _) = parse(r#"{"always_allow":"send_text","messages":[{"role":"user","content":"x"}]}"#).unwrap();
         assert!(f.always_allow.is_empty() && f.messages.len() == 1);
-        let (f, _) = parse(r#"{"always_allow":["send_text",5,"run_command"],"messages":[]}"#).unwrap();
-        assert_eq!(f.always_allow, ["send_text", "run_command"]);
+        // Altes Format (reine Namen) → Regeln ohne Sitzung; ungültige Einträge fallen weg, Doppelte auch
+        let (f, _) = parse(r#"{"always_allow":["send_text",5,"run_command",{"tool":"send_keys","session":4},{"tool":"x","session":"4"},{"session":1},{"tool":"add_todo","session":null},{"tool":"send_keys","session":4}],"messages":[]}"#).unwrap();
+        assert_eq!(f.always_allow, [rule("send_text", None), rule("run_command", None), rule("send_keys", Some(4)), rule("add_todo", None)]);
+        // Geschrieben wird immer mit `session` (auch null)
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(text.contains(r#"{"tool":"send_keys","session":4}"#) && text.contains(r#"{"tool":"add_todo","session":null}"#), "{text}");
         // Gekürzt gespeichert: das Feld bleibt
         let mut big = sample();
         for i in 0..100 {
@@ -329,7 +370,22 @@ mod tests {
         let data = serialize_capped(&big, 4_000);
         assert!(data.len() <= 4_000);
         let (back, _) = parse(std::str::from_utf8(&data).unwrap()).unwrap();
-        assert_eq!(back.always_allow, ["send_text"]);
+        assert_eq!(back.always_allow, [rule("send_text", Some(4))]);
+    }
+
+    fn rule(tool: &str, session: Option<u64>) -> AllowRule {
+        AllowRule { tool: tool.into(), session }
+    }
+
+    #[test]
+    fn allow_rules_match_tool_and_target() {
+        let call = |name: &str, args: serde_json::Value| ToolCall { id: "c".into(), name: name.into(), arguments: args };
+        let r = AllowRule::for_call(&call("send_text", serde_json::json!({"session": 4, "text": "x"})));
+        assert_eq!(r, rule("send_text", Some(4)));
+        assert!(r.matches(&call("send_text", serde_json::json!({"session": 4, "text": "other"}))));
+        assert!(!r.matches(&call("send_text", serde_json::json!({"session": 5}))), "andere Sitzung");
+        assert!(!r.matches(&call("send_keys", serde_json::json!({"session": 4}))), "anderes Werkzeug");
+        assert!(rule("add_todo", None).matches(&call("add_todo", serde_json::json!({"title": "t"}))));
     }
 
     #[test]

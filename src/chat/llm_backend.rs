@@ -46,6 +46,8 @@ pub struct Prepared {
     pub context_start: Option<usize>,
     /// Hinweis für den Nutzer zur Antwort (z. B. Systemprompt größer als der Kontext).
     pub note: Option<String>,
+    /// Platz für den Verlauf in Tokens: Kontext ohne Antwort-Reserve, Systemprompt und Werkzeug-Beschreibungen.
+    pub history_budget: usize,
 }
 
 /// Höchstlänge von Projektname und Ordner in der Kontextzeile (Zeichen).
@@ -70,7 +72,12 @@ fn unknown_server(lang: Lang) -> String {
 /// Hinweis oben im Chat: Modell ohne Werkzeuge bzw. Server fehlt. `None` = nichts zu melden.
 pub fn chat_notice(servers: &[crate::llm::config::LlmServer], meta: &ChatMeta, lang: Lang) -> Option<String> {
     let Some(s) = servers.iter().find(|s| s.id == meta.server) else { return Some(unknown_server(lang)) };
-    (s.tools_supported(&meta.model) == Some(false)).then(|| lang.t("Dieses Modell kann keine Werkzeuge nutzen – nur Chat.", "This model cannot use tools – chat only.").to_string())
+    if s.tools_supported(&meta.model) == Some(false) {
+        return Some(lang.t("Dieses Modell kann keine Werkzeuge nutzen – nur Chat.", "This model cannot use tools – chat only.").to_string());
+    }
+    // Stufe „Aus“ bewusst gewählt (ungewählt fragt der Chat beim ersten Senden).
+    let cfg = s.model_cfg(&meta.model);
+    (cfg.level == McpLevel::Off && cfg.level_chosen).then(|| lang.t("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle).", "Tools are off for this model (Settings → Models).").to_string())
 }
 
 /// Systemprompt für die Stufe des Modells: eigene Vorlage (Datenordner) oder die eingebaute, in der Prompt-Sprache.
@@ -208,6 +215,7 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
         None
     }
     .map(str::to_string);
+    let history_budget = budget.saturating_sub(tool_tokens).saturating_sub(sys_tokens);
     let start = llm::tokens::trim_to_budget(&messages, budget.saturating_sub(tool_tokens));
     let first = llm::tokens::first_turn(&messages);
     // Index in `messages` → Index im Verlauf (die Systemnachricht steht nicht im Verlauf).
@@ -215,7 +223,7 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     let messages = llm::tokens::visible(&messages, start);
     let num_ctx = (server.kind == llm::ServerKind::Ollama).then_some(ctx_len);
     let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx };
-    Ok(Prepared { endpoint, request, context_start, note })
+    Ok(Prepared { endpoint, request, context_start, note, history_budget })
 }
 
 /// Hinweis für eine an der Token-Grenze abgeschnittene Antwort.
@@ -249,6 +257,7 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
         }
         repaint();
     };
+    send(TurnEvent::Budget(p.history_budget));
     if let Some(cs) = p.context_start {
         send(TurnEvent::ContextStart(cs));
     }
@@ -352,7 +361,13 @@ mod tests {
         assert_eq!(p.note, None);
         assert_eq!(p.request.model, "m1");
         let names: Vec<&str> = p.request.tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"list_sessions") && !names.contains(&"send_text"), "Standard „Lesen“: nur lesende Werkzeuge: {names:?}");
+        assert!(names.is_empty(), "Standard „Aus“: keine Werkzeuge: {names:?}");
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") });
+        let read = prepare(&meta(), &hist, &cx(vec![s])).unwrap();
+        let names: Vec<&str> = read.request.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"list_sessions") && !names.contains(&"send_text"), "Lesen: nur lesende Werkzeuge: {names:?}");
+        assert!(read.history_budget < p.history_budget, "Werkzeug-Beschreibungen gehen vom Platz ab");
         assert_eq!((p.request.num_ctx, p.request.temperature, p.context_start), (Some(crate::llm::config::DEFAULT_CONTEXT), None, None), "Ollama: num_ctx immer");
         assert_eq!(p.endpoint.base_url, "http://localhost:11434");
         // Deutsch als Prompt-Sprache
@@ -403,6 +418,12 @@ mod tests {
         assert_eq!(chat_notice(&v, &ChatMeta { server: "s1".into(), model: "m2".into() }, Lang::En), None);
         assert_eq!(chat_notice(&v, &ChatMeta { server: "s1".into(), model: "unknown".into() }, Lang::En), None, "unbekannt: kein Hinweis");
         assert!(chat_notice(&v, &ChatMeta { server: "x".into(), model: "m1".into() }, Lang::En).unwrap().contains("no longer set up"));
+        // Stufe „Aus“ bewusst gewählt: eigener Text (nicht „kann keine Werkzeuge“)
+        let mut v = v;
+        v[0].set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, ..LlmModel::named("m2") });
+        let m2 = ChatMeta { server: "s1".into(), model: "m2".into() };
+        assert_eq!(chat_notice(&v, &m2, Lang::En).as_deref(), Some("Tools are off for this model (Settings → Models)."));
+        assert_eq!(chat_notice(&v, &m2, Lang::De).as_deref(), Some("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle)."));
     }
 
     /// Datenordner mit einer winzigen eigenen Vorlage („S“ = 5 geschätzte Tokens), damit die Rechnung exakt ist.
@@ -544,7 +565,8 @@ mod tests {
         let seen = h.join().unwrap();
         assert!(seen.starts_with("POST /api/chat HTTP/1.1"), "{seen}");
         assert!(seen.contains("\"m1\"") && seen.contains("Demo") && seen.contains("\"hi\""), "{seen}");
-        assert!(seen.contains("\"tools\"") && seen.contains("\"list_sessions\""), "Werkzeuge der Stufe Lesen: {seen}");
+        assert!(!seen.contains("\"tools\""), "Standard „Aus“: keine Werkzeuge: {seen}");
+        assert!(matches!(ev.first(), Some(TurnEvent::Budget(b)) if *b > 0), "Platz kommt zuerst: {ev:?}");
     }
 
     #[test]
@@ -659,8 +681,11 @@ mod tests {
         let resp = |b: &str| format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{b}").into_bytes();
         let (base, h) = serve_many(vec![resp(turn1), resp(turn2)]);
         let b = LlmBackend::new();
-        let c = cx(vec![server(&base, ServerKind::Ollama)]);
-        let policy = super::super::tools::ToolPolicy::new(LlmModel::named("m1"), None, false);
+        let read = LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") };
+        let mut s = server(&base, ServerKind::Ollama);
+        s.set_model_cfg(read.clone());
+        let c = cx(vec![s]);
+        let policy = super::super::tools::ToolPolicy::new(read, None, false);
         let mut chat = super::super::ChatState::new(store::ChatFile::default(), None);
         chat.draft = "which sessions?".into();
         assert!(chat.send(&b, &meta(), &c, Arc::new(|| {})));
@@ -704,8 +729,11 @@ mod tests {
         let resp = |b: &str| format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{b}").into_bytes();
         let (base, h) = serve_many(vec![resp(turn1), resp(turn2)]);
         let b = LlmBackend::new();
-        let c = cx(vec![server(&format!("{base}/v1"), ServerKind::OpenAi)]);
-        let policy = super::super::tools::ToolPolicy::new(LlmModel::named("m1"), None, false);
+        let read = LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") };
+        let mut s = server(&format!("{base}/v1"), ServerKind::OpenAi);
+        s.set_model_cfg(read.clone());
+        let c = cx(vec![s]);
+        let policy = super::super::tools::ToolPolicy::new(read, None, false);
         let mut chat = super::super::ChatState::new(store::ChatFile::default(), None);
         chat.draft = "who am I?".into();
         chat.send(&b, &meta(), &c, Arc::new(|| {}));
@@ -742,7 +770,9 @@ mod tests {
         let body = r#"{"error":"registry.ollama.ai/library/x does not support tools"}"#;
         let (base, h) = serve(format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes());
         let b = LlmBackend::new();
-        let ev = collect(&b.start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![server(&base, ServerKind::Ollama)]), Arc::new(|| {})));
+        let mut s = server(&base, ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") });
+        let ev = collect(&b.start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![s]), Arc::new(|| {})));
         match ev.last() {
             Some(TurnEvent::Error(e)) => assert!(e.ends_with(tools_hint(Lang::En)), "{e}"),
             other => panic!("{other:?}"),
