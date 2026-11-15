@@ -8,7 +8,7 @@
 #   --no-git         nur bauen und packen (Probelauf auf jedem Branch; kein Tag, kein Push)
 #   --skip-smoke     Smoke-Test und Update-Test (tools/smoke-mcp.ps1, tools/update-test.ps1; nur Windows) überspringen
 # Prüfungen (außer mit --no-git): Branch ist release/<x.y> passend zur Version · Arbeitsbaum sauber · Stand == origin/release/<x.y> ·
-#   Cargo.toml-Version · Changelog-Abschnitt mit heutigem Datum (= Tag-Datum) · englischer Text docs/release-notes/<v>.en.md · Titel.
+#   Cargo.toml-Version · Changelog-Abschnitt mit heutigem Datum (= Tag-Datum) in Changelog.md und Changelog.de.md · englischer Text docs/release-notes/<v>.en.md · Titel.
 # Das GitHub-Release ist ein normales Release (Pre-release nur, wenn die Version ein „-“ enthält; Release Candidates nutzen wir nicht).
 # Windows: nativer MSVC-Build (target/release), Installer mit NSIS (makensis). Linux: Cross-Build nach windows-gnu.
 set -euo pipefail
