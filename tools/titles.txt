@@ -1,1 +1,2 @@
 1.0.0|Paneldeck 1.0.0 – First public release
+2.1.0|Paneldeck 2.1.0 – Command line, profiles, windows and self-update
