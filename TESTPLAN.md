@@ -497,4 +497,4 @@ Automatisch: siehe Abschnitt 32a (`tools\smoke-mcp.ps1` mit 136 Prüfungen, Unit
 - [ ] **Rückfall auf 1.x:** Eine 1.0.x-Version lässt `paneldeck.db` unbenutzt, aber ungestört (README weist darauf hin).
 - [ ] **Leistung:** 10.000 Tickets (z. B. per Agent oder Skript angelegt): Start der Todo-Liste < 2 s, Board/Liste/Suche flüssig, Terminal Hub bleibt davon unberührt; Speicherbedarf der .exe-Datei wächst nicht merklich.
 - [ ] **Beide Sprachen:** kompletter Durchlauf der Abschnitte 34–46 auf Deutsch; Stichprobe: kein englischer/deutscher Resttext an der falschen Stelle.
-- [ ] **Dokumentation:** README (Englisch/Deutsch) und Changelog stimmen mit dem Programm überein; Screenshots für alle `TODO screenshot`-Kommentare in den READMEs sind erzeugt (siehe `docs/release-notes/2.0.0-todo.md`).
+- [ ] **Dokumentation:** README (Englisch/Deutsch) und Changelog stimmen mit dem Programm überein; Screenshots für alle `TODO screenshot`-Kommentare in den READMEs sind erzeugt.
