@@ -1,12 +1,12 @@
 //! Inhalt eines Chat-Bereichs (#63): Nachrichtenliste, Werkzeugzeilen, Eingabe. Kennt kein Backend – Senden, Stopp,
 //! Neu erzeugen und Bearbeiten meldet [`chat_body`] zurück; die App führt sie aus (`Action::Chat*`).
 
+use crate::chat::session::UiCache;
 use crate::chat::{ChatMsg, ChatState, Role, ToolStatus};
 use crate::markdown::{self, RenderOpts};
 use crate::state::Lang;
 use crate::style::{self, S1, S2};
 use eframe::egui::{self, Color32, CornerRadius, Event, FontId, Id, Key, Margin, Pos2, Rect, RichText, Sense, Stroke, TextStyle, Ui, UiBuilder, Vec2};
-use std::hash::{Hash, Hasher};
 
 /// Was der Nutzer in diesem Bild ausgelöst hat.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,86 +55,162 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     out
 }
 
+/// Geschätzte Höhe einer noch nie gezeichneten Nachricht.
+const EST_ROW: f32 = 60.0;
+/// So weit über/unter dem sichtbaren Bereich werden Nachrichten noch gezeichnet (weiches Scrollen).
+const ROW_MARGIN: f32 = 300.0;
+
+/// Was jede Zeile über den ganzen Verlauf wissen muss.
+struct RowCx<'a> {
+    session: u64,
+    model: &'a str,
+    lang: Lang,
+    streaming: bool,
+    has_error: bool,
+    can_regen: bool,
+    last: Option<usize>,
+    last_user: Option<usize>,
+    context_start: Option<usize>,
+}
+
 fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: Lang, out: &mut ChatOut) {
     let streaming = chat.streaming();
     let has_error = chat.has_error();
     let can_regen = !streaming && crate::chat::logic::can_regenerate(chat.messages());
-    let ChatState { file, md_cache, warning, follow, .. } = chat;
+    let rev = chat.rev();
+    let from = std::mem::replace(&mut chat.changed_from, usize::MAX);
+    let ChatState { file, ui: cache, warning, follow, .. } = chat;
     let msgs = &file.messages;
-    let last_user = crate::chat::logic::last_user(msgs);
-    let last = msgs.len().checked_sub(1);
-    let cs = crate::chat::logic::clamp_context_start(file.context_start, msgs.len());
+    let n = msgs.len();
+    // Zwischenspeicher nur für Geändertes erneuern (nicht jedes Bild den ganzen Verlauf).
+    if from != usize::MAX {
+        cache.md.retain(|k, _| *k < from);
+        cache.heights.truncate(from.min(cache.heights.len()));
+    }
+    cache.heights.resize(n, 0.0);
+    if cache.tool_rev != Some(rev) {
+        cache.tool_rev = Some(rev);
+        cache.tool_results.clear();
+        cache.matched.clear();
+        let calls: std::collections::HashSet<&str> = msgs.iter().flat_map(|m| m.tool_calls.iter().map(|c| c.id.as_str())).collect();
+        for (i, m) in msgs.iter().enumerate() {
+            if let (Role::Tool, Some(tid)) = (m.role, m.tool_call_id.as_deref()) {
+                if calls.contains(tid) {
+                    cache.tool_results.insert(tid.to_string(), i);
+                    cache.matched.insert(i);
+                }
+            }
+        }
+    }
+    let rc = RowCx {
+        session,
+        model,
+        lang,
+        streaming,
+        has_error,
+        can_regen,
+        last: n.checked_sub(1),
+        last_user: crate::chat::logic::last_user(msgs),
+        context_start: crate::chat::logic::clamp_context_start(file.context_start, n),
+    };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
     let jump = std::mem::take(follow);
     let area = egui::ScrollArea::vertical().id_salt(("chat_scroll", session)).stick_to_bottom(true).auto_shrink([false, false]);
-    area.show(ui, |ui| {
+    area.show_viewport(ui, |ui, viewport| {
+        let content_top = ui.max_rect().min.y;
+        ui.add_space(S2);
+        if let Some(w) = warning.clone() {
+            egui::Frame::new().fill(Color32::from_rgb(0xe5, 0xc0, 0x7b).gamma_multiply(0.18)).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(w);
+                    if ui.small_button(lang.t("Ausblenden", "Dismiss")).clicked() {
+                        *warning = None;
+                    }
+                });
+            });
             ui.add_space(S2);
-            if let Some(w) = warning.clone() {
-                egui::Frame::new().fill(Color32::from_rgb(0xe5, 0xc0, 0x7b).gamma_multiply(0.18)).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(w);
-                        if ui.small_button(lang.t("Ausblenden", "Dismiss")).clicked() {
-                            *warning = None;
-                        }
-                    });
+        }
+        if msgs.is_empty() {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(lang.t("Neuer Chat", "New chat")).heading());
+                ui.add_space(S1);
+                ui.label(RichText::new(format!("{}: {model}", lang.t("Modell", "Model"))).color(style::dim(ui)));
+                ui.label(RichText::new(lang.t("Enter sendet, Umschalt+Enter macht eine neue Zeile.", "Enter sends, Shift+Enter adds a new line.")).color(style::dim(ui)));
+            });
+        }
+        // Nur Zeilen im sichtbaren Bereich (plus Rand) zeichnen; die übrigen belegen ihre zuletzt gemessene Höhe.
+        let origin = ui.cursor().min;
+        let width = ui.available_width();
+        let mut y = 0.0;
+        let mut remeasured = false;
+        for (i, m) in msgs.iter().enumerate() {
+            let known = cache.heights[i];
+            let h = if known > 0.0 { known } else { EST_ROW };
+            let top = origin.y - content_top + y;
+            if top + h < viewport.min.y - ROW_MARGIN || top > viewport.max.y + ROW_MARGIN {
+                y += h;
+                continue;
+            }
+            let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
+            let mut row_ui = ui.new_child(UiBuilder::new().id_salt(("chat_row", i)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            row(&mut row_ui, i, m, msgs, cache, &rc, out);
+            let mh = row_ui.min_rect().height();
+            if (mh - known).abs() > 0.5 {
+                cache.heights[i] = mh;
+                remeasured = true;
+            }
+            y += mh;
+        }
+        let total = Rect::from_min_size(origin, Vec2::new(width, y + S1));
+        ui.allocate_rect(total, Sense::hover());
+        if jump {
+            ui.scroll_to_rect(Rect::from_min_size(Pos2::new(origin.x, total.max.y - 1.0), Vec2::new(1.0, 1.0)), Some(egui::Align::BOTTOM));
+        }
+        if remeasured {
+            ui.ctx().request_repaint(); // Höhen haben sich geändert: Positionen im nächsten Bild stimmen
+        }
+    });
+}
+
+/// Eine Nachricht samt Abstand darunter (und ggf. der Kürzungs-Markierung darüber).
+fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache, rc: &RowCx, out: &mut ChatOut) {
+    let lang = rc.lang;
+    if rc.context_start == Some(i) {
+        context_marker(ui, lang);
+    }
+    match m.role {
+        Role::User => user_bubble(ui, m, Some(i) == rc.last_user && !rc.streaming, lang, out),
+        Role::Assistant => {
+            let is_last = Some(i) == rc.last;
+            assistant(ui, rc.session, i, m, msgs, cache, rc.model, lang);
+            if is_last && rc.streaming && m.content.is_empty() && m.tool_calls.is_empty() {
+                ui.label(RichText::new("…").color(style::dim(ui)));
+            }
+            if let (true, Some(e)) = (is_last && rc.has_error, &m.error) {
+                error_box(ui, e, lang, out);
+            } else if let Some(e) = &m.error {
+                ui.label(RichText::new(format!("{}: {e}", lang.t("Fehler", "Error"))).small().color(error_col()));
+            } else if is_last && rc.can_regen {
+                ui.horizontal(|ui| {
+                    if ui.small_button("↻").on_hover_text(lang.t("Antwort neu erzeugen", "Regenerate answer")).clicked() {
+                        out.regenerate = true;
+                    }
                 });
-                ui.add_space(S2);
             }
-            if msgs.is_empty() {
-                ui.add_space(40.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(lang.t("Neuer Chat", "New chat")).heading());
-                    ui.add_space(S1);
-                    ui.label(RichText::new(format!("{}: {model}", lang.t("Modell", "Model"))).color(style::dim(ui)));
-                    ui.label(RichText::new(lang.t("Enter sendet, Umschalt+Enter macht eine neue Zeile.", "Enter sends, Shift+Enter adds a new line.")).color(style::dim(ui)));
-                });
-            }
-            for (i, m) in msgs.iter().enumerate() {
-                if cs == Some(i) {
-                    context_marker(ui, lang);
-                }
-                match m.role {
-                    Role::User => user_bubble(ui, m, Some(i) == last_user && !streaming, lang, out),
-                    Role::Assistant => {
-                        let is_last = Some(i) == last;
-                        assistant(ui, session, i, m, msgs, md_cache, model, lang);
-                        if is_last && streaming && m.content.is_empty() && m.tool_calls.is_empty() {
-                            ui.label(RichText::new("…").color(style::dim(ui)));
-                        }
-                        if let (true, Some(e)) = (is_last && has_error, &m.error) {
-                            error_box(ui, e, lang, out);
-                        } else if let Some(e) = &m.error {
-                            ui.label(RichText::new(format!("{}: {e}", lang.t("Fehler", "Error"))).small().color(error_col()));
-                        } else if is_last && can_regen {
-                            ui.horizontal(|ui| {
-                                if ui.small_button("↻").on_hover_text(lang.t("Antwort neu erzeugen", "Regenerate answer")).clicked() {
-                                    out.regenerate = true;
-                                }
-                            });
-                        }
-                    }
-                    Role::Tool => {
-                        // Ergebnisse mit passendem Aufruf stehen in dessen Zeile.
-                        let matched = m.tool_call_id.as_ref().is_some_and(|tid| msgs.iter().any(|a| a.tool_calls.iter().any(|c| &c.id == tid)));
-                        if !matched {
-                            tool_line(ui, Id::new(("chat_tool_r", session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), lang);
-                        }
-                    }
-                    Role::System => {
-                        egui::CollapsingHeader::new(RichText::new(lang.t("Systemprompt", "System prompt")).small().color(style::dim(ui)))
-                            .id_salt(("chat_sys", session, i))
-                            .show(ui, |ui| {
-                                ui.label(RichText::new(&m.content).small().monospace());
-                            });
-                    }
-                }
-                ui.add_space(S2 + 2.0);
-            }
-            ui.add_space(S1);
-            if jump {
-                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-            }
-        });
+        }
+        // Ergebnisse mit passendem Aufruf stehen in dessen Zeile.
+        Role::Tool if cache.matched.contains(&i) => {}
+        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), lang),
+        Role::System => {
+            egui::CollapsingHeader::new(RichText::new(lang.t("Systemprompt", "System prompt")).small().color(style::dim(ui))).id_salt(("chat_sys", rc.session, i)).show(ui, |ui| {
+                ui.label(RichText::new(&m.content).small().monospace());
+            });
+        }
+    }
+    if !(m.role == Role::Tool && cache.matched.contains(&i)) {
+        ui.add_space(S2 + 2.0);
+    }
 }
 
 fn error_col() -> Color32 {
@@ -176,32 +252,20 @@ fn user_bubble(ui: &mut Ui, m: &ChatMsg, editable: bool, lang: Lang, out: &mut C
     }
 }
 
-fn md_hash(s: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
-}
-
-/// Antwort des Modells: Markdown (nur bei geändertem Text neu geparst) und eine Zeile je Werkzeugaufruf.
+/// Antwort des Modells: Markdown (geparst nur, wenn sich die Nachricht geändert hat) und eine Zeile je Werkzeugaufruf.
 #[allow(clippy::too_many_arguments)]
-fn assistant(ui: &mut Ui, session: u64, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut std::collections::HashMap<usize, (u64, markdown::Doc)>, model: &str, lang: Lang) {
+fn assistant(ui: &mut Ui, session: u64, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache, model: &str, lang: Lang) {
     ui.label(RichText::new(model).small().color(style::dim(ui)));
     if !m.content.is_empty() {
-        let h = md_hash(&m.content);
-        let fresh = cache.get(&i).is_none_or(|(old, _)| *old != h);
-        if fresh {
-            cache.insert(i, (h, markdown::parse_plain(&m.content)));
-        }
-        if let Some((_, doc)) = cache.get(&i) {
-            let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };
-            let o = markdown::render(ui, doc, &opts);
-            if let Some(u) = o.clicked_url {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(u));
-            }
+        let doc = cache.md.entry(i).or_insert_with(|| markdown::parse_plain(&m.content));
+        let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };
+        let o = markdown::render(ui, doc, &opts);
+        if let Some(u) = o.clicked_url {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(u));
         }
     }
     for (k, c) in m.tool_calls.iter().enumerate() {
-        let result = msgs.iter().find(|r| r.role == Role::Tool && r.tool_call_id.as_deref() == Some(c.id.as_str()));
+        let result = cache.tool_results.get(&c.id).and_then(|j| msgs.get(*j));
         tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some(&c.arguments), result, lang);
     }
 }
@@ -253,6 +317,27 @@ fn error_box(ui: &mut Ui, e: &str, lang: Lang, out: &mut ChatOut) {
     });
 }
 
+/// Läuft gerade eine IME-Eingabe (Vorschautext)? Dann gehört Enter der IME (Übernehmen), nicht dem Senden.
+fn ime_composing(ui: &Ui, tid: Id) -> bool {
+    let key = tid.with("ime");
+    let mut composing = ui.data(|d| d.get_temp::<bool>(key)).unwrap_or(false);
+    let mut preedit_now = false;
+    ui.input(|i| {
+        for e in &i.events {
+            match e {
+                Event::Ime(egui::ImeEvent::Preedit(s)) => {
+                    composing = !s.is_empty();
+                    preedit_now |= !s.is_empty();
+                }
+                Event::Ime(egui::ImeEvent::Commit(_)) | Event::Ime(egui::ImeEvent::Disabled) => composing = false,
+                _ => {}
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(key, composing));
+    composing || preedit_now
+}
+
 /// Enter (ohne Umschalt/Strg/Alt) aus den Eingaben nehmen; Umschalt+Enter bleibt für die neue Zeile im Feld.
 fn take_plain_enter(ui: &Ui) -> bool {
     ui.input_mut(|i| {
@@ -279,7 +364,8 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
         });
     }
     let focused = ui.memory(|m| m.has_focus(tid));
-    if focused && !streaming && take_plain_enter(ui) {
+    // Enter sendet; während einer Antwort tut es nichts (auch keinen Zeilenumbruch). Nicht während einer IME-Eingabe.
+    if focused && !ime_composing(ui, tid) && take_plain_enter(ui) && !streaming {
         out.send = true;
     }
     if focused && chat.editing && ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -447,6 +533,50 @@ mod tests {
             let p = h.pos_of(retry).expect("Wiederholen-Knopf");
             assert!(h.click(&mut c, lang, p).regenerate);
         }
+    }
+
+    #[test]
+    fn enter_while_streaming_neither_sends_nor_adds_a_line_and_ime_keeps_enter() {
+        let backend = EchoBackend { delay: Duration::from_millis(50) };
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "a b c d e f g h".into();
+        c.send(&backend, &crate::chat::default_chat_meta(), Arc::new(|| {}));
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, true, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![Event::Text("x".into())]);
+        let o = h.frame(&mut c, Lang::En, false, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert!(!o.send);
+        assert_eq!(c.draft, "x", "kein Zeilenumbruch während der Antwort");
+        c.stop();
+        // IME: Enter während des Vorschautexts gehört der IME
+        let o = h.frame(&mut c, Lang::En, false, vec![Event::Ime(egui::ImeEvent::Preedit("ka".into()))]);
+        assert!(!o.send);
+        let o = h.frame(&mut c, Lang::En, false, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert!(!o.send, "Enter übernimmt den IME-Text, sendet nicht");
+        let o = h.frame(&mut c, Lang::En, false, vec![Event::Ime(egui::ImeEvent::Commit("か".into()))]);
+        assert!(!o.send);
+        let o = h.frame(&mut c, Lang::En, false, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert!(o.send, "nach dem Übernehmen sendet Enter wieder");
+    }
+
+    #[test]
+    fn a_frame_with_5000_messages_only_lays_out_the_visible_ones() {
+        let mut file = ChatFile::default();
+        for i in 0..5000 {
+            file.messages.push(ChatMsg::new(if i % 2 == 0 { Role::User } else { Role::Assistant }, format!("m{i}")));
+        }
+        let mut c = ChatState::new(file, None);
+        let mut h = H::new();
+        let t = Instant::now();
+        for _ in 0..4 {
+            h.frame(&mut c, Lang::En, false, vec![]);
+        }
+        let drawn = h.texts.iter().filter(|t| t.starts_with('m') && t[1..].chars().all(|c| c.is_ascii_digit()) && t.len() > 1).count();
+        assert!(drawn > 0 && drawn < 200, "nur sichtbare Nachrichten werden gezeichnet: {drawn}");
+        assert!(h.texts.iter().any(|t| t == "m4999"), "nach dem Öffnen steht das Ende im Bild");
+        assert!(t.elapsed() < Duration::from_secs(5), "vier Bilder dauerten {:?}", t.elapsed());
+        // Zwischenspeicher: nur gezeichnete Antworten sind geparst
+        assert!(c.ui.md.len() < 200, "{}", c.ui.md.len());
     }
 
     #[test]

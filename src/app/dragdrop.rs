@@ -243,8 +243,8 @@ impl App {
         }
         let id = target.map(|t| t.0).unwrap_or(self.focused);
         if let Some(e) = self.entries.get_mut(&id).filter(|e| e.is_chat()) {
-            // Chat: Pfade unverändert ins Eingabefeld.
-            let text: Vec<String> = files.iter().filter_map(|f| f.path.as_ref()).map(|p| p.to_string_lossy().to_string()).collect();
+            // Chat: Pfade ins Eingabefeld, mit Leerzeichen in Anführungszeichen.
+            let text: Vec<String> = files.iter().filter_map(|f| f.path.as_ref()).map(|p| quote_path(&p.to_string_lossy())).collect();
             if !text.is_empty() {
                 e.insert_text(&text.join(" "), false);
             }
@@ -368,4 +368,9 @@ impl App {
             t.set_tooltip(&tip);
         }
     }
+}
+
+/// Pfad für ein Chat-Eingabefeld: mit Leerzeichen in "…".
+fn quote_path(p: &str) -> String {
+    if p.contains(char::is_whitespace) { format!("\"{p}\"") } else { p.to_string() }
 }

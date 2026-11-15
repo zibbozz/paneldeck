@@ -310,16 +310,25 @@ impl App {
         // Schließen bestätigen
         if let Some(id) = self.confirm_close {
             let name = self.entries.get(&id).map(|e| e.display_name()).unwrap_or_default();
+            let chat = self.entries.get(&id).is_some_and(|e| e.is_chat());
             egui::Window::new(lang.t("Sitzung schließen?", "Close session?"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
                 .show(ctx, |ui| {
-                    ui.label(format!(
-                        "{} {}",
-                        lang.q(&name),
-                        lang.t("läuft noch. Beim Schließen wird der Prozess beendet.", "is still running. Closing will terminate the process.")
-                    ));
+                    if chat {
+                        ui.label(format!(
+                            "{}: {}",
+                            lang.q(&name),
+                            lang.t("Der Chatverlauf wird gelöscht (eine laufende Antwort wird abgebrochen).", "The chat history will be deleted (a running answer is stopped).")
+                        ));
+                    } else {
+                        ui.label(format!(
+                            "{} {}",
+                            lang.q(&name),
+                            lang.t("läuft noch. Beim Schließen wird der Prozess beendet.", "is still running. Closing will terminate the process.")
+                        ));
+                    }
                     ui.horizontal(|ui| {
                         if ui.button(lang.t("Schließen", "Close")).clicked() {
                             actions.push(Action::Close(id));

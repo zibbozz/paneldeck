@@ -79,7 +79,7 @@ A failed call returns `isError` with a code at the start of the text (`code: mes
 - `wrong_mode` – the tool belongs to the other to-do mode.
 - `permission_pending` – the session waits for the user's approval decision.
 - `bad_args`, `too_large`, `timeout`, `busy`, `internal` – fix the arguments, make the request smaller or try again later.
-- Sessions: `admin_profile` (administrator profiles are not allowed), `spawn_failed`, `session_not_running`, `session_exited`, `session_closed`, `not_claude`, `claude_session` (no command line in Claude sessions), `claude_mode_off`, `status_unavailable`, `no_shell_integration`, `fullscreen_program`.
+- Sessions: `admin_profile` (administrator profiles are not allowed), `spawn_failed`, `session_not_running`, `session_exited`, `session_closed`, `not_claude`, `not_a_terminal` (the session is a chat, not a terminal), `claude_session` (no command line in Claude sessions), `claude_mode_off`, `status_unavailable`, `no_shell_integration`, `fullscreen_program`.
 - Screenshots: `window_hidden`, `not_visible`, `screenshot_timeout`, `empty_image`.
 - Tickets and to-do list: `invalid_value`, `required_missing`, `transition_needs_fields`, `transition_not_allowed`, `conditions_not_met`, `hierarchy_violation`, `link_not_allowed`, `already_exists`, `invalid_query`, `feature_disabled`, `no_workflow`, `status_not_in_workflow`, `conflict`, `db_error`, `db_unavailable`.
 
@@ -135,7 +135,7 @@ Ein fehlgeschlagener Aufruf liefert `isError` mit einem Code am Anfang des Texte
 - `wrong_mode` – das Werkzeug gehört zum anderen Todo-Modus.
 - `permission_pending` – die Sitzung wartet auf die Freigabe-Entscheidung des Nutzers.
 - `bad_args`, `too_large`, `timeout`, `busy`, `internal` – Argumente korrigieren, die Anfrage verkleinern oder später erneut versuchen.
-- Sitzungen: `admin_profile` (Administrator-Profile sind nicht erlaubt), `spawn_failed`, `session_not_running`, `session_exited`, `session_closed`, `not_claude`, `claude_session` (keine Befehlszeile in Claude-Sitzungen), `claude_mode_off`, `status_unavailable`, `no_shell_integration`, `fullscreen_program`.
+- Sitzungen: `admin_profile` (Administrator-Profile sind nicht erlaubt), `spawn_failed`, `session_not_running`, `session_exited`, `session_closed`, `not_claude`, `not_a_terminal` (die Sitzung ist ein Chat, kein Terminal), `claude_session` (keine Befehlszeile in Claude-Sitzungen), `claude_mode_off`, `status_unavailable`, `no_shell_integration`, `fullscreen_program`.
 - Screenshots: `window_hidden`, `not_visible`, `screenshot_timeout`, `empty_image`.
 - Tickets und Todo-Liste: `invalid_value`, `required_missing`, `transition_needs_fields`, `transition_not_allowed`, `conditions_not_met`, `hierarchy_violation`, `link_not_allowed`, `already_exists`, `invalid_query`, `feature_disabled`, `no_workflow`, `status_not_in_workflow`, `conflict`, `db_error`, `db_unavailable`.
 

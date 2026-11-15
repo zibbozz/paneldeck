@@ -109,6 +109,10 @@ impl Entry {
             None => !self.exited(),
         }
     }
+    /// Chat mit mindestens einer Nachricht (Schließen löscht diesen Verlauf).
+    fn chat_has_history(&self) -> bool {
+        self.chat.as_ref().is_some_and(|c| !c.messages().is_empty())
+    }
     /// Modellname eines Chats (leer bei Terminals).
     fn chat_model(&self) -> &str {
         self.meta.chat.as_ref().map(|c| c.model.as_str()).unwrap_or("")
@@ -977,6 +981,8 @@ impl App {
             app.spawn_into(&cc.egui_ctx, &mut entry, Launch { restore: true, restart: false, continue_last: false, prompt: None, resume_id: None });
             app.entries.insert(id, entry);
         }
+        // Keine Id vergeben, zu der noch Verlauf/Scrollback daliegt (Absturz vor dem Speichern, zurückgesetzte state.json).
+        app.next_id = app.next_id.max(chatmod::store::max_used_id(&app.dir).saturating_add(1));
         // Projekte: ältere Stände ohne Projekte bekommen ein Standardprojekt.
         if app.projects.is_empty() {
             app.projects.push(Project {
@@ -1484,6 +1490,8 @@ impl App {
         }
         let entry = match chat_meta {
             Some(cm) => {
+                // Liegt unter dieser Id noch ein fremder Verlauf, wird er beiseitegelegt, nie geladen oder überschrieben.
+                let _ = chatmod::store::set_aside(&chatmod::store::path(&self.dir, id));
                 let meta = SessionMeta { kind: SessionKind::Chat, chat: Some(cm), shell_id: String::new(), ..meta };
                 let mut chat = ChatState::new(chatmod::ChatFile::default(), None);
                 chat.focus_input = true;
@@ -1683,7 +1691,7 @@ impl App {
         self.git.remove(id);
         let _ = std::fs::remove_file(self.scrollback_path(id));
         // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
-        let _ = std::fs::remove_file(chatmod::store::path(&self.dir, id));
+        chatmod::store::remove(&self.dir, id);
         if self.layout.is_none() {
             if let Some(first) = self.docked_ids().first().copied() {
                 self.activate(first);
@@ -1737,7 +1745,7 @@ impl App {
         for (id, e) in &self.entries {
             if let Some(c) = &e.chat {
                 if c.dirty() {
-                    if chatmod::store::save(&chatmod::store::path(&self.dir, *id), &c.file).is_ok() {
+                    if chatmod::store::save(&chatmod::store::path(&self.dir, *id), &c.file_for_save()).is_ok() {
                         c.mark_saved();
                     }
                 }
@@ -2218,7 +2226,7 @@ impl App {
 
     fn save_chat(&self, id: u64) {
         if let Some(c) = self.entries.get(&id).and_then(|e| e.chat.as_ref()) {
-            if chatmod::store::save(&chatmod::store::path(&self.dir, id), &c.file).is_ok() {
+            if chatmod::store::save(&chatmod::store::path(&self.dir, id), &c.file_for_save()).is_ok() {
                 c.mark_saved();
             }
         }
@@ -2228,7 +2236,7 @@ impl App {
     fn chat_action(&mut self, ctx: &egui::Context, id: u64, a: &Action) {
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();
-        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint_of(egui::ViewportId::ROOT));
+        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
         let Some(e) = self.entries.get_mut(&id) else { return };
         let meta = e.meta.chat.clone().unwrap_or_default();
         let Some(c) = e.chat.as_mut() else { return };
@@ -2468,6 +2476,8 @@ impl App {
                     p.profile = prof;
                 }
             }
+            // Die Warteschlange gibt es nur für Terminals (Claude), nicht für Chats.
+            Action::OpenQueue(id) | Action::QueueAdd(id, _) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {}
             Action::OpenQueue(id) => {
                 self.queue_open = if self.queue_open == Some(id) { None } else { Some(id) };
             }
@@ -2931,8 +2941,8 @@ impl App {
                 self.wt_close = Some(WtClose { id, changes, discard: false });
             }
             Action::RequestClose(id) => {
-                // Chat: nur nachfragen, solange eine Antwort läuft.
-                let running = self.entries.get(&id).is_some_and(|e| e.running());
+                // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft).
+                let running = self.entries.get(&id).is_some_and(|e| e.running() || e.chat_has_history());
                 if running && self.settings.confirm_close {
                     self.confirm_close = Some(id);
                 } else {
@@ -3321,9 +3331,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         if !cx.detached {
             edge_buttons(ui, id, body, cx, false);
         }
-        if cx.broadcast {
-            ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::from_rgb(0xd9, 0x77, 0x57)), StrokeKind::Inside);
-        }
+        // Kein Broadcast-Rahmen: Chats bekommen keine Broadcast-Eingaben.
         return;
     }
 

@@ -33,7 +33,10 @@ Copy-Item $Exe "$dir\paneldeck.exe"
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
-Remove-Item Env:PANELDECK_DATA, Env:PANELDECK_HUB_DATA, Env:PANELDECK_HUB_BASE -ErrorAction SilentlyContinue
+# Alle PANELDECK_*-Variablen eines umgebenden Paneldeck-Terminals entfernen: PANELDECK_SESSION/PORT/TOKEN (vom Hub in
+# jedes Terminal gesetzt) liessen die Bruecke sonst als "Sitzung 1" der Test-Instanz gelten, und die Pruefungen
+# "von aussen" schluegen fehl, wenn das Skript selbst in einem Paneldeck-Terminal laeuft.
+Get-ChildItem Env: | Where-Object { $_.Name -like 'PANELDECK_*' } | ForEach-Object { Remove-Item -LiteralPath "Env:$($_.Name)" -ErrorAction SilentlyContinue }
 $script:extra = @()
 $script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
@@ -119,6 +122,7 @@ try {
   $ls = Tool 'list_sessions'; Check 'list_sessions' (-not $ls.err -and $ls.data.sessions.Count -ge 1)
   $sid = $ls.data.sessions[0].id
   Check 'list_sessions: Feld window (0 = Hauptfenster)' ($ls.data.sessions[0].PSObject.Properties.Name -contains 'window' -and $ls.data.sessions[0].window -eq 0)
+  Check 'list_sessions: Terminal hat kind = terminal' ($ls.data.sessions[0].kind -eq 'terminal') ($ls.data.sessions[0] | ConvertTo-Json -Compress)
   $rt = Tool 'read_terminal' @{ session = $sid; lines = 5 }; Check 'read_terminal' (-not $rt.err -and $null -ne $rt.data.text)
   Check 'get_usage' (-not (Tool 'get_usage').err)
   Check 'search_history' (-not (Tool 'search_history' @{ query = 'smoke-test-gibt-es-nicht-xyz' }).err)
@@ -574,6 +578,29 @@ c.close()
   $kx = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Von-aussen-F' }
   Check 'create_session von aussen: Hauptfenster (window = 0)' (((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $kx.data.id }).window -eq 0)
   [void](InA 'close_session' @{ session = $K2 }); [void](Tool 'close_session' @{ session = $kx.data.id })
+
+  Write-Host "== Chat-Sitzung (#63): Wiederherstellung aus state.json, kind/model, Terminal-Werkzeuge" -ForegroundColor Cyan
+  Stop-Hub
+  $st = [ordered]@{
+    sessions = @(
+      [ordered]@{ id = 950; name = 'Smoke-Chat'; custom_name = $true; cwd = "$proj"; project = 1; kind = 'chat'; chat = [ordered]@{ server = 'echo'; model = 'smoke-model' } },
+      [ordered]@{ id = 951; name = 'Smoke-Term'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1 })
+    next_id = 952; projects = @([ordered]@{ id = 1; name = 'Standard' }); active_project = 1
+  }
+  New-Item -ItemType Directory -Force "$data\chats" | Out-Null
+  $hist = [ordered]@{ version = 1; messages = @([ordered]@{ role = 'user'; content = 'hi'; ts = 1 }, [ordered]@{ role = 'assistant'; content = 'smoke-answer'; ts = 2 }) }
+  [IO.File]::WriteAllText("$data\chats\950.json", ($hist | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+  [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+  Set-Level 'Control' -Tray
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 3
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $ch = $ss | Where-Object { $_.id -eq 950 }; $te = $ss | Where-Object { $_.id -eq 951 }
+  Check 'list_sessions: Chat aus state.json wiederhergestellt (kind = chat, model)' ($ch.kind -eq 'chat' -and $ch.model -eq 'smoke-model') ($ch | ConvertTo-Json -Compress)
+  Check 'list_sessions: wiederhergestelltes Terminal hat kind = terminal' ($te.kind -eq 'terminal' -and $null -eq $te.model) ($te | ConvertTo-Json -Compress)
+  Check 'read_terminal auf einem Chat -> not_a_terminal' ((Code (Tool 'read_terminal' @{ session = 950 })) -eq 'not_a_terminal')
+  Check 'send_text auf einem Chat -> not_a_terminal' ((Code (Tool 'send_text' @{ session = 950; text = 'x' })) -eq 'not_a_terminal')
+  Check 'Chatverlauf chats/950.json bleibt beim Start erhalten' ([IO.File]::ReadAllText("$data\chats\950.json") -match 'smoke-answer')
 } finally {
   Stop-Hub
   foreach ($h in $script:extra) { if ($h -and -not $h.HasExited) { $h.Kill() } }

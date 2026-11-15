@@ -378,7 +378,14 @@ impl App {
                     actions.push(Action::FolderBroadcast(path.clone()));
                     ui.close();
                 }
-                if armed_button(ui, ("closeall", &path), lang.t("Alle Sitzungen schließen …", "Close all sessions …"), lang.t("Wirklich alle schließen? Nochmal klicken", "Really close all? Click again")) {
+                // Chats mit Verlauf im Ordner: die Bestätigung sagt, dass deren Verläufe gelöscht werden.
+                let chat_history = self.folder_sessions(&path).iter().any(|id| self.entries.get(id).is_some_and(|e| e.chat_has_history()));
+                let confirm = if chat_history {
+                    lang.t("Wirklich alle schließen? Chatverläufe werden gelöscht. Nochmal klicken", "Really close all? Chat histories will be deleted. Click again")
+                } else {
+                    lang.t("Wirklich alle schließen? Nochmal klicken", "Really close all? Click again")
+                };
+                if armed_button(ui, ("closeall", &path), lang.t("Alle Sitzungen schließen …", "Close all sessions …"), confirm) {
                     actions.push(Action::FolderCloseAll(path.clone()));
                     ui.close();
                 }

@@ -27,8 +27,27 @@ pub struct ChatState {
     /// Änderungszähler; `saved` merkt sich den zuletzt gespeicherten Stand (Speichern läuft über `&self`).
     rev: u64,
     saved: Cell<u64>,
-    /// Geparste Antworten fürs Zeichnen: Index → (Inhalt-Hash, Dokument). Nur neu parsen, wenn sich der Text ändert.
-    pub md_cache: std::collections::HashMap<usize, (u64, crate::markdown::Doc)>,
+    /// Ab diesem Index haben sich Nachrichten seit dem letzten Zeichnen geändert (die Oberfläche setzt es zurück).
+    pub changed_from: usize,
+    /// Entwurf, der vor „Bearbeiten“ im Eingabefeld stand (kommt bei „Abbrechen“ zurück).
+    draft_before_edit: Option<String>,
+    /// Zwischenspeicher der Oberfläche (geparstes Markdown, Werkzeug-Zuordnung, Zeilenhöhen).
+    pub ui: UiCache,
+}
+
+/// Was die Oberfläche je Chat zwischenspeichert, damit ein Bild nicht den ganzen Verlauf durchgeht.
+#[derive(Default)]
+pub struct UiCache {
+    /// Geparste Antworten: Index → Dokument (neu geparst ab `changed_from`).
+    pub md: std::collections::HashMap<usize, crate::markdown::Doc>,
+    /// Stand (`rev`), für den `tool_results`/`matched` gelten.
+    pub tool_rev: Option<u64>,
+    /// Werkzeugaufruf-Id → Index der Ergebnis-Nachricht.
+    pub tool_results: std::collections::HashMap<String, usize>,
+    /// Ergebnis-Nachrichten, die in der Zeile ihres Aufrufs stehen (nicht einzeln zeichnen).
+    pub matched: std::collections::HashSet<usize>,
+    /// Zuletzt gemessene Zeilenhöhen je Nachricht (0 = noch nicht gemessen; sichtbare Zeilen werden jedes Bild neu gemessen).
+    pub heights: Vec<f32>,
 }
 
 /// Ergebnis von [`ChatState::poll`].
@@ -42,7 +61,45 @@ pub struct Polled {
 
 impl ChatState {
     pub fn new(file: ChatFile, warning: Option<String>) -> Self {
-        ChatState { file, draft: String::new(), editing: false, turn: None, turn_msg: 0, follow: true, focus_input: false, warning, rev: 0, saved: Cell::new(0), md_cache: Default::default() }
+        ChatState {
+            file,
+            draft: String::new(),
+            editing: false,
+            turn: None,
+            turn_msg: 0,
+            follow: true,
+            focus_input: false,
+            warning,
+            rev: 0,
+            saved: Cell::new(0),
+            changed_from: 0,
+            draft_before_edit: None,
+            ui: UiCache::default(),
+        }
+    }
+
+    /// Änderungszähler (für Zwischenspeicher der Oberfläche).
+    pub fn rev(&self) -> u64 {
+        self.rev
+    }
+
+    /// Nachrichten ab `i` haben sich geändert.
+    fn changed(&mut self, i: usize) {
+        self.changed_from = self.changed_from.min(i);
+        self.touch();
+    }
+
+    /// Was gespeichert wird: läuft gerade eine Antwort, ist sie in der Datei als unterbrochen markiert (endet der Hub
+    /// vorher, zeigt der Chat nach dem Neustart „Wiederholen“). Die fertige Antwort überschreibt das später.
+    pub fn file_for_save(&self) -> std::borrow::Cow<'_, ChatFile> {
+        if !self.streaming() {
+            return std::borrow::Cow::Borrowed(&self.file);
+        }
+        let mut f = self.file.clone();
+        if let Some(m) = f.messages.get_mut(self.turn_msg) {
+            m.error = Some(state::t("unterbrochen", "interrupted").to_string());
+        }
+        std::borrow::Cow::Owned(f)
     }
 
     pub fn messages(&self) -> &[ChatMsg] {
@@ -78,10 +135,13 @@ impl ChatState {
         if text.is_empty() || self.streaming() {
             return false;
         }
+        let at = logic::last_user(&self.file.messages).filter(|_| self.editing).unwrap_or(self.file.messages.len());
         if !(self.editing && logic::apply_edit(&mut self.file.messages, &text)) {
             self.file.messages.push(ChatMsg::new(Role::User, text));
         }
+        self.changed(at);
         self.editing = false;
+        self.draft_before_edit = None;
         self.draft.clear();
         self.start_turn(backend, meta, repaint);
         true
@@ -92,18 +152,20 @@ impl ChatState {
         if self.streaming() || !logic::truncate_after_last_user(&mut self.file.messages) {
             return false;
         }
+        self.changed(self.file.messages.len());
         self.start_turn(backend, meta, repaint);
         true
     }
 
     fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, repaint: Repaint) {
-        self.file.context_start = logic::clamp_context_start(self.file.context_start, self.file.messages.len());
+        // Die Kürzung gilt nur für eine Anfrage; das Backend meldet sie neu (`TurnEvent::ContextStart`), wenn es kürzt.
+        self.file.context_start = None;
         let handle = backend.start(meta, &self.file.messages, repaint);
         self.file.messages.push(ChatMsg::new(Role::Assistant, ""));
         self.turn_msg = self.file.messages.len() - 1;
         self.turn = Some(handle);
         self.follow = true;
-        self.touch();
+        self.changed(self.turn_msg);
     }
 
     /// Letzte eigene Nachricht zurück ins Eingabefeld holen.
@@ -112,26 +174,31 @@ impl ChatState {
             return false;
         }
         let Some(i) = logic::last_user(&self.file.messages) else { return false };
+        if !self.editing {
+            self.draft_before_edit = Some(std::mem::take(&mut self.draft));
+        }
         self.draft = self.file.messages[i].content.clone();
         self.editing = true;
         self.focus_input = true;
         true
     }
 
+    /// Bearbeiten abbrechen: der vorherige Entwurf kommt zurück.
     pub fn cancel_edit(&mut self) {
         if self.editing {
             self.editing = false;
-            self.draft.clear();
+            self.draft = self.draft_before_edit.take().unwrap_or_default();
         }
     }
 
-    /// Laufende Antwort abbrechen; bis dahin Geschriebenes bleibt stehen, eine leere Antwort fällt weg.
+    /// Laufende Antwort abbrechen; bis dahin Geschriebenes bleibt stehen, eine leere Antwort fällt weg. Was schon
+    /// angekommen ist, wird vorher abgeholt – ist die Antwort dabei schon fertig, bleibt sie vollständig.
     pub fn stop(&mut self) {
-        if self.turn.take().is_none() {
+        if self.poll().finished || self.turn.take().is_none() {
             return;
         }
         self.drop_empty_answer();
-        self.touch();
+        self.changed(self.turn_msg);
     }
 
     fn drop_empty_answer(&mut self) {
@@ -198,7 +265,7 @@ impl ChatState {
             }
         }
         if p.changed {
-            self.touch();
+            self.changed(i);
         }
         p
     }
@@ -288,6 +355,71 @@ mod tests {
         std::thread::sleep(Duration::from_millis(80));
         c.poll();
         assert_eq!(c.messages()[2].content, partial, "nach Stopp kommt nichts mehr an");
+    }
+
+    #[test]
+    fn context_start_is_reset_for_every_request() {
+        let b = EchoBackend { delay: Duration::ZERO };
+        let meta = crate::chat::default_chat_meta();
+        let mut c = ChatState::new(ChatFile::default(), None);
+        for q in ["a", "b /cut"] {
+            c.draft = q.into();
+            c.send(&b, &meta, Arc::new(|| {}));
+            pump(&mut c);
+        }
+        assert_eq!(c.file.context_start, Some(2));
+        c.draft = "c".into();
+        c.send(&b, &meta, Arc::new(|| {}));
+        assert_eq!(c.file.context_start, None, "alte Kürzung gilt nicht für die neue Anfrage");
+        pump(&mut c);
+        assert_eq!(c.file.context_start, None);
+        // Neu erzeugen ebenso
+        c.file.context_start = Some(1);
+        c.regenerate(&b, &meta, Arc::new(|| {}));
+        assert_eq!(c.file.context_start, None);
+    }
+
+    #[test]
+    fn stop_after_the_answer_is_already_done_keeps_it_complete() {
+        let b = EchoBackend { delay: Duration::ZERO };
+        let meta = crate::chat::default_chat_meta();
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "hello there".into();
+        c.send(&b, &meta, Arc::new(|| {}));
+        // Warten, bis der Thread alles geschickt hat (Done liegt im Kanal), aber nicht abholen
+        std::thread::sleep(Duration::from_millis(200));
+        c.stop();
+        assert!(!c.streaming());
+        assert_eq!(c.messages()[1].content, EchoBackend::reply(&meta, "hello there"), "fertige Antwort geht beim Stopp nicht verloren");
+        assert!(c.messages()[1].error.is_none());
+    }
+
+    #[test]
+    fn cancel_edit_restores_the_previous_draft() {
+        let b = EchoBackend { delay: Duration::ZERO };
+        let meta = crate::chat::default_chat_meta();
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "q".into();
+        c.send(&b, &meta, Arc::new(|| {}));
+        pump(&mut c);
+        c.draft = "half typed".into();
+        assert!(c.begin_edit());
+        assert_eq!(c.draft, "q");
+        c.cancel_edit();
+        assert_eq!(c.draft, "half typed");
+    }
+
+    #[test]
+    fn saving_while_streaming_marks_the_answer_interrupted() {
+        let slow = EchoBackend { delay: Duration::from_millis(50) };
+        let meta = crate::chat::default_chat_meta();
+        let mut c = ChatState::new(ChatFile::default(), None);
+        assert!(matches!(c.file_for_save(), std::borrow::Cow::Borrowed(_)));
+        c.draft = "a b c d e f".into();
+        c.send(&slow, &meta, Arc::new(|| {}));
+        let f = c.file_for_save();
+        assert_eq!(f.messages[1].error.as_deref(), Some("interrupted"));
+        assert!(c.messages()[1].error.is_none(), "nur die gespeicherte Fassung ist markiert");
     }
 
     #[test]

@@ -189,22 +189,88 @@ pub fn save(path: &Path, file: &ChatFile) -> std::io::Result<()> {
     state::write_atomic(path, &data)
 }
 
-/// JSON der Datei, höchstens `cap` Bytes groß (älteste Nachrichten fallen weg).
+/// JSON der Datei (kompakt), höchstens `cap` Bytes groß: jede Nachricht wird genau einmal serialisiert; reicht der Platz
+/// nicht, fallen die ältesten Nachrichten nach den Systemnachrichten am Anfang weg (anhand der gemessenen Größen).
 pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
-    let mut data = serde_json::to_vec_pretty(file).unwrap_or_default();
-    if data.len() <= cap {
-        return data;
+    let parts: Vec<Vec<u8>> = file.messages.iter().map(|m| serde_json::to_vec(m).unwrap_or_else(|_| b"{}".to_vec())).collect();
+    let keep_from = file.messages.iter().take_while(|m| m.role == Role::System).count();
+    let size = |from: usize| -> usize { parts[..keep_from].iter().chain(&parts[from..]).map(|p| p.len() + 1).sum() };
+    // Kopf ohne Nachrichten (+ Reserve für context_start): `{"version":1,"context_start":N,"messages":[]}`
+    let head_len = 64;
+    let mut drop_to = keep_from;
+    if head_len + size(keep_from) > cap {
+        let mut total = size(keep_from);
+        while drop_to < parts.len() && head_len + total > cap {
+            total -= parts[drop_to].len() + 1;
+            drop_to += 1;
+        }
     }
-    let mut f = file.clone();
-    let keep_from = f.messages.iter().take_while(|m| m.role == Role::System).count();
-    while data.len() > cap && f.messages.len() > keep_from {
-        // In größeren Schritten kürzen (ein Zehntel), damit es bei langen Verläufen nicht quadratisch wird.
-        let n = ((f.messages.len() - keep_from) / 10).max(1);
-        f.messages.drain(keep_from..keep_from + n);
-        f.context_start = f.context_start.map(|c| c.saturating_sub(n).max(keep_from)).filter(|c| *c > keep_from);
-        data = serde_json::to_vec_pretty(&f).unwrap_or_default();
+    let dropped = drop_to - keep_from;
+    // Gekürzt: der Index rückt nach; lag er im weggefallenen Teil, sieht das Modell ohnehin alles Übrige.
+    let context_start = if dropped == 0 { file.context_start } else { file.context_start.and_then(|c| (c >= drop_to).then(|| c - dropped)).filter(|c| *c > keep_from) };
+    let head = ChatFile { version: file.version, context_start, messages: Vec::new() };
+    let mut data = serde_json::to_vec(&head).unwrap_or_default();
+    // `messages` ist das letzte Feld: `…"messages":[]}` → Nachrichten zwischen die Klammern setzen.
+    data.truncate(data.len().saturating_sub(2));
+    let mut first = true;
+    for p in parts[..keep_from].iter().chain(&parts[drop_to..]) {
+        if !first {
+            data.push(b',');
+        }
+        first = false;
+        data.extend_from_slice(p);
     }
+    data.extend_from_slice(b"]}");
     data
+}
+
+/// Höchste Sitzungs-Id, zu der es im Datenordner noch Dateien gibt (`chats/<id>…`, `scrollback/<id>…`). Damit vergibt
+/// der Hub nach einem Absturz oder einer zurückgesetzten `state.json` keine Id, deren alter Verlauf noch daliegt.
+pub fn max_used_id(data_dir: &Path) -> u64 {
+    let mut max = 0;
+    for sub in ["chats", "scrollback"] {
+        let Ok(rd) = std::fs::read_dir(data_dir.join(sub)) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.len() < name.len() && name[digits.len()..].starts_with('.') {
+                if let Ok(n) = digits.parse::<u64>() {
+                    max = max.max(n);
+                }
+            }
+        }
+    }
+    max
+}
+
+/// Fremden Verlauf unter dieser Id beiseitelegen (`<id>.orphan-<zeit>.json`), statt ihn zu laden oder zu überschreiben.
+pub fn set_aside(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    let secs = super::now_secs();
+    let mut target = path.with_file_name(format!("{stem}.orphan-{secs}.json"));
+    let mut n = 2;
+    while target.exists() {
+        target = path.with_file_name(format!("{stem}.orphan-{secs}-{n}.json"));
+        n += 1;
+    }
+    std::fs::rename(path, &target).ok()?;
+    Some(target)
+}
+
+/// Verlauf eines geschlossenen Chats löschen, samt seiner Sicherungen beschädigter Dateien (`<id>.defekt-*.json`).
+pub fn remove(data_dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(path(data_dir, id));
+    let prefix = format!("{id}.defekt-");
+    if let Ok(rd) = std::fs::read_dir(dir(data_dir)) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -240,10 +306,13 @@ mod tests {
         assert!(note.is_none(), "{note:?}");
         assert_eq!(back, f);
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("\"version\": 1"));
-        assert!(text.contains("\"status\": \"ok\""));
+        assert!(text.contains("\"version\":1"));
+        assert!(text.contains("\"status\":\"ok\""));
         // Leere optionale Felder werden nicht geschrieben
-        assert!(!text.contains("\"tool_calls\": []"));
+        assert!(!text.contains("\"tool_calls\":[]"));
+        // Ohne context_start und ohne Nachrichten bleibt es gültiges JSON
+        let (empty, _) = parse(std::str::from_utf8(&serialize_capped(&ChatFile::default(), 1000)).unwrap()).unwrap();
+        assert_eq!(empty, ChatFile::default());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -312,6 +381,32 @@ mod tests {
         assert_eq!(back.messages[0].role, Role::System);
         assert!(back.messages.len() < 201);
         assert!(back.messages.last().unwrap().content.starts_with("199-"), "die neuesten bleiben");
+        assert!(data.len() > 6_000, "nicht mehr als nötig gekürzt");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn used_ids_orphans_and_removal() {
+        let d = tmp("ids");
+        std::fs::create_dir_all(dir(&d)).unwrap();
+        std::fs::create_dir_all(d.join("scrollback")).unwrap();
+        assert_eq!(max_used_id(&tmp("ids-none")), 0);
+        std::fs::write(path(&d, 12), "{}").unwrap();
+        std::fs::write(dir(&d).join("40.defekt-1.json"), "x").unwrap();
+        std::fs::write(d.join("scrollback").join("77.txt"), "x").unwrap();
+        std::fs::write(d.join("scrollback").join("notes.txt"), "x").unwrap();
+        std::fs::write(d.join("scrollback").join("999"), "x").unwrap();
+        assert_eq!(max_used_id(&d), 77);
+        // Beiseitelegen: Datei weg, Inhalt in der Sicherung
+        let b = set_aside(&path(&d, 12)).unwrap();
+        assert!(!path(&d, 12).exists());
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "{}");
+        assert!(set_aside(&path(&d, 12)).is_none());
+        // Löschen: Verlauf und Sicherungen beschädigter Dateien, nicht beiseitegelegte fremde Verläufe
+        std::fs::write(path(&d, 40), "{}").unwrap();
+        remove(&d, 40);
+        assert!(!path(&d, 40).exists() && !dir(&d).join("40.defekt-1.json").exists());
+        assert!(b.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 }
