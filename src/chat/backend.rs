@@ -19,8 +19,8 @@ pub type Repaint = Arc<dyn Fn() + Send + Sync>;
 pub enum TurnEvent {
     /// Nächstes Stück Antworttext.
     Delta(String),
-    /// Das Modell verlangt einen Werkzeugaufruf (die Werkzeug-Schleife folgt; bisher nur vom Echo-Backend).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Das Modell verlangt einen Werkzeugaufruf (kommt direkt vor `Done`; die Werkzeug-Schleife in `ChatState` führt
+    /// ihn nach dem Ende der Antwort aus).
     ToolCall(ToolCall),
     /// Für diese Anfrage wurden ältere Nachrichten weggelassen: Index (im übergebenen Verlauf) der ersten, die das
     /// Modell noch sieht.
@@ -120,6 +120,8 @@ impl ChatBackend for EchoBackend {
         // Wie ein echtes Backend: fehlgeschlagene Antworten gehören nicht in die Anfrage.
         let last = history.iter().filter(|m| super::logic::sendable(m)).rev().find(|m| m.role == Role::User).map(|m| m.content.clone()).unwrap_or_default();
         let n = history.len();
+        // Werkzeugaufruf nur auf die Frage selbst, nicht noch einmal nach dem Ergebnis (sonst endlose Runde).
+        let tool = last.contains("/tool") && history.last().is_some_and(|m| m.role == Role::User);
         let reply = Self::reply(meta, &last);
         let delay = if last.contains("/slow") { self.delay.max(Duration::from_millis(150)) } else { self.delay };
         std::thread::spawn(move || {
@@ -136,7 +138,7 @@ impl ChatBackend for EchoBackend {
             if last.contains("/cut") && n > 0 {
                 send(TurnEvent::ContextStart(n - 1));
             }
-            if last.contains("/tool") {
+            if tool {
                 send(TurnEvent::ToolCall(ToolCall { id: "echo-1".into(), name: "list_sessions".into(), arguments: serde_json::json!({"include_exited": false}) }));
             }
             // Wortweise, Leerraum bleibt am Wort (Zeilenumbrüche des Markdowns bleiben erhalten).

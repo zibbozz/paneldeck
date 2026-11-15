@@ -1,6 +1,47 @@
 //! Reine Funktionen auf der Nachrichtenliste eines Chats (ohne Oberfläche, ohne Backend).
 
-use super::store::{ChatMsg, Role};
+use super::store::{ChatMsg, Role, ToolCall, ToolStatus};
+
+/// Ergebnis-Nachricht zu einem Werkzeugaufruf.
+pub fn tool_result(call: &ToolCall, status: ToolStatus, content: String) -> ChatMsg {
+    let mut m = ChatMsg::new(Role::Tool, content);
+    m.tool_call_id = Some(call.id.clone());
+    m.tool_name = Some(call.name.clone());
+    m.status = Some(status);
+    m
+}
+
+/// Werkzeugaufrufe ohne Ergebnis bekommen eines (`result`, z. B. „unterbrochen“), direkt hinter die vorhandenen
+/// Ergebnisse ihrer Antwort. So bleibt der Verlauf für das Modell stimmig (zu jedem Aufruf genau ein Ergebnis), auch
+/// nach einem Absturz oder Stopp mitten in einer Werkzeug-Runde. Fehlgeschlagene Antworten werden nicht gesendet und
+/// bleiben unberührt. Gibt die Zahl der ergänzten Ergebnisse zurück.
+pub fn close_orphans(msgs: &mut Vec<ChatMsg>, result: impl Fn() -> (ToolStatus, String)) -> usize {
+    let mut added = 0;
+    let mut i = 0;
+    while i < msgs.len() {
+        if msgs[i].role != Role::Assistant || msgs[i].tool_calls.is_empty() || msgs[i].error.is_some() {
+            i += 1;
+            continue;
+        }
+        let calls = msgs[i].tool_calls.clone();
+        let mut j = i + 1;
+        let mut answered = std::collections::HashSet::new();
+        while j < msgs.len() && msgs[j].role == Role::Tool {
+            if let Some(id) = &msgs[j].tool_call_id {
+                answered.insert(id.clone());
+            }
+            j += 1;
+        }
+        for c in calls.iter().filter(|c| !answered.contains(&c.id)) {
+            let (st, content) = result();
+            msgs.insert(j, tool_result(c, st, content));
+            j += 1;
+            added += 1;
+        }
+        i = j;
+    }
+    added
+}
 
 /// Gehört die Nachricht in eine Anfrage an das Modell? Fehlgeschlagene Antworten nicht.
 pub fn sendable(m: &ChatMsg) -> bool {
@@ -125,6 +166,24 @@ mod tests {
         assert_eq!(clamp_context_start(Some(5), 5), None);
         assert_eq!(clamp_context_start(Some(0), 5), None);
         assert_eq!(clamp_context_start(None, 5), None);
+    }
+
+    #[test]
+    fn orphan_tool_calls_get_a_result_in_place() {
+        let call = |id: &str| ToolCall { id: id.into(), name: "list_sessions".into(), arguments: serde_json::json!({}) };
+        let mut a = ChatMsg::new(Role::Assistant, "");
+        a.tool_calls = vec![call("a"), call("b"), call("c")];
+        let mut failed = ChatMsg::new(Role::Assistant, "");
+        failed.tool_calls = vec![call("x")];
+        failed.error = Some("boom".into());
+        let mut v = vec![ChatMsg::new(Role::User, "q"), a, tool_result(&call("b"), ToolStatus::Ok, "{}".into()), ChatMsg::new(Role::User, "next"), failed];
+        let n = close_orphans(&mut v, || (ToolStatus::Error, "interrupted".into()));
+        assert_eq!(n, 2);
+        let ids: Vec<_> = v.iter().map(|m| m.tool_call_id.clone().unwrap_or_default()).collect();
+        assert_eq!(ids, ["", "", "b", "a", "c", "", ""], "Ergebnisse direkt hinter die Antwort, vor die nächste Frage");
+        assert_eq!(v[3].status, Some(ToolStatus::Error));
+        assert_eq!(v[3].tool_name.as_deref(), Some("list_sessions"));
+        assert_eq!(close_orphans(&mut v, || (ToolStatus::Error, String::new())), 0, "zweiter Lauf ändert nichts");
     }
 
     #[test]

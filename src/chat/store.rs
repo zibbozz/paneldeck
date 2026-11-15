@@ -4,6 +4,7 @@
 //! {
 //!   "version": 1,
 //!   "context_start": 2,
+//!   "always_allow": ["send_text"],
 //!   "messages": [
 //!     { "role": "user", "content": "Which sessions are open?", "ts": 1763200000 },
 //!     { "role": "assistant", "content": "", "ts": 1763200001,
@@ -101,13 +102,23 @@ pub struct ChatFile {
     /// Kontextlänge weggelassen). Fehlt, solange nichts gekürzt wurde.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_start: Option<usize>,
+    /// Schreibende Werkzeuge, die der Nutzer in diesem Chat „immer erlaubt“ hat (keine Nachfrage mehr; seit 2.2.0).
+    /// Steht vor `messages`, weil `serialize_capped` die Nachrichten ans Ende setzt.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_names")]
+    pub always_allow: Vec<String>,
     pub messages: Vec<ChatMsg>,
 }
 
 impl Default for ChatFile {
     fn default() -> Self {
-        ChatFile { version: VERSION, context_start: None, messages: Vec::new() }
+        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), messages: Vec::new() }
     }
+}
+
+/// Liste von Werkzeugnamen tolerant lesen: Nicht-Texte fallen weg, ein falscher Typ ergibt eine leere Liste.
+fn lenient_names<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default())
 }
 
 /// Ordner der Verlaufsdateien im Datenordner.
@@ -199,8 +210,8 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let parts: Vec<Vec<u8>> = file.messages.iter().map(|m| serde_json::to_vec(m).unwrap_or_else(|_| b"{}".to_vec())).collect();
     let keep_from = file.messages.iter().take_while(|m| m.role == Role::System).count();
     let size = |from: usize| -> usize { parts[..keep_from].iter().chain(&parts[from..]).map(|p| p.len() + 1).sum() };
-    // Kopf ohne Nachrichten (+ Reserve für context_start): `{"version":1,"context_start":N,"messages":[]}`
-    let head_len = 64;
+    // Kopf ohne Nachrichten (+ Reserve für context_start): `{"version":1,"context_start":N,"always_allow":[…],"messages":[]}`
+    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + 16;
     let mut drop_to = keep_from;
     if head_len + size(keep_from) > cap {
         let mut total = size(keep_from);
@@ -212,7 +223,7 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let dropped = drop_to - keep_from;
     // Gekürzt: der Index rückt nach; lag er im weggefallenen Teil, sieht das Modell ohnehin alles Übrige.
     let context_start = if dropped == 0 { file.context_start } else { file.context_start.and_then(|c| (c >= drop_to).then(|| c - dropped)).filter(|c| *c > keep_from) };
-    let head = ChatFile { version: file.version, context_start, messages: Vec::new() };
+    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), messages: Vec::new() };
     let mut data = serde_json::to_vec(&head).unwrap_or_default();
     // `messages` ist das letzte Feld: `…"messages":[]}` → Nachrichten zwischen die Klammern setzen.
     data.truncate(data.len().saturating_sub(2));
@@ -296,7 +307,29 @@ mod tests {
         t.status = Some(ToolStatus::Ok);
         let mut e = ChatMsg::new(Role::Assistant, "");
         e.error = Some("connection refused".into());
-        ChatFile { version: VERSION, context_start: Some(1), messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
+        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec!["send_text".into()], messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
+    }
+
+    #[test]
+    fn always_allow_is_optional_lenient_and_survives_the_size_cap() {
+        // Datei von 2.2.0-Vorabständen ohne das Feld
+        let (f, skipped) = parse(r#"{"version":1,"messages":[{"role":"user","content":"x"}]}"#).unwrap();
+        assert_eq!((f.always_allow.len(), skipped, f.messages.len()), (0, 0, 1));
+        assert!(!String::from_utf8(serialize_capped(&f, 1000)).unwrap().contains("always_allow"), "leer: nicht geschrieben");
+        // Falscher Typ / falsche Einträge: kein Verlust des Verlaufs
+        let (f, _) = parse(r#"{"always_allow":"send_text","messages":[{"role":"user","content":"x"}]}"#).unwrap();
+        assert!(f.always_allow.is_empty() && f.messages.len() == 1);
+        let (f, _) = parse(r#"{"always_allow":["send_text",5,"run_command"],"messages":[]}"#).unwrap();
+        assert_eq!(f.always_allow, ["send_text", "run_command"]);
+        // Gekürzt gespeichert: das Feld bleibt
+        let mut big = sample();
+        for i in 0..100 {
+            big.messages.push(ChatMsg::new(Role::User, format!("{i}{}", "z".repeat(200))));
+        }
+        let data = serialize_capped(&big, 4_000);
+        assert!(data.len() <= 4_000);
+        let (back, _) = parse(std::str::from_utf8(&data).unwrap()).unwrap();
+        assert_eq!(back.always_allow, ["send_text"]);
     }
 
     #[test]

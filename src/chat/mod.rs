@@ -4,19 +4,21 @@
 //! * [`store`]: Datenformat und tolerantes Laden/atomares Speichern der Verlaufsdatei (öffentliches Datenformat).
 //! * [`backend`]: [`ChatBackend`] (eine Antwort erzeugen, gestreamt über [`TurnEvent`]) und [`EchoBackend`] für Tests.
 //! * [`logic`]: reine Funktionen auf der Nachrichtenliste (Bearbeiten, Neu erzeugen, Wiederholen).
-//! * [`session`]: [`ChatState`] – Nachrichten, Eingabe, laufende Antwort.
+//! * [`session`]: [`ChatState`] – Nachrichten, Eingabe, laufende Antwort, Werkzeug-Schleife.
+//! * [`tools`]: welche Paneldeck-Werkzeuge ein Modell bekommt, Prüfung der Aufrufe, Ergebnis-Nachrichten.
 
 pub mod backend;
 pub mod llm_backend;
 pub mod logic;
 pub mod session;
 pub mod store;
+pub mod tools;
 
 #[cfg(test)]
 pub use backend::EchoBackend;
 pub use backend::{ChatBackend, Repaint, TurnContext};
 pub use llm_backend::LlmBackend;
-pub use session::ChatState;
+pub use session::{ChatState, Decision, ToolStep};
 pub use store::{ChatFile, ChatMsg, Role, ToolStatus};
 
 /// Server/Modell des Echo-Backends (nur Tests; Nutzer wählen das Modell im Dialog „Neuer Chat“).
