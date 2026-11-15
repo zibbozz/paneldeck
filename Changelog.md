@@ -11,9 +11,13 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ### Added
 
-- Chat sessions (first part of #63): a new session type "Chat" next to terminals – sidebar button, palette "New chat", empty Terminal Hub and folder menu "New chat here". Answers are streamed as Markdown with a copy button on code blocks; Stop, regenerate the last answer, edit the last own message, inline errors with Retry and one collapsed line per tool call. Chats live in projects and splits, work in extra and detached windows and are restored after a restart. Text from snippets, the composer or dropped files goes into the chat input and is never sent automatically. Real model servers follow in the next parts.
+- Chat sessions (first part of #63): a new session type "Chat" next to terminals – sidebar button, palette "New chat", empty Terminal Hub and folder menu "New chat here". Answers are streamed as Markdown with a copy button on code blocks; Stop, regenerate the last answer, edit the last own message, inline errors with Retry and one collapsed line per tool call. Chats live in projects and splits, work in extra and detached windows and are restored after a restart. Text from snippets, the composer or dropped files goes into the chat input and is never sent automatically.
 - New data format `chats/<id>.json` (version 1) with the history of a chat; `state.json` sessions get the optional fields `kind` and `chat`. Orphaned histories are kept as `chats/<id>.orphan-<time>.json`.
 - MCP: `list_sessions` reports `kind` (`terminal`/`chat`) and, for chats, `model`; terminal tools on a chat return the new error code `not_a_terminal`.
+- Settings → Models: set up Ollama or OpenAI-compatible servers (LM Studio, llama.cpp server, vLLM) on this computer or in private networks (other addresses are rejected; no proxy, no redirects, HTTPS certificates are verified). The optional API key is stored encrypted for your Windows user (DPAPI). "Connect" fetches the models with tool support and context length; Ollama on this computer is suggested.
+- Per model: level Off/Read/Control (independent of the MCP level for external agents), allowed tools, ask before write actions, maximum tool calls per answer, overrides for tool calling and context length.
+- "New chat" opens a dialog to pick server and model (remembers the last choice). Chats answer with the chosen model, streamed, with the system prompt and the project and folder as context; when the context is full, older messages are left out (marked in the chat). A note shows when an answer was cut off at the token limit, the token usage is shown, and models without tool support get a notice.
+- New optional fields in `settings.json`: `llm_servers` and `last_chat_model`; `chats/<id>.json` messages can have a `note`.
 
 ### Changed
 
