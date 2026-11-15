@@ -578,13 +578,8 @@ impl App {
         let has = !text.trim().is_empty();
         if has && (send || paste_only) {
             // Nur wenn wirklich gesendet wurde: ohne laufende Sitzung bliebe der (lange) Text sonst nicht erhalten.
-            let sent = match self.entries.get(&self.focused).and_then(|e| e.live.as_ref()) {
-                Some(s) => {
-                    s.send_text(&text, send);
-                    true
-                }
-                None => false,
-            };
+            // Chat im Fokus: Text landet in dessen Eingabefeld (abgeschickt wird dort).
+            let sent = self.entries.get_mut(&self.focused).is_some_and(|e| e.insert_text(&text, send));
             if sent && !self.composer_keep {
                 self.composer_text.clear();
             }

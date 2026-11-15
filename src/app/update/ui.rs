@@ -44,7 +44,8 @@ fn fmt_mb(b: u64) -> String {
 
 impl App {
     fn running_sessions(&self) -> usize {
-        self.entries.values().filter(|e| !e.exited()).count()
+        // Chats zählen nur, solange eine Antwort läuft.
+        self.entries.values().filter(|e| e.running()).count()
     }
 
     fn update_backup_target(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {

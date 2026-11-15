@@ -23,7 +23,7 @@ fn ui_sources() -> Vec<PathBuf> {
             }
         }
     }
-    for f in ["terminal_links.rs", "titlebar.rs", "toasts.rs"] {
+    for f in ["chat_ui.rs", "terminal_links.rs", "titlebar.rs", "toasts.rs"] {
         files.push(root.join(f));
     }
     files.sort();

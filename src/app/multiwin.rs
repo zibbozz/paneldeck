@@ -643,7 +643,8 @@ impl App {
 
     /// Was mit den Sitzungen von Fenster `window` beim Schließen geschieht.
     fn window_close_plan(&self, window: u64) -> ClosePlan {
-        close_plan(self.entries.iter().filter(|(_, e)| e.meta.window == window).map(|(id, e)| (*id, !e.exited(), e.meta.worktree.is_some(), self.detached.contains(id))))
+        // „Läuft“: Terminal mit Prozess oder Chat mit laufender Antwort.
+        close_plan(self.entries.iter().filter(|(_, e)| e.meta.window == window).map(|(id, e)| (*id, e.running(), e.meta.worktree.is_some(), self.detached.contains(id))))
     }
 
     /// Weitere Fenster anlegen, zeichnen und schließen. Im Hauptfenster nach dessen Aktionen aufrufen.

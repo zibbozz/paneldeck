@@ -59,6 +59,9 @@ impl App {
                     if self.settings.claude_mode && style::icon_btn(ui, SIcon::Spark, lang.t("Neue Claude-Sitzung …", "New Claude session …"), false).clicked() {
                         actions.push(Action::NewDialog(true));
                     }
+                    if style::icon_btn(ui, SIcon::Chat, lang.t("Neuer Chat (lokales Modell)", "New chat (local model)"), false).clicked() {
+                        actions.push(Action::NewChat);
+                    }
                     if style::icon_btn(ui, SIcon::Queue, &format!("{} ({})", lang.t("Prompt-Composer", "Prompt composer"), self.binding_text("composer")), self.composer_open).clicked() {
                         actions.push(Action::ToggleComposer);
                     }
@@ -288,6 +291,10 @@ impl App {
                 actions.push(Action::FolderNewSession(path.clone(), true));
                 ui.close();
             }
+            if ui.button(lang.t("Neuer Chat hier", "New chat here")).clicked() {
+                actions.push(Action::FolderNewChat(path.clone()));
+                ui.close();
+            }
             if ui.button(lang.t("Neuer Unterordner …", "New subfolder …")).clicked() {
                 actions.push(Action::FolderNew(path.clone()));
                 ui.close();
@@ -390,6 +397,7 @@ impl App {
         let name = e.display_name();
         let color = e.color();
         let exited = e.exited();
+        let is_chat = e.is_chat();
         let claude = e.meta.claude && self.settings.claude_mode;
         let focused = self.focused == id;
         let attention = e.attention || e.needs_you();
@@ -434,7 +442,10 @@ impl App {
         if !status_label.is_empty() {
             segs.push((status_label.to_string(), dot_col));
         }
-        if let Some(g) = self.git.get(id) {
+        if is_chat {
+            // Chat: Modellname statt Git/Ordner.
+            segs.push((e.chat_model().to_string(), weak_c));
+        } else if let Some(g) = self.git.get(id) {
             segs.push((git_line(&g).replacen("git: ", "", 1), weak_c));
         } else {
             let folder = std::path::Path::new(&e.cwd_now()).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
@@ -481,7 +492,9 @@ impl App {
                 status_tip.push('\n');
             }
         }
-        if let Some(g) = self.git.get(id) {
+        if is_chat {
+            status_tip += &format!("{}: {}", lang.t("Modell", "Model"), e.chat_model());
+        } else if let Some(g) = self.git.get(id) {
             status_tip += &git_line(&g);
         }
         if !e.meta.tags.is_empty() {
@@ -539,6 +552,9 @@ impl App {
             if claude {
                 style::paint_icon(&p, SIcon::SparkSmall, Pos2::new(nx + 4.0, name_y), style::ACCENT);
                 nx += 14.0;
+            } else if is_chat {
+                style::paint_icon(&p, SIcon::Chat, Pos2::new(nx + 6.0, name_y), weak_c);
+                nx += 18.0;
             }
             p.with_clip_rect(text_clip).galley(Pos2::new(nx, name_y - g.size().y / 2.0), g, name_col);
             let mut sx = text_x;
@@ -611,7 +627,7 @@ impl App {
                 actions.push(Action::TagsPrompt(id));
                 ui.close();
             }
-            if self.settings.claude_mode && ui.button(lang.t("Warteschlange …", "Queue …")).clicked() {
+            if self.settings.claude_mode && !is_chat && ui.button(lang.t("Warteschlange …", "Queue …")).clicked() {
                 actions.push(Action::OpenQueue(id));
                 ui.close();
             }
@@ -628,7 +644,7 @@ impl App {
                 actions.push(Action::ExportHistory(id));
                 ui.close();
             }
-            if ui.button(lang.t("Neu starten", "Restart")).clicked() {
+            if !is_chat && ui.button(lang.t("Neu starten", "Restart")).clicked() {
                 actions.push(Action::Restart(id));
                 ui.close();
             }

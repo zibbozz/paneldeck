@@ -242,7 +242,13 @@ impl App {
             return;
         }
         let id = target.map(|t| t.0).unwrap_or(self.focused);
-        if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
+        if let Some(e) = self.entries.get_mut(&id).filter(|e| e.is_chat()) {
+            // Chat: Pfade unverändert ins Eingabefeld.
+            let text: Vec<String> = files.iter().filter_map(|f| f.path.as_ref()).map(|p| p.to_string_lossy().to_string()).collect();
+            if !text.is_empty() {
+                e.insert_text(&text.join(" "), false);
+            }
+        } else if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
             let text: Vec<String> = files
                 .iter()
                 .filter_map(|f| f.path.as_ref())

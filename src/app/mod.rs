@@ -14,7 +14,8 @@ use crate::style::{self, Icon as SIcon};
 use crate::templates::{self, Template, TplItem};
 use crate::tray::{Tray, TrayCmd};
 use crate::shells::{self, ShellSpec};
-use crate::state::{self, Lang, Profile, Project, SavedState, SessionMeta, Settings};
+use crate::state::{self, Lang, Profile, Project, SavedState, SessionKind, SessionMeta, Settings};
+use crate::chat::{self as chatmod, ChatBackend, ChatState};
 use crate::terminal::{CmdDone, Session, SpawnOptions};
 use crate::termview;
 use crate::theme::{self, Theme};
@@ -28,6 +29,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod chat_ui;
 mod data;
 mod dialogs;
 mod dragdrop;
@@ -81,11 +83,54 @@ struct Entry {
     budget_warned: bool,
     /// Aufgelöste Shell-Kennung beim Start (z. B. `wsl:Ubuntu` auch bei Profilen mit eigenem Programm).
     shell_eff: String,
+    /// Chat-Sitzung (`meta.kind = chat`): Verlauf, Eingabe, laufende Antwort. Hängt an der Sitzung, nicht am Fenster.
+    chat: Option<ChatState>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new() }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None }
+    }
+    /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
+    fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
+        let mut e = Entry::new(meta);
+        e.status = ClaudeStatus::Idle;
+        e.chat = Some(chat);
+        e
+    }
+    /// Ein Chat statt eines Terminals (hat nie eine PTY; „beendet“ gibt es dort nicht).
+    fn is_chat(&self) -> bool {
+        self.meta.kind == SessionKind::Chat
+    }
+    /// Läuft etwas, das beim Schließen verloren ginge? Terminal: Prozess läuft; Chat: eine Antwort wird gerade erzeugt.
+    fn running(&self) -> bool {
+        match &self.chat {
+            Some(c) => c.streaming(),
+            None => !self.exited(),
+        }
+    }
+    /// Modellname eines Chats (leer bei Terminals).
+    fn chat_model(&self) -> &str {
+        self.meta.chat.as_ref().map(|c| c.model.as_str()).unwrap_or("")
+    }
+    /// Text in die Sitzung einfügen: Terminal bekommt ihn als Eingabe, ein Chat in sein Eingabefeld (nie abgeschickt).
+    /// `false`, wenn es kein Ziel gibt (Terminal ohne Prozess).
+    fn insert_text(&mut self, text: &str, submit: bool) -> bool {
+        if let Some(c) = self.chat.as_mut() {
+            if !c.draft.is_empty() && !c.draft.ends_with([' ', '\n']) {
+                c.draft.push(' ');
+            }
+            c.draft += text;
+            c.focus_input = true;
+            return true;
+        }
+        match &self.live {
+            Some(s) => {
+                s.send_text(text, submit);
+                true
+            }
+            None => false,
+        }
     }
     /// Nächsten wartenden Prompt senden, wenn Claude von beschäftigt auf bereit wechselt.
     /// Gibt `true` zurück, wenn die Warteschlange gerade vollständig abgearbeitet wurde.
@@ -132,6 +177,15 @@ impl Entry {
         }
     }
     fn status_label(&self, lang: Lang) -> &'static str {
+        if let Some(c) = &self.chat {
+            return if c.streaming() {
+                lang.t("schreibt", "streaming")
+            } else if c.has_error() {
+                lang.t("Fehler", "error")
+            } else {
+                lang.t("bereit", "idle")
+            };
+        }
         if self.exited() {
             return "";
         }
@@ -147,6 +201,9 @@ impl Entry {
         !self.exited() && matches!(self.status, ClaudeStatus::Permission | ClaudeStatus::Input)
     }
     fn status_color(&self, t: f64) -> Color32 {
+        if self.chat.as_ref().is_some_and(|c| c.has_error()) {
+            return Color32::from_rgb(0xe0, 0x6c, 0x75);
+        }
         if self.exited() {
             return Color32::from_gray(110);
         }
@@ -176,7 +233,11 @@ impl Entry {
         let c = self.meta.color;
         Color32::from_rgb(c[0], c[1], c[2])
     }
+    /// Terminal ohne laufenden Prozess. Ein Chat ist nie „beendet“ (siehe `running`).
     fn exited(&self) -> bool {
+        if self.is_chat() {
+            return false;
+        }
         self.live.as_ref().map(|s| s.has_exited()).unwrap_or(true)
     }
 }
@@ -267,6 +328,18 @@ enum Action {
     /// Zur Sitzung springen (aus einem Ticket): Terminal Hub ihres Fensters zeigen und sie aktivieren.
     JumpTo(u64),
     NewQuick,
+    /// Neuer Chat im aktiven Projekt (Platzhalter-Modell, siehe `chat::default_chat_meta`).
+    NewChat,
+    /// Neuer Chat in diesem Ordner.
+    FolderNewChat(String),
+    /// Eingabe des Chats senden (oder die bearbeitete letzte Nachricht übernehmen).
+    ChatSend(u64),
+    /// Laufende Antwort abbrechen.
+    ChatStop(u64),
+    /// Letzte Antwort neu erzeugen (auch „Wiederholen“ nach einem Fehler).
+    ChatRegenerate(u64),
+    /// Letzte eigene Nachricht zum Bearbeiten ins Eingabefeld holen.
+    ChatEdit(u64),
 }
 
 struct NewDialog {
@@ -316,6 +389,8 @@ struct NewOpts {
     window: Option<u64>,
     /// Projekt der Sitzung; None = aktives Projekt ihres Fensters.
     project: Option<u64>,
+    /// Chat statt Terminal: mit diesem Server/Modell (kein Prozess, Verlauf in `chats/<id>.json`).
+    chat: Option<state::ChatMeta>,
 }
 
 struct Launch<'a> {
@@ -637,6 +712,8 @@ pub struct App {
     wins: multiwin::Wins,
     /// Selbst-Update aus den GitHub-Releases (`update/`).
     updater: update::Updater,
+    /// Erzeugt die Antworten aller Chats (wählt das Modell anhand von `ChatMeta`). Vorerst das Echo-Backend.
+    chat_backend: std::sync::Arc<dyn ChatBackend>,
 }
 
 fn home_dir() -> String {
@@ -861,6 +938,7 @@ impl App {
             wins: Default::default(),
             // `--no-update-check`: keine automatische Prüfung für diesen Start (die manuelle geht weiter).
             updater: update::Updater::new(!crate::cli::get().no_update_check),
+            chat_backend: std::sync::Arc::new(chatmod::EchoBackend::default()),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
@@ -888,6 +966,13 @@ impl App {
         for meta in saved.sessions {
             app.next_id = app.next_id.max(meta.id.saturating_add(1));
             let id = meta.id;
+            if meta.kind == SessionKind::Chat {
+                // Chat: Verlauf aus chats/<id>.json, keine PTY.
+                let (file, warning) = chatmod::store::load(&chatmod::store::path(&app.dir, id));
+                let chat = ChatState::new(file, warning);
+                app.entries.insert(id, Entry::new_chat(meta, chat));
+                continue;
+            }
             let mut entry = Entry::new(meta);
             app.spawn_into(&cc.egui_ctx, &mut entry, Launch { restore: true, restart: false, continue_last: false, prompt: None, resume_id: None });
             app.entries.insert(id, entry);
@@ -1347,8 +1432,14 @@ impl App {
     }
 
     /// Legt eine neue Sitzung an und zeigt sie im fokussierten Bereich.
-    fn new_session(&mut self, ctx: &egui::Context, o: NewOpts) -> u64 {
+    fn new_session(&mut self, ctx: &egui::Context, mut o: NewOpts) -> u64 {
         let quiet = o.quiet;
+        let chat_meta = o.chat.take();
+        if chat_meta.is_some() {
+            // Ein Chat hat weder Shell noch Profil noch Claude.
+            o.profile = Some(0);
+            o.claude = false;
+        }
         let id = self.next_id;
         self.next_id += 1;
         let (window, project) = self.session_home(o.window, o.project);
@@ -1363,6 +1454,7 @@ impl App {
         let label = self.shell_by_id(&shell_id).map(|s| s.label).unwrap_or_else(|| "Shell".into());
         let (name, custom) = match o.name.filter(|n| !n.trim().is_empty()) {
             Some(n) => (n, true),
+            None if chat_meta.is_some() => ("Chat".to_string(), false),
             None if o.claude => ("Claude".to_string(), false),
             None => (label, false),
         };
@@ -1390,12 +1482,23 @@ impl App {
                 pr.ensure_folder(&g);
             }
         }
-        let mut entry = Entry::new(meta);
-        self.spawn_into(
-            ctx,
-            &mut entry,
-            Launch { restore: false, restart: false, continue_last: o.continue_last, prompt: o.prompt.as_deref(), resume_id: o.resume_id.as_deref() },
-        );
+        let entry = match chat_meta {
+            Some(cm) => {
+                let meta = SessionMeta { kind: SessionKind::Chat, chat: Some(cm), shell_id: String::new(), ..meta };
+                let mut chat = ChatState::new(chatmod::ChatFile::default(), None);
+                chat.focus_input = true;
+                Entry::new_chat(meta, chat)
+            }
+            None => {
+                let mut entry = Entry::new(meta);
+                self.spawn_into(
+                    ctx,
+                    &mut entry,
+                    Launch { restore: false, restart: false, continue_last: o.continue_last, prompt: o.prompt.as_deref(), resume_id: o.resume_id.as_deref() },
+                );
+                entry
+            }
+        };
         self.entries.insert(id, entry);
         if !quiet {
             if window == self.wins.cur {
@@ -1579,6 +1682,8 @@ impl App {
         self.usage.remove(id);
         self.git.remove(id);
         let _ = std::fs::remove_file(self.scrollback_path(id));
+        // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
+        let _ = std::fs::remove_file(chatmod::store::path(&self.dir, id));
         if self.layout.is_none() {
             if let Some(first) = self.docked_ids().first().copied() {
                 self.activate(first);
@@ -1622,6 +1727,20 @@ impl App {
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
                 let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
+            }
+        }
+        self.save_chats();
+    }
+
+    /// Verläufe geänderter Chats schreiben.
+    fn save_chats(&self) {
+        for (id, e) in &self.entries {
+            if let Some(c) = &e.chat {
+                if c.dirty() {
+                    if chatmod::store::save(&chatmod::store::path(&self.dir, *id), &c.file).is_ok() {
+                        c.mark_saved();
+                    }
+                }
             }
         }
     }
@@ -1863,6 +1982,9 @@ impl App {
         }
         let mut fallback_done: Vec<(u64, String)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
+            if e.is_chat() {
+                continue; // kein Ordner, kein Transkript
+            }
             self.git.set_dir(*id, PathBuf::from(e.cwd_now()));
             // Transkript über die Konversations-ID finden, falls noch nicht bekannt.
             if e.meta.transcript.is_empty() && !e.meta.claude_session.is_empty() {
@@ -2073,15 +2195,74 @@ impl App {
         }
     }
 
-    /// Gesamten Verlauf einer Sitzung als Textdatei speichern.
+    /// Laufende Antworten aller Chats abholen (Hauptdurchgang, für alle Fenster). Fertige Antworten werden sofort
+    /// gespeichert; in einer nicht angesehenen Sitzung gibt es eine Markierung.
+    fn poll_chats(&mut self) {
+        let (window_focused, focused_id) = self.seen_focus();
+        let mut finished = Vec::new();
+        for (id, e) in self.entries.iter_mut() {
+            let Some(c) = e.chat.as_mut() else { continue };
+            let p = c.poll();
+            e.status = if c.streaming() { ClaudeStatus::Working } else { ClaudeStatus::Idle };
+            if p.finished {
+                finished.push(*id);
+                if !window_focused || *id != focused_id {
+                    e.attention = true;
+                }
+            }
+        }
+        for id in finished {
+            self.save_chat(id);
+        }
+    }
+
+    fn save_chat(&self, id: u64) {
+        if let Some(c) = self.entries.get(&id).and_then(|e| e.chat.as_ref()) {
+            if chatmod::store::save(&chatmod::store::path(&self.dir, id), &c.file).is_ok() {
+                c.mark_saved();
+            }
+        }
+    }
+
+    /// Bedienung eines Chats (Senden, Stopp, Neu erzeugen, Bearbeiten) mit dem Backend des Hubs.
+    fn chat_action(&mut self, ctx: &egui::Context, id: u64, a: &Action) {
+        let backend = self.chat_backend.clone();
+        let rctx = ctx.clone();
+        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint_of(egui::ViewportId::ROOT));
+        let Some(e) = self.entries.get_mut(&id) else { return };
+        let meta = e.meta.chat.clone().unwrap_or_default();
+        let Some(c) = e.chat.as_mut() else { return };
+        let changed = match a {
+            Action::ChatSend(_) => c.send(backend.as_ref(), &meta, repaint),
+            Action::ChatRegenerate(_) => c.regenerate(backend.as_ref(), &meta, repaint),
+            Action::ChatStop(_) => {
+                c.stop();
+                true
+            }
+            Action::ChatEdit(_) => {
+                c.begin_edit();
+                false
+            }
+            _ => false,
+        };
+        e.status = if c.streaming() { ClaudeStatus::Working } else { ClaudeStatus::Idle };
+        if changed {
+            self.save_chat(id);
+        }
+    }
+
+    /// Gesamten Verlauf einer Sitzung als Textdatei speichern (Chat: als Markdown).
     fn export_history(&mut self, id: u64) {
         let lang = self.settings.language;
         let Some(e) = self.entries.get(&id) else { return };
-        let Some(s) = e.live.as_ref() else { return };
-        let text = s.dump_text(2_000_000);
+        let (text, ext) = match (&e.chat, e.live.as_ref()) {
+            (Some(c), _) => (chatmod::logic::to_markdown(&e.display_name(), e.chat_model(), c.messages(), lang), "md"),
+            (None, Some(s)) => (s.dump_text(2_000_000), "txt"),
+            (None, None) => return,
+        };
         let safe: String = e.display_name().chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let name = format!("{safe}-{secs}.txt");
+        let name = format!("{safe}-{secs}.{ext}");
         let path = notify::save_file(&name).unwrap_or_else(|| {
             let d = self.dir.join("exports");
             let _ = std::fs::create_dir_all(&d);
@@ -2347,8 +2528,13 @@ impl App {
                 }
             }
             Action::InsertPath(p) => {
-                if let Some(s) = self.entries.get(&self.focused).and_then(|e| e.live.as_ref()) {
-                    s.send_text(&format!("{} ", pathfmt::for_shell(&s.shell_id, &p)), false);
+                if let Some(e) = self.entries.get_mut(&self.focused) {
+                    // Chat: Pfad unverändert ins Eingabefeld; Terminal: passend zur Shell gequotet.
+                    let text = match &e.live {
+                        Some(s) => format!("{} ", pathfmt::for_shell(&s.shell_id, &p)),
+                        None => p.clone(),
+                    };
+                    e.insert_text(&text, false);
                 }
                 self.want_focus = Some(self.focused);
             }
@@ -2413,8 +2599,9 @@ impl App {
                 self.want_focus = Some(self.focused);
             }
             Action::SendSnippet(i) => {
-                if let (Some(sn), Some(s)) = (self.prompts.get(i), self.entries.get(&self.focused).and_then(|e| e.live.as_ref())) {
-                    s.send_text(&sn.text, sn.submit);
+                // Chat: Text ins Eingabefeld (nicht abgeschickt); Terminal: wie bisher, ggf. mit Enter.
+                if let (Some(sn), Some(e)) = (self.prompts.get(i), self.entries.get_mut(&self.focused)) {
+                    e.insert_text(&sn.text, sn.submit);
                 }
                 self.want_focus = Some(self.focused);
             }
@@ -2543,7 +2730,8 @@ impl App {
                 let mut ids: Vec<u64> = self
                     .entries
                     .iter()
-                    .filter(|(_, e)| e.meta.project == pid && self.in_win(e) && folder.as_ref().is_none_or(|f| !e.meta.group.is_empty() && state::folder_within(&e.meta.group, f)))
+                    // Vorlagen kennen nur Terminals.
+                    .filter(|(_, e)| !e.is_chat() && e.meta.project == pid && self.in_win(e) && folder.as_ref().is_none_or(|f| !e.meta.group.is_empty() && state::folder_within(&e.meta.group, f)))
                     .map(|(i, _)| *i)
                     .collect();
                 ids.sort();
@@ -2673,7 +2861,7 @@ impl App {
             }
             Action::FolderRestartAll(path) => {
                 for id in self.folder_sessions(&path) {
-                    if self.entries.get(&id).is_some_and(|e| e.exited()) {
+                    if self.entries.get(&id).is_some_and(|e| !e.is_chat() && e.exited()) {
                         self.apply(ctx, Action::Restart(id));
                     }
                 }
@@ -2692,6 +2880,7 @@ impl App {
                     self.want_focus = Some(ids[0]);
                 }
             }
+            Action::Restart(id) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {} // ein Chat hat keinen Prozess
             Action::Restart(id) => {
                 if let Some(mut e) = self.entries.remove(&id) {
                     e.live = None;
@@ -2701,6 +2890,19 @@ impl App {
             }
             Action::Duplicate(id) => {
                 if let Some(src) = self.entries.get(&id) {
+                    if src.is_chat() {
+                        // Chat: neuer, leerer Chat mit demselben Modell im selben Ordner.
+                        let o = NewOpts {
+                            cwd: Some(src.meta.cwd.clone()),
+                            group: Some(src.meta.group.clone()),
+                            window: Some(src.meta.window),
+                            project: Some(src.meta.project),
+                            chat: Some(src.meta.chat.clone().unwrap_or_else(chatmod::default_chat_meta)),
+                            ..NewOpts::default()
+                        };
+                        self.new_session(ctx, o);
+                        return;
+                    }
                     let o = NewOpts {
                         shell_id: Some(src.meta.shell_id.clone()),
                         cwd: Some(src.meta.cwd.clone()),
@@ -2729,7 +2931,8 @@ impl App {
                 self.wt_close = Some(WtClose { id, changes, discard: false });
             }
             Action::RequestClose(id) => {
-                let running = self.entries.get(&id).is_some_and(|e| !e.exited());
+                // Chat: nur nachfragen, solange eine Antwort läuft.
+                let running = self.entries.get(&id).is_some_and(|e| e.running());
                 if running && self.settings.confirm_close {
                     self.confirm_close = Some(id);
                 } else {
@@ -2749,6 +2952,15 @@ impl App {
             Action::NewQuick => {
                 self.new_session(ctx, NewOpts::default());
             }
+            Action::NewChat => {
+                self.new_session(ctx, NewOpts { chat: Some(chatmod::default_chat_meta()), ..NewOpts::default() });
+            }
+            Action::FolderNewChat(path) => {
+                let proj = self.projects.iter().find(|p| p.id == self.active_project);
+                let cwd = proj.and_then(|p| p.inherited(&path, |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())));
+                self.new_session(ctx, NewOpts { cwd, group: Some(path), chat: Some(chatmod::default_chat_meta()), ..NewOpts::default() });
+            }
+            Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) => self.chat_action(ctx, id, &a),
         }
     }
 }
@@ -2792,6 +3004,7 @@ impl eframe::App for App {
 
         self.poll_hooks(ctx);
         self.poll_shell(ctx);
+        self.poll_chats();
         self.poll_background(ctx);
         self.sync_watchers(ctx);
         self.tlinks_frame(ctx);
@@ -3031,6 +3244,10 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         x -= w + 10.0;
     }
     let mut infos: Vec<String> = Vec::new();
+    if entry.is_chat() {
+        // Chat: Modellname statt Token/Git.
+        infos.push(entry.chat_model().to_string());
+    }
     if !entry.meta.queue.is_empty() {
         infos.push(format!("Queue {}", entry.meta.queue.len()));
     }
@@ -3039,7 +3256,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             infos.push(usage_line(&u, lang));
         }
     }
-    if let Some(g) = cx.git.get(id) {
+    if let Some(g) = cx.git.get(id).filter(|_| !entry.is_chat()) {
         infos.push(git_line(&g));
     }
     for text in infos {
@@ -3083,6 +3300,32 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             });
         },
     );
+
+    // Chat (keine PTY): Nachrichten und Eingabe; Senden usw. führt die App aus.
+    if let Some(chat) = entry.chat.as_mut() {
+        ui.painter().rect_filled(body, 0.0, cx.theme.bg);
+        let grab = *cx.want_focus == Some(id);
+        if grab {
+            *cx.want_focus = None;
+        }
+        let model = entry.meta.chat.as_ref().map(|c| c.model.clone()).unwrap_or_default();
+        let o = chat_ui::chat_body(ui, body, id, chat, &model, lang, grab);
+        if o.focus && cx.focused != id {
+            cx.actions.push(Action::Focus(id));
+        }
+        for (hit, a) in [(o.send, Action::ChatSend(id)), (o.stop, Action::ChatStop(id)), (o.regenerate, Action::ChatRegenerate(id)), (o.edit, Action::ChatEdit(id))] {
+            if hit {
+                cx.actions.push(a);
+            }
+        }
+        if !cx.detached {
+            edge_buttons(ui, id, body, cx, false);
+        }
+        if cx.broadcast {
+            ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::from_rgb(0xd9, 0x77, 0x57)), StrokeKind::Inside);
+        }
+        return;
+    }
 
     // Terminal
     let cwd_now = entry.cwd_now();
@@ -3138,7 +3381,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     }
 
     if !cx.detached {
-        edge_buttons(ui, id, body, cx);
+        edge_buttons(ui, id, body, cx, true);
     }
     if cx.broadcast {
         ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::from_rgb(0xd9, 0x77, 0x57)), StrokeKind::Inside);
@@ -3383,7 +3626,8 @@ mod tests {
 }
 
 /// „+“-Knopf am Rand eines Terminals: erscheint, wenn die Maus nahe an einem Rand ist, und teilt dort den Bereich.
-fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx) {
+/// `bottom = false`: nicht am unteren Rand (ein Chat hat dort sein Eingabefeld).
+fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx, bottom: bool) {
     const ZONE: f32 = 30.0;
     let Some(p) = ui.input(|i| i.pointer.hover_pos()) else { return };
     if !body.contains(p) || cx.dragging.is_some() {
@@ -3391,7 +3635,7 @@ fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx) {
     }
     let lang = cx.lang;
     // nächster Rand: (Abstand, Seite)
-    let cands = [(p.x - body.min.x, 0u8), (body.max.x - p.x, 1), (p.y - body.min.y, 2), (body.max.y - p.y, 3)];
+    let cands = [(p.x - body.min.x, 0u8), (body.max.x - p.x, 1), (p.y - body.min.y, 2), (if bottom { body.max.y - p.y } else { f32::MAX }, 3)];
     let (dist, side) = cands.into_iter().fold((f32::MAX, 0u8), |a, b| if b.0 < a.0 { b } else { a });
     if dist > ZONE {
         return;
