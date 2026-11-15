@@ -208,7 +208,14 @@ pub mod winhttp {
     //!
     //! Puffer, die WinHTTP asynchron liest oder beschreibt (Rumpf, Kopfzeilen, Lesepuffer), gehören dem Kontext `Ctx` (im
     //! `Arc`). WinHTTP hält eine eigene Referenz darauf, die erst der Rückruf `HANDLE_CLOSING` freigibt – nach ihm kommen
-    //! keine Rückrufe mehr. So bleiben die Puffer gültig, solange WinHTTP sie benutzen kann.
+    //! keine Rückrufe mehr. Der Besitzer wartet NICHT auf `HANDLE_CLOSING`: Er übergibt asynchronen Aufrufen nie eigenen
+    //! (Stack-)Speicher, nur Speicher des Kontexts, und der lebt bis zum letzten Rückruf. Nach dem Schließen kann der Besitzer
+    //! also sofort weitermachen.
+    //!
+    //! DNS-Namen: Die geprüfte IP wird mit `WINHTTP_OPTION_RESOLUTION_HOSTNAME` an die Anfrage gebunden – WinHTTP verbindet
+    //! sich mit genau dieser IP, SNI, Zertifikatsprüfung und `Host:` bleiben beim Namen (http und https). Kennt Windows die
+    //! Option nicht, verbindet http mit der IP und setzt `Host:` selbst; https verbindet dann über den Namen (Restrisiko siehe
+    //! `WinHttp::send`).
     #[cfg(not(target_pointer_width = "64"))]
     compile_error!("llm::http::winhttp: the ConnInfo layout is only defined for 64-bit Windows");
 
@@ -228,11 +235,13 @@ pub mod winhttp {
     /// Transport über WinHTTP. `resolve` ist austauschbar (Tests); Standard = Systemauflösung.
     pub struct WinHttp {
         pub resolve: fn(&str, u16) -> std::io::Result<Vec<IpAddr>>,
+        /// `false` = so tun, als kenne Windows `RESOLUTION_HOSTNAME` nicht (nur für Tests des Rückfalls).
+        pub use_pin: bool,
     }
 
     impl Default for WinHttp {
         fn default() -> Self {
-            Self { resolve: net::system_resolve }
+            Self { resolve: net::system_resolve, use_pin: true }
         }
     }
 
@@ -495,6 +504,16 @@ pub mod winhttp {
         classify(last_error(), 0, call)
     }
 
+    /// Name des Aufrufs, wenn WinHTTP `RESOLUTION_HOSTNAME` nicht kennt (löst den Rückfall aus).
+    const PIN_CALL: &str = "WinHttpSetOption(RESOLUTION_HOSTNAME)";
+
+    /// Ein Verbindungsziel.
+    struct Target {
+        connect: String,
+        host_header: Option<String>,
+        pin: Option<IpAddr>,
+    }
+
     const CALLBACKS: u32 = WINHTTP_CALLBACK_FLAG_SENDREQUEST_COMPLETE
         | WINHTTP_CALLBACK_FLAG_HEADERS_AVAILABLE
         | WINHTTP_CALLBACK_FLAG_READ_COMPLETE
@@ -522,14 +541,19 @@ pub mod winhttp {
             }
             let recv = ms(req.receive_timeout);
             // SAFETY: gültiges Session-Handle. Namensauflösung, Verbindung, Senden, Empfangen (je Block).
-            unsafe { WinHttpSetTimeouts(s, ms(super::CONNECT_TIMEOUT), ms(super::CONNECT_TIMEOUT), ms(super::SEND_TIMEOUT), recv) };
+            if unsafe { WinHttpSetTimeouts(s, ms(super::CONNECT_TIMEOUT), ms(super::CONNECT_TIMEOUT), ms(super::SEND_TIMEOUT), recv) } == 0 {
+                return Err(last("WinHttpSetTimeouts"));
+            }
             // Ollama schickt die Kopfzeilen erst mit dem ersten Token: auch darauf lange warten.
-            set_u32(s, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, recv as u32);
+            if !set_u32(s, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, recv as u32) {
+                return Err(last("WinHttpSetOption(RECEIVE_RESPONSE_TIMEOUT)"));
+            }
             Ok(Arc::new(session))
         }
 
-        /// Ein Versuch gegen `connect_host`. `host_header` = eigener `Host:`-Kopf (bei an eine IP gebundener Verbindung).
-        fn attempt(session: &Arc<H>, url: &net::Url, connect_host: &str, host_header: Option<&str>, req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Resp, LlmError> {
+        /// Ein Versuch gegen `t.connect`. `t.host_header` = eigener `Host:`-Kopf, `t.pin` = IP für die Namensauflösung.
+        fn attempt(session: &Arc<H>, url: &net::Url, t: &Target, req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Resp, LlmError> {
+            let (connect_host, host_header) = (t.connect.as_str(), t.host_header.as_deref());
             let whost = wide(connect_host);
             // SAFETY: gültiges Session-Handle und nullterminierter Hostname.
             let conn = H(unsafe { WinHttpConnect(session.0, whost.as_ptr(), url.port, 0) });
@@ -588,6 +612,13 @@ pub mod winhttp {
                     return Err(last(call));
                 }
             }
+            if let Some(ip) = t.pin {
+                let w = wide(&ip.to_string());
+                // SAFETY: Puffer mit Länge in Zeichen (ohne Null); WinHTTP kopiert ihn.
+                if unsafe { WinHttpSetOption(h, WINHTTP_OPTION_RESOLUTION_HOSTNAME, w.as_ptr() as *const c_void, (w.len() - 1) as u32) } == 0 {
+                    return Err(last(PIN_CALL));
+                }
+            }
             if let Some(hh) = host_header {
                 let w = wide(&format!("Host: {hh}\r\n"));
                 // SAFETY: nullterminierter Puffer (Länge u32::MAX = bis zur Null), synchron.
@@ -604,9 +635,9 @@ pub mod winhttp {
                 return Err(r.fail(last_error(), "WinHttpSendRequest"));
             }
             r.wait(|e| matches!(e, Ev::SendDone), "WinHttpSendRequest")?;
-            // Zusätzliche Prüfung der tatsächlichen Gegenstelle. Bei http + Name ist die Verbindung ohnehin an die geprüfte IP
-            // gebunden; bei https + Name ist die Anfrage hier schon gesendet (TLS) – ein umgeleiteter Server bräuchte dafür
-            // ein gültiges Zertifikat für den Namen. Die Antwort wird dann trotzdem nicht gelesen.
+            // Zusätzliche Prüfung der tatsächlichen Gegenstelle (die Anfrage ist zu diesem Zeitpunkt schon gesendet). Bei
+            // gebundener IP ist das nur eine zweite Absicherung; im Rückfall „https + Name ohne Bindung“ entdeckt sie eine
+            // Umleitung erst nachträglich – die Antwort wird dann nicht gelesen.
             let h = r.handle()?;
             match remote_ip(h) {
                 Some(ip) if net::allowed_ip(ip) => {}
@@ -632,24 +663,47 @@ pub mod winhttp {
             if cancel.load(Ordering::Relaxed) {
                 return Err(LlmError::Cancelled);
             }
-            // Ziele: bei http + DNS-Name direkt die geprüften Adressen (gegen DNS-Rebinding zwischen Prüfung und Verbindung)
-            // mit eigenem `Host:`-Kopf; sonst der Name bzw. das Literal (https braucht den Namen für SNI und Zertifikat,
-            // `localhost` löst Windows selbst auf). IPv6 in Klammern (ohne: ERROR_WINHTTP_INVALID_URL).
-            let host_header = if url.port == url.default_port() { url.host_display() } else { format!("{}:{}", url.host_display(), url.port) };
-            let targets: Vec<(String, Option<&str>)> = match (&url.host, url.scheme) {
-                (net::Host::Name(_), net::Scheme::Http) => addrs
-                    .iter()
-                    .map(|ip| (if ip.is_ipv6() { format!("[{ip}]") } else { ip.to_string() }, Some(host_header.as_str())))
-                    .collect(),
-                _ => vec![(url.host_display(), None)],
+            // Ziele (IPv6 in Klammern, ohne: ERROR_WINHTTP_INVALID_URL):
+            // - DNS-Name: je geprüfte Adresse ein Versuch mit dem Namen, die IP per RESOLUTION_HOSTNAME gebunden.
+            // - IP-Literal oder `localhost` (löst Windows selbst auf, nie über DNS): direkt.
+            let targets: Vec<Target> = match &url.host {
+                net::Host::Name(_) => addrs.iter().map(|ip| Target { connect: url.host_display(), host_header: None, pin: Some(*ip) }).collect(),
+                _ => vec![Target { connect: url.host_display(), host_header: None, pin: None }],
             };
             let session = Self::session(req)?;
+            let first = if self.use_pin { Self::try_all(&session, &url, &targets, req, cancel) } else { Err(LlmError::Sys { code: 0, call: PIN_CALL }) };
+            match first {
+                // Windows kennt RESOLUTION_HOSTNAME nicht: Rückfall.
+                Err(LlmError::Sys { call: PIN_CALL, .. }) => {
+                    let host_header = if url.port == url.default_port() { url.host_display() } else { format!("{}:{}", url.host_display(), url.port) };
+                    let fallback: Vec<Target> = match url.scheme {
+                        // http: mit der geprüften IP verbinden, `Host:` selbst setzen – es geht nichts an eine ungeprüfte Adresse.
+                        net::Scheme::Http => addrs
+                            .iter()
+                            .map(|ip| Target { connect: if ip.is_ipv6() { format!("[{ip}]") } else { ip.to_string() }, host_header: Some(host_header.clone()), pin: None })
+                            .collect(),
+                        // https: über den Namen (SNI/Zertifikat). Restrisiko: WinHTTP löst selbst neu auf; liefert DNS jetzt eine
+                        // andere Adresse, geht die Anfrage (per TLS, nur bei gültigem Zertifikat für den Namen) dorthin, bevor die
+                        // Prüfung der Gegenstelle anschlägt.
+                        net::Scheme::Https => vec![Target { connect: url.host_display(), host_header: None, pin: None }],
+                    };
+                    Self::try_all(&session, &url, &fallback, req, cancel).map(|r| Box::new(r) as Box<dyn HttpResponse>)
+                }
+                r => r.map(|r| Box::new(r) as Box<dyn HttpResponse>),
+            }
+        }
+    }
+
+    impl WinHttp {
+        /// Versuche der Reihe nach; bei „keine Verbindung“ (12029) oder Zeitüberschreitung beim Senden (12002) die nächste Adresse.
+        fn try_all(session: &Arc<H>, url: &net::Url, targets: &[Target], req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Resp, LlmError> {
             let mut last_err = LlmError::Resolve { host: url.host_display() };
-            for (i, (host, hh)) in targets.iter().enumerate() {
-                match Self::attempt(&session, &url, host, *hh, req, cancel) {
-                    Ok(r) => return Ok(Box::new(r)),
-                    // Nicht erreichbar: nächste geprüfte Adresse.
-                    Err(LlmError::Sys { code: 12029, call }) if i + 1 < targets.len() => last_err = LlmError::Sys { code: 12029, call },
+            for (i, t) in targets.iter().enumerate() {
+                match Self::attempt(session, url, t, req, cancel) {
+                    Ok(r) => return Ok(r),
+                    Err(LlmError::Sys { code, call }) if i + 1 < targets.len() && (code == 12029 || (code == 12002 && call == "WinHttpSendRequest")) => {
+                        last_err = LlmError::Sys { code, call }
+                    }
                     Err(e) => return Err(e),
                 }
             }

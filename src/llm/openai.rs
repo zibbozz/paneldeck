@@ -77,7 +77,11 @@ struct Partial {
 pub struct Stream {
     calls: BTreeMap<u64, Partial>,
     data: Vec<String>,
+    data_len: usize,
 }
+
+/// Höchstlänge von Werkzeugname und Aufruf-ID (Bytes).
+const MAX_NAME: usize = 256;
 
 impl Stream {
     pub fn line(&mut self, l: &str, acc: &mut Acc, on: &mut dyn FnMut(StreamEvent)) {
@@ -90,7 +94,16 @@ impl Stream {
             return;
         }
         match l.strip_prefix("data:") {
-            Some(d) => self.data.push(d.strip_prefix(' ').unwrap_or(d).to_string()),
+            Some(d) => {
+                let d = d.strip_prefix(' ').unwrap_or(d);
+                // Ein Ereignis aus vielen `data:`-Zeilen darf nicht größer werden als eine Zeile.
+                self.data_len += d.len() + 1;
+                if self.data_len > super::http::MAX_LINE {
+                    acc.error = Some(LlmError::TooLarge);
+                    return;
+                }
+                self.data.push(d.to_string());
+            }
             None => {
                 // Manche Server antworten trotz `stream` mit einem einzelnen JSON-Objekt (dann ist die Antwort vollständig).
                 self.dispatch(acc, on);
@@ -108,6 +121,7 @@ impl Stream {
         if self.data.is_empty() {
             return;
         }
+        self.data_len = 0;
         let data = std::mem::take(&mut self.data).join("\n");
         let data = data.trim();
         if data == "[DONE]" {
@@ -159,6 +173,10 @@ impl Stream {
             if let Some(id) = tc.get("id").and_then(|i| i.as_str())
                 && !id.is_empty()
             {
+                if id.len() > MAX_NAME {
+                    acc.error = Some(LlmError::TooLarge);
+                    return;
+                }
                 p.id = id.to_string();
             }
             if let Some(f) = tc.get("function") {
@@ -168,6 +186,10 @@ impl Stream {
                         p.name = n.to_string();
                     } else if !p.name.starts_with(n) {
                         p.name.push_str(n);
+                    }
+                    if p.name.len() > MAX_NAME {
+                        acc.error = Some(LlmError::TooLarge);
+                        return;
                     }
                 }
                 match f.get("arguments") {
@@ -192,8 +214,10 @@ impl Stream {
 
     /// Wertet ein letztes Ereignis ohne abschließende Leerzeile aus und setzt die gesammelten Aufrufe zusammen
     /// (Argumente erst jetzt als JSON gelesen).
-    pub fn finish(&mut self, acc: &mut Acc, on: &mut dyn FnMut(StreamEvent)) {
-        if acc.error.is_none() {
+    /// `read_ok` = der Strom endete ohne Lesefehler und ohne Abbruch; nur dann zählt ein letztes Ereignis (ein `[DONE]`
+    /// darin darf keinen Lesefehler überdecken). Die Werkzeugaufrufe werden immer zusammengesetzt.
+    pub fn finish(&mut self, acc: &mut Acc, read_ok: bool, on: &mut dyn FnMut(StreamEvent)) {
+        if acc.error.is_none() && read_ok {
             self.dispatch(acc, on);
         }
         for (idx, p) in std::mem::take(&mut self.calls) {

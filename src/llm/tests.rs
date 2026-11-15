@@ -370,6 +370,32 @@ fn tool_call_limits() {
 }
 
 #[test]
+fn openai_name_id_and_event_limits() {
+    let long = "n".repeat(300);
+    let body = format!("data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"name\":\"{long}\"}}}}]}}}}]}}\n\ndata: [DONE]\n\n");
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(&body));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()), vec![StreamEvent::Error(LlmError::TooLarge)]);
+    let body = format!("data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{long}\",\"function\":{{\"name\":\"f\"}}}}]}}}}]}}\n\ndata: [DONE]\n\n");
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(&body));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()), vec![StreamEvent::Error(LlmError::TooLarge)]);
+    // Viele `data:`-Zeilen ohne Leerzeile dazwischen
+    let line = format!("data: {}\n", "x".repeat(1 << 20));
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::chunks(200, line.repeat(9).into_bytes().chunks(16 << 10).map(|c| c.to_vec()).collect()));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()), vec![StreamEvent::Error(LlmError::TooLarge)]);
+}
+
+#[test]
+fn openai_read_error_is_not_hidden_by_leftover_done() {
+    let mut c = Canned::ok("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n");
+    c.fail_at_end = Some(LlmError::Sys { code: 12030, call: "WinHttpReadData" });
+    let t = Fake::default().with(Method::Post, OA_CHAT, c);
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()), vec![StreamEvent::Delta("x".into()), StreamEvent::Error(LlmError::Sys { code: 12030, call: "WinHttpReadData" })]);
+    // Ohne Lesefehler zählt das letzte Ereignis ohne Leerzeile.
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n"));
+    assert!(matches!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()).last(), Some(StreamEvent::Done { .. })));
+}
+
+#[test]
 fn endpoint_receive_timeout_is_clamped() {
     let ep = Endpoint::new(ServerKind::Ollama, OL).with_receive_timeout(std::time::Duration::from_millis(1));
     assert_eq!(ep.receive_timeout, MIN_RECEIVE_TIMEOUT);
@@ -587,11 +613,60 @@ mod e2e {
             s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
         });
         let port = base.rsplit(':').next().unwrap().to_string();
-        let t = super::super::http::winhttp::WinHttp { resolve: resolve_to_loopback };
+        let t = super::super::http::winhttp::WinHttp { resolve: resolve_to_loopback, use_pin: true };
         let ep = Endpoint::new(ServerKind::OpenAi, &format!("http://model-box.lan:{port}")).with_key(Some("k".into()));
         assert_eq!(list_models(&t, &ep, &no_cancel()).unwrap().len(), 1);
         let seen = h.join().unwrap();
-        assert!(seen.head.to_ascii_lowercase().contains(&format!("\r\nhost: model-box.lan:{port}\r\n")), "{}", seen.head);
+        let lower = seen.head.to_ascii_lowercase();
+        assert!(lower.contains(&format!("\r\nhost: model-box.lan:{port}\r\n")), "{}", seen.head);
+        assert_eq!(lower.matches("\r\nhost:").count(), 1, "exactly one Host header: {}", seen.head);
+    }
+
+    #[test]
+    fn real_winhttp_fallback_without_resolution_hostname() {
+        // Rückfall für Windows ohne RESOLUTION_HOSTNAME: http verbindet mit der geprüften IP und setzt `Host:` selbst.
+        let (base, h) = serve("127.0.0.1:0", |s| {
+            let body = r#"{"data":[{"id":"m"}]}"#;
+            s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+        });
+        let port = base.rsplit(':').next().unwrap().to_string();
+        let t = super::super::http::winhttp::WinHttp { resolve: resolve_to_loopback, use_pin: false };
+        let ep = Endpoint::new(ServerKind::OpenAi, &format!("http://model-box.lan:{port}"));
+        assert_eq!(list_models(&t, &ep, &no_cancel()).unwrap().len(), 1);
+        let lower = h.join().unwrap().head.to_ascii_lowercase();
+        assert!(lower.contains(&format!("\r\nhost: model-box.lan:{port}\r\n")), "{lower}");
+        assert_eq!(lower.matches("\r\nhost:").count(), 1, "{lower}");
+    }
+
+    #[test]
+    fn real_winhttp_pins_https_names_with_sni_on_the_name() {
+        // `model-box.lan` gibt es nicht im DNS: kommt die Verbindung auf 127.0.0.1 an, hat WinHTTP die gebundene IP benutzt.
+        // Im TLS-ClientHello muss der Name als SNI stehen (Zertifikatsprüfung auf den Namen).
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        l.set_nonblocking(true).unwrap();
+        let h = std::thread::spawn(move || {
+            let t0 = Instant::now();
+            let mut s = loop {
+                match l.accept() {
+                    Ok((s, _)) => break s,
+                    Err(_) if t0.elapsed() < Duration::from_secs(10) => std::thread::sleep(Duration::from_millis(20)),
+                    Err(_) => return Vec::new(),
+                }
+            };
+            s.set_nonblocking(false).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut hello = vec![0u8; 4096];
+            let n = s.read(&mut hello).unwrap_or(0);
+            hello.truncate(n);
+            hello
+        });
+        let t = super::super::http::winhttp::WinHttp { resolve: resolve_to_loopback, use_pin: true };
+        let ep = Endpoint::new(ServerKind::Ollama, &format!("https://model-box.lan:{port}")).with_key(Some("k".into()));
+        assert!(list_models(&t, &ep, &no_cancel()).is_err());
+        let hello = h.join().unwrap();
+        assert!(hello.first() == Some(&0x16), "TLS handshake expected");
+        assert!(hello.windows(13).any(|w| w == b"model-box.lan"), "SNI must be the name");
     }
 
     #[test]
@@ -599,7 +674,7 @@ mod e2e {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         l.set_nonblocking(true).unwrap();
         let port = l.local_addr().unwrap().port();
-        let t = super::super::http::winhttp::WinHttp { resolve: resolve_mixed };
+        let t = super::super::http::winhttp::WinHttp { resolve: resolve_mixed, use_pin: true };
         let ep = Endpoint::new(ServerKind::Ollama, &format!("http://model-box.lan:{port}")).with_key(Some("secret".into()));
         let r = list_models(&t, &ep, &no_cancel());
         assert!(matches!(r, Err(LlmError::Blocked { .. })), "{r:?}");

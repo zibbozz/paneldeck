@@ -267,7 +267,7 @@ pub fn chat(t: &dyn Transport, ep: &Endpoint, req: &ChatRequest, cancel: &Arc<At
         !acc.finished && acc.error.is_none()
     });
     if ep.kind == ServerKind::OpenAi {
-        oa.finish(&mut acc, on);
+        oa.finish(&mut acc, res.is_ok() && !cancel.load(Ordering::Relaxed), on);
     }
     if cancel.load(Ordering::Relaxed) {
         return on(StreamEvent::Error(LlmError::Cancelled));
