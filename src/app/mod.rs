@@ -909,7 +909,8 @@ impl App {
                 e.meta.project = first_project;
             }
         }
-        app.restore_windows(&saved.extra_windows);
+        let ppp = cc.egui_ctx.native_pixels_per_point().unwrap_or(1.0) * app.settings.ui_scale;
+        app.restore_windows(&saved.extra_windows, ppp);
         let p = app.projects.iter().find(|p| p.id == app.active_project).cloned().unwrap_or_default();
         app.load_project_view(p.layout, p.focused);
         app.detached.retain(|id| app.entries.contains_key(id));

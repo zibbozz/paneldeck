@@ -112,8 +112,8 @@ pub fn find_own_window(_title: &str) -> Option<isize> {
     None
 }
 
-/// Liegt der Punkt (Bildschirmkoordinaten, grob in Pixeln) auf einem angeschlossenen Monitor? Für gespeicherte Fensterlagen:
-/// nach einem Wechsel der Monitore soll kein Fenster unsichtbar außerhalb landen.
+/// Liegt der Punkt (Bildschirmkoordinaten in physischen Pixeln) auf einem angeschlossenen Monitor? Für gespeicherte
+/// Fensterlagen: nach einem Wechsel der Monitore soll kein Fenster unsichtbar außerhalb landen.
 #[cfg(windows)]
 pub fn point_on_screen(x: f32, y: f32) -> bool {
     use windows_sys::Win32::Foundation::POINT;
@@ -127,4 +127,32 @@ pub fn point_on_screen(x: f32, y: f32) -> bool {
 #[cfg(not(windows))]
 pub fn point_on_screen(_x: f32, _y: f32) -> bool {
     true
+}
+
+/// Arbeitsfläche (ohne Taskleiste) des Monitors am Punkt oder des nächstgelegenen, in physischen Pixeln:
+/// `[links, oben, rechts, unten]`.
+#[cfg(windows)]
+pub fn work_area(x: f32, y: f32) -> Option<[f32; 4]> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    // SAFETY: `mi` ist ein lokal genulltes MONITORINFO mit gesetztem `cbSize`; der Monitor-Griff stammt direkt aus
+    // MonitorFromPoint (mit MONITOR_DEFAULTTONEAREST nie null) und wird nur gelesen.
+    unsafe {
+        let m = MonitorFromPoint(POINT { x: x as i32, y: y as i32 }, MONITOR_DEFAULTTONEAREST);
+        if m.is_null() {
+            return None;
+        }
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(m, &mut mi) == 0 {
+            return None;
+        }
+        let r = mi.rcWork;
+        Some([r.left as f32, r.top as f32, r.right as f32, r.bottom as f32])
+    }
+}
+
+#[cfg(not(windows))]
+pub fn work_area(_x: f32, _y: f32) -> Option<[f32; 4]> {
+    None
 }

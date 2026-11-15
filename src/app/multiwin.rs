@@ -292,6 +292,40 @@ pub(super) fn close_plan(sessions: impl Iterator<Item = (u64, bool, bool, bool)>
     p
 }
 
+/// Mindestgröße eines Fensters (Punkte).
+const MIN_SIZE: Vec2 = Vec2::new(640.0, 400.0);
+
+/// Gespeicherte Lage eines Fensters an die Bildschirme anpassen. `pos`/`size` in egui-Punkten, `ppp` = physische Pixel je
+/// Punkt (Bildschirmskalierung × Zoom), `on_screen`/`work` fragen in physischen Pixeln (`winctl`). Liegt die Position auf
+/// keinem Monitor mehr, wählt das System sie; die Größe passt in die Arbeitsfläche des Monitors, und das Fenster wird so
+/// verschoben, dass es ganz darauf liegt.
+pub(super) fn fit_window(pos: Option<Pos2>, size: Vec2, ppp: f32, on_screen: impl Fn(f32, f32) -> bool, work: impl Fn(f32, f32) -> Option<[f32; 4]>) -> (Option<Pos2>, Vec2) {
+    let ppp = if ppp.is_finite() && ppp > 0.0 { ppp } else { 1.0 };
+    let pos = pos.filter(|p| p.x.is_finite() && p.y.is_finite() && on_screen(p.x * ppp, p.y * ppp));
+    let mut size = if size.x.is_finite() && size.y.is_finite() { size } else { Vec2::new(1100.0, 720.0) };
+    let probe = pos.unwrap_or(Pos2::ZERO);
+    let Some([l, t, r, b]) = work(probe.x * ppp, probe.y * ppp) else { return (pos, size.max(MIN_SIZE)) };
+    let area = Rect::from_min_max(Pos2::new(l, t) / ppp, Pos2::new(r, b) / ppp);
+    size = size.min(area.size()).max(MIN_SIZE);
+    let pos = pos.map(|p| Pos2::new(p.x.min(area.max.x - size.x).max(area.min.x), p.y.min(area.max.y - size.y).max(area.min.y)));
+    (pos, size)
+}
+
+/// Welche gespeicherten Fenster wiederhergestellt werden: `(Fenster, Projekt)` – ohne Id 0 (Hauptfenster) und doppelte Ids;
+/// ein gelöschtes Projekt wird durch `first_project` ersetzt.
+pub(super) fn restorable<'a>(saved: &'a [SavedWindow], project_ok: impl Fn(u64) -> bool, first_project: u64) -> Vec<(&'a SavedWindow, u64)> {
+    let mut ids: Vec<u64> = Vec::new();
+    let mut out = Vec::new();
+    for s in saved {
+        if s.id == 0 || ids.contains(&s.id) {
+            continue;
+        }
+        ids.push(s.id);
+        out.push((s, if project_ok(s.project) { s.project } else { first_project }));
+    }
+    out
+}
+
 /// Sitzungen, deren Fenster es nicht (mehr) gibt, gehören dem Hauptfenster.
 pub(super) fn adopt_orphans<'a>(windows: impl Iterator<Item = &'a mut u64>, existing: &[u64]) {
     for w in windows {
@@ -322,6 +356,10 @@ pub(super) struct HubWindow {
     init_pos: Option<Pos2>,
     init_size: Vec2,
     init_max: bool,
+    /// Beim Start wiederhergestellt: ohne Fokus anlegen (bleibt für das Fenster gleich – egui baut es sonst neu).
+    restored: bool,
+    /// Verborgen, bis das Hauptfenster aus dem Tray geholt wird (Start mit `--tray`).
+    hidden: bool,
     outer: Option<Rect>,
     inner: Option<Rect>,
     maximized: bool,
@@ -338,7 +376,7 @@ pub(super) struct HubWindow {
 
 impl HubWindow {
     pub(super) fn new(id: u64, view: WinView, pos: Option<Pos2>, size: Vec2, maximized: bool) -> Self {
-        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, outer: None, inner: None, maximized, ask_close: false, close: false, needs_load: true, mem: Default::default() }
+        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, restored: false, hidden: false, outer: None, inner: None, maximized, ask_close: false, close: false, needs_load: true, mem: Default::default() }
     }
     fn viewport(&self) -> egui::ViewportId {
         viewport_of(self.id)
@@ -625,6 +663,10 @@ impl App {
             if w.init_max {
                 b = b.with_maximized(true);
             }
+            if w.hidden && !self.in_tray && !self.start_in_tray {
+                w.hidden = false; // Hauptfenster ist wieder da: weitere Fenster zeigen
+            }
+            b = b.with_active(!w.restored).with_visible(!w.hidden);
             ctx.show_viewport_immediate(w.viewport(), b, |ctx, class| {
                 if class == egui::ViewportClass::Embedded {
                     return; // ohne echte Fenster (nur in Tests/anderen Oberflächen) gibt es keine weiteren Fenster
@@ -881,21 +923,24 @@ impl App {
 
     /// Weitere Fenster aus `state.json` wiederherstellen (nach dem Laden der Sitzungen und Projekte, vor der Ansicht des
     /// Hauptfensters). Sitzungen ohne gültiges Fenster gehen ans Hauptfenster.
-    pub(super) fn restore_windows(&mut self, saved: &[SavedWindow]) {
-        let mut ids: Vec<u64> = Vec::new();
-        for s in saved {
-            if s.id == 0 || ids.contains(&s.id) {
-                continue;
-            }
-            ids.push(s.id);
-            let project = if self.projects.iter().any(|p| p.id == s.project) { s.project } else { self.projects.first().map(|p| p.id).unwrap_or(0) };
+    /// `ppp`: physische Pixel je Punkt (für den Vergleich der gespeicherten Lage mit den Monitoren).
+    pub(super) fn restore_windows(&mut self, saved: &[SavedWindow], ppp: f32) {
+        let first = self.projects.first().map(|p| p.id).unwrap_or(0);
+        let plan = restorable(saved, |p| self.projects.iter().any(|x| x.id == p), first);
+        let ids: Vec<u64> = plan.iter().map(|(s, _)| s.id).collect();
+        for (s, project) in plan {
             let mut view = WinView::new(mode_from_key(&s.tab), project);
             view.layout = s.layout.clone();
             view.focused = s.focused;
             view.proj_views = s.views.iter().filter(|v| v.project != project).map(|v| (v.project, v.layout.clone(), v.focused)).collect();
-            let pos = s.pos.map(|p| Pos2::new(p[0], p[1])).filter(|p| crate::winctl::point_on_screen(p.x, p.y));
-            let size = s.size.map(|v| Vec2::new(v[0], v[1])).unwrap_or(Vec2::new(1100.0, 720.0)).max(Vec2::new(640.0, 400.0));
-            self.wins.list.push(HubWindow::new(s.id, view, pos, size, s.maximized));
+            let pos = s.pos.map(|p| Pos2::new(p[0], p[1]));
+            let size = s.size.map(|v| Vec2::new(v[0], v[1])).unwrap_or(Vec2::new(1100.0, 720.0));
+            let (pos, size) = fit_window(pos, size, ppp, crate::winctl::point_on_screen, crate::winctl::work_area);
+            let mut w = HubWindow::new(s.id, view, pos, size, s.maximized);
+            // Beim Start nicht den Fokus vom Hauptfenster nehmen; startet Paneldeck im Tray, bleiben sie bis dahin verborgen.
+            w.restored = true;
+            w.hidden = self.start_in_tray;
+            self.wins.list.push(w);
         }
         self.wins.next = ids.iter().copied().max().unwrap_or(0) + 1;
         adopt_orphans(self.entries.values_mut().map(|e| &mut e.meta.window), &ids);
@@ -1057,6 +1102,34 @@ mod tests {
         let running = close_plan([(1, true, false, false)].into_iter());
         assert!(running.ask(), "laufende Sitzung: immer fragen, auch wenn „Schließen bestätigen“ aus ist");
         assert!(close_plan(std::iter::empty()).can_close());
+    }
+
+    #[test]
+    fn restored_window_positions_fit_the_monitors() {
+        // Ein Monitor 1920×1080 Pixel, Arbeitsfläche ohne 40 px Taskleiste; Skalierung 150 %.
+        let on = |x: f32, y: f32| (0.0..1920.0).contains(&x) && (0.0..1080.0).contains(&y);
+        let work = |_: f32, _: f32| Some([0.0, 0.0, 1920.0, 1040.0]);
+        let (pos, size) = fit_window(Some(Pos2::new(100.0, 80.0)), Vec2::new(900.0, 600.0), 1.5, on, work);
+        assert_eq!(pos, Some(Pos2::new(100.0, 80.0)), "Punkte × 1,5 = Pixel liegen auf dem Monitor");
+        assert_eq!(size, Vec2::new(900.0, 600.0));
+        let (pos, _) = fit_window(Some(Pos2::new(1500.0, 80.0)), Vec2::new(900.0, 600.0), 1.5, on, work);
+        assert_eq!(pos, None, "1500 Punkte = 2250 Pixel: außerhalb, das System wählt die Lage");
+        let (pos, size) = fit_window(Some(Pos2::new(1000.0, 500.0)), Vec2::new(3000.0, 2000.0), 1.5, on, work);
+        assert!((size.x - 1280.0).abs() < 0.01 && (size.y - 1040.0 / 1.5).abs() < 0.01, "höchstens die Arbeitsfläche (in Punkten): {size:?}");
+        assert_eq!(pos, Some(Pos2::new(0.0, 0.0)), "so verschoben, dass das Fenster ganz darauf liegt");
+        let (_, size) = fit_window(None, Vec2::new(100.0, 100.0), 1.0, on, work);
+        assert_eq!(size, MIN_SIZE, "nie kleiner als die Mindestgröße");
+        let (pos, size) = fit_window(Some(Pos2::new(f32::NAN, 0.0)), Vec2::new(f32::INFINITY, 1.0), 0.0, on, |_, _| None);
+        assert_eq!((pos, size), (None, Vec2::new(1100.0, 720.0)), "kaputte Werte: Standard");
+    }
+
+    #[test]
+    fn restore_skips_main_and_duplicate_ids_and_replaces_deleted_projects() {
+        let w = |id: u64, project: u64| SavedWindow { id, project, ..SavedWindow::default() };
+        let saved = vec![w(0, 1), w(2, 1), w(2, 3), w(3, 9), w(4, 3)];
+        let plan = restorable(&saved, |p| p == 1 || p == 3, 1);
+        let got: Vec<(u64, u64)> = plan.iter().map(|(s, p)| (s.id, *p)).collect();
+        assert_eq!(got, vec![(2, 1), (3, 1), (4, 3)], "0 = Hauptfenster, doppelte 2 einmal, Projekt 9 gibt es nicht mehr");
     }
 
     #[test]
