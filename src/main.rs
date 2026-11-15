@@ -17,6 +17,7 @@ mod cli;
 mod console;
 mod help;
 mod integration;
+mod launch;
 mod keys;
 mod notify;
 mod osc;
@@ -145,6 +146,8 @@ fn main() -> eframe::Result<()> {
         let ok = hooks::global_settings_path().map(|p| !p.exists() || hooks::uninstall_global(&p).is_ok()).unwrap_or(true);
         // Ebenso eine Registrierung als MCP-Server in Claude Code, falls sie auf diese .exe zeigt.
         mcp::unregister_if_ours();
+        // Autostart-Werte `Paneldeck (…)` von Instanzen mit Profil/Datenordner (den Standardwert löscht der Installer).
+        integration::remove_instance_autostarts();
         std::process::exit(if ok { 0 } else { 1 });
     }
     // Sprache für Hilfe und Meldungen: --lang > settings.json des Datenordners > Englisch.
