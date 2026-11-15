@@ -20,6 +20,10 @@ Für Windows 10 (1809+) / 11 (x64), **komplett offline lauffähig**: wahlweise a
 
 <p align="center"><img src="docs/images/de/kosten.png" alt="Kosten-Übersicht" width="85%"><br><sub>Kosten-Übersicht: heute, 7 Tage, Gesamt, Tagesbudget und teuerste Sitzungen.</sub></p>
 
+## Download
+Paneldeck gibt es nur über **GitHub Releases**: https://github.com/zibbozz/paneldeck/releases – je Release ein Installer (`Paneldeck-Setup-<Version>.exe`) und ein portables ZIP (`paneldeck-<Version>-windows-x64.zip`), beide aus diesem Repository gebaut.
+Code-Signatur: Die Releases sind derzeit **nicht signiert**. Paneldeck will die kostenlose Code-Signatur für Open-Source-Projekte bei der SignPath Foundation beantragen; siehe [Richtlinie zur Code-Signatur](#richtlinie-zur-code-signatur-code-signing-policy).
+
 ## Erste Schritte
 1. **Installer** `Paneldeck-Setup-<Version>.exe` ausführen – oder das **portable ZIP** entpacken und `paneldeck.exe` starten.
 2. **Strg+Umschalt+T** öffnet eine neue Sitzung, **Strg+Umschalt+P** die Befehls-Palette, **Strg+Umschalt+D/E** teilt einen Bereich.
@@ -32,7 +36,7 @@ Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 Installer und `paneldeck.exe` sind **nicht code-signiert**. Ein Zertifikat kostet Geld, und Paneldeck soll ein kostenloses Hobbyprojekt bleiben. Deshalb gilt bis auf Weiteres:
 - Beim ersten Start zeigt **Windows SmartScreen** evtl. „Der Computer wurde durch Windows geschützt“. Auf **„Weitere Informationen“ → „Trotzdem ausführen“** klicken.
 - Manche Virenscanner schlagen bei neuen, unsignierten Programmen mit Tray-Symbol und Autostart fälschlich an. Der Quelltext ist offen einsehbar, und du kannst Paneldeck selbst bauen (siehe [Bauen](#bauen)).
-- **Geplant:** Ich versuche demnächst, ein kostenloses Signatur-Zertifikat für Open-Source-Projekte zu bekommen (z. B. über die SignPath Foundation). Ob und wann das klappt, ist offen; sobald es so weit ist, steht es hier und im Changelog.
+- **Geplant:** Paneldeck will die kostenlose Code-Signatur für Open-Source-Projekte bei der SignPath Foundation beantragen (siehe [Richtlinie zur Code-Signatur](#richtlinie-zur-code-signatur-code-signing-policy)). Sobald die Releases signiert sind, steht es hier und im Changelog.
 
 ## Todo-Liste und Tickets
 Die Fensterleiste oben hat zwei Reiter: **Terminal Hub** (alles bisher Beschriebene, unverändert) und **Todo-Liste**. Umgeschaltet wird per Klick, `Strg+1` / `Strg+2` oder `Alt+Umschalt+1` / `Alt+Umschalt+2`. Paneldeck startet immer im Terminal Hub. Die Fensterknöpfe (Minimieren, Maximieren, Schließen) sitzen rechts in der Fensterleiste; unter Windows 11 zeigt der Maximieren-Knopf auch das Snap-Layouts-Menü.
@@ -163,11 +167,25 @@ Mit `--publish` wird zusätzlich das Tag gepusht und das GitHub-Release angelegt
 
 Den Changelog gibt es auf Deutsch ([`Changelog.de.md`](Changelog.de.md)) und Englisch ([`Changelog.md`](Changelog.md)); die Entwickler-Notizen (`CLAUDE.md`, `TESTPLAN.md`) sind auf Deutsch.
 
+## Richtlinie zur Code-Signatur (Code signing policy)
+- **Stand:** Die Releases sind derzeit **nicht signiert**. Paneldeck will die kostenlose Code-Signatur bei der [SignPath Foundation](https://signpath.org) beantragen; bisher wurde nichts von ihr signiert (siehe [Hinweis oben](#hinweis-programm-ist-noch-nicht-signiert)). Wird ein Antrag angenommen, steht es hier.
+- **Was signiert würde:** nur die Release-Dateien, die der GitHub-Actions-Workflow `.github/workflows/release-build.yml` aus diesem Repository baut (Installer `Paneldeck-Setup-<Version>.exe` und `paneldeck.exe` im portablen ZIP). Sonst wird nichts mit diesem Zertifikat signiert.
+- **Committer und Reviewer:** [zibbozz](https://github.com/zibbozz) (Eigentümer des Repositorys). Änderungen anderer Personen werden nur nach Prüfung durch einen Committer übernommen.
+- **Freigabe (Approver):** [zibbozz](https://github.com/zibbozz). Jede Signatur würde einzeln von Hand freigegeben.
+- **Datenschutz:** siehe [Datenschutz](#datenschutz-privacy).
+
+## Datenschutz (Privacy)
+Dieses Programm überträgt keine Informationen an andere Systeme im Netzwerk, außer der Nutzer oder die Person, die es installiert oder bedient, verlangt das ausdrücklich. (This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.)
+
+- Paneldeck sendet keine Telemetrie. Es liest lokal Claude-Transkripte (`~/.claude`) für Verlauf und Kostenschätzung; alles bleibt auf deinem Rechner, auch deine Todo-Liste und deine Tickets (lokale Datenbank `paneldeck.db`).
+- Die Agenten-Schnittstelle (MCP) ist standardmäßig aus und nur vom eigenen Rechner aus erreichbar (`127.0.0.1`).
+- Links in Terminals und Tickets öffnen sich nur auf Klick im Browser.
+
 ## Issues und Mitarbeit
 Paneldeck ist noch ein junges Projekt. Issues und Beiträge werden für alle geöffnet, sobald das Projekt einen Stand erreicht hat, mit dem ich zufrieden bin und bei dem ich mich wohlfühle, die Öffentlichkeit mitarbeiten zu lassen. Bis dahin bitte ich um Geduld – danke für das Verständnis.
 
 ## Rechtliches
 - **Lizenz:** MIT (`LICENSE`). Die Software wird ohne jede Gewährleistung bereitgestellt; die Nutzung erfolgt auf eigene Gefahr – das gilt besonders für die Agenten-Schnittstelle, die KI-Agenten in deine Terminals schreiben lässt.
 - **Keine Verbindung zu Anthropic:** Paneldeck ist ein unabhängiges Projekt. „Claude“ und „Claude Code“ sind Marken von Anthropic, PBC und werden hier nur genannt, um zu beschreiben, mit welchem Programm Paneldeck zusammenarbeitet. Paneldeck enthält keinen Code und keine Logos von Anthropic.
-- **Datenschutz:** Paneldeck baut keine Verbindungen ins Internet auf und sendet keine Telemetrie. Es liest lokal Claude-Transkripte (`~/.claude`) für Verlauf und Kostenschätzung; alles bleibt auf deinem Rechner, auch deine Todo-Liste und deine Tickets (lokale Datenbank `paneldeck.db`).
+- **Datenschutz:** siehe [Datenschutz](#datenschutz-privacy).
 - **Drittanbieter-Software:** Lizenzen und Hinweise stehen in `THIRD_PARTY.md` und `THIRD_PARTY_LICENSES.txt` (liegen Installer und ZIP bei). Die eingebetteten Schriften Cascadia Mono und Noto Color Emoji stehen unter der SIL Open Font License 1.1 (`assets/fonts/LICENSE-*.txt`).

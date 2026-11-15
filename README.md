@@ -20,6 +20,10 @@ For Windows 10 (1809+) / 11 (x64), **fully offline**: either as an installer (pe
 
 <p align="center"><img src="docs/images/kosten.png" alt="Cost overview" width="85%"><br><sub>Cost overview: today, 7 days, total, daily budget and most expensive sessions.</sub></p>
 
+## Download
+Paneldeck is distributed only through **GitHub Releases**: https://github.com/zibbozz/paneldeck/releases – each release has an installer (`Paneldeck-Setup-<version>.exe`) and a portable ZIP (`paneldeck-<version>-windows-x64.zip`), both built from this repository.
+Code signing: the releases are currently **not signed**. Paneldeck intends to apply for free code signing for open-source projects at the SignPath Foundation; see the [code signing policy](#code-signing-policy).
+
 ## Getting started
 1. Run the **installer** `Paneldeck-Setup-<version>.exe` – or unpack the **portable ZIP** and start `paneldeck.exe`.
 2. **Ctrl+Shift+T** opens a new session, **Ctrl+Shift+P** the command palette, **Ctrl+Shift+D/E** splits a pane.
@@ -32,7 +36,7 @@ All shortcuts can be changed under *Settings → Shortcuts*.
 The installer and `paneldeck.exe` are **not code-signed**. A certificate costs money, and Paneldeck is meant to stay a free hobby project. For now this means:
 - On first start, **Windows SmartScreen** may show "Windows protected your PC". Click **"More info" → "Run anyway"**.
 - Some antivirus programs raise false alarms for new, unsigned programs with a tray icon and autostart. The source code is open, and you can build Paneldeck yourself (see [Building](#building)).
-- **Planned:** I will soon try to obtain a free code-signing certificate for open-source projects (for example through the SignPath Foundation). Whether and when that works is open; once it does, it will be noted here and in the changelog.
+- **Planned:** Paneldeck intends to apply for free code signing for open-source projects from the SignPath Foundation (see the [code signing policy](#code-signing-policy)). Once releases are signed, it will be noted here and in the changelog.
 
 ## Todo list and tickets
 The title bar at the top of the window has two tabs: **Terminal Hub** (everything described above, unchanged) and **Todo list**. Switch with a click, `Ctrl+1` / `Ctrl+2` or `Alt+Shift+1` / `Alt+Shift+2`. Paneldeck always starts in the Terminal Hub. Window controls (minimize, maximize, close) sit at the right of the title bar; on Windows 11 the maximize button also shows the Snap Layouts menu.
@@ -163,11 +167,25 @@ Release files (portable ZIP with `paneldeck.exe` and licenses, installer) are bu
 
 The changelog is available in English ([`Changelog.md`](Changelog.md)) and German ([`Changelog.de.md`](Changelog.de.md)); the developer notes (`CLAUDE.md`, `TESTPLAN.md`) are written in German.
 
+## Code signing policy
+- **Status:** the releases are currently **not signed**. Paneldeck intends to apply for free code signing at the [SignPath Foundation](https://signpath.org); nothing has been signed by them (see the [note above](#note-the-program-is-not-yet-code-signed)). If an application is approved, this section will say so.
+- **What would be signed:** only the release files built from this repository by the GitHub Actions workflow `.github/workflows/release-build.yml` (installer `Paneldeck-Setup-<version>.exe` and `paneldeck.exe` in the portable ZIP). Nothing else is signed with this certificate.
+- **Committers and reviewers:** [zibbozz](https://github.com/zibbozz) (owner of the repository). Changes from other people are only merged after review by a committer.
+- **Approvers:** [zibbozz](https://github.com/zibbozz). Every signing request would be approved manually.
+- **Privacy:** see [Privacy](#privacy).
+
+## Privacy
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+
+- Paneldeck sends no telemetry. It reads Claude transcripts (`~/.claude`) locally for history and cost estimates; everything stays on your computer, including your to-do list and tickets (local database `paneldeck.db`).
+- The agent interface (MCP) is off by default and only reachable from your own computer (`127.0.0.1`).
+- Links in terminals and tickets are only opened in your browser when you click them.
+
 ## Issues and contributions
 Paneldeck is still a young project. Issues and contributions will be opened to everyone once the project has reached a state I am happy with and feel comfortable letting the public work on it. Until then, please be patient – thank you for your understanding.
 
 ## Legal
 - **License:** MIT (`LICENSE`). The software is provided without any warranty; use is at your own risk – this applies in particular to the agent interface, which lets AI agents write into your terminals.
 - **No affiliation with Anthropic:** Paneldeck is an independent project. "Claude" and "Claude Code" are trademarks of Anthropic, PBC and are mentioned here only to describe which program Paneldeck works with. Paneldeck contains no code and no logos from Anthropic.
-- **Privacy:** Paneldeck makes no connections to the internet and sends no telemetry. It reads Claude transcripts (`~/.claude`) locally for history and cost estimates; everything stays on your computer, including your to-do list and tickets (local database `paneldeck.db`).
+- **Privacy:** see [Privacy](#privacy).
 - **Third-party software:** licenses and notices are in `THIRD_PARTY.md` and `THIRD_PARTY_LICENSES.txt` (included with the installer and the ZIP). The embedded fonts Cascadia Mono and Noto Color Emoji are licensed under the SIL Open Font License 1.1 (`assets/fonts/LICENSE-*.txt`).

@@ -15,7 +15,7 @@
     <path d="M126 96 L194 96 C210.569 96 224 109.431 224 126 L224 194 C224 210.569 210.569 224 194 224 L126 224 C109.431 224 96 210.569 96 194 L96 126 C96 109.431 109.431 96 126 96 Z" fill="#e0623f"/>
     <text transform="matrix(1 0 0 1 160 190)" x="0" y="0" xml:space="preserve" font-family="Consolas, monospace" font-size="64" font-weight="bold" fill="#ffffff" text-anchor="middle"><tspan x="0" y="0">&gt;_</tspan></text>
     <text transform="matrix(1 0 0 1 262 170)" x="0" y="0" xml:space="preserve" font-family="&apos;Segoe UI&apos;, sans-serif" font-size="84" font-weight="600" fill="#f6f3ef"><tspan x="0" y="0">Paneldeck</tspan></text>
-    <text transform="matrix(1 0 0 1 266 214)" x="0" y="0" xml:space="preserve" font-family="&apos;Segoe UI&apos;, sans-serif" font-size="27" fill="#c3bdd3"><tspan x="0" y="0">All your terminals. One window.</tspan></text>
+    <text transform="matrix(1 0 0 1 266 214)" x="0" y="0" xml:space="preserve" font-family="&apos;Segoe UI&apos;, sans-serif" font-size="27" fill="#c3bdd3"><tspan x="0" y="0">Your number one tool in agentic coding.</tspan></text>
     <rect x="266" y="250" width="104" height="34" rx="17" fill="#ffffff" opacity="0.09"/>
     <circle cx="285" cy="267" r="5" fill="#3fb950"/>
     <text x="298" y="273" font-family="'Segoe UI', sans-serif" font-size="16" fill="#e8e5f0">ready</text>
