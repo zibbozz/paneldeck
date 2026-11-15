@@ -247,6 +247,48 @@ pub(super) fn pick_window(want: Option<u64>, cur: u64, exists: impl Fn(u64) -> b
     }
 }
 
+/// Was beim Schließen eines weiteren Fensters mit seinen Sitzungen geschieht (#110).
+#[derive(Default, Debug, PartialEq)]
+pub(super) struct ClosePlan {
+    /// Werden beendet.
+    pub(super) end: Vec<u64>,
+    /// Davon laufen noch.
+    pub(super) running: usize,
+    /// Abgedockte Sitzungen: bleiben in ihren eigenen Fenstern offen und gehören danach dem Hauptfenster.
+    pub(super) adopt: Vec<u64>,
+    /// Sitzungen mit Git-Worktree: erst über die Worktree-Rückfrage schließen (behalten, entfernen, mergen) – nie still.
+    pub(super) worktrees: Vec<u64>,
+}
+
+impl ClosePlan {
+    /// Rückfrage nötig? Immer, wenn noch etwas läuft, abgedockt ist oder einen Worktree hat (unabhängig von
+    /// „Schließen bestätigen“: ein ganzes Fenster beendet viele Sitzungen auf einmal).
+    pub(super) fn ask(&self) -> bool {
+        self.running > 0 || !self.adopt.is_empty() || !self.worktrees.is_empty()
+    }
+
+    /// Darf das Fenster jetzt schließen? Nicht, solange Worktree-Sitzungen offen sind.
+    pub(super) fn can_close(&self) -> bool {
+        self.worktrees.is_empty()
+    }
+}
+
+/// Plan aus den Sitzungen eines Fensters: (Id, läuft, hat Worktree, abgedockt).
+pub(super) fn close_plan(sessions: impl Iterator<Item = (u64, bool, bool, bool)>) -> ClosePlan {
+    let mut p = ClosePlan::default();
+    for (id, running, worktree, detached) in sessions {
+        if worktree {
+            p.worktrees.push(id);
+        } else if detached {
+            p.adopt.push(id);
+        } else {
+            p.end.push(id);
+            p.running += running as usize;
+        }
+    }
+    p
+}
+
 /// Sitzungen, deren Fenster es nicht (mehr) gibt, gehören dem Hauptfenster.
 pub(super) fn adopt_orphans<'a>(windows: impl Iterator<Item = &'a mut u64>, existing: &[u64]) {
     for w in windows {
@@ -492,9 +534,9 @@ impl App {
         self.wins.cur = 0;
     }
 
-    /// Laufende Sitzungen eines Fensters.
-    fn running_in(&self, window: u64) -> usize {
-        self.entries.values().filter(|e| e.meta.window == window && !e.exited()).count()
+    /// Was mit den Sitzungen von Fenster `window` beim Schließen geschieht.
+    fn window_close_plan(&self, window: u64) -> ClosePlan {
+        close_plan(self.entries.iter().filter(|(_, e)| e.meta.window == window).map(|(id, e)| (*id, !e.exited(), e.meta.worktree.is_some(), self.detached.contains(id))))
     }
 
     /// Weitere Fenster anlegen, zeichnen und schließen. Im Hauptfenster nach dessen Aktionen aufrufen.
@@ -538,8 +580,15 @@ impl App {
                 }
             }
             if w.close {
-                let ids: Vec<u64> = self.entries.iter().filter(|(_, e)| e.meta.window == w.id).map(|(i, _)| *i).collect();
-                for id in ids {
+                let plan = self.window_close_plan(w.id);
+                // Abgedocktes bleibt offen; Worktree-Sitzungen (sollte es nach der Rückfrage keine mehr geben) gehen nie still
+                // verloren: beide wechseln ins Hauptfenster.
+                for id in plan.adopt.iter().chain(&plan.worktrees) {
+                    if let Some(e) = self.entries.get_mut(id) {
+                        e.meta.window = 0;
+                    }
+                }
+                for id in plan.end {
                     self.close_session(id);
                 }
             }
@@ -586,7 +635,7 @@ impl App {
             w.inner = inner.or(w.inner);
         }
         if close_req && !w.close {
-            if self.running_in(w.id) > 0 && self.settings.confirm_close {
+            if self.window_close_plan(w.id).ask() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 w.ask_close = true;
             } else {
@@ -620,7 +669,7 @@ impl App {
         }
         self.restore_dialog(ctx);
         if w.ask_close {
-            self.close_window_dialog(ctx, w);
+            self.close_window_dialog(ctx, w, &mut actions);
         }
         for a in actions {
             self.apply(ctx, a);
@@ -667,30 +716,66 @@ impl App {
         }
     }
 
-    /// Rückfrage beim Schließen eines weiteren Fensters mit laufenden Sitzungen.
-    fn close_window_dialog(&mut self, ctx: &egui::Context, w: &mut HubWindow) {
+    /// Rückfrage beim Schließen eines weiteren Fensters: was beendet wird, was ins Hauptfenster wechselt und welche
+    /// Worktree-Sitzungen erst einzeln geschlossen werden müssen (über die gewohnte Worktree-Rückfrage).
+    fn close_window_dialog(&mut self, ctx: &egui::Context, w: &mut HubWindow, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
-        let n = self.running_in(w.id);
-        if n == 0 {
+        let plan = self.window_close_plan(w.id);
+        if !plan.ask() {
             w.ask_close = false;
             w.close = true;
             return;
         }
+        if self.wt_close.is_some() {
+            return; // die Worktree-Rückfrage einer Sitzung ist offen; danach geht es hier weiter
+        }
+        let names = |ids: &[u64]| ids.iter().filter_map(|id| self.entries.get(id).map(|e| (*id, e.display_name()))).collect::<Vec<_>>();
+        let (adopt, worktrees) = (names(&plan.adopt), names(&plan.worktrees));
+        let n = plan.running;
         egui::Window::new(lang.t("Fenster schließen?", "Close window?"))
             .id(Id::new(("close_win_ask", w.id)))
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label(if n == 1 {
-                    lang.t("In diesem Fenster läuft noch eine Sitzung. Beim Schließen wird sie beendet.", "One session is still running in this window. Closing the window will end it.").to_string()
-                } else if lang == Lang::De {
-                    format!("In diesem Fenster laufen noch {n} Sitzungen. Beim Schließen werden sie beendet.")
-                } else {
-                    format!("{n} sessions are still running in this window. Closing the window will end them.")
-                });
+                ui.set_max_width(420.0);
+                if n == 1 {
+                    ui.label(lang.t("In diesem Fenster läuft noch eine Sitzung. Beim Schließen wird sie beendet.", "One session is still running in this window. Closing the window will end it."));
+                } else if n > 1 {
+                    ui.label(if lang == Lang::De {
+                        format!("In diesem Fenster laufen noch {n} Sitzungen. Beim Schließen werden sie beendet.")
+                    } else {
+                        format!("{n} sessions are still running in this window. Closing the window will end them.")
+                    });
+                }
+                if !adopt.is_empty() {
+                    ui.add_space(S1);
+                    ui.label(lang.t("Abgedockte Sitzungen bleiben offen und gehören danach zum Hauptfenster:", "Detached sessions stay open and move to the main window:"));
+                    for (_, name) in &adopt {
+                        ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                    }
+                }
+                if !worktrees.is_empty() {
+                    ui.add_space(S1);
+                    ui.label(lang.t(
+                        "Sitzungen mit Git-Worktree zuerst schließen (Worktree behalten, entfernen oder mergen):",
+                        "Close the sessions with a Git worktree first (keep, remove or merge the worktree):",
+                    ));
+                    for (id, name) in &worktrees {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("• {name}"));
+                            if ui.small_button(lang.t("Schließen …", "Close …")).clicked() {
+                                actions.push(Action::RequestClose(*id));
+                            }
+                        });
+                    }
+                }
+                ui.add_space(S2);
                 ui.horizontal(|ui| {
-                    if ui.button(lang.t("Fenster schließen", "Close window")).clicked() {
+                    let close = ui
+                        .add_enabled(plan.can_close(), egui::Button::new(lang.t("Fenster schließen", "Close window")))
+                        .on_disabled_hover_text(lang.t("Erst die Sitzungen mit Worktree schließen.", "Close the sessions with a worktree first."));
+                    if close.clicked() {
                         w.ask_close = false;
                         w.close = true;
                     }
@@ -875,6 +960,22 @@ mod tests {
     fn agent_children_follow_the_callers_window_and_project() {
         assert_eq!(child_home(Some((2, 7)), 1), (2, 7), "Agent in Fenster 2, Projekt 7");
         assert_eq!(child_home(None, 1), (0, 1), "Agent außerhalb des Hubs: Hauptfenster, dessen Projekt");
+    }
+
+    #[test]
+    fn closing_a_window_ends_plain_sessions_keeps_detached_and_worktrees() {
+        // (Id, läuft, Worktree, abgedockt)
+        let p = close_plan([(1, true, false, false), (2, false, false, false), (3, true, false, true), (4, false, true, false), (5, true, true, true)].into_iter());
+        assert_eq!(p.end, vec![1, 2]);
+        assert_eq!(p.running, 1, "nur laufende zählen für den Text");
+        assert_eq!(p.adopt, vec![3], "abgedockt: bleibt offen, wechselt ins Hauptfenster");
+        assert_eq!(p.worktrees, vec![4, 5], "Worktree geht vor abgedockt: erst über die Worktree-Rückfrage");
+        assert!(p.ask() && !p.can_close());
+        let quiet = close_plan([(1, false, false, false)].into_iter());
+        assert!(!quiet.ask() && quiet.can_close(), "nur beendete Sitzungen: ohne Rückfrage schließen");
+        let running = close_plan([(1, true, false, false)].into_iter());
+        assert!(running.ask(), "laufende Sitzung: immer fragen, auch wenn „Schließen bestätigen“ aus ist");
+        assert!(close_plan(std::iter::empty()).can_close());
     }
 
     #[test]
