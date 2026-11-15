@@ -40,7 +40,8 @@ Each release is checked with Microsoft Defender before it is published (`tools/d
 ## Updates
 - "Checksum mismatch – the download was discarded": the file did not match `SHA256SUMS.txt`; try again later or download by hand.
 - "This version can't be installed automatically": the release has no checksum file `SHA256SUMS.txt` (2.0.0 and older) or no matching file – download it from the release page and update by hand.
-- After an update, `paneldeck.exe.old` next to a portable `paneldeck.exe` is removed at the next start.
+- After an update, `paneldeck.exe.old` next to a portable `paneldeck.exe` is removed as soon as the new version has started (its first frame is drawn). If the new version does not start at all, quit Paneldeck, delete `paneldeck.exe` and rename `paneldeck.exe.old` back to `paneldeck.exe`.
+- "The certificate revocation check could not be done …": a firewall, proxy or virus scanner blocks the server for certificate revocation lists. For safety nothing is downloaded; try again later or check the firewall/proxy – or update by hand.
 
 ## Display
 - Missing special characters? Windows system fonts are used as a fallback (Segoe UI Symbol, Microsoft YaHei, Yu Gothic, Malgun Gothic …).

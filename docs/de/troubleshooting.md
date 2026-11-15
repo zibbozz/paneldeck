@@ -40,7 +40,8 @@ Jedes Release wird vor der Veröffentlichung mit Microsoft Defender geprüft (`t
 ## Updates
 - „Prüfsumme stimmt nicht – der Download wurde verworfen.“: Die Datei passte nicht zu `SHA256SUMS.txt`; später erneut versuchen oder von Hand herunterladen.
 - „Diese Version lässt sich nicht automatisch installieren“: Das Release hat keine Prüfsummen-Datei `SHA256SUMS.txt` (2.0.0 und älter) oder keine passende Datei – von der Release-Seite herunterladen und von Hand aktualisieren.
-- Nach einem Update wird `paneldeck.exe.old` neben einer portablen `paneldeck.exe` beim nächsten Start gelöscht.
+- Nach einem Update wird `paneldeck.exe.old` neben einer portablen `paneldeck.exe` gelöscht, sobald die neue Version gestartet ist (ihr erstes Bild gezeichnet hat). Startet die neue Version gar nicht: Paneldeck beenden, `paneldeck.exe` löschen und `paneldeck.exe.old` wieder in `paneldeck.exe` umbenennen.
+- „Die Sperrprüfung des Zertifikats war nicht möglich …“: Eine Firewall, ein Proxy oder ein Virenscanner blockiert den Server für Sperrlisten. Aus Sicherheitsgründen wird nichts geladen; später erneut versuchen oder Firewall/Proxy prüfen – oder von Hand aktualisieren.
 
 ## Anzeige
 - Sonderzeichen fehlen? Windows-Systemschriften werden als Fallback genutzt (Segoe UI Symbol, Microsoft YaHei, Yu Gothic, Malgun Gothic …).

@@ -96,7 +96,7 @@ Prints the help (in the language of `--lang` or of the saved settings).
     paneldeck.exe --help > paneldeck-help.txt
 
 ### A single folder without an option
-Exactly one argument without an option that is an existing folder works like `--open <folder>`; a file opens its folder. This is what happens when you drop a folder or a file onto `paneldeck.exe`.
+Exactly one argument without an option that is an existing folder works like `--open <folder>`; an existing file opens its folder. This is what happens when you drop a folder or a file onto `paneldeck.exe`. It can be combined with other options (e.g. `--profile`), but not with `--open` or `mcp`; a second such argument or a path that does not exist is an error (exit code 2).
 
     paneldeck.exe "C:\Dev\my-app"
 

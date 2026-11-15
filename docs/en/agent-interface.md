@@ -69,7 +69,7 @@ When an agent connects, Paneldeck sends it a guide in the MCP `initialize` reply
 
 *Settings → Agents → System prompt*:
 - **Prompt language:** English (default) or German – independent of the interface language (small local models often follow English instructions best). Stored as `mcp_prompt_lang` in `settings.json`.
-- **Template:** the built-in template of the chosen language, or your own template in the file **`system-prompt.md`** in the data folder (used for both languages, editable with any text editor, at most 64 KB). The editor shows whether the *Built-in template* or a *Custom template* is active and marks *unsaved changes*. *Save* writes `system-prompt.md`; *Discard changes* reloads it; *Reset to default* renames it to **`system-prompt.md.bak`** (replacing an older backup) so that the built-in template applies again. If the file changes outside Paneldeck, the editor reloads it (or warns, if you have unsaved edits).
+- **Template:** the built-in template of the chosen language, or your own template in the file **`system-prompt.md`** in the data folder (used for both languages, editable with any text editor, at most 64 KB). The editor shows whether the *Built-in template* or a *Custom template* is active and marks *unsaved changes*. *Save* writes `system-prompt.md` (saving an empty text restores the built-in template); *Discard changes* reloads it; *Reset to default* renames it to **`system-prompt.md.bak`** (replacing an older backup) so that the built-in template applies again. If the file changes outside Paneldeck, the editor reloads it (or warns, if you have unsaved edits).
 - **Placeholders**, replaced when the prompt is sent:
 
   | Placeholder | Replaced with |
@@ -79,7 +79,7 @@ When an agent connects, Paneldeck sends it a guide in the MCP `initialize` reply
   | `{{mode}}` | the current to-do mode (simple mode or expert mode) |
   | `{{version}}` | the Paneldeck version |
 
-  Names are case-insensitive. Unknown placeholders stay in the text and are flagged with a warning; `{{{{` gives a literal `{{`.
+  Names are case-insensitive, and spaces inside the braces are allowed (`{{ Level }}`). Unknown placeholders stay in the text and are flagged with a warning; `{{{{` gives a literal `{{`.
 - **Preview** of the rendered text for the current level and mode, **Copy** (rendered text to the clipboard) and **Save as file…** (rendered text as `.md`).
 - A too large (over 64 KB), invalid (not UTF-8) or empty `system-prompt.md` falls back to the built-in template, with a message in the settings.
 

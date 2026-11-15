@@ -2,7 +2,7 @@
 
 # Windows-Integration
 
-Alles, was Paneldeck in Windows einrichtet, gilt pro Benutzer (`HKCU`, ohne Administratorrechte) und lässt sich wieder ausschalten. Die Einstellungen stehen unter *Einstellungen → Fenster*.
+Alles, was Paneldeck in Windows einrichtet, gilt pro Benutzer (`HKCU`, ohne Administratorrechte) und lässt sich wieder ausschalten. Die Einstellungen stehen unter *Einstellungen → Fenster*, Abschnitt *Windows-Integration (nur für dich, ohne Administratorrechte)*.
 
 ## Tray
 - **Schließen → Tray:** Das Fenster verschwindet im Tray, statt sich zu beenden (Beenden über das Tray-Menü).
@@ -25,7 +25,7 @@ Startet Paneldeck nach der Anmeldung minimiert im Tray (`"<exe>" --tray`, Run-We
 `<hash>` ist ein kurzer, stabiler Hash aus 8 Zeichen über den Datenordner. Schaltet eine Instanz den Autostart aus, entfernt sie nur ihren eigenen Wert.
 
 ## Explorer-Kontextmenü
-Rechtsklick auf einen Ordner, ein Laufwerk oder den leeren Hintergrund eines Ordnerfensters: **In Paneldeck öffnen** / **Mit Claude in Paneldeck starten**. Die Befehle sind `"<exe>" [Instanz-Optionen] --open "%1"` und `"<exe>" [Instanz-Optionen] --claude --open "%1"` (`%V` für den Hintergrund).
+Rechtsklick auf einen Ordner oder den leeren Hintergrund eines Ordnerfensters (auch einer Laufwerkswurzel wie `C:\`): **In Paneldeck öffnen** / **Mit Claude in Paneldeck starten**. Die Einträge gelten für Ordner (`Directory\shell`) und Ordner-Hintergründe (`Directory\Background\shell`), nicht für die Laufwerkssymbole selbst (z. B. unter *Dieser PC*). Die Befehle sind `"<exe>" [Instanz-Optionen] --open "%1"` und `"<exe>" [Instanz-Optionen] --claude --open "%1"` (`%V` für den Hintergrund).
 
 Es gibt **nur ein Kontextmenü**: Die Instanz, die es zuletzt einschaltet, wird von ihm gestartet. Eine andere Instanz zeigt dann „→ anderes Paneldeck“ neben dem Schalter (der Befehl steht im Tooltip); schaltet man es dort ein, übernimmt sie es.
 

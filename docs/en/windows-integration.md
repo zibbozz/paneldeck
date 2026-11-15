@@ -2,7 +2,7 @@
 
 # Windows integration
 
-Everything Paneldeck sets up in Windows is per user (`HKCU`, no administrator rights) and can be switched off again. The settings are under *Settings → Window*.
+Everything Paneldeck sets up in Windows is per user (`HKCU`, no administrator rights) and can be switched off again. The settings are under *Settings → Window*, section *Windows integration (current user only, no admin rights)*.
 
 ## Tray
 - **Close → tray:** the window goes to the tray instead of quitting (quit via the tray menu).
@@ -25,7 +25,7 @@ Starts Paneldeck minimized in the tray after login (`"<exe>" --tray`, Run value 
 `<hash>` is a short, stable 8-character hash of the data folder. Switching autostart off in an instance removes only its own value.
 
 ## Explorer context menu
-Right-click a folder, a drive or the empty background of a folder window: **Open in Paneldeck** / **Start with Claude in Paneldeck**. The commands are `"<exe>" [instance options] --open "%1"` and `"<exe>" [instance options] --claude --open "%1"` (`%V` for the background).
+Right-click a folder or the empty background of a folder window (also of a drive root such as `C:\`): **Open in Paneldeck** / **Start with Claude in Paneldeck**. The entries are registered for folders (`Directory\shell`) and folder backgrounds (`Directory\Background\shell`), not for the drive icons themselves (e.g. in *This PC*). The commands are `"<exe>" [instance options] --open "%1"` and `"<exe>" [instance options] --claude --open "%1"` (`%V` for the background).
 
 There is **only one context menu**: the instance that switches it on last is the one it starts. Another instance then shows "→ another Paneldeck" next to the switch (the command is in the tooltip); switching it on there takes it over.
 

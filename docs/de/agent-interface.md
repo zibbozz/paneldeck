@@ -69,7 +69,7 @@ Verbindet sich ein Agent, schickt Paneldeck ihm in der MCP-Antwort auf `initiali
 
 *Einstellungen → Agenten → Systemprompt*:
 - **Sprache des Prompts:** Englisch (Standard) oder Deutsch – unabhängig von der Sprache der Oberfläche (kleine lokale Modelle folgen englischen Anweisungen oft am besten). Gespeichert als `mcp_prompt_lang` in `settings.json`.
-- **Vorlage:** die eingebaute Vorlage der gewählten Sprache oder deine eigene in der Datei **`system-prompt.md`** im Datenordner (gilt für beide Sprachen, mit jedem Texteditor bearbeitbar, höchstens 64 KB). Der Editor zeigt, ob die *Eingebaute Vorlage* oder eine *Eigene Vorlage* gilt, und markiert *ungespeicherte Änderungen*. *Speichern* schreibt `system-prompt.md`; *Änderungen verwerfen* lädt sie neu; *Auf Standard zurücksetzen* benennt sie in **`system-prompt.md.bak`** um (ersetzt eine ältere Sicherung), danach gilt wieder die eingebaute Vorlage. Ändert sich die Datei außerhalb von Paneldeck, lädt der Editor sie neu (oder warnt, wenn du ungespeicherte Änderungen hast).
+- **Vorlage:** die eingebaute Vorlage der gewählten Sprache oder deine eigene in der Datei **`system-prompt.md`** im Datenordner (gilt für beide Sprachen, mit jedem Texteditor bearbeitbar, höchstens 64 KB). Der Editor zeigt, ob die *Eingebaute Vorlage* oder eine *Eigene Vorlage* gilt, und markiert *ungespeicherte Änderungen*. *Speichern* schreibt `system-prompt.md` (ein leerer Text stellt die eingebaute Vorlage wieder her); *Änderungen verwerfen* lädt sie neu; *Auf Standard zurücksetzen* benennt sie in **`system-prompt.md.bak`** um (ersetzt eine ältere Sicherung), danach gilt wieder die eingebaute Vorlage. Ändert sich die Datei außerhalb von Paneldeck, lädt der Editor sie neu (oder warnt, wenn du ungespeicherte Änderungen hast).
 - **Platzhalter**, die beim Senden ersetzt werden:
 
   | Platzhalter | Ersetzt durch |
@@ -79,7 +79,7 @@ Verbindet sich ein Agent, schickt Paneldeck ihm in der MCP-Antwort auf `initiali
   | `{{mode}}` | der aktuelle Todo-Modus (einfacher Modus oder Expertenmodus) |
   | `{{version}}` | die Paneldeck-Version |
 
-  Groß-/Kleinschreibung der Namen ist egal. Unbekannte Platzhalter bleiben im Text stehen und werden mit einer Warnung markiert; `{{{{` ergibt ein wörtliches `{{`.
+  Groß-/Kleinschreibung der Namen ist egal, Leerzeichen innerhalb der Klammern sind erlaubt (`{{ Level }}`). Unbekannte Platzhalter bleiben im Text stehen und werden mit einer Warnung markiert; `{{{{` ergibt ein wörtliches `{{`.
 - **Vorschau** des gerenderten Texts für aktuelle Stufe und aktuellen Modus, **Kopieren** (gerenderter Text in die Zwischenablage) und **Als Datei speichern …** (gerenderter Text als `.md`).
 - Eine zu große (über 64 KB), ungültige (kein UTF-8) oder leere `system-prompt.md` fällt auf die eingebaute Vorlage zurück, mit einem Hinweis in den Einstellungen.
 

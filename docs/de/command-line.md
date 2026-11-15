@@ -96,7 +96,7 @@ Gibt die Hilfe aus (in der Sprache von `--lang` bzw. der gespeicherten Einstellu
     paneldeck.exe --help > paneldeck-hilfe.txt
 
 ### Ein einzelner Ordner ohne Option
-Genau ein Argument ohne Option, das ein vorhandener Ordner ist, wirkt wie `--open <ordner>`; eine Datei öffnet ihren Ordner. Das passiert, wenn du einen Ordner oder eine Datei auf `paneldeck.exe` ziehst.
+Genau ein Argument ohne Option, das ein vorhandener Ordner ist, wirkt wie `--open <ordner>`; eine vorhandene Datei öffnet ihren Ordner. Das passiert, wenn du einen Ordner oder eine Datei auf `paneldeck.exe` ziehst. Es lässt sich mit anderen Optionen kombinieren (z. B. `--profile`), aber nicht mit `--open` oder `mcp`; ein zweites solches Argument oder ein Pfad, den es nicht gibt, ist ein Fehler (Exit-Code 2).
 
     paneldeck.exe "C:\Dev\meine-app"
 
