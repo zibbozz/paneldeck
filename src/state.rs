@@ -90,17 +90,28 @@ pub fn t(de: &'static str, en: &'static str) -> &'static str {
     lang().t(de, en)
 }
 
-/// `--lang`: (Startsprache, gespeicherte Sprache). Solange `Settings::language` gleich der Startsprache ist, wird
-/// beim Speichern die gespeicherte Sprache geschrieben – die Option gilt nur für diesen Start. Wählt der Nutzer
-/// in den Einstellungen selbst eine Sprache, endet die Überschreibung (`clear_lang_override`).
-static LANG_OVERRIDE: std::sync::Mutex<Option<(Lang, Lang)>> = std::sync::Mutex::new(None);
+// `--lang` gilt nur für diesen Start. Regel: Alles, was gespeichert wird (settings.json, Standard-Prompts beim
+// ersten Start, Texte im Explorer-Kontextmenü …), nutzt die GESPEICHERTE Sprache (`persisted_lang`), nur die
+// Anzeige nutzt die Startsprache. Abgelegt wird das Paar (Startsprache, gespeicherte Sprache) außerhalb von
+// `Settings` (nicht serialisiert) und threadlokal: Einstellungen werden nur im UI-Thread gespeichert, und Tests
+// (parallel) beeinflussen sich so nicht. Solange `Settings::language` gleich der Startsprache ist, schreibt
+// `ser_language` die gespeicherte Sprache. Wählt der Nutzer in den Einstellungen selbst eine Sprache, endet die
+// Überschreibung (`clear_lang_override`) und seine Wahl wird gespeichert.
+thread_local! {
+    static LANG_OVERRIDE: std::cell::Cell<Option<(Lang, Lang)>> = const { std::cell::Cell::new(None) };
+}
 
 pub fn set_lang_override(start: Lang, persisted: Lang) {
-    *LANG_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = Some((start, persisted));
+    LANG_OVERRIDE.with(|o| o.set(Some((start, persisted))));
 }
 
 pub fn clear_lang_override() {
-    *LANG_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    LANG_OVERRIDE.with(|o| o.set(None));
+}
+
+/// Sprache für Gespeichertes, ausgehend von der aktuell angezeigten Sprache `current`.
+pub fn persisted_lang(current: Lang) -> Lang {
+    persisted_language(current, LANG_OVERRIDE.with(|o| o.get()))
 }
 
 /// Sprache, die in `settings.json` landet.
@@ -112,8 +123,7 @@ pub fn persisted_language(l: Lang, over: Option<(Lang, Lang)>) -> Lang {
 }
 
 fn ser_language<S: serde::Serializer>(l: &Lang, s: S) -> Result<S::Ok, S::Error> {
-    let over = *LANG_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
-    persisted_language(*l, over).serialize(s)
+    persisted_lang(*l).serialize(s)
 }
 
 /// Sprache aus `settings.json` lesen, ohne etwas zu verändern (keine Sicherung defekter Dateien).
@@ -723,6 +733,21 @@ mod tests {
         assert_eq!(persisted_language(Lang::En, Some((Lang::De, Lang::En))), Lang::En);
         assert_eq!(persisted_language(Lang::De, Some((Lang::En, Lang::En))), Lang::De);
         assert_eq!(persisted_language(Lang::De, None), Lang::De);
+    }
+
+    #[test]
+    fn lang_override_never_reaches_settings_json() {
+        // threadlokal: betrifft nur diesen Test-Thread
+        let mut s = Settings { language: Lang::En, ..Settings::default() };
+        set_lang_override(Lang::De, Lang::En);
+        s.language = Lang::De; // so setzt App::new die Startsprache
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["language"], "En");
+        assert_eq!(persisted_lang(s.language), Lang::En);
+        // eigene Wahl in den Einstellungen beendet die Überschreibung
+        clear_lang_override();
+        assert_eq!(serde_json::to_value(&s).unwrap()["language"], "De");
+        assert_eq!(persisted_lang(Lang::De), Lang::De);
     }
 
     #[test]

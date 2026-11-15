@@ -20,17 +20,20 @@
 param(
   [string]$Exe = "$PSScriptRoot\..\target\release\paneldeck.exe",
   [switch]$Visible,
-  [switch]$KeepFiles
+  [switch]$KeepFiles,
+  # Ordner fuer die Kopie der .exe und die Test-Datenordner (z. B. ein vom Virenscanner ausgenommener Ordner)
+  [string]$WorkRoot = $env:TEMP
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
-$work = Join-Path $env:TEMP ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force $WorkRoot | Out-Null
+$work = Join-Path $WorkRoot ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $dir = New-Item -ItemType Directory -Force "$work\hub"; $proj = New-Item -ItemType Directory -Force "$work\proj"
 Copy-Item $Exe "$dir\paneldeck.exe"
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
-Remove-Item Env:PANELDECK_DATA, Env:PANELDECK_HUB_DATA -ErrorAction SilentlyContinue
+Remove-Item Env:PANELDECK_DATA, Env:PANELDECK_HUB_DATA, Env:PANELDECK_HUB_BASE -ErrorAction SilentlyContinue
 $script:extra = @()
 $script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
@@ -492,6 +495,12 @@ c.close()
   [IO.File]::WriteAllText("$work\blocker", 'x')
   $bad = Run-Exe "--data-dir `"$work\blocker\sub`""
   Check 'unbrauchbares --data-dir: Exit-Code 1, Ordner in der Meldung (kein Rueckfall)' ($bad.code -eq 1 -and $bad.err -match 'blocker') "$($bad.code) $($bad.err)"
+  $bb = Run-Exe "--data-dir `"$work\bb`" --backup-dir `"$work\blocker\bk`""
+  Check 'unbrauchbares --backup-dir: Exit-Code 1' ($bb.code -eq 1 -and $bb.err -match 'backup') "$($bb.code) $($bb.err)"
+  $ue = Run-Exe '--gibts-nicht --lang de'
+  Check 'Fehlermeldung beachtet --lang trotz Fehler' ($ue.code -eq 2 -and $ue.err -match 'Unbekannte Option') $ue.err
+  $me = Run-Exe 'mcp --tray'
+  Check 'mcp-Fehler nur auf stderr (stdout bleibt leer)' ($me.code -eq 2 -and $me.out -eq '' -and $me.err -match '--tray') "$($me.out)|$($me.err)"
 
   # Standard-Hub (Stufe Aus) + Hub mit --data-dir + Hub mit --profile p1 + Hub mit PANELDECK_DATA, alle gleichzeitig
   Set-Level 'Off'
@@ -499,7 +508,9 @@ c.close()
   [void](Start-ExtraHub "--data-dir `"$dd`"" $dd)
   Check 'Hub mit --data-dir legt ipc.json im angegebenen Ordner an' (Test-Path "$dd\ipc.json")
   Check 'mcp --data-dir findet diesen Hub' ((Probe-Bridge "mcp --data-dir `"$dd`"").code -eq 'mcp_disabled')
-  Check 'PANELDECK_HUB_DATA (Terminal eines Hubs) findet diesen Hub' ((Probe-Bridge 'mcp' @{ PANELDECK_HUB_DATA = $dd }).code -eq 'mcp_disabled')
+  Check 'PANELDECK_HUB_DATA (Terminal eines Hubs) findet diesen Hub' ((Probe-Bridge 'mcp' @{ PANELDECK_HUB_DATA = $dd; PANELDECK_HUB_BASE = $dd }).code -eq 'mcp_disabled')
+  $hpq = Probe-Bridge 'mcp --profile q' @{ PANELDECK_HUB_DATA = $dd; PANELDECK_HUB_BASE = $dd }
+  Check 'mcp --profile im Hub-Terminal: Profil unter der Basis dieses Hubs' ($hpq.code -eq 'hub_not_running' -and $hpq.text -match [regex]::Escape("$dd\profiles\q")) $hpq.text
   $nf = Probe-Bridge "mcp --data-dir `"$work\leer`""
   Check 'mcp mit leerem Ordner: hub_not_running nennt den Ordner' ($nf.code -eq 'hub_not_running' -and $nf.text -match [regex]::Escape("$work\leer")) $nf.text
   $p1 = "$data\profiles\p1"

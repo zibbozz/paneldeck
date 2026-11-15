@@ -15,6 +15,9 @@ pub const ENV_DATA: &str = "PANELDECK_DATA";
 /// Datenordner des Hubs, der ein Terminal gestartet hat (intern; setzt der Hub in jedes Terminal). Damit findet
 /// `paneldeck.exe mcp` aus einem Paneldeck-Terminal heraus genau diesen Hub, auch bei `--data-dir`/`--profile`.
 pub const ENV_HUB_DATA: &str = "PANELDECK_HUB_DATA";
+/// Basisordner (ohne Profil) dieses Hubs (intern): `paneldeck.exe mcp --profile p` aus einem Hub-Terminal löst das
+/// Profil unter derselben Basis auf wie der Hub (auch wenn der Hub mit `--data-dir` gestartet wurde).
+pub const ENV_HUB_BASE: &str = "PANELDECK_HUB_BASE";
 
 /// Woher der Datenordner stammt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +104,7 @@ pub fn resolve_with(inp: &Inputs, usable: &dyn Fn(&Path) -> bool) -> Result<Data
     } else if let Some(p) = inp.appdata.as_ref().map(|d| d.join("Paneldeck")).filter(|p| usable(p)) {
         (p, Source::AppData)
     } else {
-        (PathBuf::from("."), Source::Fallback)
+        (std::path::absolute(".").unwrap_or_else(|_| PathBuf::from(".")), Source::Fallback)
     };
     let path = match &inp.profile {
         Some(name) => {
@@ -154,7 +157,10 @@ pub fn get() -> &'static DataDir {
     }
     match init(crate::cli::get()) {
         Ok(d) => d,
-        Err(_) => DIR.get_or_init(|| DataDir { path: PathBuf::from("."), base: PathBuf::from("."), source: Source::Fallback, profile: None }),
+        Err(_) => {
+            let dot = std::path::absolute(".").unwrap_or_else(|_| PathBuf::from("."));
+            DIR.get_or_init(|| DataDir { path: dot.clone(), base: dot, source: Source::Fallback, profile: None })
+        }
     }
 }
 
@@ -213,19 +219,27 @@ pub fn peek_dir(inp: &Inputs) -> Option<PathBuf> {
     })
 }
 
-/// Ordner, in dem die MCP-Brücke `ipc.json` sucht: ausdrückliches `--data-dir`/`--profile` > Datenordner des Hubs,
-/// der das aufrufende Terminal gestartet hat (`PANELDECK_HUB_DATA`) > normale Auflösung.
-pub fn bridge_dir_with(inp: &Inputs, hub_env: Option<PathBuf>, usable: &dyn Fn(&Path) -> bool) -> Result<PathBuf, PathError> {
-    if inp.arg.is_none() && inp.profile.is_none() {
-        if let Some(h) = hub_env {
-            return Ok(h);
+/// Ordner, in dem die MCP-Brücke `ipc.json` sucht:
+/// 1. `--data-dir` (mit oder ohne `--profile`) → wie beim Hub-Start;
+/// 2. nur `--profile` aus einem Hub-Terminal → `<Basis dieses Hubs>\profiles\<name>` (`PANELDECK_HUB_BASE`);
+/// 3. ohne Angabe aus einem Hub-Terminal → Datenordner dieses Hubs (`PANELDECK_HUB_DATA`);
+/// 4. sonst die normale Auflösung.
+pub fn bridge_dir_with(inp: &Inputs, hub_data: Option<PathBuf>, hub_base: Option<PathBuf>, usable: &dyn Fn(&Path) -> bool) -> Result<PathBuf, PathError> {
+    if inp.arg.is_none() {
+        match (&inp.profile, hub_base, hub_data) {
+            (Some(_), Some(base), _) => {
+                let i = Inputs { arg: Some(base), ..inp.clone() };
+                return resolve_with(&i, usable).map(|d| d.path);
+            }
+            (None, _, Some(h)) => return Ok(h),
+            _ => {}
         }
     }
     resolve_with(inp, usable).map(|d| d.path)
 }
 
 pub fn bridge_dir(cli: &Cli) -> Result<PathBuf, PathError> {
-    bridge_dir_with(&inputs(cli), env_path(ENV_HUB_DATA), &usable)
+    bridge_dir_with(&inputs(cli), env_path(ENV_HUB_DATA), env_path(ENV_HUB_BASE), &usable)
 }
 
 #[cfg(test)]
@@ -264,9 +278,11 @@ mod tests {
         inp.exe_dir = Some(t.0.join("blocker"));
         let d = resolve_with(&inp, &usable).unwrap();
         assert_eq!((d.path.clone(), d.source), (t.0.join("appdata").join("Paneldeck"), Source::AppData));
-        // beides unbrauchbar → Notlösung
+        // beides unbrauchbar → Notlösung (absolut)
         inp.appdata = Some(t.0.join("blocker"));
-        assert_eq!(resolve_with(&inp, &usable).unwrap().source, Source::Fallback);
+        let d = resolve_with(&inp, &usable).unwrap();
+        assert_eq!(d.source, Source::Fallback);
+        assert!(d.path.is_absolute());
         // Umgebungsvariable schlägt portabel
         inp = inputs_in(&t.0);
         inp.env = Some(t.0.join("env"));
@@ -310,15 +326,20 @@ mod tests {
     fn bridge_and_peek() {
         let no = |_: &Path| false;
         let mut inp = Inputs { exe_dir: Some(PathBuf::from("C:\\nope-exe")), appdata: Some(PathBuf::from("C:\\ad")), ..Default::default() };
+        let hub = || Some(PathBuf::from("D:\\hub\\profiles\\a"));
+        let hub_base = || Some(PathBuf::from("D:\\hub"));
         // Terminal eines Hubs: dessen Ordner, ohne etwas anzulegen
-        assert_eq!(bridge_dir_with(&inp, Some(PathBuf::from("D:\\hub")), &no).unwrap(), PathBuf::from("D:\\hub"));
-        // ausdrückliche Angabe schlägt den Terminal-Hub
+        assert_eq!(bridge_dir_with(&inp, hub(), hub_base(), &no).unwrap(), PathBuf::from("D:\\hub\\profiles\\a"));
+        // nur --profile im Hub-Terminal: Profil unter der Basis dieses Hubs
         inp.profile = Some("p1".into());
         let yes = |_: &Path| true;
-        assert_eq!(bridge_dir_with(&inp, Some(PathBuf::from("D:\\hub")), &yes).unwrap(), PathBuf::from("C:\\nope-exe\\paneldeck-data\\profiles\\p1"));
+        assert_eq!(bridge_dir_with(&inp, hub(), hub_base(), &yes).unwrap(), PathBuf::from("D:\\hub\\profiles\\p1"));
+        // nur --profile außerhalb eines Hub-Terminals: normale Auflösung
+        assert_eq!(bridge_dir_with(&inp, None, None, &yes).unwrap(), PathBuf::from("C:\\nope-exe\\paneldeck-data\\profiles\\p1"));
+        // --data-dir schlägt den Terminal-Hub
         inp.profile = None;
         inp.arg = Some(PathBuf::from("D:\\x"));
-        assert_eq!(bridge_dir_with(&inp, Some(PathBuf::from("D:\\hub")), &yes).unwrap(), PathBuf::from("D:\\x"));
+        assert_eq!(bridge_dir_with(&inp, hub(), hub_base(), &yes).unwrap(), PathBuf::from("D:\\x"));
         // peek legt nichts an und nimmt ohne portablen Ordner %APPDATA%
         inp.arg = None;
         assert_eq!(peek_dir(&inp), Some(PathBuf::from("C:\\ad\\Paneldeck")));

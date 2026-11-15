@@ -14,6 +14,12 @@ pub fn error(text: &str) {
     emit(text, true);
 }
 
+/// Nur stderr, nie stdout, Konsole oder Meldungsfenster (für `mcp`: stdout ist der Protokollkanal).
+pub fn error_stderr(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{}", text.trim_end());
+}
+
 #[cfg(not(windows))]
 fn emit(text: &str, is_err: bool) {
     if is_err { eprintln!("{text}") } else { println!("{text}") }
@@ -24,8 +30,8 @@ fn emit(text: &str, is_err: bool) {
     use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
     let text = if text.ends_with('\n') { text.to_string() } else { format!("{text}\n") };
     // 1. Umgeleitete oder geerbte Standard-Handles (bei Fehlern zuerst stderr, dann stdout).
-    let ids = if is_err { [STD_ERROR_HANDLE, STD_OUTPUT_HANDLE] } else { [STD_OUTPUT_HANDLE, STD_OUTPUT_HANDLE] };
-    for id in ids {
+    let ids: &[_] = if is_err { &[STD_ERROR_HANDLE, STD_OUTPUT_HANDLE] } else { &[STD_OUTPUT_HANDLE] };
+    for &id in ids {
         // SAFETY: GetStdHandle hat keine Vorbedingungen.
         let h = unsafe { GetStdHandle(id) };
         if write_handle(h, &text) {

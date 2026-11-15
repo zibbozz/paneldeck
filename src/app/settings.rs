@@ -459,7 +459,12 @@ impl App {
                         row(ui, lang.t("Explorer-Kontextmenü", "Explorer context menu"), lang.t("Rechtsklick auf Ordner: „In Paneldeck öffnen“ / „Mit Claude starten“", "Right-click a folder: “Open in Paneldeck” / “Start with Claude”"), |ui| {
                             let mut v = self.win_context;
                             if style::toggle(ui, &mut v).changed() {
-                                match crate::integration::set_context(v, &exe) {
+                                // Die Menütexte landen in der Registry: in der gespeicherten Sprache, nicht in der von `--lang`.
+                                let shown = state::lang();
+                                state::set_lang(state::persisted_lang(self.settings.language));
+                                let r = crate::integration::set_context(v, &exe);
+                                state::set_lang(shown);
+                                match r {
                                     Ok(()) => self.win_context = v,
                                     Err(e) => err = Some(e),
                                 }

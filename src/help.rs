@@ -41,7 +41,11 @@ Notes:
     sessions and database. Only one Paneldeck runs per data folder (instance lock);
     a second start with the same folder hands over to the running one.
   - --lang, --backup-dir and --no-tray apply only to this start and are never
-    written to settings.json.
+    written to settings.json. They (and --reset-settings) only take effect when this
+    start opens the instance: if Paneldeck already runs with that data folder, the
+    start only hands --open/--claude over (--reset-settings then fails).
+  - A single folder without an option (e.g. dropped onto paneldeck.exe) works
+    like --open <folder>; a file opens its folder.
   - Exit codes: 0 = ok, 1 = error (e.g. unusable data folder), 2 = invalid command line.
 
 Details and examples:
@@ -142,7 +146,11 @@ Hinweise:
     Einstellungen, Sitzungen und Datenbank. Pro Datenordner läuft nur ein Paneldeck
     (Instanzsperre); ein zweiter Start mit demselben Ordner übergibt an das laufende.
   - --lang, --backup-dir und --no-tray gelten nur für diesen Start und werden nie
-    in settings.json gespeichert.
+    in settings.json gespeichert. Sie (und --reset-settings) wirken nur, wenn dieser
+    Start die Instanz öffnet: Läuft Paneldeck mit diesem Datenordner schon, übergibt
+    der Start nur --open/--claude (--reset-settings schlägt dann fehl).
+  - Ein einzelner Ordner ohne Option (z. B. auf paneldeck.exe gezogen) wirkt wie
+    --open <ordner>; eine Datei öffnet ihren Ordner.
   - Exit-Codes: 0 = ok, 1 = Fehler (z. B. unbrauchbarer Datenordner), 2 = ungültige Kommandozeile.
 
 Einzelheiten und Beispiele:
@@ -255,7 +263,7 @@ mod tests {
                 if !cur.is_empty() {
                     args.push(cur);
                 }
-                assert!(crate::cli::parse(&args, &|s| std::path::PathBuf::from(s)).is_ok(), "{line}");
+                assert!(crate::cli::parse(&args, &|s| std::path::PathBuf::from(s), &|_| Some(true)).is_ok(), "{line}");
             }
         }
         assert_ne!(text(Lang::En), text(Lang::De));

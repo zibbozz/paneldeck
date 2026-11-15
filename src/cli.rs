@@ -89,16 +89,129 @@ fn split_quoted(v: &str) -> (String, Vec<String>) {
     match v.split_once('"') {
         Some((path, rest)) => {
             let path = format!("{path}\\").replace("\\\\", "\\");
-            let more = rest.split_whitespace().map(|t| t.trim_matches('"').to_string()).filter(|t| !t.is_empty()).collect();
-            (path, more)
+            (path, split_args(rest))
         }
         None => (v.to_string(), Vec::new()),
     }
 }
 
-/// Liest die Argumente (`args[0]` = Programm). `abs` macht relative Pfade absolut (in Tests eingespeist).
-pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf) -> Result<Cli, CliError> {
+/// Argumente nach den Windows-Regeln zerlegen (wie `CommandLineToArgvW`: Leerraum trennt außerhalb von
+/// Anführungszeichen, `"` schaltet um, `2n` Backslashes + `"` → `n` Backslashes + Umschalten, `2n+1` → `n` + `"`),
+/// mit einer Ausnahme für Pfade: ein einzelner Backslash vor einem schließenden `"` am Argumentende (`"C:\"`,
+/// `"D:\daten\"`) bleibt ein Backslash. So kommen `--open "C:\" --data-dir "D:\my data"` richtig an.
+pub fn split_args(s: &str) -> Vec<String> {
+    let ch: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut quoted = false;
+    let mut i = 0;
+    while i < ch.len() {
+        let c = ch[i];
+        if c == '\\' {
+            let mut n = 0;
+            while i < ch.len() && ch[i] == '\\' {
+                n += 1;
+                i += 1;
+            }
+            if i < ch.len() && ch[i] == '"' {
+                let at_end = ch.get(i + 1).is_none_or(|c| c.is_whitespace());
+                if quoted && n % 2 == 1 && at_end {
+                    // Pfadende: `"C:\"` → `C:\`, Anführungszeichen schließt
+                    cur.extend(std::iter::repeat_n('\\', n));
+                    quoted = false;
+                    i += 1;
+                } else {
+                    cur.extend(std::iter::repeat_n('\\', n / 2));
+                    if n % 2 == 1 {
+                        cur.push('"');
+                        i += 1;
+                    }
+                }
+            } else {
+                cur.extend(std::iter::repeat_n('\\', n));
+            }
+            started = true;
+            continue;
+        }
+        if c == '"' {
+            if quoted && ch.get(i + 1) == Some(&'"') {
+                // `""` innerhalb von Anführungszeichen = ein `"`
+                cur.push('"');
+                i += 2;
+                continue;
+            }
+            quoted = !quoted;
+            started = true;
+        } else if c.is_whitespace() && !quoted {
+            if started {
+                out.push(std::mem::take(&mut cur));
+                started = false;
+            }
+        } else {
+            cur.push(c);
+            started = true;
+        }
+        i += 1;
+    }
+    if started {
+        out.push(cur);
+    }
+    out
+}
+
+/// Ganze Kommandozeile (`GetCommandLineW`) zerlegen: der Programmname folgt einfacheren Regeln (nur `"`).
+pub fn split_command_line(s: &str) -> Vec<String> {
+    let s = s.trim_start();
+    let (prog, rest) = if let Some(r) = s.strip_prefix('"') {
+        match r.find('"') {
+            Some(e) => (r[..e].to_string(), &r[e + 1..]),
+            None => (r.to_string(), ""),
+        }
+    } else {
+        match s.find(char::is_whitespace) {
+            Some(e) => (s[..e].to_string(), &s[e..]),
+            None => (s.to_string(), ""),
+        }
+    };
+    std::iter::once(prog).chain(split_args(rest)).collect()
+}
+
+/// `--hook`-Aufruf von Claude Code: wird vor dem Parser und unabhängig von weiteren Argumenten behandelt.
+pub fn is_hook_invocation(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--hook")
+}
+
+/// `--lang` aus den rohen Argumenten (auch wenn die Kommandozeile sonst fehlerhaft ist) – für Fehlermeldungen.
+pub fn scan_lang(args: &[String]) -> Option<Lang> {
+    let mut found = None;
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--lang" {
+            if let Some(l) = it.next().and_then(|v| parse_lang(v)) {
+                found = Some(l);
+            }
+        } else if let Some(v) = a.strip_prefix("--lang=") {
+            if let Some(l) = parse_lang(v) {
+                found = Some(l);
+            }
+        }
+    }
+    found
+}
+
+/// Ordner/Datei auf der Festplatte: `Some(true)` = Ordner, `Some(false)` = Datei, `None` = nicht vorhanden.
+pub fn fs_kind(p: &std::path::Path) -> Option<bool> {
+    std::fs::metadata(p).ok().map(|m| m.is_dir())
+}
+
+/// Liest die Argumente (`args[0]` = Programm). `abs` macht relative Pfade absolut, `kind` prüft, ob ein Pfad ein
+/// Ordner oder eine Datei ist (beides in Tests eingespeist). Genau ein Argument ohne Option, das ein vorhandener
+/// Ordner ist (eine Datei → ihr Ordner), gilt als `--open <pfad>` (Ordner auf die .exe gezogen, alte Verknüpfungen).
+pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf, kind: &dyn Fn(&std::path::Path) -> Option<bool>) -> Result<Cli, CliError> {
     let mut c = Cli::default();
+    let mut positional = false;
+    let mut open_opt = false;
     let mut rest: std::collections::VecDeque<String> = args.iter().skip(1).cloned().collect();
     if rest.front().map(|s| s.as_str()) == Some("mcp") {
         rest.pop_front();
@@ -138,7 +251,13 @@ pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf) -> Result<Cli, CliE
                     rest.push_front(m);
                 }
                 match opt.as_str() {
-                    "--open" => c.open = Some(v),
+                    "--open" => {
+                        if positional {
+                            return Err(CliError::Unexpected(raw));
+                        }
+                        open_opt = true;
+                        c.open = Some(v)
+                    }
                     "--data-dir" => c.data_dir = Some(abs(&v)),
                     _ => c.backup_dir = Some(abs(&v)),
                 }
@@ -162,7 +281,23 @@ pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf) -> Result<Cli, CliE
             "--help" | "-h" | "-?" | "/?" => c.help = true,
             "--uninstall-hooks" => c.uninstall_hooks = true,
             o if o.starts_with('-') => return Err(CliError::Unknown(raw)),
-            _ => return Err(CliError::Unexpected(raw)),
+            _ => {
+                if positional || open_opt || c.mcp {
+                    return Err(CliError::Unexpected(raw));
+                }
+                let (v, more) = split_quoted(&raw);
+                let p = abs(&v);
+                let dir = match kind(&p) {
+                    Some(true) => p,
+                    Some(false) => p.parent().map(|d| d.to_path_buf()).ok_or_else(|| CliError::Unexpected(raw.clone()))?,
+                    None => return Err(CliError::Unexpected(raw)),
+                };
+                for m in more.into_iter().rev() {
+                    rest.push_front(m);
+                }
+                positional = true;
+                c.open = Some(dir.display().to_string());
+            }
         }
     }
     Ok(c)
@@ -207,10 +342,90 @@ mod tests {
 
     fn p(args: &[&str]) -> Result<Cli, CliError> {
         let a: Vec<String> = std::iter::once("x.exe").chain(args.iter().copied()).map(|s| s.to_string()).collect();
-        parse(&a, &|s| {
-            let p = std::path::Path::new(s);
-            if p.is_absolute() { p.to_path_buf() } else { PathBuf::from("C:\\cwd").join(s) }
-        })
+        parse(
+            &a,
+            &|s| {
+                let p = std::path::Path::new(s);
+                if p.is_absolute() { p.to_path_buf() } else { PathBuf::from("C:\\cwd").join(s) }
+            },
+            &|p| match p.to_string_lossy().as_ref() {
+                "C:\\Dev\\app" | "C:\\cwd\\rel" | "C:\\" => Some(true),
+                "C:\\Dev\\app\\main.rs" => Some(false),
+                _ => None,
+            },
+        )
+    }
+
+    fn line(s: &str) -> Result<Cli, CliError> {
+        let a = split_command_line(s);
+        parse(&a, &|s| PathBuf::from(s), &|_| Some(true))
+    }
+
+    #[test]
+    fn windows_tokenizer() {
+        let v = |s: &str| split_command_line(s);
+        assert_eq!(v(r#""C:\Program Files\P\paneldeck.exe" --open "C:\" --claude"#), vec![r"C:\Program Files\P\paneldeck.exe", "--open", r"C:\", "--claude"]);
+        assert_eq!(v(r#"paneldeck.exe --open "C:\" --data-dir "D:\my data""#), vec!["paneldeck.exe", "--open", r"C:\", "--data-dir", r"D:\my data"]);
+        assert_eq!(v(r#"x --data-dir "D:\dir with space\" --tray"#), vec!["x", "--data-dir", r"D:\dir with space\", "--tray"]);
+        assert_eq!(v(r"x C:\a\b  "), vec!["x", r"C:\a\b"]);
+    }
+
+    #[test]
+    fn installer_and_registry_forms() {
+        // Autostart, Kontextmenü (%1 / %V, auch Laufwerkswurzel) und Deinstallation, wie in installer/paneldeck.nsi
+        let c = line(r#""C:\P\paneldeck.exe" --tray"#).unwrap();
+        assert!(c.tray && c.open.is_none());
+        let c = line(r#""C:\P\paneldeck.exe" --open "C:\Users\me\proj""#).unwrap();
+        assert_eq!(c.open.as_deref(), Some(r"C:\Users\me\proj"));
+        let c = line(r#""C:\P\paneldeck.exe" --open "C:\""#).unwrap();
+        assert_eq!(c.open.as_deref(), Some(r"C:\"));
+        let c = line(r#""C:\P\paneldeck.exe" --claude --open "C:\""#).unwrap();
+        assert!(c.claude);
+        assert_eq!(c.open.as_deref(), Some(r"C:\"));
+        let c = line(r#""C:\P\paneldeck.exe" --claude --open "D:\My Projects\a b""#).unwrap();
+        assert!(c.claude);
+        assert_eq!(c.open.as_deref(), Some(r"D:\My Projects\a b"));
+        assert!(line(r#""C:\P\paneldeck.exe" --uninstall-hooks"#).unwrap().uninstall_hooks);
+        // dieselben Formen, wie std::env::args sie liefert (Laufwerkswurzel: `C:" --claude` in einem Argument)
+        let c = p(&["--claude", "--open", "C:\\\""]).unwrap();
+        assert_eq!(c.open.as_deref(), Some("C:\\"));
+        assert!(c.claude);
+    }
+
+    #[test]
+    fn hook_invocation_is_detected_before_parsing() {
+        let a: Vec<String> = ["x.exe", "--hook", "--whatever", "SessionStart", "stray"].iter().map(|s| s.to_string()).collect();
+        assert!(is_hook_invocation(&a));
+        // der Parser würde diese Argumente ablehnen – deshalb behandelt `main` `--hook` vorher
+        assert!(parse(&a, &|s| PathBuf::from(s), &|_| None).is_err());
+        assert!(!is_hook_invocation(&["x.exe".to_string(), "--tray".to_string()]));
+    }
+
+    #[test]
+    fn positional_folder_means_open() {
+        assert_eq!(p(&["C:\\Dev\\app"]).unwrap().open.as_deref(), Some("C:\\Dev\\app"));
+        assert_eq!(p(&["rel"]).unwrap().open.as_deref(), Some("C:\\cwd\\rel"));
+        // Datei → ihr Ordner
+        assert_eq!(p(&["C:\\Dev\\app\\main.rs"]).unwrap().open.as_deref(), Some("C:\\Dev\\app"));
+        let c = p(&["C:\\Dev\\app", "--claude"]).unwrap();
+        assert!(c.claude);
+        // Laufwerkswurzel per Ziehen
+        assert_eq!(p(&["C:\\\" --tray"]).unwrap().open.as_deref(), Some("C:\\"));
+        // nicht vorhanden, zwei Stück, zusammen mit --open oder mcp: Fehler
+        assert!(matches!(p(&["C:\\nope"]), Err(CliError::Unexpected(_))));
+        assert!(matches!(p(&["C:\\Dev\\app", "rel"]), Err(CliError::Unexpected(_))));
+        assert!(matches!(p(&["C:\\Dev\\app", "--open", "rel"]), Err(CliError::Unexpected(_))));
+        assert!(matches!(p(&["--open", "rel", "C:\\Dev\\app"]), Err(CliError::Unexpected(_))));
+        assert!(matches!(p(&["mcp", "C:\\Dev\\app"]), Err(CliError::Unexpected(_))));
+    }
+
+    #[test]
+    fn lang_prescan() {
+        let a = |v: &[&str]| -> Vec<String> { std::iter::once("x").chain(v.iter().copied()).map(|s| s.to_string()).collect() };
+        assert_eq!(scan_lang(&a(&["--bogus", "--lang", "de"])), Some(Lang::De));
+        assert_eq!(scan_lang(&a(&["--lang=DE", "--x"])), Some(Lang::De));
+        assert_eq!(scan_lang(&a(&["--lang", "xx"])), None);
+        assert_eq!(scan_lang(&a(&["--bogus"])), None);
     }
 
     #[test]
@@ -278,6 +493,7 @@ mod tests {
         assert_eq!(p(&["--lang", "fr"]), Err(CliError::BadLang("fr".into())));
         assert_eq!(p(&["--profile", "a b"]), Err(CliError::BadProfile("a b".into())));
         assert_eq!(p(&["stray"]), Err(CliError::Unexpected("stray".into())));
+        assert!(p(&["--tray", "mcp"]).is_err());
         for e in [CliError::Unknown("--x".into()), CliError::BadProfile("ä".into()), CliError::NotWithMcp("--tray".into())] {
             assert!(e.message(Lang::En).contains("--help") && e.message(Lang::De).contains("--help"));
             assert_ne!(e.message(Lang::En), e.message(Lang::De));

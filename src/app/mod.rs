@@ -854,7 +854,7 @@ impl App {
         }
         clip::init(&app.dir);
         app.reload_themes();
-        app.prompts = state::load_json(&app.dir.join("prompts.json")).unwrap_or_else(|| prompts::defaults(app.settings.language));
+        app.prompts = state::load_json(&app.dir.join("prompts.json")).unwrap_or_else(|| prompts::defaults(state::persisted_lang(app.settings.language)));
         if let Some(h) = &app.hook_server {
             hooks::write_ipc_file(&app.dir, h.port, &h.ipc_token);
         }
@@ -876,7 +876,8 @@ impl App {
         if app.projects.is_empty() {
             app.projects.push(Project {
                 id: 1,
-                name: app.settings.language.t("Standard", "Default").to_string(),
+                // gespeichert (state.json): in der gespeicherten Sprache, nicht in der von `--lang`
+                name: state::persisted_lang(app.settings.language).t("Standard", "Default").to_string(),
                 layout: saved.layout.clone(),
                 focused: saved.focused,
                 ..Project::default()
@@ -1269,6 +1270,7 @@ impl App {
             // Datenordner dieses Hubs: `paneldeck.exe mcp` aus diesem Terminal findet damit genau diese Instanz
             // (auch bei --data-dir/--profile). Kein Geheimnis – den IPC-Token liest die Brücke aus `ipc.json`.
             env.push((crate::paths::ENV_HUB_DATA.to_string(), self.dir.display().to_string()));
+            env.push((crate::paths::ENV_HUB_BASE.to_string(), crate::paths::get().base.display().to_string()));
         }
         let wsl = shells::is_wsl(&shell);
         if wsl {
