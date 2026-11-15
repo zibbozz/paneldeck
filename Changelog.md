@@ -13,10 +13,15 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - **System prompt for agents (#61):** when an agent connects over MCP, Paneldeck sends it a detailed guide in the `initialize` reply (field `instructions`): what Paneldeck is, the permission levels, calling `whoami` first, the safety rules, terminal content as untrusted data, simple vs. expert mode, the limits of `run_command` and the error codes. The tool list contains only the tools usable at the current level and mode. Meant for local models and other programs that don't know Paneldeck; English or German (new optional setting `mcp_prompt_lang` in `settings.json`, default English, independent of the UI language).
 - **Settings → Agents → System prompt:** choose the prompt language; edit the template, saved as `system-prompt.md` in the data folder (at most 64 KB; "Reset to default" keeps the old one as `system-prompt.md.bak`); placeholders `{{tools}}`, `{{level}}`, `{{mode}}` and `{{version}}` with a legend and a warning for unknown ones; rendered preview, "Copy" and "Save as file…" (.md).
+- **Command-line options (#60):** `--data-dir <folder>`, `--profile <name>`, `--backup-dir <folder>`, `--lang en|de`, `--no-tray`, `--reset-settings`, `--version` and `--help` (`-h`, `-?`; explains every option with examples). The data folder is looked up in this order: `--data-dir`, environment variable `PANELDECK_DATA`, the portable `paneldeck-data` next to the exe, `%APPDATA%\Paneldeck`. Profiles (`<data folder>\profiles\<name>`) run as separate instances side by side, because the single-instance lock is per data folder. `--lang`, `--backup-dir` and `--no-tray` apply only to that start and are never saved; `--reset-settings` keeps the old settings as `settings.json.bak-<time>`. Output goes to the calling console, otherwise to a window; invalid arguments end with exit code 2, an unusable folder with exit code 1. A single folder passed without an option (e.g. dropped onto `paneldeck.exe`) opens like `--open`; a file opens its folder.
+- `paneldeck.exe mcp` accepts `--data-dir`, `--profile` and `--lang`. Started from a Paneldeck terminal, the bridge automatically connects to the hub of that terminal (also for profiles).
+- *Settings → About* and the diagnostics show where the data folder comes from (parameter, environment variable, portable, `%APPDATA%`), the profile and the active start options.
 
 ### Changed
 
 - The `instructions` text in the MCP `initialize` reply is now this system prompt instead of the previous short fixed text. A too large, invalid or empty `system-prompt.md` falls back to the built-in template. `initialize` and `tools/list` wait at most about 1.5 s for Paneldeck's current level and mode.
+- Unknown options or extra arguments on the command line are now reported as an error (exit code 2) instead of being ignored silently. Options that only affect the start of an instance (`--lang`, `--backup-dir`, `--no-tray`, `--reset-settings`) are not handed over to an instance that is already running.
+- The MCP error `hub_not_running` names the data folder that was searched.
 
 ## [2.0.0] - 2026-11-15
 
