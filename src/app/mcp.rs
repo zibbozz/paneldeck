@@ -552,8 +552,10 @@ impl App {
                 return Err(er("bad_args", if de() { format!("Ordner existiert nicht: {c}") } else { format!("Folder does not exist: {c}") }));
             }
         }
+        // Läuft der Agent in einer Hub-Sitzung, kommt das Kind in deren Fenster und Projekt (#110), sonst ins Hauptfenster.
+        let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
         // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
-        let default_profile = self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0);
+        let default_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
         if self.profile(default_profile).is_some_and(|p| p.admin) {
             return Err(er("admin_profile", tr("Das Standardprofil dieses Projekts startet als Administrator – über MCP nicht erlaubt.", "This project's default profile starts as administrator – not allowed via MCP.")));
         }
@@ -567,7 +569,7 @@ impl App {
             let name = if name.is_empty() { format!("{} {}", tr("Sitzung", "Session"), e.meta.id) } else { name };
             Some(if e.meta.group.is_empty() { name } else { format!("{}/{}", e.meta.group, name) })
         });
-        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, prompt, group, quiet: true, ..NewOpts::default() });
+        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, prompt, group, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
         if let Some(err) = self.entries.get(&id).and_then(|e| e.error.clone()) {
             self.close_session(id);

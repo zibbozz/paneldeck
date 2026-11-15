@@ -310,6 +310,11 @@ struct NewOpts {
     group: Option<String>,
     /// Sitzung nur anlegen, nicht im Fenster aktivieren (Agenten-Schnittstelle: kein Fokusklau).
     quiet: bool,
+    /// Fenster der Sitzung (#110); None = das gerade gezeichnete Fenster. Für Anlagen, die erst später im Hauptbild
+    /// fertig werden (Worktree) oder von dort aus für ein anderes Fenster laufen (MCP, abgedockte Bereiche).
+    window: Option<u64>,
+    /// Projekt der Sitzung; None = aktives Projekt ihres Fensters.
+    project: Option<u64>,
 }
 
 struct Launch<'a> {
@@ -1337,7 +1342,8 @@ impl App {
         let quiet = o.quiet;
         let id = self.next_id;
         self.next_id += 1;
-        let pid = o.profile.unwrap_or_else(|| self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0));
+        let (window, project) = self.session_home(o.window, o.project);
+        let pid = o.profile.unwrap_or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0));
         let prof = self.profile(pid).cloned();
         let shell_id = match &prof {
             Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
@@ -1356,8 +1362,8 @@ impl App {
             name,
             custom_name: custom,
             shell_id,
-            cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.folder.clone())).unwrap_or_default(),
-            project: self.active_project,
+            cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.folder.clone())).unwrap_or_default(),
+            project,
             color: prof.as_ref().and_then(|p| p.color).unwrap_or(PALETTE[(id as usize) % PALETTE.len()]),
             profile: pid,
             claude: o.claude,
@@ -1366,7 +1372,7 @@ impl App {
             claude_started: o.resume_id.is_some(),
             transcript: o.transcript.clone(),
             group: o.group.as_deref().map(state::clean_folder_path).unwrap_or_default(),
-            window: self.wins.cur,
+            window,
             ..SessionMeta::default()
         };
         if !meta.group.is_empty() {
@@ -1383,7 +1389,12 @@ impl App {
         );
         self.entries.insert(id, entry);
         if !quiet {
-            self.activate(id);
+            if window == self.wins.cur {
+                self.activate(id);
+            } else {
+                // Anderes Fenster: dort zeigen (es kommt nach vorn), nicht im gerade gezeichneten Layout.
+                self.route_to(ctx, window, Action::Activate(id));
+            }
         }
         id
     }
@@ -1507,6 +1518,8 @@ impl App {
     fn split_at(&mut self, ctx: &egui::Context, target: u64, dir: Dir, before: bool) {
         let Some(src) = self.entries.get(&target) else { return };
         let (shell, cwd) = (src.meta.shell_id.clone(), src.cwd_now());
+        // Fenster und Projekt der geteilten Sitzung (ein abgedockter Bereich eines weiteren Fensters wird im Hauptbild gezeichnet).
+        let (window, project) = (src.meta.window, src.meta.project);
         let id = self.next_id;
         self.next_id += 1;
         let label = self.shell_by_id(&shell).map(|s| s.label).unwrap_or_else(|| "Shell".into());
@@ -1518,14 +1531,17 @@ impl App {
             cwd,
             color: PALETTE[(id as usize) % PALETTE.len()],
             group: self.entries[&target].meta.group.clone(),
-            project: self.active_project,
+            project,
             profile: self.entries[&target].meta.profile,
-            window: self.wins.cur,
+            window,
             ..SessionMeta::default()
         };
         let mut entry = Entry::new(meta);
         self.spawn_into(ctx, &mut entry, Launch { restore: false, restart: false, continue_last: false, prompt: None, resume_id: None });
         self.entries.insert(id, entry);
+        if window != self.wins.cur {
+            return; // steht in der Seitenleiste seines Fensters; das hier gezeichnete Layout bleibt unberührt
+        }
         if let Some(l) = &mut self.layout {
             l.split_leaf_at(target, id, dir, before);
         }
@@ -2660,6 +2676,8 @@ impl App {
                         claude: src.meta.claude,
                         claude_args: src.meta.claude_args.clone(),
                         profile: Some(src.meta.profile),
+                        window: Some(src.meta.window),
+                        project: Some(src.meta.project),
                         ..NewOpts::default()
                     };
                     let new = self.new_session(ctx, o);

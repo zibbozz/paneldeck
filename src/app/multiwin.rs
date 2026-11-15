@@ -233,6 +233,20 @@ pub(super) fn mode_from_key(s: &str) -> titlebar::Mode {
     if s == "tasks" { titlebar::Mode::Tasks } else { titlebar::Mode::Terminals }
 }
 
+/// Fenster und Projekt einer Sitzung, die ein Agent anlegt: die seiner eigenen Hub-Sitzung (`caller` = deren Fenster und
+/// Projekt), sonst das Hauptfenster mit dessen aktivem Projekt.
+pub(super) fn child_home(caller: Option<(u64, u64)>, main_project: u64) -> (u64, u64) {
+    caller.unwrap_or((0, main_project))
+}
+
+/// Fenster einer neuen Sitzung: das gewünschte, wenn es (noch) existiert, sonst das gerade gezeichnete.
+pub(super) fn pick_window(want: Option<u64>, cur: u64, exists: impl Fn(u64) -> bool) -> u64 {
+    match want {
+        Some(w) if w == cur || w == 0 || exists(w) => w,
+        _ => cur,
+    }
+}
+
 /// Sitzungen, deren Fenster es nicht (mehr) gibt, gehören dem Hauptfenster.
 pub(super) fn adopt_orphans<'a>(windows: impl Iterator<Item = &'a mut u64>, existing: &[u64]) {
     for w in windows {
@@ -341,9 +355,24 @@ impl App {
     /// Aktion an das Fenster der Zielsitzung weiterreichen, wenn es ein anderes ist. `true` = weitergereicht.
     pub(super) fn route(&mut self, ctx: &egui::Context, a: &Action) -> bool {
         let Some(w) = route_target(a, |id| self.window_of(id), |id| self.detached.contains(&id), self.wins.cur) else { return false };
-        self.wins.queue.push((w, a.clone()));
-        ctx.request_repaint();
+        self.route_to(ctx, w, a.clone());
         true
+    }
+
+    /// Aktion im nächsten Bild von Fenster `window` ausführen (das Fenster kommt dabei nach vorn).
+    pub(super) fn route_to(&mut self, ctx: &egui::Context, window: u64, a: Action) {
+        self.wins.queue.push((window, a));
+        ctx.request_repaint();
+    }
+
+    /// Fenster und Projekt einer neuen Sitzung (siehe `NewOpts::window`/`project`): ein geschlossenes Fenster fällt auf das
+    /// gerade gezeichnete zurück, ein fehlendes oder gelöschtes Projekt auf das aktive Projekt des Zielfensters.
+    pub(super) fn session_home(&self, window: Option<u64>, project: Option<u64>) -> (u64, u64) {
+        let other = |w: u64| self.wins.list.iter().find(|x| x.id == w);
+        let w = pick_window(window, self.wins.cur, |w| other(w).is_some());
+        let fallback = if w == self.wins.cur { self.active_project } else { other(w).map(|x| x.view.active_project).unwrap_or(self.active_project) };
+        let p = project.filter(|p| self.projects.iter().any(|x| x.id == *p)).unwrap_or(fallback);
+        (w, p)
     }
 
     /// Weitergereichte Aktionen für das gerade gezeichnete Fenster; das Fenster kommt dabei nach vorn.
@@ -830,6 +859,22 @@ mod tests {
         let det_other = |id: u64| if id == 9 { Some(3) } else { None };
         assert_eq!(route_target(&Action::Activate(9), det_other, detached, 0), None, "abgedockt: das Fenster der Sitzung holt jeder nach vorn");
         assert_eq!(route_target(&Action::Attach(9), det_other, detached, 0), Some(3), "Anheften gehört ins Fenster der Sitzung");
+    }
+
+    #[test]
+    fn new_sessions_land_in_the_wanted_window_while_it_exists() {
+        let exists = |w: u64| w == 3;
+        assert_eq!(pick_window(None, 0, exists), 0, "ohne Wunsch: das gezeichnete Fenster");
+        assert_eq!(pick_window(Some(3), 0, exists), 3, "Worktree aus Fenster 3, fertig im Hauptbild → Fenster 3");
+        assert_eq!(pick_window(Some(0), 3, exists), 0);
+        assert_eq!(pick_window(Some(5), 0, exists), 0, "inzwischen geschlossen: das gezeichnete Fenster");
+        assert_eq!(pick_window(Some(3), 3, |_| false), 3, "das gezeichnete Fenster steht nicht in der Liste, gilt aber");
+    }
+
+    #[test]
+    fn agent_children_follow_the_callers_window_and_project() {
+        assert_eq!(child_home(Some((2, 7)), 1), (2, 7), "Agent in Fenster 2, Projekt 7");
+        assert_eq!(child_home(None, 1), (0, 1), "Agent außerhalb des Hubs: Hauptfenster, dessen Projekt");
     }
 
     #[test]
