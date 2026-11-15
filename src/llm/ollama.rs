@@ -113,10 +113,8 @@ pub fn line(l: &str, acc: &mut Acc, on: &mut dyn FnMut(StreamEvent)) {
     }
     acc.valid += 1;
     if let Some(m) = v.get("message") {
-        if let Some(c) = m.get("content").and_then(|c| c.as_str())
-            && !c.is_empty()
-        {
-            on(StreamEvent::Delta(c.to_string()));
+        if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
+            acc.delta(c, on);
         }
         for tc in m.get("tool_calls").and_then(|t| t.as_array()).into_iter().flatten() {
             let f = tc.get("function").unwrap_or(tc);
@@ -128,12 +126,16 @@ pub fn line(l: &str, acc: &mut Acc, on: &mut dyn FnMut(StreamEvent)) {
             };
             let n = acc.tool_calls.len();
             let id = tc.get("id").and_then(|i| i.as_str()).map(str::to_string).unwrap_or_else(|| format!("call_{n}"));
-            acc.tool_calls.push(ToolCall { id, name: name.to_string(), arguments });
+            acc.push_call(ToolCall { id, name: name.to_string(), arguments });
+            if acc.error.is_some() {
+                return;
+            }
         }
     }
     if v.get("done").and_then(|d| d.as_bool()) == Some(true) {
         acc.prompt_tokens = as_u32(v.get("prompt_eval_count"));
         acc.completion_tokens = as_u32(v.get("eval_count"));
+        acc.finish_reason = v.get("done_reason").and_then(|r| r.as_str()).map(str::to_string);
         acc.finished = true;
     }
 }

@@ -72,22 +72,43 @@ struct Partial {
     args: String,
 }
 
+/// SSE-Leser: `data:`-Zeilen eines Ereignisses werden bis zur Leerzeile gesammelt und mit `\n` verbunden (SSE-Standard).
 #[derive(Default)]
 pub struct Stream {
     calls: BTreeMap<u64, Partial>,
+    data: Vec<String>,
 }
 
 impl Stream {
     pub fn line(&mut self, l: &str, acc: &mut Acc, on: &mut dyn FnMut(StreamEvent)) {
         let l = l.trim_end();
-        // Leerzeilen trennen Ereignisse, `:` = Kommentar (Keep-alive), andere Felder sind hier bedeutungslos.
-        if l.is_empty() || l.starts_with(':') || l.starts_with("event:") || l.starts_with("id:") || l.starts_with("retry:") {
+        if l.is_empty() {
+            return self.dispatch(acc, on);
+        }
+        // `:` = Kommentar (Keep-alive), andere Felder sind hier bedeutungslos.
+        if l.starts_with(':') || l.starts_with("event:") || l.starts_with("id:") || l.starts_with("retry:") {
             return;
         }
-        let Some(data) = l.strip_prefix("data:") else {
-            // Manche Server antworten trotz `stream` mit einem einzelnen JSON-Objekt.
-            return self.json(l, acc, on);
-        };
+        match l.strip_prefix("data:") {
+            Some(d) => self.data.push(d.strip_prefix(' ').unwrap_or(d).to_string()),
+            None => {
+                // Manche Server antworten trotz `stream` mit einem einzelnen JSON-Objekt (dann ist die Antwort vollständig).
+                self.dispatch(acc, on);
+                let before = acc.valid;
+                self.json(l, acc, on);
+                if acc.valid > before {
+                    acc.finished = true;
+                }
+            }
+        }
+    }
+
+    /// Ein gesammeltes Ereignis auswerten.
+    fn dispatch(&mut self, acc: &mut Acc, on: &mut dyn FnMut(StreamEvent)) {
+        if self.data.is_empty() {
+            return;
+        }
+        let data = std::mem::take(&mut self.data).join("\n");
         let data = data.trim();
         if data == "[DONE]" {
             acc.valid += 1;
@@ -119,15 +140,21 @@ impl Stream {
         acc.valid += 1;
         self.usage(&v, acc);
         let Some(c0) = choices.first() else { return };
+        if let Some(r) = c0.get("finish_reason").and_then(|r| r.as_str()) {
+            acc.finish_reason = Some(r.to_string());
+        }
         // `delta` beim Strom; `message` bei Servern, die doch am Stück antworten.
         let Some(d) = c0.get("delta").or_else(|| c0.get("message")) else { return };
-        if let Some(t) = d.get("content").and_then(|c| c.as_str())
-            && !t.is_empty()
-        {
-            on(StreamEvent::Delta(t.to_string()));
+        if let Some(t) = d.get("content").and_then(|c| c.as_str()) {
+            acc.delta(t, on);
         }
         for (pos, tc) in d.get("tool_calls").and_then(|t| t.as_array()).into_iter().flatten().enumerate() {
+            // Ohne `index` (manche Server bei Antworten am Stück) zählt die Position in diesem Stück.
             let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(pos as u64);
+            if !self.calls.contains_key(&idx) && self.calls.len() >= super::MAX_TOOL_CALLS {
+                acc.error = Some(LlmError::TooLarge);
+                return;
+            }
             let p = self.calls.entry(idx).or_default();
             if let Some(id) = tc.get("id").and_then(|i| i.as_str())
                 && !id.is_empty()
@@ -136,12 +163,21 @@ impl Stream {
             }
             if let Some(f) = tc.get("function") {
                 if let Some(n) = f.get("name").and_then(|n| n.as_str()) {
-                    p.name.push_str(n);
+                    // Manche Server wiederholen den Namen in jedem Stück (oder schicken ihn wachsend): nicht doppeln.
+                    if p.name.is_empty() || n.starts_with(p.name.as_str()) {
+                        p.name = n.to_string();
+                    } else if !p.name.starts_with(n) {
+                        p.name.push_str(n);
+                    }
                 }
                 match f.get("arguments") {
                     Some(Value::String(s)) => p.args.push_str(s),
                     Some(Value::Null) | None => {}
                     Some(o) => p.args.push_str(&o.to_string()),
+                }
+                if p.args.len() > super::MAX_TOOL_ARGS {
+                    acc.error = Some(LlmError::TooLarge);
+                    return;
                 }
             }
         }
@@ -154,8 +190,12 @@ impl Stream {
         }
     }
 
-    /// Setzt die gesammelten Aufrufe zusammen (Argumente erst jetzt als JSON gelesen).
-    pub fn finish(&mut self, acc: &mut Acc) {
+    /// Wertet ein letztes Ereignis ohne abschließende Leerzeile aus und setzt die gesammelten Aufrufe zusammen
+    /// (Argumente erst jetzt als JSON gelesen).
+    pub fn finish(&mut self, acc: &mut Acc, on: &mut dyn FnMut(StreamEvent)) {
+        if acc.error.is_none() {
+            self.dispatch(acc, on);
+        }
         for (idx, p) in std::mem::take(&mut self.calls) {
             if p.name.is_empty() {
                 continue;
@@ -163,7 +203,7 @@ impl Stream {
             let raw = p.args.trim();
             let arguments = if raw.is_empty() { json!({}) } else { serde_json::from_str(raw).unwrap_or_else(|_| Value::String(p.args.clone())) };
             let id = if p.id.is_empty() { format!("call_{idx}") } else { p.id };
-            acc.tool_calls.push(ToolCall { id, name: p.name, arguments });
+            acc.push_call(ToolCall { id, name: p.name, arguments });
         }
     }
 }

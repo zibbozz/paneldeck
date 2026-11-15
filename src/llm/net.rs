@@ -180,6 +180,8 @@ pub fn allowed_ip(ip: IpAddr) -> bool {
                 return allowed_v4(v4);
             }
             let s = v6.segments();
+            // fe80::/10 ist erlaubt, aber ohne Zonen-ID (die in URLs hier nicht zugelassen ist) praktisch nicht erreichbar:
+            // Windows weiß dann nicht, über welche Schnittstelle. Für LAN-Server IPv4 oder ULA (fc00::/7) verwenden.
             v6 == Ipv6Addr::LOCALHOST || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
         }
     }

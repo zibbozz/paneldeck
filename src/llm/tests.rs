@@ -108,14 +108,14 @@ fn ollama_streams_text() {
         "\n",
         r#"{"model":"m1","message":{"role":"assistant","content":"lo ✓"},"done":false}"#,
         "\n",
-        r#"{"model":"m1","message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":12,"eval_count":3}"#,
+        r#"{"model":"m1","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":12,"eval_count":3}"#,
         "\n"
     );
     let t = Fake::default().with(Method::Post, OL_CHAT, Canned::ok(body));
     let ep = Endpoint::new(ServerKind::Ollama, OL).with_key(Some("  secret ".into()));
     let ev = run(&t, &ep, &req());
     assert_eq!(text(&ev), "Hello ✓");
-    assert_eq!(ev.last(), Some(&StreamEvent::Done { prompt_tokens: Some(12), completion_tokens: Some(3) }));
+    assert_eq!(ev.last(), Some(&StreamEvent::Done { prompt_tokens: Some(12), completion_tokens: Some(3), finish_reason: Some("stop".into()) }));
     let log = t.log();
     assert_eq!(log[0].bearer.as_deref(), Some("secret"));
     assert_eq!(log[0].body.as_ref().unwrap()["stream"], json!(true));
@@ -137,7 +137,7 @@ fn ollama_tool_calls() {
                 ToolCall { id: "call_0".into(), name: "read_terminal".into(), arguments: json!({"session": 3}) },
                 ToolCall { id: "x9".into(), name: "list_sessions".into(), arguments: json!({"a": 1}) },
             ]),
-            StreamEvent::Done { prompt_tokens: None, completion_tokens: None },
+            StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: None },
         ]
     );
 }
@@ -257,7 +257,7 @@ fn openai_streams_text_and_usage() {
     );
     let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
     let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
-    assert_eq!(ev, vec![StreamEvent::Delta("Hi".into()), StreamEvent::Delta(" there".into()), StreamEvent::Done { prompt_tokens: Some(20), completion_tokens: Some(2) }]);
+    assert_eq!(ev, vec![StreamEvent::Delta("Hi".into()), StreamEvent::Delta(" there".into()), StreamEvent::Done { prompt_tokens: Some(20), completion_tokens: Some(2), finish_reason: Some("stop".into()) }]);
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn openai_fragmented_tool_calls() {
                 ToolCall { id: "call_b".into(), name: "list_sessions".into(), arguments: json!({}) },
                 ToolCall { id: "call_2".into(), name: "bad".into(), arguments: json!("{oops") },
             ]),
-            StreamEvent::Done { prompt_tokens: None, completion_tokens: None },
+            StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: Some("tool_calls".into()) },
         ]
     );
 }
@@ -291,7 +291,7 @@ fn openai_malformed_and_errors() {
     let body = "data: {broken\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\nnonsense\n\ndata: [DONE]\n\n";
     let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
     let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
-    assert_eq!(ev, vec![StreamEvent::Delta("x".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None }]);
+    assert_eq!(ev, vec![StreamEvent::Delta("x".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: None }]);
     let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok("data: {broken\n\nhello\n"));
     assert!(matches!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()).as_slice(), [StreamEvent::Error(LlmError::BadResponse(_))]));
     // Fehler-Objekt im Strom
@@ -304,7 +304,7 @@ fn openai_malformed_and_errors() {
     assert!(e.text(crate::state::Lang::En).ends_with("(HTTP 400): tools not supported"));
     // Server antwortet am Stück (ohne SSE)
     let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(r#"{"choices":[{"message":{"role":"assistant","content":"whole"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#));
-    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()), vec![StreamEvent::Delta("whole".into()), StreamEvent::Done { prompt_tokens: Some(1), completion_tokens: Some(1) }]);
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()), vec![StreamEvent::Delta("whole".into()), StreamEvent::Done { prompt_tokens: Some(1), completion_tokens: Some(1), finish_reason: None }]);
 }
 
 #[test]
@@ -316,6 +316,77 @@ fn openai_cancel() {
     let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
     assert_eq!(text(&ev), "01");
     assert_eq!(ev.last(), Some(&StreamEvent::Error(LlmError::Cancelled)));
+}
+
+#[test]
+fn truncated_streams_are_errors() {
+    // Ollama ohne `done`
+    let t = Fake::default().with(Method::Post, OL_CHAT, Canned::ok("{\"message\":{\"content\":\"a\"}}\n"));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::Ollama, OL), &req()), vec![StreamEvent::Delta("a".into()), StreamEvent::Error(LlmError::BadResponse("stream ended early".into()))]);
+    // OpenAI ohne `[DONE]` und ohne `finish_reason`
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()).last(), Some(&StreamEvent::Error(LlmError::BadResponse("stream ended early".into()))));
+    // `finish_reason` genügt als Ende (manche Server lassen `[DONE]` weg); „length“ = an der Token-Grenze abgeschnitten
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok("data: {\"choices\":[{\"delta\":{\"content\":\"a\"},\"finish_reason\":\"length\"}]}\n\n"));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()).last(), Some(&StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: Some("length".into()) }));
+    let t = Fake::default().with(Method::Post, OL_CHAT, Canned::ok("{\"message\":{\"content\":\"a\"},\"done\":true,\"done_reason\":\"length\"}"));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::Ollama, OL), &req()).last(), Some(&StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: Some("length".into()) }));
+}
+
+#[test]
+fn openai_repeated_tool_name_is_not_doubled() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"read_terminal\",\"arguments\":\"{\\\"a\\\"\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read_terminal\",\"arguments\":\": 1}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"list_\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"sessions\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
+    let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
+    let StreamEvent::ToolCalls(calls) = &ev[0] else { panic!("{ev:?}") };
+    assert_eq!(calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["read_terminal", "list_sessions"]);
+    assert_eq!(calls[0].arguments, json!({"a": 1}));
+}
+
+#[test]
+fn openai_multiline_sse_data() {
+    let body = "data: {\"choices\":[{\"delta\":\ndata: {\"content\":\"x\"}}]}\n\ndata: [DONE]";
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()), vec![StreamEvent::Delta("x".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: None }]);
+}
+
+#[test]
+fn tool_call_limits() {
+    let calls: Vec<String> = (0..=MAX_TOOL_CALLS).map(|i| format!("{{\"function\":{{\"name\":\"f{i}\",\"arguments\":{{}}}}}}")).collect();
+    let body = format!("{{\"message\":{{\"tool_calls\":[{}]}}}}\n{{\"done\":true}}\n", calls.join(","));
+    let t = Fake::default().with(Method::Post, OL_CHAT, Canned::ok(&body));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::Ollama, OL), &req()), vec![StreamEvent::Error(LlmError::TooLarge)]);
+    // Argumente über 1 MiB in Stücken
+    let piece = format!("data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"name\":\"f\",\"arguments\":\"{}\"}}}}]}}}}]}}\n\n", "a".repeat(300_000));
+    let body = format!("{}data: [DONE]\n\n", piece.repeat(4));
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(&body));
+    assert_eq!(run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req()), vec![StreamEvent::Error(LlmError::TooLarge)]);
+}
+
+#[test]
+fn endpoint_receive_timeout_is_clamped() {
+    let ep = Endpoint::new(ServerKind::Ollama, OL).with_receive_timeout(std::time::Duration::from_millis(1));
+    assert_eq!(ep.receive_timeout, MIN_RECEIVE_TIMEOUT);
+    let mut ep = Endpoint::new(ServerKind::Ollama, OL);
+    ep.receive_timeout = std::time::Duration::ZERO;
+    assert_eq!(ep.request(Method::Get, "x", None, "a").receive_timeout, MIN_RECEIVE_TIMEOUT);
+    assert_eq!(Endpoint::new(ServerKind::Ollama, OL).receive_timeout, DEFAULT_RECEIVE_TIMEOUT);
+}
+
+#[test]
+fn dropping_the_handle_cancels() {
+    let lines: Vec<Vec<u8>> = (0..1000).map(|i| format!("{{\"message\":{{\"content\":\"{i}\"}}}}\n").into_bytes()).collect();
+    let t: Arc<dyn Transport> = Arc::new(Fake::default().with(Method::Post, OL_CHAT, Canned::chunks(200, lines)));
+    let h = spawn_chat_with(t, Endpoint::new(ServerKind::Ollama, OL), req(), Box::new(|| {}));
+    let c = h.cancel.clone();
+    drop(h);
+    assert!(c.load(Ordering::Relaxed));
 }
 
 // ---------- Typen und Faden ----------
@@ -346,7 +417,7 @@ fn spawn_chat_delivers_events() {
         n2.fetch_add(1, Ordering::Relaxed);
     }));
     let ev: Vec<StreamEvent> = h.rx.iter().collect();
-    assert_eq!(ev, vec![StreamEvent::Delta("yo".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None }]);
+    assert_eq!(ev, vec![StreamEvent::Delta("yo".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: None }]);
     assert_eq!(n.load(Ordering::Relaxed), 2);
 }
 
@@ -409,7 +480,7 @@ mod e2e {
         let ep = Endpoint::new(ServerKind::Ollama, &base).with_key(Some("k-123".into()));
         let mut ev = Vec::new();
         chat(system_transport().as_ref(), &ep, &req(), &no_cancel(), &mut |e| ev.push(e));
-        assert_eq!(ev, vec![StreamEvent::Delta("Hal".into()), StreamEvent::Delta("lo".into()), StreamEvent::Done { prompt_tokens: Some(5), completion_tokens: Some(2) }]);
+        assert_eq!(ev, vec![StreamEvent::Delta("Hal".into()), StreamEvent::Delta("lo".into()), StreamEvent::Done { prompt_tokens: Some(5), completion_tokens: Some(2), finish_reason: None }]);
         let seen = h.join().unwrap();
         assert!(seen.head.starts_with("POST /api/chat HTTP/1.1\r\n"), "{}", seen.head);
         let lower = seen.head.to_ascii_lowercase();
@@ -463,6 +534,77 @@ mod e2e {
         assert_eq!(ev, StreamEvent::Error(LlmError::Cancelled));
         assert!(t0.elapsed() < Duration::from_secs(3));
         let _ = h.join();
+    }
+
+    #[test]
+    fn real_winhttp_does_not_follow_redirects() {
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        other.set_nonblocking(true).unwrap();
+        let target = format!("http://{}/api/tags", other.local_addr().unwrap());
+        let (base, h) = serve("127.0.0.1:0", move |s| {
+            s.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+        });
+        let r = list_models(system_transport().as_ref(), &Endpoint::new(ServerKind::Ollama, &base), &no_cancel());
+        assert!(matches!(r, Err(LlmError::Status { code: 302, .. })), "{r:?}");
+        h.join().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(other.accept().is_err(), "redirect target must not be contacted");
+    }
+
+    #[test]
+    fn real_winhttp_cancel_during_read() {
+        let (base, h) = serve("127.0.0.1:0", |s| {
+            s.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"message\":{\"content\":\"first\"}}\n").unwrap();
+            s.flush().unwrap();
+            // Danach nichts mehr, bis der Client schließt.
+            let mut b = [0u8; 16];
+            let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
+            let _ = s.read(&mut b);
+        });
+        let handle = spawn_chat(Endpoint::new(ServerKind::Ollama, &base), req(), Box::new(|| {}));
+        assert_eq!(handle.rx.recv_timeout(Duration::from_secs(5)).unwrap(), StreamEvent::Delta("first".into()));
+        std::thread::sleep(Duration::from_millis(200));
+        let t0 = Instant::now();
+        handle.stop();
+        assert_eq!(handle.rx.recv_timeout(Duration::from_secs(5)).unwrap(), StreamEvent::Error(LlmError::Cancelled));
+        assert!(t0.elapsed() < Duration::from_secs(3));
+        let _ = h.join();
+    }
+
+    fn resolve_to_loopback(host: &str, _: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
+        assert_eq!(host, "model-box.lan");
+        Ok(vec!["127.0.0.1".parse().unwrap()])
+    }
+
+    fn resolve_mixed(_: &str, _: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
+        Ok(vec!["127.0.0.1".parse().unwrap(), "93.184.216.34".parse().unwrap()])
+    }
+
+    #[test]
+    fn real_winhttp_pins_http_names_to_the_checked_ip() {
+        let (base, h) = serve("127.0.0.1:0", |s| {
+            let body = r#"{"data":[{"id":"m"}]}"#;
+            s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+        });
+        let port = base.rsplit(':').next().unwrap().to_string();
+        let t = super::super::http::winhttp::WinHttp { resolve: resolve_to_loopback };
+        let ep = Endpoint::new(ServerKind::OpenAi, &format!("http://model-box.lan:{port}")).with_key(Some("k".into()));
+        assert_eq!(list_models(&t, &ep, &no_cancel()).unwrap().len(), 1);
+        let seen = h.join().unwrap();
+        assert!(seen.head.to_ascii_lowercase().contains(&format!("\r\nhost: model-box.lan:{port}\r\n")), "{}", seen.head);
+    }
+
+    #[test]
+    fn real_winhttp_disallowed_resolution_sends_nothing() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.set_nonblocking(true).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let t = super::super::http::winhttp::WinHttp { resolve: resolve_mixed };
+        let ep = Endpoint::new(ServerKind::Ollama, &format!("http://model-box.lan:{port}")).with_key(Some("secret".into()));
+        let r = list_models(&t, &ep, &no_cancel());
+        assert!(matches!(r, Err(LlmError::Blocked { .. })), "{r:?}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(l.accept().is_err(), "no connection may be made");
     }
 
     #[test]

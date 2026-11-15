@@ -100,6 +100,13 @@ mod imp {
         // SAFETY: `out` beschreibt `cbData` gültige Bytes, die DPAPI angelegt hat.
         let v = if out.pbData.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec() };
         if !out.pbData.is_null() {
+            if !protect {
+                // Klartext nicht im freigegebenen Speicher liegen lassen.
+                for i in 0..out.cbData as usize {
+                    // SAFETY: innerhalb der `cbData` Bytes von DPAPI; volatile, damit es nicht wegoptimiert wird.
+                    unsafe { std::ptr::write_volatile(out.pbData.add(i), 0) };
+                }
+            }
             // SAFETY: Speicher stammt von DPAPI (LocalAlloc) und wird genau einmal freigegeben.
             unsafe { LocalFree(out.pbData as HLOCAL) };
         }

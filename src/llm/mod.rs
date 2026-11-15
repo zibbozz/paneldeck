@@ -26,6 +26,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
+/// Kürzeste erlaubte Wartezeit auf Daten (auch wenn ein kleinerer Wert eingestellt ist).
+pub const MIN_RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Höchstens so viele Werkzeugaufrufe je Antwort, so lange Argumente je Aufruf und so viel Text je Antwort (sonst `TooLarge`).
+pub const MAX_TOOL_CALLS: usize = 128;
+pub const MAX_TOOL_ARGS: usize = 1 << 20;
+pub const MAX_CONTENT: usize = 16 << 20;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerKind {
@@ -52,6 +59,12 @@ impl Endpoint {
         Self { kind, base_url: base_url.trim().to_string(), api_key: None, receive_timeout: DEFAULT_RECEIVE_TIMEOUT }
     }
 
+    /// Wartezeit auf Daten; mindestens `MIN_RECEIVE_TIMEOUT`.
+    pub fn with_receive_timeout(mut self, d: Duration) -> Self {
+        self.receive_timeout = d.max(MIN_RECEIVE_TIMEOUT);
+        self
+    }
+
     pub fn with_key(mut self, key: Option<String>) -> Self {
         self.api_key = key.filter(|k| !k.trim().is_empty()).map(|k| k.trim().to_string());
         self
@@ -67,7 +80,7 @@ impl Endpoint {
     }
 
     pub(crate) fn request<'a>(&'a self, method: http::Method, url: &'a str, body: Option<&'a [u8]>, accept: &'a str) -> http::HttpRequest<'a> {
-        http::HttpRequest { method, url, body, bearer: self.api_key.as_deref(), accept, receive_timeout: self.receive_timeout }
+        http::HttpRequest { method, url, body, bearer: self.api_key.as_deref(), accept, receive_timeout: self.receive_timeout.max(MIN_RECEIVE_TIMEOUT) }
     }
 }
 
@@ -145,12 +158,13 @@ pub struct ChatRequest {
 }
 
 /// Ereignisse eines Chat-Aufrufs. Am Ende kommt genau eines von `Done` oder `Error`; `ToolCalls` (falls vorhanden) direkt
-/// vor `Done`.
+/// vor `Done`. `finish_reason` = Grund des Servers (OpenAI `finish_reason`, Ollama `done_reason`), z. B. `"stop"`, `"length"`
+/// (an der Token-Grenze abgeschnitten) oder `"tool_calls"`; `None`, wenn der Server keinen nennt.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamEvent {
     Delta(String),
     ToolCalls(Vec<ToolCall>),
-    Done { prompt_tokens: Option<u32>, completion_tokens: Option<u32> },
+    Done { prompt_tokens: Option<u32>, completion_tokens: Option<u32>, finish_reason: Option<String> },
     Error(LlmError),
 }
 
@@ -172,9 +186,37 @@ pub(crate) struct Acc {
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
     pub tool_calls: Vec<ToolCall>,
+    pub finish_reason: Option<String>,
+    pub content_bytes: usize,
 }
 
 impl Acc {
+    /// Text weitergeben (mit Obergrenze für die ganze Antwort).
+    pub fn delta(&mut self, s: &str, on: &mut dyn FnMut(StreamEvent)) {
+        if s.is_empty() {
+            return;
+        }
+        self.content_bytes += s.len();
+        if self.content_bytes > MAX_CONTENT {
+            self.error = Some(LlmError::TooLarge);
+            return;
+        }
+        on(StreamEvent::Delta(s.to_string()));
+    }
+
+    /// Werkzeugaufruf aufnehmen (mit Obergrenzen für Anzahl und Länge der Argumente).
+    pub fn push_call(&mut self, c: ToolCall) {
+        let len = match &c.arguments {
+            serde_json::Value::String(s) => s.len(),
+            v => v.to_string().len(),
+        };
+        if self.tool_calls.len() >= MAX_TOOL_CALLS || len > MAX_TOOL_ARGS {
+            self.error = Some(LlmError::TooLarge);
+            return;
+        }
+        self.tool_calls.push(c);
+    }
+
     /// Schluss-Ereignisse nach dem Strom.
     fn finish(mut self, on: &mut dyn FnMut(StreamEvent)) {
         if let Some(e) = self.error.take() {
@@ -184,10 +226,14 @@ impl Acc {
             let d = if self.malformed > 0 { format!("{} unreadable lines, no valid data", self.malformed) } else { "empty answer".into() };
             return on(StreamEvent::Error(LlmError::BadResponse(d)));
         }
+        // Ohne Ende-Kennung (`done`, `[DONE]`, `finish_reason`) ist die Antwort unvollständig.
+        if !self.finished && self.finish_reason.is_none() {
+            return on(StreamEvent::Error(LlmError::BadResponse("stream ended early".into())));
+        }
         if !self.tool_calls.is_empty() {
             on(StreamEvent::ToolCalls(std::mem::take(&mut self.tool_calls)));
         }
-        on(StreamEvent::Done { prompt_tokens: self.prompt_tokens, completion_tokens: self.completion_tokens });
+        on(StreamEvent::Done { prompt_tokens: self.prompt_tokens, completion_tokens: self.completion_tokens, finish_reason: self.finish_reason });
     }
 }
 
@@ -209,7 +255,7 @@ pub fn chat(t: &dyn Transport, ep: &Endpoint, req: &ChatRequest, cancel: &Arc<At
     let body = body.to_string().into_bytes();
     let mut r = match http::send_ok(t, &ep.request(http::Method::Post, &url, Some(&body), accept), cancel) {
         Ok(r) => r,
-        Err(e) => return on(StreamEvent::Error(e)),
+        Err(e) => return on(StreamEvent::Error(if cancel.load(Ordering::Relaxed) { LlmError::Cancelled } else { e })),
     };
     let mut acc = Acc::default();
     let mut oa = openai::Stream::default();
@@ -221,14 +267,14 @@ pub fn chat(t: &dyn Transport, ep: &Endpoint, req: &ChatRequest, cancel: &Arc<At
         !acc.finished && acc.error.is_none()
     });
     if ep.kind == ServerKind::OpenAi {
-        oa.finish(&mut acc);
+        oa.finish(&mut acc, on);
     }
     if cancel.load(Ordering::Relaxed) {
         return on(StreamEvent::Error(LlmError::Cancelled));
     }
     if let Err(e) = res {
-        // Abgerissene Verbindung nach gültigen Daten mit Ende-Kennung zählt nicht; sonst ist es ein Fehler.
-        if !acc.finished || acc.error.is_some() {
+        // Nach der Ende-Kennung wird nicht mehr gelesen; ein Lesefehler davor ist ein Fehler.
+        if !acc.finished {
             acc.error.get_or_insert(e);
         }
     }
@@ -248,6 +294,13 @@ impl ChatHandle {
     }
 }
 
+impl Drop for ChatHandle {
+    /// Wer den Aufruf nicht mehr hält, braucht ihn nicht mehr: Verbindung beenden.
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Startet `chat` in einem Faden über die echte Verbindung; `repaint` wird nach jedem Ereignis aufgerufen.
 pub fn spawn_chat(endpoint: Endpoint, request: ChatRequest, repaint: Box<dyn Fn() + Send>) -> ChatHandle {
     spawn_chat_with(system_transport(), endpoint, request, repaint)
@@ -259,10 +312,22 @@ pub fn spawn_chat_with(t: Arc<dyn Transport>, endpoint: Endpoint, request: ChatR
     let cancel = Arc::new(AtomicBool::new(false));
     let c = cancel.clone();
     std::thread::spawn(move || {
-        chat(t.as_ref(), &endpoint, &request, &c, &mut |ev| {
-            let _ = tx.send(ev);
+        let mut ended = false;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            chat(t.as_ref(), &endpoint, &request, &c, &mut |ev| {
+                ended |= matches!(ev, StreamEvent::Done { .. } | StreamEvent::Error(_));
+                if tx.send(ev).is_err() {
+                    // Empfänger weg: abbrechen.
+                    c.store(true, Ordering::Relaxed);
+                }
+                repaint();
+            })
+        }));
+        // Panik im Faden (nur ohne `panic = "abort"` abfangbar, also in Tests/Debug): trotzdem ein Ende melden.
+        if r.is_err() && !ended {
+            let _ = tx.send(StreamEvent::Error(LlmError::BadResponse("internal error".into())));
             repaint();
-        });
+        }
     });
     ChatHandle { rx, cancel }
 }

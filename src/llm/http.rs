@@ -4,7 +4,8 @@
 //! eigene Handles, TLS 1.2/1.3, keine Weiterleitungen, keine Cookies, keine automatische Anmeldung. Anders: nur Hosts nach
 //! `net::check` (vor JEDER Anfrage, Namen werden neu aufgelöst), kein Proxy (`WINHTTP_ACCESS_TYPE_NO_PROXY`), nach dem
 //! Verbinden wird die tatsächliche Gegenstelle geprüft, langes Empfangs-Zeitlimit (erstes Token kann auf der CPU Minuten
-//! dauern), Abbruch über ein `AtomicBool` (schließt das Anfrage-Handle, auch während ein Lesen blockiert). Zertifikate werden
+//! dauern), Abbruch über ein `AtomicBool` (auch während auf das erste Token gewartet wird; WinHTTP läuft asynchron,
+//! nur der Besitzer schließt das Handle). Bei http + DNS-Name wird direkt mit der geprüften IP verbunden (`Host:`-Kopf). Zertifikate werden
 //! immer geprüft; eine Sperrprüfung wird nicht erzwungen (interne Zertifizierungsstellen im LAN haben oft keine Sperrliste).
 
 use super::error::LlmError;
@@ -19,6 +20,8 @@ pub const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_ERROR_BODY: usize = 8 << 10;
 /// Größte Zeile im Datenstrom (NDJSON/SSE).
 pub const MAX_LINE: usize = 8 << 20;
+/// Größter Datenstrom insgesamt.
+pub const MAX_STREAM: usize = 128 << 20;
 /// Größte Antwort, die ganz gelesen wird (Modell-Listen).
 pub const MAX_BODY: usize = 32 << 20;
 
@@ -67,7 +70,16 @@ pub fn bearer_ok(k: &str) -> bool {
 }
 
 /// Sendet und prüft den Status: 2xx → Antwort; sonst `Status` mit höchstens `MAX_ERROR_BODY` Bytes des Fehlertexts.
+/// Jeder Fehler nach gesetztem `cancel` gilt als `Cancelled` (z. B. Status 0 eines gerade geschlossenen Handles).
 pub fn send_ok(t: &dyn Transport, req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Box<dyn HttpResponse>, LlmError> {
+    let r = send_ok_inner(t, req, cancel);
+    if r.is_err() && cancel.load(Ordering::Relaxed) {
+        return Err(LlmError::Cancelled);
+    }
+    r
+}
+
+fn send_ok_inner(t: &dyn Transport, req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Box<dyn HttpResponse>, LlmError> {
     if cancel.load(Ordering::Relaxed) {
         return Err(LlmError::Cancelled);
     }
@@ -113,8 +125,13 @@ pub fn read_all(r: &mut dyn HttpResponse, max: usize, cancel: &AtomicBool) -> Re
 }
 
 /// Zerlegt den Strom in Zeilen (`\n`, ein `\r` davor wird entfernt) und gibt jede an `on_line`; `false` beendet das Lesen.
-/// Eine letzte Zeile ohne Zeilenende zählt mit.
+/// Eine letzte Zeile ohne Zeilenende zählt mit. Mehr als `MAX_LINE` je Zeile oder `MAX_STREAM` insgesamt → `TooLarge`.
 pub fn read_lines(r: &mut dyn HttpResponse, cancel: &AtomicBool, on_line: &mut dyn FnMut(&str) -> bool) -> Result<(), LlmError> {
+    read_lines_max(r, cancel, MAX_STREAM, on_line)
+}
+
+pub fn read_lines_max(r: &mut dyn HttpResponse, cancel: &AtomicBool, max_total: usize, on_line: &mut dyn FnMut(&str) -> bool) -> Result<(), LlmError> {
+    let mut total = 0usize;
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 16 << 10];
     let emit = |bytes: &[u8], on_line: &mut dyn FnMut(&str) -> bool| {
@@ -131,6 +148,10 @@ pub fn read_lines(r: &mut dyn HttpResponse, cancel: &AtomicBool, on_line: &mut d
                 emit(&pending, on_line);
             }
             return Ok(());
+        }
+        total += n;
+        if total > max_total {
+            return Err(LlmError::TooLarge);
         }
         let mut chunk = &buf[..n];
         while let Some(i) = chunk.iter().position(|&b| b == b'\n') {
@@ -160,7 +181,7 @@ pub fn user_agent() -> String {
 pub fn system_transport() -> Arc<dyn Transport> {
     #[cfg(windows)]
     {
-        Arc::new(winhttp::WinHttp)
+        Arc::new(winhttp::WinHttp::default())
     }
     #[cfg(not(windows))]
     {
@@ -180,18 +201,40 @@ impl Transport for Unsupported {
 
 #[cfg(windows)]
 pub mod winhttp {
+    //! WinHTTP im asynchronen Modus (`WINHTTP_FLAG_ASYNC`): Jeder Aufruf kehrt sofort zurück, das Ergebnis kommt über den
+    //! Rückruf in eine Warteschlange, auf die nur der Besitzer-Faden wartet. Dadurch schließt ausschließlich der Besitzer das
+    //! Anfrage-Handle – auch beim Abbruch (er wartet mit kurzem Takt und prüft dabei `cancel`). Kein anderer Faden reicht je
+    //! ein Handle an WinHTTP weiter, ein schon geschlossenes Handle wird nie benutzt.
+    //!
+    //! Puffer, die WinHTTP asynchron liest oder beschreibt (Rumpf, Kopfzeilen, Lesepuffer), gehören dem Kontext `Ctx` (im
+    //! `Arc`). WinHTTP hält eine eigene Referenz darauf, die erst der Rückruf `HANDLE_CLOSING` freigibt – nach ihm kommen
+    //! keine Rückrufe mehr. So bleiben die Puffer gültig, solange WinHTTP sie benutzen kann.
+    #[cfg(not(target_pointer_width = "64"))]
+    compile_error!("llm::http::winhttp: the ConnInfo layout is only defined for 64-bit Windows");
+
     use super::super::error::{LlmError, classify};
     use super::super::net;
     use super::{HttpRequest, HttpResponse, Transport};
+    use std::cell::UnsafeCell;
+    use std::collections::VecDeque;
     use std::ffi::c_void;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Networking::WinHttp::*;
 
-    pub struct WinHttp;
+    /// Transport über WinHTTP. `resolve` ist austauschbar (Tests); Standard = Systemauflösung.
+    pub struct WinHttp {
+        pub resolve: fn(&str, u16) -> std::io::Result<Vec<IpAddr>>,
+    }
+
+    impl Default for WinHttp {
+        fn default() -> Self {
+            Self { resolve: net::system_resolve }
+        }
+    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -201,17 +244,12 @@ pub mod winhttp {
         d.as_millis().clamp(1, i32::MAX as u128) as i32
     }
 
-    /// Meldet WinHTTP einen TLS-Fehler, landen die Gründe (Flags) im `AtomicU32` hinter dem Kontext.
-    unsafe extern "system" fn on_status(_h: *mut c_void, ctx: usize, status: u32, info: *mut c_void, len: u32) {
-        if status == WINHTTP_CALLBACK_STATUS_SECURE_FAILURE && ctx != 0 && !info.is_null() && len >= 4 {
-            // SAFETY: bei SECURE_FAILURE zeigt `info` auf ein DWORD; `ctx` ist die Adresse von `Shared::tls`, das (im Arc)
-            // länger lebt als das Anfrage-Handle.
-            let (flags, cell) = unsafe { (*(info as *const u32), &*(ctx as *const AtomicU32)) };
-            cell.fetch_or(flags, Ordering::Relaxed);
-        }
+    fn last_error() -> u32 {
+        // SAFETY: liest nur den Fehlerwert des aktuellen Threads.
+        unsafe { GetLastError() }
     }
 
-    /// Besitzt ein Session- oder Verbindungs-Handle.
+    /// Besitzt ein Session- oder Verbindungs-Handle (an diesen ist kein Rückruf registriert).
     struct H(*mut c_void);
     impl Drop for H {
         fn drop(&mut self) {
@@ -221,80 +259,203 @@ pub mod winhttp {
             }
         }
     }
-    // SAFETY: WinHTTP-Handles sind nicht an einen Faden gebunden.
+    // SAFETY: WinHTTP-Handles sind nicht an einen Faden gebunden; benutzt wird es nur vom Besitzer.
     unsafe impl Send for H {}
+    unsafe impl Sync for H {}
 
-    /// Anfrage-Handle, das auch der Abbruch-Wächter schließen kann (wer es per `swap` holt, schließt es genau einmal).
-    struct Shared {
-        req: AtomicPtr<c_void>,
-        tls: AtomicU32,
-        done: AtomicBool,
+    enum Ev {
+        SendDone,
+        Headers,
+        Avail(usize),
+        Read(usize),
+        Error(u32),
+        Closing,
     }
 
-    impl Shared {
-        fn req(&self) -> Result<*mut c_void, LlmError> {
-            let h = self.req.load(Ordering::Acquire);
-            if h.is_null() { Err(LlmError::Cancelled) } else { Ok(h) }
-        }
-        fn close(&self) {
-            let h = self.req.swap(std::ptr::null_mut(), Ordering::AcqRel);
-            if !h.is_null() {
-                // SAFETY: nur der Aufrufer, der das Handle per `swap` bekommen hat, schließt es. Ein blockierter
-                // WinHttpReadData/ReceiveResponse in einem anderen Faden kehrt dann mit einem Fehler zurück.
-                unsafe { WinHttpCloseHandle(h) };
+    #[derive(Default)]
+    struct State {
+        events: VecDeque<Ev>,
+        tls: u32,
+    }
+
+    const BUF: usize = 64 << 10;
+
+    struct Ctx {
+        st: Mutex<State>,
+        cv: Condvar,
+        /// Lesepuffer für `WinHttpReadData` (WinHTTP schreibt asynchron hinein).
+        buf: Box<[UnsafeCell<u8>]>,
+        body: Vec<u8>,
+        headers: Vec<u16>,
+    }
+    // SAFETY: `buf` beschreibt nur WinHTTP während eines laufenden Lesens; der Besitzer liest ihn erst nach `READ_COMPLETE`,
+    // das über den Mutex übergeben wird (happens-before). Alles andere ist unveränderlich oder hinter dem Mutex.
+    unsafe impl Sync for Ctx {}
+    unsafe impl Send for Ctx {}
+
+    impl Ctx {
+        fn push(&self, ev: Option<Ev>, tls: u32) {
+            let mut g = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            g.tls |= tls;
+            if let Some(ev) = ev {
+                g.events.push_back(ev);
             }
+            self.cv.notify_all();
         }
     }
 
-    /// Felder in Schließ-Reihenfolge: Anfrage (in `Drop`), Verbindung, Session.
-    struct Resp {
-        shared: Arc<Shared>,
-        _conn: H,
-        _session: H,
+    /// Rückruf von WinHTTP (beliebiger Faden). `ctx` ist der Zeiger aus `Arc::into_raw`, den WinHTTP hält.
+    unsafe extern "system" fn on_status(_h: *mut c_void, ctx: usize, status: u32, info: *mut c_void, len: u32) {
+        if ctx == 0 {
+            return;
+        }
+        // SAFETY: Die Referenz von WinHTTP lebt bis zum Ende von HANDLE_CLOSING (unten freigegeben).
+        let c = unsafe { &*(ctx as *const Ctx) };
+        match status {
+            WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE => c.push(Some(Ev::SendDone), 0),
+            WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE => c.push(Some(Ev::Headers), 0),
+            WINHTTP_CALLBACK_STATUS_READ_COMPLETE => c.push(Some(Ev::Read(len as usize)), 0),
+            WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE => {
+                // SAFETY: bei DATA_AVAILABLE zeigt `info` auf ein DWORD mit der Anzahl verfügbarer Bytes.
+                let n = if info.is_null() || len < 4 { 0 } else { unsafe { *(info as *const u32) } };
+                c.push(Some(Ev::Avail(n as usize)), 0)
+            }
+            WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
+                // SAFETY: bei REQUEST_ERROR zeigt `info` auf ein WINHTTP_ASYNC_RESULT.
+                let code = if info.is_null() { 0 } else { unsafe { (*(info as *const WINHTTP_ASYNC_RESULT)).dwError } };
+                c.push(Some(Ev::Error(code)), 0)
+            }
+            WINHTTP_CALLBACK_STATUS_SECURE_FAILURE if !info.is_null() && len >= 4 => {
+                // SAFETY: bei SECURE_FAILURE zeigt `info` auf ein DWORD mit Flags.
+                c.push(None, unsafe { *(info as *const u32) })
+            }
+            WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING => {
+                c.push(Some(Ev::Closing), 0);
+                // SAFETY: letzter Rückruf für dieses Handle; gibt die Referenz von WinHTTP frei (genau einmal).
+                drop(unsafe { Arc::from_raw(ctx as *const Ctx) });
+            }
+            _ => {}
+        }
+    }
+
+    /// Das Anfrage-Handle; nur der Besitzer benutzt und schließt es.
+    struct Req {
+        h: *mut c_void,
+        ctx: Arc<Ctx>,
         cancel: Arc<AtomicBool>,
     }
 
-    impl Drop for Resp {
-        fn drop(&mut self) {
-            self.shared.done.store(true, Ordering::Release);
-            self.shared.close();
+    impl Req {
+        fn close(&mut self) {
+            if !self.h.is_null() {
+                // SAFETY: eigenes Handle, genau einmal geschlossen; laufende asynchrone Vorgänge bricht WinHTTP ab.
+                unsafe { WinHttpCloseHandle(self.h) };
+                self.h = std::ptr::null_mut();
+            }
         }
-    }
 
-    impl Resp {
-        fn err(&self, call: &'static str) -> LlmError {
-            // SAFETY: liest nur den Fehlerwert des aktuellen Threads.
-            let code = unsafe { GetLastError() };
+        fn handle(&mut self) -> Result<*mut c_void, LlmError> {
+            if self.cancel.load(Ordering::Relaxed) {
+                self.close();
+            }
+            if self.h.is_null() { Err(LlmError::Cancelled) } else { Ok(self.h) }
+        }
+
+        fn fail(&self, code: u32, call: &'static str) -> LlmError {
             if self.cancel.load(Ordering::Relaxed) {
                 return LlmError::Cancelled;
             }
-            classify(code, self.shared.tls.load(Ordering::Relaxed), call)
+            let tls = self.ctx.st.lock().unwrap_or_else(|e| e.into_inner()).tls;
+            classify(code, tls, call)
         }
+
+        /// Wartet auf das Ergebnis des laufenden Vorgangs; prüft dabei alle 50 ms `cancel` (dann wird geschlossen).
+        fn wait(&mut self, want: fn(&Ev) -> bool, call: &'static str) -> Result<Ev, LlmError> {
+            let ctx = self.ctx.clone();
+            let mut g = ctx.st.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                while let Some(ev) = g.events.pop_front() {
+                    match ev {
+                        Ev::Error(code) => {
+                            drop(g);
+                            return Err(self.fail(code, call));
+                        }
+                        Ev::Closing => return Err(LlmError::Cancelled),
+                        e if want(&e) => return Ok(e),
+                        _ => {}
+                    }
+                }
+                if self.cancel.load(Ordering::Relaxed) {
+                    drop(g);
+                    self.close();
+                    return Err(LlmError::Cancelled);
+                }
+                g = ctx.cv.wait_timeout(g, Duration::from_millis(50)).unwrap_or_else(|e| e.into_inner()).0;
+            }
+        }
+    }
+
+    impl Drop for Req {
+        fn drop(&mut self) {
+            self.close();
+        }
+    }
+
+    /// Felder in Schließ-Reihenfolge: Anfrage, Verbindung, Session.
+    struct Resp {
+        req: Req,
+        _conn: H,
+        _session: Arc<H>,
     }
 
     impl HttpResponse for Resp {
         fn status(&self) -> u16 {
-            let Ok(h) = self.shared.req() else { return 0 };
+            if self.req.h.is_null() {
+                return 0;
+            }
             let mut v: u32 = 0;
             let mut len: u32 = 4;
-            // SAFETY: Puffer `v` mit Länge 4; WINHTTP_QUERY_FLAG_NUMBER liefert eine Zahl.
-            let ok = unsafe { WinHttpQueryHeaders(h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, std::ptr::null(), &mut v as *mut u32 as *mut c_void, &mut len, std::ptr::null_mut()) };
+            // SAFETY: Puffer `v` mit Länge 4; Kopfzeilen liegen vor (HEADERS_AVAILABLE), die Abfrage ist synchron.
+            let ok = unsafe { WinHttpQueryHeaders(self.req.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, std::ptr::null(), &mut v as *mut u32 as *mut c_void, &mut len, std::ptr::null_mut()) };
             if ok != 0 { v as u16 } else { 0 }
         }
 
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, LlmError> {
-            let h = self.shared.req()?;
-            let mut n: u32 = 0;
-            let want = buf.len().min(u32::MAX as usize) as u32;
-            // SAFETY: `buf` hat mindestens `want` Bytes.
-            if unsafe { WinHttpReadData(h, buf.as_mut_ptr() as *mut c_void, want, &mut n) } == 0 {
-                return Err(self.err("WinHttpReadData"));
+            let h = self.req.handle()?;
+            // Erst fragen, wie viel schon da ist: WinHttpReadData wartet sonst, bis der ganze Puffer voll ist – beim
+            // Datenstrom kämen Tokens dann nur in großen Blöcken an.
+            // SAFETY: gültiges Handle; asynchron → Ergebnis über DATA_AVAILABLE, kein Zähler.
+            if unsafe { WinHttpQueryDataAvailable(h, std::ptr::null_mut()) } == 0 {
+                return Err(self.req.fail(last_error(), "WinHttpQueryDataAvailable"));
             }
-            Ok(n as usize)
+            let avail = match self.req.wait(|e| matches!(e, Ev::Avail(_)), "WinHttpQueryDataAvailable")? {
+                Ev::Avail(n) => n,
+                _ => unreachable!(),
+            };
+            if avail == 0 {
+                return Ok(0);
+            }
+            let h = self.req.handle()?;
+            let want = buf.len().min(BUF).min(avail) as u32;
+            let p = self.req.ctx.buf.as_ptr() as *mut u8;
+            // SAFETY: Lesepuffer des Kontexts (BUF Bytes) lebt, bis WinHTTP seine Referenz freigibt; asynchron → kein Zähler.
+            if unsafe { WinHttpReadData(h, p as *mut c_void, want, std::ptr::null_mut()) } == 0 {
+                return Err(self.req.fail(last_error(), "WinHttpReadData"));
+            }
+            match self.req.wait(|e| matches!(e, Ev::Read(_)), "WinHttpReadData")? {
+                Ev::Read(n) => {
+                    let n = n.min(want as usize);
+                    // SAFETY: WinHTTP hat `n` Bytes geschrieben und ist fertig (READ_COMPLETE über den Mutex empfangen).
+                    buf[..n].copy_from_slice(unsafe { std::slice::from_raw_parts(p, n) });
+                    Ok(n)
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
-    /// `WINHTTP_CONNECTION_INFO` ohne das WinSock-Feature von windows-sys: `cbSize` + 2× `SOCKADDR_STORAGE` (128 Bytes, 8er-Ausrichtung).
+    /// `WINHTTP_CONNECTION_INFO` ohne das WinSock-Feature von windows-sys: `cbSize` + 2× `SOCKADDR_STORAGE` (128 Bytes,
+    /// 8er-Ausrichtung) – so nur unter 64 Bit (siehe `compile_error!` oben).
     #[repr(C)]
     struct ConnInfo {
         cb: u32,
@@ -320,7 +481,7 @@ pub mod winhttp {
     fn remote_ip(h: *mut c_void) -> Option<IpAddr> {
         let mut ci = ConnInfo { cb: std::mem::size_of::<ConnInfo>() as u32, local: [0; 16], remote: [0; 16] };
         let mut len = std::mem::size_of::<ConnInfo>() as u32;
-        // SAFETY: Puffer der angegebenen Größe; WinHTTP füllt ihn nach dem Verbindungsaufbau.
+        // SAFETY: Puffer der angegebenen Größe; synchrone Abfrage nach dem Verbindungsaufbau.
         let ok = unsafe { WinHttpQueryOption(h, WINHTTP_OPTION_CONNECTION_INFO, &mut ci as *mut ConnInfo as *mut c_void, &mut len) };
         if ok == 0 { None } else { sockaddr_ip(&ci.remote) }
     }
@@ -331,24 +492,22 @@ pub mod winhttp {
     }
 
     fn last(call: &'static str) -> LlmError {
-        // SAFETY: liest nur den Fehlerwert des aktuellen Threads.
-        classify(unsafe { GetLastError() }, 0, call)
+        classify(last_error(), 0, call)
     }
 
-    impl Transport for WinHttp {
-        fn send(&self, req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Box<dyn HttpResponse>, LlmError> {
-            // Host-Regel vor jeder Anfrage (Namen werden neu aufgelöst).
-            let url = net::parse(req.url)?;
-            net::check(&url)?;
-            if req.bearer.is_some_and(|k| !super::bearer_ok(k)) {
-                return Err(LlmError::BadKey);
-            }
-            if cancel.load(Ordering::Relaxed) {
-                return Err(LlmError::Cancelled);
-            }
+    const CALLBACKS: u32 = WINHTTP_CALLBACK_FLAG_SENDREQUEST_COMPLETE
+        | WINHTTP_CALLBACK_FLAG_HEADERS_AVAILABLE
+        | WINHTTP_CALLBACK_FLAG_READ_COMPLETE
+        | WINHTTP_CALLBACK_FLAG_DATA_AVAILABLE
+        | WINHTTP_CALLBACK_FLAG_REQUEST_ERROR
+        | WINHTTP_CALLBACK_FLAG_SECURE_FAILURE
+        | WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING;
+
+    impl WinHttp {
+        fn session(req: &HttpRequest<'_>) -> Result<Arc<H>, LlmError> {
             let ua = wide(&super::user_agent());
-            // SAFETY: nullterminierter UTF-16-Puffer; ausdrücklich ohne Proxy (Server liegen auf diesem Rechner bzw. im LAN).
-            let session = H(unsafe { WinHttpOpen(ua.as_ptr(), WINHTTP_ACCESS_TYPE_NO_PROXY, std::ptr::null(), std::ptr::null(), 0) });
+            // SAFETY: nullterminierter UTF-16-Puffer; ohne Proxy (Server liegen auf diesem Rechner bzw. im LAN), asynchron.
+            let session = H(unsafe { WinHttpOpen(ua.as_ptr(), WINHTTP_ACCESS_TYPE_NO_PROXY, std::ptr::null(), std::ptr::null(), WINHTTP_FLAG_ASYNC) });
             if session.0.is_null() {
                 return Err(last("WinHttpOpen"));
             }
@@ -366,18 +525,18 @@ pub mod winhttp {
             unsafe { WinHttpSetTimeouts(s, ms(super::CONNECT_TIMEOUT), ms(super::CONNECT_TIMEOUT), ms(super::SEND_TIMEOUT), recv) };
             // Ollama schickt die Kopfzeilen erst mit dem ersten Token: auch darauf lange warten.
             set_u32(s, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, recv as u32);
+            Ok(Arc::new(session))
+        }
 
-            // IPv6 in Klammern (ohne: ERROR_WINHTTP_INVALID_URL).
-            let whost = wide(&url.host_display());
+        /// Ein Versuch gegen `connect_host`. `host_header` = eigener `Host:`-Kopf (bei an eine IP gebundener Verbindung).
+        fn attempt(session: &Arc<H>, url: &net::Url, connect_host: &str, host_header: Option<&str>, req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Resp, LlmError> {
+            let whost = wide(connect_host);
             // SAFETY: gültiges Session-Handle und nullterminierter Hostname.
-            let conn = H(unsafe { WinHttpConnect(s, whost.as_ptr(), url.port, 0) });
+            let conn = H(unsafe { WinHttpConnect(session.0, whost.as_ptr(), url.port, 0) });
             if conn.0.is_null() {
                 return Err(last("WinHttpConnect"));
             }
-            let path = match url.path.as_str() {
-                "" => "/".to_string(),
-                p => p.to_string(),
-            };
+            let path = if url.path.is_empty() { "/".to_string() } else { url.path.clone() };
             let verb = wide(req.method.as_str());
             let wpath = wide(&path);
             let secure = if url.scheme == net::Scheme::Https { WINHTTP_FLAG_SECURE } else { 0 };
@@ -386,8 +545,40 @@ pub mod winhttp {
             if h.is_null() {
                 return Err(last("WinHttpOpenRequest"));
             }
-            let shared = Arc::new(Shared { req: AtomicPtr::new(h), tls: AtomicU32::new(0), done: AtomicBool::new(false) });
-            let resp = Resp { shared: shared.clone(), _conn: conn, _session: session, cancel: cancel.clone() };
+            let mut headers = format!("Accept: {}\r\n", req.accept);
+            if req.body.is_some() {
+                headers.push_str("Content-Type: application/json\r\n");
+            }
+            if let Some(k) = req.bearer {
+                headers.push_str(&format!("Authorization: Bearer {k}\r\n"));
+            }
+            let ctx = Arc::new(Ctx {
+                st: Mutex::new(State::default()),
+                cv: Condvar::new(),
+                buf: (0..BUF).map(|_| UnsafeCell::new(0u8)).collect(),
+                body: req.body.unwrap_or(&[]).to_vec(),
+                headers: wide(&headers),
+            });
+            let raw = Arc::into_raw(ctx.clone()) as usize;
+            let raw_ok = {
+                let v = raw;
+                // SAFETY: pointergroßer Wert, WinHTTP kopiert ihn.
+                unsafe { WinHttpSetOption(h, WINHTTP_OPTION_CONTEXT_VALUE, &v as *const usize as *const c_void, std::mem::size_of::<usize>() as u32) != 0 }
+            };
+            // SAFETY: gültiges Anfrage-Handle; Rückruf siehe `on_status`.
+            let prev = if raw_ok { unsafe { WinHttpSetStatusCallback(h, Some(on_status), CALLBACKS, 0) } } else { None };
+            if !raw_ok || prev.map(|f| f as usize) == Some(usize::MAX) {
+                let e = last("WinHttpSetStatusCallback");
+                // Ohne Rückruf kommt kein HANDLE_CLOSING: Referenz selbst zurücknehmen.
+                // SAFETY: Handle noch nicht weitergegeben; `raw` stammt von `Arc::into_raw` oben und wurde nie freigegeben.
+                unsafe {
+                    WinHttpSetStatusCallback(h, None, 0, 0);
+                    WinHttpCloseHandle(h);
+                    drop(Arc::from_raw(raw as *const Ctx));
+                }
+                return Err(e);
+            }
+            let mut r = Req { h, ctx, cancel: cancel.clone() };
             // Pflicht: keine Cookies, keine Weiterleitungen, keine automatische Anmeldung.
             for (opt, v, call) in [
                 (WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION, "WinHttpSetOption(DISABLE_FEATURE)"),
@@ -397,50 +588,72 @@ pub mod winhttp {
                     return Err(last(call));
                 }
             }
-            // SAFETY: gültiges Anfrage-Handle; der Rückruf liest nur `info` und den Kontext (siehe `on_status`).
-            unsafe { WinHttpSetStatusCallback(h, Some(on_status), WINHTTP_CALLBACK_FLAG_SECURE_FAILURE, 0) };
-            let ctx = &shared.tls as *const AtomicU32 as usize;
-
-            // Abbruch-Wächter: schließt das Anfrage-Handle, sobald `cancel` gesetzt wird; endet mit der Antwort.
-            {
-                let (sh, c) = (shared.clone(), cancel.clone());
-                std::thread::spawn(move || {
-                    while !sh.done.load(Ordering::Acquire) {
-                        if c.load(Ordering::Relaxed) {
-                            sh.close();
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                });
+            if let Some(hh) = host_header {
+                let w = wide(&format!("Host: {hh}\r\n"));
+                // SAFETY: nullterminierter Puffer (Länge u32::MAX = bis zur Null), synchron.
+                if unsafe { WinHttpAddRequestHeaders(h, w.as_ptr(), u32::MAX, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE) } == 0 {
+                    return Err(last("WinHttpAddRequestHeaders(Host)"));
+                }
             }
-
-            let mut headers = format!("Accept: {}\r\n", req.accept);
-            if req.body.is_some() {
-                headers.push_str("Content-Type: application/json\r\n");
+            let c = r.ctx.clone();
+            let blen = u32::try_from(c.body.len()).map_err(|_| LlmError::TooLarge)?;
+            let bptr = if c.body.is_empty() { std::ptr::null() } else { c.body.as_ptr() as *const c_void };
+            let h = r.handle()?;
+            // SAFETY: Kopfzeilen und Rumpf gehören dem Kontext und leben, bis WinHTTP seine Referenz freigibt.
+            if unsafe { WinHttpSendRequest(h, c.headers.as_ptr(), u32::MAX, bptr, blen, blen, raw) } == 0 {
+                return Err(r.fail(last_error(), "WinHttpSendRequest"));
             }
-            if let Some(k) = req.bearer {
-                headers.push_str(&format!("Authorization: Bearer {k}\r\n"));
-            }
-            let wh = wide(&headers);
-            let body = req.body.unwrap_or(&[]);
-            let blen = u32::try_from(body.len()).map_err(|_| LlmError::TooLarge)?;
-            let h = shared.req()?;
-            // SAFETY: Kopfzeilen nullterminiert (Länge u32::MAX = bis zur Null); Rumpf lebt bis zum Ende des Aufrufs (synchron).
-            if unsafe { WinHttpSendRequest(h, wh.as_ptr(), u32::MAX, if body.is_empty() { std::ptr::null() } else { body.as_ptr() as *const c_void }, blen, blen, ctx) } == 0 {
-                return Err(resp.err("WinHttpSendRequest"));
-            }
-            // Die tatsächliche Gegenstelle muss erlaubt sein (Schutz gegen DNS-Rebinding zwischen Prüfung und Verbindung).
-            let h = shared.req()?;
+            r.wait(|e| matches!(e, Ev::SendDone), "WinHttpSendRequest")?;
+            // Zusätzliche Prüfung der tatsächlichen Gegenstelle. Bei http + Name ist die Verbindung ohnehin an die geprüfte IP
+            // gebunden; bei https + Name ist die Anfrage hier schon gesendet (TLS) – ein umgeleiteter Server bräuchte dafür
+            // ein gültiges Zertifikat für den Namen. Die Antwort wird dann trotzdem nicht gelesen.
+            let h = r.handle()?;
             match remote_ip(h) {
                 Some(ip) if net::allowed_ip(ip) => {}
                 other => return Err(LlmError::Blocked { host: url.host_display(), addr: other }),
             }
-            // SAFETY: gültiges Anfrage-Handle.
-            if unsafe { WinHttpReceiveResponse(shared.req()?, std::ptr::null_mut()) } == 0 {
-                return Err(resp.err("WinHttpReceiveResponse"));
+            // SAFETY: gültiges Anfrage-Handle; Ergebnis kommt über den Rückruf.
+            if unsafe { WinHttpReceiveResponse(h, std::ptr::null_mut()) } == 0 {
+                return Err(r.fail(last_error(), "WinHttpReceiveResponse"));
             }
-            Ok(Box::new(resp))
+            r.wait(|e| matches!(e, Ev::Headers), "WinHttpReceiveResponse")?;
+            Ok(Resp { req: r, _conn: conn, _session: session.clone() })
+        }
+    }
+
+    impl Transport for WinHttp {
+        fn send(&self, req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Box<dyn HttpResponse>, LlmError> {
+            // Host-Regel vor jeder Anfrage (Namen werden neu aufgelöst).
+            let url = net::parse(req.url)?;
+            let addrs = net::check_with(&url, &self.resolve)?;
+            if req.bearer.is_some_and(|k| !super::bearer_ok(k)) {
+                return Err(LlmError::BadKey);
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return Err(LlmError::Cancelled);
+            }
+            // Ziele: bei http + DNS-Name direkt die geprüften Adressen (gegen DNS-Rebinding zwischen Prüfung und Verbindung)
+            // mit eigenem `Host:`-Kopf; sonst der Name bzw. das Literal (https braucht den Namen für SNI und Zertifikat,
+            // `localhost` löst Windows selbst auf). IPv6 in Klammern (ohne: ERROR_WINHTTP_INVALID_URL).
+            let host_header = if url.port == url.default_port() { url.host_display() } else { format!("{}:{}", url.host_display(), url.port) };
+            let targets: Vec<(String, Option<&str>)> = match (&url.host, url.scheme) {
+                (net::Host::Name(_), net::Scheme::Http) => addrs
+                    .iter()
+                    .map(|ip| (if ip.is_ipv6() { format!("[{ip}]") } else { ip.to_string() }, Some(host_header.as_str())))
+                    .collect(),
+                _ => vec![(url.host_display(), None)],
+            };
+            let session = Self::session(req)?;
+            let mut last_err = LlmError::Resolve { host: url.host_display() };
+            for (i, (host, hh)) in targets.iter().enumerate() {
+                match Self::attempt(&session, &url, host, *hh, req, cancel) {
+                    Ok(r) => return Ok(Box::new(r)),
+                    // Nicht erreichbar: nächste geprüfte Adresse.
+                    Err(LlmError::Sys { code: 12029, call }) if i + 1 < targets.len() => last_err = LlmError::Sys { code: 12029, call },
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(last_err)
         }
     }
 
@@ -532,7 +745,7 @@ pub mod fake {
         }
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, LlmError> {
             if self.c.cancel_after == Some(self.i) {
-                // Wie WinHTTP: der Wächter schließt das Handle, das blockierte Lesen endet mit einem Fehler.
+                // Wie WinHTTP beim Abbruch: das laufende Lesen endet mit einem Fehler.
                 self.cancel.store(true, Ordering::Relaxed);
                 return Err(LlmError::Sys { code: 12017, call: "WinHttpReadData" });
             }
@@ -616,6 +829,38 @@ mod tests {
         })
         .unwrap();
         assert_eq!(got, "äö€");
+    }
+
+    #[test]
+    fn line_and_stream_limits() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let chunk = vec![b'x'; 16 << 10];
+        let n = MAX_LINE / chunk.len() + 2;
+        let t = Fake::default().with(Method::Get, "http://localhost/x", Canned::chunks(200, vec![chunk.clone(); n]));
+        let mut r = send_ok(&t, &req("http://localhost/x"), &cancel).unwrap();
+        let mut lines = 0;
+        assert_eq!(read_lines(r.as_mut(), &cancel, &mut |_| { lines += 1; true }), Err(LlmError::TooLarge));
+        assert_eq!(lines, 0);
+        let mut line = b"y".repeat(99);
+        line.push(b'\n');
+        let t = Fake::default().with(Method::Get, "http://localhost/y", Canned::chunks(200, vec![line; 20]));
+        let mut r = send_ok(&t, &req("http://localhost/y"), &cancel).unwrap();
+        let mut lines = 0;
+        assert_eq!(read_lines_max(r.as_mut(), &cancel, 1000, &mut |_| { lines += 1; true }), Err(LlmError::TooLarge));
+        assert_eq!(lines, 10);
+    }
+
+    #[test]
+    fn errors_after_cancel_are_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        struct T;
+        impl Transport for T {
+            fn send(&self, _: &HttpRequest<'_>, c: &Arc<AtomicBool>) -> Result<Box<dyn HttpResponse>, LlmError> {
+                c.store(true, Ordering::Relaxed);
+                Err(LlmError::Status { code: 0, body: String::new() })
+            }
+        }
+        assert_eq!(send_ok(&T, &req("http://localhost/x"), &cancel).err(), Some(LlmError::Cancelled));
     }
 
     #[test]
