@@ -9,6 +9,16 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.2.0] - WIP
 
+### Added
+
+- Chat-Sitzungen (erster Teil von #63): neue Sitzungsart „Chat“ neben Terminals – Knopf in der Seitenleiste, Palette „Neuer Chat“, leerer Terminal Hub und Ordnermenü „Neuer Chat hier“. Antworten werden als Markdown gestreamt, Codeblöcke haben einen Kopierknopf; dazu Stopp, letzte Antwort neu erzeugen, letzte eigene Nachricht bearbeiten, Fehler mit „Wiederholen“ und eine eingeklappte Zeile je Werkzeugaufruf. Chats liegen in Projekten und Teilungen, funktionieren in weiteren und abgedockten Fenstern und werden nach einem Neustart wiederhergestellt. Text aus Snippets, dem Composer oder abgelegten Dateien landet im Eingabefeld des Chats und wird nie automatisch gesendet. Echte Modell-Server folgen in den nächsten Teilen.
+- Neues Datenformat `chats/<id>.json` (Version 1) mit dem Verlauf eines Chats; Sitzungen in `state.json` haben die optionalen Felder `kind` und `chat`. Verwaiste Verläufe bleiben als `chats/<id>.orphan-<Zeit>.json` erhalten.
+- MCP: `list_sessions` meldet `kind` (`terminal`/`chat`) und bei Chats `model`; Terminal-Werkzeuge auf einem Chat liefern den neuen Fehlercode `not_a_terminal`.
+
+### Changed
+
+- Ein Chat mit Verlauf fragt vor dem Schließen nach (wenn die Schließen-Bestätigung an ist), auch beim Schließen eines Fensters oder Ordners; der Update-Dialog zählt laufende Chat-Antworten getrennt.
+
 ### Fixed
 
 - Ein maximiertes Fenster hat keinen durchsichtigen Rand mehr, durch den der Desktop zu sehen war (#134).
