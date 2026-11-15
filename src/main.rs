@@ -4,6 +4,7 @@ mod app;
 mod backup;
 mod boxdraw;
 mod calc;
+mod chat;
 mod db;
 mod clip;
 mod emoji;
