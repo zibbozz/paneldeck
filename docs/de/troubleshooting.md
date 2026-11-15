@@ -6,7 +6,7 @@
 *Einstellungen → Info → Diagnose kopieren* legt Systeminfos in die Zwischenablage (Version, Datenordner und seine Herkunft, Profil, aktive Startoptionen …) – bitte bei Fehlerberichten mitschicken, zusammen mit `crash.log` aus dem Datenordner, falls vorhanden.
 
 ## Windows SmartScreen
-Die Releases sind noch nicht code-signiert (siehe [Richtlinie zur Code-Signatur](../../README.de.md#richtlinie-zur-code-signatur-code-signing-policy)). Beim ersten Start zeigt SmartScreen evtl. „Der Computer wurde durch Windows geschützt“: auf **„Weitere Informationen“ → „Trotzdem ausführen“** klicken.
+Die Releases sind noch nicht code-signiert (siehe [Hinweis in der README](../../README.de.md#hinweis-programm-ist-noch-nicht-signiert)). Beim ersten Start zeigt SmartScreen evtl. „Der Computer wurde durch Windows geschützt“: auf **„Weitere Informationen“ → „Trotzdem ausführen“** klicken.
 
 ## Fehlalarme von Virenscannern
 Unsignierte Builds von Paneldeck werden ab und zu von Microsoft Defender oder anderen Virenscannern als Schadsoftware erkannt (bisher z. B. `Trojan:Win32/Bearfoos.A!ml` – eine Erkennung per maschinellem Lernen, die von Build zu Build schwankt). Paneldeck enthält keine Schadsoftware: Es ist Open Source, wird aus diesem Repository gebaut, ist nicht gepackt und geht nur für die [Update-Prüfung](updates.md) ins Netz, wenn du es verlangst.

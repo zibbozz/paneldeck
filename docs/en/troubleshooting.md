@@ -6,7 +6,7 @@
 *Settings → About → Copy diagnostics* puts system information on the clipboard (version, data folder and its source, profile, active start options …) – please include it in bug reports, together with `crash.log` from the data folder if present.
 
 ## Windows SmartScreen
-The releases are not code-signed yet (see the [code signing policy](../../README.md#code-signing-policy)). On first start, SmartScreen may show "Windows protected your PC": click **"More info" → "Run anyway"**.
+The releases are not code-signed yet (see the [note in the README](../../README.md#note-the-program-is-not-yet-code-signed)). On first start, SmartScreen may show "Windows protected your PC": click **"More info" → "Run anyway"**.
 
 ## Antivirus false positives
 Unsigned builds of Paneldeck are now and then flagged by Microsoft Defender or other antivirus programs as malware (so far for example `Trojan:Win32/Bearfoos.A!ml` – a detection by machine learning that changes from build to build). Paneldeck contains no malware: it is open source, built from this repository, not packed, and only connects to the network for the [update check](updates.md) when you ask for it.

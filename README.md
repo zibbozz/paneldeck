@@ -25,13 +25,11 @@ Paneldeck works **offline**: it only contacts GitHub when you check for updates 
 
 ## Download
 Paneldeck is distributed only through **GitHub Releases**: https://github.com/zibbozz/paneldeck/releases – each release has an installer (`Paneldeck-Setup-<version>.exe`), a portable ZIP (`paneldeck-<version>-windows-x64.zip`) and, from 2.1.0 on, `SHA256SUMS.txt` with the checksums of both, all built from this repository.
-Code signing: the releases are currently **not signed**. Paneldeck intends to apply for free code signing for open-source projects at the SignPath Foundation; see the [code signing policy](#code-signing-policy).
 
 ### Note: the program is not (yet) code-signed
 The installer and `paneldeck.exe` are **not code-signed**. A certificate costs money, and Paneldeck is meant to stay a free hobby project. For now this means:
 - On first start, **Windows SmartScreen** may show "Windows protected your PC". Click **"More info" → "Run anyway"**.
 - Some antivirus programs (including Microsoft Defender) occasionally raise false alarms for new, unsigned programs with a tray icon and autostart. The source code is open, and you can build Paneldeck yourself (see [Building](docs/en/building.md)); see also [Troubleshooting](docs/en/troubleshooting.md#antivirus-false-positives).
-- **Planned:** Paneldeck intends to apply for free code signing for open-source projects from the SignPath Foundation (see the [code signing policy](#code-signing-policy)). Once releases are signed, it will be noted here and in the changelog.
 
 ## Getting started
 1. Run the **installer** `Paneldeck-Setup-<version>.exe` – or unpack the **portable ZIP** and start `paneldeck.exe`.
@@ -58,13 +56,6 @@ The guides live in [`docs/en/`](docs/en/) (German: [`docs/de/`](docs/de/)) and a
 - [Building](docs/en/building.md) – building from source, release files
 
 The changelog is available in English ([`Changelog.md`](Changelog.md)) and German ([`Changelog.de.md`](Changelog.de.md)); the developer notes (`CLAUDE.md`, `TESTPLAN.md`) are written in German.
-
-## Code signing policy
-- **Status:** the releases are currently **not signed**. Paneldeck intends to apply for free code signing at the [SignPath Foundation](https://signpath.org); nothing has been signed by them (see the [note above](#note-the-program-is-not-yet-code-signed)). If an application is approved, this section will say so.
-- **What would be signed:** only the release files built from this repository by the GitHub Actions workflow `.github/workflows/release-build.yml` (installer `Paneldeck-Setup-<version>.exe` and `paneldeck.exe` in the portable ZIP). Nothing else is signed with this certificate.
-- **Committers and reviewers:** [zibbozz](https://github.com/zibbozz) (owner of the repository). Changes from other people are only merged after review by a committer.
-- **Approvers:** [zibbozz](https://github.com/zibbozz). Every signing request would be approved manually.
-- **Privacy:** see [Privacy](#privacy).
 
 ## Privacy
 This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
