@@ -103,10 +103,11 @@ impl Entry {
     fn is_chat(&self) -> bool {
         self.meta.kind == SessionKind::Chat
     }
-    /// Läuft etwas, das beim Schließen verloren ginge? Terminal: Prozess läuft; Chat: eine Antwort wird gerade erzeugt.
+    /// Läuft etwas, das beim Schließen verloren ginge? Terminal: Prozess läuft; Chat: eine Antwort wird gerade erzeugt
+    /// oder Werkzeuge laufen bzw. warten auf Freigabe.
     fn running(&self) -> bool {
         match &self.chat {
-            Some(c) => c.streaming(),
+            Some(c) => c.busy(),
             None => !self.exited(),
         }
     }
@@ -183,8 +184,14 @@ impl Entry {
     }
     fn status_label(&self, lang: Lang) -> &'static str {
         if let Some(c) = &self.chat {
-            return if c.streaming() {
+            return if c.awaiting_approval() {
+                lang.t("Freigabe?", "approval?")
+            } else if c.streaming() {
                 lang.t("schreibt", "streaming")
+            } else if c.busy() {
+                lang.t("Werkzeug", "tool")
+            } else if c.paused {
+                lang.t("angehalten", "paused")
             } else if c.has_error() {
                 lang.t("Fehler", "error")
             } else {
@@ -345,6 +352,10 @@ enum Action {
     ChatRegenerate(u64),
     /// Letzte eigene Nachricht zum Bearbeiten ins Eingabefeld holen.
     ChatEdit(u64),
+    /// Entscheidung zum wartenden schreibenden Werkzeugaufruf (Erlauben / Immer in diesem Chat / Ablehnen).
+    ChatDecide(u64, chatmod::Decision),
+    /// „Weiter“ nach dem Anhalten an der Höchstzahl der Werkzeugaufrufe.
+    ChatContinue(u64),
 }
 
 struct NewDialog {
@@ -2219,30 +2230,108 @@ impl App {
 
     /// Laufende Antworten aller Chats abholen (Hauptdurchgang, für alle Fenster). Fertige Antworten werden sofort
     /// gespeichert; in einer nicht angesehenen Sitzung gibt es eine Markierung.
-    fn poll_chats(&mut self) {
+    ///
+    /// Danach die Werkzeug-Schleife jedes Chats (`drive_chat_tools`): Werkzeuge laufen hier im Hub mit dem Chat als
+    /// Aufrufer. Wartet ein schreibender Aufruf auf Freigabe, steht der Chat auf „Freigabe?“ (wie eine Claude-Abfrage:
+    /// Markierung in der Seitenleiste; MCP-Agenten schreiben dann nicht in den Chat).
+    fn poll_chats(&mut self, ctx: &egui::Context) {
         let lang = self.settings.language;
         if self.llm_conn.poll(&mut self.settings.llm_servers, lang) {
             state::save_json(&self.dir.join("settings.json"), &self.settings);
         }
         let (window_focused, focused_id) = self.seen_focus();
-        let mut finished = Vec::new();
-        for (id, e) in self.entries.iter_mut() {
-            let Some(c) = e.chat.as_mut() else { continue };
-            if let Some(m) = &e.meta.chat {
-                c.notice = chatmod::llm_backend::chat_notice(&self.settings.llm_servers, m, lang);
+        let ids: Vec<u64> = self.entries.iter().filter(|(_, e)| e.chat.is_some()).map(|(id, _)| *id).collect();
+        let mut tools_running = false;
+        for id in ids {
+            let (finished, was_waiting) = {
+                let Some(e) = self.entries.get_mut(&id) else { continue };
+                let waiting = e.status == ClaudeStatus::Permission;
+                let Some(c) = e.chat.as_mut() else { continue };
+                if let Some(m) = &e.meta.chat {
+                    c.notice = chatmod::llm_backend::chat_notice(&self.settings.llm_servers, m, lang);
+                }
+                (c.poll().finished, waiting)
+            };
+            let tools_changed = self.drive_chat_tools(ctx, id);
+            let Some(e) = self.entries.get_mut(&id) else { continue };
+            let Some(c) = e.chat.as_ref() else { continue };
+            let waiting = c.awaiting_approval();
+            tools_running |= c.tool_running();
+            e.status = if waiting {
+                ClaudeStatus::Permission
+            } else if c.busy() {
+                ClaudeStatus::Working
+            } else {
+                ClaudeStatus::Idle
+            };
+            // Markierung: Runde zu Ende (fertig, Fehler, angehalten) oder eine Freigabe-Frage erscheint.
+            let done = finished && !c.busy();
+            let unseen = !window_focused || id != focused_id;
+            if (done || (waiting && !was_waiting) || (tools_changed && c.paused)) && unseen {
+                e.attention = true;
             }
-            let p = c.poll();
-            e.status = if c.streaming() { ClaudeStatus::Working } else { ClaudeStatus::Idle };
-            if p.finished {
-                finished.push(*id);
-                if !window_focused || *id != focused_id {
-                    e.attention = true;
+            if (waiting && !was_waiting) && unseen {
+                ctx.send_viewport_cmd_to(self.attention_viewport(id), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+            }
+            if finished || tools_changed {
+                self.save_chat(id);
+            }
+        }
+        if tools_running {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    /// Was für die Werkzeuge eines Chats gerade gilt: Einstellungen seines Modells (unbekannter Server: Stufe „Aus“),
+    /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
+    fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
+        let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
+        match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
+            Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
+            None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
+        }
+    }
+
+    /// Werkzeug-Schleife eines Chats ein Stück weiterführen (nur im Hauptdurchgang): Ergebnisse abholen, nächsten
+    /// Aufruf prüfen und ausführen, nach dem letzten Ergebnis die nächste Anfrage starten. `true` bei Änderungen.
+    fn drive_chat_tools(&mut self, ctx: &egui::Context, id: u64) -> bool {
+        let mut changed = false;
+        if self.entries.get(&id).and_then(|e| e.chat.as_ref()).is_none_or(|c| c.calls.is_empty() && !c.busy()) {
+            return false;
+        }
+        let policy = self.chat_policy(id);
+        // Begrenzt je Bild: sofort fertige Werkzeuge laufen nacheinander, ohne die Oberfläche lange aufzuhalten.
+        for _ in 0..16 {
+            let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) else { return changed };
+            changed |= c.poll_tools();
+            let before = c.rev();
+            let step = c.tool_step(&policy);
+            changed |= c.rev() != before;
+            match step {
+                chatmod::ToolStep::Idle => return changed,
+                chatmod::ToolStep::Execute(call) => {
+                    let rx = self.mcp_call_chat(ctx, id, &call.name, &call.arguments);
+                    if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+                        c.tool_started(rx);
+                    }
+                    changed = true;
+                }
+                chatmod::ToolStep::Request => {
+                    let backend = self.chat_backend.clone();
+                    let rctx = ctx.clone();
+                    let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
+                    let tcx = self.turn_context(id);
+                    let Some(e) = self.entries.get_mut(&id) else { return changed };
+                    let meta = e.meta.chat.clone().unwrap_or_default();
+                    if let Some(c) = e.chat.as_mut() {
+                        c.next_request(backend.as_ref(), &meta, &tcx, repaint);
+                    }
+                    return true;
                 }
             }
         }
-        for id in finished {
-            self.save_chat(id);
-        }
+        ctx.request_repaint();
+        changed
     }
 
     fn save_chat(&self, id: u64) {
@@ -2288,9 +2377,18 @@ impl App {
                 c.begin_edit();
                 false
             }
+            // Ausgeführt wird erst im Hauptdurchgang (`poll_chats`), auch wenn der Chat in einem weiteren Fenster liegt.
+            Action::ChatDecide(_, d) => c.decide(*d),
+            Action::ChatContinue(_) => c.resume(),
             _ => false,
         };
-        e.status = if c.streaming() { ClaudeStatus::Working } else { ClaudeStatus::Idle };
+        e.status = if c.awaiting_approval() {
+            ClaudeStatus::Permission
+        } else if c.busy() {
+            ClaudeStatus::Working
+        } else {
+            ClaudeStatus::Idle
+        };
         if changed {
             self.save_chat(id);
         }
@@ -3014,7 +3112,7 @@ impl App {
                 let cwd = proj.and_then(|p| p.inherited(&path, |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())));
                 self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, cwd, Some(path)));
             }
-            Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) => self.chat_action(ctx, id, &a),
+            Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, _) | Action::ChatContinue(id) => self.chat_action(ctx, id, &a),
         }
     }
 }
@@ -3058,7 +3156,7 @@ impl eframe::App for App {
 
         self.poll_hooks(ctx);
         self.poll_shell(ctx);
-        self.poll_chats();
+        self.poll_chats(ctx);
         self.models_save_tick(ctx);
         self.poll_background(ctx);
         self.sync_watchers(ctx);
@@ -3368,10 +3466,13 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         if o.focus && cx.focused != id {
             cx.actions.push(Action::Focus(id));
         }
-        for (hit, a) in [(o.send, Action::ChatSend(id)), (o.stop, Action::ChatStop(id)), (o.regenerate, Action::ChatRegenerate(id)), (o.edit, Action::ChatEdit(id))] {
+        for (hit, a) in [(o.send, Action::ChatSend(id)), (o.stop, Action::ChatStop(id)), (o.regenerate, Action::ChatRegenerate(id)), (o.edit, Action::ChatEdit(id)), (o.cont, Action::ChatContinue(id))] {
             if hit {
                 cx.actions.push(a);
             }
+        }
+        if let Some(d) = o.decide {
+            cx.actions.push(Action::ChatDecide(id, d));
         }
         if !cx.detached {
             edge_buttons(ui, id, body, cx, false);

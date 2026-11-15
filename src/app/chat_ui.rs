@@ -1,8 +1,8 @@
 //! Inhalt eines Chat-Bereichs (#63): Nachrichtenliste, Werkzeugzeilen, Eingabe. Kennt kein Backend – Senden, Stopp,
 //! Neu erzeugen und Bearbeiten meldet [`chat_body`] zurück; die App führt sie aus (`Action::Chat*`).
 
-use crate::chat::session::UiCache;
-use crate::chat::{ChatMsg, ChatState, Role, ToolStatus};
+use crate::chat::session::{CallState, UiCache};
+use crate::chat::{ChatMsg, ChatState, Decision, Role, ToolStatus};
 use crate::markdown::{self, RenderOpts};
 use crate::state::Lang;
 use crate::style::{self, S1, S2};
@@ -17,6 +17,10 @@ pub(super) struct ChatOut {
     pub edit: bool,
     /// In den Bereich geklickt / Eingabe hat den Fokus (Bereich fokussieren).
     pub focus: bool,
+    /// Entscheidung zum wartenden schreibenden Werkzeugaufruf.
+    pub decide: Option<Decision>,
+    /// „Weiter“ nach dem Anhalten an der Höchstzahl der Werkzeugaufrufe.
+    pub cont: bool,
 }
 
 const PAD: f32 = 10.0;
@@ -73,14 +77,18 @@ struct RowCx<'a> {
     context_start: Option<usize>,
     /// Token-Verbrauch der letzten Antwort (Eingabe, Antwort).
     usage: Option<(Option<u32>, Option<u32>)>,
+    /// Offene Werkzeugaufrufe: Kennung → Zustand.
+    pending: std::collections::HashMap<String, CallState>,
 }
 
 fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: Lang, out: &mut ChatOut) {
-    let streaming = chat.streaming();
+    let streaming = chat.busy();
     let has_error = chat.has_error();
     let can_regen = !streaming && crate::chat::logic::can_regenerate(chat.messages());
     let rev = chat.rev();
     let from = std::mem::replace(&mut chat.changed_from, usize::MAX);
+    let pending = chat.calls.iter().map(|p| (p.call.id.clone(), p.state)).collect();
+    let paused = chat.paused.then_some(chat.steps);
     let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
@@ -115,6 +123,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         last_user: crate::chat::logic::last_user(msgs),
         context_start: crate::chat::logic::clamp_context_start(file.context_start, n),
         usage: *usage,
+        pending,
     };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
     let jump = std::mem::take(follow);
@@ -172,6 +181,13 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
             }
             y += mh;
         }
+        // Angehalten an der Höchstzahl der Werkzeugaufrufe: Hinweis mit „Weiter“ unter der letzten Nachricht.
+        if let Some(steps) = paused {
+            let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
+            let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_paused", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            paused_bar(&mut bar, steps, lang, out);
+            y += bar.min_rect().height() + S1;
+        }
         let total = Rect::from_min_size(origin, Vec2::new(width, y + S1));
         ui.allocate_rect(total, Sense::hover());
         if jump {
@@ -193,7 +209,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
         Role::User => user_bubble(ui, m, Some(i) == rc.last_user && !rc.streaming, lang, out),
         Role::Assistant => {
             let is_last = Some(i) == rc.last;
-            assistant(ui, rc.session, i, m, msgs, cache, rc.model, lang);
+            assistant(ui, i, m, msgs, cache, rc, out);
             if is_last && rc.streaming && m.content.is_empty() && m.tool_calls.is_empty() {
                 ui.label(RichText::new("…").color(style::dim(ui)));
             }
@@ -217,7 +233,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
         }
         // Ergebnisse mit passendem Aufruf stehen in dessen Zeile.
         Role::Tool if cache.matched.contains(&i) => {}
-        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), lang),
+        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, lang, out),
         Role::System => {
             egui::CollapsingHeader::new(RichText::new(lang.t("Systemprompt", "System prompt")).small().color(style::dim(ui))).id_salt(("chat_sys", rc.session, i)).show(ui, |ui| {
                 ui.label(RichText::new(&m.content).small().monospace());
@@ -282,9 +298,9 @@ fn user_bubble(ui: &mut Ui, m: &ChatMsg, editable: bool, lang: Lang, out: &mut C
 }
 
 /// Antwort des Modells: Markdown (geparst nur, wenn sich die Nachricht geändert hat) und eine Zeile je Werkzeugaufruf.
-#[allow(clippy::too_many_arguments)]
-fn assistant(ui: &mut Ui, session: u64, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache, model: &str, lang: Lang) {
-    ui.label(RichText::new(model).small().color(style::dim(ui)));
+fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache, rc: &RowCx, out: &mut ChatOut) {
+    let (session, lang) = (rc.session, rc.lang);
+    ui.label(RichText::new(rc.model).small().color(style::dim(ui)));
     if !m.content.is_empty() {
         let doc = cache.md.entry(i).or_insert_with(|| markdown::parse_plain(&m.content));
         let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };
@@ -295,35 +311,102 @@ fn assistant(ui: &mut Ui, session: u64, i: usize, m: &ChatMsg, msgs: &[ChatMsg],
     }
     for (k, c) in m.tool_calls.iter().enumerate() {
         let result = cache.tool_results.get(&c.id).and_then(|j| msgs.get(*j));
-        tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some(&c.arguments), result, lang);
+        let state = if result.is_some() { None } else { rc.pending.get(&c.id).copied() };
+        tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some(&c.arguments), result, state, lang, out);
     }
 }
 
-/// Eine eingeklappte Zeile je Werkzeugaufruf (`▸ name ✓`), aufgeklappt Parameter und Ergebnis.
-fn tool_line(ui: &mut Ui, id: Id, name: &str, args: Option<&serde_json::Value>, result: Option<&ChatMsg>, lang: Lang) {
-    let (mark, col) = match result.and_then(|r| r.status) {
-        Some(ToolStatus::Ok) => ("✓", Color32::from_rgb(0x4c, 0xc2, 0x6a)),
-        Some(ToolStatus::Error) => ("✗", error_col()),
-        Some(ToolStatus::Denied) => (lang.t("abgelehnt", "denied"), error_col()),
-        None if result.is_some() => ("✓", Color32::from_rgb(0x4c, 0xc2, 0x6a)),
-        None => ("…", style::dim(ui)),
-    };
+/// Zeichen und Farbe für den Stand eines Werkzeugaufrufs (`None` = läuft: Kreisel).
+fn tool_mark(result: Option<&ChatMsg>, state: Option<CallState>, lang: Lang, dim: Color32) -> Option<(&'static str, Color32)> {
+    let ok = Color32::from_rgb(0x4c, 0xc2, 0x6a);
+    Some(match (result.map(|r| r.status), state) {
+        (Some(Some(ToolStatus::Ok)) | Some(None), _) => ("✓", ok),
+        (Some(Some(ToolStatus::Error)), _) => ("✗", error_col()),
+        (Some(Some(ToolStatus::Denied)), _) => (lang.t("⊘ abgelehnt", "⊘ denied"), error_col()),
+        (None, Some(CallState::Running)) => return None,
+        (None, Some(CallState::Approval)) => (lang.t("wartet auf Freigabe", "needs approval"), Color32::from_rgb(0xe5, 0xc0, 0x7b)),
+        (None, _) => ("…", dim),
+    })
+}
+
+/// Eine eingeklappte Zeile je Werkzeugaufruf (`▸ name ✓`), aufgeklappt Parameter und Ergebnis (als JSON eingerückt,
+/// gekürzt). Wartet der Aufruf auf Freigabe, stehen darunter Kurzfassung und die Knöpfe Erlauben / Immer / Ablehnen.
+#[allow(clippy::too_many_arguments)]
+fn tool_line(ui: &mut Ui, id: Id, name: &str, args: Option<&serde_json::Value>, result: Option<&ChatMsg>, state: Option<CallState>, lang: Lang, out: &mut ChatOut) {
+    let mark = tool_mark(result, state, lang, style::dim(ui));
     let mut job = egui::text::LayoutJob::default();
     job.append(name, 0.0, egui::TextFormat { font_id: FontId::monospace(12.5), color: ui.visuals().text_color(), ..Default::default() });
-    job.append(mark, 6.0, egui::TextFormat { font_id: FontId::proportional(12.5), color: col, ..Default::default() });
-    egui::CollapsingHeader::new(job).id_salt(id).default_open(false).show(ui, |ui| {
-        if let Some(a) = args {
-            ui.label(RichText::new(lang.t("Parameter", "Parameters")).small().color(style::dim(ui)));
-            code(ui, &serde_json::to_string_pretty(a).unwrap_or_default());
-        }
-        ui.label(RichText::new(lang.t("Ergebnis", "Result")).small().color(style::dim(ui)));
-        match result {
-            Some(r) => code(ui, &r.content),
-            None => {
-                ui.label(RichText::new(lang.t("(noch kein Ergebnis)", "(no result yet)")).small().color(style::dim(ui)));
+    if let Some((mark, col)) = mark {
+        job.append(mark, 6.0, egui::TextFormat { font_id: FontId::proportional(12.5), color: col, ..Default::default() });
+    }
+    ui.horizontal(|ui| {
+        egui::CollapsingHeader::new(job).id_salt(id).default_open(false).show(ui, |ui| {
+            if let Some(a) = args {
+                ui.label(RichText::new(lang.t("Parameter", "Parameters")).small().color(style::dim(ui)));
+                code(ui, &serde_json::to_string_pretty(a).unwrap_or_default());
             }
+            ui.label(RichText::new(lang.t("Ergebnis", "Result")).small().color(style::dim(ui)));
+            match result {
+                Some(r) => code(ui, &pretty(&r.content)),
+                None => {
+                    ui.label(RichText::new(lang.t("(noch kein Ergebnis)", "(no result yet)")).small().color(style::dim(ui)));
+                }
+            }
+        });
+        if mark.is_none() {
+            ui.add(egui::Spinner::new().size(12.0));
         }
     });
+    if state == Some(CallState::Approval) {
+        approval(ui, name, args, lang, out);
+    }
+}
+
+/// Freigabe-Zeile eines schreibenden Aufrufs. Enter gilt nur, wenn ein Knopf hier den Fokus hat (Tab), nie aus der
+/// Eingabe heraus – so gibt niemand versehentlich frei, während er tippt.
+fn approval(ui: &mut Ui, name: &str, args: Option<&serde_json::Value>, lang: Lang, out: &mut ChatOut) {
+    let warn = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        let summary = args.map(|a| crate::chat::tools::summary(a, 160)).unwrap_or_default();
+        ui.label(RichText::new(lang.t("Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:", "The model wants to use a tool with write access:")).small());
+        ui.label(RichText::new(format!("{name}({summary})")).monospace().size(12.5));
+        ui.horizontal_wrapped(|ui| {
+            let allow = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(style::ACCENT.gamma_multiply(0.7)));
+            let always = ui.button(lang.t("Immer für diesen Chat", "Always for this chat")).on_hover_text(if lang == Lang::De {
+                format!("„{name}“ in diesem Chat nicht mehr nachfragen")
+            } else {
+                format!("Do not ask again for “{name}” in this chat")
+            });
+            let deny = ui.button(lang.t("Ablehnen", "Deny"));
+            if allow.clicked() {
+                out.decide = Some(Decision::Allow);
+            } else if always.clicked() {
+                out.decide = Some(Decision::Always);
+            } else if deny.clicked() {
+                out.decide = Some(Decision::Deny);
+            }
+        });
+    });
+}
+
+/// „Nach N Werkzeugaufrufen angehalten“ mit dem Knopf „Weiter“.
+fn paused_bar(ui: &mut Ui, steps: u32, lang: Lang, out: &mut ChatOut) {
+    egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            let text = if lang == Lang::De { format!("Nach {steps} Werkzeugaufrufen angehalten.") } else { format!("Stopped after {steps} tool calls.") };
+            ui.label(RichText::new(text).color(style::dim(ui)));
+            if ui.button(lang.t("Weiter", "Continue")).on_hover_text(lang.t("Noch einmal so viele Werkzeugaufrufe erlauben", "Allow the same number of tool calls again")).clicked() {
+                out.cont = true;
+            }
+        });
+    });
+}
+
+/// JSON-Text eingerückt (anderes unverändert).
+fn pretty(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text).ok().and_then(|v| serde_json::to_string_pretty(&v).ok()).unwrap_or_else(|| text.to_string())
 }
 
 fn code(ui: &mut Ui, text: &str) {
@@ -382,7 +465,8 @@ fn take_plain_enter(ui: &Ui) -> bool {
 }
 
 fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_h: f32, grab_focus: bool, out: &mut ChatOut) {
-    let streaming = chat.streaming();
+    // Auch während Werkzeuge laufen oder auf Freigabe warten: Stopp statt Senden.
+    let streaming = chat.busy();
     let tid = input_id(session);
     if chat.editing {
         ui.horizontal(|ui| {
@@ -619,6 +703,84 @@ mod tests {
         h.frame(&mut c, Lang::En, false, vec![]);
         let p = h.pos_of("Stop").expect("Stopp-Knopf");
         assert!(h.click(&mut c, Lang::En, p).stop);
+    }
+
+    /// Chat, dessen Antwort `send_text` verlangt und der nun auf Freigabe wartet.
+    fn awaiting() -> ChatState {
+        struct One;
+        impl crate::chat::ChatBackend for One {
+            fn start(&self, _: &crate::state::ChatMeta, _: &[ChatMsg], _: &crate::chat::TurnContext, _: crate::chat::Repaint) -> crate::chat::backend::TurnHandle {
+                let (h, tx, _) = crate::chat::backend::TurnHandle::pair();
+                tx.send(crate::chat::backend::TurnEvent::ToolCall(ToolCall { id: "w".into(), name: "send_text".into(), arguments: serde_json::json!({"session": 4, "text": "dir"}) })).unwrap();
+                tx.send(crate::chat::backend::TurnEvent::Done).unwrap();
+                h
+            }
+        }
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "type dir in 4".into();
+        assert!(c.send(&One, &crate::state::ChatMeta::default(), &crate::chat::TurnContext::default(), Arc::new(|| {})));
+        c.poll();
+        let policy = crate::chat::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Control, ..crate::llm::config::LlmModel::named("m") }, None, false);
+        assert_eq!(c.tool_step(&policy), crate::chat::ToolStep::Idle);
+        assert!(c.awaiting_approval());
+        c
+    }
+
+    #[test]
+    fn approval_buttons_in_english_and_german_and_enter_in_the_input_does_not_approve() {
+        for (lang, allow, always, deny, hint) in [
+            (Lang::En, "Allow", "Always for this chat", "Deny", "The model wants to use a tool with write access:"),
+            (Lang::De, "Erlauben", "Immer für diesen Chat", "Ablehnen", "Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:"),
+        ] {
+            for (label, want) in [(allow, Decision::Allow), (always, Decision::Always), (deny, Decision::Deny)] {
+                let mut c = awaiting();
+                let mut h = H::new();
+                h.frame(&mut c, lang, true, vec![]);
+                h.frame(&mut c, lang, false, vec![]);
+                assert!(h.texts.iter().any(|t| t == hint), "{:?}", h.texts);
+                assert!(h.texts.iter().any(|t| t == "send_text(session=4, text=\"dir\")"), "Kurzfassung: {:?}", h.texts);
+                assert!(h.texts.iter().any(|t| t == if lang == Lang::De { "Stopp" } else { "Stop" }), "während der Frage: Stopp");
+                // Enter im (fokussierten) Eingabefeld gibt nicht frei
+                h.frame(&mut c, lang, false, vec![Event::Text("x".into())]);
+                let o = h.frame(&mut c, lang, false, vec![key(Key::Enter, Modifiers::NONE)]);
+                assert_eq!((o.decide, o.send), (None, false));
+                let p = h.pos_of(label).unwrap_or_else(|| panic!("{label} fehlt: {:?}", h.texts));
+                let mut got = None;
+                let mv = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+                for evs in [vec![Event::PointerMoved(p)], vec![mv(true)], vec![mv(false)]] {
+                    got = got.or(h.frame(&mut c, lang, false, evs).decide);
+                }
+                assert_eq!(got, Some(want), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn paused_bar_offers_continue_and_tool_marks() {
+        for (lang, text, btn) in [(Lang::En, "Stopped after 10 tool calls.", "Continue"), (Lang::De, "Nach 10 Werkzeugaufrufen angehalten.", "Weiter")] {
+            let mut c = ChatState::new(ChatFile { messages: vec![ChatMsg::new(Role::User, "q"), ChatMsg::new(Role::Assistant, "a")], ..ChatFile::default() }, None);
+            c.paused = true;
+            c.steps = 10;
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == text), "{:?}", h.texts);
+            let p = h.pos_of(btn).expect("Weiter-Knopf");
+            let mv = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            let mut cont = false;
+            for evs in [vec![Event::PointerMoved(p)], vec![mv(true)], vec![mv(false)]] {
+                cont |= h.frame(&mut c, lang, false, evs).cont;
+            }
+            assert!(cont);
+        }
+        let dim = Color32::GRAY;
+        let mut r = ChatMsg::new(Role::Tool, "{}");
+        r.status = Some(ToolStatus::Denied);
+        assert_eq!(tool_mark(Some(&r), None, Lang::En, dim).unwrap().0, "⊘ denied");
+        assert!(tool_mark(None, Some(CallState::Running), Lang::En, dim).is_none(), "läuft: Kreisel");
+        assert_eq!(tool_mark(None, Some(CallState::Approval), Lang::De, dim).unwrap().0, "wartet auf Freigabe");
+        assert_eq!(pretty("{\"a\":1}"), "{\n  \"a\": 1\n}");
+        assert_eq!(pretty("not json"), "not json");
     }
 
     #[test]
