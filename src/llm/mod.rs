@@ -6,6 +6,7 @@
 // Wird ab den Folge-Teilen (Chat-Sitzungen, Einstellungen) benutzt; bis dahin sind viele Einträge noch ungenutzt.
 #![allow(dead_code)]
 
+pub mod config;
 pub mod error;
 pub mod http;
 pub mod net;

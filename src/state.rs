@@ -205,6 +205,12 @@ pub struct Settings {
     pub update_last_check: i64,
     /// Vom Nutzer übersprungene Version (`X.Y.Z`, leer = keine); die automatische Prüfung bietet sie nicht mehr an.
     pub update_skip_version: String,
+    /// LLM-Server für Chats (seit 2.2.0, `llm::config`). Unlesbare Einträge werden übersprungen.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::llm::config::de_servers")]
+    pub llm_servers: Vec<crate::llm::config::LlmServer>,
+    /// Zuletzt im Dialog „Neuer Chat“ gewähltes Modell (Vorauswahl beim nächsten Mal).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
+    pub last_chat_model: Option<ChatMeta>,
 }
 
 /// Auswahl für `Settings::undo_steps`.
@@ -248,6 +254,8 @@ impl Default for Settings {
             update_auto_check: false,
             update_last_check: 0,
             update_skip_version: String::new(),
+            llm_servers: Vec::new(),
+            last_chat_model: None,
         }
     }
 }
@@ -721,6 +729,7 @@ impl Settings {
         }
         fix(&mut self.prices.cache_read, d.cache_read);
         fix(&mut self.prices.cache_write, d.cache_write);
+        crate::llm::config::sanitize(&mut self.llm_servers);
     }
 }
 
@@ -885,6 +894,28 @@ mod tests {
         assert!(back.update_auto_check);
         assert_eq!(back.update_last_check, 1_800_000_000);
         assert_eq!(back.update_skip_version, "3.0.0");
+    }
+
+    #[test]
+    fn llm_settings_back_compat_and_roundtrip() {
+        // settings.json von 2.1.0 (ohne LLM-Felder) lädt; die neuen Felder fehlen dann auch beim Schreiben.
+        let old = r#"{"language":"En","mcp_level":"Read","update_auto_check":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.llm_servers.is_empty() && s.last_chat_model.is_none());
+        let j = serde_json::to_value(&s).unwrap();
+        assert!(j.get("llm_servers").is_none() && j.get("last_chat_model").is_none());
+        // Ein unlesbarer Server (unbekannter Typ) und ein kaputtes last_chat_model machen die Datei nicht unlesbar.
+        let new = r#"{"language":"De","llm_servers":[{"id":"a","name":"O","kind":"ollama","url":"http://localhost:11434","models":[{"name":"m","level":"Control","max_steps":0}]},{"id":"b","kind":"gemini"}],"last_chat_model":7}"#;
+        let mut s: Settings = serde_json::from_str(new).unwrap();
+        s.sanitize();
+        assert_eq!(s.language, Lang::De);
+        assert_eq!(s.llm_servers.len(), 1);
+        assert_eq!(s.llm_servers[0].models[0].max_steps, 1, "auf 1..=100 begrenzt");
+        assert!(s.last_chat_model.is_none());
+        s.last_chat_model = Some(ChatMeta { server: "a".into(), model: "m".into() });
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.llm_servers, s.llm_servers);
+        assert_eq!(back.last_chat_model, s.last_chat_model);
     }
 }
 
