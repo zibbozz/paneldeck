@@ -68,6 +68,12 @@ enum Out {
     Later,
 }
 
+/// Werkzeuge für Terminals (Lesen, Tippen, Befehle) auf einem Chat.
+fn not_a_terminal() -> (String, String) {
+    er("not_a_terminal", tr("Diese Sitzung ist ein Chat, kein Terminal.", "This session is a chat, not a terminal."))
+}
+
+/// Status für die Agenten-Schnittstelle. Chats: `ready` (bereit/Fehler) oder `working` (Antwort läuft).
 fn status_str(e: &Entry) -> &'static str {
     if e.exited() {
         return "exited";
@@ -249,6 +255,9 @@ impl App {
 
     fn mcp_live(&self, id: u64) -> Result<&Session, (String, String)> {
         let e = self.entries.get(&id).ok_or_else(|| er("not_found", tr("Sitzung nicht gefunden", "Session not found")))?;
+        if e.is_chat() {
+            return Err(not_a_terminal());
+        }
         match &e.live {
             Some(s) if !s.has_exited() => Ok(s),
             Some(_) => Err(er("session_exited", tr("Der Prozess dieser Sitzung ist beendet.", "The process of this session has ended."))),
@@ -457,6 +466,8 @@ impl App {
                     "cwd": e.cwd_now(),
                     "shell": e.eff_shell(),
                     "claude": e.meta.claude,
+                    "kind": if e.is_chat() { "chat" } else { "terminal" },
+                    "model": e.meta.chat.as_ref().map(|c| c.model.clone()),
                     "status": status_str(e),
                     "focused": focused,
                     "visible": visible,
@@ -477,6 +488,9 @@ impl App {
 
     fn mcp_read(&self, args: &Value) -> R {
         let id = self.mcp_target(args, None, false)?;
+        if self.entries[&id].is_chat() {
+            return Err(not_a_terminal());
+        }
         // Lesen geht auch bei beendetem Prozess (das Terminal bleibt sichtbar), nur ohne Terminal gibt es nichts.
         let s = self.entries[&id].live.as_ref().ok_or_else(|| er("session_not_running", self.entries[&id].error.clone().unwrap_or_else(|| tr("Diese Sitzung hat kein Terminal.", "This session has no terminal.").into())))?;
         let screen = args.get("screen").and_then(|v| v.as_bool()).unwrap_or(false);

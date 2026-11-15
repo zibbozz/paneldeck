@@ -19,6 +19,9 @@ use std::sync::Arc;
 pub struct RenderOpts {
     /// Zeilenenden im Quelltext als Zeilenumbruch zeichnen (statt als Leerzeichen, wie bei CommonMark).
     pub soft_breaks_as_newlines: bool,
+    /// Codeblöcke bekommen oben rechts einen Knopf „Kopieren“ (legt den Code in die Zwischenablage).
+    /// `Some(text)` mit dem (übersetzten) Knopftext; `None` = kein Knopf (Standard).
+    pub copy_button: Option<&'static str>,
 }
 
 /// Ereignisse eines Zeichendurchlaufs. Öffnen von Adressen macht der Aufrufer (nur `http`, `https`,
@@ -314,7 +317,17 @@ fn block(ui: &mut Ui, cx: &mut Cx, b: &Block) {
 fn code_block(ui: &mut Ui, cx: &mut Cx, lang: &str, code: &str) {
     egui::Frame::new().fill(cx.look.code_bg).corner_radius(RADIUS).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        if !lang.is_empty() {
+        if let Some(label) = cx.opts.copy_button {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(lang).size(cx.look.size * 0.8).color(dim(ui)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(label).clicked() {
+                        ui.ctx().copy_text(code.to_string());
+                    }
+                });
+            });
+            ui.add_space(2.0);
+        } else if !lang.is_empty() {
             ui.label(egui::RichText::new(lang).size(cx.look.size * 0.8).color(dim(ui)));
             ui.add_space(2.0);
         }
@@ -502,8 +515,43 @@ mod tests {
             assert_eq!(out, RenderOutput::default());
         });
         frame(|ui| {
-            render(ui, &doc, &RenderOpts { soft_breaks_as_newlines: true });
+            render(ui, &doc, &RenderOpts { soft_breaks_as_newlines: true, ..RenderOpts::default() });
         });
+    }
+
+    #[test]
+    fn code_block_copy_button_is_optional_and_copies() {
+        let doc = parse_plain("text\n\n```rust\nfn main() {}\n```\n");
+        let run = |opts: &RenderOpts, events: Vec<egui::Event>, ctx: &egui::Context, t: f64| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 600.0))), time: Some(t), events, ..Default::default() };
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render(ui, &doc, opts);
+                });
+            })
+        };
+        let find = |out: &egui::FullOutput, text: &str| {
+            out.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.visual_bounding_rect().center()),
+                _ => None,
+            })
+        };
+        // Standard: kein Knopf
+        let ctx = egui::Context::default();
+        let out = run(&RenderOpts::default(), vec![], &ctx, 0.0);
+        assert!(find(&out, "Copy").is_none());
+        // Mit Knopf: Klick legt den Code in die Zwischenablage
+        let opts = RenderOpts { copy_button: Some("Copy"), ..RenderOpts::default() };
+        let ctx = egui::Context::default();
+        run(&opts, vec![], &ctx, 0.0);
+        let out = run(&opts, vec![], &ctx, 0.1);
+        let p = find(&out, "Copy").expect("Knopf gezeichnet");
+        let btn = |pressed| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        run(&opts, vec![egui::Event::PointerMoved(p)], &ctx, 0.2);
+        run(&opts, vec![btn(true)], &ctx, 0.3);
+        let out = run(&opts, vec![btn(false)], &ctx, 0.4);
+        let copied = out.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "fn main() {}"));
+        assert!(copied, "{:?}", out.platform_output.commands);
     }
 
     #[test]

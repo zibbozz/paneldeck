@@ -294,6 +294,48 @@ pub struct SessionMeta {
     /// Fehlt bei Sitzungen des Hauptfensters (ältere Versionen kennen das Feld nicht und zeigen alles im Hauptfenster).
     #[serde(skip_serializing_if = "is_zero")]
     pub window: u64,
+    /// Art der Sitzung (seit 2.2.0): Terminal (Standard, fehlt in der Datei) oder Chat mit einem lokalen Modell.
+    /// Unbekannte Werte (neuere Versionen) laden als Terminal.
+    #[serde(skip_serializing_if = "SessionKind::is_terminal", deserialize_with = "SessionKind::lenient")]
+    pub kind: SessionKind,
+    /// Server und Modell eines Chats (nur bei `kind = chat`); der Verlauf steht in `chats/<id>.json`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
+    pub chat: Option<ChatMeta>,
+}
+
+/// Art einer Sitzung.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionKind {
+    #[default]
+    Terminal,
+    Chat,
+}
+
+impl SessionKind {
+    fn is_terminal(&self) -> bool {
+        *self == SessionKind::Terminal
+    }
+
+    /// Tolerant lesen: alles außer `"chat"` (auch ein unbekannter Wert oder ein falscher Typ) ist ein Terminal.
+    fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(if v.as_str() == Some("chat") { SessionKind::Chat } else { SessionKind::Terminal })
+    }
+}
+
+/// Modell eines Chats: Kennung des Servers (Einstellungen) und Modellname, fest ab der Anlage.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatMeta {
+    pub server: String,
+    pub model: String,
+}
+
+/// Ungültige Chat-Angaben verwerfen die Sitzung nicht (sie wird dann ohne Modell geladen).
+fn lenient_chat_meta<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ChatMeta>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<ChatMeta>(v).ok())
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -323,6 +365,8 @@ impl Default for SessionMeta {
             project: 0,
             tags: Vec::new(),
             window: 0,
+            kind: SessionKind::Terminal,
+            chat: None,
         }
     }
 }
@@ -841,5 +885,45 @@ mod tests {
         assert!(back.update_auto_check);
         assert_eq!(back.update_last_check, 1_800_000_000);
         assert_eq!(back.update_skip_version, "3.0.0");
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::*;
+
+    #[test]
+    fn old_state_without_kind_loads_as_terminal() {
+        // state.json von 2.1.0: Sitzungen ohne `kind`/`chat`
+        let dir = std::env::temp_dir().join(format!("pd-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        std::fs::write(&p, r#"{"sessions":[{"id":3,"name":"pwsh","shell_id":"pwsh","project":1}],"next_id":4}"#).unwrap();
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none());
+        assert_eq!(st.sessions.len(), 1);
+        assert_eq!(st.sessions[0].kind, SessionKind::Terminal);
+        assert!(st.sessions[0].chat.is_none());
+        // Terminals schreiben die neuen Felder nicht (ältere Versionen sehen dieselbe Datei wie bisher)
+        let s = serde_json::to_string(&st.sessions[0]).unwrap();
+        assert!(!s.contains("\"kind\"") && !s.contains("\"chat\""), "{s}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chat_kind_roundtrip_and_unknown_kind_is_terminal() {
+        let m = SessionMeta { id: 7, kind: SessionKind::Chat, chat: Some(ChatMeta { server: "echo".into(), model: "m1".into() }), ..SessionMeta::default() };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""kind":"chat""#), "{s}");
+        let back: SessionMeta = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.kind, SessionKind::Chat);
+        assert_eq!(back.chat.as_ref().map(|c| c.model.as_str()), Some("m1"));
+        // Unbekannte Art (neuere Version) und falsche Typen: Sitzung bleibt erhalten, als Terminal bzw. ohne Modell
+        let back: SessionMeta = serde_json::from_str(r#"{"id":8,"kind":"notebook","chat":42}"#).unwrap();
+        assert_eq!(back.kind, SessionKind::Terminal);
+        assert!(back.chat.is_none());
+        let back: SessionMeta = serde_json::from_str(r#"{"id":9,"kind":7}"#).unwrap();
+        assert_eq!(back.kind, SessionKind::Terminal);
     }
 }

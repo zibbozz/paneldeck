@@ -558,6 +558,7 @@ impl App {
         if self.settings.claude_mode {
             v.push((lang.t("Neue Claude-Sitzung …", "New Claude session …").into(), String::new(), Action::NewDialog(true)));
         }
+        v.push((lang.t("Neuer Chat", "New chat").into(), String::new(), Action::NewChat));
         v.push((lang.t("Vorlagen …", "Templates …").into(), String::new(), Action::OpenTemplates));
         for (i, t) in self.templates.iter().enumerate() {
             v.push((format!("{} {}", lang.t("Vorlage starten:", "Start template:"), t.name), String::new(), Action::TemplateStart(i)));

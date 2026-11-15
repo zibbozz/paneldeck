@@ -44,7 +44,8 @@ fn fmt_mb(b: u64) -> String {
 
 impl App {
     fn running_sessions(&self) -> usize {
-        self.entries.values().filter(|e| !e.exited()).count()
+        // Chats zählen nur, solange eine Antwort läuft.
+        self.entries.values().filter(|e| e.running()).count()
     }
 
     fn update_backup_target(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
@@ -330,12 +331,19 @@ impl App {
                     "The update is downloaded and verified. Paneldeck restarts to install it; unsaved input in open dialogs is lost.",
                 ));
             } else {
-                let running = if n == 1 {
-                    lang.t("1 Terminal läuft noch.", "1 terminal is still running.").to_string()
-                } else {
-                    format!("{n} {}", lang.t("Terminals laufen noch.", "terminals are still running."))
-                };
-                ui.label(running);
+                // Getrennt zählen: laufende Terminals und Chats, deren Antwort gerade geschrieben wird.
+                let chats = self.entries.values().filter(|e| e.is_chat() && e.running()).count();
+                let terms = n - chats;
+                if terms == 1 {
+                    ui.label(lang.t("1 Terminal läuft noch.", "1 terminal is still running."));
+                } else if terms > 1 {
+                    ui.label(format!("{terms} {}", lang.t("Terminals laufen noch.", "terminals are still running.")));
+                }
+                if chats == 1 {
+                    ui.label(lang.t("1 Chat-Antwort wird noch geschrieben (sie wird abgebrochen).", "1 chat answer is still being written (it will be stopped)."));
+                } else if chats > 1 {
+                    ui.label(format!("{chats} {}", lang.t("Chat-Antworten werden noch geschrieben (sie werden abgebrochen).", "chat answers are still being written (they will be stopped).")));
+                }
                 ui.label(lang.t(
                     "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach wiederhergestellt.",
                     "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored afterwards.",

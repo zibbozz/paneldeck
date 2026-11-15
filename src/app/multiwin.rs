@@ -261,13 +261,15 @@ pub(super) struct ClosePlan {
     pub(super) adopt: Vec<u64>,
     /// Sitzungen mit Git-Worktree: erst über die Worktree-Rückfrage schließen (behalten, entfernen, mergen) – nie still.
     pub(super) worktrees: Vec<u64>,
+    /// Davon Chats mit Verlauf (der beim Schließen gelöscht wird).
+    pub(super) chats: usize,
 }
 
 impl ClosePlan {
     /// Rückfrage nötig? Immer, wenn noch etwas läuft, abgedockt ist oder einen Worktree hat (unabhängig von
     /// „Schließen bestätigen“: ein ganzes Fenster beendet viele Sitzungen auf einmal).
     pub(super) fn ask(&self) -> bool {
-        self.running > 0 || !self.adopt.is_empty() || !self.worktrees.is_empty()
+        self.running > 0 || self.chats > 0 || !self.adopt.is_empty() || !self.worktrees.is_empty()
     }
 
     /// Darf das Fenster jetzt schließen? Nicht, solange Worktree-Sitzungen offen sind.
@@ -643,7 +645,11 @@ impl App {
 
     /// Was mit den Sitzungen von Fenster `window` beim Schließen geschieht.
     fn window_close_plan(&self, window: u64) -> ClosePlan {
-        close_plan(self.entries.iter().filter(|(_, e)| e.meta.window == window).map(|(id, e)| (*id, !e.exited(), e.meta.worktree.is_some(), self.detached.contains(id))))
+        // „Läuft“: Terminal mit Prozess oder Chat mit laufender Antwort.
+        let mut plan = close_plan(self.entries.iter().filter(|(_, e)| e.meta.window == window).map(|(id, e)| (*id, e.running(), e.meta.worktree.is_some(), self.detached.contains(id))));
+        // Chats mit Verlauf: der Verlauf würde gelöscht → immer nachfragen.
+        plan.chats = plan.end.iter().filter(|id| self.entries.get(id).is_some_and(|e| e.chat_has_history())).count();
+        plan
     }
 
     /// Weitere Fenster anlegen, zeichnen und schließen. Im Hauptfenster nach dessen Aktionen aufrufen.
@@ -867,6 +873,15 @@ impl App {
                         format!("In diesem Fenster laufen noch {n} Sitzungen. Beim Schließen werden sie beendet.")
                     } else {
                         format!("{n} sessions are still running in this window. Closing the window will end them.")
+                    });
+                }
+                if plan.chats > 0 {
+                    ui.label(if plan.chats == 1 {
+                        lang.t("Der Verlauf eines Chats wird dabei gelöscht.", "The history of one chat will be deleted.").to_string()
+                    } else if lang == Lang::De {
+                        format!("Die Verläufe von {} Chats werden dabei gelöscht.", plan.chats)
+                    } else {
+                        format!("The histories of {} chats will be deleted.", plan.chats)
                     });
                 }
                 if !adopt.is_empty() {
@@ -1110,6 +1125,8 @@ mod tests {
         let running = close_plan([(1, true, false, false)].into_iter());
         assert!(running.ask(), "laufende Sitzung: immer fragen, auch wenn „Schließen bestätigen“ aus ist");
         assert!(close_plan(std::iter::empty()).can_close());
+        let chats = ClosePlan { end: vec![1], chats: 1, ..ClosePlan::default() };
+        assert!(chats.ask(), "Chat mit Verlauf: nachfragen, auch wenn er gerade nicht antwortet");
     }
 
     #[test]

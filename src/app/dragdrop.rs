@@ -242,7 +242,13 @@ impl App {
             return;
         }
         let id = target.map(|t| t.0).unwrap_or(self.focused);
-        if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
+        if let Some(e) = self.entries.get_mut(&id).filter(|e| e.is_chat()) {
+            // Chat: Pfade ins Eingabefeld, mit Leerzeichen in Anführungszeichen.
+            let text: Vec<String> = files.iter().filter_map(|f| f.path.as_ref()).map(|p| quote_path(&p.to_string_lossy())).collect();
+            if !text.is_empty() {
+                e.insert_text(&text.join(" "), false);
+            }
+        } else if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
             let text: Vec<String> = files
                 .iter()
                 .filter_map(|f| f.path.as_ref())
@@ -362,4 +368,9 @@ impl App {
             t.set_tooltip(&tip);
         }
     }
+}
+
+/// Pfad für ein Chat-Eingabefeld: mit Leerzeichen in "…".
+fn quote_path(p: &str) -> String {
+    if p.contains(char::is_whitespace) { format!("\"{p}\"") } else { p.to_string() }
 }

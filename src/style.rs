@@ -193,6 +193,8 @@ pub enum Icon {
     Restore,
     /// Kettenglieder (Ticket verknüpfen).
     Link,
+    /// Sprechblase (Chat mit einem lokalen Modell).
+    Chat,
 }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, st: Stroke) {
@@ -226,6 +228,16 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
             let st2 = Stroke::new(1.3_f32, col);
             for (a, b) in [(v(0.0, -4.0), v(0.0, 4.0)), (v(-4.0, 0.0), v(4.0, 0.0)), (v(-2.8, -2.8), v(2.8, 2.8)), (v(-2.8, 2.8), v(2.8, -2.8))] {
                 p.line_segment([c + a, c + b], st2);
+            }
+        }
+        Icon::Chat => {
+            // Abgerundete Blase mit Spitze links unten und drei Punkten
+            let r = Rect::from_center_size(c + v(0.0, -1.0), v(13.0, 9.5));
+            p.rect_stroke(r, 3.0, st, StrokeKind::Inside);
+            l(v(-3.5, 3.6), v(-5.0, 6.5));
+            l(v(-5.0, 6.5), v(-0.5, 3.6));
+            for x in [-3.0, 0.0, 3.0] {
+                p.circle_filled(c + v(x, -1.0), 0.9, col);
             }
         }
         Icon::Link => {

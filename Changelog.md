@@ -9,6 +9,16 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.2.0] - WIP
 
+### Added
+
+- Chat sessions (first part of #63): a new session type "Chat" next to terminals – sidebar button, palette "New chat", empty Terminal Hub and folder menu "New chat here". Answers are streamed as Markdown with a copy button on code blocks; Stop, regenerate the last answer, edit the last own message, inline errors with Retry and one collapsed line per tool call. Chats live in projects and splits, work in extra and detached windows and are restored after a restart. Text from snippets, the composer or dropped files goes into the chat input and is never sent automatically. Real model servers follow in the next parts.
+- New data format `chats/<id>.json` (version 1) with the history of a chat; `state.json` sessions get the optional fields `kind` and `chat`. Orphaned histories are kept as `chats/<id>.orphan-<time>.json`.
+- MCP: `list_sessions` reports `kind` (`terminal`/`chat`) and, for chats, `model`; terminal tools on a chat return the new error code `not_a_terminal`.
+
+### Changed
+
+- Closing a chat that has a history asks first (when close confirmation is on), also when closing a window or a folder; the update dialog counts running chat answers separately.
+
 ### Fixed
 
 - A maximized window no longer has a transparent gap on all sides through which the desktop showed (#134).
