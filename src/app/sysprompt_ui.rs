@@ -31,6 +31,8 @@ pub(super) struct PromptEd {
     pub mtime: Option<SystemTime>,
     /// Letzte Meldung (Text, Fehler?).
     pub msg: Option<(String, bool)>,
+    /// Die Datei wurde von außen geändert, während der Editor ungespeicherte Änderungen hat (Speichern überschreibt sie).
+    pub changed_on_disk: bool,
 }
 
 fn mtime(dir: &Path) -> Option<SystemTime> {
@@ -51,12 +53,21 @@ impl PromptEd {
         self.load_warning = l.issue.map(|i| i.message(ui_lang));
         self.mtime = mtime(dir);
         self.loaded = true;
+        self.changed_on_disk = false;
     }
 
-    /// Einmal pro Frame: erstes Laden und Änderungen der Datei von außen übernehmen (nur ohne ungespeicherte Änderungen).
+    /// Einmal pro Frame: erstes Laden und Änderungen der Datei von außen übernehmen. Mit ungespeicherten Änderungen wird nur
+    /// vermerkt, dass sich die Datei geändert hat (Warnung), damit nichts still verloren geht.
     pub fn sync(&mut self, dir: &Path, prompt_lang: Lang, ui_lang: Lang) {
-        if !self.loaded || (!self.dirty() && mtime(dir) != self.mtime) {
-            self.load(dir, prompt_lang, ui_lang);
+        if !self.loaded {
+            return self.load(dir, prompt_lang, ui_lang);
+        }
+        if mtime(dir) != self.mtime {
+            if self.dirty() {
+                self.changed_on_disk = true;
+            } else {
+                self.load(dir, prompt_lang, ui_lang);
+            }
         }
     }
 
@@ -80,9 +91,14 @@ impl PromptEd {
 
     pub fn reset(&mut self, dir: &Path, prompt_lang: Lang, ui_lang: Lang) {
         match sysprompt::reset(dir) {
-            Ok(()) => {
+            Ok(backup) => {
                 self.load(dir, prompt_lang, ui_lang);
-                self.msg = Some((ui_lang.t("Eingebaute Vorlage wiederhergestellt.", "Built-in template restored.").to_string(), false));
+                let m = if backup {
+                    ui_lang.t("Eingebaute Vorlage wiederhergestellt; deine Vorlage liegt als system-prompt.md.bak im Datenordner.", "Built-in template restored; your template was kept as system-prompt.md.bak in the data folder.")
+                } else {
+                    ui_lang.t("Eingebaute Vorlage wiederhergestellt.", "Built-in template restored.")
+                };
+                self.msg = Some((m.to_string(), false));
             }
             Err(e) => self.msg = Some((format!("{}: {e}", ui_lang.t("Zurücksetzen fehlgeschlagen", "Reset failed")), true)),
         }
@@ -155,6 +171,16 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
     if let Some(w) = &ed.load_warning {
         ui.label(RichText::new(w).small().color(WARN));
     }
+    if ed.changed_on_disk {
+        ui.label(
+            RichText::new(lang.t(
+                "system-prompt.md wurde außerhalb von Paneldeck geändert. „Speichern“ überschreibt diese Änderungen, „Änderungen verwerfen“ lädt die Datei.",
+                "system-prompt.md was changed outside Paneldeck. “Save” overwrites those changes, “Discard changes” loads the file.",
+            ))
+            .small()
+            .color(WARN),
+        );
+    }
     egui::ScrollArea::vertical().max_height(260.0).id_salt("sysprompt_edit").show(ui, |ui| {
         ui.add(egui::TextEdit::multiline(&mut ed.text).code_editor().desired_rows(12).desired_width(f32::INFINITY));
     });
@@ -181,7 +207,7 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
         }
         if ui
             .add_enabled(ed.custom || ed.dirty(), egui::Button::new(lang.t("Auf Standard zurücksetzen", "Reset to default")))
-            .on_hover_text(lang.t("Löscht system-prompt.md; danach gilt wieder die eingebaute Vorlage", "Deletes system-prompt.md; the built-in template applies again"))
+            .on_hover_text(lang.t("Benennt system-prompt.md in system-prompt.md.bak um (ersetzt eine ältere Sicherung); danach gilt wieder die eingebaute Vorlage", "Renames system-prompt.md to system-prompt.md.bak (replacing an older backup); the built-in template applies again"))
             .clicked()
         {
             ed.reset(env.dir, *env.prompt_lang, lang);
@@ -207,8 +233,9 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
     let rendered = sysprompt::render(&ed.text, &ctx).text;
     ui.label(
         RichText::new(format!(
-            "{} ({}: {}, {}: {})",
+            "{}{} ({}: {}, {}: {})",
             lang.t("Vorschau", "Preview"),
+            if ed.dirty() { lang.t(" – ungespeicherte Änderungen", " – unsaved changes") } else { "" },
             lang.t("Stufe", "level"),
             sysprompt::level_name(lang, Some(hub)),
             lang.t("Modus", "mode"),
@@ -236,7 +263,11 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
             ui.ctx().copy_text(t);
             ed.msg = Some((lang.t("In die Zwischenablage kopiert.", "Copied to the clipboard.").to_string(), false));
         }
-        Some(Act::SaveAs(t)) => ed.msg = Some(save_as(env.dir, &t, lang)),
+        Some(Act::SaveAs(t)) => {
+            if let Some(m) = save_as(env.dir, &t, lang) {
+                ed.msg = Some(m);
+            }
+        }
         None => {}
     }
     if let Some((m, is_err)) = &ed.msg {
@@ -247,17 +278,24 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
 }
 
 /// Gerenderten Text speichern: über den Dialog, ohne Dialog in `exports/` im Datenordner.
-fn save_as(dir: &Path, text: &str, lang: Lang) -> (String, bool) {
+/// Unter Windows ist `None` vom Dialog ein Abbruch (keine Datei, keine Meldung); nur ohne Dialog (andere Systeme) geht
+/// die Datei nach `exports/`.
+fn save_as(dir: &Path, text: &str, lang: Lang) -> Option<(String, bool)> {
     let name = "paneldeck-system-prompt.md";
-    let path = crate::notify::save_md(name).unwrap_or_else(|| {
+    let picked = crate::notify::save_md(name);
+    #[cfg(windows)]
+    let path = picked?;
+    #[cfg(not(windows))]
+    let path = picked.unwrap_or_else(|| {
         let d = dir.join("exports");
         let _ = std::fs::create_dir_all(&d);
         d.join(name)
     });
-    match std::fs::write(&path, text) {
+    let _ = dir;
+    Some(match std::fs::write(&path, text) {
         Ok(()) => (format!("{} {}", lang.t("Gespeichert:", "Saved:"), path.display()), false),
         Err(e) => (format!("{}: {e}", lang.t("Speichern fehlgeschlagen", "Saving failed")), true),
-    }
+    })
 }
 
 impl App {
@@ -349,6 +387,21 @@ mod tests {
         std::fs::write(dir.join(FILE_NAME), "\u{feff}Von außen {{level}} und mehr Text").unwrap();
         h.frame();
         assert_eq!(h.ed().text, "Von außen {{level}} und mehr Text");
+        // ungespeicherte Änderungen + Änderung von außen: nichts wird überschrieben, nur gewarnt
+        let mut ed = h.ed();
+        ed.text = "Meine Änderung".into();
+        h.set_ed(ed);
+        h.frame();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join(FILE_NAME), "Zweite Änderung von außen").unwrap();
+        h.frame();
+        let ed = h.ed();
+        assert!(ed.changed_on_disk && ed.text == "Meine Änderung" && ed.dirty());
+        let mut ed = h.ed();
+        ed.load(&dir, Lang::De, Lang::De);
+        assert!(!ed.changed_on_disk && ed.text == "Zweite Änderung von außen");
+        h.set_ed(ed);
+        h.frame();
         // zu groß: Speichern wird abgelehnt, die Datei bleibt
         let mut ed = h.ed();
         ed.text = "x".repeat(MAX_BYTES + 10);
@@ -364,6 +417,7 @@ mod tests {
         h.frame();
         let ed = h.ed();
         assert!(!ed.custom && !dir.join(FILE_NAME).exists() && ed.text == sysprompt::builtin(Lang::De));
+        assert!(dir.join(sysprompt::BACKUP_NAME).exists() && ed.msg.as_ref().is_some_and(|m| m.0.contains("system-prompt.md.bak")));
         // Englische Oberfläche, Expertenmodus, Steuern: zeichnet ohne Panik
         h.lang = Lang::En;
         h.level = McpLevel::Control;

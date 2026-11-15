@@ -515,10 +515,45 @@ fn initialize_instructions(hub: HubInfo) -> String {
     }
 }
 
-/// Stufe und Modus der laufenden Instanz; `None`, wenn sie nicht erreichbar ist.
-#[cfg(not(test))]
+/// Höchstdauer der Abfrage von Stufe und Modus (Verbindungsaufbau + Antwort). `initialize` und `tools/list` warten nie länger.
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Stufe und Modus der laufenden Instanz (internes `_level`); `None`, wenn sie nicht erreichbar ist oder nicht rechtzeitig
+/// antwortet (z. B. veraltete `ipc.json`, deren Port zu einem anderen Programm gehört). Eigene kurze Frist statt
+/// `hooks::call_mcp`, das auf lange Werkzeuge bis zu 10 Minuten wartet.
 fn probe_hub(dir: &std::path::Path) -> Option<HubInfo> {
-    let v = crate::hooks::call_mcp(dir, "_level", &json!({}), None, None).ok()?;
+    let s = std::fs::read_to_string(dir.join("ipc.json")).ok()?;
+    let v: Value = serde_json::from_str(crate::state::strip_bom(&s)).ok()?;
+    let port = u16::try_from(v["port"].as_u64()?).ok()?;
+    probe_at(port, v["token"].as_str()?, PROBE_TIMEOUT)
+}
+
+/// `_level` an `127.0.0.1:port` mit Gesamtfrist `budget`.
+fn probe_at(port: u16, token: &str, budget: std::time::Duration) -> Option<HubInfo> {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + budget;
+    let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, budget.min(Duration::from_millis(800))).ok()?;
+    let _ = stream.set_write_timeout(Some(budget));
+    let body = json!({"token": token, "cmd": "mcp", "tool": "_level", "args": {}, "caller": null, "caller_pid": null});
+    stream.write_all(body.to_string().as_bytes()).ok()?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+    loop {
+        let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
+        stream.set_read_timeout(Some(left)).ok()?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) if buf.len() + n <= 64 * 1024 => buf.extend_from_slice(&chunk[..n]),
+            _ => return None,
+        }
+    }
+    let r: Value = serde_json::from_slice(&buf).ok()?;
+    if r["ok"].as_bool() != Some(true) {
+        return None;
+    }
+    let v = &r["result"];
     Some(HubInfo { level: McpLevel::from_u8(v["level"].as_u64().unwrap_or(0) as u8), expert: v["expert"].as_bool().unwrap_or(false) })
 }
 
@@ -710,10 +745,7 @@ pub fn run_bridge() -> i32 {
 
 /// Stufe und Modus der laufenden Instanz erfragen (für `tools/list`); bei Fehlern `UNKNOWN` (= volle Liste, Fehler erst beim Aufruf).
 fn hub_info(dir: &std::path::Path) -> HubInfo {
-    match crate::hooks::call_mcp(dir, "_level", &json!({}), None, None) {
-        Ok(v) => HubInfo { level: McpLevel::from_u8(v["level"].as_u64().unwrap_or(0) as u8), expert: v["expert"].as_bool().unwrap_or(false) },
-        Err(_) => HubInfo::UNKNOWN,
-    }
+    probe_hub(dir).unwrap_or(HubInfo::UNKNOWN)
 }
 
 /// Beim Deinstallieren: die Registrierung in Claude Code (`~/.claude.json`, Benutzerebene) entfernen, aber nur,
@@ -865,6 +897,38 @@ mod tests {
         // Steuern im Expertenmodus
         let t = text(HubInfo { level: McpLevel::Control, expert: true });
         assert!(t.contains("- `create_ticket` (") && !t.contains("- `add_todo` ("));
+    }
+
+    #[test]
+    fn probe_gives_up_quickly_when_the_port_never_answers() {
+        // Ein Programm nimmt die Verbindung an, antwortet aber nie (z. B. veraltete ipc.json): spätestens nach ~2 s None.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let hold = std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            drop(s);
+        });
+        let t = std::time::Instant::now();
+        assert_eq!(probe_at(port, "x", PROBE_TIMEOUT), None);
+        assert!(t.elapsed() < std::time::Duration::from_millis(2000), "{:?}", t.elapsed());
+        let _ = hold.join();
+        // nichts lauscht: sofort None
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert_eq!(probe_at(free, "x", PROBE_TIMEOUT), None);
+        // ein Hub, der antwortet
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let srv = std::thread::spawn(move || {
+            use std::io::Read;
+            let (mut s, _) = l.accept().unwrap();
+            let mut req = String::new();
+            s.read_to_string(&mut req).unwrap();
+            assert!(req.contains("\"_level\"") && req.contains("\"tok\""));
+            s.write_all(br#"{"ok":true,"result":{"level":2,"expert":true}}"#).unwrap();
+        });
+        assert_eq!(probe_at(port, "tok", PROBE_TIMEOUT), Some(HubInfo { level: McpLevel::Control, expert: true }));
+        srv.join().unwrap();
     }
 
     #[test]
