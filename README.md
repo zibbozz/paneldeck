@@ -22,7 +22,7 @@ For Windows 10 (1809+) / 11 (x64), **fully offline**: either as an installer (pe
 
 ## Download
 Paneldeck is distributed only through **GitHub Releases**: https://github.com/zibbozz/paneldeck/releases – each release has an installer (`Paneldeck-Setup-<version>.exe`) and a portable ZIP (`paneldeck-<version>-windows-x64.zip`), both built from this repository.
-Code signing: see the [code signing policy](#code-signing-policy) – free code signing provided by SignPath.io, certificate by SignPath Foundation (application in progress; until it is approved, releases are unsigned).
+Code signing: the releases are currently **not signed**. Paneldeck intends to apply for free code signing for open-source projects at the SignPath Foundation; see the [code signing policy](#code-signing-policy).
 
 ## Getting started
 1. Run the **installer** `Paneldeck-Setup-<version>.exe` – or unpack the **portable ZIP** and start `paneldeck.exe`.
@@ -36,7 +36,7 @@ All shortcuts can be changed under *Settings → Shortcuts*.
 The installer and `paneldeck.exe` are **not code-signed**. A certificate costs money, and Paneldeck is meant to stay a free hobby project. For now this means:
 - On first start, **Windows SmartScreen** may show "Windows protected your PC". Click **"More info" → "Run anyway"**.
 - Some antivirus programs raise false alarms for new, unsigned programs with a tray icon and autostart. The source code is open, and you can build Paneldeck yourself (see [Building](#building)).
-- **Planned:** Paneldeck is applying for free code signing for open-source projects from the SignPath Foundation (see the [code signing policy](#code-signing-policy)). Once releases are signed, it will be noted here and in the changelog.
+- **Planned:** Paneldeck intends to apply for free code signing for open-source projects from the SignPath Foundation (see the [code signing policy](#code-signing-policy)). Once releases are signed, it will be noted here and in the changelog.
 
 ## Todo list and tickets
 The title bar at the top of the window has two tabs: **Terminal Hub** (everything described above, unchanged) and **Todo list**. Switch with a click, `Ctrl+1` / `Ctrl+2` or `Alt+Shift+1` / `Alt+Shift+2`. Paneldeck always starts in the Terminal Hub. Window controls (minimize, maximize, close) sit at the right of the title bar; on Windows 11 the maximize button also shows the Snap Layouts menu.
@@ -168,12 +168,10 @@ Release files (portable ZIP with `paneldeck.exe` and licenses, installer) are bu
 The changelog (`Changelog.md`) and the developer notes (`CLAUDE.md`, `TESTPLAN.md`) are written in German.
 
 ## Code signing policy
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-- **Status:** the application is in progress; until it is approved, releases are not signed (see the [note above](#note-the-program-is-not-yet-code-signed)).
-- **What is signed:** only the release files built from this repository by the GitHub Actions workflow `.github/workflows/release-build.yml` (installer `Paneldeck-Setup-<version>.exe` and `paneldeck.exe` in the portable ZIP). Nothing else is signed with this certificate.
+- **Status:** the releases are currently **not signed**. Paneldeck intends to apply for free code signing at the [SignPath Foundation](https://signpath.org); nothing has been signed by them (see the [note above](#note-the-program-is-not-yet-code-signed)). If an application is approved, this section will say so.
+- **What would be signed:** only the release files built from this repository by the GitHub Actions workflow `.github/workflows/release-build.yml` (installer `Paneldeck-Setup-<version>.exe` and `paneldeck.exe` in the portable ZIP). Nothing else is signed with this certificate.
 - **Committers and reviewers:** [zibbozz](https://github.com/zibbozz) (owner of the repository). Changes from other people are only merged after review by a committer.
-- **Approvers:** [zibbozz](https://github.com/zibbozz). Every signing request is approved manually.
+- **Approvers:** [zibbozz](https://github.com/zibbozz). Every signing request would be approved manually.
 - **Privacy:** see [Privacy](#privacy).
 
 ## Privacy
