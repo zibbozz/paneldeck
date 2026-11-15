@@ -506,6 +506,15 @@ impl App {
         self.overlay_window() == 0
     }
 
+    /// Fenster, das für eine Sitzung in der Taskleiste blinken soll: ihr abgedocktes Fenster, sonst das Paneldeck-Fenster,
+    /// zu dem sie gehört (nicht immer das Hauptfenster).
+    pub(super) fn attention_viewport(&self, session: u64) -> egui::ViewportId {
+        if self.detached.contains(&session) {
+            return egui::ViewportId::from_hash_of(("detached", session));
+        }
+        viewport_of(self.window_of(session).unwrap_or(0))
+    }
+
     /// Ist der Ticket-Verknüpfungsdialog für eine Sitzung dieses Fensters offen?
     pub(super) fn picker_here(&self) -> bool {
         self.tlinks_picker_session().is_none_or(|s| self.window_of(s).unwrap_or(0) == self.wins.cur)

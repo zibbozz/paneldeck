@@ -1855,7 +1855,7 @@ impl App {
         if scan_now {
             self.last_transcript_scan = Instant::now();
         }
-        let mut fallback_done: Vec<String> = Vec::new();
+        let mut fallback_done: Vec<(u64, String)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             self.git.set_dir(*id, PathBuf::from(e.cwd_now()));
             // Transkript über die Konversations-ID finden, falls noch nicht bekannt.
@@ -1887,7 +1887,7 @@ impl App {
                     let old = e.status;
                     e.status = if recent { ClaudeStatus::Working } else { ClaudeStatus::Idle };
                     if e.queue_tick(old, e.status) {
-                        fallback_done.push(e.display_name());
+                        fallback_done.push((*id, e.display_name()));
                     }
                 }
             }
@@ -2027,7 +2027,7 @@ impl App {
         let (window_focused, focused_id) = self.seen_focus();
         let threshold = self.settings.cmd_notify_secs as u64 * 1000;
         let lang = self.settings.language;
-        let mut toasts: Vec<(String, CmdDone)> = Vec::new();
+        let mut toasts: Vec<(u64, String, CmdDone)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else { continue };
             let (cwd, done) = {
@@ -2040,11 +2040,11 @@ impl App {
             for d in done {
                 if threshold > 0 && d.dur_ms.unwrap_or(0) >= threshold && (!window_focused || *id != focused_id) {
                     e.attention = true;
-                    toasts.push((e.display_name(), d));
+                    toasts.push((*id, e.display_name(), d));
                 }
             }
         }
-        for (name, d) in toasts {
+        for (sid, name, d) in toasts {
             let secs = d.dur_ms.unwrap_or(0) / 1000;
             let dur = if secs >= 60 { format!("{} min {} s", secs / 60, secs % 60) } else { format!("{secs} s") };
             let ok = d.exit.unwrap_or(0) == 0;
@@ -2059,7 +2059,7 @@ impl App {
                     notify::toast(&name, &body, self.settings.notify_sound);
                 }
                 if self.settings.notify_flash {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                    ctx.send_viewport_cmd_to(self.attention_viewport(sid), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
             } else {
                 self.notify_text(format!("{name}: {body}"));
@@ -2172,7 +2172,7 @@ impl App {
         }
         let msgs: Vec<HookMsg> = self.hook_server.as_ref().map(|s| s.rx.try_iter().collect()).unwrap_or_default();
         let lang = self.settings.language;
-        let mut queue_done: Vec<String> = Vec::new();
+        let mut queue_done: Vec<(u64, String)> = Vec::new();
         for m in msgs {
             let focused_id = seen_id;
             let Some(e) = self.entries.get_mut(&m.session) else { continue };
@@ -2207,7 +2207,7 @@ impl App {
                 e.perm_since = Some(std::time::Instant::now());
             }
             if e.queue_tick(old, new) {
-                queue_done.push(e.display_name());
+                queue_done.push((m.session, e.display_name()));
             }
             if new != old {
                 e.status_msg = m.message.clone().unwrap_or_default();
@@ -2233,17 +2233,17 @@ impl App {
                     notify::toast(&name, &body, self.settings.notify_sound);
                 }
                 if self.settings.notify_flash {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                    ctx.send_viewport_cmd_to(self.attention_viewport(m.session), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
             }
         }
         self.queue_finished(ctx, queue_done);
     }
 
-    fn queue_finished(&mut self, ctx: &egui::Context, names: Vec<String>) {
+    fn queue_finished(&mut self, ctx: &egui::Context, names: Vec<(u64, String)>) {
         let lang = self.settings.language;
         let window_focused = self.seen_focus().0;
-        for name in names {
+        for (sid, name) in names {
             let body = lang.t("Warteschlange abgearbeitet", "Queue finished");
             if window_focused {
                 self.notify_text(format!("{name}: {body}"));
@@ -2252,7 +2252,7 @@ impl App {
                     notify::toast(&name, body, self.settings.notify_sound);
                 }
                 if self.settings.notify_flash {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                    ctx.send_viewport_cmd_to(self.attention_viewport(sid), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
             }
         }
