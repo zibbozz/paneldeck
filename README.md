@@ -73,6 +73,7 @@ The query bar sits above the ticket list (a valid query replaces the local filte
 <!-- TODO screenshot: help page example images of the query language, English only: assets/query-help/query-help-<id>.png, registered in src/app/planning_ui/help_shots.rs -->
 
 **Quick actions and the quick menu:** a type can define buttons (e.g. "Create Devtask") that create a ticket with preset values, change the status or start a terminal/Claude session linked to the ticket. In a ticket, the **`.`** key opens the quick menu: search the fields of the ticket, press Enter and type the value right there, switch the status (allowed transitions only) or run a quick action.
+The quick actions of a ticket's type also appear as **buttons right in the ticket** (below the status); a click runs the action through the quick menu, asking for the title or required fields first if needed.
 Quick actions are edited in the **Quick actions** tab of the project; the quick menu also asks for required fields when a status change needs them.
 
 **Dashboards:** freely arranged tiles on a grid – saved searches (the default tile is one big search), sprint and burndown, counts by status/type/priority as pie or bar charts, booked time, favorites and flagged tickets, and "All projects"; per project or global, several dashboards with one marked as default, exportable as JSON.

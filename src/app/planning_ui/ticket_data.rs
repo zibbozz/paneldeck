@@ -2,6 +2,7 @@
 //! Tickets (Felder, Kinder, Verknüpfungen, Kommentare, Verlauf, Zeiten, erlaubte Statuswechsel) und kleine Suchhilfen.
 //! Alles liest nur; geschrieben wird über die Datenschicht in `crate::planning`.
 
+use super::quick_exec::{buttons_for, QuickButton};
 use super::ticket_draft::Draft;
 use super::ticket_state::Filters;
 use crate::calc::duration::Minutes;
@@ -148,6 +149,8 @@ pub struct Detail {
     pub time_total: Minutes,
     pub transitions: Vec<TransitionOption>,
     pub done: bool,
+    /// Schnellaktionen des Typs als Knöpfe (wird mit dem Detail geladen, nicht je Bild).
+    pub quick: Vec<QuickButton>,
 }
 
 impl Detail {
@@ -174,7 +177,9 @@ impl Detail {
         let history_total = entries.len();
         let history = entries.iter().rev().take(HISTORY_SHOW_MAX).map(|e| (e.at.replace('T', " ").chars().take(16).collect::<String>(), describe_with_source(conn, e, lang))).collect();
         let done = is_done(conn, &ticket).unwrap_or(false);
+        let quick = buttons_for(conn, &sum, &ticket, lang);
         Ok(Detail {
+            quick,
             links: links_of(conn, id, lang)?,
             comments: comments_of(conn, id)?,
             time: entries_of(conn, id)?,

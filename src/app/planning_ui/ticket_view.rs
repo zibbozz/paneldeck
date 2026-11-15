@@ -37,6 +37,8 @@ pub(super) enum Act {
     Close,
     /// Schnellmenü („.“) für dieses Ticket öffnen.
     Quick,
+    /// Knopf einer Schnellaktion des Typs: die Aktion (Kennung) für dieses Ticket starten.
+    QuickAction(i64),
     SetMode(ViewMode),
     /// Ticket über den Schlüssel öffnen (`PAN-12`).
     OpenKey(String),
@@ -295,6 +297,7 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
         ui.label(RichText::new("·").small().color(style::dim(ui)));
         ui.label(RichText::new(format!("{} {}", lang.t("Geändert", "Updated"), short_time(&t.updated_at))).small().color(style::dim(ui)));
     });
+    quick_bar(ui, vc, d, &mut acts);
     ui.add_space(S2);
     ui.separator();
     ui.add_space(S1);
@@ -367,6 +370,59 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
     });
     ui.add_space(30.0);
     acts
+}
+
+// ------------------------------------------------------------------ Schnellaktionen
+
+/// So viele Schnellaktionen stehen höchstens als Knöpfe in der Leiste; weitere im „⋯“-Menü.
+const QUICK_INLINE_MAX: usize = 6;
+
+/// Leiste mit den Schnellaktionen des Tickettyps als Knöpfe (Reihenfolge wie im Typ-Editor). Ein Klick startet die Aktion
+/// über das Schnellmenü (`Act::QuickAction`); ungültige oder gesperrte Aktionen sind ausgegraut und erklären sich im Hinweis.
+fn quick_bar(ui: &mut Ui, vc: &VCx, d: &Detail, acts: &mut Vec<Act>) {
+    if d.quick.is_empty() {
+        return;
+    }
+    let lang = vc.lang;
+    let tid = d.ticket.id;
+    let (shown, rest) = if d.quick.len() > QUICK_INLINE_MAX { d.quick.split_at(QUICK_INLINE_MAX - 1) } else { (&d.quick[..], &d.quick[d.quick.len()..]) };
+    ui.add_space(S1);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        ui.label(RichText::new(lang.t("Schnellaktionen", "Quick actions")).small().color(style::dim(ui)));
+        for b in shown {
+            ui.push_id(("qbtn", tid, b.action_id), |ui| {
+                let btn = egui::Button::new(b.label.as_str()).fill(style::accent().gamma_multiply(0.18)).min_size(Vec2::new(0.0, 24.0));
+                let resp = ui.add_enabled(b.disabled.is_none(), btn);
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| data.insert_temp(Id::new(("qbtn_rect", b.action_id)), resp.rect));
+                let resp = if b.disabled.is_none() { resp.on_hover_text(&b.tip) } else { resp.on_disabled_hover_text(&b.tip) };
+                if resp.clicked() {
+                    acts.push(Act::QuickAction(b.action_id));
+                }
+            });
+        }
+        if !rest.is_empty() {
+            ui.push_id(("qbtn_more", tid), |ui| {
+                let more = match lang {
+                    Lang::De => format!("⋯ {} weitere", rest.len()),
+                    Lang::En => format!("⋯ {} more", rest.len()),
+                };
+                ui.menu_button(more, |ui| {
+                    for b in rest {
+                        ui.push_id(("qbtn", tid, b.action_id), |ui| {
+                            let resp = ui.add_enabled(b.disabled.is_none(), egui::Button::new(b.label.as_str()));
+                            let resp = if b.disabled.is_none() { resp.on_hover_text(&b.tip) } else { resp.on_disabled_hover_text(&b.tip) };
+                            if resp.clicked() {
+                                acts.push(Act::QuickAction(b.action_id));
+                                ui.close();
+                            }
+                        });
+                    }
+                });
+            });
+        }
+    });
 }
 
 // ------------------------------------------------------------------ Status
@@ -871,6 +927,7 @@ impl PlanUi {
             Act::Back => self.ticket_back(),
             Act::Close => self.ticket_close(),
             Act::Quick => self.open_quick_menu(vec![tid]),
+            Act::QuickAction(action) => self.open_quick_action(vec![tid], action),
             Act::SetMode(m) => {
                 self.tickets.mode = m;
                 cx.db.set_meta("ticket_view_mode", m.as_str());

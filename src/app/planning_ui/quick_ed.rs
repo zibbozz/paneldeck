@@ -296,8 +296,8 @@ impl PlanUi {
         let Some(sum) = self.sum.clone() else { return };
         self.quick_ed_sync(cx, &sum);
         hint(ui, lang.t(
-            "Schnellaktionen erscheinen im Schnellmenü (Taste „.“) der Tickets des gewählten Typs – zusätzlich zu den Feldern und den erlaubten Statuswechseln.",
-            "Quick actions appear in the quick menu (key “.”) of tickets of the selected type – in addition to the fields and the allowed status changes.",
+            "Schnellaktionen erscheinen im Schnellmenü (Taste „.“) der Tickets des gewählten Typs – zusätzlich zu den Feldern und den erlaubten Statuswechseln – und als Knöpfe direkt im Ticket (in dieser Reihenfolge).",
+            "Quick actions appear in the quick menu (key “.”) of tickets of the selected type – in addition to the fields and the allowed status changes – and as buttons right in the ticket (in this order).",
         ));
         ui.add_space(S2);
         let types: Vec<&TypeSummary> = sum.types.iter().filter(|t| !t.ticket_type.system).collect();
