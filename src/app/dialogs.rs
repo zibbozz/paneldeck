@@ -355,6 +355,7 @@ impl App {
         self.prompts_ui(ctx, actions);
         self.notes_ui(ctx);
 
+        self.new_chat_ui(ctx);
         self.settings_ui(ctx);
     }
 

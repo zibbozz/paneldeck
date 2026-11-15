@@ -37,6 +37,7 @@ mod empty_hub;
 #[cfg(test)]
 mod glyph_tests;
 mod mcp;
+mod models_ui;
 mod multiwin;
 mod panels;
 mod planning_ui;
@@ -332,7 +333,7 @@ enum Action {
     /// Zur Sitzung springen (aus einem Ticket): Terminal Hub ihres Fensters zeigen und sie aktivieren.
     JumpTo(u64),
     NewQuick,
-    /// Neuer Chat im aktiven Projekt (Platzhalter-Modell, siehe `chat::default_chat_meta`).
+    /// Neuer Chat im aktiven Projekt (öffnet den Dialog „Neuer Chat“).
     NewChat,
     /// Neuer Chat in diesem Ordner.
     FolderNewChat(String),
@@ -616,6 +617,8 @@ pub struct App {
     folder_rects: Vec<(String, Rect)>,
     tree_geo: TreeGeo,
     new_dialog: Option<NewDialog>,
+    /// Dialog „Neuer Chat“ (Server und Modell wählen).
+    new_chat: Option<models_ui::NewChatDlg>,
     confirm_close: Option<u64>,
     settings_open: bool,
     dir: PathBuf,
@@ -716,8 +719,12 @@ pub struct App {
     wins: multiwin::Wins,
     /// Selbst-Update aus den GitHub-Releases (`update/`).
     updater: update::Updater,
-    /// Erzeugt die Antworten aller Chats (wählt das Modell anhand von `ChatMeta`). Vorerst das Echo-Backend.
+    /// Erzeugt die Antworten aller Chats (wählt Server und Modell anhand von `ChatMeta`).
     chat_backend: std::sync::Arc<dyn ChatBackend>,
+    /// Modelllisten der LLM-Server im Hintergrund abrufen („Verbinden“).
+    llm_conn: models_ui::Connector,
+    /// Zustand des Reiters Einstellungen → Modelle.
+    models_ui: models_ui::ModelsUi,
 }
 
 fn home_dir() -> String {
@@ -850,6 +857,7 @@ impl App {
             folder_rects: Vec::new(),
             tree_geo: TreeGeo::default(),
             new_dialog: None,
+            new_chat: None,
             confirm_close: None,
             settings_open: false,
             dir,
@@ -942,7 +950,9 @@ impl App {
             wins: Default::default(),
             // `--no-update-check`: keine automatische Prüfung für diesen Start (die manuelle geht weiter).
             updater: update::Updater::new(!crate::cli::get().no_update_check),
-            chat_backend: std::sync::Arc::new(chatmod::EchoBackend::default()),
+            chat_backend: std::sync::Arc::new(chatmod::LlmBackend::new()),
+            llm_conn: Default::default(),
+            models_ui: Default::default(),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
@@ -2206,10 +2216,17 @@ impl App {
     /// Laufende Antworten aller Chats abholen (Hauptdurchgang, für alle Fenster). Fertige Antworten werden sofort
     /// gespeichert; in einer nicht angesehenen Sitzung gibt es eine Markierung.
     fn poll_chats(&mut self) {
+        let lang = self.settings.language;
+        if self.llm_conn.poll(&mut self.settings.llm_servers, lang) {
+            state::save_json(&self.dir.join("settings.json"), &self.settings);
+        }
         let (window_focused, focused_id) = self.seen_focus();
         let mut finished = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             let Some(c) = e.chat.as_mut() else { continue };
+            if let Some(m) = &e.meta.chat {
+                c.notice = chatmod::llm_backend::chat_notice(&self.settings.llm_servers, m, lang);
+            }
             let p = c.poll();
             e.status = if c.streaming() { ClaudeStatus::Working } else { ClaudeStatus::Idle };
             if p.finished {
@@ -2233,16 +2250,32 @@ impl App {
     }
 
     /// Bedienung eines Chats (Senden, Stopp, Neu erzeugen, Bearbeiten) mit dem Backend des Hubs.
+    /// Was das Backend für eine Antwort dieses Chats wissen muss (Projekt, Ordner, Server, Prompt-Einstellungen).
+    fn turn_context(&self, id: u64) -> chatmod::TurnContext {
+        let e = self.entries.get(&id);
+        let project = e.and_then(|e| self.projects.iter().find(|p| p.id == e.meta.project)).map(|p| p.name.clone()).unwrap_or_default();
+        chatmod::TurnContext {
+            project,
+            folder: e.map(|e| e.meta.cwd.clone()).unwrap_or_default(),
+            servers: self.settings.llm_servers.clone(),
+            data_dir: Some(self.dir.clone()),
+            prompt_lang: self.settings.mcp_prompt_lang,
+            lang: self.settings.language,
+            expert: crate::mcp::expert_mode(),
+        }
+    }
+
     fn chat_action(&mut self, ctx: &egui::Context, id: u64, a: &Action) {
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();
         let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
+        let tcx = if matches!(a, Action::ChatSend(_) | Action::ChatRegenerate(_)) { self.turn_context(id) } else { chatmod::TurnContext::default() };
         let Some(e) = self.entries.get_mut(&id) else { return };
         let meta = e.meta.chat.clone().unwrap_or_default();
         let Some(c) = e.chat.as_mut() else { return };
         let changed = match a {
-            Action::ChatSend(_) => c.send(backend.as_ref(), &meta, repaint),
-            Action::ChatRegenerate(_) => c.regenerate(backend.as_ref(), &meta, repaint),
+            Action::ChatSend(_) => c.send(backend.as_ref(), &meta, &tcx, repaint),
+            Action::ChatRegenerate(_) => c.regenerate(backend.as_ref(), &meta, &tcx, repaint),
             Action::ChatStop(_) => {
                 c.stop();
                 true
@@ -2901,13 +2934,17 @@ impl App {
             Action::Duplicate(id) => {
                 if let Some(src) = self.entries.get(&id) {
                     if src.is_chat() {
-                        // Chat: neuer, leerer Chat mit demselben Modell im selben Ordner.
+                        // Chat: neuer, leerer Chat mit demselben Modell im selben Ordner (ohne Modell: Dialog).
+                        let Some(chat) = src.meta.chat.clone() else {
+                            self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, Some(src.meta.cwd.clone()), Some(src.meta.group.clone())));
+                            return;
+                        };
                         let o = NewOpts {
                             cwd: Some(src.meta.cwd.clone()),
                             group: Some(src.meta.group.clone()),
                             window: Some(src.meta.window),
                             project: Some(src.meta.project),
-                            chat: Some(src.meta.chat.clone().unwrap_or_else(chatmod::default_chat_meta)),
+                            chat: Some(chat),
                             ..NewOpts::default()
                         };
                         self.new_session(ctx, o);
@@ -2963,12 +3000,12 @@ impl App {
                 self.new_session(ctx, NewOpts::default());
             }
             Action::NewChat => {
-                self.new_session(ctx, NewOpts { chat: Some(chatmod::default_chat_meta()), ..NewOpts::default() });
+                self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, None, None));
             }
             Action::FolderNewChat(path) => {
                 let proj = self.projects.iter().find(|p| p.id == self.active_project);
                 let cwd = proj.and_then(|p| p.inherited(&path, |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())));
-                self.new_session(ctx, NewOpts { cwd, group: Some(path), chat: Some(chatmod::default_chat_meta()), ..NewOpts::default() });
+                self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, cwd, Some(path)));
             }
             Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) => self.chat_action(ctx, id, &a),
         }

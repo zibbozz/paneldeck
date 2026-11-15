@@ -65,6 +65,9 @@ pub fn to_markdown(title: &str, model: &str, msgs: &[ChatMsg], lang: crate::stat
         if let Some(e) = &m.error {
             out += &format!("\n> **{}:** {e}\n", lang.t("Fehler", "Error"));
         }
+        if let Some(n) = &m.note {
+            out += &format!("\n> {n}\n");
+        }
     }
     out
 }

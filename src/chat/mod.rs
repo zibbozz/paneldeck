@@ -7,18 +7,22 @@
 //! * [`session`]: [`ChatState`] – Nachrichten, Eingabe, laufende Antwort.
 
 pub mod backend;
+pub mod llm_backend;
 pub mod logic;
 pub mod session;
 pub mod store;
 
-pub use backend::{ChatBackend, EchoBackend, Repaint};
+#[cfg(test)]
+pub use backend::EchoBackend;
+pub use backend::{ChatBackend, Repaint, TurnContext};
+pub use llm_backend::LlmBackend;
 pub use session::ChatState;
 pub use store::{ChatFile, ChatMsg, Role, ToolStatus};
 
-use crate::state::ChatMeta;
-
-/// Server/Modell eines neuen Chats. Platzhalter, bis es einen Modell-Dialog gibt (der nächste Teil ersetzt das).
-pub fn default_chat_meta() -> ChatMeta {
+/// Server/Modell des Echo-Backends (nur Tests; Nutzer wählen das Modell im Dialog „Neuer Chat“).
+#[cfg(test)]
+pub fn default_chat_meta() -> crate::state::ChatMeta {
+    use crate::state::ChatMeta;
     ChatMeta { server: "echo".into(), model: "echo".into() }
 }
 

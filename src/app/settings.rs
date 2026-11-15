@@ -31,6 +31,8 @@ impl App {
                     lang.t("Agenten", "Agents"),
                     lang.t("Daten & Sicherung", "Data & backup"),
                     lang.t("Info", "About"),
+                    // Index 10 (`models_ui::SETTINGS_TAB`): am Ende, damit die festen Indizes oben gültig bleiben.
+                    lang.t("Modelle", "Models"),
                 ];
                 ui.horizontal_wrapped(|ui| {
                     for (i, t) in tabs.iter().enumerate() {
@@ -388,6 +390,7 @@ impl App {
                         }
                     }
                     7 => self.mcp_settings_ui(ui, ctx),
+                    models_ui::SETTINGS_TAB => self.models_settings_ui(ui, ctx),
                     8 => self.data_settings_ui(ui),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
