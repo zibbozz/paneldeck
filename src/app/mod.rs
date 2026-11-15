@@ -1798,9 +1798,9 @@ impl App {
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 let Some(mut layout) = self.layout.take() else {
-                    let first_run = self.entries.is_empty();
+                    let kind = self.empty_heading();
                     let hints = self.empty_hints();
-                    empty_hub::empty_state(ui, rect, lang, self.settings.claude_mode, first_run, &hints, actions);
+                    empty_hub::empty_state(ui, rect, lang, self.settings.claude_mode, kind, &hints, actions);
                     return;
                 };
                 let mut cx = PaneCx {

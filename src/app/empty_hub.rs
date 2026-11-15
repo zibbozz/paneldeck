@@ -10,6 +10,26 @@ pub(super) struct EmptyHints {
     pub split: String,
 }
 
+/// Überschrift des leeren Hubs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum EmptyKind {
+    /// Erster Start: noch gar keine Sitzung (nur im Hauptfenster).
+    Welcome,
+    /// Weiteres Fenster ohne eigene Sitzung (#110) – auch wenn andere Fenster Sitzungen haben.
+    Window,
+    /// Im aktiven Projekt dieses Fensters ist keine Sitzung.
+    Project,
+}
+
+/// Überschrift für Fenster `window`: `any_session` = irgendeine Sitzung in irgendeinem Fenster, `in_window` = eine in diesem.
+pub(super) fn empty_kind(window: u64, any_session: bool, in_window: bool) -> EmptyKind {
+    match (window, any_session, in_window) {
+        (0, false, _) => EmptyKind::Welcome,
+        (w, _, false) if w != 0 => EmptyKind::Window,
+        _ => EmptyKind::Project,
+    }
+}
+
 /// Wo die Knöpfe gezeichnet wurden (für Tests ohne Maus).
 #[derive(Default)]
 pub(super) struct EmptyHits {
@@ -17,8 +37,8 @@ pub(super) struct EmptyHits {
     pub claude: Option<Rect>,
 }
 
-/// Mittiger Hinweis „keine Sitzung“ im Bereich `rect`. `first_run`: noch gar keine Sitzung in diesem Fenster.
-pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool, first_run: bool, hints: &EmptyHints, actions: &mut Vec<Action>) -> EmptyHits {
+/// Mittiger Hinweis „keine Sitzung“ im Bereich `rect`; `kind` bestimmt die Überschrift (siehe `empty_kind`).
+pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool, kind: EmptyKind, hints: &EmptyHints, actions: &mut Vec<Action>) -> EmptyHits {
     let mut hits = EmptyHits::default();
     ui.scope_builder(UiBuilder::new().max_rect(Rect::from_center_size(rect.center(), Vec2::new(420.0, 300.0))), |ui| {
         ui.vertical_centered(|ui| {
@@ -26,7 +46,11 @@ pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool
             ui.painter().rect_filled(r, 14.0, style::ACCENT.gamma_multiply(0.18));
             style::paint_icon(ui.painter(), SIcon::Spark, r.center(), style::ACCENT);
             ui.add_space(S3);
-            ui.heading(if first_run { lang.t("Willkommen bei Paneldeck", "Welcome to Paneldeck") } else { lang.t("Keine Sitzung in diesem Projekt", "No session in this project") });
+            ui.heading(match kind {
+                EmptyKind::Welcome => lang.t("Willkommen bei Paneldeck", "Welcome to Paneldeck"),
+                EmptyKind::Window => lang.t("Noch keine Sitzung in diesem Fenster", "No session in this window yet"),
+                EmptyKind::Project => lang.t("Keine Sitzung in diesem Projekt", "No session in this project"),
+            });
             ui.add_space(S1);
             ui.label(RichText::new(lang.t("Starte ein Terminal oder eine Claude-Sitzung – alles an einem Ort.", "Start a terminal or a Claude session – all in one place.")).color(style::dim(ui)));
             ui.add_space(S3);
@@ -63,6 +87,10 @@ pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool
 
 impl App {
     /// Kürzel für den leeren Hub (folgen eigenen Belegungen und der Sprache).
+    pub(super) fn empty_heading(&self) -> EmptyKind {
+        empty_kind(self.wins.cur, !self.entries.is_empty(), self.entries.values().any(|e| self.in_win(e)))
+    }
+
     pub(super) fn empty_hints(&self) -> EmptyHints {
         EmptyHints { palette: self.binding_text("palette"), new: self.binding_text("new"), split: format!("{} / {}", self.binding_text("split_r"), self.binding_text("split_d")) }
     }
@@ -94,7 +122,7 @@ mod tests {
             let out = self.ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let rect = ui.available_rect_before_wrap();
-                    hits = empty_state(ui, rect, lang, claude, true, &hints, &mut acts);
+                    hits = empty_state(ui, rect, lang, claude, EmptyKind::Welcome, &hints, &mut acts);
                 });
             });
             self.texts = out.shapes.iter().filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.text().to_string()) } else { None }).collect();
@@ -124,6 +152,15 @@ mod tests {
             h.click(lang, true, p);
             assert!(matches!(h.actions.as_slice(), [Action::NewQuick, Action::NewDialog(true)]));
         }
+    }
+
+    #[test]
+    fn heading_follows_the_sessions_of_this_window() {
+        assert_eq!(empty_kind(0, false, false), EmptyKind::Welcome, "erster Start");
+        assert_eq!(empty_kind(0, true, false), EmptyKind::Project, "Hauptfenster leer, andere Fenster haben Sitzungen");
+        assert_eq!(empty_kind(2, true, false), EmptyKind::Window, "neues Fenster: keine eigene Sitzung");
+        assert_eq!(empty_kind(2, false, false), EmptyKind::Window, "kein Willkommen in einem weiteren Fenster");
+        assert_eq!(empty_kind(2, true, true), EmptyKind::Project, "Fenster hat Sitzungen, nur nicht im aktiven Projekt");
     }
 
     #[test]
