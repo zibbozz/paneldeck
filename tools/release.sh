@@ -97,13 +97,20 @@ if [ "$IS_WIN" = 1 ]; then
 fi
 
 # Ende-zu-Ende-Test der gebauten .exe (Windows): startet sie in einem Temp-Ordner und prüft die Agenten-Schnittstelle.
+# PANELDECK_TEST_ROOT (optional): Ordner für die Temp-Ordner beider Tests statt %TEMP% – z. B. ein Ordner mit Defender-Ausnahme,
+# solange unsignierte Builds fälschlich erkannt werden (siehe CLAUDE.md, Defender-Prüfung).
 if [ "$IS_WIN" = 1 ] && [ "$SKIP_SMOKE" = 0 ]; then
+  ROOT_ARGS_SMOKE=(); ROOT_ARGS_UPD=()
+  if [ -n "${PANELDECK_TEST_ROOT:-}" ]; then
+    mkdir -p "$PANELDECK_TEST_ROOT"
+    ROOT_ARGS_SMOKE=(-WorkRoot "$(abspath "$PANELDECK_TEST_ROOT")"); ROOT_ARGS_UPD=(-TempRoot "$(abspath "$PANELDECK_TEST_ROOT")")
+  fi
   echo "== Smoke-Test (tools/smoke-mcp.ps1)"
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/smoke-mcp.ps1 -Exe "$(abspath "dist/paneldeck-$V.exe")"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/smoke-mcp.ps1 -Exe "$(abspath "dist/paneldeck-$V.exe")" ${ROOT_ARGS_SMOKE[@]+"${ROOT_ARGS_SMOKE[@]}"}
   # Update-Test des echten Installers (alte Version -> dieser Installer, ruhender und laufender Hub; Schein-Profil, räumt auf).
   if [ -f "dist/Paneldeck-Setup-$V.exe" ]; then
     echo "== Update-Test (tools/update-test.ps1)"
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/update-test.ps1 -New "$(abspath "dist/Paneldeck-Setup-$V.exe")"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/update-test.ps1 -New "$(abspath "dist/Paneldeck-Setup-$V.exe")" -Exe "$(abspath "dist/paneldeck-$V.exe")" ${ROOT_ARGS_UPD[@]+"${ROOT_ARGS_UPD[@]}"}
   fi
 fi
 
