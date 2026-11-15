@@ -161,7 +161,7 @@ Everything lives in the `paneldeck-data` folder next to the `.exe` (if that is n
 Release files (portable ZIP with `paneldeck.exe` and licenses, installer) are built from a `release/x.y` branch with `tools/release.sh <version>` (see `CLAUDE.md` for the branching and release process) – on Windows from Git Bash; needs Python 3 and, for the installer, NSIS (`makensis`).
 `--publish` also pushes the tag and creates the GitHub release (GitHub CLI `gh`, logged in); `--no-git` only builds and packages.
 
-The changelog (`Changelog.md`) and the developer notes (`CLAUDE.md`, `TESTPLAN.md`) are written in German.
+The changelog is available in English ([`Changelog.md`](Changelog.md)) and German ([`Changelog.de.md`](Changelog.de.md)); the developer notes (`CLAUDE.md`, `TESTPLAN.md`) are written in German.
 
 ## Issues and contributions
 Paneldeck is still a young project. Issues and contributions will be opened to everyone once the project has reached a state I am happy with and feel comfortable letting the public work on it. Until then, please be patient – thank you for your understanding.

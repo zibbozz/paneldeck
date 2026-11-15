@@ -1,6 +1,6 @@
 name: CI
 
-# Prüft jede Änderung: Build, Tests, Changelog-Format, Lizenztexte der Abhängigkeiten, Syntax der Shell-Skripte.
+# Prüft jede Änderung: Build, Tests, Changelog-Format (englisch + deutsch, gleiche Versionen), Lizenztexte der Abhängigkeiten, Syntax der Shell-Skripte.
 # Läuft im öffentlichen Repository auf den kostenlosen Standard-Runnern.
 on:
   pull_request:
@@ -37,7 +37,7 @@ jobs:
         run: cargo build --release --locked
       - name: Tests
         run: cargo test --release --locked
-      - name: Changelog format
+      - name: Changelog format (Changelog.md + Changelog.de.md in sync)
         run: python tools/changelog.py check
       - name: Third-party licenses are up to date
         run: python tools/gen_licenses.py --check

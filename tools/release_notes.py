@@ -1,6 +1,7 @@
 """Erzeugt die Release-Texte für GitHub (zweisprachig: Englisch oben, Deutsch darunter).
 
-Englisch: docs/release-notes/<version>.en.md (von Hand geschrieben, Pflicht)   Deutsch: Abschnitt [<version>] aus Changelog.md
+Englisch: docs/release-notes/<version>.en.md (von Hand geschrieben, Pflicht)   Deutsch: Abschnitt [<version>] aus Changelog.de.md
+(Changelog.md ist der englische Changelog; der englische Release-Text bleibt der eigene, ausführlichere Text oben.)
 Titel: tools/titles.txt (englisch).   Ausgabe: dist/gh-title-<v>.txt, dist/gh-notes-<v>.md, dist/release-notes-<v>.md
 """
 import os, subprocess, sys
@@ -20,9 +21,10 @@ titles = dict(l.strip().split("|", 1) for l in open("tools/titles.txt", encoding
 sys.path.insert(0, "tools")
 import changelog  # Keep a Changelog: Abschnitt [<v>] lesen
 
-sec = [x for x in changelog.sections(rd("Changelog.md")) if x[0] == v]
+de_path = changelog.FILES["de"]  # Changelog.de.md
+sec = [x for x in changelog.sections(rd(de_path)) if x[0] == v]
 if not sec:
-    sys.exit(f"Changelog.md hat keinen Abschnitt [{v}]")
+    sys.exit(f"{de_path} hat keinen Abschnitt [{v}]")
 de = sec[0][2].strip()
 en_path = f"docs/release-notes/{v}.en.md"
 if not os.path.exists(en_path):
