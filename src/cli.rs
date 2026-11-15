@@ -1,7 +1,7 @@
 //! Kommandozeilenargumente (handgeschrieben, ohne zusätzliche Crate).
 //!
 //! Start: `--open <ordner> [--claude]`, `--tray`, `--no-tray`, `--data-dir <ordner>`, `--profile <name>`,
-//! `--backup-dir <ordner>`, `--lang en|de`, `--reset-settings`, `--version`, `--help`/`-h`/`-?`.
+//! `--backup-dir <ordner>`, `--lang en|de`, `--reset-settings`, `--no-update-check`, `--version`, `--help`/`-h`/`-?`.
 //! Agenten-Brücke: `mcp [--data-dir <ordner>] [--profile <name>] [--lang en|de]`.
 //! `--hook` wird vorher in `main` behandelt (eigene Argumente von Claude Code) und kommt hier nicht an;
 //! `--uninstall-hooks` (Deinstallationsprogramm) ist ein bekanntes Flag.
@@ -25,6 +25,8 @@ pub struct Cli {
     /// `--lang` (nur für diesen Start, wird nicht gespeichert).
     pub lang: Option<Lang>,
     pub no_tray: bool,
+    /// `--no-update-check`: keine automatische Update-Prüfung für diesen Start (die manuelle geht weiter).
+    pub no_update_check: bool,
     pub reset_settings: bool,
     pub version: bool,
     pub help: bool,
@@ -276,6 +278,7 @@ pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf, kind: &dyn Fn(&std:
             "--claude" => c.claude = true,
             "--tray" => c.tray = true,
             "--no-tray" => c.no_tray = true,
+            "--no-update-check" => c.no_update_check = true,
             "--reset-settings" => c.reset_settings = true,
             "--version" => c.version = true,
             "--help" | "-h" | "-?" | "/?" => c.help = true,
@@ -315,6 +318,9 @@ impl Cli {
         }
         if self.no_tray {
             v.push("--no-tray".to_string());
+        }
+        if self.no_update_check {
+            v.push("--no-update-check".to_string());
         }
         v
     }
@@ -465,6 +471,20 @@ mod tests {
         let c = p(&["--data-dir", "E:\\\" --no-tray"]).unwrap();
         assert_eq!(c.data_dir, Some(PathBuf::from("E:\\")));
         assert!(c.no_tray);
+    }
+
+    #[test]
+    fn no_update_check_option() {
+        let c = p(&["--no-update-check"]).unwrap();
+        assert!(c.no_update_check && !c.no_tray);
+        assert_eq!(c.overrides(), vec!["--no-update-check".to_string()]);
+        assert!(!p(&[]).unwrap().no_update_check, "Standard: Prüfung erlaubt");
+        let c = p(&["--profile", "work", "--no-update-check", "--tray"]).unwrap();
+        assert!(c.no_update_check && c.tray);
+        // streng: kein Wert, keine Abwandlung, nicht mit mcp
+        assert_eq!(p(&["--no-update-check=1"]), Err(CliError::Unknown("--no-update-check=1".into())));
+        assert_eq!(p(&["--no-update-checks"]), Err(CliError::Unknown("--no-update-checks".into())));
+        assert!(matches!(p(&["mcp", "--no-update-check"]), Err(CliError::NotWithMcp(_))));
     }
 
     #[test]

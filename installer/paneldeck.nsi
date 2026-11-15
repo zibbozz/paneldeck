@@ -71,7 +71,7 @@ Section "$(NAME_Main)" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
   ; Läuft Paneldeck gerade (Update), ist die .exe gesperrt – umbenennen darf Windows aber. Die laufende Instanz
-  ; bleibt unberührt (alte Datei bis zum Beenden), die neue liegt sofort am Platz; der Hub räumt "*.old" beim Start auf.
+  ; bleibt unberührt (alte Datei bis zum Beenden), die neue liegt sofort am Platz; der neue Hub löscht "*.old" nach seinem ersten gezeichneten Frame.
   Delete "$INSTDIR\paneldeck.exe.old"
   IfFileExists "$INSTDIR\paneldeck.exe" 0 +2
     Rename "$INSTDIR\paneldeck.exe" "$INSTDIR\paneldeck.exe.old"

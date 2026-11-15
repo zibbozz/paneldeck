@@ -60,8 +60,8 @@ mod reg {
 }
 
 /// Neue Programmdatei an den Platz der laufenden setzen: `<exe>.new` schreiben, die laufende in `<exe>.old` umbenennen (Windows
-/// erlaubt das bei laufenden Programmen), die neue umbenennen. Schlägt ein Schritt fehl, wird zurückgerollt. `<exe>.old` räumt der
-/// nächste Start auf (`main.rs`).
+/// erlaubt das bei laufenden Programmen), die neue umbenennen. Schlägt ein Schritt fehl, wird zurückgerollt. `<exe>.old` löscht erst die neue
+/// Version, nachdem sie ihren ersten Frame gezeichnet hat (`remove_old_exe`).
 pub fn swap_exe(exe: &Path, new_bytes: &[u8]) -> Result<(), String> {
     let with = |ext: &str| {
         let mut s = exe.as_os_str().to_owned();
@@ -163,37 +163,59 @@ pub fn wait_setup(child: &mut std::process::Child, timeout: std::time::Duration)
     }
 }
 
-/// Parameter der laufenden Instanz (Datenordner/Profil), damit der Neustart dieselben Daten öffnet.
-fn instance_args() -> Vec<String> {
-    // TODO(2.1 wiring): paths::instance_args() (Teil #60: `--data-dir`/`--profile` dieser Instanz); bis dahin leer.
-    Vec::new()
+/// `paneldeck.exe.old` (alte Programmdatei nach einem Update – vom portablen Tausch oder vom Installer über eine laufende
+/// Instanz) löschen. Aufgerufen erst, wenn die neue Version ihren ersten Frame gezeichnet hat, also nachweislich startet.
+///
+/// Wiederherstellung von Hand, falls eine neue Version gar nicht startet: Paneldeck beenden, `paneldeck.exe` löschen (oder
+/// umbenennen) und `paneldeck.exe.old` wieder in `paneldeck.exe` umbenennen.
+pub fn remove_old_exe(exe: &Path) {
+    let mut old = exe.as_os_str().to_owned();
+    old.push(".old");
+    let _ = std::fs::remove_file(PathBuf::from(old));
 }
 
-/// Startet `exe` neu (gleiche Instanz-Parameter). Die neue Instanz wartet über `WAIT_PID_ENV`, bis dieser Prozess beendet ist.
+/// Startet `exe` neu mit denselben Instanz-Parametern (`--data-dir`/`--profile` aus `paths::instance_args`, als einzelne
+/// Argumente). Nie `--open`, `--claude` oder `mcp`: der Neustart soll nur dieselbe Instanz öffnen. Die neue Instanz wartet
+/// über `WAIT_PID_ENV`, bis dieser Prozess beendet ist.
 pub fn spawn_restart(exe: &Path) -> Result<(), String> {
     std::process::Command::new(exe)
-        .args(instance_args())
+        .args(restart_args(crate::paths::instance_args()))
         .env(WAIT_PID_ENV, std::process::id().to_string())
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("{}: {e}", exe.display()))
 }
 
-/// Für `main.rs`, ganz am Anfang (vor der Einzelinstanz-Weiterleitung): wurde diese Instanz von einem Update neu gestartet,
-/// warten, bis die alte beendet ist (höchstens 30 s), und die Variable entfernen (Terminals sollen sie nicht erben).
-///
-/// TODO(2.1 wiring): in `main()` nach den `--hook`/`--uninstall-hooks`/`mcp`-Zweigen und vor `cli::init()`/`forward_to_running`
-/// aufrufen: `app::update::wait_for_previous_instance();` – ohne diesen Aufruf übergibt sich die neu gestartete Instanz an die
-/// noch laufende alte und beendet sich (dann startet nach dem Update nichts).
-#[allow(dead_code)]
+/// Argumente für den Neustart: nur Instanz-Parameter, Start-Aktionen (`--open`, `--claude`, `mcp`) fallen sicherheitshalber weg.
+fn restart_args(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--open" => {
+                it.next();
+            }
+            "--claude" | "mcp" => {}
+            _ => out.push(a),
+        }
+    }
+    out
+}
+
+/// Für `main.rs`, nach den `--hook`/`--uninstall-hooks`/`--help`/`mcp`-Zweigen und vor der Einzelinstanz-Weiterleitung: wurde
+/// diese Instanz von einem Update neu gestartet, warten, bis die alte beendet ist (höchstens 30 s) – sonst übergäbe sie sich an
+/// die noch laufende alte und beendete sich. Danach die Variable entfernen (Terminals sollen sie nicht erben).
 pub fn wait_for_previous_instance() {
     let Some(v) = std::env::var_os(WAIT_PID_ENV) else { return };
-    // SAFETY: wird ganz am Anfang von `main` aufgerufen, bevor weitere Fäden laufen.
-    unsafe { std::env::remove_var(WAIT_PID_ENV) };
-    let Some(pid) = v.to_str().and_then(|s| s.parse::<u32>().ok()) else { return };
-    if pid == std::process::id() {
-        return;
+    let pid = v.to_str().and_then(|s| s.parse::<u32>().ok()).filter(|p| *p != std::process::id());
+    if let Some(pid) = pid {
+        wait_pid(pid);
     }
+    // SAFETY: wird früh in `main` aufgerufen, bevor weitere Fäden laufen.
+    unsafe { std::env::remove_var(WAIT_PID_ENV) };
+}
+
+fn wait_pid(pid: u32) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::CloseHandle;
@@ -206,7 +228,8 @@ pub fn wait_for_previous_instance() {
                 CloseHandle(h);
             }
         }
-    }
+    }    #[cfg(not(windows))]
+    let _ = pid;
 }
 
 #[cfg(test)]
@@ -323,6 +346,26 @@ mod tests {
         assert!(child.try_wait().unwrap().is_none(), "läuft weiter");
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn restart_never_carries_start_actions() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(restart_args(v(&["--data-dir", r"D:\my data", "--profile", "work"])), v(&["--data-dir", r"D:\my data", "--profile", "work"]));
+        assert_eq!(restart_args(v(&["--open", r"C:\x", "--claude", "mcp", "--profile", "a"])), v(&["--profile", "a"]));
+        assert!(restart_args(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn old_exe_is_removed() {
+        let d = tmp("old");
+        let exe = d.join("paneldeck.exe");
+        std::fs::write(&exe, b"MZ new").unwrap();
+        std::fs::write(d.join("paneldeck.exe.old"), b"MZ old").unwrap();
+        remove_old_exe(&exe);
+        assert!(!d.join("paneldeck.exe.old").exists() && exe.exists());
+        remove_old_exe(&exe); // ohne .old: nichts
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

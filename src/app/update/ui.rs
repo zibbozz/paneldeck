@@ -87,6 +87,10 @@ impl App {
 
     /// Pro Frame aus `App::update`: Ergebnisse abholen, automatische Prüfung, Dialoge.
     pub(crate) fn update_frame(&mut self, ctx: &egui::Context) {
+        if self.updater.first_frame_done() {
+            // Die neue Version läuft und zeichnet: die alte Programmdatei wird nicht mehr gebraucht.
+            install::remove_old_exe(&self.exe);
+        }
         if self.updater.poll(&mut self.settings) {
             self.update_restart();
         }
@@ -222,8 +226,8 @@ impl App {
                                 "Installed copy: the setup runs silently in the same folder, then Paneldeck restarts.",
                             ),
                             _ => lang.t(
-                                "Portable Version: paneldeck.exe wird ersetzt (die alte bleibt bis zum nächsten Start als paneldeck.exe.old liegen), danach startet Paneldeck neu.",
-                                "Portable copy: paneldeck.exe is replaced (the old one stays as paneldeck.exe.old until the next start), then Paneldeck restarts.",
+                                "Portable Version: paneldeck.exe wird ersetzt (die alte bleibt als paneldeck.exe.old liegen, bis die neue Version gestartet ist), danach startet Paneldeck neu.",
+                                "Portable copy: paneldeck.exe is replaced (the old one stays as paneldeck.exe.old until the new version has started), then Paneldeck restarts.",
                             ),
                         }).small().color(dim));
                         ui.label(RichText::new(format!("{} ({}) · {}", asset.name, fmt_mb(asset.size), lang.t("geprüft per SHA-256", "verified with SHA-256"))).small().color(dim));

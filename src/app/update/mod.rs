@@ -18,8 +18,7 @@ mod ui;
 pub(super) mod version;
 mod zip;
 
-// Für `main.rs` (TODO(2.1 wiring)): `app::update::wait_for_previous_instance()` vor der Einzelinstanz-Weiterleitung.
-#[allow(unused_imports)]
+// Für `main.rs`: vor der Einzelinstanz-Weiterleitung aufrufen.
 pub use install::wait_for_previous_instance;
 
 use crate::state::Lang;
@@ -96,6 +95,8 @@ pub struct Updater {
     prepared: Option<(PathBuf, [u8; 32])>,
     retry_at: i64,
     next_tick: Instant,
+    /// Gezählte Frames bis 2: nach dem ersten gezeichneten Frame wird `paneldeck.exe.old` gelöscht.
+    frames: u8,
     flavor: Option<Option<Flavor>>,
 }
 
@@ -124,6 +125,7 @@ impl Updater {
             retry_at: 0,
             // Erste automatische Prüfung kurz nach dem Start (nicht im ersten Frame, damit der Start nicht wartet).
             next_tick: Instant::now() + Duration::from_secs(3),
+            frames: 0,
             flavor: None,
         }
     }
@@ -314,6 +316,15 @@ impl Updater {
                 let _ = std::fs::remove_dir(d);
             }
         }
+    }
+
+    /// Pro Frame: `true` genau einmal, sobald der erste Frame gezeichnet ist (beim Aufruf im zweiten Frame).
+    pub(super) fn first_frame_done(&mut self) -> bool {
+        if self.frames >= 2 {
+            return false;
+        }
+        self.frames += 1;
+        self.frames == 2
     }
 
     /// Pro Frame (billig): ist eine automatische Prüfung fällig?
