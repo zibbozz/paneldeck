@@ -391,7 +391,7 @@ impl App {
                     8 => self.data_settings_ui(ui),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
-                        ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – komplett offline.", "Terminal hub for Claude Code and many terminals – fully offline.")).color(style::dim(ui)));
+                        ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – funktioniert offline; kontaktiert GitHub nur, wenn du nach Updates suchst oder die automatische Prüfung einschaltest.", "Terminal hub for Claude Code and many terminals – works offline; only contacts GitHub when you check for updates or switch on the automatic check.")).color(style::dim(ui)));
                         ui.add_space(S2);
                         for (k, v) in [
                             (lang.t("Programm", "Program"), self.exe.display().to_string()),
@@ -421,6 +421,7 @@ impl App {
                                 self.show_licenses = !self.show_licenses;
                             }
                         });
+                        self.update_about_ui(ui); // Abschnitt „Updates“ (update/ui.rs)
                         if self.show_licenses {
                             ui.add_space(S1);
                             egui::ScrollArea::vertical().max_height(220.0).id_salt("lic").show(ui, |ui| {

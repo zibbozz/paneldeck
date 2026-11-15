@@ -170,6 +170,9 @@ fn main() -> eframe::Result<()> {
     if cli.mcp {
         std::process::exit(mcp::run_bridge());
     }
+    // Vom Selbst-Update neu gestartet: warten, bis die alte Instanz beendet ist (sonst übergäbe sich diese an sie und
+    // beendete sich), und PANELDECK_UPDATE_WAIT_PID entfernen, damit Terminals sie nicht erben.
+    app::update::wait_for_previous_instance();
     // Datenordner einmal auflösen; ein unbrauchbarer ausdrücklich gewählter Ordner ist ein Fehler (Exit-Code 1).
     let dir = match paths::init(cli) {
         Ok(d) => d.path.clone(),
@@ -190,12 +193,8 @@ fn main() -> eframe::Result<()> {
         }
     }
     install_panic_hook();
-    // Ein Update über eine laufende Instanz benennt die alte .exe in "paneldeck.exe.old" um (der Installer); jetzt weg damit.
-    if let Ok(exe) = std::env::current_exe() {
-        let mut old = exe.into_os_string();
-        old.push(".old");
-        let _ = std::fs::remove_file(old);
-    }
+    // "paneldeck.exe.old" (Update über eine laufende Instanz) wird erst nach dem ersten gezeichneten Frame gelöscht –
+    // siehe `app::update::install::remove_old_exe`.
     let cmd = match &cli.open {
         Some(p) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude },
         None => hooks::IpcCmd::Show,

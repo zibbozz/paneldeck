@@ -24,6 +24,7 @@ Options:
   --backup-dir <folder>   Write database backups to <folder> for this start.
   --lang en|de            Interface language for this start.
   --reset-settings        Reset the settings (a backup copy is kept).
+  --no-update-check       No automatic update check for this start.
   --version               Print the version and exit.
   --help, -h, -?          Print this help and exit.
   mcp                     Agent interface (MCP server over stdin/stdout).
@@ -40,10 +41,10 @@ Notes:
   - Profiles run side by side: each data folder has its own instance, settings,
     sessions and database. Only one Paneldeck runs per data folder (instance lock);
     a second start with the same folder hands over to the running one.
-  - --lang, --backup-dir and --no-tray apply only to this start and are never
-    written to settings.json. They (and --reset-settings) only take effect when this
-    start opens the instance: if Paneldeck already runs with that data folder, the
-    start only hands --open/--claude over (--reset-settings then fails).
+  - --lang, --backup-dir, --no-tray and --no-update-check apply only to this start
+    and are never written to settings.json. They (and --reset-settings) only take
+    effect when this start opens the instance: if Paneldeck already runs with that
+    data folder, the start only hands --open/--claude over (--reset-settings then fails).
   - A single folder without an option (e.g. dropped onto paneldeck.exe) works
     like --open <folder>; a file opens its folder.
   - Exit codes: 0 = ok, 1 = error (e.g. unusable data folder), 2 = invalid command line.
@@ -98,6 +99,12 @@ Details and examples:
       paneldeck.exe --reset-settings
       paneldeck.exe --profile work --reset-settings
 
+  --no-update-check
+    Skips the automatic update check for this start, even if "Check automatically"
+    is switched on in Settings > About (useful for offline or scripted starts). The
+    setting itself stays; "Check for updates" still works by hand.
+      paneldeck.exe --no-update-check
+
   --version
     Prints the version number.
       paneldeck.exe --version
@@ -129,6 +136,7 @@ Optionen:
   --backup-dir <ordner>   Datenbank-Sicherungen für diesen Start nach <ordner> schreiben.
   --lang en|de            Sprache der Oberfläche für diesen Start.
   --reset-settings        Einstellungen zurücksetzen (eine Sicherungskopie bleibt).
+  --no-update-check       Keine automatische Update-Prüfung für diesen Start.
   --version               Version ausgeben und beenden.
   --help, -h, -?          Diese Hilfe ausgeben und beenden.
   mcp                     Agenten-Schnittstelle (MCP-Server über stdin/stdout).
@@ -145,10 +153,10 @@ Hinweise:
   - Profile laufen nebeneinander: Jeder Datenordner hat eine eigene Instanz, eigene
     Einstellungen, Sitzungen und Datenbank. Pro Datenordner läuft nur ein Paneldeck
     (Instanzsperre); ein zweiter Start mit demselben Ordner übergibt an das laufende.
-  - --lang, --backup-dir und --no-tray gelten nur für diesen Start und werden nie
-    in settings.json gespeichert. Sie (und --reset-settings) wirken nur, wenn dieser
-    Start die Instanz öffnet: Läuft Paneldeck mit diesem Datenordner schon, übergibt
-    der Start nur --open/--claude (--reset-settings schlägt dann fehl).
+  - --lang, --backup-dir, --no-tray und --no-update-check gelten nur für diesen Start
+    und werden nie in settings.json gespeichert. Sie (und --reset-settings) wirken nur,
+    wenn dieser Start die Instanz öffnet: Läuft Paneldeck mit diesem Datenordner schon,
+    übergibt der Start nur --open/--claude (--reset-settings schlägt dann fehl).
   - Ein einzelner Ordner ohne Option (z. B. auf paneldeck.exe gezogen) wirkt wie
     --open <ordner>; eine Datei öffnet ihren Ordner.
   - Exit-Codes: 0 = ok, 1 = Fehler (z. B. unbrauchbarer Datenordner), 2 = ungültige Kommandozeile.
@@ -204,6 +212,12 @@ Einzelheiten und Beispiele:
       paneldeck.exe --reset-settings
       paneldeck.exe --profile arbeit --reset-settings
 
+  --no-update-check
+    Überspringt die automatische Update-Prüfung für diesen Start, auch wenn unter
+    Einstellungen > Info „Automatisch prüfen“ eingeschaltet ist (z. B. offline oder bei
+    Starts aus Skripten). Die Einstellung bleibt; „Nach Updates suchen“ geht weiter von Hand.
+      paneldeck.exe --no-update-check
+
   --version
     Gibt die Versionsnummer aus.
       paneldeck.exe --version
@@ -227,7 +241,7 @@ mod tests {
 
     #[test]
     fn every_option_in_both_languages() {
-        let opts = ["--open", "--claude", "--tray", "--no-tray", "--data-dir", "--profile", "--backup-dir", "--lang", "--reset-settings", "--version", "--help", "-h", "-?", "mcp", "PANELDECK_DATA", "%APPDATA%", "paneldeck-data"];
+        let opts = ["--open", "--claude", "--tray", "--no-tray", "--data-dir", "--profile", "--backup-dir", "--lang", "--reset-settings", "--no-update-check", "--version", "--help", "-h", "-?", "mcp", "PANELDECK_DATA", "%APPDATA%", "paneldeck-data"];
         for l in [Lang::En, Lang::De] {
             let t = text(l);
             assert!(t.contains(env!("CARGO_PKG_VERSION")));

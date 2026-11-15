@@ -47,6 +47,7 @@ mod tasks_ui;
 mod terminal_links;
 mod titlebar;
 mod toasts;
+pub(crate) mod update;
 mod winchrome;
 
 const PALETTE: [[u8; 3]; 8] = [
@@ -634,6 +635,8 @@ pub struct App {
     applied_font: String,
     /// Weitere Fenster (`multiwin.rs`, #110).
     wins: multiwin::Wins,
+    /// Selbst-Update aus den GitHub-Releases (`update/`).
+    updater: update::Updater,
 }
 
 fn home_dir() -> String {
@@ -856,6 +859,8 @@ impl App {
             editor: None,
             applied_font: String::new(),
             wins: Default::default(),
+            // `--no-update-check`: keine automatische Prüfung für diesen Start (die manuelle geht weiter).
+            updater: update::Updater::new(!crate::cli::get().no_update_check),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
@@ -2818,6 +2823,7 @@ impl eframe::App for App {
             self.tlinks_picker_ui(ctx);
         }
         self.restore_dialog(ctx);
+        self.update_frame(ctx);
         for a in actions {
             self.apply(ctx, a);
         }

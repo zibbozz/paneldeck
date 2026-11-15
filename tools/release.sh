@@ -69,6 +69,10 @@ if [ "$IS_WIN" = 1 ]; then
   n="$(grep -a -c -i -E 'C:\\Users|E:\\claude|E:\\paneldeck' "dist/paneldeck-$V.exe" || true)"
   [ "$n" = 0 ] || { echo "Programmdatei enthält Pfade des Build-Rechners ($n Treffer)"; exit 1; }
 fi
+# Der lokale Test-Feed des Selbst-Updates (Cargo-Feature update-test-feed) darf nie im Release stecken.
+if grep -a -q 'PANELDECK_UPDATE_TEST_FEED' "dist/paneldeck-$V.exe"; then
+  echo "Programmdatei enthält den Update-Test-Feed (Feature update-test-feed) – so nicht veröffentlichen"; exit 1
+fi
 
 # Defender-Prüfung auf Fehlalarme (Windows): paneldeck.exe (steckt unverändert auch im ZIP) und der Installer.
 if [ "$IS_WIN" = 1 ]; then
@@ -110,10 +114,23 @@ fi
 
 tools/package.sh "$V"
 
+# Prüfsummen der Release-Dateien für das Selbst-Update (Paneldeck lädt SHA256SUMS.txt und verwirft Downloads, die nicht passen).
+# Format wie `sha256sum` (`<hex>  <datei>`); der Asset-Name muss genau SHA256SUMS.txt sein, daher ein eigener Ordner je Version.
+SUMS_DIR="dist/sums-$V"
+mkdir -p "$SUMS_DIR"
+: > "$SUMS_DIR/SHA256SUMS.txt"
+for f in "Paneldeck-Setup-$V.exe" "paneldeck-$V-windows-x64.zip"; do
+  [ -f "dist/$f" ] || continue
+  printf '%s  %s\n' "$(sha256sum "dist/$f" | cut -d' ' -f1)" "$f" >> "$SUMS_DIR/SHA256SUMS.txt"
+done
+(cd dist && sha256sum -c --quiet "sums-$V/SHA256SUMS.txt") || { echo "SHA256SUMS.txt passt nicht zu den Dateien in dist/"; exit 1; }
+cat "$SUMS_DIR/SHA256SUMS.txt"
+
 if [ "$PUBLISH" = 1 ]; then
   git push origin "v$V"
   ASSETS=("dist/paneldeck-$V-windows-x64.zip")
   [ -f "dist/Paneldeck-Setup-$V.exe" ] && ASSETS+=("dist/Paneldeck-Setup-$V.exe")
+  ASSETS+=("$SUMS_DIR/SHA256SUMS.txt")
   PRE=(); [[ "$V" == *-* ]] && PRE=(--prerelease)
   "$GH" release create "v$V" "${ASSETS[@]}" --verify-tag ${PRE[@]+"${PRE[@]}"} \
     --title "$(cat "dist/gh-title-$V.txt")" --notes-file "dist/gh-notes-$V.md"

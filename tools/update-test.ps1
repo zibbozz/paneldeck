@@ -89,9 +89,13 @@ try {
   New-ItemProperty -Path $runKey -Name Paneldeck -Value $runVal -PropertyType String -Force | Out-Null
   $dataBefore = Hashes $data
 
+  # Stilles Update (wie das Selbst-Update: /S /D=…) behält die bisherige Auswahl: eine gelöschte Desktop-Verknüpfung kommt nicht zurück.
+  Remove-Item (Join-Path $prof 'Desktop\Paneldeck.lnk') -Force
+
   Write-Host '== Update bei ruhendem Hub'
   $rc = Install $New 'neu'
   Check 'Installer (neu) Exit 0' ($rc -eq 0) "rc=$rc"
+  Check 'stilles Update: gelöschte Desktop-Verknüpfung bleibt weg' (-not (Test-Path (Join-Path $prof 'Desktop\Paneldeck.lnk')))
   Check 'paneldeck.exe ist jetzt die neue' ((Get-FileHash "$inst\paneldeck.exe").Hash -eq $newExeHash)
   Check 'paneldeck.exe unterscheidet sich von der alten' ($newExeHash -ne $oldExeHash)
   Check 'Version in der Programmliste aktualisiert' ((Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Paneldeck' 'DisplayVersion') -ne $oldVersion)
@@ -119,7 +123,7 @@ try {
   Check 'Nutzerdaten unverändert' (SameHashes $dataRunning (Hashes $data))
   Check 'Autostart bleibt erhalten' ((Reg $runKey 'Paneldeck') -eq $runVal)
   Check 'alte exe als paneldeck.exe.old zurückgeblieben (sie lief ja noch)' (Test-Path "$inst\paneldeck.exe.old")
-  Write-Host '== Neuer Hub räumt die .old-Datei beim Start auf'
+  Write-Host '== Neuer Hub räumt die .old-Datei nach dem ersten Frame auf'
   Stop-Process -Id $hub.Id -Force; Start-Sleep -Milliseconds 800
   $env:USERPROFILE = $prof
   $hub2 = Start-Process "$inst\paneldeck.exe" -ArgumentList '--tray' -PassThru
