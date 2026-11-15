@@ -441,23 +441,34 @@ impl App {
                         ui.add_space(S2);
                         ui.label(RichText::new(lang.t("Windows-Integration (nur für dich, ohne Administratorrechte)", "Windows integration (current user only, no admin rights)")).strong());
                         if ui.small_button(lang.t("Status aktualisieren", "Refresh status")).clicked() || (!self.win_probed) {
-                            self.win_autostart = crate::integration::autostart_enabled();
-                            self.win_context = crate::integration::context_enabled();
+                            self.win_autostart = crate::integration::autostart_status();
+                            self.win_context = crate::integration::context_status();
                             self.win_probed = true;
                         }
                         let exe = self.exe.clone();
                         let mut err: Option<String> = None;
+                        // Zeigt der Eintrag auf ein anderes Paneldeck (andere .exe oder Instanz): Hinweis mit dessen Befehl.
+                        fn other_hint(ui: &mut Ui, lang: crate::state::Lang, status: &crate::integration::Status, what: &str) {
+                            if let Some(cmd) = status.other() {
+                                let text = match lang {
+                                    crate::state::Lang::De => format!("{what} zeigt auf ein anderes Paneldeck:\n{cmd}\n\nEinschalten übernimmt ihn für diese Instanz."),
+                                    crate::state::Lang::En => format!("{what} points to another Paneldeck:\n{cmd}\n\nTurning it on takes it over for this instance."),
+                                };
+                                ui.label(RichText::new(lang.t("→ anderes Paneldeck", "→ another Paneldeck")).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b))).on_hover_text(text);
+                            }
+                        }
                         row(ui, lang.t("Mit Windows starten", "Start with Windows"), lang.t("Startet minimiert im Tray", "Starts minimized in the tray"), |ui| {
-                            let mut v = self.win_autostart;
+                            let mut v = self.win_autostart.is_mine();
                             if style::toggle(ui, &mut v).changed() {
                                 match crate::integration::set_autostart(v, &exe) {
-                                    Ok(()) => self.win_autostart = v,
+                                    Ok(()) => self.win_autostart = if v { crate::integration::Status::Mine } else { crate::integration::Status::Off },
                                     Err(e) => err = Some(e),
                                 }
                             }
+                            other_hint(ui, lang, &self.win_autostart, lang.t("Der Autostart-Eintrag", "The autostart entry"));
                         });
                         row(ui, lang.t("Explorer-Kontextmenü", "Explorer context menu"), lang.t("Rechtsklick auf Ordner: „In Paneldeck öffnen“ / „Mit Claude starten“", "Right-click a folder: “Open in Paneldeck” / “Start with Claude”"), |ui| {
-                            let mut v = self.win_context;
+                            let mut v = self.win_context.is_mine();
                             if style::toggle(ui, &mut v).changed() {
                                 // Die Menütexte landen in der Registry: in der gespeicherten Sprache, nicht in der von `--lang`.
                                 let shown = state::lang();
@@ -465,10 +476,11 @@ impl App {
                                 let r = crate::integration::set_context(v, &exe);
                                 state::set_lang(shown);
                                 match r {
-                                    Ok(()) => self.win_context = v,
+                                    Ok(()) => self.win_context = if v { crate::integration::Status::Mine } else { crate::integration::Status::Off },
                                     Err(e) => err = Some(e),
                                 }
                             }
+                            other_hint(ui, lang, &self.win_context, lang.t("Das Kontextmenü", "The context menu"));
                         });
                         if let Some(e) = err {
                             self.hooks_msg = e.clone();
