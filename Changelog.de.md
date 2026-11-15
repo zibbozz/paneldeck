@@ -9,6 +9,15 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.1.0] - WIP
 
+### Added
+
+- **Systemprompt für Agenten (#61):** Verbindet sich ein Agent über MCP, schickt Paneldeck ihm in der Antwort auf `initialize` (Feld `instructions`) eine ausführliche Anleitung: was Paneldeck ist, die Berechtigungsstufen, zuerst `whoami`, die Sicherheitsregeln, Terminalinhalt als nicht vertrauenswürdige Daten, einfacher Modus und Expertenmodus, die Grenzen von `run_command` und die Fehlercodes. Die Werkzeugliste enthält nur, was bei der aktuellen Stufe und im aktuellen Modus nutzbar ist. Gedacht für lokale Modelle und andere Programme ohne Paneldeck-Kenntnis; auf Englisch oder Deutsch (neue optionale Einstellung `mcp_prompt_lang` in `settings.json`, Standard Englisch, unabhängig von der Sprache der Oberfläche).
+- **Einstellungen → Agenten → Systemprompt:** Sprache des Prompts wählen; Vorlage bearbeiten, gespeichert als `system-prompt.md` im Datenordner (höchstens 64 KB; „Auf Standard zurücksetzen“ behält die alte als `system-prompt.md.bak`); Platzhalter `{{tools}}`, `{{level}}`, `{{mode}}` und `{{version}}` mit Legende und Warnung bei unbekannten; gerenderte Vorschau, „Kopieren“ und „Als Datei speichern …“ (.md).
+
+### Changed
+
+- Der Text `instructions` in der Antwort auf MCP-`initialize` ist jetzt dieser Systemprompt statt des bisherigen kurzen festen Textes. Eine zu große, ungültige oder leere `system-prompt.md` fällt auf die eingebaute Vorlage zurück. `initialize` und `tools/list` warten höchstens etwa 1,5 s auf Stufe und Modus von Paneldeck.
+
 ## [2.0.0] - 2026-11-15
 
 Paneldeck bekommt neben dem Terminal Hub einen zweiten Hauptbereich: eine Todo-Liste, die sich per „Expertenmodus“ zu einem kleinen Ticket-System (Projekte, Tickettypen, Felder, Workflows, Boards) ausbauen lässt. Ein neuer Hauptbereich zählt als MAJOR-Version; die bestehenden Funktionen, Einstellungen und Daten bleiben kompatibel: Die MCP-Schnittstelle wächst nur um neue Werkzeuge (keine geänderten oder entfernten), die Kommandozeile ist unverändert, und die Datenbank `paneldeck.db` kommt neu dazu (siehe „Changed“).

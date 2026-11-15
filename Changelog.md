@@ -9,6 +9,15 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.1.0] - WIP
 
+### Added
+
+- **System prompt for agents (#61):** when an agent connects over MCP, Paneldeck sends it a detailed guide in the `initialize` reply (field `instructions`): what Paneldeck is, the permission levels, calling `whoami` first, the safety rules, terminal content as untrusted data, simple vs. expert mode, the limits of `run_command` and the error codes. The tool list contains only the tools usable at the current level and mode. Meant for local models and other programs that don't know Paneldeck; English or German (new optional setting `mcp_prompt_lang` in `settings.json`, default English, independent of the UI language).
+- **Settings → Agents → System prompt:** choose the prompt language; edit the template, saved as `system-prompt.md` in the data folder (at most 64 KB; "Reset to default" keeps the old one as `system-prompt.md.bak`); placeholders `{{tools}}`, `{{level}}`, `{{mode}}` and `{{version}}` with a legend and a warning for unknown ones; rendered preview, "Copy" and "Save as file…" (.md).
+
+### Changed
+
+- The `instructions` text in the MCP `initialize` reply is now this system prompt instead of the previous short fixed text. A too large, invalid or empty `system-prompt.md` falls back to the built-in template. `initialize` and `tools/list` wait at most about 1.5 s for Paneldeck's current level and mode.
+
 ## [2.0.0] - 2026-11-15
 
 Next to the Terminal Hub, Paneldeck gets a second main area: a to-do list that grows into a small ticket system (projects, ticket types, fields, workflows, boards) with "Expert mode". A new main area counts as a MAJOR version; the existing functions, settings and data stay compatible: the MCP interface only gains new tools (none changed or removed), the command line is unchanged, and the database `paneldeck.db` is new (see "Changed").
