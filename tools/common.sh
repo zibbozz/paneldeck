@@ -43,6 +43,7 @@ GH="$(find_tool gh "/c/Program Files/GitHub CLI/gh.exe")"
 # Absoluter Pfad in der Schreibweise des Zielprogramms (Windows-Programme wollen C:/..., nicht /c/...).
 abspath() {
   # (NSIS' `File` findet Pfade mit Schrägstrichen nicht → unter Windows Backslashes liefern.)
-  if [ "$IS_WIN" = 1 ]; then local p; p="$(cd "$(dirname "$1")" && pwd -W)/$(basename "$1")"; echo "${p//\//\\}"
-  else echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"; fi
+  # Ordner direkt unter dem Laufwerk (E:\x): `pwd -W` liefert "E:/" → Schrägstrich am Ende abschneiden, sonst doppelter Trenner.
+  if [ "$IS_WIN" = 1 ]; then local p; p="$(cd "$(dirname "$1")" && pwd -W)"; p="${p%/}/$(basename "$1")"; echo "${p//\//\\}"
+  else local d; d="$(cd "$(dirname "$1")" && pwd)"; echo "${d%/}/$(basename "$1")"; fi
 }
