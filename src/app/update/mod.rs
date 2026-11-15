@@ -97,8 +97,8 @@ pub struct Updater {
 
 impl Updater {
     pub fn new(auto_check_allowed: bool) -> Self {
-        // Im Hintergrund: der Temp-Ordner kann groß sein, der Start soll nicht warten.
-        std::thread::spawn(cleanup_old_downloads);
+        // Im Hintergrund: der Start soll nicht warten.
+        std::thread::spawn(|| cleanup_old_downloads(&downloads_root()));
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
             allowed: auto_check_allowed,
@@ -179,7 +179,7 @@ impl Updater {
         self.total.store(asset.size, Ordering::Relaxed);
         let (tx, ctx, cancel, done, total) = (self.tx.clone(), ctx.clone(), self.cancel.clone(), self.done.clone(), self.total.clone());
         std::thread::spawn(move || {
-            let res = http::system_transport().map_err(|e| e.text(lang)).and_then(|t| download(t.as_ref(), &asset, &sums, &version, &download_dir(), lang, &cancel, &mut |d, tot| {
+            let res = http::system_transport().map_err(|e| e.text(lang)).and_then(|t| download(t.as_ref(), &asset, &sums, &version, &downloads_root(), lang, &cancel, &mut |d, tot| {
                 done.store(d, Ordering::Relaxed);
                 if let Some(t) = tot {
                     total.store(t, Ordering::Relaxed);
@@ -295,35 +295,91 @@ fn check_with(t: &dyn http::Transport, current: &Version, flavor: Option<Flavor>
     Ok(release::evaluate(current, &rel, flavor, skip))
 }
 
-/// Ordner für die Downloads dieser Instanz.
-fn download_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("paneldeck-update-{}", std::process::id()))
+/// Übergeordneter Ordner der Downloads: `%LOCALAPPDATA%\Paneldeck\updates` (nicht der gemeinsame, vorhersagbare Temp-Ordner).
+fn downloads_root() -> PathBuf {
+    match std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+        Some(d) => PathBuf::from(d).join("Paneldeck").join("updates"),
+        None => std::env::temp_dir().join("Paneldeck-updates"),
+    }
 }
 
-/// Alte Download-Ordner (älter als ein Tag) aus dem Temp-Ordner entfernen.
-fn cleanup_old_downloads() {
-    let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else { return };
+/// Neuer, leerer Download-Ordner `<root>/<pid>-<zufall>`: mit `create_dir` angelegt, damit nie ein schon vorhandener
+/// (womöglich fremd vorbereiteter) Ordner benutzt wird. Die PID im Namen braucht das Aufräumen (`cleanup_old_downloads`).
+fn fresh_download_dir(root: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(root)?;
+    let mut last = None;
+    for _ in 0..8 {
+        let mut r = [0u8; 8];
+        if getrandom::fill(&mut r).is_err() {
+            // Ersatz ohne Zufallsquelle: Zeit in Nanosekunden (create_dir schützt trotzdem vor vorhandenen Ordnern)
+            let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+            r = n.to_le_bytes();
+        }
+        let d = root.join(format!("{}-{}", std::process::id(), r.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        match std::fs::create_dir(&d) {
+            Ok(()) => return Ok(d),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("download folder")))
+}
+
+/// Läuft der Prozess `pid` noch? Im Zweifel (z. B. kein Zugriff) ja – dann wird sein Ordner nicht angefasst.
+fn pid_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        const STILL_ACTIVE: u32 = 259;
+        // SAFETY: OpenProcess nur mit Abfragerecht; das Handle wird geschlossen. GetLastError liest nur den Fehlerwert.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                // ERROR_INVALID_PARAMETER = keine solche PID (mehr)
+                return GetLastError() != ERROR_INVALID_PARAMETER;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code) != 0;
+            CloseHandle(h);
+            !ok || code == STILL_ACTIVE
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+}
+
+/// Download-Ordner beendeter Instanzen entfernen. Ordner laufender Instanzen (auch anderer Datenordner) und alles, was nicht
+/// wie `<pid>-<zufall>` heißt, bleiben unberührt.
+fn cleanup_old_downloads(root: &Path) {
+    let Ok(rd) = std::fs::read_dir(root) else { return };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if !name.starts_with("paneldeck-update-") || name == format!("paneldeck-update-{}", std::process::id()) {
-            continue;
-        }
-        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d > Duration::from_secs(DAY_SECS as u64));
-        if old {
+        let pid = name
+            .split_once('-')
+            .filter(|(_, rest)| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()))
+            .and_then(|(p, _)| p.parse::<u32>().ok());
+        let Some(pid) = pid else { continue };
+        if e.file_type().is_ok_and(|t| t.is_dir()) && !pid_alive(pid) {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
 }
 
-/// Prüfsummen laden, Datei laden (mit Fortschritt) und prüfen; bei Abweichung wird die Datei gelöscht. ZIPs werden zusätzlich
-/// probehalber entpackt, damit ein kaputtes Archiv vor der Neustart-Frage auffällt.
+/// Prüfsummen laden, Datei in einen neuen Ordner unter `root` laden (mit Fortschritt) und prüfen; bei Abweichung wird der Ordner
+/// samt Datei gelöscht. ZIPs werden zusätzlich probehalber entpackt, damit ein kaputtes Archiv vor der Neustart-Frage auffällt.
 #[allow(clippy::too_many_arguments)]
 fn download(
     t: &dyn http::Transport,
     asset: &release::Asset,
     sums: &release::Asset,
     version: &Version,
-    dir: &Path,
+    root: &Path,
     lang: Lang,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(u64, Option<u64>),
@@ -332,27 +388,30 @@ fn download(
     let text = http::fetch_bytes(t, &sums.url, "application/octet-stream", release::MAX_SUMS, cancel)
         .map_err(|e| format!("{} ({}): {}", lang.t("Prüfsummen-Datei nicht geladen", "Could not load the checksum file"), release::SUMS_NAME, e.text(lang)))?;
     let list = release::parse_sums(&String::from_utf8_lossy(&text));
-    let want = release::expected_hash(&list, &asset.name).ok_or_else(|| format!("{} {} {}", release::SUMS_NAME, lang.t("enthält keine Prüfsumme für", "has no checksum for"), asset.name))?;
+    let want = release::expected_hash(&list, &asset.name).ok_or_else(|| {
+        format!("{} ({}: {})", lang.t("Die Prüfsummen-Datei enthält keine Prüfsumme für diese Datei", "The checksum file has no checksum for this file"), release::SUMS_NAME, asset.name)
+    })?;
     if asset.name.contains(['/', '\\']) || asset.name.contains("..") {
-        return Err(format!("{}: {}", lang.t("Ungültiger Dateiname", "Invalid file name"), asset.name));
+        return Err(format!("{} ({})", lang.t("Ungültiger Dateiname im Release", "Invalid file name in the release"), asset.name));
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let save_err = |e: &dyn std::fmt::Display, p: &Path| format!("{} ({}: {e})", lang.t("Download konnte nicht gespeichert werden", "Could not save the download"), p.display());
+    let dir = fresh_download_dir(root).map_err(|e| save_err(&e, root))?;
     let path = dir.join(&asset.name);
     let res = (|| {
-        let mut f = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| save_err(&e, &path))?;
         let mut h = sha256::Sha256::new();
         http::fetch(t, &asset.url, "application/octet-stream", release::MAX_ASSET, cancel, progress, &mut |b| {
             h.update(b);
-            f.write_all(b).map_err(|e| e.to_string())
+            f.write_all(b).map_err(|e| save_err(&e, &path))
         })
         .map_err(|e| e.text(lang))?;
-        f.sync_all().map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| save_err(&e, &path))?;
         drop(f);
         if h.finish() != want {
             return Err(lang.t("Prüfsumme stimmt nicht – der Download wurde verworfen.", "Checksum mismatch – the download was discarded.").to_string());
         }
         if asset.name.ends_with(".zip") {
-            let z = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let z = std::fs::read(&path).map_err(|e| save_err(&e, &path))?;
             check_exe(&zip::extract(&z, &release::zip_exe_entry(version), release::MAX_ASSET as usize).map_err(|e| zip_err(e, lang))?, lang)?;
         }
         Ok(())
@@ -360,7 +419,7 @@ fn download(
     match res {
         Ok(()) => Ok((path, want)),
         Err(e) => {
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir_all(&dir);
             Err(e)
         }
     }
@@ -537,13 +596,55 @@ mod tests {
         let sums = rel.asset(release::SUMS_NAME).unwrap().clone();
         let e = download(&t, &asset, &sums, &v, &d, Lang::En, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
         assert!(e.contains("Checksum mismatch"), "{e}");
-        assert!(!d.join(&asset.name).exists(), "verworfene Datei ist gelöscht");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "verworfene Datei samt Ordner ist gelöscht");
         // Prüfsumme fehlt für die Datei
         let setup = rel.asset(&release::setup_name(&v)).unwrap().clone();
         let t2 = Fake::default().with(&sums.url, Canned::ok(b"".to_vec()));
         let e = download(&t2, &setup, &sums, &v, &d, Lang::En, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
-        assert!(e.contains("no checksum"), "{e}");
+        assert!(e.contains("no checksum for this file"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn download_folders_are_fresh_and_cleaned_per_process() {
+        let root = tmp("dirs");
+        let a = fresh_download_dir(&root).unwrap();
+        let b = fresh_download_dir(&root).unwrap();
+        assert_ne!(a, b, "jeder Download bekommt einen neuen Ordner");
+        let name = a.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with(&format!("{}-", std::process::id())), "{name}");
+        // Ordner eines beendeten Prozesses wird entfernt, eigene und fremde (laufende) bleiben, ebenso Unbekanntes
+        let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" }).args(if cfg!(windows) { &["/c", "exit"][..] } else { &[][..] }).spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        drop(child);
+        let dead_dir = root.join(format!("{dead}-00ff"));
+        std::fs::create_dir(&dead_dir).unwrap();
+        std::fs::write(dead_dir.join("x.zip"), b"x").unwrap();
+        let other = root.join("notes-folder");
+        std::fs::create_dir(&other).unwrap();
+        let mut running = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/c", "ping", "-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap()
+        } else {
+            std::process::Command::new("sleep").arg("30").spawn().unwrap()
+        };
+        let parent_pid = root.join(format!("{}-abcd", running.id()));
+        std::fs::create_dir(&parent_pid).unwrap();
+        cleanup_old_downloads(&root);
+        assert!(!dead_dir.exists(), "beendeter Prozess: aufgeräumt");
+        assert!(a.exists() && b.exists(), "eigene Ordner bleiben");
+        assert!(other.exists(), "fremd benannter Ordner bleibt");
+        assert!(parent_pid.exists(), "Ordner einer laufenden Instanz bleibt");
+        let _ = running.kill();
+        let _ = running.wait();
+        // Vorhandene Datei wird nie überschrieben (create_new)
+        let (t, rel) = fake_release(false);
+        let v = Version::new(9, 1, 0);
+        let asset = rel.asset(&release::zip_name(&v)).unwrap().clone();
+        let sums = rel.asset(release::SUMS_NAME).unwrap().clone();
+        let (p, _) = download(&t, &asset, &sums, &v, &root, Lang::En, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+        assert!(p.starts_with(&root) && p.parent() != Some(a.as_path()) && p.parent() != Some(b.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

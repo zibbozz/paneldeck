@@ -18,7 +18,8 @@ pub const HOSTS: [&str; 4] = ["api.github.com", "github.com", "objects.githubuse
 
 pub const MAX_JSON: u64 = 1 << 20;
 pub const MAX_SUMS: u64 = 64 << 10;
-pub const MAX_ASSET: u64 = 200 << 20;
+/// Höchstgröße einer Release-Datei (das Release ist etwa 17 MB groß).
+pub const MAX_ASSET: u64 = 64 << 20;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Asset {
