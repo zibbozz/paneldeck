@@ -18,7 +18,32 @@ use super::*;
 use crate::state::{SavedProjectView, SavedWindow};
 use std::sync::{Arc, OnceLock};
 
-/// Ansicht eines Fensters. Die Feldnamen entsprechen den Feldern von `App` (siehe `swap_view`).
+/// Felder einer Fensteransicht, die 1:1 mit den gleichnamigen Feldern von `App` getauscht werden (`swap_view`).
+/// `proj_views` fehlt hier: es wird mit `Project::layout`/`focused` getauscht (`swap_project_views`).
+/// Die Liste steht nur hier; `swap_fields!` zerlegt `WinView` ohne `..`, ein vergessenes Feld ist daher ein Übersetzungsfehler.
+macro_rules! view_fields {
+    ($mac:ident!($($args:tt)*)) => {
+        $mac!($($args)*;
+            layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog,
+            confirm_close, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
+            queue_open, queue_draft, files_open, diff_open, diff_sel, composer_open, composer_focus, composer_text, history_open,
+            history_filter, history_hits, history_hits_rx, templates_open, tpl_name, cost_open, gsearch, prompts_open, prompt_sel,
+            broadcast, wt_close, editor, confirm_restore, restore_error, dragging, dragging_folder, folder_rects, tree_geo,
+            tree_root, plan, tasks
+        )
+    };
+}
+
+/// `$a` (App oder – in Tests – eine zweite `WinView`) und `$v` feldweise tauschen; `$pv` bindet `proj_views` für `$pv_body`.
+macro_rules! swap_fields {
+    ($a:expr, $v:expr, |$pv:ident| $pv_body:expr; $($f:ident),* $(,)?) => {{
+        let WinView { proj_views: $pv, $($f),* } = $v;
+        $( std::mem::swap(&mut $a.$f, $f); )*
+        $pv_body;
+    }};
+}
+
+/// Ansicht eines Fensters. Die Feldnamen entsprechen den Feldern von `App` (siehe `view_fields!`).
 pub(super) struct WinView {
     layout: Option<Node>,
     focused: u64,
@@ -33,24 +58,38 @@ pub(super) struct WinView {
     new_dialog: Option<NewDialog>,
     confirm_close: Option<u64>,
     settings_open: bool,
+    settings_tab: usize,
+    /// Laufende Kürzel-Aufnahme in den Einstellungen dieses Fensters (sperrt nur hier die Kürzel).
+    capture_key: Option<String>,
+    profile_sel: usize,
     palette: Option<Palette>,
     text_prompt: Option<TextPrompt>,
     folder_prompt: Option<FolderPrompt>,
     notes_open: Option<u64>,
     queue_open: Option<u64>,
+    queue_draft: String,
     files_open: bool,
     diff_open: bool,
     diff_sel: Option<(String, bool)>,
     composer_open: bool,
     composer_focus: bool,
+    composer_text: String,
     history_open: bool,
+    history_filter: String,
+    history_hits: Option<Vec<(history::HistoryItem, String)>>,
+    history_hits_rx: Option<std::sync::mpsc::Receiver<Vec<(history::HistoryItem, String)>>>,
     templates_open: bool,
+    tpl_name: String,
     cost_open: bool,
     gsearch: Option<GlobalSearch>,
     prompts_open: bool,
+    prompt_sel: usize,
     broadcast: bool,
     wt_close: Option<WtClose>,
     editor: Option<Editor>,
+    /// Rückfrage „Sicherung wiederherstellen“ erscheint im Fenster, in dem sie angeklickt wurde.
+    confirm_restore: Option<PathBuf>,
+    restore_error: Option<String>,
     dragging: Option<u64>,
     dragging_folder: Option<String>,
     folder_rects: Vec<(String, Rect)>,
@@ -80,24 +119,36 @@ impl WinView {
             new_dialog: None,
             confirm_close: None,
             settings_open: false,
+            settings_tab: 0,
+            capture_key: None,
+            profile_sel: 0,
             palette: None,
             text_prompt: None,
             folder_prompt: None,
             notes_open: None,
             queue_open: None,
+            queue_draft: String::new(),
             files_open: false,
             diff_open: false,
             diff_sel: None,
             composer_open: false,
             composer_focus: false,
+            composer_text: String::new(),
             history_open: false,
+            history_filter: String::new(),
+            history_hits: None,
+            history_hits_rx: None,
             templates_open: false,
+            tpl_name: String::new(),
             cost_open: false,
             gsearch: None,
             prompts_open: false,
+            prompt_sel: 0,
             broadcast: false,
             wt_close: None,
             editor: None,
+            confirm_restore: None,
+            restore_error: None,
             dragging: None,
             dragging_folder: None,
             folder_rects: Vec::new(),
@@ -112,16 +163,7 @@ impl WinView {
 
 /// Ansicht `v` mit den Feldern der App tauschen (zweimal aufgerufen = wieder wie vorher).
 fn swap_view(app: &mut App, v: &mut WinView) {
-    macro_rules! sw {
-        ($($f:ident),* $(,)?) => { $( std::mem::swap(&mut app.$f, &mut v.$f); )* };
-    }
-    sw!(
-        layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, confirm_close,
-        settings_open, palette, text_prompt, folder_prompt, notes_open, queue_open, files_open, diff_open, diff_sel, composer_open,
-        composer_focus, history_open, templates_open, cost_open, gsearch, prompts_open, broadcast, wt_close, editor, dragging,
-        dragging_folder, folder_rects, tree_geo, tree_root, plan, tasks,
-    );
-    swap_project_views(&mut app.projects, &mut v.proj_views);
+    view_fields!(swap_fields!(app, v, |pv| swap_project_views(&mut app.projects, pv)));
 }
 
 /// Layout/Fokus je Projekt tauschen: danach stehen in `projects` die Werte aus `stash` (fehlende: kein Layout) und in `stash`
@@ -259,6 +301,8 @@ pub(super) struct Wins {
     pub(super) data_gen: u64,
     main_gen: u64,
     main_focused: bool,
+    /// „Sicherung wiederherstellen“ aus einem weiteren Fenster: nach dessen Bild speichern und beenden.
+    pub(super) exit_after_save: bool,
 }
 
 impl Wins {
@@ -478,6 +522,10 @@ impl App {
         // Während des Zeichnens neu angelegte Fenster (Strg+Klick im weiteren Fenster) anhängen.
         list.append(&mut self.wins.list);
         self.wins.list = list;
+        if self.wins.exit_after_save {
+            self.save_all();
+            std::process::exit(0);
+        }
         if let Some(req) = self.wins.open_req.take() {
             self.open_window(req);
         }
@@ -517,6 +565,7 @@ impl App {
             }
         }
         let mut actions = self.take_routed(ctx);
+        self.poll_history_hits();
         self.handle_drops(ctx);
         self.titlebar(ctx);
         self.window_edges(ctx);
@@ -540,6 +589,7 @@ impl App {
         if self.picker_here() {
             self.tlinks_picker_ui(ctx);
         }
+        self.restore_dialog(ctx);
         if w.ask_close {
             self.close_window_dialog(ctx, w);
         }
@@ -702,6 +752,48 @@ mod tests {
         let in_stash: Vec<u64> = stash.iter().map(|s| s.0).collect();
         assert_eq!(in_stash, vec![1, 2, 3], "gelöschtes Projekt 99 fällt weg");
         assert_eq!(leaves(&stash[2].1), vec![30], "das weitere Fenster behält sein Layout des neuen Projekts");
+    }
+
+    /// Dieselbe Feldliste wie `swap_view`, aber gegen eine zweite Ansicht (eine `App` lässt sich im Test nicht bauen).
+    fn swap_views(a: &mut WinView, v: &mut WinView) {
+        view_fields!(swap_fields!(a, v, |pv| std::mem::swap(&mut a.proj_views, pv)));
+    }
+
+    fn marked(tag: u64) -> WinView {
+        let mut v = WinView::new(if tag % 2 == 0 { titlebar::Mode::Tasks } else { titlebar::Mode::Terminals }, tag);
+        v.layout = Some(Node::Leaf(tag * 10));
+        v.focused = tag * 10;
+        v.filter = format!("filter-{tag}");
+        v.composer_text = format!("draft-{tag}");
+        v.queue_draft = format!("queue-{tag}");
+        v.history_filter = format!("hist-{tag}");
+        v.settings_tab = tag as usize;
+        v.capture_key = Some(format!("key-{tag}"));
+        v.confirm_restore = Some(PathBuf::from(format!("backup-{tag}.zip")));
+        v.tpl_name = format!("tpl-{tag}");
+        v.proj_views = vec![(tag, Some(Node::Leaf(tag)), tag)];
+        v
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn sig(v: &WinView) -> ((Vec<u64>, u64, u64, titlebar::Mode), (String, String, String, String), (usize, Option<String>, Option<PathBuf>, String, Vec<u64>)) {
+        (
+            (leaves(&v.layout), v.focused, v.active_project, v.mode),
+            (v.filter.clone(), v.composer_text.clone(), v.queue_draft.clone(), v.history_filter.clone()),
+            (v.settings_tab, v.capture_key.clone(), v.confirm_restore.clone(), v.tpl_name.clone(), v.proj_views.iter().map(|p| p.0).collect()),
+        )
+    }
+
+    #[test]
+    fn swapping_a_view_twice_is_identity() {
+        let (mut a, mut b) = (marked(1), marked(2));
+        let (sa, sb) = (sig(&a), sig(&b));
+        swap_views(&mut a, &mut b);
+        assert_eq!(sig(&a), sb, "einmal getauscht: die App zeigt das andere Fenster");
+        assert_eq!(sig(&b), sa);
+        swap_views(&mut a, &mut b);
+        assert_eq!(sig(&a), sa, "zweimal getauscht: alles wie vorher");
+        assert_eq!(sig(&b), sb);
     }
 
     #[test]

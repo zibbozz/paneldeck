@@ -2100,13 +2100,18 @@ impl App {
         }
     }
 
-    fn poll_history(&mut self) {
+    /// Ergebnis der Verlaufssuche des gerade gezeichneten Fensters abholen (jedes Fenster hat seine eigene Suche).
+    fn poll_history_hits(&mut self) {
         if let Some(rx) = &self.history_hits_rx {
             if let Ok(h) = rx.try_recv() {
                 self.history_hits = Some(h);
                 self.history_hits_rx = None;
             }
         }
+    }
+
+    fn poll_history(&mut self) {
+        self.poll_history_hits();
         if let Some(rx) = &self.history_rx {
             if let Ok(items) = rx.try_recv() {
                 self.history = items;
