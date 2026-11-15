@@ -40,6 +40,7 @@ mod settings;
 #[cfg(feature = "readme-shots")]
 mod shot_start;
 mod sidebar;
+mod sysprompt_ui;
 mod tasks_ui;
 mod terminal_links;
 mod titlebar;

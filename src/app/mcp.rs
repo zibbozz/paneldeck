@@ -1009,6 +1009,7 @@ impl App {
             .small()
             .color(style::dim(ui)),
         );
+        self.sysprompt_settings_ui(ui);
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S1);

@@ -411,6 +411,21 @@ c.close()
     Check 'Expert + Nur lesen: list_sprints, list_versions und query lesen' ($names -contains 'list_sprints' -and $names -contains 'get_sprint' -and $names -contains 'list_versions' -and (Tool 'list_sprints' @{ project = 'PAN' }).data.total -eq 1 -and (Tool 'search_tickets' @{ query = 'type = Task' }).data.total -ge 1)
     Check 'Expert + Nur lesen: get_sprint und list_versions lesen' ((Tool 'get_sprint' @{ project = 'PAN'; sprint = 'Sprint 1' }).data.sprint.state -eq 'active' -and (Tool 'list_versions' @{ project = 'PAN' }).data.versions_total -ge 1)
   }
+
+  Write-Host "== Systemprompt (initialize -> instructions)" -ForegroundColor Cyan
+  Set-Level 'Read'
+  $i = Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } }
+  $ins = [string]$i.result.instructions
+  Check 'initialize: instructions nennt whoami und Werkzeuge der Stufe Nur lesen' ($ins -match 'whoami' -and $ins.Contains('- `list_sessions` (') -and -not $ins.Contains('- `send_text` (') -and $ins -match 'Read only') ($ins.Substring(0, [Math]::Min(200, $ins.Length)))
+  $ver = [string]$i.result.serverInfo.version
+  $spFile = "$dir\paneldeck-data\system-prompt.md"
+  [IO.File]::WriteAllText($spFile, 'Eigener Prompt {{version}} / {{level}} / {{gibtsnicht}}', (New-Object Text.UTF8Encoding $true))
+  try { $script:bridge.StandardInput.Close(); [void]$script:bridge.WaitForExit(2000) } catch {}
+  if (-not $script:bridge.HasExited) { $script:bridge.Kill() }
+  Start-Bridge
+  $i2 = Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } }
+  Check 'initialize: eigene system-prompt.md (mit BOM) gerendert, unbekannter Platzhalter bleibt' ([string]$i2.result.instructions -eq "Eigener Prompt $ver / Read only / {{gibtsnicht}}") ([string]$i2.result.instructions)
+  Remove-Item -LiteralPath $spFile -ErrorAction SilentlyContinue
 } finally {
   Stop-Hub
   if (-not $KeepFiles) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }

@@ -142,6 +142,10 @@ pub struct Settings {
     pub mcp_level: crate::mcp::McpLevel,
     /// Agenten dürfen auch Sitzungen schließen, die sie nicht selbst angelegt haben.
     pub mcp_close_any: bool,
+    /// Sprache des Systemprompts für Agenten (`initialize`), unabhängig von der Sprache der Oberfläche. Standard: Englisch;
+    /// ein ungültiger Wert ergibt Englisch (die Datei bleibt lesbar).
+    #[serde(deserialize_with = "crate::mcp::sysprompt::de_lang")]
+    pub mcp_prompt_lang: Lang,
     /// Automatische Datenbank-Sicherung: Intervall in Stunden (0 = aus).
     pub backup_interval_hours: u32,
     /// Wie viele automatische Sicherungen behalten werden (zusätzlich zur Datenbank selbst).
@@ -185,6 +189,7 @@ impl Default for Settings {
             session_budget: 0.0,
             mcp_level: crate::mcp::McpLevel::Off,
             mcp_close_any: false,
+            mcp_prompt_lang: Lang::En,
             backup_interval_hours: 24,
             backup_keep: 2,
             backup_dir: String::new(),
