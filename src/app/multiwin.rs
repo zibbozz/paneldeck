@@ -397,9 +397,11 @@ pub(super) struct Wins {
     /// Weitergereichte Aktionen: (Zielfenster, Aktion).
     queue: Vec<(u64, Action)>,
     open_req: Option<OpenReq>,
-    /// Zähler für Datenänderungen (Eingaben in einem Fenster, Änderungen durch Agenten); Fenster mit älterem Stand laden die
-    /// Todo-Ansicht neu, damit Änderungen aus einem Fenster im anderen erscheinen.
+    /// Zähler für Datenänderungen (Schreiben in die Datenbank aus einem Fenster, Änderungen durch Agenten); Fenster mit
+    /// älterem Stand laden die Todo-Ansicht neu, damit Änderungen aus einem Fenster im anderen erscheinen.
     pub(super) data_gen: u64,
+    /// Zuletzt gesehener Stand von `total_changes` der Datenbank.
+    db_changes: u64,
     main_gen: u64,
     /// Fenster im Vordergrund (siehe `foreground`); bestimmt zu Beginn jedes Hauptbildes.
     fg: Option<u64>,
@@ -422,15 +424,12 @@ fn icon() -> Arc<egui::IconData> {
     ICON.get_or_init(|| Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon64.png")).unwrap_or_default())).clone()
 }
 
-/// Gab es in diesem Bild eine Eingabe, die Daten ändern kann? Im Terminal Hub zählen nur Klicks (Tippen geht an die Shell).
-fn data_input(ctx: &egui::Context, tasks: bool) -> bool {
-    ctx.input(|i| {
-        i.events.iter().any(|e| match e {
-            Event::PointerButton { pressed: false, .. } => true,
-            Event::Key { pressed: true, .. } | Event::Text(_) | Event::Paste(_) => tasks,
-            _ => false,
-        })
-    })
+/// Hat sich der Datenbestand seit dem letzten Stand geändert? `total` = Zahl aller geänderten Zeilen der Verbindung
+/// (`sqlite3_total_changes`): sie wächst mit jedem Schreiben, ob aus einem Fenster oder durch einen Agenten.
+pub(super) fn data_changed(last: &mut u64, total: u64) -> bool {
+    let changed = *last != total;
+    *last = total;
+    changed
 }
 
 impl App {
@@ -631,6 +630,17 @@ impl App {
         style::set_id_salt(0);
     }
 
+    /// Neuer Datenstand (`data_gen`), wenn seit dem letzten Aufruf in die Datenbank geschrieben wurde. Billig (ein Zähler
+    /// der Verbindung) – ersetzt das Neuladen nach jeder Eingabe.
+    fn note_data_changes(&mut self) -> bool {
+        let total = self.db.as_ref().map(|d| d.conn.total_changes()).unwrap_or(0);
+        let changed = data_changed(&mut self.wins.db_changes, total);
+        if changed {
+            self.wins.data_gen += 1;
+        }
+        changed
+    }
+
     /// Was mit den Sitzungen von Fenster `window` beim Schließen geschieht.
     fn window_close_plan(&self, window: u64) -> ClosePlan {
         close_plan(self.entries.iter().filter(|(_, e)| e.meta.window == window).map(|(id, e)| (*id, !e.exited(), e.meta.worktree.is_some(), self.detached.contains(id))))
@@ -639,9 +649,8 @@ impl App {
     /// Weitere Fenster anlegen, zeichnen und schließen. Im Hauptfenster nach dessen Aktionen aufrufen.
     pub(super) fn hub_windows(&mut self, ctx: &egui::Context) {
         debug_assert_eq!(self.wins.cur, 0);
-        if !self.wins.is_empty() && data_input(ctx, self.mode == titlebar::Mode::Tasks) {
-            self.wins.data_gen += 1;
-            self.wins.main_gen = self.wins.data_gen;
+        if !self.wins.is_empty() && self.note_data_changes() {
+            self.wins.main_gen = self.wins.data_gen; // das Hauptfenster hat die Änderung selbst gemacht
         }
         if let Some(req) = self.wins.open_req.take() {
             self.open_window(req);
@@ -791,8 +800,7 @@ impl App {
         if title != self.last_title {
             self.last_title = title;
         }
-        if data_input(ctx, tasks) {
-            self.wins.data_gen += 1;
+        if self.note_data_changes() {
             w.data_gen = self.wins.data_gen;
         }
         let animating = self.entries.values().any(|e| e.meta.window == w.id && e.status == ClaudeStatus::Working && !e.exited());
@@ -1130,6 +1138,18 @@ mod tests {
         let plan = restorable(&saved, |p| p == 1 || p == 3, 1);
         let got: Vec<(u64, u64)> = plan.iter().map(|(s, p)| (s.id, *p)).collect();
         assert_eq!(got, vec![(2, 1), (3, 1), (4, 3)], "0 = Hauptfenster, doppelte 2 einmal, Projekt 9 gibt es nicht mehr");
+    }
+
+    #[test]
+    fn only_database_writes_count_as_data_changes() {
+        let conn = crate::db::open_memory();
+        let mut last = conn.total_changes();
+        assert!(!data_changed(&mut last, conn.total_changes()), "nichts geschrieben: kein Neuladen");
+        let _ = conn.query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert!(!data_changed(&mut last, conn.total_changes()), "Lesen zählt nicht");
+        conn.execute("INSERT INTO meta (key, value) VALUES ('x', '1')", []).unwrap();
+        assert!(data_changed(&mut last, conn.total_changes()), "Schreiben zählt");
+        assert!(!data_changed(&mut last, conn.total_changes()), "nur einmal");
     }
 
     #[test]
