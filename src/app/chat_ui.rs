@@ -71,6 +71,8 @@ struct RowCx<'a> {
     last: Option<usize>,
     last_user: Option<usize>,
     context_start: Option<usize>,
+    /// Token-Verbrauch der letzten Antwort (Eingabe, Antwort).
+    usage: Option<(Option<u32>, Option<u32>)>,
 }
 
 fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: Lang, out: &mut ChatOut) {
@@ -79,7 +81,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let can_regen = !streaming && crate::chat::logic::can_regenerate(chat.messages());
     let rev = chat.rev();
     let from = std::mem::replace(&mut chat.changed_from, usize::MAX);
-    let ChatState { file, ui: cache, warning, follow, .. } = chat;
+    let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
     // Zwischenspeicher nur für Geändertes erneuern (nicht jedes Bild den ganzen Verlauf).
@@ -112,6 +114,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         last: n.checked_sub(1),
         last_user: crate::chat::logic::last_user(msgs),
         context_start: crate::chat::logic::clamp_context_start(file.context_start, n),
+        usage: *usage,
     };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
     let jump = std::mem::take(follow);
@@ -119,6 +122,13 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     area.show_viewport(ui, |ui, viewport| {
         let content_top = ui.max_rect().min.y;
         ui.add_space(S2);
+        if let Some(n) = notice.as_deref() {
+            egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new(n).small().color(style::dim(ui)));
+            });
+            ui.add_space(S1);
+        }
         if let Some(w) = warning.clone() {
             egui::Frame::new().fill(Color32::from_rgb(0xe5, 0xc0, 0x7b).gamma_multiply(0.18)).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -187,6 +197,9 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
             if is_last && rc.streaming && m.content.is_empty() && m.tool_calls.is_empty() {
                 ui.label(RichText::new("…").color(style::dim(ui)));
             }
+            if let Some(n) = &m.note {
+                ui.label(RichText::new(format!("⚠ {n}")).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
+            }
             if let (true, Some(e)) = (is_last && rc.has_error, &m.error) {
                 error_box(ui, e, lang, out);
             } else if let Some(e) = &m.error {
@@ -195,6 +208,9 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
                 ui.horizontal(|ui| {
                     if ui.small_button("↻").on_hover_text(lang.t("Antwort neu erzeugen", "Regenerate answer")).clicked() {
                         out.regenerate = true;
+                    }
+                    if let Some(u) = usage_text(rc.usage, lang) {
+                        ui.label(RichText::new(u).small().color(style::dim(ui)));
                     }
                 });
             }
@@ -211,6 +227,19 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
     if !(m.role == Role::Tool && cache.matched.contains(&i)) {
         ui.add_space(S2 + 2.0);
     }
+}
+
+/// „Tokens: 120 Eingabe · 45 Antwort“ (nur, was der Server gemeldet hat).
+fn usage_text(u: Option<(Option<u32>, Option<u32>)>, lang: Lang) -> Option<String> {
+    let (p, c) = u?;
+    let mut parts = Vec::new();
+    if let Some(p) = p {
+        parts.push(format!("{p} {}", lang.t("Eingabe", "in")));
+    }
+    if let Some(c) = c {
+        parts.push(format!("{c} {}", lang.t("Antwort", "out")));
+    }
+    (!parts.is_empty()).then(|| format!("Tokens: {}", parts.join(" · ")))
 }
 
 fn error_col() -> Color32 {
@@ -493,7 +522,7 @@ mod tests {
         let o = h.frame(&mut c, Lang::En, false, vec![key(Key::Enter, Modifiers::NONE)]);
         assert!(o.send, "Enter sendet");
         assert_eq!(c.draft, "hello\nworld", "Enter fügt keinen Zeilenumbruch ein");
-        assert!(c.send(&backend, &meta, Arc::new(|| {})));
+        assert!(c.send(&backend, &meta, &crate::chat::TurnContext::default(), Arc::new(|| {})));
         h.frame(&mut c, Lang::En, false, vec![]);
         assert!(h.texts.iter().any(|t| t == "Stop"), "Während der Antwort heißt der Knopf Stopp: {:?}", h.texts);
         pump(&mut h, &mut c);
@@ -540,7 +569,7 @@ mod tests {
         let backend = EchoBackend { delay: Duration::from_millis(50) };
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "a b c d e f g h".into();
-        c.send(&backend, &crate::chat::default_chat_meta(), Arc::new(|| {}));
+        c.send(&backend, &crate::chat::default_chat_meta(), &crate::chat::TurnContext::default(), Arc::new(|| {}));
         let mut h = H::new();
         h.frame(&mut c, Lang::En, true, vec![]);
         h.frame(&mut c, Lang::En, false, vec![Event::Text("x".into())]);
@@ -584,11 +613,35 @@ mod tests {
         let backend = EchoBackend { delay: Duration::from_millis(50) };
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "a b c d e f g h".into();
-        c.send(&backend, &crate::chat::default_chat_meta(), Arc::new(|| {}));
+        c.send(&backend, &crate::chat::default_chat_meta(), &crate::chat::TurnContext::default(), Arc::new(|| {}));
         let mut h = H::new();
         h.frame(&mut c, Lang::En, false, vec![]);
         h.frame(&mut c, Lang::En, false, vec![]);
         let p = h.pos_of("Stop").expect("Stopp-Knopf");
         assert!(h.click(&mut c, Lang::En, p).stop);
+    }
+
+    #[test]
+    fn notice_cut_off_note_and_token_usage_are_shown() {
+        let mut a = ChatMsg::new(Role::Assistant, "partial answer");
+        a.note = Some(crate::chat::llm_backend::cut_off_note(Lang::En));
+        let file = ChatFile { messages: vec![ChatMsg::new(Role::User, "q"), a], ..ChatFile::default() };
+        for (lang, notice, tokens) in [(Lang::En, "This model cannot use tools – chat only.", "Tokens: 120 in · 45 out"), (Lang::De, "Dieses Modell kann keine Werkzeuge nutzen – nur Chat.", "Tokens: 120 Eingabe · 45 Antwort")] {
+            let mut c = ChatState::new(file.clone(), None);
+            c.notice = crate::chat::llm_backend::chat_notice(
+                &[crate::llm::config::LlmServer { id: "s".into(), last_models: vec![crate::llm::ModelInfo { name: "m".into(), tools: Some(false), context_length: None }], ..Default::default() }],
+                &crate::state::ChatMeta { server: "s".into(), model: "m".into() },
+                lang,
+            );
+            c.usage = Some((Some(120), Some(45)));
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == notice), "{:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == tokens), "{:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == "⚠ Answer cut off at the model's token limit."), "{:?}", h.texts);
+        }
+        assert_eq!(usage_text(Some((None, Some(3))), Lang::En).as_deref(), Some("Tokens: 3 out"));
+        assert_eq!(usage_text(Some((None, None)), Lang::En), None);
     }
 }

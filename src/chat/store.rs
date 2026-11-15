@@ -80,6 +80,10 @@ pub struct ChatMsg {
     /// Nur Antworten des Modells: Fehler, mit dem die Antwort abbrach (Anzeige mit „Wiederholen“).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Nur Antworten des Modells: Hinweis unter der Antwort, z. B. „an der Token-Grenze abgeschnitten“ (seit 2.2.0; wird
+    /// nicht an das Modell gesendet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl ChatMsg {

@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 macro_rules! view_fields {
     ($mac:ident!($($args:tt)*)) => {
         $mac!($($args)*;
-            layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog,
+            layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
             confirm_close, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
             queue_open, queue_draft, files_open, diff_open, diff_sel, composer_open, composer_focus, composer_text, history_open,
             history_filter, history_hits, history_hits_rx, templates_open, tpl_name, cost_open, gsearch, prompts_open, prompt_sel,
@@ -56,6 +56,7 @@ pub(super) struct WinView {
     rename: Option<(u64, String)>,
     group_prompt: Option<Prompt>,
     new_dialog: Option<NewDialog>,
+    new_chat: Option<models_ui::NewChatDlg>,
     confirm_close: Option<u64>,
     settings_open: bool,
     settings_tab: usize,
@@ -117,6 +118,7 @@ impl WinView {
             rename: None,
             group_prompt: None,
             new_dialog: None,
+            new_chat: None,
             confirm_close: None,
             settings_open: false,
             settings_tab: 0,

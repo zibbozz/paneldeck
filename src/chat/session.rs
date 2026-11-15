@@ -1,6 +1,6 @@
 //! Zustand eines Chats zur Laufzeit (hängt an der Sitzung, nicht an einem Fenster): Verlauf, Eingabe, laufende Antwort.
 
-use super::backend::{ChatBackend, Repaint, TurnEvent, TurnHandle};
+use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
 use super::logic;
 use super::store::{ChatFile, ChatMsg, Role};
 use crate::state::{self, ChatMeta};
@@ -33,6 +33,10 @@ pub struct ChatState {
     draft_before_edit: Option<String>,
     /// Zwischenspeicher der Oberfläche (geparstes Markdown, Werkzeug-Zuordnung, Zeilenhöhen).
     pub ui: UiCache,
+    /// Dauerhafter Hinweis oben im Chat (z. B. „Dieses Modell kann keine Werkzeuge nutzen“); setzt die App.
+    pub notice: Option<String>,
+    /// Token-Verbrauch der letzten Antwort (Eingabe, Antwort) laut Server; nicht gespeichert.
+    pub usage: Option<(Option<u32>, Option<u32>)>,
 }
 
 /// Was die Oberfläche je Chat zwischenspeichert, damit ein Bild nicht den ganzen Verlauf durchgeht.
@@ -75,6 +79,8 @@ impl ChatState {
             changed_from: 0,
             draft_before_edit: None,
             ui: UiCache::default(),
+            notice: None,
+            usage: None,
         }
     }
 
@@ -130,7 +136,7 @@ impl ChatState {
 
     /// Eingabe senden (oder als Bearbeitung der letzten Nachricht übernehmen). `false`, wenn nichts zu senden ist oder
     /// gerade eine Antwort läuft.
-    pub fn send(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, repaint: Repaint) -> bool {
+    pub fn send(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
         let text = self.draft.trim().to_string();
         if text.is_empty() || self.streaming() {
             return false;
@@ -143,24 +149,25 @@ impl ChatState {
         self.editing = false;
         self.draft_before_edit = None;
         self.draft.clear();
-        self.start_turn(backend, meta, repaint);
+        self.start_turn(backend, meta, cx, repaint);
         true
     }
 
     /// Letzte Antwort verwerfen und neu erzeugen (auch „Wiederholen“ nach einem Fehler).
-    pub fn regenerate(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, repaint: Repaint) -> bool {
+    pub fn regenerate(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
         if self.streaming() || !logic::truncate_after_last_user(&mut self.file.messages) {
             return false;
         }
         self.changed(self.file.messages.len());
-        self.start_turn(backend, meta, repaint);
+        self.start_turn(backend, meta, cx, repaint);
         true
     }
 
-    fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, repaint: Repaint) {
+    fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
         // Die Kürzung gilt nur für eine Anfrage; das Backend meldet sie neu (`TurnEvent::ContextStart`), wenn es kürzt.
         self.file.context_start = None;
-        let handle = backend.start(meta, &self.file.messages, repaint);
+        self.usage = None;
+        let handle = backend.start(meta, &self.file.messages, cx, repaint);
         self.file.messages.push(ChatMsg::new(Role::Assistant, ""));
         self.turn_msg = self.file.messages.len() - 1;
         self.turn = Some(handle);
@@ -251,6 +258,12 @@ impl ChatState {
                     }
                 }
                 TurnEvent::ContextStart(c) => self.file.context_start = logic::clamp_context_start(Some(c), i),
+                TurnEvent::Usage { prompt_tokens, completion_tokens } => self.usage = Some((prompt_tokens, completion_tokens)),
+                TurnEvent::Note(n) => {
+                    if let Some(m) = self.file.messages.get_mut(i) {
+                        m.note = Some(n);
+                    }
+                }
                 TurnEvent::Done => {
                     self.turn = None;
                     p.finished = true;
@@ -293,12 +306,12 @@ mod tests {
         let meta = crate::chat::default_chat_meta();
         let rp: Repaint = Arc::new(|| {});
         let mut c = ChatState::new(ChatFile::default(), None);
-        assert!(!c.send(&b, &meta, rp.clone()), "leere Eingabe sendet nichts");
+        assert!(!c.send(&b, &meta, &TurnContext::default(), rp.clone()), "leere Eingabe sendet nichts");
         c.draft = "  hello  ".into();
-        assert!(c.send(&b, &meta, rp.clone()));
+        assert!(c.send(&b, &meta, &TurnContext::default(), rp.clone()));
         assert!(c.draft.is_empty() && c.streaming());
         c.draft = "second".into();
-        assert!(!c.send(&b, &meta, rp.clone()), "während einer Antwort wird nicht gesendet");
+        assert!(!c.send(&b, &meta, &TurnContext::default(), rp.clone()), "während einer Antwort wird nicht gesendet");
         pump(&mut c);
         assert_eq!(c.messages().len(), 2);
         assert_eq!(c.messages()[0].content, "hello");
@@ -310,22 +323,22 @@ mod tests {
         assert!(c.begin_edit());
         assert_eq!(c.draft, "hello");
         c.draft = "hello again".into();
-        assert!(c.send(&b, &meta, rp.clone()));
+        assert!(c.send(&b, &meta, &TurnContext::default(), rp.clone()));
         pump(&mut c);
         assert_eq!(c.messages().len(), 2);
         assert_eq!(c.messages()[1].content, EchoBackend::reply(&meta, "hello again"));
         // Neu erzeugen
-        assert!(c.regenerate(&b, &meta, rp.clone()));
+        assert!(c.regenerate(&b, &meta, &TurnContext::default(), rp.clone()));
         pump(&mut c);
         assert_eq!(c.messages().len(), 2);
         // Fehler, dann Wiederholen
         c.draft = "x /error".into();
-        c.send(&b, &meta, rp.clone());
+        c.send(&b, &meta, &TurnContext::default(), rp.clone());
         pump(&mut c);
         assert!(c.has_error());
         assert_eq!(c.messages().len(), 4);
         assert!(!logic::sendable(&c.messages()[3]));
-        assert!(c.regenerate(&b, &meta, rp.clone()));
+        assert!(c.regenerate(&b, &meta, &TurnContext::default(), rp.clone()));
         pump(&mut c);
         assert!(c.has_error(), "Echo meldet bei /error wieder einen Fehler");
         assert_eq!(c.messages().len(), 4, "der alte Fehler wurde ersetzt, nicht angehängt");
@@ -338,12 +351,12 @@ mod tests {
         let slow = EchoBackend { delay: Duration::from_millis(30) };
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "one two three four five six seven eight nine ten".into();
-        c.send(&slow, &meta, rp.clone());
+        c.send(&slow, &meta, &TurnContext::default(), rp.clone());
         c.stop();
         assert!(!c.streaming());
         assert_eq!(c.messages().len(), 1, "leere Antwort fällt weg");
         c.draft = "one two three four five six seven eight nine ten".into();
-        c.send(&slow, &meta, rp.clone());
+        c.send(&slow, &meta, &TurnContext::default(), rp.clone());
         let t = Instant::now();
         while c.messages()[2].content.is_empty() && t.elapsed() < Duration::from_secs(5) {
             c.poll();
@@ -364,18 +377,18 @@ mod tests {
         let mut c = ChatState::new(ChatFile::default(), None);
         for q in ["a", "b /cut"] {
             c.draft = q.into();
-            c.send(&b, &meta, Arc::new(|| {}));
+            c.send(&b, &meta, &TurnContext::default(), Arc::new(|| {}));
             pump(&mut c);
         }
         assert_eq!(c.file.context_start, Some(2));
         c.draft = "c".into();
-        c.send(&b, &meta, Arc::new(|| {}));
+        c.send(&b, &meta, &TurnContext::default(), Arc::new(|| {}));
         assert_eq!(c.file.context_start, None, "alte Kürzung gilt nicht für die neue Anfrage");
         pump(&mut c);
         assert_eq!(c.file.context_start, None);
         // Neu erzeugen ebenso
         c.file.context_start = Some(1);
-        c.regenerate(&b, &meta, Arc::new(|| {}));
+        c.regenerate(&b, &meta, &TurnContext::default(), Arc::new(|| {}));
         assert_eq!(c.file.context_start, None);
     }
 
@@ -385,7 +398,7 @@ mod tests {
         let meta = crate::chat::default_chat_meta();
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "hello there".into();
-        c.send(&b, &meta, Arc::new(|| {}));
+        c.send(&b, &meta, &TurnContext::default(), Arc::new(|| {}));
         // Warten, bis der Thread alles geschickt hat (Done liegt im Kanal), aber nicht abholen
         std::thread::sleep(Duration::from_millis(200));
         c.stop();
@@ -400,7 +413,7 @@ mod tests {
         let meta = crate::chat::default_chat_meta();
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "q".into();
-        c.send(&b, &meta, Arc::new(|| {}));
+        c.send(&b, &meta, &TurnContext::default(), Arc::new(|| {}));
         pump(&mut c);
         c.draft = "half typed".into();
         assert!(c.begin_edit());
@@ -416,7 +429,7 @@ mod tests {
         let mut c = ChatState::new(ChatFile::default(), None);
         assert!(matches!(c.file_for_save(), std::borrow::Cow::Borrowed(_)));
         c.draft = "a b c d e f".into();
-        c.send(&slow, &meta, Arc::new(|| {}));
+        c.send(&slow, &meta, &TurnContext::default(), Arc::new(|| {}));
         let f = c.file_for_save();
         assert_eq!(f.messages[1].error.as_deref(), Some("interrupted"));
         assert!(c.messages()[1].error.is_none(), "nur die gespeicherte Fassung ist markiert");
@@ -426,15 +439,39 @@ mod tests {
     fn backend_thread_dying_is_an_error() {
         struct Dead;
         impl ChatBackend for Dead {
-            fn start(&self, _: &ChatMeta, _: &[ChatMsg], _: Repaint) -> TurnHandle {
+            fn start(&self, _: &ChatMeta, _: &[ChatMsg], _: &TurnContext, _: Repaint) -> TurnHandle {
                 TurnHandle::pair().0
             }
         }
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "x".into();
-        c.send(&Dead, &ChatMeta::default(), Arc::new(|| {}));
+        c.send(&Dead, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
         let p = c.poll();
         assert!(p.finished && c.has_error());
+    }
+
+    #[test]
+    fn usage_and_note_are_recorded() {
+        struct Canned;
+        impl ChatBackend for Canned {
+            fn start(&self, _: &ChatMeta, _: &[ChatMsg], _: &TurnContext, _: Repaint) -> TurnHandle {
+                let (h, tx, _) = TurnHandle::pair();
+                for ev in [TurnEvent::Delta("x".into()), TurnEvent::Usage { prompt_tokens: Some(9), completion_tokens: None }, TurnEvent::Note("cut".into()), TurnEvent::Done] {
+                    tx.send(ev).unwrap();
+                }
+                h
+            }
+        }
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "q".into();
+        c.send(&Canned, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        assert!(c.poll().finished);
+        assert_eq!(c.usage, Some((Some(9), None)));
+        assert_eq!(c.messages()[1].note.as_deref(), Some("cut"));
+        assert!(serde_json::to_string(&c.file).unwrap().contains("\"note\":\"cut\""), "Hinweis wird gespeichert");
+        c.draft = "q2".into();
+        c.send(&Canned, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        assert_eq!(c.usage, None, "neue Anfrage: alter Verbrauch weg");
     }
 
     #[test]
@@ -444,7 +481,7 @@ mod tests {
         let mut c = ChatState::new(ChatFile::default(), None);
         for q in ["a", "b /tool /cut"] {
             c.draft = q.into();
-            c.send(&b, &meta, Arc::new(|| {}));
+            c.send(&b, &meta, &TurnContext::default(), Arc::new(|| {}));
             pump(&mut c);
         }
         assert_eq!(c.file.context_start, Some(2));
