@@ -1,6 +1,7 @@
 # Changelog
 
 Alle wichtigen Änderungen an diesem Projekt werden in dieser Datei dokumentiert.
+Dies ist die deutsche Fassung; die englische Fassung steht in [`Changelog.md`](Changelog.md).
 
 Das Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 und dieses Projekt hält sich an [Semantic Versioning](https://semver.org/lang/de/).
