@@ -871,21 +871,38 @@ impl App {
         Ok(json!({"ok": true}))
     }
 
-    /// Befehl zum Registrieren in Claude Code (Benutzerebene).
+    /// Befehl zum Registrieren in Claude Code (Benutzerebene), mit Servername und Argumenten dieser Instanz.
     pub(super) fn mcp_register_command(&self) -> String {
-        format!("claude mcp add --scope user paneldeck -- \"{}\" mcp", self.exe.display())
+        crate::launch::claude_add_command(&self.exe, &mcp_instance_args()).unwrap_or_else(|e| e)
+    }
+
+    /// Argumente für `claude mcp add` (ohne `claude`): `mcp add --scope user <name> -- <exe> mcp <instanz…>`.
+    fn mcp_add_args(&self) -> Vec<String> {
+        let inst = mcp_instance_args();
+        let name = crate::launch::mcp_server_name(&crate::launch::Instance::from_args(&inst));
+        ["mcp", "add", "--scope", "user", &name, "--"].iter().map(|s| s.to_string()).chain(std::iter::once(self.exe.display().to_string())).chain(crate::launch::mcp_args(&inst)).collect()
     }
 
     /// `claude <args>` im Hintergrund ausführen; das Ergebnis erscheint in den Einstellungen.
     fn mcp_run_claude_cli(&self, ctx: &egui::Context, args: Vec<String>) {
         let msg = self.mcp.msg.clone();
+        // Die Zeile läuft über `cmd.exe /c`: jedes Argument selbst quotieren (auch `&|<>^…`), `"`/`%`/Steuerzeichen ablehnen.
+        let line = match args.iter().map(|a| crate::launch::quote_arg(a)).collect::<Result<Vec<_>, _>>() {
+            Ok(q) => q.join(" "),
+            Err(e) => {
+                *msg.lock().unwrap_or_else(|e| e.into_inner()) = e;
+                return;
+            }
+        };
+        #[cfg(not(windows))]
+        let _ = &line;
         *msg.lock().unwrap_or_else(|e| e.into_inner()) = tr("Läuft …", "Running …").to_string();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             #[cfg(windows)]
             let out = {
                 use std::os::windows::process::CommandExt;
-                std::process::Command::new("cmd.exe").arg("/c").arg("claude").args(&args).creation_flags(0x0800_0000).output()
+                std::process::Command::new("cmd.exe").raw_arg(format!("/c claude {line}")).creation_flags(0x0800_0000).output()
             };
             #[cfg(not(windows))]
             let out = std::process::Command::new("claude").args(&args).output();
@@ -979,21 +996,24 @@ impl App {
         ui.separator();
         ui.add_space(S1);
         ui.label(RichText::new(lang.t("In Claude Code einrichten", "Set up in Claude Code")).strong());
+        let inst_args = mcp_instance_args();
+        let server = crate::launch::mcp_server_name(&crate::launch::Instance::from_args(&inst_args));
+        ui.label(RichText::new(format!("{}: {server}", lang.t("Servername dieser Instanz", "Server name of this instance"))).small());
         let cmd = self.mcp_register_command();
         ui.label(RichText::new(&cmd).small().monospace());
         ui.horizontal_wrapped(|ui| {
             if ui.button(lang.t("Registrieren", "Register")).on_hover_text(lang.t("Führt den Befehl oben aus (Benutzerebene)", "Runs the command above (user scope)")).clicked() {
-                let args: Vec<String> = ["mcp", "add", "--scope", "user", "paneldeck", "--"].iter().map(|s| s.to_string()).chain([self.exe.display().to_string(), "mcp".to_string()]).collect();
+                let args = self.mcp_add_args();
                 self.mcp_run_claude_cli(ctx, args);
             }
-            if ui.button(lang.t("Entfernen", "Remove")).clicked() {
-                self.mcp_run_claude_cli(ctx, ["mcp", "remove", "paneldeck", "--scope", "user"].iter().map(|s| s.to_string()).collect());
+            if ui.button(lang.t("Entfernen", "Remove")).on_hover_text(if de() { format!("Entfernt den Server „{server}“ aus Claude Code (Benutzerebene)") } else { format!("Removes the server “{server}” from Claude Code (user scope)") }).clicked() {
+                self.mcp_run_claude_cli(ctx, ["mcp", "remove", server.as_str(), "--scope", "user"].iter().map(|s| s.to_string()).collect());
             }
             if ui.button(lang.t("Befehl kopieren", "Copy command")).clicked() {
                 ctx.copy_text(cmd.clone());
             }
             if ui.button(lang.t("JSON für andere Agenten", "JSON for other agents")).on_hover_text(lang.t("Eintrag für `mcpServers` (z. B. Claude Desktop, Cursor)", "Entry for `mcpServers` (e.g. Claude Desktop, Cursor)")).clicked() {
-                let v = json!({"mcpServers": {"paneldeck": {"command": self.exe.display().to_string(), "args": ["mcp"]}}});
+                let v = json!({"mcpServers": {server.as_str(): {"command": self.exe.display().to_string(), "args": crate::launch::mcp_args(&inst_args)}}});
                 ctx.copy_text(serde_json::to_string_pretty(&v).unwrap_or_default());
             }
         });
@@ -1097,4 +1117,10 @@ mod tests {
         assert_eq!(c, "required_missing");
         assert!(m.starts_with("Missing") && m.contains(mcp::DETAILS_SEP));
     }
+}
+
+/// Startargumente dieser Instanz (`--data-dir …`, `--profile …`) für die MCP-Registrierung; leer für die Standardinstanz.
+// TODO(2.1 wiring): use paths::instance_args()
+fn mcp_instance_args() -> Vec<String> {
+    Vec::new()
 }

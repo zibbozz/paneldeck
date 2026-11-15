@@ -759,26 +759,124 @@ fn hub_info(dir: &std::path::Path) -> HubInfo {
     probe_hub(dir).unwrap_or(HubInfo::UNKNOWN)
 }
 
-/// Beim Deinstallieren: die Registrierung in Claude Code (`~/.claude.json`, Benutzerebene) entfernen, aber nur,
-/// wenn sie auf genau diese .exe zeigt (eine fremde Registrierung bleibt unangetastet). Best-Effort, still.
+/// Namen aller `mcpServers`-Einträge in `~/.claude.json`, die von Paneldeck stammen (`paneldeck`, `paneldeck-*`, z. B.
+/// von Instanzen mit Profil) und deren Befehl genau diese .exe ist. Fremde Einträge zählen nicht.
+pub fn our_servers(v: &Value, exe: &str) -> Vec<String> {
+    let Some(servers) = v.get("mcpServers").and_then(|s| s.as_object()) else { return Vec::new() };
+    servers
+        .iter()
+        .filter(|(name, entry)| crate::launch::is_our_server_name(name) && entry["command"].as_str().is_some_and(|c| crate::launch::same_path(c, exe)))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Unsere Einträge direkt aus einer `.claude.json` entfernen (Ersatzweg, wenn `claude` nicht verfügbar ist).
+/// Schreibt nur, wenn sich etwas ändert (atomar über eine temporäre Datei); gibt die entfernten Namen zurück.
+pub fn remove_our_servers_from(path: &std::path::Path, exe: &str) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut v = serde_json::from_str::<Value>(crate::state::strip_bom(&text)).map_err(|e| e.to_string())?;
+    let names = our_servers(&v, exe);
+    if names.is_empty() {
+        return Ok(names);
+    }
+    if let Some(servers) = v.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+        for n in &names {
+            servers.remove(n);
+        }
+    }
+    let tmp = path.with_extension("json.paneldeck-tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(names)
+}
+
+/// Beim Deinstallieren: die Registrierungen in Claude Code (`~/.claude.json`, Benutzerebene) entfernen – alle
+/// `paneldeck`/`paneldeck-*`, die auf genau diese .exe zeigen (fremde bleiben unangetastet). Zuerst über
+/// `claude mcp remove` (lässt die Datei sonst unverändert); was danach noch übrig ist (z. B. `claude` nicht im PATH),
+/// wird direkt aus der Datei entfernt. Best-Effort, still.
 pub fn unregister_if_ours() {
     let Some(exe) = std::env::current_exe().ok() else { return };
+    let exe = exe.to_string_lossy().to_string();
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else { return };
-    let Ok(text) = std::fs::read_to_string(std::path::Path::new(&home).join(".claude.json")) else { return };
+    let path = std::path::Path::new(&home).join(".claude.json");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
     let Ok(v) = serde_json::from_str::<Value>(crate::state::strip_bom(&text)) else { return };
-    let norm = |s: &str| s.replace('/', "\\").to_lowercase();
-    let ours = v["mcpServers"]["paneldeck"]["command"].as_str().is_some_and(|c| norm(c) == norm(&exe.to_string_lossy()));
-    if !ours {
+    let names = our_servers(&v, &exe);
+    if names.is_empty() {
         return;
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("cmd.exe").args(["/c", "claude", "mcp", "remove", "paneldeck", "--scope", "user"]).creation_flags(0x0800_0000).status();
+    for name in &names {
+        // Die Namen bestehen nur aus `[A-Za-z0-9_-]` (siehe `our_servers`/`is_our_server_name` + Prüfung hier), sicher für cmd.exe.
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("cmd.exe").args(["/c", "claude", "mcp", "remove", name, "--scope", "user"]).creation_flags(0x0800_0000).status();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new("claude").args(["mcp", "remove", name, "--scope", "user"]).status();
+        }
     }
-    #[cfg(not(windows))]
-    {
-        let _ = std::process::Command::new("claude").args(["mcp", "remove", "paneldeck", "--scope", "user"]).status();
+    let _ = remove_our_servers_from(&path, &exe);
+}
+
+#[cfg(test)]
+mod unregister_tests {
+    use super::*;
+
+    #[test]
+    fn finds_only_our_entries() {
+        let exe = r"C:\Users\A\AppData\Local\Programs\Paneldeck\paneldeck.exe";
+        let v = json!({"mcpServers": {
+            "paneldeck": {"command": exe, "args": ["mcp"]},
+            "paneldeck-work": {"command": "c:/users/a/appdata/local/programs/paneldeck/PANELDECK.EXE", "args": ["mcp", "--profile", "work"]},
+            "paneldeck-portable": {"command": r"D:\Tools\paneldeck.exe", "args": ["mcp"]},
+            "paneldeckx": {"command": exe, "args": ["mcp"]},
+            "other": {"command": exe, "args": ["mcp"]},
+            "github": {"command": "npx", "args": ["x"]}
+        }});
+        let mut n = our_servers(&v, exe);
+        n.sort();
+        assert_eq!(n, ["paneldeck", "paneldeck-work"]);
+        assert!(our_servers(&json!({}), exe).is_empty());
+    }
+
+    #[test]
+    fn rewrites_claude_json() {
+        let exe = r"C:\pd\paneldeck.exe";
+        let dir = std::env::temp_dir().join(format!("pd-unreg-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join(".claude.json");
+        let original = json!({
+            "numStartups": 3,
+            "projects": {"C:/x": {"mcpServers": {"paneldeck": {"command": exe}}}},
+            "mcpServers": {
+                "paneldeck": {"command": exe, "args": ["mcp"]},
+                "paneldeck-work": {"command": exe, "args": ["mcp", "--profile", "work"]},
+                "paneldeck-other": {"command": r"D:\other\paneldeck.exe", "args": ["mcp"]},
+                "github": {"command": "npx", "args": ["x"]}
+            }
+        });
+        // mit BOM, wie Windows-PowerShell schreibt
+        std::fs::write(&f, format!("\u{feff}{}", serde_json::to_string_pretty(&original).unwrap())).unwrap();
+        let mut removed = remove_our_servers_from(&f, exe).unwrap();
+        removed.sort();
+        assert_eq!(removed, ["paneldeck", "paneldeck-work"]);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        let servers = v["mcpServers"].as_object().unwrap();
+        assert!(servers.contains_key("paneldeck-other") && servers.contains_key("github"));
+        assert!(!servers.contains_key("paneldeck") && !servers.contains_key("paneldeck-work"));
+        assert_eq!(v["numStartups"], 3);
+        // Projekt-Ebene wird nicht angefasst
+        assert!(v["projects"]["C:/x"]["mcpServers"]["paneldeck"].is_object());
+        // zweiter Lauf: nichts mehr zu tun, Datei bleibt unverändert
+        let before = std::fs::read(&f).unwrap();
+        assert!(remove_our_servers_from(&f, exe).unwrap().is_empty());
+        assert_eq!(std::fs::read(&f).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
