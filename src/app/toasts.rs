@@ -46,6 +46,8 @@ impl ToastKind {
 pub struct ToastAction {
     pub label: String,
     pub token: u64,
+    /// Paneldeck-Fenster, dessen Ansicht den Knopf ausgelöst hat (0 = Hauptfenster, #110): der Klick wird dorthin gereicht.
+    pub window: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -227,7 +229,7 @@ impl App {
             .collect();
 
         let mut clicked: Option<u64> = None;
-        let mut action_token: Option<u64> = None;
+        let mut action_token: Option<(u64, u64)> = None;
         let mut new_hover: Option<u64> = None;
         let mut offset = EDGE;
         for (id, text, kind, target, action, alpha) in snap {
@@ -266,7 +268,7 @@ impl App {
                 });
                 let rect = r.response.rect;
                 if action_hit {
-                    action_token = action.as_ref().map(|a| a.token);
+                    action_token = action.as_ref().map(|a| (a.token, a.window));
                 }
                 // Akzentstreifen links (folgt der Rundung der Ecken).
                 let strip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + STRIP, rect.max.y));
@@ -297,8 +299,8 @@ impl App {
         if let Some(id) = clicked {
             self.toasts.dismiss(now, id);
         }
-        if let Some(t) = action_token {
-            self.toast_action_clicked(ctx, t);
+        if let Some((t, window)) = action_token {
+            self.toast_action_clicked(ctx, t, window);
         }
         // Für Ein-/Ausblenden und den Ablauf alle ~33 ms neu zeichnen, solange Toasts stehen.
         ctx.request_repaint_after(Duration::from_millis(33));
@@ -331,9 +333,9 @@ mod tests {
     fn toast_can_carry_an_action_button() {
         let mut q = q();
         q.push(0.0, "plain".into(), ToastKind::Info, None);
-        q.push_with_action(0.1, "undoable".into(), ToastKind::Info, None, Some(ToastAction { label: "Undo".into(), token: 7 }));
+        q.push_with_action(0.1, "undoable".into(), ToastKind::Info, None, Some(ToastAction { label: "Undo".into(), token: 7, window: 0 }));
         assert_eq!(q.items()[0].action, None);
-        assert_eq!(q.items()[1].action, Some(ToastAction { label: "Undo".into(), token: 7 }));
+        assert_eq!(q.items()[1].action, Some(ToastAction { label: "Undo".into(), token: 7, window: 0 }));
     }
 
     #[test]

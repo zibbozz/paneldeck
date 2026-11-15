@@ -188,18 +188,21 @@ pub(super) fn prune_layout(layout: Node, ok: impl Fn(u64) -> bool) -> Option<Nod
     l
 }
 
-/// Welche Sitzung sieht der Nutzer gerade? Hauptfenster im Vordergrund → dessen Fokus, sonst das Fenster im Vordergrund.
-/// `(irgendein Fenster im Vordergrund, angesehene Sitzung)`.
-pub(super) fn pick_seen(main_focused: bool, main_session: u64, others: impl Iterator<Item = (bool, u64)>) -> (bool, u64) {
+/// Paneldeck-Fenster im Vordergrund (0 = Hauptfenster), `None` = keins. Einmal je Bild zu Beginn des Hauptbildes bestimmt
+/// (Hauptfenster: Stand dieses Bildes, weitere Fenster: Stand ihres letzten Bildes) und dann überall benutzt – so zeichnet
+/// genau ein Fenster Hinweise und Toasts, auch im Bild, in dem der Fokus wechselt.
+pub(super) fn foreground(main_focused: bool, others: impl Iterator<Item = (u64, bool)>) -> Option<u64> {
     if main_focused {
-        return (true, main_session);
+        return Some(0);
     }
-    for (focused, session) in others {
-        if focused {
-            return (true, session);
-        }
-    }
-    (false, main_session)
+    others.filter(|(_, f)| *f).map(|(id, _)| id).next()
+}
+
+/// Weitergereichtes für geschlossene Fenster verwerfen. Liefert, wie viele Einträge wegfielen.
+pub(super) fn drop_closed<T>(queue: &mut Vec<(u64, T)>, alive: impl Fn(u64) -> bool) -> usize {
+    let before = queue.len();
+    queue.retain(|(w, _)| *w == 0 || alive(*w));
+    before - queue.len()
 }
 
 /// Fenster, an das eine Aktion weitergereicht werden muss (`None` = hier ausführen).
@@ -360,7 +363,12 @@ pub(super) struct Wins {
     /// Todo-Ansicht neu, damit Änderungen aus einem Fenster im anderen erscheinen.
     pub(super) data_gen: u64,
     main_gen: u64,
-    main_focused: bool,
+    /// Fenster im Vordergrund (siehe `foreground`); bestimmt zu Beginn jedes Hauptbildes.
+    fg: Option<u64>,
+    /// Fenster, das zuletzt Hinweise und Toasts gezeichnet hat.
+    overlay_last: u64,
+    /// „Rückgängig“ eines Toasts, dessen Änderung in einem anderen Fenster entstand: (Fenster, Token).
+    undo: Vec<(u64, u64)>,
     /// „Sicherung wiederherstellen“ aus einem weiteren Fenster: nach dessen Bild speichern und beenden.
     pub(super) exit_after_save: bool,
 }
@@ -445,10 +453,42 @@ impl App {
         ctx.request_repaint();
     }
 
-    /// Hauptfenster, Beginn des Bildes: Fokuszustand merken, Ansicht prüfen, Todo-Ansicht ggf. neu laden, weitergereichte Aktionen.
+    /// Ganz zu Beginn des Hauptbildes: welches Fenster ist vorn (für „gesehen“, Benachrichtigungen, Hinweise und Toasts)?
+    pub(super) fn track_focus(&mut self, ctx: &egui::Context) {
+        let main = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        self.wins.fg = foreground(main, self.wins.list.iter().map(|w| (w.id, w.os_focused)));
+        let overlay = self.overlay_window();
+        if overlay != self.wins.overlay_last {
+            self.wins.overlay_last = overlay;
+            self.toasts_hover = None; // der Mauszeiger des anderen Fensters hält keinen Toast mehr an
+        }
+    }
+
+    /// Fenster, das in diesem Bild Hinweise und Toasts zeichnet: das im Vordergrund, sonst das Hauptfenster.
+    pub(super) fn overlay_window(&self) -> u64 {
+        self.wins.fg.unwrap_or(0)
+    }
+
+    /// „Rückgängig“-Klicks, die diesem Fenster gehören, ausführen (der Rückgängig-Stapel gehört zur Todo-Ansicht des Fensters).
+    fn run_routed_undo(&mut self, ctx: &egui::Context) {
+        let cur = self.wins.cur;
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.wins.undo).into_iter().partition(|(w, _)| *w == cur);
+        self.wins.undo = rest;
+        for (_, token) in mine {
+            self.undo_here(ctx, token);
+        }
+    }
+
+    /// „Rückgängig“ für die Todo-Ansicht eines anderen Fensters vormerken (läuft in dessen nächstem Bild, ohne es nach vorn zu holen).
+    pub(super) fn wins_undo_later(&mut self, ctx: &egui::Context, window: u64, token: u64) {
+        self.wins.undo.push((window, token));
+        ctx.request_repaint();
+    }
+
+    /// Hauptfenster, Beginn des Bildes: Ansicht prüfen, Todo-Ansicht ggf. neu laden, weitergereichte Aktionen.
     pub(super) fn main_frame_begin(&mut self, ctx: &egui::Context) -> Vec<Action> {
         debug_assert_eq!(self.wins.cur, 0);
-        self.wins.main_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        self.run_routed_undo(ctx);
         if self.wins.main_gen != self.wins.data_gen {
             self.wins.main_gen = self.wins.data_gen;
             self.plan.invalidate();
@@ -463,7 +503,7 @@ impl App {
     /// Hinweise und Toasts erscheinen im Fenster, das der Nutzer gerade benutzt: im Hauptfenster, außer ein weiteres Fenster
     /// ist im Vordergrund (dann zeichnet dieses sie, siehe `child_frame`).
     pub(super) fn main_overlay(&self) -> bool {
-        self.wins.main_focused || !self.wins.list.iter().any(|w| w.os_focused)
+        self.overlay_window() == 0
     }
 
     /// Ist der Ticket-Verknüpfungsdialog für eine Sitzung dieses Fensters offen?
@@ -471,10 +511,14 @@ impl App {
         self.tlinks_picker_session().is_none_or(|s| self.window_of(s).unwrap_or(0) == self.wins.cur)
     }
 
-    /// Angesehene Sitzung über alle Fenster (für „gesehen“ und Benachrichtigungen). Nur mit dem Hauptfenster in den Feldern.
-    pub(super) fn seen_focus(&self, ctx: &egui::Context) -> (bool, u64) {
-        let main = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        pick_seen(main, self.focused, self.wins.list.iter().map(|w| (w.os_focused, w.view.focused)))
+    /// Angesehene Sitzung über alle Fenster (für „gesehen“ und Benachrichtigungen): `(ein Fenster ist vorn, dessen fokussierte
+    /// Sitzung)`. Nur mit dem Hauptfenster in den Feldern, nach `track_focus`.
+    pub(super) fn seen_focus(&self) -> (bool, u64) {
+        match self.wins.fg {
+            None => (false, self.focused),
+            Some(0) => (true, self.focused),
+            Some(w) => (true, self.wins.list.iter().find(|x| x.id == w).map(|x| x.view.focused).unwrap_or(0)),
+        }
     }
 
     /// Für `list_sessions`: (Fenster, im Fenster fokussiert, sichtbar). „Sichtbar“ wie bisher: im aktiven Projekt seines Fensters
@@ -603,8 +647,11 @@ impl App {
             self.leave(w);
         }
         list.retain(|w| !w.close);
-        let closed: Vec<u64> = self.wins.queue.iter().map(|(w, _)| *w).filter(|w| *w != 0 && !list.iter().any(|x| x.id == *w)).collect();
-        self.wins.queue.retain(|(w, _)| !closed.contains(w));
+        drop_closed(&mut self.wins.queue, |w| list.iter().any(|x| x.id == w));
+        if drop_closed(&mut self.wins.undo, |w| list.iter().any(|x| x.id == w)) > 0 {
+            let lang = self.settings.language;
+            self.push_toast(lang.t("Rückgängig nicht mehr möglich: das Fenster der Änderung wurde geschlossen.", "Undo is no longer possible: the window of that change was closed.").to_string(), super::toasts::ToastKind::Error, None);
+        }
         // Während des Zeichnens neu angelegte Fenster (Strg+Klick im weiteren Fenster) anhängen.
         list.append(&mut self.wins.list);
         self.wins.list = list;
@@ -656,6 +703,7 @@ impl App {
                 w.close = true;
             }
         }
+        self.run_routed_undo(ctx);
         let mut actions = self.take_routed(ctx);
         self.poll_history_hits();
         self.handle_drops(ctx);
@@ -672,7 +720,7 @@ impl App {
         } else {
             self.tasks_view(ctx);
         }
-        if w.os_focused && !self.wins.main_focused {
+        if self.overlay_window() == w.id {
             self.notice_ui(ctx);
             self.toasts_ui(ctx);
         }
@@ -933,10 +981,20 @@ mod tests {
     }
 
     #[test]
-    fn seen_session_follows_the_foreground_window() {
-        assert_eq!(pick_seen(true, 1, [(true, 5)].into_iter()), (true, 1));
-        assert_eq!(pick_seen(false, 1, [(false, 4), (true, 5)].into_iter()), (true, 5));
-        assert_eq!(pick_seen(false, 1, [(false, 4)].into_iter()), (false, 1), "kein Fenster vorn: nichts gilt als gesehen");
+    fn exactly_one_foreground_window() {
+        assert_eq!(foreground(true, [(2, true)].into_iter()), Some(0), "Hauptfenster vorn (aktueller Stand) gewinnt");
+        assert_eq!(foreground(false, [(2, false), (3, true)].into_iter()), Some(3));
+        assert_eq!(foreground(false, [(2, false)].into_iter()), None, "kein Fenster vorn: nichts gilt als gesehen, Toasts im Hauptfenster");
+        assert_eq!(foreground(false, [(2, true), (3, true)].into_iter()), Some(2), "höchstens eins, auch bei veraltetem Stand");
+    }
+
+    #[test]
+    fn routed_entries_of_closed_windows_are_dropped() {
+        let mut q = vec![(0u64, 'a'), (2, 'b'), (5, 'c'), (2, 'd')];
+        assert_eq!(drop_closed(&mut q, |w| w == 2), 1, "Fenster 5 ist zu");
+        assert_eq!(q, vec![(0, 'a'), (2, 'b'), (2, 'd')], "das Hauptfenster gibt es immer");
+        assert_eq!(drop_closed(&mut q, |_| false), 2);
+        assert_eq!(q, vec![(0, 'a')]);
     }
 
     #[test]

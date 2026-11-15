@@ -2024,7 +2024,7 @@ impl App {
     /// Ordner (OSC) und beendete Befehle der Shell-Integration auswerten.
     fn poll_shell(&mut self, ctx: &egui::Context) {
         // Angesehen ist die fokussierte Sitzung des Fensters im Vordergrund (auch eines weiteren Fensters).
-        let (window_focused, focused_id) = self.seen_focus(ctx);
+        let (window_focused, focused_id) = self.seen_focus();
         let threshold = self.settings.cmd_notify_secs as u64 * 1000;
         let lang = self.settings.language;
         let mut toasts: Vec<(String, CmdDone)> = Vec::new();
@@ -2163,7 +2163,7 @@ impl App {
     }
 
     fn poll_hooks(&mut self, ctx: &egui::Context) {
-        let (window_focused, seen_id) = self.seen_focus(ctx);
+        let (window_focused, seen_id) = self.seen_focus();
         // Ereignisse in der angesehenen Sitzung gelten als gesehen.
         if window_focused {
             if let Some(e) = self.entries.get_mut(&seen_id) {
@@ -2242,7 +2242,7 @@ impl App {
 
     fn queue_finished(&mut self, ctx: &egui::Context, names: Vec<String>) {
         let lang = self.settings.language;
-        let window_focused = self.seen_focus(ctx).0;
+        let window_focused = self.seen_focus().0;
         for name in names {
             let body = lang.t("Warteschlange abgearbeitet", "Queue finished");
             if window_focused {
@@ -2778,6 +2778,7 @@ impl eframe::App for App {
         }
         #[cfg(feature = "readme-shots")]
         self.dev_shot_mode();
+        self.track_focus(ctx);
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
         crate::usage::set_prices(self.settings.prices.clone());
