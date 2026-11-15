@@ -70,7 +70,7 @@ pub fn fetch(
         let mut r = t.get(&url, accept).map_err(FetchError::Net)?;
         match r.status() {
             301 | 302 | 303 | 307 | 308 => {
-                let loc = r.location().ok_or_else(|| FetchError::Net("redirect without location".into()))?;
+                let loc = r.location().ok_or_else(|| FetchError::Net(crate::state::t("Weiterleitung ohne Ziel", "redirect without location").into()))?;
                 // Relative Weiterleitungen (selten bei GitHub) gibt es hier nicht: nur absolute, geprüfte HTTPS-Adressen.
                 url = loc;
                 continue;
@@ -100,11 +100,11 @@ pub fn fetch(
             progress(done, total);
         }
         if total.is_some_and(|n| n != done) {
-            return Err(FetchError::Net(format!("incomplete ({done} of {} bytes)", total.unwrap_or(0))));
+            return Err(FetchError::Net(format!("{} ({done} / {} bytes)", crate::state::t("unvollständig", "incomplete"), total.unwrap_or(0))));
         }
         return Ok(done);
     }
-    Err(FetchError::Net("too many redirects".into()))
+    Err(FetchError::Net(crate::state::t("zu viele Weiterleitungen", "too many redirects").into()))
 }
 
 /// Ganze Antwort in den Speicher (für kleine Dateien: JSON, Prüfsummen).

@@ -96,7 +96,7 @@ pub fn nsis_dir_arg(dir: &Path) -> Result<String, String> {
     let d = dir.to_string_lossy();
     let d = d.strip_prefix(r"\\?\").unwrap_or(&d);
     if d.is_empty() || d.contains(['"', '\n', '\r']) {
-        return Err(format!("{d}: unsupported folder name"));
+        return Err(format!("{d}: {}", crate::state::t("Ordnername wird nicht unterstützt", "unsupported folder name")));
     }
     Ok(format!("/D={}", d.trim_end_matches('\\')))
 }
@@ -119,10 +119,10 @@ pub fn run_setup(setup: &Path, dir: &Path, timeout: std::time::Duration) -> Resu
     loop {
         match child.try_wait() {
             Ok(Some(st)) if st.success() => return Ok(()),
-            Ok(Some(st)) => return Err(format!("setup exit code {}", st.code().unwrap_or(-1))),
+            Ok(Some(st)) => return Err(format!("{} {}", crate::state::t("Setup endete mit Code", "setup exit code"), st.code().unwrap_or(-1))),
             Ok(None) if t0.elapsed() > timeout => {
                 let _ = child.kill();
-                return Err("setup timed out".into());
+                return Err(crate::state::t("Zeitüberschreitung beim Setup", "setup timed out").into());
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
             Err(e) => return Err(e.to_string()),

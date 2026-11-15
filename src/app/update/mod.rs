@@ -349,7 +349,7 @@ fn download(
         }
         if asset.name.ends_with(".zip") {
             let z = std::fs::read(&path).map_err(|e| e.to_string())?;
-            check_exe(&zip::extract(&z, &release::zip_exe_entry(version), release::MAX_ASSET as usize)?, lang)?;
+            check_exe(&zip::extract(&z, &release::zip_exe_entry(version), release::MAX_ASSET as usize).map_err(|e| zip_err(e, lang))?, lang)?;
         }
         Ok(())
     })();
@@ -360,6 +360,10 @@ fn download(
             Err(e)
         }
     }
+}
+
+fn zip_err(e: String, lang: Lang) -> String {
+    format!("{} ({e})", lang.t("Das ZIP ist beschädigt oder unvollständig", "The ZIP is damaged or incomplete"))
 }
 
 fn check_exe(b: &[u8], lang: Lang) -> Result<(), String> {
@@ -384,7 +388,7 @@ fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, offer: &Offer, backu
         }
         Some(Flavor::Portable) => {
             let z = std::fs::read(file).map_err(|e| e.to_string())?;
-            let bytes = zip::extract(&z, &release::zip_exe_entry(&offer.version), release::MAX_ASSET as usize)?;
+            let bytes = zip::extract(&z, &release::zip_exe_entry(&offer.version), release::MAX_ASSET as usize).map_err(|e| zip_err(e, lang))?;
             check_exe(&bytes, lang)?;
             install::swap_exe(exe, &bytes).map_err(|e| format!("{}: {e}", lang.t("paneldeck.exe konnte nicht ersetzt werden", "Could not replace paneldeck.exe")))
         }
