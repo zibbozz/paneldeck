@@ -29,6 +29,7 @@ mod query;
 mod search;
 mod layout;
 mod links;
+mod llm;
 mod markdown;
 mod mcp;
 mod shells;
