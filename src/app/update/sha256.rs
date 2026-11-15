@@ -104,7 +104,6 @@ impl Sha256 {
 }
 
 /// Prüfsumme eines Speicherblocks.
-#[cfg(test)]
 pub fn digest(data: &[u8]) -> [u8; 32] {
     let mut s = Sha256::new();
     s.update(data);

@@ -49,6 +49,7 @@ impl App {
         match install::spawn_restart(&self.exe) {
             Ok(()) => {
                 crate::app::winchrome::shutdown();
+                self.tray = None; // Tray-Symbol entfernen (sonst bleibt bis zum Überfahren ein totes Symbol stehen)
                 std::process::exit(0);
             }
             Err(e) => {

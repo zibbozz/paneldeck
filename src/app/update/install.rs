@@ -132,7 +132,7 @@ pub fn run_setup(setup: &Path, dir: &Path, timeout: std::time::Duration) -> Resu
 
 /// Parameter der laufenden Instanz (Datenordner/Profil), damit der Neustart dieselben Daten öffnet.
 fn instance_args() -> Vec<String> {
-    // TODO(2.1 wiring): paths::instance_args()
+    // TODO(2.1 wiring): paths::instance_args() (Teil #60: `--data-dir`/`--profile` dieser Instanz); bis dahin leer.
     Vec::new()
 }
 
@@ -149,8 +149,9 @@ pub fn spawn_restart(exe: &Path) -> Result<(), String> {
 /// Für `main.rs`, ganz am Anfang (vor der Einzelinstanz-Weiterleitung): wurde diese Instanz von einem Update neu gestartet,
 /// warten, bis die alte beendet ist (höchstens 30 s), und die Variable entfernen (Terminals sollen sie nicht erben).
 ///
-/// TODO(2.1 wiring): in `main()` vor `cli::init()`/`forward_to_running` aufrufen:
-/// `app::update_wait_for_previous_instance();`
+/// TODO(2.1 wiring): in `main()` nach den `--hook`/`--uninstall-hooks`/`mcp`-Zweigen und vor `cli::init()`/`forward_to_running`
+/// aufrufen: `app::update::wait_for_previous_instance();` – ohne diesen Aufruf übergibt sich die neu gestartete Instanz an die
+/// noch laufende alte und beendet sich (dann startet nach dem Update nichts).
 #[allow(dead_code)]
 pub fn wait_for_previous_instance() {
     let Some(v) = std::env::var_os(WAIT_PID_ENV) else { return };

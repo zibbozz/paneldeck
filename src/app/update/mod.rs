@@ -63,7 +63,8 @@ pub(super) enum Phase {
 
 enum Msg {
     Checked { manual: bool, res: Result<Outcome, String> },
-    Downloaded(Result<PathBuf, String>),
+    /// Geprüfte Datei samt erwarteter Prüfsumme (wird vor der Installation erneut verglichen).
+    Downloaded(Result<(PathBuf, [u8; 32]), String>),
     Installed(Result<(), String>),
 }
 
@@ -87,7 +88,8 @@ pub struct Updater {
     pub(super) result: Option<(String, bool)>,
     /// Fehler des Downloads/der Installation (im Dialog).
     pub(super) error: Option<String>,
-    prepared: Option<PathBuf>,
+    /// Heruntergeladene, geprüfte Datei und ihre erwartete SHA-256-Prüfsumme.
+    prepared: Option<(PathBuf, [u8; 32])>,
     retry_at: i64,
     next_tick: Instant,
     flavor: Option<Option<Flavor>>,
@@ -95,7 +97,8 @@ pub struct Updater {
 
 impl Updater {
     pub fn new(auto_check_allowed: bool) -> Self {
-        cleanup_old_downloads();
+        // Im Hintergrund: der Temp-Ordner kann groß sein, der Start soll nicht warten.
+        std::thread::spawn(cleanup_old_downloads);
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
             allowed: auto_check_allowed,
@@ -193,7 +196,7 @@ impl Updater {
 
     /// Installation starten (nach der Bestätigung). `backup` = (Datenbank, Sicherungsordner) für eine Hauptversion.
     pub(super) fn start_install(&mut self, exe: PathBuf, backup: Option<(PathBuf, PathBuf)>, lang: Lang, ctx: &eframe::egui::Context) {
-        let (Some(file), Some(offer)) = (self.prepared.clone(), self.offer.clone()) else { return };
+        let (Some((file, want)), Some(offer)) = (self.prepared.clone(), self.offer.clone()) else { return };
         if self.phase != Phase::Ready {
             return;
         }
@@ -202,7 +205,7 @@ impl Updater {
         let flavor = self.flavor(&exe);
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let res = install(&exe, flavor, &file, &offer, backup, lang);
+            let res = install(&exe, flavor, &file, &want, &offer, backup, lang);
             let _ = tx.send(Msg::Installed(res));
             ctx.request_repaint();
         });
@@ -324,7 +327,7 @@ fn download(
     lang: Lang,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(u64, Option<u64>),
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, [u8; 32]), String> {
     use std::io::Write;
     let text = http::fetch_bytes(t, &sums.url, "application/octet-stream", release::MAX_SUMS, cancel).map_err(|e| format!("{}: {}", release::SUMS_NAME, e.text(lang)))?;
     let list = release::parse_sums(&String::from_utf8_lossy(&text));
@@ -354,7 +357,7 @@ fn download(
         Ok(())
     })();
     match res {
-        Ok(()) => Ok(path),
+        Ok(()) => Ok((path, want)),
         Err(e) => {
             let _ = std::fs::remove_file(&path);
             Err(e)
@@ -373,9 +376,16 @@ fn check_exe(b: &[u8], lang: Lang) -> Result<(), String> {
     Ok(())
 }
 
-/// Installieren: bei einer Hauptversion vorher die Datenbank sichern (scheitert das, wird nicht aktualisiert), dann Setup still
-/// ausführen bzw. die Programmdatei tauschen.
-fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, offer: &Offer, backup: Option<(PathBuf, PathBuf)>, lang: Lang) -> Result<(), String> {
+/// Installieren: die heruntergeladene Datei erneut gegen die Prüfsumme vergleichen (sie lag seit dem Download im Temp-Ordner),
+/// bei einer Hauptversion vorher die Datenbank sichern (scheitert das, wird nicht aktualisiert), dann Setup still ausführen bzw.
+/// die Programmdatei tauschen.
+#[allow(clippy::too_many_arguments)]
+fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, want: &[u8; 32], offer: &Offer, backup: Option<(PathBuf, PathBuf)>, lang: Lang) -> Result<(), String> {
+    let data = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    if sha256::digest(&data) != *want {
+        let _ = std::fs::remove_file(file);
+        return Err(lang.t("Die heruntergeladene Datei wurde verändert – bitte erneut aktualisieren.", "The downloaded file was changed – please update again.").into());
+    }
     if offer.major {
         if let Some((db, dir)) = backup {
             crate::backup::create(&db, &dir, crate::backup::Kind::Manual).map_err(|e| format!("{}: {e}", lang.t("Sicherung fehlgeschlagen – Update abgebrochen", "Backup failed – update cancelled")))?;
@@ -387,8 +397,7 @@ fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, offer: &Offer, backu
             install::run_setup(file, dir, Duration::from_secs(300)).map_err(|e| format!("{}: {e}", lang.t("Installation fehlgeschlagen", "Installation failed")))
         }
         Some(Flavor::Portable) => {
-            let z = std::fs::read(file).map_err(|e| e.to_string())?;
-            let bytes = zip::extract(&z, &release::zip_exe_entry(&offer.version), release::MAX_ASSET as usize).map_err(|e| zip_err(e, lang))?;
+            let bytes = zip::extract(&data, &release::zip_exe_entry(&offer.version), release::MAX_ASSET as usize).map_err(|e| zip_err(e, lang))?;
             check_exe(&bytes, lang)?;
             install::swap_exe(exe, &bytes).map_err(|e| format!("{}: {e}", lang.t("paneldeck.exe konnte nicht ersetzt werden", "Could not replace paneldeck.exe")))
         }
@@ -483,16 +492,38 @@ mod tests {
         let asset = rel.asset(&release::zip_name(&v)).unwrap().clone();
         let sums = rel.asset(release::SUMS_NAME).unwrap().clone();
         let mut last = 0;
-        let p = download(&t, &asset, &sums, &v, &d.join("dl"), Lang::En, &AtomicBool::new(false), &mut |n, _| last = n).unwrap();
+        let (p, want) = download(&t, &asset, &sums, &v, &d.join("dl"), Lang::En, &AtomicBool::new(false), &mut |n, _| last = n).unwrap();
         assert!(p.is_file());
         assert!(last > 0);
         // Portabel installieren: exe getauscht, alte als .old
         let exe = d.join("paneldeck.exe");
         std::fs::write(&exe, b"MZ old").unwrap();
         let offer = Offer { version: v.clone(), html_url: String::new(), plan: Plan::Install { asset, sums }, major: false };
-        install(&exe, Some(Flavor::Portable), &p, &offer, None, Lang::En).unwrap();
+        install(&exe, Some(Flavor::Portable), &p, &want, &offer, None, Lang::En).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), fake_exe());
         assert_eq!(std::fs::read(d.join("paneldeck.exe.old")).unwrap(), b"MZ old");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn install_rechecks_downloaded_file() {
+        let (t, rel) = fake_release(false);
+        let d = tmp("recheck");
+        let v = Version::new(9, 1, 0);
+        let asset = rel.asset(&release::zip_name(&v)).unwrap().clone();
+        let sums = rel.asset(release::SUMS_NAME).unwrap().clone();
+        let (p, want) = download(&t, &asset, &sums, &v, &d.join("dl"), Lang::En, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+        // Zwischen Download und Neustart verändert → nichts wird angefasst, Datei verworfen
+        let mut b = std::fs::read(&p).unwrap();
+        b[10] ^= 1;
+        std::fs::write(&p, b).unwrap();
+        let exe = d.join("paneldeck.exe");
+        std::fs::write(&exe, b"MZ old").unwrap();
+        let offer = Offer { version: v, html_url: String::new(), plan: Plan::Install { asset, sums }, major: false };
+        let e = install(&exe, Some(Flavor::Portable), &p, &want, &offer, None, Lang::En).unwrap_err();
+        assert!(e.contains("was changed"), "{e}");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"MZ old");
+        assert!(!p.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -522,15 +553,44 @@ mod tests {
         let v = Version::new(10, 0, 0);
         let a = release::Asset { name: "x".into(), url: String::new(), size: 0 };
         let offer = Offer { version: v, html_url: String::new(), plan: Plan::Install { asset: a.clone(), sums: a }, major: true };
+        // Eine (unbrauchbare) heruntergeladene Datei mit passender Prüfsumme
+        let file = d.join("none.zip");
+        std::fs::write(&file, b"not a zip").unwrap();
+        let want = sha256::digest(b"not a zip");
         // Datenbank fehlt → Sicherung scheitert → nichts wird angefasst
-        let e = install(&exe, Some(Flavor::Portable), &d.join("none.zip"), &offer, Some((d.join("missing.db"), d.join("backups"))), Lang::En).unwrap_err();
+        let e = install(&exe, Some(Flavor::Portable), &file, &want, &offer, Some((d.join("missing.db"), d.join("backups"))), Lang::En).unwrap_err();
         assert!(e.contains("Backup failed"), "{e}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"MZ old");
         // Mit echter Datenbank wird gesichert
         let db = d.join("paneldeck.db");
         rusqlite::Connection::open(&db).unwrap().execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);").unwrap();
-        let _ = install(&exe, Some(Flavor::Portable), &d.join("none.zip"), &offer, Some((db, d.join("backups"))), Lang::En);
+        let _ = install(&exe, Some(Flavor::Portable), &file, &want, &offer, Some((db, d.join("backups"))), Lang::En);
         assert_eq!(crate::backup::list(&d.join("backups")).len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Lokaler Schein-Release-Feed von `tools/update-feed.sh` (nur von Hand, kein Netz):
+    /// `PANELDECK_TEST_FEED_DIR=<feed> cargo test --release local_feed -- --ignored`. Prüft API-Antwort, Prüfsummen, Download
+    /// beider Dateien und den portablen Tausch gegen das echte ZIP (aus Pythons `zipfile`).
+    #[test]
+    #[ignore = "needs a feed from tools/update-feed.sh"]
+    fn local_feed() {
+        let dir = PathBuf::from(std::env::var_os("PANELDECK_TEST_FEED_DIR").expect("PANELDECK_TEST_FEED_DIR"));
+        let t = http::feed::FeedTransport { dir };
+        let cancel = AtomicBool::new(false);
+        let d = tmp("feed");
+        for flavor in [Flavor::Portable, Flavor::Installed] {
+            let Outcome::Newer { offer, .. } = check_with(&t, &Version::new(0, 0, 1), Some(flavor), "", Lang::En, &cancel).unwrap() else { panic!("no offer") };
+            let Plan::Install { asset, sums } = &offer.plan else { panic!("announce only: {:?}", offer.plan) };
+            let (p, want) = download(&t, asset, sums, &offer.version, &d.join("dl"), Lang::En, &cancel, &mut |_, _| {}).unwrap();
+            if flavor == Flavor::Portable {
+                let exe = d.join("paneldeck.exe");
+                std::fs::write(&exe, b"MZ old").unwrap();
+                install(&exe, Some(flavor), &p, &want, &offer, None, Lang::En).unwrap();
+                assert_eq!(&std::fs::read(&exe).unwrap()[..2], b"MZ");
+                assert!(d.join("paneldeck.exe.old").is_file());
+            }
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

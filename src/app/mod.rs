@@ -859,7 +859,8 @@ impl App {
             editor: None,
             applied_font: String::new(),
             wins: Default::default(),
-            updater: update::Updater::new(true /* TODO(2.1 wiring): --no-update-check → false */),
+            // TODO(2.1 wiring): --no-update-check (pass `false` when it is given: no automatic check for this start)
+            updater: update::Updater::new(true),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
