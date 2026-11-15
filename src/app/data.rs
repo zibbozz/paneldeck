@@ -5,6 +5,10 @@ use crate::backup::{self, Kind};
 
 impl App {
     fn backup_dir_path(&self) -> PathBuf {
+        // `--backup-dir` gilt nur für diesen Start und landet nie in den Einstellungen.
+        if let Some(b) = &crate::cli::get().backup_dir {
+            return b.clone();
+        }
         backup::dir(&self.dir, &self.settings.backup_dir)
     }
 
@@ -85,15 +89,19 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.label(lang.t("Ordner:", "Folder:"));
             ui.label(RichText::new(dir.display().to_string()).small().monospace());
+            if crate::cli::get().backup_dir.is_some() {
+                ui.label(RichText::new(lang.t("(festgelegt mit --backup-dir)", "(set by --backup-dir)")).small().color(dim));
+            }
         });
+        let fixed = crate::cli::get().backup_dir.is_some();
         ui.horizontal_wrapped(|ui| {
-            if ui.button(lang.t("Ordner wählen …", "Choose folder …")).clicked() {
+            if ui.add_enabled(!fixed, egui::Button::new(lang.t("Ordner wählen …", "Choose folder …"))).clicked() {
                 if let Some(p) = notify::pick_folder(&dir.display().to_string()) {
                     self.settings.backup_dir = p;
                     self.backups_dirty = true;
                 }
             }
-            if ui.add_enabled(!self.settings.backup_dir.is_empty(), egui::Button::new(lang.t("Standardordner", "Default folder"))).clicked() {
+            if ui.add_enabled(!fixed && !self.settings.backup_dir.is_empty(), egui::Button::new(lang.t("Standardordner", "Default folder"))).clicked() {
                 self.settings.backup_dir.clear();
                 self.backups_dirty = true;
             }

@@ -70,8 +70,12 @@ impl App {
                 match self.settings_tab {
                     0 => {
                         row(ui, lang.t("Sprache", "Language"), "", |ui| {
-                            ui.selectable_value(&mut self.settings.language, Lang::De, "Deutsch");
-                            ui.selectable_value(&mut self.settings.language, Lang::En, "English");
+                            let a = ui.selectable_value(&mut self.settings.language, Lang::De, "Deutsch");
+                            let b = ui.selectable_value(&mut self.settings.language, Lang::En, "English");
+                            // Eine eigene Wahl beendet die Überschreibung durch `--lang` (sie wird dann gespeichert).
+                            if a.clicked() || b.clicked() {
+                                state::clear_lang_override();
+                            }
                         });
                         let cur = self.shells.iter().find(|s| s.id == self.settings.default_shell).map(|s| s.label.clone()).unwrap_or_default();
                         row(ui, lang.t("Standard-Shell", "Default shell"), lang.t("Für neue Sitzungen und Teilungen", "For new sessions and splits"), |ui| {
@@ -392,6 +396,12 @@ impl App {
                         for (k, v) in [
                             (lang.t("Programm", "Program"), self.exe.display().to_string()),
                             (lang.t("Datenordner", "Data folder"), self.dir.display().to_string()),
+                            (lang.t("Herkunft", "Source"), crate::paths::source_label(crate::paths::get().source, lang).to_string()),
+                            (lang.t("Profil", "Profile"), crate::paths::get().profile.clone().unwrap_or_else(|| lang.t("keins (Standard)", "none (default)").to_string())),
+                            (lang.t("Startoptionen", "Start overrides"), {
+                                let o = crate::cli::get().overrides();
+                                if o.is_empty() { lang.t("keine", "none").to_string() } else { o.join("  ") }
+                            }),
                             ("Build", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)),
                         ] {
                             ui.horizontal(|ui| {
@@ -419,6 +429,9 @@ impl App {
                         }
                     }
                     _ => {
+                        if crate::cli::get().no_tray {
+                            ui.label(RichText::new(lang.t("Gestartet mit --no-tray: kein Tray-Symbol, „Schließen → Tray“ und „Minimieren → Tray“ wirken bei diesem Start nicht.", "Started with --no-tray: no tray icon, “Close → tray” and “Minimize → tray” have no effect for this start.")).small().color(style::dim(ui)));
+                        }
                         row(ui, lang.t("Schließen → Tray", "Close → tray"), lang.t("Das Fenster verschwindet im Tray (Beenden über das Tray-Menü)", "The window goes to the tray (quit via the tray menu)"), |ui| {
                             style::toggle(ui, &mut self.settings.close_to_tray);
                         });

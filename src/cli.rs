@@ -1,70 +1,298 @@
-//! Kommandozeilenargumente: `--open <ordner> [--claude]`, `--tray`.
+//! Kommandozeilenargumente (handgeschrieben, ohne zusätzliche Crate).
+//!
+//! Start: `--open <ordner> [--claude]`, `--tray`, `--no-tray`, `--data-dir <ordner>`, `--profile <name>`,
+//! `--backup-dir <ordner>`, `--lang en|de`, `--reset-settings`, `--version`, `--help`/`-h`/`-?`.
+//! Agenten-Brücke: `mcp [--data-dir <ordner>] [--profile <name>] [--lang en|de]`.
+//! `--hook` wird vorher in `main` behandelt (eigene Argumente von Claude Code) und kommt hier nicht an;
+//! `--uninstall-hooks` (Deinstallationsprogramm) ist ein bekanntes Flag.
 
+use crate::state::Lang;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct Cli {
     pub open: Option<String>,
     pub claude: bool,
     pub tray: bool,
+    /// Unterbefehl `mcp` (stdio-Brücke für Agenten).
+    pub mcp: bool,
+    /// `--data-dir`, bereits absolut.
+    pub data_dir: Option<PathBuf>,
+    /// `--backup-dir`, bereits absolut (nur für diesen Start, wird nicht gespeichert).
+    pub backup_dir: Option<PathBuf>,
+    pub profile: Option<String>,
+    /// `--lang` (nur für diesen Start, wird nicht gespeichert).
+    pub lang: Option<Lang>,
+    pub no_tray: bool,
+    pub reset_settings: bool,
+    pub version: bool,
+    pub help: bool,
+    pub uninstall_hooks: bool,
+}
+
+/// Fehler beim Lesen der Kommandozeile (Exit-Code 2).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CliError {
+    Unknown(String),
+    MissingValue(String),
+    BadProfile(String),
+    BadLang(String),
+    Unexpected(String),
+    NotWithMcp(String),
+}
+
+impl CliError {
+    pub fn message(&self, l: Lang) -> String {
+        let body = match self {
+            CliError::Unknown(o) => format!("{} {}", l.t("Unbekannte Option:", "Unknown option:"), o),
+            CliError::MissingValue(o) => format!("{} {}", l.t("Wert fehlt für", "Missing value for"), o),
+            CliError::BadProfile(n) => format!(
+                "{} {} – {}",
+                l.t("Ungültiger Profilname:", "Invalid profile name:"),
+                l.q(n),
+                l.t(
+                    "erlaubt sind 1–40 Zeichen aus A–Z, a–z, 0–9, _ und -, keine Windows-Gerätenamen (CON, NUL, …)",
+                    "allowed are 1–40 characters from A–Z, a–z, 0–9, _ and -, no Windows device names (CON, NUL, …)"
+                )
+            ),
+            CliError::BadLang(v) => format!("{} {} – {}", l.t("Ungültige Sprache:", "Invalid language:"), l.q(v), l.t("erlaubt sind en und de", "allowed are en and de")),
+            CliError::Unexpected(a) => format!("{} {}", l.t("Unerwartetes Argument:", "Unexpected argument:"), a),
+            CliError::NotWithMcp(o) => format!("{} {}", l.t("Mit mcp sind nur --data-dir, --profile, --lang und --help erlaubt, nicht:", "With mcp only --data-dir, --profile, --lang and --help are allowed, not:"), o),
+        };
+        format!("Paneldeck: {body}\n{}", l.t("Hilfe: paneldeck.exe --help", "Help: paneldeck.exe --help"))
+    }
+}
+
+/// Erlaubte Profilnamen: `[A-Za-z0-9_-]{1,40}`, keine reservierten Windows-Gerätenamen.
+pub fn valid_profile(name: &str) -> bool {
+    if name.is_empty() || name.len() > 40 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return false;
+    }
+    let up = name.to_ascii_uppercase();
+    let reserved = matches!(up.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((up.starts_with("COM") || up.starts_with("LPT")) && up.len() == 4 && up.as_bytes()[3].is_ascii_digit());
+    !reserved
+}
+
+fn parse_lang(v: &str) -> Option<Lang> {
+    match v.to_ascii_lowercase().as_str() {
+        "en" => Some(Lang::En),
+        "de" => Some(Lang::De),
+        _ => None,
+    }
+}
+
+/// `--open "C:\"` (Laufwerkswurzel): Windows liest `\"` als maskiertes Anführungszeichen, der Rest der
+/// Kommandozeile landet im selben Argument (`C:" --claude`). Hier wieder auftrennen: Pfad + übrige Argumente.
+fn split_quoted(v: &str) -> (String, Vec<String>) {
+    match v.split_once('"') {
+        Some((path, rest)) => {
+            let path = format!("{path}\\").replace("\\\\", "\\");
+            let more = rest.split_whitespace().map(|t| t.trim_matches('"').to_string()).filter(|t| !t.is_empty()).collect();
+            (path, more)
+        }
+        None => (v.to_string(), Vec::new()),
+    }
+}
+
+/// Liest die Argumente (`args[0]` = Programm). `abs` macht relative Pfade absolut (in Tests eingespeist).
+pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf) -> Result<Cli, CliError> {
+    let mut c = Cli::default();
+    let mut rest: std::collections::VecDeque<String> = args.iter().skip(1).cloned().collect();
+    if rest.front().map(|s| s.as_str()) == Some("mcp") {
+        rest.pop_front();
+        c.mcp = true;
+    }
+    while let Some(raw) = rest.pop_front() {
+        // `--option=wert` ist gleichwertig zu `--option wert`.
+        let (opt, inline) = match raw.split_once('=') {
+            Some((o, v)) if o.starts_with("--") => (o.to_string(), Some(v.to_string())),
+            _ => (raw.clone(), None),
+        };
+        let takes_value = matches!(opt.as_str(), "--open" | "--data-dir" | "--backup-dir" | "--profile" | "--lang");
+        if inline.is_some() && !takes_value {
+            return Err(CliError::Unknown(raw));
+        }
+        let value = |rest: &mut std::collections::VecDeque<String>| -> Result<String, CliError> {
+            let v = match inline.clone() {
+                Some(v) => v,
+                None => match rest.front() {
+                    // Eine folgende Option ist kein Wert („--data-dir --tray“).
+                    Some(n) if !(n.starts_with("--") && n.len() > 2) => rest.pop_front().unwrap_or_default(),
+                    _ => return Err(CliError::MissingValue(opt.clone())),
+                },
+            };
+            if v.trim().is_empty() {
+                return Err(CliError::MissingValue(opt.clone()));
+            }
+            Ok(v)
+        };
+        if c.mcp && !matches!(opt.as_str(), "--data-dir" | "--profile" | "--lang" | "--help" | "-h" | "-?" | "/?") {
+            return Err(if opt.starts_with('-') { CliError::NotWithMcp(raw) } else { CliError::Unexpected(raw) });
+        }
+        match opt.as_str() {
+            "--open" | "--data-dir" | "--backup-dir" => {
+                let (v, more) = split_quoted(&value(&mut rest)?);
+                for m in more.into_iter().rev() {
+                    rest.push_front(m);
+                }
+                match opt.as_str() {
+                    "--open" => c.open = Some(v),
+                    "--data-dir" => c.data_dir = Some(abs(&v)),
+                    _ => c.backup_dir = Some(abs(&v)),
+                }
+            }
+            "--profile" => {
+                let v = value(&mut rest)?;
+                if !valid_profile(&v) {
+                    return Err(CliError::BadProfile(v));
+                }
+                c.profile = Some(v);
+            }
+            "--lang" => {
+                let v = value(&mut rest)?;
+                c.lang = Some(parse_lang(&v).ok_or(CliError::BadLang(v))?);
+            }
+            "--claude" => c.claude = true,
+            "--tray" => c.tray = true,
+            "--no-tray" => c.no_tray = true,
+            "--reset-settings" => c.reset_settings = true,
+            "--version" => c.version = true,
+            "--help" | "-h" | "-?" | "/?" => c.help = true,
+            "--uninstall-hooks" => c.uninstall_hooks = true,
+            o if o.starts_with('-') => return Err(CliError::Unknown(raw)),
+            _ => return Err(CliError::Unexpected(raw)),
+        }
+    }
+    Ok(c)
+}
+
+impl Cli {
+    /// Startoptionen, die Einstellungen nur für diesen Start überschreiben (für Info-Seite und Diagnose).
+    pub fn overrides(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if let Some(l) = self.lang {
+            v.push(format!("--lang {}", if l == Lang::De { "de" } else { "en" }));
+        }
+        if let Some(b) = &self.backup_dir {
+            v.push(format!("--backup-dir {}", b.display()));
+        }
+        if self.no_tray {
+            v.push("--no-tray".to_string());
+        }
+        v
+    }
 }
 
 static CLI: OnceLock<Cli> = OnceLock::new();
 
-pub fn parse(args: &[String]) -> Cli {
-    let mut c = Cli::default();
-    let mut it = args.iter().skip(1);
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--open" => {
-                if let Some(v) = it.next() {
-                    // `--open "C:\"` (Laufwerkswurzel): Windows liest `\"` als maskiertes Anführungszeichen, der Rest der
-                    // Kommandozeile landet im selben Argument (`C:" --claude`). Hier wieder auftrennen.
-                    match v.split_once('"') {
-                        Some((path, rest)) => {
-                            c.open = Some(format!("{path}\\").replace("\\\\", "\\"));
-                            if rest.split_whitespace().any(|t| t == "--claude") {
-                                c.claude = true;
-                            }
-                            if rest.split_whitespace().any(|t| t == "--tray") {
-                                c.tray = true;
-                            }
-                        }
-                        None => c.open = Some(v.clone()),
-                    }
-                }
-            }
-            "--claude" => c.claude = true,
-            "--tray" => c.tray = true,
-            _ => {}
-        }
-    }
-    c
+/// Relativen Pfad gegen das aktuelle Verzeichnis auflösen.
+pub fn abs_from_cwd(s: &str) -> PathBuf {
+    std::path::absolute(s).unwrap_or_else(|_| PathBuf::from(s))
 }
 
-pub fn init() -> &'static Cli {
-    CLI.get_or_init(|| parse(&std::env::args().collect::<Vec<_>>()))
+/// Ergebnis von `parse` für den Rest des Prozesses ablegen (einmal, in `main`).
+pub fn set(c: Cli) {
+    let _ = CLI.set(c);
 }
 
 pub fn get() -> &'static Cli {
-    CLI.get().unwrap_or_else(|| init())
+    CLI.get_or_init(Cli::default)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn p(args: &[&str]) -> Result<Cli, CliError> {
+        let a: Vec<String> = std::iter::once("x.exe").chain(args.iter().copied()).map(|s| s.to_string()).collect();
+        parse(&a, &|s| {
+            let p = std::path::Path::new(s);
+            if p.is_absolute() { p.to_path_buf() } else { PathBuf::from("C:\\cwd").join(s) }
+        })
+    }
+
     #[test]
-    fn parses() {
-        let a: Vec<String> = ["x.exe", "--open", "C:\\Dev\\app", "--claude", "--tray"].iter().map(|s| s.to_string()).collect();
-        let c = parse(&a);
+    fn parses_existing_options() {
+        let c = p(&["--open", "C:\\Dev\\app", "--claude", "--tray"]).unwrap();
         assert_eq!(c.open.as_deref(), Some("C:\\Dev\\app"));
         assert!(c.claude && c.tray);
-        assert!(parse(&["x".to_string()]).open.is_none());
+        assert_eq!(p(&[]).unwrap(), Cli::default());
         // Laufwerkswurzel: `--open "C:\" --claude` kommt als ein Argument `C:" --claude`
-        let a: Vec<String> = ["x.exe", "--open", "C:\\\" --claude"].iter().map(|s| s.to_string()).collect();
-        let c = parse(&a);
+        let c = p(&["--open", "C:\\\" --claude"]).unwrap();
         assert_eq!(c.open.as_deref(), Some("C:\\"));
-        assert!(c.claude);
+        assert!(c.claude && !c.tray);
+        let c = p(&["--open", "D:\\\" --tray --profile work"]).unwrap();
+        assert_eq!(c.open.as_deref(), Some("D:\\"));
+        assert!(c.tray);
+        assert_eq!(c.profile.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn parses_new_options() {
+        let c = p(&["--data-dir", "D:\\pd", "--backup-dir", "bk", "--profile", "work_1-a", "--lang", "DE", "--no-tray", "--reset-settings"]).unwrap();
+        assert_eq!(c.data_dir, Some(PathBuf::from("D:\\pd")));
+        assert_eq!(c.backup_dir, Some(PathBuf::from("C:\\cwd\\bk")));
+        assert_eq!(c.profile.as_deref(), Some("work_1-a"));
+        assert_eq!(c.lang, Some(Lang::De));
+        assert!(c.no_tray && c.reset_settings && !c.help && !c.version);
+        assert_eq!(c.overrides(), vec!["--lang de".to_string(), "--backup-dir C:\\cwd\\bk".to_string(), "--no-tray".to_string()]);
+        let c = p(&["--data-dir=rel\\dir", "--lang=en"]).unwrap();
+        assert_eq!(c.data_dir, Some(PathBuf::from("C:\\cwd\\rel\\dir")));
+        assert_eq!(c.lang, Some(Lang::En));
+        for h in ["--help", "-h", "-?", "/?"] {
+            assert!(p(&[h]).unwrap().help, "{h}");
+        }
+        assert!(p(&["--version"]).unwrap().version);
+        assert!(p(&["--uninstall-hooks"]).unwrap().uninstall_hooks);
+        // Pfad mit abschließendem Backslash in Anführungszeichen
+        let c = p(&["--data-dir", "E:\\\" --no-tray"]).unwrap();
+        assert_eq!(c.data_dir, Some(PathBuf::from("E:\\")));
+        assert!(c.no_tray);
+    }
+
+    #[test]
+    fn mcp_subcommand() {
+        let c = p(&["mcp"]).unwrap();
+        assert!(c.mcp && c.profile.is_none());
+        let c = p(&["mcp", "--profile", "p1"]).unwrap();
+        assert!(c.mcp);
+        assert_eq!(c.profile.as_deref(), Some("p1"));
+        let c = p(&["mcp", "--data-dir", "D:\\x", "--lang", "de"]).unwrap();
+        assert_eq!(c.data_dir, Some(PathBuf::from("D:\\x")));
+        assert!(matches!(p(&["mcp", "--tray"]), Err(CliError::NotWithMcp(_))));
+        assert!(matches!(p(&["mcp", "extra"]), Err(CliError::Unexpected(_))));
+        // `mcp` nur als erstes Argument
+        assert!(matches!(p(&["--tray", "mcp"]), Err(CliError::Unexpected(_))));
+    }
+
+    #[test]
+    fn errors() {
+        assert_eq!(p(&["--bogus"]), Err(CliError::Unknown("--bogus".into())));
+        assert_eq!(p(&["--tray=1"]), Err(CliError::Unknown("--tray=1".into())));
+        assert_eq!(p(&["--data-dir"]), Err(CliError::MissingValue("--data-dir".into())));
+        assert_eq!(p(&["--data-dir", "--tray"]), Err(CliError::MissingValue("--data-dir".into())));
+        assert_eq!(p(&["--profile="]), Err(CliError::MissingValue("--profile".into())));
+        assert_eq!(p(&["--open"]), Err(CliError::MissingValue("--open".into())));
+        assert_eq!(p(&["--lang", "fr"]), Err(CliError::BadLang("fr".into())));
+        assert_eq!(p(&["--profile", "a b"]), Err(CliError::BadProfile("a b".into())));
+        assert_eq!(p(&["stray"]), Err(CliError::Unexpected("stray".into())));
+        for e in [CliError::Unknown("--x".into()), CliError::BadProfile("ä".into()), CliError::NotWithMcp("--tray".into())] {
+            assert!(e.message(Lang::En).contains("--help") && e.message(Lang::De).contains("--help"));
+            assert_ne!(e.message(Lang::En), e.message(Lang::De));
+        }
+    }
+
+    #[test]
+    fn profile_names() {
+        let long_ok = "x".repeat(40);
+        let long_bad = "x".repeat(41);
+        for ok in ["a", "work", "Work_2", "a-b", long_ok.as_str(), "COM", "com10", "CONsole"] {
+            assert!(valid_profile(ok), "{ok}");
+        }
+        for bad in ["", "a b", "ä", "a.b", "a/b", "..", long_bad.as_str(), "CON", "nul", "Com1", "lpt9", "aux"] {
+            assert!(!valid_profile(bad), "{bad}");
+        }
     }
 }

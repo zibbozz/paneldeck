@@ -713,11 +713,16 @@ impl App {
         let dir = state::data_dir();
         let mut settings: Settings = state::load_json(&dir.join("settings.json")).unwrap_or_default();
         settings.sanitize();
+        // `--lang`: nur für diesen Start (beim Speichern bleibt die gespeicherte Sprache, siehe `state::ser_language`).
+        if let Some(l) = crate::cli::get().lang {
+            state::set_lang_override(l, settings.language);
+            settings.language = l;
+        }
         state::set_lang(settings.language);
         let (saved, startup_note) = state::load_saved(&dir.join("state.json"));
         // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
         let restore_result = crate::backup::apply_pending_restore(&dir, crate::db::FILE);
-        let backup_dir = crate::backup::dir(&dir, &settings.backup_dir);
+        let backup_dir = crate::cli::get().backup_dir.clone().unwrap_or_else(|| crate::backup::dir(&dir, &settings.backup_dir));
         let (db, db_error) = match crate::db::open(&dir, &backup_dir) {
             Ok(d) => (Some(d), None),
             Err(e) => (None, Some(e.message(settings.language))),
@@ -837,7 +842,8 @@ impl App {
             editor: None,
             applied_font: String::new(),
         };
-        {
+        // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
+        if !crate::cli::get().no_tray {
             let (tx, rx) = std::sync::mpsc::channel();
             let l = app.settings.language;
             app.tray = Tray::create(&cc.egui_ctx, tx, l.t("Paneldeck anzeigen", "Show Paneldeck"), l.t("Beenden", "Quit"));
@@ -915,6 +921,9 @@ impl App {
             app.notify_text(n);
         }
         let lang = app.settings.language;
+        if let Some(b) = state::SETTINGS_RESET.get() {
+            app.notify_text(format!("{} {}", lang.t("Einstellungen zurückgesetzt (--reset-settings). Sicherung:", "Settings reset (--reset-settings). Backup:"), b.display()));
+        }
         if let Some(r) = restore_result {
             app.notify_text(match r {
                 Ok(p) => format!("{} {}", lang.t("Sicherung wiederhergestellt:", "Backup restored:"), p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
@@ -964,6 +973,21 @@ impl App {
             format!("OS: {} {}", std::env::consts::OS, std::env::consts::ARCH),
             format!("EXE: {}", self.exe.display()),
             format!("{}: {}", t("Daten", "Data"), self.dir.display()),
+            {
+                let d = crate::paths::get();
+                format!(
+                    "{}: {} · {}: {} · {}: {}",
+                    t("Datenordner-Quelle", "Data folder source"),
+                    crate::paths::source_label(d.source, l),
+                    t("Profil", "Profile"),
+                    d.profile.as_deref().unwrap_or("–"),
+                    t("Startoptionen", "Start overrides"),
+                    {
+                        let o = crate::cli::get().overrides();
+                        if o.is_empty() { t("keine", "none").to_string() } else { o.join(" ") }
+                    }
+                )
+            },
             format!("Shells: {}", self.shells.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")),
             format!(
                 "{}: {} ({}: {}) · {}: {} · {}: {}",
@@ -1242,6 +1266,9 @@ impl App {
         if let Some(h) = &self.hook_server {
             env.push((hooks::ENV_PORT.to_string(), h.port.to_string()));
             env.push((hooks::ENV_TOKEN.to_string(), h.token.clone()));
+            // Datenordner dieses Hubs: `paneldeck.exe mcp` aus diesem Terminal findet damit genau diese Instanz
+            // (auch bei --data-dir/--profile). Kein Geheimnis – den IPC-Token liest die Brücke aus `ipc.json`.
+            env.push((crate::paths::ENV_HUB_DATA.to_string(), self.dir.display().to_string()));
         }
         let wsl = shells::is_wsl(&shell);
         if wsl {
