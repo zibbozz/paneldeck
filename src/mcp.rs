@@ -688,8 +688,19 @@ pub fn tool_reply(id: Value, result: Result<Value, (String, String)>) -> Value {
 /// `paneldeck.exe mcp`: liest JSON-RPC-Zeilen von stdin, schreibt Antworten auf stdout. Nichts anderes darf auf
 /// stdout landen. Gibt den Prozess-Exitcode zurück.
 pub fn run_bridge() -> i32 {
-    let dir = crate::state::data_dir();
-    crate::state::init_lang_from_disk(&dir);
+    // Hub suchen: `mcp --data-dir/--profile` > Datenordner des Hubs, dessen Terminal uns gestartet hat
+    // (`PANELDECK_HUB_DATA`) > normale Datenordner-Suche. Fehler nur auf stderr (stdout gehört dem Protokoll).
+    let cli = crate::cli::get();
+    let dir = match crate::paths::bridge_dir(cli) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "{}", e.message(crate::state::lang()));
+            return 1;
+        }
+    };
+    if cli.lang.is_none() {
+        crate::state::init_lang_from_disk(&dir);
+    }
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let caller: Option<u64> = std::env::var(crate::hooks::ENV_SESSION).ok().and_then(|s| s.parse().ok());
     let me = std::process::id();

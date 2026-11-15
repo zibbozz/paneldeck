@@ -90,6 +90,49 @@ pub fn t(de: &'static str, en: &'static str) -> &'static str {
     lang().t(de, en)
 }
 
+// `--lang` gilt nur für diesen Start. Regel: Alles, was gespeichert wird (settings.json, Standard-Prompts beim
+// ersten Start, Texte im Explorer-Kontextmenü …), nutzt die GESPEICHERTE Sprache (`persisted_lang`), nur die
+// Anzeige nutzt die Startsprache. Abgelegt wird das Paar (Startsprache, gespeicherte Sprache) außerhalb von
+// `Settings` (nicht serialisiert) und threadlokal: Einstellungen werden nur im UI-Thread gespeichert, und Tests
+// (parallel) beeinflussen sich so nicht. Solange `Settings::language` gleich der Startsprache ist, schreibt
+// `ser_language` die gespeicherte Sprache. Wählt der Nutzer in den Einstellungen selbst eine Sprache, endet die
+// Überschreibung (`clear_lang_override`) und seine Wahl wird gespeichert.
+thread_local! {
+    static LANG_OVERRIDE: std::cell::Cell<Option<(Lang, Lang)>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_lang_override(start: Lang, persisted: Lang) {
+    LANG_OVERRIDE.with(|o| o.set(Some((start, persisted))));
+}
+
+pub fn clear_lang_override() {
+    LANG_OVERRIDE.with(|o| o.set(None));
+}
+
+/// Sprache für Gespeichertes, ausgehend von der aktuell angezeigten Sprache `current`.
+pub fn persisted_lang(current: Lang) -> Lang {
+    persisted_language(current, LANG_OVERRIDE.with(|o| o.get()))
+}
+
+/// Sprache, die in `settings.json` landet.
+pub fn persisted_language(l: Lang, over: Option<(Lang, Lang)>) -> Lang {
+    match over {
+        Some((start, persisted)) if start == l => persisted,
+        _ => l,
+    }
+}
+
+fn ser_language<S: serde::Serializer>(l: &Lang, s: S) -> Result<S::Ok, S::Error> {
+    persisted_lang(*l).serialize(s)
+}
+
+/// Sprache aus `settings.json` lesen, ohne etwas zu verändern (keine Sicherung defekter Dateien).
+pub fn lang_from_disk(dir: &std::path::Path) -> Option<Lang> {
+    let s = std::fs::read_to_string(dir.join("settings.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(strip_bom(&s)).ok()?;
+    serde_json::from_value(v.get("language")?.clone()).ok()
+}
+
 /// Sprache aus `settings.json` des Datenordners übernehmen (für Prozesse ohne Oberfläche, z. B. die MCP-Brücke).
 pub fn init_lang_from_disk(dir: &std::path::Path) {
     let l = load_json::<Settings>(&dir.join("settings.json")).map(|s| s.language).unwrap_or(Lang::En);
@@ -99,6 +142,8 @@ pub fn init_lang_from_disk(dir: &std::path::Path) {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Mit `--lang` überschreibt der Start die Sprache nur im Speicher; gespeichert wird die vorherige (`ser_language`).
+    #[serde(serialize_with = "ser_language")]
     pub language: Lang,
     pub theme: String,
     pub font_size: f32,
@@ -421,27 +466,31 @@ pub struct SavedState {
     pub composer_draft: String,
 }
 
-/// Datenordner: `paneldeck-data` neben der .exe, sonst %APPDATA%/Paneldeck.
+/// Datenordner dieses Prozesses (einmal aufgelöst, siehe `paths`): `--data-dir` > `PANELDECK_DATA` >
+/// `paneldeck-data` neben der .exe > %APPDATA%/Paneldeck, mit `--profile` jeweils `profiles\<name>` darunter.
 pub fn data_dir() -> PathBuf {
-    let try_dir = |p: PathBuf| -> Option<PathBuf> {
-        std::fs::create_dir_all(&p).ok()?;
-        let probe = p.join(".probe");
-        std::fs::write(&probe, b"x").ok()?;
-        let _ = std::fs::remove_file(probe);
-        Some(p)
-    };
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if let Some(p) = try_dir(dir.join("paneldeck-data")) {
-                return p;
-            }
-        }
+    crate::paths::get().path.clone()
+}
+
+/// Sicherung der Einstellungen nach `--reset-settings` (für den Hinweis beim Start).
+pub static SETTINGS_RESET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// `--reset-settings`: `settings.json` in `settings.json.bak-<JJJJMMTT-HHMMSS>` umbenennen (bei Namensgleichheit mit
+/// Zähler). Gibt die Sicherung zurück; `Ok(None)`, wenn es keine Einstellungsdatei gab.
+pub fn reset_settings(dir: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
+    let src = dir.join("settings.json");
+    if !src.exists() {
+        return Ok(None);
     }
-    let base = std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    try_dir(base.join("Paneldeck")).unwrap_or_else(|| PathBuf::from("."))
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut target = dir.join(format!("settings.json.bak-{stamp}"));
+    let mut n = 2;
+    while target.exists() {
+        target = dir.join(format!("settings.json.bak-{stamp}-{n}"));
+        n += 1;
+    }
+    std::fs::rename(&src, &target)?;
+    Ok(Some(target))
 }
 
 /// Entfernt ein UTF-8-BOM am Textanfang. Windows-Editoren (Notepad, PowerShell 5.1 `-Encoding UTF8`) schreiben es,
@@ -675,5 +724,49 @@ mod tests {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.undo_steps, 25);
         assert!(UNDO_STEP_CHOICES.contains(&s.undo_steps));
+    }
+
+    #[test]
+    fn lang_override_is_not_persisted() {
+        // reine Funktion (der globale Zustand bleibt unberührt, Tests laufen parallel)
+        assert_eq!(persisted_language(Lang::De, Some((Lang::De, Lang::En))), Lang::En);
+        assert_eq!(persisted_language(Lang::En, Some((Lang::De, Lang::En))), Lang::En);
+        assert_eq!(persisted_language(Lang::De, Some((Lang::En, Lang::En))), Lang::De);
+        assert_eq!(persisted_language(Lang::De, None), Lang::De);
+    }
+
+    #[test]
+    fn lang_override_never_reaches_settings_json() {
+        // threadlokal: betrifft nur diesen Test-Thread
+        let mut s = Settings { language: Lang::En, ..Settings::default() };
+        set_lang_override(Lang::De, Lang::En);
+        s.language = Lang::De; // so setzt App::new die Startsprache
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["language"], "En");
+        assert_eq!(persisted_lang(s.language), Lang::En);
+        // eigene Wahl in den Einstellungen beendet die Überschreibung
+        clear_lang_override();
+        assert_eq!(serde_json::to_value(&s).unwrap()["language"], "De");
+        assert_eq!(persisted_lang(Lang::De), Lang::De);
+    }
+
+    #[test]
+    fn reset_settings_keeps_backup() {
+        let dir = std::env::temp_dir().join(format!("pd-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(reset_settings(&dir).unwrap().is_none());
+        std::fs::write(dir.join("settings.json"), "{\"language\":\"De\"}").unwrap();
+        std::fs::write(dir.join("state.json"), "{}").unwrap();
+        assert_eq!(lang_from_disk(&dir), Some(Lang::De));
+        let b1 = reset_settings(&dir).unwrap().unwrap();
+        assert!(b1.file_name().unwrap().to_string_lossy().starts_with("settings.json.bak-"));
+        assert!(!dir.join("settings.json").exists() && dir.join("state.json").exists());
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        let b2 = reset_settings(&dir).unwrap().unwrap();
+        assert_ne!(b1, b2);
+        assert_eq!(std::fs::read_to_string(&b1).unwrap(), "{\"language\":\"De\"}");
+        assert_eq!(lang_from_disk(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

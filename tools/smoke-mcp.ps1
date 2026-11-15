@@ -20,13 +20,21 @@
 param(
   [string]$Exe = "$PSScriptRoot\..\target\release\paneldeck.exe",
   [switch]$Visible,
-  [switch]$KeepFiles
+  [switch]$KeepFiles,
+  # Ordner fuer die Kopie der .exe und die Test-Datenordner (z. B. ein vom Virenscanner ausgenommener Ordner)
+  [string]$WorkRoot = $env:TEMP
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
-$work = Join-Path $env:TEMP ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force $WorkRoot | Out-Null
+$work = Join-Path $WorkRoot ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $dir = New-Item -ItemType Directory -Force "$work\hub"; $proj = New-Item -ItemType Directory -Force "$work\proj"
 Copy-Item $Exe "$dir\paneldeck.exe"
+# Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
+# eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
+$data = "$dir\paneldeck-data"
+Remove-Item Env:PANELDECK_DATA, Env:PANELDECK_HUB_DATA, Env:PANELDECK_HUB_BASE -ErrorAction SilentlyContinue
+$script:extra = @()
 $script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
 
@@ -37,8 +45,8 @@ function Check($name, [bool]$ok, $detail = '') {
 }
 function Set-Level($level) {
   Stop-Hub
-  $f = "$dir\paneldeck-data\settings.json"
-  New-Item -ItemType Directory -Force "$dir\paneldeck-data" | Out-Null
+  $f = "$data\settings.json"
+  New-Item -ItemType Directory -Force "$data" | Out-Null
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
@@ -46,14 +54,14 @@ function Set-Level($level) {
   $style = if ($Visible) { 'Normal' } else { 'Minimized' }
   $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
   $t0 = Get-Date
-  while (-not (Test-Path "$dir\paneldeck-data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
+  while (-not (Test-Path "$data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
   Start-Sleep 2
   Start-Bridge
 }
 function Stop-Hub {
   if ($script:bridge -and -not $script:bridge.HasExited) { try { $script:bridge.StandardInput.Close(); [void]$script:bridge.WaitForExit(2000) } catch {} ; if (-not $script:bridge.HasExited) { $script:bridge.Kill() } }
   if ($script:hub -and -not $script:hub.HasExited) { $script:hub.Kill(); Start-Sleep -Milliseconds 800 }
-  Remove-Item -LiteralPath "$dir\paneldeck-data\ipc.json" -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath "$data\ipc.json" -ErrorAction SilentlyContinue
 }
 function Start-Bridge {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -250,7 +258,7 @@ try {
   Check 'list_todos: erledigte standardmaessig ausgeblendet' ((Tool 'list_todos').data.total -eq 0 -and (Tool 'list_todos' @{ state = 'all' }).data.total -eq 1)
   Check 'einfacher Modus: create_ticket -> wrong_mode' ((Code (Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'x' })) -eq 'wrong_mode')
   Check 'einfacher Modus: get_ticket -> wrong_mode (englische Meldung)' ((Tool 'get_ticket' @{ ticket = 'PAN-1' }).text -match 'Expert mode is off')
-  Check 'Todo-Aufruf im Protokoll ohne Langtext' ((Get-Content "$dir\paneldeck-data\mcp-log.jsonl" -Raw) -notmatch '2 Liter')
+  Check 'Todo-Aufruf im Protokoll ohne Langtext' ((Get-Content "$data\mcp-log.jsonl" -Raw) -notmatch '2 Liter')
 
   Write-Host "== Aufgaben-Werkzeuge: Stufe Nur lesen" -ForegroundColor Cyan
   Set-Level 'Read'
@@ -297,7 +305,7 @@ c.commit()
 c.close()
 '@
     $seedFile = "$work\seed.py"; [IO.File]::WriteAllText($seedFile, $seed, (New-Object Text.UTF8Encoding $false))
-    $script:prestart = { $env:PYTHONUTF8 = '1'; & python -I $seedFile "$dir\paneldeck-data\paneldeck.db"; if ($LASTEXITCODE -ne 0) { throw 'seed.py fehlgeschlagen' } }
+    $script:prestart = { $env:PYTHONUTF8 = '1'; & python -I $seedFile "$data\paneldeck.db"; if ($LASTEXITCODE -ne 0) { throw 'seed.py fehlgeschlagen' } }
     Set-Level 'Control'
     $script:prestart = $null
     [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
@@ -379,7 +387,7 @@ c.close()
     $gt = Tool 'get_ticket' @{ ticket = 'PAN-1' }
     Check 'get_ticket: Kommentar, Zeit, Verknuepfung, Verlauf' (-not $gt.err -and $gt.data.comments_total -eq 1 -and $gt.data.time.entries_total -eq 2 -and @($gt.data.links).Count -eq 1 -and @($gt.data.history | Where-Object source -eq 'agent').Count -ge 5)
     Check 'get_ticket: Hinweis auf nicht vertrauenswuerdige Texte' ($gt.data.note -match 'untrusted')
-    Check 'Ticket-Aufruf im Protokoll ohne Kommentartext' ((Get-Content "$dir\paneldeck-data\mcp-log.jsonl" -Raw) -notmatch 'GEHEIM-KOMMENTAR')
+    Check 'Ticket-Aufruf im Protokoll ohne Kommentartext' ((Get-Content "$data\mcp-log.jsonl" -Raw) -notmatch 'GEHEIM-KOMMENTAR')
 
     Write-Host "== Aufgaben-Werkzeuge: Sitzung und Ticket verknuepfen, Quelle im Verlauf" -ForegroundColor Cyan
     $foreign = ((Tool 'list_sessions').data.sessions | Select-Object -First 1).id
@@ -418,7 +426,7 @@ c.close()
   $ins = [string]$i.result.instructions
   Check 'initialize: instructions nennt whoami und Werkzeuge der Stufe Nur lesen' ($ins -match 'whoami' -and $ins.Contains('- `list_sessions` (') -and -not $ins.Contains('- `send_text` (') -and $ins -match 'Read only') ($ins.Substring(0, [Math]::Min(200, $ins.Length)))
   $ver = [string]$i.result.serverInfo.version
-  $spFile = "$dir\paneldeck-data\system-prompt.md"
+  $spFile = "$data\system-prompt.md"
   [IO.File]::WriteAllText($spFile, 'Eigener Prompt {{version}} / {{level}} / {{gibtsnicht}}', (New-Object Text.UTF8Encoding $true))
   try { $script:bridge.StandardInput.Close(); [void]$script:bridge.WaitForExit(2000) } catch {}
   if (-not $script:bridge.HasExited) { $script:bridge.Kill() }
@@ -426,8 +434,115 @@ c.close()
   $i2 = Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } }
   Check 'initialize: eigene system-prompt.md (mit BOM) gerendert, unbekannter Platzhalter bleibt' ([string]$i2.result.instructions -eq "Eigener Prompt $ver / Read only / {{gibtsnicht}}") ([string]$i2.result.instructions)
   Remove-Item -LiteralPath $spFile -ErrorAction SilentlyContinue
+
+  Write-Host "== Kommandozeile: --version, --help, Fehler, Datenordner, Profile, PANELDECK_DATA" -ForegroundColor Cyan
+  $script:prestart = $null
+  # Ausgabe ueber umgeleitete Pipes (die GUI-.exe schreibt dann dorthin statt in eine Konsole oder ein Meldungsfenster).
+  function Run-Exe([string]$argline, $envs = @{}) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "$dir\paneldeck.exe"; $psi.Arguments = $argline
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8; $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+    foreach ($k in $envs.Keys) { $psi.EnvironmentVariables[$k] = $envs[$k] }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit(20000)) { $p.Kill(); return [pscustomobject]@{ code = -1; out = ''; err = 'TIMEOUT' } }
+    [pscustomobject]@{ code = $p.ExitCode; out = $o.Result; err = $e.Result }
+  }
+  # Weitere Hub-Instanz (minimiert) mit eigenen Argumenten; wartet auf ipc.json im erwarteten Datenordner.
+  function Start-ExtraHub([string]$argline, [string]$dataDir) {
+    Remove-Item -LiteralPath "$dataDir\ipc.json" -ErrorAction SilentlyContinue
+    $h = if ($argline) { Start-Process "$dir\paneldeck.exe" -ArgumentList $argline -PassThru -WindowStyle Minimized } else { Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle Minimized }
+    $script:extra += $h
+    $t0 = Get-Date
+    while (-not (Test-Path "$dataDir\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
+    Start-Sleep 2
+    $h
+  }
+  # Eine Bruecke mit Argumenten/Umgebung starten, list_sessions aufrufen und den Fehlercode liefern
+  # (Stufe Aus: 'mcp_disabled' = der richtige Hub wurde erreicht; 'hub_not_running' = keiner gefunden).
+  function Probe-Bridge([string]$argline, $envs = @{}) {
+    $keep = $script:bridge
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "$dir\paneldeck.exe"; $psi.Arguments = $argline
+    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    foreach ($k in $envs.Keys) { $psi.EnvironmentVariables[$k] = $envs[$k] }
+    $script:bridge = [System.Diagnostics.Process]::Start($psi); $script:rpc = 0
+    try {
+      [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+      $r = Tool 'list_sessions'
+      [pscustomobject]@{ code = (Code $r); text = $r.text }
+    } finally {
+      try { $script:bridge.StandardInput.Close(); [void]$script:bridge.WaitForExit(3000) } catch {}
+      if (-not $script:bridge.HasExited) { $script:bridge.Kill() }
+      $script:bridge = $keep; $script:rpc = 0
+    }
+  }
+
+  $v = Run-Exe '--version'
+  Check '--version: Exit-Code 0 und Versionsnummer' ($v.code -eq 0 -and $v.out -match '^Paneldeck \d+\.\d+\.\d+') "$($v.code) $($v.out)"
+  $hl = Run-Exe '--help'
+  Check '--help: Exit-Code 0, englisch, alle Optionen' ($hl.code -eq 0 -and $hl.out -match 'Usage:' -and $hl.out -match '--data-dir' -and $hl.out -match '--profile' -and $hl.out -match 'PANELDECK_DATA' -and $hl.out -match '--reset-settings') "$($hl.code)"
+  $hd = Run-Exe '-? --lang de'
+  Check '-? --lang de: deutsche Hilfe mit Umlauten (UTF-8)' ($hd.code -eq 0 -and $hd.out -match 'Aufruf:' -and $hd.out -match ('Einstellungen zur' + [char]0xFC + 'cksetzen')) "$($hd.code)"
+  $u = Run-Exe '--gibts-nicht'
+  Check 'unbekannte Option: Exit-Code 2, Meldung auf stderr' ($u.code -eq 2 -and $u.err -match '--gibts-nicht' -and $u.err -match '--help') "$($u.code) $($u.err)"
+  Check 'fehlender Wert: Exit-Code 2' ((Run-Exe '--data-dir').code -eq 2)
+  Check 'ungueltiger Profilname: Exit-Code 2' ((Run-Exe '--profile "a b"').code -eq 2)
+  Check '--lang xx: Exit-Code 2' ((Run-Exe '--lang xx').code -eq 2)
+  Check 'mcp mit Start-Option: Exit-Code 2' ((Run-Exe 'mcp --tray').code -eq 2)
+  [IO.File]::WriteAllText("$work\blocker", 'x')
+  $bad = Run-Exe "--data-dir `"$work\blocker\sub`""
+  Check 'unbrauchbares --data-dir: Exit-Code 1, Ordner in der Meldung (kein Rueckfall)' ($bad.code -eq 1 -and $bad.err -match 'blocker') "$($bad.code) $($bad.err)"
+  $bb = Run-Exe "--data-dir `"$work\bb`" --backup-dir `"$work\blocker\bk`""
+  Check 'unbrauchbares --backup-dir: Exit-Code 1' ($bb.code -eq 1 -and $bb.err -match 'backup') "$($bb.code) $($bb.err)"
+  $ue = Run-Exe '--gibts-nicht --lang de'
+  Check 'Fehlermeldung beachtet --lang trotz Fehler' ($ue.code -eq 2 -and $ue.err -match 'Unbekannte Option') $ue.err
+  $me = Run-Exe 'mcp --tray'
+  Check 'mcp-Fehler nur auf stderr (stdout bleibt leer)' ($me.code -eq 2 -and $me.out -eq '' -and $me.err -match '--tray') "$($me.out)|$($me.err)"
+
+  # Standard-Hub (Stufe Aus) + Hub mit --data-dir + Hub mit --profile p1 + Hub mit PANELDECK_DATA, alle gleichzeitig
+  Set-Level 'Off'
+  $dd = "$work\dd"
+  [void](Start-ExtraHub "--data-dir `"$dd`"" $dd)
+  Check 'Hub mit --data-dir legt ipc.json im angegebenen Ordner an' (Test-Path "$dd\ipc.json")
+  Check 'mcp --data-dir findet diesen Hub' ((Probe-Bridge "mcp --data-dir `"$dd`"").code -eq 'mcp_disabled')
+  Check 'PANELDECK_HUB_DATA (Terminal eines Hubs) findet diesen Hub' ((Probe-Bridge 'mcp' @{ PANELDECK_HUB_DATA = $dd; PANELDECK_HUB_BASE = $dd }).code -eq 'mcp_disabled')
+  $hpq = Probe-Bridge 'mcp --profile q' @{ PANELDECK_HUB_DATA = $dd; PANELDECK_HUB_BASE = $dd }
+  Check 'mcp --profile im Hub-Terminal: Profil unter der Basis dieses Hubs' ($hpq.code -eq 'hub_not_running' -and $hpq.text -match [regex]::Escape("$dd\profiles\q")) $hpq.text
+  $nf = Probe-Bridge "mcp --data-dir `"$work\leer`""
+  Check 'mcp mit leerem Ordner: hub_not_running nennt den Ordner' ($nf.code -eq 'hub_not_running' -and $nf.text -match [regex]::Escape("$work\leer")) $nf.text
+  $p1 = "$data\profiles\p1"
+  $hp = Start-ExtraHub '--profile p1' $p1
+  Check 'Hub mit --profile p1 laeuft parallel zum Standard-Hub' ((Test-Path "$p1\ipc.json") -and -not $hp.HasExited -and -not $script:hub.HasExited)
+  $port0 = ([IO.File]::ReadAllText("$data\ipc.json") | ConvertFrom-Json).port; $port1 = ([IO.File]::ReadAllText("$p1\ipc.json") | ConvertFrom-Json).port
+  Check 'Standard-Hub und Profil-Hub haben verschiedene Ports' ($port0 -and $port1 -and $port0 -ne $port1) "$port0 / $port1"
+  Check 'mcp --profile p1 findet den Profil-Hub' ((Probe-Bridge 'mcp --profile p1').code -eq 'mcp_disabled')
+  Check 'mcp ohne Angabe findet weiter den Standard-Hub' ((Code (Tool 'list_sessions')) -eq 'mcp_disabled')
+  $ed = "$work\envdata"
+  $env:PANELDECK_DATA = $ed
+  try { [void](Start-ExtraHub '' $ed) } finally { Remove-Item Env:PANELDECK_DATA -ErrorAction SilentlyContinue }
+  Check 'PANELDECK_DATA: Hub nutzt den Ordner aus der Umgebung' (Test-Path "$ed\ipc.json")
+  Check 'PANELDECK_DATA: mcp findet diesen Hub' ((Probe-Bridge 'mcp' @{ PANELDECK_DATA = $ed }).code -eq 'mcp_disabled')
+  Check '--data-dir schlaegt PANELDECK_DATA' ((Probe-Bridge "mcp --data-dir `"$work\leer`"" @{ PANELDECK_DATA = $ed }).code -eq 'hub_not_running')
+
+  # --reset-settings: settings.json wird gesichert, Standardwerte, Zustand bleibt
+  $rs = "$work\rs"; New-Item -ItemType Directory -Force $rs | Out-Null
+  [IO.File]::WriteAllText("$rs\settings.json", '{"language":"De","mcp_level":"Read"}', (New-Object Text.UTF8Encoding $false))
+  [IO.File]::WriteAllText("$rs\state.json", '{}', (New-Object Text.UTF8Encoding $false))
+  [void](Start-ExtraHub "--data-dir `"$rs`" --reset-settings --no-tray" $rs)
+  $bak = @(Get-ChildItem -LiteralPath $rs -Filter 'settings.json.bak-*')
+  Check '--reset-settings: Sicherung settings.json.bak-<Zeit> mit altem Inhalt' ($bak.Count -eq 1 -and $bak[0].Name -match '^settings\.json\.bak-\d{8}-\d{6}$' -and ([IO.File]::ReadAllText($bak[0].FullName) -match 'Read')) (($bak | ForEach-Object Name) -join ',')
+  Check '--reset-settings: state.json bleibt' (Test-Path "$rs\state.json")
+  Check '--reset-settings bei laufendem Hub: Exit-Code 1' ((Run-Exe "--data-dir `"$rs`" --reset-settings").code -eq 1)
+  foreach ($h in $script:extra) { if (-not $h.HasExited) { $h.Kill() } }
+  Start-Sleep -Milliseconds 800
+  $after = if (Test-Path "$rs\settings.json") { [IO.File]::ReadAllText("$rs\settings.json") } else { '' }
+  Check '--reset-settings: keine alte Stufe in settings.json' ($after -notmatch '"mcp_level":\s*"Read"') $after
 } finally {
   Stop-Hub
+  foreach ($h in $script:extra) { if ($h -and -not $h.HasExited) { $h.Kill() } }
   if (-not $KeepFiles) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Write-Host ""
