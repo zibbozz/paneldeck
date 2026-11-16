@@ -1,6 +1,15 @@
 //! WSL-Hilfen (#172): installierte Distributionen, Pfadumrechnung (`\\wsl.localhost\…` ↔ Linux, `C:\…` ↔ `/mnt/c/…`),
 //! Prüfung von Linux-Pfaden und sichere `wsl.exe`-Aufrufe (Argumente einzeln, nie als Shell-Zeichenkette).
 //!
+//! Sicherheit: `wsl.exe` zerlegt seine Kommandozeile selbst und hält sich dabei nicht an die üblichen Windows-Regeln
+//! (`\"` maskiert kein Anführungszeichen). Ein `"` in einem Pfad hinter `--cd` beendet den Wert, der Rest liefe als
+//! Befehl in der Standard-Distribution. Deshalb lehnt [`validate_linux_path`] `"` und `\` ab, und jeder Linux-Pfad,
+//! der eine Kommandozeile erreicht (`--cd`, `ls`, `test -d`), geht vorher durch diese Prüfung.
+//!
+//! Grenze: `C:\` ↔ `/mnt/c` setzt den Standard-Einhängepunkt von WSL voraus (`[automount] root = /mnt/` in
+//! `/etc/wsl.conf`). Wer ihn umgestellt hat, bekommt `/mnt/<lw>`-Pfade, die in seiner Distribution nicht existieren
+//! (die Ordnerprüfung meldet das dann).
+//!
 //! Alles hier ist ohne egui; die Oberfläche dazu ist `app::folder_picker`.
 
 use std::collections::BTreeMap;
@@ -18,6 +27,8 @@ pub const RECENT_DISTROS_MAX: usize = 16;
 pub const SLOW_TIMEOUT: Duration = Duration::from_secs(15);
 /// Zeitlimit für Vervollständigung und Ordnerprüfung.
 pub const FAST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Mehr Ausgabe wird nicht gelesen (die Abfrage gilt dann als gescheitert).
+const MAX_OUTPUT: usize = 1 << 20;
 
 /// Ausgabe von `wsl.exe` dekodieren: die eigenen Meldungen (z. B. `-l -q`) kommen als UTF-16LE (mit oder ohne BOM),
 /// mit `WSL_UTF8=1` als UTF-8. UTF-8-Text enthält nie ein Nullbyte, UTF-16 mit ASCII-Namen immer.
@@ -60,17 +71,25 @@ pub fn parse_default_distro(bytes: &[u8], names: &[String]) -> Option<String> {
     }
 }
 
-/// Standard-Distribution nach vorn, sonst Reihenfolge von `wsl.exe`.
-pub fn order_distros(mut names: Vec<String>, default: Option<&str>) -> Vec<String> {
-    if let Some(i) = default.and_then(|d| names.iter().position(|n| n == d)) {
-        let d = names.remove(i);
-        names.insert(0, d);
-    }
-    names
+/// Vorlagen und System-Distributionen (`*-Template`, `docker-desktop*`), die in der Auswahl nicht erscheinen.
+pub fn is_hidden_distro(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    l.ends_with("-template") || l.starts_with("docker-desktop")
 }
 
-/// Plausibler Distributionsname für `wsl.exe -d <name>`: nicht leer, keine Steuerzeichen, keine Pfadtrenner,
-/// beginnt nicht mit `-` (wäre eine Option).
+/// Liste für die Auswahl: ohne Vorlagen/System-Distributionen, die Standard-Distribution zuerst (ist sie
+/// ausgeblendet, steht die erste sichtbare vorn).
+pub fn visible_distros(names: Vec<String>, default: Option<&str>) -> Vec<String> {
+    let mut v: Vec<String> = names.into_iter().filter(|n| !is_hidden_distro(n)).collect();
+    if let Some(i) = default.and_then(|d| v.iter().position(|n| n == d)) {
+        let d = v.remove(i);
+        v.insert(0, d);
+    }
+    v
+}
+
+/// Plausibler Distributionsname für `wsl.exe -d <name>`: nicht leer, keine Steuerzeichen, keine Pfadtrenner oder
+/// Anführungszeichen, beginnt nicht mit `-` (wäre eine Option).
 pub fn valid_distro(name: &str) -> bool {
     !name.is_empty() && name.len() <= 128 && !name.starts_with('-') && !name.chars().any(|c| c.is_control() || matches!(c, '\\' | '/' | '"'))
 }
@@ -82,6 +101,8 @@ pub enum PathError {
     NotAbsolute,
     Control,
     TooLong,
+    /// `"` oder `\` – `wsl.exe` würde den Pfad falsch zerlegen (Befehlseinschleusung über `--cd`).
+    Quote,
 }
 
 impl PathError {
@@ -96,12 +117,14 @@ impl PathError {
             (PathError::Control, false) => "The path contains control characters.",
             (PathError::TooLong, true) => "Der Pfad ist zu lang (höchstens 4096 Bytes).",
             (PathError::TooLong, false) => "The path is too long (at most 4096 bytes).",
+            (PathError::Quote, true) => "Der Pfad enthält \" oder \\ – das ist für WSL-Startordner nicht erlaubt.",
+            (PathError::Quote, false) => "The path contains \" or \\ – not allowed for WSL start folders.",
         }
     }
 }
 
-/// Gültiger Startordner für `wsl.exe --cd`: absoluter POSIX-Pfad oder `~` (Home), ohne Steuerzeichen, höchstens
-/// [`MAX_PATH_LEN`] Bytes. Ob der Ordner existiert, prüft erst [`is_dir`] (braucht die Distribution).
+/// Gültiger Startordner für `wsl.exe --cd`: absoluter POSIX-Pfad oder `~` (Home), ohne Steuerzeichen, ohne `"` und
+/// `\` (siehe Modulbeschreibung), höchstens [`MAX_PATH_LEN`] Bytes. Ob der Ordner existiert, prüft [`Backend::is_dir`].
 pub fn validate_linux_path(p: &str) -> Result<(), PathError> {
     if p.is_empty() {
         return Err(PathError::Empty);
@@ -111,6 +134,9 @@ pub fn validate_linux_path(p: &str) -> Result<(), PathError> {
     }
     if p.chars().any(char::is_control) {
         return Err(PathError::Control);
+    }
+    if p.contains(['"', '\\']) {
+        return Err(PathError::Quote);
     }
     if p != "~" && !p.starts_with('/') {
         return Err(PathError::NotAbsolute);
@@ -123,8 +149,23 @@ pub fn looks_linux(p: &str) -> bool {
     p.starts_with('/') || p == "~" || p.starts_with("~/")
 }
 
+/// Zeichen, die WSL im 9P-Share auf `U+F000 + Zeichen` abbildet (unter Windows in Namen verboten).
+const PUA_MAPPED: &[char] = &['"', '*', ':', '<', '>', '?', '\\', '|'];
+
+fn pua_to_char(c: char) -> char {
+    match (c as u32).checked_sub(0xF000).and_then(char::from_u32) {
+        Some(o) if (o as u32) < 0x20 || PUA_MAPPED.contains(&o) => o,
+        _ => c,
+    }
+}
+
+fn char_to_pua(c: char) -> char {
+    if c != '\\' && c != '"' && PUA_MAPPED.contains(&c) { char::from_u32(0xF000 + c as u32).unwrap_or(c) } else { c }
+}
+
 /// Lokaler WSL-UNC-Pfad (`\\wsl.localhost\<Distro>\…`, `\\wsl$\<Distro>\…`, auch mit `/` oder `\\?\UNC\…`) →
-/// (Distribution, Linux-Pfad). Andere Pfade: `None`.
+/// (Distribution, Linux-Pfad). Zeichen aus dem 9P-Share (`U+F0xx`) werden zurückgebildet; das Ergebnis ist ungeprüft
+/// (kann z. B. `"` enthalten – vor Gebrauch [`validate_linux_path`]). Andere Pfade: `None`.
 pub fn unc_to_linux(p: &str) -> Option<(String, String)> {
     let s = p.replace('/', "\\");
     let lower = s.to_ascii_lowercase();
@@ -138,13 +179,14 @@ pub fn unc_to_linux(p: &str) -> Option<(String, String)> {
     if !valid_distro(distro) {
         return None;
     }
-    let parts: Vec<&str> = tail.split('\\').filter(|c| !c.is_empty()).collect();
+    let parts: Vec<String> = tail.split('\\').filter(|c| !c.is_empty()).map(|c| c.chars().map(pua_to_char).collect()).collect();
     Some((distro.to_string(), format!("/{}", parts.join("/"))))
 }
 
-/// Linux-Pfad als Windows-Pfad über `\\wsl.localhost\<Distro>\…` (für den Ordnerdialog).
+/// Linux-Pfad als Windows-Pfad über `\\wsl.localhost\<Distro>\…` (für den Ordnerdialog); unter Windows verbotene
+/// Zeichen werden wie von WSL auf `U+F0xx` abgebildet.
 pub fn linux_to_unc(distro: &str, linux: &str) -> String {
-    let parts: Vec<&str> = linux.split('/').filter(|c| !c.is_empty()).collect();
+    let parts: Vec<String> = linux.split('/').filter(|c| !c.is_empty()).map(|c| c.chars().map(char_to_pua).collect()).collect();
     if parts.is_empty() {
         format!(r"\\wsl.localhost\{distro}\")
     } else {
@@ -152,14 +194,18 @@ pub fn linux_to_unc(distro: &str, linux: &str) -> String {
     }
 }
 
-/// Windows-Pfad → Linux-Pfad in WSL: `C:\x` → `/mnt/c/x` (Standard-Einhängepunkt), `\\wsl.localhost\D\x` → `/x`.
-/// Relative Pfade und Netzwerkfreigaben: `None`.
+/// Windows-Pfad → Linux-Pfad in WSL: `C:\x` (auch `\\?\C:\x`) → `/mnt/c/x` (Standard-Einhängepunkt, siehe oben),
+/// `\\wsl.localhost\D\x` → `/x`. Laufwerksrelative (`C:x`), relative Pfade und Netzwerkfreigaben: `None`.
 pub fn windows_to_linux(p: &str) -> Option<String> {
     if let Some((_, l)) = unc_to_linux(p) {
         return Some(l);
     }
+    let p = p.strip_prefix(r"\\?\").or_else(|| p.strip_prefix("//?/")).unwrap_or(p);
     let b = p.as_bytes();
     if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        if b.len() > 2 && !matches!(b[2], b'\\' | b'/') {
+            return None;
+        }
         let parts: Vec<&str> = p[2..].split(['\\', '/']).filter(|c| !c.is_empty()).collect();
         let d = (b[0] as char).to_ascii_lowercase();
         return Some(if parts.is_empty() { format!("/mnt/{d}") } else { format!("/mnt/{d}/{}", parts.join("/")) });
@@ -167,7 +213,8 @@ pub fn windows_to_linux(p: &str) -> Option<String> {
     None
 }
 
-/// Linux-Pfad → Windows-Pfad: `/mnt/c/x` → `C:\x`, sonst `\\wsl.localhost\<Distro>\…`. `~` und relative Pfade: `None`.
+/// Linux-Pfad → Windows-Pfad: `/mnt/c/x` → `C:\x`, sonst `\\wsl.localhost\<Distro>\…`. `~` und relative Pfade,
+/// ohne Distribution auch alles außerhalb von `/mnt/<lw>`: `None`.
 pub fn linux_to_windows(distro: &str, p: &str) -> Option<String> {
     if !p.starts_with('/') {
         return None;
@@ -220,13 +267,14 @@ pub fn split_for_completion(text: &str, home: Option<&str>) -> Option<(String, S
 }
 
 /// Ausgabe von `ls -1 -p -A` → Unterordner (mit `/` am Ende), die mit `prefix` beginnen. Versteckte Ordner nur,
-/// wenn der Anfang mit `.` beginnt. Sortiert, ohne Steuerzeichen, höchstens `max`.
+/// wenn der Anfang mit `.` beginnt. Namen, die als Startordner nicht erlaubt wären (Steuerzeichen, `"`, `\`),
+/// fallen weg. Sortiert, höchstens `max`.
 pub fn parse_ls(stdout: &[u8], prefix: &str, max: usize) -> Vec<String> {
     let text = String::from_utf8_lossy(stdout);
     let mut v: Vec<String> = text
         .lines()
         .filter(|l| l.ends_with('/') && l.len() > 1)
-        .filter(|l| !l.chars().any(char::is_control))
+        .filter(|l| !l.chars().any(|c| c.is_control() || c == '"' || c == '\\'))
         .filter(|l| l.starts_with(prefix))
         .filter(|l| !l.starts_with('.') || prefix.starts_with('.'))
         .map(str::to_string)
@@ -241,36 +289,56 @@ pub fn home_args(distro: &str) -> Vec<String> {
     ["-d", distro, "-e", "sh", "-c", "printf '%s' \"$HOME\""].iter().map(|s| s.to_string()).collect()
 }
 
-/// `wsl.exe`-Argumente: Ordner auflisten (`-e` = ohne Shell, jedes Argument kommt unverändert in Linux an).
+/// `wsl.exe`-Argumente: Ordner auflisten (`-e` = ohne Shell). `dir` muss [`validate_linux_path`] bestehen.
 pub fn list_args(distro: &str, dir: &str) -> Vec<String> {
     ["-d", distro, "-e", "ls", "-1", "-p", "-A", "--", dir].iter().map(|s| s.to_string()).collect()
 }
 
-/// `wsl.exe`-Argumente: existiert der Ordner?
+/// `wsl.exe`-Argumente: existiert der Ordner? `dir` muss [`validate_linux_path`] bestehen.
 pub fn isdir_args(distro: &str, dir: &str) -> Vec<String> {
     ["-d", distro, "-e", "test", "-d", dir].iter().map(|s| s.to_string()).collect()
 }
 
-/// Startordner einer WSL-Sitzung: `--cd <pfad>` vor die Argumente setzen, wenn `cwd` ein Linux-Pfad ist
-/// (leer = `~`, die Vorgabe aus #172). Liefert `true`, wenn der Windows-Startordner dann egal ist.
-/// Eigene `--cd`-Angaben eines Profils bleiben unangetastet; Windows-Pfade übersetzt `wsl.exe` selbst.
-pub fn apply_cd(args: &mut Vec<String>, cwd: &str) -> bool {
+/// Ergebnis von [`apply_cd`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cd {
+    /// `--cd <Linux-Pfad>` ist gesetzt; der Windows-Startordner ist nur Platzhalter.
+    Linux,
+    /// Nichts geändert: Windows-Pfad (übersetzt `wsl.exe` selbst) oder eigenes `--cd` des Profils.
+    Windows,
+    /// Der Ordner liegt in einer anderen Distribution als die der Shell.
+    OtherDistro(String),
+    /// Ungültiger Linux-Pfad (nicht starten!).
+    Invalid(PathError),
+}
+
+/// Startordner einer WSL-Sitzung: `--cd <pfad>` vor die Argumente setzen, wenn `cwd` ein Linux-Pfad ist (leer = `~`,
+/// die Vorgabe aus #172) oder ein `\\wsl$\<distro>\…`-Pfad derselben Distribution. Pfade mit `"`/`\`/Steuerzeichen
+/// kommen nie auf die Kommandozeile ([`Cd::Invalid`]). Eigene `--cd`-Angaben eines Profils bleiben unangetastet.
+pub fn apply_cd(args: &mut Vec<String>, cwd: &str, distro: Option<&str>) -> Cd {
     if args.iter().any(|a| a == "--cd" || a == "~") {
-        return false;
+        return Cd::Windows;
     }
     let cwd = cwd.trim();
-    let target = if cwd.is_empty() {
-        "~".to_string()
-    } else if cwd.starts_with("~/") {
+    let target = if cwd.is_empty() || cwd.starts_with("~/") {
         // Ohne Home-Auflösung kennt `--cd` nur `~` allein.
         "~".to_string()
-    } else if looks_linux(cwd) && validate_linux_path(cwd).is_ok() {
+    } else if let Some((d, linux)) = unc_to_linux(cwd) {
+        match distro {
+            Some(x) if x.eq_ignore_ascii_case(&d) => linux,
+            Some(_) => return Cd::OtherDistro(d),
+            None => return Cd::Windows,
+        }
+    } else if looks_linux(cwd) {
         cwd.to_string()
     } else {
-        return false;
+        return Cd::Windows;
     };
+    if let Err(e) = validate_linux_path(&target) {
+        return Cd::Invalid(e);
+    }
     args.splice(0..0, ["--cd".to_string(), target]);
-    true
+    Cd::Linux
 }
 
 /// Ordner vorn in die Liste der zuletzt benutzten WSL-Ordner der Distribution setzen (ohne Doppel, begrenzt).
@@ -278,22 +346,42 @@ pub fn push_recent(map: &mut BTreeMap<String, Vec<String>>, distro: &str, path: 
     if !valid_distro(distro) || validate_linux_path(path).is_err() {
         return;
     }
-    if !map.contains_key(distro) && map.len() >= RECENT_DISTROS_MAX {
+    let key = map.keys().find(|k| k.eq_ignore_ascii_case(distro)).cloned().unwrap_or_else(|| distro.to_string());
+    if !map.contains_key(&key) && map.len() >= RECENT_DISTROS_MAX {
         if let Some(k) = map.keys().next().cloned() {
             map.remove(&k);
         }
     }
-    let v = map.entry(distro.to_string()).or_default();
+    let v = map.entry(key).or_default();
     v.retain(|p| p != path);
     v.insert(0, path.to_string());
     v.truncate(RECENT_MAX);
 }
 
-/// Gelesene Liste bereinigen (settings.json ist eine Vertrauensgrenze): ungültige Einträge weg, Grenzen einhalten.
+/// Zuletzt benutzte Ordner einer Distribution (Groß-/Kleinschreibung des Namens egal).
+pub fn recent_for<'a>(map: &'a BTreeMap<String, Vec<String>>, distro: &str) -> Option<&'a Vec<String>> {
+    map.iter().find(|(k, _)| k.eq_ignore_ascii_case(distro)).map(|(_, v)| v)
+}
+
+/// Gelesene Liste bereinigen (settings.json ist eine Vertrauensgrenze): ungültige Einträge weg, Pfade normalisiert
+/// und ohne Doppel, Distributionen ohne Rücksicht auf Groß-/Kleinschreibung zusammengelegt, Grenzen eingehalten.
 pub fn sanitize_recent(map: &mut BTreeMap<String, Vec<String>>) {
-    map.retain(|d, _| valid_distro(d));
-    for v in map.values_mut() {
-        v.retain(|p| validate_linux_path(p).is_ok());
+    let old = std::mem::take(map);
+    for (d, paths) in old {
+        if !valid_distro(&d) {
+            continue;
+        }
+        let key = map.keys().find(|k| k.eq_ignore_ascii_case(&d)).cloned().unwrap_or(d);
+        let v = map.entry(key).or_default();
+        for p in paths {
+            if validate_linux_path(&p).is_err() {
+                continue;
+            }
+            let p = normalize(&p, None);
+            if validate_linux_path(&p).is_ok() && !v.contains(&p) {
+                v.push(p);
+            }
+        }
         v.truncate(RECENT_MAX);
     }
     map.retain(|_, v| !v.is_empty());
@@ -303,20 +391,28 @@ pub fn sanitize_recent(map: &mut BTreeMap<String, Vec<String>>) {
     }
 }
 
+/// Existiert ein Ordner? `Unknown`: keine Antwort (Zeitlimit, WSL-Fehler) – blockiert nichts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirCheck {
+    Exists,
+    Missing,
+    Unknown,
+}
+
 /// Zugriff auf WSL – im Programm über `wsl.exe` ([`WslExe`]), in Tests ersetzbar. Alle Aufrufe blockieren und
 /// laufen deshalb nur in Hintergrund-Threads.
 pub trait Backend: Send + Sync {
-    /// Installierte Distributionen, Standard zuerst.
+    /// Distributionen für die Auswahl ([`visible_distros`]); leer, wenn keine oder die Abfrage scheiterte.
     fn distros(&self) -> Vec<String>;
     /// Home-Verzeichnis des Standardnutzers.
     fn home(&self, distro: &str) -> Option<String>;
-    /// Ausgabe von `ls -1 -p -A -- <dir>`; `None` = nicht lesbar.
+    /// Ausgabe von `ls -1 -p -A -- <dir>`; `None` = nicht lesbar (oder zu viel Ausgabe).
     fn list(&self, distro: &str, dir: &str) -> Option<Vec<u8>>;
     /// Existiert der Ordner?
-    fn is_dir(&self, distro: &str, path: &str) -> bool;
+    fn is_dir(&self, distro: &str, path: &str) -> DirCheck;
 }
 
-/// Echte Abfragen über `wsl.exe`, Distributionen und Home-Verzeichnisse zwischengespeichert.
+/// Echte Abfragen über `wsl.exe`; erfolgreiche Distributionslisten und Home-Verzeichnisse werden zwischengespeichert.
 pub struct WslExe;
 
 fn distro_cache() -> &'static Mutex<Option<Vec<String>>> {
@@ -334,13 +430,13 @@ impl Backend for WslExe {
         if let Some(v) = distro_cache().lock().ok().and_then(|c| c.clone()) {
             return v;
         }
-        let names = run(&["-l".into(), "-q".into()], SLOW_TIMEOUT).filter(|(ok, _)| *ok).map(|(_, out)| parse_distro_list(&out)).unwrap_or_default();
-        let default = if names.len() > 1 {
-            run(&["-l".into(), "-v".into()], SLOW_TIMEOUT).and_then(|(_, out)| parse_default_distro(&out, &names))
-        } else {
-            None
+        let Some(out) = run(&["-l".into(), "-q".into()], SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated) else {
+            // Nicht zwischenspeichern: beim nächsten Öffnen erneut versuchen.
+            return Vec::new();
         };
-        let v = order_distros(names, default.as_deref());
+        let names = parse_distro_list(&out.stdout);
+        let default = run(&["-l".into(), "-v".into()], SLOW_TIMEOUT).and_then(|o| parse_default_distro(&o.stdout, &names));
+        let v = visible_distros(names, default.as_deref());
         if let Ok(mut c) = distro_cache().lock() {
             *c = Some(v.clone());
         }
@@ -354,9 +450,9 @@ impl Backend for WslExe {
         if let Some(h) = home_cache().lock().ok().and_then(|c| c.get(distro).cloned()) {
             return Some(h);
         }
-        let (ok, out) = run(&home_args(distro), SLOW_TIMEOUT)?;
-        let h = String::from_utf8_lossy(&out).trim().to_string();
-        if !ok || validate_linux_path(&h).is_err() || h == "~" {
+        let out = run(&home_args(distro), SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
+        let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if validate_linux_path(&h).is_err() || h == "~" {
             return None;
         }
         if let Ok(mut c) = home_cache().lock() {
@@ -369,21 +465,34 @@ impl Backend for WslExe {
         if !valid_distro(distro) || !dir.starts_with('/') || validate_linux_path(dir).is_err() {
             return None;
         }
-        run(&list_args(distro, dir), FAST_TIMEOUT).filter(|(ok, _)| *ok).map(|(_, out)| out)
+        run(&list_args(distro, dir), FAST_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated).map(|o| o.stdout)
     }
 
-    fn is_dir(&self, distro: &str, path: &str) -> bool {
+    fn is_dir(&self, distro: &str, path: &str) -> DirCheck {
         if !valid_distro(distro) || !path.starts_with('/') || validate_linux_path(path).is_err() {
-            return false;
+            return DirCheck::Unknown;
         }
-        run(&isdir_args(distro, path), FAST_TIMEOUT).is_some_and(|(ok, _)| ok)
+        match run(&isdir_args(distro, path), FAST_TIMEOUT).map(|o| o.code) {
+            Some(Some(0)) => DirCheck::Exists,
+            // `test -d` liefert 1 für „gibt es nicht“; andere Codes stammen von wsl.exe selbst (Distribution fehlt …).
+            Some(Some(1)) => DirCheck::Missing,
+            _ => DirCheck::Unknown,
+        }
     }
+}
+
+/// Ergebnis eines `wsl.exe`-Aufrufs.
+struct Output {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    /// Mehr als [`MAX_OUTPUT`] Bytes (nicht vollständig gelesen).
+    truncated: bool,
 }
 
 /// `wsl.exe` mit einzelnen Argumenten starten (kein Fenster, keine Eingabe), Ausgabe lesen (höchstens 1 MB);
 /// nach `timeout` wird der Prozess beendet. `None` = nicht startbar oder Zeit überschritten.
 #[cfg(windows)]
-fn run(args: &[String], timeout: Duration) -> Option<(bool, Vec<u8>)> {
+fn run(args: &[String], timeout: Duration) -> Option<Output> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -398,7 +507,7 @@ fn run(args: &[String], timeout: Duration) -> Option<(bool, Vec<u8>)> {
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = (&mut stdout).take(1 << 20).read_to_end(&mut buf);
+        let _ = (&mut stdout).take(MAX_OUTPUT as u64 + 1).read_to_end(&mut buf);
         buf
     });
     let start = std::time::Instant::now();
@@ -413,12 +522,14 @@ fn run(args: &[String], timeout: Duration) -> Option<(bool, Vec<u8>)> {
             }
         }
     };
-    let out = reader.join().unwrap_or_default();
-    status.map(|s| (s.success(), out))
+    let mut out = reader.join().unwrap_or_default();
+    let truncated = out.len() > MAX_OUTPUT;
+    out.truncate(MAX_OUTPUT);
+    status.map(|s| Output { code: s.code(), stdout: out, truncated })
 }
 
 #[cfg(not(windows))]
-fn run(_args: &[String], _timeout: Duration) -> Option<(bool, Vec<u8>)> {
+fn run(_args: &[String], _timeout: Duration) -> Option<Output> {
     None
 }
 
@@ -462,9 +573,22 @@ mod tests {
         assert_eq!(parse_default_distro(b"  NAME STATE\n  Ubuntu Running 2\n", &names), None);
         // Unbekannter Name: erstes Wort
         assert_eq!(parse_default_distro(b"* Arch Running 2\n", &names).as_deref(), Some("Arch"));
-        let ordered = order_distros(names.clone(), Some("Ubuntu-24.04"));
+        let ordered = visible_distros(names.clone(), Some("Ubuntu-24.04"));
         assert_eq!(ordered, vec!["Ubuntu-24.04".to_string(), "Ubuntu".to_string(), "My Distro".to_string()]);
-        assert_eq!(order_distros(names.clone(), Some("Missing")), names);
+        assert_eq!(visible_distros(names.clone(), Some("Missing")), names);
+    }
+
+    #[test]
+    fn templates_and_system_distros_are_hidden() {
+        // So sieht es auf dem Entwicklungsrechner aus: Standard ist eine Vorlage.
+        let names: Vec<String> = ["Ubuntu-Template", "Ubuntu-24.04", "docker-desktop", "docker-desktop-data", "archlinux"].iter().map(|s| s.to_string()).collect();
+        let v = "  NAME                   STATE           VERSION\n* Ubuntu-Template        Stopped         2\n  Ubuntu-24.04           Running         2\n";
+        let default = parse_default_distro(v.as_bytes(), &names);
+        assert_eq!(default.as_deref(), Some("Ubuntu-Template"));
+        assert_eq!(visible_distros(names.clone(), default.as_deref()), vec!["Ubuntu-24.04".to_string(), "archlinux".to_string()], "ausgeblendeter Standard: erste sichtbare vorn");
+        assert_eq!(visible_distros(names, Some("archlinux")), vec!["archlinux".to_string(), "Ubuntu-24.04".to_string()]);
+        assert!(is_hidden_distro("DOCKER-DESKTOP") && is_hidden_distro("debian-TEMPLATE"));
+        assert!(!is_hidden_distro("Ubuntu") && !is_hidden_distro("templates"));
     }
 
     #[test]
@@ -477,6 +601,11 @@ mod tests {
         assert_eq!(l("//wsl.localhost/Debian/srv/a&b (1)/ä").as_deref(), Some("Debian|/srv/a&b (1)/ä"));
         assert_eq!(l(r"\\?\UNC\wsl.localhost\Ubuntu\tmp").as_deref(), Some("Ubuntu|/tmp"));
         assert_eq!(l(r"\\wsl.localhost\Ubuntu\a\\b").as_deref(), Some("Ubuntu|/a/b"));
+        // 9P-Abbildung (U+F0xx) zurück: `a:b*c?` – und `"` kommt so zwar zurück, scheitert aber an der Prüfung.
+        assert_eq!(l("\\\\wsl$\\Ubuntu\\a\u{F03A}b\u{F02A}c\u{F03F}").as_deref(), Some("Ubuntu|/a:b*c?"));
+        let (_, q) = unc_to_linux("\\\\wsl$\\Ubuntu\\x\u{F022} y").unwrap();
+        assert_eq!(validate_linux_path(&q), Err(PathError::Quote));
+        assert_eq!(l("\\\\wsl$\\Ubuntu\\\u{F041}").as_deref(), Some("Ubuntu|/\u{F041}"), "andere PUA-Zeichen bleiben");
         // Keine WSL-Pfade
         assert_eq!(l(r"\\wsl.attacker.com\share\x"), None);
         assert_eq!(l(r"\\server\share"), None);
@@ -491,21 +620,25 @@ mod tests {
         assert_eq!(windows_to_linux(r"d:\").as_deref(), Some("/mnt/d"));
         assert_eq!(windows_to_linux("E:").as_deref(), Some("/mnt/e"));
         assert_eq!(windows_to_linux(r"C:/x/y/").as_deref(), Some("/mnt/c/x/y"));
+        assert_eq!(windows_to_linux(r"\\?\C:\x\y").as_deref(), Some("/mnt/c/x/y"));
         assert_eq!(windows_to_linux(r"C:\$Recycle.Bin\#1 'q'").as_deref(), Some("/mnt/c/$Recycle.Bin/#1 'q'"));
         assert_eq!(windows_to_linux(r"\\wsl$\Ubuntu\home\u").as_deref(), Some("/home/u"));
+        assert_eq!(windows_to_linux("C:foo"), None, "laufwerksrelativ");
         assert_eq!(windows_to_linux(r"\\server\share"), None);
         assert_eq!(windows_to_linux("relative\\x"), None);
         assert_eq!(windows_to_linux("/home/u"), None);
 
         assert_eq!(linux_to_windows("Ubuntu", "/mnt/c/Users/Max/a b").as_deref(), Some(r"C:\Users\Max\a b"));
         assert_eq!(linux_to_windows("Ubuntu", "/mnt/d").as_deref(), Some(r"D:\"));
+        assert_eq!(linux_to_windows("", "/mnt/d/x").as_deref(), Some(r"D:\x"));
         assert_eq!(linux_to_windows("Ubuntu", "/mnt/wsl/x").as_deref(), Some(r"\\wsl.localhost\Ubuntu\mnt\wsl\x"));
         assert_eq!(linux_to_windows("Ubuntu", "/home/u/p q").as_deref(), Some(r"\\wsl.localhost\Ubuntu\home\u\p q"));
         assert_eq!(linux_to_windows("Ubuntu", "~"), None);
         assert_eq!(linux_to_windows("", "/home/u"), None);
         assert_eq!(linux_to_unc("Ubuntu", "/"), r"\\wsl.localhost\Ubuntu\");
+        assert_eq!(linux_to_unc("Ubuntu", "/a:b"), "\\\\wsl.localhost\\Ubuntu\\a\u{F03A}b");
         // Hin und zurück
-        for p in ["/home/u/a b", "/", "/srv/ä-ö"] {
+        for p in ["/home/u/a b", "/", "/srv/ä-ö", "/x/a:b|c"] {
             assert_eq!(unc_to_linux(&linux_to_unc("Deb", p)).map(|x| x.1).as_deref(), Some(p));
         }
         for p in [r"C:\Users\Max", r"Z:\a b\c"] {
@@ -517,16 +650,22 @@ mod tests {
     fn linux_path_validation() {
         assert_eq!(validate_linux_path("/home/u/p"), Ok(()));
         assert_eq!(validate_linux_path("~"), Ok(()));
-        assert_eq!(validate_linux_path("/a b/$(rm -rf)/`x`;'\""), Ok(()), "Sonderzeichen sind als Argument harmlos");
+        assert_eq!(validate_linux_path("/a b/$(id)/`x`;'q'&|*"), Ok(()), "Shell-Zeichen sind als einzelnes Argument harmlos");
+        // `"` und `\` zerlegt wsl.exe selbst: nie erlaubt (Einschleusung über --cd, im Review nachgewiesen).
+        assert_eq!(validate_linux_path("/tmp/x\" echo INJECTED-$((6*7)); #"), Err(PathError::Quote));
+        assert_eq!(validate_linux_path("/tmp/x\\"), Err(PathError::Quote));
+        assert_eq!(validate_linux_path("/a\\\"b"), Err(PathError::Quote));
         assert_eq!(validate_linux_path(""), Err(PathError::Empty));
         assert_eq!(validate_linux_path("home/u"), Err(PathError::NotAbsolute));
         assert_eq!(validate_linux_path("~/x"), Err(PathError::NotAbsolute));
-        assert_eq!(validate_linux_path(r"C:\x"), Err(PathError::NotAbsolute));
+        assert_eq!(validate_linux_path("C:/x"), Err(PathError::NotAbsolute));
+        assert_eq!(validate_linux_path(r"C:\x"), Err(PathError::Quote));
         assert_eq!(validate_linux_path("/a\nb"), Err(PathError::Control));
         assert_eq!(validate_linux_path("/a\0b"), Err(PathError::Control));
         assert_eq!(validate_linux_path(&format!("/{}", "a".repeat(MAX_PATH_LEN))), Err(PathError::TooLong));
         assert!(PathError::NotAbsolute.message(true).contains("Linux"));
         assert!(PathError::TooLong.message(false).contains("4096"));
+        assert!(PathError::Quote.message(false).contains('"'));
     }
 
     #[test]
@@ -552,8 +691,8 @@ mod tests {
         assert_eq!(split_for_completion("~", Some("/home/u")), Some(("/home/u/".into(), "".into())));
         assert_eq!(split_for_completion("~", None), None);
         assert_eq!(split_for_completion("rel", None), None);
-        let ls = b"project/\nproto/\nREADME.md\n.config/\nPrivate/\nlink\nweird\x1bname/\npr\xc3\xa4fix/\n";
-        assert_eq!(parse_ls(ls, "pr", 10), vec!["project/".to_string(), "proto/".to_string(), "präfix/".to_string()]);
+        let ls = b"project/\nproto/\nREADME.md\n.config/\nPrivate/\nlink\nweird\x1bname/\npr\xc3\xa4fix/\npr\"q\" ; id/\npr\\x/\n";
+        assert_eq!(parse_ls(ls, "pr", 10), vec!["project/".to_string(), "proto/".to_string(), "präfix/".to_string()], "Namen mit \" oder \\ nie vorschlagen");
         assert_eq!(parse_ls(ls, "", 10), vec!["Private/".to_string(), "project/".to_string(), "proto/".to_string(), "präfix/".to_string()]);
         assert_eq!(parse_ls(ls, ".", 10), vec![".config/".to_string()]);
         assert_eq!(parse_ls(ls, "", 2).len(), 2);
@@ -562,7 +701,8 @@ mod tests {
 
     #[test]
     fn argv_keeps_user_text_as_single_arguments() {
-        let evil = "/tmp/x; rm -rf ~ $(id) `id` 'q' \"d\" && echo";
+        let evil = "/tmp/x; rm -rf ~ $(id) `id` 'q' && echo";
+        assert_eq!(validate_linux_path(evil), Ok(()));
         let a = list_args("Ubuntu", evil);
         assert_eq!(a, vec!["-d", "Ubuntu", "-e", "ls", "-1", "-p", "-A", "--", evil]);
         // `-e` = ohne Shell; der Pfad ist genau ein Argument und steht hinter `--`.
@@ -571,32 +711,46 @@ mod tests {
         let h = home_args("Ubuntu-24.04");
         assert_eq!(&h[..5], &["-d", "Ubuntu-24.04", "-e", "sh", "-c"]);
         assert!(!h[5].contains("Ubuntu"), "nichts Veränderliches in der Shell-Zeichenkette");
+        // Pfade mit Anführungszeichen erreichen wsl.exe nie (WslExe prüft vor jedem Aufruf).
+        assert_eq!(WslExe.is_dir("Ubuntu", "/tmp/x\" echo pwned; #"), DirCheck::Unknown);
+        assert_eq!(WslExe.list("Ubuntu", "/tmp/x\" echo pwned; #/"), None);
         assert!(!valid_distro("-e"));
         assert!(!valid_distro("a\nb"));
         assert!(!valid_distro(r"..\x"));
+        assert!(!valid_distro("U\" x"));
         assert!(valid_distro("Ubuntu-24.04"));
     }
 
     #[test]
     fn cd_argument_for_sessions() {
-        let mut a = vec!["-d".to_string(), "Ubuntu".to_string()];
-        assert!(apply_cd(&mut a, "/home/u/my project"));
+        let base = || vec!["-d".to_string(), "Ubuntu".to_string()];
+        let mut a = base();
+        assert_eq!(apply_cd(&mut a, "/home/u/my project", Some("Ubuntu")), Cd::Linux);
         assert_eq!(a, vec!["--cd", "/home/u/my project", "-d", "Ubuntu"]);
-        let mut a = vec!["-d".to_string(), "Ubuntu".to_string()];
-        assert!(apply_cd(&mut a, ""), "leer = Linux-Home");
+        let mut a = base();
+        assert_eq!(apply_cd(&mut a, "", Some("Ubuntu")), Cd::Linux, "leer = Linux-Home");
         assert_eq!(a, vec!["--cd", "~", "-d", "Ubuntu"]);
         let mut a = vec![];
-        assert!(apply_cd(&mut a, "~/x"));
+        assert_eq!(apply_cd(&mut a, "~/x", None), Cd::Linux);
         assert_eq!(a, vec!["--cd", "~"]);
-        // Windows-Pfad: wie bisher über den Windows-Startordner
-        let mut a = vec!["-d".to_string(), "Ubuntu".to_string()];
-        assert!(!apply_cd(&mut a, r"C:\Users\u"));
-        assert!(!apply_cd(&mut a, r"\\wsl$\Ubuntu\home"));
+        // Gespeicherter \\wsl$-Pfad derselben Distribution → --cd; andere Distribution → Fehler; ohne bekannte Distribution wie bisher
+        let mut a = base();
+        assert_eq!(apply_cd(&mut a, r"\\wsl$\ubuntu\srv\a b", Some("Ubuntu")), Cd::Linux);
+        assert_eq!(a[..2], ["--cd", "/srv/a b"]);
+        let mut a = base();
+        assert_eq!(apply_cd(&mut a, r"\\wsl.localhost\Debian\srv", Some("Ubuntu")), Cd::OtherDistro("Debian".into()));
+        assert_eq!(apply_cd(&mut a, r"\\wsl.localhost\Debian\srv", None), Cd::Windows);
         assert_eq!(a.len(), 2);
-        // Ungültig (Steuerzeichen) oder eigenes --cd des Profils: nichts anfügen
-        assert!(!apply_cd(&mut a, "/a\nb"));
+        // Windows-Pfad: wie bisher über den Windows-Startordner
+        assert_eq!(apply_cd(&mut a, r"C:\Users\u", Some("Ubuntu")), Cd::Windows);
+        assert_eq!(a.len(), 2);
+        // Einschleusung (im Review nachgewiesen) und Steuerzeichen: nichts anfügen, nicht starten
+        assert_eq!(apply_cd(&mut a, "/tmp/x\" echo INJECTED-$((6*7)); #", Some("Ubuntu")), Cd::Invalid(PathError::Quote));
+        assert_eq!(apply_cd(&mut a, "\\\\wsl$\\Ubuntu\\x\u{F022} echo pwned", Some("Ubuntu")), Cd::Invalid(PathError::Quote));
+        assert_eq!(apply_cd(&mut a, "/a\nb", Some("Ubuntu")), Cd::Invalid(PathError::Control));
+        assert_eq!(a.len(), 2);
         let mut own = vec!["--cd".to_string(), "/srv".to_string()];
-        assert!(!apply_cd(&mut own, "/home"));
+        assert_eq!(apply_cd(&mut own, "/home", None), Cd::Windows);
         assert_eq!(own, vec!["--cd", "/srv"]);
     }
 
@@ -606,12 +760,14 @@ mod tests {
         for i in 0..15 {
             push_recent(&mut m, "Ubuntu", &format!("/p/{i}"));
         }
-        push_recent(&mut m, "Ubuntu", "/p/5");
+        push_recent(&mut m, "ubuntu", "/p/5");
         let v = &m["Ubuntu"];
         assert_eq!(v.len(), RECENT_MAX);
         assert_eq!(v[0], "/p/5");
         assert_eq!(v.iter().filter(|p| *p == "/p/5").count(), 1);
+        assert_eq!(recent_for(&m, "UBUNTU").map(|v| v.len()), Some(RECENT_MAX));
         push_recent(&mut m, "Ubuntu", "relative");
+        push_recent(&mut m, "Ubuntu", "/q\"x");
         push_recent(&mut m, "-bad", "/x");
         assert_eq!(m.len(), 1);
         for i in 0..20 {
@@ -620,11 +776,12 @@ mod tests {
         assert_eq!(m.len(), RECENT_DISTROS_MAX);
         assert_eq!(m["D19"], vec!["/x".to_string()]);
         let mut bad: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        bad.insert("Ubuntu".into(), vec!["/ok".into(), "nope".into(), "/a\u{7}".into()]);
+        bad.insert("Ubuntu".into(), vec!["/ok".into(), "nope".into(), "/a\u{7}".into(), "/ok/".into(), "/q\"".into()]);
+        bad.insert("ubuntu".into(), vec!["/ok".into(), "/two".into()]);
         bad.insert("-x".into(), vec!["/ok".into()]);
         bad.insert("Empty".into(), vec!["rel".into()]);
         sanitize_recent(&mut bad);
-        assert_eq!(bad.len(), 1);
-        assert_eq!(bad["Ubuntu"], vec!["/ok".to_string()]);
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        assert_eq!(bad["Ubuntu"], vec!["/ok".to_string(), "/two".to_string()]);
     }
 }

@@ -1127,7 +1127,12 @@ impl App {
         let dir = if p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
         // Ordner in einer WSL-Distribution (`\\wsl.localhost\<Distro>\…`, `\\wsl$\…`, z. B. „Hier öffnen“ im Explorer):
         // WSL-Sitzung dieser Distribution im passenden Linux-Pfad (#172). Unbekannte Distribution: wie bisher.
-        let wsl = crate::wsl::unc_to_linux(&dir).and_then(|(d, linux)| self.wsl_shell_for(&d).map(|sid| (sid, linux)));
+        // Das Standardprofil des Projekts kann ein eigenes Programm haben: nur wenn die Sitzung wirklich in dieser
+        // Distribution startet, den Linux-Pfad nehmen – sonst bleibt es der (für Windows gültige) UNC-Pfad.
+        let wsl = crate::wsl::unc_to_linux(&dir).and_then(|(d, linux)| self.wsl_shell_for(&d).map(|sid| (d, sid, linux))).filter(|(d, sid, _)| {
+            let eff = self.effective_shell_id(Some(sid), self.active_project);
+            matches!(folder_picker::Target::for_shell(self.shell_by_id(&eff).as_ref(), false), folder_picker::Target::Wsl { distro: Some(x), .. } if x.eq_ignore_ascii_case(d))
+        }).map(|(_, sid, linux)| (sid, linux));
         let (shell_id, cwd) = match wsl {
             Some((sid, linux)) => (Some(sid), linux),
             None => (None, dir),
@@ -1361,6 +1366,16 @@ impl App {
         }
     }
 
+    /// Shell, mit der `new_session` tatsächlich startet: ein Standardprofil des Projekts mit eigenem Programm gewinnt,
+    /// sonst die gewünschte Shell, sonst die des Profils bzw. die Standard-Shell.
+    fn effective_shell_id(&self, shell: Option<&str>, project: u64) -> String {
+        let pid = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        match self.profile(pid) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            _ => shell.map(str::to_string).unwrap_or_else(|| self.shell_for_profile(pid)),
+        }
+    }
+
     /// Ziel des Ordnerfelds für Ordner-/Projektvorgaben mit diesem Profil (WSL-Shell → Linux-Pfad, #172).
     fn folder_target(&self, pid: u64) -> folder_picker::Target {
         folder_picker::Target::for_shell(self.shell_by_id(&self.shell_for_profile(pid)).as_ref(), false)
@@ -1474,10 +1489,35 @@ impl App {
         };
         // WSL: ein Linux-Startordner (leer = Linux-Home `~`, #172) geht als `wsl.exe --cd <pfad>` mit; der
         // Windows-Startordner ist dann nur ein gültiger Platzhalter. Windows-Pfade übersetzt wsl.exe wie bisher selbst.
-        let cwd = if wsl && crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd) {
-            home_dir()
+        // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
+        // erreichen die Kommandozeile nie (wsl.exe zerlegt sie selbst – Befehlseinschleusung).
+        let cwd = if wsl {
+            let distro = shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args));
+            match crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) {
+                crate::wsl::Cd::Linux => home_dir(),
+                crate::wsl::Cd::Windows if entry.meta.cwd.is_empty() => home_dir(),
+                crate::wsl::Cd::Windows => entry.meta.cwd.clone(),
+                crate::wsl::Cd::OtherDistro(d) => {
+                    let msg = if self.settings.language == Lang::De {
+                        format!("Der Startordner liegt in der WSL-Distribution {d}, die Shell startet eine andere: {}", entry.meta.cwd)
+                    } else {
+                        format!("The start folder is in the WSL distribution {d}, but the shell starts another one: {}", entry.meta.cwd)
+                    };
+                    entry.error = Some(msg);
+                    entry.live = None;
+                    return;
+                }
+                crate::wsl::Cd::Invalid(e) => {
+                    entry.error = Some(format!("{} {}", e.message(self.settings.language == Lang::De), entry.meta.cwd));
+                    entry.live = None;
+                    return;
+                }
+            }
         } else if entry.meta.cwd.is_empty() {
             home_dir()
+        } else if crate::wsl::looks_linux(&entry.meta.cwd) {
+            // Nie einen Linux-Pfad an eine Windows-Shell geben: `/mnt/c/x` → `C:\x`, sonst das Windows-Home.
+            crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
         } else {
             entry.meta.cwd.clone()
         };
@@ -4044,19 +4084,66 @@ fn split_args(s: &str) -> Vec<String> {
     out
 }
 
+/// Ein Argument nach den Regeln von `CommandLineToArgvW` maskieren (Leerzeichen → Anführungszeichen, `\` vor `"`
+/// verdoppeln).
+fn win_quote_arg(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '\n', '\u{0b}', '"']) {
+        return a.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut slashes = 0usize;
+    for c in a.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(slashes));
+                out.push(c);
+                slashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(slashes * 2));
+    out.push('"');
+    out
+}
+
+/// PowerShell-Befehl für den Start mit erhöhten Rechten. `Start-Process -ArgumentList` hängt seine Werte nur mit
+/// Leerzeichen aneinander; deshalb wird die Kommandozeile hier selbst maskiert (sonst zerfiele z. B.
+/// `--cd /home/u/my project` in drei Argumente). Einfache Anführungszeichen (auch die typografischen, die PowerShell
+/// ebenso als Begrenzer liest) werden verdoppelt.
+fn elevated_script(shell: &ShellSpec, cwd: Option<&str>) -> String {
+    let q = |s: &str| {
+        let mut o = String::new();
+        for c in s.chars() {
+            if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                o.push(c);
+            }
+            o.push(c);
+        }
+        o
+    };
+    let mut script = format!("Start-Process -FilePath '{}' -Verb RunAs", q(&shell.program));
+    if !shell.args.is_empty() {
+        let line: Vec<String> = shell.args.iter().map(|a| win_quote_arg(a)).collect();
+        script += &format!(" -ArgumentList '{}'", q(&line.join(" ")));
+    }
+    if let Some(c) = cwd {
+        script += &format!(" -WorkingDirectory '{}'", q(c));
+    }
+    script
+}
+
 /// Startet die Shell mit erhöhten Rechten in einem externen Fenster (nur Windows).
 fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let q = |s: &str| s.replace('\'', "''");
-        let mut script = format!("Start-Process -FilePath '{}' -Verb RunAs", q(&shell.program));
-        if !shell.args.is_empty() {
-            script += &format!(" -ArgumentList '{}'", q(&shell.args.join(" ")));
-        }
-        if std::path::Path::new(cwd).is_dir() {
-            script += &format!(" -WorkingDirectory '{}'", q(cwd));
-        }
+        let script = elevated_script(shell, Some(cwd).filter(|c| std::path::Path::new(c).is_dir()));
         let ok = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
             .creation_flags(0x0800_0000)
@@ -4261,6 +4348,24 @@ mod pane_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elevated_start_quotes_each_argument() {
+        let mut args = vec!["-d".to_string(), "Ubuntu".to_string()];
+        assert_eq!(crate::wsl::apply_cd(&mut args, "/home/u/my project", Some("Ubuntu")), crate::wsl::Cd::Linux);
+        let shell = ShellSpec { id: "wsl:Ubuntu".into(), label: "x".into(), program: "wsl.exe".into(), args };
+        let s = elevated_script(&shell, Some(r"C:\Users\o'neil"));
+        assert_eq!(s, r#"Start-Process -FilePath 'wsl.exe' -Verb RunAs -ArgumentList '--cd "/home/u/my project" -d Ubuntu' -WorkingDirectory 'C:\Users\o''neil'"#);
+        // CommandLineToArgvW-Regeln: Anführungszeichen und Backslashes davor, abschließende Backslashes
+        assert_eq!(win_quote_arg("plain"), "plain");
+        assert_eq!(win_quote_arg(""), "\"\"");
+        assert_eq!(win_quote_arg(r#"a "b""#), r#""a \"b\"""#);
+        assert_eq!(win_quote_arg(r"C:\a b\"), r#""C:\a b\\""#);
+        assert_eq!(win_quote_arg(r#"x\"y"#), r#""x\\\"y""#);
+        // Typografische einfache Anführungszeichen beenden in PowerShell ebenfalls den String: verdoppeln.
+        let shell = ShellSpec { id: "pwsh".into(), label: "x".into(), program: "pwsh.exe".into(), args: vec!["-Command".into(), "echo \u{2019}; calc".into()] };
+        assert!(elevated_script(&shell, None).contains("'-Command \"echo \u{2019}\u{2019}; calc\"'"));
+    }
 
     fn sessions(ids: &[(u64, bool)]) -> BTreeMap<u64, Entry> {
         ids.iter().map(|(id, min)| (*id, Entry::new(SessionMeta { id: *id, minimized: *min, ..SessionMeta::default() }))).collect()

@@ -146,7 +146,8 @@ pub fn wsl_distro(args: &[String]) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "-d" || a == "--distribution" {
-            return it.next().cloned();
+            // Aus Profil-Argumenten (Nutzereingabe): nur plausible Namen (keine Option, keine Anführungszeichen …).
+            return it.next().filter(|d| crate::wsl::valid_distro(d)).cloned();
         }
     }
     None
@@ -180,6 +181,8 @@ mod tests {
     fn wsl_detection() {
         assert!(is_wsl(&spec("wsl.exe", &["-d", "Ubuntu"])));
         assert_eq!(wsl_distro(&["-d".into(), "Ubuntu".into()]).as_deref(), Some("Ubuntu"));
+        assert_eq!(wsl_distro(&["-d".into(), "-e".into()]), None);
+        assert_eq!(wsl_distro(&["--distribution".into(), "U\" x".into()]), None);
         assert!(!is_wsl(&spec("pwsh.exe", &[])));
     }
 

@@ -65,6 +65,8 @@ pub enum Check {
     Pending,
     Exists,
     Missing,
+    /// Keine Antwort von WSL (Zeitlimit, Fehler) – blockiert nichts.
+    Unknown,
     Invalid(PathError),
 }
 
@@ -81,7 +83,7 @@ pub struct PickerResponse {
 enum Msg {
     Distros(Vec<String>),
     Home(String, Option<String>),
-    Listing { seq: u64, exists: bool, items: Vec<String> },
+    Listing { seq: u64, exists: wsl::DirCheck, items: Vec<String> },
 }
 
 pub struct FolderPicker {
@@ -192,10 +194,10 @@ impl FolderPicker {
     pub fn set_text(&mut self, s: &str) {
         self.text = s.to_string();
         self.touched = true;
+        self.reset_check();
         if self.wsl_mode {
             self.convert_typed();
         }
-        self.reset_check();
     }
 
     /// Gewählter Ordner zum Speichern: Windows-Pfad, oder im WSL-Modus ein Linux-Pfad (`/…` oder `~`; `~/x` wird
@@ -218,11 +220,18 @@ impl FolderPicker {
         self.distro.as_deref().filter(|_| self.wsl_mode)
     }
 
-    /// Grund, warum der Wert nicht übernommen werden sollte (ungültiger Linux-Pfad, Ordner fehlt), sonst None.
-    /// Läuft die Prüfung noch, gilt der Wert als übernehmbar.
+    /// Grund, warum der Wert nicht übernommen werden sollte (ungültiger Linux-Pfad, Ordner fehlt, `~/…` ohne bekanntes
+    /// Home, Ordner einer anderen Distribution), sonst None. Läuft die Prüfung noch oder antwortet WSL nicht
+    /// ([`Check::Unknown`]), gilt der Wert als übernehmbar.
     pub fn blocking_error(&self, lang: Lang) -> Option<String> {
         if !self.wsl_mode {
             return None;
+        }
+        if let Some(n) = &self.note {
+            return Some(n.clone());
+        }
+        if self.text.trim().starts_with("~/") && self.home().is_none() {
+            return Some(lang.t("Das Linux-Home ist noch nicht bekannt – bitte einen absoluten Pfad angeben oder kurz warten.", "The Linux home is not known yet – enter an absolute path or wait a moment.").to_string());
         }
         match self.check {
             Check::Invalid(e) => Some(e.message(lang == Lang::De).to_string()),
@@ -292,24 +301,30 @@ impl FolderPicker {
                 self.rects.text = te.rect;
                 if te.changed() {
                     self.touched = true;
+                    self.edited_at = Some(now);
+                    self.reset_check();
                     if self.wsl_mode {
                         if let Some(d) = self.convert_typed() {
                             r.distro_changed = Some(d);
                         }
                     }
-                    self.edited_at = Some(now);
-                    self.reset_check();
                     r.changed = true;
                 }
                 if ui.button("…").on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
-                    if let Some(p) = self.dialog_start().and_then(|s| crate::notify::pick_folder(&s)) {
+                    let picked = match self.dialog_start() {
+                        // Ohne vorherige Prüfung des wsl.localhost-Pfads (die könnte die Oberfläche blockieren).
+                        Some(s) if self.wsl_mode => crate::notify::pick_folder_unchecked(&s),
+                        Some(s) => crate::notify::pick_folder(&s),
+                        None => None,
+                    };
+                    if let Some(p) = picked {
                         if let Some(d) = self.apply_picked(&p, lang) {
                             r.distro_changed = Some(d);
                         }
                         r.changed = true;
                     }
                 }
-                let recents: Vec<String> = self.distro().and_then(|d| recent.get(d)).cloned().unwrap_or_default();
+                let recents: Vec<String> = self.distro().and_then(|d| wsl::recent_for(recent, d)).cloned().unwrap_or_default();
                 if self.wsl_mode && !recents.is_empty() {
                     ui.menu_button("▾", |ui| {
                         ui.label(RichText::new(lang.t("Zuletzt benutzt", "Recently used")).small().weak());
@@ -385,6 +400,13 @@ impl FolderPicker {
         self.suggestions.clear();
         self.queried = None;
         self.note = None;
+        // Gescheiterte Home-Abfrage bei der nächsten Eingabe erneut versuchen.
+        if let Some(d) = self.distro.clone() {
+            if self.homes.get(&d).is_some_and(|h| h.is_none()) {
+                self.homes.remove(&d);
+                self.homes_requested.remove(&d);
+            }
+        }
     }
 
     /// Wechsel zu WSL: unveränderte Vorgabe (leer oder Windows-Home) → `~`, Windows-Pfad → `/mnt/<lw>/…`,
@@ -393,12 +415,12 @@ impl FolderPicker {
         self.wsl_mode = true;
         let t = self.text.trim().to_string();
         let untouched_default = !self.touched && (t.is_empty() || same_windows_path(&t, &self.win_home));
+        self.reset_check();
         if t.is_empty() || untouched_default {
             self.text = "~".into();
         } else {
             self.convert_typed();
         }
-        self.reset_check();
     }
 
     /// Wechsel zu Windows: `/mnt/c/x` → `C:\x`, anderer Linux-Pfad → `\\wsl.localhost\<D>\…`, `~` (die Vorgabe)
@@ -419,16 +441,24 @@ impl FolderPicker {
 
     /// Im WSL-Modus eingegebenen Windows-/UNC-Pfad umrechnen. Liefert eine neue Distribution, wenn ein
     /// `\\wsl.localhost\<andere>\…`-Pfad sie wechselt (nur wenn wählbar).
+    /// Gehört ein UNC-Pfad zu einer anderen Distribution, die nicht wählbar ist (oder ist die eigene unbekannt),
+    /// bleibt er stehen und ein Hinweis blockiert die Übernahme – nie still in der falschen Distribution starten.
     fn convert_typed(&mut self) -> Option<String> {
-        let t = self.text.trim();
-        if wsl::looks_linux(t) {
+        let t = self.text.trim().to_string();
+        if wsl::looks_linux(&t) {
             return None;
         }
-        if let Some((d, l)) = wsl::unc_to_linux(t) {
+        if let Some((d, l)) = wsl::unc_to_linux(&t) {
+            let same = self.distro.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(&d));
+            let choose = matches!(self.target, Target::Wsl { choose_distro: true, .. });
+            if !same && !choose {
+                self.other_distro_note(&d, crate::state::lang());
+                return None;
+            }
             self.text = l;
             return self.switch_distro(&d);
         }
-        if let Some(l) = wsl::windows_to_linux(t) {
+        if let Some(l) = wsl::windows_to_linux(&t) {
             self.text = l;
         }
         None
@@ -443,15 +473,26 @@ impl FolderPicker {
             self.reset_check();
             return None;
         }
-        let other = wsl::unc_to_linux(p).map(|(d, _)| d).filter(|d| self.distro.as_deref().is_some_and(|c| !c.eq_ignore_ascii_case(d)));
+        let other = wsl::unc_to_linux(p).map(|(d, _)| d).filter(|d| !self.distro.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(d)));
         if let (Some(d), Target::Wsl { choose_distro: false, .. }) = (&other, &self.target) {
-            self.note = Some(if lang == Lang::De { format!("Der Ordner liegt in {d}, nicht in der Distribution dieser Shell.") } else { format!("The folder is in {d}, not in this shell's distribution.") });
+            // Auswahl verwerfen (Text bleibt), Hinweis zeigen.
+            let d = d.clone();
+            self.other_distro_note(&d, lang);
             return None;
         }
         self.text = p.to_string();
-        let changed = self.convert_typed();
         self.reset_check();
-        changed
+        self.convert_typed()
+    }
+
+    fn other_distro_note(&mut self, d: &str, lang: Lang) {
+        let de = lang == Lang::De;
+        self.note = Some(match &self.distro {
+            Some(c) if de => format!("Der Ordner liegt in {d}, die Shell startet {c}."),
+            Some(c) => format!("The folder is in {d}, the shell starts {c}."),
+            None if de => format!("Der Ordner liegt in {d}; die Distribution der Shell ist nicht bekannt."),
+            None => format!("The folder is in {d}; the shell's distribution is not known."),
+        });
     }
 
     fn switch_distro(&mut self, d: &str) -> Option<String> {
@@ -465,6 +506,7 @@ impl FolderPicker {
     }
 
     /// Startordner des Ordnerdialogs: im WSL-Modus `\\wsl.localhost\<D>\<ordner oder home>` (sonst `\\wsl$\…`).
+    /// Ungeprüft: schon das Prüfen eines wsl.localhost-Pfads kann die WSL-VM starten und die Oberfläche blockieren.
     fn dialog_start(&self) -> Option<String> {
         if !self.wsl_mode {
             return Some(self.text.clone());
@@ -474,11 +516,7 @@ impl FolderPicker {
             .filter(|_| self.check == Check::Exists)
             .or_else(|| self.home().map(str::to_string))
             .unwrap_or_else(|| "/".into());
-        let unc = wsl::linux_to_unc(&d, &linux);
-        if std::path::Path::new(&unc).is_dir() {
-            return Some(unc);
-        }
-        Some(crate::pathfmt::from_wsl(&format!("wsl:{d}"), &linux))
+        Some(wsl::linux_to_unc(&d, &linux))
     }
 
     fn visible_suggestions(&self) -> Vec<String> {
@@ -505,6 +543,7 @@ impl FolderPicker {
                 (s, dim)
             }
             Check::Missing => (self.missing_text(lang), ui.visuals().warn_fg_color),
+            Check::Unknown => (lang.t("Ordner nicht prüfbar (WSL antwortet nicht)", "Could not check the folder (WSL is not responding)").to_string(), dim),
             Check::Invalid(e) => (e.message(de).to_string(), ui.visuals().error_fg_color),
         };
         ui.label(RichText::new(text).small().color(color));
@@ -531,7 +570,11 @@ impl FolderPicker {
                     }
                 }
                 Msg::Listing { seq, exists, items } if seq == self.seq => {
-                    self.check = if exists { Check::Exists } else { Check::Missing };
+                    self.check = match exists {
+                        wsl::DirCheck::Exists => Check::Exists,
+                        wsl::DirCheck::Missing => Check::Missing,
+                        wsl::DirCheck::Unknown => Check::Unknown,
+                    };
                     let base = match self.text.trim() {
                         "~" => "~/".to_string(),
                         t => t.rfind('/').map(|i| t[..=i].to_string()).unwrap_or_default(),
@@ -616,7 +659,7 @@ impl FolderPicker {
         std::thread::spawn(move || {
             let listed = b.list(&d, &dir);
             let items = listed.as_deref().map(|o| wsl::parse_ls(o, &prefix, 50)).unwrap_or_default();
-            let exists = if is_home || prefix.is_empty() { is_home || listed.is_some() } else { b.is_dir(&d, &full) };
+            let exists = if is_home || (prefix.is_empty() && listed.is_some()) { wsl::DirCheck::Exists } else { b.is_dir(&d, &full) };
             let _ = tx.send(Msg::Listing { seq, exists, items });
             ctx.request_repaint();
         });
@@ -648,7 +691,11 @@ mod tests {
         }
         fn home(&self, d: &str) -> Option<String> {
             self.calls.lock().unwrap().push(format!("home {d}"));
-            Some(if d == "Debian" { "/home/deb".into() } else { "/home/u".into() })
+            match d {
+                "Nohome" => None,
+                "Debian" => Some("/home/deb".into()),
+                _ => Some("/home/u".into()),
+            }
         }
         fn list(&self, d: &str, dir: &str) -> Option<Vec<u8>> {
             self.calls.lock().unwrap().push(format!("list {d} {dir}"));
@@ -659,9 +706,13 @@ mod tests {
                 _ => None,
             }
         }
-        fn is_dir(&self, d: &str, p: &str) -> bool {
+        fn is_dir(&self, d: &str, p: &str) -> wsl::DirCheck {
             self.calls.lock().unwrap().push(format!("isdir {d} {p}"));
-            matches!(p, "/home/u" | "/home/u/project" | "/home/u/proto" | "/" | "/home/u/project/src")
+            match p {
+                "/home/u" | "/home/u/project" | "/home/u/proto" | "/" | "/home/u/project/src" => wsl::DirCheck::Exists,
+                "/slow" => wsl::DirCheck::Unknown,
+                _ => wsl::DirCheck::Missing,
+            }
         }
     }
 
@@ -878,6 +929,48 @@ mod tests {
         p.remember(&mut m);
         assert_eq!(m.len(), 1);
         assert_eq!(m["Ubuntu-24.04"].len(), 1);
+    }
+
+    #[test]
+    fn unknown_check_does_not_block_but_missing_home_and_other_distros_do() {
+        // WSL antwortet nicht: „unbekannt“, Übernahme erlaubt.
+        let mut h = H::new("/slow", ubuntu());
+        h.until("unbekannt", |p| p.check == Check::Unknown);
+        assert!(h.p.blocking_error(Lang::En).is_none());
+        // Home nicht ermittelbar: `~/x` blockiert (würde sonst still zu `~`), `~` allein nicht; jede Eingabe versucht es erneut.
+        let mut h = H::new("~/x", Target::Wsl { distro: Some("Nohome".into()), choose_distro: false });
+        h.p.touched = true;
+        h.until("Home gescheitert", |p| p.homes.get("Nohome").is_some_and(|x| x.is_none()));
+        assert!(h.p.blocking_error(Lang::En).is_some_and(|e| e.contains("home")));
+        assert_eq!(h.p.value(), "~/x");
+        h.p.set_text("~");
+        h.until("erneut versucht", |p| p.check == Check::Exists);
+        assert!(h.fake.calls.lock().unwrap().iter().filter(|c| *c == "home Nohome").count() >= 2, "{:?}", h.fake.calls.lock().unwrap());
+        assert!(h.p.blocking_error(Lang::En).is_none());
+        // Eingefügter Pfad einer anderen Distribution bei fester Shell: bleibt stehen, blockiert mit Hinweis.
+        let mut p = FolderPicker::with_backend("o", "~", ubuntu(), Arc::new(Fake::default()));
+        p.set_text(r"\\wsl.localhost\Debian\srv");
+        assert_eq!(p.text, r"\\wsl.localhost\Debian\srv");
+        assert!(p.blocking_error(Lang::En).is_some_and(|e| e.contains("Debian") && e.contains("Ubuntu-24.04")));
+        // Unbekannte Distribution der Shell (wsl.exe ohne -d): ebenso
+        let mut p = FolderPicker::with_backend("o2", "~", Target::Wsl { distro: None, choose_distro: false }, Arc::new(Fake::default()));
+        p.set_text(r"\\wsl$\Debian\srv");
+        assert!(p.blocking_error(Lang::En).is_some_and(|e| e.contains("Debian")));
+        assert_eq!(p.value(), r"\\wsl$\Debian\srv");
+        // Namen mit `"` (wsl.exe würde sie falsch zerlegen) sind ungültig.
+        let mut h = H::new("/tmp/x\" echo pwned; #", ubuntu());
+        h.until("ungültig", |p| p.check == Check::Invalid(PathError::Quote));
+        assert!(h.p.blocking_error(Lang::En).is_some());
+    }
+
+    #[test]
+    fn recents_ignore_the_case_of_the_distro_name() {
+        let mut m = BTreeMap::new();
+        m.insert("ubuntu-24.04".to_string(), vec!["/srv".to_string()]);
+        let p = FolderPicker::with_backend("rc", "/home/u/q", ubuntu(), Arc::new(Fake::default()));
+        p.remember(&mut m);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["ubuntu-24.04"], vec!["/home/u/q".to_string(), "/srv".to_string()]);
     }
 
     #[test]
