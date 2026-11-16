@@ -532,6 +532,9 @@ impl App {
         }
         if !self.wins.is_empty() {
             self.prune_view();
+        } else {
+            // Ohne weitere Fenster läuft `prune_view` nicht; der Abgleich „im Layout = nicht minimiert“ gilt trotzdem.
+            super::unminimize_shown(self.layout.as_ref(), &mut self.entries);
         }
         self.take_routed(ctx)
     }
@@ -596,14 +599,7 @@ impl App {
             let detached = &self.detached;
             self.layout = prune_layout(l, |id| entries.get(&id).is_some_and(|e| e.meta.project == pid && e.meta.window == win) && !detached.contains(&id));
         }
-        // Was im Layout steht, ist nicht minimiert – egal, wie es hineinkam (Ziehen, Ordner-Layout, Vorlage …).
-        if let Some(l) = &self.layout {
-            for id in l.leaf_ids() {
-                if let Some(e) = self.entries.get_mut(&id).filter(|e| e.meta.minimized) {
-                    e.meta.minimized = false;
-                }
-            }
-        }
+        super::unminimize_shown(self.layout.as_ref(), &mut self.entries);
         let ok = self.layout.as_ref().is_some_and(|l| l.contains(self.focused));
         if !ok {
             let mut v = Vec::new();
