@@ -68,7 +68,7 @@ Besides terminals, Paneldeck has chat sessions with local language models (`kind
 
 ## Showing sessions
 
-`focus_session` shows a session. `placement` chooses how: `replace` (default) replaces only the active pane – the pane of your own session if it is visible, otherwise the pane the user focused – which becomes minimized, and the rest of the split stays; `split_right` / `split_down` split only the active pane and put the session into the new half; `solo` makes it the only pane and minimizes all other panes (they keep running). The user's keyboard focus stays where it is (unless their pane was replaced), and no window is brought to the front. Panes waiting for an approval and sessions of your agent chain are never displaced. A session that is already visible stays where it is (except with `solo`). `create_session` creates a session without showing it; with `placement` it shows the new session the same way. Change the user's layout only when the task needs it.
+`focus_session` shows a session; `placement` chooses how (see the tool). The default `replace` puts it into the active pane – your own pane if visible, else the user's – and minimizes that pane. The user's keyboard focus stays. `create_session` shows the new session only with `placement`. Change the user's layout only when the task needs it.
 
 ## To-do list and tickets – current mode: {{mode}}
 
@@ -135,7 +135,7 @@ Neben Terminals hat Paneldeck Chat-Sitzungen mit lokalen Sprachmodellen (`kind` 
 
 ## Sitzungen anzeigen
 
-`focus_session` zeigt eine Sitzung. `placement` bestimmt, wie: `replace` (Standard) ersetzt nur den aktiven Bereich – den Bereich deiner eigenen Sitzung, wenn sie zu sehen ist, sonst den Bereich, den der Nutzer fokussiert hat –, der dabei minimiert wird; der Rest der Teilung bleibt; `split_right` / `split_down` teilen nur den aktiven Bereich und setzen die Sitzung in die neue Hälfte; `solo` macht sie zum einzigen Bereich und minimiert alle anderen (sie laufen weiter). Der Tastaturfokus des Nutzers bleibt, wo er ist (außer sein Bereich wurde ersetzt), und kein Fenster kommt nach vorn. Bereiche mit offener Freigabe-Frage und Sitzungen deiner Agenten-Kette werden nie verdrängt. Eine schon sichtbare Sitzung bleibt, wo sie ist (außer mit `solo`). `create_session` legt eine Sitzung an, ohne sie zu zeigen; mit `placement` zeigt es die neue Sitzung genauso. Ändere das Layout des Nutzers nur, wenn die Aufgabe es braucht.
+`focus_session` zeigt eine Sitzung; `placement` bestimmt, wie (siehe Werkzeug). Der Standard `replace` setzt sie in den aktiven Bereich – deinen eigenen, wenn sichtbar, sonst den des Nutzers – und minimiert diesen. Der Tastaturfokus des Nutzers bleibt. `create_session` zeigt die neue Sitzung nur mit `placement`. Ändere das Layout des Nutzers nur, wenn die Aufgabe es braucht.
 
 ## Todo-Liste und Tickets – aktueller Modus: {{mode}}
 

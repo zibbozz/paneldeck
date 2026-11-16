@@ -180,7 +180,7 @@ pub fn tools() -> Vec<ToolDef> {
         json!({
             "type": "string",
             "enum": ["solo", "replace", "split_right", "split_down"],
-            "description": format!("Where the session is shown, relative to the active pane (the pane of your own session if it is visible, else the pane the user focused): solo = the only pane, all other panes are minimized; replace = replaces only the active pane (which becomes minimized), the rest of the split stays; split_right / split_down = splits only the active pane and puts the session into the new right/lower half, nothing else changes. The user's keyboard focus stays where it is unless their pane was replaced. Panes waiting for an approval and sessions of your agent chain are never displaced: solo keeps them, replace splits them instead. {default}")
+            "description": format!("solo, replace, split_right or split_down; see the tool description. {default}")
         })
     };
     vec![
