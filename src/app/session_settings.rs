@@ -12,6 +12,7 @@
 //!   Speichern „Jetzt neu laden?“; sonst gilt die Änderung beim nächsten Neu laden.
 
 use super::closing::{confirm_window, Outcome};
+use crate::claude_opts::ClaudeOpts;
 use super::*;
 
 /// Wie Claude beim Start einer Sitzung beginnt.
@@ -125,6 +126,7 @@ pub(super) enum Problem {
     UnknownProfile,
     UnknownShell,
     MissingFolder,
+    InvalidClaudeOption,
 }
 
 impl Problem {
@@ -133,6 +135,7 @@ impl Problem {
             Problem::UnknownProfile => lang.t("Das Profil gibt es nicht mehr.", "The profile no longer exists."),
             Problem::UnknownShell => lang.t("Diese Shell wurde nicht gefunden.", "This shell was not found."),
             Problem::MissingFolder => lang.t("Den Arbeitsordner gibt es nicht.", "The working folder does not exist."),
+            Problem::InvalidClaudeOption => lang.t("Ungültige Claude-Option (Modell oder Agent).", "Invalid Claude option (model or agent)."),
         }
     }
 }
@@ -170,6 +173,8 @@ pub(super) struct FormValues {
     pub(super) cwd: String,
     pub(super) claude: bool,
     pub(super) claude_continue: bool,
+    /// Claude-Optionen (#161): wirksame Werte der Sitzung (auch alte aus `claude_args`).
+    pub(super) copts: ClaudeOpts,
 }
 
 impl FormValues {
@@ -185,6 +190,7 @@ impl FormValues {
             cwd: meta.cwd.clone(),
             claude: meta.claude,
             claude_continue: meta.claude_continue,
+            copts: meta.claude_opts_eff().0,
         }
     }
 }
@@ -205,6 +211,8 @@ pub(super) struct SessionForm {
     /// Zwischenzeit – Notizen-Fenster, MCP `rename_session`, Farbe im Kontextmenü – bleiben erhalten).
     orig: FormValues,
     pub(super) problems: Vec<Problem>,
+    /// Modell- und Agentenname gültig (Ergebnis von `claude_opts_rows` im letzten Bild).
+    pub(super) opts_ok: bool,
     /// Beim ersten Bild den Fokus ins Namensfeld (sonst tippte man ins Terminal dahinter).
     pub(super) focus: bool,
 }
@@ -221,6 +229,7 @@ impl SessionForm {
             orig: v.clone(),
             v,
             problems: Vec::new(),
+            opts_ok: true,
             focus: true,
         }
     }
@@ -268,6 +277,9 @@ impl SessionForm {
         if !cwd.is_empty() && cwd != self.orig.cwd.trim() && !is_dir(&shell, cwd) {
             v.push(Problem::MissingFolder);
         }
+        if self.v.claude && self.v.copts != self.orig.copts && (!self.opts_ok || self.v.copts.sanitized(true) != self.v.copts) {
+            v.push(Problem::InvalidClaudeOption);
+        }
         v
     }
 
@@ -277,7 +289,11 @@ impl SessionForm {
             return false;
         }
         let (v, o) = (&self.v, &self.orig);
-        v.profile != o.profile || Self::shell_of(v, profiles, default_shell) != Self::shell_of(o, profiles, default_shell) || v.cwd.trim() != o.cwd.trim() || v.claude != o.claude
+        v.profile != o.profile
+            || Self::shell_of(v, profiles, default_shell) != Self::shell_of(o, profiles, default_shell)
+            || v.cwd.trim() != o.cwd.trim()
+            || v.claude != o.claude
+            || (v.claude && v.copts != o.copts)
     }
 
     /// Übernehmen – nur die Felder, die der Nutzer im Dialog geändert hat. Der Ordner im Baum wird bereinigt
@@ -320,6 +336,13 @@ impl SessionForm {
             }
             if v.claude_continue != o.claude_continue {
                 meta.claude_continue = v.claude_continue;
+            }
+            if v.copts != o.copts {
+                // Nur für diese Sitzung (auch bypassPermissions als ausdrückliche Wahl); nie als Vorauswahl gemerkt.
+                // Alte Angaben aus `claude_args` fallen weg, sonst kämen geleerte Felder von dort zurück.
+                let (_, rest) = meta.claude_opts_eff();
+                meta.claude_opts = v.copts.sanitized(true);
+                meta.claude_args = rest;
             }
         }
         reload
@@ -475,7 +498,12 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                         let r = continue_checkbox(ui, &mut f.v.claude_continue, lang);
                         mark(ui, "continue", &r);
                         ui.end_row();
-                        // Hier kommen die Claude-Optionen (Modell, Aufwand, Permission-Mode, Agent; #161) hinzu.
+                        // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
+                        f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", true);
+                        ui.label("");
+                        let r = ui.label(RichText::new(lang.t("Die Optionen gelten nur für diese Sitzung, ab dem nächsten Start.", "The options apply to this session only, from its next start.")).small().color(style::dim(ui)));
+                        mark(ui, "copts", &r);
+                        ui.end_row();
                     }
                 }
             });
@@ -485,7 +513,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
             }
             if reload_hint {
                 ui.add_space(S1);
-                ui.label(RichText::new(lang.t("Profil, Shell, Arbeitsordner und Claude wirken erst nach einem Neu laden.", "Profile, shell, working folder and Claude take effect after a reload.")).small().color(style::dim(ui)));
+                ui.label(RichText::new(lang.t("Profil, Shell, Arbeitsordner, Claude und die Claude-Optionen wirken erst nach einem Neu laden.", "Profile, shell, working folder, Claude and the Claude options take effect after a reload.")).small().color(style::dim(ui)));
             }
             for p in &f.problems {
                 ui.colored_label(Color32::from_rgb(0xe0, 0x6c, 0x75), p.text(lang));
@@ -783,7 +811,7 @@ mod tests {
         c.v.profile = 9;
         c.v.cwd = "C:\\missing".into();
         assert!(c.validate(&s, &p, "pwsh", dir).is_empty());
-        for pr in [Problem::UnknownProfile, Problem::UnknownShell, Problem::MissingFolder] {
+        for pr in [Problem::UnknownProfile, Problem::UnknownShell, Problem::MissingFolder, Problem::InvalidClaudeOption] {
             assert_ne!(pr.text(Lang::De), pr.text(Lang::En));
         }
     }
@@ -869,6 +897,62 @@ mod tests {
         assert_eq!(meta.color, PALETTE[5]);
         assert_eq!(meta.tags, vec!["t2"]);
         assert_eq!(meta.shell_id, "pwsh");
+    }
+
+    #[test]
+    fn claude_options_are_per_session_start_time_settings() {
+        let p = profiles();
+        let mut meta = SessionMeta { id: 6, claude: true, shell_id: "pwsh".into(), claude_args: "--model opus --permission-mode plan --verbose".into(), ..SessionMeta::default() };
+        // Alte Sitzung: Optionen aus claude_args erscheinen im Dialog
+        let f = form(&meta);
+        assert_eq!((f.v.copts.model.as_str(), f.v.copts.permission_mode.as_str()), ("opus", "plan"));
+        // Unverändert: nichts geschrieben, kein Neu laden
+        assert!(!f.apply(&mut meta, &p, "pwsh"));
+        assert!(meta.claude_opts.is_empty());
+        assert_eq!(meta.claude_args, "--model opus --permission-mode plan --verbose");
+        // Geändert (Modell geleert = Standard, Effort, bypassPermissions als ausdrückliche Wahl): Neu laden nötig
+        let mut f = form(&meta);
+        f.v.copts.model.clear();
+        f.v.copts.effort = "high".into();
+        f.v.copts.permission_mode = crate::claude_opts::BYPASS.into();
+        assert!(f.needs_reload(&p, "pwsh"));
+        assert!(f.validate(&shells(), &p, "pwsh", |_, _| true).is_empty());
+        assert!(f.apply(&mut meta, &p, "pwsh"));
+        assert_eq!(meta.claude_opts.effort, "high");
+        assert_eq!(meta.claude_opts.permission_mode, "bypassPermissions", "nur für diese Sitzung");
+        assert!(meta.claude_opts.model.is_empty());
+        assert_eq!(meta.claude_args, "--verbose", "alte Modell-/Modus-Angaben fallen weg, sonst käme opus zurück");
+        assert_eq!(meta.claude_opts_eff().0.model, "", "geleertes Modell bleibt Standard");
+        // Ungültiger Name sperrt das Speichern
+        let mut f = form(&meta);
+        f.v.copts.agent = "bad name!".into();
+        f.opts_ok = false;
+        assert_eq!(f.validate(&shells(), &p, "pwsh", |_, _| true), vec![Problem::InvalidClaudeOption]);
+        // Ohne Claude zählen die Optionen nicht als Start-Änderung
+        let mut t = SessionMeta { id: 7, shell_id: "pwsh".into(), ..SessionMeta::default() };
+        let mut f = form(&t);
+        f.v.copts.model = "haiku".into();
+        assert!(!f.needs_reload(&p, "pwsh"));
+        f.apply(&mut t, &p, "pwsh");
+        assert_eq!(t.claude_opts.model, "haiku", "gespeichert für einen späteren Claude-Start");
+    }
+
+    #[test]
+    fn the_dialog_shows_claude_options_with_the_bypass_warning() {
+        let mut d = Dlg::new();
+        let mut f = form(&SessionMeta { id: 1, claude: true, shell_id: "pwsh".into(), ..SessionMeta::default() });
+        d.frame(&mut f, true, vec![]);
+        d.frame(&mut f, true, vec![]);
+        assert!(d.find("copts").is_some(), "Claude-Optionen sichtbar");
+        f.v.copts.agent = "bad name!".into();
+        d.frame(&mut f, true, vec![]);
+        assert!(!f.opts_ok, "ungültiger Agentenname erkannt");
+        // Ohne Claude: keine Optionen
+        let mut d = Dlg::new();
+        let mut t = form(&SessionMeta { id: 2, shell_id: "pwsh".into(), ..SessionMeta::default() });
+        d.frame(&mut t, true, vec![]);
+        d.frame(&mut t, true, vec![]);
+        assert!(d.find("copts").is_none());
     }
 
     #[test]

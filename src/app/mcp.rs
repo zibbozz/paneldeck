@@ -29,7 +29,8 @@ fn has_claude_opts(args: &Value) -> bool {
 /// `model`/`effort`/`permission_mode`/`agent` einer Claude-Sitzung (`null`, wenn Paneldeck sie nicht setzt).
 /// Bei Chats bleibt `model` das Modell des Chats; die übrigen sind dort `null`.
 fn add_claude_opts(v: &mut Value, e: &super::Entry) {
-    let o = if e.meta.claude && !e.is_chat() { e.meta.claude_opts_eff().0 } else { ClaudeOpts::default() };
+    // Optionen des laufenden Starts (geänderte Einstellungen gelten erst nach dem Neu laden, #170).
+    let o = if e.is_claude() { e.launched_opts.clone() } else { ClaudeOpts::default() };
     let j = o.to_json();
     if !e.is_chat() {
         v["model"] = j["model"].clone();

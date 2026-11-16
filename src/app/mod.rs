@@ -94,6 +94,8 @@ struct Entry {
     /// Beim letzten Start lief Claude (`spawn_into`). `meta.claude` ist die Einstellung für den nächsten Start (#170);
     /// alles zur Laufzeit (Status, Warteschlange, Hooks, MCP) richtet sich nach diesem Wert.
     launched_claude: bool,
+    /// Claude-Optionen dieses Starts (für Auskünfte über MCP; `meta.claude_opts` gilt erst beim nächsten Start).
+    launched_opts: crate::claude_opts::ClaudeOpts,
     /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
     /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
     session_key: String,
@@ -102,7 +104,8 @@ struct Entry {
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude }
+        let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -1452,6 +1455,7 @@ impl App {
         // Ab hier gilt die Einstellung für diesen Start (auch wenn der Start gleich scheitert: dann läuft nichts mehr
         // aus der alten Konfiguration).
         entry.launched_claude = entry.meta.claude && !entry.is_chat();
+        entry.launched_opts = if entry.launched_claude { entry.meta.claude_opts_eff().0 } else { Default::default() };
         entry.hook_seen = false;
         let Some(shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
