@@ -108,7 +108,7 @@ impl App {
                             egui::TextEdit::singleline(&mut self.filter)
                                 .frame(false)
                                 .hint_text(lang.t("Filtern: Name oder #Tag", "Filter: name or #tag"))
-                                .desired_width((ui.available_width() - 66.0).max(40.0)),
+                                .desired_width((ui.available_width() - 100.0).max(40.0)),
                         );
                         ui.spacing_mut().item_spacing.x = 0.0;
                         if tree_on && style::icon_btn(ui, SIcon::FolderPlus, lang.t("Neuer Ordner", "New folder"), false).clicked() {
@@ -121,6 +121,15 @@ impl App {
                         };
                         if style::icon_btn(ui, icon, tip, tree_on).clicked() {
                             actions.push(Action::ToggleTree);
+                        }
+                        // Alle Sitzungen schließen (#156): ganz rechts, etwas abgesetzt; Rückfrage mit Liste und Wartezeit.
+                        ui.add_space(6.0);
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                        let key = self.binding_text("close_all");
+                        let base = lang.t("Alle Sitzungen schließen … (alle Projekte und Fenster)", "Close all sessions … (all projects and windows)");
+                        let tip = if key.is_empty() { base.to_string() } else { format!("{base} ({key})") };
+                        if style::danger_icon_at(ui, r, Id::new("sidebar_close_all"), &tip, !self.entries.is_empty()).clicked() {
+                            actions.push(Action::CloseAll(closing::CloseScope::All));
                         }
                     });
                 });
@@ -263,6 +272,11 @@ impl App {
         let fcol = f.color.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(weak_c);
         style::paint_icon(&p, SIcon::Folder, Pos2::new(rect.min.x + 28.0, cy), fcol);
         let mut right = rect.max.x - 8.0;
+        // Papierkorb beim Überfahren (nur mit Sitzungen darunter): alle Sitzungen des Ordners schließen (#156).
+        let trash = (!ids.is_empty() && self.dragging.is_none() && self.dragging_folder.is_none() && ui.rect_contains_pointer(rect)).then(|| closing::folder_button_rect(rect));
+        if let Some(b) = trash {
+            right = b.min.x - 4.0;
+        }
         let count = p.layout_no_wrap(ids.len().to_string(), FontId::proportional(11.5), weak_c);
         right -= count.size().x;
         p.galley(Pos2::new(right, cy - count.size().y / 2.0), count, weak_c);
@@ -274,6 +288,12 @@ impl App {
         job.wrap = egui::text::TextWrapping { max_width: (right - rect.min.x - 48.0).max(20.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
         let g = p.layout_job(job);
         p.galley(Pos2::new(rect.min.x + 42.0, cy - g.size().y / 2.0), g, text_c);
+        if let Some(b) = trash {
+            let tip = lang.t("Alle Sitzungen in diesem Ordner schließen … (auch Unterordner, minimierte Sitzungen und Chats)", "Close all sessions in this folder … (including subfolders, minimized sessions and chats)");
+            if style::danger_icon_at(ui, b, resp.id.with("closeall"), tip, true).clicked() {
+                actions.push(Action::CloseAll(closing::CloseScope::Folder(f.path.clone())));
+            }
+        }
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -378,15 +398,9 @@ impl App {
                     actions.push(Action::FolderBroadcast(path.clone()));
                     ui.close();
                 }
-                // Chats mit Verlauf im Ordner: die Bestätigung sagt, dass deren Verläufe gelöscht werden.
-                let chat_history = self.folder_sessions(&path).iter().any(|id| self.entries.get(id).is_some_and(|e| e.chat_has_history()));
-                let confirm = if chat_history {
-                    lang.t("Wirklich alle schließen? Chatverläufe werden gelöscht. Nochmal klicken", "Really close all? Chat histories will be deleted. Click again")
-                } else {
-                    lang.t("Wirklich alle schließen? Nochmal klicken", "Really close all? Click again")
-                };
-                if armed_button(ui, ("closeall", &path), lang.t("Alle Sitzungen schließen …", "Close all sessions …"), confirm) {
-                    actions.push(Action::FolderCloseAll(path.clone()));
+                // Rückfrage mit Liste und 3-Sekunden-Wartezeit (`closing`), wie der Papierkorb an der Zeile.
+                if ui.button(lang.t("Alle Sitzungen schließen …", "Close all sessions …")).clicked() {
+                    actions.push(Action::CloseAll(closing::CloseScope::Folder(path.clone())));
                     ui.close();
                 }
             }
@@ -590,14 +604,13 @@ impl App {
                 p.with_clip_rect(text_clip).galley(Pos2::new(sx, sub_y - g.size().y / 2.0), g, *col);
                 sx += w + 5.0;
             }
-            if resp.double_clicked() {
-                actions.push(Action::StartRename(id));
-            } else if resp.clicked() {
-                actions.push(Action::Activate(id));
+            if let Some(a) = closing::session_row_click(&resp, id) {
+                actions.push(a);
             }
         }
 
-        let resp = if status_tip.is_empty() { resp } else { resp.on_hover_text(status_tip) };
+        let status_tip = format!("{status_tip}\n{}", lang.t("Mittelklick schließt die Sitzung.", "Middle-click closes the session.")).trim().to_string();
+        let resp = resp.on_hover_text(status_tip);
         let existing_groups: Vec<String> = {
             let mut g: Vec<String> = self.entries.values().map(|e| e.meta.group.clone()).filter(|g| !g.is_empty()).collect();
             if let Some(p) = self.projects.iter().find(|p| p.id == self.active_project) {
@@ -683,7 +696,7 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            if ui.button(lang.t("Schließen", "Close")).clicked() {
+            if ui.button(lang.t("Schließen (Mittelklick)", "Close (middle-click)")).clicked() {
                 actions.push(Action::RequestClose(id));
                 ui.close();
             }

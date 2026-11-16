@@ -215,6 +215,10 @@ pub struct Settings {
     /// Fehlt in älteren Dateien (dann Standard); ein unbekannter Wert ergibt ebenfalls den Standard.
     #[serde(deserialize_with = "AltScreenWheel::lenient")]
     pub alt_screen_wheel: AltScreenWheel,
+    /// Sitzungen merken (seit 2.3.0, Standard an): Terminals, Chats, Projekte und Ordner beim nächsten Start
+    /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
+    /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
+    pub remember_sessions: bool,
 }
 
 /// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
@@ -280,6 +284,7 @@ impl Default for Settings {
             llm_servers: Default::default(),
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
+            remember_sessions: true,
         }
     }
 }
@@ -956,6 +961,24 @@ mod tests {
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.llm_servers, s.llm_servers);
         assert_eq!(back.last_chat_model, s.last_chat_model);
+    }
+
+    #[test]
+    fn remember_sessions_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „an“ (bisheriges Verhalten), die übrigen Werte bleiben.
+        let old = r#"{"language":"De","confirm_close":false,"alt_screen_wheel":"off"}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.remember_sessions);
+        assert!(!s.confirm_close);
+        assert_eq!(s.alt_screen_wheel, AltScreenWheel::Off);
+        assert!(Settings::default().remember_sessions);
+        // Aus bleibt aus.
+        let mut s = s;
+        s.remember_sessions = false;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["remember_sessions"], false);
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(!back.remember_sessions);
     }
 
     #[test]

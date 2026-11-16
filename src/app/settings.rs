@@ -96,6 +96,17 @@ impl App {
                         row(ui, lang.t("Schließen bestätigen", "Confirm close"), lang.t("Bei laufenden Sitzungen nachfragen", "Ask for running sessions"), |ui| {
                             style::toggle(ui, &mut self.settings.confirm_close);
                         });
+                        row(
+                            ui,
+                            lang.t("Sitzungen merken", "Remember sessions"),
+                            lang.t(
+                                "Terminals, Chats, Projekte und Ordner beim nächsten Start wiederherstellen. Aus: jeder Start ist leer, Chatverläufe werden beim Beenden gelöscht.",
+                                "Restore terminals, chats, projects and folders on the next start. Off: every start is empty, chat histories are deleted on exit.",
+                            ),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.remember_sessions);
+                            },
+                        );
                         ui.add_space(S2);
                         row(ui, lang.t("Diagnose", "Diagnostics"), lang.t("Systeminfos für Fehlerberichte", "System info for bug reports"), |ui| {
                             if ui.button(lang.t("In Zwischenablage kopieren", "Copy to clipboard")).clicked() {
@@ -376,10 +387,17 @@ impl App {
                         ui.add_space(S1);
                         let current: Vec<(&str, String)> = keys::DEFAULTS.iter().map(|(id, d)| (*id, self.settings.keys.get(*id).cloned().unwrap_or_else(|| d.to_string()))).collect();
                         for (id, cur) in &current {
-                            let dup = current.iter().filter(|(_, c)| c == cur).count() > 1;
+                            // Leer = kein Kürzel (z. B. „Alle Sitzungen schließen“): nie „doppelt“.
+                            let dup = !cur.is_empty() && current.iter().filter(|(_, c)| c == cur).count() > 1;
                             let capturing = self.capture_key.as_deref() == Some(*id);
                             row(ui, keys::label(id, de), if dup { lang.t("Doppelt belegt!", "Duplicate!") } else { "" }, |ui| {
-                                let txt = if capturing { lang.t("Taste drücken …", "Press keys …").to_string() } else { keys::pretty(cur, de) };
+                                let txt = if capturing {
+                                    lang.t("Taste drücken …", "Press keys …").to_string()
+                                } else if cur.is_empty() {
+                                    lang.t("(keins)", "(none)").to_string()
+                                } else {
+                                    keys::pretty(cur, de)
+                                };
                                 let b = egui::Button::new(RichText::new(txt).monospace()).min_size(Vec2::new(190.0, 24.0));
                                 let b = if capturing { b.fill(style::ACCENT.gamma_multiply(0.35)) } else { b };
                                 if ui.add(b).clicked() {

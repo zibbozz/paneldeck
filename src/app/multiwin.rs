@@ -57,7 +57,7 @@ pub(super) struct WinView {
     group_prompt: Option<Prompt>,
     new_dialog: Option<NewDialog>,
     new_chat: Option<models_ui::NewChatDlg>,
-    confirm_close: Option<u64>,
+    confirm_close: Option<super::closing::CloseAsk>,
     settings_open: bool,
     settings_tab: usize,
     /// Laufende Kürzel-Aufnahme in den Einstellungen dieses Fensters (sperrt nur hier die Kürzel).
@@ -731,7 +731,7 @@ impl App {
         self.sync_accent();
         self.ensure_style(ctx);
         if self.wins.exit_after_save {
-            self.save_all();
+            self.save_for_exit();
             std::process::exit(0);
         }
         if let Some(req) = self.wins.open_req.take() {
