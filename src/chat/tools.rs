@@ -110,7 +110,7 @@ impl ToolPolicy {
         if proxy_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", PROXY_MESSAGE)));
         }
-        // Und kein Start der MCP-Brücke, die sich der Erkennung entziehen könnte (nach bestem Bemühen).
+        // Und kein Start neuer Agenten (Claude-Sitzung, MCP-Brücke) – zweite Linie neben der Markierung (#152).
         if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
@@ -138,26 +138,33 @@ pub fn proxy_forbidden(tool: &str, args: &Value, origins: &[u64]) -> bool {
     args.get("session").and_then(|v| v.as_u64()).is_some_and(|s| origins.contains(&s))
 }
 
+/// Meldung, wenn eine von einem Agenten ausgelöste Runde eine Claude-Sitzung starten will.
+pub const SPAWN_CLAUDE_MESSAGE: &str = "a chat started by an agent cannot start Claude sessions";
 /// Meldung, wenn eine von einem Agenten ausgelöste Runde die MCP-Brücke (`paneldeck mcp`) starten will.
 pub const SPAWN_BRIDGE_MESSAGE: &str = "a chat started by an agent cannot start the Paneldeck MCP bridge";
 
-/// Würde dieser Aufruf eines Chats mit Vorfahren (`origins` nicht leer) die MCP-Brücke von Paneldeck starten?
-/// Verboten sind `run_command`/`send_text`/`send_keys`, deren Text „paneldeck“ und „mcp“ enthält.
+/// Würde dieser Aufruf eines Chats mit Vorfahren (`origins` nicht leer) einen neuen Agenten starten? Verboten sind:
+/// * `create_session` mit `claude: true` oder einem `prompt`;
+/// * `run_command`/`send_text`/`send_keys`, deren Text „paneldeck“ und „mcp“ enthält (Start der MCP-Brücke).
 ///
-/// Seit 2.3.0 (#152) ist jede Sitzung markiert, die ein Glied der Kette anlegt oder beschreibt; eine dort gestartete
-/// Brücke oder Claude-Sitzung wird über den Prozessbaum (bzw. `PANELDECK_SESSION` in WSL) dieser Sitzung zugeordnet und
-/// erbt die Kette. Claude-Sitzungen sind daher wieder erlaubt (2.2.0 verbot sie). Dieses Verbot bleibt als zweite
-/// Verteidigungslinie für den einen Fall, den die Markierung nicht abdeckt: eine Brücke, die sich der Zuordnung entzieht
-/// (losgelöster Prozess, WSL ohne die Variable) und dann als Agent außerhalb von Paneldeck ohne Kette gälte.
+/// Seit 2.3.0 (#152) ist jede Sitzung markiert, die ein Glied der Kette anlegt oder beschreibt, und ein dort gestarteter
+/// Agent erbt die Kette, wenn der Hub ihn über den Prozessbaum zuordnen kann. Das Verbot bleibt als zweite
+/// Verteidigungslinie (wie in 2.2.0 zugesagt): ein Agent, der sich der Zuordnung entzieht (losgelöster Prozess, WSL),
+/// gälte sonst als Agent außerhalb von Paneldeck ohne Kette.
 ///
-/// **Nach bestem Bemühen:** Die Erkennung prüft nur den Text eines einzelnen Aufrufs (Groß-/Kleinschreibung egal); auf
-/// mehrere Aufrufe verteilter oder verschleierter Text, Skripte oder andere Agenten-Programme erkennt sie nicht.
+/// **Nach bestem Bemühen:** Die Erkennung der Brücke prüft nur den Text eines einzelnen Aufrufs (Groß-/Kleinschreibung
+/// egal); auf mehrere Aufrufe verteilter oder verschleierter Text, Skripte oder andere Agenten-Programme erkennt sie nicht.
 /// `Some(Meldung)` = verboten.
 pub fn spawn_forbidden(tool: &str, args: &Value, origins: &[u64]) -> Option<&'static str> {
     if origins.is_empty() {
         return None;
     }
     match tool {
+        "create_session" => {
+            let claude = args.get("claude").and_then(|v| v.as_bool()) == Some(true);
+            let prompt = args.get("prompt").and_then(|v| v.as_str()).is_some_and(|p| !p.trim().is_empty());
+            (claude || prompt).then_some(SPAWN_CLAUDE_MESSAGE)
+        }
         "run_command" | "send_text" | "send_keys" => {
             let text = match tool {
                 "run_command" => args.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
@@ -575,10 +582,12 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_started_by_an_agent_cannot_start_the_bridge() {
+    fn a_turn_started_by_an_agent_cannot_start_claude_sessions_or_the_bridge() {
         let p = policy(McpLevel::Control, &[], false).with_origins(vec![5]);
         let user = policy(McpLevel::Control, &[], false);
         for (tool, args, msg) in [
+            ("create_session", json!({"claude": true}), SPAWN_CLAUDE_MESSAGE),
+            ("create_session", json!({"prompt": "do things"}), SPAWN_CLAUDE_MESSAGE),
             ("run_command", json!({"session": 9, "command": "paneldeck mcp"}), SPAWN_BRIDGE_MESSAGE),
             ("run_command", json!({"session": 9, "command": r"& 'C:\Tools\PanelDeck.exe' MCP < req.json"}), SPAWN_BRIDGE_MESSAGE),
             ("send_text", json!({"session": 9, "text": "echo x | paneldeck.exe mcp"}), SPAWN_BRIDGE_MESSAGE),
@@ -589,10 +598,8 @@ mod tests {
             assert!(body.contains("\"forbidden\"") && body.contains(msg), "{tool}: {body}");
             assert!(user.check(&call(tool, args)).is_ok(), "{tool}: vom Nutzer ausgelöst erlaubt");
         }
-        // Harmloses bleibt erlaubt – seit 2.3.0 auch Claude-Sitzungen: sie erben die Agenten-Kette (#152).
+        // Harmloses bleibt erlaubt
         for (tool, args) in [
-            ("create_session", json!({"claude": true})),
-            ("create_session", json!({"claude": true, "prompt": "do things"})),
             ("create_session", json!({"shell": "powershell"})),
             ("create_session", json!({"claude": false, "prompt": "  "})),
             ("run_command", json!({"session": 9, "command": "cargo build"})),
@@ -602,7 +609,7 @@ mod tests {
         ] {
             assert_eq!(p.check(&call(tool, args.clone())), Ok(true), "{tool}: {args}");
         }
-        assert_eq!(spawn_forbidden("create_session", &json!({"claude": true}), &[5]), None);
+        assert_eq!(spawn_forbidden("create_session", &json!({"claude": true}), &[]), None, "Nutzer-Runde");
         assert_eq!(spawn_forbidden("run_command", &json!({"command": "paneldeck mcp"}), &[]), None, "Nutzer-Runde");
     }
 

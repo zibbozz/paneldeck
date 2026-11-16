@@ -316,6 +316,8 @@ enum Action {
     OpenSettings,
     OpenPrompts,
     OpenNotes(u64),
+    /// Agenten-Kette einer Sitzung aufheben (nur der Nutzer, Kontextmenü, #152).
+    ResetAgentChain(u64),
     /// Mini-Suche „Ticket verknüpfen“ für die Sitzung öffnen.
     LinkTicket(u64),
     /// Ticket öffnen (Chip, Palette).
@@ -1013,6 +1015,8 @@ impl App {
             app.spawn_into(&cc.egui_ctx, &mut entry, Launch { restore: true, restart: false, continue_last: false, prompt: None, resume_id: None });
             app.entries.insert(id, entry);
         }
+        // Agenten-Ketten: Sitzungen, die es nicht mehr gibt, fallen heraus (#152).
+        taint::prune(&mut app.entries);
         // Keine Id vergeben, zu der noch Verlauf/Scrollback daliegt (Absturz vor dem Speichern, zurückgesetzte state.json).
         app.next_id = app.next_id.max(chatmod::store::max_used_id(&app.dir).saturating_add(1));
         // Projekte: ältere Stände ohne Projekte bekommen ein Standardprojekt.
@@ -1091,8 +1095,15 @@ impl App {
         let cmds: Vec<IpcCmd> = self.hook_server.as_ref().map(|h| h.cmd_rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             self.from_tray(ctx);
-            if let IpcCmd::Open { path, claude } = c {
+            if let IpcCmd::Open { path, claude, origin_pid } = c {
+                // `paneldeck --open` aus einem Hub-Terminal heraus: die neue Sitzung erbt dessen Agenten-Kette samt ihm
+                // (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Absender nur über den Prozessbaum.
+                let origin = self.session_of_pid(origin_pid);
+                let id = self.next_id;
                 self.open_folder(ctx, &path, claude);
+                if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
+                    self.save_state();
+                }
             }
         }
         if self.start_in_tray {
@@ -1772,6 +1783,8 @@ impl App {
         let _ = std::fs::remove_file(self.scrollback_path(id));
         // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
         chatmod::store::remove(&self.dir, id);
+        // Die geschlossene Id aus allen Agenten-Ketten nehmen (sie wird nie neu vergeben, #152).
+        taint::prune(&mut self.entries);
         if self.layout.is_none() {
             // Letzter Bereich geschlossen: eine andere (nicht minimierte) Sitzung zeigen, sonst leerer Hub.
             if let Some(first) = self.unminimized_docked().first().copied() {
@@ -1795,6 +1808,18 @@ impl App {
         state::save_json(&self.dir.join("settings.json"), &self.settings);
         state::save_json(&self.dir.join("prompts.json"), &self.prompts);
         let _ = std::fs::create_dir_all(self.dir.join("scrollback"));
+        self.save_state();
+        for (id, e) in &self.entries {
+            if let Some(s) = &e.live {
+                let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
+            }
+        }
+        self.save_chats();
+    }
+
+    /// Nur `state.json` schreiben (Sitzungen, Layout, Projekte) – leicht genug für sofortiges Speichern, z. B. wenn sich
+    /// eine Agenten-Kette ändert (#152).
+    fn save_state(&self) {
         let saved = SavedState {
             sessions: self.entries.values().map(|e| e.meta.clone()).collect(),
             layout: self.layout.clone(),
@@ -1814,12 +1839,6 @@ impl App {
             extra_windows: self.saved_windows(),
         };
         state::save_json(&self.dir.join("state.json"), &saved);
-        for (id, e) in &self.entries {
-            if let Some(s) = &e.live {
-                let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
-            }
-        }
-        self.save_chats();
     }
 
     /// Verläufe geänderter Chats schreiben.
@@ -2880,6 +2899,11 @@ impl App {
             }
             Action::OpenNotes(id) => {
                 self.notes_open = if self.notes_open == Some(id) { None } else { Some(id) };
+            }
+            Action::ResetAgentChain(id) => {
+                if taint::reset(&mut self.entries, id) {
+                    self.save_state();
+                }
             }
             Action::LinkTicket(id) => self.tlinks_open_picker(id),
             Action::OpenTicket(id) => self.open_ticket_from_anywhere(id),

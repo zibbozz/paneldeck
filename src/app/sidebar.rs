@@ -517,6 +517,11 @@ impl App {
                 lang.t("Nicht im Layout – klicken zeigt die Sitzung im fokussierten Bereich.", "Not in the layout – click to show it in the focused pane.")
             };
         }
+        // Markierte Sitzung (#152): woher sie stammt; zurücksetzen über das Kontextmenü.
+        if let Some(h) = super::taint::hint(&self.entries, id) {
+            status_tip.push('\n');
+            status_tip += &h;
+        }
         let status_tip = status_tip.trim().to_string();
 
         // Rechts oben: Markierungen
@@ -607,6 +612,7 @@ impl App {
             g.dedup();
             g
         };
+        let tainted = self.entries.get(&id).is_some_and(|e| !e.meta.agent_chain.is_empty());
         resp.context_menu(|ui| {
             if ui.button(lang.t("Umbenennen (F2)", "Rename (F2)")).clicked() {
                 actions.push(Action::StartRename(id));
@@ -663,6 +669,19 @@ impl App {
             }
             if ui.button(lang.t("Notizen …", "Notes …")).clicked() {
                 actions.push(Action::OpenNotes(id));
+                ui.close();
+            }
+            // Nur der Nutzer kann die Markierung aufheben (nie über MCP, #152).
+            if tainted
+                && ui
+                    .button(lang.t("Agenten-Kette zurücksetzen", "Reset agent chain"))
+                    .on_hover_text(lang.t(
+                        "Diese Sitzung stammt aus einer Agenten-Kette: Agenten darin dürfen nicht in die Sitzungen der Kette schreiben. Zurücksetzen hebt das auf.",
+                        "This session comes from an agent chain: agents in it must not write into the sessions of that chain. Resetting lifts this.",
+                    ))
+                    .clicked()
+            {
+                actions.push(Action::ResetAgentChain(id));
                 ui.close();
             }
             if self.tlinks.enabled && ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
