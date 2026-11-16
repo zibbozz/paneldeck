@@ -50,6 +50,16 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - The palette showed German shortcut hints in the English UI and ignored custom shortcuts.
 - Dropping files onto the empty Terminal Hub could create an invalid pane.
 - Chats with a tool level now ask Ollama for a context large enough for the system prompt and the tools (up to 32768, at most the model's length) instead of 8192, so tool calls no longer stop right away.
+- `read_chat` results passed to a chat model keep the newest messages and the status when they are too large; other tool results with lists drop list entries instead of cutting the JSON (`truncated`, `truncated_list`, `omitted_items`).
+- Answering the tool-level question that an agent's message triggered no longer sends the user's draft.
+- `wait_for_status` on your own session returns `bad_args` instead of blocking until the timeout.
+- Paused chats (step limit or full context) are recognisable over MCP: `paused` / `pause_note` in `read_chat`, `paused` in `list_sessions` and `wait_for_status`.
+- Claude hook messages can no longer change the status of a chat.
+- The close and update dialogs also count chats that run a tool or wait for an approval.
+
+### Security
+
+- A chat started by another chat inherits the whole agent chain: its tools can write into none of the sessions of that chain (before, the protection was only one hop deep).
 
 ## [2.1.0] - 2026-11-15
 

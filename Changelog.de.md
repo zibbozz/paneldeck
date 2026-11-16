@@ -50,6 +50,16 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Die Palette zeigte in der englischen Oberfläche deutsche Kürzel und ignorierte eigene Belegungen.
 - Dateien auf den leeren Terminal Hub ziehen konnte einen ungültigen Bereich anlegen.
 - Chats mit Werkzeug-Stufe fordern bei Ollama einen Kontext an, der für Systemprompt und Werkzeuge reicht (bis 32768, höchstens die Länge des Modells), statt 8192 – Werkzeugaufrufe halten nicht mehr sofort an.
+- Zu große `read_chat`-Ergebnisse für ein Chat-Modell behalten die neuesten Nachrichten und den Status; andere Werkzeug-Ergebnisse mit Listen lassen Listeneinträge weg, statt das JSON abzuschneiden (`truncated`, `truncated_list`, `omitted_items`).
+- Die Antwort auf die Frage nach der Werkzeug-Stufe, die die Nachricht eines Agenten ausgelöst hat, sendet nicht mehr den Entwurf des Nutzers.
+- `wait_for_status` auf die eigene Sitzung liefert `bad_args`, statt bis zum Zeitlimit zu blockieren.
+- Angehaltene Chats (Höchstzahl der Schritte oder Kontext voll) sind über MCP erkennbar: `paused` / `pause_note` in `read_chat`, `paused` in `list_sessions` und `wait_for_status`.
+- Hook-Meldungen von Claude können den Status eines Chats nicht mehr ändern.
+- Die Dialoge zum Schließen und zum Update zählen auch Chats, die ein Werkzeug ausführen oder auf eine Freigabe warten.
+
+### Security
+
+- Ein Chat, den ein anderer Chat gestartet hat, erbt die ganze Agenten-Kette: Seine Werkzeuge können in keine Sitzung dieser Kette schreiben (bisher wirkte der Schutz nur über einen Schritt).
 
 ## [2.1.0] - 2026-11-15
 
