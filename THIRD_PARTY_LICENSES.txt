@@ -235,6 +235,10 @@ Pakete und ihre Lizenz-Ausdrücke:
   zune-core 0.5.3 - MIT OR Apache-2.0 OR Zlib
   zune-jpeg 0.5.15 - MIT OR Apache-2.0 OR Zlib
 
+Mitgelieferte Programmdateien (neben paneldeck.exe, unverändert):
+
+  Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe) 1.25.261109001 - MIT
+
 
 ------------------------------------------------------------------------------
 Text 1 – gilt für: ab_glyph 0.2.32, ab_glyph_rasterizer 0.1.10, anyhow 1.0.104, arboard 3.7.0, fdeflate 0.3.7, half 2.7.1, image 0.25.10, itoa 1.0.18, libc 0.2.191, litrs 1.0.1, miniz_oxide 0.8.9, miniz_oxide 0.9.1, naga 27.0.3, owned_ttf_parser 0.25.1, pin-project-lite 0.2.17, proc-macro2 1.0.107, quote 1.0.47, raw-window-handle 0.6.2, rustc-hash 2.1.3, semver 1.0.28, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.154, syn 2.0.119, syn 3.0.9, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, unicode-ident 1.0.27, vte 0.15.0, wgpu 27.0.1, wgpu-core 27.0.3, wgpu-core-deps-windows-linux-android 27.0.0, wgpu-hal 27.0.4, wgpu-types 27.0.1
@@ -7931,4 +7935,33 @@ freely, subject to the following restrictions:
 2. Altered source versions must be plainly marked as such, and must not be
    misrepresented as being the original software.
 3. This notice may not be removed or altered from any source distribution.
+
+
+------------------------------------------------------------------------------
+Mitgeliefert: Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe) 1.25.261109001
+------------------------------------------------------------------------------
+
+Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe) - https://github.com/microsoft/terminal
+
+MIT License
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 

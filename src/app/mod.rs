@@ -853,6 +853,8 @@ impl App {
             settings.language = l;
         }
         state::set_lang(settings.language);
+        // Vor dem Wiederherstellen der Sitzungen: welche ConPTY neue Sitzungen bekommen (#183).
+        crate::conpty::USE_BUNDLED.store(settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         let (mut saved, startup_note) = state::load_saved(&dir.join("state.json"));
         // „Sitzungen merken“ aus (#157): frischer Start. Steht in state.json noch etwas (Absturz nach dem Ausschalten, von
         // Hand geändert), wird die Datei vorher gesichert. Scrollback und Chatverläufe früherer Läufe werden gelöscht – auch
@@ -3368,6 +3370,7 @@ impl eframe::App for App {
         self.track_focus(ctx);
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
+        crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         crate::usage::set_prices(self.settings.prices.clone());
         self.handle_tray(ctx);
 

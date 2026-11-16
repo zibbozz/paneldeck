@@ -54,7 +54,14 @@ try {
   if (-not $New) {
     if (-not $makensis) { throw 'makensis nicht gefunden' }
     $New = Join-Path $tmp 'Paneldeck-Setup-probe.exe'
-    & $makensis -V1 "-DVERSION=probe" "-DEXE=$Exe" "-DOUTFILE=$New" "$root\installer\paneldeck.nsi" | Out-Null
+    # Mitgelieferte ConPTY: neben der .exe (tools\fetch-conpty.ps1 -Dest ...), sonst nach dist\conpty holen.
+    $conptyDir = Split-Path $Exe
+    if (-not ((Test-Path "$conptyDir\conpty.dll") -and (Test-Path "$conptyDir\OpenConsole.exe"))) {
+      $conptyDir = "$root\dist\conpty"
+      & powershell -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\fetch-conpty.ps1" -Dest $conptyDir | Out-Host
+      if ($LASTEXITCODE) { throw 'ConPTY (tools\fetch-conpty.ps1) fehlt' }
+    }
+    & $makensis -V1 "-DVERSION=probe" "-DEXE=$Exe" "-DOUTFILE=$New" "-DCONPTY_DIR=$conptyDir" "$root\installer\paneldeck.nsi" | Out-Null
     if (-not (Test-Path $New)) { throw 'Probe-Installer nicht gebaut' }
   }
   if (-not $Old) {
@@ -108,6 +115,7 @@ try {
   Check 'Kontextmenü bleibt (Hintergrund, mit Claude)' ((Reg 'HKCU:\Software\Classes\Directory\Background\shell\PaneldeckClaude\command') -like '*--claude*')
   Check 'Deinstaller vorhanden' (Test-Path "$inst\Uninstall.exe")
   Check 'Lizenzen installiert (LICENSE, THIRD_PARTY_LICENSES.txt, licenses)' ((Test-Path "$inst\LICENSE") -and (Test-Path "$inst\THIRD_PARTY_LICENSES.txt") -and (Test-Path "$inst\licenses\LICENSE-Cascadia.txt"))
+  Check 'Mitgelieferte ConPTY installiert (conpty.dll, OpenConsole.exe, Lizenz)' ((Test-Path "$inst\conpty.dll") -and (Test-Path "$inst\OpenConsole.exe") -and (Test-Path "$inst\licenses\LICENSE-ConPTY.txt"))
 
   Write-Host '== Update bei LAUFENDEM Hub (Datei gesperrt)'
   [void](Install $Old 'alt')   # zurück auf alt, Daten bleiben
@@ -153,6 +161,7 @@ try {
   Check 'Instanz-Autostart einer fremden exe bleibt' ((Reg $runKey $foreignName) -eq $foreignVal)
   Check 'Standard-Autostart entfernt' (-not (Reg $runKey 'Paneldeck'))
   Check 'Kontextmenü entfernt' (-not (@($regKeys | Where-Object { $_ -like '*Classes*' -and (Test-Path $_) }).Count))
+  Check 'Mitgelieferte ConPTY entfernt' (-not (Test-Path "$inst\conpty.dll") -and -not (Test-Path "$inst\OpenConsole.exe") -and -not (Test-Path "$inst\licenses\LICENSE-ConPTY.txt"))
   $cjAfter = (Get-Content -Raw $claudeJson) | ConvertFrom-Json
   $names = @($cjAfter.mcpServers.PSObject.Properties.Name)
   Check 'MCP: paneldeck und paneldeck-p1 (diese exe) entfernt' (-not ($names -contains 'paneldeck') -and -not ($names -contains 'paneldeck-p1')) ($names -join ',')

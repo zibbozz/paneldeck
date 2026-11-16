@@ -14,6 +14,24 @@ Unicode true
 !ifndef OUTFILE
   !define OUTFILE "Paneldeck-Setup-${VERSION}.exe"
 !endif
+; Mitgelieferte ConPTY (conpty.dll + OpenConsole.exe, geprüft von tools/fetch-conpty.ps1)
+!ifndef CONPTY_DIR
+  !define CONPTY_DIR "..\dist\conpty"
+!endif
+
+; Datei neben paneldeck.exe ersetzen, auch wenn Paneldeck läuft: eine geladene conpty.dll bzw. laufende OpenConsole.exe
+; (je Terminal eine) lässt sich nicht überschreiben, aber umbenennen; der neue Hub löscht "*.old" nach dem Start.
+!macro InstallBusyFile SRC NAME
+  Delete "$INSTDIR\${NAME}.old"
+  IfFileExists "$INSTDIR\${NAME}" 0 +2
+    Rename "$INSTDIR\${NAME}" "$INSTDIR\${NAME}.old"
+  ClearErrors
+  File "/oname=${NAME}" "${SRC}"
+  IfErrors 0 +3
+    MessageBox MB_OK|MB_ICONSTOP "${NAME} konnte nicht geschrieben werden. / Could not write ${NAME}." /SD IDOK
+    Abort
+  Delete "$INSTDIR\${NAME}.old"
+!macroend
 
 Name "Paneldeck ${VERSION}"
 OutFile "${OUTFILE}"
@@ -81,6 +99,8 @@ Section "$(NAME_Main)" SecMain
     MessageBox MB_OK|MB_ICONSTOP "paneldeck.exe konnte nicht geschrieben werden. / Could not write paneldeck.exe." /SD IDOK
     Abort
   Delete /REBOOTOK "$INSTDIR\paneldeck.exe.old"
+  !insertmacro InstallBusyFile "${CONPTY_DIR}\conpty.dll" "conpty.dll"
+  !insertmacro InstallBusyFile "${CONPTY_DIR}\OpenConsole.exe" "OpenConsole.exe"
   File "..\README.md"
   File "..\README.de.md"
   File "..\Changelog.md"
@@ -91,6 +111,7 @@ Section "$(NAME_Main)" SecMain
   SetOutPath "$INSTDIR\licenses"
   File "..\assets\fonts\LICENSE-Cascadia.txt"
   File "..\assets\fonts\LICENSE-NotoColorEmoji.txt"
+  File "/oname=LICENSE-ConPTY.txt" "..\tools\license-extra\conpty-MIT.txt"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
@@ -171,6 +192,10 @@ Section "Uninstall"
   ExecWait '"$INSTDIR\paneldeck.exe" --uninstall-hooks'
   Delete "$INSTDIR\paneldeck.exe"
   Delete "$INSTDIR\paneldeck.exe.old"
+  Delete "$INSTDIR\conpty.dll"
+  Delete "$INSTDIR\conpty.dll.old"
+  Delete "$INSTDIR\OpenConsole.exe"
+  Delete "$INSTDIR\OpenConsole.exe.old"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\README.de.md"
   Delete "$INSTDIR\Changelog.md"
@@ -180,6 +205,7 @@ Section "Uninstall"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\licenses\LICENSE-Cascadia.txt"
   Delete "$INSTDIR\licenses\LICENSE-NotoColorEmoji.txt"
+  Delete "$INSTDIR\licenses\LICENSE-ConPTY.txt"
   RMDir "$INSTDIR\licenses"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$SMPROGRAMS\Paneldeck\Paneldeck.lnk"

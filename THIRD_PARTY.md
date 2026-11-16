@@ -7,7 +7,7 @@ Paneldeck ist aus freier Software aufgebaut. Die wichtigsten Bestandteile und ih
 |---|---|---|
 | egui / eframe | Oberfläche, Fenster, OpenGL-Darstellung | MIT oder Apache-2.0 |
 | alacritty_terminal, vte | Terminal-Emulation | Apache-2.0 (vte: Apache-2.0 oder MIT) |
-| portable-pty | Pseudo-Konsole (ConPTY unter Windows) | MIT |
+| portable-pty | Pseudo-Konsole (ConPTY unter Windows); als Kopie mit kleinem Patch in `vendor/portable-pty` (Laden der mitgelieferten ConPTY) | MIT |
 | ttf-parser | Auslesen der Emoji-Bitmaps und Ligaturen | MIT oder Apache-2.0 |
 | image | PNG-Dekodierung, Skalierung | MIT oder Apache-2.0 |
 | serde, serde_json | Einstellungen und Zustand | MIT oder Apache-2.0 |
@@ -31,6 +31,13 @@ Alle weiteren transitiven Abhängigkeiten stehen unter MIT, Apache-2.0, BSD, Zli
 | Standardschriften von egui (Hack, Ubuntu-Light, Noto Emoji, emoji-icon-font) | siehe egui-Projekt: Hack (MIT/Bitstream Vera), Ubuntu Font Licence, SIL OFL |
 
 Die Lizenztexte der eingebetteten Schriften liegen unter `assets/fonts/`.
+
+## Mitgelieferte Programmdateien
+| Bestandteil | Verwendung | Lizenz |
+|---|---|---|
+| ConPTY von Microsoft (`conpty.dll`, `OpenConsole.exe`; NuGet-Paket Microsoft.Windows.Console.ConPTY, x64, unverändert und von Microsoft signiert) | neuere Pseudo-Konsole neben `paneldeck.exe` (Installer und portables ZIP) | MIT |
+
+Version und SHA-256 stehen in `tools/fetch-conpty.ps1`; der Lizenztext liegt als `licenses/LICENSE-ConPTY.txt` bei (Quelle: `tools/license-extra/conpty-MIT.txt`) und steht auch in `THIRD_PARTY_LICENSES.txt`. Quelltext: https://github.com/microsoft/terminal
 
 ## Installer
 Das Setup wird mit NSIS erstellt (zlib/libpng-Lizenz).

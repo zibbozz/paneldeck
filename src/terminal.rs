@@ -7,7 +7,7 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{test::TermSize, Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use eframe::egui;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use crate::osc::{OscEvent, OscScanner};
 use crate::search::SearchState;
@@ -125,7 +125,8 @@ pub struct SpawnOptions<'a> {
 impl Session {
     pub fn spawn(ctx: &egui::Context, opts: SpawnOptions) -> Result<Session, String> {
         let (cols, rows) = (100u16, 30u16);
-        let pty = native_pty_system();
+        // Mitgelieferte ConPTY (Einstellung, Dateien neben paneldeck.exe) oder die von Windows (#183).
+        let pty = crate::conpty::pty_system();
         let pair = pty
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;

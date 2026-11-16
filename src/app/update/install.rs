@@ -90,6 +90,27 @@ pub fn swap_exe(exe: &Path, new_bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Neben `paneldeck.exe` mitgelieferte Programmdateien (ConPTY, #183): das portable Update ersetzt sie mit, alte Fassungen
+/// bleiben als `<name>.old` liegen, bis die neue Version gestartet ist (wie bei der .exe; der Installer macht es genauso).
+pub const COMPANIONS: [&str; 2] = [crate::conpty::DLL, crate::conpty::HOST_EXE];
+
+/// Mitgelieferte Datei ersetzen oder neu anlegen (portable Installationen vor 2.3.0 haben sie noch nicht). Eine geladene
+/// `conpty.dll` bzw. laufende `OpenConsole.exe` wird wie die .exe umbenannt (`swap_exe`).
+pub fn swap_companion(path: &Path, new_bytes: &[u8]) -> Result<(), String> {
+    if path.exists() {
+        return swap_exe(path, new_bytes);
+    }
+    let mut new = path.as_os_str().to_owned();
+    new.push(".new");
+    let new = PathBuf::from(new);
+    let _ = std::fs::remove_file(&new);
+    std::fs::write(&new, new_bytes).map_err(|e| format!("{}: {e}", new.display()))?;
+    std::fs::rename(&new, path).map_err(|e| {
+        let _ = std::fs::remove_file(&new);
+        format!("{}: {e}", path.display())
+    })
+}
+
 /// Kommandozeilen-Teil `/D=<ordner>` für NSIS: muss der letzte Parameter sein und darf nicht in Anführungszeichen stehen
 /// (auch nicht bei Leerzeichen). Zeichen, die NSIS bzw. die Kommandozeile verwirren, werden abgelehnt.
 pub fn nsis_dir_arg(dir: &Path) -> Result<String, String> {
@@ -172,6 +193,12 @@ pub fn remove_old_exe(exe: &Path) {
     let mut old = exe.as_os_str().to_owned();
     old.push(".old");
     let _ = std::fs::remove_file(PathBuf::from(old));
+    // Ebenso alte mitgelieferte Dateien (eine noch laufende OpenConsole.exe.old bleibt bis zum nächsten Start liegen).
+    if let Some(dir) = exe.parent() {
+        for n in COMPANIONS {
+            let _ = std::fs::remove_file(dir.join(format!("{n}.old")));
+        }
+    }
 }
 
 /// Startet `exe` neu mit denselben Instanz-Parametern (`--data-dir`/`--profile` aus `paths::instance_args`, als einzelne
@@ -365,6 +392,31 @@ mod tests {
         remove_old_exe(&exe);
         assert!(!d.join("paneldeck.exe.old").exists() && exe.exists());
         remove_old_exe(&exe); // ohne .old: nichts
+        // Mitgelieferte Dateien: `.old` weg, die aktuellen bleiben.
+        for n in COMPANIONS {
+            std::fs::write(d.join(n), b"MZ new").unwrap();
+            std::fs::write(d.join(format!("{n}.old")), b"MZ old").unwrap();
+        }
+        remove_old_exe(&exe);
+        for n in COMPANIONS {
+            assert!(d.join(n).exists() && !d.join(format!("{n}.old")).exists(), "{n}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn companion_is_created_or_swapped() {
+        let d = tmp("companion");
+        let f = d.join("conpty.dll");
+        // Noch nicht vorhanden (portable Installation vor 2.3.0): neu angelegt, kein .old.
+        swap_companion(&f, b"MZ one").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"MZ one");
+        assert!(!d.join("conpty.dll.old").exists() && !d.join("conpty.dll.new").exists());
+        // Vorhanden: getauscht, alte als .old.
+        swap_companion(&f, b"MZ two").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"MZ two");
+        assert_eq!(std::fs::read(d.join("conpty.dll.old")).unwrap(), b"MZ one");
+        assert!(swap_companion(&d.join("missing").join("conpty.dll"), b"x").is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 

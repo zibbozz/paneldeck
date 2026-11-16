@@ -231,6 +231,17 @@ pub struct Settings {
     /// (Hinweis unter *Einstellungen → Claude*).
     #[serde(skip)]
     pub claude_bypass_dropped: bool,
+    /// Mitgelieferten Konsolen-Host (neuere ConPTY: `conpty.dll` + `OpenConsole.exe` neben `paneldeck.exe`) verwenden,
+    /// seit 2.3.0, Standard an. Aus oder Dateien fehlen: ConPTY von Windows. Wirkt für neue Sitzungen (`conpty`).
+    /// Fehlt in älteren Dateien (dann an); ein anderer Wert als `false` ergibt ebenfalls an.
+    #[serde(deserialize_with = "lenient_true")]
+    pub bundled_conpty: bool,
+}
+
+/// Tolerant lesen: nur `false` schaltet aus, alles andere (auch ein falscher Typ) ist `true`.
+fn lenient_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_bool() != Some(false))
 }
 
 /// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
@@ -300,6 +311,7 @@ impl Default for Settings {
             claude_defaults: Default::default(),
             last_claude_opts: None,
             claude_bypass_dropped: false,
+            bundled_conpty: true,
         }
     }
 }
@@ -1033,6 +1045,29 @@ mod tests {
         assert_eq!(j["remember_sessions"], false);
         let back: Settings = serde_json::from_value(j).unwrap();
         assert!(!back.remember_sessions);
+    }
+
+    #[test]
+    fn bundled_conpty_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „an“, die übrigen Werte bleiben.
+        let old = r#"{"language":"De","confirm_close":false,"remember_sessions":false}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.bundled_conpty);
+        assert!(!s.confirm_close && !s.remember_sessions);
+        assert!(Settings::default().bundled_conpty);
+        // Aus bleibt aus.
+        let mut s = s;
+        s.bundled_conpty = false;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["bundled_conpty"], false);
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(!back.bundled_conpty);
+        // Falscher Typ: an, die übrigen Einstellungen bleiben lesbar.
+        for bad in [r#""no""#, "0", "null", "{}"] {
+            let s: Settings = serde_json::from_str(&format!(r#"{{"language":"De","bundled_conpty":{bad}}}"#)).unwrap();
+            assert!(s.bundled_conpty, "{bad}");
+            assert_eq!(s.language, Lang::De);
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::io::Error as IoError;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
@@ -42,29 +42,49 @@ shared_library!(ConPtyFuncs,
     pub fn ClosePseudoConsole(hpc: HPCON),
 );
 
-fn load_conpty() -> ConPtyFuncs {
-    // If the kernel doesn't export these functions then their system is
-    // too old and we cannot run.
-    let kernel = ConPtyFuncs::open(Path::new("kernel32.dll")).expect(
-        "this system does not support conpty.  Windows 10 October 2018 or newer is required",
-    );
-
-    // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
-    // alongside the application.  We check for this after checking for kernel
-    // support so that we don't try to proceed and do something crazy.
-    if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
-        sideloaded
-    } else {
-        kernel
-    }
-}
+// Paneldeck patch (see PANELDECK-PATCH.md): upstream resolves `conpty.dll` once per process with a bare-name
+// `LoadLibrary`, i.e. through the DLL search order (which may include the current directory), and uses it for every
+// pseudo console. Here the caller chooses per `ConPtySystem` a sideloaded `conpty.dll` by full path or the system
+// ConPTY (kernel32); a sideloaded DLL that cannot be loaded or fails to create the pseudo console falls back to kernel32.
 
 lazy_static! {
-    static ref CONPTY: ConPtyFuncs = load_conpty();
+    static ref KERNEL: Option<ConPtyFuncs> = ConPtyFuncs::open(Path::new("kernel32.dll")).ok();
+    /// Loaded sideloaded DLLs by full path (never unloaded: pseudo consoles may still use their functions).
+    static ref SIDELOADED: Mutex<Vec<(PathBuf, &'static ConPtyFuncs)>> = Mutex::new(Vec::new());
+}
+
+fn kernel_conpty() -> Result<&'static ConPtyFuncs, Error> {
+    KERNEL.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("this system does not support conpty.  Windows 10 October 2018 or newer is required")
+    })
+}
+
+/// Load `path` (an absolute path to a `conpty.dll`) once and keep it loaded.
+fn sideloaded_conpty(path: &Path) -> Result<&'static ConPtyFuncs, Error> {
+    ensure!(path.is_absolute(), "sideloaded conpty.dll must be given by absolute path: {}", path.display());
+    let mut cache = SIDELOADED.lock().unwrap();
+    if let Some((_, f)) = cache.iter().find(|(p, _)| p == path) {
+        return Ok(*f);
+    }
+    let funcs = ConPtyFuncs::open(path).map_err(|e| anyhow::anyhow!("loading {}: {:?}", path.display(), e))?;
+    let funcs: &'static ConPtyFuncs = Box::leak(Box::new(funcs));
+    cache.push((path.to_path_buf(), funcs));
+    Ok(funcs)
+}
+
+/// Which ConPTY implementation a pseudo console runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConPtyHost {
+    /// The sideloaded `conpty.dll` (with its `OpenConsole.exe`).
+    Sideloaded,
+    /// The ConPTY built into Windows (kernel32, inbox conhost).
+    System,
 }
 
 pub struct PsuedoCon {
     con: HPCON,
+    funcs: &'static ConPtyFuncs,
+    host: ConPtyHost,
 }
 
 unsafe impl Send for PsuedoCon {}
@@ -72,21 +92,56 @@ unsafe impl Sync for PsuedoCon {}
 
 impl Drop for PsuedoCon {
     fn drop(&mut self) {
-        unsafe { (CONPTY.ClosePseudoConsole)(self.con) };
+        unsafe { (self.funcs.ClosePseudoConsole)(self.con) };
     }
 }
 
 impl PsuedoCon {
-    pub fn new(size: COORD, input: FileDescriptor, output: FileDescriptor) -> Result<Self, Error> {
+    /// Create a pseudo console on the sideloaded `conpty.dll` at `sideload` (absolute path), or on the system ConPTY
+    /// when `sideload` is `None` or the sideloaded DLL cannot be loaded or fails.
+    pub fn new(
+        size: COORD,
+        input: FileDescriptor,
+        output: FileDescriptor,
+        sideload: Option<&Path>,
+    ) -> Result<Self, Error> {
+        if let Some(path) = sideload {
+            match sideloaded_conpty(path) {
+                // conpty.dll (1.22+) maps only INHERIT_CURSOR (and its own glyph-width bits) to OpenConsole arguments;
+                // RESIZE_QUIRK and WIN32_INPUT_MODE are legacy inbox flags (OpenConsole always negotiates win32-input
+                // mode with the terminal itself), so they are not passed.
+                Ok(funcs) => match Self::create(funcs, size, &input, &output, PSUEDOCONSOLE_INHERIT_CURSOR) {
+                    Ok(con) => return Ok(Self { con, funcs, host: ConPtyHost::Sideloaded }),
+                    Err(e) => log::warn!("sideloaded conpty failed, using the system ConPTY: {:#}", e),
+                },
+                Err(e) => log::warn!("sideloaded conpty unavailable, using the system ConPTY: {:#}", e),
+            }
+        }
+        let funcs = kernel_conpty()?;
+        let con = Self::create(
+            funcs,
+            size,
+            &input,
+            &output,
+            PSUEDOCONSOLE_INHERIT_CURSOR | PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE,
+        )?;
+        Ok(Self { con, funcs, host: ConPtyHost::System })
+    }
+
+    fn create(
+        funcs: &ConPtyFuncs,
+        size: COORD,
+        input: &FileDescriptor,
+        output: &FileDescriptor,
+        flags: DWORD,
+    ) -> Result<HPCON, Error> {
         let mut con: HPCON = INVALID_HANDLE_VALUE;
         let result = unsafe {
-            (CONPTY.CreatePseudoConsole)(
+            (funcs.CreatePseudoConsole)(
                 size,
                 input.as_raw_handle() as _,
                 output.as_raw_handle() as _,
-                PSUEDOCONSOLE_INHERIT_CURSOR
-                    | PSEUDOCONSOLE_RESIZE_QUIRK
-                    | PSEUDOCONSOLE_WIN32_INPUT_MODE,
+                flags,
                 &mut con,
             )
         };
@@ -95,11 +150,16 @@ impl PsuedoCon {
             "failed to create psuedo console: HRESULT {}",
             result
         );
-        Ok(Self { con })
+        Ok(con)
+    }
+
+    /// The ConPTY implementation this pseudo console runs on.
+    pub fn host(&self) -> ConPtyHost {
+        self.host
     }
 
     pub fn resize(&self, size: COORD) -> Result<(), Error> {
-        let result = unsafe { (CONPTY.ResizePseudoConsole)(self.con, size) };
+        let result = unsafe { (self.funcs.ResizePseudoConsole)(self.con, size) };
         ensure!(
             result == S_OK,
             "failed to resize console to {}x{}: HRESULT: {}",

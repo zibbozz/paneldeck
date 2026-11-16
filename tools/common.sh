@@ -40,6 +40,17 @@ find_tool() { # find_tool <name> <fallback-pfad>...
 MAKENSIS="$(find_tool makensis "/c/Program Files (x86)/NSIS/makensis.exe" "/c/Program Files/NSIS/makensis.exe")"
 GH="$(find_tool gh "/c/Program Files/GitHub CLI/gh.exe")"
 
+# Mitgelieferte ConPTY (conpty.dll + OpenConsole.exe aus NuGet, Version und SHA-256 fest in tools/fetch-conpty.ps1)
+# nach dist/conpty holen und prüfen. Installer und portables ZIP legen beide Dateien neben paneldeck.exe.
+fetch_conpty() {
+  local ps
+  if [ "$IS_WIN" = 1 ]; then ps=powershell.exe; else ps="$(find_tool pwsh)"; fi
+  [ -n "$ps" ] || { echo "PowerShell (pwsh) nicht gefunden – tools/fetch-conpty.ps1 braucht sie"; exit 1; }
+  mkdir -p dist/conpty dist/conpty-cache
+  "$ps" -NoProfile -ExecutionPolicy Bypass -File tools/fetch-conpty.ps1 -Dest "$(abspath dist/conpty)" -Cache "$(abspath dist/conpty-cache)" \
+    || { echo "ConPTY konnte nicht geholt oder geprüft werden (tools/fetch-conpty.ps1)"; exit 1; }
+}
+
 # Absoluter Pfad in der Schreibweise des Zielprogramms (Windows-Programme wollen C:/..., nicht /c/...).
 abspath() {
   # (NSIS' `File` findet Pfade mit Schrägstrichen nicht → unter Windows Backslashes liefern.)

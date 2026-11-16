@@ -1,13 +1,26 @@
 use crate::cmdbuilder::CommandBuilder;
-use crate::win::psuedocon::PsuedoCon;
+use crate::win::psuedocon::{ConPtyHost, PsuedoCon};
 use crate::{Child, MasterPty, PtyPair, PtySize, PtySystem, SlavePty};
 use anyhow::Error;
 use filedescriptor::{FileDescriptor, Pipe};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use winapi::um::wincon::COORD;
 
 #[derive(Default)]
-pub struct ConPtySystem {}
+pub struct ConPtySystem {
+    // Paneldeck patch (see PANELDECK-PATCH.md)
+    sideload: Option<PathBuf>,
+}
+
+impl ConPtySystem {
+    /// Paneldeck patch: pseudo consoles from this system use the `conpty.dll` at `path` (absolute; its
+    /// `OpenConsole.exe` next to it), or the system ConPTY when `path` is `None` or the DLL cannot be used.
+    /// `ConPtySystem::default()` uses the system ConPTY (upstream instead loads `conpty.dll` by name).
+    pub fn with_sideloaded_conpty(path: Option<PathBuf>) -> Self {
+        Self { sideload: path }
+    }
+}
 
 impl PtySystem for ConPtySystem {
     fn openpty(&self, size: PtySize) -> anyhow::Result<PtyPair> {
@@ -21,6 +34,7 @@ impl PtySystem for ConPtySystem {
             },
             stdin.read,
             stdout.write,
+            self.sideload.as_deref(),
         )?;
 
         let master = ConPtyMasterPty {
@@ -75,6 +89,13 @@ impl Inner {
 #[derive(Clone)]
 pub struct ConPtyMasterPty {
     inner: Arc<Mutex<Inner>>,
+}
+
+impl ConPtyMasterPty {
+    /// Paneldeck patch: the ConPTY implementation this pty runs on.
+    pub fn host(&self) -> ConPtyHost {
+        self.inner.lock().unwrap().con.host()
+    }
 }
 
 pub struct ConPtySlavePty {

@@ -57,8 +57,9 @@ cargo test --release --quiet  # bricht bei fehlschlagenden Tests ab (set -e)
 cargo build --release ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} 2>&1 | grep -E "^error|Finished"
 mkdir -p dist
 cp "$EXE_SRC" "dist/paneldeck-$V.exe"
+fetch_conpty   # dist/conpty/{conpty.dll,OpenConsole.exe} für Installer und ZIP (geprüft per SHA-256)
 if [ -n "$MAKENSIS" ]; then
-  "$MAKENSIS" -V1 -DVERSION="$V" -DEXE="$(abspath "dist/paneldeck-$V.exe")" \
+  "$MAKENSIS" -V1 -DVERSION="$V" -DEXE="$(abspath "dist/paneldeck-$V.exe")" -DCONPTY_DIR="$(abspath dist/conpty)" \
     -DOUTFILE="$(abspath "dist/Paneldeck-Setup-$V.exe")" installer/paneldeck.nsi
 else
   echo "Hinweis: makensis nicht gefunden – kein Installer (Windows: winget install NSIS.NSIS)"

@@ -15,6 +15,8 @@ pub mod conpty;
 mod procthreadattr;
 mod psuedocon;
 
+pub use psuedocon::ConPtyHost; // Paneldeck patch
+
 use filedescriptor::OwnedHandle;
 
 #[derive(Debug)]
