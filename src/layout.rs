@@ -38,6 +38,9 @@ fn lenient_ratio<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error
 }
 
 /// Für `Option<Node>`-Felder in Dateien: ein kaputtes Layout lädt als „kein Layout“, statt die ganze Datei zu verwerfen.
+/// Das gilt auch für ein Layout, das diese Version nicht versteht (z. B. eine neue Knotenart nach einem Downgrade): es wird
+/// beim nächsten Speichern durch das aktuelle (ggf. leere) Layout ersetzt und ist dann weg – die Sitzungen selbst bleiben
+/// erhalten (sie stehen getrennt in `sessions`) und erscheinen in der Seitenleiste.
 pub fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Node>, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value::<Node>(v).ok())
@@ -97,6 +100,28 @@ pub fn minimize(layout: &mut Option<Node>, id: u64, focused: u64) -> Option<(Opt
         near.filter(|n| has(*n)).or_else(|| layout.as_ref().map(|l| l.leaf_ids()[0])).unwrap_or(0)
     };
     Some((slot, focus))
+}
+
+/// Blatt `gone` hat das Layout verlassen: In den Geschwistern von `slot` tritt an seine Stelle `with` (die Geschwister aus
+/// seinem eigenen Slot, also das, was an seinen Platz gerückt ist); doppelte fallen weg. Ohne `with` (er war allein) wird
+/// er nur gestrichen. So folgt eine Kette minimierter Bereiche dem, was tatsächlich noch im Layout steht.
+pub fn reroute_sibling(slot: &mut Slot, gone: u64, with: &[u64]) {
+    if !slot.sibling.contains(&gone) {
+        return;
+    }
+    let mut out: Vec<u64> = Vec::with_capacity(slot.sibling.len() + with.len());
+    for id in &slot.sibling {
+        if *id == gone {
+            for w in with {
+                if !out.contains(w) {
+                    out.push(*w);
+                }
+            }
+        } else if !out.contains(id) {
+            out.push(*id);
+        }
+    }
+    slot.sibling = out;
 }
 
 /// Für `Option<Slot>`-Felder in Dateien: Unlesbares lädt als `None`.
@@ -573,7 +598,37 @@ mod tests {
     }
 
     #[test]
-    fn minimize_everything_and_bring_it_back_in_any_order() {
+    fn slots_follow_a_chain_of_minimized_and_closed_panes() {
+        let h = |a: u64, b: u64, r: f32| split(Dir::Horizontal, r, Node::Leaf(a), Node::Leaf(b));
+        for close in [false, true] {
+            // H(1,2) → 1 minimieren → 2 rechts teilen (2|3) → 2 minimieren bzw. schließen → 1 zurück: links neben 3, 30 %
+            let mut l = Some(h(1, 2, 0.3));
+            let (s1, f) = minimize(&mut l, 1, 1).unwrap();
+            let mut s1 = s1.unwrap();
+            assert_eq!(l, Some(Node::Leaf(2)));
+            show(&mut l, 3, f, true, None); // neue Sitzung 3 teilt 2
+            assert_eq!(l, Some(h(2, 3, 0.5)));
+            let (rest, s2) = l.take().unwrap().remove_leaf_slot(2); // minimieren oder schließen: gleiche Baumänderung
+            l = rest;
+            reroute_sibling(&mut s1, 2, &s2.map(|s| s.sibling).unwrap_or_default());
+            assert_eq!(s1.sibling, vec![3], "close={close}");
+            show(&mut l, 1, 3, true, Some(&s1));
+            assert_eq!(l, Some(h(1, 3, 0.3)), "close={close}: genau an der alten Stelle");
+        }
+        // Teilbaum-Geschwister: 9 minimiert neben (2|4); 2 geht (Geschwister 4) → (4)
+        let mut s = Slot { sibling: vec![2, 4], dir: Dir::Vertical, before: false, ratio: 0.5 };
+        reroute_sibling(&mut s, 2, &[4]);
+        assert_eq!(s.sibling, vec![4]);
+        // ohne eigenen Slot (war allein): nur streichen; fremdes Blatt: unverändert
+        reroute_sibling(&mut s, 4, &[]);
+        assert!(s.sibling.is_empty());
+        let mut t = Slot { sibling: vec![5], dir: Dir::Vertical, before: false, ratio: 0.5 };
+        reroute_sibling(&mut t, 8, &[1]);
+        assert_eq!(t.sibling, vec![5]);
+    }
+
+    #[test]
+    fn minimize_everything_then_restore_in_reverse_and_forward_order() {
         let orig = split(Dir::Vertical, 0.6, split(Dir::Horizontal, 0.4, Node::Leaf(1), Node::Leaf(2)), split(Dir::Horizontal, 0.7, Node::Leaf(3), Node::Leaf(4)));
         let mut l = Some(orig.clone());
         let mut slots = std::collections::HashMap::new();
@@ -592,7 +647,26 @@ mod tests {
             show(&mut l, id, focus, true, slots[&id].as_ref());
             focus = id;
         }
-        assert_eq!(l, Some(orig));
+        assert_eq!(l, Some(orig.clone()));
+        // Vorwärts (gleiche Reihenfolge wie beim Minimieren): nicht unbedingt dieselbe Anordnung, aber alle Bereiche
+        // erreichbar, jeder genau einmal, Baum normal
+        let mut l = Some(orig.clone());
+        let mut slots = std::collections::HashMap::new();
+        let mut focus = 1;
+        for id in [2, 4, 1, 3] {
+            let (s, f) = minimize(&mut l, id, focus).unwrap();
+            slots.insert(id, s);
+            focus = f;
+        }
+        for id in [2, 4, 1, 3] {
+            show(&mut l, id, focus, true, slots[&id].as_ref());
+            focus = id;
+            let n = l.as_ref().unwrap();
+            assert!(n.contains(id) && n.is_normal(|_| true), "{id}: {n:?}");
+        }
+        let mut got = l.unwrap().leaf_ids();
+        got.sort();
+        assert_eq!(got, vec![1, 2, 3, 4]);
     }
 
     #[test]

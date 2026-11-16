@@ -864,6 +864,9 @@ impl App {
         }
         let names = |ids: &[u64]| ids.iter().filter_map(|id| self.entries.get(id).map(|e| (*id, e.display_name()))).collect::<Vec<_>>();
         let (adopt, worktrees) = (names(&plan.adopt), names(&plan.worktrees));
+        // Was beendet wird, aber nicht im Layout steht (minimiert oder weggewechselt) – sonst übersieht man es leicht.
+        let hidden_ids: Vec<u64> = plan.end.iter().copied().filter(|id| !self.layout.as_ref().is_some_and(|l| l.contains(*id))).collect();
+        let hidden = names(&hidden_ids);
         let n = plan.running;
         egui::Window::new(lang.t("Fenster schließen?", "Close window?"))
             .id(Id::new(("close_win_ask", w.id)))
@@ -889,6 +892,16 @@ impl App {
                     } else {
                         format!("The histories of {} chats will be deleted.", plan.chats)
                     });
+                }
+                if !hidden.is_empty() {
+                    ui.add_space(S1);
+                    ui.label(lang.t(
+                        "Auch diese Sitzungen werden beendet, obwohl sie gerade nicht im Layout stehen (minimiert oder weggewechselt):",
+                        "These sessions will also end, although they are not in the layout right now (minimized or switched away):",
+                    ));
+                    for (_, name) in &hidden {
+                        ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                    }
                 }
                 if !adopt.is_empty() {
                     ui.add_space(S1);

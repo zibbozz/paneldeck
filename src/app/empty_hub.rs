@@ -102,8 +102,10 @@ pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool
 impl App {
     /// Kürzel für den leeren Hub (folgen eigenen Belegungen und der Sprache).
     pub(super) fn empty_heading(&self) -> EmptyKind {
-        if !self.docked_ids().is_empty() {
-            return EmptyKind::Minimized; // Sitzungen dieses Projekts/Fensters da, aber keine im Layout
+        // Nur, wenn wirklich alles minimiert ist (nicht bloß weggewechselte Sitzungen); sonst wie bisher.
+        let docked = self.docked_ids();
+        if !docked.is_empty() && docked.iter().all(|id| self.is_minimized(*id)) {
+            return EmptyKind::Minimized;
         }
         empty_kind(self.wins.cur, !self.entries.is_empty(), self.entries.values().any(|e| self.in_win(e)))
     }

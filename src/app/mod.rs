@@ -1685,9 +1685,27 @@ impl App {
                 self.want_focus = Some(focus);
             }
         }
+        self.reroute_slots(id, slot.as_ref());
         if let Some(e) = self.entries.get_mut(&id) {
             e.meta.minimized = true;
+            // Ohne Slot, wenn es der letzte Bereich war (oder er abgedockt war): beim Zurückholen gilt dann die
+            // Ausweichregel von `layout::show` (leerer Hub → einziger Bereich, sonst fokussierten Bereich teilen).
             e.meta.slot = slot;
+        }
+    }
+
+    /// Bereich `gone` verlässt das Layout (minimiert, geschlossen, ausgeblendet, abgedockt): Plätze anderer minimierter
+    /// Sitzungen, die ihn als Geschwister nennen, zeigen danach auf das, was an seine Stelle rückt (seine eigenen
+    /// Geschwister) – so kommt z. B. bei H(1,2) → 1 minimieren → 2 teilen (2|3) → 2 minimieren die 1 neben die 3 zurück.
+    fn reroute_slots(&mut self, gone: u64, gone_slot: Option<&crate::layout::Slot>) {
+        let with = gone_slot.map(|s| s.sibling.clone()).unwrap_or_default();
+        for (id, e) in self.entries.iter_mut() {
+            if *id == gone {
+                continue;
+            }
+            if let Some(s) = e.meta.slot.as_mut() {
+                crate::layout::reroute_sibling(s, gone, &with);
+            }
         }
     }
 
@@ -1727,7 +1745,12 @@ impl App {
 
     fn hide_pane(&mut self, id: u64) {
         if let Some(l) = self.layout.take() {
-            self.layout = l.remove_leaf(id);
+            let had = l.contains(id);
+            let (rest, slot) = l.remove_leaf_slot(id);
+            self.layout = rest;
+            if had {
+                self.reroute_slots(id, slot.as_ref());
+            }
         }
         if self.focused == id {
             // Fokus nie auf einer Sitzung außerhalb des Layouts lassen (auch nicht, wenn nichts mehr übrig ist).
@@ -3352,22 +3375,37 @@ const HEADER_H: f32 = 30.0;
 const MIN_PANE_W: f32 = 120.0;
 const MIN_PANE_H: f32 = HEADER_H + 40.0;
 
-/// Pixel der ersten Seite einer Teilung der Länge `len` (ohne Trennlinie): Anteil `ratio` (begrenzt, NaN → Mitte), dabei
-/// beide Seiten mindestens `min`, solange `len` dafür reicht – sonst einfach halbe-halbe nach Anteil.
-fn split_px(len: f32, ratio: f32, min: f32) -> f32 {
-    let len = len.max(0.0);
-    let px = (len * crate::layout::clamp_ratio(ratio)).round();
-    if len >= 2.0 * min { px.clamp(min, len - min) } else { px }
+/// Kleinste Ausdehnung eines Teilbaums in Richtung `dir` (Breite bei `Horizontal`, Höhe bei `Vertical`): ein Bereich hat
+/// `MIN_PANE_W`/`MIN_PANE_H`; eine Teilung in derselben Richtung braucht beide Seiten plus Trennlinie, eine quer dazu die
+/// größere der beiden Seiten.
+fn min_extent(node: &Node, dir: Dir) -> f32 {
+    match node {
+        Node::Leaf(_) => match dir {
+            Dir::Horizontal => MIN_PANE_W,
+            Dir::Vertical => MIN_PANE_H,
+        },
+        Node::Split { dir: d, a, b, .. } if *d == dir => min_extent(a, dir) + GAP + min_extent(b, dir),
+        Node::Split { a, b, .. } => min_extent(a, dir).max(min_extent(b, dir)),
+    }
 }
 
-/// Neuer Anteil nach dem Ziehen der Trennlinie um `delta` Pixel: begrenzt auf `RATIO_MIN..RATIO_MAX` und so, dass keine
-/// Seite unter `min` Pixel fällt (soweit der Platz reicht). Bei einer Länge ≤ 0 (Fenster minimiert) bleibt er.
-fn drag_ratio(ratio: f32, delta: f32, len: f32, min: f32) -> f32 {
+/// Pixel der ersten Seite einer Teilung der Länge `len` (ohne Trennlinie): Anteil `ratio` (begrenzt, NaN → Mitte), dabei
+/// Seite a mindestens `min_a`, Seite b mindestens `min_b`, solange `len` dafür reicht – sonst einfach nach Anteil.
+fn split_px(len: f32, ratio: f32, min_a: f32, min_b: f32) -> f32 {
+    let len = len.max(0.0);
+    let px = (len * crate::layout::clamp_ratio(ratio)).round();
+    if len >= min_a + min_b { px.clamp(min_a, len - min_b) } else { px }
+}
+
+/// Neuer Anteil nach dem Ziehen der Trennlinie um `delta` Pixel: begrenzt auf `RATIO_MIN..RATIO_MAX` und so, dass Seite a
+/// nicht unter `min_a`, Seite b nicht unter `min_b` Pixel fällt (soweit der Platz reicht). Bei einer Länge ≤ 0 (Fenster
+/// minimiert) bleibt er.
+fn drag_ratio(ratio: f32, delta: f32, len: f32, min_a: f32, min_b: f32) -> f32 {
     if len <= 1.0 || !delta.is_finite() {
         return crate::layout::clamp_ratio(ratio);
     }
     let r = crate::layout::clamp_ratio(ratio + delta / len);
-    if len >= 2.0 * min { r.clamp(min / len, 1.0 - min / len) } else { r }
+    if len >= min_a + min_b { r.clamp(min_a / len, 1.0 - min_b / len) } else { r }
 }
 
 fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -3378,10 +3416,12 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
     match node {
         Node::Leaf(id) => show_pane(ui, *id, rect, cx),
         Node::Split { dir, ratio, a, b } => {
+            // Mindestgröße je Teilbaum (eine geschachtelte Seite braucht Platz für alle ihre Bereiche).
+            let (min_a, min_b) = (min_extent(a, *dir), min_extent(b, *dir));
             let (ra, rsep, rb) = match dir {
                 Dir::Horizontal => {
                     let w = rect.width() - GAP;
-                    let wa = split_px(w, *ratio, MIN_PANE_W);
+                    let wa = split_px(w, *ratio, min_a, min_b);
                     (
                         Rect::from_min_size(rect.min, Vec2::new(wa, rect.height())),
                         Rect::from_min_size(Pos2::new(rect.min.x + wa, rect.min.y), Vec2::new(GAP, rect.height())),
@@ -3390,7 +3430,7 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
                 }
                 Dir::Vertical => {
                     let h = rect.height() - GAP;
-                    let ha = split_px(h, *ratio, MIN_PANE_H);
+                    let ha = split_px(h, *ratio, min_a, min_b);
                     (
                         Rect::from_min_size(rect.min, Vec2::new(rect.width(), ha)),
                         Rect::from_min_size(Pos2::new(rect.min.x, rect.min.y + ha), Vec2::new(rect.width(), GAP)),
@@ -3412,11 +3452,11 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
             if resp.dragged() {
                 let d = resp.drag_delta();
                 // Von der gezeichneten Lage aus ziehen (die kann wegen der Mindestgröße vom gespeicherten Anteil abweichen).
-                let (delta, len, min, cur) = match dir {
-                    Dir::Horizontal => (d.x, rect.width() - GAP, MIN_PANE_W, ra.width()),
-                    Dir::Vertical => (d.y, rect.height() - GAP, MIN_PANE_H, ra.height()),
+                let (delta, len, cur) = match dir {
+                    Dir::Horizontal => (d.x, rect.width() - GAP, ra.width()),
+                    Dir::Vertical => (d.y, rect.height() - GAP, ra.height()),
                 };
-                *ratio = drag_ratio(cur / len.max(1.0), delta, len, min);
+                *ratio = drag_ratio(cur / len.max(1.0), delta, len, min_a, min_b);
             }
             let hv = style::anim(ui.ctx(), sep_id.with("h"), resp.hovered() || resp.dragged(), style::D_FAST);
             ui.painter().rect_filled(rsep, 0.0, ui.visuals().panel_fill);
@@ -3893,20 +3933,28 @@ mod pane_tests {
 
     #[test]
     fn split_px_keeps_a_minimum_size_and_survives_nan() {
-        assert_eq!(split_px(1000.0, 0.5, 120.0), 500.0);
-        assert_eq!(split_px(1000.0, 0.1, 120.0), 120.0, "nicht schmaler als die Mindestbreite");
-        assert_eq!(split_px(1000.0, 0.9, 120.0), 880.0);
-        assert_eq!(split_px(1000.0, f32::NAN, 120.0), 500.0);
-        assert_eq!(split_px(200.0, 0.1, 120.0), 20.0, "zu wenig Platz für beide: nach Anteil");
-        assert_eq!(split_px(-5.0, 0.5, 120.0), 0.0);
+        assert_eq!(split_px(1000.0, 0.5, 120.0, 120.0), 500.0);
+        assert_eq!(split_px(1000.0, 0.1, 120.0, 120.0), 120.0, "nicht schmaler als die Mindestbreite");
+        assert_eq!(split_px(1000.0, 0.9, 120.0, 120.0), 880.0);
+        assert_eq!(split_px(1000.0, 0.5, 120.0, 600.0), 400.0, "Seite b braucht mehr (geschachtelt)");
+        assert_eq!(split_px(1000.0, f32::NAN, 120.0, 120.0), 500.0);
+        assert_eq!(split_px(200.0, 0.1, 120.0, 120.0), 20.0, "zu wenig Platz für beide: nach Anteil");
+        assert_eq!(split_px(-5.0, 0.5, 120.0, 120.0), 0.0);
+        // Mindestausdehnung je Teilbaum
+        let l = |i| Node::Leaf(i);
+        let row = Node::grid(&[1, 2, 3], Dir::Horizontal).unwrap(); // (1 / 2) | 3
+        assert_eq!(min_extent(&row, Dir::Horizontal), 2.0 * MIN_PANE_W + GAP);
+        assert_eq!(min_extent(&row, Dir::Vertical), 2.0 * MIN_PANE_H + GAP);
+        assert_eq!(min_extent(&l(1), Dir::Vertical), MIN_PANE_H);
         // Ziehen: Grenzen, Mindestgröße, nichts bei Länge 0 / NaN
         let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
-        assert!(near(drag_ratio(0.5, -1000.0, 1000.0, 120.0), 0.12));
-        assert!(near(drag_ratio(0.5, 1000.0, 1000.0, 120.0), 0.88));
-        assert!(near(drag_ratio(0.5, 100.0, 1000.0, 120.0), 0.6));
-        assert_eq!(drag_ratio(0.5, 100.0, 0.0, 120.0), 0.5, "minimiertes Fenster");
-        assert_eq!(drag_ratio(0.4, f32::NAN, 1000.0, 120.0), 0.4);
-        assert_eq!(drag_ratio(0.5, -1000.0, 100.0, 120.0), crate::layout::RATIO_MIN);
+        assert!(near(drag_ratio(0.5, -1000.0, 1000.0, 120.0, 120.0), 0.12));
+        assert!(near(drag_ratio(0.5, 1000.0, 1000.0, 120.0, 120.0), 0.88));
+        assert!(near(drag_ratio(0.5, 1000.0, 1000.0, 120.0, 500.0), 0.5), "Seite b braucht 500 px");
+        assert!(near(drag_ratio(0.5, 100.0, 1000.0, 120.0, 120.0), 0.6));
+        assert_eq!(drag_ratio(0.5, 100.0, 0.0, 120.0, 120.0), 0.5, "minimiertes Fenster");
+        assert_eq!(drag_ratio(0.4, f32::NAN, 1000.0, 120.0, 120.0), 0.4);
+        assert_eq!(drag_ratio(0.5, -1000.0, 100.0, 120.0, 120.0), crate::layout::RATIO_MIN);
     }
 
     struct H {
@@ -4032,6 +4080,27 @@ mod pane_tests {
         for (id, r) in &h.rects {
             assert!(r.width() >= MIN_PANE_W - 0.5, "{id}: {}", r.width());
             assert!(r.width().is_finite() && r.height() > 0.0);
+        }
+        // Geschachtelt auf Seite b mit lauter 0.1-Anteilen: 1 | (2 | (3 | (4 | (5 | 6))))
+        let mut deep_b = Node::Leaf(6);
+        for id in (1..6).rev() {
+            deep_b = Node::Split { dir: Dir::Horizontal, ratio: 0.1, a: Box::new(Node::Leaf(id)), b: Box::new(deep_b) };
+        }
+        h.frame(&mut deep_b, false, vec![]);
+        assert_eq!(h.rects.len(), 6);
+        for (id, r) in &h.rects {
+            assert!(r.width() >= MIN_PANE_W - 0.5, "Seite b, {id}: {}", r.width());
+        }
+        // Quer geschachtelt: (1 / 2 / 3 / 4 / 5 / 6 übereinander) rechts neben 7, Anteil 0.9 → rechts bleibt Mindesthöhe je Bereich
+        let mut col = Node::Leaf(6);
+        for id in (1..6).rev() {
+            col = Node::Split { dir: Dir::Vertical, ratio: 0.1, a: Box::new(Node::Leaf(id)), b: Box::new(col) };
+        }
+        let mut mixed = Node::Split { dir: Dir::Horizontal, ratio: 0.9, a: Box::new(Node::Leaf(7)), b: Box::new(col) };
+        let mut h2 = H::new(&(1..=7).map(|i| (i, false)).collect::<Vec<_>>());
+        h2.frame(&mut mixed, false, vec![]);
+        for (id, r) in &h2.rects {
+            assert!(r.width() >= MIN_PANE_W - 0.5 && r.height() >= MIN_PANE_H - 0.5, "quer, {id}: {r:?}");
         }
         // Unsinniger Anteil (z. B. aus einer alten Datei, ohne Normalisierung): zeichnet trotzdem sinnvoll
         let mut bad = Node::Split { dir: Dir::Vertical, ratio: f32::NAN, a: Box::new(Node::Leaf(1)), b: Box::new(Node::Leaf(2)) };
