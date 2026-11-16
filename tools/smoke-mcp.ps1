@@ -295,8 +295,27 @@ try {
   $rawCmd = "`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json; `$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port); `$s = `$c.GetStream(); `$b = [Text.Encoding]::UTF8.GetBytes('{""token"":""' + `$j.token + '"",""cmd"":""mcp"",""tool"":""send_text"",""caller"":null,""caller_pid"":4,""args"":{""session"":$A,""text"":""echo raw-leak""}}'); `$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1); (New-Object IO.StreamReader(`$s)).ReadToEnd()"
   $raw = Tool 'run_command' @{ session = $K; command = $rawCmd; timeout_secs = 30 }
   Check 'Kette: rohe TCP-Anfrage ohne Aufrufer aus dem Kind -> zugeordnet und forbidden' ($raw.data.output -match '"code":"forbidden"' -and $raw.data.output -match 'agent chain') $raw.text
+  # Losgeloester Absender: eine kurzlebige Shell im Kind startet per Start-Process einen Prozess und endet sofort; der
+  # Prozess (Elternteil beendet, nach dem Hub gestartet = verwaist) schickt dann eine rohe Anfrage in den Eltern-Agenten.
+  # Er ist keiner Sitzung zuzuordnen und darf nicht in einen moeglichen Vorfahren schreiben.
+  $detOut = "$work\detached-out.txt"; $detPs = "$work\detached.ps1"
+  [IO.File]::WriteAllText($detPs, @"
+Start-Sleep -Seconds 3
+`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json
+`$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port)
+`$s = `$c.GetStream()
+`$b = [Text.Encoding]::UTF8.GetBytes('{"token":"' + `$j.token + '","cmd":"mcp","tool":"send_text","args":{"session":$A,"text":"echo detached-leak"}}')
+`$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1)
+[IO.File]::WriteAllText('$detOut', (New-Object IO.StreamReader(`$s)).ReadToEnd())
+"@, (New-Object Text.UTF8Encoding $false))
+  $detCmd = "powershell -NoProfile -Command ""Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$detPs'"""
+  [void](Tool 'run_command' @{ session = $K; command = $detCmd; timeout_secs = 30 })
+  $deadline = (Get-Date).AddSeconds(25)
+  while (-not (Test-Path $detOut) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+  $det = if (Test-Path $detOut) { [IO.File]::ReadAllText($detOut) } else { '' }
+  Check 'Kette: losgeloester Absender (Start-Process aus kurzlebiger Shell) -> forbidden in den Eltern-Agenten' ($det -match '"code":"forbidden"' -and $det -match 'cannot be attributed') $det
   Start-Sleep 1
-  Check 'Kette: im Eltern-Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'kind-leak|raw-leak')
+  Check 'Kette: im Eltern-Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'kind-leak|raw-leak|detached-leak')
   Check 'Kette: von aussen (ohne Kette) bleibt Schreiben erlaubt' (-not (Tool 'send_text' @{ session = $A; text = ' '; submit = $false }).err)
   $cl = InA 'close_session' @{ session = $K }
   Check 'Eltern-Agent schliesst sein Kind' ($cl.isError -ne $true)
