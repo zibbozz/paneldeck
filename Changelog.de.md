@@ -19,11 +19,17 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 - Die Rückfrage beim Schließen gibt *Schließen* erst nach 3 Sekunden frei; Enter bestätigt erst nach dem Countdown, und Esc/Enter im Dialog erreichen das Terminal dahinter nicht mehr.
 - *Alle Sitzungen schließen …* am Ordner öffnet eine Rückfrage mit Liste statt des Doppelklick-Knopfs.
+- Eine minimierte Sitzung zurückholen (Klick in der Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`) öffnet sie jetzt allein: Sie ersetzt das Layout des Fensters/Projekts, die bisher sichtbaren Bereiche werden zu minimierten Sitzungen und laufen weiter. Strg+Umschalt+W minimiert nur noch; der alte Platz in der Teilung wird nicht mehr gemerkt (#162).
+
+### Deprecated
+
+- `state.json`: Das Feld `slot` minimierter Sitzungen (2.2.0) wird nicht mehr verwendet oder angelegt; ein vorhandener Wert wird unverändert durchgereicht und entfällt, sobald die Sitzung minimiert oder wieder gezeigt wird. Es wird in 3.0.0 entfernt.
 
 ### Fixed
 
 - Ein Mittelklick mit leichter Mausbewegung zieht keine Sitzung und keinen Ordner mehr.
 - Zwischen Seitenleiste und Terminalbereich bleibt keine durchsichtige Lücke mehr, wenn eine Zeile der Seitenleiste breiter ist als die Leiste; die Leiste behält ihre Breite und schneidet die Zeile ab (#160).
+- Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
 
 ## [2.2.0] - 2026-11-16
 
