@@ -475,10 +475,11 @@ mod tests {
     fn new_project_color_avoids_used_colors() {
         let mut ps = vec![project(1, "TODO", true)];
         let f = Form::new_project(&ps);
-        assert_eq!(f.color, super::super::helpers::PALETTE[0]);
+        let pal = crate::palette::auto(crate::palette::Area::Expert);
+        assert_eq!(f.color, pal[0]);
         let mut p = project(2, "AB", false);
-        p.color = super::super::helpers::PALETTE[0].into();
+        p.color = pal[0].clone();
         ps.push(p);
-        assert_eq!(Form::new_project(&ps).color, super::super::helpers::PALETTE[1]);
+        assert_eq!(Form::new_project(&ps).color, pal[1]);
     }
 }

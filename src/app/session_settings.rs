@@ -368,18 +368,13 @@ pub(super) fn folder_exists(_shell_id: &str, path: &str) -> bool {
     std::path::Path::new(path).is_dir()
 }
 
-/// Farbauswahl (die Farben des Kontextmenüs „Farbe“); die gewählte ist umrandet.
-fn color_row(ui: &mut Ui, color: &mut [u8; 3]) {
-    ui.horizontal(|ui| {
-        for c in PALETTE {
-            let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-            ui.painter().rect_filled(r, 4.0, Color32::from_rgb(c[0], c[1], c[2]));
-            if *color == c {
-                ui.painter().rect_stroke(r.expand(2.0), 5.0, Stroke::new(1.5_f32, ui.visuals().strong_text_color()), StrokeKind::Outside);
-            }
-            if resp.clicked() {
-                *color = c;
-            }
+/// Farbauswahl: die geltende Palette des Terminal-Hubs wie im Kontextmenü „Farbe“ (die gewählte ist umrandet) und
+/// „Eigene Farbe …“ (klappt im Dialog auf; die Farbe kommt nicht in die Palette).
+fn color_row(ui: &mut Ui, color: &mut [u8; 3], lang: Lang) {
+    ui.vertical(|ui| {
+        let cur = crate::palette::hex_of(*color);
+        if let Some(h) = palette_ui::pick(ui, "sset_color", crate::palette::Area::Hub, Some(&cur), palette_ui::PickOpts::HUB, lang) {
+            *color = crate::palette::rgb(&h);
         }
     });
 }
@@ -424,7 +419,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 }
                 ui.end_row();
                 ui.label(lang.t("Farbe", "Color"));
-                color_row(ui, &mut f.v.color);
+                color_row(ui, &mut f.v.color, lang);
                 ui.end_row();
                 ui.label(lang.t("Ordner im Baum", "Tree folder"));
                 ui.add(egui::TextEdit::singleline(&mut f.v.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(320.0));
@@ -499,7 +494,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                         mark(ui, "continue", &r);
                         ui.end_row();
                         // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
-                        f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", true);
+                        f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", super::dialogs::OptsPlace::Session);
                         ui.label("");
                         let r = ui.label(RichText::new(lang.t("Die Optionen gelten nur für diese Sitzung, ab dem nächsten Start.", "The options apply to this session only, from its next start.")).small().color(style::dim(ui)));
                         mark(ui, "copts", &r);
@@ -825,13 +820,13 @@ mod tests {
         assert_eq!(f.v.name, "", "automatischer Name → leeres Feld");
         assert_eq!(f.v.tags, "t");
         f.v.name = "  Build ".into();
-        f.v.color = PALETTE[2];
+        f.v.color = crate::palette::rgb(crate::palette::HUB_DEFAULTS[2]);
         f.v.group = " a / b ".into();
         f.v.tags = "x, #y,, z ".into();
         f.v.notes = "n".into();
         assert!(!f.apply(&mut meta, &p, "pwsh"));
         assert_eq!((meta.name.as_str(), meta.custom_name), ("Build", true));
-        assert_eq!(meta.color, PALETTE[2]);
+        assert_eq!(meta.color, crate::palette::rgb(crate::palette::HUB_DEFAULTS[2]));
         assert_eq!(meta.group, "a/b");
         assert_eq!(meta.tags, vec!["x", "y", "z"]);
         assert_eq!(meta.notes, "n");
@@ -886,7 +881,7 @@ mod tests {
         // Inzwischen: Notizen-Fenster, MCP rename_session, Farbe im Kontextmenü, Tags-Eingabe
         meta.notes = "from notes panel".into();
         meta.name = "renamed by agent".into();
-        meta.color = PALETTE[5];
+        meta.color = crate::palette::nth_rgb(crate::palette::Area::Hub, 5);
         meta.tags = vec!["t2".into()];
         // Im Dialog nur der Ordner im Baum geändert
         f.v.group = "G".into();
@@ -894,7 +889,7 @@ mod tests {
         assert_eq!(meta.group, "G");
         assert_eq!(meta.notes, "from notes panel");
         assert_eq!(meta.name, "renamed by agent");
-        assert_eq!(meta.color, PALETTE[5]);
+        assert_eq!(meta.color, crate::palette::nth_rgb(crate::palette::Area::Hub, 5));
         assert_eq!(meta.tags, vec!["t2"]);
         assert_eq!(meta.shell_id, "pwsh");
     }
@@ -1129,5 +1124,40 @@ mod tests {
         d.frame(&mut f, true, vec![]);
         d.frame(&mut f, true, vec![]);
         assert!(d.find("worktree").is_some());
+    }
+
+    #[test]
+    fn color_row_offers_the_palette_and_a_custom_color() {
+        let mut d = Dlg::new();
+        let mut f = form(&SessionMeta { id: 1, shell_id: "pwsh".into(), ..SessionMeta::default() });
+        for _ in 0..4 {
+            d.frame(&mut f, false, vec![]);
+        }
+        let r0 = d.ctx.read_response(Id::new("sset_color").with(("pal", 2usize))).map(|r| r.rect);
+        d.frame(&mut f, false, vec![]);
+        let r1 = d.ctx.read_response(Id::new("sset_color").with(("pal", 2usize))).map(|r| r.rect);
+        assert!(r0.zip(r1).is_some_and(|(a, b)| (a.center() - b.center()).length() < 3.0), "Lage stabil");
+        let sw = |d: &Dlg, i: usize| d.ctx.read_response(Id::new("sset_color").with(("pal", i))).expect("Farbfeld").rect;
+        // Farbfeld 2 der geltenden Palette
+        d.click(&mut f, false, sw(&d, 2).center());
+        assert_eq!(f.v.color, crate::palette::rgb(&crate::palette::colors(crate::palette::Area::Hub)[2].hex));
+        // „Eigene Farbe …“ unter den Farbfeldern aufklappen, Hex eintippen, übernehmen
+        let last = sw(&d, 10);
+        d.click(&mut f, false, Pos2::new(last.left() + 30.0, last.bottom() + 14.0));
+        // Der Dialog wächst und rückt neu in die Mitte: Lage erst danach lesen.
+        let hex = |d: &mut Dlg, f: &mut SessionForm| {
+            for _ in 0..4 {
+                d.frame(f, false, vec![]);
+            }
+            d.ctx.read_response(Id::new("sset_color").with("custom").with("hex")).expect("Eigene Farbe aufgeklappt").rect
+        };
+        let r = hex(&mut d, &mut f);
+        d.click(&mut f, false, r.center());
+        d.frame(&mut f, false, vec![Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND }]);
+        d.frame(&mut f, false, vec![Event::Text("#2288FF".into())]);
+        let hex = hex(&mut d, &mut f);
+        assert_eq!(d.click(&mut f, false, Pos2::new(hex.right() + 8.0 + 20.0, hex.center().y)), FormOutcome::Open, "der Dialog bleibt offen");
+        assert_eq!(f.v.color, [0x22, 0x88, 0xFF]);
+        assert!(!crate::palette::colors(crate::palette::Area::Hub).iter().any(|c| c.hex == "#2288FF"), "nicht in der Palette");
     }
 }

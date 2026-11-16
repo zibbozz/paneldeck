@@ -23,6 +23,7 @@ mod launch;
 mod keys;
 mod notify;
 mod osc;
+mod palette;
 mod paths;
 mod planning;
 mod prompts;
@@ -45,6 +46,7 @@ mod termview;
 mod theme;
 mod usage;
 mod winctl;
+mod wsl;
 
 fn app_icon() -> eframe::egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon64.png")).unwrap_or_default()

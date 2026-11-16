@@ -31,7 +31,7 @@ impl App {
                                             d.shell_id = p.shell_id.clone();
                                         }
                                         if !p.cwd.is_empty() {
-                                            d.cwd = p.cwd.clone();
+                                            d.set_cwd(&p.cwd);
                                         }
                                     }
                                 }
@@ -47,14 +47,13 @@ impl App {
                         });
                         ui.end_row();
                         ui.label(lang.t("Ordner", "Folder"));
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut d.cwd).desired_width(290.0));
-                            if ui.button("…").on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
-                                if let Some(p) = notify::pick_folder(&d.cwd) {
-                                    d.cwd = p;
-                                }
-                            }
-                        });
+                        // WSL-Shell: Linux-Pfad mit Vervollständigung, Distribution wählbar (wechselt die Shell), #172.
+                        d.picker.set_target(self.new_dialog_target(&d.shell_id, d.profile));
+                        let r = d.picker.show(ui, lang, &self.settings.wsl_recent);
+                        if let Some(sid) = r.distro_changed.and_then(|dist| self.wsl_shell_for(&dist)) {
+                            d.shell_id = sid;
+                        }
+                        d.cwd = d.picker.value();
                         ui.end_row();
                         ui.label(lang.t("Name (optional)", "Name (optional)"));
                         ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(320.0));
@@ -67,7 +66,7 @@ impl App {
                             ui.checkbox(&mut d.claude, lang.t("Claude Code starten", "Start Claude Code"));
                             ui.end_row();
                             if d.claude {
-                                opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg", true);
+                                opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg", OptsPlace::NewSession);
                                 ui.label("");
                                 ui.checkbox(&mut d.continue_last, lang.t("Letzte Konversation im Ordner fortsetzen (--continue)", "Continue last conversation in folder (--continue)"));
                                 ui.end_row();
@@ -82,7 +81,9 @@ impl App {
                                 if d.repo_for != d.cwd {
                                     d.repo_for = d.cwd.clone();
                                     let p = std::path::Path::new(&d.cwd);
-                                    d.repo = gitops::inside_repo_fs(p).then(|| p.to_path_buf());
+                                    // Linux-Pfad (WSL): kein Worktree-Angebot (git liefe in Windows auf einem fremden Pfad).
+                                    // Ebenso kein Prüfen eines \\wsl$-Pfads im UI-Thread.
+                                    d.repo = (!d.picker.is_wsl() && !crate::wsl::is_wsl_unc(&d.cwd) && gitops::inside_repo_fs(p)).then(|| p.to_path_buf());
                                 }
                                 if d.repo.is_some() {
                                     ui.label("Git");
@@ -106,9 +107,15 @@ impl App {
                         }
                     });
                     ui.add_space(6.0);
+                    // Ungültiger oder fehlender WSL-Ordner: Erstellen gesperrt (Grund steht unter dem Ordnerfeld).
+                    let blocked = d.picker.blocking_error(lang);
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(opts_ok, egui::Button::new(lang.t("Erstellen", "Create"))).clicked() {
+                        let b = ui.add_enabled(opts_ok && blocked.is_none(), egui::Button::new(lang.t("Erstellen", "Create")));
+                        if b.clicked() {
                             create = true;
+                        }
+                        if let Some(e) = &blocked {
+                            b.on_disabled_hover_text(e.as_str());
                         }
                         if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
                             keep = false;
@@ -127,6 +134,10 @@ impl App {
                 }
             }
             if create {
+                if d.picker.is_wsl() {
+                    d.picker.remember(&mut self.settings.wsl_recent);
+                    state::save_json(&self.dir.join("settings.json"), &self.settings);
+                }
                 let opts = NewOpts {
                     shell_id: Some(d.shell_id.clone()),
                     cwd: Some(d.cwd.clone()),
@@ -330,17 +341,32 @@ impl App {
                 PromptKind::NewProject => lang.t("Neues Projekt", "New project"),
                 PromptKind::RenameProject => lang.t("Projekt umbenennen", "Rename project"),
                 PromptKind::ProjectFolder => lang.t("Standardordner des Projekts", "Project default folder"),
+                PromptKind::FolderCwd => lang.t("Arbeitsordner", "Working folder"),
             }
         };
         let (mut ok, mut cancel) = (false, ctx.input(|i| i.key_pressed(Key::Escape)));
         egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
-            let te = ui.add(egui::TextEdit::singleline(&mut p.text).desired_width(340.0));
-            if !te.has_focus() {
-                te.request_focus();
-            }
+            let blocked = match &mut p.picker {
+                // Ordnervorgabe mit WSL-Shell: Ordnerfeld mit Linux-Pfad (#172).
+                Some(picker) => {
+                    picker.show(ui, lang, &self.settings.wsl_recent);
+                    picker.blocking_error(lang)
+                }
+                None => {
+                    let te = ui.add(egui::TextEdit::singleline(&mut p.text).desired_width(340.0));
+                    if !te.has_focus() {
+                        te.request_focus();
+                    }
+                    None
+                }
+            };
             ui.horizontal(|ui| {
-                if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                let b = ui.add_enabled(blocked.is_none(), egui::Button::new("OK"));
+                if b.clicked() || (blocked.is_none() && ui.input(|i| i.key_pressed(Key::Enter))) {
                     ok = true;
+                }
+                if let Some(e) = &blocked {
+                    b.on_disabled_hover_text(e.as_str());
                 }
                 if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
                     cancel = true;
@@ -348,7 +374,16 @@ impl App {
             });
         });
         if ok {
-            let text = p.text.trim().to_string();
+            let text = match &p.picker {
+                Some(picker) => {
+                    if picker.is_wsl() {
+                        picker.remember(&mut self.settings.wsl_recent);
+                        state::save_json(&self.dir.join("settings.json"), &self.settings);
+                    }
+                    picker.value()
+                }
+                None => p.text.trim().to_string(),
+            };
             if let Some(sid) = p.tags_for {
                 if let Some(e) = self.entries.get_mut(&sid) {
                     e.meta.tags = text.split(',').map(|t| t.trim().trim_start_matches('#').to_string()).filter(|t| !t.is_empty()).collect();
@@ -358,7 +393,7 @@ impl App {
                     PromptKind::NewProject => {
                         if !text.is_empty() {
                             let id = self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1;
-                            let color = PALETTE[(id as usize) % PALETTE.len()];
+                            let color = hub_color(id);
                             self.projects.push(Project { id, name: text, color, ..Project::default() });
                             actions.push(Action::SwitchProject(id));
                         }
@@ -373,6 +408,11 @@ impl App {
                     PromptKind::ProjectFolder => {
                         if let Some(pr) = self.projects.iter_mut().find(|x| x.id == p.id) {
                             pr.folder = text;
+                        }
+                    }
+                    PromptKind::FolderCwd => {
+                        if let Some(f) = self.projects.iter_mut().find(|x| x.id == p.id).and_then(|pr| pr.folders.iter_mut().find(|f| f.path == p.folder)) {
+                            f.cwd = text;
                         }
                     }
                 }
@@ -685,7 +725,8 @@ impl App {
 /// Leere Auswahl = Standard von Claude Code (Flag wird nicht gesetzt). `false`, solange ein Name ungültig ist.
 /// `bypassPermissions` nur mit `allow_bypass` (Dialog „Neue Sitzung“, gilt nur für diese Sitzung) und mit Warnung;
 /// in den Standards gibt es es nicht.
-pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, allow_bypass: bool) -> bool {
+pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, place: OptsPlace) -> bool {
+    let allow_bypass = place != OptsPlace::Defaults;
     use crate::claude_opts::{valid_name, BYPASS, EFFORTS, MAX_NAME, MODEL_ALIASES, PERMISSION_MODES};
     let default = lang.t("Standard von Claude Code", "Claude Code default");
     let shown = |v: &str| match v {
@@ -758,7 +799,7 @@ pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt
     }
     o.model = o.model.trim().to_string();
     o.agent = o.agent.trim().to_string();
-    let more_ok = claude_more_rows(ui, lang, o, salt);
+    let more_ok = claude_more_rows(ui, lang, o, salt, place);
     !bad_name(&o.model) && !bad_name(&o.agent) && more_ok
 }
 
@@ -781,16 +822,35 @@ fn switch_help(name: &str, lang: Lang) -> &'static str {
         "ide" => lang.t("Beim Start automatisch mit einer IDE verbinden.", "Connect to an IDE automatically at start."),
         "verbose" => lang.t("Ausführliche Ausgabe.", "Verbose output."),
         "disable-slash-commands" => lang.t("Alle Slash-Befehle abschalten.", "Disable all slash commands."),
+        "safe-mode" => lang.t("Hooks und MCP-Server abschalten – Paneldeck erkennt dann Status und Freigabe-Fragen nicht. Nur für dich, nie für Agenten.", "Turn off hooks and MCP servers – Paneldeck then can't detect status and permission prompts. Only for you, never for agents."),
         _ => lang.t("Wird unverändert an Claude Code übergeben (siehe claude --help).", "Passed to Claude Code as is (see claude --help)."),
     }
 }
 
+/// Wo die Claude-Optionen bearbeitet werden: bestimmt `bypassPermissions` (nicht in den Standards) und die Hinweise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OptsPlace {
+    /// Dialog „Neue Sitzung“ (Sitzung des Nutzers).
+    NewSession,
+    /// Einstellungen einer bestehenden Sitzung (auch einer, die ein Agent angelegt hat).
+    Session,
+    /// Standards unter Einstellungen → Claude.
+    Defaults,
+}
+
+/// Ergebnis einer Pfadprüfung im Abschnitt, je Pfad zwischengespeichert (keine Dateisystem-Zugriffe in jedem Bild).
+type PathCache = std::collections::HashMap<(String, bool), (Result<(), crate::claude_opts::PathIssue>, f64)>;
+
+/// Wie lange ein Prüfergebnis gilt (Sekunden), solange der Abschnitt offen ist.
+const PATH_CACHE_SECS: f64 = 3.0;
+
 /// Abschnitt „Weitere Claude-Optionen“ (#182) im selben zweispaltigen Grid wie [`claude_opts_rows`]: Schalter als Häkchen
-/// und die Wertoptionen, die nur der Nutzer setzen kann (Agenten über MCP nur die Schalter). Zugeklappt, solange nichts
-/// gesetzt ist. Warnung bei den Rechte erweiternden Optionen (gelten nie für Sitzungen von Agenten). `false`, solange
-/// ein Wert ungültig ist – auch zugeklappt (Pfade: lokal, ohne Netzwerk, vorhanden).
-fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> bool {
-    use crate::claude_opts::{check_path, valid_budget, valid_name, valid_text, valid_tools, PathIssue, MAX_DIRS, MAX_NAME, MAX_PATH_LEN, MAX_TEXT_LEN, MAX_TOOLS_LEN, SWITCHES};
+/// (auch `--safe-mode`, nur für den Nutzer) und die Wertoptionen, die nur der Nutzer setzen kann (Agenten über MCP nur
+/// die Agenten-Schalter). Zugeklappt, solange nichts gesetzt ist. Warnung bei den Rechte erweiternden Optionen und bei
+/// `--safe-mode`. `false`, solange ein Wert ungültig ist – auch zugeklappt. Pfade werden nur bei offenem Abschnitt im
+/// Dateisystem geprüft (Ergebnis je Pfad zwischengespeichert); zugeklappt zählen nur Form und gespeicherte Ergebnisse.
+fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, place: OptsPlace) -> bool {
+    use crate::claude_opts::{agent_switch, check_path, valid_autocompact, valid_budget, valid_name, valid_path, valid_text, valid_tools, PathIssue, MAX_DIRS, MAX_NAME, MAX_PATH_LEN, MAX_TEXT_LEN, MAX_TOOLS_LEN, SWITCHES, USER_SWITCHES};
     let red = Color32::from_rgb(0xe0, 0x6c, 0x75);
     let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
     let hint = |ui: &mut Ui, text: &str, c: Color32| {
@@ -798,36 +858,9 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> 
         ui.add(egui::Label::new(RichText::new(text).small().color(c)).wrap());
         ui.end_row();
     };
-    let path_err = |p: &str, dir: bool| -> Option<String> {
-        let why = match check_path(p, dir) {
-            Ok(()) => return None,
-            Err(PathIssue::Invalid) => lang.t("kein absoluter lokaler Pfad (oder Zeichen \" % ! ^ & | < >)", "not an absolute local path (or contains \" % ! ^ & | < >)"),
-            Err(PathIssue::Network) => lang.t("Netzwerkpfade sind nicht erlaubt", "network paths are not allowed"),
-            Err(PathIssue::Missing) if dir => lang.t("Ordner existiert nicht", "folder does not exist"),
-            Err(PathIssue::Missing) => lang.t("Datei existiert nicht", "file does not exist"),
-        };
-        Some(format!("{}: {why}", lang.q(p)))
-    };
-
-    // Prüfen (auch zugeklappt): ungültige Werte sperren „Erstellen“/„Speichern“.
-    let e = &o.extra;
-    let dirs: Vec<&str> = e.add_dirs.iter().map(|d| d.trim()).filter(|d| !d.is_empty()).collect();
-    let dir_err = if dirs.len() > MAX_DIRS {
-        Some(format!("{} {MAX_DIRS}", lang.t("Höchstens so viele Ordner:", "At most this many folders:")))
-    } else {
-        dirs.iter().find_map(|d| path_err(d, true))
-    };
-    let filled = |s: &str| !s.trim().is_empty();
-    let tools_bad = |s: &str| filled(s) && !valid_tools(s.trim());
-    let mcp_err = if filled(&e.mcp_config) { path_err(e.mcp_config.trim(), false) } else { None };
-    let text_bad = filled(&e.append_system_prompt) && !valid_text(e.append_system_prompt.trim());
-    let fallback_bad = filled(&e.fallback_model) && !valid_name(e.fallback_model.trim());
-    let budget_bad = filled(&e.max_budget_usd) && !valid_budget(e.max_budget_usd.trim());
-    let (allowed_bad, disallowed_bad) = (tools_bad(&e.allowed_tools), tools_bad(&e.disallowed_tools));
-    let ok = dir_err.is_none() && mcp_err.is_none() && !allowed_bad && !disallowed_bad && !text_bad && !fallback_bad && !budget_bad;
 
     let open_id = Id::new(("claude_more_open", salt));
-    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(!o.extra.is_empty() || !ok);
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(!o.extra.is_empty());
     ui.label("");
     let arrow = if open { "▾" } else { "▸" };
     let title = format!("{arrow} {}", lang.t("Weitere Claude-Optionen", "More Claude options"));
@@ -840,6 +873,56 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> 
     ui.end_row();
     #[cfg(test)]
     ui.data_mut(|d| d.insert_temp(Id::new(("claude_more_shown", salt)), open));
+
+    // Pfade prüfen: Form immer; Dateisystem nur bei offenem Abschnitt und höchstens alle PATH_CACHE_SECS je Pfad.
+    let cache_id = Id::new(("claude_more_paths", salt));
+    let now = ui.input(|i| i.time);
+    let mut cache: PathCache = ui.data(|d| d.get_temp(cache_id)).unwrap_or_default();
+    let mut check = |p: &str, dir: bool| -> Result<(), PathIssue> {
+        if !valid_path(p) {
+            return Err(PathIssue::Invalid);
+        }
+        let key = (p.to_string(), dir);
+        match cache.get(&key) {
+            Some((r, t)) if !open || now - t < PATH_CACHE_SECS => *r,
+            _ if !open => Ok(()),
+            _ => {
+                let r = check_path(p, dir);
+                cache.insert(key, (r, now));
+                r
+            }
+        }
+    };
+    let path_err = |r: Result<(), PathIssue>, p: &str, dir: bool| -> Option<String> {
+        let why = match r {
+            Ok(()) => return None,
+            Err(PathIssue::Invalid) => lang.t("kein absoluter lokaler Pfad (oder Zeichen \" % ! ^ & | < >)", "not an absolute local path (or contains \" % ! ^ & | < >)"),
+            Err(PathIssue::Network) => lang.t("Netzwerkpfade sind nicht erlaubt", "network paths are not allowed"),
+            Err(PathIssue::Missing) if dir => lang.t("Ordner existiert nicht", "folder does not exist"),
+            Err(PathIssue::Missing) => lang.t("Datei existiert nicht", "file does not exist"),
+        };
+        Some(format!("{}: {why}", lang.q(p)))
+    };
+
+    // Prüfen (auch zugeklappt): ungültige Werte sperren „Erstellen“/„Speichern“.
+    let e = &o.extra;
+    let dirs: Vec<String> = e.add_dirs.iter().map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
+    let dir_err = if dirs.len() > MAX_DIRS {
+        Some(format!("{} {MAX_DIRS}", lang.t("Höchstens so viele Ordner:", "At most this many folders:")))
+    } else {
+        dirs.iter().find_map(|d| path_err(check(d, true), d, true))
+    };
+    let filled = |s: &str| !s.trim().is_empty();
+    let tools_bad = |s: &str| filled(s) && !valid_tools(s.trim());
+    let mcp = e.mcp_config.trim().to_string();
+    let mcp_err = if mcp.is_empty() { None } else { path_err(check(&mcp, false), &mcp, false) };
+    ui.data_mut(|d| d.insert_temp(cache_id, cache));
+    let text_bad = filled(&e.append_system_prompt) && !valid_text(e.append_system_prompt.trim());
+    let fallback_bad = filled(&e.fallback_model) && !valid_name(e.fallback_model.trim());
+    let budget_bad = filled(&e.max_budget_usd) && !valid_budget(e.max_budget_usd.trim());
+    let compact_bad = filled(&e.autocompact) && !valid_autocompact(e.autocompact.trim());
+    let (allowed_bad, disallowed_bad) = (tools_bad(&e.allowed_tools), tools_bad(&e.disallowed_tools));
+    let ok = dir_err.is_none() && mcp_err.is_none() && !allowed_bad && !disallowed_bad && !text_bad && !fallback_bad && !budget_bad && !compact_bad;
     if !open {
         if !ok {
             hint(ui, lang.t("Ein Wert unter „Weitere Claude-Optionen“ ist ungültig.", "A value under “More Claude options” is invalid."), red);
@@ -851,25 +934,41 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> 
     ui.label(lang.t("Schalter", "Switches"));
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(330.0);
-        for (n, f) in SWITCHES {
+        for (n, f) in SWITCHES.iter().chain(USER_SWITCHES.iter()) {
             let mut on = e.flags.iter().any(|x| x == n);
-            if ui.checkbox(&mut on, f).on_hover_text(switch_help(n, lang)).changed() {
+            if ui.checkbox(&mut on, *f).on_hover_text(switch_help(n, lang)).changed() {
                 e.flags.retain(|x| x != n);
                 if on {
                     e.flags.push(n.to_string());
                     // chrome und no-chrome schließen sich aus.
-                    let other = match n {
+                    let other = match *n {
                         "chrome" => "no-chrome",
                         "no-chrome" => "chrome",
                         _ => "",
                     };
                     e.flags.retain(|x| x != other);
                 }
-                e.flags = SWITCHES.iter().filter(|(s, _)| e.flags.iter().any(|x| x == s)).map(|(s, _)| s.to_string()).collect();
+                e.flags = SWITCHES.iter().chain(USER_SWITCHES.iter()).filter(|(s, _)| e.flags.iter().any(|x| x == s)).map(|(s, _)| s.to_string()).collect();
             }
         }
     });
     ui.end_row();
+    if e.flags.iter().any(|f| !agent_switch(f)) {
+        hint(
+            ui,
+            match place {
+                OptsPlace::Defaults => lang.t(
+                    "⚠ --safe-mode schaltet Hooks und MCP-Server ab: Paneldeck erkennt dann weder Status noch Freigabe-Fragen dieser Sitzungen – auch der Schutz, dass Agenten keine Freigaben beantworten, greift dort nicht. Gilt nur für Sitzungen, die du selbst startest, nie für Sitzungen von Agenten.",
+                    "⚠ --safe-mode turns off hooks and MCP servers: Paneldeck then sees neither the status nor the permission prompts of these sessions – the protection that keeps agents from answering permission prompts does not work there either. Applies only to sessions you start yourself, never to sessions created by agents.",
+                ),
+                _ => lang.t(
+                    "⚠ --safe-mode schaltet Hooks und MCP-Server ab: Paneldeck erkennt dann weder Status noch Freigabe-Fragen dieser Sitzung – auch der Schutz, dass Agenten keine Freigaben beantworten, greift hier nicht.",
+                    "⚠ --safe-mode turns off hooks and MCP servers: Paneldeck then sees neither the status nor the permission prompts of this session – the protection that keeps agents from answering permission prompts does not work here either.",
+                ),
+            },
+            amber,
+        );
+    }
 
     ui.label(lang.t("Zusätzliche Ordner", "Extra folders")).on_hover_text("--add-dir");
     ui.horizontal(|ui| {
@@ -926,7 +1025,7 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> 
     ui.add(egui::TextEdit::singleline(&mut e.append_system_prompt).hint_text(lang.t("Text (eine Zeile, optional)", "Text (one line, optional)")).char_limit(MAX_TEXT_LEN).desired_width(260.0));
     ui.end_row();
     if text_bad {
-        hint(ui, lang.t("Eine Zeile ohne \" % ! ^ & | < >, nicht mit - beginnend, nicht mit \\ endend.", "One line without \" % ! ^ & | < >, not starting with - or ending with \\."), red);
+        hint(ui, lang.t("Eine Zeile ohne \" % ! ^ & | < > \\, nicht mit - beginnend.", "One line without \" % ! ^ & | < > \\, not starting with -."), red);
     }
 
     ui.label(lang.t("Ersatzmodell", "Fallback model")).on_hover_text("--fallback-model");
@@ -943,13 +1042,30 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> 
         hint(ui, lang.t("Eine positive Zahl, z. B. 5 oder 2.50.", "A positive number, e.g. 5 or 2.50."), red);
     }
 
+    ui.label(lang.t("Auto-Komprimierung", "Auto-compact")).on_hover_text("--autocompact");
+    ui.add(egui::TextEdit::singleline(&mut e.autocompact).hint_text(lang.t("auto oder Tokens, z. B. 200k", "auto or tokens, e.g. 200k")).char_limit(12).desired_width(120.0));
+    ui.end_row();
+    if compact_bad {
+        hint(ui, lang.t("„auto“ oder eine Tokenzahl, z. B. 200000 oder 200k.", "“auto” or a number of tokens, e.g. 200000 or 200k."), red);
+    }
+
     if e.has_risky() {
         hint(
             ui,
-            lang.t(
-                "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude zugreifen und was es ohne Rückfrage tun darf. Sie gelten nie für Sitzungen, die ein Agent anlegt.",
-                "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking. They never apply to sessions created by an agent.",
-            ),
+            match place {
+                OptsPlace::Defaults => lang.t(
+                    "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude zugreifen und was es ohne Rückfrage tun darf. Als Standard gelten sie nur für Sitzungen, die du selbst startest – nie für Sitzungen von Agenten.",
+                    "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking. As defaults they apply only to sessions you start yourself – never to sessions created by agents.",
+                ),
+                OptsPlace::NewSession => lang.t(
+                    "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude in dieser Sitzung zugreifen und was es ohne Rückfrage tun darf.",
+                    "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking in this session.",
+                ),
+                OptsPlace::Session => lang.t(
+                    "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude in dieser Sitzung zugreifen und was es ohne Rückfrage tun darf – ab dem nächsten Start, auch wenn ein Agent die Sitzung angelegt hat.",
+                    "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking in this session – from its next start, even if an agent created the session.",
+                ),
+            },
             amber,
         );
     }
@@ -957,8 +1073,8 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> 
     hint(
         ui,
         lang.t(
-            "Die Werte setzt nur der Nutzer; Agenten können über MCP nur die Schalter ergänzen. Ordner und Dateien werden bei jedem Start geprüft.",
-            "Only you set the values; agents can only add the switches via MCP. Folders and files are checked at every start.",
+            "Die Werte setzt nur der Nutzer; Agenten können über MCP nur Schalter ohne Einfluss auf Rechte ergänzen. Ordner und Dateien werden bei jedem Start geprüft; fehlende werden mit Hinweis weggelassen.",
+            "Only you set the values; agents can only add switches without effect on rights via MCP. Folders and files are checked at every start; missing ones are left out with a notice.",
         ),
         dim,
     );
@@ -972,19 +1088,19 @@ mod copts_tests {
 
     /// Die Zeilen ohne Fenster zeichnen (headless) und das Ergebnis der Prüfung liefern.
     fn rows(o: &mut ClaudeOpts) -> bool {
-        rows_with(o, true)
+        rows_with(o, OptsPlace::NewSession)
     }
 
-    fn rows_with(o: &mut ClaudeOpts, allow: bool) -> bool {
-        rows_ctx(&egui::Context::default(), o, allow)
+    fn rows_with(o: &mut ClaudeOpts, place: OptsPlace) -> bool {
+        rows_ctx(&egui::Context::default(), o, place)
     }
 
-    fn rows_ctx(ctx: &egui::Context, o: &mut ClaudeOpts, allow: bool) -> bool {
+    fn rows_ctx(ctx: &egui::Context, o: &mut ClaudeOpts, place: OptsPlace) -> bool {
         let mut ok = None;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::Grid::new("t").num_columns(2).show(ui, |ui| {
-                    ok = Some(claude_opts_rows(ui, Lang::En, o, "t", allow));
+                    ok = Some(claude_opts_rows(ui, Lang::En, o, "t", place));
                 });
             });
         });
@@ -1003,7 +1119,7 @@ mod copts_tests {
     fn more_options_section() {
         // Ohne weitere Optionen zugeklappt; mit gesetzten Werten offen.
         let ctx = egui::Context::default();
-        assert!(rows_ctx(&ctx, &mut ClaudeOpts::default(), true));
+        assert!(rows_ctx(&ctx, &mut ClaudeOpts::default(), OptsPlace::NewSession));
         assert!(!shown(&ctx), "zugeklappt, solange nichts gesetzt ist");
         let d = std::env::temp_dir().join(format!("pd-flags-ui-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
@@ -1011,7 +1127,7 @@ mod copts_tests {
         std::fs::write(&f, "{}").unwrap();
         let (dir, file) = (d.to_string_lossy().to_string(), f.to_string_lossy().to_string());
         let mut o = extra(ExtraOpts {
-            flags: vec!["chrome".into(), "ide".into()],
+            flags: vec!["chrome".into(), "ide".into(), "safe-mode".into()],
             add_dirs: vec![format!("  {dir}  "), String::new(), dir.clone()],
             allowed_tools: "Bash(git log:*) Read".into(),
             disallowed_tools: "WebFetch".into(),
@@ -1019,15 +1135,18 @@ mod copts_tests {
             append_system_prompt: "Be brief. ".into(),
             fallback_model: "sonnet".into(),
             max_budget_usd: "2.50".into(),
+            autocompact: "200k".into(),
         });
         let ctx = egui::Context::default();
-        assert!(rows_ctx(&ctx, &mut o, true), "gültige Werte");
+        assert!(rows_ctx(&ctx, &mut o, OptsPlace::NewSession), "gültige Werte");
+        assert_eq!(o.extra.flags, ["chrome", "ide", "safe-mode"], "safe-mode ist ein Schalter für den Nutzer");
         assert!(shown(&ctx), "offen, sobald etwas gesetzt ist");
         assert_eq!(o.extra.add_dirs, [dir.clone()], "Ordnerzeilen bereinigt, ohne Doppelte");
         assert_eq!(o.extra.append_system_prompt, "Be brief. ", "Text wird beim Tippen nicht beschnitten");
         assert_eq!(o.sanitized(true), o.trimmed(), "gültig = bereinigt gleich getrimmt");
         // Standards (Einstellungen): dieselben Felder, auch die Rechte erweiternden.
-        assert!(rows_with(&mut o.clone(), false));
+        assert!(rows_with(&mut o.clone(), OptsPlace::Defaults));
+        assert!(rows_with(&mut o.clone(), OptsPlace::Session));
 
         // Ungültig: fehlender Ordner, Netzwerkpfad (ohne Zugriff aufs Netz), fehlende Datei, Shell-Zeichen, Budget, Modell.
         let sep = std::path::MAIN_SEPARATOR;
@@ -1044,14 +1163,24 @@ mod copts_tests {
             ExtraOpts { fallback_model: "a b".into(), ..Default::default() },
             ExtraOpts { max_budget_usd: "1e3".into(), ..Default::default() },
             ExtraOpts { max_budget_usd: "0".into(), ..Default::default() },
+            ExtraOpts { append_system_prompt: "a\\b".into(), ..Default::default() },
+            ExtraOpts { autocompact: "sometimes".into(), ..Default::default() },
         ] {
             assert!(!rows(&mut extra(bad.clone())), "{bad:?}");
         }
-        // Auch zugeklappt sperrt ein ungültiger Wert.
+        // Auch zugeklappt sperrt ein ungültiger Wert (Form) …
         let ctx = egui::Context::default();
         ctx.data_mut(|d| d.insert_temp(Id::new(("claude_more_open", "t")), false));
-        assert!(!rows_ctx(&ctx, &mut extra(ExtraOpts { max_budget_usd: "x".into(), ..Default::default() }), true));
+        assert!(!rows_ctx(&ctx, &mut extra(ExtraOpts { max_budget_usd: "x".into(), ..Default::default() }), OptsPlace::NewSession));
         assert!(!shown(&ctx));
+        // … ohne Dateisystem-Zugriff: ein fehlender Ordner fällt zugeklappt nicht auf (geprüft wird beim Start) …
+        let mut missing = extra(ExtraOpts { add_dirs: vec![format!("{dir}{sep}missing")], ..Default::default() });
+        assert!(rows_ctx(&ctx, &mut missing, OptsPlace::NewSession), "zugeklappt: keine Prüfung im Dateisystem");
+        // … aufgeklappt schon; das Ergebnis bleibt zwischengespeichert und gilt dann auch zugeklappt.
+        ctx.data_mut(|d| d.insert_temp(Id::new(("claude_more_open", "t")), true));
+        assert!(!rows_ctx(&ctx, &mut missing, OptsPlace::NewSession));
+        ctx.data_mut(|d| d.insert_temp(Id::new(("claude_more_open", "t")), false));
+        assert!(!rows_ctx(&ctx, &mut missing, OptsPlace::NewSession), "Ergebnis aus dem Zwischenspeicher");
         let _ = std::fs::remove_dir_all(d);
     }
 
@@ -1066,7 +1195,7 @@ mod copts_tests {
         assert!(!rows(&mut ClaudeOpts { agent: "-x".into(), ..Default::default() }));
         // Standards (Einstellungen): bypassPermissions gibt es dort nicht.
         let mut d = ClaudeOpts { permission_mode: "bypassPermissions".into(), ..Default::default() };
-        assert!(rows_with(&mut d, false));
+        assert!(rows_with(&mut d, OptsPlace::Defaults));
         assert_eq!(d.permission_mode, "");
     }
 }

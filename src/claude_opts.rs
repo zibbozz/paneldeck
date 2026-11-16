@@ -10,14 +10,18 @@
 //! - `manual` (neuere Claude-Code-Versionen) wird zu `default` (versteht jede Version).
 //! - Agenten-Sitzungen ohne Permission-Mode bekommen ausdrücklich `default` ([`ClaudeOpts::for_agent`]); sonst gälte
 //!   `permissions.defaultMode` aus `~/.claude/settings.json` des Nutzers, und das kann `bypassPermissions` sein.
-//! - Weitere Optionen (#182), feste geprüfte Liste im Code (neue kommen mit Updates):
-//!   - Schalter ohne Wert ([`SWITCHES`], z. B. `--chrome`): ohne Einfluss auf Rechte oder Zugriffe; auch Agenten dürfen
-//!     sie über MCP setzen (`claude_flags`).
+//! - Weitere Optionen (#182), feste geprüfte Liste im Code (neue kommen mit Updates; Grundlage ist eine dokumentierte
+//!   Tabelle im Test `switch_table`, nie `claude --help` zur Laufzeit):
+//!   - Schalter ohne Wert, die auch Agenten über MCP setzen dürfen ([`SWITCHES`], z. B. `--chrome`): ohne Einfluss auf
+//!     Rechte, Zugriffe oder die Hooks, auf denen Paneldecks Status- und Freigabe-Erkennung beruht.
+//!   - Schalter nur für den Nutzer ([`USER_SWITCHES`]): `--safe-mode` schaltet Hooks und MCP-Server ab – dann erkennt
+//!     Paneldeck weder Status noch Freigabe-Fragen der Sitzung (der Schutz `permission_pending` greift nicht).
 //!   - Wertoptionen (`--add-dir`, `--allowed-tools`, `--disallowed-tools`, `--mcp-config`, `--append-system-prompt`,
-//!     `--fallback-model`, `--max-budget-usd`): nur der Nutzer in Paneldeck, nie über MCP. Die Rechte erweiternden
-//!     ([`RISKY`]: Ordner, erlaubte Werkzeuge, MCP-Konfiguration) gelten nie für Sitzungen, die ein Agent anlegt –
-//!     auch nicht als Standard. Pfade müssen lokal sein und existieren (geprüft bei jedem Start), Texte enthalten keine
-//!     Zeichen, die eine Shell auswertet; gequotet wird je Shell.
+//!     `--fallback-model`, `--max-budget-usd`, `--autocompact`): nur der Nutzer in Paneldeck, nie über MCP. Die
+//!     Rechte erweiternden ([`RISKY`]) und die Nutzer-Schalter gelten nie für Sitzungen, die ein Agent anlegt – auch nicht
+//!     als Standard ([`ExtraOpts::agent_safe`]). Pfade müssen lokal sein und existieren (geprüft bei jedem Start, ohne
+//!     je eine Netzwerkfreigabe zu berühren, [`check_path`]); Texte enthalten keine Zeichen, die eine Shell auswertet;
+//!     gequotet wird je Shell, Pfade passend zur Shell umgerechnet ([`PathStyle`]).
 //! - Gespeichert in `settings.json` (Standards, letzte Wahl; nur gültige Werte ohne `bypassPermissions`,
 //!   [`ser_user_opts`]) und je Sitzung in `state.json`; beim Lesen werden ungültige Werte still verworfen.
 //!
@@ -26,6 +30,7 @@
 use crate::quote::{quote, Kind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::{Component, Path, PathBuf};
 
 /// Höchstlänge von Modell- und Agentenname.
 pub const MAX_NAME: usize = 100;
@@ -41,23 +46,24 @@ pub const BYPASS: &str = "bypassPermissions";
 /// Vorschläge für das Modell in der Oberfläche (Claude-Code-Aliase).
 pub const MODEL_ALIASES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
-/// Schalter ohne Wert (#182): (Name in MCP und JSON, Flag). Nur Schalter ohne Einfluss auf Rechte oder Zugriffe –
-/// Agenten dürfen sie setzen. `chrome` und `no-chrome` schließen sich aus.
-pub const SWITCHES: [(&str, &str); 9] = [
+/// Schalter ohne Wert, die auch Agenten setzen dürfen (#182): (Name in MCP und JSON, Flag). Ohne Einfluss auf Rechte,
+/// Zugriffe oder Hooks. `chrome` und `no-chrome` schließen sich aus.
+pub const SWITCHES: [(&str, &str); 7] = [
     ("chrome", "--chrome"),
     ("no-chrome", "--no-chrome"),
     ("ide", "--ide"),
     ("verbose", "--verbose"),
     ("brief", "--brief"),
-    ("autocompact", "--autocompact"),
-    ("safe-mode", "--safe-mode"),
     ("restricted", "--restricted"),
     ("disable-slash-commands", "--disable-slash-commands"),
 ];
+/// Schalter ohne Wert nur für den Nutzer: nie über MCP, nie für Sitzungen von Agenten (auch nicht als Standard).
+/// `--safe-mode` schaltet Hooks und MCP-Server ab (keine Status-/Freigabe-Erkennung durch Paneldeck).
+pub const USER_SWITCHES: [(&str, &str); 1] = [("safe-mode", "--safe-mode")];
 /// Flags, die über MCP nie erlaubt sind (eigene Fehlermeldung; alles außerhalb von [`SWITCHES`] ist ohnehin abgelehnt):
-/// Rechte oder Zugriffe erweitern, Ausgabe/Konversation steuern (das macht Paneldeck), Fernsteuerung oder Wertoptionen
-/// des Nutzers. Dazu jedes Flag mit `dangerously` im Namen.
-pub const NEVER_VIA_MCP: [&str; 30] = [
+/// Rechte oder Zugriffe erweitern, Hooks abschalten, Ausgabe/Konversation steuern (das macht Paneldeck),
+/// Fernsteuerung oder Wertoptionen des Nutzers. Dazu jedes Flag mit `dangerously` im Namen.
+pub const NEVER_VIA_MCP: [&str; 32] = [
     "add-dir",
     "allowed-tools",
     "allowedtools",
@@ -88,31 +94,28 @@ pub const NEVER_VIA_MCP: [&str; 30] = [
     "system-prompt",
     "fallback-model",
     "max-budget-usd",
+    "safe-mode",
+    "autocompact",
 ];
-/// Parameter von `create_session`, die es nicht gibt, weil nur der Nutzer sie in Paneldeck setzen kann (oder Paneldeck
-/// sie steuert): angegeben → `bad_args` statt still ignoriert.
-pub const USER_ONLY_PARAMS: [&str; 21] = [
+/// Parameter von `create_session` für Wertoptionen und gefährliche Flags: angegeben → `bad_args` statt still
+/// ignoriert (nur der Nutzer kann sie in Paneldeck setzen). Allgemeine Namen (`args`, `settings` …) bleiben wie
+/// bisher unbeachtet.
+pub const USER_ONLY_PARAMS: [&str; 15] = [
     "add_dir",
     "add_dirs",
     "allowed_tools",
     "disallowed_tools",
-    "tools",
     "mcp_config",
     "strict_mcp_config",
     "plugin_dir",
-    "settings",
-    "agents",
     "append_system_prompt",
     "system_prompt",
     "fallback_model",
     "max_budget_usd",
+    "autocompact",
     "permission_prompt_tool",
     "dangerously_skip_permissions",
-    "claude_args",
-    "args",
-    "resume",
-    "session_id",
-    "output_format",
+    "safe_mode",
 ];
 /// Wertoptionen, die Rechte oder Zugriffe erweitern (Namen wie in [`ExtraOpts::value_names`]): Warnung in der
 /// Oberfläche, nie für Sitzungen von Agenten ([`ExtraOpts::agent_safe`]).
@@ -145,9 +148,14 @@ pub fn valid_permission_mode(s: &str, allow_bypass: bool) -> bool {
     PERMISSION_MODES.contains(&s) || (allow_bypass && s == BYPASS)
 }
 
-/// Flag eines Schalters aus [`SWITCHES`].
+/// Flag eines Schalters aus [`SWITCHES`] oder [`USER_SWITCHES`].
 pub fn switch_flag(name: &str) -> Option<&'static str> {
-    SWITCHES.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
+    SWITCHES.iter().chain(USER_SWITCHES.iter()).find(|(n, _)| *n == name).map(|(_, f)| *f)
+}
+
+/// Darf ein Agent diesen Schalter setzen ([`SWITCHES`])?
+pub fn agent_switch(name: &str) -> bool {
+    SWITCHES.iter().any(|(n, _)| *n == name)
 }
 
 /// Keine Zeichen, die eine Shell auswertet oder die sich nicht sicher übergeben lassen: cmd wertet `% ! ^ & | < >` aus
@@ -184,10 +192,10 @@ pub fn valid_tools(s: &str) -> bool {
     plain(s, MAX_TOOLS_LEN) && !s.ends_with('\\') && s.chars().all(|c| c.is_ascii_alphanumeric() || " _.,:*()/@-~=+[]?#\\".contains(c))
 }
 
-/// Zusatz zum System-Prompt gültig? Eine Zeile, Shell-sicher, nicht mit `\` am Ende (würde in Windows-Argumenten das
-/// schließende Anführungszeichen schützen).
+/// Zusatz zum System-Prompt gültig? Eine Zeile, Shell-sicher, ohne `\` (fish wertet `\` auch in einfachen Anführungszeichen
+/// aus; in Windows-Argumenten schützt `\` ein folgendes Anführungszeichen).
 pub fn valid_text(s: &str) -> bool {
-    plain(s, MAX_TEXT_LEN) && !s.ends_with('\\')
+    plain(s, MAX_TEXT_LEN) && !s.contains('\\')
 }
 
 /// Budget in USD gültig? Positive Zahl mit höchstens 6 Stellen vor und 2 nach dem Punkt.
@@ -202,6 +210,12 @@ pub fn valid_budget(s: &str) -> bool {
         && s.parse::<f64>().is_ok_and(|v| v > 0.0)
 }
 
+/// Wert für `--autocompact` gültig? `auto` oder eine Tokenzahl (1–9 Ziffern, ohne führende 0, optional mit `k`).
+pub fn valid_autocompact(s: &str) -> bool {
+    let n = s.strip_suffix('k').unwrap_or(s);
+    s == "auto" || (!n.is_empty() && n.len() <= 9 && n.bytes().all(|c| c.is_ascii_digit()) && !n.starts_with('0'))
+}
+
 /// Warum ein Pfad (beim Start bzw. in der Oberfläche) nicht verwendet wird.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathIssue {
@@ -213,8 +227,9 @@ pub enum PathIssue {
     Missing,
 }
 
-/// Pfad prüfen: Form, lokales Laufwerk (Netzwerklaufwerke werden nie berührt), existiert als Ordner (`dir`) bzw. Datei,
-/// zeigt auch aufgelöst (Junction/Symlink) nicht auf eine Netzwerkfreigabe.
+/// Pfad prüfen: Form, lokales Laufwerk, jede Verknüpfung (Symlink/Junction) im Pfad zeigt auf ein lokales Ziel (gelesen
+/// mit `read_link`, bevor ihr gefolgt wird – eine Netzwerkfreigabe wird nie berührt), existiert als Ordner (`dir`) bzw.
+/// Datei.
 pub fn check_path(p: &str, dir: bool) -> Result<(), PathIssue> {
     if !valid_path(p) {
         return Err(PathIssue::Invalid);
@@ -222,17 +237,42 @@ pub fn check_path(p: &str, dir: bool) -> Result<(), PathIssue> {
     if is_remote_drive(p) {
         return Err(PathIssue::Network);
     }
-    let path = std::path::Path::new(p);
-    if !(if dir { path.is_dir() } else { path.is_file() }) {
-        return Err(PathIssue::Missing);
-    }
-    if let Ok(c) = std::fs::canonicalize(path) {
-        let s = c.to_string_lossy().to_string();
-        let local = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        let drive = local.len() >= 2 && local.as_bytes()[1] == b':';
-        if crate::pathfmt::is_remote_unc(&s) || (cfg!(windows) && drive && is_remote_drive(local)) {
+    local_chain(Path::new(p), 8)?;
+    let md = std::fs::metadata(p).map_err(|_| PathIssue::Missing)?;
+    if (dir && md.is_dir()) || (!dir && md.is_file()) { Ok(()) } else { Err(PathIssue::Missing) }
+}
+
+/// Jeden Teil des Pfads einzeln prüfen, ohne Verknüpfungen zu folgen (`symlink_metadata`). Eine Verknüpfung wird nur
+/// gelesen (`read_link`); ihr Ziel muss lokal sein und wird ebenso geprüft (höchstens `depth` Ebenen), erst dann geht es
+/// dort weiter.
+fn local_chain(p: &Path, depth: u8) -> Result<(), PathIssue> {
+    let mut cur = PathBuf::new();
+    for comp in p.components() {
+        cur.push(comp);
+        if matches!(comp, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+        let md = std::fs::symlink_metadata(&cur).map_err(|_| PathIssue::Missing)?;
+        if !md.file_type().is_symlink() {
+            continue;
+        }
+        let target = std::fs::read_link(&cur).map_err(|_| PathIssue::Missing)?;
+        let target = if target.is_relative() { cur.parent().map(|d| d.join(&target)).unwrap_or(target) } else { target };
+        let s = target.to_string_lossy().to_string();
+        let local = s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix(r"\??\")).unwrap_or(&s).to_string();
+        let lower = local.to_ascii_lowercase();
+        if crate::pathfmt::is_remote_unc(&s) || lower.starts_with("unc\\") || local.starts_with("\\\\") || local.starts_with("//") {
             return Err(PathIssue::Network);
         }
+        if lower.starts_with("volume{") {
+            // Laufwerk ohne Buchstaben (Bereitstellungspunkt): lokal; nicht weiter auflösbar.
+            continue;
+        }
+        if depth == 0 || is_remote_drive(&local) {
+            return Err(PathIssue::Network);
+        }
+        local_chain(Path::new(&local), depth - 1)?;
+        cur = PathBuf::from(local);
     }
     Ok(())
 }
@@ -258,15 +298,51 @@ fn is_remote_drive(_p: &str) -> bool {
     false
 }
 
-/// Pfad für die Kommandozeile der Shell: WSL bekommt `/mnt/<lw>/…`, POSIX-Shells unter Windows (Git Bash) Schrägstriche;
-/// Trenner am Ende fallen weg (ein `\` vor dem schließenden Anführungszeichen würde es unter Windows schützen).
-fn shell_path(shell_id: &str, kind: Kind, p: &str) -> String {
-    let p = if shell_id.starts_with("wsl") {
-        crate::pathfmt::convert(shell_id, p)
-    } else if kind == Kind::Posix && cfg!(windows) {
-        p.replace('\\', "/")
-    } else {
-        p.to_string()
+/// Wie Pfade für die Shell geschrieben werden, in der Claude startet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathStyle {
+    /// Unverändert (PowerShell, cmd; unter Linux/macOS jede Shell).
+    Native,
+    /// POSIX-Shell unter Windows (Git Bash, MSYS): Schrägstriche; Claude startet mit `MSYS2_ARG_CONV_EXCL='*'`.
+    Slash,
+    /// WSL: `/mnt/<lw>/…`.
+    Wsl,
+}
+
+impl PathStyle {
+    /// Art der Shell aus Kennung und Programm: WSL auch bei eigenen Profilen mit `wsl.exe` oder dem `bash.exe` aus
+    /// System32; andere POSIX-Shells unter Windows (Git Bash) mit Schrägstrichen.
+    pub fn for_shell(shell_id: &str, program: &str, kind: Kind) -> PathStyle {
+        let prog = program.replace('/', "\\").to_ascii_lowercase();
+        let file = prog.rsplit('\\').next().unwrap_or("");
+        let stem = file.strip_suffix(".exe").unwrap_or(file);
+        let system_bash = stem == "bash" && (prog.contains("\\system32\\") || prog.contains("\\sysnative\\") || prog.contains("\\windowsapps\\"));
+        if cfg!(windows) && (shell_id.starts_with("wsl") || stem == "wsl" || system_bash) {
+            PathStyle::Wsl
+        } else if cfg!(windows) && kind == Kind::Posix {
+            PathStyle::Slash
+        } else {
+            PathStyle::Native
+        }
+    }
+
+    /// Aufruf von Claude: in Git Bash ohne die Pfad-Umschreibung von MSYS (sonst würde aus `Edit(/src/**)` in
+    /// `--allowed-tools` ein Windows-Pfad).
+    pub fn claude_program(self) -> &'static str {
+        match self {
+            PathStyle::Slash => "MSYS2_ARG_CONV_EXCL='*' claude",
+            _ => "claude",
+        }
+    }
+}
+
+/// Pfad für die Kommandozeile der Shell; Trenner am Ende fallen weg (ein `\` vor dem schließenden Anführungszeichen würde
+/// es unter Windows schützen).
+fn shell_path(style: PathStyle, p: &str) -> String {
+    let p = match style {
+        PathStyle::Wsl => crate::pathfmt::convert("wsl", p),
+        PathStyle::Slash => p.replace('\\', "/"),
+        PathStyle::Native => p.to_string(),
     };
     let t = p.trim_end_matches(['\\', '/']);
     if t.is_empty() {
@@ -281,7 +357,7 @@ fn shell_path(shell_id: &str, kind: Kind, p: &str) -> String {
 /// Weitere Optionen (#182): Schalter und Wertoptionen. Leere Felder setzen nichts.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ExtraOpts {
-    /// Schalter aus [`SWITCHES`] (Namen ohne `--`, z. B. `chrome`).
+    /// Schalter aus [`SWITCHES`] und [`USER_SWITCHES`] (Namen ohne `--`, z. B. `chrome`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<String>,
     /// `--add-dir`: zusätzliche Ordner (nur Nutzer, nie für Agenten-Sitzungen).
@@ -305,6 +381,16 @@ pub struct ExtraOpts {
     /// `--max-budget-usd <Zahl>` (nur Nutzer; als Text, wie eingegeben).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub max_budget_usd: String,
+    /// `--autocompact <auto|Tokens>` (nur Nutzer).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub autocompact: String,
+}
+
+/// Ergebnis der Wertoptionen beim Start: Zeile, tatsächlich gesetzte Optionen und weggelassene Pfade.
+struct ValueArgs {
+    line: String,
+    applied: ExtraOpts,
+    dropped: Vec<String>,
 }
 
 impl ExtraOpts {
@@ -315,7 +401,7 @@ impl ExtraOpts {
     /// Nur gültige Werte (Form, ohne Dateisystem): Schalter in fester Reihenfolge ohne Doppelte (`chrome` zusammen mit
     /// `no-chrome` fällt ganz weg), Ordner ohne Doppelte und höchstens [`MAX_DIRS`], Ränder getrimmt.
     pub fn sanitized(&self) -> ExtraOpts {
-        let mut flags: Vec<String> = SWITCHES.iter().filter(|(n, _)| self.flags.iter().any(|f| f.trim() == *n)).map(|(n, _)| n.to_string()).collect();
+        let mut flags: Vec<String> = SWITCHES.iter().chain(USER_SWITCHES.iter()).filter(|(n, _)| self.flags.iter().any(|f| f.trim() == *n)).map(|(n, _)| n.to_string()).collect();
         if flags.iter().any(|f| f == "chrome") && flags.iter().any(|f| f == "no-chrome") {
             flags.retain(|f| f != "chrome" && f != "no-chrome");
         }
@@ -338,6 +424,7 @@ impl ExtraOpts {
             append_system_prompt: keep(&self.append_system_prompt, valid_text),
             fallback_model: keep(&self.fallback_model, valid_name),
             max_budget_usd: keep(&self.max_budget_usd, valid_budget),
+            autocompact: keep(&self.autocompact, valid_autocompact),
         }
     }
 
@@ -353,6 +440,7 @@ impl ExtraOpts {
             append_system_prompt: t(&self.append_system_prompt),
             fallback_model: t(&self.fallback_model),
             max_budget_usd: t(&self.max_budget_usd),
+            autocompact: t(&self.autocompact),
         }
     }
 
@@ -369,12 +457,14 @@ impl ExtraOpts {
             append_system_prompt: pick(&self.append_system_prompt, &fallback.append_system_prompt),
             fallback_model: pick(&self.fallback_model, &fallback.fallback_model),
             max_budget_usd: pick(&self.max_budget_usd, &fallback.max_budget_usd),
+            autocompact: pick(&self.autocompact, &fallback.autocompact),
         }
     }
 
-    /// Ohne die Rechte erweiternden Wertoptionen ([`RISKY`]) – für Sitzungen, die ein Agent anlegt.
+    /// Ohne die Rechte erweiternden Wertoptionen ([`RISKY`]) und ohne die Schalter nur für den Nutzer
+    /// ([`USER_SWITCHES`]) – für Sitzungen, die ein Agent anlegt.
     pub fn agent_safe(&self) -> ExtraOpts {
-        ExtraOpts { add_dirs: Vec::new(), allowed_tools: String::new(), mcp_config: String::new(), ..self.clone() }
+        ExtraOpts { flags: self.flags.iter().filter(|f| agent_switch(f)).cloned().collect(), add_dirs: Vec::new(), allowed_tools: String::new(), mcp_config: String::new(), ..self.clone() }
     }
 
     /// Namen der gesetzten Wertoptionen (für MCP-Auskünfte; die Werte bleiben beim Nutzer).
@@ -387,6 +477,7 @@ impl ExtraOpts {
             ("append_system_prompt", !self.append_system_prompt.is_empty()),
             ("fallback_model", !self.fallback_model.is_empty()),
             ("max_budget_usd", !self.max_budget_usd.is_empty()),
+            ("autocompact", !self.autocompact.is_empty()),
         ]
         .into_iter()
         .filter(|(_, set)| *set)
@@ -405,31 +496,38 @@ impl ExtraOpts {
     }
 
     /// Wertoptionen als Kommandozeilen-Teil (mit führendem Leerzeichen), gequotet für `kind`. Pfade, die es (noch) nicht
-    /// gibt oder die nicht lokal sind, fallen weg (geprüft bei jedem Start); WSL bekommt `/mnt/…`-Pfade.
-    pub fn value_args(&self, kind: Kind, shell_id: &str) -> String {
-        let e = self.sanitized();
-        let mut out = String::new();
-        let dirs: Vec<String> = e.add_dirs.iter().filter(|d| check_path(d, true).is_ok()).map(|d| quote(kind, &shell_path(shell_id, kind, d))).collect();
-        if !dirs.is_empty() {
-            out += &format!(" --add-dir {}", dirs.join(" "));
+    /// gibt oder die nicht lokal sind, fallen weg (geprüft bei jedem Start) und werden gemeldet.
+    fn value_args(&self, kind: Kind, style: PathStyle) -> ValueArgs {
+        let mut e = self.sanitized();
+        let mut dropped = Vec::new();
+        let mut line = String::new();
+        let (ok, missing): (Vec<String>, Vec<String>) = e.add_dirs.iter().cloned().partition(|d| check_path(d, true).is_ok());
+        dropped.extend(missing);
+        e.add_dirs = ok;
+        if !e.add_dirs.is_empty() {
+            line += &format!(" --add-dir {}", e.add_dirs.iter().map(|d| quote(kind, &shell_path(style, d))).collect::<Vec<_>>().join(" "));
         }
         for (flag, v) in [("--allowed-tools", &e.allowed_tools), ("--disallowed-tools", &e.disallowed_tools)] {
             if !v.is_empty() {
-                out += &format!(" {flag} {}", quote(kind, v));
+                line += &format!(" {flag} {}", quote(kind, v));
             }
         }
-        if !e.mcp_config.is_empty() && check_path(&e.mcp_config, false).is_ok() {
-            out += &format!(" --mcp-config {}", quote(kind, &shell_path(shell_id, kind, &e.mcp_config)));
+        if !e.mcp_config.is_empty() {
+            if check_path(&e.mcp_config, false).is_ok() {
+                line += &format!(" --mcp-config {}", quote(kind, &shell_path(style, &e.mcp_config)));
+            } else {
+                dropped.push(std::mem::take(&mut e.mcp_config));
+            }
         }
         if !e.append_system_prompt.is_empty() {
-            out += &format!(" --append-system-prompt {}", quote(kind, &e.append_system_prompt));
+            line += &format!(" --append-system-prompt {}", quote(kind, &e.append_system_prompt));
         }
-        for (flag, v) in [("--fallback-model", &e.fallback_model), ("--max-budget-usd", &e.max_budget_usd)] {
+        for (flag, v) in [("--fallback-model", &e.fallback_model), ("--max-budget-usd", &e.max_budget_usd), ("--autocompact", &e.autocompact)] {
             if !v.is_empty() {
-                out += &format!(" {flag} {}", quote_value(kind, v));
+                line += &format!(" {flag} {}", quote_value(kind, v));
             }
         }
-        out
+        ValueArgs { line, applied: e, dropped }
     }
 }
 
@@ -451,6 +549,17 @@ pub struct ClaudeOpts {
 
 /// Fehler bei der Prüfung von MCP-Argumenten: (Deutsch, Englisch).
 pub type OptError = (String, String);
+
+/// Kommandozeilen-Teil eines Starts ([`ClaudeOpts::launch`]).
+pub struct LaunchArgs {
+    /// Mit führendem Leerzeichen; danach folgt immer noch eine Option von Paneldeck (`--session-id`, `--resume`,
+    /// `--continue`), die die mehrwertigen `--add-dir`/`--allowed-tools`/`--disallowed-tools` begrenzt.
+    pub line: String,
+    /// Tatsächlich gesetzte Optionen (ohne weggelassene Pfade) – für Auskünfte über MCP.
+    pub applied: ClaudeOpts,
+    /// Weggelassene Pfade (fehlen, nicht lokal) – Hinweis an den Nutzer.
+    pub dropped: Vec<String>,
+}
 
 impl ClaudeOpts {
     pub fn is_empty(&self) -> bool {
@@ -493,17 +602,20 @@ impl ClaudeOpts {
         }
     }
 
-    /// Optionen einer über MCP angelegten Sitzung: Angaben des Agenten, sonst die Standards des Nutzers – nie
-    /// `bypassPermissions`. Ohne Permission-Mode ausdrücklich `default`, damit nicht `permissions.defaultMode` aus
-    /// `~/.claude/settings.json` gilt (das könnte `bypassPermissions` sein). Schalter: die des Nutzers und die des
-    /// Agenten (bei `chrome`/`no-chrome` entscheidet der Agent). Die Rechte erweiternden Wertoptionen ([`RISKY`]) nie,
-    /// auch nicht aus den Standards.
+    /// Optionen einer über MCP (oder per `paneldeck --open` aus einem Hub-Terminal) angelegten Sitzung: Angaben des
+    /// Agenten, sonst die Standards des Nutzers – nie `bypassPermissions`. Ohne Permission-Mode ausdrücklich `default`,
+    /// damit nicht `permissions.defaultMode` aus `~/.claude/settings.json` gilt. Schalter: die des Nutzers und die des
+    /// Agenten; `no-chrome` des Nutzers gewinnt gegen `chrome` des Agenten (MCP lehnt das vorher ab,
+    /// [`ClaudeOpts::agent_conflict`]), sonst entscheidet der Agent. Die Rechte erweiternden Wertoptionen ([`RISKY`]) und
+    /// die Schalter nur für den Nutzer nie, auch nicht aus den Standards.
     pub fn for_agent(&self, defaults: &ClaudeOpts) -> ClaudeOpts {
         let d = defaults.sanitized(false);
         let mut o = self.or(&d).sanitized(false);
         let chrome = |f: &String| f == "chrome" || f == "no-chrome";
-        let own_chrome = self.extra.flags.iter().any(chrome);
-        let mut flags = self.extra.flags.clone();
+        let user_off = d.extra.flags.iter().any(|f| f == "no-chrome");
+        let own: Vec<String> = self.extra.flags.iter().filter(|f| !(user_off && f.as_str() == "chrome")).cloned().collect();
+        let own_chrome = own.iter().any(chrome);
+        let mut flags = own;
         flags.extend(d.extra.flags.iter().filter(|f| !(own_chrome && chrome(f))).cloned());
         o.extra.flags = flags;
         o.extra = o.extra.agent_safe().sanitized();
@@ -511,6 +623,19 @@ impl ClaudeOpts {
             o.permission_mode = "default".into();
         }
         o
+    }
+
+    /// Widerspricht die Angabe eines Agenten einer Vorgabe des Nutzers? `chrome`, wenn der Nutzer `no-chrome` als
+    /// Standard gesetzt hat.
+    pub fn agent_conflict(&self, defaults: &ClaudeOpts) -> Result<(), OptError> {
+        let off = defaults.sanitized(false).extra.flags.iter().any(|f| f == "no-chrome");
+        if off && self.extra.flags.iter().any(|f| f == "chrome") {
+            return Err((
+                "claude_flags: chrome ist nicht erlaubt – der Nutzer hat Chrome als Standard ausgeschaltet (no-chrome).".into(),
+                "claude_flags: chrome is not allowed – the user turned Chrome off by default (no-chrome).".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Kommandozeilen-Teil ohne Wertoptionen (mit führendem Leerzeichen, leer ohne Optionen): Modell, Effort,
@@ -527,10 +652,18 @@ impl ClaudeOpts {
         out + &o.extra.switch_args()
     }
 
-    /// Vollständiger Kommandozeilen-Teil für den Start in der Shell `shell_id`: Wertoptionen (zuerst, damit die
-    /// mehrwertigen `--add-dir`/`--allowed-tools` von einer Option begrenzt werden) und [`ClaudeOpts::args`].
-    pub fn args_for(&self, kind: Kind, shell_id: &str) -> String {
-        self.extra.value_args(kind, shell_id) + &self.args(kind)
+    /// Kommandozeilen-Teil für einen Start: [`ClaudeOpts::args`], die bereinigten freien Reste alter `claude_args`
+    /// (`legacy_rest`) und zuletzt die Wertoptionen – so kann kein freier Rest von einem mehrwertigen `--add-dir`
+    /// geschluckt werden; dahinter setzt Paneldeck immer noch `--session-id`/`--resume`/`--continue`.
+    pub fn launch(&self, kind: Kind, style: PathStyle, legacy_rest: &str) -> LaunchArgs {
+        let o = self.sanitized(true);
+        let mut line = o.args(kind);
+        if !legacy_rest.trim().is_empty() {
+            line += &format!(" {}", legacy_args(legacy_rest, kind));
+        }
+        let v = o.extra.value_args(kind, style);
+        line += &v.line;
+        LaunchArgs { line, applied: ClaudeOpts { extra: ExtraOpts { flags: o.extra.flags.clone(), ..v.applied }, ..o }, dropped: v.dropped }
     }
 
     /// Prüft die optionalen Parameter `model`/`effort`/`permission_mode`/`agent`/`claude_flags` von `create_session`.
@@ -580,7 +713,8 @@ impl ClaudeOpts {
     }
 
     /// Optionen aus einer alten `claude_args`-Zeile (vor 2.3.0: „--model x --permission-mode y“) herauslösen, auch
-    /// Schalter aus [`SWITCHES`]. Rückgabe: erkannte Optionen und die übrigen Token (unverändert, Reihenfolge erhalten).
+    /// Schalter aus [`SWITCHES`]/[`USER_SWITCHES`] und `--autocompact <Wert>`. Rückgabe: erkannte Optionen und die
+    /// übrigen Token (unverändert, Reihenfolge erhalten).
     pub fn split_legacy(args: &str) -> (ClaudeOpts, String) {
         let mut o = ClaudeOpts::default();
         let mut rest = Vec::new();
@@ -600,6 +734,7 @@ impl ClaudeOpts {
                 "--effort" => (Some(&mut o.effort), valid_effort),
                 "--permission-mode" => (Some(&mut o.permission_mode), |s| s == MANUAL || valid_permission_mode(s, true)),
                 "--agent" => (Some(&mut o.agent), valid_name),
+                "--autocompact" => (Some(&mut o.extra.autocompact), valid_autocompact),
                 _ => (None, |_| false),
             };
             match (slot, toks.get(i + 1)) {
@@ -668,8 +803,8 @@ pub fn user_only_param(args: &Value) -> Result<(), OptError> {
 }
 
 /// `claude_flags` von `create_session`: Liste von Namen aus [`SWITCHES`] (führende `-` sind erlaubt, Groß-/
-/// Kleinschreibung egal). Alles andere ist `bad_args` – Flags aus [`NEVER_VIA_MCP`] und `--dangerously-*` mit eigener
-/// Meldung; `chrome` und `no-chrome` zusammen ebenfalls.
+/// Kleinschreibung egal, Doppelte zählen einmal). Alles andere ist `bad_args` – Flags aus [`NEVER_VIA_MCP`] und
+/// `--dangerously-*` mit eigener Meldung; `chrome` und `no-chrome` zusammen ebenfalls.
 fn flags_from_mcp(v: Option<&Value>) -> Result<Vec<String>, OptError> {
     let list = match v {
         None | Some(Value::Null) => return Ok(Vec::new()),
@@ -687,7 +822,7 @@ fn flags_from_mcp(v: Option<&Value>) -> Result<Vec<String>, OptError> {
         };
         let name = raw.trim().trim_start_matches('-').to_ascii_lowercase();
         let shown: String = raw.chars().filter(|c| !c.is_control()).take(60).collect();
-        if switch_flag(&name).is_some() {
+        if agent_switch(&name) {
             if !out.contains(&name) {
                 out.push(name);
             }
@@ -696,8 +831,8 @@ fn flags_from_mcp(v: Option<&Value>) -> Result<Vec<String>, OptError> {
         let base = name.split(['=', ' ']).next().unwrap_or("");
         if NEVER_VIA_MCP.contains(&base) || name.contains("dangerously") {
             return Err((
-                format!("claude_flags: „{shown}“ ist über MCP nie erlaubt (Rechte/Zugriffe oder von Paneldeck gesteuert). Erlaubt: {allowed}."),
-                format!("claude_flags: “{shown}” is never allowed via MCP (rights/access or controlled by Paneldeck). Allowed: {allowed}."),
+                format!("claude_flags: „{shown}“ ist über MCP nie erlaubt (Rechte/Zugriffe, Hooks oder von Paneldeck gesteuert). Erlaubt: {allowed}."),
+                format!("claude_flags: “{shown}” is never allowed via MCP (rights/access, hooks or controlled by Paneldeck). Allowed: {allowed}."),
             ));
         }
         return Err((format!("claude_flags: unbekannter Schalter „{shown}“. Erlaubt: {allowed}."), format!("claude_flags: unknown switch “{shown}”. Allowed: {allowed}.")));
@@ -759,10 +894,10 @@ impl<'de> Deserialize<'de> for ClaudeOpts {
         let v = Value::deserialize(d)?;
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         let list = |k: &str| -> Vec<String> { v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).collect()).unwrap_or_default() };
-        // Budget auch als Zahl annehmen (von Hand bearbeitete settings.json).
-        let budget = match v.get("max_budget_usd") {
+        // Zahlen auch als Zahl annehmen (von Hand bearbeitete settings.json).
+        let num = |k: &str| match v.get(k) {
             Some(Value::Number(n)) => n.to_string(),
-            _ => s("max_budget_usd"),
+            _ => s(k),
         };
         let extra = ExtraOpts {
             flags: list("flags"),
@@ -772,7 +907,8 @@ impl<'de> Deserialize<'de> for ClaudeOpts {
             mcp_config: s("mcp_config"),
             append_system_prompt: s("append_system_prompt"),
             fallback_model: s("fallback_model"),
-            max_budget_usd: budget,
+            max_budget_usd: num("max_budget_usd"),
+            autocompact: num("autocompact"),
         };
         Ok(ClaudeOpts { model: s("model"), effort: s("effort"), permission_mode: s("permission_mode"), agent: s("agent"), extra }.sanitized(true))
     }
@@ -783,12 +919,69 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Wie ein Flag Werte nimmt.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Arity {
+        /// Schalter ohne Wert.
+        None,
+        /// Genau ein Wert (Pflicht).
+        One,
+        /// Ein oder mehrere Werte (mehrwertig, wird von der nächsten Option begrenzt).
+        Many,
+    }
+
+    /// Wirkung eines Flags, soweit sie für Paneldeck zählt.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Effect {
+        /// Kein Einfluss auf Rechte, Zugriffe oder Hooks.
+        Harmless,
+        /// Schränkt nur ein.
+        Restricts,
+        /// Erweitert Rechte oder Zugriffe.
+        Widens,
+        /// Schaltet Hooks ab (Paneldecks Status-/Freigabe-Erkennung fällt aus).
+        DisablesHooks,
+    }
+
+    /// Geprüfte Tabelle der Flags, die Paneldeck setzen kann (Stand der Hilfe von Claude Code laut #182 und Review;
+    /// `claude --help` wird nie ausgeführt). Neue Flags erst hier eintragen, dann in die Listen übernehmen.
+    const FLAG_TABLE: [(&str, Arity, Effect); 17] = [
+        ("--chrome", Arity::None, Effect::Harmless),
+        ("--no-chrome", Arity::None, Effect::Restricts),
+        ("--ide", Arity::None, Effect::Harmless),
+        ("--verbose", Arity::None, Effect::Harmless),
+        ("--brief", Arity::None, Effect::Harmless),
+        ("--restricted", Arity::None, Effect::Restricts),
+        ("--disable-slash-commands", Arity::None, Effect::Restricts),
+        ("--safe-mode", Arity::None, Effect::DisablesHooks),
+        ("--autocompact", Arity::One, Effect::Harmless),
+        ("--add-dir", Arity::Many, Effect::Widens),
+        ("--allowed-tools", Arity::Many, Effect::Widens),
+        ("--disallowed-tools", Arity::Many, Effect::Restricts),
+        ("--mcp-config", Arity::Many, Effect::Widens),
+        ("--append-system-prompt", Arity::One, Effect::Harmless),
+        ("--fallback-model", Arity::One, Effect::Harmless),
+        ("--max-budget-usd", Arity::One, Effect::Harmless),
+        ("--dangerously-skip-permissions", Arity::None, Effect::Widens),
+    ];
+
+    fn table(flag: &str) -> (Arity, Effect) {
+        FLAG_TABLE.iter().find(|(f, _, _)| *f == flag).map(|(_, a, e)| (*a, *e)).unwrap_or_else(|| panic!("{flag} fehlt in FLAG_TABLE"))
+    }
+
     fn four(model: &str, effort: &str, permission_mode: &str, agent: &str) -> ClaudeOpts {
         ClaudeOpts { model: model.into(), effort: effort.into(), permission_mode: permission_mode.into(), agent: agent.into(), ..Default::default() }
     }
 
     fn with_flags(flags: &[&str]) -> ClaudeOpts {
         ClaudeOpts { extra: ExtraOpts { flags: flags.iter().map(|s| s.to_string()).collect(), ..Default::default() }, ..Default::default() }
+    }
+
+    impl ClaudeOpts {
+        /// Kommandozeilen-Teil ohne freie Reste (für die Tests).
+        fn args_for(&self, kind: Kind, style: PathStyle) -> String {
+            self.launch(kind, style, "").line
+        }
     }
 
     /// Ein vorhandener lokaler Ordner und eine Datei darin (eigener Temp-Ordner je Test).
@@ -798,6 +991,56 @@ mod tests {
         let f = d.join("mcp.json");
         std::fs::write(&f, "{}").unwrap();
         (d.clone(), d.to_string_lossy().to_string(), f.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn switch_table() {
+        // Jeder Schalter (Agent und Nutzer) ist laut Tabelle wertlos; Agenten-Schalter berühren weder Rechte noch Hooks.
+        for (n, f) in SWITCHES {
+            assert_eq!(f, format!("--{n}"));
+            let (arity, effect) = table(f);
+            assert_eq!(arity, Arity::None, "{f} nimmt einen Wert");
+            assert!(matches!(effect, Effect::Harmless | Effect::Restricts), "{f}: {effect:?}");
+            assert!(!NEVER_VIA_MCP.contains(&n), "{n}");
+        }
+        for (n, f) in USER_SWITCHES {
+            assert_eq!(f, format!("--{n}"));
+            assert_eq!(table(f).0, Arity::None, "{f}");
+            assert!(NEVER_VIA_MCP.contains(&n), "{n}: nie über MCP");
+            assert!(!agent_switch(n));
+        }
+        assert_eq!(table("--safe-mode").1, Effect::DisablesHooks);
+        // Wertoptionen nehmen laut Tabelle Werte; was Rechte erweitert, steht in RISKY.
+        for f in ["--add-dir", "--allowed-tools", "--disallowed-tools", "--mcp-config", "--append-system-prompt", "--fallback-model", "--max-budget-usd", "--autocompact"] {
+            assert_ne!(table(f).0, Arity::None, "{f}");
+            let name = f.trim_start_matches("--").replace('-', "_");
+            assert_eq!(table(f).1 == Effect::Widens, RISKY.contains(&name.as_str()), "{f}");
+            assert!(switch_flag(f.trim_start_matches("--")).is_none(), "{f} ist kein Schalter");
+        }
+        // Jedes Flag, das in einer Zeile auftauchen kann, steht in der Tabelle (mit Werten nur als Wertoption).
+        let (d, dir, file) = temp_dir("table");
+        let all = ClaudeOpts {
+            extra: ExtraOpts {
+                flags: SWITCHES.iter().chain(USER_SWITCHES.iter()).map(|(n, _)| n.to_string()).filter(|n| n != "no-chrome").collect(),
+                add_dirs: vec![dir],
+                allowed_tools: "Read".into(),
+                disallowed_tools: "WebFetch".into(),
+                mcp_config: file,
+                append_system_prompt: "x".into(),
+                fallback_model: "sonnet".into(),
+                max_budget_usd: "1".into(),
+                autocompact: "auto".into(),
+            },
+            ..Default::default()
+        };
+        let line = all.args_for(Kind::Cmd, PathStyle::Native);
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        for (i, t) in toks.iter().enumerate().filter(|(_, t)| t.starts_with("--")) {
+            let (arity, _) = table(t);
+            let next_is_value = toks.get(i + 1).is_some_and(|n| !n.starts_with("--"));
+            assert_eq!(arity != Arity::None, next_is_value, "{t} in {line}");
+        }
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
@@ -916,24 +1159,24 @@ mod tests {
     }
 
     #[test]
-    fn mcp_accepts_every_switch() {
+    fn mcp_accepts_every_agent_switch() {
         for (n, f) in SWITCHES {
             assert_eq!(ClaudeOpts::from_mcp(&json!({"claude_flags": [n]})).unwrap().extra.flags, [n], "{n}");
             assert_eq!(ClaudeOpts::from_mcp(&json!({"claude_flags": [f]})).unwrap().extra.flags, [n], "mit --: {f}");
         }
         let o = ClaudeOpts::from_mcp(&json!({"claude_flags": [" IDE ", "chrome", "ide", "--verbose"]})).unwrap();
-        assert_eq!(o.extra.flags, ["ide", "chrome", "verbose"], "getrimmt, klein, ohne Doppelte");
+        assert_eq!(o.extra.flags, ["ide", "chrome", "verbose"], "getrimmt, klein, Doppelte zählen einmal");
         assert_eq!(o.extra.sanitized().flags, ["chrome", "ide", "verbose"], "feste Reihenfolge");
     }
 
     #[test]
     fn mcp_refuses_forbidden_flags() {
-        // Rechte/Zugriffe, Ausgabe/Konversation (steuert Paneldeck), Fernsteuerung, Wertoptionen – mit eigener Meldung.
+        // Rechte/Zugriffe, Hooks, Ausgabe/Konversation (steuert Paneldeck), Fernsteuerung, Wertoptionen – eigene Meldung.
         for f in [
             "add-dir", "--add-dir", "allowed-tools", "--allowedTools", "disallowed-tools", "tools", "mcp-config", "strict-mcp-config", "plugin-dir", "settings",
             "agents", "permission-prompt-tool", "print", "-p", "output-format", "resume", "session-id", "remote-control", "teleport", "cloud",
             "dangerously-skip-permissions", "--dangerously-skip-permissions", "allow-dangerously-skip-permissions", "--add-dir=C:\\", "append-system-prompt",
-            "fallback-model", "max-budget-usd", "continue",
+            "fallback-model", "max-budget-usd", "continue", "safe-mode", "--safe-mode", "autocompact", "--autocompact=auto",
         ] {
             let (de, en) = ClaudeOpts::from_mcp(&json!({"claude_flags": [f]})).unwrap_err();
             assert!(en.contains("never allowed via MCP") && de.contains("nie erlaubt"), "{f}: {en}");
@@ -967,6 +1210,10 @@ mod tests {
             assert!(ClaudeOpts::from_mcp(&json!({ k: null })).is_ok(), "null zählt als nicht angegeben: {k}");
         }
         assert!(ClaudeOpts::from_mcp(&json!({"add_dir": ["C:\\"]})).is_err());
+        // Allgemeine Namen, die schon vorher unbeachtet blieben, bleiben es (kein neuer Fehler).
+        for k in ["args", "tools", "settings", "resume", "session_id", "output_format", "agents", "claude_args"] {
+            assert!(ClaudeOpts::from_mcp(&json!({ k: "x" })).unwrap().is_empty(), "{k}");
+        }
     }
 
     #[test]
@@ -983,7 +1230,7 @@ mod tests {
     fn risky_defaults_never_reach_agent_sessions() {
         let defaults = ClaudeOpts {
             extra: ExtraOpts {
-                flags: vec!["verbose".into(), "chrome".into()],
+                flags: vec!["verbose".into(), "chrome".into(), "safe-mode".into()],
                 add_dirs: vec!["C:\\work".into()],
                 allowed_tools: "Bash(git:*) Edit".into(),
                 disallowed_tools: "WebFetch".into(),
@@ -991,26 +1238,45 @@ mod tests {
                 append_system_prompt: "Be brief.".into(),
                 fallback_model: "sonnet".into(),
                 max_budget_usd: "5".into(),
+                autocompact: "auto".into(),
             },
             ..Default::default()
         };
         let o = ClaudeOpts::default().for_agent(&defaults);
         assert!(o.extra.add_dirs.is_empty() && o.extra.allowed_tools.is_empty() && o.extra.mcp_config.is_empty(), "{o:?}");
         assert!(!o.extra.has_risky());
-        // Einschränkendes und Harmloses aus den Standards gilt weiter; Schalter des Nutzers auch.
+        // Einschränkendes und Harmloses aus den Standards gilt weiter; Agenten-Schalter des Nutzers auch, safe-mode nie.
         assert_eq!(o.extra.disallowed_tools, "WebFetch");
-        assert_eq!((o.extra.append_system_prompt.as_str(), o.extra.fallback_model.as_str(), o.extra.max_budget_usd.as_str()), ("Be brief.", "sonnet", "5"));
+        assert_eq!((o.extra.append_system_prompt.as_str(), o.extra.fallback_model.as_str(), o.extra.max_budget_usd.as_str(), o.extra.autocompact.as_str()), ("Be brief.", "sonnet", "5", "auto"));
         assert_eq!(o.extra.flags, ["chrome", "verbose"]);
-        // Schalter des Agenten kommen dazu; bei chrome/no-chrome entscheidet der Agent.
+        // Schalter des Agenten kommen dazu; bei chrome/no-chrome entscheidet sonst der Agent.
         let o = with_flags(&["no-chrome", "ide"]).for_agent(&defaults);
         assert_eq!(o.extra.flags, ["no-chrome", "ide", "verbose"]);
-        // Selbst wenn eine Angabe (nie aus from_mcp) Rechte erweiternde Werte trüge: weg.
+        // Selbst wenn eine Angabe (nie aus from_mcp) Rechte erweiternde Werte oder safe-mode trüge: weg.
         let o = defaults.for_agent(&ClaudeOpts::default());
         assert!(o.extra.add_dirs.is_empty() && o.extra.allowed_tools.is_empty() && o.extra.mcp_config.is_empty());
-        let line = o.args_for(Kind::Pwsh, "powershell");
-        assert!(!line.contains("--add-dir") && !line.contains("--allowed-tools") && !line.contains("--mcp-config"), "{line}");
+        assert!(!o.extra.flags.iter().any(|f| f == "safe-mode"));
+        let line = o.args_for(Kind::Pwsh, PathStyle::Native);
+        assert!(!line.contains("--add-dir") && !line.contains("--allowed-tools") && !line.contains("--mcp-config") && !line.contains("--safe-mode"), "{line}");
         // Für Sitzungen des Nutzers (Kontextmenü, Vorlagen) gelten die Standards vollständig.
-        assert_eq!(resolve_new(None, false, &defaults, "").0.extra.allowed_tools, "Bash(git:*) Edit");
+        let user = resolve_new(None, false, &defaults, "").0;
+        assert_eq!(user.extra.allowed_tools, "Bash(git:*) Edit");
+        assert!(user.extra.flags.iter().any(|f| f == "safe-mode"));
+    }
+
+    #[test]
+    fn users_no_chrome_wins_over_agents_chrome() {
+        let defaults = with_flags(&["no-chrome", "verbose"]);
+        let agent = ClaudeOpts::from_mcp(&json!({"claude_flags": ["chrome", "ide"]})).unwrap();
+        let (de, en) = agent.agent_conflict(&defaults).unwrap_err();
+        assert!(en.contains("turned Chrome off") && de.contains("ausgeschaltet"));
+        // Auch ohne die Prüfung: chrome des Agenten wird nicht übernommen.
+        assert_eq!(agent.for_agent(&defaults).extra.flags, ["no-chrome", "ide", "verbose"]);
+        // Umgekehrt (Nutzer chrome, Agent no-chrome) darf der Agent ausschalten.
+        let agent = with_flags(&["no-chrome"]);
+        assert!(agent.agent_conflict(&with_flags(&["chrome"])).is_ok());
+        assert_eq!(agent.for_agent(&with_flags(&["chrome"])).extra.flags, ["no-chrome"]);
+        assert!(with_flags(&["ide"]).agent_conflict(&defaults).is_ok());
     }
 
     #[test]
@@ -1026,11 +1292,20 @@ mod tests {
         // Nur einzelne Felder; bypassPermissions (Wahl des Nutzers) wird übernommen.
         assert_eq!(ClaudeOpts { permission_mode: BYPASS.into(), ..Default::default() }.args(Kind::Cmd), " --permission-mode bypassPermissions");
         // Schalter: feste Flags in fester Reihenfolge, ungequotet (keine Werte).
-        let s = with_flags(&["verbose", "chrome", "ide"]);
+        let s = with_flags(&["verbose", "chrome", "ide", "safe-mode"]);
         for k in [Kind::Pwsh, Kind::Posix, Kind::Cmd] {
-            assert_eq!(s.args(k), " --chrome --ide --verbose", "{k:?}");
-            assert_eq!(s.args_for(k, "x"), " --chrome --ide --verbose", "{k:?}");
+            assert_eq!(s.args(k), " --chrome --ide --verbose --safe-mode", "{k:?}");
+            assert_eq!(s.args_for(k, PathStyle::Native), " --chrome --ide --verbose --safe-mode", "{k:?}");
         }
+    }
+
+    #[test]
+    fn legacy_rest_comes_before_variadic_options() {
+        let (d, dir, _) = temp_dir("order");
+        let o = ClaudeOpts { model: "opus".into(), extra: ExtraOpts { add_dirs: vec![dir.clone()], disallowed_tools: "WebFetch".into(), ..Default::default() }, ..Default::default() };
+        let l = o.launch(Kind::Pwsh, PathStyle::Native, "--x val");
+        assert_eq!(l.line, format!(" --model 'opus' --x 'val' --add-dir '{dir}' --disallowed-tools 'WebFetch'"));
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
@@ -1038,7 +1313,7 @@ mod tests {
         // Direkt gesetzte (nicht über Deserialize geprüfte) Werte kommen nie ungeprüft in die Zeile.
         let mut o = four("x' ; calc; '", "ultra", "ask", "$(id)");
         o.extra = ExtraOpts {
-            flags: vec!["add-dir".into(), "dangerously-skip-permissions".into(), "chrome; calc".into()],
+            flags: vec!["add-dir".into(), "dangerously-skip-permissions".into(), "chrome; calc".into(), "autocompact".into()],
             add_dirs: vec!["$(calc)".into(), "\\\\server\\share".into()],
             allowed_tools: "Bash(x)'; calc; '".into(),
             disallowed_tools: "\"a\"".into(),
@@ -1046,20 +1321,17 @@ mod tests {
             append_system_prompt: "a\nb".into(),
             fallback_model: "a b".into(),
             max_budget_usd: "1e3".into(),
+            autocompact: "auto; calc".into(),
         };
         for k in [Kind::Pwsh, Kind::Posix, Kind::Cmd] {
-            assert_eq!(o.args_for(k, "powershell"), "", "{k:?}");
+            assert_eq!(o.args_for(k, PathStyle::Native), "", "{k:?}");
         }
     }
 
     #[test]
     fn switches_conflict_and_order() {
         assert_eq!(with_flags(&["chrome", "no-chrome", "ide"]).sanitized(false).extra.flags, ["ide"]);
-        assert_eq!(with_flags(&["brief", "brief", "nope"]).sanitized(false).extra.flags, ["brief"]);
-        for (n, f) in SWITCHES {
-            assert_eq!(f, format!("--{n}"));
-            assert!(!NEVER_VIA_MCP.contains(&n), "{n}");
-        }
+        assert_eq!(with_flags(&["brief", "brief", "nope", "autocompact"]).sanitized(false).extra.flags, ["brief"]);
     }
 
     #[test]
@@ -1111,8 +1383,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
     }
 
+    /// Eine Junction (ohne Adminrechte anlegbar) auf eine Netzwerkfreigabe wird erkannt, ohne ihr zu folgen; eine auf
+    /// einen lokalen Ordner ist in Ordnung. Angelegt mit `mklink /J` (cmd), das das Ziel nicht prüft.
+    #[cfg(windows)]
     #[test]
-    fn tools_text_budget() {
+    fn links_to_network_shares_are_never_followed() {
+        let (d, dir, _) = temp_dir("junction");
+        let mk_kind = |kind: &str, link: &str, target: &str| std::process::Command::new("cmd").args(["/C", "mklink", kind, link, target]).output().map(|o| o.status.success()).unwrap_or(false);
+        // Junction (lokal) bzw. – für eine Freigabe, falls Symlinks erlaubt sind (Entwicklermodus) – ein Ordner-Symlink.
+        let mk = |link: &str, target: &str| mk_kind("/J", link, target) || mk_kind("/D", link, target);
+        let local = format!("{dir}\\to-local");
+        let target = format!("{dir}\\target");
+        std::fs::create_dir_all(&target).unwrap();
+        if !mk(&local, &target) {
+            eprintln!("mklink /J nicht verfügbar – übersprungen");
+            let _ = std::fs::remove_dir_all(d);
+            return;
+        }
+        assert_eq!(check_path(&local, true), Ok(()));
+        assert_eq!(check_path(&format!("{local}\\"), true), Ok(()));
+        // Ziel auf einer Freigabe (der Rechner selbst über einen ungültigen Freigabenamen – wird nie aufgerufen).
+        let net = format!("{dir}\\to-net");
+        if mk(&net, "\\\\127.0.0.1\\pd-flags-never-touched$\\x") {
+            let t0 = std::time::Instant::now();
+            assert_eq!(check_path(&net, true), Err(PathIssue::Network));
+            assert_eq!(check_path(&format!("{net}\\sub"), true), Err(PathIssue::Network), "auch als Zwischenteil");
+            assert!(t0.elapsed() < std::time::Duration::from_secs(2), "kein Netzwerkzugriff (sonst Wartezeit)");
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn tools_text_budget_autocompact() {
         for ok in ["Bash(git log:*) Read", "Edit,Write", "mcp__github__*", "WebFetch(domain:example.com)", "Read(~/.zshrc)", "Edit(/src/**/*.ts)", "Bash(npm run test:*)"] {
             assert!(valid_tools(ok), "{ok}");
         }
@@ -1124,7 +1426,7 @@ mod tests {
             assert!(valid_text(ok), "{ok}");
         }
         let long_text = "a".repeat(MAX_TEXT_LEN + 1);
-        for bad in ["", "-x", "two\nlines", "a\rb", "tab\tx", "a\"b", "50%", "a&b", "a|b", "a<b", "a>b", "a^b", "wow!", "ends\\", long_text.as_str()] {
+        for bad in ["", "-x", "two\nlines", "a\rb", "tab\tx", "a\"b", "50%", "a&b", "a|b", "a<b", "a>b", "a^b", "wow!", "ends\\", "a\\b", "it\\'s", long_text.as_str()] {
             assert!(!valid_text(bad), "{bad:?}");
         }
         for ok in ["1", "5", "0.5", "12.25", "999999.99"] {
@@ -1133,6 +1435,31 @@ mod tests {
         for bad in ["", "0", "0.00", "-1", "1.", ".5", "1.234", "1e3", "1,5", "1234567", " 1", "NaN", "inf", "0x10"] {
             assert!(!valid_budget(bad), "{bad:?}");
         }
+        for ok in ["auto", "100000", "200k", "1"] {
+            assert!(valid_autocompact(ok), "{ok}");
+        }
+        for bad in ["", "Auto", "0", "0k", "k", "1kk", "1.5k", "-5", "1234567890", "auto;calc", " auto"] {
+            assert!(!valid_autocompact(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn path_style_follows_the_program() {
+        if cfg!(windows) {
+            assert_eq!(PathStyle::for_shell("wsl:Ubuntu", "C:\\Windows\\System32\\wsl.exe", Kind::Posix), PathStyle::Wsl);
+            assert_eq!(PathStyle::for_shell("custom:3", "C:\\Windows\\System32\\wsl.exe", Kind::Posix), PathStyle::Wsl, "eigenes Profil mit wsl.exe");
+            assert_eq!(PathStyle::for_shell("custom:4", "wsl", Kind::Posix), PathStyle::Wsl);
+            assert_eq!(PathStyle::for_shell("custom:5", "C:/Windows/System32/bash.exe", Kind::Posix), PathStyle::Wsl, "bash.exe aus System32 ist WSL");
+            assert_eq!(PathStyle::for_shell("gitbash", "C:\\Program Files\\Git\\bin\\bash.exe", Kind::Posix), PathStyle::Slash);
+            assert_eq!(PathStyle::for_shell("custom:6", "C:\\Program Files\\Git\\bin\\bash.exe", Kind::Posix), PathStyle::Slash);
+            assert_eq!(PathStyle::for_shell("powershell", "powershell.exe", Kind::Pwsh), PathStyle::Native);
+            assert_eq!(PathStyle::for_shell("cmd", "cmd.exe", Kind::Cmd), PathStyle::Native);
+        } else {
+            assert_eq!(PathStyle::for_shell("bash", "/bin/bash", Kind::Posix), PathStyle::Native);
+        }
+        assert_eq!(PathStyle::Slash.claude_program(), "MSYS2_ARG_CONV_EXCL='*' claude");
+        assert_eq!(PathStyle::Native.claude_program(), "claude");
+        assert_eq!(PathStyle::Wsl.claude_program(), "claude");
     }
 
     #[test]
@@ -1148,48 +1475,58 @@ mod tests {
                 append_system_prompt: "It's $HOME `x` (y)".into(),
                 fallback_model: "sonnet".into(),
                 max_budget_usd: "1e3".into(),
+                autocompact: "200k".into(),
             },
             ..Default::default()
         };
-        let pw = o.args_for(Kind::Pwsh, "powershell");
+        let pw = o.launch(Kind::Pwsh, PathStyle::Native, "");
         assert_eq!(
-            pw,
+            pw.line,
             format!(
-                " --add-dir '{dir}' --allowed-tools 'Bash(git log:*) Read' --disallowed-tools 'WebFetch' --mcp-config '{file}' --append-system-prompt 'It''s $HOME `x` (y)' --fallback-model 'sonnet' --ide"
+                " --ide --add-dir '{dir}' --allowed-tools 'Bash(git log:*) Read' --disallowed-tools 'WebFetch' --mcp-config '{file}' --append-system-prompt 'It''s $HOME `x` (y)' --fallback-model 'sonnet' --autocompact '200k'"
             ),
             "fehlender Ordner und ungültiges Budget fallen weg"
         );
-        let cmd = o.args_for(Kind::Cmd, "cmd");
+        assert_eq!(pw.dropped, [format!("{dir}{}missing", std::path::MAIN_SEPARATOR)], "weggelassene Pfade werden gemeldet");
+        assert_eq!(pw.applied.extra.add_dirs, [dir.clone()], "nur, was wirklich gesetzt ist");
+        let cmd = o.args_for(Kind::Cmd, PathStyle::Native);
         assert_eq!(
             cmd,
-            format!(" --add-dir \"{dir}\" --allowed-tools \"Bash(git log:*) Read\" --disallowed-tools \"WebFetch\" --mcp-config \"{file}\" --append-system-prompt \"It's $HOME `x` (y)\" --fallback-model sonnet --ide")
+            format!(" --ide --add-dir \"{dir}\" --allowed-tools \"Bash(git log:*) Read\" --disallowed-tools \"WebFetch\" --mcp-config \"{file}\" --append-system-prompt \"It's $HOME `x` (y)\" --fallback-model sonnet --autocompact 200k")
         );
-        let posix = o.args_for(Kind::Posix, "bash");
+        let posix = o.args_for(Kind::Posix, PathStyle::Native);
         assert!(posix.contains("--append-system-prompt 'It'\\''s $HOME `x` (y)'"), "{posix}");
         #[cfg(windows)]
         {
             let fwd = dir.replace('\\', "/");
-            assert!(posix.starts_with(&format!(" --add-dir '{fwd}'")), "Git Bash: Schrägstriche: {posix}");
+            let gb = o.args_for(Kind::Posix, PathStyle::Slash);
+            assert!(gb.contains(&format!(" --add-dir '{fwd}'")), "Git Bash: Schrägstriche: {gb}");
             // WSL: /mnt/<laufwerk>/…
-            let wsl = o.args_for(Kind::Posix, "wsl:Ubuntu");
+            let wsl = o.args_for(Kind::Posix, PathStyle::Wsl);
             let drive = dir.as_bytes()[0].to_ascii_lowercase() as char;
-            assert!(wsl.starts_with(&format!(" --add-dir '/mnt/{drive}/")), "{wsl}");
+            assert!(wsl.contains(&format!(" --add-dir '/mnt/{drive}/")), "{wsl}");
             assert!(wsl.contains(&format!("--mcp-config '/mnt/{drive}/")), "{wsl}");
         }
+        // Fehlende MCP-Konfiguration: weggelassen und gemeldet.
+        let m = ClaudeOpts { extra: ExtraOpts { mcp_config: format!("{dir}{}nope.json", std::path::MAIN_SEPARATOR), ..Default::default() }, ..Default::default() };
+        let l = m.launch(Kind::Pwsh, PathStyle::Native, "");
+        assert_eq!((l.line.as_str(), l.dropped.len()), ("", 1));
+        assert!(l.applied.extra.mcp_config.is_empty() && l.applied.to_json()["claude_user_options"] == json!([]));
         // Budget gültig: als Wert.
         let b = ClaudeOpts { extra: ExtraOpts { max_budget_usd: "2.50".into(), ..Default::default() }, ..Default::default() };
-        assert_eq!(b.args_for(Kind::Pwsh, "powershell"), " --max-budget-usd '2.50'");
-        assert_eq!(b.args_for(Kind::Cmd, "cmd"), " --max-budget-usd 2.50");
+        assert_eq!(b.args_for(Kind::Pwsh, PathStyle::Native), " --max-budget-usd '2.50'");
+        assert_eq!(b.args_for(Kind::Cmd, PathStyle::Native), " --max-budget-usd 2.50");
         let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
     fn trailing_separators_never_escape_the_quote() {
-        assert_eq!(shell_path("powershell", Kind::Pwsh, "C:\\x\\"), "C:\\x");
-        assert_eq!(shell_path("cmd", Kind::Cmd, "C:\\"), "C:/");
-        assert_eq!(shell_path("wsl:Ubuntu", Kind::Posix, "C:\\"), "/mnt/c");
-        assert_eq!(shell_path("wsl:Ubuntu", Kind::Posix, "D:\\a b\\"), "/mnt/d/a b");
-        assert_eq!(shell_path("bash", Kind::Posix, "/"), "/");
+        assert_eq!(shell_path(PathStyle::Native, "C:\\x\\"), "C:\\x");
+        assert_eq!(shell_path(PathStyle::Native, "C:\\"), "C:/");
+        assert_eq!(shell_path(PathStyle::Wsl, "C:\\"), "/mnt/c");
+        assert_eq!(shell_path(PathStyle::Wsl, "D:\\a b\\"), "/mnt/d/a b");
+        assert_eq!(shell_path(PathStyle::Slash, "C:\\a\\b\\"), "C:/a/b");
+        assert_eq!(shell_path(PathStyle::Native, "/"), "/");
     }
 
     #[test]
@@ -1208,6 +1545,7 @@ mod tests {
             "!x!",
             "^&calc",
             "C:\\x\" --dangerously-skip-permissions \"",
+            "x\\' ; calc",
         ];
         for h in hostile {
             let o = ClaudeOpts {
@@ -1220,14 +1558,15 @@ mod tests {
                     append_system_prompt: h.into(),
                     fallback_model: h.into(),
                     max_budget_usd: h.into(),
+                    autocompact: h.into(),
                 },
                 ..Default::default()
             };
-            // Pfade, Schalter, Modell und Budget: immer verworfen (nicht existierend bzw. ungültig).
+            // Pfade, Schalter, Modell, Budget, autocompact: immer verworfen (nicht existierend bzw. ungültig).
             let s = o.sanitized(false).extra;
-            assert!(s.flags.is_empty() && s.fallback_model.is_empty() && s.max_budget_usd.is_empty(), "{h:?}: {s:?}");
+            assert!(s.flags.is_empty() && s.fallback_model.is_empty() && s.max_budget_usd.is_empty() && s.autocompact.is_empty(), "{h:?}: {s:?}");
             for k in [Kind::Pwsh, Kind::Posix, Kind::Cmd] {
-                let line = o.args_for(k, "powershell");
+                let line = o.args_for(k, PathStyle::Native);
                 assert!(!line.contains("--add-dir") && !line.contains("--mcp-config") && !line.contains(" --dangerously"), "{h:?} {k:?}: {line}");
                 assert!(!line.contains(['\r', '\n', '%', '!', '^', '&', '|', '<', '>']), "{h:?} {k:?}: {line}");
                 // Was übrig bleibt, ist genau der geprüfte Text als EIN wörtliches Argument.
@@ -1243,11 +1582,11 @@ mod tests {
         }
         // `$(calc)`/`` `calc` `` sind als Text erlaubt, aber immer wörtlich gequotet (PowerShell/POSIX: einfache Quotes).
         let t = ClaudeOpts { extra: ExtraOpts { append_system_prompt: "$(calc) `calc`".into(), ..Default::default() }, ..Default::default() };
-        assert_eq!(t.args_for(Kind::Pwsh, "powershell"), " --append-system-prompt '$(calc) `calc`'");
-        assert_eq!(t.args_for(Kind::Posix, "bash"), " --append-system-prompt '$(calc) `calc`'");
+        assert_eq!(t.args_for(Kind::Pwsh, PathStyle::Native), " --append-system-prompt '$(calc) `calc`'");
+        assert_eq!(t.args_for(Kind::Posix, PathStyle::Native), " --append-system-prompt '$(calc) `calc`'");
         // PowerShell: typografische Apostrophe werden verdoppelt.
         let t = ClaudeOpts { extra: ExtraOpts { append_system_prompt: "it\u{2019}s; calc".into(), ..Default::default() }, ..Default::default() };
-        assert_eq!(t.args_for(Kind::Pwsh, "powershell"), " --append-system-prompt 'it\u{2019}\u{2019}s; calc'");
+        assert_eq!(t.args_for(Kind::Pwsh, PathStyle::Native), " --append-system-prompt 'it\u{2019}\u{2019}s; calc'");
     }
 
     #[test]
@@ -1269,7 +1608,7 @@ mod tests {
         let o = ClaudeOpts {
             model: "opus".into(),
             extra: ExtraOpts {
-                flags: vec!["chrome".into(), "verbose".into()],
+                flags: vec!["chrome".into(), "verbose".into(), "safe-mode".into()],
                 add_dirs: vec!["C:\\a".into(), "C:\\b c".into()],
                 allowed_tools: "Read".into(),
                 disallowed_tools: "WebFetch".into(),
@@ -1277,29 +1616,32 @@ mod tests {
                 append_system_prompt: "Be brief.".into(),
                 fallback_model: "sonnet".into(),
                 max_budget_usd: "2.5".into(),
+                autocompact: "200k".into(),
             },
             ..Default::default()
         };
         let j = serde_json::to_value(&o).unwrap();
-        assert_eq!(j["flags"], json!(["chrome", "verbose"]));
+        assert_eq!(j["flags"], json!(["chrome", "verbose", "safe-mode"]));
         assert_eq!(j["add_dirs"], json!(["C:\\a", "C:\\b c"]));
         assert_eq!(j["max_budget_usd"], "2.5");
+        assert_eq!(j["autocompact"], "200k");
         assert!(j.get("extra").is_none(), "flach auf derselben Ebene");
         if cfg!(windows) {
             let back: ClaudeOpts = serde_json::from_value(j).unwrap();
             assert_eq!(back, o);
         }
-        // Tolerant: falsche Typen, ungültige Werte und unbekannte Schalter fallen still weg; Budget auch als Zahl.
+        // Tolerant: falsche Typen, ungültige Werte und unbekannte Schalter fallen still weg; Zahlen auch als Zahl.
         let back: ClaudeOpts = serde_json::from_value(json!({
-            "flags": ["chrome", "add-dir", 5, "dangerously-skip-permissions"],
+            "flags": ["chrome", "add-dir", 5, "dangerously-skip-permissions", "autocompact"],
             "add_dirs": "C:\\x",
             "allowed_tools": ["Read"],
             "append_system_prompt": "a\nb",
             "fallback_model": "a b",
-            "max_budget_usd": 3
+            "max_budget_usd": 3,
+            "autocompact": 100000
         }))
         .unwrap();
-        assert_eq!(back.extra, ExtraOpts { flags: vec!["chrome".into()], max_budget_usd: "3".into(), ..Default::default() });
+        assert_eq!(back.extra, ExtraOpts { flags: vec!["chrome".into()], max_budget_usd: "3".into(), autocompact: "100000".into(), ..Default::default() });
         let back: ClaudeOpts = serde_json::from_value(json!({"max_budget_usd": 2.5})).unwrap();
         assert_eq!(back.extra.max_budget_usd, "2.5");
     }
@@ -1312,12 +1654,17 @@ mod tests {
         let (o, rest) = ClaudeOpts::split_legacy("--model --ok");
         assert!(o.is_empty());
         assert_eq!(rest, "--model --ok");
+        // --autocompact nimmt seinen Wert mit; ohne gültigen Wert bleibt es in der freien Zeile.
+        let (o, rest) = ClaudeOpts::split_legacy("--autocompact 200k --verbose");
+        assert_eq!((o.extra.autocompact.as_str(), rest.as_str()), ("200k", ""));
+        let (o, rest) = ClaudeOpts::split_legacy("--autocompact --verbose");
+        assert_eq!((o.extra.autocompact.as_str(), rest.as_str(), o.extra.flags.clone()), ("", "--autocompact", vec!["verbose".to_string()]));
         // Hier ungültige Werte bleiben in der freien Zeile (alte Sitzungen verlieren nichts).
         let (o, rest) = ClaudeOpts::split_legacy("--model opus[1m] --permission-mode bypassPermissions");
         assert_eq!((o.model.as_str(), o.permission_mode.as_str(), rest.as_str()), ("", BYPASS, "--model opus[1m]"));
         let mut o = four("opus", "max", "plan", "a");
-        o.extra.flags = vec!["chrome".into(), "ide".into()];
-        assert_eq!(o.to_legacy(), "--model opus --effort max --permission-mode plan --agent a --chrome --ide");
+        o.extra.flags = vec!["chrome".into(), "ide".into(), "safe-mode".into()];
+        assert_eq!(o.to_legacy(), "--model opus --effort max --permission-mode plan --agent a --chrome --ide --safe-mode");
         assert_eq!(ClaudeOpts::split_legacy(&o.to_legacy()), (o.clone(), String::new()));
         // Wertoptionen kommen nicht in die Vorlagenzeile.
         o.extra.append_system_prompt = "secret".into();
