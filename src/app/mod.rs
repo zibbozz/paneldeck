@@ -1699,63 +1699,43 @@ impl App {
     }
 
     /// Sitzung zeigen und fokussieren (Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`, Strg+Tab …).
-    /// Steht sie nicht im Layout, gilt:
+    /// Steht sie nicht im Layout, gilt (`layout::show`):
     /// 1. leerer Hub → sie wird der einzige Bereich;
-    /// 2. minimiert und ihr Platz ist noch da → genau dort wieder einfügen (neben denselben Geschwistern, gleiche Richtung,
-    ///    Seite und Größe – `Node::insert_at_slot`);
-    /// 3. minimiert, aber die Geschwister sind weg → den fokussierten Bereich rechts teilen;
-    /// 4. sonst (nur weggewechselt, nie minimiert) → den fokussierten Bereich ersetzen, wie bisher.
+    /// 2. minimiert → sie öffnet sich allein und ersetzt das ganze Layout dieses Fensters/Projekts; die bisher sichtbaren
+    ///    Bereiche werden zu minimierten Sitzungen (sie laufen weiter, ein Klick holt jede genauso zurück);
+    /// 3. sonst (nur weggewechselt, nie minimiert) → den fokussierten Bereich ersetzen, wie bisher.
+    ///
+    /// Eine Sitzung eines anderen Fensters kommt hier nicht an (`route_target` reicht die Aktion dorthin weiter, dort gilt
+    /// dieselbe Regel); bei einer eines anderen Projekts wechselt `Action::Activate` vorher das Projekt.
     fn activate(&mut self, id: u64) {
         let Some(e) = self.entries.get_mut(&id) else { return };
         e.attention = false;
-        let minimized = std::mem::take(&mut e.meta.minimized);
-        let slot = e.meta.slot.take();
         // Eine Sitzung darf nie gleichzeitig abgedockt und im Hauptlayout sein (zwei Größen kämpften um die PTY).
         self.detached.retain(|d| *d != id);
-        crate::layout::show(&mut self.layout, id, self.focused, minimized, slot.as_ref());
+        show_session(&mut self.layout, &mut self.entries, id, self.focused);
         self.focused = id;
         self.want_focus = Some(id);
     }
 
-    /// Bereich minimieren: die Sitzung verlässt das Layout (ihr Platz wird gemerkt), läuft aber weiter und bleibt in der
-    /// Seitenleiste (abgeblendet). Auch der letzte Bereich darf gehen – dann bleibt der leere Hub. Ein abgedocktes Fenster
-    /// schließt sich dabei, ohne die Sitzung wieder anzudocken.
+    /// Bereich minimieren: die Sitzung verlässt das Layout, läuft aber weiter und bleibt in der Seitenleiste (abgeblendet).
+    /// Ihr Platz wird nicht gemerkt – zurückgeholt öffnet sie sich allein (`activate`). Auch der letzte Bereich darf gehen –
+    /// dann bleibt der leere Hub. Ein abgedocktes Fenster schließt sich dabei, ohne die Sitzung wieder anzudocken.
     fn minimize_pane(&mut self, id: u64) {
         if !self.entries.contains_key(&id) {
             return;
         }
-        let mut slot = None;
         if self.detached.contains(&id) {
             self.detached.retain(|d| *d != id);
         } else {
-            let Some((s, focus)) = crate::layout::minimize(&mut self.layout, id, self.focused) else { return }; // schon draußen
-            slot = s;
+            let Some(focus) = crate::layout::minimize(&mut self.layout, id, self.focused) else { return }; // schon draußen
             if focus != self.focused {
                 self.focused = focus;
                 self.want_focus = Some(focus);
             }
         }
-        self.reroute_slots(id, slot.as_ref());
         if let Some(e) = self.entries.get_mut(&id) {
             e.meta.minimized = true;
-            // Ohne Slot, wenn es der letzte Bereich war (oder er abgedockt war): beim Zurückholen gilt dann die
-            // Ausweichregel von `layout::show` (leerer Hub → einziger Bereich, sonst fokussierten Bereich teilen).
-            e.meta.slot = slot;
-        }
-    }
-
-    /// Bereich `gone` verlässt das Layout (minimiert, geschlossen, ausgeblendet, abgedockt): Plätze anderer minimierter
-    /// Sitzungen, die ihn als Geschwister nennen, zeigen danach auf das, was an seine Stelle rückt (seine eigenen
-    /// Geschwister) – so kommt z. B. bei H(1,2) → 1 minimieren → 2 teilen (2|3) → 2 minimieren die 1 neben die 3 zurück.
-    fn reroute_slots(&mut self, gone: u64, gone_slot: Option<&crate::layout::Slot>) {
-        let with = gone_slot.map(|s| s.sibling.clone()).unwrap_or_default();
-        for (id, e) in self.entries.iter_mut() {
-            if *id == gone {
-                continue;
-            }
-            if let Some(s) = e.meta.slot.as_mut() {
-                crate::layout::reroute_sibling(s, gone, &with);
-            }
+            e.meta.slot = None; // veralteter Platz aus 2.2.0 (deprecated): wird nie neu angelegt
         }
     }
 
@@ -1795,12 +1775,7 @@ impl App {
 
     fn hide_pane(&mut self, id: u64) {
         if let Some(l) = self.layout.take() {
-            let had = l.contains(id);
-            let (rest, slot) = l.remove_leaf_slot(id);
-            self.layout = rest;
-            if had {
-                self.reroute_slots(id, slot.as_ref());
-            }
+            self.layout = l.remove_leaf(id);
         }
         if self.focused == id {
             // Fokus nie auf einer Sitzung außerhalb des Layouts lassen (auch nicht, wenn nichts mehr übrig ist).
@@ -3495,6 +3470,32 @@ fn min_extent(node: &Node, dir: Dir) -> f32 {
     }
 }
 
+/// Kern von `App::activate`: Sitzung `id` nach `layout::show` ins Layout bringen. Eine minimierte öffnet sich allein; die
+/// Bereiche, die dabei das Layout verlassen, werden als minimiert markiert. Den veralteten `slot` (2.2.0) beider Seiten löschen.
+fn show_session(layout: &mut Option<Node>, entries: &mut BTreeMap<u64, Entry>, id: u64, focused: u64) {
+    let Some(e) = entries.get_mut(&id) else { return };
+    let minimized = std::mem::take(&mut e.meta.minimized);
+    e.meta.slot = None;
+    for gone in crate::layout::show(layout, id, focused, minimized) {
+        if let Some(e) = entries.get_mut(&gone) {
+            e.meta.minimized = true;
+            e.meta.slot = None;
+        }
+    }
+}
+
+/// Was im Layout steht, ist nicht minimiert – egal, wie es hineinkam (Ziehen, Ordner-Layout, Vorlage …). Läuft in jedem Bild
+/// (billig: nur die Blätter des gezeichneten Layouts).
+fn unminimize_shown(layout: Option<&Node>, entries: &mut BTreeMap<u64, Entry>) {
+    let Some(l) = layout else { return };
+    for id in l.leaf_ids() {
+        if let Some(e) = entries.get_mut(&id).filter(|e| e.meta.minimized || e.meta.slot.is_some()) {
+            e.meta.minimized = false;
+            e.meta.slot = None;
+        }
+    }
+}
+
 /// Pixel der ersten Seite einer Teilung der Länge `len` (ohne Trennlinie): Anteil `ratio` (begrenzt, NaN → Mitte), dabei
 /// Seite a mindestens `min_a`, Seite b mindestens `min_b`, solange `len` dafür reicht – sonst einfach nach Anteil.
 fn split_px(len: f32, ratio: f32, min_a: f32, min_b: f32) -> f32 {
@@ -4218,6 +4219,59 @@ mod pane_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sessions(ids: &[(u64, bool)]) -> BTreeMap<u64, Entry> {
+        ids.iter().map(|(id, min)| (*id, Entry::new(SessionMeta { id: *id, minimized: *min, ..SessionMeta::default() }))).collect()
+    }
+
+    fn minimized_ids(e: &BTreeMap<u64, Entry>) -> Vec<u64> {
+        e.iter().filter(|(_, e)| e.meta.minimized).map(|(id, _)| *id).collect()
+    }
+
+    #[test]
+    fn showing_a_minimized_session_minimizes_the_visible_panes() {
+        let h = |a: u64, b: u64| Node::Split { dir: Dir::Horizontal, ratio: 0.5, a: Box::new(Node::Leaf(a)), b: Box::new(Node::Leaf(b)) };
+        // 1 | 2 sichtbar, 3 minimiert (mit veraltetem `slot` aus 2.2.0)
+        let mut e = sessions(&[(1, false), (2, false), (3, true), (4, false)]);
+        e.get_mut(&3).unwrap().meta.slot = Some(serde_json::json!({"sibling": [1]}));
+        let mut l = Some(h(1, 2));
+        show_session(&mut l, &mut e, 3, 1);
+        assert_eq!(l, Some(Node::Leaf(3)), "allein");
+        assert_eq!(minimized_ids(&e), vec![1, 2], "die bisher sichtbaren sind minimiert");
+        assert!(e[&3].meta.slot.is_none(), "veralteter Platz gelöscht");
+        // nur weggewechselte Sitzung (4): ersetzt den fokussierten Bereich, minimiert nichts
+        show_session(&mut l, &mut e, 4, 3);
+        assert_eq!(l, Some(Node::Leaf(4)));
+        assert_eq!(minimized_ids(&e), vec![1, 2]);
+        // zurückholen tauscht: 1 allein, 4 minimiert
+        show_session(&mut l, &mut e, 1, 4);
+        assert_eq!(l, Some(Node::Leaf(1)));
+        assert_eq!(minimized_ids(&e), vec![2, 4]);
+        // schon sichtbar: nichts ändert sich
+        show_session(&mut l, &mut e, 1, 1);
+        assert_eq!(minimized_ids(&e), vec![2, 4]);
+        // leerer Hub: einziger Bereich, niemand minimiert
+        let mut none = None;
+        show_session(&mut none, &mut e, 2, 0);
+        assert_eq!(none, Some(Node::Leaf(2)));
+        assert_eq!(minimized_ids(&e), vec![4]);
+        // unbekannte Sitzung: nichts
+        show_session(&mut l, &mut e, 99, 1);
+        assert_eq!(l, Some(Node::Leaf(1)));
+    }
+
+    #[test]
+    fn panes_that_get_into_the_layout_otherwise_are_not_minimized() {
+        // z. B. per Ziehen oder Ordner-Layout ins Layout gekommen, ohne `activate`
+        let mut e = sessions(&[(1, true), (2, true), (3, true)]);
+        e.get_mut(&2).unwrap().meta.slot = Some(serde_json::json!(17));
+        let l = Node::Split { dir: Dir::Vertical, ratio: 0.5, a: Box::new(Node::Leaf(1)), b: Box::new(Node::Leaf(2)) };
+        unminimize_shown(Some(&l), &mut e);
+        assert_eq!(minimized_ids(&e), vec![3], "nur was nicht im Layout steht, bleibt minimiert");
+        assert!(e[&2].meta.slot.is_none());
+        unminimize_shown(None, &mut e);
+        assert_eq!(minimized_ids(&e), vec![3], "leerer Hub: nichts ändert sich");
+    }
 
     #[test]
     fn editor_readonly_survives_file_switch() {
