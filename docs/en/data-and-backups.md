@@ -67,7 +67,7 @@ Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the sessio
 - `settings.json` → `last_chat_model`: `{ "server": "<id>", "model": "<name>" }`, the last choice in the *New chat* dialog.
 - `settings.json` → `alt_screen_wheel`: `"arrows"` (default) or `"off"` – the setting *Mouse wheel in full-screen programs* (see [Mouse wheel](terminals.md#mouse-wheel)). Any other value counts as `"arrows"`.
 - `state.json` → per session `kind` (`"chat"`; missing = terminal) and `chat` (`{ "server": "<id>", "model": "<name>" }`). An older Paneldeck (2.1) opening this file shows chats as terminals and leaves `chats/*.json` alone.
-- `state.json` → per session `minimized` (`true` for a [minimized pane](terminals.md#panes-and-minimizing); missing = not minimized) and `slot` (where the pane stood: `sibling` = the session ids of its neighbouring part of the layout, `dir`, `before` = it was left/above, `ratio`). Layouts and split ratios are read leniently: unknown or duplicate sessions, empty splits and invalid ratios are repaired, and a broken layout no longer resets the whole file.
+- `state.json` → per session `minimized` (`true` for a [minimized pane](terminals.md#panes-and-minimizing); missing = not minimized) and `slot` (where a minimized pane goes back to – internal, its content may change; leave it alone or delete it). Layouts and split ratios are read leniently: unknown or duplicate sessions, empty splits and invalid ratios are repaired, and a broken layout no longer resets the whole file.
 - `mcp-log.jsonl` → optional `how` (`"chat"`) and `model` (the chat's model) on entries of tool calls made by a [chat](chat.md#tool-calls-and-approvals); missing for external agents.
 
 ## Backups
