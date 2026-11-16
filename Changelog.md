@@ -9,6 +9,15 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.3.0] - WIP
 
+### Added
+
+- Context menu "Reset agent chain" for sessions started from an agent chain; the session tooltip names the chain.
+
+### Security
+
+- Sessions started from an agent chain are now marked (#152): a terminal, Claude session or chat that an agent creates with `create_session` (or `paneldeck --open` from inside a session) inherits the creator's agent chain plus the creator, and a chain member that writes into another session (`send_text`, `send_keys`, `run_command`, `queue_prompt`, `send_chat_message`) passes the chain on. No agent – MCP bridge, Claude session or chat – may write into, rename, focus or close a session of its own chain (`forbidden`). Chains are kept in `state.json` (new optional field `agent_chain`), survive a restart and are reported by `whoami` and `list_sessions`. Agents started by the user behave as before, except that a session an agent creates can no longer write back into its creator.
+- The hub now identifies the calling process itself from the connection (TCP table and process tree) and ignores a process id supplied by the client; `PANELDECK_SESSION` is only a hint for WSL terminals. Best effort against a malicious agent with its own shell: processes started outside a session's process tree (e.g. scheduled tasks) count as external callers.
+
 ## [2.2.0] - 2026-11-16
 
 ### Added

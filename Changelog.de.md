@@ -9,6 +9,15 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.3.0] - WIP
 
+### Added
+
+- Kontextmenü „Agenten-Kette zurücksetzen“ für Sitzungen aus einer Agenten-Kette; der Tooltip der Sitzung nennt die Kette.
+
+### Security
+
+- Sitzungen aus einer Agenten-Kette sind jetzt markiert (#152): Ein Terminal, eine Claude-Sitzung oder ein Chat, die ein Agent mit `create_session` (oder `paneldeck --open` aus einer Sitzung heraus) anlegt, erbt die Agenten-Kette des Erstellers samt ihm, und ein Glied der Kette, das in eine andere Sitzung schreibt (`send_text`, `send_keys`, `run_command`, `queue_prompt`, `send_chat_message`), gibt die Kette weiter. Kein Agent – MCP-Brücke, Claude-Sitzung oder Chat – darf in eine Sitzung seiner Kette schreiben, sie umbenennen, anzeigen oder schließen (`forbidden`). Ketten stehen in `state.json` (neues optionales Feld `agent_chain`), überstehen einen Neustart und werden von `whoami` und `list_sessions` gemeldet. Vom Nutzer gestartete Agenten verhalten sich wie bisher, nur kann eine von einem Agenten angelegte Sitzung nicht mehr in ihren Ersteller zurückschreiben.
+- Der Hub ermittelt den aufrufenden Prozess jetzt selbst aus der Verbindung (TCP-Tabelle und Prozessbaum) und ignoriert eine vom Client angegebene Prozess-ID; `PANELDECK_SESSION` dient nur noch als Hinweis für WSL-Terminals. Gegen einen böswilligen Agenten mit eigener Shell nur nach bestem Bemühen: Prozesse, die außerhalb des Prozessbaums einer Sitzung gestartet werden (z. B. geplante Tasks), gelten als externe Aufrufer.
+
 ## [2.2.0] - 2026-11-16
 
 ### Added
