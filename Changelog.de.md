@@ -24,6 +24,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - `settings.json`: optionales Feld `wsl_recent` (zuletzt benutzte WSL-Ordner je Distribution, begrenzt). (#172)
 - Einstellung „Programme dürfen in die Zwischenablage kopieren (OSC 52)“ (Einstellungen → Terminal, standardmäßig an; Feld `osc52_copy` in `settings.json`). (#181)
 - Bearbeitbare Farbpalette (Einstellungen → Farben): standardmäßig eine gemeinsame Palette für den Terminal Hub (Farben von Sitzungen, Ordnern, Projekten, Profilen), die Tags der Todo-Liste und den Expertenmodus (Projekte, Typen, Status, Auswahlwerte, Diagramme), wahlweise je Bereich eine eigene (beim Umschalten bleiben beide erhalten). Farben hinzufügen, ändern (Farbwähler oder Hex), löschen und per Ziehen sortieren, optional benennen (im Tooltip, z. B. „Cooles Blau (#2288FF)“), gelöschte Vorgaben wiederherstellen. Jede Farbauswahl bietet zusätzlich „Eigene Farbe …“ für eine einmalige Farbe. Vorhandene Elemente behalten ihre Farbe; automatisch vergebene Farben bleiben wie bisher, bis du die Palette bearbeitest. Gespeichert in `settings.json` (neues optionales Feld `palette`; unveränderte Listen werden nicht geschrieben). (#173)
+- Weitere Claude-Startoptionen unter „Weitere Claude-Optionen“ im Dialog „Neue Sitzung“, in den Einstellungen der Sitzung (eine Änderung fragt „Jetzt neu laden?“) und als Standard unter Einstellungen → Claude: Schalter `--chrome`/`--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` und `--safe-mode` (mit Warnung); zusätzliche Ordner (`--add-dir`), erlaubte und verbotene Werkzeuge, eine MCP-Konfiguration, ein Zusatz zum System-Prompt, ein Ersatzmodell, ein Höchstbudget und Auto-Komprimierung. Optionen, die Zugriffe erweitern, zeigen eine Warnung; fehlende Ordner oder Dateien werden beim Start mit Hinweis weggelassen. (#182)
+- MCP: `create_session` nimmt `claude_flags` (nur Schalter); `list_sessions`, `whoami` und `create_session` melden `claude_flags` und `claude_user_options` (nur Namen, wie angewendet). (#182)
 
 ### Changed
 
@@ -32,6 +34,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Eine minimierte Sitzung zurückholen (Klick in der Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`) öffnet sie jetzt allein: Sie ersetzt das Layout des Fensters/Projekts, die bisher sichtbaren Bereiche werden zu minimierten Sitzungen und laufen weiter. Strg+Umschalt+W minimiert nur noch; der alte Platz in der Teilung wird nicht mehr gemerkt (#162).
 - Eine WSL-Sitzung ohne Startordner startet jetzt im Linux-Home (`~`) statt im Windows-Benutzerordner; eine wiederhergestellte WSL-Sitzung, deren gespeicherter Ordner nicht verwendbar ist, startet mit Hinweis in `~`. (#172)
 - MCP `create_session` lehnt Linux-Pfade für Windows-Shells ab, ebenso `\\wsl$`-Pfade einer anderen Distribution. (#172)
+- MCP `create_session` lehnt Wertoptionen, die es bisher still ignorierte (z. B. `add_dir`, `allowed_tools`, `mcp_config`, `append_system_prompt`, `safe_mode`), jetzt mit `bad_args` ab. (#182)
 
 ### Deprecated
 
@@ -51,6 +54,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - WSL-Startordner mit `"` oder `\` werden überall abgelehnt, damit über `wsl.exe --cd` keine Befehle eingeschleust werden können; Starts mit Administratorrechten maskieren jedes Argument korrekt. (#172)
 - MCP `create_session` lehnt Netzwerkpfade als `cwd` für Terminals und Chats ab, ohne auf sie zuzugreifen; `\\wsl$`-Pfade werden nicht mehr im UI-Thread geprüft. (#172)
 - OSC 52 nur zum Schreiben: Programme können die Zwischenablage nie lesen. Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB, höchstens alle 0,3 s; leere Texte leeren die Zwischenablage nie. Hinweis: Ein Agent mit Steuer-Zugriff (MCP) kann die fokussierte Sitzung ebenfalls etwas kopieren lassen. (#181)
+- Agenten (MCP) können nur Schalter ergänzen, die Rechte, Zugriffe und Hooks nicht berühren (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; chrome nicht, wenn du Chrome als Standard ausgeschaltet hast). Wertoptionen, Flags, die Rechte oder Zugriffe erweitern, Flags, die Hooks abschalten (`--safe-mode`), und Flags, die Paneldeck steuert, werden abgelehnt. Zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration und `--safe-mode` aus den Standards gelten nie für Sitzungen, die Agenten anlegen oder die per `paneldeck --open --claude` aus einem Hub-Terminal geöffnet werden. Pfade müssen lokal sein und existieren (Netzwerkfreigaben, auch über Verknüpfungen, werden nie berührt); alle Werte werden geprüft und je Shell gequotet. (#182)
 
 ## [2.2.0] - 2026-11-16
 

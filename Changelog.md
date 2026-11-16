@@ -24,6 +24,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - `settings.json`: optional field `wsl_recent` (recently used WSL folders per distribution, capped). (#172)
 - Setting "Allow programs to copy to the clipboard (OSC 52)" (Settings → Terminal, on by default; `settings.json` field `osc52_copy`). (#181)
 - Editable color palette (Settings → Colors): one shared palette by default for the Terminal Hub (session, folder, project, profile colors), todo-list tags and expert mode (projects, types, statuses, dropdown values, charts), or optionally a separate palette per area (both are kept when switching). Add, edit (color wheel or hex), delete and drag to reorder colors, give them optional names (shown in the tooltip, e.g. "Cool blue (#2288FF)"), and restore deleted defaults. Every color picker also offers "Custom color …" for a one-off color. Existing items keep their color; automatically assigned colors stay as before until you edit the palette. Stored in `settings.json` (new optional field `palette`; untouched lists are not written). (#173)
+- More Claude start options under "More Claude options" in the New session dialog, in the session settings (a change asks "Reload now?") and as defaults under Settings → Claude: switches `--chrome`/`--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` and `--safe-mode` (with a warning); extra folders (`--add-dir`), allowed and disallowed tools, an MCP config, an addition to the system prompt, a fallback model, a maximum budget and auto-compact. Options that widen access show a warning; missing folders or files are left out at start with a notice. (#182)
+- MCP: `create_session` takes `claude_flags` (switches only); `list_sessions`, `whoami` and `create_session` report `claude_flags` and `claude_user_options` (names only, as applied). (#182)
 
 ### Changed
 
@@ -32,6 +34,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Restoring a minimized session (sidebar click, palette "Switch to", MCP `focus_session`) now opens it alone: it replaces the layout of the window/project and the panes that were visible become minimized sessions that keep running. Ctrl+Shift+W only minimizes; the old place in the split is no longer remembered (#162).
 - A WSL session without a start folder now starts in the Linux home (`~`) instead of the Windows user folder; a restored WSL session whose saved folder cannot be used starts in `~` with a note. (#172)
 - MCP `create_session` refuses Linux paths for Windows shells, and `\\wsl$` paths of another distribution. (#172)
+- MCP `create_session` now refuses value options that it used to ignore silently (e.g. `add_dir`, `allowed_tools`, `mcp_config`, `append_system_prompt`, `safe_mode`) with `bad_args`. (#182)
 
 ### Deprecated
 
@@ -51,6 +54,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - WSL start folders containing `"` or `\` are rejected everywhere, so `wsl.exe --cd` cannot be used to inject commands; administrator starts quote every argument correctly. (#172)
 - MCP `create_session` refuses network paths as `cwd` for terminals and chats without accessing them; `\\wsl$` paths are no longer probed on the UI thread. (#172)
 - OSC 52 is write-only: programs can never read the clipboard. Only the focused session in the foreground window may copy, at most 1 MB, at most once every 0.3 s; empty texts never clear the clipboard. Note: an agent with control access (MCP) can make the focused session copy text, too. (#181)
+- Agents (MCP) can only add switches that don't affect rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; not chrome if you turned Chrome off by default). Value options, flags that widen rights or access, flags that turn off hooks (`--safe-mode`) and flags Paneldeck controls are refused. Extra folders, allowed tools, an MCP config and `--safe-mode` from your defaults never apply to agent-created sessions or to `paneldeck --open --claude` from a Hub terminal. Paths must be local and existing (network shares, also via links, are never accessed); all values are validated and quoted per shell. (#182)
 
 ## [2.2.0] - 2026-11-16
 
