@@ -82,6 +82,8 @@ pub struct PickerResponse {
 
 enum Msg {
     Distros(Vec<String>),
+    /// Echte Standard-Distribution (für `wsl.exe` ohne `-d`).
+    Default(Option<String>),
     Home(String, Option<String>),
     Listing { seq: u64, exists: wsl::DirCheck, items: Vec<String> },
 }
@@ -96,6 +98,9 @@ pub struct FolderPicker {
     distro: Option<String>,
     distros: Option<Vec<String>>,
     distros_requested: bool,
+    /// Standard-Distribution angefragt (Ziel ohne Distribution, nicht wählbar) bzw. nicht ermittelbar.
+    default_requested: bool,
+    default_unknown: bool,
     homes: BTreeMap<String, Option<String>>,
     homes_requested: BTreeSet<String>,
     check: Check,
@@ -147,6 +152,8 @@ impl FolderPicker {
             distro: None,
             distros: None,
             distros_requested: false,
+            default_requested: false,
+            default_unknown: false,
             homes: BTreeMap::new(),
             homes_requested: BTreeSet::new(),
             check: Check::Idle,
@@ -313,7 +320,7 @@ impl FolderPicker {
                 if ui.button("…").on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
                     let picked = match self.dialog_start() {
                         // Ohne vorherige Prüfung des wsl.localhost-Pfads (die könnte die Oberfläche blockieren).
-                        Some(s) if self.wsl_mode => crate::notify::pick_folder_unchecked(&s),
+                        Some(s) if self.wsl_mode || wsl::is_wsl_unc(&s) => crate::notify::pick_folder_unchecked(&s),
                         Some(s) => crate::notify::pick_folder(&s),
                         None => None,
                     };
@@ -562,6 +569,21 @@ impl FolderPicker {
                     }
                     self.distros = Some(v);
                 }
+                Msg::Default(Some(d)) => {
+                    // `wsl.exe` ohne `-d` startet die echte Standard-Distribution – auch eine in der Auswahl ausgeblendete.
+                    if self.distro.is_none() {
+                        self.distro = Some(d);
+                        self.reset_check();
+                        r.changed = true;
+                    }
+                }
+                Msg::Default(None) => {
+                    // Unbekannt: nicht prüfen, keine Vervollständigung (welche Distribution startet, weiß nur wsl.exe).
+                    self.default_unknown = true;
+                    if self.distro.is_none() {
+                        self.check = Check::Idle;
+                    }
+                }
                 Msg::Home(d, h) => {
                     self.homes.insert(d, h);
                     // Eine wegen des Homes wartende Prüfung neu starten.
@@ -587,7 +609,16 @@ impl FolderPicker {
     }
 
     fn request_background(&mut self, ctx: &egui::Context) {
-        if !self.distros_requested && (self.distro.is_none() || matches!(self.target, Target::Wsl { choose_distro: true, .. })) {
+        let choose = matches!(self.target, Target::Wsl { choose_distro: true, .. });
+        if !choose && self.distro.is_none() && !self.default_requested {
+            self.default_requested = true;
+            let (b, tx, ctx) = (self.backend.clone(), self.tx.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::Default(b.default_distro()));
+                ctx.request_repaint();
+            });
+        }
+        if !self.distros_requested && choose {
             self.distros_requested = true;
             let (b, tx, ctx) = (self.backend.clone(), self.tx.clone(), ctx.clone());
             std::thread::spawn(move || {
@@ -610,7 +641,12 @@ impl FolderPicker {
     /// Vervollständigung und Prüfung im Hintergrund starten, wenn sich Text/Distribution geändert haben und die
     /// Entprellzeit um ist.
     fn maybe_query(&mut self, ctx: &egui::Context, now: f64) {
-        let Some(d) = self.distro.clone() else { return };
+        let Some(d) = self.distro.clone() else {
+            if self.default_unknown {
+                self.check = Check::Idle;
+            }
+            return;
+        };
         let text = self.text.trim().to_string();
         let key = (d.clone(), text.clone());
         if self.queried.as_ref() == Some(&key) {
@@ -682,12 +718,18 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         calls: Mutex<Vec<String>>,
+        /// Echte Standard-Distribution (auch ausgeblendete).
+        default: Option<String>,
     }
 
     impl Backend for Fake {
         fn distros(&self) -> Vec<String> {
             self.calls.lock().unwrap().push("distros".into());
             vec!["Ubuntu-24.04".into(), "Debian".into()]
+        }
+        fn default_distro(&self) -> Option<String> {
+            self.calls.lock().unwrap().push("default".into());
+            self.default.clone()
         }
         fn home(&self, d: &str) -> Option<String> {
             self.calls.lock().unwrap().push(format!("home {d}"));
@@ -960,6 +1002,33 @@ mod tests {
         // Namen mit `"` (wsl.exe würde sie falsch zerlegen) sind ungültig.
         let mut h = H::new("/tmp/x\" echo pwned; #", ubuntu());
         h.until("ungültig", |p| p.check == Check::Invalid(PathError::Quote));
+        assert!(h.p.blocking_error(Lang::En).is_some());
+    }
+
+    #[test]
+    fn unknown_shell_distro_uses_the_real_default_or_skips_checks() {
+        // `wsl.exe` ohne -d: die echte Standard-Distribution, auch wenn sie in der Auswahl ausgeblendet ist.
+        let fake = Arc::new(Fake { default: Some("Ubuntu-Template".into()), ..Fake::default() });
+        let mut h = H::new("/home/u", Target::Wsl { distro: None, choose_distro: false });
+        h.p = FolderPicker::build("d1", "/home/u", Target::Wsl { distro: None, choose_distro: false }, fake.clone(), r"C:\Users\u".into());
+        h.fake = fake;
+        h.until("Standard", |p| p.distro() == Some("Ubuntu-Template") && p.check == Check::Exists);
+        assert!(h.fake.calls.lock().unwrap().iter().any(|c| c == "isdir Ubuntu-Template /home/u"));
+        assert!(!h.fake.calls.lock().unwrap().iter().any(|c| c == "distros"), "keine Auswahlliste nötig");
+        // Unbekannt: keine Prüfung, keine Vervollständigung, nichts blockiert; ein \\wsl$-Pfad wird nicht umgerechnet.
+        let fake = Arc::new(Fake::default());
+        h.p = FolderPicker::build("d2", "/srv", Target::Wsl { distro: None, choose_distro: false }, fake.clone(), r"C:\Users\u".into());
+        h.fake = fake;
+        h.until("unbekannt", |p| p.default_unknown && p.check == Check::Idle);
+        for _ in 0..5 {
+            h.frame(vec![]);
+        }
+        assert_eq!(h.p.check, Check::Idle);
+        assert!(h.fake.calls.lock().unwrap().iter().all(|c| c == "default"), "{:?}", h.fake.calls.lock().unwrap());
+        assert!(h.p.blocking_error(Lang::En).is_none());
+        assert_eq!(h.p.value(), "/srv");
+        h.p.set_text(r"\\wsl$\Debian\x");
+        assert_eq!(h.p.value(), r"\\wsl$\Debian\x");
         assert!(h.p.blocking_error(Lang::En).is_some());
     }
 

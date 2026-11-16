@@ -1,3 +1,4 @@
+use crate::claude_opts::ClaudeOpts;
 use crate::clip;
 use crate::gitinfo::{GitInfo, GitWatcher};
 use crate::gitops::{self, Change, DiffWatcher};
@@ -49,6 +50,7 @@ mod settings;
 mod shot_start;
 mod sidebar;
 mod sysprompt_ui;
+mod taint;
 mod tasks_ui;
 mod terminal_links;
 mod titlebar;
@@ -89,11 +91,14 @@ struct Entry {
     shell_eff: String,
     /// Chat-Sitzung (`meta.kind = chat`): Verlauf, Eingabe, laufende Antwort. Hängt an der Sitzung, nicht am Fenster.
     chat: Option<ChatState>,
+    /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
+    /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
+    session_key: String,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new() }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -179,6 +184,9 @@ impl Entry {
     fn cwd_now(&self) -> String {
         if !self.live_cwd.is_empty() {
             self.live_cwd.clone()
+        } else if self.meta.cwd.is_empty() && self.eff_shell().starts_with("wsl") && !self.is_chat() {
+            // WSL ohne Ordner startet im Linux-Home (#172).
+            "~".to_string()
         } else if self.meta.cwd.is_empty() {
             home_dir()
         } else {
@@ -321,6 +329,8 @@ enum Action {
     OpenSettings,
     OpenPrompts,
     OpenNotes(u64),
+    /// Agenten-Kette einer Sitzung aufheben (nur der Nutzer, Kontextmenü, #152).
+    ResetAgentChain(u64),
     /// Mini-Suche „Ticket verknüpfen“ für die Sitzung öffnen.
     LinkTicket(u64),
     /// Ticket öffnen (Chip, Palette).
@@ -374,8 +384,8 @@ struct NewDialog {
     cwd: String,
     name: String,
     claude: bool,
-    model: String,
-    perm: usize,
+    /// Claude-Startoptionen (Modell, Effort, Permission-Mode, Agent); vorbelegt mit der letzten Wahl bzw. den Standards.
+    copts: ClaudeOpts,
     continue_last: bool,
     profile: u64,
     prompt: String,
@@ -388,15 +398,6 @@ struct NewDialog {
     picker: folder_picker::FolderPicker,
 }
 
-const PERMS: [(&str, &str); 6] = [
-    ("", "Standard"),
-    ("acceptEdits", "acceptEdits"),
-    ("plan", "plan"),
-    ("auto", "auto"),
-    ("dontAsk", "dontAsk"),
-    ("bypassPermissions", "bypassPermissions"),
-];
-
 #[derive(Default)]
 struct NewOpts {
     shell_id: Option<String>,
@@ -404,6 +405,10 @@ struct NewOpts {
     name: Option<String>,
     claude: bool,
     claude_args: String,
+    /// Claude-Startoptionen; `None` = Standards aus den Einstellungen (ohne bypassPermissions).
+    claude_opts: Option<ClaudeOpts>,
+    /// Nur der Dialog „Neue Sitzung“: der Nutzer hat bypassPermissions ausdrücklich für diese Sitzung gewählt.
+    allow_bypass: bool,
     continue_last: bool,
     prompt: Option<String>,
     resume_id: Option<String>,
@@ -431,10 +436,10 @@ struct Launch<'a> {
 }
 
 impl NewDialog {
-    fn new(shell_id: String, claude: bool) -> Self {
+    fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
         let cwd = home_dir();
         let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
-        NewDialog { shell_id, cwd, name: String::new(), claude, model: String::new(), perm: 0, continue_last: false, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+        NewDialog { shell_id, cwd, name: String::new(), claude, copts, continue_last: false, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
     }
 
     /// Startordner von außen setzen (Profil, Ordnervorgabe).
@@ -654,6 +659,8 @@ pub struct App {
     folder_prompt: Option<FolderPrompt>,
     folder_rects: Vec<(String, Rect)>,
     tree_geo: TreeGeo,
+    /// Hinweise aus `spawn_into` (z. B. unbrauchbarer gespeicherter WSL-Ordner), im nächsten Bild als Meldung gezeigt.
+    spawn_notes: std::cell::RefCell<Vec<String>>,
     new_dialog: Option<NewDialog>,
     /// Dialog „Neuer Chat“ (Server und Modell wählen).
     new_chat: Option<models_ui::NewChatDlg>,
@@ -915,6 +922,7 @@ impl App {
             folder_prompt: None,
             folder_rects: Vec::new(),
             tree_geo: TreeGeo::default(),
+            spawn_notes: Default::default(),
             new_dialog: None,
             new_chat: None,
             confirm_close: None,
@@ -1054,6 +1062,8 @@ impl App {
             app.spawn_into(&cc.egui_ctx, &mut entry, Launch { restore: true, restart: false, continue_last: false, prompt: None, resume_id: None });
             app.entries.insert(id, entry);
         }
+        // Agenten-Ketten: Sitzungen, die es nicht mehr gibt, fallen heraus (#152).
+        taint::prune(&mut app.entries);
         // Keine Id vergeben, zu der noch Verlauf/Scrollback daliegt (Absturz vor dem Speichern, zurückgesetzte state.json).
         app.next_id = app.next_id.max(chatmod::store::max_used_id(&app.dir).saturating_add(1));
         // Projekte: ältere Stände ohne Projekte bekommen ein Standardprojekt.
@@ -1099,7 +1109,7 @@ impl App {
         // Start aus dem Explorer-Kontextmenü: Sitzung im übergebenen Ordner öffnen.
         let cli = crate::cli::get();
         if let Some(p) = &cli.open {
-            app.open_folder(&cc.egui_ctx, p, cli.claude);
+            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude);
         }
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
@@ -1122,9 +1132,11 @@ impl App {
     }
 
     /// Neue Sitzung in einem Ordner (Dateien → deren Ordner).
-    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) {
+    /// Ordner (oder Ordner einer Datei) als neue Sitzung öffnen; gibt deren Kennung zurück.
+    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) -> u64 {
         let p = std::path::Path::new(path);
-        let dir = if p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
+        // Ein WSL-Pfad gilt ungeprüft als Ordner (schon das Prüfen kann die WSL-VM starten und die Oberfläche blockieren).
+        let dir = if !crate::wsl::is_wsl_unc(path) && p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
         // Ordner in einer WSL-Distribution (`\\wsl.localhost\<Distro>\…`, `\\wsl$\…`, z. B. „Hier öffnen“ im Explorer):
         // WSL-Sitzung dieser Distribution im passenden Linux-Pfad (#172). Unbekannte Distribution: wie bisher.
         // Das Standardprofil des Projekts kann ein eigenes Programm haben: nur wenn die Sitzung wirklich in dieser
@@ -1137,15 +1149,26 @@ impl App {
             Some((sid, linux)) => (Some(sid), linux),
             None => (None, dir),
         };
-        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, ..NewOpts::default() });
+        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
         let cmds: Vec<IpcCmd> = self.hook_server.as_ref().map(|h| h.cmd_rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             self.from_tray(ctx);
-            if let IpcCmd::Open { path, claude } = c {
-                self.open_folder(ctx, &path, claude);
+            if let IpcCmd::Open { path, claude, origin } = c {
+                // `paneldeck --open` aus einem Hub-Terminal heraus: die neue Sitzung erbt dessen Agenten-Kette samt ihm
+                // (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Absender nur über den Prozessbaum; ein
+                // losgelöster (nicht zuzuordnender) Absender darf keine Claude-Sitzung öffnen.
+                let (origin, orphan) = self.open_origin(origin.as_ref());
+                if orphan && claude {
+                    self.notify_text(taint::orphan_error().1);
+                    continue;
+                }
+                let id = self.open_folder(ctx, &path, claude);
+                if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
+                    self.save_state();
+                }
             }
         }
         if self.start_in_tray {
@@ -1425,6 +1448,11 @@ impl App {
         self.dir.join("scrollback").join(format!("{id}.txt"))
     }
 
+    /// Vorbelegung der Claude-Optionen im Dialog „Neue Sitzung“: letzte Wahl, sonst die Standards der Einstellungen.
+    fn dialog_claude_opts(&self) -> ClaudeOpts {
+        self.settings.last_claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone()).sanitized(false)
+    }
+
     fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> String {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
@@ -1441,10 +1469,12 @@ impl App {
                 c += &format!(" --settings {}", crate::quote::quote(kind, &f.to_string_lossy().replace('\\', "/")));
             }
         }
-        // Gespeicherte Optionen nur in harmloser Form übernehmen (state.json ist eine Vertrauensgrenze).
-        let args = crate::quote::sanitize_claude_args(&meta.claude_args);
+        // Gespeicherte Optionen nur in harmloser Form übernehmen (state.json ist eine Vertrauensgrenze):
+        // geprüfte Startoptionen (#161), gequotet für die Shell, dazu ältere freie `claude_args` bereinigt.
+        let (opts, args) = meta.claude_opts_eff();
+        c += &opts.args(kind);
         if !args.is_empty() {
-            c += &format!(" {args}");
+            c += &format!(" {}", crate::claude_opts::legacy_args(&args, kind));
         }
         let resume_wanted = l.restart || (l.restore && self.settings.claude_resume);
         let resume_id = l.resume_id.filter(|id| crate::quote::is_uuid(id));
@@ -1493,12 +1523,15 @@ impl App {
         // erreichen die Kommandozeile nie (wsl.exe zerlegt sie selbst – Befehlseinschleusung).
         let cwd = if wsl {
             let distro = shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args));
+            let de = self.settings.language == Lang::De;
             match crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) {
                 crate::wsl::Cd::Linux => home_dir(),
-                crate::wsl::Cd::Windows if entry.meta.cwd.is_empty() => home_dir(),
-                crate::wsl::Cd::Windows => entry.meta.cwd.clone(),
+                // Eigenes `--cd`/`~` des Profils (oder keine bekannte Distribution): nie einen Linux- oder WSL-Pfad als
+                // Windows-Startordner (CreateProcess) – und keine Prüfung eines \\wsl$-Pfads im UI-Thread.
+                crate::wsl::Cd::Windows if spawn_cwd_is_windows(&entry.meta.cwd) => entry.meta.cwd.clone(),
+                crate::wsl::Cd::Windows => home_dir(),
                 crate::wsl::Cd::OtherDistro(d) => {
-                    let msg = if self.settings.language == Lang::De {
+                    let msg = if de {
                         format!("Der Startordner liegt in der WSL-Distribution {d}, die Shell startet eine andere: {}", entry.meta.cwd)
                     } else {
                         format!("The start folder is in the WSL distribution {d}, but the shell starts another one: {}", entry.meta.cwd)
@@ -1508,9 +1541,17 @@ impl App {
                     return;
                 }
                 crate::wsl::Cd::Invalid(e) => {
-                    entry.error = Some(format!("{} {}", e.message(self.settings.language == Lang::De), entry.meta.cwd));
-                    entry.live = None;
-                    return;
+                    // Gespeicherter Ordner (Wiederherstellen, Teilen, Duplizieren; kann per OSC 7 vom Terminalinhalt stammen)
+                    // ist als Startordner unzulässig: im Linux-Home starten und das melden, statt die Sitzung zu verweigern.
+                    // Dialog und MCP lehnen solche Pfade schon vorher ab.
+                    let old = std::mem::replace(&mut entry.meta.cwd, "~".into());
+                    let _ = crate::wsl::apply_cd(&mut shell.args, "~", distro.as_deref());
+                    self.spawn_notes.borrow_mut().push(if de {
+                        format!("Startordner nicht verwendbar ({}): {} – die Sitzung startet im Linux-Home (~).", e.message(true), crate::mcp::short(&old, 80))
+                    } else {
+                        format!("Start folder not usable ({}): {} – the session starts in the Linux home (~).", e.message(false), crate::mcp::short(&old, 80))
+                    });
+                    home_dir()
                 }
             }
         } else if entry.meta.cwd.is_empty() {
@@ -1521,7 +1562,9 @@ impl App {
         } else {
             entry.meta.cwd.clone()
         };
-        let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string())];
+        // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
+        entry.session_key = hooks::random_hex();
+        let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string()), (hooks::ENV_SESSION_KEY.to_string(), entry.session_key.clone())];
         if let Some(p) = &profile {
             for line in p.env.lines() {
                 if let Some((k, v)) = line.split_once('=') {
@@ -1626,6 +1669,13 @@ impl App {
         };
         let o = NewOpts { cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| prof.as_ref().map(|p| p.cwd.clone()).filter(|c| !c.is_empty())), ..o };
         let label = self.shell_by_id(&shell_id).map(|s| s.label).unwrap_or_else(|| "Shell".into());
+        // Alle Wege (Dialog, MCP, Kontextmenü, --claude, IPC, Vorlagen, Duplikat, Verlauf) laufen hier durch;
+        // bypassPermissions nur bei ausdrücklicher Wahl im Dialog.
+        let (claude_opts, claude_args) = if o.claude {
+            crate::claude_opts::resolve_new(o.claude_opts.as_ref(), o.allow_bypass, &self.settings.claude_defaults, &o.claude_args)
+        } else {
+            (ClaudeOpts::default(), o.claude_args.clone())
+        };
         let (name, custom) = match o.name.filter(|n| !n.trim().is_empty()) {
             Some(n) => (n, true),
             None if chat_meta.is_some() => ("Chat".to_string(), false),
@@ -1642,7 +1692,8 @@ impl App {
             color: prof.as_ref().and_then(|p| p.color).unwrap_or(PALETTE[(id as usize) % PALETTE.len()]),
             profile: pid,
             claude: o.claude,
-            claude_args: o.claude_args,
+            claude_args,
+            claude_opts,
             claude_session: o.resume_id.clone().unwrap_or_default(),
             claude_started: o.resume_id.is_some(),
             transcript: o.transcript.clone(),
@@ -1874,6 +1925,8 @@ impl App {
         let _ = std::fs::remove_file(self.scrollback_path(id));
         // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
         chatmod::store::remove(&self.dir, id);
+        // Die geschlossene Id aus allen Agenten-Ketten nehmen (sie wird nie neu vergeben, #152).
+        taint::prune(&mut self.entries);
         if self.layout.is_none() {
             // Letzter Bereich geschlossen: eine andere (nicht minimierte) Sitzung zeigen, sonst leerer Hub.
             if let Some(first) = self.unminimized_docked().first().copied() {
@@ -1897,13 +1950,19 @@ impl App {
         state::save_json(&self.dir.join("settings.json"), &self.settings);
         state::save_json(&self.dir.join("prompts.json"), &self.prompts);
         let _ = std::fs::create_dir_all(self.dir.join("scrollback"));
-        state::save_json(&self.dir.join("state.json"), &self.saved_state());
+        self.save_state();
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
                 let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
             }
         }
         self.save_chats();
+    }
+
+    /// Nur `state.json` schreiben (Sitzungen, Layout, Projekte) – leicht genug für sofortiges Speichern, z. B. wenn sich
+    /// eine Agenten-Kette ändert (#152).
+    fn save_state(&self) {
+        state::save_json(&self.dir.join("state.json"), &self.saved_state());
     }
 
     /// Inhalt von `state.json` (Sitzungen, Projekte mit dem aktuellen Layout, Fenster).
@@ -2470,7 +2529,8 @@ impl App {
     /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
     fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
         let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
-        let origins = self.entries.get(&id).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+        // Vorfahren des Chats: seine gespeicherte Agenten-Kette und die Kette der laufenden Runde (#152).
+        let origins = taint::ancestors(&self.entries, Some(id));
         match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
             Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
             None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
@@ -2561,13 +2621,11 @@ impl App {
             }
             return ChatSendResult::LevelQuestion;
         }
-        // Kette der auslösenden Agenten: der Aufrufer und – ist er selbst ein Chat – dessen Kette (transitiv).
+        // Kette der auslösenden Agenten: der Aufrufer und seine Vorfahren (gespeicherte Agenten-Kette, bei einem Chat
+        // auch die Kette seiner laufenden Runde; transitiv, #152).
         let chain = match &origin {
             ChatSendOrigin::User => Vec::new(),
-            ChatSendOrigin::Agent { caller, .. } => {
-                let caller_chain = caller.and_then(|c| self.entries.get(&c)).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
-                chatmod::tools::chain_origins(*caller, &caller_chain)
-            }
+            ChatSendOrigin::Agent { caller, .. } => taint::handed_on(&self.entries, *caller),
         };
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();
@@ -2992,10 +3050,15 @@ impl App {
             Action::OpenSettings => self.settings_open = true,
             Action::OpenPrompts => self.prompts_open = true,
             Action::NewDialog(claude) => {
-                self.new_dialog = Some(NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode));
+                self.new_dialog = Some(NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode, self.dialog_claude_opts()));
             }
             Action::OpenNotes(id) => {
                 self.notes_open = if self.notes_open == Some(id) { None } else { Some(id) };
+            }
+            Action::ResetAgentChain(id) => {
+                if taint::reset(&mut self.entries, id) {
+                    self.save_state();
+                }
             }
             Action::LinkTicket(id) => self.tlinks_open_picker(id),
             Action::OpenTicket(id) => self.open_ticket_from_anywhere(id),
@@ -3169,7 +3232,11 @@ impl App {
                         shell_id: e.meta.shell_id.clone(),
                         cwd: e.cwd_now(),
                         claude: e.meta.claude,
-                        claude_args: e.meta.claude_args.clone(),
+                        // Das Vorlagenformat kennt nur die Zeile `claude_args`: Startoptionen dort hinein.
+                        claude_args: {
+                            let (o, rest) = e.meta.claude_opts_eff();
+                            format!("{} {rest}", o.sanitized(false).to_legacy()).trim().to_string()
+                        },
                         profile: e.meta.profile,
                         group: e.meta.group.clone(),
                         prompt: String::new(),
@@ -3198,7 +3265,8 @@ impl App {
                                 cwd: Some(it.cwd.clone()),
                                 name: Some(it.name.clone()),
                                 claude: it.claude && self.settings.claude_mode,
-                                claude_args: crate::quote::sanitize_claude_args(&it.claude_args),
+                                // Optionen der Vorlage vor den aktuellen Standards (alte Vorlagen ohne Optionen: nur Standards).
+                                claude_args: it.claude_args.clone(),
                                 prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
                                 profile: Some(it.profile),
                                 group: Some(it.group.clone()),
@@ -3285,7 +3353,7 @@ impl App {
                 let proj = self.projects.iter().find(|p| p.id == self.active_project);
                 let cwd = proj.and_then(|p| p.inherited(&path, |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())));
                 let prof = proj.and_then(|p| p.inherited(&path, |f| Some(f.profile).filter(|x| *x != 0)));
-                let mut d = NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode);
+                let mut d = NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode, self.dialog_claude_opts());
                 if let Some(c) = cwd.or_else(|| proj.map(|p| p.folder.clone()).filter(|c| !c.is_empty())) {
                     d.set_cwd(&c);
                 }
@@ -3349,6 +3417,7 @@ impl App {
                         name: Some(format!("{} (2)", src.display_name())),
                         claude: src.meta.claude,
                         claude_args: src.meta.claude_args.clone(),
+                        claude_opts: Some(src.meta.claude_opts.clone()),
                         profile: Some(src.meta.profile),
                         window: Some(src.meta.window),
                         project: Some(src.meta.project),
@@ -3431,6 +3500,9 @@ impl eframe::App for App {
         #[cfg(feature = "readme-shots")]
         self.dev_shot_mode();
         self.track_focus(ctx);
+        for n in self.spawn_notes.take() {
+            self.notify_text(n);
+        }
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
         crate::usage::set_prices(self.settings.prices.clone());
@@ -4084,6 +4156,13 @@ fn split_args(s: &str) -> Vec<String> {
     out
 }
 
+/// Taugt der gespeicherte Ordner einer WSL-Sitzung, deren Startordner `wsl.exe` nicht per `--cd` bekommt (eigenes
+/// `--cd` des Profils, Distribution unbekannt), als Windows-Startordner? Nie ein Linux-Pfad und nie ein `\\wsl$`-Pfad
+/// (den müsste der UI-Thread prüfen); sonst das Windows-Home.
+fn spawn_cwd_is_windows(cwd: &str) -> bool {
+    !cwd.trim().is_empty() && !crate::wsl::looks_linux(cwd.trim()) && !crate::wsl::is_wsl_unc(cwd)
+}
+
 /// Ein Argument nach den Regeln von `CommandLineToArgvW` maskieren (Leerzeichen → Anführungszeichen, `\` vor `"`
 /// verdoppeln).
 fn win_quote_arg(a: &str) -> String {
@@ -4143,7 +4222,8 @@ fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let script = elevated_script(shell, Some(cwd).filter(|c| std::path::Path::new(c).is_dir()));
+        // WSL-Pfade ungeprüft (keine Prüfung im UI-Thread); sonst nur vorhandene Ordner.
+        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || std::path::Path::new(c).is_dir()));
         let ok = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
             .creation_flags(0x0800_0000)
@@ -4348,6 +4428,28 @@ mod pane_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wsl_spawn_cwd_fallbacks() {
+        // Profil mit eigenem `--cd`: ein Linux-/WSL-Ordner wird nie zum Windows-Startordner.
+        assert!(spawn_cwd_is_windows(r"C:\Work"));
+        assert!(!spawn_cwd_is_windows("/home/u"));
+        assert!(!spawn_cwd_is_windows("~"));
+        assert!(!spawn_cwd_is_windows(r"\\wsl$\Ubuntu\home"));
+        assert!(!spawn_cwd_is_windows(""));
+        let mut args = vec!["--cd".to_string(), "/srv".to_string()];
+        assert_eq!(crate::wsl::apply_cd(&mut args, "/home/u", Some("Ubuntu")), crate::wsl::Cd::Windows);
+        // Gespeicherter Ordner mit `"` (z. B. per OSC 7 aus dem Terminal): beim Wiederherstellen ~ statt Abbruch.
+        let mut args = vec!["-d".to_string(), "Ubuntu".to_string()];
+        assert!(matches!(crate::wsl::apply_cd(&mut args, "/tmp/x\" echo pwned; #", Some("Ubuntu")), crate::wsl::Cd::Invalid(_)));
+        assert_eq!(crate::wsl::apply_cd(&mut args, "~", Some("Ubuntu")), crate::wsl::Cd::Linux);
+        assert_eq!(args, vec!["--cd", "~", "-d", "Ubuntu"]);
+        // cwd_now: WSL ohne Ordner = ~, andere Shells = Windows-Home
+        let mut e = Entry::new(SessionMeta { shell_id: "wsl:Ubuntu".into(), ..SessionMeta::default() });
+        assert_eq!(e.cwd_now(), "~");
+        e.meta.shell_id = "powershell".into();
+        assert_eq!(e.cwd_now(), home_dir());
+    }
 
     #[test]
     fn elevated_start_quotes_each_argument() {

@@ -135,7 +135,8 @@ impl Session {
             cmd.arg(a);
         }
         if let Some(cwd) = opts.cwd {
-            if std::path::Path::new(cwd).is_dir() {
+            // `\\wsl$`-Pfade ungeprüft (das Prüfen im UI-Thread könnte die WSL-VM starten und blockieren).
+            if crate::wsl::is_wsl_unc(cwd) || std::path::Path::new(cwd).is_dir() {
                 cmd.cwd(cwd);
             }
         }

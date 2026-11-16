@@ -183,6 +183,12 @@ pub fn unc_to_linux(p: &str) -> Option<(String, String)> {
     Some((distro.to_string(), format!("/{}", parts.join("/"))))
 }
 
+/// Ist das ein lokaler WSL-Pfad (`\\wsl.localhost\…`, `\\wsl$\…`)? Solche Pfade prüft der UI-Thread nie
+/// (`is_dir`/`is_file` könnten die WSL-VM starten und blockieren); sie gelten als Ordner.
+pub fn is_wsl_unc(p: &str) -> bool {
+    unc_to_linux(p).is_some()
+}
+
 /// Linux-Pfad als Windows-Pfad über `\\wsl.localhost\<Distro>\…` (für den Ordnerdialog); unter Windows verbotene
 /// Zeichen werden wie von WSL auf `U+F0xx` abgebildet.
 pub fn linux_to_unc(distro: &str, linux: &str) -> String {
@@ -404,6 +410,9 @@ pub enum DirCheck {
 pub trait Backend: Send + Sync {
     /// Distributionen für die Auswahl ([`visible_distros`]); leer, wenn keine oder die Abfrage scheiterte.
     fn distros(&self) -> Vec<String>;
+    /// Die echte Standard-Distribution (die `wsl.exe` ohne `-d` startet) – auch wenn sie in der Auswahl
+    /// ausgeblendet ist. `None`: unbekannt.
+    fn default_distro(&self) -> Option<String>;
     /// Home-Verzeichnis des Standardnutzers.
     fn home(&self, distro: &str) -> Option<String>;
     /// Ausgabe von `ls -1 -p -A -- <dir>`; `None` = nicht lesbar (oder zu viel Ausgabe).
@@ -415,9 +424,27 @@ pub trait Backend: Send + Sync {
 /// Echte Abfragen über `wsl.exe`; erfolgreiche Distributionslisten und Home-Verzeichnisse werden zwischengespeichert.
 pub struct WslExe;
 
-fn distro_cache() -> &'static Mutex<Option<Vec<String>>> {
-    static C: OnceLock<Mutex<Option<Vec<String>>>> = OnceLock::new();
+/// Zwischengespeichert: (sichtbare Distributionen, echte Standard-Distribution).
+type DistroInfo = (Vec<String>, Option<String>);
+
+fn distro_cache() -> &'static Mutex<Option<DistroInfo>> {
+    static C: OnceLock<Mutex<Option<DistroInfo>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(None))
+}
+
+/// Distributionen und Standard ermitteln; nur ein Erfolg wird zwischengespeichert (sonst beim nächsten Mal erneut).
+fn distro_info() -> Option<DistroInfo> {
+    if let Some(v) = distro_cache().lock().ok().and_then(|c| c.clone()) {
+        return Some(v);
+    }
+    let out = run(&["-l".into(), "-q".into()], SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
+    let names = parse_distro_list(&out.stdout);
+    let default = run(&["-l".into(), "-v".into()], SLOW_TIMEOUT).and_then(|o| parse_default_distro(&o.stdout, &names));
+    let info = (visible_distros(names, default.as_deref()), default);
+    if let Ok(mut c) = distro_cache().lock() {
+        *c = Some(info.clone());
+    }
+    Some(info)
 }
 
 fn home_cache() -> &'static Mutex<BTreeMap<String, String>> {
@@ -427,20 +454,11 @@ fn home_cache() -> &'static Mutex<BTreeMap<String, String>> {
 
 impl Backend for WslExe {
     fn distros(&self) -> Vec<String> {
-        if let Some(v) = distro_cache().lock().ok().and_then(|c| c.clone()) {
-            return v;
-        }
-        let Some(out) = run(&["-l".into(), "-q".into()], SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated) else {
-            // Nicht zwischenspeichern: beim nächsten Öffnen erneut versuchen.
-            return Vec::new();
-        };
-        let names = parse_distro_list(&out.stdout);
-        let default = run(&["-l".into(), "-v".into()], SLOW_TIMEOUT).and_then(|o| parse_default_distro(&o.stdout, &names));
-        let v = visible_distros(names, default.as_deref());
-        if let Ok(mut c) = distro_cache().lock() {
-            *c = Some(v.clone());
-        }
-        v
+        distro_info().map(|i| i.0).unwrap_or_default()
+    }
+
+    fn default_distro(&self) -> Option<String> {
+        distro_info().and_then(|i| i.1)
     }
 
     fn home(&self, distro: &str) -> Option<String> {
@@ -612,6 +630,8 @@ mod tests {
         assert_eq!(l(r"C:\Users\x"), None);
         assert_eq!(l(r"\\wsl$\"), None);
         assert_eq!(l(r"\\wsl$\-bad\x"), None);
+        assert!(is_wsl_unc(r"\\wsl$\Ubuntu") && is_wsl_unc("//wsl.localhost/U/x"));
+        assert!(!is_wsl_unc(r"C:\x") && !is_wsl_unc(r"\\server\s") && !is_wsl_unc("/home"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod backup;
 mod boxdraw;
 mod calc;
 mod chat;
+mod claude_opts;
 mod db;
 mod clip;
 mod emoji;
@@ -199,7 +200,7 @@ fn main() -> eframe::Result<()> {
     // "paneldeck.exe.old" (Update über eine laufende Instanz) wird erst nach dem ersten gezeichneten Frame gelöscht –
     // siehe `app::update::install::remove_old_exe`.
     let cmd = match &cli.open {
-        Some(p) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude },
+        Some(p) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude, origin: None },
         None => hooks::IpcCmd::Show,
     };
     // `--reset-settings` nur, wenn keine Instanz mit diesem Datenordner läuft (sie würde die Datei wieder schreiben).
