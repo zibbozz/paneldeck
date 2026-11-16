@@ -258,12 +258,13 @@ try {
   Check 'whoami von aussen: nicht in einem Hub-Terminal' ($null -eq $w0.data.session -and $w0.data.identified_by -eq 'none')
   $ac = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Eltern-Agent' }; $A = $ac.data.id; Start-Sleep 4
   # Ein Agent in der Sitzung $A: startet die Bruecke als Kindprozess der Shell (Prozessbaum), ohne Umgebungsvariable.
-  function InA($tool, $targs) {
+  function InS($s, $tool, $targs) {
     $req = @{ jsonrpc = '2.0'; id = 1; method = 'tools/call'; params = @{ name = $tool; arguments = $targs } } | ConvertTo-Json -Depth 8 -Compress
     $cmd = "`$env:PANELDECK_SESSION=`$null; '" + $req.Replace("'", "''") + "' | & '$dir\paneldeck.exe' mcp | Out-String"
-    $r = Tool 'run_command' @{ session = $A; command = $cmd; timeout_secs = 40 }
+    $r = Tool 'run_command' @{ session = $s; command = $cmd; timeout_secs = 40 }
     try { ($r.data.output | ConvertFrom-Json).result } catch { $null }
   }
+  function InA($tool, $targs) { InS $A $tool $targs }
   $me = InA 'whoami' @{}
   Check 'whoami in Hub-Sitzung (Prozessbaum, ohne Umgebungsvariable)' ($me.structuredContent.session -eq $A -and $me.structuredContent.identified_by -eq 'process') ($me | ConvertTo-Json -Compress -Depth 5)
   $kid = InA 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Kind' }; $K = $kid.structuredContent.id
@@ -277,6 +278,45 @@ try {
   Check 'Eltern-Agent steuert sein Kind (run_command)' ($rc.structuredContent.output.Trim() -eq 'kind-ok') ($rc | ConvertTo-Json -Compress -Depth 5)
   $self = InA 'send_text' @{ session = $A; text = 'x' }
   Check 'Eltern-Agent darf nicht in die eigene Sitzung schreiben' ($self.isError -eq $true -and $self.content[0].text -like 'forbidden*')
+  # Agenten-Kette (#152): das Kind ist markiert; ein Agent darin darf nicht in den Eltern-Agenten schreiben, nur lesen.
+  $kw = InS $K 'whoami' @{}
+  Check 'Kette: whoami im Kind nennt agent_chain = Eltern-Agent' ($kw.structuredContent.session -eq $K -and @($kw.structuredContent.agent_chain) -contains $A) ($kw | ConvertTo-Json -Compress -Depth 5)
+  Check 'Kette: list_sessions zeigt agent_chain des Kindes' (@(((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $K }).agent_chain) -contains $A)
+  $kx = InS $K 'send_text' @{ session = $A; text = 'echo kind-leak' }
+  Check 'Kette: Agent im Kind -> send_text in den Eltern-Agenten forbidden' ($kx.isError -eq $true -and $kx.content[0].text -like 'forbidden*' -and $kx.content[0].text -match 'agent chain') ($kx | ConvertTo-Json -Compress -Depth 5)
+  Check 'Kette: Agent im Kind -> rename_session des Eltern-Agenten forbidden' ((InS $K 'rename_session' @{ session = $A; name = 'x' }).content[0].text -like 'forbidden*')
+  Check 'Kette: Agent im Kind darf den Eltern-Agenten lesen' ((InS $K 'read_terminal' @{ session = $A; lines = 5 }).isError -ne $true)
+  foreach ($t in @(@('run_command', @{ session = $A; command = 'echo kind-leak' }), @('send_keys', @{ session = $A; keys = @('enter') }), @('queue_prompt', @{ session = $A; prompt = 'x' }), @('focus_session', @{ session = $A }))) {
+    $kr = InS $K $t[0] $t[1]
+    Check "Kette: Agent im Kind -> $($t[0]) in den Eltern-Agenten forbidden" ($kr.isError -eq $true -and $kr.content[0].text -like 'forbidden*') ($kr | ConvertTo-Json -Compress -Depth 5)
+  }
+  # Gefaelschter/fehlender Aufrufer: eine rohe TCP-Anfrage mit dem Token aus ipc.json, ohne caller/caller_pid, aus dem
+  # Prozessbaum des Kindes -> der Hub ermittelt den Absender selbst (TCP-Tabelle + Prozessbaum) und weist ab.
+  $rawCmd = "`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json; `$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port); `$s = `$c.GetStream(); `$b = [Text.Encoding]::UTF8.GetBytes('{""token"":""' + `$j.token + '"",""cmd"":""mcp"",""tool"":""send_text"",""caller"":null,""caller_pid"":4,""args"":{""session"":$A,""text"":""echo raw-leak""}}'); `$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1); (New-Object IO.StreamReader(`$s)).ReadToEnd()"
+  $raw = Tool 'run_command' @{ session = $K; command = $rawCmd; timeout_secs = 30 }
+  Check 'Kette: rohe TCP-Anfrage ohne Aufrufer aus dem Kind -> zugeordnet und forbidden' ($raw.data.output -match '"code":"forbidden"' -and $raw.data.output -match 'agent chain') $raw.text
+  # Losgeloester Absender: eine kurzlebige Shell im Kind startet per Start-Process einen Prozess und endet sofort; der
+  # Prozess (Elternteil beendet, nach dem Hub gestartet = verwaist) schickt dann eine rohe Anfrage in den Eltern-Agenten.
+  # Er ist keiner Sitzung zuzuordnen und darf nicht in einen moeglichen Vorfahren schreiben.
+  $detOut = "$work\detached-out.txt"; $detPs = "$work\detached.ps1"
+  [IO.File]::WriteAllText($detPs, @"
+Start-Sleep -Seconds 3
+`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json
+`$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port)
+`$s = `$c.GetStream()
+`$b = [Text.Encoding]::UTF8.GetBytes('{"token":"' + `$j.token + '","cmd":"mcp","tool":"send_text","args":{"session":$A,"text":"echo detached-leak"}}')
+`$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1)
+[IO.File]::WriteAllText('$detOut', (New-Object IO.StreamReader(`$s)).ReadToEnd())
+"@, (New-Object Text.UTF8Encoding $false))
+  $detCmd = "powershell -NoProfile -Command ""Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$detPs'"""
+  [void](Tool 'run_command' @{ session = $K; command = $detCmd; timeout_secs = 30 })
+  $deadline = (Get-Date).AddSeconds(25)
+  while (-not (Test-Path $detOut) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+  $det = if (Test-Path $detOut) { [IO.File]::ReadAllText($detOut) } else { '' }
+  Check 'Kette: losgeloester Absender (Start-Process aus kurzlebiger Shell) -> forbidden in den Eltern-Agenten' ($det -match '"code":"forbidden"' -and $det -match 'cannot be attributed') $det
+  Start-Sleep 1
+  Check 'Kette: im Eltern-Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'kind-leak|raw-leak|detached-leak')
+  Check 'Kette: von aussen (ohne Kette) bleibt Schreiben erlaubt' (-not (Tool 'send_text' @{ session = $A; text = ' '; submit = $false }).err)
   $cl = InA 'close_session' @{ session = $K }
   Check 'Eltern-Agent schliesst sein Kind' ($cl.isError -ne $true)
   [void](Tool 'close_session' @{ session = $A })
@@ -760,6 +800,7 @@ c.close()
           if ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
           elseif ($hasTools -and $last -match 'chain please (\d+) (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_chat_message","arguments":{"session":' + $Matches[1] + ',"text":"proxy please ' + $Matches[2] + '"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'read please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_chat","arguments":{"session":' + $Matches[1] + ',"last":40}}}]},"done":false}' }
+          elseif ($hasTools -and $last -match 'spawn please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"create_session","arguments":{"shell":"powershell","name":"Chat-Kind"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'proxy please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_text","arguments":{"session":' + $Matches[1] + ',"text":"echo proxy-leak"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'tools please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_sessions","arguments":{}}}]},"done":false}' }
           else {
@@ -865,6 +906,20 @@ c.close()
   Check 'Umweg-Schutz ueber eine Kette: Chat -> Chat -> send_text in die Sitzung des Agenten -> forbidden' ($px.isError -ne $true -and $w2.data.matched -eq $true -and $sc.Count -ge 1 -and $sc[-1].status -eq 'ok' -and $pu2.note -eq 'Sent by agent Smoke-LLM' -and $pt2.Count -ge 1 -and $pt2[-1].status -eq 'denied' -and $pt2[-1].content -match 'cannot write into that agent') "$($rc1.text) /// $($rc2.text)"
   Start-Sleep 1
   Check 'Umweg-Schutz: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'proxy-leak')
+  # Markierung (#152): Agent $A -> Chat $C legt per create_session ein Terminal an; ein Agent dort darf weder in $A
+  # noch in $C schreiben (bis 2.2.0 war ein solches Terminal nicht markiert).
+  [void](InA 'send_chat_message' @{ session = $C; text = 'spawn please' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $T = @((Tool 'list_sessions').data.sessions) | Where-Object { $_.parent -eq $C -and $_.kind -eq 'terminal' } | Select-Object -First 1
+  Check 'Markierung: Terminal eines Chats der Kette erbt sie (agent_chain = Agent + Chat)' ($null -ne $T -and @($T.agent_chain) -contains $A -and @($T.agent_chain) -contains $C) ($T | ConvertTo-Json -Compress)
+  if ($T) {
+    Start-Sleep 4
+    $tw = InS $T.id 'send_text' @{ session = $A; text = 'echo taint-leak' }
+    Check 'Markierung: Agent im Terminal des Chats -> send_text in den urspruenglichen Agenten forbidden' ($tw.isError -eq $true -and $tw.content[0].text -like 'forbidden*' -and $tw.content[0].text -match 'agent chain') ($tw | ConvertTo-Json -Compress -Depth 5)
+    $tc = InS $T.id 'send_chat_message' @{ session = $C; text = 'x' }
+    Check 'Markierung: ... und nicht in den Chat der Kette' ($tc.isError -eq $true -and $tc.content[0].text -like 'forbidden*') ($tc | ConvertTo-Json -Compress -Depth 5)
+    Check 'Markierung: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'taint-leak')
+  }
   Check 'wait_for_status auf die eigene Sitzung -> bad_args' ((InA 'wait_for_status' @{ session = $A; status = @('ready'); timeout_secs = 5 }).content[0].text -like 'bad_args*')
   [void](Tool 'close_session' @{ session = $C2 })
   [void](Tool 'close_session' @{ session = $A })
@@ -893,9 +948,9 @@ c.close()
   Check 'Nur lesen: create_session kind=chat verboten (forbidden)' ((Code (Tool 'create_session' @{ kind = 'chat' })) -eq 'forbidden')
   $script:prestart = $null
 
-  Write-Host "== Minimierte Bereiche (#142): Wiederherstellung, kaputtes Layout, focus_session holt zurueck" -ForegroundColor Cyan
+  Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session oeffnet allein" -ForegroundColor Cyan
   Stop-Hub
-  # 960 ist minimiert (Platz: rechts neben 961); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
+  # 960 ist minimiert (mit `slot` wie in 2.2.0 – seit 2.3.0 deprecated, nur durchgereicht); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
   $bad = [ordered]@{ Split = [ordered]@{ dir = 'Horizontal'; ratio = $null; a = @{ Leaf = 961 }; b = [ordered]@{ Split = [ordered]@{ dir = 'Vertical'; ratio = 0.5; a = @{ Leaf = 777 }; b = @{ Leaf = 961 } } } } }
   $st = [ordered]@{
     sessions = @(
@@ -915,7 +970,20 @@ c.close()
   $fr = Tool 'focus_session' @{ session = 960 }
   Start-Sleep -Milliseconds 600
   $mn = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq 960 })
-  Check 'focus_session holt die minimierte Sitzung zurueck (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session oeffnet die minimierte Sitzung allein (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
+  Check 'focus_session: der bisher sichtbare Bereich ist jetzt minimiert (laeuft weiter)' ($vs.minimized -eq $true -and $vs.focused -eq $false -and $vs.status -ne 'exited') ($vs | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961 }
+  Start-Sleep -Milliseconds 600
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session zurueck: Plaetze getauscht (961 sichtbar, 960 minimiert)' (-not $fr.err -and $vs.minimized -eq $false -and $vs.focused -eq $true -and $mn.minimized -eq $true) ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961 }
+  Start-Sleep -Milliseconds 300
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }
+  Check 'focus_session auf eine sichtbare Sitzung minimiert nichts' (-not $fr.err -and $mn.minimized -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 1) ($ss | ConvertTo-Json -Compress)
 } catch {
   # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.
   $script:fail++; Write-Host "  ABBRUCH  $($_.Exception.Message)" -ForegroundColor Red

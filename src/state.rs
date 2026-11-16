@@ -357,13 +357,30 @@ pub struct SessionMeta {
     /// Fehlt in der Datei, wenn nicht minimiert.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub minimized: bool,
-    /// Wo der minimierte Bereich stand (Geschwister, Richtung, Seite, Anteil) – dort kommt er wieder hin.
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::layout::lenient_slot")]
-    pub slot: Option<crate::layout::Slot>,
+    /// **Deprecated, nur zur Kompatibilität behalten, entfällt in 3.0.0.** 2.2.0 merkte hier den alten Platz eines
+    /// minimierten Bereichs. Seit 2.3.0 öffnet ein zurückgeholter Bereich allein: Der Wert wird unverändert durchgereicht
+    /// (beliebiges JSON, nie ausgewertet, nie neu angelegt) und gelöscht, sobald die Sitzung minimiert oder wieder gezeigt wird.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<serde_json::Value>,
     /// Startoptionen für Claude Code (seit 2.3.0): Modell, Effort, Permission-Mode, Agent. Fehlt in der Datei, wenn keine
     /// gesetzt sind; ungültige Werte werden beim Laden verworfen. Ältere Sitzungen haben sie ggf. noch in `claude_args`.
     #[serde(skip_serializing_if = "crate::claude_opts::ClaudeOpts::is_empty")]
     pub claude_opts: crate::claude_opts::ClaudeOpts,
+    /// Agenten-Kette (seit 2.3.0, #152): Sitzungen, von denen diese Sitzung abstammt – ihr Ersteller über
+    /// `create_session` samt dessen Kette, und jeder Agent, der über MCP in sie geschrieben hat, samt seiner Kette.
+    /// Ein Agent in dieser Sitzung darf in keine davon schreiben. Aufsteigend, ohne Doppelte; fehlt in der Datei, wenn
+    /// leer (vom Nutzer gestartet und nie von einem Agenten beschrieben). Ungültige Werte laden als leer.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_chain")]
+    pub agent_chain: Vec<u64>,
+}
+
+/// `agent_chain` nachsichtig lesen: eine Liste von Zahlen; Fremdes (kein Array, keine Zahlen) wird übergangen.
+fn lenient_chain<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u64>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let mut out: Vec<u64> = v.as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
 /// Art einer Sitzung.
@@ -443,6 +460,7 @@ impl Default for SessionMeta {
             minimized: false,
             slot: None,
             claude_opts: Default::default(),
+            agent_chain: Vec::new(),
         }
     }
 }
@@ -1117,6 +1135,32 @@ mod kind_tests {
     }
 
     #[test]
+    fn agent_chain_survives_a_restart_and_old_files_load_without_it() {
+        let dir = std::env::temp_dir().join(format!("pd-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        // 2.2.0 und älter: kein Feld → leere Kette (vom Nutzer gestartet)
+        std::fs::write(&p, r#"{"sessions":[{"id":3,"name":"pwsh","shell_id":"pwsh","project":1}],"next_id":4}"#).unwrap();
+        let (st, _) = load_saved(&p);
+        assert!(st.sessions[0].agent_chain.is_empty());
+        // Leere Kette wird nicht geschrieben (ältere Versionen sehen dieselbe Datei)
+        assert!(!serde_json::to_string(&st.sessions[0]).unwrap().contains("agent_chain"));
+        // Neustart: die Kette bleibt an der Sitzung (Ids werden nie neu vergeben)
+        let saved = SavedState { sessions: vec![SessionMeta { id: 12, agent_chain: vec![5, 10], ..SessionMeta::default() }], next_id: 13, ..SavedState::default() };
+        save_json(&p, &saved);
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none());
+        assert_eq!(st.sessions[0].agent_chain, [5, 10]);
+        // Fremde Werte: nachsichtig (sortiert, ohne Doppelte, nur Zahlen; kein Array → leer)
+        let m: SessionMeta = serde_json::from_str(r#"{"id":1,"agent_chain":[9,"x",3,9,-1]}"#).unwrap();
+        assert_eq!(m.agent_chain, [3, 9]);
+        let m: SessionMeta = serde_json::from_str(r#"{"id":1,"agent_chain":"5"}"#).unwrap();
+        assert!(m.agent_chain.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn chat_kind_roundtrip_and_unknown_kind_is_terminal() {
         let m = SessionMeta { id: 7, kind: SessionKind::Chat, chat: Some(ChatMeta { server: "echo".into(), model: "m1".into() }), ..SessionMeta::default() };
         let s = serde_json::to_string(&m).unwrap();
@@ -1134,20 +1178,55 @@ mod kind_tests {
 
     #[test]
     fn minimized_sessions_round_trip_and_old_files_load() {
-        use crate::layout::{Dir, Slot};
-        // 2.1.0: kein `minimized`/`slot` → nicht minimiert; nicht minimierte Sitzungen schreiben die Felder auch nicht
+        // 2.1.0: kein `minimized` → nicht minimiert; nicht minimierte Sitzungen schreiben das Feld auch nicht
         let old: SessionMeta = serde_json::from_str(r#"{"id":3,"name":"pwsh"}"#).unwrap();
-        assert!(!old.minimized && old.slot.is_none());
+        assert!(!old.minimized);
         let s = serde_json::to_string(&old).unwrap();
         assert!(!s.contains("minimized") && !s.contains("slot"), "{s}");
-        // minimiert mit Platz: Rundreise
-        let m = SessionMeta { id: 4, minimized: true, slot: Some(Slot { sibling: vec![1, 2], dir: Dir::Vertical, before: false, ratio: 0.3 }), ..SessionMeta::default() };
-        let back: SessionMeta = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
-        assert!(back.minimized);
-        assert_eq!(back.slot, m.slot);
-        // kaputter Platz: Sitzung bleibt (minimiert, ohne Platz)
-        let back: SessionMeta = serde_json::from_str(r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#).unwrap();
+        // minimiert (2.3.0): Rundreise, ohne `slot` (wird nie neu angelegt)
+        let m = SessionMeta { id: 4, minimized: true, ..SessionMeta::default() };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"minimized\":true") && !s.contains("slot"), "{s}");
+        assert!(serde_json::from_str::<SessionMeta>(&s).unwrap().minimized);
+        // 2.2.0 mit `slot` (gültig oder kaputt): lädt, der Wert wird unverändert durchgereicht (deprecated bis 3.0.0)
+        for (old, slot) in [
+            (r#"{"id":5,"minimized":true,"slot":{"sibling":[1,2],"dir":"Vertical","before":false,"ratio":0.3}}"#, r#"{"sibling":[1,2],"dir":"Vertical","before":false,"ratio":0.3}"#),
+            (r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#, r#"{"dir":"Up"}"#),
+            (r#"{"id":5,"minimized":true,"slot":17}"#, "17"),
+        ] {
+            let back: SessionMeta = serde_json::from_str(old).unwrap_or_else(|e| panic!("{old}: {e}"));
+            assert!(back.id == 5 && back.minimized, "{old}");
+            let want: serde_json::Value = serde_json::from_str(slot).unwrap();
+            assert_eq!(back.slot.as_ref(), Some(&want), "{old}");
+            let again: SessionMeta = serde_json::from_str(&serde_json::to_string(&back).unwrap()).unwrap();
+            assert_eq!(again.slot, Some(want), "{old}: Rundreise");
+        }
+        // `null` → kein Wert, wird nicht geschrieben
+        let back: SessionMeta = serde_json::from_str(r#"{"id":5,"minimized":true,"slot":null}"#).unwrap();
         assert!(back.minimized && back.slot.is_none());
+        assert!(!serde_json::to_string(&back).unwrap().contains("slot"));
+    }
+
+    #[test]
+    fn state_file_of_2_2_0_with_slots_loads() {
+        let dir = std::env::temp_dir().join(format!("pd-slot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        std::fs::write(
+            &p,
+            r#"{"sessions":[{"id":1},{"id":2,"minimized":true,"slot":{"sibling":[1],"dir":"Horizontal","before":false,"ratio":0.5}},
+                            {"id":3,"minimized":true,"slot":"kaputt"}],
+                "next_id":4,"active_project":1,"projects":[{"id":1,"name":"A","layout":{"Leaf":1},"focused":1}]}"#,
+        )
+        .unwrap();
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none(), "{note:?}");
+        assert_eq!(st.sessions.len(), 3);
+        assert!(!st.sessions[0].minimized && st.sessions[1].minimized && st.sessions[2].minimized);
+        assert!(st.sessions[0].slot.is_none() && st.sessions[1].slot.is_some());
+        assert_eq!(st.sessions[2].slot, Some(serde_json::json!("kaputt")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

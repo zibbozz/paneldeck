@@ -14,15 +14,28 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Mittelklick auf eine Sitzung in der Seitenleiste schließt sie, mit derselben Rückfrage wie der Schließen-Knopf (#155).
 - Alle Sitzungen auf einmal schließen (#156): rötlicher Papierkorb an Ordnern in der Seitenleiste (beim Überfahren; inklusive Unterordnern, minimierten Sitzungen und Chats) und rechts neben dem Filterfeld (alle Sitzungen aller Projekte und Fenster); außerdem im Projekt-Kontextmenü, in der Befehls-Palette und als Tastenkürzel (standardmäßig keins). Die Rückfrage listet auf, was beendet wird, und gibt „Alle schließen“ nach 3 Sekunden frei; Git-Worktrees und Branches bleiben erhalten.
 - Einstellung *Sitzungen merken* (Einstellungen → Allgemein, standardmäßig an; neues optionales Feld `remember_sessions` in `settings.json`) (#157). Aus: jeder Start ist frisch – keine Terminals, Chats, Projekte oder Ordner aus dem letzten Lauf; Chatverläufe werden beim Beenden gelöscht. Einstellungen, Todo-Liste und Tickets bleiben. Ausschalten fragt nach; der Stand wird als `state.json.bak-<Datum>` gesichert (nur die neueste bleibt).
+- Kontextmenü „Agenten-Kette zurücksetzen“ für Sitzungen aus einer Agenten-Kette; der Tooltip der Sitzung nennt die Kette.
 
 ### Changed
 
 - Die Rückfrage beim Schließen gibt *Schließen* erst nach 3 Sekunden frei; Enter bestätigt erst nach dem Countdown, und Esc/Enter im Dialog erreichen das Terminal dahinter nicht mehr.
 - *Alle Sitzungen schließen …* am Ordner öffnet eine Rückfrage mit Liste statt des Doppelklick-Knopfs.
+- Eine minimierte Sitzung zurückholen (Klick in der Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`) öffnet sie jetzt allein: Sie ersetzt das Layout des Fensters/Projekts, die bisher sichtbaren Bereiche werden zu minimierten Sitzungen und laufen weiter. Strg+Umschalt+W minimiert nur noch; der alte Platz in der Teilung wird nicht mehr gemerkt (#162).
+
+### Deprecated
+
+- `state.json`: Das Feld `slot` minimierter Sitzungen (2.2.0) wird nicht mehr verwendet oder angelegt; ein vorhandener Wert wird unverändert durchgereicht und entfällt, sobald die Sitzung minimiert oder wieder gezeigt wird. Es wird in 3.0.0 entfernt.
 
 ### Fixed
 
 - Ein Mittelklick mit leichter Mausbewegung zieht keine Sitzung und keinen Ordner mehr.
+- Zwischen Seitenleiste und Terminalbereich bleibt keine durchsichtige Lücke mehr, wenn eine Zeile der Seitenleiste breiter ist als die Leiste; die Leiste behält ihre Breite und schneidet die Zeile ab (#160).
+- Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
+
+### Security
+
+- Sitzungen aus einer Agenten-Kette sind jetzt markiert (#152): Ein Terminal, eine Claude-Sitzung oder ein Chat, die ein Agent mit `create_session` (oder `paneldeck --open` aus einer Sitzung heraus) anlegt, erbt die Agenten-Kette des Erstellers samt ihm, und ein Glied der Kette, das in eine andere Sitzung schreibt (`send_text`, `send_keys`, `run_command`, `queue_prompt`, `send_chat_message`), gibt die Kette weiter. Kein Agent – MCP-Brücke, Claude-Sitzung oder Chat – darf in eine Sitzung seiner Kette schreiben, sie umbenennen, anzeigen oder schließen (`forbidden`). Ketten stehen in `state.json` (neues optionales Feld `agent_chain`), überstehen einen Neustart und werden von `whoami` und `list_sessions` gemeldet. Vom Nutzer gestartete Agenten verhalten sich wie bisher, nur kann eine von einem Agenten angelegte Sitzung nicht mehr in ihren Ersteller zurückschreiben.
+- Der Hub ermittelt den aufrufenden Prozess jetzt selbst, sofort beim Eintreffen der Verbindung (TCP-Tabelle, der laufende Prozess und sein Prozessbaum mit Erzeugungszeiten), und ignoriert eine vom Client angegebene Prozess-ID; ein Aufrufer, der sich nicht ermitteln lässt (schon beendet, Verbindung weg), wird abgewiesen. `PANELDECK_SESSION` zählt nur noch für WSL-Terminals und nur zusammen mit dem geheimen Schlüssel der Sitzung `PANELDECK_SESSION_KEY`. Gegen einen böswilligen Agenten mit eigener Shell nur nach bestem Bemühen: Prozesse, die sich keiner Sitzung zuordnen lassen, gelten als externe Aufrufer; losgelöste oder verwaiste Prozesse (nach Paneldeck gestartet, ihr Elternprozess ist beendet) dürfen nicht in Sitzungen einer Agenten-Kette schreiben und kein `--open --claude` aufrufen; Prozesse, die ganz außerhalb von Paneldeck gestartet werden (z. B. geplante Tasks, WMI), bleiben außerhalb des Schutzes.
 
 ## [2.2.0] - 2026-11-16
 
