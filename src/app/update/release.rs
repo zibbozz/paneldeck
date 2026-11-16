@@ -45,7 +45,12 @@ pub fn zip_name(v: &Version) -> String {
 
 /// Pfad von `paneldeck.exe` im portablen ZIP.
 pub fn zip_exe_entry(v: &Version) -> String {
-    format!("paneldeck-{v}/paneldeck.exe")
+    zip_entry(v, "paneldeck.exe")
+}
+
+/// Pfad einer Datei im Programmordner des portablen ZIPs (`paneldeck-<v>/<name>`).
+pub fn zip_entry(v: &Version, name: &str) -> String {
+    format!("paneldeck-{v}/{name}")
 }
 
 /// Zerlegt eine HTTPS-Adresse in (Host, Pfad mit Abfrage). Lehnt alles ab, was nicht eindeutig ist:

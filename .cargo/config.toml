@@ -1,2 +1,8 @@
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
+
+# C-Laufzeit statisch einbinden (#183): keine VCRUNTIME140.dll, die der Lader vor main() per Standardsuche
+# (notfalls im Arbeitsordner) suchen muesste. Gilt fuer jedes cargo build/test. Achtung: eine gesetzte Umgebungsvariable
+# RUSTFLAGS ersetzt diese Einstellung - tools/common.sh haengt das Flag deshalb selbst an.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

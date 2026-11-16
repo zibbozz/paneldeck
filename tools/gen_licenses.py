@@ -22,6 +22,8 @@ EXTRA_MAP = {
     "hexf-CC0.txt": "hexf-parse",
 }
 EXTRA_BY_PKG = {pkg: files.split() for files, pkgs in EXTRA_MAP.items() for pkg in pkgs.split()}
+# Mitgelieferte Programmdateien, die keine Crates sind (Version aus dem Fetch-Skript).
+FETCH_CONPTY = ROOT / "tools" / "fetch-conpty.ps1"
 WANT = ("license", "licence", "copying", "copyright", "notice", "unlicense")
 
 
@@ -57,6 +59,17 @@ def collect():
     return [tuple(e[:4]) for e in entries]
 
 
+def bundled():
+    """(Name, Version, Lizenz, Lizenztext) der mitgelieferten Programmdateien."""
+    import re
+    m = re.search(r"^\$Version = '([^']+)'", FETCH_CONPTY.read_text(encoding="utf-8"), re.M)
+    if not m:
+        sys.exit("tools/fetch-conpty.ps1: $Version nicht gefunden")
+    # Lizenz und Hinweise Dritter (NOTICE.md von microsoft/terminal: in OpenConsole einkompilierter Fremdcode)
+    texts = [(EXTRA / f).read_text(encoding="utf-8").strip() for f in ("conpty-MIT.txt", "conpty-NOTICE.md")]
+    return [("Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe)", m.group(1), "MIT", "\n\n\n".join(texts))]
+
+
 def render():
     entries = collect()
     by_text = {}   # sha -> (text, [pakete])
@@ -76,9 +89,15 @@ def render():
         out.append(f"  {name} {ver} - {lic}")
     if missing:
         out += ["", "Pakete ohne eigene Lizenzdatei im Quellpaket (Lizenz laut Cargo.toml oben):"] + [f"  {m}" for m in missing]
+    out += ["", "Mitgelieferte Programmdateien (neben paneldeck.exe, unverändert):", ""]
+    extra = bundled()
+    for name, ver, lic, _ in extra:
+        out.append(f"  {name} {ver} - {lic}")
     out.append("")
     for i, (t, pk) in enumerate(sorted(by_text.values(), key=lambda v: v[1][0]), 1):
         out += ["", "-" * 78, f"Text {i} – gilt für: " + ", ".join(sorted(set(pk))), "-" * 78, "", t, ""]
+    for name, ver, _lic, t in extra:
+        out += ["", "-" * 78, f"Mitgeliefert: {name} {ver}", "-" * 78, "", t, ""]
     return "\n".join(out) + "\n"
 
 

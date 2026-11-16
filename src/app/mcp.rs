@@ -936,6 +936,8 @@ impl App {
                     "shell": e.eff_shell(),
                     "claude": e.is_claude(),
                     "kind": if e.is_chat() { "chat" } else { "terminal" },
+                    // Konsolen-Host des Terminals (Windows): "bundled" (mitgelieferte ConPTY) oder "system"; sonst null.
+                    "console_host": e.live.as_ref().and_then(|s| s.console_host),
                     "model": e.meta.chat.as_ref().map(|c| c.model.clone()),
                     // Nur Chats: die Runde hielt an und wartet auf „Weiter“ des Nutzers (Status bleibt `ready`).
                     "paused": e.chat.as_ref().map(|c| c.paused),
