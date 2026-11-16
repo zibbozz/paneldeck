@@ -191,12 +191,13 @@ try {
   Check 'whoami von aussen: nicht in einem Hub-Terminal' ($null -eq $w0.data.session -and $w0.data.identified_by -eq 'none')
   $ac = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Eltern-Agent' }; $A = $ac.data.id; Start-Sleep 4
   # Ein Agent in der Sitzung $A: startet die Bruecke als Kindprozess der Shell (Prozessbaum), ohne Umgebungsvariable.
-  function InA($tool, $targs) {
+  function InS($s, $tool, $targs) {
     $req = @{ jsonrpc = '2.0'; id = 1; method = 'tools/call'; params = @{ name = $tool; arguments = $targs } } | ConvertTo-Json -Depth 8 -Compress
     $cmd = "`$env:PANELDECK_SESSION=`$null; '" + $req.Replace("'", "''") + "' | & '$dir\paneldeck.exe' mcp | Out-String"
-    $r = Tool 'run_command' @{ session = $A; command = $cmd; timeout_secs = 40 }
+    $r = Tool 'run_command' @{ session = $s; command = $cmd; timeout_secs = 40 }
     try { ($r.data.output | ConvertFrom-Json).result } catch { $null }
   }
+  function InA($tool, $targs) { InS $A $tool $targs }
   $me = InA 'whoami' @{}
   Check 'whoami in Hub-Sitzung (Prozessbaum, ohne Umgebungsvariable)' ($me.structuredContent.session -eq $A -and $me.structuredContent.identified_by -eq 'process') ($me | ConvertTo-Json -Compress -Depth 5)
   $kid = InA 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Kind' }; $K = $kid.structuredContent.id
@@ -210,6 +211,15 @@ try {
   Check 'Eltern-Agent steuert sein Kind (run_command)' ($rc.structuredContent.output.Trim() -eq 'kind-ok') ($rc | ConvertTo-Json -Compress -Depth 5)
   $self = InA 'send_text' @{ session = $A; text = 'x' }
   Check 'Eltern-Agent darf nicht in die eigene Sitzung schreiben' ($self.isError -eq $true -and $self.content[0].text -like 'forbidden*')
+  # Agenten-Kette (#152): das Kind ist markiert; ein Agent darin darf nicht in den Eltern-Agenten schreiben, nur lesen.
+  $kw = InS $K 'whoami' @{}
+  Check 'Kette: whoami im Kind nennt agent_chain = Eltern-Agent' ($kw.structuredContent.session -eq $K -and @($kw.structuredContent.agent_chain) -contains $A) ($kw | ConvertTo-Json -Compress -Depth 5)
+  Check 'Kette: list_sessions zeigt agent_chain des Kindes' (@(((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $K }).agent_chain) -contains $A)
+  $kx = InS $K 'send_text' @{ session = $A; text = 'echo kind-leak' }
+  Check 'Kette: Agent im Kind -> send_text in den Eltern-Agenten forbidden' ($kx.isError -eq $true -and $kx.content[0].text -like 'forbidden*' -and $kx.content[0].text -match 'agent chain') ($kx | ConvertTo-Json -Compress -Depth 5)
+  Check 'Kette: Agent im Kind -> rename_session des Eltern-Agenten forbidden' ((InS $K 'rename_session' @{ session = $A; name = 'x' }).content[0].text -like 'forbidden*')
+  Check 'Kette: Agent im Kind darf den Eltern-Agenten lesen' ((InS $K 'read_terminal' @{ session = $A; lines = 5 }).isError -ne $true)
+  Check 'Kette: von aussen (ohne Kette) bleibt Schreiben erlaubt' (-not (Tool 'send_text' @{ session = $A; text = ' '; submit = $false }).err)
   $cl = InA 'close_session' @{ session = $K }
   Check 'Eltern-Agent schliesst sein Kind' ($cl.isError -ne $true)
   [void](Tool 'close_session' @{ session = $A })
@@ -650,6 +660,7 @@ c.close()
           if ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
           elseif ($hasTools -and $last -match 'chain please (\d+) (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_chat_message","arguments":{"session":' + $Matches[1] + ',"text":"proxy please ' + $Matches[2] + '"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'read please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_chat","arguments":{"session":' + $Matches[1] + ',"last":40}}}]},"done":false}' }
+          elseif ($hasTools -and $last -match 'spawn please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"create_session","arguments":{"shell":"powershell","name":"Chat-Kind"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'proxy please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_text","arguments":{"session":' + $Matches[1] + ',"text":"echo proxy-leak"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'tools please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_sessions","arguments":{}}}]},"done":false}' }
           else {
@@ -755,6 +766,20 @@ c.close()
   Check 'Umweg-Schutz ueber eine Kette: Chat -> Chat -> send_text in die Sitzung des Agenten -> forbidden' ($px.isError -ne $true -and $w2.data.matched -eq $true -and $sc.Count -ge 1 -and $sc[-1].status -eq 'ok' -and $pu2.note -eq 'Sent by agent Smoke-LLM' -and $pt2.Count -ge 1 -and $pt2[-1].status -eq 'denied' -and $pt2[-1].content -match 'cannot write into that agent') "$($rc1.text) /// $($rc2.text)"
   Start-Sleep 1
   Check 'Umweg-Schutz: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'proxy-leak')
+  # Markierung (#152): Agent $A -> Chat $C legt per create_session ein Terminal an; ein Agent dort darf weder in $A
+  # noch in $C schreiben (bis 2.2.0 war ein solches Terminal nicht markiert).
+  [void](InA 'send_chat_message' @{ session = $C; text = 'spawn please' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $T = @((Tool 'list_sessions').data.sessions) | Where-Object { $_.parent -eq $C -and $_.kind -eq 'terminal' } | Select-Object -First 1
+  Check 'Markierung: Terminal eines Chats der Kette erbt sie (agent_chain = Agent + Chat)' ($null -ne $T -and @($T.agent_chain) -contains $A -and @($T.agent_chain) -contains $C) ($T | ConvertTo-Json -Compress)
+  if ($T) {
+    Start-Sleep 4
+    $tw = InS $T.id 'send_text' @{ session = $A; text = 'echo taint-leak' }
+    Check 'Markierung: Agent im Terminal des Chats -> send_text in den urspruenglichen Agenten forbidden' ($tw.isError -eq $true -and $tw.content[0].text -like 'forbidden*' -and $tw.content[0].text -match 'agent chain') ($tw | ConvertTo-Json -Compress -Depth 5)
+    $tc = InS $T.id 'send_chat_message' @{ session = $C; text = 'x' }
+    Check 'Markierung: ... und nicht in den Chat der Kette' ($tc.isError -eq $true -and $tc.content[0].text -like 'forbidden*') ($tc | ConvertTo-Json -Compress -Depth 5)
+    Check 'Markierung: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'taint-leak')
+  }
   Check 'wait_for_status auf die eigene Sitzung -> bad_args' ((InA 'wait_for_status' @{ session = $A; status = @('ready'); timeout_secs = 5 }).content[0].text -like 'bad_args*')
   [void](Tool 'close_session' @{ session = $C2 })
   [void](Tool 'close_session' @{ session = $A })

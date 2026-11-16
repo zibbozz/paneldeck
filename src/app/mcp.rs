@@ -529,14 +529,14 @@ impl App {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         // Kein Umweg: hat ein Agent diese Runde ausgelöst, schreibt der Chat nie in dessen Sitzung (und schließt sie nie) –
         // auch nicht in eine andere Sitzung der auslösenden Kette (Agent → Chat A → Chat B).
-        let origins = self.entries.get(&chat).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+        // Vorfahren des Chats: gespeicherte Agenten-Kette (#152) und die Kette der laufenden Runde.
+        let origins = super::taint::ancestors(&self.entries, Some(chat));
         if proxy_forbidden(tool, args, &origins) {
             self.mcp_finish(&tx, tool, args, Some(chat), "chat", Err(proxy_error()));
             return rx;
         }
         if let Some(msg) = crate::chat::tools::spawn_forbidden(tool, args, &origins) {
-            let de_msg = if msg == crate::chat::tools::SPAWN_CLAUDE_MESSAGE { "Ein von einem Agenten ausgelöster Chat darf keine Claude-Sitzungen starten." } else { "Ein von einem Agenten ausgelöster Chat darf die MCP-Brücke von Paneldeck nicht starten." };
-            self.mcp_finish(&tx, tool, args, Some(chat), "chat", Err(er("forbidden", tr(de_msg, msg))));
+            self.mcp_finish(&tx, tool, args, Some(chat), "chat", Err(er("forbidden", tr("Ein von einem Agenten ausgelöster Chat darf die MCP-Brücke von Paneldeck nicht starten.", msg))));
             return rx;
         }
         if let Out::Now(r) = self.mcp_call(ctx, tool, args, Some(chat), "chat", &tx) {
@@ -554,7 +554,26 @@ impl App {
         if write && caller == Some(id) {
             return Err(er("forbidden", tr("Ein Agent darf nicht in seine eigene Sitzung schreiben oder sie schließen.", "An agent must not write to or close its own session.")));
         }
+        // Auch nicht über einen Umweg: in keine Sitzung seiner Agenten-Kette – für jeden Aufrufer (#152).
+        if write && super::taint::write_forbidden(&self.entries, caller, id) {
+            return Err(super::taint::chain_error());
+        }
         Ok(id)
+    }
+
+    /// `caller` hat `id` über `create_session` angelegt: die neue Sitzung bekommt seine Agenten-Kette samt ihm (#152).
+    /// Geänderte Ketten werden sofort gespeichert (ein Absturz soll die Markierung nicht verlieren).
+    fn mcp_taint_create(&mut self, caller: Option<u64>, id: u64) {
+        if super::taint::on_create(&mut self.entries, caller, id) {
+            self.save_all();
+        }
+    }
+
+    /// `caller` hat in `id` geschrieben: als Glied einer Agenten-Kette markiert er das Ziel mit ihr (#152).
+    fn mcp_taint_write(&mut self, caller: Option<u64>, id: u64) {
+        if super::taint::on_write(&mut self.entries, caller, id) {
+            self.save_all();
+        }
     }
 
     fn mcp_live(&self, id: u64) -> Result<&Session, (String, String)> {
@@ -751,6 +770,8 @@ impl App {
             "claude": e.meta.claude,
             "status": status_str(e),
             "children": children,
+            // Sitzungen, in die dieser Agent nicht schreiben darf (er stammt von ihnen ab, #152).
+            "agent_chain": super::taint::ancestors(&self.entries, Some(id)),
         })
     }
 
@@ -788,6 +809,7 @@ impl App {
                     "git": git.map(|g| json!({"branch": g.branch, "changed_files": g.changed})),
                     "created_by_agent": self.mcp.created.contains_key(id),
                     "parent": self.mcp.created.get(id).and_then(|c| *c),
+                    "agent_chain": super::taint::ancestors(&self.entries, Some(*id)),
                     "you": caller == Some(*id),
                     "error": e.error,
                 })
@@ -907,6 +929,7 @@ impl App {
             return Err(er("spawn_failed", err));
         }
         self.mcp.created.insert(id, caller);
+        self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
         Ok(json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.meta.claude, "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")}))
     }
@@ -939,6 +962,7 @@ impl App {
         let group = self.mcp_child_group(s("group"), caller);
         let id = self.new_session(ctx, NewOpts { cwd, name: s("name"), group, quiet: true, window: Some(window), project: Some(project), chat: Some(meta.clone()), ..NewOpts::default() });
         self.mcp.created.insert(id, caller);
+        self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
         let server = self.settings.llm_servers.iter().find(|x| x.id == meta.server).map(|x| x.name.clone()).unwrap_or_default();
         Ok(json!({
@@ -1010,6 +1034,7 @@ impl App {
         }
         match self.chat_send(ctx, id, Some(text), super::ChatSendOrigin::Agent { caller, note: Some(note.clone()) }) {
             super::ChatSendResult::Sent => {
+                self.mcp_taint_write(caller, id);
                 let index = self.entries.get(&id).and_then(|e| e.chat.as_ref()).and_then(|c| chatmod::logic::last_user(&c.file.messages));
                 self.push_toast(mcp::short(&format!("{chat_name}: {note}"), 140), super::toasts::ToastKind::Info, None);
                 ctx.request_repaint();
@@ -1056,6 +1081,7 @@ impl App {
         if submit && e.meta.claude && e.status == ClaudeStatus::Idle {
             e.status = ClaudeStatus::Working;
         }
+        self.mcp_taint_write(caller, id);
         Ok(json!({"ok": true}))
     }
 
@@ -1074,6 +1100,7 @@ impl App {
         }
         self.mcp_check_writable(id)?;
         self.mcp_live(id)?.write_raw(&bytes);
+        self.mcp_taint_write(caller, id);
         Ok(json!({"ok": true, "keys": keys.len()}))
     }
 
@@ -1124,7 +1151,9 @@ impl App {
         })();
         match r {
             Ok(p) => {
+                let id = p.session;
                 self.mcp.pending.push(p);
+                self.mcp_taint_write(caller, id);
                 Out::Later
             }
             Err(e) => Out::Now(Err(e)),
@@ -1306,11 +1335,19 @@ impl App {
             e.send_next_queued();
             sent = true;
         }
-        Ok(json!({"queue_len": e.meta.queue.len(), "sent_immediately": sent}))
+        let out = json!({"queue_len": e.meta.queue.len(), "sent_immediately": sent});
+        // Ein Glied einer Agenten-Kette markiert die Claude-Sitzung, der es einen Prompt gibt (#152): sie kann ihn
+        // nicht in eine Sitzung der Kette weiterreichen.
+        self.mcp_taint_write(caller, id);
+        Ok(out)
     }
 
     fn mcp_rename(&mut self, args: &Value, caller: Option<u64>) -> R {
         let id = self.mcp_target(args, caller, false)?;
+        // Die eigene Sitzung darf ein Agent umbenennen, eine Sitzung seiner Agenten-Kette nicht (#152).
+        if super::taint::write_forbidden(&self.entries, caller, id) {
+            return Err(super::taint::chain_error());
+        }
         let name = args.get("name").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).ok_or_else(|| er("bad_args", tr("name fehlt", "name is missing")))?;
         let e = self.entries.get_mut(&id).ok_or_else(|| er("not_found", tr("Sitzung nicht gefunden", "Session not found")))?;
         e.meta.name = name.chars().take(80).collect();
