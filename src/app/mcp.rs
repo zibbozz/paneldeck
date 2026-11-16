@@ -17,17 +17,19 @@ use std::sync::mpsc::SyncSender;
 
 type R = Result<Value, (String, String)>;
 
-/// Wurde eine der Claude-Startoptionen angegeben (nicht leer)?
+/// Wurde eine der Claude-Startoptionen angegeben (nicht leer)? Auch `claude_flags` (#182).
 fn has_claude_opts(args: &Value) -> bool {
-    ["model", "effort", "permission_mode", "agent"].iter().any(|k| match args.get(*k) {
+    ["model", "effort", "permission_mode", "agent", "claude_flags"].iter().any(|k| match args.get(*k) {
         None | Some(Value::Null) => false,
         Some(Value::String(s)) => !s.trim().is_empty(),
+        Some(Value::Array(a)) => !a.is_empty(),
         Some(_) => true,
     })
 }
 
-/// `model`/`effort`/`permission_mode`/`agent` einer Claude-Sitzung (`null`, wenn Paneldeck sie nicht setzt).
-/// Bei Chats bleibt `model` das Modell des Chats; die übrigen sind dort `null`.
+/// `model`/`effort`/`permission_mode`/`agent` einer Claude-Sitzung (`null`, wenn Paneldeck sie nicht setzt), dazu
+/// `claude_flags` (gesetzte Schalter) und `claude_user_options` (Namen der Wertoptionen des Nutzers, ohne Werte; #182) –
+/// beide leer ohne Claude. Bei Chats bleibt `model` das Modell des Chats; die übrigen sind dort `null` bzw. leer.
 fn add_claude_opts(v: &mut Value, e: &super::Entry) {
     // Optionen des laufenden Starts (geänderte Einstellungen gelten erst nach dem Neu laden, #170).
     let o = if e.is_claude() { e.launched_opts.clone() } else { ClaudeOpts::default() };
@@ -35,7 +37,7 @@ fn add_claude_opts(v: &mut Value, e: &super::Entry) {
     if !e.is_chat() {
         v["model"] = j["model"].clone();
     }
-    for k in ["effort", "permission_mode", "agent"] {
+    for k in ["effort", "permission_mode", "agent", "claude_flags", "claude_user_options"] {
         v[k] = j[k].clone();
     }
 }
@@ -1000,12 +1002,13 @@ impl App {
             return Err(er(
                 "bad_args",
                 tr(
-                    "model, effort, permission_mode und agent gibt es nur mit claude = true (model außerdem mit kind = „chat“).",
-                    "model, effort, permission_mode and agent only apply with claude = true (model also with kind = “chat”).",
+                    "model, effort, permission_mode, agent und claude_flags gibt es nur mit claude = true (model außerdem mit kind = „chat“).",
+                    "model, effort, permission_mode, agent and claude_flags only apply with claude = true (model also with kind = “chat”).",
                 ),
             ));
         }
-        // Nur geprüfte Startoptionen, nie freie Argumente; bypassPermissions nie (auch nicht als Standard des Nutzers).
+        // Nur geprüfte Startoptionen und Schalter (#182), nie freie Argumente oder Wertoptionen; bypassPermissions nie (auch
+        // nicht als Standard des Nutzers); die Rechte erweiternden Standards des Nutzers gelten hier nicht (`for_agent`).
         let copts = ClaudeOpts::from_mcp(args).map_err(|(d, e)| er("bad_args", if de() { d } else { e }))?.for_agent(&self.settings.claude_defaults);
         if claude && !self.settings.claude_mode {
             return Err(er("claude_mode_off", tr("Der Claude-Modus ist in den Einstellungen ausgeschaltet.", "Claude mode is switched off in the settings.")));
@@ -1067,9 +1070,11 @@ impl App {
     /// `create_session` mit `kind = chat`: Chat mit einem eingerichteten Modell, im Fenster/Projekt des Aufrufers.
     fn mcp_create_chat(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-        if s("shell").is_some() || s("prompt").is_some() || s("effort").is_some() || s("permission_mode").is_some() || s("agent").is_some() || args.get("claude").and_then(|v| v.as_bool()) == Some(true) {
-            return Err(er("bad_args", tr("Ein Chat hat keine Shell und kein Claude: shell, claude, prompt, effort, permission_mode und agent gibt es nur für Terminals.", "A chat has no shell and no Claude: shell, claude, prompt, effort, permission_mode and agent only apply to terminals.")));
+        let flags = args.get("claude_flags").is_some_and(|v| !v.is_null());
+        if s("shell").is_some() || s("prompt").is_some() || s("effort").is_some() || s("permission_mode").is_some() || s("agent").is_some() || flags || args.get("claude").and_then(|v| v.as_bool()) == Some(true) {
+            return Err(er("bad_args", tr("Ein Chat hat keine Shell und kein Claude: shell, claude, prompt, effort, permission_mode, agent und claude_flags gibt es nur für Terminals.", "A chat has no shell and no Claude: shell, claude, prompt, effort, permission_mode, agent and claude_flags only apply to terminals.")));
         }
+        crate::claude_opts::user_only_param(args).map_err(|(d, e)| er("bad_args", if de() { d } else { e }))?;
         let cwd = s("cwd");
         if let Some(c) = &cwd {
             if !std::path::Path::new(c).is_dir() {
@@ -1722,6 +1727,9 @@ mod tests {
         assert!(!has_claude_opts(&json!({})) && !has_claude_opts(&json!({"model": " ", "effort": null, "claude": true})));
         assert!(has_claude_opts(&json!({"model": "opus"})) && has_claude_opts(&json!({"effort": 3})) && has_claude_opts(&json!({"agent": "a"})));
         assert!(has_claude_opts(&json!({"permission_mode": "bypassPermissions"})));
+        // Schalter (#182): eine nicht leere Liste (oder ein falscher Typ) zählt als Angabe.
+        assert!(has_claude_opts(&json!({"claude_flags": ["chrome"]})) && has_claude_opts(&json!({"claude_flags": "chrome"})));
+        assert!(!has_claude_opts(&json!({"claude_flags": []})) && !has_claude_opts(&json!({"claude_flags": null})));
     }
 
     #[test]

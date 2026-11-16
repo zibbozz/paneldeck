@@ -1131,7 +1131,7 @@ mod kind_tests {
         assert!(j.get("claude_bypass_dropped").is_none());
         // Hin und zurück
         let mut m = SessionMeta::default();
-        m.claude_opts = ClaudeOpts { model: "sonnet".into(), effort: "max".into(), permission_mode: "plan".into(), agent: "rev".into() };
+        m.claude_opts = ClaudeOpts { model: "sonnet".into(), effort: "max".into(), permission_mode: "plan".into(), agent: "rev".into(), ..Default::default() };
         let back: SessionMeta = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(back.claude_opts, m.claude_opts);
         let mut s = Settings::default();
@@ -1140,13 +1140,50 @@ mod kind_tests {
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!((back.claude_defaults, back.last_claude_opts), (s.claude_defaults, s.last_claude_opts));
         // Sitzungen von vor 2.3.0: Modell/Permission-Mode aus `claude_args` zählen, solange das neue Feld leer ist.
-        let mut m: SessionMeta = serde_json::from_str(r#"{"id":5,"claude":true,"claude_args":"--model opus --permission-mode plan --verbose $(x)"}"#).unwrap();
+        let mut m: SessionMeta = serde_json::from_str(r#"{"id":5,"claude":true,"claude_args":"--model opus --permission-mode plan --verbose --keep $(x)"}"#).unwrap();
         let (o, rest) = m.claude_opts_eff();
-        assert_eq!((o.model.as_str(), o.permission_mode.as_str(), rest.as_str()), ("opus", "plan", "--verbose"));
+        assert_eq!((o.model.as_str(), o.permission_mode.as_str(), rest.as_str()), ("opus", "plan", "--keep"));
+        assert_eq!(o.extra.flags, ["verbose"], "Schalter aus alten claude_args erscheinen als Schalter (#182)");
         m.claude_opts.model = "haiku".into();
         assert_eq!(m.claude_opts_eff().0.model, "haiku", "das neue Feld hat Vorrang");
-        m.claude_args = "--dangerously-skip-permissions --verbose".into();
-        assert_eq!(m.claude_opts_eff().1, "--verbose", "nie --dangerously-*");
+        m.claude_args = "--dangerously-skip-permissions --keep".into();
+        assert_eq!(m.claude_opts_eff().1, "--keep", "nie --dangerously-*");
+    }
+
+    #[test]
+    fn claude_extra_opts_back_compat_and_roundtrip() {
+        use crate::claude_opts::{ClaudeOpts, ExtraOpts};
+        // Dateien von vor #182 (nur die vier Optionen) laden unverändert, ohne weitere Felder.
+        let m: SessionMeta = serde_json::from_str(r#"{"id":3,"claude":true,"claude_opts":{"model":"opus"}}"#).unwrap();
+        assert!(m.claude_opts.extra.is_empty());
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(j["claude_opts"], serde_json::json!({"model": "opus"}), "keine neuen Felder, solange nichts gesetzt ist");
+        let s: Settings = serde_json::from_str(r#"{"claude_defaults":{"effort":"high"}}"#).unwrap();
+        assert!(s.claude_defaults.extra.is_empty());
+        // Neue Felder: Schalter je Sitzung in state.json, Standards in settings.json (auch die Rechte erweiternden).
+        let extra = ExtraOpts {
+            flags: vec!["chrome".into(), "verbose".into()],
+            add_dirs: if cfg!(windows) { vec!["C:\\work".into()] } else { vec!["/work".into()] },
+            allowed_tools: "Read".into(),
+            disallowed_tools: "WebFetch".into(),
+            mcp_config: if cfg!(windows) { "C:\\m.json".into() } else { "/m.json".into() },
+            append_system_prompt: "Be brief.".into(),
+            fallback_model: "sonnet".into(),
+            max_budget_usd: "5".into(),
+        };
+        let mut m = SessionMeta::default();
+        m.claude_opts = ClaudeOpts { extra: extra.clone(), ..Default::default() };
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(j["claude_opts"]["flags"], serde_json::json!(["chrome", "verbose"]));
+        let back: SessionMeta = serde_json::from_value(j).unwrap();
+        assert_eq!(back.claude_opts.extra, extra);
+        let mut s = Settings::default();
+        s.claude_defaults = ClaudeOpts { extra: extra.clone(), ..Default::default() };
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.claude_defaults.extra, extra);
+        // Kaputte Werte: verworfen, kein Ladefehler.
+        let m: SessionMeta = serde_json::from_str(r#"{"id":4,"claude_opts":{"flags":"chrome","add_dirs":[1,"\\\\srv\\x"],"max_budget_usd":"-1"}}"#).unwrap();
+        assert!(m.claude_opts.extra.is_empty());
     }
 
     #[test]

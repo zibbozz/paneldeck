@@ -1113,7 +1113,7 @@ impl App {
         // Start aus dem Explorer-Kontextmenü: Sitzung im übergebenen Ordner öffnen.
         let cli = crate::cli::get();
         if let Some(p) = &cli.open {
-            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude);
+            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude, false);
         }
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
@@ -1137,10 +1137,17 @@ impl App {
 
     /// Neue Sitzung in einem Ordner (Dateien → deren Ordner).
     /// Ordner (oder Ordner einer Datei) als neue Sitzung öffnen; gibt deren Kennung zurück.
-    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) -> u64 {
+    /// `from_hub` = angestoßen aus einem Hub-Terminal (`paneldeck --open` dort, möglicherweise von einem Agenten): dann
+    /// ohne die Rechte erweiternden Wertoptionen der Standards (#182), wie bei Sitzungen über MCP.
+    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool, from_hub: bool) -> u64 {
         let p = std::path::Path::new(path);
         let dir = if p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
-        self.new_session(ctx, NewOpts { cwd: Some(dir), claude: claude && self.settings.claude_mode, ..NewOpts::default() })
+        let claude_opts = from_hub.then(|| {
+            let mut o = self.settings.claude_defaults.sanitized(false);
+            o.extra = o.extra.agent_safe();
+            o
+        });
+        self.new_session(ctx, NewOpts { cwd: Some(dir), claude: claude && self.settings.claude_mode, claude_opts, ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
@@ -1156,7 +1163,7 @@ impl App {
                     self.notify_text(taint::orphan_error().1);
                     continue;
                 }
-                let id = self.open_folder(ctx, &path, claude);
+                let id = self.open_folder(ctx, &path, claude, origin.is_some());
                 if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
                     self.save_state();
                 }
@@ -1422,9 +1429,10 @@ impl App {
             }
         }
         // Gespeicherte Optionen nur in harmloser Form übernehmen (state.json ist eine Vertrauensgrenze):
-        // geprüfte Startoptionen (#161), gequotet für die Shell, dazu ältere freie `claude_args` bereinigt.
+        // geprüfte Startoptionen (#161, #182; Pfade erst hier auf Existenz geprüft und für WSL umgerechnet), gequotet für
+        // die Shell, dazu ältere freie `claude_args` bereinigt.
         let (opts, args) = meta.claude_opts_eff();
-        c += &opts.args(kind);
+        c += &opts.args_for(kind, &sid);
         if !args.is_empty() {
             c += &format!(" {}", crate::claude_opts::legacy_args(&args, kind));
         }

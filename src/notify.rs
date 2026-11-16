@@ -99,3 +99,19 @@ pub fn pick_folder(start: &str) -> Option<String> {
 pub fn pick_folder(_start: &str) -> Option<String> {
     None
 }
+
+/// Datei-Auswahldialog (z. B. MCP-Konfiguration, #182); startet im Ordner von `start`, wenn das ein lokaler Pfad ist
+/// (Netzwerkpfade werden nicht berührt).
+#[cfg(windows)]
+pub fn pick_file(start: &str) -> Option<String> {
+    let mut d = rfd::FileDialog::new();
+    if let Some(dir) = std::path::Path::new(start).parent().filter(|p| crate::claude_opts::check_path(&p.to_string_lossy(), true).is_ok()) {
+        d = d.set_directory(dir);
+    }
+    d.pick_file().map(|p| p.to_string_lossy().to_string())
+}
+
+#[cfg(not(windows))]
+pub fn pick_file(_start: &str) -> Option<String> {
+    None
+}

@@ -758,12 +758,217 @@ pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt
     }
     o.model = o.model.trim().to_string();
     o.agent = o.agent.trim().to_string();
-    !bad_name(&o.model) && !bad_name(&o.agent)
+    let more_ok = claude_more_rows(ui, lang, o, salt);
+    !bad_name(&o.model) && !bad_name(&o.agent) && more_ok
+}
+
+/// Zeilen „Ordner“ im Abschnitt „Weitere Claude-Optionen“: Text (ein Pfad je Zeile) bereinigt, ohne Doppelte.
+fn dir_lines(s: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    for l in s.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !v.iter().any(|x| x == l) {
+            v.push(l.to_string());
+        }
+    }
+    v
+}
+
+/// Kurzhilfe zu einem Schalter (Tooltip).
+fn switch_help(name: &str, lang: Lang) -> &'static str {
+    match name {
+        "chrome" => lang.t("Claude-in-Chrome-Integration einschalten.", "Turn on the Claude in Chrome integration."),
+        "no-chrome" => lang.t("Claude-in-Chrome-Integration ausschalten.", "Turn off the Claude in Chrome integration."),
+        "ide" => lang.t("Beim Start automatisch mit einer IDE verbinden.", "Connect to an IDE automatically at start."),
+        "verbose" => lang.t("Ausführliche Ausgabe.", "Verbose output."),
+        "disable-slash-commands" => lang.t("Alle Slash-Befehle abschalten.", "Disable all slash commands."),
+        _ => lang.t("Wird unverändert an Claude Code übergeben (siehe claude --help).", "Passed to Claude Code as is (see claude --help)."),
+    }
+}
+
+/// Abschnitt „Weitere Claude-Optionen“ (#182) im selben zweispaltigen Grid wie [`claude_opts_rows`]: Schalter als Häkchen
+/// und die Wertoptionen, die nur der Nutzer setzen kann (Agenten über MCP nur die Schalter). Zugeklappt, solange nichts
+/// gesetzt ist. Warnung bei den Rechte erweiternden Optionen (gelten nie für Sitzungen von Agenten). `false`, solange
+/// ein Wert ungültig ist – auch zugeklappt (Pfade: lokal, ohne Netzwerk, vorhanden).
+fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> bool {
+    use crate::claude_opts::{check_path, valid_budget, valid_name, valid_text, valid_tools, PathIssue, MAX_DIRS, MAX_NAME, MAX_PATH_LEN, MAX_TEXT_LEN, MAX_TOOLS_LEN, SWITCHES};
+    let red = Color32::from_rgb(0xe0, 0x6c, 0x75);
+    let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    let hint = |ui: &mut Ui, text: &str, c: Color32| {
+        ui.label("");
+        ui.add(egui::Label::new(RichText::new(text).small().color(c)).wrap());
+        ui.end_row();
+    };
+    let path_err = |p: &str, dir: bool| -> Option<String> {
+        let why = match check_path(p, dir) {
+            Ok(()) => return None,
+            Err(PathIssue::Invalid) => lang.t("kein absoluter lokaler Pfad (oder Zeichen \" % ! ^ & | < >)", "not an absolute local path (or contains \" % ! ^ & | < >)"),
+            Err(PathIssue::Network) => lang.t("Netzwerkpfade sind nicht erlaubt", "network paths are not allowed"),
+            Err(PathIssue::Missing) if dir => lang.t("Ordner existiert nicht", "folder does not exist"),
+            Err(PathIssue::Missing) => lang.t("Datei existiert nicht", "file does not exist"),
+        };
+        Some(format!("{}: {why}", lang.q(p)))
+    };
+
+    // Prüfen (auch zugeklappt): ungültige Werte sperren „Erstellen“/„Speichern“.
+    let e = &o.extra;
+    let dirs: Vec<&str> = e.add_dirs.iter().map(|d| d.trim()).filter(|d| !d.is_empty()).collect();
+    let dir_err = if dirs.len() > MAX_DIRS {
+        Some(format!("{} {MAX_DIRS}", lang.t("Höchstens so viele Ordner:", "At most this many folders:")))
+    } else {
+        dirs.iter().find_map(|d| path_err(d, true))
+    };
+    let filled = |s: &str| !s.trim().is_empty();
+    let tools_bad = |s: &str| filled(s) && !valid_tools(s.trim());
+    let mcp_err = if filled(&e.mcp_config) { path_err(e.mcp_config.trim(), false) } else { None };
+    let text_bad = filled(&e.append_system_prompt) && !valid_text(e.append_system_prompt.trim());
+    let fallback_bad = filled(&e.fallback_model) && !valid_name(e.fallback_model.trim());
+    let budget_bad = filled(&e.max_budget_usd) && !valid_budget(e.max_budget_usd.trim());
+    let (allowed_bad, disallowed_bad) = (tools_bad(&e.allowed_tools), tools_bad(&e.disallowed_tools));
+    let ok = dir_err.is_none() && mcp_err.is_none() && !allowed_bad && !disallowed_bad && !text_bad && !fallback_bad && !budget_bad;
+
+    let open_id = Id::new(("claude_more_open", salt));
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(!o.extra.is_empty() || !ok);
+    ui.label("");
+    let arrow = if open { "▾" } else { "▸" };
+    let title = format!("{arrow} {}", lang.t("Weitere Claude-Optionen", "More Claude options"));
+    let set = o.extra.flags.len() + o.extra.value_names().len();
+    let title = if set > 0 && !open { format!("{title} ({set})") } else { title };
+    if ui.add(egui::Button::new(title).frame(false)).on_hover_text(lang.t("Schalter wie --chrome und weitere Optionen für Claude Code", "Switches such as --chrome and more options for Claude Code")).clicked() {
+        open = !open;
+    }
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+    ui.end_row();
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(Id::new(("claude_more_shown", salt)), open));
+    if !open {
+        if !ok {
+            hint(ui, lang.t("Ein Wert unter „Weitere Claude-Optionen“ ist ungültig.", "A value under “More Claude options” is invalid."), red);
+        }
+        return ok;
+    }
+
+    let e = &mut o.extra;
+    ui.label(lang.t("Schalter", "Switches"));
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(330.0);
+        for (n, f) in SWITCHES {
+            let mut on = e.flags.iter().any(|x| x == n);
+            if ui.checkbox(&mut on, f).on_hover_text(switch_help(n, lang)).changed() {
+                e.flags.retain(|x| x != n);
+                if on {
+                    e.flags.push(n.to_string());
+                    // chrome und no-chrome schließen sich aus.
+                    let other = match n {
+                        "chrome" => "no-chrome",
+                        "no-chrome" => "chrome",
+                        _ => "",
+                    };
+                    e.flags.retain(|x| x != other);
+                }
+                e.flags = SWITCHES.iter().filter(|(s, _)| e.flags.iter().any(|x| x == s)).map(|(s, _)| s.to_string()).collect();
+            }
+        }
+    });
+    ui.end_row();
+
+    ui.label(lang.t("Zusätzliche Ordner", "Extra folders")).on_hover_text("--add-dir");
+    ui.horizontal(|ui| {
+        // Eingabepuffer im Speicher von egui: leere Zeilen und Leerzeichen am Rand bleiben beim Tippen erhalten.
+        let bid = Id::new(("claude_more_dirs", salt));
+        let mut buf = ui.data(|d| d.get_temp::<String>(bid)).filter(|b| dir_lines(b) == e.add_dirs).unwrap_or_else(|| e.add_dirs.join("\n"));
+        ui.add(egui::TextEdit::multiline(&mut buf).desired_rows(2).desired_width(260.0).hint_text(lang.t("ein Ordner je Zeile", "one folder per line")));
+        if ui.button("…").on_hover_text(lang.t("Ordner hinzufügen", "Add folder")).clicked() {
+            if let Some(p) = notify::pick_folder("") {
+                if !buf.is_empty() && !buf.ends_with('\n') {
+                    buf.push('\n');
+                }
+                buf.push_str(&p);
+            }
+        }
+        e.add_dirs = dir_lines(&buf);
+        ui.data_mut(|d| d.insert_temp(bid, buf));
+    });
+    ui.end_row();
+    if let Some(err) = &dir_err {
+        hint(ui, err, red);
+    }
+
+    ui.label(lang.t("Erlaubte Werkzeuge", "Allowed tools")).on_hover_text("--allowed-tools");
+    ui.add(egui::TextEdit::singleline(&mut e.allowed_tools).hint_text("Bash(git log:*) Read").char_limit(MAX_TOOLS_LEN).desired_width(260.0));
+    ui.end_row();
+    let tools_err = lang.t("Nur Buchstaben, Ziffern, Leerzeichen und _ . , : * ( ) / @ - ~ = + [ ] ? # \\ (nicht am Anfang -, nicht am Ende \\).", "Only letters, digits, spaces and _ . , : * ( ) / @ - ~ = + [ ] ? # \\ (no leading -, no trailing \\).");
+    if allowed_bad {
+        hint(ui, tools_err, red);
+    }
+
+    ui.label(lang.t("Verbotene Werkzeuge", "Disallowed tools")).on_hover_text("--disallowed-tools");
+    ui.add(egui::TextEdit::singleline(&mut e.disallowed_tools).hint_text("WebFetch Bash(curl:*)").char_limit(MAX_TOOLS_LEN).desired_width(260.0));
+    ui.end_row();
+    if disallowed_bad {
+        hint(ui, tools_err, red);
+    }
+
+    ui.label(lang.t("MCP-Konfiguration", "MCP config")).on_hover_text("--mcp-config");
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut e.mcp_config).hint_text(lang.t("JSON-Datei (optional)", "JSON file (optional)")).char_limit(MAX_PATH_LEN).desired_width(230.0));
+        if ui.button("…").on_hover_text(lang.t("Datei wählen", "Choose file")).clicked() {
+            if let Some(p) = notify::pick_file(e.mcp_config.trim()) {
+                e.mcp_config = p;
+            }
+        }
+    });
+    ui.end_row();
+    if let Some(err) = &mcp_err {
+        hint(ui, err, red);
+    }
+
+    ui.label(lang.t("System-Prompt ergänzen", "Append system prompt")).on_hover_text("--append-system-prompt");
+    ui.add(egui::TextEdit::singleline(&mut e.append_system_prompt).hint_text(lang.t("Text (eine Zeile, optional)", "Text (one line, optional)")).char_limit(MAX_TEXT_LEN).desired_width(260.0));
+    ui.end_row();
+    if text_bad {
+        hint(ui, lang.t("Eine Zeile ohne \" % ! ^ & | < >, nicht mit - beginnend, nicht mit \\ endend.", "One line without \" % ! ^ & | < >, not starting with - or ending with \\."), red);
+    }
+
+    ui.label(lang.t("Ersatzmodell", "Fallback model")).on_hover_text("--fallback-model");
+    ui.add(egui::TextEdit::singleline(&mut e.fallback_model).hint_text(lang.t("z. B. sonnet (optional)", "e.g. sonnet (optional)")).char_limit(MAX_NAME).desired_width(160.0));
+    ui.end_row();
+    if fallback_bad {
+        hint(ui, lang.t("Nur Buchstaben, Ziffern und . _ : - (höchstens 100 Zeichen).", "Only letters, digits and . _ : - (at most 100 characters)."), red);
+    }
+
+    ui.label(lang.t("Budget (USD)", "Max budget (USD)")).on_hover_text("--max-budget-usd");
+    ui.add(egui::TextEdit::singleline(&mut e.max_budget_usd).hint_text(lang.t("z. B. 5", "e.g. 5")).char_limit(12).desired_width(80.0));
+    ui.end_row();
+    if budget_bad {
+        hint(ui, lang.t("Eine positive Zahl, z. B. 5 oder 2.50.", "A positive number, e.g. 5 or 2.50."), red);
+    }
+
+    if e.has_risky() {
+        hint(
+            ui,
+            lang.t(
+                "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude zugreifen und was es ohne Rückfrage tun darf. Sie gelten nie für Sitzungen, die ein Agent anlegt.",
+                "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking. They never apply to sessions created by an agent.",
+            ),
+            amber,
+        );
+    }
+    let dim = style::dim(ui);
+    hint(
+        ui,
+        lang.t(
+            "Die Werte setzt nur der Nutzer; Agenten können über MCP nur die Schalter ergänzen. Ordner und Dateien werden bei jedem Start geprüft.",
+            "Only you set the values; agents can only add the switches via MCP. Folders and files are checked at every start.",
+        ),
+        dim,
+    );
+    ok
 }
 
 #[cfg(test)]
 mod copts_tests {
     use super::*;
+    use crate::claude_opts::ExtraOpts;
 
     /// Die Zeilen ohne Fenster zeichnen (headless) und das Ergebnis der Prüfung liefern.
     fn rows(o: &mut ClaudeOpts) -> bool {
@@ -771,7 +976,10 @@ mod copts_tests {
     }
 
     fn rows_with(o: &mut ClaudeOpts, allow: bool) -> bool {
-        let ctx = egui::Context::default();
+        rows_ctx(&egui::Context::default(), o, allow)
+    }
+
+    fn rows_ctx(ctx: &egui::Context, o: &mut ClaudeOpts, allow: bool) -> bool {
         let mut ok = None;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -783,9 +991,73 @@ mod copts_tests {
         ok.unwrap()
     }
 
+    fn shown(ctx: &egui::Context) -> bool {
+        ctx.data(|d| d.get_temp::<bool>(Id::new(("claude_more_shown", "t")))).unwrap_or(false)
+    }
+
+    fn extra(e: ExtraOpts) -> ClaudeOpts {
+        ClaudeOpts { extra: e, ..Default::default() }
+    }
+
+    #[test]
+    fn more_options_section() {
+        // Ohne weitere Optionen zugeklappt; mit gesetzten Werten offen.
+        let ctx = egui::Context::default();
+        assert!(rows_ctx(&ctx, &mut ClaudeOpts::default(), true));
+        assert!(!shown(&ctx), "zugeklappt, solange nichts gesetzt ist");
+        let d = std::env::temp_dir().join(format!("pd-flags-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("mcp.json");
+        std::fs::write(&f, "{}").unwrap();
+        let (dir, file) = (d.to_string_lossy().to_string(), f.to_string_lossy().to_string());
+        let mut o = extra(ExtraOpts {
+            flags: vec!["chrome".into(), "ide".into()],
+            add_dirs: vec![format!("  {dir}  "), String::new(), dir.clone()],
+            allowed_tools: "Bash(git log:*) Read".into(),
+            disallowed_tools: "WebFetch".into(),
+            mcp_config: file.clone(),
+            append_system_prompt: "Be brief. ".into(),
+            fallback_model: "sonnet".into(),
+            max_budget_usd: "2.50".into(),
+        });
+        let ctx = egui::Context::default();
+        assert!(rows_ctx(&ctx, &mut o, true), "gültige Werte");
+        assert!(shown(&ctx), "offen, sobald etwas gesetzt ist");
+        assert_eq!(o.extra.add_dirs, [dir.clone()], "Ordnerzeilen bereinigt, ohne Doppelte");
+        assert_eq!(o.extra.append_system_prompt, "Be brief. ", "Text wird beim Tippen nicht beschnitten");
+        assert_eq!(o.sanitized(true), o.trimmed(), "gültig = bereinigt gleich getrimmt");
+        // Standards (Einstellungen): dieselben Felder, auch die Rechte erweiternden.
+        assert!(rows_with(&mut o.clone(), false));
+
+        // Ungültig: fehlender Ordner, Netzwerkpfad (ohne Zugriff aufs Netz), fehlende Datei, Shell-Zeichen, Budget, Modell.
+        let sep = std::path::MAIN_SEPARATOR;
+        for bad in [
+            ExtraOpts { add_dirs: vec![format!("{dir}{sep}missing")], ..Default::default() },
+            ExtraOpts { add_dirs: vec!["\\\\server\\share".into()], ..Default::default() },
+            ExtraOpts { add_dirs: vec!["relative".into()], ..Default::default() },
+            ExtraOpts { mcp_config: format!("{dir}{sep}missing.json"), ..Default::default() },
+            ExtraOpts { mcp_config: dir.clone(), ..Default::default() },
+            ExtraOpts { allowed_tools: "Bash(x); calc".into(), ..Default::default() },
+            ExtraOpts { disallowed_tools: "a\"b".into(), ..Default::default() },
+            ExtraOpts { append_system_prompt: "50% & more".into(), ..Default::default() },
+            ExtraOpts { append_system_prompt: "-x".into(), ..Default::default() },
+            ExtraOpts { fallback_model: "a b".into(), ..Default::default() },
+            ExtraOpts { max_budget_usd: "1e3".into(), ..Default::default() },
+            ExtraOpts { max_budget_usd: "0".into(), ..Default::default() },
+        ] {
+            assert!(!rows(&mut extra(bad.clone())), "{bad:?}");
+        }
+        // Auch zugeklappt sperrt ein ungültiger Wert.
+        let ctx = egui::Context::default();
+        ctx.data_mut(|d| d.insert_temp(Id::new(("claude_more_open", "t")), false));
+        assert!(!rows_ctx(&ctx, &mut extra(ExtraOpts { max_budget_usd: "x".into(), ..Default::default() }), true));
+        assert!(!shown(&ctx));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
     #[test]
     fn dialog_rows_validate_names() {
-        let mut o = ClaudeOpts { model: " opus ".into(), effort: "high".into(), permission_mode: "bypassPermissions".into(), agent: "rev".into() };
+        let mut o = ClaudeOpts { model: " opus ".into(), effort: "high".into(), permission_mode: "bypassPermissions".into(), agent: "rev".into(), ..Default::default() };
         assert!(rows(&mut o));
         assert_eq!(o.model, "opus", "getrimmt");
         assert_eq!(o.permission_mode, "bypassPermissions", "der Nutzer darf es selbst wählen");

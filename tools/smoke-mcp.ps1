@@ -392,7 +392,87 @@ Start-Sleep -Seconds 3
   $pl = Tool 'create_session' @{ shell = 'cmd'; cwd = "$proj"; name = 'smoke-plain' }
   $plr = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $pl.data.id }
   Check 'list_sessions: ohne Claude sind die Optionen null' ($plr.PSObject.Properties.Name -contains 'effort' -and $null -eq $plr.model -and $null -eq $plr.effort -and $null -eq $plr.permission_mode -and $null -eq $plr.agent)
+  Check 'list_sessions: ohne Claude keine claude_flags/claude_user_options' ($plr.PSObject.Properties.Name -contains 'claude_flags' -and @($plr.claude_flags).Count -eq 0 -and @($plr.claude_user_options).Count -eq 0)
   [void](Tool 'close_session' @{ session = $pl.data.id })
+
+  Write-Host "== Weitere Claude-Optionen (#182)" -ForegroundColor Cyan
+  Check 'create_session: claude_flags ohne claude -> bad_args' ((Code (Tool 'create_session' @{ shell = 'cmd'; claude_flags = @('chrome') })) -eq 'bad_args')
+  foreach ($bad in @('add-dir', '--dangerously-skip-permissions', 'mcp-config', 'allowed-tools', 'resume', 'settings', 'remote-control')) {
+    $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @($bad) }
+    Check "create_session: claude_flags [$bad] -> bad_args (never allowed)" ((Code $r) -eq 'bad_args' -and $r.text -match 'never allowed via MCP') $r.text
+  }
+  $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @('chrome', 'no-chrome') }
+  Check 'create_session: chrome + no-chrome -> bad_args' ((Code $r) -eq 'bad_args' -and $r.text -match 'mutually exclusive') $r.text
+  Check 'create_session: claude_flags als String -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = 'chrome' })) -eq 'bad_args')
+  Check 'create_session: unbekannter Schalter -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @('chrome; calc') })) -eq 'bad_args')
+  foreach ($k in @('add_dir', 'mcp_config', 'append_system_prompt', 'allowed_tools', 'claude_args')) {
+    $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; $k = "$proj" }
+    Check "create_session: Parameter $k -> bad_args" ((Code $r) -eq 'bad_args' -and $r.text -match 'not allowed via MCP') $r.text
+  }
+  Check 'create_session (Chat): claude_flags -> bad_args' ((Code (Tool 'create_session' @{ kind = 'chat'; claude_flags = @('ide') })) -eq 'bad_args')
+  $cf = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-flags'; claude_flags = @('verbose', '--chrome', 'ide') }
+  Check 'create_session mit claude_flags' (-not $cf.err -and (@($cf.data.claude_flags) -join ',') -eq 'chrome,ide,verbose') $cf.text
+  if ($script:lastOk) {
+    $cfl = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $cf.data.id }
+    Check 'list_sessions meldet claude_flags' ((@($cfl.claude_flags) -join ',') -eq 'chrome,ide,verbose' -and @($cfl.claude_user_options).Count -eq 0) ($cfl | ConvertTo-Json -Compress)
+    $re3 = 'args=.*--permission-mode default --chrome --ide --verbose --session-id [0-9a-f-]{36}'
+    $ct3 = Wait-FakeFile $calls $re3
+    Check 'Ersatz-claude bekommt --chrome --ide --verbose (fakebin\calls.txt)' ($ct3 -match $re3) "calls.txt='$ct3'"
+    [void](Tool 'close_session' @{ session = $cf.data.id })
+  }
+  Check 'keine verbotenen Flags in fakebin\calls.txt' ((Wait-FakeFile $calls 'add-dir|mcp-config|dangerously| --allowed-tools|remote-control' 1) -notmatch 'add-dir|mcp-config|dangerously| --allowed-tools|remote-control')
+
+  # Standards des Nutzers mit Rechte erweiternden Wertoptionen: gelten fuer Sitzungen des Nutzers (hier: --open --claude
+  # von aussen), nie fuer Sitzungen eines Agenten. Neustart mit vorbereiteter settings.json.
+  Write-Host "== Weitere Claude-Optionen: Standards des Nutzers (#182)" -ForegroundColor Cyan
+  $mcpCfg = "$work\smoke-mcp-config.json"
+  [IO.File]::WriteAllText($mcpCfg, '{"mcpServers":{}}', (New-Object Text.UTF8Encoding $false))
+  $script:prestart = {
+    $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $d = [pscustomobject]@{ flags = @('verbose'); add_dirs = @("$proj"); allowed_tools = 'Read'; disallowed_tools = 'WebFetch'; mcp_config = $mcpCfg; fallback_model = 'haiku' }
+    $j | Add-Member -Force claude_defaults $d
+    $j | Add-Member -Force default_shell 'powershell'
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  }
+  Set-Level 'Control'
+  # Beim naechsten Neustart die Standards wieder entfernen (spaetere Abschnitte erwarten keine).
+  $script:prestart = {
+    $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $j.PSObject.Properties.Remove('claude_defaults'); $j.PSObject.Properties.Remove('default_shell')
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  }
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  # Nach dem Neustart erneut bestaetigen, dass claude im PowerShell-Terminal nur der Ersatz ist.
+  $iso2 = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'smoke-iso2' }
+  Start-Sleep 4
+  $r = Tool 'run_command' @{ session = $iso2.data.id; command = 'Get-Command claude -All | ForEach-Object { if ($_.CommandType -in ''Application'', ''ExternalScript'') { $_.Source } else { "$($_.CommandType):$($_.Name)" } }'; timeout_secs = 25 }
+  Check 'Isolation nach Neustart: claude im PowerShell-Terminal ist nur der Ersatz' (Only-Fake $r.data.output) $r.data.output
+  [void](Tool 'close_session' @{ session = $iso2.data.id })
+  if (-not $script:lastOk) { throw 'SICHERHEIT: claude nach dem Neustart nicht als Ersatz bestaetigt - keine Claude-Sitzung' }
+  $ag = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-risky'; claude_flags = @('ide') }
+  $uo = @($ag.data.claude_user_options)
+  Check 'Agenten-Sitzung: Schalter des Nutzers + eigene, nur harmlose Wertoptionen' (-not $ag.err -and (@($ag.data.claude_flags) -join ',') -eq 'ide,verbose' -and ($uo -join ',') -eq 'disallowed_tools,fallback_model') $ag.text
+  if ($script:lastOk) {
+    $re4 = 'args=.*--disallowed-tools WebFetch --fallback-model haiku --permission-mode default --ide --verbose --session-id [0-9a-f-]{36}'
+    $ct4 = Wait-FakeFile $calls $re4
+    $line4 = @(($ct4 -split "`r?`n") | Where-Object { $_ -match $re4 }) | Select-Object -Last 1
+    Check 'Ersatz-claude (Agent): ohne --add-dir/--allowed-tools/--mcp-config' ($line4 -and $line4 -notmatch '--add-dir|--mcp-config| --allowed-tools') "calls.txt='$ct4'"
+    [void](Tool 'close_session' @{ session = $ag.data.id })
+  }
+  # Sitzung des Nutzers: Start von aussen (wie aus dem Explorer) per --open --claude -> alle Standards.
+  $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
+  # Der zweite Aufruf reicht nur per IPC an den laufenden Hub weiter und endet sofort (sonst nach 15 s beenden).
+  $op = Start-Process "$dir\paneldeck.exe" -ArgumentList '--open', "`"$proj`"", '--claude' -WindowStyle Hidden -PassThru
+  if (-not $op.WaitForExit(15000)) { $op.Kill() }
+  $us = $null; $t0 = Get-Date
+  while (-not $us -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500; $us = (Tool 'list_sessions').data.sessions | Where-Object { $before -notcontains $_.id -and $_.claude } | Select-Object -First 1 }
+  Check 'Sitzung des Nutzers (--open --claude): alle Wertoptionen der Standards' ($us -and (@($us.claude_user_options) -join ',') -eq 'add_dir,allowed_tools,disallowed_tools,mcp_config,fallback_model' -and (@($us.claude_flags) -join ',') -eq 'verbose') ($us | ConvertTo-Json -Compress)
+  if ($script:lastOk) {
+    $re5 = 'args=.*--add-dir "?' + [regex]::Escape("$proj") + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? --fallback-model haiku --verbose --session-id'
+    $ct5 = Wait-FakeFile $calls $re5
+    Check 'Ersatz-claude (Nutzer) bekommt --add-dir/--allowed-tools/--mcp-config gequotet (fakebin\calls.txt)' ($ct5 -match $re5) "calls.txt='$ct5'"
+    [void](Tool 'close_session' @{ session = $us.id })
+  }
 
   if ($Visible) {
     Write-Host "== Screenshot (Fenster sichtbar)" -ForegroundColor Cyan
