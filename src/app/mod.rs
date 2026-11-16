@@ -1677,63 +1677,47 @@ impl App {
     }
 
     /// Sitzung zeigen und fokussieren (Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`, Strg+Tab …).
-    /// Steht sie nicht im Layout, gilt:
+    /// Steht sie nicht im Layout, gilt (`layout::show`):
     /// 1. leerer Hub → sie wird der einzige Bereich;
-    /// 2. minimiert und ihr Platz ist noch da → genau dort wieder einfügen (neben denselben Geschwistern, gleiche Richtung,
-    ///    Seite und Größe – `Node::insert_at_slot`);
-    /// 3. minimiert, aber die Geschwister sind weg → den fokussierten Bereich rechts teilen;
-    /// 4. sonst (nur weggewechselt, nie minimiert) → den fokussierten Bereich ersetzen, wie bisher.
+    /// 2. minimiert → sie öffnet sich allein und ersetzt das ganze Layout dieses Fensters/Projekts; die bisher sichtbaren
+    ///    Bereiche werden zu minimierten Sitzungen (sie laufen weiter, ein Klick holt jede genauso zurück);
+    /// 3. sonst (nur weggewechselt, nie minimiert) → den fokussierten Bereich ersetzen, wie bisher.
+    ///
+    /// Eine Sitzung eines anderen Fensters kommt hier nicht an (`route_target` reicht die Aktion dorthin weiter, dort gilt
+    /// dieselbe Regel); bei einer eines anderen Projekts wechselt `Action::Activate` vorher das Projekt.
     fn activate(&mut self, id: u64) {
         let Some(e) = self.entries.get_mut(&id) else { return };
         e.attention = false;
         let minimized = std::mem::take(&mut e.meta.minimized);
-        let slot = e.meta.slot.take();
         // Eine Sitzung darf nie gleichzeitig abgedockt und im Hauptlayout sein (zwei Größen kämpften um die PTY).
         self.detached.retain(|d| *d != id);
-        crate::layout::show(&mut self.layout, id, self.focused, minimized, slot.as_ref());
+        for gone in crate::layout::show(&mut self.layout, id, self.focused, minimized) {
+            if let Some(e) = self.entries.get_mut(&gone) {
+                e.meta.minimized = true;
+            }
+        }
         self.focused = id;
         self.want_focus = Some(id);
     }
 
-    /// Bereich minimieren: die Sitzung verlässt das Layout (ihr Platz wird gemerkt), läuft aber weiter und bleibt in der
-    /// Seitenleiste (abgeblendet). Auch der letzte Bereich darf gehen – dann bleibt der leere Hub. Ein abgedocktes Fenster
-    /// schließt sich dabei, ohne die Sitzung wieder anzudocken.
+    /// Bereich minimieren: die Sitzung verlässt das Layout, läuft aber weiter und bleibt in der Seitenleiste (abgeblendet).
+    /// Ihr Platz wird nicht gemerkt – zurückgeholt öffnet sie sich allein (`activate`). Auch der letzte Bereich darf gehen –
+    /// dann bleibt der leere Hub. Ein abgedocktes Fenster schließt sich dabei, ohne die Sitzung wieder anzudocken.
     fn minimize_pane(&mut self, id: u64) {
         if !self.entries.contains_key(&id) {
             return;
         }
-        let mut slot = None;
         if self.detached.contains(&id) {
             self.detached.retain(|d| *d != id);
         } else {
-            let Some((s, focus)) = crate::layout::minimize(&mut self.layout, id, self.focused) else { return }; // schon draußen
-            slot = s;
+            let Some(focus) = crate::layout::minimize(&mut self.layout, id, self.focused) else { return }; // schon draußen
             if focus != self.focused {
                 self.focused = focus;
                 self.want_focus = Some(focus);
             }
         }
-        self.reroute_slots(id, slot.as_ref());
         if let Some(e) = self.entries.get_mut(&id) {
             e.meta.minimized = true;
-            // Ohne Slot, wenn es der letzte Bereich war (oder er abgedockt war): beim Zurückholen gilt dann die
-            // Ausweichregel von `layout::show` (leerer Hub → einziger Bereich, sonst fokussierten Bereich teilen).
-            e.meta.slot = slot;
-        }
-    }
-
-    /// Bereich `gone` verlässt das Layout (minimiert, geschlossen, ausgeblendet, abgedockt): Plätze anderer minimierter
-    /// Sitzungen, die ihn als Geschwister nennen, zeigen danach auf das, was an seine Stelle rückt (seine eigenen
-    /// Geschwister) – so kommt z. B. bei H(1,2) → 1 minimieren → 2 teilen (2|3) → 2 minimieren die 1 neben die 3 zurück.
-    fn reroute_slots(&mut self, gone: u64, gone_slot: Option<&crate::layout::Slot>) {
-        let with = gone_slot.map(|s| s.sibling.clone()).unwrap_or_default();
-        for (id, e) in self.entries.iter_mut() {
-            if *id == gone {
-                continue;
-            }
-            if let Some(s) = e.meta.slot.as_mut() {
-                crate::layout::reroute_sibling(s, gone, &with);
-            }
         }
     }
 
@@ -1773,12 +1757,7 @@ impl App {
 
     fn hide_pane(&mut self, id: u64) {
         if let Some(l) = self.layout.take() {
-            let had = l.contains(id);
-            let (rest, slot) = l.remove_leaf_slot(id);
-            self.layout = rest;
-            if had {
-                self.reroute_slots(id, slot.as_ref());
-            }
+            self.layout = l.remove_leaf(id);
         }
         if self.focused == id {
             // Fokus nie auf einer Sitzung außerhalb des Layouts lassen (auch nicht, wenn nichts mehr übrig ist).
@@ -2975,7 +2954,6 @@ impl App {
                     // In einem eigenen Fenster ist sie sichtbar, also nicht mehr minimiert.
                     if let Some(e) = self.entries.get_mut(&id) {
                         e.meta.minimized = false;
-                        e.meta.slot = None;
                     }
                 }
             }
