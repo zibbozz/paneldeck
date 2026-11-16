@@ -87,11 +87,14 @@ struct Entry {
     shell_eff: String,
     /// Chat-Sitzung (`meta.kind = chat`): Verlauf, Eingabe, laufende Antwort. Hängt an der Sitzung, nicht am Fenster.
     chat: Option<ChatState>,
+    /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
+    /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
+    session_key: String,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new() }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -1062,7 +1065,7 @@ impl App {
         // Start aus dem Explorer-Kontextmenü: Sitzung im übergebenen Ordner öffnen.
         let cli = crate::cli::get();
         if let Some(p) = &cli.open {
-            app.open_folder(&cc.egui_ctx, p, cli.claude);
+            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude);
         }
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
@@ -1085,22 +1088,27 @@ impl App {
     }
 
     /// Neue Sitzung in einem Ordner (Dateien → deren Ordner).
-    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) {
+    /// Ordner (oder Ordner einer Datei) als neue Sitzung öffnen; gibt deren Kennung zurück.
+    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) -> u64 {
         let p = std::path::Path::new(path);
         let dir = if p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
-        self.new_session(ctx, NewOpts { cwd: Some(dir), claude: claude && self.settings.claude_mode, ..NewOpts::default() });
+        self.new_session(ctx, NewOpts { cwd: Some(dir), claude: claude && self.settings.claude_mode, ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
         let cmds: Vec<IpcCmd> = self.hook_server.as_ref().map(|h| h.cmd_rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             self.from_tray(ctx);
-            if let IpcCmd::Open { path, claude, origin_pid } = c {
+            if let IpcCmd::Open { path, claude, origin } = c {
                 // `paneldeck --open` aus einem Hub-Terminal heraus: die neue Sitzung erbt dessen Agenten-Kette samt ihm
-                // (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Absender nur über den Prozessbaum.
-                let origin = self.session_of_pid(origin_pid);
-                let id = self.next_id;
-                self.open_folder(ctx, &path, claude);
+                // (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Absender nur über den Prozessbaum; ein
+                // losgelöster (nicht zuzuordnender) Absender darf keine Claude-Sitzung öffnen.
+                let (origin, orphan) = self.open_origin(origin.as_ref());
+                if orphan && claude {
+                    self.notify_text(taint::orphan_error().1);
+                    continue;
+                }
+                let id = self.open_folder(ctx, &path, claude);
                 if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
                     self.save_state();
                 }
@@ -1405,7 +1413,9 @@ impl App {
             (None, c) => c,
         };
         let cwd = if entry.meta.cwd.is_empty() { home_dir() } else { entry.meta.cwd.clone() };
-        let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string())];
+        // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
+        entry.session_key = hooks::random_hex();
+        let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string()), (hooks::ENV_SESSION_KEY.to_string(), entry.session_key.clone())];
         if let Some(p) = &profile {
             for line in p.env.lines() {
                 if let Some((k, v)) = line.split_once('=') {

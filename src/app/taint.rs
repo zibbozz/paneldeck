@@ -122,6 +122,25 @@ pub(super) fn chain_error() -> (String, String) {
     )
 }
 
+/// Steht `id` in irgendeiner Agenten-Kette (oder der Kette einer laufenden Chat-Runde)? Dann ist sie ein möglicher
+/// Vorfahr – nicht zuzuordnende Absender dürfen dort nicht schreiben.
+pub(super) fn potential_ancestor(entries: &BTreeMap<u64, Entry>, id: u64) -> bool {
+    entries.values().any(|e| e.meta.agent_chain.contains(&id) || e.chat.as_ref().is_some_and(|c| c.origin_sessions.contains(&id)))
+}
+
+/// Fehler für einen nicht zuzuordnenden Absender (losgelöster Prozess), der in einen möglichen Vorfahren schreiben will
+/// oder `--open --claude` aufruft.
+pub(super) fn orphan_error() -> (String, String) {
+    (
+        "forbidden".to_string(),
+        state::t(
+            "Der aufrufende Prozess lässt sich keiner Sitzung zuordnen (losgelöst von seiner Shell gestartet) – er darf nicht in Sitzungen schreiben, die zu einer Agenten-Kette gehören.",
+            "The calling process cannot be attributed to a session (it was started detached from its shell) – it must not write into sessions that belong to an agent chain.",
+        )
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +313,21 @@ mod tests {
         w.insert(40, Entry::new(meta));
         assert!(prune(&mut w));
         assert_eq!(w[&40].meta.agent_chain, [20]);
+    }
+
+    #[test]
+    fn potential_ancestors_are_every_session_in_some_chain() {
+        let mut w = world(&[(5, false), (6, false), (10, true), (20, false)]);
+        assert!(!(1..=20).any(|i| potential_ancestor(&w, i)), "ohne Ketten: keine");
+        on_create(&mut w, Some(5), 20);
+        assert!(potential_ancestor(&w, 5));
+        assert!(!potential_ancestor(&w, 20) && !potential_ancestor(&w, 6));
+        // auch die Kette einer laufenden Chat-Runde zählt
+        w.get_mut(&10).unwrap().chat.as_mut().unwrap().origin_sessions = vec![6];
+        assert!(potential_ancestor(&w, 6));
+        let (code, msg) = orphan_error();
+        assert_eq!(code, "forbidden");
+        assert!(!msg.is_empty());
     }
 
     #[test]
