@@ -128,8 +128,9 @@ pub struct SpawnOptions<'a> {
 /// Interne Variablen, die Paneldeck selbst setzt bzw. nur für einen Neustart nutzt: Ein Wert aus der Umgebung des
 /// Paneldeck-Prozesses (z. B. Start aus einem Terminal eines anderen Hubs) darf nie an ein Terminal gehen – sonst fände
 /// `paneldeck mcp` dort den falschen Hub. Die passenden Werte setzt `SpawnOptions::env` danach neu.
-pub const INTERNAL_ENV: [&str; 7] = [
+pub const INTERNAL_ENV: [&str; 8] = [
     crate::hooks::ENV_SESSION,
+    crate::hooks::ENV_SESSION_KEY,
     crate::hooks::ENV_PORT,
     crate::hooks::ENV_TOKEN,
     crate::paths::ENV_HUB_DATA,
