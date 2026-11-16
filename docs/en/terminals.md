@@ -26,9 +26,23 @@ The **Terminal Hub** is Paneldeck's main area: many terminal sessions in one win
 ## Organization
 - **Projects** with their own layout, plus **folders**, groups, colors, tags, filters (`Filter: name or #tag`) and notes. The sidebar shows the sessions as a list or a folder tree; drag & drop moves sessions and folders.
 - Folders can have a working folder and **defaults for new sessions** (profile); *Save as template …* stores a group of sessions as a **session template**.
-- **Panes:** split right (**Ctrl+Shift+D**) or below (**Ctrl+Shift+E**), rearrange by drag & drop, hide a pane (**Ctrl+Shift+W**), or detach a session into its own window.
+- **Panes:** split right (**Ctrl+Shift+D**) or below (**Ctrl+Shift+E**), rearrange by drag & drop, minimize a pane (**Ctrl+Shift+W**), or detach a session into its own window (see [Panes and minimizing](#panes-and-minimizing)).
 - **Several windows:** **Ctrl+click** on the *Terminal Hub* tab opens a further window with its own sessions (see [Multiple windows](windows.md)).
 - On restart Paneldeck restores sessions, projects and layout; the scrollback of each terminal is saved in the data folder (`scrollback/`).
+
+## Panes and minimizing
+- **Pane header buttons** (left to right): *Link ticket …* (only when ticket links are available), *Split right*, *Split below*, *Open in own window*, **Minimize pane** and *Close session* (×). A detached window has *Dock back* (×, **Ctrl+Shift+W**) and *Minimize*.
+- **Minimize** takes the pane out of the split layout; its neighbour takes the space, and the terminal or chat **keeps running**. This also works for the last pane – the Terminal Hub then shows "All panes are minimized". Minimize is in the pane header, the context menus of the pane and of the session in the sidebar, the command palette (*Minimize pane*) and on **Ctrl+Shift+W**. In a detached window, *Minimize* closes the window without docking the session back.
+- **Sidebar:** a **dimmed** name means the session is not in the layout right now; a small **underline marker** means it is minimized. The tooltip says what a click does.
+- **Bringing a session back** – click it in the sidebar, *Switch to:* in the palette, or the agent tool `focus_session`:
+  - already in the layout → it just gets the focus;
+  - empty Terminal Hub → it becomes the only pane;
+  - minimized, and its old neighbours are still there → it comes back at **exactly its old place** (same direction, side and width; if the neighbours were minimized or closed meanwhile, Paneldeck follows them to whatever took their place);
+  - minimized, but the neighbours are gone → the focused pane is split, the session on the right;
+  - only switched away (not minimized) → it replaces the focused pane.
+- **Ctrl+Tab** skips minimized sessions. Minimized sessions stay minimized after a restart.
+- Panes keep a **minimum size** of about 120 × 70 px, also in deep splits and while dragging a divider.
+- When closing a window, the question also lists the sessions that will end although they are not in the layout (minimized or switched away).
 
 ## Convenience
 - **Command palette** (**Ctrl+Shift+P**): all commands, sessions and – in expert mode – tickets.
@@ -46,7 +60,7 @@ All shortcuts can be changed under *Settings → Shortcuts*.
 |---|---|
 | `Ctrl+Shift+T` | New session |
 | `Ctrl+Shift+D` / `Ctrl+Shift+E` | Split pane right / below |
-| `Ctrl+Shift+W` | Hide pane |
+| `Ctrl+Shift+W` | Minimize pane (in a detached window: dock back) |
 | `Ctrl+Shift+R` | Rename session |
 | `Ctrl+Shift+P` | Commands (palette) |
 | `Ctrl+Shift+F` | Search scrollback |

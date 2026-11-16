@@ -213,7 +213,7 @@ Voraussetzung: `git` im PATH, `claude` angemeldet.
 - [ ] **Umbenennen**: Ordner mit Unterordnern umbenennen → alle Sitzungen folgen; doppelter Name wird abgelehnt.
 - [ ] **Migration**: bestehende Gruppen aus 0.15.x erscheinen als Ordner.
 - [ ] **Sammelstatus**: Claude-Sitzung in Ordner wartet auf Freigabe → roter Punkt an der Ordnerzeile (auch zugeklappt).
-- [ ] **X im Terminal-Kopf**: Klick auf X fragt wie „Sitzung schließen“ (bei laufender Sitzung); Strg+Umschalt+W blendet nur aus.
+- [ ] **X im Terminal-Kopf**: Klick auf X fragt wie „Sitzung schließen“ (bei laufender Sitzung); Strg+Umschalt+W minimiert nur (ab 2.2.0, siehe Abschnitt 60).
 
 ## 26 · Hotfix UI-Skalierung (0.16.1)
 - [ ] Regler „UI-Skalierung“ ziehen → Oberfläche bleibt während des Ziehens unverändert und skaliert erst beim Loslassen; Klick auf die Leiste und Pfeiltasten wirken sofort.
@@ -683,8 +683,25 @@ Vorbereitung: Testinstanz wie 54 mit Git Bash oder WSL (`less`, `vim`, `htop`). 
 - [ ] **Nach Absturz:** Vollbildprogramm mit Maus hart beenden (z. B. `vim` per `kill -9` aus einer zweiten Sitzung) → am Prompt keine Pfeiltasten und kein Zeichensalat beim Mausrad (Shell-Integration nötig); nach dem nächsten Befehl normales Verhalten.
 - [ ] **Beide Sprachen:** Einstellung und Hinweis auf Deutsch und Englisch.
 
-## 60 · Gesamtprüfung vor dem Release 2.2.0
-- [ ] **Abschnitte 54–59** komplett durchlaufen, einmal auf Deutsch und einmal auf Englisch.
+## 60 · Bereiche minimieren (#142, 2.2.0)
+Vorbereitung: Testinstanz wie 54 mit drei Terminals und einem Chat in einem geteilten Layout. Automatisch: Unit-Tests `layout` (Minimieren, Platz merken, Ketten, Normalisieren, tolerantes Lesen) und `state` (`minimized`/`slot`).
+- [ ] **Knopf:** Kopf eines Bereichs zeigt Ticket verknüpfen (falls verfügbar), Rechts teilen, Darunter teilen, In eigenem Fenster öffnen, Minimieren, × → Minimieren: der Nachbar übernimmt den Platz, die Sitzung läuft weiter (z. B. `ping -t` zählt weiter); in der Seitenleiste abgeblendet mit Unterstrich-Markierung, Tooltip „Minimiert – läuft weiter …“.
+- [ ] **Weitere Wege:** Kontextmenü des Bereichs, Kontextmenü der Sitzung in der Seitenleiste, Palette *Bereich minimieren*, Strg+Umschalt+W – alle minimieren.
+- [ ] **Letzter Bereich:** alle Bereiche minimieren → leerer Hub „Alle Bereiche sind minimiert“; Klick in der Seitenleiste → einziger Bereich.
+- [ ] **Alter Platz:** linken von zwei Bereichen (Anteil z. B. 30 %) minimieren und zurückholen → wieder links mit gleicher Breite; ebenso oben/unten. Nachbar danach auch minimieren bzw. schließen → das Zurückholen folgt der Kette an die richtige Stelle.
+- [ ] **Nachbarn weg:** minimieren, dann alle früheren Nachbarn schließen → Zurückholen teilt den fokussierten Bereich, die Sitzung rechts.
+- [ ] **Weggewechselt:** Sitzung, die nicht minimiert, aber nicht im Layout ist (abgeblendet ohne Markierung) → Klick ersetzt den fokussierten Bereich. Schon sichtbare Sitzung → nur Fokus.
+- [ ] **Palette und MCP:** *Wechseln zu:* zeigt „minimiert“ und holt zurück; `list_sessions` meldet `minimized: true`, `focus_session` holt die Sitzung an ihren Platz.
+- [ ] **Strg+Tab** überspringt minimierte Sitzungen.
+- [ ] **Chat und Fenster:** einen Chat minimieren und zurückholen (Verlauf bleibt); in einem weiteren Fenster dasselbe; im abgedockten Fenster *Minimieren* → Fenster zu, Sitzung minimiert in der Seitenleiste, × dockt dagegen wieder an.
+- [ ] **Neustart:** mit minimierten Sitzungen beenden und starten → weiterhin minimiert; `state.json` enthält `minimized`/`slot`; Zurückholen an den alten Platz.
+- [ ] **Robust:** in `state.json` eine unbekannte Sitzungskennung ins Layout schreiben bzw. einen Anteil auf `null` setzen → das restliche Layout und alle Projekte bleiben erhalten.
+- [ ] **Mindestgröße:** viele Teilungen bzw. Trennlinie ganz an den Rand ziehen → kein Bereich wird kleiner als etwa 120 × 70 px.
+- [ ] **Fenster schließen:** weiteres Fenster mit minimierter Sitzung schließen → die Frage nennt sie unter „Auch diese Sitzungen werden beendet, obwohl sie gerade nicht im Layout stehen …“.
+- [ ] **Beide Sprachen:** Knöpfe, Tooltips, Hub-Text und Palette auf Deutsch und Englisch.
+
+## 61 · Gesamtprüfung vor dem Release 2.2.0
+- [ ] **Abschnitte 54–60** komplett durchlaufen, einmal auf Deutsch und einmal auf Englisch.
 - [ ] **Update von 2.1:** Installer über 2.1 (`tools\update-test.ps1 -Exe <exe> -TempRoot E:\paneldeck-test`): Daten, Einstellungen, Sitzungen bleiben; `settings.json` und `state.json` von 2.1 laden ohne Verlust (neue Felder fehlen dort).
 - [ ] **Zurück auf 2.1** (optional, Kopie des Datenordners): 2.1 öffnet die Daten von 2.2 → Chats erscheinen als Terminals, `chats/*.json` bleibt unangetastet, kein Absturz.
 - [ ] **Datenschutz:** ohne eingerichteten Server keine Netzwerkzugriffe durch Chats; mit Server nur Verbindungen zu dessen Adresse (z. B. mit `netstat -ano` prüfen).
