@@ -23,6 +23,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Fixed
 
 - Ein Mittelklick mit leichter Mausbewegung zieht keine Sitzung und keinen Ordner mehr.
+- Zwischen Seitenleiste und Terminalbereich bleibt keine durchsichtige Lücke mehr, wenn eine Zeile der Seitenleiste breiter ist als die Leiste; die Leiste behält ihre Breite und schneidet die Zeile ab (#160).
 
 ## [2.2.0] - 2026-11-16
 

@@ -23,6 +23,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Fixed
 
 - A middle-click with a slight mouse movement no longer starts dragging a session or folder.
+- No see-through gap between the session sidebar and the terminal area when a sidebar row is wider than the sidebar; the sidebar keeps its width and clips the row instead (#160).
 
 ## [2.2.0] - 2026-11-16
 
