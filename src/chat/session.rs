@@ -120,14 +120,26 @@ pub struct ChatState {
     /// Ziel des wartenden Aufrufs für die Freigabe-Zeile, z. B. `session 4 "build"` (setzt der Hub).
     pub approval_target: Option<String>,
     /// Einmalige Frage nach der Stufe des Modells ist offen (setzt der Hub beim ersten Senden; siehe
-    /// [`ChatState::awaiting_level_choice`]).
-    pub level_question: bool,
-    /// Hat ein externer Agent (MCP `send_chat_message`) diese Runde ausgelöst: seine Sitzung (`None` = Nutzer oder
-    /// Agent außerhalb von Paneldeck). Gilt für die ganze Runde samt „Weiter“; Werkzeuge des Chats dürfen dort nicht
-    /// schreiben (kein Umweg in die eigene Sitzung des Agenten). Setzt `App::chat_send`.
-    pub origin_session: Option<u64>,
+    /// [`ChatState::awaiting_level_choice`]) – und wer sie ausgelöst hat: Nur bei [`LevelAsker::User`] geht nach der
+    /// Antwort der Entwurf im Eingabefeld los.
+    pub level_question: Option<LevelAsker>,
+    /// Hat ein Agent (MCP `send_chat_message`) diese Runde ausgelöst: die Sitzungen der auslösenden Kette (der
+    /// Aufrufer und – ist er selbst ein Chat – dessen Kette; leer = Nutzer oder Agent außerhalb von Paneldeck). Gilt für
+    /// die ganze Runde samt „Weiter“; Werkzeuge des Chats dürfen in keine davon schreiben (kein Umweg in die Sitzung
+    /// des Agenten, auch nicht über weitere Chats). Setzt `App::chat_send` (`tools::chain_origins`).
+    pub origin_sessions: Vec<u64>,
     /// Der Hinweis „Kontext zu klein für die Werkzeug-Stufe“ wurde in diesem Chat schon gezeigt (einmal je Chat).
     pub context_warned: bool,
+}
+
+/// Wer die einmalige Frage nach der Stufe des Modells ausgelöst hat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelAsker {
+    /// Der Nutzer (Eingabefeld): nach der Antwort geht sein Entwurf los.
+    User,
+    /// Ein Agent (MCP `send_chat_message`, bekam `permission_pending`): nach der Antwort wird nichts gesendet – der
+    /// Entwurf im Eingabefeld gehört dem Nutzer.
+    Agent,
 }
 
 /// Status eines Chats für Seitenleiste und MCP (`ready`, `working`, `approval`).
@@ -201,8 +213,8 @@ impl ChatState {
             token_scale: 1.0,
             context_pause: false,
             approval_target: None,
-            level_question: false,
-            origin_session: None,
+            level_question: None,
+            origin_sessions: Vec::new(),
             context_warned: false,
         };
         if fixed > 0 {
@@ -260,7 +272,7 @@ impl ChatState {
     /// Die einmalige Frage „Darf dieses Modell Paneldeck nutzen?“ wartet auf eine Antwort (die Nachricht im
     /// Eingabefeld geht erst danach los). Zählt wie eine Freigabe als „braucht dich“.
     pub fn awaiting_level_choice(&self) -> bool {
-        self.level_question
+        self.level_question.is_some()
     }
 
     /// Status für Seitenleiste und MCP: Freigabe/Frage offen → `Approval`, Runde läuft → `Working`, sonst `Ready`.

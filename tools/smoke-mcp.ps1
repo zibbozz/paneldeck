@@ -587,12 +587,16 @@ c.close()
   $st = [ordered]@{
     sessions = @(
       [ordered]@{ id = 950; name = 'Smoke-Chat'; custom_name = $true; cwd = "$proj"; project = 1; kind = 'chat'; chat = [ordered]@{ server = 'echo'; model = 'smoke-model' } },
-      [ordered]@{ id = 951; name = 'Smoke-Term'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1 })
-    next_id = 952; projects = @([ordered]@{ id = 1; name = 'Standard' }); active_project = 1
+      [ordered]@{ id = 951; name = 'Smoke-Term'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1 },
+      [ordered]@{ id = 952; name = 'Smoke-Big'; custom_name = $true; cwd = "$proj"; project = 1; kind = 'chat'; chat = [ordered]@{ server = 'echo'; model = 'smoke-model' } })
+    next_id = 953; projects = @([ordered]@{ id = 1; name = 'Standard' }); active_project = 1
   }
   New-Item -ItemType Directory -Force "$data\chats" | Out-Null
   $hist = [ordered]@{ version = 1; messages = @([ordered]@{ role = 'user'; content = 'hi'; ts = 1 }, [ordered]@{ role = 'assistant'; content = 'smoke-answer'; ts = 2 }) }
   [IO.File]::WriteAllText("$data\chats\950.json", ($hist | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+  # Grosser Verlauf (40 Nachrichten zu je ~1,5 KB) fuer read_chat ueber ein Chat-Modell: die neuesten muessen ankommen.
+  $bigMsgs = @(0..39 | ForEach-Object { [ordered]@{ role = $(if ($_ % 2) { 'assistant' } else { 'user' }); content = ("big-{0:D2} " -f $_) + ('w' * 1500); ts = 10 + $_ } })
+  [IO.File]::WriteAllText("$data\chats\952.json", ([ordered]@{ version = 1; messages = $bigMsgs } | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
   [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
   Set-Level 'Control' -Tray
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
@@ -609,7 +613,9 @@ c.close()
   Stop-Hub
   # Kleiner Ollama-Ersatz auf 127.0.0.1 (TcpListener, eigener Runspace): /api/tags, /api/show, /api/chat (NDJSON).
   # /api/chat: Antwort "pong"; "slow" in der letzten Nutzer-Nachricht -> 3 s Pause; "tools please" mit tools-Liste ->
-  # Werkzeugaufruf list_sessions; "proxy please <id>" -> send_text in Sitzung <id>; nach einer tool-Nachricht -> "done". Jede Anfrage landet in $script:fakeLog.
+  # Werkzeugaufruf list_sessions; "proxy please <id>" -> send_text in Sitzung <id>; "chain please <chat> <id>" ->
+  # send_chat_message an <chat> mit "proxy please <id>"; "read please <chat>" -> read_chat (last 40);
+  # nach einer tool-Nachricht -> "done". Jede Anfrage landet in $script:fakeLog.
   $fake = {
     param($listener, $log)
     $enc = New-Object Text.UTF8Encoding $false
@@ -642,6 +648,8 @@ c.close()
           $hasTools = $j -and $j.PSObject.Properties.Name -contains 'tools' -and @($j.tools).Count -gt 0
           $done = '{"model":"fake-model","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":5,"eval_count":1}'
           if ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
+          elseif ($hasTools -and $last -match 'chain please (\d+) (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_chat_message","arguments":{"session":' + $Matches[1] + ',"text":"proxy please ' + $Matches[2] + '"}}}]},"done":false}' }
+          elseif ($hasTools -and $last -match 'read please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_chat","arguments":{"session":' + $Matches[1] + ',"last":40}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'proxy please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_text","arguments":{"session":' + $Matches[1] + ',"text":"echo proxy-leak"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'tools please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_sessions","arguments":{}}}]},"done":false}' }
           else {
@@ -734,9 +742,29 @@ c.close()
   $pt = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'send_text' })
   $pu = @($rc.data.messages | Where-Object { $_.role -eq 'user' })[-1]
   Check 'Umweg-Schutz: send_text des Chats in die Sitzung des Agenten -> forbidden (abgewiesen vor Freigabe/Ausfuehrung)' ($pt.Count -ge 1 -and $pt[-1].status -eq 'denied' -and $pt[-1].content -match 'cannot write into that agent' -and $pu.note -eq 'Sent by agent Proxy-Agent') $rc.text
+  # Kette: Agent $A -> Chat $C -> (send_chat_message) Chat $C2 -> send_text in $A: auch zwei Glieder weiter verboten.
+  $C2 = (Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-model'; name = 'Smoke-LLM2' }).data.id
+  $px = InA 'send_chat_message' @{ session = $C; text = "chain please $C2 $A" }
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $w2 = Tool 'wait_for_status' @{ session = $C2; status = @('ready'); timeout_secs = 40 } 50000
+  $rc1 = Tool 'read_chat' @{ session = $C; last = 4 }
+  $sc = @($rc1.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'send_chat_message' })
+  $rc2 = Tool 'read_chat' @{ session = $C2; last = 6 }
+  $pt2 = @($rc2.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'send_text' })
+  $pu2 = @($rc2.data.messages | Where-Object { $_.role -eq 'user' })[-1]
+  Check 'Umweg-Schutz ueber eine Kette: Chat -> Chat -> send_text in die Sitzung des Agenten -> forbidden' ($px.isError -ne $true -and $w2.data.matched -eq $true -and $sc.Count -ge 1 -and $sc[-1].status -eq 'ok' -and $pu2.note -eq 'Sent by agent Smoke-LLM' -and $pt2.Count -ge 1 -and $pt2[-1].status -eq 'denied' -and $pt2[-1].content -match 'cannot write into that agent') "$($rc1.text) /// $($rc2.text)"
   Start-Sleep 1
   Check 'Umweg-Schutz: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'proxy-leak')
+  Check 'wait_for_status auf die eigene Sitzung -> bad_args' ((InA 'wait_for_status' @{ session = $A; status = @('ready'); timeout_secs = 5 }).content[0].text -like 'bad_args*')
+  [void](Tool 'close_session' @{ session = $C2 })
   [void](Tool 'close_session' @{ session = $A })
+  # read_chat ueber ein Chat-Modell (Ergebnis gekuerzt): die neuesten Nachrichten und der Status kommen an, nicht die aeltesten.
+  [void](Tool 'send_chat_message' @{ session = $C; text = 'read please 952' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $rc = Tool 'read_chat' @{ session = $C; last = 4 }
+  $rt = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_chat' })
+  Check 'read_chat ueber ein Chat-Modell: neueste Nachrichten, more_above und Status statt der aeltesten' ($w.data.matched -eq $true -and $rt.Count -ge 1 -and $rt[-1].status -eq 'ok' -and $rt[-1].content -match 'big-39' -and $rt[-1].content -match '"more_above":true' -and $rt[-1].content -match '"status":"ready"' -and $rt[-1].content -notmatch 'big-00') (($rc.text) -replace '(.{600}).*', '$1')
+  Check 'read_chat: Feld paused (false)' ($rc.data.paused -eq $false -and $rc.data.PSObject.Properties.Name -contains 'pause_note')
   # Stufe des Modells nie gewaehlt: die einmalige Frage erscheint, der Agent bekommt permission_pending.
   $raw = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-raw'; name = 'Smoke-Raw' }
   $rq = Tool 'send_chat_message' @{ session = $raw.data.id; text = 'hallo' }

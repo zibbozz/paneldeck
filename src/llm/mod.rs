@@ -3,8 +3,6 @@
 //! Kern ohne egui und ohne App: HTTP (`http`), Host-Regel (`net`), Adapter (`ollama`, `openai`), Datenstrom-Ereignisse,
 //! DPAPI für API-Schlüssel (`secret`) und Token-Schätzung (`tokens`). Die Oberfläche (Chat-Sitzungen, Modelle in den
 //! Einstellungen) baut darauf auf.
-// Wird ab den Folge-Teilen (Chat-Sitzungen, Einstellungen) benutzt; bis dahin sind viele Einträge noch ungenutzt.
-#![allow(dead_code)]
 
 pub mod config;
 pub mod error;
@@ -297,11 +295,13 @@ pub fn chat(t: &dyn Transport, ep: &Endpoint, req: &ChatRequest, cancel: &Arc<At
 }
 
 /// Laufender Chat-Aufruf in einem eigenen Faden.
+#[cfg_attr(not(test), allow(dead_code))] // Faden-Hülle für die Tests; die Chats nutzen `chat::llm_backend`
 pub struct ChatHandle {
     pub rx: Receiver<StreamEvent>,
     pub cancel: Arc<AtomicBool>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // Faden-Hülle für die Tests; die Chats nutzen `chat::llm_backend`
 impl ChatHandle {
     /// Bricht ab (auch während auf das erste Token gewartet wird); danach kommt `Error(Cancelled)`.
     pub fn stop(&self) {
@@ -317,11 +317,13 @@ impl Drop for ChatHandle {
 }
 
 /// Startet `chat` in einem Faden über die echte Verbindung; `repaint` wird nach jedem Ereignis aufgerufen.
+#[cfg_attr(not(test), allow(dead_code))] // Faden-Hülle für die Tests; die Chats nutzen `chat::llm_backend`
 pub fn spawn_chat(endpoint: Endpoint, request: ChatRequest, repaint: Box<dyn Fn() + Send>) -> ChatHandle {
     spawn_chat_with(system_transport(), endpoint, request, repaint)
 }
 
 /// Wie `spawn_chat`, mit eigenem Transport (Tests, Attrappen).
+#[cfg_attr(not(test), allow(dead_code))] // Faden-Hülle für die Tests; die Chats nutzen `chat::llm_backend`
 pub fn spawn_chat_with(t: Arc<dyn Transport>, endpoint: Endpoint, request: ChatRequest, repaint: Box<dyn Fn() + Send>) -> ChatHandle {
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));

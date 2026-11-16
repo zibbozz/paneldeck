@@ -4,7 +4,7 @@
 //! {
 //!   "version": 1,
 //!   "context_start": 2,
-//!   "always_allow": [ { "tool": "send_text", "session": 4 }, { "tool": "add_todo", "session": null } ],
+//!   "always_allow": [ { "tool": "send_text", "session": 4 }, { "tool": "run_command", "session": 7 } ],
 //!   "messages": [
 //!     { "role": "user", "content": "Which sessions are open?", "ts": 1763200000 },
 //!     { "role": "assistant", "content": "", "ts": 1763200001,

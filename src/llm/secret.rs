@@ -11,6 +11,8 @@ pub enum SecretError {
     Utf8,
     /// DPAPI-Fehler (z. B. Blob eines anderen Benutzers/Rechners).
     Sys(u32),
+    /// Nicht unter Windows.
+    #[cfg_attr(windows, allow(dead_code))]
     Unsupported,
 }
 

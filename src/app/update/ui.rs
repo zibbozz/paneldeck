@@ -331,7 +331,7 @@ impl App {
                     "The update is downloaded and verified. Paneldeck restarts to install it; unsaved input in open dialogs is lost.",
                 ));
             } else {
-                // Getrennt zählen: laufende Terminals und Chats, deren Antwort gerade geschrieben wird.
+                // Getrennt zählen: laufende Terminals und Chats, die noch arbeiten (Antwort, Werkzeug, Freigabe-Frage).
                 let chats = self.entries.values().filter(|e| e.is_chat() && e.running()).count();
                 let terms = n - chats;
                 if terms == 1 {
@@ -340,9 +340,9 @@ impl App {
                     ui.label(format!("{terms} {}", lang.t("Terminals laufen noch.", "terminals are still running.")));
                 }
                 if chats == 1 {
-                    ui.label(lang.t("1 Chat-Antwort wird noch geschrieben (sie wird abgebrochen).", "1 chat answer is still being written (it will be stopped)."));
+                    ui.label(lang.t("1 Chat arbeitet noch (er wird angehalten).", "1 chat is still working (it will be stopped)."));
                 } else if chats > 1 {
-                    ui.label(format!("{chats} {}", lang.t("Chat-Antworten werden noch geschrieben (sie werden abgebrochen).", "chat answers are still being written (they will be stopped).")));
+                    ui.label(format!("{chats} {}", lang.t("Chats arbeiten noch (sie werden angehalten).", "chats are still working (they will be stopped).")));
                 }
                 ui.label(lang.t(
                     "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach wiederhergestellt.",

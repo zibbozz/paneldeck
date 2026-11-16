@@ -113,7 +113,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let from = std::mem::replace(&mut chat.changed_from, usize::MAX);
     let pending = chat.calls.iter().map(|p| (p.call.id.clone(), p.state)).collect();
     let paused = chat.paused.then(|| (chat.steps, chat.pause_note.clone()));
-    let level_question = chat.level_question;
+    let level_question = chat.level_question.is_some();
     let target = chat.approval_target.clone();
     let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
     let msgs = &file.messages;
@@ -944,7 +944,7 @@ mod tests {
             for (label, want) in [(off, McpLevel::Off), (read, McpLevel::Read), (ctrl, McpLevel::Control)] {
                 let mut c = ChatState::new(ChatFile::default(), None);
                 c.draft = "hello".into();
-                c.level_question = true;
+                c.level_question = Some(crate::chat::LevelAsker::User);
                 let mut h = H::new();
                 h.frame(&mut c, lang, false, vec![]);
                 h.frame(&mut c, lang, false, vec![]);
