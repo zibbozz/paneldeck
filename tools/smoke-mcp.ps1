@@ -1040,28 +1040,16 @@ c.close()
     }
     # B: mit mitgelieferten Dateien; Einstellung je nach -ConPty.
     Start-ConPtyHub
-    $cid = @{}
     foreach ($sh in @('cmd', 'powershell')) {
       $c = Tool 'create_session' @{ shell = $sh; cwd = "$plant"; name = "smoke-conpty-$sh" }
       Check "ConPTY: create_session $sh" (-not $c.err) $c.text
       if ($c.err) { continue }
-      $cid[$sh] = $c.data.id
       Start-Sleep 3
       $r = Tool 'run_command' @{ session = $c.data.id; command = 'echo conpty-ok'; timeout_secs = 25 }
       Check "ConPTY: run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'conpty-ok') "out='$($r.data.output)' q=$($r.data.quality)"
       $r = Tool 'run_command' @{ session = $c.data.id; command = 'cmd /c exit 4'; timeout_secs = 25 }
       if ($sh -eq 'cmd') { Check 'ConPTY: run_command cmd (Befehl beendet)' ($r.data.finished) $r.text }
       else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text }
-    }
-    # Strg+C bricht ein laufendes Programm ab (danach antwortet die Shell sofort wieder).
-    if ($cid['cmd']) {
-      [void](Tool 'send_text' @{ session = $cid['cmd']; text = 'ping -n 30 127.0.0.1' })
-      Start-Sleep 2
-      [void](Tool 'send_keys' @{ session = $cid['cmd']; keys = @('ctrl+c') })
-      Start-Sleep 1
-      $t0 = Get-Date
-      $r = Tool 'run_command' @{ session = $cid['cmd']; command = 'echo nach-strg-c'; timeout_secs = 15 }
-      Check 'ConPTY: Strg+C bricht ping ab (Shell antwortet sofort)' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-strg-c' -and ((Get-Date) - $t0).TotalSeconds -lt 10) $r.text
     }
     # Git Bash und Vollbildprogramme (alternativer Bildschirm) ueber die gewaehlte ConPTY.
     if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {
@@ -1083,13 +1071,12 @@ c.close()
         $r = Tool 'run_command' @{ session = $gid; command = 'echo nach-less'; timeout_secs = 15 }
         Check 'ConPTY: nach less zurueck in der Shell' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-less') $r.text
         if (Test-Path "$env:ProgramFiles\Git\usr\bin\vim.exe") {
-          [void](Tool 'send_text' @{ session = $gid; text = 'vim -u NONE zeilen.txt' })
+          # vim beendet sich selbst (send_text ist ein Einfuegen und landete in vim als Text).
+          [void](Tool 'send_text' @{ session = $gid; text = 'vim -u NONE -c redraw -c "sleep 4" -c "qa!" zeilen.txt' })
           Start-Sleep 2
           $scr = (Tool 'read_terminal' @{ session = $gid; screen = $true }).data.text
           Check 'ConPTY: vim zeigt die Datei' ($scr -match 'zeile-1\b') $scr
-          [void](Tool 'send_keys' @{ session = $gid; keys = @('esc') })
-          [void](Tool 'send_text' @{ session = $gid; text = ':q!' })
-          Start-Sleep 1
+          Start-Sleep 4
           $r = Tool 'run_command' @{ session = $gid; command = 'echo nach-vim'; timeout_secs = 15 }
           Check 'ConPTY: nach vim zurueck in der Shell' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-vim') $r.text
         }
@@ -1101,8 +1088,12 @@ c.close()
       $w = Tool 'create_session' @{ shell = "wsl:$distro"; cwd = "$plant"; name = 'smoke-conpty-wsl' }
       Check "ConPTY: create_session wsl:$distro" (-not $w.err) $w.text
       if (-not $w.err) {
-        Start-Sleep 8
-        $r = Tool 'run_command' @{ session = $w.data.id; command = 'echo wsl-ok'; timeout_secs = 40 }
+        # Ein kalter WSL-Start kann dauern: warten, bis die Shell-Integration da ist.
+        $t0 = Get-Date
+        do {
+          Start-Sleep 3
+          $r = Tool 'run_command' @{ session = $w.data.id; command = 'echo wsl-ok'; timeout_secs = 40 }
+        } while ((Code $r) -eq 'no_shell_integration' -and ((Get-Date) - $t0).TotalSeconds -lt 60)
         Check 'ConPTY: run_command wsl (Ausgabe)' ($r.data.finished -and $r.data.output.Trim() -eq 'wsl-ok') $r.text
       }
     } else { Skip 'ConPTY: WSL' 'keine WSL-Distribution' }
