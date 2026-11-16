@@ -22,6 +22,7 @@ pub use tokens::{estimate_tokens, trim_to_budget};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
@@ -295,13 +296,13 @@ pub fn chat(t: &dyn Transport, ep: &Endpoint, req: &ChatRequest, cancel: &Arc<At
 }
 
 /// Laufender Chat-Aufruf in einem eigenen Faden.
-#[cfg_attr(not(test), allow(dead_code))] // Faden-Hülle für die Tests; die Chats nutzen `chat::llm_backend`
+#[cfg(test)] // Faden-Hülle nur für die Tests; die Chats nutzen `chat::llm_backend`
 pub struct ChatHandle {
     pub rx: Receiver<StreamEvent>,
     pub cancel: Arc<AtomicBool>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // Faden-Hülle für die Tests; die Chats nutzen `chat::llm_backend`
+#[cfg(test)] // Faden-Hülle nur für die Tests; die Chats nutzen `chat::llm_backend`
 impl ChatHandle {
     /// Bricht ab (auch während auf das erste Token gewartet wird); danach kommt `Error(Cancelled)`.
     pub fn stop(&self) {
@@ -309,6 +310,7 @@ impl ChatHandle {
     }
 }
 
+#[cfg(test)]
 impl Drop for ChatHandle {
     /// Wer den Aufruf nicht mehr hält, braucht ihn nicht mehr: Verbindung beenden.
     fn drop(&mut self) {
@@ -317,13 +319,13 @@ impl Drop for ChatHandle {
 }
 
 /// Startet `chat` in einem Faden über die echte Verbindung; `repaint` wird nach jedem Ereignis aufgerufen.
-#[cfg_attr(not(test), allow(dead_code))] // Faden-Hülle für die Tests; die Chats nutzen `chat::llm_backend`
+#[cfg(test)] // Faden-Hülle nur für die Tests; die Chats nutzen `chat::llm_backend`
 pub fn spawn_chat(endpoint: Endpoint, request: ChatRequest, repaint: Box<dyn Fn() + Send>) -> ChatHandle {
     spawn_chat_with(system_transport(), endpoint, request, repaint)
 }
 
 /// Wie `spawn_chat`, mit eigenem Transport (Tests, Attrappen).
-#[cfg_attr(not(test), allow(dead_code))] // Faden-Hülle für die Tests; die Chats nutzen `chat::llm_backend`
+#[cfg(test)] // Faden-Hülle nur für die Tests; die Chats nutzen `chat::llm_backend`
 pub fn spawn_chat_with(t: Arc<dyn Transport>, endpoint: Endpoint, request: ChatRequest, repaint: Box<dyn Fn() + Send>) -> ChatHandle {
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));

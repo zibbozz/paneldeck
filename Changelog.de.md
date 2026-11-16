@@ -60,6 +60,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Security
 
 - Ein Chat, den ein anderer Chat gestartet hat, erbt die ganze Agenten-Kette: Seine Werkzeuge können in keine Sitzung dieser Kette schreiben (bisher wirkte der Schutz nur über einen Schritt).
+- Ein von einem Agenten gestarteter Chat kann keine Claude-Sitzungen und keine MCP-Brücke starten (nach bestem Bemühen).
 
 ## [2.1.0] - 2026-11-15
 

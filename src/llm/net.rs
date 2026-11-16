@@ -223,13 +223,13 @@ pub fn check_with(u: &Url, resolve: Resolver) -> Result<Vec<IpAddr>, LlmError> {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // nur über `parse_checked` (Tests); der Transport nutzt `check_with`
+#[cfg(test)] // nur über `parse_checked` (Tests); der Transport nutzt `check_with`
 pub fn check(u: &Url) -> Result<Vec<IpAddr>, LlmError> {
     check_with(u, &system_resolve)
 }
 
 /// Zerlegen und prüfen in einem Schritt.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn parse_checked(url: &str) -> Result<Url, LlmError> {
     let u = parse(url)?;
     check(&u)?;

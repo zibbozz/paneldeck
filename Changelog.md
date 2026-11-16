@@ -60,6 +60,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Security
 
 - A chat started by another chat inherits the whole agent chain: its tools can write into none of the sessions of that chain (before, the protection was only one hop deep).
+- A chat started by an agent cannot start Claude sessions or the MCP bridge (best effort).
 
 ## [2.1.0] - 2026-11-15
 

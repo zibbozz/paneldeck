@@ -109,6 +109,10 @@ impl ToolPolicy {
         if proxy_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", PROXY_MESSAGE)));
         }
+        // Und kein Ausweg über neu gestartete Agenten (Claude-Sitzung, MCP-Brücke), die nicht zur Kette zählen würden.
+        if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
+            return Err((ToolStatus::Denied, error_json("forbidden", msg)));
+        }
         Ok(def.level >= McpLevel::Control && !NO_APPROVAL.contains(&def.name))
     }
 
@@ -131,6 +135,48 @@ pub fn proxy_forbidden(tool: &str, args: &Value, origins: &[u64]) -> bool {
         return false;
     }
     args.get("session").and_then(|v| v.as_u64()).is_some_and(|s| origins.contains(&s))
+}
+
+/// Meldung, wenn eine von einem Agenten ausgelöste Runde eine Claude-Sitzung starten will.
+pub const SPAWN_CLAUDE_MESSAGE: &str = "a chat started by an agent cannot start Claude sessions";
+/// Meldung, wenn eine von einem Agenten ausgelöste Runde die MCP-Brücke (`paneldeck mcp`) starten will.
+pub const SPAWN_BRIDGE_MESSAGE: &str = "a chat started by an agent cannot start the Paneldeck MCP bridge";
+
+/// Würde dieser Aufruf einer von einem Agenten ausgelösten Runde (`origins` nicht leer) einen neuen Agenten starten, der
+/// nicht zur Kette zählt? Eine Sitzung, die ein Glied der Kette startet, ist nicht „markiert“ (geplant für 2.3.0) – ihr
+/// Agent dürfte sonst wieder in die Sitzungen der Kette schreiben. Verboten sind daher:
+/// * `create_session` mit `claude: true` oder einem `prompt`;
+/// * `run_command`/`send_text`/`send_keys`, deren Text „paneldeck“ und „mcp“ enthält (Start der MCP-Brücke).
+///
+/// **Nach bestem Bemühen:** Die Erkennung der Brücke prüft nur den Text eines einzelnen Aufrufs (Groß-/Kleinschreibung
+/// egal); auf mehrere Aufrufe verteilter oder verschleierter Text, Skripte oder andere Agenten-Programme erkennt sie nicht.
+/// `Some(Meldung)` = verboten.
+pub fn spawn_forbidden(tool: &str, args: &Value, origins: &[u64]) -> Option<&'static str> {
+    if origins.is_empty() {
+        return None;
+    }
+    match tool {
+        "create_session" => {
+            let claude = args.get("claude").and_then(|v| v.as_bool()) == Some(true);
+            let prompt = args.get("prompt").and_then(|v| v.as_str()).is_some_and(|p| !p.trim().is_empty());
+            (claude || prompt).then_some(SPAWN_CLAUDE_MESSAGE)
+        }
+        "run_command" | "send_text" | "send_keys" => {
+            let text = match tool {
+                "run_command" => args.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                "send_text" => args.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                _ => args.get("keys").and_then(|v| v.as_array()).map(|k| k.iter().filter_map(|x| x.as_str()).collect::<String>()).unwrap_or_default(),
+            };
+            starts_bridge(&text).then_some(SPAWN_BRIDGE_MESSAGE)
+        }
+        _ => None,
+    }
+}
+
+/// Sieht der Text nach dem Start der MCP-Brücke aus (`paneldeck … mcp`)? Grob und nach bestem Bemühen.
+fn starts_bridge(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.find("paneldeck").is_some_and(|i| t[i..].contains("mcp"))
 }
 
 /// Kette einer neuen, von einem Agenten ausgelösten Runde: die Sitzung des Aufrufers `caller` und – ist der Aufrufer
@@ -338,12 +384,12 @@ pub fn cap_read_chat(mut v: Value, max: usize) -> Option<String> {
     // Nur die neueste Nachricht, gekürzt: Inhalt von vorn, Werkzeugaufrufe weg.
     let mut last = msgs[n - 1].clone();
     let content = last.get("content").and_then(|c| c.as_str()).unwrap_or_default().to_string();
-    if let Some(o) = last.as_object_mut() {
-        if o.remove("tool_calls").is_some() {
-            o.insert("tool_calls_truncated".into(), json!(true));
-        }
-        o.insert("truncated".into(), json!(true));
+    // Keine Nachricht als Objekt (fremde Form): nichts weiter kürzen, das Ergebnis ohne Nachrichten gilt.
+    let Some(o) = last.as_object_mut() else { return Some(t) };
+    if o.remove("tool_calls").is_some() {
+        o.insert("tool_calls_truncated".into(), json!(true));
     }
+    o.insert("truncated".into(), json!(true));
     let shown = largest_fitting(content.len(), max, |keep| {
         let mut start = content.len() - keep;
         while !content.is_char_boundary(start) {
@@ -380,7 +426,14 @@ pub fn elided() -> String {
     json!({ "elided": true, "note": "older tool result removed to fit the context" }).to_string()
 }
 
-/// Zu langen JSON-Text in ein gültiges JSON-Objekt mit dem Anfang und einem Hinweis verpacken.
+/// Kleinster Umschlag: `{"truncated":true,"untrusted_note":…}` (gut 90 Bytes). [`cap`] liefert ihn, wenn nicht einmal
+/// der Umschlag mit leerem Anfang in `max` passt – er ist dann die Untergrenze und kann `max` überschreiten.
+pub fn min_envelope() -> String {
+    json!({ "truncated": true, "untrusted_note": UNTRUSTED_NOTE }).to_string()
+}
+
+/// Zu langen JSON-Text in ein gültiges JSON-Objekt mit dem Anfang und einem Hinweis verpacken. Bei sehr kleinem `max`
+/// (unter etwa 256 Bytes passt der Umschlag mit Hinweis nicht) kommt [`min_envelope`] – nie mehr als dieser.
 pub fn cap(text: String, max: usize) -> String {
     if text.len() <= max {
         return text;
@@ -400,6 +453,9 @@ pub fn cap(text: String, max: usize) -> String {
             cut -= 1;
         }
         out = wrap(cut);
+    }
+    if out.len() > max {
+        return min_envelope();
     }
     out
 }
@@ -519,6 +575,37 @@ mod tests {
         assert_eq!(p.check(&call("wait_for_status", json!({"session": 7, "status": ["ready"]}))), Ok(false));
         assert!(!proxy_forbidden("create_session", &json!({}), &[7]));
         assert!(!proxy_forbidden("send_text", &json!({"session": 7}), &[]));
+    }
+
+    #[test]
+    fn a_turn_started_by_an_agent_cannot_start_claude_sessions_or_the_bridge() {
+        let p = policy(McpLevel::Control, &[], false).with_origins(vec![5]);
+        let user = policy(McpLevel::Control, &[], false);
+        for (tool, args, msg) in [
+            ("create_session", json!({"claude": true}), SPAWN_CLAUDE_MESSAGE),
+            ("create_session", json!({"prompt": "do things"}), SPAWN_CLAUDE_MESSAGE),
+            ("run_command", json!({"session": 9, "command": "paneldeck mcp"}), SPAWN_BRIDGE_MESSAGE),
+            ("run_command", json!({"session": 9, "command": r"& 'C:\Tools\PanelDeck.exe' MCP < req.json"}), SPAWN_BRIDGE_MESSAGE),
+            ("send_text", json!({"session": 9, "text": "echo x | paneldeck.exe mcp"}), SPAWN_BRIDGE_MESSAGE),
+            ("send_keys", json!({"session": 9, "keys": ["p", "a", "n", "e", "l", "d", "e", "c", "k", " ", "m", "c", "p", "enter"]}), SPAWN_BRIDGE_MESSAGE),
+        ] {
+            let (st, body) = p.check(&call(tool, args.clone())).unwrap_err();
+            assert_eq!(st, ToolStatus::Denied, "{tool}: {args}");
+            assert!(body.contains("\"forbidden\"") && body.contains(msg), "{tool}: {body}");
+            assert!(user.check(&call(tool, args)).is_ok(), "{tool}: vom Nutzer ausgelöst erlaubt");
+        }
+        // Harmloses bleibt erlaubt
+        for (tool, args) in [
+            ("create_session", json!({"shell": "powershell"})),
+            ("create_session", json!({"claude": false, "prompt": "  "})),
+            ("run_command", json!({"session": 9, "command": "cargo build"})),
+            ("run_command", json!({"session": 9, "command": "mcp-server paneldeck"})),
+            ("send_text", json!({"session": 9, "text": "dir"})),
+            ("send_keys", json!({"session": 9, "keys": ["enter"]})),
+        ] {
+            assert_eq!(p.check(&call(tool, args.clone())), Ok(true), "{tool}: {args}");
+        }
+        assert_eq!(spawn_forbidden("create_session", &json!({"claude": true}), &[]), None);
     }
 
     #[test]
@@ -680,6 +767,37 @@ mod tests {
         assert!(m[0]["content"].as_str().unwrap().ends_with("THE-END"));
         assert_eq!((m[0]["truncated"].clone(), m[0]["tool_calls_truncated"].clone()), (json!(true), json!(true)));
         assert_eq!((back["status"].clone(), back["total"].clone(), back["more_above"].clone()), (json!("working"), json!(2), json!(true)));
+    }
+
+    #[test]
+    fn read_chat_with_a_message_that_is_no_object_does_not_panic() {
+        let v = json!({"status": "ready", "messages": ["x".repeat(5000)], "total": 1, "more_above": false, "note": "untrusted"});
+        let out = cap_for("read_chat", v, 1024);
+        let back: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!((back["status"].clone(), back["total"].clone()), (json!("ready"), json!(1)));
+        assert_eq!(back["messages"], json!([]));
+        assert!(out.len() <= 1024);
+    }
+
+    #[test]
+    fn cap_with_a_tiny_limit_returns_the_minimal_envelope() {
+        let big = "a\"b".repeat(1000);
+        for max in [0, 1, 50, 120, 200] {
+            let out = cap(big.clone(), max);
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["truncated"], true, "{max}");
+            assert_eq!(v["untrusted_note"], UNTRUSTED_NOTE);
+            assert!(out.len() <= max.max(min_envelope().len()), "{max}: {}", out.len());
+        }
+        assert_eq!(cap(big.clone(), 10), min_envelope());
+        // ab etwa 256 Bytes: Umschlag mit Anfang und Hinweis, nie über `max`
+        for max in [256, 300, 1000] {
+            let out = cap(big.clone(), max);
+            assert!(out.len() <= max, "{max}: {}", out.len());
+            assert!(serde_json::from_str::<Value>(&out).unwrap().get("partial").is_some(), "{max}");
+        }
+        // Ein Ergebnis über cap_for mit winzigem Platz bleibt gültiges JSON
+        assert!(serde_json::from_str::<Value>(&cap_for("list_sessions", json!({"text": big}), 5)).is_ok());
     }
 
     #[test]

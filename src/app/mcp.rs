@@ -534,6 +534,11 @@ impl App {
             self.mcp_finish(&tx, tool, args, Some(chat), "chat", Err(proxy_error()));
             return rx;
         }
+        if let Some(msg) = crate::chat::tools::spawn_forbidden(tool, args, &origins) {
+            let de_msg = if msg == crate::chat::tools::SPAWN_CLAUDE_MESSAGE { "Ein von einem Agenten ausgelöster Chat darf keine Claude-Sitzungen starten." } else { "Ein von einem Agenten ausgelöster Chat darf die MCP-Brücke von Paneldeck nicht starten." };
+            self.mcp_finish(&tx, tool, args, Some(chat), "chat", Err(er("forbidden", tr(de_msg, msg))));
+            return rx;
+        }
         if let Out::Now(r) = self.mcp_call(ctx, tool, args, Some(chat), "chat", &tx) {
             self.mcp_finish(&tx, tool, args, Some(chat), "chat", r);
         }
