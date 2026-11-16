@@ -10,6 +10,7 @@ impl App {
         if let Some(mut d) = self.new_dialog.take() {
             let mut keep = true;
             let mut create = false;
+            let mut opts_ok = true;
             egui::Window::new(if d.claude { lang.t("Neue Claude-Sitzung", "New Claude session") } else { lang.t("Neue Sitzung", "New session") })
                 .collapsible(false)
                 .resizable(false)
@@ -66,26 +67,7 @@ impl App {
                             ui.checkbox(&mut d.claude, lang.t("Claude Code starten", "Start Claude Code"));
                             ui.end_row();
                             if d.claude {
-                                ui.label(lang.t("Modell", "Model"));
-                                ui.horizontal(|ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut d.model).hint_text("z.B. opus, sonnet, haiku").desired_width(200.0));
-                                    ui.menu_button("▾", |ui| {
-                                        for m in ["", "opus", "sonnet", "haiku"] {
-                                            if ui.button(if m.is_empty() { lang.t("Standard", "Default") } else { m }).clicked() {
-                                                d.model = m.to_string();
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                });
-                                ui.end_row();
-                                ui.label("Permission-Mode");
-                                egui::ComboBox::from_id_salt("permsel").selected_text(PERMS[d.perm].1).show_ui(ui, |ui| {
-                                    for (i, (_, label)) in PERMS.iter().enumerate() {
-                                        ui.selectable_value(&mut d.perm, i, *label);
-                                    }
-                                });
-                                ui.end_row();
+                                opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg", true);
                                 ui.label("");
                                 ui.checkbox(&mut d.continue_last, lang.t("Letzte Konversation im Ordner fortsetzen (--continue)", "Continue last conversation in folder (--continue)"));
                                 ui.end_row();
@@ -125,7 +107,7 @@ impl App {
                     });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.button(lang.t("Erstellen", "Create")).clicked() {
+                        if ui.add_enabled(opts_ok, egui::Button::new(lang.t("Erstellen", "Create"))).clicked() {
                             create = true;
                         }
                         if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
@@ -136,20 +118,22 @@ impl App {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 keep = false;
             }
+            if create && d.claude {
+                // Letzte Wahl merken (Vorauswahl beim nächsten Mal) – nie bypassPermissions.
+                let copts = d.copts.sanitized(false);
+                if self.settings.last_claude_opts.as_ref() != Some(&copts) {
+                    self.settings.last_claude_opts = Some(copts);
+                    state::save_json(&self.dir.join("settings.json"), &self.settings);
+                }
+            }
             if create {
-                let mut args = Vec::new();
-                if !d.model.trim().is_empty() {
-                    args.push(format!("--model {}", d.model.trim().replace(' ', "")));
-                }
-                if d.perm > 0 {
-                    args.push(format!("--permission-mode {}", PERMS[d.perm].0));
-                }
                 let opts = NewOpts {
                     shell_id: Some(d.shell_id.clone()),
                     cwd: Some(d.cwd.clone()),
                     name: Some(d.name.clone()),
                     claude: d.claude,
-                    claude_args: args.join(" "),
+                    claude_opts: Some(d.copts.sanitized(true)),
+                    allow_bypass: true,
                     continue_last: d.continue_last,
                     claude_continue: Some(d.claude_continue),
                     prompt: Some(d.prompt.clone()),
@@ -694,5 +678,123 @@ impl App {
         if !open {
             self.notes_open = None;
         }
+    }
+}
+
+/// Zeilen eines zweispaltigen Grids für die Claude-Startoptionen (#161): Modell, Effort, Permission-Mode, Agent.
+/// Leere Auswahl = Standard von Claude Code (Flag wird nicht gesetzt). `false`, solange ein Name ungültig ist.
+/// `bypassPermissions` nur mit `allow_bypass` (Dialog „Neue Sitzung“, gilt nur für diese Sitzung) und mit Warnung;
+/// in den Standards gibt es es nicht.
+pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, allow_bypass: bool) -> bool {
+    use crate::claude_opts::{valid_name, BYPASS, EFFORTS, MAX_NAME, MODEL_ALIASES, PERMISSION_MODES};
+    let default = lang.t("Standard von Claude Code", "Claude Code default");
+    let shown = |v: &str| match v {
+        "" => default.to_string(),
+        "default" => lang.t("default (bei allem fragen)", "default (always ask)").to_string(),
+        _ => v.to_string(),
+    };
+    let bad_name = |v: &str| !v.trim().is_empty() && !valid_name(v.trim());
+    let hint = |ui: &mut Ui, text: &str, warn: bool| {
+        ui.label("");
+        let c = if warn { Color32::from_rgb(0xe0, 0x6c, 0x75) } else { style::dim(ui) };
+        ui.add(egui::Label::new(RichText::new(text).small().color(c)).wrap());
+        ui.end_row();
+    };
+    let name_err = lang.t("Nur Buchstaben, Ziffern und . _ : - (höchstens 100 Zeichen).", "Only letters, digits and . _ : - (at most 100 characters).");
+    debug_assert_eq!(MAX_NAME, 100);
+
+    ui.label(lang.t("Modell", "Model"));
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut o.model).hint_text(default).char_limit(MAX_NAME).desired_width(220.0));
+        ui.menu_button("▾", |ui| {
+            for m in std::iter::once("").chain(MODEL_ALIASES) {
+                if ui.button(shown(m)).clicked() {
+                    o.model = m.to_string();
+                    ui.close();
+                }
+            }
+        });
+    });
+    ui.end_row();
+    if bad_name(&o.model) {
+        hint(ui, name_err, true);
+    }
+
+    ui.label("Effort");
+    egui::ComboBox::from_id_salt(format!("{salt}_effort")).selected_text(shown(&o.effort)).show_ui(ui, |ui| {
+        for e in std::iter::once("").chain(EFFORTS) {
+            ui.selectable_value(&mut o.effort, e.to_string(), shown(e));
+        }
+    });
+    ui.end_row();
+
+    ui.label("Permission-Mode");
+    egui::ComboBox::from_id_salt(format!("{salt}_perm")).selected_text(shown(&o.permission_mode)).show_ui(ui, |ui| {
+        let bypass: &[&str] = if allow_bypass { &[BYPASS] } else { &[] };
+        for m in std::iter::once("").chain(PERMISSION_MODES).chain(bypass.iter().copied()) {
+            ui.selectable_value(&mut o.permission_mode, m.to_string(), shown(m));
+        }
+    });
+    ui.end_row();
+    if !allow_bypass && o.permission_mode == BYPASS {
+        o.permission_mode.clear();
+    }
+    if o.permission_mode == BYPASS {
+        hint(
+            ui,
+            lang.t(
+                "⚠ bypassPermissions: Claude fragt bei nichts mehr nach (Dateien, Befehle, Netz). Nur in einer abgeschotteten Umgebung verwenden. Gilt nur für diese Sitzung und wird nicht als Vorauswahl gemerkt; Agenten über MCP können diesen Modus nie setzen.",
+                "⚠ bypassPermissions: Claude no longer asks before anything (files, commands, network). Use only in an isolated environment. Applies only to this session and is not remembered as a preselection; agents via MCP can never set this mode.",
+            ),
+            true,
+        );
+    }
+
+    ui.label("Agent");
+    ui.add(egui::TextEdit::singleline(&mut o.agent).hint_text(lang.t("Name eines Claude-Agenten (optional)", "Name of a Claude agent (optional)")).char_limit(MAX_NAME).desired_width(220.0));
+    ui.end_row();
+    if bad_name(&o.agent) {
+        hint(ui, name_err, true);
+    }
+    o.model = o.model.trim().to_string();
+    o.agent = o.agent.trim().to_string();
+    !bad_name(&o.model) && !bad_name(&o.agent)
+}
+
+#[cfg(test)]
+mod copts_tests {
+    use super::*;
+
+    /// Die Zeilen ohne Fenster zeichnen (headless) und das Ergebnis der Prüfung liefern.
+    fn rows(o: &mut ClaudeOpts) -> bool {
+        rows_with(o, true)
+    }
+
+    fn rows_with(o: &mut ClaudeOpts, allow: bool) -> bool {
+        let ctx = egui::Context::default();
+        let mut ok = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::Grid::new("t").num_columns(2).show(ui, |ui| {
+                    ok = Some(claude_opts_rows(ui, Lang::En, o, "t", allow));
+                });
+            });
+        });
+        ok.unwrap()
+    }
+
+    #[test]
+    fn dialog_rows_validate_names() {
+        let mut o = ClaudeOpts { model: " opus ".into(), effort: "high".into(), permission_mode: "bypassPermissions".into(), agent: "rev".into() };
+        assert!(rows(&mut o));
+        assert_eq!(o.model, "opus", "getrimmt");
+        assert_eq!(o.permission_mode, "bypassPermissions", "der Nutzer darf es selbst wählen");
+        assert!(rows(&mut ClaudeOpts::default()));
+        assert!(!rows(&mut ClaudeOpts { model: "opus; calc".into(), ..Default::default() }));
+        assert!(!rows(&mut ClaudeOpts { agent: "-x".into(), ..Default::default() }));
+        // Standards (Einstellungen): bypassPermissions gibt es dort nicht.
+        let mut d = ClaudeOpts { permission_mode: "bypassPermissions".into(), ..Default::default() };
+        assert!(rows_with(&mut d, false));
+        assert_eq!(d.permission_mode, "");
     }
 }

@@ -219,6 +219,18 @@ pub struct Settings {
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
     /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
     pub remember_sessions: bool,
+    /// Standard-Startoptionen für neue Claude-Sitzungen (seit 2.3.0; leeres Feld = Standard von Claude Code). Gelten für
+    /// Sitzungen aus der Oberfläche und über MCP, wenn nichts angegeben ist – `bypassPermissions` nie für Agenten.
+    /// Nie `bypassPermissions` und nur gültige Namen (beim Schreiben bereinigt, beim Laden verworfen, siehe `sanitize`).
+    #[serde(skip_serializing_if = "crate::claude_opts::ClaudeOpts::is_empty", serialize_with = "crate::claude_opts::ser_user_opts")]
+    pub claude_defaults: crate::claude_opts::ClaudeOpts,
+    /// Zuletzt im Dialog „Neue Sitzung“ gewählte Claude-Optionen (Vorauswahl beim nächsten Mal; `None` = Standards).
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "crate::claude_opts::ser_user_opts_opt")]
+    pub last_claude_opts: Option<crate::claude_opts::ClaudeOpts>,
+    /// Nur im Speicher: beim Laden stand `bypassPermissions` als Standard in der Datei und wurde verworfen
+    /// (Hinweis unter *Einstellungen → Claude*).
+    #[serde(skip)]
+    pub claude_bypass_dropped: bool,
 }
 
 /// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
@@ -285,6 +297,9 @@ impl Default for Settings {
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
+            claude_defaults: Default::default(),
+            last_claude_opts: None,
+            claude_bypass_dropped: false,
         }
     }
 }
@@ -347,6 +362,16 @@ pub struct SessionMeta {
     /// (beliebiges JSON, nie ausgewertet, nie neu angelegt) und gelöscht, sobald die Sitzung minimiert oder wieder gezeigt wird.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot: Option<serde_json::Value>,
+    /// Startoptionen für Claude Code (seit 2.3.0): Modell, Effort, Permission-Mode, Agent. Fehlt in der Datei, wenn keine
+    /// gesetzt sind; ungültige Werte werden beim Laden verworfen. Ältere Sitzungen haben sie ggf. noch in `claude_args`.
+    #[serde(skip_serializing_if = "crate::claude_opts::ClaudeOpts::is_empty")]
+    pub claude_opts: crate::claude_opts::ClaudeOpts,
+    /// Agenten-Kette (seit 2.3.0, #152): Sitzungen, von denen diese Sitzung abstammt – ihr Ersteller über
+    /// `create_session` samt dessen Kette, und jeder Agent, der über MCP in sie geschrieben hat, samt seiner Kette.
+    /// Ein Agent in dieser Sitzung darf in keine davon schreiben. Aufsteigend, ohne Doppelte; fehlt in der Datei, wenn
+    /// leer (vom Nutzer gestartet und nie von einem Agenten beschrieben). Ungültige Werte laden als leer.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_chain")]
+    pub agent_chain: Vec<u64>,
     /// Claude-Sitzung (seit 2.3.0): „Neu laden“/„Neu starten“ setzt die Konversation fort (`--resume`) statt eine neue
     /// zu beginnen. Standard an (so verhielt sich der Neustart bisher); fehlt in der Datei, solange es an ist.
     #[serde(skip_serializing_if = "is_true", deserialize_with = "lenient_bool_true")]
@@ -361,6 +386,15 @@ fn is_true(v: &bool) -> bool {
 fn lenient_bool_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
     Ok(v.as_bool().unwrap_or(true))
+}
+
+/// `agent_chain` nachsichtig lesen: eine Liste von Zahlen; Fremdes (kein Array, keine Zahlen) wird übergangen.
+fn lenient_chain<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u64>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let mut out: Vec<u64> = v.as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
 /// Art einer Sitzung.
@@ -402,6 +436,16 @@ fn is_zero(v: &u64) -> bool {
     *v == 0
 }
 
+impl SessionMeta {
+    /// Wirksame Claude-Optionen und die übrigen (bereinigten) freien `claude_args`. Sitzungen von vor 2.3.0 haben
+    /// Modell/Permission-Mode noch in `claude_args`; sie zählen, solange das neue Feld leer ist.
+    pub fn claude_opts_eff(&self) -> (crate::claude_opts::ClaudeOpts, String) {
+        // Nie ein `--dangerously-*`-Flag aus alten Zeilen; ein für diese Sitzung gewähltes bypassPermissions bleibt.
+        let (legacy, rest) = crate::claude_opts::ClaudeOpts::split_legacy(&crate::claude_opts::clean_legacy(&self.claude_args));
+        (self.claude_opts.or(&legacy), rest)
+    }
+}
+
 impl Default for SessionMeta {
     fn default() -> Self {
         Self {
@@ -430,6 +474,8 @@ impl Default for SessionMeta {
             minimized: false,
             slot: None,
             claude_continue: true,
+            claude_opts: Default::default(),
+            agent_chain: Vec::new(),
         }
     }
 }
@@ -761,6 +807,12 @@ fn clamp_f32(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
 impl Settings {
     /// Unsinnige Werte aus einer von Hand bearbeiteten Datei auf gültige Bereiche begrenzen (verhindert Abstürze beim Start).
     pub fn sanitize(&mut self) {
+        // bypassPermissions ist nie ein gespeicherter Standard und nie die „letzte Wahl“ (nur ausdrücklich im Dialog).
+        if self.claude_defaults.permission_mode == crate::claude_opts::BYPASS {
+            self.claude_bypass_dropped = true;
+        }
+        self.claude_defaults = self.claude_defaults.sanitized(false);
+        self.last_claude_opts = self.last_claude_opts.as_ref().map(|o| o.sanitized(false));
         self.font_size = clamp_f32(self.font_size, 8.0, 40.0, 14.0);
         self.opacity = clamp_f32(self.opacity, 0.3, 1.0, 1.0);
         self.sidebar_width = clamp_f32(self.sidebar_width, 210.0, 460.0, 240.0);
@@ -1041,6 +1093,85 @@ mod kind_tests {
         // Terminals schreiben die neuen Felder nicht (ältere Versionen sehen dieselbe Datei wie bisher)
         let s = serde_json::to_string(&st.sessions[0]).unwrap();
         assert!(!s.contains("\"kind\"") && !s.contains("\"chat\""), "{s}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_opts_back_compat_and_roundtrip() {
+        use crate::claude_opts::ClaudeOpts;
+        // state.json/settings.json von 2.2.0 (ohne die Felder) laden; geschrieben werden sie dann auch nicht.
+        let m: SessionMeta = serde_json::from_str(r#"{"id":3,"name":"c","claude":true,"claude_args":"--model opus"}"#).unwrap();
+        assert!(m.claude_opts.is_empty());
+        assert!(!serde_json::to_string(&m).unwrap().contains("claude_opts"));
+        let s: Settings = serde_json::from_str(r#"{"language":"En","claude_mode":true}"#).unwrap();
+        assert!(s.claude_defaults.is_empty() && s.last_claude_opts.is_none());
+        let j = serde_json::to_value(&s).unwrap();
+        assert!(j.get("claude_defaults").is_none() && j.get("last_claude_opts").is_none());
+        // Kaputte Werte machen die Dateien nicht unlesbar; ungültige Felder werden verworfen.
+        let m: SessionMeta = serde_json::from_str(r#"{"id":4,"claude_opts":{"model":"opus;calc","effort":"high","permission_mode":"bypassPermissions"}}"#).unwrap();
+        assert_eq!(m.claude_opts, ClaudeOpts { effort: "high".into(), permission_mode: "bypassPermissions".into(), ..Default::default() });
+        let s: Settings = serde_json::from_str(r#"{"claude_defaults":7,"last_claude_opts":"x"}"#).unwrap();
+        assert!(s.claude_defaults.is_empty());
+        // bypassPermissions als Standard (ältere Datei / Hand-Bearbeitung): wird beim Laden verworfen, mit Hinweis.
+        let mut s: Settings = serde_json::from_str(r#"{"claude_defaults":{"model":"opus","permission_mode":"bypassPermissions"},"last_claude_opts":{"permission_mode":"bypassPermissions","effort":"low"}}"#).unwrap();
+        s.sanitize();
+        assert!(s.claude_bypass_dropped);
+        assert_eq!(s.claude_defaults, ClaudeOpts { model: "opus".into(), ..Default::default() });
+        assert_eq!(s.last_claude_opts, Some(ClaudeOpts { effort: "low".into(), ..Default::default() }));
+        let mut ok = Settings::default();
+        ok.sanitize();
+        assert!(!ok.claude_bypass_dropped);
+        // Auch ungesäubert im Speicher (Einstellungsseite während der Eingabe) wird nichts Ungültiges geschrieben.
+        let mut s = Settings::default();
+        s.claude_defaults = ClaudeOpts { model: "op us".into(), permission_mode: "bypassPermissions".into(), agent: "rev".into(), ..Default::default() };
+        s.last_claude_opts = Some(ClaudeOpts { permission_mode: "bypassPermissions".into(), ..Default::default() });
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["claude_defaults"], serde_json::json!({"agent": "rev"}));
+        assert_eq!(j["last_claude_opts"], serde_json::json!({}));
+        assert!(j.get("claude_bypass_dropped").is_none());
+        // Hin und zurück
+        let mut m = SessionMeta::default();
+        m.claude_opts = ClaudeOpts { model: "sonnet".into(), effort: "max".into(), permission_mode: "plan".into(), agent: "rev".into() };
+        let back: SessionMeta = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.claude_opts, m.claude_opts);
+        let mut s = Settings::default();
+        s.claude_defaults = ClaudeOpts { model: "opus".into(), ..Default::default() };
+        s.last_claude_opts = Some(ClaudeOpts { effort: "low".into(), ..Default::default() });
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!((back.claude_defaults, back.last_claude_opts), (s.claude_defaults, s.last_claude_opts));
+        // Sitzungen von vor 2.3.0: Modell/Permission-Mode aus `claude_args` zählen, solange das neue Feld leer ist.
+        let mut m: SessionMeta = serde_json::from_str(r#"{"id":5,"claude":true,"claude_args":"--model opus --permission-mode plan --verbose $(x)"}"#).unwrap();
+        let (o, rest) = m.claude_opts_eff();
+        assert_eq!((o.model.as_str(), o.permission_mode.as_str(), rest.as_str()), ("opus", "plan", "--verbose"));
+        m.claude_opts.model = "haiku".into();
+        assert_eq!(m.claude_opts_eff().0.model, "haiku", "das neue Feld hat Vorrang");
+        m.claude_args = "--dangerously-skip-permissions --verbose".into();
+        assert_eq!(m.claude_opts_eff().1, "--verbose", "nie --dangerously-*");
+    }
+
+    #[test]
+    fn agent_chain_survives_a_restart_and_old_files_load_without_it() {
+        let dir = std::env::temp_dir().join(format!("pd-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        // 2.2.0 und älter: kein Feld → leere Kette (vom Nutzer gestartet)
+        std::fs::write(&p, r#"{"sessions":[{"id":3,"name":"pwsh","shell_id":"pwsh","project":1}],"next_id":4}"#).unwrap();
+        let (st, _) = load_saved(&p);
+        assert!(st.sessions[0].agent_chain.is_empty());
+        // Leere Kette wird nicht geschrieben (ältere Versionen sehen dieselbe Datei)
+        assert!(!serde_json::to_string(&st.sessions[0]).unwrap().contains("agent_chain"));
+        // Neustart: die Kette bleibt an der Sitzung (Ids werden nie neu vergeben)
+        let saved = SavedState { sessions: vec![SessionMeta { id: 12, agent_chain: vec![5, 10], ..SessionMeta::default() }], next_id: 13, ..SavedState::default() };
+        save_json(&p, &saved);
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none());
+        assert_eq!(st.sessions[0].agent_chain, [5, 10]);
+        // Fremde Werte: nachsichtig (sortiert, ohne Doppelte, nur Zahlen; kein Array → leer)
+        let m: SessionMeta = serde_json::from_str(r#"{"id":1,"agent_chain":[9,"x",3,9,-1]}"#).unwrap();
+        assert_eq!(m.agent_chain, [3, 9]);
+        let m: SessionMeta = serde_json::from_str(r#"{"id":1,"agent_chain":"5"}"#).unwrap();
+        assert!(m.agent_chain.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

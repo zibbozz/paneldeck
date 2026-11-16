@@ -17,6 +17,28 @@ use std::sync::mpsc::SyncSender;
 
 type R = Result<Value, (String, String)>;
 
+/// Wurde eine der Claude-Startoptionen angegeben (nicht leer)?
+fn has_claude_opts(args: &Value) -> bool {
+    ["model", "effort", "permission_mode", "agent"].iter().any(|k| match args.get(*k) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) => !s.trim().is_empty(),
+        Some(_) => true,
+    })
+}
+
+/// `model`/`effort`/`permission_mode`/`agent` einer Claude-Sitzung (`null`, wenn Paneldeck sie nicht setzt).
+/// Bei Chats bleibt `model` das Modell des Chats; die übrigen sind dort `null`.
+fn add_claude_opts(v: &mut Value, e: &super::Entry) {
+    let o = if e.meta.claude && !e.is_chat() { e.meta.claude_opts_eff().0 } else { ClaudeOpts::default() };
+    let j = o.to_json();
+    if !e.is_chat() {
+        v["model"] = j["model"].clone();
+    }
+    for k in ["effort", "permission_mode", "agent"] {
+        v[k] = j[k].clone();
+    }
+}
+
 fn tr(de: &'static str, en: &'static str) -> &'static str {
     state::t(de, en)
 }
@@ -64,6 +86,8 @@ pub(super) struct McpState {
     /// Meldung zum Registrieren in Claude Code (Einstellungen).
     pub msg: std::sync::Arc<std::sync::Mutex<String>>,
     next_token: u64,
+    /// Der gerade ausgeführte Aufruf kommt von einem nicht zuzuordnenden (losgelösten) Prozess (#152).
+    unattributable: bool,
 }
 
 impl McpState {
@@ -174,6 +198,43 @@ fn tool_err(e: agent::ToolError) -> (String, String) {
 /// PTY, in ihm kann keine Brücke laufen.
 fn env_caller_ok(is_chat: Option<bool>) -> bool {
     is_chat == Some(false)
+}
+
+/// Eine Sitzung für [`pick_caller`]: Kennung, PID ihrer Shell (der Hub hält deren Handle, die PID kann also nicht neu
+/// vergeben werden) und – nur bei WSL-Terminals – ihr geheimer Schlüssel (`PANELDECK_SESSION_KEY`).
+type CallerCand<'a> = (u64, Option<u32>, Option<&'a str>);
+
+/// Wer ruft auf (#152)? `peer` = Prozessbaum des Absenders, auf dem Verbindungs-Thread geprüft (`winctl::resolve_peer`);
+/// `hint` = `PANELDECK_SESSION` und `PANELDECK_SESSION_KEY` der Brücke. Regeln:
+/// 1. Liegt eine Sitzung im Prozessbaum, ist sie der Aufrufer (`"process"`) – die nächste, wenn es mehrere gäbe. Ein
+///    abweichender Hinweis zählt dann nicht.
+/// 2. Sonst gilt der Hinweis (`"env"`), aber nur für ein WSL-Terminal (dort liegt die Brücke nicht im Windows-Baum der
+///    Sitzung) und nur mit dem passenden Schlüssel dieser Sitzung. Die Kennung allein beweist nichts.
+/// 3. Sonst: reißt der Baum des Absenders nach dem Start des Hubs ab (losgelöster Prozess), ist er „nicht zuzuordnen“
+///    (`"orphan"`): kein Aufrufer, aber kein Schreiben in mögliche Vorfahren ([`App::chain_blocked`]).
+/// 4. Sonst ist der Aufrufer extern (`"none"`, ohne Sitzung und ohne Kette).
+fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+    let near = sessions.iter().filter_map(|(id, pid, _)| Some((*id, peer.chain.iter().position(|p| Some(*p) == *pid)?))).min_by_key(|(_, pos)| *pos);
+    if let Some((id, _)) = near {
+        return (Some(id), "process");
+    }
+    if let Some((want, key)) = hint {
+        if let Some((id, _, Some(k))) = sessions.iter().find(|(s, _, _)| *s == want) {
+            if !k.is_empty() && keys_equal(k, key) {
+                return (Some(*id), "env");
+            }
+        }
+    }
+    if peer.orphan {
+        (None, "orphan")
+    } else {
+        (None, "none")
+    }
+}
+
+/// Schlüssel vergleichen, ohne früh abzubrechen (Laufzeit hängt nicht davon ab, wie viele Zeichen stimmen).
+fn keys_equal(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Felder `how`/`model` des Protokolleintrags: nur für Werkzeuge eines Chats (`how == "chat"`, ausdrücklich übergeben,
@@ -465,13 +526,19 @@ impl App {
             ctx.request_repaint();
         }
         for job in jobs {
-            let McpJob { tool, args, caller: env_caller, caller_pid, reply } = job;
-            let (caller, how) = self.mcp_resolve_caller(env_caller, caller_pid);
+            let McpJob { tool, args, caller: env_caller, peer, caller_key, reply } = job;
+            let (caller, how) = self.mcp_resolve_caller(&peer, env_caller.zip(caller_key.as_deref()));
             self.mcp.last = Some(Instant::now());
             // Stufe und Modus hier noch einmal prüfen: sie können sich zwischen Verbindung und UI geändert haben.
             let out = match mcp::check_access(&tool, self.settings.mcp_level, self.plan.expert) {
                 Err(e) => Out::Now(Err(e)),
-                Ok(()) => self.mcp_call(ctx, &tool, &args, caller, how, &reply),
+                Ok(()) => {
+                    // Nicht zuzuordnender (losgelöster) Absender: gilt für die Prüfungen dieses Aufrufs (`chain_blocked`).
+                    self.mcp.unattributable = how == "orphan";
+                    let out = self.mcp_call(ctx, &tool, &args, caller, how, &reply);
+                    self.mcp.unattributable = false;
+                    out
+                }
             };
             if let Out::Now(r) = out {
                 self.mcp_finish(&reply, &tool, &args, caller, how, r);
@@ -482,25 +549,39 @@ impl App {
         }
     }
 
-    /// Welche Hub-Sitzung ruft auf? Zuerst über den Prozessbaum der Brücke (Eltern-Prozesse; nicht fälschbar durch eine gesetzte
-    /// Umgebungsvariable), sonst über `PANELDECK_SESSION` (nötig in WSL, dort liegt die Brücke nicht im Windows-Prozessbaum).
-    fn mcp_resolve_caller(&self, env_caller: Option<u64>, pid: Option<u32>) -> (Option<u64>, &'static str) {
-        if let Some(pid) = pid {
-            let chain = crate::winctl::process_chain(pid);
-            for (id, e) in &self.entries {
-                if let Some(sp) = e.live.as_ref().and_then(|s| s.pid()) {
-                    if chain.contains(&sp) {
-                        return (Some(*id), "process");
-                    }
-                }
-            }
+    /// Welche Hub-Sitzung ruft auf? `peer` ist der Prozessbaum des Absenders, vom Hub selbst auf dem Verbindungs-Thread
+    /// ermittelt (`hooks::McpJob::peer`, nie die Angabe des Clients); `hint` = (`PANELDECK_SESSION`, Schlüssel). Regeln in
+    /// [`pick_caller`]. Ein Chat hat keine PTY und ist nie Aufrufer über diesen Weg.
+    fn mcp_resolve_caller(&self, peer: &crate::winctl::PeerChain, hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+        let sessions: Vec<CallerCand> = self
+            .entries
+            .iter()
+            .map(|(id, e)| {
+                let wsl = env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl");
+                (*id, e.live.as_ref().and_then(|s| s.pid()), wsl.then_some(e.session_key.as_str()))
+            })
+            .collect();
+        pick_caller(peer, &sessions, hint)
+    }
+
+    /// Absender eines `--open` (#152): `(Sitzung in seinem Prozessbaum, nicht zuzuordnen)` – nur über den Prozessbaum.
+    pub(super) fn open_origin(&self, peer: Option<&crate::winctl::PeerChain>) -> (Option<u64>, bool) {
+        let Some(peer) = peer else { return (None, false) };
+        let sessions: Vec<CallerCand> = self.entries.iter().map(|(id, e)| (*id, e.live.as_ref().and_then(|s| s.pid()), None)).collect();
+        let (id, how) = pick_caller(peer, &sessions, None);
+        (id, how == "orphan")
+    }
+
+    /// Darf `caller` nicht in `id` schreiben (#152)? Weil `id` zu seiner Agenten-Kette gehört – oder weil der Absender
+    /// nicht zuzuordnen ist (losgelöster Prozess) und `id` in irgendeiner Kette steht (ein möglicher Vorfahr).
+    fn chain_blocked(&self, caller: Option<u64>, id: u64) -> Option<(String, String)> {
+        if super::taint::write_forbidden(&self.entries, caller, id) {
+            return Some(super::taint::chain_error());
         }
-        // Nur Terminals: ein Chat hat keine PTY, eine Brücke kann also nie in ihm laufen (sonst könnte sie sich als Chat
-        // ausgeben und dessen Kinder steuern).
-        match env_caller {
-            Some(id) if env_caller_ok(self.entries.get(&id).map(|e| e.is_chat())) => (Some(id), "env"),
-            _ => (None, "none"),
+        if self.mcp.unattributable && super::taint::potential_ancestor(&self.entries, id) {
+            return Some(super::taint::orphan_error());
         }
+        None
     }
 
     fn mcp_finish(&mut self, reply: &SyncSender<R>, tool: &str, args: &Value, caller: Option<u64>, how: &str, r: R) {
@@ -546,7 +627,8 @@ impl App {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         // Kein Umweg: hat ein Agent diese Runde ausgelöst, schreibt der Chat nie in dessen Sitzung (und schließt sie nie) –
         // auch nicht in eine andere Sitzung der auslösenden Kette (Agent → Chat A → Chat B).
-        let origins = self.entries.get(&chat).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+        // Vorfahren des Chats: gespeicherte Agenten-Kette (#152) und die Kette der laufenden Runde.
+        let origins = super::taint::ancestors(&self.entries, Some(chat));
         if proxy_forbidden(tool, args, &origins) {
             self.mcp_finish(&tx, tool, args, Some(chat), "chat", Err(proxy_error()));
             return rx;
@@ -571,7 +653,28 @@ impl App {
         if write && caller == Some(id) {
             return Err(er("forbidden", tr("Ein Agent darf nicht in seine eigene Sitzung schreiben oder sie schließen.", "An agent must not write to or close its own session.")));
         }
+        // Auch nicht über einen Umweg: in keine Sitzung seiner Agenten-Kette – für jeden Aufrufer (#152).
+        if write {
+            if let Some(e) = self.chain_blocked(caller, id) {
+                return Err(e);
+            }
+        }
         Ok(id)
+    }
+
+    /// `caller` hat `id` über `create_session` angelegt: die neue Sitzung bekommt seine Agenten-Kette samt ihm (#152).
+    /// Geänderte Ketten werden sofort gespeichert (nur `state.json`; ein Absturz soll die Markierung nicht verlieren).
+    fn mcp_taint_create(&mut self, caller: Option<u64>, id: u64) {
+        if super::taint::on_create(&mut self.entries, caller, id) {
+            self.save_state();
+        }
+    }
+
+    /// `caller` hat in `id` geschrieben: als Glied einer Agenten-Kette markiert er das Ziel mit ihr (#152).
+    fn mcp_taint_write(&mut self, caller: Option<u64>, id: u64) {
+        if super::taint::on_write(&mut self.entries, caller, id) {
+            self.save_state();
+        }
     }
 
     fn mcp_live(&self, id: u64) -> Result<&Session, (String, String)> {
@@ -633,7 +736,7 @@ impl App {
             "wait_for_status" => self.mcp_wait(args, reply, tool, caller, how),
             "queue_prompt" => Out::Now(self.mcp_queue(args, caller)),
             "rename_session" => Out::Now(self.mcp_rename(args, caller)),
-            "focus_session" => Out::Now(self.mcp_focus(ctx, args)),
+            "focus_session" => Out::Now(self.mcp_focus(ctx, args, caller)),
             "close_session" => Out::Now(self.mcp_close(args, caller)),
             t if agent::TOOLS.contains(&t) => Out::Now(self.mcp_planning(t, args, caller)),
             _ => Out::Now(Err(er("not_found", tr("Unbekanntes Werkzeug", "Unknown tool")))),
@@ -757,7 +860,7 @@ impl App {
         let Some(e) = self.entries.get(&id) else { return json!({"session": null, "identified_by": "none"}) };
         let project = self.projects.iter().find(|p| p.id == e.meta.project).map(|p| p.name.clone()).unwrap_or_default();
         let children: Vec<u64> = self.mcp.created.iter().filter(|(_, c)| **c == Some(id)).map(|(k, _)| *k).filter(|k| self.entries.contains_key(k)).collect();
-        json!({
+        let mut v = json!({
             "session": id,
             "identified_by": how,
             "name": e.display_name(),
@@ -768,7 +871,11 @@ impl App {
             "claude": e.is_claude(),
             "status": status_str(e),
             "children": children,
-        })
+            // Sitzungen, in die dieser Agent nicht schreiben darf (er stammt von ihnen ab, #152).
+            "agent_chain": super::taint::ancestors(&self.entries, Some(id)),
+        });
+        add_claude_opts(&mut v, e);
+        v
     }
 
     fn mcp_list(&self, args: &Value, caller: Option<u64>) -> Value {
@@ -783,7 +890,7 @@ impl App {
                 let project = self.projects.iter().find(|p| p.id == e.meta.project).map(|p| p.name.clone()).unwrap_or_default();
                 // Fenster der Sitzung (0 = Hauptfenster); fokussiert/sichtbar gelten in diesem Fenster.
                 let (window, focused, visible) = self.session_view_info(*id);
-                json!({
+                let mut v = json!({
                     "id": id,
                     "name": e.display_name(),
                     "project": project,
@@ -805,9 +912,12 @@ impl App {
                     "git": git.map(|g| json!({"branch": g.branch, "changed_files": g.changed})),
                     "created_by_agent": self.mcp.created.contains_key(id),
                     "parent": self.mcp.created.get(id).and_then(|c| *c),
+                    "agent_chain": super::taint::ancestors(&self.entries, Some(*id)),
                     "you": caller == Some(*id),
                     "error": e.error,
-                })
+                });
+                add_claude_opts(&mut v, e);
+                v
             })
             .collect();
         // Namen, Ordner und Branches können aus dem Terminal (Fenstertitel) oder aus Repositories stammen: nicht vertrauenswürdig
@@ -881,10 +991,21 @@ impl App {
         if chat {
             return self.mcp_create_chat(ctx, args, caller);
         }
-        if s("server").is_some() || s("model").is_some() {
-            return Err(er("bad_args", tr("server und model gibt es nur mit kind = „chat“.", "server and model only apply with kind = “chat”.")));
+        if s("server").is_some() {
+            return Err(er("bad_args", tr("server gibt es nur mit kind = „chat“.", "server only applies with kind = “chat”.")));
         }
         let claude = args.get("claude").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !claude && has_claude_opts(args) {
+            return Err(er(
+                "bad_args",
+                tr(
+                    "model, effort, permission_mode und agent gibt es nur mit claude = true (model außerdem mit kind = „chat“).",
+                    "model, effort, permission_mode and agent only apply with claude = true (model also with kind = “chat”).",
+                ),
+            ));
+        }
+        // Nur geprüfte Startoptionen, nie freie Argumente; bypassPermissions nie (auch nicht als Standard des Nutzers).
+        let copts = ClaudeOpts::from_mcp(args).map_err(|(d, e)| er("bad_args", if de() { d } else { e }))?.for_agent(&self.settings.claude_defaults);
         if claude && !self.settings.claude_mode {
             return Err(er("claude_mode_off", tr("Der Claude-Modus ist in den Einstellungen ausgeschaltet.", "Claude mode is switched off in the settings.")));
         }
@@ -917,15 +1038,18 @@ impl App {
         // Ohne `group`: Läuft der Agent in einer Hub-Sitzung, kommen seine neuen Sitzungen in einen Unterordner mit deren Namen
         // (Baumansicht) – so stehen Kinder unter dem Elternteil und sind leicht zu finden.
         let group = self.mcp_child_group(s("group"), caller);
-        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, prompt, group, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
+        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, claude_opts: Some(copts), prompt, group, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
         if let Some(err) = self.entries.get(&id).and_then(|e| e.error.clone()) {
             self.close_session(id);
             return Err(er("spawn_failed", err));
         }
         self.mcp.created.insert(id, caller);
+        self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
-        Ok(json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")}))
+        let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
+        add_claude_opts(&mut v, e);
+        Ok(v)
     }
 
     /// Gruppe einer neuen Sitzung: `group` oder – läuft der Agent in einer Hub-Sitzung – ein Unterordner mit deren Namen
@@ -942,8 +1066,8 @@ impl App {
     /// `create_session` mit `kind = chat`: Chat mit einem eingerichteten Modell, im Fenster/Projekt des Aufrufers.
     fn mcp_create_chat(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-        if s("shell").is_some() || s("prompt").is_some() || args.get("claude").and_then(|v| v.as_bool()) == Some(true) {
-            return Err(er("bad_args", tr("Ein Chat hat keine Shell und kein Claude: shell, claude und prompt gibt es nur für Terminals.", "A chat has no shell and no Claude: shell, claude and prompt only apply to terminals.")));
+        if s("shell").is_some() || s("prompt").is_some() || s("effort").is_some() || s("permission_mode").is_some() || s("agent").is_some() || args.get("claude").and_then(|v| v.as_bool()) == Some(true) {
+            return Err(er("bad_args", tr("Ein Chat hat keine Shell und kein Claude: shell, claude, prompt, effort, permission_mode und agent gibt es nur für Terminals.", "A chat has no shell and no Claude: shell, claude, prompt, effort, permission_mode and agent only apply to terminals.")));
         }
         let cwd = s("cwd");
         if let Some(c) = &cwd {
@@ -956,6 +1080,7 @@ impl App {
         let group = self.mcp_child_group(s("group"), caller);
         let id = self.new_session(ctx, NewOpts { cwd, name: s("name"), group, quiet: true, window: Some(window), project: Some(project), chat: Some(meta.clone()), ..NewOpts::default() });
         self.mcp.created.insert(id, caller);
+        self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
         let server = self.settings.llm_servers.iter().find(|x| x.id == meta.server).map(|x| x.name.clone()).unwrap_or_default();
         Ok(json!({
@@ -1027,6 +1152,7 @@ impl App {
         }
         match self.chat_send(ctx, id, Some(text), super::ChatSendOrigin::Agent { caller, note: Some(note.clone()) }) {
             super::ChatSendResult::Sent => {
+                self.mcp_taint_write(caller, id);
                 let index = self.entries.get(&id).and_then(|e| e.chat.as_ref()).and_then(|c| chatmod::logic::last_user(&c.file.messages));
                 self.push_toast(mcp::short(&format!("{chat_name}: {note}"), 140), super::toasts::ToastKind::Info, None);
                 ctx.request_repaint();
@@ -1073,6 +1199,7 @@ impl App {
         if submit && e.is_claude() && e.status == ClaudeStatus::Idle {
             e.status = ClaudeStatus::Working;
         }
+        self.mcp_taint_write(caller, id);
         Ok(json!({"ok": true}))
     }
 
@@ -1091,6 +1218,7 @@ impl App {
         }
         self.mcp_check_writable(id)?;
         self.mcp_live(id)?.write_raw(&bytes);
+        self.mcp_taint_write(caller, id);
         Ok(json!({"ok": true, "keys": keys.len()}))
     }
 
@@ -1141,7 +1269,9 @@ impl App {
         })();
         match r {
             Ok(p) => {
+                let id = p.session;
                 self.mcp.pending.push(p);
+                self.mcp_taint_write(caller, id);
                 Out::Later
             }
             Err(e) => Out::Now(Err(e)),
@@ -1323,11 +1453,19 @@ impl App {
             e.send_next_queued();
             sent = true;
         }
-        Ok(json!({"queue_len": e.meta.queue.len(), "sent_immediately": sent}))
+        let out = json!({"queue_len": e.meta.queue.len(), "sent_immediately": sent});
+        // Ein Glied einer Agenten-Kette markiert die Claude-Sitzung, der es einen Prompt gibt (#152): sie kann ihn
+        // nicht in eine Sitzung der Kette weiterreichen.
+        self.mcp_taint_write(caller, id);
+        Ok(out)
     }
 
     fn mcp_rename(&mut self, args: &Value, caller: Option<u64>) -> R {
         let id = self.mcp_target(args, caller, false)?;
+        // Die eigene Sitzung darf ein Agent umbenennen, eine Sitzung seiner Agenten-Kette nicht (#152).
+        if let Some(e) = self.chain_blocked(caller, id) {
+            return Err(e);
+        }
         let name = args.get("name").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).ok_or_else(|| er("bad_args", tr("name fehlt", "name is missing")))?;
         let e = self.entries.get_mut(&id).ok_or_else(|| er("not_found", tr("Sitzung nicht gefunden", "Session not found")))?;
         e.meta.name = name.chars().take(80).collect();
@@ -1335,8 +1473,12 @@ impl App {
         Ok(json!({"ok": true, "name": e.meta.name}))
     }
 
-    fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value) -> R {
+    fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let id = self.mcp_target(args, None, false)?;
+        // Wie bei Chats (`proxy_forbidden`): keine Sitzung der eigenen Agenten-Kette in den Vordergrund holen (#152).
+        if let Some(e) = self.chain_blocked(caller, id) {
+            return Err(e);
+        }
         // Abgedockt: dieses Fenster nach vorn; Sitzung eines weiteren Fensters: dort aktivieren, Fenster nach vorn.
         self.apply(ctx, Action::Focus(id));
         Ok(json!({"ok": true}))
@@ -1575,6 +1717,13 @@ mod tests {
     }
 
     #[test]
+    fn claude_opts_given() {
+        assert!(!has_claude_opts(&json!({})) && !has_claude_opts(&json!({"model": " ", "effort": null, "claude": true})));
+        assert!(has_claude_opts(&json!({"model": "opus"})) && has_claude_opts(&json!({"effort": 3})) && has_claude_opts(&json!({"agent": "a"})));
+        assert!(has_claude_opts(&json!({"permission_mode": "bypassPermissions"})));
+    }
+
+    #[test]
     fn terminal_links_only_for_own_or_self_created_sessions() {
         let mut created: HashMap<u64, Option<u64>> = HashMap::new();
         created.insert(8, Some(3));
@@ -1603,6 +1752,39 @@ mod tests {
         assert_eq!(planning_log_info("log_time", &json!({"ticket": "PAN-1", "duration": 2})), "PAN-1 2");
         assert_eq!(planning_log_info("set_todo_done", &json!({"id": "TODO-4"})), "TODO-4");
         assert!(planning_log_info("add_todo", &json!({"text": long})).chars().count() <= 81);
+    }
+
+    #[test]
+    fn the_caller_comes_from_the_peer_process_tree_not_from_its_own_claims() {
+        use crate::winctl::PeerChain;
+        let pc = |chain: &[u32], orphan: bool| PeerChain { chain: chain.to_vec(), orphan };
+        // Sitzungen: 5 (Shell-PID 500), 20 (PID 2000, markiert), 30 (WSL-Terminal, PID 3000, Schlüssel), 40 (Chat)
+        let key30 = "a".repeat(64);
+        let sessions: [CallerCand; 4] = [(5, Some(500), None), (20, Some(2000), None), (30, Some(3000), Some(key30.as_str())), (40, None, None)];
+        // Rohe Verbindung aus dem Prozessbaum von 20, ohne oder mit gefälschter Angabe: immer 20
+        let tree = pc(&[4242, 4100, 2000, 1, 999], false);
+        assert_eq!(pick_caller(&tree, &sessions, None), (Some(20), "process"));
+        assert_eq!(pick_caller(&tree, &sessions, Some((5, ""))), (Some(20), "process"), "Hinweis 5 ändert nichts");
+        assert_eq!(pick_caller(&tree, &sessions, Some((30, key30.as_str()))), (Some(20), "process"));
+        // die nächste Sitzung im Baum gewinnt
+        assert_eq!(pick_caller(&pc(&[1, 2000, 500], false), &sessions, None), (Some(20), "process"));
+        // Nicht im Baum einer Sitzung: der WSL-Hinweis gilt nur mit dem passenden Schlüssel
+        let outside = pc(&[7777, 4], false);
+        assert_eq!(pick_caller(&outside, &sessions, None), (None, "none"));
+        assert_eq!(pick_caller(&outside, &sessions, Some((30, key30.as_str()))), (Some(30), "env"), "WSL mit Schlüssel");
+        assert_eq!(pick_caller(&outside, &sessions, Some((30, ""))), (None, "none"), "WSL ohne Schlüssel: Kennung allein reicht nicht");
+        assert_eq!(pick_caller(&outside, &sessions, Some((30, &"b".repeat(64)))), (None, "none"), "falscher Schlüssel");
+        assert_eq!(pick_caller(&outside, &sessions, Some((5, ""))), (None, "none"), "Terminal ohne WSL: Hinweis ignoriert");
+        assert_eq!(pick_caller(&outside, &sessions, Some((40, ""))), (None, "none"), "Chat: nie");
+        assert_eq!(pick_caller(&outside, &sessions, Some((99, "x"))), (None, "none"));
+        // Losgelöster Prozess (Baum reißt nach dem Hub-Start ab): nicht zuzuordnen, nicht extern
+        let orphan = pc(&[8888], true);
+        assert_eq!(pick_caller(&orphan, &sessions, None), (None, "orphan"));
+        assert_eq!(pick_caller(&orphan, &sessions, Some((5, ""))), (None, "orphan"), "gefälschter Hinweis hilft nicht");
+        assert_eq!(pick_caller(&orphan, &sessions, Some((30, key30.as_str()))), (Some(30), "env"), "WSL-Brücke mit Schlüssel");
+        // Ein verwaister Teilbaum, der noch durch eine Sitzung läuft, zählt als diese Sitzung
+        assert_eq!(pick_caller(&pc(&[9, 2000], true), &sessions, None), (Some(20), "process"));
+        assert!(keys_equal("abc", "abc") && !keys_equal("abc", "abd") && !keys_equal("abc", "ab"));
     }
 
     #[test]
