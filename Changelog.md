@@ -22,6 +22,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Before tools with write access the chat asks with the full arguments and the target session: Allow / Always for this chat / Deny. "Always" applies to that tool and target session only and can be revoked in the chat header ("Permanent approvals"). While the chat waits it is marked in the sidebar.
 - At most N tool calls per answer (default 10, rejected calls count too); then the chat stops with "Continue". Tool results are shortened to fit the model's context (the end of terminal output is kept); if they no longer fit, the chat pauses with a notice instead of losing the system prompt.
 - Tool lines show their status (✓, ✗, ⊘ denied, spinner) and expand to parameters and result.
+- Setting "Mouse wheel in full-screen programs" (Settings → Appearance): send arrow keys (default, like other terminals) or nothing in full-screen programs without mouse support; stored as the optional `alt_screen_wheel` field in `settings.json`.
+- Shift+mouse wheel scrolls Paneldeck's scrollback even when the program has switched on mouse mode.
 
 ### Changed
 
@@ -31,6 +33,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Fixed
 
 - A maximized window no longer has a transparent gap on all sides through which the desktop showed (#134).
+- The mouse wheel sent arrow keys in full-screen programs that request mouse events in the normal or UTF-8 encoding; wheel and clicks are now reported in every mouse encoding (normal encoding up to column/row 94 because of ConPTY), and the position is right after scrolling back (#141).
+- Programs that switch off the alternate scroll mode (DECSET 1007) no longer get arrow keys from the mouse wheel.
+- When a full-screen program exits without restoring the screen (crash, dropped connection), the mouse wheel and clicks no longer send arrow keys or mouse sequences into the shell prompt (needs the shell integration).
 
 ## [2.1.0] - 2026-11-15
 

@@ -1985,6 +1985,7 @@ impl App {
                     themes: &self.themes,
                     profiles: &self.settings.profiles,
                     tl: &self.tlinks,
+                    alt_wheel: self.settings.alt_screen_wheel,
                 };
                 show_node(ui, &mut layout, rect, &mut cx);
                 self.layout = Some(layout);
@@ -3309,6 +3310,8 @@ struct PaneCx<'a> {
     profiles: &'a [Profile],
     /// Verknüpfte Tickets je Sitzung (Chips im Kopf).
     tl: &'a terminal_links::TLinks,
+    /// Einstellung „Mausrad in Vollbildprogrammen“.
+    alt_wheel: state::AltScreenWheel,
 }
 
 
@@ -3571,7 +3574,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                 theme_local = Some(t);
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
-            let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now);
+            let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
             if session.search.is_some() && search_bar(ui, session, body, lang) {
                 session.search = None;
                 *cx.want_focus = Some(id);

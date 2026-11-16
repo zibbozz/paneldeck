@@ -305,6 +305,7 @@ impl App {
                         themes: &self.themes,
                         profiles: &self.settings.profiles,
                         tl: &self.tlinks,
+                        alt_wheel: self.settings.alt_screen_wheel,
                     };
                     show_pane(ui, id, rect, &mut cx);
                 });

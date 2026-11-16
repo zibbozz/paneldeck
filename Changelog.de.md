@@ -22,6 +22,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Vor Werkzeugen mit Schreibzugriff fragt der Chat mit den vollständigen Argumenten und der Ziel-Sitzung nach: Erlauben / Immer für diesen Chat / Ablehnen. „Immer“ gilt nur für dieses Werkzeug und diese Ziel-Sitzung und lässt sich im Chat-Kopf widerrufen („Dauerhafte Freigaben“). Solange der Chat wartet, ist er in der Seitenleiste markiert.
 - Höchstens N Werkzeugaufrufe je Antwort (Standard 10, abgelehnte Aufrufe zählen mit); danach hält der Chat mit „Weiter“ an. Werkzeug-Ergebnisse werden passend zum Kontext des Modells gekürzt (das Ende von Terminalausgaben bleibt); passen sie nicht mehr, hält der Chat mit Hinweis an, statt den Systemprompt zu verlieren.
 - Werkzeugzeilen zeigen ihren Stand (✓, ✗, ⊘ abgelehnt, Kreisel) und lassen sich zu Parametern und Ergebnis aufklappen.
+- Einstellung „Mausrad in Vollbildprogrammen“ (Einstellungen → Darstellung): Pfeiltasten senden (Standard, wie andere Terminals) oder nichts in Vollbildprogrammen ohne Mausunterstützung; gespeichert als optionales Feld `alt_screen_wheel` in `settings.json`.
+- Umschalt+Mausrad scrollt den Verlauf von Paneldeck, auch wenn das Programm den Maus-Modus eingeschaltet hat.
 
 ### Changed
 
@@ -31,6 +33,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Fixed
 
 - Ein maximiertes Fenster hat keinen durchsichtigen Rand mehr, durch den der Desktop zu sehen war (#134).
+- Das Mausrad sendete in Vollbildprogrammen, die Mausereignisse in der normalen oder der UTF-8-Kodierung anfordern, Pfeiltasten; Mausrad und Klicks werden jetzt in jeder Maus-Kodierung gemeldet (normale Kodierung wegen ConPTY bis Spalte/Zeile 94), und die Position stimmt auch nach dem Zurückscrollen (#141).
+- Programme, die den Alternate Scroll Mode (DECSET 1007) abschalten, bekommen vom Mausrad keine Pfeiltasten mehr.
+- Beendet sich ein Vollbildprogramm, ohne den Bildschirm zurückzusetzen (Absturz, getrennte Verbindung), senden Mausrad und Klicks keine Pfeiltasten oder Maussequenzen mehr in den Shell-Prompt (benötigt die Shell-Integration).
 
 ## [2.1.0] - 2026-11-15
 
