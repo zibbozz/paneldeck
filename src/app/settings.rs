@@ -37,9 +37,14 @@ impl App {
                     lang.t("Info", "About"),
                     // Index 10 (`models_ui::SETTINGS_TAB`): am Ende, damit die festen Indizes oben gültig bleiben.
                     lang.t("Modelle", "Models"),
+                    // Index 11 (`palette_ui::SETTINGS_TAB`), angezeigt hinter „Darstellung“.
+                    lang.t("Farben", "Colors"),
                 ];
+                // Anzeigereihenfolge (die Indizes bleiben fest).
+                const ORDER: [usize; 12] = [0, 1, palette_ui::SETTINGS_TAB, 2, 3, 4, 5, 6, 7, 8, 9, models_ui::SETTINGS_TAB];
                 ui.horizontal_wrapped(|ui| {
-                    for (i, t) in tabs.iter().enumerate() {
+                    for i in ORDER {
+                        let t = tabs[i];
                         let r = style::tab(ui, t, self.settings_tab == i);
                         if r.clicked() {
                             self.settings_tab = i;
@@ -201,6 +206,17 @@ impl App {
                                         ui.selectable_value(&mut self.settings.alt_screen_wheel, w, label(w));
                                     }
                                 });
+                            },
+                        );
+                        row(
+                            ui,
+                            lang.t("Programme dürfen in die Zwischenablage kopieren (OSC 52)", "Allow programs to copy to the clipboard (OSC 52)"),
+                            lang.t(
+                                "Z. B. Claude Code, vim oder tmux in WSL- und SSH-Sitzungen. Nur die fokussierte Sitzung, nur Schreiben (nie Lesen), höchstens 1 MB. Achtung: Auch ein Agent mit Steuer-Zugriff (MCP) kann so Text in deine Zwischenablage legen.",
+                                "E.g. Claude Code, vim or tmux in WSL and SSH sessions. Only the focused session, write only (never read), at most 1 MB. Note: an agent with control access (MCP) can also put text on your clipboard this way.",
+                            ),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.osc52_copy);
                             },
                         );
                     }
@@ -397,19 +413,15 @@ impl App {
                                 ui.add(egui::DragValue::new(&mut p.font_size).range(0.0..=40.0).speed(0.2));
                             });
                             row(ui, lang.t("Farbe", "Color"), lang.t("Farbmarke der Sitzung", "Session color mark"), |ui| {
-                                for c in PALETTE {
-                                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-                                    ui.painter().rect_filled(r, 4.0, Color32::from_rgb(c[0], c[1], c[2]));
-                                    if p.color == Some(c) {
-                                        ui.painter().rect_stroke(r.expand(2.0), 5.0, Stroke::new(1.5_f32, Color32::WHITE), StrokeKind::Outside);
+                                ui.vertical(|ui| {
+                                    let cur = p.color.map(crate::palette::hex_of);
+                                    if let Some(h) = palette_ui::pick(ui, ("profile_color", p.id), crate::palette::Area::Hub, cur.as_deref(), palette_ui::PickOpts::HUB, lang) {
+                                        p.color = Some(crate::palette::rgb(&h));
                                     }
-                                    if resp.clicked() {
-                                        p.color = Some(c);
+                                    if ui.small_button(lang.t("Keine", "None")).clicked() {
+                                        p.color = None;
                                     }
-                                }
-                                if ui.small_button(lang.t("Keine", "None")).clicked() {
-                                    p.color = None;
-                                }
+                                });
                             });
                             row(ui, lang.t("Als Administrator", "As administrator"), lang.t("Öffnet ein eigenes Fenster (UAC); nicht eingebettet", "Opens its own window (UAC); not embedded"), |ui| {
                                 style::toggle(ui, &mut p.admin);
@@ -464,6 +476,7 @@ impl App {
                     }
                     7 => self.mcp_settings_ui(ui, ctx),
                     models_ui::SETTINGS_TAB => self.models_settings_ui(ui, ctx),
+                    palette_ui::SETTINGS_TAB => palette_ui::settings_view(ui, &mut self.settings.palette, lang),
                     8 => self.data_settings_ui(ui),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
