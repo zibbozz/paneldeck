@@ -48,6 +48,7 @@ mod settings;
 mod shot_start;
 mod sidebar;
 mod sysprompt_ui;
+mod taint;
 mod tasks_ui;
 mod terminal_links;
 mod titlebar;
@@ -88,11 +89,14 @@ struct Entry {
     shell_eff: String,
     /// Chat-Sitzung (`meta.kind = chat`): Verlauf, Eingabe, laufende Antwort. Hängt an der Sitzung, nicht am Fenster.
     chat: Option<ChatState>,
+    /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
+    /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
+    session_key: String,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new() }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -320,6 +324,8 @@ enum Action {
     OpenSettings,
     OpenPrompts,
     OpenNotes(u64),
+    /// Agenten-Kette einer Sitzung aufheben (nur der Nutzer, Kontextmenü, #152).
+    ResetAgentChain(u64),
     /// Mini-Suche „Ticket verknüpfen“ für die Sitzung öffnen.
     LinkTicket(u64),
     /// Ticket öffnen (Chip, Palette).
@@ -1037,6 +1043,8 @@ impl App {
             app.spawn_into(&cc.egui_ctx, &mut entry, Launch { restore: true, restart: false, continue_last: false, prompt: None, resume_id: None });
             app.entries.insert(id, entry);
         }
+        // Agenten-Ketten: Sitzungen, die es nicht mehr gibt, fallen heraus (#152).
+        taint::prune(&mut app.entries);
         // Keine Id vergeben, zu der noch Verlauf/Scrollback daliegt (Absturz vor dem Speichern, zurückgesetzte state.json).
         app.next_id = app.next_id.max(chatmod::store::max_used_id(&app.dir).saturating_add(1));
         // Projekte: ältere Stände ohne Projekte bekommen ein Standardprojekt.
@@ -1082,7 +1090,7 @@ impl App {
         // Start aus dem Explorer-Kontextmenü: Sitzung im übergebenen Ordner öffnen.
         let cli = crate::cli::get();
         if let Some(p) = &cli.open {
-            app.open_folder(&cc.egui_ctx, p, cli.claude);
+            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude);
         }
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
@@ -1105,18 +1113,30 @@ impl App {
     }
 
     /// Neue Sitzung in einem Ordner (Dateien → deren Ordner).
-    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) {
+    /// Ordner (oder Ordner einer Datei) als neue Sitzung öffnen; gibt deren Kennung zurück.
+    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) -> u64 {
         let p = std::path::Path::new(path);
         let dir = if p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
-        self.new_session(ctx, NewOpts { cwd: Some(dir), claude: claude && self.settings.claude_mode, ..NewOpts::default() });
+        self.new_session(ctx, NewOpts { cwd: Some(dir), claude: claude && self.settings.claude_mode, ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
         let cmds: Vec<IpcCmd> = self.hook_server.as_ref().map(|h| h.cmd_rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             self.from_tray(ctx);
-            if let IpcCmd::Open { path, claude } = c {
-                self.open_folder(ctx, &path, claude);
+            if let IpcCmd::Open { path, claude, origin } = c {
+                // `paneldeck --open` aus einem Hub-Terminal heraus: die neue Sitzung erbt dessen Agenten-Kette samt ihm
+                // (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Absender nur über den Prozessbaum; ein
+                // losgelöster (nicht zuzuordnender) Absender darf keine Claude-Sitzung öffnen.
+                let (origin, orphan) = self.open_origin(origin.as_ref());
+                if orphan && claude {
+                    self.notify_text(taint::orphan_error().1);
+                    continue;
+                }
+                let id = self.open_folder(ctx, &path, claude);
+                if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
+                    self.save_state();
+                }
             }
         }
         if self.start_in_tray {
@@ -1418,7 +1438,9 @@ impl App {
             (None, c) => c,
         };
         let cwd = if entry.meta.cwd.is_empty() { home_dir() } else { entry.meta.cwd.clone() };
-        let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string())];
+        // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
+        entry.session_key = hooks::random_hex();
+        let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string()), (hooks::ENV_SESSION_KEY.to_string(), entry.session_key.clone())];
         if let Some(p) = &profile {
             for line in p.env.lines() {
                 if let Some((k, v)) = line.split_once('=') {
@@ -1773,6 +1795,8 @@ impl App {
         let _ = std::fs::remove_file(self.scrollback_path(id));
         // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
         chatmod::store::remove(&self.dir, id);
+        // Die geschlossene Id aus allen Agenten-Ketten nehmen (sie wird nie neu vergeben, #152).
+        taint::prune(&mut self.entries);
         if self.layout.is_none() {
             // Letzter Bereich geschlossen: eine andere (nicht minimierte) Sitzung zeigen, sonst leerer Hub.
             if let Some(first) = self.unminimized_docked().first().copied() {
@@ -1796,13 +1820,19 @@ impl App {
         state::save_json(&self.dir.join("settings.json"), &self.settings);
         state::save_json(&self.dir.join("prompts.json"), &self.prompts);
         let _ = std::fs::create_dir_all(self.dir.join("scrollback"));
-        state::save_json(&self.dir.join("state.json"), &self.saved_state());
+        self.save_state();
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
                 let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
             }
         }
         self.save_chats();
+    }
+
+    /// Nur `state.json` schreiben (Sitzungen, Layout, Projekte) – leicht genug für sofortiges Speichern, z. B. wenn sich
+    /// eine Agenten-Kette ändert (#152).
+    fn save_state(&self) {
+        state::save_json(&self.dir.join("state.json"), &self.saved_state());
     }
 
     /// Inhalt von `state.json` (Sitzungen, Projekte mit dem aktuellen Layout, Fenster).
@@ -2369,7 +2399,8 @@ impl App {
     /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
     fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
         let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
-        let origins = self.entries.get(&id).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+        // Vorfahren des Chats: seine gespeicherte Agenten-Kette und die Kette der laufenden Runde (#152).
+        let origins = taint::ancestors(&self.entries, Some(id));
         match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
             Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
             None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
@@ -2460,13 +2491,11 @@ impl App {
             }
             return ChatSendResult::LevelQuestion;
         }
-        // Kette der auslösenden Agenten: der Aufrufer und – ist er selbst ein Chat – dessen Kette (transitiv).
+        // Kette der auslösenden Agenten: der Aufrufer und seine Vorfahren (gespeicherte Agenten-Kette, bei einem Chat
+        // auch die Kette seiner laufenden Runde; transitiv, #152).
         let chain = match &origin {
             ChatSendOrigin::User => Vec::new(),
-            ChatSendOrigin::Agent { caller, .. } => {
-                let caller_chain = caller.and_then(|c| self.entries.get(&c)).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
-                chatmod::tools::chain_origins(*caller, &caller_chain)
-            }
+            ChatSendOrigin::Agent { caller, .. } => taint::handed_on(&self.entries, *caller),
         };
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();
@@ -2895,6 +2924,11 @@ impl App {
             }
             Action::OpenNotes(id) => {
                 self.notes_open = if self.notes_open == Some(id) { None } else { Some(id) };
+            }
+            Action::ResetAgentChain(id) => {
+                if taint::reset(&mut self.entries, id) {
+                    self.save_state();
+                }
             }
             Action::LinkTicket(id) => self.tlinks_open_picker(id),
             Action::OpenTicket(id) => self.open_ticket_from_anywhere(id),
