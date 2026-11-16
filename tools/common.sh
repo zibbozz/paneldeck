@@ -30,6 +30,8 @@ fi
 # den Benutzernamen aus dem Cargo-Pfad in die .exe schreiben): Pfade per rustc auf neutrale Namen abbilden.
 _w() { if [ "$IS_WIN" = 1 ]; then cygpath -w "$1" 2>/dev/null || echo "$1"; else echo "$1"; fi; }
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$(_w "${CARGO_HOME:-$HOME/.cargo}")=/cargo --remap-path-prefix=$(_w "${RUSTUP_HOME:-$HOME/.rustup}")=/rustup --remap-path-prefix=$(_w "$PWD")=/paneldeck"
+# RUSTFLAGS ersetzt die rustflags aus .cargo/config.toml: die statische C-Laufzeit (MSVC, keine VCRUNTIME140.dll) hier erneut.
+if [ "$IS_WIN" = 1 ]; then export RUSTFLAGS="$RUSTFLAGS -C target-feature=+crt-static"; fi
 
 # Optionale Werkzeuge (auch wenn sie nicht im PATH der laufenden Shell stehen).
 find_tool() { # find_tool <name> <fallback-pfad>...
