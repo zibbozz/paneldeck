@@ -216,7 +216,7 @@ impl App {
             project: self.projects.iter().find(|p| p.id == e.meta.project).map(|p| p.name.clone()).unwrap_or_default(),
             chat: e.is_chat(),
             running: e.running(),
-            claude: !e.is_chat() && e.meta.claude && self.settings.claude_mode,
+            claude: e.is_claude() && self.settings.claude_mode,
             history: e.chat_has_history(),
             minimized: e.meta.minimized,
             worktree: e.meta.worktree.is_some(),

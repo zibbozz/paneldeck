@@ -31,6 +31,8 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("mode_tasks_alt", "Ctrl+2"),
     // Alle Sitzungen schließen (#156): standardmäßig ohne Kürzel (leer = keins)
     ("close_all", ""),
+    // Sitzung neu laden (#169): standardmäßig ohne Kürzel
+    ("reload", ""),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
@@ -64,6 +66,7 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "mode_terminals_alt" => ("Reiter „Terminal Hub“ (zweite Belegung)", "“Terminal Hub” tab (alternative)"),
         "mode_tasks_alt" => ("Reiter „Todo-Liste“ (zweite Belegung)", "“Todo list” tab (alternative)"),
         "close_all" => ("Alle Sitzungen schließen", "Close all sessions"),
+        "reload" => ("Sitzung neu laden", "Reload session"),
         _ => ("?", "?"),
     };
     if de { d } else { e }

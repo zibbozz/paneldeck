@@ -415,7 +415,7 @@ impl App {
         let color = e.color();
         let exited = e.exited();
         let is_chat = e.is_chat();
-        let claude = e.meta.claude && self.settings.claude_mode;
+        let claude = e.is_claude() && self.settings.claude_mode;
         let focused = self.focused == id;
         let attention = e.attention || e.needs_you();
         // Nicht im Layout (minimiert oder weggewechselt): abgeblendet; minimiert zusätzlich mit Strich-Marke.
@@ -638,6 +638,10 @@ impl App {
         };
         let tainted = self.entries.get(&id).is_some_and(|e| !e.meta.agent_chain.is_empty());
         resp.context_menu(|ui| {
+            if ui.button(lang.t("Einstellungen …", "Settings …")).clicked() {
+                actions.push(Action::OpenSessionSettings(id));
+                ui.close();
+            }
             if ui.button(lang.t("Umbenennen (F2)", "Rename (F2)")).clicked() {
                 actions.push(Action::StartRename(id));
                 ui.close();
@@ -717,8 +721,8 @@ impl App {
                 actions.push(Action::ExportHistory(id));
                 ui.close();
             }
-            if !is_chat && ui.button(lang.t("Neu starten", "Restart")).clicked() {
-                actions.push(Action::Restart(id));
+            if !is_chat && ui.button(lang.t("Neu laden …", "Reload …")).clicked() {
+                actions.push(Action::RequestReload(id));
                 ui.close();
             }
             if ui.button(lang.t("Duplizieren", "Duplicate")).clicked() {
