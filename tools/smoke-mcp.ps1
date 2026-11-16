@@ -33,7 +33,10 @@ Copy-Item $Exe "$dir\paneldeck.exe"
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
-Remove-Item Env:PANELDECK_DATA, Env:PANELDECK_HUB_DATA, Env:PANELDECK_HUB_BASE -ErrorAction SilentlyContinue
+# Alle PANELDECK_*-Variablen eines umgebenden Paneldeck-Terminals entfernen: PANELDECK_SESSION/PORT/TOKEN (vom Hub in
+# jedes Terminal gesetzt) liessen die Bruecke sonst als "Sitzung 1" der Test-Instanz gelten, und die Pruefungen
+# "von aussen" schluegen fehl, wenn das Skript selbst in einem Paneldeck-Terminal laeuft.
+Get-ChildItem Env: | Where-Object { $_.Name -like 'PANELDECK_*' } | ForEach-Object { Remove-Item -LiteralPath "Env:$($_.Name)" -ErrorAction SilentlyContinue }
 $script:extra = @()
 $script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
@@ -43,6 +46,9 @@ function Check($name, [bool]$ok, $detail = '') {
   else { $script:fail++; Write-Host "  FAIL  $name  $detail" -ForegroundColor Red }
   $script:lastOk = $ok
 }
+# Pruefung, die in diesem Build nicht moeglich ist (z. B. Funktion eines anderen Teils fehlt): weder bestanden noch fehlgeschlagen.
+$script:skip = 0
+function Skip($name, $why) { $script:skip++; Write-Host "  skip  $name  ($why)" -ForegroundColor Yellow }
 function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   Stop-Hub
   $f = "$data\settings.json"
@@ -119,6 +125,7 @@ try {
   $ls = Tool 'list_sessions'; Check 'list_sessions' (-not $ls.err -and $ls.data.sessions.Count -ge 1)
   $sid = $ls.data.sessions[0].id
   Check 'list_sessions: Feld window (0 = Hauptfenster)' ($ls.data.sessions[0].PSObject.Properties.Name -contains 'window' -and $ls.data.sessions[0].window -eq 0)
+  Check 'list_sessions: Terminal hat kind = terminal' ($ls.data.sessions[0].kind -eq 'terminal') ($ls.data.sessions[0] | ConvertTo-Json -Compress)
   $rt = Tool 'read_terminal' @{ session = $sid; lines = 5 }; Check 'read_terminal' (-not $rt.err -and $null -ne $rt.data.text)
   Check 'get_usage' (-not (Tool 'get_usage').err)
   Check 'search_history' (-not (Tool 'search_history' @{ query = 'smoke-test-gibt-es-nicht-xyz' }).err)
@@ -574,11 +581,241 @@ c.close()
   $kx = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Von-aussen-F' }
   Check 'create_session von aussen: Hauptfenster (window = 0)' (((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $kx.data.id }).window -eq 0)
   [void](InA 'close_session' @{ session = $K2 }); [void](Tool 'close_session' @{ session = $kx.data.id })
+
+  Write-Host "== Chat-Sitzung (#63): Wiederherstellung aus state.json, kind/model, Terminal-Werkzeuge" -ForegroundColor Cyan
+  Stop-Hub
+  $st = [ordered]@{
+    sessions = @(
+      [ordered]@{ id = 950; name = 'Smoke-Chat'; custom_name = $true; cwd = "$proj"; project = 1; kind = 'chat'; chat = [ordered]@{ server = 'echo'; model = 'smoke-model' } },
+      [ordered]@{ id = 951; name = 'Smoke-Term'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1 },
+      [ordered]@{ id = 952; name = 'Smoke-Big'; custom_name = $true; cwd = "$proj"; project = 1; kind = 'chat'; chat = [ordered]@{ server = 'echo'; model = 'smoke-model' } })
+    next_id = 953; projects = @([ordered]@{ id = 1; name = 'Standard' }); active_project = 1
+  }
+  New-Item -ItemType Directory -Force "$data\chats" | Out-Null
+  $hist = [ordered]@{ version = 1; messages = @([ordered]@{ role = 'user'; content = 'hi'; ts = 1 }, [ordered]@{ role = 'assistant'; content = 'smoke-answer'; ts = 2 }) }
+  [IO.File]::WriteAllText("$data\chats\950.json", ($hist | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+  # Grosser Verlauf (40 Nachrichten zu je ~1,5 KB) fuer read_chat ueber ein Chat-Modell: die neuesten muessen ankommen.
+  $bigMsgs = @(0..39 | ForEach-Object { [ordered]@{ role = $(if ($_ % 2) { 'assistant' } else { 'user' }); content = ("big-{0:D2} " -f $_) + ('w' * 1500); ts = 10 + $_ } })
+  [IO.File]::WriteAllText("$data\chats\952.json", ([ordered]@{ version = 1; messages = $bigMsgs } | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+  [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+  Set-Level 'Control' -Tray
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 3
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $ch = $ss | Where-Object { $_.id -eq 950 }; $te = $ss | Where-Object { $_.id -eq 951 }
+  Check 'list_sessions: Chat aus state.json wiederhergestellt (kind = chat, model)' ($ch.kind -eq 'chat' -and $ch.model -eq 'smoke-model') ($ch | ConvertTo-Json -Compress)
+  Check 'list_sessions: wiederhergestelltes Terminal hat kind = terminal' ($te.kind -eq 'terminal' -and $null -eq $te.model) ($te | ConvertTo-Json -Compress)
+  Check 'read_terminal auf einem Chat -> not_a_terminal' ((Code (Tool 'read_terminal' @{ session = 950 })) -eq 'not_a_terminal')
+  Check 'send_text auf einem Chat -> not_a_terminal' ((Code (Tool 'send_text' @{ session = 950; text = 'x' })) -eq 'not_a_terminal')
+  Check 'Chatverlauf chats/950.json bleibt beim Start erhalten' ([IO.File]::ReadAllText("$data\chats\950.json") -match 'smoke-answer')
+
+  Write-Host "== Chats ueber MCP (#63): Fake-Ollama-Server, create_session kind=chat, send_chat_message, read_chat" -ForegroundColor Cyan
+  Stop-Hub
+  # Kleiner Ollama-Ersatz auf 127.0.0.1 (TcpListener, eigener Runspace): /api/tags, /api/show, /api/chat (NDJSON).
+  # /api/chat: Antwort "pong"; "slow" in der letzten Nutzer-Nachricht -> 3 s Pause; "tools please" mit tools-Liste ->
+  # Werkzeugaufruf list_sessions; "proxy please <id>" -> send_text in Sitzung <id>; "chain please <chat> <id>" ->
+  # send_chat_message an <chat> mit "proxy please <id>"; "read please <chat>" -> read_chat (last 40);
+  # nach einer tool-Nachricht -> "done". Jede Anfrage landet in $script:fakeLog.
+  $fake = {
+    param($listener, $log)
+    $enc = New-Object Text.UTF8Encoding $false
+    while ($true) {
+      # Pending() statt eines blockierenden Accept: nach $listener.Stop() wirft es, und die Schleife endet sofort.
+      try { if (-not $listener.Pending()) { Start-Sleep -Milliseconds 50; continue }; $client = $listener.AcceptTcpClient() } catch { break }
+      try {
+        $st = $client.GetStream(); $st.ReadTimeout = 5000
+        $buf = New-Object byte[] 65536; $ms = New-Object IO.MemoryStream; $he = -1
+        while ($he -lt 0) {
+          $n = $st.Read($buf, 0, $buf.Length); if ($n -le 0) { break }
+          $ms.Write($buf, 0, $n); $he = [Text.Encoding]::ASCII.GetString($ms.ToArray()).IndexOf("`r`n`r`n")
+        }
+        if ($he -lt 0) { $client.Close(); continue }
+        $all = $ms.ToArray(); $head = [Text.Encoding]::ASCII.GetString($all, 0, $he)
+        $len = 0; if ($head -match '(?im)^content-length:\s*(\d+)') { $len = [int]$Matches[1] }
+        while ($all.Length - ($he + 4) -lt $len) { $n = $st.Read($buf, 0, $buf.Length); if ($n -le 0) { break }; $ms.Write($buf, 0, $n); $all = $ms.ToArray() }
+        $body = $enc.GetString($all, $he + 4, $all.Length - $he - 4)
+        $path = ($head -split ' ')[1]
+        [void]$log.Add("$path $body")
+        $type = 'application/json'; $status = '200 OK'
+        if ($path -eq '/api/tags') { $out = '{"models":[{"name":"fake-model"}]}' }
+        elseif ($path -eq '/api/show') { $out = '{"capabilities":["completion","tools"],"model_info":{"general.architecture":"llama","llama.context_length":8192}}' }
+        elseif ($path -eq '/api/chat') {
+          $j = $null; try { $j = $body | ConvertFrom-Json } catch {}
+          $msgs = @(); if ($j) { $msgs = @($j.messages) }
+          $lu = -1; for ($i = 0; $i -lt $msgs.Count; $i++) { if ($msgs[$i].role -eq 'user') { $lu = $i } }
+          $last = if ($lu -ge 0) { [string]$msgs[$lu].content } else { '' }
+          $toolAfter = $false; for ($i = $lu + 1; $i -lt $msgs.Count; $i++) { if ($msgs[$i].role -eq 'tool') { $toolAfter = $true } }
+          $hasTools = $j -and $j.PSObject.Properties.Name -contains 'tools' -and @($j.tools).Count -gt 0
+          $done = '{"model":"fake-model","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":5,"eval_count":1}'
+          if ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
+          elseif ($hasTools -and $last -match 'chain please (\d+) (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_chat_message","arguments":{"session":' + $Matches[1] + ',"text":"proxy please ' + $Matches[2] + '"}}}]},"done":false}' }
+          elseif ($hasTools -and $last -match 'read please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_chat","arguments":{"session":' + $Matches[1] + ',"last":40}}}]},"done":false}' }
+          elseif ($hasTools -and $last -match 'proxy please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_text","arguments":{"session":' + $Matches[1] + ',"text":"echo proxy-leak"}}}]},"done":false}' }
+          elseif ($hasTools -and $last -match 'tools please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_sessions","arguments":{}}}]},"done":false}' }
+          else {
+            if ($last -match 'slow') { Start-Sleep -Seconds 3 }
+            $first = '{"model":"fake-model","message":{"role":"assistant","content":"pong"},"done":false}'
+          }
+          $out = "$first`n$done`n"; $type = 'application/x-ndjson'
+        } else { $status = '404 Not Found'; $out = '{"error":"not found"}' }
+        $ob = $enc.GetBytes($out)
+        $hb = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 $status`r`nContent-Type: $type`r`nContent-Length: $($ob.Length)`r`nConnection: close`r`n`r`n")
+        $st.Write($hb, 0, $hb.Length); $st.Write($ob, 0, $ob.Length); $st.Flush()
+      } catch {} finally { $client.Close() }
+    }
+  }
+  $script:fakeListener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0); $script:fakeListener.Start()
+  $fakePort = $script:fakeListener.LocalEndpoint.Port
+  $script:fakeLog = [Collections.ArrayList]::Synchronized((New-Object Collections.ArrayList))
+  $script:fakePs = [powershell]::Create(); [void]$script:fakePs.AddScript($fake).AddArgument($script:fakeListener).AddArgument($script:fakeLog)
+  $script:fakeAsync = $script:fakePs.BeginInvoke()
+  # Server in settings.json eintragen (vor jedem Start; als Text, damit ConvertTo-Json von PowerShell 5.1 nichts verbiegt).
+  $srvJson = '{"id":"srv-smoke","name":"Fake","kind":"ollama","url":"http://127.0.0.1:' + $fakePort + '","models":[{"name":"fake-model","level":"Control","level_chosen":true,"ask_write":false,"tools":true}],"last_models":[{"name":"fake-model","tools":true,"context_length":131072},{"name":"fake-raw","tools":true,"context_length":131072}]}'
+  $script:prestart = {
+    $f = "$data\settings.json"
+    $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    foreach ($p in @('llm_servers', 'last_chat_model')) { if ($j.PSObject.Properties.Name -contains $p) { $j.PSObject.Properties.Remove($p) } }
+    $t = ($j | ConvertTo-Json -Depth 10) -replace '^\s*\{', ('{"llm_servers":[' + $srvJson + '],')
+    [IO.File]::WriteAllText($f, $t, (New-Object Text.UTF8Encoding $false))
+  }
+  Set-Level 'Control' -Tray
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'tools/list (Steuern): read_chat, send_chat_message, list_models' ($names -contains 'read_chat' -and $names -contains 'send_chat_message' -and $names -contains 'list_models')
+  $lm = Tool 'list_models'
+  $fs = @($lm.data.servers) | Where-Object { $_.id -eq 'srv-smoke' }
+  Check 'list_models: Fake-Server mit Modell und Host:Port, ohne Schluessel und Adresse' ($fs.name -eq 'Fake' -and $fs.host -eq "127.0.0.1:$fakePort" -and @($fs.models).Count -eq 2 -and $fs.models[0].name -eq 'fake-model' -and $fs.models[0].level -eq 'Control' -and $fs.models[0].level_chosen -eq $true -and $fs.models[1].level_chosen -eq $false -and $lm.text -notmatch 'http://' -and $lm.text -notmatch 'api_key') $lm.text
+  $bad = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'gibts-nicht' }
+  Check 'create_session kind=chat, unbekanntes Modell -> bad_args nennt die Modelle' ((Code $bad) -eq 'bad_args' -and $bad.text -match 'fake-model' -and $bad.text -notmatch 'http://') $bad.text
+  $nm = Tool 'create_session' @{ kind = 'chat'; model = 'gibts-nicht' }
+  Check 'create_session kind=chat, Modell, das kein Server hat -> bad_args nennt die Server' ((Code $nm) -eq 'bad_args' -and $nm.text -match 'No configured server' -and $nm.text -match 'Fake') $nm.text
+  Check 'create_session kind=chat, unbekannter Server -> bad_args' ((Code (Tool 'create_session' @{ kind = 'chat'; server = 'Nirgends' })) -eq 'bad_args')
+  Check 'create_session kind=chat mit shell -> bad_args' ((Code (Tool 'create_session' @{ kind = 'chat'; shell = 'powershell' })) -eq 'bad_args')
+  $f0 = (Tool 'list_sessions').data.focused
+  $cc = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-model'; name = 'Smoke-LLM'; cwd = "$proj" }
+  Check 'create_session kind=chat' (-not $cc.err -and $cc.data.kind -eq 'chat' -and $cc.data.model -eq 'fake-model' -and $cc.data.server -eq 'srv-smoke') $cc.text
+  $C = $cc.data.id
+  $lsc = Tool 'list_sessions'
+  $lc = ($lsc.data.sessions | Where-Object { $_.id -eq $C })
+  Check 'create_session kind=chat ist leise: Fokus unveraendert, nicht minimiert' ($lsc.data.focused -eq $f0 -and $lc.minimized -eq $false -and $lc.focused -eq $false) ($lc | ConvertTo-Json -Compress)
+  Check 'list_sessions: neuer Chat (kind = chat, model, vom Agenten angelegt, ready)' ($lc.kind -eq 'chat' -and $lc.model -eq 'fake-model' -and $lc.created_by_agent -eq $true -and $lc.status -eq 'ready') ($lc | ConvertTo-Json -Compress)
+  $sm = Tool 'send_chat_message' @{ session = $C; text = 'ping' }
+  Check 'send_chat_message: ok mit Index der Nachricht' (-not $sm.err -and $sm.data.ok -eq $true -and $sm.data.index -eq 0) $sm.text
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 20 } 30000
+  Check 'wait_for_status auf einem Chat: ready' ($w.data.matched -eq $true -and $w.data.status -eq 'ready') $w.text
+  $rc = Tool 'read_chat' @{ session = $C }
+  $m = @($rc.data.messages)
+  Check 'read_chat: Nutzer "ping", Antwort "pong"' ($rc.data.total -eq 2 -and $m[0].role -eq 'user' -and $m[0].content -eq 'ping' -and $m[1].role -eq 'assistant' -and $m[1].content -eq 'pong') $rc.text
+  Check 'read_chat: Status ready, Inhalt als nicht vertrauenswuerdig markiert' ($rc.data.status -eq 'ready' -and $rc.data.note -match 'untrusted')
+  Check 'send_chat_message: Nachricht als vom Agenten gesendet markiert' ($m[0].note -eq 'Sent by agent external agent') ($m[0] | ConvertTo-Json -Compress)
+  Check 'Fake-Server bekam /api/chat mit Systemprompt und "ping"' (@($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"system"' -and $_ -match 'ping' }).Count -ge 1) (($script:fakeLog | Select-Object -Last 1) -replace '(.{300}).*', '$1')
+  $s1 = Tool 'send_chat_message' @{ session = $C; text = 'slow ping' }
+  $s2 = Tool 'send_chat_message' @{ session = $C; text = 'zu frueh' }
+  Check 'send_chat_message waehrend einer laufenden Antwort -> busy' (-not $s1.err -and (Code $s2) -eq 'busy') "$($s1.text) / $($s2.text)"
+  Check 'read_chat waehrend der Antwort: working' ((Tool 'read_chat' @{ session = $C; last = 1 }).data.status -eq 'working')
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 20 } 30000
+  $rc = Tool 'read_chat' @{ session = $C; last = 2 }
+  Check 'nach dem Warten: Antwort auf "slow ping" da, "zu frueh" nicht gesendet' ($w.data.matched -eq $true -and $rc.data.total -eq 4 -and $rc.data.messages[0].content -eq 'slow ping' -and $rc.data.messages[1].content -eq 'pong' -and $rc.data.more_above -eq $true) $rc.text
+  $term = ((Tool 'list_sessions').data.sessions | Where-Object { $_.kind -eq 'terminal' } | Select-Object -First 1).id
+  if (-not $term) { $term = (Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'smoke-term-chat' }).data.id; Start-Sleep 3 }
+  Check 'read_chat auf einem Terminal -> not_a_chat' ((Code (Tool 'read_chat' @{ session = $term })) -eq 'not_a_chat')
+  Check 'send_chat_message an ein Terminal -> not_a_chat' ((Code (Tool 'send_chat_message' @{ session = $term; text = 'x' })) -eq 'not_a_chat')
+  Check 'send_chat_message an einen Chat ohne eingerichteten Server -> no_model' ((Code (Tool 'send_chat_message' @{ session = 950; text = 'x' })) -eq 'no_model')
+  Check 'read_chat liest den wiederhergestellten Chat' ((Tool 'read_chat' @{ session = 950 }).data.messages[1].content -eq 'smoke-answer')
+  Check 'send_chat_message mit leerem Text -> bad_args' ((Code (Tool 'send_chat_message' @{ session = $C; text = '  ' })) -eq 'bad_args')
+  $hadTools = @($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"tools"\s*:\s*\[\s*\{' }).Count -gt 0
+  Check 'Modell bekommt Werkzeuge (Stufe Steuern, level_chosen)' $hadTools
+  Check 'Stufe Steuern ohne eigene Kontextlaenge: num_ctx nach Bedarf (16384/32768), kein Kontext-Hinweis' (@($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"num_ctx"\s*:\s*(16384|32768)' }).Count -ge 1 -and -not ((Tool 'read_chat' @{ session = $C; last = 50 }).text -match 'larger than the model|too small for its tool level'))
+  [void](Tool 'send_chat_message' @{ session = $C; text = 'tools please' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $rc = Tool 'read_chat' @{ session = $C; last = 10 }
+  $tm = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'list_sessions' })
+  $lastA = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' })[-1]
+  Check 'Werkzeug-Schleife: Chat ruft list_sessions auf und antwortet "done"' ($w.data.matched -eq $true -and $tm.Count -ge 1 -and $tm[0].status -eq 'ok' -and $lastA.content -eq 'done') $rc.text
+  # Kein Umweg: ein Agent in Sitzung $A laesst den Chat send_text in $A aufrufen -> forbidden, nichts getippt.
+  $pa = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Proxy-Agent' }; $A = $pa.data.id; Start-Sleep 4
+  $px = InA 'send_chat_message' @{ session = $C; text = "proxy please $A" }
+  Check 'Agent in einer Sitzung sendet an den Chat (Hinweis mit Sitzungsname)' ($px.isError -ne $true) ($px | ConvertTo-Json -Compress -Depth 5)
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $rc = Tool 'read_chat' @{ session = $C; last = 6 }
+  $pt = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'send_text' })
+  $pu = @($rc.data.messages | Where-Object { $_.role -eq 'user' })[-1]
+  Check 'Umweg-Schutz: send_text des Chats in die Sitzung des Agenten -> forbidden (abgewiesen vor Freigabe/Ausfuehrung)' ($pt.Count -ge 1 -and $pt[-1].status -eq 'denied' -and $pt[-1].content -match 'cannot write into that agent' -and $pu.note -eq 'Sent by agent Proxy-Agent') $rc.text
+  # Kette: Agent $A -> Chat $C -> (send_chat_message) Chat $C2 -> send_text in $A: auch zwei Glieder weiter verboten.
+  $C2 = (Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-model'; name = 'Smoke-LLM2' }).data.id
+  $px = InA 'send_chat_message' @{ session = $C; text = "chain please $C2 $A" }
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $w2 = Tool 'wait_for_status' @{ session = $C2; status = @('ready'); timeout_secs = 40 } 50000
+  $rc1 = Tool 'read_chat' @{ session = $C; last = 4 }
+  $sc = @($rc1.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'send_chat_message' })
+  $rc2 = Tool 'read_chat' @{ session = $C2; last = 6 }
+  $pt2 = @($rc2.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'send_text' })
+  $pu2 = @($rc2.data.messages | Where-Object { $_.role -eq 'user' })[-1]
+  Check 'Umweg-Schutz ueber eine Kette: Chat -> Chat -> send_text in die Sitzung des Agenten -> forbidden' ($px.isError -ne $true -and $w2.data.matched -eq $true -and $sc.Count -ge 1 -and $sc[-1].status -eq 'ok' -and $pu2.note -eq 'Sent by agent Smoke-LLM' -and $pt2.Count -ge 1 -and $pt2[-1].status -eq 'denied' -and $pt2[-1].content -match 'cannot write into that agent') "$($rc1.text) /// $($rc2.text)"
+  Start-Sleep 1
+  Check 'Umweg-Schutz: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'proxy-leak')
+  Check 'wait_for_status auf die eigene Sitzung -> bad_args' ((InA 'wait_for_status' @{ session = $A; status = @('ready'); timeout_secs = 5 }).content[0].text -like 'bad_args*')
+  [void](Tool 'close_session' @{ session = $C2 })
+  [void](Tool 'close_session' @{ session = $A })
+  # read_chat ueber ein Chat-Modell (Ergebnis gekuerzt): die neuesten Nachrichten und der Status kommen an, nicht die aeltesten.
+  [void](Tool 'send_chat_message' @{ session = $C; text = 'read please 952' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $rc = Tool 'read_chat' @{ session = $C; last = 4 }
+  $rt = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_chat' })
+  Check 'read_chat ueber ein Chat-Modell: neueste Nachrichten, more_above und Status statt der aeltesten' ($w.data.matched -eq $true -and $rt.Count -ge 1 -and $rt[-1].status -eq 'ok' -and $rt[-1].content -match 'big-39' -and $rt[-1].content -match '"more_above":true' -and $rt[-1].content -match '"status":"ready"' -and $rt[-1].content -notmatch 'big-00') (($rc.text) -replace '(.{600}).*', '$1')
+  Check 'read_chat: Feld paused (false)' ($rc.data.paused -eq $false -and $rc.data.PSObject.Properties.Name -contains 'pause_note')
+  # Stufe des Modells nie gewaehlt: die einmalige Frage erscheint, der Agent bekommt permission_pending.
+  $raw = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-raw'; name = 'Smoke-Raw' }
+  $rq = Tool 'send_chat_message' @{ session = $raw.data.id; text = 'hallo' }
+  $rr = Tool 'read_chat' @{ session = $raw.data.id }
+  Check 'Stufe nie gewaehlt: send_chat_message -> permission_pending, Chat im Status approval' ((Code $rq) -eq 'permission_pending' -and $rq.text -match 'tool level has not been chosen' -and $rr.data.status -eq 'approval' -and $rr.data.total -eq 0) "$($rq.text) / $($rr.text)"
+  $wq = Tool 'wait_for_status' @{ session = $raw.data.id; status = @('ready'); timeout_secs = 1 }
+  Check 'wait_for_status bei offener Frage: Zeitlimit mit needs_you' ($wq.data.timed_out -eq $true -and $wq.data.needs_you -eq $true -and $wq.data.status -eq 'approval') $wq.text
+  [void](Tool 'close_session' @{ session = $raw.data.id })
+  Check 'close_session: selbst angelegter Chat' (-not (Tool 'close_session' @{ session = $C }).err)
+  Set-Level 'Read' -Tray
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Nur lesen: read_chat und list_models ja, send_chat_message nein' ($names -contains 'read_chat' -and $names -contains 'list_models' -and $names -notcontains 'send_chat_message')
+  Check 'Nur lesen: send_chat_message verboten (forbidden)' ((Code (Tool 'send_chat_message' @{ session = 950; text = 'x' })) -eq 'forbidden')
+  Check 'Nur lesen: create_session kind=chat verboten (forbidden)' ((Code (Tool 'create_session' @{ kind = 'chat' })) -eq 'forbidden')
+  $script:prestart = $null
+
+  Write-Host "== Minimierte Bereiche (#142): Wiederherstellung, kaputtes Layout, focus_session holt zurueck" -ForegroundColor Cyan
+  Stop-Hub
+  # 960 ist minimiert (Platz: rechts neben 961); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
+  $bad = [ordered]@{ Split = [ordered]@{ dir = 'Horizontal'; ratio = $null; a = @{ Leaf = 961 }; b = [ordered]@{ Split = [ordered]@{ dir = 'Vertical'; ratio = 0.5; a = @{ Leaf = 777 }; b = @{ Leaf = 961 } } } } }
+  $st = [ordered]@{
+    sessions = @(
+      [ordered]@{ id = 960; name = 'Smoke-Min'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1; minimized = $true; slot = [ordered]@{ sibling = @(961); dir = 'Horizontal'; before = $false; ratio = 0.5 } },
+      [ordered]@{ id = 961; name = 'Smoke-Sicht'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1 })
+    next_id = 962; projects = @([ordered]@{ id = 1; name = 'Standard'; layout = $bad; focused = 960 }); active_project = 1
+  }
+  [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding $false))
+  Set-Level 'Control' -Tray
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 3
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'Kaputtes Layout (unbekannt, doppelt, Anteil null): Hub startet, beide Sitzungen da' ($ss.Count -eq 2 -and $null -ne $mn -and $null -ne $vs) ($ss | ConvertTo-Json -Compress)
+  Check 'list_sessions: minimiert aus state.json wiederhergestellt (minimized = true)' ($mn.minimized -eq $true -and $vs.minimized -eq $false) ($ss | ConvertTo-Json -Compress)
+  Check 'Fokus zeigt nicht auf die minimierte Sitzung' ($mn.focused -eq $false -and $vs.focused -eq $true) ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 960 }
+  Start-Sleep -Milliseconds 600
+  $mn = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq 960 })
+  Check 'focus_session holt die minimierte Sitzung zurueck (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
 } finally {
+  if ($script:fakeListener) { try { $script:fakeListener.Stop() } catch {} }
+  if ($script:fakePs) {
+    try { if ($script:fakeAsync.AsyncWaitHandle.WaitOne(8000)) { [void]$script:fakePs.EndInvoke($script:fakeAsync) } else { [void]$script:fakePs.BeginStop($null, $null) } } catch {}
+    try { $script:fakePs.Dispose() } catch {}
+  }
   Stop-Hub
   foreach ($h in $script:extra) { if ($h -and -not $h.HasExited) { $h.Kill() } }
   if (-not $KeepFiles) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Write-Host ""
-Write-Host ("Ergebnis: {0} bestanden, {1} fehlgeschlagen" -f $script:pass, $script:fail) -ForegroundColor $(if ($script:fail -eq 0) { 'Green' } else { 'Red' })
+Write-Host ("Ergebnis: {0} bestanden, {1} fehlgeschlagen, {2} uebersprungen" -f $script:pass, $script:fail, $script:skip) -ForegroundColor $(if ($script:fail -eq 0) { 'Green' } else { 'Red' })
 exit $(if ($script:fail -eq 0) { 0 } else { 1 })

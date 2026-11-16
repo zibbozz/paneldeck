@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 macro_rules! view_fields {
     ($mac:ident!($($args:tt)*)) => {
         $mac!($($args)*;
-            layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog,
+            layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
             confirm_close, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
             queue_open, queue_draft, files_open, diff_open, diff_sel, composer_open, composer_focus, composer_text, history_open,
             history_filter, history_hits, history_hits_rx, templates_open, tpl_name, cost_open, gsearch, prompts_open, prompt_sel,
@@ -56,6 +56,7 @@ pub(super) struct WinView {
     rename: Option<(u64, String)>,
     group_prompt: Option<Prompt>,
     new_dialog: Option<NewDialog>,
+    new_chat: Option<models_ui::NewChatDlg>,
     confirm_close: Option<u64>,
     settings_open: bool,
     settings_tab: usize,
@@ -117,6 +118,7 @@ impl WinView {
             rename: None,
             group_prompt: None,
             new_dialog: None,
+            new_chat: None,
             confirm_close: None,
             settings_open: false,
             settings_tab: 0,
@@ -177,15 +179,10 @@ pub(super) fn swap_project_views(projects: &mut [Project], stash: &mut Vec<(u64,
     *stash = out;
 }
 
-/// Blätter entfernen, die nicht (mehr) in die Ansicht gehören; `None`, wenn nichts übrig bleibt.
+/// Blätter entfernen, die nicht (mehr) in die Ansicht gehören, dazu doppelte; Anteile begrenzen (`Node::normalize`).
+/// `None`, wenn nichts übrig bleibt. Ist schon alles in Ordnung, bleibt der Baum unangetastet.
 pub(super) fn prune_layout(layout: Node, ok: impl Fn(u64) -> bool) -> Option<Node> {
-    let mut leaves = Vec::new();
-    layout.leaves(&mut leaves);
-    let mut l = Some(layout);
-    for id in leaves.into_iter().filter(|id| !ok(*id)) {
-        l = l.and_then(|n| n.remove_leaf(id));
-    }
-    l
+    if layout.is_normal(&ok) { Some(layout) } else { layout.normalize(ok) }
 }
 
 /// Paneldeck-Fenster im Vordergrund (0 = Hauptfenster), `None` = keins. Einmal je Bild zu Beginn des Hauptbildes bestimmt
@@ -261,13 +258,15 @@ pub(super) struct ClosePlan {
     pub(super) adopt: Vec<u64>,
     /// Sitzungen mit Git-Worktree: erst über die Worktree-Rückfrage schließen (behalten, entfernen, mergen) – nie still.
     pub(super) worktrees: Vec<u64>,
+    /// Davon Chats mit Verlauf (der beim Schließen gelöscht wird).
+    pub(super) chats: usize,
 }
 
 impl ClosePlan {
     /// Rückfrage nötig? Immer, wenn noch etwas läuft, abgedockt ist oder einen Worktree hat (unabhängig von
     /// „Schließen bestätigen“: ein ganzes Fenster beendet viele Sitzungen auf einmal).
     pub(super) fn ask(&self) -> bool {
-        self.running > 0 || !self.adopt.is_empty() || !self.worktrees.is_empty()
+        self.running > 0 || self.chats > 0 || !self.adopt.is_empty() || !self.worktrees.is_empty()
     }
 
     /// Darf das Fenster jetzt schließen? Nicht, solange Worktree-Sitzungen offen sind.
@@ -597,6 +596,15 @@ impl App {
             let detached = &self.detached;
             self.layout = prune_layout(l, |id| entries.get(&id).is_some_and(|e| e.meta.project == pid && e.meta.window == win) && !detached.contains(&id));
         }
+        // Was im Layout steht, ist nicht minimiert – egal, wie es hineinkam (Ziehen, Ordner-Layout, Vorlage …).
+        if let Some(l) = &self.layout {
+            for id in l.leaf_ids() {
+                if let Some(e) = self.entries.get_mut(&id).filter(|e| e.meta.minimized || e.meta.slot.is_some()) {
+                    e.meta.minimized = false;
+                    e.meta.slot = None;
+                }
+            }
+        }
         let ok = self.layout.as_ref().is_some_and(|l| l.contains(self.focused));
         if !ok {
             let mut v = Vec::new();
@@ -643,7 +651,11 @@ impl App {
 
     /// Was mit den Sitzungen von Fenster `window` beim Schließen geschieht.
     fn window_close_plan(&self, window: u64) -> ClosePlan {
-        close_plan(self.entries.iter().filter(|(_, e)| e.meta.window == window).map(|(id, e)| (*id, !e.exited(), e.meta.worktree.is_some(), self.detached.contains(id))))
+        // „Läuft“: Terminal mit Prozess oder Chat mit laufender Antwort.
+        let mut plan = close_plan(self.entries.iter().filter(|(_, e)| e.meta.window == window).map(|(id, e)| (*id, e.running(), e.meta.worktree.is_some(), self.detached.contains(id))));
+        // Chats mit Verlauf: der Verlauf würde gelöscht → immer nachfragen.
+        plan.chats = plan.end.iter().filter(|id| self.entries.get(id).is_some_and(|e| e.chat_has_history())).count();
+        plan
     }
 
     /// Weitere Fenster anlegen, zeichnen und schließen. Im Hauptfenster nach dessen Aktionen aufrufen.
@@ -852,6 +864,9 @@ impl App {
         }
         let names = |ids: &[u64]| ids.iter().filter_map(|id| self.entries.get(id).map(|e| (*id, e.display_name()))).collect::<Vec<_>>();
         let (adopt, worktrees) = (names(&plan.adopt), names(&plan.worktrees));
+        // Was beendet wird, aber nicht im Layout steht (minimiert oder weggewechselt) – sonst übersieht man es leicht.
+        let hidden_ids: Vec<u64> = plan.end.iter().copied().filter(|id| !self.layout.as_ref().is_some_and(|l| l.contains(*id))).collect();
+        let hidden = names(&hidden_ids);
         let n = plan.running;
         egui::Window::new(lang.t("Fenster schließen?", "Close window?"))
             .id(Id::new(("close_win_ask", w.id)))
@@ -868,6 +883,25 @@ impl App {
                     } else {
                         format!("{n} sessions are still running in this window. Closing the window will end them.")
                     });
+                }
+                if plan.chats > 0 {
+                    ui.label(if plan.chats == 1 {
+                        lang.t("Der Verlauf eines Chats wird dabei gelöscht.", "The history of one chat will be deleted.").to_string()
+                    } else if lang == Lang::De {
+                        format!("Die Verläufe von {} Chats werden dabei gelöscht.", plan.chats)
+                    } else {
+                        format!("The histories of {} chats will be deleted.", plan.chats)
+                    });
+                }
+                if !hidden.is_empty() {
+                    ui.add_space(S1);
+                    ui.label(lang.t(
+                        "Auch diese Sitzungen werden beendet, obwohl sie gerade nicht im Layout stehen (minimiert oder weggewechselt):",
+                        "These sessions will also end, although they are not in the layout right now (minimized or switched away):",
+                    ));
+                    for (_, name) in &hidden {
+                        ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                    }
                 }
                 if !adopt.is_empty() {
                     ui.add_space(S1);
@@ -1040,6 +1074,14 @@ mod tests {
         let kept = prune_layout(l, |id| id % 2 == 0);
         assert_eq!(leaves(&kept), vec![2, 4]);
         assert!(prune_layout(Node::Leaf(5), |_| false).is_none(), "nichts übrig → kein Layout (leerer Hub)");
+        // doppelte Blätter (dieselbe Sitzung zweimal) und unsinnige Anteile werden bereinigt
+        let dup = Node::Split { dir: Dir::Vertical, ratio: f32::NAN, a: Box::new(Node::Leaf(2)), b: Box::new(Node::grid(&[2, 4], Dir::Horizontal).unwrap()) };
+        let kept = prune_layout(dup, |_| true).unwrap();
+        assert_eq!(kept.leaf_ids(), vec![2, 4]);
+        assert!(kept.is_normal(|_| true));
+        // schon in Ordnung → derselbe Baum
+        let ok = Node::grid(&[1, 2, 3], Dir::Horizontal).unwrap();
+        assert_eq!(prune_layout(ok.clone(), |_| true), Some(ok));
     }
 
     #[test]
@@ -1110,6 +1152,8 @@ mod tests {
         let running = close_plan([(1, true, false, false)].into_iter());
         assert!(running.ask(), "laufende Sitzung: immer fragen, auch wenn „Schließen bestätigen“ aus ist");
         assert!(close_plan(std::iter::empty()).can_close());
+        let chats = ClosePlan { end: vec![1], chats: 1, ..ClosePlan::default() };
+        assert!(chats.ask(), "Chat mit Verlauf: nachfragen, auch wenn er gerade nicht antwortet");
     }
 
     #[test]

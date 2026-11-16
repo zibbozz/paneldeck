@@ -91,6 +91,18 @@ pub struct Session {
     tee: Mutex<Vec<u8>>,
     /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
     last_activity: Arc<std::sync::atomic::AtomicU64>,
+    /// Die Shell meldete ihren Prompt (OSC 133;A), während noch der alternative Bildschirm oder ein Maus-Modus
+    /// aktiv war – ein Vollbildprogramm ist wohl ohne Aufräumen beendet worden (Absturz, getrennte SSH-Verbindung).
+    /// Mausrad und Klicks behandeln die Sitzung dann wie eine normale Shell (keine Pfeiltasten, keine Mausereignisse);
+    /// die Modi selbst bleiben unangetastet. Zurückgesetzt, sobald ein Befehl abgeschickt wird (`\r` in `write_raw`)
+    /// oder ein Programm Vollbild/Maus-Modus erneut einschaltet (`next_stale_modes`).
+    ///
+    /// Heuristik mit bekannten Fehlgriffen: Ein Multiplexer (tmux, screen, zellij), der das OSC 133;A der inneren
+    /// Shell durchreicht, während er selbst im alternativen Bildschirm mit Maus-Modus läuft, sieht wie ein hängen
+    /// gebliebener Zustand aus – dann bekommt er bis zur nächsten Befehlszeile bzw. zum nächsten DECSET kein Mausrad
+    /// und keine Klicks. Ebenso ein Vollbildprogramm, das selbst OSC 133;A ausgibt. Ohne Shell-Integration
+    /// (cmd ohne Integration, entfernte Shells) greift die Erkennung nicht.
+    pub stale_modes: Arc<AtomicBool>,
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
@@ -160,6 +172,7 @@ impl Session {
         let exited = Arc::new(AtomicBool::new(false));
         let shell_state: Arc<Mutex<ShellState>> = Arc::new(Mutex::new(ShellState::default()));
         let last_activity = Arc::new(std::sync::atomic::AtomicU64::new(mono_ms()));
+        let stale_modes = Arc::new(AtomicBool::new(false));
 
         {
             let term = term.clone();
@@ -167,6 +180,7 @@ impl Session {
             let ctx = ctx.clone();
             let shell_state = shell_state.clone();
             let activity = last_activity.clone();
+            let stale = stale_modes.clone();
             // Lesen und Verarbeiten getrennt: Der Verarbeitungs-Thread muss die Frist eines „Synchronized Update“
             // (CSI ?2026h) selbst durchsetzen. vte puffert sonst nach einem abgebrochenen Update (Programm stirbt
             // mitten im Frame, `cat` einer Datei mit ESC[?2026h) bis zu 2 MiB und das Terminal zeigt nichts mehr an.
@@ -213,6 +227,11 @@ impl Session {
                                         done = end;
                                         let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
                                         let line = t.grid().cursor.point.line.0 as i64;
+                                        let was = stale.load(Ordering::Relaxed);
+                                        stale.store(next_stale_modes(was, &ev, *t.mode()), Ordering::Relaxed);
+                                        if ev == OscEvent::FullscreenModeSet {
+                                            continue; // keine Shell-Integration
+                                        }
                                         apply_events(&shell_state, vec![ev], (hist + line).max(0) as u64);
                                     }
                                     processor.advance(&mut *t, &bytes[done..]);
@@ -256,6 +275,7 @@ impl Session {
             tee_on: AtomicBool::new(false),
             tee: Mutex::new(Vec::new()),
             last_activity,
+            stale_modes,
         };
         if let Some(input) = opts.initial_input {
             session.write(input.as_bytes());
@@ -272,6 +292,10 @@ impl Session {
 
     /// Wie `write`, aber ohne Broadcast-Mitschnitt: Eingaben eines Agenten dürfen nicht in fremden Terminals landen.
     pub fn write_raw(&self, bytes: &[u8]) {
+        // Ein Befehl wird abgeschickt: die Shell verlässt ihren Prompt (siehe `stale_modes`).
+        if bytes.contains(&b'\r') {
+            self.stale_modes.store(false, Ordering::Relaxed);
+        }
         let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = w.write_all(bytes);
         let _ = w.flush();
@@ -525,10 +549,33 @@ impl Session {
     }
 }
 
+/// Meldet die Shell ihren Prompt, obwohl noch der alternative Bildschirm oder ein Maus-Modus aktiv ist?
+/// Dann ist das Vollbildprogramm ohne Aufräumen beendet worden (`Session::stale_modes`).
+pub fn prompt_with_stale_modes(mode: alacritty_terminal::term::TermMode) -> bool {
+    use alacritty_terminal::term::TermMode;
+    mode.intersects(TermMode::ALT_SCREEN | TermMode::MOUSE_MODE)
+}
+
+/// Neuer Wert von `Session::stale_modes` nach einem Ereignis im Ausgabestrom (`mode` = Modus der Emulation, nachdem
+/// alles bis einschließlich der Sequenz verarbeitet ist):
+/// - Prompt-Anfang (OSC 133;A): gesetzt, wenn dabei noch Vollbild/Maus-Modus aktiv ist, sonst gelöscht.
+/// - Ein Programm schaltet Vollbild oder Maus-Modus ein (DECSET 47/1047/1049/1000/1002/1003): gelöscht – auch wenn
+///   sich kein Modus-Bit ändert (1049h im schon aktiven alternativen Bildschirm). So hängt der Zustand nicht, wenn ein
+///   Vollbildprogramm ohne abgeschickte Befehlszeile startet (Tastenkürzel der Shell, mc nach Strg+O) oder der Prompt
+///   erst nach dem Enter eintraf.
+/// - Sonst unverändert.
+pub fn next_stale_modes(prev: bool, ev: &OscEvent, mode: alacritty_terminal::term::TermMode) -> bool {
+    match ev {
+        OscEvent::PromptStart => prompt_with_stale_modes(mode),
+        OscEvent::FullscreenModeSet => false,
+        _ => prev,
+    }
+}
+
 fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line: u64) {
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     for ev in events {
-        st.integration_seen = true;
+        st.integration_seen |= ev != OscEvent::FullscreenModeSet;
         match ev {
             OscEvent::PromptStart => {
                 st.prompt_seq += 1;
@@ -557,6 +604,8 @@ fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line:
                 st.cwd = Some(p);
             }
             OscEvent::DurationMs(ms) => st.pending_dur = Some(ms),
+            // Kommt nicht von der Shell-Integration; der Lese-Thread wertet es selbst aus (`next_stale_modes`).
+            OscEvent::FullscreenModeSet => {}
         }
     }
 }

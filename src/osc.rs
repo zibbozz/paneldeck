@@ -3,6 +3,8 @@
 //!  - `ESC ] 9 ; 9 ; "pfad" BEL`      aktueller Ordner (ConEmu/Windows Terminal)
 //!  - `ESC ] 7 ; file://host/pfad BEL` aktueller Ordner (OSC 7)
 //!  - `ESC ] 7777 ; dur=<ms> BEL`      Dauer des letzten Befehls (eigene Erweiterung)
+//!  - `ESC [ ? 47/1047/1049/1000/1002/1003 h` Programm schaltet Vollbild oder Maus-Modus ein (kein OSC, aber für
+//!    `Session::stale_modes`: ein `1049h` im schon aktiven alternativen Bildschirm ändert keine Modus-Bits)
 //! Die Bytes werden zusätzlich unverändert an die Terminal-Emulation weitergegeben (unbekannte OSC werden dort ignoriert).
 
 #[derive(Debug, Clone, PartialEq)]
@@ -12,7 +14,15 @@ pub enum OscEvent {
     CommandDone { exit: Option<i32> },
     Cwd(String),
     DurationMs(u64),
+    /// DECSET für den alternativen Bildschirm (47/1047/1049) oder einen Maus-Modus (1000/1002/1003).
+    /// Keine Shell-Integration: zählt nicht als `integration_seen`.
+    FullscreenModeSet,
 }
+
+/// Private Modi, deren Einschalten ein Vollbildprogramm ankündigt (siehe `OscEvent::FullscreenModeSet`).
+const FULLSCREEN_MODES: [u32; 6] = [47, 1047, 1049, 1000, 1002, 1003];
+/// Länge der Parameter einer CSI-Sequenz, bis zu der sie ausgewertet wird (längere sind kein DECSET dieser Art).
+const MAX_CSI: usize = 64;
 
 #[derive(Default)]
 enum State {
@@ -21,6 +31,8 @@ enum State {
     Esc,
     Osc(Vec<u8>),
     OscEsc(Vec<u8>),
+    /// `ESC [` gelesen: Parameter- und Zwischenbytes bis zum Endbyte.
+    Csi(Vec<u8>),
 }
 
 #[derive(Default)]
@@ -53,7 +65,30 @@ impl OscScanner {
                 }
                 State::Esc => match b {
                     b']' => State::Osc(Vec::new()),
+                    b'[' => State::Csi(Vec::new()),
                     0x1b => State::Esc,
+                    _ => State::Normal,
+                },
+                State::Csi(mut buf) => match b {
+                    // Parameter (0–9 ; : < = > ?) und Zwischenbytes
+                    0x20..=0x3f => {
+                        if buf.len() < MAX_CSI {
+                            buf.push(b);
+                            State::Csi(buf)
+                        } else {
+                            State::Normal
+                        }
+                    }
+                    // Endbyte
+                    0x40..=0x7e => {
+                        if b == b'h' && is_fullscreen_decset(&buf) {
+                            out.push(OscEvent::FullscreenModeSet);
+                        }
+                        State::Normal
+                    }
+                    0x1b => State::Esc,
+                    // C0-Steuerzeichen mitten in der Sequenz führt die Emulation aus, die Sequenz läuft weiter.
+                    0x00..=0x1f => State::Csi(buf),
                     _ => State::Normal,
                 },
                 State::Osc(mut buf) => match b {
@@ -87,6 +122,13 @@ impl OscScanner {
         }
         (out, pos)
     }
+}
+
+/// `? Pm` (Parameter einer CSI-Sequenz mit Endbyte `h`) schaltet einen der `FULLSCREEN_MODES` ein?
+fn is_fullscreen_decset(params: &[u8]) -> bool {
+    let Some(rest) = params.strip_prefix(b"?") else { return false };
+    let Ok(s) = std::str::from_utf8(rest) else { return false };
+    s.split(';').any(|p| p.parse::<u32>().is_ok_and(|n| FULLSCREEN_MODES.contains(&n)))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -146,6 +188,29 @@ fn parse(payload: &[u8], out: &mut Vec<OscEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_decset_is_detected() {
+        let mut s = OscScanner::default();
+        for seq in ["\x1b[?1049h", "\x1b[?47h", "\x1b[?1047h", "\x1b[?1000h", "\x1b[?1002h", "\x1b[?1003h", "\x1b[?1h\x1b[?25;1049;1006h"] {
+            assert_eq!(s.feed(seq.as_bytes()), vec![OscEvent::FullscreenModeSet], "{seq:?}");
+        }
+        // Ausschalten, andere Modi, andere Sequenzen: nichts.
+        for seq in ["\x1b[?1049l", "\x1b[?1000l", "\x1b[?1006h", "\x1b[?25h", "\x1b[1049h", "\x1b[?10490h", "\x1b[31m", "\x1b[2J", "\x1b[>1049h"] {
+            assert!(s.feed(seq.as_bytes()).is_empty(), "{seq:?}");
+        }
+        // Über Chunk-Grenzen, mit Position hinter dem Endbyte, zusammen mit einem Prompt.
+        assert!(s.feed_at(b"ab\x1b[?10").0.is_empty());
+        let (ev, pos) = s.feed_at(b"49hxy\x1b]133;A\x07");
+        assert_eq!(ev, vec![OscEvent::FullscreenModeSet, OscEvent::PromptStart]);
+        assert_eq!(pos, vec![3, 13]);
+        // Eine OSC-Sequenz mittendrin bleibt erkannt.
+        assert_eq!(s.feed(b"\x1b[?1049\x1b]133;A\x07"), vec![OscEvent::PromptStart]);
+        // Überlange Parameter brechen ab, danach wird wieder normal erkannt.
+        let long = format!("\x1b[?{}1049h", "1;".repeat(100));
+        assert!(s.feed(long.as_bytes()).is_empty());
+        assert_eq!(s.feed(b"\x1b[?1049h"), vec![OscEvent::FullscreenModeSet]);
+    }
 
     #[test]
     fn parses_sequences_across_chunks() {

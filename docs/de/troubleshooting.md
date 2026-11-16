@@ -37,6 +37,9 @@ Jedes Release wird vor der Veröffentlichung mit Microsoft Defender geprüft (`t
 - `hub_not_running`: Für den Datenordner, in dem die Brücke gesucht hat, läuft kein Paneldeck (die Meldung nennt ihn). Bei Profilen den eigenen Servernamen der Instanz registrieren (`paneldeck-<profil>`) oder `--profile` an `mcp` übergeben (siehe [Agenten-Schnittstelle](agent-interface.md)).
 - Nach dem Umschalten des Expertenmodus die Werkzeugliste des Agenten neu laden (`/mcp` in Claude Code).
 
+## Chats mit lokalen Modellen
+- Server nicht erreichbar, Modell nicht gefunden, Kontext zu klein, ein Modell nutzt keine Werkzeuge: siehe [Chats – Fehlersuche](chat.md#fehlersuche).
+
 ## Updates
 - „Prüfsumme stimmt nicht – der Download wurde verworfen.“: Die Datei passte nicht zu `SHA256SUMS.txt`; später erneut versuchen oder von Hand herunterladen.
 - „Diese Version lässt sich nicht automatisch installieren“: Das Release hat keine Prüfsummen-Datei `SHA256SUMS.txt` (2.0.0 und älter) oder keine passende Datei – von der Release-Seite herunterladen und von Hand aktualisieren.

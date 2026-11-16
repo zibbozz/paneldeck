@@ -213,7 +213,7 @@ Voraussetzung: `git` im PATH, `claude` angemeldet.
 - [ ] **Umbenennen**: Ordner mit Unterordnern umbenennen → alle Sitzungen folgen; doppelter Name wird abgelehnt.
 - [ ] **Migration**: bestehende Gruppen aus 0.15.x erscheinen als Ordner.
 - [ ] **Sammelstatus**: Claude-Sitzung in Ordner wartet auf Freigabe → roter Punkt an der Ordnerzeile (auch zugeklappt).
-- [ ] **X im Terminal-Kopf**: Klick auf X fragt wie „Sitzung schließen“ (bei laufender Sitzung); Strg+Umschalt+W blendet nur aus.
+- [ ] **X im Terminal-Kopf**: Klick auf X fragt wie „Sitzung schließen“ (bei laufender Sitzung); Strg+Umschalt+W minimiert nur (ab 2.2.0, siehe Abschnitt 60).
 
 ## 26 · Hotfix UI-Skalierung (0.16.1)
 - [ ] Regler „UI-Skalierung“ ziehen → Oberfläche bleibt während des Ziehens unverändert und skaliert erst beim Loslassen; Klick auf die Leiste und Pfeiltasten wirken sofort.
@@ -593,3 +593,119 @@ Vorbereitung (lokaler Test-Feed, nichts wird veröffentlicht): Test-Build mit de
 - [ ] **Smoke-Test:** `tools\smoke-mcp.ps1 -Exe <exe> -WorkRoot E:\paneldeck-test` → alle Prüfungen bestanden („Ergebnis: 181 bestanden“, Stand 2.1.0).
 - [ ] **Selbst-Update gegen das echte Release** (nach dem Veröffentlichen, mit einer 2.1.0-Kopie ist noch nichts Neueres da): *Nach Updates suchen* → „Paneldeck ist aktuell“; Datenschutz: keine Netzwerkzugriffe ohne Prüfung (Schalter aus, Start ohne Klick).
 - [ ] **Dokumentation:** README (Englisch/Deutsch) und die Anleitungen unter `docs/en/` und `docs/de/` stimmen mit dem Programm überein, alle Links funktionieren; Changelog (beide Sprachen) und `docs/release-notes/2.1.0.en.md` sind vollständig.
+
+## 54 · Chat-Sitzungen (2.2.0)
+Vorbereitung: Kopie der .exe unter `E:\paneldeck-test`, eigener Datenordner, Schein-`USERPROFILE`; ein Server unter *Einstellungen → Modelle* (Ollama auf `http://localhost:11434` mit einem kleinen Modell, z. B. `qwen2.5:7b`). Automatisch: Unit-Tests `chat::*` (Verlaufsdatei, Logik, Sitzung), headless-egui-Tests `chat_ui` (Texte EN/DE).
+- [ ] **Neuer Chat:** Sprechblasen-Knopf in der Seitenleiste → Dialog *Neuer Chat* → *Chat beginnen* → Chat-Bereich mit Hinweis „Neuer Chat“, Eingabe hat den Fokus; die Zeile in der Seitenleiste zeigt Chat-Symbol, Status und Modell.
+- [ ] **Senden:** `hallo`, Umschalt+Enter, `welt`, Enter → rechtsbündige Blase mit zwei Zeilen; die Antwort streamt, währenddessen *Stopp* und Status „arbeitet“; danach ↻ unter der Antwort, *Kopieren* an Codeblöcken, „Tokens: N Eingabe · M Antwort“.
+- [ ] **Kopieren:** *Kopieren* an einem Codeblock → in ein Terminal einfügen → der Code kommt genau einmal an.
+- [ ] **Neu erzeugen:** ↻ → die Antwort wird ersetzt, nicht verdoppelt.
+- [ ] **Bearbeiten:** ✎ neben der letzten eigenen Nachricht → Text im Eingabefeld mit „Letzte Nachricht wird bearbeitet – Senden ersetzt sie.“; ändern + Enter → alte Frage und Antwort ersetzt. `Esc` bzw. *Abbrechen* bricht ab, nichts geändert.
+- [ ] **Stopp:** lange Antwort anfordern, *Stopp* während des Streamens → der Teiltext bleibt, Status wieder bereit.
+- [ ] **Fehler:** Ollama beenden, senden → roter Kasten „Keine Verbindung zum Server … (Ollama: Port 11434)“ mit *Wiederholen*, Status rot; Ollama starten, *Wiederholen* → Antwort kommt.
+- [ ] **Scrollen:** lange Unterhaltung, während des Streamens nach oben scrollen → Ansicht bleibt stehen; wieder nach unten → folgt dem Text.
+- [ ] **Teilen:** Tippen im Chat, `Strg+Umschalt+D` → neuer Bereich ist ein Terminal; getippte Zeichen landen nicht im Terminal.
+- [ ] **Text von außen:** Chat fokussiert: Doppelklick auf eine Datei im Dateibaum, Datei auf den Chat ziehen, Prompt-Snippet, Composer *Senden* → der Text landet im Eingabefeld des Chats, wird aber **nicht** gesendet.
+- [ ] **Schließen:** leeren Chat schließen → keine Frage. Chat mit Verlauf (Schließen bestätigen an) → Frage „Der Chatverlauf wird gelöscht (eine laufende Antwort wird abgebrochen).“; *Abbrechen* behält ihn, Schließen löscht `chats/<id>.json`. Weiteres Fenster bzw. Ordner-*Alle schließen* mit Chats → Warnung nennt die Verläufe.
+- [ ] **Neustart:** beenden und neu starten → der Chat ist mit Verlauf wieder da (kein Prozess, kein Terminal).
+- [ ] **Fenster:** Chat abdocken; Strg+Klick auf *Terminal Hub* → weiteres Fenster mit einem Chat → senden geht, die Antwort streamt auch, wenn das Hauptfenster im Vordergrund ist.
+- [ ] **Andere Einstiege:** Baumansicht, Rechtsklick auf Ordner → *Neuer Chat hier* (Chat landet im Ordner); Palette *Neuer Chat*; leerer Terminal Hub *Neuer Chat*.
+- [ ] **Kontextmenü:** kein *Neu starten*, keine Warteschlange; *Verlauf als Datei speichern …* schreibt eine `.md`; *Duplizieren* → leerer Chat mit demselben Modell.
+- [ ] **Datei:** `chats/<id>.json` kaputt machen (z. B. `{` am Ende abschneiden), neu starten → leerer Chat mit Hinweis, daneben `chats/<id>.defekt-<Zeit>.json`.
+- [ ] **Beide Sprachen:** alle Chat-Texte auf Deutsch und Englisch.
+
+## 55 · Modelle und Server (2.2.0)
+Vorbereitung wie 54, aber zuerst ohne Server. Automatisch: Unit-Tests `llm::*` (Host-Regel, URL-Formen, Adapter, Datenstrom, DPAPI, Kürzung), `llm::config` (Einstellungen, tolerantes Lesen), `models_ui`.
+- [ ] **Ohne Server:** *Neuer Chat* → der Dialog erklärt, dass kein Server eingerichtet ist; *Einstellungen öffnen* → Reiter *Modelle*.
+- [ ] **Vorschlag:** Reiter *Modelle* ohne Server → „Vorschlag: Ollama auf diesem Rechner (http://localhost:11434)“; *Hinzufügen* (noch nichts abgerufen); *Verbinden* → Kreisel → Modelle mit „Werkzeuge ✓“ bzw. „keine Werkzeuge“ und „Kontext Nk“. Ollama beendet → „Keine Verbindung zum Server … (Ollama: Port 11434)“.
+- [ ] **Erlaubte Adressen:** *+ Server hinzufügen* mit `http://8.8.8.8` → rot „Adresse nicht erlaubt“, *Speichern* gesperrt; ebenso `http://100.64.0.1`, `http://127.1`, `http://0x7f.0.0.1`, `http://user:pw@localhost`. `http://192.168.x.y:1234/v1` als OpenAI-kompatibel → *Speichern* geht.
+- [ ] **Hostname:** ein Name, der auf eine öffentliche Adresse auflöst (z. B. `http://example.com`) → *Verbinden* meldet „Adresse nicht erlaubt“ mit der aufgelösten Adresse.
+- [ ] **HTTPS selbst signiert** (optional, eigener Testserver im LAN): *Verbinden* → „Das Zertifikat des Servers ist nicht vertrauenswürdig …“ mit dem Hinweis auf *Vertrauenswürdige Stammzertifizierungsstellen* bzw. `http://`.
+- [ ] **Umleitung** (optional, Testserver mit 301): Meldung „Der Server leitet weiter …“, der Umleitung wird nicht gefolgt.
+- [ ] **API-Schlüssel:** *Zeigen*/*Verbergen*; *Speichern* → 🔑 am Server; `settings.json` enthält nur einen Base64-Blob, nirgends den Klartext. Bearbeiten mit leerem Feld behält den Schlüssel; *Schlüssel entfernen* löscht ihn. Datenordner unter einem anderen Windows-Benutzer öffnen (optional) → Chat meldet „Der gespeicherte API-Schlüssel lässt sich nicht entschlüsseln …“.
+- [ ] **Neues Modell:** nach *Verbinden* steht ein neues Modell auf Stufe *Aus*; in `settings.json` fehlt `level_chosen`.
+- [ ] **Modell-Einstellungen:** Stufe Aus/Lesen/Steuern (die Werkzeugliste wächst mit der Stufe), ein Werkzeug abwählen, *Vor Schreib-Aktionen nachfragen*, *Max. Schritte*, *Werkzeugaufrufe* Automatisch/An/Aus, eigene Kontextlänge → eine Wahl der Stufe setzt `level_chosen: true`; alles bleibt nach Schließen und erneutem Öffnen der Einstellungen und nach einem Neustart erhalten.
+- [ ] **Dialog *Neuer Chat*:** aus Seitenleiste, Palette, leerem Hub und Ordnermenü → Server/Modell vorausgewählt (letzte Wahl), Enter beginnt den Chat; ein Ordner-Chat landet im Ordner.
+- [ ] **Antwort:** echte Antwort streamt, ↻ und „Tokens: …“ erscheinen; *Stopp* bricht ab.
+- [ ] **Ohne Werkzeuge:** Modell ohne Werkzeug-Fähigkeit (oder *Werkzeugaufrufe: Aus*) → Hinweis „Dieses Modell kann keine Werkzeuge nutzen – nur Chat.“
+- [ ] **Kontext:** eigene Kontextlänge 512 + langer Text → Hinweis „Antwort an der Token-Grenze des Modells abgeschnitten.“ bzw. bei langem Chat die Markierung „Ältere Nachrichten sieht das Modell nicht mehr“.
+- [ ] **Automatischer Kontext (Ollama):** ohne eigene Kontextlänge, Stufe *Steuern* → `ollama ps` zeigt 16384 als Kontext; eigene Kontextlänge 4096 bei Stufe *Steuern* → einmal je Chat der Hinweis „Der Kontext dieses Modells (4096 Tokens) ist zu klein für seine Werkzeug-Stufe …“.
+- [ ] **Server entfernt:** Server eines Chats entfernen → Hinweis im Chat; Senden → Fehler mit Hinweis auf *Einstellungen → Modelle*.
+- [ ] **Modell gelöscht:** `ollama rm <modell>` → Senden → „Nicht gefunden … (HTTP 404)“ mit Hinweis auf *Verbinden*.
+- [ ] **Unlesbarer Eintrag:** in `settings.json` einen Server mit `"kind": "gemini"` ergänzen → erscheint nur lesbar mit „Unlesbarer Eintrag … bleibt unverändert erhalten“ und *Entfernen*; nach dem Speichern anderer Einstellungen steht er unverändert in der Datei.
+- [ ] **Beide Sprachen:** Reiter, Dialoge und Fehlermeldungen auf Deutsch und Englisch.
+
+## 56 · Werkzeuge und Freigaben in Chats (2.2.0)
+Vorbereitung wie 54 mit einem Modell mit Werkzeug-Fähigkeit (z. B. `qwen2.5:7b`), daneben ein Terminal. Automatisch: Unit-Tests der Werkzeug-Schleife (Filter nach Stufe/Modus/abgewählt, Prüfung beim Ausführen, Schritte + *Weiter*, Stopp mit offenen Aufrufen, „Immer für diesen Chat“ in `chats/<id>.json`), End-to-End-Test mit einem Schein-Ollama-Server, headless-egui-Test der Freigabe-Knöpfe EN/DE.
+- [ ] **Frage nach der Stufe:** neues Modell (Stufe nie gewählt), erste Nachricht senden → die Nachricht bleibt im Eingabefeld, der Chat fragt „Darf dieses Modell Paneldeck nutzen?“ mit *Aus* / *Lesen* / *Steuern*, Seitenleiste „braucht dich“; *Lesen* → die Nachricht wird gesendet, `settings.json` enthält `level_chosen: true`; der nächste Chat mit dem Modell fragt nicht mehr. Stufe stattdessen in *Einstellungen → Modelle* wählen → die Frage verschwindet, die Nachricht bleibt im Feld.
+- [ ] **Lesend:** Stufe *Lesen*, „Welche Sitzungen sind offen?“ → eingeklappte Zeile `list_sessions` mit Kreisel, dann ✓; aufgeklappt Parameter und Ergebnis (JSON); danach die Antwort des Modells.
+- [ ] **Stufe Aus:** Stufe *Aus* → das Modell bekommt keine Werkzeuge (nur Chat), keine Werkzeugzeilen.
+- [ ] **Abgewählt:** `list_sessions` abwählen → das Modell kann es nicht aufrufen (bzw. bekommt einen Fehler zurück, ohne dass etwas ausgeführt wird).
+- [ ] **Freigabe:** Stufe *Steuern*, *Nachfragen* an: „Schreib `echo hi` in das Terminal“ → Kasten „Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:“ mit `send_text → session N "Name"`, den vollständigen Argumenten (bei langem Text scrollbar, Hinweis „+N Zeichen – nach unten scrollen …“) und *Erlauben* / *Immer für diesen Chat* / *Ablehnen*; der Chat ist in der Seitenleiste als „braucht dich“ markiert (Aufmerksamkeitsring). Enter im Eingabefeld gibt **nicht** frei; Enter mit Fokus auf der Freigabe-Zeile erlaubt.
+- [ ] **Erlauben** → Text erscheint im Terminal, Zeile ✓. **Ablehnen** → Zeile ⊘ abgelehnt, nichts im Terminal, das Modell erfährt die Ablehnung. **Immer für diesen Chat** → weitere `send_text` dieses Chats **auf dieselbe Sitzung** laufen ohne Frage; auf eine andere Sitzung fragt er wieder; ein anderer Chat fragt weiter; `chats/<id>.json` enthält `always_allow: [{"tool":"send_text","session":N}]`; nach einem Neustart gilt es für diesen Chat noch.
+- [ ] **Kein „Immer“:** `create_session` und Aufrufe ohne Ziel-Sitzung (z. B. `add_todo`) zeigen nur *Erlauben* / *Ablehnen*. `wait_for_status` und `focus_session` laufen ohne Frage.
+- [ ] **Widerrufen:** Kopfzeile „Dauerhafte Freigaben (1)“ → *Widerrufen* → der Eintrag verschwindet (auch aus der Datei), der nächste `send_text` fragt wieder.
+- [ ] **Eigene Sitzung / Regeln:** der Chat darf sich nicht selbst schließen; ein Terminal mit offener Claude-Freigabe-Frage wird nicht beschrieben; `close_session` auf ein fremdes Terminal → abgelehnt; ein vom Chat angelegtes Terminal ist sein Kind und darf geschlossen werden.
+- [ ] **Max. Schritte:** *Max. Schritte* = 2, Aufgabe mit vielen Aufrufen → „Nach 2 Werkzeugaufrufen angehalten“ mit *Weiter*; *Weiter* erlaubt zwei weitere. Abgewiesene Aufrufe (abgewähltes Werkzeug) zählen mit.
+- [ ] **Unsinnige Aufrufe:** Modell ruft immer wieder ein nicht erlaubtes Werkzeug auf → „Das Modell rief immer wieder Werkzeuge auf, die nicht laufen konnten – angehalten.“ mit *Weiter*, keine Endlosschleife.
+- [ ] **Kontext voll:** eigene Kontextlänge klein (z. B. 4096), Stufe *Lesen*, mehrmals große Ausgaben lesen lassen (`read_terminal` mit vielen Zeilen) → Ergebnisse sind gekürzt (das Ende bleibt, Hinweis auf nicht vertrauenswürdigen Inhalt), ältere werden durch „elided“ ersetzt; schließlich „Die Werkzeug-Ergebnisse passen nicht mehr in den Kontext des Modells …“ mit *Weiter* → wartende Aufrufe stehen als „nicht ausgeführt“ (`skipped`) im Verlauf, das Modell antwortet.
+- [ ] **Screenshot:** Stufe *Lesen*, „Mach einen Screenshot“ → Ergebnis ohne Bilddaten („omitted – images are not passed to chat models“).
+- [ ] **Stopp mit offenen Aufrufen:** während eine Freigabe wartet *Stopp* → der Aufruf wird abgebrochen; die nächste Nachricht funktioniert (kein „hängender“ Werkzeugaufruf im Verlauf).
+- [ ] **Beenden während eines Werkzeugs:** Paneldeck beenden, während `run_command` läuft → nach dem Neustart steht der Aufruf als unterbrochen im Chat, weiterschreiben geht.
+- [ ] **Aufrufprotokoll:** *Einstellungen → Agenten* bzw. `mcp-log.jsonl` listet die Aufrufe des Chats (`how: "chat"` und `model`; bei externen Agenten fehlen beide Felder).
+- [ ] **Unabhängig von der MCP-Stufe:** *Einstellungen → Agenten* auf *Aus* → der Chat nutzt trotzdem die Werkzeuge seiner Modell-Stufe.
+- [ ] **Beide Sprachen:** Freigabe-Knöpfe, Status und Hinweise auf Deutsch und Englisch.
+
+## 57 · MCP-Zugriff auf Chats (2.2.0)
+Vorbereitung: MCP-Stufe *Steuern*, ein Chat mit einem eingerichteten Modell. Automatisch: Unit-Tests der neuen Werkzeuge (Schemas, Stufen, Fehlercodes, Kürzung, nicht vertrauenswürdig, keine Geheimnisse), `tools\smoke-mcp.ps1 -Exe <exe> -WorkRoot E:\paneldeck-test` (mit Schein-Ollama-Server: Chat anlegen, senden, lesen, Fehlercodes; Zahl siehe Skript-Ausgabe).
+- [ ] **list_sessions:** Chat mit `kind: "chat"` und `model`; Terminals mit `kind: "terminal"`.
+- [ ] **list_models:** Server mit `id`, `name`, `kind`, `host:port` und Modellen (`level`, `tools`, `context_length`, `last_used`); kein API-Schlüssel, keine vollständige Adresse in der Antwort.
+- [ ] **create_session** mit `kind: "chat"`, `server`, `model` → neuer Chat erscheint in der Seitenleiste als Kind des Agenten; unbekanntes Modell → `bad_args` mit den Namen der eingerichteten Server/Modelle (keine Schlüssel).
+- [ ] **send_chat_message** „ping“ → `{ok: true, index}`; die Nachricht erscheint im Chat-Fenster mit „Von Agent … gesendet“, die Antwort streamt; `wait_for_status` bis `ready`; `read_chat` zeigt Frage und Antwort (als nicht vertrauenswürdig gekennzeichnet).
+- [ ] **busy / permission_pending:** `send_chat_message` während die Antwort streamt bzw. während du die letzte Nachricht bearbeitest → `busy`; während eine Freigabe wartet bzw. die Frage nach der Stufe offen ist → `permission_pending`. Während der Freigabe: `read_chat` meldet `approval`, `wait_for_status` mit `approval` kehrt zurück (mit `needs_you`); freigeben kann der Agent nicht.
+- [ ] **read_chat-Felder:** langer Chat mit `last: 2` → `more_above: true`; sehr lange Nachricht → `truncated`.
+- [ ] **Kein Umweg:** Agent legt einen Chat (Stufe *Steuern*) an und lässt ihn `send_text` auf die Sitzung des Agenten aufrufen → `forbidden`.
+- [ ] **Fehlercodes:** `read_terminal` auf den Chat → `not_a_terminal`; `read_chat` auf ein Terminal → `not_a_chat`; `send_chat_message` bei Stufe *Lesen* → `forbidden`; Server des Chats entfernt bzw. Modell nicht mehr in der Liste des Servers → `no_model`; `create_session` mit unbekanntem Modell ohne Server → `bad_args`.
+- [ ] **Agent im Terminal:** Claude Code in einem Paneldeck-Terminal fragt „Frag den Chat X nach …“ → Nachricht kommt im Chat an, Claude liest die Antwort.
+- [ ] **Beide Sprachen:** Fehlermeldungen der neuen Werkzeuge in beiden Sprachen (Codes unübersetzt).
+
+## 58 · Maximieren ohne Rand (#134, 2.2.0)
+- [ ] **Hauptfenster:** maximieren (Doppelklick auf die Fensterleiste bzw. Knopf) → kein durchsichtiger Rand, der Inhalt reicht an alle Kanten des Arbeitsbereichs, die Taskleiste bleibt sichtbar; wiederherstellen → gewohnte Größe mit runden Ecken.
+- [ ] **Weiteres Fenster:** dasselbe in einem weiteren Fenster (Strg+Klick auf einen Reiter).
+- [ ] **Skalierung 150 %:** dasselbe bei 150 % Anzeigeskalierung und auf einem zweiten Monitor (falls vorhanden).
+
+## 59 · Mausrad (#141, 2.2.0)
+Vorbereitung: Testinstanz wie 54 mit Git Bash oder WSL (`less`, `vim`, `htop`). Automatisch: Unit-Tests `termview` (Kodierungen SGR/UTF-8/normal, Grenze 94, DECSET 1007, Umschalt+Rad, Prompt nach Absturz).
+- [ ] **Shell:** viel Ausgabe, Mausrad → der Verlauf von Paneldeck scrollt.
+- [ ] **Programm mit Maus:** `vim` mit `:set mouse=a` bzw. `htop` → das Mausrad scrollt im Programm, Klicks setzen den Cursor/wählen eine Zeile; bei breitem Fenster auch rechts von Spalte 94 (SGR).
+- [ ] **Vollbild ohne Maus:** `less` auf einer langen Datei → das Mausrad scrollt den Text (Pfeiltasten). *Einstellungen → Darstellung → Mausrad in Vollbildprogrammen* = *Aus* → nichts passiert; `settings.json` enthält `"alt_screen_wheel": "off"`; zurück auf *Pfeiltasten senden*.
+- [ ] **DECSET 1007:** `printf '\e[?1049h\e[?1007l'` (Git Bash) → Mausrad sendet keine Pfeiltasten; `printf '\e[?1007h\e[?1049l'` stellt zurück.
+- [ ] **Umschalt+Mausrad:** in der Shell bei eingeschaltetem Maus-Modus (z. B. `printf '\e[?1000h'`) → Umschalt+Rad scrollt den Verlauf; in `less` → nichts.
+- [ ] **Nach Absturz:** Vollbildprogramm mit Maus hart beenden (z. B. `vim` per `kill -9` aus einer zweiten Sitzung) → am Prompt keine Pfeiltasten und kein Zeichensalat beim Mausrad (Shell-Integration nötig); nach dem nächsten Befehl normales Verhalten.
+- [ ] **Beide Sprachen:** Einstellung und Hinweis auf Deutsch und Englisch.
+
+## 60 · Bereiche minimieren (#142, 2.2.0)
+Vorbereitung: Testinstanz wie 54 mit drei Terminals und einem Chat in einem geteilten Layout. Automatisch: Unit-Tests `layout` (Minimieren, Platz merken, Ketten, Normalisieren, tolerantes Lesen) und `state` (`minimized`/`slot`).
+- [ ] **Knopf:** Kopf eines Bereichs zeigt Ticket verknüpfen (falls verfügbar), Rechts teilen, Darunter teilen, In eigenem Fenster öffnen, Minimieren, × → Minimieren: der Nachbar übernimmt den Platz, die Sitzung läuft weiter (z. B. `ping -t` zählt weiter); in der Seitenleiste abgeblendet mit Unterstrich-Markierung, Tooltip „Minimiert – läuft weiter …“.
+- [ ] **Weitere Wege:** Kontextmenü des Bereichs, Kontextmenü der Sitzung in der Seitenleiste, Palette *Bereich minimieren*, Strg+Umschalt+W – alle minimieren.
+- [ ] **Letzter Bereich:** alle Bereiche minimieren → leerer Hub „Alle Bereiche sind minimiert“; Klick in der Seitenleiste → einziger Bereich.
+- [ ] **Alter Platz:** linken von zwei Bereichen (Anteil z. B. 30 %) minimieren und zurückholen → wieder links mit gleicher Breite; ebenso oben/unten. Nachbar danach auch minimieren bzw. schließen → das Zurückholen folgt der Kette an die richtige Stelle.
+- [ ] **Nachbarn weg:** minimieren, dann alle früheren Nachbarn schließen → Zurückholen teilt den fokussierten Bereich, die Sitzung rechts.
+- [ ] **Weggewechselt:** Sitzung, die nicht minimiert, aber nicht im Layout ist (abgeblendet ohne Markierung) → Klick ersetzt den fokussierten Bereich. Schon sichtbare Sitzung → nur Fokus.
+- [ ] **Palette und MCP:** *Wechseln zu:* zeigt „minimiert“ und holt zurück; `list_sessions` meldet `minimized: true`, `focus_session` holt die Sitzung an ihren Platz.
+- [ ] **Strg+Tab** überspringt minimierte Sitzungen.
+- [ ] **Chat und Fenster:** einen Chat minimieren und zurückholen (Verlauf bleibt); in einem weiteren Fenster dasselbe; im abgedockten Fenster *Minimieren* → Fenster zu, Sitzung minimiert in der Seitenleiste, × dockt dagegen wieder an.
+- [ ] **Neustart:** mit minimierten Sitzungen beenden und starten → weiterhin minimiert; `state.json` enthält `minimized`/`slot`; Zurückholen an den alten Platz.
+- [ ] **Robust:** in `state.json` eine unbekannte Sitzungskennung ins Layout schreiben bzw. einen Anteil auf `null` setzen → das restliche Layout und alle Projekte bleiben erhalten.
+- [ ] **Mindestgröße:** viele Teilungen bzw. Trennlinie ganz an den Rand ziehen → kein Bereich wird kleiner als etwa 120 × 70 px.
+- [ ] **Fenster schließen:** weiteres Fenster mit minimierter Sitzung schließen → die Frage nennt sie unter „Auch diese Sitzungen werden beendet, obwohl sie gerade nicht im Layout stehen …“.
+- [ ] **Beide Sprachen:** Knöpfe, Tooltips, Hub-Text und Palette auf Deutsch und Englisch.
+
+## 61 · Gesamtprüfung vor dem Release 2.2.0
+- [ ] **Abschnitte 54–60** komplett durchlaufen, einmal auf Deutsch und einmal auf Englisch.
+- [ ] **Update von 2.1:** Installer über 2.1 (`tools\update-test.ps1 -Exe <exe> -TempRoot E:\paneldeck-test`): Daten, Einstellungen, Sitzungen bleiben; `settings.json` und `state.json` von 2.1 laden ohne Verlust (neue Felder fehlen dort).
+- [ ] **Zurück auf 2.1** (optional, Kopie des Datenordners): 2.1 öffnet die Daten von 2.2 → Chats erscheinen als Terminals, `chats/*.json` bleibt unangetastet, kein Absturz.
+- [ ] **Datenschutz:** ohne eingerichteten Server keine Netzwerkzugriffe durch Chats; mit Server nur Verbindungen zu dessen Adresse (z. B. mit `netstat -ano` prüfen).
+- [ ] **Smoke-Test:** `tools\smoke-mcp.ps1 -Exe <exe> -WorkRoot E:\paneldeck-test` → alle Prüfungen bestanden (Zahl siehe Skript-Ausgabe „Ergebnis: N bestanden“).
+- [ ] **Release-Dateien und Defender:** wie in Abschnitt 53 (`tools/release.sh`, `SHA256SUMS.txt`, `tools\defender-scan.ps1` auf `paneldeck-2.2.0.exe` und `Paneldeck-Setup-2.2.0.exe`).
+- [ ] **Dokumentation:** README (Englisch/Deutsch), `docs/en/chat.md`/`docs/de/chat.md` und die geänderten Anleitungen stimmen mit dem Programm überein, alle Links funktionieren; Changelog (beide Sprachen) und `docs/release-notes/2.2.0.en.md` sind vollständig.

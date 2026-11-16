@@ -14,7 +14,8 @@ use crate::style::{self, Icon as SIcon};
 use crate::templates::{self, Template, TplItem};
 use crate::tray::{Tray, TrayCmd};
 use crate::shells::{self, ShellSpec};
-use crate::state::{self, Lang, Profile, Project, SavedState, SessionMeta, Settings};
+use crate::state::{self, Lang, Profile, Project, SavedState, SessionKind, SessionMeta, Settings};
+use crate::chat::{self as chatmod, ChatBackend, ChatState};
 use crate::terminal::{CmdDone, Session, SpawnOptions};
 use crate::termview;
 use crate::theme::{self, Theme};
@@ -28,6 +29,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod chat_ui;
 mod data;
 mod dialogs;
 mod dragdrop;
@@ -35,6 +37,7 @@ mod empty_hub;
 #[cfg(test)]
 mod glyph_tests;
 mod mcp;
+mod models_ui;
 mod multiwin;
 mod panels;
 mod planning_ui;
@@ -81,11 +84,59 @@ struct Entry {
     budget_warned: bool,
     /// Aufgelöste Shell-Kennung beim Start (z. B. `wsl:Ubuntu` auch bei Profilen mit eigenem Programm).
     shell_eff: String,
+    /// Chat-Sitzung (`meta.kind = chat`): Verlauf, Eingabe, laufende Antwort. Hängt an der Sitzung, nicht am Fenster.
+    chat: Option<ChatState>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new() }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None }
+    }
+    /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
+    fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
+        let mut e = Entry::new(meta);
+        e.status = ClaudeStatus::Idle;
+        e.chat = Some(chat);
+        e
+    }
+    /// Ein Chat statt eines Terminals (hat nie eine PTY; „beendet“ gibt es dort nicht).
+    fn is_chat(&self) -> bool {
+        self.meta.kind == SessionKind::Chat
+    }
+    /// Läuft etwas, das beim Schließen verloren ginge? Terminal: Prozess läuft; Chat: eine Antwort wird gerade erzeugt
+    /// oder Werkzeuge laufen bzw. warten auf Freigabe.
+    fn running(&self) -> bool {
+        match &self.chat {
+            Some(c) => c.busy(),
+            None => !self.exited(),
+        }
+    }
+    /// Chat mit mindestens einer Nachricht (Schließen löscht diesen Verlauf).
+    fn chat_has_history(&self) -> bool {
+        self.chat.as_ref().is_some_and(|c| !c.messages().is_empty())
+    }
+    /// Modellname eines Chats (leer bei Terminals).
+    fn chat_model(&self) -> &str {
+        self.meta.chat.as_ref().map(|c| c.model.as_str()).unwrap_or("")
+    }
+    /// Text in die Sitzung einfügen: Terminal bekommt ihn als Eingabe, ein Chat in sein Eingabefeld (nie abgeschickt).
+    /// `false`, wenn es kein Ziel gibt (Terminal ohne Prozess).
+    fn insert_text(&mut self, text: &str, submit: bool) -> bool {
+        if let Some(c) = self.chat.as_mut() {
+            if !c.draft.is_empty() && !c.draft.ends_with([' ', '\n']) {
+                c.draft.push(' ');
+            }
+            c.draft += text;
+            c.focus_input = true;
+            return true;
+        }
+        match &self.live {
+            Some(s) => {
+                s.send_text(text, submit);
+                true
+            }
+            None => false,
+        }
     }
     /// Nächsten wartenden Prompt senden, wenn Claude von beschäftigt auf bereit wechselt.
     /// Gibt `true` zurück, wenn die Warteschlange gerade vollständig abgearbeitet wurde.
@@ -132,6 +183,21 @@ impl Entry {
         }
     }
     fn status_label(&self, lang: Lang) -> &'static str {
+        if let Some(c) = &self.chat {
+            return if c.status() == chatmod::ChatStatus::Approval {
+                lang.t("Freigabe?", "approval?")
+            } else if c.streaming() {
+                lang.t("schreibt", "streaming")
+            } else if c.busy() {
+                lang.t("Werkzeug", "tool")
+            } else if c.paused {
+                lang.t("angehalten", "paused")
+            } else if c.has_error() {
+                lang.t("Fehler", "error")
+            } else {
+                lang.t("bereit", "idle")
+            };
+        }
         if self.exited() {
             return "";
         }
@@ -147,6 +213,9 @@ impl Entry {
         !self.exited() && matches!(self.status, ClaudeStatus::Permission | ClaudeStatus::Input)
     }
     fn status_color(&self, t: f64) -> Color32 {
+        if self.chat.as_ref().is_some_and(|c| c.has_error()) {
+            return Color32::from_rgb(0xe0, 0x6c, 0x75);
+        }
         if self.exited() {
             return Color32::from_gray(110);
         }
@@ -176,7 +245,11 @@ impl Entry {
         let c = self.meta.color;
         Color32::from_rgb(c[0], c[1], c[2])
     }
+    /// Terminal ohne laufenden Prozess. Ein Chat ist nie „beendet“ (siehe `running`).
     fn exited(&self) -> bool {
+        if self.is_chat() {
+            return false;
+        }
         self.live.as_ref().map(|s| s.has_exited()).unwrap_or(true)
     }
 }
@@ -262,11 +335,32 @@ enum Action {
     Close(u64),
     Split(u64, Dir),
     SplitAt(u64, Dir, bool),
-    HidePane(u64),
+    /// Bereich minimieren: aus dem Layout nehmen, Sitzung läuft weiter (`App::minimize_pane`).
+    MinimizePane(u64),
     Focus(u64),
     /// Zur Sitzung springen (aus einem Ticket): Terminal Hub ihres Fensters zeigen und sie aktivieren.
     JumpTo(u64),
     NewQuick,
+    /// Neuer Chat im aktiven Projekt (öffnet den Dialog „Neuer Chat“).
+    NewChat,
+    /// Neuer Chat in diesem Ordner.
+    FolderNewChat(String),
+    /// Eingabe des Chats senden (oder die bearbeitete letzte Nachricht übernehmen).
+    ChatSend(u64),
+    /// Laufende Antwort abbrechen.
+    ChatStop(u64),
+    /// Letzte Antwort neu erzeugen (auch „Wiederholen“ nach einem Fehler).
+    ChatRegenerate(u64),
+    /// Letzte eigene Nachricht zum Bearbeiten ins Eingabefeld holen.
+    ChatEdit(u64),
+    /// Entscheidung zum wartenden Werkzeugaufruf (Chat, Aufruf-Kennung, Erlauben / Immer für diesen Chat / Ablehnen).
+    ChatDecide(u64, String, chatmod::Decision),
+    /// „Weiter“ nach dem Anhalten (Höchstzahl der Werkzeugaufrufe, Kontext voll).
+    ChatContinue(u64),
+    /// Dauerhafte Freigabe des Chats zurücknehmen.
+    ChatRevoke(u64, chatmod::AllowRule),
+    /// Antwort auf die einmalige Frage nach der Stufe des Modells.
+    ChatLevel(u64, crate::mcp::McpLevel),
 }
 
 struct NewDialog {
@@ -316,6 +410,8 @@ struct NewOpts {
     window: Option<u64>,
     /// Projekt der Sitzung; None = aktives Projekt ihres Fensters.
     project: Option<u64>,
+    /// Chat statt Terminal: mit diesem Server/Modell (kein Prozess, Verlauf in `chats/<id>.json`).
+    chat: Option<state::ChatMeta>,
 }
 
 struct Launch<'a> {
@@ -537,6 +633,8 @@ pub struct App {
     folder_rects: Vec<(String, Rect)>,
     tree_geo: TreeGeo,
     new_dialog: Option<NewDialog>,
+    /// Dialog „Neuer Chat“ (Server und Modell wählen).
+    new_chat: Option<models_ui::NewChatDlg>,
     confirm_close: Option<u64>,
     settings_open: bool,
     dir: PathBuf,
@@ -637,6 +735,15 @@ pub struct App {
     wins: multiwin::Wins,
     /// Selbst-Update aus den GitHub-Releases (`update/`).
     updater: update::Updater,
+    /// Erzeugt die Antworten aller Chats (wählt Server und Modell anhand von `ChatMeta`).
+    chat_backend: std::sync::Arc<dyn ChatBackend>,
+    /// Modelllisten der LLM-Server im Hintergrund abrufen („Verbinden“).
+    llm_conn: models_ui::Connector,
+    /// Zustand des Reiters Einstellungen → Modelle. Bewusst für alle Fenster gemeinsam (nicht in `view_fields!`): Er
+    /// bearbeitet die globalen Einstellungen, und `dirty_since` steuert das verzögerte Speichern im Hauptdurchgang
+    /// (`models_save_tick`) – je Fenster getauscht, bliebe eine Änderung in einem gerade nicht gezeichneten Fenster
+    /// ungespeichert. Folge: Ein offenes Server-Formular erscheint in jedem Fenster, das diesen Reiter zeigt.
+    models_ui: models_ui::ModelsUi,
 }
 
 fn home_dir() -> String {
@@ -769,6 +876,7 @@ impl App {
             folder_rects: Vec::new(),
             tree_geo: TreeGeo::default(),
             new_dialog: None,
+            new_chat: None,
             confirm_close: None,
             settings_open: false,
             dir,
@@ -861,6 +969,9 @@ impl App {
             wins: Default::default(),
             // `--no-update-check`: keine automatische Prüfung für diesen Start (die manuelle geht weiter).
             updater: update::Updater::new(!crate::cli::get().no_update_check),
+            chat_backend: std::sync::Arc::new(chatmod::LlmBackend::new()),
+            llm_conn: Default::default(),
+            models_ui: Default::default(),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
@@ -888,10 +999,21 @@ impl App {
         for meta in saved.sessions {
             app.next_id = app.next_id.max(meta.id.saturating_add(1));
             let id = meta.id;
+            if meta.kind == SessionKind::Chat {
+                // Chat: Verlauf aus chats/<id>.json, keine PTY.
+                let (file, warning) = chatmod::store::load(&chatmod::store::path(&app.dir, id));
+                // Keine Id neu vergeben, auf die eine dauerhafte Freigabe zeigt (sonst gälte sie für ein neues Terminal).
+                app.next_id = app.next_id.max(chatmod::store::max_rule_session(&file).saturating_add(1));
+                let chat = ChatState::new(file, warning);
+                app.entries.insert(id, Entry::new_chat(meta, chat));
+                continue;
+            }
             let mut entry = Entry::new(meta);
             app.spawn_into(&cc.egui_ctx, &mut entry, Launch { restore: true, restart: false, continue_last: false, prompt: None, resume_id: None });
             app.entries.insert(id, entry);
         }
+        // Keine Id vergeben, zu der noch Verlauf/Scrollback daliegt (Absturz vor dem Speichern, zurückgesetzte state.json).
+        app.next_id = app.next_id.max(chatmod::store::max_used_id(&app.dir).saturating_add(1));
         // Projekte: ältere Stände ohne Projekte bekommen ein Standardprojekt.
         if app.projects.is_empty() {
             app.projects.push(Project {
@@ -1091,14 +1213,16 @@ impl App {
     /// Layout/Fokus des aktiven Projekts übernehmen (nur gültige Sitzungen des Projekts).
     fn load_project_view(&mut self, layout: Option<Node>, focused: u64) {
         let pid = self.active_project;
-        let ok = |id: &u64, s: &App| s.entries.get(id).is_some_and(|e| e.meta.project == pid && s.in_win(e));
-        self.layout = layout.filter(|l| {
-            let mut v = Vec::new();
-            l.leaves(&mut v);
-            !v.is_empty() && v.iter().all(|id| ok(id, self))
+        // Unbekannte, fremde, abgedockte oder doppelte Blätter fallen weg; der Rest des Layouts bleibt (früher wurde ein
+        // Layout mit nur einem ungültigen Blatt ganz verworfen).
+        let layout = layout.and_then(|l| {
+            let (entries, detached, win) = (&self.entries, &self.detached, self.wins.cur);
+            l.normalize(|id| entries.get(&id).is_some_and(|e| e.meta.project == pid && e.meta.window == win) && !detached.contains(&id))
         });
+        self.layout = layout;
         if self.layout.is_none() {
-            if let Some(first) = self.docked_ids().first().copied() {
+            // Kein Layout: die erste nicht minimierte Sitzung zeigen; sind alle minimiert, bleibt der leere Hub.
+            if let Some(first) = self.unminimized_docked().first().copied() {
                 self.layout = Some(Node::Leaf(first));
             }
         }
@@ -1136,6 +1260,15 @@ impl App {
     /// Sitzungen des Projekts, die nicht abgedockt sind (dürfen ins Hauptlayout).
     fn docked_ids(&self) -> Vec<u64> {
         self.project_ids().into_iter().filter(|i| !self.detached.contains(i)).collect()
+    }
+
+    /// Wie `docked_ids`, ohne minimierte Sitzungen (die kommen nur zurück, wenn man sie holt).
+    fn unminimized_docked(&self) -> Vec<u64> {
+        self.docked_ids().into_iter().filter(|i| !self.is_minimized(*i)).collect()
+    }
+
+    fn is_minimized(&self, id: u64) -> bool {
+        self.entries.get(&id).is_some_and(|e| e.meta.minimized)
     }
 
     fn switch_project(&mut self, id: u64) {
@@ -1347,8 +1480,14 @@ impl App {
     }
 
     /// Legt eine neue Sitzung an und zeigt sie im fokussierten Bereich.
-    fn new_session(&mut self, ctx: &egui::Context, o: NewOpts) -> u64 {
+    fn new_session(&mut self, ctx: &egui::Context, mut o: NewOpts) -> u64 {
         let quiet = o.quiet;
+        let chat_meta = o.chat.take();
+        if chat_meta.is_some() {
+            // Ein Chat hat weder Shell noch Profil noch Claude.
+            o.profile = Some(0);
+            o.claude = false;
+        }
         let id = self.next_id;
         self.next_id += 1;
         let (window, project) = self.session_home(o.window, o.project);
@@ -1363,6 +1502,7 @@ impl App {
         let label = self.shell_by_id(&shell_id).map(|s| s.label).unwrap_or_else(|| "Shell".into());
         let (name, custom) = match o.name.filter(|n| !n.trim().is_empty()) {
             Some(n) => (n, true),
+            None if chat_meta.is_some() => ("Chat".to_string(), false),
             None if o.claude => ("Claude".to_string(), false),
             None => (label, false),
         };
@@ -1390,12 +1530,25 @@ impl App {
                 pr.ensure_folder(&g);
             }
         }
-        let mut entry = Entry::new(meta);
-        self.spawn_into(
-            ctx,
-            &mut entry,
-            Launch { restore: false, restart: false, continue_last: o.continue_last, prompt: o.prompt.as_deref(), resume_id: o.resume_id.as_deref() },
-        );
+        let entry = match chat_meta {
+            Some(cm) => {
+                // Liegt unter dieser Id noch ein fremder Verlauf, wird er beiseitegelegt, nie geladen oder überschrieben.
+                let _ = chatmod::store::set_aside(&chatmod::store::path(&self.dir, id));
+                let meta = SessionMeta { kind: SessionKind::Chat, chat: Some(cm), shell_id: String::new(), ..meta };
+                let mut chat = ChatState::new(chatmod::ChatFile::default(), None);
+                chat.focus_input = true;
+                Entry::new_chat(meta, chat)
+            }
+            None => {
+                let mut entry = Entry::new(meta);
+                self.spawn_into(
+                    ctx,
+                    &mut entry,
+                    Launch { restore: false, restart: false, continue_last: o.continue_last, prompt: o.prompt.as_deref(), resume_id: o.resume_id.as_deref() },
+                );
+                entry
+            }
+        };
         self.entries.insert(id, entry);
         if !quiet {
             if window == self.wins.cur {
@@ -1498,29 +1651,64 @@ impl App {
         }
     }
 
+    /// Sitzung zeigen und fokussieren (Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`, Strg+Tab …).
+    /// Steht sie nicht im Layout, gilt:
+    /// 1. leerer Hub → sie wird der einzige Bereich;
+    /// 2. minimiert und ihr Platz ist noch da → genau dort wieder einfügen (neben denselben Geschwistern, gleiche Richtung,
+    ///    Seite und Größe – `Node::insert_at_slot`);
+    /// 3. minimiert, aber die Geschwister sind weg → den fokussierten Bereich rechts teilen;
+    /// 4. sonst (nur weggewechselt, nie minimiert) → den fokussierten Bereich ersetzen, wie bisher.
     fn activate(&mut self, id: u64) {
+        let Some(e) = self.entries.get_mut(&id) else { return };
+        e.attention = false;
+        let minimized = std::mem::take(&mut e.meta.minimized);
+        let slot = e.meta.slot.take();
         // Eine Sitzung darf nie gleichzeitig abgedockt und im Hauptlayout sein (zwei Größen kämpften um die PTY).
         self.detached.retain(|d| *d != id);
-        match &mut self.layout {
-            None => self.layout = Some(Node::Leaf(id)),
-            Some(l) => {
-                if !l.contains(id) {
-                    l.replace_leaf(self.focused, id);
-                    if !l.contains(id) {
-                        // fokussierter Bereich unbekannt → erstes Blatt ersetzen
-                        let mut v = Vec::new();
-                        l.leaves(&mut v);
-                        if let Some(first) = v.first() {
-                            l.replace_leaf(*first, id);
-                        }
-                    }
-                }
-            }
-        }
+        crate::layout::show(&mut self.layout, id, self.focused, minimized, slot.as_ref());
         self.focused = id;
         self.want_focus = Some(id);
+    }
+
+    /// Bereich minimieren: die Sitzung verlässt das Layout (ihr Platz wird gemerkt), läuft aber weiter und bleibt in der
+    /// Seitenleiste (abgeblendet). Auch der letzte Bereich darf gehen – dann bleibt der leere Hub. Ein abgedocktes Fenster
+    /// schließt sich dabei, ohne die Sitzung wieder anzudocken.
+    fn minimize_pane(&mut self, id: u64) {
+        if !self.entries.contains_key(&id) {
+            return;
+        }
+        let mut slot = None;
+        if self.detached.contains(&id) {
+            self.detached.retain(|d| *d != id);
+        } else {
+            let Some((s, focus)) = crate::layout::minimize(&mut self.layout, id, self.focused) else { return }; // schon draußen
+            slot = s;
+            if focus != self.focused {
+                self.focused = focus;
+                self.want_focus = Some(focus);
+            }
+        }
+        self.reroute_slots(id, slot.as_ref());
         if let Some(e) = self.entries.get_mut(&id) {
-            e.attention = false;
+            e.meta.minimized = true;
+            // Ohne Slot, wenn es der letzte Bereich war (oder er abgedockt war): beim Zurückholen gilt dann die
+            // Ausweichregel von `layout::show` (leerer Hub → einziger Bereich, sonst fokussierten Bereich teilen).
+            e.meta.slot = slot;
+        }
+    }
+
+    /// Bereich `gone` verlässt das Layout (minimiert, geschlossen, ausgeblendet, abgedockt): Plätze anderer minimierter
+    /// Sitzungen, die ihn als Geschwister nennen, zeigen danach auf das, was an seine Stelle rückt (seine eigenen
+    /// Geschwister) – so kommt z. B. bei H(1,2) → 1 minimieren → 2 teilen (2|3) → 2 minimieren die 1 neben die 3 zurück.
+    fn reroute_slots(&mut self, gone: u64, gone_slot: Option<&crate::layout::Slot>) {
+        let with = gone_slot.map(|s| s.sibling.clone()).unwrap_or_default();
+        for (id, e) in self.entries.iter_mut() {
+            if *id == gone {
+                continue;
+            }
+            if let Some(s) = e.meta.slot.as_mut() {
+                crate::layout::reroute_sibling(s, gone, &with);
+            }
         }
     }
 
@@ -1560,15 +1748,17 @@ impl App {
 
     fn hide_pane(&mut self, id: u64) {
         if let Some(l) = self.layout.take() {
-            self.layout = l.remove_leaf(id);
+            let had = l.contains(id);
+            let (rest, slot) = l.remove_leaf_slot(id);
+            self.layout = rest;
+            if had {
+                self.reroute_slots(id, slot.as_ref());
+            }
         }
         if self.focused == id {
-            if let Some(l) = &self.layout {
-                let mut v = Vec::new();
-                l.leaves(&mut v);
-                self.focused = v.first().copied().unwrap_or(0);
-                self.want_focus = Some(self.focused);
-            }
+            // Fokus nie auf einer Sitzung außerhalb des Layouts lassen (auch nicht, wenn nichts mehr übrig ist).
+            self.focused = self.layout.as_ref().map(|l| l.leaf_ids()[0]).unwrap_or(0);
+            self.want_focus = Some(self.focused);
         }
     }
 
@@ -1579,15 +1769,19 @@ impl App {
         self.usage.remove(id);
         self.git.remove(id);
         let _ = std::fs::remove_file(self.scrollback_path(id));
+        // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
+        chatmod::store::remove(&self.dir, id);
         if self.layout.is_none() {
-            if let Some(first) = self.docked_ids().first().copied() {
+            // Letzter Bereich geschlossen: eine andere (nicht minimierte) Sitzung zeigen, sonst leerer Hub.
+            if let Some(first) = self.unminimized_docked().first().copied() {
                 self.activate(first);
             }
         }
     }
 
+    /// Strg+Tab: reihum durch die Sitzungen (minimierte bleiben draußen, bis man sie gezielt holt).
     fn cycle(&mut self, delta: i32) {
-        let ids: Vec<u64> = self.docked_ids();
+        let ids: Vec<u64> = self.unminimized_docked();
         if ids.is_empty() {
             return;
         }
@@ -1622,6 +1816,20 @@ impl App {
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
                 let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
+            }
+        }
+        self.save_chats();
+    }
+
+    /// Verläufe geänderter Chats schreiben.
+    fn save_chats(&self) {
+        for (id, e) in &self.entries {
+            if let Some(c) = &e.chat {
+                if c.dirty() {
+                    if chatmod::store::save(&chatmod::store::path(&self.dir, *id), &c.file_for_save()).is_ok() {
+                        c.mark_saved();
+                    }
+                }
             }
         }
     }
@@ -1732,7 +1940,7 @@ impl App {
                 "new" => Action::NewQuick,
                 "split_r" => Action::Split(f, Dir::Horizontal),
                 "split_d" => Action::Split(f, Dir::Vertical),
-                "hide" => Action::HidePane(f),
+                "hide" => Action::MinimizePane(f),
                 "rename" => Action::StartRename(f),
                 "palette" => Action::OpenPalette,
                 "search" => Action::OpenSearch,
@@ -1767,6 +1975,10 @@ impl App {
     }
 
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
+        if self.new_chat.is_some() {
+            models_ui::release_focus(ctx);
+        }
         let theme = self.theme();
         let font = FontId::monospace(self.settings.font_size);
         let lang = self.settings.language;
@@ -1778,7 +1990,7 @@ impl App {
             }
         }
         {
-            let n = self.layout.as_ref().map(|l| { let mut v = Vec::new(); l.leaves(&mut v); v.len() }).unwrap_or(0);
+            let n = self.layout.as_ref().map(Node::leaf_count).unwrap_or(0);
             egui::TopBottomPanel::top(style::salted(Id::new("bcbar")))
                 .frame(egui::Frame::NONE.fill(Color32::from_rgb(0x8a, 0x4b, 0x2f)).inner_margin(egui::Margin::symmetric(10, 4)))
                 .show_animated(ctx, self.broadcast, |ui| {
@@ -1799,6 +2011,7 @@ impl App {
         }
 
         self.pane_rects.clear();
+        let hide_key = self.binding_text("hide");
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme.bg))
             .show(ctx, |ui| {
@@ -1827,6 +2040,8 @@ impl App {
                     themes: &self.themes,
                     profiles: &self.settings.profiles,
                     tl: &self.tlinks,
+                    alt_wheel: self.settings.alt_screen_wheel,
+                    hide_key: &hide_key,
                 };
                 show_node(ui, &mut layout, rect, &mut cx);
                 self.layout = Some(layout);
@@ -1863,6 +2078,9 @@ impl App {
         }
         let mut fallback_done: Vec<(u64, String)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
+            if e.is_chat() {
+                continue; // kein Ordner, kein Transkript
+            }
             self.git.set_dir(*id, PathBuf::from(e.cwd_now()));
             // Transkript über die Konversations-ID finden, falls noch nicht bekannt.
             if e.meta.transcript.is_empty() && !e.meta.claude_session.is_empty() {
@@ -2073,15 +2291,271 @@ impl App {
         }
     }
 
-    /// Gesamten Verlauf einer Sitzung als Textdatei speichern.
+    /// Laufende Antworten aller Chats abholen (Hauptdurchgang, für alle Fenster). Fertige Antworten werden sofort
+    /// gespeichert; in einer nicht angesehenen Sitzung gibt es eine Markierung.
+    ///
+    /// Danach die Werkzeug-Schleife jedes Chats (`chat::driver::drive` über [`ChatHost`]): Werkzeuge laufen hier im
+    /// Hub mit dem Chat als Aufrufer. Wartet ein schreibender Aufruf auf Freigabe (oder die einmalige Frage nach der
+    /// Stufe), steht der Chat auf „Freigabe?“ (wie eine Claude-Abfrage: Markierung in der Seitenleiste; MCP-Agenten
+    /// schreiben dann nicht in den Chat).
+    fn poll_chats(&mut self, ctx: &egui::Context) {
+        let lang = self.settings.language;
+        if self.llm_conn.poll(&mut self.settings.llm_servers, lang) {
+            state::save_json(&self.dir.join("settings.json"), &self.settings);
+        }
+        let (window_focused, focused_id) = self.seen_focus();
+        let ids: Vec<u64> = self.entries.iter().filter(|(_, e)| e.chat.is_some()).map(|(id, _)| *id).collect();
+        let mut tools_running = false;
+        for id in ids {
+            let (finished, was_waiting) = {
+                let Some(e) = self.entries.get_mut(&id) else { continue };
+                let waiting = e.status == ClaudeStatus::Permission;
+                let Some(c) = e.chat.as_mut() else { continue };
+                if let Some(m) = &e.meta.chat {
+                    c.notice = chatmod::llm_backend::chat_notice(&self.settings.llm_servers, m, lang);
+                }
+                (c.poll().finished, waiting)
+            };
+            // Stufe inzwischen im Reiter „Modelle“ gewählt: die Frage erübrigt sich (die Nachricht bleibt im Feld).
+            if !self.chat_level_unchosen(id) {
+                if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()).filter(|c| c.level_question.is_some()) {
+                    c.level_question = None;
+                    c.touch();
+                }
+            }
+            let driven = chatmod::driver::drive(&mut ChatHost { app: self, ctx }, id);
+            if driven.more {
+                ctx.request_repaint();
+            }
+            let Some(e) = self.entries.get_mut(&id) else { continue };
+            let Some(c) = e.chat.as_ref() else { continue };
+            tools_running |= c.tool_running();
+            e.status = chat_claude_status(c.status());
+            let waiting = e.status == ClaudeStatus::Permission;
+            // Markierung: Runde zu Ende (fertig, Fehler, angehalten) oder eine Freigabe-Frage erscheint.
+            let done = finished && !c.busy();
+            let unseen = !window_focused || id != focused_id;
+            if (done || (waiting && !was_waiting) || (driven.changed && c.paused)) && unseen {
+                e.attention = true;
+            }
+            if (waiting && !was_waiting) && unseen {
+                ctx.send_viewport_cmd_to(self.attention_viewport(id), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+            }
+            if finished || driven.changed {
+                self.save_chat(id);
+            }
+        }
+        if tools_running {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    /// Was für die Werkzeuge eines Chats gerade gilt: Einstellungen seines Modells (unbekannter Server: Stufe „Aus“),
+    /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
+    fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
+        let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
+        let origins = self.entries.get(&id).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+        match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
+            Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
+            None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
+        }
+        .with_origins(origins)
+    }
+
+    /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
+    /// könnte (Fähigkeit nicht „nein“) und der Nutzer die Stufe nie gewählt hat. Für P5 (`send_chat_message`): ist das
+    /// wahr, kann ein externer Agent nicht senden (`permission_pending`) – die Frage beantwortet nur der Nutzer.
+    pub(super) fn chat_level_unchosen(&self, id: u64) -> bool {
+        let Some(meta) = self.entries.get(&id).and_then(|e| e.meta.chat.as_ref()) else { return false };
+        let Some(s) = self.settings.llm_servers.iter().find(|s| s.id == meta.server) else { return false };
+        s.tools_supported(&meta.model) != Some(false) && !s.model_cfg(&meta.model).level_chosen
+    }
+
+    /// Antwort auf die einmalige Frage: Stufe speichern (als gewählt) und – hatte der Nutzer die Frage mit „Senden“
+    /// ausgelöst – seine zurückgehaltene Nachricht senden. Kam die Frage von einem Agenten (`permission_pending`), schließt
+    /// die Antwort sie nur: Der Entwurf im Eingabefeld gehört dem Nutzer und geht nicht ungefragt los.
+    fn chat_choose_level(&mut self, ctx: &egui::Context, id: u64, level: crate::mcp::McpLevel) {
+        let Some(meta) = self.entries.get(&id).and_then(|e| e.meta.chat.clone()) else { return };
+        if let Some(s) = self.settings.llm_servers.iter_mut().find(|s| s.id == meta.server) {
+            let mut cfg = s.model_cfg(&meta.model);
+            cfg.level = level;
+            cfg.level_chosen = true;
+            s.set_model_cfg(cfg);
+            state::save_json(&self.dir.join("settings.json"), &self.settings);
+        }
+        let asker = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()).and_then(|c| {
+            c.touch();
+            c.level_question.take()
+        });
+        if send_after_level_choice(asker) {
+            self.chat_action(ctx, id, &Action::ChatSend(id));
+        }
+    }
+
+    fn save_chat(&self, id: u64) {
+        if let Some(c) = self.entries.get(&id).and_then(|e| e.chat.as_ref()) {
+            if chatmod::store::save(&chatmod::store::path(&self.dir, id), &c.file_for_save()).is_ok() {
+                c.mark_saved();
+            }
+        }
+    }
+
+    /// Bedienung eines Chats (Senden, Stopp, Neu erzeugen, Bearbeiten) mit dem Backend des Hubs.
+    /// Was das Backend für eine Antwort dieses Chats wissen muss (Projekt, Ordner, Server, Prompt-Einstellungen).
+    fn turn_context(&self, id: u64) -> chatmod::TurnContext {
+        let e = self.entries.get(&id);
+        let project = e.and_then(|e| self.projects.iter().find(|p| p.id == e.meta.project)).map(|p| p.name.clone()).unwrap_or_default();
+        chatmod::TurnContext {
+            project,
+            folder: e.map(|e| e.meta.cwd.clone()).unwrap_or_default(),
+            servers: self.settings.llm_servers.list.clone(),
+            data_dir: Some(self.dir.clone()),
+            prompt_lang: self.settings.mcp_prompt_lang,
+            lang: self.settings.language,
+            expert: crate::mcp::expert_mode(),
+            token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
+        }
+    }
+
+    /// Eine Nachricht an einen Chat senden – die eine Stelle für das Eingabefeld (`text = None`: der Entwurf) und für
+    /// externe Agenten (`text = Some(…)`, Entwurf bleibt unberührt; P5 `send_chat_message`).
+    ///
+    /// Wurde die Stufe des Modells nie gewählt, wird nichts gesendet: die einmalige Frage erscheint im Chat
+    /// (`ChatState::level_question`) und das Ergebnis ist [`ChatSendResult::LevelQuestion`] – für Agenten
+    /// `permission_pending`, nur der Nutzer kann sie beantworten.
+    pub(super) fn chat_send(&mut self, ctx: &egui::Context, id: u64, text: Option<&str>, origin: ChatSendOrigin) -> ChatSendResult {
+        let Some(c) = self.entries.get(&id).and_then(|e| e.chat.as_ref()) else { return ChatSendResult::NotAChat };
+        let empty = match text {
+            Some(t) => t.trim().is_empty(),
+            None => c.draft.trim().is_empty(),
+        };
+        if empty {
+            return ChatSendResult::Empty;
+        }
+        if c.busy() {
+            return ChatSendResult::Busy;
+        }
+        if self.chat_level_unchosen(id) {
+            if let Some(e) = self.entries.get_mut(&id) {
+                if let Some(c) = e.chat.as_mut() {
+                    c.level_question = Some(level_asker(c.level_question, &origin));
+                    c.touch();
+                }
+                e.status = ClaudeStatus::Permission;
+            }
+            return ChatSendResult::LevelQuestion;
+        }
+        // Kette der auslösenden Agenten: der Aufrufer und – ist er selbst ein Chat – dessen Kette (transitiv).
+        let chain = match &origin {
+            ChatSendOrigin::User => Vec::new(),
+            ChatSendOrigin::Agent { caller, .. } => {
+                let caller_chain = caller.and_then(|c| self.entries.get(&c)).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+                chatmod::tools::chain_origins(*caller, &caller_chain)
+            }
+        };
+        let backend = self.chat_backend.clone();
+        let rctx = ctx.clone();
+        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
+        let tcx = self.turn_context(id);
+        let Some(e) = self.entries.get_mut(&id) else { return ChatSendResult::NotAChat };
+        let meta = e.meta.chat.clone().unwrap_or_default();
+        let Some(c) = e.chat.as_mut() else { return ChatSendResult::NotAChat };
+        let sent = match text {
+            Some(t) => c.send_text(t, backend.as_ref(), &meta, &tcx, repaint),
+            None => c.send(backend.as_ref(), &meta, &tcx, repaint),
+        };
+        if sent {
+            // Herkunft der Runde: der Nutzer hebt eine Agenten-Herkunft auf; ein Agent markiert seine Nachricht.
+            c.origin_sessions = chain;
+            match origin {
+                ChatSendOrigin::User => {}
+                ChatSendOrigin::Agent { note, .. } => {
+                    if let Some(i) = chatmod::logic::last_user(&c.file.messages) {
+                        c.file.messages[i].note = note;
+                        c.touch();
+                    }
+                }
+            }
+        }
+        e.status = chat_claude_status(c.status());
+        if !sent {
+            return ChatSendResult::Busy;
+        }
+        self.save_chat(id);
+        ChatSendResult::Sent
+    }
+
+    /// Nächste Anfrage einer Werkzeug-Runde (für `ChatHost::request`).
+    fn chat_next_request(&mut self, ctx: &egui::Context, id: u64) {
+        let backend = self.chat_backend.clone();
+        let rctx = ctx.clone();
+        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
+        let tcx = self.turn_context(id);
+        let Some(e) = self.entries.get_mut(&id) else { return };
+        let meta = e.meta.chat.clone().unwrap_or_default();
+        if let Some(c) = e.chat.as_mut() {
+            c.next_request(backend.as_ref(), &meta, &tcx, repaint);
+        }
+    }
+
+    fn chat_action(&mut self, ctx: &egui::Context, id: u64, a: &Action) {
+        // Senden: über `chat_send` (fragt bei nie gewählter Stufe einmal nach; die Nachricht wartet im Feld).
+        if matches!(a, Action::ChatSend(_)) {
+            self.chat_send(ctx, id, None, ChatSendOrigin::User);
+            return;
+        }
+        if let Action::ChatLevel(_, level) = a {
+            return self.chat_choose_level(ctx, id, *level);
+        }
+        let backend = self.chat_backend.clone();
+        let rctx = ctx.clone();
+        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
+        let tcx = if matches!(a, Action::ChatSend(_) | Action::ChatRegenerate(_)) { self.turn_context(id) } else { chatmod::TurnContext::default() };
+        let Some(e) = self.entries.get_mut(&id) else { return };
+        let meta = e.meta.chat.clone().unwrap_or_default();
+        let Some(c) = e.chat.as_mut() else { return };
+        let changed = match a {
+            Action::ChatSend(_) => c.send(backend.as_ref(), &meta, &tcx, repaint),
+            Action::ChatRegenerate(_) => c.regenerate(backend.as_ref(), &meta, &tcx, repaint),
+            Action::ChatStop(_) => {
+                c.stop();
+                c.level_question = None;
+                true
+            }
+            Action::ChatEdit(_) => {
+                c.begin_edit();
+                false
+            }
+            // Ausgeführt wird erst im Hauptdurchgang (`poll_chats`), auch wenn der Chat in einem weiteren Fenster liegt.
+            // Gilt nur, wenn genau dieser Aufruf noch wartet (veraltete Klicks bleiben ohne Wirkung).
+            Action::ChatDecide(_, call_id, d) => {
+                let ok = c.decide(call_id, *d);
+                // Fokus zurück ins Eingabefeld: sonst gälte Enter auf dem Knopf an derselben Stelle gleich der nächsten Frage.
+                c.focus_input = true;
+                ok
+            }
+            Action::ChatContinue(_) => c.resume(),
+            Action::ChatRevoke(_, rule) => c.revoke(rule),
+            _ => false,
+        };
+        e.status = chat_claude_status(c.status());
+        if changed {
+            self.save_chat(id);
+        }
+    }
+
+    /// Gesamten Verlauf einer Sitzung als Textdatei speichern (Chat: als Markdown).
     fn export_history(&mut self, id: u64) {
         let lang = self.settings.language;
         let Some(e) = self.entries.get(&id) else { return };
-        let Some(s) = e.live.as_ref() else { return };
-        let text = s.dump_text(2_000_000);
+        let (text, ext) = match (&e.chat, e.live.as_ref()) {
+            (Some(c), _) => (chatmod::logic::to_markdown(&e.display_name(), e.chat_model(), c.messages(), lang), "md"),
+            (None, Some(s)) => (s.dump_text(2_000_000), "txt"),
+            (None, None) => return,
+        };
         let safe: String = e.display_name().chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let name = format!("{safe}-{secs}.txt");
+        let name = format!("{safe}-{secs}.{ext}");
         let path = notify::save_file(&name).unwrap_or_else(|| {
             let d = self.dir.join("exports");
             let _ = std::fs::create_dir_all(&d);
@@ -2182,6 +2656,11 @@ impl App {
         for m in msgs {
             let focused_id = seen_id;
             let Some(e) = self.entries.get_mut(&m.session) else { continue };
+            // Ein Chat hat keine Shell und keinen Claude: sein Status kommt nur aus `poll_chats`. Eine Hook-Meldung mit
+            // seiner Kennung (gefälscht oder veraltet) darf ihn nicht ändern.
+            if e.is_chat() {
+                continue;
+            }
             let old = e.status;
             e.hook_seen = true;
             let sh = e.eff_shell().to_string();
@@ -2287,6 +2766,8 @@ impl App {
                     p.profile = prof;
                 }
             }
+            // Die Warteschlange gibt es nur für Terminals (Claude), nicht für Chats.
+            Action::OpenQueue(id) | Action::QueueAdd(id, _) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {}
             Action::OpenQueue(id) => {
                 self.queue_open = if self.queue_open == Some(id) { None } else { Some(id) };
             }
@@ -2347,8 +2828,13 @@ impl App {
                 }
             }
             Action::InsertPath(p) => {
-                if let Some(s) = self.entries.get(&self.focused).and_then(|e| e.live.as_ref()) {
-                    s.send_text(&format!("{} ", pathfmt::for_shell(&s.shell_id, &p)), false);
+                if let Some(e) = self.entries.get_mut(&self.focused) {
+                    // Chat: Pfad unverändert ins Eingabefeld; Terminal: passend zur Shell gequotet.
+                    let text = match &e.live {
+                        Some(s) => format!("{} ", pathfmt::for_shell(&s.shell_id, &p)),
+                        None => p.clone(),
+                    };
+                    e.insert_text(&text, false);
                 }
                 self.want_focus = Some(self.focused);
             }
@@ -2413,8 +2899,9 @@ impl App {
                 self.want_focus = Some(self.focused);
             }
             Action::SendSnippet(i) => {
-                if let (Some(sn), Some(s)) = (self.prompts.get(i), self.entries.get(&self.focused).and_then(|e| e.live.as_ref())) {
-                    s.send_text(&sn.text, sn.submit);
+                // Chat: Text ins Eingabefeld (nicht abgeschickt); Terminal: wie bisher, ggf. mit Enter.
+                if let (Some(sn), Some(e)) = (self.prompts.get(i), self.entries.get_mut(&self.focused)) {
+                    e.insert_text(&sn.text, sn.submit);
                 }
                 self.want_focus = Some(self.focused);
             }
@@ -2445,6 +2932,11 @@ impl App {
                 if self.entries.contains_key(&id) && !self.detached.contains(&id) {
                     self.hide_pane(id);
                     self.detached.push(id);
+                    // In einem eigenen Fenster ist sie sichtbar, also nicht mehr minimiert.
+                    if let Some(e) = self.entries.get_mut(&id) {
+                        e.meta.minimized = false;
+                        e.meta.slot = None;
+                    }
                 }
             }
             Action::Attach(id) => {
@@ -2543,7 +3035,8 @@ impl App {
                 let mut ids: Vec<u64> = self
                     .entries
                     .iter()
-                    .filter(|(_, e)| e.meta.project == pid && self.in_win(e) && folder.as_ref().is_none_or(|f| !e.meta.group.is_empty() && state::folder_within(&e.meta.group, f)))
+                    // Vorlagen kennen nur Terminals.
+                    .filter(|(_, e)| !e.is_chat() && e.meta.project == pid && self.in_win(e) && folder.as_ref().is_none_or(|f| !e.meta.group.is_empty() && state::folder_within(&e.meta.group, f)))
                     .map(|(i, _)| *i)
                     .collect();
                 ids.sort();
@@ -2673,7 +3166,7 @@ impl App {
             }
             Action::FolderRestartAll(path) => {
                 for id in self.folder_sessions(&path) {
-                    if self.entries.get(&id).is_some_and(|e| e.exited()) {
+                    if self.entries.get(&id).is_some_and(|e| !e.is_chat() && e.exited()) {
                         self.apply(ctx, Action::Restart(id));
                     }
                 }
@@ -2692,6 +3185,7 @@ impl App {
                     self.want_focus = Some(ids[0]);
                 }
             }
+            Action::Restart(id) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {} // ein Chat hat keinen Prozess
             Action::Restart(id) => {
                 if let Some(mut e) = self.entries.remove(&id) {
                     e.live = None;
@@ -2701,6 +3195,26 @@ impl App {
             }
             Action::Duplicate(id) => {
                 if let Some(src) = self.entries.get(&id) {
+                    if src.is_chat() {
+                        // Chat: neuer, leerer Chat mit demselben Modell im selben Ordner (ohne Modell: Dialog).
+                        let Some(chat) = src.meta.chat.clone() else {
+                            let mut d = models_ui::NewChatDlg::new(&self.settings, Some(src.meta.cwd.clone()), Some(src.meta.group.clone()));
+                            d.window = Some(src.meta.window);
+                            d.project = Some(src.meta.project);
+                            self.new_chat = Some(d);
+                            return;
+                        };
+                        let o = NewOpts {
+                            cwd: Some(src.meta.cwd.clone()),
+                            group: Some(src.meta.group.clone()),
+                            window: Some(src.meta.window),
+                            project: Some(src.meta.project),
+                            chat: Some(chat),
+                            ..NewOpts::default()
+                        };
+                        self.new_session(ctx, o);
+                        return;
+                    }
                     let o = NewOpts {
                         shell_id: Some(src.meta.shell_id.clone()),
                         cwd: Some(src.meta.cwd.clone()),
@@ -2729,7 +3243,8 @@ impl App {
                 self.wt_close = Some(WtClose { id, changes, discard: false });
             }
             Action::RequestClose(id) => {
-                let running = self.entries.get(&id).is_some_and(|e| !e.exited());
+                // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft).
+                let running = self.entries.get(&id).is_some_and(|e| e.running() || e.chat_has_history());
                 if running && self.settings.confirm_close {
                     self.confirm_close = Some(id);
                 } else {
@@ -2739,16 +3254,19 @@ impl App {
             Action::Close(id) => self.close_session(id),
             Action::Split(id, dir) => self.split_at(ctx, id, dir, false),
             Action::SplitAt(id, dir, before) => self.split_at(ctx, id, dir, before),
-            Action::HidePane(id) => {
-                // Das letzte sichtbare Terminal bleibt stehen.
-                let n = self.layout.as_ref().map(|l| { let mut v = Vec::new(); l.leaves(&mut v); v.len() }).unwrap_or(0);
-                if n > 1 {
-                    self.hide_pane(id);
-                }
-            }
+            Action::MinimizePane(id) => self.minimize_pane(id),
             Action::NewQuick => {
                 self.new_session(ctx, NewOpts::default());
             }
+            Action::NewChat => {
+                self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, None, None));
+            }
+            Action::FolderNewChat(path) => {
+                let proj = self.projects.iter().find(|p| p.id == self.active_project);
+                let cwd = proj.and_then(|p| p.inherited(&path, |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())));
+                self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, cwd, Some(path)));
+            }
+            Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, ..) | Action::ChatContinue(id) | Action::ChatRevoke(id, _) | Action::ChatLevel(id, _) => self.chat_action(ctx, id, &a),
         }
     }
 }
@@ -2792,6 +3310,8 @@ impl eframe::App for App {
 
         self.poll_hooks(ctx);
         self.poll_shell(ctx);
+        self.poll_chats(ctx);
+        self.models_save_tick(ctx);
         self.poll_background(ctx);
         self.sync_watchers(ctx);
         self.tlinks_frame(ctx);
@@ -2877,11 +3397,51 @@ struct PaneCx<'a> {
     profiles: &'a [Profile],
     /// Verknüpfte Tickets je Sitzung (Chips im Kopf).
     tl: &'a terminal_links::TLinks,
+    /// Einstellung „Mausrad in Vollbildprogrammen“.
+    alt_wheel: state::AltScreenWheel,
+    /// Kürzel „Bereich minimieren“ für den Tooltip (eigene Belegung, Sprache).
+    hide_key: &'a str,
 }
 
 
 const GAP: f32 = 6.0;
 const HEADER_H: f32 = 30.0;
+/// Kleinste Breite/Höhe eines Bereichs, solange der Platz reicht (Kopfzeile und ein paar Zeilen/Spalten bleiben sichtbar).
+const MIN_PANE_W: f32 = 120.0;
+const MIN_PANE_H: f32 = HEADER_H + 40.0;
+
+/// Kleinste Ausdehnung eines Teilbaums in Richtung `dir` (Breite bei `Horizontal`, Höhe bei `Vertical`): ein Bereich hat
+/// `MIN_PANE_W`/`MIN_PANE_H`; eine Teilung in derselben Richtung braucht beide Seiten plus Trennlinie, eine quer dazu die
+/// größere der beiden Seiten.
+fn min_extent(node: &Node, dir: Dir) -> f32 {
+    match node {
+        Node::Leaf(_) => match dir {
+            Dir::Horizontal => MIN_PANE_W,
+            Dir::Vertical => MIN_PANE_H,
+        },
+        Node::Split { dir: d, a, b, .. } if *d == dir => min_extent(a, dir) + GAP + min_extent(b, dir),
+        Node::Split { a, b, .. } => min_extent(a, dir).max(min_extent(b, dir)),
+    }
+}
+
+/// Pixel der ersten Seite einer Teilung der Länge `len` (ohne Trennlinie): Anteil `ratio` (begrenzt, NaN → Mitte), dabei
+/// Seite a mindestens `min_a`, Seite b mindestens `min_b`, solange `len` dafür reicht – sonst einfach nach Anteil.
+fn split_px(len: f32, ratio: f32, min_a: f32, min_b: f32) -> f32 {
+    let len = len.max(0.0);
+    let px = (len * crate::layout::clamp_ratio(ratio)).round();
+    if len >= min_a + min_b { px.clamp(min_a, len - min_b) } else { px }
+}
+
+/// Neuer Anteil nach dem Ziehen der Trennlinie um `delta` Pixel: begrenzt auf `RATIO_MIN..RATIO_MAX` und so, dass Seite a
+/// nicht unter `min_a`, Seite b nicht unter `min_b` Pixel fällt (soweit der Platz reicht). Bei einer Länge ≤ 0 (Fenster
+/// minimiert) bleibt er.
+fn drag_ratio(ratio: f32, delta: f32, len: f32, min_a: f32, min_b: f32) -> f32 {
+    if len <= 1.0 || !delta.is_finite() {
+        return crate::layout::clamp_ratio(ratio);
+    }
+    let r = crate::layout::clamp_ratio(ratio + delta / len);
+    if len >= min_a + min_b { r.clamp(min_a / len, 1.0 - min_b / len) } else { r }
+}
 
 fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
     style::mix(a, b, t)
@@ -2891,10 +3451,12 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
     match node {
         Node::Leaf(id) => show_pane(ui, *id, rect, cx),
         Node::Split { dir, ratio, a, b } => {
+            // Mindestgröße je Teilbaum (eine geschachtelte Seite braucht Platz für alle ihre Bereiche).
+            let (min_a, min_b) = (min_extent(a, *dir), min_extent(b, *dir));
             let (ra, rsep, rb) = match dir {
                 Dir::Horizontal => {
                     let w = rect.width() - GAP;
-                    let wa = (w * *ratio).round();
+                    let wa = split_px(w, *ratio, min_a, min_b);
                     (
                         Rect::from_min_size(rect.min, Vec2::new(wa, rect.height())),
                         Rect::from_min_size(Pos2::new(rect.min.x + wa, rect.min.y), Vec2::new(GAP, rect.height())),
@@ -2903,7 +3465,7 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
                 }
                 Dir::Vertical => {
                     let h = rect.height() - GAP;
-                    let ha = (h * *ratio).round();
+                    let ha = split_px(h, *ratio, min_a, min_b);
                     (
                         Rect::from_min_size(rect.min, Vec2::new(rect.width(), ha)),
                         Rect::from_min_size(Pos2::new(rect.min.x, rect.min.y + ha), Vec2::new(rect.width(), GAP)),
@@ -2924,11 +3486,12 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
             }
             if resp.dragged() {
                 let d = resp.drag_delta();
-                match dir {
-                    Dir::Horizontal => *ratio += d.x / (rect.width() - GAP).max(1.0),
-                    Dir::Vertical => *ratio += d.y / (rect.height() - GAP).max(1.0),
-                }
-                *ratio = ratio.clamp(0.1, 0.9);
+                // Von der gezeichneten Lage aus ziehen (die kann wegen der Mindestgröße vom gespeicherten Anteil abweichen).
+                let (delta, len, cur) = match dir {
+                    Dir::Horizontal => (d.x, rect.width() - GAP, ra.width()),
+                    Dir::Vertical => (d.y, rect.height() - GAP, ra.height()),
+                };
+                *ratio = drag_ratio(cur / len.max(1.0), delta, len, min_a, min_b);
             }
             let hv = style::anim(ui.ctx(), sep_id.with("h"), resp.hovered() || resp.dragged(), style::D_FAST);
             ui.painter().rect_filled(rsep, 0.0, ui.visuals().panel_fill);
@@ -2978,14 +3541,16 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if hresp.clicked() {
         cx.actions.push(Action::Focus(id));
     }
-    if tl_enabled {
-        hresp.context_menu(|ui| {
-            if ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
-                cx.actions.push(Action::LinkTicket(id));
-                ui.close();
-            }
-        });
-    }
+    hresp.context_menu(|ui| {
+        if ui.button(lang.t("Bereich minimieren", "Minimize pane")).clicked() {
+            cx.actions.push(Action::MinimizePane(id));
+            ui.close();
+        }
+        if tl_enabled && ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
+            cx.actions.push(Action::LinkTicket(id));
+            ui.close();
+        }
+    });
     let claude = entry.meta.claude && cx.claude_mode;
     let status_label = entry.status_label(lang);
     let status_col = entry.status_color(t);
@@ -3002,9 +3567,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
-    // Breite des Knopfbereichs rechts: vier Knöpfe, mit Ticket-Verknüpfung ein fünfter.
+    // Breite des Knopfbereichs rechts: fünf Knöpfe (abgedockt zwei), mit Ticket-Verknüpfung einer mehr.
     let tl_btn = tl_enabled;
-    let btns_w = if cx.detached { 30.0 } else { 104.0 + if tl_btn { 26.0 } else { 0.0 } };
+    let btns_w = if cx.detached { 52.0 } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } };
     let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
     let chips = cx.tl.chips_of(id);
@@ -3031,6 +3596,10 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         x -= w + 10.0;
     }
     let mut infos: Vec<String> = Vec::new();
+    if entry.is_chat() {
+        // Chat: Modellname statt Token/Git.
+        infos.push(entry.chat_model().to_string());
+    }
     if !entry.meta.queue.is_empty() {
         infos.push(format!("Queue {}", entry.meta.queue.len()));
     }
@@ -3039,7 +3608,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             infos.push(usage_line(&u, lang));
         }
     }
-    if let Some(g) = cx.git.get(id) {
+    if let Some(g) = cx.git.get(id).filter(|_| !entry.is_chat()) {
         infos.push(git_line(&g));
     }
     for text in infos {
@@ -3063,10 +3632,18 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                     if style::icon_btn_small(ui, SIcon::Close, lang.t("Wieder andocken (Strg+Umschalt+W)", "Dock back (Ctrl+Shift+W)")).clicked() {
                         cx.actions.push(Action::Attach(id));
                     }
+                    if style::icon_btn_small(ui, SIcon::Collapse, lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)")).clicked() {
+                        cx.actions.push(Action::MinimizePane(id));
+                    }
                     return;
                 }
-                if style::icon_btn_small(ui, SIcon::Close, lang.t("Sitzung schließen (Strg+Umschalt+W blendet nur den Bereich aus)", "Close session (Ctrl+Shift+W only hides the pane)")).clicked() {
+                if style::icon_btn_small(ui, SIcon::Close, lang.t("Sitzung schließen", "Close session")).clicked() {
                     cx.actions.push(Action::RequestClose(id));
+                }
+                let tip = lang.t("Bereich minimieren – die Sitzung läuft weiter, ein Klick in der Seitenleiste holt sie zurück", "Minimize pane – the session keeps running, click it in the sidebar to bring it back");
+                let tip = if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) };
+                if style::icon_btn_small(ui, SIcon::Collapse, &tip).clicked() {
+                    cx.actions.push(Action::MinimizePane(id));
                 }
                 if style::icon_btn_small(ui, SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window")).clicked() {
                     cx.actions.push(Action::Detach(id));
@@ -3083,6 +3660,39 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             });
         },
     );
+
+    // Chat (keine PTY): Nachrichten und Eingabe; Senden usw. führt die App aus.
+    if let Some(chat) = entry.chat.as_mut() {
+        ui.painter().rect_filled(body, 0.0, cx.theme.bg);
+        let grab = *cx.want_focus == Some(id);
+        if grab {
+            *cx.want_focus = None;
+        }
+        let model = entry.meta.chat.as_ref().map(|c| c.model.clone()).unwrap_or_default();
+        let o = chat_ui::chat_body(ui, body, id, chat, &model, lang, grab);
+        if o.focus && cx.focused != id {
+            cx.actions.push(Action::Focus(id));
+        }
+        for (hit, a) in [(o.send, Action::ChatSend(id)), (o.stop, Action::ChatStop(id)), (o.regenerate, Action::ChatRegenerate(id)), (o.edit, Action::ChatEdit(id)), (o.cont, Action::ChatContinue(id))] {
+            if hit {
+                cx.actions.push(a);
+            }
+        }
+        if let Some((call, d)) = o.decide {
+            cx.actions.push(Action::ChatDecide(id, call, d));
+        }
+        if let Some(rule) = o.revoke {
+            cx.actions.push(Action::ChatRevoke(id, rule));
+        }
+        if let Some(level) = o.level {
+            cx.actions.push(Action::ChatLevel(id, level));
+        }
+        if !cx.detached {
+            edge_buttons(ui, id, body, cx, false);
+        }
+        // Kein Broadcast-Rahmen: Chats bekommen keine Broadcast-Eingaben.
+        return;
+    }
 
     // Terminal
     let cwd_now = entry.cwd_now();
@@ -3102,7 +3712,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                 theme_local = Some(t);
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
-            let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now);
+            let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
             if session.search.is_some() && search_bar(ui, session, body, lang) {
                 session.search = None;
                 *cx.want_focus = Some(id);
@@ -3138,7 +3748,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     }
 
     if !cx.detached {
-        edge_buttons(ui, id, body, cx);
+        edge_buttons(ui, id, body, cx, true);
     }
     if cx.broadcast {
         ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::from_rgb(0xd9, 0x77, 0x57)), StrokeKind::Inside);
@@ -3352,6 +3962,189 @@ fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
 }
 
 #[cfg(test)]
+mod pane_tests {
+    use super::*;
+    use eframe::egui::{Event, PointerButton, RawInput};
+
+    #[test]
+    fn split_px_keeps_a_minimum_size_and_survives_nan() {
+        assert_eq!(split_px(1000.0, 0.5, 120.0, 120.0), 500.0);
+        assert_eq!(split_px(1000.0, 0.1, 120.0, 120.0), 120.0, "nicht schmaler als die Mindestbreite");
+        assert_eq!(split_px(1000.0, 0.9, 120.0, 120.0), 880.0);
+        assert_eq!(split_px(1000.0, 0.5, 120.0, 600.0), 400.0, "Seite b braucht mehr (geschachtelt)");
+        assert_eq!(split_px(1000.0, f32::NAN, 120.0, 120.0), 500.0);
+        assert_eq!(split_px(200.0, 0.1, 120.0, 120.0), 20.0, "zu wenig Platz für beide: nach Anteil");
+        assert_eq!(split_px(-5.0, 0.5, 120.0, 120.0), 0.0);
+        // Mindestausdehnung je Teilbaum
+        let l = |i| Node::Leaf(i);
+        let row = Node::grid(&[1, 2, 3], Dir::Horizontal).unwrap(); // (1 / 2) | 3
+        assert_eq!(min_extent(&row, Dir::Horizontal), 2.0 * MIN_PANE_W + GAP);
+        assert_eq!(min_extent(&row, Dir::Vertical), 2.0 * MIN_PANE_H + GAP);
+        assert_eq!(min_extent(&l(1), Dir::Vertical), MIN_PANE_H);
+        // Ziehen: Grenzen, Mindestgröße, nichts bei Länge 0 / NaN
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(near(drag_ratio(0.5, -1000.0, 1000.0, 120.0, 120.0), 0.12));
+        assert!(near(drag_ratio(0.5, 1000.0, 1000.0, 120.0, 120.0), 0.88));
+        assert!(near(drag_ratio(0.5, 1000.0, 1000.0, 120.0, 500.0), 0.5), "Seite b braucht 500 px");
+        assert!(near(drag_ratio(0.5, 100.0, 1000.0, 120.0, 120.0), 0.6));
+        assert_eq!(drag_ratio(0.5, 100.0, 0.0, 120.0, 120.0), 0.5, "minimiertes Fenster");
+        assert_eq!(drag_ratio(0.4, f32::NAN, 1000.0, 120.0, 120.0), 0.4);
+        assert_eq!(drag_ratio(0.5, -1000.0, 100.0, 120.0, 120.0), crate::layout::RATIO_MIN);
+    }
+
+    struct H {
+        ctx: egui::Context,
+        time: f64,
+        entries: BTreeMap<u64, Entry>,
+        rects: HashMap<u64, Rect>,
+        actions: Vec<Action>,
+    }
+
+    impl H {
+        fn new(ids: &[(u64, bool)]) -> H {
+            let mut entries = BTreeMap::new();
+            for (id, chat) in ids {
+                let meta = SessionMeta { id: *id, name: format!("s{id}"), custom_name: true, kind: if *chat { SessionKind::Chat } else { SessionKind::Terminal }, ..SessionMeta::default() };
+                let e = if *chat { Entry::new_chat(meta, ChatState::new(chatmod::ChatFile::default(), None)) } else { Entry::new(meta) };
+                entries.insert(*id, e);
+            }
+            H { ctx: egui::Context::default(), time: 0.0, entries, rects: HashMap::new(), actions: Vec::new() }
+        }
+
+        fn frame(&mut self, layout: &mut Node, detached: bool, events: Vec<Event>) {
+            self.time += 0.1;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 700.0))), time: Some(self.time), events, ..Default::default() };
+            let theme = crate::theme::all().remove(0);
+            let font = FontId::monospace(13.0);
+            let (usage, git, tl) = (UsageWatcher::default(), GitWatcher::default(), terminal_links::TLinks::default());
+            let (mut want, mut dragging) = (None, None);
+            let mut rects = HashMap::new();
+            let mut acts = Vec::new();
+            let entries = &mut self.entries;
+            let _ = self.ctx.run(input, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    let mut cx = PaneCx {
+                        entries,
+                        theme: &theme,
+                        font: &font,
+                        focused: 1,
+                        want_focus: &mut want,
+                        actions: &mut acts,
+                        lang: Lang::En,
+                        claude_mode: false,
+                        rects: &mut rects,
+                        broadcast: false,
+                        usage: &usage,
+                        git: &git,
+                        dragging: &mut dragging,
+                        detached,
+                        themes: &[],
+                        profiles: &[],
+                        tl: &tl,
+                        alt_wheel: Default::default(),
+                        hide_key: "Ctrl+Shift+W",
+                    };
+                    if detached {
+                        show_pane(ui, layout.leaf_ids()[0], rect, &mut cx);
+                    } else {
+                        show_node(ui, layout, rect, &mut cx);
+                    }
+                });
+            });
+            self.rects = rects;
+            self.actions.extend(acts);
+        }
+
+        fn click(&mut self, layout: &mut Node, detached: bool, p: Pos2) {
+            let btn = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+            self.frame(layout, detached, vec![Event::PointerMoved(p)]);
+            self.frame(layout, detached, vec![btn(true)]);
+            self.frame(layout, detached, vec![btn(false)]);
+        }
+    }
+
+    /// Mitte des n-ten Kopfzeilenknopfs von rechts (0 = Schließen/Andocken, 1 = Minimieren).
+    fn header_btn(r: Rect, n: usize) -> Pos2 {
+        Pos2::new(r.max.x - 4.0 - 11.0 - 22.0 * n as f32, r.min.y + 2.0 + (HEADER_H - 2.0) / 2.0)
+    }
+
+    #[test]
+    fn the_minimize_button_minimizes_terminals_and_chats() {
+        let mut h = H::new(&[(1, false), (2, true)]);
+        let mut layout = Node::grid(&[1, 2], Dir::Horizontal).unwrap();
+        h.frame(&mut layout, false, vec![]);
+        h.frame(&mut layout, false, vec![]);
+        for id in [1u64, 2] {
+            let r = h.rects[&id];
+            h.actions.clear();
+            h.click(&mut layout, false, header_btn(r, 1));
+            assert!(h.actions.iter().any(|a| matches!(a, Action::MinimizePane(x) if *x == id)), "{id}: Minimieren");
+            assert!(!h.actions.iter().any(|a| matches!(a, Action::RequestClose(_))), "{id}: nicht schließen");
+            h.actions.clear();
+            h.click(&mut layout, false, header_btn(r, 0));
+            assert!(h.actions.iter().any(|a| matches!(a, Action::RequestClose(x) if *x == id)), "{id}: X schließt weiterhin");
+        }
+    }
+
+    #[test]
+    fn a_detached_window_has_dock_back_and_minimize() {
+        let mut h = H::new(&[(1, false)]);
+        let mut layout = Node::Leaf(1);
+        h.frame(&mut layout, true, vec![]);
+        h.frame(&mut layout, true, vec![]);
+        let r = h.rects[&1];
+        h.click(&mut layout, true, header_btn(r, 1));
+        assert!(h.actions.iter().any(|a| matches!(a, Action::MinimizePane(1))));
+        h.actions.clear();
+        h.click(&mut layout, true, header_btn(r, 0));
+        assert!(h.actions.iter().any(|a| matches!(a, Action::Attach(1))));
+    }
+
+    #[test]
+    fn panes_of_a_deep_split_keep_a_minimum_size() {
+        // 6 Bereiche nebeneinander mit lauter 0.1-Anteilen: alle bleiben mindestens MIN_PANE_W breit
+        let mut layout = Node::Leaf(6);
+        for id in (1..6).rev() {
+            layout = Node::Split { dir: Dir::Horizontal, ratio: 0.9, a: Box::new(layout), b: Box::new(Node::Leaf(id)) };
+        }
+        let ids: Vec<(u64, bool)> = (1..=6).map(|i| (i, false)).collect();
+        let mut h = H::new(&ids);
+        h.frame(&mut layout, false, vec![]);
+        assert_eq!(h.rects.len(), 6);
+        for (id, r) in &h.rects {
+            assert!(r.width() >= MIN_PANE_W - 0.5, "{id}: {}", r.width());
+            assert!(r.width().is_finite() && r.height() > 0.0);
+        }
+        // Geschachtelt auf Seite b mit lauter 0.1-Anteilen: 1 | (2 | (3 | (4 | (5 | 6))))
+        let mut deep_b = Node::Leaf(6);
+        for id in (1..6).rev() {
+            deep_b = Node::Split { dir: Dir::Horizontal, ratio: 0.1, a: Box::new(Node::Leaf(id)), b: Box::new(deep_b) };
+        }
+        h.frame(&mut deep_b, false, vec![]);
+        assert_eq!(h.rects.len(), 6);
+        for (id, r) in &h.rects {
+            assert!(r.width() >= MIN_PANE_W - 0.5, "Seite b, {id}: {}", r.width());
+        }
+        // Quer geschachtelt: (1 / 2 / 3 / 4 / 5 / 6 übereinander) rechts neben 7, Anteil 0.9 → rechts bleibt Mindesthöhe je Bereich
+        let mut col = Node::Leaf(6);
+        for id in (1..6).rev() {
+            col = Node::Split { dir: Dir::Vertical, ratio: 0.1, a: Box::new(Node::Leaf(id)), b: Box::new(col) };
+        }
+        let mut mixed = Node::Split { dir: Dir::Horizontal, ratio: 0.9, a: Box::new(Node::Leaf(7)), b: Box::new(col) };
+        let mut h2 = H::new(&(1..=7).map(|i| (i, false)).collect::<Vec<_>>());
+        h2.frame(&mut mixed, false, vec![]);
+        for (id, r) in &h2.rects {
+            assert!(r.width() >= MIN_PANE_W - 0.5 && r.height() >= MIN_PANE_H - 0.5, "quer, {id}: {r:?}");
+        }
+        // Unsinniger Anteil (z. B. aus einer alten Datei, ohne Normalisierung): zeichnet trotzdem sinnvoll
+        let mut bad = Node::Split { dir: Dir::Vertical, ratio: f32::NAN, a: Box::new(Node::Leaf(1)), b: Box::new(Node::Leaf(2)) };
+        h.frame(&mut bad, false, vec![]);
+        assert!((h.rects[&1].height() - h.rects[&2].height()).abs() <= 1.0, "NaN → halbe-halbe");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3383,7 +4176,8 @@ mod tests {
 }
 
 /// „+“-Knopf am Rand eines Terminals: erscheint, wenn die Maus nahe an einem Rand ist, und teilt dort den Bereich.
-fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx) {
+/// `bottom = false`: nicht am unteren Rand (ein Chat hat dort sein Eingabefeld).
+fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx, bottom: bool) {
     const ZONE: f32 = 30.0;
     let Some(p) = ui.input(|i| i.pointer.hover_pos()) else { return };
     if !body.contains(p) || cx.dragging.is_some() {
@@ -3391,7 +4185,7 @@ fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx) {
     }
     let lang = cx.lang;
     // nächster Rand: (Abstand, Seite)
-    let cands = [(p.x - body.min.x, 0u8), (body.max.x - p.x, 1), (p.y - body.min.y, 2), (body.max.y - p.y, 3)];
+    let cands = [(p.x - body.min.x, 0u8), (body.max.x - p.x, 1), (p.y - body.min.y, 2), (if bottom { body.max.y - p.y } else { f32::MAX }, 3)];
     let (dist, side) = cands.into_iter().fold((f32::MAX, 0u8), |a, b| if b.0 < a.0 { b } else { a });
     if dist > ZONE {
         return;
@@ -3448,4 +4242,111 @@ fn armed_button(ui: &mut Ui, key: impl std::hash::Hash, label: &str, armed_label
         ui.memory_mut(|m| m.data.insert_temp(id, now));
     }
     false
+}
+
+/// Status eines Chats als Sitzungsstatus: Freigabe/Frage offen → `Permission` (Seitenleiste „braucht dich“, MCP
+/// `approval`, externe Agenten schreiben dann nicht in den Chat), Runde läuft → `Working`, sonst `Idle`.
+fn chat_claude_status(s: chatmod::ChatStatus) -> ClaudeStatus {
+    match s {
+        chatmod::ChatStatus::Approval => ClaudeStatus::Permission,
+        chatmod::ChatStatus::Working => ClaudeStatus::Working,
+        chatmod::ChatStatus::Ready => ClaudeStatus::Idle,
+    }
+}
+
+/// Die App als Hub der Werkzeug-Schleife (`chat::driver`): Ausführung über den MCP-Ausführer mit dem Chat als
+/// Aufrufer, nächste Anfrage über das Backend des Hubs.
+struct ChatHost<'a> {
+    app: &'a mut App,
+    ctx: &'a egui::Context,
+}
+
+impl chatmod::driver::ChatToolHost for ChatHost<'_> {
+    fn chat(&mut self, id: u64) -> Option<&mut ChatState> {
+        self.app.entries.get_mut(&id).and_then(|e| e.chat.as_mut())
+    }
+    fn policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
+        self.app.chat_policy(id)
+    }
+    fn execute(&mut self, chat: u64, call: &chatmod::store::ToolCall) -> std::sync::mpsc::Receiver<chatmod::tools::ToolResult> {
+        self.app.mcp_call_chat(self.ctx, chat, &call.name, &call.arguments)
+    }
+    fn request(&mut self, id: u64) {
+        self.app.chat_next_request(self.ctx, id);
+    }
+    fn session_name(&self, id: u64) -> Option<String> {
+        self.app.entries.get(&id).map(|e| e.display_name())
+    }
+}
+
+#[cfg(test)]
+mod chat_status_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_level_question_of_the_user_sends_the_draft_afterwards() {
+        use chatmod::LevelAsker::{Agent, User};
+        let agent = ChatSendOrigin::Agent { caller: Some(5), note: None };
+        // Ein Agent löst die Frage aus → nach der Antwort wird nichts gesendet (der Entwurf gehört dem Nutzer).
+        assert_eq!(level_asker(None, &agent), Agent);
+        assert!(!send_after_level_choice(Some(Agent)));
+        // Der Nutzer löst sie aus (oder drückt selbst „Senden“, während die Frage eines Agenten offen ist) → sein Entwurf geht los.
+        assert_eq!(level_asker(None, &ChatSendOrigin::User), User);
+        assert_eq!(level_asker(Some(Agent), &ChatSendOrigin::User), User);
+        // Ein späterer Agent macht die Frage des Nutzers nicht zu seiner.
+        assert_eq!(level_asker(Some(User), &agent), User);
+        assert!(send_after_level_choice(Some(User)));
+        assert!(!send_after_level_choice(None), "keine Frage offen (z. B. im Reiter Modelle gewählt): nichts senden");
+    }
+
+    #[test]
+    fn chat_status_maps_to_session_status() {
+        assert_eq!(chat_claude_status(chatmod::ChatStatus::Approval), ClaudeStatus::Permission);
+        assert_eq!(chat_claude_status(chatmod::ChatStatus::Working), ClaudeStatus::Working);
+        assert_eq!(chat_claude_status(chatmod::ChatStatus::Ready), ClaudeStatus::Idle);
+        // Ein Chat mit offener Frage „braucht dich“
+        let mut e = Entry::new_chat(SessionMeta { kind: SessionKind::Chat, ..SessionMeta::default() }, ChatState::new(chatmod::ChatFile::default(), None));
+        e.status = chat_claude_status(chatmod::ChatStatus::Approval);
+        assert!(e.needs_you());
+    }
+}
+
+/// Wer die Frage nach der Stufe auslöst: der Nutzer, sobald er selbst sendet (auch wenn ein Agent sie vorher auslöste);
+/// sonst ein Agent.
+fn level_asker(open: Option<chatmod::LevelAsker>, origin: &ChatSendOrigin) -> chatmod::LevelAsker {
+    match (open, origin) {
+        (_, ChatSendOrigin::User) | (Some(chatmod::LevelAsker::User), _) => chatmod::LevelAsker::User,
+        _ => chatmod::LevelAsker::Agent,
+    }
+}
+
+/// Geht nach der Antwort auf die Frage nach der Stufe der Entwurf los? Nur, wenn der Nutzer sie mit „Senden“ auslöste.
+fn send_after_level_choice(asker: Option<chatmod::LevelAsker>) -> bool {
+    asker == Some(chatmod::LevelAsker::User)
+}
+
+/// Woher eine Chat-Nachricht kommt ([`App::chat_send`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ChatSendOrigin {
+    /// Eingabefeld des Chats.
+    User,
+    /// Externer Agent über MCP (`send_chat_message`): `caller` = seine Hub-Sitzung (`None` = außerhalb von Paneldeck).
+    /// Die Werkzeuge der ausgelösten Runde dürfen nicht in diese Sitzung (und nicht in die Kette davor) schreiben
+    /// (`ChatState::origin_sessions`).
+    Agent { caller: Option<u64>, note: Option<String> },
+}
+
+/// Ergebnis von [`App::chat_send`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatSendResult {
+    /// Gesendet, die Antwort läuft.
+    Sent,
+    /// Nicht gesendet: die einmalige Frage nach der Stufe des Modells ist offen (für Agenten `permission_pending`).
+    LevelQuestion,
+    /// Nicht gesendet: eine Antwort läuft, Werkzeuge laufen oder eine Freigabe ist offen.
+    Busy,
+    /// Nichts zu senden.
+    Empty,
+    /// Keine Chat-Sitzung mit dieser Id.
+    NotAChat,
 }

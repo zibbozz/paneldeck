@@ -41,7 +41,7 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "new" => ("Neue Sitzung", "New session"),
         "split_r" => ("Bereich rechts teilen", "Split pane right"),
         "split_d" => ("Bereich darunter teilen", "Split pane below"),
-        "hide" => ("Bereich ausblenden", "Hide pane"),
+        "hide" => ("Bereich minimieren", "Minimize pane"),
         "rename" => ("Sitzung umbenennen", "Rename session"),
         "palette" => ("Befehle (Palette)", "Commands (palette)"),
         "search" => ("Im Verlauf suchen", "Search scrollback"),

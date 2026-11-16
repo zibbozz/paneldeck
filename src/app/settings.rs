@@ -31,6 +31,8 @@ impl App {
                     lang.t("Agenten", "Agents"),
                     lang.t("Daten & Sicherung", "Data & backup"),
                     lang.t("Info", "About"),
+                    // Index 10 (`models_ui::SETTINGS_TAB`): am Ende, damit die festen Indizes oben gültig bleiben.
+                    lang.t("Modelle", "Models"),
                 ];
                 ui.horizontal_wrapped(|ui| {
                     for (i, t) in tabs.iter().enumerate() {
@@ -159,6 +161,26 @@ impl App {
                         row(ui, "Scrollback", lang.t("Zeilen pro Terminal (wirkt für neue Sitzungen)", "Lines per terminal (applies to new sessions)"), |ui| {
                             ui.add(egui::DragValue::new(&mut self.settings.scrollback_lines).range(1000..=100_000).speed(100.0));
                         });
+                        row(
+                            ui,
+                            lang.t("Mausrad in Vollbildprogrammen", "Mouse wheel in full-screen programs"),
+                            lang.t(
+                                "Für Programme wie less oder man ohne eigene Mausunterstützung. Umschalt+Mausrad scrollt den Verlauf von Paneldeck (Vollbildprogramme haben keinen).",
+                                "For programs like less or man without their own mouse support. Shift+wheel scrolls Paneldeck's scrollback (full-screen programs have none).",
+                            ),
+                            |ui| {
+                                use crate::state::AltScreenWheel;
+                                let label = |w: AltScreenWheel| match w {
+                                    AltScreenWheel::Arrows => lang.t("Pfeiltasten senden (wie andere Terminals)", "Send arrow keys (like other terminals)"),
+                                    AltScreenWheel::Off => lang.t("Aus", "Off"),
+                                };
+                                egui::ComboBox::from_id_salt("altwheel").selected_text(label(self.settings.alt_screen_wheel)).show_ui(ui, |ui| {
+                                    for w in [AltScreenWheel::Arrows, AltScreenWheel::Off] {
+                                        ui.selectable_value(&mut self.settings.alt_screen_wheel, w, label(w));
+                                    }
+                                });
+                            },
+                        );
                     }
                     2 => {
                         row(ui, lang.t("Claude-Modus", "Claude mode"), lang.t("Zeigt Claude-Funktionen: Start, Status, Kosten, Verlauf", "Shows Claude features: start, status, cost, history"), |ui| {
@@ -388,6 +410,7 @@ impl App {
                         }
                     }
                     7 => self.mcp_settings_ui(ui, ctx),
+                    models_ui::SETTINGS_TAB => self.models_settings_ui(ui, ctx),
                     8 => self.data_settings_ui(ui),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());

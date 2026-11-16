@@ -4,7 +4,7 @@
 
 A hub for many terminals – built for Claude Code, usable as a general-purpose terminal manager.
 For Windows 10 (1809+) / 11 (x64): either as an installer (per user, no administrator rights) or as a portable ZIP with a single `paneldeck.exe`.
-Paneldeck works **offline**: it only contacts GitHub when you check for updates yourself or switch on the automatic update check (see [Privacy](#privacy)).
+Paneldeck works **offline**: it only contacts GitHub when you check for updates yourself or switch on the automatic update check, and chats only talk to the local model servers you set up (see [Privacy](#privacy)).
 
 > Independent open-source project – not affiliated with, endorsed by or reviewed by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, PBC. See [Legal](#legal).
 
@@ -14,6 +14,7 @@ Paneldeck works **offline**: it only contacts GitHub when you check for updates 
 - **Terminals** with full emulation (ConPTY): PowerShell 7, Windows PowerShell, CMD, Git Bash, WSL distributions – organized in projects, with freely splittable panes, several windows and a command palette.
 - **Claude mode** (can be turned off): status via hooks (working / approval? / ready), notifications, token and cost estimates, history with exact resume.
 - **Todo list and tickets:** a simple to-do list that turns into a small Jira in *expert mode* – projects, ticket types, workflows, boards, a query language, sprints and dashboards, all stored locally.
+- **Chats with local models:** talk to Ollama, LM Studio, llama.cpp or vLLM on this computer or in your network, right next to your terminals – the model can use Paneldeck's tools within limits you set per model.
 - **Agent interface (MCP):** AI agents can see sessions, read terminals, run commands and work with your to-do list and tickets – off by default, with a configurable system prompt.
 - **Command line and profiles:** separate data folders and profiles that run side by side, each with its own autostart and MCP entry.
 - **Self-update** from GitHub Releases on request, checked against `SHA256SUMS.txt`.
@@ -47,6 +48,7 @@ The guides live in [`docs/en/`](docs/en/) (German: [`docs/de/`](docs/de/)) and a
 - [Claude Code](docs/en/claude-code.md) – Claude mode, status, costs, history
 - [Todo list and tickets](docs/en/todo-and-tickets.md) – simple and expert mode, boards, sprints, dashboards, quick actions
 - [Query language](docs/en/query-language.md) – searching tickets, examples, reference
+- [Chats with local models](docs/en/chat.md) – Ollama and OpenAI-compatible servers, models, tools and approvals, security
 - [Agent interface (MCP)](docs/en/agent-interface.md) – levels, tools, security, system prompt
 - [Command line](docs/en/command-line.md) – every option, data folder lookup, profiles, exit codes
 - [Data folder and backups](docs/en/data-and-backups.md) – files, backups, portable vs. installed
@@ -63,6 +65,7 @@ This program will not transfer any information to other networked systems unless
 - Paneldeck sends no telemetry. It reads Claude transcripts (`~/.claude`) locally for history and cost estimates; everything stays on your computer, including your to-do list and tickets (local database `paneldeck.db`).
 - **Update check:** Paneldeck only asks GitHub for the latest release when you click *Check for updates* (*Settings → About*) or after you switch on the automatic check there (off by default; at start, at most once a day). The request goes to the public GitHub API (`api.github.com`); downloads come from `github.com` and GitHub's download servers – all over HTTPS, without a login. GitHub sees your IP address and the Paneldeck version (in the `User-Agent`, e.g. `Paneldeck/2.1.0`); no other data is sent. See [Updates](docs/en/updates.md).
 - The agent interface (MCP) is off by default and only reachable from your own computer (`127.0.0.1`).
+- **Chats with local models** only connect to the model servers you set up yourself, and only on this computer or in private networks (see [Chats](docs/en/chat.md#privacy)).
 - Links in terminals and tickets are only opened in your browser when you click them.
 
 ## Issues and contributions

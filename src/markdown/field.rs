@@ -134,7 +134,7 @@ pub fn rich_text_field_ex(ui: &mut Ui, id: impl Hash, text: &mut String, mode: &
                     let line = ui.text_style_height(&TextStyle::Monospace);
                     let min_h = opts.rows.max(1) as f32 * line + 4.0;
                     let known = |p: &str| opts.known_prefix.map(|f| f(p)).unwrap_or(false);
-                    let ropts = RenderOpts { soft_breaks_as_newlines: opts.soft_breaks_as_newlines };
+                    let ropts = RenderOpts { soft_breaks_as_newlines: opts.soft_breaks_as_newlines, ..RenderOpts::default() };
                     let body = |ui: &mut Ui, out: &mut RenderOutput| {
                         egui::Frame::new()
                             .fill(ui.visuals().extreme_bg_color)

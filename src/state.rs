@@ -205,6 +205,35 @@ pub struct Settings {
     pub update_last_check: i64,
     /// Vom Nutzer übersprungene Version (`X.Y.Z`, leer = keine); die automatische Prüfung bietet sie nicht mehr an.
     pub update_skip_version: String,
+    /// LLM-Server für Chats (seit 2.2.0, `llm::config`). Unlesbare Einträge bleiben unverändert erhalten.
+    #[serde(skip_serializing_if = "crate::llm::config::LlmServers::is_blank")]
+    pub llm_servers: crate::llm::config::LlmServers,
+    /// Zuletzt im Dialog „Neuer Chat“ gewähltes Modell (Vorauswahl beim nächsten Mal).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
+    pub last_chat_model: Option<ChatMeta>,
+    /// Mausrad in Vollbildprogrammen (alternativer Bildschirm, Programm ohne Maus-Modus), seit 2.2.0.
+    /// Fehlt in älteren Dateien (dann Standard); ein unbekannter Wert ergibt ebenfalls den Standard.
+    #[serde(deserialize_with = "AltScreenWheel::lenient")]
+    pub alt_screen_wheel: AltScreenWheel,
+}
+
+/// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AltScreenWheel {
+    /// Pfeiltasten senden (Alternate Scroll Mode, DECSET 1007) – wie Alacritty, GNOME Terminal, kitty.
+    #[default]
+    Arrows,
+    /// Nichts senden.
+    Off,
+}
+
+impl AltScreenWheel {
+    /// Tolerant lesen: nur `"off"` schaltet aus, alles andere (auch ein unbekannter Wert) ist der Standard.
+    fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(if v.as_str() == Some("off") { AltScreenWheel::Off } else { AltScreenWheel::Arrows })
+    }
 }
 
 /// Auswahl für `Settings::undo_steps`.
@@ -248,6 +277,9 @@ impl Default for Settings {
             update_auto_check: false,
             update_last_check: 0,
             update_skip_version: String::new(),
+            llm_servers: Default::default(),
+            last_chat_model: None,
+            alt_screen_wheel: AltScreenWheel::Arrows,
         }
     }
 }
@@ -294,6 +326,55 @@ pub struct SessionMeta {
     /// Fehlt bei Sitzungen des Hauptfensters (ältere Versionen kennen das Feld nicht und zeigen alles im Hauptfenster).
     #[serde(skip_serializing_if = "is_zero")]
     pub window: u64,
+    /// Art der Sitzung (seit 2.2.0): Terminal (Standard, fehlt in der Datei) oder Chat mit einem lokalen Modell.
+    /// Unbekannte Werte (neuere Versionen) laden als Terminal.
+    #[serde(skip_serializing_if = "SessionKind::is_terminal", deserialize_with = "SessionKind::lenient")]
+    pub kind: SessionKind,
+    /// Server und Modell eines Chats (nur bei `kind = chat`); der Verlauf steht in `chats/<id>.json`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
+    pub chat: Option<ChatMeta>,
+    /// Bereich minimiert (seit 2.2.0): die Sitzung läuft weiter, steht aber in keinem Layout, bis sie zurückgeholt wird.
+    /// Fehlt in der Datei, wenn nicht minimiert.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub minimized: bool,
+    /// Wo der minimierte Bereich stand (Geschwister, Richtung, Seite, Anteil) – dort kommt er wieder hin.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::layout::lenient_slot")]
+    pub slot: Option<crate::layout::Slot>,
+}
+
+/// Art einer Sitzung.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionKind {
+    #[default]
+    Terminal,
+    Chat,
+}
+
+impl SessionKind {
+    fn is_terminal(&self) -> bool {
+        *self == SessionKind::Terminal
+    }
+
+    /// Tolerant lesen: alles außer `"chat"` (auch ein unbekannter Wert oder ein falscher Typ) ist ein Terminal.
+    fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(if v.as_str() == Some("chat") { SessionKind::Chat } else { SessionKind::Terminal })
+    }
+}
+
+/// Modell eines Chats: Kennung des Servers (Einstellungen) und Modellname, fest ab der Anlage.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatMeta {
+    pub server: String,
+    pub model: String,
+}
+
+/// Ungültige Chat-Angaben verwerfen die Sitzung nicht (sie wird dann ohne Modell geladen).
+fn lenient_chat_meta<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ChatMeta>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<ChatMeta>(v).ok())
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -323,6 +404,10 @@ impl Default for SessionMeta {
             project: 0,
             tags: Vec::new(),
             window: 0,
+            kind: SessionKind::Terminal,
+            chat: None,
+            minimized: false,
+            slot: None,
         }
     }
 }
@@ -337,6 +422,7 @@ pub struct Project {
     pub folder: String,
     /// Standardprofil für neue Sitzungen dieses Projekts (0 = keins)
     pub profile: u64,
+    #[serde(deserialize_with = "crate::layout::lenient")]
     pub layout: Option<Node>,
     pub focused: u64,
     /// Seitenleiste als Ordnerbaum statt als Liste anzeigen.
@@ -474,6 +560,7 @@ impl Project {
 pub struct SavedState {
     pub sessions: Vec<SessionMeta>,
     /// Alter Einzel-Layout-Stand (vor Projekten); wird beim Laden ins erste Projekt übernommen.
+    #[serde(deserialize_with = "crate::layout::lenient")]
     pub layout: Option<Node>,
     pub focused: u64,
     pub next_id: u64,
@@ -498,6 +585,7 @@ pub struct SavedWindow {
     pub tab: String,
     /// Aktives Projekt des Terminal Hubs in diesem Fenster.
     pub project: u64,
+    #[serde(deserialize_with = "crate::layout::lenient")]
     pub layout: Option<Node>,
     pub focused: u64,
     /// Layouts der übrigen Projekte in diesem Fenster.
@@ -513,6 +601,7 @@ pub struct SavedWindow {
 #[serde(default)]
 pub struct SavedProjectView {
     pub project: u64,
+    #[serde(deserialize_with = "crate::layout::lenient")]
     pub layout: Option<Node>,
     pub focused: u64,
 }
@@ -677,6 +766,7 @@ impl Settings {
         }
         fix(&mut self.prices.cache_read, d.cache_read);
         fix(&mut self.prices.cache_write, d.cache_write);
+        crate::llm::config::sanitize(&mut self.llm_servers);
     }
 }
 
@@ -841,5 +931,140 @@ mod tests {
         assert!(back.update_auto_check);
         assert_eq!(back.update_last_check, 1_800_000_000);
         assert_eq!(back.update_skip_version, "3.0.0");
+    }
+
+    #[test]
+    fn llm_settings_back_compat_and_roundtrip() {
+        // settings.json von 2.1.0 (ohne LLM-Felder) lädt; die neuen Felder fehlen dann auch beim Schreiben.
+        let old = r#"{"language":"En","mcp_level":"Read","update_auto_check":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.llm_servers.is_empty() && s.last_chat_model.is_none());
+        let j = serde_json::to_value(&s).unwrap();
+        assert!(j.get("llm_servers").is_none() && j.get("last_chat_model").is_none());
+        // Ein unlesbarer Server (unbekannter Typ) und ein kaputtes last_chat_model machen die Datei nicht unlesbar.
+        let new = r#"{"language":"De","llm_servers":[{"id":"a","name":"O","kind":"ollama","url":"http://localhost:11434","models":[{"name":"m","level":"Control","max_steps":0}]},{"id":"b","kind":"gemini"}],"last_chat_model":7}"#;
+        let mut s: Settings = serde_json::from_str(new).unwrap();
+        s.sanitize();
+        assert_eq!(s.language, Lang::De);
+        assert_eq!(s.llm_servers.len(), 1);
+        assert_eq!(s.llm_servers.unreadable, vec![serde_json::json!({"id":"b","kind":"gemini"})], "bleibt erhalten");
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["llm_servers"][1], serde_json::json!({"id":"b","kind":"gemini"}), "und wird zurückgeschrieben");
+        assert_eq!(s.llm_servers[0].models[0].max_steps, 1, "auf 1..=100 begrenzt");
+        assert!(s.last_chat_model.is_none());
+        s.last_chat_model = Some(ChatMeta { server: "a".into(), model: "m".into() });
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.llm_servers, s.llm_servers);
+        assert_eq!(back.last_chat_model, s.last_chat_model);
+    }
+
+    #[test]
+    fn alt_screen_wheel_back_compat_and_roundtrip() {
+        // settings.json von 2.1.0 (ohne das Feld) lädt mit dem Standard „Pfeiltasten“.
+        let old = r#"{"language":"En","scrollback_lines":5000}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.alt_screen_wheel, AltScreenWheel::Arrows);
+        assert_eq!(s.scrollback_lines, 5000);
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["alt_screen_wheel"], "arrows");
+        // Gespeicherter Wert bleibt erhalten.
+        let mut s = s;
+        s.alt_screen_wheel = AltScreenWheel::Off;
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.alt_screen_wheel, AltScreenWheel::Off);
+        // Unbekannter Wert oder falscher Typ: Standard, die übrigen Einstellungen bleiben lesbar.
+        for bad in [r#""report""#, "3", "null", r#"{"x":1}"#] {
+            let s: Settings = serde_json::from_str(&format!(r#"{{"language":"De","alt_screen_wheel":{bad}}}"#)).unwrap();
+            assert_eq!(s.alt_screen_wheel, AltScreenWheel::Arrows, "{bad}");
+            assert_eq!(s.language, Lang::De);
+        }
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::*;
+
+    #[test]
+    fn old_state_without_kind_loads_as_terminal() {
+        // state.json von 2.1.0: Sitzungen ohne `kind`/`chat`
+        let dir = std::env::temp_dir().join(format!("pd-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        std::fs::write(&p, r#"{"sessions":[{"id":3,"name":"pwsh","shell_id":"pwsh","project":1}],"next_id":4}"#).unwrap();
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none());
+        assert_eq!(st.sessions.len(), 1);
+        assert_eq!(st.sessions[0].kind, SessionKind::Terminal);
+        assert!(st.sessions[0].chat.is_none());
+        // Terminals schreiben die neuen Felder nicht (ältere Versionen sehen dieselbe Datei wie bisher)
+        let s = serde_json::to_string(&st.sessions[0]).unwrap();
+        assert!(!s.contains("\"kind\"") && !s.contains("\"chat\""), "{s}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chat_kind_roundtrip_and_unknown_kind_is_terminal() {
+        let m = SessionMeta { id: 7, kind: SessionKind::Chat, chat: Some(ChatMeta { server: "echo".into(), model: "m1".into() }), ..SessionMeta::default() };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""kind":"chat""#), "{s}");
+        let back: SessionMeta = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.kind, SessionKind::Chat);
+        assert_eq!(back.chat.as_ref().map(|c| c.model.as_str()), Some("m1"));
+        // Unbekannte Art (neuere Version) und falsche Typen: Sitzung bleibt erhalten, als Terminal bzw. ohne Modell
+        let back: SessionMeta = serde_json::from_str(r#"{"id":8,"kind":"notebook","chat":42}"#).unwrap();
+        assert_eq!(back.kind, SessionKind::Terminal);
+        assert!(back.chat.is_none());
+        let back: SessionMeta = serde_json::from_str(r#"{"id":9,"kind":7}"#).unwrap();
+        assert_eq!(back.kind, SessionKind::Terminal);
+    }
+
+    #[test]
+    fn minimized_sessions_round_trip_and_old_files_load() {
+        use crate::layout::{Dir, Slot};
+        // 2.1.0: kein `minimized`/`slot` → nicht minimiert; nicht minimierte Sitzungen schreiben die Felder auch nicht
+        let old: SessionMeta = serde_json::from_str(r#"{"id":3,"name":"pwsh"}"#).unwrap();
+        assert!(!old.minimized && old.slot.is_none());
+        let s = serde_json::to_string(&old).unwrap();
+        assert!(!s.contains("minimized") && !s.contains("slot"), "{s}");
+        // minimiert mit Platz: Rundreise
+        let m = SessionMeta { id: 4, minimized: true, slot: Some(Slot { sibling: vec![1, 2], dir: Dir::Vertical, before: false, ratio: 0.3 }), ..SessionMeta::default() };
+        let back: SessionMeta = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert!(back.minimized);
+        assert_eq!(back.slot, m.slot);
+        // kaputter Platz: Sitzung bleibt (minimiert, ohne Platz)
+        let back: SessionMeta = serde_json::from_str(r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#).unwrap();
+        assert!(back.minimized && back.slot.is_none());
+    }
+
+    #[test]
+    fn broken_layouts_do_not_discard_the_state_file() {
+        use crate::layout::Node;
+        let dir = std::env::temp_dir().join(format!("pd-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        // Projekt 1: Anteil null (so schreibt serde_json ein NaN), Projekt 2: unlesbarer Knoten, Fenster: falscher Typ
+        std::fs::write(
+            &p,
+            r#"{"sessions":[{"id":1},{"id":2,"minimized":true}],"next_id":3,"active_project":1,
+                "projects":[{"id":1,"name":"A","layout":{"Split":{"dir":"Horizontal","ratio":null,"a":{"Leaf":1},"b":{"Leaf":1}}}},
+                            {"id":2,"name":"B","layout":{"Split":{"dir":"Sideways"}}}],
+                "extra_windows":[{"id":1,"layout":17,"views":[{"project":2,"layout":[1,2]}]}]}"#,
+        )
+        .unwrap();
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none(), "{note:?}");
+        assert_eq!(st.sessions.len(), 2);
+        assert!(st.sessions[1].minimized);
+        assert_eq!(st.projects.len(), 2, "Projekte bleiben erhalten");
+        match &st.projects[0].layout {
+            Some(Node::Split { ratio, .. }) => assert_eq!(*ratio, 0.5),
+            other => panic!("{other:?}"),
+        }
+        assert!(st.projects[1].layout.is_none(), "kaputtes Layout → kein Layout");
+        assert!(st.extra_windows[0].layout.is_none() && st.extra_windows[0].views[0].layout.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

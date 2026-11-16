@@ -9,9 +9,58 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.2.0] - WIP
 
+### Added
+
+- Chat sessions (first part of #63): a new session type "Chat" next to terminals – sidebar button, palette "New chat", empty Terminal Hub and folder menu "New chat here". Answers are streamed as Markdown with a copy button on code blocks; Stop, regenerate the last answer, edit the last own message, inline errors with Retry and one collapsed line per tool call. Chats live in projects and splits, work in extra and detached windows and are restored after a restart. Text from snippets, the composer or dropped files goes into the chat input and is never sent automatically.
+- New data format `chats/<id>.json` (version 1) with the history of a chat; `state.json` sessions get the optional fields `kind` and `chat`. Orphaned histories are kept as `chats/<id>.orphan-<time>.json`.
+- MCP: `list_sessions` reports `kind` (`terminal`/`chat`) and, for chats, `model`; terminal tools on a chat return the new error code `not_a_terminal`.
+- Settings → Models: set up Ollama or OpenAI-compatible servers (LM Studio, llama.cpp server, vLLM) on this computer or in private networks (other addresses are rejected; no proxy, no redirects, HTTPS certificates are verified). The optional API key is stored encrypted for your Windows user (DPAPI). "Connect" fetches the models with tool support and context length; Ollama on this computer is suggested.
+- Per model: level Off/Read/Control (independent of the MCP level for external agents), allowed tools, ask before write actions, maximum tool calls per answer, overrides for tool calling and context length.
+- "New chat" opens a dialog to pick server and model (remembers the last choice). Chats answer with the chosen model, streamed, with the system prompt and the project and folder as context; when the context is full, older messages are left out (marked in the chat). A note shows when an answer was cut off at the token limit, the token usage is shown, and models without tool support get a notice.
+- New optional fields in `settings.json`: `llm_servers` and `last_chat_model`; `chats/<id>.json` messages can have a `note`.
+- Chats with local models can use Paneldeck's tools within the level set for the model (Settings → Models: Off/Read/Control, single tools can be blocked). Tools run inside Paneldeck with the chat as caller: a chat never writes into itself and all MCP safety rules apply. New models start with tools off; the first chat asks once whether the model may read or control Paneldeck.
+- Before tools with write access the chat asks with the full arguments and the target session: Allow / Always for this chat / Deny. "Always" applies to that tool and target session only and can be revoked in the chat header ("Permanent approvals"). While the chat waits it is marked in the sidebar.
+- At most N tool calls per answer (default 10, rejected calls count too); then the chat stops with "Continue". Tool results are shortened to fit the model's context (the end of terminal output is kept); if they no longer fit, the chat pauses with a notice instead of losing the system prompt.
+- Tool lines show their status (✓, ✗, ⊘ denied, spinner) and expand to parameters and result.
+- Setting "Mouse wheel in full-screen programs" (Settings → Appearance): send arrow keys (default, like other terminals) or nothing in full-screen programs without mouse support; stored as the optional `alt_screen_wheel` field in `settings.json`.
+- Shift+mouse wheel scrolls Paneldeck's scrollback even when the program has switched on mouse mode.
+- Panes can be minimized: a new button next to × in the pane header (also in the pane and sidebar context menus, the palette and Ctrl+Shift+W) takes the pane out of the split layout while the terminal or chat keeps running; its neighbour takes the space. Minimized sessions stay in the sidebar (dimmed, with a small marker) and come back where they were with a click in the sidebar, the palette's "Switch to" or MCP `focus_session`. The state survives a restart (new optional `state.json` session fields `minimized` and `slot`). In a detached window, Minimize closes the window without docking the session back (#142).
+- MCP `list_sessions`: new field `minimized`.
+- Agents can use chats over MCP: `read_chat` (Read) reads a chat's messages (content marked as untrusted), `send_chat_message` (Control) sends a message that the chat's own model answers (marked "Sent by agent …" in the chat), `list_models` (Read) lists the configured model servers and models without keys or URLs, and `create_session` creates chats (`kind: "chat"`, optional `server` and `model`).
+- A chat started by an agent can never write into that agent's own session through its tools; such calls are refused before any approval question.
+
+### Changed
+
+- Closing a chat that has a history asks first (when close confirmation is on), also when closing a window or a folder; the update dialog counts running chat answers separately.
+- `chats/<id>.json` has the new optional field `always_allow` (tool + session); model entries in `settings.json` have `level_chosen`; `mcp-log.jsonl` has the optional fields `how` ("chat") and `model` for tool calls from chats.
+- Ctrl+Shift+W ("Hide pane", now "Minimize pane") also works on the last pane and leaves the empty Terminal Hub, which says when all panes are minimized; Ctrl+Tab skips minimized sessions.
+- The close-window question lists sessions that will end although they are minimized or not in the layout.
+- `wait_for_status` also works for chats (statuses `ready` / `working` / `approval`) and returns `needs_you` in every answer; `permission_pending` now also applies to chats waiting for an approval or for the one-time level question; new error codes `not_a_chat` and `no_model`, `busy` also applies to chats.
+- Chat models get shorter tool descriptions; external MCP clients keep the full ones. An own context length that is too small for the tool level shows a notice once per chat.
+
 ### Fixed
 
 - A maximized window no longer has a transparent gap on all sides through which the desktop showed (#134).
+- The mouse wheel sent arrow keys in full-screen programs that request mouse events in the normal or UTF-8 encoding; wheel and clicks are now reported in every mouse encoding (normal encoding up to column/row 94 because of ConPTY), and the position is right after scrolling back (#141).
+- Programs that switch off the alternate scroll mode (DECSET 1007) no longer get arrow keys from the mouse wheel.
+- When a full-screen program exits without restoring the screen (crash, dropped connection), the mouse wheel and clicks no longer send arrow keys or mouse sequences into the shell prompt (needs the shell integration).
+- A single unknown session in a saved layout no longer throws away the whole layout; duplicate panes, empty splits and invalid split ratios are repaired automatically.
+- A damaged layout or split ratio in `state.json` no longer resets all projects and windows.
+- Panes keep a minimum size in deep splits and when dragging a divider.
+- The palette showed German shortcut hints in the English UI and ignored custom shortcuts.
+- Dropping files onto the empty Terminal Hub could create an invalid pane.
+- Chats with a tool level now ask Ollama for a context large enough for the system prompt and the tools (up to 32768, at most the model's length) instead of 8192, so tool calls no longer stop right away.
+- `read_chat` results passed to a chat model keep the newest messages and the status when they are too large; other tool results with lists drop list entries instead of cutting the JSON (`truncated`, `truncated_list`, `omitted_items`).
+- Answering the tool-level question that an agent's message triggered no longer sends the user's draft.
+- `wait_for_status` on your own session returns `bad_args` instead of blocking until the timeout.
+- Paused chats (step limit or full context) are recognisable over MCP: `paused` / `pause_note` in `read_chat`, `paused` in `list_sessions` and `wait_for_status`.
+- Claude hook messages can no longer change the status of a chat.
+- The close and update dialogs also count chats that run a tool or wait for an approval.
+
+### Security
+
+- A chat started by another chat inherits the whole agent chain: its tools can write into none of the sessions of that chain (before, the protection was only one hop deep).
+- A chat started by an agent cannot start Claude sessions or the MCP bridge (best effort).
 
 ## [2.1.0] - 2026-11-15
 
