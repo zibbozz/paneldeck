@@ -15,8 +15,9 @@
 //! - `keyboard`: physical key state (image paste with Ctrl+V, Ctrl+Insert).
 //! - `notify`: desktop notifications and native file/folder dialogs.
 //! - `open`: open files/URLs with the default program, show items in the file manager.
-//! - `process`: raw command line, process tree, "is this PID alive", waiting for a PID, hidden child processes,
-//!   elevated launch, how `claude` is started, file sharing/reparse-point details.
+//! - `process`: raw command line, process tree (Windows: ToolHelp snapshot; Linux: `/proc/<pid>/stat`; macOS:
+//!   `proc_pidinfo`), "is this PID alive" (Unix: `kill(pid, 0)`), waiting for a PID, hidden child processes, elevated
+//!   launch, how `claude` is started.
 //! - `registry`: per-user settings store of the system (HKCU) – autostart, Explorer context menu, install location.
 //! - `secret`: encryption of API keys for the current user (DPAPI).
 //! - `tray`: tray icon with menu.
@@ -32,7 +33,17 @@
 //!
 //! Already portable (no platform code needed): terminals (`portable-pty`: ConPTY on Windows, openpty elsewhere),
 //! terminal emulation (`alacritty_terminal`), the single-instance lock (`File::try_lock`), the IPC between bridge and
-//! hub (TCP on 127.0.0.1), the data folder search (`paths`).
+//! hub (TCP on 127.0.0.1).
+//!
+//! Not decided yet: the data folder search (`paths`) works everywhere, but off Windows its last resort is
+//! `$HOME/Paneldeck` (the `%APPDATA%` slot falls back to `HOME`). XDG (`~/.local/share`) or `~/Library/Application Support`
+//! is for #149/#150.
+//!
+//! BLOCKER for #149/#150 (security): the MCP rule "never write into the agent's own session" maps a bridge to its
+//! session by the process tree (`process::process_chain`, plus the peer PID of the TCP connection once that lands).
+//! `process_chain` is implemented for Windows, Linux and macOS; any further target falls back to the PID alone, and
+//! then only `PANELDECK_SESSION` protects the rule. Before releasing on a new target, implement both there and keep
+//! the tests (`platform::process::tests`) running in CI.
 //!
 //! Test scripts (`tools/*.ps1`) and the installer (`installer/`) are Windows-only and not part of the crate.
 

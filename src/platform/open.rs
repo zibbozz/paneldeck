@@ -17,7 +17,11 @@ pub fn launch(target: &str) -> bool {
             .spawn()
             .is_ok()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(target).spawn().is_ok()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         std::process::Command::new("xdg-open").arg(target).spawn().is_ok()
     }
@@ -30,7 +34,11 @@ pub fn reveal(target: &str) {
         use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("explorer.exe").arg(format!("/select,{target}")).creation_flags(0x0800_0000).spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg("-R").arg(target).spawn();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         if let Some(dir) = Path::new(target).parent() {
             let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
@@ -59,7 +67,7 @@ pub fn show_in_file_manager(path: &str, is_dir: bool) {
 }
 
 /// Open a web page (already checked by the caller) in the default browser. Windows: `ShellExecuteW` (no detour through
-/// `explorer`). Elsewhere nothing happens yet.
+/// `explorer`). Elsewhere: `launch`.
 pub fn url(url: &str) {
     #[cfg(windows)]
     {
@@ -71,5 +79,5 @@ pub fn url(url: &str) {
         unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
     }
     #[cfg(not(windows))]
-    let _ = url;
+    launch(url);
 }

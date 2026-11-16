@@ -97,7 +97,58 @@ pub fn process_chain(pid: u32) -> Vec<u32> {
 
 #[cfg(not(windows))]
 pub fn process_chain(pid: u32) -> Vec<u32> {
-    vec![pid]
+    chain_from(pid, parent_of)
+}
+
+/// Kette `pid`, Eltern, Großeltern … nach denselben Regeln wie unter Windows: höchstens 40 Stufen, Abbruch bei PID 0,
+/// fehlendem Eltern-Eintrag oder Wiederholung.
+#[cfg_attr(windows, allow(dead_code))]
+fn chain_from(pid: u32, parent: impl Fn(u32) -> Option<u32>) -> Vec<u32> {
+    let mut chain = vec![pid];
+    let mut cur = pid;
+    for _ in 0..40 {
+        match parent(cur) {
+            Some(p) if p != 0 && !chain.contains(&p) => {
+                chain.push(p);
+                cur = p;
+            }
+            _ => break,
+        }
+    }
+    chain
+}
+
+/// Eltern-PID aus dem Inhalt von `/proc/<pid>/stat` (Feld 4). Der Programmname (Feld 2, in Klammern) darf Leerzeichen und
+/// Klammern enthalten, deshalb wird ab der letzten `)` gezählt.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_stat_ppid(stat: &str) -> Option<u32> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let mut f = rest.split_whitespace();
+    f.next()?; // Feld 3: Zustand
+    f.next()?.parse().ok()
+}
+
+/// Linux: Eltern-PID über `/proc`.
+#[cfg(target_os = "linux")]
+fn parent_of(pid: u32) -> Option<u32> {
+    parse_stat_ppid(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// macOS: Eltern-PID über `proc_pidinfo(PROC_PIDTBSDINFO)`.
+#[cfg(target_os = "macos")]
+fn parent_of(pid: u32) -> Option<u32> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` ist ein lokal genullter proc_bsdinfo; Größe und Zeiger passen zusammen, der Aufruf schreibt höchstens `size` Bytes.
+    let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+    (n == size).then_some(info.pbi_ppid)
+}
+
+/// Andere Systeme: keine Vorfahren bekannt (die Kette ist nur die PID selbst).
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn parent_of(_pid: u32) -> Option<u32> {
+    None
 }
 
 /// Läuft der (fremde) Prozess `pid` noch? Im Zweifel (z. B. kein Zugriff) ja.
@@ -120,17 +171,24 @@ pub fn is_alive(pid: u32) -> bool {
             !ok || code == STILL_ACTIVE
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        if std::path::Path::new("/proc/self").exists() {
-            return std::path::Path::new(&format!("/proc/{pid}")).exists();
+        // PID 0 wäre bei kill() die eigene Prozessgruppe, negative Werte ganze Gruppen: nie „lebt“.
+        let Ok(p) = libc::pid_t::try_from(pid) else { return false };
+        if p <= 0 {
+            return false;
         }
-        // Ohne /proc (macOS): Signal 0 prüft nur, ob es den Prozess gibt; kann `kill` nicht laufen, im Zweifel ja.
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_or(true, |s| s.success())
+        // SAFETY: Signal 0 wird nicht zugestellt; kill prüft nur, ob es den Prozess gibt und ob wir ihn erreichen dürften.
+        if unsafe { libc::kill(p, 0) } == 0 {
+            return true;
+        }
+        // EPERM: Prozess existiert, gehört aber jemand anderem.
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+        true
     }
 }
 
@@ -200,5 +258,66 @@ pub fn claude_command(args: &[String], cwd: &std::path::Path) -> Result<Command,
         let mut c = std::process::Command::new("claude");
         c.args(args).current_dir(cwd);
         Ok(c)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stat_parent_pid_is_field_four() {
+        assert_eq!(parse_stat_ppid("1234 (bash) S 99 1234 1234 34816 0"), Some(99));
+        // Programmname mit Leerzeichen und Klammern
+        assert_eq!(parse_stat_ppid("77 (a) b (c)) R 5 77 77 0"), Some(5));
+        assert_eq!(parse_stat_ppid("garbage"), None);
+        assert_eq!(parse_stat_ppid("1 (x) S"), None);
+    }
+
+    #[test]
+    fn chain_stops_at_zero_repeats_and_depth() {
+        let map = |p: u32| -> Option<u32> { [(10, 5), (5, 1), (1, 0)].iter().find(|(c, _)| *c == p).map(|(_, q)| *q) };
+        assert_eq!(chain_from(10, map), vec![10, 5, 1]);
+        assert_eq!(chain_from(3, |p| Some(if p == 3 { 4 } else { 3 })), vec![3, 4], "Schleife");
+        assert_eq!(chain_from(1, |p| Some(p + 1)).len(), 41, "höchstens 40 Stufen");
+    }
+
+    /// Echte Prozesse: ein Kind dieses Tests hat diesen Prozess und dessen Eltern als Vorfahren (Grundlage der Zuordnung
+    /// einer MCP-Brücke zu ihrer Sitzung).
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn real_child_has_us_as_ancestor() {
+        let me = std::process::id();
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/c", "ping", "-n", "10", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap()
+        } else {
+            std::process::Command::new("sleep").arg("10").spawn().unwrap()
+        };
+        let chain = process_chain(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(chain.first(), Some(&child.id()));
+        assert_eq!(chain.get(1), Some(&me), "{chain:?}");
+        #[cfg(unix)]
+        assert_eq!(chain.get(2), Some(&std::os::unix::process::parent_id()), "{chain:?}");
+    }
+
+    #[test]
+    fn alive_checks() {
+        assert!(is_alive(std::process::id()));
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/c", "exit", "0"]).spawn().unwrap()
+        } else {
+            std::process::Command::new("true").spawn().unwrap()
+        };
+        let pid = child.id();
+        child.wait().unwrap();
+        // nach dem Einsammeln ist die PID frei (Wiederverwendung so schnell ist praktisch ausgeschlossen)
+        assert!(!is_alive(pid));
+        #[cfg(unix)]
+        {
+            assert!(!is_alive(0), "PID 0 nie");
+            assert!(is_alive(1), "init/launchd gehört root: EPERM zählt als lebendig");
+        }
     }
 }

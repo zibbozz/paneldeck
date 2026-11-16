@@ -207,6 +207,11 @@ pub fn system_transport() -> Result<Box<dyn Transport>, FetchError> {
 #[cfg(windows)]
 mod winhttp;
 
+/// Lokales Schein-Release für Ende-zu-Ende-Tests – **nur mit dem Cargo-Feature `update-test-feed`** (Standard: aus; Release-Builds
+/// über `tools/release.sh` haben es nie, das Skript prüft das) und nur über die
+/// Umgebungsvariable `PANELDECK_UPDATE_TEST_FEED=<ordner>`. Der Ordner enthält `latest.json` (Antwort wie von der API) und die
+/// Release-Dateien; Adressen der Form `…/releases/download/<tag>/<datei>` werden auf `<ordner>/<datei>` abgebildet. Alle Prüfungen
+/// (Hosts, Größen, Prüfsummen) laufen wie im echten Betrieb. Ohne das Feature enthält die .exe diesen Code nicht.
 #[cfg(any(feature = "update-test-feed", test))]
 pub mod feed {
     use super::{FetchError, Response, Transport};

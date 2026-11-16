@@ -2,6 +2,8 @@
 name = "paneldeck"
 version = "2.2.0"
 edition = "2024"
+# File::try_lock (Instanzsperre) ist seit 1.89 stabil; let-chains (Edition 2024) seit 1.88.
+rust-version = "1.89"
 
 [dependencies]
 eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts", "x11"] }
@@ -26,6 +28,10 @@ update-test-feed = []
 
 [build-dependencies]
 embed-resource = "3"
+
+[target.'cfg(unix)'.dependencies]
+# Prozessbaum und „lebt die PID noch“ (src/platform/process.rs); steckt über portable-pty ohnehin schon im Baum.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8"
