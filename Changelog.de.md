@@ -14,6 +14,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Mittelklick auf eine Sitzung in der Seitenleiste schließt sie, mit derselben Rückfrage wie der Schließen-Knopf (#155).
 - Alle Sitzungen auf einmal schließen (#156): rötlicher Papierkorb an Ordnern in der Seitenleiste (beim Überfahren; inklusive Unterordnern, minimierten Sitzungen und Chats) und rechts neben dem Filterfeld (alle Sitzungen aller Projekte und Fenster); außerdem im Projekt-Kontextmenü, in der Befehls-Palette und als Tastenkürzel (standardmäßig keins). Die Rückfrage listet auf, was beendet wird, und gibt „Alle schließen“ nach 3 Sekunden frei; Git-Worktrees und Branches bleiben erhalten.
 - Einstellung *Sitzungen merken* (Einstellungen → Allgemein, standardmäßig an; neues optionales Feld `remember_sessions` in `settings.json`) (#157). Aus: jeder Start ist frisch – keine Terminals, Chats, Projekte oder Ordner aus dem letzten Lauf; Chatverläufe werden beim Beenden gelöscht. Einstellungen, Todo-Liste und Tickets bleiben. Ausschalten fragt nach; der Stand wird als `state.json.bak-<Datum>` gesichert (nur die neueste bleibt).
+- Kontextmenü „Agenten-Kette zurücksetzen“ für Sitzungen aus einer Agenten-Kette; der Tooltip der Sitzung nennt die Kette.
 
 ### Changed
 
@@ -23,6 +24,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Fixed
 
 - Ein Mittelklick mit leichter Mausbewegung zieht keine Sitzung und keinen Ordner mehr.
+
+### Security
+
+- Sitzungen aus einer Agenten-Kette sind jetzt markiert (#152): Ein Terminal, eine Claude-Sitzung oder ein Chat, die ein Agent mit `create_session` (oder `paneldeck --open` aus einer Sitzung heraus) anlegt, erbt die Agenten-Kette des Erstellers samt ihm, und ein Glied der Kette, das in eine andere Sitzung schreibt (`send_text`, `send_keys`, `run_command`, `queue_prompt`, `send_chat_message`), gibt die Kette weiter. Kein Agent – MCP-Brücke, Claude-Sitzung oder Chat – darf in eine Sitzung seiner Kette schreiben, sie umbenennen, anzeigen oder schließen (`forbidden`). Ketten stehen in `state.json` (neues optionales Feld `agent_chain`), überstehen einen Neustart und werden von `whoami` und `list_sessions` gemeldet. Vom Nutzer gestartete Agenten verhalten sich wie bisher, nur kann eine von einem Agenten angelegte Sitzung nicht mehr in ihren Ersteller zurückschreiben.
+- Der Hub ermittelt den aufrufenden Prozess jetzt selbst aus der Verbindung (TCP-Tabelle und Prozessbaum) und ignoriert eine vom Client angegebene Prozess-ID; `PANELDECK_SESSION` dient nur noch als Hinweis für WSL-Terminals. Gegen einen böswilligen Agenten mit eigener Shell nur nach bestem Bemühen: Prozesse, die außerhalb des Prozessbaums einer Sitzung gestartet werden (z. B. geplante Tasks), gelten als externe Aufrufer.
 
 ## [2.2.0] - 2026-11-16
 

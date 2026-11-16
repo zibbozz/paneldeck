@@ -14,6 +14,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Middle-click on a session in the sidebar closes it, with the same confirmation as the close button (#155).
 - Close all sessions at once (#156): a reddish trash button on folders in the sidebar (on hover; includes subfolders, minimized sessions and chats) and one right of the filter field (all sessions of all projects and windows); also in the project context menu, the command palette and as a shortcut (no default). The confirmation lists what will end and enables "Close all" after 3 seconds; Git worktrees and branches are kept.
 - Setting *Remember sessions* (Settings → General, on by default; new optional `settings.json` field `remember_sessions`) (#157). When off, every start is fresh: no terminals, chats, projects or folders from the last run; chat histories are deleted on exit. Settings, to-do list and tickets stay. Turning it off asks first; the state is backed up to `state.json.bak-<date>` (newest kept).
+- Context menu "Reset agent chain" for sessions started from an agent chain; the session tooltip names the chain.
 
 ### Changed
 
@@ -23,6 +24,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Fixed
 
 - A middle-click with a slight mouse movement no longer starts dragging a session or folder.
+
+### Security
+
+- Sessions started from an agent chain are now marked (#152): a terminal, Claude session or chat that an agent creates with `create_session` (or `paneldeck --open` from inside a session) inherits the creator's agent chain plus the creator, and a chain member that writes into another session (`send_text`, `send_keys`, `run_command`, `queue_prompt`, `send_chat_message`) passes the chain on. No agent – MCP bridge, Claude session or chat – may write into, rename, focus or close a session of its own chain (`forbidden`). Chains are kept in `state.json` (new optional field `agent_chain`), survive a restart and are reported by `whoami` and `list_sessions`. Agents started by the user behave as before, except that a session an agent creates can no longer write back into its creator.
+- The hub now identifies the calling process itself from the connection (TCP table and process tree) and ignores a process id supplied by the client; `PANELDECK_SESSION` is only a hint for WSL terminals. Best effort against a malicious agent with its own shell: processes started outside a session's process tree (e.g. scheduled tasks) count as external callers.
 
 ## [2.2.0] - 2026-11-16
 
