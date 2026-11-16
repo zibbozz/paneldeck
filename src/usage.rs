@@ -319,6 +319,14 @@ impl UsageWatcher {
         self.published.lock().unwrap_or_else(|e| e.into_inner()).get(&id).filter(|u| u.turns > 0).cloned()
     }
 
+    /// Neu beginnen (neue Claude-Konversation oder kein Claude mehr): Pfad und Zahlen vergessen. Anders als `remove`
+    /// kann die Sitzung danach wieder einen Pfad bekommen. Ein leerer Eintrag bleibt stehen, damit eine gerade laufende
+    /// Abfrage im Hintergrund den alten Stand nicht zurückschreibt.
+    pub fn reset(&self, id: u64) {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Tracked::default());
+        self.published.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+
     pub fn remove(&self, id: u64) {
         self.dead.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
         self.shared.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
@@ -329,6 +337,20 @@ impl UsageWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_forgets_the_transcript_but_accepts_a_new_one() {
+        let w = UsageWatcher::default();
+        w.set_path(7, PathBuf::from("a.jsonl"));
+        w.published.lock().unwrap().insert(7, Usage { turns: 3, ..Usage::default() });
+        assert!(w.get(7).is_some());
+        w.reset(7);
+        assert!(w.get(7).is_none(), "keine alten Zahlen");
+        assert!(w.shared.lock().unwrap().get(&7).is_some_and(|t| t.path.is_none()));
+        w.set_path(7, PathBuf::from("b.jsonl"));
+        assert_eq!(w.shared.lock().unwrap().get(&7).and_then(|t| t.path.clone()), Some(PathBuf::from("b.jsonl")));
+        assert!(!w.dead.lock().unwrap().contains(&7), "anders als remove: bleibt beobachtbar");
+    }
 
     #[test]
     fn counts_each_message_once_and_keeps_latest() {

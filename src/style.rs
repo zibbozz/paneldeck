@@ -197,6 +197,8 @@ pub enum Icon {
     Chat,
     /// Pfeil nach unten auf eine Linie: Bereich minimieren (aus dem Layout nehmen, Sitzung läuft weiter).
     Collapse,
+    /// Kreispfeil: Sitzung neu laden.
+    Reload,
 }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, st: Stroke) {
@@ -347,6 +349,16 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
         Icon::Close => {
             l(v(-4.0, -4.0), v(4.0, 4.0));
             l(v(-4.0, 4.0), v(4.0, -4.0));
+        }
+        Icon::Reload => {
+            // Kreis mit Lücke oben, Pfeilspitze am Ende des Bogens (im Uhrzeigersinn).
+            let (r, a0, a1) = (5.0_f32, -1.25_f32, 4.0_f32);
+            arc(p, c, r, a0, a1, st);
+            let tip = v(r * a1.cos(), r * a1.sin());
+            let back = v(a1.sin(), -a1.cos()); // gegen die Laufrichtung am Bogenende
+            let side = v(-back.y, back.x);
+            l(tip, tip + back * 3.2 + side * 2.4);
+            l(tip, tip + back * 3.2 - side * 2.4);
         }
         Icon::Collapse => {
             l(v(0.0, -5.0), v(0.0, 1.5));
