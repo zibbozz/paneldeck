@@ -857,7 +857,7 @@ c.close()
   Check 'Nur lesen: create_session kind=chat verboten (forbidden)' ((Code (Tool 'create_session' @{ kind = 'chat' })) -eq 'forbidden')
   $script:prestart = $null
 
-  Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session oeffnet allein" -ForegroundColor Cyan
+  Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session mit placement" -ForegroundColor Cyan
   Stop-Hub
   # 960 ist minimiert (mit `slot` wie in 2.2.0 – seit 2.3.0 deprecated, nur durchgereicht); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
   $bad = [ordered]@{ Split = [ordered]@{ dir = 'Horizontal'; ratio = $null; a = @{ Leaf = 961 }; b = [ordered]@{ Split = [ordered]@{ dir = 'Vertical'; ratio = 0.5; a = @{ Leaf = 777 }; b = @{ Leaf = 961 } } } } }
@@ -876,23 +876,83 @@ c.close()
   Check 'Kaputtes Layout (unbekannt, doppelt, Anteil null): Hub startet, beide Sitzungen da' ($ss.Count -eq 2 -and $null -ne $mn -and $null -ne $vs) ($ss | ConvertTo-Json -Compress)
   Check 'list_sessions: minimiert aus state.json wiederhergestellt (minimized = true)' ($mn.minimized -eq $true -and $vs.minimized -eq $false) ($ss | ConvertTo-Json -Compress)
   Check 'Fokus zeigt nicht auf die minimierte Sitzung' ($mn.focused -eq $false -and $vs.focused -eq $true) ($ss | ConvertTo-Json -Compress)
-  $fr = Tool 'focus_session' @{ session = 960 }
-  Start-Sleep -Milliseconds 600
-  $mn = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq 960 })
-  $ss = @((Tool 'list_sessions').data.sessions)
-  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
-  Check 'focus_session oeffnet die minimierte Sitzung allein (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
-  Check 'focus_session: der bisher sichtbare Bereich ist jetzt minimiert (laeuft weiter)' ($vs.minimized -eq $true -and $vs.focused -eq $false -and $vs.status -ne 'exited') ($vs | ConvertTo-Json -Compress)
-  $fr = Tool 'focus_session' @{ session = 961 }
+  $fr = Tool 'focus_session' @{ session = 960; placement = 'solo' }
   Start-Sleep -Milliseconds 600
   $ss = @((Tool 'list_sessions').data.sessions)
   $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
-  Check 'focus_session zurueck: Plaetze getauscht (961 sichtbar, 960 minimiert)' (-not $fr.err -and $vs.minimized -eq $false -and $vs.focused -eq $true -and $mn.minimized -eq $true) ($ss | ConvertTo-Json -Compress)
+  Check 'focus_session placement=solo oeffnet die minimierte Sitzung allein (minimized = false, fokussiert)' (-not $fr.err -and $fr.data.placement -eq 'solo' -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($fr.text + ' ' + ($mn | ConvertTo-Json -Compress))
+  Check 'focus_session solo: der bisher sichtbare Bereich ist jetzt minimiert (laeuft weiter)' ($vs.minimized -eq $true -and $vs.focused -eq $false -and $vs.status -ne 'exited') ($vs | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961; placement = 'solo' }
+  Start-Sleep -Milliseconds 600
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session solo zurueck: Plaetze getauscht (961 sichtbar, 960 minimiert)' (-not $fr.err -and $vs.minimized -eq $false -and $vs.focused -eq $true -and $mn.minimized -eq $true) ($ss | ConvertTo-Json -Compress)
   $fr = Tool 'focus_session' @{ session = 961 }
   Start-Sleep -Milliseconds 300
   $ss = @((Tool 'list_sessions').data.sessions)
   $mn = $ss | Where-Object { $_.id -eq 960 }
   Check 'focus_session auf eine sichtbare Sitzung minimiert nichts' (-not $fr.err -and $mn.minimized -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 1) ($ss | ConvertTo-Json -Compress)
+
+  Write-Host "== Platzierung fuer Agenten (#162): Standard replace, split_right, create_session mit placement" -ForegroundColor Cyan
+  # Bruecke von aussen (keine eigene Sitzung): aktiver Bereich = der fokussierte (961).
+  $fr = Tool 'focus_session' @{ session = 960 }
+  Start-Sleep -Milliseconds 600
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session ohne placement = replace (Antwort placement)' (-not $fr.err -and $fr.data.placement -eq 'replace') $fr.text
+  Check 'replace: minimierte 960 ersetzt den aktiven Bereich (sichtbar, fokussiert, nicht minimiert)' ($mn.visible -eq $true -and $mn.focused -eq $true -and $mn.minimized -eq $false) ($mn | ConvertTo-Json -Compress)
+  Check 'replace: der ersetzte Bereich 961 ist weg, aber nicht minimiert; nichts sonst minimiert' ($vs.visible -eq $false -and $vs.minimized -eq $false -and @($ss | Where-Object { $_.minimized }).Count -eq 0 -and $vs.status -ne 'exited') ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961; placement = 'split_right' }
+  Start-Sleep -Milliseconds 600
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'split_right: aktiver Bereich geteilt, beide sichtbar, 961 fokussiert, nichts minimiert' (-not $fr.err -and $fr.data.placement -eq 'split_right' -and $mn.visible -eq $true -and $vs.visible -eq $true -and $vs.focused -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 0) ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 960; placement = 'split_down' }
+  Start-Sleep -Milliseconds 300
+  $ss = @((Tool 'list_sessions').data.sessions)
+  Check 'split_* auf eine schon sichtbare Sitzung: nur Fokus, Layout bleibt (beide sichtbar)' (-not $fr.err -and @($ss | Where-Object { $_.visible }).Count -eq 2 -and ($ss | Where-Object { $_.id -eq 960 }).focused -eq $true) ($ss | ConvertTo-Json -Compress)
+  Check 'focus_session mit unbekanntem placement: bad_args' ((Code (Tool 'focus_session' @{ session = 960; placement = 'left' })) -eq 'bad_args')
+  $n0 = @((Tool 'list_sessions').data.sessions).Count
+  Check 'create_session mit unbekanntem placement: bad_args, nichts angelegt' ((Code (Tool 'create_session' @{ shell = 'powershell'; placement = 'everywhere' })) -eq 'bad_args' -and @((Tool 'list_sessions').data.sessions).Count -eq $n0)
+  # 960 fokussiert (links), 961 rechts: replace mit einer neuen Sitzung ersetzt nur 960
+  $c = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Smoke-Place'; placement = 'replace' }
+  Start-Sleep -Milliseconds 800
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $nw = $ss | Where-Object { $_.id -eq $c.data.id }; $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'create_session placement=replace: neue Sitzung sichtbar und fokussiert, ersetzt nur den aktiven Bereich' (-not $c.err -and $c.data.placement -eq 'replace' -and $nw.visible -eq $true -and $nw.focused -eq $true -and $mn.visible -eq $false -and $vs.visible -eq $true) ($c.text + ' ' + ($ss | ConvertTo-Json -Compress))
+  $q = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Smoke-Quiet' }
+  Start-Sleep -Milliseconds 500
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $qq = $ss | Where-Object { $_.id -eq $q.data.id }
+  Check 'create_session ohne placement bleibt leise (nicht sichtbar, Fokus unveraendert)' (-not $q.err -and $null -eq $q.data.placement -and $qq.visible -eq $false -and ($ss | Where-Object { $_.id -eq $c.data.id }).focused -eq $true) ($q.text + ' ' + ($qq | ConvertTo-Json -Compress))
+
+  Write-Host "== Umgebung der Terminals (#175): Registry (Standard) und 'Umgebung von Paneldeck erben'" -ForegroundColor Cyan
+  # Eine Variable nur im Prozess des Hubs und ein eigener TEMP: TEMP steht (meist) auch in HKCU\Environment, aus der
+  # portable-pty die Umgebung standardmaessig auffrischt. Mit inherit_env bleibt der Wert des Prozesses.
+  $regTemp = try { (Get-ItemProperty -Path 'HKCU:\Environment' -Name TEMP -ErrorAction Stop).TEMP } catch { $null }
+  $ownTemp = "$work\tmp-inherit"
+  New-Item -ItemType Directory -Force $ownTemp | Out-Null
+  foreach ($inherit in @($false, $true)) {
+    Stop-Hub
+    $f = "$data\settings.json"
+    $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    if ($j.PSObject.Properties.Name -contains 'inherit_env') { $j.inherit_env = $inherit } else { $j | Add-Member inherit_env $inherit }
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+    $oldTemp = $env:TEMP; $env:TEMP = $ownTemp; $env:PD_SMOKE_INHERIT = 'aus-dem-prozess'
+    try { Set-Level 'Control' -Tray } finally { $env:TEMP = $oldTemp; Remove-Item Env:PD_SMOKE_INHERIT -ErrorAction SilentlyContinue }
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    $c = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = "Smoke-Env-$inherit" }
+    Start-Sleep 4
+    $r = Tool 'run_command' @{ session = $c.data.id; command = '"$env:PD_SMOKE_INHERIT|$env:TEMP|$env:PANELDECK_SESSION|$env:USERPROFILE|" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'; timeout_secs = 25 }
+    $o = "$($r.data.output)".Trim(); $parts = $o -split '\|'
+    $label = if ($inherit) { 'an' } else { 'aus' }
+    Check "inherit_env $($label): Paneldecks Variable PANELDECK_SESSION = eigene Sitzung" (-not $c.err -and $parts.Count -ge 5 -and $parts[2] -eq "$($c.data.id)") $o
+    Check "inherit_env $($label): Isolation haelt (Schein-Profil, claude nur der Ersatz)" ($parts.Count -ge 5 -and $parts[3] -eq $script:iso.Profile -and (Only-Fake ($parts[4] -replace ',', "`n"))) $o
+    Check "inherit_env $($label): Variable nur im Prozess kommt an" ($parts[0] -eq 'aus-dem-prozess') $o
+    if (-not $regTemp) { Skip "inherit_env $($label): TEMP aus Registry vs. Prozess" 'kein TEMP in HKCU\Environment' }
+    elseif ($inherit) { Check 'inherit_env an: TEMP des Prozesses bleibt (nicht aus der Registry)' ($parts[1] -eq $ownTemp) $o }
+    else { Check 'inherit_env aus: TEMP frisch aus der Registry (nicht der des Prozesses)' ($parts[1] -ne $ownTemp -and $parts[1] -ne '') $o }
+  }
 } catch {
   # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.
   $script:fail++; Write-Host "  ABBRUCH  $($_.Exception.Message)" -ForegroundColor Red

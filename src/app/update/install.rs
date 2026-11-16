@@ -8,6 +8,25 @@ use std::path::{Path, PathBuf};
 /// Einzelinstanz-Prüfung macht (sonst würde sie sich an die noch laufende alte Instanz übergeben und beenden).
 pub const WAIT_PID_ENV: &str = "PANELDECK_UPDATE_WAIT_PID";
 
+/// Umgebungsvariable für den Neustart nach einem Update mit „Sitzungen merken“ aus (#157): `1` = die neue Instanz stellt die
+/// Sitzungen **einmal** wieder her (ein Update soll laufende Arbeit nicht beenden). Gilt nur zusammen mit `WAIT_PID_ENV`
+/// (also nur für einen echten Update-Neustart) und wird beim Start sofort entfernt – sie bleibt nie hängen: Weder Terminals
+/// noch ein späterer Start erben sie, ein Absturz danach führt beim nächsten Start zum gewohnten frischen Start.
+pub const KEEP_SESSIONS_ENV: &str = "PANELDECK_UPDATE_KEEP_SESSIONS";
+
+/// Ergebnis von `wait_for_previous_instance`: diese Instanz ist ein Update-Neustart, der die Sitzungen einmal wiederherstellt.
+static RESTORE_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stellt dieser Start die Sitzungen einmal wieder her, obwohl „Sitzungen merken“ aus ist (Update-Neustart, #157)?
+pub fn restore_once() -> bool {
+    RESTORE_ONCE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Gilt die Einmal-Wiederherstellung? Nur mit beiden Variablen (Update-Neustart) und genau dem Wert `1`.
+fn keep_requested(wait_pid: Option<&std::ffi::OsStr>, keep: Option<&std::ffi::OsStr>) -> bool {
+    wait_pid.is_some() && keep.and_then(|k| k.to_str()) == Some("1")
+}
+
 /// Pfad ohne `\\?\`-Präfix, mit `\`, ohne abschließenden Trenner, klein geschrieben (Windows-Pfade sind nicht case-sensitiv).
 pub fn norm_dir(p: &str) -> String {
     let s = p.trim().trim_matches('"').replace('/', "\\");
@@ -176,14 +195,17 @@ pub fn remove_old_exe(exe: &Path) {
 
 /// Startet `exe` neu mit denselben Instanz-Parametern (`--data-dir`/`--profile` aus `paths::instance_args`, als einzelne
 /// Argumente). Nie `--open`, `--claude` oder `mcp`: der Neustart soll nur dieselbe Instanz öffnen. Die neue Instanz wartet
-/// über `WAIT_PID_ENV`, bis dieser Prozess beendet ist.
-pub fn spawn_restart(exe: &Path) -> Result<(), String> {
-    std::process::Command::new(exe)
-        .args(restart_args(crate::paths::instance_args()))
-        .env(WAIT_PID_ENV, std::process::id().to_string())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("{}: {e}", exe.display()))
+/// über `WAIT_PID_ENV`, bis dieser Prozess beendet ist. `keep_sessions`: die neue Instanz stellt die Sitzungen einmal wieder
+/// her, obwohl „Sitzungen merken“ aus ist (`KEEP_SESSIONS_ENV`, #157).
+pub fn spawn_restart(exe: &Path, keep_sessions: bool) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(restart_args(crate::paths::instance_args())).env(WAIT_PID_ENV, std::process::id().to_string());
+    if keep_sessions {
+        cmd.env(KEEP_SESSIONS_ENV, "1");
+    } else {
+        cmd.env_remove(KEEP_SESSIONS_ENV);
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
 /// Argumente für den Neustart: nur Instanz-Parameter, Start-Aktionen (`--open`, `--claude`, `mcp`) fallen sicherheitshalber weg.
@@ -204,14 +226,21 @@ fn restart_args(args: Vec<String>) -> Vec<String> {
 
 /// Für `main.rs`, nach den `--hook`/`--uninstall-hooks`/`--help`/`mcp`-Zweigen und vor der Einzelinstanz-Weiterleitung: wurde
 /// diese Instanz von einem Update neu gestartet, warten, bis die alte beendet ist (höchstens 30 s) – sonst übergäbe sie sich an
-/// die noch laufende alte und beendete sich. Danach die Variable entfernen (Terminals sollen sie nicht erben).
+/// die noch laufende alte und beendete sich. Merkt sich `KEEP_SESSIONS_ENV` ([`restore_once`]). Danach beide Variablen
+/// entfernen (Terminals und spätere Neustarts sollen sie nicht erben).
 pub fn wait_for_previous_instance() {
-    let Some(v) = std::env::var_os(WAIT_PID_ENV) else { return };
+    let (wait, keep) = (std::env::var_os(WAIT_PID_ENV), std::env::var_os(KEEP_SESSIONS_ENV));
+    RESTORE_ONCE.store(keep_requested(wait.as_deref(), keep.as_deref()), std::sync::atomic::Ordering::SeqCst);
+    if keep.is_some() {
+        // SAFETY: wird früh in `main` aufgerufen, bevor weitere Fäden laufen.
+        unsafe { std::env::remove_var(KEEP_SESSIONS_ENV) };
+    }
+    let Some(v) = wait else { return };
     let pid = v.to_str().and_then(|s| s.parse::<u32>().ok()).filter(|p| *p != std::process::id());
     if let Some(pid) = pid {
         wait_pid(pid);
     }
-    // SAFETY: wird früh in `main` aufgerufen, bevor weitere Fäden laufen.
+    // SAFETY: wie oben.
     unsafe { std::env::remove_var(WAIT_PID_ENV) };
 }
 
@@ -371,10 +400,34 @@ mod tests {
     #[test]
     fn wait_env_is_consumed() {
         // Eigene PID: sofort zurück, Variable entfernt
-        // SAFETY: Test setzt eine nur hier gelesene Variable.
+        // SAFETY: Test setzt nur hier gelesene Variablen (einziger Test, der sie anfasst).
         unsafe { std::env::set_var(WAIT_PID_ENV, std::process::id().to_string()) };
         wait_for_previous_instance();
         assert!(std::env::var_os(WAIT_PID_ENV).is_none());
+        assert!(!restore_once());
         wait_for_previous_instance(); // ohne Variable: nichts
+        // Update-Neustart mit „Sitzungen merken“ aus: einmal wiederherstellen, beide Variablen sind danach weg (#157).
+        unsafe {
+            std::env::set_var(WAIT_PID_ENV, std::process::id().to_string());
+            std::env::set_var(KEEP_SESSIONS_ENV, "1");
+        }
+        wait_for_previous_instance();
+        assert!(restore_once());
+        assert!(std::env::var_os(KEEP_SESSIONS_ENV).is_none() && std::env::var_os(WAIT_PID_ENV).is_none(), "nichts bleibt hängen");
+        // Nur die Merk-Variable ohne Update-Neustart (z. B. von Hand gesetzt): gilt nicht, wird aber entfernt.
+        unsafe { std::env::set_var(KEEP_SESSIONS_ENV, "1") };
+        wait_for_previous_instance();
+        assert!(!restore_once());
+        assert!(std::env::var_os(KEEP_SESSIONS_ENV).is_none());
+    }
+
+    #[test]
+    fn keep_sessions_needs_an_update_restart() {
+        use std::ffi::OsStr;
+        assert!(keep_requested(Some(OsStr::new("42")), Some(OsStr::new("1"))));
+        assert!(!keep_requested(None, Some(OsStr::new("1"))), "ohne Update-Neustart nie");
+        assert!(!keep_requested(Some(OsStr::new("42")), None));
+        assert!(!keep_requested(Some(OsStr::new("42")), Some(OsStr::new("0"))));
+        assert!(!keep_requested(Some(OsStr::new("42")), Some(OsStr::new("yes"))));
     }
 }

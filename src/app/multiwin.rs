@@ -206,7 +206,7 @@ pub(super) fn drop_closed<T>(queue: &mut Vec<(u64, T)>, alive: impl Fn(u64) -> b
 /// `session_window`: Fenster der Zielsitzung (falls es sie gibt); abgedockte Sitzungen holt jedes Fenster selbst nach vorn.
 pub(super) fn route_target(action: &Action, session_window: impl Fn(u64) -> Option<u64>, detached: impl Fn(u64) -> bool, cur: u64) -> Option<u64> {
     let (id, follows_detached) = match action {
-        Action::Activate(id) | Action::Focus(id) | Action::JumpTo(id) => (*id, true),
+        Action::Activate(id) | Action::Focus(id) | Action::JumpTo(id) | Action::Place(id, ..) => (*id, true),
         Action::GlobalJump(id, ..) => (*id, true),
         Action::Attach(id) => (*id, false),
         _ => return None,
@@ -1106,6 +1106,9 @@ mod tests {
         let detached = |id: u64| id == 9;
         assert_eq!(route_target(&Action::Activate(2), window, detached, 0), Some(3));
         assert_eq!(route_target(&Action::Focus(2), window, detached, 0), Some(3));
+        // Platzierung für einen Agenten (#162): im Fenster der Sitzung (dort ist der aktive Bereich zu bestimmen)
+        assert_eq!(route_target(&Action::Place(2, crate::layout::Placement::SplitRight, Some(1)), window, detached, 0), Some(3));
+        assert_eq!(route_target(&Action::Place(1, crate::layout::Placement::Replace, None), window, detached, 0), None);
         assert_eq!(route_target(&Action::JumpTo(1), window, detached, 3), Some(0));
         assert_eq!(route_target(&Action::GlobalJump(2, 4, "x".into()), window, detached, 0), Some(3));
         assert_eq!(route_target(&Action::Attach(2), window, detached, 0), Some(3));

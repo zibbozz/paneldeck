@@ -33,6 +33,19 @@ fn er(code: &str, msg: impl Into<String>) -> (String, String) {
     (code.to_string(), msg.into())
 }
 
+/// Optionales `placement` von `focus_session`/`create_session` (#162): fehlt/null → `None`, sonst einer der Werte aus
+/// `Placement::NAMES`, alles andere ist `bad_args`.
+fn parse_placement(args: &Value) -> Result<Option<crate::layout::Placement>, (String, String)> {
+    let names = crate::layout::Placement::NAMES.join(", ");
+    match args.get("placement") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => crate::layout::Placement::parse(s.trim()).map(Some).ok_or_else(|| {
+            er("bad_args", if de() { format!("placement: einer von {names}, nicht „{s}“") } else { format!("placement: one of {names}, not “{s}”") })
+        }),
+        Some(_) => Err(er("bad_args", if de() { format!("placement muss ein Text sein ({names})") } else { format!("placement must be a string ({names})") })),
+    }
+}
+
 enum Pend {
     Run { cmd: String, prompt0: u64, cwd0: u64, start_abs: u64, max_lines: usize, cmd_shell: bool, started: Instant, mark0: Option<u64> },
     Wait { statuses: Vec<ClaudeStatus>, started: Instant },
@@ -633,7 +646,7 @@ impl App {
             "wait_for_status" => self.mcp_wait(args, reply, tool, caller, how),
             "queue_prompt" => Out::Now(self.mcp_queue(args, caller)),
             "rename_session" => Out::Now(self.mcp_rename(args, caller)),
-            "focus_session" => Out::Now(self.mcp_focus(ctx, args)),
+            "focus_session" => Out::Now(self.mcp_focus(ctx, args, caller)),
             "close_session" => Out::Now(self.mcp_close(args, caller)),
             t if agent::TOOLS.contains(&t) => Out::Now(self.mcp_planning(t, args, caller)),
             _ => Out::Now(Err(er("not_found", tr("Unbekanntes Werkzeug", "Unknown tool")))),
@@ -871,7 +884,24 @@ impl App {
         }))
     }
 
+    /// `create_session`: ohne `placement` still angelegt (kein Fokusklau, wie bisher); mit `placement` (#162) danach wie
+    /// `focus_session` mit diesem Wert gezeigt. Ein ungültiger Wert legt nichts an.
     fn mcp_create(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
+        let placement = parse_placement(args)?;
+        let mut v = self.mcp_create_quiet(ctx, args, caller)?;
+        if let (Some(p), Some(id)) = (placement, v["id"].as_u64()) {
+            self.apply(ctx, Action::Place(id, p, caller));
+            v["placement"] = json!(p.name());
+            v["note"] = json!(if v["kind"] == "chat" {
+                tr("Der Chat ist angelegt und im Fenster geöffnet. Nachrichten mit send_chat_message.", "The chat was created and opened in the window. Send messages with send_chat_message.")
+            } else {
+                tr("Die Sitzung ist angelegt und im Fenster geöffnet.", "The session was created and opened in the window.")
+            });
+        }
+        Ok(v)
+    }
+
+    fn mcp_create_quiet(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
         let chat = match s("kind").as_deref() {
             None | Some("terminal") => false,
@@ -1335,11 +1365,15 @@ impl App {
         Ok(json!({"ok": true, "name": e.meta.name}))
     }
 
-    fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value) -> R {
+    /// `focus_session` mit optionalem `placement` (#162, Standard `replace`): bezogen auf den aktiven Bereich (der Bereich
+    /// der eigenen Sitzung des Agenten, wenn sie zu sehen ist, sonst der fokussierte des Nutzers). Abgedockt: dieses Fenster
+    /// nach vorn; Sitzung eines weiteren Fensters: dort platzieren (`route_target`), Fenster nach vorn. Sitzungen der
+    /// Agenten-Kette eines Chats lehnt schon `proxy_forbidden` ab (vor der Ausführung, für jede Platzierung).
+    fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let id = self.mcp_target(args, None, false)?;
-        // Abgedockt: dieses Fenster nach vorn; Sitzung eines weiteren Fensters: dort aktivieren, Fenster nach vorn.
-        self.apply(ctx, Action::Focus(id));
-        Ok(json!({"ok": true}))
+        let placement = parse_placement(args)?.unwrap_or(crate::layout::Placement::Replace);
+        self.apply(ctx, Action::Place(id, placement, caller));
+        Ok(json!({"ok": true, "placement": placement.name()}))
     }
 
     fn mcp_close(&mut self, args: &Value, caller: Option<u64>) -> R {
@@ -1878,6 +1912,20 @@ mod tests {
     }
 
     #[test]
+    fn placement_is_optional_and_strict() {
+        use crate::layout::Placement;
+        assert_eq!(parse_placement(&json!({"session": 1})), Ok(None), "fehlt: Standard des Werkzeugs");
+        assert_eq!(parse_placement(&json!({"placement": null})), Ok(None));
+        assert_eq!(parse_placement(&json!({"placement": "solo"})), Ok(Some(Placement::Solo)));
+        assert_eq!(parse_placement(&json!({"placement": " split_down "})), Ok(Some(Placement::SplitDown)));
+        assert_eq!(parse_placement(&json!({"placement": "split_right"})), Ok(Some(Placement::SplitRight)));
+        assert_eq!(parse_placement(&json!({"placement": "replace"})), Ok(Some(Placement::Replace)));
+        for bad in [json!({"placement": "left"}), json!({"placement": ""}), json!({"placement": 1}), json!({"placement": ["solo"]})] {
+            assert_eq!(parse_placement(&bad).unwrap_err().0, "bad_args", "{bad}");
+        }
+    }
+
+    #[test]
     fn a_chat_started_by_an_agent_cannot_write_into_that_agents_session() {
         // Schreibende Werkzeuge mit der Sitzung des auslösenden Agenten als Ziel: verboten.
         for (tool, args) in [
@@ -1889,6 +1937,10 @@ mod tests {
             ("rename_session", json!({"session": 7, "name": "x"})),
             ("send_chat_message", json!({"session": 7, "text": "x"})),
             ("link_terminal", json!({"ticket": "PAN-1", "session": 7})),
+            // Anzeigen in jeder Platzierung (#162): die Platzierung umgeht den Schutz nicht
+            ("focus_session", json!({"session": 7})),
+            ("focus_session", json!({"session": 7, "placement": "solo"})),
+            ("focus_session", json!({"session": 7, "placement": "split_right"})),
         ] {
             assert!(proxy_forbidden(tool, &args, &[7]), "{tool}");
             assert!(proxy_forbidden(tool, &args, &[3, 7, 9]), "{tool}: Sitzung irgendwo in der Kette");

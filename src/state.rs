@@ -219,6 +219,12 @@ pub struct Settings {
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
     /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
     pub remember_sessions: bool,
+    /// Umgebung von Paneldeck erben (seit 2.3.0, #175, Standard aus): Terminals starten mit der Umgebung des
+    /// Paneldeck-Prozesses statt mit der frisch aus der Registry gelesenen (portable-pty: Prozessumgebung, darüber System-
+    /// und Benutzervariablen aus der Registry – so wirkt `setx` sofort). An: genau die Prozessumgebung, z. B. für einen Start
+    /// aus einer Shell mit eigener Umgebung. Paneldecks eigene Variablen (`PANELDECK_SESSION` …) und die Variablen des Profils
+    /// gelten in beiden Fällen. Fehlt in älteren Dateien (dann aus = bisheriges Verhalten).
+    pub inherit_env: bool,
 }
 
 /// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
@@ -285,6 +291,7 @@ impl Default for Settings {
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
+            inherit_env: false,
         }
     }
 }
@@ -981,6 +988,20 @@ mod tests {
         assert_eq!(j["remember_sessions"], false);
         let back: Settings = serde_json::from_value(j).unwrap();
         assert!(!back.remember_sessions);
+    }
+
+    #[test]
+    fn inherit_env_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „aus“ (Umgebung aus der Registry wie bisher).
+        let s: Settings = serde_json::from_str(r#"{"language":"En","shell_integration":false}"#).unwrap();
+        assert!(!s.inherit_env);
+        assert!(!s.shell_integration);
+        assert!(!Settings::default().inherit_env);
+        let mut s = s;
+        s.inherit_env = true;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["inherit_env"], true);
+        assert!(serde_json::from_value::<Settings>(j).unwrap().inherit_env);
     }
 
     #[test]

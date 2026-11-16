@@ -1,10 +1,11 @@
 //! Sitzungen schließen mit Rückfrage: eine Sitzung (Schließen-Knopf, Kontextmenü, Mittelklick auf die Zeile in der
 //! Seitenleiste, #155) und viele auf einmal (#156: Papierkorb am Ordner, Papierkorb rechts neben dem Filterfeld für alle
-//! Sitzungen, Projekt-Kontextmenü, Befehls-Palette, Kürzel „close_all“). Die Rückfrage gibt „Schließen“ erst nach
-//! 3 Sekunden frei (wie das Löschen von Tickets und Karten) und nennt, was beendet wird.
+//! Sitzungen, Projekt-Kontextmenü, Befehls-Palette, Kürzel „close_all“). Die Rückfrage nennt, was beendet wird; nur beim
+//! Schließen vieler Sitzungen gibt sie „Alle schließen“ erst nach 3 Sekunden frei (wie das Löschen von Tickets und Karten,
+//! Entscheidung des Nutzers zu #156 – eine einzelne Sitzung fragt ohne Wartezeit wie in 2.2, [`wait_secs`]).
 //!
 //! * Eine Sitzung: Rückfrage nur bei laufendem Prozess bzw. Chat mit Verlauf und eingeschalteter Einstellung
-//!   „Schließen bestätigen“; Sitzungen mit Git-Worktree gehen wie bisher über die Worktree-Rückfrage.
+//!   „Schließen bestätigen“, ohne Wartezeit; Sitzungen mit Git-Worktree gehen wie bisher über die Worktree-Rückfrage.
 //! * Viele: Rückfrage immer (wie beim Schließen eines weiteren Fensters, da viele Sitzungen auf einmal enden). Beendet
 //!   werden genau die beim Öffnen aufgelisteten Sitzungen; Git-Worktrees und Branches bleiben dabei bestehen.
 
@@ -30,8 +31,17 @@ pub(super) enum CloseTarget {
 /// Offene Rückfrage (je Fenster, siehe `WinView::confirm_close`).
 pub(super) struct CloseAsk {
     pub(super) target: CloseTarget,
-    /// Beginn der Wartezeit (3 s, `countdown_secs`).
+    /// Beginn der Wartezeit (3 s, `countdown_secs`; nur bei vielen Sitzungen, siehe [`wait_secs`]).
     pub(super) since: Instant,
+}
+
+/// Restliche Wartezeit der Rückfrage in Sekunden: nur beim Schließen vieler Sitzungen (Ordner-Papierkorb, „alle schließen“)
+/// 3 Sekunden; eine einzelne Sitzung (Schließen-Knopf, Mittelklick, Kontextmenü) wartet nie.
+pub(super) fn wait_secs(target: &CloseTarget, since: Instant, now: Instant) -> u32 {
+    match target {
+        CloseTarget::One(_) => 0,
+        CloseTarget::Many(..) => countdown_secs(since, now),
+    }
 }
 
 impl CloseAsk {
@@ -242,11 +252,11 @@ impl App {
         }
     }
 
-    /// Rückfrage zum Schließen (eine oder viele Sitzungen) mit 3-Sekunden-Wartezeit.
+    /// Rückfrage zum Schließen: eine Sitzung ohne Wartezeit, viele mit 3-Sekunden-Wartezeit ([`wait_secs`]).
     pub(super) fn close_ask_ui(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(ask) = self.confirm_close.take() else { return };
         let lang = self.settings.language;
-        let secs = countdown_secs(ask.since, Instant::now());
+        let secs = wait_secs(&ask.target, ask.since, Instant::now());
         if secs > 0 {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
@@ -477,6 +487,15 @@ mod tests {
         let now: std::collections::HashSet<u64> = [1, 3, 9].into_iter().collect(); // 2 inzwischen geschlossen, 9 neu
         assert_eq!(still_open(&[1, 2, 3], |id| now.contains(&id)), vec![1, 3]);
         assert!(still_open(&[], |_| true).is_empty());
+    }
+
+    #[test]
+    fn only_closing_many_waits() {
+        let t0 = Instant::now();
+        assert_eq!(wait_secs(&CloseTarget::One(1), t0, t0), 0, "eine Sitzung: ohne Wartezeit (wie 2.2)");
+        assert_eq!(wait_secs(&CloseTarget::Many(CloseScope::All, vec![1, 2]), t0, t0), 3);
+        assert_eq!(wait_secs(&CloseTarget::Many(CloseScope::Folder("a".into()), vec![1]), t0, t0 + Duration::from_millis(1500)), 2);
+        assert_eq!(wait_secs(&CloseTarget::Many(CloseScope::Project(1), vec![1]), t0, t0 + Duration::from_secs(4)), 0);
     }
 
     #[test]

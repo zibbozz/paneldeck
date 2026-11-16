@@ -442,8 +442,15 @@ pub fn icon_btn_small(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
 /// Rot für Fehler und zerstörende Aktionen in der Oberfläche (das Rot des Standard-Themas One Dark).
 pub const DANGER_SOFT: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
 
-/// Zerstörender Icon-Knopf (Papierkorb, „alle schließen“) an einer festen Stelle: in Ruhe gedämpft rötlich, beim Überfahren
-/// kräftiger mit rötlicher Fläche. `enabled = false` zeichnet ihn blass und reagiert nicht.
+/// Farbe des Symbols von [`danger_icon_at`] bei Überfahren-Anteil `hover` (0..1, animiert): in Ruhe unauffällig in der
+/// gedämpften Textfarbe (kein Rot), beim Überfahren das übliche Warnrot (Entscheidung des Nutzers zu #156, wie der
+/// Papierkorb der Todo-Karten). `enabled = false`: blass.
+pub fn danger_icon_color(text: Color32, enabled: bool, hover: f32) -> Color32 {
+    if enabled { mix(text.gamma_multiply(0.7), DANGER_SOFT, hover) } else { text.gamma_multiply(0.3) }
+}
+
+/// Zerstörender Icon-Knopf (Papierkorb, „alle schließen“) an einer festen Stelle: in Ruhe unauffällig, beim Überfahren
+/// Warnrot mit rötlicher Fläche ([`danger_icon_color`]). `enabled = false` zeichnet ihn blass und reagiert nicht.
 pub fn danger_icon_at(ui: &mut Ui, rect: Rect, id: egui::Id, tip: &str, enabled: bool) -> Response {
     // Auch Ziehen annehmen: sonst begänne ein Druck auf den Knopf mit Bewegung ein Ziehen der Zeile darunter (Ordner).
     let resp = ui.interact(rect, id, if enabled { Sense::click_and_drag() } else { Sense::hover() });
@@ -453,9 +460,7 @@ pub fn danger_icon_at(ui: &mut Ui, rect: Rect, id: egui::Id, tip: &str, enabled:
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     ui.painter().rect_filled(rect, RADIUS as f32, DANGER_SOFT.gamma_multiply(0.18 * h));
-    let rest = mix(text.gamma_multiply(0.7), DANGER_SOFT, 0.55);
-    let col = if enabled { mix(rest, DANGER_SOFT, h) } else { text.gamma_multiply(0.3) };
-    paint_icon(ui.painter(), Icon::Trash, rect.center(), col);
+    paint_icon(ui.painter(), Icon::Trash, rect.center(), danger_icon_color(text, enabled, h));
     resp.on_hover_text(tip)
 }
 
@@ -538,6 +543,18 @@ pub fn tab(ui: &mut Ui, text: &str, active: bool) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn danger_icon_is_subtle_until_hovered() {
+        let text = Color32::from_gray(200);
+        let rest = danger_icon_color(text, true, 0.0);
+        assert!(rest.r() == rest.g() && rest.g() == rest.b(), "in Ruhe kein Rot: {rest:?}");
+        assert_eq!(danger_icon_color(text, true, 1.0), DANGER_SOFT, "überfahren: Warnrot");
+        let half = danger_icon_color(text, true, 0.5);
+        assert!(half.r() > half.g(), "Übergang wird rötlich");
+        let off = danger_icon_color(text, false, 1.0);
+        assert!(off.r() == off.g() && off.a() < rest.a(), "deaktiviert: blass, nie rot");
+    }
 
     #[test]
     fn ids_are_salted_per_window_only_outside_the_main_window() {

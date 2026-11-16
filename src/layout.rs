@@ -94,6 +94,83 @@ pub fn minimize(layout: &mut Option<Node>, id: u64, focused: u64) -> Option<u64>
     Some(focus)
 }
 
+/// Wohin ein Agent eine Sitzung bringt (`focus_session`/`create_session` mit `placement`, #162). Bezugspunkt ist der
+/// „aktive Bereich“ (`anchor`): der Bereich der eigenen Sitzung des Agenten, wenn sie zu sehen ist, sonst der Bereich, den
+/// der Nutzer fokussiert hat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// Einziger Bereich; alle anderen werden minimiert (wie ein Klick in der Seitenleiste auf eine minimierte Sitzung).
+    Solo,
+    /// Ersetzt nur den aktiven Bereich; der Rest der Teilung bleibt (Standard für Agenten).
+    Replace,
+    /// Teilt nur den aktiven Bereich, die Sitzung kommt in die rechte Hälfte.
+    SplitRight,
+    /// Teilt nur den aktiven Bereich, die Sitzung kommt in die untere Hälfte.
+    SplitDown,
+}
+
+impl Placement {
+    /// Werte der MCP-Schnittstelle (öffentliche API).
+    pub const NAMES: [&'static str; 4] = ["solo", "replace", "split_right", "split_down"];
+
+    pub fn parse(s: &str) -> Option<Placement> {
+        match s {
+            "solo" => Some(Placement::Solo),
+            "replace" => Some(Placement::Replace),
+            "split_right" => Some(Placement::SplitRight),
+            "split_down" => Some(Placement::SplitDown),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Placement::Solo => "solo",
+            Placement::Replace => "replace",
+            Placement::SplitRight => "split_right",
+            Placement::SplitDown => "split_down",
+        }
+    }
+}
+
+/// Ergebnis von [`place`]: welche Bereiche das Layout verlassen haben.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Placed {
+    /// Durch `Solo` verdrängt – der Aufrufer markiert sie als minimiert (sie laufen weiter).
+    pub minimized: Vec<u64>,
+    /// Durch `Replace` ersetzt – nur weggewechselt, nicht minimiert (ein Klick holt sie wieder an die fokussierte Stelle).
+    pub replaced: Option<u64>,
+}
+
+/// Sitzung `id` nach `placement` ins Layout bringen, bezogen auf den aktiven Bereich `anchor` (steht er nicht im Layout,
+/// gilt der erste Bereich). Ohne Layout (leerer Hub) wird sie in jedem Fall der einzige Bereich. Steht sie schon im Layout,
+/// ändert nur `Solo` etwas (dann bleibt sie allein übrig); `Replace` und die Teilungen lassen das Layout dann, wie es ist.
+pub fn place(layout: &mut Option<Node>, id: u64, anchor: u64, placement: Placement) -> Placed {
+    let Some(l) = layout else {
+        *layout = Some(Node::Leaf(id));
+        return Placed::default();
+    };
+    if placement == Placement::Solo {
+        let gone: Vec<u64> = l.leaf_ids().into_iter().filter(|x| *x != id).collect();
+        *layout = Some(Node::Leaf(id));
+        return Placed { minimized: gone, replaced: None };
+    }
+    if l.contains(id) {
+        return Placed::default();
+    }
+    let anchor = if l.contains(anchor) { anchor } else { l.leaf_ids()[0] };
+    let dir = match placement {
+        Placement::SplitRight => Dir::Horizontal,
+        Placement::SplitDown => Dir::Vertical,
+        _ => {
+            l.replace_leaf(anchor, id);
+            return Placed { minimized: Vec::new(), replaced: Some(anchor) };
+        }
+    };
+    l.split_leaf_at(anchor, id, dir, false);
+    Placed::default()
+}
+
 impl Node {
     /// Anzahl der Blätter.
     pub fn leaf_count(&self) -> usize {
@@ -325,6 +402,59 @@ mod tests {
 
     fn split(dir: Dir, ratio: f32, a: Node, b: Node) -> Node {
         Node::Split { dir, ratio, a: Box::new(a), b: Box::new(b) }
+    }
+
+    #[test]
+    fn placement_names_roundtrip() {
+        for n in Placement::NAMES {
+            assert_eq!(Placement::parse(n).unwrap().name(), n);
+        }
+        assert_eq!(Placement::parse("Solo"), None);
+        assert_eq!(Placement::parse(""), None);
+    }
+
+    #[test]
+    fn place_acts_only_on_the_active_pane() {
+        // (1 | 2) / 3, aktiver Bereich 2
+        let base = || split(Dir::Vertical, 0.5, split(Dir::Horizontal, 0.5, Node::Leaf(1), Node::Leaf(2)), Node::Leaf(3));
+        // replace: nur 2 wird ersetzt, der Rest der Teilung bleibt
+        let mut l = Some(base());
+        let r = place(&mut l, 9, 2, Placement::Replace);
+        assert_eq!(r, Placed { minimized: vec![], replaced: Some(2) });
+        assert_eq!(l, Some(split(Dir::Vertical, 0.5, split(Dir::Horizontal, 0.5, Node::Leaf(1), Node::Leaf(9)), Node::Leaf(3))));
+        // split_right: nur 2 wird geteilt, 9 rechts daneben
+        let mut l = Some(base());
+        assert_eq!(place(&mut l, 9, 2, Placement::SplitRight), Placed::default());
+        let want = split(Dir::Vertical, 0.5, split(Dir::Horizontal, 0.5, Node::Leaf(1), split(Dir::Horizontal, 0.5, Node::Leaf(2), Node::Leaf(9))), Node::Leaf(3));
+        assert_eq!(l, Some(want));
+        // split_down: 9 unter 3
+        let mut l = Some(base());
+        place(&mut l, 9, 3, Placement::SplitDown);
+        assert_eq!(l.as_ref().unwrap().leaf_ids(), vec![1, 2, 3, 9]);
+        assert_eq!(l, Some(split(Dir::Vertical, 0.5, split(Dir::Horizontal, 0.5, Node::Leaf(1), Node::Leaf(2)), split(Dir::Vertical, 0.5, Node::Leaf(3), Node::Leaf(9)))));
+        // solo: allein, die anderen verlassen das Layout (der Aufrufer minimiert sie)
+        let mut l = Some(base());
+        let r = place(&mut l, 9, 2, Placement::Solo);
+        assert_eq!((l, r.minimized, r.replaced), (Some(Node::Leaf(9)), vec![1, 2, 3], None));
+        // solo mit einer schon sichtbaren Sitzung: sie bleibt allein übrig
+        let mut l = Some(base());
+        assert_eq!(place(&mut l, 2, 1, Placement::Solo).minimized, vec![1, 3]);
+        assert_eq!(l, Some(Node::Leaf(2)));
+        // schon sichtbar: replace/split ändern nichts
+        for p in [Placement::Replace, Placement::SplitRight, Placement::SplitDown] {
+            let mut l = Some(base());
+            assert_eq!(place(&mut l, 3, 1, p), Placed::default());
+            assert_eq!(l, Some(base()), "{p:?}");
+        }
+        // aktiver Bereich nicht im Layout: der erste Bereich
+        let mut l = Some(base());
+        assert_eq!(place(&mut l, 9, 42, Placement::Replace).replaced, Some(1));
+        // leerer Hub: einziger Bereich, egal wie
+        for p in [Placement::Solo, Placement::Replace, Placement::SplitRight, Placement::SplitDown] {
+            let mut none = None;
+            assert_eq!(place(&mut none, 5, 0, p), Placed::default());
+            assert_eq!(none, Some(Node::Leaf(5)));
+        }
     }
 
     #[test]
