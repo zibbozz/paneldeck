@@ -176,6 +176,24 @@ fn env_caller_ok(is_chat: Option<bool>) -> bool {
     is_chat == Some(false)
 }
 
+/// Wer ruft auf (#152)? `chain` = Prozessbaum des Prozesses am anderen Ende der Verbindung (vom Hub ermittelt, nächster
+/// zuerst; leer, wenn unbekannt); `sessions` = (Sitzung, PID ihrer Shell, Hinweis erlaubt). Regeln:
+/// 1. Liegt eine Sitzung im Prozessbaum, ist sie der Aufrufer (`"process"`) – die nächste, wenn es mehrere gäbe. Ein
+///    abweichender `PANELDECK_SESSION`-Hinweis zählt dann nicht (er ist fälschbar, der Prozessbaum nicht).
+/// 2. Sonst gilt der Hinweis `env` (`"env"`), aber nur für eine Sitzung, die ihn braucht (`hint_ok`: ein WSL-Terminal –
+///    dort liegt die Brücke nicht im Windows-Prozessbaum der Sitzung). Andere Hinweise werden ignoriert.
+/// 3. Sonst ist der Aufrufer extern (`"none"`, ohne Sitzung und ohne Kette).
+fn pick_caller(chain: &[u32], sessions: &[(u64, Option<u32>, bool)], env: Option<u64>) -> (Option<u64>, &'static str) {
+    let near = sessions.iter().filter_map(|(id, pid, _)| Some((*id, chain.iter().position(|p| Some(*p) == *pid)?))).min_by_key(|(_, pos)| *pos);
+    if let Some((id, _)) = near {
+        return (Some(id), "process");
+    }
+    match env.and_then(|id| sessions.iter().find(|(s, _, _)| *s == id)) {
+        Some((id, _, true)) => (Some(*id), "env"),
+        _ => (None, "none"),
+    }
+}
+
 /// Felder `how`/`model` des Protokolleintrags: nur für Werkzeuge eines Chats (`how == "chat"`, ausdrücklich übergeben,
 /// nicht aus dem Aufrufer geschlossen).
 fn log_origin(how: &str, chat_model: Option<String>) -> (Option<String>, Option<String>) {
@@ -482,25 +500,25 @@ impl App {
         }
     }
 
-    /// Welche Hub-Sitzung ruft auf? Zuerst über den Prozessbaum der Brücke (Eltern-Prozesse; nicht fälschbar durch eine gesetzte
-    /// Umgebungsvariable), sonst über `PANELDECK_SESSION` (nötig in WSL, dort liegt die Brücke nicht im Windows-Prozessbaum).
+    /// Welche Hub-Sitzung ruft auf? `pid` ist der Prozess am anderen Ende der Verbindung, vom Hub selbst ermittelt
+    /// (`hooks::McpJob::caller_pid`, nie die Angabe des Clients). Zuerst über dessen Prozessbaum (nicht fälschbar durch
+    /// eine gesetzte Umgebungsvariable), sonst über `PANELDECK_SESSION` – nur für WSL-Terminals, dort liegt die Brücke
+    /// nicht im Windows-Prozessbaum (siehe [`pick_caller`]). Ein Chat hat keine PTY und ist nie Aufrufer über diesen Weg.
     fn mcp_resolve_caller(&self, env_caller: Option<u64>, pid: Option<u32>) -> (Option<u64>, &'static str) {
-        if let Some(pid) = pid {
-            let chain = crate::winctl::process_chain(pid);
-            for (id, e) in &self.entries {
-                if let Some(sp) = e.live.as_ref().and_then(|s| s.pid()) {
-                    if chain.contains(&sp) {
-                        return (Some(*id), "process");
-                    }
-                }
-            }
-        }
-        // Nur Terminals: ein Chat hat keine PTY, eine Brücke kann also nie in ihm laufen (sonst könnte sie sich als Chat
-        // ausgeben und dessen Kinder steuern).
-        match env_caller {
-            Some(id) if env_caller_ok(self.entries.get(&id).map(|e| e.is_chat())) => (Some(id), "env"),
-            _ => (None, "none"),
-        }
+        let chain = pid.map(crate::winctl::process_chain).unwrap_or_default();
+        let sessions: Vec<(u64, Option<u32>, bool)> = self
+            .entries
+            .iter()
+            .map(|(id, e)| (*id, e.live.as_ref().and_then(|s| s.pid()), env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl")))
+            .collect();
+        pick_caller(&chain, &sessions, env_caller)
+    }
+
+    /// Sitzung, in deren Prozessbaum `pid` läuft (für `--open` aus einem Terminal, #152) – nur über den Prozessbaum.
+    pub(super) fn session_of_pid(&self, pid: Option<u32>) -> Option<u64> {
+        let chain = pid.map(crate::winctl::process_chain).unwrap_or_default();
+        let sessions: Vec<(u64, Option<u32>, bool)> = self.entries.iter().map(|(id, e)| (*id, e.live.as_ref().and_then(|s| s.pid()), false)).collect();
+        pick_caller(&chain, &sessions, None).0
     }
 
     fn mcp_finish(&mut self, reply: &SyncSender<R>, tool: &str, args: &Value, caller: Option<u64>, how: &str, r: R) {
@@ -553,7 +571,8 @@ impl App {
             return rx;
         }
         if let Some(msg) = crate::chat::tools::spawn_forbidden(tool, args, &origins) {
-            self.mcp_finish(&tx, tool, args, Some(chat), "chat", Err(er("forbidden", tr("Ein von einem Agenten ausgelöster Chat darf die MCP-Brücke von Paneldeck nicht starten.", msg))));
+            let de_msg = if msg == crate::chat::tools::SPAWN_CLAUDE_MESSAGE { "Ein von einem Agenten ausgelöster Chat darf keine Claude-Sitzungen starten." } else { "Ein von einem Agenten ausgelöster Chat darf die MCP-Brücke von Paneldeck nicht starten." };
+            self.mcp_finish(&tx, tool, args, Some(chat), "chat", Err(er("forbidden", tr(de_msg, msg))));
             return rx;
         }
         if let Out::Now(r) = self.mcp_call(ctx, tool, args, Some(chat), "chat", &tx) {
@@ -579,17 +598,17 @@ impl App {
     }
 
     /// `caller` hat `id` über `create_session` angelegt: die neue Sitzung bekommt seine Agenten-Kette samt ihm (#152).
-    /// Geänderte Ketten werden sofort gespeichert (ein Absturz soll die Markierung nicht verlieren).
+    /// Geänderte Ketten werden sofort gespeichert (nur `state.json`; ein Absturz soll die Markierung nicht verlieren).
     fn mcp_taint_create(&mut self, caller: Option<u64>, id: u64) {
         if super::taint::on_create(&mut self.entries, caller, id) {
-            self.save_all();
+            self.save_state();
         }
     }
 
     /// `caller` hat in `id` geschrieben: als Glied einer Agenten-Kette markiert er das Ziel mit ihr (#152).
     fn mcp_taint_write(&mut self, caller: Option<u64>, id: u64) {
         if super::taint::on_write(&mut self.entries, caller, id) {
-            self.save_all();
+            self.save_state();
         }
     }
 
@@ -652,7 +671,7 @@ impl App {
             "wait_for_status" => self.mcp_wait(args, reply, tool, caller, how),
             "queue_prompt" => Out::Now(self.mcp_queue(args, caller)),
             "rename_session" => Out::Now(self.mcp_rename(args, caller)),
-            "focus_session" => Out::Now(self.mcp_focus(ctx, args)),
+            "focus_session" => Out::Now(self.mcp_focus(ctx, args, caller)),
             "close_session" => Out::Now(self.mcp_close(args, caller)),
             t if agent::TOOLS.contains(&t) => Out::Now(self.mcp_planning(t, args, caller)),
             _ => Out::Now(Err(er("not_found", tr("Unbekanntes Werkzeug", "Unknown tool")))),
@@ -1372,8 +1391,12 @@ impl App {
         Ok(json!({"ok": true, "name": e.meta.name}))
     }
 
-    fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value) -> R {
+    fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let id = self.mcp_target(args, None, false)?;
+        // Wie bei Chats (`proxy_forbidden`): keine Sitzung der eigenen Agenten-Kette in den Vordergrund holen (#152).
+        if super::taint::write_forbidden(&self.entries, caller, id) {
+            return Err(super::taint::chain_error());
+        }
         // Abgedockt: dieses Fenster nach vorn; Sitzung eines weiteren Fensters: dort aktivieren, Fenster nach vorn.
         self.apply(ctx, Action::Focus(id));
         Ok(json!({"ok": true}))
@@ -1640,6 +1663,27 @@ mod tests {
         assert_eq!(planning_log_info("log_time", &json!({"ticket": "PAN-1", "duration": 2})), "PAN-1 2");
         assert_eq!(planning_log_info("set_todo_done", &json!({"id": "TODO-4"})), "TODO-4");
         assert!(planning_log_info("add_todo", &json!({"text": long})).chars().count() <= 81);
+    }
+
+    #[test]
+    fn the_caller_comes_from_the_peer_process_tree_not_from_its_own_claims() {
+        // Sitzungen: 5 (Shell-PID 500), 20 (PID 2000, markiert), 30 (WSL-Terminal, PID 3000), 40 (Chat, keine PID)
+        let sessions = [(5, Some(500), false), (20, Some(2000), false), (30, Some(3000), true), (40, None, false)];
+        // Rohe Verbindung aus dem Prozessbaum von 20, ohne oder mit gefälschter Angabe: immer 20
+        let tree = [4242, 4100, 2000, 1, 999];
+        assert_eq!(pick_caller(&tree, &sessions, None), (Some(20), "process"));
+        assert_eq!(pick_caller(&tree, &sessions, Some(5)), (Some(20), "process"), "Hinweis 5 ändert nichts");
+        assert_eq!(pick_caller(&tree, &sessions, Some(30)), (Some(20), "process"));
+        // die nächste Sitzung im Baum gewinnt
+        assert_eq!(pick_caller(&[1, 2000, 500], &sessions, None), (Some(20), "process"));
+        // nicht zuzuordnen (z. B. per schtasks/WMI gestartet): Hinweis nur für ein WSL-Terminal, sonst extern
+        let outside = [7777, 4];
+        assert_eq!(pick_caller(&outside, &sessions, None), (None, "none"));
+        assert_eq!(pick_caller(&outside, &sessions, Some(5)), (None, "none"), "Terminal ohne WSL: Hinweis ignoriert");
+        assert_eq!(pick_caller(&outside, &sessions, Some(40)), (None, "none"), "Chat: nie");
+        assert_eq!(pick_caller(&outside, &sessions, Some(30)), (Some(30), "env"), "WSL: Brücke liegt nicht im Windows-Baum");
+        assert_eq!(pick_caller(&outside, &sessions, Some(99)), (None, "none"));
+        assert_eq!(pick_caller(&[], &sessions, Some(30)), (Some(30), "env"), "Absender unbekannt");
     }
 
     #[test]

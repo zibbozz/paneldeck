@@ -93,7 +93,9 @@ pub fn new_uuid() -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcCmd {
     Show,
-    Open { path: String, claude: bool },
+    /// `origin_pid`: Prozess, der den Befehl geschickt hat – ermittelt der Hub selbst aus der Verbindung (#152), nie aus
+    /// der Anfrage. Liegt er im Prozessbaum einer Sitzung, erbt die neue Sitzung deren Agenten-Kette.
+    Open { path: String, claude: bool, origin_pid: Option<u32> },
 }
 
 pub struct HookServer {
@@ -114,9 +116,12 @@ pub struct HookServer {
 pub struct McpJob {
     pub tool: String,
     pub args: Value,
-    /// Sitzung, aus der der Agent aufruft (Umgebungsvariable `PANELDECK_SESSION` der Brücke), falls bekannt.
+    /// Sitzung, aus der der Agent nach eigener Angabe aufruft (Umgebungsvariable `PANELDECK_SESSION` der Brücke) –
+    /// nur ein Hinweis, siehe `App::mcp_resolve_caller`.
     pub caller: Option<u64>,
-    /// Prozess-ID der Brücke: der Hub ordnet sie über den Prozessbaum einer Sitzung zu (zuverlässiger als die Umgebungsvariable).
+    /// Prozess am anderen Ende der Verbindung, vom Hub selbst über die TCP-Tabelle ermittelt (`winctl::tcp_peer_pid`,
+    /// seit 2.3.0, #152); der Hub ordnet ihn über den Prozessbaum einer Sitzung zu. Ein `caller_pid` in der Anfrage wird
+    /// ignoriert (ein Client könnte ihn fälschen).
     pub caller_pid: Option<u32>,
     pub reply: std::sync::mpsc::SyncSender<Result<Value, (String, String)>>,
 }
@@ -192,12 +197,16 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
     if buf.contains("\"mcp\"") {
         if let Ok(v) = serde_json::from_str::<Value>(&buf) {
             if v.get("cmd").and_then(|c| c.as_str()) == Some("mcp") {
-                handle_mcp(&mut s, &v, ipc_token, mcp_tx, ctx);
+                let pid = peer_pid(&s);
+                handle_mcp(&mut s, &v, ipc_token, mcp_tx, ctx, pid);
                 return;
             }
         }
     }
-    if let Some(cmd) = parse_cmd(&buf, ipc_token) {
+    if let Some(mut cmd) = parse_cmd(&buf, ipc_token) {
+        if let IpcCmd::Open { origin_pid, .. } = &mut cmd {
+            *origin_pid = peer_pid(&s);
+        }
         let _ = cmd_tx.send(cmd);
         let _ = s.write_all(b"ok");
         ctx.request_repaint();
@@ -207,6 +216,11 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
     }
 }
 
+/// Prozess am anderen Ende der Verbindung (vom Hub ermittelt, nicht vom Client angegeben).
+fn peer_pid(s: &TcpStream) -> Option<u32> {
+    crate::winctl::tcp_peer_pid(s.peer_addr().ok()?, s.local_addr().ok()?)
+}
+
 fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
     let v: Value = serde_json::from_str(raw).ok()?;
     if v.get("token")?.as_str()? != token {
@@ -214,7 +228,7 @@ fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
     }
     match v.get("cmd")?.as_str()? {
         "show" => Some(IpcCmd::Show),
-        "open" => Some(IpcCmd::Open { path: v.get("path")?.as_str()?.to_string(), claude: v.get("claude").and_then(|c| c.as_bool()).unwrap_or(false) }),
+        "open" => Some(IpcCmd::Open { path: v.get("path")?.as_str()?.to_string(), claude: v.get("claude").and_then(|c| c.as_bool()).unwrap_or(false), origin_pid: None }),
         _ => None,
     }
 }
@@ -234,7 +248,7 @@ pub fn forward_to_running(dir: &Path, cmd: &IpcCmd) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else { return false };
     let body = match cmd {
         IpcCmd::Show => json!({"token": token, "cmd": "show"}),
-        IpcCmd::Open { path, claude } => json!({"token": token, "cmd": "open", "path": path, "claude": claude}),
+        IpcCmd::Open { path, claude, .. } => json!({"token": token, "cmd": "open", "path": path, "claude": claude}),
     };
     if stream.write_all(body.to_string().as_bytes()).is_err() {
         return false;
@@ -252,7 +266,7 @@ fn mcp_err(code: &str, message: &str) -> Value {
 
 /// Eine MCP-Anfrage entgegennehmen: Token und Stufe prüfen, an die UI weiterreichen, Antwort zurückschreiben.
 /// Die Prüfung der Stufe passiert hier im Hub (nicht erst in der Brücke), damit ein anderer Client sie nicht umgehen kann.
-fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync::mpsc::Sender<McpJob>, ctx: &egui::Context) {
+fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync::mpsc::Sender<McpJob>, ctx: &egui::Context, peer_pid: Option<u32>) {
     use crate::mcp;
     let mut reply = |r: Value| {
         let _ = s.write_all(r.to_string().as_bytes());
@@ -280,7 +294,8 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
     // Wartezeit: bei Werkzeugen mit eigener Frist deren Wert (+ Reserve), sonst kurz.
     let wait = args.get("timeout_secs").and_then(|t| t.as_u64()).map(|t| t.clamp(1, mcp::MAX_WAIT_SECS) + 10).unwrap_or(30);
     let caller = v.get("caller").and_then(|c| c.as_u64());
-    let caller_pid = v.get("caller_pid").and_then(|c| c.as_u64()).and_then(|p| u32::try_from(p).ok());
+    // Nie die Angabe des Clients: der Prozess am anderen Ende der Verbindung (#152).
+    let caller_pid = peer_pid;
     let (rtx, rrx) = std::sync::mpsc::sync_channel(1);
     let out = if mcp_tx.send(McpJob { tool: tool.to_string(), args, caller, caller_pid, reply: rtx }).is_err() {
         mcp_err("internal", crate::state::t("Hub nicht bereit", "Hub not ready"))
@@ -555,8 +570,9 @@ mod tests {
         write_ipc_file(&dir, srv.port, &srv.token);
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
         write_ipc_file(&dir, srv.port, &srv.ipc_token);
-        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true }));
-        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Open { path: "C:\\x".into(), claude: true });
+        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin_pid: Some(1) }));
+        // Der Hub ermittelt den Absender selbst (hier: dieser Testprozess), eine Angabe im Befehl zählt nicht.
+        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Open { path: "C:\\x".into(), claude: true, origin_pid: Some(std::process::id()) });
         // veraltete Datei (falscher Port) → keine Bestätigung
         write_ipc_file(&dir, 1, "x");
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
@@ -627,10 +643,11 @@ mod tests {
         // Ein Lese-Werkzeug erreicht die UI-Schleife (hier: ein Test, der sie spielt).
         let reply = std::thread::spawn({
             let dir = dir.clone();
-            move || call_mcp(&dir, "list_sessions", &json!({"include_exited": false}), Some(7), None)
+            move || call_mcp(&dir, "list_sessions", &json!({"include_exited": false}), Some(7), Some(1))
         });
         let job = srv.mcp_rx.recv_timeout(Duration::from_secs(3)).expect("Anfrage kommt in der UI-Schleife an");
-        assert_eq!((job.tool.as_str(), job.caller, job.caller_pid), ("list_sessions", Some(7), None));
+        // caller_pid: der Hub ermittelt den Prozess am anderen Ende selbst (dieser Testprozess); die gefälschte Angabe (PID 1) zählt nicht.
+        assert_eq!((job.tool.as_str(), job.caller, job.caller_pid), ("list_sessions", Some(7), Some(std::process::id())));
         assert_eq!(job.args["include_exited"], false);
         job.reply.send(Ok(json!({"sessions": []}))).unwrap();
         assert_eq!(reply.join().unwrap().unwrap()["sessions"], json!([]));

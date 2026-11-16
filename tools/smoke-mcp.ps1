@@ -286,6 +286,17 @@ try {
   Check 'Kette: Agent im Kind -> send_text in den Eltern-Agenten forbidden' ($kx.isError -eq $true -and $kx.content[0].text -like 'forbidden*' -and $kx.content[0].text -match 'agent chain') ($kx | ConvertTo-Json -Compress -Depth 5)
   Check 'Kette: Agent im Kind -> rename_session des Eltern-Agenten forbidden' ((InS $K 'rename_session' @{ session = $A; name = 'x' }).content[0].text -like 'forbidden*')
   Check 'Kette: Agent im Kind darf den Eltern-Agenten lesen' ((InS $K 'read_terminal' @{ session = $A; lines = 5 }).isError -ne $true)
+  foreach ($t in @(@('run_command', @{ session = $A; command = 'echo kind-leak' }), @('send_keys', @{ session = $A; keys = @('enter') }), @('queue_prompt', @{ session = $A; prompt = 'x' }), @('focus_session', @{ session = $A }))) {
+    $kr = InS $K $t[0] $t[1]
+    Check "Kette: Agent im Kind -> $($t[0]) in den Eltern-Agenten forbidden" ($kr.isError -eq $true -and $kr.content[0].text -like 'forbidden*') ($kr | ConvertTo-Json -Compress -Depth 5)
+  }
+  # Gefaelschter/fehlender Aufrufer: eine rohe TCP-Anfrage mit dem Token aus ipc.json, ohne caller/caller_pid, aus dem
+  # Prozessbaum des Kindes -> der Hub ermittelt den Absender selbst (TCP-Tabelle + Prozessbaum) und weist ab.
+  $rawCmd = "`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json; `$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port); `$s = `$c.GetStream(); `$b = [Text.Encoding]::UTF8.GetBytes('{""token"":""' + `$j.token + '"",""cmd"":""mcp"",""tool"":""send_text"",""caller"":null,""caller_pid"":4,""args"":{""session"":$A,""text"":""echo raw-leak""}}'); `$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1); (New-Object IO.StreamReader(`$s)).ReadToEnd()"
+  $raw = Tool 'run_command' @{ session = $K; command = $rawCmd; timeout_secs = 30 }
+  Check 'Kette: rohe TCP-Anfrage ohne Aufrufer aus dem Kind -> zugeordnet und forbidden' ($raw.data.output -match '"code":"forbidden"' -and $raw.data.output -match 'agent chain') $raw.text
+  Start-Sleep 1
+  Check 'Kette: im Eltern-Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'kind-leak|raw-leak')
   Check 'Kette: von aussen (ohne Kette) bleibt Schreiben erlaubt' (-not (Tool 'send_text' @{ session = $A; text = ' '; submit = $false }).err)
   $cl = InA 'close_session' @{ session = $K }
   Check 'Eltern-Agent schliesst sein Kind' ($cl.isError -ne $true)

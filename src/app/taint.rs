@@ -70,6 +70,46 @@ fn merge_into(entries: &mut BTreeMap<u64, Entry>, target: u64, add: &[u64]) -> b
     chain.len() != before
 }
 
+/// Ketten bereinigen: Sitzungen, die es nicht mehr gibt, fallen heraus (beim Laden und nach dem Schließen einer
+/// Sitzung). Sicher, weil Sitzungs-Ids nie neu vergeben werden – eine verschwundene Id kann niemand mehr sein.
+/// `true` = etwas geändert.
+pub(super) fn prune(entries: &mut BTreeMap<u64, Entry>) -> bool {
+    let alive: std::collections::BTreeSet<u64> = entries.keys().copied().collect();
+    let mut changed = false;
+    for e in entries.values_mut() {
+        let before = e.meta.agent_chain.len();
+        e.meta.agent_chain.retain(|s| alive.contains(s));
+        changed |= e.meta.agent_chain.len() != before;
+        if let Some(c) = e.chat.as_mut() {
+            c.origin_sessions.retain(|s| alive.contains(s));
+        }
+    }
+    changed
+}
+
+/// Der Nutzer hebt die Markierung einer Sitzung auf (Kontextmenü „Agenten-Kette zurücksetzen“). Nur aus der
+/// Oberfläche, nie über MCP. Die Kette einer gerade laufenden Chat-Runde bleibt bis zu deren Ende. `true` = geändert.
+pub(super) fn reset(entries: &mut BTreeMap<u64, Entry>, id: u64) -> bool {
+    entries.get_mut(&id).is_some_and(|e| !std::mem::take(&mut e.meta.agent_chain).is_empty())
+}
+
+/// Hinweis für Tooltip/Seitenleiste: „Aus Agenten-Kette gestartet: A, K“ (Namen der Vorfahren, die es noch gibt).
+/// `None` für unmarkierte Sitzungen.
+pub(super) fn hint(entries: &BTreeMap<u64, Entry>, id: u64) -> Option<String> {
+    let chain = &entries.get(&id)?.meta.agent_chain;
+    if chain.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = chain
+        .iter()
+        .map(|s| match entries.get(s) {
+            Some(e) if !e.display_name().trim().is_empty() => e.display_name().to_string(),
+            _ => format!("#{s}"),
+        })
+        .collect();
+    Some(format!("{} {}", state::t("Aus Agenten-Kette gestartet:", "Started from agent chain:"), names.join(", ")))
+}
+
 /// Fehler, wenn ein Agent in eine Sitzung seiner Kette schreiben will.
 pub(super) fn chain_error() -> (String, String) {
     (
@@ -210,6 +250,65 @@ mod tests {
         w.insert(20, Entry::new(meta));
         assert!(write_forbidden(&w, Some(20), 5));
         assert!(!write_forbidden(&w, Some(5), 20));
+    }
+
+    #[test]
+    fn an_agent_created_chat_cannot_write_into_its_agent_even_in_a_user_turn() {
+        // Agent 5 legt Chat 12 an; der Nutzer schreibt selbst im Chat (keine Kette der Runde) – die Werkzeuge des
+        // Modells dürfen trotzdem nicht in 5 schreiben, auch nicht per run_command/send_keys/queue_prompt/close/focus.
+        let mut w = world(&[(5, false), (12, true), (30, false)]);
+        on_create(&mut w, Some(5), 12);
+        user_sends_chat(&mut w, 12);
+        let origins = ancestors(&w, Some(12));
+        assert_eq!(origins, [5]);
+        for (tool, args) in [
+            ("send_text", serde_json::json!({"session": 5, "text": "x"})),
+            ("run_command", serde_json::json!({"session": 5, "command": "dir"})),
+            ("send_keys", serde_json::json!({"session": 5, "keys": ["enter"]})),
+            ("queue_prompt", serde_json::json!({"session": 5, "prompt": "x"})),
+            ("close_session", serde_json::json!({"session": 5})),
+            ("focus_session", serde_json::json!({"session": 5})),
+        ] {
+            assert!(proxy_forbidden(tool, &args, &origins), "{tool}");
+        }
+        assert!(!proxy_forbidden("send_text", &serde_json::json!({"session": 30, "text": "x"}), &origins));
+        // Bei der Ausführung (mcp_target, für jeden Aufrufer, auch bei „Agenten dürfen fremde Sitzungen schließen“)
+        assert!(write_forbidden(&w, Some(12), 5));
+    }
+
+    #[test]
+    fn closed_sessions_are_pruned_from_every_chain() {
+        let mut w = world(&[(5, false), (20, false), (21, true)]);
+        on_create(&mut w, Some(5), 20);
+        on_create(&mut w, Some(20), 21);
+        w.get_mut(&21).unwrap().chat.as_mut().unwrap().origin_sessions = vec![5, 99];
+        assert!(!prune(&mut w), "alle noch da");
+        w.remove(&5);
+        assert!(prune(&mut w));
+        assert_eq!(w[&20].meta.agent_chain, Vec::<u64>::new());
+        assert_eq!(w[&21].meta.agent_chain, [20]);
+        assert!(w[&21].chat.as_ref().unwrap().origin_sessions.is_empty());
+        assert!(!prune(&mut w));
+        // Laden: eine Kette aus state.json mit Ids, die es nicht mehr gibt
+        let meta: SessionMeta = serde_json::from_str(r#"{"id":40,"agent_chain":[3,20,77]}"#).unwrap();
+        w.insert(40, Entry::new(meta));
+        assert!(prune(&mut w));
+        assert_eq!(w[&40].meta.agent_chain, [20]);
+    }
+
+    #[test]
+    fn the_user_can_reset_a_chain() {
+        let mut w = world(&[(5, false), (20, false)]);
+        w.get_mut(&5).unwrap().meta.name = "Agent A".into();
+        w.get_mut(&5).unwrap().meta.custom_name = true;
+        on_create(&mut w, Some(5), 20);
+        assert!(hint(&w, 20).is_some_and(|h| h.ends_with(": Agent A")), "{:?}", hint(&w, 20));
+        assert_eq!(hint(&w, 5), None, "unmarkiert: kein Hinweis");
+        assert!(reset(&mut w, 20));
+        assert!(w[&20].meta.agent_chain.is_empty() && hint(&w, 20).is_none());
+        assert!(!write_forbidden(&w, Some(20), 5));
+        assert!(!reset(&mut w, 20), "nichts mehr zurückzusetzen");
+        assert!(!reset(&mut w, 99));
     }
 
     #[test]

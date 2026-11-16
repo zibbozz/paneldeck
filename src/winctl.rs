@@ -89,6 +89,61 @@ pub fn process_chain(pid: u32) -> Vec<u32> {
     vec![pid]
 }
 
+/// Prozess am anderen Ende einer angenommenen IPv4-Verbindung (#152): `peer` = Adresse des Clients (`peer_addr`),
+/// `local` = Adresse des Hubs (`local_addr`). Gesucht wird in der TCP-Tabelle des Systems (`GetExtendedTcpTable`,
+/// `TCP_TABLE_OWNER_PID_CONNECTIONS`) die Zeile des Clients: lokale Adresse/Port = `peer`, entfernter Port = Port des
+/// Hubs. So muss der Hub der Prozess-ID, die ein Client selbst angibt, nicht glauben. `None`, wenn die Tabelle nicht
+/// lesbar ist oder keine Zeile passt (nur IPv4 – der Hub lauscht nur auf 127.0.0.1).
+#[cfg(windows)]
+pub fn tcp_peer_pid(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> Option<u32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_CONNECTIONS};
+    let (std::net::SocketAddr::V4(peer), std::net::SocketAddr::V4(local)) = (peer, local) else { return None };
+    const AF_INET: u32 = 2;
+    const NO_ERROR: u32 = 0;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    // Die Tabelle kann zwischen Größenabfrage und Abruf wachsen: ein paar Versuche mit Reserve.
+    let mut size: u32 = 0;
+    let mut buf: Vec<u32> = Vec::new();
+    let mut ok = false;
+    for _ in 0..4 {
+        // SAFETY: `buf` ist (als u32-Vektor passend ausgerichtet) mindestens `size` Bytes groß bzw. beim ersten Aufruf leer
+        // mit `size = 0` (dann schreibt die Funktion nur die nötige Größe); `size` ist ein lokaler Ein-/Ausgabewert.
+        let r = unsafe { GetExtendedTcpTable(if buf.is_empty() { std::ptr::null_mut() } else { buf.as_mut_ptr().cast() }, &mut size, 0, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0) };
+        if r == NO_ERROR && !buf.is_empty() {
+            ok = true;
+            break;
+        }
+        if r != ERROR_INSUFFICIENT_BUFFER && !(r == NO_ERROR && buf.is_empty()) {
+            return None;
+        }
+        size = size.saturating_add(16 * std::mem::size_of::<MIB_TCPROW_OWNER_PID>() as u32);
+        buf = vec![0u32; (size as usize).div_ceil(4)];
+    }
+    if !ok {
+        return None;
+    }
+    let bytes = buf.len() * 4;
+    let n = buf[0] as usize;
+    let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+    if 4 + n.saturating_mul(row_size) > bytes {
+        return None;
+    }
+    // Adressen stehen in Netzwerk-Reihenfolge im Speicher (Bytes wie `octets()`), Ports in den unteren 16 Bit, ebenfalls
+    // in Netzwerk-Reihenfolge.
+    let want_addr = u32::from_ne_bytes(peer.ip().octets());
+    let port = |p: u32| u16::from_be(p as u16);
+    // SAFETY: Die Zeilen folgen dem Zähler (Offset 4, Ausrichtung 4) und liegen laut Prüfung oben ganz im Puffer.
+    let rows: &[MIB_TCPROW_OWNER_PID] = unsafe { std::slice::from_raw_parts(buf.as_ptr().add(1).cast(), n) };
+    rows.iter()
+        .find(|r| r.dwLocalAddr == want_addr && port(r.dwLocalPort) == peer.port() && port(r.dwRemotePort) == local.port())
+        .map(|r| r.dwOwningPid)
+}
+
+#[cfg(not(windows))]
+pub fn tcp_peer_pid(_peer: std::net::SocketAddr, _local: std::net::SocketAddr) -> Option<u32> {
+    None
+}
+
 /// Eigenes Fenster (dieses Prozesses) mit genau diesem Titel suchen – für weitere Fenster, deren Handle egui nicht herausgibt
 /// (runde Ecken über DWM). Der Titel ist beim Anlegen eindeutig (`Paneldeck #<n>`).
 #[cfg(windows)]
