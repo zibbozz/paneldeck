@@ -15,12 +15,11 @@ mod gitops;
 mod history;
 mod hooks;
 mod cli;
-mod console;
+mod platform;
 mod help;
 mod integration;
 mod launch;
 mod keys;
-mod notify;
 mod osc;
 mod paths;
 mod planning;
@@ -39,11 +38,11 @@ mod tasks;
 mod templates;
 mod terminal;
 mod undo;
-mod tray;
 mod termview;
 mod theme;
 mod usage;
-mod winctl;
+
+use platform::console;
 
 fn app_icon() -> eframe::egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon64.png")).unwrap_or_default()
@@ -96,22 +95,12 @@ fn acquire_instance_lock() -> InstanceLock {
 }
 
 /// Rohe Kommandozeile mit eigener Zerlegung (`cli::split_command_line`), damit `"C:\"` und Pfade mit
-/// Leerzeichen nach einer Laufwerkswurzel richtig ankommen. Ohne Windows: `std::env::args`.
+/// Leerzeichen nach einer Laufwerkswurzel richtig ankommen. Ohne rohe Kommandozeile (`platform::process`): `std::env::args`.
 fn command_line_args() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        // SAFETY: GetCommandLineW liefert einen nullterminierten Zeiger, der für die Prozesslaufzeit gültig ist.
-        let p = unsafe { windows_sys::Win32::System::Environment::GetCommandLineW() };
-        if !p.is_null() {
-            let mut n = 0usize;
-            while unsafe { *p.add(n) } != 0 {
-                n += 1;
-            }
-            let raw = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, n) });
-            let v = cli::split_command_line(&raw);
-            if !v.is_empty() {
-                return v;
-            }
+    if let Some(raw) = platform::process::raw_command_line() {
+        let v = cli::split_command_line(&raw);
+        if !v.is_empty() {
+            return v;
         }
     }
     std::env::args().collect()

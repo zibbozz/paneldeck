@@ -101,9 +101,8 @@ impl App {
                             if ui.button(lang.t("In Zwischenablage kopieren", "Copy to clipboard")).clicked() {
                                 ctx.copy_text(self.diagnostics());
                             }
-                            #[cfg(windows)]
-                            if ui.button(lang.t("Datenordner öffnen", "Open data folder")).clicked() {
-                                let _ = std::process::Command::new("explorer").arg(&self.dir).spawn();
+                            if crate::platform::open::FILE_MANAGER && ui.button(lang.t("Datenordner öffnen", "Open data folder")).clicked() {
+                                crate::platform::open::folder(&self.dir);
                             }
                         });
                         ui.label(RichText::new(format!("{}: {}", lang.t("Datenordner", "Data folder"), self.dir.display())).small().color(style::dim(ui)));
@@ -153,9 +152,8 @@ impl App {
                             if ui.button(lang.t("Neu laden", "Reload")).clicked() {
                                 self.reload_themes();
                             }
-                            #[cfg(windows)]
-                            if ui.button(lang.t("Ordner öffnen", "Open folder")).clicked() {
-                                let _ = std::process::Command::new("explorer").arg(self.themes_dir()).spawn();
+                            if crate::platform::open::FILE_MANAGER && ui.button(lang.t("Ordner öffnen", "Open folder")).clicked() {
+                                crate::platform::open::folder(&self.themes_dir());
                             }
                         });
                         row(ui, "Scrollback", lang.t("Zeilen pro Terminal (wirkt für neue Sitzungen)", "Lines per terminal (applies to new sessions)"), |ui| {

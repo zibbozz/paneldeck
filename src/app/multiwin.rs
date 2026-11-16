@@ -698,9 +698,9 @@ impl App {
             });
             if w.hwnd.is_none() && w.hwnd_tries < 120 {
                 w.hwnd_tries += 1;
-                if let Some(h) = crate::winctl::find_own_window(&title) {
+                if let Some(h) = crate::platform::window::find_own_window(&title) {
                     w.hwnd = Some(h);
-                    winchrome::apply_corners(h);
+                    crate::platform::chrome::apply_corners(h);
                 }
             }
             if w.close {
@@ -977,7 +977,7 @@ impl App {
             view.proj_views = s.views.iter().filter(|v| v.project != project).map(|v| (v.project, v.layout.clone(), v.focused)).collect();
             let pos = s.pos.map(|p| Pos2::new(p[0], p[1]));
             let size = s.size.map(|v| Vec2::new(v[0], v[1])).unwrap_or(Vec2::new(1100.0, 720.0));
-            let (pos, size) = fit_window(pos, size, ppp, crate::winctl::point_on_screen, crate::winctl::work_area);
+            let (pos, size) = fit_window(pos, size, ppp, crate::platform::window::point_on_screen, crate::platform::window::work_area);
             let mut w = HubWindow::new(s.id, view, pos, size, s.maximized);
             // Beim Start nicht den Fokus vom Hauptfenster nehmen; startet Paneldeck im Tray, bleiben sie bis dahin verborgen.
             w.restored = true;

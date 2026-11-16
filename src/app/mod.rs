@@ -6,13 +6,13 @@ use crate::hooks::{self, ClaudeStatus, HookMsg, HookServer, IpcCmd};
 use crate::keys;
 use crate::usage::{self, fmt_tokens, Usage, UsageWatcher};
 use crate::layout::{Dir, Node};
-use crate::notify;
+use crate::platform::notify;
 use crate::pathfmt;
 use crate::prompts::{self, Snippet};
 use crate::search::{self, SearchState};
 use crate::style::{self, Icon as SIcon};
 use crate::templates::{self, Template, TplItem};
-use crate::tray::{Tray, TrayCmd};
+use crate::platform::tray::{Tray, TrayCmd};
 use crate::shells::{self, ShellSpec};
 use crate::state::{self, Lang, Profile, Project, SavedState, SessionKind, SessionMeta, Settings};
 use crate::chat::{self as chatmod, ChatBackend, ChatState};
@@ -51,7 +51,7 @@ mod terminal_links;
 mod titlebar;
 mod toasts;
 pub(crate) mod update;
-mod winchrome;
+use crate::platform::chrome;
 
 const PALETTE: [[u8; 3]; 8] = [
     [0x61, 0xaf, 0xef],
@@ -768,24 +768,25 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "cascadia".to_owned());
     // Optionale Systemschriften als Fallback für Symbole, Sonderzeichen, CJK, Thai, Indisch, Mathe usw.
     // Es werden nur vorhandene Dateien geladen; fehlt eine, ändert sich nichts.
-    let candidates: [(&str, &str); 14] = [
-        ("seguisym", r"C:\Windows\Fonts\seguisym.ttf"),
-        ("segoeui", r"C:\Windows\Fonts\segoeui.ttf"),
-        ("msyh", r"C:\Windows\Fonts\msyh.ttc"),
-        ("msjh", r"C:\Windows\Fonts\msjh.ttc"),
-        ("yugoth", r"C:\Windows\Fonts\YuGothM.ttc"),
-        ("meiryo", r"C:\Windows\Fonts\meiryo.ttc"),
-        ("malgun", r"C:\Windows\Fonts\malgun.ttf"),
-        ("simsun", r"C:\Windows\Fonts\simsun.ttc"),
-        ("nirmala", r"C:\Windows\Fonts\Nirmala.ttc"),
-        ("leelawui", r"C:\Windows\Fonts\LeelawUI.ttf"),
-        ("seguihis", r"C:\Windows\Fonts\seguihis.ttf"),
-        ("cambria", r"C:\Windows\Fonts\cambria.ttc"),
-        ("arial", r"C:\Windows\Fonts\arial.ttf"),
-        ("dejavu", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+    let sys = crate::platform::fonts::system_font;
+    let candidates: [(&str, Option<std::path::PathBuf>); 14] = [
+        ("seguisym", sys("seguisym.ttf")),
+        ("segoeui", sys("segoeui.ttf")),
+        ("msyh", sys("msyh.ttc")),
+        ("msjh", sys("msjh.ttc")),
+        ("yugoth", sys("YuGothM.ttc")),
+        ("meiryo", sys("meiryo.ttc")),
+        ("malgun", sys("malgun.ttf")),
+        ("simsun", sys("simsun.ttc")),
+        ("nirmala", sys("Nirmala.ttc")),
+        ("leelawui", sys("LeelawUI.ttf")),
+        ("seguihis", sys("seguihis.ttf")),
+        ("cambria", sys("cambria.ttc")),
+        ("arial", sys("arial.ttf")),
+        ("dejavu", Some("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into())),
     ];
     for (name, path) in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
+        if let Some(Ok(bytes)) = path.map(std::fs::read) {
             fonts.font_data.insert(name.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
             for fam in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
                 fonts.families.entry(fam).or_default().push(name.to_owned());
@@ -800,7 +801,7 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     }
     // Fette UI-Schrift (Titel der Todo-Karten): Segoe UI Bold, sonst die normale UI-Schrift als Ersatz.
     let mut bold: Vec<String> = Vec::new();
-    if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\segoeuib.ttf") {
+    if let Some(Ok(bytes)) = sys("segoeuib.ttf").map(std::fs::read) {
         fonts.font_data.insert("segoeuib".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
         bold.push("segoeuib".to_owned());
     }
@@ -815,7 +816,7 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
                 "Lucida Console" => ("lucon", "lucon.ttf"),
                 _ => ("cour", "cour.ttf"),
             };
-            std::fs::read(format!(r"C:\Windows\Fonts\{f}")).ok().map(|b| {
+            sys(f).and_then(|p| std::fs::read(p).ok()).map(|b| {
                 fonts.font_data.insert(k.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(b)));
                 k.to_string()
             })
@@ -962,7 +963,7 @@ impl App {
             toasts: Default::default(),
             toasts_epoch: Instant::now(),
             toasts_hover: None,
-            hwnd: crate::winctl::hwnd_from(cc),
+            hwnd: crate::platform::window::hwnd_from(cc),
             in_tray: false,
             editor: None,
             applied_font: String::new(),
@@ -981,7 +982,7 @@ impl App {
             app.tray_rx = rx;
         }
         if let Some(h) = app.hwnd {
-            winchrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
+            chrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
         }
         clip::init(&app.dir);
         app.reload_themes();
@@ -1107,7 +1108,7 @@ impl App {
     /// Zusammenfassung für Fehlerberichte (wird per Knopf in die Zwischenablage kopiert).
     fn diagnostics(&self) -> String {
         let font_files = ["seguisym.ttf", "segoeui.ttf", "msyh.ttc", "msjh.ttc", "YuGothM.ttc", "meiryo.ttc", "malgun.ttf", "simsun.ttc", "Nirmala.ttc", "LeelawUI.ttf", "seguihis.ttf", "cambria.ttc", "arial.ttf", "consola.ttf"];
-        let fonts: Vec<&str> = font_files.iter().copied().filter(|f| std::path::Path::new(&format!(r"C:\Windows\Fonts\{f}")).exists()).collect();
+        let fonts: Vec<&str> = font_files.iter().copied().filter(|f| crate::platform::fonts::system_font(f).is_some_and(|p| p.exists())).collect();
         let crash = self.dir.join("crash.log");
         let l = self.settings.language;
         let t = |de: &'static str, en: &'static str| l.t(de, en);
@@ -3371,7 +3372,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        winchrome::shutdown();
+        chrome::shutdown();
         self.save_all();
     }
 }
@@ -3882,9 +3883,8 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
                 actions.push(Action::NewSessionAt(path_s.clone()));
                 ui.close();
             }
-            #[cfg(windows)]
-            if ui.button(lang.t("Im Explorer anzeigen", "Show in Explorer")).clicked() {
-                let _ = std::process::Command::new("explorer").arg(if it.is_dir { path_s.clone() } else { format!("/select,{path_s}") }).spawn();
+            if crate::platform::open::FILE_MANAGER && ui.button(lang.t("Im Explorer anzeigen", "Show in Explorer")).clicked() {
+                crate::platform::open::show_in_file_manager(&path_s, it.is_dir);
                 ui.close();
             }
         };
@@ -3930,34 +3930,12 @@ fn split_args(s: &str) -> Vec<String> {
     out
 }
 
-/// Startet die Shell mit erhöhten Rechten in einem externen Fenster (nur Windows).
+/// Startet die Shell mit erhöhten Rechten in einem externen Fenster (nur Windows, `platform::process::spawn_elevated`).
 fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let q = |s: &str| s.replace('\'', "''");
-        let mut script = format!("Start-Process -FilePath '{}' -Verb RunAs", q(&shell.program));
-        if !shell.args.is_empty() {
-            script += &format!(" -ArgumentList '{}'", q(&shell.args.join(" ")));
-        }
-        if std::path::Path::new(cwd).is_dir() {
-            script += &format!(" -WorkingDirectory '{}'", q(cwd));
-        }
-        let ok = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .is_ok();
-        return if ok {
-            state::t("Als Administrator in einem eigenen Fenster gestartet (UAC-Abfrage). Dieses Terminal ist nicht eingebettet.", "Started as administrator in its own window (UAC prompt). This terminal is not embedded.").to_string()
-        } else {
-            state::t("Start als Administrator fehlgeschlagen.", "Starting as administrator failed.").to_string()
-        };
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (shell, cwd);
-        state::t("Start als Administrator wird nur unter Windows unterstützt.", "Starting as administrator is only supported on Windows.").to_string()
+    match crate::platform::process::spawn_elevated(&shell.program, &shell.args, cwd) {
+        Some(true) => state::t("Als Administrator in einem eigenen Fenster gestartet (UAC-Abfrage). Dieses Terminal ist nicht eingebettet.", "Started as administrator in its own window (UAC prompt). This terminal is not embedded.").to_string(),
+        Some(false) => state::t("Start als Administrator fehlgeschlagen.", "Starting as administrator failed.").to_string(),
+        None => state::t("Start als Administrator wird nur unter Windows unterstützt.", "Starting as administrator is only supported on Windows.").to_string(),
     }
 }
 

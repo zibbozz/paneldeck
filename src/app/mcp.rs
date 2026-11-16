@@ -469,7 +469,7 @@ impl App {
     /// Umgebungsvariable), sonst über `PANELDECK_SESSION` (nötig in WSL, dort liegt die Brücke nicht im Windows-Prozessbaum).
     fn mcp_resolve_caller(&self, env_caller: Option<u64>, pid: Option<u32>) -> (Option<u64>, &'static str) {
         if let Some(pid) = pid {
-            let chain = crate::winctl::process_chain(pid);
+            let chain = crate::platform::process::process_chain(pid);
             for (id, e) in &self.entries {
                 if let Some(sp) = e.live.as_ref().and_then(|s| s.pid()) {
                     if chain.contains(&sp) {

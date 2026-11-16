@@ -354,7 +354,9 @@ mod tests {
     use super::*;
     use crate::llm::config::{LlmModel, LlmServer};
     use crate::llm::{ModelInfo, ServerKind};
+    #[cfg(windows)]
     use std::io::{Read, Write};
+    #[cfg(windows)]
     use std::net::TcpListener;
     use std::time::Duration;
 
@@ -535,6 +537,7 @@ mod tests {
         assert_eq!(context_line(&c), "", "nur Steuerzeichen: keine Zeile");
     }
 
+    #[cfg(windows)] // nur für die Ende-zu-Ende-Tests über WinHTTP
     /// Ein Server für genau eine Verbindung: liest die Anfrage und schreibt `response`.
     fn serve(response: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -565,6 +568,7 @@ mod tests {
         (base, h)
     }
 
+    #[cfg(windows)] // nur für die Ende-zu-Ende-Tests über WinHTTP
     fn collect(h: &TurnHandle) -> Vec<TurnEvent> {
         let mut v = Vec::new();
         while let Ok(ev) = h.rx.recv_timeout(Duration::from_secs(20)) {
@@ -577,10 +581,12 @@ mod tests {
         v
     }
 
+    #[cfg(windows)] // nur für die Ende-zu-Ende-Tests über WinHTTP
     fn text(ev: &[TurnEvent]) -> String {
         ev.iter().filter_map(|e| if let TurnEvent::Delta(d) = e { Some(d.as_str()) } else { None }).collect()
     }
 
+    #[cfg(windows)] // echte Verbindung (WinHTTP; andere Systeme haben noch keinen Transport)
     #[test]
     fn end_to_end_ollama_ndjson() {
         let body = "{\"message\":{\"content\":\"Hel\"}}\n{\"message\":{\"content\":\"lo\"}}\n{\"done\":true,\"done_reason\":\"length\",\"prompt_eval_count\":12,\"eval_count\":3}\n";
@@ -618,6 +624,7 @@ mod tests {
         assert_eq!(prepare(&meta(), &hist, &cx(vec![o])).unwrap().request.num_predict, None);
     }
 
+    #[cfg(windows)]
     #[test]
     fn end_to_end_openai_sse() {
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"there\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n";
@@ -631,6 +638,7 @@ mod tests {
         assert!(seen.starts_with("POST /v1/chat/completions HTTP/1.1"), "{seen}");
     }
 
+    #[cfg(windows)] // nur für die Ende-zu-Ende-Tests über WinHTTP
     /// Server für mehrere Verbindungen nacheinander (je Anfrage die nächste Antwort); liefert die gesehenen Anfragen.
     fn serve_many(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -728,6 +736,7 @@ mod tests {
     }
 
     /// Ganze Werkzeug-Runde gegen einen Ollama-Ersatz: Aufruf `list_sessions`, Ergebnis, dann Text.
+    #[cfg(windows)]
     #[test]
     fn end_to_end_ollama_tool_loop() {
         let turn1 = "{\"message\":{\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"list_sessions\",\"arguments\":{}}}]}}\n{\"done\":true,\"done_reason\":\"stop\"}\n";
@@ -776,6 +785,7 @@ mod tests {
     }
 
     /// OpenAI-kompatibel: Aufruf in Stücken, Ergebnis mit `tool_call_id`.
+    #[cfg(windows)]
     #[test]
     fn end_to_end_openai_tool_call_and_result_mapping() {
         let turn1 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_x1\",\"function\":{\"name\":\"whoami\",\"arguments\":\"{}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
@@ -819,6 +829,7 @@ mod tests {
         assert_eq!(msgs[3]["tool_call_id"], "call_x1");
     }
 
+    #[cfg(windows)]
     #[test]
     fn server_errors_with_tools_hint_at_the_tool_switch() {
         let body = r#"{"error":"registry.ollama.ai/library/x does not support tools"}"#;
@@ -834,6 +845,7 @@ mod tests {
         h.join().unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn end_to_end_model_not_found_is_readable() {
         let body = r#"{"error":"model 'm1' not found"}"#;

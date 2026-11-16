@@ -1,5 +1,5 @@
-//! API-Schlüssel verschlüsselt ablegen: Windows-DPAPI (`CryptProtectData`, an den aktuellen Benutzer gebunden), gespeichert
-//! als Base64 des Blobs. Klartext landet nie in einer Datei.
+//! API-Schlüssel verschlüsselt ablegen: Windows-DPAPI (`CryptProtectData`, an den aktuellen Benutzer gebunden, über
+//! `platform::secret`), gespeichert als Base64 des Blobs. Klartext landet nie in einer Datei.
 
 use crate::state::Lang;
 
@@ -11,8 +11,7 @@ pub enum SecretError {
     Utf8,
     /// DPAPI-Fehler (z. B. Blob eines anderen Benutzers/Rechners).
     Sys(u32),
-    /// Nicht unter Windows.
-    #[cfg_attr(windows, allow(dead_code))]
+    /// Nicht unter Windows (`platform::secret`).
     Unsupported,
 }
 
@@ -34,13 +33,22 @@ impl SecretError {
 
 /// Verschlüsselt `plain` für den aktuellen Benutzer; Ergebnis = Base64.
 pub fn protect(plain: &str) -> Result<String, SecretError> {
-    imp::protect(plain.as_bytes()).map(|b| crate::mcp::base64(&b))
+    crate::platform::secret::protect(plain.as_bytes()).map_err(from_platform).map(|b| crate::mcp::base64(&b))
 }
 
 /// Entschlüsselt einen Wert von `protect`.
 pub fn unprotect(b64: &str) -> Result<String, SecretError> {
     let blob = unbase64(b64.trim()).ok_or(SecretError::Encoding)?;
-    String::from_utf8(imp::unprotect(&blob)?).map_err(|_| SecretError::Utf8)
+    String::from_utf8(crate::platform::secret::unprotect(&blob).map_err(from_platform)?).map_err(|_| SecretError::Utf8)
+}
+
+fn from_platform(e: crate::platform::secret::Error) -> SecretError {
+    use crate::platform::secret::Error;
+    match e {
+        Error::TooLarge => SecretError::Encoding,
+        Error::Sys(c) => SecretError::Sys(c),
+        Error::Unsupported => SecretError::Unsupported,
+    }
 }
 
 /// Base64 (Standard-Alphabet, Auffüllung optional) → Bytes; `None` bei ungültigen Zeichen.
@@ -74,65 +82,6 @@ pub fn unbase64(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
-}
-
-#[cfg(windows)]
-mod imp {
-    use super::SecretError;
-    use windows_sys::Win32::Foundation::{GetLastError, HLOCAL, LocalFree};
-    use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData};
-
-    fn run(input: &[u8], protect: bool) -> Result<Vec<u8>, SecretError> {
-        let len = u32::try_from(input.len()).map_err(|_| SecretError::Encoding)?;
-        let inb = CRYPT_INTEGER_BLOB { cbData: len, pbData: input.as_ptr() as *mut u8 };
-        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
-        // SAFETY: Eingabe-Blob zeigt auf `input` (nur gelesen); keine Beschreibung, keine Zusatz-Entropie, kein Dialog.
-        // Ausgabe wird von DPAPI mit LocalAlloc angelegt und unten mit LocalFree freigegeben.
-        let ok = unsafe {
-            if protect {
-                CryptProtectData(&inb, std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
-            } else {
-                CryptUnprotectData(&inb, std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
-            }
-        };
-        if ok == 0 {
-            // SAFETY: liest nur den Fehlerwert des aktuellen Threads.
-            return Err(SecretError::Sys(unsafe { GetLastError() }));
-        }
-        // SAFETY: `out` beschreibt `cbData` gültige Bytes, die DPAPI angelegt hat.
-        let v = if out.pbData.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec() };
-        if !out.pbData.is_null() {
-            if !protect {
-                // Klartext nicht im freigegebenen Speicher liegen lassen.
-                for i in 0..out.cbData as usize {
-                    // SAFETY: innerhalb der `cbData` Bytes von DPAPI; volatile, damit es nicht wegoptimiert wird.
-                    unsafe { std::ptr::write_volatile(out.pbData.add(i), 0) };
-                }
-            }
-            // SAFETY: Speicher stammt von DPAPI (LocalAlloc) und wird genau einmal freigegeben.
-            unsafe { LocalFree(out.pbData as HLOCAL) };
-        }
-        Ok(v)
-    }
-
-    pub fn protect(b: &[u8]) -> Result<Vec<u8>, SecretError> {
-        run(b, true)
-    }
-
-    pub fn unprotect(b: &[u8]) -> Result<Vec<u8>, SecretError> {
-        run(b, false)
-    }
-}
-
-#[cfg(not(windows))]
-mod imp {
-    use super::SecretError;
-    pub fn protect(_: &[u8]) -> Result<Vec<u8>, SecretError> {
-        Err(SecretError::Unsupported)
-    }
-    pub fn unprotect(_: &[u8]) -> Result<Vec<u8>, SecretError> {
-        Err(SecretError::Unsupported)
-    }
 }
 
 #[cfg(test)]

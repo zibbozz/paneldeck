@@ -33,9 +33,11 @@ pub enum LlmError {
     /// HTTP-Status ≥ 300 mit dem Anfang (höchstens 8 KB) des Fehlertexts.
     Status { code: u16, body: String },
     /// Zertifikat nicht vertrauenswürdig: WinHTTP-Fehlercode und Flags der TLS-Prüfung (`WINHTTP_CALLBACK_STATUS_FLAG_*`).
+    #[cfg_attr(not(windows), allow(dead_code))]
     Cert { code: u32, flags: u32 },
     Cancelled,
     /// Fehler eines WinHTTP-Aufrufs.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Sys { code: u32, call: &'static str },
     /// Fehlermeldung des Servers im Datenstrom (`{"error": …}`).
     Server(String),
@@ -48,6 +50,7 @@ pub enum LlmError {
 }
 
 /// WinHTTP-Fehlercodes und TLS-Flags (winhttp.h), als Zahlen, damit die Texte auch ohne Windows testbar sind.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) mod code {
     pub const TIMEOUT: u32 = 12002;
     pub const NAME_NOT_RESOLVED: u32 = 12007;
@@ -66,6 +69,7 @@ pub(super) mod code {
 }
 
 /// Ordnet einen WinHTTP-Fehler ein: Zertifikatsprobleme bekommen eine eigene Variante mit Hinweis.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn classify(c: u32, tls: u32, call: &'static str) -> LlmError {
     let cert_flags = code::FLAG_INVALID_CERT | code::FLAG_INVALID_CA | code::FLAG_CN_INVALID | code::FLAG_DATE_INVALID;
     if c == code::CANCELLED {

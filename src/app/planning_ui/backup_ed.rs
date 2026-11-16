@@ -207,7 +207,7 @@ impl PlanUi {
             Ok(d) => d,
             Err(e) => return self.backup_error(cx, &e),
         };
-        let Some(path) = crate::notify::save_json(&format!("{}-backup.json", key.to_lowercase())) else { return };
+        let Some(path) = crate::platform::notify::save_json(&format!("{}-backup.json", key.to_lowercase())) else { return };
         match std::fs::write(&path, doc.to_json()) {
             Ok(()) => self.note(match lang {
                 Lang::De => format!("Projekt exportiert: {}", path.display()),
@@ -221,7 +221,7 @@ impl PlanUi {
         if self.templates.backup.job.is_some() {
             return;
         }
-        let Some(path) = crate::notify::open_json() else { return };
+        let Some(path) = crate::platform::notify::open_json() else { return };
         self.begin_load_project(ctx, path);
     }
 
@@ -242,7 +242,7 @@ impl PlanUi {
             Ok(t) => t,
             Err(e) => return self.backup_error(cx, &e),
         };
-        let Some(path) = crate::notify::save_csv(&format!("{}-tickets.csv", key.to_lowercase())) else { return };
+        let Some(path) = crate::platform::notify::save_csv(&format!("{}-tickets.csv", key.to_lowercase())) else { return };
         match std::fs::write(&path, text) {
             Ok(()) => self.note(match lang {
                 Lang::De => format!("Tickets exportiert: {}", path.display()),
@@ -256,7 +256,7 @@ impl PlanUi {
         if self.templates.backup.job.is_some() {
             return;
         }
-        let Some(path) = crate::notify::open_csv() else { return };
+        let Some(path) = crate::platform::notify::open_csv() else { return };
         self.begin_load_csv(ctx, path, project_id, key);
     }
 

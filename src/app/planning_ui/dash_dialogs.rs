@@ -148,7 +148,7 @@ impl PlanUi {
             Ok(d) => d,
             Err(e) => return self.dash.notify(e.message(lang), true),
         };
-        let Some(path) = crate::notify::save_json(&format!("{}.json", logic::file_slug(&doc.name))) else { return };
+        let Some(path) = crate::platform::notify::save_json(&format!("{}.json", logic::file_slug(&doc.name))) else { return };
         match std::fs::write(&path, doc.to_json()) {
             Ok(()) => self.dash.notify(
                 match lang {
@@ -164,7 +164,7 @@ impl PlanUi {
     /// Liest eine JSON-Datei (Öffnen-Dialog) und zeigt die Vorschau des Imports.
     pub(super) fn dash_start_import(&mut self, cx: &Cx, proj: &Project) {
         let lang = cx.lang;
-        let Some(path) = crate::notify::open_json() else { return };
+        let Some(path) = crate::platform::notify::open_json() else { return };
         let text = match std::fs::read(&path) {
             Ok(b) => String::from_utf8_lossy(&b).to_string(),
             Err(e) => return self.dash.notify(format!("{}: {e}", lang.t("Die Datei konnte nicht gelesen werden", "The file could not be read")), true),

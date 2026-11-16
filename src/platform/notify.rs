@@ -1,4 +1,4 @@
-//! Desktop-Benachrichtigungen (Windows-Toast). Auf anderen Systemen ohne Wirkung.
+//! Desktop-Benachrichtigungen (Windows-Toast) und Datei-/Ordnerdialoge. Auf anderen Systemen ohne Wirkung bzw. `None`.
 
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str, sound: bool) {
@@ -18,6 +18,10 @@ pub fn toast(title: &str, body: &str, sound: bool) {
 
 #[cfg(not(windows))]
 pub fn toast(_title: &str, _body: &str, _sound: bool) {}
+
+/// Native file dialogs exist (Windows: `rfd`). Without them every dialog function returns `None` and callers fall back
+/// (e.g. save into `exports/` in the data folder).
+pub const DIALOGS: bool = cfg!(windows);
 
 /// Speichern-Dialog (Windows); anderswo `None`.
 #[cfg(windows)]

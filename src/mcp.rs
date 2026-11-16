@@ -817,26 +817,9 @@ pub fn claude_cwd() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// `claude <args>` als Prozess vorbereiten. Unter Windows über `cmd.exe /d /v:off /c` (kein AutoRun, keine verzögerte
-/// Erweiterung; `claude` kann eine .cmd sein) mit selbst quotierter Zeile (`launch::claude_cmd_line`).
+/// `claude <args>` als Prozess vorbereiten (Aufruf je System: `platform::process::claude_command`).
 pub fn claude_command(args: &[String], cwd: &std::path::Path) -> Result<std::process::Command, String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let line = crate::launch::claude_cmd_line(args)?;
-        let mut c = std::process::Command::new("cmd.exe");
-        c.raw_arg(line).current_dir(cwd).creation_flags(0x0800_0000);
-        Ok(c)
-    }
-    #[cfg(not(windows))]
-    {
-        for a in args {
-            crate::launch::check_arg(a)?;
-        }
-        let mut c = std::process::Command::new("claude");
-        c.args(args).current_dir(cwd);
-        Ok(c)
-    }
+    crate::platform::process::claude_command(args, cwd)
 }
 
 /// Prozess starten und höchstens `limit` warten, sonst beenden (der Deinstaller darf nie hängen).
@@ -982,14 +965,7 @@ fn remove_servers_text(text: &str, names: &[String]) -> Option<String> {
 /// Ob ein Pfad ein symbolischer Link bzw. Analysepunkt ist (dann schreiben wir nicht).
 fn is_link(path: &std::path::Path) -> bool {
     let Ok(m) = std::fs::symlink_metadata(path) else { return false };
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if m.file_attributes() & 0x400 != 0 {
-            return true; // FILE_ATTRIBUTE_REPARSE_POINT
-        }
-    }
-    m.file_type().is_symlink()
+    crate::platform::fs::is_reparse_point(&m) || m.file_type().is_symlink()
 }
 
 /// Unsere Einträge direkt aus einer `.claude.json` entfernen (Ersatzweg, wenn `claude` nicht verfügbar ist).

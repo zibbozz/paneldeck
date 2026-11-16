@@ -25,38 +25,12 @@ pub fn flavor_for(exe: &Path, install_location: Option<&str>) -> Flavor {
     }
 }
 
-/// Installationsart dieser Instanz (`None` außerhalb von Windows).
+/// Installationsart dieser Instanz (`None`, wo es kein Selbst-Update gibt: `platform::SELF_UPDATE`).
 pub fn detect(exe: &Path) -> Option<Flavor> {
-    #[cfg(windows)]
-    {
-        Some(flavor_for(exe, reg::install_location().as_deref()))
+    if !crate::platform::SELF_UPDATE {
+        return None;
     }
-    #[cfg(not(windows))]
-    {
-        let _ = exe;
-        None
-    }
-}
-
-#[cfg(windows)]
-mod reg {
-    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
-
-    /// `InstallLocation` aus `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Paneldeck` (vom NSIS-Installer).
-    pub fn install_location() -> Option<String> {
-        let key: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Paneldeck".encode_utf16().chain([0]).collect();
-        let val: Vec<u16> = "InstallLocation".encode_utf16().chain([0]).collect();
-        let mut buf = vec![0u16; 1024];
-        let mut len = (buf.len() * 2) as u32;
-        // SAFETY: nullterminierte Namen, Puffer mit `len` Bytes; RRF_RT_REG_SZ liefert eine nullterminierte Zeichenkette.
-        let rc = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), val.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _, &mut len) };
-        if rc != 0 {
-            return None;
-        }
-        let n = (len as usize / 2).min(buf.len());
-        let s = String::from_utf16_lossy(&buf[..n]);
-        Some(s.trim_end_matches('\0').to_string())
-    }
+    Some(flavor_for(exe, crate::platform::registry::install_location().as_deref()))
 }
 
 /// Neue Programmdatei an den Platz der laufenden setzen: `<exe>.new` schreiben, die laufende in `<exe>.old` umbenennen (Windows
@@ -106,12 +80,7 @@ pub fn nsis_dir_arg(dir: &Path) -> Result<String, String> {
 pub fn read_locked(p: &Path) -> std::io::Result<(Vec<u8>, std::fs::File)> {
     let mut o = std::fs::OpenOptions::new();
     o.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ: u32 = 0x1;
-        o.share_mode(FILE_SHARE_READ);
-    }
+    crate::platform::fs::deny_write_share(&mut o);
     let mut f = o.open(p)?;
     let mut v = Vec::new();
     std::io::Read::read_to_end(&mut f, &mut v)?;
@@ -136,13 +105,7 @@ pub fn run_setup(setup: &Path, dir: &Path, timeout: std::time::Duration) -> Resu
     let mut cmd = std::process::Command::new(setup);
     cmd.arg("/S");
     let d = nsis_dir_arg(dir).map_err(SetupError::Start)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.raw_arg(d);
-    }
-    #[cfg(not(windows))]
-    cmd.arg(d);
+    crate::platform::process::raw_arg(&mut cmd, d);
     let mut child = cmd.spawn().map_err(|e| SetupError::Start(format!("{}: {e}", setup.display())))?;
     // Auch nach der Wartezeit nicht beenden: `child` wird ohne kill() freigegeben, das Setup läuft weiter.
     wait_setup(&mut child, timeout)
@@ -216,20 +179,7 @@ pub fn wait_for_previous_instance() {
 }
 
 fn wait_pid(pid: u32) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
-        // SAFETY: OpenProcess mit reinem Warte-Recht; das Handle wird geschlossen.
-        unsafe {
-            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-            if !h.is_null() {
-                WaitForSingleObject(h, 30_000);
-                CloseHandle(h);
-            }
-        }
-    }    #[cfg(not(windows))]
-    let _ = pid;
+    crate::platform::process::wait_for_exit(pid, 30_000);
 }
 
 #[cfg(test)]

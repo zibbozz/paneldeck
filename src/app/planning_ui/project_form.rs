@@ -173,7 +173,7 @@ fn form_ui(ui: &mut Ui, f: &mut Form, lang: Lang, new: bool) -> bool {
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut f.work_dir).desired_width((w - 120.0).max(120.0)).hint_text(lang.t("optional", "optional")).margin(egui::Margin::symmetric(8, 5)));
         if ui.button(lang.t("Wählen …", "Browse …")).clicked() {
-            if let Some(d) = crate::notify::pick_folder(&f.work_dir) {
+            if let Some(d) = crate::platform::notify::pick_folder(&f.work_dir) {
                 f.work_dir = d;
             }
         }

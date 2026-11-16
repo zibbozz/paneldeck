@@ -60,7 +60,7 @@ impl PlanUi {
             Ok(d) => d,
             Err(e) => return self.fail(cx, &e),
         };
-        let Some(path) = crate::notify::save_json(&format!("{}-template.json", key.to_lowercase())) else { return };
+        let Some(path) = crate::platform::notify::save_json(&format!("{}-template.json", key.to_lowercase())) else { return };
         match std::fs::write(&path, doc.to_json()) {
             Ok(()) => self.note(match lang {
                 Lang::De => format!("Vorlage exportiert: {}", path.display()),
@@ -72,7 +72,7 @@ impl PlanUi {
 
     fn pick_template(&mut self, cx: &Cx) {
         let lang = cx.lang;
-        let Some(path) = crate::notify::open_json() else { return };
+        let Some(path) = crate::platform::notify::open_json() else { return };
         let text = match std::fs::read(&path) {
             Ok(b) => String::from_utf8_lossy(&b).to_string(),
             Err(e) => {

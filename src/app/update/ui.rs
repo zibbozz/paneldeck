@@ -17,15 +17,7 @@ fn open_release_page(v: &Version) {
     if !super::release::safe_release_page(&url) {
         return;
     }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::Shell::ShellExecuteW;
-        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        let op: Vec<u16> = "open".encode_utf16().chain([0]).collect();
-        let u: Vec<u16> = url.encode_utf16().chain([0]).collect();
-        // SAFETY: nullterminierte UTF-16-Puffer, die den Aufruf überleben; kein Fenster-Handle nötig.
-        unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
-    }
+    crate::platform::open::url(&url);
 }
 
 /// Esc schließt ein Update-Fenster nur, wenn es vorn liegt und weder ein Terminal noch ein Textfeld die Tastatur hat (sonst
@@ -70,7 +62,7 @@ impl App {
         self.save_all();
         match install::spawn_restart(&self.exe) {
             Ok(()) => {
-                crate::app::winchrome::shutdown();
+                crate::platform::chrome::shutdown();
                 self.tray = None; // Tray-Symbol entfernen (sonst bleibt bis zum Überfahren ein totes Symbol stehen)
                 std::process::exit(0);
             }

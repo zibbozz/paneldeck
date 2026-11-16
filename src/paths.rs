@@ -321,6 +321,7 @@ mod tests {
         assert_eq!(resolve_with(&inp, &usable).unwrap_err().source, Source::Env);
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn bridge_and_peek() {
         let no = |_: &Path| false;

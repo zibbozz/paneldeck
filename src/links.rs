@@ -125,40 +125,10 @@ pub fn is_executable_like(target: &str) -> bool {
 /// Ausführbare Dateitypen werden stattdessen im Ordner angezeigt (Rückgabe `false` = nicht geöffnet, nur gezeigt).
 pub fn open(target: &str) -> bool {
     if is_executable_like(target) {
-        reveal(target);
+        crate::platform::open::reveal(target);
         return false;
     }
-    launch(target)
-}
-
-fn reveal(target: &str) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("explorer.exe").arg(format!("/select,{target}")).creation_flags(0x0800_0000).spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        if let Some(dir) = Path::new(target).parent() {
-            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
-        }
-    }
-}
-
-fn launch(target: &str) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", target])
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("xdg-open").arg(target).spawn().is_ok()
-    }
+    crate::platform::open::launch(target)
 }
 
 #[cfg(test)]

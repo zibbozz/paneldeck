@@ -26,15 +26,9 @@ pub fn init(data_dir: &Path) {
 }
 
 /// Liefert den Pfad einer neuen PNG-Datei, wenn die Zwischenablage ein Bild (und keinen Text) enthält.
-#[cfg(windows)]
 pub fn image_to_file() -> Option<PathBuf> {
     let dir = DIR.get()?;
-    let mut cb = arboard::Clipboard::new().ok()?;
-    if cb.get_text().map(|t| !t.is_empty()).unwrap_or(false) {
-        return None;
-    }
-    let img = cb.get_image().ok()?;
-    let rgba = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())?;
+    let rgba = crate::platform::clipboard::image()?;
     // Millisekunden + laufende Nummer: zwei Bilder in derselben Sekunde überschreiben sich nicht.
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
@@ -42,9 +36,4 @@ pub fn image_to_file() -> Option<PathBuf> {
     let path = dir.join(format!("clip-{ms}-{n}.png"));
     rgba.save(&path).ok()?;
     Some(path)
-}
-
-#[cfg(not(windows))]
-pub fn image_to_file() -> Option<PathBuf> {
-    None
 }

@@ -45,11 +45,7 @@ fn branch_of(repo: &Path) -> Option<String> {
 fn changed_files(repo: &Path) -> usize {
     let mut cmd = Command::new("git");
     cmd.args(["-c", "core.fsmonitor=false", "--no-optional-locks", "status", "--porcelain"]).current_dir(repo);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::platform::process::hide_window(&mut cmd);
     cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).lines().count()).unwrap_or(0)
 }
 

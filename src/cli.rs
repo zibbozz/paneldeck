@@ -407,6 +407,7 @@ mod tests {
         assert!(!is_hook_invocation(&["x.exe".to_string(), "--tray".to_string()]));
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn positional_folder_means_open() {
         assert_eq!(p(&["C:\\Dev\\app"]).unwrap().open.as_deref(), Some("C:\\Dev\\app"));
@@ -450,6 +451,7 @@ mod tests {
         assert_eq!(c.profile.as_deref(), Some("work"));
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn parses_new_options() {
         let c = p(&["--data-dir", "D:\\pd", "--backup-dir", "bk", "--profile", "work_1-a", "--lang", "DE", "--no-tray", "--reset-settings"]).unwrap();
@@ -487,6 +489,7 @@ mod tests {
         assert!(matches!(p(&["mcp", "--no-update-check"]), Err(CliError::NotWithMcp(_))));
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn mcp_subcommand() {
         let c = p(&["mcp"]).unwrap();

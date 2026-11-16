@@ -1,5 +1,7 @@
-//! Windows-Fensterfunktionen: Fenster im Tray verstecken (minimiert, ohne Taskleistenbutton).
+//! Native windows: the window handle, hide to tray, find our own extra windows, monitors and work areas. Without an
+//! implementation there is no handle (`None`), hiding does nothing, every point counts as on screen.
 //!
+//! Windows-Fensterfunktionen: Fenster im Tray verstecken (minimiert, ohne Taskleistenbutton).
 //! Das Fenster bleibt dabei "minimiert sichtbar", damit die Ereignisschleife (Hooks, Benachrichtigungen)
 //! weiterläuft; nur der Taskleisten-/Alt+Tab-Eintrag verschwindet (WS_EX_TOOLWINDOW).
 
@@ -40,54 +42,6 @@ pub fn set_tray_hidden(hwnd: isize, hidden: bool) {
 
 #[cfg(not(windows))]
 pub fn set_tray_hidden(_hwnd: isize, _hidden: bool) {}
-
-/// PID und alle Vorfahren (Eltern, Großeltern …) eines Prozesses, nächster zuerst. Dient dazu, eine MCP-Brücke
-/// einer Hub-Sitzung zuzuordnen: Läuft ein Agent in einem Hub-Terminal, ist die Shell der Sitzung ein Vorfahre der Brücke.
-/// Unter Windows über einen Prozess-Schnappschuss; ein wiederverwendeter Eltern-PID kann theoretisch täuschen
-/// (deshalb höchstens 40 Stufen und Abbruch bei Wiederholung).
-#[cfg(windows)]
-pub fn process_chain(pid: u32) -> Vec<u32> {
-    use std::collections::HashMap;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
-    let mut parent: HashMap<u32, u32> = HashMap::new();
-    // SAFETY: `pe` ist ein lokal genullter PROCESSENTRY32W mit gesetztem `dwSize` und wird nur an die ToolHelp-Aufrufe
-    // übergeben; das Snapshot-Handle wird auf jedem Pfad nach der Prüfung (`INVALID_HANDLE_VALUE`) geschlossen.
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snap == INVALID_HANDLE_VALUE {
-            return vec![pid];
-        }
-        let mut pe: PROCESSENTRY32W = std::mem::zeroed();
-        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        if Process32FirstW(snap, &mut pe) != 0 {
-            loop {
-                parent.insert(pe.th32ProcessID, pe.th32ParentProcessID);
-                if Process32NextW(snap, &mut pe) == 0 {
-                    break;
-                }
-            }
-        }
-        CloseHandle(snap);
-    }
-    let mut chain = vec![pid];
-    let mut cur = pid;
-    for _ in 0..40 {
-        match parent.get(&cur).copied() {
-            Some(p) if p != 0 && !chain.contains(&p) => {
-                chain.push(p);
-                cur = p;
-            }
-            _ => break,
-        }
-    }
-    chain
-}
-
-#[cfg(not(windows))]
-pub fn process_chain(pid: u32) -> Vec<u32> {
-    vec![pid]
-}
 
 /// Eigenes Fenster (dieses Prozesses) mit genau diesem Titel suchen – für weitere Fenster, deren Handle egui nicht herausgibt
 /// (runde Ecken über DWM). Der Titel ist beim Anlegen eindeutig (`Paneldeck #<n>`).

@@ -587,41 +587,23 @@ fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
     }
 }
 
-/// Windows: ist die Taste (virtueller Tastencode) gerade gedrückt?
-#[cfg(windows)]
-fn vk_down(vk: u16) -> bool {
-    // SAFETY: reine Abfrage des Tastenzustands, keine Zeiger.
-    unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32) < 0 }
-}
-
 /// Strg+V wurde gerade gedrückt (Flanke). egui-winit macht aus Strg+V nur dann ein `Event::Paste`, wenn die
 /// Zwischenablage Text enthält, und verschluckt den Tastendruck sonst ganz – ein Bild käme also nie an.
-#[cfg(windows)]
+/// Ohne Plattform-Umsetzung (`platform::keyboard`) nie gedrückt.
 fn ctrl_v_pressed(ui: &Ui) -> bool {
+    use crate::platform::keyboard::{is_down, Key};
     use std::sync::atomic::{AtomicBool, Ordering};
     static PREV: AtomicBool = AtomicBool::new(false);
-    let down = ui.input(|i| i.focused) && vk_down(0x11 /* VK_CONTROL */) && vk_down(b'V' as u16) && !vk_down(0x12 /* VK_MENU */);
+    let down = ui.input(|i| i.focused) && is_down(Key::Control) && is_down(Key::V) && !is_down(Key::Alt);
     // `swap` muss IMMER laufen: mit `down && !PREV.swap(..)` bliebe PREV nach dem ersten Druck dauerhaft `true`
     // (Kurzschluss), und nur das allererste Strg+V der Sitzung würde ein Bild einfügen.
     let prev = PREV.swap(down, Ordering::Relaxed);
     down && !prev
 }
 
-#[cfg(not(windows))]
-fn ctrl_v_pressed(_ui: &Ui) -> bool {
-    false
-}
-
 /// Strg+Einfg löst ebenfalls `Event::Copy` aus – dann ohne Auswahl kein ^C senden.
 fn insert_held() -> bool {
-    #[cfg(windows)]
-    {
-        vk_down(0x2D /* VK_INSERT */)
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    crate::platform::keyboard::is_down(crate::platform::keyboard::Key::Insert)
 }
 
 fn handle_keyboard(ui: &Ui, session: &mut Session) {
