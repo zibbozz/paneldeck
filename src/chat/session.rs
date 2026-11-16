@@ -122,6 +122,10 @@ pub struct ChatState {
     /// Einmalige Frage nach der Stufe des Modells ist offen (setzt der Hub beim ersten Senden; siehe
     /// [`ChatState::awaiting_level_choice`]).
     pub level_question: bool,
+    /// Hat ein externer Agent (MCP `send_chat_message`) diese Runde ausgelöst: seine Sitzung (`None` = Nutzer oder
+    /// Agent außerhalb von Paneldeck). Gilt für die ganze Runde samt „Weiter“; Werkzeuge des Chats dürfen dort nicht
+    /// schreiben (kein Umweg in die eigene Sitzung des Agenten). Setzt `App::chat_send`.
+    pub origin_session: Option<u64>,
 }
 
 /// Status eines Chats für Seitenleiste und MCP (`ready`, `working`, `approval`).
@@ -196,6 +200,7 @@ impl ChatState {
             context_pause: false,
             approval_target: None,
             level_question: false,
+            origin_session: None,
         };
         if fixed > 0 {
             c.touch();
