@@ -507,6 +507,13 @@ impl App {
                 status_tip.push('\n');
             }
         }
+        if claude && !is_chat {
+            // Startoptionen der Sitzung (#161), z. B. „Claude: opus · high · plan · Agent reviewer“.
+            let o = e.meta.claude_opts_eff().0.summary("Agent");
+            if !o.is_empty() {
+                status_tip += &format!("{} {o}\n", lang.t("Claude-Optionen:", "Claude options:"));
+            }
+        }
         if is_chat {
             status_tip += &format!("{}: {}", lang.t("Modell", "Model"), e.chat_model());
         } else if let Some(g) = self.git.get(id) {
@@ -525,6 +532,11 @@ impl App {
             } else {
                 lang.t("Nicht im Layout – klicken zeigt die Sitzung im fokussierten Bereich.", "Not in the layout – click to show it in the focused pane.")
             };
+        }
+        // Markierte Sitzung (#152): woher sie stammt; zurücksetzen über das Kontextmenü.
+        if let Some(h) = super::taint::hint(&self.entries, id) {
+            status_tip.push('\n');
+            status_tip += &h;
         }
         let status_tip = status_tip.trim().to_string();
 
@@ -620,6 +632,7 @@ impl App {
             g
         };
         let cur_color = self.entries.get(&id).map(|e| crate::palette::hex_of(e.meta.color));
+        let tainted = self.entries.get(&id).is_some_and(|e| !e.meta.agent_chain.is_empty());
         resp.context_menu(|ui| {
             if ui.button(lang.t("Umbenennen (F2)", "Rename (F2)")).clicked() {
                 actions.push(Action::StartRename(id));
@@ -670,6 +683,19 @@ impl App {
             }
             if ui.button(lang.t("Notizen …", "Notes …")).clicked() {
                 actions.push(Action::OpenNotes(id));
+                ui.close();
+            }
+            // Nur der Nutzer kann die Markierung aufheben (nie über MCP, #152).
+            if tainted
+                && ui
+                    .button(lang.t("Agenten-Kette zurücksetzen", "Reset agent chain"))
+                    .on_hover_text(lang.t(
+                        "Diese Sitzung stammt aus einer Agenten-Kette: Agenten darin dürfen nicht in die Sitzungen der Kette schreiben. Zurücksetzen hebt das auf.",
+                        "This session comes from an agent chain: agents in it must not write into the sessions of that chain. Resetting lifts this.",
+                    ))
+                    .clicked()
+            {
+                actions.push(Action::ResetAgentChain(id));
                 ui.close();
             }
             if self.tlinks.enabled && ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
