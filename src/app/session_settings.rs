@@ -115,6 +115,8 @@ pub(super) struct ReloadAsk {
     pub(super) id: u64,
     /// Nach dem Speichern der Einstellungen gefragt („Jetzt neu laden?“, sonst beim nächsten Mal).
     pub(super) after_settings: bool,
+    /// Aus dem Fenster einer abgedockten Sitzung: die Rückfrage erscheint dort.
+    pub(super) detached: bool,
 }
 
 /// Fehler im Einstellungsdialog (Speichern bleibt gesperrt).
@@ -154,16 +156,11 @@ pub(super) fn resolve_shell(profile: Option<&Profile>, shell_id: &str, default_s
     }
 }
 
-/// Inhalt des Dialogs „Einstellungen der Sitzung“.
-pub(super) struct SessionForm {
-    pub(super) id: u64,
-    pub(super) chat: bool,
-    /// Modell eines Chats (nur zur Anzeige).
-    pub(super) chat_model: String,
+/// Was der Dialog ändern kann – einmal als Stand beim Öffnen, einmal als Eingabe.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct FormValues {
     /// Eigener Name; leer = automatisch (folgt dem Terminal-Titel).
     pub(super) name: String,
-    /// Aktueller automatischer Name (Platzhalter des Namensfelds).
-    pub(super) auto_name: String,
     pub(super) color: [u8; 3],
     pub(super) group: String,
     pub(super) tags: String,
@@ -173,21 +170,12 @@ pub(super) struct SessionForm {
     pub(super) cwd: String,
     pub(super) claude: bool,
     pub(super) claude_continue: bool,
-    /// Arbeitsordner beim Öffnen (nur ein geänderter Ordner muss existieren).
-    orig_cwd: String,
-    pub(super) problems: Vec<Problem>,
-    /// Beim ersten Bild den Fokus ins Namensfeld (sonst tippte man ins Terminal dahinter).
-    pub(super) focus: bool,
 }
 
-impl SessionForm {
-    pub(super) fn from_meta(meta: &SessionMeta, auto_name: String) -> Self {
-        SessionForm {
-            id: meta.id,
-            chat: meta.kind == SessionKind::Chat,
-            chat_model: meta.chat.as_ref().map(|c| c.model.clone()).unwrap_or_default(),
+impl FormValues {
+    fn of(meta: &SessionMeta) -> Self {
+        FormValues {
             name: if meta.custom_name { meta.name.clone() } else { String::new() },
-            auto_name,
             color: meta.color,
             group: meta.group.clone(),
             tags: meta.tags.join(", "),
@@ -197,98 +185,164 @@ impl SessionForm {
             cwd: meta.cwd.clone(),
             claude: meta.claude,
             claude_continue: meta.claude_continue,
-            orig_cwd: meta.cwd.clone(),
+        }
+    }
+}
+
+/// Inhalt des Dialogs „Einstellungen der Sitzung“.
+pub(super) struct SessionForm {
+    pub(super) id: u64,
+    pub(super) chat: bool,
+    /// Modell eines Chats (nur zur Anzeige).
+    pub(super) chat_model: String,
+    /// Aktueller automatischer Name (Platzhalter des Namensfelds).
+    pub(super) auto_name: String,
+    /// Ordner des eigenen Git-Worktrees: dann ist der Arbeitsordner fest.
+    pub(super) worktree: Option<String>,
+    /// Eingabe.
+    pub(super) v: FormValues,
+    /// Stand beim Öffnen: Gespeichert wird nur, was der Nutzer hier geändert hat (andere Änderungen in der
+    /// Zwischenzeit – Notizen-Fenster, MCP `rename_session`, Farbe im Kontextmenü – bleiben erhalten).
+    orig: FormValues,
+    pub(super) problems: Vec<Problem>,
+    /// Beim ersten Bild den Fokus ins Namensfeld (sonst tippte man ins Terminal dahinter).
+    pub(super) focus: bool,
+}
+
+impl SessionForm {
+    pub(super) fn from_meta(meta: &SessionMeta, auto_name: String) -> Self {
+        let v = FormValues::of(meta);
+        SessionForm {
+            id: meta.id,
+            chat: meta.kind == SessionKind::Chat,
+            chat_model: meta.chat.as_ref().map(|c| c.model.clone()).unwrap_or_default(),
+            auto_name,
+            worktree: meta.worktree.as_ref().map(|w| w.path.clone()),
+            orig: v.clone(),
+            v,
             problems: Vec::new(),
             focus: true,
         }
     }
 
-    /// Profil gewählt: Shell und Ordner wie im Dialog „Neue Sitzung“ übernehmen.
+    /// Profil gewählt: Shell und Ordner wie im Dialog „Neue Sitzung“ übernehmen (den Ordner nicht bei einem Worktree).
     pub(super) fn pick_profile(&mut self, p: Option<&Profile>) {
         match p {
             Some(p) => {
-                self.profile = p.id;
+                self.v.profile = p.id;
                 if !p.program.trim().is_empty() {
-                    self.shell_id = format!("custom:{}", p.id);
+                    self.v.shell_id = format!("custom:{}", p.id);
                 } else if !p.shell_id.is_empty() {
-                    self.shell_id = p.shell_id.clone();
+                    self.v.shell_id = p.shell_id.clone();
                 }
-                if !p.cwd.is_empty() {
-                    self.cwd = p.cwd.clone();
+                if !p.cwd.is_empty() && self.worktree.is_none() {
+                    self.v.cwd = p.cwd.clone();
                 }
             }
-            None => self.profile = 0,
+            None => self.v.profile = 0,
         }
     }
 
-    /// Prüfen wie beim Anlegen: Profil und Shell müssen bekannt sein, ein geänderter Arbeitsordner muss existieren
-    /// (wie bei `new_session` über MCP). Chats haben nichts davon.
-    pub(super) fn validate(&self, shells: &[ShellSpec], profiles: &[Profile], default_shell: &str, is_dir: impl Fn(&str) -> bool) -> Vec<Problem> {
+    fn shell_of(v: &FormValues, profiles: &[Profile], default_shell: &str) -> String {
+        resolve_shell(profiles.iter().find(|p| p.id == v.profile), &v.shell_id, default_shell)
+    }
+
+    /// Prüfen wie beim Anlegen, aber nur Geändertes (ein inzwischen fehlendes Profil oder ein gelöschter Ordner sperrt
+    /// das Speichern anderer Änderungen nicht): Profil und Shell müssen bekannt sein, ein Arbeitsordner muss existieren
+    /// (wie bei `new_session` über MCP). `is_dir(shell, path)` kennt die Shell, damit WSL-Pfade (#172) prüfbar sind.
+    /// Chats haben nichts davon.
+    pub(super) fn validate(&self, shells: &[ShellSpec], profiles: &[Profile], default_shell: &str, is_dir: impl Fn(&str, &str) -> bool) -> Vec<Problem> {
         let mut v = Vec::new();
         if self.chat {
             return v;
         }
-        let prof = profiles.iter().find(|p| p.id == self.profile);
-        if self.profile != 0 && prof.is_none() {
+        if self.v.profile != self.orig.profile && self.v.profile != 0 && !profiles.iter().any(|p| p.id == self.v.profile) {
             v.push(Problem::UnknownProfile);
         }
-        let shell = resolve_shell(prof, &self.shell_id, default_shell);
-        if !shell.starts_with("custom:") && !shell.is_empty() && !shells.is_empty() && !shells.iter().any(|s| s.id == shell) {
+        let shell = Self::shell_of(&self.v, profiles, default_shell);
+        let shell_changed = shell != Self::shell_of(&self.orig, profiles, default_shell);
+        if shell_changed && !shell.starts_with("custom:") && !shell.is_empty() && !shells.is_empty() && !shells.iter().any(|s| s.id == shell) {
             v.push(Problem::UnknownShell);
         }
-        let cwd = self.cwd.trim();
-        if !cwd.is_empty() && cwd != self.orig_cwd.trim() && !is_dir(cwd) {
+        let cwd = self.v.cwd.trim();
+        if !cwd.is_empty() && cwd != self.orig.cwd.trim() && !is_dir(&shell, cwd) {
             v.push(Problem::MissingFolder);
         }
         v
     }
 
-    /// Ändern sich Dinge, die erst beim (Neu-)Start wirken?
-    pub(super) fn needs_reload(&self, meta: &SessionMeta, profiles: &[Profile], default_shell: &str) -> bool {
+    /// Hat der Nutzer etwas geändert, das erst beim (Neu-)Start wirkt?
+    pub(super) fn needs_reload(&self, profiles: &[Profile], default_shell: &str) -> bool {
         if self.chat {
             return false;
         }
-        let shell = resolve_shell(profiles.iter().find(|p| p.id == self.profile), &self.shell_id, default_shell);
-        shell != meta.shell_id || self.profile != meta.profile || self.cwd.trim() != meta.cwd || self.claude != meta.claude
+        let (v, o) = (&self.v, &self.orig);
+        v.profile != o.profile || Self::shell_of(v, profiles, default_shell) != Self::shell_of(o, profiles, default_shell) || v.cwd.trim() != o.cwd.trim() || v.claude != o.claude
     }
 
-    /// Übernehmen. Der Ordner im Baum wird bereinigt (`clean_folder_path`); dass er im Projekt existiert, sorgt der
-    /// Aufrufer (`App::set_group`). Gibt zurück, ob ein Neu laden nötig ist.
+    /// Übernehmen – nur die Felder, die der Nutzer im Dialog geändert hat. Der Ordner im Baum wird bereinigt
+    /// (`clean_folder_path`); dass er im Projekt existiert, sorgt der Aufrufer (`App::set_group`). Gibt zurück, ob ein
+    /// Neu laden nötig ist.
     pub(super) fn apply(&self, meta: &mut SessionMeta, profiles: &[Profile], default_shell: &str) -> bool {
-        let reload = self.needs_reload(meta, profiles, default_shell);
-        let name = self.name.trim();
-        if name.is_empty() {
-            meta.custom_name = false;
-        } else {
-            meta.name = name.to_string();
-            meta.custom_name = true;
+        let reload = self.needs_reload(profiles, default_shell);
+        let (v, o) = (&self.v, &self.orig);
+        if v.name.trim() != o.name.trim() {
+            let name = v.name.trim();
+            if name.is_empty() {
+                meta.custom_name = false;
+            } else {
+                meta.name = name.to_string();
+                meta.custom_name = true;
+            }
         }
-        meta.color = self.color;
-        meta.group = state::clean_folder_path(&self.group);
-        meta.tags = parse_tags(&self.tags);
-        meta.notes = self.notes.clone();
+        if v.color != o.color {
+            meta.color = v.color;
+        }
+        if v.group != o.group {
+            meta.group = state::clean_folder_path(&v.group);
+        }
+        if v.tags != o.tags {
+            meta.tags = parse_tags(&v.tags);
+        }
+        if v.notes != o.notes {
+            meta.notes = v.notes.clone();
+        }
         if !self.chat {
-            meta.shell_id = resolve_shell(profiles.iter().find(|p| p.id == self.profile), &self.shell_id, default_shell);
-            meta.profile = self.profile;
-            meta.cwd = self.cwd.trim().to_string();
-            meta.claude = self.claude;
-            meta.claude_continue = self.claude_continue;
+            if v.profile != o.profile || v.shell_id != o.shell_id {
+                meta.profile = v.profile;
+                meta.shell_id = Self::shell_of(v, profiles, default_shell);
+            }
+            if v.cwd.trim() != o.cwd.trim() && self.worktree.is_none() {
+                meta.cwd = v.cwd.trim().to_string();
+            }
+            if v.claude != o.claude {
+                meta.claude = v.claude;
+            }
+            if v.claude_continue != o.claude_continue {
+                meta.claude_continue = v.claude_continue;
+            }
         }
         reload
     }
 }
 
-/// Feld „Arbeitsordner“: Text und Auswahl-Knopf. Eigene Funktion, damit hier später die WSL-fähige Ordnerauswahl (#172)
-/// eingesetzt werden kann. `shell_id` = gewählte Shell (für eine solche Auswahl).
-pub(super) fn folder_field(ui: &mut Ui, cwd: &mut String, _shell_id: &str, lang: Lang) {
+/// Feld „Arbeitsordner“: Text und Auswahl-Knopf. Eigene Funktion, damit hier die WSL-fähige Ordnerauswahl (#172)
+/// eingesetzt werden kann; `shell_id` = gewählte Shell (bestimmt, welche Pfade gelten). `locked` = Ordner eines
+/// Git-Worktrees (nicht änderbar).
+pub(super) fn folder_field(ui: &mut Ui, cwd: &mut String, _shell_id: &str, locked: bool, lang: Lang) {
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(cwd).desired_width(290.0).hint_text(lang.t("leer = Benutzerordner", "empty = home folder")));
-        if ui.button("…").on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
+        ui.add_enabled(!locked, egui::TextEdit::singleline(cwd).desired_width(290.0).hint_text(lang.t("leer = Benutzerordner", "empty = home folder")));
+        if ui.add_enabled(!locked, egui::Button::new("…")).on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
             if let Some(p) = notify::pick_folder(cwd) {
                 *cwd = p;
             }
         }
     });
+}
+
+/// Gibt es den Arbeitsordner für diese Shell? Hier zieht die WSL-Prüfung von #172 ein; bis dahin der Windows-Pfad.
+pub(super) fn folder_exists(_shell_id: &str, path: &str) -> bool {
+    std::path::Path::new(path).is_dir()
 }
 
 /// Farbauswahl (die Farben des Kontextmenüs „Farbe“); die gewählte ist umrandet.
@@ -323,10 +377,13 @@ pub(super) enum FormOutcome {
     Cancel,
 }
 
-/// Der Dialog selbst (ohne App, für Tests ohne Fenster). `claude_mode` = Claude-Modus eingeschaltet.
-pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: &[ShellSpec], profiles: &[Profile], claude_mode: bool, reload_hint: bool, lang: Lang) -> FormOutcome {
+/// Der Dialog selbst (ohne App, für Tests ohne Fenster). `claude_mode` = Claude-Modus eingeschaltet, `esc_ok` = Esc
+/// darf den Dialog schließen (nicht, solange darüber eine Rückfrage offen ist). Esc wird verbraucht (kein Terminal und
+/// kein zweiter Dialog bekommt es) und gilt nicht, solange eine Auswahlliste offen ist (die schließt Esc zuerst).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: &[ShellSpec], profiles: &[Profile], claude_mode: bool, reload_hint: bool, esc_ok: bool, lang: Lang) -> FormOutcome {
     let mut out = FormOutcome::Open;
-    let esc = ctx.input(|i| i.key_pressed(Key::Escape));
+    let esc = esc_ok && !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     egui::Window::new(lang.t("Einstellungen der Sitzung", "Session settings"))
         .id(Id::new("session_settings"))
         .collapsible(false)
@@ -337,23 +394,23 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 ui.label(lang.t("Name", "Name"));
                 let auto = lang.t("automatisch", "automatic");
                 let hint = if f.auto_name.is_empty() { auto.to_string() } else { format!("{} ({auto})", f.auto_name) };
-                let te = ui.add(egui::TextEdit::singleline(&mut f.name).hint_text(hint).desired_width(320.0));
+                let te = ui.add(egui::TextEdit::singleline(&mut f.v.name).hint_text(hint).desired_width(320.0));
                 if f.focus {
                     te.request_focus();
                     f.focus = false;
                 }
                 ui.end_row();
                 ui.label(lang.t("Farbe", "Color"));
-                color_row(ui, &mut f.color);
+                color_row(ui, &mut f.v.color);
                 ui.end_row();
                 ui.label(lang.t("Ordner im Baum", "Tree folder"));
-                ui.add(egui::TextEdit::singleline(&mut f.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut f.v.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(320.0));
                 ui.end_row();
                 ui.label(lang.t("Tags", "Tags"));
-                ui.add(egui::TextEdit::singleline(&mut f.tags).hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut f.v.tags).hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(320.0));
                 ui.end_row();
                 ui.label(lang.t("Notizen", "Notes"));
-                ui.add(egui::TextEdit::multiline(&mut f.notes).desired_rows(3).desired_width(320.0));
+                ui.add(egui::TextEdit::multiline(&mut f.v.notes).desired_rows(3).desired_width(320.0));
                 ui.end_row();
                 if f.chat {
                     return;
@@ -361,56 +418,61 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 ui.separator();
                 ui.separator();
                 ui.end_row();
-                let prog_profile = profiles.iter().find(|p| p.id == f.profile).is_some_and(|p| !p.program.trim().is_empty());
-                if !profiles.is_empty() || f.profile != 0 {
+                let prog_profile = profiles.iter().find(|p| p.id == f.v.profile).is_some_and(|p| !p.program.trim().is_empty());
+                if !profiles.is_empty() || f.v.profile != 0 {
                     ui.label(lang.t("Profil", "Profile"));
-                    let cur = profiles.iter().find(|p| p.id == f.profile).map(|p| p.name.clone()).unwrap_or_else(|| lang.t("Keins", "None").to_string());
-                    egui::ComboBox::from_id_salt("sset_prof").selected_text(cur).show_ui(ui, |ui| {
-                        if ui.selectable_label(f.profile == 0, lang.t("Keins", "None")).clicked() {
+                    let cur = profiles.iter().find(|p| p.id == f.v.profile).map(|p| p.name.clone()).unwrap_or_else(|| lang.t("Keins", "None").to_string());
+                    let r = egui::ComboBox::from_id_salt("sset_prof").selected_text(cur).show_ui(ui, |ui| {
+                        if ui.selectable_label(f.v.profile == 0, lang.t("Keins", "None")).clicked() {
                             f.pick_profile(None);
                         }
                         for p in profiles {
-                            if ui.selectable_label(f.profile == p.id, &p.name).clicked() {
+                            if ui.selectable_label(f.v.profile == p.id, &p.name).clicked() {
                                 f.pick_profile(Some(p));
                             }
                         }
                     });
+                    mark(ui, "profile", &r.response);
                     ui.end_row();
                 }
                 ui.label("Shell");
                 if prog_profile {
                     ui.label(RichText::new(lang.t("eigenes Programm des Profils", "the profile's own program")).color(style::dim(ui)));
                 } else {
-                    let cur = shells.iter().find(|s| s.id == f.shell_id).map(|s| s.label.clone()).unwrap_or_else(|| f.shell_id.clone());
+                    let cur = shells.iter().find(|s| s.id == f.v.shell_id).map(|s| s.label.clone()).unwrap_or_else(|| f.v.shell_id.clone());
                     egui::ComboBox::from_id_salt("sset_shell").selected_text(cur).show_ui(ui, |ui| {
                         for s in shells {
-                            ui.selectable_value(&mut f.shell_id, s.id.clone(), &s.label);
+                            ui.selectable_value(&mut f.v.shell_id, s.id.clone(), &s.label);
                         }
                     });
                 }
                 ui.end_row();
                 ui.label(lang.t("Arbeitsordner", "Working folder"));
-                folder_field(ui, &mut f.cwd, &f.shell_id.clone(), lang);
+                let shell = f.v.shell_id.clone();
+                folder_field(ui, &mut f.v.cwd, &shell, f.worktree.is_some(), lang);
                 ui.end_row();
+                if f.worktree.is_some() {
+                    ui.label("");
+                    let r = ui.label(RichText::new(lang.t("Der Arbeitsordner ist der Git-Worktree dieser Sitzung und bleibt fest.", "The working folder is this session's Git worktree and stays fixed.")).small().color(style::dim(ui)));
+                    mark(ui, "worktree", &r);
+                    ui.end_row();
+                }
                 ui.label("");
-                let prof = profiles.iter().find(|p| p.id == f.profile);
+                let prof = profiles.iter().find(|p| p.id == f.v.profile);
                 let start_note = match prof {
                     Some(p) if !p.startup.trim().is_empty() || !p.env.trim().is_empty() => format!("{} {}", lang.t("Startbefehl und Umgebungsvariablen kommen aus dem Profil", "Start command and environment variables come from the profile"), lang.q(&p.name)),
                     _ => lang.t("Startbefehl und Umgebungsvariablen legt ein Profil fest (Einstellungen → Profile).", "A profile sets the start command and environment variables (Settings → Profiles).").to_string(),
                 };
                 ui.label(RichText::new(start_note).small().color(style::dim(ui)));
                 ui.end_row();
-                if claude_mode || f.claude {
+                if claude_mode || f.v.claude {
                     ui.label("");
-                    let r = ui.checkbox(&mut f.claude, lang.t("Claude Code starten", "Start Claude Code"));
+                    let r = ui.checkbox(&mut f.v.claude, lang.t("Claude Code starten", "Start Claude Code"));
                     mark(ui, "claude", &r);
                     ui.end_row();
-                    if f.claude {
+                    if f.v.claude {
                         ui.label("");
-                        let r = ui.checkbox(&mut f.claude_continue, lang.t("Konversation fortsetzen", "Continue the conversation")).on_hover_text(lang.t(
-                            "Beim Neu laden, Neu starten und Programmstart setzt Claude die bisherige Konversation fort. Aus: jedes Mal eine neue Konversation.",
-                            "On reload, restart and program start Claude continues the previous conversation. Off: a new conversation every time.",
-                        ));
+                        let r = continue_checkbox(ui, &mut f.v.claude_continue, lang);
                         mark(ui, "continue", &r);
                         ui.end_row();
                         // Hier kommen die Claude-Optionen (Modell, Aufwand, Permission-Mode, Agent; #161) hinzu.
@@ -448,20 +510,43 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
     out
 }
 
+/// Häkchen „Konversation fortsetzen“ (Einstellungen der Sitzung und Dialog „Neue Sitzung“).
+pub(super) fn continue_checkbox(ui: &mut Ui, on: &mut bool, lang: Lang) -> egui::Response {
+    ui.checkbox(on, lang.t("Konversation fortsetzen", "Continue the conversation")).on_hover_text(lang.t(
+        "Beim Neu laden, Neu starten und Programmstart setzt Claude die bisherige Konversation fort. Aus: jedes Mal eine neue Konversation.",
+        "On reload, restart and program start Claude continues the previous conversation. Off: a new conversation every time.",
+    ))
+}
+
 impl App {
-    /// „Neu laden“: Chats nie; ein beendeter Prozess startet gleich neu, ein laufender erst nach der Rückfrage.
+    /// „Neu laden“: Chats nie; ein beendeter Prozess startet gleich neu, ein laufender erst nach der Rückfrage. Die
+    /// Rückfrage einer abgedockten Sitzung erscheint in deren Fenster.
     pub(super) fn request_reload(&mut self, ctx: &egui::Context, id: u64) {
         let Some(e) = self.entries.get(&id) else { return };
         match reload_route(e.is_chat(), e.exited()) {
             ReloadRoute::Nothing => {}
             ReloadRoute::Now => self.apply(ctx, Action::Restart(id)),
-            ReloadRoute::Ask => self.reload_ask = Some(ReloadAsk { id, after_settings: false }),
+            ReloadRoute::Ask => {
+                // Einmal den Fokus abgeben, damit Enter nicht noch ins Terminal geht; danach hält „Abbrechen“ ihn.
+                models_ui::release_focus(ctx);
+                self.reload_ask = Some(ReloadAsk { id, after_settings: false, detached: self.detached.contains(&id) });
+            }
         }
     }
 
-    /// Rückfrage „Neu laden?“ (ohne Wartezeit).
-    pub(super) fn reload_ask_ui(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+    /// Rückfrage „Neu laden?“ (ohne Wartezeit). `viewport` = Id der abgedockten Sitzung, deren Fenster gerade gezeichnet
+    /// wird (`None` = das normale Fenster).
+    pub(super) fn reload_ask_ui(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>, viewport: Option<u64>) {
         let Some(ask) = self.reload_ask.take() else { return };
+        let in_detached = ask.detached && self.detached.contains(&ask.id);
+        let here = match viewport {
+            Some(v) => in_detached && v == ask.id,
+            None => !in_detached,
+        };
+        if !here {
+            self.reload_ask = Some(ask);
+            return;
+        }
         let lang = self.settings.language;
         let Some(e) = self.entries.get(&ask.id) else { return };
         let Some(plan) = reload_plan(&e.meta) else { return };
@@ -487,7 +572,9 @@ impl App {
         match o {
             Outcome::Go => {
                 actions.push(Action::Restart(ask.id));
-                self.want_focus = Some(ask.id);
+                // Den Fokus nur holen, wenn die Sitzung hier im Layout steht (nicht minimiert, nicht in einem anderen Fenster).
+                let shown = self.layout.as_ref().is_some_and(|l| l.contains(ask.id)) && !self.detached.contains(&ask.id);
+                self.want_focus = Some(if shown { ask.id } else { self.focused });
             }
             Outcome::Cancel => self.want_focus = Some(self.focused),
             Outcome::Open => self.reload_ask = Some(ask),
@@ -504,15 +591,18 @@ impl App {
     /// Dialog „Einstellungen der Sitzung“ (je Fenster).
     pub(super) fn session_settings_ui(&mut self, ctx: &egui::Context) {
         let Some(mut f) = self.session_settings.take() else { return };
-        let Some(meta) = self.entries.get(&f.id).map(|e| e.meta.clone()) else { return }; // inzwischen geschlossen
+        if !self.entries.contains_key(&f.id) {
+            return; // inzwischen geschlossen
+        }
         let lang = self.settings.language;
         let default_shell = self.settings.default_shell.clone();
-        let hint = f.needs_reload(&meta, &self.settings.profiles, &default_shell);
-        match session_form_ui(ctx, &mut f, &self.shells, &self.settings.profiles, self.settings.claude_mode, hint, lang) {
+        let hint = f.needs_reload(&self.settings.profiles, &default_shell);
+        let esc_ok = self.reload_ask.is_none();
+        match session_form_ui(ctx, &mut f, &self.shells, &self.settings.profiles, self.settings.claude_mode, hint, esc_ok, lang) {
             FormOutcome::Open => self.session_settings = Some(f),
             FormOutcome::Cancel => self.want_focus = Some(self.focused),
             FormOutcome::Save => {
-                f.problems = f.validate(&self.shells, &self.settings.profiles, &default_shell, |p| std::path::Path::new(p).is_dir());
+                f.problems = f.validate(&self.shells, &self.settings.profiles, &default_shell, folder_exists);
                 if !f.problems.is_empty() {
                     self.session_settings = Some(f);
                     return;
@@ -523,7 +613,8 @@ impl App {
                 let group = e.meta.group.clone();
                 self.set_group(id, group); // legt den Ordner im Projekt an
                 if reload {
-                    self.reload_ask = Some(ReloadAsk { id, after_settings: true });
+                    models_ui::release_focus(ctx);
+                    self.reload_ask = Some(ReloadAsk { id, after_settings: true, detached: false });
                 } else {
                     self.want_focus = Some(self.focused);
                 }
@@ -644,38 +735,53 @@ mod tests {
         // pick_profile übernimmt Shell und Ordner
         let mut f = form(&SessionMeta { shell_id: "pwsh".into(), ..SessionMeta::default() });
         f.pick_profile(Some(&p[1]));
-        assert_eq!((f.profile, f.shell_id.as_str(), f.cwd.as_str()), (2, "bash", "C:\\work"));
+        assert_eq!((f.v.profile, f.v.shell_id.as_str(), f.v.cwd.as_str()), (2, "bash", "C:\\work"));
         f.pick_profile(Some(&p[0]));
-        assert_eq!(f.shell_id, "custom:1");
+        assert_eq!(f.v.shell_id, "custom:1");
         f.pick_profile(None);
-        assert_eq!(f.profile, 0);
+        assert_eq!(f.v.profile, 0);
+        // Worktree: der Ordner des Profils ersetzt den Worktree-Ordner nicht
+        let wt = SessionMeta { cwd: "C:\\wt".into(), worktree: Some(state::Worktree { repo: "C:\\r".into(), path: "C:\\wt".into(), branch: "b".into() }), ..SessionMeta::default() };
+        let mut f = form(&wt);
+        f.pick_profile(Some(&p[1]));
+        assert_eq!(f.v.cwd, "C:\\wt");
     }
 
     #[test]
-    fn validation_like_the_new_session_dialog() {
+    fn validation_checks_only_what_changed() {
         let (p, s) = (profiles(), shells());
         let meta = SessionMeta { shell_id: "pwsh".into(), cwd: "C:\\gone".into(), ..SessionMeta::default() };
-        let dir = |d: &str| d == "C:\\ok";
+        let dir = |_shell: &str, d: &str| d == "C:\\ok";
         let mut f = form(&meta);
         assert!(f.validate(&s, &p, "pwsh", dir).is_empty(), "unveränderter (auch fehlender) Ordner sperrt nicht");
-        f.cwd = "C:\\missing".into();
+        f.v.cwd = "C:\\missing".into();
         assert_eq!(f.validate(&s, &p, "pwsh", dir), vec![Problem::MissingFolder]);
-        f.cwd = "C:\\ok".into();
+        f.v.cwd = "C:\\ok".into();
         assert!(f.validate(&s, &p, "pwsh", dir).is_empty());
-        f.cwd = "  ".into();
+        f.v.cwd = "  ".into();
         assert!(f.validate(&s, &p, "pwsh", dir).is_empty(), "leer = Benutzerordner");
-        f.shell_id = "fish".into();
+        f.v.shell_id = "fish".into();
         assert_eq!(f.validate(&s, &p, "pwsh", dir), vec![Problem::UnknownShell]);
-        f.shell_id = "pwsh".into();
-        f.profile = 9;
+        f.v.shell_id = "pwsh".into();
+        f.v.profile = 9;
         assert_eq!(f.validate(&s, &p, "pwsh", dir), vec![Problem::UnknownProfile]);
-        f.profile = 1; // Profil mit Programm: Shell egal
-        f.shell_id = "fish".into();
+        f.v.profile = 1; // Profil mit Programm: Shell egal
+        f.v.shell_id = "fish".into();
         assert!(f.validate(&s, &p, "pwsh", dir).is_empty());
+        // Unverändert ungültig (Profil gelöscht, Shell deinstalliert): sperrt andere Änderungen nicht
+        let stale = SessionMeta { shell_id: "fish".into(), profile: 9, ..SessionMeta::default() };
+        let mut f = form(&stale);
+        f.v.name = "x".into();
+        assert!(f.validate(&s, &p, "pwsh", dir).is_empty());
+        // Die Prüfung des Ordners bekommt die gewählte Shell (WSL-Pfade, #172)
+        let mut f = form(&meta);
+        f.v.shell_id = "bash".into();
+        f.v.cwd = "/home/u".into();
+        assert!(f.validate(&s, &p, "pwsh", |sh, d| sh == "bash" && d == "/home/u").is_empty());
         // Chat: nichts davon
         let mut c = form(&SessionMeta { kind: SessionKind::Chat, ..SessionMeta::default() });
-        c.profile = 9;
-        c.cwd = "C:\\missing".into();
+        c.v.profile = 9;
+        c.v.cwd = "C:\\missing".into();
         assert!(c.validate(&s, &p, "pwsh", dir).is_empty());
         for pr in [Problem::UnknownProfile, Problem::UnknownShell, Problem::MissingFolder] {
             assert_ne!(pr.text(Lang::De), pr.text(Lang::En));
@@ -688,13 +794,13 @@ mod tests {
         let mut meta = SessionMeta { id: 3, name: "x".into(), shell_id: "pwsh".into(), cwd: "C:\\a".into(), tags: vec!["t".into()], ..SessionMeta::default() };
         // Nur Name, Farbe, Ordner, Tags, Notizen: kein Neu laden
         let mut f = form(&meta);
-        assert_eq!(f.name, "", "automatischer Name → leeres Feld");
-        assert_eq!(f.tags, "t");
-        f.name = "  Build ".into();
-        f.color = PALETTE[2];
-        f.group = " a / b ".into();
-        f.tags = "x, #y,, z ".into();
-        f.notes = "n".into();
+        assert_eq!(f.v.name, "", "automatischer Name → leeres Feld");
+        assert_eq!(f.v.tags, "t");
+        f.v.name = "  Build ".into();
+        f.v.color = PALETTE[2];
+        f.v.group = " a / b ".into();
+        f.v.tags = "x, #y,, z ".into();
+        f.v.notes = "n".into();
         assert!(!f.apply(&mut meta, &p, "pwsh"));
         assert_eq!((meta.name.as_str(), meta.custom_name), ("Build", true));
         assert_eq!(meta.color, PALETTE[2]);
@@ -703,12 +809,12 @@ mod tests {
         assert_eq!(meta.notes, "n");
         // „Konversation fortsetzen“ allein: wirkt beim nächsten Neu laden, keine Rückfrage
         let mut f = form(&meta);
-        f.claude_continue = false;
+        f.v.claude_continue = false;
         assert!(!f.apply(&mut meta, &p, "pwsh"));
         assert!(!meta.claude_continue);
         // Name leeren → wieder automatisch
         let mut f = form(&meta);
-        f.name.clear();
+        f.v.name.clear();
         f.apply(&mut meta, &p, "pwsh");
         assert!(!meta.custom_name);
         // Claude an, Ordner, Shell, Profil: Neu laden nötig
@@ -716,12 +822,12 @@ mod tests {
             let mut m = meta.clone();
             let mut f = form(&m);
             match change {
-                0 => f.claude = true,
-                1 => f.cwd = "C:\\b".into(),
-                2 => f.shell_id = "bash".into(),
+                0 => f.v.claude = true,
+                1 => f.v.cwd = "C:\\b".into(),
+                2 => f.v.shell_id = "bash".into(),
                 _ => f.pick_profile(Some(&p[0])),
             }
-            assert!(f.needs_reload(&m, &p, "pwsh"), "Änderung {change}");
+            assert!(f.needs_reload(&p, "pwsh"), "Änderung {change}");
             assert!(f.apply(&mut m, &p, "pwsh"), "Änderung {change}");
         }
         let mut m = meta.clone();
@@ -732,9 +838,37 @@ mod tests {
         // Claude aus einer Claude-Sitzung → Terminal (und zurück)
         let mut m = claude_meta(true, true);
         let mut f = form(&m);
-        f.claude = false;
+        f.v.claude = false;
         assert!(f.apply(&mut m, &p, "pwsh"));
         assert!(!m.claude);
+        // Worktree: der Arbeitsordner bleibt
+        let mut m = SessionMeta { cwd: "C:\\wt".into(), worktree: Some(state::Worktree { repo: "C:\\r".into(), path: "C:\\wt".into(), branch: "b".into() }), ..SessionMeta::default() };
+        let mut f = form(&m);
+        assert!(f.worktree.is_some());
+        f.v.cwd = "C:\\elsewhere".into();
+        f.apply(&mut m, &p, "pwsh");
+        assert_eq!(m.cwd, "C:\\wt");
+    }
+
+    #[test]
+    fn saving_keeps_changes_made_elsewhere_while_the_dialog_was_open() {
+        let p = profiles();
+        let mut meta = SessionMeta { id: 4, name: "old".into(), custom_name: true, shell_id: "pwsh".into(), notes: "a".into(), ..SessionMeta::default() };
+        let mut f = form(&meta);
+        // Inzwischen: Notizen-Fenster, MCP rename_session, Farbe im Kontextmenü, Tags-Eingabe
+        meta.notes = "from notes panel".into();
+        meta.name = "renamed by agent".into();
+        meta.color = PALETTE[5];
+        meta.tags = vec!["t2".into()];
+        // Im Dialog nur der Ordner im Baum geändert
+        f.v.group = "G".into();
+        assert!(!f.apply(&mut meta, &p, "pwsh"));
+        assert_eq!(meta.group, "G");
+        assert_eq!(meta.notes, "from notes panel");
+        assert_eq!(meta.name, "renamed by agent");
+        assert_eq!(meta.color, PALETTE[5]);
+        assert_eq!(meta.tags, vec!["t2"]);
+        assert_eq!(meta.shell_id, "pwsh");
     }
 
     #[test]
@@ -744,11 +878,11 @@ mod tests {
         let mut f = form(&meta);
         assert!(f.chat);
         assert_eq!(f.chat_model, "m");
-        f.claude = true;
-        f.shell_id = "pwsh".into();
-        f.cwd = "C:\\x".into();
-        f.profile = 2;
-        f.name = "Ask".into();
+        f.v.claude = true;
+        f.v.shell_id = "pwsh".into();
+        f.v.cwd = "C:\\x".into();
+        f.v.profile = 2;
+        f.v.name = "Ask".into();
         assert!(!f.apply(&mut meta, &p, "pwsh"), "ein Chat wird nie neu geladen");
         assert_eq!(meta.kind, SessionKind::Chat);
         assert!(!meta.claude && meta.shell_id.is_empty() && meta.cwd.is_empty() && meta.profile == 0);
@@ -759,18 +893,28 @@ mod tests {
     struct Dlg {
         ctx: egui::Context,
         t: f64,
+        esc_ok: bool,
     }
 
     impl Dlg {
+        fn new() -> Dlg {
+            Dlg { ctx: egui::Context::default(), t: 0.0, esc_ok: true }
+        }
         fn frame(&mut self, f: &mut SessionForm, claude_mode: bool, events: Vec<Event>) -> FormOutcome {
+            self.frame_left(f, claude_mode, events).0
+        }
+        /// Wie `frame`; dazu die Tasten, die danach noch übrig sind (die bekäme ein Terminal oder ein zweiter Dialog).
+        fn frame_left(&mut self, f: &mut SessionForm, claude_mode: bool, events: Vec<Event>) -> (FormOutcome, Vec<Key>) {
             self.t += 0.1;
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0))), time: Some(self.t), events, ..Default::default() };
-            let mut out = FormOutcome::Open;
+            let (mut out, mut left) = (FormOutcome::Open, Vec::new());
             let (s, p) = (shells(), profiles());
+            let esc_ok = self.esc_ok;
             let _ = self.ctx.run(input, |ctx| {
-                out = session_form_ui(ctx, f, &s, &p, claude_mode, false, Lang::En);
+                out = session_form_ui(ctx, f, &s, &p, claude_mode, false, esc_ok, Lang::En);
+                left = ctx.input(|i| i.events.iter().filter_map(|e| if let Event::Key { key, pressed: true, .. } = e { Some(*key) } else { None }).collect());
             });
-            out
+            (out, left)
         }
         fn click(&mut self, f: &mut SessionForm, claude_mode: bool, p: Pos2) -> FormOutcome {
             let b = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() };
@@ -784,27 +928,33 @@ mod tests {
         }
     }
 
+    fn esc() -> Event {
+        Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }
+    }
+
     #[test]
     fn dialog_saves_cancels_and_shows_claude_rows_only_for_terminals() {
-        let mut d = Dlg { ctx: egui::Context::default(), t: 0.0 };
+        let mut d = Dlg::new();
         let mut f = form(&SessionMeta { id: 1, claude: true, shell_id: "pwsh".into(), ..SessionMeta::default() });
         assert_eq!(d.frame(&mut f, true, vec![]), FormOutcome::Open);
         assert!(!f.focus, "Fokus ging beim ersten Bild ins Namensfeld");
         d.frame(&mut f, true, vec![]);
         assert!(d.find("continue").is_some(), "Claude-Sitzung: Option sichtbar");
         assert!(d.find("claude").is_some());
+        assert!(d.find("worktree").is_none());
         // Häkchen klicken schaltet die Option
         let r = d.find("continue").unwrap();
         d.click(&mut f, true, r.center());
-        assert!(!f.claude_continue);
+        assert!(!f.v.claude_continue);
         // Speichern
         let r = d.find("save").unwrap();
         assert_eq!(d.click(&mut f, true, r.center()), FormOutcome::Save);
-        // Esc bricht ab
-        let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
-        assert_eq!(d.frame(&mut f, true, vec![esc]), FormOutcome::Cancel);
+        // Esc bricht ab und wird verbraucht (kein zweiter Dialog, kein Terminal bekommt es)
+        let (o, left) = d.frame_left(&mut f, true, vec![esc()]);
+        assert_eq!(o, FormOutcome::Cancel);
+        assert!(left.is_empty(), "{left:?}");
         // Chat: keine Claude-, Shell- oder Ordnerzeilen
-        let mut d = Dlg { ctx: egui::Context::default(), t: 0.0 };
+        let mut d = Dlg::new();
         let mut c = form(&SessionMeta { id: 2, kind: SessionKind::Chat, ..SessionMeta::default() });
         d.frame(&mut c, true, vec![]);
         d.frame(&mut c, true, vec![]);
@@ -812,7 +962,7 @@ mod tests {
         assert!(d.find("continue").is_none());
         assert!(d.find("save").is_some());
         // Terminal ohne Claude-Modus: kein Claude-Häkchen
-        let mut d = Dlg { ctx: egui::Context::default(), t: 0.0 };
+        let mut d = Dlg::new();
         let mut t = form(&SessionMeta { id: 3, shell_id: "pwsh".into(), ..SessionMeta::default() });
         d.frame(&mut t, false, vec![]);
         d.frame(&mut t, false, vec![]);
@@ -820,5 +970,35 @@ mod tests {
         // Abbrechen-Knopf
         let r = d.find("cancel").unwrap();
         assert_eq!(d.click(&mut t, false, r.center()), FormOutcome::Cancel);
+    }
+
+    #[test]
+    fn esc_waits_for_a_question_on_top_and_for_open_lists() {
+        // Rückfrage darüber offen: Esc gehört ihr, der Dialog bleibt und lässt die Taste liegen
+        let mut d = Dlg::new();
+        d.esc_ok = false;
+        let mut f = form(&SessionMeta { id: 1, shell_id: "pwsh".into(), ..SessionMeta::default() });
+        d.frame(&mut f, true, vec![]);
+        let (o, left) = d.frame_left(&mut f, true, vec![esc()]);
+        assert_eq!(o, FormOutcome::Open);
+        assert_eq!(left, vec![Key::Escape]);
+        // Offene Auswahlliste: Esc schließt erst die Liste, nicht den Dialog
+        let mut d = Dlg::new();
+        let mut f = form(&SessionMeta { id: 1, shell_id: "pwsh".into(), profile: 2, ..SessionMeta::default() });
+        d.frame(&mut f, true, vec![]);
+        d.frame(&mut f, true, vec![]);
+        let r = d.find("profile").unwrap();
+        d.click(&mut f, true, r.center());
+        assert!(egui::Popup::is_any_open(&d.ctx), "Profilliste offen");
+        assert_eq!(d.frame(&mut f, true, vec![esc()]), FormOutcome::Open, "Esc schließt nur die Liste");
+    }
+
+    #[test]
+    fn a_worktree_locks_the_folder_with_a_hint() {
+        let mut d = Dlg::new();
+        let mut f = form(&SessionMeta { id: 1, shell_id: "pwsh".into(), cwd: "C:\\wt".into(), worktree: Some(state::Worktree { repo: "C:\\r".into(), path: "C:\\wt".into(), branch: "b".into() }), ..SessionMeta::default() });
+        d.frame(&mut f, true, vec![]);
+        d.frame(&mut f, true, vec![]);
+        assert!(d.find("worktree").is_some());
     }
 }

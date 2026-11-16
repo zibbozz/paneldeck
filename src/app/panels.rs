@@ -63,7 +63,7 @@ impl App {
                 if ui.add_enabled(!e.meta.queue.is_empty(), egui::Button::new(lang.t("Alle löschen", "Clear all"))).clicked() {
                     e.meta.queue.clear();
                 }
-                if !e.meta.claude {
+                if !e.is_claude() {
                     ui.colored_label(Color32::from_rgb(0xe5, 0xc0, 0x7b), lang.t("Keine Claude-Sitzung – die Warteschlange läuft nur bei Claude.", "Not a Claude session – the queue only runs with Claude."));
                 }
             });
@@ -120,7 +120,7 @@ impl App {
         let waiting: Vec<(u64, String, String, bool)> = self
             .entries
             .iter()
-            .filter(|(_, e)| e.needs_you() && e.meta.claude)
+            .filter(|(_, e)| e.needs_you() && e.is_claude())
             .map(|(id, e)| (*id, e.display_name(), e.status_msg.clone(), e.status == ClaudeStatus::Permission))
             .collect();
         if waiting.is_empty() {

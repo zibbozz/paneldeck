@@ -89,6 +89,9 @@ impl App {
                                 ui.label("");
                                 ui.checkbox(&mut d.continue_last, lang.t("Letzte Konversation im Ordner fortsetzen (--continue)", "Continue last conversation in folder (--continue)"));
                                 ui.end_row();
+                                ui.label("");
+                                session_settings::continue_checkbox(ui, &mut d.claude_continue, lang);
+                                ui.end_row();
                                 ui.label(lang.t("Start-Prompt", "Start prompt"));
                                 ui.add(egui::TextEdit::singleline(&mut d.prompt).desired_width(320.0));
                                 ui.end_row();
@@ -148,6 +151,7 @@ impl App {
                     claude: d.claude,
                     claude_args: args.join(" "),
                     continue_last: d.continue_last,
+                    claude_continue: Some(d.claude_continue),
                     prompt: Some(d.prompt.clone()),
                     profile: Some(d.profile),
                     group: Some(d.group.clone()),
@@ -309,10 +313,10 @@ impl App {
 
         // Schließen bestätigen (eine oder viele Sitzungen, mit 3-Sekunden-Wartezeit)
         self.close_ask_ui(ctx, actions);
-        // Einstellungen einer Sitzung und Rückfrage „Neu laden?“ (#169, #170); die Rückfrage nach dem Dialog,
-        // damit „Jetzt neu laden?“ gleich nach dem Speichern erscheint.
+        // Einstellungen einer Sitzung und Rückfrage „Neu laden?“ (#169, #170).
+        // Die Rückfrage zuerst: sie bekommt Esc/Enter, bevor der Einstellungsdialog darunter sie sieht.
+        self.reload_ask_ui(ctx, actions, None);
         self.session_settings_ui(ctx);
-        self.reload_ask_ui(ctx, actions);
 
         self.history_ui(ctx, actions);
         self.templates_ui(ctx, actions);

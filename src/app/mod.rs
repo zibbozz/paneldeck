@@ -89,11 +89,15 @@ struct Entry {
     shell_eff: String,
     /// Chat-Sitzung (`meta.kind = chat`): Verlauf, Eingabe, laufende Antwort. Hängt an der Sitzung, nicht am Fenster.
     chat: Option<ChatState>,
+    /// Beim letzten Start lief Claude (`spawn_into`). `meta.claude` ist die Einstellung für den nächsten Start (#170);
+    /// alles zur Laufzeit (Status, Warteschlange, Hooks, MCP) richtet sich nach diesem Wert.
+    launched_claude: bool,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None }
+        let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, launched_claude }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -101,6 +105,11 @@ impl Entry {
         e.status = ClaudeStatus::Idle;
         e.chat = Some(chat);
         e
+    }
+    /// Läuft in dieser Sitzung Claude (so wie sie zuletzt gestartet wurde)? Nicht `meta.claude`: das gilt erst beim
+    /// nächsten Start.
+    fn is_claude(&self) -> bool {
+        self.launched_claude && !self.is_chat()
     }
     /// Ein Chat statt eines Terminals (hat nie eine PTY; „beendet“ gibt es dort nicht).
     fn is_chat(&self) -> bool {
@@ -144,7 +153,7 @@ impl Entry {
     /// Nächsten wartenden Prompt senden, wenn Claude von beschäftigt auf bereit wechselt.
     /// Gibt `true` zurück, wenn die Warteschlange gerade vollständig abgearbeitet wurde.
     fn queue_tick(&mut self, old: ClaudeStatus, new: ClaudeStatus) -> bool {
-        if !self.meta.claude || self.meta.queue_paused || self.exited() {
+        if !self.is_claude() || self.meta.queue_paused || self.exited() {
             return false;
         }
         if new == ClaudeStatus::Idle && old != ClaudeStatus::Idle {
@@ -381,6 +390,8 @@ struct NewDialog {
     model: String,
     perm: usize,
     continue_last: bool,
+    /// „Konversation fortsetzen“ beim Neu laden/Neustart (#170), Standard an.
+    claude_continue: bool,
     profile: u64,
     prompt: String,
     worktree: bool,
@@ -407,6 +418,8 @@ struct NewOpts {
     claude: bool,
     claude_args: String,
     continue_last: bool,
+    /// „Konversation fortsetzen“ (None = an, wie bisher).
+    claude_continue: Option<bool>,
     prompt: Option<String>,
     resume_id: Option<String>,
     transcript: String,
@@ -434,7 +447,7 @@ struct Launch<'a> {
 
 impl NewDialog {
     fn new(shell_id: String, claude: bool) -> Self {
-        NewDialog { shell_id, cwd: home_dir(), name: String::new(), claude, model: String::new(), perm: 0, continue_last: false, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new() }
+        NewDialog { shell_id, cwd: home_dir(), name: String::new(), claude, model: String::new(), perm: 0, continue_last: false, claude_continue: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new() }
     }
 }
 
@@ -1367,7 +1380,8 @@ impl App {
         self.dir.join("scrollback").join(format!("{id}.txt"))
     }
 
-    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> String {
+    /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt.
+    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool) {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
@@ -1391,7 +1405,9 @@ impl App {
         // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
         // der globalen Einstellung (`session_settings::resume_wanted`).
         let resume_wanted = session_settings::resume_wanted(l.restore, l.restart, meta.claude_continue, self.settings.claude_resume);
-        match session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, is_wsl) {
+        let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, is_wsl);
+        let fresh = start == session_settings::ClaudeStart::Fresh;
+        match start {
             session_settings::ClaudeStart::Resume(id) => c += &format!(" --resume {id}"),
             session_settings::ClaudeStart::Continue => c += " --continue",
             session_settings::ClaudeStart::Fresh => {
@@ -1406,10 +1422,14 @@ impl App {
         if let Some(p) = l.prompt.filter(|p| !p.trim().is_empty()) {
             meta.queue.insert(0, p.trim().to_string());
         }
-        c + "\r"
+        (c + "\r", fresh)
     }
 
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
+        // Ab hier gilt die Einstellung für diesen Start (auch wenn der Start gleich scheitert: dann läuft nichts mehr
+        // aus der alten Konfiguration).
+        entry.launched_claude = entry.meta.claude && !entry.is_chat();
+        entry.hook_seen = false;
         let Some(shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
@@ -1419,7 +1439,18 @@ impl App {
         } else {
             None
         };
-        let claude_cmd = if entry.meta.claude { Some(self.claude_command(&mut entry.meta, &l)) } else { None };
+        let claude_cmd = if entry.launched_claude {
+            let (c, fresh) = self.claude_command(&mut entry.meta, &l);
+            if fresh {
+                // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
+                entry.meta.transcript.clear();
+                self.usage.reset(entry.meta.id);
+            }
+            Some(c)
+        } else {
+            self.usage.reset(entry.meta.id);
+            None
+        };
         let profile = self.profile(entry.meta.profile).cloned();
         let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
         let initial = match (&startup, claude_cmd) {
@@ -1557,6 +1588,7 @@ impl App {
             transcript: o.transcript.clone(),
             group: o.group.as_deref().map(state::clean_folder_path).unwrap_or_default(),
             window,
+            claude_continue: o.claude_continue.unwrap_or(true),
             ..SessionMeta::default()
         };
         if !meta.group.is_empty() {
@@ -1972,6 +2004,7 @@ impl App {
                 "next_cmd" => Action::JumpCmd(1),
                 "next" => Action::Cycle(1),
                 "close_all" => Action::CloseAll(closing::CloseScope::All),
+                "reload" => Action::RequestReload(f),
                 _ => Action::Cycle(-1),
             });
         }
@@ -1994,7 +2027,7 @@ impl App {
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
         // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
-        if self.new_chat.is_some() || self.confirm_close.is_some() || self.reload_ask.is_some() {
+        if self.new_chat.is_some() || self.confirm_close.is_some() {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();
@@ -2121,7 +2154,7 @@ impl App {
                 }
             }
             // Ohne Hook-Daten (z. B. WSL ohne funktionierenden Interop): einfachen Status aus dem Transkript ableiten.
-            if e.meta.claude && !e.hook_seen && !e.exited() {
+            if e.is_claude() && !e.hook_seen && !e.exited() {
                 if let Some(u) = self.usage.get(*id) {
                     // Großzügige Frist: Claude schreibt bei langen Werkzeugläufen (Tests, Builds) lange nichts ins Transkript;
                     // ein zu früh erkanntes „bereit“ würde den nächsten Warteschlangen-Prompt mitten in die Arbeit tippen.
@@ -2703,7 +2736,7 @@ impl App {
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
                 e.live_cwd = c.clone();
             }
-            if e.meta.claude {
+            if e.is_claude() {
                 if let Some(cs) = m.claude_session.as_ref().filter(|c| !c.is_empty()) {
                     e.meta.claude_session = cs.clone();
                 }
@@ -2802,7 +2835,7 @@ impl App {
                     if let Some(e) = self.entries.get_mut(&id) {
                         e.meta.queue.push(text);
                         // Ist Claude schon bereit, startet die Warteschlange sofort.
-                        if e.meta.claude && !e.meta.queue_paused && e.status == ClaudeStatus::Idle && !e.exited() {
+                        if e.is_claude() && !e.meta.queue_paused && e.status == ClaudeStatus::Idle && !e.exited() {
                             e.send_next_queued();
                         }
                     }
@@ -3245,17 +3278,16 @@ impl App {
                         name: Some(format!("{} (2)", src.display_name())),
                         claude: src.meta.claude,
                         claude_args: src.meta.claude_args.clone(),
+                        claude_continue: Some(src.meta.claude_continue),
                         profile: Some(src.meta.profile),
                         window: Some(src.meta.window),
                         project: Some(src.meta.project),
                         ..NewOpts::default()
                     };
-                    let cont = src.meta.claude_continue;
                     let new = self.new_session(ctx, o);
                     let group = self.entries.get(&id).map(|e| e.meta.group.clone()).unwrap_or_default();
                     if let Some(e) = self.entries.get_mut(&new) {
                         e.meta.group = group;
-                        e.meta.claude_continue = cont;
                     }
                 }
             }
@@ -3603,7 +3635,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             ui.close();
         }
     });
-    let claude = entry.meta.claude && cx.claude_mode;
+    let claude = entry.is_claude() && cx.claude_mode;
     // „Neu laden“ (#169) nur für Terminals; ein Chat hat keinen Prozess.
     let reload = session_settings::reload_plan(&entry.meta);
     let status_label = entry.status_label(lang);
@@ -3623,7 +3655,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     let name_col = mix_col(text_c, strong_c, fo);
     // Breite des Knopfbereichs rechts: fünf Knöpfe (abgedockt zwei), mit Ticket-Verknüpfung und Neu laden je einer mehr.
     let tl_btn = tl_enabled;
-    let btns_w = if cx.detached { 52.0 } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } + if reload.is_some() { 22.0 } else { 0.0 } };
+    let reload_w = if reload.is_some() { 22.0 } else { 0.0 };
+    let btns_w = if cx.detached { 52.0 + reload_w } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } + reload_w };
     let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
     let chips = cx.tl.chips_of(id);
@@ -3688,6 +3721,11 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                     }
                     if style::icon_btn_small(ui, SIcon::Collapse, lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)")).clicked() {
                         cx.actions.push(Action::MinimizePane(id));
+                    }
+                    if let Some(plan) = reload {
+                        if style::icon_btn_small(ui, SIcon::Reload, plan.tip(lang)).clicked() {
+                            cx.actions.push(Action::RequestReload(id));
+                        }
                     }
                     return;
                 }
@@ -4168,18 +4206,47 @@ mod pane_tests {
         h.actions.clear();
         h.click(&mut layout, false, header_btn(r, 3));
         assert!(h.actions.iter().any(|a| matches!(a, Action::Detach(1))));
-        // Abgedockt: nur Andocken und Minimieren, kein Neu laden
+        // Abgedockt: Andocken, Minimieren, Neu laden
         let mut h = H::new(&[(1, false)]);
         let mut solo = Node::Leaf(1);
         h.frame(&mut solo, true, vec![]);
         h.frame(&mut solo, true, vec![]);
         let r = h.rects[&1];
         h.click(&mut solo, true, header_btn(r, 2));
+        assert!(h.actions.iter().any(|a| matches!(a, Action::RequestReload(1))));
+        // Abgedockter Chat: kein Neu laden
+        let mut h = H::new(&[(2, true)]);
+        let mut solo = Node::Leaf(2);
+        h.frame(&mut solo, true, vec![]);
+        h.frame(&mut solo, true, vec![]);
+        let r = h.rects[&2];
+        h.click(&mut solo, true, header_btn(r, 2));
         assert!(!h.actions.iter().any(|a| matches!(a, Action::RequestReload(_))));
     }
 
     #[test]
-    fn a_detached_window_has_dock_back_and_minimize() {
+    fn claude_gates_follow_the_launched_session_not_the_settings() {
+        // Gestartet als Claude: Einstellung aus, aber noch nicht neu geladen → weiter Claude (Status, Warteschlange, MCP)
+        let mut e = Entry::new(SessionMeta { id: 1, claude: true, ..SessionMeta::default() });
+        assert!(e.is_claude());
+        e.meta.claude = false;
+        assert!(e.is_claude(), "erst das Neu laden macht daraus ein Terminal");
+        e.meta.queue.push("p".into());
+        e.queue_active = false;
+        // Ohne Prozess sendet die Warteschlange nichts, aber nicht wegen der geänderten Einstellung (Prompt bleibt).
+        assert!(!e.queue_tick(ClaudeStatus::Working, ClaudeStatus::Idle));
+        assert_eq!(e.meta.queue.len(), 1);
+        // Umgekehrt: Terminal, Claude eingeschaltet, nicht neu geladen → kein Claude
+        let mut t = Entry::new(SessionMeta { id: 2, ..SessionMeta::default() });
+        t.meta.claude = true;
+        assert!(!t.is_claude());
+        // Ein Chat ist nie Claude
+        let c = Entry::new_chat(SessionMeta { id: 3, claude: true, kind: SessionKind::Chat, ..SessionMeta::default() }, ChatState::new(chatmod::ChatFile::default(), None));
+        assert!(!c.is_claude());
+    }
+
+    #[test]
+    fn a_detached_window_has_dock_back_minimize_and_reload() {
         let mut h = H::new(&[(1, false)]);
         let mut layout = Node::Leaf(1);
         h.frame(&mut layout, true, vec![]);

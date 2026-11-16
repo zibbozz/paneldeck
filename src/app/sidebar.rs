@@ -415,7 +415,7 @@ impl App {
         let color = e.color();
         let exited = e.exited();
         let is_chat = e.is_chat();
-        let claude = e.meta.claude && self.settings.claude_mode;
+        let claude = e.is_claude() && self.settings.claude_mode;
         let focused = self.focused == id;
         let attention = e.attention || e.needs_you();
         // Nicht im Layout (minimiert oder weggewechselt): abgeblendet; minimiert zusätzlich mit Strich-Marke.

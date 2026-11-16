@@ -765,7 +765,7 @@ impl App {
             "group": e.meta.group,
             "cwd": e.cwd_now(),
             "shell": e.eff_shell(),
-            "claude": e.meta.claude,
+            "claude": e.is_claude(),
             "status": status_str(e),
             "children": children,
         })
@@ -790,7 +790,7 @@ impl App {
                     "group": e.meta.group,
                     "cwd": e.cwd_now(),
                     "shell": e.eff_shell(),
-                    "claude": e.meta.claude,
+                    "claude": e.is_claude(),
                     "kind": if e.is_chat() { "chat" } else { "terminal" },
                     "model": e.meta.chat.as_ref().map(|c| c.model.clone()),
                     // Nur Chats: die Runde hielt an und wartet auf „Weiter“ des Nutzers (Status bleibt `ready`).
@@ -925,7 +925,7 @@ impl App {
         }
         self.mcp.created.insert(id, caller);
         let e = &self.entries[&id];
-        Ok(json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.meta.claude, "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")}))
+        Ok(json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")}))
     }
 
     /// Gruppe einer neuen Sitzung: `group` oder – läuft der Agent in einer Hub-Sitzung – ein Unterordner mit deren Namen
@@ -1070,7 +1070,7 @@ impl App {
             s.send_text_agent(text, submit);
         }
         // Ein abgeschickter Prompt macht Claude sofort „arbeitet“ (der Hook kommt erst Sekundenbruchteile später).
-        if submit && e.meta.claude && e.status == ClaudeStatus::Idle {
+        if submit && e.is_claude() && e.status == ClaudeStatus::Idle {
             e.status = ClaudeStatus::Working;
         }
         Ok(json!({"ok": true}))
@@ -1105,7 +1105,7 @@ impl App {
             let max_lines = args.get("max_output_lines").and_then(|v| v.as_u64()).unwrap_or(200).clamp(1, 5000) as usize;
             let s = self.mcp_live(id)?;
             let e = &self.entries[&id];
-            if e.meta.claude {
+            if e.is_claude() {
                 return Err(er("claude_session", tr("In Claude-Sitzungen gibt es keine Befehlszeile – queue_prompt oder send_text verwenden.", "Claude sessions have no command line – use queue_prompt or send_text.")));
             }
             if self.pending_for(id) {
@@ -1158,7 +1158,7 @@ impl App {
             // Auf sich selbst warten hieße: bis zur Frist blockieren (der eigene Status ändert sich währenddessen nicht).
             wait_target_ok(caller, id)?;
             let chat = self.entries[&id].is_chat();
-            if !chat && !self.entries[&id].meta.claude {
+            if !chat && !self.entries[&id].is_claude() {
                 return Err(er("not_claude", tr("Das ist keine Claude-Sitzung und kein Chat.", "This is neither a Claude session nor a chat.")));
             }
             if !chat && !self.settings.claude_mode {
@@ -1314,7 +1314,7 @@ impl App {
             return Err(er("too_large", tr("prompt ist zu groß", "prompt is too large")));
         }
         let e = self.entries.get_mut(&id).ok_or_else(|| er("not_found", tr("Sitzung nicht gefunden", "Session not found")))?;
-        if !e.meta.claude {
+        if !e.is_claude() {
             return Err(er("not_claude", tr("Das ist keine Claude-Sitzung (die Warteschlange gilt nur dort).", "This is not a Claude session (the queue only applies there).")));
         }
         e.meta.queue.push(prompt);
