@@ -11,6 +11,13 @@ Der **Terminal Hub** ist der Hauptbereich von Paneldeck: viele Terminal-Sitzunge
 - Farben, Alt-Screen, Maus, Unicode, farbige Emojis, CJK und lückenlose Rahmenzeichen. Die Terminalschrift ist Cascadia Mono (eingebettet); fehlende Zeichen kommen aus den Windows-Systemschriften.
 - **Profile** (*Einstellungen → Profile*) bündeln Shell, Startbefehl, Umgebungsvariablen und Darstellung – z. B. „Produktion“ rot oder „Claude in WSL“. Projekte und Ordner können ein Profil für neue Sitzungen vorgeben.
 
+## Mausrad
+- **Normale Shell:** Das Mausrad scrollt den Verlauf von Paneldeck.
+- **Programme mit Mausunterstützung** (z. B. `htop`, `vim` mit `mouse=a`, `tmux`, Midnight Commander): Paneldeck meldet Mausrad und Klicks in jeder Maus-Kodierung an das Programm (SGR, UTF-8 und die normale Kodierung). Die normale Kodierung kann Positionen nur bis Spalte/Zeile 94 tragen – größere Werte würde ConPTY verfälschen –, darüber sendet Paneldeck deshalb nichts statt einer falschen Position; die meisten Programme nutzen ohnehin SGR.
+- **Vollbildprogramme ohne Mausunterstützung** (z. B. `less`, `man`): Das Mausrad sendet Pfeiltasten, damit der Text scrollt – aber nur, wenn das Programm es erlaubt (Alternate Scroll Mode, DECSET 1007, standardmäßig an). Die Einstellung *Einstellungen → Darstellung → Mausrad in Vollbildprogrammen* wählt **Pfeiltasten senden** (Standard) oder **Aus**.
+- **Umschalt+Mausrad** scrollt immer den Verlauf von Paneldeck, auch wenn das Programm die Maus nutzt. Vollbildprogramme haben keinen Verlauf, dort tut Umschalt+Mausrad deshalb nichts.
+- **Nach einem abgestürzten Vollbildprogramm**, das seine Modi nicht zurückgesetzt hat, verhält sich das Mausrad am Shell-Prompt wieder wie in einer normalen Shell (keine Pfeiltasten in die Befehlszeile, kein Zeichensalat aus Mauscodes), bis du den nächsten Befehl ausführst. Das braucht Shell-Integration (die Shell meldet ihren Prompt); ohne sie verhält sich das Mausrad weiter wie im abgestürzten Programm.
+
 ## Sitzungen starten
 - **Strg+Umschalt+T** oder *Neue Sitzung …* in der Seitenleiste öffnet eine Sitzung; *Neue Claude-Sitzung …* (Funken-Knopf) startet eine mit Claude Code (siehe [Claude Code](claude-code.md)). Der Sprechblasen-Knopf beginnt statt eines Terminals einen **Chat mit einem lokalen Modell** (siehe [Chats mit lokalen Modellen](chat.md)).
 - Bei einem frischen Start öffnet Paneldeck **kein Terminal**: Der leere Terminal Hub zeigt einen kurzen Hinweis mit *Neues Terminal* (im Claude-Modus auch *Neue Claude-Sitzung …*) und den Tastenkürzeln. Sitzungen des letzten Laufs werden wie bisher wiederhergestellt. Siehe [Mehrere Fenster](windows.md#der-leere-terminal-hub).

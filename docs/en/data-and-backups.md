@@ -44,6 +44,7 @@ Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the sessio
 {
   "version": 1,
   "context_start": 2,
+  "always_allow": [ { "tool": "send_text", "session": 4 } ],
   "messages": [
     { "role": "user", "content": "Which sessions are open?", "ts": 1763200000 },
     { "role": "assistant", "content": "", "ts": 1763200001,
@@ -56,15 +57,17 @@ Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the sessio
 }
 ```
 
-- `role` is `user`, `assistant`, `tool` or `system`; `ts` = seconds since 1970 (UTC). An answer can carry `tool_calls`, an `error` (shown with *Retry*) or a `note` (e.g. "cut off at the token limit"; not sent to the model). A tool result has `tool_call_id`, `tool_name` and `status` (`ok`, `error`, `denied`). `context_start` = the first message the model still saw at the last request (missing while nothing was left out). The tools allowed with *Always for this chat* are stored in the file as well.
+- `role` is `user`, `assistant`, `tool` or `system`; `ts` = seconds since 1970 (UTC). An answer can carry `tool_calls`, an `error` (shown with *Retry*) or a `note` (e.g. "cut off at the token limit"; not sent to the model). A tool result has `tool_call_id`, `tool_name` and `status` (`ok`, `error`, `denied`). `context_start` = the first message the model still saw at the last request (missing while nothing was left out). `always_allow` = the rules from *Always for this chat*, each a tool plus its target session (`{"tool": "send_text", "session": 4}`); a call runs without asking only when both match. Rules without a session are never written and never apply. *Permanent approvals (N)* in the chat header revokes them.
 - The file is written **atomically** (temporary file, then rename). Reading is tolerant: a BOM is allowed, unknown fields are ignored, a single invalid message is skipped. A corrupt or too large file (over 8 MB) gives an empty chat with a notice; the file is first saved as `chats/<id>.defekt-<time>.json`. When saving, a history over 8 MB loses its oldest messages.
 - A history file that does not belong to a session (e.g. after `state.json` was reset) is never loaded into a new chat: it is moved aside as `chats/<id>.orphan-<time>.json`.
 - **Closing a chat deletes its file** (and its `.defekt-…` backups). *Save history to file …* in the chat's context menu exports it as Markdown first.
 
-## Chat fields in settings.json and state.json
-- `settings.json` → `llm_servers`: the servers of *Settings → Models*, each with `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 of a Windows DPAPI blob – never plain text; only the same Windows user on the same computer can decrypt it), optional `receive_timeout_secs`, `models` (settings per model: `name`, `level`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`) and `last_models` (the result of the last *Connect*). A server entry that cannot be read (e.g. an unknown `kind` from a newer version) is kept unchanged and shown read-only with *Remove*.
+## New fields in 2.2.0
+- `settings.json` → `llm_servers`: the servers of *Settings → Models*, each with `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 of a Windows DPAPI blob – never plain text; only the same Windows user on the same computer can decrypt it), optional `receive_timeout_secs`, `models` (settings per model: `name`, `level`, `level_chosen`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`; `level_chosen: true` = the level was chosen in the [level question](chat.md#the-level-question) or under *Settings → Models* – missing or `false` means the model counts as *Off*, whatever `level` says) and `last_models` (the result of the last *Connect*). A server entry that cannot be read (e.g. an unknown `kind` from a newer version) is kept unchanged and shown read-only with *Remove*.
 - `settings.json` → `last_chat_model`: `{ "server": "<id>", "model": "<name>" }`, the last choice in the *New chat* dialog.
+- `settings.json` → `alt_screen_wheel`: `"arrows"` (default) or `"off"` – the setting *Mouse wheel in full-screen programs* (see [Mouse wheel](terminals.md#mouse-wheel)). Any other value counts as `"arrows"`.
 - `state.json` → per session `kind` (`"chat"`; missing = terminal) and `chat` (`{ "server": "<id>", "model": "<name>" }`). An older Paneldeck (2.1) opening this file shows chats as terminals and leaves `chats/*.json` alone.
+- `mcp-log.jsonl` → optional `how` (`"chat"`) and `model` (the chat's model) on entries of tool calls made by a [chat](chat.md#tool-calls-and-approvals); missing for external agents.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.

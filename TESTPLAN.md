@@ -623,7 +623,8 @@ Vorbereitung wie 54, aber zuerst ohne Server. Automatisch: Unit-Tests `llm::*` (
 - [ ] **HTTPS selbst signiert** (optional, eigener Testserver im LAN): *Verbinden* → „Das Zertifikat des Servers ist nicht vertrauenswürdig …“ mit dem Hinweis auf *Vertrauenswürdige Stammzertifizierungsstellen* bzw. `http://`.
 - [ ] **Umleitung** (optional, Testserver mit 301): Meldung „Der Server leitet weiter …“, der Umleitung wird nicht gefolgt.
 - [ ] **API-Schlüssel:** *Zeigen*/*Verbergen*; *Speichern* → 🔑 am Server; `settings.json` enthält nur einen Base64-Blob, nirgends den Klartext. Bearbeiten mit leerem Feld behält den Schlüssel; *Schlüssel entfernen* löscht ihn. Datenordner unter einem anderen Windows-Benutzer öffnen (optional) → Chat meldet „Der gespeicherte API-Schlüssel lässt sich nicht entschlüsseln …“.
-- [ ] **Modell-Einstellungen:** Stufe Aus/Lesen/Steuern (die Werkzeugliste wächst mit der Stufe), ein Werkzeug abwählen, *Vor Schreib-Aktionen nachfragen*, *Max. Schritte*, *Werkzeugaufrufe* Automatisch/An/Aus, eigene Kontextlänge → bleiben nach Schließen und erneutem Öffnen der Einstellungen und nach einem Neustart erhalten.
+- [ ] **Neues Modell:** nach *Verbinden* steht ein neues Modell auf Stufe *Aus*; in `settings.json` fehlt `level_chosen`.
+- [ ] **Modell-Einstellungen:** Stufe Aus/Lesen/Steuern (die Werkzeugliste wächst mit der Stufe), ein Werkzeug abwählen, *Vor Schreib-Aktionen nachfragen*, *Max. Schritte*, *Werkzeugaufrufe* Automatisch/An/Aus, eigene Kontextlänge → eine Wahl der Stufe setzt `level_chosen: true`; alles bleibt nach Schließen und erneutem Öffnen der Einstellungen und nach einem Neustart erhalten.
 - [ ] **Dialog *Neuer Chat*:** aus Seitenleiste, Palette, leerem Hub und Ordnermenü → Server/Modell vorausgewählt (letzte Wahl), Enter beginnt den Chat; ein Ordner-Chat landet im Ordner.
 - [ ] **Antwort:** echte Antwort streamt, ↻ und „Tokens: …“ erscheinen; *Stopp* bricht ab.
 - [ ] **Ohne Werkzeuge:** Modell ohne Werkzeug-Fähigkeit (oder *Werkzeugaufrufe: Aus*) → Hinweis „Dieses Modell kann keine Werkzeuge nutzen – nur Chat.“
@@ -635,26 +636,35 @@ Vorbereitung wie 54, aber zuerst ohne Server. Automatisch: Unit-Tests `llm::*` (
 
 ## 56 · Werkzeuge und Freigaben in Chats (2.2.0)
 Vorbereitung wie 54 mit einem Modell mit Werkzeug-Fähigkeit (z. B. `qwen2.5:7b`), daneben ein Terminal. Automatisch: Unit-Tests der Werkzeug-Schleife (Filter nach Stufe/Modus/abgewählt, Prüfung beim Ausführen, Schritte + *Weiter*, Stopp mit offenen Aufrufen, „Immer für diesen Chat“ in `chats/<id>.json`), End-to-End-Test mit einem Schein-Ollama-Server, headless-egui-Test der Freigabe-Knöpfe EN/DE.
+- [ ] **Frage nach der Stufe:** neues Modell (Stufe nie gewählt), erste Nachricht senden → die Nachricht bleibt im Eingabefeld, der Chat fragt „Darf dieses Modell Paneldeck nutzen?“ mit *Aus* / *Lesen* / *Steuern*, Seitenleiste „braucht dich“; *Lesen* → die Nachricht wird gesendet, `settings.json` enthält `level_chosen: true`; der nächste Chat mit dem Modell fragt nicht mehr. Stufe stattdessen in *Einstellungen → Modelle* wählen → die Frage verschwindet, die Nachricht bleibt im Feld.
 - [ ] **Lesend:** Stufe *Lesen*, „Welche Sitzungen sind offen?“ → eingeklappte Zeile `list_sessions` mit Kreisel, dann ✓; aufgeklappt Parameter und Ergebnis (JSON); danach die Antwort des Modells.
 - [ ] **Stufe Aus:** Stufe *Aus* → das Modell bekommt keine Werkzeuge (nur Chat), keine Werkzeugzeilen.
 - [ ] **Abgewählt:** `list_sessions` abwählen → das Modell kann es nicht aufrufen (bzw. bekommt einen Fehler zurück, ohne dass etwas ausgeführt wird).
-- [ ] **Freigabe:** Stufe *Steuern*, *Nachfragen* an: „Schreib `echo hi` in das Terminal“ → Zeile `send_text` mit kurzer Parameter-Zusammenfassung und *Erlauben* / *Immer für diesen Chat* / *Ablehnen*; der Chat ist in der Seitenleiste als „braucht dich“ markiert (Aufmerksamkeitsring). Enter im Eingabefeld gibt **nicht** frei; Enter mit Fokus auf der Freigabe-Zeile erlaubt.
-- [ ] **Erlauben** → Text erscheint im Terminal, Zeile ✓. **Ablehnen** → Zeile ⊘ abgelehnt, nichts im Terminal, das Modell erfährt die Ablehnung. **Immer für diesen Chat** → weitere `send_text` dieses Chats laufen ohne Frage; ein anderer Chat fragt weiter; nach einem Neustart gilt es für diesen Chat noch.
+- [ ] **Freigabe:** Stufe *Steuern*, *Nachfragen* an: „Schreib `echo hi` in das Terminal“ → Kasten „Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:“ mit `send_text → session N "Name"`, den vollständigen Argumenten (bei langem Text scrollbar, Hinweis „+N Zeichen – nach unten scrollen …“) und *Erlauben* / *Immer für diesen Chat* / *Ablehnen*; der Chat ist in der Seitenleiste als „braucht dich“ markiert (Aufmerksamkeitsring). Enter im Eingabefeld gibt **nicht** frei; Enter mit Fokus auf der Freigabe-Zeile erlaubt.
+- [ ] **Erlauben** → Text erscheint im Terminal, Zeile ✓. **Ablehnen** → Zeile ⊘ abgelehnt, nichts im Terminal, das Modell erfährt die Ablehnung. **Immer für diesen Chat** → weitere `send_text` dieses Chats **auf dieselbe Sitzung** laufen ohne Frage; auf eine andere Sitzung fragt er wieder; ein anderer Chat fragt weiter; `chats/<id>.json` enthält `always_allow: [{"tool":"send_text","session":N}]`; nach einem Neustart gilt es für diesen Chat noch.
+- [ ] **Kein „Immer“:** `create_session` und Aufrufe ohne Ziel-Sitzung (z. B. `add_todo`) zeigen nur *Erlauben* / *Ablehnen*. `wait_for_status` und `focus_session` laufen ohne Frage.
+- [ ] **Widerrufen:** Kopfzeile „Dauerhafte Freigaben (1)“ → *Widerrufen* → der Eintrag verschwindet (auch aus der Datei), der nächste `send_text` fragt wieder.
 - [ ] **Eigene Sitzung / Regeln:** der Chat darf sich nicht selbst schließen; ein Terminal mit offener Claude-Freigabe-Frage wird nicht beschrieben; `close_session` auf ein fremdes Terminal → abgelehnt; ein vom Chat angelegtes Terminal ist sein Kind und darf geschlossen werden.
-- [ ] **Max. Schritte:** *Max. Schritte* = 2, Aufgabe mit vielen Aufrufen → „Nach 2 Werkzeugaufrufen angehalten“ mit *Weiter*; *Weiter* erlaubt zwei weitere.
+- [ ] **Max. Schritte:** *Max. Schritte* = 2, Aufgabe mit vielen Aufrufen → „Nach 2 Werkzeugaufrufen angehalten“ mit *Weiter*; *Weiter* erlaubt zwei weitere. Abgewiesene Aufrufe (abgewähltes Werkzeug) zählen mit.
+- [ ] **Unsinnige Aufrufe:** Modell ruft immer wieder ein nicht erlaubtes Werkzeug auf → „Das Modell rief immer wieder Werkzeuge auf, die nicht laufen konnten – angehalten.“ mit *Weiter*, keine Endlosschleife.
+- [ ] **Kontext voll:** eigene Kontextlänge klein (z. B. 4096), Stufe *Lesen*, mehrmals große Ausgaben lesen lassen (`read_terminal` mit vielen Zeilen) → Ergebnisse sind gekürzt (das Ende bleibt, Hinweis auf nicht vertrauenswürdigen Inhalt), ältere werden durch „elided“ ersetzt; schließlich „Die Werkzeug-Ergebnisse passen nicht mehr in den Kontext des Modells …“ mit *Weiter* → wartende Aufrufe stehen als „nicht ausgeführt“ (`skipped`) im Verlauf, das Modell antwortet.
+- [ ] **Screenshot:** Stufe *Lesen*, „Mach einen Screenshot“ → Ergebnis ohne Bilddaten („omitted – images are not passed to chat models“).
 - [ ] **Stopp mit offenen Aufrufen:** während eine Freigabe wartet *Stopp* → der Aufruf wird abgebrochen; die nächste Nachricht funktioniert (kein „hängender“ Werkzeugaufruf im Verlauf).
 - [ ] **Beenden während eines Werkzeugs:** Paneldeck beenden, während `run_command` läuft → nach dem Neustart steht der Aufruf als unterbrochen im Chat, weiterschreiben geht.
-- [ ] **Aufrufprotokoll:** *Einstellungen → Agenten* bzw. `mcp-log.jsonl` listet die Aufrufe des Chats (als Chat gekennzeichnet).
+- [ ] **Aufrufprotokoll:** *Einstellungen → Agenten* bzw. `mcp-log.jsonl` listet die Aufrufe des Chats (`how: "chat"` und `model`; bei externen Agenten fehlen beide Felder).
 - [ ] **Unabhängig von der MCP-Stufe:** *Einstellungen → Agenten* auf *Aus* → der Chat nutzt trotzdem die Werkzeuge seiner Modell-Stufe.
 - [ ] **Beide Sprachen:** Freigabe-Knöpfe, Status und Hinweise auf Deutsch und Englisch.
 
 ## 57 · MCP-Zugriff auf Chats (2.2.0)
 Vorbereitung: MCP-Stufe *Steuern*, ein Chat mit einem eingerichteten Modell. Automatisch: Unit-Tests der neuen Werkzeuge (Schemas, Stufen, Fehlercodes, Kürzung, nicht vertrauenswürdig, keine Geheimnisse), `tools\smoke-mcp.ps1 -Exe <exe> -WorkRoot E:\paneldeck-test` (mit Schein-Ollama-Server: Chat anlegen, senden, lesen, Fehlercodes; Zahl siehe Skript-Ausgabe).
 - [ ] **list_sessions:** Chat mit `kind: "chat"` und `model`; Terminals mit `kind: "terminal"`.
+- [ ] **list_models:** Server mit `id`, `name`, `kind`, `host:port` und Modellen (`level`, `tools`, `context_length`, `last_used`); kein API-Schlüssel, keine vollständige Adresse in der Antwort.
 - [ ] **create_session** mit `kind: "chat"`, `server`, `model` → neuer Chat erscheint in der Seitenleiste als Kind des Agenten; unbekanntes Modell → `bad_args` mit den Namen der eingerichteten Server/Modelle (keine Schlüssel).
-- [ ] **send_chat_message** „ping“ → `{ok: true, index}`; die Nachricht erscheint im Chat-Fenster, die Antwort streamt; `wait_for_status` bis `ready`; `read_chat` zeigt Frage und Antwort (als nicht vertrauenswürdig gekennzeichnet).
-- [ ] **busy:** `send_chat_message` während die Antwort läuft bzw. eine Freigabe wartet → `busy`. Während der Freigabe: `read_chat` meldet `needs_approval`, `wait_for_status` mit `approval` kehrt zurück; freigeben kann der Agent nicht.
-- [ ] **Fehlercodes:** `read_terminal` auf den Chat → `not_a_terminal`; `read_chat` auf ein Terminal → `not_a_chat`; `send_chat_message` bei Stufe *Lesen* → `forbidden`; Server des Chats entfernt → `no_model`.
+- [ ] **send_chat_message** „ping“ → `{ok: true, index}`; die Nachricht erscheint im Chat-Fenster mit „Von Agent … gesendet“, die Antwort streamt; `wait_for_status` bis `ready`; `read_chat` zeigt Frage und Antwort (als nicht vertrauenswürdig gekennzeichnet).
+- [ ] **busy / permission_pending:** `send_chat_message` während die Antwort streamt bzw. während du die letzte Nachricht bearbeitest → `busy`; während eine Freigabe wartet bzw. die Frage nach der Stufe offen ist → `permission_pending`. Während der Freigabe: `read_chat` meldet `approval`, `wait_for_status` mit `approval` kehrt zurück (mit `needs_you`); freigeben kann der Agent nicht.
+- [ ] **read_chat-Felder:** langer Chat mit `last: 2` → `more_above: true`; sehr lange Nachricht → `truncated`.
+- [ ] **Kein Umweg:** Agent legt einen Chat (Stufe *Steuern*) an und lässt ihn `send_text` auf die Sitzung des Agenten aufrufen → `forbidden`.
+- [ ] **Fehlercodes:** `read_terminal` auf den Chat → `not_a_terminal`; `read_chat` auf ein Terminal → `not_a_chat`; `send_chat_message` bei Stufe *Lesen* → `forbidden`; Server des Chats entfernt bzw. Modell nicht mehr in der Liste des Servers → `no_model`; `create_session` mit unbekanntem Modell ohne Server → `bad_args`.
 - [ ] **Agent im Terminal:** Claude Code in einem Paneldeck-Terminal fragt „Frag den Chat X nach …“ → Nachricht kommt im Chat an, Claude liest die Antwort.
 - [ ] **Beide Sprachen:** Fehlermeldungen der neuen Werkzeuge in beiden Sprachen (Codes unübersetzt).
 
@@ -663,8 +673,18 @@ Vorbereitung: MCP-Stufe *Steuern*, ein Chat mit einem eingerichteten Modell. Aut
 - [ ] **Weiteres Fenster:** dasselbe in einem weiteren Fenster (Strg+Klick auf einen Reiter).
 - [ ] **Skalierung 150 %:** dasselbe bei 150 % Anzeigeskalierung und auf einem zweiten Monitor (falls vorhanden).
 
-## 59 · Gesamtprüfung vor dem Release 2.2.0
-- [ ] **Abschnitte 54–58** komplett durchlaufen, einmal auf Deutsch und einmal auf Englisch.
+## 59 · Mausrad (#141, 2.2.0)
+Vorbereitung: Testinstanz wie 54 mit Git Bash oder WSL (`less`, `vim`, `htop`). Automatisch: Unit-Tests `termview` (Kodierungen SGR/UTF-8/normal, Grenze 94, DECSET 1007, Umschalt+Rad, Prompt nach Absturz).
+- [ ] **Shell:** viel Ausgabe, Mausrad → der Verlauf von Paneldeck scrollt.
+- [ ] **Programm mit Maus:** `vim` mit `:set mouse=a` bzw. `htop` → das Mausrad scrollt im Programm, Klicks setzen den Cursor/wählen eine Zeile; bei breitem Fenster auch rechts von Spalte 94 (SGR).
+- [ ] **Vollbild ohne Maus:** `less` auf einer langen Datei → das Mausrad scrollt den Text (Pfeiltasten). *Einstellungen → Darstellung → Mausrad in Vollbildprogrammen* = *Aus* → nichts passiert; `settings.json` enthält `"alt_screen_wheel": "off"`; zurück auf *Pfeiltasten senden*.
+- [ ] **DECSET 1007:** `printf '\e[?1049h\e[?1007l'` (Git Bash) → Mausrad sendet keine Pfeiltasten; `printf '\e[?1007h\e[?1049l'` stellt zurück.
+- [ ] **Umschalt+Mausrad:** in der Shell bei eingeschaltetem Maus-Modus (z. B. `printf '\e[?1000h'`) → Umschalt+Rad scrollt den Verlauf; in `less` → nichts.
+- [ ] **Nach Absturz:** Vollbildprogramm mit Maus hart beenden (z. B. `vim` per `kill -9` aus einer zweiten Sitzung) → am Prompt keine Pfeiltasten und kein Zeichensalat beim Mausrad (Shell-Integration nötig); nach dem nächsten Befehl normales Verhalten.
+- [ ] **Beide Sprachen:** Einstellung und Hinweis auf Deutsch und Englisch.
+
+## 60 · Gesamtprüfung vor dem Release 2.2.0
+- [ ] **Abschnitte 54–59** komplett durchlaufen, einmal auf Deutsch und einmal auf Englisch.
 - [ ] **Update von 2.1:** Installer über 2.1 (`tools\update-test.ps1 -Exe <exe> -TempRoot E:\paneldeck-test`): Daten, Einstellungen, Sitzungen bleiben; `settings.json` und `state.json` von 2.1 laden ohne Verlust (neue Felder fehlen dort).
 - [ ] **Zurück auf 2.1** (optional, Kopie des Datenordners): 2.1 öffnet die Daten von 2.2 → Chats erscheinen als Terminals, `chats/*.json` bleibt unangetastet, kein Absturz.
 - [ ] **Datenschutz:** ohne eingerichteten Server keine Netzwerkzugriffe durch Chats; mit Server nur Verbindungen zu dessen Adresse (z. B. mit `netstat -ano` prüfen).

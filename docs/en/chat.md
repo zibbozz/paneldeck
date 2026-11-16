@@ -48,14 +48,17 @@ Click a model to change its settings. They apply to every chat with that model:
 
 | Setting | Meaning |
 |---|---|
-| **Level** | **Off** – chat only, no Paneldeck tools · **Read** (default) – read sessions, terminal content, history and the to-do list or tickets · **Control** – also send input, run commands, create and close sessions, change the to-do list or tickets. This level is **independent of the MCP level** under *Settings → Agents*, which only applies to external agents. |
+| **Level** | **Off** – chat only, no Paneldeck tools · **Read** – read sessions, terminal content, history and the to-do list or tickets · **Control** – also send input, run commands, create and close sessions, change the to-do list or tickets. A new model starts with **Off**; see [The level question](#the-level-question). This level is **independent of the MCP level** under *Settings → Agents*, which only applies to external agents. |
 | **Tools** | the tools the level allows; unchecked tools are never offered to the model. |
-| **Ask before write actions** | on by default: every tool that changes something (a Control tool) waits for your approval in the chat. |
-| **Max steps** | at most this many tool calls per answer (1–100, default 10); then the answer stops with a *Continue* button. |
+| **Ask before write actions** | on by default: every write tool waits for your approval in the chat. Write tools are all Control tools except `wait_for_status` and `focus_session` (they only wait or show a session). |
+| **Max steps** | at most this many tool calls per answer (1–100, default 10); every call counts, including rejected ones. Then the answer stops with a *Continue* button. |
 | **Tool calling** | *Auto* (detected from the server), *On* or *Off*. Set *Off* for a model that fails as soon as tools are sent. |
-| **Context length** | *default* (from the server, otherwise 8192 tokens) or a *custom* number of tokens. |
+| **Context length** | *default* (from the server, otherwise 8192 tokens) or a *custom* number of tokens. With level *Control* the tool descriptions alone take about 4.5k tokens – raise the context length, e.g. to 16k–32k, if the model and your graphics memory allow it. |
 
 As for external agents, the tools also depend on the to-do mode: with expert mode off a model gets the to-do list tools, with expert mode on the ticket tools.
+
+### The level question
+A model you have never set a level for counts as **Off** everywhere – when sending, regenerating, retrying, continuing and for messages from external agents. The first time you send a message in a chat with such a model, the message stays in the input and the chat asks once: "May this model use Paneldeck?" with **Off**, **Read** and **Control**. Your answer is saved for the model (`level_chosen: true` in `settings.json`), and the waiting message is sent. Choosing a level under *Settings → Models* answers the question as well. While the question is open, the chat is marked as *needs you* in the sidebar.
 
 ## Starting a chat
 - The speech-bubble button in the sidebar (*New chat (local model)*), *New chat* in the command palette, *New chat* in the empty Terminal Hub, or *New chat here* in the context menu of a folder.
@@ -75,10 +78,13 @@ As for external agents, the tools also depend on the to-do mode: with expert mod
 ### Tool calls and approvals
 When the model calls a Paneldeck tool, the chat shows **one collapsed line per call** with the tool name and a status: a spinner while it runs, ✓ done, ✗ error, ⊘ denied. Expand it to see the parameters and the result.
 
-- With *Ask before write actions*, a write call waits with **Allow**, **Always for this chat** and **Deny**. Meanwhile the chat is marked as *needs you* in the sidebar, like a Claude approval prompt. **Enter** allows only when the approval line has the focus – Enter in the input never approves anything. *Always for this chat* remembers the tool for this chat only (stored with its history). *Deny* tells the model that the call was denied.
-- After the **max steps** of the model the answer stops: "Stopped after N tool calls" with **Continue**, which allows another round of the same size.
+- With *Ask before write actions*, a write call waits: "The model wants to use a tool with write access:" with the tool name, the **target session** (id and name) and the **full arguments** (scrollable; a note tells you when more is hidden below), plus **Allow**, **Always for this chat** and **Deny**. Meanwhile the chat is marked as *needs you* in the sidebar, like a Claude approval prompt. **Enter** allows only when the approval line has the focus – Enter in the input never approves anything. *Deny* tells the model that the call was denied.
+- **Always for this chat** is only offered when the call has a numeric `session` target, and never for `create_session`. It applies to **this tool on this target session** in this chat only – the same tool on another session asks again. The rules are stored in the chat's history file (`always_allow`, see [Data folder](data-and-backups.md#chat-histories)) and can be revoked at the top of the chat under **Permanent approvals (N)** → *Revoke*.
+- Every tool call counts toward the **max steps** of the model, including rejected ones. When the limit is reached, the answer stops: "Stopped after N tool calls." with **Continue**, which allows the same number of calls again. If the model keeps calling tools that cannot run (unknown, not allowed, broken arguments), the chat stops with a separate note: "The model kept calling tools that could not run – stopped."
+- **Context full:** tool results are shortened so that the round fits into the model's context. If that is no longer enough, older results of the round that the model has already seen are replaced by a short placeholder (elided); if even that does not help, the chat pauses with "The tool results no longer fit into the model's context – raise the context length in Settings → Models." *Continue* then skips the calls that are still waiting (the model is told they were not run) and asks the model again. No call runs without room for its result, so the system prompt is never cut off.
+- **Results:** a tool result is capped at 16 KB (less when the context is tight). For terminal output (`read_terminal`, `run_command`, `read_chat`) the **end** is kept and the start is cut, with a note that the content is untrusted. Screenshots are not passed to chat models – the model only learns that the image was left out.
 - **Stop** also cancels tool calls that are still waiting or running.
-- The tools run inside Paneldeck with **the chat as the caller**, under the same rules as for external agents: a chat cannot write into its own session, never uses administrator profiles or its own programs, only closes sessions it created itself, does nothing in a session with an open approval prompt, and terminal content is marked as untrusted data. Sessions the chat creates are its child sessions. Every call is listed in the call log (`mcp-log.jsonl`).
+- The tools run inside Paneldeck with **the chat as the caller**, under the same rules as for external agents: a chat cannot write into its own session, never uses administrator profiles or its own programs, only closes sessions it created itself, does nothing in a session with an open approval prompt, and terminal content is marked as untrusted data. Sessions the chat creates are its child sessions. Every call is listed in the call log (`mcp-log.jsonl`, marked with `how: "chat"` and the `model`).
 - Calls that are not allowed (level, unchecked tool) or have broken arguments are not executed; the model gets an error back instead. If Paneldeck quits while a tool runs, the call is marked as interrupted at the next start.
 
 ### Chats in projects, splits and windows
@@ -113,7 +119,9 @@ Everything else is rejected, for example **public addresses** (`8.8.8.8`, `2001:
 ## Limits
 - **Timeouts:** 10 s to connect, 30 s to send a request, **300 s** waiting for data by default – also for the first token, which can take minutes on a CPU. The waiting time can be set per server (*Timeout*, 5–3600 s).
 - **Sizes:** an answer may have up to 16 MB of text and 128 tool calls (each with up to 1 MB of arguments); larger answers end with "The server's answer is larger than allowed." A history file larger than 8 MB loses its oldest messages when it is saved.
-- **Context:** custom value, otherwise the server's value, otherwise 8192 tokens. For Ollama without a custom value Paneldeck asks for at most 8192 tokens (sent as `num_ctx`; the full context of large models costs a lot of memory) – set a custom context length to use more. A quarter of the context is kept free for the answer.
+- **Context:** custom value, otherwise the server's value, otherwise 8192 tokens. For Ollama without a custom value Paneldeck asks for at most 8192 tokens (sent as `num_ctx`; the full context of large models costs a lot of memory) – set a custom context length to use more. A quarter of the context is kept free for the answer (for Ollama sent as `num_predict`). Tool descriptions count toward the context too: about 4.5k tokens at level *Control*.
+- **Token estimate:** Paneldeck estimates tokens conservatively – rather too many than too few, so that the server never silently cuts off the start of the conversation – and calibrates the estimate with the token counts the server reports.
+- **Tool results:** at most 16 KB each; screenshots are not passed to the model.
 - **Not shown:** "thinking" output of reasoning models is not displayed separately.
 
 ## Troubleshooting
@@ -123,7 +131,8 @@ Everything else is rejected, for example **public addresses** (`8.8.8.8`, `2001:
 - **"Unexpected answer from the server – is the server type right?":** an OpenAI-compatible server was added as Ollama or the other way round.
 - **"Access denied – check the API key (HTTP 401/403)":** the key is missing or wrong. **"The stored API key cannot be decrypted …":** the data folder comes from another Windows user or computer – enter the key again.
 - **The model forgets the start of the conversation / "The system prompt is larger than the model's context":** the context length is too small. Raise *Context length* for the model (Ollama: e.g. 16384 or 32768, if the model and your memory allow it), or shorten your own `system-prompt.md`.
-- **The model does not use tools:** check the notice "This model cannot use tools – chat only.", the model's *Level* (Off = chat only) and the unchecked tools. Small models often call tools badly – try a larger model with tool support. If the server returns an error as soon as tools are sent (e.g. "does not support tools"), set *Tool calling* to *Off*.
+- **"The tool results no longer fit into the model's context …" / "The system prompt and tool descriptions are larger than the model's context …":** raise *Context length* (with level *Control* e.g. to 16384–32768), uncheck tools the model does not need, or ask for smaller results.
+- **The model does not use tools:** check the notices "This model cannot use tools – chat only." and "Tools are off for this model (Settings → Models).", the model's *Level* (Off = chat only; a new model starts with Off) and the unchecked tools. Small models often call tools badly – try a larger model with tool support. If the server returns an error as soon as tools are sent (e.g. "does not support tools"), set *Tool calling* to *Off*.
 - **Errors about the chat template or roles** (e.g. "roles must alternate") with llama.cpp or LM Studio: some models have strict chat templates. Paneldeck already merges two user messages in a row (after a failed answer) into one; if the server still refuses, start llama.cpp with `--jinja`, pick another model or a newer version of it.
 - **Answers time out:** large models on a CPU can take long for the first token – raise the server's *Timeout*.
 - **"The server's certificate is not trusted …":** see HTTPS above.

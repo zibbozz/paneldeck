@@ -11,6 +11,13 @@ The **Terminal Hub** is Paneldeck's main area: many terminal sessions in one win
 - Colors, alternate screen, mouse, Unicode, color emoji, CJK and seamless box-drawing characters. The terminal font is Cascadia Mono (embedded); missing characters fall back to the Windows system fonts.
 - **Profiles** (*Settings → Profiles*) bundle a shell, a startup command, environment variables and the appearance – e.g. "Production" in red or "Claude in WSL". Projects and folders can preset a profile for new sessions.
 
+## Mouse wheel
+- **Plain shell:** the wheel scrolls Paneldeck's scrollback.
+- **Programs with mouse support** (e.g. `htop`, `vim` with `mouse=a`, `tmux`, Midnight Commander): Paneldeck reports wheel and clicks to the program in every mouse encoding (SGR, UTF-8 and the normal encoding). The normal encoding can only carry positions up to column/row 94 – ConPTY would garble larger values – so beyond that Paneldeck sends nothing instead of a wrong position; most programs use SGR anyway.
+- **Full-screen programs without mouse support** (e.g. `less`, `man`): the wheel sends arrow keys, so the text scrolls – but only if the program allows it (alternate scroll mode, DECSET 1007, on by default). The setting *Settings → Appearance → Mouse wheel in full-screen programs* chooses **Send arrow keys** (default) or **Off**.
+- **Shift+wheel** always scrolls Paneldeck's scrollback, even when the program uses the mouse. Full-screen programs have no scrollback, so Shift+wheel does nothing there.
+- **After a crashed full-screen program** that did not switch its modes back, the wheel at the shell prompt behaves like in a plain shell again (no arrow keys into the command line, no garbled mouse codes) until you run the next command. This needs shell integration (the shell reports its prompt); without it, the wheel keeps behaving as in the crashed program.
+
 ## Starting sessions
 - **Ctrl+Shift+T** or *New session …* in the sidebar opens a session; *New Claude session …* (spark button) starts one with Claude Code (see [Claude Code](claude-code.md)). The speech-bubble button starts a **chat with a local model** instead of a terminal (see [Chats with local models](chat.md)).
 - On a fresh start Paneldeck opens **no terminal**: the empty Terminal Hub shows a short hint with *New terminal* (and *New Claude session …* in Claude mode) and the shortcuts. Sessions from the previous run are restored as before. See [Multiple windows](windows.md#the-empty-terminal-hub).
