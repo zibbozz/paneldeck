@@ -211,6 +211,29 @@ pub struct Settings {
     /// Zuletzt im Dialog „Neuer Chat“ gewähltes Modell (Vorauswahl beim nächsten Mal).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
     pub last_chat_model: Option<ChatMeta>,
+    /// Mausrad in Vollbildprogrammen (alternativer Bildschirm, Programm ohne Maus-Modus), seit 2.2.0.
+    /// Fehlt in älteren Dateien (dann Standard); ein unbekannter Wert ergibt ebenfalls den Standard.
+    #[serde(deserialize_with = "AltScreenWheel::lenient")]
+    pub alt_screen_wheel: AltScreenWheel,
+}
+
+/// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AltScreenWheel {
+    /// Pfeiltasten senden (Alternate Scroll Mode, DECSET 1007) – wie Alacritty, GNOME Terminal, kitty.
+    #[default]
+    Arrows,
+    /// Nichts senden.
+    Off,
+}
+
+impl AltScreenWheel {
+    /// Tolerant lesen: nur `"off"` schaltet aus, alles andere (auch ein unbekannter Wert) ist der Standard.
+    fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(if v.as_str() == Some("off") { AltScreenWheel::Off } else { AltScreenWheel::Arrows })
+    }
 }
 
 /// Auswahl für `Settings::undo_steps`.
@@ -256,6 +279,7 @@ impl Default for Settings {
             update_skip_version: String::new(),
             llm_servers: Default::default(),
             last_chat_model: None,
+            alt_screen_wheel: AltScreenWheel::Arrows,
         }
     }
 }
@@ -919,6 +943,28 @@ mod tests {
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.llm_servers, s.llm_servers);
         assert_eq!(back.last_chat_model, s.last_chat_model);
+    }
+
+    #[test]
+    fn alt_screen_wheel_back_compat_and_roundtrip() {
+        // settings.json von 2.1.0 (ohne das Feld) lädt mit dem Standard „Pfeiltasten“.
+        let old = r#"{"language":"En","scrollback_lines":5000}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.alt_screen_wheel, AltScreenWheel::Arrows);
+        assert_eq!(s.scrollback_lines, 5000);
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["alt_screen_wheel"], "arrows");
+        // Gespeicherter Wert bleibt erhalten.
+        let mut s = s;
+        s.alt_screen_wheel = AltScreenWheel::Off;
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.alt_screen_wheel, AltScreenWheel::Off);
+        // Unbekannter Wert oder falscher Typ: Standard, die übrigen Einstellungen bleiben lesbar.
+        for bad in [r#""report""#, "3", "null", r#"{"x":1}"#] {
+            let s: Settings = serde_json::from_str(&format!(r#"{{"language":"De","alt_screen_wheel":{bad}}}"#)).unwrap();
+            assert_eq!(s.alt_screen_wheel, AltScreenWheel::Arrows, "{bad}");
+            assert_eq!(s.language, Lang::De);
+        }
     }
 }
 
