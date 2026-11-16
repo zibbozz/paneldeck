@@ -439,6 +439,26 @@ pub fn icon_btn_small(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
     resp.on_hover_text(tip)
 }
 
+/// Rot für Fehler und zerstörende Aktionen in der Oberfläche (das Rot des Standard-Themas One Dark).
+pub const DANGER_SOFT: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+
+/// Zerstörender Icon-Knopf (Papierkorb, „alle schließen“) an einer festen Stelle: in Ruhe gedämpft rötlich, beim Überfahren
+/// kräftiger mit rötlicher Fläche. `enabled = false` zeichnet ihn blass und reagiert nicht.
+pub fn danger_icon_at(ui: &mut Ui, rect: Rect, id: egui::Id, tip: &str, enabled: bool) -> Response {
+    // Auch Ziehen annehmen: sonst begänne ein Druck auf den Knopf mit Bewegung ein Ziehen der Zeile darunter (Ordner).
+    let resp = ui.interact(rect, id, if enabled { Sense::click_and_drag() } else { Sense::hover() });
+    let text = ui.visuals().text_color();
+    let h = anim(ui.ctx(), id.with("h"), enabled && resp.hovered(), D_FAST);
+    if enabled && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    ui.painter().rect_filled(rect, RADIUS as f32, DANGER_SOFT.gamma_multiply(0.18 * h));
+    let rest = mix(text.gamma_multiply(0.7), DANGER_SOFT, 0.55);
+    let col = if enabled { mix(rest, DANGER_SOFT, h) } else { text.gamma_multiply(0.3) };
+    paint_icon(ui.painter(), Icon::Trash, rect.center(), col);
+    resp.on_hover_text(tip)
+}
+
 /// Pill (Segment) – z. B. für Projekte. Gibt die Antwort zurück.
 pub fn pill(ui: &mut Ui, text: &str, count: Option<usize>, color: Color32, active: bool) -> Response {
     let font = FontId::proportional(12.5);

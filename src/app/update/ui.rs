@@ -67,9 +67,12 @@ impl App {
     /// Zustand speichern (Sitzungen werden beim Start wiederhergestellt) und neu starten.
     fn update_restart(&mut self) {
         let lang = self.settings.language;
+        // Erst normal speichern; Verläufe und Scrollback (bei „Sitzungen merken“ aus) erst löschen, wenn der Neustart
+        // wirklich angestoßen ist – scheitert er, geht nichts verloren.
         self.save_all();
         match install::spawn_restart(&self.exe) {
             Ok(()) => {
+                self.save_for_exit();
                 crate::app::winchrome::shutdown();
                 self.tray = None; // Tray-Symbol entfernen (sonst bleibt bis zum Überfahren ein totes Symbol stehen)
                 std::process::exit(0);
@@ -232,10 +235,17 @@ impl App {
                             ),
                         }).small().color(dim));
                         ui.label(RichText::new(format!("{} ({}) · {}", asset.name, fmt_mb(asset.size), lang.t("geprüft per SHA-256", "verified with SHA-256"))).small().color(dim));
-                        ui.label(RichText::new(lang.t(
-                            "Laufende Terminals werden beim Neustart beendet; die Sitzungen werden danach wiederhergestellt.",
-                            "Running terminals end when Paneldeck restarts; the sessions are restored afterwards.",
-                        )).small().color(dim));
+                        ui.label(RichText::new(if self.settings.remember_sessions {
+                            lang.t(
+                                "Laufende Terminals werden beim Neustart beendet; die Sitzungen werden danach wiederhergestellt.",
+                                "Running terminals end when Paneldeck restarts; the sessions are restored afterwards.",
+                            )
+                        } else {
+                            lang.t(
+                                "Laufende Terminals werden beim Neustart beendet. „Sitzungen merken“ ist aus: Paneldeck startet danach leer, Chatverläufe werden gelöscht.",
+                                "Running terminals end when Paneldeck restarts. “Remember sessions” is off: Paneldeck starts empty afterwards and chat histories are deleted.",
+                            )
+                        }).small().color(dim));
                     }
                 }
                 if phase == Phase::Downloading {
@@ -344,10 +354,17 @@ impl App {
                 } else if chats > 1 {
                     ui.label(format!("{chats} {}", lang.t("Chats arbeiten noch (sie werden angehalten).", "chats are still working (they will be stopped).")));
                 }
-                ui.label(lang.t(
-                    "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach wiederhergestellt.",
-                    "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored afterwards.",
-                ));
+                ui.label(if self.settings.remember_sessions {
+                    lang.t(
+                        "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach wiederhergestellt.",
+                        "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored afterwards.",
+                    )
+                } else {
+                    lang.t(
+                        "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet. „Sitzungen merken“ ist aus: Paneldeck startet danach leer, Chatverläufe werden gelöscht.",
+                        "To finish the update Paneldeck restarts: running processes (including Claude sessions) end. “Remember sessions” is off: Paneldeck starts empty afterwards and chat histories are deleted.",
+                    )
+                });
             }
             if major {
                 ui.label(RichText::new(lang.t("Vorher wird die Datenbank gesichert.", "The database is backed up first.")).small().color(style::dim(ui)));

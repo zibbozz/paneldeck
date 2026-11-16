@@ -87,6 +87,9 @@ pub(super) use helpers::color_of;
 pub(super) use quick_exec::SessionRequest;
 pub(super) use quick_menu::Out as QuickOut;
 pub(super) use widgets::type_icon;
+// Rückfrage mit 3-Sekunden-Wartezeit auch im Terminal Hub (Sitzungen schließen, `app::closing`).
+pub(super) use ticket_state::countdown_secs;
+pub(super) use widgets::danger as danger_button;
 
 use super::tasks_ui::Env;
 use crate::db::Db;

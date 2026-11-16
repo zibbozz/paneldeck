@@ -182,7 +182,7 @@ impl App {
                 // Speichern geht nur mit dem Hauptfenster in den Feldern: aus einem weiteren Fenster erst nach dessen Bild (#110).
                 Ok(()) if self.wins.cur != 0 => self.wins.exit_after_save = true,
                 Ok(()) => {
-                    self.save_all();
+                    self.save_for_exit();
                     std::process::exit(0);
                 }
                 Err(e) => self.restore_error = Some(format!("{}: {e}", lang.t("Sicherung ist nicht lesbar", "Backup is not readable"))),

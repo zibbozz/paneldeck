@@ -573,6 +573,8 @@ impl App {
             (lang.t("Sitzung umbenennen", "Rename session").into(), self.binding_text("rename"), Action::StartRename(f)),
             (lang.t("Sitzung neu starten", "Restart session").into(), String::new(), Action::Restart(f)),
             (lang.t("Sitzung schließen", "Close session").into(), String::new(), Action::RequestClose(f)),
+            (lang.t("Alle Sitzungen des Projekts schließen …", "Close all sessions of the project …").into(), String::new(), Action::CloseAll(closing::CloseScope::Project(self.active_project))),
+            (lang.t("Alle Sitzungen schließen … (alle Projekte und Fenster)", "Close all sessions … (all projects and windows)").into(), self.binding_text("close_all"), Action::CloseAll(closing::CloseScope::All)),
             (lang.t("Alle Sitzungen durchsuchen", "Search all sessions").into(), self.binding_text("search_all"), Action::OpenGlobalSearch),
             (lang.t("Verlauf als Datei speichern", "Save history to file").into(), String::new(), Action::ExportHistory(f)),
             (lang.t("Zum vorherigen Befehl springen", "Jump to previous command").into(), self.binding_text("prev_cmd"), Action::JumpCmd(-1)),

@@ -34,6 +34,8 @@ mod data;
 mod dialogs;
 mod dragdrop;
 mod empty_hub;
+mod fresh_start;
+mod closing;
 #[cfg(test)]
 mod glyph_tests;
 mod mcp;
@@ -281,7 +283,10 @@ enum Action {
     FolderProfile(String, u64),
     FolderNewSession(String, bool),
     FolderRestartAll(String),
-    FolderCloseAll(String),
+    /// Rückfrage „alle schließen“ (Ordner, Projekt, alle) öffnen.
+    CloseAll(closing::CloseScope),
+    /// Bestätigt: diese Sitzungen beenden.
+    CloseMany(Vec<u64>),
     FolderLayout(String),
     FolderBroadcast(String),
     MoveFolder(String, String),
@@ -635,8 +640,12 @@ pub struct App {
     new_dialog: Option<NewDialog>,
     /// Dialog „Neuer Chat“ (Server und Modell wählen).
     new_chat: Option<models_ui::NewChatDlg>,
-    confirm_close: Option<u64>,
+    confirm_close: Option<closing::CloseAsk>,
     settings_open: bool,
+    /// „Sitzungen merken“ beim Start (an → beim Beenden mit „aus“ vorher sichern, siehe `fresh_start`).
+    remember_at_start: bool,
+    /// Rückfrage „Sitzungen merken ausschalten?“ offen – in diesem Fenster (Id, 0 = Hauptfenster).
+    remember_off_ask: Option<u64>,
     dir: PathBuf,
     last_save: Instant,
     applied_theme: String,
@@ -842,7 +851,21 @@ impl App {
             settings.language = l;
         }
         state::set_lang(settings.language);
-        let (saved, startup_note) = state::load_saved(&dir.join("state.json"));
+        let (mut saved, startup_note) = state::load_saved(&dir.join("state.json"));
+        // „Sitzungen merken“ aus (#157): frischer Start. Steht in state.json noch etwas (Absturz nach dem Ausschalten, von
+        // Hand geändert), wird die Datei vorher gesichert. Scrollback und Chatverläufe früherer Läufe werden gelöscht – auch
+        // nach einem Absturz, bei dem `save_for_exit` nicht mehr lief.
+        let remember_at_start = settings.remember_sessions;
+        if !settings.remember_sessions {
+            if fresh_start::worth_keeping(&saved) {
+                if let Ok(raw) = std::fs::read(dir.join("state.json")) {
+                    fresh_start::backup_state(&dir, &raw);
+                }
+            }
+            let top = fresh_start::sweep_session_files(&dir);
+            saved.next_id = saved.next_id.max(top.saturating_add(1));
+            saved = fresh_start::forget(saved, state::persisted_lang(settings.language));
+        }
         // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
         let restore_result = crate::backup::apply_pending_restore(&dir, crate::db::FILE);
         let backup_dir = crate::cli::get().backup_dir.clone().unwrap_or_else(|| crate::backup::dir(&dir, &settings.backup_dir));
@@ -879,6 +902,8 @@ impl App {
             new_chat: None,
             confirm_close: None,
             settings_open: false,
+            remember_at_start,
+            remember_off_ask: None,
             dir,
             last_save: Instant::now(),
             applied_theme: String::new(),
@@ -1768,6 +1793,8 @@ impl App {
         self.entries.remove(&id);
         self.usage.remove(id);
         self.git.remove(id);
+        // Agenten-Zuordnung: auf jedem Weg (Knopf, Mittelklick, „alle schließen“, MCP) aufräumen.
+        self.mcp.session_closed(id);
         let _ = std::fs::remove_file(self.scrollback_path(id));
         // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
         chatmod::store::remove(&self.dir, id);
@@ -1794,7 +1821,18 @@ impl App {
         state::save_json(&self.dir.join("settings.json"), &self.settings);
         state::save_json(&self.dir.join("prompts.json"), &self.prompts);
         let _ = std::fs::create_dir_all(self.dir.join("scrollback"));
-        let saved = SavedState {
+        state::save_json(&self.dir.join("state.json"), &self.saved_state());
+        for (id, e) in &self.entries {
+            if let Some(s) = &e.live {
+                let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
+            }
+        }
+        self.save_chats();
+    }
+
+    /// Inhalt von `state.json` (Sitzungen, Projekte mit dem aktuellen Layout, Fenster).
+    fn saved_state(&self) -> SavedState {
+        SavedState {
             sessions: self.entries.values().map(|e| e.meta.clone()).collect(),
             layout: self.layout.clone(),
             focused: self.focused,
@@ -1811,14 +1849,7 @@ impl App {
             detached: self.detached.clone(),
             composer_draft: self.composer_text.clone(),
             extra_windows: self.saved_windows(),
-        };
-        state::save_json(&self.dir.join("state.json"), &saved);
-        for (id, e) in &self.entries {
-            if let Some(s) = &e.live {
-                let _ = state::write_atomic(&self.scrollback_path(*id), s.dump_text(3000).as_bytes());
-            }
         }
-        self.save_chats();
     }
 
     /// Verläufe geänderter Chats schreiben.
@@ -1955,6 +1986,7 @@ impl App {
                 "prev_cmd" => Action::JumpCmd(-1),
                 "next_cmd" => Action::JumpCmd(1),
                 "next" => Action::Cycle(1),
+                "close_all" => Action::CloseAll(closing::CloseScope::All),
                 _ => Action::Cycle(-1),
             });
         }
@@ -1976,7 +2008,8 @@ impl App {
 
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
-        if self.new_chat.is_some() {
+        // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
+        if self.new_chat.is_some() || self.confirm_close.is_some() {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();
@@ -2170,6 +2203,13 @@ impl App {
                             }
                         });
                     });
+                    if n > 0 {
+                        ui.separator();
+                        if ui.button(lang.t("Alle Sitzungen des Projekts schließen …", "Close all sessions of the project …")).clicked() {
+                            actions.push(Action::CloseAll(closing::CloseScope::Project(id)));
+                            ui.close();
+                        }
+                    }
                     if self.projects.len() > 1 {
                         ui.separator();
                         let confirm_id = egui::Id::new(("delproj", id));
@@ -3171,11 +3211,8 @@ impl App {
                     }
                 }
             }
-            Action::FolderCloseAll(path) => {
-                for id in self.folder_sessions(&path) {
-                    self.close_session(id);
-                }
-            }
+            Action::CloseAll(scope) => self.request_close_many(scope),
+            Action::CloseMany(ids) => self.close_many(&ids),
             Action::FolderLayout(path) => {
                 let ids: Vec<u64> = self.folder_sessions(&path).into_iter().filter(|id| self.entries.get(id).is_some_and(|e| !e.exited())).take(12).collect();
                 if let Some(l) = Node::grid(&ids, Dir::Horizontal) {
@@ -3246,7 +3283,7 @@ impl App {
                 // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft).
                 let running = self.entries.get(&id).is_some_and(|e| e.running() || e.chat_has_history());
                 if running && self.settings.confirm_close {
-                    self.confirm_close = Some(id);
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::One(id)));
                 } else {
                     self.close_session(id);
                 }
@@ -3372,7 +3409,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         winchrome::shutdown();
-        self.save_all();
+        self.save_for_exit();
     }
 }
 
