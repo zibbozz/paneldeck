@@ -339,8 +339,11 @@ impl MouseEncoding {
     }
 }
 
-/// Größte Spalte/Zeile (0-basiert) der Standard-Kodierung: ein Byte `32 + 1 + Position` reicht bis 255.
-pub const NORMAL_MOUSE_MAX: usize = 255 - 33;
+/// Größte Spalte/Zeile (0-basiert) der Standard-Kodierung. Ein Byte `32 + 1 + Position` reichte zwar bis 255, aber
+/// ConPTY liest die Eingabe des Terminals als UTF-8: Einzelbytes 0x80–0xFF sind dort ungültig und kämen als U+FFFD
+/// (falsche Position) beim Programm an. Deshalb nur 7-Bit-Werte (bis 127 = Position 94) senden, darüber nichts –
+/// wie Windows Terminal. Programme, die breitere Terminals brauchen, fordern SGR (1006) an.
+pub const NORMAL_MOUSE_MAX: usize = 0x7F - 33;
 /// Größte Spalte/Zeile (0-basiert) der UTF-8-Kodierung: Zeichen bis U+07FF (zwei Bytes), wie in xterm.
 pub const UTF8_MOUSE_MAX: usize = 0x7FF - 33;
 /// Tastencodes des Mausrads (xterm): hoch/runter; Modifikatoren werden addiert (Alt +8, Strg +16).
@@ -355,7 +358,7 @@ pub fn mouse_mod_bits(m: Modifiers) -> u8 {
 
 /// Maus-Ereignis für Programme mit Maus-Modus kodieren (`cb` = Tastencode inkl. Modifikatoren, `col`/`row` 0-basiert
 /// im sichtbaren Bereich). `None`, wenn die Kodierung die Position nicht darstellen kann (Standard-Kodierung ab
-/// Spalte/Zeile 223, 0-basiert): dann wird nichts gesendet (wie Alacritty) statt einer falschen Position.
+/// Spalte/Zeile 95, 0-basiert, siehe `NORMAL_MOUSE_MAX`): dann wird nichts gesendet statt einer falschen Position.
 pub fn mouse_seq(enc: MouseEncoding, cb: u8, col: usize, row: usize, release: bool) -> Option<Vec<u8>> {
     let max = match enc {
         MouseEncoding::Sgr => {
@@ -502,11 +505,18 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
 
 fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect, cs: Vec2, alt_wheel: crate::state::AltScreenWheel) {
     let mode = *session.term.lock().unwrap_or_else(|e| e.into_inner()).mode();
-    let forwarding = mode.intersects(TermMode::MOUSE_MODE) && !ui.input(|i| i.modifiers.shift);
+    let stale = session.stale_modes.load(std::sync::atomic::Ordering::Relaxed);
+    let forwarding = mode.intersects(TermMode::MOUSE_MODE) && !ui.input(|i| i.modifiers.shift) && !stale;
     if forwarding {
         forward_mouse(ui, response, session, inner, cs, mode);
-    } else {
-        session.mouse_down = None;
+    } else if let Some(b) = session.mouse_down.take() {
+        // Weitergeleiteter Klick/Zug endet hier (z. B. Umschalt während des Ziehens): dem Programm das Loslassen
+        // melden, sonst glaubt es die Taste weiter gedrückt.
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            if let Some((col, row)) = session.mouse_last {
+                write_mouse(session, mouse_seq(MouseEncoding::of(mode), b, col, row, true));
+            }
+        }
     }
     if let Some(pos) = response.interact_pointer_pos().filter(|_| !forwarding) {
         if response.triple_clicked() {
@@ -833,13 +843,19 @@ mod tests {
 
     #[test]
     fn normal_encoding_limits() {
-        // Spalte/Zeile 222 (0-basiert) ist die letzte darstellbare: 32 + 1 + 222 = 255.
-        assert_eq!(NORMAL_MOUSE_MAX, 222);
-        assert_eq!(mouse_seq(Normal, WHEEL_UP, 222, 222, false), some(&[0x1b, b'[', b'M', 96, 255, 255]));
-        // Ab 223 nichts senden (statt einer falschen Position).
-        assert_eq!(mouse_seq(Normal, WHEEL_UP, 223, 0, false), None);
-        assert_eq!(mouse_seq(Normal, 0, 0, 223, false), None);
+        // Spalte/Zeile 94 (0-basiert) ist die letzte darstellbare: 32 + 1 + 94 = 127 (7 Bit, übersteht ConPTY).
+        assert_eq!(NORMAL_MOUSE_MAX, 94);
+        assert_eq!(mouse_seq(Normal, WHEEL_UP, 94, 94, false), some(&[0x1b, b'[', b'M', 96, 127, 127]));
+        // Ab 95 nichts senden (Bytes ab 0x80 würden in ConPTY zu U+FFFD), auch nicht an der alten 8-Bit-Grenze 223.
+        assert_eq!(mouse_seq(Normal, WHEEL_UP, 95, 0, false), None);
+        assert_eq!(mouse_seq(Normal, 0, 0, 95, false), None);
+        assert_eq!(mouse_seq(Normal, WHEEL_DOWN, 222, 0, false), None);
+        assert_eq!(mouse_seq(Normal, 0, 223, 223, false), None);
         assert_eq!(mouse_seq(Normal, 0, 500, 0, true), None);
+        // Kein gesendetes Byte der Standard-Kodierung hat das achte Bit.
+        for col in 0..=NORMAL_MOUSE_MAX {
+            assert!(mouse_seq(Normal, WHEEL_DOWN | 24, col, col, false).unwrap().iter().all(|b| *b < 0x80));
+        }
         // UTF-8: ab Wert 128 zwei Bytes (U+0080 = C2 80), bis U+07FF.
         assert_eq!(mouse_seq(Utf8, WHEEL_UP, 94, 0, false), some(&[0x1b, b'[', b'M', 96, 127, 33]));
         assert_eq!(mouse_seq(Utf8, WHEEL_UP, 95, 0, false), some(&[0x1b, b'[', b'M', 96, 0xC2, 0x80, 33]));
@@ -926,6 +942,59 @@ mod tests {
         assert!(prompt_with_stale_modes(mode_after("\x1b[?1002h\x1b[?1006h")));
         // `reset` (RIS) räumt beides auf.
         assert!(!prompt_with_stale_modes(mode_after("\x1b[?1049h\x1b[?1003h\x1bc")));
+    }
+
+    /// Ausgabe-Chunks wie im Lese-Thread (`Session::new`) verarbeiten: an den Sequenzen teilen, nach jeder
+    /// `next_stale_modes` mit dem Modus an dieser Stelle; `enter` vor einem Chunk = abgeschickte Befehlszeile.
+    fn stale_after(chunks: &[(bool, &str)]) -> bool {
+        use crate::osc::OscScanner;
+        use crate::terminal::next_stale_modes;
+        let mut term = Term::new(Config::default(), &TermSize::new(80, 24), VoidListener);
+        let mut p: Processor = Processor::new();
+        let mut scanner = OscScanner::default();
+        let mut stale = false;
+        for (enter, chunk) in chunks {
+            if *enter {
+                stale = false; // wie `Session::write_raw` mit `\r`
+            }
+            let bytes = chunk.as_bytes();
+            let (events, positions) = scanner.feed_at(bytes);
+            let mut done = 0;
+            for (ev, end) in events.into_iter().zip(positions) {
+                p.advance(&mut term, &bytes[done..end]);
+                done = end;
+                stale = next_stale_modes(stale, &ev, *term.mode());
+            }
+            p.advance(&mut term, &bytes[done..]);
+        }
+        stale
+    }
+
+    #[test]
+    fn stale_flag_lifecycle() {
+        const PROMPT: &str = "\x1b]133;A\x07$ \x1b]133;B\x07";
+        // Ordentlich beendetes Vollbildprogramm: nie gesetzt.
+        assert!(!stale_after(&[(false, PROMPT), (true, "\x1b[?1049h\x1b[?1000hvim"), (false, "\x1b[?1000l\x1b[?1049l"), (false, PROMPT)]));
+        // Absturz im alternativen Bildschirm, danach Prompt: gesetzt.
+        assert!(stale_after(&[(false, PROMPT), (true, "\x1b[?1049h\x1b[?1006h\x1b[?1002h"), (false, PROMPT)]));
+        // ... in einem Chunk mit dem Prompt.
+        assert!(stale_after(&[(true, &format!("\x1b[?1049hboom{PROMPT}"))]));
+        // Enter löscht, der nächste Prompt im hängenden Bildschirm setzt wieder.
+        assert!(!stale_after(&[(false, "\x1b[?1049h"), (false, PROMPT), (true, "dir\r\n")]));
+        assert!(stale_after(&[(false, "\x1b[?1049h"), (false, PROMPT), (true, "dir\r\n"), (false, PROMPT)]));
+        // Vollbildprogramm startet ohne Enter (Tastenkürzel, mc nach Strg+O): 1049h im schon aktiven alternativen
+        // Bildschirm ändert keine Modus-Bits, löscht aber den Zustand.
+        assert!(!stale_after(&[(false, "\x1b[?1049h"), (false, PROMPT), (false, "\x1b[?1049h\x1b[?1000h")]));
+        assert!(!stale_after(&[(false, "\x1b[?1049h"), (false, PROMPT), (false, "\x1b[?47h")]));
+        assert!(!stale_after(&[(false, "\x1b[?1049h"), (false, PROMPT), (false, "\x1b[?1003h")]));
+        // Wettlauf: der Prompt kommt erst nach dem Enter, das nächste Programm schaltet aber Vollbild ein.
+        assert!(!stale_after(&[(false, "\x1b[?1049h"), (true, PROMPT), (false, "\x1b[?1049h")]));
+        // Sequenz über eine Chunk-Grenze.
+        assert!(!stale_after(&[(false, "\x1b[?1049h"), (false, PROMPT), (false, "\x1b[?10"), (false, "49h")]));
+        // Andere Sequenzen (Farben, Cursor, Abschalten) lassen den Zustand stehen.
+        assert!(stale_after(&[(false, "\x1b[?1049h"), (false, PROMPT), (false, "\x1b[31mx\x1b[?25h\x1b[?1000l\x1b[?2004h")]));
+        // Prompt im Hauptbildschirm ohne Maus-Modus: gelöscht.
+        assert!(!stale_after(&[(false, "\x1b[?1049h"), (false, PROMPT), (false, "\x1b[?1049l"), (false, PROMPT)]));
     }
 
     #[test]

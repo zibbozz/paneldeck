@@ -165,8 +165,8 @@ impl App {
                             ui,
                             lang.t("Mausrad in Vollbildprogrammen", "Mouse wheel in full-screen programs"),
                             lang.t(
-                                "Für Programme wie less oder man ohne eigene Mausunterstützung. Umschalt+Mausrad scrollt immer den Verlauf von Paneldeck.",
-                                "For programs like less or man without their own mouse support. Shift+wheel always scrolls Paneldeck's scrollback.",
+                                "Für Programme wie less oder man ohne eigene Mausunterstützung. Umschalt+Mausrad scrollt den Verlauf von Paneldeck (Vollbildprogramme haben keinen).",
+                                "For programs like less or man without their own mouse support. Shift+wheel scrolls Paneldeck's scrollback (full-screen programs have none).",
                             ),
                             |ui| {
                                 use crate::state::AltScreenWheel;
