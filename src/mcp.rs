@@ -231,7 +231,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "kind": {"type": "string", "enum": ["terminal", "chat"], "description": "Default terminal"},
                     "server": {"type": "string", "description": "Chat only: LLM server id or name from list_models"},
                     "model": {"type": "string", "description": "Chat only: model name from list_models"},
-                    "cwd": {"type": "string", "description": "Start folder"},
+                    "cwd": {"type": "string", "description": "Start folder (Windows path). When the session starts in WSL also a Linux path: absolute (e.g. /home/me/project) or ~; a \\\\wsl.localhost\\<distro>\\... path is converted. Without cwd and without a project default folder a WSL session starts in the Linux home ~"},
                     "shell": {"type": "string", "description": "Shell id (see list_shells in the result of an error), e.g. powershell, cmd, gitbash, wsl:Ubuntu-24.04. Default: the Hub default shell"},
                     "name": {"type": "string"},
                     "claude": {"type": "boolean", "description": "Start Claude Code in the session"},

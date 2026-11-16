@@ -34,6 +34,7 @@ mod data;
 mod dialogs;
 mod dragdrop;
 mod empty_hub;
+pub(crate) mod folder_picker;
 mod fresh_start;
 mod closing;
 #[cfg(test)]
@@ -383,6 +384,8 @@ struct NewDialog {
     repo_for: String,
     repo: Option<PathBuf>,
     group: String,
+    /// Ordnerfeld (WSL-fähig, #172); `cwd` wird jedes Bild daraus übernommen.
+    picker: folder_picker::FolderPicker,
 }
 
 const PERMS: [(&str, &str); 6] = [
@@ -429,7 +432,15 @@ struct Launch<'a> {
 
 impl NewDialog {
     fn new(shell_id: String, claude: bool) -> Self {
-        NewDialog { shell_id, cwd: home_dir(), name: String::new(), claude, model: String::new(), perm: 0, continue_last: false, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new() }
+        let cwd = home_dir();
+        let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
+        NewDialog { shell_id, cwd, name: String::new(), claude, model: String::new(), perm: 0, continue_last: false, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+    }
+
+    /// Startordner von außen setzen (Profil, Ordnervorgabe).
+    fn set_cwd(&mut self, c: &str) {
+        self.picker.set_text(c);
+        self.cwd = self.picker.value();
     }
 }
 
@@ -450,6 +461,8 @@ enum PromptKind {
     NewProject,
     RenameProject,
     ProjectFolder,
+    /// Arbeitsordner eines Ordners im Baum (`TextPrompt::folder`), nur bei WSL-Shell als Dialog (#172).
+    FolderCwd,
 }
 
 struct TextPrompt {
@@ -457,6 +470,10 @@ struct TextPrompt {
     id: u64,
     tags_for: Option<u64>,
     text: String,
+    /// Ordner im Baum (`PromptKind::FolderCwd`).
+    folder: String,
+    /// Ordnerfeld statt Textfeld (Ordnervorgaben, deren Shell WSL ist, #172).
+    picker: Option<folder_picker::FolderPicker>,
 }
 
 struct EditorFile {
@@ -1108,7 +1125,14 @@ impl App {
     fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) {
         let p = std::path::Path::new(path);
         let dir = if p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
-        self.new_session(ctx, NewOpts { cwd: Some(dir), claude: claude && self.settings.claude_mode, ..NewOpts::default() });
+        // Ordner in einer WSL-Distribution (`\\wsl.localhost\<Distro>\…`, `\\wsl$\…`, z. B. „Hier öffnen“ im Explorer):
+        // WSL-Sitzung dieser Distribution im passenden Linux-Pfad (#172). Unbekannte Distribution: wie bisher.
+        let wsl = crate::wsl::unc_to_linux(&dir).and_then(|(d, linux)| self.wsl_shell_for(&d).map(|sid| (sid, linux)));
+        let (shell_id, cwd) = match wsl {
+            Some((sid, linux)) => (Some(sid), linux),
+            None => (None, dir),
+        };
+        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, ..NewOpts::default() });
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
@@ -1328,6 +1352,36 @@ impl App {
         if id == 0 { None } else { self.settings.profiles.iter().find(|p| p.id == id) }
     }
 
+    /// Shell-Kennung, die eine neue Sitzung mit diesem Profil ohne ausdrückliche Shell bekommt (wie `new_session`).
+    fn shell_for_profile(&self, pid: u64) -> String {
+        match self.profile(pid) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            Some(p) if !p.shell_id.is_empty() => p.shell_id.clone(),
+            _ => self.settings.default_shell.clone(),
+        }
+    }
+
+    /// Ziel des Ordnerfelds für Ordner-/Projektvorgaben mit diesem Profil (WSL-Shell → Linux-Pfad, #172).
+    fn folder_target(&self, pid: u64) -> folder_picker::Target {
+        folder_picker::Target::for_shell(self.shell_by_id(&self.shell_for_profile(pid)).as_ref(), false)
+    }
+
+    /// Ziel des Ordnerfelds im Dialog „Neue Sitzung“: die gewählte Shell (bzw. die des Profils); bei einer erkannten
+    /// WSL-Shell ist die Distribution dort wählbar (wechselt die Shell).
+    fn new_dialog_target(&self, shell_id: &str, profile: u64) -> folder_picker::Target {
+        let sid = match self.profile(profile) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            _ => shell_id.to_string(),
+        };
+        let choose = sid.starts_with("wsl:") && self.shells.iter().any(|s| s.id == sid);
+        folder_picker::Target::for_shell(self.shell_by_id(&sid).as_ref(), choose)
+    }
+
+    /// Erkannte WSL-Shell einer Distribution (Groß-/Kleinschreibung egal, wie Windows).
+    fn wsl_shell_for(&self, distro: &str) -> Option<String> {
+        self.shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|d| d.eq_ignore_ascii_case(distro))).map(|s| s.id.clone())
+    }
+
     fn shell_by_id(&self, id: &str) -> Option<ShellSpec> {
         if let Some(pid) = id.strip_prefix("custom:").and_then(|n| n.parse::<u64>().ok()) {
             if let Some(p) = self.profile(pid) {
@@ -1400,10 +1454,11 @@ impl App {
     }
 
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
-        let Some(shell) = self.shell_by_id(&entry.meta.shell_id) else {
+        let Some(mut shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
         };
+        let wsl = shells::is_wsl(&shell);
         let restore_text = if l.restore {
             std::fs::read_to_string(self.scrollback_path(entry.meta.id)).ok()
         } else {
@@ -1417,7 +1472,15 @@ impl App {
             (Some(st), None) => Some(format!("{st}\r")),
             (None, c) => c,
         };
-        let cwd = if entry.meta.cwd.is_empty() { home_dir() } else { entry.meta.cwd.clone() };
+        // WSL: ein Linux-Startordner (leer = Linux-Home `~`, #172) geht als `wsl.exe --cd <pfad>` mit; der
+        // Windows-Startordner ist dann nur ein gültiger Platzhalter. Windows-Pfade übersetzt wsl.exe wie bisher selbst.
+        let cwd = if wsl && crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd) {
+            home_dir()
+        } else if entry.meta.cwd.is_empty() {
+            home_dir()
+        } else {
+            entry.meta.cwd.clone()
+        };
         let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string())];
         if let Some(p) = &profile {
             for line in p.env.lines() {
@@ -1453,7 +1516,6 @@ impl App {
             env.push((crate::paths::ENV_HUB_DATA.to_string(), self.dir.display().to_string()));
             env.push((crate::paths::ENV_HUB_BASE.to_string(), crate::paths::get().base.display().to_string()));
         }
-        let wsl = shells::is_wsl(&shell);
         if wsl {
             // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Profilvariablen.
             let mut names = vec![hooks::ENV_SESSION.to_string(), hooks::ENV_PORT.to_string(), hooks::ENV_TOKEN.to_string()];
@@ -1471,7 +1533,6 @@ impl App {
         }
         entry.shell_eff = shell.id.clone();
         entry.status = ClaudeStatus::Unknown;
-        let mut shell = shell;
         if self.settings.shell_integration {
             let (extra_args, extra_env) = shells::integration(&shell);
             shell.args.extend(extra_args);
@@ -2998,7 +3059,7 @@ impl App {
                 }
             }
             Action::SwitchProject(id) => self.switch_project(id),
-            Action::NewProjectPrompt => self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: None, text: String::new() }),
+            Action::NewProjectPrompt => self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: None, text: String::new(), folder: String::new(), picker: None }),
             Action::ProjectPrompt(id, kind) => {
                 let text = self
                     .projects
@@ -3006,7 +3067,12 @@ impl App {
                     .find(|p| p.id == id)
                     .map(|p| if kind == PromptKind::ProjectFolder { p.folder.clone() } else { p.name.clone() })
                     .unwrap_or_default();
-                self.text_prompt = Some(TextPrompt { kind, id, tags_for: None, text });
+                // Standardordner eines Projekts, dessen Shell WSL ist: Ordnerfeld mit Linux-Pfad (#172).
+                let picker = (kind == PromptKind::ProjectFolder)
+                    .then(|| self.folder_target(self.projects.iter().find(|p| p.id == id).map(|p| p.profile).unwrap_or(0)))
+                    .filter(|t| *t != folder_picker::Target::Windows)
+                    .map(|t| folder_picker::FolderPicker::new(("projfolder", id), &text, t));
+                self.text_prompt = Some(TextPrompt { kind, id, tags_for: None, text, folder: String::new(), picker });
             }
             Action::SetProjectColor(id, c) => {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
@@ -3015,7 +3081,7 @@ impl App {
             }
             Action::TagsPrompt(id) => {
                 let text = self.entries.get(&id).map(|e| e.meta.tags.join(", ")).unwrap_or_default();
-                self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: Some(id), text });
+                self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: Some(id), text, folder: String::new(), picker: None });
             }
             Action::DeleteProject(id) => {
                 let other = self.projects.iter().find(|p| p.id != id).map(|p| p.id);
@@ -3179,6 +3245,16 @@ impl App {
                 }
             }
             Action::FolderCwd(path, clear) => {
+                // Shell des Ordners (geerbtes Profil, sonst das des Projekts) ist WSL: Ordnerfeld mit Linux-Pfad (#172).
+                let proj = self.projects.iter().find(|p| p.id == self.active_project);
+                let pid = proj.and_then(|p| p.inherited(&path, |f| Some(f.profile).filter(|x| *x != 0)).or(Some(p.profile))).unwrap_or(0);
+                let target = self.folder_target(pid);
+                if !clear && target != folder_picker::Target::Windows {
+                    let cur = proj.and_then(|p| p.folder(&path)).map(|f| f.cwd.clone()).unwrap_or_default();
+                    let picker = folder_picker::FolderPicker::new(("foldercwd", &path), &cur, target);
+                    self.text_prompt = Some(TextPrompt { kind: PromptKind::FolderCwd, id: self.active_project, tags_for: None, text: cur, folder: path, picker: Some(picker) });
+                    return;
+                }
                 let start = self.entries.get(&self.focused).map(|e| e.cwd_now()).unwrap_or_else(home_dir);
                 let new = if clear { Some(String::new()) } else { notify::pick_folder(&start) };
                 if let (Some(c), Some(f)) = (new, self.active_folder_mut(&path)) {
@@ -3196,7 +3272,7 @@ impl App {
                 let prof = proj.and_then(|p| p.inherited(&path, |f| Some(f.profile).filter(|x| *x != 0)));
                 let mut d = NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode);
                 if let Some(c) = cwd.or_else(|| proj.map(|p| p.folder.clone()).filter(|c| !c.is_empty())) {
-                    d.cwd = c;
+                    d.set_cwd(&c);
                 }
                 if let Some(pr) = prof {
                     d.profile = pr;

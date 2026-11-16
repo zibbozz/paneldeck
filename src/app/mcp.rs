@@ -899,16 +899,23 @@ impl App {
             }
             None => None,
         };
-        let cwd = s("cwd");
-        if let Some(c) = &cwd {
-            if !std::path::Path::new(c).is_dir() {
-                return Err(er("bad_args", if de() { format!("Ordner existiert nicht: {c}") } else { format!("Folder does not exist: {c}") }));
-            }
-        }
         // Läuft der Agent in einer Hub-Sitzung, kommt das Kind in deren Fenster und Projekt (#110), sonst ins Hauptfenster.
         let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
-        // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
         let default_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        // Startet die Sitzung in WSL (gewählte Shell bzw. Standard), darf `cwd` ein Linux-Pfad sein (#172).
+        let eff_shell = match self.profile(default_profile) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            _ => shell.clone().unwrap_or_else(|| self.shell_for_profile(default_profile)),
+        };
+        let wsl = match super::folder_picker::Target::for_shell(self.shell_by_id(&eff_shell).as_ref(), false) {
+            super::folder_picker::Target::Wsl { distro, .. } => Some(distro),
+            super::folder_picker::Target::Windows => None,
+        };
+        let cwd = match s("cwd") {
+            Some(c) => Some(check_create_cwd(&c, wsl.as_ref().map(|d| d.as_deref()), de(), |p| std::path::Path::new(p).is_dir())?),
+            None => None,
+        };
+        // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
         if self.profile(default_profile).is_some_and(|p| p.admin) {
             return Err(er("admin_profile", tr("Das Standardprofil dieses Projekts startet als Administrator – über MCP nicht erlaubt.", "This project's default profile starts as administrator – not allowed via MCP.")));
         }
@@ -1554,9 +1561,74 @@ impl App {
     }
 }
 
+/// Startordner für `create_session` prüfen (rein, testbar). `wsl` = `Some(Distribution)`, wenn die Sitzung in WSL
+/// startet: dann ist auch ein Linux-Pfad erlaubt (absolut oder `~`, ohne Steuerzeichen, höchstens 4096 Bytes; ob er
+/// existiert, zeigt erst der Start – eine Prüfung über wsl.exe würde die Oberfläche blockieren), und ein
+/// `\\wsl.localhost\<Distro>\…`-Pfad wird zum Linux-Pfad. Windows-Pfade müssen existieren; Netzwerkfreigaben werden
+/// gar nicht erst geprüft (schon das Prüfen baute eine SMB-Verbindung auf).
+fn check_create_cwd(c: &str, wsl: Option<Option<&str>>, de: bool, is_dir: impl Fn(&str) -> bool) -> Result<String, (String, String)> {
+    let bad = |de_msg: String, en_msg: String| Err(er("bad_args", if de { de_msg } else { en_msg }));
+    if let Some(distro) = wsl {
+        if let Some((d, linux)) = crate::wsl::unc_to_linux(c) {
+            if let Some(x) = distro.filter(|x| !x.eq_ignore_ascii_case(&d)) {
+                return bad(format!("Der Ordner liegt in der WSL-Distribution {d}, die Shell startet {x}."), format!("The folder is in the WSL distribution {d}, the shell starts {x}."));
+            }
+            return Ok(linux);
+        }
+        if crate::wsl::looks_linux(c) {
+            return match crate::wsl::validate_linux_path(c) {
+                Ok(()) => Ok(crate::wsl::normalize(c, None)),
+                Err(e) => bad(format!("Ungültiger Linux-Pfad: {}", e.message(true)), format!("Invalid Linux path: {}", e.message(false))),
+            };
+        }
+    }
+    if crate::pathfmt::is_remote_unc(c) {
+        return bad(format!("Netzwerkpfade sind als Startordner nicht erlaubt: {c}"), format!("Network paths are not allowed as start folder: {c}"));
+    }
+    if !is_dir(c) {
+        return bad(format!("Ordner existiert nicht: {c}"), format!("Folder does not exist: {c}"));
+    }
+    Ok(c.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_session_cwd_accepts_linux_paths_only_for_wsl() {
+        let dirs = |p: &str| matches!(p, r"C:\Work" | r"\\wsl.localhost\Ubuntu\home\u");
+        let ok = |c: &str, wsl: Option<Option<&str>>| check_create_cwd(c, wsl, false, dirs);
+        let ubuntu = Some(Some("Ubuntu"));
+        // WSL: Linux-Pfad (absolut oder ~) ohne Existenzprüfung, normalisiert
+        assert_eq!(ok("/home/u/my project/", ubuntu).unwrap(), "/home/u/my project");
+        assert_eq!(ok("~", ubuntu).unwrap(), "~");
+        assert_eq!(ok("/", ubuntu).unwrap(), "/");
+        // UNC derselben Distribution → Linux-Pfad; andere Distribution → Fehler
+        assert_eq!(ok(r"\\wsl$\ubuntu\srv\x", ubuntu).unwrap(), "/srv/x");
+        assert!(ok(r"\\wsl.localhost\Debian\srv", ubuntu).unwrap_err().1.contains("Debian"));
+        assert_eq!(ok(r"\\wsl.localhost\Debian\srv", Some(None)).unwrap(), "/srv");
+        // Windows-Pfade wie bisher (müssen existieren)
+        assert_eq!(ok(r"C:\Work", ubuntu).unwrap(), r"C:\Work");
+        assert!(ok(r"C:\Missing", ubuntu).is_err());
+        // Ungültige Linux-Pfade
+        for c in ["~/x", "/a\nb", "/a\u{0}b", &format!("/{}", "x".repeat(5000))] {
+            let e = ok(c, ubuntu).unwrap_err();
+            assert_eq!(e.0, "bad_args", "{c:?}");
+            assert!(e.1.starts_with("Invalid Linux path"), "{c:?}: {}", e.1);
+        }
+        assert!(check_create_cwd("/a\nb", ubuntu, true, dirs).unwrap_err().1.contains("Steuerzeichen"));
+        // Ohne WSL: Linux-Pfade sind normale (nicht vorhandene) Windows-Pfade; Netzwerkfreigaben nie prüfen
+        assert!(ok("/home/u", None).unwrap_err().1.contains("does not exist"));
+        assert_eq!(ok(r"\\wsl.localhost\Ubuntu\home\u", None).unwrap(), r"\\wsl.localhost\Ubuntu\home\u");
+        let probed = std::cell::Cell::new(false);
+        let e = check_create_cwd(r"\\evil\share", ubuntu, false, |_| {
+            probed.set(true);
+            true
+        })
+        .unwrap_err();
+        assert!(e.1.contains("Network paths") && !probed.get());
+    }
 
     #[test]
     fn closing_a_session_forgets_it_and_orphans_its_children() {

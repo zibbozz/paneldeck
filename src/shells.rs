@@ -81,16 +81,9 @@ fn detect_wsl() -> Vec<ShellSpec> {
     if !out.status.success() {
         return Vec::new();
     }
-    // wsl.exe gibt UTF-16LE aus.
-    let units: Vec<u16> = out
-        .stdout
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    String::from_utf16_lossy(&units)
-        .lines()
-        .map(|l| l.trim().trim_start_matches('\u{feff}').trim())
-        .filter(|l| !l.is_empty())
+    // wsl.exe gibt UTF-16LE aus (mit WSL_UTF8=1 UTF-8); `wsl::parse_distro_list` kann beides.
+    crate::wsl::parse_distro_list(&out.stdout)
+        .iter()
         .map(|name| {
             ShellSpec::new(
                 &format!("wsl:{name}"),

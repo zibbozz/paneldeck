@@ -30,7 +30,7 @@ impl App {
                                             d.shell_id = p.shell_id.clone();
                                         }
                                         if !p.cwd.is_empty() {
-                                            d.cwd = p.cwd.clone();
+                                            d.set_cwd(&p.cwd);
                                         }
                                     }
                                 }
@@ -46,14 +46,13 @@ impl App {
                         });
                         ui.end_row();
                         ui.label(lang.t("Ordner", "Folder"));
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut d.cwd).desired_width(290.0));
-                            if ui.button("…").on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
-                                if let Some(p) = notify::pick_folder(&d.cwd) {
-                                    d.cwd = p;
-                                }
-                            }
-                        });
+                        // WSL-Shell: Linux-Pfad mit Vervollständigung, Distribution wählbar (wechselt die Shell), #172.
+                        d.picker.set_target(self.new_dialog_target(&d.shell_id, d.profile));
+                        let r = d.picker.show(ui, lang, &self.settings.wsl_recent);
+                        if let Some(sid) = r.distro_changed.and_then(|dist| self.wsl_shell_for(&dist)) {
+                            d.shell_id = sid;
+                        }
+                        d.cwd = d.picker.value();
                         ui.end_row();
                         ui.label(lang.t("Name (optional)", "Name (optional)"));
                         ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(320.0));
@@ -97,7 +96,8 @@ impl App {
                                 if d.repo_for != d.cwd {
                                     d.repo_for = d.cwd.clone();
                                     let p = std::path::Path::new(&d.cwd);
-                                    d.repo = gitops::inside_repo_fs(p).then(|| p.to_path_buf());
+                                    // Linux-Pfad (WSL): kein Worktree-Angebot (git liefe in Windows auf einem fremden Pfad).
+                                    d.repo = (!d.picker.is_wsl() && gitops::inside_repo_fs(p)).then(|| p.to_path_buf());
                                 }
                                 if d.repo.is_some() {
                                     ui.label("Git");
@@ -121,9 +121,15 @@ impl App {
                         }
                     });
                     ui.add_space(6.0);
+                    // Ungültiger oder fehlender WSL-Ordner: Erstellen gesperrt (Grund steht unter dem Ordnerfeld).
+                    let blocked = d.picker.blocking_error(lang);
                     ui.horizontal(|ui| {
-                        if ui.button(lang.t("Erstellen", "Create")).clicked() {
+                        let b = ui.add_enabled(blocked.is_none(), egui::Button::new(lang.t("Erstellen", "Create")));
+                        if b.clicked() {
                             create = true;
+                        }
+                        if let Some(e) = &blocked {
+                            b.on_disabled_hover_text(e.as_str());
                         }
                         if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
                             keep = false;
@@ -134,6 +140,10 @@ impl App {
                 keep = false;
             }
             if create {
+                if d.picker.is_wsl() {
+                    d.picker.remember(&mut self.settings.wsl_recent);
+                    state::save_json(&self.dir.join("settings.json"), &self.settings);
+                }
                 let mut args = Vec::new();
                 if !d.model.trim().is_empty() {
                     args.push(format!("--model {}", d.model.trim().replace(' ', "")));
@@ -338,17 +348,32 @@ impl App {
                 PromptKind::NewProject => lang.t("Neues Projekt", "New project"),
                 PromptKind::RenameProject => lang.t("Projekt umbenennen", "Rename project"),
                 PromptKind::ProjectFolder => lang.t("Standardordner des Projekts", "Project default folder"),
+                PromptKind::FolderCwd => lang.t("Arbeitsordner", "Working folder"),
             }
         };
         let (mut ok, mut cancel) = (false, ctx.input(|i| i.key_pressed(Key::Escape)));
         egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
-            let te = ui.add(egui::TextEdit::singleline(&mut p.text).desired_width(340.0));
-            if !te.has_focus() {
-                te.request_focus();
-            }
+            let blocked = match &mut p.picker {
+                // Ordnervorgabe mit WSL-Shell: Ordnerfeld mit Linux-Pfad (#172).
+                Some(picker) => {
+                    picker.show(ui, lang, &self.settings.wsl_recent);
+                    picker.blocking_error(lang)
+                }
+                None => {
+                    let te = ui.add(egui::TextEdit::singleline(&mut p.text).desired_width(340.0));
+                    if !te.has_focus() {
+                        te.request_focus();
+                    }
+                    None
+                }
+            };
             ui.horizontal(|ui| {
-                if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                let b = ui.add_enabled(blocked.is_none(), egui::Button::new("OK"));
+                if b.clicked() || (blocked.is_none() && ui.input(|i| i.key_pressed(Key::Enter))) {
                     ok = true;
+                }
+                if let Some(e) = &blocked {
+                    b.on_disabled_hover_text(e.as_str());
                 }
                 if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
                     cancel = true;
@@ -356,7 +381,16 @@ impl App {
             });
         });
         if ok {
-            let text = p.text.trim().to_string();
+            let text = match &p.picker {
+                Some(picker) => {
+                    if picker.is_wsl() {
+                        picker.remember(&mut self.settings.wsl_recent);
+                        state::save_json(&self.dir.join("settings.json"), &self.settings);
+                    }
+                    picker.value()
+                }
+                None => p.text.trim().to_string(),
+            };
             if let Some(sid) = p.tags_for {
                 if let Some(e) = self.entries.get_mut(&sid) {
                     e.meta.tags = text.split(',').map(|t| t.trim().trim_start_matches('#').to_string()).filter(|t| !t.is_empty()).collect();
@@ -381,6 +415,11 @@ impl App {
                     PromptKind::ProjectFolder => {
                         if let Some(pr) = self.projects.iter_mut().find(|x| x.id == p.id) {
                             pr.folder = text;
+                        }
+                    }
+                    PromptKind::FolderCwd => {
+                        if let Some(f) = self.projects.iter_mut().find(|x| x.id == p.id).and_then(|pr| pr.folders.iter_mut().find(|f| f.path == p.folder)) {
+                            f.cwd = text;
                         }
                     }
                 }
