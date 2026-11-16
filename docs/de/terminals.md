@@ -11,17 +11,38 @@ Der **Terminal Hub** ist der Hauptbereich von Paneldeck: viele Terminal-Sitzunge
 - Farben, Alt-Screen, Maus, Unicode, farbige Emojis, CJK und lückenlose Rahmenzeichen. Die Terminalschrift ist Cascadia Mono (eingebettet); fehlende Zeichen kommen aus den Windows-Systemschriften.
 - **Profile** (*Einstellungen → Profile*) bündeln Shell, Startbefehl, Umgebungsvariablen und Darstellung – z. B. „Produktion“ rot oder „Claude in WSL“. Projekte und Ordner können ein Profil für neue Sitzungen vorgeben.
 
+## Mausrad
+- **Normale Shell:** Das Mausrad scrollt den Verlauf von Paneldeck.
+- **Programme mit Mausunterstützung** (z. B. `htop`, `vim` mit `mouse=a`, `tmux`, Midnight Commander): Paneldeck meldet Mausrad und Klicks in jeder Maus-Kodierung an das Programm (SGR, UTF-8 und die normale Kodierung). Die normale Kodierung kann Positionen nur bis Spalte/Zeile 94 tragen – größere Werte würde ConPTY verfälschen –, darüber sendet Paneldeck deshalb nichts statt einer falschen Position; die meisten Programme nutzen ohnehin SGR.
+- **Vollbildprogramme ohne Mausunterstützung** (z. B. `less`, `man`): Das Mausrad sendet Pfeiltasten, damit der Text scrollt – aber nur, wenn das Programm es erlaubt (Alternate Scroll Mode, DECSET 1007, standardmäßig an). Die Einstellung *Einstellungen → Darstellung → Mausrad in Vollbildprogrammen* wählt **Pfeiltasten senden** (Standard) oder **Aus**.
+- **Umschalt+Mausrad** scrollt immer den Verlauf von Paneldeck, auch wenn das Programm die Maus nutzt. Vollbildprogramme haben keinen Verlauf, dort tut Umschalt+Mausrad deshalb nichts.
+- **Nach einem abgestürzten Vollbildprogramm**, das seine Modi nicht zurückgesetzt hat, verhält sich das Mausrad am Shell-Prompt wieder wie in einer normalen Shell (keine Pfeiltasten in die Befehlszeile, kein Zeichensalat aus Mauscodes), bis du den nächsten Befehl ausführst. Das braucht Shell-Integration (die Shell meldet ihren Prompt); ohne sie verhält sich das Mausrad weiter wie im abgestürzten Programm.
+
 ## Sitzungen starten
-- **Strg+Umschalt+T** oder *Neue Sitzung …* in der Seitenleiste öffnet eine Sitzung; *Neue Claude-Sitzung …* (Funken-Knopf) startet eine mit Claude Code (siehe [Claude Code](claude-code.md)).
+- **Strg+Umschalt+T** oder *Neue Sitzung …* in der Seitenleiste öffnet eine Sitzung; *Neue Claude-Sitzung …* (Funken-Knopf) startet eine mit Claude Code (siehe [Claude Code](claude-code.md)). Der Sprechblasen-Knopf beginnt statt eines Terminals einen **Chat mit einem lokalen Modell** (siehe [Chats mit lokalen Modellen](chat.md)).
 - Bei einem frischen Start öffnet Paneldeck **kein Terminal**: Der leere Terminal Hub zeigt einen kurzen Hinweis mit *Neues Terminal* (im Claude-Modus auch *Neue Claude-Sitzung …*) und den Tastenkürzeln. Sitzungen des letzten Laufs werden wie bisher wiederhergestellt. Siehe [Mehrere Fenster](windows.md#der-leere-terminal-hub).
 - Von außen: das Explorer-Kontextmenü (*In Paneldeck öffnen* / *Mit Claude in Paneldeck starten*), `paneldeck.exe --open <ordner>` oder ein auf `paneldeck.exe` gezogener Ordner (siehe [Kommandozeile](command-line.md) und [Windows-Integration](windows-integration.md)).
 
 ## Organisation
 - **Projekte** mit eigenem Layout, dazu **Ordner**, Gruppen, Farben, Tags, Filter (`Filtern: Name oder #Tag`) und Notizen. Die Seitenleiste zeigt die Sitzungen als Liste oder Ordnerbaum; Drag & Drop verschiebt Sitzungen und Ordner.
 - Ordner können einen Arbeitsordner und **Vorgaben für neue Sitzungen** (Profil) haben; *Als Vorlage speichern …* legt eine Gruppe von Sitzungen als **Sitzungs-Vorlage** ab.
-- **Bereiche:** rechts teilen (**Strg+Umschalt+D**) oder darunter (**Strg+Umschalt+E**), per Drag & Drop umordnen, einen Bereich ausblenden (**Strg+Umschalt+W**) oder eine Sitzung in ein eigenes Fenster abdocken.
+- **Bereiche:** rechts teilen (**Strg+Umschalt+D**) oder darunter (**Strg+Umschalt+E**), per Drag & Drop umordnen, einen Bereich minimieren (**Strg+Umschalt+W**) oder eine Sitzung in ein eigenes Fenster abdocken (siehe [Bereiche und Minimieren](#bereiche-und-minimieren)).
 - **Mehrere Fenster:** **Strg+Klick** auf den Reiter *Terminal Hub* öffnet ein weiteres Fenster mit eigenen Sitzungen (siehe [Mehrere Fenster](windows.md)).
 - Beim Neustart stellt Paneldeck Sitzungen, Projekte und Layout wieder her; der Verlauf jedes Terminals wird im Datenordner gespeichert (`scrollback/`).
+
+## Bereiche und Minimieren
+- **Knöpfe im Kopf eines Bereichs** (von links nach rechts): *Ticket verknüpfen …* (nur wenn Ticket-Verknüpfungen verfügbar sind), *Rechts teilen*, *Darunter teilen*, *In eigenem Fenster öffnen*, **Bereich minimieren** und *Sitzung schließen* (×). Ein abgedocktes Fenster hat *Wieder andocken* (×, **Strg+Umschalt+W**) und *Minimieren*.
+- **Minimieren** nimmt den Bereich aus dem geteilten Layout; sein Nachbar übernimmt den Platz, und das Terminal oder der Chat **läuft weiter**. Das geht auch mit dem letzten Bereich – der Terminal Hub zeigt dann „Alle Bereiche sind minimiert“. Minimieren gibt es im Kopf des Bereichs, in den Kontextmenüs des Bereichs und der Sitzung in der Seitenleiste, in der Befehls-Palette (*Bereich minimieren*) und auf **Strg+Umschalt+W**. In einem abgedockten Fenster schließt *Minimieren* das Fenster, ohne die Sitzung wieder anzudocken.
+- **Seitenleiste:** Ein **abgeblendeter** Name heißt, die Sitzung steht gerade nicht im Layout; eine kleine **Unterstrich-Markierung** heißt, sie ist minimiert. Der Tooltip sagt, was ein Klick tut.
+- **Eine Sitzung zurückholen** – Klick in der Seitenleiste, *Wechseln zu:* in der Palette oder das Agenten-Werkzeug `focus_session`:
+  - schon im Layout → sie bekommt nur den Fokus;
+  - leerer Terminal Hub → sie wird der einzige Bereich;
+  - minimiert, und ihre alten Nachbarn sind noch da → sie kommt **genau an ihren alten Platz** zurück (gleiche Richtung, Seite und Breite; wurden die Nachbarn inzwischen minimiert oder geschlossen, folgt Paneldeck ihnen zu dem, was an ihre Stelle gerückt ist);
+  - minimiert, aber die Nachbarn sind weg → der fokussierte Bereich wird geteilt, die Sitzung rechts;
+  - nur weggewechselt (nicht minimiert) → sie ersetzt den fokussierten Bereich.
+- **Strg+Tab** überspringt minimierte Sitzungen. Minimierte Sitzungen bleiben auch nach einem Neustart minimiert.
+- Bereiche behalten eine **Mindestgröße** von etwa 120 × 70 px, auch in tiefen Teilungen und beim Ziehen einer Trennlinie.
+- Beim Schließen eines Fensters nennt die Frage auch die Sitzungen, die beendet werden, obwohl sie nicht im Layout stehen (minimiert oder weggewechselt).
 
 ## Komfort
 - **Befehls-Palette** (**Strg+Umschalt+P**): alle Befehle, Sitzungen und – im Expertenmodus – Tickets.
@@ -39,7 +60,7 @@ Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 |---|---|
 | `Strg+Umschalt+T` | Neue Sitzung |
 | `Strg+Umschalt+D` / `Strg+Umschalt+E` | Bereich rechts / darunter teilen |
-| `Strg+Umschalt+W` | Bereich ausblenden |
+| `Strg+Umschalt+W` | Bereich minimieren (im abgedockten Fenster: wieder andocken) |
 | `Strg+Umschalt+R` | Sitzung umbenennen |
 | `Strg+Umschalt+P` | Befehle (Palette) |
 | `Strg+Umschalt+F` | Im Verlauf suchen |

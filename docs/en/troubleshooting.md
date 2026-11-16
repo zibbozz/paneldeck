@@ -37,6 +37,9 @@ Each release is checked with Microsoft Defender before it is published (`tools/d
 - `hub_not_running`: Paneldeck is not running for the data folder the bridge looked at (the message names it). With profiles, register the instance's own server name (`paneldeck-<profile>`) or pass `--profile` to `mcp` (see [Agent interface](agent-interface.md)).
 - After switching expert mode, reload the agent's tool list (`/mcp` in Claude Code).
 
+## Chats with local models
+- Server not reachable, model not found, context too small, a model that does not use tools: see [Chats – Troubleshooting](chat.md#troubleshooting).
+
 ## Updates
 - "Checksum mismatch – the download was discarded": the file did not match `SHA256SUMS.txt`; try again later or download by hand.
 - "This version can't be installed automatically": the release has no checksum file `SHA256SUMS.txt` (2.0.0 and older) or no matching file – download it from the release page and update by hand.
