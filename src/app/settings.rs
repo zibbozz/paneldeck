@@ -404,7 +404,7 @@ impl App {
                             row(ui, lang.t("Farbe", "Color"), lang.t("Farbmarke der Sitzung", "Session color mark"), |ui| {
                                 ui.vertical(|ui| {
                                     let cur = p.color.map(crate::palette::hex_of);
-                                    if let Some(h) = palette_ui::pick(ui, ("profile_color", p.id), crate::palette::Area::Hub, cur.as_deref(), palette_ui::Look::Square, 10, lang) {
+                                    if let Some(h) = palette_ui::pick(ui, ("profile_color", p.id), crate::palette::Area::Hub, cur.as_deref(), palette_ui::PickOpts::HUB, lang) {
                                         p.color = Some(crate::palette::rgb(&h));
                                     }
                                     if ui.small_button(lang.t("Keine", "None")).clicked() {

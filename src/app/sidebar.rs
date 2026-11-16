@@ -341,13 +341,13 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            ui.menu_button(lang.t("Farbe", "Color"), |ui| {
+            palette_ui::color_menu(ui, lang.t("Farbe", "Color"), |ui| {
                 if ui.button(lang.t("Keine", "None")).clicked() {
                     actions.push(Action::FolderColor(path.clone(), None));
                     ui.close();
                 }
                 let cur = f.color.map(crate::palette::hex_of);
-                if let Some(h) = palette_ui::pick(ui, ("folder_color", &path), crate::palette::Area::Hub, cur.as_deref(), palette_ui::Look::Square, 10, lang) {
+                if let Some(h) = palette_ui::pick(ui, ("folder_color", &path), crate::palette::Area::Hub, cur.as_deref(), palette_ui::PickOpts::HUB, lang) {
                     actions.push(Action::FolderColor(path.clone(), Some(crate::palette::rgb(&h))));
                     ui.close();
                 }
@@ -638,8 +638,8 @@ impl App {
                 actions.push(Action::StartRename(id));
                 ui.close();
             }
-            ui.menu_button(lang.t("Farbe", "Color"), |ui| {
-                if let Some(h) = palette_ui::pick(ui, ("session_color", id), crate::palette::Area::Hub, cur_color.as_deref(), palette_ui::Look::Square, 10, lang) {
+            palette_ui::color_menu(ui, lang.t("Farbe", "Color"), |ui| {
+                if let Some(h) = palette_ui::pick(ui, ("session_color", id), crate::palette::Area::Hub, cur_color.as_deref(), palette_ui::PickOpts::HUB, lang) {
                     actions.push(Action::SetColor(id, crate::palette::rgb(&h)));
                     ui.close();
                 }

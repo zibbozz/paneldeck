@@ -2,14 +2,20 @@
 //! (Terminal-Hub), Tags der einfachen Todo-Liste und den Expertenmodus (Projekte, Typen, Status, Auswahlwerte, Diagramme).
 //!
 //! Standard ist **eine gemeinsame Palette** für alles. Mit `per_area` hat jeder Bereich seine eigene; beide Varianten
-//! bleiben gespeichert, ein Umschalten verliert nichts. Gespeichert wird in `settings.json` (Feld `palette`, optional;
-//! fehlt es, gelten die eingebauten Vorgaben). Elemente speichern ihren Farbwert selbst – ändern oder löschen einer
-//! Palettenfarbe wirkt nur auf künftige Auswahlen.
+//! bleiben gespeichert, ein Umschalten verliert nichts. Gespeichert wird in `settings.json` (Feld `palette`, optional).
+//! Jede Liste ist optional: fehlt sie (`None`), gelten die eingebauten Vorgaben – auch künftige Änderungen daran.
+//! Elemente speichern ihren Farbwert selbst – ändern oder löschen einer Palettenfarbe wirkt nur auf künftige Auswahlen.
 //!
-//! Die Oberfläche liest die Palette über [`current`] (die App veröffentlicht ihre Einstellungen jedes Bild mit
+//! **Automatische Vergabe** (neue Sitzungen, Tags, Projekte/Typen/Status, Auswahlwerte, Diagrammsegmente): solange die
+//! geltende Liste unverändert (oder leer) ist, nimmt sie die bisherige Vorgabe des Bereichs in der bisherigen Reihenfolge
+//! ([`HUB_DEFAULTS`], [`TODO_DEFAULTS`], [`EXPERT_DEFAULTS`]) – nach dem Update ändert sich also nichts. Erst eine selbst
+//! bearbeitete Liste wird für die Vergabe benutzt.
+//!
+//! Die Oberfläche liest die Palette über [`with_current`] (die App veröffentlicht ihre Einstellungen jedes Bild mit
 //! [`publish`]), damit nicht jede Auswahl die Einstellungen durchreichen muss. Kein egui hier.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::RwLock;
 
 /// Eingebaute Vorgabe des Terminal-Hubs (bis 2.2 die feste Palette für Sitzungen, Ordner, Projekte, Profile).
@@ -25,8 +31,7 @@ pub const EXPERT_DEFAULTS: [&str; 14] = [
 
 /// Eingebaute gemeinsame Palette: Vereinigung der drei obigen ohne Doppelte. Fast gleiche Paare sind zusammengefasst
 /// (`#7B8CF0`/`#6F8FE8`, `#E07BB0`/`#E07FB0` – mit bloßem Auge nicht zu unterscheiden). Reihenfolge: zuerst die acht
-/// Hub-Farben (neue Sitzungen bekommen also dieselben Farben wie bisher), dann abwechselnd die übrigen, damit die
-/// automatische Vergabe zuerst gut unterscheidbare Farben verteilt; die gedeckten Töne kommen zuletzt.
+/// Hub-Farben, dann abwechselnd die übrigen (gut unterscheidbare zuerst), die gedeckten Töne zuletzt.
 pub const SHARED_DEFAULTS: [&str; 20] = [
     "#61AFEF", "#98C379", "#E5C07B", "#E06C75", "#C678DD", "#56B6C2", "#D97757", "#888888", "#E5A04B", "#E07FB0", "#4A78B5", "#5E8F5E", "#B77FE0", "#4FB8A8",
     "#D8B94A", "#6F8FE8", "#7FBF6A", "#58A6E6", "#97A3B0", "#8C7B6B",
@@ -34,7 +39,7 @@ pub const SHARED_DEFAULTS: [&str; 20] = [
 
 /// Längster Farbname in Zeichen.
 pub const MAX_NAME_CHARS: usize = 40;
-/// Höchstens so viele Farben je Palette (Schutz vor kaputten Dateien; die Oberfläche bietet „Hinzufügen“ dann nicht mehr an).
+/// Höchstens so viele Farben je Palette.
 pub const MAX_COLORS: usize = 64;
 
 /// Bereich, dessen Auswahlen eine Palette nutzen.
@@ -59,6 +64,7 @@ impl Area {
         }
     }
 
+    /// Die bisherige Vorgabe des Bereichs (auch Grundlage der automatischen Vergabe, solange nichts bearbeitet ist).
     pub fn defaults(self) -> &'static [&'static str] {
         match self {
             Area::Hub => &HUB_DEFAULTS,
@@ -76,19 +82,30 @@ pub enum Which {
 }
 
 impl Which {
+    pub const ALL: [Which; 4] = [Which::Shared, Which::Area(Area::Hub), Which::Area(Area::Todo), Which::Area(Area::Expert)];
+
     pub fn defaults(self) -> &'static [&'static str] {
         match self {
             Which::Shared => &SHARED_DEFAULTS,
             Which::Area(a) => a.defaults(),
         }
     }
+
+    fn key(self) -> &'static str {
+        match self {
+            Which::Shared => "shared",
+            Which::Area(Area::Hub) => "hub",
+            Which::Area(Area::Todo) => "todo",
+            Which::Area(Area::Expert) => "expert",
+        }
+    }
 }
 
 /// Eine Palettenfarbe: Wert `#RRGGBB` (Großbuchstaben) und optionaler Name.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct PaletteColor {
     pub hex: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
 }
 
@@ -107,32 +124,40 @@ impl PaletteColor {
         let n = self.name.trim();
         if n.is_empty() { self.hex.clone() } else { format!("{n} ({})", self.hex) }
     }
-}
 
-fn list(defaults: &[&str]) -> Vec<PaletteColor> {
-    defaults.iter().map(|h| PaletteColor::new(h)).collect()
-}
-
-/// Alle Paletten (Feld `palette` in `settings.json`).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Palettes {
-    /// `false` (Standard): eine gemeinsame Palette für alles. `true`: je Bereich eine eigene.
-    pub per_area: bool,
-    pub shared: Vec<PaletteColor>,
-    pub hub: Vec<PaletteColor>,
-    pub todo: Vec<PaletteColor>,
-    pub expert: Vec<PaletteColor>,
-}
-
-impl Default for Palettes {
-    fn default() -> Self {
-        Self { per_area: false, shared: list(&SHARED_DEFAULTS), hub: list(&HUB_DEFAULTS), todo: list(&TODO_DEFAULTS), expert: list(&EXPERT_DEFAULTS) }
+    /// Tolerant aus JSON: Objekt mit `hex` (Pflicht, gültig) und `name` (Text, sonst leer) oder nur der Hex-Text.
+    fn from_value(v: &Value) -> Option<Self> {
+        let (hex, name) = match v {
+            Value::String(s) => (s.as_str(), ""),
+            Value::Object(o) => (o.get("hex")?.as_str()?, o.get("name").and_then(Value::as_str).unwrap_or("")),
+            _ => return None,
+        };
+        Some(Self { hex: normalize_hex(hex)?, name: clean_name(name) })
     }
 }
 
+/// Liste aus Vorgaben.
+pub fn list_of(defaults: &[&str]) -> Vec<PaletteColor> {
+    defaults.iter().map(|h| PaletteColor::new(h)).collect()
+}
+
+/// Alle Paletten (Feld `palette` in `settings.json`). `None` = eingebaute Vorgaben (nicht gespeichert).
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize)]
+pub struct Palettes {
+    /// `false` (Standard): eine gemeinsame Palette für alles. `true`: je Bereich eine eigene.
+    pub per_area: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared: Option<Vec<PaletteColor>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub: Option<Vec<PaletteColor>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todo: Option<Vec<PaletteColor>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expert: Option<Vec<PaletteColor>>,
+}
+
 impl Palettes {
-    /// Unverändert gegenüber den Vorgaben (dann schreibt `settings.json` das Feld nicht – spätere Vorgaben gelten).
+    /// Nichts eingestellt (dann schreibt `settings.json` das Feld nicht).
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -142,7 +167,7 @@ impl Palettes {
         if self.per_area { Which::Area(area) } else { Which::Shared }
     }
 
-    pub fn get(&self, w: Which) -> &Vec<PaletteColor> {
+    pub fn slot(&self, w: Which) -> &Option<Vec<PaletteColor>> {
         match w {
             Which::Shared => &self.shared,
             Which::Area(Area::Hub) => &self.hub,
@@ -151,7 +176,7 @@ impl Palettes {
         }
     }
 
-    pub fn get_mut(&mut self, w: Which) -> &mut Vec<PaletteColor> {
+    pub fn slot_mut(&mut self, w: Which) -> &mut Option<Vec<PaletteColor>> {
         match w {
             Which::Shared => &mut self.shared,
             Which::Area(Area::Hub) => &mut self.hub,
@@ -160,42 +185,50 @@ impl Palettes {
         }
     }
 
+    /// Die Liste `w` wie sie gilt (gespeichert oder die Vorgaben).
+    pub fn list(&self, w: Which) -> Vec<PaletteColor> {
+        self.slot(w).clone().unwrap_or_else(|| list_of(w.defaults()))
+    }
+
+    /// Liste `w` setzen; gleicht sie den Vorgaben, wird sie nicht gespeichert (folgt dann künftigen Vorgaben).
+    pub fn set(&mut self, w: Which, l: Vec<PaletteColor>) {
+        *self.slot_mut(w) = if l == list_of(w.defaults()) { None } else { Some(l) };
+    }
+
     /// Die Farben, die die Auswahlen in `area` anbieten (kann leer sein).
-    pub fn colors(&self, area: Area) -> &[PaletteColor] {
-        self.get(self.which(area))
+    pub fn colors(&self, area: Area) -> Vec<PaletteColor> {
+        self.list(self.which(area))
     }
 
-    /// Farben für die automatische Vergabe in `area`. Ist die geltende Palette leer, gelten die eingebauten Vorgaben
-    /// dieser Liste (gemeinsam bzw. des Bereichs) – automatisch vergeben wird also immer eine Farbe.
+    /// Farben für die automatische Vergabe in `area` (nie leer): die selbst bearbeitete geltende Liste; ist sie
+    /// unverändert oder leer, die bisherige Vorgabe des Bereichs in der bisherigen Reihenfolge.
     pub fn auto(&self, area: Area) -> Vec<String> {
-        let w = self.which(area);
-        let l = self.get(w);
-        if l.is_empty() { w.defaults().iter().map(|s| s.to_string()).collect() } else { l.iter().map(|c| c.hex.clone()).collect() }
-    }
-
-    /// Tolerant bereinigen (nach dem Lesen): ungültige Werte fallen weg, Hex in Großbuchstaben, Doppelte entfallen,
-    /// Namen gekürzt, höchstens [`MAX_COLORS`] je Liste.
-    pub fn sanitize(&mut self) {
-        for w in [Which::Shared, Which::Area(Area::Hub), Which::Area(Area::Todo), Which::Area(Area::Expert)] {
-            let l = self.get_mut(w);
-            let mut out: Vec<PaletteColor> = Vec::new();
-            for c in l.drain(..) {
-                let Some(hex) = normalize_hex(&c.hex) else { continue };
-                if out.iter().any(|o| o.hex == hex) || out.len() >= MAX_COLORS {
-                    continue;
-                }
-                out.push(PaletteColor { hex, name: clean_name(&c.name) });
-            }
-            *l = out;
+        match self.slot(self.which(area)) {
+            Some(l) if !l.is_empty() => l.iter().map(|c| c.hex.clone()).collect(),
+            _ => area.defaults().iter().map(|s| s.to_string()).collect(),
         }
     }
 
-    /// Für `settings.json`: unlesbare Daten ergeben die Vorgaben (der Rest der Datei bleibt lesbar).
+    /// Tolerant aus JSON, je Feld und je Eintrag: ungültige Einträge fallen weg (die übrigen bleiben), eine unlesbare
+    /// Liste ergibt die Vorgaben, Doppelte entfallen, höchstens [`MAX_COLORS`] je Liste.
+    pub fn from_value(v: &Value) -> Self {
+        let mut p = Palettes { per_area: v.get("per_area").and_then(Value::as_bool).unwrap_or(false), ..Default::default() };
+        for w in Which::ALL {
+            let Some(Value::Array(items)) = v.get(w.key()) else { continue };
+            let mut out: Vec<PaletteColor> = Vec::new();
+            for c in items.iter().filter_map(PaletteColor::from_value) {
+                if out.len() < MAX_COLORS && !out.iter().any(|o| o.hex == c.hex) {
+                    out.push(c);
+                }
+            }
+            *p.slot_mut(w) = Some(out);
+        }
+        p
+    }
+
+    /// Für `settings.json` (`deserialize_with`).
     pub fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = serde_json::Value::deserialize(d)?;
-        let mut p: Palettes = serde_json::from_value(v).unwrap_or_default();
-        p.sanitize();
-        Ok(p)
+        Ok(Self::from_value(&Value::deserialize(d)?))
     }
 }
 
@@ -230,11 +263,19 @@ pub fn least_used<'a>(pool: &[String], used: impl IntoIterator<Item = &'a str>) 
     pool.iter().min_by_key(|c| used.iter().filter(|u| u.eq_ignore_ascii_case(c)).count()).cloned()
 }
 
-/// Gelöschte Vorgaben wieder anhängen (Reihenfolge der Vorgaben; vorhandene Farben und ihre Namen bleiben).
-/// Liefert die Zahl der wieder hinzugefügten Farben.
+/// Wie viele Vorgaben in `list` fehlen.
+pub fn missing_defaults(list: &[PaletteColor], defaults: &[&str]) -> usize {
+    defaults.iter().filter(|d| !list.iter().any(|c| c.hex.eq_ignore_ascii_case(d))).count()
+}
+
+/// Gelöschte Vorgaben wieder anhängen (Reihenfolge der Vorgaben; vorhandene Farben und ihre Namen bleiben), höchstens
+/// bis [`MAX_COLORS`]. Liefert die Zahl der wieder hinzugefügten Farben.
 pub fn restore_defaults(list: &mut Vec<PaletteColor>, defaults: &[&str]) -> usize {
     let mut n = 0;
     for d in defaults {
+        if list.len() >= MAX_COLORS {
+            break;
+        }
         let h = normalize_hex(d).unwrap_or_default();
         if !list.iter().any(|c| c.hex.eq_ignore_ascii_case(&h)) {
             list.push(PaletteColor::new(&h));
@@ -250,7 +291,6 @@ pub fn suggest_new(list: &[PaletteColor], defaults: &[&str]) -> String {
     if let Some(d) = defaults.iter().find(|d| !has(d)) {
         return d.to_string();
     }
-    // Farbkreis in Schritten absuchen (Sättigung/Helligkeit wie die Vorgaben).
     for step in 0..360u32 {
         let hue = (step * 37) % 360;
         let h = hex_of(hsv(hue as f32, 0.55, 0.85));
@@ -314,7 +354,7 @@ pub fn with_current<R>(f: impl FnOnce(&Palettes) -> R) -> R {
 
 /// Farben, die die Auswahlen in `area` anbieten.
 pub fn colors(area: Area) -> Vec<PaletteColor> {
-    with_current(|p| p.colors(area).to_vec())
+    with_current(|p| p.colors(area))
 }
 
 /// Farben für die automatische Vergabe in `area` (nie leer).
@@ -338,6 +378,10 @@ mod tests {
     use super::*;
     use crate::state::Settings;
 
+    fn hexes(l: &[PaletteColor]) -> Vec<&str> {
+        l.iter().map(|c| c.hex.as_str()).collect()
+    }
+
     #[test]
     fn shared_defaults_are_the_deduplicated_union_of_the_three_old_palettes() {
         let mut seen = std::collections::HashSet::new();
@@ -345,7 +389,6 @@ mod tests {
             assert_eq!(normalize_hex(h).as_deref(), Some(h), "Großbuchstaben, gültig");
             assert!(seen.insert(h), "keine Doppelten: {h}");
         }
-        // Jede alte Farbe ist enthalten – außer den zwei fast gleichen, deren Zwilling drin ist.
         for h in HUB_DEFAULTS.iter().chain(TODO_DEFAULTS.iter()).chain(EXPERT_DEFAULTS.iter()) {
             let twin = match *h {
                 "#7B8CF0" => "#6F8FE8",
@@ -354,7 +397,7 @@ mod tests {
             };
             assert!(SHARED_DEFAULTS.contains(&twin), "{h} fehlt");
         }
-        assert_eq!(&SHARED_DEFAULTS[..8], &HUB_DEFAULTS[..], "neue Sitzungen bekommen die bisherigen Farben");
+        assert_eq!(&SHARED_DEFAULTS[..8], &HUB_DEFAULTS[..]);
     }
 
     #[test]
@@ -362,91 +405,121 @@ mod tests {
         let old = r#"{"language":"De","theme":"One Dark","font_size":15.0}"#;
         let s: Settings = serde_json::from_str(old).unwrap();
         assert!(s.palette.is_default());
-        assert!(!s.palette.per_area);
-        // Unveränderte Paletten werden nicht geschrieben (alte Versionen lesen die Datei weiter, neue Vorgaben gelten).
+        assert_eq!(hexes(&s.palette.colors(Area::Todo)), SHARED_DEFAULTS.to_vec());
         let out = serde_json::to_string(&Settings::default()).unwrap();
         assert!(!out.contains("\"palette\""), "{out}");
+        // Nur bearbeitete Listen werden geschrieben.
+        let mut s = Settings::default();
+        s.palette.per_area = true;
+        s.palette.set(Which::Area(Area::Todo), vec![PaletteColor::new("#010101")]);
+        let v: Value = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["palette"], serde_json::json!({"per_area": true, "todo": [{"hex": "#010101"}]}));
     }
 
     #[test]
-    fn palettes_round_trip_and_broken_data_falls_back() {
+    fn palettes_round_trip_and_broken_data_is_kept_per_list_and_item() {
         let mut s = Settings::default();
         s.palette.per_area = true;
-        s.palette.shared = vec![PaletteColor::named("#2288ff", "Cooles Blau")];
-        s.palette.todo.clear();
+        s.palette.shared = Some(vec![PaletteColor::named("#2288ff", "Cooles Blau")]);
+        s.palette.todo = Some(vec![]);
         let json = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.palette, s.palette);
-        assert_eq!(back.palette.shared[0].hex, "#2288FF");
+        assert_eq!(back.palette.shared.as_ref().unwrap()[0].hex, "#2288FF");
+        assert_eq!(back.palette.todo, Some(vec![]), "eine geleerte Liste bleibt leer");
 
-        // Kaputtes Feld: Vorgaben, die übrige Datei bleibt lesbar.
+        // Ganz kaputtes Feld: Vorgaben, die übrige Datei bleibt lesbar.
         let s: Settings = serde_json::from_str(r#"{"font_size":17.0,"palette":"kaputt"}"#).unwrap();
         assert_eq!(s.font_size, 17.0);
         assert!(s.palette.is_default());
-        // Einzelne ungültige Einträge und Doppelte fallen weg, Namen werden gekürzt.
+        // Einzelne kaputte Einträge: nur sie fallen weg; ein falscher Name kostet nur den Namen; eine unlesbare Liste
+        // ergibt nur für sich die Vorgaben; Doppelte entfallen, Namen werden gekürzt.
         let long = "x".repeat(100);
-        let j = format!(r##"{{"palette":{{"shared":[{{"hex":"#abc"}},{{"hex":"112233","name":"  a\nb "}},{{"hex":"#112233"}},{{"hex":"#445566","name":"{long}"}}]}}}}"##);
+        let j = format!(
+            r##"{{"palette":{{"per_area":"ja","shared":[{{"hex":"#abc"}},{{"hex":"112233","name":"  a\nb "}},{{"hex":"#112233"}},{{"hex":"#445566","name":"{long}"}},{{"hex":"#778899","name":5}},7,"#AABBCC"],"hub":"kaputt","todo":[{{"hex":"#010101"}}]}}}}"##
+        );
         let s: Settings = serde_json::from_str(&j).unwrap();
-        assert_eq!(s.palette.shared, vec![PaletteColor::named("#112233", "a b"), PaletteColor::named("#445566", &"x".repeat(MAX_NAME_CHARS))]);
-        assert_eq!(s.palette.hub.len(), HUB_DEFAULTS.len(), "fehlende Listen: Vorgaben");
+        assert!(!s.palette.per_area, "falscher Typ: aus");
+        assert_eq!(
+            s.palette.shared.unwrap(),
+            vec![PaletteColor::named("#112233", "a b"), PaletteColor::named("#445566", &"x".repeat(MAX_NAME_CHARS)), PaletteColor::new("#778899"), PaletteColor::new("#AABBCC")]
+        );
+        assert_eq!(s.palette.hub, None, "unlesbare Liste: Vorgaben");
+        assert_eq!(s.palette.todo, Some(vec![PaletteColor::new("#010101")]), "die anderen Listen bleiben");
+        // Zu viele Farben: gekappt
+        let many: Vec<String> = (0..100).map(|i| format!(r##"{{"hex":"#0000{i:02X}"}}"##)).collect();
+        let s: Settings = serde_json::from_str(&format!(r#"{{"palette":{{"shared":[{}]}}}}"#, many.join(","))).unwrap();
+        assert_eq!(s.palette.shared.unwrap().len(), MAX_COLORS);
     }
 
     #[test]
     fn switching_between_shared_and_per_area_keeps_both() {
         let mut p = Palettes::default();
-        p.shared = vec![PaletteColor::new("#111111")];
-        assert_eq!(p.colors(Area::Todo), &[PaletteColor::new("#111111")][..]);
+        p.set(Which::Shared, vec![PaletteColor::new("#111111")]);
+        assert_eq!(p.colors(Area::Todo), vec![PaletteColor::new("#111111")]);
         p.per_area = true;
-        p.get_mut(Which::Area(Area::Todo)).push(PaletteColor::new("#222222"));
-        p.hub = vec![PaletteColor::new("#333333")];
-        assert_eq!(p.colors(Area::Hub), &[PaletteColor::new("#333333")][..]);
+        let mut todo = p.list(Which::Area(Area::Todo));
+        todo.push(PaletteColor::new("#222222"));
+        p.set(Which::Area(Area::Todo), todo);
+        p.set(Which::Area(Area::Hub), vec![PaletteColor::new("#333333")]);
+        assert_eq!(p.colors(Area::Hub), vec![PaletteColor::new("#333333")]);
         assert_eq!(p.colors(Area::Todo).last().unwrap().hex, "#222222");
-        assert_eq!(p.colors(Area::Expert).len(), EXPERT_DEFAULTS.len());
-        // zurück zur gemeinsamen: die je Bereich bleiben gespeichert
+        assert_eq!(hexes(&p.colors(Area::Expert)), EXPERT_DEFAULTS.to_vec());
         p.per_area = false;
-        assert_eq!(p.colors(Area::Hub), &[PaletteColor::new("#111111")][..]);
-        assert_eq!(p.hub, vec![PaletteColor::new("#333333")]);
-        // und gelten wieder
+        assert_eq!(p.colors(Area::Hub), vec![PaletteColor::new("#111111")]);
+        assert_eq!(p.hub, Some(vec![PaletteColor::new("#333333")]));
         p.per_area = true;
-        assert_eq!(p.colors(Area::Hub), &[PaletteColor::new("#333333")][..]);
-        assert_eq!(p.shared, vec![PaletteColor::new("#111111")]);
+        assert_eq!(p.colors(Area::Hub), vec![PaletteColor::new("#333333")]);
+        assert_eq!(p.shared, Some(vec![PaletteColor::new("#111111")]));
+        // Eine Liste gleich den Vorgaben wird nicht gespeichert (folgt künftigen Vorgaben).
+        p.set(Which::Area(Area::Hub), list_of(&HUB_DEFAULTS));
+        assert_eq!(p.hub, None);
     }
 
     #[test]
-    fn restore_defaults_re_adds_only_deleted_ones() {
+    fn restore_defaults_re_adds_only_deleted_ones_and_stops_when_full() {
         let mut l = vec![PaletteColor::named("#E06C75", "Rot"), PaletteColor::new("#123456")];
+        assert_eq!(missing_defaults(&l, &TODO_DEFAULTS), TODO_DEFAULTS.len() - 1);
         let n = restore_defaults(&mut l, &TODO_DEFAULTS);
         assert_eq!(n, TODO_DEFAULTS.len() - 1);
-        assert_eq!(l[0], PaletteColor::named("#E06C75", "Rot"), "vorhandene behalten Namen und Platz");
+        assert_eq!(l[0], PaletteColor::named("#E06C75", "Rot"));
         assert_eq!(l[1].hex, "#123456");
         assert_eq!(l[2].hex, TODO_DEFAULTS[1]);
-        assert_eq!(restore_defaults(&mut l, &TODO_DEFAULTS), 0, "nichts doppelt");
-        let mut empty = Vec::new();
-        assert_eq!(restore_defaults(&mut empty, &SHARED_DEFAULTS), SHARED_DEFAULTS.len());
+        assert_eq!(restore_defaults(&mut l, &TODO_DEFAULTS), 0);
+        // fast voll: nur bis zur Grenze
+        let mut full: Vec<PaletteColor> = (0..MAX_COLORS - 3).map(|i| PaletteColor::new(&format!("#0000{i:02X}"))).collect();
+        assert_eq!(restore_defaults(&mut full, &SHARED_DEFAULTS), 3);
+        assert_eq!(full.len(), MAX_COLORS);
+        assert_eq!(missing_defaults(&full, &SHARED_DEFAULTS), SHARED_DEFAULTS.len() - 3);
     }
 
     #[test]
-    fn auto_assignment_rotates_and_falls_back_to_the_defaults_when_empty() {
+    fn auto_assignment_keeps_the_old_order_until_edited_and_falls_back_when_empty() {
         let mut p = Palettes::default();
-        assert_eq!(p.auto(Area::Hub), SHARED_DEFAULTS.map(String::from).to_vec());
-        p.shared = vec![PaletteColor::new("#010101"), PaletteColor::new("#020202")];
+        // unverändert: die bisherige Vorgabe des Bereichs – nach dem Update ändert sich nichts
+        assert_eq!(p.auto(Area::Hub), HUB_DEFAULTS.map(String::from).to_vec());
+        assert_eq!(p.auto(Area::Todo), TODO_DEFAULTS.map(String::from).to_vec());
+        assert_eq!(p.auto(Area::Expert), EXPERT_DEFAULTS.map(String::from).to_vec());
+        // bearbeitet: die eigene Liste
+        p.set(Which::Shared, vec![PaletteColor::new("#010101"), PaletteColor::new("#020202")]);
         let pool = p.auto(Area::Todo);
+        assert_eq!(pool, ["#010101", "#020202"]);
         assert_eq!(least_used(&pool, []).unwrap(), "#010101");
         assert_eq!(least_used(&pool, ["#010101"]).unwrap(), "#020202");
-        assert_eq!(least_used(&pool, ["#010101", "#020202"]).unwrap(), "#010101", "alle gleich oft → von vorn");
-        assert_eq!(least_used(&pool, ["#ffffff"]).unwrap(), "#010101", "fremde Farben zählen nicht");
-        // leere gemeinsame Palette → eingebaute gemeinsame Vorgaben
-        p.shared.clear();
-        assert_eq!(p.auto(Area::Expert)[0], SHARED_DEFAULTS[0]);
-        assert!(p.colors(Area::Expert).is_empty(), "die Auswahl zeigt die leere Palette");
-        // leere Bereichspalette → Vorgaben dieses Bereichs
+        assert_eq!(least_used(&pool, ["#010101", "#020202"]).unwrap(), "#010101");
+        assert_eq!(least_used(&pool, ["#ffffff"]).unwrap(), "#010101");
+        // leer: die Vorgabe des Bereichs, die Auswahl zeigt die leere Palette
+        p.set(Which::Shared, vec![]);
+        assert_eq!(p.auto(Area::Expert)[0], EXPERT_DEFAULTS[0]);
+        assert!(p.colors(Area::Expert).is_empty());
         p.per_area = true;
-        p.todo.clear();
+        p.set(Which::Area(Area::Todo), vec![]);
         assert_eq!(p.auto(Area::Todo), TODO_DEFAULTS.map(String::from).to_vec());
         assert_eq!(least_used(&[], ["#010101"]), None);
         // ohne Veröffentlichung: die Vorgaben
-        assert_eq!(nth(Area::Hub, 0), SHARED_DEFAULTS[0]);
-        assert_eq!(nth(Area::Hub, SHARED_DEFAULTS.len() + 1), SHARED_DEFAULTS[1], "läuft im Kreis");
+        assert_eq!(nth(Area::Hub, 0), HUB_DEFAULTS[0]);
+        assert_eq!(nth(Area::Hub, HUB_DEFAULTS.len() + 1), HUB_DEFAULTS[1], "läuft im Kreis");
+        assert_eq!(nth(Area::Expert, 3), EXPERT_DEFAULTS[3]);
     }
 
     #[test]
@@ -470,7 +543,7 @@ mod tests {
         assert!(move_before(&mut v, 1, 3));
         assert_eq!(v, [1, 3, 2, 4]);
         assert!(!move_before(&mut v, 1, 1) && !move_before(&mut v, 1, 2) && !move_before(&mut v, 9, 0));
-        let full: Vec<PaletteColor> = SHARED_DEFAULTS.iter().map(|h| PaletteColor::new(h)).collect();
+        let full = list_of(&SHARED_DEFAULTS);
         let s = suggest_new(&full, &SHARED_DEFAULTS);
         assert!(normalize_hex(&s).is_some() && !SHARED_DEFAULTS.contains(&s.as_str()));
         assert_eq!(suggest_new(&full[1..], &SHARED_DEFAULTS), SHARED_DEFAULTS[0]);

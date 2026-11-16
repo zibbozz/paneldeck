@@ -1259,7 +1259,7 @@ impl TasksUi {
                         ui.horizontal(|ui| {
                             ui.add_space(28.0);
                             ui.vertical(|ui| {
-                                if let Some(c) = super::palette_ui::pick(ui, ("todo_tag_color", t.id), crate::palette::Area::Todo, Some(&t.color), super::palette_ui::Look::Circle, 12, lang) {
+                                if let Some(c) = super::palette_ui::pick(ui, ("todo_tag_color", t.id), crate::palette::Area::Todo, Some(&t.color), super::palette_ui::PickOpts::TODO, lang) {
                                     recolor.push((t.id, c));
                                     mgr.picker = None;
                                 }

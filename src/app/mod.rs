@@ -2203,9 +2203,9 @@ impl App {
                             }
                         });
                     }
-                    ui.menu_button(lang.t("Farbe", "Color"), |ui| {
+                    palette_ui::color_menu(ui, lang.t("Farbe", "Color"), |ui| {
                         let cur = crate::palette::hex_of(c);
-                        if let Some(h) = palette_ui::pick(ui, ("project_color", id), crate::palette::Area::Hub, Some(&cur), palette_ui::Look::Square, 10, lang) {
+                        if let Some(h) = palette_ui::pick(ui, ("project_color", id), crate::palette::Area::Hub, Some(&cur), palette_ui::PickOpts::HUB, lang) {
                             actions.push(Action::SetProjectColor(id, crate::palette::rgb(&h)));
                             ui.close();
                         }

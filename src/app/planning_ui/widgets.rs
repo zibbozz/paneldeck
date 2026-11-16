@@ -213,8 +213,8 @@ pub fn swatch(ui: &mut Ui, id: Id, color: Color32, size: f32) -> Response {
 pub fn palette_and_hex(ui: &mut Ui, salt: impl Hash, hex: &mut String, lang: Lang) -> bool {
     let salt = Id::new(salt);
     let mut changed = false;
-    // Palette des Expertenmodus (Tooltip mit Name und Wert) und „Eigene Farbe …“.
-    if let Some(c) = crate::app::palette_ui::pick(ui, salt, crate::palette::Area::Expert, Some(hex), crate::app::palette_ui::Look::Circle, 7, lang) {
+    // Palette des Expertenmodus (Tooltip mit Name und Wert); freie Farben über das Hex-Feld darunter.
+    if let Some(c) = crate::app::palette_ui::pick(ui, salt, crate::palette::Area::Expert, Some(hex), crate::app::palette_ui::PickOpts::EXPERT_WITH_HEX, lang) {
         *hex = c;
         ui.data_mut(|d| d.remove_temp::<String>(salt.with("hexbuf")));
         changed = true;
