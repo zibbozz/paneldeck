@@ -19,10 +19,16 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - The close confirmation now enables *Close* after a 3-second wait; Enter only confirms after the countdown, and Esc/Enter in the dialog no longer reach the terminal behind it.
 - A folder's *Close all sessions …* opens a confirmation with a list instead of the double-click button.
+- Restoring a minimized session (sidebar click, palette "Switch to", MCP `focus_session`) now opens it alone: it replaces the layout of the window/project and the panes that were visible become minimized sessions that keep running. Ctrl+Shift+W only minimizes; the old place in the split is no longer remembered (#162).
+
+### Deprecated
+
+- `state.json`: the `slot` field of minimized sessions (2.2.0) is no longer used or created; an existing value is passed through unchanged and dropped once the session is minimized or shown again. It will be removed in 3.0.0.
 
 ### Fixed
 
 - A middle-click with a slight mouse movement no longer starts dragging a session or folder.
+- A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
 
 ## [2.2.0] - 2026-11-16
 
