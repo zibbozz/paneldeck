@@ -603,7 +603,7 @@ impl App {
             }
         }
         for (id, e) in &self.entries {
-            // Minimierte Sitzungen: „Wechseln zu“ holt sie an ihren Platz zurück (siehe `App::activate`).
+            // Minimierte Sitzungen: „Wechseln zu“ öffnet sie allein, die sichtbaren Bereiche werden minimiert (`App::activate`).
             let hint = if e.meta.minimized {
                 let m = lang.t("minimiert", "minimized");
                 if e.meta.group.is_empty() { m.to_string() } else { format!("{} · {m}", e.meta.group) }
