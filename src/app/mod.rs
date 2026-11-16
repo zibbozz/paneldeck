@@ -335,7 +335,8 @@ enum Action {
     Close(u64),
     Split(u64, Dir),
     SplitAt(u64, Dir, bool),
-    HidePane(u64),
+    /// Bereich minimieren: aus dem Layout nehmen, Sitzung läuft weiter (`App::minimize_pane`).
+    MinimizePane(u64),
     Focus(u64),
     /// Zur Sitzung springen (aus einem Ticket): Terminal Hub ihres Fensters zeigen und sie aktivieren.
     JumpTo(u64),
@@ -1209,14 +1210,16 @@ impl App {
     /// Layout/Fokus des aktiven Projekts übernehmen (nur gültige Sitzungen des Projekts).
     fn load_project_view(&mut self, layout: Option<Node>, focused: u64) {
         let pid = self.active_project;
-        let ok = |id: &u64, s: &App| s.entries.get(id).is_some_and(|e| e.meta.project == pid && s.in_win(e));
-        self.layout = layout.filter(|l| {
-            let mut v = Vec::new();
-            l.leaves(&mut v);
-            !v.is_empty() && v.iter().all(|id| ok(id, self))
+        // Unbekannte, fremde, abgedockte oder doppelte Blätter fallen weg; der Rest des Layouts bleibt (früher wurde ein
+        // Layout mit nur einem ungültigen Blatt ganz verworfen).
+        let layout = layout.and_then(|l| {
+            let (entries, detached, win) = (&self.entries, &self.detached, self.wins.cur);
+            l.normalize(|id| entries.get(&id).is_some_and(|e| e.meta.project == pid && e.meta.window == win) && !detached.contains(&id))
         });
+        self.layout = layout;
         if self.layout.is_none() {
-            if let Some(first) = self.docked_ids().first().copied() {
+            // Kein Layout: die erste nicht minimierte Sitzung zeigen; sind alle minimiert, bleibt der leere Hub.
+            if let Some(first) = self.unminimized_docked().first().copied() {
                 self.layout = Some(Node::Leaf(first));
             }
         }
@@ -1254,6 +1257,15 @@ impl App {
     /// Sitzungen des Projekts, die nicht abgedockt sind (dürfen ins Hauptlayout).
     fn docked_ids(&self) -> Vec<u64> {
         self.project_ids().into_iter().filter(|i| !self.detached.contains(i)).collect()
+    }
+
+    /// Wie `docked_ids`, ohne minimierte Sitzungen (die kommen nur zurück, wenn man sie holt).
+    fn unminimized_docked(&self) -> Vec<u64> {
+        self.docked_ids().into_iter().filter(|i| !self.is_minimized(*i)).collect()
+    }
+
+    fn is_minimized(&self, id: u64) -> bool {
+        self.entries.get(&id).is_some_and(|e| e.meta.minimized)
     }
 
     fn switch_project(&mut self, id: u64) {
@@ -1636,29 +1648,46 @@ impl App {
         }
     }
 
+    /// Sitzung zeigen und fokussieren (Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`, Strg+Tab …).
+    /// Steht sie nicht im Layout, gilt:
+    /// 1. leerer Hub → sie wird der einzige Bereich;
+    /// 2. minimiert und ihr Platz ist noch da → genau dort wieder einfügen (neben denselben Geschwistern, gleiche Richtung,
+    ///    Seite und Größe – `Node::insert_at_slot`);
+    /// 3. minimiert, aber die Geschwister sind weg → den fokussierten Bereich rechts teilen;
+    /// 4. sonst (nur weggewechselt, nie minimiert) → den fokussierten Bereich ersetzen, wie bisher.
     fn activate(&mut self, id: u64) {
+        let Some(e) = self.entries.get_mut(&id) else { return };
+        e.attention = false;
+        let minimized = std::mem::take(&mut e.meta.minimized);
+        let slot = e.meta.slot.take();
         // Eine Sitzung darf nie gleichzeitig abgedockt und im Hauptlayout sein (zwei Größen kämpften um die PTY).
         self.detached.retain(|d| *d != id);
-        match &mut self.layout {
-            None => self.layout = Some(Node::Leaf(id)),
-            Some(l) => {
-                if !l.contains(id) {
-                    l.replace_leaf(self.focused, id);
-                    if !l.contains(id) {
-                        // fokussierter Bereich unbekannt → erstes Blatt ersetzen
-                        let mut v = Vec::new();
-                        l.leaves(&mut v);
-                        if let Some(first) = v.first() {
-                            l.replace_leaf(*first, id);
-                        }
-                    }
-                }
-            }
-        }
+        crate::layout::show(&mut self.layout, id, self.focused, minimized, slot.as_ref());
         self.focused = id;
         self.want_focus = Some(id);
+    }
+
+    /// Bereich minimieren: die Sitzung verlässt das Layout (ihr Platz wird gemerkt), läuft aber weiter und bleibt in der
+    /// Seitenleiste (abgeblendet). Auch der letzte Bereich darf gehen – dann bleibt der leere Hub. Ein abgedocktes Fenster
+    /// schließt sich dabei, ohne die Sitzung wieder anzudocken.
+    fn minimize_pane(&mut self, id: u64) {
+        if !self.entries.contains_key(&id) {
+            return;
+        }
+        let mut slot = None;
+        if self.detached.contains(&id) {
+            self.detached.retain(|d| *d != id);
+        } else {
+            let Some((s, focus)) = crate::layout::minimize(&mut self.layout, id, self.focused) else { return }; // schon draußen
+            slot = s;
+            if focus != self.focused {
+                self.focused = focus;
+                self.want_focus = Some(focus);
+            }
+        }
         if let Some(e) = self.entries.get_mut(&id) {
-            e.attention = false;
+            e.meta.minimized = true;
+            e.meta.slot = slot;
         }
     }
 
@@ -1701,12 +1730,9 @@ impl App {
             self.layout = l.remove_leaf(id);
         }
         if self.focused == id {
-            if let Some(l) = &self.layout {
-                let mut v = Vec::new();
-                l.leaves(&mut v);
-                self.focused = v.first().copied().unwrap_or(0);
-                self.want_focus = Some(self.focused);
-            }
+            // Fokus nie auf einer Sitzung außerhalb des Layouts lassen (auch nicht, wenn nichts mehr übrig ist).
+            self.focused = self.layout.as_ref().map(|l| l.leaf_ids()[0]).unwrap_or(0);
+            self.want_focus = Some(self.focused);
         }
     }
 
@@ -1720,14 +1746,16 @@ impl App {
         // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
         chatmod::store::remove(&self.dir, id);
         if self.layout.is_none() {
-            if let Some(first) = self.docked_ids().first().copied() {
+            // Letzter Bereich geschlossen: eine andere (nicht minimierte) Sitzung zeigen, sonst leerer Hub.
+            if let Some(first) = self.unminimized_docked().first().copied() {
                 self.activate(first);
             }
         }
     }
 
+    /// Strg+Tab: reihum durch die Sitzungen (minimierte bleiben draußen, bis man sie gezielt holt).
     fn cycle(&mut self, delta: i32) {
-        let ids: Vec<u64> = self.docked_ids();
+        let ids: Vec<u64> = self.unminimized_docked();
         if ids.is_empty() {
             return;
         }
@@ -1886,7 +1914,7 @@ impl App {
                 "new" => Action::NewQuick,
                 "split_r" => Action::Split(f, Dir::Horizontal),
                 "split_d" => Action::Split(f, Dir::Vertical),
-                "hide" => Action::HidePane(f),
+                "hide" => Action::MinimizePane(f),
                 "rename" => Action::StartRename(f),
                 "palette" => Action::OpenPalette,
                 "search" => Action::OpenSearch,
@@ -1936,7 +1964,7 @@ impl App {
             }
         }
         {
-            let n = self.layout.as_ref().map(|l| { let mut v = Vec::new(); l.leaves(&mut v); v.len() }).unwrap_or(0);
+            let n = self.layout.as_ref().map(Node::leaf_count).unwrap_or(0);
             egui::TopBottomPanel::top(style::salted(Id::new("bcbar")))
                 .frame(egui::Frame::NONE.fill(Color32::from_rgb(0x8a, 0x4b, 0x2f)).inner_margin(egui::Margin::symmetric(10, 4)))
                 .show_animated(ctx, self.broadcast, |ui| {
@@ -1957,6 +1985,7 @@ impl App {
         }
 
         self.pane_rects.clear();
+        let hide_key = self.binding_text("hide");
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme.bg))
             .show(ctx, |ui| {
@@ -1986,6 +2015,7 @@ impl App {
                     profiles: &self.settings.profiles,
                     tl: &self.tlinks,
                     alt_wheel: self.settings.alt_screen_wheel,
+                    hide_key: &hide_key,
                 };
                 show_node(ui, &mut layout, rect, &mut cx);
                 self.layout = Some(layout);
@@ -2844,6 +2874,11 @@ impl App {
                 if self.entries.contains_key(&id) && !self.detached.contains(&id) {
                     self.hide_pane(id);
                     self.detached.push(id);
+                    // In einem eigenen Fenster ist sie sichtbar, also nicht mehr minimiert.
+                    if let Some(e) = self.entries.get_mut(&id) {
+                        e.meta.minimized = false;
+                        e.meta.slot = None;
+                    }
                 }
             }
             Action::Attach(id) => {
@@ -3161,13 +3196,7 @@ impl App {
             Action::Close(id) => self.close_session(id),
             Action::Split(id, dir) => self.split_at(ctx, id, dir, false),
             Action::SplitAt(id, dir, before) => self.split_at(ctx, id, dir, before),
-            Action::HidePane(id) => {
-                // Das letzte sichtbare Terminal bleibt stehen.
-                let n = self.layout.as_ref().map(|l| { let mut v = Vec::new(); l.leaves(&mut v); v.len() }).unwrap_or(0);
-                if n > 1 {
-                    self.hide_pane(id);
-                }
-            }
+            Action::MinimizePane(id) => self.minimize_pane(id),
             Action::NewQuick => {
                 self.new_session(ctx, NewOpts::default());
             }
@@ -3312,11 +3341,34 @@ struct PaneCx<'a> {
     tl: &'a terminal_links::TLinks,
     /// Einstellung „Mausrad in Vollbildprogrammen“.
     alt_wheel: state::AltScreenWheel,
+    /// Kürzel „Bereich minimieren“ für den Tooltip (eigene Belegung, Sprache).
+    hide_key: &'a str,
 }
 
 
 const GAP: f32 = 6.0;
 const HEADER_H: f32 = 30.0;
+/// Kleinste Breite/Höhe eines Bereichs, solange der Platz reicht (Kopfzeile und ein paar Zeilen/Spalten bleiben sichtbar).
+const MIN_PANE_W: f32 = 120.0;
+const MIN_PANE_H: f32 = HEADER_H + 40.0;
+
+/// Pixel der ersten Seite einer Teilung der Länge `len` (ohne Trennlinie): Anteil `ratio` (begrenzt, NaN → Mitte), dabei
+/// beide Seiten mindestens `min`, solange `len` dafür reicht – sonst einfach halbe-halbe nach Anteil.
+fn split_px(len: f32, ratio: f32, min: f32) -> f32 {
+    let len = len.max(0.0);
+    let px = (len * crate::layout::clamp_ratio(ratio)).round();
+    if len >= 2.0 * min { px.clamp(min, len - min) } else { px }
+}
+
+/// Neuer Anteil nach dem Ziehen der Trennlinie um `delta` Pixel: begrenzt auf `RATIO_MIN..RATIO_MAX` und so, dass keine
+/// Seite unter `min` Pixel fällt (soweit der Platz reicht). Bei einer Länge ≤ 0 (Fenster minimiert) bleibt er.
+fn drag_ratio(ratio: f32, delta: f32, len: f32, min: f32) -> f32 {
+    if len <= 1.0 || !delta.is_finite() {
+        return crate::layout::clamp_ratio(ratio);
+    }
+    let r = crate::layout::clamp_ratio(ratio + delta / len);
+    if len >= 2.0 * min { r.clamp(min / len, 1.0 - min / len) } else { r }
+}
 
 fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
     style::mix(a, b, t)
@@ -3329,7 +3381,7 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
             let (ra, rsep, rb) = match dir {
                 Dir::Horizontal => {
                     let w = rect.width() - GAP;
-                    let wa = (w * *ratio).round();
+                    let wa = split_px(w, *ratio, MIN_PANE_W);
                     (
                         Rect::from_min_size(rect.min, Vec2::new(wa, rect.height())),
                         Rect::from_min_size(Pos2::new(rect.min.x + wa, rect.min.y), Vec2::new(GAP, rect.height())),
@@ -3338,7 +3390,7 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
                 }
                 Dir::Vertical => {
                     let h = rect.height() - GAP;
-                    let ha = (h * *ratio).round();
+                    let ha = split_px(h, *ratio, MIN_PANE_H);
                     (
                         Rect::from_min_size(rect.min, Vec2::new(rect.width(), ha)),
                         Rect::from_min_size(Pos2::new(rect.min.x, rect.min.y + ha), Vec2::new(rect.width(), GAP)),
@@ -3359,11 +3411,12 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
             }
             if resp.dragged() {
                 let d = resp.drag_delta();
-                match dir {
-                    Dir::Horizontal => *ratio += d.x / (rect.width() - GAP).max(1.0),
-                    Dir::Vertical => *ratio += d.y / (rect.height() - GAP).max(1.0),
-                }
-                *ratio = ratio.clamp(0.1, 0.9);
+                // Von der gezeichneten Lage aus ziehen (die kann wegen der Mindestgröße vom gespeicherten Anteil abweichen).
+                let (delta, len, min, cur) = match dir {
+                    Dir::Horizontal => (d.x, rect.width() - GAP, MIN_PANE_W, ra.width()),
+                    Dir::Vertical => (d.y, rect.height() - GAP, MIN_PANE_H, ra.height()),
+                };
+                *ratio = drag_ratio(cur / len.max(1.0), delta, len, min);
             }
             let hv = style::anim(ui.ctx(), sep_id.with("h"), resp.hovered() || resp.dragged(), style::D_FAST);
             ui.painter().rect_filled(rsep, 0.0, ui.visuals().panel_fill);
@@ -3413,14 +3466,16 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if hresp.clicked() {
         cx.actions.push(Action::Focus(id));
     }
-    if tl_enabled {
-        hresp.context_menu(|ui| {
-            if ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
-                cx.actions.push(Action::LinkTicket(id));
-                ui.close();
-            }
-        });
-    }
+    hresp.context_menu(|ui| {
+        if ui.button(lang.t("Bereich minimieren", "Minimize pane")).clicked() {
+            cx.actions.push(Action::MinimizePane(id));
+            ui.close();
+        }
+        if tl_enabled && ui.button(lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
+            cx.actions.push(Action::LinkTicket(id));
+            ui.close();
+        }
+    });
     let claude = entry.meta.claude && cx.claude_mode;
     let status_label = entry.status_label(lang);
     let status_col = entry.status_color(t);
@@ -3437,9 +3492,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
-    // Breite des Knopfbereichs rechts: vier Knöpfe, mit Ticket-Verknüpfung ein fünfter.
+    // Breite des Knopfbereichs rechts: fünf Knöpfe (abgedockt zwei), mit Ticket-Verknüpfung einer mehr.
     let tl_btn = tl_enabled;
-    let btns_w = if cx.detached { 30.0 } else { 104.0 + if tl_btn { 26.0 } else { 0.0 } };
+    let btns_w = if cx.detached { 52.0 } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } };
     let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
     let chips = cx.tl.chips_of(id);
@@ -3502,10 +3557,18 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                     if style::icon_btn_small(ui, SIcon::Close, lang.t("Wieder andocken (Strg+Umschalt+W)", "Dock back (Ctrl+Shift+W)")).clicked() {
                         cx.actions.push(Action::Attach(id));
                     }
+                    if style::icon_btn_small(ui, SIcon::Collapse, lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)")).clicked() {
+                        cx.actions.push(Action::MinimizePane(id));
+                    }
                     return;
                 }
-                if style::icon_btn_small(ui, SIcon::Close, lang.t("Sitzung schließen (Strg+Umschalt+W blendet nur den Bereich aus)", "Close session (Ctrl+Shift+W only hides the pane)")).clicked() {
+                if style::icon_btn_small(ui, SIcon::Close, lang.t("Sitzung schließen", "Close session")).clicked() {
                     cx.actions.push(Action::RequestClose(id));
+                }
+                let tip = lang.t("Bereich minimieren – die Sitzung läuft weiter, ein Klick in der Seitenleiste holt sie zurück", "Minimize pane – the session keeps running, click it in the sidebar to bring it back");
+                let tip = if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) };
+                if style::icon_btn_small(ui, SIcon::Collapse, &tip).clicked() {
+                    cx.actions.push(Action::MinimizePane(id));
                 }
                 if style::icon_btn_small(ui, SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window")).clicked() {
                     cx.actions.push(Action::Detach(id));
@@ -3820,6 +3883,160 @@ fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
     {
         let _ = (shell, cwd);
         state::t("Start als Administrator wird nur unter Windows unterstützt.", "Starting as administrator is only supported on Windows.").to_string()
+    }
+}
+
+#[cfg(test)]
+mod pane_tests {
+    use super::*;
+    use eframe::egui::{Event, PointerButton, RawInput};
+
+    #[test]
+    fn split_px_keeps_a_minimum_size_and_survives_nan() {
+        assert_eq!(split_px(1000.0, 0.5, 120.0), 500.0);
+        assert_eq!(split_px(1000.0, 0.1, 120.0), 120.0, "nicht schmaler als die Mindestbreite");
+        assert_eq!(split_px(1000.0, 0.9, 120.0), 880.0);
+        assert_eq!(split_px(1000.0, f32::NAN, 120.0), 500.0);
+        assert_eq!(split_px(200.0, 0.1, 120.0), 20.0, "zu wenig Platz für beide: nach Anteil");
+        assert_eq!(split_px(-5.0, 0.5, 120.0), 0.0);
+        // Ziehen: Grenzen, Mindestgröße, nichts bei Länge 0 / NaN
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(near(drag_ratio(0.5, -1000.0, 1000.0, 120.0), 0.12));
+        assert!(near(drag_ratio(0.5, 1000.0, 1000.0, 120.0), 0.88));
+        assert!(near(drag_ratio(0.5, 100.0, 1000.0, 120.0), 0.6));
+        assert_eq!(drag_ratio(0.5, 100.0, 0.0, 120.0), 0.5, "minimiertes Fenster");
+        assert_eq!(drag_ratio(0.4, f32::NAN, 1000.0, 120.0), 0.4);
+        assert_eq!(drag_ratio(0.5, -1000.0, 100.0, 120.0), crate::layout::RATIO_MIN);
+    }
+
+    struct H {
+        ctx: egui::Context,
+        time: f64,
+        entries: BTreeMap<u64, Entry>,
+        rects: HashMap<u64, Rect>,
+        actions: Vec<Action>,
+    }
+
+    impl H {
+        fn new(ids: &[(u64, bool)]) -> H {
+            let mut entries = BTreeMap::new();
+            for (id, chat) in ids {
+                let meta = SessionMeta { id: *id, name: format!("s{id}"), custom_name: true, kind: if *chat { SessionKind::Chat } else { SessionKind::Terminal }, ..SessionMeta::default() };
+                let e = if *chat { Entry::new_chat(meta, ChatState::new(chatmod::ChatFile::default(), None)) } else { Entry::new(meta) };
+                entries.insert(*id, e);
+            }
+            H { ctx: egui::Context::default(), time: 0.0, entries, rects: HashMap::new(), actions: Vec::new() }
+        }
+
+        fn frame(&mut self, layout: &mut Node, detached: bool, events: Vec<Event>) {
+            self.time += 0.1;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 700.0))), time: Some(self.time), events, ..Default::default() };
+            let theme = crate::theme::all().remove(0);
+            let font = FontId::monospace(13.0);
+            let (usage, git, tl) = (UsageWatcher::default(), GitWatcher::default(), terminal_links::TLinks::default());
+            let (mut want, mut dragging) = (None, None);
+            let mut rects = HashMap::new();
+            let mut acts = Vec::new();
+            let entries = &mut self.entries;
+            let _ = self.ctx.run(input, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    let mut cx = PaneCx {
+                        entries,
+                        theme: &theme,
+                        font: &font,
+                        focused: 1,
+                        want_focus: &mut want,
+                        actions: &mut acts,
+                        lang: Lang::En,
+                        claude_mode: false,
+                        rects: &mut rects,
+                        broadcast: false,
+                        usage: &usage,
+                        git: &git,
+                        dragging: &mut dragging,
+                        detached,
+                        themes: &[],
+                        profiles: &[],
+                        tl: &tl,
+                        alt_wheel: Default::default(),
+                        hide_key: "Ctrl+Shift+W",
+                    };
+                    if detached {
+                        show_pane(ui, layout.leaf_ids()[0], rect, &mut cx);
+                    } else {
+                        show_node(ui, layout, rect, &mut cx);
+                    }
+                });
+            });
+            self.rects = rects;
+            self.actions.extend(acts);
+        }
+
+        fn click(&mut self, layout: &mut Node, detached: bool, p: Pos2) {
+            let btn = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+            self.frame(layout, detached, vec![Event::PointerMoved(p)]);
+            self.frame(layout, detached, vec![btn(true)]);
+            self.frame(layout, detached, vec![btn(false)]);
+        }
+    }
+
+    /// Mitte des n-ten Kopfzeilenknopfs von rechts (0 = Schließen/Andocken, 1 = Minimieren).
+    fn header_btn(r: Rect, n: usize) -> Pos2 {
+        Pos2::new(r.max.x - 4.0 - 11.0 - 22.0 * n as f32, r.min.y + 2.0 + (HEADER_H - 2.0) / 2.0)
+    }
+
+    #[test]
+    fn the_minimize_button_minimizes_terminals_and_chats() {
+        let mut h = H::new(&[(1, false), (2, true)]);
+        let mut layout = Node::grid(&[1, 2], Dir::Horizontal).unwrap();
+        h.frame(&mut layout, false, vec![]);
+        h.frame(&mut layout, false, vec![]);
+        for id in [1u64, 2] {
+            let r = h.rects[&id];
+            h.actions.clear();
+            h.click(&mut layout, false, header_btn(r, 1));
+            assert!(h.actions.iter().any(|a| matches!(a, Action::MinimizePane(x) if *x == id)), "{id}: Minimieren");
+            assert!(!h.actions.iter().any(|a| matches!(a, Action::RequestClose(_))), "{id}: nicht schließen");
+            h.actions.clear();
+            h.click(&mut layout, false, header_btn(r, 0));
+            assert!(h.actions.iter().any(|a| matches!(a, Action::RequestClose(x) if *x == id)), "{id}: X schließt weiterhin");
+        }
+    }
+
+    #[test]
+    fn a_detached_window_has_dock_back_and_minimize() {
+        let mut h = H::new(&[(1, false)]);
+        let mut layout = Node::Leaf(1);
+        h.frame(&mut layout, true, vec![]);
+        h.frame(&mut layout, true, vec![]);
+        let r = h.rects[&1];
+        h.click(&mut layout, true, header_btn(r, 1));
+        assert!(h.actions.iter().any(|a| matches!(a, Action::MinimizePane(1))));
+        h.actions.clear();
+        h.click(&mut layout, true, header_btn(r, 0));
+        assert!(h.actions.iter().any(|a| matches!(a, Action::Attach(1))));
+    }
+
+    #[test]
+    fn panes_of_a_deep_split_keep_a_minimum_size() {
+        // 6 Bereiche nebeneinander mit lauter 0.1-Anteilen: alle bleiben mindestens MIN_PANE_W breit
+        let mut layout = Node::Leaf(6);
+        for id in (1..6).rev() {
+            layout = Node::Split { dir: Dir::Horizontal, ratio: 0.9, a: Box::new(layout), b: Box::new(Node::Leaf(id)) };
+        }
+        let ids: Vec<(u64, bool)> = (1..=6).map(|i| (i, false)).collect();
+        let mut h = H::new(&ids);
+        h.frame(&mut layout, false, vec![]);
+        assert_eq!(h.rects.len(), 6);
+        for (id, r) in &h.rects {
+            assert!(r.width() >= MIN_PANE_W - 0.5, "{id}: {}", r.width());
+            assert!(r.width().is_finite() && r.height() > 0.0);
+        }
+        // Unsinniger Anteil (z. B. aus einer alten Datei, ohne Normalisierung): zeichnet trotzdem sinnvoll
+        let mut bad = Node::Split { dir: Dir::Vertical, ratio: f32::NAN, a: Box::new(Node::Leaf(1)), b: Box::new(Node::Leaf(2)) };
+        h.frame(&mut bad, false, vec![]);
+        assert!((h.rects[&1].height() - h.rects[&2].height()).abs() <= 1.0, "NaN → halbe-halbe");
     }
 }
 

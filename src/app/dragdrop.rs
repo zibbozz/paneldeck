@@ -306,6 +306,7 @@ impl App {
                         profiles: &self.settings.profiles,
                         tl: &self.tlinks,
                         alt_wheel: self.settings.alt_screen_wheel,
+                        hide_key: "",
                     };
                     show_pane(ui, id, rect, &mut cx);
                 });

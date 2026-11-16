@@ -179,15 +179,10 @@ pub(super) fn swap_project_views(projects: &mut [Project], stash: &mut Vec<(u64,
     *stash = out;
 }
 
-/// Blätter entfernen, die nicht (mehr) in die Ansicht gehören; `None`, wenn nichts übrig bleibt.
+/// Blätter entfernen, die nicht (mehr) in die Ansicht gehören, dazu doppelte; Anteile begrenzen (`Node::normalize`).
+/// `None`, wenn nichts übrig bleibt. Ist schon alles in Ordnung, bleibt der Baum unangetastet.
 pub(super) fn prune_layout(layout: Node, ok: impl Fn(u64) -> bool) -> Option<Node> {
-    let mut leaves = Vec::new();
-    layout.leaves(&mut leaves);
-    let mut l = Some(layout);
-    for id in leaves.into_iter().filter(|id| !ok(*id)) {
-        l = l.and_then(|n| n.remove_leaf(id));
-    }
-    l
+    if layout.is_normal(&ok) { Some(layout) } else { layout.normalize(ok) }
 }
 
 /// Paneldeck-Fenster im Vordergrund (0 = Hauptfenster), `None` = keins. Einmal je Bild zu Beginn des Hauptbildes bestimmt
@@ -600,6 +595,15 @@ impl App {
             let entries = &self.entries;
             let detached = &self.detached;
             self.layout = prune_layout(l, |id| entries.get(&id).is_some_and(|e| e.meta.project == pid && e.meta.window == win) && !detached.contains(&id));
+        }
+        // Was im Layout steht, ist nicht minimiert – egal, wie es hineinkam (Ziehen, Ordner-Layout, Vorlage …).
+        if let Some(l) = &self.layout {
+            for id in l.leaf_ids() {
+                if let Some(e) = self.entries.get_mut(&id).filter(|e| e.meta.minimized || e.meta.slot.is_some()) {
+                    e.meta.minimized = false;
+                    e.meta.slot = None;
+                }
+            }
         }
         let ok = self.layout.as_ref().is_some_and(|l| l.contains(self.focused));
         if !ok {
@@ -1057,6 +1061,14 @@ mod tests {
         let kept = prune_layout(l, |id| id % 2 == 0);
         assert_eq!(leaves(&kept), vec![2, 4]);
         assert!(prune_layout(Node::Leaf(5), |_| false).is_none(), "nichts übrig → kein Layout (leerer Hub)");
+        // doppelte Blätter (dieselbe Sitzung zweimal) und unsinnige Anteile werden bereinigt
+        let dup = Node::Split { dir: Dir::Vertical, ratio: f32::NAN, a: Box::new(Node::Leaf(2)), b: Box::new(Node::grid(&[2, 4], Dir::Horizontal).unwrap()) };
+        let kept = prune_layout(dup, |_| true).unwrap();
+        assert_eq!(kept.leaf_ids(), vec![2, 4]);
+        assert!(kept.is_normal(|_| true));
+        // schon in Ordnung → derselbe Baum
+        let ok = Node::grid(&[1, 2, 3], Dir::Horizontal).unwrap();
+        assert_eq!(prune_layout(ok.clone(), |_| true), Some(ok));
     }
 
     #[test]

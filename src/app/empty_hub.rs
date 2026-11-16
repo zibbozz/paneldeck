@@ -19,6 +19,8 @@ pub(super) enum EmptyKind {
     Window,
     /// Im aktiven Projekt dieses Fensters ist keine Sitzung.
     Project,
+    /// Es gibt Sitzungen, aber alle Bereiche sind minimiert (sie laufen weiter, stehen in der Seitenleiste).
+    Minimized,
 }
 
 /// Überschrift für Fenster `window`: `any_session` = irgendeine Sitzung in irgendeinem Fenster, `in_window` = eine in diesem.
@@ -51,9 +53,15 @@ pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool
                 EmptyKind::Welcome => lang.t("Willkommen bei Paneldeck", "Welcome to Paneldeck"),
                 EmptyKind::Window => lang.t("Noch keine Sitzung in diesem Fenster", "No session in this window yet"),
                 EmptyKind::Project => lang.t("Keine Sitzung in diesem Projekt", "No session in this project"),
+                EmptyKind::Minimized => lang.t("Alle Bereiche sind minimiert", "All panes are minimized"),
             });
             ui.add_space(S1);
-            ui.label(RichText::new(lang.t("Starte ein Terminal oder eine Claude-Sitzung – alles an einem Ort.", "Start a terminal or a Claude session – all in one place.")).color(style::dim(ui)));
+            let sub = if kind == EmptyKind::Minimized {
+                lang.t("Die Sitzungen laufen weiter – ein Klick in der Seitenleiste holt eine zurück.", "The sessions keep running – click one in the sidebar to bring it back.")
+            } else {
+                lang.t("Starte ein Terminal oder eine Claude-Sitzung – alles an einem Ort.", "Start a terminal or a Claude session – all in one place.")
+            };
+            ui.label(RichText::new(sub).color(style::dim(ui)));
             ui.add_space(S3);
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - if claude_mode { 450.0 } else { 300.0 }) / 2.0);
@@ -94,6 +102,9 @@ pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool
 impl App {
     /// Kürzel für den leeren Hub (folgen eigenen Belegungen und der Sprache).
     pub(super) fn empty_heading(&self) -> EmptyKind {
+        if !self.docked_ids().is_empty() {
+            return EmptyKind::Minimized; // Sitzungen dieses Projekts/Fensters da, aber keine im Layout
+        }
         empty_kind(self.wins.cur, !self.entries.is_empty(), self.entries.values().any(|e| self.in_win(e)))
     }
 
