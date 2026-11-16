@@ -12,6 +12,10 @@
   (Typ Task mit Workflow, Pflichtfeld "Area", Übergangsregel "Result", Dropdown "Priority") und dem Expertenmodus präpariert.
   Mit -Visible zusätzlich: Screenshot-Werkzeug (braucht ein sichtbares Fenster).
   Es werden weder Maus noch Tastatur benutzt.
+  Isolation (tools\test-env.ps1): Hubs, Bruecken und Terminals laufen mit Schein-Profil (USERPROFILE, HOME, APPDATA,
+  LOCALAPPDATA, CLAUDE_CONFIG_DIR unter dem Arbeitsordner), ohne CLAUDECODE/CLAUDE_*/ANTHROPIC_* und mit einem PATH, in
+  dem nur ein Ersatz-claude (fakebin\claude.cmd) liegt; das echte Claude Code wird nie gestartet. Am Ende prueft der Test,
+  dass das echte ~/.claude unberuehrt blieb.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File tools\smoke-mcp.ps1
@@ -22,7 +26,10 @@ param(
   [switch]$Visible,
   [switch]$KeepFiles,
   # Ordner fuer die Kopie der .exe und die Test-Datenordner (z. B. ein vom Virenscanner ausgenommener Ordner)
-  [string]$WorkRoot = $env:TEMP
+  [string]$WorkRoot = $env:TEMP,
+  # Schutzpruefung streng: jede Aenderung von ~/.claude.json bzw. ~/.claude/settings.json ist ein Fehler (sonst nur,
+  # wenn sie den Testordner nennt - ein gleichzeitig laufendes, echtes Claude Code schreibt ~/.claude.json laufend)
+  [switch]$StrictClaudeConfig
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -37,6 +44,38 @@ $data = "$dir\paneldeck-data"
 # jedes Terminal gesetzt) liessen die Bruecke sonst als "Sitzung 1" der Test-Instanz gelten, und die Pruefungen
 # "von aussen" schluegen fehl, wenn das Skript selbst in einem Paneldeck-Terminal laeuft.
 Get-ChildItem Env: | Where-Object { $_.Name -like 'PANELDECK_*' } | ForEach-Object { Remove-Item -LiteralPath "Env:$($_.Name)" -ErrorAction SilentlyContinue }
+# Isolation (fail closed): nie das echte Claude Code und nie das echte ~/.claude. Ab hier gelten fuer dieses Skript und damit
+# fuer jeden Hub, jede Bruecke und jedes Terminal ein Schein-Profil unter $work\profile, ein PATH ohne echtes claude und ein
+# Ersatz-claude in $work\fakebin (Aufrufe -> fakebin\calls.txt, Eingaben -> fakebin\input.txt). Siehe tools\test-env.ps1.
+. "$PSScriptRoot\test-env.ps1"
+$realHome = $env:USERPROFILE
+$realSnap = Get-RealClaudeSnapshot $realHome
+$tag = Split-Path -Leaf $work
+$fakebin = New-FakeClaudeBin "$work\fakebin"
+$calls = "$fakebin\calls.txt"; $inputs = "$fakebin\input.txt"
+$script:iso = Enter-IsolatedTestEnv $work $fakebin
+Write-Host "Isolation: USERPROFILE=$env:USERPROFILE, claude -> $((Get-Command claude -CommandType Application).Source)" -ForegroundColor DarkGray
+# Die Terminals des Hubs bekommen ihre Umgebung von portable-pty frisch aus der Registry (echter PATH mit ~/.local/bin).
+# Deshalb laeuft jede Sitzung ueber das Profil 1 "Smoke-Isolation" (Standardprofil jedes Projekts, auch jeder
+# wiederhergestellten Sitzung), dessen Variablen PATH/Profil wieder auf die Schein-Umgebung setzen. Vor jedem Hub-Start.
+$ptyEnv = Get-PtyIsolationEnv $script:iso
+function Set-IsolationProfile {
+  $u8 = New-Object Text.UTF8Encoding $false
+  $f = "$data\settings.json"
+  $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+  $p = [pscustomobject]@{ id = 1; name = 'Smoke-Isolation'; env = $ptyEnv }
+  if ($j.PSObject.Properties.Name -contains 'profiles') { $j.profiles = @($p) } else { $j | Add-Member profiles @($p) }
+  [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), $u8)
+  $sf = "$data\state.json"
+  if (Test-Path $sf) {
+    $s = [IO.File]::ReadAllText($sf).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    if (-not ($s.PSObject.Properties.Name -contains 'projects') -or -not @($s.projects).Count) { $s | Add-Member -Force projects @([pscustomobject]@{ id = 1; name = 'Standard' }) }
+    foreach ($o in @($s.projects) + @($s.sessions | Where-Object { $_ })) { $o | Add-Member -Force profile 1 }
+    [IO.File]::WriteAllText($sf, ($s | ConvertTo-Json -Depth 30), $u8)
+  } else {
+    [IO.File]::WriteAllText($sf, '{"projects":[{"id":1,"name":"Standard","profile":1}],"active_project":1,"next_id":1}', $u8)
+  }
+}
 $script:extra = @()
 $script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
@@ -57,10 +96,12 @@ function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
+  # -Empty: ohne gespeicherte Sitzungen (Set-IsolationProfile legt dann einen state.json nur mit dem Projekt an)
+  if ($Empty) { Remove-Item -LiteralPath "$data\state.json" -ErrorAction SilentlyContinue }
+  Set-IsolationProfile
   $style = if ($Visible) { 'Normal' } else { 'Minimized' }
   # Paneldeck startet ohne Terminal (#111); sonst eine Sitzung des Nutzers per --open anlegen (wie ein Start aus dem Explorer).
   if ($Empty) {
-    Remove-Item -LiteralPath "$data\state.json" -ErrorAction SilentlyContinue
     $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
   } elseif ($Tray) {
     # Vorbereiteten state.json behalten; mit --tray bleiben auch wiederhergestellte weitere Fenster verborgen (#110).
@@ -102,6 +143,22 @@ function Tool($name, $arguments = @{}, $ms = 30000) {
   } else { [pscustomobject]@{ err = $true; text = 'KEINE ANTWORT'; data = $null; raw = $r } }
 }
 function Code($r) { if ($r.err) { ($r.text -split ':')[0] } else { '' } }
+# Inhalt einer Datei des Ersatz-claude (leer, wenn es sie nicht gibt); wartet bis $ms auf $pattern.
+function Wait-FakeFile([string]$f, [string]$pattern, [int]$ms = 15000) {
+  $t0 = Get-Date
+  do {
+    $txt = if (Test-Path -LiteralPath $f) { try { [IO.File]::ReadAllText($f) } catch { '' } } else { '' }
+    if ($txt -match $pattern) { return $txt }
+    Start-Sleep -Milliseconds 250
+  } while (((Get-Date) - $t0).TotalMilliseconds -lt $ms)
+  $txt
+}
+# Jeder gefundene claude-Pfad (eine Zeile je Treffer) muss im Ersatz-Ordner liegen; mindestens einer.
+function Only-Fake([string]$out) {
+  $l = @(($out -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  $l.Count -ge 1 -and -not ($l | Where-Object { $_ -notmatch 'fakebin[\\/]claude(\.cmd)?$' })
+}
+$script:psClaudeFake = $false
 
 try {
   Write-Host "== Protokoll" -ForegroundColor Cyan
@@ -144,6 +201,16 @@ try {
     Check "create_session $sh" (-not $c.err) $c.text
     if ($c.err) { continue }
     $id = $c.data.id; Start-Sleep 4
+    # Isolation im Terminal des Hubs: `claude` darf nur der Ersatz sein.
+    $wc = switch ($sh) { 'cmd' { 'where claude' } 'gitbash' { 'type -ap claude' } default { 'Get-Command claude -All | ForEach-Object { if ($_.CommandType -in ''Application'', ''ExternalScript'') { $_.Source } else { "$($_.CommandType):$($_.Name)" } }' } }
+    $r = Tool 'run_command' @{ session = $id; command = $wc; timeout_secs = 25 }
+    Check "Isolation: claude im $sh-Terminal des Hubs ist nur der Ersatz (fakebin)" (Only-Fake $r.data.output) $r.data.output
+    if ($sh -eq 'powershell' -and $script:lastOk) {
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:USERPROFILE|$env:CLAUDE_CONFIG_DIR|" + ((Get-ChildItem Env: | Where-Object { $_.Name -match ''^(CLAUDECODE|CLAUDE_CODE_|ANTHROPIC_)'' -and $_.Value }).Name -join '','')'; timeout_secs = 25 }
+      $want = "$($script:iso.Profile)|$($script:iso.Profile)\.claude|"
+      Check 'Isolation: Terminal-Umgebung mit Schein-Profil, ohne CLAUDECODE/CLAUDE_CODE_*/ANTHROPIC_*' ($r.data.output.Trim() -eq $want) "'$($r.data.output.Trim())' statt '$want'"
+      if ($script:lastOk) { $script:psClaudeFake = $true }
+    }
     if ($sh -eq 'cmd') {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-cmd'; timeout_secs = 25 }
       Check "run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'hallo-cmd') $r.text
@@ -219,10 +286,16 @@ try {
   $o = (Tool 'run_command' @{ session = $psid; command = '"$env:PANELDECK_PORT|$env:PANELDECK_TOKEN"'; timeout_secs = 25 }).data.output.Trim()
   $port, $hookTok = $o.Split('|')
   Check 'Hook-Zugang aus der Sitzung gelesen' ($port -match '^\d+$' -and $hookTok.Length -gt 20)
-  $cs = Tool 'create_session' @{ claude = $true; cwd = "$proj"; name = 'smoke-claude' }
-  Check 'create_session claude' (-not $cs.err) $cs.text
+  # Fail closed: ohne bestaetigten Ersatz im PowerShell-Terminal des Hubs wird keine Claude-Sitzung angelegt.
+  if (-not $script:psClaudeFake) { throw 'SICHERHEIT: claude im PowerShell-Terminal des Hubs nicht als Ersatz bestaetigt - keine Claude-Sitzung' }
+  # Shell fest auf PowerShell (nie WSL: dort gaelte der Ersatz-PATH nicht).
+  $cs = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-claude' }
+  Check 'create_session claude (PowerShell, nicht WSL)' (-not $cs.err -and $cs.data.shell -notlike 'wsl*') $cs.text
   if ($script:lastOk) {
-    $cid = $cs.data.id; Start-Sleep 2
+    $cid = $cs.data.id
+    $ct = Wait-FakeFile $calls '--session-id'
+    Check 'Claude-Start erreicht den Ersatz (fakebin\calls.txt: --session-id, Hooks per --settings aus dem Test-Datenordner)' ($ct -match 'claude\.cmd' -and $ct -match '--session-id [0-9a-f-]{36}' -and $ct -match ('--settings "?[^ ]*' + [regex]::Escape($tag) + '/hub/paneldeck-data/claude-hooks\.json')) "calls.txt='$ct'"
+    Check 'Schein-Profil: keine globalen Hooks in ~/.claude/settings.json angelegt' (-not (Test-Path "$($script:iso.Profile)\.claude\settings.json"))
     function Hook($evt, $extra = @{}) {
       $body = @{ token = $hookTok; session = [uint64]$cid; payload = (@{ hook_event_name = $evt; session_id = 'smoke1' } + $extra) } | ConvertTo-Json -Compress -Depth 5
       $cl = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]$port); $st = $cl.GetStream(); $by = [Text.Encoding]::UTF8.GetBytes($body)
@@ -234,6 +307,7 @@ try {
     Check 'wait_for_status nach SessionStart' ((Tool 'wait_for_status' @{ session = $cid; status = @('ready'); timeout_secs = 5 }).data.matched -eq $true)
     $q = Tool 'queue_prompt' @{ session = $cid; prompt = 'hallo' }
     Check 'queue_prompt sendet sofort' ($q.data.sent_immediately -eq $true)
+    Check 'queue_prompt kommt beim Ersatz-claude an (fakebin\input.txt: hallo)' ((Wait-FakeFile $inputs 'hallo' 10000) -match 'hallo') "input.txt='$(Wait-FakeFile $inputs 'hallo' 1)'"
     Send-Raw (@{ jsonrpc = '2.0'; id = 900; method = 'tools/call'; params = @{ name = 'wait_for_status'; arguments = @{ session = $cid; status = @('ready'); timeout_secs = 20 } } } | ConvertTo-Json -Depth 8 -Compress)
     Start-Sleep 2; Hook 'Stop'
     $wr = (Read-Line 15000).result.structuredContent
@@ -806,6 +880,9 @@ c.close()
   Start-Sleep -Milliseconds 600
   $mn = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq 960 })
   Check 'focus_session holt die minimierte Sitzung zurueck (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
+} catch {
+  # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.
+  $script:fail++; Write-Host "  ABBRUCH  $($_.Exception.Message)" -ForegroundColor Red
 } finally {
   if ($script:fakeListener) { try { $script:fakeListener.Stop() } catch {} }
   if ($script:fakePs) {
@@ -814,7 +891,22 @@ c.close()
   }
   Stop-Hub
   foreach ($h in $script:extra) { if ($h -and -not $h.HasExited) { $h.Kill() } }
+  if (Test-Path -LiteralPath $calls) { Write-Host "Ersatz-claude, Aufrufe (fakebin\calls.txt):" -ForegroundColor DarkGray; Get-Content -LiteralPath $calls | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray } }
+  else { Write-Host "Ersatz-claude wurde nicht aufgerufen (fakebin\calls.txt fehlt)." -ForegroundColor DarkGray }
+  Exit-IsolatedTestEnv $script:iso
   if (-not $KeepFiles) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+}
+# Schutzpruefung: das echte ~/.claude des aufrufenden Nutzers muss unberuehrt sein.
+Write-Host "== Schutzpruefung: echtes ~/.claude ($realHome)" -ForegroundColor Cyan
+$guard = Test-RealClaudeUntouched $realSnap $tag -Strict:$StrictClaudeConfig
+foreach ($m in $guard.Warnings) { Write-Host "  WARNUNG  $m" -ForegroundColor Yellow }
+Check 'Echtes ~/.claude unberuehrt (kein projects-Ordner des Tests, .claude.json/settings.json ohne Testordner)' ($guard.Violations.Count -eq 0) ($guard.Violations -join '; ')
+if ($guard.Violations.Count) {
+  Write-Host ""
+  Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+  Write-Host "!!! SICHERHEIT: Der Smoke-Test hat das ECHTE Claude-Profil beruehrt:" -ForegroundColor Red
+  foreach ($m in $guard.Violations) { Write-Host "!!!   $m" -ForegroundColor Red }
+  Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
 }
 Write-Host ""
 Write-Host ("Ergebnis: {0} bestanden, {1} fehlgeschlagen, {2} uebersprungen" -f $script:pass, $script:fail, $script:skip) -ForegroundColor $(if ($script:fail -eq 0) { 'Green' } else { 'Red' })
