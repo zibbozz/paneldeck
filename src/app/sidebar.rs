@@ -408,6 +408,8 @@ impl App {
         let claude = e.meta.claude && self.settings.claude_mode;
         let focused = self.focused == id;
         let attention = e.attention || e.needs_you();
+        // Nicht im Layout (minimiert oder weggewechselt): abgeblendet; minimiert zusätzlich mit Strich-Marke.
+        let minimized = e.meta.minimized && !visible;
 
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click_and_drag());
         self.tree_geo.sess.insert(id, rect);
@@ -507,6 +509,14 @@ impl App {
         if !e.meta.tags.is_empty() {
             status_tip += &format!("\n#{}", e.meta.tags.join(" #"));
         }
+        if !visible {
+            status_tip.push('\n');
+            status_tip += if minimized {
+                lang.t("Minimiert – läuft weiter. Klicken holt den Bereich an seinen Platz zurück.", "Minimized – still running. Click to bring the pane back to where it was.")
+            } else {
+                lang.t("Nicht im Layout – klicken zeigt die Sitzung im fokussierten Bereich.", "Not in the layout – click to show it in the focused pane.")
+            };
+        }
         let status_tip = status_tip.trim().to_string();
 
         // Rechts oben: Markierungen
@@ -517,6 +527,10 @@ impl App {
         }
         if visible && !focused {
             p.rect_stroke(Rect::from_center_size(Pos2::new(mark_x - 4.0, name_y), Vec2::new(9.0, 7.0)), 1.5, Stroke::new(1.2_f32, weak_c), StrokeKind::Inside);
+            mark_x -= 18.0;
+        } else if minimized {
+            // Strich unten (wie „minimiert“), gleiche Breite wie die Marke „sichtbar“
+            p.line_segment([Pos2::new(mark_x - 8.5, name_y + 3.0), Pos2::new(mark_x + 0.5, name_y + 3.0)], Stroke::new(1.6_f32, weak_c));
             mark_x -= 18.0;
         }
         // Chip der verknüpften Tickets (links neben den Markierungen)
@@ -553,7 +567,7 @@ impl App {
                 self.want_focus = Some(self.focused);
             }
         } else {
-            let name_col = if exited { weak_c } else if focused || attention { strong_c } else { text_c };
+            let name_col = if exited || (!visible && !attention) { weak_c } else if focused || attention { strong_c } else { text_c };
             let g = p.layout_no_wrap(name, FontId::proportional(13.5), name_col);
             let mut nx = text_x;
             if claude {
@@ -626,6 +640,15 @@ impl App {
                     ui.close();
                 }
             });
+            if visible {
+                if ui.button(lang.t("Bereich minimieren", "Minimize pane")).clicked() {
+                    actions.push(Action::MinimizePane(id));
+                    ui.close();
+                }
+            } else if ui.button(lang.t("Im Layout zeigen", "Show in layout")).clicked() {
+                actions.push(Action::Activate(id));
+                ui.close();
+            }
             if ui.button(lang.t("In eigenem Fenster öffnen", "Open in own window")).clicked() {
                 actions.push(Action::Detach(id));
                 ui.close();

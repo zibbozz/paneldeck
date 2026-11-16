@@ -333,6 +333,13 @@ pub struct SessionMeta {
     /// Server und Modell eines Chats (nur bei `kind = chat`); der Verlauf steht in `chats/<id>.json`.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
     pub chat: Option<ChatMeta>,
+    /// Bereich minimiert (seit 2.2.0): die Sitzung läuft weiter, steht aber in keinem Layout, bis sie zurückgeholt wird.
+    /// Fehlt in der Datei, wenn nicht minimiert.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub minimized: bool,
+    /// Wo der minimierte Bereich stand (Geschwister, Richtung, Seite, Anteil) – dort kommt er wieder hin.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::layout::lenient_slot")]
+    pub slot: Option<crate::layout::Slot>,
 }
 
 /// Art einer Sitzung.
@@ -399,6 +406,8 @@ impl Default for SessionMeta {
             window: 0,
             kind: SessionKind::Terminal,
             chat: None,
+            minimized: false,
+            slot: None,
         }
     }
 }
@@ -413,6 +422,7 @@ pub struct Project {
     pub folder: String,
     /// Standardprofil für neue Sitzungen dieses Projekts (0 = keins)
     pub profile: u64,
+    #[serde(deserialize_with = "crate::layout::lenient")]
     pub layout: Option<Node>,
     pub focused: u64,
     /// Seitenleiste als Ordnerbaum statt als Liste anzeigen.
@@ -550,6 +560,7 @@ impl Project {
 pub struct SavedState {
     pub sessions: Vec<SessionMeta>,
     /// Alter Einzel-Layout-Stand (vor Projekten); wird beim Laden ins erste Projekt übernommen.
+    #[serde(deserialize_with = "crate::layout::lenient")]
     pub layout: Option<Node>,
     pub focused: u64,
     pub next_id: u64,
@@ -574,6 +585,7 @@ pub struct SavedWindow {
     pub tab: String,
     /// Aktives Projekt des Terminal Hubs in diesem Fenster.
     pub project: u64,
+    #[serde(deserialize_with = "crate::layout::lenient")]
     pub layout: Option<Node>,
     pub focused: u64,
     /// Layouts der übrigen Projekte in diesem Fenster.
@@ -589,6 +601,7 @@ pub struct SavedWindow {
 #[serde(default)]
 pub struct SavedProjectView {
     pub project: u64,
+    #[serde(deserialize_with = "crate::layout::lenient")]
     pub layout: Option<Node>,
     pub focused: u64,
 }
@@ -1005,5 +1018,53 @@ mod kind_tests {
         assert!(back.chat.is_none());
         let back: SessionMeta = serde_json::from_str(r#"{"id":9,"kind":7}"#).unwrap();
         assert_eq!(back.kind, SessionKind::Terminal);
+    }
+
+    #[test]
+    fn minimized_sessions_round_trip_and_old_files_load() {
+        use crate::layout::{Dir, Slot};
+        // 2.1.0: kein `minimized`/`slot` → nicht minimiert; nicht minimierte Sitzungen schreiben die Felder auch nicht
+        let old: SessionMeta = serde_json::from_str(r#"{"id":3,"name":"pwsh"}"#).unwrap();
+        assert!(!old.minimized && old.slot.is_none());
+        let s = serde_json::to_string(&old).unwrap();
+        assert!(!s.contains("minimized") && !s.contains("slot"), "{s}");
+        // minimiert mit Platz: Rundreise
+        let m = SessionMeta { id: 4, minimized: true, slot: Some(Slot { sibling: vec![1, 2], dir: Dir::Vertical, before: false, ratio: 0.3 }), ..SessionMeta::default() };
+        let back: SessionMeta = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert!(back.minimized);
+        assert_eq!(back.slot, m.slot);
+        // kaputter Platz: Sitzung bleibt (minimiert, ohne Platz)
+        let back: SessionMeta = serde_json::from_str(r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#).unwrap();
+        assert!(back.minimized && back.slot.is_none());
+    }
+
+    #[test]
+    fn broken_layouts_do_not_discard_the_state_file() {
+        use crate::layout::Node;
+        let dir = std::env::temp_dir().join(format!("pd-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        // Projekt 1: Anteil null (so schreibt serde_json ein NaN), Projekt 2: unlesbarer Knoten, Fenster: falscher Typ
+        std::fs::write(
+            &p,
+            r#"{"sessions":[{"id":1},{"id":2,"minimized":true}],"next_id":3,"active_project":1,
+                "projects":[{"id":1,"name":"A","layout":{"Split":{"dir":"Horizontal","ratio":null,"a":{"Leaf":1},"b":{"Leaf":1}}}},
+                            {"id":2,"name":"B","layout":{"Split":{"dir":"Sideways"}}}],
+                "extra_windows":[{"id":1,"layout":17,"views":[{"project":2,"layout":[1,2]}]}]}"#,
+        )
+        .unwrap();
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none(), "{note:?}");
+        assert_eq!(st.sessions.len(), 2);
+        assert!(st.sessions[1].minimized);
+        assert_eq!(st.projects.len(), 2, "Projekte bleiben erhalten");
+        match &st.projects[0].layout {
+            Some(Node::Split { ratio, .. }) => assert_eq!(*ratio, 0.5),
+            other => panic!("{other:?}"),
+        }
+        assert!(st.projects[1].layout.is_none(), "kaputtes Layout → kein Layout");
+        assert!(st.extra_windows[0].layout.is_none() && st.extra_windows[0].views[0].layout.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -24,11 +24,15 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Tool lines show their status (✓, ✗, ⊘ denied, spinner) and expand to parameters and result.
 - Setting "Mouse wheel in full-screen programs" (Settings → Appearance): send arrow keys (default, like other terminals) or nothing in full-screen programs without mouse support; stored as the optional `alt_screen_wheel` field in `settings.json`.
 - Shift+mouse wheel scrolls Paneldeck's scrollback even when the program has switched on mouse mode.
+- Panes can be minimized: a new button next to × in the pane header (also in the pane and sidebar context menus, the palette and Ctrl+Shift+W) takes the pane out of the split layout while the terminal or chat keeps running; its neighbour takes the space. Minimized sessions stay in the sidebar (dimmed, with a small marker) and come back where they were with a click in the sidebar, the palette's "Switch to" or MCP `focus_session`. The state survives a restart (new optional `state.json` session fields `minimized` and `slot`). In a detached window, Minimize closes the window without docking the session back (#142).
+- MCP `list_sessions`: new field `minimized`.
 
 ### Changed
 
 - Closing a chat that has a history asks first (when close confirmation is on), also when closing a window or a folder; the update dialog counts running chat answers separately.
 - `chats/<id>.json` has the new optional field `always_allow` (tool + session); model entries in `settings.json` have `level_chosen`; `mcp-log.jsonl` has the optional fields `how` ("chat") and `model` for tool calls from chats.
+- Ctrl+Shift+W ("Hide pane", now "Minimize pane") also works on the last pane and leaves the empty Terminal Hub, which says when all panes are minimized; Ctrl+Tab skips minimized sessions.
+- The close-window question lists sessions that will end although they are minimized or not in the layout.
 
 ### Fixed
 
@@ -36,6 +40,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - The mouse wheel sent arrow keys in full-screen programs that request mouse events in the normal or UTF-8 encoding; wheel and clicks are now reported in every mouse encoding (normal encoding up to column/row 94 because of ConPTY), and the position is right after scrolling back (#141).
 - Programs that switch off the alternate scroll mode (DECSET 1007) no longer get arrow keys from the mouse wheel.
 - When a full-screen program exits without restoring the screen (crash, dropped connection), the mouse wheel and clicks no longer send arrow keys or mouse sequences into the shell prompt (needs the shell integration).
+- A single unknown session in a saved layout no longer throws away the whole layout; duplicate panes, empty splits and invalid split ratios are repaired automatically.
+- A damaged layout or split ratio in `state.json` no longer resets all projects and windows.
+- Panes keep a minimum size in deep splits and when dragging a divider.
+- The palette showed German shortcut hints in the English UI and ignored custom shortcuts.
+- Dropping files onto the empty Terminal Hub could create an invalid pane.
 
 ## [2.1.0] - 2026-11-15
 

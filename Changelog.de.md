@@ -24,11 +24,15 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Werkzeugzeilen zeigen ihren Stand (✓, ✗, ⊘ abgelehnt, Kreisel) und lassen sich zu Parametern und Ergebnis aufklappen.
 - Einstellung „Mausrad in Vollbildprogrammen“ (Einstellungen → Darstellung): Pfeiltasten senden (Standard, wie andere Terminals) oder nichts in Vollbildprogrammen ohne Mausunterstützung; gespeichert als optionales Feld `alt_screen_wheel` in `settings.json`.
 - Umschalt+Mausrad scrollt den Verlauf von Paneldeck, auch wenn das Programm den Maus-Modus eingeschaltet hat.
+- Bereiche lassen sich minimieren: Ein neuer Knopf neben dem × in der Kopfzeile (auch im Kontextmenü des Bereichs und der Seitenleiste, in der Palette und mit Strg+Umschalt+W) nimmt den Bereich aus der Teilung, das Terminal bzw. der Chat läuft weiter; der Nachbar übernimmt den Platz. Minimierte Sitzungen bleiben in der Seitenleiste (abgeblendet, mit kleiner Marke) und kommen per Klick dort, über „Wechseln zu“ in der Palette oder MCP `focus_session` an ihren alten Platz zurück. Der Zustand übersteht einen Neustart (neue optionale Sitzungsfelder `minimized` und `slot` in `state.json`). In einem abgedockten Fenster schließt „Minimieren“ das Fenster, ohne die Sitzung wieder anzudocken (#142).
+- MCP `list_sessions`: neues Feld `minimized`.
 
 ### Changed
 
 - Ein Chat mit Verlauf fragt vor dem Schließen nach (wenn die Schließen-Bestätigung an ist), auch beim Schließen eines Fensters oder Ordners; der Update-Dialog zählt laufende Chat-Antworten getrennt.
 - `chats/<id>.json` hat das neue optionale Feld `always_allow` (Werkzeug + Sitzung); Modell-Einträge in `settings.json` haben `level_chosen`; `mcp-log.jsonl` hat die optionalen Felder `how` („chat“) und `model` für Werkzeugaufrufe aus Chats.
+- Strg+Umschalt+W („Bereich ausblenden“, jetzt „Bereich minimieren“) wirkt auch auf den letzten Bereich und lässt den leeren Terminal Hub stehen, der anzeigt, wenn alle Bereiche minimiert sind; Strg+Tab überspringt minimierte Sitzungen.
+- Die Rückfrage beim Schließen eines Fensters nennt auch Sitzungen, die beendet werden, obwohl sie minimiert sind oder nicht im Layout stehen.
 
 ### Fixed
 
@@ -36,6 +40,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Das Mausrad sendete in Vollbildprogrammen, die Mausereignisse in der normalen oder der UTF-8-Kodierung anfordern, Pfeiltasten; Mausrad und Klicks werden jetzt in jeder Maus-Kodierung gemeldet (normale Kodierung wegen ConPTY bis Spalte/Zeile 94), und die Position stimmt auch nach dem Zurückscrollen (#141).
 - Programme, die den Alternate Scroll Mode (DECSET 1007) abschalten, bekommen vom Mausrad keine Pfeiltasten mehr.
 - Beendet sich ein Vollbildprogramm, ohne den Bildschirm zurückzusetzen (Absturz, getrennte Verbindung), senden Mausrad und Klicks keine Pfeiltasten oder Maussequenzen mehr in den Shell-Prompt (benötigt die Shell-Integration).
+- Eine einzelne unbekannte Sitzung in einem gespeicherten Layout verwirft nicht mehr das ganze Layout; doppelte Bereiche, leere Teilungen und ungültige Teilungsverhältnisse werden automatisch bereinigt.
+- Ein beschädigtes Layout oder Teilungsverhältnis in `state.json` setzt nicht mehr alle Projekte und Fenster zurück.
+- Bereiche behalten bei tiefen Teilungen und beim Ziehen der Trennlinie eine Mindestgröße.
+- Die Palette zeigte in der englischen Oberfläche deutsche Kürzel und ignorierte eigene Belegungen.
+- Dateien auf den leeren Terminal Hub ziehen konnte einen ungültigen Bereich anlegen.
 
 ## [2.1.0] - 2026-11-15
 

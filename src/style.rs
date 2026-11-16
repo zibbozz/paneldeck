@@ -195,6 +195,8 @@ pub enum Icon {
     Link,
     /// Sprechblase (Chat mit einem lokalen Modell).
     Chat,
+    /// Pfeil nach unten auf eine Linie: Bereich minimieren (aus dem Layout nehmen, Sitzung läuft weiter).
+    Collapse,
 }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, st: Stroke) {
@@ -345,6 +347,12 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
         Icon::Close => {
             l(v(-4.0, -4.0), v(4.0, 4.0));
             l(v(-4.0, 4.0), v(4.0, -4.0));
+        }
+        Icon::Collapse => {
+            l(v(0.0, -5.0), v(0.0, 1.5));
+            l(v(-3.0, -1.5), v(0.0, 1.5));
+            l(v(3.0, -1.5), v(0.0, 1.5));
+            l(v(-5.0, 4.5), v(5.0, 4.5));
         }
         Icon::SplitRight => {
             let r = Rect::from_center_size(c, v(12.0, 10.0));

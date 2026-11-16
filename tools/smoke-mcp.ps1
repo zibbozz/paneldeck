@@ -601,6 +601,30 @@ c.close()
   Check 'read_terminal auf einem Chat -> not_a_terminal' ((Code (Tool 'read_terminal' @{ session = 950 })) -eq 'not_a_terminal')
   Check 'send_text auf einem Chat -> not_a_terminal' ((Code (Tool 'send_text' @{ session = 950; text = 'x' })) -eq 'not_a_terminal')
   Check 'Chatverlauf chats/950.json bleibt beim Start erhalten' ([IO.File]::ReadAllText("$data\chats\950.json") -match 'smoke-answer')
+
+  Write-Host "== Minimierte Bereiche (#142): Wiederherstellung, kaputtes Layout, focus_session holt zurueck" -ForegroundColor Cyan
+  Stop-Hub
+  # 960 ist minimiert (Platz: rechts neben 961); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
+  $bad = [ordered]@{ Split = [ordered]@{ dir = 'Horizontal'; ratio = $null; a = @{ Leaf = 961 }; b = [ordered]@{ Split = [ordered]@{ dir = 'Vertical'; ratio = 0.5; a = @{ Leaf = 777 }; b = @{ Leaf = 961 } } } } }
+  $st = [ordered]@{
+    sessions = @(
+      [ordered]@{ id = 960; name = 'Smoke-Min'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1; minimized = $true; slot = [ordered]@{ sibling = @(961); dir = 'Horizontal'; before = $false; ratio = 0.5 } },
+      [ordered]@{ id = 961; name = 'Smoke-Sicht'; custom_name = $true; shell_id = 'powershell'; cwd = "$proj"; project = 1 })
+    next_id = 962; projects = @([ordered]@{ id = 1; name = 'Standard'; layout = $bad; focused = 960 }); active_project = 1
+  }
+  [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding $false))
+  Set-Level 'Control' -Tray
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 3
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'Kaputtes Layout (unbekannt, doppelt, Anteil null): Hub startet, beide Sitzungen da' ($ss.Count -eq 2 -and $null -ne $mn -and $null -ne $vs) ($ss | ConvertTo-Json -Compress)
+  Check 'list_sessions: minimiert aus state.json wiederhergestellt (minimized = true)' ($mn.minimized -eq $true -and $vs.minimized -eq $false) ($ss | ConvertTo-Json -Compress)
+  Check 'Fokus zeigt nicht auf die minimierte Sitzung' ($mn.focused -eq $false -and $vs.focused -eq $true) ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 960 }
+  Start-Sleep -Milliseconds 600
+  $mn = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq 960 })
+  Check 'focus_session holt die minimierte Sitzung zurueck (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
 } finally {
   Stop-Hub
   foreach ($h in $script:extra) { if ($h -and -not $h.HasExited) { $h.Kill() } }

@@ -510,6 +510,7 @@ impl App {
                     "status": status_str(e),
                     "focused": focused,
                     "visible": visible,
+                    "minimized": e.meta.minimized,
                     "window": window,
                     "queue_len": e.meta.queue.len(),
                     "cost_usd": usage.as_ref().map(|u| (u.cost() * 100.0).round() / 100.0),

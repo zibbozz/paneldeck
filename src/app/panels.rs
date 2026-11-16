@@ -552,7 +552,7 @@ impl App {
         let lang = self.settings.language;
         let f = self.focused;
         let mut v: Vec<(String, String, Action)> = vec![
-            (lang.t("Neue Sitzung (Standard-Shell)", "New session (default shell)").into(), "Strg+Umschalt+T".into(), Action::NewQuick),
+            (lang.t("Neue Sitzung (Standard-Shell)", "New session (default shell)").into(), self.binding_text("new"), Action::NewQuick),
             (lang.t("Neue Sitzung …", "New session …").into(), String::new(), Action::NewDialog(false)),
         ];
         if self.settings.claude_mode {
@@ -567,37 +567,44 @@ impl App {
             v.push((lang.t("Kosten-Übersicht", "Cost overview").into(), String::new(), Action::OpenCosts));
         }
         v.extend([
-            (lang.t("Bereich rechts teilen", "Split pane right").into(), "Strg+Umschalt+D".into(), Action::Split(f, Dir::Horizontal)),
-            (lang.t("Bereich darunter teilen", "Split pane below").into(), "Strg+Umschalt+E".into(), Action::Split(f, Dir::Vertical)),
-            (lang.t("Bereich ausblenden", "Hide pane").into(), "Strg+Umschalt+W".into(), Action::HidePane(f)),
-            (lang.t("Sitzung umbenennen", "Rename session").into(), "Strg+Umschalt+R".into(), Action::StartRename(f)),
+            (lang.t("Bereich rechts teilen", "Split pane right").into(), self.binding_text("split_r"), Action::Split(f, Dir::Horizontal)),
+            (lang.t("Bereich darunter teilen", "Split pane below").into(), self.binding_text("split_d"), Action::Split(f, Dir::Vertical)),
+            (lang.t("Bereich minimieren", "Minimize pane").into(), self.binding_text("hide"), Action::MinimizePane(f)),
+            (lang.t("Sitzung umbenennen", "Rename session").into(), self.binding_text("rename"), Action::StartRename(f)),
             (lang.t("Sitzung neu starten", "Restart session").into(), String::new(), Action::Restart(f)),
             (lang.t("Sitzung schließen", "Close session").into(), String::new(), Action::RequestClose(f)),
             (lang.t("Alle Sitzungen durchsuchen", "Search all sessions").into(), self.binding_text("search_all"), Action::OpenGlobalSearch),
             (lang.t("Verlauf als Datei speichern", "Save history to file").into(), String::new(), Action::ExportHistory(f)),
             (lang.t("Zum vorherigen Befehl springen", "Jump to previous command").into(), self.binding_text("prev_cmd"), Action::JumpCmd(-1)),
             (lang.t("Zum nächsten Befehl springen", "Jump to next command").into(), self.binding_text("next_cmd"), Action::JumpCmd(1)),
-            (lang.t("Im Verlauf suchen", "Search scrollback").into(), "Strg+Umschalt+F".into(), Action::OpenSearch),
-            (lang.t("Broadcast an/aus", "Toggle broadcast").into(), "Strg+Umschalt+B".into(), Action::ToggleBroadcast),
+            (lang.t("Im Verlauf suchen", "Search scrollback").into(), self.binding_text("search"), Action::OpenSearch),
+            (lang.t("Broadcast an/aus", "Toggle broadcast").into(), self.binding_text("broadcast"), Action::ToggleBroadcast),
             (lang.t("Prompt-Composer", "Prompt composer").into(), self.binding_text("composer"), Action::ToggleComposer),
             (lang.t("Warteschlange der Sitzung", "Session queue").into(), self.binding_text("queue"), Action::OpenQueue(f)),
             (lang.t("Änderungen (Diff) ein/aus", "Toggle changes (diff)").into(), self.binding_text("diff"), Action::ToggleDiff),
-            (lang.t("Notizen der Sitzung", "Session notes").into(), "Strg+Umschalt+N".into(), Action::OpenNotes(f)),
+            (lang.t("Notizen der Sitzung", "Session notes").into(), self.binding_text("notes"), Action::OpenNotes(f)),
             (lang.t("Prompt-Bibliothek", "Prompt library").into(), String::new(), Action::OpenPrompts),
             (lang.t("Sitzung in eigenem Fenster öffnen", "Open session in own window").into(), String::new(), Action::Detach(f)),
             (lang.t("CLAUDE.md / Claude-Dateien bearbeiten", "Edit CLAUDE.md / Claude files").into(), self.binding_text("editor"), Action::OpenEditor),
-            (lang.t("Dateibaum ein/aus", "Toggle file tree").into(), "Strg+Umschalt+O".into(), Action::ToggleFiles),
+            (lang.t("Dateibaum ein/aus", "Toggle file tree").into(), self.binding_text("files"), Action::ToggleFiles),
             (lang.t("Claude-Verlauf (Konversationen fortsetzen)", "Claude history (resume conversations)").into(), String::new(), Action::OpenHistory),
             (lang.t("Einstellungen", "Settings").into(), String::new(), Action::OpenSettings),
         ]);
         v.push((lang.t("Neues Projekt …", "New project …").into(), String::new(), Action::NewProjectPrompt));
         for (i, p) in self.projects.iter().enumerate() {
             if p.id != self.active_project {
-                v.push((format!("{} {}", lang.t("Projekt wechseln:", "Switch project:"), p.name), format!("Strg+Umschalt+{}", i + 1), Action::SwitchProject(p.id)));
+                v.push((format!("{} {}", lang.t("Projekt wechseln:", "Switch project:"), p.name), keys::pretty(&format!("Ctrl+Shift+{}", i + 1), lang == Lang::De), Action::SwitchProject(p.id)));
             }
         }
         for (id, e) in &self.entries {
-            v.push((format!("{} {}", lang.t("Wechseln zu:", "Switch to:"), e.display_name()), e.meta.group.clone(), Action::Activate(*id)));
+            // Minimierte Sitzungen: „Wechseln zu“ holt sie an ihren Platz zurück (siehe `App::activate`).
+            let hint = if e.meta.minimized {
+                let m = lang.t("minimiert", "minimized");
+                if e.meta.group.is_empty() { m.to_string() } else { format!("{} · {m}", e.meta.group) }
+            } else {
+                e.meta.group.clone()
+            };
+            v.push((format!("{} {}", lang.t("Wechseln zu:", "Switch to:"), e.display_name()), hint, Action::Activate(*id)));
         }
         for (i, s) in self.prompts.iter().enumerate() {
             v.push((format!("{} {}", lang.t("Prompt senden:", "Send prompt:"), s.name), String::new(), Action::SendSnippet(i)));
