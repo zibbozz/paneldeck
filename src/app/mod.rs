@@ -2351,10 +2351,12 @@ impl App {
     /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
     fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
         let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
+        let origin = self.entries.get(&id).and_then(|e| e.chat.as_ref()).and_then(|c| c.origin_session);
         match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
             Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
             None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
         }
+        .with_origin(origin)
     }
 
     /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen

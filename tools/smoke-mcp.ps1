@@ -662,7 +662,7 @@ c.close()
   $script:fakePs = [powershell]::Create(); [void]$script:fakePs.AddScript($fake).AddArgument($script:fakeListener).AddArgument($script:fakeLog)
   $script:fakeAsync = $script:fakePs.BeginInvoke()
   # Server in settings.json eintragen (vor jedem Start; als Text, damit ConvertTo-Json von PowerShell 5.1 nichts verbiegt).
-  $srvJson = '{"id":"srv-smoke","name":"Fake","kind":"ollama","url":"http://127.0.0.1:' + $fakePort + '","models":[{"name":"fake-model","level":"Control","level_chosen":true,"ask_write":false,"tools":true,"context_length":65536}],"last_models":[{"name":"fake-model","tools":true,"context_length":131072},{"name":"fake-raw","tools":true,"context_length":131072}]}'
+  $srvJson = '{"id":"srv-smoke","name":"Fake","kind":"ollama","url":"http://127.0.0.1:' + $fakePort + '","models":[{"name":"fake-model","level":"Control","level_chosen":true,"ask_write":false,"tools":true}],"last_models":[{"name":"fake-model","tools":true,"context_length":131072},{"name":"fake-raw","tools":true,"context_length":131072}]}'
   $script:prestart = {
     $f = "$data\settings.json"
     $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
@@ -715,6 +715,7 @@ c.close()
   Check 'send_chat_message mit leerem Text -> bad_args' ((Code (Tool 'send_chat_message' @{ session = $C; text = '  ' })) -eq 'bad_args')
   $hadTools = @($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"tools"\s*:\s*\[\s*\{' }).Count -gt 0
   Check 'Modell bekommt Werkzeuge (Stufe Steuern, level_chosen)' $hadTools
+  Check 'Stufe Steuern ohne eigene Kontextlaenge: num_ctx nach Bedarf (16384/32768), kein Kontext-Hinweis' (@($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"num_ctx"\s*:\s*(16384|32768)' }).Count -ge 1 -and -not ((Tool 'read_chat' @{ session = $C; last = 50 }).text -match 'larger than the model|too small for its tool level'))
   [void](Tool 'send_chat_message' @{ session = $C; text = 'tools please' })
   $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
   $rc = Tool 'read_chat' @{ session = $C; last = 10 }
@@ -729,7 +730,7 @@ c.close()
   $rc = Tool 'read_chat' @{ session = $C; last = 6 }
   $pt = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'send_text' })
   $pu = @($rc.data.messages | Where-Object { $_.role -eq 'user' })[-1]
-  Check 'Umweg-Schutz: send_text des Chats in die Sitzung des Agenten -> forbidden' ($pt.Count -ge 1 -and $pt[-1].status -eq 'error' -and $pt[-1].content -match 'cannot write into that agent' -and $pu.note -eq 'Sent by agent Proxy-Agent') $rc.text
+  Check 'Umweg-Schutz: send_text des Chats in die Sitzung des Agenten -> forbidden (abgewiesen vor Freigabe/Ausfuehrung)' ($pt.Count -ge 1 -and $pt[-1].status -eq 'denied' -and $pt[-1].content -match 'cannot write into that agent' -and $pu.note -eq 'Sent by agent Proxy-Agent') $rc.text
   Start-Sleep 1
   Check 'Umweg-Schutz: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'proxy-leak')
   [void](Tool 'close_session' @{ session = $A })

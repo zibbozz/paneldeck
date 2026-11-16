@@ -275,20 +275,11 @@ fn read_chat_json(c: &ChatState, last: usize, status: &str) -> Value {
     })
 }
 
-/// Schreibt dieser Werkzeugaufruf eines Chats in die Sitzung `origin` des Agenten, der die Runde ausgelöst hat? Dann
-/// ist er verboten (ein Agent darf einen Chat nicht als Umweg in seine eigene Sitzung nutzen). Zählt: jedes Werkzeug
-/// der Stufe Steuern mit `session` als Ziel (Tippen, Tasten, Befehle, Prompts, Umbenennen, Anzeigen, Schließen,
-/// Chat-Nachricht, Ticket-Verknüpfung) – nur `wait_for_status` liest bloß.
-fn proxy_forbidden(tool: &str, args: &Value, origin: Option<u64>) -> bool {
-    let Some(origin) = origin else { return false };
-    if tool == "wait_for_status" || mcp::tool_level(tool) != Some(McpLevel::Control) {
-        return false;
-    }
-    args.get("session").and_then(|v| v.as_u64()) == Some(origin)
-}
+/// Zweite Verteidigungslinie bei der Ausführung (die erste ist `ToolPolicy::check` vor der Freigabe).
+use crate::chat::tools::proxy_forbidden;
 
 fn proxy_error() -> (String, String) {
-    er("forbidden", tr("Ein von einem Agenten ausgelöster Chat darf nicht in die eigene Sitzung dieses Agenten schreiben.", "a chat started by an agent cannot write into that agent's own session"))
+    er("forbidden", tr("Ein von einem Agenten ausgelöster Chat darf nicht in die eigene Sitzung dieses Agenten schreiben.", crate::chat::tools::PROXY_MESSAGE))
 }
 
 /// Kann der Chat mit seinem Modell senden? Server muss eingerichtet sein; kennt er eine Modellliste (letzte Verbindung

@@ -308,17 +308,23 @@ impl LlmServer {
     }
 
     /// Kontextlänge, mit der angefragt (und auf die der Verlauf gekürzt) wird. Eigene Angabe gilt immer. Ohne sie:
-    /// bei Ollama höchstens `DEFAULT_CONTEXT` (die Zahl geht als `num_ctx` mit; die volle erkannte Länge kostet viel
-    /// Speicher), bei OpenAI-kompatiblen Servern die erkannte Länge bzw. `DEFAULT_CONTEXT`.
-    pub fn request_context(&self, name: &str) -> u32 {
-        if let Some(c) = self.model_cfg(name).context_length.filter(|c| *c > 0) {
+    /// bei Ollama so groß wie für Systemprompt und Werkzeuge nötig ([`auto_context`], die Zahl geht als `num_ctx` mit;
+    /// mehr als nötig kostet viel Speicher), bei OpenAI-kompatiblen Servern die erkannte Länge bzw. `DEFAULT_CONTEXT`.
+    /// `prompt_tokens` = geschätzte Tokens von Systemprompt und Werkzeug-Beschreibungen (`None` = unbekannt: 8192).
+    pub fn request_context(&self, name: &str, prompt_tokens: Option<usize>) -> u32 {
+        if let Some(c) = self.user_context(name) {
             return c;
         }
         let detected = self.info(name).and_then(|i| i.context_length).filter(|c| *c > 0);
         match self.kind {
-            ServerKind::Ollama => detected.map_or(DEFAULT_CONTEXT, |d| d.min(DEFAULT_CONTEXT)),
+            ServerKind::Ollama => auto_context(prompt_tokens.unwrap_or(0), detected),
             ServerKind::OpenAi => detected.unwrap_or(DEFAULT_CONTEXT),
         }
+    }
+
+    /// Eigene Kontextlänge des Nutzers (Einstellungen → Modelle), wenn gesetzt.
+    pub fn user_context(&self, name: &str) -> Option<u32> {
+        self.model_cfg(name).context_length.filter(|c| *c > 0)
     }
 
     /// Verbindungsangaben (entschlüsselt den Schlüssel). Fehlertext in `lang`.
@@ -346,6 +352,28 @@ impl LlmServer {
         }
         Ok(ep)
     }
+}
+
+/// Ohne eigene Angabe höchstens so viel Kontext (Ollama reserviert Speicher für die ganze Länge).
+pub const MAX_AUTO_CONTEXT: u32 = 32768;
+/// Platz für Verlauf und Werkzeug-Ergebnisse, der neben Systemprompt und Werkzeugen mindestens bleiben soll.
+pub const MIN_ROOM_TOKENS: usize = 4096;
+/// Anteil des Kontexts, der für die Antwort frei bleibt (Prozent; wie `chat::llm_backend::ANSWER_RESERVE_PERCENT`).
+pub const ANSWER_RESERVE_PERCENT: usize = 25;
+
+/// Kontextlänge, die Systemprompt und Werkzeuge (`prompt_tokens`) samt [`MIN_ROOM_TOKENS`] und der Antwort-Reserve
+/// braucht: auf die nächste Zweierpotenz aufgerundet, mindestens `DEFAULT_CONTEXT`, höchstens [`MAX_AUTO_CONTEXT`] und
+/// höchstens die erkannte Länge des Modells.
+pub fn auto_context(prompt_tokens: usize, detected: Option<u32>) -> u32 {
+    let need = (prompt_tokens + MIN_ROOM_TOKENS).saturating_mul(100).div_ceil(100 - ANSWER_RESERVE_PERCENT);
+    let need = u32::try_from(need).unwrap_or(u32::MAX).checked_next_power_of_two().unwrap_or(MAX_AUTO_CONTEXT);
+    let c = need.clamp(DEFAULT_CONTEXT, MAX_AUTO_CONTEXT);
+    detected.map_or(c, |d| c.min(d))
+}
+
+/// Ist die Kontextlänge `ctx` zu klein für Systemprompt und Werkzeuge (`prompt_tokens`) samt Mindestplatz und Reserve?
+pub fn context_too_small(ctx: u32, prompt_tokens: usize) -> bool {
+    (ctx as usize) * (100 - ANSWER_RESERVE_PERCENT) / 100 < prompt_tokens + MIN_ROOM_TOKENS
 }
 
 /// Schnelle Prüfung einer eingegebenen Adresse beim Tippen (ohne Namensauflösung, damit die Oberfläche nicht wartet):
@@ -407,17 +435,32 @@ mod tests {
     }
 
     #[test]
+    fn auto_context_rounds_up_and_detects_too_small_contexts() {
+        assert_eq!(auto_context(0, None), DEFAULT_CONTEXT);
+        assert_eq!(auto_context(2_000, None), DEFAULT_CONTEXT, "(2000 + 4096) / 0,75 = 8128");
+        assert_eq!(auto_context(2_100, None), 16384);
+        assert_eq!(auto_context(20_000, None), 32768);
+        assert_eq!(auto_context(20_000, Some(4096)), 4096);
+        assert!(context_too_small(8192, 6_612) && !context_too_small(16384, 6_612));
+        assert!(!context_too_small(8192, 2_000));
+    }
+
+    #[test]
     fn request_context_for_ollama_and_openai() {
         let mut s = LlmServer { last_models: vec![ModelInfo { name: "big".into(), tools: None, context_length: Some(131072) }, ModelInfo { name: "small".into(), tools: None, context_length: Some(2048) }], ..Default::default() };
-        assert_eq!(s.request_context("big"), DEFAULT_CONTEXT, "Ollama: höchstens 8192 ohne eigene Angabe");
-        assert_eq!(s.request_context("small"), 2048);
-        assert_eq!(s.request_context("unknown"), DEFAULT_CONTEXT);
+        assert_eq!(s.request_context("big", None), DEFAULT_CONTEXT, "Ollama: ohne bekannten Bedarf 8192");
+        assert_eq!(s.request_context("big", Some(9_000)), 32768, "Bedarf (9000 + 4096) / 0,75 → 32768");
+        assert_eq!(s.request_context("big", Some(5_000)), 16384);
+        assert_eq!(s.request_context("big", Some(500_000)), MAX_AUTO_CONTEXT, "höchstens 32768");
+        assert_eq!(s.request_context("small", Some(9_000)), 2048, "höchstens die Länge des Modells");
+        assert_eq!(s.request_context("small", None), 2048);
+        assert_eq!(s.request_context("unknown", None), DEFAULT_CONTEXT);
         s.set_model_cfg(LlmModel { context_length: Some(32768), ..LlmModel::named("big") });
-        assert_eq!(s.request_context("big"), 32768);
+        assert_eq!(s.request_context("big", None), 32768);
         s.kind = ServerKind::OpenAi;
-        assert_eq!(s.request_context("small"), 2048);
+        assert_eq!(s.request_context("small", None), 2048);
         s.last_models[1].context_length = Some(65536);
-        assert_eq!(s.request_context("small"), 65536);
+        assert_eq!(s.request_context("small", None), 65536);
     }
 
     #[test]

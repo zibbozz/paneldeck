@@ -126,6 +126,8 @@ pub struct ChatState {
     /// Agent außerhalb von Paneldeck). Gilt für die ganze Runde samt „Weiter“; Werkzeuge des Chats dürfen dort nicht
     /// schreiben (kein Umweg in die eigene Sitzung des Agenten). Setzt `App::chat_send`.
     pub origin_session: Option<u64>,
+    /// Der Hinweis „Kontext zu klein für die Werkzeug-Stufe“ wurde in diesem Chat schon gezeigt (einmal je Chat).
+    pub context_warned: bool,
 }
 
 /// Status eines Chats für Seitenleiste und MCP (`ready`, `working`, `approval`).
@@ -201,6 +203,7 @@ impl ChatState {
             approval_target: None,
             level_question: false,
             origin_session: None,
+            context_warned: false,
         };
         if fixed > 0 {
             c.touch();
@@ -778,6 +781,17 @@ impl ChatState {
                     self.history_budget = Some(history);
                     self.budget_scale = self.token_scale;
                     self.prompt_estimate = Some(prompt);
+                }
+                TurnEvent::ContextNotice(n) => {
+                    if !self.context_warned {
+                        self.context_warned = true;
+                        if let Some(m) = self.file.messages.get_mut(i) {
+                            m.note = Some(match m.note.take() {
+                                Some(old) => format!("{old}\n{n}"),
+                                None => n,
+                            });
+                        }
+                    }
                 }
                 TurnEvent::Note(n) => {
                     if let Some(m) = self.file.messages.get_mut(i) {
@@ -1394,5 +1408,27 @@ mod tests {
         }
         assert_eq!(c.file.context_start, Some(2));
         assert_eq!(c.messages()[3].tool_calls[0].name, "list_sessions");
+    }
+
+    #[test]
+    fn context_notice_is_shown_once_per_chat() {
+        struct Notice;
+        impl ChatBackend for Notice {
+            fn start(&self, _: &ChatMeta, _: &[ChatMsg], _: &TurnContext, _: Repaint) -> TurnHandle {
+                let (h, tx, _) = TurnHandle::pair();
+                for ev in [TurnEvent::ContextNotice("small".into()), TurnEvent::Delta("x".into()), TurnEvent::Done] {
+                    tx.send(ev).unwrap();
+                }
+                h
+            }
+        }
+        let mut c = ChatState::new(ChatFile::default(), None);
+        for q in ["a", "b"] {
+            c.draft = q.into();
+            assert!(c.send(&Notice, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {})));
+            assert!(c.poll().finished);
+        }
+        assert_eq!(c.messages()[1].note.as_deref(), Some("small"));
+        assert!(c.messages()[3].note.is_none(), "nur einmal je Chat");
     }
 }

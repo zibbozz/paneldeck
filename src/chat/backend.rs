@@ -33,6 +33,9 @@ pub enum TurnEvent {
     Usage { prompt_tokens: Option<u32>, completion_tokens: Option<u32> },
     /// Hinweis zur Antwort (z. B. „an der Token-Grenze abgeschnitten“), landet in [`ChatMsg::note`].
     Note(String),
+    /// Hinweis „Kontext zu klein für die Werkzeug-Stufe“ (eigene Kontextlänge des Nutzers): landet wie `Note` an der
+    /// Antwort, aber nur einmal je Chat.
+    ContextNotice(String),
     /// Antwort fertig.
     Done,
     /// Abbruch mit Fehlermeldung (für den Nutzer, ein Satz).
