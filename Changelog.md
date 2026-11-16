@@ -26,6 +26,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Shift+mouse wheel scrolls Paneldeck's scrollback even when the program has switched on mouse mode.
 - Panes can be minimized: a new button next to × in the pane header (also in the pane and sidebar context menus, the palette and Ctrl+Shift+W) takes the pane out of the split layout while the terminal or chat keeps running; its neighbour takes the space. Minimized sessions stay in the sidebar (dimmed, with a small marker) and come back where they were with a click in the sidebar, the palette's "Switch to" or MCP `focus_session`. The state survives a restart (new optional `state.json` session fields `minimized` and `slot`). In a detached window, Minimize closes the window without docking the session back (#142).
 - MCP `list_sessions`: new field `minimized`.
+- Agents can use chats over MCP: `read_chat` (Read) reads a chat's messages (content marked as untrusted), `send_chat_message` (Control) sends a message that the chat's own model answers (marked "Sent by agent …" in the chat), `list_models` (Read) lists the configured model servers and models without keys or URLs, and `create_session` creates chats (`kind: "chat"`, optional `server` and `model`).
+- A chat started by an agent can never write into that agent's own session through its tools; such calls are refused before any approval question.
 
 ### Changed
 
@@ -33,6 +35,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - `chats/<id>.json` has the new optional field `always_allow` (tool + session); model entries in `settings.json` have `level_chosen`; `mcp-log.jsonl` has the optional fields `how` ("chat") and `model` for tool calls from chats.
 - Ctrl+Shift+W ("Hide pane", now "Minimize pane") also works on the last pane and leaves the empty Terminal Hub, which says when all panes are minimized; Ctrl+Tab skips minimized sessions.
 - The close-window question lists sessions that will end although they are minimized or not in the layout.
+- `wait_for_status` also works for chats (statuses `ready` / `working` / `approval`) and returns `needs_you` in every answer; `permission_pending` now also applies to chats waiting for an approval or for the one-time level question; new error codes `not_a_chat` and `no_model`, `busy` also applies to chats.
+- Chat models get shorter tool descriptions; external MCP clients keep the full ones. An own context length that is too small for the tool level shows a notice once per chat.
 
 ### Fixed
 
@@ -45,6 +49,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Panes keep a minimum size in deep splits and when dragging a divider.
 - The palette showed German shortcut hints in the English UI and ignored custom shortcuts.
 - Dropping files onto the empty Terminal Hub could create an invalid pane.
+- Chats with a tool level now ask Ollama for a context large enough for the system prompt and the tools (up to 32768, at most the model's length) instead of 8192, so tool calls no longer stop right away.
 
 ## [2.1.0] - 2026-11-15
 
