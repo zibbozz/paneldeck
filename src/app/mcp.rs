@@ -1002,7 +1002,8 @@ impl App {
         let placement = parse_placement(args)?;
         let mut v = self.mcp_create_quiet(ctx, args, caller)?;
         if let (Some(p), Some(id)) = (placement, v["id"].as_u64()) {
-            self.apply(ctx, Action::Place(id, p, caller));
+            let protected = self.place_protected(caller);
+            self.apply(ctx, Action::Place(id, p, caller, protected));
             v["placement"] = json!(p.name());
             v["note"] = json!(if v["kind"] == "chat" {
                 tr("Der Chat ist angelegt und im Fenster geöffnet. Nachrichten mit send_chat_message.", "The chat was created and opened in the window. Send messages with send_chat_message.")
@@ -1517,8 +1518,21 @@ impl App {
             return Err(e);
         }
         let placement = parse_placement(args)?.unwrap_or(crate::layout::Placement::Replace);
-        self.apply(ctx, Action::Place(id, placement, caller));
+        let protected = self.place_protected(caller);
+        self.apply(ctx, Action::Place(id, placement, caller, protected));
         Ok(json!({"ok": true, "placement": placement.name()}))
+    }
+
+    /// Sitzungen, deren Bereich eine Platzierung für einen Agenten nie verdrängen darf (Review zu #162): eine offene
+    /// Freigabe-Frage (Status `approval`) und die Kette des Aufrufers (`chain_blocked`, bei einem Chat auch die Kette, die
+    /// seine Runde ausgelöst hat).
+    fn place_protected(&self, caller: Option<u64>) -> Vec<u64> {
+        let origins = caller.and_then(|c| self.entries.get(&c)).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+        self.entries
+            .iter()
+            .filter(|(id, e)| status_str(e) == "approval" || origins.contains(id) || self.chain_blocked(caller, **id).is_some())
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     fn mcp_close(&mut self, args: &Value, caller: Option<u64>) -> R {

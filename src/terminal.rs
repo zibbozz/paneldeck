@@ -128,7 +128,7 @@ pub struct SpawnOptions<'a> {
 /// Interne Variablen, die Paneldeck selbst setzt bzw. nur für einen Neustart nutzt: Ein Wert aus der Umgebung des
 /// Paneldeck-Prozesses (z. B. Start aus einem Terminal eines anderen Hubs) darf nie an ein Terminal gehen – sonst fände
 /// `paneldeck mcp` dort den falschen Hub. Die passenden Werte setzt `SpawnOptions::env` danach neu.
-pub const INTERNAL_ENV: [&str; 8] = [
+pub const INTERNAL_ENV: [&str; 11] = [
     crate::hooks::ENV_SESSION,
     crate::hooks::ENV_SESSION_KEY,
     crate::hooks::ENV_PORT,
@@ -137,7 +137,18 @@ pub const INTERNAL_ENV: [&str; 8] = [
     crate::paths::ENV_HUB_BASE,
     "PANELDECK_UPDATE_WAIT_PID",
     "PANELDECK_UPDATE_KEEP_SESSIONS",
+    // nur für Tests/Bildschirmfotos: nie an Terminals weitergeben
+    "PANELDECK_UPDATE_TEST_FEED",
+    "PANELDECK_SHOT",
+    "PANELDECK_DEMO_",
 ];
+
+/// Ist `name` eine interne Variable ([`INTERNAL_ENV`]; Einträge mit `_` am Ende sind Präfixe, z. B. `PANELDECK_DEMO_*`)?
+/// Groß-/Kleinschreibung egal (Windows).
+pub fn is_internal_env(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    INTERNAL_ENV.iter().any(|k| if k.ends_with('_') { n.starts_with(k) } else { n == *k })
+}
 
 /// Umgebung des Terminals setzen (#175). `cmd` bringt von portable-pty schon die Standard-Umgebung mit (Prozessumgebung,
 /// darüber System- und Benutzervariablen frisch aus der Registry). `inherit`: stattdessen genau die Prozessumgebung
@@ -150,7 +161,8 @@ fn apply_env(cmd: &mut CommandBuilder, inherit: bool, process: impl IntoIterator
             cmd.env(k, v);
         }
     }
-    for k in INTERNAL_ENV {
+    let internal: Vec<String> = cmd.iter_full_env_as_str().map(|(k, _)| k.to_string()).filter(|k| is_internal_env(k)).collect();
+    for k in internal {
         cmd.env_remove(k);
     }
     cmd.env("TERM", "xterm-256color");
@@ -923,23 +935,28 @@ mod env_tests {
         use std::ffi::OsString;
         let process = || {
             vec![
-                (OsString::from("PATH"), OsString::from(r"C:\customin")),
+                (OsString::from("PATH"), OsString::from(r"C:\custom\bin")),
                 (OsString::from("MY_VAR"), OsString::from("from-shell")),
                 (OsString::from("PANELDECK_SESSION"), OsString::from("99")),
                 (OsString::from("PANELDECK_HUB_DATA"), OsString::from(r"C:\other-hub")),
                 (OsString::from("PANELDECK_UPDATE_KEEP_SESSIONS"), OsString::from("1")),
+                (OsString::from("PANELDECK_UPDATE_TEST_FEED"), OsString::from(r"C:\feed")),
+                (OsString::from("paneldeck_shot"), OsString::from("1")),
+                (OsString::from("PANELDECK_DEMO_DIR"), OsString::from(r"C:\demo")),
                 (OsString::from("PANELDECK_DATA"), OsString::from(r"C:\data")),
             ]
         };
-        let ours = vec![("PANELDECK_SESSION".to_string(), "7".to_string()), ("PATH".to_string(), r"C:\profilein".to_string())];
+        let ours = vec![("PANELDECK_SESSION".to_string(), "7".to_string()), ("PATH".to_string(), r"C:\profile\bin".to_string())];
         // An: genau die Prozessumgebung (nichts aus der Registry), interne Variablen weg, unsere gewinnen.
         let mut cmd = CommandBuilder::new("cmd.exe");
         apply_env(&mut cmd, true, process(), &ours);
         let e = envs(&cmd);
         assert_eq!(e.get("MY_VAR").map(String::as_str), Some("from-shell"));
-        assert_eq!(e.get("PATH").map(String::as_str), Some(r"C:\profilein"), "Profilvariable gewinnt");
+        assert_eq!(e.get("PATH").map(String::as_str), Some(r"C:\profile\bin"), "Profilvariable gewinnt");
         assert_eq!(e.get("PANELDECK_SESSION").map(String::as_str), Some("7"), "eigene Sitzung, nicht die geerbte");
         assert!(!e.contains_key("PANELDECK_HUB_DATA") && !e.contains_key("PANELDECK_UPDATE_KEEP_SESSIONS"), "interne Variablen fremder Hubs fallen weg");
+        assert!(!e.contains_key("PANELDECK_UPDATE_TEST_FEED") && !e.contains_key("PANELDECK_SHOT") && !e.contains_key("PANELDECK_DEMO_DIR"), "Test-Variablen fallen weg");
+        assert!(is_internal_env("paneldeck_demo_lang") && is_internal_env("PANELDECK_TOKEN") && !is_internal_env("PANELDECK_DATA") && !is_internal_env("PANELDECK_DEMO"));
         assert_eq!(e.get("PANELDECK_DATA").map(String::as_str), Some(r"C:\data"), "öffentliche Variable bleibt");
         assert_eq!(e.get("TERM").map(String::as_str), Some("xterm-256color"));
         let mut want: Vec<&str> = vec!["COLORTERM", "MY_VAR", "PANELDECK_DATA", "PANELDECK_SESSION", "PATH", "TERM"];
@@ -948,7 +965,7 @@ mod env_tests {
         // Ohne Profil-PATH bleibt der geerbte PATH.
         let mut cmd = CommandBuilder::new("cmd.exe");
         apply_env(&mut cmd, true, process(), &[]);
-        assert_eq!(envs(&cmd).get("PATH").map(String::as_str), Some(r"C:\customin"));
+        assert_eq!(envs(&cmd).get("PATH").map(String::as_str), Some(r"C:\custom\bin"));
     }
 
     #[test]

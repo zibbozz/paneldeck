@@ -991,17 +991,18 @@ c.close()
   $ss = @((Tool 'list_sessions').data.sessions)
   $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
   Check 'focus_session ohne placement = replace (Antwort placement)' (-not $fr.err -and $fr.data.placement -eq 'replace') $fr.text
-  Check 'replace: minimierte 960 ersetzt den aktiven Bereich (sichtbar, fokussiert, nicht minimiert)' ($mn.shown -eq $true -and $mn.focused -eq $true -and $mn.minimized -eq $false) ($mn | ConvertTo-Json -Compress)
-  Check 'replace: der ersetzte Bereich 961 ist weg, aber nicht minimiert; nichts sonst minimiert' ($vs.shown -eq $false -and $vs.minimized -eq $false -and @($ss | Where-Object { $_.minimized }).Count -eq 0 -and $vs.status -ne 'exited') ($ss | ConvertTo-Json -Compress)
+  Check 'replace: minimierte 960 ersetzt den aktiven Bereich (sichtbar, nicht minimiert; Fokus folgt, weil der fokussierte Bereich ersetzt wurde)' ($mn.shown -eq $true -and $mn.focused -eq $true -and $mn.minimized -eq $false) ($mn | ConvertTo-Json -Compress)
+  Check 'replace: der ersetzte Bereich 961 ist jetzt minimiert (laeuft weiter); sonst nichts minimiert' ($vs.shown -eq $false -and $vs.minimized -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 1 -and $vs.status -ne 'exited') ($ss | ConvertTo-Json -Compress)
   $fr = Tool 'focus_session' @{ session = 961; placement = 'split_right' }
   Start-Sleep -Milliseconds 600
   $ss = @((Tool 'list_sessions').data.sessions)
   $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
-  Check 'split_right: aktiver Bereich geteilt, beide sichtbar, 961 fokussiert, nichts minimiert' (-not $fr.err -and $fr.data.placement -eq 'split_right' -and $mn.shown -eq $true -and $vs.shown -eq $true -and $vs.focused -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 0) ($ss | ConvertTo-Json -Compress)
+  Check 'split_right: aktiver Bereich geteilt, beide sichtbar, nichts minimiert' (-not $fr.err -and $fr.data.placement -eq 'split_right' -and $mn.shown -eq $true -and $vs.shown -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 0) ($ss | ConvertTo-Json -Compress)
+  Check 'split_right: Tastaturfokus des Nutzers bleibt (960), 961 nicht fokussiert' ($mn.focused -eq $true -and $vs.focused -eq $false) ($ss | ConvertTo-Json -Compress)
   $fr = Tool 'focus_session' @{ session = 960; placement = 'split_down' }
   Start-Sleep -Milliseconds 300
   $ss = @((Tool 'list_sessions').data.sessions)
-  Check 'split_* auf eine schon sichtbare Sitzung: nur Fokus, Layout bleibt (beide sichtbar)' (-not $fr.err -and @($ss | Where-Object { $_.shown }).Count -eq 2 -and ($ss | Where-Object { $_.id -eq 960 }).focused -eq $true) ($ss | ConvertTo-Json -Compress)
+  Check 'split_* auf eine schon sichtbare Sitzung: Layout und Fokus bleiben (beide sichtbar)' (-not $fr.err -and @($ss | Where-Object { $_.shown }).Count -eq 2 -and ($ss | Where-Object { $_.id -eq 960 }).focused -eq $true) ($ss | ConvertTo-Json -Compress)
   Check 'focus_session mit unbekanntem placement: bad_args' ((Code (Tool 'focus_session' @{ session = 960; placement = 'left' })) -eq 'bad_args')
   $n0 = @((Tool 'list_sessions').data.sessions).Count
   Check 'create_session mit unbekanntem placement: bad_args, nichts angelegt' ((Code (Tool 'create_session' @{ shell = 'powershell'; placement = 'everywhere' })) -eq 'bad_args' -and @((Tool 'list_sessions').data.sessions).Count -eq $n0)
@@ -1038,10 +1039,18 @@ c.close()
     try { Set-Level 'Control' -Tray } finally { if ($regVar) { [Environment]::SetEnvironmentVariable($regVar, $oldVal) }; Remove-Item Env:PD_SMOKE_INHERIT -ErrorAction SilentlyContinue }
     [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
     $c = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = "Smoke-Env-$inherit" }
-    Start-Sleep 4
+    # Auf den Prompt warten (sichtbarer Bildschirm zeigt "PS ...>"), statt eine feste Zeit zu schlafen.
+    $t0 = Get-Date
+    do { Start-Sleep -Milliseconds 300; $scr = "$((Tool 'read_terminal' @{ session = $c.data.id; screen = $true }).data.text)" } while ($scr -notmatch 'PS [^\r\n]*>' -and ((Get-Date) - $t0).TotalSeconds -lt 30)
+    if ($scr -notmatch 'PS [^\r\n]*>') { Write-Host "  info  inherit_env: kein Prompt nach 30 s" -ForegroundColor Yellow }
     $rv = if ($regVar) { "`$env:$regVar" } else { "''" }
-    $r = Tool 'run_command' @{ session = $c.data.id; command = '"$env:PD_SMOKE_INHERIT|' + $rv + '|$env:PANELDECK_SESSION|$env:USERPROFILE|" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'; timeout_secs = 25 }
-    if (-not "$($r.data.output)".Trim()) { Start-Sleep 3; $r = Tool 'run_command' @{ session = $c.data.id; command = '"$env:PD_SMOKE_INHERIT|' + $rv + '|$env:PANELDECK_SESSION|$env:USERPROFILE|" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'; timeout_secs = 25 } }
+    $probe = '"$env:PD_SMOKE_INHERIT|' + $rv + '|$env:PANELDECK_SESSION|$env:USERPROFILE|" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'
+    $r = Tool 'run_command' @{ session = $c.data.id; command = $probe; timeout_secs = 25 }
+    if (-not "$($r.data.output)".Trim()) {
+      # Sollte nach dem Warten auf den Prompt nicht vorkommen: sichtbar protokollieren (mit quality), dann einmal wiederholen.
+      Write-Host "  info  inherit_env: run_command ohne Ausgabe trotz Prompt (quality=$($r.data.quality), finished=$($r.data.finished), timed_out=$($r.data.timed_out)) – Wiederholung" -ForegroundColor Yellow
+      Start-Sleep 2; $r = Tool 'run_command' @{ session = $c.data.id; command = $probe; timeout_secs = 25 }
+    }
     $o = "$($r.data.output)".Trim(); $parts = $o -split '\|'
     if (-not $o) { $o = "(leer) create: $($c.text) | run_command: $($r.text)" }
     $label = if ($inherit) { 'an' } else { 'aus' }

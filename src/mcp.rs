@@ -180,7 +180,7 @@ pub fn tools() -> Vec<ToolDef> {
         json!({
             "type": "string",
             "enum": ["solo", "replace", "split_right", "split_down"],
-            "description": format!("Where the session is shown, relative to the active pane (the pane of your own session if it is visible, else the pane the user focused): solo = the only pane, all other panes are minimized; replace = replaces only the active pane, the rest of the split stays; split_right / split_down = splits only the active pane and puts the session into the new right/lower half, nothing else changes. {default}")
+            "description": format!("Where the session is shown, relative to the active pane (the pane of your own session if it is visible, else the pane the user focused): solo = the only pane, all other panes are minimized; replace = replaces only the active pane (which becomes minimized), the rest of the split stays; split_right / split_down = splits only the active pane and puts the session into the new right/lower half, nothing else changes. The user's keyboard focus stays where it is unless their pane was replaced. Panes waiting for an approval and sessions of your agent chain are never displaced: solo keeps them, replace splits them instead. {default}")
         })
     };
     vec![
@@ -305,7 +305,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "focus_session",
             level: Control,
             group: Group::Always,
-            description: "Show a session in its Hub window (switches the project if needed; a session of another Paneldeck window brings that window to the front; a session in its own detached window only brings that window to the front). `placement` chooses how: replace (default) replaces only the active pane - the pane of your own session if it is visible, else the pane the user focused - and the rest of the split stays; split_right / split_down split only the active pane; solo makes it the only pane and minimizes all other panes (they keep running). A session that is already visible is only focused (except with solo).",
+            description: "Show a session in its Hub window without moving the user's keyboard focus (it moves to the session only if the user's focused pane was replaced) and without bringing a window to the front; a session of another project or window is placed in that project's/window's layout, a session in its own detached window is left as it is. `placement` chooses how: replace (default) replaces only the active pane - the pane of your own session if it is visible, else the pane the user focused - and that pane becomes minimized (it keeps running), the rest of the split stays; split_right / split_down split only the active pane; solo makes it the only pane and minimizes all other panes. Panes waiting for an approval and sessions of your agent chain are never displaced (solo keeps them, replace splits instead). A session that is already visible stays where it is (except with solo). Sessions of your agent chain are refused (forbidden).",
             schema: schema(json!({"session": session, "placement": placement("Default: replace.")}), &["session"]),
         },
         ToolDef {

@@ -221,6 +221,11 @@ pub(super) fn route_target(action: &Action, session_window: impl Fn(u64) -> Opti
     session_window(id).filter(|w| *w != cur)
 }
 
+/// Holt eine weitergereichte Aktion ihr Fenster nach vorn? Alle außer der Platzierung für einen Agenten (`Action::Place`).
+pub(super) fn brings_to_front(a: &Action) -> bool {
+    !matches!(a, Action::Place(..))
+}
+
 /// Strg+Klick auf einen Reiter öffnet ihn in einem neuen Fenster, ein normaler Klick wechselt nur den Reiter.
 pub(super) fn opens_window(modifiers: Modifiers) -> bool {
     modifiers.command && !modifiers.shift && !modifiers.alt
@@ -476,6 +481,10 @@ impl App {
         self.wins.queue = rest;
         if mine.is_empty() {
             return Vec::new();
+        }
+        // Platzierungen für Agenten (#162) holen das Fenster nicht nach vorn: der Nutzer arbeitet weiter, wo er war.
+        if mine.iter().all(|(_, a)| !brings_to_front(a)) {
+            return mine.into_iter().map(|(_, a)| a).collect();
         }
         if cur == 0 && self.in_tray {
             self.from_tray(ctx);
@@ -1126,8 +1135,10 @@ mod tests {
         assert_eq!(route_target(&Action::Activate(2), window, detached, 0), Some(3));
         assert_eq!(route_target(&Action::Focus(2), window, detached, 0), Some(3));
         // Platzierung für einen Agenten (#162): im Fenster der Sitzung (dort ist der aktive Bereich zu bestimmen)
-        assert_eq!(route_target(&Action::Place(2, crate::layout::Placement::SplitRight, Some(1)), window, detached, 0), Some(3));
-        assert_eq!(route_target(&Action::Place(1, crate::layout::Placement::Replace, None), window, detached, 0), None);
+        assert_eq!(route_target(&Action::Place(2, crate::layout::Placement::SplitRight, Some(1), vec![]), window, detached, 0), Some(3));
+        assert_eq!(route_target(&Action::Place(1, crate::layout::Placement::Replace, None, vec![]), window, detached, 0), None);
+        assert!(!brings_to_front(&Action::Place(2, crate::layout::Placement::Solo, None, vec![])), "Platzierung: Fenster bleibt, wo es ist");
+        assert!(brings_to_front(&Action::Focus(2)) && brings_to_front(&Action::Activate(2)));
         assert_eq!(route_target(&Action::JumpTo(1), window, detached, 3), Some(0));
         assert_eq!(route_target(&Action::GlobalJump(2, 4, "x".into()), window, detached, 0), Some(3));
         assert_eq!(route_target(&Action::Attach(2), window, detached, 0), Some(3));
