@@ -783,9 +783,9 @@ c.close()
   Check 'Nur lesen: create_session kind=chat verboten (forbidden)' ((Code (Tool 'create_session' @{ kind = 'chat' })) -eq 'forbidden')
   $script:prestart = $null
 
-  Write-Host "== Minimierte Bereiche (#142): Wiederherstellung, kaputtes Layout, focus_session holt zurueck" -ForegroundColor Cyan
+  Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session oeffnet allein" -ForegroundColor Cyan
   Stop-Hub
-  # 960 ist minimiert (Platz: rechts neben 961); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
+  # 960 ist minimiert (mit `slot` wie in 2.2.0 – wird seit 2.3.0 ignoriert); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
   $bad = [ordered]@{ Split = [ordered]@{ dir = 'Horizontal'; ratio = $null; a = @{ Leaf = 961 }; b = [ordered]@{ Split = [ordered]@{ dir = 'Vertical'; ratio = 0.5; a = @{ Leaf = 777 }; b = @{ Leaf = 961 } } } } }
   $st = [ordered]@{
     sessions = @(
@@ -805,7 +805,20 @@ c.close()
   $fr = Tool 'focus_session' @{ session = 960 }
   Start-Sleep -Milliseconds 600
   $mn = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq 960 })
-  Check 'focus_session holt die minimierte Sitzung zurueck (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session oeffnet die minimierte Sitzung allein (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
+  Check 'focus_session: der bisher sichtbare Bereich ist jetzt minimiert (laeuft weiter)' ($vs.minimized -eq $true -and $vs.focused -eq $false -and $vs.status -ne 'exited') ($vs | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961 }
+  Start-Sleep -Milliseconds 600
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session zurueck: Plaetze getauscht (961 sichtbar, 960 minimiert)' (-not $fr.err -and $vs.minimized -eq $false -and $vs.focused -eq $true -and $mn.minimized -eq $true) ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961 }
+  Start-Sleep -Milliseconds 300
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }
+  Check 'focus_session auf eine sichtbare Sitzung minimiert nichts' (-not $fr.err -and $mn.minimized -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 1) ($ss | ConvertTo-Json -Compress)
 } finally {
   if ($script:fakeListener) { try { $script:fakeListener.Stop() } catch {} }
   if ($script:fakePs) {
