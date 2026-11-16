@@ -684,10 +684,13 @@ c.close()
   Check 'create_session kind=chat, Modell, das kein Server hat -> bad_args nennt die Server' ((Code $nm) -eq 'bad_args' -and $nm.text -match 'No configured server' -and $nm.text -match 'Fake') $nm.text
   Check 'create_session kind=chat, unbekannter Server -> bad_args' ((Code (Tool 'create_session' @{ kind = 'chat'; server = 'Nirgends' })) -eq 'bad_args')
   Check 'create_session kind=chat mit shell -> bad_args' ((Code (Tool 'create_session' @{ kind = 'chat'; shell = 'powershell' })) -eq 'bad_args')
+  $f0 = (Tool 'list_sessions').data.focused
   $cc = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-model'; name = 'Smoke-LLM'; cwd = "$proj" }
   Check 'create_session kind=chat' (-not $cc.err -and $cc.data.kind -eq 'chat' -and $cc.data.model -eq 'fake-model' -and $cc.data.server -eq 'srv-smoke') $cc.text
   $C = $cc.data.id
-  $lc = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $C })
+  $lsc = Tool 'list_sessions'
+  $lc = ($lsc.data.sessions | Where-Object { $_.id -eq $C })
+  Check 'create_session kind=chat ist leise: Fokus unveraendert, nicht minimiert' ($lsc.data.focused -eq $f0 -and $lc.minimized -eq $false -and $lc.focused -eq $false) ($lc | ConvertTo-Json -Compress)
   Check 'list_sessions: neuer Chat (kind = chat, model, vom Agenten angelegt, ready)' ($lc.kind -eq 'chat' -and $lc.model -eq 'fake-model' -and $lc.created_by_agent -eq $true -and $lc.status -eq 'ready') ($lc | ConvertTo-Json -Compress)
   $sm = Tool 'send_chat_message' @{ session = $C; text = 'ping' }
   Check 'send_chat_message: ok mit Index der Nachricht' (-not $sm.err -and $sm.data.ok -eq $true -and $sm.data.index -eq 0) $sm.text
