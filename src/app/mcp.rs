@@ -202,25 +202,33 @@ fn env_caller_ok(is_chat: Option<bool>) -> bool {
 }
 
 /// Eine Sitzung für [`pick_caller`]: Kennung, PID ihrer Shell (der Hub hält deren Handle, die PID kann also nicht neu
-/// vergeben werden) und – nur bei WSL-Terminals – ihr geheimer Schlüssel (`PANELDECK_SESSION_KEY`).
-type CallerCand<'a> = (u64, Option<u32>, Option<&'a str>);
+/// vergeben werden), Kennung ihres Job Objects (#168) und – nur bei WSL-Terminals – ihr geheimer Schlüssel
+/// (`PANELDECK_SESSION_KEY`).
+type CallerCand<'a> = (u64, Option<u32>, Option<u64>, Option<&'a str>);
 
-/// Wer ruft auf (#152)? `peer` = Prozessbaum des Absenders, auf dem Verbindungs-Thread geprüft (`winctl::resolve_peer`);
-/// `hint` = `PANELDECK_SESSION` und `PANELDECK_SESSION_KEY` der Brücke. Regeln:
-/// 1. Liegt eine Sitzung im Prozessbaum, ist sie der Aufrufer (`"process"`) – die nächste, wenn es mehrere gäbe. Ein
-///    abweichender Hinweis zählt dann nicht.
-/// 2. Sonst gilt der Hinweis (`"env"`), aber nur für ein WSL-Terminal (dort liegt die Brücke nicht im Windows-Baum der
+/// Wer ruft auf (#152, #168)? `peer` = Absender, auf dem Verbindungs-Thread geprüft (`winctl::resolve_peer`: sein Job
+/// Object bzw. sein Prozessbaum); `hint` = `PANELDECK_SESSION` und `PANELDECK_SESSION_KEY` der Brücke. Regeln:
+/// 1. Läuft der Absender im Job Object einer Sitzung, ist sie der Aufrufer (`"job"`) – auch wenn er losgelöst oder
+///    verwaist ist. Ein abweichender Hinweis zählt dann nicht.
+/// 2. Sonst (Rückfallweg, z. B. Job nicht anzulegen): Liegt eine Sitzung im Prozessbaum, ist sie der Aufrufer
+///    (`"process"`) – die nächste, wenn es mehrere gäbe. Ein abweichender Hinweis zählt dann nicht.
+/// 3. Sonst gilt der Hinweis (`"env"`), aber nur für ein WSL-Terminal (dort liegt die Brücke nicht im Windows-Baum der
 ///    Sitzung) und nur mit dem passenden Schlüssel dieser Sitzung. Die Kennung allein beweist nichts.
-/// 3. Sonst: reißt der Baum des Absenders nach dem Start des Hubs ab (losgelöster Prozess), ist er „nicht zuzuordnen“
-///    (`"orphan"`): kein Aufrufer, aber kein Schreiben in mögliche Vorfahren ([`App::chain_blocked`]).
-/// 4. Sonst ist der Aufrufer extern (`"none"`, ohne Sitzung und ohne Kette).
+/// 4. Sonst: reißt der Baum des Absenders nach dem Start des Hubs ab (losgelöster Prozess außerhalb jedes Jobs), ist er
+///    „nicht zuzuordnen“ (`"orphan"`): kein Aufrufer, aber kein Schreiben in mögliche Vorfahren ([`App::chain_blocked`]).
+/// 5. Sonst ist der Aufrufer extern (`"none"`, ohne Sitzung und ohne Kette).
 fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
-    let near = sessions.iter().filter_map(|(id, pid, _)| Some((*id, peer.chain.iter().position(|p| Some(*p) == *pid)?))).min_by_key(|(_, pos)| *pos);
+    if let Some(job) = peer.job {
+        if let Some((id, ..)) = sessions.iter().find(|(_, _, j, _)| *j == Some(job)) {
+            return (Some(*id), "job");
+        }
+    }
+    let near = sessions.iter().filter_map(|(id, pid, _, _)| Some((*id, peer.chain.iter().position(|p| Some(*p) == *pid)?))).min_by_key(|(_, pos)| *pos);
     if let Some((id, _)) = near {
         return (Some(id), "process");
     }
     if let Some((want, key)) = hint {
-        if let Some((id, _, Some(k))) = sessions.iter().find(|(s, _, _)| *s == want) {
+        if let Some((id, _, _, Some(k))) = sessions.iter().find(|(s, ..)| *s == want) {
             if !k.is_empty() && keys_equal(k, key) {
                 return (Some(*id), "env");
             }
@@ -230,6 +238,16 @@ fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: O
         (None, "orphan")
     } else {
         (None, "none")
+    }
+}
+
+/// `identified_by` in `whoami`: Die Zuordnung über das Job Object (#168) ist die über den Prozessbaum der Sitzung –
+/// nach außen weiter `"process"` (die öffentlichen Werte bleiben `process`/`env`/`none`).
+fn public_how(how: &str) -> &str {
+    if how == "job" {
+        "process"
+    } else {
+        how
     }
 }
 
@@ -559,16 +577,25 @@ impl App {
             .iter()
             .map(|(id, e)| {
                 let wsl = env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl");
-                (*id, e.live.as_ref().and_then(|s| s.pid()), wsl.then_some(e.session_key.as_str()))
+                let live = e.live.as_ref();
+                (*id, live.and_then(|s| s.pid()), live.and_then(|s| s.job_key()), wsl.then_some(e.session_key.as_str()))
             })
             .collect();
         pick_caller(peer, &sessions, hint)
     }
 
-    /// Absender eines `--open` (#152): `(Sitzung in seinem Prozessbaum, nicht zuzuordnen)` – nur über den Prozessbaum.
+    /// Absender eines `--open` (#152): `(Sitzung, aus der er stammt, nicht zuzuordnen)` – nur über Job Object bzw.
+    /// Prozessbaum (#168), nie über Umgebungsvariablen.
     pub(super) fn open_origin(&self, peer: Option<&crate::winctl::PeerChain>) -> (Option<u64>, bool) {
         let Some(peer) = peer else { return (None, false) };
-        let sessions: Vec<CallerCand> = self.entries.iter().map(|(id, e)| (*id, e.live.as_ref().and_then(|s| s.pid()), None)).collect();
+        let sessions: Vec<CallerCand> = self
+            .entries
+            .iter()
+            .map(|(id, e)| {
+                let live = e.live.as_ref();
+                (*id, live.and_then(|s| s.pid()), live.and_then(|s| s.job_key()), None)
+            })
+            .collect();
         let (id, how) = pick_caller(peer, &sessions, None);
         (id, how == "orphan")
     }
@@ -863,7 +890,7 @@ impl App {
         let children: Vec<u64> = self.mcp.created.iter().filter(|(_, c)| **c == Some(id)).map(|(k, _)| *k).filter(|k| self.entries.contains_key(k)).collect();
         let mut v = json!({
             "session": id,
-            "identified_by": how,
+            "identified_by": public_how(how),
             "name": e.display_name(),
             "project": project,
             "group": e.meta.group,
@@ -1758,10 +1785,10 @@ mod tests {
     #[test]
     fn the_caller_comes_from_the_peer_process_tree_not_from_its_own_claims() {
         use crate::winctl::PeerChain;
-        let pc = |chain: &[u32], orphan: bool| PeerChain { chain: chain.to_vec(), orphan };
+        let pc = |chain: &[u32], orphan: bool| PeerChain { chain: chain.to_vec(), orphan, job: None };
         // Sitzungen: 5 (Shell-PID 500), 20 (PID 2000, markiert), 30 (WSL-Terminal, PID 3000, Schlüssel), 40 (Chat)
         let key30 = "a".repeat(64);
-        let sessions: [CallerCand; 4] = [(5, Some(500), None), (20, Some(2000), None), (30, Some(3000), Some(key30.as_str())), (40, None, None)];
+        let sessions: [CallerCand; 4] = [(5, Some(500), None, None), (20, Some(2000), None, None), (30, Some(3000), None, Some(key30.as_str())), (40, None, None, None)];
         // Rohe Verbindung aus dem Prozessbaum von 20, ohne oder mit gefälschter Angabe: immer 20
         let tree = pc(&[4242, 4100, 2000, 1, 999], false);
         assert_eq!(pick_caller(&tree, &sessions, None), (Some(20), "process"));
@@ -1786,6 +1813,34 @@ mod tests {
         // Ein verwaister Teilbaum, der noch durch eine Sitzung läuft, zählt als diese Sitzung
         assert_eq!(pick_caller(&pc(&[9, 2000], true), &sessions, None), (Some(20), "process"));
         assert!(keys_equal("abc", "abc") && !keys_equal("abc", "abd") && !keys_equal("abc", "ab"));
+    }
+
+    #[test]
+    fn the_job_object_attributes_detached_and_orphaned_callers_first() {
+        use crate::winctl::PeerChain;
+        // Sitzungen mit Jobs: 5 (PID 500, Job 1), 20 (PID 2000, Job 2), 30 (WSL, Job 3, Schlüssel), 40 (ohne Job, PID 4000)
+        let key30 = "a".repeat(64);
+        let sessions: [CallerCand; 4] = [(5, Some(500), Some(1), None), (20, Some(2000), Some(2), None), (30, Some(3000), Some(3), Some(key30.as_str())), (40, Some(4000), None, None)];
+        let job = |j: u64, chain: &[u32], orphan: bool| PeerChain { chain: chain.to_vec(), orphan, job: Some(j) };
+        // Losgelöster Enkel (Start-Process nach dem Ende seiner Shell): kein Baum mehr, aber im Job von 20
+        assert_eq!(pick_caller(&job(2, &[8888], false), &sessions, None), (Some(20), "job"));
+        // Job schlägt Baum und Hinweis (beides könnte ein Prozess fälschen bzw. verlieren)
+        assert_eq!(pick_caller(&job(2, &[8888, 500], false), &sessions, None), (Some(20), "job"));
+        assert_eq!(pick_caller(&job(2, &[8888], false), &sessions, Some((30, key30.as_str()))), (Some(20), "job"));
+        // Ein Job, den keine Sitzung (mehr) hat: Rückfall auf Baum, Hinweis, verwaist, extern
+        assert_eq!(pick_caller(&job(77, &[9, 4000], false), &sessions, None), (Some(40), "process"));
+        assert_eq!(pick_caller(&job(77, &[9], true), &sessions, None), (None, "orphan"));
+        assert_eq!(pick_caller(&job(77, &[9], false), &sessions, None), (None, "none"));
+        // Prozess außerhalb jeder Sitzung (kein Job, Baum ohne Sitzung): extern
+        let outside = PeerChain { chain: vec![7777, 4], orphan: false, job: None };
+        assert_eq!(pick_caller(&outside, &sessions, None), (None, "none"));
+        // Die Sitzung ohne Job (Zuweisung gescheitert) bleibt über den Baum erreichbar
+        assert_eq!(pick_caller(&PeerChain { chain: vec![1, 4000], orphan: false, job: None }, &sessions, None), (Some(40), "process"));
+        // Nach außen (whoami.identified_by) heißt der Job-Weg weiter "process" (öffentliche API unverändert)
+        assert_eq!(public_how("job"), "process");
+        for h in ["process", "env", "none"] {
+            assert_eq!(public_how(h), h);
+        }
     }
 
     #[test]

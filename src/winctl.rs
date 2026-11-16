@@ -117,12 +117,18 @@ pub struct PeerChain {
     /// `Start-Process`/`cmd /c start` aus einer kurzlebigen Shell). Er gilt nicht als externer Client, sondern als
     /// „nicht zuzuordnen“ und darf nicht in mögliche Vorfahren schreiben.
     pub orphan: bool,
+    /// Job Object der Sitzung, in dem der Absender läuft ([`SessionJob::key`], seit 2.3.0, #168). Zuverlässiger als
+    /// `chain`: Die Mitgliedschaft übersteht losgelöste und verwaiste Prozesse und neu vergebene Eltern-PIDs. Ist sie
+    /// bekannt, wird der Baum nicht mehr abgelaufen (`chain` = nur der Absender).
+    pub job: Option<u64>,
 }
 
 /// Absender einer angenommenen Verbindung bestimmen – sofort auf dem Verbindungs-Thread, ohne Zeitfenster für
 /// Täuschungen (#152): PID aus der TCP-Tabelle, Prozess öffnen (das Handle hält die PID fest), prüfen, dass er noch
-/// läuft und die Zeile noch ihm gehört, dann seinen Baum mit Erzeugungszeiten ablaufen. `None` (= abweisen), wenn der
-/// Absender schon beendet ist, nicht zu öffnen ist oder seine Zeile verschwunden ist.
+/// läuft und die Zeile noch ihm gehört. Dann zuerst über das Job Object einer Sitzung zuordnen (`IsProcessInJob` auf
+/// dieses Handle, #168); liegt er in keinem, seinen Baum mit Erzeugungszeiten ablaufen (Rückfallweg, z. B. wenn die
+/// Zuweisung an den Job scheiterte). `None` (= abweisen), wenn der Absender schon beendet ist, nicht zu öffnen ist oder
+/// seine Zeile verschwunden ist.
 #[cfg(windows)]
 pub fn resolve_peer(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> Option<PeerChain> {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -131,11 +137,15 @@ pub fn resolve_peer(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> 
     if !h.alive() || tcp_peer_pid(peer, local) != Some(pid) {
         return None;
     }
-    let born = h.created()?;
-    let out = walk_tree(pid, born);
+    let job = job_containing(h.0);
+    let out = match (job, h.created()) {
+        (Some(_), _) => Some(PeerChain { chain: vec![pid], orphan: false, job }),
+        (None, Some(born)) => Some(walk_tree(pid, born)),
+        (None, None) => None,
+    };
     // SAFETY: gültiges Handle aus `OpenProcess`, genau einmal geschlossen.
     unsafe { CloseHandle(h.0) };
-    Some(out)
+    out
 }
 
 #[cfg(not(windows))]
@@ -195,28 +205,9 @@ fn hub_started() -> u64 {
 #[cfg(windows)]
 fn walk_tree(pid: u32, born: u64) -> PeerChain {
     use std::collections::HashMap;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
-    let mut parent: HashMap<u32, u32> = HashMap::new();
-    // SAFETY: `pe` ist ein lokal genullter PROCESSENTRY32W mit gesetztem `dwSize` und wird nur an die ToolHelp-Aufrufe
-    // übergeben; das Snapshot-Handle wird nach der Prüfung (`INVALID_HANDLE_VALUE`) geschlossen.
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snap != INVALID_HANDLE_VALUE {
-            let mut pe: PROCESSENTRY32W = std::mem::zeroed();
-            pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-            if Process32FirstW(snap, &mut pe) != 0 {
-                loop {
-                    parent.insert(pe.th32ProcessID, pe.th32ParentProcessID);
-                    if Process32NextW(snap, &mut pe) == 0 {
-                        break;
-                    }
-                }
-            }
-            CloseHandle(snap);
-        }
-    }
-    let mut out = PeerChain { chain: vec![pid], orphan: false };
+    use windows_sys::Win32::Foundation::CloseHandle;
+    let parent: HashMap<u32, u32> = process_parents().into_iter().collect();
+    let mut out = PeerChain { chain: vec![pid], orphan: false, job: None };
     let (mut cur, mut cur_born) = (pid, born);
     for _ in 0..40 {
         let Some(&p) = parent.get(&cur) else { break };
@@ -251,6 +242,191 @@ fn walk_tree(pid: u32, born: u64) -> PeerChain {
         }
     }
     out
+}
+
+/// Alle laufenden Prozesse als (PID, Eltern-PID) – eine Momentaufnahme (ToolHelp). Leer, wenn sie nicht zu bekommen ist.
+#[cfg(windows)]
+fn process_parents() -> Vec<(u32, u32)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let mut out = Vec::new();
+    // SAFETY: `pe` ist ein lokal genullter PROCESSENTRY32W mit gesetztem `dwSize` und wird nur an die ToolHelp-Aufrufe
+    // übergeben; das Snapshot-Handle wird nach der Prüfung (`INVALID_HANDLE_VALUE`) geschlossen.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap != INVALID_HANDLE_VALUE {
+            let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+            pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap, &mut pe) != 0 {
+                loop {
+                    out.push((pe.th32ProcessID, pe.th32ParentProcessID));
+                    if Process32NextW(snap, &mut pe) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snap);
+        }
+    }
+    out
+}
+
+/// Job Object einer Sitzung (#168): Der Hub steckt die Shell direkt nach dem Start hinein ([`SessionJob::adopt`]); jeder
+/// Nachfahre erbt ihn – auch losgelöste (`Start-Process`, `cmd /c start`), verwaiste und solche, deren Eltern-PID neu
+/// vergeben ist. So ordnet [`resolve_peer`] einen Absender seiner Sitzung zu, ohne den Prozessbaum zu brauchen.
+///
+/// * **Kein Ausbruch:** Der Job hat keine Grenzen, insbesondere weder `JOB_OBJECT_LIMIT_BREAKAWAY_OK` noch
+///   `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`: `CreateProcess` mit `CREATE_BREAKAWAY_FROM_JOB` schlägt für jeden
+///   Nachfahren fehl (Zugriff verweigert).
+/// * **Verschachtelt:** Legt ein Programm in der Sitzung eigene Jobs an (ab Windows 8 erlaubt), liegen sie unter diesem;
+///   die Mitgliedschaft (`IsProcessInJob`) bleibt. Läuft der Hub selbst in einem Job, liegt dieser Job darunter.
+/// * **Kein Beenden:** Ohne `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` – das Schließen einer Sitzung beendet wie bisher nur
+///   die Shell, gestartete Hintergrundprozesse laufen weiter.
+/// * Was außerhalb von Paneldeck startet (Aufgabenplanung, WMI, COM-Server, ein per ShellExecute schon laufender
+///   Explorer), liegt in keinem Job; dafür bleibt der Prozessbaum als Rückfallweg. Ebenso WSL: Linux-Prozesse sind
+///   keine Windows-Prozesse (dort gilt `PANELDECK_SESSION_KEY`).
+///
+/// Das Handle liegt in einer prozessweiten Liste (für den Verbindungs-Thread); `Drop` nimmt es heraus und schließt es.
+pub struct SessionJob {
+    key: u64,
+}
+
+/// Die Job-Handles aller Sitzungen: (Kennung, Handle). Unter dieser Sperre wird ein Handle benutzt und geschlossen.
+#[cfg(windows)]
+fn jobs() -> std::sync::MutexGuard<'static, Vec<(u64, isize)>> {
+    static JOBS: std::sync::Mutex<Vec<(u64, isize)>> = std::sync::Mutex::new(Vec::new());
+    JOBS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl SessionJob {
+    /// Neuen, anonymen Job anlegen. `None`, wenn das nicht geht (dann bleibt nur der Prozessbaum).
+    #[cfg(windows)]
+    pub fn new() -> Option<SessionJob> {
+        use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        // SAFETY: ohne Sicherheitsattribute (Handle nicht vererbbar) und ohne Namen; ein Nullhandle ist ein Fehler.
+        let h = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if h.is_null() {
+            return None;
+        }
+        let key = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        jobs().push((key, h as isize));
+        Some(SessionJob { key })
+    }
+
+    #[cfg(not(windows))]
+    pub fn new() -> Option<SessionJob> {
+        None
+    }
+
+    /// Kennung für [`PeerChain::job`].
+    pub fn key(&self) -> u64 {
+        self.key
+    }
+
+    /// Den gerade gestarteten Prozess `process` (PID `pid`; Handle mit `PROCESS_SET_QUOTA | PROCESS_TERMINATE`, wie es
+    /// `CreateProcess` liefert) in den Job stecken. portable-pty startet die Shell nicht angehalten; zwischen
+    /// `CreateProcess` und dieser Zuweisung liegen Mikrosekunden, in denen eine Shell praktisch nie etwas startet. Falls
+    /// doch, holt [`sweep`] solche Nachfahren nach. `false`, wenn die Zuweisung scheitert (z. B. verbietet ein Job, in
+    /// dem der Hub selbst läuft, die Verschachtelung) – dann gilt der Prozessbaum.
+    #[cfg(windows)]
+    pub fn adopt(&self, process: std::os::windows::io::RawHandle, pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let g = jobs();
+        let Some(&(_, jh)) = g.iter().find(|(k, _)| *k == self.key) else { return false };
+        let (jh, ph) = (jh as HANDLE, process as HANDLE);
+        // SAFETY: gültiges Job-Handle (unter der Sperre, erst `Drop` schließt es) und das Prozess-Handle des Aufrufers.
+        if unsafe { AssignProcessToJobObject(jh, ph) } == 0 {
+            return false;
+        }
+        if let Some(born) = process_created(ph) {
+            sweep(jh, pid, born);
+        }
+        true
+    }
+
+    /// Alle Prozesse des Jobs beenden (nur für Tests).
+    #[cfg(all(test, windows))]
+    fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        if let Some(&(_, jh)) = jobs().iter().find(|(k, _)| *k == self.key) {
+            // SAFETY: gültiges Job-Handle unter der Sperre.
+            unsafe { TerminateJobObject(jh as windows_sys::Win32::Foundation::HANDLE, 1) };
+        }
+    }
+}
+
+impl Drop for SessionJob {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            let mut g = jobs();
+            if let Some(i) = g.iter().position(|(k, _)| *k == self.key) {
+                let (_, h) = g.remove(i);
+                // SAFETY: Handle aus `CreateJobObjectW`, aus der Liste genommen und genau einmal geschlossen.
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(h as windows_sys::Win32::Foundation::HANDLE) };
+            }
+        }
+    }
+}
+
+/// Kennung des Sitzungs-Jobs, in dem der Prozess `process` (Handle mit Abfragerecht) läuft (#168).
+#[cfg(windows)]
+fn job_containing(process: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+    jobs()
+        .iter()
+        .find(|(_, jh)| {
+            let mut r = 0;
+            // SAFETY: gültige Handles (das Job-Handle unter der Sperre), `r` ist ein lokaler Ausgabewert.
+            unsafe { IsProcessInJob(process, *jh as windows_sys::Win32::Foundation::HANDLE, &mut r) != 0 && r != 0 }
+        })
+        .map(|(k, _)| *k)
+}
+
+/// Nachfahren von `root` (Erzeugungszeit `root_born`), die vor seiner Zuweisung an `job` entstanden sind, nachträglich
+/// hineinstecken (#168). Jedes Kind muss nach seinem Elternteil entstanden sein (sonst gehört die Eltern-PID einem
+/// früheren Prozess). Wiederholt, bis ein Durchgang nichts Neues findet: Kinder, die ein nachträglich zugewiesener
+/// Prozess vor seiner Zuweisung gestartet hat, stehen erst in der nächsten Momentaufnahme.
+#[cfg(windows)]
+fn sweep(job: windows_sys::Win32::Foundation::HANDLE, root: u32, root_born: u64) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, IsProcessInJob};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+    for _ in 0..5 {
+        let procs = process_parents();
+        let mut tree: Vec<(u32, u64)> = vec![(root, root_born)];
+        let mut added = false;
+        let mut i = 0;
+        while i < tree.len() {
+            let (p, p_born) = tree[i];
+            i += 1;
+            for &(c, pp) in &procs {
+                if pp != p || c == p || c == 0 || tree.iter().any(|(t, _)| *t == c) {
+                    continue;
+                }
+                // SAFETY: reiner Aufruf; ein Nullhandle wird übersprungen.
+                let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, c) };
+                if h.is_null() {
+                    continue;
+                }
+                if let Some(t) = process_created(h).filter(|t| *t >= p_born) {
+                    let mut r = 0;
+                    // SAFETY: gültige Handles, `r` ist ein lokaler Ausgabewert.
+                    if unsafe { IsProcessInJob(h, job, &mut r) } != 0 && r == 0 && unsafe { AssignProcessToJobObject(job, h) } != 0 {
+                        added = true;
+                    }
+                    tree.push((c, t));
+                }
+                // SAFETY: gültiges Handle aus `OpenProcess`, genau einmal geschlossen.
+                unsafe { CloseHandle(h) };
+            }
+        }
+        if !added {
+            break;
+        }
+    }
 }
 
 /// Ein Abriss des Baums zählt als „verwaist“, wenn der letzte geprüfte Prozess nach dem Hub entstand. Ältere Abrisse
@@ -347,6 +523,154 @@ mod peer_tests {
         assert_eq!(pc.chain.first(), Some(&std::process::id()));
         assert!(!pc.orphan);
         drop(c);
+    }
+
+    /// Kinder von `pid` (laut Momentaufnahme), wartet bis zu 10 s auf mindestens eines.
+    fn children_of(pid: u32) -> Vec<u32> {
+        let t0 = std::time::Instant::now();
+        loop {
+            let c: Vec<u32> = process_parents().into_iter().filter(|(_, p)| *p == pid).map(|(c, _)| c).collect();
+            if !c.is_empty() || t0.elapsed() > std::time::Duration::from_secs(10) {
+                return c;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn job_of(pid: u32) -> Option<u64> {
+        let h = Proc::open(pid)?;
+        let j = job_containing(h.0);
+        // SAFETY: gültiges Handle aus `OpenProcess`, genau einmal geschlossen.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(h.0) };
+        j
+    }
+
+    #[test]
+    fn a_session_job_takes_the_shell_and_children_it_started_before_the_assignment() {
+        use std::os::windows::io::AsRawHandle;
+        // Die „Shell“ startet ihr Kind, bevor sie in den Job kommt (der Wettlauf, den `sweep` abdeckt).
+        let mut shell = std::process::Command::new("cmd").args(["/c", "ping -n 30 127.0.0.1 >nul"]).spawn().unwrap();
+        let kids = children_of(shell.id());
+        assert!(!kids.is_empty(), "ping gestartet");
+        let job = SessionJob::new().expect("Job");
+        assert!(job.adopt(shell.as_raw_handle(), shell.id()));
+        assert_eq!(job_of(shell.id()), Some(job.key()));
+        for k in &kids {
+            assert_eq!(job_of(*k), Some(job.key()), "vor der Zuweisung gestartetes Kind {k} nachgeholt");
+        }
+        assert_eq!(job_of(std::process::id()), None, "der Hub selbst liegt in keinem Sitzungs-Job");
+        let other = SessionJob::new().expect("zweiter Job");
+        assert_ne!(other.key(), job.key());
+        job.terminate();
+        let _ = shell.wait();
+        let key = job.key();
+        drop(job);
+        assert!(jobs().iter().all(|(k, _)| *k != key), "Drop nimmt den Job aus der Liste");
+        assert!(jobs().iter().any(|(k, _)| *k == other.key()));
+    }
+
+    #[test]
+    fn a_detached_process_of_a_session_is_attributed_by_its_job() {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        // Kurzlebige „Shell“ im Job startet per `start` einen losgelösten PowerShell-Prozess und endet sofort; der
+        // verbindet sich danach – sein Elternteil gibt es dann nicht mehr, der Job bleibt.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let ps = format!("$c = New-Object Net.Sockets.TcpClient('127.0.0.1', {port}); Start-Sleep 5");
+        // `raw_arg`: cmd versteht die Anführungszeichen-Maskierung von `args` (\") nicht.
+        let mut shell = std::process::Command::new("cmd")
+            .raw_arg(format!("/c start \"\" /b powershell -NoProfile -WindowStyle Hidden -Command \"{ps}\""))
+            .spawn()
+            .unwrap();
+        let job = SessionJob::new().expect("Job");
+        assert!(job.adopt(shell.as_raw_handle(), shell.id()));
+        let _ = shell.wait();
+        l.set_nonblocking(true).unwrap();
+        let t0 = std::time::Instant::now();
+        let s = loop {
+            match l.accept() {
+                Ok((s, _)) => break s,
+                Err(_) if t0.elapsed() < std::time::Duration::from_secs(30) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(e) => panic!("keine Verbindung des losgelösten Prozesses: {e}"),
+            }
+        };
+        let pc = resolve_peer(s.peer_addr().unwrap(), s.local_addr().unwrap()).expect("lebender Absender");
+        assert_eq!(pc.job, Some(job.key()), "{pc:?}");
+        assert!(!pc.orphan);
+        job.terminate();
+    }
+
+    /// Hilfsprozess für [`no_breakaway_and_nested_jobs_keep_the_membership`] (läuft nur mit `PANELDECK_JOB_HELPER`):
+    /// wartet auf „go“ (dann ist er im Job), versucht auszubrechen, steckt ein Kind in einen eigenen Job und meldet
+    /// `RESULT breakaway=<ok|Fehlercode> nested=<0|1> pid=<Kind>`; beendet sich nach der nächsten Zeile.
+    #[test]
+    fn job_helper_process() {
+        use std::io::BufRead;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        use windows_sys::Win32::System::Threading::{CreateProcessW, CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW};
+        if std::env::var_os("PANELDECK_JOB_HELPER").is_none() {
+            return;
+        }
+        let mut line = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut line);
+        let mut cmdline: Vec<u16> = "cmd.exe /c exit 0".encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: genullte Strukturen mit gesetztem `cb`; `cmdline` ist veränderbar und nullterminiert; die Handles aus
+        // `pi` werden bei Erfolg geschlossen.
+        let breakaway = unsafe {
+            let mut si: STARTUPINFOW = std::mem::zeroed();
+            si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+            let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+            if CreateProcessW(std::ptr::null(), cmdline.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0, CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW, std::ptr::null(), std::ptr::null(), &si, &mut pi) != 0 {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                "ok".to_string()
+            } else {
+                GetLastError().to_string()
+            }
+        };
+        let mut kid = std::process::Command::new("cmd").args(["/c", "ping -n 30 127.0.0.1 >nul"]).spawn().unwrap();
+        // SAFETY: anonymer Job; das Prozess-Handle gehört `kid` und lebt über den Aufruf.
+        let nested = unsafe {
+            let j = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            !j.is_null() && AssignProcessToJobObject(j, kid.as_raw_handle() as _) != 0
+        };
+        println!("RESULT breakaway={breakaway} nested={} pid={}", nested as u8, kid.id());
+        let _ = std::io::stdin().lock().read_line(&mut line);
+        let _ = kid.kill();
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn no_breakaway_and_nested_jobs_keep_the_membership() {
+        use std::io::{BufRead, Write};
+        use std::os::windows::io::AsRawHandle;
+        let exe = std::env::current_exe().unwrap();
+        let mut helper = std::process::Command::new(exe)
+            .args(["--exact", "winctl::peer_tests::job_helper_process", "--nocapture", "--test-threads=1"])
+            .env("PANELDECK_JOB_HELPER", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let job = SessionJob::new().expect("Job");
+        assert!(job.adopt(helper.as_raw_handle(), helper.id()));
+        let mut stdin = helper.stdin.take().unwrap();
+        writeln!(stdin, "go").unwrap();
+        let out = std::io::BufReader::new(helper.stdout.take().unwrap());
+        // libtest schreibt „test … ... “ ohne Zeilenende davor: die Meldung steht mitten in der Zeile.
+        let res = out.lines().map_while(Result::ok).find_map(|l| l.find("RESULT ").map(|i| l[i..].to_string())).expect("Ergebnis des Hilfsprozesses");
+        let field = |k: &str| res.split(' ').find_map(|f| f.strip_prefix(&format!("{k}="))).unwrap_or("").to_string();
+        assert_ne!(field("breakaway"), "ok", "CREATE_BREAKAWAY_FROM_JOB muss scheitern: {res}");
+        assert_eq!(field("breakaway"), "5", "Zugriff verweigert: {res}");
+        assert_eq!(field("nested"), "1", "eigener Job eines Programms (verschachtelt): {res}");
+        let kid: u32 = field("pid").parse().unwrap();
+        assert_eq!(job_of(kid), Some(job.key()), "Kind im verschachtelten Job bleibt im Sitzungs-Job");
+        let _ = writeln!(stdin, "done");
+        let _ = helper.wait();
+        job.terminate();
     }
 
     #[test]

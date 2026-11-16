@@ -5,8 +5,10 @@
 //! Chat – darf in keine Sitzung seiner Vorfahren schreiben (`write_forbidden`, geprüft in `App::mcp_target`).
 //!
 //! Die Kette wächst so:
-//! * `create_session` (Terminal, Claude-Sitzung, Chat): die neue Sitzung bekommt die Vorfahren des Erstellers und den
-//!   Ersteller selbst – immer, auch wenn der Ersteller vom Nutzer gestartet wurde (sein Kind darf nicht in ihn schreiben).
+//! * `create_session` (Terminal, Claude-Sitzung, Chat) und `paneldeck --open` aus einem Terminal: Ist der Ersteller
+//!   Glied einer Kette (hat Vorfahren), bekommt die neue Sitzung diese Vorfahren und den Ersteller selbst. Ein vom
+//!   Nutzer gestarteter Agent ohne Kette markiert nichts: Seine Kinder dürfen in ihn zurückschreiben (Entscheidung des
+//!   Nutzers zu #152), und ein `--open`, das der Nutzer in ein Terminal tippt, ergibt eine freie Sitzung.
 //! * Schreiben (`send_text`, `send_keys`, `run_command`, `queue_prompt`, `send_chat_message`) eines Aufrufers, der
 //!   selbst Vorfahren hat (Glied einer Kette), in eine Sitzung außerhalb seiner Kette: das Ziel wird genauso markiert.
 //!   Sonst könnte ein Glied der Kette einer bestehenden Claude-Sitzung einen Prompt geben, die dann für es schreibt.
@@ -43,8 +45,13 @@ pub(super) fn write_forbidden(entries: &BTreeMap<u64, Entry>, caller: Option<u64
     ancestors(entries, caller).contains(&target)
 }
 
-/// Neue Sitzung `child`, angelegt von `creator`: bekommt dessen Kette samt ihm selbst. `true` = Kette geändert.
+/// Neue Sitzung `child`, angelegt von `creator` (über `create_session` oder `paneldeck --open` aus seinem Terminal): Ist
+/// er Glied einer Kette (hat Vorfahren), bekommt sie dessen Kette samt ihm selbst. Ein Ersteller ohne Kette (vom Nutzer
+/// gestartet) markiert nichts – sein Kind darf in ihn zurückschreiben. `true` = Kette geändert.
 pub(super) fn on_create(entries: &mut BTreeMap<u64, Entry>, creator: Option<u64>, child: u64) -> bool {
+    if ancestors(entries, creator).is_empty() {
+        return false;
+    }
     let add = handed_on(entries, creator);
     merge_into(entries, child, &add)
 }
@@ -171,6 +178,11 @@ mod tests {
         w.get_mut(&chat).unwrap().chat.as_mut().unwrap().origin_sessions = Vec::new();
     }
 
+    /// `id` ist bereits Glied einer Kette (z. B. von einem Chat der Kette angelegt, siehe den ersten Test).
+    fn member(w: &mut BTreeMap<u64, Entry>, id: u64, chain: &[u64]) {
+        w.get_mut(&id).unwrap().meta.agent_chain = chain.to_vec();
+    }
+
     #[test]
     fn agent_chat_terminal_agent_cannot_write_back_into_the_original_agent() {
         // Agent in Terminal 5 (vom Nutzer gestartet) → Chat 10 → create_session Terminal 20 → Agent dort.
@@ -199,17 +211,21 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_child_cannot_write_into_its_parent_or_grandparent() {
-        // Vom Nutzer gestarteter Agent 5 legt Claude-Sitzung 21 an, die legt 22 an.
-        let mut w = world(&[(5, false), (21, false), (22, false)]);
-        on_create(&mut w, Some(5), 21);
-        on_create(&mut w, Some(21), 22);
-        assert_eq!(w[&21].meta.agent_chain, [5]);
-        assert_eq!(w[&22].meta.agent_chain, [5, 21]);
-        assert!(write_forbidden(&w, Some(21), 5));
-        assert!(write_forbidden(&w, Some(22), 5) && write_forbidden(&w, Some(22), 21));
-        // Eltern dürfen ihre Kinder weiter steuern
-        assert!(!write_forbidden(&w, Some(5), 21) && !write_forbidden(&w, Some(21), 22));
+    fn children_of_a_user_started_agent_may_write_back_into_it() {
+        // Entscheidung des Nutzers (#152): Vom Nutzer gestarteter Agent 5 (ohne Kette) legt Claude-Sitzung 21 an, die
+        // legt 22 an – nichts wird markiert, Kinder dürfen in ihre Ersteller zurückschreiben.
+        let mut w = world(&[(5, false), (21, false), (22, false), (12, true)]);
+        assert!(!on_create(&mut w, Some(5), 21));
+        assert!(!on_create(&mut w, Some(21), 22));
+        assert!(w[&21].meta.agent_chain.is_empty() && w[&22].meta.agent_chain.is_empty());
+        assert!(!write_forbidden(&w, Some(21), 5));
+        assert!(!write_forbidden(&w, Some(22), 5) && !write_forbidden(&w, Some(22), 21));
+        // Auch ein Chat, den 5 anlegt, darf in einer Runde des Nutzers in 5 schreiben …
+        assert!(!on_create(&mut w, Some(5), 12));
+        assert!(ancestors(&w, Some(12)).is_empty());
+        // … nur in einer Runde, die 5 selbst auslöst, nicht (Umweg-Schutz seit 2.2.0)
+        agent_sends_chat(&mut w, 5, 12);
+        assert!(write_forbidden(&w, Some(12), 5));
         // Ein Aufrufer außerhalb von Paneldeck vererbt nichts
         w.insert(23, Entry::new(SessionMeta { id: 23, ..SessionMeta::default() }));
         assert!(!on_create(&mut w, None, 23));
@@ -217,10 +233,25 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_child_of_a_chain_member_cannot_write_into_its_parent_or_grandparent() {
+        // 5 ist Glied einer Kette (Vorfahr 1), legt Claude-Sitzung 21 an, die legt 22 an.
+        let mut w = world(&[(1, false), (5, false), (21, false), (22, false)]);
+        member(&mut w, 5, &[1]);
+        assert!(on_create(&mut w, Some(5), 21));
+        assert!(on_create(&mut w, Some(21), 22));
+        assert_eq!(w[&21].meta.agent_chain, [1, 5]);
+        assert_eq!(w[&22].meta.agent_chain, [1, 5, 21]);
+        assert!(write_forbidden(&w, Some(21), 5) && write_forbidden(&w, Some(21), 1));
+        assert!(write_forbidden(&w, Some(22), 5) && write_forbidden(&w, Some(22), 21));
+        // Eltern dürfen ihre Kinder weiter steuern
+        assert!(!write_forbidden(&w, Some(5), 21) && !write_forbidden(&w, Some(21), 22));
+    }
+
+    #[test]
     fn a_chain_member_taints_the_session_it_writes_into() {
         // Kette 5 → 20; 20 gibt der bestehenden Claude-Sitzung 40 des Nutzers einen Prompt (queue_prompt).
         let mut w = world(&[(5, false), (20, false), (40, false), (41, false)]);
-        on_create(&mut w, Some(5), 20);
+        member(&mut w, 20, &[5]);
         assert!(!write_forbidden(&w, Some(20), 40));
         assert!(on_write(&mut w, Some(20), 40));
         assert_eq!(w[&40].meta.agent_chain, [5, 20]);
@@ -249,7 +280,7 @@ mod tests {
         assert!(write_forbidden(&w, Some(40), 5));
         // Ein Glied der Kette, das einem Chat schreibt, markiert ihn dauerhaft (auch nach einer Nutzer-Runde)
         let mut w = world(&[(5, false), (20, false), (11, true)]);
-        on_create(&mut w, Some(5), 20);
+        member(&mut w, 20, &[5]);
         agent_sends_chat(&mut w, 20, 11);
         assert_eq!(w[&11].meta.agent_chain, [5, 20]);
         user_sends_chat(&mut w, 11);
@@ -261,7 +292,7 @@ mod tests {
     #[test]
     fn the_chain_survives_a_restart() {
         let mut w = world(&[(5, false), (20, false)]);
-        on_create(&mut w, Some(5), 20);
+        member(&mut w, 20, &[5]);
         // Neustart: Metadaten aus state.json, neue Einträge (Prozesse neu gestartet, Ids gleich)
         let saved = serde_json::to_string(&w[&20].meta).unwrap();
         let meta: SessionMeta = serde_json::from_str(&saved).unwrap();
@@ -272,14 +303,16 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_created_chat_cannot_write_into_its_agent_even_in_a_user_turn() {
-        // Agent 5 legt Chat 12 an; der Nutzer schreibt selbst im Chat (keine Kette der Runde) – die Werkzeuge des
-        // Modells dürfen trotzdem nicht in 5 schreiben, auch nicht per run_command/send_keys/queue_prompt/close/focus.
-        let mut w = world(&[(5, false), (12, true), (30, false)]);
-        on_create(&mut w, Some(5), 12);
+    fn a_chat_created_by_a_chain_member_cannot_write_into_it_even_in_a_user_turn() {
+        // Agent 5 (Glied einer Kette mit Vorfahr 1) legt Chat 12 an; der Nutzer schreibt selbst im Chat (keine Kette der
+        // Runde) – die Werkzeuge des Modells dürfen trotzdem nicht in 5 schreiben, auch nicht per
+        // run_command/send_keys/queue_prompt/close/focus.
+        let mut w = world(&[(1, false), (5, false), (12, true), (30, false)]);
+        member(&mut w, 5, &[1]);
+        assert!(on_create(&mut w, Some(5), 12));
         user_sends_chat(&mut w, 12);
         let origins = ancestors(&w, Some(12));
-        assert_eq!(origins, [5]);
+        assert_eq!(origins, [1, 5]);
         for (tool, args) in [
             ("send_text", serde_json::json!({"session": 5, "text": "x"})),
             ("run_command", serde_json::json!({"session": 5, "command": "dir"})),
@@ -298,7 +331,7 @@ mod tests {
     #[test]
     fn closed_sessions_are_pruned_from_every_chain() {
         let mut w = world(&[(5, false), (20, false), (21, true)]);
-        on_create(&mut w, Some(5), 20);
+        member(&mut w, 20, &[5]);
         on_create(&mut w, Some(20), 21);
         w.get_mut(&21).unwrap().chat.as_mut().unwrap().origin_sessions = vec![5, 99];
         assert!(!prune(&mut w), "alle noch da");
@@ -319,7 +352,7 @@ mod tests {
     fn potential_ancestors_are_every_session_in_some_chain() {
         let mut w = world(&[(5, false), (6, false), (10, true), (20, false)]);
         assert!(!(1..=20).any(|i| potential_ancestor(&w, i)), "ohne Ketten: keine");
-        on_create(&mut w, Some(5), 20);
+        member(&mut w, 20, &[5]);
         assert!(potential_ancestor(&w, 5));
         assert!(!potential_ancestor(&w, 20) && !potential_ancestor(&w, 6));
         // auch die Kette einer laufenden Chat-Runde zählt
@@ -335,7 +368,7 @@ mod tests {
         let mut w = world(&[(5, false), (20, false)]);
         w.get_mut(&5).unwrap().meta.name = "Agent A".into();
         w.get_mut(&5).unwrap().meta.custom_name = true;
-        on_create(&mut w, Some(5), 20);
+        member(&mut w, 20, &[5]);
         assert!(hint(&w, 20).is_some_and(|h| h.ends_with(": Agent A")), "{:?}", hint(&w, 20));
         assert_eq!(hint(&w, 5), None, "unmarkiert: kein Hinweis");
         assert!(reset(&mut w, 20));
@@ -343,6 +376,19 @@ mod tests {
         assert!(!write_forbidden(&w, Some(20), 5));
         assert!(!reset(&mut w, 20), "nichts mehr zurückzusetzen");
         assert!(!reset(&mut w, 99));
+    }
+
+    #[test]
+    fn open_from_a_terminal_marks_only_when_the_terminal_has_a_chain() {
+        // `paneldeck --open … --claude` aus Terminal 5 (wie `App::handle_ipc`): Der Nutzer tippt es in sein Terminal –
+        // freie Sitzung. Ein Glied einer Kette (20, Vorfahr 5) tippt es – die neue Sitzung erbt die Kette samt 20.
+        let mut w = world(&[(5, false), (20, false), (30, false), (31, false)]);
+        assert!(!on_create(&mut w, Some(5), 30));
+        assert!(w[&30].meta.agent_chain.is_empty() && !write_forbidden(&w, Some(30), 5));
+        member(&mut w, 20, &[5]);
+        assert!(on_create(&mut w, Some(20), 31));
+        assert_eq!(w[&31].meta.agent_chain, [5, 20]);
+        assert!(write_forbidden(&w, Some(31), 20) && write_forbidden(&w, Some(31), 5));
     }
 
     #[test]

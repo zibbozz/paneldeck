@@ -1148,9 +1148,10 @@ impl App {
         for c in cmds {
             self.from_tray(ctx);
             if let IpcCmd::Open { path, claude, origin } = c {
-                // `paneldeck --open` aus einem Hub-Terminal heraus: die neue Sitzung erbt dessen Agenten-Kette samt ihm
-                // (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Absender nur über den Prozessbaum; ein
-                // losgelöster (nicht zuzuordnender) Absender darf keine Claude-Sitzung öffnen.
+                // `paneldeck --open` aus einem Hub-Terminal heraus: Hat das Terminal eine Agenten-Kette, erbt die neue
+                // Sitzung sie samt ihm (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Ohne Kette (der
+                // Nutzer tippt es) bleibt sie frei (`taint::on_create`). Absender nur über Job Object bzw. Prozessbaum
+                // (#168); ein losgelöster, nicht zuzuordnender Absender darf keine Claude-Sitzung öffnen.
                 let (origin, orphan) = self.open_origin(origin.as_ref());
                 if orphan && claude {
                     self.notify_text(taint::orphan_error().1);

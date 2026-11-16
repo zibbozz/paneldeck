@@ -103,6 +103,9 @@ pub struct Session {
     /// und keine Klicks. Ebenso ein Vollbildprogramm, das selbst OSC 133;A ausgibt. Ohne Shell-Integration
     /// (cmd ohne Integration, entfernte Shells) greift die Erkennung nicht.
     pub stale_modes: Arc<AtomicBool>,
+    /// Job Object der Shell und all ihrer Nachfahren (#168): ordnet MCP-Aufrufer auch losgelöst dieser Sitzung zu.
+    /// Wird nach dem Beenden der Shell (`Drop`) freigegeben; die Prozesse darin laufen weiter.
+    job: Option<crate::winctl::SessionJob>,
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
@@ -146,6 +149,9 @@ impl Session {
         }
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+        // Shell sofort in das Job Object der Sitzung (#168): Ihre Nachfahren gehören dann sicher zu ihr, auch losgelöst.
+        // Scheitert das, bleibt der Prozessbaum als Zuordnung (`winctl::resolve_peer`).
+        let job = Self::adopt_into_job(child.as_ref());
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -276,11 +282,31 @@ impl Session {
             tee: Mutex::new(Vec::new()),
             last_activity,
             stale_modes,
+            job,
         };
         if let Some(input) = opts.initial_input {
             session.write(input.as_bytes());
         }
         Ok(session)
+    }
+
+    /// Job Object für die gerade gestartete Shell anlegen und sie hineinstecken (#168). `None` ohne Windows oder wenn
+    /// das scheitert.
+    #[cfg(windows)]
+    fn adopt_into_job(child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
+        let (h, pid) = (child.as_raw_handle()?, child.process_id()?);
+        let job = crate::winctl::SessionJob::new()?;
+        job.adopt(h, pid).then_some(job)
+    }
+
+    #[cfg(not(windows))]
+    fn adopt_into_job(_child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
+        None
+    }
+
+    /// Kennung des Job Objects dieser Sitzung (#168), `None` ohne Job (dann zählt nur der Prozessbaum).
+    pub fn job_key(&self) -> Option<u64> {
+        self.job.as_ref().map(|j| j.key())
     }
 
     pub fn write(&self, bytes: &[u8]) {
