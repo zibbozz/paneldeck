@@ -48,6 +48,7 @@ mod settings;
 mod shot_start;
 mod sidebar;
 mod sysprompt_ui;
+mod taint;
 mod tasks_ui;
 mod terminal_links;
 mod titlebar;
@@ -2394,7 +2395,8 @@ impl App {
     /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
     fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
         let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
-        let origins = self.entries.get(&id).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+        // Vorfahren des Chats: seine gespeicherte Agenten-Kette und die Kette der laufenden Runde (#152).
+        let origins = taint::ancestors(&self.entries, Some(id));
         match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
             Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
             None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
@@ -2485,13 +2487,11 @@ impl App {
             }
             return ChatSendResult::LevelQuestion;
         }
-        // Kette der auslösenden Agenten: der Aufrufer und – ist er selbst ein Chat – dessen Kette (transitiv).
+        // Kette der auslösenden Agenten: der Aufrufer und seine Vorfahren (gespeicherte Agenten-Kette, bei einem Chat
+        // auch die Kette seiner laufenden Runde; transitiv, #152).
         let chain = match &origin {
             ChatSendOrigin::User => Vec::new(),
-            ChatSendOrigin::Agent { caller, .. } => {
-                let caller_chain = caller.and_then(|c| self.entries.get(&c)).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
-                chatmod::tools::chain_origins(*caller, &caller_chain)
-            }
+            ChatSendOrigin::Agent { caller, .. } => taint::handed_on(&self.entries, *caller),
         };
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();

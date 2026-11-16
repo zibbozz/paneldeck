@@ -180,7 +180,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "whoami",
             level: Read,
             group: Group::Always,
-            description: "Identify the calling agent inside Paneldeck: the session it runs in (by process tree, or by the PANELDECK_SESSION variable inside WSL), that session's name/folder/project, and the sessions it created (children). session=null means the agent does not run inside a Paneldeck terminal.",
+            description: "Identify the calling agent inside Paneldeck: the session it runs in (by process tree, or by the PANELDECK_SESSION variable inside WSL), that session's name/folder/project, and the sessions it created (children). agent_chain lists the sessions it must not write into because it descends from them (they created it or wrote into it through MCP, directly or through other sessions). session=null means the agent does not run inside a Paneldeck terminal.",
             schema: schema(json!({}), &[]),
         },
         ToolDef {

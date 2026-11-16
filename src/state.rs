@@ -345,6 +345,21 @@ pub struct SessionMeta {
     /// Wo der minimierte Bereich stand (Geschwister, Richtung, Seite, Anteil) – dort kommt er wieder hin.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::layout::lenient_slot")]
     pub slot: Option<crate::layout::Slot>,
+    /// Agenten-Kette (seit 2.3.0, #152): Sitzungen, von denen diese Sitzung abstammt – ihr Ersteller über
+    /// `create_session` samt dessen Kette, und jeder Agent, der über MCP in sie geschrieben hat, samt seiner Kette.
+    /// Ein Agent in dieser Sitzung darf in keine davon schreiben. Aufsteigend, ohne Doppelte; fehlt in der Datei, wenn
+    /// leer (vom Nutzer gestartet und nie von einem Agenten beschrieben). Ungültige Werte laden als leer.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_chain")]
+    pub agent_chain: Vec<u64>,
+}
+
+/// `agent_chain` nachsichtig lesen: eine Liste von Zahlen; Fremdes (kein Array, keine Zahlen) wird übergangen.
+fn lenient_chain<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u64>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let mut out: Vec<u64> = v.as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
 /// Art einer Sitzung.
@@ -413,6 +428,7 @@ impl Default for SessionMeta {
             chat: None,
             minimized: false,
             slot: None,
+            agent_chain: Vec::new(),
         }
     }
 }
@@ -1024,6 +1040,32 @@ mod kind_tests {
         // Terminals schreiben die neuen Felder nicht (ältere Versionen sehen dieselbe Datei wie bisher)
         let s = serde_json::to_string(&st.sessions[0]).unwrap();
         assert!(!s.contains("\"kind\"") && !s.contains("\"chat\""), "{s}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_chain_survives_a_restart_and_old_files_load_without_it() {
+        let dir = std::env::temp_dir().join(format!("pd-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        // 2.2.0 und älter: kein Feld → leere Kette (vom Nutzer gestartet)
+        std::fs::write(&p, r#"{"sessions":[{"id":3,"name":"pwsh","shell_id":"pwsh","project":1}],"next_id":4}"#).unwrap();
+        let (st, _) = load_saved(&p);
+        assert!(st.sessions[0].agent_chain.is_empty());
+        // Leere Kette wird nicht geschrieben (ältere Versionen sehen dieselbe Datei)
+        assert!(!serde_json::to_string(&st.sessions[0]).unwrap().contains("agent_chain"));
+        // Neustart: die Kette bleibt an der Sitzung (Ids werden nie neu vergeben)
+        let saved = SavedState { sessions: vec![SessionMeta { id: 12, agent_chain: vec![5, 10], ..SessionMeta::default() }], next_id: 13, ..SavedState::default() };
+        save_json(&p, &saved);
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none());
+        assert_eq!(st.sessions[0].agent_chain, [5, 10]);
+        // Fremde Werte: nachsichtig (sortiert, ohne Doppelte, nur Zahlen; kein Array → leer)
+        let m: SessionMeta = serde_json::from_str(r#"{"id":1,"agent_chain":[9,"x",3,9,-1]}"#).unwrap();
+        assert_eq!(m.agent_chain, [3, 9]);
+        let m: SessionMeta = serde_json::from_str(r#"{"id":1,"agent_chain":"5"}"#).unwrap();
+        assert!(m.agent_chain.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
