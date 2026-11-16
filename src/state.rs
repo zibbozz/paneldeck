@@ -222,6 +222,9 @@ pub struct Settings {
     /// Programme dürfen per OSC 52 in die Zwischenablage kopieren (seit 2.3.0, #181, Standard an). Lesen der
     /// Zwischenablage durch Programme gibt es nie. Fehlt in älteren Dateien (dann an).
     pub osc52_copy: bool,
+    /// Vor dem Einfügen mehrerer Zeilen nachfragen, wenn das Programm kein Bracketed Paste nutzt (seit 2.3.0, #183,
+    /// Standard an wie in Windows Terminal). Fehlt in älteren Dateien (dann an).
+    pub warn_multiline_paste: bool,
     /// Standard-Startoptionen für neue Claude-Sitzungen (seit 2.3.0; leeres Feld = Standard von Claude Code). Gelten für
     /// Sitzungen aus der Oberfläche und über MCP, wenn nichts angegeben ist – `bypassPermissions` nie für Agenten.
     /// Nie `bypassPermissions` und nur gültige Namen (beim Schreiben bereinigt, beim Laden verworfen, siehe `sanitize`).
@@ -312,6 +315,7 @@ impl Default for Settings {
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
             osc52_copy: true,
+            warn_multiline_paste: true,
             claude_defaults: Default::default(),
             last_claude_opts: None,
             claude_bypass_dropped: false,
@@ -1080,6 +1084,22 @@ mod tests {
         assert_eq!(j["osc52_copy"], false);
         let back: Settings = serde_json::from_value(j).unwrap();
         assert!(!back.osc52_copy);
+    }
+
+    #[test]
+    fn warn_multiline_paste_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „an“, die übrigen Werte bleiben.
+        let old = r#"{"language":"En","osc52_copy":false}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.warn_multiline_paste);
+        assert!(!s.osc52_copy);
+        assert!(Settings::default().warn_multiline_paste);
+        let mut s = s;
+        s.warn_multiline_paste = false;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["warn_multiline_paste"], false);
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(!back.warn_multiline_paste);
     }
 
     #[test]

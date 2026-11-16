@@ -40,6 +40,10 @@ New-Item -ItemType Directory -Force $WorkRoot | Out-Null
 $work = Join-Path $WorkRoot ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $dir = New-Item -ItemType Directory -Force "$work\hub"; $proj = New-Item -ItemType Directory -Force "$work\proj"
 Copy-Item $Exe "$dir\paneldeck.exe"
+# Mitgelieferte, neuere ConPTY (conpty.dll + OpenConsole.exe neben der .exe) mitnehmen, falls vorhanden: nur damit
+# kommen Farbabfragen (OSC 10/11) beim Programm an und werden beantwortet (#183).
+foreach ($f in 'conpty.dll', 'OpenConsole.exe') { $src = Join-Path (Split-Path $Exe) $f; if (Test-Path $src) { Copy-Item $src "$dir\$f" } }
+$script:bundledConpty = (Test-Path "$dir\conpty.dll") -and (Test-Path "$dir\OpenConsole.exe")
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
@@ -274,6 +278,18 @@ try {
       $r = Tool 'run_command' @{ session = $id; command = $long; timeout_secs = 25 }
       Check "run_command $sh (langer Befehl: Ausgabe exakt)" ($r.data.output -eq 'hallo-lang' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
       Test-Osc52 $id $sh
+      # Name/Version des Terminals in der Umgebung der Shell (#183)
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:TERM_PROGRAM|$env:TERM_PROGRAM_VERSION"'; timeout_secs = 25 }
+      Check "TERM_PROGRAM=Paneldeck und TERM_PROGRAM_VERSION in $sh" ($r.data.output.Trim() -match '^Paneldeck\|\d+\.\d+\.\d+') "'$($r.data.output)'"
+      # Farbabfrage OSC 11: Antwort kommt als Eingabe zurueck (nur mit der mitgelieferten ConPTY; die des Systems
+      # reicht die Abfrage nicht an das Terminal weiter)
+      if ($script:bundledConpty) {
+        $q = '[Console]::Write("$([char]27)]11;?$([char]27)\"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''rgb:[0-9a-f/]+'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'' -replace "$([char]7)", ''BEL'')'
+        $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
+        Check "OSC 11 (Hintergrundfarbe abfragen) wird beantwortet ($sh, mitgelieferte ConPTY)" ($r.data.output -match 'reply=ESC\]11;rgb:[0-9a-f]{4}/[0-9a-f]{4}/[0-9a-f]{4}') "'$($r.data.output)'"
+      } else {
+        Skip "OSC 11 (Hintergrundfarbe abfragen) wird beantwortet ($sh)" 'keine mitgelieferte ConPTY (conpty.dll + OpenConsole.exe) neben der .exe'
+      }
       $r = Tool 'run_command' @{ session = $id; command = 'Start-Sleep 4'; timeout_secs = 1 }
       Check "run_command $sh (Zeitlimit)" ($r.data.timed_out -eq $true -and -not $r.data.finished) $r.text
       Start-Sleep 5

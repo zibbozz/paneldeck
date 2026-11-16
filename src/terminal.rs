@@ -1,17 +1,19 @@
 //! Ein Terminal: PTY (ConPTY unter Windows) + VT-Emulation (alacritty_terminal).
 
 use crate::shells::ShellSpec;
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::{test::TermSize, Config, Osc52, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::term::color::{Colors, COUNT as COLOR_COUNT};
+use alacritty_terminal::term::{test::TermSize, Config, Osc52, Term, TermMode};
+use alacritty_terminal::vte::ansi::{Processor, Rgb};
 use eframe::egui;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use crate::osc::{OscEvent, OscScanner};
+use crate::osc::{OscEvent, OscScanner, Query};
 use crate::search::SearchState;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::theme::Theme;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -49,6 +51,129 @@ impl ClipboardRequest {
     }
 }
 
+/// Höchstlänge (Zeichen) eines Titels, den ein Programm per OSC 0/2 setzt (#183).
+pub const TITLE_MAX_CHARS: usize = 256;
+
+/// Formatiert die Antwort auf eine Farbabfrage (von alacritty, enthält Präfix und Abschluss der Anfrage).
+pub type ColorFmt = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
+/// Formatiert die Antwort auf `CSI 14 t` (von alacritty).
+pub type SizeFmt = Arc<dyn Fn(WindowSize) -> String + Sync + Send + 'static>;
+
+/// Antwort an das Programm. Alle Antworten (auch die der Emulation selbst, z. B. DA1 oder die Cursorposition) werden in
+/// der Reihenfolge der Anfragen gesammelt und nach jedem verarbeiteten Ausgabe-Stück zusammen geschrieben
+/// ([`Listener::take_reply_bytes`]): Farbabfragen brauchen die von Programmen gesetzten Farben (`Term::colors`), die
+/// erst nach dem Verarbeiten ohne Sperrkonflikt lesbar sind, und Programme wie Neovim oder fish schicken DA1 als
+/// „Wächter“ hinter OSC 11 – kommt dessen Antwort zuerst, gilt die Farbabfrage als nicht unterstützt.
+#[derive(Clone)]
+pub enum Reply {
+    /// Fertiger Text (`Event::PtyWrite`).
+    Text(String),
+    /// OSC 4/10/11/12 `?` für den Farbindex (0–255 Palette, 256 Vordergrund, 257 Hintergrund, 258 Cursor).
+    Color(usize, ColorFmt),
+    /// `CSI 14 t`: Größe des Textbereichs in Pixeln.
+    TextAreaPx(SizeFmt),
+    /// Anfragen, die die Emulation nicht kennt (`CSI 16 t`, XTVERSION), erkannt in `osc::OscScanner`.
+    Query(Query),
+}
+
+/// Was der PTY-Thread zum Beantworten braucht und der UI-Thread je Frame pflegt (`Session::set_view`):
+/// Theme der Sitzung und Zellgröße in physischen Pixeln (0 = noch nie gezeichnet).
+#[derive(Clone, PartialEq)]
+pub struct ReplyView {
+    pub theme: Theme,
+    pub cell_w: u16,
+    pub cell_h: u16,
+}
+
+impl Default for ReplyView {
+    fn default() -> Self {
+        ReplyView { theme: crate::theme::all().swap_remove(0), cell_w: 0, cell_h: 0 }
+    }
+}
+
+/// Antworten in Bytes umsetzen (rein, testbar): Farben aus den von Programmen gesetzten Werten (`colors`), sonst aus
+/// dem Theme; Größen aus `cols`×`rows` Zellen der Größe `view.cell_w`×`view.cell_h`.
+pub fn render_replies(replies: Vec<Reply>, colors: &Colors, view: &ReplyView, cols: usize, rows: usize) -> Vec<u8> {
+    let mut out = String::new();
+    for r in replies {
+        match r {
+            Reply::Text(s) => out.push_str(&s),
+            Reply::Color(i, f) => {
+                let set = if i < COLOR_COUNT { colors[i] } else { None };
+                let rgb = set.unwrap_or_else(|| {
+                    let c = view.theme.index_color(i);
+                    Rgb { r: c.r(), g: c.g(), b: c.b() }
+                });
+                out.push_str(&f(rgb));
+            }
+            Reply::TextAreaPx(f) => out.push_str(&f(WindowSize {
+                num_lines: rows.min(u16::MAX as usize) as u16,
+                num_cols: cols.min(u16::MAX as usize) as u16,
+                cell_width: view.cell_w,
+                cell_height: view.cell_h,
+            })),
+            Reply::Query(Query::CellSizePx) => out.push_str(&format!("\x1b[6;{};{}t", view.cell_h, view.cell_w)),
+            Reply::Query(Query::XtVersion) => out.push_str(&format!("\x1bP>|Paneldeck {}\x1b\\", env!("CARGO_PKG_VERSION"))),
+        }
+    }
+    out.into_bytes()
+}
+
+/// Titel eines Programms (OSC 0/2) bereinigen, bevor er in der Seitenleiste, im Fenstertitel oder über MCP erscheint:
+/// ohne Steuerzeichen (C0, DEL, C1) und ohne Zeichen zur Schreibrichtung (Überschreiben/Isolieren U+202A–202E,
+/// U+2066–2069 sowie die Marken U+200E/U+200F/U+061C), die die Anzeige umdrehen und einen anderen Titel vortäuschen
+/// könnten; höchstens [`TITLE_MAX_CHARS`] Zeichen.
+pub fn sanitize_title(t: &str) -> String {
+    t.chars()
+        .filter(|&c| !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}'))
+        .take(TITLE_MAX_CHARS)
+        .collect()
+}
+
+/// Eingefügten Text für das Programm aufbereiten: Zeilenumbrüche als `\r`, C1-Steuerzeichen (U+0080–U+009F) immer
+/// entfernt (manche Programme deuten sie als Escape-Sequenzen). Mit Bracketed Paste zusätzlich alle anderen
+/// Steuerzeichen (v. a. ESC: ein eingefügtes `ESC[201~` beendete sonst den Einfüge-Modus vorzeitig und der Rest liefe
+/// als getippte Befehle) außer Tab und Zeilenumbruch, eingerahmt in `ESC[200~` … `ESC[201~`.
+pub fn paste_payload(text: &str, bracketed: bool) -> String {
+    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    let c1 = |c: char| ('\u{80}'..='\u{9f}').contains(&c);
+    if bracketed {
+        let text: String = text.chars().filter(|&c| c >= ' ' && c != '\u{7f}' && !c1(c) || c == '\t' || c == '\r').collect();
+        format!("\x1b[200~{text}\x1b[201~")
+    } else {
+        text.chars().filter(|&c| !c1(c)).collect()
+    }
+}
+
+/// Zeilen eines eingefügten Textes, wenn er Zeilenumbrüche enthält (sonst `None`): Grundlage der Rückfrage beim
+/// Einfügen mehrerer Zeilen ohne Bracketed Paste – jeder Umbruch kann dann einen Befehl ausführen.
+pub fn paste_line_count(text: &str) -> Option<usize> {
+    if !text.contains(['\r', '\n']) {
+        return None;
+    }
+    Some(text.replace("\r\n", "\n").replace('\r', "\n").lines().count().max(1))
+}
+
+/// Fokusmeldung (DECSET 1004) beim Wechsel des Fokus: `CSI I` (bekommt Fokus) bzw. `CSI O` (verliert ihn), nur wenn
+/// sich der Zustand ändert (`prev` = zuletzt gesehener, `None` = noch keiner) und das Programm sie angefordert hat.
+pub fn focus_report(prev: Option<bool>, now: bool, mode: TermMode) -> Option<&'static [u8]> {
+    if prev == Some(now) || !mode.contains(TermMode::FOCUS_IN_OUT) {
+        return None;
+    }
+    Some(if now { b"\x1b[I" } else { b"\x1b[O" })
+}
+
+/// Umgebung jeder Shell: Terminaltyp, Farbtiefe und Name/Version des Terminals (`TERM_PROGRAM`, wie Windows Terminal,
+/// iTerm2 oder WezTerm; von Programmen wie Claude Code ausgewertet).
+pub fn term_env() -> Vec<(&'static str, String)> {
+    vec![
+        ("TERM", "xterm-256color".to_string()),
+        ("COLORTERM", "truecolor".to_string()),
+        ("TERM_PROGRAM", "Paneldeck".to_string()),
+        ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION").to_string()),
+    ]
+}
+
 #[derive(Clone)]
 pub struct Listener {
     title: Arc<Mutex<Option<String>>>,
@@ -56,12 +181,69 @@ pub struct Listener {
     bell: Arc<AtomicBool>,
     /// Kopierwünsche (OSC 52) seit dem letzten Abholen.
     clipboard: Arc<Mutex<ClipboardRequest>>,
+    /// Noch nicht geschriebene Antworten an das Programm, in Reihenfolge (siehe [`Reply`]).
+    replies: Arc<Mutex<Vec<Reply>>>,
 }
 
 impl Listener {
     /// Listener mit Standardwerten; `Session::spawn` übernimmt die geteilten Felder per `clone`.
     pub fn new(writer: SharedWriter) -> Self {
-        Listener { title: Default::default(), writer, bell: Default::default(), clipboard: Default::default() }
+        Listener { title: Default::default(), writer, bell: Default::default(), clipboard: Default::default(), replies: Default::default() }
+    }
+
+    /// Ereignis der Emulation verarbeiten (Inhalt von `send_event`). Läuft im PTY-Thread, während er die Emulation
+    /// gesperrt hält – deshalb wird hier nichts geschrieben, nur gesammelt.
+    fn on_event(&self, event: Event) {
+        match event {
+            Event::Title(t) => *self.title.lock().unwrap_or_else(|e| e.into_inner()) = Some(sanitize_title(&t)),
+            Event::ResetTitle => *self.title.lock().unwrap_or_else(|e| e.into_inner()) = None,
+            // Antworten der Emulation (z.B. Cursorposition) zurück an die Shell – in Reihenfolge gesammelt.
+            Event::PtyWrite(s) => self.push_reply(Reply::Text(s)),
+            Event::ColorRequest(i, f) => self.push_reply(Reply::Color(i, f)),
+            Event::TextAreaSizeRequest(f) => self.push_reply(Reply::TextAreaPx(f)),
+            Event::Bell => self.bell.store(true, Ordering::Relaxed),
+            // OSC 52 „Kopieren“ (Zwischenablage oder Auswahl – Windows kennt nur eine): an den UI-Thread übergeben,
+            // der die Einstellung prüft und die Zwischenablage setzt. Die Verarbeitung läuft im PTY-Thread, der danach
+            // ohnehin `request_repaint` aufruft.
+            Event::ClipboardStore(_, text) => self.clipboard.lock().unwrap_or_else(|e| e.into_inner()).add(text),
+            // Lesen der Zwischenablage durch Programme wird nie beantwortet (auch nicht für Agenten-Eingaben).
+            Event::ClipboardLoad(..) => {}
+            _ => {}
+        }
+    }
+
+    pub fn push_reply(&self, r: Reply) {
+        let mut q = self.replies.lock().unwrap_or_else(|e| e.into_inner());
+        // Ein Programm, das in einer Schleife fragt, soll den Speicher nicht füllen (nach jedem Stück wird geleert).
+        if q.len() < 4096 {
+            q.push(r);
+        }
+    }
+
+    /// Gesammelte Antworten abholen und in Bytes umsetzen (`term` = die gesperrte Emulation dieses Listeners).
+    pub fn take_reply_bytes(&self, term: &Term<Listener>, view: &Mutex<ReplyView>) -> Vec<u8> {
+        let replies = std::mem::take(&mut *self.replies.lock().unwrap_or_else(|e| e.into_inner()));
+        if replies.is_empty() {
+            return Vec::new();
+        }
+        let view = view.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        render_replies(replies, term.colors(), &view, term.columns(), term.screen_lines())
+    }
+
+    /// Antworten an das Programm schreiben (ohne die Emulation gesperrt zu halten).
+    pub fn write_out(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = w.write_all(bytes);
+        let _ = w.flush();
+    }
+
+    /// Gesammelte Antworten verwerfen (z. B. nach dem Wiederherstellen des alten Verlaufs: dessen Anfragen dürfen
+    /// nicht an die neue Shell gehen).
+    pub fn drop_replies(&self) {
+        self.replies.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -73,24 +255,7 @@ pub fn term_config(scrollback_lines: usize) -> Config {
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        match event {
-            Event::Title(t) => *self.title.lock().unwrap_or_else(|e| e.into_inner()) = Some(t),
-            Event::ResetTitle => *self.title.lock().unwrap_or_else(|e| e.into_inner()) = None,
-            // Antworten der Emulation (z.B. Cursorposition) zurück an die Shell.
-            Event::PtyWrite(s) => {
-                let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = w.write_all(s.as_bytes());
-                let _ = w.flush();
-            }
-            Event::Bell => self.bell.store(true, Ordering::Relaxed),
-            // OSC 52 „Kopieren“ (Zwischenablage oder Auswahl – Windows kennt nur eine): an den UI-Thread übergeben,
-            // der die Einstellung prüft und die Zwischenablage setzt. Die Verarbeitung läuft im PTY-Thread, der danach
-            // ohnehin `request_repaint` aufruft.
-            Event::ClipboardStore(_, text) => self.clipboard.lock().unwrap_or_else(|e| e.into_inner()).add(text),
-            // Lesen der Zwischenablage durch Programme wird nie beantwortet (auch nicht für Agenten-Eingaben).
-            Event::ClipboardLoad(..) => {}
-            _ => {}
-        }
+        self.on_event(event);
     }
 }
 
@@ -158,6 +323,14 @@ pub struct Session {
     /// und keine Klicks. Ebenso ein Vollbildprogramm, das selbst OSC 133;A ausgibt. Ohne Shell-Integration
     /// (cmd ohne Integration, entfernte Shells) greift die Erkennung nicht.
     pub stale_modes: Arc<AtomicBool>,
+    /// Theme und Zellgröße für Antworten an das Programm (Farb- und Größenabfragen), vom UI-Thread gepflegt.
+    view: Arc<Mutex<ReplyView>>,
+    /// Zuletzt gemeldeter Fokus (DECSET 1004): 0 = noch keiner, 1 = ohne Fokus, 2 = mit Fokus.
+    focus_seen: AtomicU8,
+    /// Vor dem Einfügen mehrerer Zeilen ohne Bracketed Paste nachfragen (Einstellung, vom UI-Thread gesetzt).
+    paste_warn: AtomicBool,
+    /// Eingefügter Text, der auf die Rückfrage wartet (`take_paste_ask`).
+    paste_ask: Mutex<Option<String>>,
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
@@ -195,8 +368,9 @@ impl Session {
                 cmd.cwd(cwd);
             }
         }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        for (k, v) in term_env() {
+            cmd.env(k, v);
+        }
         for (k, v) in &opts.env {
             cmd.env(k, v);
         }
@@ -211,6 +385,8 @@ impl Session {
 
         let listener = Listener::new(writer.clone());
         let (title, bell, clipboard) = (listener.title.clone(), listener.bell.clone(), listener.clipboard.clone());
+        let lst = listener.clone();
+        let view: Arc<Mutex<ReplyView>> = Default::default();
 
         let config = term_config(opts.scrollback_lines);
         let mut term = Term::new(config, &TermSize::new(cols as usize, rows as usize), listener);
@@ -221,6 +397,8 @@ impl Session {
             processor.advance(&mut term, text.as_bytes());
             let sep = format!("\r\n\x1b[2m\u{2500}\u{2500} {} \u{2500}\u{2500}\x1b[0m\r\n", crate::state::t("wiederhergestellter Verlauf", "restored history"));
             processor.advance(&mut term, sep.as_bytes());
+            // Anfragen im alten Verlauf beantwortet niemand: die neue Shell hat sie nicht gestellt.
+            lst.drop_replies();
         }
 
         let term = Arc::new(Mutex::new(term));
@@ -236,6 +414,7 @@ impl Session {
             let shell_state = shell_state.clone();
             let activity = last_activity.clone();
             let stale = stale_modes.clone();
+            let view = view.clone();
             // Lesen und Verarbeiten getrennt: Der Verarbeitungs-Thread muss die Frist eines „Synchronized Update“
             // (CSI ?2026h) selbst durchsetzen. vte puffert sonst nach einem abgebrochenen Update (Programm stirbt
             // mitten im Frame, `cat` einer Datei mit ESC[?2026h) bis zu 2 MiB und das Terminal zeigt nichts mehr an.
@@ -265,37 +444,24 @@ impl Session {
                         Ok(bytes) => {
                             activity.store(mono_ms(), Ordering::Relaxed);
                             let (events, positions) = scanner.feed_at(&bytes);
-                            {
+                            let replies = {
                                 let mut t = term.lock().unwrap_or_else(|e| e.into_inner());
                                 if processor.sync_timeout().sync_timeout().is_some_and(|d| d <= std::time::Instant::now()) {
                                     processor.stop_sync(&mut *t);
                                 }
-                                if events.is_empty() {
-                                    processor.advance(&mut *t, &bytes);
-                                } else {
-                                    // Den Chunk an den Ereignissen teilen: die Cursorzeile (z. B. Prompt-Anfang) wird dort ausgelesen,
-                                    // wo die Sequenz steht – nicht erst am Chunk-Ende, wo ein mehrzeiliger Prompt schon fertig gedruckt ist.
-                                    let mut done = 0usize;
-                                    for (ev, end) in events.into_iter().zip(positions) {
-                                        let end = end.clamp(done, bytes.len());
-                                        processor.advance(&mut *t, &bytes[done..end]);
-                                        done = end;
-                                        let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
-                                        let line = t.grid().cursor.point.line.0 as i64;
-                                        let was = stale.load(Ordering::Relaxed);
-                                        stale.store(next_stale_modes(was, &ev, *t.mode()), Ordering::Relaxed);
-                                        if ev == OscEvent::FullscreenModeSet {
-                                            continue; // keine Shell-Integration
-                                        }
-                                        apply_events(&shell_state, vec![ev], (hist + line).max(0) as u64);
-                                    }
-                                    processor.advance(&mut *t, &bytes[done..]);
-                                }
-                            }
+                                process_chunk(&mut processor, &mut t, &bytes, (events, positions), &lst, &shell_state, &stale);
+                                lst.take_reply_bytes(&t, &view)
+                            };
+                            lst.write_out(&replies);
                             ctx.request_repaint();
                         }
                         Err(RecvTimeoutError::Timeout) => {
-                            processor.stop_sync(&mut *term.lock().unwrap_or_else(|e| e.into_inner()));
+                            let replies = {
+                                let mut t = term.lock().unwrap_or_else(|e| e.into_inner());
+                                processor.stop_sync(&mut *t);
+                                lst.take_reply_bytes(&t, &view)
+                            };
+                            lst.write_out(&replies);
                             ctx.request_repaint();
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -332,6 +498,10 @@ impl Session {
             tee: Mutex::new(Vec::new()),
             last_activity,
             stale_modes,
+            view,
+            focus_seen: AtomicU8::new(0),
+            paste_warn: AtomicBool::new(true),
+            paste_ask: Mutex::new(None),
         };
         if let Some(input) = opts.initial_input {
             session.write(input.as_bytes());
@@ -360,19 +530,12 @@ impl Session {
     /// Eingabe eines Agenten: Text wie eingefügt (Bracketed Paste, falls angefordert), optional mit Enter, in EINEM
     /// Schreibvorgang, ohne Broadcast; scrollt vorher ans Ende.
     pub fn send_text_agent(&self, text: &str, submit: bool) {
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bracketed = {
             let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
             t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
-            t.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+            t.mode().contains(TermMode::BRACKETED_PASTE)
         };
-        let mut out: Vec<u8> = Vec::new();
-        if bracketed {
-            let text: String = text.chars().filter(|&c| c >= ' ' && c != '\u{7f}' || c == '\t' || c == '\r').collect();
-            out.extend_from_slice(format!("\x1b[200~{text}\x1b[201~").as_bytes());
-        } else {
-            out.extend_from_slice(text.as_bytes());
-        }
+        let mut out: Vec<u8> = paste_payload(text, bracketed).into_bytes();
         if submit {
             out.push(b'\r');
         }
@@ -527,18 +690,98 @@ impl Session {
 
     /// Text wie eingefügt senden (Bracketed Paste, falls die Anwendung es anfordert).
     pub fn send_text(&self, text: &str, submit: bool) {
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        let bracketed = self.term.lock().unwrap_or_else(|e| e.into_inner()).mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
-        if bracketed {
-            // Steuerzeichen (v. a. ESC) entfernen: ein eingefügtes „\e[201~“ beendete sonst den Paste-Modus
-            // vorzeitig und der Rest liefe als getippte Befehle.
-            let text: String = text.chars().filter(|&c| c >= ' ' && c != '\u{7f}' || c == '\t' || c == '\r').collect();
-            self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
-        } else {
-            self.write(text.as_bytes());
-        }
+        let bracketed = self.bracketed_paste();
+        // Steuerzeichen filtern (siehe `paste_payload`).
+        self.write(paste_payload(text, bracketed).as_bytes());
         if submit {
             self.write(b"\r");
+        }
+    }
+
+    /// Das Programm hat Bracketed Paste (DECSET 2004) eingeschaltet.
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.lock().unwrap_or_else(|e| e.into_inner()).mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// Einfügen durch den Nutzer (Strg+V, Rechtsklick): mehrere Zeilen ohne Bracketed Paste warten auf die Rückfrage
+    /// (Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“, `take_paste_ask`), alles andere geht sofort.
+    pub fn paste_user(&self, text: &str) {
+        if self.paste_warn.load(Ordering::Relaxed) && paste_line_count(text).is_some() && !self.bracketed_paste() {
+            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
+            return;
+        }
+        self.paste_now(text);
+    }
+
+    /// Text einfügen: ans Ende scrollen, Auswahl aufheben, senden.
+    pub fn paste_now(&self, text: &str) {
+        {
+            let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+            if t.grid().display_offset() > 0 {
+                t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+            }
+            t.selection = None;
+        }
+        self.send_text(text, false);
+    }
+
+    /// Text, der auf die Rückfrage vor dem Einfügen wartet (einmal abholen).
+    pub fn take_paste_ask(&self) -> Option<String> {
+        self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“ übernehmen (UI-Thread, jedes Frame).
+    pub fn set_paste_warn(&self, on: bool) {
+        self.paste_warn.store(on, Ordering::Relaxed);
+    }
+
+    /// Fokus der Sitzung (Bereich fokussiert und Fenster im Vordergrund) melden, jedes Frame: Beim Wechsel bekommt
+    /// ein Programm, das Fokusmeldungen angefordert hat (DECSET 1004), `CSI I` bzw. `CSI O`.
+    pub fn report_focus(&self, focused: bool) {
+        let now = if focused { 2 } else { 1 };
+        let prev = match self.focus_seen.swap(now, Ordering::Relaxed) {
+            0 => None,
+            p => Some(p == 2),
+        };
+        if prev == Some(focused) {
+            return;
+        }
+        let mode = *self.term.lock().unwrap_or_else(|e| e.into_inner()).mode();
+        if let Some(seq) = focus_report(prev, focused, mode) {
+            // Ohne Broadcast-Mitschnitt und ohne `stale_modes` anzufassen.
+            let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = w.write_all(seq);
+            let _ = w.flush();
+        }
+    }
+
+    /// Theme und Zellgröße (physische Pixel) für Antworten an das Programm übernehmen (UI-Thread, beim Zeichnen).
+    pub fn set_view(&self, theme: &Theme, cell_w: u16, cell_h: u16) {
+        let mut v = self.view.lock().unwrap_or_else(|e| e.into_inner());
+        if v.theme != *theme {
+            v.theme = theme.clone();
+        }
+        if (v.cell_w, v.cell_h) != (cell_w, cell_h) {
+            v.cell_w = cell_w;
+            v.cell_h = cell_h;
+            drop(v);
+            // Unter Windows wertet ConPTY die Pixelgröße nicht aus; ein Größenwechsel ohne neue Zeilen/Spalten löste
+            // dort nur ein Neuzeichnen aus. Sonst (Unix) bekommt das Programm die neue Pixelgröße (TIOCSWINSZ).
+            #[cfg(not(windows))]
+            {
+                let _ = self.master.resize(self.pty_size());
+            }
+        }
+    }
+
+    /// Größe für das Pseudo-Terminal: Zeilen/Spalten und die Pixelgröße des Textbereichs (0, solange unbekannt).
+    fn pty_size(&self) -> PtySize {
+        let v = self.view.lock().unwrap_or_else(|e| e.into_inner());
+        PtySize {
+            rows: self.rows,
+            cols: self.cols,
+            pixel_width: self.cols.saturating_mul(v.cell_w),
+            pixel_height: self.rows.saturating_mul(v.cell_h),
         }
     }
 
@@ -588,7 +831,7 @@ impl Session {
         self.cols = cols;
         self.rows = rows;
         self.term.lock().unwrap_or_else(|e| e.into_inner()).resize(TermSize::new(cols as usize, rows as usize));
-        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        let _ = self.master.resize(self.pty_size());
     }
 
     /// Gesamten Verlauf (Scrollback + sichtbarer Bereich) als Text, auf `max_lines` begrenzt.
@@ -609,6 +852,47 @@ impl Session {
         let _ = Line(0);
         lines[start..].join("\n")
     }
+}
+
+/// Ein Stück Programmausgabe durch die Emulation schicken (PTY-Thread, Emulation gesperrt). `scanned` = Ereignisse und
+/// ihre Positionen aus `OscScanner::feed_at` für genau diese Bytes. Antworten landen in der Reihe des Listeners
+/// (`lst`), Meldungen der Shell-Integration in `shell_state`.
+fn process_chunk(
+    processor: &mut Processor,
+    t: &mut Term<Listener>,
+    bytes: &[u8],
+    scanned: (Vec<OscEvent>, Vec<usize>),
+    lst: &Listener,
+    shell_state: &Arc<Mutex<ShellState>>,
+    stale: &AtomicBool,
+) {
+    let (events, positions) = scanned;
+    if events.is_empty() {
+        processor.advance(t, bytes);
+        return;
+    }
+    // Den Chunk an den Ereignissen teilen: die Cursorzeile (z. B. Prompt-Anfang) wird dort ausgelesen,
+    // wo die Sequenz steht – nicht erst am Chunk-Ende, wo ein mehrzeiliger Prompt schon fertig gedruckt ist.
+    let mut done = 0usize;
+    for (ev, end) in events.into_iter().zip(positions) {
+        let end = end.clamp(done, bytes.len());
+        processor.advance(t, &bytes[done..end]);
+        done = end;
+        if let OscEvent::Query(q) = ev {
+            // In die Reihe der Antworten: nach allem, was davor im Strom stand.
+            lst.push_reply(Reply::Query(q));
+            continue;
+        }
+        let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
+        let line = t.grid().cursor.point.line.0 as i64;
+        let was = stale.load(Ordering::Relaxed);
+        stale.store(next_stale_modes(was, &ev, *t.mode()), Ordering::Relaxed);
+        if !ev.is_integration() {
+            continue; // keine Shell-Integration
+        }
+        apply_events(shell_state, vec![ev], (hist + line).max(0) as u64);
+    }
+    processor.advance(t, &bytes[done..]);
 }
 
 /// Meldet die Shell ihren Prompt, obwohl noch der alternative Bildschirm oder ein Maus-Modus aktiv ist?
@@ -637,7 +921,7 @@ pub fn next_stale_modes(prev: bool, ev: &OscEvent, mode: alacritty_terminal::ter
 fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line: u64) {
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     for ev in events {
-        st.integration_seen |= ev != OscEvent::FullscreenModeSet;
+        st.integration_seen |= ev.is_integration();
         match ev {
             OscEvent::PromptStart => {
                 st.prompt_seq += 1;
@@ -666,8 +950,8 @@ fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line:
                 st.cwd = Some(p);
             }
             OscEvent::DurationMs(ms) => st.pending_dur = Some(ms),
-            // Kommt nicht von der Shell-Integration; der Lese-Thread wertet es selbst aus (`next_stale_modes`).
-            OscEvent::FullscreenModeSet => {}
+            // Kommen nicht von der Shell-Integration; der Lese-Thread wertet sie selbst aus (`next_stale_modes`, Antworten).
+            OscEvent::FullscreenModeSet | OscEvent::Query(_) => {}
         }
     }
 }
@@ -1024,5 +1308,278 @@ mod osc52_tests {
         let (got, _) = feed(format!("\x1b]52;c;{}\x07\x1b]52;c;{}\x07", b64(b"klein"), b64(&big)).as_bytes());
         assert_eq!(got, ClipboardRequest { text: Some("klein".into()), too_large: Some(OSC52_MAX_BYTES + 3), count: 2 });
         assert!(!got.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod vt_reply_tests {
+    use super::*;
+    use crate::theme::Theme;
+    use eframe::egui::Color32;
+
+    /// Schreibt in einen geteilten Puffer (wie das Pseudo-Terminal).
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Eine Sitzung ohne Prozess: Emulation, Listener und Scanner wie im PTY-Thread.
+    struct Rig {
+        term: Term<Listener>,
+        lst: Listener,
+        p: Processor,
+        scanner: OscScanner,
+        view: Mutex<ReplyView>,
+        out: Arc<Mutex<Vec<u8>>>,
+        shell: Arc<Mutex<ShellState>>,
+        stale: AtomicBool,
+    }
+
+    fn theme() -> Theme {
+        let mut t = crate::theme::all().swap_remove(0);
+        t.fg = Color32::from_rgb(0xab, 0xb2, 0xbf);
+        t.bg = Color32::from_rgba_unmultiplied(0x1e, 0x21, 0x27, 230);
+        t.cursor = Color32::from_rgb(0x52, 0x8b, 0xff);
+        t.ansi[1] = Color32::from_rgb(0xe0, 0x6c, 0x75);
+        t
+    }
+
+    impl Rig {
+        fn new() -> Rig {
+            let out = Arc::new(Mutex::new(Vec::new()));
+            let lst = Listener::new(Arc::new(Mutex::new(Box::new(Sink(out.clone())))));
+            let term = Term::new(term_config(100), &TermSize::new(100, 30), lst.clone());
+            Rig {
+                term,
+                lst,
+                p: Processor::new(),
+                scanner: OscScanner::default(),
+                view: Mutex::new(ReplyView { theme: theme(), cell_w: 9, cell_h: 18 }),
+                out,
+                shell: Default::default(),
+                stale: AtomicBool::new(false),
+            }
+        }
+
+        /// Ausgabe des Programms verarbeiten (wie der PTY-Thread) und die Antworten an das Programm liefern.
+        fn feed(&mut self, s: &str) -> String {
+            let bytes = s.as_bytes();
+            let scanned = self.scanner.feed_at(bytes);
+            process_chunk(&mut self.p, &mut self.term, bytes, scanned, &self.lst, &self.shell, &self.stale);
+            let r = self.lst.take_reply_bytes(&self.term, &self.view);
+            self.lst.write_out(&r);
+            String::from_utf8(std::mem::take(&mut *self.out.lock().unwrap())).unwrap()
+        }
+    }
+
+    #[test]
+    fn colour_queries_answer_with_theme() {
+        let mut r = Rig::new();
+        assert_eq!(r.feed("\x1b]10;?\x1b\\"), "\x1b]10;rgb:abab/b2b2/bfbf\x1b\\");
+        // Hintergrund ohne Transparenz; BEL-Abschluss bleibt BEL.
+        assert_eq!(r.feed("\x1b]11;?\x07"), "\x1b]11;rgb:1e1e/2121/2727\x07");
+        assert_eq!(r.feed("\x1b]12;?\x1b\\"), "\x1b]12;rgb:5252/8b8b/ffff\x1b\\");
+        assert_eq!(r.feed("\x1b]4;1;?\x1b\\"), "\x1b]4;1;rgb:e0e0/6c6c/7575\x1b\\");
+        // Würfel- und Graufarben aus der festen Palette.
+        assert_eq!(r.feed("\x1b]4;196;?\x07"), "\x1b]4;196;rgb:ffff/0000/0000\x07");
+        assert_eq!(r.feed("\x1b]4;232;?\x07"), "\x1b]4;232;rgb:0808/0808/0808\x07");
+    }
+
+    #[test]
+    fn colour_queries_follow_overrides_and_resets() {
+        let mut r = Rig::new();
+        // Setzen: Abfrage liefert den gesetzten Wert, nichts wird geschrieben.
+        assert_eq!(r.feed("\x1b]11;#102030\x1b\\\x1b]10;rgb:aa/bb/cc\x1b\\\x1b]12;#010203\x07\x1b]4;1;#445566\x07\x1b]4;100;#778899\x07"), "");
+        assert_eq!(r.feed("\x1b]11;?\x1b\\"), "\x1b]11;rgb:1010/2020/3030\x1b\\");
+        assert_eq!(r.feed("\x1b]10;?\x1b\\"), "\x1b]10;rgb:aaaa/bbbb/cccc\x1b\\");
+        assert_eq!(r.feed("\x1b]12;?\x1b\\"), "\x1b]12;rgb:0101/0202/0303\x1b\\");
+        assert_eq!(r.feed("\x1b]4;1;?\x1b\\"), "\x1b]4;1;rgb:4444/5555/6666\x1b\\");
+        assert_eq!(r.feed("\x1b]4;100;?\x1b\\"), "\x1b]4;100;rgb:7777/8888/9999\x1b\\");
+        // Die Darstellung nutzt die gesetzten Farben vor dem Theme.
+        let eff = theme().with_overrides(r.term.colors()).unwrap();
+        assert_eq!(eff.bg, Color32::from_rgba_unmultiplied(0x10, 0x20, 0x30, 230));
+        assert_eq!(eff.ansi[1], Color32::from_rgb(0x44, 0x55, 0x66));
+        // Zurücksetzen: OSC 110/111/112 einzeln, OSC 104 mit Index bzw. ohne (alle).
+        r.feed("\x1b]111\x1b\\\x1b]110\x07\x1b]112\x07");
+        assert_eq!(r.feed("\x1b]11;?\x1b\\"), "\x1b]11;rgb:1e1e/2121/2727\x1b\\");
+        assert_eq!(r.feed("\x1b]10;?\x1b\\"), "\x1b]10;rgb:abab/b2b2/bfbf\x1b\\");
+        assert_eq!(r.feed("\x1b]12;?\x1b\\"), "\x1b]12;rgb:5252/8b8b/ffff\x1b\\");
+        r.feed("\x1b]104;1\x07");
+        assert_eq!(r.feed("\x1b]4;1;?\x07"), "\x1b]4;1;rgb:e0e0/6c6c/7575\x07");
+        assert_eq!(r.feed("\x1b]4;100;?\x07"), "\x1b]4;100;rgb:7777/8888/9999\x07");
+        r.feed("\x1b]104\x07");
+        assert_eq!(r.feed("\x1b]4;100;?\x07"), "\x1b]4;100;rgb:8787/8787/0000\x07");
+        assert!(theme().with_overrides(r.term.colors()).is_none());
+    }
+
+    #[test]
+    fn theme_change_reaches_replies() {
+        let mut r = Rig::new();
+        let mut t = theme();
+        t.bg = Color32::from_rgb(0xfa, 0xfa, 0xfa);
+        r.view.lock().unwrap().theme = t;
+        assert_eq!(r.feed("\x1b]11;?\x07"), "\x1b]11;rgb:fafa/fafa/fafa\x07");
+    }
+
+    #[test]
+    fn replies_keep_request_order() {
+        // fish/Neovim: OSC 11 mit DA1 als Wächter – die Farbantwort muss vor der DA1-Antwort ankommen.
+        let mut r = Rig::new();
+        let got = r.feed("\x1b]11;?\x1b\\\x1b[c");
+        assert_eq!(got, "\x1b]11;rgb:1e1e/2121/2727\x1b\\\x1b[?6c");
+        // Ebenso XTVERSION (vom Scanner erkannt) zwischen Antworten der Emulation.
+        let got = r.feed("\x1b[5n\x1b[>q\x1b[c");
+        assert_eq!(got, format!("\x1b[0n\x1bP>|Paneldeck {}\x1b\\\x1b[?6c", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn size_and_identity_replies() {
+        let mut r = Rig::new();
+        // 14t: Textbereich in Pixeln (Zeilen×Zellhöhe, Spalten×Zellbreite), 16t: Zelle, 18t: Zeichen.
+        assert_eq!(r.feed("\x1b[14t"), "\x1b[4;540;900t");
+        assert_eq!(r.feed("\x1b[16t"), "\x1b[6;18;9t");
+        assert_eq!(r.feed("\x1b[18t"), "\x1b[8;30;100t");
+        let ver = format!("\x1bP>|Paneldeck {}\x1b\\", env!("CARGO_PKG_VERSION"));
+        assert_eq!(r.feed("\x1b[>q"), ver);
+        assert_eq!(r.feed("\x1b[>0q"), ver);
+        // Neue Zellgröße (andere Schrift/Skalierung) gilt sofort.
+        *r.view.lock().unwrap() = ReplyView { theme: theme(), cell_w: 10, cell_h: 21 };
+        assert_eq!(r.feed("\x1b[16t\x1b[14t"), "\x1b[6;21;10t\x1b[4;630;1000t");
+        // Nicht verwechseln: DECSCUSR, DA2.
+        assert_eq!(r.feed("\x1b[2 q"), "");
+        assert_eq!(r.feed("\x1b[>c"), "\x1b[>0;2600;1c");
+    }
+
+    #[test]
+    fn restored_history_queries_are_not_answered() {
+        let r = Rig::new();
+        let mut term = Term::new(term_config(100), &TermSize::new(80, 24), r.lst.clone());
+        let mut p: Processor = Processor::new();
+        p.advance(&mut term, b"\x1b[c\x1b]11;?\x07");
+        r.lst.drop_replies();
+        assert!(r.lst.take_reply_bytes(&term, &r.view).is_empty());
+    }
+
+    #[test]
+    fn focus_reports_only_with_mode_and_on_change() {
+        let mut r = Rig::new();
+        let off = *r.term.mode();
+        assert_eq!(focus_report(None, true, off), None);
+        assert_eq!(focus_report(Some(false), true, off), None);
+        r.feed("\x1b[?1004h");
+        let on = *r.term.mode();
+        assert!(on.contains(TermMode::FOCUS_IN_OUT));
+        assert_eq!(focus_report(Some(false), true, on), Some(&b"\x1b[I"[..]));
+        assert_eq!(focus_report(Some(true), false, on), Some(&b"\x1b[O"[..]));
+        assert_eq!(focus_report(None, false, on), Some(&b"\x1b[O"[..]));
+        // Kein Wechsel: nichts (kein Senden in jedem Frame).
+        assert_eq!(focus_report(Some(true), true, on), None);
+        assert_eq!(focus_report(Some(false), false, on), None);
+        r.feed("\x1b[?1004l");
+        assert_eq!(focus_report(Some(false), true, *r.term.mode()), None);
+    }
+
+    #[test]
+    fn paste_filters_esc_and_c1() {
+        // Bracketed: ESC, andere C0, DEL und C1 raus; Tab und Zeilenumbruch bleiben.
+        let evil = "a\x1b[201~rm -rf /\r\nb\tc\u{9b}201~d\u{85}e\u{7f}\u{7}";
+        assert_eq!(paste_payload(evil, true), "\x1b[200~a[201~rm -rf /\rb\tc201~de\x1b[201~");
+        // Ohne Bracketed Paste: nur C1 raus, Zeilenumbrüche als CR.
+        assert_eq!(paste_payload("x\u{9b}31m\u{90}y\nz", false), "x31my\rz");
+        assert_eq!(paste_payload("Grüße ✓ – ok", false), "Grüße ✓ – ok");
+        assert_eq!(paste_payload("Grüße ✓", true), "\x1b[200~Grüße ✓\x1b[201~");
+    }
+
+    #[test]
+    fn paste_line_counts() {
+        assert_eq!(paste_line_count("eine Zeile"), None);
+        assert_eq!(paste_line_count("cmd\n"), Some(1));
+        assert_eq!(paste_line_count("a\r\nb\r\nc"), Some(3));
+        assert_eq!(paste_line_count("a\rb"), Some(2));
+        assert_eq!(paste_line_count("\n"), Some(1));
+    }
+
+    #[test]
+    fn titles_are_sanitised() {
+        assert_eq!(sanitize_title("vim – datei.rs"), "vim – datei.rs");
+        // Steuerzeichen (C0, DEL, C1) und Schreibrichtungs-Zeichen fallen weg.
+        assert_eq!(sanitize_title("a\x07b\x1b[31mc\u{7f}d\u{9b}e"), "ab[31mcde");
+        assert_eq!(sanitize_title("evil\u{202e}txt.exe\u{202c}\u{2066}x\u{2069}\u{200f}"), "eviltxt.exex");
+        assert_eq!(sanitize_title(&"x".repeat(1000)).chars().count(), TITLE_MAX_CHARS);
+        assert_eq!(sanitize_title(&"ä".repeat(300)), "ä".repeat(TITLE_MAX_CHARS));
+        // Über die Emulation: der Listener speichert nur den bereinigten Titel.
+        let mut r = Rig::new();
+        r.feed(&format!("\x1b]0;ok\u{202e}gpj.exe{}\x07", "y".repeat(400)));
+        let t = r.lst.title.lock().unwrap().clone().unwrap();
+        assert!(t.starts_with("okgpj.exe") && t.chars().count() == TITLE_MAX_CHARS, "{t}");
+    }
+
+    #[test]
+    fn term_program_env() {
+        let env = term_env();
+        let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("TERM_PROGRAM").as_deref(), Some("Paneldeck"));
+        assert_eq!(get("TERM_PROGRAM_VERSION").as_deref(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(get("TERM").as_deref(), Some("xterm-256color"));
+        assert_eq!(get("COLORTERM").as_deref(), Some("truecolor"));
+    }
+}
+
+/// Ende-zu-Ende-Probe der Antworten durch ein echtes Pseudo-Terminal (#183), von Hand gestartet:
+/// `PANELDECK_VTPROBE=<vtprobe.exe> cargo test --release conpty_probe -- --ignored --nocapture`.
+/// `vtprobe app q <Sequenz>` (Wegwerf-Werkzeug aus der Analyse zu #183) schreibt die Anfrage, liest die Antwort als
+/// Konsoleneingabe und legt sie in `PROBE_OUT` ab. Mit der neueren ConPTY (conpty.dll + OpenConsole.exe neben der
+/// Test-.exe) kommen alle Anfragen an; mit der des Systems fehlen u. a. OSC 10/11.
+#[cfg(all(test, windows))]
+mod conpty_probe {
+    use super::*;
+    use crate::shells::ShellSpec;
+
+    fn probe(seq: &str, focus: bool) -> String {
+        let exe = std::env::var("PANELDECK_VTPROBE").expect("PANELDECK_VTPROBE");
+        let out = std::env::temp_dir().join(format!("pd-vtprobe-{}-{}.txt", std::process::id(), seq.len()));
+        let _ = std::fs::remove_file(&out);
+        let shell = ShellSpec { id: "probe".into(), label: "probe".into(), program: exe, args: vec!["app".into(), "q".into(), seq.into()] };
+        let ctx = egui::Context::default();
+        let s = Session::spawn(
+            &ctx,
+            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![("PROBE_OUT".into(), out.display().to_string())] },
+        )
+        .unwrap();
+        s.set_view(&crate::theme::all()[0], 9, 18);
+        let t0 = std::time::Instant::now();
+        let mut sent = false;
+        while t0.elapsed() < std::time::Duration::from_secs(8) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if focus && !sent && s.term.lock().unwrap().mode().contains(TermMode::FOCUS_IN_OUT) && s.dump_text(5).contains("<<S>>") {
+                sent = true;
+                s.report_focus(false);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                s.report_focus(true);
+                s.report_focus(true); // kein zweites CSI I
+            }
+            if let Ok(r) = std::fs::read_to_string(&out).map(|r| r.trim().to_string()) {
+                if !r.is_empty() {
+                    return if focus { format!("{r} (Fokus gesendet: {sent})") } else { r };
+                }
+            }
+        }
+        "<keine Antwort>".into()
+    }
+
+    #[test]
+    #[ignore]
+    fn conpty_probe() {
+        for seq in ["\\e]10;?\\e\\", "\\e]11;?\\e\\", "\\e]12;?\\a", "\\e]4;1;?\\e\\", "\\e]11;#102030\\e\\\\e]11;?\\e\\", "\\e[14t", "\\e[16t", "\\e[18t", "\\e[>q", "\\e[>0q", "\\e]11;?\\e\\\\e[c"] {
+            println!("{seq:<32} {}", probe(seq, false));
+        }
+        // Das Programm fordert Fokusmeldungen an (DECSET 1004); OpenConsole reicht CSI O/I dann als Eingabe durch.
+        println!("{:<32} {}", "focus out/in (?1004h)", probe("\\e[?1004h", true));
     }
 }

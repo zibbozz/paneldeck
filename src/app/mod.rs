@@ -45,6 +45,7 @@ mod models_ui;
 mod multiwin;
 mod osc52;
 mod panels;
+mod paste_ask;
 mod planning_ui;
 mod session_settings;
 mod settings;
@@ -289,6 +290,8 @@ enum Nav {
 
 #[derive(Clone)]
 enum Action {
+    /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
+    PasteAsk(u64, String, bool),
     OpenPalette,
     OpenTemplates,
     OpenCosts,
@@ -689,6 +692,8 @@ pub struct App {
     confirm_close: Option<closing::CloseAsk>,
     /// Rückfrage „Sitzung neu laden?“ (#169).
     reload_ask: Option<session_settings::ReloadAsk>,
+    /// Rückfrage vor dem Einfügen mehrerer Zeilen (#183).
+    paste_ask: Option<paste_ask::PasteAsk>,
     /// Dialog „Einstellungen der Sitzung“ (#170).
     session_settings: Option<session_settings::SessionForm>,
     settings_open: bool,
@@ -955,6 +960,7 @@ impl App {
             new_chat: None,
             confirm_close: None,
             reload_ask: None,
+            paste_ask: None,
             session_settings: None,
             settings_open: false,
             remember_at_start,
@@ -1650,7 +1656,14 @@ impl App {
         }
         if wsl {
             // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Profilvariablen.
-            let mut names = vec![hooks::ENV_SESSION.to_string(), hooks::ENV_PORT.to_string(), hooks::ENV_TOKEN.to_string()];
+            // Dazu Name/Version des Terminals (`terminal::term_env`), wie Windows Terminal es mit WT_SESSION macht.
+            let mut names = vec![
+                hooks::ENV_SESSION.to_string(),
+                hooks::ENV_PORT.to_string(),
+                hooks::ENV_TOKEN.to_string(),
+                "TERM_PROGRAM".to_string(),
+                "TERM_PROGRAM_VERSION".to_string(),
+            ];
             for (k, _) in env.iter().skip(1) {
                 if k != hooks::ENV_PORT && k != hooks::ENV_TOKEN && !names.contains(k) {
                     names.push(k.clone());
@@ -2479,8 +2492,15 @@ impl App {
         let lang = self.settings.language;
         let mut toasts: Vec<(u64, String, CmdDone)> = Vec::new();
         let mut copies: Vec<(u64, crate::terminal::ClipboardRequest)> = Vec::new();
+        let paste_warn = self.settings.warn_multiline_paste;
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else { continue };
+            // Fokusmeldungen (DECSET 1004): gilt als fokussiert wie bei OSC 52 – fokussierte Sitzung des Fensters im
+            // Vordergrund; abgedockte Sitzungen meldet ihr eigenes Fenster (`detached_windows`). Gesendet wird nur beim Wechsel.
+            if !self.detached.contains(id) {
+                s.report_focus(window_focused && *id == focused_id);
+            }
+            s.set_paste_warn(paste_warn);
             // Immer abholen, auch bei abgeschalteter Einstellung: ein alter Wunsch darf nicht später doch noch greifen.
             if let Some(req) = s.take_clipboard() {
                 copies.push((*id, req));
@@ -2981,6 +3001,7 @@ impl App {
             return;
         }
         match a {
+            Action::PasteAsk(id, text, detached) => self.ask_paste(id, text, detached),
             Action::ToggleFiles => self.files_open = !self.files_open,
             Action::Cycle(d) => self.cycle(d),
             Action::JumpCmd(d) => {
@@ -4013,6 +4034,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
             let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
+            if let Some(text) = session.take_paste_ask() {
+                cx.actions.push(Action::PasteAsk(id, text, cx.detached));
+            }
             if session.search.is_some() && search_bar(ui, session, body, lang) {
                 session.search = None;
                 *cx.want_focus = Some(id);
