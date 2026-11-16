@@ -523,7 +523,10 @@ impl App {
         if !visible {
             status_tip.push('\n');
             status_tip += if minimized {
-                lang.t("Minimiert – läuft weiter. Klicken holt den Bereich an seinen Platz zurück.", "Minimized – still running. Click to bring the pane back to where it was.")
+                lang.t(
+                    "Minimiert – läuft weiter. Klicken öffnet die Sitzung allein; die sichtbaren Bereiche werden minimiert.",
+                    "Minimized – still running. Click to open it alone; the visible panes are minimized.",
+                )
             } else {
                 lang.t("Nicht im Layout – klicken zeigt die Sitzung im fokussierten Bereich.", "Not in the layout – click to show it in the focused pane.")
             };

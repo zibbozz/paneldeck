@@ -599,9 +599,8 @@ impl App {
         // Was im Layout steht, ist nicht minimiert – egal, wie es hineinkam (Ziehen, Ordner-Layout, Vorlage …).
         if let Some(l) = &self.layout {
             for id in l.leaf_ids() {
-                if let Some(e) = self.entries.get_mut(&id).filter(|e| e.meta.minimized || e.meta.slot.is_some()) {
+                if let Some(e) = self.entries.get_mut(&id).filter(|e| e.meta.minimized) {
                     e.meta.minimized = false;
-                    e.meta.slot = None;
                 }
             }
         }

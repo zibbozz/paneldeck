@@ -339,12 +339,10 @@ pub struct SessionMeta {
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
     pub chat: Option<ChatMeta>,
     /// Bereich minimiert (seit 2.2.0): die Sitzung läuft weiter, steht aber in keinem Layout, bis sie zurückgeholt wird.
-    /// Fehlt in der Datei, wenn nicht minimiert.
+    /// Fehlt in der Datei, wenn nicht minimiert. (2.2.0 schrieb dazu noch `slot`, den alten Platz im Layout; seit 2.3.0
+    /// öffnet ein zurückgeholter Bereich allein, das Feld wird nicht mehr geschrieben und beim Laden ignoriert.)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub minimized: bool,
-    /// Wo der minimierte Bereich stand (Geschwister, Richtung, Seite, Anteil) – dort kommt er wieder hin.
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::layout::lenient_slot")]
-    pub slot: Option<crate::layout::Slot>,
 }
 
 /// Art einer Sitzung.
@@ -412,7 +410,6 @@ impl Default for SessionMeta {
             kind: SessionKind::Terminal,
             chat: None,
             minimized: false,
-            slot: None,
         }
     }
 }
@@ -1045,20 +1042,47 @@ mod kind_tests {
 
     #[test]
     fn minimized_sessions_round_trip_and_old_files_load() {
-        use crate::layout::{Dir, Slot};
-        // 2.1.0: kein `minimized`/`slot` → nicht minimiert; nicht minimierte Sitzungen schreiben die Felder auch nicht
+        // 2.1.0: kein `minimized` → nicht minimiert; nicht minimierte Sitzungen schreiben das Feld auch nicht
         let old: SessionMeta = serde_json::from_str(r#"{"id":3,"name":"pwsh"}"#).unwrap();
-        assert!(!old.minimized && old.slot.is_none());
+        assert!(!old.minimized);
         let s = serde_json::to_string(&old).unwrap();
         assert!(!s.contains("minimized") && !s.contains("slot"), "{s}");
-        // minimiert mit Platz: Rundreise
-        let m = SessionMeta { id: 4, minimized: true, slot: Some(Slot { sibling: vec![1, 2], dir: Dir::Vertical, before: false, ratio: 0.3 }), ..SessionMeta::default() };
-        let back: SessionMeta = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
-        assert!(back.minimized);
-        assert_eq!(back.slot, m.slot);
-        // kaputter Platz: Sitzung bleibt (minimiert, ohne Platz)
-        let back: SessionMeta = serde_json::from_str(r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#).unwrap();
-        assert!(back.minimized && back.slot.is_none());
+        // minimiert: Rundreise, ohne `slot` (seit 2.3.0 nicht mehr geschrieben)
+        let m = SessionMeta { id: 4, minimized: true, ..SessionMeta::default() };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"minimized\":true") && !s.contains("slot"), "{s}");
+        assert!(serde_json::from_str::<SessionMeta>(&s).unwrap().minimized);
+        // 2.2.0 mit `slot` (gültig oder kaputt): lädt, das Feld wird ignoriert und beim Speichern nicht wieder geschrieben
+        for old in [
+            r#"{"id":5,"minimized":true,"slot":{"sibling":[1,2],"dir":"Vertical","before":false,"ratio":0.3}}"#,
+            r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#,
+            r#"{"id":5,"minimized":true,"slot":null}"#,
+            r#"{"id":5,"minimized":true,"slot":17}"#,
+        ] {
+            let back: SessionMeta = serde_json::from_str(old).unwrap_or_else(|e| panic!("{old}: {e}"));
+            assert!(back.id == 5 && back.minimized, "{old}");
+            assert!(!serde_json::to_string(&back).unwrap().contains("slot"), "{old}");
+        }
+    }
+
+    #[test]
+    fn state_file_of_2_2_0_with_slots_loads() {
+        let dir = std::env::temp_dir().join(format!("pd-slot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        std::fs::write(
+            &p,
+            r#"{"sessions":[{"id":1},{"id":2,"minimized":true,"slot":{"sibling":[1],"dir":"Horizontal","before":false,"ratio":0.5}},
+                            {"id":3,"minimized":true,"slot":"kaputt"}],
+                "next_id":4,"active_project":1,"projects":[{"id":1,"name":"A","layout":{"Leaf":1},"focused":1}]}"#,
+        )
+        .unwrap();
+        let (st, note) = load_saved(&p);
+        assert!(note.is_none(), "{note:?}");
+        assert_eq!(st.sessions.len(), 3);
+        assert!(!st.sessions[0].minimized && st.sessions[1].minimized && st.sessions[2].minimized);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
