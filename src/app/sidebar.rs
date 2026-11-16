@@ -627,6 +627,10 @@ impl App {
             g
         };
         resp.context_menu(|ui| {
+            if ui.button(lang.t("Einstellungen …", "Settings …")).clicked() {
+                actions.push(Action::OpenSessionSettings(id));
+                ui.close();
+            }
             if ui.button(lang.t("Umbenennen (F2)", "Rename (F2)")).clicked() {
                 actions.push(Action::StartRename(id));
                 ui.close();
@@ -693,8 +697,8 @@ impl App {
                 actions.push(Action::ExportHistory(id));
                 ui.close();
             }
-            if !is_chat && ui.button(lang.t("Neu starten", "Restart")).clicked() {
-                actions.push(Action::Restart(id));
+            if !is_chat && ui.button(lang.t("Neu laden …", "Reload …")).clicked() {
+                actions.push(Action::RequestReload(id));
                 ui.close();
             }
             if ui.button(lang.t("Duplizieren", "Duplicate")).clicked() {

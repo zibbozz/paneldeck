@@ -571,7 +571,7 @@ impl App {
             (lang.t("Bereich darunter teilen", "Split pane below").into(), self.binding_text("split_d"), Action::Split(f, Dir::Vertical)),
             (lang.t("Bereich minimieren", "Minimize pane").into(), self.binding_text("hide"), Action::MinimizePane(f)),
             (lang.t("Sitzung umbenennen", "Rename session").into(), self.binding_text("rename"), Action::StartRename(f)),
-            (lang.t("Sitzung neu starten", "Restart session").into(), String::new(), Action::Restart(f)),
+            (lang.t("Einstellungen der Sitzung …", "Session settings …").into(), String::new(), Action::OpenSessionSettings(f)),
             (lang.t("Sitzung schließen", "Close session").into(), String::new(), Action::RequestClose(f)),
             (lang.t("Alle Sitzungen des Projekts schließen …", "Close all sessions of the project …").into(), String::new(), Action::CloseAll(closing::CloseScope::Project(self.active_project))),
             (lang.t("Alle Sitzungen schließen … (alle Projekte und Fenster)", "Close all sessions … (all projects and windows)").into(), self.binding_text("close_all"), Action::CloseAll(closing::CloseScope::All)),
@@ -592,6 +592,10 @@ impl App {
             (lang.t("Claude-Verlauf (Konversationen fortsetzen)", "Claude history (resume conversations)").into(), String::new(), Action::OpenHistory),
             (lang.t("Einstellungen", "Settings").into(), String::new(), Action::OpenSettings),
         ]);
+        // „Neu laden“ nur für Terminals (ein Chat hat keinen Prozess).
+        if self.entries.get(&f).is_some_and(|e| !e.is_chat()) {
+            v.push((lang.t("Sitzung neu laden …", "Reload session …").into(), String::new(), Action::RequestReload(f)));
+        }
         v.push((lang.t("Neues Projekt …", "New project …").into(), String::new(), Action::NewProjectPrompt));
         for (i, p) in self.projects.iter().enumerate() {
             if p.id != self.active_project {

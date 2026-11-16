@@ -43,6 +43,7 @@ mod models_ui;
 mod multiwin;
 mod panels;
 mod planning_ui;
+mod session_settings;
 mod settings;
 #[cfg(feature = "readme-shots")]
 mod shot_start;
@@ -335,6 +336,10 @@ enum Action {
     SetColor(u64, [u8; 3]),
     SetGroup(u64, String),
     Restart(u64),
+    /// „Neu laden“ (#169): Rückfrage, solange ein Prozess läuft, dann `Restart`. Chats: nichts.
+    RequestReload(u64),
+    /// Dialog „Einstellungen der Sitzung“ (#170) öffnen.
+    OpenSessionSettings(u64),
     Duplicate(u64),
     RequestClose(u64),
     Close(u64),
@@ -641,6 +646,10 @@ pub struct App {
     /// Dialog „Neuer Chat“ (Server und Modell wählen).
     new_chat: Option<models_ui::NewChatDlg>,
     confirm_close: Option<closing::CloseAsk>,
+    /// Rückfrage „Sitzung neu laden?“ (#169).
+    reload_ask: Option<session_settings::ReloadAsk>,
+    /// Dialog „Einstellungen der Sitzung“ (#170).
+    session_settings: Option<session_settings::SessionForm>,
     settings_open: bool,
     /// „Sitzungen merken“ beim Start (an → beim Beenden mit „aus“ vorher sichern, siehe `fresh_start`).
     remember_at_start: bool,
@@ -901,6 +910,8 @@ impl App {
             new_dialog: None,
             new_chat: None,
             confirm_close: None,
+            reload_ask: None,
+            session_settings: None,
             settings_open: false,
             remember_at_start,
             remember_off_ask: None,
@@ -1377,19 +1388,18 @@ impl App {
         if !args.is_empty() {
             c += &format!(" {args}");
         }
-        let resume_wanted = l.restart || (l.restore && self.settings.claude_resume);
-        let resume_id = l.resume_id.filter(|id| crate::quote::is_uuid(id));
-        if let Some(id) = resume_id {
-            c += &format!(" --resume {id}");
-        } else if resume_wanted && meta.claude_started && crate::quote::is_uuid(&meta.claude_session) {
-            c += &format!(" --resume {}", meta.claude_session);
-        } else if (resume_wanted && is_wsl) || l.continue_last {
-            c += " --continue";
-        } else {
-            // Neue Konversation mit eigener ID, damit sie später exakt wiedergefunden wird.
-            meta.claude_session = hooks::new_uuid();
-            meta.claude_started = false;
-            c += &format!(" --session-id {}", meta.claude_session);
+        // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
+        // der globalen Einstellung (`session_settings::resume_wanted`).
+        let resume_wanted = session_settings::resume_wanted(l.restore, l.restart, meta.claude_continue, self.settings.claude_resume);
+        match session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, is_wsl) {
+            session_settings::ClaudeStart::Resume(id) => c += &format!(" --resume {id}"),
+            session_settings::ClaudeStart::Continue => c += " --continue",
+            session_settings::ClaudeStart::Fresh => {
+                // Neue Konversation mit eigener ID, damit sie später exakt wiedergefunden wird.
+                meta.claude_session = hooks::new_uuid();
+                meta.claude_started = false;
+                c += &format!(" --session-id {}", meta.claude_session);
+            }
         }
         // Der Start-Prompt wird nicht in die Kommandozeile geschrieben (Shell-Expansion von $, `, % …),
         // sondern als erster Eintrag der Warteschlange gesendet, sobald Claude bereit ist.
@@ -2009,7 +2019,7 @@ impl App {
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
         // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
-        if self.new_chat.is_some() || self.confirm_close.is_some() {
+        if self.new_chat.is_some() || self.confirm_close.is_some() || self.reload_ask.is_some() {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();
@@ -3222,6 +3232,8 @@ impl App {
                     self.want_focus = Some(ids[0]);
                 }
             }
+            Action::RequestReload(id) => self.request_reload(ctx, id),
+            Action::OpenSessionSettings(id) => self.open_session_settings(id),
             Action::Restart(id) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {} // ein Chat hat keinen Prozess
             Action::Restart(id) => {
                 if let Some(mut e) = self.entries.remove(&id) {
@@ -3263,10 +3275,12 @@ impl App {
                         project: Some(src.meta.project),
                         ..NewOpts::default()
                     };
+                    let cont = src.meta.claude_continue;
                     let new = self.new_session(ctx, o);
                     let group = self.entries.get(&id).map(|e| e.meta.group.clone()).unwrap_or_default();
                     if let Some(e) = self.entries.get_mut(&new) {
                         e.meta.group = group;
+                        e.meta.claude_continue = cont;
                     }
                 }
             }
@@ -3589,6 +3603,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         }
     });
     let claude = entry.meta.claude && cx.claude_mode;
+    // „Neu laden“ (#169) nur für Terminals; ein Chat hat keinen Prozess.
+    let reload = session_settings::reload_plan(&entry.meta);
     let status_label = entry.status_label(lang);
     let status_col = entry.status_color(t);
     let (text_c, strong_c, weak) = {
@@ -3604,9 +3620,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
-    // Breite des Knopfbereichs rechts: fünf Knöpfe (abgedockt zwei), mit Ticket-Verknüpfung einer mehr.
+    // Breite des Knopfbereichs rechts: fünf Knöpfe (abgedockt zwei), mit Ticket-Verknüpfung und Neu laden je einer mehr.
     let tl_btn = tl_enabled;
-    let btns_w = if cx.detached { 52.0 } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } };
+    let btns_w = if cx.detached { 52.0 } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } + if reload.is_some() { 22.0 } else { 0.0 } };
     let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
     let chips = cx.tl.chips_of(id);
@@ -3681,6 +3697,11 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                 let tip = if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) };
                 if style::icon_btn_small(ui, SIcon::Collapse, &tip).clicked() {
                     cx.actions.push(Action::MinimizePane(id));
+                }
+                if let Some(plan) = reload {
+                    if style::icon_btn_small(ui, SIcon::Reload, plan.tip(lang)).clicked() {
+                        cx.actions.push(Action::RequestReload(id));
+                    }
                 }
                 if style::icon_btn_small(ui, SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window")).clicked() {
                     cx.actions.push(Action::Detach(id));
@@ -4122,6 +4143,38 @@ mod pane_tests {
             h.click(&mut layout, false, header_btn(r, 0));
             assert!(h.actions.iter().any(|a| matches!(a, Action::RequestClose(x) if *x == id)), "{id}: X schließt weiterhin");
         }
+    }
+
+    #[test]
+    fn the_reload_button_sits_next_to_minimize_for_terminals_only() {
+        let mut h = H::new(&[(1, false), (2, true)]);
+        let mut layout = Node::grid(&[1, 2], Dir::Horizontal).unwrap();
+        h.frame(&mut layout, false, vec![]);
+        h.frame(&mut layout, false, vec![]);
+        // Terminal: dritter Knopf von rechts lädt neu (über die Rückfrage), nichts anderes
+        let r = h.rects[&1];
+        h.click(&mut layout, false, header_btn(r, 2));
+        assert!(h.actions.iter().any(|a| matches!(a, Action::RequestReload(1))), "Neu laden");
+        assert!(!h.actions.iter().any(|a| matches!(a, Action::Restart(_) | Action::Detach(_) | Action::MinimizePane(_))));
+        // Chat: kein Neu laden – an dieser Stelle sitzt „In eigenem Fenster öffnen“
+        let r = h.rects[&2];
+        h.actions.clear();
+        h.click(&mut layout, false, header_btn(r, 2));
+        assert!(h.actions.iter().any(|a| matches!(a, Action::Detach(2))));
+        assert!(!h.actions.iter().any(|a| matches!(a, Action::RequestReload(_))));
+        // Terminal: die übrigen Knöpfe rücken eins weiter (Detach an Stelle 3)
+        let r = h.rects[&1];
+        h.actions.clear();
+        h.click(&mut layout, false, header_btn(r, 3));
+        assert!(h.actions.iter().any(|a| matches!(a, Action::Detach(1))));
+        // Abgedockt: nur Andocken und Minimieren, kein Neu laden
+        let mut h = H::new(&[(1, false)]);
+        let mut solo = Node::Leaf(1);
+        h.frame(&mut solo, true, vec![]);
+        h.frame(&mut solo, true, vec![]);
+        let r = h.rects[&1];
+        h.click(&mut solo, true, header_btn(r, 2));
+        assert!(!h.actions.iter().any(|a| matches!(a, Action::RequestReload(_))));
     }
 
     #[test]

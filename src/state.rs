@@ -345,6 +345,20 @@ pub struct SessionMeta {
     /// Wo der minimierte Bereich stand (Geschwister, Richtung, Seite, Anteil) – dort kommt er wieder hin.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::layout::lenient_slot")]
     pub slot: Option<crate::layout::Slot>,
+    /// Claude-Sitzung (seit 2.3.0): „Neu laden“/„Neu starten“ setzt die Konversation fort (`--resume`) statt eine neue
+    /// zu beginnen. Standard an (so verhielt sich der Neustart bisher); fehlt in der Datei, solange es an ist.
+    #[serde(skip_serializing_if = "is_true", deserialize_with = "lenient_bool_true")]
+    pub claude_continue: bool,
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+/// Nur ein echtes `false` schaltet aus; ein falscher Typ (z. B. aus einer fremden Version) lädt als an.
+fn lenient_bool_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_bool().unwrap_or(true))
 }
 
 /// Art einer Sitzung.
@@ -413,6 +427,7 @@ impl Default for SessionMeta {
             chat: None,
             minimized: false,
             slot: None,
+            claude_continue: true,
         }
     }
 }
@@ -1059,6 +1074,26 @@ mod kind_tests {
         // kaputter Platz: Sitzung bleibt (minimiert, ohne Platz)
         let back: SessionMeta = serde_json::from_str(r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#).unwrap();
         assert!(back.minimized && back.slot.is_none());
+    }
+
+    #[test]
+    fn claude_continue_defaults_on_and_round_trips() {
+        // 2.2.0: kein `claude_continue` → an (Neustart setzt die Konversation fort wie bisher); an wird nicht geschrieben
+        let old: SessionMeta = serde_json::from_str(r#"{"id":3,"name":"Claude","claude":true,"claude_session":"x"}"#).unwrap();
+        assert!(old.claude_continue);
+        assert!(SessionMeta::default().claude_continue);
+        let s = serde_json::to_string(&old).unwrap();
+        assert!(!s.contains("claude_continue"), "{s}");
+        // aus: Rundreise
+        let m = SessionMeta { id: 4, claude: true, claude_continue: false, ..SessionMeta::default() };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""claude_continue":false"#), "{s}");
+        let back: SessionMeta = serde_json::from_str(&s).unwrap();
+        assert!(!back.claude_continue);
+        // falscher Typ: Sitzung bleibt, Option an
+        let back: SessionMeta = serde_json::from_str(r#"{"id":5,"claude_continue":"no"}"#).unwrap();
+        assert!(back.claude_continue);
+        assert_eq!(back.id, 5);
     }
 
     #[test]

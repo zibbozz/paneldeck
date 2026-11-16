@@ -309,6 +309,10 @@ impl App {
 
         // Schließen bestätigen (eine oder viele Sitzungen, mit 3-Sekunden-Wartezeit)
         self.close_ask_ui(ctx, actions);
+        // Einstellungen einer Sitzung und Rückfrage „Neu laden?“ (#169, #170); die Rückfrage nach dem Dialog,
+        // damit „Jetzt neu laden?“ gleich nach dem Speichern erscheint.
+        self.session_settings_ui(ctx);
+        self.reload_ask_ui(ctx, actions);
 
         self.history_ui(ctx, actions);
         self.templates_ui(ctx, actions);
