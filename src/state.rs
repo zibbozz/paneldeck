@@ -219,6 +219,10 @@ pub struct Settings {
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
     /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
     pub remember_sessions: bool,
+    /// Farbpaletten (seit 2.3.0, `palette`): gemeinsam oder je Bereich. Fehlt in älteren Dateien (dann die Vorgaben);
+    /// unveränderte Vorgaben werden nicht geschrieben, unlesbare Daten ergeben die Vorgaben.
+    #[serde(skip_serializing_if = "crate::palette::Palettes::is_default", deserialize_with = "crate::palette::Palettes::lenient")]
+    pub palette: crate::palette::Palettes,
     /// Programme dürfen per OSC 52 in die Zwischenablage kopieren (seit 2.3.0, #181, Standard an). Lesen der
     /// Zwischenablage durch Programme gibt es nie. Fehlt in älteren Dateien (dann an).
     pub osc52_copy: bool,
@@ -311,6 +315,7 @@ impl Default for Settings {
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
+            palette: Default::default(),
             osc52_copy: true,
             claude_defaults: Default::default(),
             last_claude_opts: None,

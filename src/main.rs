@@ -23,6 +23,7 @@ mod launch;
 mod keys;
 mod notify;
 mod osc;
+mod palette;
 mod paths;
 mod planning;
 mod prompts;
