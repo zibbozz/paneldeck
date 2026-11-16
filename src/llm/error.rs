@@ -43,6 +43,7 @@ pub enum LlmError {
     BadResponse(String),
     TooLarge,
     /// Nicht unter Windows.
+    #[cfg_attr(windows, allow(dead_code))]
     Unsupported,
 }
 

@@ -739,7 +739,10 @@ pub struct App {
     chat_backend: std::sync::Arc<dyn ChatBackend>,
     /// Modelllisten der LLM-Server im Hintergrund abrufen („Verbinden“).
     llm_conn: models_ui::Connector,
-    /// Zustand des Reiters Einstellungen → Modelle.
+    /// Zustand des Reiters Einstellungen → Modelle. Bewusst für alle Fenster gemeinsam (nicht in `view_fields!`): Er
+    /// bearbeitet die globalen Einstellungen, und `dirty_since` steuert das verzögerte Speichern im Hauptdurchgang
+    /// (`models_save_tick`) – je Fenster getauscht, bliebe eine Änderung in einem gerade nicht gezeichneten Fenster
+    /// ungespeichert. Folge: Ein offenes Server-Formular erscheint in jedem Fenster, das diesen Reiter zeigt.
     models_ui: models_ui::ModelsUi,
 }
 
@@ -2315,8 +2318,8 @@ impl App {
             };
             // Stufe inzwischen im Reiter „Modelle“ gewählt: die Frage erübrigt sich (die Nachricht bleibt im Feld).
             if !self.chat_level_unchosen(id) {
-                if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()).filter(|c| c.level_question) {
-                    c.level_question = false;
+                if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()).filter(|c| c.level_question.is_some()) {
+                    c.level_question = None;
                     c.touch();
                 }
             }
@@ -2351,12 +2354,12 @@ impl App {
     /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
     fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
         let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
-        let origin = self.entries.get(&id).and_then(|e| e.chat.as_ref()).and_then(|c| c.origin_session);
+        let origins = self.entries.get(&id).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
         match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
             Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
             None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
         }
-        .with_origin(origin)
+        .with_origins(origins)
     }
 
     /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
@@ -2368,7 +2371,9 @@ impl App {
         s.tools_supported(&meta.model) != Some(false) && !s.model_cfg(&meta.model).level_chosen
     }
 
-    /// Antwort auf die einmalige Frage: Stufe speichern (als gewählt) und die zurückgehaltene Nachricht senden.
+    /// Antwort auf die einmalige Frage: Stufe speichern (als gewählt) und – hatte der Nutzer die Frage mit „Senden“
+    /// ausgelöst – seine zurückgehaltene Nachricht senden. Kam die Frage von einem Agenten (`permission_pending`), schließt
+    /// die Antwort sie nur: Der Entwurf im Eingabefeld gehört dem Nutzer und geht nicht ungefragt los.
     fn chat_choose_level(&mut self, ctx: &egui::Context, id: u64, level: crate::mcp::McpLevel) {
         let Some(meta) = self.entries.get(&id).and_then(|e| e.meta.chat.clone()) else { return };
         if let Some(s) = self.settings.llm_servers.iter_mut().find(|s| s.id == meta.server) {
@@ -2378,8 +2383,11 @@ impl App {
             s.set_model_cfg(cfg);
             state::save_json(&self.dir.join("settings.json"), &self.settings);
         }
-        let held = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()).is_some_and(|c| std::mem::take(&mut c.level_question));
-        if held {
+        let asker = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()).and_then(|c| {
+            c.touch();
+            c.level_question.take()
+        });
+        if send_after_level_choice(asker) {
             self.chat_action(ctx, id, &Action::ChatSend(id));
         }
     }
@@ -2430,13 +2438,21 @@ impl App {
         if self.chat_level_unchosen(id) {
             if let Some(e) = self.entries.get_mut(&id) {
                 if let Some(c) = e.chat.as_mut() {
-                    c.level_question = true;
+                    c.level_question = Some(level_asker(c.level_question, &origin));
                     c.touch();
                 }
                 e.status = ClaudeStatus::Permission;
             }
             return ChatSendResult::LevelQuestion;
         }
+        // Kette der auslösenden Agenten: der Aufrufer und – ist er selbst ein Chat – dessen Kette (transitiv).
+        let chain = match &origin {
+            ChatSendOrigin::User => Vec::new(),
+            ChatSendOrigin::Agent { caller, .. } => {
+                let caller_chain = caller.and_then(|c| self.entries.get(&c)).and_then(|e| e.chat.as_ref()).map(|c| c.origin_sessions.clone()).unwrap_or_default();
+                chatmod::tools::chain_origins(*caller, &caller_chain)
+            }
+        };
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();
         let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
@@ -2450,10 +2466,10 @@ impl App {
         };
         if sent {
             // Herkunft der Runde: der Nutzer hebt eine Agenten-Herkunft auf; ein Agent markiert seine Nachricht.
+            c.origin_sessions = chain;
             match origin {
-                ChatSendOrigin::User => c.origin_session = None,
-                ChatSendOrigin::Agent { caller, note } => {
-                    c.origin_session = caller;
+                ChatSendOrigin::User => {}
+                ChatSendOrigin::Agent { note, .. } => {
                     if let Some(i) = chatmod::logic::last_user(&c.file.messages) {
                         c.file.messages[i].note = note;
                         c.touch();
@@ -2503,7 +2519,7 @@ impl App {
             Action::ChatRegenerate(_) => c.regenerate(backend.as_ref(), &meta, &tcx, repaint),
             Action::ChatStop(_) => {
                 c.stop();
-                c.level_question = false;
+                c.level_question = None;
                 true
             }
             Action::ChatEdit(_) => {
@@ -2640,6 +2656,11 @@ impl App {
         for m in msgs {
             let focused_id = seen_id;
             let Some(e) = self.entries.get_mut(&m.session) else { continue };
+            // Ein Chat hat keine Shell und keinen Claude: sein Status kommt nur aus `poll_chats`. Eine Hook-Meldung mit
+            // seiner Kennung (gefälscht oder veraltet) darf ihn nicht ändern.
+            if e.is_chat() {
+                continue;
+            }
             let old = e.status;
             e.hook_seen = true;
             let sh = e.eff_shell().to_string();
@@ -4263,6 +4284,22 @@ mod chat_status_tests {
     use super::*;
 
     #[test]
+    fn only_a_level_question_of_the_user_sends_the_draft_afterwards() {
+        use chatmod::LevelAsker::{Agent, User};
+        let agent = ChatSendOrigin::Agent { caller: Some(5), note: None };
+        // Ein Agent löst die Frage aus → nach der Antwort wird nichts gesendet (der Entwurf gehört dem Nutzer).
+        assert_eq!(level_asker(None, &agent), Agent);
+        assert!(!send_after_level_choice(Some(Agent)));
+        // Der Nutzer löst sie aus (oder drückt selbst „Senden“, während die Frage eines Agenten offen ist) → sein Entwurf geht los.
+        assert_eq!(level_asker(None, &ChatSendOrigin::User), User);
+        assert_eq!(level_asker(Some(Agent), &ChatSendOrigin::User), User);
+        // Ein späterer Agent macht die Frage des Nutzers nicht zu seiner.
+        assert_eq!(level_asker(Some(User), &agent), User);
+        assert!(send_after_level_choice(Some(User)));
+        assert!(!send_after_level_choice(None), "keine Frage offen (z. B. im Reiter Modelle gewählt): nichts senden");
+    }
+
+    #[test]
     fn chat_status_maps_to_session_status() {
         assert_eq!(chat_claude_status(chatmod::ChatStatus::Approval), ClaudeStatus::Permission);
         assert_eq!(chat_claude_status(chatmod::ChatStatus::Working), ClaudeStatus::Working);
@@ -4274,13 +4311,28 @@ mod chat_status_tests {
     }
 }
 
+/// Wer die Frage nach der Stufe auslöst: der Nutzer, sobald er selbst sendet (auch wenn ein Agent sie vorher auslöste);
+/// sonst ein Agent.
+fn level_asker(open: Option<chatmod::LevelAsker>, origin: &ChatSendOrigin) -> chatmod::LevelAsker {
+    match (open, origin) {
+        (_, ChatSendOrigin::User) | (Some(chatmod::LevelAsker::User), _) => chatmod::LevelAsker::User,
+        _ => chatmod::LevelAsker::Agent,
+    }
+}
+
+/// Geht nach der Antwort auf die Frage nach der Stufe der Entwurf los? Nur, wenn der Nutzer sie mit „Senden“ auslöste.
+fn send_after_level_choice(asker: Option<chatmod::LevelAsker>) -> bool {
+    asker == Some(chatmod::LevelAsker::User)
+}
+
 /// Woher eine Chat-Nachricht kommt ([`App::chat_send`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ChatSendOrigin {
     /// Eingabefeld des Chats.
     User,
     /// Externer Agent über MCP (`send_chat_message`): `caller` = seine Hub-Sitzung (`None` = außerhalb von Paneldeck).
-    /// Die Werkzeuge der ausgelösten Runde dürfen nicht in diese Sitzung schreiben (`ChatState::origin_session`).
+    /// Die Werkzeuge der ausgelösten Runde dürfen nicht in diese Sitzung (und nicht in die Kette davor) schreiben
+    /// (`ChatState::origin_sessions`).
     Agent { caller: Option<u64>, note: Option<String> },
 }
 

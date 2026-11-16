@@ -779,7 +779,10 @@ pub mod fake {
 
     #[derive(Clone, Debug)]
     pub struct Logged {
+        // Nur in Debug-Ausgaben fehlgeschlagener Tests gelesen.
+        #[allow(dead_code)]
         pub method: Method,
+        #[allow(dead_code)]
         pub url: String,
         pub body: Option<serde_json::Value>,
         pub bearer: Option<String>,

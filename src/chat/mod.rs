@@ -20,7 +20,7 @@ pub mod tools;
 pub use backend::EchoBackend;
 pub use backend::{ChatBackend, Repaint, TurnContext};
 pub use llm_backend::LlmBackend;
-pub use session::{ChatState, ChatStatus, Decision};
+pub use session::{ChatState, ChatStatus, Decision, LevelAsker};
 #[cfg(test)]
 pub use session::ToolStep;
 pub use store::{AllowRule, ChatFile, ChatMsg, Role, ToolStatus};

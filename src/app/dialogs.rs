@@ -320,7 +320,7 @@ impl App {
                         ui.label(format!(
                             "{}: {}",
                             lang.q(&name),
-                            lang.t("Der Chatverlauf wird gelöscht (eine laufende Antwort wird abgebrochen).", "The chat history will be deleted (a running answer is stopped).")
+                            lang.t("Der Chatverlauf wird gelöscht (eine laufende Antwort, ein laufendes Werkzeug oder eine offene Freigabe wird abgebrochen).", "The chat history will be deleted (a running answer, a running tool or a pending approval is stopped).")
                         ));
                     } else {
                         ui.label(format!(
