@@ -15,12 +15,18 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Close all sessions at once (#156): a reddish trash button on folders in the sidebar (on hover; includes subfolders, minimized sessions and chats) and one right of the filter field (all sessions of all projects and windows); also in the project context menu, the command palette and as a shortcut (no default). The confirmation lists what will end and enables "Close all" after 3 seconds; Git worktrees and branches are kept.
 - Setting *Remember sessions* (Settings → General, on by default; new optional `settings.json` field `remember_sessions`) (#157). When off, every start is fresh: no terminals, chats, projects or folders from the last run; chat histories are deleted on exit. Settings, to-do list and tickets stay. Turning it off asks first; the state is backed up to `state.json.bak-<date>` (newest kept).
 - Context menu "Reset agent chain" for sessions started from an agent chain; the session tooltip names the chain.
+- WSL sessions can start in a folder inside WSL. The folder field in "New session" offers a "Windows path / WSL path" switch, all installed WSL distributions (default first; templates and Docker Desktop hidden), Linux path completion with an existence check, a folder dialog that opens in the distribution's home folder (the choice becomes the Linux path), and recently used WSL folders per distribution. (#172)
+- Default folders of tree folders and projects whose shell is WSL can be chosen as Linux paths; Explorer "Open here" on a `\\wsl.localhost\<distro>\…` folder opens a WSL session of that distribution in the matching Linux path. (#172)
+- MCP `create_session` accepts a Linux path as `cwd` when the session starts in WSL (absolute or `~`). The folder is checked in WSL first: `bad_args` if it is missing, and a new result field `cwd_checked` (`false` = WSL did not answer in time; the session is still created and starts in `/` if the folder does not exist). (#172)
+- `settings.json`: optional field `wsl_recent` (recently used WSL folders per distribution, capped). (#172)
 
 ### Changed
 
 - The close confirmation now enables *Close* after a 3-second wait; Enter only confirms after the countdown, and Esc/Enter in the dialog no longer reach the terminal behind it.
 - A folder's *Close all sessions …* opens a confirmation with a list instead of the double-click button.
 - Restoring a minimized session (sidebar click, palette "Switch to", MCP `focus_session`) now opens it alone: it replaces the layout of the window/project and the panes that were visible become minimized sessions that keep running. Ctrl+Shift+W only minimizes; the old place in the split is no longer remembered (#162).
+- A WSL session without a start folder now starts in the Linux home (`~`) instead of the Windows user folder; a restored WSL session whose saved folder cannot be used starts in `~` with a note. (#172)
+- MCP `create_session` refuses Linux paths for Windows shells, and `\\wsl$` paths of another distribution. (#172)
 
 ### Deprecated
 
@@ -36,6 +42,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - Sessions started from an agent chain are now marked (#152): a terminal, Claude session or chat that an agent creates with `create_session` (or `paneldeck --open` from inside a session) inherits the creator's agent chain plus the creator, and a chain member that writes into another session (`send_text`, `send_keys`, `run_command`, `queue_prompt`, `send_chat_message`) passes the chain on. No agent – MCP bridge, Claude session or chat – may write into, rename, focus or close a session of its own chain (`forbidden`). Chains are kept in `state.json` (new optional field `agent_chain`), survive a restart and are reported by `whoami` and `list_sessions`. Agents started by the user behave as before, except that a session an agent creates can no longer write back into its creator.
 - The hub now identifies the calling process itself, right when the connection arrives (TCP table, the live process and its process tree with creation times), and ignores a process id supplied by the client; a caller that cannot be identified (already exited, connection gone) is refused. `PANELDECK_SESSION` only counts for WSL terminals and only together with the session's secret key `PANELDECK_SESSION_KEY`. Best effort against a malicious agent with its own shell: processes that cannot be attributed to any session count as external callers; detached or orphaned processes (started after Paneldeck, whose parent has exited) are blocked from writing into sessions that belong to an agent chain and from `--open --claude`; processes started outside Paneldeck entirely (e.g. scheduled tasks, WMI) remain outside the protection.
+- WSL start folders containing `"` or `\` are rejected everywhere, so `wsl.exe --cd` cannot be used to inject commands; administrator starts quote every argument correctly. (#172)
+- MCP `create_session` refuses network paths as `cwd` for terminals and chats without accessing them; `\\wsl$` paths are no longer probed on the UI thread. (#172)
 
 ## [2.2.0] - 2026-11-16
 
