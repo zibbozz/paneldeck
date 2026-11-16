@@ -1113,14 +1113,21 @@ c.close()
     do { Start-Sleep -Milliseconds 300; $scr = "$((Tool 'read_terminal' @{ session = $c.data.id; screen = $true }).data.text)" } while ($scr -notmatch 'PS [^\r\n]*>' -and ((Get-Date) - $t0).TotalSeconds -lt 30)
     if ($scr -notmatch 'PS [^\r\n]*>') { Write-Host "  info  inherit_env: kein Prompt nach 30 s" -ForegroundColor Yellow }
     $rv = if ($regVar) { "`$env:$regVar" } else { "''" }
-    $probe = '"$env:PD_SMOKE_INHERIT|' + $rv + '|$env:PANELDECK_SESSION|$env:USERPROFILE|" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'
-    $r = Tool 'run_command' @{ session = $c.data.id; command = $probe; timeout_secs = 25 }
-    if (-not "$($r.data.output)".Trim()) {
-      # Sollte nach dem Warten auf den Prompt nicht vorkommen: sichtbar protokollieren (mit quality), dann einmal wiederholen.
-      Write-Host "  info  inherit_env: run_command ohne Ausgabe trotz Prompt (quality=$($r.data.quality), finished=$($r.data.finished), timed_out=$($r.data.timed_out)) – Wiederholung" -ForegroundColor Yellow
-      Start-Sleep 2; $r = Tool 'run_command' @{ session = $c.data.id; command = $probe; timeout_secs = 25 }
+    # Ein Wert je Zeile (mit Marke davor): eine einzige lange Zeile, die genau am Zeilenende umbricht, liefert bei run_command
+    # leere Ausgabe (Befund, siehe Bericht zu #175) - das soll diese Pruefung nicht verdecken, aber auch nicht ausloesen.
+    $probe = '"v0=$env:PD_SMOKE_INHERIT"; "v1=$(' + $rv + ')"; "v2=$env:PANELDECK_SESSION"; "v3=$env:USERPROFILE"; "v4=" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'
+    # Bis zu drei Versuche; jeder leere Versuch wird mit quality und dem sichtbaren Bildschirm protokolliert (keine stille
+    # Wiederholung: ein leeres Ergebnis trotz Prompt ist ein Befund von run_command, kein Fehler dieser Pruefung).
+    for ($try = 1; $try -le 3; $try++) {
+      $r = Tool 'run_command' @{ session = $c.data.id; command = $probe; timeout_secs = 25 }
+      if ("$($r.data.output)".Trim()) { break }
+      $scr = "$((Tool 'read_terminal' @{ session = $c.data.id; screen = $true }).data.text)".Trim() -replace '\s+', ' '
+      if ($scr.Length -gt 300) { $scr = $scr.Substring($scr.Length - 300) }
+      Write-Host "  info  inherit_env: Versuch $try ohne Ausgabe (quality=$($r.data.quality), finished=$($r.data.finished), timed_out=$($r.data.timed_out), duration_ms=$($r.data.duration_ms)); Bildschirm: $scr" -ForegroundColor Yellow
+      Start-Sleep 2
     }
-    $o = "$($r.data.output)".Trim(); $parts = $o -split '\|'
+    $o = "$($r.data.output)".Trim()
+    $parts = @(0..4 | ForEach-Object { $k = "v$_="; $l = @($o -split "`r?`n" | Where-Object { $_.StartsWith($k) }) | Select-Object -First 1; if ($l) { $l.Substring($k.Length).Trim() } else { $null } })
     if (-not $o) { $o = "(leer) create: $($c.text) | run_command: $($r.text)" }
     $label = if ($inherit) { 'an' } else { 'aus' }
     Check "inherit_env $($label): Paneldecks Variable PANELDECK_SESSION = eigene Sitzung" (-not $c.err -and $parts.Count -ge 5 -and $parts[2] -eq "$($c.data.id)") $o
