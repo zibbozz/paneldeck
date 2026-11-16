@@ -279,6 +279,8 @@ impl App {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close = true;
                 }
+                // Rückfrage „Neu laden?“ aus diesem Fenster hier zeigen – vor dem Terminal, damit Enter/Esc ihr gehören.
+                self.reload_ask_ui(ctx, actions, Some(id));
                 if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::W)) {
                     close = true;
                 }
