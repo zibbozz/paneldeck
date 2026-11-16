@@ -61,6 +61,9 @@ enum Pend {
     Wait { statuses: Vec<ClaudeStatus>, started: Instant },
     /// Screenshot angefordert; das Bild kommt im nächsten Frame als `Event::Screenshot` mit diesem Token.
     Shot { token: u64, crop: Option<egui::Rect> },
+    /// `create_session` mit Linux-`cwd`: wartet auf die Ordnerprüfung in WSL (Hintergrund-Thread, #172).
+    /// `distro`/`path`: was geprüft wird (beim Anlegen muss es noch passen).
+    Create { rx: std::sync::mpsc::Receiver<crate::wsl::DirCheck>, distro: String, path: String },
 }
 
 pub(super) struct PendingMcp {
@@ -517,6 +520,26 @@ impl App {
         // Wartende zuerst (neue Anfragen können weitere anhängen).
         let pend = std::mem::take(&mut self.mcp.pending);
         for p in pend {
+            if let Pend::Create { rx, distro, path } = &p.kind {
+                // Ordnerprüfung fertig (oder Frist um: dann gilt „unbekannt“ und die Sitzung wird trotzdem angelegt).
+                // Lange danach (der Aufrufer hat aufgegeben) wird nichts mehr angelegt.
+                match create_wait(rx.try_recv(), Instant::now(), p.deadline) {
+                    CreateWait::Wait => self.mcp.pending.push(p),
+                    CreateWait::GaveUp => {
+                        let r = Err(er("timeout", tr("Die Ordnerprüfung in WSL kam zu spät – es wurde keine Sitzung angelegt.", "The folder check in WSL came too late – no session was created.")));
+                        self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r);
+                    }
+                    CreateWait::Proceed(c) => {
+                        let checked = (c, distro.clone(), path.clone());
+                        let r = match self.mcp_create(ctx, &p.args, p.caller, Some(checked)) {
+                            CreateStep::Done(r) => r,
+                            CreateStep::Check { .. } => Err(er("internal", "cwd check repeated")),
+                        };
+                        self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r);
+                    }
+                }
+                continue;
+            }
             match self.mcp_check(&p) {
                 Some(r) => self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r),
                 None => self.mcp.pending.push(p),
@@ -727,7 +750,7 @@ impl App {
                 // Das Protokoll-Eintrag-Schreiben übernimmt der Thread; hier nur die Aktivität vermerken.
                 Out::Later
             }
-            "create_session" => Out::Now(self.mcp_create(ctx, args, caller)),
+            "create_session" => self.mcp_create_start(ctx, args, caller, how, reply),
             "read_chat" => Out::Now(self.mcp_read_chat(args)),
             "send_chat_message" => Out::Now(self.mcp_send_chat(ctx, args, caller)),
             "list_models" => Out::Now(Ok(models_json(&self.settings.llm_servers, self.settings.last_chat_model.as_ref()))),
@@ -982,7 +1005,50 @@ impl App {
         }))
     }
 
-    fn mcp_create(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
+    /// `create_session`: sofort fertig, oder – bei einem Linux-`cwd` für WSL – erst nach der Ordnerprüfung im
+    /// Hintergrund (wartet in `McpState::pending`, die Oberfläche blockiert nicht).
+    fn mcp_create_start(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>, how: &'static str, reply: &SyncSender<R>) -> Out {
+        match self.mcp_create(ctx, args, caller, None) {
+            CreateStep::Done(r) => Out::Now(r),
+            CreateStep::Check { distro, path } => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx2 = ctx.clone();
+                let (d2, p2) = (distro.clone(), path.clone());
+                std::thread::spawn(move || {
+                    use crate::wsl::Backend;
+                    let _ = tx.send(crate::wsl::WslExe.is_dir(&d2, &p2));
+                    ctx2.request_repaint();
+                });
+                // wsl.exe hat selbst ein Zeitlimit (FAST_TIMEOUT); etwas Luft für den Start des Threads.
+                let wait = crate::wsl::FAST_TIMEOUT + Duration::from_secs(2);
+                ctx.request_repaint_after(wait);
+                self.mcp.pending.push(PendingMcp {
+                    reply: reply.clone(),
+                    tool: "create_session".into(),
+                    args: args.clone(),
+                    caller,
+                    how,
+                    session: 0,
+                    deadline: Instant::now() + wait,
+                    kind: Pend::Create { rx, distro, path },
+                });
+                Out::Later
+            }
+        }
+    }
+
+    /// `checked`: Ergebnis der Ordnerprüfung eines Linux-`cwd` mit der geprüften (Distribution, Pfad)
+    /// (None = noch nicht geprüft → ggf. `CreateStep::Check`).
+    fn mcp_create(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>, checked: Option<(crate::wsl::DirCheck, String, String)>) -> CreateStep {
+        match self.mcp_create_inner(ctx, args, caller, checked) {
+            Ok(Ok(v)) => CreateStep::Done(Ok(v)),
+            Ok(Err((distro, path))) => CreateStep::Check { distro, path },
+            Err(e) => CreateStep::Done(Err(e)),
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn mcp_create_inner(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>, checked: Option<(crate::wsl::DirCheck, String, String)>) -> Result<Result<Value, (String, String)>, (String, String)> {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
         let chat = match s("kind").as_deref() {
             None | Some("terminal") => false,
@@ -990,7 +1056,7 @@ impl App {
             Some(k) => return Err(er("bad_args", if de() { format!("kind: „terminal“ oder „chat“, nicht „{k}“") } else { format!("kind: “terminal” or “chat”, not “{k}”") })),
         };
         if chat {
-            return self.mcp_create_chat(ctx, args, caller);
+            return self.mcp_create_chat(ctx, args, caller).map(Ok);
         }
         if s("server").is_some() {
             return Err(er("bad_args", tr("server gibt es nur mit kind = „chat“.", "server only applies with kind = “chat”.")));
@@ -1021,16 +1087,34 @@ impl App {
             }
             None => None,
         };
-        let cwd = s("cwd");
-        if let Some(c) = &cwd {
-            if !std::path::Path::new(c).is_dir() {
-                return Err(er("bad_args", if de() { format!("Ordner existiert nicht: {c}") } else { format!("Folder does not exist: {c}") }));
-            }
-        }
         // Läuft der Agent in einer Hub-Sitzung, kommt das Kind in deren Fenster und Projekt (#110), sonst ins Hauptfenster.
         let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
-        // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
         let default_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        // Startet die Sitzung (nach Auflösung des Standardprofils mit eigenem Programm) in WSL, darf `cwd` ein
+        // Linux-Pfad sein (#172); sonst nie.
+        let eff_shell = self.effective_shell_id(shell.as_deref(), project);
+        let wsl = match super::folder_picker::Target::for_shell(self.shell_by_id(&eff_shell).as_ref(), false) {
+            super::folder_picker::Target::Wsl { distro, .. } => Some(distro),
+            super::folder_picker::Target::Windows => None,
+        };
+        let cwd = match s("cwd") {
+            Some(c) => Some(check_create_cwd(&c, wsl.as_ref().map(|d| d.as_deref()), de(), |p| std::path::Path::new(p).is_dir())?),
+            None => None,
+        };
+        // Linux-Ordner in WSL prüfen (im Hintergrund, siehe `mcp_create_start`).
+        let linux_check = match (&cwd, &wsl) {
+            (Some(c), Some(d)) => cwd_check_target(c, d.as_deref()),
+            _ => None,
+        };
+        let cwd_checked = match (&linux_check, checked) {
+            (Some((d, p)), None) => return Ok(Err((d.clone(), p.clone()))),
+            // Geprüft wurde genau diese Distribution mit genau diesem Pfad? (Shell/Profil können sich in der Zwischenzeit
+            // geändert haben – dann nicht mit einem fremden Prüfergebnis anlegen.)
+            (Some((d, p)), Some((c, cd, cp))) if d.eq_ignore_ascii_case(&cd) && *p == cp => Some(dir_check_result(c, cwd.as_deref().unwrap_or_default(), de())?),
+            (Some(_), Some(_)) => return Err(er("bad_args", tr("Shell oder Ordner haben sich während der Prüfung geändert – bitte erneut versuchen.", "The shell or folder changed during the check – please try again."))),
+            (None, _) => None,
+        };
+        // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
         if self.profile(default_profile).is_some_and(|p| p.admin) {
             return Err(er("admin_profile", tr("Das Standardprofil dieses Projekts startet als Administrator – über MCP nicht erlaubt.", "This project's default profile starts as administrator – not allowed via MCP.")));
         }
@@ -1050,7 +1134,11 @@ impl App {
         let e = &self.entries[&id];
         let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
         add_claude_opts(&mut v, e);
-        Ok(v)
+        // Linux-`cwd`: ob der Ordner geprüft werden konnte (false = WSL antwortete nicht rechtzeitig, trotzdem angelegt).
+        if let Some(c) = cwd_checked {
+            v["cwd_checked"] = json!(c);
+        }
+        Ok(Ok(v))
     }
 
     /// Gruppe einer neuen Sitzung: `group` oder – läuft der Agent in einer Hub-Sitzung – ein Unterordner mit deren Namen
@@ -1072,7 +1160,12 @@ impl App {
         }
         let cwd = s("cwd");
         if let Some(c) = &cwd {
-            if !std::path::Path::new(c).is_dir() {
+            // Netzwerkpfade nie prüfen (schon das Prüfen baute eine SMB-Verbindung auf).
+            if crate::pathfmt::is_remote_unc(c) {
+                return Err(er("bad_args", if de() { format!("Netzwerkpfade sind als Startordner nicht erlaubt: {c}") } else { format!("Network paths are not allowed as start folder: {c}") }));
+            }
+            // WSL-Pfade ungeprüft (keine Prüfung im UI-Thread, sie könnte die WSL-VM starten).
+            if !crate::wsl::is_wsl_unc(c) && !std::path::Path::new(c).is_dir() {
                 return Err(er("bad_args", if de() { format!("Ordner existiert nicht: {c}") } else { format!("Folder does not exist: {c}") }));
             }
         }
@@ -1333,6 +1426,10 @@ impl App {
 
     /// `Some(Ergebnis)`, wenn ein wartender Aufruf fertig ist (Erfolg, Ende der Sitzung oder Frist).
     fn mcp_check(&self, p: &PendingMcp) -> Option<R> {
+        // `create_session` mit Ordnerprüfung erledigt `poll_mcp` selbst (braucht `&mut self`).
+        if let Pend::Create { .. } = &p.kind {
+            return None;
+        }
         // Screenshots hängen an keiner Sitzung (Fenster-Screenshot: Sitzung 0); nur die Frist zählt.
         if let Pend::Shot { .. } = &p.kind {
             return if Instant::now() >= p.deadline { Some(Err(er("screenshot_timeout", tr("Es kam kein Bild vom Fenster (ist es sichtbar und nicht minimiert?).", "No image came from the window (is it visible and not minimized?).")))) } else { None };
@@ -1366,7 +1463,7 @@ impl App {
                 }
                 None
             }
-            Pend::Shot { .. } => None,
+            Pend::Shot { .. } | Pend::Create { .. } => None,
             Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started, mark0 } => {
                 let Some(s) = &e.live else { return Some(Err(er("session_not_running", tr("Die Sitzung läuft nicht mehr.", "The session is no longer running.")))) };
                 let (advanced, exit, mark) = {
@@ -1697,9 +1794,176 @@ impl App {
     }
 }
 
+/// Ergebnis von `mcp_create`: fertig, oder erst den Linux-Ordner in WSL prüfen.
+enum CreateStep {
+    Done(R),
+    Check { distro: String, path: String },
+}
+
+/// Muss ein `cwd` vor dem Anlegen in WSL geprüft werden? Ja für absolute Linux-Pfade bei bekannter Distribution
+/// (`~` gibt es immer; ohne Distribution – `wsl.exe` ohne `-d` – lässt sich nicht gezielt prüfen).
+fn cwd_check_target(cwd: &str, distro: Option<&str>) -> Option<(String, String)> {
+    let d = distro?;
+    (cwd.starts_with('/') && crate::wsl::validate_linux_path(cwd).is_ok()).then(|| (d.to_string(), cwd.to_string()))
+}
+
+/// Ergebnis der Ordnerprüfung: fehlt der Ordner, `bad_args`; sonst ob er wirklich geprüft wurde
+/// (`Unknown` = WSL antwortete nicht rechtzeitig – die Sitzung wird trotzdem angelegt, `wsl.exe` meldet dann selbst).
+fn dir_check_result(c: crate::wsl::DirCheck, cwd: &str, de: bool) -> Result<bool, (String, String)> {
+    match c {
+        crate::wsl::DirCheck::Exists => Ok(true),
+        crate::wsl::DirCheck::Unknown => Ok(false),
+        crate::wsl::DirCheck::Missing => Err(er("bad_args", if de { format!("Ordner existiert in WSL nicht: {cwd}") } else { format!("Folder does not exist in WSL: {cwd}") })),
+    }
+}
+
+/// Startordner für `create_session` prüfen (rein, testbar). `wsl` = `Some(Distribution)`, wenn die Sitzung in WSL
+/// startet: dann ist auch ein Linux-Pfad erlaubt (absolut oder `~`, ohne Steuerzeichen, höchstens 4096 Bytes; ob er
+/// existiert, zeigt erst der Start – eine Prüfung über wsl.exe würde die Oberfläche blockieren), und ein
+/// `\\wsl.localhost\<Distro>\…`-Pfad wird zum Linux-Pfad. Windows-Pfade müssen existieren; Netzwerkfreigaben werden
+/// gar nicht erst geprüft (schon das Prüfen baute eine SMB-Verbindung auf).
+fn check_create_cwd(c: &str, wsl: Option<Option<&str>>, de: bool, is_dir: impl Fn(&str) -> bool) -> Result<String, (String, String)> {
+    let bad = |de_msg: String, en_msg: String| Err(er("bad_args", if de { de_msg } else { en_msg }));
+    if let Some(distro) = wsl {
+        // Ein \\wsl$-Pfad wird zum Linux-Pfad – aber nur für dieselbe, bekannte Distribution (nie still in einer anderen
+        // starten); danach dieselbe Prüfung wie ein getippter Linux-Pfad (9P-Zeichen können `"` ergeben).
+        let linux = match crate::wsl::unc_to_linux(c) {
+            Some((d, linux)) => match distro {
+                Some(x) if x.eq_ignore_ascii_case(&d) => Some(linux),
+                Some(x) => return bad(format!("Der Ordner liegt in der WSL-Distribution {d}, die Shell startet {x}."), format!("The folder is in the WSL distribution {d}, the shell starts {x}.")),
+                None => return bad(format!("Unklar, welche WSL-Distribution die Shell startet – bitte einen Linux-Pfad angeben statt {c}."), format!("It is unclear which WSL distribution the shell starts – give a Linux path instead of {c}.")),
+            },
+            None => None,
+        };
+        let c = linux.as_deref().unwrap_or(c);
+        if crate::wsl::looks_linux(c) {
+            return match crate::wsl::validate_linux_path(c) {
+                Ok(()) => Ok(crate::wsl::normalize(c, None)),
+                Err(e) => bad(format!("Ungültiger Linux-Pfad: {}", e.message(true)), format!("Invalid Linux path: {}", e.message(false))),
+            };
+        }
+    } else if crate::wsl::looks_linux(c) {
+        // Nie einen Linux-Pfad an eine Windows-Shell geben (`/x` hieße dort `C:\x`).
+        return bad(format!("Linux-Pfade gibt es nur für WSL-Shells: {c}"), format!("Linux paths are only allowed for WSL shells: {c}"));
+    }
+    if crate::pathfmt::is_remote_unc(c) {
+        return bad(format!("Netzwerkpfade sind als Startordner nicht erlaubt: {c}"), format!("Network paths are not allowed as start folder: {c}"));
+    }
+    // Ein \\wsl$-Pfad für eine Windows-Shell gilt ungeprüft als Ordner (keine Prüfung im UI-Thread).
+    if !crate::wsl::is_wsl_unc(c) && !is_dir(c) {
+        return bad(format!("Ordner existiert nicht: {c}"), format!("Folder does not exist: {c}"));
+    }
+    Ok(c.to_string())
+}
+
+/// So lange nach der Frist der Ordnerprüfung wird eine Antwort noch verwendet; danach hat der Aufrufer (die Brücke
+/// wartet 30 s) praktisch aufgegeben, und es wird nichts mehr angelegt.
+const CREATE_GIVE_UP: Duration = Duration::from_secs(8);
+
+/// Stand einer wartenden `create_session`-Ordnerprüfung.
+#[derive(Debug, PartialEq)]
+enum CreateWait {
+    Wait,
+    Proceed(crate::wsl::DirCheck),
+    GaveUp,
+}
+
+/// Rein, testbar: was mit einer wartenden Ordnerprüfung geschieht.
+fn create_wait(recv: Result<crate::wsl::DirCheck, std::sync::mpsc::TryRecvError>, now: Instant, deadline: Instant) -> CreateWait {
+    if now > deadline + CREATE_GIVE_UP {
+        return CreateWait::GaveUp;
+    }
+    match recv {
+        Ok(c) => CreateWait::Proceed(c),
+        Err(std::sync::mpsc::TryRecvError::Empty) if now < deadline => CreateWait::Wait,
+        // Frist um oder Prüf-Thread weg: „unbekannt“, trotzdem anlegen (`cwd_checked: false`).
+        Err(_) => CreateWait::Proceed(crate::wsl::DirCheck::Unknown),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_session_cwd_accepts_linux_paths_only_for_wsl() {
+        let dirs = |p: &str| matches!(p, r"C:\Work" | r"\\wsl.localhost\Ubuntu\home\u");
+        let ok = |c: &str, wsl: Option<Option<&str>>| check_create_cwd(c, wsl, false, dirs);
+        let ubuntu = Some(Some("Ubuntu"));
+        // WSL: Linux-Pfad (absolut oder ~) ohne Existenzprüfung, normalisiert
+        assert_eq!(ok("/home/u/my project/", ubuntu).unwrap(), "/home/u/my project");
+        assert_eq!(ok("~", ubuntu).unwrap(), "~");
+        assert_eq!(ok("/", ubuntu).unwrap(), "/");
+        // UNC derselben Distribution → Linux-Pfad; andere Distribution → Fehler
+        assert_eq!(ok(r"\\wsl$\ubuntu\srv\x", ubuntu).unwrap(), "/srv/x");
+        assert!(ok(r"\\wsl.localhost\Debian\srv", ubuntu).unwrap_err().1.contains("Debian"));
+        assert!(ok(r"\\wsl.localhost\Debian\srv", Some(None)).unwrap_err().1.contains("unclear"));
+        // Windows-Pfade wie bisher (müssen existieren)
+        assert_eq!(ok(r"C:\Work", ubuntu).unwrap(), r"C:\Work");
+        assert!(ok(r"C:\Missing", ubuntu).is_err());
+        // Ungültige Linux-Pfade
+        for c in ["~/x", "/a\nb", "/a\u{0}b", &format!("/{}", "x".repeat(5000))] {
+            let e = ok(c, ubuntu).unwrap_err();
+            assert_eq!(e.0, "bad_args", "{c:?}");
+            assert!(e.1.starts_with("Invalid Linux path"), "{c:?}: {}", e.1);
+        }
+        assert!(check_create_cwd("/a\nb", ubuntu, true, dirs).unwrap_err().1.contains("Steuerzeichen"));
+        // Regression (Review): `"` beendet den Wert von `wsl.exe --cd`, der Rest liefe als Befehl. Nie annehmen –
+        // weder direkt noch über die 9P-Abbildung (U+F022) eines \\wsl$-Pfads, noch mit `\`.
+        for c in ["/tmp/x\" echo INJECTED-$((6*7)); #", "\\\\wsl$\\Ubuntu\\tmp\\x\u{F022} echo pwned", "/tmp/a\\b"] {
+            let e = ok(c, ubuntu).unwrap_err();
+            assert!(e.0 == "bad_args" && e.1.contains("Invalid Linux path") && e.1.contains('"'), "{c:?}: {}", e.1);
+        }
+        // Ohne WSL: Linux-Pfade nie (unter Windows hieße `/x` sonst `C:\x`); Netzwerkfreigaben nie prüfen
+        assert!(ok("/home/u", None).unwrap_err().1.contains("only allowed for WSL"));
+        assert!(ok("~", None).is_err());
+        assert_eq!(ok(r"\\wsl.localhost\Ubuntu\home\u", None).unwrap(), r"\\wsl.localhost\Ubuntu\home\u");
+        let probed = std::cell::Cell::new(false);
+        let e = check_create_cwd(r"\\evil\share", ubuntu, false, |_| {
+            probed.set(true);
+            true
+        })
+        .unwrap_err();
+        assert!(e.1.contains("Network paths") && !probed.get());
+    }
+
+    #[test]
+    fn create_session_folder_check_deadline() {
+        use crate::wsl::DirCheck;
+        use std::sync::mpsc::TryRecvError;
+        let t0 = Instant::now();
+        let deadline = t0 + Duration::from_secs(7);
+        // Vor der Frist: warten bzw. Ergebnis nehmen
+        assert_eq!(create_wait(Err(TryRecvError::Empty), t0, deadline), CreateWait::Wait);
+        assert_eq!(create_wait(Ok(DirCheck::Missing), t0, deadline), CreateWait::Proceed(DirCheck::Missing));
+        // Frist um, keine Antwort: „unbekannt“ (anlegen, cwd_checked = false); Thread weg ebenso
+        assert_eq!(create_wait(Err(TryRecvError::Empty), deadline + Duration::from_secs(1), deadline), CreateWait::Proceed(DirCheck::Unknown));
+        assert_eq!(create_wait(Err(TryRecvError::Disconnected), t0, deadline), CreateWait::Proceed(DirCheck::Unknown));
+        // Weit nach der Frist (UI stand, Aufrufer hat aufgegeben): nichts anlegen – auch nicht mit spätem Ergebnis
+        let late = deadline + CREATE_GIVE_UP + Duration::from_millis(1);
+        assert_eq!(create_wait(Ok(DirCheck::Exists), late, deadline), CreateWait::GaveUp);
+        assert_eq!(create_wait(Err(TryRecvError::Empty), late, deadline), CreateWait::GaveUp);
+        // Insgesamt deutlich unter der Wartezeit der Brücke (30 s)
+        assert!(crate::wsl::FAST_TIMEOUT + Duration::from_secs(2) + CREATE_GIVE_UP < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn create_session_checks_linux_folders_in_the_background() {
+        // Nur absolute Linux-Pfade bei bekannter Distribution werden in WSL geprüft.
+        assert_eq!(cwd_check_target("/home/u/p", Some("Ubuntu")), Some(("Ubuntu".into(), "/home/u/p".into())));
+        assert_eq!(cwd_check_target("~", Some("Ubuntu")), None);
+        assert_eq!(cwd_check_target("/home/u", None), None, "wsl.exe ohne -d: Distribution unbekannt");
+        assert_eq!(cwd_check_target(r"C:\Work", Some("Ubuntu")), None);
+        assert_eq!(cwd_check_target("/x\"y", Some("Ubuntu")), None);
+        use crate::wsl::DirCheck;
+        assert_eq!(dir_check_result(DirCheck::Exists, "/p", false), Ok(true));
+        // Keine Antwort (Zeitlimit): trotzdem anlegen, `cwd_checked: false`.
+        assert_eq!(dir_check_result(DirCheck::Unknown, "/p", false), Ok(false));
+        let e = dir_check_result(DirCheck::Missing, "/nope", false).unwrap_err();
+        assert_eq!(e.0, "bad_args");
+        assert!(e.1.contains("/nope") && e.1.contains("WSL"));
+        assert!(dir_check_result(DirCheck::Missing, "/nope", true).unwrap_err().1.contains("existiert"));
+    }
 
     #[test]
     fn closing_a_session_forgets_it_and_orphans_its_children() {

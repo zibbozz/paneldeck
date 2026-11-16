@@ -234,6 +234,17 @@ pub struct Settings {
     /// (Hinweis unter *Einstellungen → Claude*).
     #[serde(skip)]
     pub claude_bypass_dropped: bool,
+    /// Zuletzt im Ordner-Auswahlfeld benutzte WSL-Ordner je Distribution (seit 2.3.0, #172), neueste zuerst,
+    /// begrenzt (`wsl::RECENT_MAX`). Fehlt in älteren Dateien; Unlesbares/Ungültiges wird beim Laden verworfen.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "lenient_wsl_recent")]
+    pub wsl_recent: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+fn lenient_wsl_recent<'de, D: serde::Deserializer<'de>>(d: D) -> Result<std::collections::BTreeMap<String, Vec<String>>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let mut m: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_value(v).unwrap_or_default();
+    crate::wsl::sanitize_recent(&mut m);
+    Ok(m)
 }
 
 /// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
@@ -304,6 +315,7 @@ impl Default for Settings {
             claude_defaults: Default::default(),
             last_claude_opts: None,
             claude_bypass_dropped: false,
+            wsl_recent: Default::default(),
         }
     }
 }
@@ -1068,6 +1080,24 @@ mod tests {
         assert_eq!(j["osc52_copy"], false);
         let back: Settings = serde_json::from_value(j).unwrap();
         assert!(!back.osc52_copy);
+    }
+
+    #[test]
+    fn wsl_recent_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit leerer Liste und schreibt das Feld nicht.
+        let old = r#"{"language":"De","remember_sessions":false}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.wsl_recent.is_empty());
+        assert!(!s.remember_sessions);
+        assert!(serde_json::to_value(&s).unwrap().get("wsl_recent").is_none());
+        // Kaputter Wert: Standard statt Ladefehler; ungültige Einträge fallen weg.
+        let s: Settings = serde_json::from_str(r#"{"wsl_recent": 5, "confirm_close": false}"#).unwrap();
+        assert!(s.wsl_recent.is_empty() && !s.confirm_close);
+        let s: Settings = serde_json::from_str(r#"{"wsl_recent": {"Ubuntu": ["/home/u", "rel", "/x\n"], "-x": ["/a"]}}"#).unwrap();
+        assert_eq!(s.wsl_recent.len(), 1);
+        assert_eq!(s.wsl_recent["Ubuntu"], vec!["/home/u".to_string()]);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.wsl_recent, s.wsl_recent);
     }
 
     #[test]
