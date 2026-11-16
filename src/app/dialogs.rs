@@ -366,7 +366,7 @@ impl App {
                     PromptKind::NewProject => {
                         if !text.is_empty() {
                             let id = self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1;
-                            let color = PALETTE[(id as usize) % PALETTE.len()];
+                            let color = hub_color(id);
                             self.projects.push(Project { id, name: text, color, ..Project::default() });
                             actions.push(Action::SwitchProject(id));
                         }

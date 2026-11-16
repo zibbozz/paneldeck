@@ -1,7 +1,7 @@
 //! Wiederverwendbare Bausteine der Projekt-Oberfläche: Farbwahl (Palette + Hex), Icon-Auswahl mit selbst gezeichneten
 //! Typ-Icons, Textfelder mit „beim Verlassen übernehmen“, Schaltflächen, Karten, Dialog-Rahmen.
 
-use super::helpers::{color_of, PALETTE};
+use super::helpers::color_of;
 use crate::planning::common::normalize_color;
 use crate::planning::icons::ICONS;
 use crate::state::Lang;
@@ -213,23 +213,12 @@ pub fn swatch(ui: &mut Ui, id: Id, color: Color32, size: f32) -> Response {
 pub fn palette_and_hex(ui: &mut Ui, salt: impl Hash, hex: &mut String, lang: Lang) -> bool {
     let salt = Id::new(salt);
     let mut changed = false;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(4.0);
-        ui.set_max_width(7.0 * 26.0);
-        for (i, c) in PALETTE.iter().enumerate() {
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-            let resp = ui.interact(rect, salt.with(("pal", i)), Sense::click());
-            ui.painter().circle_filled(rect.center(), 8.5, color_of(c));
-            if hex.eq_ignore_ascii_case(c) {
-                ui.painter().circle_stroke(rect.center(), 10.5, Stroke::new(1.8_f32, ui.visuals().strong_text_color()));
-            }
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                *hex = (*c).to_string();
-                ui.data_mut(|d| d.remove_temp::<String>(salt.with("hexbuf")));
-                changed = true;
-            }
-        }
-    });
+    // Palette des Expertenmodus (Tooltip mit Name und Wert) und „Eigene Farbe …“.
+    if let Some(c) = crate::app::palette_ui::pick(ui, salt, crate::palette::Area::Expert, Some(hex), crate::app::palette_ui::Look::Circle, 7, lang) {
+        *hex = c;
+        ui.data_mut(|d| d.remove_temp::<String>(salt.with("hexbuf")));
+        changed = true;
+    }
     ui.horizontal(|ui| {
         ui.label(RichText::new(lang.t("Hex:", "Hex:")).color(style::dim(ui)));
         let id = salt.with("hexfield");

@@ -1210,7 +1210,7 @@ impl TasksUi {
         let tags = self.tags.clone();
         let tag_use = self.tag_use.clone();
         let mut renames: Vec<(i64, String)> = Vec::new();
-        let mut recolor: Vec<(i64, &'static str)> = Vec::new();
+        let mut recolor: Vec<(i64, String)> = Vec::new();
         let mut merge_into: Vec<(i64, i64)> = Vec::new();
         let mut delete: Vec<i64> = Vec::new();
         let m = egui::Modal::new(Id::new("todo_tags_modal")).show(ctx, |ui| {
@@ -1258,19 +1258,12 @@ impl TasksUi {
                     if mgr.picker == Some(t.id) {
                         ui.horizontal(|ui| {
                             ui.add_space(28.0);
-                            for c in tasks::PALETTE {
-                                let (r, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::CLICK);
-                                let (cr, cg, cb) = tasks::rgb(c);
-                                let col = Color32::from_rgb(cr, cg, cb);
-                                ui.painter().circle_filled(r.center(), 8.0, col);
-                                if t.color.eq_ignore_ascii_case(c) {
-                                    ui.painter().circle_stroke(r.center(), 10.0, Stroke::new(1.5_f32, style::accent()));
-                                }
-                                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            ui.vertical(|ui| {
+                                if let Some(c) = super::palette_ui::pick(ui, ("todo_tag_color", t.id), crate::palette::Area::Todo, Some(&t.color), super::palette_ui::Look::Circle, 12, lang) {
                                     recolor.push((t.id, c));
                                     mgr.picker = None;
                                 }
-                            }
+                            });
                         });
                     }
                 }
@@ -1302,7 +1295,7 @@ impl TasksUi {
             }
         }
         for (id, c) in recolor {
-            let r = tasks::set_tag_color(conn, id, c);
+            let r = tasks::set_tag_color(conn, id, &c);
             self.finish(lang, r);
         }
         for (from, into) in merge_into {
