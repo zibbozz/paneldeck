@@ -6,178 +6,173 @@ impl App {
     pub(super) fn sidebar(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
         let panel_fill = ctx.style().visuals.panel_fill;
-        let panel = egui::SidePanel::left("sidebar")
-            .resizable(true)
-            .default_width(self.settings.sidebar_width)
-            .width_range(210.0..=460.0)
-            .frame(egui::Frame::new().fill(panel_fill).inner_margin(Margin::symmetric(10, 10)))
-            .show(ctx, |ui| {
-                // Fußzeile: Einstellungen + Gesamtverbrauch
-                egui::TopBottomPanel::bottom("sidebar_footer").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
-                    ui.add_space(S1);
-                    ui.horizontal(|ui| {
-                        if style::icon_btn(ui, SIcon::Gear, lang.t("Einstellungen", "Settings"), self.settings_open).clicked() {
-                            self.settings_open = !self.settings_open;
-                        }
-                        if self.mcp_chip(ui) {
-                            self.settings_open = true;
-                            self.settings_tab = 7;
-                        }
-                        let (mut tok, mut cost) = (0u64, 0.0f64);
-                        if self.settings.claude_mode {
-                            for id in self.entries.keys().copied().collect::<Vec<_>>() {
-                                if let Some(u) = self.usage.get(id) {
-                                    tok += u.total.input + u.total.output + u.total.cache_read + u.total.cache_write;
-                                    cost += u.cost();
-                                }
-                            }
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let txt = if tok > 0 {
-                                format!("Σ {} {} · ≈ ${:.2}", fmt_tokens(tok), lang.t("Token", "tokens"), cost)
-                            } else {
-                                format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))
-                            };
-                            if tok > 0 {
-                                let r = ui.add(egui::Label::new(RichText::new(txt).small().color(style::dim(ui))).sense(Sense::click()));
-                                if r.on_hover_text(lang.t("Kosten-Übersicht öffnen", "Open cost overview")).clicked() {
-                                    actions.push(Action::OpenCosts);
-                                }
-                            } else {
-                                ui.label(RichText::new(txt).small().color(style::dim(ui)));
-                            }
-                        });
-                    });
-                });
-
-                // Werkzeugleiste
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
-                    if style::icon_btn(ui, SIcon::Plus, &format!("{} ({})", lang.t("Neue Sitzung …", "New session …"), self.binding_text("new")), false).clicked() {
-                        actions.push(Action::NewDialog(false));
-                    }
-                    if self.settings.claude_mode && style::icon_btn(ui, SIcon::Spark, lang.t("Neue Claude-Sitzung …", "New Claude session …"), false).clicked() {
-                        actions.push(Action::NewDialog(true));
-                    }
-                    if style::icon_btn(ui, SIcon::Chat, lang.t("Neuer Chat (lokales Modell)", "New chat (local model)"), false).clicked() {
-                        actions.push(Action::NewChat);
-                    }
-                    if style::icon_btn(ui, SIcon::Queue, &format!("{} ({})", lang.t("Prompt-Composer", "Prompt composer"), self.binding_text("composer")), self.composer_open).clicked() {
-                        actions.push(Action::ToggleComposer);
-                    }
-                    if style::icon_btn(ui, SIcon::Search, &format!("{} ({})", lang.t("Befehle", "Commands"), self.binding_text("palette")), false).clicked() {
-                        actions.push(Action::OpenPalette);
-                    }
-                    if style::icon_btn(ui, SIcon::Prompt, lang.t("Prompt-Bibliothek", "Prompt library"), self.prompts_open).clicked() {
-                        actions.push(Action::OpenPrompts);
-                    }
-                    if style::icon_btn(ui, SIcon::Folder, &format!("{} ({})", lang.t("Dateibaum", "File tree"), self.binding_text("files")), self.files_open).clicked() {
-                        actions.push(Action::ToggleFiles);
-                    }
-                    if style::icon_btn(ui, SIcon::Diff, &format!("{} ({})", lang.t("Änderungen (Diff, Stage, Commit)", "Changes (diff, stage, commit)"), self.binding_text("diff")), self.diff_open).clicked() {
-                        actions.push(Action::ToggleDiff);
-                    }
-                    if self.settings.claude_mode && style::icon_btn(ui, SIcon::Doc, &format!("{} ({})", lang.t("CLAUDE.md / Claude-Dateien", "CLAUDE.md / Claude files"), self.binding_text("editor")), self.editor.is_some()).clicked() {
-                        actions.push(Action::OpenEditor);
-                    }
-                    if self.settings.claude_mode && style::icon_btn(ui, SIcon::Clock, lang.t("Claude-Verlauf", "Claude history"), self.history_open).clicked() {
-                        actions.push(Action::OpenHistory);
-                    }
-                    if style::icon_btn(ui, SIcon::Template, lang.t("Sitzungs-Vorlagen", "Session templates"), self.templates_open).clicked() {
-                        actions.push(Action::OpenTemplates);
-                    }
-                    if style::icon_btn(ui, SIcon::Broadcast, &format!("{} ({})", lang.t("Broadcast an alle sichtbaren Bereiche", "Broadcast to all visible panes"), self.binding_text("broadcast")), self.broadcast).clicked() {
-                        actions.push(Action::ToggleBroadcast);
-                    }
-                });
-                ui.add_space(S2);
-                self.project_bar(ui, actions);
+        let panel = sidebar_panel(ctx, self.settings.sidebar_width, panel_fill, |ui| {
+            // Fußzeile: Einstellungen + Gesamtverbrauch
+            egui::TopBottomPanel::bottom("sidebar_footer").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
                 ui.add_space(S1);
-                self.inbox_ui(ui, actions);
-
-                // Filter
-                self.sync_folders();
-                self.folder_rects.clear();
-                self.tree_geo = TreeGeo::default();
-                let tree_on = self.projects.iter().find(|p| p.id == self.active_project).is_some_and(|p| p.tree_view);
-                egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                        style::paint_icon(ui.painter(), SIcon::Search, r.center(), style::dim(ui));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.filter)
-                                .frame(false)
-                                .hint_text(lang.t("Filtern: Name oder #Tag", "Filter: name or #tag"))
-                                .desired_width((ui.available_width() - 100.0).max(40.0)),
-                        );
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        if tree_on && style::icon_btn(ui, SIcon::FolderPlus, lang.t("Neuer Ordner", "New folder"), false).clicked() {
-                            actions.push(Action::FolderNew(String::new()));
+                ui.horizontal(|ui| {
+                    if style::icon_btn(ui, SIcon::Gear, lang.t("Einstellungen", "Settings"), self.settings_open).clicked() {
+                        self.settings_open = !self.settings_open;
+                    }
+                    if self.mcp_chip(ui) {
+                        self.settings_open = true;
+                        self.settings_tab = 7;
+                    }
+                    let (mut tok, mut cost) = (0u64, 0.0f64);
+                    if self.settings.claude_mode {
+                        for id in self.entries.keys().copied().collect::<Vec<_>>() {
+                            if let Some(u) = self.usage.get(id) {
+                                tok += u.total.input + u.total.output + u.total.cache_read + u.total.cache_write;
+                                cost += u.cost();
+                            }
                         }
-                        let (icon, tip) = if tree_on {
-                            (SIcon::List, lang.t("Als Liste anzeigen", "Show as list"))
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let txt = if tok > 0 {
+                            format!("Σ {} {} · ≈ ${:.2}", fmt_tokens(tok), lang.t("Token", "tokens"), cost)
                         } else {
-                            (SIcon::Tree, lang.t("Als Ordnerbaum anzeigen", "Show as folder tree"))
+                            format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))
                         };
-                        if style::icon_btn(ui, icon, tip, tree_on).clicked() {
-                            actions.push(Action::ToggleTree);
-                        }
-                        // Alle Sitzungen schließen (#156): ganz rechts, etwas abgesetzt; Rückfrage mit Liste und Wartezeit.
-                        ui.add_space(6.0);
-                        let (r, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-                        let key = self.binding_text("close_all");
-                        let base = lang.t("Alle Sitzungen schließen … (alle Projekte und Fenster)", "Close all sessions … (all projects and windows)");
-                        let tip = if key.is_empty() { base.to_string() } else { format!("{base} ({key})") };
-                        if style::danger_icon_at(ui, r, Id::new("sidebar_close_all"), &tip, !self.entries.is_empty()).clicked() {
-                            actions.push(Action::CloseAll(closing::CloseScope::All));
+                        if tok > 0 {
+                            let r = ui.add(egui::Label::new(RichText::new(txt).small().color(style::dim(ui))).sense(Sense::click()));
+                            if r.on_hover_text(lang.t("Kosten-Übersicht öffnen", "Open cost overview")).clicked() {
+                                actions.push(Action::OpenCosts);
+                            }
+                        } else {
+                            ui.label(RichText::new(txt).small().color(style::dim(ui)));
                         }
                     });
                 });
-                ui.add_space(S2);
+            });
 
-                let mut groups: Vec<String> = self.entries.values().filter(|e| self.sidebar_match(e)).map(|e| e.meta.group.clone()).collect();
-                groups.sort();
-                groups.dedup();
-                groups.sort_by_key(|g| !g.is_empty()); // ohne Gruppe zuerst
-                let empty = groups.is_empty();
+            // Werkzeugleiste
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
+                if style::icon_btn(ui, SIcon::Plus, &format!("{} ({})", lang.t("Neue Sitzung …", "New session …"), self.binding_text("new")), false).clicked() {
+                    actions.push(Action::NewDialog(false));
+                }
+                if self.settings.claude_mode && style::icon_btn(ui, SIcon::Spark, lang.t("Neue Claude-Sitzung …", "New Claude session …"), false).clicked() {
+                    actions.push(Action::NewDialog(true));
+                }
+                if style::icon_btn(ui, SIcon::Chat, lang.t("Neuer Chat (lokales Modell)", "New chat (local model)"), false).clicked() {
+                    actions.push(Action::NewChat);
+                }
+                if style::icon_btn(ui, SIcon::Queue, &format!("{} ({})", lang.t("Prompt-Composer", "Prompt composer"), self.binding_text("composer")), self.composer_open).clicked() {
+                    actions.push(Action::ToggleComposer);
+                }
+                if style::icon_btn(ui, SIcon::Search, &format!("{} ({})", lang.t("Befehle", "Commands"), self.binding_text("palette")), false).clicked() {
+                    actions.push(Action::OpenPalette);
+                }
+                if style::icon_btn(ui, SIcon::Prompt, lang.t("Prompt-Bibliothek", "Prompt library"), self.prompts_open).clicked() {
+                    actions.push(Action::OpenPrompts);
+                }
+                if style::icon_btn(ui, SIcon::Folder, &format!("{} ({})", lang.t("Dateibaum", "File tree"), self.binding_text("files")), self.files_open).clicked() {
+                    actions.push(Action::ToggleFiles);
+                }
+                if style::icon_btn(ui, SIcon::Diff, &format!("{} ({})", lang.t("Änderungen (Diff, Stage, Commit)", "Changes (diff, stage, commit)"), self.binding_text("diff")), self.diff_open).clicked() {
+                    actions.push(Action::ToggleDiff);
+                }
+                if self.settings.claude_mode && style::icon_btn(ui, SIcon::Doc, &format!("{} ({})", lang.t("CLAUDE.md / Claude-Dateien", "CLAUDE.md / Claude files"), self.binding_text("editor")), self.editor.is_some()).clicked() {
+                    actions.push(Action::OpenEditor);
+                }
+                if self.settings.claude_mode && style::icon_btn(ui, SIcon::Clock, lang.t("Claude-Verlauf", "Claude history"), self.history_open).clicked() {
+                    actions.push(Action::OpenHistory);
+                }
+                if style::icon_btn(ui, SIcon::Template, lang.t("Sitzungs-Vorlagen", "Session templates"), self.templates_open).clicked() {
+                    actions.push(Action::OpenTemplates);
+                }
+                if style::icon_btn(ui, SIcon::Broadcast, &format!("{} ({})", lang.t("Broadcast an alle sichtbaren Bereiche", "Broadcast to all visible panes"), self.binding_text("broadcast")), self.broadcast).clicked() {
+                    actions.push(Action::ToggleBroadcast);
+                }
+            });
+            ui.add_space(S2);
+            self.project_bar(ui, actions);
+            ui.add_space(S1);
+            self.inbox_ui(ui, actions);
 
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    if empty && !(tree_on && self.filter.trim().is_empty()) {
-                        ui.add_space(S3);
-                        ui.label(RichText::new(if self.filter.trim().is_empty() {
-                            lang.t("Noch keine Sitzungen in diesem Projekt.", "No sessions in this project yet.")
-                        } else {
-                            lang.t("Keine Treffer.", "No matches.")
-                        }).color(style::dim(ui)));
+            // Filter
+            self.sync_folders();
+            self.folder_rects.clear();
+            self.tree_geo = TreeGeo::default();
+            let tree_on = self.projects.iter().find(|p| p.id == self.active_project).is_some_and(|p| p.tree_view);
+            egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                    style::paint_icon(ui.painter(), SIcon::Search, r.center(), style::dim(ui));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.filter)
+                            .frame(false)
+                            .hint_text(lang.t("Filtern: Name oder #Tag", "Filter: name or #tag"))
+                            .desired_width((ui.available_width() - 100.0).max(40.0)),
+                    );
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    if tree_on && style::icon_btn(ui, SIcon::FolderPlus, lang.t("Neuer Ordner", "New folder"), false).clicked() {
+                        actions.push(Action::FolderNew(String::new()));
                     }
-                    if tree_on && self.filter.trim().is_empty() {
-                        self.folder_rects.push((String::new(), ui.clip_rect()));
-                        self.tree_ui(ui, actions);
-                        return;
+                    let (icon, tip) = if tree_on {
+                        (SIcon::List, lang.t("Als Liste anzeigen", "Show as list"))
+                    } else {
+                        (SIcon::Tree, lang.t("Als Ordnerbaum anzeigen", "Show as folder tree"))
+                    };
+                    if style::icon_btn(ui, icon, tip, tree_on).clicked() {
+                        actions.push(Action::ToggleTree);
                     }
-                    for g in groups {
-                        let ids: Vec<u64> = self
-                            .entries
-                            .iter()
-                            .filter(|(_, e)| e.meta.group == g && self.sidebar_match(e))
-                            .map(|(i, _)| *i)
-                            .collect();
-                        if g.is_empty() {
-                            for id in ids {
-                                self.session_row(ui, id, actions);
-                            }
-                        } else {
-                            let title = RichText::new(format!("{}  {}", g.to_uppercase(), ids.len())).small().color(style::dim(ui));
-                            egui::CollapsingHeader::new(title).id_salt(("grp", &g)).default_open(true).show(ui, |ui| {
-                                for id in ids {
-                                    self.session_row(ui, id, actions);
-                                }
-                            });
-                        }
+                    // Alle Sitzungen schließen (#156): ganz rechts, etwas abgesetzt; Rückfrage mit Liste und Wartezeit.
+                    ui.add_space(6.0);
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                    let key = self.binding_text("close_all");
+                    let base = lang.t("Alle Sitzungen schließen … (alle Projekte und Fenster)", "Close all sessions … (all projects and windows)");
+                    let tip = if key.is_empty() { base.to_string() } else { format!("{base} ({key})") };
+                    if style::danger_icon_at(ui, r, Id::new("sidebar_close_all"), &tip, !self.entries.is_empty()).clicked() {
+                        actions.push(Action::CloseAll(closing::CloseScope::All));
                     }
                 });
             });
+            ui.add_space(S2);
+
+            let mut groups: Vec<String> = self.entries.values().filter(|e| self.sidebar_match(e)).map(|e| e.meta.group.clone()).collect();
+            groups.sort();
+            groups.dedup();
+            groups.sort_by_key(|g| !g.is_empty()); // ohne Gruppe zuerst
+            let empty = groups.is_empty();
+
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if empty && !(tree_on && self.filter.trim().is_empty()) {
+                    ui.add_space(S3);
+                    ui.label(RichText::new(if self.filter.trim().is_empty() {
+                        lang.t("Noch keine Sitzungen in diesem Projekt.", "No sessions in this project yet.")
+                    } else {
+                        lang.t("Keine Treffer.", "No matches.")
+                    }).color(style::dim(ui)));
+                }
+                if tree_on && self.filter.trim().is_empty() {
+                    self.folder_rects.push((String::new(), ui.clip_rect()));
+                    self.tree_ui(ui, actions);
+                    return;
+                }
+                for g in groups {
+                    let ids: Vec<u64> = self
+                        .entries
+                        .iter()
+                        .filter(|(_, e)| e.meta.group == g && self.sidebar_match(e))
+                        .map(|(i, _)| *i)
+                        .collect();
+                    if g.is_empty() {
+                        for id in ids {
+                            self.session_row(ui, id, actions);
+                        }
+                    } else {
+                        let title = RichText::new(format!("{}  {}", g.to_uppercase(), ids.len())).small().color(style::dim(ui));
+                        egui::CollapsingHeader::new(title).id_salt(("grp", &g)).default_open(true).show(ui, |ui| {
+                            for id in ids {
+                                self.session_row(ui, id, actions);
+                            }
+                        });
+                    }
+                }
+            });
+        });
         self.settings.sidebar_width = panel.response.rect.width();
         if panel.response.hovered() && ctx.input(|i| i.key_pressed(Key::F2)) {
             actions.push(Action::StartRename(self.focused));
@@ -528,7 +523,10 @@ impl App {
         if !visible {
             status_tip.push('\n');
             status_tip += if minimized {
-                lang.t("Minimiert – läuft weiter. Klicken holt den Bereich an seinen Platz zurück.", "Minimized – still running. Click to bring the pane back to where it was.")
+                lang.t(
+                    "Minimiert – läuft weiter. Klicken öffnet die Sitzung allein; die sichtbaren Bereiche werden minimiert.",
+                    "Minimized – still running. Click to open it alone; the visible panes are minimized.",
+                )
             } else {
                 lang.t("Nicht im Layout – klicken zeigt die Sitzung im fokussierten Bereich.", "Not in the layout – click to show it in the focused pane.")
             };
@@ -707,5 +705,124 @@ impl App {
                 ui.close();
             }
         });
+    }
+}
+
+/// Breitenbereich der Seitenleiste (Punkte).
+const SIDEBAR_WIDTHS: std::ops::RangeInclusive<f32> = 210.0..=460.0;
+
+/// Seitenleiste als `SidePanel` zeigen, ohne dass ihr Inhalt sie verbreitern kann (#160).
+///
+/// egui füllt den Panel-Rahmen nur bis zur eingestellten Breite (Clip-Rechteck), reserviert aber das ganze Rechteck des
+/// Inhalts: Ragt eine Zeile über die Breite hinaus, beginnt der Mittelbereich erst dahinter. Der Streifen dazwischen wird
+/// von keiner Fläche gefüllt und ist im transparenten Fenster durchsichtig – mit der Trennlinie dahinter wirkt er wie eine
+/// Lücke zwischen Seitenleiste und Terminals. Darum läuft der Inhalt in einem Kind-Ui, das seine Größe nicht an das Panel
+/// weitergibt; das Panel belegt genau seine Breite (überstehender Inhalt wird abgeschnitten).
+pub(super) fn sidebar_panel<R>(ctx: &egui::Context, default_width: f32, fill: Color32, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    egui::SidePanel::left("sidebar")
+        .resizable(true)
+        .default_width(default_width)
+        .width_range(SIDEBAR_WIDTHS)
+        .frame(egui::Frame::new().fill(fill).inner_margin(Margin::symmetric(10, 10)))
+        .show(ctx, |ui| {
+            let area = ui.max_rect();
+            let mut body = ui.new_child(egui::UiBuilder::new().id_salt("sidebar_body").max_rect(area).layout(*ui.layout()));
+            let r = add(&mut body);
+            // Genau die verfügbare Fläche belegen – nicht mehr (Inhalt zu breit) und nicht weniger (Inhalt zu schmal).
+            // (ohne Widget: nichts darf Klicks oder Hover der Zeilen darunter abfangen).
+            ui.advance_cursor_after_rect(area);
+            r
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ein Durchlauf: Seitenleiste mit Inhalt der Breite `content_w`, danach der Mittelbereich.
+    /// Liefert (gezeichnete Breite der Seitenleiste = Clip, belegtes Rechteck, Rechteck des Mittelbereichs).
+    fn run(ctx: &egui::Context, use_helper: bool, width: f32, content_w: f32) -> (Rect, Rect, Rect) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 700.0))), ..Default::default() };
+        let (mut clip, mut side, mut central) = (Rect::NOTHING, Rect::NOTHING, Rect::NOTHING);
+        let _ = ctx.run(input, |ctx| {
+            let content = |ui: &mut Ui| {
+                ui.allocate_exact_size(Vec2::new(content_w, 20.0), Sense::hover());
+                ui.clip_rect()
+            };
+            let r = if use_helper {
+                sidebar_panel(ctx, width, Color32::DARK_GRAY, content)
+            } else {
+                egui::SidePanel::left("sidebar_raw")
+                    .resizable(true)
+                    .default_width(width)
+                    .width_range(SIDEBAR_WIDTHS)
+                    .frame(egui::Frame::new().fill(Color32::DARK_GRAY).inner_margin(Margin::symmetric(10, 10)))
+                    .show(ctx, content)
+            };
+            clip = r.inner;
+            side = r.response.rect;
+            central = egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| ui.max_rect()).response.rect;
+        });
+        (clip, side, central)
+    }
+
+    /// Der Rahmen füllt nur das Clip-Rechteck des Panels. Gibt die Lücke in Punkten zurück: so weit beginnt der
+    /// Mittelbereich rechts der gefüllten Fläche.
+    fn gap(clip: Rect, central: Rect) -> f32 {
+        central.min.x - clip.max.x
+    }
+
+    #[test]
+    fn plain_side_panel_leaves_a_gap_when_content_is_too_wide() {
+        // Nachweis der Ursache von #160 mit egui allein: zu breiter Inhalt verschiebt den Mittelbereich hinter die Füllung.
+        let ctx = egui::Context::default();
+        let (clip, _, central) = run(&ctx, false, 460.0, 600.0);
+        assert!(gap(clip, central) > 100.0, "erwartet eine Lücke: clip {clip:?}, central {central:?}");
+    }
+
+    #[test]
+    fn widgets_in_the_sidebar_still_get_clicks_and_hover() {
+        // Der Kind-Ui und die abschließende Belegung der Fläche dürfen Knöpfe (z. B. die Papierkörbe aus #155) nicht verdecken.
+        let ctx = egui::Context::default();
+        let pos = Pos2::new(24.0, 24.0);
+        let mut clicked = false;
+        let mut hovered = false;
+        let mut btn_rect = Rect::NOTHING;
+        for (i, events) in [
+            vec![egui::Event::PointerMoved(pos)],
+            vec![egui::Event::PointerMoved(pos)],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 700.0))), time: Some(i as f64 * 0.05), events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                sidebar_panel(ctx, 240.0, Color32::DARK_GRAY, |ui| {
+                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+                    btn_rect = r;
+                    hovered |= resp.hovered();
+                    clicked |= resp.clicked();
+                });
+                egui::CentralPanel::default().show(ctx, |_| {});
+            });
+        }
+        assert!(btn_rect.contains(pos), "Testpunkt liegt nicht auf dem Knopf: {btn_rect:?}");
+        assert!(hovered, "Knopf in der Seitenleiste bekommt kein Hover");
+        assert!(clicked, "Knopf in der Seitenleiste bekommt keinen Klick");
+    }
+
+    #[test]
+    fn sidebar_and_central_panel_touch_without_gap() {
+        for (width, content_w) in [(240.0, 100.0), (240.0, 220.0), (240.0, 600.0), (396.375, 1000.0), (460.0, 900.0), (210.0, 0.0)] {
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                let (clip, side, central) = run(&ctx, true, width, content_w);
+                assert!(gap(clip, central).abs() < 0.01, "Lücke bei Breite {width}, Inhalt {content_w}: clip {clip:?}, central {central:?}");
+                assert!((side.max.x - central.min.x).abs() < 0.01, "Seitenleiste {side:?} und Mitte {central:?} grenzen nicht aneinander");
+                assert!((side.width() - width).abs() < 0.01, "Breite {width} wurde zu {} (Inhalt {content_w})", side.width());
+            }
+        }
     }
 }

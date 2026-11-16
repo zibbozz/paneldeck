@@ -36,11 +36,14 @@ $realDesktopLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Paneldeck
 $realStart = Join-Path ([Environment]::GetFolderPath('Programs')) 'Paneldeck'
 $beforeDesktop = Test-Path $realDesktopLnk; $beforeStart = Test-Path $realStart
 $oldProfile = $env:USERPROFILE
+# Schein-Umgebung fuer Installer, Hubs und Deinstaller (tools\test-env.ps1): Profil $prof (= $tmp\profile), kein echtes
+# claude im PATH, keine CLAUDECODE/CLAUDE_*/ANTHROPIC_*-Variablen; bricht ab, wenn doch ein claude gefunden wird.
+. "$PSScriptRoot\test-env.ps1"
 
 function Install($setup, [string]$label) {
-  $env:USERPROFILE = $prof
+  $iso = Enter-IsolatedTestEnv $tmp
   try { $p = Start-Process $setup -ArgumentList '/S', "/D=$inst" -PassThru; if (-not $p.WaitForExit(120000)) { $p.Kill(); return -999 }; return $p.ExitCode }
-  finally { $env:USERPROFILE = $oldProfile }
+  finally { Exit-IsolatedTestEnv $iso }
 }
 function Reg($path, $name = $null) { if ($name) { (Get-ItemProperty $path -Name $name -ErrorAction SilentlyContinue).$name } else { (Get-Item $path -ErrorAction SilentlyContinue).GetValue('') } }
 # Nur die Nutzerdaten (nicht instance.lock/ipc.json u. ä., die ein laufender Hub hält).
@@ -109,9 +112,8 @@ try {
   Write-Host '== Update bei LAUFENDEM Hub (Datei gesperrt)'
   [void](Install $Old 'alt')   # zurück auf alt, Daten bleiben
   Check 'zurück auf alte exe' ((Get-FileHash "$inst\paneldeck.exe").Hash -eq $oldExeHash)
-  $env:USERPROFILE = $prof
-  $hub = Start-Process "$inst\paneldeck.exe" -ArgumentList '--tray' -PassThru
-  $env:USERPROFILE = $oldProfile
+  $iso = Enter-IsolatedTestEnv $tmp
+  try { $hub = Start-Process "$inst\paneldeck.exe" -ArgumentList '--tray' -PassThru } finally { Exit-IsolatedTestEnv $iso }
   $t0 = Get-Date; while (-not (Test-Path "$data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 300 }
   Check 'Hub läuft (ipc.json da)' ((Test-Path "$data\ipc.json") -and -not $hub.HasExited)
   $dataRunning = Hashes $data
@@ -125,9 +127,8 @@ try {
   Check 'alte exe als paneldeck.exe.old zurückgeblieben (sie lief ja noch)' (Test-Path "$inst\paneldeck.exe.old")
   Write-Host '== Neuer Hub räumt die .old-Datei nach dem ersten Frame auf'
   Stop-Process -Id $hub.Id -Force; Start-Sleep -Milliseconds 800
-  $env:USERPROFILE = $prof
-  $hub2 = Start-Process "$inst\paneldeck.exe" -ArgumentList '--tray' -PassThru
-  $env:USERPROFILE = $oldProfile
+  $iso = Enter-IsolatedTestEnv $tmp
+  try { $hub2 = Start-Process "$inst\paneldeck.exe" -ArgumentList '--tray' -PassThru } finally { Exit-IsolatedTestEnv $iso }
   $t0 = Get-Date; while ((Test-Path "$inst\paneldeck.exe.old") -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 300 }
   Check 'paneldeck.exe.old ist nach dem Start weg' (-not (Test-Path "$inst\paneldeck.exe.old"))
 
@@ -143,10 +144,10 @@ try {
   [IO.File]::WriteAllText($claudeJson, ($cj | ConvertTo-Json -Depth 6), $u8)
   # Ohne echtes `claude` im PATH und ohne CLAUDE_CONFIG_DIR: sonst könnte `claude mcp remove` die echte Konfiguration ändern.
   # Der Deinstaller nimmt dann den Ersatzweg (Einträge direkt aus der Schein-.claude.json entfernen).
-  $oldPath = $env:PATH; $oldCfg = $env:CLAUDE_CONFIG_DIR
-  $env:USERPROFILE = $prof; $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"; Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+  $iso = Enter-IsolatedTestEnv $tmp -NoConfigDir
+  $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
   try { $u = Start-Process "$inst\Uninstall.exe" -ArgumentList '/S', "_?=$inst" -PassThru; $uok = $u.WaitForExit(120000); if (-not $uok) { $u.Kill() } }
-  finally { $env:USERPROFILE = $oldProfile; $env:PATH = $oldPath; if ($oldCfg) { $env:CLAUDE_CONFIG_DIR = $oldCfg } }
+  finally { Exit-IsolatedTestEnv $iso }
   Check 'Deinstaller endet' $uok
   Check 'Instanz-Autostart dieser exe entfernt' (-not (Reg $runKey $p1Name))
   Check 'Instanz-Autostart einer fremden exe bleibt' ((Reg $runKey $foreignName) -eq $foreignVal)

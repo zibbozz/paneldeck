@@ -46,88 +46,52 @@ pub fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Node>, D
     Ok(serde_json::from_value::<Node>(v).ok())
 }
 
-/// Wo ein minimierter Bereich stand: sein Geschwister-Teilbaum (dessen Blätter in Reihenfolge), die Teilungsrichtung,
-/// ob er davor (links/oben) lag, und sein Anteil. Damit kommt er beim Zurückholen an dieselbe Stelle (`Node::insert_at_slot`).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Slot {
-    pub sibling: Vec<u64>,
-    pub dir: Dir,
-    pub before: bool,
-    #[serde(deserialize_with = "lenient_ratio")]
-    pub ratio: f32,
-}
-
 /// Sitzung `id` zeigen (Regel von `App::activate`). Steht sie schon im Layout, bleibt alles, wie es ist. Sonst:
 /// 1. kein Layout (leerer Hub) → sie wird der einzige Bereich;
-/// 2. `minimized` und ihr `slot` passt noch → genau dort wieder einfügen (`Node::insert_at_slot`);
-/// 3. `minimized`, aber die Geschwister sind weg → den fokussierten Bereich (`focused`) rechts teilen;
-/// 4. sonst (nur weggewechselt) → den fokussierten Bereich ersetzen.
+/// 2. `minimized` → sie öffnet sich **allein**: Sie ersetzt das ganze Layout, die bisher sichtbaren Bereiche verlassen es
+///    (der Aufrufer markiert sie als minimiert; sie laufen weiter);
+/// 3. sonst (nur weggewechselt) → den fokussierten Bereich (`focused`, sonst den ersten) ersetzen.
 ///
-/// Ist `focused` nicht im Layout, gilt für 3/4 der erste Bereich.
-pub fn show(layout: &mut Option<Node>, id: u64, focused: u64, minimized: bool, slot: Option<&Slot>) {
+/// Liefert die Bereiche, die durch Regel 2 das Layout verlassen haben (in Reihenfolge), sonst eine leere Liste.
+pub fn show(layout: &mut Option<Node>, id: u64, focused: u64, minimized: bool) -> Vec<u64> {
     let Some(l) = layout else {
         *layout = Some(Node::Leaf(id));
-        return;
+        return Vec::new();
     };
     if l.contains(id) {
-        return;
+        return Vec::new();
     }
-    let place = |l: &mut Node, at: u64| if minimized { l.split_leaf_at(at, id, Dir::Horizontal, false) } else { l.replace_leaf(at, id) };
-    let placed = (minimized && slot.is_some_and(|s| l.insert_at_slot(id, s))) || place(l, focused);
-    if !placed {
+    if minimized {
+        let gone = l.leaf_ids();
+        *layout = Some(Node::Leaf(id));
+        return gone;
+    }
+    if !l.replace_leaf(focused, id) {
         let first = l.leaf_ids()[0];
-        place(l, first);
+        l.replace_leaf(first, id);
     }
+    Vec::new()
 }
 
-/// Bereich `id` minimieren: aus dem Layout nehmen (auch den letzten – dann `None` = leerer Hub). Liefert den gemerkten
-/// Platz und den neuen Fokus (bleibt `focused`, wenn das noch im Layout ist, sonst der direkte Nachbar; 0 = nichts mehr da),
-/// oder `None`, wenn `id` gar nicht im Layout stand.
-pub fn minimize(layout: &mut Option<Node>, id: u64, focused: u64) -> Option<(Option<Slot>, u64)> {
+/// Bereich `id` minimieren: aus dem Layout nehmen (auch den letzten – dann `None` = leerer Hub). Sein Platz wird nicht
+/// gemerkt (seit 2.3.0 öffnet ein minimierter Bereich beim Zurückholen allein, siehe `show`). Liefert den neuen Fokus
+/// (bleibt `focused`, wenn das noch im Layout ist, sonst der direkte Nachbar; 0 = nichts mehr da), oder `None`, wenn `id`
+/// gar nicht im Layout stand.
+pub fn minimize(layout: &mut Option<Node>, id: u64, focused: u64) -> Option<u64> {
     let l = layout.take()?;
     if !l.contains(id) {
         *layout = Some(l);
         return None;
     }
-    let (rest, slot) = l.remove_leaf_slot(id);
-    *layout = rest;
+    let near = l.neighbour_of(id);
+    *layout = l.remove_leaf(id);
     let has = |x: u64| layout.as_ref().is_some_and(|l| l.contains(x));
     let focus = if has(focused) {
         focused
     } else {
-        // angrenzende Seite des Geschwister-Teilbaums
-        let near = slot.as_ref().and_then(|s| if s.before { s.sibling.first() } else { s.sibling.last() }).copied();
         near.filter(|n| has(*n)).or_else(|| layout.as_ref().map(|l| l.leaf_ids()[0])).unwrap_or(0)
     };
-    Some((slot, focus))
-}
-
-/// Blatt `gone` hat das Layout verlassen: In den Geschwistern von `slot` tritt an seine Stelle `with` (die Geschwister aus
-/// seinem eigenen Slot, also das, was an seinen Platz gerückt ist); doppelte fallen weg. Ohne `with` (er war allein) wird
-/// er nur gestrichen. So folgt eine Kette minimierter Bereiche dem, was tatsächlich noch im Layout steht.
-pub fn reroute_sibling(slot: &mut Slot, gone: u64, with: &[u64]) {
-    if !slot.sibling.contains(&gone) {
-        return;
-    }
-    let mut out: Vec<u64> = Vec::with_capacity(slot.sibling.len() + with.len());
-    for id in &slot.sibling {
-        if *id == gone {
-            for w in with {
-                if !out.contains(w) {
-                    out.push(*w);
-                }
-            }
-        } else if !out.contains(id) {
-            out.push(*id);
-        }
-    }
-    slot.sibling = out;
-}
-
-/// Für `Option<Slot>`-Felder in Dateien: Unlesbares lädt als `None`.
-pub fn lenient_slot<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Slot>, D::Error> {
-    let v = serde_json::Value::deserialize(d)?;
-    Ok(serde_json::from_value::<Slot>(v).ok())
+    Some(focus)
 }
 
 impl Node {
@@ -183,75 +147,14 @@ impl Node {
         }
     }
 
-    /// Entfernt das Blatt `target` (wie `remove_leaf`) und merkt sich, wo es stand (`Slot`). Der Slot ist `None`, wenn das
-    /// Blatt fehlte oder allein war.
-    pub fn remove_leaf_slot(self, target: u64) -> (Option<Node>, Option<Slot>) {
-        let slot = self.slot_of(target);
-        (self.remove_leaf(target), slot)
-    }
-
-    fn slot_of(&self, target: u64) -> Option<Slot> {
-        let Node::Split { dir, ratio, a, b } = self else { return None };
+    /// Das Blatt, das an `target` angrenzt: Ist `target` eine Seite einer Teilung, das nächstgelegene Blatt der anderen
+    /// Seite (deren erstes, wenn `target` davor lag, sonst deren letztes). `None`, wenn `target` fehlt oder allein ist.
+    fn neighbour_of(&self, target: u64) -> Option<u64> {
+        let Node::Split { a, b, .. } = self else { return None };
         match (a.as_ref(), b.as_ref()) {
-            (Node::Leaf(x), other) if *x == target => Some(Slot { sibling: other.leaf_ids(), dir: *dir, before: true, ratio: *ratio }),
-            (other, Node::Leaf(x)) if *x == target => Some(Slot { sibling: other.leaf_ids(), dir: *dir, before: false, ratio: *ratio }),
-            _ => a.slot_of(target).or_else(|| b.slot_of(target)),
-        }
-    }
-
-    /// Fügt `id` an der gemerkten Stelle wieder ein: Gibt es den Geschwister-Teilbaum noch genau so, wird er geteilt
-    /// (gleiche Richtung, Seite und Anteil); sonst wird das erste noch vorhandene Blatt daraus geteilt. `false`, wenn von
-    /// den Geschwistern nichts mehr im Baum ist (oder `id` schon drin ist).
-    pub fn insert_at_slot(&mut self, id: u64, slot: &Slot) -> bool {
-        if self.contains(id) || slot.sibling.is_empty() {
-            return false;
-        }
-        if let Some(n) = self.find_subtree(&slot.sibling) {
-            let old = std::mem::replace(n, Node::Leaf(id));
-            let (a, b) = if slot.before { (Node::Leaf(id), old) } else { (old, Node::Leaf(id)) };
-            *n = Node::Split { dir: slot.dir, ratio: clamp_ratio(slot.ratio), a: Box::new(a), b: Box::new(b) };
-            return true;
-        }
-        let have = self.leaf_ids();
-        let Some(anchor) = slot.sibling.iter().find(|s| have.contains(s)).copied() else { return false };
-        if !self.split_leaf_at(anchor, id, slot.dir, slot.before) {
-            return false;
-        }
-        // Anteil der wiederhergestellten Seite übernehmen.
-        self.set_ratio_of_parent(id, clamp_ratio(slot.ratio));
-        true
-    }
-
-    fn find_subtree(&mut self, leaves: &[u64]) -> Option<&mut Node> {
-        if self.leaf_ids() == leaves {
-            return Some(self);
-        }
-        match self {
-            Node::Leaf(_) => None,
-            Node::Split { a, b, .. } => {
-                if a.has_subtree(leaves) {
-                    a.find_subtree(leaves)
-                } else {
-                    b.find_subtree(leaves)
-                }
-            }
-        }
-    }
-
-    fn has_subtree(&self, leaves: &[u64]) -> bool {
-        self.leaf_ids() == leaves || matches!(self, Node::Split { a, b, .. } if a.has_subtree(leaves) || b.has_subtree(leaves))
-    }
-
-    fn set_ratio_of_parent(&mut self, id: u64, r: f32) -> bool {
-        match self {
-            Node::Leaf(_) => false,
-            Node::Split { ratio, a, b, .. } => {
-                if matches!(a.as_ref(), Node::Leaf(x) if *x == id) || matches!(b.as_ref(), Node::Leaf(x) if *x == id) {
-                    *ratio = r;
-                    return true;
-                }
-                a.set_ratio_of_parent(id, r) || b.set_ratio_of_parent(id, r)
-            }
+            (Node::Leaf(x), other) if *x == target => other.leaf_ids().first().copied(),
+            (other, Node::Leaf(x)) if *x == target => other.leaf_ids().last().copied(),
+            _ => a.neighbour_of(target).or_else(|| b.neighbour_of(target)),
         }
     }
 
@@ -473,102 +376,36 @@ mod tests {
     }
 
     #[test]
-    fn minimized_pane_comes_back_where_it_was() {
-        // (1 | 2) / 3, 3 unten mit 30 %
-        let orig = split(Dir::Vertical, 0.7, split(Dir::Horizontal, 0.4, Node::Leaf(1), Node::Leaf(2)), Node::Leaf(3));
-        for id in [1, 2, 3] {
-            let (rest, slot) = orig.clone().remove_leaf_slot(id);
-            let mut rest = rest.unwrap();
-            let slot = slot.unwrap();
-            assert!(!rest.contains(id));
-            assert!(rest.insert_at_slot(id, &slot), "{id}");
-            assert_eq!(rest, orig, "{id}: gleiche Stelle, Richtung und Anteil");
-        }
-        // Allein: kein Slot
-        let (rest, slot) = Node::Leaf(1).remove_leaf_slot(1);
-        assert!(rest.is_none() && slot.is_none());
-        // Unbekanntes Blatt: unverändert, kein Slot
-        let (rest, slot) = orig.clone().remove_leaf_slot(9);
-        assert_eq!(rest, Some(orig.clone()));
-        assert!(slot.is_none());
-    }
-
-    #[test]
-    fn minimized_pane_falls_back_to_a_remaining_sibling_leaf() {
-        // 3 minimiert (Geschwister: 1|2), danach wird 1 geschlossen → 3 kommt unter 2 zurück
-        let orig = split(Dir::Vertical, 0.7, split(Dir::Horizontal, 0.4, Node::Leaf(1), Node::Leaf(2)), Node::Leaf(3));
-        let (rest, slot) = orig.remove_leaf_slot(3);
-        let slot = slot.unwrap();
-        assert_eq!(slot.sibling, vec![1, 2]);
-        let mut rest = rest.unwrap().remove_leaf(1).unwrap();
-        assert!(rest.insert_at_slot(3, &slot));
-        assert_eq!(rest, split(Dir::Vertical, 0.7, Node::Leaf(2), Node::Leaf(3)));
-        // Geschwister ganz weg → false, Baum unverändert
-        let mut other = Node::Leaf(8);
-        assert!(!other.insert_at_slot(3, &slot));
-        assert_eq!(other, Node::Leaf(8));
-        // schon drin → false
-        let mut has = split(Dir::Horizontal, 0.5, Node::Leaf(1), Node::Leaf(3));
-        assert!(!has.insert_at_slot(3, &slot));
-        // Geschwister umsortiert (2|1): erstes vorhandenes Blatt wird geteilt
-        let mut swapped = split(Dir::Horizontal, 0.4, Node::Leaf(2), Node::Leaf(1));
-        assert!(swapped.insert_at_slot(3, &slot));
-        assert_eq!(swapped.leaf_count(), 3);
-        assert!(swapped.is_normal(|_| true));
-    }
-
-    #[test]
-    fn slot_round_trips_and_loads_leniently() {
-        let s = Slot { sibling: vec![1, 2], dir: Dir::Horizontal, before: true, ratio: 0.3 };
-        let j = serde_json::to_string(&s).unwrap();
-        assert_eq!(serde_json::from_str::<Slot>(&j).unwrap(), s);
-        #[derive(Deserialize)]
-        struct F {
-            #[serde(default, deserialize_with = "lenient_slot")]
-            slot: Option<Slot>,
-        }
-        assert!(serde_json::from_str::<F>(r#"{"slot":{"sibling":"x"}}"#).unwrap().slot.is_none());
-        assert!(serde_json::from_str::<F>(r#"{}"#).unwrap().slot.is_none());
-    }
-
-    #[test]
-    fn show_follows_the_reinsert_rule() {
+    fn show_follows_the_open_rule() {
         let h = |a: u64, b: u64| split(Dir::Horizontal, 0.5, Node::Leaf(a), Node::Leaf(b));
-        // 1. leerer Hub → einziger Bereich (auch minimiert)
-        let mut l = None;
-        show(&mut l, 5, 0, true, None);
-        assert_eq!(l, Some(Node::Leaf(5)));
-        // schon drin → unverändert
+        // 1. leerer Hub → einziger Bereich (minimiert oder nicht), niemand verdrängt
+        for min in [true, false] {
+            let mut l = None;
+            assert!(show(&mut l, 5, 0, min).is_empty());
+            assert_eq!(l, Some(Node::Leaf(5)));
+        }
+        // schon drin → unverändert (auch wenn noch als minimiert markiert)
+        for min in [true, false] {
+            let mut l = Some(h(1, 2));
+            assert!(show(&mut l, 2, 1, min).is_empty());
+            assert_eq!(l, Some(h(1, 2)));
+        }
+        // 2. minimiert → allein; alle bisher sichtbaren Bereiche verlassen das Layout (in Reihenfolge)
+        let mut l = Some(split(Dir::Vertical, 0.3, Node::Leaf(3), h(1, 2)));
+        assert_eq!(show(&mut l, 7, 1, true), vec![3, 1, 2]);
+        assert_eq!(l, Some(Node::Leaf(7)));
+        // auch bei unbekanntem Fokus
+        let mut l = Some(Node::Leaf(4));
+        assert_eq!(show(&mut l, 7, 99, true), vec![4]);
+        assert_eq!(l, Some(Node::Leaf(7)));
+        // 3. nur weggewechselt → fokussierten Bereich ersetzen, sonst niemand verdrängt
         let mut l = Some(h(1, 2));
-        show(&mut l, 2, 1, true, None);
-        assert_eq!(l, Some(h(1, 2)));
-        // 2. minimiert, Platz noch da → an alter Stelle
-        let orig = split(Dir::Vertical, 0.3, Node::Leaf(3), h(1, 2));
-        let mut l = Some(orig.clone());
-        let (slot, focus) = minimize(&mut l, 3, 3).unwrap();
-        assert_eq!(focus, 1, "Fokus geht an den Nachbarn darunter");
-        show(&mut l, 3, focus, true, slot.as_ref());
-        assert_eq!(l, Some(orig));
-        // 3. minimiert, Geschwister weg → fokussierten Bereich rechts teilen
-        let slot = Slot { sibling: vec![42], dir: Dir::Vertical, before: true, ratio: 0.3 };
-        let mut l = Some(h(1, 2));
-        show(&mut l, 3, 2, true, Some(&slot));
-        assert_eq!(l, Some(split(Dir::Horizontal, 0.5, Node::Leaf(1), h(2, 3))));
-        // minimiert ohne Slot (war der letzte Bereich) → ebenso
-        let mut l = Some(Node::Leaf(1));
-        show(&mut l, 3, 1, true, None);
-        assert_eq!(l, Some(h(1, 3)));
-        // 4. nur weggewechselt → fokussierten Bereich ersetzen
-        let mut l = Some(h(1, 2));
-        show(&mut l, 3, 2, false, None);
+        assert!(show(&mut l, 3, 2, false).is_empty());
         assert_eq!(l, Some(h(1, 3)));
         // Fokus unbekannt → erster Bereich
         let mut l = Some(h(1, 2));
-        show(&mut l, 3, 99, false, None);
+        assert!(show(&mut l, 3, 99, false).is_empty());
         assert_eq!(l, Some(h(3, 2)));
-        let mut l = Some(h(1, 2));
-        show(&mut l, 3, 99, true, None);
-        assert_eq!(l, Some(split(Dir::Horizontal, 0.5, h(1, 3), Node::Leaf(2))));
         assert!(l.unwrap().is_normal(|_| true));
     }
 
@@ -578,16 +415,17 @@ mod tests {
         let orig = split(Dir::Horizontal, 0.33, Node::Leaf(1), split(Dir::Horizontal, 0.5, Node::Leaf(2), Node::Leaf(3)));
         // anderer Bereich fokussiert → Fokus bleibt
         let mut l = Some(orig.clone());
-        let (_, f) = minimize(&mut l, 2, 1).unwrap();
-        assert_eq!(f, 1);
+        assert_eq!(minimize(&mut l, 2, 1), Some(1));
+        assert_eq!(l, Some(split(Dir::Horizontal, 0.33, Node::Leaf(1), Node::Leaf(3))));
         // fokussierter rechter Bereich → linker Nachbar (letztes Blatt der Geschwister)
         let mut l = Some(split(Dir::Horizontal, 0.5, split(Dir::Vertical, 0.5, Node::Leaf(1), Node::Leaf(2)), Node::Leaf(3)));
-        let (slot, f) = minimize(&mut l, 3, 3).unwrap();
-        assert_eq!(f, 2);
-        assert_eq!(slot.unwrap().sibling, vec![1, 2]);
-        // letzter Bereich → leerer Hub, kein Slot, Fokus 0
+        assert_eq!(minimize(&mut l, 3, 3), Some(2));
+        // fokussierter linker Bereich → rechter Nachbar (erstes Blatt der Geschwister)
+        let mut l = Some(split(Dir::Horizontal, 0.5, Node::Leaf(3), split(Dir::Vertical, 0.5, Node::Leaf(1), Node::Leaf(2))));
+        assert_eq!(minimize(&mut l, 3, 3), Some(1));
+        // letzter Bereich → leerer Hub, Fokus 0
         let mut l = Some(Node::Leaf(7));
-        assert_eq!(minimize(&mut l, 7, 7), Some((None, 0)));
+        assert_eq!(minimize(&mut l, 7, 7), Some(0));
         assert!(l.is_none());
         // nicht im Layout → nichts
         let mut l = Some(orig.clone());
@@ -598,75 +436,28 @@ mod tests {
     }
 
     #[test]
-    fn slots_follow_a_chain_of_minimized_and_closed_panes() {
-        let h = |a: u64, b: u64, r: f32| split(Dir::Horizontal, r, Node::Leaf(a), Node::Leaf(b));
-        for close in [false, true] {
-            // H(1,2) → 1 minimieren → 2 rechts teilen (2|3) → 2 minimieren bzw. schließen → 1 zurück: links neben 3, 30 %
-            let mut l = Some(h(1, 2, 0.3));
-            let (s1, f) = minimize(&mut l, 1, 1).unwrap();
-            let mut s1 = s1.unwrap();
-            assert_eq!(l, Some(Node::Leaf(2)));
-            show(&mut l, 3, f, true, None); // neue Sitzung 3 teilt 2
-            assert_eq!(l, Some(h(2, 3, 0.5)));
-            let (rest, s2) = l.take().unwrap().remove_leaf_slot(2); // minimieren oder schließen: gleiche Baumänderung
-            l = rest;
-            reroute_sibling(&mut s1, 2, &s2.map(|s| s.sibling).unwrap_or_default());
-            assert_eq!(s1.sibling, vec![3], "close={close}");
-            show(&mut l, 1, 3, true, Some(&s1));
-            assert_eq!(l, Some(h(1, 3, 0.3)), "close={close}: genau an der alten Stelle");
-        }
-        // Teilbaum-Geschwister: 9 minimiert neben (2|4); 2 geht (Geschwister 4) → (4)
-        let mut s = Slot { sibling: vec![2, 4], dir: Dir::Vertical, before: false, ratio: 0.5 };
-        reroute_sibling(&mut s, 2, &[4]);
-        assert_eq!(s.sibling, vec![4]);
-        // ohne eigenen Slot (war allein): nur streichen; fremdes Blatt: unverändert
-        reroute_sibling(&mut s, 4, &[]);
-        assert!(s.sibling.is_empty());
-        let mut t = Slot { sibling: vec![5], dir: Dir::Vertical, before: false, ratio: 0.5 };
-        reroute_sibling(&mut t, 8, &[1]);
-        assert_eq!(t.sibling, vec![5]);
-    }
-
-    #[test]
-    fn minimize_everything_then_restore_in_reverse_and_forward_order() {
+    fn restoring_minimized_panes_swaps_them_one_by_one() {
+        // Alles minimieren → leerer Hub; jeder geholte Bereich öffnet allein, der vorige wird minimiert.
         let orig = split(Dir::Vertical, 0.6, split(Dir::Horizontal, 0.4, Node::Leaf(1), Node::Leaf(2)), split(Dir::Horizontal, 0.7, Node::Leaf(3), Node::Leaf(4)));
-        let mut l = Some(orig.clone());
-        let mut slots = std::collections::HashMap::new();
+        let mut l = Some(orig);
+        let mut minimized: Vec<u64> = Vec::new();
         let mut focus = 1;
         for id in [2, 4, 1, 3] {
-            let (s, f) = minimize(&mut l, id, focus).unwrap();
-            slots.insert(id, s);
-            focus = f;
+            focus = minimize(&mut l, id, focus).unwrap();
+            minimized.push(id);
             if let Some(n) = &l {
                 assert!(n.is_normal(|_| true));
             }
         }
-        assert!(l.is_none(), "alle minimiert → leerer Hub");
-        // umgekehrte Reihenfolge stellt das Original exakt wieder her
+        assert!(l.is_none() && focus == 0, "alle minimiert → leerer Hub");
+        let mut shown = None;
         for id in [3, 1, 4, 2] {
-            show(&mut l, id, focus, true, slots[&id].as_ref());
+            let gone = show(&mut l, id, focus, true);
+            assert_eq!(gone, shown.into_iter().collect::<Vec<_>>(), "{id}: nur der vorige verlässt das Layout");
+            assert_eq!(l, Some(Node::Leaf(id)));
             focus = id;
+            shown = Some(id);
         }
-        assert_eq!(l, Some(orig.clone()));
-        // Vorwärts (gleiche Reihenfolge wie beim Minimieren): nicht unbedingt dieselbe Anordnung, aber alle Bereiche
-        // erreichbar, jeder genau einmal, Baum normal
-        let mut l = Some(orig.clone());
-        let mut slots = std::collections::HashMap::new();
-        let mut focus = 1;
-        for id in [2, 4, 1, 3] {
-            let (s, f) = minimize(&mut l, id, focus).unwrap();
-            slots.insert(id, s);
-            focus = f;
-        }
-        for id in [2, 4, 1, 3] {
-            show(&mut l, id, focus, true, slots[&id].as_ref());
-            focus = id;
-            let n = l.as_ref().unwrap();
-            assert!(n.contains(id) && n.is_normal(|_| true), "{id}: {n:?}");
-        }
-        let mut got = l.unwrap().leaf_ids();
-        got.sort();
-        assert_eq!(got, vec![1, 2, 3, 4]);
     }
 
     #[test]
