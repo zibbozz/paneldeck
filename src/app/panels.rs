@@ -63,7 +63,7 @@ impl App {
                 if ui.add_enabled(!e.meta.queue.is_empty(), egui::Button::new(lang.t("Alle löschen", "Clear all"))).clicked() {
                     e.meta.queue.clear();
                 }
-                if !e.meta.claude {
+                if !e.is_claude() {
                     ui.colored_label(Color32::from_rgb(0xe5, 0xc0, 0x7b), lang.t("Keine Claude-Sitzung – die Warteschlange läuft nur bei Claude.", "Not a Claude session – the queue only runs with Claude."));
                 }
             });
@@ -120,7 +120,7 @@ impl App {
         let waiting: Vec<(u64, String, String, bool)> = self
             .entries
             .iter()
-            .filter(|(_, e)| e.needs_you() && e.meta.claude)
+            .filter(|(_, e)| e.needs_you() && e.is_claude())
             .map(|(id, e)| (*id, e.display_name(), e.status_msg.clone(), e.status == ClaudeStatus::Permission))
             .collect();
         if waiting.is_empty() {
@@ -571,7 +571,7 @@ impl App {
             (lang.t("Bereich darunter teilen", "Split pane below").into(), self.binding_text("split_d"), Action::Split(f, Dir::Vertical)),
             (lang.t("Bereich minimieren", "Minimize pane").into(), self.binding_text("hide"), Action::MinimizePane(f)),
             (lang.t("Sitzung umbenennen", "Rename session").into(), self.binding_text("rename"), Action::StartRename(f)),
-            (lang.t("Sitzung neu starten", "Restart session").into(), String::new(), Action::Restart(f)),
+            (lang.t("Einstellungen der Sitzung …", "Session settings …").into(), String::new(), Action::OpenSessionSettings(f)),
             (lang.t("Sitzung schließen", "Close session").into(), String::new(), Action::RequestClose(f)),
             (lang.t("Alle Sitzungen des Projekts schließen …", "Close all sessions of the project …").into(), String::new(), Action::CloseAll(closing::CloseScope::Project(self.active_project))),
             (lang.t("Alle Sitzungen schließen … (alle Projekte und Fenster)", "Close all sessions … (all projects and windows)").into(), self.binding_text("close_all"), Action::CloseAll(closing::CloseScope::All)),
@@ -592,6 +592,10 @@ impl App {
             (lang.t("Claude-Verlauf (Konversationen fortsetzen)", "Claude history (resume conversations)").into(), String::new(), Action::OpenHistory),
             (lang.t("Einstellungen", "Settings").into(), String::new(), Action::OpenSettings),
         ]);
+        // „Neu laden“ nur für Terminals (ein Chat hat keinen Prozess).
+        if self.entries.get(&f).is_some_and(|e| !e.is_chat()) {
+            v.push((lang.t("Sitzung neu laden …", "Reload session …").into(), String::new(), Action::RequestReload(f)));
+        }
         v.push((lang.t("Neues Projekt …", "New project …").into(), String::new(), Action::NewProjectPrompt));
         for (i, p) in self.projects.iter().enumerate() {
             if p.id != self.active_project {
