@@ -811,6 +811,7 @@ impl App {
                     "status": status_str(e),
                     "focused": focused,
                     "visible": visible,
+                    "shown": self.session_shown(*id),
                     "minimized": e.meta.minimized,
                     "window": window,
                     "queue_len": e.meta.queue.len(),

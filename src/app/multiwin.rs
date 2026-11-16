@@ -584,6 +584,21 @@ impl App {
         }
     }
 
+    /// Steht die Sitzung gerade als Bereich auf dem Bildschirm (im Layout der aktuellen Ansicht ihres Fensters oder in einem
+    /// eigenen abgedockten Fenster)? Für `list_sessions` `shown` (#162: Ergebnis einer Platzierung). Wie `session_view_info`
+    /// aus dem Hauptdurchlauf (`wins.cur == 0`) aufgerufen.
+    pub(super) fn session_shown(&self, id: u64) -> bool {
+        let Some(e) = self.entries.get(&id) else { return false };
+        if self.detached.contains(&id) {
+            return true;
+        }
+        let in_view = |layout: Option<&Node>, project: u64| e.meta.project == project && layout.is_some_and(|l| l.contains(id));
+        if e.meta.window == 0 {
+            return in_view(self.layout.as_ref(), self.active_project);
+        }
+        self.wins.list.iter().find(|x| x.id == e.meta.window).is_some_and(|x| in_view(x.view.layout.as_ref(), x.view.active_project))
+    }
+
     /// Layout der gerade gezeichneten Ansicht bereinigen: nur Sitzungen dieses Fensters und Projekts, nichts Abgedocktes.
     fn prune_view(&mut self) {
         if !self.projects.iter().any(|p| p.id == self.active_project) {
