@@ -1187,6 +1187,13 @@ pub struct LogEntry {
     pub ok: bool,
     /// Kurzfassung (höchstens 120 Zeichen; Eingaben können Geheimnisse enthalten).
     pub info: String,
+    /// Woher der Aufruf kam, wenn nicht von einem externen Agenten: `"chat"` = Werkzeug eines Chats mit einem lokalen
+    /// Modell (seit 2.2.0; fehlt sonst).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub how: Option<String>,
+    /// Bei `how: "chat"`: Modell des Chats.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 pub fn short(s: &str, n: usize) -> String {

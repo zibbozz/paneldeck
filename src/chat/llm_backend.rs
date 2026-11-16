@@ -6,8 +6,9 @@
 //! Passt der Verlauf nicht in die Kontextlänge (abzüglich 25 % für die Antwort), fallen die ältesten Runden weg
 //! (`TurnEvent::ContextStart`). Folgen nach einer fehlgeschlagenen Antwort zwei Nutzer-Nachrichten aufeinander, werden
 //! sie zu einer zusammengefasst (mit Leerzeile getrennt), damit das Modell eine abwechselnde Folge sieht.
-//! Bei Ollama geht die Kontextlänge als `num_ctx` mit (`LlmServer::request_context`). Werkzeuge werden noch nicht
-//! gesendet (die Werkzeug-Schleife folgt).
+//! Bei Ollama geht die Kontextlänge als `num_ctx` mit (`LlmServer::request_context`). Werkzeuge: alle, die die Stufe
+//! des Modells erlaubt (`tools::ToolPolicy::specs`); verlangt das Modell welche, kommen sie als `TurnEvent::ToolCall`
+//! und die Werkzeug-Schleife in `ChatState` führt sie aus.
 
 use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
 use super::logic;
@@ -45,6 +46,11 @@ pub struct Prepared {
     pub context_start: Option<usize>,
     /// Hinweis für den Nutzer zur Antwort (z. B. Systemprompt größer als der Kontext).
     pub note: Option<String>,
+    /// Platz für den Verlauf in geschätzten Tokens: Kontext ohne Antwort-Reserve, Systemprompt und
+    /// Werkzeug-Beschreibungen, geteilt durch `TurnContext::token_scale`.
+    pub history_budget: usize,
+    /// Geschätzte Tokens der ganzen Anfrage (zum Abgleich mit `prompt_tokens` des Servers).
+    pub prompt_estimate: usize,
 }
 
 /// Höchstlänge von Projektname und Ordner in der Kontextzeile (Zeichen).
@@ -69,7 +75,12 @@ fn unknown_server(lang: Lang) -> String {
 /// Hinweis oben im Chat: Modell ohne Werkzeuge bzw. Server fehlt. `None` = nichts zu melden.
 pub fn chat_notice(servers: &[crate::llm::config::LlmServer], meta: &ChatMeta, lang: Lang) -> Option<String> {
     let Some(s) = servers.iter().find(|s| s.id == meta.server) else { return Some(unknown_server(lang)) };
-    (s.tools_supported(&meta.model) == Some(false)).then(|| lang.t("Dieses Modell kann keine Werkzeuge nutzen – nur Chat.", "This model cannot use tools – chat only.").to_string())
+    if s.tools_supported(&meta.model) == Some(false) {
+        return Some(lang.t("Dieses Modell kann keine Werkzeuge nutzen – nur Chat.", "This model cannot use tools – chat only.").to_string());
+    }
+    // Stufe „Aus“ bewusst gewählt (ungewählt fragt der Chat beim ersten Senden).
+    let cfg = s.model_cfg(&meta.model);
+    (cfg.level == McpLevel::Off && cfg.level_chosen).then(|| lang.t("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle).", "Tools are off for this model (Settings → Models).").to_string())
 }
 
 /// Systemprompt für die Stufe des Modells: eigene Vorlage (Datenordner) oder die eingebaute, in der Prompt-Sprache.
@@ -119,12 +130,40 @@ fn role(r: store::Role) -> Role {
 /// Antworten (`logic::sendable`), leere Antworten und gespeicherte Systemnachrichten (der Systemprompt kommt frisch dazu).
 /// Stehen danach zwei Nutzer-Nachrichten hintereinander (die Antwort dazwischen schlug fehl), werden sie zu einer
 /// zusammengefasst (Leerzeile dazwischen); ihr Index ist der der ersten.
+///
+/// Werkzeuge: Ein Ergebnis wird nur gesendet, wenn sein Aufruf in der Antwort direkt davor steht (sonst lehnen Server
+/// die Anfrage ab); fehlt zu einem Aufruf das Ergebnis, steht an seiner Stelle „kein Ergebnis“. So passt jede Anfrage
+/// zu den Regeln von Ollama und OpenAI, auch bei einem beschädigten oder alten Verlauf.
 pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
-    let mut msgs = Vec::new();
+    let mut msgs: Vec<ChatMessage> = Vec::new();
     let mut origin = Vec::new();
+    // Aufrufe der letzten gesendeten Antwort, die noch auf ihr Ergebnis warten (Kennung, Name), und deren Index.
+    let mut open: Vec<(String, String)> = Vec::new();
+    let mut open_at = 0;
+    let close = |msgs: &mut Vec<ChatMessage>, origin: &mut Vec<usize>, open: &mut Vec<(String, String)>, at: usize| {
+        for (id, name) in open.drain(..) {
+            let call = llm::ToolCall { id, name, arguments: serde_json::Value::Null };
+            msgs.push(ChatMessage::tool_result(&call, super::tools::error_json("no_result", "This tool call has no result.")));
+            origin.push(at);
+        }
+    };
     for (i, m) in history.iter().enumerate() {
         if !logic::sendable(m) || m.role == store::Role::System || (m.role == store::Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty()) {
             continue;
+        }
+        if m.role == store::Role::Tool {
+            match m.tool_call_id.as_deref().and_then(|id| open.iter().position(|(o, _)| o == id)) {
+                Some(k) => {
+                    open.remove(k);
+                }
+                None => continue, // Ergebnis ohne passenden Aufruf
+            }
+        } else {
+            close(&mut msgs, &mut origin, &mut open, open_at);
+        }
+        if m.role == store::Role::Assistant {
+            open = m.tool_calls.iter().map(|c| (c.id.clone(), c.name.clone())).collect();
+            open_at = i;
         }
         if let Some(prev) = msgs.last_mut().filter(|p: &&mut ChatMessage| p.role == Role::User && m.role == store::Role::User) {
             prev.content = format!("{}\n\n{}", prev.content.trim_end(), m.content);
@@ -139,6 +178,7 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
         });
         origin.push(i);
     }
+    close(&mut msgs, &mut origin, &mut open, open_at);
     (msgs, origin)
 }
 
@@ -153,32 +193,61 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     }
     let cfg = server.model_cfg(model);
     let endpoint = server.endpoint(lang)?;
+    let policy = super::tools::ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert);
     let (hist, origin) = map_history(history);
     let mut messages = Vec::with_capacity(hist.len() + 1);
-    messages.push(ChatMessage::new(Role::System, system_prompt(cfg.level, cx)));
+    messages.push(ChatMessage::new(Role::System, system_prompt(policy.prompt_level(), cx)));
     messages.extend(hist);
     let ctx_len = server.request_context(model);
-    let budget = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
-    let note = (llm::tokens::message_tokens(&messages[0]) > budget).then(|| {
-        lang.t(
+    let budget_real = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
+    // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
+    // ist entsprechend weniger Platz.
+    let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
+    let budget = (budget_real as f64 / scale as f64) as usize;
+    // Die Werkzeug-Beschreibungen belegen ebenfalls Kontext.
+    let tools = policy.specs();
+    let tool_tokens = if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(&tools).unwrap_or_default()) };
+    let sys_tokens = llm::tokens::message_tokens(&messages[0]);
+    let note = if sys_tokens > budget {
+        Some(lang.t(
             "Der Systemprompt ist größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen oder system-prompt.md kürzen.",
             "The system prompt is larger than the model's context – raise the context length in Settings → Models or shorten system-prompt.md.",
-        )
-        .to_string()
-    });
-    let start = llm::tokens::trim_to_budget(&messages, budget);
+        ))
+    } else if sys_tokens + tool_tokens > budget {
+        Some(lang.t(
+            "Systemprompt und Werkzeug-Beschreibungen sind größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen oder Werkzeuge sperren.",
+            "The system prompt and tool descriptions are larger than the model's context – raise the context length in Settings → Models or disable tools.",
+        ))
+    } else {
+        None
+    }
+    .map(str::to_string);
+    let history_budget = budget.saturating_sub(tool_tokens).saturating_sub(sys_tokens);
+    let start = llm::tokens::trim_to_budget(&messages, budget.saturating_sub(tool_tokens));
     let first = llm::tokens::first_turn(&messages);
     // Index in `messages` → Index im Verlauf (die Systemnachricht steht nicht im Verlauf).
     let context_start = (start > first).then(|| origin.get(start - first).copied()).flatten();
     let messages = llm::tokens::visible(&messages, start);
-    let num_ctx = (server.kind == llm::ServerKind::Ollama).then_some(ctx_len);
-    let request = ChatRequest { model: model.to_string(), messages, tools: Vec::new(), temperature: cfg.temperature, num_ctx };
-    Ok(Prepared { endpoint, request, context_start, note })
+    let prompt_estimate = messages.iter().map(llm::tokens::message_tokens).sum::<usize>() + tool_tokens;
+    let ollama = server.kind == llm::ServerKind::Ollama;
+    let num_ctx = ollama.then_some(ctx_len);
+    // Ollama: die Antwort darf nur die Reserve nutzen, sonst schöbe sie den Anfang der Anfrage aus dem Kontext.
+    let num_predict = ollama.then_some(ctx_len.saturating_sub(budget_real as u32).max(1));
+    let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx, num_predict };
+    Ok(Prepared { endpoint, request, context_start, note, history_budget, prompt_estimate })
 }
 
 /// Hinweis für eine an der Token-Grenze abgeschnittene Antwort.
 pub fn cut_off_note(lang: Lang) -> String {
     lang.t("Antwort an der Token-Grenze des Modells abgeschnitten.", "Answer cut off at the model's token limit.").to_string()
+}
+
+/// Zusatz zu einem Serverfehler, wenn die Anfrage Werkzeuge enthielt.
+pub fn tools_hint(lang: Lang) -> &'static str {
+    lang.t(
+        "(Kann das Modell keine Werkzeuge nutzen, in Einstellungen → Modelle „Werkzeugaufrufe“ ausschalten.)",
+        "(If the model cannot use tools, switch off “Tool calling” in Settings → Models.)",
+    )
 }
 
 /// Fehlertext für den Nutzer; bei „nicht gefunden“ mit Hinweis auf die Modellliste.
@@ -199,6 +268,7 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
         }
         repaint();
     };
+    send(TurnEvent::Budget { history: p.history_budget, prompt: p.prompt_estimate });
     if let Some(cs) = p.context_start {
         send(TurnEvent::ContextStart(cs));
     }
@@ -206,11 +276,17 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
         send(TurnEvent::Note(n.clone()));
     }
     let mut ended = false;
+    let with_tools = !p.request.tools.is_empty();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         llm::chat(t.as_ref(), &p.endpoint, &p.request, &cancel, &mut |ev| match ev {
             StreamEvent::Delta(d) => send(TurnEvent::Delta(d)),
-            // Werkzeuge werden noch nicht angeboten; verlangt ein Modell trotzdem welche, bleibt es beim Text.
-            StreamEvent::ToolCalls(_) => {}
+            // Ohne angebotene Werkzeuge gibt es keine Aufrufe (ein Modell, das trotzdem welche schickt, bekommt
+            // „unknown_tool“/„forbidden“ von der Werkzeug-Schleife).
+            StreamEvent::ToolCalls(calls) => {
+                for c in calls {
+                    send(TurnEvent::ToolCall(store::ToolCall { id: c.id, name: c.name, arguments: c.arguments }));
+                }
+            }
             StreamEvent::Done { prompt_tokens, completion_tokens, finish_reason } => {
                 ended = true;
                 send(TurnEvent::Usage { prompt_tokens, completion_tokens });
@@ -223,7 +299,12 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
                 ended = true;
                 // Abgebrochen (Stopp / Chat geschlossen): niemand wartet mehr.
                 if !cancel.load(Ordering::SeqCst) {
-                    send(TurnEvent::Error(error_text(&e, lang)));
+                    let mut text = error_text(&e, lang);
+                    // Manche Server lehnen Anfragen mit Werkzeugen ab, wenn das Modell keine kann.
+                    if with_tools && matches!(e, LlmError::Status { code: 400 | 422 | 500, .. }) {
+                        text = format!("{text} {}", tools_hint(lang));
+                    }
+                    send(TurnEvent::Error(text));
                 }
             }
         })
@@ -290,7 +371,14 @@ mod tests {
         assert_eq!(m[1].content, "q1\n\nq2");
         assert_eq!(p.note, None);
         assert_eq!(p.request.model, "m1");
-        assert!(p.request.tools.is_empty(), "Werkzeuge erst mit der Werkzeug-Schleife");
+        let names: Vec<&str> = p.request.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.is_empty(), "Standard „Aus“: keine Werkzeuge: {names:?}");
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") });
+        let read = prepare(&meta(), &hist, &cx(vec![s])).unwrap();
+        let names: Vec<&str> = read.request.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"list_sessions") && !names.contains(&"send_text"), "Lesen: nur lesende Werkzeuge: {names:?}");
+        assert!(read.history_budget < p.history_budget, "Werkzeug-Beschreibungen gehen vom Platz ab");
         assert_eq!((p.request.num_ctx, p.request.temperature, p.context_start), (Some(crate::llm::config::DEFAULT_CONTEXT), None, None), "Ollama: num_ctx immer");
         assert_eq!(p.endpoint.base_url, "http://localhost:11434");
         // Deutsch als Prompt-Sprache
@@ -341,6 +429,12 @@ mod tests {
         assert_eq!(chat_notice(&v, &ChatMeta { server: "s1".into(), model: "m2".into() }, Lang::En), None);
         assert_eq!(chat_notice(&v, &ChatMeta { server: "s1".into(), model: "unknown".into() }, Lang::En), None, "unbekannt: kein Hinweis");
         assert!(chat_notice(&v, &ChatMeta { server: "x".into(), model: "m1".into() }, Lang::En).unwrap().contains("no longer set up"));
+        // Stufe „Aus“ bewusst gewählt: eigener Text (nicht „kann keine Werkzeuge“)
+        let mut v = v;
+        v[0].set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, ..LlmModel::named("m2") });
+        let m2 = ChatMeta { server: "s1".into(), model: "m2".into() };
+        assert_eq!(chat_notice(&v, &m2, Lang::En).as_deref(), Some("Tools are off for this model (Settings → Models)."));
+        assert_eq!(chat_notice(&v, &m2, Lang::De).as_deref(), Some("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle)."));
     }
 
     /// Datenordner mit einer winzigen eigenen Vorlage („S“ = 5 geschätzte Tokens), damit die Rechnung exakt ist.
@@ -361,7 +455,7 @@ mod tests {
         let d = tiny_prompt_dir("trim");
         let run = |ctx: u32| {
             let mut s = server("http://localhost:11434", ServerKind::Ollama);
-            s.set_model_cfg(LlmModel { context_length: Some(ctx), temperature: Some(0.5), ..LlmModel::named("m1") });
+            s.set_model_cfg(LlmModel { context_length: Some(ctx), temperature: Some(0.5), level: McpLevel::Off, ..LlmModel::named("m1") });
             let mut c = cx(vec![s]);
             c.project.clear();
             c.folder.clear();
@@ -482,7 +576,28 @@ mod tests {
         let seen = h.join().unwrap();
         assert!(seen.starts_with("POST /api/chat HTTP/1.1"), "{seen}");
         assert!(seen.contains("\"m1\"") && seen.contains("Demo") && seen.contains("\"hi\""), "{seen}");
-        assert!(!seen.contains("\"tools\""), "keine Werkzeuge: {seen}");
+        assert!(!seen.contains("\"tools\""), "Standard „Aus“: keine Werkzeuge: {seen}");
+        assert!(matches!(ev.first(), Some(TurnEvent::Budget { history, prompt }) if *history > 0 && *prompt > 0), "Platz kommt zuerst: {ev:?}");
+        // Ollama: die Antwort bekommt nur die Reserve (25 % von 8192)
+        assert!(seen.contains("\"num_predict\":2048"), "{seen}");
+    }
+
+    #[test]
+    fn token_scale_shrinks_the_budget() {
+        let s = server("http://localhost:11434", ServerKind::Ollama);
+        let hist = [msg(store::Role::User, "q")];
+        let one = prepare(&meta(), &hist, &cx(vec![s.clone()])).unwrap();
+        let mut c = cx(vec![s.clone()]);
+        c.token_scale = 2.0;
+        let two = prepare(&meta(), &hist, &c).unwrap();
+        assert!(two.history_budget < one.history_budget, "{} < {}", two.history_budget, one.history_budget);
+        assert!(two.prompt_estimate == one.prompt_estimate && one.prompt_estimate > 0);
+        c.token_scale = f32::NAN;
+        assert_eq!(prepare(&meta(), &hist, &c).unwrap().history_budget, one.history_budget, "unsinniger Faktor gilt als 1");
+        // OpenAI-kompatibel: kein num_predict
+        let mut o = s;
+        o.kind = ServerKind::OpenAi;
+        assert_eq!(prepare(&meta(), &hist, &cx(vec![o])).unwrap().request.num_predict, None);
     }
 
     #[test]
@@ -496,6 +611,209 @@ mod tests {
         assert!(!ev.iter().any(|e| matches!(e, TurnEvent::Note(_))));
         let seen = h.join().unwrap();
         assert!(seen.starts_with("POST /v1/chat/completions HTTP/1.1"), "{seen}");
+    }
+
+    /// Server für mehrere Verbindungen nacheinander (je Anfrage die nächste Antwort); liefert die gesehenen Anfragen.
+    fn serve_many(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for response in responses {
+                let (mut s, _) = l.accept().unwrap();
+                s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                let head_end = loop {
+                    let n = s.read(&mut tmp).unwrap();
+                    assert!(n > 0);
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let len = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                while buf.len() < head_end + len {
+                    let n = s.read(&mut tmp).unwrap();
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                s.write_all(&response).unwrap();
+                s.flush().unwrap();
+                seen.push(String::from_utf8_lossy(&buf[head_end..head_end + len]).to_string());
+            }
+            seen
+        });
+        (base, h)
+    }
+
+    fn tool_msg(id: &str, name: &str, content: &str) -> ChatMsg {
+        let mut t = msg(store::Role::Tool, content);
+        t.tool_call_id = Some(id.into());
+        t.tool_name = Some(name.into());
+        t.status = Some(store::ToolStatus::Ok);
+        t
+    }
+
+    fn call_msg(ids: &[(&str, &str)]) -> ChatMsg {
+        let mut a = msg(store::Role::Assistant, "");
+        a.tool_calls = ids.iter().map(|(id, n)| store::ToolCall { id: (*id).into(), name: (*n).into(), arguments: serde_json::json!({}) }).collect();
+        a
+    }
+
+    #[test]
+    fn history_mapping_keeps_calls_and_results_paired() {
+        let mut failed = call_msg(&[("f", "whoami")]);
+        failed.error = Some("boom".into());
+        let hist = vec![
+            msg(store::Role::User, "q"),
+            call_msg(&[("a", "list_sessions"), ("b", "whoami")]),
+            tool_msg("a", "list_sessions", "{}"),
+            // Ergebnis zu „b“ fehlt; ein fremdes Ergebnis ohne Aufruf
+            tool_msg("zz", "read_terminal", "{\"stray\":1}"),
+            msg(store::Role::Assistant, "done"),
+            msg(store::Role::User, "q2"),
+            failed,
+            tool_msg("f", "whoami", "{}"),
+            msg(store::Role::User, "q3"),
+        ];
+        let (m, origin) = map_history(&hist);
+        let shape: Vec<(Role, Option<&str>)> = m.iter().map(|m| (m.role, m.tool_call_id.as_deref())).collect();
+        assert_eq!(
+            shape,
+            [(Role::User, None), (Role::Assistant, None), (Role::Tool, Some("a")), (Role::Tool, Some("b")), (Role::Assistant, None), (Role::User, None)],
+            "fehlendes Ergebnis ergänzt, fremdes und das der fehlgeschlagenen Antwort weggelassen, q2+q3 zusammengefasst"
+        );
+        assert!(m[3].content.contains("no_result") && m[3].tool_name.as_deref() == Some("whoami"));
+        assert_eq!(m[5].content, "q2\n\nq3");
+        assert_eq!(origin.len(), m.len());
+        assert_eq!(origin[3], 1, "ergänztes Ergebnis zählt zur Antwort mit dem Aufruf");
+    }
+
+    #[test]
+    fn models_without_tools_get_none_and_a_tool_free_prompt() {
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { tools: Some(false), level: McpLevel::Control, ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
+        assert!(p.request.tools.is_empty());
+        assert_eq!(p.request.messages[0].content, system_prompt(McpLevel::Off, &cx(vec![s])), "Prompt für „Aus“");
+        // Unbekannte Fähigkeit (OpenAI-kompatibel): Werkzeuge werden gesendet
+        let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
+        o.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![o.clone()])).unwrap();
+        assert!(p.request.tools.iter().any(|t| t.name == "send_text"));
+        // Stufe nie gewählt: gilt als „Aus“ (auch bei Neu erzeugen, Weiter, Nachrichten von Agenten)
+        o.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: false, ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![o.clone()])).unwrap();
+        assert!(p.request.tools.is_empty());
+        assert_eq!(p.request.messages[0].content, system_prompt(McpLevel::Off, &cx(vec![o])));
+    }
+
+    /// Ganze Werkzeug-Runde gegen einen Ollama-Ersatz: Aufruf `list_sessions`, Ergebnis, dann Text.
+    #[test]
+    fn end_to_end_ollama_tool_loop() {
+        let turn1 = "{\"message\":{\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"list_sessions\",\"arguments\":{}}}]}}\n{\"done\":true,\"done_reason\":\"stop\"}\n";
+        let turn2 = "{\"message\":{\"content\":\"You have no sessions.\"}}\n{\"done\":true}\n";
+        let resp = |b: &str| format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{b}").into_bytes();
+        let (base, h) = serve_many(vec![resp(turn1), resp(turn2)]);
+        let b = LlmBackend::new();
+        let read = LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") };
+        let mut s = server(&base, ServerKind::Ollama);
+        s.set_model_cfg(read.clone());
+        let c = cx(vec![s]);
+        let policy = super::super::tools::ToolPolicy::new(read, None, false);
+        let mut chat = super::super::ChatState::new(store::ChatFile::default(), None);
+        chat.draft = "which sessions?".into();
+        assert!(chat.send(&b, &meta(), &c, Arc::new(|| {})));
+        let t = std::time::Instant::now();
+        let mut executed = 0;
+        while (chat.busy() || executed == 0) && t.elapsed() < Duration::from_secs(20) {
+            chat.poll();
+            chat.poll_tools();
+            match chat.tool_step(&policy) {
+                super::super::ToolStep::Execute(call) => {
+                    assert_eq!(call.name, "list_sessions");
+                    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                    tx.send(Ok(serde_json::json!({"sessions": []}))).unwrap();
+                    chat.tool_started(rx);
+                    executed += 1;
+                }
+                super::super::ToolStep::Request => chat.next_request(&b, &meta(), &c, Arc::new(|| {})),
+                super::super::ToolStep::Idle => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        let roles: Vec<store::Role> = chat.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, [store::Role::User, store::Role::Assistant, store::Role::Tool, store::Role::Assistant], "{:#?}", chat.messages());
+        assert_eq!(chat.messages()[3].content, "You have no sessions.");
+        let seen = h.join().unwrap();
+        assert!(seen[0].contains("\"tools\""));
+        // Zweite Anfrage: Aufruf und Ergebnis (Ollama: `tool_name`)
+        let v: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        let msgs = v["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["system", "user", "assistant", "tool"]);
+        assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "list_sessions");
+        assert_eq!(msgs[3]["tool_name"], "list_sessions");
+        assert_eq!(msgs[3]["content"], "{\"sessions\":[]}");
+    }
+
+    /// OpenAI-kompatibel: Aufruf in Stücken, Ergebnis mit `tool_call_id`.
+    #[test]
+    fn end_to_end_openai_tool_call_and_result_mapping() {
+        let turn1 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_x1\",\"function\":{\"name\":\"whoami\",\"arguments\":\"{}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+        let turn2 = "data: {\"choices\":[{\"delta\":{\"content\":\"You are a chat.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let resp = |b: &str| format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{b}").into_bytes();
+        let (base, h) = serve_many(vec![resp(turn1), resp(turn2)]);
+        let b = LlmBackend::new();
+        let read = LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") };
+        let mut s = server(&format!("{base}/v1"), ServerKind::OpenAi);
+        s.set_model_cfg(read.clone());
+        let c = cx(vec![s]);
+        let policy = super::super::tools::ToolPolicy::new(read, None, false);
+        let mut chat = super::super::ChatState::new(store::ChatFile::default(), None);
+        chat.draft = "who am I?".into();
+        chat.send(&b, &meta(), &c, Arc::new(|| {}));
+        let t = std::time::Instant::now();
+        while chat.messages().len() < 4 && t.elapsed() < Duration::from_secs(20) {
+            chat.poll();
+            chat.poll_tools();
+            match chat.tool_step(&policy) {
+                super::super::ToolStep::Execute(_) => {
+                    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                    tx.send(Ok(serde_json::json!({"session": 7}))).unwrap();
+                    chat.tool_started(rx);
+                }
+                super::super::ToolStep::Request => chat.next_request(&b, &meta(), &c, Arc::new(|| {})),
+                super::super::ToolStep::Idle => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        while chat.streaming() && t.elapsed() < Duration::from_secs(20) {
+            chat.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(chat.messages().last().unwrap().content, "You are a chat.");
+        let seen = h.join().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        let msgs = v["messages"].as_array().unwrap();
+        assert_eq!(msgs[2]["tool_calls"][0]["id"], "call_x1");
+        assert_eq!(msgs[2]["content"], serde_json::Value::Null);
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["tool_call_id"], "call_x1");
+    }
+
+    #[test]
+    fn server_errors_with_tools_hint_at_the_tool_switch() {
+        let body = r#"{"error":"registry.ollama.ai/library/x does not support tools"}"#;
+        let (base, h) = serve(format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes());
+        let b = LlmBackend::new();
+        let mut s = server(&base, ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") });
+        let ev = collect(&b.start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![s]), Arc::new(|| {})));
+        match ev.last() {
+            Some(TurnEvent::Error(e)) => assert!(e.ends_with(tools_hint(Lang::En)), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        h.join().unwrap();
     }
 
     #[test]

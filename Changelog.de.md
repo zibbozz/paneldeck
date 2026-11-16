@@ -18,10 +18,15 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Je Modell: Stufe Aus/Lesen/Steuern (unabhängig von der MCP-Stufe für externe Agenten), erlaubte Werkzeuge, Nachfragen vor Schreib-Aktionen, höchstens so viele Werkzeugaufrufe je Antwort, eigene Angaben zu Werkzeugaufrufen und Kontextlänge.
 - „Neuer Chat“ öffnet einen Dialog zur Wahl von Server und Modell (merkt sich die letzte Wahl). Chats antworten mit dem gewählten Modell, gestreamt, mit Systemprompt sowie Projekt und Ordner als Kontext; ist der Kontext voll, fallen ältere Nachrichten weg (im Chat markiert). Ein Hinweis zeigt an, wenn eine Antwort an der Token-Grenze abgeschnitten wurde, der Token-Verbrauch wird angezeigt, und Modelle ohne Werkzeug-Fähigkeit bekommen einen Hinweis.
 - Neue optionale Felder in `settings.json`: `llm_servers` und `last_chat_model`; Nachrichten in `chats/<id>.json` können eine `note` haben.
+- Chats mit lokalen Modellen können die Paneldeck-Werkzeuge nutzen – im Rahmen der Stufe des Modells (Einstellungen → Modelle: Aus/Lesen/Steuern, einzelne Werkzeuge sperrbar). Die Werkzeuge laufen in Paneldeck mit dem Chat als Aufrufer: Ein Chat schreibt nie in sich selbst, und alle MCP-Schutzregeln gelten. Neue Modelle starten ohne Werkzeuge; der erste Chat fragt einmal, ob das Modell Paneldeck lesen oder steuern darf.
+- Vor Werkzeugen mit Schreibzugriff fragt der Chat mit den vollständigen Argumenten und der Ziel-Sitzung nach: Erlauben / Immer für diesen Chat / Ablehnen. „Immer“ gilt nur für dieses Werkzeug und diese Ziel-Sitzung und lässt sich im Chat-Kopf widerrufen („Dauerhafte Freigaben“). Solange der Chat wartet, ist er in der Seitenleiste markiert.
+- Höchstens N Werkzeugaufrufe je Antwort (Standard 10, abgelehnte Aufrufe zählen mit); danach hält der Chat mit „Weiter“ an. Werkzeug-Ergebnisse werden passend zum Kontext des Modells gekürzt (das Ende von Terminalausgaben bleibt); passen sie nicht mehr, hält der Chat mit Hinweis an, statt den Systemprompt zu verlieren.
+- Werkzeugzeilen zeigen ihren Stand (✓, ✗, ⊘ abgelehnt, Kreisel) und lassen sich zu Parametern und Ergebnis aufklappen.
 
 ### Changed
 
 - Ein Chat mit Verlauf fragt vor dem Schließen nach (wenn die Schließen-Bestätigung an ist), auch beim Schließen eines Fensters oder Ordners; der Update-Dialog zählt laufende Chat-Antworten getrennt.
+- `chats/<id>.json` hat das neue optionale Feld `always_allow` (Werkzeug + Sitzung); Modell-Einträge in `settings.json` haben `level_chosen`; `mcp-log.jsonl` hat die optionalen Felder `how` („chat“) und `model` für Werkzeugaufrufe aus Chats.
 
 ### Fixed
 

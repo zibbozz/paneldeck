@@ -103,10 +103,11 @@ impl Entry {
     fn is_chat(&self) -> bool {
         self.meta.kind == SessionKind::Chat
     }
-    /// Läuft etwas, das beim Schließen verloren ginge? Terminal: Prozess läuft; Chat: eine Antwort wird gerade erzeugt.
+    /// Läuft etwas, das beim Schließen verloren ginge? Terminal: Prozess läuft; Chat: eine Antwort wird gerade erzeugt
+    /// oder Werkzeuge laufen bzw. warten auf Freigabe.
     fn running(&self) -> bool {
         match &self.chat {
-            Some(c) => c.streaming(),
+            Some(c) => c.busy(),
             None => !self.exited(),
         }
     }
@@ -183,8 +184,14 @@ impl Entry {
     }
     fn status_label(&self, lang: Lang) -> &'static str {
         if let Some(c) = &self.chat {
-            return if c.streaming() {
+            return if c.status() == chatmod::ChatStatus::Approval {
+                lang.t("Freigabe?", "approval?")
+            } else if c.streaming() {
                 lang.t("schreibt", "streaming")
+            } else if c.busy() {
+                lang.t("Werkzeug", "tool")
+            } else if c.paused {
+                lang.t("angehalten", "paused")
             } else if c.has_error() {
                 lang.t("Fehler", "error")
             } else {
@@ -345,6 +352,14 @@ enum Action {
     ChatRegenerate(u64),
     /// Letzte eigene Nachricht zum Bearbeiten ins Eingabefeld holen.
     ChatEdit(u64),
+    /// Entscheidung zum wartenden Werkzeugaufruf (Chat, Aufruf-Kennung, Erlauben / Immer für diesen Chat / Ablehnen).
+    ChatDecide(u64, String, chatmod::Decision),
+    /// „Weiter“ nach dem Anhalten (Höchstzahl der Werkzeugaufrufe, Kontext voll).
+    ChatContinue(u64),
+    /// Dauerhafte Freigabe des Chats zurücknehmen.
+    ChatRevoke(u64, chatmod::AllowRule),
+    /// Antwort auf die einmalige Frage nach der Stufe des Modells.
+    ChatLevel(u64, crate::mcp::McpLevel),
 }
 
 struct NewDialog {
@@ -983,6 +998,8 @@ impl App {
             if meta.kind == SessionKind::Chat {
                 // Chat: Verlauf aus chats/<id>.json, keine PTY.
                 let (file, warning) = chatmod::store::load(&chatmod::store::path(&app.dir, id));
+                // Keine Id neu vergeben, auf die eine dauerhafte Freigabe zeigt (sonst gälte sie für ein neues Terminal).
+                app.next_id = app.next_id.max(chatmod::store::max_rule_session(&file).saturating_add(1));
                 let chat = ChatState::new(file, warning);
                 app.entries.insert(id, Entry::new_chat(meta, chat));
                 continue;
@@ -2219,29 +2236,95 @@ impl App {
 
     /// Laufende Antworten aller Chats abholen (Hauptdurchgang, für alle Fenster). Fertige Antworten werden sofort
     /// gespeichert; in einer nicht angesehenen Sitzung gibt es eine Markierung.
-    fn poll_chats(&mut self) {
+    ///
+    /// Danach die Werkzeug-Schleife jedes Chats (`chat::driver::drive` über [`ChatHost`]): Werkzeuge laufen hier im
+    /// Hub mit dem Chat als Aufrufer. Wartet ein schreibender Aufruf auf Freigabe (oder die einmalige Frage nach der
+    /// Stufe), steht der Chat auf „Freigabe?“ (wie eine Claude-Abfrage: Markierung in der Seitenleiste; MCP-Agenten
+    /// schreiben dann nicht in den Chat).
+    fn poll_chats(&mut self, ctx: &egui::Context) {
         let lang = self.settings.language;
         if self.llm_conn.poll(&mut self.settings.llm_servers, lang) {
             state::save_json(&self.dir.join("settings.json"), &self.settings);
         }
         let (window_focused, focused_id) = self.seen_focus();
-        let mut finished = Vec::new();
-        for (id, e) in self.entries.iter_mut() {
-            let Some(c) = e.chat.as_mut() else { continue };
-            if let Some(m) = &e.meta.chat {
-                c.notice = chatmod::llm_backend::chat_notice(&self.settings.llm_servers, m, lang);
-            }
-            let p = c.poll();
-            e.status = if c.streaming() { ClaudeStatus::Working } else { ClaudeStatus::Idle };
-            if p.finished {
-                finished.push(*id);
-                if !window_focused || *id != focused_id {
-                    e.attention = true;
+        let ids: Vec<u64> = self.entries.iter().filter(|(_, e)| e.chat.is_some()).map(|(id, _)| *id).collect();
+        let mut tools_running = false;
+        for id in ids {
+            let (finished, was_waiting) = {
+                let Some(e) = self.entries.get_mut(&id) else { continue };
+                let waiting = e.status == ClaudeStatus::Permission;
+                let Some(c) = e.chat.as_mut() else { continue };
+                if let Some(m) = &e.meta.chat {
+                    c.notice = chatmod::llm_backend::chat_notice(&self.settings.llm_servers, m, lang);
+                }
+                (c.poll().finished, waiting)
+            };
+            // Stufe inzwischen im Reiter „Modelle“ gewählt: die Frage erübrigt sich (die Nachricht bleibt im Feld).
+            if !self.chat_level_unchosen(id) {
+                if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()).filter(|c| c.level_question) {
+                    c.level_question = false;
+                    c.touch();
                 }
             }
+            let driven = chatmod::driver::drive(&mut ChatHost { app: self, ctx }, id);
+            if driven.more {
+                ctx.request_repaint();
+            }
+            let Some(e) = self.entries.get_mut(&id) else { continue };
+            let Some(c) = e.chat.as_ref() else { continue };
+            tools_running |= c.tool_running();
+            e.status = chat_claude_status(c.status());
+            let waiting = e.status == ClaudeStatus::Permission;
+            // Markierung: Runde zu Ende (fertig, Fehler, angehalten) oder eine Freigabe-Frage erscheint.
+            let done = finished && !c.busy();
+            let unseen = !window_focused || id != focused_id;
+            if (done || (waiting && !was_waiting) || (driven.changed && c.paused)) && unseen {
+                e.attention = true;
+            }
+            if (waiting && !was_waiting) && unseen {
+                ctx.send_viewport_cmd_to(self.attention_viewport(id), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+            }
+            if finished || driven.changed {
+                self.save_chat(id);
+            }
         }
-        for id in finished {
-            self.save_chat(id);
+        if tools_running {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    /// Was für die Werkzeuge eines Chats gerade gilt: Einstellungen seines Modells (unbekannter Server: Stufe „Aus“),
+    /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
+    fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
+        let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
+        match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
+            Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
+            None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
+        }
+    }
+
+    /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
+    /// könnte (Fähigkeit nicht „nein“) und der Nutzer die Stufe nie gewählt hat. Für P5 (`send_chat_message`): ist das
+    /// wahr, kann ein externer Agent nicht senden (`permission_pending`) – die Frage beantwortet nur der Nutzer.
+    pub(super) fn chat_level_unchosen(&self, id: u64) -> bool {
+        let Some(meta) = self.entries.get(&id).and_then(|e| e.meta.chat.as_ref()) else { return false };
+        let Some(s) = self.settings.llm_servers.iter().find(|s| s.id == meta.server) else { return false };
+        s.tools_supported(&meta.model) != Some(false) && !s.model_cfg(&meta.model).level_chosen
+    }
+
+    /// Antwort auf die einmalige Frage: Stufe speichern (als gewählt) und die zurückgehaltene Nachricht senden.
+    fn chat_choose_level(&mut self, ctx: &egui::Context, id: u64, level: crate::mcp::McpLevel) {
+        let Some(meta) = self.entries.get(&id).and_then(|e| e.meta.chat.clone()) else { return };
+        if let Some(s) = self.settings.llm_servers.iter_mut().find(|s| s.id == meta.server) {
+            let mut cfg = s.model_cfg(&meta.model);
+            cfg.level = level;
+            cfg.level_chosen = true;
+            s.set_model_cfg(cfg);
+            state::save_json(&self.dir.join("settings.json"), &self.settings);
+        }
+        let held = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()).is_some_and(|c| std::mem::take(&mut c.level_question));
+        if held {
+            self.chat_action(ctx, id, &Action::ChatSend(id));
         }
     }
 
@@ -2266,10 +2349,80 @@ impl App {
             prompt_lang: self.settings.mcp_prompt_lang,
             lang: self.settings.language,
             expert: crate::mcp::expert_mode(),
+            token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
+        }
+    }
+
+    /// Eine Nachricht an einen Chat senden – die eine Stelle für das Eingabefeld (`text = None`: der Entwurf) und für
+    /// externe Agenten (`text = Some(…)`, Entwurf bleibt unberührt; P5 `send_chat_message`).
+    ///
+    /// Wurde die Stufe des Modells nie gewählt, wird nichts gesendet: die einmalige Frage erscheint im Chat
+    /// (`ChatState::level_question`) und das Ergebnis ist [`ChatSendResult::LevelQuestion`] – für Agenten
+    /// `permission_pending`, nur der Nutzer kann sie beantworten.
+    pub(super) fn chat_send(&mut self, ctx: &egui::Context, id: u64, text: Option<&str>, origin: ChatSendOrigin) -> ChatSendResult {
+        let Some(c) = self.entries.get(&id).and_then(|e| e.chat.as_ref()) else { return ChatSendResult::NotAChat };
+        let empty = match text {
+            Some(t) => t.trim().is_empty(),
+            None => c.draft.trim().is_empty(),
+        };
+        if empty {
+            return ChatSendResult::Empty;
+        }
+        if c.busy() {
+            return ChatSendResult::Busy;
+        }
+        if self.chat_level_unchosen(id) {
+            if let Some(e) = self.entries.get_mut(&id) {
+                if let Some(c) = e.chat.as_mut() {
+                    c.level_question = true;
+                    c.touch();
+                }
+                e.status = ClaudeStatus::Permission;
+            }
+            return ChatSendResult::LevelQuestion;
+        }
+        let backend = self.chat_backend.clone();
+        let rctx = ctx.clone();
+        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
+        let tcx = self.turn_context(id);
+        let Some(e) = self.entries.get_mut(&id) else { return ChatSendResult::NotAChat };
+        let meta = e.meta.chat.clone().unwrap_or_default();
+        let Some(c) = e.chat.as_mut() else { return ChatSendResult::NotAChat };
+        let sent = match text {
+            Some(t) => c.send_text(t, backend.as_ref(), &meta, &tcx, repaint),
+            None => c.send(backend.as_ref(), &meta, &tcx, repaint),
+        };
+        e.status = chat_claude_status(c.status());
+        if !sent {
+            return ChatSendResult::Busy;
+        }
+        let _ = origin; // beide Wege gleich; die Herkunft ist für Protokoll/Erweiterungen vorgesehen
+        self.save_chat(id);
+        ChatSendResult::Sent
+    }
+
+    /// Nächste Anfrage einer Werkzeug-Runde (für `ChatHost::request`).
+    fn chat_next_request(&mut self, ctx: &egui::Context, id: u64) {
+        let backend = self.chat_backend.clone();
+        let rctx = ctx.clone();
+        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
+        let tcx = self.turn_context(id);
+        let Some(e) = self.entries.get_mut(&id) else { return };
+        let meta = e.meta.chat.clone().unwrap_or_default();
+        if let Some(c) = e.chat.as_mut() {
+            c.next_request(backend.as_ref(), &meta, &tcx, repaint);
         }
     }
 
     fn chat_action(&mut self, ctx: &egui::Context, id: u64, a: &Action) {
+        // Senden: über `chat_send` (fragt bei nie gewählter Stufe einmal nach; die Nachricht wartet im Feld).
+        if matches!(a, Action::ChatSend(_)) {
+            self.chat_send(ctx, id, None, ChatSendOrigin::User);
+            return;
+        }
+        if let Action::ChatLevel(_, level) = a {
+            return self.chat_choose_level(ctx, id, *level);
+        }
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();
         let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
@@ -2282,15 +2435,26 @@ impl App {
             Action::ChatRegenerate(_) => c.regenerate(backend.as_ref(), &meta, &tcx, repaint),
             Action::ChatStop(_) => {
                 c.stop();
+                c.level_question = false;
                 true
             }
             Action::ChatEdit(_) => {
                 c.begin_edit();
                 false
             }
+            // Ausgeführt wird erst im Hauptdurchgang (`poll_chats`), auch wenn der Chat in einem weiteren Fenster liegt.
+            // Gilt nur, wenn genau dieser Aufruf noch wartet (veraltete Klicks bleiben ohne Wirkung).
+            Action::ChatDecide(_, call_id, d) => {
+                let ok = c.decide(call_id, *d);
+                // Fokus zurück ins Eingabefeld: sonst gälte Enter auf dem Knopf an derselben Stelle gleich der nächsten Frage.
+                c.focus_input = true;
+                ok
+            }
+            Action::ChatContinue(_) => c.resume(),
+            Action::ChatRevoke(_, rule) => c.revoke(rule),
             _ => false,
         };
-        e.status = if c.streaming() { ClaudeStatus::Working } else { ClaudeStatus::Idle };
+        e.status = chat_claude_status(c.status());
         if changed {
             self.save_chat(id);
         }
@@ -3014,7 +3178,7 @@ impl App {
                 let cwd = proj.and_then(|p| p.inherited(&path, |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())));
                 self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, cwd, Some(path)));
             }
-            Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) => self.chat_action(ctx, id, &a),
+            Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, ..) | Action::ChatContinue(id) | Action::ChatRevoke(id, _) | Action::ChatLevel(id, _) => self.chat_action(ctx, id, &a),
         }
     }
 }
@@ -3058,7 +3222,7 @@ impl eframe::App for App {
 
         self.poll_hooks(ctx);
         self.poll_shell(ctx);
-        self.poll_chats();
+        self.poll_chats(ctx);
         self.models_save_tick(ctx);
         self.poll_background(ctx);
         self.sync_watchers(ctx);
@@ -3368,10 +3532,19 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         if o.focus && cx.focused != id {
             cx.actions.push(Action::Focus(id));
         }
-        for (hit, a) in [(o.send, Action::ChatSend(id)), (o.stop, Action::ChatStop(id)), (o.regenerate, Action::ChatRegenerate(id)), (o.edit, Action::ChatEdit(id))] {
+        for (hit, a) in [(o.send, Action::ChatSend(id)), (o.stop, Action::ChatStop(id)), (o.regenerate, Action::ChatRegenerate(id)), (o.edit, Action::ChatEdit(id)), (o.cont, Action::ChatContinue(id))] {
             if hit {
                 cx.actions.push(a);
             }
+        }
+        if let Some((call, d)) = o.decide {
+            cx.actions.push(Action::ChatDecide(id, call, d));
+        }
+        if let Some(rule) = o.revoke {
+            cx.actions.push(Action::ChatRevoke(id, rule));
+        }
+        if let Some(level) = o.level {
+            cx.actions.push(Action::ChatLevel(id, level));
         }
         if !cx.detached {
             edge_buttons(ui, id, body, cx, false);
@@ -3745,4 +3918,80 @@ fn armed_button(ui: &mut Ui, key: impl std::hash::Hash, label: &str, armed_label
         ui.memory_mut(|m| m.data.insert_temp(id, now));
     }
     false
+}
+
+/// Status eines Chats als Sitzungsstatus: Freigabe/Frage offen → `Permission` (Seitenleiste „braucht dich“, MCP
+/// `approval`, externe Agenten schreiben dann nicht in den Chat), Runde läuft → `Working`, sonst `Idle`.
+fn chat_claude_status(s: chatmod::ChatStatus) -> ClaudeStatus {
+    match s {
+        chatmod::ChatStatus::Approval => ClaudeStatus::Permission,
+        chatmod::ChatStatus::Working => ClaudeStatus::Working,
+        chatmod::ChatStatus::Ready => ClaudeStatus::Idle,
+    }
+}
+
+/// Die App als Hub der Werkzeug-Schleife (`chat::driver`): Ausführung über den MCP-Ausführer mit dem Chat als
+/// Aufrufer, nächste Anfrage über das Backend des Hubs.
+struct ChatHost<'a> {
+    app: &'a mut App,
+    ctx: &'a egui::Context,
+}
+
+impl chatmod::driver::ChatToolHost for ChatHost<'_> {
+    fn chat(&mut self, id: u64) -> Option<&mut ChatState> {
+        self.app.entries.get_mut(&id).and_then(|e| e.chat.as_mut())
+    }
+    fn policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
+        self.app.chat_policy(id)
+    }
+    fn execute(&mut self, chat: u64, call: &chatmod::store::ToolCall) -> std::sync::mpsc::Receiver<chatmod::tools::ToolResult> {
+        self.app.mcp_call_chat(self.ctx, chat, &call.name, &call.arguments)
+    }
+    fn request(&mut self, id: u64) {
+        self.app.chat_next_request(self.ctx, id);
+    }
+    fn session_name(&self, id: u64) -> Option<String> {
+        self.app.entries.get(&id).map(|e| e.display_name())
+    }
+}
+
+#[cfg(test)]
+mod chat_status_tests {
+    use super::*;
+
+    #[test]
+    fn chat_status_maps_to_session_status() {
+        assert_eq!(chat_claude_status(chatmod::ChatStatus::Approval), ClaudeStatus::Permission);
+        assert_eq!(chat_claude_status(chatmod::ChatStatus::Working), ClaudeStatus::Working);
+        assert_eq!(chat_claude_status(chatmod::ChatStatus::Ready), ClaudeStatus::Idle);
+        // Ein Chat mit offener Frage „braucht dich“
+        let mut e = Entry::new_chat(SessionMeta { kind: SessionKind::Chat, ..SessionMeta::default() }, ChatState::new(chatmod::ChatFile::default(), None));
+        e.status = chat_claude_status(chatmod::ChatStatus::Approval);
+        assert!(e.needs_you());
+    }
+}
+
+/// Woher eine Chat-Nachricht kommt ([`App::chat_send`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatSendOrigin {
+    /// Eingabefeld des Chats.
+    User,
+    /// Externer Agent über MCP (`send_chat_message`, kommt mit P5).
+    #[allow(dead_code)]
+    Agent,
+}
+
+/// Ergebnis von [`App::chat_send`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatSendResult {
+    /// Gesendet, die Antwort läuft.
+    Sent,
+    /// Nicht gesendet: die einmalige Frage nach der Stufe des Modells ist offen (für Agenten `permission_pending`).
+    LevelQuestion,
+    /// Nicht gesendet: eine Antwort läuft, Werkzeuge laufen oder eine Freigabe ist offen.
+    Busy,
+    /// Nichts zu senden.
+    Empty,
+    /// Keine Chat-Sitzung mit dieser Id.
+    NotAChat,
 }

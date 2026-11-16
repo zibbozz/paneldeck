@@ -167,6 +167,9 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     /// Kontextlänge (nur Ollama: `options.num_ctx`; OpenAI-kompatible Server legen sie beim Start fest).
     pub num_ctx: Option<u32>,
+    /// Höchstzahl Tokens der Antwort (nur Ollama: `options.num_predict`), damit die Antwort die Anfrage nicht aus dem
+    /// Kontext drängt.
+    pub num_predict: Option<u32>,
 }
 
 /// Ereignisse eines Chat-Aufrufs. Am Ende kommt genau eines von `Done` oder `Error`; `ToolCalls` (falls vorhanden) direkt
