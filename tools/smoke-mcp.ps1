@@ -253,6 +253,36 @@ try {
   Check 'unbekannte Shell' ((Code (Tool 'create_session' @{ shell = 'gibtsnicht' })) -eq 'bad_args')
   Check 'ungueltiger Ordner' ((Code (Tool 'create_session' @{ cwd = "$work\gibtsnicht" })) -eq 'bad_args')
 
+  Write-Host "== WSL: Linux-Startordner (#172)" -ForegroundColor Cyan
+  # Erkannte WSL-Shells aus der Fehlermeldung zu einer unbekannten Shell; Vorlagen/System-Distributionen auslassen.
+  $avail = (Tool 'create_session' @{ shell = 'gibtsnicht' }).text
+  $wslSh = [regex]::Matches($avail, 'wsl:[^,\s]+') | ForEach-Object { $_.Value.TrimEnd('.') } | Where-Object { $_ -notmatch '(?i)-template$|^wsl:docker-desktop' } | Select-Object -First 1
+  if (-not $wslSh) {
+    Skip 'WSL: Linux-Startordner' 'keine WSL-Distribution'
+  } else {
+    # Einschleusung ueber `wsl.exe --cd` (ein `"` beendet dort den Wert): immer bad_args, ohne zu starten
+    $inj = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/x" echo INJECTED-$((6*7)); #'; name = 'smoke-wsl-inj' }
+    Check "WSL: cwd mit Anfuehrungszeichen abgelehnt ($wslSh)" ((Code $inj) -eq 'bad_args') $inj.text
+    Check 'WSL: cwd mit Backslash abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/a\b' })) -eq 'bad_args')
+    Check 'WSL: ~/x abgelehnt (nur ~ allein)' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x' })) -eq 'bad_args')
+    Check 'Linux-cwd fuer Windows-Shell abgelehnt' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = '/tmp' })) -eq 'bad_args')
+    # Fehlender Ordner: Pruefung in WSL im Hintergrund -> bad_args (antwortet WSL nicht, wird angelegt mit cwd_checked=false)
+    $miss = Tool 'create_session' @{ shell = $wslSh; cwd = '/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-miss' } 60000
+    if ($miss.err) { Check 'WSL: fehlender Linux-Ordner = bad_args' ((Code $miss) -eq 'bad_args') $miss.text }
+    else { Check 'WSL: fehlender Linux-Ordner (WSL antwortete nicht: cwd_checked=false)' ($miss.data.cwd_checked -eq $false) $miss.text; [void](Tool 'close_session' @{ session = $miss.data.id }) }
+    # Vorhandener Ordner: Sitzung startet dort (wsl.exe --cd /tmp)
+    $w = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/'; name = 'smoke-wsl' } 60000
+    Check "WSL: create_session mit Linux-cwd ($wslSh)" (-not $w.err -and $w.data.cwd -eq '/tmp' -and $w.data.shell -eq $wslSh) $w.text
+    if (-not $w.err) {
+      Check 'WSL: cwd_checked gesetzt' ($null -ne $w.data.cwd_checked) $w.text
+      Start-Sleep 6
+      $r = Tool 'run_command' @{ session = $w.data.id; command = 'pwd'; timeout_secs = 30 } 45000
+      if ($r.data.finished) { Check 'WSL: Sitzung laeuft in /tmp (pwd)' ($r.data.output.Trim() -eq '/tmp') $r.text }
+      else { $rt = Tool 'read_terminal' @{ session = $w.data.id; lines = 30 }; Skip 'WSL: pwd' "run_command nicht beendet (Shell-Integration in WSL?): $($rt.data.text)" }
+      Check 'WSL: close_session' (-not (Tool 'close_session' @{ session = $w.data.id }).err)
+    }
+  }
+
   Write-Host "== Selbst-Identifikation und Kinder-Sitzungen" -ForegroundColor Cyan
   $w0 = Tool 'whoami'
   Check 'whoami von aussen: nicht in einem Hub-Terminal' ($null -eq $w0.data.session -and $w0.data.identified_by -eq 'none')
