@@ -429,19 +429,21 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
         }
         ui.horizontal_wrapped(|ui| {
             let allow = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(style::ACCENT.gamma_multiply(0.7)));
-            let scope = match target {
-                Some(t) => format!("{name} → {t}"),
-                None => name.to_string(),
-            };
-            let always = ui.button(lang.t("Immer für diesen Chat", "Always for this chat")).on_hover_text(if lang == Lang::De {
-                format!("„{scope}“ in diesem Chat nicht mehr nachfragen (oben im Chat widerrufbar)")
-            } else {
-                format!("Do not ask again for “{scope}” in this chat (can be revoked at the top of the chat)")
+            // „Immer“ nur mit Ziel-Sitzung (Werkzeug + Sitzung); Tickets, Todos, create_session … fragen jedes Mal.
+            let call = crate::chat::store::ToolCall { id: call_id.to_string(), name: name.to_string(), arguments: args.clone() };
+            let always = AllowRule::eligible(&call).then(|| {
+                let session = args.get("session").and_then(|s| s.as_u64()).unwrap_or(0);
+                let scope = format!("{name} → {}", target.map(str::to_string).unwrap_or_else(|| format!("session {session}")));
+                ui.button(lang.t("Immer für diesen Chat", "Always for this chat")).on_hover_text(if lang == Lang::De {
+                    format!("Immer für {scope} (oben im Chat widerrufbar)")
+                } else {
+                    format!("Always for {scope} (can be revoked at the top of the chat)")
+                })
             });
             let deny = ui.button(lang.t("Ablehnen", "Deny"));
             let d = if allow.clicked() {
                 Some(Decision::Allow)
-            } else if always.clicked() {
+            } else if always.is_some_and(|a| a.clicked()) {
                 Some(Decision::Always)
             } else if deny.clicked() {
                 Some(Decision::Deny)
@@ -828,7 +830,7 @@ mod tests {
     }
 
     fn control() -> crate::chat::tools::ToolPolicy {
-        crate::chat::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Control, ..crate::llm::config::LlmModel::named("m") }, None, false)
+        crate::chat::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, ..crate::llm::config::LlmModel::named("m") }, None, false)
     }
 
     /// Chat, dessen Antwort diese Aufrufe verlangt; der erste wartet auf Freigabe.
@@ -886,6 +888,27 @@ mod tests {
         h.frame(&mut c, Lang::En, false, vec![]);
         assert!(!h.texts.iter().any(|t| t.contains("characters – scroll down")));
         assert!(h.texts.iter().any(|t| t.contains("\"text\": \"dir\"")), "{:?}", h.texts);
+    }
+
+    #[test]
+    fn always_is_offered_only_for_calls_with_a_target_session() {
+        let cases = [
+            (ToolCall { id: "a".into(), name: "create_session".into(), arguments: serde_json::json!({"name": "x"}) }, false),
+            (ToolCall { id: "b".into(), name: "add_todo".into(), arguments: serde_json::json!({"title": "t"}) }, false),
+            (ToolCall { id: "c".into(), name: "send_keys".into(), arguments: serde_json::json!({"session": 4, "keys": ["enter"]}) }, true),
+        ];
+        for (call, offered) in cases {
+            let mut c = awaiting_with(vec![call.clone()]);
+            let mut h = H::new();
+            h.frame(&mut c, Lang::En, false, vec![]);
+            h.frame(&mut c, Lang::En, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == "Allow") && h.texts.iter().any(|t| t == "Deny"), "{}", call.name);
+            assert_eq!(h.texts.iter().any(|t| t == "Always for this chat"), offered, "{}", call.name);
+        }
+        // Ein „Immer“ ohne Ziel (z. B. veralteter Klick) wirkt wie „Erlauben“ und speichert nichts
+        let mut c = awaiting_with(vec![ToolCall { id: "t".into(), name: "add_todo".into(), arguments: serde_json::json!({"title": "t"}) }]);
+        assert!(c.decide("t", Decision::Always));
+        assert!(c.file.always_allow.is_empty());
     }
 
     #[test]

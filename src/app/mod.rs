@@ -998,6 +998,8 @@ impl App {
             if meta.kind == SessionKind::Chat {
                 // Chat: Verlauf aus chats/<id>.json, keine PTY.
                 let (file, warning) = chatmod::store::load(&chatmod::store::path(&app.dir, id));
+                // Keine Id neu vergeben, auf die eine dauerhafte Freigabe zeigt (sonst gälte sie für ein neues Terminal).
+                app.next_id = app.next_id.max(chatmod::store::max_rule_session(&file).saturating_add(1));
                 let chat = ChatState::new(file, warning);
                 app.entries.insert(id, Entry::new_chat(meta, chat));
                 continue;
@@ -2347,7 +2349,56 @@ impl App {
             prompt_lang: self.settings.mcp_prompt_lang,
             lang: self.settings.language,
             expert: crate::mcp::expert_mode(),
+            token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
         }
+    }
+
+    /// Eine Nachricht an einen Chat senden – die eine Stelle für das Eingabefeld (`text = None`: der Entwurf) und für
+    /// externe Agenten (`text = Some(…)`, Entwurf bleibt unberührt; P5 `send_chat_message`).
+    ///
+    /// Wurde die Stufe des Modells nie gewählt, wird nichts gesendet: die einmalige Frage erscheint im Chat
+    /// (`ChatState::level_question`) und das Ergebnis ist [`ChatSendResult::LevelQuestion`] – für Agenten
+    /// `permission_pending`, nur der Nutzer kann sie beantworten.
+    pub(super) fn chat_send(&mut self, ctx: &egui::Context, id: u64, text: Option<&str>, origin: ChatSendOrigin) -> ChatSendResult {
+        let Some(c) = self.entries.get(&id).and_then(|e| e.chat.as_ref()) else { return ChatSendResult::NotAChat };
+        let empty = match text {
+            Some(t) => t.trim().is_empty(),
+            None => c.draft.trim().is_empty(),
+        };
+        if empty {
+            return ChatSendResult::Empty;
+        }
+        if c.busy() {
+            return ChatSendResult::Busy;
+        }
+        if self.chat_level_unchosen(id) {
+            if let Some(e) = self.entries.get_mut(&id) {
+                if let Some(c) = e.chat.as_mut() {
+                    c.level_question = true;
+                    c.touch();
+                }
+                e.status = ClaudeStatus::Permission;
+            }
+            return ChatSendResult::LevelQuestion;
+        }
+        let backend = self.chat_backend.clone();
+        let rctx = ctx.clone();
+        let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
+        let tcx = self.turn_context(id);
+        let Some(e) = self.entries.get_mut(&id) else { return ChatSendResult::NotAChat };
+        let meta = e.meta.chat.clone().unwrap_or_default();
+        let Some(c) = e.chat.as_mut() else { return ChatSendResult::NotAChat };
+        let sent = match text {
+            Some(t) => c.send_text(t, backend.as_ref(), &meta, &tcx, repaint),
+            None => c.send(backend.as_ref(), &meta, &tcx, repaint),
+        };
+        e.status = chat_claude_status(c.status());
+        if !sent {
+            return ChatSendResult::Busy;
+        }
+        let _ = origin; // beide Wege gleich; die Herkunft ist für Protokoll/Erweiterungen vorgesehen
+        self.save_chat(id);
+        ChatSendResult::Sent
     }
 
     /// Nächste Anfrage einer Werkzeug-Runde (für `ChatHost::request`).
@@ -2364,17 +2415,9 @@ impl App {
     }
 
     fn chat_action(&mut self, ctx: &egui::Context, id: u64, a: &Action) {
-        // Erstes Senden mit einem Modell, dessen Stufe nie gewählt wurde: einmal fragen, die Nachricht wartet im Feld.
-        if matches!(a, Action::ChatSend(_)) && self.chat_level_unchosen(id) {
-            if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
-                if !c.draft.trim().is_empty() && !c.busy() {
-                    c.level_question = true;
-                    c.touch();
-                }
-            }
-            if let Some(e) = self.entries.get_mut(&id) {
-                e.status = ClaudeStatus::Permission;
-            }
+        // Senden: über `chat_send` (fragt bei nie gewählter Stufe einmal nach; die Nachricht wartet im Feld).
+        if matches!(a, Action::ChatSend(_)) {
+            self.chat_send(ctx, id, None, ChatSendOrigin::User);
             return;
         }
         if let Action::ChatLevel(_, level) = a {
@@ -3926,4 +3969,29 @@ mod chat_status_tests {
         e.status = chat_claude_status(chatmod::ChatStatus::Approval);
         assert!(e.needs_you());
     }
+}
+
+/// Woher eine Chat-Nachricht kommt ([`App::chat_send`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatSendOrigin {
+    /// Eingabefeld des Chats.
+    User,
+    /// Externer Agent über MCP (`send_chat_message`, kommt mit P5).
+    #[allow(dead_code)]
+    Agent,
+}
+
+/// Ergebnis von [`App::chat_send`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatSendResult {
+    /// Gesendet, die Antwort läuft.
+    Sent,
+    /// Nicht gesendet: die einmalige Frage nach der Stufe des Modells ist offen (für Agenten `permission_pending`).
+    LevelQuestion,
+    /// Nicht gesendet: eine Antwort läuft, Werkzeuge laufen oder eine Freigabe ist offen.
+    Busy,
+    /// Nichts zu senden.
+    Empty,
+    /// Keine Chat-Sitzung mit dieser Id.
+    NotAChat,
 }

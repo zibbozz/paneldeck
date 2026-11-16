@@ -46,8 +46,11 @@ pub struct Prepared {
     pub context_start: Option<usize>,
     /// Hinweis für den Nutzer zur Antwort (z. B. Systemprompt größer als der Kontext).
     pub note: Option<String>,
-    /// Platz für den Verlauf in Tokens: Kontext ohne Antwort-Reserve, Systemprompt und Werkzeug-Beschreibungen.
+    /// Platz für den Verlauf in geschätzten Tokens: Kontext ohne Antwort-Reserve, Systemprompt und
+    /// Werkzeug-Beschreibungen, geteilt durch `TurnContext::token_scale`.
     pub history_budget: usize,
+    /// Geschätzte Tokens der ganzen Anfrage (zum Abgleich mit `prompt_tokens` des Servers).
+    pub prompt_estimate: usize,
 }
 
 /// Höchstlänge von Projektname und Ordner in der Kontextzeile (Zeichen).
@@ -196,7 +199,11 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     messages.push(ChatMessage::new(Role::System, system_prompt(policy.prompt_level(), cx)));
     messages.extend(hist);
     let ctx_len = server.request_context(model);
-    let budget = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
+    let budget_real = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
+    // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
+    // ist entsprechend weniger Platz.
+    let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
+    let budget = (budget_real as f64 / scale as f64) as usize;
     // Die Werkzeug-Beschreibungen belegen ebenfalls Kontext.
     let tools = policy.specs();
     let tool_tokens = if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(&tools).unwrap_or_default()) };
@@ -221,9 +228,13 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     // Index in `messages` → Index im Verlauf (die Systemnachricht steht nicht im Verlauf).
     let context_start = (start > first).then(|| origin.get(start - first).copied()).flatten();
     let messages = llm::tokens::visible(&messages, start);
-    let num_ctx = (server.kind == llm::ServerKind::Ollama).then_some(ctx_len);
-    let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx };
-    Ok(Prepared { endpoint, request, context_start, note, history_budget })
+    let prompt_estimate = messages.iter().map(llm::tokens::message_tokens).sum::<usize>() + tool_tokens;
+    let ollama = server.kind == llm::ServerKind::Ollama;
+    let num_ctx = ollama.then_some(ctx_len);
+    // Ollama: die Antwort darf nur die Reserve nutzen, sonst schöbe sie den Anfang der Anfrage aus dem Kontext.
+    let num_predict = ollama.then_some(ctx_len.saturating_sub(budget_real as u32).max(1));
+    let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx, num_predict };
+    Ok(Prepared { endpoint, request, context_start, note, history_budget, prompt_estimate })
 }
 
 /// Hinweis für eine an der Token-Grenze abgeschnittene Antwort.
@@ -257,7 +268,7 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
         }
         repaint();
     };
-    send(TurnEvent::Budget(p.history_budget));
+    send(TurnEvent::Budget { history: p.history_budget, prompt: p.prompt_estimate });
     if let Some(cs) = p.context_start {
         send(TurnEvent::ContextStart(cs));
     }
@@ -566,7 +577,27 @@ mod tests {
         assert!(seen.starts_with("POST /api/chat HTTP/1.1"), "{seen}");
         assert!(seen.contains("\"m1\"") && seen.contains("Demo") && seen.contains("\"hi\""), "{seen}");
         assert!(!seen.contains("\"tools\""), "Standard „Aus“: keine Werkzeuge: {seen}");
-        assert!(matches!(ev.first(), Some(TurnEvent::Budget(b)) if *b > 0), "Platz kommt zuerst: {ev:?}");
+        assert!(matches!(ev.first(), Some(TurnEvent::Budget { history, prompt }) if *history > 0 && *prompt > 0), "Platz kommt zuerst: {ev:?}");
+        // Ollama: die Antwort bekommt nur die Reserve (25 % von 8192)
+        assert!(seen.contains("\"num_predict\":2048"), "{seen}");
+    }
+
+    #[test]
+    fn token_scale_shrinks_the_budget() {
+        let s = server("http://localhost:11434", ServerKind::Ollama);
+        let hist = [msg(store::Role::User, "q")];
+        let one = prepare(&meta(), &hist, &cx(vec![s.clone()])).unwrap();
+        let mut c = cx(vec![s.clone()]);
+        c.token_scale = 2.0;
+        let two = prepare(&meta(), &hist, &c).unwrap();
+        assert!(two.history_budget < one.history_budget, "{} < {}", two.history_budget, one.history_budget);
+        assert!(two.prompt_estimate == one.prompt_estimate && one.prompt_estimate > 0);
+        c.token_scale = f32::NAN;
+        assert_eq!(prepare(&meta(), &hist, &c).unwrap().history_budget, one.history_budget, "unsinniger Faktor gilt als 1");
+        // OpenAI-kompatibel: kein num_predict
+        let mut o = s;
+        o.kind = ServerKind::OpenAi;
+        assert_eq!(prepare(&meta(), &hist, &cx(vec![o])).unwrap().request.num_predict, None);
     }
 
     #[test]
@@ -668,9 +699,14 @@ mod tests {
         assert_eq!(p.request.messages[0].content, system_prompt(McpLevel::Off, &cx(vec![s])), "Prompt für „Aus“");
         // Unbekannte Fähigkeit (OpenAI-kompatibel): Werkzeuge werden gesendet
         let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
-        o.set_model_cfg(LlmModel { level: McpLevel::Control, ..LlmModel::named("m1") });
-        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![o])).unwrap();
+        o.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![o.clone()])).unwrap();
         assert!(p.request.tools.iter().any(|t| t.name == "send_text"));
+        // Stufe nie gewählt: gilt als „Aus“ (auch bei Neu erzeugen, Weiter, Nachrichten von Agenten)
+        o.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: false, ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![o.clone()])).unwrap();
+        assert!(p.request.tools.is_empty());
+        assert_eq!(p.request.messages[0].content, system_prompt(McpLevel::Off, &cx(vec![o])));
     }
 
     /// Ganze Werkzeug-Runde gegen einen Ollama-Ersatz: Aufruf `list_sessions`, Ergebnis, dann Text.

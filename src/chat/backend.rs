@@ -25,9 +25,10 @@ pub enum TurnEvent {
     /// Für diese Anfrage wurden ältere Nachrichten weggelassen: Index (im übergebenen Verlauf) der ersten, die das
     /// Modell noch sieht.
     ContextStart(usize),
-    /// Platz für den Verlauf in Tokens (Kontext ohne Antwort-Reserve, Systemprompt und Werkzeug-Beschreibungen); kommt
-    /// am Anfang der Antwort. Damit hält die Werkzeug-Schleife Ergebnisse klein genug.
-    Budget(usize),
+    /// Kommt am Anfang der Antwort. `history`: Platz für den Verlauf in geschätzten Tokens (Kontext ohne
+    /// Antwort-Reserve, Systemprompt und Werkzeug-Beschreibungen; damit hält die Werkzeug-Schleife Ergebnisse klein
+    /// genug). `prompt`: geschätzte Tokens der ganzen Anfrage (Abgleich mit `Usage::prompt_tokens`).
+    Budget { history: usize, prompt: usize },
     /// Verbrauch der Anfrage laut Server (Tokens der Eingabe und der Antwort), kurz vor `Done`.
     Usage { prompt_tokens: Option<u32>, completion_tokens: Option<u32> },
     /// Hinweis zur Antwort (z. B. „an der Token-Grenze abgeschnitten“), landet in [`ChatMsg::note`].
@@ -79,11 +80,13 @@ pub struct TurnContext {
     pub lang: Lang,
     /// Expertenmodus der Todo-Liste (bestimmt die Werkzeuge im Systemprompt).
     pub expert: bool,
+    /// So viel mehr Tokens zählt der Server als geschätzt (aus der letzten Antwort des Chats, 1,0–4,0; 1,0 = unbekannt).
+    pub token_scale: f32,
 }
 
 impl Default for TurnContext {
     fn default() -> Self {
-        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), data_dir: None, prompt_lang: Lang::En, lang: Lang::En, expert: false }
+        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), data_dir: None, prompt_lang: Lang::En, lang: Lang::En, expert: false, token_scale: 1.0 }
     }
 }
 

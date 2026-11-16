@@ -43,7 +43,12 @@ pub struct ToolPolicy {
 }
 
 impl ToolPolicy {
-    pub fn new(cfg: LlmModel, tools_supported: Option<bool>, expert: bool) -> Self {
+    /// Eine nie gewählte Stufe gilt als „Aus“ – überall (Senden, Neu erzeugen, Wiederholen, Weiter, laufende Runde,
+    /// Nachrichten externer Agenten), nicht nur beim ersten Senden.
+    pub fn new(mut cfg: LlmModel, tools_supported: Option<bool>, expert: bool) -> Self {
+        if !cfg.level_chosen {
+            cfg.level = McpLevel::Off;
+        }
         ToolPolicy { cfg, tools_supported, expert }
     }
 
@@ -224,8 +229,15 @@ mod tests {
     use super::*;
 
     fn policy(level: McpLevel, disabled: &[&str], expert: bool) -> ToolPolicy {
-        let cfg = LlmModel { level, disabled_tools: disabled.iter().map(|s| s.to_string()).collect(), ..LlmModel::named("m") };
+        let cfg = LlmModel { level, level_chosen: true, disabled_tools: disabled.iter().map(|s| s.to_string()).collect(), ..LlmModel::named("m") };
         ToolPolicy::new(cfg, None, expert)
+    }
+
+    #[test]
+    fn an_unchosen_level_counts_as_off() {
+        let p = ToolPolicy::new(LlmModel { level: McpLevel::Control, level_chosen: false, ..LlmModel::named("m") }, None, false);
+        assert_eq!((p.cfg.level, p.enabled(), p.specs().len()), (McpLevel::Off, false, 0));
+        assert!(p.check(&call("list_sessions", json!({}))).unwrap_err().1.contains("forbidden"));
     }
 
     fn call(name: &str, args: Value) -> ToolCall {

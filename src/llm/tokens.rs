@@ -2,9 +2,16 @@
 
 use super::{ChatMessage, Role};
 
-/// Etwa Zeichen / 4, aufgerundet.
+/// Vorsichtige Schätzung: ASCII-Zeichen / 3 (aufgerundet) plus ein Token je Nicht-ASCII-Zeichen.
+///
+/// Warum so vorsichtig: Für englischen Fließtext liegen gängige BPE-Tokenizer (Llama, Qwen, Mistral) bei etwa 4 Zeichen
+/// je Token, für JSON, Code, Pfade und Terminalausgabe – genau das, was Werkzeug-Ergebnisse enthalten – eher bei 2,5–3.
+/// Umlaute, Emoji und CJK kosten oft ein Token oder mehr je Zeichen. Zu hoch geschätzt kostet nur etwas Verlauf; zu
+/// niedrig geschätzt schneidet Ollama still den Anfang ab – samt Systemprompt. Die tatsächliche Zahl des Servers
+/// gleicht der Chat zusätzlich über einen Faktor ab (`TurnContext::token_scale`).
 pub fn estimate_tokens(s: &str) -> usize {
-    s.chars().count().div_ceil(4)
+    let (ascii, other) = s.chars().fold((0usize, 0usize), |(a, o), c| if c.is_ascii() { (a + 1, o) } else { (a, o + 1) });
+    ascii.div_ceil(3) + other
 }
 
 /// Geschätzte Tokens einer Nachricht (Inhalt, Werkzeugaufrufe, kleiner Aufschlag für Rolle/Formatierung).
@@ -50,18 +57,19 @@ mod tests {
     use crate::llm::ToolCall;
 
     fn m(role: Role, n: usize) -> ChatMessage {
-        ChatMessage { role, content: "x".repeat(n * 4), ..Default::default() }
+        ChatMessage { role, content: "x".repeat(n * 3), ..Default::default() }
     }
 
     #[test]
-    fn estimate_rounds_up() {
+    fn estimate_is_conservative() {
         assert_eq!(estimate_tokens(""), 0);
         assert_eq!(estimate_tokens("a"), 1);
-        assert_eq!(estimate_tokens("abcd"), 1);
-        assert_eq!(estimate_tokens("abcde"), 2);
-        assert_eq!(estimate_tokens("äöüß"), 1);
+        assert_eq!(estimate_tokens("abc"), 1);
+        assert_eq!(estimate_tokens("abcd"), 2);
+        assert_eq!(estimate_tokens("äöüß"), 4, "Nicht-ASCII: ein Token je Zeichen");
+        assert_eq!(estimate_tokens("Grüße"), 1 + 2, "G, r, e = 3 ASCII → 1; ü, ß → 2");
         let c = ChatMessage { role: Role::Assistant, tool_calls: vec![ToolCall { id: "1".into(), name: "abcd".into(), arguments: serde_json::json!({}) }], ..Default::default() };
-        assert_eq!(message_tokens(&c), 4 + 0 + 1 + 1 + 3);
+        assert_eq!(message_tokens(&c), 4 + 0 + 2 + 1 + 3);
     }
 
     #[test]

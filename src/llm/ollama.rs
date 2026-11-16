@@ -78,6 +78,9 @@ pub fn request_json(req: &ChatRequest) -> Value {
     if let Some(n) = req.num_ctx {
         opts.insert("num_ctx".into(), json!(n));
     }
+    if let Some(n) = req.num_predict {
+        opts.insert("num_predict".into(), json!(n));
+    }
     if !opts.is_empty() {
         body["options"] = Value::Object(opts);
     }

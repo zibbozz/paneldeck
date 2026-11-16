@@ -103,8 +103,9 @@ pub struct ChatFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_start: Option<usize>,
     /// Dauerhafte Freigaben „Immer für diesen Chat“ (seit 2.2.0): je Werkzeug und Ziel-Sitzung keine Nachfrage mehr.
-    /// Steht vor `messages`, weil `serialize_capped` die Nachrichten ans Ende setzt.
-    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_rules")]
+    /// Steht vor `messages`, weil `serialize_capped` die Nachrichten ans Ende setzt. Regeln ohne Sitzung (`null`) werden
+    /// gelesen, gelten aber nie und fallen beim Speichern weg.
+    #[serde(skip_serializing_if = "no_session_rules", serialize_with = "session_rules", deserialize_with = "lenient_rules")]
     pub always_allow: Vec<AllowRule>,
     pub messages: Vec<ChatMsg>,
 }
@@ -115,13 +116,16 @@ impl Default for ChatFile {
     }
 }
 
-/// Eine dauerhafte Freigabe: dieses Werkzeug für diese Ziel-Sitzung (`session` aus den Argumenten des Aufrufs;
-/// `null` bei Werkzeugen ohne Sitzung). Nur wenn beides passt, läuft ein Aufruf ohne Nachfrage.
+/// Eine dauerhafte Freigabe: dieses Werkzeug für diese Ziel-Sitzung (`session` aus den Argumenten des Aufrufs). Nur
+/// wenn beides passt, läuft ein Aufruf ohne Nachfrage. Regeln ohne Sitzung (`null`, aus Vorabständen) gelten nie.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllowRule {
     pub tool: String,
     pub session: Option<u64>,
 }
+
+/// Werkzeuge, für die es nie „Immer für diesen Chat“ gibt (auch mit `session`-Argument nicht).
+pub const NEVER_ALWAYS: &[&str] = &["create_session"];
 
 impl AllowRule {
     /// Regel für einen Aufruf (Werkzeug + Ziel-Sitzung aus `arguments.session`).
@@ -129,9 +133,35 @@ impl AllowRule {
         AllowRule { tool: call.name.clone(), session: call.arguments.get("session").and_then(|s| s.as_u64()) }
     }
 
-    pub fn matches(&self, call: &ToolCall) -> bool {
-        *self == AllowRule::for_call(call)
+    /// Darf es für diesen Aufruf „Immer für diesen Chat“ geben? Nur mit einer Ziel-Sitzung (Zahl im Argument
+    /// `session`) und nie für [`NEVER_ALWAYS`]. Werkzeuge ohne Ziel (Tickets, Todos, `create_session` …) fragen immer.
+    pub fn eligible(call: &ToolCall) -> bool {
+        call.arguments.get("session").is_some_and(|s| s.as_u64().is_some()) && !NEVER_ALWAYS.contains(&call.name.as_str())
     }
+
+    pub fn matches(&self, call: &ToolCall) -> bool {
+        self.session.is_some() && AllowRule::eligible(call) && *self == AllowRule::for_call(call)
+    }
+}
+
+fn no_session_rules(v: &[AllowRule]) -> bool {
+    v.iter().all(|r| r.session.is_none())
+}
+
+/// Nur Regeln mit Sitzung schreiben.
+fn session_rules<S: serde::Serializer>(v: &[AllowRule], s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let keep: Vec<&AllowRule> = v.iter().filter(|r| r.session.is_some()).collect();
+    let mut seq = s.serialize_seq(Some(keep.len()))?;
+    for r in keep {
+        seq.serialize_element(r)?;
+    }
+    seq.end()
+}
+
+/// Höchste Sitzungs-Id, auf die eine gespeicherte Regel zeigt (der Hub vergibt danach keine kleinere Id neu).
+pub fn max_rule_session(file: &ChatFile) -> u64 {
+    file.always_allow.iter().filter_map(|r| r.session).max().unwrap_or(0)
 }
 
 /// Freigaben tolerant lesen: `{"tool": …, "session": …}`; ein reiner Werkzeugname (Vorabstand) gilt als Regel ohne
@@ -359,9 +389,13 @@ mod tests {
         // Altes Format (reine Namen) → Regeln ohne Sitzung; ungültige Einträge fallen weg, Doppelte auch
         let (f, _) = parse(r#"{"always_allow":["send_text",5,"run_command",{"tool":"send_keys","session":4},{"tool":"x","session":"4"},{"session":1},{"tool":"add_todo","session":null},{"tool":"send_keys","session":4}],"messages":[]}"#).unwrap();
         assert_eq!(f.always_allow, [rule("send_text", None), rule("run_command", None), rule("send_keys", Some(4)), rule("add_todo", None)]);
-        // Geschrieben wird immer mit `session` (auch null)
+        // Geschrieben werden nur Regeln mit Sitzung (die ohne gelten nie)
         let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
-        assert!(text.contains(r#"{"tool":"send_keys","session":4}"#) && text.contains(r#"{"tool":"add_todo","session":null}"#), "{text}");
+        assert!(text.contains(r#""always_allow":[{"tool":"send_keys","session":4}]"#), "{text}");
+        let only_null = ChatFile { always_allow: vec![rule("add_todo", None)], ..ChatFile::default() };
+        assert!(!String::from_utf8(serialize_capped(&only_null, 1000)).unwrap().contains("always_allow"), "nur ungültige Regeln: Feld fehlt");
+        assert_eq!(max_rule_session(&f), 4);
+        assert_eq!(max_rule_session(&only_null), 0);
         // Gekürzt gespeichert: das Feld bleibt
         let mut big = sample();
         for i in 0..100 {
@@ -385,7 +419,13 @@ mod tests {
         assert!(r.matches(&call("send_text", serde_json::json!({"session": 4, "text": "other"}))));
         assert!(!r.matches(&call("send_text", serde_json::json!({"session": 5}))), "andere Sitzung");
         assert!(!r.matches(&call("send_keys", serde_json::json!({"session": 4}))), "anderes Werkzeug");
-        assert!(rule("add_todo", None).matches(&call("add_todo", serde_json::json!({"title": "t"}))));
+        // Ohne Ziel-Sitzung nie „Immer“: Regel ohne Sitzung passt nicht, create_session nie
+        assert!(!rule("add_todo", None).matches(&call("add_todo", serde_json::json!({"title": "t"}))));
+        assert!(!AllowRule::eligible(&call("add_todo", serde_json::json!({"title": "t"}))));
+        assert!(!AllowRule::eligible(&call("send_text", serde_json::json!({"session": "4"}))), "keine Zahl");
+        assert!(!AllowRule::eligible(&call("create_session", serde_json::json!({"session": 4}))));
+        assert!(!rule("create_session", Some(4)).matches(&call("create_session", serde_json::json!({"session": 4}))));
+        assert!(AllowRule::eligible(&call("send_keys", serde_json::json!({"session": 4}))));
     }
 
     #[test]

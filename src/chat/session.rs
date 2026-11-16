@@ -104,9 +104,19 @@ pub struct ChatState {
     step_executed: bool,
     /// Schritte dieser Runde in Folge, in denen kein einziger Aufruf ausgeführt wurde (nur abgewiesene).
     idle_steps: u32,
-    /// Platz für den Verlauf laut Backend (Tokens; Kontext ohne Antwort-Reserve, Systemprompt und Werkzeuge).
-    /// `None` = unbekannt (dann gilt nur [`tools::MAX_RESULT_BYTES`]).
+    /// Platz für den Verlauf laut Backend (geschätzte Tokens; Kontext ohne Antwort-Reserve, Systemprompt und
+    /// Werkzeuge). `None` = unbekannt (dann gilt nur [`tools::MAX_RESULT_BYTES`]).
     pub history_budget: Option<usize>,
+    /// Faktor, mit dem das Backend `history_budget` gerechnet hat (der damalige `token_scale`).
+    budget_scale: f32,
+    /// Geschätzte Tokens der letzten Anfrage (aus `TurnEvent::Budget`), zum Abgleich mit `prompt_tokens`.
+    prompt_estimate: Option<usize>,
+    /// So viel mehr Tokens zählt der Server als geschätzt (`prompt_tokens / Schätzung`, 1,0–4,0); geht als
+    /// `TurnContext::token_scale` in die nächste Anfrage. Nicht gespeichert.
+    pub token_scale: f32,
+    /// Angehalten, weil kein Platz mehr im Kontext war: „Weiter“ startet gleich die nächste Anfrage (mit neu
+    /// berechnetem Platz), statt wartende Aufrufe auszuführen.
+    context_pause: bool,
     /// Ziel des wartenden Aufrufs für die Freigabe-Zeile, z. B. `session 4 "build"` (setzt der Hub).
     pub approval_target: Option<String>,
     /// Einmalige Frage nach der Stufe des Modells ist offen (setzt der Hub beim ersten Senden; siehe
@@ -180,6 +190,10 @@ impl ChatState {
             step_executed: false,
             idle_steps: 0,
             history_budget: None,
+            budget_scale: 1.0,
+            prompt_estimate: None,
+            token_scale: 1.0,
+            context_pause: false,
             approval_target: None,
             level_question: false,
         };
@@ -275,6 +289,19 @@ impl ChatState {
         self.saved.set(self.rev);
     }
 
+    /// Diesen Text als neue Nachricht senden (externer Agent): Entwurf und Bearbeiten im Eingabefeld bleiben unberührt.
+    /// `false`, wenn nichts zu senden ist oder die Runde noch läuft.
+    pub fn send_text(&mut self, text: &str, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
+        let draft = std::mem::replace(&mut self.draft, text.to_string());
+        let editing = std::mem::replace(&mut self.editing, false);
+        let before = self.draft_before_edit.take();
+        let sent = self.send(backend, meta, cx, repaint);
+        self.draft = draft;
+        self.editing = editing;
+        self.draft_before_edit = before;
+        sent
+    }
+
     /// Eingabe senden (oder als Bearbeitung der letzten Nachricht übernehmen). `false`, wenn nichts zu senden ist oder
     /// gerade eine Antwort läuft.
     pub fn send(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) -> bool {
@@ -337,6 +364,7 @@ impl ChatState {
         self.grants = 1;
         self.paused = false;
         self.pause_note = None;
+        self.context_pause = false;
         self.idle_steps = 0;
         self.step_executed = false;
     }
@@ -400,6 +428,7 @@ impl ChatState {
         self.next_request = false;
         self.paused = false;
         self.pause_note = None;
+        self.context_pause = false;
         self.approval_target = None;
         if had || fixed > 0 {
             self.changed(self.turn_msg.min(self.file.messages.len()));
@@ -424,6 +453,18 @@ impl ChatState {
         self.touch();
     }
 
+    /// Anhalten, weil der Kontext voll ist („Weiter“ startet dann gleich die nächste Anfrage).
+    fn pause_context(&mut self) {
+        self.context_pause = true;
+        self.pause(Some(
+            state::t(
+                "Die Werkzeug-Ergebnisse passen nicht mehr in den Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen.",
+                "The tool results no longer fit into the model's context – raise the context length in Settings → Models.",
+            )
+            .to_string(),
+        ));
+    }
+
     /// Erste Nachricht der laufenden Runde (nach der letzten Nutzer-Nachricht).
     fn round_start(&self) -> usize {
         logic::last_user(&self.file.messages).map_or(0, |i| i + 1)
@@ -435,20 +476,27 @@ impl ChatState {
     }
 
     /// Wie groß ein neues Werkzeug-Ergebnis höchstens sein darf (Bytes): [`tools::MAX_RESULT_BYTES`], bei bekanntem
-    /// Platz höchstens die Hälfte dessen, was in der Runde noch frei ist (1 Token ≈ 4 Zeichen).
+    /// Platz höchstens die Hälfte dessen, was in der Runde noch frei ist. Der Platz ist in geschätzten Tokens (ASCII ≈
+    /// 3 Zeichen je Token) und wird mit dem neuesten Abgleich `token_scale` nachkorrigiert.
     pub fn result_cap(&self) -> usize {
         match self.history_budget {
             None => tools::MAX_RESULT_BYTES,
-            Some(b) => (b.saturating_sub(self.round_tokens()) * 4 / 2).min(tools::MAX_RESULT_BYTES),
+            Some(b) => {
+                let b = (b as f64 * self.budget_scale as f64 / self.token_scale.max(1.0) as f64) as usize;
+                (b.saturating_sub(self.round_tokens()) * 3 / 2).min(tools::MAX_RESULT_BYTES)
+            }
         }
     }
 
-    /// Ältere Werkzeug-Ergebnisse der Runde durch einen kurzen Platzhalter ersetzen. `true`, wenn etwas frei wurde.
+    /// Ergebnisse der Runde, die das Modell schon gesehen hat (vor der laufenden Antwort), durch einen kurzen
+    /// Platzhalter ersetzen. Ergebnisse des aktuellen Schritts bleiben – die kennt das Modell noch nicht. `true`, wenn
+    /// etwas frei wurde.
     fn elide_round_results(&mut self) -> bool {
         let from = self.round_start();
+        let to = self.turn_msg.min(self.file.messages.len());
         let short = tools::elided();
         let mut any = false;
-        for i in from..self.file.messages.len() {
+        for i in from..to {
             let m = &mut self.file.messages[i];
             if m.role == Role::Tool && m.content.len() > short.len() {
                 m.content = short.clone();
@@ -462,36 +510,36 @@ impl ChatState {
         any
     }
 
-    /// Ergebnis eines ausgeführten Aufrufs eintragen – so gekürzt, dass die Runde in den Kontext passt. Reicht der
-    /// Platz auch ohne die älteren Ergebnisse der Runde nicht, wird es durch einen Platzhalter ersetzt und die Runde
-    /// hält an (der Systemprompt darf nie abgeschnitten werden).
-    fn record_result(&mut self, name: &str, r: ToolResult) {
-        let mut cap = self.result_cap();
-        if cap < MIN_RESULT_BYTES && self.elide_round_results() {
-            cap = self.result_cap();
+    /// Ist Platz für ein weiteres Ergebnis? Wenn nicht, werden zuerst schon gesehene Ergebnisse der Runde entfernt.
+    fn room_for_result(&mut self) -> bool {
+        if self.result_cap() >= MIN_RESULT_BYTES {
+            return true;
         }
-        if cap < MIN_RESULT_BYTES {
+        self.elide_round_results() && self.result_cap() >= MIN_RESULT_BYTES
+    }
+
+    /// Ergebnis eines ausgeführten Aufrufs eintragen – so gekürzt, dass die Runde in den Kontext passt. (Vor der
+    /// Ausführung wurde schon geprüft, dass Platz ist; reicht er trotzdem nicht, kommt ein Platzhalter und die Runde
+    /// hält an – der Systemprompt darf nie abgeschnitten werden.)
+    fn record_result(&mut self, name: &str, r: ToolResult) {
+        if !self.room_for_result() {
             let status = if r.is_ok() { ToolStatus::Ok } else { ToolStatus::Error };
             self.finish_first(status, tools::elided());
-            self.pause(Some(
-                state::t(
-                    "Die Werkzeug-Ergebnisse passen nicht mehr in den Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen.",
-                    "The tool results no longer fit into the model's context – raise the context length in Settings → Models.",
-                )
-                .to_string(),
-            ));
+            self.pause_context();
             return;
         }
-        let (st, content) = tools::result_message(name, r, cap);
+        let (st, content) = tools::result_message(name, r, self.result_cap());
         self.finish_first(st, content);
     }
 
     /// Nächster Schritt der Werkzeug-Schleife (im Hauptdurchgang, jedes Bild). Ungültige oder verbotene Aufrufe
     /// bekommen hier gleich ihr Fehler-Ergebnis; die Einstellungen werden bei jedem Aufruf neu geprüft.
     ///
-    /// Jeder verlangte Aufruf zählt gegen `max_steps` (auch abgewiesene, sonst liefe ein Modell, das immer wieder
-    /// Unsinn aufruft, endlos). Zusätzlich hält die Runde an, wenn `max_steps` Schritte in Folge keinen einzigen Aufruf
-    /// ausführen konnten.
+    /// * Jeder verlangte Aufruf zählt gegen `max_steps` (auch abgewiesene, sonst liefe ein Modell, das immer wieder
+    ///   Unsinn aufruft, endlos).
+    /// * Schritte in Folge, die nichts ausführen konnten, halten die Runde nach `max(max_steps, 2)` an (eigener
+    ///   Hinweis; bei `max_steps = 1` sieht das Modell so die Ablehnung noch einmal).
+    /// * Kein Aufruf läuft ohne Platz für sein Ergebnis: dann hält die Runde vorher an.
     pub fn tool_step(&mut self, policy: &ToolPolicy) -> ToolStep {
         if self.streaming() || self.paused {
             return ToolStep::Idle;
@@ -508,8 +556,14 @@ impl ChatState {
                 } else {
                     self.idle_steps += 1;
                 }
-                if self.idle_steps >= max {
-                    self.pause(None);
+                if self.idle_steps >= max.max(2) {
+                    self.pause(Some(
+                        state::t(
+                            "Das Modell rief immer wieder Werkzeuge auf, die nicht laufen konnten – angehalten.",
+                            "The model kept calling tools that could not run – stopped.",
+                        )
+                        .to_string(),
+                    ));
                     return ToolStep::Idle;
                 }
                 self.next_request = false;
@@ -520,25 +574,33 @@ impl ChatState {
                 CallState::Queued | CallState::Approved => {}
             }
             let approved = p.state == CallState::Approved;
-            if !approved {
-                // Erster Blick auf diesen Aufruf: gegen die Höchstzahl zählen.
-                if self.steps >= max.saturating_mul(self.grants) {
-                    self.pause(None);
-                    return ToolStep::Idle;
-                }
-                self.steps += 1;
+            // Erster Blick auf diesen Aufruf: Höchstzahl (gezählt wird unten, auch wenn er abgewiesen wird).
+            if !approved && self.steps >= max.saturating_mul(self.grants) {
+                self.pause(None);
+                return ToolStep::Idle;
             }
             let ask = match policy.check(&p.call) {
                 Ok(w) => w,
                 Err((st, content)) => {
+                    if !approved {
+                        self.steps += 1;
+                    }
                     self.finish_first(st, content);
                     continue;
                 }
             };
-            if !approved && policy.needs_approval(ask, &p.call, &self.file.always_allow) {
-                self.calls[0].state = CallState::Approval;
-                self.touch();
+            // Ohne Platz für das Ergebnis läuft nichts (und es wird auch nicht erst gefragt).
+            if !self.room_for_result() {
+                self.pause_context();
                 return ToolStep::Idle;
+            }
+            if !approved {
+                self.steps += 1;
+                if policy.needs_approval(ask, &self.calls[0].call, &self.file.always_allow) {
+                    self.calls[0].state = CallState::Approval;
+                    self.touch();
+                    return ToolStep::Idle;
+                }
             }
             self.step_executed = true;
             self.calls[0].state = CallState::Running;
@@ -575,15 +637,18 @@ impl ChatState {
     }
 
     /// Entscheidung des Nutzers zum wartenden Aufruf `call_id`. `false` (und nichts geschieht), wenn gerade kein oder
-    /// ein anderer Aufruf wartet – z. B. ein veralteter Klick nach Stopp.
+    /// ein anderer Aufruf wartet – z. B. ein veralteter Klick nach Stopp. „Immer“ gilt nur für Aufrufe mit
+    /// Ziel-Sitzung ([`AllowRule::eligible`]); sonst wirkt es wie „Erlauben“.
     pub fn decide(&mut self, call_id: &str, d: Decision) -> bool {
         let Some(i) = self.calls.iter().position(|c| c.state == CallState::Approval && c.call.id == call_id) else { return false };
         match d {
             Decision::Allow => self.calls[i].state = CallState::Approved,
             Decision::Always => {
-                let rule = AllowRule::for_call(&self.calls[i].call);
-                if !self.file.always_allow.contains(&rule) {
-                    self.file.always_allow.push(rule);
+                if AllowRule::eligible(&self.calls[i].call) {
+                    let rule = AllowRule::for_call(&self.calls[i].call);
+                    if !self.file.always_allow.contains(&rule) {
+                        self.file.always_allow.push(rule);
+                    }
                 }
                 self.calls[i].state = CallState::Approved;
             }
@@ -609,15 +674,26 @@ impl ChatState {
         changed
     }
 
-    /// „Weiter“ nach dem Anhalten: noch einmal so viele Aufrufe freigeben (auch nach „Kontext voll“, z. B. nachdem
-    /// die Kontextlänge erhöht wurde).
+    /// „Weiter“ nach dem Anhalten: noch einmal so viele Aufrufe freigeben. Nach „Kontext voll“ laufen die wartenden
+    /// Aufrufe nicht mehr (sie bekommen „nicht ausgeführt“); stattdessen geht gleich die nächste Anfrage mit neu
+    /// berechnetem Platz los – das Modell entscheidet dann selbst, was es noch braucht.
     pub fn resume(&mut self) -> bool {
         if !self.paused {
             return false;
         }
+        if std::mem::take(&mut self.context_pause) {
+            for p in std::mem::take(&mut self.calls) {
+                let content = tools::error_json("skipped", "Not run: the model's context was full. Call it again if you still need it.");
+                self.file.messages.push(logic::tool_result(&p.call, ToolStatus::Error, content));
+            }
+            self.next_request = true;
+            self.history_budget = None;
+            self.changed(self.turn_msg.min(self.file.messages.len()));
+        }
         self.paused = false;
         self.pause_note = None;
         self.idle_steps = 0;
+        self.step_executed = true; // „Weiter“ zählt nicht als leerer Schritt
         self.grants += 1;
         self.touch();
         true
@@ -686,8 +762,18 @@ impl ChatState {
                     }
                 }
                 TurnEvent::ContextStart(c) => self.file.context_start = logic::clamp_context_start(Some(c), i),
-                TurnEvent::Usage { prompt_tokens, completion_tokens } => self.usage = Some((prompt_tokens, completion_tokens)),
-                TurnEvent::Budget(b) => self.history_budget = Some(b),
+                TurnEvent::Usage { prompt_tokens, completion_tokens } => {
+                    self.usage = Some((prompt_tokens, completion_tokens));
+                    // Abgleich: so viel mehr zählt der Server als geschätzt (nie weniger als die Schätzung annehmen).
+                    if let (Some(real), Some(est)) = (prompt_tokens, self.prompt_estimate.filter(|e| *e > 0)) {
+                        self.token_scale = (real as f32 / est as f32).clamp(1.0, 4.0);
+                    }
+                }
+                TurnEvent::Budget { history, prompt } => {
+                    self.history_budget = Some(history);
+                    self.budget_scale = self.token_scale;
+                    self.prompt_estimate = Some(prompt);
+                }
                 TurnEvent::Note(n) => {
                     if let Some(m) = self.file.messages.get_mut(i) {
                         m.note = Some(n);
@@ -934,7 +1020,7 @@ mod tests {
     }
 
     fn policy(level: crate::mcp::McpLevel, max_steps: u32) -> ToolPolicy {
-        ToolPolicy::new(crate::llm::config::LlmModel { level, max_steps, ..crate::llm::config::LlmModel::named("m") }, None, false)
+        ToolPolicy::new(crate::llm::config::LlmModel { level, max_steps, level_chosen: true, ..crate::llm::config::LlmModel::named("m") }, None, false)
     }
 
     /// Hub nachspielen: Antwort abholen, Werkzeuge mit `exec` ausführen, nächste Anfrage, bis nichts mehr geschieht.
@@ -1122,6 +1208,7 @@ mod tests {
         c.grants = 1000; // Aufrufgrenze praktisch aus
         drive(&mut c, &b, &p, &|_| panic!("verboten"));
         assert!(c.paused, "nach {} leeren Schritten angehalten", p.cfg.max_steps);
+        assert_eq!(c.pause_note.as_deref(), Some("The model kept calling tools that could not run – stopped."), "eigener Hinweis");
         let requests = c.messages().iter().filter(|m| m.role == Role::Assistant).count();
         assert_eq!(requests, 5);
     }
@@ -1129,7 +1216,7 @@ mod tests {
     #[test]
     fn results_shrink_to_the_context_and_the_round_pauses_when_full() {
         let big = |_: &ToolCall| -> ToolResult { Ok(serde_json::json!({"text": "x".repeat(50_000)})) };
-        let b = Script::new(vec![vec![TurnEvent::Budget(3_000), tc("a", "read_terminal", serde_json::json!({"session": 1})), TurnEvent::Done]]);
+        let b = Script::new(vec![vec![TurnEvent::Budget { history: 3_000, prompt: 100 }, tc("a", "read_terminal", serde_json::json!({"session": 1})), TurnEvent::Done]]);
         let p = policy(crate::mcp::McpLevel::Read, 10);
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "read".into();
@@ -1148,17 +1235,74 @@ mod tests {
         assert!(c.paused && c.pause_note.is_none(), "hier hielt die Höchstzahl an");
         let mut saved = c.file_for_save().into_owned().messages;
         assert_eq!(logic::close_orphans(&mut saved, tools::interrupted), 0, "gespeichert stimmig (der wartende Aufruf als unterbrochen)");
-        // Viel zu wenig Platz: auch ohne ältere Ergebnisse passt nichts → Platzhalter, Anhalten mit Hinweis
-        let tiny = Script::new(vec![vec![TurnEvent::Budget(200), tc("a", "read_terminal", serde_json::json!({"session": 1})), TurnEvent::Done]]);
+        // Viel zu wenig Platz: das Werkzeug läuft gar nicht erst, die Runde hält mit Hinweis an
+        let tiny = Script::new(vec![vec![TurnEvent::Budget { history: 200, prompt: 100 }, tc("a", "read_terminal", serde_json::json!({"session": 1})), TurnEvent::Done]]);
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "read".into();
         c.send(&tiny, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
-        drive(&mut c, &tiny, &p, &big);
+        assert!(drive(&mut c, &tiny, &p, &|_| panic!("ohne Platz läuft nichts")).is_empty());
         assert!(c.paused && !c.busy());
         assert_eq!(c.pause_note.as_deref(), Some("The tool results no longer fit into the model's context – raise the context length in Settings → Models."));
-        assert!(c.messages().last().unwrap().content.contains("\"elided\""));
+        assert_eq!(c.steps, 0, "nicht ausgeführt, nicht gezählt");
+        let mut saved = c.file_for_save().into_owned().messages;
+        assert_eq!(logic::close_orphans(&mut saved, tools::interrupted), 0);
+        // „Weiter“: der wartende Aufruf bekommt „nicht ausgeführt“, gleich folgt die nächste Anfrage (Platz neu berechnet)
+        assert!(c.resume() && c.pause_note.is_none());
+        assert!(c.calls.is_empty());
+        assert!(c.messages().last().unwrap().content.contains("\"skipped\""));
         consistent(&c);
-        assert!(c.resume() && c.pause_note.is_none(), "„Weiter“ setzt fort");
+        assert_eq!(c.tool_step(&p), ToolStep::Request);
+    }
+
+    #[test]
+    fn eliding_never_touches_results_the_model_has_not_seen() {
+        // Zwei Aufrufe in einem Schritt; das erste Ergebnis ist groß. Vor dem zweiten fehlt Platz – das erste Ergebnis
+        // derselben Antwort bleibt trotzdem (das Modell kennt es noch nicht); stattdessen hält die Runde an.
+        let b = Script::new(vec![vec![TurnEvent::Budget { history: 1_200, prompt: 100 }, tc("a", "read_terminal", serde_json::json!({"session": 1})), tc("b", "read_terminal", serde_json::json!({"session": 2})), TurnEvent::Done]]);
+        let p = policy(crate::mcp::McpLevel::Read, 10);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "read".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        let ran = drive(&mut c, &b, &p, &|_| Ok(serde_json::json!({"text": "y".repeat(50_000)})));
+        assert_eq!(ran.len(), 1, "der zweite Aufruf läuft ohne Platz nicht");
+        let first = c.messages().iter().find(|m| m.role == Role::Tool).unwrap();
+        assert!(!first.content.contains("\"elided\""), "ungesehenes Ergebnis bleibt");
+        assert!(c.paused && c.pause_note.is_some());
+    }
+
+    #[test]
+    fn token_scale_follows_the_servers_prompt_tokens() {
+        let b = Script::new(vec![vec![TurnEvent::Budget { history: 1_000, prompt: 100 }, TurnEvent::Delta("a".into()), TurnEvent::Usage { prompt_tokens: Some(250), completion_tokens: None }, TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "q".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        c.poll();
+        assert!((c.token_scale - 2.5).abs() < 1e-6);
+        // Der Platz wurde noch mit Faktor 1 gerechnet: jetzt gilt nur noch 1000 / 2,5
+        let expect = ((1_000.0f64 / 2.5) as usize).saturating_sub(c.round_tokens()) * 3 / 2;
+        assert_eq!(c.result_cap(), expect.min(tools::MAX_RESULT_BYTES));
+        // Weniger als geschätzt: nie unter 1; mehr als 4: höchstens 4
+        for (real, want) in [(50u32, 1.0f32), (10_000, 4.0)] {
+            let b = Script::new(vec![vec![TurnEvent::Budget { history: 1_000, prompt: 100 }, TurnEvent::Usage { prompt_tokens: Some(real), completion_tokens: None }, TurnEvent::Done]]);
+            let mut c = ChatState::new(ChatFile::default(), None);
+            c.draft = "q".into();
+            c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+            c.poll();
+            assert_eq!(c.token_scale, want);
+        }
+    }
+
+    #[test]
+    fn with_one_step_the_model_still_sees_the_denial() {
+        let b = Script::new(vec![vec![tc("x", "no_such_tool", serde_json::json!({})), TurnEvent::Done]]);
+        let p = policy(crate::mcp::McpLevel::Read, 1);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "go".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        drive(&mut c, &b, &p, &|_| panic!("unbekannt"));
+        assert!(c.paused);
+        assert_eq!(c.messages().iter().filter(|m| m.role == Role::Assistant).count(), 2, "zweite Anfrage mit der Ablehnung");
+        assert_eq!(c.pause_note, None, "hier greift die Höchstzahl („Nach 1 Werkzeugaufrufen angehalten“)");
     }
 
     #[test]
