@@ -36,7 +36,10 @@ param(
   #   system  = Einstellung "Mitgelieferten Konsolen-Host verwenden" aus (Dateien liegen trotzdem daneben)
   [ValidateSet('auto', 'bundled', 'system')][string]$ConPty = 'auto',
   # Ordner mit conpty.dll + OpenConsole.exe (Standard: der Ordner von -Exe); release.sh gibt dist\conpty an
-  [string]$ConPtyDir = ''
+  [string]$ConPtyDir = '',
+  # OSC-52-Pruefung (#181) auslassen: sie setzt kurz die echte Windows-Zwischenablage (Text wird gesichert und
+  # wiederhergestellt, eine Zwischenablage mit anderen als reinen Textformaten bleibt ohnehin unberuehrt)
+  [switch]$NoClipboard
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -69,6 +72,9 @@ $tag = Split-Path -Leaf $work
 $fakebin = New-FakeClaudeBin "$work\fakebin"
 $calls = "$fakebin\calls.txt"; $inputs = "$fakebin\input.txt"
 $script:iso = Enter-IsolatedTestEnv $work $fakebin
+# OSC 52 (#181): Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren. Der Test-Hub laeuft minimiert und ohne
+# Fokus, deshalb hebt diese Variable (nur in der Umgebung der Test-Hubs) die Fokus-Regel auf; siehe src\app\osc52.rs.
+$env:PANELDECK_TEST_OSC52_ANY_FOCUS = '1'
 Write-Host "Isolation: USERPROFILE=$env:USERPROFILE, claude -> $((Get-Command claude -CommandType Application).Source)" -ForegroundColor DarkGray
 # Die Terminals des Hubs bekommen ihre Umgebung von portable-pty frisch aus der Registry (echter PATH mit ~/.local/bin).
 # Deshalb laeuft jede Sitzung ueber das Profil 1 "Smoke-Isolation" (Standardprofil jedes Projekts, auch jeder
@@ -103,6 +109,37 @@ function Check($name, [bool]$ok, $detail = '') {
 # Pruefung, die in diesem Build nicht moeglich ist (z. B. Funktion eines anderen Teils fehlt): weder bestanden noch fehlgeschlagen.
 $script:skip = 0
 function Skip($name, $why) { $script:skip++; Write-Host "  skip  $name  ($why)" -ForegroundColor Yellow }
+# OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
+# Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
+# inzwischen niemand anderes etwas kopiert hat). Enthaelt sie andere als reine Textformate (Bild, Dateien, HTML, RTF ...), wird die
+# Pruefung uebersprungen und die Zwischenablage nicht angefasst. -NoClipboard ueberspringt sie immer.
+function Test-Osc52([int]$sid, [string]$sh) {
+  $name = "OSC 52: Programm in $sh kopiert in die Windows-Zwischenablage"
+  if ($NoClipboard) { Skip $name '-NoClipboard'; return }
+  Add-Type -AssemblyName System.Windows.Forms
+  $C = [System.Windows.Forms.Clipboard]
+  try {
+    # Nur reine Textformate (leere Zwischenablage = keine Formate) - alles andere ginge beim Wiederherstellen verloren.
+    $textOnly = @('Text', 'UnicodeText', 'OEMText', 'Locale', 'System.String')
+    $obj = $C::GetDataObject()
+    $formats = if ($obj) { @($obj.GetFormats()) } else { @() }
+    $other = @($formats | Where-Object { $textOnly -notcontains $_ })
+    if ($other.Count -gt 0) {
+      Skip $name "Zwischenablage enthaelt andere Formate ($($other -join ', ')) und bleibt unberuehrt"; return
+    }
+    $had = $C::ContainsText(); $saved = if ($had) { $C::GetText() } else { '' }
+  } catch { Skip $name "Zwischenablage nicht lesbar: $($_.Exception.Message)"; return }
+  $marker = 'hello-osc52-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+  $cmd = if ($sh -eq 'gitbash') { "printf '\033]52;c;%s\a' `"`$(printf $marker | base64)`"" }
+         else { '$b = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(''' + $marker + ''')); [Console]::Write("$([char]27)]52;c;$b$([char]7)")' }
+  $r = Tool 'run_command' @{ session = $sid; command = $cmd; timeout_secs = 25 }
+  $got = ''
+  for ($i = 0; $i -lt 50 -and $got -ne $marker; $i++) { Start-Sleep -Milliseconds 100; try { $got = $C::GetText() } catch { } }
+  Check $name ($got -eq $marker) "Zwischenablage: '$got', run_command: $($r.text)"
+  try {
+    if ($C::GetText() -eq $marker) { if ($had) { $C::SetText($saved) } else { $C::Clear() } }
+  } catch { Write-Host "  Hinweis: Zwischenablage nicht wiederhergestellt: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
 function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   Stop-Hub
   $f = "$data\settings.json"
@@ -238,6 +275,7 @@ try {
       Check "run_command $sh (Exit 1, leere Ausgabe)" ($r.data.exit_code -eq 1 -and $r.data.output -eq '') $r.text
       $r = Tool 'run_command' @{ session = $id; command = 'printf "x\ny\n"'; timeout_secs = 25 }
       Check "run_command $sh (zweiter Befehl sauber)" ($r.data.output -eq "x`ny") $r.text
+      Test-Osc52 $id $sh
     } else {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-ps'; timeout_secs = 25 }
       Check "run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'hallo-ps') $r.text
@@ -252,6 +290,7 @@ try {
       $long = 'Write-Output hallo-lang # ' + ('z' * 220)
       $r = Tool 'run_command' @{ session = $id; command = $long; timeout_secs = 25 }
       Check "run_command $sh (langer Befehl: Ausgabe exakt)" ($r.data.output -eq 'hallo-lang' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+      Test-Osc52 $id $sh
       $r = Tool 'run_command' @{ session = $id; command = 'Start-Sleep 4'; timeout_secs = 1 }
       Check "run_command $sh (Zeitlimit)" ($r.data.timed_out -eq $true -and -not $r.data.finished) $r.text
       Start-Sleep 5
@@ -269,6 +308,36 @@ try {
   Check 'fremde Sitzung nicht schliessbar' ((Code (Tool 'close_session' @{ session = $sid })) -eq 'forbidden')
   Check 'unbekannte Shell' ((Code (Tool 'create_session' @{ shell = 'gibtsnicht' })) -eq 'bad_args')
   Check 'ungueltiger Ordner' ((Code (Tool 'create_session' @{ cwd = "$work\gibtsnicht" })) -eq 'bad_args')
+
+  Write-Host "== WSL: Linux-Startordner (#172)" -ForegroundColor Cyan
+  # Erkannte WSL-Shells aus der Fehlermeldung zu einer unbekannten Shell; Vorlagen/System-Distributionen auslassen.
+  $avail = (Tool 'create_session' @{ shell = 'gibtsnicht' }).text
+  $wslSh = [regex]::Matches($avail, 'wsl:[^,\s]+') | ForEach-Object { $_.Value.TrimEnd('.') } | Where-Object { $_ -notmatch '(?i)-template$|^wsl:docker-desktop' } | Select-Object -First 1
+  if (-not $wslSh) {
+    Skip 'WSL: Linux-Startordner' 'keine WSL-Distribution'
+  } else {
+    # Einschleusung ueber `wsl.exe --cd` (ein `"` beendet dort den Wert): immer bad_args, ohne zu starten
+    $inj = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/x" echo INJECTED-$((6*7)); #'; name = 'smoke-wsl-inj' }
+    Check "WSL: cwd mit Anfuehrungszeichen abgelehnt ($wslSh)" ((Code $inj) -eq 'bad_args') $inj.text
+    Check 'WSL: cwd mit Backslash abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/a\b' })) -eq 'bad_args')
+    Check 'WSL: ~/x abgelehnt (nur ~ allein)' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x' })) -eq 'bad_args')
+    Check 'Linux-cwd fuer Windows-Shell abgelehnt' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = '/tmp' })) -eq 'bad_args')
+    # Fehlender Ordner: Pruefung in WSL im Hintergrund -> bad_args (antwortet WSL nicht, wird angelegt mit cwd_checked=false)
+    $miss = Tool 'create_session' @{ shell = $wslSh; cwd = '/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-miss' } 60000
+    if ($miss.err) { Check 'WSL: fehlender Linux-Ordner = bad_args' ((Code $miss) -eq 'bad_args') $miss.text }
+    else { Check 'WSL: fehlender Linux-Ordner (WSL antwortete nicht: cwd_checked=false)' ($miss.data.cwd_checked -eq $false) $miss.text; [void](Tool 'close_session' @{ session = $miss.data.id }) }
+    # Vorhandener Ordner: Sitzung startet dort (wsl.exe --cd /tmp)
+    $w = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/'; name = 'smoke-wsl' } 60000
+    Check "WSL: create_session mit Linux-cwd ($wslSh)" (-not $w.err -and $w.data.cwd -eq '/tmp' -and $w.data.shell -eq $wslSh) $w.text
+    if (-not $w.err) {
+      Check 'WSL: cwd_checked gesetzt' ($null -ne $w.data.cwd_checked) $w.text
+      Start-Sleep 6
+      $r = Tool 'run_command' @{ session = $w.data.id; command = 'pwd'; timeout_secs = 30 } 45000
+      if ($r.data.finished) { Check 'WSL: Sitzung laeuft in /tmp (pwd)' ($r.data.output.Trim() -eq '/tmp') $r.text }
+      else { $rt = Tool 'read_terminal' @{ session = $w.data.id; lines = 30 }; Skip 'WSL: pwd' "run_command nicht beendet (Shell-Integration in WSL?): $($rt.data.text)" }
+      Check 'WSL: close_session' (-not (Tool 'close_session' @{ session = $w.data.id }).err)
+    }
+  }
 
   Write-Host "== Selbst-Identifikation und Kinder-Sitzungen" -ForegroundColor Cyan
   $w0 = Tool 'whoami'

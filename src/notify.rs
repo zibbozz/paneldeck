@@ -99,3 +99,15 @@ pub fn pick_folder(start: &str) -> Option<String> {
 pub fn pick_folder(_start: &str) -> Option<String> {
     None
 }
+
+/// Ordner-Auswahldialog mit Startordner ohne vorherige Prüfung (für `\\wsl.localhost\…`: schon das Prüfen kann die
+/// WSL-VM starten und blockieren; fehlt der Ordner, zeigt der Dialog einen Standardordner).
+#[cfg(windows)]
+pub fn pick_folder_unchecked(start: &str) -> Option<String> {
+    rfd::FileDialog::new().set_directory(start).pick_folder().map(|p| p.to_string_lossy().to_string())
+}
+
+#[cfg(not(windows))]
+pub fn pick_folder_unchecked(_start: &str) -> Option<String> {
+    None
+}
