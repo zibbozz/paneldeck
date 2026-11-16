@@ -372,12 +372,7 @@ pub(super) fn folder_exists(_shell_id: &str, path: &str) -> bool {
 fn color_row(ui: &mut Ui, color: &mut [u8; 3]) {
     ui.horizontal(|ui| {
         for c in PALETTE {
-            let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-            ui.painter().rect_filled(r, 4.0, Color32::from_rgb(c[0], c[1], c[2]));
-            if *color == c {
-                ui.painter().rect_stroke(r.expand(2.0), 5.0, Stroke::new(1.5_f32, ui.visuals().strong_text_color()), StrokeKind::Outside);
-            }
-            if resp.clicked() {
+            if afford::swatch(ui, Color32::from_rgb(c[0], c[1], c[2]), *color == c).clicked() {
                 *color = c;
             }
         }

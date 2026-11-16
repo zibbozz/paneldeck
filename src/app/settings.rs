@@ -76,8 +76,8 @@ impl App {
                 match self.settings_tab {
                     0 => {
                         row(ui, lang.t("Sprache", "Language"), "", |ui| {
-                            let a = ui.selectable_value(&mut self.settings.language, Lang::De, "Deutsch");
-                            let b = ui.selectable_value(&mut self.settings.language, Lang::En, "English");
+                            let a = afford::choice_value(ui, &mut self.settings.language, Lang::De, "Deutsch", 0.0);
+                            let b = afford::choice_value(ui, &mut self.settings.language, Lang::En, "English", 0.0);
                             // Eine eigene Wahl beendet die Überschreibung durch `--lang` (sie wird dann gespeichert).
                             if a.clicked() || b.clicked() {
                                 state::clear_lang_override();
@@ -341,7 +341,7 @@ impl App {
                         } else {
                             ui.horizontal_wrapped(|ui| {
                                 for (i, p) in self.settings.profiles.iter().enumerate() {
-                                    if ui.selectable_label(self.profile_sel == i, &p.name).clicked() {
+                                    if afford::choice(ui, self.profile_sel == i, &p.name, 0.0).clicked() {
                                         self.profile_sel = i;
                                     }
                                 }
@@ -398,12 +398,7 @@ impl App {
                             });
                             row(ui, lang.t("Farbe", "Color"), lang.t("Farbmarke der Sitzung", "Session color mark"), |ui| {
                                 for c in PALETTE {
-                                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-                                    ui.painter().rect_filled(r, 4.0, Color32::from_rgb(c[0], c[1], c[2]));
-                                    if p.color == Some(c) {
-                                        ui.painter().rect_stroke(r.expand(2.0), 5.0, Stroke::new(1.5_f32, Color32::WHITE), StrokeKind::Outside);
-                                    }
-                                    if resp.clicked() {
+                                    if afford::swatch(ui, Color32::from_rgb(c[0], c[1], c[2]), p.color == Some(c)).clicked() {
                                         p.color = Some(c);
                                     }
                                 }
