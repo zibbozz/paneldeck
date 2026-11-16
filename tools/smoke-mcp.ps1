@@ -1041,7 +1041,9 @@ c.close()
     Start-Sleep 4
     $rv = if ($regVar) { "`$env:$regVar" } else { "''" }
     $r = Tool 'run_command' @{ session = $c.data.id; command = '"$env:PD_SMOKE_INHERIT|' + $rv + '|$env:PANELDECK_SESSION|$env:USERPROFILE|" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'; timeout_secs = 25 }
+    if (-not "$($r.data.output)".Trim()) { Start-Sleep 3; $r = Tool 'run_command' @{ session = $c.data.id; command = '"$env:PD_SMOKE_INHERIT|' + $rv + '|$env:PANELDECK_SESSION|$env:USERPROFILE|" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'; timeout_secs = 25 } }
     $o = "$($r.data.output)".Trim(); $parts = $o -split '\|'
+    if (-not $o) { $o = "(leer) create: $($c.text) | run_command: $($r.text)" }
     $label = if ($inherit) { 'an' } else { 'aus' }
     Check "inherit_env $($label): Paneldecks Variable PANELDECK_SESSION = eigene Sitzung" (-not $c.err -and $parts.Count -ge 5 -and $parts[2] -eq "$($c.data.id)") $o
     Check "inherit_env $($label): Isolation haelt (Schein-Profil, claude nur der Ersatz)" ($parts.Count -ge 5 -and $parts[3] -eq $script:iso.Profile -and (Only-Fake ($parts[4] -replace ',', "`n"))) $o
