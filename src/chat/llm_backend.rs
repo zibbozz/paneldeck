@@ -6,7 +6,7 @@
 //! Passt der Verlauf nicht in die Kontextlänge (abzüglich 25 % für die Antwort), fallen die ältesten Runden weg
 //! (`TurnEvent::ContextStart`). Folgen nach einer fehlgeschlagenen Antwort zwei Nutzer-Nachrichten aufeinander, werden
 //! sie zu einer zusammengefasst (mit Leerzeile getrennt), damit das Modell eine abwechselnde Folge sieht.
-//! Bei Ollama geht die Kontextlänge als `num_ctx` mit (`LlmServer::request_context`). Werkzeuge: alle, die die Stufe
+//! Bei Ollama geht die Kontextlänge als `num_ctx` mit (`LlmServer::request_context`, ohne eigene Angabe nach Bedarf von Systemprompt und Werkzeugen). Werkzeuge: alle, die die Stufe
 //! des Modells erlaubt (`tools::ToolPolicy::specs`); verlangt das Modell welche, kommen sie als `TurnEvent::ToolCall`
 //! und die Werkzeug-Schleife in `ChatState` führt sie aus.
 
@@ -46,6 +46,8 @@ pub struct Prepared {
     pub context_start: Option<usize>,
     /// Hinweis für den Nutzer zur Antwort (z. B. Systemprompt größer als der Kontext).
     pub note: Option<String>,
+    /// Eigene Kontextlänge zu klein für die Werkzeug-Stufe (Hinweis einmal je Chat, `TurnEvent::ContextNotice`).
+    pub context_notice: Option<String>,
     /// Platz für den Verlauf in geschätzten Tokens: Kontext ohne Antwort-Reserve, Systemprompt und
     /// Werkzeug-Beschreibungen, geteilt durch `TurnContext::token_scale`.
     pub history_budget: usize,
@@ -198,16 +200,20 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     let mut messages = Vec::with_capacity(hist.len() + 1);
     messages.push(ChatMessage::new(Role::System, system_prompt(policy.prompt_level(), cx)));
     messages.extend(hist);
-    let ctx_len = server.request_context(model);
-    let budget_real = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
     // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
     // ist entsprechend weniger Platz.
     let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
-    let budget = (budget_real as f64 / scale as f64) as usize;
     // Die Werkzeug-Beschreibungen belegen ebenfalls Kontext.
     let tools = policy.specs();
     let tool_tokens = if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(&tools).unwrap_or_default()) };
     let sys_tokens = llm::tokens::message_tokens(&messages[0]);
+    // Ohne eigene Angabe: so viel Kontext, wie Systemprompt und Werkzeuge samt Mindestplatz brauchen (in echten Tokens).
+    let prompt_real = ((sys_tokens + tool_tokens) as f64 * scale as f64).ceil() as usize;
+    // Ohne Werkzeuge (Stufe Aus, keine Werkzeug-Fähigkeit) bleibt es bei 8192: der Mindestplatz gilt den Ergebnissen.
+    let ctx_len = server.request_context(model, policy.enabled().then_some(prompt_real));
+    let budget_real = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
+    let budget = (budget_real as f64 / scale as f64) as usize;
+    let context_notice = (server.user_context(model).is_some() && policy.enabled() && llm::config::context_too_small(ctx_len, prompt_real)).then(|| context_notice(ctx_len, lang));
     let note = if sys_tokens > budget {
         Some(lang.t(
             "Der Systemprompt ist größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen oder system-prompt.md kürzen.",
@@ -234,7 +240,15 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     // Ollama: die Antwort darf nur die Reserve nutzen, sonst schöbe sie den Anfang der Anfrage aus dem Kontext.
     let num_predict = ollama.then_some(ctx_len.saturating_sub(budget_real as u32).max(1));
     let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx, num_predict };
-    Ok(Prepared { endpoint, request, context_start, note, history_budget, prompt_estimate })
+    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate })
+}
+
+/// Hinweis: die eigene Kontextlänge reicht nicht für die Werkzeug-Stufe des Modells.
+pub fn context_notice(ctx: u32, lang: Lang) -> String {
+    match lang {
+        Lang::De => format!("Der Kontext dieses Modells ({ctx} Tokens) ist zu klein für seine Werkzeug-Stufe – in Einstellungen → Modelle erhöhen oder die Stufe „Lesen“ nutzen."),
+        Lang::En => format!("This model's context ({ctx} tokens) is too small for its tool level – raise it in Settings → Models or use level Read."),
+    }
 }
 
 /// Hinweis für eine an der Token-Grenze abgeschnittene Antwort.
@@ -274,6 +288,9 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
     }
     if let Some(n) = &p.note {
         send(TurnEvent::Note(n.clone()));
+    }
+    if let Some(n) = &p.context_notice {
+        send(TurnEvent::ContextNotice(n.clone()));
     }
     let mut ended = false;
     let with_tools = !p.request.tools.is_empty();
@@ -374,7 +391,8 @@ mod tests {
         let names: Vec<&str> = p.request.tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.is_empty(), "Standard „Aus“: keine Werkzeuge: {names:?}");
         let mut s = server("http://localhost:11434", ServerKind::Ollama);
-        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") });
+        // gleiche Kontextlänge wie oben (eigene Angabe), damit der Platz vergleichbar ist
+        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, context_length: Some(crate::llm::config::DEFAULT_CONTEXT), ..LlmModel::named("m1") });
         let read = prepare(&meta(), &hist, &cx(vec![s])).unwrap();
         let names: Vec<&str> = read.request.tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"list_sessions") && !names.contains(&"send_text"), "Lesen: nur lesende Werkzeuge: {names:?}");
@@ -831,5 +849,51 @@ mod tests {
             other => panic!("{other:?}"),
         }
         h.join().unwrap();
+    }
+
+    /// Geschätzte Tokens von Systemprompt und Werkzeug-Beschreibungen je Stufe (eingebaute Vorlage, EN/DE, einfacher
+    /// Modus und Expertenmodus): die Grundlage der Kontextgröße ohne eigene Angabe (`--nocapture` zeigt die Zahlen).
+    #[test]
+    fn prompt_and_tool_sizes_per_level() {
+        for lang in [Lang::En, Lang::De] {
+            for expert in [false, true] {
+                for level in [McpLevel::Read, McpLevel::Control] {
+                    let cx = TurnContext { prompt_lang: lang, expert, ..TurnContext::default() };
+                    let sys = llm::tokens::estimate_tokens(&system_prompt(level, &cx)) + 4;
+                    let policy = super::super::tools::ToolPolicy::new(LlmModel { level, level_chosen: true, ..LlmModel::named("m") }, None, expert);
+                    let tools = llm::tokens::estimate_tokens(&serde_json::to_string(&policy.specs()).unwrap());
+                    eprintln!("SIZES {lang:?} expert={expert} {level:?}: system {sys} + tools {tools} = {}", sys + tools);
+                    // ohne eigene Angabe passt jede Stufe in den automatisch gewählten Kontext (höchstens 32768)
+                    let ctx = crate::llm::config::auto_context(sys + tools, None);
+                    assert!(!crate::llm::config::context_too_small(ctx, sys + tools), "{lang:?} {expert} {level:?}: {ctx}");
+                    eprintln!("SIZES   -> auto context {ctx}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn control_without_override_gets_enough_context_and_an_override_gets_a_notice() {
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.last_models = vec![ModelInfo { name: "m1".into(), tools: Some(true), context_length: Some(131_072) }];
+        s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
+        let ctx = p.request.num_ctx.unwrap();
+        assert!(ctx > 8192 && ctx <= 32768 && ctx.is_power_of_two(), "{ctx}");
+        assert!(p.note.is_none() && p.context_notice.is_none(), "{:?} {:?}", p.note, p.context_notice);
+        assert!(p.history_budget >= 4096 * 3 / 4, "{}", p.history_budget);
+        // erkannte Länge kleiner: höchstens diese
+        s.last_models[0].context_length = Some(4096);
+        assert_eq!(prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap().request.num_ctx, Some(4096));
+        // eigene zu kleine Angabe: bleibt, aber mit Hinweis
+        s.last_models[0].context_length = Some(131_072);
+        s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, context_length: Some(8192), ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
+        assert_eq!(p.request.num_ctx, Some(8192));
+        assert_eq!(p.context_notice.as_deref(), Some("This model's context (8192 tokens) is too small for its tool level – raise it in Settings → Models or use level Read."));
+        assert!(context_notice(8192, Lang::De).contains("zu klein"));
+        // Stufe Aus: kein Hinweis
+        s.set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, context_length: Some(8192), ..LlmModel::named("m1") });
+        assert!(prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s])).unwrap().context_notice.is_none());
     }
 }

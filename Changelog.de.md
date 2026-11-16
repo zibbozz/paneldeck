@@ -26,6 +26,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Umschalt+Mausrad scrollt den Verlauf von Paneldeck, auch wenn das Programm den Maus-Modus eingeschaltet hat.
 - Bereiche lassen sich minimieren: Ein neuer Knopf neben dem × in der Kopfzeile (auch im Kontextmenü des Bereichs und der Seitenleiste, in der Palette und mit Strg+Umschalt+W) nimmt den Bereich aus der Teilung, das Terminal bzw. der Chat läuft weiter; der Nachbar übernimmt den Platz. Minimierte Sitzungen bleiben in der Seitenleiste (abgeblendet, mit kleiner Marke) und kommen per Klick dort, über „Wechseln zu“ in der Palette oder MCP `focus_session` an ihren alten Platz zurück. Der Zustand übersteht einen Neustart (neue optionale Sitzungsfelder `minimized` und `slot` in `state.json`). In einem abgedockten Fenster schließt „Minimieren“ das Fenster, ohne die Sitzung wieder anzudocken (#142).
 - MCP `list_sessions`: neues Feld `minimized`.
+- Agenten können Chats über MCP nutzen: `read_chat` (Lesen) liest die Nachrichten eines Chats (Inhalt als nicht vertrauenswürdig markiert), `send_chat_message` (Steuern) sendet eine Nachricht, auf die das Modell des Chats antwortet (im Chat als „Von Agent … gesendet“ markiert), `list_models` (Lesen) listet die eingerichteten Modell-Server und Modelle ohne Schlüssel und Adressen, und `create_session` legt Chats an (`kind: "chat"`, optional `server` und `model`).
+- Ein von einem Agenten ausgelöster Chat kann über seine Werkzeuge nie in die Sitzung dieses Agenten schreiben; solche Aufrufe werden schon vor jeder Freigabe-Frage abgewiesen.
 
 ### Changed
 
@@ -33,6 +35,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - `chats/<id>.json` hat das neue optionale Feld `always_allow` (Werkzeug + Sitzung); Modell-Einträge in `settings.json` haben `level_chosen`; `mcp-log.jsonl` hat die optionalen Felder `how` („chat“) und `model` für Werkzeugaufrufe aus Chats.
 - Strg+Umschalt+W („Bereich ausblenden“, jetzt „Bereich minimieren“) wirkt auch auf den letzten Bereich und lässt den leeren Terminal Hub stehen, der anzeigt, wenn alle Bereiche minimiert sind; Strg+Tab überspringt minimierte Sitzungen.
 - Die Rückfrage beim Schließen eines Fensters nennt auch Sitzungen, die beendet werden, obwohl sie minimiert sind oder nicht im Layout stehen.
+- `wait_for_status` funktioniert auch für Chats (Status `ready` / `working` / `approval`) und liefert in jeder Antwort `needs_you`; `permission_pending` gilt jetzt auch für Chats, die auf eine Freigabe oder die einmalige Stufen-Frage warten; neue Fehlercodes `not_a_chat` und `no_model`, `busy` gilt auch für Chats.
+- Chat-Modelle bekommen kürzere Werkzeug-Beschreibungen; externe MCP-Clients behalten die vollständigen. Eine eigene Kontextlänge, die für die Werkzeug-Stufe zu klein ist, zeigt einmal je Chat einen Hinweis.
 
 ### Fixed
 
@@ -45,6 +49,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Bereiche behalten bei tiefen Teilungen und beim Ziehen der Trennlinie eine Mindestgröße.
 - Die Palette zeigte in der englischen Oberfläche deutsche Kürzel und ignorierte eigene Belegungen.
 - Dateien auf den leeren Terminal Hub ziehen konnte einen ungültigen Bereich anlegen.
+- Chats mit Werkzeug-Stufe fordern bei Ollama einen Kontext an, der für Systemprompt und Werkzeuge reicht (bis 32768, höchstens die Länge des Modells), statt 8192 – Werkzeugaufrufe halten nicht mehr sofort an.
 
 ## [2.1.0] - 2026-11-15
 

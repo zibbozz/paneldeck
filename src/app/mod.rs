@@ -2351,10 +2351,12 @@ impl App {
     /// Werkzeug-Fähigkeit und der Expertenmodus der Todo-Liste.
     fn chat_policy(&self, id: u64) -> chatmod::tools::ToolPolicy {
         let meta = self.entries.get(&id).and_then(|e| e.meta.chat.clone()).unwrap_or_default();
+        let origin = self.entries.get(&id).and_then(|e| e.chat.as_ref()).and_then(|c| c.origin_session);
         match self.settings.llm_servers.iter().find(|s| s.id == meta.server) {
             Some(s) => chatmod::tools::ToolPolicy::new(s.model_cfg(&meta.model), s.tools_supported(&meta.model), self.plan.expert),
             None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
         }
+        .with_origin(origin)
     }
 
     /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
@@ -2446,11 +2448,23 @@ impl App {
             Some(t) => c.send_text(t, backend.as_ref(), &meta, &tcx, repaint),
             None => c.send(backend.as_ref(), &meta, &tcx, repaint),
         };
+        if sent {
+            // Herkunft der Runde: der Nutzer hebt eine Agenten-Herkunft auf; ein Agent markiert seine Nachricht.
+            match origin {
+                ChatSendOrigin::User => c.origin_session = None,
+                ChatSendOrigin::Agent { caller, note } => {
+                    c.origin_session = caller;
+                    if let Some(i) = chatmod::logic::last_user(&c.file.messages) {
+                        c.file.messages[i].note = note;
+                        c.touch();
+                    }
+                }
+            }
+        }
         e.status = chat_claude_status(c.status());
         if !sent {
             return ChatSendResult::Busy;
         }
-        let _ = origin; // beide Wege gleich; die Herkunft ist für Protokoll/Erweiterungen vorgesehen
         self.save_chat(id);
         ChatSendResult::Sent
     }
@@ -4261,13 +4275,13 @@ mod chat_status_tests {
 }
 
 /// Woher eine Chat-Nachricht kommt ([`App::chat_send`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ChatSendOrigin {
     /// Eingabefeld des Chats.
     User,
-    /// Externer Agent über MCP (`send_chat_message`, kommt mit P5).
-    #[allow(dead_code)]
-    Agent,
+    /// Externer Agent über MCP (`send_chat_message`): `caller` = seine Hub-Sitzung (`None` = außerhalb von Paneldeck).
+    /// Die Werkzeuge der ausgelösten Runde dürfen nicht in diese Sitzung schreiben (`ChatState::origin_session`).
+    Agent { caller: Option<u64>, note: Option<String> },
 }
 
 /// Ergebnis von [`App::chat_send`].
