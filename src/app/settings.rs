@@ -212,6 +212,22 @@ impl App {
                             row(ui, lang.t("Fortsetzen", "Resume"), lang.t("Claude-Sitzungen beim Start mit --resume wiederherstellen", "Restore Claude sessions on start with --resume"), |ui| {
                                 style::toggle(ui, &mut self.settings.claude_resume);
                             });
+                            ui.add_space(S2);
+                            ui.label(lang.t("Standards für neue Claude-Sitzungen", "Defaults for new Claude sessions"));
+                            ui.label(RichText::new(lang.t(
+                                "Gelten für Sitzungen aus dem Dialog „Neue Sitzung“ (Vorauswahl), dem Kontextmenü und über MCP, wenn nichts angegeben ist. „Standard von Claude Code“ setzt keine Option. bypassPermissions gilt nie für Sitzungen, die Agenten über MCP anlegen.",
+                                "Apply to sessions from the “New session” dialog (preselection), the context menu and via MCP when nothing is given. “Claude Code default” sets no option. bypassPermissions never applies to sessions that agents create via MCP.",
+                            )).small().color(style::dim(ui)));
+                            ui.add_space(S1);
+                            let before = self.settings.claude_defaults.clone();
+                            egui::Grid::new("claude_defaults").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults");
+                            });
+                            if self.settings.claude_defaults != before {
+                                // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).
+                                self.settings.last_claude_opts = None;
+                            }
+                            ui.add_space(S2);
                             row(ui, lang.t("Tagesbudget", "Daily budget"), lang.t("Hinweis, wenn die geschätzten Tageskosten (UTC-Tag, alle Sitzungen) den Betrag in USD überschreiten; 0 = aus", "Notice when estimated daily cost (UTC day, all sessions) exceeds this USD amount; 0 = off"), |ui| {
                                 ui.add(egui::DragValue::new(&mut self.settings.daily_budget).range(0.0..=100000.0).speed(0.5).prefix("$ ").fixed_decimals(2));
                             });

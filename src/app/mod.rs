@@ -1,3 +1,4 @@
+use crate::claude_opts::ClaudeOpts;
 use crate::clip;
 use crate::gitinfo::{GitInfo, GitWatcher};
 use crate::gitops::{self, Change, DiffWatcher};
@@ -373,8 +374,8 @@ struct NewDialog {
     cwd: String,
     name: String,
     claude: bool,
-    model: String,
-    perm: usize,
+    /// Claude-Startoptionen (Modell, Effort, Permission-Mode, Agent); vorbelegt mit der letzten Wahl bzw. den Standards.
+    copts: ClaudeOpts,
     continue_last: bool,
     profile: u64,
     prompt: String,
@@ -385,15 +386,6 @@ struct NewDialog {
     group: String,
 }
 
-const PERMS: [(&str, &str); 6] = [
-    ("", "Standard"),
-    ("acceptEdits", "acceptEdits"),
-    ("plan", "plan"),
-    ("auto", "auto"),
-    ("dontAsk", "dontAsk"),
-    ("bypassPermissions", "bypassPermissions"),
-];
-
 #[derive(Default)]
 struct NewOpts {
     shell_id: Option<String>,
@@ -401,6 +393,8 @@ struct NewOpts {
     name: Option<String>,
     claude: bool,
     claude_args: String,
+    /// Claude-Startoptionen; `None` = Standards aus den Einstellungen.
+    claude_opts: Option<ClaudeOpts>,
     continue_last: bool,
     prompt: Option<String>,
     resume_id: Option<String>,
@@ -428,8 +422,8 @@ struct Launch<'a> {
 }
 
 impl NewDialog {
-    fn new(shell_id: String, claude: bool) -> Self {
-        NewDialog { shell_id, cwd: home_dir(), name: String::new(), claude, model: String::new(), perm: 0, continue_last: false, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new() }
+    fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
+        NewDialog { shell_id, cwd: home_dir(), name: String::new(), claude, copts, continue_last: false, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new() }
     }
 }
 
@@ -1356,6 +1350,11 @@ impl App {
         self.dir.join("scrollback").join(format!("{id}.txt"))
     }
 
+    /// Vorbelegung der Claude-Optionen im Dialog „Neue Sitzung“: letzte Wahl, sonst die Standards der Einstellungen.
+    fn dialog_claude_opts(&self) -> ClaudeOpts {
+        self.settings.last_claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone())
+    }
+
     fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> String {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
@@ -1372,8 +1371,10 @@ impl App {
                 c += &format!(" --settings {}", crate::quote::quote(kind, &f.to_string_lossy().replace('\\', "/")));
             }
         }
-        // Gespeicherte Optionen nur in harmloser Form übernehmen (state.json ist eine Vertrauensgrenze).
-        let args = crate::quote::sanitize_claude_args(&meta.claude_args);
+        // Gespeicherte Optionen nur in harmloser Form übernehmen (state.json ist eine Vertrauensgrenze):
+        // geprüfte Startoptionen (#161), gequotet für die Shell, dazu ältere freie `claude_args` bereinigt.
+        let (opts, args) = meta.claude_opts_eff();
+        c += &opts.args(kind);
         if !args.is_empty() {
             c += &format!(" {args}");
         }
@@ -1542,6 +1543,7 @@ impl App {
             profile: pid,
             claude: o.claude,
             claude_args: o.claude_args,
+            claude_opts: if o.claude { o.claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone()).sanitized(true) } else { ClaudeOpts::default() },
             claude_session: o.resume_id.clone().unwrap_or_default(),
             claude_started: o.resume_id.is_some(),
             transcript: o.transcript.clone(),
@@ -2916,7 +2918,7 @@ impl App {
             Action::OpenSettings => self.settings_open = true,
             Action::OpenPrompts => self.prompts_open = true,
             Action::NewDialog(claude) => {
-                self.new_dialog = Some(NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode));
+                self.new_dialog = Some(NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode, self.dialog_claude_opts()));
             }
             Action::OpenNotes(id) => {
                 self.notes_open = if self.notes_open == Some(id) { None } else { Some(id) };
@@ -3088,7 +3090,11 @@ impl App {
                         shell_id: e.meta.shell_id.clone(),
                         cwd: e.cwd_now(),
                         claude: e.meta.claude,
-                        claude_args: e.meta.claude_args.clone(),
+                        // Das Vorlagenformat kennt nur die Zeile `claude_args`: Startoptionen dort hinein.
+                        claude_args: {
+                            let (o, rest) = e.meta.claude_opts_eff();
+                            format!("{} {rest}", o.to_legacy()).trim().to_string()
+                        },
                         profile: e.meta.profile,
                         group: e.meta.group.clone(),
                         prompt: String::new(),
@@ -3117,7 +3123,8 @@ impl App {
                                 cwd: Some(it.cwd.clone()),
                                 name: Some(it.name.clone()),
                                 claude: it.claude && self.settings.claude_mode,
-                                claude_args: crate::quote::sanitize_claude_args(&it.claude_args),
+                                claude_args: ClaudeOpts::split_legacy(&crate::quote::sanitize_claude_args(&it.claude_args)).1,
+                                claude_opts: Some(ClaudeOpts::split_legacy(&crate::quote::sanitize_claude_args(&it.claude_args)).0),
                                 prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
                                 profile: Some(it.profile),
                                 group: Some(it.group.clone()),
@@ -3194,7 +3201,7 @@ impl App {
                 let proj = self.projects.iter().find(|p| p.id == self.active_project);
                 let cwd = proj.and_then(|p| p.inherited(&path, |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())));
                 let prof = proj.and_then(|p| p.inherited(&path, |f| Some(f.profile).filter(|x| *x != 0)));
-                let mut d = NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode);
+                let mut d = NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode, self.dialog_claude_opts());
                 if let Some(c) = cwd.or_else(|| proj.map(|p| p.folder.clone()).filter(|c| !c.is_empty())) {
                     d.cwd = c;
                 }
@@ -3258,6 +3265,7 @@ impl App {
                         name: Some(format!("{} (2)", src.display_name())),
                         claude: src.meta.claude,
                         claude_args: src.meta.claude_args.clone(),
+                        claude_opts: Some(src.meta.claude_opts.clone()),
                         profile: Some(src.meta.profile),
                         window: Some(src.meta.window),
                         project: Some(src.meta.project),

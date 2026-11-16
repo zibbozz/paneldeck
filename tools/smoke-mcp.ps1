@@ -318,6 +318,34 @@ try {
   }
   [void](Tool 'close_session' @{ session = $psid })
 
+  Write-Host "== Claude-Startoptionen (#161)" -ForegroundColor Cyan
+  Check 'create_session: model ohne claude -> bad_args' ((Code (Tool 'create_session' @{ model = 'opus' })) -eq 'bad_args')
+  Check 'create_session: effort ohne claude -> bad_args' ((Code (Tool 'create_session' @{ shell = 'cmd'; effort = 'high' })) -eq 'bad_args')
+  $bp = Tool 'create_session' @{ claude = $true; cwd = "$proj"; permission_mode = 'bypassPermissions' }
+  Check 'create_session: bypassPermissions -> bad_args' ((Code $bp) -eq 'bad_args' -and $bp.text -match 'never allowed via MCP') $bp.text
+  Check 'create_session: ungueltiges Modell -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; model = 'opus; calc' })) -eq 'bad_args')
+  Check 'create_session: unbekannter effort -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; effort = 'ultra' })) -eq 'bad_args')
+  # Unechtes claude im Startordner (cmd sucht zuerst im aktuellen Ordner), damit moeglichst kein echtes Claude startet.
+  # Geprueft wird die von cmd angezeigte, getippte Kommandozeile.
+  [IO.File]::WriteAllText("$proj\claude.cmd", "@echo FAKECLAUDE %*`r`n", (New-Object Text.UTF8Encoding $false))
+  $co = Tool 'create_session' @{ claude = $true; shell = 'cmd'; cwd = "$proj"; name = 'smoke-copts'; model = 'haiku'; effort = 'high'; permission_mode = 'plan'; agent = 'smoke-agent' }
+  Check 'create_session mit model/effort/permission_mode/agent' (-not $co.err -and $co.data.model -eq 'haiku' -and $co.data.effort -eq 'high' -and $co.data.permission_mode -eq 'plan' -and $co.data.agent -eq 'smoke-agent') $co.text
+  if ($script:lastOk) {
+    $coid = $co.data.id
+    $cl = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $coid }
+    Check 'list_sessions meldet die Startoptionen' ($cl.claude -eq $true -and $cl.model -eq 'haiku' -and $cl.effort -eq 'high' -and $cl.permission_mode -eq 'plan' -and $cl.agent -eq 'smoke-agent') ($cl | ConvertTo-Json -Compress)
+    $txt = ''; $t0 = Get-Date
+    $re = 'claude .*--model haiku --effort high --permission-mode plan --agent smoke-agent --session-id'
+    while ($txt -notmatch $re -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500; $txt = (Tool 'read_terminal' @{ session = $coid; lines = 200 }).data.text }
+    Check 'Kommandozeile enthaelt die geprueften Optionen' ($txt -match $re) $txt
+    [void](Tool 'close_session' @{ session = $coid })
+  }
+  $pl = Tool 'create_session' @{ shell = 'cmd'; cwd = "$proj"; name = 'smoke-plain' }
+  $plr = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $pl.data.id }
+  Check 'list_sessions: ohne Claude sind die Optionen null' ($plr.PSObject.Properties.Name -contains 'effort' -and $null -eq $plr.model -and $null -eq $plr.effort -and $null -eq $plr.permission_mode -and $null -eq $plr.agent)
+  [void](Tool 'close_session' @{ session = $pl.data.id })
+  Remove-Item -LiteralPath "$proj\claude.cmd" -ErrorAction SilentlyContinue
+
   if ($Visible) {
     Write-Host "== Screenshot (Fenster sichtbar)" -ForegroundColor Cyan
     Send-Raw (@{ jsonrpc = '2.0'; id = 950; method = 'tools/call'; params = @{ name = 'screenshot'; arguments = @{} } } | ConvertTo-Json -Depth 5 -Compress)

@@ -5,6 +5,7 @@ mod backup;
 mod boxdraw;
 mod calc;
 mod chat;
+mod claude_opts;
 mod db;
 mod clip;
 mod emoji;

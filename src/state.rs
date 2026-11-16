@@ -219,6 +219,13 @@ pub struct Settings {
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
     /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
     pub remember_sessions: bool,
+    /// Standard-Startoptionen für neue Claude-Sitzungen (seit 2.3.0; leeres Feld = Standard von Claude Code). Gelten für
+    /// Sitzungen aus der Oberfläche und über MCP, wenn nichts angegeben ist – `bypassPermissions` nie für Agenten.
+    #[serde(skip_serializing_if = "crate::claude_opts::ClaudeOpts::is_empty")]
+    pub claude_defaults: crate::claude_opts::ClaudeOpts,
+    /// Zuletzt im Dialog „Neue Sitzung“ gewählte Claude-Optionen (Vorauswahl beim nächsten Mal; `None` = Standards).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_claude_opts: Option<crate::claude_opts::ClaudeOpts>,
 }
 
 /// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
@@ -285,6 +292,8 @@ impl Default for Settings {
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
+            claude_defaults: Default::default(),
+            last_claude_opts: None,
         }
     }
 }
@@ -345,6 +354,10 @@ pub struct SessionMeta {
     /// Wo der minimierte Bereich stand (Geschwister, Richtung, Seite, Anteil) – dort kommt er wieder hin.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::layout::lenient_slot")]
     pub slot: Option<crate::layout::Slot>,
+    /// Startoptionen für Claude Code (seit 2.3.0): Modell, Effort, Permission-Mode, Agent. Fehlt in der Datei, wenn keine
+    /// gesetzt sind; ungültige Werte werden beim Laden verworfen. Ältere Sitzungen haben sie ggf. noch in `claude_args`.
+    #[serde(skip_serializing_if = "crate::claude_opts::ClaudeOpts::is_empty")]
+    pub claude_opts: crate::claude_opts::ClaudeOpts,
 }
 
 /// Art einer Sitzung.
@@ -386,6 +399,15 @@ fn is_zero(v: &u64) -> bool {
     *v == 0
 }
 
+impl SessionMeta {
+    /// Wirksame Claude-Optionen und die übrigen (bereinigten) freien `claude_args`. Sitzungen von vor 2.3.0 haben
+    /// Modell/Permission-Mode noch in `claude_args`; sie zählen, solange das neue Feld leer ist.
+    pub fn claude_opts_eff(&self) -> (crate::claude_opts::ClaudeOpts, String) {
+        let (legacy, rest) = crate::claude_opts::ClaudeOpts::split_legacy(&crate::quote::sanitize_claude_args(&self.claude_args));
+        (self.claude_opts.or(&legacy), rest)
+    }
+}
+
 impl Default for SessionMeta {
     fn default() -> Self {
         Self {
@@ -413,6 +435,7 @@ impl Default for SessionMeta {
             chat: None,
             minimized: false,
             slot: None,
+            claude_opts: Default::default(),
         }
     }
 }
@@ -1025,6 +1048,40 @@ mod kind_tests {
         let s = serde_json::to_string(&st.sessions[0]).unwrap();
         assert!(!s.contains("\"kind\"") && !s.contains("\"chat\""), "{s}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_opts_back_compat_and_roundtrip() {
+        use crate::claude_opts::ClaudeOpts;
+        // state.json/settings.json von 2.2.0 (ohne die Felder) laden; geschrieben werden sie dann auch nicht.
+        let m: SessionMeta = serde_json::from_str(r#"{"id":3,"name":"c","claude":true,"claude_args":"--model opus"}"#).unwrap();
+        assert!(m.claude_opts.is_empty());
+        assert!(!serde_json::to_string(&m).unwrap().contains("claude_opts"));
+        let s: Settings = serde_json::from_str(r#"{"language":"En","claude_mode":true}"#).unwrap();
+        assert!(s.claude_defaults.is_empty() && s.last_claude_opts.is_none());
+        let j = serde_json::to_value(&s).unwrap();
+        assert!(j.get("claude_defaults").is_none() && j.get("last_claude_opts").is_none());
+        // Kaputte Werte machen die Dateien nicht unlesbar; ungültige Felder werden verworfen.
+        let m: SessionMeta = serde_json::from_str(r#"{"id":4,"claude_opts":{"model":"opus;calc","effort":"high","permission_mode":"bypassPermissions"}}"#).unwrap();
+        assert_eq!(m.claude_opts, ClaudeOpts { effort: "high".into(), permission_mode: "bypassPermissions".into(), ..Default::default() });
+        let s: Settings = serde_json::from_str(r#"{"claude_defaults":7,"last_claude_opts":"x"}"#).unwrap();
+        assert!(s.claude_defaults.is_empty());
+        // Hin und zurück
+        let mut m = SessionMeta::default();
+        m.claude_opts = ClaudeOpts { model: "sonnet".into(), effort: "max".into(), permission_mode: "plan".into(), agent: "rev".into() };
+        let back: SessionMeta = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.claude_opts, m.claude_opts);
+        let mut s = Settings::default();
+        s.claude_defaults = ClaudeOpts { model: "opus".into(), ..Default::default() };
+        s.last_claude_opts = Some(ClaudeOpts { effort: "low".into(), ..Default::default() });
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!((back.claude_defaults, back.last_claude_opts), (s.claude_defaults, s.last_claude_opts));
+        // Sitzungen von vor 2.3.0: Modell/Permission-Mode aus `claude_args` zählen, solange das neue Feld leer ist.
+        let mut m: SessionMeta = serde_json::from_str(r#"{"id":5,"claude":true,"claude_args":"--model opus --permission-mode plan --verbose $(x)"}"#).unwrap();
+        let (o, rest) = m.claude_opts_eff();
+        assert_eq!((o.model.as_str(), o.permission_mode.as_str(), rest.as_str()), ("opus", "plan", "--verbose"));
+        m.claude_opts.model = "haiku".into();
+        assert_eq!(m.claude_opts_eff().0.model, "haiku", "das neue Feld hat Vorrang");
     }
 
     #[test]
