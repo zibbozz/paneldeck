@@ -341,21 +341,16 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            ui.menu_button(lang.t("Farbe", "Color"), |ui| {
+            palette_ui::color_menu(ui, lang.t("Farbe", "Color"), |ui| {
                 if ui.button(lang.t("Keine", "None")).clicked() {
                     actions.push(Action::FolderColor(path.clone(), None));
                     ui.close();
                 }
-                ui.horizontal(|ui| {
-                    for c in PALETTE {
-                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-                        ui.painter().rect_filled(r, 4.0, Color32::from_rgb(c[0], c[1], c[2]));
-                        if resp.clicked() {
-                            actions.push(Action::FolderColor(path.clone(), Some(c)));
-                            ui.close();
-                        }
-                    }
-                });
+                let cur = f.color.map(crate::palette::hex_of);
+                if let Some(h) = palette_ui::pick(ui, ("folder_color", &path), crate::palette::Area::Hub, cur.as_deref(), palette_ui::PickOpts::HUB, lang) {
+                    actions.push(Action::FolderColor(path.clone(), Some(crate::palette::rgb(&h))));
+                    ui.close();
+                }
             });
             ui.menu_button(lang.t("Vorgaben für neue Sitzungen", "Defaults for new sessions"), |ui| {
                 let cwd_label = if f.cwd.is_empty() { lang.t("Arbeitsordner wählen …", "Choose working folder …").to_string() } else { format!("{}: {}", lang.t("Arbeitsordner", "Working folder"), f.cwd) };
@@ -636,6 +631,7 @@ impl App {
             g.dedup();
             g
         };
+        let cur_color = self.entries.get(&id).map(|e| crate::palette::hex_of(e.meta.color));
         let tainted = self.entries.get(&id).is_some_and(|e| !e.meta.agent_chain.is_empty());
         resp.context_menu(|ui| {
             if ui.button(lang.t("Einstellungen …", "Settings …")).clicked() {
@@ -646,17 +642,11 @@ impl App {
                 actions.push(Action::StartRename(id));
                 ui.close();
             }
-            ui.menu_button(lang.t("Farbe", "Color"), |ui| {
-                ui.horizontal(|ui| {
-                    for c in PALETTE {
-                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-                        ui.painter().rect_filled(r, 4.0, Color32::from_rgb(c[0], c[1], c[2]));
-                        if resp.clicked() {
-                            actions.push(Action::SetColor(id, c));
-                            ui.close();
-                        }
-                    }
-                });
+            palette_ui::color_menu(ui, lang.t("Farbe", "Color"), |ui| {
+                if let Some(h) = palette_ui::pick(ui, ("session_color", id), crate::palette::Area::Hub, cur_color.as_deref(), palette_ui::PickOpts::HUB, lang) {
+                    actions.push(Action::SetColor(id, crate::palette::rgb(&h)));
+                    ui.close();
+                }
             });
             ui.menu_button(lang.t("In Ordner verschieben", "Move to folder"), |ui| {
                 if ui.button(lang.t("Kein Ordner", "No folder")).clicked() {

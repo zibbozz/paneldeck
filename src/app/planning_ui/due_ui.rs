@@ -233,10 +233,24 @@ pub(crate) fn marker_symbol_picker(ui: &mut Ui, salt: impl std::hash::Hash, curr
     widgets::icon_picker(ui, salt, current, color, lang)
 }
 
-/// Farbauswahl einer Markierung (Palette + eigene Farbe). `todo`: Palette der Todo-Liste statt des Expertenmodus.
+/// Farbauswahl einer Markierung: Farbfeld, das die Palette öffnet (Expertenmodus bzw. mit `todo` die der Todo-Liste) samt
+/// „Eigene Farbe …“.
 pub(crate) fn marker_color_picker(ui: &mut Ui, salt: impl std::hash::Hash, hex: &mut String, todo: bool, lang: Lang) -> bool {
-    let _ = todo;
-    widgets::color_edit(ui, salt, hex, lang)
+    use crate::app::palette_ui::{self, Look, PickOpts};
+    use crate::palette::Area;
+    let salt = Id::new(salt);
+    let resp = widgets::swatch(ui, salt.with("sw"), super::helpers::color_of(hex), 16.0).on_hover_text(lang.t("Farbe ändern", "Change color"));
+    let mut changed = false;
+    egui::Popup::from_toggle_button_response(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        let (area, opts) = if todo { (Area::Todo, PickOpts::TODO) } else { (Area::Expert, PickOpts { look: Look::Circle, per_row: 7, custom: true }) };
+        if let Some(h) = palette_ui::pick(ui, salt.with("pick"), area, Some(hex.as_str()), opts, lang) {
+            if !h.eq_ignore_ascii_case(hex) {
+                *hex = h;
+                changed = true;
+            }
+        }
+    });
+    changed
 }
 
 /// Kleines Vorschaubild einer Markierung als Knopf (öffnet die Bearbeitung).

@@ -4,7 +4,7 @@
 //! * Eine Karte hat optionalen Titel und optionalen Text – mindestens eins von beiden muss gefüllt sein.
 //! * Die Nummer (`id`, Anzeige `TODO-<n>`) wird fortlaufend vergeben und nie wiederverwendet.
 //! * Tags werden beim Zuordnen automatisch angelegt (Name ohne Beachtung der Groß-/Kleinschreibung eindeutig, angezeigt
-//!   wird der zuerst angelegte Name) und bekommen reihum eine Farbe aus [`PALETTE`].
+//!   wird der zuerst angelegte Name) und bekommen reihum eine Farbe aus der geltenden Palette (`palette::Area::Todo`).
 //! * Alle Änderungen außer dem Löschen liefern eine [`TaskOp`] zurück, die sich mit `undo::History` rückgängig machen
 //!   und wiederholen lässt. Löschen bleibt endgültig.
 
@@ -12,11 +12,6 @@ use crate::state::{self, Lang};
 use crate::undo::Op;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
-
-/// Farbpalette der Tags (Text „#RRGGBB“, für dunkle wie helle Oberflächen brauchbar).
-pub const PALETTE: [&str; 10] = [
-    "#E06C75", "#E5A04B", "#D8B94A", "#7FBF6A", "#4FB8A8", "#58A6E6", "#7B8CF0", "#B77FE0", "#E07BB0", "#97A3B0",
-];
 
 /// Längste Tag-Bezeichnung in Zeichen.
 pub const MAX_TAG_CHARS: usize = 32;
@@ -382,15 +377,17 @@ pub fn suggest<'a>(tags: &'a [Tag], query: &str, exclude: &[String], limit: usiz
 
 // ------------------------------------------------------------------ Tags schreiben
 
-/// Palettenfarbe, die bisher am seltensten vergeben ist (bei Gleichstand die erste) – so rotiert die Vergabe.
+/// Palettenfarbe, die bisher am seltensten vergeben ist (bei Gleichstand die erste) – so rotiert die Vergabe. Palette:
+/// die geltende der Todo-Liste (`palette::auto`, bei leerer Palette die eingebauten Vorgaben).
 pub fn next_color(conn: &Connection) -> Res<String> {
-    let mut used: HashMap<String, usize> = HashMap::new();
+    next_color_from(conn, &crate::palette::auto(crate::palette::Area::Todo))
+}
+
+/// Wie [`next_color`] mit vorgegebener Palette (`pool` darf nicht leer sein).
+pub fn next_color_from(conn: &Connection, pool: &[String]) -> Res<String> {
     let mut st = conn.prepare("SELECT color FROM todo_tags")?;
-    for c in st.query_map([], |r| r.get::<_, String>(0))? {
-        *used.entry(c?.to_uppercase()).or_default() += 1;
-    }
-    let pick = PALETTE.iter().min_by_key(|c| used.get(&c.to_uppercase()).copied().unwrap_or(0)).copied().unwrap_or(PALETTE[0]);
-    Ok(pick.to_string())
+    let used: Vec<String> = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?;
+    Ok(crate::palette::least_used(pool, used.iter().map(|s| s.as_str())).unwrap_or_else(|| crate::palette::TODO_DEFAULTS[0].to_string()))
 }
 
 /// Tag zum Namen finden oder (mit der nächsten Palettenfarbe) anlegen.
@@ -892,19 +889,26 @@ mod tests {
     fn tag_colors_rotate_through_the_palette() {
         let c = db();
         let mut seen = Vec::new();
-        for i in 0..PALETTE.len() {
+        let pal = crate::palette::auto(crate::palette::Area::Todo);
+        for i in 0..pal.len() {
             create_item(&c, "t", "", None, &[format!("tag{i}")]).unwrap();
         }
         for t in list_tags(&c).unwrap() {
-            assert!(PALETTE.contains(&t.color.as_str()));
+            assert!(pal.contains(&t.color));
             seen.push(t.color);
         }
         seen.sort();
         seen.dedup();
-        assert_eq!(seen.len(), PALETTE.len(), "die ersten zehn Tags haben zehn verschiedene Farben");
-        // der elfte beginnt wieder von vorn
+        assert_eq!(seen.len(), pal.len(), "die ersten Tags haben lauter verschiedene Farben");
+        // der nächste beginnt wieder von vorn
         create_item(&c, "t", "", None, &names(&["elf"])).unwrap();
-        assert_eq!(find_tag(&c, "elf").unwrap().unwrap().color, PALETTE[0]);
+        assert_eq!(find_tag(&c, "elf").unwrap().unwrap().color, pal[0]);
+        // eigene Palette: Vergabe daraus, Kleinbuchstaben in der Datenbank zählen mit
+        let pool = vec!["#010101".to_string(), "#020202".to_string()];
+        assert_eq!(next_color_from(&c, &pool).unwrap(), "#010101");
+        create_item(&c, "t", "", None, &names(&["zwölf"])).unwrap();
+        set_tag_color(&c, find_tag(&c, "zwölf").unwrap().unwrap().id, "#010101").unwrap();
+        assert_eq!(next_color_from(&c, &pool).unwrap(), "#020202");
         assert_eq!(rgb("#E06C75"), (0xe0, 0x6c, 0x75));
         assert_eq!(rgb("kaputt"), (0x97, 0xa3, 0xb0));
     }
@@ -930,9 +934,10 @@ mod tests {
         assert_eq!(rename_tag(&c, alt, "  ").unwrap_err(), TaskError::TagNameEmpty);
         assert_eq!(rename_tag(&c, 999, "x").unwrap_err(), TaskError::NotFound);
         // Farbe
-        assert!(set_tag_color(&c, alt, PALETTE[3]).unwrap().is_some());
-        assert_eq!(find_tag(&c, "neu").unwrap().unwrap().color, PALETTE[3]);
-        assert!(set_tag_color(&c, alt, &PALETTE[3].to_lowercase()).unwrap().is_none());
+        let p3 = crate::palette::TODO_DEFAULTS[3];
+        assert!(set_tag_color(&c, alt, p3).unwrap().is_some());
+        assert_eq!(find_tag(&c, "neu").unwrap().unwrap().color, p3);
+        assert!(set_tag_color(&c, alt, &p3.to_lowercase()).unwrap().is_none());
     }
 
     #[test]
@@ -1070,7 +1075,7 @@ mod tests {
         let alpha = find_tag(&c, "alpha").unwrap().unwrap().id;
         push(&mut h, rename_tag(&c, alpha, "Alpha 2").unwrap());
         states.push(snapshot(&c));
-        push(&mut h, set_tag_color(&c, alpha, PALETTE[9]).unwrap());
+        push(&mut h, set_tag_color(&c, alpha, crate::palette::TODO_DEFAULTS[9]).unwrap());
         states.push(snapshot(&c));
         let gamma = find_tag(&c, "gamma").unwrap().unwrap().id;
         let beta = find_tag(&c, "beta").unwrap().unwrap().id;

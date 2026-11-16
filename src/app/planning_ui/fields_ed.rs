@@ -2,7 +2,7 @@
 //! und ein Dialog je Feld mit den typspezifischen Optionen (Werteliste mit Farben, Zahl, Textlänge, Zeilen, Ziel-Typen).
 
 use super::delete::Target;
-use super::helpers::{color_of, kind_label, move_id, PALETTE};
+use super::helpers::{color_of, kind_label, move_id};
 use super::values;
 use super::widgets::{self, hint};
 use super::{Cx, PlanUi};
@@ -591,7 +591,7 @@ fn values_editor(ui: &mut Ui, d: &mut FieldDlg, lang: Lang) {
         };
     }
     if ui.button(format!("+ {}", lang.t("Wert hinzufügen", "Add value"))).clicked() {
-        let color = PALETTE[d.values.len() % PALETTE.len()].to_string();
+        let color = crate::palette::nth(crate::palette::Area::Expert, d.values.len());
         d.values.push(OptionValue { id: 0, key: None, name: Some(format!("{} {}", lang.t("Wert", "Value"), d.values.len() + 1)), color: Some(color) });
     }
 }
