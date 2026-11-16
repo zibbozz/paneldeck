@@ -38,10 +38,11 @@ function CT-Start([string]$Lang = 'En', [switch]$Keep, [string]$Level = 'Control
   foreach ($kv in @{ language = $Lang; mcp_level = $Level }.GetEnumerator()) { if ($j.PSObject.Properties.Name -contains $kv.Key) { $j.($kv.Key) = $kv.Value } else { $j | Add-Member $kv.Key $kv.Value } }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($Seed) { $env:PYTHONUTF8 = '1'; & python -I $Seed "$data\paneldeck.db" }
-  $old = @{ U = $env:USERPROFILE; H = $env:HOME }
-  $env:USERPROFILE = $prof; $env:HOME = $prof
-  $p = Start-Process "$hub\paneldeck.exe" -PassThru -WorkingDirectory $hub
-  $env:USERPROFILE = $old.U; $env:HOME = $old.H
+  # Schein-Umgebung (tools\test-env.ps1): Profil $CT\profile, PATH nur mit Ersatz-claude ($CT\fakebin, Aufrufe in calls.txt),
+  # keine CLAUDECODE/CLAUDE_*/ANTHROPIC_*-Variablen - ein Klick auf "Claude" startet nie das echte Claude Code.
+  . "$PSScriptRoot\test-env.ps1"
+  $iso = Enter-IsolatedTestEnv $script:CT (New-FakeClaudeBin "$script:CT\fakebin")
+  try { $p = Start-Process "$hub\paneldeck.exe" -PassThru -WorkingDirectory $hub } finally { Exit-IsolatedTestEnv $iso }
   [pscustomobject]@{ pid = $p.Id } | ConvertTo-Json | Set-Content "$script:CT\state.json"
   $t0 = Get-Date; $h = $null
   while (-not $h -and ((Get-Date) - $t0).TotalSeconds -lt 30) { Start-Sleep -Milliseconds 400; $h = Get-HubWin $p.Id }
