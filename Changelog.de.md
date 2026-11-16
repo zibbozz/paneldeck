@@ -22,6 +22,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Standardordner von Baumordnern und Projekten mit WSL-Shell lassen sich als Linux-Pfad wählen; „Hier öffnen“ im Explorer auf einem `\\wsl.localhost\<Distro>\…`-Ordner öffnet eine WSL-Sitzung dieser Distribution im passenden Linux-Pfad. (#172)
 - MCP `create_session` nimmt als `cwd` einen Linux-Pfad an, wenn die Sitzung in WSL startet (absolut oder `~`). Der Ordner wird vorher in WSL geprüft: `bad_args`, wenn er fehlt, und ein neues Ergebnisfeld `cwd_checked` (`false` = WSL hat nicht rechtzeitig geantwortet; die Sitzung wird trotzdem angelegt und startet in `/`, falls es den Ordner nicht gibt). (#172)
 - `settings.json`: optionales Feld `wsl_recent` (zuletzt benutzte WSL-Ordner je Distribution, begrenzt). (#172)
+- Einstellung „Programme dürfen in die Zwischenablage kopieren (OSC 52)“ (Einstellungen → Terminal, standardmäßig an; Feld `osc52_copy` in `settings.json`). (#181)
 
 ### Changed
 
@@ -40,6 +41,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Ein Mittelklick mit leichter Mausbewegung zieht keine Sitzung und keinen Ordner mehr.
 - Zwischen Seitenleiste und Terminalbereich bleibt keine durchsichtige Lücke mehr, wenn eine Zeile der Seitenleiste breiter ist als die Leiste; die Leiste behält ihre Breite und schneidet die Zeile ab (#160).
 - Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
+- Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
 
 ### Security
 
@@ -47,6 +49,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Der Hub ermittelt den aufrufenden Prozess jetzt selbst, sofort beim Eintreffen der Verbindung (TCP-Tabelle, der laufende Prozess und sein Prozessbaum mit Erzeugungszeiten), und ignoriert eine vom Client angegebene Prozess-ID; ein Aufrufer, der sich nicht ermitteln lässt (schon beendet, Verbindung weg), wird abgewiesen. `PANELDECK_SESSION` zählt nur noch für WSL-Terminals und nur zusammen mit dem geheimen Schlüssel der Sitzung `PANELDECK_SESSION_KEY`. Gegen einen böswilligen Agenten mit eigener Shell nur nach bestem Bemühen: Prozesse, die sich keiner Sitzung zuordnen lassen, gelten als externe Aufrufer; losgelöste oder verwaiste Prozesse (nach Paneldeck gestartet, ihr Elternprozess ist beendet) dürfen nicht in Sitzungen einer Agenten-Kette schreiben und kein `--open --claude` aufrufen; Prozesse, die ganz außerhalb von Paneldeck gestartet werden (z. B. geplante Tasks, WMI), bleiben außerhalb des Schutzes.
 - WSL-Startordner mit `"` oder `\` werden überall abgelehnt, damit über `wsl.exe --cd` keine Befehle eingeschleust werden können; Starts mit Administratorrechten maskieren jedes Argument korrekt. (#172)
 - MCP `create_session` lehnt Netzwerkpfade als `cwd` für Terminals und Chats ab, ohne auf sie zuzugreifen; `\\wsl$`-Pfade werden nicht mehr im UI-Thread geprüft. (#172)
+- OSC 52 nur zum Schreiben: Programme können die Zwischenablage nie lesen. Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB, höchstens alle 0,3 s; leere Texte leeren die Zwischenablage nie. Hinweis: Ein Agent mit Steuer-Zugriff (MCP) kann die fokussierte Sitzung ebenfalls etwas kopieren lassen. (#181)
 
 ## [2.2.0] - 2026-11-16
 
