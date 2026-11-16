@@ -8,11 +8,6 @@ use crate::planning::workflow::{ConditionOp, TransitionDef, WorkflowProblem};
 use crate::state::Lang;
 use eframe::egui::Color32;
 
-/// Farbpalette für Projekte, Status und Typen (für dunkle wie helle Oberflächen brauchbar).
-pub const PALETTE: [&str; 14] = [
-    "#D97757", "#E5A04B", "#D8B94A", "#7FBF6A", "#4FB8A8", "#58A6E6", "#6F8FE8", "#B77FE0", "#E07FB0", "#E06C75", "#97A3B0", "#8C7B6B", "#5E8F5E", "#4A78B5",
-];
-
 /// „#RRGGBB“ → Farbe (nur genau diese Form).
 pub fn parse_hex(s: &str) -> Option<Color32> {
     let t = s.trim();
@@ -27,9 +22,15 @@ pub fn color_of(s: &str) -> Color32 {
     parse_hex(s).unwrap_or(Color32::GRAY)
 }
 
-/// Erste Farbe der Palette, die noch am seltensten benutzt wird (für neue Projekte/Status/Typen).
-pub fn next_palette_color(used: &[String]) -> &'static str {
-    PALETTE.iter().min_by_key(|c| used.iter().filter(|u| u.eq_ignore_ascii_case(c)).count()).copied().unwrap_or(PALETTE[0])
+/// Erste Farbe der Palette, die noch am seltensten benutzt wird (für neue Projekte/Status/Typen). Palette: die geltende
+/// des Expertenmodus (`palette::auto`, bei leerer Palette die eingebauten Vorgaben).
+pub fn next_palette_color(used: &[String]) -> String {
+    next_color_from(&crate::palette::auto(crate::palette::Area::Expert), used)
+}
+
+/// Wie [`next_palette_color`] mit vorgegebener Palette (`pool` darf nicht leer sein).
+pub fn next_color_from(pool: &[String], used: &[String]) -> String {
+    crate::palette::least_used(pool, used.iter().map(|s| s.as_str())).unwrap_or_else(|| crate::palette::EXPERT_DEFAULTS[0].to_string())
 }
 
 /// Umlaute und ß in ASCII, übrige Nicht-ASCII-Zeichen entfallen.
@@ -228,18 +229,21 @@ mod tests {
         for bad in ["", "d97757", "#d9775", "#d977577", "#gggggg", "red"] {
             assert_eq!(parse_hex(bad), None, "{bad}");
         }
-        for c in PALETTE {
+        for c in crate::palette::SHARED_DEFAULTS.iter().chain(crate::palette::EXPERT_DEFAULTS.iter()) {
             assert!(crate::planning::common::normalize_color(c).is_ok(), "{c}");
         }
     }
 
     #[test]
     fn palette_rotation_prefers_unused() {
-        assert_eq!(next_palette_color(&[]), PALETTE[0]);
-        let used = vec![PALETTE[0].to_lowercase(), PALETTE[1].to_string()];
-        assert_eq!(next_palette_color(&used), PALETTE[2]);
-        let all: Vec<String> = PALETTE.iter().map(|s| s.to_string()).collect();
-        assert_eq!(next_palette_color(&all), PALETTE[0], "alle gleich oft → von vorn");
+        let pal = crate::palette::auto(crate::palette::Area::Expert);
+        assert_eq!(next_palette_color(&[]), pal[0]);
+        let used = vec![pal[0].to_lowercase(), pal[1].to_string()];
+        assert_eq!(next_palette_color(&used), pal[2]);
+        assert_eq!(next_palette_color(&pal), pal[0], "alle gleich oft → von vorn");
+        // eigene Palette
+        let own = vec!["#0A0A0A".to_string(), "#0B0B0B".to_string()];
+        assert_eq!(next_color_from(&own, &["#0a0a0a".to_string()]), "#0B0B0B");
     }
 
     #[test]

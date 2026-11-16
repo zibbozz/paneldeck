@@ -23,6 +23,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - MCP `create_session` nimmt als `cwd` einen Linux-Pfad an, wenn die Sitzung in WSL startet (absolut oder `~`). Der Ordner wird vorher in WSL geprüft: `bad_args`, wenn er fehlt, und ein neues Ergebnisfeld `cwd_checked` (`false` = WSL hat nicht rechtzeitig geantwortet; die Sitzung wird trotzdem angelegt und startet in `/`, falls es den Ordner nicht gibt). (#172)
 - `settings.json`: optionales Feld `wsl_recent` (zuletzt benutzte WSL-Ordner je Distribution, begrenzt). (#172)
 - Einstellung „Programme dürfen in die Zwischenablage kopieren (OSC 52)“ (Einstellungen → Terminal, standardmäßig an; Feld `osc52_copy` in `settings.json`). (#181)
+- Bearbeitbare Farbpalette (Einstellungen → Farben): standardmäßig eine gemeinsame Palette für den Terminal Hub (Farben von Sitzungen, Ordnern, Projekten, Profilen), die Tags der Todo-Liste und den Expertenmodus (Projekte, Typen, Status, Auswahlwerte, Diagramme), wahlweise je Bereich eine eigene (beim Umschalten bleiben beide erhalten). Farben hinzufügen, ändern (Farbwähler oder Hex), löschen und per Ziehen sortieren, optional benennen (im Tooltip, z. B. „Cooles Blau (#2288FF)“), gelöschte Vorgaben wiederherstellen. Jede Farbauswahl bietet zusätzlich „Eigene Farbe …“ für eine einmalige Farbe. Vorhandene Elemente behalten ihre Farbe; automatisch vergebene Farben bleiben wie bisher, bis du die Palette bearbeitest. Gespeichert in `settings.json` (neues optionales Feld `palette`; unveränderte Listen werden nicht geschrieben). (#173)
 
 ### Changed
 

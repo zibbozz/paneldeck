@@ -23,6 +23,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - MCP `create_session` accepts a Linux path as `cwd` when the session starts in WSL (absolute or `~`). The folder is checked in WSL first: `bad_args` if it is missing, and a new result field `cwd_checked` (`false` = WSL did not answer in time; the session is still created and starts in `/` if the folder does not exist). (#172)
 - `settings.json`: optional field `wsl_recent` (recently used WSL folders per distribution, capped). (#172)
 - Setting "Allow programs to copy to the clipboard (OSC 52)" (Settings → Terminal, on by default; `settings.json` field `osc52_copy`). (#181)
+- Editable color palette (Settings → Colors): one shared palette by default for the Terminal Hub (session, folder, project, profile colors), todo-list tags and expert mode (projects, types, statuses, dropdown values, charts), or optionally a separate palette per area (both are kept when switching). Add, edit (color wheel or hex), delete and drag to reorder colors, give them optional names (shown in the tooltip, e.g. "Cool blue (#2288FF)"), and restore deleted defaults. Every color picker also offers "Custom color …" for a one-off color. Existing items keep their color; automatically assigned colors stay as before until you edit the palette. Stored in `settings.json` (new optional field `palette`; untouched lists are not written). (#173)
 
 ### Changed
 
