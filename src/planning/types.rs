@@ -16,7 +16,7 @@ pub struct TicketType {
     pub project_id: i64,
     pub key: Option<String>,
     pub name: Option<String>,
-    /// Name aus dem festen Icon-Satz (`icons::ICONS`), optional.
+    /// Name aus dem festen Icon-Satz (`icons::ICONS`) oder `lucide:<name>`, optional.
     pub icon: Option<String>,
     pub color: String,
     /// `false`: der Typ hat kein Statusfeld und erscheint nicht im Board.
@@ -85,9 +85,12 @@ pub fn editable_type(conn: &Connection, id: i64) -> Res<TicketType> {
     Ok(t)
 }
 
+/// Prüft ein Icon beim Speichern: eingebaut oder formal richtiges `lucide:<name>` ([`icons::is_storable`]) – ein in dieser
+/// Version unbekanntes Lucide-Icon (z. B. aus der Sicherung einer neueren Version) bricht den Import nicht ab, es wird als
+/// Platzhalter gezeichnet. Die Oberfläche bietet nur bekannte Icons an.
 fn check_icon(icon: &Option<String>) -> Res<()> {
     match icon {
-        Some(i) if !icons::is_valid(i) => Err(PlanError::IconInvalid),
+        Some(i) if !icons::is_storable(i) => Err(PlanError::IconInvalid),
         _ => Ok(()),
     }
 }
@@ -342,6 +345,13 @@ mod tests {
         assert_eq!(get_type(&c, a).unwrap().icon, None);
         assert_eq!(update_type(&c, a, &UpdateType { icon: Some(Some("nope".into())), ..Default::default() }), Err(PlanError::IconInvalid));
         assert_eq!(create_type(&c, &NewType { icon: Some("nope".into()), ..ty(p, "X") }), Err(PlanError::IconInvalid));
+        // Lucide-Icons: bekannte und formal richtige unbekannte werden gespeichert, formal falsche abgelehnt.
+        update_type(&c, a, &UpdateType { icon: Some(Some("lucide:alarm-clock".into())), ..Default::default() }).unwrap();
+        assert_eq!(get_type(&c, a).unwrap().icon.as_deref(), Some("lucide:alarm-clock"));
+        let future = create_type(&c, &NewType { icon: Some("lucide:icon-from-the-future".into()), ..ty(proj(&c, "AB"), "Future") }).unwrap();
+        assert_eq!(get_type(&c, future).unwrap().icon.as_deref(), Some("lucide:icon-from-the-future"));
+        assert_eq!(update_type(&c, a, &UpdateType { icon: Some(Some("lucide:Bad Name".into())), ..Default::default() }), Err(PlanError::IconInvalid));
+        assert_eq!(update_type(&c, a, &UpdateType { icon: Some(Some("lucide:".into())), ..Default::default() }), Err(PlanError::IconInvalid));
         reorder_types(&c, p, &[k, a, b]).unwrap();
         assert_eq!(list_types(&c, p).unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), vec![k, a, b]);
         assert_eq!(reorder_types(&c, p, &[k, a]), Err(PlanError::ReorderMismatch));

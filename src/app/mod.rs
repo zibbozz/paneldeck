@@ -823,6 +823,8 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../assets/fonts/CascadiaMono-Regular.ttf"))),
     );
     fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "cascadia".to_owned());
+    // Lucide-Icons (ISC) als eigene Familie nur für Icons (Icon-Explorer, `lucide:<name>`).
+    planning_ui::install_icon_font(&mut fonts);
     // Optionale Systemschriften als Fallback für Symbole, Sonderzeichen, CJK, Thai, Indisch, Mathe usw.
     // Es werden nur vorhandene Dateien geladen; fehlt eine, ändert sich nichts.
     let candidates: [(&str, &str); 14] = [

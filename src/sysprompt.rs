@@ -74,6 +74,7 @@ The task tools depend on the mode the user sets with the "Expert mode" switch in
 
 A tool of the other mode returns `wrong_mode`. Reload the tool list (tools/list) after the user switches the mode.
 You can never delete tickets or to-do cards, and never change ticket types, workflows or projects.
+Ticket types have an optional `icon` (in get_project): a built-in name such as `bug`, or `lucide:<name>` from the Lucide icon set (https://lucide.dev/icons).
 
 ## Errors
 
@@ -137,6 +138,7 @@ Die Aufgaben-Werkzeuge hängen vom Modus ab, den der Nutzer mit dem Schalter „
 
 Ein Werkzeug des anderen Modus liefert `wrong_mode`. Lade die Werkzeugliste (tools/list) neu, nachdem der Nutzer den Modus umgestellt hat.
 Du kannst nie Tickets oder Todo-Karten löschen und nie Tickettypen, Workflows oder Projekte ändern.
+Tickettypen haben ein optionales `icon` (in get_project): einen eingebauten Namen wie `bug` oder `lucide:<name>` aus dem Lucide-Icon-Satz (https://lucide.dev/icons).
 
 ## Fehler
 
@@ -184,7 +186,7 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "add_todo" => ("Karte zur einfachen Todo-Liste hinzufügen.", "Add a card to the simple to-do list."),
         "set_todo_done" => ("Todo-Karte abhaken oder wieder öffnen.", "Tick off a to-do card or reopen it."),
         "list_projects" => ("Projekte auflisten.", "List the projects."),
-        "get_project" => ("Alles zu einem Projekt: Typen, Felder, Workflows, Verknüpfungstypen.", "Everything about a project: types, fields, workflows, link types."),
+        "get_project" => ("Alles zu einem Projekt: Typen (mit Icon), Felder, Workflows, Verknüpfungstypen.", "Everything about a project: types (with icon), fields, workflows, link types."),
         "search_tickets" => ("Tickets suchen (Filter oder JQL-ähnliche Abfrage).", "Search tickets (filters or a JQL-like query)."),
         "get_ticket" => ("Ein Ticket mit Feldern, Kommentaren, Verknüpfungen und erlaubten Übergängen.", "One ticket with fields, comments, links and allowed transitions."),
         "get_time_entries" => ("Zeiteinträge eines Tickets.", "The time entries of a ticket."),

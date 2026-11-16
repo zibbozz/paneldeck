@@ -28,6 +28,7 @@ Alle weiteren transitiven Abhängigkeiten stehen unter MIT, Apache-2.0, BSD, Zli
 |---|---|
 | Cascadia Mono (Microsoft) | SIL Open Font License 1.1 |
 | Noto Color Emoji (Google) | SIL Open Font License 1.1 |
+| Lucide-Icons (`lucide.ttf` aus dem npm-Paket `lucide-static` 1.66.0, https://lucide.dev; Icon-Explorer, Icons `lucide:<name>`) | ISC (aus Feather Icons abgeleitete Icons: MIT) |
 | Standardschriften von egui (Hack, Ubuntu-Light, Noto Emoji, emoji-icon-font) | siehe egui-Projekt: Hack (MIT/Bitstream Vera), Ubuntu Font Licence, SIL OFL |
 
 Die Lizenztexte der eingebetteten Schriften liegen unter `assets/fonts/`.

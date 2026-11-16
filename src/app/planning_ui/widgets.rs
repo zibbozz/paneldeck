@@ -315,8 +315,12 @@ fn prims(name: &str) -> &'static [P] {
     }
 }
 
-/// Zeichnet das benannte Typ-Icon (Name aus `planning::icons::ICONS`) mittig um `c`; `size` ist die Kantenlänge in Pixeln.
+/// Zeichnet das benannte Typ-Icon (Name aus `planning::icons::ICONS` oder `lucide:<name>`) mittig um `c`; `size` ist die
+/// Kantenlänge in Pixeln. Öffentlicher Name dafür: [`super::icon_explorer::paint_icon`].
 pub fn type_icon(p: &Painter, name: &str, c: Pos2, size: f32, col: Color32) {
+    if super::icon_explorer::paint_lucide(p, name, c, size, col) {
+        return;
+    }
     let k = size / 16.0;
     let st = Stroke::new((1.4 * k).max(1.0), col);
     let pt = |x: f32, y: f32| Pos2::new(c.x + x * k, c.y + y * k);
@@ -371,37 +375,78 @@ pub fn paint_type_badge(p: &Painter, rect: Rect, icon: Option<&str>, color: Colo
     }
 }
 
-/// Auswahlraster aller Icons (und „Kein Icon“). `true` bei Änderung.
+/// Icon-Picker: Raster aller eingebauten Icons (und „Kein Icon“) plus „Weitere Icons …“, das den Icon-Explorer mit den
+/// Lucide-Icons öffnet ([`super::icon_explorer`]). Ein gewähltes Lucide-Icon (`lucide:<name>`) steht als zusätzliche, markierte
+/// Zelle im Raster. `salt` muss je Picker eindeutig sein; `true` bei Änderung (auch wenn im Explorer gewählt wurde).
 pub fn icon_picker(ui: &mut Ui, salt: impl Hash, current: &mut Option<String>, color: Color32, lang: Lang) -> bool {
-    let salt = Id::new(salt);
+    icon_picker_impl(ui, Id::new(salt), current, color, lang, true)
+}
+
+/// Wie [`icon_picker`], aber ein Icon ist Pflicht (ohne „Kein Icon“); `current` ist der gespeicherte Name.
+#[allow(dead_code)] // für Picker mit Pflicht-Icon (Fälligkeits-Markierungen, #188)
+pub fn icon_picker_required(ui: &mut Ui, salt: impl Hash, current: &mut String, color: Color32, lang: Lang) -> bool {
+    let mut cur = Some(std::mem::take(current));
+    let changed = icon_picker_impl(ui, Id::new(salt), &mut cur, color, lang, false);
+    *current = cur.unwrap_or_default();
+    changed
+}
+
+fn icon_picker_impl(ui: &mut Ui, salt: Id, current: &mut Option<String>, color: Color32, lang: Lang, allow_none: bool) -> bool {
     let mut changed = false;
+    let explorer = salt.with("icon_explorer");
+    let dim = ui.visuals().text_color().gamma_multiply(0.85);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(3.0);
         ui.set_max_width(12.0 * 31.0);
-        // „Kein Icon“
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-        let resp = ui.interact(rect, salt.with("none"), Sense::click());
-        let sel = current.is_none();
-        paint_pick_cell(ui, rect, sel, resp.hovered());
-        let c = ui.visuals().weak_text_color();
-        ui.painter().line_segment([rect.center() + Vec2::new(-5.0, 5.0), rect.center() + Vec2::new(5.0, -5.0)], Stroke::new(1.3_f32, c));
-        ui.painter().circle_stroke(rect.center(), 6.0, Stroke::new(1.3_f32, c));
-        if resp.on_hover_text(lang.t("Kein Icon", "No icon")).clicked() && !sel {
-            *current = None;
-            changed = true;
+        if allow_none {
+            // „Kein Icon“
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+            let resp = ui.interact(rect, salt.with("none"), Sense::click());
+            let sel = current.is_none();
+            paint_pick_cell(ui, rect, sel, resp.hovered());
+            let c = ui.visuals().weak_text_color();
+            ui.painter().line_segment([rect.center() + Vec2::new(-5.0, 5.0), rect.center() + Vec2::new(5.0, -5.0)], Stroke::new(1.3_f32, c));
+            ui.painter().circle_stroke(rect.center(), 6.0, Stroke::new(1.3_f32, c));
+            if resp.on_hover_text(lang.t("Kein Icon", "No icon")).clicked() && !sel {
+                *current = None;
+                changed = true;
+            }
         }
         for name in ICONS {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
             let resp = ui.interact(rect, salt.with(*name), Sense::click());
             let sel = current.as_deref() == Some(*name);
             paint_pick_cell(ui, rect, sel, resp.hovered());
-            type_icon(ui.painter(), name, rect.center(), 18.0, if sel { color } else { ui.visuals().text_color().gamma_multiply(0.85) });
+            type_icon(ui.painter(), name, rect.center(), 18.0, if sel { color } else { dim });
             if resp.on_hover_text(*name).clicked() && !sel {
                 *current = Some((*name).to_string());
                 changed = true;
             }
         }
+        // Gewähltes Icon, das nicht zum eingebauten Satz gehört (Lucide oder unbekannt): als markierte Zelle dazu.
+        if let Some(cur) = current.as_deref().filter(|c| !ICONS.contains(c)) {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+            let resp = ui.interact(rect, salt.with("current_extra"), Sense::click());
+            paint_pick_cell(ui, rect, true, resp.hovered());
+            super::icon_explorer::paint_icon(ui.painter(), cur, rect.center(), 18.0, color);
+            if resp.on_hover_text(super::icon_explorer::icon_label(cur)).clicked() {
+                super::icon_explorer::open_picker_explorer(ui.ctx(), explorer, Some(cur));
+            }
+        }
     });
+    ui.add_space(3.0);
+    let open = super::icon_explorer::explorer_open(ui.ctx(), explorer);
+    let more = ui.add_enabled(!open, egui::Button::new(lang.t("Weitere Icons …", "More icons …")).min_size(Vec2::new(0.0, 24.0)));
+    if more.on_hover_text(lang.t("Icon-Explorer mit über 1.500 Lucide-Icons öffnen", "Open the icon explorer with more than 1,500 Lucide icons")).clicked() {
+        super::icon_explorer::open_picker_explorer(ui.ctx(), explorer, current.as_deref());
+    }
+    if let Some(name) = super::icon_explorer::picker_explorer(ui.ctx(), explorer, lang) {
+        let v = crate::planning::icons::lucide_value(&name);
+        if current.as_deref() != Some(v.as_str()) {
+            *current = Some(v);
+            changed = true;
+        }
+    }
     changed
 }
 

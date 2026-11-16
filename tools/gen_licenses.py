@@ -22,6 +22,11 @@ EXTRA_MAP = {
     "hexf-CC0.txt": "hexf-parse",
 }
 EXTRA_BY_PKG = {pkg: files.split() for files, pkgs in EXTRA_MAP.items() for pkg in pkgs.split()}
+# Eingebettete Bestandteile, die keine Crates sind (Name, Version, Lizenz, Dateien in tools/license-extra/).
+# Lucide: Version wie in tools/update-lucide.ps1 (das Skript schreibt auch die Lizenzdatei).
+BUNDLED = [
+    ("lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf)", "1.66.0", "ISC (aus Feather abgeleitete Icons: MIT)", ["lucide-LICENSE.txt"]),
+]
 WANT = ("license", "licence", "copying", "copyright", "notice", "unlicense")
 
 
@@ -46,6 +51,8 @@ def collect():
             for fn in EXTRA_BY_PKG.get(p["name"], []):
                 texts.append((fn, (EXTRA / fn).read_text(encoding="utf-8").strip()))
         entries.append([p["name"], p["version"], p.get("license") or "(siehe Datei)", texts, p.get("repository")])
+    for name, ver, lic, files in BUNDLED:
+        entries.append([name, ver, lic, [(fn, (EXTRA / fn).read_text(encoding="utf-8").strip()) for fn in files], None])
     # Pakete ohne eigene Lizenzdatei (Workspaces): Texte eines Geschwister-Pakets aus demselben Repository übernehmen.
     by_repo = {}
     for e in entries:
@@ -70,7 +77,7 @@ def render():
     out = ["Lizenztexte der Abhängigkeiten von Paneldeck", "=" * 46, "",
            "Paneldeck selbst steht unter der MIT-Lizenz (Datei LICENSE). Die folgenden Pakete werden in die Programmdatei",
            "eingebunden; ihre Lizenztexte stehen unten (gleiche Texte nur einmal). Die eingebetteten Schriften haben eigene",
-           "Lizenzdateien im Ordner assets/fonts/ (SIL Open Font License 1.1).", "",
+           "Lizenzdateien im Ordner assets/fonts/ (SIL Open Font License 1.1; Lucide-Icons: ISC, siehe unten).", "",
            "Pakete und ihre Lizenz-Ausdrücke:", ""]
     for name, ver, lic, _ in entries:
         out.append(f"  {name} {ver} - {lic}")
