@@ -31,7 +31,7 @@ param(
   # wenn sie den Testordner nennt - ein gleichzeitig laufendes, echtes Claude Code schreibt ~/.claude.json laufend)
   [switch]$StrictClaudeConfig,
   # OSC-52-Pruefung (#181) auslassen: sie setzt kurz die echte Windows-Zwischenablage (Text wird gesichert und
-  # wiederhergestellt, eine Zwischenablage mit Bild/Dateien/HTML/RTF bleibt ohnehin unberuehrt)
+  # wiederhergestellt, eine Zwischenablage mit anderen als reinen Textformaten bleibt ohnehin unberuehrt)
   [switch]$NoClipboard
 )
 $ErrorActionPreference = 'Stop'
@@ -57,6 +57,9 @@ $tag = Split-Path -Leaf $work
 $fakebin = New-FakeClaudeBin "$work\fakebin"
 $calls = "$fakebin\calls.txt"; $inputs = "$fakebin\input.txt"
 $script:iso = Enter-IsolatedTestEnv $work $fakebin
+# OSC 52 (#181): Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren. Der Test-Hub laeuft minimiert und ohne
+# Fokus, deshalb hebt diese Variable (nur in der Umgebung der Test-Hubs) die Fokus-Regel auf; siehe src\app\osc52.rs.
+$env:PANELDECK_TEST_OSC52_ANY_FOCUS = '1'
 Write-Host "Isolation: USERPROFILE=$env:USERPROFILE, claude -> $((Get-Command claude -CommandType Application).Source)" -ForegroundColor DarkGray
 # Die Terminals des Hubs bekommen ihre Umgebung von portable-pty frisch aus der Registry (echter PATH mit ~/.local/bin).
 # Deshalb laeuft jede Sitzung ueber das Profil 1 "Smoke-Isolation" (Standardprofil jedes Projekts, auch jeder
@@ -93,7 +96,7 @@ $script:skip = 0
 function Skip($name, $why) { $script:skip++; Write-Host "  skip  $name  ($why)" -ForegroundColor Yellow }
 # OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
 # Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
-# inzwischen niemand anderes etwas kopiert hat). Enthaelt sie mehr als reinen Text (Bild, Dateien, HTML, RTF), wird die
+# inzwischen niemand anderes etwas kopiert hat). Enthaelt sie andere als reine Textformate (Bild, Dateien, HTML, RTF ...), wird die
 # Pruefung uebersprungen und die Zwischenablage nicht angefasst. -NoClipboard ueberspringt sie immer.
 function Test-Osc52([int]$sid, [string]$sh) {
   $name = "OSC 52: Programm in $sh kopiert in die Windows-Zwischenablage"
@@ -101,8 +104,13 @@ function Test-Osc52([int]$sid, [string]$sh) {
   Add-Type -AssemblyName System.Windows.Forms
   $C = [System.Windows.Forms.Clipboard]
   try {
-    if ($C::ContainsImage() -or $C::ContainsFileDropList() -or $C::ContainsAudio() -or $C::ContainsData('HTML Format') -or $C::ContainsData('Rich Text Format')) {
-      Skip $name 'Zwischenablage enthaelt mehr als Text und bleibt unberuehrt'; return
+    # Nur reine Textformate (leere Zwischenablage = keine Formate) - alles andere ginge beim Wiederherstellen verloren.
+    $textOnly = @('Text', 'UnicodeText', 'OEMText', 'Locale', 'System.String')
+    $obj = $C::GetDataObject()
+    $formats = if ($obj) { @($obj.GetFormats()) } else { @() }
+    $other = @($formats | Where-Object { $textOnly -notcontains $_ })
+    if ($other.Count -gt 0) {
+      Skip $name "Zwischenablage enthaelt andere Formate ($($other -join ', ')) und bleibt unberuehrt"; return
     }
     $had = $C::ContainsText(); $saved = if ($had) { $C::GetText() } else { '' }
   } catch { Skip $name "Zwischenablage nicht lesbar: $($_.Exception.Message)"; return }
