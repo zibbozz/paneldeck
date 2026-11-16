@@ -215,13 +215,21 @@ impl App {
                             ui.add_space(S2);
                             ui.label(lang.t("Standards für neue Claude-Sitzungen", "Defaults for new Claude sessions"));
                             ui.label(RichText::new(lang.t(
-                                "Gelten für Sitzungen aus dem Dialog „Neue Sitzung“ (Vorauswahl), dem Kontextmenü und über MCP, wenn nichts angegeben ist. „Standard von Claude Code“ setzt keine Option. bypassPermissions gilt nie für Sitzungen, die Agenten über MCP anlegen.",
-                                "Apply to sessions from the “New session” dialog (preselection), the context menu and via MCP when nothing is given. “Claude Code default” sets no option. bypassPermissions never applies to sessions that agents create via MCP.",
+                                "Gelten für Sitzungen aus dem Dialog „Neue Sitzung“ (Vorauswahl), dem Kontextmenü, Vorlagen und über MCP, wenn nichts angegeben ist. „Standard von Claude Code“ setzt keine Option. bypassPermissions lässt sich nur im Dialog „Neue Sitzung“ für eine einzelne Sitzung wählen. Ohne Permission-Mode starten Agenten-Sitzungen mit „default“.",
+                                "Apply to sessions from the “New session” dialog (preselection), the context menu, templates and via MCP when nothing is given. “Claude Code default” sets no option. bypassPermissions can only be chosen in the “New session” dialog for a single session. Without a permission mode, agent sessions start with “default”.",
                             )).small().color(style::dim(ui)));
                             ui.add_space(S1);
+                            if self.settings.claude_bypass_dropped {
+                                ui.label(RichText::new(lang.t(
+                                    "Hinweis: bypassPermissions stand als Standard in settings.json und wurde entfernt – es ist nur noch im Dialog „Neue Sitzung“ für eine einzelne Sitzung wählbar.",
+                                    "Note: bypassPermissions was set as a default in settings.json and has been removed – it can now only be chosen in the “New session” dialog for a single session.",
+                                )).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
+                                ui.add_space(S1);
+                            }
                             let before = self.settings.claude_defaults.clone();
                             egui::Grid::new("claude_defaults").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults");
+                                // Ungültige Namen bleiben nur im Eingabefeld; gespeichert und angewendet werden nur gültige Werte.
+                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", false);
                             });
                             if self.settings.claude_defaults != before {
                                 // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).

@@ -393,8 +393,10 @@ struct NewOpts {
     name: Option<String>,
     claude: bool,
     claude_args: String,
-    /// Claude-Startoptionen; `None` = Standards aus den Einstellungen.
+    /// Claude-Startoptionen; `None` = Standards aus den Einstellungen (ohne bypassPermissions).
     claude_opts: Option<ClaudeOpts>,
+    /// Nur der Dialog „Neue Sitzung“: der Nutzer hat bypassPermissions ausdrücklich für diese Sitzung gewählt.
+    allow_bypass: bool,
     continue_last: bool,
     prompt: Option<String>,
     resume_id: Option<String>,
@@ -1352,7 +1354,7 @@ impl App {
 
     /// Vorbelegung der Claude-Optionen im Dialog „Neue Sitzung“: letzte Wahl, sonst die Standards der Einstellungen.
     fn dialog_claude_opts(&self) -> ClaudeOpts {
-        self.settings.last_claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone())
+        self.settings.last_claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone()).sanitized(false)
     }
 
     fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> String {
@@ -1376,7 +1378,7 @@ impl App {
         let (opts, args) = meta.claude_opts_eff();
         c += &opts.args(kind);
         if !args.is_empty() {
-            c += &format!(" {args}");
+            c += &format!(" {}", crate::claude_opts::legacy_args(&args, kind));
         }
         let resume_wanted = l.restart || (l.restore && self.settings.claude_resume);
         let resume_id = l.resume_id.filter(|id| crate::quote::is_uuid(id));
@@ -1526,6 +1528,13 @@ impl App {
         };
         let o = NewOpts { cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| prof.as_ref().map(|p| p.cwd.clone()).filter(|c| !c.is_empty())), ..o };
         let label = self.shell_by_id(&shell_id).map(|s| s.label).unwrap_or_else(|| "Shell".into());
+        // Alle Wege (Dialog, MCP, Kontextmenü, --claude, IPC, Vorlagen, Duplikat, Verlauf) laufen hier durch;
+        // bypassPermissions nur bei ausdrücklicher Wahl im Dialog.
+        let (claude_opts, claude_args) = if o.claude {
+            crate::claude_opts::resolve_new(o.claude_opts.as_ref(), o.allow_bypass, &self.settings.claude_defaults, &o.claude_args)
+        } else {
+            (ClaudeOpts::default(), o.claude_args.clone())
+        };
         let (name, custom) = match o.name.filter(|n| !n.trim().is_empty()) {
             Some(n) => (n, true),
             None if chat_meta.is_some() => ("Chat".to_string(), false),
@@ -1542,8 +1551,8 @@ impl App {
             color: prof.as_ref().and_then(|p| p.color).unwrap_or(PALETTE[(id as usize) % PALETTE.len()]),
             profile: pid,
             claude: o.claude,
-            claude_args: o.claude_args,
-            claude_opts: if o.claude { o.claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone()).sanitized(true) } else { ClaudeOpts::default() },
+            claude_args,
+            claude_opts,
             claude_session: o.resume_id.clone().unwrap_or_default(),
             claude_started: o.resume_id.is_some(),
             transcript: o.transcript.clone(),
@@ -3093,7 +3102,7 @@ impl App {
                         // Das Vorlagenformat kennt nur die Zeile `claude_args`: Startoptionen dort hinein.
                         claude_args: {
                             let (o, rest) = e.meta.claude_opts_eff();
-                            format!("{} {rest}", o.to_legacy()).trim().to_string()
+                            format!("{} {rest}", o.sanitized(false).to_legacy()).trim().to_string()
                         },
                         profile: e.meta.profile,
                         group: e.meta.group.clone(),
@@ -3123,8 +3132,8 @@ impl App {
                                 cwd: Some(it.cwd.clone()),
                                 name: Some(it.name.clone()),
                                 claude: it.claude && self.settings.claude_mode,
-                                claude_args: ClaudeOpts::split_legacy(&crate::quote::sanitize_claude_args(&it.claude_args)).1,
-                                claude_opts: Some(ClaudeOpts::split_legacy(&crate::quote::sanitize_claude_args(&it.claude_args)).0),
+                                // Optionen der Vorlage vor den aktuellen Standards (alte Vorlagen ohne Optionen: nur Standards).
+                                claude_args: it.claude_args.clone(),
                                 prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
                                 profile: Some(it.profile),
                                 group: Some(it.group.clone()),

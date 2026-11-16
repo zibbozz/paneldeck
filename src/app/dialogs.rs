@@ -67,7 +67,7 @@ impl App {
                             ui.checkbox(&mut d.claude, lang.t("Claude Code starten", "Start Claude Code"));
                             ui.end_row();
                             if d.claude {
-                                opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg");
+                                opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg", true);
                                 ui.label("");
                                 ui.checkbox(&mut d.continue_last, lang.t("Letzte Konversation im Ordner fortsetzen (--continue)", "Continue last conversation in folder (--continue)"));
                                 ui.end_row();
@@ -116,8 +116,8 @@ impl App {
                 keep = false;
             }
             if create && d.claude {
-                // Letzte Wahl merken (Vorauswahl beim nächsten Mal).
-                let copts = d.copts.sanitized(true);
+                // Letzte Wahl merken (Vorauswahl beim nächsten Mal) – nie bypassPermissions.
+                let copts = d.copts.sanitized(false);
                 if self.settings.last_claude_opts.as_ref() != Some(&copts) {
                     self.settings.last_claude_opts = Some(copts);
                     state::save_json(&self.dir.join("settings.json"), &self.settings);
@@ -130,6 +130,7 @@ impl App {
                     name: Some(d.name.clone()),
                     claude: d.claude,
                     claude_opts: Some(d.copts.sanitized(true)),
+                    allow_bypass: true,
                     continue_last: d.continue_last,
                     prompt: Some(d.prompt.clone()),
                     profile: Some(d.profile),
@@ -674,11 +675,16 @@ impl App {
 
 /// Zeilen eines zweispaltigen Grids für die Claude-Startoptionen (#161): Modell, Effort, Permission-Mode, Agent.
 /// Leere Auswahl = Standard von Claude Code (Flag wird nicht gesetzt). `false`, solange ein Name ungültig ist.
-/// `bypassPermissions` ist hier wählbar (Entscheidung des Nutzers), mit Warnung; Agenten können es nie setzen.
-pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str) -> bool {
+/// `bypassPermissions` nur mit `allow_bypass` (Dialog „Neue Sitzung“, gilt nur für diese Sitzung) und mit Warnung;
+/// in den Standards gibt es es nicht.
+pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, allow_bypass: bool) -> bool {
     use crate::claude_opts::{valid_name, BYPASS, EFFORTS, MAX_NAME, MODEL_ALIASES, PERMISSION_MODES};
     let default = lang.t("Standard von Claude Code", "Claude Code default");
-    let shown = |v: &str| if v.is_empty() { default.to_string() } else { v.to_string() };
+    let shown = |v: &str| match v {
+        "" => default.to_string(),
+        "default" => lang.t("default (bei allem fragen)", "default (always ask)").to_string(),
+        _ => v.to_string(),
+    };
     let bad_name = |v: &str| !v.trim().is_empty() && !valid_name(v.trim());
     let hint = |ui: &mut Ui, text: &str, warn: bool| {
         ui.label("");
@@ -716,17 +722,21 @@ pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt
 
     ui.label("Permission-Mode");
     egui::ComboBox::from_id_salt(format!("{salt}_perm")).selected_text(shown(&o.permission_mode)).show_ui(ui, |ui| {
-        for m in std::iter::once("").chain(PERMISSION_MODES).chain([BYPASS]) {
+        let bypass: &[&str] = if allow_bypass { &[BYPASS] } else { &[] };
+        for m in std::iter::once("").chain(PERMISSION_MODES).chain(bypass.iter().copied()) {
             ui.selectable_value(&mut o.permission_mode, m.to_string(), shown(m));
         }
     });
     ui.end_row();
+    if !allow_bypass && o.permission_mode == BYPASS {
+        o.permission_mode.clear();
+    }
     if o.permission_mode == BYPASS {
         hint(
             ui,
             lang.t(
-                "⚠ bypassPermissions: Claude fragt bei nichts mehr nach (Dateien, Befehle, Netz). Nur in einer abgeschotteten Umgebung verwenden. Agenten über MCP können diesen Modus nie setzen.",
-                "⚠ bypassPermissions: Claude no longer asks before anything (files, commands, network). Use only in an isolated environment. Agents via MCP can never set this mode.",
+                "⚠ bypassPermissions: Claude fragt bei nichts mehr nach (Dateien, Befehle, Netz). Nur in einer abgeschotteten Umgebung verwenden. Gilt nur für diese Sitzung und wird nicht als Vorauswahl gemerkt; Agenten über MCP können diesen Modus nie setzen.",
+                "⚠ bypassPermissions: Claude no longer asks before anything (files, commands, network). Use only in an isolated environment. Applies only to this session and is not remembered as a preselection; agents via MCP can never set this mode.",
             ),
             true,
         );
@@ -749,12 +759,16 @@ mod copts_tests {
 
     /// Die Zeilen ohne Fenster zeichnen (headless) und das Ergebnis der Prüfung liefern.
     fn rows(o: &mut ClaudeOpts) -> bool {
+        rows_with(o, true)
+    }
+
+    fn rows_with(o: &mut ClaudeOpts, allow: bool) -> bool {
         let ctx = egui::Context::default();
         let mut ok = None;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::Grid::new("t").num_columns(2).show(ui, |ui| {
-                    ok = Some(claude_opts_rows(ui, Lang::En, o, "t"));
+                    ok = Some(claude_opts_rows(ui, Lang::En, o, "t", allow));
                 });
             });
         });
@@ -770,5 +784,9 @@ mod copts_tests {
         assert!(rows(&mut ClaudeOpts::default()));
         assert!(!rows(&mut ClaudeOpts { model: "opus; calc".into(), ..Default::default() }));
         assert!(!rows(&mut ClaudeOpts { agent: "-x".into(), ..Default::default() }));
+        // Standards (Einstellungen): bypassPermissions gibt es dort nicht.
+        let mut d = ClaudeOpts { permission_mode: "bypassPermissions".into(), ..Default::default() };
+        assert!(rows_with(&mut d, false));
+        assert_eq!(d.permission_mode, "");
     }
 }

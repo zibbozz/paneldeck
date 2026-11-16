@@ -221,11 +221,16 @@ pub struct Settings {
     pub remember_sessions: bool,
     /// Standard-Startoptionen für neue Claude-Sitzungen (seit 2.3.0; leeres Feld = Standard von Claude Code). Gelten für
     /// Sitzungen aus der Oberfläche und über MCP, wenn nichts angegeben ist – `bypassPermissions` nie für Agenten.
-    #[serde(skip_serializing_if = "crate::claude_opts::ClaudeOpts::is_empty")]
+    /// Nie `bypassPermissions` und nur gültige Namen (beim Schreiben bereinigt, beim Laden verworfen, siehe `sanitize`).
+    #[serde(skip_serializing_if = "crate::claude_opts::ClaudeOpts::is_empty", serialize_with = "crate::claude_opts::ser_user_opts")]
     pub claude_defaults: crate::claude_opts::ClaudeOpts,
     /// Zuletzt im Dialog „Neue Sitzung“ gewählte Claude-Optionen (Vorauswahl beim nächsten Mal; `None` = Standards).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "crate::claude_opts::ser_user_opts_opt")]
     pub last_claude_opts: Option<crate::claude_opts::ClaudeOpts>,
+    /// Nur im Speicher: beim Laden stand `bypassPermissions` als Standard in der Datei und wurde verworfen
+    /// (Hinweis unter *Einstellungen → Claude*).
+    #[serde(skip)]
+    pub claude_bypass_dropped: bool,
 }
 
 /// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
@@ -294,6 +299,7 @@ impl Default for Settings {
             remember_sessions: true,
             claude_defaults: Default::default(),
             last_claude_opts: None,
+            claude_bypass_dropped: false,
         }
     }
 }
@@ -403,7 +409,8 @@ impl SessionMeta {
     /// Wirksame Claude-Optionen und die übrigen (bereinigten) freien `claude_args`. Sitzungen von vor 2.3.0 haben
     /// Modell/Permission-Mode noch in `claude_args`; sie zählen, solange das neue Feld leer ist.
     pub fn claude_opts_eff(&self) -> (crate::claude_opts::ClaudeOpts, String) {
-        let (legacy, rest) = crate::claude_opts::ClaudeOpts::split_legacy(&crate::quote::sanitize_claude_args(&self.claude_args));
+        // Nie ein `--dangerously-*`-Flag aus alten Zeilen; ein für diese Sitzung gewähltes bypassPermissions bleibt.
+        let (legacy, rest) = crate::claude_opts::ClaudeOpts::split_legacy(&crate::claude_opts::clean_legacy(&self.claude_args));
         (self.claude_opts.or(&legacy), rest)
     }
 }
@@ -767,6 +774,12 @@ fn clamp_f32(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
 impl Settings {
     /// Unsinnige Werte aus einer von Hand bearbeiteten Datei auf gültige Bereiche begrenzen (verhindert Abstürze beim Start).
     pub fn sanitize(&mut self) {
+        // bypassPermissions ist nie ein gespeicherter Standard und nie die „letzte Wahl“ (nur ausdrücklich im Dialog).
+        if self.claude_defaults.permission_mode == crate::claude_opts::BYPASS {
+            self.claude_bypass_dropped = true;
+        }
+        self.claude_defaults = self.claude_defaults.sanitized(false);
+        self.last_claude_opts = self.last_claude_opts.as_ref().map(|o| o.sanitized(false));
         self.font_size = clamp_f32(self.font_size, 8.0, 40.0, 14.0);
         self.opacity = clamp_f32(self.opacity, 0.3, 1.0, 1.0);
         self.sidebar_width = clamp_f32(self.sidebar_width, 210.0, 460.0, 240.0);
@@ -1066,6 +1079,23 @@ mod kind_tests {
         assert_eq!(m.claude_opts, ClaudeOpts { effort: "high".into(), permission_mode: "bypassPermissions".into(), ..Default::default() });
         let s: Settings = serde_json::from_str(r#"{"claude_defaults":7,"last_claude_opts":"x"}"#).unwrap();
         assert!(s.claude_defaults.is_empty());
+        // bypassPermissions als Standard (ältere Datei / Hand-Bearbeitung): wird beim Laden verworfen, mit Hinweis.
+        let mut s: Settings = serde_json::from_str(r#"{"claude_defaults":{"model":"opus","permission_mode":"bypassPermissions"},"last_claude_opts":{"permission_mode":"bypassPermissions","effort":"low"}}"#).unwrap();
+        s.sanitize();
+        assert!(s.claude_bypass_dropped);
+        assert_eq!(s.claude_defaults, ClaudeOpts { model: "opus".into(), ..Default::default() });
+        assert_eq!(s.last_claude_opts, Some(ClaudeOpts { effort: "low".into(), ..Default::default() }));
+        let mut ok = Settings::default();
+        ok.sanitize();
+        assert!(!ok.claude_bypass_dropped);
+        // Auch ungesäubert im Speicher (Einstellungsseite während der Eingabe) wird nichts Ungültiges geschrieben.
+        let mut s = Settings::default();
+        s.claude_defaults = ClaudeOpts { model: "op us".into(), permission_mode: "bypassPermissions".into(), agent: "rev".into(), ..Default::default() };
+        s.last_claude_opts = Some(ClaudeOpts { permission_mode: "bypassPermissions".into(), ..Default::default() });
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["claude_defaults"], serde_json::json!({"agent": "rev"}));
+        assert_eq!(j["last_claude_opts"], serde_json::json!({}));
+        assert!(j.get("claude_bypass_dropped").is_none());
         // Hin und zurück
         let mut m = SessionMeta::default();
         m.claude_opts = ClaudeOpts { model: "sonnet".into(), effort: "max".into(), permission_mode: "plan".into(), agent: "rev".into() };
@@ -1082,6 +1112,8 @@ mod kind_tests {
         assert_eq!((o.model.as_str(), o.permission_mode.as_str(), rest.as_str()), ("opus", "plan", "--verbose"));
         m.claude_opts.model = "haiku".into();
         assert_eq!(m.claude_opts_eff().0.model, "haiku", "das neue Feld hat Vorrang");
+        m.claude_args = "--dangerously-skip-permissions --verbose".into();
+        assert_eq!(m.claude_opts_eff().1, "--verbose", "nie --dangerously-*");
     }
 
     #[test]

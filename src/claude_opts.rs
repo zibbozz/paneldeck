@@ -3,10 +3,14 @@
 //! - Nur geprüfte Werte, keine freien Argumente: Modell/Agent bestehen aus `[A-Za-z0-9._:-]` (höchstens
 //!   [`MAX_NAME`] Zeichen, erstes Zeichen Buchstabe oder Ziffer – sonst könnte ein Wert wie eine Option aussehen),
 //!   Effort und Permission-Mode stammen aus festen Listen.
-//! - `bypassPermissions` darf nur der Nutzer selbst wählen (Dialog, Standard in den Einstellungen), nie ein Agent über
-//!   MCP ([`ClaudeOpts::from_mcp`], [`ClaudeOpts::for_agent`]).
-//! - Gespeichert in `settings.json` (Standards, letzte Wahl) und je Sitzung in `state.json`; beim Lesen werden ungültige
-//!   Werte still verworfen (die Dateien sind eine Vertrauensgrenze), die Datei bleibt lesbar.
+//! - `bypassPermissions` gibt es nur, wenn der Nutzer es im Dialog „Neue Sitzung“ ausdrücklich für diese eine Sitzung
+//!   wählt: nie als gespeicherter Standard, nie als „letzte Wahl“, nie über MCP, Kontextmenü, `--claude`, IPC, Vorlagen
+//!   oder Verlauf ([`resolve_new`] mit `allow_bypass = false`).
+//! - `manual` (neuere Claude-Code-Versionen) wird zu `default` (versteht jede Version).
+//! - Agenten-Sitzungen ohne Permission-Mode bekommen ausdrücklich `default` ([`ClaudeOpts::for_agent`]); sonst gälte
+//!   `permissions.defaultMode` aus `~/.claude/settings.json` des Nutzers, und das kann `bypassPermissions` sein.
+//! - Gespeichert in `settings.json` (Standards, letzte Wahl; nur gültige Werte ohne `bypassPermissions`,
+//!   [`ser_user_opts`]) und je Sitzung in `state.json`; beim Lesen werden ungültige Werte still verworfen.
 //!
 //! Kennt kein egui.
 
@@ -18,8 +22,11 @@ use serde_json::Value;
 pub const MAX_NAME: usize = 100;
 /// Erlaubte Effort-Stufen (`--effort`).
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-/// Permission-Modi, die auch ein Agent setzen darf (`--permission-mode`).
-pub const PERMISSION_MODES: [&str; 5] = ["acceptEdits", "auto", "plan", "manual", "dontAsk"];
+/// Permission-Modi, die auch ein Agent setzen darf (`--permission-mode`). `default` = bei allem fragen
+/// (heißt in neueren Claude-Code-Versionen `manual`, die `default` weiter annehmen).
+pub const PERMISSION_MODES: [&str; 5] = ["acceptEdits", "auto", "plan", "default", "dontAsk"];
+/// Neuer Name von `default`; wird beim Lesen und Prüfen zu `default`.
+pub const MANUAL: &str = "manual";
 /// Nur vom Nutzer selbst wählbar, nie über MCP.
 pub const BYPASS: &str = "bypassPermissions";
 /// Vorschläge für das Modell in der Oberfläche (Claude-Code-Aliase).
@@ -63,13 +70,14 @@ impl ClaudeOpts {
         self.model.is_empty() && self.effort.is_empty() && self.permission_mode.is_empty() && self.agent.is_empty()
     }
 
-    /// Nur gültige Werte behalten (ungültige werden zu „Standard“).
+    /// Nur gültige Werte behalten (ungültige werden zu „Standard“); `manual` wird zu `default`.
     pub fn sanitized(&self, allow_bypass: bool) -> ClaudeOpts {
         let keep = |s: &str, ok: bool| if ok { s.to_string() } else { String::new() };
+        let mode = if self.permission_mode == MANUAL { "default" } else { self.permission_mode.as_str() };
         ClaudeOpts {
             model: keep(&self.model, valid_name(&self.model)),
             effort: keep(&self.effort, valid_effort(&self.effort)),
-            permission_mode: keep(&self.permission_mode, valid_permission_mode(&self.permission_mode, allow_bypass)),
+            permission_mode: keep(mode, valid_permission_mode(mode, allow_bypass)),
             agent: keep(&self.agent, valid_name(&self.agent)),
         }
     }
@@ -85,10 +93,15 @@ impl ClaudeOpts {
         }
     }
 
-    /// Optionen einer über MCP angelegten Sitzung: Angaben des Agenten, sonst die Standards des Nutzers –
-    /// ohne `bypassPermissions` (auch nicht als Standard; dann setzt Paneldeck keinen Permission-Mode).
+    /// Optionen einer über MCP angelegten Sitzung: Angaben des Agenten, sonst die Standards des Nutzers – nie
+    /// `bypassPermissions`. Ohne Permission-Mode ausdrücklich `default`, damit nicht `permissions.defaultMode` aus
+    /// `~/.claude/settings.json` gilt (das könnte `bypassPermissions` sein).
     pub fn for_agent(&self, defaults: &ClaudeOpts) -> ClaudeOpts {
-        self.or(&defaults.sanitized(false)).sanitized(false)
+        let mut o = self.or(&defaults.sanitized(false)).sanitized(false);
+        if o.permission_mode.is_empty() {
+            o.permission_mode = "default".into();
+        }
+        o
     }
 
     /// Kommandozeilen-Teil (mit führendem Leerzeichen, leer ohne Optionen). Ungültige Werte werden ausgelassen;
@@ -110,6 +123,7 @@ impl ClaudeOpts {
         let get = |k: &str| -> Result<String, OptError> {
             match args.get(k) {
                 None | Some(Value::Null) => Ok(String::new()),
+                Some(Value::String(s)) if k == "permission_mode" && s.trim() == MANUAL => Ok("default".to_string()),
                 Some(Value::String(s)) => Ok(s.trim().to_string()),
                 Some(_) => Err((format!("{k} muss ein String sein."), format!("{k} must be a string."))),
             }
@@ -153,7 +167,7 @@ impl ClaudeOpts {
             let (slot, ok): (Option<&mut String>, fn(&str) -> bool) = match toks[i] {
                 "--model" => (Some(&mut o.model), valid_name),
                 "--effort" => (Some(&mut o.effort), valid_effort),
-                "--permission-mode" => (Some(&mut o.permission_mode), |s| valid_permission_mode(s, true)),
+                "--permission-mode" => (Some(&mut o.permission_mode), |s| s == MANUAL || valid_permission_mode(s, true)),
                 "--agent" => (Some(&mut o.agent), valid_name),
                 _ => (None, |_| false),
             };
@@ -168,7 +182,7 @@ impl ClaudeOpts {
                 }
             }
         }
-        (o, rest.join(" "))
+        (o.sanitized(true), rest.join(" "))
     }
 
     /// Als `claude_args`-Zeile (für Vorlagen, deren Dateiformat nur diese Zeile kennt).
@@ -190,6 +204,41 @@ impl ClaudeOpts {
         }
         parts.join(" · ")
     }
+}
+
+/// Freie Reste alter `claude_args` (nach [`clean_legacy`]) für die Zeile: Flags wie sie sind (nur `-`, Buchstaben,
+/// Ziffern), Werte gequotet wie die Startoptionen, damit `@`/`[]` in PowerShell bzw. POSIX-Shells nichts auslösen.
+pub fn legacy_args(rest: &str, kind: Kind) -> String {
+    rest.split_whitespace().map(|t| if t.starts_with('-') { t.to_string() } else { quote_value(kind, t) }).collect::<Vec<_>>().join(" ")
+}
+
+/// Alte `claude_args` bereinigen: nur harmlose Token ([`crate::quote::sanitize_claude_args`]) und nie ein
+/// `--dangerously-*`/`--allow-dangerously-*`-Flag (würde Freigaben abschalten).
+pub fn clean_legacy(args: &str) -> String {
+    crate::quote::sanitize_claude_args(args).split_whitespace().filter(|t| !t.to_ascii_lowercase().contains("dangerously")).collect::<Vec<_>>().join(" ")
+}
+
+/// Optionen einer neuen Sitzung (alle Wege laufen hier durch): `explicit` (Dialog, MCP, Vorlage, Duplikat) oder sonst
+/// die Standards des Nutzers, ergänzt um Optionen aus alten `claude_args`. `bypassPermissions` bleibt nur mit
+/// `allow_bypass` (ausdrückliche Wahl im Dialog „Neue Sitzung“). Rückgabe: Optionen und bereinigte freie Reste.
+pub fn resolve_new(explicit: Option<&ClaudeOpts>, allow_bypass: bool, defaults: &ClaudeOpts, legacy_args: &str) -> (ClaudeOpts, String) {
+    let (legacy, rest) = ClaudeOpts::split_legacy(&clean_legacy(legacy_args));
+    // Ausdrückliche Angabe vor alter Zeile; eine alte Zeile (Vorlage) vor den Standards des Nutzers.
+    let o = match explicit {
+        Some(e) => e.or(&legacy),
+        None => legacy.or(&defaults.sanitized(false)),
+    };
+    (o.sanitized(allow_bypass), rest)
+}
+
+/// Gespeicherte Standards/letzte Wahl in `settings.json`: nur gültige Werte, nie `bypassPermissions`.
+pub fn ser_user_opts<S: serde::Serializer>(o: &ClaudeOpts, s: S) -> Result<S::Ok, S::Error> {
+    o.sanitized(false).serialize(s)
+}
+
+/// Wie [`ser_user_opts`] für `Option`.
+pub fn ser_user_opts_opt<S: serde::Serializer>(o: &Option<ClaudeOpts>, s: S) -> Result<S::Ok, S::Error> {
+    o.as_ref().map(|o| o.sanitized(false)).serialize(s)
 }
 
 /// Werte sind geprüft, PowerShell wertet aber zahlähnliche Wörter (`1e5`, `0x10`) als Zahl aus: dort immer in
@@ -229,6 +278,65 @@ mod tests {
     }
 
     #[test]
+    fn manual_maps_to_default() {
+        assert_eq!(ClaudeOpts::from_mcp(&json!({"permission_mode": "manual"})).unwrap().permission_mode, "default");
+        assert_eq!(ClaudeOpts::from_mcp(&json!({"permission_mode": "default"})).unwrap().permission_mode, "default");
+        let o: ClaudeOpts = serde_json::from_value(json!({"permission_mode": "manual"})).unwrap();
+        assert_eq!(o.permission_mode, "default");
+        assert_eq!(ClaudeOpts::split_legacy("--permission-mode manual").0.permission_mode, "default");
+        assert_eq!(ClaudeOpts { permission_mode: "manual".into(), ..Default::default() }.args(Kind::Cmd), " --permission-mode default");
+    }
+
+    #[test]
+    fn agent_sessions_get_explicit_default_mode() {
+        assert_eq!(ClaudeOpts::default().for_agent(&ClaudeOpts::default()).permission_mode, "default");
+        let d = ClaudeOpts { permission_mode: "plan".into(), ..Default::default() };
+        assert_eq!(ClaudeOpts::default().for_agent(&d).permission_mode, "plan", "Standard des Nutzers ohne bypass gilt");
+        assert_eq!(ClaudeOpts { permission_mode: "auto".into(), ..Default::default() }.for_agent(&d).permission_mode, "auto");
+    }
+
+    #[test]
+    fn bypass_only_from_the_explicit_dialog_choice() {
+        let bypass = ClaudeOpts { model: "opus".into(), permission_mode: BYPASS.into(), ..Default::default() };
+        // Dialog „Neue Sitzung“, ausdrücklich gewählt: bleibt.
+        assert_eq!(resolve_new(Some(&bypass), true, &ClaudeOpts::default(), "").0.permission_mode, BYPASS);
+        // Standard der Einstellungen (Kontextmenü, --claude, IPC open, Verlauf, Ticket-Schnellstart, alte Vorlagen): nie.
+        let (o, _) = resolve_new(None, false, &bypass, "");
+        assert_eq!((o.model.as_str(), o.permission_mode.as_str()), ("opus", ""));
+        // MCP, Vorlage, Duplikat: ausdrückliche Angabe, aber ohne Erlaubnis.
+        assert_eq!(resolve_new(Some(&bypass), false, &ClaudeOpts::default(), "").0.permission_mode, "");
+        // Alte claude_args (Vorlage, Duplikat einer alten Sitzung): weder bypass noch --dangerously-*.
+        let (o, rest) = resolve_new(None, false, &ClaudeOpts::default(), "--permission-mode bypassPermissions --dangerously-skip-permissions --allow-dangerously-skip-permissions --verbose");
+        assert_eq!((o.permission_mode.as_str(), rest.as_str()), ("", "--verbose"));
+        // Alte Vorlage: ihre Optionen vor den Standards, fehlende aus den Standards; ohne Optionen nur die Standards.
+        let d = ClaudeOpts { model: "sonnet".into(), effort: "low".into(), ..Default::default() };
+        let (o, rest) = resolve_new(None, false, &d, "--model opus");
+        assert_eq!((o.model.as_str(), o.effort.as_str(), rest.as_str()), ("opus", "low", ""));
+        assert_eq!(resolve_new(None, false, &d, "").0, d);
+        // Duplikat: Optionen der Quelle vor ihrer alten Zeile.
+        let src = ClaudeOpts { model: "haiku".into(), ..Default::default() };
+        assert_eq!(resolve_new(Some(&src), false, &d, "--model opus --effort max").0, ClaudeOpts { model: "haiku".into(), effort: "max".into(), ..Default::default() });
+        // Agenten-Weg
+        assert_eq!(resolve_new(Some(&ClaudeOpts::default().for_agent(&bypass)), false, &bypass, "").0.permission_mode, "default");
+    }
+
+    #[test]
+    fn user_opts_never_persist_bypass_or_invalid_names() {
+        let o = ClaudeOpts { model: "opus; calc".into(), effort: "high".into(), permission_mode: BYPASS.into(), agent: "ok".into() };
+        let mut buf = Vec::new();
+        ser_user_opts(&o, &mut serde_json::Serializer::new(&mut buf)).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), r#"{"effort":"high","agent":"ok"}"#);
+    }
+
+    #[test]
+    fn legacy_leftovers_are_quoted_per_shell() {
+        assert_eq!(legacy_args("--model opus[1m] --x @a", Kind::Pwsh), "--model 'opus[1m]' --x '@a'");
+        assert_eq!(legacy_args("--model opus[1m]", Kind::Posix), "--model 'opus[1m]'");
+        assert_eq!(legacy_args("--model opus[1m]", Kind::Cmd), "--model opus[1m]");
+        assert_eq!(clean_legacy("--dangerously-skip-permissions --model x;y --ok"), "--model --ok");
+    }
+
+    #[test]
     fn efforts_and_modes() {
         for e in EFFORTS {
             assert!(valid_effort(e));
@@ -238,7 +346,7 @@ mod tests {
             assert!(valid_permission_mode(m, false));
         }
         assert!(!valid_permission_mode(BYPASS, false) && valid_permission_mode(BYPASS, true));
-        assert!(!valid_permission_mode("default", true) && !valid_permission_mode("acceptedits", true));
+        assert!(!valid_permission_mode("manual", true) && !valid_permission_mode("acceptedits", true));
     }
 
     #[test]
@@ -261,7 +369,7 @@ mod tests {
             json!({"agent": "a b"}),
             json!({"agent": "x".repeat(101)}),
             json!({"effort": "ultra"}),
-            json!({"permission_mode": "default"}),
+            json!({"permission_mode": "ask"}),
             json!({"permission_mode": "bypassPermissions"}),
         ] {
             assert!(ClaudeOpts::from_mcp(&bad).is_err(), "{bad}");
@@ -274,7 +382,7 @@ mod tests {
     fn agents_never_get_bypass_even_as_default() {
         let defaults = ClaudeOpts { model: "sonnet".into(), effort: "high".into(), permission_mode: BYPASS.into(), agent: String::new() };
         let o = ClaudeOpts::default().for_agent(&defaults);
-        assert_eq!(o, ClaudeOpts { model: "sonnet".into(), effort: "high".into(), ..Default::default() });
+        assert_eq!(o, ClaudeOpts { model: "sonnet".into(), effort: "high".into(), permission_mode: "default".into(), ..Default::default() });
         // Angaben des Agenten haben Vorrang vor den Standards.
         let o = ClaudeOpts { model: "haiku".into(), permission_mode: "plan".into(), ..Default::default() }.for_agent(&defaults);
         assert_eq!((o.model.as_str(), o.effort.as_str(), o.permission_mode.as_str()), ("haiku", "high", "plan"));
@@ -297,7 +405,7 @@ mod tests {
     #[test]
     fn command_line_drops_invalid_values() {
         // Direkt gesetzte (nicht über Deserialize geprüfte) Werte kommen nie ungeprüft in die Zeile.
-        let o = ClaudeOpts { model: "x' ; calc; '".into(), effort: "ultra".into(), permission_mode: "default".into(), agent: "$(id)".into() };
+        let o = ClaudeOpts { model: "x' ; calc; '".into(), effort: "ultra".into(), permission_mode: "ask".into(), agent: "$(id)".into() };
         for k in [Kind::Pwsh, Kind::Posix, Kind::Cmd] {
             assert_eq!(o.args(k), "", "{k:?}");
         }
