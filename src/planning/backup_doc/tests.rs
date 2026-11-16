@@ -207,6 +207,71 @@ fn titles(c: &Connection, project: i64) -> Vec<(i64, String)> {
     st.query_map([project], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|x| x.unwrap()).collect()
 }
 
+#[test]
+fn due_dates_descriptions_and_thresholds_survive_the_roundtrip() {
+    let fx = Fx::new();
+    let c = &fx.c;
+    let fid = |t: i64, k: &str| crate::planning::builtin_fields::field_id(c, t, k).unwrap().unwrap();
+    let mut n = NewTicket::new(fx.project, fx.task, "Mit Termin");
+    n.values = vec![(fid(fx.task, "due"), json!("2026-11-20T14:30")), (fid(fx.task, "description"), json!("Text **fett**"))];
+    create_ticket(c, &n, &Source::ui()).unwrap();
+    let mut n = NewTicket::new(fx.project, fx.epic, "Nur Datum");
+    n.values = vec![(fid(fx.epic, "due"), json!("2026-12-01"))];
+    create_ticket(c, &n, &Source::ui()).unwrap();
+    let mut th = crate::due::default_thresholds();
+    th[1].tint = true;
+    th[1].marker.name = "Dringend".into();
+    th.push(crate::due::DueThreshold { under_minutes: 60, marker: crate::due::DueMarker { frame: crate::due::MarkerFrame::Hexagon, symbol: None, color: "#58A6E6".into(), name: String::new() }, tint: false });
+    crate::planning::projects::set_due_thresholds(c, fx.project, &th).unwrap();
+    let a = export_project(c, fx.project).unwrap();
+    assert_eq!(a.project.due_thresholds.as_deref(), Some(th.as_slice()));
+    let d = fresh();
+    let res = import(&d, &a);
+    let b = export_project(&d, res.project_id).unwrap();
+    assert_eq!(norm(a.clone()), norm(b));
+    assert_eq!(crate::planning::projects::due_thresholds(&d, res.project_id).unwrap(), th);
+    let dues = crate::planning::builtin_fields::due_map(&d, res.project_id).unwrap();
+    let mut v: Vec<&String> = dues.values().collect();
+    v.sort();
+    assert_eq!(v, vec!["2026-11-20T14:30:00", "2026-12-01"]);
+}
+
+#[test]
+fn a_backup_from_before_2_3_imports_with_built_in_fields_and_default_thresholds() {
+    let fx = Fx::new();
+    let c = &fx.c;
+    let desc = crate::planning::builtin_fields::field_id(c, fx.task, "description").unwrap().unwrap();
+    let mut n = NewTicket::new(fx.project, fx.task, "Alt");
+    n.values = vec![(desc, json!("Beschreibung von früher"))];
+    create_ticket(c, &n, &Source::ui()).unwrap();
+    // so sah eine Sicherung von 2.2 aus: ohne Schwellen und ohne Fälligkeitsfeld in den Typen
+    let mut v = serde_json::to_value(export_project(c, fx.project).unwrap()).unwrap();
+    v["project"].as_object_mut().unwrap().remove("due_thresholds");
+    for t in v["structure"]["types"].as_array_mut().unwrap() {
+        t["fields"].as_array_mut().unwrap().retain(|f| f["key"] != "due");
+    }
+    let old: ProjectDoc = serde_json::from_value(v).unwrap();
+    assert!(old.project.due_thresholds.is_none());
+    let d = fresh();
+    let res = import(&d, &old);
+    assert_eq!(crate::planning::projects::due_thresholds(&d, res.project_id).unwrap(), crate::due::default_thresholds(), "Projekt mit Vorlagen");
+    let t = crate::planning::tickets::ticket_by_key(&d, "PAN-1").unwrap();
+    let fs = crate::planning::fields::list_fields(&d, t.type_id).unwrap();
+    assert!(fs[0].is_description() && fs[1].is_due());
+    assert_eq!(crate::planning::values::get_value(&d, t.id, &fs[0]).unwrap(), Some(json!("Beschreibung von früher")));
+    // ohne Vorlagen-Typen: keine Schwellen
+    let mut v2 = serde_json::to_value(&old).unwrap();
+    for t in v2["structure"]["types"].as_array_mut().unwrap() {
+        t["key"] = serde_json::Value::Null;
+        if t["name"].is_null() {
+            t["name"] = json!(format!("Typ {}", t["id"]));
+        }
+    }
+    let old2: ProjectDoc = serde_json::from_value(v2).unwrap();
+    let res2 = import_project(&d, &old2, Some("OLD".to_string())).unwrap();
+    assert!(crate::planning::projects::due_thresholds(&d, res2.project_id).unwrap().is_empty());
+}
+
 // ------------------------------------------------------------------ Export
 
 #[test]

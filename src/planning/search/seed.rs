@@ -328,6 +328,16 @@ impl Seeder<'_> {
             let targets: Vec<i64> =
                 if f.types.is_empty() { self.type_ids.iter().map(|(_, id)| *id).collect() } else { self.type_ids.iter().filter(|(n, _)| f.types.iter().any(|t| t.eq_ignore_ascii_case(n))).map(|(_, id)| *id).collect() };
             for tid in targets {
+                // Beschreibung und Fälligkeit sind in jedem Typ eingebaut: deren Felder benutzen
+                let builtin = match (f.name.to_lowercase().as_str(), f.kind) {
+                    ("description", FieldKind::Rich | FieldKind::Text) => Some(crate::planning::builtin_fields::DESCRIPTION_KEY),
+                    ("due", FieldKind::Date | FieldKind::Datetime) => Some(crate::planning::builtin_fields::DUE_KEY),
+                    _ => None,
+                };
+                if let Some(fid) = builtin.map(|k| crate::planning::builtin_fields::field_id(conn, tid, k)).transpose()?.flatten() {
+                    self.fields.insert((tid, f.name.to_lowercase()), Made { field: fields::get_field(conn, fid)? });
+                    continue;
+                }
                 let key = default_key(&f.name, &FIELD_KEYS);
                 let mut n = NewField::new(tid, &f.name, f.kind);
                 if let Some(k) = key {

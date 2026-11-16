@@ -336,6 +336,12 @@ fn build_inner(b: &mut Builder, tx: &data::Texts, s12_start: NaiveDate) -> Res<B
                         values.push((f, json!(render(if b.de { de } else { en }))));
                     }
                 }
+                // Fälligkeit: jedes dritte Ticket, verteilt von überfällig bis in zwei Wochen
+                if i % 3 == 0 {
+                    if let Some(f) = fid("due") {
+                        values.push((f, json!((today + Duration::days((i % 17) as i64 - 3)).format("%Y-%m-%d").to_string())));
+                    }
+                }
                 if let Some((_, en, de)) = data::STEPS.iter().find(|d| d.0 == tk.id) {
                     if let Some(f) = fid("steps") {
                         values.push((f, json!(render(if b.de { de } else { en }))));

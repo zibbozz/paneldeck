@@ -503,7 +503,7 @@ fn deleting_forgets_the_undo_entries_of_that_ticket() {
 #[test]
 fn todo_cards_convert_into_tickets() {
     both(|h| {
-        let (item, _) = crate::tasks::create_item(&h.db.conn, "Wichtige Idee", "Mehr Text dazu", &["Alpha".to_string()]).unwrap();
+        let (item, _) = crate::tasks::create_item(&h.db.conn, "Wichtige Idee", "Mehr Text dazu", None, &["Alpha".to_string()]).unwrap();
         // das System-Projekt „Todolist“ anzeigen
         let todo = crate::planning::projects::list_projects(&h.db.conn).unwrap().into_iter().find(|p| p.system).unwrap().id;
         h.with(|ui, cx| ui.select(cx, todo));
@@ -549,7 +549,7 @@ fn todo_cards_convert_into_tickets() {
 #[test]
 fn ctrl_z_in_the_todo_overview_waits_for_dialogs_and_text_fields() {
     both(|h| {
-        let (item, _) = crate::tasks::create_item(&h.db.conn, "Idee", "", &[]).unwrap();
+        let (item, _) = crate::tasks::create_item(&h.db.conn, "Idee", "", None, &[]).unwrap();
         let todo = crate::planning::projects::list_projects(&h.db.conn).unwrap().into_iter().find(|p| p.system).unwrap().id;
         h.with(|ui, cx| ui.select(cx, todo));
         h.frames(3);

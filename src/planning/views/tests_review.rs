@@ -59,7 +59,8 @@ fn deleting_a_field_removes_it_from_the_board_card_fields() {
     let p = project(&c, "AA", true);
     let ty = list_types(&c, p).unwrap().into_iter().find(|t| t.key.as_deref() == Some("userstory")).unwrap().id;
     let fields = list_fields(&c, ty).unwrap();
-    let (f1, f2) = (fields[0].id, fields[1].id);
+    // die ersten beiden sind die eingebauten (nicht löschbar)
+    let (f1, f2) = (fields[2].id, fields[3].id);
     let id = board(&c, p, BoardConfig { card_fields: vec![f1, f2], ..Default::default() });
     delete_field(&c, f1, Some(DeleteMode::Discard)).unwrap();
     assert_eq!(get_board(&c, id).unwrap().config.card_fields, vec![f2]);

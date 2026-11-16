@@ -126,7 +126,8 @@ fn header_has_fixed_columns_then_one_column_per_field_in_config_order() {
     let t = table(&exp(&s, &opts()));
     assert_eq!(&t.headers[..9], FIXED_COLUMNS.map(String::from));
     let rest: Vec<&str> = t.headers[9..].iter().map(String::as_str).collect();
-    assert_eq!(rest[..2], ["Description", "Priority"]);
+    assert_eq!(rest[..3], ["Description", "Due date", "Priority"], "eingebaute Felder zuerst");
+    assert_eq!(rest.iter().filter(|h| **h == "Due date").count(), 1);
     assert!(rest.contains(&"Epic") && rest.contains(&"Tags") && rest.contains(&"Related") && rest.contains(&"Steps to reproduce"));
     assert_eq!(rest.iter().filter(|h| **h == "Description").count(), 1, "gleiches Feld in mehreren Typen = eine Spalte");
     assert_eq!(rest.iter().filter(|h| **h == "Priority").count(), 1);

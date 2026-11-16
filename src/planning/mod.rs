@@ -20,6 +20,7 @@
 
 pub mod agent;
 pub mod backup_doc;
+pub mod builtin_fields;
 pub mod clone_move;
 pub mod comments;
 pub mod defaults;
@@ -153,6 +154,8 @@ pub enum PlanError {
     /// Verknüpfungstyp: Namen/Richtungen unstimmig (z. B. fehlende Rückrichtung bei gerichtetem Typ).
     LinkTypeInvalid,
     Template(TemplateProblem),
+    /// Schwellen der Fälligkeits-Markierung ungültig.
+    Thresholds(crate::due::ThresholdProblem),
     Db(String),
 }
 
@@ -220,6 +223,7 @@ impl PlanError {
                 TemplateProblem::Invalid(r) => format!("{}: {r}", lang.t("Ungültiger Wert in der Vorlage", "Invalid value in the template")),
                 TemplateProblem::Json(r) => format!("{}: {r}", lang.t("Die Vorlage ist nicht lesbar", "The template cannot be read")),
             },
+            PlanError::Thresholds(p) => p.message(lang).to_string(),
             PlanError::Db(e) => format!("{}: {e}", lang.t("Datenbankfehler", "Database error")),
         }
     }
@@ -281,6 +285,9 @@ mod tests {
             PlanError::Template(TemplateProblem::Reference("x".into())),
             PlanError::Template(TemplateProblem::Invalid("x".into())),
             PlanError::Template(TemplateProblem::Json("x".into())),
+            PlanError::Thresholds(crate::due::ThresholdProblem::TooMany),
+            PlanError::Thresholds(crate::due::ThresholdProblem::Duration),
+            PlanError::Thresholds(crate::due::ThresholdProblem::Duplicate),
             PlanError::Db("x".into()),
         ];
         for e in all {

@@ -13,6 +13,10 @@
 //!   (`type`, `status`, `title` …), steht ebenfalls in den Konflikten: das eingebaute gewinnt.
 //! * **Eingebaute Pseudo-Felder:** `key`, `type`, `status`, `summary`/`title`, `parent`, `created`, `updated`, `flagged`, `starred`,
 //!   `project`, `sprint` (nur wenn ein Projekt des Bereichs Sprints nutzt), `changedBy`, `terminal`.
+//! * **Eingebaute Felder jedes Tickets:** `description` (dt. auch „Beschreibung“; eigene Text-Felder dieses Namens gehören dazu)
+//!   und `due` (dt. auch „Fällig“). Die Fälligkeit vergleicht „nur Datum“ als Ende des Tages; ein Vergleich mit einem reinen
+//!   Datum vergleicht nur den Tag (`due = 2026-11-20` trifft auch 14:30 an dem Tag). Eigene Datums-Felder namens „Due“/„Fällig“
+//!   (aus älteren Versionen) gehören zur Abfrage `due` dazu; ein eigenes Feld „Due date“ bleibt eigenständig.
 //! * **Namen:** Anzeigename in der Sprache der Oberfläche; ist sie Deutsch, gilt zusätzlich der englische Name (die Hilfe nennt die
 //!   englischen). Auswahlwerte (Typ, Status, Dropdown, Projekt) gelten immer in beiden Sprachen.
 //! * **Schlüsselwörter:** Prädikate und Sortier-Schlüsselwörter kommen aus `views::keywords` (kaputte werden ausgelassen).
@@ -38,6 +42,8 @@ pub(super) enum Class {
     Bool,
     Date,
     DateTime,
+    /// Die eingebaute Fälligkeit: Datum oder Datum mit Uhrzeit (nur Datum = Ende des Tages).
+    Due,
     Dropdown,
     Multi,
     Labels,
@@ -413,6 +419,13 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
         )
         .ok_or_else(|| SearchError::Internal("Feld `terminal` beim Aufbau schon belegt".to_string()))?;
 
+    // ---- eingebaute Felder jedes Tickets: Beschreibung und Fälligkeit (über ihren Schlüssel, nicht den Anzeigenamen)
+    let desc_fields: Vec<ValField> = fields_in_order.iter().filter(|f| f.is_description()).map(|f| ValField { id: f.id, kind: f.kind }).collect();
+    let due_fields: Vec<ValField> = fields_in_order.iter().filter(|f| f.is_due()).map(|f| ValField { id: f.id, kind: f.kind }).collect();
+    let desc_idx = reg.add(&nm("description", "Beschreibung"), FieldType::Text, false, Store::Values(Vals { class: Class::Text, fields: desc_fields, opts: OptionSet::default(), links: false }));
+    let due_idx = reg.add(&nm("due", "Fällig"), FieldType::DateTime, false, Store::Values(Vals { class: Class::Due, fields: due_fields, opts: OptionSet::default(), links: false }));
+    fields_in_order.retain(|f| !f.is_fixed());
+
     // ---- benutzerdefinierte Felder: nach Name und Art gruppieren
     struct Group {
         name_lc: String,
@@ -458,6 +471,20 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
         if matches!(g.class, Class::Version | Class::Milestone) && !versions_on {
             continue;
         }
+        // eigene Text-Felder namens „Description“/„Beschreibung“ gehören zur eingebauten Beschreibung
+        if g.class == Class::Text && (g.name_lc == "description" || g.name_lc == "beschreibung") {
+            if let Some(Store::Values(v)) = desc_idx.map(|i| &mut reg.bindings[i].store) {
+                v.fields.extend(g.fields.iter().map(|f| f.0));
+                continue;
+            }
+        }
+        // eigene Datums-Felder namens „Due“/„Fällig“ (vor 2.3 angelegt) gehören zur eingebauten Fälligkeit (gleiche Speicherform)
+        if matches!(g.class, Class::Date | Class::DateTime) && (g.name_lc == "due" || g.name_lc == "fällig") {
+            if let Some(Store::Values(v)) = due_idx.map(|i| &mut reg.bindings[i].store) {
+                v.fields.extend(g.fields.iter().map(|f| f.0));
+                continue;
+            }
+        }
         // Terminal-Felder namens „terminal“ gehören zum eingebauten Feld
         if g.class == Class::Terminal && g.name_lc == "terminal" {
             if let Store::Values(v) = &mut reg.bindings[terminal_idx].store {
@@ -478,7 +505,7 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             Class::Number => (FieldType::Number, false),
             Class::Bool => (FieldType::Bool, false),
             Class::Date => (FieldType::Date, false),
-            Class::DateTime => (FieldType::DateTime, false),
+            Class::DateTime | Class::Due => (FieldType::DateTime, false),
             Class::Dropdown => (FieldType::Option(opts.flat_names()), false),
             Class::Multi => (FieldType::Option(opts.flat_names()), true),
             Class::Labels => (FieldType::Labels, true),

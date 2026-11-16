@@ -257,7 +257,8 @@ pub fn change_type_preview(conn: &Connection, ticket_id: i64, to_type: i64) -> T
 pub fn change_type_preview_with(conn: &Connection, ticket_id: i64, to_type: i64, mapping: &[FieldMapEntry]) -> TRes<ChangeTypePreview> {
     let p = plan_change(conn, ticket_id, to_type, mapping)?;
     let kept_targets: HashSet<i64> = p.kept.iter().map(|k| k.to.id).collect();
-    let added = p.new_fields.iter().filter(|f| !kept_targets.contains(&f.id)).cloned().collect();
+    // eingebaute Felder (Beschreibung, Fälligkeit) hat jeder Typ: sie sind nie „neu“
+    let added = p.new_fields.iter().filter(|f| !kept_targets.contains(&f.id) && !f.is_fixed()).cloned().collect();
     let new_key = if p.project_change {
         let proj = get_project(conn, p.to.project_id)?;
         Some(format!("{}-{}", proj.key, proj.next_number))

@@ -353,9 +353,12 @@ impl PlanUi {
         let w_prio = if cols.prio { 112.0 } else { 0.0 };
         let w_points = if cols.points { 54.0 } else { 0.0 };
         let w_marks = 56.0;
+        let w_due = if cols.status { 118.0 } else { 0.0 };
+        let thresholds = crate::planning::projects::due_thresholds(cx.conn, sum.project.id).unwrap_or_default();
+        let now = chrono::Local::now().naive_local();
         let show_refs = width >= REFS_MIN_WIDTH && !self.tickets.row_refs.is_empty();
         let w_refs = if show_refs { W_REFS } else { 0.0 };
-        let w_title = (width - 8.0 - w_badge - w_key - w_status - w_prio - w_points - w_refs - w_marks - 8.0).max(80.0);
+        let w_title = (width - 8.0 - w_badge - w_key - w_status - w_due - w_prio - w_points - w_refs - w_marks - 8.0).max(80.0);
         // Kopfzeile
         let mut new_sort: Option<SortCol> = None;
         let (hrect, _) = ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::hover());
@@ -387,6 +390,7 @@ impl PlanUi {
         head(ui, lang.t("Titel", "Title"), Some(SortCol::Title), w_title, false);
         if cols.status {
             head(ui, lang.t("Status", "Status"), Some(SortCol::Status), w_status, false);
+            head(ui, lang.t("Fällig", "Due"), Some(SortCol::Due), w_due, false);
         }
         if cols.prio {
             head(ui, lang.t("Priorität", "Priority"), Some(SortCol::Priority), w_prio, false);
@@ -439,6 +443,12 @@ impl PlanUi {
                 }
                 let ty = sum.type_by_id(t.type_id);
                 let done = t.status_id.and_then(|s| sum.status(s)).is_some_and(|s| s.category == StatusCategory::Done);
+                let due_st = if done { None } else { row.due.as_deref().and_then(|d| crate::due::evaluate(&thresholds, d, now)) };
+                if open != Some(t.id) {
+                    if let Some(tc) = super::due_ui::tint_color(due_st.as_ref(), ui.visuals().dark_mode) {
+                        p.rect_filled(rect, 5.0, tc);
+                    }
+                }
                 let text_col = if done { style::dim(ui) } else { ui.visuals().text_color() };
                 let mut x = rect.left() + 8.0;
                 // Typ
@@ -471,6 +481,24 @@ impl PlanUi {
                         p.galley(Pos2::new(pr.left() + 18.0, pr.center().y - g.size().y / 2.0), g, c);
                     }
                     x += w_status;
+                    if let Some(d) = row.due.as_deref() {
+                        let mut tx = x;
+                        if let Some(m) = due_st.as_ref().and_then(|s| s.marker()) {
+                            let mr = Rect::from_center_size(Pos2::new(x + 8.0, rect.center().y), Vec2::splat(16.0));
+                            let bg = ui.visuals().panel_fill;
+                            super::due_ui::paint_marker(ui.painter(), mr, m, ui.visuals().dark_mode, [bg.r(), bg.g(), bg.b()]);
+                            tx += 20.0;
+                        }
+                        let overdue = due_st.as_ref().is_some_and(|s| s.overdue());
+                        let c = if overdue { FLAG_RED } else { text_col };
+                        let g = ui.painter().layout_no_wrap(crate::due::display(d, lang), egui::FontId::proportional(12.0), c);
+                        ui.painter().galley(Pos2::new(tx, rect.center().y - g.size().y / 2.0), g, c);
+                        if let Some(st) = &due_st {
+                            let hr = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(w_due - 4.0, ROW_H));
+                            ui.interact(hr, egui::Id::new(("rowdue", t.id)), Sense::hover()).on_hover_text(super::due_ui::tooltip_text(st, lang));
+                        }
+                    }
+                    x += w_due;
                 }
                 if cols.prio {
                     if let Some((_, v)) = priority_of(sum, row) {
@@ -635,7 +663,7 @@ mod tests {
         let sum = crate::planning::summary::project_summary(&f.c, f.project).unwrap();
         let t = f.mk(f.task, "T");
         let medium = f.field(f.task, "priority").default_value.unwrap().as_i64().unwrap();
-        let row = Row { ticket: t, prio: Some(medium), points: None };
+        let row = Row { ticket: t, prio: Some(medium), points: None, due: None };
         let (rank, v) = priority_of(&sum, &row).unwrap();
         assert_eq!(rank, 2, "Medium ist der dritte von fünf Werten");
         assert_eq!(v.display(Lang::De), "Normal");

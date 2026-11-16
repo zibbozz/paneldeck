@@ -210,6 +210,10 @@ pub struct DocProject {
     /// Nummer des nächsten Tickets (wird nie zurückgesetzt).
     pub next_number: i64,
     pub created_at: String,
+    /// Schwellen der Fälligkeits-Markierung (ab Paneldeck 2.3). Fehlt das Feld (ältere Sicherung), bekommt ein Projekt mit den
+    /// mitgelieferten Typen die Standard-Schwellen, sonst keine – wie beim Update der Datenbank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_thresholds: Option<Vec<crate::due::DueThreshold>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

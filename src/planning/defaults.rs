@@ -62,12 +62,9 @@ pub(crate) fn apply(conn: &Connection, project_id: i64, use_versions: bool) -> R
         let ids: Vec<i64> = parents.iter().map(|p| tid(p)).collect();
         set_parents(conn, tid(child), &ids)?;
     }
-    // Felder
+    // Felder (Beschreibung und Fälligkeit sind eingebaut und entstehen schon mit dem Typ, siehe `builtin_fields`)
     for (key, _, _) in TYPES {
         let t = tid(key);
-        let mut d = field(t, "description", FieldKind::Rich);
-        d.options.rows = Some(8);
-        create_field(conn, &d)?;
         let mut p = field(t, "priority", FieldKind::Dropdown);
         p.options.values = PRIORITIES.iter().map(|(k, c)| OptionValue { id: 0, key: Some((*k).into()), name: None, color: Some((*c).into()) }).collect();
         p.default_value = Some(json!(3)); // „Medium“ (Normal) ist der dritte Wert, Kennung 3
@@ -184,11 +181,12 @@ mod tests {
         assert_eq!(parents("subtask"), sorted(&["userstory", "devtask", "defect"]));
         // Felder
         let fields = |k: &str| list_fields(&c, id(k)).unwrap();
-        assert_eq!(keys(&fields("epic")), vec!["description", "priority"]);
-        assert_eq!(keys(&fields("userstory")), vec!["description", "priority", "epic", "release_version", "story_points"]);
-        assert_eq!(keys(&fields("devtask")), vec!["description", "priority", "story_points"]);
-        assert_eq!(keys(&fields("subtask")), vec!["description", "priority"]);
-        assert_eq!(keys(&fields("defect")), vec!["description", "priority", "steps"]);
+        // Beschreibung und Fälligkeit sind eingebaut (oben, nicht löschbar)
+        assert_eq!(keys(&fields("epic")), vec!["description", "due", "priority"]);
+        assert_eq!(keys(&fields("userstory")), vec!["description", "due", "priority", "epic", "release_version", "story_points"]);
+        assert_eq!(keys(&fields("devtask")), vec!["description", "due", "priority", "story_points"]);
+        assert_eq!(keys(&fields("subtask")), vec!["description", "due", "priority"]);
+        assert_eq!(keys(&fields("defect")), vec!["description", "due", "priority", "steps"]);
         let us = fields("userstory");
         let kind = |k: &str| us.iter().find(|f| f.key.as_deref() == Some(k)).unwrap().clone();
         assert_eq!(kind("description").kind, FieldKind::Rich);
@@ -208,7 +206,9 @@ mod tests {
         let def = pr.default_value.clone().unwrap().as_i64().unwrap();
         assert_eq!(pr.options.values.iter().find(|v| v.id == def).unwrap().key.as_deref(), Some("priority.medium"));
         assert_eq!(kind("description").display(Lang::De), "Beschreibung");
-        assert_eq!(fields("defect")[2].display(Lang::De), "Schritte zur Reproduktion");
+        assert_eq!(fields("defect")[3].display(Lang::De), "Schritte zur Reproduktion");
+        assert_eq!((kind("due").display(Lang::De), kind("due").display(Lang::En)), ("Fällig am".to_string(), "Due date".to_string()));
+        assert!(kind("due").is_due() && kind("description").is_description());
         // Arten der Arbeit
         let wk = crate::planning::work_kinds::list_work_kinds(&c, p.id).unwrap();
         assert_eq!(wk.iter().map(|w| w.display(Lang::En)).collect::<Vec<_>>(), vec!["Development", "Testing", "Planning", "Refinement"]);
@@ -220,7 +220,7 @@ mod tests {
         let c = db();
         let p = with_defaults(&c, "AA", false);
         let us = by_key(&list_types(&c, p.id).unwrap(), "userstory");
-        assert_eq!(keys(&list_fields(&c, us.id).unwrap()), vec!["description", "priority", "epic", "story_points"]);
+        assert_eq!(keys(&list_fields(&c, us.id).unwrap()), vec!["description", "due", "priority", "epic", "story_points"]);
     }
 
     #[test]
@@ -278,8 +278,8 @@ mod tests {
         let dev = by_key(&list_types(&c, p.id).unwrap(), "devtask");
         let sp = list_fields(&c, dev.id).unwrap().into_iter().find(|f| f.key.as_deref() == Some("story_points")).unwrap();
         delete_field(&c, sp.id, None).unwrap(); // Story Points sind nicht zwingend
-        update_field(&c, list_fields(&c, dev.id).unwrap()[1].id, &UpdateField { name: Some("Wichtigkeit".into()), ..Default::default() }).unwrap();
-        let f = &list_fields(&c, dev.id).unwrap()[1];
+        update_field(&c, list_fields(&c, dev.id).unwrap()[2].id, &UpdateField { name: Some("Wichtigkeit".into()), ..Default::default() }).unwrap();
+        let f = &list_fields(&c, dev.id).unwrap()[2];
         assert_eq!((f.display(Lang::En).as_str(), f.key.as_deref()), ("Wichtigkeit", Some("priority")));
     }
 }

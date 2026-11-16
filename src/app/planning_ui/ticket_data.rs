@@ -34,6 +34,8 @@ pub struct Row {
     pub ticket: Ticket,
     pub prio: Option<i64>,
     pub points: Option<f64>,
+    /// Eingebaute Fälligkeit (gespeicherter Text).
+    pub due: Option<String>,
 }
 
 /// Lädt die Zeilen des Projekts nach dem Filter (alle Treffer; die Liste zeichnet nur den sichtbaren Ausschnitt).
@@ -58,12 +60,14 @@ pub fn load_rows(conn: &Connection, project_id: i64, f: &Filters) -> TRes<(Vec<R
             }
         }
     }
+    let mut dues = crate::planning::builtin_fields::due_map(conn, project_id)?;
     let rows = page
         .items
         .into_iter()
         .map(|t| {
             let (prio, points) = cols.get(&t.id).copied().unwrap_or_default();
-            Row { ticket: t, prio, points }
+            let due = dues.remove(&t.id);
+            Row { ticket: t, prio, points, due }
         })
         .collect();
     Ok((rows, total))

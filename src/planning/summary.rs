@@ -164,7 +164,7 @@ mod tests {
             assert_eq!(t.transitions, workflow::list_transitions(&c, id).unwrap());
         }
         let us = s.type_by_key("userstory").unwrap();
-        assert_eq!(us.fields.len(), 5);
+        assert_eq!(us.fields.len(), 6, "mit den eingebauten Feldern Beschreibung und Fälligkeit");
         assert!(us.field_by_key("epic").is_some() && us.field(us.fields[0].id).is_some());
         assert!(s.status(s.statuses[0].id).is_some() && s.type_by_id(us.ticket_type.id).is_some());
         assert_eq!(project_summary_by_key(&c, "aa").unwrap(), s);

@@ -377,12 +377,56 @@ fn schema_contains_builtin_fields_and_custom_fields_once() {
 }
 
 #[test]
+fn built_in_due_and_description_in_queries() {
+    // eigene Umgebung: nur die eingebauten Felder (ohne das eigene „Due“-Feld der übrigen Tests)
+    let f = Fx::new();
+    let mk = |title: &str, due: Option<&str>, desc: Option<&str>| {
+        let mut n = NewTicket::new(f.project, f.task, title);
+        let fid = |k: &str| crate::planning::builtin_fields::field_id(&f.c, f.task, k).unwrap().unwrap();
+        if let Some(d) = due {
+            n.values.push((fid("due"), json!(d)));
+        }
+        if let Some(d) = desc {
+            n.values.push((fid("description"), json!(d)));
+        }
+        create_ticket(&f.c, &n, &ui()).unwrap().0.key()
+    };
+    let a = mk("Morgens", Some("2026-11-16T09:00"), Some("Login prüfen"));
+    let b = mk("Tagesende", Some("2026-11-16"), None);
+    let c = mk("Morgen", Some("2026-11-17T08:00"), Some("Nichts"));
+    let _d = mk("Ohne", None, None);
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |jql: &str| -> Vec<String> { run_query(&f.c, &ctx, Scope::Project(f.project), jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    // reines Datum vergleicht den Tag (auch Einträge mit Uhrzeit an diesem Tag)
+    assert_eq!(q("due = 2026-11-16"), vec![a.clone(), b.clone()]);
+    assert_eq!(q("due > 2026-11-16"), vec![c.clone()]);
+    assert_eq!(q("due <= 2026-11-16"), vec![a.clone(), b.clone()]);
+    // mit Uhrzeit: nur Datum gilt als Ende des Tages
+    assert_eq!(q("due < \"2026-11-16 12:00\""), vec![a.clone()]);
+    assert_eq!(q("due > \"2026-11-16 12:00\""), vec![b.clone(), c.clone()]);
+    // Sortierung: 09:00 vor Tagesende vor morgen; ohne Fälligkeit hinten
+    assert_eq!(q("due IS NOT EMPTY ORDER BY due"), vec![a.clone(), b.clone(), c.clone()]);
+    assert_eq!(q("due IS NOT EMPTY ORDER BY due DESC"), vec![c.clone(), b.clone(), a.clone()]);
+    assert_eq!(q("due IS EMPTY").len(), 1);
+    // Beschreibung als Text, auch auf Deutsch
+    assert_eq!(q("description ~ login"), vec![a.clone()]);
+    let de = Ctx::new(TODAY, Lang::De);
+    let r = run_query(&f.c, &de, Scope::Project(f.project), "Beschreibung ~ login AND Fällig < 2026-11-17", Page::ALL).unwrap();
+    assert_eq!(r.rows.iter().map(|x| x.key.clone()).collect::<Vec<_>>(), vec![a]);
+    // Schema: eingebaute Namen
+    let s = schema_for(&f.c, Scope::Project(f.project), Lang::En).unwrap();
+    assert!(matches!(s.field("due").unwrap().ty, crate::query::FieldType::DateTime) && matches!(s.field("description").unwrap().ty, crate::query::FieldType::Text));
+}
+
+#[test]
 fn schema_types_and_values() {
     let s = Sx::new();
     let schema = schema_for(&s.f.c, s.scope(), Lang::En).unwrap();
     use crate::query::FieldType;
     assert!(matches!(&schema.field("labels").unwrap().ty, FieldType::Labels) && schema.field("labels").unwrap().multi);
-    assert!(matches!(&schema.field("due").unwrap().ty, FieldType::Date));
+    // „Due“ (eigenes Datumsfeld) gehört zur eingebauten Fälligkeit: Datum mit optionaler Uhrzeit
+    assert!(matches!(&schema.field("due").unwrap().ty, FieldType::DateTime));
+    assert!(matches!(&schema.field("description").unwrap().ty, FieldType::Text));
     assert!(matches!(&schema.field("start").unwrap().ty, FieldType::DateTime));
     assert!(matches!(&schema.field("reviewed").unwrap().ty, FieldType::Bool));
     assert!(matches!(&schema.field("epic").unwrap().ty, FieldType::TicketRef));
@@ -432,13 +476,21 @@ fn conflicting_field_kinds_keep_the_most_common_and_report_the_rest() {
     let s = Sx::new();
     let other = s.f.other_project("OTH");
     let epic = crate::planning::types::list_types(&s.f.c, other).unwrap()[0].id;
-    // „Due“ als Text in einem Typ, drei Datumsfelder im Projekt PAN
+    // „Due“ als Text in einem Typ, drei Datumsfelder im Projekt PAN (die gehören zur eingebauten Fälligkeit), dazu „Size“ als Text
+    // in einem und als Zahl in zwei Typen
     crate::planning::fields::create_field(&s.f.c, &crate::planning::fields::NewField::new(epic, "Due", FieldKind::Text)).unwrap();
+    crate::planning::fields::create_field(&s.f.c, &crate::planning::fields::NewField::new(epic, "Size", FieldKind::Text)).unwrap();
+    for ty in crate::planning::types::list_types(&s.f.c, other).unwrap().iter().skip(1).take(2) {
+        crate::planning::fields::create_field(&s.f.c, &crate::planning::fields::NewField::new(ty.id, "Size", FieldKind::Number)).unwrap();
+    }
     let ss = search_schema(&s.f.c, Scope::All, Lang::En).unwrap();
-    assert!(matches!(ss.schema.field("due").unwrap().ty, crate::query::FieldType::Date));
-    assert_eq!(ss.conflicts.len(), 1);
-    assert_eq!(ss.conflicts[0].kept, Some(FieldKind::Date));
-    assert_eq!(ss.conflicts[0].dropped, vec![FieldKind::Text]);
+    assert!(matches!(ss.schema.field("due").unwrap().ty, crate::query::FieldType::DateTime));
+    assert!(matches!(ss.schema.field("size").unwrap().ty, crate::query::FieldType::Number));
+    assert_eq!(ss.conflicts.len(), 2, "{:?}", ss.conflicts);
+    let due = ss.conflicts.iter().find(|c| c.name == "Due").unwrap();
+    assert_eq!((due.kept, due.dropped.clone()), (Some(FieldKind::Date), vec![FieldKind::Text]), "die Datumsfelder gehören zur eingebauten Fälligkeit, das Text-Feld fällt weg");
+    let size = ss.conflicts.iter().find(|c| c.name == "Size").unwrap();
+    assert_eq!((size.kept, size.dropped.clone()), (Some(FieldKind::Number), vec![FieldKind::Text]));
 }
 
 #[test]

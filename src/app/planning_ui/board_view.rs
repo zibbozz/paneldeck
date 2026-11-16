@@ -794,9 +794,11 @@ fn chip(ui: &mut Ui, text: &str, color: Option<Color32>) {
 
 /// Zeichnet eine Karte und liefert ihr Rechteck. Der Inhalt hat keine eigene Bedienung (die Karte wird als Ganzes angefasst).
 fn paint_card(ui: &mut Ui, card: &Card, cfg: &BoardConfig, lang: Lang, ghost: bool) -> Rect {
-    let _ = lang;
     let v = ui.visuals();
-    let fill = if ghost { v.window_fill } else { v.widgets.inactive.bg_fill };
+    let mut fill = if ghost { v.window_fill } else { v.widgets.inactive.bg_fill };
+    if let Some(t) = super::due_ui::tint_color(card.due_state.as_ref(), v.dark_mode) {
+        fill = super::due_ui::tinted(fill, t);
+    }
     let stroke = if ghost { Stroke::new(1.5_f32, style::accent()) } else { Stroke::new(1.0_f32, v.widgets.noninteractive.bg_stroke.color) };
     let dimmed = card.done && !ghost;
     let type_col = color_of(&card.type_color);
@@ -830,6 +832,9 @@ fn paint_card(ui: &mut Ui, card: &Card, cfg: &BoardConfig, lang: Lang, ghost: bo
             title = title.strikethrough();
         }
         ui.add(egui::Label::new(title).selectable(false));
+        if let Some(d) = &card.due {
+            super::due_ui::due_line(ui, d, card.due_state.as_ref(), lang);
+        }
         if !card.fields.is_empty() || !card.labels.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);

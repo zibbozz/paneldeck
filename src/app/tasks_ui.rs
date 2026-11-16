@@ -5,6 +5,7 @@ use super::*;
 use crate::state::UNDO_STEP_CHOICES;
 use crate::tasks::{self, Item, ItemFilter, Tag, TaskError, TaskOp};
 use crate::undo::History;
+use super::planning_ui::due_ui;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align, FontFamily, Galley, Layout, Painter, Response};
 use std::sync::Arc;
@@ -40,6 +41,8 @@ fn bold_font(size: f32) -> FontId {
 struct CardForm {
     title: String,
     body: String,
+    /// Fälligkeit als Eingabetext (`2026-11-20`, `2026-11-20 14:30`; leer = keine).
+    due: String,
     /// Gewählte Tag-Namen (neue entstehen erst beim Bestätigen).
     tags: Vec<String>,
     tag_input: String,
@@ -113,6 +116,9 @@ struct TagMgr {
     picker: Option<i64>,
 }
 
+/// Arbeitskopie des Dialogs „Fälligkeit“.
+struct DueManager(due_ui::Manager);
+
 struct Drag {
     id: i64,
     /// Abstand des Zeigers zur linken oberen Ecke der Karte beim Greifen.
@@ -157,6 +163,15 @@ pub(super) struct TasksUi {
     drag: Option<Drag>,
     /// Meldung für die Hinweisblase der Anwendung (z. B. Datenbankfehler).
     pub(super) notice: Option<String>,
+    /// Filter und Sortierung nach Fälligkeit.
+    due_filter: tasks::DueFilter,
+    sort: tasks::ItemSort,
+    /// Schwellen der Fälligkeits-Markierung der Todo-Liste (beim Laden gelesen).
+    thresholds: Vec<crate::due::DueThreshold>,
+    /// Dialog „Fälligkeit“ (Verwalter der Schwellen), offen = `Some`.
+    due_mgr: Option<DueManager>,
+    /// (überfällig, markiert) der offenen Karten für die Übersicht (Reiter-Kopf).
+    pub(super) due_counts: (usize, usize),
 }
 
 impl Default for TasksUi {
@@ -185,6 +200,11 @@ impl Default for TasksUi {
             tag_mgr: None,
             drag: None,
             notice: None,
+            due_filter: tasks::DueFilter::All,
+            sort: tasks::ItemSort::Manual,
+            thresholds: crate::due::default_thresholds(),
+            due_mgr: None,
+            due_counts: (0, 0),
         }
     }
 }
@@ -205,6 +225,10 @@ struct Colors {
     text: Color32,
     strong: Color32,
     dim: Color32,
+    /// Dunkles Theme (für die Farben der Fälligkeits-Markierung).
+    dark: bool,
+    /// Kartenhintergrund als RGB (Untergrund einer Markierung ohne Rahmen).
+    bg: [u8; 3],
 }
 
 impl Colors {
@@ -218,6 +242,8 @@ impl Colors {
             text: v.text_color(),
             strong: v.strong_text_color(),
             dim: v.weak_text_color(),
+            dark: v.dark_mode,
+            bg: [fill.r(), fill.g(), fill.b()],
         }
     }
 }
@@ -277,12 +303,14 @@ struct CardLayout {
     title: Option<(Arc<Galley>, Vec2)>,
     body: Option<(Arc<Galley>, Vec2)>,
     sep_y: Option<f32>,
+    /// Zeile der Fälligkeit: Markierung (falls eine) und Datumstext.
+    due: Option<(Option<Rect>, Arc<Galley>, Vec2)>,
     chips: Arc<Vec<ChipBox>>,
     check: Rect,
     trash: Rect,
 }
 
-fn layout_card(p: &Painter, it: &Item, all: &[Tag], w: f32, col: &Colors) -> CardLayout {
+fn layout_card(p: &Painter, it: &Item, all: &[Tag], w: f32, col: &Colors, st: Option<&crate::due::DueState>, lang: Lang) -> CardLayout {
     let fade = if it.done { 0.5 } else { 1.0 };
     let inner = w - 2.0 * CARD_PAD;
     let mut y = 8.0;
@@ -312,6 +340,18 @@ fn layout_card(p: &Painter, it: &Item, all: &[Tag], w: f32, col: &Colors) -> Car
         y += h;
     }
     y += 8.0;
+    // Fälligkeit: Markierung und Datum (rot, wenn überfällig)
+    let mut due = None;
+    if let Some(d) = it.due.as_deref() {
+        let overdue = st.is_some_and(|s| s.overdue());
+        let c = if overdue { DANGER } else { col.dim };
+        let g = galley(p, &crate::due::display(d, lang), FontId::proportional(12.0), c.gamma_multiply(fade), it.done, inner - 22.0);
+        let marker = st.and_then(|s| s.marker()).map(|_| Rect::from_min_size(Pos2::new(CARD_PAD, y), Vec2::splat(16.0)));
+        let x = if marker.is_some() { CARD_PAD + 21.0 } else { CARD_PAD };
+        let h = g.size().y.max(16.0);
+        due = Some((marker, g.clone(), Vec2::new(x, y + (h - g.size().y) / 2.0)));
+        y += h + 6.0;
+    }
     // Fußzeile: Tags links (umbrechend), Checkbox rechts unten
     let mut chips = Vec::new();
     let mut tags: Vec<&Tag> = it.tags.iter().filter_map(|id| all.iter().find(|t| t.id == *id)).collect();
@@ -332,7 +372,7 @@ fn layout_card(p: &Painter, it: &Item, all: &[Tag], w: f32, col: &Colors) -> Car
     let row_h = chips_h.max(20.0);
     let check = Rect::from_min_size(Pos2::new(w - CARD_PAD - 20.0, y + row_h - 20.0), Vec2::splat(20.0));
     y += row_h + 10.0;
-    CardLayout { size: Vec2::new(w, y), key, key_pos, title, body, sep_y, chips: Arc::new(chips), check, trash }
+    CardLayout { size: Vec2::new(w, y), key, key_pos, title, body, sep_y, due, chips: Arc::new(chips), check, trash }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -343,10 +383,13 @@ struct Hover {
     chip: Option<usize>,
 }
 
-fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors, hv: Hover, ghost: bool) {
+fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors, hv: Hover, ghost: bool, st: Option<&crate::due::DueState>) {
     let fade = if it.done { 0.5 } else { 1.0 };
     let o = rect.min.to_vec2();
-    let fill = if hv.card || ghost { col.fill_hover } else { col.fill };
+    let mut fill = if hv.card || ghost { col.fill_hover } else { col.fill };
+    if let Some(t) = due_ui::tint_color(st, col.dark) {
+        fill = due_ui::tinted(fill, t);
+    }
     let stroke = if ghost { style::accent() } else if hv.card { style::mix(col.stroke, col.text, 0.3) } else { col.stroke };
     p.rect(rect, 10.0, fill, Stroke::new(if ghost { 1.5_f32 } else { 1.0_f32 }, stroke), StrokeKind::Inside);
     p.galley(Pos2::ZERO + lay.key_pos + o, lay.key.clone(), col.dim);
@@ -358,6 +401,12 @@ fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors
     }
     if let Some((g, pos)) = &lay.body {
         p.galley(Pos2::ZERO + *pos + o, g.clone(), col.text);
+    }
+    if let Some((mr, g, pos)) = &lay.due {
+        if let (Some(mr), Some(m)) = (mr, st.and_then(|s| s.marker())) {
+            due_ui::paint_marker(p, mr.translate(o), m, col.dark, col.bg);
+        }
+        p.galley(Pos2::ZERO + *pos + o, g.clone(), col.dim);
     }
     for (i, c) in lay.chips.iter().enumerate() {
         paint_chip(p, c.rect.translate(o), &c.tag.name, Some(tag_color(&c.tag)), false, false, hv.chip == Some(i), col.strong, col.dim, fade);
@@ -399,9 +448,14 @@ fn card_form_ui(ui: &mut Ui, form: &mut CardForm, all: &[Tag], lang: Lang, salt:
     ui.label(RichText::new(lang.t("Text (optional)", "Text (optional)")).small().color(dim));
     let r_body = ui.add(egui::TextEdit::multiline(&mut form.body).id(Id::new((salt, "body"))).desired_width(f32::INFINITY).desired_rows(4).margin(Margin::symmetric(8, 6)).hint_text(lang.t("Beschreibung …", "Description …")));
     ui.add_space(S1);
+    ui.label(RichText::new(lang.t("Fällig am (optional)", "Due date (optional)")).small().color(dim));
+    let due_id = Id::new((salt, "due"));
+    due_ui::due_input(ui, due_id, &mut form.due, lang);
+    let due_focus = ui.memory(|m| m.has_focus(due_id));
+    ui.add_space(S1);
     ui.label(RichText::new("Tags").small().color(dim));
     let tag_focus = tag_editor(ui, form, all, lang, Id::new((salt, "tag")));
-    let any_focus = r_title.has_focus() || r_body.has_focus() || tag_focus;
+    let any_focus = r_title.has_focus() || r_body.has_focus() || tag_focus || due_focus;
     any_focus && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter))
 }
 
@@ -521,7 +575,15 @@ impl TasksUi {
             self.total = t;
             self.done_total = d;
             self.filter.retain(|f| self.tags.iter().any(|t| t.id == *f));
-            self.items = tasks::list_items(conn, &self.filter())?;
+            self.thresholds = tasks::due_thresholds(conn)?;
+            let now = chrono::Local::now().naive_local();
+            self.due_counts = tasks::due_counts(conn, now)?;
+            let mut items = tasks::list_items(conn, &self.filter())?;
+            items.retain(|i| self.due_filter.matches(i, &self.thresholds, now));
+            if self.sort == tasks::ItemSort::Due {
+                tasks::sort_by_due(&mut items);
+            }
+            self.items = items;
             Ok(())
         })();
         if let Err(e) = r {
@@ -577,7 +639,7 @@ impl TasksUi {
     }
 
     fn any_modal(&self) -> bool {
-        self.edit.is_some() || self.confirm.is_some() || self.merge_ask.is_some() || self.tag_mgr.is_some()
+        self.edit.is_some() || self.confirm.is_some() || self.merge_ask.is_some() || self.tag_mgr.is_some() || self.due_mgr.is_some()
     }
 
     /// Tastenkürzel des Reiters: Strg+N (neue Karte), Strg+Z / Strg+Y / Strg+Umschalt+Z.
@@ -685,7 +747,7 @@ impl TasksUi {
                 let add = ui.add_sized([btn_w, 32.0], egui::Button::new(lang.t("Hinzufügen", "Add")).fill(style::accent().gamma_multiply(0.35))).clicked();
                 if enter || add {
                     let text = std::mem::take(&mut self.quick);
-                    match tasks::create_item(conn, "", &text, &[]) {
+                    match tasks::create_item(conn, "", &text, None, &[]) {
                         Ok((_, op)) => {
                             self.commit(Some(op));
                             self.create_err = None;
@@ -733,7 +795,7 @@ impl TasksUi {
                 if create {
                     self.form.flush_tag(&all);
                     let names = self.form.tags.clone();
-                    match tasks::create_item(conn, &self.form.title, &self.form.body, &names) {
+                    match tasks::create_item(conn, &self.form.title, &self.form.body, Some(&self.form.due), &names) {
                         Ok((_, op)) => {
                             self.commit(Some(op));
                             self.form.clear();
@@ -800,6 +862,26 @@ impl TasksUi {
                 if ui.small_button(lang.t("Tags …", "Tags …")).on_hover_text(lang.t("Tags verwalten", "Manage tags")).clicked() {
                     self.tag_mgr = Some(TagMgr::default());
                 }
+                if ui.small_button(lang.t("Fälligkeit …", "Due dates …")).on_hover_text(lang.t("Markierungen fälliger Karten einstellen", "Set up the markers of due cards")).clicked() {
+                    self.due_mgr = Some(DueManager(due_ui::Manager { loaded_for: Some(0), list: self.thresholds.clone(), err: None }));
+                }
+                let sort_label = match self.sort {
+                    tasks::ItemSort::Manual => lang.t("Sortierung: eigene", "Order: manual"),
+                    tasks::ItemSort::Due => lang.t("Sortierung: Fälligkeit", "Order: due date"),
+                };
+                if ui.small_button(sort_label).on_hover_text(lang.t("Zwischen eigener Reihenfolge und Fälligkeit (früheste zuerst) wechseln", "Switch between your own order and due date (earliest first)")).clicked() {
+                    self.sort = if self.sort == tasks::ItemSort::Manual { tasks::ItemSort::Due } else { tasks::ItemSort::Manual };
+                    self.dirty = true;
+                }
+                let before = self.due_filter;
+                egui::ComboBox::from_id_salt("todo_due_filter").selected_text(self.due_filter.label(lang)).width(120.0).show_ui(ui, |ui| {
+                    for f in tasks::DueFilter::ALL {
+                        ui.selectable_value(&mut self.due_filter, f, f.label(lang));
+                    }
+                });
+                if self.due_filter != before {
+                    self.dirty = true;
+                }
                 if self.done_total > 0 {
                     if ui.small_button(format!("{} ({}) …", lang.t("Erledigte löschen", "Delete completed"), self.done_total)).clicked() {
                         self.confirm = Some(Confirm { kind: ConfirmKind::AllDone(self.done_total), since: Instant::now() });
@@ -862,8 +944,10 @@ impl TasksUi {
             let viewport = ui.clip_rect();
             let mut rects: Vec<(i64, Rect)> = Vec::with_capacity(self.items.len());
             let mut ghost: Option<(CardLayout, Item)> = None;
+            let now = chrono::Local::now().naive_local();
             for it in &self.items {
-                let lay = layout_card(ui.painter(), it, &self.tags, w, &col);
+                let st = if it.done { None } else { it.due.as_deref().and_then(|d| crate::due::evaluate(&self.thresholds, d, now)) };
+                let lay = layout_card(ui.painter(), it, &self.tags, w, &col, st.as_ref(), lang);
                 let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), lay.size.y), Sense::hover());
                 let rect = Rect::from_min_size(Pos2::new(cx - w / 2.0, row.top()), lay.size);
                 rects.push((it.id, rect));
@@ -900,7 +984,10 @@ impl TasksUi {
                     ui.painter().rect(rect, 10.0, col.fill.gamma_multiply(0.5), Stroke::new(1.0_f32, style::accent().gamma_multiply(0.5)), StrokeKind::Inside);
                     ghost = Some((lay.clone(), it.clone()));
                 } else {
-                    paint_card(ui.painter(), rect, &lay, it, &col, hv, false);
+                    paint_card(ui.painter(), rect, &lay, it, &col, hv, false, st.as_ref());
+                    if let (Some((Some(mr), _, _)), Some(s)) = (&lay.due, &st) {
+                        ui.interact(mr.translate(o).expand(2.0), base.with("due"), Sense::hover()).on_hover_text(due_ui::tooltip_text(s, lang));
+                    }
                 }
                 if r_trash.clicked() {
                     acts.push(CardAct::Delete(it.id));
@@ -931,7 +1018,7 @@ impl TasksUi {
                     let rect = Rect::from_min_size(Pos2::new(cx - w / 2.0, p.y - grab.y), lay.size);
                     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("todo_ghost")));
                     painter.rect_filled(rect.translate(Vec2::new(0.0, 4.0)).expand(1.0), 10.0, Color32::from_black_alpha(60));
-                    paint_card(&painter, rect, lay, it, &col, Hover::default(), true);
+                    paint_card(&painter, rect, lay, it, &col, Hover::default(), true, None);
                 }
                 let edge = 36.0;
                 if p.y < viewport.top() + edge {
@@ -972,7 +1059,7 @@ impl TasksUi {
                         let tags = it.tags.iter().filter_map(|t| self.tags.iter().find(|x| x.id == *t)).map(|t| t.name.clone()).collect::<Vec<_>>();
                         let mut tags = tags;
                         tags.sort_by_key(|a| a.to_lowercase());
-                        self.edit = Some(EditDialog { id, key: it.key(), form: CardForm { title: it.title.clone(), body: it.body.clone(), tags, ..CardForm::default() }, err: None, focus_title: true });
+                        self.edit = Some(EditDialog { id, key: it.key(), form: CardForm { title: it.title.clone(), body: it.body.clone(), due: it.due.as_deref().map(crate::due::edit_text).unwrap_or_default(), tags, ..CardForm::default() }, err: None, focus_title: true });
                     }
                 }
                 CardAct::FilterTag(id) => {
@@ -989,9 +1076,45 @@ impl TasksUi {
 
     fn dialogs(&mut self, ctx: &egui::Context, conn: &rusqlite::Connection, lang: Lang) {
         self.edit_dialog(ctx, conn, lang);
+        self.due_dialog(ctx, conn, lang);
         self.tag_manager(ctx, conn, lang);
         self.merge_dialog(ctx, conn, lang);
         self.confirm_dialog(ctx, conn, lang);
+    }
+
+    /// Dialog „Fälligkeit“: Schwellen der Todo-Liste (gleicher Verwalter wie in den Projekt-Einstellungen).
+    fn due_dialog(&mut self, ctx: &egui::Context, conn: &rusqlite::Connection, lang: Lang) {
+        let Some(mut mgr) = self.due_mgr.take() else { return };
+        let mut close = false;
+        let m = egui::Modal::new(Id::new("todo_due_modal")).show(ctx, |ui| {
+            ui.set_width(Self::modal_width(ctx, 760.0));
+            ui.label(RichText::new(lang.t("Fälligkeit – Markierungen", "Due dates – markers")).heading());
+            ui.add_space(S2);
+            let save = match due_ui::manager_ui(ui, "todo", &mut mgr.0, true, lang) {
+                due_ui::ManagerOut::None => None,
+                due_ui::ManagerOut::Save(list) => Some(list),
+                due_ui::ManagerOut::Defaults => Some(crate::due::default_thresholds()),
+            };
+            if let Some(list) = save {
+                match tasks::set_due_thresholds(conn, &list) {
+                    Ok(()) => {
+                        mgr.0.list = list;
+                        self.dirty = true;
+                    }
+                    Err(e) => mgr.0.err = Some(e.message(lang)),
+                }
+            }
+            ui.add_space(S2);
+            if ui.button(lang.t("Schließen", "Close")).clicked() {
+                close = true;
+            }
+        });
+        if m.should_close() {
+            close = true;
+        }
+        if !close {
+            self.due_mgr = Some(mgr);
+        }
     }
 
     fn modal_width(ctx: &egui::Context, want: f32) -> f32 {
@@ -1035,12 +1158,12 @@ impl TasksUi {
         }
         if save {
             ed.form.flush_tag(&all);
-            match tasks::edit_item(conn, ed.id, &ed.form.title, &ed.form.body, &ed.form.tags) {
+            match tasks::edit_item(conn, ed.id, &ed.form.title, &ed.form.body, Some(&ed.form.due), &ed.form.tags) {
                 Ok(op) => {
                     self.commit(op);
                     close = true;
                 }
-                Err(TaskError::Empty) => ed.err = Some(TaskError::Empty),
+                Err(e @ (TaskError::Empty | TaskError::DueInvalid)) => ed.err = Some(e),
                 Err(e) => {
                     self.fail(lang, &e);
                     close = true;
@@ -1350,6 +1473,8 @@ impl App {
             }
         }
         self.tasks.show(ctx, &env);
+        // Kopf („3 überfällig“) mit dem Stand der gerade geladenen Liste
+        self.plan.set_todo_due_counts(self.tasks.due_counts);
         if let Some(n) = self.tasks.notice.take() {
             self.notice = Some((n, Instant::now()));
         }
@@ -1439,5 +1564,73 @@ impl App {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod due_tests {
+    use super::*;
+    use crate::due::{self, DueThreshold};
+
+    fn layout(it: &Item, st: Option<&crate::due::DueState>) -> CardLayout {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let prop = fonts.families[&FontFamily::Proportional].clone();
+        fonts.families.insert(FontFamily::Name("bold".into()), prop);
+        ctx.set_fonts(fonts);
+        let mut out = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let col = Colors::of(ui);
+                let lay = layout_card(ui.painter(), it, &[], 400.0, &col, st, Lang::En);
+                // zeichnen geht ohne Absturz, mit und ohne Tönung
+                paint_card(ui.painter(), Rect::from_min_size(Pos2::ZERO, lay.size), &lay, it, &col, Hover::default(), false, st);
+                out = Some(lay);
+            });
+        });
+        out.unwrap()
+    }
+
+    #[test]
+    fn todo_cards_show_the_due_date_and_marker_and_the_list_sorts_and_filters() {
+        let conn = crate::db::open_memory();
+        let now = chrono::Local::now().naive_local();
+        let day = |d: i64| (now.date() + chrono::Duration::days(d)).format("%Y-%m-%d").to_string();
+        let (a, _) = tasks::create_item(&conn, "Später", "", Some(&day(30)), &[]).unwrap();
+        let (b, _) = tasks::create_item(&conn, "Überfällig", "Beschreibung", Some(&day(-1)), &[]).unwrap();
+        let (c, _) = tasks::create_item(&conn, "Ohne", "", None, &[]).unwrap();
+        let (d, _) = tasks::create_item(&conn, "Bald", "", Some(&format!("{} 09:30", day(2))), &[]).unwrap();
+        assert_eq!(d.due.as_deref().map(|x| x.len()), Some(16), "mit Uhrzeit gespeichert");
+        assert!(matches!(tasks::create_item(&conn, "x", "", Some("morgen"), &[]), Err(TaskError::DueInvalid)));
+        let th = tasks::due_thresholds(&conn).unwrap();
+        assert_eq!(th, due::default_thresholds(), "Todo-Liste: Standard-Schwellen");
+        // Karte: Datumszeile mit Markierung (rot, überfällig) bzw. ohne Markierung (in 30 Tagen) bzw. ohne Zeile
+        let st_b = due::evaluate(&th, b.due.as_deref().unwrap(), now);
+        let lay = layout(&b, st_b.as_ref());
+        assert!(matches!(&lay.due, Some((Some(_), _, _))), "Markierung neben dem Datum");
+        let st_a = due::evaluate(&th, a.due.as_deref().unwrap(), now);
+        assert!(matches!(&layout(&a, st_a.as_ref()).due, Some((None, _, _))));
+        assert!(layout(&c, None).due.is_none());
+        let lay_c = layout(&c, None);
+        assert!(lay.size.y > lay_c.size.y);
+        // Tönung: an der Karte nur, wenn die Schwelle es verlangt
+        let mut tinted = th.clone();
+        tinted[1].tint = true;
+        tasks::set_due_thresholds(&conn, &tinted).unwrap();
+        let st = due::evaluate(&tasks::due_thresholds(&conn).unwrap(), b.due.as_deref().unwrap(), now);
+        assert!(due_ui::tint_color(st.as_ref(), true).is_some() && due_ui::tint_color(st_b.as_ref(), true).is_none());
+        layout(&b, st.as_ref());
+        // Sortierung nach Fälligkeit: früheste zuerst, ohne hinten; Filter
+        let mut items = tasks::list_items(&conn, &ItemFilter::default()).unwrap();
+        tasks::sort_by_due(&mut items);
+        assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), vec![b.id, d.id, a.id, c.id]);
+        let ids = |f: tasks::DueFilter| items.iter().filter(|i| f.matches(i, &tinted, now)).map(|i| i.id).collect::<Vec<_>>();
+        assert_eq!(ids(tasks::DueFilter::WithDue), vec![b.id, d.id, a.id]);
+        assert_eq!(ids(tasks::DueFilter::Overdue), vec![b.id]);
+        assert_eq!(ids(tasks::DueFilter::Marked), vec![b.id, d.id]);
+        assert_eq!(tasks::due_counts(&conn, now).unwrap(), (1, 2));
+        // leere Schwellen: nichts markiert, aber überfällig zählt weiter
+        tasks::set_due_thresholds(&conn, &Vec::<DueThreshold>::new()).unwrap();
+        assert_eq!(tasks::due_counts(&conn, now).unwrap(), (1, 0));
     }
 }
