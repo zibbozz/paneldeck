@@ -203,6 +203,17 @@ impl App {
                                 });
                             },
                         );
+                        row(
+                            ui,
+                            lang.t("Programme dürfen in die Zwischenablage kopieren (OSC 52)", "Allow programs to copy to the clipboard (OSC 52)"),
+                            lang.t(
+                                "Z. B. Claude Code, vim oder tmux in WSL- und SSH-Sitzungen. Programme können die Zwischenablage nur beschreiben, nie lesen; höchstens 1 MB.",
+                                "E.g. Claude Code, vim or tmux in WSL and SSH sessions. Programs can only write to the clipboard, never read it; at most 1 MB.",
+                            ),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.osc52_copy);
+                            },
+                        );
                     }
                     2 => {
                         row(ui, lang.t("Claude-Modus", "Claude mode"), lang.t("Zeigt Claude-Funktionen: Start, Status, Kosten, Verlauf", "Shows Claude features: start, status, cost, history"), |ui| {

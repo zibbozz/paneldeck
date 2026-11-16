@@ -219,6 +219,9 @@ pub struct Settings {
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
     /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
     pub remember_sessions: bool,
+    /// Programme dürfen per OSC 52 in die Zwischenablage kopieren (seit 2.3.0, #181, Standard an). Lesen der
+    /// Zwischenablage durch Programme gibt es nie. Fehlt in älteren Dateien (dann an).
+    pub osc52_copy: bool,
 }
 
 /// Was das Mausrad in einem Vollbildprogramm (alternativer Bildschirm) tut, das keine Mausereignisse angefordert hat.
@@ -285,6 +288,7 @@ impl Default for Settings {
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
+            osc52_copy: true,
         }
     }
 }
@@ -981,6 +985,22 @@ mod tests {
         assert_eq!(j["remember_sessions"], false);
         let back: Settings = serde_json::from_value(j).unwrap();
         assert!(!back.remember_sessions);
+    }
+
+    #[test]
+    fn osc52_copy_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „an“, die übrigen Werte bleiben.
+        let old = r#"{"language":"De","confirm_close":false}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.osc52_copy);
+        assert!(!s.confirm_close);
+        assert!(Settings::default().osc52_copy);
+        let mut s = s;
+        s.osc52_copy = false;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["osc52_copy"], false);
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(!back.osc52_copy);
     }
 
     #[test]

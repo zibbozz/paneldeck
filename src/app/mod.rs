@@ -41,6 +41,7 @@ mod glyph_tests;
 mod mcp;
 mod models_ui;
 mod multiwin;
+mod osc52;
 mod panels;
 mod planning_ui;
 mod settings;
@@ -736,6 +737,8 @@ pub struct App {
     toasts: toasts::ToastQueue,
     toasts_epoch: Instant,
     toasts_hover: Option<u64>,
+    /// Letzter Toast „In die Zwischenablage kopiert“ je Sitzung (OSC 52, #181) – gegen Toast-Fluten.
+    osc52_toasts: HashMap<u64, Instant>,
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
@@ -987,6 +990,7 @@ impl App {
             toasts: Default::default(),
             toasts_epoch: Instant::now(),
             toasts_hover: None,
+            osc52_toasts: HashMap::new(),
             hwnd: crate::winctl::hwnd_from(cc),
             in_tray: false,
             editor: None,
@@ -2267,8 +2271,13 @@ impl App {
         let threshold = self.settings.cmd_notify_secs as u64 * 1000;
         let lang = self.settings.language;
         let mut toasts: Vec<(u64, String, CmdDone)> = Vec::new();
+        let mut copies: Vec<(u64, String, crate::terminal::ClipboardRequest)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else { continue };
+            // Immer abholen, auch bei abgeschalteter Einstellung: ein alter Wunsch darf nicht später doch noch greifen.
+            if let Some(req) = s.take_clipboard() {
+                copies.push((*id, e.display_name(), req));
+            }
             let (cwd, done) = {
                 let mut st = s.shell_state.lock().unwrap_or_else(|e| e.into_inner());
                 (st.cwd.take(), std::mem::take(&mut st.done))
@@ -2282,6 +2291,9 @@ impl App {
                     toasts.push((*id, e.display_name(), d));
                 }
             }
+        }
+        for (sid, name, req) in copies {
+            self.osc52_copy(ctx, sid, &name, req);
         }
         for (sid, name, d) in toasts {
             let secs = d.dur_ms.unwrap_or(0) / 1000;
