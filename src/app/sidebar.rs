@@ -512,6 +512,13 @@ impl App {
                 status_tip.push('\n');
             }
         }
+        if claude && !is_chat {
+            // Startoptionen der Sitzung (#161), z. B. „Claude: opus · high · plan · Agent reviewer“.
+            let o = e.meta.claude_opts_eff().0.summary("Agent");
+            if !o.is_empty() {
+                status_tip += &format!("{} {o}\n", lang.t("Claude-Optionen:", "Claude options:"));
+            }
+        }
         if is_chat {
             status_tip += &format!("{}: {}", lang.t("Modell", "Model"), e.chat_model());
         } else if let Some(g) = self.git.get(id) {

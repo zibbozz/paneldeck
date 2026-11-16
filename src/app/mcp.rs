@@ -17,6 +17,28 @@ use std::sync::mpsc::SyncSender;
 
 type R = Result<Value, (String, String)>;
 
+/// Wurde eine der Claude-Startoptionen angegeben (nicht leer)?
+fn has_claude_opts(args: &Value) -> bool {
+    ["model", "effort", "permission_mode", "agent"].iter().any(|k| match args.get(*k) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) => !s.trim().is_empty(),
+        Some(_) => true,
+    })
+}
+
+/// `model`/`effort`/`permission_mode`/`agent` einer Claude-Sitzung (`null`, wenn Paneldeck sie nicht setzt).
+/// Bei Chats bleibt `model` das Modell des Chats; die übrigen sind dort `null`.
+fn add_claude_opts(v: &mut Value, e: &super::Entry) {
+    let o = if e.meta.claude && !e.is_chat() { e.meta.claude_opts_eff().0 } else { ClaudeOpts::default() };
+    let j = o.to_json();
+    if !e.is_chat() {
+        v["model"] = j["model"].clone();
+    }
+    for k in ["effort", "permission_mode", "agent"] {
+        v[k] = j[k].clone();
+    }
+}
+
 fn tr(de: &'static str, en: &'static str) -> &'static str {
     state::t(de, en)
 }
@@ -838,7 +860,7 @@ impl App {
         let Some(e) = self.entries.get(&id) else { return json!({"session": null, "identified_by": "none"}) };
         let project = self.projects.iter().find(|p| p.id == e.meta.project).map(|p| p.name.clone()).unwrap_or_default();
         let children: Vec<u64> = self.mcp.created.iter().filter(|(_, c)| **c == Some(id)).map(|(k, _)| *k).filter(|k| self.entries.contains_key(k)).collect();
-        json!({
+        let mut v = json!({
             "session": id,
             "identified_by": how,
             "name": e.display_name(),
@@ -851,7 +873,9 @@ impl App {
             "children": children,
             // Sitzungen, in die dieser Agent nicht schreiben darf (er stammt von ihnen ab, #152).
             "agent_chain": super::taint::ancestors(&self.entries, Some(id)),
-        })
+        });
+        add_claude_opts(&mut v, e);
+        v
     }
 
     fn mcp_list(&self, args: &Value, caller: Option<u64>) -> Value {
@@ -866,7 +890,7 @@ impl App {
                 let project = self.projects.iter().find(|p| p.id == e.meta.project).map(|p| p.name.clone()).unwrap_or_default();
                 // Fenster der Sitzung (0 = Hauptfenster); fokussiert/sichtbar gelten in diesem Fenster.
                 let (window, focused, visible) = self.session_view_info(*id);
-                json!({
+                let mut v = json!({
                     "id": id,
                     "name": e.display_name(),
                     "project": project,
@@ -891,7 +915,9 @@ impl App {
                     "agent_chain": super::taint::ancestors(&self.entries, Some(*id)),
                     "you": caller == Some(*id),
                     "error": e.error,
-                })
+                });
+                add_claude_opts(&mut v, e);
+                v
             })
             .collect();
         // Namen, Ordner und Branches können aus dem Terminal (Fenstertitel) oder aus Repositories stammen: nicht vertrauenswürdig
@@ -965,10 +991,21 @@ impl App {
         if chat {
             return self.mcp_create_chat(ctx, args, caller);
         }
-        if s("server").is_some() || s("model").is_some() {
-            return Err(er("bad_args", tr("server und model gibt es nur mit kind = „chat“.", "server and model only apply with kind = “chat”.")));
+        if s("server").is_some() {
+            return Err(er("bad_args", tr("server gibt es nur mit kind = „chat“.", "server only applies with kind = “chat”.")));
         }
         let claude = args.get("claude").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !claude && has_claude_opts(args) {
+            return Err(er(
+                "bad_args",
+                tr(
+                    "model, effort, permission_mode und agent gibt es nur mit claude = true (model außerdem mit kind = „chat“).",
+                    "model, effort, permission_mode and agent only apply with claude = true (model also with kind = “chat”).",
+                ),
+            ));
+        }
+        // Nur geprüfte Startoptionen, nie freie Argumente; bypassPermissions nie (auch nicht als Standard des Nutzers).
+        let copts = ClaudeOpts::from_mcp(args).map_err(|(d, e)| er("bad_args", if de() { d } else { e }))?.for_agent(&self.settings.claude_defaults);
         if claude && !self.settings.claude_mode {
             return Err(er("claude_mode_off", tr("Der Claude-Modus ist in den Einstellungen ausgeschaltet.", "Claude mode is switched off in the settings.")));
         }
@@ -1001,7 +1038,7 @@ impl App {
         // Ohne `group`: Läuft der Agent in einer Hub-Sitzung, kommen seine neuen Sitzungen in einen Unterordner mit deren Namen
         // (Baumansicht) – so stehen Kinder unter dem Elternteil und sind leicht zu finden.
         let group = self.mcp_child_group(s("group"), caller);
-        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, prompt, group, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
+        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, claude_opts: Some(copts), prompt, group, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
         if let Some(err) = self.entries.get(&id).and_then(|e| e.error.clone()) {
             self.close_session(id);
@@ -1010,7 +1047,9 @@ impl App {
         self.mcp.created.insert(id, caller);
         self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
-        Ok(json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.meta.claude, "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")}))
+        let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.meta.claude, "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
+        add_claude_opts(&mut v, e);
+        Ok(v)
     }
 
     /// Gruppe einer neuen Sitzung: `group` oder – läuft der Agent in einer Hub-Sitzung – ein Unterordner mit deren Namen
@@ -1027,8 +1066,8 @@ impl App {
     /// `create_session` mit `kind = chat`: Chat mit einem eingerichteten Modell, im Fenster/Projekt des Aufrufers.
     fn mcp_create_chat(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-        if s("shell").is_some() || s("prompt").is_some() || args.get("claude").and_then(|v| v.as_bool()) == Some(true) {
-            return Err(er("bad_args", tr("Ein Chat hat keine Shell und kein Claude: shell, claude und prompt gibt es nur für Terminals.", "A chat has no shell and no Claude: shell, claude and prompt only apply to terminals.")));
+        if s("shell").is_some() || s("prompt").is_some() || s("effort").is_some() || s("permission_mode").is_some() || s("agent").is_some() || args.get("claude").and_then(|v| v.as_bool()) == Some(true) {
+            return Err(er("bad_args", tr("Ein Chat hat keine Shell und kein Claude: shell, claude, prompt, effort, permission_mode und agent gibt es nur für Terminals.", "A chat has no shell and no Claude: shell, claude, prompt, effort, permission_mode and agent only apply to terminals.")));
         }
         let cwd = s("cwd");
         if let Some(c) = &cwd {
@@ -1675,6 +1714,13 @@ mod tests {
         st.created.insert(9, Some(1));
         st.session_closed(9);
         assert!(st.created.is_empty());
+    }
+
+    #[test]
+    fn claude_opts_given() {
+        assert!(!has_claude_opts(&json!({})) && !has_claude_opts(&json!({"model": " ", "effort": null, "claude": true})));
+        assert!(has_claude_opts(&json!({"model": "opus"})) && has_claude_opts(&json!({"effort": 3})) && has_claude_opts(&json!({"agent": "a"})));
+        assert!(has_claude_opts(&json!({"permission_mode": "bypassPermissions"})));
     }
 
     #[test]
