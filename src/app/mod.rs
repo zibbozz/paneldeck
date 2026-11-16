@@ -35,6 +35,7 @@ mod data;
 mod dialogs;
 mod dragdrop;
 mod empty_hub;
+pub(crate) mod folder_picker;
 mod fresh_start;
 mod closing;
 #[cfg(test)]
@@ -196,6 +197,9 @@ impl Entry {
     fn cwd_now(&self) -> String {
         if !self.live_cwd.is_empty() {
             self.live_cwd.clone()
+        } else if self.meta.cwd.is_empty() && self.eff_shell().starts_with("wsl") && !self.is_chat() {
+            // WSL ohne Ordner startet im Linux-Home (#172).
+            "~".to_string()
         } else if self.meta.cwd.is_empty() {
             home_dir()
         } else {
@@ -409,6 +413,8 @@ struct NewDialog {
     repo_for: String,
     repo: Option<PathBuf>,
     group: String,
+    /// Ordnerfeld (WSL-fähig, #172); `cwd` wird jedes Bild daraus übernommen.
+    picker: folder_picker::FolderPicker,
 }
 
 #[derive(Default)]
@@ -452,7 +458,15 @@ struct Launch<'a> {
 
 impl NewDialog {
     fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
-        NewDialog { shell_id, cwd: home_dir(), name: String::new(), claude, copts, continue_last: false, claude_continue: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new() }
+        let cwd = home_dir();
+        let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
+        NewDialog { shell_id, cwd, name: String::new(), claude, copts, continue_last: false, claude_continue: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+    }
+
+    /// Startordner von außen setzen (Profil, Ordnervorgabe).
+    fn set_cwd(&mut self, c: &str) {
+        self.picker.set_text(c);
+        self.cwd = self.picker.value();
     }
 }
 
@@ -473,6 +487,8 @@ enum PromptKind {
     NewProject,
     RenameProject,
     ProjectFolder,
+    /// Arbeitsordner eines Ordners im Baum (`TextPrompt::folder`), nur bei WSL-Shell als Dialog (#172).
+    FolderCwd,
 }
 
 struct TextPrompt {
@@ -480,6 +496,10 @@ struct TextPrompt {
     id: u64,
     tags_for: Option<u64>,
     text: String,
+    /// Ordner im Baum (`PromptKind::FolderCwd`).
+    folder: String,
+    /// Ordnerfeld statt Textfeld (Ordnervorgaben, deren Shell WSL ist, #172).
+    picker: Option<folder_picker::FolderPicker>,
 }
 
 struct EditorFile {
@@ -660,6 +680,8 @@ pub struct App {
     folder_prompt: Option<FolderPrompt>,
     folder_rects: Vec<(String, Rect)>,
     tree_geo: TreeGeo,
+    /// Hinweise aus `spawn_into` (z. B. unbrauchbarer gespeicherter WSL-Ordner), im nächsten Bild als Meldung gezeigt.
+    spawn_notes: std::cell::RefCell<Vec<String>>,
     new_dialog: Option<NewDialog>,
     /// Dialog „Neuer Chat“ (Server und Modell wählen).
     new_chat: Option<models_ui::NewChatDlg>,
@@ -925,6 +947,7 @@ impl App {
             folder_prompt: None,
             folder_rects: Vec::new(),
             tree_geo: TreeGeo::default(),
+            spawn_notes: Default::default(),
             new_dialog: None,
             new_chat: None,
             confirm_close: None,
@@ -1139,8 +1162,21 @@ impl App {
     /// Ordner (oder Ordner einer Datei) als neue Sitzung öffnen; gibt deren Kennung zurück.
     fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) -> u64 {
         let p = std::path::Path::new(path);
-        let dir = if p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
-        self.new_session(ctx, NewOpts { cwd: Some(dir), claude: claude && self.settings.claude_mode, ..NewOpts::default() })
+        // Ein WSL-Pfad gilt ungeprüft als Ordner (schon das Prüfen kann die WSL-VM starten und die Oberfläche blockieren).
+        let dir = if !crate::wsl::is_wsl_unc(path) && p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
+        // Ordner in einer WSL-Distribution (`\\wsl.localhost\<Distro>\…`, `\\wsl$\…`, z. B. „Hier öffnen“ im Explorer):
+        // WSL-Sitzung dieser Distribution im passenden Linux-Pfad (#172). Unbekannte Distribution: wie bisher.
+        // Das Standardprofil des Projekts kann ein eigenes Programm haben: nur wenn die Sitzung wirklich in dieser
+        // Distribution startet, den Linux-Pfad nehmen – sonst bleibt es der (für Windows gültige) UNC-Pfad.
+        let wsl = crate::wsl::unc_to_linux(&dir).and_then(|(d, linux)| self.wsl_shell_for(&d).map(|sid| (d, sid, linux))).filter(|(d, sid, _)| {
+            let eff = self.effective_shell_id(Some(sid), self.active_project);
+            matches!(folder_picker::Target::for_shell(self.shell_by_id(&eff).as_ref(), false), folder_picker::Target::Wsl { distro: Some(x), .. } if x.eq_ignore_ascii_case(d))
+        }).map(|(_, sid, linux)| (sid, linux));
+        let (shell_id, cwd) = match wsl {
+            Some((sid, linux)) => (Some(sid), linux),
+            None => (None, dir),
+        };
+        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
@@ -1371,6 +1407,46 @@ impl App {
         if id == 0 { None } else { self.settings.profiles.iter().find(|p| p.id == id) }
     }
 
+    /// Shell-Kennung, die eine neue Sitzung mit diesem Profil ohne ausdrückliche Shell bekommt (wie `new_session`).
+    fn shell_for_profile(&self, pid: u64) -> String {
+        match self.profile(pid) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            Some(p) if !p.shell_id.is_empty() => p.shell_id.clone(),
+            _ => self.settings.default_shell.clone(),
+        }
+    }
+
+    /// Shell, mit der `new_session` tatsächlich startet: ein Standardprofil des Projekts mit eigenem Programm gewinnt,
+    /// sonst die gewünschte Shell, sonst die des Profils bzw. die Standard-Shell.
+    fn effective_shell_id(&self, shell: Option<&str>, project: u64) -> String {
+        let pid = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        match self.profile(pid) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            _ => shell.map(str::to_string).unwrap_or_else(|| self.shell_for_profile(pid)),
+        }
+    }
+
+    /// Ziel des Ordnerfelds für Ordner-/Projektvorgaben mit diesem Profil (WSL-Shell → Linux-Pfad, #172).
+    fn folder_target(&self, pid: u64) -> folder_picker::Target {
+        folder_picker::Target::for_shell(self.shell_by_id(&self.shell_for_profile(pid)).as_ref(), false)
+    }
+
+    /// Ziel des Ordnerfelds im Dialog „Neue Sitzung“: die gewählte Shell (bzw. die des Profils); bei einer erkannten
+    /// WSL-Shell ist die Distribution dort wählbar (wechselt die Shell).
+    fn new_dialog_target(&self, shell_id: &str, profile: u64) -> folder_picker::Target {
+        let sid = match self.profile(profile) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            _ => shell_id.to_string(),
+        };
+        let choose = sid.starts_with("wsl:") && self.shells.iter().any(|s| s.id == sid);
+        folder_picker::Target::for_shell(self.shell_by_id(&sid).as_ref(), choose)
+    }
+
+    /// Erkannte WSL-Shell einer Distribution (Groß-/Kleinschreibung egal, wie Windows).
+    fn wsl_shell_for(&self, distro: &str) -> Option<String> {
+        self.shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|d| d.eq_ignore_ascii_case(distro))).map(|s| s.id.clone())
+    }
+
     fn shell_by_id(&self, id: &str) -> Option<ShellSpec> {
         if let Some(pid) = id.strip_prefix("custom:").and_then(|n| n.parse::<u64>().ok()) {
             if let Some(p) = self.profile(pid) {
@@ -1457,10 +1533,11 @@ impl App {
         entry.launched_claude = entry.meta.claude && !entry.is_chat();
         entry.launched_opts = if entry.launched_claude { entry.meta.claude_opts_eff().0 } else { Default::default() };
         entry.hook_seen = false;
-        let Some(shell) = self.shell_by_id(&entry.meta.shell_id) else {
+        let Some(mut shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
         };
+        let wsl = shells::is_wsl(&shell);
         let restore_text = if l.restore {
             std::fs::read_to_string(self.scrollback_path(entry.meta.id)).ok()
         } else {
@@ -1485,7 +1562,51 @@ impl App {
             (Some(st), None) => Some(format!("{st}\r")),
             (None, c) => c,
         };
-        let cwd = if entry.meta.cwd.is_empty() { home_dir() } else { entry.meta.cwd.clone() };
+        // WSL: ein Linux-Startordner (leer = Linux-Home `~`, #172) geht als `wsl.exe --cd <pfad>` mit; der
+        // Windows-Startordner ist dann nur ein gültiger Platzhalter. Windows-Pfade übersetzt wsl.exe wie bisher selbst.
+        // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
+        // erreichen die Kommandozeile nie (wsl.exe zerlegt sie selbst – Befehlseinschleusung).
+        let cwd = if wsl {
+            let distro = shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args));
+            let de = self.settings.language == Lang::De;
+            match crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) {
+                crate::wsl::Cd::Linux => home_dir(),
+                // Eigenes `--cd`/`~` des Profils (oder keine bekannte Distribution): nie einen Linux- oder WSL-Pfad als
+                // Windows-Startordner (CreateProcess) – und keine Prüfung eines \\wsl$-Pfads im UI-Thread.
+                crate::wsl::Cd::Windows if spawn_cwd_is_windows(&entry.meta.cwd) => entry.meta.cwd.clone(),
+                crate::wsl::Cd::Windows => home_dir(),
+                crate::wsl::Cd::OtherDistro(d) => {
+                    let msg = if de {
+                        format!("Der Startordner liegt in der WSL-Distribution {d}, die Shell startet eine andere: {}", entry.meta.cwd)
+                    } else {
+                        format!("The start folder is in the WSL distribution {d}, but the shell starts another one: {}", entry.meta.cwd)
+                    };
+                    entry.error = Some(msg);
+                    entry.live = None;
+                    return;
+                }
+                crate::wsl::Cd::Invalid(e) => {
+                    // Gespeicherter Ordner (Wiederherstellen, Teilen, Duplizieren; kann per OSC 7 vom Terminalinhalt stammen)
+                    // ist als Startordner unzulässig: im Linux-Home starten und das melden, statt die Sitzung zu verweigern.
+                    // Dialog und MCP lehnen solche Pfade schon vorher ab.
+                    let old = std::mem::replace(&mut entry.meta.cwd, "~".into());
+                    let _ = crate::wsl::apply_cd(&mut shell.args, "~", distro.as_deref());
+                    self.spawn_notes.borrow_mut().push(if de {
+                        format!("Startordner nicht verwendbar ({}): {} – die Sitzung startet im Linux-Home (~).", e.message(true), crate::mcp::short(&old, 80))
+                    } else {
+                        format!("Start folder not usable ({}): {} – the session starts in the Linux home (~).", e.message(false), crate::mcp::short(&old, 80))
+                    });
+                    home_dir()
+                }
+            }
+        } else if entry.meta.cwd.is_empty() {
+            home_dir()
+        } else if crate::wsl::looks_linux(&entry.meta.cwd) {
+            // Nie einen Linux-Pfad an eine Windows-Shell geben: `/mnt/c/x` → `C:\x`, sonst das Windows-Home.
+            crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
+        } else {
+            entry.meta.cwd.clone()
+        };
         // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
         entry.session_key = hooks::random_hex();
         let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string()), (hooks::ENV_SESSION_KEY.to_string(), entry.session_key.clone())];
@@ -1523,7 +1644,6 @@ impl App {
             env.push((crate::paths::ENV_HUB_DATA.to_string(), self.dir.display().to_string()));
             env.push((crate::paths::ENV_HUB_BASE.to_string(), crate::paths::get().base.display().to_string()));
         }
-        let wsl = shells::is_wsl(&shell);
         if wsl {
             // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Profilvariablen.
             let mut names = vec![hooks::ENV_SESSION.to_string(), hooks::ENV_PORT.to_string(), hooks::ENV_TOKEN.to_string()];
@@ -1541,7 +1661,6 @@ impl App {
         }
         entry.shell_eff = shell.id.clone();
         entry.status = ClaudeStatus::Unknown;
-        let mut shell = shell;
         if self.settings.shell_integration {
             let (extra_args, extra_env) = shells::integration(&shell);
             shell.args.extend(extra_args);
@@ -3065,7 +3184,7 @@ impl App {
                 }
             }
             Action::SwitchProject(id) => self.switch_project(id),
-            Action::NewProjectPrompt => self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: None, text: String::new() }),
+            Action::NewProjectPrompt => self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: None, text: String::new(), folder: String::new(), picker: None }),
             Action::ProjectPrompt(id, kind) => {
                 let text = self
                     .projects
@@ -3073,7 +3192,12 @@ impl App {
                     .find(|p| p.id == id)
                     .map(|p| if kind == PromptKind::ProjectFolder { p.folder.clone() } else { p.name.clone() })
                     .unwrap_or_default();
-                self.text_prompt = Some(TextPrompt { kind, id, tags_for: None, text });
+                // Standardordner eines Projekts, dessen Shell WSL ist: Ordnerfeld mit Linux-Pfad (#172).
+                let picker = (kind == PromptKind::ProjectFolder)
+                    .then(|| self.folder_target(self.projects.iter().find(|p| p.id == id).map(|p| p.profile).unwrap_or(0)))
+                    .filter(|t| *t != folder_picker::Target::Windows)
+                    .map(|t| folder_picker::FolderPicker::new(("projfolder", id), &text, t));
+                self.text_prompt = Some(TextPrompt { kind, id, tags_for: None, text, folder: String::new(), picker });
             }
             Action::SetProjectColor(id, c) => {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
@@ -3082,7 +3206,7 @@ impl App {
             }
             Action::TagsPrompt(id) => {
                 let text = self.entries.get(&id).map(|e| e.meta.tags.join(", ")).unwrap_or_default();
-                self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: Some(id), text });
+                self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: Some(id), text, folder: String::new(), picker: None });
             }
             Action::DeleteProject(id) => {
                 let other = self.projects.iter().find(|p| p.id != id).map(|p| p.id);
@@ -3251,6 +3375,16 @@ impl App {
                 }
             }
             Action::FolderCwd(path, clear) => {
+                // Shell des Ordners (geerbtes Profil, sonst das des Projekts) ist WSL: Ordnerfeld mit Linux-Pfad (#172).
+                let proj = self.projects.iter().find(|p| p.id == self.active_project);
+                let pid = proj.and_then(|p| p.inherited(&path, |f| Some(f.profile).filter(|x| *x != 0)).or(Some(p.profile))).unwrap_or(0);
+                let target = self.folder_target(pid);
+                if !clear && target != folder_picker::Target::Windows {
+                    let cur = proj.and_then(|p| p.folder(&path)).map(|f| f.cwd.clone()).unwrap_or_default();
+                    let picker = folder_picker::FolderPicker::new(("foldercwd", &path), &cur, target);
+                    self.text_prompt = Some(TextPrompt { kind: PromptKind::FolderCwd, id: self.active_project, tags_for: None, text: cur, folder: path, picker: Some(picker) });
+                    return;
+                }
                 let start = self.entries.get(&self.focused).map(|e| e.cwd_now()).unwrap_or_else(home_dir);
                 let new = if clear { Some(String::new()) } else { notify::pick_folder(&start) };
                 if let (Some(c), Some(f)) = (new, self.active_folder_mut(&path)) {
@@ -3268,7 +3402,7 @@ impl App {
                 let prof = proj.and_then(|p| p.inherited(&path, |f| Some(f.profile).filter(|x| *x != 0)));
                 let mut d = NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode, self.dialog_claude_opts());
                 if let Some(c) = cwd.or_else(|| proj.map(|p| p.folder.clone()).filter(|c| !c.is_empty())) {
-                    d.cwd = c;
+                    d.set_cwd(&c);
                 }
                 if let Some(pr) = prof {
                     d.profile = pr;
@@ -3416,6 +3550,9 @@ impl eframe::App for App {
         #[cfg(feature = "readme-shots")]
         self.dev_shot_mode();
         self.track_focus(ctx);
+        for n in self.spawn_notes.take() {
+            self.notify_text(n);
+        }
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
         crate::usage::set_prices(self.settings.prices.clone());
@@ -4082,19 +4219,74 @@ fn split_args(s: &str) -> Vec<String> {
     out
 }
 
+/// Taugt der gespeicherte Ordner einer WSL-Sitzung, deren Startordner `wsl.exe` nicht per `--cd` bekommt (eigenes
+/// `--cd` des Profils, Distribution unbekannt), als Windows-Startordner? Nie ein Linux-Pfad und nie ein `\\wsl$`-Pfad
+/// (den müsste der UI-Thread prüfen); sonst das Windows-Home.
+fn spawn_cwd_is_windows(cwd: &str) -> bool {
+    !cwd.trim().is_empty() && !crate::wsl::looks_linux(cwd.trim()) && !crate::wsl::is_wsl_unc(cwd)
+}
+
+/// Ein Argument nach den Regeln von `CommandLineToArgvW` maskieren (Leerzeichen → Anführungszeichen, `\` vor `"`
+/// verdoppeln).
+fn win_quote_arg(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '\n', '\u{0b}', '"']) {
+        return a.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut slashes = 0usize;
+    for c in a.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(slashes));
+                out.push(c);
+                slashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(slashes * 2));
+    out.push('"');
+    out
+}
+
+/// PowerShell-Befehl für den Start mit erhöhten Rechten. `Start-Process -ArgumentList` hängt seine Werte nur mit
+/// Leerzeichen aneinander; deshalb wird die Kommandozeile hier selbst maskiert (sonst zerfiele z. B.
+/// `--cd /home/u/my project` in drei Argumente). Einfache Anführungszeichen (auch die typografischen, die PowerShell
+/// ebenso als Begrenzer liest) werden verdoppelt.
+fn elevated_script(shell: &ShellSpec, cwd: Option<&str>) -> String {
+    let q = |s: &str| {
+        let mut o = String::new();
+        for c in s.chars() {
+            if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                o.push(c);
+            }
+            o.push(c);
+        }
+        o
+    };
+    let mut script = format!("Start-Process -FilePath '{}' -Verb RunAs", q(&shell.program));
+    if !shell.args.is_empty() {
+        let line: Vec<String> = shell.args.iter().map(|a| win_quote_arg(a)).collect();
+        script += &format!(" -ArgumentList '{}'", q(&line.join(" ")));
+    }
+    if let Some(c) = cwd {
+        script += &format!(" -WorkingDirectory '{}'", q(c));
+    }
+    script
+}
+
 /// Startet die Shell mit erhöhten Rechten in einem externen Fenster (nur Windows).
 fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let q = |s: &str| s.replace('\'', "''");
-        let mut script = format!("Start-Process -FilePath '{}' -Verb RunAs", q(&shell.program));
-        if !shell.args.is_empty() {
-            script += &format!(" -ArgumentList '{}'", q(&shell.args.join(" ")));
-        }
-        if std::path::Path::new(cwd).is_dir() {
-            script += &format!(" -WorkingDirectory '{}'", q(cwd));
-        }
+        // WSL-Pfade ungeprüft (keine Prüfung im UI-Thread); sonst nur vorhandene Ordner.
+        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || std::path::Path::new(c).is_dir()));
         let ok = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
             .creation_flags(0x0800_0000)
@@ -4360,6 +4552,46 @@ mod pane_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wsl_spawn_cwd_fallbacks() {
+        // Profil mit eigenem `--cd`: ein Linux-/WSL-Ordner wird nie zum Windows-Startordner.
+        assert!(spawn_cwd_is_windows(r"C:\Work"));
+        assert!(!spawn_cwd_is_windows("/home/u"));
+        assert!(!spawn_cwd_is_windows("~"));
+        assert!(!spawn_cwd_is_windows(r"\\wsl$\Ubuntu\home"));
+        assert!(!spawn_cwd_is_windows(""));
+        let mut args = vec!["--cd".to_string(), "/srv".to_string()];
+        assert_eq!(crate::wsl::apply_cd(&mut args, "/home/u", Some("Ubuntu")), crate::wsl::Cd::Windows);
+        // Gespeicherter Ordner mit `"` (z. B. per OSC 7 aus dem Terminal): beim Wiederherstellen ~ statt Abbruch.
+        let mut args = vec!["-d".to_string(), "Ubuntu".to_string()];
+        assert!(matches!(crate::wsl::apply_cd(&mut args, "/tmp/x\" echo pwned; #", Some("Ubuntu")), crate::wsl::Cd::Invalid(_)));
+        assert_eq!(crate::wsl::apply_cd(&mut args, "~", Some("Ubuntu")), crate::wsl::Cd::Linux);
+        assert_eq!(args, vec!["--cd", "~", "-d", "Ubuntu"]);
+        // cwd_now: WSL ohne Ordner = ~, andere Shells = Windows-Home
+        let mut e = Entry::new(SessionMeta { shell_id: "wsl:Ubuntu".into(), ..SessionMeta::default() });
+        assert_eq!(e.cwd_now(), "~");
+        e.meta.shell_id = "powershell".into();
+        assert_eq!(e.cwd_now(), home_dir());
+    }
+
+    #[test]
+    fn elevated_start_quotes_each_argument() {
+        let mut args = vec!["-d".to_string(), "Ubuntu".to_string()];
+        assert_eq!(crate::wsl::apply_cd(&mut args, "/home/u/my project", Some("Ubuntu")), crate::wsl::Cd::Linux);
+        let shell = ShellSpec { id: "wsl:Ubuntu".into(), label: "x".into(), program: "wsl.exe".into(), args };
+        let s = elevated_script(&shell, Some(r"C:\Users\o'neil"));
+        assert_eq!(s, r#"Start-Process -FilePath 'wsl.exe' -Verb RunAs -ArgumentList '--cd "/home/u/my project" -d Ubuntu' -WorkingDirectory 'C:\Users\o''neil'"#);
+        // CommandLineToArgvW-Regeln: Anführungszeichen und Backslashes davor, abschließende Backslashes
+        assert_eq!(win_quote_arg("plain"), "plain");
+        assert_eq!(win_quote_arg(""), "\"\"");
+        assert_eq!(win_quote_arg(r#"a "b""#), r#""a \"b\"""#);
+        assert_eq!(win_quote_arg(r"C:\a b\"), r#""C:\a b\\""#);
+        assert_eq!(win_quote_arg(r#"x\"y"#), r#""x\\\"y""#);
+        // Typografische einfache Anführungszeichen beenden in PowerShell ebenfalls den String: verdoppeln.
+        let shell = ShellSpec { id: "pwsh".into(), label: "x".into(), program: "pwsh.exe".into(), args: vec!["-Command".into(), "echo \u{2019}; calc".into()] };
+        assert!(elevated_script(&shell, None).contains("'-Command \"echo \u{2019}\u{2019}; calc\"'"));
+    }
 
     fn sessions(ids: &[(u64, bool)]) -> BTreeMap<u64, Entry> {
         ids.iter().map(|(id, min)| (*id, Entry::new(SessionMeta { id: *id, minimized: *min, ..SessionMeta::default() }))).collect()
