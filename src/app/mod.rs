@@ -363,6 +363,8 @@ enum Action {
     Duplicate(u64),
     RequestClose(u64),
     Close(u64),
+    /// „Alle beenden“ (#168): alle Prozesse im Job dieser Sitzungen beenden (vor `Close`/`CloseMany`/`Restart`).
+    EndJobs(Vec<u64>),
     Split(u64, Dir),
     SplitAt(u64, Dir, bool),
     /// Bereich minimieren: aus dem Layout nehmen, Sitzung läuft weiter (`App::minimize_pane`).
@@ -750,6 +752,8 @@ pub struct App {
     mcp: mcp::McpState,
     tray_rx: std::sync::mpsc::Receiver<TrayCmd>,
     quitting: bool,
+    /// Beenden trotz Hintergrundprozessen bestätigt (#168, `closing::App::quit_guard`): nicht noch einmal fragen.
+    quit_ok: bool,
     detached: Vec<u64>,
     settings_tab: usize,
     capture_key: Option<String>,
@@ -1008,6 +1012,7 @@ impl App {
             mcp: mcp::McpState::default(),
             tray_rx: std::sync::mpsc::channel().1,
             quitting: false,
+            quit_ok: false,
             detached: saved.detached.clone(),
             settings_tab: 0,
             capture_key: None,
@@ -3493,15 +3498,18 @@ impl App {
                 self.wt_close = Some(WtClose { id, changes, discard: false });
             }
             Action::RequestClose(id) => {
-                // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft).
+                // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft). Hintergrundprozesse
+                // im Job der Sitzung (#168): immer nachfragen (weiterlaufen lassen oder alle beenden).
                 let running = self.entries.get(&id).is_some_and(|e| e.running() || e.chat_has_history());
-                if running && self.settings.confirm_close {
-                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::One(id)));
+                let lingering = self.lingering_of(&[id]);
+                if !lingering.is_empty() || (running && self.settings.confirm_close) {
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::One(id)).with(lingering));
                 } else {
                     self.close_session(id);
                 }
             }
             Action::Close(id) => self.close_session(id),
+            Action::EndJobs(ids) => self.end_jobs(&ids),
             Action::Split(id, dir) => self.split_at(ctx, id, dir, false),
             Action::SplitAt(id, dir, before) => self.split_at(ctx, id, dir, before),
             Action::MinimizePane(id) => self.minimize_pane(id),
@@ -3562,6 +3570,7 @@ impl eframe::App for App {
         // Paletten für alle Farbauswahlen und die automatische Vergabe (auch Todo-Tags, Expertenmodus, Diagramme).
         crate::palette::publish(&self.settings.palette);
         self.handle_tray(ctx);
+        self.quit_guard(ctx);
 
         self.poll_hooks(ctx);
         self.poll_shell(ctx);

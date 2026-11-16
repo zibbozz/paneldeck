@@ -244,6 +244,25 @@ fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: O
     }
 }
 
+/// Antwort von `close_session`: `{"ok": true}`, dazu `remaining_processes` (`[{pid, name, title?}]`), wenn Prozesse
+/// der Sitzung weiterlaufen (#168; additives Feld, fehlt ohne solche Prozesse).
+fn close_reply(lingering: &[crate::winctl::JobProc]) -> Value {
+    let mut v = json!({"ok": true});
+    if !lingering.is_empty() {
+        v["remaining_processes"] = lingering
+            .iter()
+            .map(|p| {
+                let mut o = json!({"pid": p.pid, "name": p.name});
+                if !p.title.trim().is_empty() {
+                    o["title"] = json!(p.title.trim());
+                }
+                o
+            })
+            .collect();
+    }
+    v
+}
+
 /// `identified_by` in `whoami`: Die Zuordnung über das Job Object (#168) ist die über den Prozessbaum der Sitzung –
 /// nach außen weiter `"process"` (die öffentlichen Werte bleiben `process`/`env`/`none`).
 fn public_how(how: &str) -> &str {
@@ -1618,8 +1637,11 @@ impl App {
         if self.entries.get(&id).is_some_and(|e| e.meta.worktree.is_some()) {
             return Err(er("forbidden", tr("Sitzungen mit Git-Worktree müssen im Fenster geschlossen werden (dort fragt Paneldeck, was mit dem Worktree geschehen soll).", "Sessions with a Git worktree must be closed in the window (Paneldeck asks there what to do with the worktree).")));
         }
+        // Hintergrundprozesse im Job (#168): nie fragen (ein Agent darf nicht am Dialog hängen) – sie laufen weiter wie
+        // bisher und werden gemeldet.
+        let lingering = self.entries.get(&id).and_then(|e| e.live.as_ref()).map(|s| s.lingering()).unwrap_or_default();
         self.close_session(id); // räumt auch `mcp.created` auf (Kinder verlieren die Zuordnung)
-        Ok(json!({"ok": true}))
+        Ok(close_reply(&lingering))
     }
 
     /// Befehl zum Registrieren in Claude Code (Benutzerebene), mit Servername und Argumenten dieser Instanz;
@@ -2105,6 +2127,14 @@ mod tests {
         for h in ["process", "env", "none"] {
             assert_eq!(public_how(h), h);
         }
+    }
+
+    #[test]
+    fn close_reports_remaining_processes_only_when_there_are_some() {
+        use crate::winctl::JobProc;
+        assert_eq!(close_reply(&[]), json!({"ok": true}), "Antwort wie vor 2.3.0");
+        let v = close_reply(&[JobProc { pid: 7, name: "notepad.exe".into(), title: "Editor".into() }, JobProc { pid: 8, name: "node.exe".into(), title: " ".into() }]);
+        assert_eq!(v, json!({"ok": true, "remaining_processes": [{"pid": 7, "name": "notepad.exe", "title": "Editor"}, {"pid": 8, "name": "node.exe"}]}));
     }
 
     #[test]

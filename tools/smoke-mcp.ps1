@@ -382,7 +382,18 @@ Start-Sleep -Seconds 3
   # Gegenprobe: derselbe losgeloeste Start vom Test selbst (ausserhalb jeder Sitzung) -> keiner Sitzung zugeordnet.
   $out = Detached $null 'whoami' '{}'
   Check 'Job: losgeloester Prozess ausserhalb jeder Sitzung -> keiner Sitzung zugeordnet' ($out -match '"session":null' -and $out -match '"identified_by":"none"') $out
+  # Hintergrundprozess (#168): das Kind startet eine versteckte PowerShell mit eigener Konsole (ueberlebt das Schliessen);
+  # close_session per MCP fragt nie, laesst sie weiterlaufen und meldet sie in remaining_processes.
+  $bgMark = "$work\bg-$([guid]::NewGuid().ToString('N').Substring(0, 6)).txt"
+  $bgCmd = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','`$PID | Out-File -Encoding ascii ''$bgMark''; Start-Sleep 120'"
+  [void](Tool 'run_command' @{ session = $K; command = $bgCmd; timeout_secs = 30 })
+  $t0 = Get-Date; while (-not (Test-Path $bgMark) -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 200 }
+  $bgPid = if (Test-Path $bgMark) { [int]([IO.File]::ReadAllText($bgMark).Trim()) } else { 0 }
   $cl = InA 'close_session' @{ session = $K }
+  $rem = @($cl.structuredContent.remaining_processes)
+  Check 'close_session (MCP) fragt nicht und meldet den Hintergrundprozess in remaining_processes' ($cl.isError -ne $true -and $bgPid -gt 0 -and @($rem | Where-Object { $_.pid -eq $bgPid -and $_.name -match '^powershell' }).Count -eq 1) ($cl | ConvertTo-Json -Compress -Depth 6)
+  Check 'close_session (MCP): Hintergrundprozess laeuft weiter (Weiterlaufen lassen)' ($bgPid -gt 0 -and $null -ne (Get-Process -Id $bgPid -ErrorAction SilentlyContinue))
+  if ($bgPid -gt 0) { Stop-Process -Id $bgPid -Force -ErrorAction SilentlyContinue }
   Check 'Eltern-Agent schliesst sein Kind' ($cl.isError -ne $true)
   [void](Tool 'close_session' @{ session = $A })
 

@@ -277,11 +277,13 @@ fn process_parents() -> Vec<(u32, u32)> {
 ///
 /// * **Kein Ausbruch:** Der Job hat keine Grenzen, insbesondere weder `JOB_OBJECT_LIMIT_BREAKAWAY_OK` noch
 ///   `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`: `CreateProcess` mit `CREATE_BREAKAWAY_FROM_JOB` schlägt für jeden
-///   Nachfahren fehl (Zugriff verweigert).
+///   Nachfahren fehl (Zugriff verweigert). Das ist gewollt (Entscheidung des Nutzers zu #168): Ein Ausbruch würde die
+///   Zuordnung umgehen; Programme, die ihn erzwingen, laufen in einer Paneldeck-Sitzung nicht.
 /// * **Verschachtelt:** Legt ein Programm in der Sitzung eigene Jobs an (ab Windows 8 erlaubt), liegen sie unter diesem;
 ///   die Mitgliedschaft (`IsProcessInJob`) bleibt. Läuft der Hub selbst in einem Job, liegt dieser Job darunter.
-/// * **Kein Beenden:** Ohne `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` – das Schließen einer Sitzung beendet wie bisher nur
-///   die Shell, gestartete Hintergrundprozesse laufen weiter.
+/// * **Kein automatisches Beenden:** Ohne `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Laufen beim Schließen noch Prozesse
+///   im Job, die das Schließen überleben ([`lingering`]), fragt der Hub: weiterlaufen lassen oder alle beenden
+///   ([`SessionJob::terminate_all`]).
 /// * Was außerhalb von Paneldeck startet (Aufgabenplanung, WMI, COM-Server, ein per ShellExecute schon laufender
 ///   Explorer), liegt in keinem Job; dafür bleibt der Prozessbaum als Rückfallweg. Ebenso WSL: Linux-Prozesse sind
 ///   keine Windows-Prozesse (dort gilt `PANELDECK_SESSION_KEY`).
@@ -346,15 +348,204 @@ impl SessionJob {
         true
     }
 
-    /// Alle Prozesse des Jobs beenden (nur für Tests).
-    #[cfg(all(test, windows))]
-    fn terminate(&self) {
+    /// Alle Prozesse des Jobs beenden („Alle beenden“ im Schließen-Dialog, #168). `true`, wenn der Aufruf gelang.
+    #[cfg(windows)]
+    pub fn terminate_all(&self) -> bool {
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-        if let Some(&(_, jh)) = jobs().iter().find(|(k, _)| *k == self.key) {
+        jobs().iter().find(|(k, _)| *k == self.key).is_some_and(|&(_, jh)| {
             // SAFETY: gültiges Job-Handle unter der Sperre.
-            unsafe { TerminateJobObject(jh as windows_sys::Win32::Foundation::HANDLE, 1) };
+            unsafe { TerminateJobObject(jh as windows_sys::Win32::Foundation::HANDLE, 1) != 0 }
+        })
+    }
+
+    #[cfg(not(windows))]
+    pub fn terminate_all(&self) -> bool {
+        false
+    }
+
+    /// PIDs aller laufenden Prozesse im Job (auch in darunter verschachtelten Jobs).
+    #[cfg(windows)]
+    pub fn pids(&self) -> Vec<u32> {
+        use windows_sys::Win32::System::JobObjects::{JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST};
+        let g = jobs();
+        let Some(&(_, jh)) = g.iter().find(|(k, _)| *k == self.key) else { return Vec::new() };
+        let off = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+        let mut cap = 64usize;
+        for _ in 0..6 {
+            // Kopf + `cap` Einträge (je ein usize); als usize-Vektor passend ausgerichtet.
+            let words = off.div_ceil(std::mem::size_of::<usize>()) + cap;
+            let mut buf = vec![0usize; words];
+            let bytes = (words * std::mem::size_of::<usize>()) as u32;
+            // SAFETY: `buf` ist `bytes` groß und für die Struktur ausgerichtet; das Job-Handle ist unter der Sperre gültig.
+            let ok = unsafe { QueryInformationJobObject(jh as windows_sys::Win32::Foundation::HANDLE, JobObjectBasicProcessIdList, buf.as_mut_ptr().cast(), bytes, std::ptr::null_mut()) } != 0;
+            // SAFETY: der Kopf liegt am Anfang des Puffers.
+            let head = unsafe { &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST) };
+            let (assigned, listed) = (head.NumberOfAssignedProcesses as usize, (head.NumberOfProcessIdsInList as usize).min(cap));
+            if ok && listed >= assigned.min(cap) && assigned <= cap {
+                let ids = &buf[off / std::mem::size_of::<usize>()..][..listed];
+                return ids.iter().map(|p| *p as u32).filter(|p| *p != 0).collect();
+            }
+            cap = assigned.max(cap * 2) + 16;
+        }
+        Vec::new()
+    }
+
+    #[cfg(not(windows))]
+    pub fn pids(&self) -> Vec<u32> {
+        Vec::new()
+    }
+}
+
+/// Ein Prozess im Job einer Sitzung, der das Schließen der Sitzung überleben würde (#168): Name der Programmdatei und –
+/// falls er ein sichtbares Fenster hat – dessen Titel.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JobProc {
+    pub pid: u32,
+    pub name: String,
+    pub title: String,
+}
+
+/// Welche Prozesse eines Jobs überleben das Schließen der Sitzung? Alle außer der Shell, den Prozessen, die an ihrer
+/// Konsole hängen (die beendet ConPTY beim Schließen ohnehin, z. B. ein laufendes `claude` oder `vim`), und
+/// Konsolen-Hosts (`conhost.exe`, `OpenConsole.exe`). `console = None`: Konsole nicht zu ermitteln (Shell beendet) –
+/// dann zählt alles außer Shell und Konsolen-Hosts.
+pub fn survivors(job: &[u32], shell: Option<u32>, console: Option<&[u32]>, name_of: impl Fn(u32) -> String) -> Vec<u32> {
+    job.iter()
+        .copied()
+        .filter(|p| Some(*p) != shell && !console.is_some_and(|c| c.contains(p)))
+        .filter(|p| {
+            let n = name_of(*p).to_ascii_lowercase();
+            n != "conhost.exe" && n != "openconsole.exe"
+        })
+        .collect()
+}
+
+/// Prozesse, die an derselben Konsole hängen wie `pid` (die Shell einer Sitzung). Der Hub hängt sich dafür kurz an diese
+/// Konsole (`AttachConsole` → `GetConsoleProcessList` → `FreeConsole`; er selbst hat keine). Strg+C-/Schließen-Ereignisse
+/// in diesem Moment ignoriert ein eigener Handler; die Standard-Handles werden danach wiederhergestellt. Nur aus der
+/// UI-Schleife aufrufen (eine Konsole je Prozess; eine Sperre schützt trotzdem). `None`, wenn das nicht geht.
+#[cfg(windows)]
+pub fn console_pids(pid: u32) -> Option<Vec<u32>> {
+    use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GetConsoleProcessList, GetStdHandle, SetConsoleCtrlHandler, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    unsafe extern "system" fn ignore(_ctrl: u32) -> windows_sys::Win32::Foundation::BOOL {
+        1
+    }
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static HANDLER: std::sync::Once = std::sync::Once::new();
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: reine Win32-Aufrufe; `ignore` ist eine `extern "system"`-Funktion mit passender Signatur, `buf` ist ein
+    // lokaler Puffer mit der übergebenen Länge; die gesicherten Standard-Handles werden unverändert zurückgesetzt.
+    unsafe {
+        HANDLER.call_once(|| {
+            SetConsoleCtrlHandler(Some(ignore), 1);
+        });
+        let std_ids = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
+        let saved: Vec<_> = std_ids.iter().map(|i| GetStdHandle(*i)).collect();
+        if AttachConsole(pid) == 0 {
+            return None;
+        }
+        let mut buf = vec![0u32; 64];
+        let mut n = GetConsoleProcessList(buf.as_mut_ptr(), buf.len() as u32) as usize;
+        if n > buf.len() {
+            buf = vec![0u32; n + 16];
+            n = GetConsoleProcessList(buf.as_mut_ptr(), buf.len() as u32) as usize;
+        }
+        FreeConsole();
+        for (i, h) in std_ids.iter().zip(saved) {
+            SetStdHandle(*i, h);
+        }
+        (n > 0 && n <= buf.len()).then(|| buf[..n].to_vec())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn console_pids(_pid: u32) -> Option<Vec<u32>> {
+    None
+}
+
+/// Namen aller laufenden Prozesse (PID → Programmdatei, z. B. `notepad.exe`).
+#[cfg(windows)]
+pub fn process_names() -> std::collections::HashMap<u32, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let mut out = std::collections::HashMap::new();
+    // SAFETY: wie `process_parents`.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap != INVALID_HANDLE_VALUE {
+            let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+            pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap, &mut pe) != 0 {
+                loop {
+                    let len = pe.szExeFile.iter().position(|c| *c == 0).unwrap_or(pe.szExeFile.len());
+                    out.insert(pe.th32ProcessID, String::from_utf16_lossy(&pe.szExeFile[..len]));
+                    if Process32NextW(snap, &mut pe) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snap);
         }
     }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn process_names() -> std::collections::HashMap<u32, String> {
+    std::collections::HashMap::new()
+}
+
+/// Titel der sichtbaren Fenster je Prozess (das erste mit Titel).
+#[cfg(windows)]
+pub fn window_titles() -> std::collections::HashMap<u32, String> {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible};
+    unsafe extern "system" fn each(h: HWND, l: LPARAM) -> BOOL {
+        // SAFETY: `l` ist der Zeiger auf die HashMap aus `window_titles`, die während `EnumWindows` lebt; `h` kommt von
+        // `EnumWindows`; `pid` und `buf` sind lokale Ausgabewerte mit passender Länge.
+        unsafe {
+            let map = &mut *(l as *mut std::collections::HashMap<u32, String>);
+            if IsWindowVisible(h) == 0 {
+                return 1;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, &mut pid);
+            if pid == 0 || map.contains_key(&pid) {
+                return 1;
+            }
+            let mut buf = [0u16; 256];
+            let n = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
+            if n > 0 {
+                map.insert(pid, String::from_utf16_lossy(&buf[..n as usize]));
+            }
+            1
+        }
+    }
+    let mut map = std::collections::HashMap::new();
+    // SAFETY: Rückruf mit passender Signatur; der Zeiger auf `map` gilt für die Dauer des Aufrufs.
+    unsafe { EnumWindows(Some(each), &mut map as *mut _ as LPARAM) };
+    map
+}
+
+#[cfg(not(windows))]
+pub fn window_titles() -> std::collections::HashMap<u32, String> {
+    std::collections::HashMap::new()
+}
+
+/// Die überlebenden Prozesse eines Sitzungs-Jobs mit Namen und Fenstertitel (#168). `shell` = PID der Shell.
+pub fn lingering(job: &SessionJob, shell: Option<u32>) -> Vec<JobProc> {
+    let pids = job.pids();
+    if pids.iter().all(|p| Some(*p) == shell) {
+        return Vec::new();
+    }
+    let console = shell.and_then(console_pids);
+    let names = process_names();
+    let keep = survivors(&pids, shell, console.as_deref(), |p| names.get(&p).cloned().unwrap_or_default());
+    if keep.is_empty() {
+        return Vec::new();
+    }
+    let titles = window_titles();
+    keep.into_iter().map(|pid| JobProc { pid, name: names.get(&pid).cloned().unwrap_or_else(|| "?".into()), title: titles.get(&pid).cloned().unwrap_or_default() }).collect()
 }
 
 impl Drop for SessionJob {
@@ -561,7 +752,7 @@ mod peer_tests {
         assert_eq!(job_of(std::process::id()), None, "der Hub selbst liegt in keinem Sitzungs-Job");
         let other = SessionJob::new().expect("zweiter Job");
         assert_ne!(other.key(), job.key());
-        job.terminate();
+        job.terminate_all();
         let _ = shell.wait();
         let key = job.key();
         drop(job);
@@ -598,7 +789,7 @@ mod peer_tests {
         let pc = resolve_peer(s.peer_addr().unwrap(), s.local_addr().unwrap()).expect("lebender Absender");
         assert_eq!(pc.job, Some(job.key()), "{pc:?}");
         assert!(!pc.orphan);
-        job.terminate();
+        job.terminate_all();
     }
 
     /// Hilfsprozess für [`no_breakaway_and_nested_jobs_keep_the_membership`] (läuft nur mit `PANELDECK_JOB_HELPER`):
@@ -670,7 +861,95 @@ mod peer_tests {
         assert_eq!(job_of(kid), Some(job.key()), "Kind im verschachtelten Job bleibt im Sitzungs-Job");
         let _ = writeln!(stdin, "done");
         let _ = helper.wait();
-        job.terminate();
+        job.terminate_all();
+    }
+
+    #[test]
+    fn survivors_are_job_processes_off_the_shell_console() {
+        let names = |p: u32| match p {
+            7 => "conhost.exe".to_string(),
+            8 => "OpenConsole.exe".to_string(),
+            _ => "x.exe".to_string(),
+        };
+        // Shell 1, an ihrer Konsole 1 und 2 (z. B. claude im Vordergrund); 3 losgelöst; 7/8 Konsolen-Hosts
+        assert_eq!(survivors(&[1, 2, 3, 7, 8], Some(1), Some(&[1, 2]), names), [3]);
+        assert_eq!(survivors(&[1, 2], Some(1), Some(&[1, 2]), names), Vec::<u32>::new(), "nur Vordergrund: nichts");
+        // Konsole unbekannt (Shell beendet): alles außer Shell und Hosts
+        assert_eq!(survivors(&[1, 2, 3, 7], Some(1), None, names), [2, 3]);
+        assert_eq!(survivors(&[2, 3], None, None, names), [2, 3]);
+    }
+
+    /// Hilfsprozess ohne Konsole (`DETACHED_PROCESS`) für [`lingering_processes_are_listed_and_end_all_ends_them`]: meldet
+    /// `CONSOLE <pid>,<pid>…` der Konsole des Prozesses aus `PANELDECK_CONSOLE_OF` (wie der Hub, der keine Konsole hat).
+    #[test]
+    fn job_console_helper() {
+        let Some(pid) = std::env::var("PANELDECK_CONSOLE_OF").ok().and_then(|p| p.parse::<u32>().ok()) else { return };
+        let list = console_pids(pid).unwrap_or_default();
+        println!("CONSOLE {}", list.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn lingering_processes_are_listed_and_end_all_ends_them() {
+        use std::io::BufRead;
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // „Shell“ mit eigener (unsichtbarer) Konsole und einem Vordergrund-Kind daran; dazu ein losgelöster Prozess ohne
+        // Konsole im selben Job (wie `Start-Process` aus der Sitzung).
+        let mut shell = std::process::Command::new("cmd").raw_arg("/c ping -n 30 127.0.0.1 >nul").creation_flags(CREATE_NO_WINDOW).spawn().unwrap();
+        // Vordergrund-Kind = ping.exe (nicht der Konsolen-Host conhost.exe, der als erstes Kind der Shell startet)
+        let t0 = std::time::Instant::now();
+        let fg: Vec<u32> = loop {
+            let names = process_names();
+            let pings: Vec<u32> = process_parents().into_iter().filter(|(c, p)| *p == shell.id() && names.get(c).is_some_and(|n| n.eq_ignore_ascii_case("ping.exe"))).map(|(c, _)| c).collect();
+            if !pings.is_empty() || t0.elapsed() > std::time::Duration::from_secs(10) {
+                break pings;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(fg.len(), 1, "ping gestartet");
+        let mut bg = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).creation_flags(DETACHED_PROCESS).spawn().unwrap();
+        let job = SessionJob::new().expect("Job");
+        assert!(job.adopt(shell.as_raw_handle(), shell.id()));
+        assert!(job.adopt(bg.as_raw_handle(), bg.id()));
+        let mut pids = job.pids();
+        pids.sort_unstable();
+        let mut want = vec![shell.id(), bg.id()];
+        want.extend(&fg);
+        want.sort_unstable();
+        // Dazu der Konsolen-Host der neuen Konsole der Shell (conhost.exe als ihr Kind, ebenfalls im Job).
+        let names = process_names();
+        let extra: Vec<u32> = pids.iter().copied().filter(|p| !want.contains(p)).collect();
+        assert!(want.iter().all(|p| pids.contains(p)), "alle Prozesse des Jobs: {pids:?} ⊇ {want:?}");
+        assert!(extra.iter().all(|p| names.get(p).is_some_and(|n| n.eq_ignore_ascii_case("conhost.exe"))), "sonst nur Konsolen-Hosts: {extra:?}");
+        // Konsole der Shell aus einem Prozess ohne eigene Konsole bestimmen (der Testprozess hat eine)
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(exe)
+            .args(["--exact", "winctl::peer_tests::job_console_helper", "--nocapture", "--test-threads=1"])
+            .env("PANELDECK_CONSOLE_OF", shell.id().to_string())
+            .creation_flags(DETACHED_PROCESS)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let line = out.stdout.lines().map_while(Result::ok).find_map(|l| l.find("CONSOLE ").map(|i| l[i + 8..].to_string())).expect("Ausgabe des Hilfsprozesses");
+        let console: Vec<u32> = line.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        assert!(console.contains(&shell.id()) && fg.iter().all(|p| console.contains(p)), "Shell und Vordergrund an der Konsole: {console:?}");
+        assert!(!console.contains(&bg.id()));
+        let names = process_names();
+        let keep = survivors(&pids, Some(shell.id()), Some(&console), |p| names.get(&p).cloned().unwrap_or_default());
+        assert_eq!(keep, [bg.id()], "nur der losgelöste Prozess überlebt das Schließen");
+        assert_eq!(names.get(&bg.id()).map(|n| n.to_ascii_lowercase()), Some("ping.exe".into()));
+        // „Alle beenden“
+        assert!(job.terminate_all());
+        let _ = shell.wait();
+        let _ = bg.wait();
+        let t0 = std::time::Instant::now();
+        while !job.pids().is_empty() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(job.pids().is_empty(), "alle beendet");
     }
 
     #[test]

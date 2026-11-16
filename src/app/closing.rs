@@ -7,9 +7,16 @@
 //!   „Schließen bestätigen“; Sitzungen mit Git-Worktree gehen wie bisher über die Worktree-Rückfrage.
 //! * Viele: Rückfrage immer (wie beim Schließen eines weiteren Fensters, da viele Sitzungen auf einmal enden). Beendet
 //!   werden genau die beim Öffnen aufgelisteten Sitzungen; Git-Worktrees und Branches bleiben dabei bestehen.
+//! * Hintergrundprozesse (#168): Laufen im Job Object einer Sitzung noch Prozesse, die das Schließen überleben würden
+//!   (losgelöst gestartet, GUI-Programme – nicht die Shell und nichts an ihrer Konsole), nennt dieselbe Rückfrage sie und
+//!   bietet „Weiterlaufen lassen“ (nur die Sitzung schließen, wie bisher) oder „Alle beenden“ (`TerminateJobObject`).
+//!   Eine Sitzung: immer mit dieser Frage, ohne Wartezeit; viele und das Beenden von Paneldeck: eine gemeinsame Frage
+//!   mit Wartezeit. Neu laden (#169) fragt genauso (`session_settings::reload_ask_ui`). MCP `close_session` fragt nie
+//!   (lässt weiterlaufen und meldet `remaining_processes`).
 
 use super::planning_ui::{countdown_secs, danger_button};
 use super::*;
+use crate::winctl::JobProc;
 
 /// Welche Sitzungen „alle schließen“ beendet.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +32,8 @@ pub(super) enum CloseScope {
 pub(super) enum CloseTarget {
     One(u64),
     Many(CloseScope, Vec<u64>),
+    /// Paneldeck beenden, obwohl Sitzungen Hintergrundprozesse haben (#168).
+    Quit,
 }
 
 /// Offene Rückfrage (je Fenster, siehe `WinView::confirm_close`).
@@ -32,12 +41,82 @@ pub(super) struct CloseAsk {
     pub(super) target: CloseTarget,
     /// Beginn der Wartezeit (3 s, `countdown_secs`).
     pub(super) since: Instant,
+    /// Hintergrundprozesse der betroffenen Sitzungen beim Öffnen der Rückfrage (#168).
+    pub(super) lingering: Vec<Lingering>,
 }
 
 impl CloseAsk {
     pub(super) fn new(target: CloseTarget) -> Self {
-        CloseAsk { target, since: Instant::now() }
+        CloseAsk { target, since: Instant::now(), lingering: Vec::new() }
     }
+
+    pub(super) fn with(mut self, lingering: Vec<Lingering>) -> Self {
+        self.lingering = lingering;
+        self
+    }
+}
+
+/// Prozesse einer Sitzung, die ihr Schließen überleben würden (#168, `terminal::Session::lingering`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Lingering {
+    pub(super) id: u64,
+    pub(super) name: String,
+    pub(super) procs: Vec<JobProc>,
+}
+
+/// Eine Zeile je Prozess: „notepad.exe (PID 42) – Titel“.
+pub(super) fn proc_line(p: &JobProc) -> String {
+    let mut s = format!("{} (PID {})", p.name, p.pid);
+    if !p.title.trim().is_empty() {
+        s.push_str(" – ");
+        s.push_str(p.title.trim());
+    }
+    s
+}
+
+/// Einleitung der Prozessliste: wie viele Prozesse in wie vielen Sitzungen weiterlaufen würden.
+pub(super) fn lingering_intro(list: &[Lingering], lang: Lang) -> String {
+    let procs: usize = list.iter().map(|l| l.procs.len()).sum();
+    let sessions = list.iter().filter(|l| !l.procs.is_empty()).count();
+    let p = n_of(procs, lang, ("Hintergrundprozess", "Hintergrundprozesse"), ("background process", "background processes"));
+    match (lang == Lang::De, procs == 1, sessions > 1) {
+        (true, true, _) => format!("{p} läuft noch und bleibt nach dem Schließen bestehen, wenn du ihn nicht beendest:"),
+        (true, false, false) => format!("{p} laufen noch und bleiben nach dem Schließen bestehen, wenn du sie nicht beendest:"),
+        (true, false, true) => format!("{p} in {sessions} Sitzungen laufen noch und bleiben nach dem Schließen bestehen, wenn du sie nicht beendest:"),
+        (false, true, _) => format!("{p} is still running and stays after closing unless you end it:"),
+        (false, false, false) => format!("{p} are still running and stay after closing unless you end them:"),
+        (false, false, true) => format!("{p} in {sessions} sessions are still running and stay after closing unless you end them:"),
+    }
+}
+
+/// Abschnitt „Hintergrundprozesse“ einer Rückfrage; mit `per_session` steht der Name der Sitzung über ihren Prozessen.
+pub(super) fn lingering_section(ui: &mut Ui, list: &[Lingering], lang: Lang, per_session: bool) {
+    if list.iter().all(|l| l.procs.is_empty()) {
+        return;
+    }
+    ui.add_space(S1);
+    ui.label(lingering_intro(list, lang));
+    egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("lingering").max_height(160.0).auto_shrink([false, true]).show(ui, |ui| {
+            for l in list.iter().filter(|l| !l.procs.is_empty()) {
+                if per_session {
+                    ui.label(RichText::new(&l.name).strong());
+                }
+                for p in &l.procs {
+                    ui.label(RichText::new(proc_line(p)).small());
+                }
+            }
+        });
+    });
+}
+
+/// Knöpfe der Rückfrage bei Hintergrundprozessen.
+pub(super) fn keep_label(lang: Lang) -> &'static str {
+    lang.t("Weiterlaufen lassen", "Keep running")
+}
+
+pub(super) fn end_all_label(lang: Lang) -> &'static str {
+    lang.t("Alle beenden", "End all")
 }
 
 /// Eine Sitzung, wie sie in der Rückfrage steht.
@@ -168,6 +247,8 @@ pub(super) fn still_open(ids: &[u64], exists: impl Fn(u64) -> bool) -> Vec<u64> 
 pub(super) enum Outcome {
     Open,
     Go,
+    /// Zweiter, harmloserer Knopf (bei Hintergrundprozessen „Weiterlaufen lassen“, #168).
+    Keep,
     Cancel,
 }
 
@@ -178,23 +259,31 @@ pub(super) fn confirmed(secs: u32, clicked: bool, enter: bool) -> bool {
 
 /// Rückfrage-Fenster mit Wartezeit. Esc und Enter werden hier verbraucht (kein Terminal bekommt sie): Esc bricht ab,
 /// Enter bestätigt erst nach der Wartezeit. Der Fokus liegt auf „Abbrechen“.
+/// Optional ein zweiter Knopf `keep` (vor dem gefährlichen, ebenfalls erst nach der Wartezeit frei, #168); mit ihm
+/// bestätigt Enter diesen harmloseren Knopf, nicht den gefährlichen.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn confirm_window(ctx: &egui::Context, id: Id, title: &str, button: &str, secs: u32, lang: Lang, width: f32, body: impl FnOnce(&mut Ui)) -> Outcome {
+pub(super) fn confirm_window_keep(ctx: &egui::Context, id: Id, title: &str, button: &str, keep: Option<&str>, secs: u32, lang: Lang, width: f32, body: impl FnOnce(&mut Ui)) -> Outcome {
     let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), i.consume_key(Modifiers::NONE, Key::Enter)));
-    let (mut clicked, mut cancel) = (false, esc);
+    let (mut clicked, mut kept, mut cancel) = (false, false, esc);
     egui::Window::new(title).id(id).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
         ui.set_max_width(width);
         body(ui);
         ui.add_space(S2);
         ui.horizontal(|ui| {
+            if let Some(k) = keep {
+                kept = ui.add_enabled(secs == 0, egui::Button::new(k)).clicked();
+            }
             clicked = danger_button(ui, button, secs).clicked();
             let c = ui.button(lang.t("Abbrechen", "Cancel"));
             c.request_focus();
             cancel |= c.clicked();
         });
     });
-    if confirmed(secs, clicked, enter) {
+    let (enter_go, enter_keep) = if keep.is_some() { (false, enter) } else { (enter, false) };
+    if confirmed(secs, clicked, enter_go) {
         Outcome::Go
+    } else if confirmed(secs, kept, enter_keep) {
+        Outcome::Keep
     } else if cancel {
         Outcome::Cancel
     } else {
@@ -232,7 +321,54 @@ impl App {
             self.notify_text(lang.t("Keine Sitzungen zum Schließen.", "No sessions to close.").to_string());
             return;
         }
-        self.confirm_close = Some(CloseAsk::new(CloseTarget::Many(scope, ids)));
+        let lingering = self.lingering_of(&ids);
+        self.confirm_close = Some(CloseAsk::new(CloseTarget::Many(scope, ids)).with(lingering));
+    }
+
+    /// Hintergrundprozesse dieser Sitzungen, die ihr Schließen überleben würden (#168). Nur Sitzungen mit solchen.
+    pub(super) fn lingering_of(&self, ids: &[u64]) -> Vec<Lingering> {
+        ids.iter()
+            .filter_map(|id| {
+                let e = self.entries.get(id)?;
+                let procs = e.live.as_ref()?.lingering();
+                (!procs.is_empty()).then(|| Lingering { id: *id, name: e.display_name(), procs })
+            })
+            .collect()
+    }
+
+    /// „Alle beenden“: alle Prozesse in den Jobs dieser Sitzungen beenden (#168).
+    pub(super) fn end_jobs(&mut self, ids: &[u64]) {
+        for id in ids {
+            if let Some(s) = self.entries.get(id).and_then(|e| e.live.as_ref()) {
+                s.end_job();
+            }
+        }
+    }
+
+    /// Paneldeck soll beendet werden (Hauptfenster schließen, „Beenden“ im Tray). Haben Sitzungen Hintergrundprozesse,
+    /// wird das Schließen angehalten und gefragt (#168). Aufruf in jedem Bild des Hauptfensters nach `handle_tray`.
+    pub(super) fn quit_guard(&mut self, ctx: &egui::Context) {
+        if self.quit_ok || !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if self.tray.is_some() && !self.quitting && self.settings.close_to_tray {
+            return; // geht in den Tray, beendet nichts
+        }
+        if matches!(self.confirm_close.as_ref().map(|a| &a.target), Some(CloseTarget::Quit)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            return;
+        }
+        let ids: Vec<u64> = self.entries.keys().copied().collect();
+        let lingering = self.lingering_of(&ids);
+        if lingering.is_empty() {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if self.in_tray {
+            self.from_tray(ctx);
+        }
+        super::models_ui::release_focus(ctx);
+        self.confirm_close = Some(CloseAsk::new(CloseTarget::Quit).with(lingering));
     }
 
     /// Bestätigte Sitzungen beenden (nur noch vorhandene).
@@ -246,27 +382,55 @@ impl App {
     pub(super) fn close_ask_ui(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(ask) = self.confirm_close.take() else { return };
         let lang = self.settings.language;
-        let secs = countdown_secs(ask.since, Instant::now());
+        let jobs = !ask.lingering.is_empty();
+        // Eine Sitzung mit Hintergrundprozessen: ohne Wartezeit (die Wahl „weiterlaufen/beenden“ ist die Rückfrage).
+        let secs = if jobs && matches!(ask.target, CloseTarget::One(_)) { 0 } else { countdown_secs(ask.since, Instant::now()) };
         if secs > 0 {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+        let keep = jobs.then(|| keep_label(lang));
         let outcome = match &ask.target {
             CloseTarget::One(id) => {
                 let Some(e) = self.entries.get(id) else { return }; // inzwischen geschlossen (z. B. von einem Agenten)
-                let (name, chat) = (e.display_name(), e.is_chat());
-                let o = confirm_window(ctx, Id::new("close_one_ask"), lang.t("Sitzung schließen?", "Close session?"), lang.t("Schließen", "Close"), secs, lang, 420.0, |ui| {
+                let (name, chat, running) = (e.display_name(), e.is_chat(), e.running());
+                let button = if jobs { end_all_label(lang) } else { lang.t("Schließen", "Close") };
+                let o = confirm_window_keep(ctx, Id::new("close_one_ask"), lang.t("Sitzung schließen?", "Close session?"), button, keep, secs, lang, 420.0, |ui| {
                     if chat {
                         ui.label(format!(
                             "{}: {}",
                             lang.q(&name),
                             lang.t("Der Chatverlauf wird gelöscht (eine laufende Antwort, ein laufendes Werkzeug oder eine offene Freigabe wird abgebrochen).", "The chat history will be deleted (a running answer, a running tool or a pending approval is stopped).")
                         ));
-                    } else {
+                    } else if running {
                         ui.label(format!("{} {}", lang.q(&name), lang.t("läuft noch. Beim Schließen wird der Prozess beendet.", "is still running. Closing will terminate the process.")));
+                    } else {
+                        ui.label(RichText::new(&name).strong());
                     }
+                    lingering_section(ui, &ask.lingering, lang, false);
                 });
-                if o == Outcome::Go {
-                    actions.push(Action::Close(*id));
+                match o {
+                    Outcome::Go if jobs => actions.extend([Action::EndJobs(vec![*id]), Action::Close(*id)]),
+                    Outcome::Go | Outcome::Keep => actions.push(Action::Close(*id)),
+                    _ => {}
+                }
+                o
+            }
+            CloseTarget::Quit => {
+                let o = confirm_window_keep(ctx, Id::new("quit_ask"), lang.t("Paneldeck beenden?", "Quit Paneldeck?"), end_all_label(lang), keep, secs, lang, 460.0, |ui| {
+                    ui.label(lang.t("Beim Beenden enden alle Sitzungen.", "Quitting ends all sessions."));
+                    lingering_section(ui, &ask.lingering, lang, true);
+                });
+                match o {
+                    Outcome::Go | Outcome::Keep => {
+                        if o == Outcome::Go {
+                            let ids: Vec<u64> = ask.lingering.iter().map(|l| l.id).collect();
+                            self.end_jobs(&ids);
+                        }
+                        self.quit_ok = true;
+                        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                    }
+                    Outcome::Cancel => self.quitting = false,
+                    Outcome::Open => {}
                 }
                 o
             }
@@ -284,7 +448,8 @@ impl App {
                     CloseScope::All => (lang.t("Alle Sitzungen schließen?", "Close all sessions?"), lang.t("Alle Projekte und Fenster", "All projects and windows").to_string()),
                 };
                 let with_project = matches!(scope, CloseScope::All) && items.iter().any(|i| i.project != items[0].project);
-                let o = confirm_window(ctx, Id::new("close_many_ask"), title, lang.t("Alle schließen", "Close all"), secs, lang, 460.0, |ui| {
+                let button = if jobs { end_all_label(lang) } else { lang.t("Alle schließen", "Close all") };
+                let o = confirm_window_keep(ctx, Id::new("close_many_ask"), title, button, keep, secs, lang, 460.0, |ui| {
                     ui.label(RichText::new(what).strong());
                     ui.add_space(S1);
                     for (n, line) in summary_lines(&items, lang).into_iter().enumerate() {
@@ -304,11 +469,15 @@ impl App {
                             }
                         });
                     });
+                    lingering_section(ui, &ask.lingering, lang, true);
                     ui.add_space(S1);
                     ui.label(RichText::new(lang.t("Das lässt sich nicht rückgängig machen.", "This cannot be undone.")).small().color(style::dim(ui)));
                 });
-                if o == Outcome::Go {
-                    actions.push(Action::CloseMany(items.iter().map(|i| i.id).collect()));
+                let ids: Vec<u64> = items.iter().map(|i| i.id).collect();
+                match o {
+                    Outcome::Go if jobs => actions.extend([Action::EndJobs(ids.clone()), Action::CloseMany(ids)]),
+                    Outcome::Go | Outcome::Keep => actions.push(Action::CloseMany(ids)),
+                    _ => {}
                 }
                 o
             }
@@ -495,12 +664,69 @@ mod tests {
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))), time: Some(t), events, ..Default::default() };
         let (mut out, mut left) = (Outcome::Open, Vec::new());
         let _ = ctx.run(input, |ctx| {
-            out = confirm_window(ctx, Id::new("ask"), "Close?", "Close", secs, Lang::En, 300.0, |ui| {
+            out = confirm_window_keep(ctx, Id::new("ask"), "Close?", "Close", None, secs, Lang::En, 300.0, |ui| {
                 ui.label("x");
             });
             left = ctx.input(|i| i.events.iter().filter_map(|e| if let Event::Key { key, pressed: true, .. } = e { Some(*key) } else { None }).collect());
         });
         (out, left)
+    }
+
+    /// Wie `ask_frame`, mit dem Knopf „Weiterlaufen lassen“ (#168).
+    fn keep_frame(ctx: &egui::Context, t: f64, secs: u32, keys: &[Key]) -> (Outcome, Vec<Key>) {
+        let events = keys.iter().map(|k| Event::Key { key: *k, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }).collect();
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))), time: Some(t), events, ..Default::default() };
+        let (mut out, mut left) = (Outcome::Open, Vec::new());
+        let _ = ctx.run(input, |ctx| {
+            out = confirm_window_keep(ctx, Id::new("keep"), "Close?", end_all_label(Lang::En), Some(keep_label(Lang::En)), secs, Lang::En, 300.0, |ui| {
+                ui.label("x");
+            });
+            left = ctx.input(|i| i.events.iter().filter_map(|e| if let Event::Key { key, pressed: true, .. } = e { Some(*key) } else { None }).collect());
+        });
+        (out, left)
+    }
+
+    #[test]
+    fn with_background_processes_enter_keeps_them_running_and_never_ends_all() {
+        let ctx = egui::Context::default();
+        assert_eq!(keep_frame(&ctx, 0.0, 0, &[]).0, Outcome::Open);
+        let (o, left) = keep_frame(&ctx, 0.1, 0, &[Key::Enter]);
+        assert_eq!(o, Outcome::Keep, "Enter = der harmlose Knopf, nie „Alle beenden“");
+        assert!(left.is_empty(), "Enter erreicht kein Terminal");
+        let (o, left) = keep_frame(&ctx, 0.2, 2, &[Key::Enter]);
+        assert_eq!(o, Outcome::Open, "viele Sitzungen: auch „Weiterlaufen lassen“ erst nach der Wartezeit");
+        assert!(left.is_empty());
+        let (o, left) = keep_frame(&ctx, 0.3, 0, &[Key::Escape]);
+        assert_eq!(o, Outcome::Cancel);
+        assert!(left.is_empty(), "Esc erreicht kein Terminal");
+        // Ohne zweiten Knopf bleibt Enter = bestätigen (bisheriges Verhalten)
+        assert_eq!(ask_frame(&ctx, 0.4, 0, &[Key::Enter]).0, Outcome::Go);
+    }
+
+    fn jp(pid: u32, name: &str, title: &str) -> JobProc {
+        JobProc { pid, name: name.into(), title: title.into() }
+    }
+
+    #[test]
+    fn background_process_texts_in_both_languages() {
+        assert_eq!(proc_line(&jp(42, "notepad.exe", " Unbenannt - Editor ")), "notepad.exe (PID 42) – Unbenannt - Editor");
+        assert_eq!(proc_line(&jp(7, "node.exe", "")), "node.exe (PID 7)");
+        let one = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "a.exe", "")] }];
+        assert_eq!(lingering_intro(&one, Lang::En), "1 background process is still running and stays after closing unless you end it:");
+        assert_eq!(lingering_intro(&one, Lang::De), "1 Hintergrundprozess läuft noch und bleibt nach dem Schließen bestehen, wenn du ihn nicht beendest:");
+        let two = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "a.exe", ""), jp(2, "b.exe", "")] }, Lingering { id: 2, name: "B".into(), procs: vec![jp(3, "c.exe", "")] }];
+        assert_eq!(lingering_intro(&two, Lang::En), "3 background processes in 2 sessions are still running and stay after closing unless you end them:");
+        assert!(lingering_intro(&two[..1], Lang::De).starts_with("2 Hintergrundprozesse laufen noch"));
+        assert_ne!(keep_label(Lang::De), keep_label(Lang::En));
+        assert_ne!(end_all_label(Lang::De), end_all_label(Lang::En));
+        // Abschnitt zeichnet sich ohne Fehler (headless) und nichts ohne Prozesse
+        let ctx = egui::Context::default();
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                lingering_section(ui, &two, Lang::En, true);
+                lingering_section(ui, &[], Lang::En, true);
+            });
+        });
     }
 
     #[test]

@@ -161,6 +161,8 @@ pub struct Session {
     /// Job Object der Shell und all ihrer Nachfahren (#168): ordnet MCP-Aufrufer auch losgelöst dieser Sitzung zu.
     /// Wird nach dem Beenden der Shell (`Drop`) freigegeben; die Prozesse darin laufen weiter.
     job: Option<crate::winctl::SessionJob>,
+    /// PID der Shell (beim Start festgehalten; `pid()` kann am gesperrten Kind scheitern).
+    shell_pid: Option<u32>,
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
@@ -208,6 +210,7 @@ impl Session {
         // Shell sofort in das Job Object der Sitzung (#168): Ihre Nachfahren gehören dann sicher zu ihr, auch losgelöst.
         // Scheitert das, bleibt der Prozessbaum als Zuordnung (`winctl::resolve_peer`).
         let job = Self::adopt_into_job(child.as_ref());
+        let shell_pid = child.process_id();
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -339,6 +342,7 @@ impl Session {
             last_activity,
             stale_modes,
             job,
+            shell_pid,
         };
         if let Some(input) = opts.initial_input {
             session.write(input.as_bytes());
@@ -363,6 +367,17 @@ impl Session {
     /// Kennung des Job Objects dieser Sitzung (#168), `None` ohne Job (dann zählt nur der Prozessbaum).
     pub fn job_key(&self) -> Option<u64> {
         self.job.as_ref().map(|j| j.key())
+    }
+
+    /// Prozesse der Sitzung, die ihr Schließen überleben würden (#168): im Job, aber weder die Shell noch an ihrer
+    /// Konsole (z. B. per `Start-Process` gestartet, ein GUI-Programm). Leer ohne Job.
+    pub fn lingering(&self) -> Vec<crate::winctl::JobProc> {
+        self.job.as_ref().map(|j| crate::winctl::lingering(j, self.shell_pid)).unwrap_or_default()
+    }
+
+    /// Alle Prozesse im Job der Sitzung beenden („Alle beenden“, #168). `false` ohne Job.
+    pub fn end_job(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| j.terminate_all())
     }
 
     pub fn write(&self, bytes: &[u8]) {
