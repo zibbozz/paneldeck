@@ -445,7 +445,8 @@ pub const DANGER_SOFT: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
 /// Zerstörender Icon-Knopf (Papierkorb, „alle schließen“) an einer festen Stelle: in Ruhe gedämpft rötlich, beim Überfahren
 /// kräftiger mit rötlicher Fläche. `enabled = false` zeichnet ihn blass und reagiert nicht.
 pub fn danger_icon_at(ui: &mut Ui, rect: Rect, id: egui::Id, tip: &str, enabled: bool) -> Response {
-    let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
+    // Auch Ziehen annehmen: sonst begänne ein Druck auf den Knopf mit Bewegung ein Ziehen der Zeile darunter (Ordner).
+    let resp = ui.interact(rect, id, if enabled { Sense::click_and_drag() } else { Sense::hover() });
     let text = ui.visuals().text_color();
     let h = anim(ui.ctx(), id.with("h"), enabled && resp.hovered(), D_FAST);
     if enabled && resp.hovered() {

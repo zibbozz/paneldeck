@@ -66,6 +66,23 @@ pub(super) struct McpState {
     next_token: u64,
 }
 
+impl McpState {
+    /// Eine Sitzung wurde geschlossen (auf jedem Weg, siehe `App::close_session`): sie ist kein angelegtes Kind mehr, und
+    /// ihre Kinder verlieren die Zuordnung zum Elternteil (bleiben aber vom Nutzer steuerbar).
+    pub(super) fn session_closed(&mut self, id: u64) {
+        forget_created(&mut self.created, id);
+    }
+}
+
+fn forget_created(created: &mut HashMap<u64, Option<u64>>, id: u64) {
+    created.remove(&id);
+    for creator in created.values_mut() {
+        if *creator == Some(id) {
+            *creator = None;
+        }
+    }
+}
+
 enum Out {
     Now(R),
     Later,
@@ -1334,14 +1351,7 @@ impl App {
         if self.entries.get(&id).is_some_and(|e| e.meta.worktree.is_some()) {
             return Err(er("forbidden", tr("Sitzungen mit Git-Worktree müssen im Fenster geschlossen werden (dort fragt Paneldeck, was mit dem Worktree geschehen soll).", "Sessions with a Git worktree must be closed in the window (Paneldeck asks there what to do with the worktree).")));
         }
-        self.close_session(id);
-        self.mcp.created.remove(&id);
-        // Kinder, deren Elternteil weg ist, verlieren die Zuordnung (bleiben aber vom Nutzer steuerbar).
-        for creator in self.mcp.created.values_mut() {
-            if *creator == Some(id) {
-                *creator = None;
-            }
-        }
+        self.close_session(id); // räumt auch `mcp.created` auf (Kinder verlieren die Zuordnung)
         Ok(json!({"ok": true}))
     }
 
@@ -1547,6 +1557,22 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_a_session_forgets_it_and_orphans_its_children() {
+        let mut created: HashMap<u64, Option<u64>> = HashMap::new();
+        created.insert(5, Some(2)); // Kind von 2
+        created.insert(6, Some(2));
+        created.insert(2, None); // 2 selbst von einem externen Agenten angelegt
+        created.insert(7, Some(3));
+        forget_created(&mut created, 2);
+        assert!(!created.contains_key(&2));
+        assert_eq!((created[&5], created[&6], created[&7]), (None, None, Some(3)));
+        let mut st = McpState::default();
+        st.created.insert(9, Some(1));
+        st.session_closed(9);
+        assert!(st.created.is_empty());
+    }
 
     #[test]
     fn terminal_links_only_for_own_or_self_created_sessions() {

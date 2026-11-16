@@ -7,8 +7,12 @@ impl App {
         if !self.settings_open {
             // Eine nicht abgeschlossene Kürzel-Aufnahme würde sonst alle Tastenkürzel dauerhaft sperren.
             self.capture_key = None;
+            if self.remember_off_ask == Some(self.wins.cur) {
+                self.remember_off_ask = None; // Einstellungen geschlossen: Rückfrage gilt als abgebrochen
+            }
             return;
         }
+        self.remember_off_ui(ctx);
         let lang = self.settings.language;
         let mut open = true;
         egui::Window::new(lang.t("Einstellungen", "Settings"))
@@ -104,7 +108,14 @@ impl App {
                                 "Restore terminals, chats, projects and folders on the next start. Off: every start is empty, chat histories are deleted on exit.",
                             ),
                             |ui| {
-                                style::toggle(ui, &mut self.settings.remember_sessions);
+                                // Ausschalten erst nach Rückfrage (verwirft beim nächsten Beenden Projekte und Ordner).
+                                let mut on = self.settings.remember_sessions;
+                                style::toggle(ui, &mut on);
+                                if on && !self.settings.remember_sessions {
+                                    self.settings.remember_sessions = true;
+                                } else if !on && self.settings.remember_sessions {
+                                    self.remember_off_ask = Some(self.wins.cur);
+                                }
                             },
                         );
                         ui.add_space(S2);

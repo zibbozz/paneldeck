@@ -249,7 +249,8 @@ impl App {
             }
         }
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click_and_drag());
-        if resp.drag_started() {
+        // Nur mit der linken Taste ziehen (ein Mittelklick mit etwas Bewegung ist kein Ziehen).
+        if resp.drag_started_by(egui::PointerButton::Primary) {
             self.dragging_folder = Some(f.path.clone());
         }
         self.folder_rects.push((f.path.clone(), rect));
@@ -427,7 +428,8 @@ impl App {
 
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click_and_drag());
         self.tree_geo.sess.insert(id, rect);
-        if resp.drag_started() {
+        // Nur mit der linken Taste ziehen: ein Mittelklick (schließt) mit etwas Bewegung startet kein Ziehen.
+        if resp.drag_started_by(egui::PointerButton::Primary) {
             self.dragging = Some(id);
         }
         if resp.hovered() {
@@ -609,8 +611,12 @@ impl App {
             }
         }
 
-        let status_tip = format!("{status_tip}\n{}", lang.t("Mittelklick schließt die Sitzung.", "Middle-click closes the session.")).trim().to_string();
-        let resp = resp.on_hover_text(status_tip);
+        // Den Hinweis auf den Mittelklick nur an einen vorhandenen Tooltip hängen (Zeilen ohne Tooltip bleiben ohne).
+        let resp = if status_tip.is_empty() {
+            resp
+        } else {
+            resp.on_hover_text(format!("{status_tip}\n{}", lang.t("Mittelklick schließt die Sitzung.", "Middle-click closes the session.")))
+        };
         let existing_groups: Vec<String> = {
             let mut g: Vec<String> = self.entries.values().map(|e| e.meta.group.clone()).filter(|g| !g.is_empty()).collect();
             if let Some(p) = self.projects.iter().find(|p| p.id == self.active_project) {

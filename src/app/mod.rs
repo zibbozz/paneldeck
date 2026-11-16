@@ -642,6 +642,10 @@ pub struct App {
     new_chat: Option<models_ui::NewChatDlg>,
     confirm_close: Option<closing::CloseAsk>,
     settings_open: bool,
+    /// „Sitzungen merken“ beim Start (an → beim Beenden mit „aus“ vorher sichern, siehe `fresh_start`).
+    remember_at_start: bool,
+    /// Rückfrage „Sitzungen merken ausschalten?“ offen – in diesem Fenster (Id, 0 = Hauptfenster).
+    remember_off_ask: Option<u64>,
     dir: PathBuf,
     last_save: Instant,
     applied_theme: String,
@@ -848,10 +852,18 @@ impl App {
         }
         state::set_lang(settings.language);
         let (mut saved, startup_note) = state::load_saved(&dir.join("state.json"));
-        // „Sitzungen merken“ aus (#157): frischer Start. Dateien der Sitzungen des letzten Laufs (Scrollback, Chatverläufe)
-        // löschen – auch nach einem Absturz, bei dem `save_for_exit` nicht mehr lief.
+        // „Sitzungen merken“ aus (#157): frischer Start. Steht in state.json noch etwas (Absturz nach dem Ausschalten, von
+        // Hand geändert), wird die Datei vorher gesichert. Scrollback und Chatverläufe früherer Läufe werden gelöscht – auch
+        // nach einem Absturz, bei dem `save_for_exit` nicht mehr lief.
+        let remember_at_start = settings.remember_sessions;
         if !settings.remember_sessions {
-            fresh_start::remove_session_files(&dir, saved.sessions.iter().map(|m| m.id));
+            if fresh_start::worth_keeping(&saved) {
+                if let Ok(raw) = std::fs::read(dir.join("state.json")) {
+                    fresh_start::backup_state(&dir, &raw);
+                }
+            }
+            let top = fresh_start::sweep_session_files(&dir);
+            saved.next_id = saved.next_id.max(top.saturating_add(1));
             saved = fresh_start::forget(saved, state::persisted_lang(settings.language));
         }
         // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
@@ -890,6 +902,8 @@ impl App {
             new_chat: None,
             confirm_close: None,
             settings_open: false,
+            remember_at_start,
+            remember_off_ask: None,
             dir,
             last_save: Instant::now(),
             applied_theme: String::new(),
@@ -1779,6 +1793,8 @@ impl App {
         self.entries.remove(&id);
         self.usage.remove(id);
         self.git.remove(id);
+        // Agenten-Zuordnung: auf jedem Weg (Knopf, Mittelklick, „alle schließen“, MCP) aufräumen.
+        self.mcp.session_closed(id);
         let _ = std::fs::remove_file(self.scrollback_path(id));
         // Chat: Verlauf mit löschen (wie der Scrollback eines Terminals); eine laufende Antwort endet mit dem Entry.
         chatmod::store::remove(&self.dir, id);
@@ -1992,7 +2008,8 @@ impl App {
 
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
-        if self.new_chat.is_some() {
+        // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
+        if self.new_chat.is_some() || self.confirm_close.is_some() {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();

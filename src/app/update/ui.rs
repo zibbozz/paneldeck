@@ -67,9 +67,12 @@ impl App {
     /// Zustand speichern (Sitzungen werden beim Start wiederhergestellt) und neu starten.
     fn update_restart(&mut self) {
         let lang = self.settings.language;
-        self.save_for_exit();
+        // Erst normal speichern; Verläufe und Scrollback (bei „Sitzungen merken“ aus) erst löschen, wenn der Neustart
+        // wirklich angestoßen ist – scheitert er, geht nichts verloren.
+        self.save_all();
         match install::spawn_restart(&self.exe) {
             Ok(()) => {
+                self.save_for_exit();
                 crate::app::winchrome::shutdown();
                 self.tray = None; // Tray-Symbol entfernen (sonst bleibt bis zum Überfahren ein totes Symbol stehen)
                 std::process::exit(0);

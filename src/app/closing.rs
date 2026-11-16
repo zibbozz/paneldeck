@@ -147,14 +147,65 @@ pub(super) fn folder_button_rect(row: Rect) -> Rect {
     Rect::from_center_size(Pos2::new(row.max.x - 15.0, row.center().y), Vec2::splat(22.0))
 }
 
+/// Gehört eine Sitzung zum Bereich? `project`/`window` = aktives Projekt und gezeichnetes Fenster (Ordner und Projekt
+/// gelten nur in diesem Fenster, wie die Seitenleiste sie zeigt; „alle“ umfasst alles, auch abgedockte und minimierte).
+pub(super) fn in_scope(scope: &CloseScope, meta: &SessionMeta, project: u64, window: u64) -> bool {
+    match scope {
+        CloseScope::Folder(path) => meta.project == project && meta.window == window && !meta.group.is_empty() && state::folder_within(&meta.group, path),
+        CloseScope::Project(pid) => meta.project == *pid && meta.window == window,
+        CloseScope::All => true,
+    }
+}
+
+/// Von den bestätigten Sitzungen nur die, die es noch gibt (inzwischen geschlossene fallen weg; neu angelegte kommen
+/// nie dazu, weil die Liste beim Öffnen der Rückfrage feststeht).
+pub(super) fn still_open(ids: &[u64], exists: impl Fn(u64) -> bool) -> Vec<u64> {
+    ids.iter().copied().filter(|id| exists(*id)).collect()
+}
+
+/// Ergebnis eines Bildes der Rückfrage.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(super) enum Outcome {
+    Open,
+    Go,
+    Cancel,
+}
+
+/// Darf bestätigt werden? Erst wenn die Wartezeit abgelaufen ist (Knopf oder Enter).
+pub(super) fn confirmed(secs: u32, clicked: bool, enter: bool) -> bool {
+    secs == 0 && (clicked || enter)
+}
+
+/// Rückfrage-Fenster mit Wartezeit. Esc und Enter werden hier verbraucht (kein Terminal bekommt sie): Esc bricht ab,
+/// Enter bestätigt erst nach der Wartezeit. Der Fokus liegt auf „Abbrechen“.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn confirm_window(ctx: &egui::Context, id: Id, title: &str, button: &str, secs: u32, lang: Lang, width: f32, body: impl FnOnce(&mut Ui)) -> Outcome {
+    let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), i.consume_key(Modifiers::NONE, Key::Enter)));
+    let (mut clicked, mut cancel) = (false, esc);
+    egui::Window::new(title).id(id).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+        ui.set_max_width(width);
+        body(ui);
+        ui.add_space(S2);
+        ui.horizontal(|ui| {
+            clicked = danger_button(ui, button, secs).clicked();
+            let c = ui.button(lang.t("Abbrechen", "Cancel"));
+            c.request_focus();
+            cancel |= c.clicked();
+        });
+    });
+    if confirmed(secs, clicked, enter) {
+        Outcome::Go
+    } else if cancel {
+        Outcome::Cancel
+    } else {
+        Outcome::Open
+    }
+}
+
 impl App {
     /// Sitzungen eines Bereichs (nach Id sortiert).
     pub(super) fn scope_ids(&self, scope: &CloseScope) -> Vec<u64> {
-        match scope {
-            CloseScope::Folder(path) => self.folder_sessions(path),
-            CloseScope::Project(pid) => self.entries.iter().filter(|(_, e)| e.meta.project == *pid && self.in_win(e)).map(|(i, _)| *i).collect(),
-            CloseScope::All => self.entries.keys().copied().collect(),
-        }
+        self.entries.iter().filter(|(_, e)| in_scope(scope, &e.meta, self.active_project, self.wins.cur)).map(|(i, _)| *i).collect()
     }
 
     pub(super) fn close_item(&self, id: u64) -> Option<CloseItem> {
@@ -186,10 +237,8 @@ impl App {
 
     /// Bestätigte Sitzungen beenden (nur noch vorhandene).
     pub(super) fn close_many(&mut self, ids: &[u64]) {
-        for id in ids {
-            if self.entries.contains_key(id) {
-                self.close_session(*id);
-            }
+        for id in still_open(ids, |id| self.entries.contains_key(&id)) {
+            self.close_session(id);
         }
     }
 
@@ -201,13 +250,11 @@ impl App {
         if secs > 0 {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
-        let (mut go, mut cancel) = (false, ctx.input(|i| i.key_pressed(Key::Escape)));
-        match &ask.target {
+        let outcome = match &ask.target {
             CloseTarget::One(id) => {
                 let Some(e) = self.entries.get(id) else { return }; // inzwischen geschlossen (z. B. von einem Agenten)
                 let (name, chat) = (e.display_name(), e.is_chat());
-                egui::Window::new(lang.t("Sitzung schließen?", "Close session?")).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
-                    ui.set_max_width(420.0);
+                let o = confirm_window(ctx, Id::new("close_one_ask"), lang.t("Sitzung schließen?", "Close session?"), lang.t("Schließen", "Close"), secs, lang, 420.0, |ui| {
                     if chat {
                         ui.label(format!(
                             "{}: {}",
@@ -217,15 +264,11 @@ impl App {
                     } else {
                         ui.label(format!("{} {}", lang.q(&name), lang.t("läuft noch. Beim Schließen wird der Prozess beendet.", "is still running. Closing will terminate the process.")));
                     }
-                    ui.add_space(S2);
-                    ui.horizontal(|ui| {
-                        go = danger_button(ui, lang.t("Schließen", "Close"), secs).clicked();
-                        cancel |= ui.button(lang.t("Abbrechen", "Cancel")).clicked();
-                    });
                 });
-                if go {
+                if o == Outcome::Go {
                     actions.push(Action::Close(*id));
                 }
+                o
             }
             CloseTarget::Many(scope, ids) => {
                 let items: Vec<CloseItem> = ids.iter().filter_map(|id| self.close_item(*id)).collect();
@@ -241,8 +284,7 @@ impl App {
                     CloseScope::All => (lang.t("Alle Sitzungen schließen?", "Close all sessions?"), lang.t("Alle Projekte und Fenster", "All projects and windows").to_string()),
                 };
                 let with_project = matches!(scope, CloseScope::All) && items.iter().any(|i| i.project != items[0].project);
-                egui::Window::new(title).id(Id::new("close_many_ask")).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
-                    ui.set_max_width(460.0);
+                let o = confirm_window(ctx, Id::new("close_many_ask"), title, lang.t("Alle schließen", "Close all"), secs, lang, 460.0, |ui| {
                     ui.label(RichText::new(what).strong());
                     ui.add_space(S1);
                     for (n, line) in summary_lines(&items, lang).into_iter().enumerate() {
@@ -264,19 +306,17 @@ impl App {
                     });
                     ui.add_space(S1);
                     ui.label(RichText::new(lang.t("Das lässt sich nicht rückgängig machen.", "This cannot be undone.")).small().color(style::dim(ui)));
-                    ui.add_space(S2);
-                    ui.horizontal(|ui| {
-                        go = danger_button(ui, lang.t("Alle schließen", "Close all"), secs).clicked();
-                        cancel |= ui.button(lang.t("Abbrechen", "Cancel")).clicked();
-                    });
                 });
-                if go {
+                if o == Outcome::Go {
                     actions.push(Action::CloseMany(items.iter().map(|i| i.id).collect()));
                 }
+                o
             }
-        }
-        if !go && !cancel {
+        };
+        if outcome == Outcome::Open {
             self.confirm_close = Some(ask);
+        } else {
+            self.want_focus = Some(self.focused); // Fokus zurück ins Terminal (nach dem Schließen ggf. das nächste)
         }
     }
 }
@@ -382,5 +422,104 @@ mod tests {
         assert!(trash && !folder, "Papierkorb geklickt, Ordner nicht umgeschaltet");
         let (_, trash, folder) = click(&ctx, &mut t, trash_center - Vec2::new(150.0, 0.0), PointerButton::Primary);
         assert!(!trash && folder, "Rest der Zeile bleibt der Ordner");
+        // Druck auf den Papierkorb und Ziehen: die Ordnerzeile darunter beginnt kein Ziehen (der Knopf nimmt es).
+        let mut dragged = false;
+        for ev in [
+            Event::PointerMoved(trash_center),
+            Event::PointerButton { pos: trash_center, button: PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            Event::PointerMoved(trash_center - Vec2::new(40.0, 20.0)),
+            Event::PointerMoved(trash_center - Vec2::new(80.0, 40.0)),
+            Event::PointerButton { pos: trash_center - Vec2::new(80.0, 40.0), button: PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ] {
+            t += 0.05;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))), time: Some(t), events: vec![ev], ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.allocate_exact_size(Vec2::new(300.0, 46.0), Sense::click_and_drag());
+                    let (row, fresp) = ui.allocate_exact_size(Vec2::new(300.0, 28.0), Sense::click_and_drag());
+                    let _ = style::danger_icon_at(ui, folder_button_rect(row), Id::new("t"), "x", true);
+                    dragged |= fresp.drag_started() || fresp.dragged();
+                });
+            });
+        }
+        assert!(!dragged, "kein Ordner-Ziehen aus dem Papierkorb heraus");
+    }
+
+    fn meta(id: u64, project: u64, window: u64, group: &str) -> SessionMeta {
+        SessionMeta { id, project, window, group: group.into(), ..SessionMeta::default() }
+    }
+
+    #[test]
+    fn scope_covers_subfolders_and_respects_window_and_project() {
+        let mut minimized = meta(4, 1, 0, "a/b");
+        minimized.minimized = true;
+        let sessions = [
+            meta(1, 1, 0, "a"),       // Ordner selbst
+            meta(2, 1, 0, "a/b/c"),   // Unterordner
+            meta(3, 1, 0, "ab"),      // nur gleicher Anfang, nicht darunter
+            minimized,                // minimiert, im Unterordner
+            meta(5, 1, 1, "a"),       // anderes Fenster
+            meta(6, 2, 0, "a"),       // anderes Projekt
+            meta(7, 1, 0, ""),        // ohne Ordner
+        ];
+        let ids = |scope: &CloseScope| sessions.iter().filter(|m| in_scope(scope, m, 1, 0)).map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(&CloseScope::Folder("a".into())), vec![1, 2, 4]);
+        assert_eq!(ids(&CloseScope::Folder("a/b".into())), vec![2, 4]);
+        assert_eq!(ids(&CloseScope::Project(1)), vec![1, 2, 3, 4, 7]);
+        assert_eq!(ids(&CloseScope::Project(2)), vec![6]);
+        assert_eq!(ids(&CloseScope::All), vec![1, 2, 3, 4, 5, 6, 7], "alle: auch andere Fenster und Projekte");
+        // Aus Sicht des zweiten Fensters
+        assert_eq!(sessions.iter().filter(|m| in_scope(&CloseScope::Folder("a".into()), m, 1, 1)).map(|m| m.id).collect::<Vec<_>>(), vec![5]);
+    }
+
+    #[test]
+    fn close_many_skips_missing_and_never_adds_new_ids() {
+        let now: std::collections::HashSet<u64> = [1, 3, 9].into_iter().collect(); // 2 inzwischen geschlossen, 9 neu
+        assert_eq!(still_open(&[1, 2, 3], |id| now.contains(&id)), vec![1, 3]);
+        assert!(still_open(&[], |_| true).is_empty());
+    }
+
+    #[test]
+    fn countdown_gates_confirmation() {
+        assert!(!confirmed(3, true, false));
+        assert!(!confirmed(1, false, true), "Enter während der Wartezeit tut nichts");
+        assert!(confirmed(0, true, false));
+        assert!(confirmed(0, false, true));
+        assert!(!confirmed(0, false, false));
+    }
+
+    /// Ein Bild der Rückfrage mit diesen Tasten; liefert das Ergebnis und die Tastenereignisse, die danach noch übrig
+    /// sind (die bekäme ein Terminal, das nach dem Dialog Eingaben liest).
+    fn ask_frame(ctx: &egui::Context, t: f64, secs: u32, keys: &[Key]) -> (Outcome, Vec<Key>) {
+        let events = keys.iter().map(|k| Event::Key { key: *k, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }).collect();
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))), time: Some(t), events, ..Default::default() };
+        let (mut out, mut left) = (Outcome::Open, Vec::new());
+        let _ = ctx.run(input, |ctx| {
+            out = confirm_window(ctx, Id::new("ask"), "Close?", "Close", secs, Lang::En, 300.0, |ui| {
+                ui.label("x");
+            });
+            left = ctx.input(|i| i.events.iter().filter_map(|e| if let Event::Key { key, pressed: true, .. } = e { Some(*key) } else { None }).collect());
+        });
+        (out, left)
+    }
+
+    #[test]
+    fn dialog_keys_enter_waits_for_the_countdown_and_esc_cancels_without_leaking() {
+        let ctx = egui::Context::default();
+        assert_eq!(ask_frame(&ctx, 0.0, 3, &[]).0, Outcome::Open);
+        let (o, left) = ask_frame(&ctx, 0.1, 3, &[Key::Enter]);
+        assert_eq!(o, Outcome::Open, "Enter während der Wartezeit");
+        assert!(left.is_empty(), "Enter erreicht kein Terminal: {left:?}");
+        let (o, left) = ask_frame(&ctx, 0.2, 0, &[Key::Enter]);
+        assert_eq!(o, Outcome::Go, "Enter nach der Wartezeit bestätigt");
+        assert!(left.is_empty());
+        let (o, left) = ask_frame(&ctx, 0.3, 2, &[Key::Escape]);
+        assert_eq!(o, Outcome::Cancel);
+        assert!(left.is_empty(), "Esc erreicht kein Terminal: {left:?}");
+        // Andere Tasten bleiben unberührt (der Dialog verbraucht nur Enter und Esc).
+        let (o, left) = ask_frame(&ctx, 0.4, 2, &[Key::A]);
+        assert_eq!((o, left), (Outcome::Open, vec![Key::A]));
+        // Der Fokus liegt auf „Abbrechen“ (kein Terminal hält ihn).
+        assert!(ctx.memory(|m| m.focused()).is_some());
     }
 }
