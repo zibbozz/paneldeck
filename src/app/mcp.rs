@@ -64,6 +64,8 @@ pub(super) struct McpState {
     /// Meldung zum Registrieren in Claude Code (Einstellungen).
     pub msg: std::sync::Arc<std::sync::Mutex<String>>,
     next_token: u64,
+    /// Der gerade ausgeführte Aufruf kommt von einem nicht zuzuordnenden (losgelösten) Prozess (#152).
+    unattributable: bool,
 }
 
 impl McpState {
@@ -176,22 +178,41 @@ fn env_caller_ok(is_chat: Option<bool>) -> bool {
     is_chat == Some(false)
 }
 
-/// Wer ruft auf (#152)? `chain` = Prozessbaum des Prozesses am anderen Ende der Verbindung (vom Hub ermittelt, nächster
-/// zuerst; leer, wenn unbekannt); `sessions` = (Sitzung, PID ihrer Shell, Hinweis erlaubt). Regeln:
+/// Eine Sitzung für [`pick_caller`]: Kennung, PID ihrer Shell (der Hub hält deren Handle, die PID kann also nicht neu
+/// vergeben werden) und – nur bei WSL-Terminals – ihr geheimer Schlüssel (`PANELDECK_SESSION_KEY`).
+type CallerCand<'a> = (u64, Option<u32>, Option<&'a str>);
+
+/// Wer ruft auf (#152)? `peer` = Prozessbaum des Absenders, auf dem Verbindungs-Thread geprüft (`winctl::resolve_peer`);
+/// `hint` = `PANELDECK_SESSION` und `PANELDECK_SESSION_KEY` der Brücke. Regeln:
 /// 1. Liegt eine Sitzung im Prozessbaum, ist sie der Aufrufer (`"process"`) – die nächste, wenn es mehrere gäbe. Ein
-///    abweichender `PANELDECK_SESSION`-Hinweis zählt dann nicht (er ist fälschbar, der Prozessbaum nicht).
-/// 2. Sonst gilt der Hinweis `env` (`"env"`), aber nur für eine Sitzung, die ihn braucht (`hint_ok`: ein WSL-Terminal –
-///    dort liegt die Brücke nicht im Windows-Prozessbaum der Sitzung). Andere Hinweise werden ignoriert.
-/// 3. Sonst ist der Aufrufer extern (`"none"`, ohne Sitzung und ohne Kette).
-fn pick_caller(chain: &[u32], sessions: &[(u64, Option<u32>, bool)], env: Option<u64>) -> (Option<u64>, &'static str) {
-    let near = sessions.iter().filter_map(|(id, pid, _)| Some((*id, chain.iter().position(|p| Some(*p) == *pid)?))).min_by_key(|(_, pos)| *pos);
+///    abweichender Hinweis zählt dann nicht.
+/// 2. Sonst gilt der Hinweis (`"env"`), aber nur für ein WSL-Terminal (dort liegt die Brücke nicht im Windows-Baum der
+///    Sitzung) und nur mit dem passenden Schlüssel dieser Sitzung. Die Kennung allein beweist nichts.
+/// 3. Sonst: reißt der Baum des Absenders nach dem Start des Hubs ab (losgelöster Prozess), ist er „nicht zuzuordnen“
+///    (`"orphan"`): kein Aufrufer, aber kein Schreiben in mögliche Vorfahren ([`App::chain_blocked`]).
+/// 4. Sonst ist der Aufrufer extern (`"none"`, ohne Sitzung und ohne Kette).
+fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+    let near = sessions.iter().filter_map(|(id, pid, _)| Some((*id, peer.chain.iter().position(|p| Some(*p) == *pid)?))).min_by_key(|(_, pos)| *pos);
     if let Some((id, _)) = near {
         return (Some(id), "process");
     }
-    match env.and_then(|id| sessions.iter().find(|(s, _, _)| *s == id)) {
-        Some((id, _, true)) => (Some(*id), "env"),
-        _ => (None, "none"),
+    if let Some((want, key)) = hint {
+        if let Some((id, _, Some(k))) = sessions.iter().find(|(s, _, _)| *s == want) {
+            if !k.is_empty() && keys_equal(k, key) {
+                return (Some(*id), "env");
+            }
+        }
     }
+    if peer.orphan {
+        (None, "orphan")
+    } else {
+        (None, "none")
+    }
+}
+
+/// Schlüssel vergleichen, ohne früh abzubrechen (Laufzeit hängt nicht davon ab, wie viele Zeichen stimmen).
+fn keys_equal(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Felder `how`/`model` des Protokolleintrags: nur für Werkzeuge eines Chats (`how == "chat"`, ausdrücklich übergeben,
@@ -483,13 +504,19 @@ impl App {
             ctx.request_repaint();
         }
         for job in jobs {
-            let McpJob { tool, args, caller: env_caller, caller_pid, reply } = job;
-            let (caller, how) = self.mcp_resolve_caller(env_caller, caller_pid);
+            let McpJob { tool, args, caller: env_caller, peer, caller_key, reply } = job;
+            let (caller, how) = self.mcp_resolve_caller(&peer, env_caller.zip(caller_key.as_deref()));
             self.mcp.last = Some(Instant::now());
             // Stufe und Modus hier noch einmal prüfen: sie können sich zwischen Verbindung und UI geändert haben.
             let out = match mcp::check_access(&tool, self.settings.mcp_level, self.plan.expert) {
                 Err(e) => Out::Now(Err(e)),
-                Ok(()) => self.mcp_call(ctx, &tool, &args, caller, how, &reply),
+                Ok(()) => {
+                    // Nicht zuzuordnender (losgelöster) Absender: gilt für die Prüfungen dieses Aufrufs (`chain_blocked`).
+                    self.mcp.unattributable = how == "orphan";
+                    let out = self.mcp_call(ctx, &tool, &args, caller, how, &reply);
+                    self.mcp.unattributable = false;
+                    out
+                }
             };
             if let Out::Now(r) = out {
                 self.mcp_finish(&reply, &tool, &args, caller, how, r);
@@ -500,25 +527,39 @@ impl App {
         }
     }
 
-    /// Welche Hub-Sitzung ruft auf? `pid` ist der Prozess am anderen Ende der Verbindung, vom Hub selbst ermittelt
-    /// (`hooks::McpJob::caller_pid`, nie die Angabe des Clients). Zuerst über dessen Prozessbaum (nicht fälschbar durch
-    /// eine gesetzte Umgebungsvariable), sonst über `PANELDECK_SESSION` – nur für WSL-Terminals, dort liegt die Brücke
-    /// nicht im Windows-Prozessbaum (siehe [`pick_caller`]). Ein Chat hat keine PTY und ist nie Aufrufer über diesen Weg.
-    fn mcp_resolve_caller(&self, env_caller: Option<u64>, pid: Option<u32>) -> (Option<u64>, &'static str) {
-        let chain = pid.map(crate::winctl::process_chain).unwrap_or_default();
-        let sessions: Vec<(u64, Option<u32>, bool)> = self
+    /// Welche Hub-Sitzung ruft auf? `peer` ist der Prozessbaum des Absenders, vom Hub selbst auf dem Verbindungs-Thread
+    /// ermittelt (`hooks::McpJob::peer`, nie die Angabe des Clients); `hint` = (`PANELDECK_SESSION`, Schlüssel). Regeln in
+    /// [`pick_caller`]. Ein Chat hat keine PTY und ist nie Aufrufer über diesen Weg.
+    fn mcp_resolve_caller(&self, peer: &crate::winctl::PeerChain, hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+        let sessions: Vec<CallerCand> = self
             .entries
             .iter()
-            .map(|(id, e)| (*id, e.live.as_ref().and_then(|s| s.pid()), env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl")))
+            .map(|(id, e)| {
+                let wsl = env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl");
+                (*id, e.live.as_ref().and_then(|s| s.pid()), wsl.then_some(e.session_key.as_str()))
+            })
             .collect();
-        pick_caller(&chain, &sessions, env_caller)
+        pick_caller(peer, &sessions, hint)
     }
 
-    /// Sitzung, in deren Prozessbaum `pid` läuft (für `--open` aus einem Terminal, #152) – nur über den Prozessbaum.
-    pub(super) fn session_of_pid(&self, pid: Option<u32>) -> Option<u64> {
-        let chain = pid.map(crate::winctl::process_chain).unwrap_or_default();
-        let sessions: Vec<(u64, Option<u32>, bool)> = self.entries.iter().map(|(id, e)| (*id, e.live.as_ref().and_then(|s| s.pid()), false)).collect();
-        pick_caller(&chain, &sessions, None).0
+    /// Absender eines `--open` (#152): `(Sitzung in seinem Prozessbaum, nicht zuzuordnen)` – nur über den Prozessbaum.
+    pub(super) fn open_origin(&self, peer: Option<&crate::winctl::PeerChain>) -> (Option<u64>, bool) {
+        let Some(peer) = peer else { return (None, false) };
+        let sessions: Vec<CallerCand> = self.entries.iter().map(|(id, e)| (*id, e.live.as_ref().and_then(|s| s.pid()), None)).collect();
+        let (id, how) = pick_caller(peer, &sessions, None);
+        (id, how == "orphan")
+    }
+
+    /// Darf `caller` nicht in `id` schreiben (#152)? Weil `id` zu seiner Agenten-Kette gehört – oder weil der Absender
+    /// nicht zuzuordnen ist (losgelöster Prozess) und `id` in irgendeiner Kette steht (ein möglicher Vorfahr).
+    fn chain_blocked(&self, caller: Option<u64>, id: u64) -> Option<(String, String)> {
+        if super::taint::write_forbidden(&self.entries, caller, id) {
+            return Some(super::taint::chain_error());
+        }
+        if self.mcp.unattributable && super::taint::potential_ancestor(&self.entries, id) {
+            return Some(super::taint::orphan_error());
+        }
+        None
     }
 
     fn mcp_finish(&mut self, reply: &SyncSender<R>, tool: &str, args: &Value, caller: Option<u64>, how: &str, r: R) {
@@ -591,8 +632,10 @@ impl App {
             return Err(er("forbidden", tr("Ein Agent darf nicht in seine eigene Sitzung schreiben oder sie schließen.", "An agent must not write to or close its own session.")));
         }
         // Auch nicht über einen Umweg: in keine Sitzung seiner Agenten-Kette – für jeden Aufrufer (#152).
-        if write && super::taint::write_forbidden(&self.entries, caller, id) {
-            return Err(super::taint::chain_error());
+        if write {
+            if let Some(e) = self.chain_blocked(caller, id) {
+                return Err(e);
+            }
         }
         Ok(id)
     }
@@ -1381,8 +1424,8 @@ impl App {
     fn mcp_rename(&mut self, args: &Value, caller: Option<u64>) -> R {
         let id = self.mcp_target(args, caller, false)?;
         // Die eigene Sitzung darf ein Agent umbenennen, eine Sitzung seiner Agenten-Kette nicht (#152).
-        if super::taint::write_forbidden(&self.entries, caller, id) {
-            return Err(super::taint::chain_error());
+        if let Some(e) = self.chain_blocked(caller, id) {
+            return Err(e);
         }
         let name = args.get("name").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).ok_or_else(|| er("bad_args", tr("name fehlt", "name is missing")))?;
         let e = self.entries.get_mut(&id).ok_or_else(|| er("not_found", tr("Sitzung nicht gefunden", "Session not found")))?;
@@ -1394,8 +1437,8 @@ impl App {
     fn mcp_focus(&mut self, ctx: &egui::Context, args: &Value, caller: Option<u64>) -> R {
         let id = self.mcp_target(args, None, false)?;
         // Wie bei Chats (`proxy_forbidden`): keine Sitzung der eigenen Agenten-Kette in den Vordergrund holen (#152).
-        if super::taint::write_forbidden(&self.entries, caller, id) {
-            return Err(super::taint::chain_error());
+        if let Some(e) = self.chain_blocked(caller, id) {
+            return Err(e);
         }
         // Abgedockt: dieses Fenster nach vorn; Sitzung eines weiteren Fensters: dort aktivieren, Fenster nach vorn.
         self.apply(ctx, Action::Focus(id));
@@ -1667,23 +1710,35 @@ mod tests {
 
     #[test]
     fn the_caller_comes_from_the_peer_process_tree_not_from_its_own_claims() {
-        // Sitzungen: 5 (Shell-PID 500), 20 (PID 2000, markiert), 30 (WSL-Terminal, PID 3000), 40 (Chat, keine PID)
-        let sessions = [(5, Some(500), false), (20, Some(2000), false), (30, Some(3000), true), (40, None, false)];
+        use crate::winctl::PeerChain;
+        let pc = |chain: &[u32], orphan: bool| PeerChain { chain: chain.to_vec(), orphan };
+        // Sitzungen: 5 (Shell-PID 500), 20 (PID 2000, markiert), 30 (WSL-Terminal, PID 3000, Schlüssel), 40 (Chat)
+        let key30 = "a".repeat(64);
+        let sessions: [CallerCand; 4] = [(5, Some(500), None), (20, Some(2000), None), (30, Some(3000), Some(key30.as_str())), (40, None, None)];
         // Rohe Verbindung aus dem Prozessbaum von 20, ohne oder mit gefälschter Angabe: immer 20
-        let tree = [4242, 4100, 2000, 1, 999];
+        let tree = pc(&[4242, 4100, 2000, 1, 999], false);
         assert_eq!(pick_caller(&tree, &sessions, None), (Some(20), "process"));
-        assert_eq!(pick_caller(&tree, &sessions, Some(5)), (Some(20), "process"), "Hinweis 5 ändert nichts");
-        assert_eq!(pick_caller(&tree, &sessions, Some(30)), (Some(20), "process"));
+        assert_eq!(pick_caller(&tree, &sessions, Some((5, ""))), (Some(20), "process"), "Hinweis 5 ändert nichts");
+        assert_eq!(pick_caller(&tree, &sessions, Some((30, key30.as_str()))), (Some(20), "process"));
         // die nächste Sitzung im Baum gewinnt
-        assert_eq!(pick_caller(&[1, 2000, 500], &sessions, None), (Some(20), "process"));
-        // nicht zuzuordnen (z. B. per schtasks/WMI gestartet): Hinweis nur für ein WSL-Terminal, sonst extern
-        let outside = [7777, 4];
+        assert_eq!(pick_caller(&pc(&[1, 2000, 500], false), &sessions, None), (Some(20), "process"));
+        // Nicht im Baum einer Sitzung: der WSL-Hinweis gilt nur mit dem passenden Schlüssel
+        let outside = pc(&[7777, 4], false);
         assert_eq!(pick_caller(&outside, &sessions, None), (None, "none"));
-        assert_eq!(pick_caller(&outside, &sessions, Some(5)), (None, "none"), "Terminal ohne WSL: Hinweis ignoriert");
-        assert_eq!(pick_caller(&outside, &sessions, Some(40)), (None, "none"), "Chat: nie");
-        assert_eq!(pick_caller(&outside, &sessions, Some(30)), (Some(30), "env"), "WSL: Brücke liegt nicht im Windows-Baum");
-        assert_eq!(pick_caller(&outside, &sessions, Some(99)), (None, "none"));
-        assert_eq!(pick_caller(&[], &sessions, Some(30)), (Some(30), "env"), "Absender unbekannt");
+        assert_eq!(pick_caller(&outside, &sessions, Some((30, key30.as_str()))), (Some(30), "env"), "WSL mit Schlüssel");
+        assert_eq!(pick_caller(&outside, &sessions, Some((30, ""))), (None, "none"), "WSL ohne Schlüssel: Kennung allein reicht nicht");
+        assert_eq!(pick_caller(&outside, &sessions, Some((30, &"b".repeat(64)))), (None, "none"), "falscher Schlüssel");
+        assert_eq!(pick_caller(&outside, &sessions, Some((5, ""))), (None, "none"), "Terminal ohne WSL: Hinweis ignoriert");
+        assert_eq!(pick_caller(&outside, &sessions, Some((40, ""))), (None, "none"), "Chat: nie");
+        assert_eq!(pick_caller(&outside, &sessions, Some((99, "x"))), (None, "none"));
+        // Losgelöster Prozess (Baum reißt nach dem Hub-Start ab): nicht zuzuordnen, nicht extern
+        let orphan = pc(&[8888], true);
+        assert_eq!(pick_caller(&orphan, &sessions, None), (None, "orphan"));
+        assert_eq!(pick_caller(&orphan, &sessions, Some((5, ""))), (None, "orphan"), "gefälschter Hinweis hilft nicht");
+        assert_eq!(pick_caller(&orphan, &sessions, Some((30, key30.as_str()))), (Some(30), "env"), "WSL-Brücke mit Schlüssel");
+        // Ein verwaister Teilbaum, der noch durch eine Sitzung läuft, zählt als diese Sitzung
+        assert_eq!(pick_caller(&pc(&[9, 2000], true), &sessions, None), (Some(20), "process"));
+        assert!(keys_equal("abc", "abc") && !keys_equal("abc", "abd") && !keys_equal("abc", "ab"));
     }
 
     #[test]

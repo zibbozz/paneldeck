@@ -15,6 +15,9 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 
 pub const ENV_SESSION: &str = "PANELDECK_SESSION";
+/// Geheimer Schlüssel der Sitzung (#152, 128 Bit, je Start neu, nie in Oberfläche oder Protokoll). Nur wer ihn kennt,
+/// kann sich als diese Sitzung ausweisen, wenn der Prozessbaum nicht hilft (WSL); `PANELDECK_SESSION` allein reicht nicht.
+pub const ENV_SESSION_KEY: &str = "PANELDECK_SESSION_KEY";
 pub const ENV_PORT: &str = "PANELDECK_PORT";
 pub const ENV_TOKEN: &str = "PANELDECK_TOKEN";
 
@@ -68,7 +71,7 @@ pub fn status_after(cur: ClaudeStatus, m: &HookMsg) -> ClaudeStatus {
 }
 
 /// 32 Zufallsbytes aus dem Betriebssystem (Hex). Fällt nur im Notfall auf einen schwächeren Wert zurück.
-fn random_hex() -> String {
+pub(crate) fn random_hex() -> String {
     let mut b = [0u8; 32];
     if getrandom::fill(&mut b).is_err() {
         let a = RandomState::new().build_hasher().finish();
@@ -93,9 +96,9 @@ pub fn new_uuid() -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcCmd {
     Show,
-    /// `origin_pid`: Prozess, der den Befehl geschickt hat – ermittelt der Hub selbst aus der Verbindung (#152), nie aus
-    /// der Anfrage. Liegt er im Prozessbaum einer Sitzung, erbt die neue Sitzung deren Agenten-Kette.
-    Open { path: String, claude: bool, origin_pid: Option<u32> },
+    /// `origin`: Prozessbaum des Absenders – ermittelt der Hub selbst aus der Verbindung (#152), nie aus der Anfrage.
+    /// Liegt eine Sitzung darin, erbt die neue Sitzung deren Agenten-Kette.
+    Open { path: String, claude: bool, origin: Option<crate::winctl::PeerChain> },
 }
 
 pub struct HookServer {
@@ -119,10 +122,12 @@ pub struct McpJob {
     /// Sitzung, aus der der Agent nach eigener Angabe aufruft (Umgebungsvariable `PANELDECK_SESSION` der Brücke) –
     /// nur ein Hinweis, siehe `App::mcp_resolve_caller`.
     pub caller: Option<u64>,
-    /// Prozess am anderen Ende der Verbindung, vom Hub selbst über die TCP-Tabelle ermittelt (`winctl::tcp_peer_pid`,
-    /// seit 2.3.0, #152); der Hub ordnet ihn über den Prozessbaum einer Sitzung zu. Ein `caller_pid` in der Anfrage wird
-    /// ignoriert (ein Client könnte ihn fälschen).
-    pub caller_pid: Option<u32>,
+    /// Prozessbaum des Absenders, vom Hub auf dem Verbindungs-Thread ermittelt (`winctl::resolve_peer`, seit 2.3.0, #152):
+    /// TCP-Tabelle → Prozess geöffnet und lebend → Vorfahren mit Erzeugungszeiten. Ein `caller_pid` in der Anfrage wird
+    /// ignoriert (ein Client könnte ihn fälschen). Nicht zu ermitteln = Anfrage abgewiesen, nie „extern“.
+    pub peer: crate::winctl::PeerChain,
+    /// `PANELDECK_SESSION_KEY` der Brücke (nur für die Zuordnung über `caller` in WSL).
+    pub caller_key: Option<String>,
     pub reply: std::sync::mpsc::SyncSender<Result<Value, (String, String)>>,
 }
 
@@ -197,15 +202,21 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
     if buf.contains("\"mcp\"") {
         if let Ok(v) = serde_json::from_str::<Value>(&buf) {
             if v.get("cmd").and_then(|c| c.as_str()) == Some("mcp") {
-                let pid = peer_pid(&s);
-                handle_mcp(&mut s, &v, ipc_token, mcp_tx, ctx, pid);
+                handle_mcp(&mut s, &v, ipc_token, mcp_tx, ctx);
                 return;
             }
         }
     }
     if let Some(mut cmd) = parse_cmd(&buf, ipc_token) {
-        if let IpcCmd::Open { origin_pid, .. } = &mut cmd {
-            *origin_pid = peer_pid(&s);
+        if let IpcCmd::Open { origin, .. } = &mut cmd {
+            // Absender sofort bestimmen; ist er nicht zu ermitteln (schon beendet …), wird nichts geöffnet (#152).
+            match peer_chain(&s) {
+                Some(p) => *origin = Some(p),
+                None => {
+                    let _ = s.write_all(b"refused");
+                    return;
+                }
+            }
         }
         let _ = cmd_tx.send(cmd);
         let _ = s.write_all(b"ok");
@@ -217,8 +228,8 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
 }
 
 /// Prozess am anderen Ende der Verbindung (vom Hub ermittelt, nicht vom Client angegeben).
-fn peer_pid(s: &TcpStream) -> Option<u32> {
-    crate::winctl::tcp_peer_pid(s.peer_addr().ok()?, s.local_addr().ok()?)
+fn peer_chain(s: &TcpStream) -> Option<crate::winctl::PeerChain> {
+    crate::winctl::resolve_peer(s.peer_addr().ok()?, s.local_addr().ok()?)
 }
 
 fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
@@ -228,7 +239,7 @@ fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
     }
     match v.get("cmd")?.as_str()? {
         "show" => Some(IpcCmd::Show),
-        "open" => Some(IpcCmd::Open { path: v.get("path")?.as_str()?.to_string(), claude: v.get("claude").and_then(|c| c.as_bool()).unwrap_or(false), origin_pid: None }),
+        "open" => Some(IpcCmd::Open { path: v.get("path")?.as_str()?.to_string(), claude: v.get("claude").and_then(|c| c.as_bool()).unwrap_or(false), origin: None }),
         _ => None,
     }
 }
@@ -266,8 +277,10 @@ fn mcp_err(code: &str, message: &str) -> Value {
 
 /// Eine MCP-Anfrage entgegennehmen: Token und Stufe prüfen, an die UI weiterreichen, Antwort zurückschreiben.
 /// Die Prüfung der Stufe passiert hier im Hub (nicht erst in der Brücke), damit ein anderer Client sie nicht umgehen kann.
-fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync::mpsc::Sender<McpJob>, ctx: &egui::Context, peer_pid: Option<u32>) {
+fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync::mpsc::Sender<McpJob>, ctx: &egui::Context) {
     use crate::mcp;
+    // Absender sofort auf diesem Thread bestimmen (vor jeder Wartezeit), solange seine Verbindung besteht (#152).
+    let peer = peer_chain(s);
     let mut reply = |r: Value| {
         let _ = s.write_all(r.to_string().as_bytes());
     };
@@ -294,10 +307,20 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
     // Wartezeit: bei Werkzeugen mit eigener Frist deren Wert (+ Reserve), sonst kurz.
     let wait = args.get("timeout_secs").and_then(|t| t.as_u64()).map(|t| t.clamp(1, mcp::MAX_WAIT_SECS) + 10).unwrap_or(30);
     let caller = v.get("caller").and_then(|c| c.as_u64());
-    // Nie die Angabe des Clients: der Prozess am anderen Ende der Verbindung (#152).
-    let caller_pid = peer_pid;
+    let caller_key = v.get("caller_key").and_then(|c| c.as_str()).map(str::to_string);
+    // Nie die Angabe des Clients: der Prozessbaum am anderen Ende der Verbindung (#152). Nicht zu ermitteln → abweisen.
+    let Some(peer) = peer else {
+        mcp::ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return reply(mcp_err(
+            "forbidden",
+            crate::state::t(
+                "Paneldeck kann den aufrufenden Prozess nicht bestimmen (schon beendet oder Verbindung weg) – die Anfrage wird abgewiesen.",
+                "Paneldeck cannot identify the calling process (it has exited or its connection is gone) – the request is refused.",
+            ),
+        ));
+    };
     let (rtx, rrx) = std::sync::mpsc::sync_channel(1);
-    let out = if mcp_tx.send(McpJob { tool: tool.to_string(), args, caller, caller_pid, reply: rtx }).is_err() {
+    let out = if mcp_tx.send(McpJob { tool: tool.to_string(), args, caller, peer, caller_key, reply: rtx }).is_err() {
         mcp_err("internal", crate::state::t("Hub nicht bereit", "Hub not ready"))
     } else {
         ctx.request_repaint();
@@ -312,7 +335,7 @@ fn handle_mcp(s: &mut TcpStream, v: &Value, ipc_token: &str, mcp_tx: &std::sync:
 }
 
 /// Werkzeugaufruf an die laufende Instanz (Brücke → Hub). Fehler als `(Code, Text)`.
-pub fn call_mcp(dir: &Path, tool: &str, args: &Value, caller: Option<u64>, pid: Option<u32>) -> Result<Value, (String, String)> {
+pub fn call_mcp(dir: &Path, tool: &str, args: &Value, caller: Option<u64>, key: Option<&str>) -> Result<Value, (String, String)> {
     let down = || {
         let msg = format!(
             "{} {} {}",
@@ -330,7 +353,8 @@ pub fn call_mcp(dir: &Path, tool: &str, args: &Value, caller: Option<u64>, pid: 
     let (Some(port), Some(token)) = (v["port"].as_u64(), v["token"].as_str()) else { return Err(down()) };
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port as u16));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(800)).map_err(|_| down())?;
-    let body = json!({"token": token, "cmd": "mcp", "tool": tool, "args": args, "caller": caller, "caller_pid": pid});
+    // `caller_pid` wertet der Hub seit 2.3.0 nicht mehr aus (er ermittelt den Absender selbst); `caller_key` belegt `caller`.
+    let body = json!({"token": token, "cmd": "mcp", "tool": tool, "args": args, "caller": caller, "caller_key": key});
     stream.write_all(body.to_string().as_bytes()).map_err(|_| down())?;
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(crate::mcp::MAX_WAIT_SECS + 30)));
@@ -570,9 +594,16 @@ mod tests {
         write_ipc_file(&dir, srv.port, &srv.token);
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
         write_ipc_file(&dir, srv.port, &srv.ipc_token);
-        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin_pid: Some(1) }));
+        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin: Some(crate::winctl::PeerChain { chain: vec![1], orphan: true }) }));
         // Der Hub ermittelt den Absender selbst (hier: dieser Testprozess), eine Angabe im Befehl zählt nicht.
-        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Open { path: "C:\\x".into(), claude: true, origin_pid: Some(std::process::id()) });
+        match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            IpcCmd::Open { path, claude, origin } => {
+                assert_eq!((path.as_str(), claude), ("C:\\x", true));
+                assert_eq!(origin.as_ref().and_then(|o| o.chain.first()), Some(&std::process::id()));
+                assert!(!origin.unwrap().orphan);
+            }
+            other => panic!("{other:?}"),
+        }
         // veraltete Datei (falscher Port) → keine Bestätigung
         write_ipc_file(&dir, 1, "x");
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
@@ -643,11 +674,13 @@ mod tests {
         // Ein Lese-Werkzeug erreicht die UI-Schleife (hier: ein Test, der sie spielt).
         let reply = std::thread::spawn({
             let dir = dir.clone();
-            move || call_mcp(&dir, "list_sessions", &json!({"include_exited": false}), Some(7), Some(1))
+            move || call_mcp(&dir, "list_sessions", &json!({"include_exited": false}), Some(7), Some("k"))
         });
         let job = srv.mcp_rx.recv_timeout(Duration::from_secs(3)).expect("Anfrage kommt in der UI-Schleife an");
-        // caller_pid: der Hub ermittelt den Prozess am anderen Ende selbst (dieser Testprozess); die gefälschte Angabe (PID 1) zählt nicht.
-        assert_eq!((job.tool.as_str(), job.caller, job.caller_pid), ("list_sessions", Some(7), Some(std::process::id())));
+        // Absender: der Hub ermittelt den Prozess am anderen Ende selbst (dieser Testprozess).
+        assert_eq!((job.tool.as_str(), job.caller, job.caller_key.as_deref()), ("list_sessions", Some(7), Some("k")));
+        assert_eq!(job.peer.chain.first(), Some(&std::process::id()));
+        assert!(!job.peer.orphan);
         assert_eq!(job.args["include_exited"], false);
         job.reply.send(Ok(json!({"sessions": []}))).unwrap();
         assert_eq!(reply.join().unwrap().unwrap()["sessions"], json!([]));
