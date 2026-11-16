@@ -47,3 +47,27 @@ jobs:
           for f in tools/*.sh tools/git-hooks/*; do
             bash -n "$f" || exit 1
           done
+
+  # Linux und macOS (Vorbereitung #149/#150): Build und Tests der plattformunabhängigen Teile. Die Windows-Teile stecken hinter
+  # `src/platform/` und sind dort Stubs; Changelog, Lizenzen und Shell-Skripte prüft schon der Windows-Job.
+  # Keine Systempakete nötig: tray-icon, rfd, arboard und die WinRT-Benachrichtigungen sind nur Windows-Abhängigkeiten, eframe
+  # lädt X11/OpenGL zur Laufzeit (die Tests öffnen kein Fenster), SQLite wird mit dem C-Compiler des Runners gebaut.
+  build-test-unix:
+    name: build-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+      - name: Build (release)
+        run: cargo build --release --locked
+      - name: Tests
+        run: cargo test --release --locked
