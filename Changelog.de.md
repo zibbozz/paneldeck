@@ -12,7 +12,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Added
 
 - Mittelklick auf eine Sitzung in der Seitenleiste schließt sie, mit derselben Rückfrage wie der Schließen-Knopf (#155).
-- Alle Sitzungen auf einmal schließen (#156): rötlicher Papierkorb an Ordnern in der Seitenleiste (beim Überfahren; inklusive Unterordnern, minimierten Sitzungen und Chats) und rechts neben dem Filterfeld (alle Sitzungen aller Projekte und Fenster); außerdem im Projekt-Kontextmenü, in der Befehls-Palette und als Tastenkürzel (standardmäßig keins). Die Rückfrage listet auf, was beendet wird, und gibt „Alle schließen“ nach 3 Sekunden frei; Git-Worktrees und Branches bleiben erhalten.
+- Alle Sitzungen auf einmal schließen (#156): Papierkorb an Ordnern in der Seitenleiste (beim Überfahren, unauffällig, beim Darauf-Zeigen rot; inklusive Unterordnern, minimierten Sitzungen und Chats) und rechts neben dem Filterfeld (alle Sitzungen aller Projekte und Fenster); außerdem im Projekt-Kontextmenü, in der Befehls-Palette und als Tastenkürzel (standardmäßig keins). Die Rückfrage listet auf, was beendet wird, und gibt „Alle schließen“ nach 3 Sekunden frei; Git-Worktrees und Branches bleiben erhalten.
 - Einstellung *Sitzungen merken* (Einstellungen → Allgemein, standardmäßig an; neues optionales Feld `remember_sessions` in `settings.json`) (#157). Aus: jeder Start ist frisch – keine Terminals, Chats, Projekte oder Ordner aus dem letzten Lauf; Chatverläufe werden beim Beenden gelöscht. Einstellungen, Todo-Liste und Tickets bleiben. Ausschalten fragt nach; der Stand wird als `state.json.bak-<Datum>` gesichert (nur die neueste bleibt).
 - Kontextmenü „Agenten-Kette zurücksetzen“ für Sitzungen aus einer Agenten-Kette; der Tooltip der Sitzung nennt die Kette.
 - Knopf „Neu laden“ in der Kopfzeile eines Bereichs (auch in abgedockten Fenstern, in der Befehlspalette und im Kontextmenü der Seitenleiste): startet die Shell der Sitzung neu bzw. Claude Code nach den Optionen der Sitzung; fragt vorher, wenn ein Programm läuft, ohne 3-Sekunden-Wartezeit. Optionales Tastenkürzel „Sitzung neu laden“ (ohne Vorbelegung). (#169)
@@ -24,14 +24,19 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - `settings.json`: optionales Feld `wsl_recent` (zuletzt benutzte WSL-Ordner je Distribution, begrenzt). (#172)
 - Einstellung „Programme dürfen in die Zwischenablage kopieren (OSC 52)“ (Einstellungen → Terminal, standardmäßig an; Feld `osc52_copy` in `settings.json`). (#181)
 - Bearbeitbare Farbpalette (Einstellungen → Farben): standardmäßig eine gemeinsame Palette für den Terminal Hub (Farben von Sitzungen, Ordnern, Projekten, Profilen), die Tags der Todo-Liste und den Expertenmodus (Projekte, Typen, Status, Auswahlwerte, Diagramme), wahlweise je Bereich eine eigene (beim Umschalten bleiben beide erhalten). Farben hinzufügen, ändern (Farbwähler oder Hex), löschen und per Ziehen sortieren, optional benennen (im Tooltip, z. B. „Cooles Blau (#2288FF)“), gelöschte Vorgaben wiederherstellen. Jede Farbauswahl bietet zusätzlich „Eigene Farbe …“ für eine einmalige Farbe. Vorhandene Elemente behalten ihre Farbe; automatisch vergebene Farben bleiben wie bisher, bis du die Palette bearbeitest. Gespeichert in `settings.json` (neues optionales Feld `palette`; unveränderte Listen werden nicht geschrieben). (#173)
+- Agenten bestimmen mit dem neuen optionalen `placement`, wo `focus_session` und `create_session` eine Sitzung zeigen: `replace` (Standard bei `focus_session`; ersetzt nur den aktiven Bereich – den eigenen Bereich des Agenten, wenn sichtbar, sonst den fokussierten – und minimiert ihn), `split_right` / `split_down` (teilt nur den aktiven Bereich) oder `solo` (einziger Bereich, die anderen werden minimiert). Die Platzierung bewegt nie den Tastaturfokus des Nutzers (außer sein Bereich wurde ersetzt) und holt kein Fenster nach vorn; Bereiche mit offener Freigabe-Frage und Sitzungen der Agenten-Kette werden nie verdrängt. Ohne `placement` bleibt `create_session` wie bisher leise. `list_sessions` meldet `shown` (Bereich ist zu sehen). (#162)
+- Strg+Tab erreicht auch minimierte Sitzungen und zeigt sie im fokussierten Bereich; der ersetzte Bereich wird minimiert. Nach dem Allein-Öffnen zeigt ein kurzer Hinweis, wie viele Bereiche minimiert wurden. (#162)
+- Einstellung „Umgebung von Paneldeck erben“ (Einstellungen → Allgemein, standardmäßig aus; Feld `inherit_env` in `settings.json`): Neue Terminals bekommen genau die Umgebung, mit der Paneldeck gestartet wurde, statt der frisch aus Windows gelesenen Variablen. (#175)
 
 ### Changed
 
-- Die Rückfrage beim Schließen gibt *Schließen* erst nach 3 Sekunden frei; Enter bestätigt erst nach dem Countdown, und Esc/Enter im Dialog erreichen das Terminal dahinter nicht mehr.
+- Esc/Enter in der Rückfrage beim Schließen erreichen das Terminal dahinter nicht mehr; eine einzelne Sitzung wird weiterhin ohne Wartezeit geschlossen, nur beim Schließen vieler Sitzungen wird *Alle schließen* nach 3 Sekunden frei (#156).
 - *Alle Sitzungen schließen …* am Ordner öffnet eine Rückfrage mit Liste statt des Doppelklick-Knopfs.
-- Eine minimierte Sitzung zurückholen (Klick in der Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`) öffnet sie jetzt allein: Sie ersetzt das Layout des Fensters/Projekts, die bisher sichtbaren Bereiche werden zu minimierten Sitzungen und laufen weiter. Strg+Umschalt+W minimiert nur noch; der alte Platz in der Teilung wird nicht mehr gemerkt (#162).
+- Eine minimierte Sitzung per Klick in der Seitenleiste oder über „Wechseln zu“ in der Palette zurückholen öffnet sie jetzt allein: Sie ersetzt das Layout des Fensters/Projekts, die bisher sichtbaren Bereiche werden zu minimierten Sitzungen und laufen weiter. Strg+Umschalt+W minimiert nur noch; der alte Platz in der Teilung wird nicht mehr gemerkt. Strg+Tab zeigt eine minimierte Sitzung dagegen im fokussierten Bereich; MCP `focus_session` nutzt `placement` (Standard `replace`) (#162).
 - Eine WSL-Sitzung ohne Startordner startet jetzt im Linux-Home (`~`) statt im Windows-Benutzerordner; eine wiederhergestellte WSL-Sitzung, deren gespeicherter Ordner nicht verwendbar ist, startet mit Hinweis in `~`. (#172)
 - MCP `create_session` lehnt Linux-Pfade für Windows-Shells ab, ebenso `\\wsl$`-Pfade einer anderen Distribution. (#172)
+- MCP `focus_session` auf eine minimierte Sitzung nutzt jetzt den Standard `replace` statt sie allein zu öffnen (dafür `placement: "solo"`); ein Chat braucht für `focus_session` mit `placement` eine Freigabe. (#162)
+- Mit „Sitzungen merken“ aus stellt ein Neustart nach einem Update die Sitzungen einmal wieder her; beim nächsten Beenden werden sie wie gewohnt verworfen. (#157)
 
 ### Deprecated
 
@@ -43,6 +48,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Zwischen Seitenleiste und Terminalbereich bleibt keine durchsichtige Lücke mehr, wenn eine Zeile der Seitenleiste breiter ist als die Leiste; die Leiste behält ihre Breite und schneidet die Zeile ab (#160).
 - Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
 - Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
+- Terminals erben keine internen oder reinen Test-Variablen `PANELDECK_*` von Paneldeck mehr (z. B. wenn Paneldeck aus dem Terminal eines anderen Paneldeck gestartet wurde). (#175)
 
 ### Security
 
