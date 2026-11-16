@@ -125,6 +125,45 @@ function Test-Osc52([int]$sid, [string]$sh) {
     if ($C::GetText() -eq $marker) { if ($had) { $C::SetText($saved) } else { $C::Clear() } }
   } catch { Write-Host "  Hinweis: Zwischenablage nicht wiederhergestellt: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
+# Tastenkodierung (#183): send_keys kodiert wie die Tastatur. Ein klassisches Konsolenprogramm ([Console]::ReadKey =
+# ReadConsoleInput) und ein Programm mit VT-Eingabe (node im Rohmodus wie Claude Code, ohne und mit kitty-Flags).
+function Test-Keys([int]$sid) {
+  $out = Join-Path $work 'keys-classic.txt'
+  Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
+  $cmd = '$r = 1..4 | ForEach-Object { $k = [Console]::ReadKey($true); ''{0}/{1}/{2}'' -f $k.Key, $k.Modifiers, [int]$k.KeyChar }; [IO.File]::WriteAllText(''' + $out + ''', ($r -join '' ''))'
+  [void](Tool 'send_text' @{ session = $sid; text = $cmd; submit = $true })
+  Start-Sleep -Milliseconds 1500
+  foreach ($k in @('ctrl+backspace', 'alt+.', 'ctrl+space', 'shift+enter')) { [void](Tool 'send_keys' @{ session = $sid; keys = @($k) }); Start-Sleep -Milliseconds 300 }
+  for ($i = 0; $i -lt 50 -and -not (Test-Path -LiteralPath $out); $i++) { Start-Sleep -Milliseconds 100 }
+  $got = if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { '<nichts>' }
+  # Umschalt+Enter kommt bei klassischen Programmen als Alt+Enter an (ESC CR, damit VT-Programme es behalten).
+  Check 'send_keys (#183): klassisches Programm bekommt Strg+Rueck, Alt+., Strg+Leertaste (win32-input)' ($got -eq 'Backspace/Control/127 OemPeriod/Alt/46 Spacebar/Control/32 Enter/Alt/13') $got
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Skip 'send_keys (#183): Programm mit VT-Eingabe' 'node fehlt'; return }
+  $js = Join-Path $work 'keys-vt.js'
+  [IO.File]::WriteAllText($js, @'
+const fs = require('fs');
+const out = process.argv[2], fl = process.argv[3] || '';
+process.stdin.setRawMode(true); process.stdin.resume();
+const got = [];
+process.stdin.on('data', d => { for (const c of d) got.push(c); });
+if (fl) process.stdout.write('\x1b[>' + fl + 'u');
+process.stdout.write('keys-ready\r\n');
+setTimeout(() => { if (fl) process.stdout.write('\x1b[<u'); fs.writeFileSync(out, got.map(c => c.toString(16).padStart(2, '0')).join(' ')); process.exit(0); }, 3500);
+'@)
+  foreach ($case in @(@('', '1b 0d 1b 2e 08'), @('1', '1b 5b 31 33 3b 32 75 1b 5b 34 36 3b 33 75 1b 5b 31 32 37 3b 35 75'))) {
+    $fl = $case[0]; $want = $case[1]
+    $out = Join-Path $work "keys-vt$fl.txt"
+    Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
+    [void](Tool 'send_text' @{ session = $sid; text = "node '$js' '$out' '$fl'"; submit = $true })
+    Start-Sleep -Milliseconds 1500
+    foreach ($k in @('shift+enter', 'alt+.', 'ctrl+backspace')) { [void](Tool 'send_keys' @{ session = $sid; keys = @($k) }); Start-Sleep -Milliseconds 300 }
+    for ($i = 0; $i -lt 60 -and -not (Test-Path -LiteralPath $out); $i++) { Start-Sleep -Milliseconds 100 }
+    $got = if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { '<nichts>' }
+    $what = if ($fl) { 'mit kitty-Flags: CSI 13;2u, CSI 46;3u, CSI 127;5u' } else { 'ohne kitty: ESC CR, ESC ., 0x08' }
+    Check "send_keys (#183): VT-Programm (node) $what" ($got -eq $want) $got
+    Start-Sleep -Milliseconds 500
+  }
+}
 function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   Stop-Hub
   $f = "$data\settings.json"
@@ -280,6 +319,7 @@ try {
       Check 'send_text' (-not (Tool 'send_text' @{ session = $id; text = 'echo per-send_text'; submit = $true }).err); Start-Sleep 1
       Check 'send_keys' (-not (Tool 'send_keys' @{ session = $id; keys = @('ctrl+l') }).err)
       Check 'send_keys ungueltige Taste' ((Code (Tool 'send_keys' @{ session = $id; keys = @('ctrl+alt+entf') })) -eq 'bad_args')
+      Test-Keys $id
       Check 'rename_session' ((Tool 'rename_session' @{ session = $id; name = 'Agent' }).data.name -eq 'Agent')
       Check 'wait_for_status: keine Claude-Sitzung' ((Code (Tool 'wait_for_status' @{ session = $id; status = @('ready'); timeout_secs = 1 })) -eq 'not_claude')
       Check 'queue_prompt: keine Claude-Sitzung' ((Code (Tool 'queue_prompt' @{ session = $id; prompt = 'x' })) -eq 'not_claude')

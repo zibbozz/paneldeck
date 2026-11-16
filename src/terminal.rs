@@ -67,8 +67,10 @@ impl Listener {
 
 /// Emulator-Einstellungen eines Terminals. OSC 52 nur zum Kopieren: Programme dürfen die Zwischenablage
 /// beschreiben, aber nie lesen (`ClipboardLoad` wird gar nicht erst ausgelöst).
+/// kitty-Tastaturprotokoll an (#183): alacritty führt den Flag-Stapel und beantwortet `CSI ? u`; kodiert wird in
+/// `vtkeys`.
 pub fn term_config(scrollback_lines: usize) -> Config {
-    Config { scrolling_history: scrollback_lines, osc52: Osc52::OnlyCopy, ..Config::default() }
+    Config { scrolling_history: scrollback_lines, osc52: Osc52::OnlyCopy, kitty_keyboard: true, ..Config::default() }
 }
 
 impl EventListener for Listener {
@@ -158,6 +160,8 @@ pub struct Session {
     /// und keine Klicks. Ebenso ein Vollbildprogramm, das selbst OSC 133;A ausgibt. Ohne Shell-Integration
     /// (cmd ohne Integration, entfernte Shells) greift die Erkennung nicht.
     pub stale_modes: Arc<AtomicBool>,
+    /// win32-input-mode (DECSET 9001) ist an: ConPTY verlangt ihn beim Start (`vtkeys::Win32ModeScanner`).
+    pub win32_input: Arc<AtomicBool>,
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
@@ -228,6 +232,7 @@ impl Session {
         let shell_state: Arc<Mutex<ShellState>> = Arc::new(Mutex::new(ShellState::default()));
         let last_activity = Arc::new(std::sync::atomic::AtomicU64::new(mono_ms()));
         let stale_modes = Arc::new(AtomicBool::new(false));
+        let win32_input = Arc::new(AtomicBool::new(false));
 
         {
             let term = term.clone();
@@ -236,6 +241,7 @@ impl Session {
             let shell_state = shell_state.clone();
             let activity = last_activity.clone();
             let stale = stale_modes.clone();
+            let win32 = win32_input.clone();
             // Lesen und Verarbeiten getrennt: Der Verarbeitungs-Thread muss die Frist eines „Synchronized Update“
             // (CSI ?2026h) selbst durchsetzen. vte puffert sonst nach einem abgebrochenen Update (Programm stirbt
             // mitten im Frame, `cat` einer Datei mit ESC[?2026h) bis zu 2 MiB und das Terminal zeigt nichts mehr an.
@@ -256,6 +262,7 @@ impl Session {
             std::thread::spawn(move || {
                 use std::sync::mpsc::RecvTimeoutError;
                 let mut scanner = OscScanner::default();
+                let mut win32_scan = crate::vtkeys::Win32ModeScanner::default();
                 loop {
                     let msg = match processor.sync_timeout().sync_timeout() {
                         Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
@@ -264,6 +271,9 @@ impl Session {
                     match msg {
                         Ok(bytes) => {
                             activity.store(mono_ms(), Ordering::Relaxed);
+                            if let Some(on) = win32_scan.feed(&bytes) {
+                                win32.store(on, Ordering::Relaxed);
+                            }
                             let (events, positions) = scanner.feed_at(&bytes);
                             {
                                 let mut t = term.lock().unwrap_or_else(|e| e.into_inner());
@@ -284,6 +294,9 @@ impl Session {
                                         let line = t.grid().cursor.point.line.0 as i64;
                                         let was = stale.load(Ordering::Relaxed);
                                         stale.store(next_stale_modes(was, &ev, *t.mode()), Ordering::Relaxed);
+                                        if kitty_left_at_prompt(&ev, *t.mode()) {
+                                            processor.advance(&mut *t, KITTY_RESET);
+                                        }
                                         if ev == OscEvent::FullscreenModeSet {
                                             continue; // keine Shell-Integration
                                         }
@@ -332,6 +345,7 @@ impl Session {
             tee: Mutex::new(Vec::new()),
             last_activity,
             stale_modes,
+            win32_input,
         };
         if let Some(input) = opts.initial_input {
             session.write(input.as_bytes());
@@ -405,9 +419,10 @@ impl Session {
         text.lines().map(|l| l.trim_end().to_string()).collect()
     }
 
-    /// Anwendung hat den Cursor-Tasten-Modus (Pfeile als `ESC O A`) gesetzt.
-    pub fn app_cursor(&self) -> bool {
-        self.term.lock().unwrap_or_else(|e| e.into_inner()).mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR)
+    /// Wie Tasten gerade kodiert werden (Cursor-/Ziffernblock-Modus, win32-input-mode, kitty-Flags).
+    pub fn key_mode(&self) -> crate::vtkeys::KeyMode {
+        let mode = *self.term.lock().unwrap_or_else(|e| e.into_inner()).mode();
+        crate::vtkeys::KeyMode::new(mode, self.win32_input.load(Ordering::Relaxed))
     }
 
     pub fn alt_screen(&self) -> bool {
@@ -632,6 +647,16 @@ pub fn next_stale_modes(prev: bool, ev: &OscEvent, mode: alacritty_terminal::ter
         OscEvent::FullscreenModeSet => false,
         _ => prev,
     }
+}
+
+/// Setzt die kitty-Flags auf 0 (`CSI = 0 ; 1 u`).
+const KITTY_RESET: &[u8] = b"\x1b[=0;1u";
+
+/// Meldet die Shell ihren Prompt (OSC 133;A), während noch kitty-Tastaturflags gesetzt sind, hat das Programm sie
+/// nicht zurückgenommen (Absturz, abgeschossen). Ohne Rücksetzen kämen Esc, Strg+C und Strg+Buchstabe als CSI u bei
+/// der Shell an. Dann setzt der Lese-Thread die Flags auf 0 (`KITTY_RESET`).
+pub fn kitty_left_at_prompt(ev: &OscEvent, mode: alacritty_terminal::term::TermMode) -> bool {
+    *ev == OscEvent::PromptStart && mode.intersects(alacritty_terminal::term::TermMode::KITTY_KEYBOARD_PROTOCOL)
 }
 
 fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line: u64) {

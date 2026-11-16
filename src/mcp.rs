@@ -255,7 +255,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "send_keys",
             level: Control,
             group: Group::Always,
-            description: "Send special keys: enter, esc, tab, backspace, delete, up, down, left, right, home, end, pageup, pagedown, ctrl+c, ctrl+d, ctrl+l, ctrl+z, f1..f12. Refused while the session waits for a permission decision.",
+            description: "Send keys, encoded like the keyboard (win32-input-mode under ConPTY, kitty keyboard protocol when the program enabled it): enter, esc, tab, backspace, delete, insert, up, down, left, right, home, end, pageup, pagedown, space, f1..f20, a..z, 0..9 and . , / \\ - = ; ' [ ] `, each with optional ctrl+, alt+, shift+ prefixes (e.g. ctrl+c, shift+enter, ctrl+backspace, alt+.). Refused while the session waits for a permission decision.",
             schema: schema(json!({"session": session, "keys": {"type": "array", "items": {"type": "string"}}}), &["session", "keys"]),
         },
         ToolDef {
@@ -1148,50 +1148,6 @@ mod unregister_tests {
 
 // ───────────────────────────── Hilfsfunktionen ─────────────────────────────
 
-/// Namen von Tasten in die Bytes übersetzen, die ein Terminal erwartet. Nur eine feste Liste (Whitelist).
-pub fn key_bytes(name: &str, app_cursor: bool) -> Option<Vec<u8>> {
-    let n = name.trim().to_lowercase();
-    let arrow = |c: char| -> Vec<u8> {
-        if app_cursor { format!("\x1bO{c}").into_bytes() } else { format!("\x1b[{c}").into_bytes() }
-    };
-    Some(match n.as_str() {
-        "enter" | "return" => b"\r".to_vec(),
-        "esc" | "escape" => b"\x1b".to_vec(),
-        "tab" => b"\t".to_vec(),
-        "shift+tab" => b"\x1b[Z".to_vec(),
-        "backspace" => b"\x7f".to_vec(),
-        "delete" | "del" => b"\x1b[3~".to_vec(),
-        "up" => arrow('A'),
-        "down" => arrow('B'),
-        "right" => arrow('C'),
-        "left" => arrow('D'),
-        "home" => b"\x1b[H".to_vec(),
-        "end" => b"\x1b[F".to_vec(),
-        "pageup" => b"\x1b[5~".to_vec(),
-        "pagedown" => b"\x1b[6~".to_vec(),
-        "ctrl+c" => vec![3],
-        "ctrl+d" => vec![4],
-        "ctrl+l" => vec![12],
-        "ctrl+z" => vec![26],
-        f if f.starts_with('f') && f.len() <= 3 => {
-            let k: u8 = f[1..].parse().ok()?;
-            match k {
-                1..=4 => format!("\x1bO{}", (b'P' + k - 1) as char).into_bytes(),
-                5 => b"\x1b[15~".to_vec(),
-                6 => b"\x1b[17~".to_vec(),
-                7 => b"\x1b[18~".to_vec(),
-                8 => b"\x1b[19~".to_vec(),
-                9 => b"\x1b[20~".to_vec(),
-                10 => b"\x1b[21~".to_vec(),
-                11 => b"\x1b[23~".to_vec(),
-                12 => b"\x1b[24~".to_vec(),
-                _ => return None,
-            }
-        }
-        _ => return None,
-    })
-}
-
 /// Base64 (Standard-Alphabet, mit Auffüllung) – das Projekt hat dafür keine Abhängigkeit.
 pub fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1516,15 +1472,8 @@ mod tests {
     }
 
     #[test]
-    fn keys_and_base64() {
-        assert_eq!(key_bytes("Enter", false), Some(b"\r".to_vec()));
-        assert_eq!(key_bytes("up", true), Some(b"\x1bOA".to_vec()));
-        assert_eq!(key_bytes("up", false), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_bytes("ctrl+c", false), Some(vec![3]));
-        assert_eq!(key_bytes("f5", false), Some(b"\x1b[15~".to_vec()));
-        assert_eq!(key_bytes("f1", false), Some(b"\x1bOP".to_vec()));
-        assert!(key_bytes("ctrl+alt+entf", false).is_none());
-        assert!(key_bytes("f99", false).is_none());
+    fn base64_encoding() {
+        // Tastennamen (send_keys): `vtkeys::key_bytes` mit eigenen Tests.
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");

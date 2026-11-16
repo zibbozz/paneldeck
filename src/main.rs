@@ -41,6 +41,7 @@ mod templates;
 mod terminal;
 mod undo;
 mod tray;
+mod vtkeys;
 mod termview;
 mod theme;
 mod usage;

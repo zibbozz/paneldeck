@@ -1,6 +1,7 @@
 //! Zeichnen eines Terminals und Verarbeitung von Tastatur/Maus.
 
 use crate::terminal::Session;
+use crate::vtkeys;
 use crate::theme::Theme;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -624,6 +625,32 @@ fn insert_held() -> bool {
     }
 }
 
+/// Taste des Ziffernblocks? egui meldet den Ort nicht (Ziffernblock-5 = `Key::Num5`); unter Windows zeigt der
+/// Tastenzustand von VK_NUMPAD0…9 / VK_MULTIPLY / VK_ADD / VK_SUBTRACT / VK_DECIMAL / VK_DIVIDE, woher das Zeichen kam
+/// (NumLock an – sonst wären es Pfeil- und Bildtasten).
+#[cfg(windows)]
+fn numpad_down(c: char) -> bool {
+    let vk = match c {
+        '0'..='9' => 0x60 + (c as u16 - '0' as u16),
+        '*' => 0x6A,
+        '+' => 0x6B,
+        '-' => 0x6D,
+        '.' | ',' => 0x6E,
+        '/' => 0x6F,
+        _ => return false,
+    };
+    vk_down(vk)
+}
+
+#[cfg(not(windows))]
+fn numpad_down(_c: char) -> bool {
+    false
+}
+
+/// Tasten, deren Drücken gesendet wurde: nur deren Loslassen geht ans Programm (kitty-Flag 2). Sonst käme das
+/// Loslassen von Tastenkürzeln des Hubs an, deren Drücken egui schon verbraucht hat.
+static KEYS_DOWN: std::sync::Mutex<Vec<Key>> = std::sync::Mutex::new(Vec::new());
+
 fn handle_keyboard(ui: &Ui, session: &mut Session) {
     let events = ui.input(|i| i.events.clone());
     let pasted_text = events.iter().any(|e| matches!(e, Event::Paste(_)));
@@ -633,7 +660,11 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
             paste(session, &format!("{t} "));
         }
     }
-    for ev in events {
+    let mode = session.key_mode();
+    let encode = |key: Key, mods: Modifiers| vtkeys::encode_key(&vtkeys::KeyPress::new(key, mods), mode).bytes;
+    // Das `Event::Text` direkt nach einer Taste gehört zu ihr; hat `encode_key` es schon gesendet, wird es übersprungen.
+    let mut eat_text = false;
+    for (i, ev) in events.iter().enumerate() {
         match ev {
             // egui-winit wandelt Strg+C / Strg+X (und Strg+Einfg / Umschalt+Entf) in Copy/Cut um und
             // liefert dafür KEIN Key-Ereignis – ohne diese Zweige käme ^C nie im Terminal an.
@@ -643,57 +674,100 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                     ui.ctx().copy_text(t);
                     session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
                 } else if !ui.input(|i| i.modifiers.shift) && !insert_held() {
-                    send(session, b"\x03");
+                    send(session, &encode(Key::C, Modifiers::CTRL));
                 }
             }
             Event::Cut => {
                 let m = ui.input(|i| i.modifiers);
                 if m.ctrl {
-                    send(session, b"\x18");
+                    send(session, &encode(Key::X, Modifiers::CTRL));
                 } else {
                     // Umschalt+Entf
-                    let mode = *session.term.lock().unwrap_or_else(|e| e.into_inner()).mode();
-                    if let Some(bytes) = encode_key(Key::Delete, m, mode.contains(TermMode::APP_CURSOR)) {
-                        send(session, &bytes);
-                    }
+                    send(session, &encode(Key::Delete, m));
                 }
             }
             Event::Text(t) => {
-                let m = ui.input(|i| i.modifiers);
-                let altgr = m.ctrl && m.alt;
-                let pure_ctrl = m.ctrl && !m.alt;
-                let pure_alt = m.alt && !m.ctrl;
-                if !(pure_ctrl || pure_alt) || altgr {
-                    if !t.chars().all(|c| c.is_control()) {
-                        send(session, t.as_bytes());
-                    }
-                }
-            }
-            Event::Paste(t) => paste(session, &t),
-            Event::Key { key, pressed: true, modifiers, .. } => {
-                // Einfügen: Text kommt über Event::Paste, Bilder über ctrl_v_pressed(); das Steuerzeichen ^V
-                // selbst wird nicht gesendet (sonst fügt z. B. PSReadLine doppelt ein).
-                if key == Key::V && modifiers.ctrl && !modifiers.alt {
+                if std::mem::take(&mut eat_text) {
                     continue;
                 }
-                // Kopieren
-                if key == Key::C && modifiers.ctrl && !modifiers.alt {
-                    let sel = session.term.lock().unwrap_or_else(|e| e.into_inner()).selection_to_string();
-                    if let Some(t) = sel.filter(|t| !t.is_empty()) {
-                        ui.ctx().copy_text(t);
-                        session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
-                        continue;
-                    } else if modifiers.shift {
+                let m = ui.input(|i| i.modifiers);
+                let numpad = t.chars().count() == 1 && t.chars().next().is_some_and(numpad_down);
+                let bytes = vtkeys::encode_text(t, m, numpad, mode);
+                if !bytes.is_empty() {
+                    send(session, &bytes);
+                }
+            }
+            Event::Paste(t) => paste(session, t),
+            Event::Key { key, physical_key, pressed, repeat, modifiers } => {
+                eat_text = false;
+                let (key, modifiers) = (*key, *modifiers);
+                if *pressed {
+                    // Einfügen: Text kommt über Event::Paste, Bilder über ctrl_v_pressed(); das Steuerzeichen ^V
+                    // selbst wird nicht gesendet (sonst fügt z. B. PSReadLine doppelt ein).
+                    if key == Key::V && modifiers.ctrl && !modifiers.alt {
                         continue;
                     }
+                    // Kopieren
+                    if key == Key::C && modifiers.ctrl && !modifiers.alt {
+                        let sel = session.term.lock().unwrap_or_else(|e| e.into_inner()).selection_to_string();
+                        if let Some(t) = sel.filter(|t| !t.is_empty()) {
+                            ui.ctx().copy_text(t);
+                            session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
+                            continue;
+                        } else if modifiers.shift {
+                            continue;
+                        }
+                    }
                 }
-                let mode = *session.term.lock().unwrap_or_else(|e| e.into_inner()).mode();
-                if let Some(bytes) = encode_key(key, modifiers, mode.contains(TermMode::APP_CURSOR)) {
-                    send(session, &bytes);
+                let text = match events.get(i + 1) {
+                    Some(Event::Text(t)) => Some(t.as_str()),
+                    _ => None,
+                };
+                let phase = match (*pressed, *repeat) {
+                    (false, _) => vtkeys::Phase::Release,
+                    (true, true) => vtkeys::Phase::Repeat,
+                    (true, false) => vtkeys::Phase::Press,
+                };
+                {
+                    let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+                    if phase == vtkeys::Phase::Release {
+                        let was_sent = down.contains(&key);
+                        down.retain(|k| *k != key);
+                        if !was_sent {
+                            continue;
+                        }
+                    }
+                }
+                let numpad = key_digit(key).is_some_and(numpad_down);
+                let kp = vtkeys::KeyPress { key, physical: *physical_key, mods: modifiers, phase, numpad, text };
+                let out = vtkeys::encode_key(&kp, mode);
+                eat_text = out.eat_text && text.is_some();
+                if !out.bytes.is_empty() {
+                    if phase != vtkeys::Phase::Release {
+                        let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+                        if !down.contains(&key) {
+                            down.push(key);
+                        }
+                    }
+                    send(session, &out.bytes);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// Ziffer bzw. Rechenzeichen einer Taste, die es auch auf dem Ziffernblock gibt.
+fn key_digit(key: Key) -> Option<char> {
+    let n = key.name();
+    match key {
+        Key::Plus => Some('+'),
+        Key::Minus => Some('-'),
+        Key::Slash => Some('/'),
+        Key::Period => Some('.'),
+        Key::Comma => Some(','),
+        _ if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() => n.chars().next(),
+        _ => None,
     }
 }
 
@@ -717,84 +791,6 @@ fn paste(session: &mut Session, text: &str) {
         t.selection = None;
     }
     session.send_text(text, false);
-}
-
-fn mod_param(m: Modifiers) -> u8 {
-    1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.ctrl as u8
-}
-
-fn encode_key(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
-    let altgr = m.ctrl && m.alt;
-    let any_mod = m.shift || m.alt || m.ctrl;
-    let csi = |final_byte: char| -> Vec<u8> {
-        if any_mod {
-            format!("\x1b[1;{}{}", mod_param(m), final_byte).into_bytes()
-        } else if app_cursor {
-            format!("\x1bO{final_byte}").into_bytes()
-        } else {
-            format!("\x1b[{final_byte}").into_bytes()
-        }
-    };
-    let tilde = |n: u8| -> Vec<u8> {
-        if any_mod {
-            format!("\x1b[{};{}~", n, mod_param(m)).into_bytes()
-        } else {
-            format!("\x1b[{n}~").into_bytes()
-        }
-    };
-    let b = |s: &str| Some(s.as_bytes().to_vec());
-    match key {
-        Key::Enter => {
-            if m.shift || m.alt || m.ctrl { b("\x1b\r") } else { b("\r") }
-        }
-        Key::Backspace => {
-            if m.ctrl { b("\x17") } else if m.alt { b("\x1b\x7f") } else { b("\x7f") }
-        }
-        Key::Tab => if m.shift { b("\x1b[Z") } else { b("\t") },
-        Key::Escape => b("\x1b"),
-        Key::ArrowUp => Some(csi('A')),
-        Key::ArrowDown => Some(csi('B')),
-        Key::ArrowRight => Some(csi('C')),
-        Key::ArrowLeft => Some(csi('D')),
-        Key::Home => Some(csi('H')),
-        Key::End => Some(csi('F')),
-        Key::Insert => Some(tilde(2)),
-        Key::Delete => Some(tilde(3)),
-        Key::PageUp => Some(tilde(5)),
-        Key::PageDown => Some(tilde(6)),
-        Key::F1 => Some(if any_mod { format!("\x1b[1;{}P", mod_param(m)).into_bytes() } else { b"\x1bOP".to_vec() }),
-        Key::F2 => Some(if any_mod { format!("\x1b[1;{}Q", mod_param(m)).into_bytes() } else { b"\x1bOQ".to_vec() }),
-        Key::F3 => Some(if any_mod { format!("\x1b[1;{}R", mod_param(m)).into_bytes() } else { b"\x1bOR".to_vec() }),
-        Key::F4 => Some(if any_mod { format!("\x1b[1;{}S", mod_param(m)).into_bytes() } else { b"\x1bOS".to_vec() }),
-        Key::F5 => Some(tilde(15)),
-        Key::F6 => Some(tilde(17)),
-        Key::F7 => Some(tilde(18)),
-        Key::F8 => Some(tilde(19)),
-        Key::F9 => Some(tilde(20)),
-        Key::F10 => Some(tilde(21)),
-        Key::F11 => Some(tilde(23)),
-        Key::F12 => Some(tilde(24)),
-        Key::Space if m.ctrl && !m.alt => Some(vec![0]),
-        Key::OpenBracket if m.ctrl && !m.alt => Some(vec![0x1b]),
-        Key::Backslash if m.ctrl && !m.alt => Some(vec![0x1c]),
-        Key::CloseBracket if m.ctrl && !m.alt => Some(vec![0x1d]),
-        Key::Slash if m.ctrl && !m.alt => Some(vec![0x1f]),
-        _ => {
-            // Buchstaben: Ctrl+X / Alt+X
-            let name = key.name();
-            if name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase() && !altgr {
-                let ch = name.as_bytes()[0];
-                if m.ctrl {
-                    return Some(vec![ch - b'A' + 1]);
-                }
-                if m.alt {
-                    let c = if m.shift { ch } else { ch.to_ascii_lowercase() };
-                    return Some(vec![0x1b, c]);
-                }
-            }
-            None
-        }
-    }
 }
 
 #[cfg(test)]
@@ -942,6 +938,42 @@ mod tests {
         assert!(prompt_with_stale_modes(mode_after("\x1b[?1002h\x1b[?1006h")));
         // `reset` (RIS) räumt beides auf.
         assert!(!prompt_with_stale_modes(mode_after("\x1b[?1049h\x1b[?1003h\x1bc")));
+    }
+
+    /// kitty-Tastaturflags, die ein abgestürztes Programm stehen ließ, setzt der Lese-Thread am Prompt zurück (#183).
+    #[test]
+    fn kitty_flags_reset_at_prompt() {
+        use crate::osc::OscScanner;
+        use crate::terminal::{kitty_left_at_prompt, term_config};
+        let run = |chunks: &[&str]| -> TermMode {
+            let mut term = Term::new(term_config(100), &TermSize::new(80, 24), VoidListener);
+            let mut p: Processor = Processor::new();
+            let mut scanner = OscScanner::default();
+            for chunk in chunks {
+                let bytes = chunk.as_bytes();
+                let (events, positions) = scanner.feed_at(bytes);
+                let mut done = 0;
+                for (ev, end) in events.into_iter().zip(positions) {
+                    p.advance(&mut term, &bytes[done..end]);
+                    done = end;
+                    if kitty_left_at_prompt(&ev, *term.mode()) {
+                        p.advance(&mut term, b"\x1b[=0;1u");
+                    }
+                }
+                p.advance(&mut term, &bytes[done..]);
+            }
+            *term.mode()
+        };
+        const PROMPT: &str = "\x1b]133;A\x07PS> \x1b]133;B\x07";
+        // Programm schaltet kitty ein (wie Claude Code: Flags 5) – solange es läuft, bleiben sie.
+        let m = run(&[PROMPT, "\x1b[>5u"]);
+        assert_eq!(crate::vtkeys::KeyMode::new(m, true).kitty, 5);
+        // ordentlich beendet (Pop) oder abgestürzt: am nächsten Prompt aus
+        assert!(!run(&[PROMPT, "\x1b[>5u", "\x1b[<u", PROMPT]).intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
+        assert!(!run(&[PROMPT, "\x1b[>5u", PROMPT]).intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
+        assert!(!run(&[PROMPT, &format!("\x1b[>1u\x1b[>5uboom{PROMPT}")]).intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
+        // Text nach dem Prompt im selben Chunk, der kitty wieder einschaltet (Shell mit kitty-Unterstützung): bleibt.
+        assert!(run(&[&format!("{PROMPT}\x1b[>1u")]).contains(TermMode::DISAMBIGUATE_ESC_CODES));
     }
 
     /// Ausgabe-Chunks wie im Lese-Thread (`Session::new`) verarbeiten: an den Sequenzen teilen, nach jeder

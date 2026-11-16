@@ -1304,11 +1304,12 @@ impl App {
             return Err(er("bad_args", tr("keys: 1 bis 32 Einträge", "keys: 1 to 32 entries")));
         }
         let live = self.mcp_live(id)?;
-        let app = live.app_cursor();
+        // Dieselbe Kodierung wie die Tastatur (win32-input-mode, kitty-Flags der Sitzung).
+        let mode = live.key_mode();
         let mut bytes: Vec<u8> = Vec::new();
         for k in keys {
             let name = k.as_str().ok_or_else(|| er("bad_args", tr("keys: nur Strings", "keys: strings only")))?;
-            bytes.extend(mcp::key_bytes(name, app).ok_or_else(|| er("bad_args", if de() { format!("Unbekannte Taste „{name}“") } else { format!("Unknown key “{name}”") }))?);
+            bytes.extend(crate::vtkeys::key_bytes(name, mode).ok_or_else(|| er("bad_args", if de() { format!("Unbekannte Taste „{name}“") } else { format!("Unknown key “{name}”") }))?);
         }
         self.mcp_check_writable(id)?;
         self.mcp_live(id)?.write_raw(&bytes);
