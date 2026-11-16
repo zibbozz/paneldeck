@@ -339,10 +339,14 @@ pub struct SessionMeta {
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
     pub chat: Option<ChatMeta>,
     /// Bereich minimiert (seit 2.2.0): die Sitzung läuft weiter, steht aber in keinem Layout, bis sie zurückgeholt wird.
-    /// Fehlt in der Datei, wenn nicht minimiert. (2.2.0 schrieb dazu noch `slot`, den alten Platz im Layout; seit 2.3.0
-    /// öffnet ein zurückgeholter Bereich allein, das Feld wird nicht mehr geschrieben und beim Laden ignoriert.)
+    /// Fehlt in der Datei, wenn nicht minimiert.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub minimized: bool,
+    /// **Deprecated, nur zur Kompatibilität behalten, entfällt in 3.0.0.** 2.2.0 merkte hier den alten Platz eines
+    /// minimierten Bereichs. Seit 2.3.0 öffnet ein zurückgeholter Bereich allein: Der Wert wird unverändert durchgereicht
+    /// (beliebiges JSON, nie ausgewertet, nie neu angelegt) und gelöscht, sobald die Sitzung minimiert oder wieder gezeigt wird.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<serde_json::Value>,
 }
 
 /// Art einer Sitzung.
@@ -410,6 +414,7 @@ impl Default for SessionMeta {
             kind: SessionKind::Terminal,
             chat: None,
             minimized: false,
+            slot: None,
         }
     }
 }
@@ -1047,22 +1052,28 @@ mod kind_tests {
         assert!(!old.minimized);
         let s = serde_json::to_string(&old).unwrap();
         assert!(!s.contains("minimized") && !s.contains("slot"), "{s}");
-        // minimiert: Rundreise, ohne `slot` (seit 2.3.0 nicht mehr geschrieben)
+        // minimiert (2.3.0): Rundreise, ohne `slot` (wird nie neu angelegt)
         let m = SessionMeta { id: 4, minimized: true, ..SessionMeta::default() };
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"minimized\":true") && !s.contains("slot"), "{s}");
         assert!(serde_json::from_str::<SessionMeta>(&s).unwrap().minimized);
-        // 2.2.0 mit `slot` (gültig oder kaputt): lädt, das Feld wird ignoriert und beim Speichern nicht wieder geschrieben
-        for old in [
-            r#"{"id":5,"minimized":true,"slot":{"sibling":[1,2],"dir":"Vertical","before":false,"ratio":0.3}}"#,
-            r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#,
-            r#"{"id":5,"minimized":true,"slot":null}"#,
-            r#"{"id":5,"minimized":true,"slot":17}"#,
+        // 2.2.0 mit `slot` (gültig oder kaputt): lädt, der Wert wird unverändert durchgereicht (deprecated bis 3.0.0)
+        for (old, slot) in [
+            (r#"{"id":5,"minimized":true,"slot":{"sibling":[1,2],"dir":"Vertical","before":false,"ratio":0.3}}"#, r#"{"sibling":[1,2],"dir":"Vertical","before":false,"ratio":0.3}"#),
+            (r#"{"id":5,"minimized":true,"slot":{"dir":"Up"}}"#, r#"{"dir":"Up"}"#),
+            (r#"{"id":5,"minimized":true,"slot":17}"#, "17"),
         ] {
             let back: SessionMeta = serde_json::from_str(old).unwrap_or_else(|e| panic!("{old}: {e}"));
             assert!(back.id == 5 && back.minimized, "{old}");
-            assert!(!serde_json::to_string(&back).unwrap().contains("slot"), "{old}");
+            let want: serde_json::Value = serde_json::from_str(slot).unwrap();
+            assert_eq!(back.slot.as_ref(), Some(&want), "{old}");
+            let again: SessionMeta = serde_json::from_str(&serde_json::to_string(&back).unwrap()).unwrap();
+            assert_eq!(again.slot, Some(want), "{old}: Rundreise");
         }
+        // `null` → kein Wert, wird nicht geschrieben
+        let back: SessionMeta = serde_json::from_str(r#"{"id":5,"minimized":true,"slot":null}"#).unwrap();
+        assert!(back.minimized && back.slot.is_none());
+        assert!(!serde_json::to_string(&back).unwrap().contains("slot"));
     }
 
     #[test]
@@ -1082,6 +1093,8 @@ mod kind_tests {
         assert!(note.is_none(), "{note:?}");
         assert_eq!(st.sessions.len(), 3);
         assert!(!st.sessions[0].minimized && st.sessions[1].minimized && st.sessions[2].minimized);
+        assert!(st.sessions[0].slot.is_none() && st.sessions[1].slot.is_some());
+        assert_eq!(st.sessions[2].slot, Some(serde_json::json!("kaputt")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
