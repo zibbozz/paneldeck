@@ -4,7 +4,7 @@ use crate::shells::ShellSpec;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::{test::TermSize, Config, Term};
+use alacritty_terminal::term::{test::TermSize, Config, Osc52, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use eframe::egui;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -16,11 +16,59 @@ use std::sync::{Arc, Mutex};
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
+/// Höchstgröße eines Textes, den ein Programm per OSC 52 in die Zwischenablage legen darf (#181).
+pub const OSC52_MAX_BYTES: usize = 1024 * 1024;
+
+/// Kopierwünsche eines Programms per OSC 52 seit dem letzten Abholen durch den UI-Thread (`Session::take_clipboard`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClipboardRequest {
+    /// Neuester gültiger Text (nicht leer, höchstens [`OSC52_MAX_BYTES`]). Ein späterer zu großer Text verdrängt ihn nicht.
+    pub text: Option<String>,
+    /// Größe (Bytes) des zuletzt verworfenen, zu großen Textes – für eine Warnung.
+    pub too_large: Option<usize>,
+    /// Anzahl der nicht leeren Kopierwünsche (für die Warnung bei Dauerfeuer).
+    pub count: u32,
+}
+
+impl ClipboardRequest {
+    /// Einen Kopierwunsch aufnehmen. Leere Texte werden ignoriert (sie würden die Zwischenablage nur leeren).
+    pub fn add(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.count = self.count.saturating_add(1);
+        if text.len() > OSC52_MAX_BYTES {
+            self.too_large = Some(text.len());
+        } else {
+            self.text = Some(text);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && self.too_large.is_none()
+    }
+}
+
 #[derive(Clone)]
 pub struct Listener {
     title: Arc<Mutex<Option<String>>>,
     writer: SharedWriter,
     bell: Arc<AtomicBool>,
+    /// Kopierwünsche (OSC 52) seit dem letzten Abholen.
+    clipboard: Arc<Mutex<ClipboardRequest>>,
+}
+
+impl Listener {
+    /// Listener mit Standardwerten; `Session::spawn` übernimmt die geteilten Felder per `clone`.
+    pub fn new(writer: SharedWriter) -> Self {
+        Listener { title: Default::default(), writer, bell: Default::default(), clipboard: Default::default() }
+    }
+}
+
+/// Emulator-Einstellungen eines Terminals. OSC 52 nur zum Kopieren: Programme dürfen die Zwischenablage
+/// beschreiben, aber nie lesen (`ClipboardLoad` wird gar nicht erst ausgelöst).
+pub fn term_config(scrollback_lines: usize) -> Config {
+    Config { scrolling_history: scrollback_lines, osc52: Osc52::OnlyCopy, ..Config::default() }
 }
 
 impl EventListener for Listener {
@@ -35,6 +83,12 @@ impl EventListener for Listener {
                 let _ = w.flush();
             }
             Event::Bell => self.bell.store(true, Ordering::Relaxed),
+            // OSC 52 „Kopieren“ (Zwischenablage oder Auswahl – Windows kennt nur eine): an den UI-Thread übergeben,
+            // der die Einstellung prüft und die Zwischenablage setzt. Die Verarbeitung läuft im PTY-Thread, der danach
+            // ohnehin `request_repaint` aufruft.
+            Event::ClipboardStore(_, text) => self.clipboard.lock().unwrap_or_else(|e| e.into_inner()).add(text),
+            // Lesen der Zwischenablage durch Programme wird nie beantwortet (auch nicht für Agenten-Eingaben).
+            Event::ClipboardLoad(..) => {}
             _ => {}
         }
     }
@@ -77,6 +131,7 @@ pub struct Session {
     exited: Arc<AtomicBool>,
     #[allow(dead_code)] // wird gesetzt (Event::Bell); eine Anzeige dafür ist noch nicht eingebaut
     pub bell: Arc<AtomicBool>,
+    clipboard: Arc<Mutex<ClipboardRequest>>,
     pub cols: u16,
     pub rows: u16,
     /// Rest-Scrollwert (Bruchteil einer Zeile) für sanftes Scrollen.
@@ -154,11 +209,10 @@ impl Session {
             pair.master.take_writer().map_err(|e| e.to_string())?,
         ));
 
-        let title = Arc::new(Mutex::new(None));
-        let bell = Arc::new(AtomicBool::new(false));
-        let listener = Listener { title: title.clone(), writer: writer.clone(), bell: bell.clone() };
+        let listener = Listener::new(writer.clone());
+        let (title, bell, clipboard) = (listener.title.clone(), listener.bell.clone(), listener.clipboard.clone());
 
-        let config = Config { scrolling_history: opts.scrollback_lines, ..Config::default() };
+        let config = term_config(opts.scrollback_lines);
         let mut term = Term::new(config, &TermSize::new(cols as usize, rows as usize), listener);
         let mut processor: Processor = Processor::new();
 
@@ -265,6 +319,7 @@ impl Session {
             title,
             exited,
             bell,
+            clipboard,
             cols,
             rows,
             scroll_acc: 0.0,
@@ -501,6 +556,12 @@ impl Session {
                 if cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) || cell.c == '\0' { ' ' } else { cell.c }
             })
             .collect()
+    }
+
+    /// Kopierwunsch eines Programms (OSC 52) abholen, falls einer wartet.
+    pub fn take_clipboard(&self) -> Option<ClipboardRequest> {
+        let req = std::mem::take(&mut *self.clipboard.lock().unwrap_or_else(|e| e.into_inner()));
+        (!req.is_empty()).then_some(req)
     }
 
     pub fn title(&self) -> Option<String> {
@@ -872,5 +933,96 @@ mod echo_tests {
         let r = rows(20, "PS C:\\> Get-ChildIt\r\nanderes\r\n");
         assert_eq!(find_echo(&r, "Get-ChildItem -Force"), None);
         assert_eq!(find_echo(&r, "   "), None);
+    }
+}
+
+#[cfg(test)]
+mod osc52_tests {
+    use super::*;
+
+    /// Schreibt in einen geteilten Puffer: so lässt sich prüfen, dass nichts an das Programm zurückgeht.
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Bytes durch die echte Emulation (mit der Konfiguration der Sitzungen) schicken.
+    fn feed(bytes: &[u8]) -> (ClipboardRequest, Vec<u8>) {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let listener = Listener::new(Arc::new(Mutex::new(Box::new(Sink(out.clone())))));
+        let clipboard = listener.clipboard.clone();
+        let mut term = Term::new(term_config(100), &TermSize::new(80, 24), listener);
+        let mut p: Processor = Processor::new();
+        p.advance(&mut term, bytes);
+        let got = std::mem::take(&mut *clipboard.lock().unwrap());
+        let written = out.lock().unwrap().clone();
+        (got, written)
+    }
+
+    fn text(t: &str, count: u32) -> ClipboardRequest {
+        ClipboardRequest { text: Some(t.into()), too_large: None, count }
+    }
+
+    fn b64(s: &[u8]) -> String {
+        crate::mcp::base64(s)
+    }
+
+    #[test]
+    fn osc52_copy_reaches_listener() {
+        // BEL als Abschluss (Claude Code, tmux) und ST (ESC \).
+        let (got, written) = feed(format!("\x1b]52;c;{}\x07", b64(b"hello")).as_bytes());
+        assert_eq!(got, text("hello", 1));
+        assert!(written.is_empty());
+        let (got, _) = feed(format!("vorher\x1b]52;c;{}\x1b\\nachher", b64("Grüße ✓\nzweite Zeile".as_bytes())).as_bytes());
+        assert_eq!(got, text("Grüße ✓\nzweite Zeile", 1));
+    }
+
+    #[test]
+    fn osc52_selection_targets_also_copy() {
+        // „p“/„s“ (primäre Auswahl) – Windows hat nur eine Zwischenablage.
+        for target in ["p", "s"] {
+            let (got, _) = feed(format!("\x1b]52;{target};{}\x07", b64(b"sel")).as_bytes());
+            assert_eq!(got, text("sel", 1), "Ziel {target}");
+        }
+        // Der letzte von mehreren Wünschen gewinnt, gezählt werden alle.
+        let (got, _) = feed(format!("\x1b]52;c;{}\x07\x1b]52;c;{}\x07", b64(b"eins"), b64(b"zwei")).as_bytes());
+        assert_eq!(got, text("zwei", 2));
+    }
+
+    #[test]
+    fn osc52_read_request_is_never_answered() {
+        // Lesewunsch: keine Antwort an das Programm, kein Kopierwunsch.
+        let (got, written) = feed(b"\x1b]52;c;?\x07");
+        assert!(got.is_empty());
+        assert!(written.is_empty(), "Antwort an das Programm: {:?}", String::from_utf8_lossy(&written));
+        assert_eq!(term_config(10).osc52, Osc52::OnlyCopy);
+    }
+
+    #[test]
+    fn osc52_empty_payload_is_ignored() {
+        // Leerer Inhalt würde die Zwischenablage leeren: kein Wunsch, kein Zähler.
+        let (got, _) = feed(b"\x1b]52;c;\x07");
+        assert_eq!(got, ClipboardRequest::default());
+        let (got, _) = feed(format!("\x1b]52;c;{}\x07\x1b]52;c;\x07", b64(b"bleibt")).as_bytes());
+        assert_eq!(got, text("bleibt", 1));
+    }
+
+    #[test]
+    fn osc52_size_limit_keeps_last_valid_text() {
+        let mut r = ClipboardRequest::default();
+        r.add("x".repeat(OSC52_MAX_BYTES));
+        assert_eq!(r.text.as_deref().map(str::len), Some(OSC52_MAX_BYTES));
+        assert_eq!(r.too_large, None);
+        // Gültig, dann zu groß im selben Durchgang: der gültige Text bleibt, dazu die Warnung.
+        let big = vec![b'a'; OSC52_MAX_BYTES + 3];
+        let (got, _) = feed(format!("\x1b]52;c;{}\x07\x1b]52;c;{}\x07", b64(b"klein"), b64(&big)).as_bytes());
+        assert_eq!(got, ClipboardRequest { text: Some("klein".into()), too_large: Some(OSC52_MAX_BYTES + 3), count: 2 });
+        assert!(!got.is_empty());
     }
 }

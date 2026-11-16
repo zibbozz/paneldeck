@@ -43,6 +43,7 @@ mod glyph_tests;
 mod mcp;
 mod models_ui;
 mod multiwin;
+mod osc52;
 mod panels;
 mod planning_ui;
 mod session_settings;
@@ -785,6 +786,8 @@ pub struct App {
     toasts: toasts::ToastQueue,
     toasts_epoch: Instant,
     toasts_hover: Option<u64>,
+    /// Zustand je Sitzung für OSC 52 (#181): wartender Text, Ratenbegrenzung, Toasts.
+    osc52: HashMap<u64, osc52::ClipState>,
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
@@ -1039,6 +1042,7 @@ impl App {
             toasts: Default::default(),
             toasts_epoch: Instant::now(),
             toasts_hover: None,
+            osc52: HashMap::new(),
             hwnd: crate::winctl::hwnd_from(cc),
             in_tray: false,
             editor: None,
@@ -2474,8 +2478,13 @@ impl App {
         let threshold = self.settings.cmd_notify_secs as u64 * 1000;
         let lang = self.settings.language;
         let mut toasts: Vec<(u64, String, CmdDone)> = Vec::new();
+        let mut copies: Vec<(u64, crate::terminal::ClipboardRequest)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else { continue };
+            // Immer abholen, auch bei abgeschalteter Einstellung: ein alter Wunsch darf nicht später doch noch greifen.
+            if let Some(req) = s.take_clipboard() {
+                copies.push((*id, req));
+            }
             let (cwd, done) = {
                 let mut st = s.shell_state.lock().unwrap_or_else(|e| e.into_inner());
                 (st.cwd.take(), std::mem::take(&mut st.done))
@@ -2490,6 +2499,8 @@ impl App {
                 }
             }
         }
+        // Auch ohne neue Wünsche: wartende Texte nachreichen (Ratenbegrenzung).
+        self.osc52_poll(ctx, copies);
         for (sid, name, d) in toasts {
             let secs = d.dur_ms.unwrap_or(0) / 1000;
             let dur = if secs >= 60 { format!("{} min {} s", secs / 60, secs % 60) } else { format!("{secs} s") };

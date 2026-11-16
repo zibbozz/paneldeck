@@ -22,6 +22,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Default folders of tree folders and projects whose shell is WSL can be chosen as Linux paths; Explorer "Open here" on a `\\wsl.localhost\<distro>\…` folder opens a WSL session of that distribution in the matching Linux path. (#172)
 - MCP `create_session` accepts a Linux path as `cwd` when the session starts in WSL (absolute or `~`). The folder is checked in WSL first: `bad_args` if it is missing, and a new result field `cwd_checked` (`false` = WSL did not answer in time; the session is still created and starts in `/` if the folder does not exist). (#172)
 - `settings.json`: optional field `wsl_recent` (recently used WSL folders per distribution, capped). (#172)
+- Setting "Allow programs to copy to the clipboard (OSC 52)" (Settings → Terminal, on by default; `settings.json` field `osc52_copy`). (#181)
 
 ### Changed
 
@@ -40,6 +41,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - A middle-click with a slight mouse movement no longer starts dragging a session or folder.
 - No see-through gap between the session sidebar and the terminal area when a sidebar row is wider than the sidebar; the sidebar keeps its width and clips the row instead (#160).
 - A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
+- Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
 
 ### Security
 
@@ -47,6 +49,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - The hub now identifies the calling process itself, right when the connection arrives (TCP table, the live process and its process tree with creation times), and ignores a process id supplied by the client; a caller that cannot be identified (already exited, connection gone) is refused. `PANELDECK_SESSION` only counts for WSL terminals and only together with the session's secret key `PANELDECK_SESSION_KEY`. Best effort against a malicious agent with its own shell: processes that cannot be attributed to any session count as external callers; detached or orphaned processes (started after Paneldeck, whose parent has exited) are blocked from writing into sessions that belong to an agent chain and from `--open --claude`; processes started outside Paneldeck entirely (e.g. scheduled tasks, WMI) remain outside the protection.
 - WSL start folders containing `"` or `\` are rejected everywhere, so `wsl.exe --cd` cannot be used to inject commands; administrator starts quote every argument correctly. (#172)
 - MCP `create_session` refuses network paths as `cwd` for terminals and chats without accessing them; `\\wsl$` paths are no longer probed on the UI thread. (#172)
+- OSC 52 is write-only: programs can never read the clipboard. Only the focused session in the foreground window may copy, at most 1 MB, at most once every 0.3 s; empty texts never clear the clipboard. Note: an agent with control access (MCP) can make the focused session copy text, too. (#181)
 
 ## [2.2.0] - 2026-11-16
 
