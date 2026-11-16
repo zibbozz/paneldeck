@@ -447,10 +447,11 @@ fn counts_nonzero(a0: f32, a1: f32) -> bool {
     a1 > a0
 }
 
-/// Farbe eines Segments: die der Gruppe, sonst die Palette der Anwendung der Reihe nach.
+/// Farbe eines Segments: die der Gruppe, sonst die geltende Palette des Expertenmodus der Reihe nach (bei leerer
+/// Palette die eingebauten Vorgaben).
 pub fn slice_color(index: usize, color: Option<&str>) -> Color32 {
-    use super::helpers::{parse_hex, PALETTE};
-    color.and_then(parse_hex).unwrap_or_else(|| parse_hex(PALETTE[index % PALETTE.len()]).unwrap_or(Color32::GRAY))
+    use super::helpers::parse_hex;
+    color.and_then(parse_hex).unwrap_or_else(|| parse_hex(&crate::palette::nth(crate::palette::Area::Expert, index)).unwrap_or(Color32::GRAY))
 }
 
 // ------------------------------------------------------------------ Zeit
@@ -1042,7 +1043,7 @@ mod tests {
     fn slice_colors_use_the_group_color_or_the_palette() {
         assert_eq!(slice_color(0, Some("#112233")), Color32::from_rgb(0x11, 0x22, 0x33));
         let a = slice_color(0, None);
-        assert_eq!(slice_color(super::super::helpers::PALETTE.len(), None), a, "die Palette läuft im Kreis");
+        assert_eq!(slice_color(crate::palette::auto(crate::palette::Area::Expert).len(), None), a, "die Palette läuft im Kreis");
         assert_ne!(slice_color(1, None), a);
         assert_eq!(slice_color(2, Some("kaputt")), slice_color(2, None));
     }

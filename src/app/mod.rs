@@ -43,6 +43,7 @@ mod glyph_tests;
 mod mcp;
 mod models_ui;
 mod multiwin;
+mod palette_ui;
 mod osc52;
 mod panels;
 mod planning_ui;
@@ -60,16 +61,11 @@ mod toasts;
 pub(crate) mod update;
 mod winchrome;
 
-const PALETTE: [[u8; 3]; 8] = [
-    [0x61, 0xaf, 0xef],
-    [0x98, 0xc3, 0x79],
-    [0xe5, 0xc0, 0x7b],
-    [0xe0, 0x6c, 0x75],
-    [0xc6, 0x78, 0xdd],
-    [0x56, 0xb6, 0xc2],
-    [0xd9, 0x77, 0x57],
-    [0x88, 0x88, 0x88],
-];
+/// Vorgabefarbe einer neuen Sitzung/eines neuen Projekts Nummer `i` aus der geltenden Palette des Terminal-Hubs
+/// (läuft im Kreis; bis 2.2 die feste Palette, jetzt `crate::palette::HUB_DEFAULTS` bzw. die gemeinsame).
+fn hub_color(i: u64) -> [u8; 3] {
+    crate::palette::nth_rgb(crate::palette::Area::Hub, i as usize)
+}
 
 struct Entry {
     meta: SessionMeta,
@@ -1740,7 +1736,7 @@ impl App {
             shell_id,
             cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.folder.clone())).unwrap_or_default(),
             project,
-            color: prof.as_ref().and_then(|p| p.color).unwrap_or(PALETTE[(id as usize) % PALETTE.len()]),
+            color: prof.as_ref().and_then(|p| p.color).unwrap_or_else(|| hub_color(id)),
             profile: pid,
             claude: o.claude,
             claude_args,
@@ -1935,7 +1931,7 @@ impl App {
             custom_name: false,
             shell_id: shell,
             cwd,
-            color: PALETTE[(id as usize) % PALETTE.len()],
+            color: hub_color(id),
             group: self.entries[&target].meta.group.clone(),
             project,
             profile: self.entries[&target].meta.profile,
@@ -2379,17 +2375,12 @@ impl App {
                             }
                         });
                     }
-                    ui.menu_button(lang.t("Farbe", "Color"), |ui| {
-                        ui.horizontal(|ui| {
-                            for c in PALETTE {
-                                let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-                                ui.painter().rect_filled(r, 4.0, Color32::from_rgb(c[0], c[1], c[2]));
-                                if resp.clicked() {
-                                    actions.push(Action::SetProjectColor(id, c));
-                                    ui.close();
-                                }
-                            }
-                        });
+                    palette_ui::color_menu(ui, lang.t("Farbe", "Color"), |ui| {
+                        let cur = crate::palette::hex_of(c);
+                        if let Some(h) = palette_ui::pick(ui, ("project_color", id), crate::palette::Area::Hub, Some(&cur), palette_ui::PickOpts::HUB, lang) {
+                            actions.push(Action::SetProjectColor(id, crate::palette::rgb(&h)));
+                            ui.close();
+                        }
                     });
                     if n > 0 {
                         ui.separator();
@@ -3581,6 +3572,8 @@ impl eframe::App for App {
             );
         }
         crate::usage::set_prices(self.settings.prices.clone());
+        // Paletten für alle Farbauswahlen und die automatische Vergabe (auch Todo-Tags, Expertenmodus, Diagramme).
+        crate::palette::publish(&self.settings.palette);
         self.handle_tray(ctx);
 
         self.poll_hooks(ctx);
