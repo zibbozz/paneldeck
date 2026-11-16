@@ -65,8 +65,9 @@ def bundled():
     m = re.search(r"^\$Version = '([^']+)'", FETCH_CONPTY.read_text(encoding="utf-8"), re.M)
     if not m:
         sys.exit("tools/fetch-conpty.ps1: $Version nicht gefunden")
-    return [("Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe)", m.group(1), "MIT",
-             (EXTRA / "conpty-MIT.txt").read_text(encoding="utf-8").strip())]
+    # Lizenz und Hinweise Dritter (NOTICE.md von microsoft/terminal: in OpenConsole einkompilierter Fremdcode)
+    texts = [(EXTRA / f).read_text(encoding="utf-8").strip() for f in ("conpty-MIT.txt", "conpty-NOTICE.md")]
+    return [("Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe)", m.group(1), "MIT", "\n\n\n".join(texts))]
 
 
 def render():

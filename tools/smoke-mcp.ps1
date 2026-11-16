@@ -34,7 +34,9 @@ param(
   #   auto    = Standardeinstellung; mitgelieferte ConPTY, wenn die Dateien da sind
   #   bundled = wie auto, aber die Dateien muessen da sein und genutzt werden
   #   system  = Einstellung "Mitgelieferten Konsolen-Host verwenden" aus (Dateien liegen trotzdem daneben)
-  [ValidateSet('auto', 'bundled', 'system')][string]$ConPty = 'auto'
+  [ValidateSet('auto', 'bundled', 'system')][string]$ConPty = 'auto',
+  # Ordner mit conpty.dll + OpenConsole.exe (Standard: der Ordner von -Exe); release.sh gibt dist\conpty an
+  [string]$ConPtyDir = ''
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -42,10 +44,10 @@ New-Item -ItemType Directory -Force $WorkRoot | Out-Null
 $work = Join-Path $WorkRoot ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $dir = New-Item -ItemType Directory -Force "$work\hub"; $proj = New-Item -ItemType Directory -Force "$work\proj"
 Copy-Item $Exe "$dir\paneldeck.exe"
-$exeDir = Split-Path $Exe
+$exeDir = if ($ConPtyDir) { $ConPtyDir } else { Split-Path $Exe }
 $hasConPty = (Test-Path "$exeDir\conpty.dll") -and (Test-Path "$exeDir\OpenConsole.exe")
 if ($hasConPty) { Copy-Item "$exeDir\conpty.dll", "$exeDir\OpenConsole.exe" $dir }
-if ($ConPty -eq 'bundled' -and -not $hasConPty) { Write-Host "-ConPty bundled: conpty.dll/OpenConsole.exe fehlen neben $Exe (tools\fetch-conpty.ps1 -Dest $exeDir)" -ForegroundColor Red; exit 1 }
+if ($ConPty -eq 'bundled' -and -not $hasConPty) { Write-Host "-ConPty bundled: conpty.dll/OpenConsole.exe fehlen in $exeDir (tools\fetch-conpty.ps1 -Dest $exeDir)" -ForegroundColor Red; exit 1 }
 $useBundled = $hasConPty -and $ConPty -ne 'system'
 Write-Host ("Konsolen-Host: " + $(if ($useBundled) { 'mitgeliefert (OpenConsole)' } elseif ($ConPty -eq 'system') { 'Windows (Einstellung aus)' } else { 'Windows (keine mitgelieferten Dateien)' })) -ForegroundColor DarkGray
 # Arbeitsordner des naechsten Hub-Starts (Set-Level), sonst der des Skripts.
@@ -1029,6 +1031,8 @@ c.close()
       Check 'DLL-Suche: create_session im Ordner mit fremder conpty.dll' (-not $c.err) $c.text
       if (-not $c.err) {
         Start-Sleep 3
+        $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $c.data.id })
+        Check 'DLL-Suche: ohne mitgelieferte Dateien console_host = system' ($me.Count -eq 1 -and $me[0].console_host -eq 'system') ($me | ConvertTo-Json -Compress)
         $r = Tool 'run_command' @{ session = $c.data.id; command = 'echo plant-ok'; timeout_secs = 25 }
         Check 'DLL-Suche: Sitzung laeuft (ConPTY von Windows)' ($r.data.finished -and $r.data.output.Trim() -eq 'plant-ok') $r.text
       }
@@ -1045,6 +1049,9 @@ c.close()
       Check "ConPTY: create_session $sh" (-not $c.err) $c.text
       if ($c.err) { continue }
       Start-Sleep 3
+      $want = if ($useBundled) { 'bundled' } else { 'system' }
+      $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $c.data.id })
+      Check "ConPTY: list_sessions console_host = $want ($sh)" ($me.Count -eq 1 -and $me[0].console_host -eq $want) ($me | ConvertTo-Json -Compress)
       $r = Tool 'run_command' @{ session = $c.data.id; command = 'echo conpty-ok'; timeout_secs = 25 }
       Check "ConPTY: run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'conpty-ok') "out='$($r.data.output)' q=$($r.data.quality)"
       $r = Tool 'run_command' @{ session = $c.data.id; command = 'cmd /c exit 4'; timeout_secs = 25 }

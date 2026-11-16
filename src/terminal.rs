@@ -103,6 +103,8 @@ pub struct Session {
     /// und keine Klicks. Ebenso ein Vollbildprogramm, das selbst OSC 133;A ausgibt. Ohne Shell-Integration
     /// (cmd ohne Integration, entfernte Shells) greift die Erkennung nicht.
     pub stale_modes: Arc<AtomicBool>,
+    /// Konsolen-Host dieser Sitzung (#183): `"bundled"` (mitgelieferte ConPTY) oder `"system"`; `None` außerhalb von Windows.
+    pub console_host: Option<&'static str>,
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
@@ -126,10 +128,12 @@ impl Session {
     pub fn spawn(ctx: &egui::Context, opts: SpawnOptions) -> Result<Session, String> {
         let (cols, rows) = (100u16, 30u16);
         // Mitgelieferte ConPTY (Einstellung, Dateien neben paneldeck.exe) oder die von Windows (#183).
-        let pty = crate::conpty::pty_system();
+        let (pty, want_bundled) = crate::conpty::pty_system();
         let pair = pty
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
+        let console_host = crate::conpty::host_of(&*pair.master);
+        crate::conpty::note_spawn(want_bundled, console_host);
 
         let mut cmd = CommandBuilder::new(&opts.shell.program);
         for a in &opts.shell.args {
@@ -277,6 +281,7 @@ impl Session {
             tee: Mutex::new(Vec::new()),
             last_activity,
             stale_modes,
+            console_host,
         };
         if let Some(input) = opts.initial_input {
             session.write(input.as_bytes());

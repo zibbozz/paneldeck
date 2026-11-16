@@ -53,11 +53,16 @@ fi
 grep -q "^$V|" tools/titles.txt || { echo "tools/titles.txt hat keinen (englischen) Titel für $V"; exit 1; }
 [ -f "docs/release-notes/$V.en.md" ] || { echo "docs/release-notes/$V.en.md fehlt (englischer Release-Text)"; exit 1; }
 
-cargo test --release --quiet  # bricht bei fehlschlagenden Tests ab (set -e)
+fetch_conpty   # dist/conpty/{conpty.dll,OpenConsole.exe} für Tests, Installer und ZIP (geprüft per SHA-256)
+# Tests auch gegen die ausgelieferte ConPTY (conpty::tests::pty_runs_on_selected_host startet eine Sitzung darauf).
+PANELDECK_TEST_CONPTY_DIR="$(abspath dist/conpty)" cargo test --release --quiet  # bricht bei fehlschlagenden Tests ab (set -e)
 cargo build --release ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} 2>&1 | grep -E "^error|Finished"
 mkdir -p dist
 cp "$EXE_SRC" "dist/paneldeck-$V.exe"
-fetch_conpty   # dist/conpty/{conpty.dll,OpenConsole.exe} für Installer und ZIP (geprüft per SHA-256)
+# Statische C-Laufzeit (.cargo/config.toml, tools/common.sh): keine VCRUNTIME140.dll, die vor main() gesucht würde.
+if [ "$IS_WIN" = 1 ] && grep -a -q -i 'vcruntime140' "dist/paneldeck-$V.exe"; then
+  echo "Programmdatei braucht VCRUNTIME140.dll – die C-Laufzeit muss statisch eingebunden sein (+crt-static)"; exit 1
+fi
 if [ -n "$MAKENSIS" ]; then
   "$MAKENSIS" -V1 -DVERSION="$V" -DEXE="$(abspath "dist/paneldeck-$V.exe")" -DCONPTY_DIR="$(abspath dist/conpty)" \
     -DOUTFILE="$(abspath "dist/Paneldeck-Setup-$V.exe")" installer/paneldeck.nsi
@@ -107,7 +112,9 @@ if [ "$IS_WIN" = 1 ] && [ "$SKIP_SMOKE" = 0 ]; then
     ROOT_ARGS_SMOKE=(-WorkRoot "$(abspath "$PANELDECK_TEST_ROOT")"); ROOT_ARGS_UPD=(-TempRoot "$(abspath "$PANELDECK_TEST_ROOT")")
   fi
   echo "== Smoke-Test (tools/smoke-mcp.ps1)"
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/smoke-mcp.ps1 -Exe "$(abspath "dist/paneldeck-$V.exe")" ${ROOT_ARGS_SMOKE[@]+"${ROOT_ARGS_SMOKE[@]}"}
+  # Wie ausgeliefert: mit der geprüften ConPTY aus dist/conpty, und sie muss genutzt werden.
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/smoke-mcp.ps1 -Exe "$(abspath "dist/paneldeck-$V.exe")" \
+    -ConPtyDir "$(abspath dist/conpty)" -ConPty bundled ${ROOT_ARGS_SMOKE[@]+"${ROOT_ARGS_SMOKE[@]}"}
   # Update-Test des echten Installers (alte Version -> dieser Installer, ruhender und laufender Hub; Schein-Profil, räumt auf).
   if [ -f "dist/Paneldeck-Setup-$V.exe" ]; then
     echo "== Update-Test (tools/update-test.ps1)"

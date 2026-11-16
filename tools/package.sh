@@ -19,6 +19,7 @@ for f in ('conpty.dll','OpenConsole.exe'): z.write('dist/conpty/'+f, d+f)   # mi
 for f in ('LICENSE','THIRD_PARTY.md','THIRD_PARTY_LICENSES.txt','README.md','README.de.md','Changelog.md','Changelog.de.md'): z.write(f, d+f)
 for f in ('LICENSE-Cascadia.txt','LICENSE-NotoColorEmoji.txt'): z.write('assets/fonts/'+f, d+'licenses/'+f)
 z.write('tools/license-extra/conpty-MIT.txt', d+'licenses/LICENSE-ConPTY.txt')
+z.write('tools/license-extra/conpty-NOTICE.md', d+'licenses/NOTICE-ConPTY.md')   # Hinweise Dritter (Fremdcode in OpenConsole)
 import glob,os
 for f in sorted(glob.glob('docs/en/*.md') + glob.glob('docs/de/*.md')): z.write(f, d+f.replace(os.sep, '/'))   # Anleitungen (Bilder liegen online im Repository)
 z.close()" "$V"

@@ -9,7 +9,7 @@
 //!   Windows (kernel32). Die Auswahl je Sitzung macht der kleine Patch in `vendor/portable-pty` möglich.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Einstellung „Mitgelieferten Konsolen-Host verwenden“ (`Settings::bundled_conpty`); vom UI-Thread beim Start und
 /// jedes Frame gesetzt wie `mcp::LEVEL`, gelesen beim Start einer Sitzung.
@@ -55,17 +55,64 @@ pub fn selected_dll(use_bundled: bool, found: Option<PathBuf>) -> Option<PathBuf
     if use_bundled { found } else { None }
 }
 
-/// Pty-System für eine neue Sitzung (Windows: mitgelieferte oder System-ConPTY nach `USE_BUNDLED`).
-pub fn pty_system() -> Box<dyn portable_pty::PtySystem + Send> {
+/// Pty-System für eine neue Sitzung (Windows: mitgelieferte oder System-ConPTY nach `USE_BUNDLED`) und ob die mitgelieferte
+/// gewünscht ist. Die Dateien werden direkt vor jedem Start geprüft: fehlt eine, läuft die Sitzung ausdrücklich auf der
+/// ConPTY von Windows (kein Laden per Name, kein Rückfall nötig).
+pub fn pty_system() -> (Box<dyn portable_pty::PtySystem + Send>, bool) {
     #[cfg(windows)]
     {
-        let dll = selected_dll(USE_BUNDLED.load(std::sync::atomic::Ordering::Relaxed), bundled_dll());
-        Box::new(portable_pty::win::conpty::ConPtySystem::with_sideloaded_conpty(dll))
+        let dll = selected_dll(USE_BUNDLED.load(Ordering::Relaxed), bundled_dll());
+        let wanted = dll.is_some();
+        (Box::new(portable_pty::win::conpty::ConPtySystem::with_sideloaded_conpty(dll)), wanted)
     }
     #[cfg(not(windows))]
     {
-        portable_pty::native_pty_system()
+        (portable_pty::native_pty_system(), false)
     }
+}
+
+/// Konsolen-Host einer gestarteten Sitzung für `list_sessions` (`console_host`): `"bundled"` oder `"system"`; `None`
+/// außerhalb von Windows.
+pub fn host_of(master: &dyn portable_pty::MasterPty) -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        use portable_pty::win::ConPtyHost;
+        master.downcast_ref::<portable_pty::win::conpty::ConPtyMasterPty>().map(|m| match m.host() {
+            ConPtyHost::Sideloaded => "bundled",
+            ConPtyHost::System => "system",
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = master;
+        None
+    }
+}
+
+/// Rückfälle in Folge: die mitgelieferte ConPTY war gewählt und vorhanden, die Sitzung lief aber auf der von Windows.
+static FALLBACKS: AtomicU32 = AtomicU32::new(0);
+/// Hinweis schon gezeigt (einmal je Programmlauf).
+static HINT_SHOWN: AtomicBool = AtomicBool::new(false);
+/// Ab so vielen Rückfällen in Folge erscheint ein Hinweis.
+pub const FALLBACK_HINT_AFTER: u32 = 2;
+
+/// Nach jedem Sitzungsstart: Rückfälle zählen (ein gelungener Start auf der mitgelieferten setzt zurück).
+pub fn note_spawn(wanted_bundled: bool, host: Option<&str>) {
+    if !wanted_bundled {
+        return;
+    }
+    match host {
+        Some("system") => {
+            FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(_) => FALLBACKS.store(0, Ordering::Relaxed),
+        None => {}
+    }
+}
+
+/// `true` genau einmal je Lauf, sobald die mitgelieferte ConPTY mehrmals in Folge nicht startete (UI zeigt einen Hinweis).
+pub fn take_fallback_hint() -> bool {
+    FALLBACKS.load(Ordering::Relaxed) >= FALLBACK_HINT_AFTER && !HINT_SHOWN.swap(true, Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -93,6 +140,23 @@ mod tests {
         std::fs::create_dir(d.join(DLL)).unwrap();
         assert_eq!(bundled_dll_in(&d), None);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn fallback_hint_after_repeated_fallbacks_once() {
+        // Nicht gewünscht oder gelungen: kein Zählen.
+        note_spawn(false, Some("system"));
+        note_spawn(true, Some("bundled"));
+        assert!(!take_fallback_hint());
+        note_spawn(true, Some("system"));
+        assert!(!take_fallback_hint(), "ein einzelner Rückfall reicht nicht");
+        note_spawn(true, Some("bundled"));
+        note_spawn(true, Some("system"));
+        assert!(!take_fallback_hint(), "Zähler nach gelungenem Start zurückgesetzt");
+        note_spawn(true, Some("system"));
+        assert!(take_fallback_hint());
+        note_spawn(true, Some("system"));
+        assert!(!take_fallback_hint(), "nur einmal je Lauf");
     }
 
     #[test]
@@ -134,7 +198,9 @@ mod tests {
             let status = child.wait().unwrap();
             assert_eq!(status.exit_code(), 3);
             let master: &dyn portable_pty::MasterPty = &*pair.master;
-            master.downcast_ref::<ConPtyMasterPty>().unwrap().host()
+            let host = master.downcast_ref::<ConPtyMasterPty>().unwrap().host();
+            assert_eq!(host_of(master), Some(if host == ConPtyHost::Sideloaded { "bundled" } else { "system" }));
+            host
         };
         assert_eq!(run(ConPtySystem::default()), ConPtyHost::System);
         // Nicht ladbare „conpty.dll“: Rückfall auf die ConPTY von Windows statt eines Fehlers.

@@ -105,11 +105,18 @@ foreach ($d in $Dest) {
   New-Item -ItemType Directory -Force $d | Out-Null
   foreach ($n in $Files.Keys) {
     $target = Join-Path $d $n
+    # Reste frueherer Laeufe (<name>.old, <name>.old.<n>) aufraeumen; was noch laeuft bzw. geladen ist, bleibt liegen.
+    Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match ('^' + [regex]::Escape($n) + '\.old(\.\d+)?$') } |
+      ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
     if ((Test-Path -LiteralPath $target) -and (Get-Sha256 $target) -eq $Files[$n][1]) { continue }
     # Eine laufende OpenConsole.exe bzw. geladene conpty.dll (Paneldeck aus diesem Ordner laeuft) laesst sich nicht
-    # ueberschreiben, aber umbenennen.
+    # ueberschreiben, aber umbenennen - unter einem freien Namen <name>.old[.<n>].
     if (Test-Path -LiteralPath $target) {
-      try { Remove-Item -LiteralPath $target -Force } catch { Move-Item -Force -LiteralPath $target -Destination "$target.old" }
+      try { Remove-Item -LiteralPath $target -Force -ErrorAction Stop } catch {
+        $aside = "$target.old"; $i = 0
+        while (Test-Path -LiteralPath $aside) { $i++; $aside = "$target.old.$i" }
+        Move-Item -LiteralPath $target -Destination $aside
+      }
     }
     Copy-Item -LiteralPath (Join-Path $cacheDir $n) -Destination $target
   }

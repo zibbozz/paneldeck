@@ -479,18 +479,20 @@ fn download(
     }
 }
 
-/// Mitgelieferte Dateien neben `paneldeck.exe` (ConPTY) aus dem geprüften ZIP mit ersetzen, soweit es sie enthält. Nach dem
-/// Tausch der .exe nur noch nach bestem Bemühen: fehlt eine Datei oder klappt der Tausch nicht, bleibt die bisherige
-/// (bzw. Paneldeck nutzt die ConPTY von Windows).
+/// Mitgelieferte Dateien neben `paneldeck.exe` (ConPTY) aus dem geprüften ZIP ersetzen – nur als Paar und gemeinsam
+/// (`install::swap_files`, alles oder nichts). Läuft vor dem Tausch der .exe und nur nach bestem Bemühen: fehlt eine Datei,
+/// ist sie unbrauchbar oder klappt der Tausch nicht, bleiben die bisherigen (bzw. Paneldeck nutzt die ConPTY von Windows).
+/// Eine neue ConPTY neben der alten .exe ist unbedenklich, falls danach der Tausch der .exe scheitert.
 fn swap_companions(exe: &Path, zip_data: &[u8], v: &Version) {
     let Some(dir) = exe.parent() else { return };
+    let mut items = Vec::new();
     for name in install::COMPANIONS {
-        if let Ok(bytes) = zip::extract(zip_data, &release::zip_entry(v, name), release::MAX_ASSET as usize) {
-            if bytes.len() >= 1024 && bytes.starts_with(b"MZ") {
-                let _ = install::swap_companion(&dir.join(name), &bytes);
-            }
+        match zip::extract(zip_data, &release::zip_entry(v, name), release::MAX_ASSET as usize) {
+            Ok(bytes) if bytes.len() >= 1024 && bytes.starts_with(b"MZ") => items.push((dir.join(name), bytes)),
+            _ => return,
         }
     }
+    let _ = install::swap_files(&items);
 }
 
 fn zip_err(e: String, lang: Lang) -> String {
@@ -557,9 +559,8 @@ fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, want: &[u8; 32], off
         Some(Flavor::Portable) => {
             let bytes = zip::extract(&data, &release::zip_exe_entry(&offer.version), release::MAX_ASSET as usize).map_err(|e| Discard(zip_err(e, lang)))?;
             check_exe(&bytes, lang).map_err(Discard)?;
-            install::swap_exe(exe, &bytes).map_err(|e| Retry(format!("{} ({e})", lang.t("paneldeck.exe konnte nicht ersetzt werden", "Could not replace paneldeck.exe"))))?;
             swap_companions(exe, &data, &offer.version);
-            Ok(())
+            install::swap_exe(exe, &bytes).map_err(|e| Retry(format!("{} ({e})", lang.t("paneldeck.exe konnte nicht ersetzt werden", "Could not replace paneldeck.exe"))))
         }
         None => Err(Discard(lang.t("Automatische Updates gibt es nur unter Windows.", "Automatic updates are only available on Windows.").into())),
     };
@@ -690,10 +691,16 @@ mod tests {
         assert_eq!(std::fs::read(d.join("conpty.dll")).unwrap(), dll);
         assert_eq!(std::fs::read(d.join("conpty.dll.old")).unwrap(), b"MZ old dll");
         assert_eq!(std::fs::read(d.join("OpenConsole.exe")).unwrap(), host);
-        // Ungültiger Inhalt (kein MZ / zu klein) wird nicht übernommen.
-        let bad = zip::tests::make_zip(&[("paneldeck-9.1.0/conpty.dll", b"nope", false)]);
+        // Ungültiger Inhalt (kein MZ / zu klein) wird nicht übernommen, und nur als Paar: auch die gültige zweite Datei nicht.
+        let host2: Vec<u8> = b"MZ host2".iter().copied().chain(std::iter::repeat_n(3u8, 2000)).collect();
+        let bad = zip::tests::make_zip(&[("paneldeck-9.1.0/conpty.dll", b"nope", false), ("paneldeck-9.1.0/OpenConsole.exe", &host2, false)]);
         swap_companions(&exe, &bad, &v);
         assert_eq!(std::fs::read(d.join("conpty.dll")).unwrap(), dll);
+        assert_eq!(std::fs::read(d.join("OpenConsole.exe")).unwrap(), host);
+        // Nur eine der beiden Dateien im ZIP: nichts getauscht.
+        let half = zip::tests::make_zip(&[("paneldeck-9.1.0/OpenConsole.exe", &host2, false)]);
+        swap_companions(&exe, &half, &v);
+        assert_eq!(std::fs::read(d.join("OpenConsole.exe")).unwrap(), host);
         let _ = std::fs::remove_dir_all(&d);
     }
 

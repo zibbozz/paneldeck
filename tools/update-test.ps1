@@ -115,7 +115,7 @@ try {
   Check 'Kontextmenü bleibt (Hintergrund, mit Claude)' ((Reg 'HKCU:\Software\Classes\Directory\Background\shell\PaneldeckClaude\command') -like '*--claude*')
   Check 'Deinstaller vorhanden' (Test-Path "$inst\Uninstall.exe")
   Check 'Lizenzen installiert (LICENSE, THIRD_PARTY_LICENSES.txt, licenses)' ((Test-Path "$inst\LICENSE") -and (Test-Path "$inst\THIRD_PARTY_LICENSES.txt") -and (Test-Path "$inst\licenses\LICENSE-Cascadia.txt"))
-  Check 'Mitgelieferte ConPTY installiert (conpty.dll, OpenConsole.exe, Lizenz)' ((Test-Path "$inst\conpty.dll") -and (Test-Path "$inst\OpenConsole.exe") -and (Test-Path "$inst\licenses\LICENSE-ConPTY.txt"))
+  Check 'Mitgelieferte ConPTY installiert (conpty.dll, OpenConsole.exe, Lizenz, NOTICE)' ((Test-Path "$inst\conpty.dll") -and (Test-Path "$inst\OpenConsole.exe") -and (Test-Path "$inst\licenses\LICENSE-ConPTY.txt") -and (Test-Path "$inst\licenses\NOTICE-ConPTY.md"))
 
   Write-Host '== Update bei LAUFENDEM Hub (Datei gesperrt)'
   [void](Install $Old 'alt')   # zurück auf alt, Daten bleiben
