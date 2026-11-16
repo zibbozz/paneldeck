@@ -9,6 +9,21 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.3.0] - WIP
 
+### Added
+
+- Middle-click on a session in the sidebar closes it, with the same confirmation as the close button (#155).
+- Close all sessions at once (#156): a reddish trash button on folders in the sidebar (on hover; includes subfolders, minimized sessions and chats) and one right of the filter field (all sessions of all projects and windows); also in the project context menu, the command palette and as a shortcut (no default). The confirmation lists what will end and enables "Close all" after 3 seconds; Git worktrees and branches are kept.
+- Setting *Remember sessions* (Settings → General, on by default; new optional `settings.json` field `remember_sessions`) (#157). When off, every start is fresh: no terminals, chats, projects or folders from the last run; chat histories are deleted on exit. Settings, to-do list and tickets stay. Turning it off asks first; the state is backed up to `state.json.bak-<date>` (newest kept).
+
+### Changed
+
+- The close confirmation now enables *Close* after a 3-second wait; Enter only confirms after the countdown, and Esc/Enter in the dialog no longer reach the terminal behind it.
+- A folder's *Close all sessions …* opens a confirmation with a list instead of the double-click button.
+
+### Fixed
+
+- A middle-click with a slight mouse movement no longer starts dragging a session or folder.
+
 ## [2.2.0] - 2026-11-16
 
 ### Added

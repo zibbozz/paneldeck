@@ -9,6 +9,21 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.3.0] - WIP
 
+### Added
+
+- Mittelklick auf eine Sitzung in der Seitenleiste schließt sie, mit derselben Rückfrage wie der Schließen-Knopf (#155).
+- Alle Sitzungen auf einmal schließen (#156): rötlicher Papierkorb an Ordnern in der Seitenleiste (beim Überfahren; inklusive Unterordnern, minimierten Sitzungen und Chats) und rechts neben dem Filterfeld (alle Sitzungen aller Projekte und Fenster); außerdem im Projekt-Kontextmenü, in der Befehls-Palette und als Tastenkürzel (standardmäßig keins). Die Rückfrage listet auf, was beendet wird, und gibt „Alle schließen“ nach 3 Sekunden frei; Git-Worktrees und Branches bleiben erhalten.
+- Einstellung *Sitzungen merken* (Einstellungen → Allgemein, standardmäßig an; neues optionales Feld `remember_sessions` in `settings.json`) (#157). Aus: jeder Start ist frisch – keine Terminals, Chats, Projekte oder Ordner aus dem letzten Lauf; Chatverläufe werden beim Beenden gelöscht. Einstellungen, Todo-Liste und Tickets bleiben. Ausschalten fragt nach; der Stand wird als `state.json.bak-<Datum>` gesichert (nur die neueste bleibt).
+
+### Changed
+
+- Die Rückfrage beim Schließen gibt *Schließen* erst nach 3 Sekunden frei; Enter bestätigt erst nach dem Countdown, und Esc/Enter im Dialog erreichen das Terminal dahinter nicht mehr.
+- *Alle Sitzungen schließen …* am Ordner öffnet eine Rückfrage mit Liste statt des Doppelklick-Knopfs.
+
+### Fixed
+
+- Ein Mittelklick mit leichter Mausbewegung zieht keine Sitzung und keinen Ordner mehr.
+
 ## [2.2.0] - 2026-11-16
 
 ### Added
