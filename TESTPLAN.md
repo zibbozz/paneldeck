@@ -629,6 +629,7 @@ Vorbereitung wie 54, aber zuerst ohne Server. Automatisch: Unit-Tests `llm::*` (
 - [ ] **Antwort:** echte Antwort streamt, ↻ und „Tokens: …“ erscheinen; *Stopp* bricht ab.
 - [ ] **Ohne Werkzeuge:** Modell ohne Werkzeug-Fähigkeit (oder *Werkzeugaufrufe: Aus*) → Hinweis „Dieses Modell kann keine Werkzeuge nutzen – nur Chat.“
 - [ ] **Kontext:** eigene Kontextlänge 512 + langer Text → Hinweis „Antwort an der Token-Grenze des Modells abgeschnitten.“ bzw. bei langem Chat die Markierung „Ältere Nachrichten sieht das Modell nicht mehr“.
+- [ ] **Automatischer Kontext (Ollama):** ohne eigene Kontextlänge, Stufe *Steuern* → `ollama ps` zeigt 16384 als Kontext; eigene Kontextlänge 4096 bei Stufe *Steuern* → einmal je Chat der Hinweis „Der Kontext dieses Modells (4096 Tokens) ist zu klein für seine Werkzeug-Stufe …“.
 - [ ] **Server entfernt:** Server eines Chats entfernen → Hinweis im Chat; Senden → Fehler mit Hinweis auf *Einstellungen → Modelle*.
 - [ ] **Modell gelöscht:** `ollama rm <modell>` → Senden → „Nicht gefunden … (HTTP 404)“ mit Hinweis auf *Verbinden*.
 - [ ] **Unlesbarer Eintrag:** in `settings.json` einen Server mit `"kind": "gemini"` ergänzen → erscheint nur lesbar mit „Unlesbarer Eintrag … bleibt unverändert erhalten“ und *Entfernen*; nach dem Speichern anderer Einstellungen steht er unverändert in der Datei.
