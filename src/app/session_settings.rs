@@ -129,6 +129,8 @@ pub(super) enum Problem {
     UnknownProfile,
     UnknownShell,
     MissingFolder,
+    /// Die Prüfung des Linux-Ordners in WSL läuft noch (#216).
+    FolderCheckPending,
     InvalidClaudeOption,
 }
 
@@ -138,6 +140,7 @@ impl Problem {
             Problem::UnknownProfile => lang.t("Das Profil gibt es nicht mehr.", "The profile no longer exists."),
             Problem::UnknownShell => lang.t("Diese Shell wurde nicht gefunden.", "This shell was not found."),
             Problem::MissingFolder => lang.t("Den Arbeitsordner gibt es nicht.", "The working folder does not exist."),
+            Problem::FolderCheckPending => lang.t("Der Arbeitsordner wird in WSL noch geprüft – bitte gleich noch einmal speichern.", "The working folder is still being checked in WSL – please save again in a moment."),
             Problem::InvalidClaudeOption => lang.t("Ungültige Claude-Option (Modell oder Agent).", "Invalid Claude option (model or agent)."),
         }
     }
@@ -258,6 +261,11 @@ impl SessionForm {
     /// Distribution; Prüfung in WSL im Hintergrund), sonst None.
     pub(super) fn folder_blocked(&self, lang: Lang) -> Option<String> {
         self.picker.as_ref().filter(|_| self.worktree.is_none()).and_then(|p| p.blocking_error(lang))
+    }
+
+    /// Wird der geänderte Arbeitsordner gerade noch in WSL geprüft?
+    pub(super) fn folder_checking(&self) -> bool {
+        self.v.cwd.trim() != self.orig.cwd.trim() && self.picker.as_ref().filter(|_| self.worktree.is_none()).is_some_and(|p| p.checking())
     }
 
     /// Profil gewählt: Shell und Ordner wie im Dialog „Neue Sitzung“ übernehmen (den Ordner nicht bei einem Worktree).
@@ -706,6 +714,8 @@ impl App {
                 f.problems = f.validate(&self.shells, &self.settings.profiles, &default_shell, |sh, p| folder_exists(is_wsl(sh), p));
                 if f.folder_blocked(lang).is_some() && !f.problems.contains(&Problem::MissingFolder) {
                     f.problems.push(Problem::MissingFolder);
+                } else if f.folder_checking() && !f.problems.contains(&Problem::MissingFolder) {
+                    f.problems.push(Problem::FolderCheckPending);
                 }
                 if !f.problems.is_empty() {
                     self.session_settings = Some(f);
@@ -894,7 +904,7 @@ mod tests {
         c.v.profile = 9;
         c.v.cwd = "C:\\missing".into();
         assert!(c.validate(&s, &p, "pwsh", dir).is_empty());
-        for pr in [Problem::UnknownProfile, Problem::UnknownShell, Problem::MissingFolder, Problem::InvalidClaudeOption] {
+        for pr in [Problem::UnknownProfile, Problem::UnknownShell, Problem::MissingFolder, Problem::FolderCheckPending, Problem::InvalidClaudeOption] {
             assert_ne!(pr.text(Lang::De), pr.text(Lang::En));
         }
     }

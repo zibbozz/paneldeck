@@ -90,7 +90,7 @@ pub fn open_csv() -> Option<std::path::PathBuf> {
 pub fn pick_folder(start: &str) -> Option<String> {
     let mut d = rfd::FileDialog::new();
     // Netzwerk- und WSL-Pfade nicht prüfen (UI-Thread: SMB-Verbindung bzw. Start der WSL-VM, #216).
-    if !crate::pathfmt::is_remote_unc(start) && !crate::wsl::is_wsl_unc(start) && std::path::Path::new(start).is_dir() {
+    if !crate::pathfmt::is_remote(start) && !crate::wsl::is_wsl_unc(start) && std::path::Path::new(start).is_dir() {
         d = d.set_directory(start);
     }
     d.pick_folder().map(|p| p.to_string_lossy().to_string())

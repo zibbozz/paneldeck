@@ -4617,7 +4617,7 @@ fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
     {
         use std::os::windows::process::CommandExt;
         // WSL-Pfade ungeprüft (keine Prüfung im UI-Thread); sonst nur vorhandene Ordner.
-        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || std::path::Path::new(c).is_dir()));
+        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || crate::pathfmt::dir_exists_quick(c, std::time::Duration::from_millis(400)) == Some(true)));
         let ok = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
             .creation_flags(0x0800_0000)
