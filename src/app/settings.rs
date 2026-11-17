@@ -99,6 +99,18 @@ impl App {
                         row(ui, lang.t("Shell-Integration", "Shell integration"), lang.t("Befehlsmarken, Ordner-Tracking (wirkt für neue Sitzungen; ändert keine Profile)", "Command marks, folder tracking (applies to new sessions; does not change profiles)"), |ui| {
                             style::toggle(ui, &mut self.settings.shell_integration);
                         });
+                        // #175: kurzer Hinweis in der Zeile, die Abwägung ausführlich im Tooltip des Schalters.
+                        row(
+                            ui,
+                            lang.t("Umgebung von Paneldeck erben", "Inherit Paneldeck's environment"),
+                            lang.t("Aus: frisch aus Windows (setx wirkt sofort). An: die Umgebung beim Start von Paneldeck.", "Off: fresh from Windows (setx applies at once). On: the environment Paneldeck was started with."),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.inherit_env).on_hover_text(lang.t(
+                                    "Aus (empfohlen): Neue Terminals lesen die Umgebungsvariablen frisch aus Windows – mit setx oder in den Systemeinstellungen geänderte Variablen gelten sofort, ohne Paneldeck neu zu starten; eine eigene Umgebung der Shell, aus der Paneldeck gestartet wurde, geht dabei für Variablen, die auch in Windows gesetzt sind (z. B. PATH), verloren.\n\nAn: Neue Terminals bekommen genau die Umgebung, mit der Paneldeck gestartet wurde (z. B. aus einer Shell mit eigenem PATH oder eigenen Variablen); in Windows später geänderte Variablen gelten dann erst nach einem Neustart von Paneldeck.\n\nIn beiden Fällen gelten die Variablen des Profils und Paneldecks eigene Variablen. Wirkt für neue Terminals.",
+                                    "Off (recommended): new terminals read the environment variables fresh from Windows – variables changed with setx or in the system settings apply at once, without restarting Paneldeck; a custom environment of the shell Paneldeck was started from is lost for variables that Windows also sets (e.g. PATH).\n\nOn: new terminals get exactly the environment Paneldeck was started with (e.g. from a shell with its own PATH or variables); variables changed in Windows later only apply after restarting Paneldeck.\n\nProfile variables and Paneldeck's own variables apply either way. Applies to new terminals.",
+                                ));
+                            },
+                        );
                         row(ui, lang.t("Befehl fertig melden", "Notify when command finishes"), lang.t("ab dieser Dauer in Sekunden (0 = aus)", "after this many seconds (0 = off)"), |ui| {
                             ui.add(egui::DragValue::new(&mut self.settings.cmd_notify_secs).range(0..=3600).speed(1.0).suffix(" s"));
                         });
@@ -266,7 +278,7 @@ impl App {
                             let before = self.settings.claude_defaults.clone();
                             egui::Grid::new("claude_defaults").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
                                 // Ungültige Namen bleiben nur im Eingabefeld; gespeichert und angewendet werden nur gültige Werte.
-                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", false);
+                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults);
                             });
                             if self.settings.claude_defaults != before {
                                 // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).
