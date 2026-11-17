@@ -18,6 +18,18 @@ A condition is *field operator value*. Field names with spaces and texts with sp
 
 <p align="center"><img src="../../assets/query-help/query-help-basics-field-value.png" alt="Result of type = Defect" width="85%"></p>
 
+## Fields
+- **Custom fields** are named by their name (in quotes if it contains spaces) or, since 2.3, by their **key** (e.g. `story_points`).
+- **Built-in fields** exist in every project and every ticket type (see [Built-in fields and due dates](todo-and-tickets.md#built-in-fields-and-due-dates)) and answer to their English and German names in either interface language, so saved queries work in both languages:
+
+| Field | Names | Example |
+|---|---|---|
+| Description | `description`, `Description`, `Beschreibung` | `description ~ login` |
+| Due date | `due`, `Due date`, `Fällig`, `Fällig am` | `due < currentDate() ORDER BY due` |
+| Labels | `labels`, `Labels` | `labels = auth` |
+
+- `due` compares a due date without a time as the end of that day; comparing with a plain date compares only the day (`due = 2026-11-20` also matches 14:30 on that day).
+
 ## Examples
 All examples come from the help page in Paneldeck (demo data); each has a screenshot of its result there. A selection:
 

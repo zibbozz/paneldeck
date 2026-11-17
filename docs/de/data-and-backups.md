@@ -20,8 +20,8 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | Datei/Ordner | Inhalt |
 |---|---|
 | `settings.json` | Einstellungen (von Hand editierbar); `settings.json.bak-<Zeit>` = Kopie von `--reset-settings` |
-| `state.json` | Sitzungen, Projekte, Layout, weitere Fenster (`state.defekt.json` = Sicherung, falls die Datei beschädigt war) |
-| `paneldeck.db` | die lokale Datenbank (SQLite) mit Todo-Liste, Projekten und Tickets (`paneldeck.db-wal` / `-shm` gibt es nur, solange die App läuft) |
+| `state.json` | Sitzungen, Projekte, Layout, weitere Fenster (`state.defekt.json` = Sicherung, falls die Datei beschädigt war; `state.json.bak-<Datum>` = Sicherung beim Ausschalten von *Sitzungen merken*) |
+| `paneldeck.db` | die lokale Datenbank (SQLite, seit 2.3.0 Schema-Version 9) mit Todo-Liste, Projekten und Tickets (`paneldeck.db-wal` / `-shm` gibt es nur, solange die App läuft) |
 | `backups/` | automatische und manuelle Kopien der Datenbank (der Ordner ist änderbar) |
 | `scrollback/` | gespeicherter Terminalverlauf |
 | `chats/` | Verläufe der [Chats](chat.md), je Chat eine `<id>.json` (siehe [Chatverläufe](#chatverläufe)) |
@@ -69,6 +69,33 @@ Jeder [Chat](chat.md) speichert seinen Verlauf in `chats/<id>.json` (`<id>` = Ke
 - `state.json` → je Sitzung `kind` (`"chat"`; fehlt = Terminal) und `chat` (`{ "server": "<id>", "model": "<name>" }`). Ein älteres Paneldeck (2.1), das diese Datei öffnet, zeigt Chats als Terminals und lässt `chats/*.json` in Ruhe.
 - `state.json` → je Sitzung `minimized` (`true` bei einem [minimierten Bereich](terminals.md#bereiche-und-minimieren); fehlt = nicht minimiert) und `slot` (wohin ein minimierter Bereich zurückkehrt – intern, der Inhalt kann sich ändern; nicht anfassen oder löschen). Layouts und Teilungsanteile werden tolerant gelesen: unbekannte oder doppelte Sitzungen, leere Teilungen und ungültige Anteile werden repariert, und ein kaputtes Layout setzt nicht mehr die ganze Datei zurück.
 - `mcp-log.jsonl` → optional `how` (`"chat"`) und `model` (das Modell des Chats) bei Einträgen von Werkzeugaufrufen eines [Chats](chat.md#werkzeugaufrufe-und-freigaben); fehlen bei externen Agenten.
+
+## Neue Felder in 2.3.0
+Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verhalten, ältere Dateien laden unverändert.
+
+- `settings.json`:
+  - `remember_sessions` (Standard `true`) – *Sitzungen merken*; beim Ausschalten wird der bisherige Stand als `state.json.bak-<Datum>` gesichert (nur die neueste bleibt).
+  - `inherit_env` (Standard `false`) – *Umgebung von Paneldeck erben*.
+  - `bundled_conpty` (Standard `true`) – *Mitgelieferten Konsolen-Host verwenden (empfohlen)*.
+  - `osc52_copy` (Standard `true`) – *Programme dürfen in die Zwischenablage kopieren (OSC 52)*.
+  - `warn_multiline_paste` (Standard `true`) – *Vor dem Einfügen mehrerer Zeilen nachfragen*.
+  - `shift_enter_newline_powershell` (Standard `false`) – *Umschalt+Enter = neue Zeile in PowerShell*.
+  - `cursor_blink`, `program_notify`, `progress_indicator` (Standard `true`) und `bell_toast` (Standard `false`) – *Blinkender Cursor*, *Benachrichtigungen von Programmen*, *Fortschritt anzeigen* und *Toast bei Glocke*.
+  - `terminal_font` darf jetzt jede installierte Festbreitenschrift nennen.
+  - `wsl_recent` – zuletzt benutzte WSL-Ordner je Distribution (neueste zuerst, begrenzt).
+  - `palette` – die [Farbpaletten](terminals.md#sprache-und-darstellung): `per_area` (`false` = eine gemeinsame Palette) und die Listen `shared`, `hub`, `todo` und `expert`, jede eine Liste aus `{ "hex": "#RRGGBB", "name": "…" }` (`name` optional). Nie geänderte Listen werden nicht geschrieben.
+  - `claude_defaults` – die Standard-[Claude-Startoptionen](claude-code.md#startoptionen) (`model`, `effort`, `permission_mode`, `agent`, `flags`, `add_dirs`, `allowed_tools`, `disallowed_tools`, `mcp_config`, `append_system_prompt`, `fallback_model`, `max_budget_usd`, `autocompact`; leere Werte werden nicht geschrieben); `last_claude_opts` – die letzte Auswahl im Dialog *Neue Sitzung*. `bypassPermissions` wird dort nie gespeichert (beim Laden verworfen).
+- `state.json` → je Sitzung:
+  - `claude_opts` – die Claude-Startoptionen der Sitzung (dieselben Felder wie `claude_defaults`; ungültige Werte werden beim Laden verworfen). Sitzungen von vor 2.3 haben Modell und Permission-Mode ggf. noch in `claude_args`; sie funktionieren weiter.
+  - `claude_continue` – *Konversation fortsetzen* (fehlt = an).
+  - `agent_chain` – die [Agenten-Kette](agent-interface.md#sicherheit) einer Sitzung, die ein Agent angelegt oder in die er geschrieben hat (Sitzungs-Ids; fehlt = keine).
+  - **Veraltet (deprecated):** `slot` minimierter Sitzungen (2.2.0) wird nicht mehr verwendet oder angelegt; ein vorhandener Wert wird unverändert durchgereicht und entfällt, sobald die Sitzung minimiert oder wieder gezeigt wird. Es wird in 3.0.0 entfernt.
+- `paneldeck.db` → **Schema-Version 9**: eingebaute Felder Beschreibung, Fälligkeit und Labels für jeden Tickettyp, Fälligkeits-Schwellen je Projekt (`due_thresholds`) und für die Todo-Liste, eine Fälligkeit für Todo-Karten. Das Update wandelt vorhandene Beschreibungs- und „Labels“-Felder um (siehe [Todo-Liste und Tickets](todo-and-tickets.md#eingebaute-felder-und-fälligkeit)); wie vor jeder Migration sichert Paneldeck die Datenbank vorher. Fälligkeiten werden als `JJJJ-MM-TT` bzw. `JJJJ-MM-TTTHH:MM` gespeichert.
+- **Projektsicherungen** (JSON-Export) → **Format Version 3**, mit den eingebauten Feldern und `project.due_thresholds`. Paneldeck vor 2.3 lehnt sie ab; Sicherungen der Versionen 1 und 2 lassen sich weiter importieren.
+- **Icons** können als `lucide:<name>` (Icon-Satz Lucide) in der Datenbank, in Projektsicherungen und in Vorlagen stehen; solche Dateien lassen sich nicht in Versionen vor 2.3 importieren.
+- Der mitgelieferte Konsolen-Host (`conpty.dll`, `OpenConsole.exe`) liegt im Programmordner neben `paneldeck.exe`, nicht im Datenordner.
+
+**Zurück zu 2.2:** 2.2 lehnt eine Datenbank mit Schema-Version 9 ab („Die Datenbank hat die Schema-Version …“) und lässt sie unverändert. Für den Weg zurück Paneldeck beenden, die vor dem Update angelegte Sicherung der Datenbank (im Sicherungsordner, standardmäßig `backups/`) über `paneldeck.db` kopieren und dann 2.2 starten – Änderungen seitdem gehen verloren. Nicht *Wiederherstellen …* in 2.3 dafür nehmen: 2.3 würde die wiederhergestellte Kopie erneut aktualisieren. 2.2 kann `settings.json` und `state.json` weiter lesen und übergeht die neuen Felder, verwirft sie aber beim Speichern.
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
