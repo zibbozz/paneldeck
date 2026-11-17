@@ -124,6 +124,9 @@ pub struct CmdDone {
 pub struct Session {
     pub shell_state: Arc<Mutex<ShellState>>,
     pub term: Arc<Mutex<Term<Listener>>>,
+    /// Aus dem Verlauf gefallene Zeilen (#197), nur unter der Sperre von `term` geändert: absolute Zeile =
+    /// `dropped` + Verlaufszeilen + Bildschirmzeile, damit bleiben Marken und Positionen bei vollem Verlauf gültig.
+    dropped: Arc<std::sync::atomic::AtomicU64>,
     writer: SharedWriter,
     master: Box<dyn MasterPty + Send>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
@@ -263,15 +266,18 @@ impl Session {
         let listener = Listener::new(writer.clone());
         let (title, bell, clipboard) = (listener.title.clone(), listener.bell.clone(), listener.clipboard.clone());
 
-        let config = term_config(opts.scrollback_lines);
+        // Etwas mehr Verlauf als eingestellt: `HistoryTrack` kürzt selbst auf das Limit und zählt dabei mit (#197).
+        let config = term_config(opts.scrollback_lines + HISTORY_SLACK);
         let mut term = Term::new(config, &TermSize::new(cols as usize, rows as usize), listener);
         let mut processor: Processor = Processor::new();
+        let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let hist_track = HistoryTrack::new(opts.scrollback_lines, dropped.clone());
 
         if let Some(text) = opts.restore_text {
             let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
-            processor.advance(&mut term, text.as_bytes());
+            hist_track.advance(&mut processor, &mut term, text.as_bytes());
             let sep = format!("\r\n\x1b[2m\u{2500}\u{2500} {} \u{2500}\u{2500}\x1b[0m\r\n", crate::state::t("wiederhergestellter Verlauf", "restored history"));
-            processor.advance(&mut term, sep.as_bytes());
+            hist_track.advance(&mut processor, &mut term, sep.as_bytes());
         }
 
         let term = Arc::new(Mutex::new(term));
@@ -309,6 +315,7 @@ impl Session {
                 let mut scanner = OscScanner::default();
                 // Prompt-Anfang bei „Umbruch ausstehend“, dessen Zeile erst das nächste Zeichen festlegt (`advance_tracked`).
                 let mut pending_mark: Option<u64> = None;
+                let hist_track = hist_track;
                 loop {
                     let msg = match processor.sync_timeout().sync_timeout() {
                         Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
@@ -321,9 +328,11 @@ impl Session {
                             {
                                 let mut t = term.lock().unwrap_or_else(|e| e.into_inner());
                                 if processor.sync_timeout().sync_timeout().is_some_and(|d| d <= std::time::Instant::now()) {
+                                    let before = primary_history(&t);
                                     processor.stop_sync(&mut *t);
+                                    hist_track.settle(&mut t, before);
                                 }
-                                advance_tracked(&mut processor, &mut t, &bytes, events, positions, &mut pending_mark, &shell_state, |ev, t| {
+                                advance_tracked(&mut processor, &mut t, &hist_track, &bytes, events, positions, &mut pending_mark, &shell_state, |ev, t| {
                                     let was = stale.load(Ordering::Relaxed);
                                     stale.store(next_stale_modes(was, ev, *t.mode()), Ordering::Relaxed);
                                 });
@@ -331,7 +340,11 @@ impl Session {
                             ctx.request_repaint();
                         }
                         Err(RecvTimeoutError::Timeout) => {
-                            processor.stop_sync(&mut *term.lock().unwrap_or_else(|e| e.into_inner()));
+                            let mut t = term.lock().unwrap_or_else(|e| e.into_inner());
+                            let before = primary_history(&t);
+                            processor.stop_sync(&mut *t);
+                            hist_track.settle(&mut t, before);
+                            drop(t);
                             ctx.request_repaint();
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -339,7 +352,10 @@ impl Session {
                 }
                 // Restpuffer eines offenen Updates noch anzeigen.
                 if processor.sync_timeout().sync_timeout().is_some() {
-                    processor.stop_sync(&mut *term.lock().unwrap_or_else(|e| e.into_inner()));
+                    let mut t = term.lock().unwrap_or_else(|e| e.into_inner());
+                    let before = primary_history(&t);
+                    processor.stop_sync(&mut *t);
+                    hist_track.settle(&mut t, before);
                 }
                 exited.store(true, Ordering::Relaxed);
                 ctx.request_repaint();
@@ -348,6 +364,7 @@ impl Session {
 
         let session = Session {
             term,
+            dropped,
             shell_state,
             writer,
             master: pair.master,
@@ -437,17 +454,25 @@ impl Session {
 
     /// Absolute Zeilennummer (ab Anfang des Verlaufs) der Cursorzeile.
     pub fn abs_cursor_line(&self) -> u64 {
-        cursor_abs_in(&self.term.lock().unwrap_or_else(|e| e.into_inner()))
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        cursor_abs_in(&t, self.base())
+    }
+
+    /// Aus dem Verlauf gefallene Zeilen (Anfang der absoluten Zählung); nur unter der Sperre von `term` lesen.
+    fn base(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Terminal-Zeilen von `from` bis `to` (absolut, einschließlich), je Zeile ein Eintrag, ohne Leerraum am Zeilenende.
     pub fn lines_abs(&self, from: u64, to: u64) -> Vec<String> {
-        lines_abs_in(&self.term.lock().unwrap_or_else(|e| e.into_inner()), from, to)
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        lines_abs_in(&t, self.base(), from, to)
     }
 
     /// Ausgabe eines `run_command` (MCP) aus dem Terminalinhalt, siehe [`run_output`].
     pub fn run_output(&self, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool) -> RunOutput {
-        run_output(&self.term.lock().unwrap_or_else(|e| e.into_inner()), cmd, start_abs, mark0, mark, advanced)
+        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        run_output(&t, self.base(), cmd, start_abs, mark0, mark, advanced)
     }
 
     /// Letzte `n` Zeilen des Verlaufs (ohne leere Zeilen am Ende) und ob es davor noch mehr gab.
@@ -645,15 +670,24 @@ impl Session {
     pub fn jump_mark(&self, delta: i32) {
         let marks = self.shell_state.lock().unwrap_or_else(|e| e.into_inner()).marks.clone();
         let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
-        let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
-        let top = hist - t.grid().display_offset() as i64;
+        jump_mark_in(&mut t, self.base(), &marks, delta);
+    }
+}
+
+/// Zum vorherigen (`delta < 0`) bzw. nächsten (`delta > 0`) Prompt rollen (`marks` absolut, `base` = `Session::dropped`).
+fn jump_mark_in<T: EventListener>(t: &mut Term<T>, base: u64, marks: &[u64], delta: i32) {
+    {
+        let hist = hist_of(t);
+        // Bildschirmzeile 0 als absolute Zeile (Marken sind absolut, siehe `Session::dropped`).
+        let screen0 = hist + base as i64;
+        let top = screen0 - t.grid().display_offset() as i64;
         let target = if delta < 0 {
             marks.iter().rev().find(|m| (**m as i64) < top).copied()
         } else {
             marks.iter().find(|m| (**m as i64) > top).copied()
         };
         let offset = match target {
-            Some(m) => (hist - m as i64).clamp(0, hist),
+            Some(m) => (screen0 - m as i64).clamp(0, hist),
             None if delta > 0 => 0,
             None => hist,
         };
@@ -667,8 +701,62 @@ fn hist_of<T>(t: &Term<T>) -> i64 {
     t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64
 }
 
-fn cursor_abs_in<T>(t: &Term<T>) -> u64 {
-    (hist_of(t) + t.grid().cursor.point.line.0 as i64).max(0) as u64
+/// Absolute Zeile der Cursorzeile (`base` = aus dem Verlauf gefallene Zeilen, `Session::dropped`).
+fn cursor_abs_in<T>(t: &Term<T>, base: u64) -> u64 {
+    (hist_of(t) + base as i64 + t.grid().cursor.point.line.0 as i64).max(0) as u64
+}
+
+/// Spielraum über dem eingestellten Verlauf (#197): alacritty verwirft bei vollem Verlauf die ältesten Zeilen, ohne das
+/// zu melden. Die Emulation bekommt deshalb `HISTORY_SLACK` Zeilen mehr; `HistoryTrack` kürzt nach jedem Stück der
+/// Ausgabe (höchstens `HISTORY_SLACK` Bytes, je Byte meist höchstens eine neue Zeile) selbst auf das Limit und zählt die
+/// verworfenen Zeilen. Nur ein einzelnes Stück, das mehr Zeilen erzeugt (sehr großes „Synchronized Update“, CSI n S),
+/// kann am Zähler vorbei Zeilen verlieren.
+pub const HISTORY_SLACK: usize = 1000;
+
+/// Verlaufslänge des Hauptbildschirms; `None` im alternativen Bildschirm (der hat keinen Verlauf).
+fn primary_history<T>(t: &Term<T>) -> Option<usize> {
+    (!t.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)).then(|| t.grid().history_size())
+}
+
+/// Zählt aus dem Verlauf gefallene Zeilen (#197), damit absolute Zeilen (Prompt-Marken, `run_command`) stabil bleiben.
+pub struct HistoryTrack {
+    limit: usize,
+    dropped: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl HistoryTrack {
+    pub fn new(limit: usize, dropped: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        HistoryTrack { limit, dropped }
+    }
+
+    fn base(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Wie `Processor::advance`, in Stücken mit Kürzen und Zählen danach.
+    fn advance<T: EventListener>(&self, p: &mut Processor, t: &mut Term<T>, bytes: &[u8]) {
+        for piece in bytes.chunks(HISTORY_SLACK) {
+            let before = primary_history(t);
+            p.advance(t, piece);
+            self.settle(t, before);
+        }
+    }
+
+    /// Nach Ausgabe: Verlauf über dem Limit selbst kürzen und mitzählen; ein geschrumpfter Verlauf (CSI 3J, RIS) zählt
+    /// ebenfalls als verworfen. `before` = `primary_history` vor der Ausgabe.
+    fn settle<T>(&self, t: &mut Term<T>, before: Option<usize>) {
+        let Some(h) = primary_history(t) else { return };
+        let mut gone = before.map_or(0, |b| b.saturating_sub(h));
+        if h > self.limit {
+            let g = t.grid_mut();
+            g.update_history(self.limit);
+            g.update_history(self.limit + HISTORY_SLACK);
+            gone += h - self.limit;
+        }
+        if gone > 0 {
+            self.dropped.fetch_add(gone as u64, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Einen Chunk der Programmausgabe in die Emulation geben und die Ereignisse der Shell-Integration (`events` mit ihren
@@ -685,6 +773,7 @@ fn cursor_abs_in<T>(t: &Term<T>) -> u64 {
 fn advance_tracked<T: EventListener>(
     p: &mut Processor,
     t: &mut Term<T>,
+    hs: &HistoryTrack,
     bytes: &[u8],
     events: Vec<OscEvent>,
     positions: Vec<usize>,
@@ -695,37 +784,37 @@ fn advance_tracked<T: EventListener>(
     let mut done = 0usize;
     for (ev, end) in events.into_iter().zip(positions) {
         let end = end.clamp(done, bytes.len());
-        advance_resolving(p, t, &bytes[done..end], pending, state);
+        advance_resolving(p, t, hs, &bytes[done..end], pending, state);
         done = end;
         on_event(&ev, t);
         if ev == OscEvent::FullscreenModeSet {
             continue; // keine Shell-Integration
         }
         let prompt = ev == OscEvent::PromptStart;
-        let abs = cursor_abs_in(t);
+        let abs = cursor_abs_in(t, hs.base());
         apply_events(state, vec![ev], abs);
         if prompt {
             *pending = t.grid().cursor.input_needs_wrap.then_some(abs);
         }
     }
-    advance_resolving(p, t, &bytes[done..], pending, state);
+    advance_resolving(p, t, hs, &bytes[done..], pending, state);
 }
 
 /// Wie `Processor::advance`; solange eine Marke offen ist (`advance_tracked`), Byte für Byte mit Prüfung danach.
-fn advance_resolving<T: EventListener>(p: &mut Processor, t: &mut Term<T>, bytes: &[u8], pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
+fn advance_resolving<T: EventListener>(p: &mut Processor, t: &mut Term<T>, hs: &HistoryTrack, bytes: &[u8], pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
     let mut i = 0;
     while pending.is_some() && i < bytes.len() {
-        p.advance(t, &bytes[i..i + 1]);
+        hs.advance(p, t, &bytes[i..i + 1]);
         i += 1;
-        resolve_mark(t, pending, state);
+        resolve_mark(t, hs.base(), pending, state);
     }
-    p.advance(t, &bytes[i..]);
+    hs.advance(p, t, &bytes[i..]);
 }
 
 /// Offene Marke festlegen, sobald der ausstehende Umbruch erledigt ist: auf die Zeile, in der der Cursor dann steht.
-fn resolve_mark<T>(t: &Term<T>, pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
+fn resolve_mark<T>(t: &Term<T>, base: u64, pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
     let Some(old) = *pending else { return };
-    let now = cursor_abs_in(t);
+    let now = cursor_abs_in(t, base);
     if t.grid().cursor.input_needs_wrap && now == old {
         return; // noch offen (z. B. Farbsequenz vor dem Prompt-Text)
     }
@@ -740,13 +829,14 @@ fn resolve_mark<T>(t: &Term<T>, pending: &mut Option<u64>, state: &Arc<Mutex<She
 }
 
 /// Wie `lines_abs_in`, aber umgebrochene Zeilen sind zu einer logischen Zeile zusammengefügt (für Ausgaben an Leser).
-fn text_abs_in<T: EventListener>(t: &Term<T>, from: u64, to: u64) -> Vec<String> {
+fn text_abs_in<T: EventListener>(t: &Term<T>, base: u64, from: u64, to: u64) -> Vec<String> {
     let g = t.grid();
     let hist = hist_of(t);
+    let off = hist + base as i64;
     let top = -hist;
     let bottom = g.bottommost_line().0 as i64;
-    let a = (from as i64 - hist).clamp(top, bottom);
-    let b = (to as i64 - hist).clamp(top, bottom);
+    let a = (from as i64 - off).clamp(top, bottom);
+    let b = (to as i64 - off).clamp(top, bottom);
     if b < a {
         return vec![];
     }
@@ -756,14 +846,15 @@ fn text_abs_in<T: EventListener>(t: &Term<T>, from: u64, to: u64) -> Vec<String>
 
 /// Beginn der (ggf. umgebrochenen) Zeile, zu der `abs` gehört: läuft eine Zeile am Rand in die nächste über,
 /// gehört sie zur selben logischen Zeile (lange Prompts in schmalen Terminals).
-fn unwrap_start_in<T>(t: &Term<T>, mut abs: u64) -> u64 {
+fn unwrap_start_in<T>(t: &Term<T>, base: u64, mut abs: u64) -> u64 {
     use alacritty_terminal::term::cell::Flags;
     let g = t.grid();
     let hist = hist_of(t);
+    let off = hist + base as i64;
     let top = -hist;
     let last_col = Column(g.columns() - 1);
     while abs > 0 {
-        let prev = abs as i64 - 1 - hist;
+        let prev = abs as i64 - 1 - off;
         if prev < top || prev > g.bottommost_line().0 as i64 {
             break;
         }
@@ -778,14 +869,14 @@ fn unwrap_start_in<T>(t: &Term<T>, mut abs: u64) -> u64 {
 
 /// Letzte Zeile der (ggf. umgebrochenen) logischen Zeile, die bei `abs` beginnt: läuft eine Zeile am Rand in die
 /// nächste über, gehört diese noch dazu (lange eingegebene Befehle in schmalen Terminals).
-fn wrap_end_in<T>(t: &Term<T>, mut abs: u64) -> u64 {
+fn wrap_end_in<T>(t: &Term<T>, base: u64, mut abs: u64) -> u64 {
     use alacritty_terminal::term::cell::Flags;
     let g = t.grid();
     let hist = hist_of(t);
     let bottom = g.bottommost_line().0 as i64;
     let last_col = Column(g.columns() - 1);
     loop {
-        let row = abs as i64 - hist;
+        let row = abs as i64 - hist - base as i64;
         if row < -hist || row >= bottom || !g[Line(row as i32)][last_col].flags.contains(Flags::WRAPLINE) {
             return abs;
         }
@@ -794,13 +885,14 @@ fn wrap_end_in<T>(t: &Term<T>, mut abs: u64) -> u64 {
 }
 
 /// Terminal-Zeilen von `from` bis `to` (absolut, einschließlich), je Zeile ein Eintrag, ohne Leerraum am Zeilenende.
-fn lines_abs_in<T: EventListener>(t: &Term<T>, from: u64, to: u64) -> Vec<String> {
+fn lines_abs_in<T: EventListener>(t: &Term<T>, base: u64, from: u64, to: u64) -> Vec<String> {
     let g = t.grid();
     let hist = hist_of(t);
+    let off = hist + base as i64;
     let top = -(hist);
     let bottom = g.bottommost_line().0 as i64;
-    let a = (from as i64 - hist).clamp(top, bottom);
-    let b = (to as i64 - hist).clamp(top, bottom);
+    let a = (from as i64 - off).clamp(top, bottom);
+    let b = (to as i64 - off).clamp(top, bottom);
     if b < a {
         return vec![];
     }
@@ -823,9 +915,10 @@ pub struct RunOutput {
 
 /// Ausgabe eines per `run_command` eingegebenen Befehls: Zeilen nach dem Echo des Befehls bis vor den neuen Prompt.
 /// `start_abs` = Cursorzeile beim Senden, `mark0` = Prompt-Anfang davor, `mark` = Anfang des neuen Prompts (OSC 133;A,
-/// falls die Shell ihn meldete), `advanced` = der Befehl ist fertig (neuer Prompt da).
-pub fn run_output<T: EventListener>(t: &Term<T>, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool) -> RunOutput {
-    let cursor = cursor_abs_in(t);
+/// falls die Shell ihn meldete), `advanced` = der Befehl ist fertig (neuer Prompt da); alle absolut (`base` =
+/// `Session::dropped`).
+pub fn run_output<T: EventListener>(t: &Term<T>, base: u64, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool) -> RunOutput {
+    let cursor = cursor_abs_in(t, base);
     // Ende: vor dem neuen Prompt. Die Marke ist sein genauer Anfang (`advance_tracked`); von dort nicht über umgebrochene
     // Zeilen zurücklaufen – eine Ausgabezeile, die die Breite genau füllt, trägt oft WRAPLINE (ConPTY lässt den
     // Zeilenvorschub weg) und fiele sonst samt Ausgabe dem Prompt zu (#193). Ohne Marke (cmd) bleibt nur die Cursorzeile;
@@ -833,7 +926,7 @@ pub fn run_output<T: EventListener>(t: &Term<T>, cmd: &str, start_abs: u64, mark
     let end_incl = if advanced {
         match mark {
             Some(m) => m.saturating_sub(1),
-            None => unwrap_start_in(t, cursor).saturating_sub(1),
+            None => unwrap_start_in(t, base, cursor).saturating_sub(1),
         }
     } else {
         cursor
@@ -841,7 +934,7 @@ pub fn run_output<T: EventListener>(t: &Term<T>, cmd: &str, start_abs: u64, mark
     // Anfang der Ausgabe: die Zeile mit dem eingegebenen Befehl. Gesucht ab dem vorherigen Prompt-Anfang – die Cursorzeile
     // beim Senden ist unsicher, weil langsame Prompts (z. B. Git Bash mit Git-Status) zeilenweise mit Pausen erscheinen.
     let scan_from = mark0.map_or(start_abs, |m| m.min(start_abs));
-    let all = lines_abs_in(t, scan_from, end_incl.max(scan_from));
+    let all = lines_abs_in(t, base, scan_from, end_incl.max(scan_from));
     // Ein langer Befehl kann umbrochen sein: den ganzen Eingabeblock überspringen, nicht nur die erste Zeile. Das Echo
     // wird am Befehlstext selbst verfolgt (WRAPLINE fehlt, wenn ConPTY/PSReadLine die Eingabe neu zeichnen).
     let (first_ok, skip) = match find_echo(&all, cmd) {
@@ -850,14 +943,14 @@ pub fn run_output<T: EventListener>(t: &Term<T>, cmd: &str, start_abs: u64, mark
             // Rückfall (Echo unvollständig, z. B. aus dem Verlauf gefallen): erste Zeile mit dem Befehlsanfang.
             let key: String = cmd.chars().take(12).collect();
             match all.iter().position(|l| l.contains(key.as_str())) {
-                Some(i) => (true, (wrap_end_in(t, scan_from + i as u64) - scan_from) as usize + 1),
+                Some(i) => (true, (wrap_end_in(t, base, scan_from + i as u64) - scan_from) as usize + 1),
                 None => (false, (start_abs - scan_from) as usize + 1),
             }
         }
     };
     // Ausgabe mit zusammengefügten Zeilenumbrüchen des Terminals (eine 300 Zeichen lange Zeile bleibt eine Zeile).
     let first_out = scan_from + skip as u64;
-    let mut lines: Vec<String> = if first_out <= end_incl { text_abs_in(t, first_out, end_incl) } else { Vec::new() };
+    let mut lines: Vec<String> = if first_out <= end_incl { text_abs_in(t, base, first_out, end_incl) } else { Vec::new() };
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
@@ -1187,6 +1280,7 @@ mod run_output_tests {
         p: Processor,
         sc: OscScanner,
         pending: Option<u64>,
+        hs: HistoryTrack,
         st: Arc<Mutex<ShellState>>,
     }
 
@@ -1195,22 +1289,32 @@ mod run_output_tests {
             Self::with_history(cols, lines, Config::default().scrolling_history)
         }
 
+        /// Wie `Session::spawn`: Emulation mit `HISTORY_SLACK` Zeilen mehr, `HistoryTrack` kürzt auf `scrolling_history`.
         fn with_history(cols: usize, lines: usize, scrolling_history: usize) -> Self {
-            let config = Config { scrolling_history, ..Config::default() };
+            let config = Config { scrolling_history: scrolling_history + HISTORY_SLACK, ..Config::default() };
             Fake {
                 term: Term::new(config, &TermSize::new(cols, lines), VoidListener),
                 p: Processor::new(),
                 sc: OscScanner::default(),
                 pending: None,
+                hs: HistoryTrack::new(scrolling_history, Arc::new(std::sync::atomic::AtomicU64::new(0))),
                 st: Arc::new(Mutex::new(ShellState::default())),
             }
+        }
+
+        fn base(&self) -> u64 {
+            self.hs.base()
+        }
+
+        fn cursor(&self) -> u64 {
+            cursor_abs_in(&self.term, self.base())
         }
 
         /// Wie der Lese-Thread von `Session::spawn` (`advance_tracked`).
         fn feed(&mut self, bytes: &str) {
             let bytes = bytes.as_bytes();
             let (events, positions) = self.sc.feed_at(bytes);
-            advance_tracked(&mut self.p, &mut self.term, bytes, events, positions, &mut self.pending, &self.st, |_, _| {});
+            advance_tracked(&mut self.p, &mut self.term, &self.hs, bytes, events, positions, &mut self.pending, &self.st, |_, _| {});
         }
 
         fn last_mark(&self) -> Option<u64> {
@@ -1229,13 +1333,13 @@ mod run_output_tests {
             f.feed(&format!("alt {i}\r\n"));
         }
         f.feed(PROMPT);
-        let start_abs = cursor_abs_in(&f.term);
+        let start_abs = f.cursor();
         let mark0 = f.last_mark();
         let seq0 = f.st.lock().unwrap().prompt_seq;
         f.feed(&format!("{cmd}\r\n"));
         f.feed(out);
         assert!(f.st.lock().unwrap().prompt_seq > seq0, "kein neuer Prompt");
-        run_output(&f.term, cmd, start_abs, mark0, f.last_mark(), true)
+        run_output(&f.term, f.base(), cmd, start_abs, mark0, f.last_mark(), true)
     }
 
     fn text(r: &RunOutput) -> String {
@@ -1346,9 +1450,7 @@ mod run_output_tests {
     #[test]
     fn exact_width_with_full_scrollback() {
         // Verlauf voll (kleines Limit): der Umbruch in der untersten Zeile rollt nur, die absolute Zeile wächst nicht –
-        // die Marke darf dann nicht eine Zeile tiefer liegen (sonst endete die Ausgabe mit dem Prompt). Geprüft wird nur
-        // die Marke: bei vollem Verlauf verschieben sich alle absoluten Zeilen (auch `start_abs`/`mark0`) mit jedem
-        // Rollen – das betrifft `run_command` unabhängig von #193.
+        // die Marke darf dann nicht eine Zeile tiefer liegen (sonst endete die Ausgabe mit dem Prompt).
         let line = "f".repeat(COLS);
         for nl in ["", "\r\n"] {
             let mut f = Fake::with_history(COLS, 8, 10);
@@ -1358,9 +1460,91 @@ mod run_output_tests {
             assert_eq!(f.term.grid().history_size(), 10, "Verlauf voll");
             f.feed(&format!("{line}{nl}{PROMPT}"));
             let m = f.last_mark().unwrap();
-            let rows = lines_abs_in(&f.term, m - 1, m);
+            let rows = lines_abs_in(&f.term, f.base(), m - 1, m);
             assert_eq!(rows, vec![line.clone(), "PS C:\\>".to_string()], "Zeilenvorschub {nl:?}");
         }
+    }
+
+    #[test]
+    fn full_history_keeps_absolute_lines_stable() {
+        // #197: bei vollem Verlauf wächst die absolute Zählung weiter (verworfene Zeilen werden mitgezählt).
+        let mut f = Fake::with_history(COLS, 8, 10);
+        f.feed("\x1b]133;A\x07$ ");
+        let m0 = f.last_mark().unwrap();
+        for i in 0..100 {
+            f.feed(&format!("zeile {i}\r\n"));
+        }
+        assert_eq!(f.term.grid().history_size(), 10, "Verlauf auf das Limit gekürzt");
+        assert_eq!(f.base(), 100 + 1 - 8 - 10, "verworfene Zeilen gezählt");
+        assert_eq!(f.cursor(), 100, "Cursor in absoluter Zeile 100");
+        assert_eq!(lines_abs_in(&f.term, f.base(), 99, 99), vec!["zeile 99".to_string()]);
+        // Die erste Marke ist aus dem Verlauf gefallen: Lesen davon liefert die älteste noch vorhandene Zeile.
+        assert_eq!(m0, 0);
+        assert_eq!(lines_abs_in(&f.term, f.base(), 0, 0), vec!["zeile 83".to_string()]);
+        // Verlauf löschen (CSI 3J) zählt ebenfalls als verworfen: die Bildschirmzeilen behalten ihre Nummern.
+        f.feed("\x1b[3J");
+        assert_eq!(f.term.grid().history_size(), 0);
+        assert_eq!(f.cursor(), 100);
+        assert_eq!(lines_abs_in(&f.term, f.base(), 99, 99), vec!["zeile 99".to_string()]);
+    }
+
+    #[test]
+    fn run_command_with_full_history() {
+        // #197: vorher lieferte schon `echo hi` bei vollem Verlauf nichts (Echo nicht gefunden).
+        for history in [40, 200] {
+            let r = run_in(Fake::with_history(COLS, 8, 10), history, "echo hi", &format!("hi\r\n{PROMPT}"));
+            assert_eq!(text(&r), "hi", "Verlauf {history}");
+            // Ausgabe länger als Bildschirm und Verlauf zusammen: der Anfang ist weg, der Rest stimmt.
+            let many: Vec<String> = (0..30).map(|i| format!("z{i}")).collect();
+            let r = run_in(Fake::with_history(COLS, 8, 10), history, "1..30", &format!("{}\r\n{PROMPT}", many.join("\r\n")));
+            assert!(!r.first_ok, "Echo ist aus dem Verlauf gefallen");
+            let line = "f".repeat(COLS);
+            let r = run_in(Fake::with_history(COLS, 8, 10), history, "'f'*40", &format!("{line}{PROMPT}"));
+            assert_eq!(text(&r), line, "genaue Breite, Verlauf {history}");
+            let r = run_in(Fake::with_history(COLS, 8, 10), history, "'f'*40", &format!("{line}\r\n{PROMPT}"));
+            assert_eq!(text(&r), line, "genaue Breite mit Zeilenvorschub, Verlauf {history}");
+        }
+        // Mehrere Befehle hintereinander in derselben Sitzung (mark0 = Marke des vorherigen Prompts).
+        let mut f = Fake::with_history(COLS, 8, 10);
+        for i in 0..50 {
+            f.feed(&format!("alt {i}\r\n"));
+        }
+        f.feed(PROMPT);
+        for i in 0..20 {
+            let start_abs = f.cursor();
+            let mark0 = f.last_mark();
+            let cmd = format!("echo n{i}");
+            f.feed(&format!("{cmd}\r\nn{i}\r\n{PROMPT}"));
+            let r = run_output(&f.term, f.base(), &cmd, start_abs, mark0, f.last_mark(), true);
+            assert_eq!(text(&r), format!("n{i}"), "Befehl {i}");
+        }
+    }
+
+    #[test]
+    fn prompt_jumps_with_full_history() {
+        // Prompt-Navigation: Marken sind absolut; bei vollem Verlauf landen die Sprünge trotzdem auf dem Prompt.
+        let mut f = Fake::with_history(COLS, 8, 30);
+        for i in 0..60 {
+            f.feed(&format!("{PROMPT}cmd{i}\r\nout{i}\r\nout{i}b\r\n"));
+        }
+        f.feed(PROMPT);
+        assert_eq!(f.term.grid().history_size(), 30);
+        let marks = f.st.lock().unwrap().marks.clone();
+        let top_row = |f: &Fake| {
+            let off = f.term.grid().display_offset() as i32;
+            f.term.bounds_to_string(Point::new(Line(-off), Column(0)), Point::new(Line(-off), Column(COLS - 1))).trim_end().to_string()
+        };
+        jump_mark_in(&mut f.term, f.hs.base(), &marks, -1);
+        assert_eq!(top_row(&f), "PS C:\\> cmd57");
+        jump_mark_in(&mut f.term, f.hs.base(), &marks, -1);
+        assert_eq!(top_row(&f), "PS C:\\> cmd56");
+        jump_mark_in(&mut f.term, f.hs.base(), &marks, 1);
+        assert_eq!(top_row(&f), "PS C:\\> cmd57");
+        // Ganz nach oben: ältester noch vorhandener Prompt, dann der Anfang des Verlaufs.
+        for _ in 0..20 {
+            jump_mark_in(&mut f.term, f.hs.base(), &marks, -1);
+        }
+        assert_eq!(f.term.grid().display_offset(), 30);
     }
 
     #[test]
@@ -1369,10 +1553,10 @@ mod run_output_tests {
         let mut f = Fake::new(COLS, 8);
         let prompt = format!("C:\\{}>", "k".repeat(COLS + 5));
         f.feed(&prompt);
-        let start_abs = cursor_abs_in(&f.term);
+        let start_abs = f.cursor();
         f.feed("echo hallo\r\nhallo\r\n\r\n");
         f.feed(&prompt);
-        let r = run_output(&f.term, "echo hallo", start_abs, None, None, true);
+        let r = run_output(&f.term, f.base(), "echo hallo", start_abs, None, None, true);
         assert_eq!(text(&r), "hallo");
     }
 }
