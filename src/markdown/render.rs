@@ -282,6 +282,7 @@ fn inline_block(ui: &mut Ui, cx: &mut Cx, inl: &[Inline], size: f32, bold_all: b
     let laid = layout(ui, &cx.look, cx.opts, inl, size, bold_all, ui.available_width(), false);
     let sense = if laid.links.is_empty() { Sense::hover() } else { Sense::click() };
     let (rect, resp) = ui.allocate_exact_size(laid.galley.size(), sense);
+    let resp = crate::afford::Clickable::no_pointer(resp); // Hand nur über dem Verweis selbst (handle_target)
     if ui.is_rect_visible(rect) {
         paint_laid(ui, rect.min, &laid, cx.look.color);
     }
@@ -440,6 +441,7 @@ fn table(ui: &mut Ui, cx: &mut Cx, align: &[TAlign], header: &[Vec<Inline>], row
     let (total_w, total_h) = (widths.iter().sum::<f32>(), row_h.iter().sum::<f32>());
     let has_links = laid.iter().flatten().any(|l| !l.links.is_empty());
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, total_h), if has_links { Sense::click() } else { Sense::hover() });
+    let resp = crate::afford::Clickable::no_pointer(resp); // Hand nur über einem Verweis
     let border = cx.look.color.gamma_multiply(0.28);
     let stroke = Stroke::new(1.0_f32, border);
     let p = ui.painter();

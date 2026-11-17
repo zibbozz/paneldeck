@@ -239,7 +239,7 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
         widgets::paint_type_badge(ui.painter(), r, ty.icon.as_deref(), tcol);
         ui.label(RichText::new(ty.display(lang)).small().color(tcol));
         if let Some(p) = &d.parent {
-            if ui.add(egui::Label::new(RichText::new(p.key()).monospace().small().color(style::dim(ui))).sense(Sense::click())).on_hover_text(format!("{} {}", lang.t("Eltern-Ticket:", "Parent:"), p.title)).clicked() {
+            if ui.add(egui::Label::new(RichText::new(p.key()).monospace().small().color(style::dim(ui))).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{} {}", lang.t("Eltern-Ticket öffnen:", "Open parent:"), p.title)).clicked() {
                 acts.push(Act::OpenId(p.id));
             }
             ui.label(RichText::new("›").color(style::dim(ui)));

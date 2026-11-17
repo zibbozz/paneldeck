@@ -1,3 +1,4 @@
+use crate::afford::{self, Clickable};
 use crate::claude_opts::ClaudeOpts;
 use crate::clip;
 use crate::gitinfo::{GitInfo, GitWatcher};
@@ -97,13 +98,16 @@ struct Entry {
     /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
     /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
     session_key: String,
+    /// Hinweis vom letzten Start (z. B. weggelassene Pfade aus den Claude-Optionen, #182); wird im nächsten Bild als
+    /// Meldung gezeigt.
+    launch_note: Option<String>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts, launch_note: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -828,6 +832,8 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../assets/fonts/CascadiaMono-Regular.ttf"))),
     );
     fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "cascadia".to_owned());
+    // Lucide-Icons (ISC) als eigene Familie nur für Icons (Icon-Explorer, `lucide:<name>`).
+    planning_ui::install_icon_font(&mut fonts);
     // Optionale Systemschriften als Fallback für Symbole, Sonderzeichen, CJK, Thai, Indisch, Mathe usw.
     // Es werden nur vorhandene Dateien geladen; fehlt eine, ändert sich nichts.
     let candidates: [(&str, &str); 14] = [
@@ -1072,6 +1078,7 @@ impl App {
             winchrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
         }
         clip::init(&app.dir);
+        crate::afford::install(&cc.egui_ctx); // Hand-Zeiger über allem, was wie ein Knopf funktioniert (#187)
         app.reload_themes();
         app.prompts = state::load_json(&app.dir.join("prompts.json")).unwrap_or_else(|| prompts::defaults(state::persisted_lang(app.settings.language)));
         if let Some(h) = &app.hook_server {
@@ -1147,7 +1154,7 @@ impl App {
         // Start aus dem Explorer-Kontextmenü: Sitzung im übergebenen Ordner öffnen.
         let cli = crate::cli::get();
         if let Some(p) = &cli.open {
-            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude);
+            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude, false);
         }
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
@@ -1177,7 +1184,10 @@ impl App {
 
     /// Neue Sitzung in einem Ordner (Dateien → deren Ordner).
     /// Ordner (oder Ordner einer Datei) als neue Sitzung öffnen; gibt deren Kennung zurück.
-    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) -> u64 {
+    /// `from_hub` = angestoßen aus einem Hub-Terminal (`paneldeck --open` dort, möglicherweise von einem Agenten): dann
+    /// Optionen wie bei Sitzungen über MCP (#182): ohne die Rechte erweiternden Wertoptionen der Standards und mit
+    /// ausdrücklichem Permission-Mode (`ClaudeOpts::for_agent`).
+    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool, from_hub: bool) -> u64 {
         let p = std::path::Path::new(path);
         // Ein WSL-Pfad gilt ungeprüft als Ordner (schon das Prüfen kann die WSL-VM starten und die Oberfläche blockieren).
         let dir = if !crate::wsl::is_wsl_unc(path) && p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
@@ -1193,7 +1203,8 @@ impl App {
             Some((sid, linux)) => (Some(sid), linux),
             None => (None, dir),
         };
-        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, ..NewOpts::default() })
+        let claude_opts = from_hub.then(|| ClaudeOpts::default().for_agent(&self.settings.claude_defaults));
+        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, claude_opts, ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
@@ -1209,7 +1220,7 @@ impl App {
                     self.notify_text(taint::orphan_error().1);
                     continue;
                 }
-                let id = self.open_folder(ctx, &path, claude);
+                let id = self.open_folder(ctx, &path, claude, origin.is_some());
                 if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
                     self.save_state();
                 }
@@ -1497,13 +1508,16 @@ impl App {
         self.settings.last_claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone()).sanitized(false)
     }
 
-    /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt.
-    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool) {
+    /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt; dritter: die tatsächlich gesetzten
+    /// Optionen und die weggelassenen Pfade (#182).
+    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs) {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
         let is_wsl = sid.starts_with("wsl");
-        let mut c = String::from("claude");
+        // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
+        let style = crate::claude_opts::PathStyle::for_shell(&sid, spec.as_ref().map(|s| s.program.as_str()).unwrap_or(""), kind);
+        let mut c = String::from(style.claude_program());
         if is_wsl {
             // WSL: eigene Hook-Datei mit WSL-Pfad zur .exe (Aufruf über Interop); die globale Windows-Konfiguration gilt dort nicht.
             if let Some(f) = hooks::write_session_settings_wsl(&self.dir, &self.exe, &sid) {
@@ -1515,12 +1529,11 @@ impl App {
             }
         }
         // Gespeicherte Optionen nur in harmloser Form übernehmen (state.json ist eine Vertrauensgrenze):
-        // geprüfte Startoptionen (#161), gequotet für die Shell, dazu ältere freie `claude_args` bereinigt.
+        // geprüfte Startoptionen (#161, #182; Pfade erst hier auf Existenz geprüft und für WSL umgerechnet), gequotet für
+        // die Shell, dazu ältere freie `claude_args` bereinigt (vor den mehrwertigen Wertoptionen).
         let (opts, args) = meta.claude_opts_eff();
-        c += &opts.args(kind);
-        if !args.is_empty() {
-            c += &format!(" {}", crate::claude_opts::legacy_args(&args, kind));
-        }
+        let launch = opts.launch(kind, style, &args);
+        c += &launch.line;
         // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
         // der globalen Einstellung (`session_settings::resume_wanted`).
         let resume_wanted = session_settings::resume_wanted(l.restore, l.restart, meta.claude_continue, self.settings.claude_resume);
@@ -1541,7 +1554,7 @@ impl App {
         if let Some(p) = l.prompt.filter(|p| !p.trim().is_empty()) {
             meta.queue.insert(0, p.trim().to_string());
         }
-        (c + "\r", fresh)
+        (c + "\r", fresh, launch)
     }
 
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
@@ -1561,7 +1574,17 @@ impl App {
             None
         };
         let claude_cmd = if entry.launched_claude {
-            let (c, fresh) = self.claude_command(&mut entry.meta, &l);
+            let (c, fresh, launch) = self.claude_command(&mut entry.meta, &l);
+            // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
+            entry.launched_opts = launch.applied;
+            if !launch.dropped.is_empty() {
+                entry.launch_note = Some(format!(
+                    "{} ({}): {}",
+                    state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
+                    entry.display_name(),
+                    launch.dropped.join(", "),
+                ));
+            }
             if fresh {
                 // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
                 entry.meta.transcript.clear();
@@ -3621,6 +3644,11 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.handle_ipc(ctx);
+        // Hinweise vom Start einer Sitzung (weggelassene Pfade der Claude-Optionen, #182).
+        let notes: Vec<String> = self.entries.values_mut().filter_map(|e| e.launch_note.take()).collect();
+        for n in notes {
+            self.notify_text(n);
+        }
         self.poll_mcp(ctx);
         crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         if crate::conpty::take_fallback_hint() {
@@ -3936,7 +3964,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         [Pos2::new(header.min.x, header.max.y - 0.5), Pos2::new(header.max.x, header.max.y - 0.5)],
         Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(0.7)),
     );
-    let hresp = ui.interact(header, Id::new(("hdr", id)), if cx.detached { Sense::click() } else { Sense::click_and_drag() });
+    // Kopfzeile = Titelleiste des Bereichs (Klick fokussiert, Ziehen verschiebt): kein Knopf, darum ohne Hand (#187).
+    let hresp = ui.interact(header, Id::new(("hdr", id)), if cx.detached { Sense::click() } else { Sense::click_and_drag() }).no_pointer();
     if hresp.drag_started() {
         *cx.dragging = Some(id);
     }

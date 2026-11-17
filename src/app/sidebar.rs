@@ -10,6 +10,26 @@ impl App {
             // Fußzeile: Einstellungen + Gesamtverbrauch
             egui::TopBottomPanel::bottom("sidebar_footer").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
                 ui.add_space(S1);
+                let (mut tok, mut cost) = (0u64, 0.0f64);
+                if self.settings.claude_mode {
+                    for id in self.entries.keys().copied().collect::<Vec<_>>() {
+                        if let Some(u) = self.usage.get(id) {
+                            tok += u.total.input + u.total.output + u.total.cache_read + u.total.cache_write;
+                            cost += u.cost();
+                        }
+                    }
+                }
+                // Gesamtverbrauch in einer eigenen Zeile über den Knöpfen (#187): genug Platz für den vollen Text.
+                if tok > 0 {
+                    let full = format!("Σ {} {} · ≈ ${:.2}", fmt_tokens(tok), lang.t("Token", "tokens"), cost);
+                    let medium = format!("Σ {} · ≈ ${:.2}", fmt_tokens(tok), cost);
+                    ui.horizontal(|ui| {
+                        if cost_summary(ui, &[&full, &medium, &format!("≈ ${cost:.2}")], lang).is_some_and(|r| r.clicked()) {
+                            actions.push(Action::OpenCosts);
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
                 ui.horizontal(|ui| {
                     if style::icon_btn(ui, SIcon::Gear, lang.t("Einstellungen", "Settings"), self.settings_open).clicked() {
                         self.settings_open = !self.settings_open;
@@ -18,30 +38,11 @@ impl App {
                         self.settings_open = true;
                         self.settings_tab = 7;
                     }
-                    let (mut tok, mut cost) = (0u64, 0.0f64);
-                    if self.settings.claude_mode {
-                        for id in self.entries.keys().copied().collect::<Vec<_>>() {
-                            if let Some(u) = self.usage.get(id) {
-                                tok += u.total.input + u.total.output + u.total.cache_read + u.total.cache_write;
-                                cost += u.cost();
-                            }
-                        }
+                    if tok == 0 {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).small().color(style::dim(ui))).truncate());
+                        });
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let txt = if tok > 0 {
-                            format!("Σ {} {} · ≈ ${:.2}", fmt_tokens(tok), lang.t("Token", "tokens"), cost)
-                        } else {
-                            format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))
-                        };
-                        if tok > 0 {
-                            let r = ui.add(egui::Label::new(RichText::new(txt).small().color(style::dim(ui))).sense(Sense::click()));
-                            if r.on_hover_text(lang.t("Kosten-Übersicht öffnen", "Open cost overview")).clicked() {
-                                actions.push(Action::OpenCosts);
-                            }
-                        } else {
-                            ui.label(RichText::new(txt).small().color(style::dim(ui)));
-                        }
-                    });
                 });
             });
 
@@ -755,9 +756,47 @@ pub(super) fn sidebar_panel<R>(ctx: &egui::Context, default_width: f32, fill: Co
         })
 }
 
+/// Gesamtverbrauch unten in der Seitenleiste: öffnet die Kosten-Übersicht – darum als kleiner Knopf mit Pfeil, Hover,
+/// Hand und Tooltip (#187), nicht als stiller Text. `texts`: vom ausführlichsten zum kürzesten; es steht der erste, der
+/// in den Platz passt (sehr schmale Seitenleiste). Passt nicht einmal der kürzeste, entfällt der Knopf (`None`) statt
+/// über den Rand zu ragen. Der Tooltip nennt immer den ersten.
+pub(super) fn cost_summary(ui: &mut Ui, texts: &[&str], lang: Lang) -> Option<egui::Response> {
+    let col = style::dim(ui);
+    let avail = ui.available_width();
+    let text = texts.iter().copied().find(|t| afford::link_button_width(ui, t) <= avail)?;
+    let full = texts.first().copied().unwrap_or_default();
+    let tip = format!("{full}\n{}", lang.t("Kosten-Übersicht öffnen (Token und Kosten je Sitzung und Tag)", "Open the cost overview (tokens and costs per session and day)"));
+    Some(afford::link_button(ui, text, col, &tip))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cost_summary_looks_clickable_hand_and_tooltip() {
+        use crate::afford::tests::{cursor_at, rect_of, tooltip_at};
+        let txt = "Σ 1.2k tokens · ≈ $0.42";
+        let texts = [txt, "Σ 1.2k · ≈ $0.42", "≈ $0.42"];
+        let r = rect_of(&mut |ui| cost_summary(ui, &texts, Lang::En).expect("passt").rect);
+        assert!(r.width() > 40.0 && r.height() >= 18.0, "Knopffläche: {r:?}");
+        let mut f = |ui: &mut Ui| {
+            cost_summary(ui, &texts, Lang::En);
+        };
+        assert_eq!(cursor_at(r.center(), &mut f), egui::CursorIcon::PointingHand, "Hand über der Kostenzeile");
+        assert!(tooltip_at(r.center(), &mut f), "Tooltip über der Kostenzeile");
+        assert_ne!(cursor_at(r.center() + Vec2::new(0.0, 60.0), &mut f), egui::CursorIcon::PointingHand, "daneben keine Hand");
+        // Zu wenig Platz: nur die Kosten, nichts ragt über den Rand
+        let narrow = rect_of(&mut |ui| ui.allocate_ui(Vec2::new(90.0, 20.0), |ui| cost_summary(ui, &texts, Lang::En).expect("kurz passt").rect).inner);
+        assert!(narrow.width() < r.width() && narrow.width() <= 90.0, "gekürzt: {narrow:?} statt {r:?}");
+        // Nicht einmal der kürzeste Text passt: kein Knopf (nichts ragt über den Rand)
+        let mut none = false;
+        rect_of(&mut |ui| {
+            ui.allocate_ui(Vec2::new(30.0, 20.0), |ui| none = cost_summary(ui, &texts, Lang::En).is_none());
+            Rect::NOTHING
+        });
+        assert!(none, "zu schmal: ausgeblendet");
+    }
 
     /// Ein Durchlauf: Seitenleiste mit Inhalt der Breite `content_w`, danach der Mittelbereich.
     /// Liefert (gezeichnete Breite der Seitenleiste = Clip, belegtes Rechteck, Rechteck des Mittelbereichs).
