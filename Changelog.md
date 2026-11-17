@@ -35,6 +35,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - A WSL session without a start folder now starts in the Linux home (`~`) instead of the Windows user folder; a restored WSL session whose saved folder cannot be used starts in `~` with a note. (#172)
 - MCP `create_session` refuses Linux paths for Windows shells, and `\\wsl$` paths of another distribution. (#172)
 - Updates replace `paneldeck.exe`, `conpty.dll` and `OpenConsole.exe` together even while Paneldeck is running: the installer writes the console host first and puts the previous file back if writing fails; the portable self-update replaces all files or none. Leftover `.old` files are removed on the next start, and uninstalling removes the console host too. (#183)
+- Everything that works like a button now shows the hand cursor: main tabs, window buttons, list and menu entries, drop-downs, checkboxes, collapsible headings, toasts, and buttons over the terminal. (#187)
+- Settings → Agent interface: the levels Off / Read only / Control are real buttons; language, prompt language, profiles, model level, tool calling, Windows/WSL path and Unstaged/Staged work the same way. (#187)
+- The cost summary has its own line at the bottom of the sidebar and looks like a small button, with arrow, hover state and tooltip; the MCP chip looks the same. (#187)
 
 ### Deprecated
 
@@ -46,6 +49,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - No see-through gap between the session sidebar and the terminal area when a sidebar row is wider than the sidebar; the sidebar keeps its width and clips the row instead (#160).
 - A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
 - Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
+- Clickable elements without any hint (cost summary, MCP chip, toasts, tag colours, parent ticket key) now show a hover state, the hand cursor and a tooltip. (#187)
 
 ### Security
 

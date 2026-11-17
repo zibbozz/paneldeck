@@ -35,6 +35,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Eine WSL-Sitzung ohne Startordner startet jetzt im Linux-Home (`~`) statt im Windows-Benutzerordner; eine wiederhergestellte WSL-Sitzung, deren gespeicherter Ordner nicht verwendbar ist, startet mit Hinweis in `~`. (#172)
 - MCP `create_session` lehnt Linux-Pfade für Windows-Shells ab, ebenso `\\wsl$`-Pfade einer anderen Distribution. (#172)
 - Updates ersetzen `paneldeck.exe`, `conpty.dll` und `OpenConsole.exe` gemeinsam, auch bei laufendem Paneldeck: Der Installer schreibt zuerst den Konsolen-Host und legt bei einem Schreibfehler die bisherige Datei zurück; das portable Selbst-Update ersetzt alle Dateien oder keine. Übrig gebliebene `.old`-Dateien werden beim nächsten Start gelöscht, die Deinstallation entfernt auch den Konsolen-Host. (#183)
+- Alles, was wie ein Knopf funktioniert, zeigt jetzt den Hand-Zeiger: Hauptreiter, Fensterknöpfe, Listen- und Menüeinträge, Auswahllisten, Kontrollkästchen, aufklappbare Überschriften, Toasts und Knöpfe über dem Terminal. (#187)
+- Einstellungen → Agenten-Schnittstelle: Die Stufen Aus / Nur lesen / Steuern sind echte Knöpfe; genauso Sprache, Prompt-Sprache, Profile, Modell-Stufe, Werkzeugaufrufe, Windows/WSL-Pfad und Nicht vorgemerkt/Vorgemerkt. (#187)
+- Die Kostenzeile steht in einer eigenen Zeile unten in der Seitenleiste und sieht wie ein kleiner Knopf aus, mit Pfeil, Hover und Tooltip; der MCP-Chip ebenso. (#187)
 
 ### Deprecated
 
@@ -46,6 +49,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Zwischen Seitenleiste und Terminalbereich bleibt keine durchsichtige Lücke mehr, wenn eine Zeile der Seitenleiste breiter ist als die Leiste; die Leiste behält ihre Breite und schneidet die Zeile ab (#160).
 - Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
 - Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
+- Klickbare Elemente ohne jeden Hinweis (Kostenzeile, MCP-Chip, Toasts, Tag-Farben, Eltern-Ticket) zeigen jetzt Hover, Hand-Zeiger und Tooltip. (#187)
 
 ### Security
 
