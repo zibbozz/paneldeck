@@ -376,7 +376,8 @@ enum Action {
     RequestClose(u64),
     Close(u64),
     /// „Alle beenden“ (#168): alle Prozesse im Job dieser Sitzungen beenden (vor `Close`/`CloseMany`/`Restart`).
-    EndJobs(Vec<u64>),
+    /// (Sitzung, Job beim Öffnen der Rückfrage) – ein inzwischen neu gestarteter Job bleibt (#213).
+    EndJobs(Vec<(u64, u64)>),
     Split(u64, Dir),
     SplitAt(u64, Dir, bool),
     /// Bereich minimieren: aus dem Layout nehmen, Sitzung läuft weiter (`App::minimize_pane`).
@@ -649,6 +650,10 @@ struct WtClose {
     id: u64,
     changes: usize,
     discard: bool,
+    /// Hintergrundprozesse im Job der Sitzung beim Öffnen (#168, #213).
+    lingering: Vec<closing::Lingering>,
+    /// „Hintergrundprozesse beenden“ angehakt.
+    end_jobs: bool,
 }
 
 struct Palette {
@@ -799,6 +804,9 @@ pub struct App {
     bg_rx: std::sync::mpsc::Receiver<String>,
     pending_wt: Option<PendingWt>,
     wt_close: Option<WtClose>,
+    /// Jobs geschlossener/neu gestarteter Sitzungen mit übrigen Prozessen (#218, #213) und letzte Pflege.
+    retired: Vec<closing::Retired>,
+    retired_poll: Option<Instant>,
     gsearch: Option<GlobalSearch>,
     notice: Option<(String, Instant)>,
     /// Toast-Stapel unten rechts (`toasts.rs`), Uhr dafür und Toast unter dem Mauszeiger.
@@ -1091,6 +1099,8 @@ impl App {
             bg_rx: bg.1,
             pending_wt: None,
             wt_close: None,
+            retired: Vec::new(),
+            retired_poll: None,
             gsearch: None,
             notice: None,
             toasts: Default::default(),
@@ -2097,7 +2107,17 @@ impl App {
     fn close_session(&mut self, id: u64) {
         self.hide_pane(id);
         self.detached.retain(|d| *d != id);
-        self.entries.remove(&id);
+        // Job mit übrigen Prozessen behalten (#218): Sie handeln weiter als diese Sitzung, mit ihrer Kette.
+        let chain = taint::ancestors(&self.entries, Some(id));
+        if let Some(mut e) = self.entries.remove(&id) {
+            let name = e.display_name();
+            if let Some(s) = e.live.as_mut() {
+                self.retire_job(id, name, s);
+            }
+        }
+        if self.retired.iter().any(|r| r.session == id) {
+            taint::set_retired(id, chain);
+        }
         self.usage.remove(id);
         self.git.remove(id);
         // Agenten-Zuordnung: auf jedem Weg (Knopf, Mittelklick, „alle schließen“, MCP) aufräumen.
@@ -3622,10 +3642,27 @@ impl App {
                 self.new_dialog = Some(d);
             }
             Action::FolderRestartAll(path) => {
+                // Wie „Neu laden“ (#213): Hat eine beendete Sitzung noch Hintergrundprozesse im Job, wird erst gefragt
+                // (eine Rückfrage zur Zeit; weitere solche Sitzungen bleiben und werden gemeldet).
+                let mut skipped = 0;
                 for id in self.folder_sessions(&path) {
-                    if self.entries.get(&id).is_some_and(|e| !e.is_chat() && e.exited()) {
-                        self.apply(ctx, Action::Restart(id));
+                    if !self.entries.get(&id).is_some_and(|e| !e.is_chat() && e.exited()) {
+                        continue;
                     }
+                    if self.lingering_of(&[id]).is_empty() {
+                        self.apply(ctx, Action::Restart(id));
+                    } else if self.reload_ask.is_none() {
+                        self.request_reload(ctx, id);
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                if skipped > 0 {
+                    let lang = self.settings.language;
+                    self.notify_text(match lang {
+                        Lang::De => format!("{skipped} weitere beendete Sitzung(en) mit Hintergrundprozessen nicht neu gestartet – bitte einzeln neu starten."),
+                        Lang::En => format!("{skipped} more ended session(s) with background processes not restarted – please restart them one by one."),
+                    });
                 }
             }
             Action::CloseAll(scope) => self.request_close_many(scope),
@@ -3644,6 +3681,11 @@ impl App {
             Action::Restart(id) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {} // ein Chat hat keinen Prozess
             Action::Restart(id) => {
                 if let Some(mut e) = self.entries.remove(&id) {
+                    // Alten Job mit übrigen Prozessen behalten (#218, #213), dann erst die alte Shell beenden.
+                    let name = e.display_name();
+                    if let Some(s) = e.live.as_mut() {
+                        self.retire_job(id, name, s);
+                    }
                     e.live = None;
                     self.spawn_into(ctx, &mut e, Launch { restore: false, restart: true, continue_last: false, prompt: None, resume_id: None });
                     self.entries.insert(id, e);
@@ -3698,7 +3740,9 @@ impl App {
                     .and_then(|e| e.meta.worktree.as_ref())
                     .map(|w| gitops::status(std::path::Path::new(&w.path)).map(|c| c.len()).unwrap_or(0))
                     .unwrap_or(0);
-                self.wt_close = Some(WtClose { id, changes, discard: false });
+                // Hintergrundprozesse im Job (#213): auch hier nennen; sie können den Ordner belegt halten.
+                let lingering = self.lingering_of(&[id]);
+                self.wt_close = Some(WtClose { id, changes, discard: false, lingering, end_jobs: false });
             }
             Action::RequestClose(id) => {
                 // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft). Hintergrundprozesse
@@ -3774,6 +3818,7 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.poll_mcp(ctx);
+        self.poll_retired(ctx);
         crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);
         if crate::conpty::take_fallback_hint() {
@@ -4302,8 +4347,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                 ui.scope_builder(UiBuilder::new().max_rect(bar.shrink2(Vec2::new(8.0, 3.0))), |ui| {
                     ui.horizontal(|ui| {
                         ui.colored_label(Color32::from_gray(220), lang.t("Prozess beendet.", "Process exited."));
+                        // Wie „Neu laden“: mit Hintergrundprozessen im Job erst fragen (#213).
                         if ui.button(lang.t("Neu starten", "Restart")).clicked() {
-                            cx.actions.push(Action::Restart(id));
+                            cx.actions.push(Action::RequestReload(id));
                         }
                     });
                 });
@@ -4315,7 +4361,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             ui.scope_builder(UiBuilder::new().max_rect(body.shrink(12.0)), |ui| {
                 ui.colored_label(Color32::LIGHT_RED, format!("{}: {msg}", lang.t("Start fehlgeschlagen", "Failed to start")));
                 if ui.button(lang.t("Neu starten", "Restart")).clicked() {
-                    cx.actions.push(Action::Restart(id));
+                    cx.actions.push(Action::RequestReload(id));
                 }
             });
         }
@@ -4571,7 +4617,7 @@ fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
     {
         use std::os::windows::process::CommandExt;
         // WSL-Pfade ungeprüft (keine Prüfung im UI-Thread); sonst nur vorhandene Ordner.
-        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || std::path::Path::new(c).is_dir()));
+        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || crate::pathfmt::dir_exists_quick(c, std::time::Duration::from_millis(400)) == Some(true)));
         let ok = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
             .creation_flags(0x0800_0000)

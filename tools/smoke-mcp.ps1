@@ -447,11 +447,14 @@ try {
   # Losgeloester Absender: eine kurzlebige Shell (in Sitzung $s per run_command, ohne $s vom Test selbst gestartet)
   # startet per Start-Process eine PowerShell und endet sofort; diese schickt nach 3 s eine rohe Anfrage ohne Aufrufer
   # (Token aus ipc.json) an den Hub. Rueckgabe: die rohe Antwort ('' ohne Antwort).
-  function Detached($s, [string]$tool, [string]$argsJson) {
+  # $flag: statt 3 s zu warten, bis diese Datei existiert (hoechstens 90 s); dann liefert die Funktion sofort den Pfad
+  # der Ausgabedatei (Aufrufer liest sie spaeter, z. B. nachdem die Sitzung geschlossen wurde).
+  function Detached($s, [string]$tool, [string]$argsJson, [string]$flag = '') {
     $n = [guid]::NewGuid().ToString('N').Substring(0, 6)
     $out = "$work\det-$n.txt"; $ps = "$work\det-$n.ps1"
+    $wait = if ($flag) { "`$t0 = Get-Date; while (-not (Test-Path '$flag') -and ((Get-Date) - `$t0).TotalSeconds -lt 90) { Start-Sleep -Milliseconds 200 }" } else { 'Start-Sleep -Seconds 3' }
     [IO.File]::WriteAllText($ps, @"
-Start-Sleep -Seconds 3
+$wait
 `$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json
 `$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port)
 `$s = `$c.GetStream()
@@ -462,6 +465,7 @@ Start-Sleep -Seconds 3
     $inner = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$ps'"
     if ($s) { [void](Tool 'run_command' @{ session = $s; command = "powershell -NoProfile -Command ""$inner"""; timeout_secs = 30 }) }
     else { $p = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', $inner; [void]$p.WaitForExit(15000) }
+    if ($flag) { return $out }
     $deadline = (Get-Date).AddSeconds(25)
     while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
     if (Test-Path $out) { [IO.File]::ReadAllText($out) } else { '' }
@@ -498,7 +502,9 @@ Start-Sleep -Seconds 3
   $bgCmd = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','`$PID | Out-File -Encoding ascii ''$bgMark''; Start-Sleep 120'"
   [void](Tool 'run_command' @{ session = $K; command = $bgCmd; timeout_secs = 30 })
   $t0 = Get-Date; while (-not (Test-Path $bgMark) -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 200 }
-  $bgPid = if (Test-Path $bgMark) { [int]([IO.File]::ReadAllText($bgMark).Trim()) } else { 0 }
+  # Out-File kann die Datei kurz noch offen halten: Lesen wiederholen.
+  $bgPid = 0
+  for ($i = 0; $i -lt 25 -and $bgPid -eq 0 -and (Test-Path $bgMark); $i++) { try { $bgPid = [int]([IO.File]::ReadAllText($bgMark).Trim()) } catch { Start-Sleep -Milliseconds 200 } }
   $cl = InA 'close_session' @{ session = $K }
   $rem = @($cl.structuredContent.remaining_processes)
   Check 'close_session (MCP) fragt nicht und meldet den Hintergrundprozess in remaining_processes' ($cl.isError -ne $true -and $bgPid -gt 0 -and @($rem | Where-Object { $_.pid -eq $bgPid -and $_.name -match '^powershell' }).Count -eq 1) ($cl | ConvertTo-Json -Compress -Depth 6)
@@ -1223,10 +1229,22 @@ c.close()
     # Losgeloester Enkel des Glieds (#168): ueber den Job von $T zugeordnet -> als Glied der Kette abgewiesen.
     $det = Detached $Ti 'send_text' ('{"session":' + $A + ',"text":"echo detached-leak"}')
     Check 'Job: losgeloester Enkel eines Glieds -> der Kette zugeordnet, forbidden in den Vorfahren' ($det -match '"code":"forbidden"' -and $det -match 'agent chain') $det
-    # Rueckfallweg: ein losgeloester Prozess ausserhalb jeder Sitzung (vom Test, verwaist) ist nicht zuzuordnen und darf
-    # nicht in einen moeglichen Vorfahren ($A steht in einer Kette) schreiben.
-    $det = Detached $null 'send_text' ('{"session":' + $A + ',"text":"echo orphan-leak"}')
-    Check 'Verwaist ausserhalb jeder Sitzung -> nicht zuzuordnen, forbidden in einen moeglichen Vorfahren' ($det -match '"code":"forbidden"' -and $det -match 'cannot be attributed') $det
+    # Uebrig gebliebener Prozess einer geschlossenen Sitzung (#218): Der Hub behaelt ihren Job, der Prozess handelt als
+    # die geschlossene Sitzung mit ihrer Kette -> forbidden in den Vorfahren. (Ein Prozess ganz ohne Job ist extern,
+    # solange jede Sitzung einen Job hat - siehe den Check "Job: losgeloester Prozess ausserhalb jeder Sitzung -> keiner
+    # Sitzung zugeordnet" weiter oben: identified_by "none".)
+    $nn = (InS $Ti 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'smoke-retired' }).structuredContent.id
+    Start-Sleep 4
+    $flag = "$work\retired-go-$([guid]::NewGuid().ToString('N').Substring(0, 6)).txt"
+    $retOut = Detached $nn 'send_text' ('{"session":' + $A + ',"text":"echo retired-leak"}') $flag
+    Start-Sleep 2
+    $rc2 = InS $Ti 'close_session' @{ session = $nn }
+    Check 'Geschlossene Sitzung mit losgeloestem Prozess (close_session)' ($rc2.isError -ne $true) ($rc2 | ConvertTo-Json -Compress -Depth 5)
+    [IO.File]::WriteAllText($flag, 'go')
+    $deadline = (Get-Date).AddSeconds(25)
+    while (-not (Test-Path $retOut) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    $det = if (Test-Path $retOut) { [IO.File]::ReadAllText($retOut) } else { '' }
+    Check 'Job: uebrig gebliebener Prozess einer geschlossenen Sitzung -> deren Kette, forbidden in den Vorfahren' ($det -match '"code":"forbidden"' -and $det -match 'agent chain') $det
     # paneldeck --open aus einem Terminal (#152): markiert nur, wenn das Terminal selbst eine Kette hat.
     $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
     [void](Tool 'run_command' @{ session = $Ti; command = "& '$dir\paneldeck.exe' --open '$proj'"; timeout_secs = 30 })

@@ -23,10 +23,30 @@ use crate::chat::tools::chain_origins;
 use crate::state;
 use std::collections::BTreeMap;
 
+/// Ketten geschlossener Sitzungen, deren Job Object noch Prozesse hat (#218): Ein übrig gebliebener Prozess handelt
+/// als seine geschlossene Sitzung (`App::retire_job`, `mcp::attribute`). Nur im Speicher (nach einem Neustart des Hubs
+/// unbekannt); Sitzungs-Ids werden nie neu vergeben, die Einträge können also niemanden sonst treffen.
+fn retired() -> std::sync::MutexGuard<'static, BTreeMap<u64, Vec<u64>>> {
+    static R: std::sync::Mutex<BTreeMap<u64, Vec<u64>>> = std::sync::Mutex::new(BTreeMap::new());
+    R.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Geschlossene Sitzung `id` mit ihrer Kette `chain` merken (ihr Job hat noch Prozesse).
+pub(super) fn set_retired(id: u64, chain: Vec<u64>) {
+    retired().insert(id, chain);
+}
+
+/// Der letzte Job der geschlossenen Sitzung `id` ist leer: vergessen.
+pub(super) fn remove_retired(id: u64) {
+    retired().remove(&id);
+}
+
 /// Vorfahren eines Aufrufers: seine gespeicherte Kette und – ist er ein Chat – die Kette der laufenden Runde.
-/// Leer für Aufrufer außerhalb von Paneldeck (`None`) und für vom Nutzer gestartete Sitzungen.
+/// Leer für Aufrufer außerhalb von Paneldeck (`None`) und für vom Nutzer gestartete Sitzungen. Ein übrig gebliebener
+/// Prozess einer geschlossenen Sitzung hat deren Kette ([`set_retired`]).
 pub(super) fn ancestors(entries: &BTreeMap<u64, Entry>, caller: Option<u64>) -> Vec<u64> {
-    let Some(e) = caller.and_then(|c| entries.get(&c)) else { return Vec::new() };
+    let Some(c) = caller else { return Vec::new() };
+    let Some(e) = entries.get(&c) else { return retired().get(&c).cloned().unwrap_or_default() };
     let turn: &[u64] = e.chat.as_ref().map(|c| c.origin_sessions.as_slice()).unwrap_or(&[]);
     let mut v: Vec<u64> = e.meta.agent_chain.iter().chain(turn.iter()).copied().collect();
     v.sort_unstable();
@@ -132,17 +152,24 @@ pub(super) fn chain_error() -> (String, String) {
 /// Steht `id` in irgendeiner Agenten-Kette (oder der Kette einer laufenden Chat-Runde)? Dann ist sie ein möglicher
 /// Vorfahr – nicht zuzuordnende Absender dürfen dort nicht schreiben.
 pub(super) fn potential_ancestor(entries: &BTreeMap<u64, Entry>, id: u64) -> bool {
-    entries.values().any(|e| e.meta.agent_chain.contains(&id) || e.chat.as_ref().is_some_and(|c| c.origin_sessions.contains(&id)))
+    entries.values().any(|e| e.meta.agent_chain.contains(&id) || e.chat.as_ref().is_some_and(|c| c.origin_sessions.contains(&id))) || retired().values().any(|c| c.contains(&id))
 }
 
-/// Fehler für einen nicht zuzuordnenden Absender (losgelöster Prozess), der in einen möglichen Vorfahren schreiben will
-/// oder `--open --claude` aufruft.
+/// Darf ein nicht zuzuordnender Absender (losgelöster Prozess, #152) nicht in `id` schreiben? Nicht in mögliche
+/// Vorfahren und – seit 2.3.1 (#218) – nicht in Agenten (Claude-Sitzung, Chat): die arbeiteten sonst ohne Kette für
+/// ihn weiter und könnten in seine Herkunft zurückschreiben.
+pub(super) fn orphan_target_forbidden(entries: &BTreeMap<u64, Entry>, id: u64) -> bool {
+    potential_ancestor(entries, id) || entries.get(&id).is_some_and(|e| e.is_chat() || e.is_claude() || e.meta.claude || e.hook_seen)
+}
+
+/// Fehler für einen nicht zuzuordnenden Absender (losgelöster Prozess), der in einen möglichen Vorfahren oder einen
+/// Agenten schreiben, einen Agenten starten oder `--open --claude` aufrufen will.
 pub(super) fn orphan_error() -> (String, String) {
     (
         "forbidden".to_string(),
         state::t(
-            "Der aufrufende Prozess lässt sich keiner Sitzung zuordnen (losgelöst von seiner Shell gestartet) – er darf nicht in Sitzungen schreiben, die zu einer Agenten-Kette gehören.",
-            "The calling process cannot be attributed to a session (it was started detached from its shell) – it must not write into sessions that belong to an agent chain.",
+            "Der aufrufende Prozess lässt sich keiner Sitzung zuordnen (losgelöst von seiner Shell gestartet) – er darf weder in Sitzungen einer Agenten-Kette, Claude-Sitzungen oder Chats schreiben noch Claude-Sitzungen oder Chats starten.",
+            "The calling process cannot be attributed to a session (it was started detached from its shell) – it must not write into sessions of an agent chain, Claude sessions or chats, nor start Claude sessions or chats.",
         )
         .to_string(),
     )
@@ -403,5 +430,47 @@ mod tests {
         let (code, msg) = chain_error();
         assert_eq!(code, "forbidden");
         assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn a_leftover_process_acts_as_its_closed_session() {
+        // Geschlossene Sitzung 900_001 mit Kette [5] (Ids nur für diesen Test, das Register ist prozessweit)
+        let mut w = world(&[(5, false), (6, false), (7, false)]);
+        let gone = 900_001;
+        assert!(ancestors(&w, Some(gone)).is_empty());
+        set_retired(gone, vec![5]);
+        assert_eq!(ancestors(&w, Some(gone)), [5]);
+        assert!(write_forbidden(&w, Some(gone), 5), "nicht in die Kette der geschlossenen Sitzung");
+        assert!(!write_forbidden(&w, Some(gone), 6));
+        // Schreiben/Anlegen markiert das Ziel mit Kette + geschlossener Sitzung
+        assert!(on_write(&mut w, Some(gone), 6));
+        assert_eq!(w[&6].meta.agent_chain, [5, gone]);
+        assert!(write_forbidden(&w, Some(6), 5));
+        assert!(potential_ancestor(&w, 5));
+        // Ohne Kette (vom Nutzer gestartet): markiert nichts
+        let free = 900_002;
+        set_retired(free, Vec::new());
+        assert!(!on_write(&mut w, Some(free), 7));
+        assert!(w[&7].meta.agent_chain.is_empty());
+        remove_retired(gone);
+        remove_retired(free);
+        assert!(ancestors(&w, Some(gone)).is_empty());
+    }
+
+    #[test]
+    fn unattributable_callers_cannot_write_into_agents() {
+        // 1 einfaches Terminal, 2 Chat, 3 Claude-Sitzung, 4 Terminal mit Claude für den nächsten Start, 5 Terminal, in dem
+        // Claude von Hand gestartet wurde (Hooks), 6 Vorfahr einer Kette (von 7).
+        let mut w = world(&[(1, false), (2, true), (3, false), (4, false), (5, false), (6, false), (7, false)]);
+        w.get_mut(&3).unwrap().launched_claude = true;
+        w.get_mut(&4).unwrap().meta.claude = true;
+        w.get_mut(&5).unwrap().hook_seen = true;
+        member(&mut w, 7, &[6]);
+        assert!(!orphan_target_forbidden(&w, 1), "einfaches Terminal");
+        assert!(!orphan_target_forbidden(&w, 7), "Glied einer Kette, aber kein Vorfahr und kein Agent");
+        for id in [2, 3, 4, 5, 6] {
+            assert!(orphan_target_forbidden(&w, id), "{id}");
+        }
+        assert_eq!(orphan_error().0, "forbidden");
     }
 }

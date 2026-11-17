@@ -24,6 +24,21 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Dialogs no longer pass keys to the terminal behind them: the close prompt of an extra window (Esc interrupted Claude, Enter reached the shell), the first frame of the multi-line paste prompt, and focus now returns to the terminal after the link prompt (#217)
 - Broadcast paste: each target pane now frames pasted text with its own bracketed-paste mode, and the multi-line paste prompt also appears when a target pane would run the lines (#220)
 - A full reset (RIS) in the alternate screen no longer shifts prompt marks and absolute line numbers; CAN/SUB now end OSC sequences as in the terminal emulation (#221)
+- Closing or reloading a session no longer lists the hidden helper processes of a running program (for example the MCP servers and tool calls of Claude Code) as background processes; if some of them are still running about 6 seconds later, a notification names them and offers “End all”. (#213)
+- Closing a session with a Git worktree now also lists its background processes and can end them before the worktree is removed. (#213)
+- The “Restart” button of an ended session and “Restart ended sessions” now ask about background processes, like “Reload”. (#213)
+- “End all” in a close or reload prompt only ends the processes shown there; a session restarted in the meantime is left alone. (#213)
+- Session settings: a WSL session's working folder accepts Linux paths and offers the WSL folder picker; saving while the folder is still being checked in WSL says so. WSL paths, network paths and mapped network drives are no longer probed on the UI thread, and a network working folder is only checked briefly when a session starts. (#216)
+- `paneldeck --open` with a relative path opens the folder relative to where the command was run, not to the running Paneldeck. (#221)
+- A hanging `wsl.exe` can no longer hold up the start of Paneldeck or WSL folder checks indefinitely. (#221)
+- Fixed a process handle leak when identifying an MCP caller. (#221)
+
+### Security
+
+- MCP: sessions whose creating session has been closed can no longer be closed or linked by every external agent. (#218)
+- MCP: a process left over from a closed or restarted session is still attributed to that session (its job object is kept while processes remain): it keeps the session's agent chain and passes it on, instead of counting as an unknown caller. Agents started from other programs (for example via `code .`) are no longer mistaken for detached processes. (#218)
+- MCP: if a session could not get a job object, a detached process that cannot be attributed can no longer start Claude sessions, chats or the MCP bridge, nor write into Claude sessions or chats. (#218)
+- MCP: a `create_session` waiting for a WSL folder check re-checks the access level (or the chat model's tool rules) before the session is created. (#218)
 
 ## [2.3.0] - 2026-11-17
 

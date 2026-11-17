@@ -484,8 +484,9 @@ impl Session {
             cmd.arg(a);
         }
         if let Some(cwd) = opts.cwd {
-            // `\\wsl$`-Pfade ungeprüft (das Prüfen im UI-Thread könnte die WSL-VM starten und blockieren).
-            if crate::wsl::is_wsl_unc(cwd) || std::path::Path::new(cwd).is_dir() {
+            // `\\wsl$`-Pfade ungeprüft (das Prüfen im UI-Thread könnte die WSL-VM starten und blockieren); ein
+            // Netzwerkpfad nur mit kurzer Frist (#216) – antwortet die Freigabe nicht, startet die Shell im Standardordner.
+            if crate::wsl::is_wsl_unc(cwd) || crate::pathfmt::dir_exists_quick(cwd, std::time::Duration::from_millis(400)) == Some(true) {
                 cmd.cwd(cwd);
             }
         }
@@ -694,6 +695,12 @@ impl Session {
     #[cfg(not(windows))]
     fn adopt_into_job(_job: Option<crate::winctl::SessionJob>, _in_job: bool, _child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
         None
+    }
+
+    /// Job Object herausnehmen (Schließen/Neustart, #218): Der Hub behält es, solange noch Prozesse darin laufen, damit
+    /// er sie weiter dieser Sitzung zuordnen kann (`closing::Retired`). Danach hat die Sitzung keinen Job mehr.
+    pub fn take_job(&mut self) -> Option<crate::winctl::SessionJob> {
+        self.job.take()
     }
 
     /// Kennung des Job Objects dieser Sitzung (#168), `None` ohne Job (dann zählt nur der Prozessbaum).
@@ -2301,7 +2308,7 @@ mod win_job_tests {
         assert!(s.job_key().is_some(), "Sitzung hat einen Job");
         assert!(s.lingering(&crate::winctl::ProcInfo::default()).is_empty(), "nur die Shell: nichts");
         let pid = s.shell_pid.expect("Shell-PID");
-        assert!(s.job.as_ref().unwrap().pids().contains(&pid), "Shell im Job");
+        assert!(s.job.as_ref().unwrap().pids().unwrap_or_default().contains(&pid), "Shell im Job");
         assert!(s.end_job());
     }
 }
