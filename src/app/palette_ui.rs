@@ -214,7 +214,9 @@ pub fn settings_view(ui: &mut Ui, p: &mut Palettes, lang: Lang) {
     // Auf einer Kopie arbeiten: Ansehen allein speichert nichts, eine Liste gleich den Vorgaben bleibt ungespeichert.
     let mut list = p.list(which);
     let before = list.clone();
-    list_editor(ui, salt.with(which_key(which)), &mut list, which.defaults(), lang);
+    // Eigene Palette eines Bereichs: beginnt mit dessen bisheriger Vorgabe, lässt sich aber aus der gemeinsamen kopieren.
+    let shared = matches!(which, Which::Area(_)).then(|| p.list(Which::Shared));
+    list_editor(ui, salt.with(which_key(which)), &mut list, which.defaults(), shared.as_deref(), lang);
     if list != before {
         p.set(which, list);
     }
@@ -259,10 +261,28 @@ impl RowIds {
     }
 }
 
-/// Liste einer Palette bearbeiten.
-fn list_editor(ui: &mut Ui, salt: Id, list: &mut Vec<PaletteColor>, defaults: &[&str], lang: Lang) {
+/// Wie lange „Rückgängig“ nach Löschen bzw. Kopieren angeboten wird (Sekunden).
+pub const UNDO_SECS: f64 = 6.0;
+
+/// Angebot „Rückgängig“: Text, die Liste davor und bis wann (Zeit von egui).
+#[derive(Clone, Default)]
+struct Undo {
+    msg: String,
+    prev: Vec<PaletteColor>,
+    until: f64,
+}
+
+fn offer_undo(ui: &Ui, salt: Id, msg: String, prev: Vec<PaletteColor>) {
+    let until = ui.input(|i| i.time) + UNDO_SECS;
+    ui.data_mut(|d| d.insert_temp(salt.with("undo"), Undo { msg, prev, until }));
+}
+
+/// Liste einer Palette bearbeiten. `shared`: bei der eigenen Palette eines Bereichs die gemeinsame (Knopf „Aus
+/// gemeinsamer kopieren“).
+fn list_editor(ui: &mut Ui, salt: Id, list: &mut Vec<PaletteColor>, defaults: &[&str], shared: Option<&[PaletteColor]>, lang: Lang) {
     let drag_id = salt.with("drag");
     let msg_id = salt.with("msg");
+    let undo_id = salt.with("undo");
     let mut rows = RowIds::load(ui, salt, list.len());
     // gezogen wird die Zeile mit dieser Kennung
     let mut dragging: Option<u64> = ui.data(|d| d.get_temp::<u64>(drag_id)).filter(|k| rows.ids.contains(k));
@@ -371,6 +391,10 @@ fn list_editor(ui: &mut Ui, salt: Id, list: &mut Vec<PaletteColor>, defaults: &[
         }
     });
     if let Some(i) = remove {
+        // Ohne Rückfrage löschen, aber einige Sekunden „Rückgängig“ anbieten. Was die Farbe schon trägt (Sitzungen, Tags,
+        // Tickets …), behält sie – die Palette bietet nur künftige Auswahlen an.
+        let msg = format!("{} {}", lang.t("Farbe gelöscht:", "Color deleted:"), list[i].tooltip());
+        offer_undo(ui, salt, msg, list.clone());
         list.remove(i);
         rows.ids.remove(i);
     }
@@ -402,10 +426,45 @@ fn list_editor(ui: &mut Ui, salt: Id, list: &mut Vec<PaletteColor>, defaults: &[
             };
             ui.data_mut(|d| d.insert_temp(msg_id, m));
         }
+        if let Some(s) = shared {
+            if ui
+                .add_enabled(list.as_slice() != s, egui::Button::new(lang.t("Aus gemeinsamer kopieren", "Copy from shared palette")))
+                .on_hover_text(lang.t("Diese Palette durch eine Kopie der gemeinsamen Palette ersetzen (rückgängig machbar).", "Replace this palette with a copy of the shared palette (can be undone)."))
+                .clicked()
+            {
+                offer_undo(ui, salt, lang.t("Durch die gemeinsame Palette ersetzt.", "Replaced with the shared palette.").to_string(), list.clone());
+                *list = s.to_vec();
+                rows.ids = (0..list.len()).map(|_| rows.fresh()).collect();
+                ui.data_mut(|d| d.remove_temp::<String>(msg_id));
+            }
+        }
         if let Some(m) = ui.data(|d| d.get_temp::<String>(msg_id)) {
             ui.label(RichText::new(m).small().color(style::dim(ui)));
         }
     });
+    // „Rückgängig“ für Löschen/Kopieren, einige Sekunden lang
+    let now = ui.input(|i| i.time);
+    match ui.data(|d| d.get_temp::<Undo>(undo_id)) {
+        Some(u) if now < u.until => {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&u.msg).small().color(style::dim(ui)));
+                if ui.small_button(lang.t("Rückgängig", "Undo")).clicked() {
+                    *list = u.prev.clone();
+                    rows.ids = (0..list.len()).map(|_| rows.fresh()).collect();
+                    ui.data_mut(|d| {
+                        d.remove_temp::<Undo>(undo_id);
+                    });
+                }
+            });
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((u.until - now).max(0.05)));
+        }
+        Some(_) => {
+            ui.data_mut(|d| {
+                d.remove_temp::<Undo>(undo_id);
+            });
+        }
+        None => {}
+    }
     rows.store(ui);
 }
 
@@ -571,6 +630,59 @@ mod tests {
             h.click(toggle, |ui| settings_view(ui, &mut p, lang));
             assert!(!p.per_area);
             assert_eq!(p.todo.as_ref().map(|t| t.len()), Some(palette::TODO_DEFAULTS.len() + 1));
+        }
+    }
+
+    /// Löschen ohne Rückfrage, aber mit „Rückgängig“ für einige Sekunden; danach verschwindet das Angebot.
+    #[test]
+    fn deleting_a_color_offers_undo_for_a_few_seconds() {
+        for lang in [Lang::En, Lang::De] {
+            let (undo, deleted) = if lang == Lang::En { ("Undo", "Color deleted:") } else { ("Rückgängig", "Farbe gelöscht:") };
+            let mut p = Palettes::default();
+            let mut h = H::new();
+            h.frame(vec![], |ui| settings_view(ui, &mut p, lang));
+            let before = p.list(Which::Shared);
+            let name0 = h.row_rect("name", 0);
+            let trash = Pos2::new(name0.right() + 8.0 + 11.0, name0.center().y);
+            let out = h.click(trash, |ui| settings_view(ui, &mut p, lang));
+            assert_eq!(p.list(Which::Shared).len(), before.len() - 1, "sofort gelöscht, keine Rückfrage");
+            assert!(has(&out, undo), "„Rückgängig“ angeboten");
+            assert!(has(&out, &format!("{deleted} {}", before[0].tooltip())));
+            h.click(find(&out, undo), |ui| settings_view(ui, &mut p, lang));
+            assert_eq!(p.list(Which::Shared), before, "wiederhergestellt, auch die Reihenfolge");
+            assert!(p.is_default(), "gleich den Vorgaben: nichts gespeichert");
+            let out = h.frame(vec![], |ui| settings_view(ui, &mut p, lang));
+            assert!(!has(&out, undo), "nach dem Rückgängigmachen weg");
+            // erneut löschen und warten: das Angebot läuft ab, die Löschung bleibt
+            h.click(trash, |ui| settings_view(ui, &mut p, lang));
+            h.time += UNDO_SECS + 0.5;
+            let out = h.frame(vec![], |ui| settings_view(ui, &mut p, lang));
+            assert!(!has(&out, undo), "abgelaufen");
+            assert_eq!(p.list(Which::Shared).len(), before.len() - 1);
+        }
+    }
+
+    /// Eigene Palette eines Bereichs: beginnt mit dessen Vorgabe; „Aus gemeinsamer kopieren“ ersetzt sie (rückgängig
+    /// machbar). In der gemeinsamen Ansicht gibt es den Knopf nicht.
+    #[test]
+    fn area_palette_can_be_copied_from_the_shared_one_and_undone() {
+        for lang in [Lang::En, Lang::De] {
+            let (copy, undo) = if lang == Lang::En { ("Copy from shared palette", "Undo") } else { ("Aus gemeinsamer kopieren", "Rückgängig") };
+            let mut p = Palettes::default();
+            p.shared = Some(vec![PaletteColor::named("#123456", "Eins"), PaletteColor::new("#654321")]);
+            let mut h = H::new();
+            let out = h.frame(vec![], |ui| settings_view(ui, &mut p, lang));
+            assert!(!has(&out, copy), "nicht bei der gemeinsamen Palette");
+            p.per_area = true;
+            let out = h.frame(vec![], |ui| settings_view(ui, &mut p, lang));
+            assert_eq!(p.list(Which::Area(Area::Hub)), palette::list_of(&palette::HUB_DEFAULTS), "beginnt mit der bisherigen Vorgabe");
+            let out2 = h.click(find(&out, copy), |ui| settings_view(ui, &mut p, lang));
+            assert_eq!(p.hub, p.shared, "Kopie der gemeinsamen");
+            assert!(has(&out2, undo));
+            let out = h.frame(vec![], |ui| settings_view(ui, &mut p, lang));
+            h.click(find(&out, undo), |ui| settings_view(ui, &mut p, lang));
+            assert_eq!(p.hub, None, "wieder die Vorgabe des Bereichs");
+            assert_eq!(p.shared.as_ref().map(|s| s.len()), Some(2), "gemeinsame unverändert");
         }
     }
 
