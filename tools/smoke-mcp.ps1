@@ -55,6 +55,8 @@ $useBundled = $hasConPty -and $ConPty -ne 'system'
 Write-Host ("Konsolen-Host: " + $(if ($useBundled) { 'mitgeliefert (OpenConsole)' } elseif ($ConPty -eq 'system') { 'Windows (Einstellung aus)' } else { 'Windows (keine mitgelieferten Dateien)' })) -ForegroundColor DarkGray
 # Arbeitsordner des naechsten Hub-Starts (Set-Level), sonst der des Skripts.
 $script:hubCwd = $null
+# Farbabfragen (OSC 10/11) kommen nur mit der mitgelieferten ConPTY beim Programm an (#183).
+$script:bundledConpty = $useBundled
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
@@ -163,12 +165,53 @@ function Test-Osc52([int]$sid, [string]$sh) {
     if ($C::GetText() -eq $marker) { if ($had) { $C::SetText($saved) } else { $C::Clear() } }
   } catch { Write-Host "  Hinweis: Zwischenablage nicht wiederhergestellt: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
+# Tastenkodierung (#183): send_keys kodiert wie die Tastatur. Ein klassisches Konsolenprogramm ([Console]::ReadKey =
+# ReadConsoleInput) und ein Programm mit VT-Eingabe (node im Rohmodus wie Claude Code, ohne und mit kitty-Flags).
+function Test-Keys([int]$sid) {
+  $out = Join-Path $work 'keys-classic.txt'
+  Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
+  $cmd = '$r = 1..4 | ForEach-Object { $k = [Console]::ReadKey($true); ''{0}/{1}/{2}'' -f $k.Key, $k.Modifiers, [int]$k.KeyChar }; [IO.File]::WriteAllText(''' + $out + ''', ($r -join '' ''))'
+  [void](Tool 'send_text' @{ session = $sid; text = $cmd; submit = $true })
+  Start-Sleep -Milliseconds 1500
+  foreach ($k in @('ctrl+backspace', 'alt+.', 'ctrl+space', 'shift+enter')) { [void](Tool 'send_keys' @{ session = $sid; keys = @($k) }); Start-Sleep -Milliseconds 300 }
+  for ($i = 0; $i -lt 50 -and -not (Test-Path -LiteralPath $out); $i++) { Start-Sleep -Milliseconds 100 }
+  $got = if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { '<nichts>' }
+  # Umschalt+Enter kommt bei klassischen Programmen als Alt+Enter an (ESC CR, damit VT-Programme es behalten).
+  Check 'send_keys (#183): klassisches Programm bekommt Strg+Rueck, Alt+., Strg+Leertaste (win32-input)' ($got -eq 'Backspace/Control/127 OemPeriod/Alt/46 Spacebar/Control/32 Enter/Alt/13') $got
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Skip 'send_keys (#183): Programm mit VT-Eingabe' 'node fehlt'; return }
+  $js = Join-Path $work 'keys-vt.js'
+  [IO.File]::WriteAllText($js, @'
+const fs = require('fs');
+const out = process.argv[2], fl = process.argv[3] || '';
+process.stdin.setRawMode(true); process.stdin.resume();
+const got = [];
+process.stdin.on('data', d => { for (const c of d) got.push(c); });
+if (fl) process.stdout.write('\x1b[>' + fl + 'u');
+process.stdout.write('keys-ready\r\n');
+setTimeout(() => { if (fl) process.stdout.write('\x1b[<u'); fs.writeFileSync(out, got.map(c => c.toString(16).padStart(2, '0')).join(' ')); process.exit(0); }, 3500);
+'@)
+  foreach ($case in @(@('', '1b 0d 1b 2e 08'), @('1', '1b 5b 31 33 3b 32 75 1b 5b 34 36 3b 33 75 1b 5b 31 32 37 3b 35 75'))) {
+    $fl = $case[0]; $want = $case[1]
+    $out = Join-Path $work "keys-vt$fl.txt"
+    Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
+    [void](Tool 'send_text' @{ session = $sid; text = "node '$js' '$out' '$fl'"; submit = $true })
+    Start-Sleep -Milliseconds 1500
+    foreach ($k in @('shift+enter', 'alt+.', 'ctrl+backspace')) { [void](Tool 'send_keys' @{ session = $sid; keys = @($k) }); Start-Sleep -Milliseconds 300 }
+    for ($i = 0; $i -lt 60 -and -not (Test-Path -LiteralPath $out); $i++) { Start-Sleep -Milliseconds 100 }
+    $got = if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { '<nichts>' }
+    $what = if ($fl) { 'mit kitty-Flags: CSI 13;2u, CSI 46;3u, CSI 127;5u' } else { 'ohne kitty: ESC CR, ESC ., 0x08' }
+    Check "send_keys (#183): VT-Programm (node) $what" ($got -eq $want) $got
+    Start-Sleep -Milliseconds 500
+  }
+}
 function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   Stop-Hub
   $f = "$data\settings.json"
   New-Item -ItemType Directory -Force "$data" | Out-Null
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
+  # Festes Theme, das nicht das erste der Liste ist: Farbabfragen (OSC 11) muessen dessen Werte melden (#183).
+  $j | Add-Member -NotePropertyName theme -NotePropertyValue 'Dracula' -Force
   if ($ConPty -eq 'system') { $j | Add-Member -Force bundled_conpty $false }
   # Kleinster Verlauf (1000 Zeilen), damit Test-FullHistory ihn schnell fuellt (#197).
   $j | Add-Member -Force scrollback_lines 1000
@@ -324,12 +367,29 @@ try {
       Test-WrapWidth $id $sh
       Test-FullHistory $id $sh
       Test-Osc52 $id $sh
+      # Name/Version des Terminals in der Umgebung der Shell (#183)
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:TERM_PROGRAM|$env:TERM_PROGRAM_VERSION"'; timeout_secs = 25 }
+      Check "TERM_PROGRAM=Paneldeck und TERM_PROGRAM_VERSION in $sh" ($r.data.output.Trim() -match '^Paneldeck\|\d+\.\d+\.\d+') "'$($r.data.output)'"
+      # Farbabfrage OSC 11: Antwort kommt als Eingabe zurueck (nur mit der mitgelieferten ConPTY; die des Systems
+      # reicht die Abfrage nicht an das Terminal weiter)
+      if ($script:bundledConpty) {
+        $q = '[Console]::Write("$([char]27)]11;?$([char]27)\"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''rgb:[0-9a-f/]+'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'' -replace "$([char]7)", ''BEL'')'
+        $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
+        # Sitzung per MCP angelegt und nie gezeichnet: Antwort trotzdem mit dem Theme der Sitzung (Dracula, 282a36).
+        Check "OSC 11 (Hintergrundfarbe abfragen) meldet das Theme der Sitzung ($sh, mitgelieferte ConPTY, ungezeichnet)" ($r.data.output -match 'reply=ESC\]11;rgb:2828/2a2a/3636') "'$($r.data.output)'"
+        $q = '[Console]::Write("$([char]27)[16t"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''t$'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'')'
+        $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
+        Check "CSI 16t (Zellgroesse) meldet eine echte Groesse ($sh, ungezeichnet)" ($r.data.output -match 'reply=ESC\[6;[1-9]\d*;[1-9]\d*t') "'$($r.data.output)'"
+      } else {
+        Skip "OSC 11 (Hintergrundfarbe abfragen) wird beantwortet ($sh)" 'keine mitgelieferte ConPTY (conpty.dll + OpenConsole.exe) neben der .exe'
+      }
       $r = Tool 'run_command' @{ session = $id; command = 'Start-Sleep 4'; timeout_secs = 1 }
       Check "run_command $sh (Zeitlimit)" ($r.data.timed_out -eq $true -and -not $r.data.finished) $r.text
       Start-Sleep 5
       Check 'send_text' (-not (Tool 'send_text' @{ session = $id; text = 'echo per-send_text'; submit = $true }).err); Start-Sleep 1
       Check 'send_keys' (-not (Tool 'send_keys' @{ session = $id; keys = @('ctrl+l') }).err)
       Check 'send_keys ungueltige Taste' ((Code (Tool 'send_keys' @{ session = $id; keys = @('ctrl+alt+entf') })) -eq 'bad_args')
+      Test-Keys $id
       Check 'rename_session' ((Tool 'rename_session' @{ session = $id; name = 'Agent' }).data.name -eq 'Agent')
       Check 'wait_for_status: keine Claude-Sitzung' ((Code (Tool 'wait_for_status' @{ session = $id; status = @('ready'); timeout_secs = 1 })) -eq 'not_claude')
       Check 'queue_prompt: keine Claude-Sitzung' ((Code (Tool 'queue_prompt' @{ session = $id; prompt = 'x' })) -eq 'not_claude')
@@ -1407,6 +1467,22 @@ c.close()
       $r = Tool 'run_command' @{ session = $c.data.id; command = 'cmd /c exit 4'; timeout_secs = 25 }
       if ($sh -eq 'cmd') { Check 'ConPTY: run_command cmd (Befehl beendet)' ($r.data.finished) $r.text }
       else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text; Test-WrapWidth $c.data.id $sh 'ConPTY: ' }
+      if ($sh -eq 'powershell') {
+        # Fortschritt (OSC 9;4, #183): list_sessions meldet ihn, der naechste Prompt entfernt ihn wieder. Mit ST statt BEL
+        # beendet, damit keine Glocke (Benachrichtigung) ausgeloest wird.
+        $sid = $c.data.id
+        $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })
+        Check 'OSC 9;4: list_sessions hat das Feld progress (null ohne Fortschritt)' ($me.Count -eq 1 -and ($me[0].PSObject.Properties.Name -contains 'progress') -and $null -eq $me[0].progress) ($me | ConvertTo-Json -Compress)
+        [void](Tool 'send_text' @{ session = $sid; text = '[Console]::Write("$([char]27)]9;4;1;42$([char]27)\"); Start-Sleep 6'; submit = $true })
+        $pg = $null
+        for ($i = 0; $i -lt 40 -and -not $pg; $i++) { Start-Sleep -Milliseconds 150; $pg = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })[0].progress }
+        if ($useBundled -or $pg) {
+          Check "OSC 9;4: list_sessions progress = normal/42 ($want)" ($pg.state -eq 'normal' -and $pg.percent -eq 42) ($pg | ConvertTo-Json -Compress)
+          $gone = $false
+          for ($i = 0; $i -lt 60 -and -not $gone; $i++) { Start-Sleep -Milliseconds 200; $gone = $null -eq @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })[0].progress }
+          Check 'OSC 9;4: Fortschritt nach dem naechsten Prompt entfernt' $gone
+        } else { Skip 'OSC 9;4: list_sessions progress' 'ConPTY von Windows reicht OSC 9;4 nicht durch' }
+      }
     }
     # Git Bash und Vollbildprogramme (alternativer Bildschirm) ueber die gewaehlte ConPTY.
     if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {

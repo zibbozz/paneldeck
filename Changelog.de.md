@@ -45,6 +45,19 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Neues Icon „alert“ (Ausrufezeichen). (#188)
 - Labels ist ein eingebautes Feld an jedem Tickettyp, auch an eigenen Typen, wie Titel, Beschreibung und Fälligkeit; es lässt sich nicht löschen. MCP: Parameter `labels` bei `create_ticket`/`update_ticket` und `labels` in den Ticket-Antworten. (#195)
 - Abfragesprache: Eigene Felder lassen sich auch über ihren Schlüssel suchen (z. B. `story_points`); die eingebauten Felder hören in jeder Oberflächensprache auf ihre deutschen und englischen Namen. (#195)
+- Kitty-Tastaturprotokoll: Programme, die es einschalten (z. B. Claude Code), bekommen eindeutige Tasten (Umschalt+Enter, Strg+Rück, Esc, Alt-Kombinationen als CSI u). (#183)
+- win32-input-mode unter ConPTY: PowerShell/cmd erhalten Strg+Leertaste, Strg+Enter, Strg+/, Strg+Umschalt+Buchstabe, Esc und den Ziffernblock als echte Tastenereignisse; Strg+3…0 kommen jetzt im Terminal an. (#183)
+- Einstellung „Umschalt+Enter = neue Zeile in PowerShell“ (standardmäßig aus): PSReadLine fügt eine Zeile ein, statt den Befehl auszuführen. (#183)
+- MCP `send_keys` versteht ctrl+/alt+/shift+-Kombinationen und mehr Tasten (space, insert, f1–f20, Buchstaben, Ziffern, Satzzeichen) und kodiert sie wie die Tastatur; im kitty-Modus geht z. B. `ctrl+c` als `CSI 99;5u` und `esc` als `CSI 27u`. (#183)
+- `TERM_PROGRAM=Paneldeck` und `TERM_PROGRAM_VERSION` in jeder Shell. (#183)
+- Antworten auf Farbabfragen (OSC 4/10/11/12), Größenabfragen (CSI 14t/16t) und XTVERSION, auch für Sitzungen im Hintergrund. (#183)
+- Fokusmeldungen (DECSET 1004). (#183)
+- Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“ (standardmäßig an, für Programme ohne Bracketed Paste; Bestätigen nach kurzer Wartezeit). (#183)
+- Fortschritt, den Programme melden (OSC 9;4), erscheint in der Seitenleiste und am Taskleistenknopf; MCP `list_sessions` hat das neue Feld `progress`. (#183)
+- Benachrichtigungen von Programmen (OSC 9, OSC 777) melden sich, wenn du die Sitzung gerade nicht ansiehst (begrenzt, abschaltbar); die Glocke markiert die Sitzung in der Seitenleiste, ein Toast ist wählbar. (#183)
+- Von Programmen gesetzte Links (OSC 8) lassen sich mit Strg+Klick öffnen; der Tooltip zeigt das echte Ziel und den Rechner. (#183)
+- Jede installierte Festbreitenschrift (z. B. Nerd Fonts) ist als Terminalschrift wählbar; Powerline-Trenner werden lückenlos selbst gezeichnet. (#183)
+- Fett und kursiv, Unterstreichungsarten (doppelt, Welle, gepunktet, gestrichelt) und Unterstreichungsfarben; blinkender Cursor, wenn das Programm ihn anfordert (Einstellung). (#183)
 
 ### Changed
 
@@ -68,6 +81,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Fälligkeiten werden als `JJJJ-MM-TT` bzw. `JJJJ-MM-TTTHH:MM` (ohne Sekunden) gespeichert. (#188)
 - Farbpalette: Das Löschen einer Farbe fragt nicht nach, sondern bietet einige Sekunden lang „Rückgängig“ an. Die eigene Palette eines Bereichs beginnt mit dessen bisherigen Farben und lässt sich durch eine Kopie der gemeinsamen ersetzen („Aus der gemeinsamen Palette kopieren“, rückgängig machbar). (#173)
 - Felder, die beim Update zu eingebauten Feldern werden, verlieren ihren Standardwert (eingebaute Felder haben keinen); ein eigenes Feld anderer Art mit dem Namen eines eingebauten (z. B. ein Textfeld „Labels“) behält seine Werte und heißt „… (custom)“ – Agenten, die es unter dem alten Namen setzen, treffen jetzt das eingebaute Feld. (#195)
+- Strg+Rück sendet 0x08 wie Windows Terminal (PowerShell löscht das vorige Wort) statt Strg+W; in bash löscht es jetzt ein Zeichen. (#183)
+- Esc geht unter ConPTY als Tastenereignis im win32-input-mode. (#183)
+- `reset` (RIS) setzt von Programmen geänderte Farben auf das Theme zurück. (#183)
 
 ### Deprecated
 
@@ -85,6 +101,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - `run_command` (MCP) liefert keine leere Ausgabe mehr, wenn der Befehl eine Zeile ausgibt, die genau die Terminalbreite füllt (PowerShell, Git Bash); das Springen zwischen Prompts landet dann auch in der richtigen Zeile. (#193)
 - `run_command` (MCP) und das Springen zwischen Prompts funktionieren wieder, wenn der Verlauf des Terminals voll ist; bisher kam die Ausgabe leer zurück und Prompt-Sprünge landeten in falschen Zeilen. (#197)
 - Die Abfrage-Leiste über der Ticket-Liste kennt jetzt auch Felder, die nach der ersten Abfrage angelegt wurden (ein eigenes Feld „Labels“ war nicht suchbar). (#195)
+- Alt+Ziffer und Alt+Satzzeichen (z. B. Alt+. in bash) sendeten nichts; von Paneldeck belegte Alt-Kürzel schicken keine Zeichen mehr ins Terminal. (#183)
+- Broadcast kodiert Tasten je Zielterminal. (#183)
+- Kitty-Tastaturflags, die ein abgestürztes Programm stehen ließ, werden am nächsten Shell-Prompt zurückgesetzt. (#183)
 
 ### Security
 
@@ -98,6 +117,13 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Agenten (MCP) können nur Schalter ergänzen, die Rechte, Zugriffe und Hooks nicht berühren (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; chrome nicht, wenn du Chrome als Standard ausgeschaltet hast). Wertoptionen, Flags, die Rechte oder Zugriffe erweitern, Flags, die Hooks abschalten (`--safe-mode`), und Flags, die Paneldeck steuert, werden abgelehnt. Zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration und `--safe-mode` aus den Standards gelten nie für Sitzungen, die Agenten anlegen oder die per `paneldeck --open --claude` aus einem Hub-Terminal geöffnet werden. Pfade müssen lokal sein und existieren (Netzwerkfreigaben, auch über Verknüpfungen, werden nie berührt); alle Werte werden geprüft und je Shell gequotet. (#182)
 - Per MCP angelegte Sitzungen ohne Permission-Mode bekommen ausdrücklich `--permission-mode default`, damit die eigenen Claude-Einstellungen des Nutzers bypassPermissions nicht einschalten können; `bypassPermissions` geht nie per MCP, nie als gespeicherter Standard und wird nie gemerkt – nur als ausdrückliche Wahl je Sitzung mit Warnung. Alte `--dangerously-*`-Argumente fallen weg. (#161)
 - Paneldeck startet die Shell jedes Terminals in einem eigenen Windows-Job-Object und ordnet MCP-Aufrufer und `paneldeck --open` über die Mitgliedschaft zu. Losgelöst oder verwaist gestartete Prozesse (`Start-Process`, `cmd /c start`, doppelter Fork) gehören weiter zu ihrer Sitzung und deren Agenten-Kette; Programme können nicht aus dem Job ausbrechen. Die Prüfung über den Prozessbaum bleibt als Rückfallweg. (#168)
+- Ein Programm, das tausende kitty-Tastaturmodi ablegt, bringt Paneldeck nicht mehr zum Absturz. (#183)
+- Eingefügter Text wird wie bei Windows Terminal gefiltert (Steuerzeichen inkl. ESC und C1), versteckte Enter-Sequenzen umgehen die Rückfrage nicht mehr. (#183)
+- Fenstertitel von Programmen werden bereinigt (Steuer-, Schreibrichtungs-, Zeilentrenn- und unsichtbare Zeichen, Längengrenze). (#183)
+- OSC-8-Links: http/https öffnen nur mit schlichtem Rechnernamen direkt; alle anderen erst nach einer Rückfrage mit dem ganzen Ziel. Überlange oder getarnte Ziele (Steuer-, Bidi- oder unsichtbare Zeichen, auch prozent-kodiert), Skript-Schemata, missbrauchte Windows-Protokolle (auch die Office-Handler) und `file:`-Links auf anderes als lokale Laufwerkspfade werden nie geöffnet. (#183)
+- Netzwerk- und Gerätepfade wie `\\.\GLOBALROOT\…` oder `\??\UNC\…` gelten nicht mehr als lokal (Links, Arbeitsordner aus OSC 7/9;9). (#183)
+- „Im Ordner zeigen“ reicht keine Kommas oder Anführungszeichen mehr an den Explorer weiter; weitere Dateitypen (z. B. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc`), Punkte/Leerzeichen am Ende und alternative Datenströme gelten als ausführbar. (#183)
+- Benachrichtigungstexte und Sitzungsnamen in Toasts werden bereinigt (Steuer-, Bidi- und unsichtbare Zeichen entfernt, Länge begrenzt); Toasts nennen immer Paneldeck und die Sitzung. (#183)
 
 ## [2.2.0] - 2026-11-16
 

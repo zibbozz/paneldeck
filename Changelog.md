@@ -45,6 +45,19 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - New icon "alert" (exclamation mark). (#188)
 - Labels is a built-in field on every ticket type, including your own types, like title, description and due date; it cannot be deleted. MCP: `labels` parameter for `create_ticket`/`update_ticket` and `labels` in ticket answers. (#195)
 - Query language: custom fields can also be searched by their key (e.g. `story_points`); the built-in fields answer to their English and German names in either UI language. (#195)
+- Kitty keyboard protocol: programs that enable it (e.g. Claude Code) get unambiguous keys (Shift+Enter, Ctrl+Backspace, Esc, Alt combinations as CSI u). (#183)
+- win32-input-mode under ConPTY: PowerShell/cmd receive Ctrl+Space, Ctrl+Enter, Ctrl+/, Ctrl+Shift+letter, Esc and numpad keys as real key events; Ctrl+3…0 now reach the terminal. (#183)
+- Setting "Shift+Enter = new line in PowerShell" (off by default): PSReadLine inserts a line instead of running the command. (#183)
+- MCP `send_keys` accepts ctrl+/alt+/shift+ combinations and more keys (space, insert, f1–f20, letters, digits, punctuation) and encodes them like the keyboard; in kitty mode e.g. `ctrl+c` is sent as `CSI 99;5u` and `esc` as `CSI 27u`. (#183)
+- `TERM_PROGRAM=Paneldeck` and `TERM_PROGRAM_VERSION` in every shell. (#183)
+- Replies to colour queries (OSC 4/10/11/12), size queries (CSI 14t/16t) and XTVERSION, also for sessions in the background. (#183)
+- Focus events (DECSET 1004). (#183)
+- Setting "Ask before pasting multiple lines" (on by default, for programs without bracketed paste; confirm after a short delay). (#183)
+- Progress reported by programs (OSC 9;4) is shown in the sidebar and on the taskbar button; MCP `list_sessions` has a new `progress` field. (#183)
+- Notifications from programs (OSC 9, OSC 777) notify you when the session isn't being looked at (rate-limited, can be turned off); a terminal bell marks the session in the sidebar, with an optional toast. (#183)
+- Hyperlinks set by programs (OSC 8) can be Ctrl+clicked; the tooltip shows the real target and host. (#183)
+- Any installed monospace font (e.g. Nerd Fonts) can be chosen as the terminal font; Powerline separators are drawn so they line up without gaps. (#183)
+- Bold and italic text, underline styles (double, curly, dotted, dashed) and underline colours; a blinking cursor when the program asks for it (setting). (#183)
 
 ### Changed
 
@@ -68,6 +81,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Due dates are stored as `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (without seconds). (#188)
 - Colour palette: deleting a colour no longer asks first; instead "Undo" is offered for a few seconds. An area's own palette starts with that area's previous colours and can be replaced with a copy of the shared palette ("Copy from shared palette", can be undone). (#173)
 - Fields that become built-in fields on update lose their default value (built-in fields have none); a custom field of another kind named like a built-in one (e.g. a text field "Labels") keeps its values and is renamed "… (custom)" – agents that set it by its old name now reach the built-in field. (#195)
+- Ctrl+Backspace sends 0x08 like Windows Terminal (PowerShell deletes the previous word) instead of Ctrl+W; in bash it now deletes one character. (#183)
+- Esc is sent as a win32-input-mode key event under ConPTY. (#183)
+- `reset` (RIS) restores colours changed by programs to the theme. (#183)
 
 ### Deprecated
 
@@ -85,6 +101,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - `run_command` (MCP) no longer returns empty output when the command prints a line that exactly fills the terminal width (PowerShell, Git Bash); jumping between prompts also lands on the right row then. (#193)
 - `run_command` (MCP) and jumping between prompts work again once the terminal's scrollback is full; until now the output came back empty and prompt jumps landed on the wrong rows. (#197)
 - The query bar above the ticket list now knows fields that were added after the first query (a custom "Labels" field could not be searched). (#195)
+- Alt+digit and Alt+punctuation (e.g. Alt+. in bash) sent nothing; Alt shortcuts used by Paneldeck no longer leak characters into the terminal. (#183)
+- Broadcast encodes keys per target terminal. (#183)
+- Kitty keyboard flags left behind by a crashed program are cleared at the next shell prompt. (#183)
 
 ### Security
 
@@ -98,6 +117,13 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Agents (MCP) can only add switches that don't affect rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; not chrome if you turned Chrome off by default). Value options, flags that widen rights or access, flags that turn off hooks (`--safe-mode`) and flags Paneldeck controls are refused. Extra folders, allowed tools, an MCP config and `--safe-mode` from your defaults never apply to agent-created sessions or to `paneldeck --open --claude` from a Hub terminal. Paths must be local and existing (network shares, also via links, are never accessed); all values are validated and quoted per shell. (#182)
 - Sessions created via MCP without a permission mode get an explicit `--permission-mode default`, so the user's own Claude settings cannot turn on bypassPermissions; `bypassPermissions` is never possible via MCP, never a stored default and never remembered – only an explicit per-session choice with a warning. Old `--dangerously-*` arguments are dropped. (#161)
 - Paneldeck starts every terminal's shell inside its own Windows Job Object and attributes MCP callers and `paneldeck --open` by job membership. Processes started detached or orphaned (`Start-Process`, `cmd /c start`, double fork) still belong to their session and its agent chain; programs cannot break away from the job. The process-tree check remains as a fallback. (#168)
+- A program pushing thousands of kitty keyboard modes can no longer crash Paneldeck. (#183)
+- Pasted text is filtered like Windows Terminal (control characters incl. ESC and C1), so hidden Enter sequences cannot bypass the multi-line warning. (#183)
+- Window titles from programs are sanitised (control, bidi, line-separator and zero-width characters, length cap). (#183)
+- OSC 8 links: http/https open directly only with a plain host name; every other link asks first and shows the full target. Overlong or disguised targets (control, bidi or invisible characters, also percent-encoded), script schemes, abused Windows protocol handlers (including the Office handlers), and `file:` links to anything but local drive paths are never opened. (#183)
+- Network and device paths such as `\\.\GLOBALROOT\…` or `\??\UNC\…` are no longer treated as local (links, working folder from OSC 7/9;9). (#183)
+- "Show in folder" no longer passes commas or quotes to Explorer; more file types (e.g. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc`), trailing dots/spaces and alternate data streams are treated as executable. (#183)
+- Notification texts and session names in toasts are cleaned (control, bidi and invisible characters removed, length limited); toasts always name Paneldeck and the session. (#183)
 
 ## [2.2.0] - 2026-11-16
 

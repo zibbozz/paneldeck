@@ -1264,6 +1264,23 @@ mod tests {
     }
 
     #[test]
+    fn get_project_reports_built_in_and_lucide_icons_verbatim() {
+        use crate::planning::types::{update_type, UpdateType};
+        let f = Fx::new();
+        update_type(&f.c, f.epic, &UpdateType { icon: Some(Some("lucide:alarm-clock".into())), ..Default::default() }).unwrap();
+        update_type(&f.c, f.story, &UpdateType { icon: Some(Some("lucide:icon-from-a-newer-version".into())), ..Default::default() }).unwrap();
+        update_type(&f.c, f.task, &UpdateType { icon: Some(None), ..Default::default() }).unwrap();
+        let d = ok(&f, "get_project", json!({"project": "PAN"}));
+        let icon = |key: &str| d.result["types"].as_array().unwrap().iter().find(|t| t["key"] == key).unwrap()["icon"].clone();
+        assert_eq!(icon("epic"), json!("lucide:alarm-clock"));
+        assert_eq!(icon("userstory"), json!("lucide:icon-from-a-newer-version"));
+        assert_eq!(icon("devtask"), Value::Null);
+        assert!(icon("defect").as_str().is_some_and(crate::planning::icons::is_valid), "eingebautes Icon");
+        // Neue Eingaben (z. B. Werkzeuge, die ein Icon setzen) prüfen mit `is_valid`: bekannte Namen ja, unbekannte nein.
+        assert!(crate::planning::icons::is_valid("lucide:alarm-clock") && !crate::planning::icons::is_valid("lucide:icon-from-a-newer-version"));
+    }
+
+    #[test]
     fn description_and_due_date_are_parameters_and_answer_fields() {
         let f = Fx::new();
         // jetzt = 2026-11-14 12:00 (siehe ctx)
@@ -1332,23 +1349,6 @@ mod tests {
         ok(&f, "set_todo_done", json!({"id": 1}));
         let l = ok(&f, "list_todos", json!({"state": "all"}));
         assert!(l.result["todos"][0]["due_state"]["marker"].is_null());
-    }
-
-    #[test]
-    fn get_project_reports_built_in_and_lucide_icons_verbatim() {
-        use crate::planning::types::{update_type, UpdateType};
-        let f = Fx::new();
-        update_type(&f.c, f.epic, &UpdateType { icon: Some(Some("lucide:alarm-clock".into())), ..Default::default() }).unwrap();
-        update_type(&f.c, f.story, &UpdateType { icon: Some(Some("lucide:icon-from-a-newer-version".into())), ..Default::default() }).unwrap();
-        update_type(&f.c, f.task, &UpdateType { icon: Some(None), ..Default::default() }).unwrap();
-        let d = ok(&f, "get_project", json!({"project": "PAN"}));
-        let icon = |key: &str| d.result["types"].as_array().unwrap().iter().find(|t| t["key"] == key).unwrap()["icon"].clone();
-        assert_eq!(icon("epic"), json!("lucide:alarm-clock"));
-        assert_eq!(icon("userstory"), json!("lucide:icon-from-a-newer-version"));
-        assert_eq!(icon("devtask"), Value::Null);
-        assert!(icon("defect").as_str().is_some_and(crate::planning::icons::is_valid), "eingebautes Icon");
-        // Neue Eingaben (z. B. Werkzeuge, die ein Icon setzen) prüfen mit `is_valid`: bekannte Namen ja, unbekannte nein.
-        assert!(crate::planning::icons::is_valid("lucide:alarm-clock") && !crate::planning::icons::is_valid("lucide:icon-from-a-newer-version"));
     }
 
     #[test]
