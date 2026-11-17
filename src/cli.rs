@@ -258,7 +258,9 @@ pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf, kind: &dyn Fn(&std:
                             return Err(CliError::Unexpected(raw));
                         }
                         open_opt = true;
-                        c.open = Some(v)
+                        // Relativ zum Ordner dieses Aufrufs, nicht zu dem des laufenden Hubs, an den `--open`
+                        // weitergereicht wird (#221). Linux-Pfade (WSL) bleiben unverändert.
+                        c.open = Some(if crate::wsl::looks_linux(v.trim()) { v } else { abs(&v).display().to_string() })
                     }
                     "--data-dir" => c.data_dir = Some(abs(&v)),
                     _ => c.backup_dir = Some(abs(&v)),
@@ -423,6 +425,20 @@ mod tests {
         assert!(matches!(p(&["C:\\Dev\\app", "--open", "rel"]), Err(CliError::Unexpected(_))));
         assert!(matches!(p(&["--open", "rel", "C:\\Dev\\app"]), Err(CliError::Unexpected(_))));
         assert!(matches!(p(&["mcp", "C:\\Dev\\app"]), Err(CliError::Unexpected(_))));
+    }
+
+    #[test]
+    fn a_relative_open_path_becomes_absolute_before_forwarding() {
+        assert_eq!(p(&["--open", "rel"]).unwrap().open.as_deref(), Some("C:\\cwd\\rel"));
+        assert_eq!(p(&["--open", "sub\\dir"]).unwrap().open.as_deref(), Some("C:\\cwd\\sub\\dir"));
+        assert_eq!(p(&["--open=.\\x"]).unwrap().open.as_deref(), Some("C:\\cwd\\.\\x"));
+        assert_eq!(p(&["--open", "C:\\Dev\\app"]).unwrap().open.as_deref(), Some("C:\\Dev\\app"));
+        assert_eq!(p(&["--open", r"\\wsl.localhost\Ubuntu\home"]).unwrap().open.as_deref(), Some(r"\\wsl.localhost\Ubuntu\home"));
+        assert_eq!(p(&["--open", "/home/u"]).unwrap().open.as_deref(), Some("/home/u"));
+        // echte Umgebung: relativ zum aktuellen Ordner dieses Prozesses
+        let a: Vec<String> = ["x.exe", "--open", "rel"].iter().map(|s| s.to_string()).collect();
+        let c = parse(&a, &|s| abs_from_cwd(s), &|_| None).unwrap();
+        assert_eq!(c.open.map(PathBuf::from), Some(std::env::current_dir().unwrap().join("rel")));
     }
 
     #[test]

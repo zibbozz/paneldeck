@@ -432,6 +432,12 @@ fn distro_cache() -> &'static Mutex<Option<DistroInfo>> {
     C.get_or_init(|| Mutex::new(None))
 }
 
+/// Namen aller Distributionen (`wsl.exe -l -q`, ungefiltert) mit Zeitlimit – für die Shell-Erkennung beim Start
+/// (bis 2.3.0 ohne Zeitlimit, ein hängendes `wsl.exe` hielt den Start auf, #221). `None` = nicht ermittelbar.
+pub fn list_distros(timeout: Duration) -> Option<Vec<String>> {
+    run(&["-l".into(), "-q".into()], timeout).filter(|o| o.code == Some(0) && !o.truncated).map(|o| parse_distro_list(&o.stdout))
+}
+
 /// Distributionen und Standard ermitteln; nur ein Erfolg wird zwischengespeichert (sonst beim nächsten Mal erneut).
 fn distro_info() -> Option<DistroInfo> {
     if let Some(v) = distro_cache().lock().ok().and_then(|c| c.clone()) {
@@ -507,15 +513,27 @@ struct Output {
     truncated: bool,
 }
 
+/// Nach dem Ende von `wsl.exe` höchstens so lange auf den Rest der Ausgabe warten: Ein von ihm gestarteter Prozess
+/// kann das Schreibende der Pipe erben und offen halten (#221).
+const DRAIN_WAIT: Duration = Duration::from_secs(1);
+
 /// `wsl.exe` mit einzelnen Argumenten starten (kein Fenster, keine Eingabe), Ausgabe lesen (höchstens 1 MB);
 /// nach `timeout` wird der Prozess beendet. `None` = nicht startbar oder Zeit überschritten.
 #[cfg(windows)]
 fn run(args: &[String], timeout: Duration) -> Option<Output> {
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.args(args);
+    run_cmd(cmd, timeout)
+}
+
+/// Wie [`run`] für ein beliebiges Programm (Tests). Der Lesefaden wird nie unbegrenzt abgewartet: höchstens
+/// [`DRAIN_WAIT`] nach dem Ende bzw. Abbruch des Prozesses, sonst `None` (der Faden endet, sobald die Pipe schließt).
+#[cfg(windows)]
+fn run_cmd(mut cmd: std::process::Command, timeout: Duration) -> Option<Output> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("wsl.exe")
-        .args(args)
+    use std::process::Stdio;
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -523,10 +541,11 @@ fn run(args: &[String], timeout: Duration) -> Option<Output> {
         .spawn()
         .ok()?;
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = (&mut stdout).take(MAX_OUTPUT as u64 + 1).read_to_end(&mut buf);
-        buf
+        let _ = tx.send(buf);
     });
     let start = std::time::Instant::now();
     let status = loop {
@@ -540,7 +559,7 @@ fn run(args: &[String], timeout: Duration) -> Option<Output> {
             }
         }
     };
-    let mut out = reader.join().unwrap_or_default();
+    let mut out = rx.recv_timeout(DRAIN_WAIT).ok()?;
     let truncated = out.len() > MAX_OUTPUT;
     out.truncate(MAX_OUTPUT);
     status.map(|s| Output { code: s.code(), stdout: out, truncated })
@@ -554,6 +573,32 @@ fn run(_args: &[String], _timeout: Duration) -> Option<Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn run_never_waits_unbounded_for_the_output() {
+        let ms = Duration::from_millis;
+        // Normalfall: Ausgabe und Exit-Code
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/c", "echo hallo"]);
+        let o = run_cmd(c, Duration::from_secs(10)).expect("Ausgabe");
+        assert_eq!(o.code, Some(0));
+        assert!(String::from_utf8_lossy(&o.stdout).contains("hallo"));
+        // Ein Enkel erbt die Pipe und hält sie offen (wie ein von wsl.exe gestarteter Prozess): Das Programm endet
+        // sofort, die Ausgabe schließt erst nach 20 s – `run` wartet höchstens DRAIN_WAIT.
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/c", "start /b ping -n 20 127.0.0.1 & exit 0"]);
+        let t0 = std::time::Instant::now();
+        let o = run_cmd(c, Duration::from_secs(10));
+        assert!(t0.elapsed() < Duration::from_secs(8), "{:?}", t0.elapsed());
+        assert!(o.is_none());
+        // Zeitlimit: Prozess beendet, nicht gewartet
+        let mut c = std::process::Command::new("ping");
+        c.args(["-n", "20", "127.0.0.1"]);
+        let t0 = std::time::Instant::now();
+        assert!(run_cmd(c, ms(300)).is_none());
+        assert!(t0.elapsed() < Duration::from_secs(8), "{:?}", t0.elapsed());
+    }
 
     fn utf16(s: &str, bom: bool) -> Vec<u8> {
         let mut v = if bom { vec![0xFF, 0xFE] } else { Vec::new() };

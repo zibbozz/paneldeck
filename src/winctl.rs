@@ -131,21 +131,18 @@ pub struct PeerChain {
 /// seine Zeile verschwunden ist.
 #[cfg(windows)]
 pub fn resolve_peer(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> Option<PeerChain> {
-    use windows_sys::Win32::Foundation::CloseHandle;
     let pid = tcp_peer_pid(peer, local)?;
+    // Das Handle schließt `Drop` von `Proc` – auch beim frühen Abbruch (2.3.0 ließ es dort offen, #221).
     let h = Proc::open(pid)?;
     if !h.alive() || tcp_peer_pid(peer, local) != Some(pid) {
         return None;
     }
     let job = job_containing(h.0);
-    let out = match (job, h.created()) {
+    match (job, h.created()) {
         (Some(_), _) => Some(PeerChain { chain: vec![pid], orphan: false, job }),
         (None, Some(born)) => Some(walk_tree(pid, born)),
         (None, None) => None,
-    };
-    // SAFETY: gültiges Handle aus `OpenProcess`, genau einmal geschlossen.
-    unsafe { CloseHandle(h.0) };
-    out
+    }
 }
 
 #[cfg(not(windows))]
@@ -153,9 +150,17 @@ pub fn resolve_peer(_peer: std::net::SocketAddr, _local: std::net::SocketAddr) -
     Some(PeerChain::default())
 }
 
-/// Ein geöffneter Prozess (nur Abfragerechte). Schließen muss der Aufrufer (`CloseHandle`).
+/// Ein geöffneter Prozess (nur Abfragerechte). `Drop` schließt das Handle.
 #[cfg(windows)]
 struct Proc(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for Proc {
+    fn drop(&mut self) {
+        // SAFETY: gültiges Handle aus `OpenProcess` (`Proc::open` liefert nie ein Nullhandle), genau einmal geschlossen.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
 
 #[cfg(windows)]
 impl Proc {
@@ -205,7 +210,6 @@ fn hub_started() -> u64 {
 #[cfg(windows)]
 fn walk_tree(pid: u32, born: u64) -> PeerChain {
     use std::collections::HashMap;
-    use windows_sys::Win32::Foundation::CloseHandle;
     let parent: HashMap<u32, u32> = process_parents().into_iter().collect();
     let mut out = PeerChain { chain: vec![pid], orphan: false, job: None };
     let (mut cur, mut cur_born) = (pid, born);
@@ -221,8 +225,7 @@ fn walk_tree(pid: u32, born: u64) -> PeerChain {
                 None => break, // nicht zu prüfen (geschützt): Wurzel
                 Some(h) => {
                     let t = h.created();
-                    // SAFETY: gültiges Handle aus `OpenProcess`, genau einmal geschlossen.
-                    unsafe { CloseHandle(h.0) };
+                    drop(h);
                     match t {
                         Some(t) if t <= cur_born => {
                             out.chain.push(p);
@@ -779,10 +782,7 @@ mod peer_tests {
 
     fn job_of(pid: u32) -> Option<u64> {
         let h = Proc::open(pid)?;
-        let j = job_containing(h.0);
-        // SAFETY: gültiges Handle aus `OpenProcess`, genau einmal geschlossen.
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(h.0) };
-        j
+        job_containing(h.0)
     }
 
     #[test]
