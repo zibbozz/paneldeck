@@ -336,15 +336,18 @@ pub fn import_types(conn: &Connection, project_id: i64, doc: &TemplateDoc) -> Re
         // 3. Felder der neuen Typen
         let mut field_map: HashMap<i64, i64> = HashMap::new();
         for (t, type_id) in &created {
-            for f in &t.fields {
-                // eingebaute Felder (Beschreibung, Fälligkeit) gibt es im neuen Typ schon: zuordnen statt anlegen
+            // eingebaute Felder (Beschreibung, Fälligkeit, Labels) gibt es im neuen Typ schon: zuordnen statt anlegen – wie beim
+            // Update auch gleichnamige eigene Felder älterer Vorlagen/Sicherungen
+            let targets = super::builtin_fields::builtin_targets(&t.fields.iter().map(|f| (f.key.as_deref(), f.name.as_deref(), f.kind)).collect::<Vec<_>>());
+            for (fi, f) in t.fields.iter().enumerate() {
                 let fixed_key = f.key.as_deref().filter(|k| super::builtin_fields::FIXED_KEYS.contains(k));
                 let mut key = f.key.clone();
                 let mut name = f.name.clone();
-                if let Some(k) = fixed_key {
-                    if super::builtin_fields::template_fits(Some(k), f.kind).is_some() {
+                if let Some(k) = targets[fi] {
+                    {
                         let id = super::builtin_fields::field_id(conn, *type_id, k)?.ok_or(PlanError::NotFound)?;
-                        if let Some(n) = f.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                        // ein eigener Anzeigename eines Feldes mit Schlüssel bleibt (z. B. umbenannte Beschreibung)
+                        if let (true, Some(n)) = (f.key.is_some(), f.name.as_deref().map(str::trim).filter(|n| !n.is_empty())) {
                             conn.execute("UPDATE fields SET name = ?1 WHERE id = ?2", rusqlite::params![common::clean_name(n)?, id])?;
                         }
                         super::fields::update_field(conn, id, &super::fields::UpdateField { help: Some(f.help.clone()), section: Some(f.section.clone()), show_on_card: Some(f.show_on_card), ..Default::default() })?;
@@ -352,11 +355,17 @@ pub fn import_types(conn: &Connection, project_id: i64, doc: &TemplateDoc) -> Re
                         rep.created_fields += 1;
                         continue;
                     }
+                }
+                if let Some(k) = fixed_key {
                     // anderer Feldtyp: bleibt ein eigenes Feld ohne Schlüssel
                     key = None;
                     if name.is_none() {
                         name = Some(format!("{} (custom)", super::names::display_name(Some(k), None, crate::state::Lang::En)));
                     }
+                }
+                // ein eigenes Feld, das wie ein eingebautes heißt (z. B. „Due date“), bekommt wie beim Update den Zusatz „(custom)“
+                if let Some(n) = name.as_deref().filter(|n| key.is_none() && super::builtin_fields::is_builtin_label(n)) {
+                    name = Some(format!("{} (custom)", n.trim()));
                 }
                 let mut options = f.options.clone();
                 options.target_types = options.target_types.iter().map(|x| type_map.get(x).copied().ok_or_else(|| reference("type", *x))).collect::<Res<Vec<_>>>()?;
@@ -488,7 +497,7 @@ mod tests {
         num.help = "Geschätzte Stunden".into();
         create_field(c, &num).unwrap();
         update_field(c, sp, &UpdateField { required: Some(true), ..Default::default() }).unwrap();
-        let mut o = NewField::new(dev, "Labels", FieldKind::Labels);
+        let mut o = NewField::new(dev, "Tags", FieldKind::Labels);
         o.show_on_card = true;
         create_field(c, &o).unwrap();
         // Regeln auf dem Übergang In Progress -> Done
@@ -646,7 +655,7 @@ mod tests {
         assert!(matches!(import_types(&c, target, &bad), Err(PlanError::Template(TemplateProblem::Reference(_)))));
         // Optionen ungültig
         let mut bad = good.clone();
-        bad.types[0].fields[2].options.values[0].color = Some("x".into());
+        bad.types[0].fields[3].options.values[0].color = Some("x".into());
         assert_eq!(import_types(&c, target, &bad), Err(PlanError::Options(crate::planning::OptionsProblem::ValueColor)));
         assert_eq!(count(&c), (0, 0));
         // System-Projekt und unbekanntes Projekt

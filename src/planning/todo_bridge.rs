@@ -178,7 +178,7 @@ pub fn convert_todo_with_values(conn: &Connection, todo_id: i64, project_id: i64
             if !item.tags.is_empty() {
                 let all: HashMap<i64, String> = tasks::list_tags(conn).map_err(task_err)?.into_iter().map(|t| (t.id, t.name)).collect();
                 let names: Vec<String> = item.tags.iter().filter_map(|t| all.get(t).cloned()).collect();
-                let target = fields.iter().find(|f| f.kind == FieldKind::Labels);
+                let target = fields.iter().find(|f| f.is_labels()).or_else(|| fields.iter().find(|f| f.kind == FieldKind::Labels));
                 match target.and_then(|f| normalize_value(conn, &ctx, f, &json!(names)).ok().flatten().map(|v| (f.id, v))) {
                     Some(v) => values.push(v),
                     None => dropped_tags = names,
@@ -278,7 +278,7 @@ mod tests {
         let desc = f.field(f.task, "description");
         let due = f.field(f.task, "due");
         assert!(desc.is_description() && due.is_due());
-        for (input, stored) in [("2026-11-20", "2026-11-20"), ("2026-11-20 14:30", "2026-11-20T14:30:00")] {
+        for (input, stored) in [("2026-11-20", "2026-11-20"), ("2026-11-20 14:30", "2026-11-20T14:30")] {
             let id = tasks::create_item(&f.c, "Mit Termin", "Beschreibung **fett**", Some(input), &[]).unwrap().0.id;
             assert_eq!(todo_ticket(&f.c, id).unwrap().due.as_deref().map(|d| d.len()), Some(if input.len() == 10 { 10 } else { 16 }));
             let conv = convert_todo_to_ticket(&f.c, id, f.project, f.task, &ui()).unwrap();
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn converts_title_text_and_tags() {
         let f = Fx::new();
-        let labels = f.add_field(f.task, "Labels", FieldKind::Labels, Default::default(), false);
+        let labels = f.field(f.task, "labels");
         let a = todo(&f.c, "Einkaufen", "Milch\nBrot", &["Haushalt", "dringend"]);
         let conv = convert_todo_to_ticket(&f.c, a, f.project, f.task, &Source::agent("S")).unwrap();
         assert_eq!(conv.ticket.title, "Einkaufen");
@@ -323,11 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn tags_are_dropped_and_reported_without_a_labels_field() {
+    fn tags_go_into_the_built_in_labels_of_every_type() {
         let f = Fx::new();
         let a = todo(&f.c, "T", "", &["x", "y"]);
         let conv = convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap();
-        assert_eq!(conv.dropped_tags, vec!["x", "y"]);
+        assert!(conv.dropped_tags.is_empty(), "jeder Typ hat Labels");
+        assert_eq!(get_value(&f.c, conv.ticket.id, &f.field(f.task, "labels")).unwrap(), Some(json!(["x", "y"])));
         // ein neuer Typ ohne eigene Felder hat trotzdem die eingebaute Beschreibung: der Text kommt an
         let plain = crate::planning::types::create_type(&f.c, &crate::planning::types::NewType { project_id: f.project, key: None, name: Some("Notiz".into()), icon: None, color: "#445566".into(), workflow: false }).unwrap();
         let b = todo(&f.c, "B", "Inhalt", &[]);

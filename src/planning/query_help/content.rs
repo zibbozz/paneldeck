@@ -133,7 +133,7 @@ pub(super) fn build() -> HelpDoc {
                     vec![same("`\"Story points\"`"), t("Number", "Zahl"), t("On stories, tasks, subtasks and defects", "Bei Stories, Tasks, Subtasks und Defects")],
                     vec![same("`due`"), t("Date, optionally with a time (built into every ticket)", "Datum, optional mit Uhrzeit (in jedem Ticket eingebaut)"), t("Due date; a date alone counts until the end of that day, `due = 2026-11-20` matches the whole day; the example data are relative to today", "Fälligkeit; ein Datum allein gilt bis zum Ende des Tages, `due = 2026-11-20` trifft den ganzen Tag; die Beispieldaten sind relativ zu heute")],
                     vec![same("`description`"), t("Text (built into every ticket)", "Text (in jedem Ticket eingebaut)"), t("Free text, e.g. `description ~ login`", "Freier Text, z. B. `description ~ login`")],
-                    vec![same("`labels`"), t("Labels (several values)", "Labels (mehrere Werte)"), same("frontend, backend, api, auth, payments, legacy")],
+                    vec![same("`labels`"), t("Labels (several values, built into every ticket)", "Labels (mehrere Werte, in jedem Ticket eingebaut)"), same("frontend, backend, api, auth, payments, legacy")],
                     vec![same("`terminal`"), t("Terminal", "Terminal"), same("api-work, login-fix, docs")],
                     vec![same("`changedBy`"), t("Dropdown", "Auswahl"), t("Who made the last change: `ui`, `agent` or `import`", "Wer zuletzt geändert hat: `ui`, `agent` oder `import`")],
                 ],

@@ -22,6 +22,7 @@ pub const NAMES: &[(&str, &str, &str)] = &[
     // Felder
     ("description", "Beschreibung", "Description"),
     ("due", "Fällig am", "Due date"),
+    ("labels", "Labels", "Labels"),
     ("priority", "Priorität", "Priority"),
     ("story_points", "Story Points", "Story points"),
     ("release_version", "Release-Version", "Release version"),

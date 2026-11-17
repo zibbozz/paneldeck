@@ -211,10 +211,18 @@ pub(crate) fn due_input(ui: &mut Ui, id: Id, buf: &mut String, lang: Lang) -> bo
 /// Arbeitskopie des Verwalters (Projekt oder Todo-Liste).
 #[derive(Default)]
 pub(crate) struct Manager {
-    /// Für welche Liste die Kopie geladen ist (`Some(project_id)` bzw. `Some(0)` für die Todo-Liste).
     pub loaded_for: Option<i64>,
+    /// Arbeitskopie, so wie sie bearbeitet wird (Namen mit Leerzeichen beim Tippen, ungültige Zwischenstände).
     pub list: Vec<DueThreshold>,
+    /// Zuletzt gespeicherte, bereinigte Liste: gespeichert wird nur, wenn sich die bereinigte Arbeitskopie davon unterscheidet.
+    pub saved: Vec<DueThreshold>,
     pub err: Option<String>,
+}
+
+impl Manager {
+    pub fn new(loaded_for: i64, list: Vec<DueThreshold>) -> Manager {
+        Manager { loaded_for: Some(loaded_for), saved: list.clone(), list, err: None }
+    }
 }
 
 /// Was der Verwalter in diesem Bild getan hat.
@@ -377,6 +385,7 @@ pub(crate) fn apply(m: &mut Manager, e: Edit, lang: Lang) -> ManagerOut {
         Edit::Tint(i, on) if i < m.list.len() => m.list[i].tint = on,
         Edit::Defaults => {
             m.list = due::default_thresholds();
+            m.saved = m.list.clone();
             m.err = None;
             return ManagerOut::Defaults;
         }
@@ -384,8 +393,13 @@ pub(crate) fn apply(m: &mut Manager, e: Edit, lang: Lang) -> ManagerOut {
         _ => return ManagerOut::None,
     }
     match due::validate_thresholds(&m.list) {
+        Ok(list) if list == m.saved => {
+            m.err = None;
+            ManagerOut::None
+        }
         Ok(list) => {
             m.err = None;
+            m.saved = list.clone();
             ManagerOut::Save(list)
         }
         Err(p) => {
@@ -508,7 +522,7 @@ impl super::PlanUi {
     pub(super) fn due_tab(&mut self, ui: &mut Ui, cx: &super::Cx, proj: &crate::planning::projects::Project) {
         let lang = cx.lang;
         if self.due_mgr.loaded_for != Some(proj.id) {
-            self.due_mgr = Manager { loaded_for: Some(proj.id), list: crate::planning::projects::due_thresholds(cx.conn, proj.id).unwrap_or_default(), err: None };
+            self.due_mgr = Manager::new(proj.id, crate::planning::projects::due_thresholds(cx.conn, proj.id).unwrap_or_default());
         }
         widgets::hint(ui, lang.t(
             "Jedes Ticket hat eine optionale Fälligkeit (Datum, optional mit Uhrzeit). Hier legst du fest, ab wann Karten, Listen und Boards eine Markierung zeigen.",
@@ -521,9 +535,11 @@ impl super::PlanUi {
             ManagerOut::Defaults => Some(due::default_thresholds()),
         };
         if let Some(list) = save {
+            // die Arbeitskopie bleibt, wie sie getippt wurde; nur die bereinigte Liste geht in die Datenbank
             if self.run(cx, crate::planning::projects::set_due_thresholds(cx.conn, proj.id, &list)).is_some() {
-                self.due_mgr.list = list;
-                self.due_mgr.err = None;
+                self.due_counts.invalidate();
+            } else {
+                self.due_mgr.saved.clear();
             }
         }
     }
@@ -621,7 +637,7 @@ mod tests {
     #[test]
     fn the_manager_adds_reorders_validates_and_saves() {
         let ctx = egui::Context::default();
-        let mut m = Manager { loaded_for: Some(1), list: due::default_thresholds(), err: None };
+        let mut m = Manager::new(1, due::default_thresholds());
         // ohne Eingabe: nichts zu speichern
         let mut out = ManagerOut::None;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -638,7 +654,18 @@ mod tests {
         let clash = vec![DueThreshold { under_minutes: 120, marker: DueMarker::default(), tint: false }, DueThreshold { under_minutes: 60, marker: DueMarker::default(), tint: false }];
         assert!(!clash.iter().any(|t| t.under_minutes == new_threshold(&clash).under_minutes));
         // Änderungen: hinzufügen, Tönung an, umsortieren, löschen, Standard
-        let mut m = Manager { loaded_for: Some(1), list: due::default_thresholds(), err: None };
+        let mut m = Manager::new(1, due::default_thresholds());
+        // unverändert: nichts speichern; Leerzeichen am Namensende (beim Tippen) bleiben in der Arbeitskopie und speichern nicht
+        assert_eq!(apply(&mut m, Edit::Touched, Lang::En), ManagerOut::None);
+        m.list[0].marker.name = "Bald ".into();
+        assert!(matches!(apply(&mut m, Edit::Touched, Lang::En), ManagerOut::Save(l) if l[0].marker.name == "Bald"));
+        assert_eq!(m.list[0].marker.name, "Bald ", "die Arbeitskopie wird nicht bereinigt");
+        m.list[0].marker.name = "Bald  ".into();
+        assert_eq!(apply(&mut m, Edit::Touched, Lang::En), ManagerOut::None, "bereinigt gleich: keine weitere Speicherung");
+        m.list[0].marker.name = "Bald b".into();
+        assert!(matches!(apply(&mut m, Edit::Touched, Lang::En), ManagerOut::Save(l) if l[0].marker.name == "Bald b"));
+        m.list[0].marker.name.clear();
+        let _ = apply(&mut m, Edit::Touched, Lang::En);
         assert!(matches!(apply(&mut m, Edit::Add, Lang::En), ManagerOut::Save(l) if l.len() == 3));
         match apply(&mut m, Edit::Tint(2, true), Lang::En) {
             ManagerOut::Save(l) => assert!(l[2].tint && !l[0].tint && !l[1].tint, "nur die gewählte Schwelle tönt"),

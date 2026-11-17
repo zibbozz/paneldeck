@@ -72,7 +72,7 @@ The task tools depend on the mode the user sets with the "Expert mode" switch in
 - **Simple mode** (expert mode off): the simple to-do list – read it, add cards and tick them off.
 - **Expert mode** (expert mode on): projects and tickets – read projects, tickets, sprints and versions; create tickets, change fields, change the status under the same workflow rules as in the window, comment, log time and link. The to-do list is then read-only (list_todos).
 
-Every ticket and every to-do card has a title, an optional description and an optional due date (`due`: `YYYY-MM-DD` means the end of that day, or `YYYY-MM-DDTHH:MM`). Answers carry `due_state` (overdue, time left, marker by the project's or to-do list's thresholds). Search with e.g. `due < currentDate() ORDER BY due`.
+Every ticket and every to-do card has a title, an optional description and an optional due date (`due`: `YYYY-MM-DD` means the end of that day, or `YYYY-MM-DDTHH:MM`); tickets also have built-in `labels`. Custom fields are searchable by name or key. Answers carry `due_state` (overdue, time left, marker by the project's or to-do list's thresholds). Search with e.g. `due < currentDate() ORDER BY due`.
 
 A tool of the other mode returns `wrong_mode`. Reload the tool list (tools/list) after the user switches the mode.
 You can never delete tickets or to-do cards, and never change ticket types, workflows or projects.
@@ -137,7 +137,7 @@ Die Aufgaben-Werkzeuge hängen vom Modus ab, den der Nutzer mit dem Schalter „
 - **Einfacher Modus** (Expertenmodus aus): die einfache Todo-Liste – lesen, Karten anlegen und abhaken.
 - **Expertenmodus** (Expertenmodus an): Projekte und Tickets – Projekte, Tickets, Sprints und Versionen lesen; Tickets anlegen, Felder ändern, den Status nach denselben Workflow-Regeln wie im Fenster wechseln, kommentieren, Zeit erfassen und verknüpfen. Die Todo-Liste ist dann nur lesbar (list_todos).
 
-Jedes Ticket und jede Todo-Karte hat einen Titel, eine optionale Beschreibung und eine optionale Fälligkeit (`due`: `JJJJ-MM-TT` meint das Ende dieses Tages, oder `JJJJ-MM-TTTHH:MM`). Antworten enthalten `due_state` (überfällig, verbleibende Zeit, Markierung nach den Schwellen des Projekts bzw. der Todo-Liste). Suche z. B. mit `due < currentDate() ORDER BY due`.
+Jedes Ticket und jede Todo-Karte hat einen Titel, eine optionale Beschreibung und eine optionale Fälligkeit (`due`: `JJJJ-MM-TT` meint das Ende dieses Tages, oder `JJJJ-MM-TTTHH:MM`); Tickets haben außerdem eingebaute `labels`. Eigene Felder lassen sich über Namen oder Schlüssel suchen. Antworten enthalten `due_state` (überfällig, verbleibende Zeit, Markierung nach den Schwellen des Projekts bzw. der Todo-Liste). Suche z. B. mit `due < currentDate() ORDER BY due`.
 
 Ein Werkzeug des anderen Modus liefert `wrong_mode`. Lade die Werkzeugliste (tools/list) neu, nachdem der Nutzer den Modus umgestellt hat.
 Du kannst nie Tickets oder Todo-Karten löschen und nie Tickettypen, Workflows oder Projekte ändern.
@@ -195,8 +195,8 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "list_sprints" => ("Sprints eines Projekts.", "The sprints of a project."),
         "get_sprint" => ("Ein Sprint mit Tickets und Bericht.", "One sprint with its tickets and report."),
         "list_versions" => ("Versionen und Meilensteine eines Projekts mit Fortschritt.", "Versions and milestones of a project with progress."),
-        "create_ticket" => ("Ticket anlegen (mit Beschreibung und Fälligkeit).", "Create a ticket (with description and due date)."),
-        "update_ticket" => ("Titel, Beschreibung, Fälligkeit oder Felder eines Tickets ändern.", "Change the title, description, due date or fields of a ticket."),
+        "create_ticket" => ("Ticket anlegen (mit Beschreibung, Fälligkeit und Labels).", "Create a ticket (with description, due date and labels)."),
+        "update_ticket" => ("Titel, Beschreibung, Fälligkeit, Labels oder Felder eines Tickets ändern.", "Change the title, description, due date, labels or fields of a ticket."),
         "transition_ticket" => ("Status eines Tickets nach dem Workflow wechseln.", "Change the status of a ticket under its workflow."),
         "add_comment" => ("Kommentar zu einem Ticket hinzufügen.", "Add a comment to a ticket."),
         "log_time" => ("Arbeitszeit auf einem Ticket erfassen.", "Log work time on a ticket."),

@@ -442,13 +442,18 @@ fn format_hint(kind: FieldKind, lang: Lang) -> &'static str {
 /// Die Parameter `description` (Text, Markdown) und `due` (`JJJJ-MM-TT` oder `JJJJ-MM-TT HH:MM`, `null` leert) auf die eingebauten
 /// Felder des Typs abbilden; sie haben Vorrang vor demselben Feld in `fields`.
 fn builtin_args(ctx: &Ctx, a: &Args, fields: &[Field], values: &mut Vec<(i64, Value)>) -> Result<(), ToolError> {
-    for (param, pick) in [("description", Field::is_description as fn(&Field) -> bool), ("due", Field::is_due)] {
+    for (param, pick) in [("description", Field::is_description as fn(&Field) -> bool), ("due", Field::is_due), ("labels", Field::is_labels)] {
         if !a.has(param) {
             continue;
         }
         let v = a.get(param).unwrap_or(&Value::Null);
-        if !(v.is_string() || v.is_null()) {
-            return Err(ctx.bad(format!("{param} muss ein Text oder null sein"), format!("{param} must be a string or null")));
+        let ok = if param == "labels" { v.is_null() || v.as_array().is_some_and(|l| l.iter().all(Value::is_string)) } else { v.is_string() || v.is_null() };
+        if !ok {
+            return Err(if param == "labels" {
+                ctx.bad("labels muss eine Liste von Texten oder null sein", "labels must be a list of strings or null")
+            } else {
+                ctx.bad(format!("{param} muss ein Text oder null sein"), format!("{param} must be a string or null"))
+            });
         }
         let Some(f) = fields.iter().find(|f| pick(f)) else {
             return Err(ctx.bad(format!("Dieser Typ hat kein Feld {param}"), format!("This type has no {param} field")));
@@ -503,11 +508,16 @@ fn status_json(ctx: &Ctx, s: &Status) -> Value {
     json!({"id": s.id, "key": s.key, "name": status_name(ctx, s), "category": s.category.as_str()})
 }
 
-/// Wert eines eingebauten Feldes (Beschreibung, Fälligkeit) als Text.
-fn builtin_text(ctx: &Ctx, t: &Ticket, key: &str) -> Option<String> {
+/// Wert eines eingebauten Feldes (Beschreibung, Fälligkeit, Labels).
+fn builtin_value(ctx: &Ctx, t: &Ticket, key: &str) -> Option<Value> {
     let fid = super::builtin_fields::field_id(ctx.conn, t.type_id, key).ok().flatten()?;
     let f = super::fields::get_field(ctx.conn, fid).ok()?;
-    super::values::get_value(ctx.conn, t.id, &f).ok().flatten().and_then(|v| v.as_str().map(str::to_string))
+    super::values::get_value(ctx.conn, t.id, &f).ok().flatten()
+}
+
+/// Wert eines eingebauten Text-Feldes (Beschreibung, Fälligkeit).
+fn builtin_text(ctx: &Ctx, t: &Ticket, key: &str) -> Option<String> {
+    builtin_value(ctx, t, key).and_then(|v| v.as_str().map(str::to_string))
 }
 
 /// Markierung als JSON (`null` = keine).
@@ -555,6 +565,7 @@ fn ticket_json(ctx: &Ctx, t: &Ticket) -> Value {
         "description": builtin_text(ctx, t, super::builtin_fields::DESCRIPTION_KEY).map(|s| clip(&s)),
         "due_state": due_state_json(ctx, &thresholds, due.as_deref(), done),
         "due": due,
+        "labels": builtin_value(ctx, t, super::builtin_fields::LABELS_KEY).unwrap_or_else(|| json!([])),
     })
 }
 
@@ -903,7 +914,7 @@ fn quoted(ctx: &Ctx, s: &str) -> String {
 }
 
 fn create_ticket_tool(ctx: &Ctx, v: &Value) -> R {
-    let a = args(ctx, v, &["project", "type", "title", "parent", "fields", "description", "due"])?;
+    let a = args(ctx, v, &["project", "type", "title", "parent", "fields", "description", "due", "labels"])?;
     let p = project_arg(ctx, &a, "project")?;
     if p.system {
         return Err(ctx.err("forbidden", "Das System-Projekt Todolist ist schreibgeschützt (add_todo gibt es nur im einfachen Modus).", "The system project Todolist is read-only (add_todo exists only in simple mode)."));
@@ -927,10 +938,10 @@ fn create_ticket_tool(ctx: &Ctx, v: &Value) -> R {
 }
 
 fn update_ticket_tool(ctx: &Ctx, v: &Value) -> R {
-    let a = args(ctx, v, &["ticket", "title", "fields", "description", "due"])?;
+    let a = args(ctx, v, &["ticket", "title", "fields", "description", "due", "labels"])?;
     let t = ticket_arg(ctx, &a, "ticket")?;
-    if !["title", "fields", "description", "due"].iter().any(|k| a.has(k)) {
-        return Err(ctx.bad("Nichts zu ändern: title, description, due oder fields angeben", "Nothing to change: give title, description, due or fields"));
+    if !["title", "fields", "description", "due", "labels"].iter().any(|k| a.has(k)) {
+        return Err(ctx.bad("Nichts zu ändern: title, description, due, labels oder fields angeben", "Nothing to change: give title, description, due, labels or fields"));
     }
     let title = match a.get("title") {
         Some(_) => Some(a.req_str("title", 1_000)?),
@@ -1269,7 +1280,7 @@ mod tests {
         // mit Uhrzeit, deutsches Datum, überfällig
         let d = ok(&f, "update_ticket", json!({"ticket": "PAN-1", "due": "13.11.2026 09:30"}));
         let t = &d.result["ticket"];
-        assert_eq!(t["due"], "2026-11-13T09:30:00");
+        assert_eq!(t["due"], "2026-11-13T09:30", "wie bei Todo-Karten ohne Sekunden");
         assert_eq!((t["due_state"]["overdue"].as_bool(), t["due_state"]["text"].as_str()), (Some(true), Some("overdue by 1 day")));
         assert_eq!(t["due_state"]["marker"]["color"], crate::due::RED);
         // leeren, unlesbar, falscher Typ
@@ -1292,6 +1303,19 @@ mod tests {
         assert_eq!(pan["due_thresholds"].as_array().unwrap().len(), 2);
         assert_eq!(pan["due_thresholds"][0]["under_minutes"], 10080);
         assert_eq!(pan["due_thresholds"][0]["tint"], false);
+    }
+
+    #[test]
+    fn built_in_labels_are_a_parameter_and_an_answer_field() {
+        let f = Fx::new();
+        let d = ok(&f, "create_ticket", json!({"project": "PAN", "type": "Epic", "title": "Mit Labels", "labels": ["api", "API", "ui"]}));
+        assert_eq!(d.result["ticket"]["labels"], json!(["api", "ui"]), "ohne Doppelte (Groß-/Kleinschreibung egal)");
+        let d = ok(&f, "update_ticket", json!({"ticket": "PAN-1", "labels": null}));
+        assert_eq!(d.result["ticket"]["labels"], json!([]));
+        assert_eq!(fail(&f, "update_ticket", json!({"ticket": "PAN-1", "labels": "api"})).code, "bad_args");
+        ok(&f, "update_ticket", json!({"ticket": "PAN-1", "labels": ["mcp"]}));
+        let s = ok(&f, "search_tickets", json!({"project": "PAN", "query": "labels = mcp"}));
+        assert_eq!(s.result["total"], 1);
     }
 
     #[test]

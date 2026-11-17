@@ -312,8 +312,8 @@ pub(super) fn row_controls(f: &crate::planning::fields::Field) -> RowControls {
 /// Kennzeichen „Eingebaut“ in der ersten Spalte (Schloss, Tooltip).
 fn builtin_badge(ui: &mut Ui, lang: Lang) {
     ui.label(RichText::new(lang.t("Eingebaut", "Built-in")).small().color(style::dim(ui))).on_hover_text(lang.t(
-        "Titel, Beschreibung und Fälligkeit hat jedes Ticket. Sie lassen sich nicht löschen.",
-        "Every ticket has a title, a description and a due date. They cannot be deleted.",
+        "Titel, Beschreibung, Fälligkeit und Labels hat jedes Ticket. Sie lassen sich nicht löschen.",
+        "Every ticket has a title, a description, a due date and labels. They cannot be deleted.",
     ));
 }
 

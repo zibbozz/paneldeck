@@ -368,13 +368,13 @@ mod tests {
         let es = menu_entries(&cfg(&f, f.story), &ctx(Some(f.todo)), Lang::En);
         assert_eq!(
             labels(&es),
-            vec!["Title", "Description", "Due date", "Priority", "Epic", "Release version", "Story points", "In Progress", "Done", "Create Dev task", "Work in Claude"]
+            vec!["Title", "Description", "Due date", "Labels", "Priority", "Epic", "Release version", "Story points", "In Progress", "Done", "Create Dev task", "Work in Claude"]
         );
         assert!(matches!(es[0].kind, EntryKind::Title));
         assert!(matches!(es[1].kind, EntryKind::Field { kind: FieldKind::Rich, .. }));
         assert!(matches!(es[2].kind, EntryKind::Field { kind: FieldKind::Datetime, .. }));
-        assert!(matches!(es[7].kind, EntryKind::Transition { to_status_id } if to_status_id == f.progress));
-        assert!(matches!(es[9].kind, EntryKind::Action { .. }));
+        assert!(matches!(es[8].kind, EntryKind::Transition { to_status_id } if to_status_id == f.progress));
+        assert!(matches!(es[10].kind, EntryKind::Action { .. }));
     }
 
     #[test]
@@ -382,8 +382,8 @@ mod tests {
         let f = fx();
         let c = cfg(&f, f.story);
         let de = menu_entries(&c, &ctx(Some(f.todo)), Lang::De);
-        assert_eq!(labels(&de)[..6], ["Titel", "Beschreibung", "Fällig am", "Priorität", "Epic", "Release-Version"].map(String::from));
-        let prio = &de[3];
+        assert_eq!(labels(&de)[..7], ["Titel", "Beschreibung", "Fällig am", "Labels", "Priorität", "Epic", "Release-Version"].map(String::from));
+        let prio = &de[4];
         assert_eq!(prio.aliases, vec!["Priority".to_string()]);
         // englisches Wort findet auch im deutschen Menü
         let hits = filter_entries(&de, "priority");
@@ -523,7 +523,7 @@ mod tests {
         nf.options.max_length = Some(10);
         create_field(&f.c, &nf).unwrap();
         let es = menu_entries(&cfg(&f, t), &ctx(None), Lang::En);
-        assert_eq!(labels(&es), vec!["Title", "Description", "Due date", "Remark"], "eingebaute Felder auch ohne Workflow");
+        assert_eq!(labels(&es), vec!["Title", "Description", "Due date", "Labels", "Remark"], "eingebaute Felder auch ohne Workflow");
     }
 
     #[test]
@@ -573,10 +573,10 @@ mod tests {
     fn entries_for_every_default_type() {
         let f = fx();
         for (ty, want) in [
-            (f.epic, vec!["Title", "Description", "Due date", "Priority"]),
-            (f.dev, vec!["Title", "Description", "Due date", "Priority", "Story points"]),
-            (f.sub, vec!["Title", "Description", "Due date", "Priority"]),
-            (f.defect, vec!["Title", "Description", "Due date", "Priority", "Steps to reproduce"]),
+            (f.epic, vec!["Title", "Description", "Due date", "Labels", "Priority"]),
+            (f.dev, vec!["Title", "Description", "Due date", "Labels", "Priority", "Story points"]),
+            (f.sub, vec!["Title", "Description", "Due date", "Labels", "Priority"]),
+            (f.defect, vec!["Title", "Description", "Due date", "Labels", "Priority", "Steps to reproduce"]),
         ] {
             let es = menu_entries(&cfg(&f, ty), &ctx(Some(f.done)), Lang::En);
             let fields: Vec<String> = es.iter().filter(|e| matches!(e.kind, EntryKind::Title | EntryKind::Field { .. })).map(|e| e.label.clone()).collect();

@@ -59,10 +59,12 @@ pub struct Cols {
     pub status: bool,
     pub prio: bool,
     pub points: bool,
+    /// Fälligkeit (eigene Spalte, ab mittlerer Breite).
+    pub due: bool,
 }
 
 pub fn columns_for(width: f32) -> Cols {
-    Cols { status: width >= 460.0, prio: width >= 640.0, points: width >= 720.0 }
+    Cols { status: width >= 460.0, due: width >= 560.0, prio: width >= 640.0, points: width >= 720.0 }
 }
 
 impl PlanUi {
@@ -117,6 +119,12 @@ impl PlanUi {
         if self.tab == Tab::Tickets && self.tickets.list_dirty {
             self.tickets.list_dirty = false;
             self.tq_sync(sum.project.id);
+            // Felder können sich geändert haben (z. B. ein neues eigenes Feld): das Schema der Abfrage-Leiste immer neu bauen,
+            // auch ohne aktive Abfrage – sonst kennt die nächste Abfrage das neue Feld nicht (#195)
+            self.tq_schema_changed();
+            self.tickets.due_thresholds = crate::planning::projects::due_thresholds(cx.conn, sum.project.id).unwrap_or_default();
+            // die Zählung „überfällig“ im Kopf folgt geänderten Fälligkeiten
+            self.due_counts.invalidate();
             if self.tq_active() {
                 // Eine Abfrage ist aktiv: die Liste lädt über die Suche (`ticket_query`), die lokalen Zeilen ruhen.
                 self.tq_data_changed();
@@ -353,8 +361,8 @@ impl PlanUi {
         let w_prio = if cols.prio { 112.0 } else { 0.0 };
         let w_points = if cols.points { 54.0 } else { 0.0 };
         let w_marks = 56.0;
-        let w_due = if cols.status { 118.0 } else { 0.0 };
-        let thresholds = crate::planning::projects::due_thresholds(cx.conn, sum.project.id).unwrap_or_default();
+        let w_due = if cols.due { 118.0 } else { 0.0 };
+        let thresholds = self.tickets.due_thresholds.clone();
         let now = chrono::Local::now().naive_local();
         let show_refs = width >= REFS_MIN_WIDTH && !self.tickets.row_refs.is_empty();
         let w_refs = if show_refs { W_REFS } else { 0.0 };
@@ -390,6 +398,8 @@ impl PlanUi {
         head(ui, lang.t("Titel", "Title"), Some(SortCol::Title), w_title, false);
         if cols.status {
             head(ui, lang.t("Status", "Status"), Some(SortCol::Status), w_status, false);
+        }
+        if cols.due {
             head(ui, lang.t("Fällig", "Due"), Some(SortCol::Due), w_due, false);
         }
         if cols.prio {
@@ -481,6 +491,8 @@ impl PlanUi {
                         p.galley(Pos2::new(pr.left() + 18.0, pr.center().y - g.size().y / 2.0), g, c);
                     }
                     x += w_status;
+                }
+                if cols.due {
                     if let Some(d) = row.due.as_deref() {
                         let mut tx = x;
                         if let Some(m) = due_st.as_ref().and_then(|s| s.marker()) {
@@ -640,10 +652,11 @@ mod tests {
 
     #[test]
     fn narrow_lists_drop_columns_in_order() {
-        assert_eq!(columns_for(900.0), Cols { status: true, prio: true, points: true });
-        assert_eq!(columns_for(680.0), Cols { status: true, prio: true, points: false });
-        assert_eq!(columns_for(500.0), Cols { status: true, prio: false, points: false });
-        assert_eq!(columns_for(300.0), Cols { status: false, prio: false, points: false });
+        assert_eq!(columns_for(900.0), Cols { status: true, prio: true, points: true, due: true });
+        assert_eq!(columns_for(680.0), Cols { status: true, prio: true, points: false, due: true });
+        assert_eq!(columns_for(600.0), Cols { status: true, prio: false, points: false, due: true });
+        assert_eq!(columns_for(500.0), Cols { status: true, prio: false, points: false, due: false });
+        assert_eq!(columns_for(300.0), Cols { status: false, prio: false, points: false, due: false });
     }
 
     #[test]

@@ -252,7 +252,7 @@ fn value_names(key: Option<&str>, name: Option<&str>, lang: Lang) -> Vec<String>
     v
 }
 
-/// Namen eines Feldes: Anzeigename in der Sprache, bei Deutsch zusätzlich der englische.
+/// Namen eines Feldes: Anzeigename in der Sprache, bei Deutsch zusätzlich der englische, dazu der Schlüssel (z. B. `story_points`).
 fn field_names(f: &Field, lang: Lang) -> Vec<String> {
     let mut v = vec![f.display(lang)];
     if lang == Lang::De {
@@ -261,7 +261,28 @@ fn field_names(f: &Field, lang: Lang) -> Vec<String> {
             v.push(en);
         }
     }
+    if let Some(k) = f.key.as_deref().filter(|k| !k.is_empty()) {
+        if !v.iter().any(|n| eq_ci(n, k)) {
+            v.push(k.to_string());
+        }
+    }
     v.retain(|n| !n.trim().is_empty());
+    v
+}
+
+/// Namen eines eingebauten Feldes (Beschreibung, Fälligkeit, Labels) – unabhängig von der Sprache der Oberfläche, damit
+/// gespeicherte Abfragen in beiden Sprachen gelten: Schlüssel, die festen Namen und die Anzeigenamen der Felder im Bereich
+/// (z. B. eine in „Details“ umbenannte Beschreibung).
+fn builtin_names(fixed: &[&str], fields: &[&&Field]) -> Vec<String> {
+    let mut v: Vec<String> = fixed.iter().map(|s| s.to_string()).collect();
+    for f in fields {
+        for l in [Lang::En, Lang::De] {
+            let d = f.display(l);
+            if !d.trim().is_empty() && !v.iter().any(|x| eq_ci(x, &d)) {
+                v.push(d);
+            }
+        }
+    }
     v
 }
 
@@ -274,7 +295,12 @@ struct Reg {
 impl Reg {
     /// Registriert das Feld unter allen noch freien Namen. Liefert den Index (oder `None`, wenn kein Name frei war).
     fn add(&mut self, names: &[String], ty: FieldType, multi: bool, store: Store) -> Option<usize> {
-        let free: Vec<&String> = names.iter().filter(|n| !self.by_name.contains_key(&n.to_lowercase())).collect();
+        let mut free: Vec<&String> = Vec::new();
+        for n in names.iter().filter(|n| !self.by_name.contains_key(&n.to_lowercase())) {
+            if !free.iter().any(|f| eq_ci(f, n)) {
+                free.push(n);
+            }
+        }
         if free.is_empty() {
             return None;
         }
@@ -419,12 +445,18 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
         )
         .ok_or_else(|| SearchError::Internal("Feld `terminal` beim Aufbau schon belegt".to_string()))?;
 
-    // ---- eingebaute Felder jedes Tickets: Beschreibung und Fälligkeit (über ihren Schlüssel, nicht den Anzeigenamen)
-    let desc_fields: Vec<ValField> = fields_in_order.iter().filter(|f| f.is_description()).map(|f| ValField { id: f.id, kind: f.kind }).collect();
-    let due_fields: Vec<ValField> = fields_in_order.iter().filter(|f| f.is_due()).map(|f| ValField { id: f.id, kind: f.kind }).collect();
-    let desc_idx = reg.add(&nm("description", "Beschreibung"), FieldType::Text, false, Store::Values(Vals { class: Class::Text, fields: desc_fields, opts: OptionSet::default(), links: false }));
-    let due_idx = reg.add(&nm("due", "Fällig"), FieldType::DateTime, false, Store::Values(Vals { class: Class::Due, fields: due_fields, opts: OptionSet::default(), links: false }));
+    // ---- eingebaute Felder jedes Tickets: Beschreibung, Fälligkeit, Labels (über ihren Schlüssel, nicht den Anzeigenamen)
+    let vf = |pick: fn(&Field) -> bool| -> Vec<ValField> { fields_in_order.iter().filter(|f| pick(f)).map(|f| ValField { id: f.id, kind: f.kind }).collect() };
+    let of = |pick: fn(&Field) -> bool| -> Vec<&&Field> { fields_in_order.iter().filter(|f| pick(f)).collect() };
+    let desc_names = builtin_names(&["description", "Description", "Beschreibung"], &of(Field::is_description));
+    let due_names = builtin_names(&["due", "Due date", "Fällig", "Fällig am"], &of(Field::is_due));
+    let labels_names = builtin_names(&["labels", "Labels"], &of(Field::is_labels));
+    let (desc_fields, due_fields, labels_fields) = (vf(Field::is_description), vf(Field::is_due), vf(Field::is_labels));
+    let desc_idx = reg.add(&desc_names, FieldType::Text, false, Store::Values(Vals { class: Class::Text, fields: desc_fields, opts: OptionSet::default(), links: false }));
+    let due_idx = reg.add(&due_names, FieldType::DateTime, false, Store::Values(Vals { class: Class::Due, fields: due_fields, opts: OptionSet::default(), links: false }));
+    let labels_idx = reg.add(&labels_names, FieldType::Labels, true, Store::Values(Vals { class: Class::Labels, fields: labels_fields, opts: OptionSet::default(), links: false }));
     fields_in_order.retain(|f| !f.is_fixed());
+    let named = |g_names: &[String], set: &[String]| g_names.iter().any(|n| set.iter().any(|s| eq_ci(s, n)));
 
     // ---- benutzerdefinierte Felder: nach Name und Art gruppieren
     struct Group {
@@ -471,19 +503,17 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
         if matches!(g.class, Class::Version | Class::Milestone) && !versions_on {
             continue;
         }
-        // eigene Text-Felder namens „Description“/„Beschreibung“ gehören zur eingebauten Beschreibung
-        if g.class == Class::Text && (g.name_lc == "description" || g.name_lc == "beschreibung") {
-            if let Some(Store::Values(v)) = desc_idx.map(|i| &mut reg.bindings[i].store) {
-                v.fields.extend(g.fields.iter().map(|f| f.0));
-                continue;
-            }
-        }
-        // eigene Datums-Felder namens „Due“/„Fällig“ (vor 2.3 angelegt) gehören zur eingebauten Fälligkeit (gleiche Speicherform)
-        if matches!(g.class, Class::Date | Class::DateTime) && (g.name_lc == "due" || g.name_lc == "fällig") {
-            if let Some(Store::Values(v)) = due_idx.map(|i| &mut reg.bindings[i].store) {
-                v.fields.extend(g.fields.iter().map(|f| f.0));
-                continue;
-            }
+        // eigene Felder passender Art, die wie ein eingebautes heißen, gehören dazu (Text → Beschreibung, Datum → Fälligkeit,
+        // Labels → Labels; gleiche Speicherform)
+        let merge_into = match g.class {
+            Class::Text if named(&g.names, &desc_names) => desc_idx,
+            Class::Date | Class::DateTime if named(&g.names, &due_names) => due_idx,
+            Class::Labels if named(&g.names, &labels_names) => labels_idx,
+            _ => None,
+        };
+        if let Some(Store::Values(v)) = merge_into.map(|i| &mut reg.bindings[i].store) {
+            v.fields.extend(g.fields.iter().map(|f| f.0));
+            continue;
         }
         // Terminal-Felder namens „terminal“ gehören zum eingebauten Feld
         if g.class == Class::Terminal && g.name_lc == "terminal" {

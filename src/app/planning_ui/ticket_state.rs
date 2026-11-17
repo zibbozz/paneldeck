@@ -250,6 +250,8 @@ pub struct TicketUi {
     pub filters: Filters,
     pub sort: Sort,
     pub rows: Vec<Row>,
+    /// Schwellen der Fälligkeit des Projekts (mit den Zeilen geladen, nicht je Bild).
+    pub due_thresholds: Vec<crate::due::DueThreshold>,
     /// Alle Tickets des Projekts (ohne Filter).
     pub project_total: usize,
     pub open: Option<i64>,
@@ -315,6 +317,7 @@ impl Default for TicketUi {
             filters: Filters::default(),
             sort: Sort::default(),
             rows: Vec::new(),
+            due_thresholds: Vec::new(),
             project_total: 0,
             open: None,
             back: Vec::new(),

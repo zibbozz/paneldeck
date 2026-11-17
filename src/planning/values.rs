@@ -169,12 +169,12 @@ pub fn normalize_value(conn: &Connection, ctx: &RefCtx, field: &Field, v: &Value
         }
         FieldKind::Datetime => {
             if let Some(s) = v.as_str() {
-                // Uhrzeit optional (Fälligkeit): auch „2026-11-20 14:30“ und „20.11.2026“ verstehen
-                let s = match (field.options.date_only_ok(), crate::due::parse_input(s)) {
+                // Uhrzeit optional (Fälligkeit): auch „2026-11-20 14:30“ und „20.11.2026“ verstehen; gespeichert wie bei den
+                // Todo-Karten als `JJJJ-MM-TT` bzw. `JJJJ-MM-TTTHH:MM` (ohne Sekunden)
+                v = Value::String(match (field.options.date_only_ok(), crate::due::parse_input(s)) {
                     (true, Ok(Some(n))) => n,
-                    _ => s.to_string(),
-                };
-                v = Value::String(normalize_datetime(&s));
+                    _ => normalize_datetime(s),
+                });
             }
         }
         FieldKind::Terminal => {

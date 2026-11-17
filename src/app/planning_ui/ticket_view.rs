@@ -299,8 +299,7 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
         // Fälligkeit mit Markierung (nach den Schwellen des Projekts; erledigt = ohne Markierung)
         if let Some(due) = d.ty.fields.iter().find(|f| f.is_due()).and_then(|f| d.stored.get(&f.id)).and_then(|v| v.as_str()) {
             ui.label(RichText::new("·").small().color(style::dim(ui)));
-            let th = crate::planning::projects::due_thresholds(vc.conn, t.project_id).unwrap_or_default();
-            let st = if d.done { None } else { crate::due::evaluate(&th, due, chrono::Local::now().naive_local()) };
+            let st = if d.done { None } else { crate::due::evaluate(&d.due_thresholds, due, chrono::Local::now().naive_local()) };
             ui.label(RichText::new(lang.t("Fällig", "Due")).small().color(style::dim(ui)));
             super::due_ui::due_line(ui, due, st.as_ref(), lang);
         }

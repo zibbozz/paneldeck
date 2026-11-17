@@ -183,7 +183,7 @@ impl Field {
         names::display_name(self.key.as_deref(), self.name.as_deref(), lang)
     }
 
-    /// Eingebautes Feld jedes Tickets (Beschreibung oder Fälligkeit): nicht löschbar, nur Hilfetext, Abschnitt und „auf Karte
+    /// Eingebautes Feld jedes Tickets (Beschreibung, Fälligkeit oder Labels): nicht löschbar, nur Hilfetext, Abschnitt und „auf Karte
     /// anzeigen“ sind änderbar (siehe `builtin_fields`).
     pub fn is_fixed(&self) -> bool {
         self.builtin && self.key.as_deref().is_some_and(|k| super::builtin_fields::FIXED_KEYS.contains(&k))
@@ -197,6 +197,11 @@ impl Field {
     /// Die eingebaute Beschreibung?
     pub fn is_description(&self) -> bool {
         self.is_fixed() && self.key.as_deref() == Some(super::builtin_fields::DESCRIPTION_KEY)
+    }
+
+    /// Die eingebauten Labels?
+    pub fn is_labels(&self) -> bool {
+        self.is_fixed() && self.key.as_deref() == Some(super::builtin_fields::LABELS_KEY)
     }
 }
 
@@ -865,7 +870,7 @@ mod tests {
         let b = create_field(&c, &NewField::new(t, "B", FieldKind::Text)).unwrap();
         let d = create_field(&c, &NewField::new(t, "C", FieldKind::Text)).unwrap();
         let fixed: Vec<i64> = list_fields(&c, t).unwrap().iter().filter(|f| f.is_fixed()).map(|f| f.id).collect();
-        assert_eq!(fixed.len(), 2);
+        assert_eq!(fixed.len(), 3);
         let ids = |c: &Connection| list_fields(c, t).unwrap().iter().map(|f| f.id).collect::<Vec<_>>();
         assert_eq!(ids(&c), [fixed.clone(), vec![a, b, d]].concat());
         reorder_fields(&c, t, &[d, a, b]).unwrap();
@@ -897,12 +902,12 @@ mod tests {
         delete_field(&c, n, None).unwrap();
         assert_eq!(delete_field(&c, n, None), Err(PlanError::NotFound));
         assert!(list_fields(&c, t).unwrap().iter().all(|f| f.is_fixed()), "nur die eingebauten bleiben");
-        assert_eq!(list_fields(&c, u).unwrap().len(), 3);
+        assert_eq!(list_fields(&c, u).unwrap().len(), 4);
         // eingebaute Felder lassen sich nicht löschen und nur in Hilfe, Abschnitt und „auf Karte“ ändern
         for f in list_fields(&c, t).unwrap() {
             assert_eq!(delete_field(&c, f.id, Some(DeleteMode::Discard)), Err(PlanError::SystemProtected));
             assert_eq!(update_field(&c, f.id, &UpdateField { name: Some("Anders".into()), ..Default::default() }), Err(PlanError::SystemProtected));
-            assert_eq!(update_field(&c, f.id, &UpdateField { options: Some(FieldOptions::default()), ..Default::default() }), Err(PlanError::SystemProtected));
+            assert_eq!(update_field(&c, f.id, &UpdateField { options: Some(FieldOptions { rows: Some(3), max_length: Some(9), ..Default::default() }), ..Default::default() }), Err(PlanError::SystemProtected));
             update_field(&c, f.id, &UpdateField { name: Some(String::new()), required: Some(false), help: Some("Hilfe".into()), show_on_card: Some(true), ..Default::default() }).unwrap();
             assert_eq!(get_field(&c, f.id).unwrap().help, "Hilfe");
         }

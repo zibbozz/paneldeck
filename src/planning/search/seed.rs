@@ -332,6 +332,7 @@ impl Seeder<'_> {
                 let builtin = match (f.name.to_lowercase().as_str(), f.kind) {
                     ("description", FieldKind::Rich | FieldKind::Text) => Some(crate::planning::builtin_fields::DESCRIPTION_KEY),
                     ("due", FieldKind::Date | FieldKind::Datetime) => Some(crate::planning::builtin_fields::DUE_KEY),
+                    ("labels", FieldKind::Labels) => Some(crate::planning::builtin_fields::LABELS_KEY),
                     _ => None,
                 };
                 if let Some(fid) = builtin.map(|k| crate::planning::builtin_fields::field_id(conn, tid, k)).transpose()?.flatten() {

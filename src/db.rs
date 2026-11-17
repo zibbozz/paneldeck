@@ -51,6 +51,8 @@ const MIGRATIONS: &[&str] = &[
     crate::planning::sprints::schema::MIGRATION,
     // 8: eingebaute Felder Beschreibung/Fälligkeit, Fälligkeits-Schwellen je Projekt, Fälligkeit der Todo-Karten, SQL in `planning/builtin_fields.rs`
     crate::planning::builtin_fields::MIGRATION,
+    // 9: eingebaute Labels an jedem Typ (Issue #195), SQL in `planning/builtin_fields.rs`
+    crate::planning::builtin_fields::MIGRATION_LABELS,
 ];
 
 /// Aktuelle Schema-Version dieser Programmversion.
@@ -416,16 +418,20 @@ mod tests {
                         (41, 30, 'priority', NULL, 'dropdown', '{}', 0, 1, 1),
                         (42, 31, 'description', 'Details', 'rich', '{\"rows\":8}', 1, 0, 1),
                         (43, 32, NULL, 'Beschreibung', 'text', '{\"max_length\":500}', 0, 0, 0),
-                        (44, 32, NULL, 'Due date', 'date', '{}', 0, 1, 0);
+                        (44, 32, NULL, 'Due date', 'date', '{}', 0, 1, 0),
+                        (45, 30, NULL, 'Labels', 'labels', '{}', 1, 2, 0),
+                        (46, 31, NULL, 'Labels', 'text', '{}', 0, 1, 0);
                      INSERT INTO transitions (id, type_id, from_status_id, to_status_id, required_fields) VALUES (50, 31, 20, 21, '[42]');
                      INSERT INTO tickets (id, project_id, number, type_id, title, status_id, rank, created_at, updated_at) VALUES
                         (60, 10, 1, 30, 'Epic', 20, 0, '2026-01-01T00:00:00', '2026-01-01T00:00:00'),
                         (61, 10, 2, 31, 'Task', 20, 1, '2026-01-01T00:00:00', '2026-01-01T00:00:00'),
                         (62, 11, 1, 32, 'Eigen', NULL, 0, '2026-01-01T00:00:00', '2026-01-01T00:00:00');
                      INSERT INTO ticket_values (ticket_id, field_id, pos, text, num) VALUES
-                        (60, 40, 0, 'Epic **Text**', NULL), (61, 42, 0, 'Details ä😀', NULL), (62, 43, 0, 'Eigener Text', NULL), (62, 44, 0, '2026-12-24', NULL);
+                        (60, 40, 0, 'Epic **Text**', NULL), (61, 42, 0, 'Details ä😀', NULL), (62, 43, 0, 'Eigener Text', NULL), (62, 44, 0, '2026-12-24', NULL),
+                        (60, 45, 0, 'backend', NULL), (60, 45, 1, 'ui', NULL), (61, 46, 0, 'kein Label', NULL);
                      INSERT INTO history (ticket_id, at, source, field, old, new, batch) VALUES
-                        (61, '2026-01-02T00:00:00', 'ui', 'field:42', NULL, '\"Details ä😀\"', 1);
+                        (61, '2026-01-02T00:00:00', 'ui', 'field:42', NULL, '\"Details ä😀\"', 1),
+                        (60, '2026-01-02T00:00:00', 'ui', 'field:45', NULL, '[\"backend\",\"ui\"]', 2);
                      INSERT INTO todo_items (title, body, done, position, created_at, updated_at) VALUES ('Karte', 'Text', 0, 1, '2026-01-01T00:00:00', '2026-01-01T00:00:00');",
                 )
                 .unwrap();
@@ -441,13 +447,27 @@ mod tests {
             }
             assert_eq!(fields(31)[0].name.as_deref(), Some("Details"));
             // eigenes Text-Feld „Beschreibung“ wird die eingebaute Beschreibung (Wert bleibt), „Due date“ bleibt eigenes Feld
+            // (umbenannt, damit es nicht wie die Fälligkeit heißt), dazu die eingebauten Labels
             let own = fields(32);
-            assert_eq!(own.len(), 3);
+            assert_eq!(own.len(), 4);
+            assert!(own[0].is_description() && own[1].is_due() && own[2].is_labels());
             let desc = own.iter().find(|f| f.id == 43).unwrap();
             assert!(desc.is_description() && desc.kind == FieldKind::Rich && desc.name.is_none());
             assert_eq!(desc.options.rows, Some(8));
             let custom_due = own.iter().find(|f| f.id == 44).unwrap();
-            assert!(!custom_due.is_fixed() && custom_due.kind == FieldKind::Date && custom_due.name.as_deref() == Some("Due date"));
+            assert!(!custom_due.is_fixed() && custom_due.kind == FieldKind::Date && custom_due.name.as_deref() == Some("Due date (custom)"));
+            // Labels: das eigene Labels-Feld des Epics wird das eingebaute (gleiche Kennung, Werte, Verlauf; nicht mehr Pflicht),
+            // das Text-Feld „Labels“ der Dev-Aufgabe bleibt eigenes Feld mit Zusatz, die Dev-Aufgabe bekommt neue Labels
+            let epic = fields(30);
+            assert_eq!((epic[2].id, epic[2].is_labels(), epic[2].required), (45, true, false));
+            let lv: Vec<String> = { let mut st = c.prepare("SELECT text FROM ticket_values WHERE ticket_id = 60 AND field_id = 45 ORDER BY pos").unwrap(); st.query_map([], |r| r.get(0)).unwrap().map(|x| x.unwrap()).collect() };
+            assert_eq!(lv, vec!["backend", "ui"]);
+            let hl: i64 = c.query_row("SELECT COUNT(*) FROM history WHERE field = 'field:45'", [], |r| r.get(0)).unwrap();
+            assert_eq!(hl, 1);
+            let dev = fields(31);
+            assert!(dev[2].is_labels() && dev[2].id != 46);
+            let text_labels = dev.iter().find(|f| f.id == 46).unwrap();
+            assert_eq!((text_labels.kind, text_labels.name.as_deref(), text_labels.is_fixed()), (FieldKind::Text, Some("Labels (custom)"), false));
             assert!(own.iter().any(|f| f.is_due()));
             // Werte, Verlauf, Regel bleiben
             let v = |t: i64, f: i64| -> String { c.query_row("SELECT text FROM ticket_values WHERE ticket_id = ?1 AND field_id = ?2", [t, f], |r| r.get(0)).unwrap() };
@@ -475,7 +495,7 @@ mod tests {
         };
         // die Sicherung vor dem Update ist der Stand von 2.2.0
         let l = backup::list(&bdir);
-        assert!(l.len() == 1 && matches!(l[0].kind, backup::Kind::PreMigration { from: 7, .. }));
+        assert!(l.len() == 1 && matches!(l[0].kind, backup::Kind::PreMigration { from: 7, to: 9 }));
         // idempotent: die Umwandlung noch einmal (wie nach jedem neuen Typ) ändert nichts
         crate::planning::builtin_fields::ensure(&db.conn).unwrap();
         crate::planning::builtin_fields::ensure(&db.conn).unwrap();

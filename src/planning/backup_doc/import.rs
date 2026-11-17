@@ -247,8 +247,9 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress:
             // Sicherung ohne Fälligkeit (vor 2.3) passt ebenso
             let fs = list_fields(conn, t.id)?;
             let mut used: Vec<i64> = Vec::new();
-            for df in &d.fields {
-                let f = match crate::planning::builtin_fields::template_fits(df.key.as_deref(), df.kind) {
+            let targets = crate::planning::builtin_fields::builtin_targets(&d.fields.iter().map(|f| (f.key.as_deref(), f.name.as_deref(), f.kind)).collect::<Vec<_>>());
+            for (di, df) in d.fields.iter().enumerate() {
+                let f = match targets[di] {
                     Some(k) => fs.iter().find(|f| f.is_fixed() && f.key.as_deref() == Some(k)),
                     None => fs.iter().find(|f| !f.is_fixed() && !used.contains(&f.id)),
                 };

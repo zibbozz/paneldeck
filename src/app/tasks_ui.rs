@@ -863,7 +863,7 @@ impl TasksUi {
                     self.tag_mgr = Some(TagMgr::default());
                 }
                 if ui.small_button(lang.t("Fälligkeit …", "Due dates …")).on_hover_text(lang.t("Markierungen fälliger Karten einstellen", "Set up the markers of due cards")).clicked() {
-                    self.due_mgr = Some(DueManager(due_ui::Manager { loaded_for: Some(0), list: self.thresholds.clone(), err: None }));
+                    self.due_mgr = Some(DueManager(due_ui::Manager::new(0, self.thresholds.clone())));
                 }
                 let sort_label = match self.sort {
                     tasks::ItemSort::Manual => lang.t("Sortierung: eigene", "Order: manual"),
@@ -996,7 +996,8 @@ impl TasksUi {
                 } else if card.clicked() && hv.chip.is_none() {
                     acts.push(CardAct::Edit(it.id));
                 }
-                if card.drag_started() && !r_trash.dragged() && !r_check.dragged() {
+                // Ziehen ordnet die eigene Reihenfolge; bei Sortierung nach Fälligkeit gibt es sie nicht
+                if card.drag_started() && !r_trash.dragged() && !r_check.dragged() && self.sort == tasks::ItemSort::Manual {
                     let grab = pointer.map_or(Vec2::ZERO, |p| p - rect.min);
                     start_drag = Some(Drag { id: it.id, grab });
                 }
@@ -1097,11 +1098,12 @@ impl TasksUi {
             };
             if let Some(list) = save {
                 match tasks::set_due_thresholds(conn, &list) {
-                    Ok(()) => {
-                        mgr.0.list = list;
-                        self.dirty = true;
+                    // die Arbeitskopie bleibt, wie sie getippt wurde
+                    Ok(()) => self.dirty = true,
+                    Err(e) => {
+                        mgr.0.err = Some(e.message(lang));
+                        mgr.0.saved.clear();
                     }
-                    Err(e) => mgr.0.err = Some(e.message(lang)),
                 }
             }
             ui.add_space(S2);

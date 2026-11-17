@@ -180,9 +180,7 @@ fn build_inner(b: &mut Builder, tx: &data::Texts, s12_start: NaiveDate) -> Res<B
 
     // ---- zusätzliche Felder
     let milestone_name = lang.t("Meilenstein", "Milestone");
-    for t in [Ty::Epic, Ty::Story, Ty::Task, Ty::Defect] {
-        create_field(conn, &NewField::new(type_id(t), "Labels", FieldKind::Labels)).ex("Labels")?;
-    }
+    // Labels sind eingebaut (jeder Typ hat sie)
     for t in [Ty::Story, Ty::Task, Ty::Defect] {
         create_field(conn, &NewField::new(type_id(t), milestone_name, FieldKind::Milestone)).ex("Meilenstein")?;
     }

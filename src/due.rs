@@ -3,6 +3,8 @@
 //!
 //! * **Gespeicherte Form:** `JJJJ-MM-TT` (nur Datum) oder `JJJJ-MM-TTTHH:MM[:SS]` (mit Uhrzeit), lokale Zeit.
 //! * **Nur Datum** zählt als **Ende dieses Tages** (lokal): fällig bis 23:59:59, überfällig ab 00:00 des Folgetags.
+//! * **Sommer-/Winterzeit:** gerechnet wird in lokaler Wanduhrzeit ohne Zeitzone (`NaiveDateTime`). In der Nacht der Umstellung
+//!   ist die verbleibende Zeit daher um eine Stunde zu kurz bzw. zu lang; für Markierungen ab Stunden aufwärts ist das unerheblich.
 //! * **Schwellen:** eine Liste aus Dauer, Markierung und „Zeile/Karte tönen“. Es gilt die **kleinste** Schwelle, deren Dauer
 //!   größer ist als die verbleibende Zeit (überfällig = negative Zeit, also unter jeder Schwelle). Liegt die verbleibende Zeit
 //!   über allen Schwellen, gibt es keine Markierung.
@@ -204,9 +206,21 @@ pub fn validate_thresholds(list: &[DueThreshold]) -> Result<Vec<DueThreshold>, T
     Ok(out)
 }
 
-/// Liest gespeichertes JSON; Unlesbares oder Ungültiges ergibt eine leere Liste (keine Markierung).
+/// Liest gespeichertes JSON. Unlesbares JSON ergibt eine leere Liste; einzelne ungültige Einträge (z. B. ein unbekanntes Symbol,
+/// eine doppelte Dauer) fallen weg, die übrigen bleiben.
 pub fn parse_thresholds(json: &str) -> Vec<DueThreshold> {
-    serde_json::from_str::<Vec<DueThreshold>>(json).ok().and_then(|v| validate_thresholds(&v).ok()).unwrap_or_default()
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json) else { return Vec::new() };
+    let mut out: Vec<DueThreshold> = Vec::new();
+    for v in items {
+        let Ok(t) = serde_json::from_value::<DueThreshold>(v) else { continue };
+        if out.len() >= MAX_THRESHOLDS || out.iter().any(|o| o.under_minutes == t.under_minutes) {
+            continue;
+        }
+        if let Ok(mut ok) = validate_thresholds(&[t]) {
+            out.append(&mut ok);
+        }
+    }
+    out
 }
 
 pub fn thresholds_json(list: &[DueThreshold]) -> String {
@@ -625,6 +639,9 @@ mod tests {
         assert_eq!(thresholds_json(&default_thresholds()), DEFAULT_THRESHOLDS_JSON);
         assert!(parse_thresholds("kaputt").is_empty());
         assert!(parse_thresholds(r#"[{"under_minutes":0}]"#).is_empty());
+        // nur die ungültigen Einträge fallen weg
+        let mixed = r##"[{"under_minutes":60,"marker":{"symbol":"gibtsnicht"}},{"under_minutes":120},{"under_minutes":120,"tint":true},"x",{"under_minutes":-1}]"##;
+        assert_eq!(parse_thresholds(mixed), vec![DueThreshold { under_minutes: 120, marker: DueMarker::default(), tint: false }]);
         let min = parse_thresholds(r#"[{"under_minutes":60}]"#);
         assert_eq!(min, vec![DueThreshold { under_minutes: 60, marker: DueMarker::default(), tint: false }]);
         assert!(min[0].marker.is_none());

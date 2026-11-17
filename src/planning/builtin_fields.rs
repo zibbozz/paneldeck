@@ -1,22 +1,29 @@
-//! Eingebaute Felder jedes Tickets (jeder Typ außer dem System-Typ): **Beschreibung** (Rich-Text, optional) und **Fälligkeit**
-//! (Datum mit optionaler Uhrzeit, optional). Der Titel ist kein Feld, sondern eine Spalte des Tickets.
+//! Eingebaute Felder jedes Tickets (jeder Typ außer dem System-Typ): **Beschreibung** (Rich-Text, optional), **Fälligkeit**
+//! (Datum mit optionaler Uhrzeit, optional) und **Labels** (mehrere Texte, optional). Der Titel ist kein Feld, sondern eine
+//! Spalte des Tickets.
 //!
-//! * Beide stehen als gewöhnliche Zeilen in `fields` (Schlüssel `description` bzw. `due`, `builtin = 1`). Damit gelten
+//! * Alle drei stehen als gewöhnliche Zeilen in `fields` (Schlüssel `description`, `due`, `labels`, `builtin = 1`). Damit gelten
 //!   Werte, Verlauf, Rückgängig, Übergangsregeln, Quick-Actions, Boards, Suche, Sicherung und CSV unverändert.
-//! * **Fest:** Ein Feld mit einem der beiden Schlüssel und `builtin = 1` ist nicht löschbar, Name/Optionen/Pflicht/Standard
-//!   sind nicht änderbar ([`super::fields::Field::is_fixed`]); es steht immer oben (Positionen -2 und -1).
-//! * [`ENSURE_SQL`] legt die Felder für jeden Typ an, dem sie fehlen, und wandelt bestehende um (idempotent). Die Migration 8
-//!   führt sie einmal aus; danach rufen `create_type` und die Vorlagen-/Sicherungs-Importe [`ensure`] auf.
+//! * **Fest:** Ein Feld mit einem dieser Schlüssel und `builtin = 1` ist nicht löschbar, Name/Optionen/Pflicht/Standard sind nicht
+//!   änderbar ([`super::fields::Field::is_fixed`]); sie stehen immer oben (Positionen -3, -2, -1).
+//! * Umwandlungen bestehender Felder macht nur die jeweilige Migration (eingefrorenes SQL, [`MIGRATION`] = 8 für Beschreibung und
+//!   Fälligkeit, [`MIGRATION_LABELS`] = 9 für Labels). Danach legt [`ensure`] nur noch fehlende Felder an (neue Typen, Importe,
+//!   von außen eingefügte Typen) – billig geprüft und in einer Transaktion.
 //!
-//! Umwandlung beim Update (Migration 8):
-//! 1. Ein Feld mit Schlüssel `description` und Feldtyp Text oder Rich-Text **wird** die eingebaute Beschreibung (Feldtyp
-//!    Rich-Text, nicht Pflicht); Werte, Verlauf und Verweise in Regeln bleiben, weil die Feld-Kennung gleich bleibt.
-//! 2. Hat ein Typ kein solches Feld, wird das erste eigene Text-/Rich-Text-Feld namens „Description“/„Beschreibung“ zur
-//!    eingebauten Beschreibung.
-//! 3. Ein Feld mit Schlüssel `description`/`due` anderen Feldtyps verliert den Schlüssel und bleibt als eigenes Feld.
-//! 4. Ein eigenes Feld wie „Due date“ bleibt ein normales eigenes Feld (kein Zusammenlegen mit der Fälligkeit).
+//! Umwandlung beim Update (Migration 8 und 9, je Feld):
+//! 1. Ein Feld mit dem Schlüssel und passendem Feldtyp **wird** das eingebaute Feld (Beschreibung: Text/Rich-Text → Rich-Text;
+//!    Fälligkeit: Datum+Uhrzeit; Labels: Labels), nicht Pflicht; Werte, Verlauf und Verweise in Regeln bleiben, weil die
+//!    Feld-Kennung gleich bleibt.
+//! 2. Hat ein Typ kein solches Feld, wird das erste eigene Feld passender Art namens „Description“/„Beschreibung“ bzw. „Labels“
+//!    zum eingebauten Feld.
+//! 3. Ein Feld mit einem dieser Schlüssel und anderem Feldtyp verliert den Schlüssel und bleibt als eigenes Feld.
+//! 4. Eigene Felder, deren Name danach mit dem eines eingebauten Feldes im selben Typ gleich wäre (z. B. „Due date“), heißen
+//!    „… (custom)“ und bleiben eigene Felder.
 //! 5. Projekte mit den mitgelieferten Typen (Schlüssel epic/userstory/devtask/subtask/defect) bekommen die Standard-Schwellen
 //!    der Fälligkeits-Markierung, alle anderen keine. Todo-Karten bekommen die Spalte `due`.
+//!
+//! Text-Werte einer zu Rich-Text gewordenen Beschreibung werden nicht umgeschrieben: der Markdown-Leser kennt keine
+//! Backslash-Maskierung, Sonderzeichen wie `*` erscheinen daher ggf. als Formatierung.
 
 use rusqlite::Connection;
 
@@ -24,15 +31,22 @@ use rusqlite::Connection;
 pub const DESCRIPTION_KEY: &str = "description";
 /// Schlüssel der eingebauten Fälligkeit.
 pub const DUE_KEY: &str = "due";
-/// Schlüssel der eingebauten Felder.
-pub const FIXED_KEYS: [&str; 2] = [DESCRIPTION_KEY, DUE_KEY];
+/// Schlüssel der eingebauten Labels.
+pub const LABELS_KEY: &str = "labels";
+/// Schlüssel der eingebauten Felder (in der Reihenfolge im Typ).
+pub const FIXED_KEYS: [&str; 3] = [DESCRIPTION_KEY, DUE_KEY, LABELS_KEY];
 
 /// Optionen der Fälligkeit (Datum+Uhrzeit, Uhrzeit optional).
 pub const DUE_OPTIONS_JSON: &str = r#"{"time_optional":true}"#;
 
-macro_rules! ensure_sql {
-    () => {
-        "
+/// SQL der Migration 8: Spalten für Schwellen und Todo-Fälligkeit, eingebaute Beschreibung und Fälligkeit, Standard-Schwellen.
+/// Eingefroren: nach dem Erscheinen nie ändern (spätere Änderungen kommen als eigene Migration).
+pub const MIGRATION: &str = r##"
+ALTER TABLE projects ADD COLUMN due_thresholds TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE todo_items ADD COLUMN due TEXT;
+CREATE INDEX todo_items_due ON todo_items (due) WHERE due IS NOT NULL;
+UPDATE projects SET due_thresholds = '[{"under_minutes":10080,"marker":{"frame":"triangle","symbol":"alert","color":"#D8B94A"},"tint":false},{"under_minutes":1440,"marker":{"frame":"triangle","symbol":"alert","color":"#E06C75"},"tint":false}]'
+ WHERE system = 0 AND EXISTS (SELECT 1 FROM ticket_types t WHERE t.project_id = projects.id AND t.key IN ('epic', 'userstory', 'devtask', 'subtask', 'defect'));
 -- (3) Schlüssel description/due bei unpassendem Feldtyp: wird ein eigenes Feld
 UPDATE fields SET key = NULL, name = COALESCE(name, 'Description (custom)'), builtin = 0
  WHERE key = 'description' AND kind NOT IN ('rich', 'text');
@@ -46,55 +60,127 @@ UPDATE fields SET key = 'description', name = NULL
       AND NOT EXISTS (SELECT 1 FROM fields g WHERE g.type_id = f.type_id AND g.key = 'description')
     GROUP BY f.type_id);
 -- (1) vorhandene Beschreibungs-/Fälligkeitsfelder festschreiben
-UPDATE fields SET options = CASE WHEN kind = 'text' THEN '{\"rows\":8}' ELSE options END
+UPDATE fields SET options = CASE WHEN kind = 'text' THEN '{"rows":8}' ELSE options END
  WHERE key = 'description' AND type_id IN (SELECT id FROM ticket_types WHERE system = 0);
-UPDATE fields SET kind = 'rich', builtin = 1, required = 0, position = -2
+UPDATE fields SET kind = 'rich', builtin = 1, required = 0, position = -3
  WHERE key = 'description' AND type_id IN (SELECT id FROM ticket_types WHERE system = 0);
-UPDATE fields SET options = '{\"time_optional\":true}', builtin = 1, required = 0, position = -1
+UPDATE fields SET options = '{"time_optional":true}', builtin = 1, required = 0, position = -2
  WHERE key = 'due' AND type_id IN (SELECT id FROM ticket_types WHERE system = 0);
 -- fehlende anlegen
 INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
- SELECT t.id, 'description', NULL, 'rich', '{\"rows\":8}', 0, NULL, '', '', -2, 0, 1 FROM ticket_types t
+ SELECT t.id, 'description', NULL, 'rich', '{"rows":8}', 0, NULL, '', '', -3, 0, 1 FROM ticket_types t
   WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'description');
 INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
- SELECT t.id, 'due', NULL, 'datetime', '{\"time_optional\":true}', 0, NULL, '', '', -1, 0, 1 FROM ticket_types t
+ SELECT t.id, 'due', NULL, 'datetime', '{"time_optional":true}', 0, NULL, '', '', -2, 0, 1 FROM ticket_types t
   WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'due');
-"
-    };
-}
+-- (4) eigene Felder, die jetzt wie ein eingebautes heißen, bekommen den Zusatz „(custom)“
+UPDATE fields SET name = name || ' (custom)'
+ WHERE key IS NULL AND lower(trim(name)) IN ('description', 'beschreibung')
+   AND type_id IN (SELECT type_id FROM fields WHERE key = 'description' AND builtin = 1);
+UPDATE fields SET name = name || ' (custom)'
+ WHERE key IS NULL AND lower(trim(name)) IN ('due date', 'fällig am')
+   AND type_id IN (SELECT type_id FROM fields WHERE key = 'due' AND builtin = 1);
+"##;
 
-/// Legt die eingebauten Felder für alle Typen an bzw. wandelt sie um (idempotent).
-pub const ENSURE_SQL: &str = ensure_sql!();
+/// SQL der Migration 9: eingebaute Labels (Issue #195). Eingefroren wie [`MIGRATION`].
+pub const MIGRATION_LABELS: &str = r##"
+-- (3) Schlüssel labels bei unpassendem Feldtyp: wird ein eigenes Feld
+UPDATE fields SET key = NULL, name = COALESCE(name, 'Labels (custom)'), builtin = 0
+ WHERE key = 'labels' AND kind <> 'labels';
+-- (2) eigenes Labels-Feld namens „Labels“ in Typen ohne Labels-Feld mit Schlüssel (der Name bleibt als Anzeigename)
+UPDATE fields SET key = 'labels', name = NULL
+ WHERE id IN (
+   SELECT MIN(f.id) FROM fields f JOIN ticket_types t ON t.id = f.type_id
+    WHERE t.system = 0 AND f.key IS NULL AND f.kind = 'labels' AND lower(trim(f.name)) = 'labels'
+      AND NOT EXISTS (SELECT 1 FROM fields g WHERE g.type_id = f.type_id AND g.key = 'labels')
+    GROUP BY f.type_id);
+-- (1) festschreiben (oben, nicht Pflicht; „auf Karte“ bleibt, wie es war)
+UPDATE fields SET builtin = 1, required = 0, options = '{}', position = -1
+ WHERE key = 'labels' AND type_id IN (SELECT id FROM ticket_types WHERE system = 0);
+-- fehlende anlegen (auf der Karte sichtbar)
+INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
+ SELECT t.id, 'labels', NULL, 'labels', '{}', 0, NULL, '', '', -1, 1, 1 FROM ticket_types t
+  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'labels');
+-- (4) gleichnamige eigene Felder (anderer Art, oder ein zweites „Labels“) bekommen den Zusatz „(custom)“
+UPDATE fields SET name = name || ' (custom)'
+ WHERE key IS NULL AND lower(trim(name)) = 'labels'
+   AND type_id IN (SELECT type_id FROM fields WHERE key = 'labels' AND builtin = 1);
+"##;
 
-/// SQL der Migration 8: Spalten für Schwellen und Todo-Fälligkeit, eingebaute Felder, Standard-Schwellen.
-/// Nur anhängen: diese Migration nach dem Erscheinen nie ändern.
-pub const MIGRATION: &str = concat!(
-    "
-ALTER TABLE projects ADD COLUMN due_thresholds TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE todo_items ADD COLUMN due TEXT;
-CREATE INDEX todo_items_due ON todo_items (due) WHERE due IS NOT NULL;
-UPDATE projects SET due_thresholds = '",
-    r##"[{"under_minutes":10080,"marker":{"frame":"triangle","symbol":"alert","color":"#D8B94A"},"tint":false},{"under_minutes":1440,"marker":{"frame":"triangle","symbol":"alert","color":"#E06C75"},"tint":false}]"##,
-    "'
- WHERE system = 0 AND EXISTS (SELECT 1 FROM ticket_types t WHERE t.project_id = projects.id AND t.key IN ('epic', 'userstory', 'devtask', 'subtask', 'defect'));
-",
-    ensure_sql!()
-);
+/// Fehlende eingebaute Felder anlegen (keine Umwandlungen, die macht nur die Migration).
+const INSERT_MISSING_SQL: &str = r##"
+INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
+ SELECT t.id, 'description', NULL, 'rich', '{"rows":8}', 0, NULL, '', '', -3, 0, 1 FROM ticket_types t
+  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'description');
+INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
+ SELECT t.id, 'due', NULL, 'datetime', '{"time_optional":true}', 0, NULL, '', '', -2, 0, 1 FROM ticket_types t
+  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'due');
+INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
+ SELECT t.id, 'labels', NULL, 'labels', '{}', 0, NULL, '', '', -1, 1, 1 FROM ticket_types t
+  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'labels');
+"##;
 
-/// Eingebaute Felder für alle Typen sicherstellen (nach dem Anlegen eines Typs und nach Importen).
+/// Fehlt irgendeinem Typ ein eingebautes Feld? (billig, für den Aufruf beim Öffnen)
+const MISSING_SQL: &str = "SELECT EXISTS (SELECT 1 FROM ticket_types t WHERE t.system = 0 AND (SELECT COUNT(*) FROM fields f WHERE f.type_id = t.id AND f.key IN ('description', 'due', 'labels')) < 3)";
+
+/// Fehlende eingebaute Felder für alle Typen anlegen (nach dem Anlegen eines Typs, nach Importen, beim Öffnen). Prüft zuerst
+/// billig, ob überhaupt etwas fehlt, und schreibt dann in einem SAVEPOINT (auch innerhalb einer äußeren Transaktion).
 pub fn ensure(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(ENSURE_SQL)
-}
-
-/// Wird ein Feld einer Vorlage/Sicherung (Schlüssel, Feldtyp) zum eingebauten Feld? Liefert dessen Schlüssel.
-pub fn template_fits(key: Option<&str>, kind: super::fields::FieldKind) -> Option<&'static str> {
-    use super::fields::FieldKind;
-    match key? {
-        DESCRIPTION_KEY if matches!(kind, FieldKind::Rich | FieldKind::Text) => Some(DESCRIPTION_KEY),
-        DUE_KEY if kind == FieldKind::Datetime => Some(DUE_KEY),
-        _ => None,
+    let missing: bool = conn.query_row(MISSING_SQL, [], |r| r.get(0))?;
+    if !missing {
+        return Ok(());
+    }
+    conn.execute_batch("SAVEPOINT ensure_builtin_fields")?;
+    match conn.execute_batch(INSERT_MISSING_SQL) {
+        Ok(()) => conn.execute_batch("RELEASE ensure_builtin_fields"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO ensure_builtin_fields; RELEASE ensure_builtin_fields");
+            Err(e)
+        }
     }
 }
+
+/// Passt ein Feldtyp zum eingebauten Feld?
+fn kind_fits(key: &str, kind: super::fields::FieldKind) -> bool {
+    use super::fields::FieldKind;
+    match key {
+        DESCRIPTION_KEY => matches!(kind, FieldKind::Rich | FieldKind::Text),
+        DUE_KEY => kind == FieldKind::Datetime,
+        LABELS_KEY => kind == FieldKind::Labels,
+        _ => false,
+    }
+}
+
+/// Namen eigener Felder, die beim Update (und beim Import älterer Vorlagen) zum eingebauten Feld werden.
+fn legacy_names(key: &str) -> &'static [&'static str] {
+    match key {
+        DESCRIPTION_KEY => &["description", "beschreibung"],
+        LABELS_KEY => &["labels"],
+        _ => &[],
+    }
+}
+
+/// Heißt ein eigenes Feld wie ein eingebautes (in einer der Sprachen)? Dann bekommt es beim Update/Import „(custom)“.
+pub fn is_builtin_label(name: &str) -> bool {
+    let n = name.trim().to_lowercase();
+    FIXED_KEYS.iter().any(|k| [crate::state::Lang::De, crate::state::Lang::En].iter().any(|l| super::names::display_name(Some(k), None, *l).to_lowercase() == n))
+}
+
+/// Welche Felder eines Typs aus einer Vorlage/Sicherung (Schlüssel, Name, Feldtyp) zu welchem eingebauten Feld gehören – nach
+/// denselben Regeln wie beim Update: zuerst ein Feld mit dem Schlüssel und passendem Feldtyp, sonst das erste eigene Feld
+/// passender Art mit einem der alten Namen („Description“/„Beschreibung“, „Labels“).
+pub fn builtin_targets(fields: &[(Option<&str>, Option<&str>, super::fields::FieldKind)]) -> Vec<Option<&'static str>> {
+    let mut out: Vec<Option<&'static str>> = vec![None; fields.len()];
+    for k in FIXED_KEYS {
+        let keyed = fields.iter().position(|(key, _, kind)| *key == Some(k) && kind_fits(k, *kind));
+        let by_name = || fields.iter().enumerate().position(|(i, (key, name, kind))| out[i].is_none() && key.is_none() && kind_fits(k, *kind) && name.is_some_and(|n| legacy_names(k).contains(&n.trim().to_lowercase().as_str())));
+        if let Some(i) = keyed.or_else(by_name) {
+            out[i] = Some(k);
+        }
+    }
+    out
+}
+
 
 /// Hat das Projekt die mitgelieferten Typen (Schlüssel epic/userstory/devtask/subtask/defect)?
 pub fn has_preset_types(conn: &Connection, project_id: i64) -> rusqlite::Result<bool> {
@@ -142,15 +228,15 @@ mod tests {
     use crate::planning::types::{create_type, list_types, NewType};
 
     #[test]
-    fn the_migration_sql_and_ensure_agree_and_are_idempotent() {
-        assert!(MIGRATION.contains(ENSURE_SQL));
+    fn new_types_get_all_built_in_fields_and_ensure_is_idempotent() {
         assert!(MIGRATION.contains(crate::due::DEFAULT_THRESHOLDS_JSON));
-        assert!(ENSURE_SQL.contains(DUE_OPTIONS_JSON));
+        assert!(MIGRATION.contains(DUE_OPTIONS_JSON) && INSERT_MISSING_SQL.contains(DUE_OPTIONS_JSON));
         let c = db();
         let p = create_project(&c, &NewProject::new("AA", "P", "#112233")).unwrap();
         let t = create_type(&c, &NewType { project_id: p, key: None, name: Some("T".into()), icon: None, color: "#445566".into(), workflow: false }).unwrap();
         let before = list_fields(&c, t).unwrap();
-        assert_eq!(before.iter().map(|f| f.key.clone().unwrap()).collect::<Vec<_>>(), vec!["description", "due"]);
+        assert_eq!(before.iter().map(|f| f.key.clone().unwrap()).collect::<Vec<_>>(), vec!["description", "due", "labels"]);
+        assert_eq!((before[2].kind, before[2].show_on_card), (FieldKind::Labels, true));
         assert!(before.iter().all(|f| f.is_fixed() && !f.required));
         assert_eq!(before[0].kind, FieldKind::Rich);
         assert_eq!((before[1].kind, before[1].options.time_optional), (FieldKind::Datetime, Some(true)));
@@ -170,8 +256,33 @@ mod tests {
         let q = create_project(&c, &np).unwrap();
         assert_eq!(due_thresholds(&c, q).unwrap(), crate::due::default_thresholds());
         for ty in list_types(&c, q).unwrap() {
-            let keys: Vec<String> = list_fields(&c, ty.id).unwrap().iter().take(2).map(|f| f.key.clone().unwrap()).collect();
-            assert_eq!(keys, vec!["description", "due"], "{:?}", ty.key);
+            let keys: Vec<String> = list_fields(&c, ty.id).unwrap().iter().take(3).map(|f| f.key.clone().unwrap()).collect();
+            assert_eq!(keys, vec!["description", "due", "labels"], "{:?}", ty.key);
         }
+        // ein von außen eingefügter Typ (ohne Felder) bekommt sie beim nächsten `ensure`, in einer Transaktion des Aufrufers
+        c.execute("INSERT INTO ticket_types (project_id, key, name, color, workflow, system, position) VALUES (?1, NULL, 'Roh', '#112233', 0, 0, 9)", [p]).unwrap();
+        let raw = c.last_insert_rowid();
+        assert!(list_fields(&c, raw).unwrap().is_empty());
+        c.execute_batch("BEGIN").unwrap();
+        ensure(&c).unwrap();
+        c.execute_batch("COMMIT").unwrap();
+        assert_eq!(list_fields(&c, raw).unwrap().len(), 3);
+        let n: i64 = c.query_row(MISSING_SQL, [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "danach fehlt nichts mehr");
+    }
+
+    #[test]
+    fn builtin_targets_follow_the_update_rules() {
+        use FieldKind::*;
+        let t = |v: &[(Option<&str>, Option<&str>, FieldKind)]| builtin_targets(v);
+        // mit Schlüssel und passender Art
+        assert_eq!(t(&[(Some("description"), None, Text), (Some("due"), None, Datetime), (Some("labels"), None, Labels)]), vec![Some(DESCRIPTION_KEY), Some(DUE_KEY), Some(LABELS_KEY)]);
+        // ohne Schlüssel über den alten Namen (erstes passendes), andere Art nicht
+        assert_eq!(t(&[(None, Some("Beschreibung"), Rich), (None, Some("Labels"), Labels), (None, Some("labels"), Labels)]), vec![Some(DESCRIPTION_KEY), Some(LABELS_KEY), None]);
+        assert_eq!(t(&[(None, Some("Labels"), Text), (None, Some("Due date"), Date), (Some("due"), None, Date)]), vec![None, None, None]);
+        // Schlüssel geht vor Namen
+        assert_eq!(t(&[(None, Some("Description"), Text), (Some("description"), Some("Details"), Rich)]), vec![None, Some(DESCRIPTION_KEY)]);
+        assert!(is_builtin_label("Due date") && is_builtin_label(" fällig am ") && is_builtin_label("LABELS") && is_builtin_label("Beschreibung"));
+        assert!(!is_builtin_label("Due") && !is_builtin_label("Notes"));
     }
 }
