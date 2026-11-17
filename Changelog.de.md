@@ -32,6 +32,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Weitere Claude-Startoptionen unter „Weitere Claude-Optionen“ im Dialog „Neue Sitzung“, in den Einstellungen der Sitzung (eine Änderung fragt „Jetzt neu laden?“) und als Standard unter Einstellungen → Claude: Schalter `--chrome`/`--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` und `--safe-mode` (mit Warnung); zusätzliche Ordner (`--add-dir`), erlaubte und verbotene Werkzeuge, eine MCP-Konfiguration, ein Zusatz zum System-Prompt, ein Ersatzmodell, ein Höchstbudget und Auto-Komprimierung. Optionen, die Zugriffe erweitern, zeigen eine Warnung; fehlende Ordner oder Dateien werden beim Start mit Hinweis weggelassen. (#182)
 - MCP: `create_session` nimmt `claude_flags` (nur Schalter); `list_sessions`, `whoami` und `create_session` melden `claude_flags` und `claude_user_options` (nur Namen, wie angewendet). (#182)
 - Icon-Explorer mit dem Lucide-Icon-Satz (über 2.000 Icons, ISC): In jedem Icon-Picker öffnet „Weitere Icons …“ ein Fenster mit den eingebauten Icons (Kategorie „Eingebaut“) und allen Lucide-Icons – Suche nach Name und Stichwort, Kategorien, Raster mit Vorschau beim Darüberfahren, große Vorschau und Auswählen/Abbrechen (Esc schließt). Die eingebauten Icons bleiben im Picker. Ein Lucide-Icon wird als `lucide:<name>` gespeichert; Sicherungen, Vorlagen-Export/-Import und das MCP-Werkzeug `get_project` übernehmen es. Alte Lucide-Namen werden mit dem aktuellen Icon angezeigt und unter dem neuen Namen gespeichert; Icons aus einer neueren Lucide-Version erscheinen als Platzhalter, statt den Import abzubrechen. Sicherungen und Vorlagen mit Lucide-Icons lassen sich nicht in Versionen vor 2.3 importieren. (#190)
+- Claude-Startoptionen: Modell, Effort, Permission-Mode und Agent – als Standard unter Einstellungen → Claude und je Sitzung im Dialog „Neue Sitzung“; je Sitzung in `state.json` gespeichert (optionales Feld `claude_opts`). (#161)
+- MCP: `create_session` nimmt `model`, `effort`, `permission_mode` und `agent` an (nur mit `claude: true`, geprüft); `list_sessions`, `whoami` und `create_session` melden sie. (#161)
 
 ### Changed
 
@@ -60,6 +62,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
 - Terminals erben keine internen oder reinen Test-Variablen `PANELDECK_*` von Paneldeck mehr (z. B. wenn Paneldeck aus dem Terminal eines anderen Paneldeck gestartet wurde). (#175)
 - Klickbare Elemente ohne jeden Hinweis (Kostenzeile, MCP-Chip, Toasts, Tag-Farben, Eltern-Ticket) zeigen jetzt Hover, Hand-Zeiger und Tooltip. (#187)
+- MCP `read_chat` schneidet Werkzeug-Ergebnisse eines Chats nicht mehr nach 8 KB vorn ab; sie kommen bis zur Grenze von 16 KB für Werkzeug-Ergebnisse, das Ende mit den neuesten Nachrichten und dem Status bleibt erhalten. (#194)
 
 ### Security
 
@@ -71,6 +74,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Paneldeck lädt keine DLLs mehr aus dem Arbeitsordner: Gleich beim Start wird die DLL-Suche auf den Programmordner und System32 beschränkt, der mitgelieferte Konsolen-Host wird über seinen vollen Pfad geladen. (#183)
 - Die C-Laufzeit ist jetzt in `paneldeck.exe` eingebunden; die `VCRUNTIME140.dll`, die Windows noch vor dem Start von Paneldeck suchen würde, wird nicht mehr gebraucht. (#183)
 - Agenten (MCP) können nur Schalter ergänzen, die Rechte, Zugriffe und Hooks nicht berühren (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; chrome nicht, wenn du Chrome als Standard ausgeschaltet hast). Wertoptionen, Flags, die Rechte oder Zugriffe erweitern, Flags, die Hooks abschalten (`--safe-mode`), und Flags, die Paneldeck steuert, werden abgelehnt. Zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration und `--safe-mode` aus den Standards gelten nie für Sitzungen, die Agenten anlegen oder die per `paneldeck --open --claude` aus einem Hub-Terminal geöffnet werden. Pfade müssen lokal sein und existieren (Netzwerkfreigaben, auch über Verknüpfungen, werden nie berührt); alle Werte werden geprüft und je Shell gequotet. (#182)
+- Per MCP angelegte Sitzungen ohne Permission-Mode bekommen ausdrücklich `--permission-mode default`, damit die eigenen Claude-Einstellungen des Nutzers bypassPermissions nicht einschalten können; `bypassPermissions` geht nie per MCP, nie als gespeicherter Standard und wird nie gemerkt – nur als ausdrückliche Wahl je Sitzung mit Warnung. Alte `--dangerously-*`-Argumente fallen weg. (#161)
 
 ## [2.2.0] - 2026-11-16
 

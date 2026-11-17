@@ -32,6 +32,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - More Claude start options under "More Claude options" in the New session dialog, in the session settings (a change asks "Reload now?") and as defaults under Settings → Claude: switches `--chrome`/`--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` and `--safe-mode` (with a warning); extra folders (`--add-dir`), allowed and disallowed tools, an MCP config, an addition to the system prompt, a fallback model, a maximum budget and auto-compact. Options that widen access show a warning; missing folders or files are left out at start with a notice. (#182)
 - MCP: `create_session` takes `claude_flags` (switches only); `list_sessions`, `whoami` and `create_session` report `claude_flags` and `claude_user_options` (names only, as applied). (#182)
 - Icon explorer with the Lucide icon set (more than 2,000 icons, ISC): from any icon picker, "More icons …" opens a window with the built-in icons (category "Built-in") and all Lucide icons – search by name and tag, categories, a grid with hover preview, a large preview and Select/Cancel (Esc closes). The built-in icons stay in the pickers. A Lucide icon is stored as `lucide:<name>`; backups, template export/import and the MCP tool `get_project` carry it. Old Lucide names are shown with the current icon and saved under the new name; icons from a newer Lucide version show as a placeholder instead of failing the import. Backups and templates with Lucide icons cannot be imported into versions before 2.3. (#190)
+- Claude start options: model, effort, permission mode and agent – as defaults under Settings → Claude and per session in the New session dialog; stored per session in `state.json` (optional field `claude_opts`). (#161)
+- MCP: `create_session` accepts `model`, `effort`, `permission_mode` and `agent` (only with `claude: true`, validated); `list_sessions`, `whoami` and `create_session` report them. (#161)
 
 ### Changed
 
@@ -60,6 +62,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
 - Terminals no longer inherit Paneldeck's internal or test-only `PANELDECK_*` variables (for example when Paneldeck was started from another Paneldeck's terminal). (#175)
 - Clickable elements without any hint (cost summary, MCP chip, toasts, tag colours, parent ticket key) now show a hover state, the hand cursor and a tooltip. (#187)
+- MCP `read_chat` no longer cuts a chat's tool results at 8 KB from the start; they come through up to the 16 KB tool-result limit, so the end with the newest messages and the status is kept. (#194)
 
 ### Security
 
@@ -71,6 +74,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Paneldeck no longer loads DLLs from the current working folder: right at startup the DLL search is restricted to the program folder and System32, and the bundled console host is loaded by its full path. (#183)
 - The C runtime is now linked into `paneldeck.exe`; it no longer needs `VCRUNTIME140.dll`, which Windows would look for before Paneldeck starts. (#183)
 - Agents (MCP) can only add switches that don't affect rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; not chrome if you turned Chrome off by default). Value options, flags that widen rights or access, flags that turn off hooks (`--safe-mode`) and flags Paneldeck controls are refused. Extra folders, allowed tools, an MCP config and `--safe-mode` from your defaults never apply to agent-created sessions or to `paneldeck --open --claude` from a Hub terminal. Paths must be local and existing (network shares, also via links, are never accessed); all values are validated and quoted per shell. (#182)
+- Sessions created via MCP without a permission mode get an explicit `--permission-mode default`, so the user's own Claude settings cannot turn on bypassPermissions; `bypassPermissions` is never possible via MCP, never a stored default and never remembered – only an explicit per-session choice with a warning. Old `--dangerously-*` arguments are dropped. (#161)
 
 ## [2.2.0] - 2026-11-16
 
