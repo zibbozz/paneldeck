@@ -12,7 +12,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Added
 
 - Middle-click on a session in the sidebar closes it, with the same confirmation as the close button (#155).
-- Close all sessions at once (#156): a reddish trash button on folders in the sidebar (on hover; includes subfolders, minimized sessions and chats) and one right of the filter field (all sessions of all projects and windows); also in the project context menu, the command palette and as a shortcut (no default). The confirmation lists what will end and enables "Close all" after 3 seconds; Git worktrees and branches are kept.
+- Close all sessions at once (#156): a trash button on folders in the sidebar (on hover, subtle until hovered, then red; includes subfolders, minimized sessions and chats) and one right of the filter field (all sessions of all projects and windows); also in the project context menu, the command palette and as a shortcut (no default). The confirmation lists what will end and enables "Close all" after 3 seconds; Git worktrees and branches are kept.
 - Setting *Remember sessions* (Settings → General, on by default; new optional `settings.json` field `remember_sessions`) (#157). When off, every start is fresh: no terminals, chats, projects or folders from the last run; chat histories are deleted on exit. Settings, to-do list and tickets stay. Turning it off asks first; the state is backed up to `state.json.bak-<date>` (newest kept).
 - Context menu "Reset agent chain" for sessions started from an agent chain; the session tooltip names the chain.
 - Reload button in the pane header (also in detached windows, the palette and the sidebar context menu): restarts the session's shell, or Claude Code according to the session's options; asks first while a program is running, without the 3-second wait. Optional keyboard shortcut "Reload session" (no default). (#169)
@@ -26,15 +26,20 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Editable color palette (Settings → Colors): one shared palette by default for the Terminal Hub (session, folder, project, profile colors), todo-list tags and expert mode (projects, types, statuses, dropdown values, charts), or optionally a separate palette per area (both are kept when switching). Add, edit (color wheel or hex), delete and drag to reorder colors, give them optional names (shown in the tooltip, e.g. "Cool blue (#2288FF)"), and restore deleted defaults. Every color picker also offers "Custom color …" for a one-off color. Existing items keep their color; automatically assigned colors stay as before until you edit the palette. Stored in `settings.json` (new optional field `palette`; untouched lists are not written). (#173)
 - Bundled console host: the installer and the portable ZIP now include a newer ConPTY from Microsoft (`conpty.dll` and `OpenConsole.exe`, 1.25). It passes colour queries (OSC 10/11) and synchronized output (mode 2026) through to Paneldeck in the right order, so full-screen programs flicker less. New setting *Settings → Appearance → Use the bundled console host (recommended)*, on by default. When it is off, or the files are missing or fail, sessions use the console host built into Windows; a notice appears if this happens repeatedly. Changes apply to new sessions. New optional field `bundled_conpty` in `settings.json`. (#183)
 - MCP: `list_sessions` reports the console host of each terminal in the new optional field `console_host` (`bundled` or `system`). (#183)
+- Agents can choose where `focus_session` and `create_session` show a session with the new optional `placement`: `replace` (default for `focus_session`; replaces only the active pane – the agent's own pane if visible, otherwise the one the user focused – and minimizes it), `split_right` / `split_down` (split only the active pane) or `solo` (only pane, the others are minimized). Placement never moves the user's keyboard focus (unless their pane was replaced) and never brings a window to the front; panes waiting for an approval and sessions of the agent's chain are never displaced. Without `placement`, `create_session` stays quiet as before. `list_sessions` reports `shown` (the pane is on screen). (#162)
+- Ctrl+Tab also reaches minimized sessions and shows them in the focused pane; the pane they replace is minimized. After a session opens alone, a short notice shows how many panes were minimized. (#162)
+- Setting "Inherit Paneldeck's environment" (Settings → General, off by default; `settings.json` field `inherit_env`): new terminals get exactly the environment Paneldeck was started with instead of the variables read fresh from Windows. (#175)
 
 ### Changed
 
-- The close confirmation now enables *Close* after a 3-second wait; Enter only confirms after the countdown, and Esc/Enter in the dialog no longer reach the terminal behind it.
+- Esc/Enter in the close confirmation no longer reach the terminal behind it; closing a single session still asks without a wait, only closing many sessions enables *Close all* after 3 seconds (#156).
 - A folder's *Close all sessions …* opens a confirmation with a list instead of the double-click button.
-- Restoring a minimized session (sidebar click, palette "Switch to", MCP `focus_session`) now opens it alone: it replaces the layout of the window/project and the panes that were visible become minimized sessions that keep running. Ctrl+Shift+W only minimizes; the old place in the split is no longer remembered (#162).
+- Restoring a minimized session with a sidebar click or the palette's "Switch to" now opens it alone: it replaces the layout of the window/project and the panes that were visible become minimized sessions that keep running. Ctrl+Shift+W only minimizes; the old place in the split is no longer remembered. Ctrl+Tab shows a minimized session in the focused pane instead; MCP `focus_session` uses `placement` (default `replace`) (#162).
 - A WSL session without a start folder now starts in the Linux home (`~`) instead of the Windows user folder; a restored WSL session whose saved folder cannot be used starts in `~` with a note. (#172)
 - MCP `create_session` refuses Linux paths for Windows shells, and `\\wsl$` paths of another distribution. (#172)
 - Updates replace `paneldeck.exe`, `conpty.dll` and `OpenConsole.exe` together even while Paneldeck is running: the installer writes the console host first and puts the previous file back if writing fails; the portable self-update replaces all files or none. Leftover `.old` files are removed on the next start, and uninstalling removes the console host too. (#183)
+- MCP `focus_session` on a minimized session now uses the default `replace` instead of opening it alone (use `placement: "solo"` for that); a chat needs approval for `focus_session` with `placement`. (#162)
+- With "Remember sessions" off, an update restart restores the sessions once; the next exit discards them as usual. (#157)
 
 ### Deprecated
 
@@ -46,6 +51,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - No see-through gap between the session sidebar and the terminal area when a sidebar row is wider than the sidebar; the sidebar keeps its width and clips the row instead (#160).
 - A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
 - Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
+- Terminals no longer inherit Paneldeck's internal or test-only `PANELDECK_*` variables (for example when Paneldeck was started from another Paneldeck's terminal). (#175)
 
 ### Security
 
