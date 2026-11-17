@@ -141,8 +141,11 @@ fn open_with(data_dir: &Path, backup_dir: &Path, migrations: &[&str]) -> Result<
     // eingebaute Felder für Typen nachtragen, die von außen in die Datenbank kamen (idempotent; nur Felder, deren Migration schon
     // gelaufen ist – das prüft `ensure` an der Schema-Version)
     crate::planning::builtin_fields::ensure(&conn).map_err(other)?;
-    // eigene Felder, die die Migration wegen Groß-/Kleinschreibung jenseits von ASCII übersah (#221)
-    crate::planning::builtin_fields::rename_clashing_custom(&conn).map_err(other)?;
+    // eigene Felder, die die Migration wegen Groß-/Kleinschreibung jenseits von ASCII übersah (#221) – nur eine Aufräumarbeit:
+    // ein Fehler verhindert das Öffnen nicht (beim nächsten Start wird es erneut versucht)
+    if let Err(e) = crate::planning::builtin_fields::rename_clashing_custom(&conn) {
+        eprintln!("rename_clashing_custom: {e}");
+    }
     let db = Db { conn, path };
     if db.meta("created_at").is_none() {
         db.set_meta("created_at", &chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string());

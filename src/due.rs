@@ -231,8 +231,9 @@ pub fn clean_threshold_values(items: impl IntoIterator<Item = serde_json::Value>
     out
 }
 
-/// `deserialize_with` für eine optionale Schwellen-Liste (Projektsicherung): fehlt/`null` = `None`, sonst die gültigen
-/// Einträge ([`clean_threshold_values`]); kein Ladefehler wegen eines einzelnen Eintrags.
+/// `deserialize_with` für eine optionale Schwellen-Liste (Projektsicherung): fehlt/`null` = `None`, eine Liste = ihre gültigen
+/// Einträge ([`clean_threshold_values`]); ein anderer Wert (keine Liste) zählt wie fehlend (`None`, also die Vorgaben beim
+/// Import). Kein Ladefehler wegen eines einzelnen Eintrags.
 pub fn lenient_thresholds<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<DueThreshold>>, D::Error> {
     use serde::Deserialize;
     Ok(match serde_json::Value::deserialize(d)? {
