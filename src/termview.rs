@@ -63,12 +63,121 @@ pub fn show(
     if focused {
         handle_keyboard(ui, session);
     }
-    let opened_link = handle_links(ui, &response, session, inner, cs, cwd);
+    let (opened_link, osc8_hover) = handle_links(ui, &response, session, inner, cs, cwd);
     if !opened_link {
         handle_mouse(ui, &response, session, inner, cs, alt_wheel);
     }
-    paint(ui, rect, inner, session, theme, font, cs, focused);
+    let cursor_on = cursor_blink_phase(ui, id, session, focused);
+    paint(ui, rect, inner, session, theme, font, cs, focused, cursor_on, osc8_hover.as_ref());
     response
+}
+
+/// Einstellung „Blinkender Cursor“ (#183); die App schreibt sie jedes Bild (wie `mcp::LEVEL`).
+pub static CURSOR_BLINK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Halbe Blinkperiode (Sekunden), wie der Standard von Windows.
+const BLINK_HALF: f64 = 0.53;
+/// Nach so langer Zeit ohne Eingabe hört der Cursor auf zu blinken (spart Neuzeichnen).
+const BLINK_IDLE: f64 = 30.0;
+
+/// Ist der Cursor in dieser Blinkphase sichtbar? Blinkt nur, wenn das Programm es anfordert (DECSCUSR 1/3/5,
+/// `CSI ? 12 h`), die Einstellung an ist und das Terminal im Fenster im Vordergrund den Fokus hat; jede Eingabe
+/// beginnt die Phase neu (beim Tippen bleibt er sichtbar). Fordert das nächste Neuzeichnen zum Phasenwechsel an.
+fn cursor_blink_phase(ui: &Ui, id: Id, session: &Session, focused: bool) -> bool {
+    let blinking = session.term.lock().unwrap_or_else(|e| e.into_inner()).cursor_style().blinking;
+    if !(focused && blinking && CURSOR_BLINK.load(std::sync::atomic::Ordering::Relaxed) && ui.input(|i| i.focused)) {
+        return true;
+    }
+    let key = id.with("cursor-blink");
+    let (now, typed) = ui.input(|i| (i.time, i.events.iter().any(|e| matches!(e, Event::Key { pressed: true, .. } | Event::Text(_) | Event::Paste(_)))));
+    let epoch = match ui.data(|d| d.get_temp::<f64>(key)) {
+        Some(t) if !typed && t <= now => t,
+        _ => now,
+    };
+    ui.data_mut(|d| d.insert_temp(key, epoch));
+    let (on, next) = blink_state(now - epoch);
+    if let Some(s) = next {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(s));
+    }
+    on
+}
+
+/// Blinkzustand nach `elapsed` Sekunden seit der letzten Eingabe: (sichtbar, Sekunden bis zum nächsten Wechsel).
+fn blink_state(elapsed: f64) -> (bool, Option<f64>) {
+    if elapsed >= BLINK_IDLE {
+        return (true, None);
+    }
+    let phase = (elapsed / BLINK_HALF).floor() as i64;
+    let next = (BLINK_HALF - elapsed % BLINK_HALF).min(BLINK_IDLE - elapsed).max(0.01);
+    (phase % 2 == 0, Some(next))
+}
+
+/// Schriftfamilien der Schnitte fett/kursiv (einmal angelegt, statt je Zelle einen `Arc<str>`).
+fn style_family(name: &'static str) -> egui::FontFamily {
+    static FAMS: std::sync::OnceLock<[egui::FontFamily; 3]> = std::sync::OnceLock::new();
+    let f = FAMS.get_or_init(|| {
+        [crate::sysfonts::FAMILY_BOLD, crate::sysfonts::FAMILY_ITALIC, crate::sysfonts::FAMILY_BOLD_ITALIC].map(|n| egui::FontFamily::Name(n.into()))
+    });
+    match name {
+        crate::sysfonts::FAMILY_BOLD => f[0].clone(),
+        crate::sysfonts::FAMILY_ITALIC => f[1].clone(),
+        _ => f[2].clone(),
+    }
+}
+
+/// Neigung nachgezeichneter Kursivschrift (x-Versatz je Höheneinheit über der Grundlinie).
+const SLANT: f32 = 0.2;
+
+/// Text einer Zelle mit SGR-Fett/Kursiv zeichnen: echter Schnitt, wenn vorhanden, sonst nachgezeichnet (fett: zweimal
+/// um ein Pixel versetzt; kursiv: die Glyphen-Dreiecke geschert).
+#[allow(clippy::too_many_arguments)]
+fn draw_cell_text(ui: &Ui, painter: &egui::Painter, cell: Rect, width: f32, wide: bool, s: String, font: &FontId, fg: Color32, bold: bool, italic: bool, ppp: f32) {
+    let plan = crate::sysfonts::plan(bold, italic);
+    let f = match plan.family {
+        Some(n) => FontId::new(font.size, style_family(n)),
+        None => font.clone(),
+    };
+    let g = painter.layout_no_wrap(s, f, fg);
+    let x = if wide { cell.min.x + ((width - g.size().x) / 2.0).max(0.0) } else { cell.min.x };
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let pos = Pos2::new(snap(x), snap(cell.min.y));
+    let dx = snap((font.size / 20.0).max(1.0 / ppp)).max(1.0 / ppp);
+    if plan.fake_italic {
+        let base = cell.max.y - cell.height() * 0.22;
+        let size = ui.ctx().fonts(|fo| fo.font_image_size());
+        let mesh = skewed_text(&g, pos, base, fg, size);
+        if plan.fake_bold {
+            let mut m2 = mesh.clone();
+            m2.translate(Vec2::new(dx, 0.0));
+            painter.add(egui::Shape::mesh(m2));
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    } else {
+        if plan.fake_bold {
+            painter.galley(pos + Vec2::new(dx, 0.0), g.clone(), fg);
+        }
+        painter.galley(pos, g, fg);
+    }
+}
+
+/// Glyphen eines Galleys als geschertes Dreiecksnetz (nachgezeichnete Kursivschrift). `tex_size` = Größe des
+/// Schrift-Atlas (die Netze im Galley tragen Texel-Koordinaten, die der Tessellator sonst selbst umrechnet).
+fn skewed_text(g: &egui::Galley, pos: Pos2, base: f32, fg: Color32, tex_size: [usize; 2]) -> egui::Mesh {
+    let norm = Vec2::new(1.0 / tex_size[0].max(1) as f32, 1.0 / tex_size[1].max(1) as f32);
+    let mut mesh = egui::Mesh::default();
+    for row in &g.rows {
+        let m = &row.visuals.mesh;
+        if m.is_empty() {
+            continue;
+        }
+        mesh.texture_id = m.texture_id;
+        let off = mesh.vertices.len() as u32;
+        mesh.indices.extend(m.indices.iter().map(|i| i + off));
+        mesh.vertices.extend(m.vertices.iter().map(|v| {
+            let p = pos + row.pos.to_vec2() + v.pos.to_vec2();
+            egui::epaint::Vertex { pos: Pos2::new(p.x + (base - p.y) * SLANT, p.y), uv: (v.uv.to_vec2() * norm).to_pos2(), color: fg }
+        }));
+    }
+    mesh
 }
 
 fn paint(
@@ -80,6 +189,8 @@ fn paint(
     font: &FontId,
     cs: Vec2,
     focused: bool,
+    cursor_on: bool,
+    osc8_hover: Option<&alacritty_terminal::term::cell::Hyperlink>,
 ) {
     let ppp = ui.ctx().pixels_per_point();
     let painter = ui.painter_at(rect);
@@ -119,6 +230,19 @@ fn paint(
 
     let cells: Vec<_> = content.display_iter.collect();
     let mut skip_until = 0usize;
+    // OSC-8-Unterstreichung je Zeile als zusammenhängender Lauf (gepunktet bzw. beim Strg-Hover durchgezogen), damit das
+    // Punktmuster nicht an jeder Zelle neu ansetzt: (Rechteck, Farbe, hervorgehoben).
+    let mut link_run: Option<(Rect, Color32, bool)> = None;
+    let flush_link = |run: Option<(Rect, Color32, bool)>| {
+        if let Some((r, col, hot)) = run {
+            if hot {
+                let yy = r.max.y - 1.5;
+                painter.line_segment([Pos2::new(r.min.x, yy), Pos2::new(r.max.x, yy)], Stroke::new(1.5_f32, crate::style::ACCENT));
+            } else {
+                crate::glyphs::draw_underline(&painter, crate::glyphs::Underline::Dotted, r, col, ppp);
+            }
+        }
+    };
     for (idx, ic) in cells.iter().enumerate() {
         if idx < skip_until {
             continue;
@@ -170,7 +294,7 @@ fn paint(
             let zw = cell.zerowidth();
             let vs16 = zw.is_some_and(|z| z.contains(&'\u{fe0f}'));
             let wide = flags.contains(Flags::WIDE_CHAR);
-            let mut drawn = crate::boxdraw::draw(&painter, cell_rect, ch, fg, ppp);
+            let mut drawn = crate::boxdraw::draw(&painter, cell_rect, ch, fg, ppp) || crate::glyphs::draw_powerline(&painter, cell_rect, ch, fg, ppp);
             if !drawn && crate::emoji::wants_color(ch, wide, vs16) {
                 let side = if wide { (cs.x * 2.0).min(cs.y) } else { cs.y * 0.85 };
                 if let Some((tex, aspect)) = crate::emoji::texture(ui.ctx(), ch, (side * ppp).round() as u32) {
@@ -187,22 +311,30 @@ fn paint(
                 if let Some(z) = zw {
                     s.extend(z.iter().filter(|c| !matches!(**c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}' | '\u{200b}')));
                 }
-                if wide {
-                    // Breite Zeichen (CJK u. a.) in den zwei Zellen zentrieren.
-                    let g = painter.layout_no_wrap(s, font.clone(), fg);
-                    let x = cell_rect.min.x + ((width - g.size().x) / 2.0).max(0.0);
-                    painter.galley(Pos2::new(x, cell_rect.min.y), g, fg);
-                } else {
-                    painter.text(cell_rect.min, Align2::LEFT_TOP, s, font.clone(), fg);
-                }
+                // Breite Zeichen (CJK u. a.) werden in den zwei Zellen zentriert.
+                draw_cell_text(ui, &painter, cell_rect, width, wide, s, font, fg, bold, flags.contains(Flags::ITALIC), ppp);
             }
         }
-        if flags.intersects(Flags::ALL_UNDERLINES) {
-            let yy = cell_rect.max.y - 1.5;
-            painter.line_segment(
-                [Pos2::new(cell_rect.min.x, yy), Pos2::new(cell_rect.max.x, yy)],
-                Stroke::new(1.0_f32, fg),
-            );
+        // Unterstreichung (SGR 4:1–4:5, Farbe SGR 58); OSC-8-Links ohne eigene Unterstreichung dezent gepunktet.
+        let link = cell.hyperlink();
+        let link_hovered = osc8_hover.is_some_and(|h| link.as_ref() == Some(h));
+        if let Some(style) = crate::glyphs::underline_of(flags) {
+            let ucol = cell.underline_color().map(|c| theme.resolve(c, false, false)).unwrap_or(fg);
+            crate::glyphs::draw_underline(&painter, style, cell_rect, ucol, ppp);
+        }
+        let seg = if link_hovered {
+            Some((cell_rect, crate::style::ACCENT, true))
+        } else if link.is_some() && crate::glyphs::underline_of(flags).is_none() {
+            Some((cell_rect, fg.gamma_multiply(0.6), false))
+        } else {
+            None
+        };
+        if let Some((r, col, hot)) = seg {
+            match &mut link_run {
+                // Anschluss in derselben Zeile mit gleicher Art und Farbe: verlängern.
+                Some((lr, lc, lh)) if (lr.max.x - r.min.x).abs() < 0.5 && lr.min.y == r.min.y && *lc == col && *lh == hot => lr.max.x = r.max.x,
+                _ => flush_link(link_run.replace((r, col, hot))),
+            }
         }
         if flags.contains(Flags::STRIKEOUT) {
             let yy = cell_rect.center().y;
@@ -213,6 +345,8 @@ fn paint(
         }
     }
 
+    flush_link(link_run.take());
+
     // Cursor
     if cursor.shape != CursorShape::Hidden {
         let row = cursor.point.line.0 + offset;
@@ -222,6 +356,8 @@ fn paint(
             let cr = Rect::from_min_size(Pos2::new(x, y), cs);
             if !focused {
                 painter.rect_stroke(cr, 0.0, Stroke::new(1.0_f32, theme.cursor), StrokeKind::Inside);
+            } else if !cursor_on {
+                // Blinkender Cursor in der dunklen Phase: nichts zeichnen (das Zeichen darunter steht schon da).
             } else {
                 match cursor.shape {
                     CursorShape::Beam => {
@@ -496,28 +632,87 @@ pub fn wheel_arrow(up: bool, app_cursor: bool) -> &'static [u8] {
     }
 }
 
-/// Strg+Klick auf Links/Pfade. Gibt `true` zurück, wenn geöffnet wurde (dann keine weitere Mausbehandlung).
-fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect, cs: Vec2, cwd: &str) -> bool {
+/// Strg+Klick auf Links/Pfade und OSC-8-Links. Gibt zurück, ob geklickt wurde (dann keine weitere Mausbehandlung),
+/// und den OSC-8-Link unter dem Mauszeiger bei gedrückter Strg-Taste (zum Unterstreichen).
+fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect, cs: Vec2, cwd: &str) -> (bool, Option<alacritty_terminal::term::cell::Hyperlink>) {
     session.hover_link = None;
-    let ctrl = ui.input(|i| i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt);
-    if !ctrl || !response.hovered() {
-        return false;
+    if !response.hovered() {
+        return (false, None);
     }
-    let Some(pos) = response.hover_pos() else { return false };
+    let Some(pos) = response.hover_pos() else { return (false, None) };
     let col = ((pos.x - inner.min.x) / cs.x).floor();
     let row = ((pos.y - inner.min.y) / cs.y).floor();
-    if col < 0.0 || row < 0.0 || row as u16 >= session.rows {
-        return false;
+    if col < 0.0 || row < 0.0 || row as u16 >= session.rows || col as u16 >= session.cols {
+        return (false, None);
+    }
+    let ctrl = ui.input(|i| i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt);
+    // OSC 8: das Programm hat Text und Ziel getrennt gesetzt – das Ziel zeigt der Tooltip.
+    let osc8 = {
+        let t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+        let off = t.grid().display_offset() as i32;
+        t.grid()[Point::new(Line(row as i32 - off), Column(col as usize))].hyperlink()
+    };
+    if let Some(h) = osc8 {
+        use crate::hyperlink::LinkKind;
+        let kind = crate::hyperlink::classify(h.uri());
+        let (resting, idle) = ui.input(|i| (i.pointer.time_since_last_movement(), !i.pointer.any_down()));
+        if idle && (ctrl || resting >= TOOLTIP_DELAY) {
+            link_tooltip(ui, response, h.uri(), &kind);
+        } else if idle {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(TOOLTIP_DELAY - resting + 0.02));
+        }
+        if !ctrl {
+            return (false, None);
+        }
+        if !matches!(kind, LinkKind::Denied(_)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked_by(egui::PointerButton::Primary) {
+            match kind {
+                LinkKind::Web => crate::hyperlink::open(h.uri()),
+                LinkKind::Ask { .. } => crate::hyperlink::request_confirm(ui.ctx(), h.uri()),
+                LinkKind::Denied(_) => {}
+            }
+            return (true, Some(h));
+        }
+        return (false, Some(h));
+    }
+    if !ctrl {
+        return (false, None);
     }
     let chars = session.row_chars(row as usize);
-    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else { return false };
+    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else { return (false, None) };
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     session.hover_link = Some((row as usize, link.start, link.end, link.target.clone()));
     if response.clicked_by(egui::PointerButton::Primary) {
         crate::links::open(&link.target);
-        return true;
+        return (true, None);
     }
-    false
+    (false, None)
+}
+
+/// Ruhezeit des Mauszeigers über einem OSC-8-Link, bis der Tooltip ohne Strg erscheint (Sekunden).
+const TOOLTIP_DELAY: f32 = 0.6;
+
+/// Tooltip mit dem echten Ziel eines OSC-8-Links (bereinigt und gekürzt; die Rückfrage zeigt es ganz).
+fn link_tooltip(ui: &Ui, response: &Response, uri: &str, kind: &crate::hyperlink::LinkKind) {
+    use crate::hyperlink::LinkKind;
+    use crate::state::t;
+    // Bereinigt und in der Mitte gekürzt (Anfang und Dateiende bleiben sichtbar); der Rechnername eigens darunter.
+    let target = crate::hyperlink::middle_truncate(&crate::vtnotify::sanitize(uri, crate::hyperlink::URI_MAX), 160);
+    let host = crate::hyperlink::host(uri).filter(|h| !h.is_empty()).map(|h| crate::vtnotify::sanitize(h, 120));
+    let hint = match kind {
+        LinkKind::Web => t("Strg+Klick öffnet den Link", "Ctrl+click opens the link"),
+        LinkKind::Ask { .. } => t("Strg+Klick: vor dem Öffnen wird nachgefragt", "Ctrl+click: asks before opening"),
+        LinkKind::Denied(_) => t("Dieser Link wird nicht geöffnet (Schema oder Ziel nicht erlaubt)", "This link is not opened (scheme or target not allowed)"),
+    };
+    egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), response.id.with("osc8-tip"), egui::PopupAnchor::Pointer).gap(12.0).show(|ui| {
+        ui.label(egui::RichText::new(target).monospace());
+        if let Some(h) = host {
+            ui.label(egui::RichText::new(format!("{} {h}", t("Rechner:", "Host:"))).monospace().strong());
+        }
+        ui.label(egui::RichText::new(hint).small());
+    });
 }
 
 fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect, cs: Vec2, alt_wheel: crate::state::AltScreenWheel) {
@@ -842,6 +1037,19 @@ mod tests {
 
     fn some(v: &[u8]) -> Option<Vec<u8>> {
         Some(v.to_vec())
+    }
+
+    #[test]
+    fn cursor_blink_phases() {
+        assert!(blink_state(0.0).0);
+        assert!(!blink_state(BLINK_HALF + 0.01).0);
+        assert!(blink_state(2.0 * BLINK_HALF + 0.01).0);
+        let (_, next) = blink_state(0.1);
+        assert!((next.unwrap() - (BLINK_HALF - 0.1)).abs() < 1e-9);
+        // Nach langer Ruhe: sichtbar und kein weiteres Neuzeichnen.
+        assert_eq!(blink_state(BLINK_IDLE), (true, None));
+        assert_eq!(blink_state(BLINK_IDLE + 100.0), (true, None));
+        assert!(blink_state(BLINK_IDLE - 0.001).1.unwrap() <= 0.01 + 1e-9);
     }
 
     #[test]

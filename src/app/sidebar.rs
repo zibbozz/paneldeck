@@ -450,6 +450,15 @@ impl App {
         let right_x = rect.max.x - 10.0;
         let name_y = rect.min.y + 17.0;
         let sub_y = rect.min.y + 33.0;
+        // Fortschritt laut Programm (OSC 9;4, #183): dünner Balken am unteren Rand der Zeile.
+        if let Some(pg) = e.progress.filter(|_| self.settings.progress_indicator) {
+            let bar = Rect::from_min_max(Pos2::new(text_x, rect.max.y - 5.0), Pos2::new(right_x, rect.max.y - 3.0));
+            // Unbestimmt: langsam animiert (8 Bilder/s), nur mit Animationen und im Fenster im Vordergrund – sonst still.
+            let animate = self.settings.animations && ui.input(|i| i.focused);
+            if paint_progress(&p, bar, pg, if animate { Some(t) } else { None }, weak_c) {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(125));
+            }
+        }
 
         // Zeile 2: Status · Ordner/Git · Kosten
         let status_label = e.status_label(lang);
@@ -537,6 +546,10 @@ impl App {
         if let Some(h) = super::taint::hint(&self.entries, id) {
             status_tip.push('\n');
             status_tip += &h;
+        }
+        if let Some(pg) = e.progress.filter(|_| self.settings.progress_indicator) {
+            status_tip.push('\n');
+            status_tip += &progress_label(pg, lang);
         }
         let status_tip = status_tip.trim().to_string();
 
@@ -845,4 +858,40 @@ mod tests {
             }
         }
     }
+}
+
+/// Text zum Fortschritt eines Programms (Tooltip der Sitzungszeile).
+fn progress_label(pg: crate::vtnotify::Progress, lang: Lang) -> String {
+    use crate::vtnotify::ProgressState::*;
+    match pg.state {
+        Normal => format!("{} {} %", lang.t("Fortschritt:", "Progress:"), pg.percent),
+        Error => format!("{} {} % ({})", lang.t("Fortschritt:", "Progress:"), pg.percent, lang.t("Fehler", "error")),
+        Paused => format!("{} {} % ({})", lang.t("Fortschritt:", "Progress:"), pg.percent, lang.t("angehalten", "paused")),
+        Indeterminate => format!("{} {}", lang.t("Fortschritt:", "Progress:"), lang.t("läuft", "running")),
+    }
+}
+
+/// Fortschrittsbalken (OSC 9;4) zeichnen; `t` = Zeit für die Animation des unbestimmten Zustands (`None` = still).
+/// Gibt `true` zurück, wenn er animiert ist und neu gezeichnet werden muss.
+fn paint_progress(p: &egui::Painter, bar: Rect, pg: crate::vtnotify::Progress, t: Option<f64>, track: Color32) -> bool {
+    use crate::vtnotify::ProgressState::*;
+    p.rect_filled(bar, 1.0, track.gamma_multiply(0.25));
+    let col = match pg.state {
+        Normal | Indeterminate => style::ACCENT,
+        Error => Color32::from_rgb(0xe0, 0x6c, 0x75),
+        Paused => Color32::from_rgb(0xe5, 0xc0, 0x7b),
+    };
+    if pg.state == Indeterminate {
+        // Ein Drittel der Breite wandert hin und her.
+        let w = bar.width() / 3.0;
+        let f = t.map(|t| ((t * 0.8).sin() * 0.5 + 0.5) as f32).unwrap_or(0.5);
+        let x = bar.min.x + (bar.width() - w) * f;
+        p.rect_filled(Rect::from_min_size(Pos2::new(x, bar.min.y), Vec2::new(w, bar.height())), 1.0, col);
+        return t.is_some();
+    }
+    let w = bar.width() * pg.percent.min(100) as f32 / 100.0;
+    if w > 0.0 {
+        p.rect_filled(Rect::from_min_size(bar.min, Vec2::new(w, bar.height())), 1.0, col);
+    }
+    false
 }

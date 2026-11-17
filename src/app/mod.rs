@@ -45,6 +45,8 @@ mod models_ui;
 mod multiwin;
 mod palette_ui;
 mod osc52;
+mod link_ask;
+mod vt_notify;
 mod panels;
 mod paste_ask;
 mod planning_ui;
@@ -98,13 +100,15 @@ struct Entry {
     /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
     /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
     session_key: String,
+    /// Fortschritt laut Programm (OSC 9;4, #183) für Seitenleiste, Taskleiste und `list_sessions`.
+    progress: Option<crate::vtnotify::Progress>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts, progress: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -794,6 +798,12 @@ pub struct App {
     toasts_hover: Option<u64>,
     /// Zustand je Sitzung für OSC 52 (#181): wartender Text, Ratenbegrenzung, Toasts.
     osc52: HashMap<u64, osc52::ClipState>,
+    /// Ratenbegrenzung der Programm-Benachrichtigungen und der Glocke je Sitzung (#183, `vt_notify.rs`).
+    vt_limits: HashMap<u64, crate::vtnotify::RateLimit>,
+    /// Zuletzt an die Taskleiste gemeldeter Fortschritt je Fenster (#183).
+    taskbar: crate::taskbar::Taskbar,
+    /// Offene Rückfrage „Link öffnen?“ für OSC-8-Links mit anderem Schema als http/https (#183, `link_ask.rs`).
+    link_ask: Option<link_ask::LinkAsk>,
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
@@ -873,27 +883,53 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     }
     bold.extend(fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default());
     fonts.families.insert(egui::FontFamily::Name("bold".into()), bold);
-    // Gewählte Terminalschrift an die erste Stelle setzen (Fallbacks bleiben dahinter).
+    // Gewählte Terminalschrift an die erste Stelle setzen (Fallbacks bleiben dahinter): eingebettete Cascadia Mono,
+    // Hack (egui) oder jede installierte Festbreitenschrift, z. B. Nerd Fonts (#183, `sysfonts`).
     let key = match choice {
+        "" | "Cascadia Mono" => None,
         "Hack" => Some("Hack".to_string()),
-        "Consolas" | "Lucida Console" | "Courier New" => {
-            let (k, f) = match choice {
-                "Consolas" => ("consolas", "consola.ttf"),
-                "Lucida Console" => ("lucon", "lucon.ttf"),
-                _ => ("cour", "cour.ttf"),
-            };
-            std::fs::read(format!(r"C:\Windows\Fonts\{f}")).ok().map(|b| {
-                fonts.font_data.insert(k.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(b)));
-                k.to_string()
-            })
-        }
-        _ => None,
+        other => match crate::sysfonts::load(other, false, false).filter(crate::sysfonts::is_monospace) {
+            Some(d) => {
+                fonts.font_data.insert("term-regular".to_owned(), std::sync::Arc::new(egui::FontData { font: d.bytes.into(), index: d.index, tweak: Default::default() }));
+                Some("term-regular".to_string())
+            }
+            // Ohne GDI (oder nicht gefunden): die früheren festen Dateien.
+            None => {
+                let file = match other {
+                    "Consolas" => Some(("consolas", "consola.ttf")),
+                    "Lucida Console" => Some(("lucon", "lucon.ttf")),
+                    "Courier New" => Some(("cour", "cour.ttf")),
+                    _ => None,
+                };
+                file.and_then(|(k, f)| {
+                    std::fs::read(format!(r"C:\Windows\Fonts\{f}")).ok().map(|b| {
+                        fonts.font_data.insert(k.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(b)));
+                        k.to_string()
+                    })
+                })
+            }
+        },
     };
     if let Some(k) = key {
         let fam = fonts.families.entry(egui::FontFamily::Monospace).or_default();
         fam.retain(|n| n != &k);
         fam.insert(0, k);
     }
+    // Schnitte fett/kursiv/fett-kursiv der Terminalschrift (SGR 1/3). Familien gibt es immer; ohne echten Schnitt stehen
+    // dort nur die normalen Schriften, das Terminal zeichnet dann nach (`sysfonts::plan`).
+    let mono = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
+    let lookup = if choice.is_empty() { "Cascadia Mono" } else { choice };
+    let mut real = [false; 3];
+    for (i, (fam_name, bold, italic)) in [(crate::sysfonts::FAMILY_BOLD, true, false), (crate::sysfonts::FAMILY_ITALIC, false, true), (crate::sysfonts::FAMILY_BOLD_ITALIC, true, true)].into_iter().enumerate() {
+        let mut list = mono.clone();
+        if let Some(d) = crate::sysfonts::load(lookup, bold, italic).filter(|d| crate::sysfonts::face_matches(d, bold, italic)) {
+            fonts.font_data.insert(fam_name.to_owned(), std::sync::Arc::new(egui::FontData { font: d.bytes.into(), index: d.index, tweak: Default::default() }));
+            list.insert(0, fam_name.to_owned());
+            real[i] = true;
+        }
+        fonts.families.insert(egui::FontFamily::Name(fam_name.into()), list);
+    }
+    crate::sysfonts::set_real_variants(real[0], real[1], real[2]);
     fonts
 }
 
@@ -1056,6 +1092,9 @@ impl App {
             toasts_epoch: Instant::now(),
             toasts_hover: None,
             osc52: HashMap::new(),
+            vt_limits: HashMap::new(),
+            taskbar: Default::default(),
+            link_ask: None,
             hwnd: crate::winctl::hwnd_from(cc),
             in_tray: false,
             editor: None,
@@ -2309,7 +2348,7 @@ impl App {
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
         // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
-        if self.new_chat.is_some() || self.confirm_close.is_some() {
+        if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();
@@ -3693,6 +3732,7 @@ impl eframe::App for App {
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
         crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
+        termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);
         if crate::conpty::take_fallback_hint() {
             self.push_toast(
                 state::t(
@@ -3711,6 +3751,7 @@ impl eframe::App for App {
 
         self.poll_hooks(ctx);
         self.poll_shell(ctx);
+        self.poll_vt(ctx);
         self.poll_chats(ctx);
         self.models_save_tick(ctx);
         self.poll_background(ctx);
