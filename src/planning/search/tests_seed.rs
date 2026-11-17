@@ -75,7 +75,7 @@ fn creates_types_statuses_and_fields_like_the_defaults() {
     let prio = f.iter().find(|x| x.key.as_deref() == Some("priority")).unwrap();
     assert_eq!(prio.options.values.len(), 5);
     assert_eq!(prio.options.values[0].key.as_deref(), Some("priority.highest"));
-    assert!(f.iter().any(|x| x.key.as_deref() == Some("story_points")) && f.iter().any(|x| x.name.as_deref() == Some("Labels")));
+    assert!(f.iter().any(|x| x.key.as_deref() == Some("story_points")) && f.iter().any(|x| x.is_labels()), "Labels sind eingebaut");
 }
 
 #[test]

@@ -26,7 +26,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // Reiterwechsel der Fensterleiste (nicht Strg+Alt+Zahl: das ist AltGr auf deutschen Tastaturen)
     ("mode_terminals", "Alt+Shift+1"),
     ("mode_tasks", "Alt+Shift+2"),
-    // Zweite Belegung ohne Alt+Shift (Windows schaltet damit die Eingabesprache um); Strg+Zahl sendet das Terminal ohnehin nicht
+    // Zweite Belegung ohne Alt+Shift (Windows schaltet damit die Eingabesprache um); Strg+1/2 verbraucht der Hub; Strg+3…0 gehen ans Terminal (win32-input-mode, #183)
     ("mode_terminals_alt", "Ctrl+1"),
     ("mode_tasks_alt", "Ctrl+2"),
     // Alle Sitzungen schließen (#156): standardmäßig ohne Kürzel (leer = keins)

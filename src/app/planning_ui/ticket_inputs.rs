@@ -259,7 +259,7 @@ pub(super) fn field_input(ui: &mut Ui, ic: &InCx, f: &Field, d: &mut Draft, expl
                 single_line(ui, salt, &mut text, 170.0, &field_hint(f, lang), None, &mut edited, &mut ev);
                 d.text = text;
                 d.edited = edited;
-                let (label, tip, fmt) = if f.kind == FieldKind::Date {
+                let (label, tip, fmt) = if f.kind == FieldKind::Date || f.options.date_only_ok() {
                     (lang.t("Heute", "Today"), lang.t("Heutiges Datum eintragen", "Enter today's date"), "%Y-%m-%d")
                 } else {
                     (lang.t("Jetzt", "Now"), lang.t("Aktuelle Uhrzeit eintragen", "Enter the current time"), "%Y-%m-%d %H:%M")

@@ -46,7 +46,10 @@ mod models_ui;
 mod multiwin;
 mod palette_ui;
 mod osc52;
+mod link_ask;
+mod vt_notify;
 mod panels;
+mod paste_ask;
 mod planning_ui;
 mod session_settings;
 mod settings;
@@ -101,13 +104,15 @@ struct Entry {
     /// Hinweis vom letzten Start (z. B. weggelassene Pfade aus den Claude-Optionen, #182); wird im nächsten Bild als
     /// Meldung gezeigt.
     launch_note: Option<String>,
+    /// Fortschritt laut Programm (OSC 9;4, #183) für Seitenleiste, Taskleiste und `list_sessions`.
+    progress: Option<crate::vtnotify::Progress>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts, launch_note: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts, launch_note: None, progress: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -289,6 +294,8 @@ enum Nav {
 
 #[derive(Clone)]
 enum Action {
+    /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
+    PasteAsk(u64, String, bool),
     OpenPalette,
     OpenTemplates,
     OpenCosts,
@@ -367,6 +374,8 @@ enum Action {
     Duplicate(u64),
     RequestClose(u64),
     Close(u64),
+    /// „Alle beenden“ (#168): alle Prozesse im Job dieser Sitzungen beenden (vor `Close`/`CloseMany`/`Restart`).
+    EndJobs(Vec<u64>),
     Split(u64, Dir),
     SplitAt(u64, Dir, bool),
     /// Bereich minimieren: aus dem Layout nehmen, Sitzung läuft weiter (`App::minimize_pane`).
@@ -694,6 +703,8 @@ pub struct App {
     confirm_close: Option<closing::CloseAsk>,
     /// Rückfrage „Sitzung neu laden?“ (#169).
     reload_ask: Option<session_settings::ReloadAsk>,
+    /// Rückfrage vor dem Einfügen mehrerer Zeilen (#183).
+    paste_ask: Option<paste_ask::PasteAsk>,
     /// Dialog „Einstellungen der Sitzung“ (#170).
     session_settings: Option<session_settings::SessionForm>,
     settings_open: bool,
@@ -759,6 +770,8 @@ pub struct App {
     mcp: mcp::McpState,
     tray_rx: std::sync::mpsc::Receiver<TrayCmd>,
     quitting: bool,
+    /// Beenden trotz Hintergrundprozessen bestätigt (#168, `closing::App::quit_guard`): nicht noch einmal fragen.
+    quit_ok: bool,
     detached: Vec<u64>,
     settings_tab: usize,
     capture_key: Option<String>,
@@ -793,6 +806,12 @@ pub struct App {
     toasts_hover: Option<u64>,
     /// Zustand je Sitzung für OSC 52 (#181): wartender Text, Ratenbegrenzung, Toasts.
     osc52: HashMap<u64, osc52::ClipState>,
+    /// Ratenbegrenzung der Programm-Benachrichtigungen und der Glocke je Sitzung (#183, `vt_notify.rs`).
+    vt_limits: HashMap<u64, crate::vtnotify::RateLimit>,
+    /// Zuletzt an die Taskleiste gemeldeter Fortschritt je Fenster (#183).
+    taskbar: crate::taskbar::Taskbar,
+    /// Offene Rückfrage „Link öffnen?“ für OSC-8-Links mit anderem Schema als http/https (#183, `link_ask.rs`).
+    link_ask: Option<link_ask::LinkAsk>,
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
@@ -874,27 +893,53 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     }
     bold.extend(fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default());
     fonts.families.insert(egui::FontFamily::Name("bold".into()), bold);
-    // Gewählte Terminalschrift an die erste Stelle setzen (Fallbacks bleiben dahinter).
+    // Gewählte Terminalschrift an die erste Stelle setzen (Fallbacks bleiben dahinter): eingebettete Cascadia Mono,
+    // Hack (egui) oder jede installierte Festbreitenschrift, z. B. Nerd Fonts (#183, `sysfonts`).
     let key = match choice {
+        "" | "Cascadia Mono" => None,
         "Hack" => Some("Hack".to_string()),
-        "Consolas" | "Lucida Console" | "Courier New" => {
-            let (k, f) = match choice {
-                "Consolas" => ("consolas", "consola.ttf"),
-                "Lucida Console" => ("lucon", "lucon.ttf"),
-                _ => ("cour", "cour.ttf"),
-            };
-            std::fs::read(format!(r"C:\Windows\Fonts\{f}")).ok().map(|b| {
-                fonts.font_data.insert(k.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(b)));
-                k.to_string()
-            })
-        }
-        _ => None,
+        other => match crate::sysfonts::load(other, false, false).filter(crate::sysfonts::is_monospace) {
+            Some(d) => {
+                fonts.font_data.insert("term-regular".to_owned(), std::sync::Arc::new(egui::FontData { font: d.bytes.into(), index: d.index, tweak: Default::default() }));
+                Some("term-regular".to_string())
+            }
+            // Ohne GDI (oder nicht gefunden): die früheren festen Dateien.
+            None => {
+                let file = match other {
+                    "Consolas" => Some(("consolas", "consola.ttf")),
+                    "Lucida Console" => Some(("lucon", "lucon.ttf")),
+                    "Courier New" => Some(("cour", "cour.ttf")),
+                    _ => None,
+                };
+                file.and_then(|(k, f)| {
+                    std::fs::read(format!(r"C:\Windows\Fonts\{f}")).ok().map(|b| {
+                        fonts.font_data.insert(k.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(b)));
+                        k.to_string()
+                    })
+                })
+            }
+        },
     };
     if let Some(k) = key {
         let fam = fonts.families.entry(egui::FontFamily::Monospace).or_default();
         fam.retain(|n| n != &k);
         fam.insert(0, k);
     }
+    // Schnitte fett/kursiv/fett-kursiv der Terminalschrift (SGR 1/3). Familien gibt es immer; ohne echten Schnitt stehen
+    // dort nur die normalen Schriften, das Terminal zeichnet dann nach (`sysfonts::plan`).
+    let mono = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
+    let lookup = if choice.is_empty() { "Cascadia Mono" } else { choice };
+    let mut real = [false; 3];
+    for (i, (fam_name, bold, italic)) in [(crate::sysfonts::FAMILY_BOLD, true, false), (crate::sysfonts::FAMILY_ITALIC, false, true), (crate::sysfonts::FAMILY_BOLD_ITALIC, true, true)].into_iter().enumerate() {
+        let mut list = mono.clone();
+        if let Some(d) = crate::sysfonts::load(lookup, bold, italic).filter(|d| crate::sysfonts::face_matches(d, bold, italic)) {
+            fonts.font_data.insert(fam_name.to_owned(), std::sync::Arc::new(egui::FontData { font: d.bytes.into(), index: d.index, tweak: Default::default() }));
+            list.insert(0, fam_name.to_owned());
+            real[i] = true;
+        }
+        fonts.families.insert(egui::FontFamily::Name(fam_name.into()), list);
+    }
+    crate::sysfonts::set_real_variants(real[0], real[1], real[2]);
     fonts
 }
 
@@ -968,6 +1013,7 @@ impl App {
             new_chat: None,
             confirm_close: None,
             reload_ask: None,
+            paste_ask: None,
             session_settings: None,
             settings_open: false,
             remember_at_start,
@@ -1025,6 +1071,7 @@ impl App {
             mcp: mcp::McpState::default(),
             tray_rx: std::sync::mpsc::channel().1,
             quitting: false,
+            quit_ok: false,
             detached: saved.detached.clone(),
             settings_tab: 0,
             capture_key: None,
@@ -1056,6 +1103,9 @@ impl App {
             toasts_epoch: Instant::now(),
             toasts_hover: None,
             osc52: HashMap::new(),
+            vt_limits: HashMap::new(),
+            taskbar: Default::default(),
+            link_ask: None,
             hwnd: crate::winctl::hwnd_from(cc),
             in_tray: false,
             editor: None,
@@ -1212,9 +1262,10 @@ impl App {
         for c in cmds {
             self.from_tray(ctx);
             if let IpcCmd::Open { path, claude, origin } = c {
-                // `paneldeck --open` aus einem Hub-Terminal heraus: die neue Sitzung erbt dessen Agenten-Kette samt ihm
-                // (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Absender nur über den Prozessbaum; ein
-                // losgelöster (nicht zuzuordnender) Absender darf keine Claude-Sitzung öffnen.
+                // `paneldeck --open` aus einem Hub-Terminal heraus: Hat das Terminal eine Agenten-Kette, erbt die neue
+                // Sitzung sie samt ihm (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Ohne Kette (der
+                // Nutzer tippt es) bleibt sie frei (`taint::on_create`). Absender nur über Job Object bzw. Prozessbaum
+                // (#168); ein losgelöster, nicht zuzuordnender Absender darf keine Claude-Sitzung öffnen.
                 let (origin, orphan) = self.open_origin(origin.as_ref());
                 if orphan && claude {
                     self.notify_text(taint::orphan_error().1);
@@ -1686,7 +1737,14 @@ impl App {
         }
         if wsl {
             // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Profilvariablen.
-            let mut names = vec![hooks::ENV_SESSION.to_string(), hooks::ENV_PORT.to_string(), hooks::ENV_TOKEN.to_string()];
+            // Dazu Name/Version des Terminals (`terminal::term_env`), wie Windows Terminal es mit WT_SESSION macht.
+            let mut names = vec![
+                hooks::ENV_SESSION.to_string(),
+                hooks::ENV_PORT.to_string(),
+                hooks::ENV_TOKEN.to_string(),
+                "TERM_PROGRAM".to_string(),
+                "TERM_PROGRAM_VERSION".to_string(),
+            ];
             for (k, _) in env.iter().skip(1) {
                 if k != hooks::ENV_PORT && k != hooks::ENV_TOKEN && !names.contains(k) {
                     names.push(k.clone());
@@ -1723,6 +1781,8 @@ impl App {
                 initial_input: initial.as_deref(),
                 scrollback_lines: self.settings.scrollback_lines,
                 env,
+                // Farb- und Größenabfragen ab dem ersten Byte richtig beantworten (#183), auch ungezeichnet.
+                view: Some(self.reply_view_for(ctx, entry.meta.profile)),
                 inherit_env: self.settings.inherit_env,
             },
         ) {
@@ -2154,6 +2214,47 @@ impl App {
         self.applied_theme = key;
     }
 
+    /// Theme und Zellgröße (physische Pixel), mit denen eine Sitzung Farb- und Größenabfragen beantwortet (#183) – wie
+    /// beim Zeichnen in `show_pane`: Theme des Profils, sonst das der App; Schriftgröße des Profils, sonst die der App.
+    /// Vor dem ersten Frame (noch keine Schriften) ohne Zellgröße.
+    fn reply_view_for(&self, ctx: &egui::Context, profile_id: u64) -> crate::terminal::ReplyView {
+        let base = self.theme();
+        let prof = self.settings.profiles.iter().find(|p| p.id == profile_id);
+        let theme = match prof.filter(|p| !p.theme.is_empty()).and_then(|p| self.themes.iter().find(|t| t.name == p.theme)) {
+            Some(t) => {
+                let mut t = t.clone();
+                t.bg = Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), base.bg.a());
+                t
+            }
+            None => base,
+        };
+        let size = prof.filter(|p| p.font_size > 0.0).map(|p| p.font_size).unwrap_or(self.settings.font_size);
+        let (cell_w, cell_h) = if ctx.cumulative_pass_nr() > 0 {
+            let cs = ctx.fonts_mut(|f| f.layout_no_wrap("M".to_string(), FontId::monospace(size), Color32::WHITE).size());
+            let ppp = ctx.pixels_per_point();
+            ((cs.x * ppp).round().clamp(0.0, u16::MAX as f32) as u16, (cs.y * ppp).round().clamp(0.0, u16::MAX as f32) as u16)
+        } else {
+            (0, 0)
+        };
+        crate::terminal::ReplyView { theme, cell_w, cell_h }
+    }
+
+    /// Alle laufenden Sitzungen mit Theme und Zellgröße versorgen (jedes Frame): auch nicht sichtbare beantworten
+    /// Farb- und Größenabfragen richtig, und ein Theme-Wechsel erreicht sie sofort.
+    fn sync_reply_views(&self, ctx: &egui::Context) {
+        let mut cache: Vec<(u64, crate::terminal::ReplyView)> = Vec::new();
+        for e in self.entries.values() {
+            let Some(s) = &e.live else { continue };
+            let p = e.meta.profile;
+            if !cache.iter().any(|(id, _)| *id == p) {
+                cache.push((p, self.reply_view_for(ctx, p)));
+            }
+            if let Some((_, v)) = cache.iter().find(|(id, _)| *id == p) {
+                s.seed_view(&v.theme, v.cell_w, v.cell_h);
+            }
+        }
+    }
+
     fn theme(&self) -> Theme {
         let mut t = self
             .themes
@@ -2276,17 +2377,19 @@ impl App {
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
         // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
-        if self.new_chat.is_some() || self.confirm_close.is_some() {
+        if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();
         let font = FontId::monospace(self.settings.font_size);
         let lang = self.settings.language;
 
+        self.sync_reply_views(ctx);
         // Broadcast: nur die fokussierte Sitzung zeichnet Eingaben mit.
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
                 s.set_tee(self.broadcast && *id == self.focused);
+                s.set_shift_enter_newline(self.settings.shift_enter_newline_powershell);
             }
         }
         {
@@ -2355,9 +2458,13 @@ impl App {
                 if let Some(l) = &self.layout {
                     l.leaves(&mut leaves);
                 }
+                // Tasten je Ziel mit dessen Modus kodieren (kitty, win32-input-mode, Cursor-Tasten).
                 for id in leaves.into_iter().filter(|i| *i != self.focused) {
                     if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
-                        s.write(&data);
+                        let bytes = crate::vtkeys::TeeInput::encode_all(&data, s.key_mode());
+                        if !bytes.is_empty() {
+                            s.write(&bytes);
+                        }
                     }
                 }
             }
@@ -2555,8 +2662,15 @@ impl App {
         let lang = self.settings.language;
         let mut toasts: Vec<(u64, String, CmdDone)> = Vec::new();
         let mut copies: Vec<(u64, crate::terminal::ClipboardRequest)> = Vec::new();
+        let paste_warn = self.settings.warn_multiline_paste;
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else { continue };
+            // Fokusmeldungen (DECSET 1004): gilt als fokussiert wie bei OSC 52 – fokussierte Sitzung des Fensters im
+            // Vordergrund; abgedockte Sitzungen meldet ihr eigenes Fenster (`detached_windows`). Gesendet wird nur beim Wechsel.
+            if !self.detached.contains(id) {
+                s.report_focus(window_focused && *id == focused_id);
+            }
+            s.set_paste_warn(paste_warn);
             // Immer abholen, auch bei abgeschalteter Einstellung: ein alter Wunsch darf nicht später doch noch greifen.
             if let Some(req) = s.take_clipboard() {
                 copies.push((*id, req));
@@ -3057,6 +3171,7 @@ impl App {
             return;
         }
         match a {
+            Action::PasteAsk(id, text, detached) => self.ask_paste(id, text, detached),
             Action::ToggleFiles => self.files_open = !self.files_open,
             Action::Cycle(d) => self.cycle(d),
             Action::JumpCmd(d) => {
@@ -3580,15 +3695,18 @@ impl App {
                 self.wt_close = Some(WtClose { id, changes, discard: false });
             }
             Action::RequestClose(id) => {
-                // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft).
+                // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft). Hintergrundprozesse
+                // im Job der Sitzung (#168): immer nachfragen (weiterlaufen lassen oder alle beenden).
                 let running = self.entries.get(&id).is_some_and(|e| e.running() || e.chat_has_history());
-                if running && self.settings.confirm_close {
-                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::One(id)));
+                let lingering = self.lingering_of(&[id]);
+                if !lingering.is_empty() || (running && self.settings.confirm_close) {
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::One(id)).with(lingering));
                 } else {
                     self.close_session(id);
                 }
             }
             Action::Close(id) => self.close_session(id),
+            Action::EndJobs(ids) => self.end_jobs(&ids),
             Action::Split(id, dir) => self.split_at(ctx, id, dir, false),
             Action::SplitAt(id, dir, before) => self.split_at(ctx, id, dir, before),
             Action::MinimizePane(id) => self.minimize_pane(id),
@@ -3651,6 +3769,7 @@ impl eframe::App for App {
         }
         self.poll_mcp(ctx);
         crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
+        termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);
         if crate::conpty::take_fallback_hint() {
             self.push_toast(
                 state::t(
@@ -3666,9 +3785,11 @@ impl eframe::App for App {
         // Paletten für alle Farbauswahlen und die automatische Vergabe (auch Todo-Tags, Expertenmodus, Diagramme).
         crate::palette::publish(&self.settings.palette);
         self.handle_tray(ctx);
+        self.quit_guard(ctx);
 
         self.poll_hooks(ctx);
         self.poll_shell(ctx);
+        self.poll_vt(ctx);
         self.poll_chats(ctx);
         self.models_save_tick(ctx);
         self.poll_background(ctx);
@@ -4157,6 +4278,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
             let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
+            if let Some(text) = session.take_paste_ask() {
+                cx.actions.push(Action::PasteAsk(id, text, cx.detached));
+            }
             if session.search.is_some() && search_bar(ui, session, body, lang) {
                 session.search = None;
                 *cx.want_focus = Some(id);

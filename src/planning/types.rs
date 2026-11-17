@@ -117,7 +117,10 @@ pub fn create_type(conn: &Connection, n: &NewType) -> Res<i64> {
             "INSERT INTO ticket_types (project_id, key, name, icon, color, workflow, system, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
             params![n.project_id, n.key, name, n.icon.as_deref().map(icons::normalize), color, bool_i(n.workflow), pos],
         )?;
-        Ok(conn.last_insert_rowid())
+        let id = conn.last_insert_rowid();
+        // eingebaute Felder (Beschreibung, Fälligkeit) gehören zu jedem Typ
+        super::builtin_fields::ensure(conn)?;
+        Ok(id)
     })
 }
 
@@ -438,7 +441,11 @@ mod tests {
         let link = create_field(&c, &link).unwrap();
         // Zuordnung: Vorschlag verbindet gleiche Namen/Typen
         let map = suggest_field_map(&c, a, b).unwrap();
-        assert_eq!(map, vec![integrity::FieldMapEntry { from_field: fa_text, to_field: Some(fb_text) }, integrity::FieldMapEntry { from_field: fa_num, to_field: None }]);
+        // die eingebauten Felder (Beschreibung, Fälligkeit) gehen immer auf die des Ziels
+        let fixed = |t: i64| list_fields(&c, t).unwrap().into_iter().filter(|x| x.is_fixed()).map(|x| x.id).collect::<Vec<_>>();
+        let mut want: Vec<integrity::FieldMapEntry> = fixed(a).into_iter().zip(fixed(b)).map(|(x, y)| integrity::FieldMapEntry { from_field: x, to_field: Some(y) }).collect();
+        want.extend([integrity::FieldMapEntry { from_field: fa_text, to_field: Some(fb_text) }, integrity::FieldMapEntry { from_field: fa_num, to_field: None }]);
+        assert_eq!(map, want);
         // ungültige Migrationen
         let bad = |m: TypeMigration| delete_type(&c, a, Some(TypeDeleteMode::Migrate(m)));
         assert_eq!(bad(TypeMigration { to_type: a, fields: vec![] }), Err(PlanError::ReplacementInvalid));

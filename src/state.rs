@@ -219,6 +219,10 @@ pub struct Settings {
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
     /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
     pub remember_sessions: bool,
+    /// Umschalt+Enter = neue Zeile in PowerShell (seit 2.3.0, Standard aus): sendet in PowerShell-Sitzungen ein echtes
+    /// Umschalt+Enter (win32-input-mode), das PSReadLine als „AddLine“ versteht. Aus = ESC CR wie bisher (Claude Code und
+    /// andere Programme mit VT-Eingabe behalten Umschalt+Enter). Fehlt in älteren Dateien (dann aus).
+    pub shift_enter_newline_powershell: bool,
     /// Farbpaletten (seit 2.3.0, `palette`): gemeinsam oder je Bereich. Fehlt in älteren Dateien (dann die Vorgaben);
     /// unveränderte Vorgaben werden nicht geschrieben, unlesbare Daten ergeben die Vorgaben.
     #[serde(skip_serializing_if = "crate::palette::Palettes::is_default", deserialize_with = "crate::palette::Palettes::lenient")]
@@ -226,6 +230,9 @@ pub struct Settings {
     /// Programme dürfen per OSC 52 in die Zwischenablage kopieren (seit 2.3.0, #181, Standard an). Lesen der
     /// Zwischenablage durch Programme gibt es nie. Fehlt in älteren Dateien (dann an).
     pub osc52_copy: bool,
+    /// Vor dem Einfügen mehrerer Zeilen nachfragen, wenn das Programm kein Bracketed Paste nutzt (seit 2.3.0, #183,
+    /// Standard an wie in Windows Terminal). Fehlt in älteren Dateien (dann an).
+    pub warn_multiline_paste: bool,
     /// Standard-Startoptionen für neue Claude-Sitzungen (seit 2.3.0; leeres Feld = Standard von Claude Code). Gelten für
     /// Sitzungen aus der Oberfläche und über MCP, wenn nichts angegeben ist – `bypassPermissions` nie für Agenten.
     /// Nie `bypassPermissions` und nur gültige Namen (beim Schreiben bereinigt, beim Laden verworfen, siehe `sanitize`).
@@ -253,6 +260,21 @@ pub struct Settings {
     /// aus einer Shell mit eigener Umgebung. Paneldecks eigene Variablen (`PANELDECK_SESSION` …) und die Variablen des Profils
     /// gelten in beiden Fällen. Fehlt in älteren Dateien (dann aus = bisheriges Verhalten).
     pub inherit_env: bool,
+    /// Benachrichtigungen von Programmen (OSC 9 / OSC 777;notify) anzeigen – nur für nicht angesehene Sitzungen, über die
+    /// üblichen Wege (Toast/Blinken laut `notify_*`), begrenzt (seit 2.3.0, #183, Standard an). Fehlt in älteren Dateien (an).
+    #[serde(deserialize_with = "lenient_true")]
+    pub program_notify: bool,
+    /// Glocke (BEL) einer nicht angesehenen Sitzung: die Markierung in der Seitenleiste gibt es immer; mit dieser Einstellung
+    /// zusätzlich Toast/Blinken bzw. Hinweis wie bei Benachrichtigungen (seit 2.3.0, #183, Standard aus – Entscheidung des
+    /// Nutzers). Fehlt in älteren Dateien (dann aus).
+    pub bell_toast: bool,
+    /// Fortschritt von Programmen (OSC 9;4) in Seitenleiste und Taskleiste zeigen (seit 2.3.0, #183, Standard an).
+    #[serde(deserialize_with = "lenient_true")]
+    pub progress_indicator: bool,
+    /// Blinkender Cursor, wenn das Programm ihn anfordert (DECSCUSR 1/3/5, `CSI ? 12 h`); nur im fokussierten Terminal
+    /// (seit 2.3.0, #183, Standard an).
+    #[serde(deserialize_with = "lenient_true")]
+    pub cursor_blink: bool,
 }
 
 /// Tolerant lesen: nur `false` schaltet aus, alles andere (auch ein falscher Typ) ist `true`.
@@ -332,14 +354,20 @@ impl Default for Settings {
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
+            shift_enter_newline_powershell: false,
             palette: Default::default(),
             osc52_copy: true,
+            warn_multiline_paste: true,
             claude_defaults: Default::default(),
             last_claude_opts: None,
             claude_bypass_dropped: false,
             bundled_conpty: true,
             wsl_recent: Default::default(),
             inherit_env: false,
+            program_notify: true,
+            bell_toast: false,
+            progress_indicator: true,
+            cursor_blink: true,
         }
     }
 }
@@ -1144,6 +1172,35 @@ mod tests {
     }
 
     #[test]
+    fn warn_multiline_paste_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „an“, die übrigen Werte bleiben.
+        let old = r#"{"language":"En","osc52_copy":false}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.warn_multiline_paste);
+        assert!(!s.osc52_copy);
+        assert!(Settings::default().warn_multiline_paste);
+        let mut s = s;
+        s.warn_multiline_paste = false;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["warn_multiline_paste"], false);
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(!back.warn_multiline_paste);
+    }
+
+    #[test]
+    fn vt_render_settings_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne die Felder): alles an; ein falscher Typ ergibt ebenfalls an, nur `false` schaltet aus.
+        let s: Settings = serde_json::from_str(r#"{"language":"En"}"#).unwrap();
+        assert!(s.program_notify && !s.bell_toast && s.progress_indicator && s.cursor_blink);
+        let s: Settings = serde_json::from_str(r#"{"program_notify":"no","bell_toast":true,"progress_indicator":1,"cursor_blink":false}"#).unwrap();
+        assert!(s.program_notify && s.bell_toast && s.progress_indicator && !s.cursor_blink);
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!((j["bell_toast"].as_bool(), j["cursor_blink"].as_bool(), j["program_notify"].as_bool()), (Some(true), Some(false), Some(true)));
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(back.bell_toast && !back.cursor_blink);
+    }
+
+    #[test]
     fn wsl_recent_back_compat_and_roundtrip() {
         // settings.json von 2.2.0 (ohne das Feld) lädt mit leerer Liste und schreibt das Feld nicht.
         let old = r#"{"language":"De","remember_sessions":false}"#;
@@ -1159,6 +1216,19 @@ mod tests {
         assert_eq!(s.wsl_recent["Ubuntu"], vec!["/home/u".to_string()]);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.wsl_recent, s.wsl_recent);
+    }
+
+    #[test]
+    fn shift_enter_setting_back_compat_and_roundtrip() {
+        // settings.json ohne das Feld (vor 2.3.0): aus.
+        let s: Settings = serde_json::from_str(r#"{"language":"En","scrollback_lines":5000}"#).unwrap();
+        assert!(!s.shift_enter_newline_powershell);
+        let mut s = s;
+        s.shift_enter_newline_powershell = true;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["shift_enter_newline_powershell"], true);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.shift_enter_newline_powershell);
     }
 
     #[test]

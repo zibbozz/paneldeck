@@ -32,6 +32,32 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Weitere Claude-Startoptionen unter „Weitere Claude-Optionen“ im Dialog „Neue Sitzung“, in den Einstellungen der Sitzung (eine Änderung fragt „Jetzt neu laden?“) und als Standard unter Einstellungen → Claude: Schalter `--chrome`/`--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` und `--safe-mode` (mit Warnung); zusätzliche Ordner (`--add-dir`), erlaubte und verbotene Werkzeuge, eine MCP-Konfiguration, ein Zusatz zum System-Prompt, ein Ersatzmodell, ein Höchstbudget und Auto-Komprimierung. Optionen, die Zugriffe erweitern, zeigen eine Warnung; fehlende Ordner oder Dateien werden beim Start mit Hinweis weggelassen. (#182)
 - MCP: `create_session` nimmt `claude_flags` (nur Schalter); `list_sessions`, `whoami` und `create_session` melden `claude_flags` und `claude_user_options` (nur Namen, wie angewendet). (#182)
 - Icon-Explorer mit dem Lucide-Icon-Satz (über 2.000 Icons, ISC): In jedem Icon-Picker öffnet „Weitere Icons …“ ein Fenster mit den eingebauten Icons (Kategorie „Eingebaut“) und allen Lucide-Icons – Suche nach Name und Stichwort, Kategorien, Raster mit Vorschau beim Darüberfahren, große Vorschau und Auswählen/Abbrechen (Esc schließt). Die eingebauten Icons bleiben im Picker. Ein Lucide-Icon wird als `lucide:<name>` gespeichert; Sicherungen, Vorlagen-Export/-Import und das MCP-Werkzeug `get_project` übernehmen es. Alte Lucide-Namen werden mit dem aktuellen Icon angezeigt und unter dem neuen Namen gespeichert; Icons aus einer neueren Lucide-Version erscheinen als Platzhalter, statt den Import abzubrechen. Sicherungen und Vorlagen mit Lucide-Icons lassen sich nicht in Versionen vor 2.3 importieren. (#190)
+- Claude-Startoptionen: Modell, Effort, Permission-Mode und Agent – als Standard unter Einstellungen → Claude und je Sitzung im Dialog „Neue Sitzung“; je Sitzung in `state.json` gespeichert (optionales Feld `claude_opts`). (#161)
+- MCP: `create_session` nimmt `model`, `effort`, `permission_mode` und `agent` an (nur mit `claude: true`, geprüft); `list_sessions`, `whoami` und `create_session` melden sie. (#161)
+- Beim Schließen einer oder mehrerer Sitzungen, eines Fensters oder von Paneldeck und beim Neu laden zeigt die Rückfrage die Hintergrundprozesse der Sitzung, die weiterlaufen würden: Name, PID, Fenstertitel, Programme mit offenem Fenster markiert. Du wählst „Weiterlaufen lassen“ oder „Alle beenden“; „Alle beenden“ beendet sie sofort, ohne zu speichern. (#168)
+- Eine laufende Sitzung wartet vor dem Schließen 3 Sekunden, ebenso das Schließen vieler Sitzungen und das Beenden von Paneldeck. (#168)
+- MCP `close_session` fragt nie, lässt die Prozesse weiterlaufen und meldet sie im neuen optionalen Feld `remaining_processes` (pid, name, window, title; nicht vertrauenswürdig). (#168)
+- Jedes Ticket (alle Typen) und jede Todo-Karte hat eine eingebaute Beschreibung und eine optionale Fälligkeit (Datum, optional mit Uhrzeit; ein Datum allein gilt bis zum Ende des Tages). Beide stehen im Feld-Editor als feste Zeilen „Eingebaut“ und lassen sich nicht löschen. (#188)
+- Fälligkeits-Markierungen mit einstellbaren Schwellen: je Projekt im neuen Reiter „Fälligkeit“ der Projekt-Einstellungen, für die einfache Todo-Liste unter „Fälligkeit …“. Jede Schwelle hat eine Dauer, eine Markierung (Rahmen, Symbol, Farbe, optionaler Name) und optional „Zeile/Karte tönen“. Projekte mit den mitgelieferten Typen und die Todo-Liste starten mit einem gelben Warndreieck unter 1 Woche und einem roten unter 1 Tag; der Tooltip zeigt z. B. „fällig in 3 Tagen“ bzw. „überfällig seit 2 h“. (#188)
+- Listen, Boards, Karten und die Ticket-Ansicht zeigen die Fälligkeit mit Markierung; der Kopf zeigt Zählungen wie „3 überfällig“ je Projekt und für die Todo-Liste. Die Todo-Liste bekommt die Fälligkeit im Karten-Editor und auf der Karte, Sortierung nach Fälligkeit und einen Filter (mit Fälligkeit / überfällig / markiert). (#188)
+- Abfragesprache: `due` und `description` (deutsch auch „Fällig“/„Beschreibung“). (#188)
+- MCP: `description` und `due` bei `create_ticket`/`update_ticket`, `due` bei `add_todo`, `due`/`due_state` in Ticket- und Todo-Antworten, `due_thresholds` in `list_projects`. (#188)
+- Neues Icon „alert“ (Ausrufezeichen). (#188)
+- Labels ist ein eingebautes Feld an jedem Tickettyp, auch an eigenen Typen, wie Titel, Beschreibung und Fälligkeit; es lässt sich nicht löschen. MCP: Parameter `labels` bei `create_ticket`/`update_ticket` und `labels` in den Ticket-Antworten. (#195)
+- Abfragesprache: Eigene Felder lassen sich auch über ihren Schlüssel suchen (z. B. `story_points`); die eingebauten Felder hören in jeder Oberflächensprache auf ihre deutschen und englischen Namen. (#195)
+- Kitty-Tastaturprotokoll: Programme, die es einschalten (z. B. Claude Code), bekommen eindeutige Tasten (Umschalt+Enter, Strg+Rück, Esc, Alt-Kombinationen als CSI u). (#183)
+- win32-input-mode unter ConPTY: PowerShell/cmd erhalten Strg+Leertaste, Strg+Enter, Strg+/, Strg+Umschalt+Buchstabe, Esc und den Ziffernblock als echte Tastenereignisse; Strg+3…0 kommen jetzt im Terminal an. (#183)
+- Einstellung „Umschalt+Enter = neue Zeile in PowerShell“ (standardmäßig aus): PSReadLine fügt eine Zeile ein, statt den Befehl auszuführen. (#183)
+- MCP `send_keys` versteht ctrl+/alt+/shift+-Kombinationen und mehr Tasten (space, insert, f1–f20, Buchstaben, Ziffern, Satzzeichen) und kodiert sie wie die Tastatur; im kitty-Modus geht z. B. `ctrl+c` als `CSI 99;5u` und `esc` als `CSI 27u`. (#183)
+- `TERM_PROGRAM=Paneldeck` und `TERM_PROGRAM_VERSION` in jeder Shell. (#183)
+- Antworten auf Farbabfragen (OSC 4/10/11/12), Größenabfragen (CSI 14t/16t) und XTVERSION, auch für Sitzungen im Hintergrund. (#183)
+- Fokusmeldungen (DECSET 1004). (#183)
+- Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“ (standardmäßig an, für Programme ohne Bracketed Paste; Bestätigen nach kurzer Wartezeit). (#183)
+- Fortschritt, den Programme melden (OSC 9;4), erscheint in der Seitenleiste und am Taskleistenknopf; MCP `list_sessions` hat das neue Feld `progress`. (#183)
+- Benachrichtigungen von Programmen (OSC 9, OSC 777) melden sich, wenn du die Sitzung gerade nicht ansiehst (begrenzt, abschaltbar); die Glocke markiert die Sitzung in der Seitenleiste, ein Toast ist wählbar. (#183)
+- Von Programmen gesetzte Links (OSC 8) lassen sich mit Strg+Klick öffnen; der Tooltip zeigt das echte Ziel und den Rechner. (#183)
+- Jede installierte Festbreitenschrift (z. B. Nerd Fonts) ist als Terminalschrift wählbar; Powerline-Trenner werden lückenlos selbst gezeichnet. (#183)
+- Fett und kursiv, Unterstreichungsarten (doppelt, Welle, gepunktet, gestrichelt) und Unterstreichungsfarben; blinkender Cursor, wenn das Programm ihn anfordert (Einstellung). (#183)
 
 ### Changed
 
@@ -47,6 +73,17 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Alles, was wie ein Knopf funktioniert, zeigt jetzt den Hand-Zeiger: Hauptreiter, Fensterknöpfe, Listen- und Menüeinträge, Auswahllisten, Kontrollkästchen, aufklappbare Überschriften, Toasts und Knöpfe über dem Terminal. (#187)
 - Einstellungen → Agenten-Schnittstelle: Die Stufen Aus / Nur lesen / Steuern sind echte Knöpfe; genauso Sprache, Prompt-Sprache, Profile, Modell-Stufe, Werkzeugaufrufe, Windows/WSL-Pfad und Nicht vorgemerkt/Vorgemerkt. (#187)
 - Die Kostenzeile steht in einer eigenen Zeile unten in der Seitenleiste und sieht wie ein kleiner Knopf aus, mit Pfeil, Hover und Tooltip; der MCP-Chip ebenso. (#187)
+- Agenten-Kette: Eine Sitzung, die ein vom Nutzer gestarteter Agent (ohne Agenten-Kette) anlegt, wird nicht mehr markiert und darf in ihren Ersteller zurückschreiben; die Sperre gilt nur, wenn der Ersteller selbst eine Agenten-Kette hat. `paneldeck --open … --claude` in einem Terminal markiert die neue Sitzung nur, wenn dieses Terminal eine Agenten-Kette hat. (#152)
+- Vorhandene Beschreibungsfelder werden beim Update zur eingebauten Beschreibung; Werte, Verlauf und Regeln bleiben erhalten. Eine Pflicht-Beschreibung wird optional. (#188)
+- Die Umwandlung einer Todo-Karte in ein Ticket übernimmt auch die Fälligkeit. Projektsicherungen enthalten die Schwellen; ältere Sicherungen werden mit den Standards importiert. (#188)
+- Beim Update werden vorhandene eigene Felder namens „Labels“ zum eingebauten Labels-Feld; Werte, Verlauf und Regeln bleiben erhalten. Eigene Felder, die genauso heißen würden wie ein eingebautes, heißen danach „… (custom)“. (#195)
+- Projektsicherungen haben das Format Version 3; ältere Versionen lehnen sie mit einer verständlichen Meldung ab. Sicherungen der Versionen 1 und 2 lassen sich weiter importieren, ihre eigenen Beschreibungs-/Labels-Felder werden wie beim Update umgewandelt. (#188)
+- Fälligkeiten werden als `JJJJ-MM-TT` bzw. `JJJJ-MM-TTTHH:MM` (ohne Sekunden) gespeichert. (#188)
+- Farbpalette: Das Löschen einer Farbe fragt nicht nach, sondern bietet einige Sekunden lang „Rückgängig“ an. Die eigene Palette eines Bereichs beginnt mit dessen bisherigen Farben und lässt sich durch eine Kopie der gemeinsamen ersetzen („Aus der gemeinsamen Palette kopieren“, rückgängig machbar). (#173)
+- Felder, die beim Update zu eingebauten Feldern werden, verlieren ihren Standardwert (eingebaute Felder haben keinen); ein eigenes Feld anderer Art mit dem Namen eines eingebauten (z. B. ein Textfeld „Labels“) behält seine Werte und heißt „… (custom)“ – Agenten, die es unter dem alten Namen setzen, treffen jetzt das eingebaute Feld. (#195)
+- Strg+Rück sendet 0x08 wie Windows Terminal (PowerShell löscht das vorige Wort) statt Strg+W; in bash löscht es jetzt ein Zeichen. (#183)
+- Esc geht unter ConPTY als Tastenereignis im win32-input-mode. (#183)
+- `reset` (RIS) setzt von Programmen geänderte Farben auf das Theme zurück. (#183)
 
 ### Deprecated
 
@@ -60,6 +97,13 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
 - Terminals erben keine internen oder reinen Test-Variablen `PANELDECK_*` von Paneldeck mehr (z. B. wenn Paneldeck aus dem Terminal eines anderen Paneldeck gestartet wurde). (#175)
 - Klickbare Elemente ohne jeden Hinweis (Kostenzeile, MCP-Chip, Toasts, Tag-Farben, Eltern-Ticket) zeigen jetzt Hover, Hand-Zeiger und Tooltip. (#187)
+- MCP `read_chat` schneidet Werkzeug-Ergebnisse eines Chats nicht mehr nach 8 KB vorn ab; sie kommen bis zur Grenze von 16 KB für Werkzeug-Ergebnisse, das Ende mit den neuesten Nachrichten und dem Status bleibt erhalten. (#194)
+- `run_command` (MCP) liefert keine leere Ausgabe mehr, wenn der Befehl eine Zeile ausgibt, die genau die Terminalbreite füllt (PowerShell, Git Bash); das Springen zwischen Prompts landet dann auch in der richtigen Zeile. (#193)
+- `run_command` (MCP) und das Springen zwischen Prompts funktionieren wieder, wenn der Verlauf des Terminals voll ist; bisher kam die Ausgabe leer zurück und Prompt-Sprünge landeten in falschen Zeilen. (#197)
+- Die Abfrage-Leiste über der Ticket-Liste kennt jetzt auch Felder, die nach der ersten Abfrage angelegt wurden (ein eigenes Feld „Labels“ war nicht suchbar). (#195)
+- Alt+Ziffer und Alt+Satzzeichen (z. B. Alt+. in bash) sendeten nichts; von Paneldeck belegte Alt-Kürzel schicken keine Zeichen mehr ins Terminal. (#183)
+- Broadcast kodiert Tasten je Zielterminal. (#183)
+- Kitty-Tastaturflags, die ein abgestürztes Programm stehen ließ, werden am nächsten Shell-Prompt zurückgesetzt. (#183)
 
 ### Security
 
@@ -71,6 +115,15 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Paneldeck lädt keine DLLs mehr aus dem Arbeitsordner: Gleich beim Start wird die DLL-Suche auf den Programmordner und System32 beschränkt, der mitgelieferte Konsolen-Host wird über seinen vollen Pfad geladen. (#183)
 - Die C-Laufzeit ist jetzt in `paneldeck.exe` eingebunden; die `VCRUNTIME140.dll`, die Windows noch vor dem Start von Paneldeck suchen würde, wird nicht mehr gebraucht. (#183)
 - Agenten (MCP) können nur Schalter ergänzen, die Rechte, Zugriffe und Hooks nicht berühren (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; chrome nicht, wenn du Chrome als Standard ausgeschaltet hast). Wertoptionen, Flags, die Rechte oder Zugriffe erweitern, Flags, die Hooks abschalten (`--safe-mode`), und Flags, die Paneldeck steuert, werden abgelehnt. Zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration und `--safe-mode` aus den Standards gelten nie für Sitzungen, die Agenten anlegen oder die per `paneldeck --open --claude` aus einem Hub-Terminal geöffnet werden. Pfade müssen lokal sein und existieren (Netzwerkfreigaben, auch über Verknüpfungen, werden nie berührt); alle Werte werden geprüft und je Shell gequotet. (#182)
+- Per MCP angelegte Sitzungen ohne Permission-Mode bekommen ausdrücklich `--permission-mode default`, damit die eigenen Claude-Einstellungen des Nutzers bypassPermissions nicht einschalten können; `bypassPermissions` geht nie per MCP, nie als gespeicherter Standard und wird nie gemerkt – nur als ausdrückliche Wahl je Sitzung mit Warnung. Alte `--dangerously-*`-Argumente fallen weg. (#161)
+- Paneldeck startet die Shell jedes Terminals in einem eigenen Windows-Job-Object und ordnet MCP-Aufrufer und `paneldeck --open` über die Mitgliedschaft zu. Losgelöst oder verwaist gestartete Prozesse (`Start-Process`, `cmd /c start`, doppelter Fork) gehören weiter zu ihrer Sitzung und deren Agenten-Kette; Programme können nicht aus dem Job ausbrechen. Die Prüfung über den Prozessbaum bleibt als Rückfallweg. (#168)
+- Ein Programm, das tausende kitty-Tastaturmodi ablegt, bringt Paneldeck nicht mehr zum Absturz. (#183)
+- Eingefügter Text wird wie bei Windows Terminal gefiltert (Steuerzeichen inkl. ESC und C1), versteckte Enter-Sequenzen umgehen die Rückfrage nicht mehr. (#183)
+- Fenstertitel von Programmen werden bereinigt (Steuer-, Schreibrichtungs-, Zeilentrenn- und unsichtbare Zeichen, Längengrenze). (#183)
+- OSC-8-Links: http/https öffnen nur mit schlichtem Rechnernamen direkt; alle anderen erst nach einer Rückfrage mit dem ganzen Ziel. Überlange oder getarnte Ziele (Steuer-, Bidi- oder unsichtbare Zeichen, auch prozent-kodiert), Skript-Schemata, missbrauchte Windows-Protokolle (auch die Office-Handler) und `file:`-Links auf anderes als lokale Laufwerkspfade werden nie geöffnet. (#183)
+- Netzwerk- und Gerätepfade wie `\\.\GLOBALROOT\…` oder `\??\UNC\…` gelten nicht mehr als lokal (Links, Arbeitsordner aus OSC 7/9;9). (#183)
+- „Im Ordner zeigen“ reicht keine Kommas oder Anführungszeichen mehr an den Explorer weiter; weitere Dateitypen (z. B. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc`), Punkte/Leerzeichen am Ende und alternative Datenströme gelten als ausführbar. (#183)
+- Benachrichtigungstexte und Sitzungsnamen in Toasts werden bereinigt (Steuer-, Bidi- und unsichtbare Zeichen entfernt, Länge begrenzt); Toasts nennen immer Paneldeck und die Sitzung. (#183)
 
 ## [2.2.0] - 2026-11-16
 

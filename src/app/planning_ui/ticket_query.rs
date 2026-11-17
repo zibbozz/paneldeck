@@ -83,6 +83,11 @@ impl PlanUi {
         }
     }
 
+    /// Felder/Typen könnten sich geändert haben: das Schema beim nächsten Zeichnen neu bauen.
+    pub(super) fn tq_schema_changed(&mut self) {
+        self.tq.schema.invalidate();
+    }
+
     /// Die Daten haben sich geändert: Schema und Ergebnis neu holen.
     pub(super) fn tq_data_changed(&mut self) {
         self.tq.schema.invalidate();

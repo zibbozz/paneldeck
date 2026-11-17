@@ -131,7 +131,6 @@ pub fn list_tickets(conn: &Connection, project_id: Option<i64>, f: &TicketFilter
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planning::fields::FieldKind;
     use crate::planning::history::Source;
     use crate::planning::tickets::fixture::Fx;
     use crate::planning::tickets::{set_field, set_flagged, set_starred};
@@ -202,7 +201,7 @@ mod tests {
         let a = f.mk(f.story, "Login überarbeiten");
         let b = f.mk(f.story, "Export");
         set_field(&f.c, b.id, desc.id, json!("Die Anmeldung nutzt 100% neue_Seiten"), &ui()).unwrap();
-        let labels = f.add_field(f.story, "Labels", FieldKind::Labels, Default::default(), false);
+        let labels = f.field(f.story, "labels");
         set_field(&f.c, a.id, labels.id, json!(["frontend", "ui"]), &ui()).unwrap();
         let q = |t: &str| keys(&list_tickets(&f.c, None, &TicketFilter { text: Some(t.into()), ..Default::default() }).unwrap());
         assert_eq!(q("login"), vec!["PAN-1"], "Groß-/Kleinschreibung egal");

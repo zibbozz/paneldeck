@@ -123,7 +123,8 @@ pub struct McpJob {
     /// nur ein Hinweis, siehe `App::mcp_resolve_caller`.
     pub caller: Option<u64>,
     /// Prozessbaum des Absenders, vom Hub auf dem Verbindungs-Thread ermittelt (`winctl::resolve_peer`, seit 2.3.0, #152):
-    /// TCP-Tabelle → Prozess geöffnet und lebend → Vorfahren mit Erzeugungszeiten. Ein `caller_pid` in der Anfrage wird
+    /// TCP-Tabelle → Prozess geöffnet und lebend → Job Object einer Sitzung (#168), sonst Vorfahren mit Erzeugungszeiten.
+    /// Ein `caller_pid` in der Anfrage wird
     /// ignoriert (ein Client könnte ihn fälschen). Nicht zu ermitteln = Anfrage abgewiesen, nie „extern“.
     pub peer: crate::winctl::PeerChain,
     /// `PANELDECK_SESSION_KEY` der Brücke (nur für die Zuordnung über `caller` in WSL).
@@ -594,13 +595,15 @@ mod tests {
         write_ipc_file(&dir, srv.port, &srv.token);
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
         write_ipc_file(&dir, srv.port, &srv.ipc_token);
-        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin: Some(crate::winctl::PeerChain { chain: vec![1], orphan: true }) }));
+        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin: Some(crate::winctl::PeerChain { chain: vec![1], orphan: true, job: Some(9) }) }));
         // Der Hub ermittelt den Absender selbst (hier: dieser Testprozess), eine Angabe im Befehl zählt nicht.
         match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
             IpcCmd::Open { path, claude, origin } => {
                 assert_eq!((path.as_str(), claude), ("C:\\x", true));
                 assert_eq!(origin.as_ref().and_then(|o| o.chain.first()), Some(&std::process::id()));
-                assert!(!origin.unwrap().orphan);
+                let origin = origin.unwrap();
+                assert!(!origin.orphan);
+                assert_eq!(origin.job, None, "die Job-Angabe des Clients zählt nicht; der Testprozess liegt in keinem Sitzungs-Job");
             }
             other => panic!("{other:?}"),
         }

@@ -281,6 +281,14 @@ impl App {
                 }
                 // Rückfrage „Neu laden?“ aus diesem Fenster hier zeigen – vor dem Terminal, damit Enter/Esc ihr gehören.
                 self.reload_ask_ui(ctx, actions, Some(id));
+                // Ebenso die Rückfrage vor dem Einfügen mehrerer Zeilen.
+                self.paste_ask_ui(ctx, Some(id));
+                // Fokusmeldung (DECSET 1004): die abgedockte Sitzung hat den Fokus, wenn ihr Fenster ihn hat.
+                if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
+                    s.report_focus(ctx.input(|i| i.viewport().focused.unwrap_or(false)));
+                }
+                // Ebenso die Rückfrage „Link öffnen?“ (OSC 8), wenn der Link in diesem Fenster angeklickt wurde.
+                self.link_ask_ui(ctx);
                 if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::W)) {
                     close = true;
                 }
