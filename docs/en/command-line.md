@@ -34,7 +34,7 @@ Options with a value can also be written as `--option=value` (`--profile=work`).
 ## Options in detail
 
 ### --open \<folder\>
-Opens a new terminal session in `<folder>` in the running Paneldeck (or starts it). If `<folder>` is a file, its folder is used. The Explorer context menu uses this; drive roots such as `"C:\"` work too.
+Opens a new terminal session in `<folder>` in the running Paneldeck (or starts it). If `<folder>` is a file, its folder is used. The Explorer context menu uses this; drive roots such as `"C:\"` work too. A relative path is resolved against the caller's current folder; Linux paths (`/…`, `~`) are passed on unchanged for WSL.
 
     paneldeck.exe --open "C:\Dev\my-app"
 
