@@ -966,14 +966,7 @@ impl App {
         let remember_at_start = settings.remember_sessions;
         let restored_once = fresh_start::restore_once_applies(settings.remember_sessions, update::install::restore_once());
         if !settings.remember_sessions && !restored_once {
-            if fresh_start::worth_keeping(&saved) {
-                if let Ok(raw) = std::fs::read(dir.join("state.json")) {
-                    fresh_start::backup_state(&dir, &raw);
-                }
-            }
-            let top = fresh_start::sweep_session_files(&dir);
-            saved.next_id = saved.next_id.max(top.saturating_add(1));
-            saved = fresh_start::forget(saved, state::persisted_lang(settings.language));
+            saved = fresh_start::start_fresh(&dir, saved, state::persisted_lang(settings.language));
         }
         let restored_once = restored_once && !saved.sessions.is_empty();
         // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
@@ -2152,8 +2145,12 @@ impl App {
 
     /// Nur `state.json` schreiben (Sitzungen, Layout, Projekte) – leicht genug für sofortiges Speichern, z. B. wenn sich
     /// eine Agenten-Kette ändert (#152).
+    /// Mit „Sitzungen merken“ aus (seit dem Start) steht dort nur der zugeschnittene Zustand – sonst würde ein Absturz beim
+    /// nächsten Start die Wegwerf-Sitzungen sichern und dabei die einzige echte Sicherung ersetzen (#219).
     fn save_state(&self) {
-        state::save_json(&self.dir.join("state.json"), &self.saved_state());
+        let throwaway = fresh_start::throwaway_run(self.settings.remember_sessions, self.remember_at_start);
+        let s = fresh_start::state_for_disk(self.saved_state(), throwaway, state::persisted_lang(self.settings.language));
+        state::save_json(&self.dir.join("state.json"), &s);
     }
 
     /// Inhalt von `state.json` (Sitzungen, Projekte mit dem aktuellen Layout, Fenster).
