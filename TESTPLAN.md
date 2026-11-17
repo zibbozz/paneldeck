@@ -723,3 +723,18 @@ Vorbereitung: Testinstanz wie 54 (Claude-Modus an, eine Claude-Sitzung mit Verbr
 - [ ] **Hover-Zustände:** Toast (Rahmen), Tag-Farbe in *Tags verwalten* (Ring), Eltern-Ticket-Kürzel in der Ticketansicht (Hand, Tooltip „Eltern-Ticket öffnen“).
 - [ ] **Weiteres Fenster:** dasselbe in einem weiteren Fenster (Strg+Klick auf einen Reiter).
 - [ ] **Beide Sprachen:** Tooltips auf Deutsch und Englisch.
+
+## 63 · Hintergrundprozesse und Job Objects (#152, #168, 2.3.0)
+Jede Shell startet in einem eigenen Windows-Job-Object; Programme, die aus der Sitzung gestartet werden, bleiben darin (auch losgelöst). Sie können nicht ausbrechen (`CREATE_BREAKAWAY_FROM_JOB` schlägt fehl). Lang laufende Programme (`code .`, Browser, `wt`, `Start-Process notepad`) gehören damit zur Sitzung, die sie gestartet hat – „Alle beenden“ beendet sie hart, ohne Speichern.
+- [ ] **Eine Sitzung, ruhend:** in PowerShell `Start-Process notepad` → X der Sitzung: Rückfrage ohne Wartezeit nennt `notepad.exe (PID …) · window open – <Titel>` und warnt „End all terminates them immediately – without saving“; Enter = „Keep running“ → Sitzung zu, Editor bleibt offen.
+- [ ] **Alle beenden:** dasselbe mit „End all“ → Sitzung zu, Editor beendet (ungespeicherter Text weg). Esc/Abbrechen: nichts passiert, kein Enter/Esc im Terminal.
+- [ ] **Laufende Sitzung:** `Start-Process notepad`, dann `ping -t 127.0.0.1` laufen lassen → X: Rückfrage mit 3 s Wartezeit; Enter erst danach (= weiterlaufen lassen, schließt die Sitzung).
+- [ ] **Kein Fehlalarm:** Sitzung nur mit `claude` bzw. `ping -t` im Vordergrund → keine Hintergrund-Rückfrage (nur die übliche).
+- [ ] **Viele:** zwei Sitzungen eines Ordners mit je einem Editor → Papierkorb am Ordner: eine Rückfrage, Prozesse je Sitzung, beide Knöpfe nach 3 s.
+- [ ] **Beenden:** Hauptfenster schließen bzw. Tray → Beenden mit Editor im Hintergrund → Rückfrage (3 s); Abbrechen hält Paneldeck offen; mit „In den Tray schließen“ keine Rückfrage beim X.
+- [ ] **Weiteres Fenster:** Sitzung mit Editor in ein zweites Fenster, Fenster schließen → Liste, „Schließen, weiterlaufen lassen“/„Schließen, alle beenden“ erst nach 3 s; Esc bricht ab, Enter erreicht kein Terminal.
+- [ ] **Neu laden:** Kontextmenü → Sitzung neu laden mit Editor im Hintergrund → „Neu laden, weiterlaufen lassen“ / „Neu laden, alle beenden“, auch wenn die Shell schon beendet ist.
+- [ ] **Programme mit Fenster:** `code .` bzw. ein Browser aus der Sitzung → in der Liste als „window open“ markiert; vor „Alle beenden“ selbst speichern.
+- [ ] **MCP:** Agent schließt eine selbst angelegte Sitzung mit Hintergrundprozess → keine Rückfrage, Antwort mit `remaining_processes` (pid, name, window, title) und Hinweis „untrusted“; der Prozess läuft weiter.
+- [ ] **Zuordnung:** ein per `Start-Process` aus der Sitzung gestarteter Prozess, dessen Shell schon beendet ist, wird bei `whoami` der Sitzung zugeordnet (Smoke-Test prüft das).
+- [ ] **Beide Sprachen:** Rückfragen, Knöpfe und Warnung auf Deutsch und Englisch.

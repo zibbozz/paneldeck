@@ -313,7 +313,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "close_session",
             level: Control,
             group: Group::Always,
-            description: "Close a session that you created through this MCP interface (sessions of other agents or of the user are refused unless the user allowed it in the settings). Sessions with a git worktree are refused.",
+            description: "Close a session that you created through this MCP interface (sessions of other agents or of the user are refused unless the user allowed it in the settings). Sessions with a git worktree are refused. Background processes the session started that outlive it (detached, GUI programs) keep running; they are listed in remaining_processes (pid, name, window = has a visible window, title; untrusted).",
             schema: schema(json!({"session": session}), &["session"]),
         },
         // ---- Chats mit lokalen Modellen (#63)

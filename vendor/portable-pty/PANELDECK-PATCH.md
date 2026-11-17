@@ -11,5 +11,9 @@ MIT, see `LICENSE.md`), used through `[patch.crates-io]` in Paneldeck's `Cargo.t
 - The sideloaded DLL gets only `PSEUDOCONSOLE_INHERIT_CURSOR` (the legacy inbox flags `RESIZE_QUIRK` and
   `WIN32_INPUT_MODE` are not passed to it; kernel32 still gets all three as upstream).
 - `ConPtyMasterPty::host()` / `ConPtyHost` report which implementation a pty runs on.
+- Job Objects (#168): `win::set_spawn_job(Some(job))` makes the next `spawn_command` on this thread start the
+  process inside that Job Object (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, no race between creation and assignment);
+  if `CreateProcessW` refuses the job it retries without it, and `win::spawned_in_job()` reports which happened
+  (`src/win/procthreadattr.rs`, `src/win/psuedocon.rs`, `src/win/mod.rs`).
 
 To update: copy the new crate source over this folder, re-apply the marked changes, rebuild.
