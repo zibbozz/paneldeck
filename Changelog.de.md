@@ -52,6 +52,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
 - Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
 - Terminals erben keine internen oder reinen Test-Variablen `PANELDECK_*` von Paneldeck mehr (z. B. wenn Paneldeck aus dem Terminal eines anderen Paneldeck gestartet wurde). (#175)
+- `run_command` (MCP) liefert keine leere Ausgabe mehr, wenn der Befehl eine Zeile ausgibt, die genau die Terminalbreite füllt (PowerShell, Git Bash); das Springen zwischen Prompts landet dann auch in der richtigen Zeile. (#193)
+- `run_command` (MCP) und das Springen zwischen Prompts funktionieren wieder, wenn der Verlauf des Terminals voll ist; bisher kam die Ausgabe leer zurück und Prompt-Sprünge landeten in falschen Zeilen. (#197)
 
 ### Security
 

@@ -52,6 +52,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
 - Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
 - Terminals no longer inherit Paneldeck's internal or test-only `PANELDECK_*` variables (for example when Paneldeck was started from another Paneldeck's terminal). (#175)
+- `run_command` (MCP) no longer returns empty output when the command prints a line that exactly fills the terminal width (PowerShell, Git Bash); jumping between prompts also lands on the right row then. (#193)
+- `run_command` (MCP) and jumping between prompts work again once the terminal's scrollback is full; until now the output came back empty and prompt jumps landed on the wrong rows. (#197)
 
 ### Security
 
