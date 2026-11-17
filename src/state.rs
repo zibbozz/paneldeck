@@ -247,6 +247,12 @@ pub struct Settings {
     /// begrenzt (`wsl::RECENT_MAX`). Fehlt in älteren Dateien; Unlesbares/Ungültiges wird beim Laden verworfen.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "lenient_wsl_recent")]
     pub wsl_recent: std::collections::BTreeMap<String, Vec<String>>,
+    /// Umgebung von Paneldeck erben (seit 2.3.0, #175, Standard aus): Terminals starten mit der Umgebung des
+    /// Paneldeck-Prozesses statt mit der frisch aus der Registry gelesenen (portable-pty: Prozessumgebung, darüber System-
+    /// und Benutzervariablen aus der Registry – so wirkt `setx` sofort). An: genau die Prozessumgebung, z. B. für einen Start
+    /// aus einer Shell mit eigener Umgebung. Paneldecks eigene Variablen (`PANELDECK_SESSION` …) und die Variablen des Profils
+    /// gelten in beiden Fällen. Fehlt in älteren Dateien (dann aus = bisheriges Verhalten).
+    pub inherit_env: bool,
 }
 
 /// Tolerant lesen: nur `false` schaltet aus, alles andere (auch ein falscher Typ) ist `true`.
@@ -333,6 +339,7 @@ impl Default for Settings {
             claude_bypass_dropped: false,
             bundled_conpty: true,
             wsl_recent: Default::default(),
+            inherit_env: false,
         }
     }
 }
@@ -1081,6 +1088,20 @@ mod tests {
         assert_eq!(j["remember_sessions"], false);
         let back: Settings = serde_json::from_value(j).unwrap();
         assert!(!back.remember_sessions);
+    }
+
+    #[test]
+    fn inherit_env_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „aus“ (Umgebung aus der Registry wie bisher).
+        let s: Settings = serde_json::from_str(r#"{"language":"En","shell_integration":false}"#).unwrap();
+        assert!(!s.inherit_env);
+        assert!(!s.shell_integration);
+        assert!(!Settings::default().inherit_env);
+        let mut s = s;
+        s.inherit_env = true;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["inherit_env"], true);
+        assert!(serde_json::from_value::<Settings>(j).unwrap().inherit_env);
     }
 
     #[test]
