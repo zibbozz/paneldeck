@@ -20,6 +20,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Custom fields named like a built-in field with different upper/lower case beyond ASCII (e.g. “FÄLLIG AM”) are renamed “… (custom)” like during the update; custom fields of another kind named “Due”/“Fällig” can be queried as “Due (custom)” (#221)
 - The due threshold editor keeps the chosen unit while dragging (7 days no longer jumps to 1 week) (#221)
 - The Appearance settings no longer check the bundled ConPTY files on every frame (#221)
+- A program that kept a synchronized update open forever while sending queries, or an OSC sequence that never ended, could fill memory until Paneldeck crashed; both are now limited (#212)
+- Dialogs no longer pass keys to the terminal behind them: the close prompt of an extra window (Esc interrupted Claude, Enter reached the shell), the first frame of the multi-line paste prompt, and focus now returns to the terminal after the link prompt (#217)
+- Broadcast paste: each target pane now frames pasted text with its own bracketed-paste mode, and the multi-line paste prompt also appears when a target pane would run the lines (#220)
+- A full reset (RIS) in the alternate screen no longer shifts prompt marks and absolute line numbers; CAN/SUB now end OSC sequences as in the terminal emulation (#221)
 
 ## [2.3.0] - 2026-11-17
 

@@ -295,7 +295,8 @@ enum Nav {
 #[derive(Clone)]
 enum Action {
     /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
-    PasteAsk(u64, String, bool),
+    /// Sitzung, Text, aus abgedocktem Fenster, Rückfrage nur wegen möglicher Broadcast-Ziele (`Session::take_paste_ask`).
+    PasteAsk(u64, String, bool, bool),
     OpenPalette,
     OpenTemplates,
     OpenCosts,
@@ -2374,7 +2375,9 @@ impl App {
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
         // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
-        if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) {
+        // Die Rückfrage vor dem Einfügen mehrerer Zeilen zeichnet erst nach den Terminals: ohne das bekäme das Terminal
+        // im ersten Bild noch Tasten (#217).
+        if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) || self.paste_ask_here(None) {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();
@@ -2451,12 +2454,8 @@ impl App {
         if self.broadcast {
             let data = self.entries.get(&self.focused).and_then(|e| e.live.as_ref()).map(|s| s.take_tee()).unwrap_or_default();
             if !data.is_empty() {
-                let mut leaves = Vec::new();
-                if let Some(l) = &self.layout {
-                    l.leaves(&mut leaves);
-                }
-                // Tasten je Ziel mit dessen Modus kodieren (kitty, win32-input-mode, Cursor-Tasten).
-                for id in leaves.into_iter().filter(|i| *i != self.focused) {
+                // Tasten je Ziel mit dessen Modus kodieren (kitty, win32-input-mode, Cursor-Tasten, Bracketed Paste).
+                for id in self.broadcast_targets() {
                     if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
                         let bytes = crate::vtkeys::TeeInput::encode_all(&data, s.key_mode());
                         if !bytes.is_empty() {
@@ -2466,6 +2465,16 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Ziele des Broadcasts: alle Bereiche im Layout außer dem fokussierten.
+    pub(super) fn broadcast_targets(&self) -> Vec<u64> {
+        let mut leaves = Vec::new();
+        if let Some(l) = &self.layout {
+            l.leaves(&mut leaves);
+        }
+        leaves.retain(|i| *i != self.focused);
+        leaves
     }
 
     /// Ordner für Git-Abfrage und Transkript-Suche aktuell halten (alle 2 s).
@@ -3168,7 +3177,7 @@ impl App {
             return;
         }
         match a {
-            Action::PasteAsk(id, text, detached) => self.ask_paste(id, text, detached),
+            Action::PasteAsk(id, text, detached, check_targets) => self.ask_paste(id, text, detached, check_targets),
             Action::ToggleFiles => self.files_open = !self.files_open,
             Action::Cycle(d) => self.cycle(d),
             Action::JumpCmd(d) => {
@@ -4275,8 +4284,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
             let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
-            if let Some(text) = session.take_paste_ask() {
-                cx.actions.push(Action::PasteAsk(id, text, cx.detached));
+            if let Some((text, check_targets)) = session.take_paste_ask() {
+                cx.actions.push(Action::PasteAsk(id, text, cx.detached, check_targets));
             }
             if session.search.is_some() && search_bar(ui, session, body, lang) {
                 session.search = None;

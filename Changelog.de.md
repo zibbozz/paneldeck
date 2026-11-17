@@ -20,6 +20,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Eigene Felder, die bis auf Groß-/Kleinschreibung jenseits von ASCII wie ein eingebautes heißen (z. B. „FÄLLIG AM“), heißen wie beim Update „… (custom)“; eigene Felder anderer Art namens „Due“/„Fällig“ sind als „Due (custom)“ abfragbar (#221)
 - Der Editor der Fälligkeits-Schwellen behält beim Ziehen die gewählte Einheit (7 Tage springt nicht mehr auf 1 Woche) (#221)
 - Die Einstellungen „Darstellung“ prüfen die mitgelieferten ConPTY-Dateien nicht mehr in jedem Bild (#221)
+- Ein Programm, das ein Synchronized Update endlos offen hielt und dabei Anfragen sendete, oder eine nie beendete OSC-Sequenz konnte den Speicher füllen, bis Paneldeck abstürzte; beides ist jetzt begrenzt (#212)
+- Dialoge geben keine Tasten mehr an das Terminal dahinter weiter: die Rückfrage beim Schließen eines weiteren Fensters (Esc unterbrach Claude, Enter ging an die Shell), das erste Bild der Rückfrage beim Einfügen mehrerer Zeilen; nach der Rückfrage „Link öffnen?“ bekommt das Terminal den Fokus zurück (#217)
+- Broadcast-Einfügen: Jeder Zielbereich rahmt eingefügten Text jetzt mit seinem eigenen Bracketed-Paste-Modus, und die Rückfrage vor mehreren Zeilen erscheint auch, wenn ein Zielbereich die Zeilen ausführen würde (#220)
+- Ein vollständiger Reset (RIS) im alternativen Bildschirm verschiebt Prompt-Marken und absolute Zeilennummern nicht mehr; CAN/SUB beenden OSC-Sequenzen wie in der Terminal-Emulation (#221)
 
 ## [2.3.0] - 2026-11-17
 
