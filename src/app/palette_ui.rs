@@ -264,17 +264,20 @@ impl RowIds {
 /// Wie lange „Rückgängig“ nach Löschen bzw. Kopieren angeboten wird (Sekunden).
 pub const UNDO_SECS: f64 = 6.0;
 
-/// Angebot „Rückgängig“: Text, die Liste davor und bis wann (Zeit von egui).
+/// Angebot „Rückgängig“: Text, die Liste davor, die Liste direkt nach der Aktion und bis wann (Zeit von egui).
+/// Weicht die Liste von `after` ab (umbenannt, Farbe geändert, hinzugefügt, sortiert, Vorgaben wiederhergestellt …),
+/// entfällt das Angebot – sonst würde „Rückgängig“ diese späteren Änderungen still verwerfen.
 #[derive(Clone, Default)]
 struct Undo {
     msg: String,
     prev: Vec<PaletteColor>,
+    after: Vec<PaletteColor>,
     until: f64,
 }
 
-fn offer_undo(ui: &Ui, salt: Id, msg: String, prev: Vec<PaletteColor>) {
+fn offer_undo(ui: &Ui, salt: Id, msg: String, prev: Vec<PaletteColor>, after: Vec<PaletteColor>) {
     let until = ui.input(|i| i.time) + UNDO_SECS;
-    ui.data_mut(|d| d.insert_temp(salt.with("undo"), Undo { msg, prev, until }));
+    ui.data_mut(|d| d.insert_temp(salt.with("undo"), Undo { msg, prev, after, until }));
 }
 
 /// Liste einer Palette bearbeiten. `shared`: bei der eigenen Palette eines Bereichs die gemeinsame (Knopf „Aus
@@ -394,8 +397,9 @@ fn list_editor(ui: &mut Ui, salt: Id, list: &mut Vec<PaletteColor>, defaults: &[
         // Ohne Rückfrage löschen, aber einige Sekunden „Rückgängig“ anbieten. Was die Farbe schon trägt (Sitzungen, Tags,
         // Tickets …), behält sie – die Palette bietet nur künftige Auswahlen an.
         let msg = format!("{} {}", lang.t("Farbe gelöscht:", "Color deleted:"), list[i].tooltip());
-        offer_undo(ui, salt, msg, list.clone());
+        let prev = list.clone();
         list.remove(i);
+        offer_undo(ui, salt, msg, prev, list.clone());
         rows.ids.remove(i);
     }
     ui.add_space(S2);
@@ -428,11 +432,11 @@ fn list_editor(ui: &mut Ui, salt: Id, list: &mut Vec<PaletteColor>, defaults: &[
         }
         if let Some(s) = shared {
             if ui
-                .add_enabled(list.as_slice() != s, egui::Button::new(lang.t("Aus gemeinsamer kopieren", "Copy from shared palette")))
+                .add_enabled(list.as_slice() != s, egui::Button::new(lang.t("Aus der gemeinsamen Palette kopieren", "Copy from shared palette")))
                 .on_hover_text(lang.t("Diese Palette durch eine Kopie der gemeinsamen Palette ersetzen (rückgängig machbar).", "Replace this palette with a copy of the shared palette (can be undone)."))
                 .clicked()
             {
-                offer_undo(ui, salt, lang.t("Durch die gemeinsame Palette ersetzt.", "Replaced with the shared palette.").to_string(), list.clone());
+                offer_undo(ui, salt, lang.t("Durch die gemeinsame Palette ersetzt.", "Replaced with the shared palette.").to_string(), list.clone(), s.to_vec());
                 *list = s.to_vec();
                 rows.ids = (0..list.len()).map(|_| rows.fresh()).collect();
                 ui.data_mut(|d| d.remove_temp::<String>(msg_id));
@@ -445,7 +449,7 @@ fn list_editor(ui: &mut Ui, salt: Id, list: &mut Vec<PaletteColor>, defaults: &[
     // „Rückgängig“ für Löschen/Kopieren, einige Sekunden lang
     let now = ui.input(|i| i.time);
     match ui.data(|d| d.get_temp::<Undo>(undo_id)) {
-        Some(u) if now < u.until => {
+        Some(u) if now < u.until && *list == u.after => {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&u.msg).small().color(style::dim(ui)));
                 if ui.small_button(lang.t("Rückgängig", "Undo")).clicked() {
@@ -662,12 +666,47 @@ mod tests {
         }
     }
 
-    /// Eigene Palette eines Bereichs: beginnt mit dessen Vorgabe; „Aus gemeinsamer kopieren“ ersetzt sie (rückgängig
+    /// Nach dem Löschen weiter bearbeitet (umbenannt, hinzugefügt, Vorgaben wiederhergestellt): „Rückgängig“ entfällt,
+    /// statt diese Änderungen still zu verwerfen.
+    #[test]
+    fn later_edits_withdraw_the_undo_offer() {
+        let lang = Lang::En;
+        let add = "+ Add color";
+        let restore = "Restore defaults";
+        for edit in 0..3 {
+            let mut p = Palettes::default();
+            let mut h = H::new();
+            h.frame(vec![], |ui| settings_view(ui, &mut p, lang));
+            let name0 = h.row_rect("name", 0);
+            let trash = Pos2::new(name0.right() + 8.0 + 11.0, name0.center().y);
+            let out = h.click(trash, |ui| settings_view(ui, &mut p, lang));
+            assert!(has(&out, "Undo"));
+            match edit {
+                0 => {
+                    let name = h.row_rect("name", 0).center();
+                    h.click(name, |ui| settings_view(ui, &mut p, lang));
+                    h.frame(vec![Event::Text("Blau".into())], |ui| settings_view(ui, &mut p, lang));
+                }
+                1 => {
+                    h.click(find(&out, add), |ui| settings_view(ui, &mut p, lang));
+                }
+                _ => {
+                    h.click(find(&out, restore), |ui| settings_view(ui, &mut p, lang));
+                }
+            }
+            let after = p.list(Which::Shared);
+            let out = h.frame(vec![], |ui| settings_view(ui, &mut p, lang));
+            assert!(!has(&out, "Undo"), "Bearbeitung {edit}: Angebot entfällt");
+            assert_eq!(p.list(Which::Shared), after, "Bearbeitung {edit} bleibt");
+        }
+    }
+
+    /// Eigene Palette eines Bereichs: beginnt mit dessen Vorgabe; „Aus der gemeinsamen Palette kopieren“ ersetzt sie (rückgängig
     /// machbar). In der gemeinsamen Ansicht gibt es den Knopf nicht.
     #[test]
     fn area_palette_can_be_copied_from_the_shared_one_and_undone() {
         for lang in [Lang::En, Lang::De] {
-            let (copy, undo) = if lang == Lang::En { ("Copy from shared palette", "Undo") } else { ("Aus gemeinsamer kopieren", "Rückgängig") };
+            let (copy, undo) = if lang == Lang::En { ("Copy from shared palette", "Undo") } else { ("Aus der gemeinsamen Palette kopieren", "Rückgängig") };
             let mut p = Palettes::default();
             p.shared = Some(vec![PaletteColor::named("#123456", "Eins"), PaletteColor::new("#654321")]);
             let mut h = H::new();
