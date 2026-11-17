@@ -8,20 +8,46 @@ use super::*;
 pub(super) struct LinkAsk {
     viewport: egui::ViewportId,
     uri: String,
+    /// Zuletzt gezeichnet: Wird das Fenster nicht mehr gezeichnet (geschlossen, wieder angedockt), verfällt die Frage.
+    shown: Instant,
+    /// Fokus des Terminals dahinter schon abgegeben (einmal beim ersten Zeichnen).
+    focus_taken: bool,
 }
 
+/// Nach so langer Zeit ohne Zeichnen in ihrem Fenster verfällt die Rückfrage.
+const STALE: Duration = Duration::from_secs(2);
+
 impl App {
+    /// Ist die Rückfrage in diesem Fenster offen? (Dann behält dort kein Terminal den Fokus.)
+    pub(super) fn link_ask_here(&self, ctx: &egui::Context) -> bool {
+        self.link_ask.as_ref().is_some_and(|a| a.viewport == ctx.viewport_id())
+    }
+
     /// Neue Anfrage übernehmen und die offene Rückfrage im passenden Fenster zeigen.
     pub(super) fn link_ask_ui(&mut self, ctx: &egui::Context) {
         if let Some((viewport, uri)) = crate::hyperlink::take_request(ctx) {
-            self.link_ask = Some(LinkAsk { viewport, uri });
+            self.link_ask = Some(LinkAsk { viewport, uri, shown: Instant::now(), focus_taken: false });
         }
-        let Some(ask) = self.link_ask.as_ref() else { return };
+        if self.link_ask.as_ref().is_some_and(|a| a.shown.elapsed() > STALE) {
+            self.link_ask = None;
+        }
+        let Some(ask) = self.link_ask.as_mut() else { return };
         if ask.viewport != ctx.viewport_id() {
             return;
         }
+        ask.shown = Instant::now();
+        // Tasten gehören der Rückfrage, nicht dem Terminal dahinter (abgedockte Fenster zeichnen sie vor dem Terminal).
+        if !ask.focus_taken {
+            ask.focus_taken = true;
+            models_ui::release_focus(ctx);
+        }
+        let ask = self.link_ask.as_ref().expect("gerade geprüft");
         let lang = self.settings.language;
-        let file = matches!(crate::hyperlink::classify(&ask.uri), crate::hyperlink::LinkKind::Ask { file: Some(_) });
+        let file = match crate::hyperlink::classify(&ask.uri) {
+            crate::hyperlink::LinkKind::Ask { file: Some(p) } => Some(p),
+            _ => None,
+        };
+        let host = crate::hyperlink::host(&ask.uri).map(str::to_string);
         let mut open = false;
         let mut cancel = false;
         let r = egui::Modal::new(egui::Id::new("osc8_link_ask")).show(ctx, |ui| {
@@ -38,7 +64,14 @@ impl App {
                     ui.add(egui::Label::new(RichText::new(&ask.uri).monospace()).wrap());
                 });
             });
-            if file {
+            // Was tatsächlich geöffnet wird: Rechnername bzw. der dekodierte lokale Pfad.
+            if let Some(h) = host.as_deref().filter(|h| !h.is_empty()) {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("{} {h}", lang.t("Rechner:", "Host:"))).monospace());
+            }
+            if let Some(p) = &file {
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(RichText::new(format!("{} {p}", lang.t("Datei:", "File:"))).monospace()).wrap());
                 ui.add_space(4.0);
                 ui.label(RichText::new(lang.t(
                     "Ausführbare Dateien werden nicht gestartet, sondern im Ordner angezeigt.",

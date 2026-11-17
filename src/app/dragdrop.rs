@@ -281,6 +281,8 @@ impl App {
                 }
                 // Rückfrage „Neu laden?“ aus diesem Fenster hier zeigen – vor dem Terminal, damit Enter/Esc ihr gehören.
                 self.reload_ask_ui(ctx, actions, Some(id));
+                // Ebenso die Rückfrage „Link öffnen?“ (OSC 8), wenn der Link in diesem Fenster angeklickt wurde.
+                self.link_ask_ui(ctx);
                 if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::W)) {
                     close = true;
                 }

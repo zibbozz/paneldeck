@@ -100,6 +100,7 @@ mod imp {
     use windows_sys::Win32::Graphics::Gdi::*;
 
     const TTCF: u32 = 0x6663_7474; // 'ttcf'
+    const OS2: u32 = 0x322f_534f; // 'OS/2'
     const GDI_ERROR: u32 = u32::MAX;
 
     unsafe extern "system" fn enum_proc(lf: *const LOGFONTW, tm: *const TEXTMETRICW, font_type: u32, lp: LPARAM) -> i32 {
@@ -177,10 +178,21 @@ mod imp {
                     let got = GetFontData(dc, table, 0, buf.as_mut_ptr().cast(), size);
                     (got == size).then_some(buf)
                 };
+                // Fett/kursiv gewünscht: erst die kleine OS/2-Tabelle prüfen – ersetzt GDI den Schnitt durch den normalen,
+                // wird die (oft mehrere MB große) Datei gar nicht erst gelesen.
+                if (bold || italic) && !read(OS2).is_some_and(|t| super::os2_matches(&t, bold, italic)) {
+                    return None;
+                }
                 match read(TTCF) {
-                    // Sammlung: ganze Datei, der gewählte Schnitt beginnt mit denselben Bytes wie seine Offset-Tabelle.
+                    // Sammlung: ganze Datei, der gewählte Schnitt beginnt mit denselben Bytes wie seine Offset-Tabelle
+                    // (davon genügt der Kopf).
                     Some(all) => {
-                        let own = read(0)?;
+                        let mut own = vec![0u8; 256];
+                        let got = GetFontData(dc, 0, 0, own.as_mut_ptr().cast(), own.len() as u32);
+                        if got == GDI_ERROR || got < 12 {
+                            return None;
+                        }
+                        own.truncate(got as usize);
                         let index = super::collection_index(&all, &own)?;
                         Some(FaceData { bytes: all, index })
                     }
@@ -203,6 +215,15 @@ mod imp {
     pub fn load(_family: &str, _bold: bool, _italic: bool) -> Option<super::FaceData> {
         None
     }
+}
+
+/// Passt die OS/2-Tabelle eines Schnitts zu fett/kursiv? (Gewicht ≥ 600 oder fsSelection-Bit 5 = fett; Bit 0 oder 9 = kursiv.)
+fn os2_matches(os2: &[u8], bold: bool, italic: bool) -> bool {
+    let be16 = |i: usize| os2.get(i..i + 2).map(|s| u16::from_be_bytes([s[0], s[1]]));
+    let (Some(weight), Some(sel)) = (be16(4), be16(62)) else { return false };
+    let is_bold = weight >= 600 || sel & (1 << 5) != 0;
+    let is_italic = sel & 1 != 0 || sel & (1 << 9) != 0;
+    is_bold == bold && is_italic == italic
 }
 
 /// Index des Schnitts in einer Schriftsammlung (`all`), dessen Offset-Tabelle mit `own` beginnt (GDI liefert für einen
@@ -242,6 +263,22 @@ mod tests {
         assert_eq!(plan_with(1, true, true), p(Some(FAMILY_BOLD), false, true));
         assert_eq!(plan_with(2, true, true), p(Some(FAMILY_ITALIC), true, false));
         assert_eq!(plan_with(1, false, true), p(None, false, true));
+    }
+
+    #[test]
+    fn os2_precheck() {
+        let table = |weight: u16, sel: u16| {
+            let mut t = vec![0u8; 96];
+            t[4..6].copy_from_slice(&weight.to_be_bytes());
+            t[62..64].copy_from_slice(&sel.to_be_bytes());
+            t
+        };
+        assert!(os2_matches(&table(700, 1 << 5), true, false));
+        assert!(os2_matches(&table(400, 1), false, true));
+        assert!(os2_matches(&table(700, 1 | 1 << 5), true, true));
+        assert!(!os2_matches(&table(400, 1 << 6), true, false)); // normaler Schnitt als Ersatz
+        assert!(os2_matches(&table(400, 1 << 9), false, true)); // schräg gilt als kursiv
+        assert!(!os2_matches(&[0u8; 10], true, false));
     }
 
     #[test]

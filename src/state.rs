@@ -247,13 +247,20 @@ pub struct Settings {
     /// begrenzt (`wsl::RECENT_MAX`). Fehlt in älteren Dateien; Unlesbares/Ungültiges wird beim Laden verworfen.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "lenient_wsl_recent")]
     pub wsl_recent: std::collections::BTreeMap<String, Vec<String>>,
+    /// Umgebung von Paneldeck erben (seit 2.3.0, #175, Standard aus): Terminals starten mit der Umgebung des
+    /// Paneldeck-Prozesses statt mit der frisch aus der Registry gelesenen (portable-pty: Prozessumgebung, darüber System-
+    /// und Benutzervariablen aus der Registry – so wirkt `setx` sofort). An: genau die Prozessumgebung, z. B. für einen Start
+    /// aus einer Shell mit eigener Umgebung. Paneldecks eigene Variablen (`PANELDECK_SESSION` …) und die Variablen des Profils
+    /// gelten in beiden Fällen. Fehlt in älteren Dateien (dann aus = bisheriges Verhalten).
+    pub inherit_env: bool,
     /// Benachrichtigungen von Programmen (OSC 9 / OSC 777;notify) anzeigen – nur für nicht angesehene Sitzungen, über die
     /// üblichen Wege (Toast/Blinken laut `notify_*`), begrenzt (seit 2.3.0, #183, Standard an). Fehlt in älteren Dateien (an).
     #[serde(deserialize_with = "lenient_true")]
     pub program_notify: bool,
-    /// Glocke (BEL) einer nicht angesehenen Sitzung wie eine Benachrichtigung behandeln (seit 2.3.0, #183, Standard an).
-    #[serde(deserialize_with = "lenient_true")]
-    pub bell_notify: bool,
+    /// Glocke (BEL) einer nicht angesehenen Sitzung: die Markierung in der Seitenleiste gibt es immer; mit dieser Einstellung
+    /// zusätzlich Toast/Blinken bzw. Hinweis wie bei Benachrichtigungen (seit 2.3.0, #183, Standard aus – Entscheidung des
+    /// Nutzers). Fehlt in älteren Dateien (dann aus).
+    pub bell_toast: bool,
     /// Fortschritt von Programmen (OSC 9;4) in Seitenleiste und Taskleiste zeigen (seit 2.3.0, #183, Standard an).
     #[serde(deserialize_with = "lenient_true")]
     pub progress_indicator: bool,
@@ -347,8 +354,9 @@ impl Default for Settings {
             claude_bypass_dropped: false,
             bundled_conpty: true,
             wsl_recent: Default::default(),
+            inherit_env: false,
             program_notify: true,
-            bell_notify: true,
+            bell_toast: false,
             progress_indicator: true,
             cursor_blink: true,
         }
@@ -1102,6 +1110,20 @@ mod tests {
     }
 
     #[test]
+    fn inherit_env_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „aus“ (Umgebung aus der Registry wie bisher).
+        let s: Settings = serde_json::from_str(r#"{"language":"En","shell_integration":false}"#).unwrap();
+        assert!(!s.inherit_env);
+        assert!(!s.shell_integration);
+        assert!(!Settings::default().inherit_env);
+        let mut s = s;
+        s.inherit_env = true;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["inherit_env"], true);
+        assert!(serde_json::from_value::<Settings>(j).unwrap().inherit_env);
+    }
+
+    #[test]
     fn bundled_conpty_back_compat_and_roundtrip() {
         // settings.json von 2.2.0 (ohne das Feld) lädt mit „an“, die übrigen Werte bleiben.
         let old = r#"{"language":"De","confirm_close":false,"remember_sessions":false}"#;
@@ -1144,13 +1166,13 @@ mod tests {
     fn vt_render_settings_back_compat_and_roundtrip() {
         // settings.json von 2.2.0 (ohne die Felder): alles an; ein falscher Typ ergibt ebenfalls an, nur `false` schaltet aus.
         let s: Settings = serde_json::from_str(r#"{"language":"En"}"#).unwrap();
-        assert!(s.program_notify && s.bell_notify && s.progress_indicator && s.cursor_blink);
-        let s: Settings = serde_json::from_str(r#"{"program_notify":"no","bell_notify":false,"progress_indicator":1,"cursor_blink":false}"#).unwrap();
-        assert!(s.program_notify && !s.bell_notify && s.progress_indicator && !s.cursor_blink);
+        assert!(s.program_notify && !s.bell_toast && s.progress_indicator && s.cursor_blink);
+        let s: Settings = serde_json::from_str(r#"{"program_notify":"no","bell_toast":true,"progress_indicator":1,"cursor_blink":false}"#).unwrap();
+        assert!(s.program_notify && s.bell_toast && s.progress_indicator && !s.cursor_blink);
         let j = serde_json::to_value(&s).unwrap();
-        assert_eq!((j["bell_notify"].as_bool(), j["cursor_blink"].as_bool(), j["program_notify"].as_bool()), (Some(false), Some(false), Some(true)));
+        assert_eq!((j["bell_toast"].as_bool(), j["cursor_blink"].as_bool(), j["program_notify"].as_bool()), (Some(true), Some(false), Some(true)));
         let back: Settings = serde_json::from_value(j).unwrap();
-        assert!(!back.bell_notify && !back.cursor_blink);
+        assert!(back.bell_toast && !back.cursor_blink);
     }
 
     #[test]

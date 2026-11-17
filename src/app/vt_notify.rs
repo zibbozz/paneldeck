@@ -9,6 +9,11 @@
 use super::*;
 use crate::vtnotify::RateLimit;
 
+/// Titel des Toasts einer Programm-Meldung: „Paneldeck · <Sitzung>“ (Name schon bereinigt).
+pub(super) fn toast_title(session: &str) -> String {
+    format!("Paneldeck · {session}")
+}
+
 /// Text einer Benachrichtigung aus Titel und Text des Programms.
 pub(super) fn note_text(title: &str, body: &str) -> String {
     match (title.is_empty(), body.is_empty()) {
@@ -24,7 +29,7 @@ impl App {
         let (window_focused, focused_id) = self.seen_focus();
         let now = Instant::now();
         let lang = self.settings.language;
-        let (notes_on, bell_on) = (self.settings.program_notify, self.settings.bell_notify);
+        let (notes_on, bell_toast) = (self.settings.program_notify, self.settings.bell_toast);
         let mut out: Vec<(u64, String, String)> = Vec::new();
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else {
@@ -34,6 +39,10 @@ impl App {
             // Immer abholen: eine alte Meldung darf nicht später (z. B. nach dem Einschalten) doch noch erscheinen.
             let (progress, notes) = {
                 let mut st = s.shell_state.lock().unwrap_or_else(|e| e.into_inner());
+                // Unbestimmter Fortschritt ohne Neuigkeiten verfällt (ein abgestürztes Programm ließe sonst ewig animieren).
+                if crate::vtnotify::progress_expired(st.progress, st.progress_at, now) {
+                    st.progress = None;
+                }
                 (st.progress, std::mem::take(&mut st.notes))
             };
             let bell = s.bell.swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -42,11 +51,15 @@ impl App {
             if window_focused && *id == focused_id {
                 continue;
             }
+            // Glocke: die Markierung immer, Toast/Hinweis nur mit der Einstellung (Entscheidung des Nutzers).
+            if bell {
+                e.attention = true;
+            }
             let mut msgs: Vec<String> = Vec::new();
             if notes_on {
                 msgs.extend(notes.iter().map(|(t, b)| note_text(t, b)));
             }
-            if bell && bell_on {
+            if bell && bell_toast {
                 msgs.push(lang.t("Das Programm hat die Glocke geläutet", "The program rang the bell").to_string());
             }
             if msgs.is_empty() {
@@ -60,7 +73,7 @@ impl App {
             let lim = self.vt_limits.entry(*id).or_insert_with(|| RateLimit::new(now));
             for m in msgs {
                 if lim.allow(now) {
-                    out.push((*id, e.display_name(), m));
+                    out.push((*id, crate::vtnotify::sanitize(&e.display_name(), crate::vtnotify::TITLE_MAX), m));
                 }
             }
         }
@@ -69,7 +82,8 @@ impl App {
         for (sid, name, body) in out {
             if !window_focused {
                 if self.settings.notify_toast {
-                    notify::toast(&name, &body, self.settings.notify_sound);
+                    // Absender immer erkennbar: die App, dann die Sitzung (der Text stammt vom Programm).
+                    notify::toast(&toast_title(&name), &body, self.settings.notify_sound);
                 }
                 if self.settings.notify_flash {
                     ctx.send_viewport_cmd_to(self.attention_viewport(sid), egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
@@ -108,5 +122,6 @@ mod tests {
         assert_eq!(note_text("Build", "fertig"), "Build – fertig");
         assert_eq!(note_text("", "fertig"), "fertig");
         assert_eq!(note_text("Build", ""), "Build");
+        assert_eq!(super::toast_title("pwsh"), "Paneldeck · pwsh");
     }
 }

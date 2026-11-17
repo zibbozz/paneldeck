@@ -111,14 +111,24 @@ pub fn find(chars: &[char], col: usize, cwd: &str, shell_id: &str) -> Option<Lin
 /// Dateiendungen, die ausgeführt werden könnten: sie werden NIE per Klick gestartet, nur im Ordner angezeigt.
 const EXECUTABLE: &[&str] = &[
     "exe", "com", "bat", "cmd", "msi", "msp", "lnk", "pif", "scr", "hta", "vbs", "vbe", "js", "jse", "wsf", "wsh", "ps1", "psm1",
-    "reg", "jar", "cpl", "dll", "appx", "msix", "sh", "run", "appimage", "url", "gadget", "application",
+    "reg", "jar", "cpl", "dll", "appx", "msix", "sh", "run", "appimage", "url", "gadget", "application", "msc", "chm", "xll",
+    "appref-ms", "settingcontent-ms", "diagcab", "library-ms", "searchconnector-ms", "theme", "themepack", "rdp", "wsc", "sct", "inf",
+    "scf", "iso", "img", "vhd", "vhdx", "website", "ws", "appinstaller", "msixbundle", "appxbundle", "mde", "mda", "ade", "adp",
+    "ins", "isp", "jnlp", "ps1xml", "psc1", "psd1", "pssc", "cdxml", "xbap", "vsix", "msh", "msh1", "msh2", "mshxml",
 ];
 
 pub fn is_executable_like(target: &str) -> bool {
-    if target.starts_with("http://") || target.starts_with("https://") {
+    let lower = target.get(..8).unwrap_or(target).to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
         return false;
     }
-    Path::new(target).extension().is_some_and(|e| EXECUTABLE.contains(&e.to_string_lossy().to_lowercase().as_str()))
+    // Windows ignoriert Punkte und Leerzeichen am Ende („a.exe. “ startet a.exe); ein Doppelpunkt hinter dem Laufwerk
+    // (alternativer Datenstrom „a.txt:x.exe“) gilt ebenfalls als ausführbar.
+    let t = target.trim_end_matches(['.', ' ']);
+    if t.char_indices().any(|(i, c)| c == ':' && i > 2) {
+        return true;
+    }
+    Path::new(t).extension().is_some_and(|e| EXECUTABLE.contains(&e.to_string_lossy().to_lowercase().as_str()))
 }
 
 /// Mit dem Standardprogramm öffnen (URL im Browser, Datei in der zugeordneten App, Ordner im Explorer).
@@ -138,6 +148,10 @@ pub fn launch_uri(uri: &str) {
 }
 
 fn reveal(target: &str) {
+    // Explorer liest Schalter aus dem Argument („/select,a,/root,…“): Kommas und Anführungszeichen nie durchreichen.
+    if !reveal_safe(target) {
+        return;
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -165,6 +179,11 @@ fn launch(target: &str) -> bool {
     {
         std::process::Command::new("xdg-open").arg(target).spawn().is_ok()
     }
+}
+
+/// Darf der Pfad an `explorer.exe /select,<pfad>` gehen? (Keine Kommas/Anführungszeichen, keine Netzwerkpfade.)
+fn reveal_safe(target: &str) -> bool {
+    !target.contains([',', '"']) && !crate::pathfmt::is_remote_unc(target)
 }
 
 #[cfg(test)]
@@ -207,6 +226,14 @@ mod tests {
         assert!(!is_executable_like("https://example.com/a.exe"));
         assert!(!is_executable_like("/tmp/readme.md"));
         assert!(find(&chars("\\\\evil\\share\\x.txt"), 4, "", "powershell").is_none());
+        // Punkte/Leerzeichen am Ende und alternative Datenströme täuschen die Endung nicht weg.
+        assert!(is_executable_like(r"C:\x\setup.exe."));
+        assert!(is_executable_like(r"C:\x\setup.exe . "));
+        assert!(is_executable_like(r"C:\x\a.txt:evil.exe"));
+        assert!(is_executable_like(r"C:\x\a.settingcontent-ms") && is_executable_like("/x/b.CHM") && is_executable_like("c.library-ms"));
+        assert!(!is_executable_like(r"C:\x\notes.txt"));
+        assert!(reveal_safe(r"C:\x\a.exe"));
+        assert!(!reveal_safe(r"C:\x\a,/root,\\evil\s\y.exe") && !reveal_safe(r#"C:\x\a"b.exe"#) && !reveal_safe(r"\\evil\s\a.exe"));
     }
 
     #[test]

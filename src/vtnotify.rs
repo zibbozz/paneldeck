@@ -68,6 +68,15 @@ pub fn parse_progress(rest: &str) -> Option<Option<Progress>> {
     Some(Some(Progress { state, percent: pct }))
 }
 
+/// Unbestimmter Fortschritt verfällt nach dieser Zeit ohne neue Meldung (Seitenleiste animiert ihn).
+pub const INDETERMINATE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Ist der gemeldete Fortschritt verfallen? Nur unbestimmter, nach `INDETERMINATE_TTL` ohne Meldung.
+pub fn progress_expired(p: Option<Progress>, at: Option<Instant>, now: Instant) -> bool {
+    matches!(p, Some(Progress { state: ProgressState::Indeterminate, .. }))
+        && at.is_some_and(|t| now.saturating_duration_since(t) >= INDETERMINATE_TTL)
+}
+
 /// Ist der Text hinter `9;` ein ConEmu-Befehl (`<zahl>` oder `<zahl>;…`) statt einer Benachrichtigung?
 pub fn is_conemu_command(text: &str) -> bool {
     let num = text.split(';').next().unwrap_or("");
@@ -76,10 +85,13 @@ pub fn is_conemu_command(text: &str) -> bool {
 
 /// Zeichen, die in angezeigten Texten aus dem Terminal nie vorkommen dürfen: Bidi-Steuerzeichen (Umkehrung von Text,
 /// „Trojan Source“), unsichtbare Format- und Trennzeichen.
-fn is_hidden_format(c: char) -> bool {
+/// Gilt auch für Link-Ziele (`hyperlink`): weiches Trennzeichen, Graphem-Verbinder, mongolischer Vokaltrenner,
+/// Variationsselektoren und Tag-Zeichen sind unsichtbar und taugen zum Verschleiern.
+pub fn is_hidden_format(c: char) -> bool {
     matches!(c,
-        '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}'
-        | '\u{206a}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+        '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{206a}'..='\u{206f}' | '\u{fe00}'..='\u{fe0f}'
+        | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e007f}')
 }
 
 /// Text aus dem Terminal für die Anzeige bereinigen: Steuerzeichen und Bidi-/Formatzeichen weg, Leerraum (auch
@@ -171,6 +183,17 @@ mod tests {
     }
 
     #[test]
+    fn indeterminate_progress_expires() {
+        let t0 = Instant::now();
+        let ind = Some(Progress { state: ProgressState::Indeterminate, percent: 0 });
+        let norm = Some(Progress { state: ProgressState::Normal, percent: 5 });
+        assert!(!progress_expired(ind, Some(t0), t0 + Duration::from_secs(60)));
+        assert!(progress_expired(ind, Some(t0), t0 + INDETERMINATE_TTL));
+        assert!(!progress_expired(norm, Some(t0), t0 + INDETERMINATE_TTL * 10));
+        assert!(!progress_expired(None, Some(t0), t0 + INDETERMINATE_TTL));
+    }
+
+    #[test]
     fn conemu_commands_are_not_notifications() {
         for cmd in ["4;1;50", "9;\"C:\\\"", "1;500", "12", "7;calc.exe"] {
             assert!(is_conemu_command(cmd), "{cmd:?}");
@@ -194,6 +217,7 @@ mod tests {
         assert_eq!(sanitize(&"ä".repeat(10), 10), "ä".repeat(10));
         assert_eq!(sanitize("abc def", 4), "abc…");
         assert_eq!(sanitize("Emoji 👍🏽 ok", 64), "Emoji 👍🏽 ok");
+        assert_eq!(sanitize("so\u{00ad}ft\u{034f}\u{180e}\u{fe0f}\u{e0041}x", 64), "softx");
     }
 
     #[test]

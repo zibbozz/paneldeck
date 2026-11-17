@@ -453,8 +453,10 @@ impl App {
         // Fortschritt laut Programm (OSC 9;4, #183): dünner Balken am unteren Rand der Zeile.
         if let Some(pg) = e.progress.filter(|_| self.settings.progress_indicator) {
             let bar = Rect::from_min_max(Pos2::new(text_x, rect.max.y - 5.0), Pos2::new(right_x, rect.max.y - 3.0));
-            if paint_progress(&p, bar, pg, t, weak_c) {
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            // Unbestimmt: langsam animiert (8 Bilder/s), nur mit Animationen und im Fenster im Vordergrund – sonst still.
+            let animate = self.settings.animations && ui.input(|i| i.focused);
+            if paint_progress(&p, bar, pg, if animate { Some(t) } else { None }, weak_c) {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(125));
             }
         }
 
@@ -869,8 +871,9 @@ fn progress_label(pg: crate::vtnotify::Progress, lang: Lang) -> String {
     }
 }
 
-/// Fortschrittsbalken (OSC 9;4) zeichnen. Gibt `true` zurück, wenn er animiert ist (unbestimmt) und neu gezeichnet werden muss.
-fn paint_progress(p: &egui::Painter, bar: Rect, pg: crate::vtnotify::Progress, t: f64, track: Color32) -> bool {
+/// Fortschrittsbalken (OSC 9;4) zeichnen; `t` = Zeit für die Animation des unbestimmten Zustands (`None` = still).
+/// Gibt `true` zurück, wenn er animiert ist und neu gezeichnet werden muss.
+fn paint_progress(p: &egui::Painter, bar: Rect, pg: crate::vtnotify::Progress, t: Option<f64>, track: Color32) -> bool {
     use crate::vtnotify::ProgressState::*;
     p.rect_filled(bar, 1.0, track.gamma_multiply(0.25));
     let col = match pg.state {
@@ -881,10 +884,10 @@ fn paint_progress(p: &egui::Painter, bar: Rect, pg: crate::vtnotify::Progress, t
     if pg.state == Indeterminate {
         // Ein Drittel der Breite wandert hin und her.
         let w = bar.width() / 3.0;
-        let f = ((t * 0.8).sin() * 0.5 + 0.5) as f32;
+        let f = t.map(|t| ((t * 0.8).sin() * 0.5 + 0.5) as f32).unwrap_or(0.5);
         let x = bar.min.x + (bar.width() - w) * f;
         p.rect_filled(Rect::from_min_size(Pos2::new(x, bar.min.y), Vec2::new(w, bar.height())), 1.0, col);
-        return true;
+        return t.is_some();
     }
     let w = bar.width() * pg.percent.min(100) as f32 / 100.0;
     if w > 0.0 {

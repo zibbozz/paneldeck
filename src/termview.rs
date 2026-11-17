@@ -213,6 +213,19 @@ fn paint(
 
     let cells: Vec<_> = content.display_iter.collect();
     let mut skip_until = 0usize;
+    // OSC-8-Unterstreichung je Zeile als zusammenhängender Lauf (gepunktet bzw. beim Strg-Hover durchgezogen), damit das
+    // Punktmuster nicht an jeder Zelle neu ansetzt: (Rechteck, Farbe, hervorgehoben).
+    let mut link_run: Option<(Rect, Color32, bool)> = None;
+    let flush_link = |run: Option<(Rect, Color32, bool)>| {
+        if let Some((r, col, hot)) = run {
+            if hot {
+                let yy = r.max.y - 1.5;
+                painter.line_segment([Pos2::new(r.min.x, yy), Pos2::new(r.max.x, yy)], Stroke::new(1.5_f32, crate::style::ACCENT));
+            } else {
+                crate::glyphs::draw_underline(&painter, crate::glyphs::Underline::Dotted, r, col, ppp);
+            }
+        }
+    };
     for (idx, ic) in cells.iter().enumerate() {
         if idx < skip_until {
             continue;
@@ -291,12 +304,20 @@ fn paint(
         if let Some(style) = crate::glyphs::underline_of(flags) {
             let ucol = cell.underline_color().map(|c| theme.resolve(c, false, false)).unwrap_or(fg);
             crate::glyphs::draw_underline(&painter, style, cell_rect, ucol, ppp);
-        } else if link.is_some() && !link_hovered {
-            crate::glyphs::draw_underline(&painter, crate::glyphs::Underline::Dotted, cell_rect, fg.gamma_multiply(0.6), ppp);
         }
-        if link_hovered {
-            let yy = cell_rect.max.y - 1.5;
-            painter.line_segment([Pos2::new(cell_rect.min.x, yy), Pos2::new(cell_rect.max.x, yy)], Stroke::new(1.5_f32, crate::style::ACCENT));
+        let seg = if link_hovered {
+            Some((cell_rect, crate::style::ACCENT, true))
+        } else if link.is_some() && crate::glyphs::underline_of(flags).is_none() {
+            Some((cell_rect, fg.gamma_multiply(0.6), false))
+        } else {
+            None
+        };
+        if let Some((r, col, hot)) = seg {
+            match &mut link_run {
+                // Anschluss in derselben Zeile mit gleicher Art und Farbe: verlängern.
+                Some((lr, lc, lh)) if (lr.max.x - r.min.x).abs() < 0.5 && lr.min.y == r.min.y && *lc == col && *lh == hot => lr.max.x = r.max.x,
+                _ => flush_link(link_run.replace((r, col, hot))),
+            }
         }
         if flags.contains(Flags::STRIKEOUT) {
             let yy = cell_rect.center().y;
@@ -306,6 +327,8 @@ fn paint(
             );
         }
     }
+
+    flush_link(link_run.take());
 
     // Cursor
     if cursor.shape != CursorShape::Hidden {
@@ -658,7 +681,9 @@ const TOOLTIP_DELAY: f32 = 0.6;
 fn link_tooltip(ui: &Ui, response: &Response, uri: &str, kind: &crate::hyperlink::LinkKind) {
     use crate::hyperlink::LinkKind;
     use crate::state::t;
-    let target = crate::vtnotify::sanitize(uri, 400);
+    // Bereinigt und in der Mitte gekürzt (Anfang und Dateiende bleiben sichtbar); der Rechnername eigens darunter.
+    let target = crate::hyperlink::middle_truncate(&crate::vtnotify::sanitize(uri, crate::hyperlink::URI_MAX), 160);
+    let host = crate::hyperlink::host(uri).filter(|h| !h.is_empty()).map(|h| crate::vtnotify::sanitize(h, 120));
     let hint = match kind {
         LinkKind::Web => t("Strg+Klick öffnet den Link", "Ctrl+click opens the link"),
         LinkKind::Ask { .. } => t("Strg+Klick: vor dem Öffnen wird nachgefragt", "Ctrl+click: asks before opening"),
@@ -666,6 +691,9 @@ fn link_tooltip(ui: &Ui, response: &Response, uri: &str, kind: &crate::hyperlink
     };
     egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), response.id.with("osc8-tip"), egui::PopupAnchor::Pointer).gap(12.0).show(|ui| {
         ui.label(egui::RichText::new(target).monospace());
+        if let Some(h) = host {
+            ui.label(egui::RichText::new(format!("{} {h}", t("Rechner:", "Host:"))).monospace().strong());
+        }
         ui.label(egui::RichText::new(hint).small());
     });
 }
