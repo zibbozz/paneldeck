@@ -386,7 +386,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "get_project",
             level: Read,
             group: Group::Expert,
-            description: "Expert mode: everything needed to work with a project: statuses, ticket types with their fields (kind, required, default, allowed values, how to write a value), hierarchy rules, workflow statuses and allowed transitions (with fields a transition requires), kinds of work, link types. Agents can neither delete tickets nor change types, workflows or projects.",
+            description: "Expert mode: everything needed to work with a project: statuses, ticket types with their fields (kind, required, default, allowed values, how to write a value), hierarchy rules, workflow statuses and allowed transitions (with fields a transition requires), kinds of work, link types. A type's `icon` is null, a built-in icon name (e.g. `bug`) or `lucide:<name>` from the Lucide icon set (https://lucide.dev/icons). Agents can neither delete tickets nor change types, workflows or projects.",
             schema: schema(json!({"project": {"type": "string", "description": "Project key, e.g. PAN"}}), &["project"]),
         },
         ToolDef {
