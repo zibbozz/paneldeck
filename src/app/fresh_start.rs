@@ -12,12 +12,24 @@
 //! Projekten oder Ordnern verworfen wird, entsteht eine Sicherung `state.json.bak-<JJJJMMTT-HHMMSS>` im Datenordner
 //! ([`backup_state`]; nur die neueste bleibt). Beim Beenden geschieht das nur, wenn die Einstellung beim Start noch an war
 //! (der Übergang); beim Start, wenn die Datei noch etwas enthält (z. B. Absturz nach dem Ausschalten).
+//!
+//! Update-Neustart (Entscheidung des Nutzers zu #157): Ein Update soll laufende Arbeit nicht beenden. Vor dem Neustart wird
+//! deshalb ganz normal gespeichert ([`App::save_for_update_restart`]) und die neue Instanz mit
+//! `PANELDECK_UPDATE_KEEP_SESSIONS=1` gestartet; sie stellt die Sitzungen **einmal** wieder her ([`restore_once_applies`]).
+//! Die Variable wird beim Start sofort entfernt (`update::install::wait_for_previous_instance`) – danach, auch nach einem
+//! Absturz, gilt wieder der frische Start.
 
 use super::*;
 use std::path::Path;
 
 /// Präfix der Sicherungen von `state.json` (wie `settings.json.bak-<zeit>` bei `--reset-settings`).
 const BAK_PREFIX: &str = "state.json.bak-";
+
+/// Stellt dieser Start die Sitzungen trotz „Sitzungen merken“ aus wieder her? Nur nach einem Update-Neustart
+/// (`update_restart` = `update::install::restore_once`); mit „an“ gilt ohnehin die normale Wiederherstellung.
+pub(super) fn restore_once_applies(remember: bool, update_restart: bool) -> bool {
+    !remember && update_restart
+}
 
 /// Gespeicherten Zustand für einen frischen Start zuschneiden: keine Sitzungen, Layouts, abgedockten oder weiteren
 /// Fenster, keine Projekte und Ordner – nur ein leeres Standardprojekt. Bleibt: `next_id` (Ids werden nie wiederverwendet,
@@ -120,6 +132,26 @@ impl App {
         state::save_json(&self.dir.join("settings.json"), &self.settings);
         state::save_json(&self.dir.join("prompts.json"), &self.prompts);
         trim_for_exit(&self.dir, self.saved_state(), self.entries.keys().copied(), state::persisted_lang(self.settings.language), self.remember_at_start);
+    }
+
+    /// Speichern vor einem Update-Neustart (#157): immer vollständig wie `save_all` – auch mit „Sitzungen merken“ aus, denn die
+    /// neue Instanz stellt die Sitzungen dann einmal wieder her. Wurde die Einstellung in diesem Lauf ausgeschaltet, entsteht
+    /// die Sicherung des Übergangs schon jetzt (die neue Instanz weiß nichts mehr davon und verwirft beim Beenden ohne
+    /// Sicherung). Liefert, ob die neue Instanz die Sitzungen einmal wiederherstellen soll.
+    pub(super) fn save_for_update_restart(&self) -> bool {
+        self.save_all();
+        if self.settings.remember_sessions {
+            return false;
+        }
+        if self.remember_at_start {
+            let s = self.saved_state();
+            if worth_keeping(&s) {
+                if let Ok(b) = serde_json::to_vec_pretty(&s) {
+                    backup_state(&self.dir, &b);
+                }
+            }
+        }
+        true
     }
 
     /// Rückfrage beim Ausschalten von „Sitzungen merken“ (im Fenster, in dem die Einstellungen offen sind).
@@ -284,6 +316,14 @@ mod tests {
         // Ohne Ordner: nichts zu tun.
         assert_eq!(sweep_session_files(&dir.join("missing")), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_restart_restores_only_once_and_only_when_off() {
+        assert!(restore_once_applies(false, true), "aus + Update-Neustart: einmal wiederherstellen");
+        assert!(!restore_once_applies(false, false), "aus + normaler Start (auch nach Absturz): frisch");
+        assert!(!restore_once_applies(true, true), "an: normale Wiederherstellung, kein Sonderfall");
+        assert!(!restore_once_applies(true, false));
     }
 
     #[test]
