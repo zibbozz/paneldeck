@@ -261,9 +261,15 @@ pub(crate) fn marker_color_picker(ui: &mut Ui, salt: impl std::hash::Hash, hex: 
     changed
 }
 
+/// Salt des Symbol-Pickers im Markierungs-Editor `id` (damit der Verwalter weiß, ob dessen Icon-Explorer offen ist).
+fn marker_symbol_salt(id: Id) -> Id {
+    id.with("sym")
+}
+
 /// Kleines Vorschaubild einer Markierung als Knopf (öffnet die Bearbeitung).
-fn marker_preview(ui: &mut Ui, m: &DueMarker, size: f32) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+fn marker_preview(ui: &mut Ui, id: Id, m: &DueMarker, size: f32) -> Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click());
     if m.is_none() {
         ui.painter().circle_stroke(rect.center(), size * 0.3, Stroke::new(1.0_f32, style::dim(ui)));
     } else {
@@ -307,8 +313,12 @@ pub(crate) fn manager_ui(ui: &mut Ui, salt: &str, m: &mut Manager, todo: bool, l
                 changed = true;
             }
             ui.label("→");
-            let pv = marker_preview(ui, &t.marker, 20.0).on_hover_text(lang.t("Markierung bearbeiten", "Edit marker"));
-            egui::Popup::from_toggle_button_response(&pv).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            let pv = marker_preview(ui, id.with("preview"), &t.marker, 20.0).on_hover_text(lang.t("Markierung bearbeiten", "Edit marker"));
+            // Solange der Icon-Explorer des Symbol-Pickers offen ist, darf ein Klick in sein Fenster (für das Popup „außerhalb“)
+            // die Bearbeitung nicht schließen – sonst verschwände mit ihr auch der Explorer (#215).
+            let explorer_open = widgets::icon_picker_explorer_open(ui.ctx(), marker_symbol_salt(id.with("ed")));
+            let close = if explorer_open { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClickOutside };
+            egui::Popup::from_toggle_button_response(&pv).close_behavior(close).show(|ui| {
                 changed |= marker_editor(ui, id.with("ed"), &mut t.marker, todo, lang);
             });
             egui::ComboBox::from_id_salt(id.with("frame")).selected_text(t.marker.frame.label(lang)).width(140.0).show_ui(ui, |ui| {
@@ -441,7 +451,7 @@ fn marker_editor(ui: &mut Ui, id: Id, mk: &mut DueMarker, todo: bool, lang: Lang
     ui.horizontal_wrapped(|ui| {
         for f in MarkerFrame::ALL {
             let sample = DueMarker { frame: f, symbol: None, color: mk.color.clone(), name: String::new() };
-            let r = marker_preview(ui, &sample, 24.0).on_hover_text(f.label(lang));
+            let r = marker_preview(ui, id.with(("frame", f.as_str())), &sample, 24.0).on_hover_text(f.label(lang));
             if mk.frame == f {
                 ui.painter().rect_stroke(r.rect.expand(2.0), 4.0, Stroke::new(1.5_f32, style::accent()), egui::StrokeKind::Outside);
             }
@@ -453,7 +463,7 @@ fn marker_editor(ui: &mut Ui, id: Id, mk: &mut DueMarker, todo: bool, lang: Lang
     });
     ui.add_space(S1);
     ui.label(RichText::new(lang.t("Symbol", "Symbol")).strong());
-    changed |= marker_symbol_picker(ui, id.with("sym"), &mut mk.symbol, super::helpers::color_of(&mk.color), lang);
+    changed |= marker_symbol_picker(ui, marker_symbol_salt(id), &mut mk.symbol, super::helpers::color_of(&mk.color), lang);
     ui.add_space(S2);
     changed
 }
