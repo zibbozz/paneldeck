@@ -6,7 +6,7 @@ impl App {
     pub(super) fn dialogs(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
         // Rückfrage „Link öffnen?“ (OSC 8, #183)
-        self.link_ask_ui(ctx);
+        self.link_ask_ui(ctx, self.focused);
 
         // Neue Sitzung
         if let Some(mut d) = self.new_dialog.take() {

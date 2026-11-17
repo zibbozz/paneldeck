@@ -819,6 +819,11 @@ impl App {
         self.titlebar(ctx);
         self.window_edges(ctx);
         self.mode_shortcuts(ctx);
+        // Die Rückfrage „Fenster schließen?“ zeichnet erst nach den Terminals: Esc/Enter gehören ihr, kein Terminal behält
+        // den Fokus (sonst unterbrach Esc z. B. Claude, #217).
+        if w.ask_close {
+            super::models_ui::release_focus(ctx);
+        }
         let tasks = self.mode == titlebar::Mode::Tasks;
         if !tasks {
             self.shortcuts(ctx, &mut actions);
@@ -1000,6 +1005,10 @@ impl App {
             });
         if esc {
             w.ask_close = false;
+        }
+        // Abgebrochen: Fokus zurück ins Terminal des Fensters.
+        if !w.ask_close && !w.close {
+            self.want_focus = Some(self.focused);
         }
     }
 

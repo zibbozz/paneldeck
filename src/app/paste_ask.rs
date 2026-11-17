@@ -50,25 +50,35 @@ pub(super) fn preview(text: &str) -> String {
     out.join("\n")
 }
 
+/// Gehört die Rückfrage `ask` in das gerade gezeichnete Fenster? `viewport` = Id der abgedockten Sitzung, deren Fenster
+/// gezeichnet wird (`None` = Hauptfenster oder weiteres Fenster `cur`); `detached` = die Sitzung ist (noch) abgedockt.
+fn ask_is_here(ask: &PasteAsk, detached: bool, cur: u64, viewport: Option<u64>) -> bool {
+    let in_detached = ask.detached && detached;
+    match viewport {
+        Some(v) => in_detached && v == ask.id,
+        None => !in_detached && ask.win == cur,
+    }
+}
+
 impl App {
     /// Text aus `Session::paste_user` übernehmen (aus `apply`, im Fenster des Bereichs).
     pub(super) fn ask_paste(&mut self, id: u64, text: String, detached: bool) {
         self.paste_ask = Some(PasteAsk { id, text, win: self.wins.cur, detached, since: std::time::Instant::now() });
     }
 
+    /// Steht die Rückfrage in diesem Fenster (`viewport` wie bei `paste_ask_ui`)? Dann behält dort kein Terminal den
+    /// Fokus (`central`), auch nicht im ersten Bild, bevor die Rückfrage gezeichnet ist (#217).
+    pub(super) fn paste_ask_here(&self, viewport: Option<u64>) -> bool {
+        self.paste_ask.as_ref().is_some_and(|ask| ask_is_here(ask, self.detached.contains(&ask.id), self.wins.cur, viewport))
+    }
+
     /// Rückfrage zeigen (je Fenster; `viewport` = Id der abgedockten Sitzung, deren Fenster gerade gezeichnet wird).
     pub(super) fn paste_ask_ui(&mut self, ctx: &egui::Context, viewport: Option<u64>) {
-        let Some(ask) = self.paste_ask.take() else { return };
-        let in_detached = ask.detached && self.detached.contains(&ask.id);
-        let here = match viewport {
-            Some(v) => in_detached && v == ask.id,
-            None => !in_detached && ask.win == self.wins.cur,
-        };
         // Wird das Fenster vorher geschlossen, bleibt der Text liegen, bis ein neues Einfügen ihn ersetzt (nie gesendet).
-        if !here {
-            self.paste_ask = Some(ask);
+        if !self.paste_ask_here(viewport) {
             return;
         }
+        let Some(ask) = self.paste_ask.take() else { return };
         let Some(s) = self.entries.get(&ask.id).and_then(|e| e.live.as_ref()) else { return };
         let lang = self.settings.language;
         let lines = crate::terminal::paste_line_count(&ask.text).unwrap_or(1);

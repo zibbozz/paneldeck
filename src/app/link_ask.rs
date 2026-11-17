@@ -23,8 +23,10 @@ impl App {
         self.link_ask.as_ref().is_some_and(|a| a.viewport == ctx.viewport_id())
     }
 
-    /// Neue Anfrage übernehmen und die offene Rückfrage im passenden Fenster zeigen.
-    pub(super) fn link_ask_ui(&mut self, ctx: &egui::Context) {
+    /// Neue Anfrage übernehmen und die offene Rückfrage im passenden Fenster zeigen. `focus` = Sitzung, die danach den
+    /// Fokus zurückbekommt (die fokussierte des Fensters bzw. die abgedockte); ohne das blieb er nach dem Schließen
+    /// nirgends und Tasten gingen ins Leere (#217).
+    pub(super) fn link_ask_ui(&mut self, ctx: &egui::Context, focus: u64) {
         if let Some((viewport, uri)) = crate::hyperlink::take_request(ctx) {
             self.link_ask = Some(LinkAsk { viewport, uri, shown: Instant::now(), focus_taken: false });
         }
@@ -101,6 +103,9 @@ impl App {
             }
         } else if cancel {
             self.link_ask = None;
+        }
+        if open || cancel {
+            self.want_focus = Some(focus);
         }
     }
 }

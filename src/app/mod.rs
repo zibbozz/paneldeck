@@ -2374,7 +2374,9 @@ impl App {
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
         // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
-        if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) {
+        // Die Rückfrage vor dem Einfügen mehrerer Zeilen zeichnet erst nach den Terminals: ohne das bekäme das Terminal
+        // im ersten Bild noch Tasten (#217).
+        if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) || self.paste_ask_here(None) {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();
