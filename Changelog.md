@@ -29,6 +29,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Agents can choose where `focus_session` and `create_session` show a session with the new optional `placement`: `replace` (default for `focus_session`; replaces only the active pane – the agent's own pane if visible, otherwise the one the user focused – and minimizes it), `split_right` / `split_down` (split only the active pane) or `solo` (only pane, the others are minimized). Placement never moves the user's keyboard focus (unless their pane was replaced) and never brings a window to the front; panes waiting for an approval and sessions of the agent's chain are never displaced. Without `placement`, `create_session` stays quiet as before. `list_sessions` reports `shown` (the pane is on screen). (#162)
 - Ctrl+Tab also reaches minimized sessions and shows them in the focused pane; the pane they replace is minimized. After a session opens alone, a short notice shows how many panes were minimized. (#162)
 - Setting "Inherit Paneldeck's environment" (Settings → General, off by default; `settings.json` field `inherit_env`): new terminals get exactly the environment Paneldeck was started with instead of the variables read fresh from Windows. (#175)
+- Progress reported by programs (OSC 9;4) is shown in the sidebar and on the taskbar button; MCP `list_sessions` has a new `progress` field. (#183)
+- Notifications from programs (OSC 9, OSC 777) notify you when the session isn't being looked at (rate-limited, can be turned off); a terminal bell marks the session in the sidebar, with an optional toast. (#183)
+- Hyperlinks set by programs (OSC 8) can be Ctrl+clicked; the tooltip shows the real target and host. (#183)
+- Any installed monospace font (e.g. Nerd Fonts) can be chosen as the terminal font; Powerline separators are drawn so they line up without gaps. (#183)
+- Bold and italic text, underline styles (double, curly, dotted, dashed) and underline colours; a blinking cursor when the program asks for it (setting). (#183)
 
 ### Changed
 
@@ -62,6 +67,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - OSC 52 is write-only: programs can never read the clipboard. Only the focused session in the foreground window may copy, at most 1 MB, at most once every 0.3 s; empty texts never clear the clipboard. Note: an agent with control access (MCP) can make the focused session copy text, too. (#181)
 - Paneldeck no longer loads DLLs from the current working folder: right at startup the DLL search is restricted to the program folder and System32, and the bundled console host is loaded by its full path. (#183)
 - The C runtime is now linked into `paneldeck.exe`; it no longer needs `VCRUNTIME140.dll`, which Windows would look for before Paneldeck starts. (#183)
+- OSC 8 links: http/https open directly only with a plain host name; every other link asks first and shows the full target. Overlong or disguised targets (control, bidi or invisible characters, also percent-encoded), script schemes, abused Windows protocol handlers (including the Office handlers), and `file:` links to anything but local drive paths are never opened. (#183)
+- Network and device paths such as `\\.\GLOBALROOT\…` or `\??\UNC\…` are no longer treated as local (links, working folder from OSC 7/9;9). (#183)
+- "Show in folder" no longer passes commas or quotes to Explorer; more file types (e.g. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc`), trailing dots/spaces and alternate data streams are treated as executable. (#183)
+- Notification texts and session names in toasts are cleaned (control, bidi and invisible characters removed, length limited); toasts always name Paneldeck and the session. (#183)
 
 ## [2.2.0] - 2026-11-16
 

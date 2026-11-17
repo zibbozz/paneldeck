@@ -29,6 +29,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Agenten bestimmen mit dem neuen optionalen `placement`, wo `focus_session` und `create_session` eine Sitzung zeigen: `replace` (Standard bei `focus_session`; ersetzt nur den aktiven Bereich – den eigenen Bereich des Agenten, wenn sichtbar, sonst den fokussierten – und minimiert ihn), `split_right` / `split_down` (teilt nur den aktiven Bereich) oder `solo` (einziger Bereich, die anderen werden minimiert). Die Platzierung bewegt nie den Tastaturfokus des Nutzers (außer sein Bereich wurde ersetzt) und holt kein Fenster nach vorn; Bereiche mit offener Freigabe-Frage und Sitzungen der Agenten-Kette werden nie verdrängt. Ohne `placement` bleibt `create_session` wie bisher leise. `list_sessions` meldet `shown` (Bereich ist zu sehen). (#162)
 - Strg+Tab erreicht auch minimierte Sitzungen und zeigt sie im fokussierten Bereich; der ersetzte Bereich wird minimiert. Nach dem Allein-Öffnen zeigt ein kurzer Hinweis, wie viele Bereiche minimiert wurden. (#162)
 - Einstellung „Umgebung von Paneldeck erben“ (Einstellungen → Allgemein, standardmäßig aus; Feld `inherit_env` in `settings.json`): Neue Terminals bekommen genau die Umgebung, mit der Paneldeck gestartet wurde, statt der frisch aus Windows gelesenen Variablen. (#175)
+- Fortschritt, den Programme melden (OSC 9;4), erscheint in der Seitenleiste und am Taskleistenknopf; MCP `list_sessions` hat das neue Feld `progress`. (#183)
+- Benachrichtigungen von Programmen (OSC 9, OSC 777) melden sich, wenn du die Sitzung gerade nicht ansiehst (begrenzt, abschaltbar); die Glocke markiert die Sitzung in der Seitenleiste, ein Toast ist wählbar. (#183)
+- Von Programmen gesetzte Links (OSC 8) lassen sich mit Strg+Klick öffnen; der Tooltip zeigt das echte Ziel und den Rechner. (#183)
+- Jede installierte Festbreitenschrift (z. B. Nerd Fonts) ist als Terminalschrift wählbar; Powerline-Trenner werden lückenlos selbst gezeichnet. (#183)
+- Fett und kursiv, Unterstreichungsarten (doppelt, Welle, gepunktet, gestrichelt) und Unterstreichungsfarben; blinkender Cursor, wenn das Programm ihn anfordert (Einstellung). (#183)
 
 ### Changed
 
@@ -62,6 +67,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - OSC 52 nur zum Schreiben: Programme können die Zwischenablage nie lesen. Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB, höchstens alle 0,3 s; leere Texte leeren die Zwischenablage nie. Hinweis: Ein Agent mit Steuer-Zugriff (MCP) kann die fokussierte Sitzung ebenfalls etwas kopieren lassen. (#181)
 - Paneldeck lädt keine DLLs mehr aus dem Arbeitsordner: Gleich beim Start wird die DLL-Suche auf den Programmordner und System32 beschränkt, der mitgelieferte Konsolen-Host wird über seinen vollen Pfad geladen. (#183)
 - Die C-Laufzeit ist jetzt in `paneldeck.exe` eingebunden; die `VCRUNTIME140.dll`, die Windows noch vor dem Start von Paneldeck suchen würde, wird nicht mehr gebraucht. (#183)
+- OSC-8-Links: http/https öffnen nur mit schlichtem Rechnernamen direkt; alle anderen erst nach einer Rückfrage mit dem ganzen Ziel. Überlange oder getarnte Ziele (Steuer-, Bidi- oder unsichtbare Zeichen, auch prozent-kodiert), Skript-Schemata, missbrauchte Windows-Protokolle (auch die Office-Handler) und `file:`-Links auf anderes als lokale Laufwerkspfade werden nie geöffnet. (#183)
+- Netzwerk- und Gerätepfade wie `\\.\GLOBALROOT\…` oder `\??\UNC\…` gelten nicht mehr als lokal (Links, Arbeitsordner aus OSC 7/9;9). (#183)
+- „Im Ordner zeigen“ reicht keine Kommas oder Anführungszeichen mehr an den Explorer weiter; weitere Dateitypen (z. B. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc`), Punkte/Leerzeichen am Ende und alternative Datenströme gelten als ausführbar. (#183)
+- Benachrichtigungstexte und Sitzungsnamen in Toasts werden bereinigt (Steuer-, Bidi- und unsichtbare Zeichen entfernt, Länge begrenzt); Toasts nennen immer Paneldeck und die Sitzung. (#183)
 
 ## [2.2.0] - 2026-11-16
 
