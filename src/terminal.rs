@@ -1085,3 +1085,21 @@ mod osc52_tests {
         assert!(!got.is_empty());
     }
 }
+
+#[cfg(all(test, windows))]
+mod win_job_tests {
+    use super::*;
+    use crate::shells::ShellSpec;
+
+    #[test]
+    fn a_windows_session_starts_inside_its_job_and_reports_background_processes() {
+        let ctx = egui::Context::default();
+        let shell = ShellSpec { id: "cmd".into(), label: "cmd".into(), program: "cmd.exe".into(), args: vec!["/q".into()] };
+        let s = Session::spawn(&ctx, SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: Vec::new() }).expect("Sitzung startet");
+        assert!(s.job_key().is_some(), "Sitzung hat einen Job");
+        assert!(s.lingering().is_empty(), "nur die Shell: nichts");
+        let pid = s.shell_pid.expect("Shell-PID");
+        assert!(s.job.as_ref().unwrap().pids().contains(&pid), "Shell im Job");
+        assert!(s.end_job());
+    }
+}
