@@ -1717,24 +1717,7 @@ impl App {
         );
         ui.add_space(S2);
         let before = self.settings.mcp_level;
-        for (lvl, title, hint) in [
-            (McpLevel::Off, lang.t("Aus", "Off"), lang.t("Keine Verbindung möglich.", "No connection possible.")),
-            (
-                McpLevel::Read,
-                lang.t("Nur lesen", "Read only"),
-                lang.t("Sitzungen, Terminalinhalt, Kosten und Claude-Verlauf lesen. Nichts wird verändert.", "Read sessions, terminal content, costs and Claude history. Nothing is changed."),
-            ),
-            (
-                McpLevel::Control,
-                lang.t("Steuern", "Control"),
-                lang.t("Zusätzlich Text eingeben, Befehle ausführen, Sitzungen anlegen und schließen; Todo-Karten anlegen und abhaken bzw. Tickets anlegen und ändern. Der Agent tippt dann in deine echten Terminals.", "Also type text, run commands, create and close sessions; add and tick off to-do cards or create and change tickets. The agent then types into your real terminals."),
-            ),
-        ] {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.settings.mcp_level, lvl, title);
-                ui.label(RichText::new(hint).small().color(style::dim(ui)));
-            });
-        }
+        level_selector(ui, &mut self.settings.mcp_level, lang);
         if self.settings.mcp_level != before {
             // Sofort sichern: die Stufe ist eine Sicherheitseinstellung und darf nicht bis zum nächsten Zeitgeber warten.
             state::save_json(&self.dir.join("settings.json"), &self.settings);
@@ -1857,7 +1840,30 @@ impl App {
         };
         let col = if active { Color32::from_rgb(0xd9, 0x77, 0x57) } else { Color32::from_rgb(0x4c, 0xc2, 0x6a) };
         let tip = format!("{}: {}\n{}", lang.t("Agenten-Schnittstelle", "Agent interface"), level_txt, lang.t("Klicken für die Einstellungen", "Click for settings"));
-        ui.add(egui::Label::new(RichText::new(label).small().color(col)).sense(Sense::click())).on_hover_text(tip).clicked()
+        afford::link_button(ui, label, col, &tip).clicked()
+    }
+}
+
+/// Stufe der Agenten-Schnittstelle: drei echte Knöpfe (auch nicht gewählt mit Rahmen wie „Eintragen“/„Entfernen“,
+/// gewählt in der Auswahlfarbe, #187), daneben was die Stufe erlaubt.
+pub(super) fn level_selector(ui: &mut egui::Ui, level: &mut McpLevel, lang: Lang) {
+    for (lvl, title, hint) in [
+        (McpLevel::Off, lang.t("Aus", "Off"), lang.t("Keine Verbindung möglich.", "No connection possible.")),
+        (
+            McpLevel::Read,
+            lang.t("Nur lesen", "Read only"),
+            lang.t("Sitzungen, Terminalinhalt, Kosten und Claude-Verlauf lesen. Nichts wird verändert.", "Read sessions, terminal content, costs and Claude history. Nothing is changed."),
+        ),
+        (
+            McpLevel::Control,
+            lang.t("Steuern", "Control"),
+            lang.t("Zusätzlich Text eingeben, Befehle ausführen, Sitzungen anlegen und schließen; Todo-Karten anlegen und abhaken bzw. Tickets anlegen und ändern. Der Agent tippt dann in deine echten Terminals.", "Also type text, run commands, create and close sessions; add and tick off to-do cards or create and change tickets. The agent then types into your real terminals."),
+        ),
+    ] {
+        ui.horizontal(|ui| {
+            afford::choice_value(ui, level, lvl, title, 96.0); // gleich breite Knöpfe untereinander
+            ui.label(RichText::new(hint).small().color(style::dim(ui)));
+        });
     }
 }
 
@@ -1951,6 +1957,40 @@ fn create_wait(recv: Result<crate::wsl::DirCheck, std::sync::mpsc::TryRecvError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stufen-Auswahl (#187): jede Stufe ist ein echter Knopf – auch nicht gewählt mit sichtbarer Fläche –, zeigt die
+    /// Hand und schaltet beim Klick um.
+    #[test]
+    fn level_selector_buttons_look_pressable_and_show_the_hand() {
+        use crate::afford::tests::{cursor_at, frame_with};
+        use egui::{Event, PointerButton};
+        let ctx = egui::Context::default();
+        crate::afford::install(&ctx);
+        let mut level = McpLevel::Off;
+        let mut t = 0.0;
+        // Knopf-Flächen aus den gezeichneten Formen ermitteln (Mindestbreite 96 px).
+        let mut shapes = Vec::new();
+        let out = frame_with(&ctx, &mut t, vec![], &mut |ui| level_selector(ui, &mut level, Lang::En));
+        for c in &out.shapes {
+            if let egui::Shape::Rect(r) = &c.shape {
+                shapes.push((r.rect, r.fill));
+            }
+        }
+        // Drei gleich breite Knopf-Flächen (auch die beiden nicht gewählten sind gefüllt).
+        let inactive = ctx.style().visuals.widgets.inactive.weak_bg_fill;
+        let buttons: Vec<egui::Rect> = shapes.iter().filter(|(r, f)| r.width() >= 96.0 && r.width() < 140.0 && *f != Color32::TRANSPARENT).map(|(r, _)| *r).collect();
+        assert_eq!(buttons.len(), 3, "drei Knopf-Flächen: {shapes:?}");
+        assert!(shapes.iter().filter(|(_, f)| *f == inactive).count() >= 2, "nicht gewählte Stufen haben die Knopf-Fläche");
+        let read = buttons[1];
+        let mut f = |ui: &mut egui::Ui| level_selector(ui, &mut McpLevel::Off, Lang::En);
+        assert_eq!(cursor_at(read.center(), &mut f), egui::CursorIcon::PointingHand, "Hand über „Read only“");
+        // Klick schaltet um
+        let ev = |pressed| Event::PointerButton { pos: read.center(), button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        for evs in [vec![Event::PointerMoved(read.center())], vec![ev(true)], vec![ev(false)]] {
+            frame_with(&ctx, &mut t, evs, &mut |ui| level_selector(ui, &mut level, Lang::En));
+        }
+        assert_eq!(level, McpLevel::Read);
+    }
 
     #[test]
     fn create_session_cwd_accepts_linux_paths_only_for_wsl() {

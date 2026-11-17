@@ -43,6 +43,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - MCP `focus_session` on a minimized session now uses the default `replace` instead of opening it alone (use `placement: "solo"` for that); a chat needs approval for `focus_session` with `placement`. (#162)
 - With "Remember sessions" off, an update restart restores the sessions once; the next exit discards them as usual. (#157)
 - MCP `create_session` now refuses value options that it used to ignore silently (e.g. `add_dir`, `allowed_tools`, `mcp_config`, `append_system_prompt`, `safe_mode`) with `bad_args`. (#182)
+- Everything that works like a button now shows the hand cursor: main tabs, window buttons, list and menu entries, drop-downs, checkboxes, collapsible headings, toasts, and buttons over the terminal. (#187)
+- Settings → Agent interface: the levels Off / Read only / Control are real buttons; language, prompt language, profiles, model level, tool calling, Windows/WSL path and Unstaged/Staged work the same way. (#187)
+- The cost summary has its own line at the bottom of the sidebar and looks like a small button, with arrow, hover state and tooltip; the MCP chip looks the same. (#187)
 
 ### Deprecated
 
@@ -55,6 +58,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
 - Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
 - Terminals no longer inherit Paneldeck's internal or test-only `PANELDECK_*` variables (for example when Paneldeck was started from another Paneldeck's terminal). (#175)
+- Clickable elements without any hint (cost summary, MCP chip, toasts, tag colours, parent ticket key) now show a hover state, the hand cursor and a tooltip. (#187)
 
 ### Security
 

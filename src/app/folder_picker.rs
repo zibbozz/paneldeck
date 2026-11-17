@@ -267,8 +267,8 @@ impl FolderPicker {
         ui.vertical(|ui| {
             if let Target::Wsl { choose_distro, .. } = self.target.clone() {
                 ui.horizontal(|ui| {
-                    let w = ui.selectable_label(!self.wsl_mode, lang.t("Windows-Pfad", "Windows path"));
-                    let l = ui.selectable_label(self.wsl_mode, lang.t("WSL-Pfad", "WSL path"));
+                    let w = crate::afford::choice(ui, !self.wsl_mode, lang.t("Windows-Pfad", "Windows path"), 0.0);
+                    let l = crate::afford::choice(ui, self.wsl_mode, lang.t("WSL-Pfad", "WSL path"), 0.0);
                     self.rects.modes = [w.rect, l.rect];
                     if w.clicked() && self.wsl_mode {
                         self.leave_wsl();

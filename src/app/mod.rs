@@ -1,3 +1,4 @@
+use crate::afford::{self, Clickable};
 use crate::claude_opts::ClaudeOpts;
 use crate::clip;
 use crate::gitinfo::{GitInfo, GitWatcher};
@@ -1075,6 +1076,7 @@ impl App {
             winchrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
         }
         clip::init(&app.dir);
+        crate::afford::install(&cc.egui_ctx); // Hand-Zeiger über allem, was wie ein Knopf funktioniert (#187)
         app.reload_themes();
         app.prompts = state::load_json(&app.dir.join("prompts.json")).unwrap_or_else(|| prompts::defaults(state::persisted_lang(app.settings.language)));
         if let Some(h) = &app.hook_server {
@@ -3960,7 +3962,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         [Pos2::new(header.min.x, header.max.y - 0.5), Pos2::new(header.max.x, header.max.y - 0.5)],
         Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(0.7)),
     );
-    let hresp = ui.interact(header, Id::new(("hdr", id)), if cx.detached { Sense::click() } else { Sense::click_and_drag() });
+    // Kopfzeile = Titelleiste des Bereichs (Klick fokussiert, Ziehen verschiebt): kein Knopf, darum ohne Hand (#187).
+    let hresp = ui.interact(header, Id::new(("hdr", id)), if cx.detached { Sense::click() } else { Sense::click_and_drag() }).no_pointer();
     if hresp.drag_started() {
         *cx.dragging = Some(id);
     }

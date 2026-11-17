@@ -43,6 +43,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - MCP `focus_session` auf eine minimierte Sitzung nutzt jetzt den Standard `replace` statt sie allein zu öffnen (dafür `placement: "solo"`); ein Chat braucht für `focus_session` mit `placement` eine Freigabe. (#162)
 - Mit „Sitzungen merken“ aus stellt ein Neustart nach einem Update die Sitzungen einmal wieder her; beim nächsten Beenden werden sie wie gewohnt verworfen. (#157)
 - MCP `create_session` lehnt Wertoptionen, die es bisher still ignorierte (z. B. `add_dir`, `allowed_tools`, `mcp_config`, `append_system_prompt`, `safe_mode`), jetzt mit `bad_args` ab. (#182)
+- Alles, was wie ein Knopf funktioniert, zeigt jetzt den Hand-Zeiger: Hauptreiter, Fensterknöpfe, Listen- und Menüeinträge, Auswahllisten, Kontrollkästchen, aufklappbare Überschriften, Toasts und Knöpfe über dem Terminal. (#187)
+- Einstellungen → Agenten-Schnittstelle: Die Stufen Aus / Nur lesen / Steuern sind echte Knöpfe; genauso Sprache, Prompt-Sprache, Profile, Modell-Stufe, Werkzeugaufrufe, Windows/WSL-Pfad und Nicht vorgemerkt/Vorgemerkt. (#187)
+- Die Kostenzeile steht in einer eigenen Zeile unten in der Seitenleiste und sieht wie ein kleiner Knopf aus, mit Pfeil, Hover und Tooltip; der MCP-Chip ebenso. (#187)
 
 ### Deprecated
 
@@ -55,6 +58,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
 - Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
 - Terminals erben keine internen oder reinen Test-Variablen `PANELDECK_*` von Paneldeck mehr (z. B. wenn Paneldeck aus dem Terminal eines anderen Paneldeck gestartet wurde). (#175)
+- Klickbare Elemente ohne jeden Hinweis (Kostenzeile, MCP-Chip, Toasts, Tag-Farben, Eltern-Ticket) zeigen jetzt Hover, Hand-Zeiger und Tooltip. (#187)
 
 ### Security
 
