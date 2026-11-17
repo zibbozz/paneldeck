@@ -523,6 +523,30 @@ fn built_in_fields_answer_to_their_names_in_both_languages_and_to_renamed_names(
 }
 
 #[test]
+fn renamed_built_in_names_stay_within_their_project() {
+    let f = Fx::new();
+    let c = &f.c;
+    // Projekt A (PAN): Beschreibung heißt „Details“; Projekt B: eigenes Text-Feld „Details“
+    let desc = f.field(f.epic, "description");
+    c.execute("UPDATE fields SET name = 'Details' WHERE id = ?1", [desc.id]).unwrap();
+    let a = f.mk(f.epic, "A");
+    set_field(c, a.id, desc.id, json!("aus A"), &ui()).unwrap();
+    let other = f.other_project("OTH");
+    let oty = crate::planning::types::list_types(c, other).unwrap()[0].id;
+    let custom = f.add_field(oty, "Details", FieldKind::Text, FieldOptions::default(), false);
+    let b = create_ticket(c, &NewTicket::new(other, oty, "B"), &ui()).unwrap().0;
+    set_field(c, b.id, custom.id, json!("aus B"), &ui()).unwrap();
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |scope: Scope, jql: &str| -> Vec<String> { run_query(c, &ctx, scope, jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    // über alle Projekte: „Details“ ist das eigene Feld aus B, die Beschreibung nur über ihre festen Namen
+    assert_eq!(q(Scope::All, "Details ~ aus"), vec![b.key()]);
+    assert_eq!(q(Scope::All, "description ~ aus"), vec![a.key()]);
+    // im Projekt A gilt der eigene Name der Beschreibung, in B das eigene Feld
+    assert_eq!(q(Scope::Project(f.project), "Details ~ aus"), vec![a.key()]);
+    assert_eq!(q(Scope::Project(other), "Details ~ aus"), vec![b.key()]);
+}
+
+#[test]
 fn schema_types_and_values() {
     let s = Sx::new();
     let schema = schema_for(&s.f.c, s.scope(), Lang::En).unwrap();

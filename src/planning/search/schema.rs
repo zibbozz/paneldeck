@@ -271,10 +271,14 @@ fn field_names(f: &Field, lang: Lang) -> Vec<String> {
 }
 
 /// Namen eines eingebauten Feldes (Beschreibung, Fälligkeit, Labels) – unabhängig von der Sprache der Oberfläche, damit
-/// gespeicherte Abfragen in beiden Sprachen gelten: Schlüssel, die festen Namen und die Anzeigenamen der Felder im Bereich
-/// (z. B. eine in „Details“ umbenannte Beschreibung).
-fn builtin_names(fixed: &[&str], fields: &[&&Field]) -> Vec<String> {
+/// gespeicherte Abfragen in beiden Sprachen gelten: Schlüssel und feste Namen, im Bereich eines Projekts zusätzlich die
+/// Anzeigenamen seiner Felder (z. B. eine in „Details“ umbenannte Beschreibung). Über alle Projekte gelten nur die festen Namen,
+/// sonst würde der eigene Name aus Projekt A ein gleichnamiges eigenes Feld in Projekt B verschlucken.
+fn builtin_names(fixed: &[&str], fields: &[&&Field], project_scope: bool) -> Vec<String> {
     let mut v: Vec<String> = fixed.iter().map(|s| s.to_string()).collect();
+    if !project_scope {
+        return v;
+    }
     for f in fields {
         for l in [Lang::En, Lang::De] {
             let d = f.display(l);
@@ -448,9 +452,10 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     // ---- eingebaute Felder jedes Tickets: Beschreibung, Fälligkeit, Labels (über ihren Schlüssel, nicht den Anzeigenamen)
     let vf = |pick: fn(&Field) -> bool| -> Vec<ValField> { fields_in_order.iter().filter(|f| pick(f)).map(|f| ValField { id: f.id, kind: f.kind }).collect() };
     let of = |pick: fn(&Field) -> bool| -> Vec<&&Field> { fields_in_order.iter().filter(|f| pick(f)).collect() };
-    let desc_names = builtin_names(&["description", "Description", "Beschreibung"], &of(Field::is_description));
-    let due_names = builtin_names(&["due", "Due date", "Fällig", "Fällig am"], &of(Field::is_due));
-    let labels_names = builtin_names(&["labels", "Labels"], &of(Field::is_labels));
+    let in_project = matches!(scope, Scope::Project(_));
+    let desc_names = builtin_names(&["description", "Description", "Beschreibung"], &of(Field::is_description), in_project);
+    let due_names = builtin_names(&["due", "Due date", "Fällig", "Fällig am"], &of(Field::is_due), in_project);
+    let labels_names = builtin_names(&["labels", "Labels"], &of(Field::is_labels), in_project);
     let (desc_fields, due_fields, labels_fields) = (vf(Field::is_description), vf(Field::is_due), vf(Field::is_labels));
     let desc_idx = reg.add(&desc_names, FieldType::Text, false, Store::Values(Vals { class: Class::Text, fields: desc_fields, opts: OptionSet::default(), links: false }));
     let due_idx = reg.add(&due_names, FieldType::DateTime, false, Store::Values(Vals { class: Class::Due, fields: due_fields, opts: OptionSet::default(), links: false }));

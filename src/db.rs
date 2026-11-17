@@ -69,6 +69,7 @@ pub fn open_memory() -> Connection {
     for m in MIGRATIONS {
         conn.execute_batch(m).unwrap();
     }
+    conn.pragma_update(None, "user_version", MIGRATIONS.len() as u32).unwrap();
     conn
 }
 
@@ -137,10 +138,9 @@ fn open_with(data_dir: &Path, backup_dir: &Path, migrations: &[&str]) -> Result<
             tx.commit().map_err(other)?;
         }
     }
-    // eingebaute Felder (Beschreibung, Fälligkeit) für Typen nachtragen, die von außen in die Datenbank kamen (idempotent, ab Schema 8)
-    if migrations.len() >= 8 {
-        crate::planning::builtin_fields::ensure(&conn).map_err(other)?;
-    }
+    // eingebaute Felder für Typen nachtragen, die von außen in die Datenbank kamen (idempotent; nur Felder, deren Migration schon
+    // gelaufen ist – das prüft `ensure` an der Schema-Version)
+    crate::planning::builtin_fields::ensure(&conn).map_err(other)?;
     let db = Db { conn, path };
     if db.meta("created_at").is_none() {
         db.set_meta("created_at", &chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string());
@@ -459,7 +459,7 @@ mod tests {
             // Labels: das eigene Labels-Feld des Epics wird das eingebaute (gleiche Kennung, Werte, Verlauf; nicht mehr Pflicht),
             // das Text-Feld „Labels“ der Dev-Aufgabe bleibt eigenes Feld mit Zusatz, die Dev-Aufgabe bekommt neue Labels
             let epic = fields(30);
-            assert_eq!((epic[2].id, epic[2].is_labels(), epic[2].required), (45, true, false));
+            assert_eq!((epic[2].id, epic[2].is_labels(), epic[2].required, epic[2].default_value.clone()), (45, true, false, None));
             let lv: Vec<String> = { let mut st = c.prepare("SELECT text FROM ticket_values WHERE ticket_id = 60 AND field_id = 45 ORDER BY pos").unwrap(); st.query_map([], |r| r.get(0)).unwrap().map(|x| x.unwrap()).collect() };
             assert_eq!(lv, vec!["backend", "ui"]);
             let hl: i64 = c.query_row("SELECT COUNT(*) FROM history WHERE field = 'field:45'", [], |r| r.get(0)).unwrap();
@@ -510,6 +510,44 @@ mod tests {
         let db = open(&d, &bdir).unwrap();
         check(&db.conn);
         assert_eq!(backup::list(&bdir).len(), 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Ein Stand mit Schema 8 (Beschreibung und Fälligkeit, noch keine eingebauten Labels) und einem eigenen Feld „Labels“ mit
+    /// Standardwert: Öffnen mit Schema 8 legt die Labels noch nicht an (sonst könnte Migration 9 das eigene Feld nicht mehr
+    /// umwandeln), das Update auf 9 wandelt es um (gleiche Kennung, Wert bleibt, Standardwert entfällt).
+    #[test]
+    fn ensure_waits_for_migration_9_before_adding_labels() {
+        use crate::planning::fields::list_fields;
+        let d = tmp("db-v8-labels");
+        let bdir = d.join("backups");
+        let (ty, fid) = {
+            let db = open_with(&d, &bdir, &MIGRATIONS[..8]).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO projects (id, key, name, color, system, next_number, position, created_at) VALUES (20, 'LAB', 'L', '#112233', 0, 2, 1, '2026-01-01T00:00:00');
+                     INSERT INTO ticket_types (id, project_id, key, name, icon, color, workflow, system, position) VALUES (70, 20, NULL, 'Story', NULL, '#445566', 0, 0, 0);
+                     INSERT INTO fields (id, type_id, key, name, kind, options, required, default_value, position, builtin) VALUES (80, 70, NULL, 'Labels', 'labels', '{}', 0, '[\"neu\"]', 0, 0);
+                     INSERT INTO tickets (id, project_id, number, type_id, title, status_id, rank, created_at, updated_at) VALUES (90, 20, 1, 70, 'T', NULL, 0, '2026-01-01T00:00:00', '2026-01-01T00:00:00');
+                     INSERT INTO ticket_values (ticket_id, field_id, pos, text, num) VALUES (90, 80, 0, 'alt', NULL);",
+                )
+                .unwrap();
+            (70_i64, 80_i64)
+        };
+        // erneut mit Schema 8 öffnen: Beschreibung und Fälligkeit kommen dazu, Labels noch nicht
+        {
+            let db = open_with(&d, &bdir, &MIGRATIONS[..8]).unwrap();
+            let keys: Vec<Option<String>> = list_fields(&db.conn, ty).unwrap().into_iter().map(|f| f.key).collect();
+            assert_eq!(keys, vec![Some("description".into()), Some("due".into()), None]);
+        }
+        let db = open(&d, &bdir).unwrap();
+        let fs = list_fields(&db.conn, ty).unwrap();
+        assert_eq!(fs.len(), 3);
+        let lab = fs.iter().find(|f| f.is_labels()).unwrap();
+        assert_eq!((lab.id, lab.default_value.clone()), (fid, None), "das eigene Feld wurde umgewandelt, ohne Standardwert");
+        let v: String = db.conn.query_row("SELECT text FROM ticket_values WHERE ticket_id = 90 AND field_id = 80", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, "alt");
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
     }

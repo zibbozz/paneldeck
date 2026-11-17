@@ -12,8 +12,9 @@
 //!
 //! Umwandlung beim Update (Migration 8 und 9, je Feld):
 //! 1. Ein Feld mit dem Schlüssel und passendem Feldtyp **wird** das eingebaute Feld (Beschreibung: Text/Rich-Text → Rich-Text;
-//!    Fälligkeit: Datum+Uhrzeit; Labels: Labels), nicht Pflicht; Werte, Verlauf und Verweise in Regeln bleiben, weil die
-//!    Feld-Kennung gleich bleibt.
+//!    Fälligkeit: Datum+Uhrzeit; Labels: Labels), nicht Pflicht und ohne Standardwert (eingebaute Felder haben keinen, er wäre
+//!    danach weder änderbar noch Teil einer Sicherung); Werte, Verlauf und Verweise in Regeln bleiben, weil die Feld-Kennung
+//!    gleich bleibt.
 //! 2. Hat ein Typ kein solches Feld, wird das erste eigene Feld passender Art namens „Description“/„Beschreibung“ bzw. „Labels“
 //!    zum eingebauten Feld.
 //! 3. Ein Feld mit einem dieser Schlüssel und anderem Feldtyp verliert den Schlüssel und bleibt als eigenes Feld.
@@ -62,9 +63,9 @@ UPDATE fields SET key = 'description', name = NULL
 -- (1) vorhandene Beschreibungs-/Fälligkeitsfelder festschreiben
 UPDATE fields SET options = CASE WHEN kind = 'text' THEN '{"rows":8}' ELSE options END
  WHERE key = 'description' AND type_id IN (SELECT id FROM ticket_types WHERE system = 0);
-UPDATE fields SET kind = 'rich', builtin = 1, required = 0, position = -3
+UPDATE fields SET kind = 'rich', builtin = 1, required = 0, default_value = NULL, position = -3
  WHERE key = 'description' AND type_id IN (SELECT id FROM ticket_types WHERE system = 0);
-UPDATE fields SET options = '{"time_optional":true}', builtin = 1, required = 0, position = -2
+UPDATE fields SET options = '{"time_optional":true}', builtin = 1, required = 0, default_value = NULL, position = -2
  WHERE key = 'due' AND type_id IN (SELECT id FROM ticket_types WHERE system = 0);
 -- fehlende anlegen
 INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
@@ -95,7 +96,7 @@ UPDATE fields SET key = 'labels', name = NULL
       AND NOT EXISTS (SELECT 1 FROM fields g WHERE g.type_id = f.type_id AND g.key = 'labels')
     GROUP BY f.type_id);
 -- (1) festschreiben (oben, nicht Pflicht; „auf Karte“ bleibt, wie es war)
-UPDATE fields SET builtin = 1, required = 0, options = '{}', position = -1
+UPDATE fields SET builtin = 1, required = 0, default_value = NULL, options = '{}', position = -1
  WHERE key = 'labels' AND type_id IN (SELECT id FROM ticket_types WHERE system = 0);
 -- fehlende anlegen (auf der Karte sichtbar)
 INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
@@ -107,37 +108,57 @@ UPDATE fields SET name = name || ' (custom)'
    AND type_id IN (SELECT type_id FROM fields WHERE key = 'labels' AND builtin = 1);
 "##;
 
-/// Fehlende eingebaute Felder anlegen (keine Umwandlungen, die macht nur die Migration).
-const INSERT_MISSING_SQL: &str = r##"
-INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
+/// Eingebaute Felder mit der Schema-Version, ab der es sie gibt, und dem SQL, das sie für jeden Typ ohne sie anlegt.
+const INSERTS: [(&str, u32, &str); 3] = [
+    (
+        DESCRIPTION_KEY,
+        8,
+        r##"INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
  SELECT t.id, 'description', NULL, 'rich', '{"rows":8}', 0, NULL, '', '', -3, 0, 1 FROM ticket_types t
-  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'description');
-INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
+  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'description')"##,
+    ),
+    (
+        DUE_KEY,
+        8,
+        r##"INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
  SELECT t.id, 'due', NULL, 'datetime', '{"time_optional":true}', 0, NULL, '', '', -2, 0, 1 FROM ticket_types t
-  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'due');
-INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
+  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'due')"##,
+    ),
+    (
+        LABELS_KEY,
+        9,
+        r##"INSERT INTO fields (type_id, key, name, kind, options, required, default_value, help, section, position, show_on_card, builtin)
  SELECT t.id, 'labels', NULL, 'labels', '{}', 0, NULL, '', '', -1, 1, 1 FROM ticket_types t
-  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'labels');
-"##;
+  WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = 'labels')"##,
+    ),
+];
 
-/// Fehlt irgendeinem Typ ein eingebautes Feld? (billig, für den Aufruf beim Öffnen)
-const MISSING_SQL: &str = "SELECT EXISTS (SELECT 1 FROM ticket_types t WHERE t.system = 0 AND (SELECT COUNT(*) FROM fields f WHERE f.type_id = t.id AND f.key IN ('description', 'due', 'labels')) < 3)";
+/// Fehlt einem Typ das eingebaute Feld `?1`? (billig, für den Aufruf beim Öffnen)
+const MISSING_SQL: &str = "SELECT EXISTS (SELECT 1 FROM ticket_types t WHERE t.system = 0 AND NOT EXISTS (SELECT 1 FROM fields f WHERE f.type_id = t.id AND f.key = ?1))";
 
-/// Fehlende eingebaute Felder für alle Typen anlegen (nach dem Anlegen eines Typs, nach Importen, beim Öffnen). Prüft zuerst
-/// billig, ob überhaupt etwas fehlt, und schreibt dann in einem SAVEPOINT (auch innerhalb einer äußeren Transaktion).
+/// Fehlende eingebaute Felder für alle Typen anlegen (nach dem Anlegen eines Typs, nach Importen, beim Öffnen) – nur die, deren
+/// Migration schon gelaufen ist (`PRAGMA user_version`; ein Feld vorher anzulegen würde die Umwandlung gleichnamiger eigener
+/// Felder in der späteren Migration verhindern). Prüft zuerst billig, ob überhaupt etwas fehlt, und schreibt dann in einem
+/// SAVEPOINT (auch innerhalb einer äußeren Transaktion).
 pub fn ensure(conn: &Connection) -> rusqlite::Result<()> {
-    let missing: bool = conn.query_row(MISSING_SQL, [], |r| r.get(0))?;
-    if !missing {
+    let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let mut todo: Vec<&str> = Vec::new();
+    for (key, since, sql) in INSERTS {
+        if version >= since && conn.query_row(MISSING_SQL, [key], |r| r.get::<_, bool>(0))? {
+            todo.push(sql);
+        }
+    }
+    if todo.is_empty() {
         return Ok(());
     }
     conn.execute_batch("SAVEPOINT ensure_builtin_fields")?;
-    match conn.execute_batch(INSERT_MISSING_SQL) {
-        Ok(()) => conn.execute_batch("RELEASE ensure_builtin_fields"),
-        Err(e) => {
+    for sql in todo {
+        if let Err(e) = conn.execute_batch(sql) {
             let _ = conn.execute_batch("ROLLBACK TO ensure_builtin_fields; RELEASE ensure_builtin_fields");
-            Err(e)
+            return Err(e);
         }
     }
+    conn.execute_batch("RELEASE ensure_builtin_fields")
 }
 
 /// Passt ein Feldtyp zum eingebauten Feld?
@@ -230,7 +251,7 @@ mod tests {
     #[test]
     fn new_types_get_all_built_in_fields_and_ensure_is_idempotent() {
         assert!(MIGRATION.contains(crate::due::DEFAULT_THRESHOLDS_JSON));
-        assert!(MIGRATION.contains(DUE_OPTIONS_JSON) && INSERT_MISSING_SQL.contains(DUE_OPTIONS_JSON));
+        assert!(MIGRATION.contains(DUE_OPTIONS_JSON) && INSERTS[1].2.contains(DUE_OPTIONS_JSON));
         let c = db();
         let p = create_project(&c, &NewProject::new("AA", "P", "#112233")).unwrap();
         let t = create_type(&c, &NewType { project_id: p, key: None, name: Some("T".into()), icon: None, color: "#445566".into(), workflow: false }).unwrap();
@@ -267,8 +288,10 @@ mod tests {
         ensure(&c).unwrap();
         c.execute_batch("COMMIT").unwrap();
         assert_eq!(list_fields(&c, raw).unwrap().len(), 3);
-        let n: i64 = c.query_row(MISSING_SQL, [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 0, "danach fehlt nichts mehr");
+        for k in FIXED_KEYS {
+            let missing: bool = c.query_row(MISSING_SQL, [k], |r| r.get(0)).unwrap();
+            assert!(!missing, "danach fehlt {k} nicht mehr");
+        }
     }
 
     #[test]
