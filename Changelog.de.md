@@ -24,6 +24,21 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Dialoge geben keine Tasten mehr an das Terminal dahinter weiter: die Rückfrage beim Schließen eines weiteren Fensters (Esc unterbrach Claude, Enter ging an die Shell), das erste Bild der Rückfrage beim Einfügen mehrerer Zeilen; nach der Rückfrage „Link öffnen?“ bekommt das Terminal den Fokus zurück (#217)
 - Broadcast-Einfügen: Jeder Zielbereich rahmt eingefügten Text jetzt mit seinem eigenen Bracketed-Paste-Modus, und die Rückfrage vor mehreren Zeilen erscheint auch, wenn ein Zielbereich die Zeilen ausführen würde (#220)
 - Ein vollständiger Reset (RIS) im alternativen Bildschirm verschiebt Prompt-Marken und absolute Zeilennummern nicht mehr; CAN/SUB beenden OSC-Sequenzen wie in der Terminal-Emulation (#221)
+- Beim Schließen oder Neu laden einer Sitzung erscheinen versteckte Hilfsprozesse eines laufenden Programms (z. B. MCP-Server und Werkzeugaufrufe von Claude Code) nicht mehr als Hintergrundprozesse; laufen einige davon etwa 6 Sekunden später noch, nennt eine Meldung sie und bietet „Alle beenden“. (#213)
+- Beim Schließen einer Sitzung mit Git-Worktree werden jetzt auch ihre Hintergrundprozesse genannt und lassen sich vor dem Entfernen des Worktrees beenden. (#213)
+- Der Knopf „Neu starten“ einer beendeten Sitzung und „Beendete Sitzungen neu starten“ fragen jetzt wie „Neu laden“ nach Hintergrundprozessen. (#213)
+- „Alle beenden“ in einer Schließen- oder Neu-laden-Rückfrage beendet nur die dort genannten Prozesse; eine inzwischen neu gestartete Sitzung bleibt unberührt. (#213)
+- Einstellungen der Sitzung: Der Arbeitsordner einer WSL-Sitzung akzeptiert Linux-Pfade und bietet die WSL-Ordnerauswahl; Speichern während der Prüfung in WSL sagt das. WSL-Pfade, Netzwerkpfade und Netzlaufwerke werden nicht mehr im UI-Thread geprüft, ein Netzwerk-Arbeitsordner beim Start nur noch kurz. (#216)
+- `paneldeck --open` mit relativem Pfad öffnet den Ordner relativ zum Ort des Aufrufs, nicht zum laufenden Paneldeck. (#221)
+- Ein hängendes `wsl.exe` hält den Start von Paneldeck und WSL-Ordnerprüfungen nicht mehr unbegrenzt auf. (#221)
+- Ein Prozess-Handle-Leck beim Zuordnen eines MCP-Aufrufers wurde behoben. (#221)
+
+### Security
+
+- MCP: Sitzungen, deren anlegende Sitzung geschlossen wurde, können nicht mehr von jedem externen Agenten geschlossen oder verknüpft werden. (#218)
+- MCP: Ein Prozess, der von einer geschlossenen oder neu gestarteten Sitzung übrig ist, wird weiter dieser Sitzung zugeordnet (ihr Job Object bleibt, solange darin Prozesse laufen): Er behält ihre Agenten-Kette und gibt sie weiter, statt als unbekannter Aufrufer zu gelten. Agenten, die aus anderen Programmen gestartet wurden (z. B. über `code .`), gelten nicht mehr fälschlich als losgelöst. (#218)
+- MCP: Konnte eine Sitzung kein Job Object bekommen, darf ein losgelöster, nicht zuzuordnender Prozess keine Claude-Sitzungen, Chats oder die MCP-Brücke starten und nicht in Claude-Sitzungen oder Chats schreiben. (#218)
+- MCP: Ein `create_session`, das auf die Ordnerprüfung in WSL wartet, prüft vor dem Anlegen die Stufe (bzw. die Werkzeug-Regeln des Chat-Modells) erneut. (#218)
 
 ## [2.3.0] - 2026-11-17
 
