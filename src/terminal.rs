@@ -285,14 +285,13 @@ impl Session {
                                         let end = end.clamp(done, bytes.len());
                                         processor.advance(&mut *t, &bytes[done..end]);
                                         done = end;
-                                        let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
-                                        let line = t.grid().cursor.point.line.0 as i64;
+                                        let abs_line = event_abs_line(&*t);
                                         let was = stale.load(Ordering::Relaxed);
                                         stale.store(next_stale_modes(was, &ev, *t.mode()), Ordering::Relaxed);
                                         if ev == OscEvent::FullscreenModeSet {
                                             continue; // keine Shell-Integration
                                         }
-                                        apply_events(&shell_state, vec![ev], (hist + line).max(0) as u64);
+                                        apply_events(&shell_state, vec![ev], abs_line);
                                     }
                                     processor.advance(&mut *t, &bytes[done..]);
                                 }
@@ -395,22 +394,6 @@ impl Session {
         self.child.try_lock().ok().and_then(|c| c.process_id())
     }
 
-    /// Wie `lines_abs`, aber umgebrochene Zeilen sind zu einer logischen Zeile zusammengefügt (für Ausgaben an Leser).
-    pub fn text_abs(&self, from: u64, to: u64) -> Vec<String> {
-        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
-        let g = t.grid();
-        let hist = g.total_lines().saturating_sub(g.screen_lines()) as i64;
-        let top = -hist;
-        let bottom = g.bottommost_line().0 as i64;
-        let a = (from as i64 - hist).clamp(top, bottom);
-        let b = (to as i64 - hist).clamp(top, bottom);
-        if b < a {
-            return vec![];
-        }
-        let text = t.bounds_to_string(Point::new(Line(a as i32), Column(0)), Point::new(Line(b as i32), Column(g.columns() - 1)));
-        text.lines().map(|l| l.trim_end().to_string()).collect()
-    }
-
     /// Anwendung hat den Cursor-Tasten-Modus (Pfeile als `ESC O A`) gesetzt.
     pub fn app_cursor(&self) -> bool {
         self.term.lock().unwrap_or_else(|e| e.into_inner()).mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR)
@@ -422,70 +405,17 @@ impl Session {
 
     /// Absolute Zeilennummer (ab Anfang des Verlaufs) der Cursorzeile.
     pub fn abs_cursor_line(&self) -> u64 {
-        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
-        let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
-        (hist + t.grid().cursor.point.line.0 as i64).max(0) as u64
-    }
-
-    /// Beginn der (ggf. umgebrochenen) Zeile, zu der `abs` gehört: läuft eine Zeile am Rand in die nächste über,
-    /// gehört sie zur selben logischen Zeile (lange Prompts in schmalen Terminals).
-    pub fn unwrap_start(&self, mut abs: u64) -> u64 {
-        use alacritty_terminal::term::cell::Flags;
-        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
-        let g = t.grid();
-        let hist = g.total_lines().saturating_sub(g.screen_lines()) as i64;
-        let top = -hist;
-        let last_col = Column(g.columns() - 1);
-        while abs > 0 {
-            let prev = abs as i64 - 1 - hist;
-            if prev < top || prev > g.bottommost_line().0 as i64 {
-                break;
-            }
-            if g[Line(prev as i32)][last_col].flags.contains(Flags::WRAPLINE) {
-                abs -= 1;
-            } else {
-                break;
-            }
-        }
-        abs
-    }
-
-    /// Letzte Zeile der (ggf. umgebrochenen) logischen Zeile, die bei `abs` beginnt: läuft eine Zeile am Rand in die
-    /// nächste über, gehört diese noch dazu (lange eingegebene Befehle in schmalen Terminals).
-    pub fn wrap_end(&self, mut abs: u64) -> u64 {
-        use alacritty_terminal::term::cell::Flags;
-        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
-        let g = t.grid();
-        let hist = g.total_lines().saturating_sub(g.screen_lines()) as i64;
-        let bottom = g.bottommost_line().0 as i64;
-        let last_col = Column(g.columns() - 1);
-        loop {
-            let row = abs as i64 - hist;
-            if row < -hist || row >= bottom || !g[Line(row as i32)][last_col].flags.contains(Flags::WRAPLINE) {
-                return abs;
-            }
-            abs += 1;
-        }
+        cursor_abs_in(&self.term.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Terminal-Zeilen von `from` bis `to` (absolut, einschließlich), je Zeile ein Eintrag, ohne Leerraum am Zeilenende.
     pub fn lines_abs(&self, from: u64, to: u64) -> Vec<String> {
-        let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
-        let g = t.grid();
-        let hist = g.total_lines().saturating_sub(g.screen_lines()) as i64;
-        let top = -(hist);
-        let bottom = g.bottommost_line().0 as i64;
-        let a = (from as i64 - hist).clamp(top, bottom);
-        let b = (to as i64 - hist).clamp(top, bottom);
-        if b < a {
-            return vec![];
-        }
-        // Zeile für Zeile (Index = Zeilennummer − from): `bounds_to_string` über mehrere Zeilen fügt umgebrochene Zeilen
-        // zu einer zusammen, dann stimmten die Indizes für Aufrufer nicht mehr.
-        let last_col = Column(g.columns() - 1);
-        (a..=b)
-            .map(|r| t.bounds_to_string(Point::new(Line(r as i32), Column(0)), Point::new(Line(r as i32), last_col)).trim_end().to_string())
-            .collect()
+        lines_abs_in(&self.term.lock().unwrap_or_else(|e| e.into_inner()), from, to)
+    }
+
+    /// Ausgabe eines `run_command` (MCP) aus dem Terminalinhalt, siehe [`run_output`].
+    pub fn run_output(&self, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool) -> RunOutput {
+        run_output(&self.term.lock().unwrap_or_else(|e| e.into_inner()), cmd, start_abs, mark0, mark, advanced)
     }
 
     /// Letzte `n` Zeilen des Verlaufs (ohne leere Zeilen am Ende) und ob es davor noch mehr gab.
@@ -698,6 +628,148 @@ impl Session {
         let cur = t.grid().display_offset() as i64;
         t.scroll_display(alacritty_terminal::grid::Scroll::Delta((offset - cur) as i32));
     }
+}
+
+/// Anzahl der Zeilen im Verlauf über dem sichtbaren Bereich (absolute Zeile = `hist` + Bildschirmzeile).
+fn hist_of<T>(t: &Term<T>) -> i64 {
+    t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64
+}
+
+fn cursor_abs_in<T>(t: &Term<T>) -> u64 {
+    (hist_of(t) + t.grid().cursor.point.line.0 as i64).max(0) as u64
+}
+
+/// Absolute Zeile, an der ein Ereignis im Ausgabestrom (z. B. Prompt-Anfang, OSC 133;A) steht. Steht der Cursor nach
+/// einer Zeile, die die Breite genau füllt, noch am Rand („Umbruch ausstehend“), landet das nächste Zeichen in der
+/// folgenden Zeile – dort beginnt dann auch der Prompt, nicht in der Ausgabezeile (#193).
+pub fn event_abs_line<T>(t: &Term<T>) -> u64 {
+    let c = &t.grid().cursor;
+    cursor_abs_in(t) + u64::from(c.input_needs_wrap)
+}
+
+/// Wie `lines_abs_in`, aber umgebrochene Zeilen sind zu einer logischen Zeile zusammengefügt (für Ausgaben an Leser).
+fn text_abs_in<T: EventListener>(t: &Term<T>, from: u64, to: u64) -> Vec<String> {
+    let g = t.grid();
+    let hist = hist_of(t);
+    let top = -hist;
+    let bottom = g.bottommost_line().0 as i64;
+    let a = (from as i64 - hist).clamp(top, bottom);
+    let b = (to as i64 - hist).clamp(top, bottom);
+    if b < a {
+        return vec![];
+    }
+    let text = t.bounds_to_string(Point::new(Line(a as i32), Column(0)), Point::new(Line(b as i32), Column(g.columns() - 1)));
+    text.lines().map(|l| l.trim_end().to_string()).collect()
+}
+
+/// Beginn der (ggf. umgebrochenen) Zeile, zu der `abs` gehört: läuft eine Zeile am Rand in die nächste über,
+/// gehört sie zur selben logischen Zeile (lange Prompts in schmalen Terminals).
+fn unwrap_start_in<T>(t: &Term<T>, mut abs: u64) -> u64 {
+    use alacritty_terminal::term::cell::Flags;
+    let g = t.grid();
+    let hist = hist_of(t);
+    let top = -hist;
+    let last_col = Column(g.columns() - 1);
+    while abs > 0 {
+        let prev = abs as i64 - 1 - hist;
+        if prev < top || prev > g.bottommost_line().0 as i64 {
+            break;
+        }
+        if g[Line(prev as i32)][last_col].flags.contains(Flags::WRAPLINE) {
+            abs -= 1;
+        } else {
+            break;
+        }
+    }
+    abs
+}
+
+/// Letzte Zeile der (ggf. umgebrochenen) logischen Zeile, die bei `abs` beginnt: läuft eine Zeile am Rand in die
+/// nächste über, gehört diese noch dazu (lange eingegebene Befehle in schmalen Terminals).
+fn wrap_end_in<T>(t: &Term<T>, mut abs: u64) -> u64 {
+    use alacritty_terminal::term::cell::Flags;
+    let g = t.grid();
+    let hist = hist_of(t);
+    let bottom = g.bottommost_line().0 as i64;
+    let last_col = Column(g.columns() - 1);
+    loop {
+        let row = abs as i64 - hist;
+        if row < -hist || row >= bottom || !g[Line(row as i32)][last_col].flags.contains(Flags::WRAPLINE) {
+            return abs;
+        }
+        abs += 1;
+    }
+}
+
+/// Terminal-Zeilen von `from` bis `to` (absolut, einschließlich), je Zeile ein Eintrag, ohne Leerraum am Zeilenende.
+fn lines_abs_in<T: EventListener>(t: &Term<T>, from: u64, to: u64) -> Vec<String> {
+    let g = t.grid();
+    let hist = hist_of(t);
+    let top = -(hist);
+    let bottom = g.bottommost_line().0 as i64;
+    let a = (from as i64 - hist).clamp(top, bottom);
+    let b = (to as i64 - hist).clamp(top, bottom);
+    if b < a {
+        return vec![];
+    }
+    // Zeile für Zeile (Index = Zeilennummer − from): `bounds_to_string` über mehrere Zeilen fügt umgebrochene Zeilen
+    // zu einer zusammen, dann stimmten die Indizes für Aufrufer nicht mehr.
+    let last_col = Column(g.columns() - 1);
+    (a..=b)
+        .map(|r| t.bounds_to_string(Point::new(Line(r as i32), Column(0)), Point::new(Line(r as i32), last_col)).trim_end().to_string())
+        .collect()
+}
+
+/// Ergebnis von [`run_output`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunOutput {
+    /// Das Echo des Befehls wurde gefunden (sonst ist der Anfang der Ausgabe geraten).
+    pub first_ok: bool,
+    /// Ausgabezeilen (umgebrochene Zeilen zusammengefügt), ohne leere Zeilen am Ende.
+    pub lines: Vec<String>,
+}
+
+/// Ausgabe eines per `run_command` eingegebenen Befehls: Zeilen nach dem Echo des Befehls bis vor den neuen Prompt.
+/// `start_abs` = Cursorzeile beim Senden, `mark0` = Prompt-Anfang davor, `mark` = Anfang des neuen Prompts (OSC 133;A,
+/// falls die Shell ihn meldete), `advanced` = der Befehl ist fertig (neuer Prompt da).
+pub fn run_output<T: EventListener>(t: &Term<T>, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool) -> RunOutput {
+    let cursor = cursor_abs_in(t);
+    // Ende: vor dem neuen Prompt. Die Marke ist sein genauer Anfang (`event_abs_line`); von dort nicht über umgebrochene
+    // Zeilen zurücklaufen – eine Ausgabezeile, die die Breite genau füllt, trägt oft WRAPLINE (ConPTY lässt den
+    // Zeilenvorschub weg) und fiele sonst samt Ausgabe dem Prompt zu (#193). Ohne Marke (cmd) bleibt nur die Cursorzeile;
+    // ein umbrochener Prompt beginnt dann an der ersten Zeile davon.
+    let end_incl = if advanced {
+        match mark {
+            Some(m) => m.saturating_sub(1),
+            None => unwrap_start_in(t, cursor).saturating_sub(1),
+        }
+    } else {
+        cursor
+    };
+    // Anfang der Ausgabe: die Zeile mit dem eingegebenen Befehl. Gesucht ab dem vorherigen Prompt-Anfang – die Cursorzeile
+    // beim Senden ist unsicher, weil langsame Prompts (z. B. Git Bash mit Git-Status) zeilenweise mit Pausen erscheinen.
+    let scan_from = mark0.map_or(start_abs, |m| m.min(start_abs));
+    let all = lines_abs_in(t, scan_from, end_incl.max(scan_from));
+    // Ein langer Befehl kann umbrochen sein: den ganzen Eingabeblock überspringen, nicht nur die erste Zeile. Das Echo
+    // wird am Befehlstext selbst verfolgt (WRAPLINE fehlt, wenn ConPTY/PSReadLine die Eingabe neu zeichnen).
+    let (first_ok, skip) = match find_echo(&all, cmd) {
+        Some((_, last)) => (true, last + 1),
+        None => {
+            // Rückfall (Echo unvollständig, z. B. aus dem Verlauf gefallen): erste Zeile mit dem Befehlsanfang.
+            let key: String = cmd.chars().take(12).collect();
+            match all.iter().position(|l| l.contains(key.as_str())) {
+                Some(i) => (true, (wrap_end_in(t, scan_from + i as u64) - scan_from) as usize + 1),
+                None => (false, (start_abs - scan_from) as usize + 1),
+            }
+        }
+    };
+    // Ausgabe mit zusammengefügten Zeilenumbrüchen des Terminals (eine 300 Zeichen lange Zeile bleibt eine Zeile).
+    let first_out = scan_from + skip as u64;
+    let mut lines: Vec<String> = if first_out <= end_incl { text_abs_in(t, first_out, end_incl) } else { Vec::new() };
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    RunOutput { first_ok, lines }
 }
 
 /// Sucht in Terminal-Zeilen (eine Bildschirmzeile je Eintrag, wie `Session::lines_abs`) das Echo eines eingegebenen
@@ -939,6 +1011,170 @@ mod echo_tests {
         let r = rows(20, "PS C:\\> Get-ChildIt\r\nanderes\r\n");
         assert_eq!(find_echo(&r, "Get-ChildItem -Force"), None);
         assert_eq!(find_echo(&r, "   "), None);
+    }
+}
+
+#[cfg(test)]
+mod run_output_tests {
+    //! `run_command`-Ausgabe mit fester Breite durch die echte Emulation und die Shell-Integration (#193).
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+
+    const COLS: usize = 40;
+    /// PowerShell-Prompt wie `PS_INIT`: Befehlsende, Ordner, Prompt-Anfang, Prompt-Text, Eingabe-Anfang.
+    const PROMPT: &str = "\x1b]133;D;0\x07\x1b]9;9;\"C:\\\"\x07\x1b]133;A\x07PS C:\\> \x1b]133;B\x07";
+
+    /// Emulation plus Shell-Zustand, gefüttert wie im Lese-Thread von `Session::spawn` (Chunk an den Ereignissen geteilt).
+    struct Fake {
+        term: Term<VoidListener>,
+        p: Processor,
+        sc: OscScanner,
+        st: Arc<Mutex<ShellState>>,
+    }
+
+    impl Fake {
+        fn new(cols: usize, lines: usize) -> Self {
+            Fake {
+                term: Term::new(Config::default(), &TermSize::new(cols, lines), VoidListener),
+                p: Processor::new(),
+                sc: OscScanner::default(),
+                st: Arc::new(Mutex::new(ShellState::default())),
+            }
+        }
+
+        fn feed(&mut self, bytes: &str) {
+            let bytes = bytes.as_bytes();
+            let (events, positions) = self.sc.feed_at(bytes);
+            let mut done = 0usize;
+            for (ev, end) in events.into_iter().zip(positions) {
+                let end = end.clamp(done, bytes.len());
+                self.p.advance(&mut self.term, &bytes[done..end]);
+                done = end;
+                if ev == OscEvent::FullscreenModeSet {
+                    continue;
+                }
+                apply_events(&self.st, vec![ev], event_abs_line(&self.term));
+            }
+            self.p.advance(&mut self.term, &bytes[done..]);
+        }
+
+        fn last_mark(&self) -> Option<u64> {
+            self.st.lock().unwrap().marks.last().copied()
+        }
+    }
+
+    /// Ein `run_command`: Prompt steht, `cmd` wird eingegeben (Echo + Enter), dann kommt `out` (Ausgabe samt neuem Prompt).
+    /// `history` füllt vorher den Bildschirm (Zeilen laufen in den Verlauf).
+    fn run(cols: usize, history: usize, cmd: &str, out: &str) -> RunOutput {
+        let mut f = Fake::new(cols, 8);
+        for i in 0..history {
+            f.feed(&format!("alt {i}\r\n"));
+        }
+        f.feed(PROMPT);
+        let start_abs = cursor_abs_in(&f.term);
+        let mark0 = f.last_mark();
+        let seq0 = f.st.lock().unwrap().prompt_seq;
+        f.feed(&format!("{cmd}\r\n"));
+        f.feed(out);
+        assert!(f.st.lock().unwrap().prompt_seq > seq0, "kein neuer Prompt");
+        run_output(&f.term, cmd, start_abs, mark0, f.last_mark(), true)
+    }
+
+    fn text(r: &RunOutput) -> String {
+        assert!(r.first_ok, "Echo nicht gefunden: {r:?}");
+        r.lines.join("\n")
+    }
+
+    #[test]
+    fn exact_width_line_soft_wrapped_by_conpty() {
+        // ConPTY lässt nach einer Zeile, die die Breite genau füllt, den Zeilenvorschub weg (die Zeile gilt als umbrochen):
+        // OSC 133;A kommt bei „Umbruch ausstehend“, der Prompt-Text landet per Autowrap in der nächsten Zeile (WRAPLINE).
+        let line = "x".repeat(COLS);
+        for history in [0, 20] {
+            let r = run(COLS, history, "'x'*40", &format!("{line}{PROMPT}"));
+            assert_eq!(text(&r), line, "Verlauf {history}");
+        }
+    }
+
+    #[test]
+    fn exact_width_line_with_newline() {
+        let line = "y".repeat(COLS);
+        let r = run(COLS, 0, "'y'*40", &format!("{line}\r\n{PROMPT}"));
+        assert_eq!(text(&r), line);
+        // Mit Leerzeile vor dem Prompt (PowerShell nach formatierter Ausgabe).
+        let r = run(COLS, 20, "'y'*40", &format!("{line}\r\n\r\n{PROMPT}"));
+        assert_eq!(text(&r), line);
+    }
+
+    #[test]
+    fn width_plus_one() {
+        let line = "z".repeat(COLS + 1);
+        let r = run(COLS, 0, "'z'*41", &format!("{line}\r\n{PROMPT}"));
+        assert_eq!(text(&r), line, "eine umbrochene Zeile bleibt eine Zeile");
+        // Eine Zeichen weniger als die Breite: kein Umbruch, kein ausstehender Umbruch.
+        let short = "z".repeat(COLS - 1);
+        let r = run(COLS, 20, "'z'*39", &format!("{short}\r\n{PROMPT}"));
+        assert_eq!(text(&r), short);
+        // Zwei volle Zeilen plus eins, im Verlauf.
+        let long = "z".repeat(2 * COLS + 1);
+        let r = run(COLS, 20, "'z'*81", &format!("{long}\r\n{PROMPT}"));
+        assert_eq!(text(&r), long);
+    }
+
+    #[test]
+    fn multiple_wraps() {
+        // Drei volle Zeilen am Stück (genau 3 × Breite), ohne Zeilenvorschub vor dem Prompt.
+        let line = "m".repeat(3 * COLS);
+        let r = run(COLS, 20, "'m'*120", &format!("{line}{PROMPT}"));
+        assert_eq!(text(&r), line);
+        // Zweieinhalb Zeilen, dann zwei Zeilen genau in Breite (je mit und ohne Zeilenvorschub).
+        let a = "a".repeat(2 * COLS + COLS / 2);
+        let b = "b".repeat(COLS);
+        let c = "c".repeat(COLS);
+        let r = run(COLS, 20, "dreierlei", &format!("{a}\r\n{b}\r\n{c}{PROMPT}"));
+        assert_eq!(text(&r), format!("{a}\n{b}\n{c}"));
+    }
+
+    #[test]
+    fn exact_width_followed_by_wrapped_prompt() {
+        // Der neue Prompt ist selbst länger als die Zeile (langer Ordner) und folgt direkt auf eine volle Ausgabezeile.
+        let long = format!("\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\{}> \x1b]133;B\x07", "o".repeat(COLS + 10));
+        let line = "w".repeat(COLS);
+        let r = run(COLS, 20, "'w'*40", &format!("{line}{long}"));
+        assert_eq!(text(&r), line);
+        let r = run(COLS, 20, "'w'*40", &format!("kurz\r\n{line}\r\n{long}"));
+        assert_eq!(text(&r), format!("kurz\n{line}"));
+    }
+
+    #[test]
+    fn no_output_stays_empty() {
+        let r = run(COLS, 20, "$null", PROMPT);
+        assert_eq!(text(&r), "");
+    }
+
+    #[test]
+    fn mark_after_pending_wrap_is_next_row() {
+        let mut f = Fake::new(COLS, 8);
+        f.feed(&"q".repeat(COLS));
+        assert!(f.term.grid().cursor.input_needs_wrap);
+        f.feed("\x1b]133;A\x07$ ");
+        assert_eq!(f.last_mark(), Some(1));
+        // Ohne ausstehenden Umbruch: die Cursorzeile selbst.
+        f.feed("\r\n\x1b]133;A\x07$ ");
+        assert_eq!(f.last_mark(), Some(2));
+    }
+
+    #[test]
+    fn without_mark_wrapped_prompt_still_skipped() {
+        // cmd meldet keinen Prompt-Anfang: Ende über die Cursorzeile; ein umbrochener langer Prompt fällt ganz weg.
+        let mut f = Fake::new(COLS, 8);
+        let prompt = format!("C:\\{}>", "k".repeat(COLS + 5));
+        f.feed(&prompt);
+        let start_abs = cursor_abs_in(&f.term);
+        f.feed("echo hallo\r\nhallo\r\n\r\n");
+        f.feed(&prompt);
+        let r = run_output(&f.term, "echo hallo", start_abs, None, None, true);
+        assert_eq!(text(&r), "hallo");
     }
 }
 
