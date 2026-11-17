@@ -23,10 +23,30 @@ use crate::chat::tools::chain_origins;
 use crate::state;
 use std::collections::BTreeMap;
 
+/// Ketten geschlossener Sitzungen, deren Job Object noch Prozesse hat (#218): Ein übrig gebliebener Prozess handelt
+/// als seine geschlossene Sitzung (`App::retire_job`, `mcp::attribute`). Nur im Speicher (nach einem Neustart des Hubs
+/// unbekannt); Sitzungs-Ids werden nie neu vergeben, die Einträge können also niemanden sonst treffen.
+fn retired() -> std::sync::MutexGuard<'static, BTreeMap<u64, Vec<u64>>> {
+    static R: std::sync::Mutex<BTreeMap<u64, Vec<u64>>> = std::sync::Mutex::new(BTreeMap::new());
+    R.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Geschlossene Sitzung `id` mit ihrer Kette `chain` merken (ihr Job hat noch Prozesse).
+pub(super) fn set_retired(id: u64, chain: Vec<u64>) {
+    retired().insert(id, chain);
+}
+
+/// Der letzte Job der geschlossenen Sitzung `id` ist leer: vergessen.
+pub(super) fn remove_retired(id: u64) {
+    retired().remove(&id);
+}
+
 /// Vorfahren eines Aufrufers: seine gespeicherte Kette und – ist er ein Chat – die Kette der laufenden Runde.
-/// Leer für Aufrufer außerhalb von Paneldeck (`None`) und für vom Nutzer gestartete Sitzungen.
+/// Leer für Aufrufer außerhalb von Paneldeck (`None`) und für vom Nutzer gestartete Sitzungen. Ein übrig gebliebener
+/// Prozess einer geschlossenen Sitzung hat deren Kette ([`set_retired`]).
 pub(super) fn ancestors(entries: &BTreeMap<u64, Entry>, caller: Option<u64>) -> Vec<u64> {
-    let Some(e) = caller.and_then(|c| entries.get(&c)) else { return Vec::new() };
+    let Some(c) = caller else { return Vec::new() };
+    let Some(e) = entries.get(&c) else { return retired().get(&c).cloned().unwrap_or_default() };
     let turn: &[u64] = e.chat.as_ref().map(|c| c.origin_sessions.as_slice()).unwrap_or(&[]);
     let mut v: Vec<u64> = e.meta.agent_chain.iter().chain(turn.iter()).copied().collect();
     v.sort_unstable();
@@ -132,7 +152,7 @@ pub(super) fn chain_error() -> (String, String) {
 /// Steht `id` in irgendeiner Agenten-Kette (oder der Kette einer laufenden Chat-Runde)? Dann ist sie ein möglicher
 /// Vorfahr – nicht zuzuordnende Absender dürfen dort nicht schreiben.
 pub(super) fn potential_ancestor(entries: &BTreeMap<u64, Entry>, id: u64) -> bool {
-    entries.values().any(|e| e.meta.agent_chain.contains(&id) || e.chat.as_ref().is_some_and(|c| c.origin_sessions.contains(&id)))
+    entries.values().any(|e| e.meta.agent_chain.contains(&id) || e.chat.as_ref().is_some_and(|c| c.origin_sessions.contains(&id))) || retired().values().any(|c| c.contains(&id))
 }
 
 /// Darf ein nicht zuzuordnender Absender (losgelöster Prozess, #152) nicht in `id` schreiben? Nicht in mögliche
@@ -410,6 +430,31 @@ mod tests {
         let (code, msg) = chain_error();
         assert_eq!(code, "forbidden");
         assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn a_leftover_process_acts_as_its_closed_session() {
+        // Geschlossene Sitzung 900_001 mit Kette [5] (Ids nur für diesen Test, das Register ist prozessweit)
+        let mut w = world(&[(5, false), (6, false), (7, false)]);
+        let gone = 900_001;
+        assert!(ancestors(&w, Some(gone)).is_empty());
+        set_retired(gone, vec![5]);
+        assert_eq!(ancestors(&w, Some(gone)), [5]);
+        assert!(write_forbidden(&w, Some(gone), 5), "nicht in die Kette der geschlossenen Sitzung");
+        assert!(!write_forbidden(&w, Some(gone), 6));
+        // Schreiben/Anlegen markiert das Ziel mit Kette + geschlossener Sitzung
+        assert!(on_write(&mut w, Some(gone), 6));
+        assert_eq!(w[&6].meta.agent_chain, [5, gone]);
+        assert!(write_forbidden(&w, Some(6), 5));
+        assert!(potential_ancestor(&w, 5));
+        // Ohne Kette (vom Nutzer gestartet): markiert nichts
+        let free = 900_002;
+        set_retired(free, Vec::new());
+        assert!(!on_write(&mut w, Some(free), 7));
+        assert!(w[&7].meta.agent_chain.is_empty());
+        remove_retired(gone);
+        remove_retired(free);
+        assert!(ancestors(&w, Some(gone)).is_empty());
     }
 
     #[test]

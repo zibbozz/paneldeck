@@ -804,6 +804,9 @@ pub struct App {
     bg_rx: std::sync::mpsc::Receiver<String>,
     pending_wt: Option<PendingWt>,
     wt_close: Option<WtClose>,
+    /// Jobs geschlossener/neu gestarteter Sitzungen mit übrigen Prozessen (#218, #213) und letzte Pflege.
+    retired: Vec<closing::Retired>,
+    retired_poll: Option<Instant>,
     gsearch: Option<GlobalSearch>,
     notice: Option<(String, Instant)>,
     /// Toast-Stapel unten rechts (`toasts.rs`), Uhr dafür und Toast unter dem Mauszeiger.
@@ -1096,6 +1099,8 @@ impl App {
             bg_rx: bg.1,
             pending_wt: None,
             wt_close: None,
+            retired: Vec::new(),
+            retired_poll: None,
             gsearch: None,
             notice: None,
             toasts: Default::default(),
@@ -2102,7 +2107,17 @@ impl App {
     fn close_session(&mut self, id: u64) {
         self.hide_pane(id);
         self.detached.retain(|d| *d != id);
-        self.entries.remove(&id);
+        // Job mit übrigen Prozessen behalten (#218): Sie handeln weiter als diese Sitzung, mit ihrer Kette.
+        let chain = taint::ancestors(&self.entries, Some(id));
+        if let Some(mut e) = self.entries.remove(&id) {
+            let name = e.display_name();
+            if let Some(s) = e.live.as_mut() {
+                self.retire_job(id, name, s);
+            }
+        }
+        if self.retired.iter().any(|r| r.session == id) {
+            taint::set_retired(id, chain);
+        }
         self.usage.remove(id);
         self.git.remove(id);
         // Agenten-Zuordnung: auf jedem Weg (Knopf, Mittelklick, „alle schließen“, MCP) aufräumen.
@@ -3666,6 +3681,11 @@ impl App {
             Action::Restart(id) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {} // ein Chat hat keinen Prozess
             Action::Restart(id) => {
                 if let Some(mut e) = self.entries.remove(&id) {
+                    // Alten Job mit übrigen Prozessen behalten (#218, #213), dann erst die alte Shell beenden.
+                    let name = e.display_name();
+                    if let Some(s) = e.live.as_mut() {
+                        self.retire_job(id, name, s);
+                    }
                     e.live = None;
                     self.spawn_into(ctx, &mut e, Launch { restore: false, restart: true, continue_last: false, prompt: None, resume_id: None });
                     self.entries.insert(id, e);
@@ -3798,6 +3818,7 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.poll_mcp(ctx);
+        self.poll_retired(ctx);
         crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);
         if crate::conpty::take_fallback_hint() {

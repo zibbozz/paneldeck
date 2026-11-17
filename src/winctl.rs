@@ -423,9 +423,12 @@ pub struct JobProc {
 /// * Konsolen-Hosts (`conhost.exe`, `OpenConsole.exe`),
 /// * Hilfsprozessen eines Vordergrundprogramms (#213): ohne sichtbares Fenster, gestartet von einem Prozess an der
 ///   Konsole der Shell (nicht von der Shell selbst) oder von einem solchen Hilfsprozess – z. B. die stdio-MCP-Server und
-///   Werkzeugaufrufe von Claude Code. Sie laufen mit `CREATE_NO_WINDOW` in einer eigenen, unsichtbaren Konsole, hängen
-///   aber an den Pipes ihres Elternprozesses und enden mit ihm. Weiter gezählt werden Programme mit Fenster, alles, was
-///   die Shell selbst startet (`Start-Process`, `start`), und Prozesse, deren Elternprozess nicht mehr im Job läuft.
+///   Werkzeugaufrufe von Claude Code. Sie laufen mit `CREATE_NO_WINDOW` in einer eigenen, unsichtbaren Konsole und
+///   enden meist mit ihrem Elternprozess (Pipes) – aber nicht immer (Hintergrund-Shells, Entwicklungsserver, Dienste).
+///   Deshalb ist das nur die Auswahl für die Rückfrage: Nach dem Schließen/Neu laden prüft der Hub den alten Job nach
+///   kurzer Zeit erneut und meldet, was dann noch läuft (`App::poll_retired`). Weiter gezählt werden Programme mit
+///   Fenster, alles, was die Shell selbst startet (`Start-Process`, `start`), und Prozesse, deren Elternprozess nicht
+///   mehr im Job läuft.
 ///
 /// `console = None`: Konsole nicht zu ermitteln (Shell beendet) – dann zählt alles außer Shell und Konsolen-Hosts.
 /// `parent_of`: Elternprozess (nur einer im Job, der vor dem Kind entstand, [`job_parents`]); `has_window`: hat ein

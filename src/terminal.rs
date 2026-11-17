@@ -697,6 +697,12 @@ impl Session {
         None
     }
 
+    /// Job Object herausnehmen (Schließen/Neustart, #218): Der Hub behält es, solange noch Prozesse darin laufen, damit
+    /// er sie weiter dieser Sitzung zuordnen kann (`closing::Retired`). Danach hat die Sitzung keinen Job mehr.
+    pub fn take_job(&mut self) -> Option<crate::winctl::SessionJob> {
+        self.job.take()
+    }
+
     /// Kennung des Job Objects dieser Sitzung (#168), `None` ohne Job (dann zählt nur der Prozessbaum).
     pub fn job_key(&self) -> Option<u64> {
         self.job.as_ref().map(|j| j.key())

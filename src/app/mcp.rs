@@ -239,6 +239,16 @@ fn orphan_spawn_forbidden(tool: &str, args: &Value) -> bool {
     chat || crate::chat::tools::starts_agent(tool, args).is_some()
 }
 
+/// Fehler aus `ToolPolicy::check` (JSON `{"error", "message"}` für das Modell) als (Code, Text) – nicht noch einmal
+/// verpackt.
+fn policy_error(body: &str) -> (String, String) {
+    let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    match (v.get("error").and_then(|c| c.as_str()), v.get("message").and_then(|c| c.as_str())) {
+        (Some(code), Some(msg)) => (code.to_string(), msg.to_string()),
+        _ => er("forbidden", body),
+    }
+}
+
 /// Darf der Agent diese Sitzung mit einem Ticket verknüpfen? Die eigene Sitzung oder eine, die er selbst angelegt hat
 /// (`created`: Sitzung → Anleger). Es wird nichts ins Terminal geschrieben – die Verknüpfung ist nur ein Datensatz.
 fn terminal_link_allowed(caller: Option<u64>, session: u64, created: &HashMap<u64, Creator>) -> bool {
@@ -273,13 +283,23 @@ type CallerCand<'a> = (u64, Option<u32>, Option<u64>, Option<&'a str>);
 ///    (`"process"`) – die nächste, wenn es mehrere gäbe. Ein abweichender Hinweis zählt dann nicht.
 /// 3. Sonst gilt der Hinweis (`"env"`), aber nur für ein WSL-Terminal (dort liegt die Brücke nicht im Windows-Baum der
 ///    Sitzung) und nur mit dem passenden Schlüssel dieser Sitzung. Die Kennung allein beweist nichts.
-/// 4. Sonst: reißt der Baum des Absenders nach dem Start des Hubs ab (losgelöster Prozess außerhalb jedes Jobs), ist er
-///    „nicht zuzuordnen“ (`"orphan"`): kein Aufrufer, aber kein Schreiben in mögliche Vorfahren ([`App::chain_blocked`]).
+/// 4. Sonst: reißt der Baum des Absenders nach dem Start des Hubs ab und läuft eine Sitzung ohne Job (Zuweisung
+///    gescheitert, nur dann kann ein losgelöster Nachfahre außerhalb jedes Jobs liegen), ist er „nicht zuzuordnen“
+///    (`"orphan"`): kein Aufrufer, und er darf keine Agenten starten und nicht in Agenten oder mögliche Vorfahren
+///    schreiben ([`App::chain_blocked`], [`orphan_spawn_forbidden`]). Haben alle laufenden Sitzungen einen Job, ist ein
+///    Absender ohne Job kein Nachfahre einer Sitzung (ein Ausbruch aus dem Job scheitert, #168) – dann gilt Regel 5;
+///    so zählen z. B. `code .` (VS Code) oder `wt.exe`, deren Startprozess sich beendet, nicht als losgelöst (#218).
 /// 5. Sonst ist der Aufrufer extern (`"none"`, ohne Sitzung und ohne Kette).
-fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+///
+/// `retired` = (Job, Sitzung) der aufbewahrten Jobs geschlossener bzw. neu gestarteter Sitzungen (`closing::Retired`):
+/// Ein übrig gebliebener Prozess darin handelt als diese Sitzung (`"retired"`, mit ihrer Kette, `taint::set_retired`).
+fn attribute(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], retired: &[(u64, u64)], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
     if let Some(job) = peer.job {
         if let Some((id, ..)) = sessions.iter().find(|(_, _, j, _)| *j == Some(job)) {
             return (Some(*id), "job");
+        }
+        if let Some((_, id)) = retired.iter().find(|(j, _)| *j == job) {
+            return (Some(*id), "retired");
         }
         // Im Job einer Sitzung, die es (so) nicht mehr gibt: gehört zu Paneldeck, ist aber nicht zuzuordnen.
         return (None, "orphan");
@@ -295,11 +315,18 @@ fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: O
             }
         }
     }
-    if peer.orphan {
+    let jobless = sessions.iter().any(|(_, pid, job, _)| pid.is_some() && job.is_none());
+    if peer.orphan && jobless {
         (None, "orphan")
     } else {
         (None, "none")
     }
+}
+
+/// [`attribute`] ohne aufbewahrte Jobs (Tests).
+#[cfg(test)]
+fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+    attribute(peer, sessions, &[], hint)
 }
 
 /// Antwort von `close_session`: `{"ok": true}`, dazu `remaining_processes` (`[{pid, name, window, title?}]`) und ein
@@ -330,7 +357,7 @@ fn close_reply(lingering: &[crate::winctl::JobProc]) -> Value {
 /// `identified_by` in `whoami`: Die Zuordnung über das Job Object (#168) ist die über den Prozessbaum der Sitzung –
 /// nach außen weiter `"process"` (die öffentlichen Werte bleiben `process`/`env`/`none`).
 fn public_how(how: &str) -> &str {
-    if how == "job" {
+    if how == "job" || how == "retired" {
         "process"
     } else {
         how
@@ -699,7 +726,7 @@ impl App {
                 (*id, live.and_then(|s| s.pid()), live.and_then(|s| s.job_key()), wsl.then_some(e.session_key.as_str()))
             })
             .collect();
-        pick_caller(peer, &sessions, hint)
+        attribute(peer, &sessions, &self.retired_refs(), hint)
     }
 
     /// Absender eines `--open` (#152): `(Sitzung, aus der er stammt, nicht zuzuordnen)` – nur über Job Object bzw.
@@ -714,7 +741,7 @@ impl App {
                 (*id, live.and_then(|s| s.pid()), live.and_then(|s| s.job_key()), None)
             })
             .collect();
-        let (id, how) = pick_caller(peer, &sessions, None);
+        let (id, how) = attribute(peer, &sessions, &self.retired_refs(), None);
         (id, how == "orphan")
     }
 
@@ -728,6 +755,16 @@ impl App {
             return Some(super::taint::orphan_error());
         }
         None
+    }
+
+    /// Anleger einer neuen Sitzung. Ein übrig gebliebener Prozess einer geschlossenen Sitzung (`"retired"`) ist keine
+    /// Sitzung: Seine Kinder gehören niemandem (`Closed`, wie die Kinder einer geschlossenen Sitzung) – der sichere Fall;
+    /// schließen kann sie dann nur der Nutzer (oder ein Agent mit „fremde Sitzungen schließen“).
+    fn creator_of(&self, caller: Option<u64>) -> Creator {
+        match caller {
+            Some(c) if !self.entries.contains_key(&c) => Creator::Closed,
+            _ => Creator::of(caller),
+        }
     }
 
     /// Zugriff eines externen Agenten (über die Brücke): Stufe und Modus (`mcp::check_access`) und – für einen nicht
@@ -752,7 +789,7 @@ impl App {
             return Err(er("not_found", tr("Der Chat, der die Sitzung anlegen wollte, ist geschlossen.", "The chat that wanted to create the session is closed.")));
         };
         let call = crate::chat::store::ToolCall { id: String::new(), name: tool.to_string(), arguments: args.clone() };
-        self.chat_policy(chat).check(&call).map(|_| ()).map_err(|(_, msg)| er("forbidden", msg))
+        self.chat_policy(chat).check(&call).map(|_| ()).map_err(|(_, body)| policy_error(&body))
     }
 
     fn mcp_finish(&mut self, reply: &SyncSender<R>, tool: &str, args: &Value, caller: Option<u64>, how: &str, r: R) {
@@ -1307,7 +1344,7 @@ impl App {
             self.close_session(id);
             return Err(er("spawn_failed", err));
         }
-        self.mcp.created.insert(id, Creator::of(caller));
+        self.mcp.created.insert(id, self.creator_of(caller));
         self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
         let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
@@ -1353,7 +1390,7 @@ impl App {
         let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
         let group = self.mcp_child_group(s("group"), caller);
         let id = self.new_session(ctx, NewOpts { cwd, name: s("name"), group, quiet: true, window: Some(window), project: Some(project), chat: Some(meta.clone()), ..NewOpts::default() });
-        self.mcp.created.insert(id, Creator::of(caller));
+        self.mcp.created.insert(id, self.creator_of(caller));
         self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
         let server = self.settings.llm_servers.iter().find(|x| x.id == meta.server).map(|x| x.name.clone()).unwrap_or_default();
@@ -2203,6 +2240,30 @@ mod tests {
         st.created.insert(9, Creator::Session(1));
         st.session_closed(9);
         assert!(st.created.is_empty());
+    }
+
+    #[test]
+    fn leftover_processes_and_the_orphan_fallback() {
+        use crate::winctl::PeerChain;
+        // Alle laufenden Sitzungen haben einen Job: 5 (Job 1), 20 (Job 2); 40 ist ein Chat (ohne PID)
+        let with_jobs: [CallerCand; 3] = [(5, Some(500), Some(1), None), (20, Some(2000), Some(2), None), (40, None, None, None)];
+        // Übrig gebliebener Prozess im aufbewahrten Job 9 der geschlossenen Sitzung 7 bzw. im alten Job 8 von 20
+        let retired = [(9, 7), (8, 20)];
+        let job = |j: u64| PeerChain { chain: vec![4242], orphan: true, job: Some(j) };
+        assert_eq!(attribute(&job(9), &with_jobs, &retired, None), (Some(7), "retired"));
+        assert_eq!(attribute(&job(8), &with_jobs, &retired, None), (Some(20), "retired"));
+        assert_eq!(attribute(&job(2), &with_jobs, &retired, None), (Some(20), "job"), "der laufende Job gewinnt");
+        assert_eq!(attribute(&job(77), &with_jobs, &retired, None), (None, "orphan"));
+        // Baum reißt ab (z. B. `code .`: der Startprozess ist beendet), aber alle Sitzungen haben Jobs: extern (#218)
+        let broken = PeerChain { chain: vec![4242], orphan: true, job: None };
+        assert_eq!(attribute(&broken, &with_jobs, &retired, None), (None, "none"));
+        // Rückfallweg nur, wenn eine laufende Sitzung keinen Job hat
+        let jobless: [CallerCand; 2] = [(5, Some(500), Some(1), None), (6, Some(600), None, None)];
+        assert_eq!(attribute(&broken, &jobless, &retired, None), (None, "orphan"));
+        assert_eq!(public_how("retired"), "process");
+        // Fehler der Werkzeug-Regeln eines Chats: Code und Text durchgereicht
+        assert_eq!(policy_error(&crate::chat::tools::error_json("wrong_mode", "m")), ("wrong_mode".to_string(), "m".to_string()));
+        assert_eq!(policy_error("kaputt").0, "forbidden");
     }
 
     #[test]
