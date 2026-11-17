@@ -307,6 +307,8 @@ impl Session {
             std::thread::spawn(move || {
                 use std::sync::mpsc::RecvTimeoutError;
                 let mut scanner = OscScanner::default();
+                // Prompt-Anfang bei „Umbruch ausstehend“, dessen Zeile erst das nächste Zeichen festlegt (`advance_tracked`).
+                let mut pending_mark: Option<u64> = None;
                 loop {
                     let msg = match processor.sync_timeout().sync_timeout() {
                         Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
@@ -321,26 +323,10 @@ impl Session {
                                 if processor.sync_timeout().sync_timeout().is_some_and(|d| d <= std::time::Instant::now()) {
                                     processor.stop_sync(&mut *t);
                                 }
-                                if events.is_empty() {
-                                    processor.advance(&mut *t, &bytes);
-                                } else {
-                                    // Den Chunk an den Ereignissen teilen: die Cursorzeile (z. B. Prompt-Anfang) wird dort ausgelesen,
-                                    // wo die Sequenz steht – nicht erst am Chunk-Ende, wo ein mehrzeiliger Prompt schon fertig gedruckt ist.
-                                    let mut done = 0usize;
-                                    for (ev, end) in events.into_iter().zip(positions) {
-                                        let end = end.clamp(done, bytes.len());
-                                        processor.advance(&mut *t, &bytes[done..end]);
-                                        done = end;
-                                        let abs_line = event_abs_line(&*t);
-                                        let was = stale.load(Ordering::Relaxed);
-                                        stale.store(next_stale_modes(was, &ev, *t.mode()), Ordering::Relaxed);
-                                        if ev == OscEvent::FullscreenModeSet {
-                                            continue; // keine Shell-Integration
-                                        }
-                                        apply_events(&shell_state, vec![ev], abs_line);
-                                    }
-                                    processor.advance(&mut *t, &bytes[done..]);
-                                }
+                                advance_tracked(&mut processor, &mut t, &bytes, events, positions, &mut pending_mark, &shell_state, |ev, t| {
+                                    let was = stale.load(Ordering::Relaxed);
+                                    stale.store(next_stale_modes(was, ev, *t.mode()), Ordering::Relaxed);
+                                });
                             }
                             ctx.request_repaint();
                         }
@@ -685,12 +671,72 @@ fn cursor_abs_in<T>(t: &Term<T>) -> u64 {
     (hist_of(t) + t.grid().cursor.point.line.0 as i64).max(0) as u64
 }
 
-/// Absolute Zeile, an der ein Ereignis im Ausgabestrom (z. B. Prompt-Anfang, OSC 133;A) steht. Steht der Cursor nach
-/// einer Zeile, die die Breite genau füllt, noch am Rand („Umbruch ausstehend“), landet das nächste Zeichen in der
-/// folgenden Zeile – dort beginnt dann auch der Prompt, nicht in der Ausgabezeile (#193).
-pub fn event_abs_line<T>(t: &Term<T>) -> u64 {
-    let c = &t.grid().cursor;
-    cursor_abs_in(t) + u64::from(c.input_needs_wrap)
+/// Einen Chunk der Programmausgabe in die Emulation geben und die Ereignisse der Shell-Integration (`events` mit ihren
+/// `positions` aus `OscScanner::feed_at`) an der Cursorzeile auswerten, an der die Sequenz steht – nicht erst am
+/// Chunk-Ende, wo ein mehrzeiliger Prompt schon fertig gedruckt ist. `on_event` sieht jedes Ereignis (auch
+/// `FullscreenModeSet`) mit dem Stand der Emulation an dieser Stelle.
+///
+/// Prompt-Anfang bei „Umbruch ausstehend“ (#193): Füllt die letzte Ausgabezeile die Breite genau und lässt ConPTY den
+/// Zeilenvorschub weg, steht der Cursor bei OSC 133;A noch am Rand der Ausgabezeile. Wo der Prompt beginnt, entscheidet
+/// erst das nächste Zeichen: ein druckbares Zeichen bricht in die nächste Zeile um (bei vollem Verlauf rollt dabei nur
+/// der Inhalt, die absolute Zeile bleibt gleich), CR oder eine Cursorbewegung (oh-my-posh, starship) heben den Umbruch
+/// auf. Die Marke wird deshalb vorläufig gesetzt (`pending`, auch über Chunk-Grenzen) und danach Byte für Byte bis zu
+/// dieser Entscheidung auf die Cursorzeile korrigiert.
+fn advance_tracked<T: EventListener>(
+    p: &mut Processor,
+    t: &mut Term<T>,
+    bytes: &[u8],
+    events: Vec<OscEvent>,
+    positions: Vec<usize>,
+    pending: &mut Option<u64>,
+    state: &Arc<Mutex<ShellState>>,
+    mut on_event: impl FnMut(&OscEvent, &Term<T>),
+) {
+    let mut done = 0usize;
+    for (ev, end) in events.into_iter().zip(positions) {
+        let end = end.clamp(done, bytes.len());
+        advance_resolving(p, t, &bytes[done..end], pending, state);
+        done = end;
+        on_event(&ev, t);
+        if ev == OscEvent::FullscreenModeSet {
+            continue; // keine Shell-Integration
+        }
+        let prompt = ev == OscEvent::PromptStart;
+        let abs = cursor_abs_in(t);
+        apply_events(state, vec![ev], abs);
+        if prompt {
+            *pending = t.grid().cursor.input_needs_wrap.then_some(abs);
+        }
+    }
+    advance_resolving(p, t, &bytes[done..], pending, state);
+}
+
+/// Wie `Processor::advance`; solange eine Marke offen ist (`advance_tracked`), Byte für Byte mit Prüfung danach.
+fn advance_resolving<T: EventListener>(p: &mut Processor, t: &mut Term<T>, bytes: &[u8], pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
+    let mut i = 0;
+    while pending.is_some() && i < bytes.len() {
+        p.advance(t, &bytes[i..i + 1]);
+        i += 1;
+        resolve_mark(t, pending, state);
+    }
+    p.advance(t, &bytes[i..]);
+}
+
+/// Offene Marke festlegen, sobald der ausstehende Umbruch erledigt ist: auf die Zeile, in der der Cursor dann steht.
+fn resolve_mark<T>(t: &Term<T>, pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
+    let Some(old) = *pending else { return };
+    let now = cursor_abs_in(t);
+    if t.grid().cursor.input_needs_wrap && now == old {
+        return; // noch offen (z. B. Farbsequenz vor dem Prompt-Text)
+    }
+    *pending = None;
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    if now != old && st.marks.last() == Some(&old) {
+        st.marks.pop();
+        if st.marks.last() != Some(&now) {
+            st.marks.push(now);
+        }
+    }
 }
 
 /// Wie `lines_abs_in`, aber umgebrochene Zeilen sind zu einer logischen Zeile zusammengefügt (für Ausgaben an Leser).
@@ -780,7 +826,7 @@ pub struct RunOutput {
 /// falls die Shell ihn meldete), `advanced` = der Befehl ist fertig (neuer Prompt da).
 pub fn run_output<T: EventListener>(t: &Term<T>, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool) -> RunOutput {
     let cursor = cursor_abs_in(t);
-    // Ende: vor dem neuen Prompt. Die Marke ist sein genauer Anfang (`event_abs_line`); von dort nicht über umgebrochene
+    // Ende: vor dem neuen Prompt. Die Marke ist sein genauer Anfang (`advance_tracked`); von dort nicht über umgebrochene
     // Zeilen zurücklaufen – eine Ausgabezeile, die die Breite genau füllt, trägt oft WRAPLINE (ConPTY lässt den
     // Zeilenvorschub weg) und fiele sonst samt Ausgabe dem Prompt zu (#193). Ohne Marke (cmd) bleibt nur die Cursorzeile;
     // ein umbrochener Prompt beginnt dann an der ersten Zeile davon.
@@ -1140,33 +1186,31 @@ mod run_output_tests {
         term: Term<VoidListener>,
         p: Processor,
         sc: OscScanner,
+        pending: Option<u64>,
         st: Arc<Mutex<ShellState>>,
     }
 
     impl Fake {
         fn new(cols: usize, lines: usize) -> Self {
+            Self::with_history(cols, lines, Config::default().scrolling_history)
+        }
+
+        fn with_history(cols: usize, lines: usize, scrolling_history: usize) -> Self {
+            let config = Config { scrolling_history, ..Config::default() };
             Fake {
-                term: Term::new(Config::default(), &TermSize::new(cols, lines), VoidListener),
+                term: Term::new(config, &TermSize::new(cols, lines), VoidListener),
                 p: Processor::new(),
                 sc: OscScanner::default(),
+                pending: None,
                 st: Arc::new(Mutex::new(ShellState::default())),
             }
         }
 
+        /// Wie der Lese-Thread von `Session::spawn` (`advance_tracked`).
         fn feed(&mut self, bytes: &str) {
             let bytes = bytes.as_bytes();
             let (events, positions) = self.sc.feed_at(bytes);
-            let mut done = 0usize;
-            for (ev, end) in events.into_iter().zip(positions) {
-                let end = end.clamp(done, bytes.len());
-                self.p.advance(&mut self.term, &bytes[done..end]);
-                done = end;
-                if ev == OscEvent::FullscreenModeSet {
-                    continue;
-                }
-                apply_events(&self.st, vec![ev], event_abs_line(&self.term));
-            }
-            self.p.advance(&mut self.term, &bytes[done..]);
+            advance_tracked(&mut self.p, &mut self.term, bytes, events, positions, &mut self.pending, &self.st, |_, _| {});
         }
 
         fn last_mark(&self) -> Option<u64> {
@@ -1177,7 +1221,10 @@ mod run_output_tests {
     /// Ein `run_command`: Prompt steht, `cmd` wird eingegeben (Echo + Enter), dann kommt `out` (Ausgabe samt neuem Prompt).
     /// `history` füllt vorher den Bildschirm (Zeilen laufen in den Verlauf).
     fn run(cols: usize, history: usize, cmd: &str, out: &str) -> RunOutput {
-        let mut f = Fake::new(cols, 8);
+        run_in(Fake::new(cols, 8), history, cmd, out)
+    }
+
+    fn run_in(mut f: Fake, history: usize, cmd: &str, out: &str) -> RunOutput {
         for i in 0..history {
             f.feed(&format!("alt {i}\r\n"));
         }
@@ -1273,6 +1320,47 @@ mod run_output_tests {
         // Ohne ausstehenden Umbruch: die Cursorzeile selbst.
         f.feed("\r\n\x1b]133;A\x07$ ");
         assert_eq!(f.last_mark(), Some(2));
+        // Marke am Chunk-Ende, Prompt-Text (nach einer Farbsequenz) erst im nächsten Chunk.
+        f.feed(&format!("\r\n{}\x1b]133;A\x07", "q".repeat(COLS)));
+        assert_eq!(f.last_mark(), Some(3), "vorläufig: die Ausgabezeile");
+        f.feed("\x1b[32m$ ");
+        assert_eq!(f.last_mark(), Some(4));
+    }
+
+    #[test]
+    fn mark_when_cr_or_cursor_move_cancels_the_wrap() {
+        // oh-my-posh/starship: CR bzw. Cursorbewegung vor dem Prompt-Text heben den ausstehenden Umbruch auf; der Prompt
+        // überschreibt dann die Ausgabezeile (bzw. steht, wo der Cursor hinspringt) – die Marke folgt dem.
+        let mut f = Fake::new(COLS, 8);
+        f.feed(&format!("{}\x1b]133;A\x07\r$ ", "q".repeat(COLS)));
+        assert_eq!(f.last_mark(), Some(0));
+        f.feed(&format!("\r\n{}\x1b]133;A\x07\x1b[5;1H$ ", "q".repeat(COLS)));
+        assert_eq!(f.last_mark(), Some(4));
+        // Wie im Lauf: Ausgabe mit CR vor dem Prompt endet mit dem überschriebenen Rest nicht in der Ausgabe.
+        let line = "r".repeat(COLS);
+        let prompt_cr = "\x1b]133;D;0\x07\x1b]133;A\x07\rPS C:\\> \x1b]133;B\x07";
+        let r = run(COLS, 20, "'r'*40", &format!("kurz\r\n{line}{prompt_cr}"));
+        assert_eq!(text(&r), "kurz");
+    }
+
+    #[test]
+    fn exact_width_with_full_scrollback() {
+        // Verlauf voll (kleines Limit): der Umbruch in der untersten Zeile rollt nur, die absolute Zeile wächst nicht –
+        // die Marke darf dann nicht eine Zeile tiefer liegen (sonst endete die Ausgabe mit dem Prompt). Geprüft wird nur
+        // die Marke: bei vollem Verlauf verschieben sich alle absoluten Zeilen (auch `start_abs`/`mark0`) mit jedem
+        // Rollen – das betrifft `run_command` unabhängig von #193.
+        let line = "f".repeat(COLS);
+        for nl in ["", "\r\n"] {
+            let mut f = Fake::with_history(COLS, 8, 10);
+            for i in 0..40 {
+                f.feed(&format!("alt {i}\r\n"));
+            }
+            assert_eq!(f.term.grid().history_size(), 10, "Verlauf voll");
+            f.feed(&format!("{line}{nl}{PROMPT}"));
+            let m = f.last_mark().unwrap();
+            let rows = lines_abs_in(&f.term, m - 1, m);
+            assert_eq!(rows, vec![line.clone(), "PS C:\\>".to_string()], "Zeilenvorschub {nl:?}");
+        }
     }
 
     #[test]
