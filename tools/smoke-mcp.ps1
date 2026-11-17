@@ -289,6 +289,10 @@ try {
       $want = "$($script:iso.Profile)|$($script:iso.Profile)\.claude|"
       Check 'Isolation: Terminal-Umgebung mit Schein-Profil, ohne CLAUDECODE/CLAUDE_CODE_*/ANTHROPIC_*' ($r.data.output.Trim() -eq $want) "'$($r.data.output.Trim())' statt '$want'"
       if ($script:lastOk) { $script:psClaudeFake = $true }
+      # Die Registry-Auffrischung darf den Benutzer nicht durch HKLM-Werte ersetzen (dort steht USERNAME=SYSTEM).
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:USERNAME|$env:USERDOMAIN"'; timeout_secs = 25 }
+      $want = "$env:USERNAME|$env:USERDOMAIN"
+      Check 'Terminal: USERNAME = aktueller Benutzer (USERDOMAIN ebenso)' ($r.data.output.Trim() -eq $want) "'$($r.data.output.Trim())' statt '$want'"
     }
     if ($sh -eq 'cmd') {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-cmd'; timeout_secs = 25 }
