@@ -296,6 +296,13 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
         ui.label(RichText::new(format!("{} {}", lang.t("Angelegt", "Created"), short_time(&t.created_at))).small().color(style::dim(ui)));
         ui.label(RichText::new("·").small().color(style::dim(ui)));
         ui.label(RichText::new(format!("{} {}", lang.t("Geändert", "Updated"), short_time(&t.updated_at))).small().color(style::dim(ui)));
+        // Fälligkeit mit Markierung (nach den Schwellen des Projekts; erledigt = ohne Markierung)
+        if let Some(due) = d.ty.fields.iter().find(|f| f.is_due()).and_then(|f| d.stored.get(&f.id)).and_then(|v| v.as_str()) {
+            ui.label(RichText::new("·").small().color(style::dim(ui)));
+            let st = if d.done { None } else { crate::due::evaluate(&d.due_thresholds, due, chrono::Local::now().naive_local()) };
+            ui.label(RichText::new(lang.t("Fällig", "Due")).small().color(style::dim(ui)));
+            super::due_ui::due_line(ui, due, st.as_ref(), lang);
+        }
     });
     quick_bar(ui, vc, d, &mut acts);
     ui.add_space(S2);

@@ -139,6 +139,16 @@ pub struct FieldOptions {
     /// Ticket-Feld: erlaubte Typen der Ziel-Tickets (leer = jeder Typ).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_types: Vec<i64>,
+    /// Datum+Uhrzeit: die Uhrzeit ist optional, ein Wert darf auch nur ein Datum `JJJJ-MM-TT` sein (die eingebaute Fälligkeit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_optional: Option<bool>,
+}
+
+impl FieldOptions {
+    /// Darf ein Datum+Uhrzeit-Wert auch nur ein Datum sein?
+    pub fn date_only_ok(&self) -> bool {
+        self.time_optional == Some(true)
+    }
 }
 
 pub fn parse_options(json: &str) -> FieldOptions {
@@ -171,6 +181,27 @@ pub struct Field {
 impl Field {
     pub fn display(&self, lang: Lang) -> String {
         names::display_name(self.key.as_deref(), self.name.as_deref(), lang)
+    }
+
+    /// Eingebautes Feld jedes Tickets (Beschreibung, Fälligkeit oder Labels): nicht löschbar, nur Hilfetext, Abschnitt und „auf Karte
+    /// anzeigen“ sind änderbar (siehe `builtin_fields`).
+    pub fn is_fixed(&self) -> bool {
+        self.builtin && self.key.as_deref().is_some_and(|k| super::builtin_fields::FIXED_KEYS.contains(&k))
+    }
+
+    /// Die eingebaute Fälligkeit?
+    pub fn is_due(&self) -> bool {
+        self.is_fixed() && self.key.as_deref() == Some(super::builtin_fields::DUE_KEY)
+    }
+
+    /// Die eingebaute Beschreibung?
+    pub fn is_description(&self) -> bool {
+        self.is_fixed() && self.key.as_deref() == Some(super::builtin_fields::DESCRIPTION_KEY)
+    }
+
+    /// Die eingebauten Labels?
+    pub fn is_labels(&self) -> bool {
+        self.is_fixed() && self.key.as_deref() == Some(super::builtin_fields::LABELS_KEY)
     }
 }
 
@@ -359,7 +390,10 @@ pub fn validate_options(conn: &Connection, project_id: i64, kind: FieldKind, o: 
             }
             out.target_types = targets;
         }
-        FieldKind::Checkbox | FieldKind::Terminal | FieldKind::Version | FieldKind::Milestone | FieldKind::Date | FieldKind::Datetime | FieldKind::Labels => {}
+        FieldKind::Datetime => {
+            out.time_optional = src.time_optional.filter(|b| *b);
+        }
+        FieldKind::Checkbox | FieldKind::Terminal | FieldKind::Version | FieldKind::Milestone | FieldKind::Date | FieldKind::Labels => {}
     }
     *o = out;
     Ok(())
@@ -390,7 +424,7 @@ fn single_ok(kind: FieldKind, o: &FieldOptions, v: &Value, refs_ok: bool) -> boo
         FieldKind::Labels => v.as_str().is_some_and(|s| !s.trim().is_empty()),
         FieldKind::Number => number_ok(o, v),
         FieldKind::Date => v.as_str().is_some_and(date_ok),
-        FieldKind::Datetime => v.as_str().is_some_and(datetime_ok),
+        FieldKind::Datetime => v.as_str().is_some_and(|s| datetime_ok(s) || (o.date_only_ok() && date_ok(s))),
         FieldKind::Ticket | FieldKind::Version | FieldKind::Milestone => refs_ok && v.as_i64().is_some(),
         FieldKind::Terminal => refs_ok && v.is_string(),
     }
@@ -487,6 +521,17 @@ pub fn create_field(conn: &Connection, n: &NewField) -> Res<i64> {
 pub fn update_field(conn: &Connection, id: i64, u: &UpdateField) -> Res<()> {
     let cur = get_field(conn, id)?;
     let t = editable_type(conn, cur.type_id)?;
+    if cur.is_fixed() {
+        // eingebaute Felder: nur Hilfetext, Abschnitt und „auf Karte anzeigen“ (alles andere nur, wenn unverändert)
+        let renamed = u.name.as_ref().is_some_and(|n| rename_value(cur.key.as_deref(), n).ok() != Some(cur.name.clone()));
+        let changed = renamed
+            || u.options.as_ref().is_some_and(|o| *o != cur.options)
+            || u.required.is_some_and(|r| r != cur.required)
+            || u.default_value.as_ref().is_some_and(|d| *d != cur.default_value);
+        if changed {
+            return Err(PlanError::SystemProtected);
+        }
+    }
     let name = match &u.name {
         Some(s) => rename_value(cur.key.as_deref(), s)?,
         None => cur.name.clone(),
@@ -537,9 +582,13 @@ pub fn set_section(conn: &Connection, id: i64, section: &str) -> Res<()> {
     update_field(conn, id, &UpdateField { section: Some(section.to_string()), ..Default::default() })
 }
 
+/// Reihenfolge der Felder setzen. Die eingebauten Felder bleiben immer oben (ihre Stelle in `ids` zählt nicht).
 pub fn reorder_fields(conn: &Connection, type_id: i64, ids: &[i64]) -> Res<()> {
     editable_type(conn, type_id)?;
-    common::reorder(conn, "fields", "type_id = ?1", &[type_id], ids)
+    let fixed: Vec<i64> = list_fields(conn, type_id)?.into_iter().filter(Field::is_fixed).map(|f| f.id).collect();
+    let mut order = fixed.clone();
+    order.extend(ids.iter().copied().filter(|i| !fixed.contains(i)));
+    common::reorder(conn, "fields", "type_id = ?1", &[type_id], &order)
 }
 
 /// Wie oft das Feld mit einem Wert belegt ist (Tickets mit einem Wert).
@@ -553,6 +602,9 @@ pub fn usage(conn: &Connection, id: i64) -> Res<i64> {
 pub fn delete_field(conn: &Connection, id: i64, mode: Option<DeleteMode>) -> Res<()> {
     let cur = get_field(conn, id)?;
     let owner = editable_type(conn, cur.type_id)?;
+    if cur.is_fixed() {
+        return Err(PlanError::SystemProtected);
+    }
     let count = integrity::usage_count_field(conn, id)?;
     integrity::require_mode(count, mode.is_some())?;
     let to = match &mode {
@@ -787,14 +839,15 @@ mod tests {
         n.help = "x".repeat(1001);
         assert!(matches!(create_field(&c, &n), Err(PlanError::NameTooLong { .. })));
         assert_eq!(create_field(&c, &NewField::new(999, "X", FieldKind::Text)), Err(PlanError::NotFound));
-        assert_eq!(list_fields(&c, t).unwrap().len(), 1, "nur das gültige Feld existiert");
-        // Schlüssel eindeutig im Typ, Standardname bleibt übersetzbar
+        assert_eq!(list_fields(&c, t).unwrap().iter().filter(|f| !f.is_fixed()).count(), 1, "nur das gültige Feld existiert (neben den eingebauten)");
+        // Schlüssel eindeutig im Typ, Standardname bleibt übersetzbar: die eingebaute Beschreibung belegt `description`
         let mut k = NewField::new(t, "", FieldKind::Rich);
         k.name = None;
         k.key = Some("description".into());
-        let kid = create_field(&c, &k).unwrap();
+        let kid = list_fields(&c, t).unwrap().into_iter().find(|f| f.is_description()).unwrap().id;
         assert_eq!(get_field(&c, kid).unwrap().display(Lang::De), "Beschreibung");
         assert_eq!(create_field(&c, &k), Err(PlanError::NameTaken));
+        assert_eq!(create_field(&c, &NewField::new(t, "Fällig am", FieldKind::Date)), Err(PlanError::NameTaken), "auch der Name der Fälligkeit ist vergeben");
         assert_eq!(update_field(&c, ok, &UpdateField { name: Some("Beschreibung".into()), ..Default::default() }), Err(PlanError::NameTaken), "auch in der anderen Sprache");
         // der Feldtyp ändert sich beim Aktualisieren nie
         update_field(&c, ok, &UpdateField { options: Some(opts(&["x"])), ..Default::default() }).unwrap();
@@ -816,9 +869,15 @@ mod tests {
         let a = create_field(&c, &NewField::new(t, "A", FieldKind::Text)).unwrap();
         let b = create_field(&c, &NewField::new(t, "B", FieldKind::Text)).unwrap();
         let d = create_field(&c, &NewField::new(t, "C", FieldKind::Text)).unwrap();
-        assert_eq!(list_fields(&c, t).unwrap().iter().map(|f| f.id).collect::<Vec<_>>(), vec![a, b, d]);
+        let fixed: Vec<i64> = list_fields(&c, t).unwrap().iter().filter(|f| f.is_fixed()).map(|f| f.id).collect();
+        assert_eq!(fixed.len(), 3);
+        let ids = |c: &Connection| list_fields(c, t).unwrap().iter().map(|f| f.id).collect::<Vec<_>>();
+        assert_eq!(ids(&c), [fixed.clone(), vec![a, b, d]].concat());
         reorder_fields(&c, t, &[d, a, b]).unwrap();
-        assert_eq!(list_fields(&c, t).unwrap().iter().map(|f| f.id).collect::<Vec<_>>(), vec![d, a, b]);
+        assert_eq!(ids(&c), [fixed.clone(), vec![d, a, b]].concat(), "die eingebauten Felder bleiben oben");
+        // auch wenn sie in der Liste weiter unten stehen
+        reorder_fields(&c, t, &[a, fixed[1], b, fixed[0], d]).unwrap();
+        assert_eq!(ids(&c), [fixed.clone(), vec![a, b, d]].concat());
         assert_eq!(reorder_fields(&c, t, &[a, b]), Err(PlanError::ReorderMismatch));
         assert_eq!(reorder_fields(&c, t, &[a, b, 999]), Err(PlanError::ReorderMismatch));
     }
@@ -842,8 +901,25 @@ mod tests {
         delete_field(&c, b, Some(DeleteMode::Discard)).unwrap();
         delete_field(&c, n, None).unwrap();
         assert_eq!(delete_field(&c, n, None), Err(PlanError::NotFound));
-        assert!(list_fields(&c, t).unwrap().is_empty());
-        assert_eq!(list_fields(&c, u).unwrap().len(), 1);
+        assert!(list_fields(&c, t).unwrap().iter().all(|f| f.is_fixed()), "nur die eingebauten bleiben");
+        assert_eq!(list_fields(&c, u).unwrap().len(), 4);
+        // eingebaute Felder lassen sich nicht löschen und nur in Hilfe, Abschnitt und „auf Karte“ ändern
+        for f in list_fields(&c, t).unwrap() {
+            assert_eq!(delete_field(&c, f.id, Some(DeleteMode::Discard)), Err(PlanError::SystemProtected));
+            assert_eq!(update_field(&c, f.id, &UpdateField { name: Some("Anders".into()), ..Default::default() }), Err(PlanError::SystemProtected));
+            assert_eq!(update_field(&c, f.id, &UpdateField { options: Some(FieldOptions { rows: Some(3), max_length: Some(9), ..Default::default() }), ..Default::default() }), Err(PlanError::SystemProtected));
+            update_field(&c, f.id, &UpdateField { name: Some(String::new()), required: Some(false), help: Some("Hilfe".into()), show_on_card: Some(true), ..Default::default() }).unwrap();
+            assert_eq!(get_field(&c, f.id).unwrap().help, "Hilfe");
+        }
+        // Fälligkeit: Datum allein oder mit Uhrzeit
+        let due = list_fields(&c, t).unwrap().into_iter().find(|f| f.is_due()).unwrap();
+        for ok in ["2026-11-20", "2026-11-20T14:30", "2026-11-20T14:30:00"] {
+            assert!(check_value(due.kind, &due.options, &json!(ok), false).is_ok(), "{ok}");
+        }
+        for bad in ["20.11.2026", "2026-11-20 14:30", "x"] {
+            assert!(check_value(due.kind, &due.options, &json!(bad), false).is_err(), "{bad}");
+        }
+        assert!(check_value(FieldKind::Datetime, &FieldOptions::default(), &json!("2026-11-20"), false).is_err(), "normales Datum+Uhrzeit braucht die Uhrzeit");
     }
 
     #[test]

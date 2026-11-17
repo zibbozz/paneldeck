@@ -37,6 +37,14 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Closing a session, several sessions, a window or Paneldeck itself, or reloading a session, lists the session's background processes that would keep running: name, PID, window title, with programs that have an open window marked. You choose "Keep running" or "End all"; "End all" terminates them immediately, without saving. (#168)
 - A running session waits 3 seconds before closing, as do closing many sessions and quitting. (#168)
 - MCP `close_session` never asks; it keeps the processes running and reports them in the new optional field `remaining_processes` (pid, name, window, title; untrusted). (#168)
+- Every ticket (all types) and every to-do card has a built-in description and an optional due date (a date, optionally with a time; a date alone counts until the end of that day). They show as fixed "Built-in" rows in the field editor and cannot be deleted. (#188)
+- Due-date markers with configurable thresholds: per project in the new "Due dates" tab of the project settings, and for the simple to-do list under "Due dates …". Each threshold has a duration, a marker (frame, symbol, colour, optional name) and an optional "tint row/card". Projects created with the preset types and the to-do list start with a yellow warning triangle under 1 week and a red one under 1 day; the tooltip reads e.g. "due in 3 days" or "overdue by 2 h". (#188)
+- Lists, boards, cards and the ticket view show the due date with its marker; the header shows counts such as "3 overdue" per project and for the to-do list. The to-do list gets a due date in the card editor and on the card, sorting by due date and a filter (with due date / overdue / marked). (#188)
+- Query language: `due` and `description`, e.g. `due < currentDate() ORDER BY due`. (#188)
+- MCP: `description` and `due` for `create_ticket`/`update_ticket`, `due` for `add_todo`, `due`/`due_state` in ticket and to-do answers, `due_thresholds` in `list_projects`. (#188)
+- New icon "alert" (exclamation mark). (#188)
+- Labels is a built-in field on every ticket type, including your own types, like title, description and due date; it cannot be deleted. MCP: `labels` parameter for `create_ticket`/`update_ticket` and `labels` in ticket answers. (#195)
+- Query language: custom fields can also be searched by their key (e.g. `story_points`); the built-in fields answer to their English and German names in either UI language. (#195)
 
 ### Changed
 
@@ -53,6 +61,13 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Settings → Agent interface: the levels Off / Read only / Control are real buttons; language, prompt language, profiles, model level, tool calling, Windows/WSL path and Unstaged/Staged work the same way. (#187)
 - The cost summary has its own line at the bottom of the sidebar and looks like a small button, with arrow, hover state and tooltip; the MCP chip looks the same. (#187)
 - Agent chain: a session created by an agent the user started (one without an agent chain) is no longer marked and may write back into its creator; the block applies only when the creator itself has an agent chain. `paneldeck --open … --claude` typed in a terminal marks the new session only if that terminal has an agent chain. (#152)
+- Existing description fields become the built-in description when updating; values, history and rules are kept. A required description becomes optional. (#188)
+- Converting a to-do card into a ticket also carries over its due date. Project backups include the due thresholds; older backups import with the defaults. (#188)
+- On update, existing custom fields named "Labels" become the built-in Labels field; values, history and rules are kept. Custom fields that would have the same name as a built-in field are renamed "… (custom)". (#195)
+- Project backups use format version 3; older versions refuse them with a clear message. Version 1 and 2 backups still import, and their own Description/Labels fields are converted like on update. (#188)
+- Due dates are stored as `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (without seconds). (#188)
+- Colour palette: deleting a colour no longer asks first; instead "Undo" is offered for a few seconds. An area's own palette starts with that area's previous colours and can be replaced with a copy of the shared palette ("Copy from shared palette", can be undone). (#173)
+- Fields that become built-in fields on update lose their default value (built-in fields have none); a custom field of another kind named like a built-in one (e.g. a text field "Labels") keeps its values and is renamed "… (custom)" – agents that set it by its old name now reach the built-in field. (#195)
 
 ### Deprecated
 
@@ -69,6 +84,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - MCP `read_chat` no longer cuts a chat's tool results at 8 KB from the start; they come through up to the 16 KB tool-result limit, so the end with the newest messages and the status is kept. (#194)
 - `run_command` (MCP) no longer returns empty output when the command prints a line that exactly fills the terminal width (PowerShell, Git Bash); jumping between prompts also lands on the right row then. (#193)
 - `run_command` (MCP) and jumping between prompts work again once the terminal's scrollback is full; until now the output came back empty and prompt jumps landed on the wrong rows. (#197)
+- The query bar above the ticket list now knows fields that were added after the first query (a custom "Labels" field could not be searched). (#195)
 
 ### Security
 

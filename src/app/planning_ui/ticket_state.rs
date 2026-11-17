@@ -46,6 +46,8 @@ pub enum SortCol {
     Priority,
     Points,
     Marks,
+    /// Fälligkeit (früheste zuerst; ohne Fälligkeit hinten).
+    Due,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -164,6 +166,7 @@ pub fn sort_rows(rows: &mut [Row], sort: Sort, cx: &SortCtx) {
             SortCol::Status => opt(ta.status_id.map(|s| (cx.status_pos)(s)), tb.status_id.map(|s| (cx.status_pos)(s)), sort.desc),
             SortCol::Priority => opt((cx.prio_rank)(a), (cx.prio_rank)(b), sort.desc),
             SortCol::Points => opt(a.points, b.points, sort.desc),
+            SortCol::Due => opt(a.due.as_deref().and_then(crate::due::deadline), b.due.as_deref().and_then(crate::due::deadline), sort.desc),
             SortCol::Marks => {
                 let ka = (ta.starred as u8) * 2 + ta.flagged as u8;
                 let kb = (tb.starred as u8) * 2 + tb.flagged as u8;
@@ -247,6 +250,8 @@ pub struct TicketUi {
     pub filters: Filters,
     pub sort: Sort,
     pub rows: Vec<Row>,
+    /// Schwellen der Fälligkeit des Projekts (mit den Zeilen geladen, nicht je Bild).
+    pub due_thresholds: Vec<crate::due::DueThreshold>,
     /// Alle Tickets des Projekts (ohne Filter).
     pub project_total: usize,
     pub open: Option<i64>,
@@ -312,6 +317,7 @@ impl Default for TicketUi {
             filters: Filters::default(),
             sort: Sort::default(),
             rows: Vec::new(),
+            due_thresholds: Vec::new(),
             project_total: 0,
             open: None,
             back: Vec::new(),
@@ -490,7 +496,7 @@ mod tests {
     }
 
     fn row(id: i64, title: &str) -> Row {
-        Row { ticket: ticket(id, id, title), prio: None, points: None }
+        Row { ticket: ticket(id, id, title), prio: None, points: None, due: None }
     }
 
     fn numbers(rows: &[Row]) -> Vec<i64> {

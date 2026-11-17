@@ -172,6 +172,9 @@ fn norm_datetime(s: &str) -> Option<String> {
     Some(format!("{}T{:02}:{:02}:{:02}", date.format("%Y-%m-%d"), nums[0], nums[1], nums[2]))
 }
 
+/// Fälligkeit als vergleichbarer Zeitpunkt `JJJJ-MM-TTTHH:MM:SS` (nur Datum = Ende des Tages).
+const DUE_EXPR: &str = "(CASE WHEN length(v.text) = 10 THEN v.text || 'T23:59:59' WHEN length(v.text) = 16 THEN v.text || ':00' ELSE v.text END)";
+
 fn parse_bool(s: &str) -> Option<bool> {
     match s.to_lowercase().as_str() {
         "true" | "yes" | "1" => Some(true),
@@ -591,6 +594,24 @@ impl<'a> Cx<'a> {
                 let cond = or_join(parts);
                 if cond == "0" { Ok(cond) } else { Ok(self.exists_v(&ids, &cond)) }
             }
+            Class::Due => {
+                // reines Datum: nur den Tag vergleichen; mit Uhrzeit: den Zeitpunkt (nur Datum gespeichert = Ende des Tages)
+                let o = if ordering { ord_sql } else { "=" };
+                let mut parts = Vec::new();
+                for s in vals {
+                    if s.trim().len() == 10 {
+                        if let Some(d) = norm_date(s) {
+                            let p = self.text(&d);
+                            parts.push(format!("substr(v.text, 1, 10) {o} {p}"));
+                        }
+                    } else if let Some(d) = norm_datetime(s) {
+                        let p = self.text(&d);
+                        parts.push(format!("{DUE_EXPR} {o} {p}"));
+                    }
+                }
+                let cond = or_join(parts);
+                if cond == "0" { Ok(cond) } else { Ok(self.exists_v(&ids, &cond)) }
+            }
             Class::Dropdown | Class::Multi => {
                 // je Feld die passenden Wert-Kennungen
                 let mut per_field: Vec<(i64, Vec<i64>)> = Vec::new();
@@ -648,7 +669,7 @@ impl<'a> Cx<'a> {
                     return pending::version_condition(self, &ids, v.class == Class::Milestone, None, &[]);
                 }
                 // Text-Werte ohne Inhalt zählen als leer
-                let cond = if matches!(v.class, Class::Text | Class::Terminal | Class::Labels | Class::Date | Class::DateTime) { "COALESCE(v.text, '') <> ''" } else { "1" };
+                let cond = if matches!(v.class, Class::Text | Class::Terminal | Class::Labels | Class::Date | Class::DateTime | Class::Due) { "COALESCE(v.text, '') <> ''" } else { "1" };
                 let has = self.exists_v(&ids, cond);
                 let mut sql = not(has);
                 if v.links {
@@ -847,6 +868,7 @@ impl<'a> Cx<'a> {
         Ok(match v.class {
             Class::Number | Class::Bool => vec![OExpr { sql: agg("v.num", &f), nocase: false, nullable: true }],
             Class::Date | Class::DateTime => vec![OExpr { sql: agg("v.text", &f), nocase: false, nullable: true }],
+            Class::Due => vec![OExpr { sql: agg(DUE_EXPR, &f), nocase: false, nullable: true }],
             Class::Text | Class::Terminal => {
                 let mut sql = agg("v.text", &f);
                 if v.links {

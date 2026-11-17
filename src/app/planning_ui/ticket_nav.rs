@@ -59,6 +59,7 @@ pub(super) fn tab_label(tab: Tab, lang: Lang) -> &'static str {
         Tab::WorkKinds => lang.t("Arten der Arbeit", "Kinds of work"),
         Tab::Templates => lang.t("Vorlagen & Sicherung", "Templates & backup"),
         Tab::Quick => lang.t("Schnellaktionen", "Quick actions"),
+        Tab::DueMarkers => lang.t("Fälligkeit", "Due dates"),
     }
 }
 

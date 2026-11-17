@@ -621,8 +621,10 @@ Start-Sleep -Seconds 3
   Check 'einfacher Modus: tools/list hat die Todo-Werkzeuge' ($names -contains 'list_todos' -and $names -contains 'add_todo' -and $names -contains 'set_todo_done')
   Check 'einfacher Modus: tools/list hat keine Ticket-Werkzeuge' ($names -notcontains 'create_ticket' -and $names -notcontains 'get_ticket' -and $names -notcontains 'link_terminal')
   Check 'kein Werkzeug zum Loeschen von Tickets/Karten' (-not ($names | Where-Object { $_ -match 'delete|remove' }))
-  $t1 = Tool 'add_todo' @{ title = 'Milch kaufen'; text = '2 Liter'; tags = @('Haushalt', 'haushalt', 'Einkauf') }
+  $t1 = Tool 'add_todo' @{ title = 'Milch kaufen'; text = '2 Liter'; tags = @('Haushalt', 'haushalt', 'Einkauf'); due = '20.11.2026 18:00' }
   Check 'add_todo legt eine Karte an (Tags automatisch, ohne Doppelte)' (-not $t1.err -and $t1.data.todo.key -eq 'TODO-1' -and $t1.data.todo.tags.Count -eq 2) $t1.text
+  Check 'add_todo: Faelligkeit (deutsches Datum mit Uhrzeit) wird gespeichert und ausgewertet' ($t1.data.todo.due -eq '2026-11-20T18:00' -and $null -ne $t1.data.todo.due_state.minutes_left) $t1.text
+  Check 'add_todo: unlesbare Faelligkeit -> bad_args' ((Code (Tool 'add_todo' @{ title = 'x'; due = 'irgendwann' })) -eq 'bad_args')
   Check 'add_todo ohne Titel und Text: bad_args' ((Code (Tool 'add_todo' @{})) -eq 'bad_args')
   Check 'add_todo: unbekannter Parameter: bad_args' ((Code (Tool 'add_todo' @{ title = 'x'; bogus = 1 })) -eq 'bad_args')
   Check 'add_todo: zu langer Titel: too_large' ((Code (Tool 'add_todo' @{ title = ('x' * 300) })) -eq 'too_large')
@@ -698,7 +700,7 @@ c.close()
     Check 'list_projects: TODO (schreibgeschuetzt) und PAN' (@($lp.data.projects | Where-Object { $_.key -eq 'TODO' -and $_.read_only }).Count -eq 1 -and @($lp.data.projects | Where-Object key -eq 'PAN').Count -eq 1)
     $gp = Tool 'get_project' @{ project = 'pan' }
     $task = $gp.data.types | Where-Object name -eq 'Task'
-    Check 'get_project: Typ, Felder, Workflow, Uebergaenge' (-not $gp.err -and @($task.fields).Count -eq 3 -and @($task.workflow.transitions).Count -eq 4 -and (($task.workflow.transitions | Where-Object { $_.to -eq 'Done' }).required_fields -contains 'Result'))
+    Check 'get_project: Typ, Felder, Workflow, Uebergaenge' (-not $gp.err -and @($task.fields).Count -eq 6 -and @($task.workflow.transitions).Count -eq 4 -and (($task.workflow.transitions | Where-Object { $_.to -eq 'Done' }).required_fields -contains 'Result'))
     Check 'get_project: unbekanntes Projekt nennt die verfuegbaren' ((Tool 'get_project' @{ project = 'ZZZ' }).data.error.details.available -contains 'PAN')
     $c1 = Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'Login reparieren' }
     Check 'create_ticket ohne Pflichtfeld: required_missing mit Liste' ((Code $c1) -eq 'required_missing' -and $c1.data.error.details.missing_fields[0].name -eq 'Area') $c1.text
@@ -765,6 +767,22 @@ c.close()
     Check 'get_ticket: Kommentar, Zeit, Verknuepfung, Verlauf' (-not $gt.err -and $gt.data.comments_total -eq 1 -and $gt.data.time.entries_total -eq 2 -and @($gt.data.links).Count -eq 1 -and @($gt.data.history | Where-Object source -eq 'agent').Count -ge 5)
     Check 'get_ticket: Hinweis auf nicht vertrauenswuerdige Texte' ($gt.data.note -match 'untrusted')
     Check 'Ticket-Aufruf im Protokoll ohne Kommentartext' ((Get-Content "$data\mcp-log.jsonl" -Raw) -notmatch 'GEHEIM-KOMMENTAR')
+    Check 'get_project: eingebaute Felder Beschreibung, Faelligkeit und Labels an jedem Typ' (@($task.fields | Where-Object { $_.key -eq 'description' -or $_.key -eq 'due' -or $_.key -eq 'labels' }).Count -eq 3)
+    $dd = Tool 'create_ticket' @{ project = 'PAN'; type = 'Note'; title = 'Mit Termin'; description = 'Erst **lesen**'; due = '2026-11-20 14:30' }
+    Check 'create_ticket: Beschreibung und Faelligkeit (Datum mit Uhrzeit)' (-not $dd.err -and $dd.data.ticket.due -eq '2026-11-20T14:30' -and $dd.data.ticket.description -eq 'Erst **lesen**' -and $null -ne $dd.data.ticket.due_state) $dd.text
+    $ddk = $dd.data.ticket.key
+    $gd = Tool 'get_ticket' @{ ticket = $ddk }
+    Check 'get_ticket: Faelligkeit lesen (auch in den Feldern)' ($gd.data.due -eq '2026-11-20T14:30' -and @($gd.data.fields | Where-Object { $_.key -eq 'due' -and $_.value -eq '2026-11-20T14:30' }).Count -eq 1) $gd.text
+    $ud = Tool 'update_ticket' @{ ticket = $ddk; due = '2026-11-21' }
+    Check 'update_ticket: nur Datum (Ende des Tages)' (-not $ud.err -and $ud.data.ticket.due -eq '2026-11-21') $ud.text
+    Check 'update_ticket: unlesbare Faelligkeit -> invalid_value' ((Code (Tool 'update_ticket' @{ ticket = $ddk; due = 'morgen' })) -eq 'invalid_value')
+    $sq = Tool 'search_tickets' @{ project = 'PAN'; query = 'due = 2026-11-21 AND description ~ lesen' }
+    Check 'search_tickets: due und description in der Abfrage' (-not $sq.err -and $sq.data.total -eq 1 -and $sq.data.tickets[0].key -eq $ddk) $sq.text
+    $ul = Tool 'update_ticket' @{ ticket = $ddk; labels = @('smoke', 'Smoke', 'mcp') }
+    Check 'update_ticket: eingebaute Labels (ohne Doppelte)' (-not $ul.err -and @($ul.data.ticket.labels).Count -eq 2) $ul.text
+    Check 'search_tickets: labels in der Abfrage' ((Tool 'search_tickets' @{ project = 'PAN'; query = 'labels = mcp' }).data.total -eq 1)
+    $cl = Tool 'update_ticket' @{ ticket = $ddk; due = $null }
+    Check 'update_ticket: due null leert die Faelligkeit' (-not $cl.err -and $null -eq $cl.data.ticket.due) $cl.text
 
     Write-Host "== Aufgaben-Werkzeuge: Sitzung und Ticket verknuepfen, Quelle im Verlauf" -ForegroundColor Cyan
     $foreign = ((Tool 'list_sessions').data.sessions | Select-Object -First 1).id

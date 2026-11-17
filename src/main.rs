@@ -8,6 +8,7 @@ mod calc;
 mod chat;
 mod claude_opts;
 mod db;
+mod due;
 mod clip;
 mod emoji;
 mod pathfmt;

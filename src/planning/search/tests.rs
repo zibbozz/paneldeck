@@ -50,7 +50,8 @@ impl Sx {
     pub fn new() -> Sx {
         let f = Fx::new();
         let date = |t: i64| f.add_field(t, "Due", FieldKind::Date, FieldOptions::default(), false);
-        let labels = |t: i64| f.add_field(t, "Labels", FieldKind::Labels, FieldOptions::default(), false);
+        // Labels sind eingebaut (jeder Typ hat sie)
+        let labels = |t: i64| f.field(t, "labels");
         let (due_story, due_task, due_defect) = (date(f.story), date(f.task), date(f.defect));
         let (lab_story, lab_task, lab_defect) = (labels(f.story), labels(f.task), labels(f.defect));
         let terminal = f.add_field(f.task, "Terminal", FieldKind::Terminal, FieldOptions::default(), false);
@@ -377,12 +378,183 @@ fn schema_contains_builtin_fields_and_custom_fields_once() {
 }
 
 #[test]
+fn built_in_due_and_description_in_queries() {
+    // eigene Umgebung: nur die eingebauten Felder (ohne das eigene „Due“-Feld der übrigen Tests)
+    let f = Fx::new();
+    let mk = |title: &str, due: Option<&str>, desc: Option<&str>| {
+        let mut n = NewTicket::new(f.project, f.task, title);
+        let fid = |k: &str| crate::planning::builtin_fields::field_id(&f.c, f.task, k).unwrap().unwrap();
+        if let Some(d) = due {
+            n.values.push((fid("due"), json!(d)));
+        }
+        if let Some(d) = desc {
+            n.values.push((fid("description"), json!(d)));
+        }
+        create_ticket(&f.c, &n, &ui()).unwrap().0.key()
+    };
+    let a = mk("Morgens", Some("2026-11-16T09:00"), Some("Login prüfen"));
+    let b = mk("Tagesende", Some("2026-11-16"), None);
+    let c = mk("Morgen", Some("2026-11-17T08:00"), Some("Nichts"));
+    let _d = mk("Ohne", None, None);
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |jql: &str| -> Vec<String> { run_query(&f.c, &ctx, Scope::Project(f.project), jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    // reines Datum vergleicht den Tag (auch Einträge mit Uhrzeit an diesem Tag)
+    assert_eq!(q("due = 2026-11-16"), vec![a.clone(), b.clone()]);
+    assert_eq!(q("due > 2026-11-16"), vec![c.clone()]);
+    assert_eq!(q("due <= 2026-11-16"), vec![a.clone(), b.clone()]);
+    // mit Uhrzeit: nur Datum gilt als Ende des Tages
+    assert_eq!(q("due < \"2026-11-16 12:00\""), vec![a.clone()]);
+    assert_eq!(q("due > \"2026-11-16 12:00\""), vec![b.clone(), c.clone()]);
+    // Sortierung: 09:00 vor Tagesende vor morgen; ohne Fälligkeit hinten
+    assert_eq!(q("due IS NOT EMPTY ORDER BY due"), vec![a.clone(), b.clone(), c.clone()]);
+    assert_eq!(q("due IS NOT EMPTY ORDER BY due DESC"), vec![c.clone(), b.clone(), a.clone()]);
+    assert_eq!(q("due IS EMPTY").len(), 1);
+    // Beschreibung als Text, auch auf Deutsch
+    assert_eq!(q("description ~ login"), vec![a.clone()]);
+    let de = Ctx::new(TODAY, Lang::De);
+    let r = run_query(&f.c, &de, Scope::Project(f.project), "Beschreibung ~ login AND Fällig < 2026-11-17", Page::ALL).unwrap();
+    assert_eq!(r.rows.iter().map(|x| x.key.clone()).collect::<Vec<_>>(), vec![a]);
+    // Schema: eingebaute Namen
+    let s = schema_for(&f.c, Scope::Project(f.project), Lang::En).unwrap();
+    assert!(matches!(s.field("due").unwrap().ty, crate::query::FieldType::DateTime) && matches!(s.field("description").unwrap().ty, crate::query::FieldType::Text));
+}
+
+#[test]
+fn every_custom_field_kind_is_searchable_by_name_and_key_also_on_user_types() {
+    use crate::planning::types::{create_type, NewType};
+    let f = Fx::new();
+    let c = &f.c;
+    crate::planning::projects::update_project(c, f.project, &crate::planning::projects::UpdateProject { use_versions: Some(true), ..Default::default() }).unwrap();
+    let ver = crate::planning::sprints::releases::create_version(c, &crate::planning::sprints::releases::NewRelease { project_id: f.project, name: "1.0".into(), description: String::new(), due_date: None }).unwrap();
+    // ein selbst angelegter Typ ohne Workflow; die eigenen Felder gibt es nur dort und teils am Epic
+    let user = create_type(c, &NewType { project_id: f.project, key: None, name: Some("Bug report".into()), icon: None, color: "#445566".into(), workflow: false }).unwrap();
+    let both = |name: &str, kind: FieldKind, o: FieldOptions| (f.add_field(user, name, kind, o.clone(), false), f.add_field(f.epic, name, kind, o, false));
+    let only = |name: &str, kind: FieldKind, o: FieldOptions| f.add_field(user, name, kind, o, false);
+    let notes = both("Notes", FieldKind::Text, FieldOptions::default());
+    let spec = only("Spec", FieldKind::Rich, FieldOptions::default());
+    let reviewed = only("Reviewed", FieldKind::Checkbox, FieldOptions::default());
+    let size = both("Size", FieldKind::Dropdown, Fx::dropdown(&["S", "M", "L"]));
+    let effort = only("Effort", FieldKind::Number, FieldOptions::default());
+    let related = only("Related", FieldKind::Ticket, FieldOptions::default());
+    let shell = only("Shell", FieldKind::Terminal, FieldOptions::default());
+    let target = only("Target", FieldKind::Version, FieldOptions::default());
+    let start = only("Start day", FieldKind::Date, FieldOptions::default());
+    let at = only("Planned at", FieldKind::Datetime, FieldOptions::default());
+    let areas = only("Areas", FieldKind::Multi, Fx::dropdown(&["api", "ui"]));
+    let tags = only("Tags", FieldKind::Labels, FieldOptions::default());
+    let e1 = f.mk(f.epic, "Epic eins");
+    let t1 = f.mk(user, "Bericht eins");
+    let t2 = f.mk(user, "Bericht zwei (leer)");
+    let set = |t: i64, fid: i64, v: Value| {
+        set_field(c, t, fid, v, &ui()).unwrap();
+    };
+    set(t1.id, notes.0.id, json!("alpha beta"));
+    set(e1.id, notes.1.id, json!("gamma"));
+    set(t1.id, spec.id, json!("**fett** spec"));
+    set(t1.id, reviewed.id, json!(true));
+    set(t1.id, size.0.id, json!(2));
+    set(e1.id, size.1.id, json!(3));
+    set(t1.id, effort.id, json!(5));
+    set(t1.id, related.id, json!(e1.id));
+    set(t1.id, shell.id, json!("session:3"));
+    set(t1.id, target.id, json!(ver));
+    set(t1.id, start.id, json!("2026-11-10"));
+    set(t1.id, at.id, json!("2026-11-10T10:00"));
+    set(t1.id, areas.id, json!([1, 2]));
+    set(t1.id, tags.id, json!(["x", "y"]));
+    // die eingebauten Labels gibt es auch am selbst angelegten Typ
+    let lab = crate::planning::fields::list_fields(c, user).unwrap().into_iter().find(|x| x.is_labels()).expect("eingebaute Labels am eigenen Typ");
+    set(t2.id, lab.id, json!(["dringend"]));
+    // Story points über den Schlüssel
+    let task = f.mk(f.task, "Aufgabe");
+    set(task.id, f.field(f.task, "story_points").id, json!(8));
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |jql: &str| -> Vec<String> { run_query(c, &ctx, Scope::Project(f.project), jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    let (k_e1, k_t1, k_t2) = (e1.key(), t1.key(), t2.key());
+    assert_eq!(q("Notes ~ alpha"), vec![k_t1.clone()]);
+    assert_eq!(q("notes IS NOT EMPTY ORDER BY key"), vec![k_e1.clone(), k_t1.clone()], "Feld an zwei Typen = ein Feld");
+    assert_eq!(q("Spec ~ spec"), vec![k_t1.clone()]);
+    assert_eq!(q("Reviewed = true"), vec![k_t1.clone()]);
+    assert_eq!(q("Size = M"), vec![k_t1.clone()]);
+    assert_eq!(q("Size IN (M, L) ORDER BY key"), vec![k_e1.clone(), k_t1.clone()]);
+    assert_eq!(q("Effort > 3"), vec![k_t1.clone()]);
+    assert_eq!(q(&format!("Related = {k_e1}")), vec![k_t1.clone()]);
+    assert_eq!(q("Shell IS NOT EMPTY"), vec![k_t1.clone()]);
+    assert_eq!(q("Target = \"1.0\""), vec![k_t1.clone()]);
+    assert_eq!(q("\"Start day\" < 2026-11-16"), vec![k_t1.clone()]);
+    assert_eq!(q("\"Planned at\" < \"2026-11-16 00:00\""), vec![k_t1.clone()]);
+    assert_eq!(q("Areas = ui"), vec![k_t1.clone()]);
+    assert_eq!(q("Tags = y"), vec![k_t1.clone()]);
+    assert_eq!(q("labels = dringend"), vec![k_t2.clone()]);
+    assert_eq!(q("Labels = dringend"), vec![k_t2.clone()]);
+    assert_eq!(q("story_points > 3"), vec![task.key()], "Feld auch über den Schlüssel");
+    assert_eq!(q("\"Story points\" > 3"), vec![task.key()]);
+    assert_eq!(q("type = \"Bug report\" ORDER BY key"), vec![k_t1.clone(), k_t2.clone()]);
+    // auch auf Deutsch und über alle Projekte
+    let de = Ctx::new(TODAY, Lang::De);
+    let r = run_query(c, &de, Scope::All, "Tags = x AND Notes ~ alpha AND Labels IS EMPTY", Page::ALL).unwrap();
+    assert_eq!(r.rows.iter().map(|x| x.key.clone()).collect::<Vec<_>>(), vec![k_t1.clone()]);
+    // keines der Felder fehlt im Schema oder ist ein Konflikt
+    let ss = search_schema(c, Scope::Project(f.project), Lang::En).unwrap();
+    for n in ["notes", "spec", "reviewed", "size", "effort", "related", "shell", "target", "start day", "planned at", "areas", "tags", "labels", "story_points"] {
+        assert!(ss.schema.field(n).is_some(), "{n} fehlt");
+    }
+    assert!(ss.conflicts.is_empty(), "{:?}", ss.conflicts);
+}
+
+#[test]
+fn built_in_fields_answer_to_their_names_in_both_languages_and_to_renamed_names() {
+    let f = Fx::new();
+    let c = &f.c;
+    let desc = f.field(f.epic, "description");
+    // umbenannte Beschreibung (wie nach dem Update von einem eigenen Namen)
+    c.execute("UPDATE fields SET name = 'Details' WHERE id = ?1", [desc.id]).unwrap();
+    let e = f.mk(f.epic, "E");
+    set_field(c, e.id, desc.id, json!("Login klemmt"), &ui()).unwrap();
+    let due = f.field(f.epic, "due");
+    set_field(c, e.id, due.id, json!("2026-11-20"), &ui()).unwrap();
+    for lang in [Lang::En, Lang::De] {
+        let ctx = Ctx::new(TODAY, lang);
+        for jql in ["description ~ login", "Beschreibung ~ login", "Description ~ login", "Details ~ login", "due = 2026-11-20", "Fällig = 2026-11-20", "\"Fällig am\" = 2026-11-20", "\"Due date\" = 2026-11-20"] {
+            let r = run_query(c, &ctx, Scope::Project(f.project), jql, Page::ALL).unwrap_or_else(|x| panic!("{lang:?} {jql}: {}", x.message(Lang::En)));
+            assert_eq!(r.rows.len(), 1, "{lang:?} {jql}");
+        }
+    }
+}
+
+#[test]
+fn renamed_built_in_names_stay_within_their_project() {
+    let f = Fx::new();
+    let c = &f.c;
+    // Projekt A (PAN): Beschreibung heißt „Details“; Projekt B: eigenes Text-Feld „Details“
+    let desc = f.field(f.epic, "description");
+    c.execute("UPDATE fields SET name = 'Details' WHERE id = ?1", [desc.id]).unwrap();
+    let a = f.mk(f.epic, "A");
+    set_field(c, a.id, desc.id, json!("aus A"), &ui()).unwrap();
+    let other = f.other_project("OTH");
+    let oty = crate::planning::types::list_types(c, other).unwrap()[0].id;
+    let custom = f.add_field(oty, "Details", FieldKind::Text, FieldOptions::default(), false);
+    let b = create_ticket(c, &NewTicket::new(other, oty, "B"), &ui()).unwrap().0;
+    set_field(c, b.id, custom.id, json!("aus B"), &ui()).unwrap();
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |scope: Scope, jql: &str| -> Vec<String> { run_query(c, &ctx, scope, jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    // über alle Projekte: „Details“ ist das eigene Feld aus B, die Beschreibung nur über ihre festen Namen
+    assert_eq!(q(Scope::All, "Details ~ aus"), vec![b.key()]);
+    assert_eq!(q(Scope::All, "description ~ aus"), vec![a.key()]);
+    // im Projekt A gilt der eigene Name der Beschreibung, in B das eigene Feld
+    assert_eq!(q(Scope::Project(f.project), "Details ~ aus"), vec![a.key()]);
+    assert_eq!(q(Scope::Project(other), "Details ~ aus"), vec![b.key()]);
+}
+
+#[test]
 fn schema_types_and_values() {
     let s = Sx::new();
     let schema = schema_for(&s.f.c, s.scope(), Lang::En).unwrap();
     use crate::query::FieldType;
     assert!(matches!(&schema.field("labels").unwrap().ty, FieldType::Labels) && schema.field("labels").unwrap().multi);
-    assert!(matches!(&schema.field("due").unwrap().ty, FieldType::Date));
+    // „Due“ (eigenes Datumsfeld) gehört zur eingebauten Fälligkeit: Datum mit optionaler Uhrzeit
+    assert!(matches!(&schema.field("due").unwrap().ty, FieldType::DateTime));
+    assert!(matches!(&schema.field("description").unwrap().ty, FieldType::Text));
     assert!(matches!(&schema.field("start").unwrap().ty, FieldType::DateTime));
     assert!(matches!(&schema.field("reviewed").unwrap().ty, FieldType::Bool));
     assert!(matches!(&schema.field("epic").unwrap().ty, FieldType::TicketRef));
@@ -432,13 +604,21 @@ fn conflicting_field_kinds_keep_the_most_common_and_report_the_rest() {
     let s = Sx::new();
     let other = s.f.other_project("OTH");
     let epic = crate::planning::types::list_types(&s.f.c, other).unwrap()[0].id;
-    // „Due“ als Text in einem Typ, drei Datumsfelder im Projekt PAN
+    // „Due“ als Text in einem Typ, drei Datumsfelder im Projekt PAN (die gehören zur eingebauten Fälligkeit), dazu „Size“ als Text
+    // in einem und als Zahl in zwei Typen
     crate::planning::fields::create_field(&s.f.c, &crate::planning::fields::NewField::new(epic, "Due", FieldKind::Text)).unwrap();
+    crate::planning::fields::create_field(&s.f.c, &crate::planning::fields::NewField::new(epic, "Size", FieldKind::Text)).unwrap();
+    for ty in crate::planning::types::list_types(&s.f.c, other).unwrap().iter().skip(1).take(2) {
+        crate::planning::fields::create_field(&s.f.c, &crate::planning::fields::NewField::new(ty.id, "Size", FieldKind::Number)).unwrap();
+    }
     let ss = search_schema(&s.f.c, Scope::All, Lang::En).unwrap();
-    assert!(matches!(ss.schema.field("due").unwrap().ty, crate::query::FieldType::Date));
-    assert_eq!(ss.conflicts.len(), 1);
-    assert_eq!(ss.conflicts[0].kept, Some(FieldKind::Date));
-    assert_eq!(ss.conflicts[0].dropped, vec![FieldKind::Text]);
+    assert!(matches!(ss.schema.field("due").unwrap().ty, crate::query::FieldType::DateTime));
+    assert!(matches!(ss.schema.field("size").unwrap().ty, crate::query::FieldType::Number));
+    assert_eq!(ss.conflicts.len(), 2, "{:?}", ss.conflicts);
+    let due = ss.conflicts.iter().find(|c| c.name == "Due").unwrap();
+    assert_eq!((due.kept, due.dropped.clone()), (Some(FieldKind::Date), vec![FieldKind::Text]), "die Datumsfelder gehören zur eingebauten Fälligkeit, das Text-Feld fällt weg");
+    let size = ss.conflicts.iter().find(|c| c.name == "Size").unwrap();
+    assert_eq!((size.kept, size.dropped.clone()), (Some(FieldKind::Number), vec![FieldKind::Text]));
 }
 
 #[test]
@@ -950,7 +1130,7 @@ fn ten_thousand_tickets_answer_typical_queries_quickly() {
     let prio = f.field(f.task, "priority").id;
     let sp = f.field(f.task, "story_points").id;
     let desc = f.field(f.task, "description").id;
-    let labels = f.add_field(f.task, "Labels", FieldKind::Labels, FieldOptions::default(), false).id;
+    let labels = f.field(f.task, "labels").id;
     let types = [f.epic, f.story, f.task, f.subtask, f.defect];
     let statuses = [f.todo, f.progress, f.done];
     c.execute_batch("BEGIN").unwrap();

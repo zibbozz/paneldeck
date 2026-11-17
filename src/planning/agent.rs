@@ -439,6 +439,43 @@ fn format_hint(kind: FieldKind, lang: Lang) -> &'static str {
     }
 }
 
+/// Die Parameter `description` (Text, Markdown) und `due` (`JJJJ-MM-TT` oder `JJJJ-MM-TT HH:MM`, `null` leert) auf die eingebauten
+/// Felder des Typs abbilden; sie haben Vorrang vor demselben Feld in `fields`.
+fn builtin_args(ctx: &Ctx, a: &Args, fields: &[Field], values: &mut Vec<(i64, Value)>) -> Result<(), ToolError> {
+    for (param, pick) in [("description", Field::is_description as fn(&Field) -> bool), ("due", Field::is_due), ("labels", Field::is_labels)] {
+        if !a.has(param) {
+            continue;
+        }
+        let v = a.get(param).unwrap_or(&Value::Null);
+        let ok = if param == "labels" { v.is_null() || v.as_array().is_some_and(|l| l.iter().all(Value::is_string)) } else { v.is_string() || v.is_null() };
+        if !ok {
+            return Err(if param == "labels" {
+                ctx.bad("labels muss eine Liste von Texten oder null sein", "labels must be a list of strings or null")
+            } else {
+                ctx.bad(format!("{param} muss ein Text oder null sein"), format!("{param} must be a string or null"))
+            });
+        }
+        let Some(f) = fields.iter().find(|f| pick(f)) else {
+            return Err(ctx.bad(format!("Dieser Typ hat kein Feld {param}"), format!("This type has no {param} field")));
+        };
+        let v = value_in(ctx, f, v)?;
+        if param == "due" {
+            if let Some(s) = v.as_str() {
+                if crate::due::parse_input(s).is_err() {
+                    return Err(ToolError {
+                        code: "invalid_value",
+                        message: ctx.tx("due: so geht es: 2026-11-20 oder 2026-11-20T14:30", "due: use 2026-11-20 or 2026-11-20T14:30"),
+                        details: Some(json!({"field": "due", "format": "YYYY-MM-DD or YYYY-MM-DDTHH:MM"})),
+                    });
+                }
+            }
+        }
+        values.retain(|(i, _)| *i != f.id);
+        values.push((f.id, v));
+    }
+    Ok(())
+}
+
 /// `fields`-Objekt (`{Feldname|Schlüssel|Id: Wert}`) in (Feld-Id, Wert) übersetzen, nur Felder des Typs.
 fn parse_fields(ctx: &Ctx, a: &Args, fields: &[Field]) -> Result<Vec<(i64, Value)>, ToolError> {
     let Some(v) = a.get("fields") else { return Ok(Vec::new()) };
@@ -471,10 +508,47 @@ fn status_json(ctx: &Ctx, s: &Status) -> Value {
     json!({"id": s.id, "key": s.key, "name": status_name(ctx, s), "category": s.category.as_str()})
 }
 
+/// Wert eines eingebauten Feldes (Beschreibung, Fälligkeit, Labels).
+fn builtin_value(ctx: &Ctx, t: &Ticket, key: &str) -> Option<Value> {
+    let fid = super::builtin_fields::field_id(ctx.conn, t.type_id, key).ok().flatten()?;
+    let f = super::fields::get_field(ctx.conn, fid).ok()?;
+    super::values::get_value(ctx.conn, t.id, &f).ok().flatten()
+}
+
+/// Wert eines eingebauten Text-Feldes (Beschreibung, Fälligkeit).
+fn builtin_text(ctx: &Ctx, t: &Ticket, key: &str) -> Option<String> {
+    builtin_value(ctx, t, key).and_then(|v| v.as_str().map(str::to_string))
+}
+
+/// Markierung als JSON (`null` = keine).
+fn marker_json(m: &crate::due::DueMarker) -> Value {
+    json!({"frame": m.frame.as_str(), "symbol": m.symbol, "color": m.color, "name": m.name})
+}
+
+/// Zustand einer Fälligkeit: überfällig, verbleibende Minuten, Text („due in 3 days“), Markierung und Tönung nach den Schwellen.
+/// Erledigte Einträge bekommen keine Markierung.
+fn due_state_json(ctx: &Ctx, thresholds: &[crate::due::DueThreshold], due: Option<&str>, done: bool) -> Value {
+    let Some(st) = due.and_then(|d| crate::due::evaluate(thresholds, d, ctx.now)) else { return Value::Null };
+    json!({
+        "overdue": st.overdue() && !done,
+        "minutes_left": st.minutes_left,
+        "text": crate::due::tooltip(st.minutes_left, ctx.lang),
+        "marker": if done { Value::Null } else { st.marker().map(marker_json).unwrap_or(Value::Null) },
+        "tint": if done { Value::Null } else { st.tint().map(|c| json!(c)).unwrap_or(Value::Null) },
+    })
+}
+
+fn threshold_json(ctx: &Ctx, t: &crate::due::DueThreshold) -> Value {
+    json!({"under_minutes": t.under_minutes, "under": crate::due::duration_label(t.under_minutes, ctx.lang), "marker": marker_json(&t.marker), "tint": t.tint})
+}
+
 fn ticket_json(ctx: &Ctx, t: &Ticket) -> Value {
     let ty = get_type(ctx.conn, t.type_id).map(|x| x.display(ctx.lang)).unwrap_or_default();
     let status = t.status_id.and_then(|s| get_status(ctx.conn, s).ok());
     let parent = t.parent_id.and_then(|p| get_ticket(ctx.conn, p).ok()).map(|p| p.key());
+    let due = builtin_text(ctx, t, super::builtin_fields::DUE_KEY);
+    let thresholds = super::projects::due_thresholds(ctx.conn, t.project_id).unwrap_or_default();
+    let done = status.as_ref().is_some_and(|s| s.category == super::statuses::StatusCategory::Done);
     json!({
         "key": t.key(),
         "id": t.id,
@@ -488,6 +562,10 @@ fn ticket_json(ctx: &Ctx, t: &Ticket) -> Value {
         "starred": t.starred,
         "created_at": t.created_at,
         "updated_at": t.updated_at,
+        "description": builtin_text(ctx, t, super::builtin_fields::DESCRIPTION_KEY).map(|s| clip(&s)),
+        "due_state": due_state_json(ctx, &thresholds, due.as_deref(), done),
+        "due": due,
+        "labels": builtin_value(ctx, t, super::builtin_fields::LABELS_KEY).unwrap_or_else(|| json!([])),
     })
 }
 
@@ -566,6 +644,7 @@ fn project_json(ctx: &Ctx, p: &Project) -> Value {
         "use_sprints": p.use_sprints,
         "use_versions": p.use_versions,
         "ticket_count": count,
+        "due_thresholds": super::projects::due_thresholds(ctx.conn, p.id).unwrap_or_default().iter().map(|t| threshold_json(ctx, t)).collect::<Vec<_>>(),
     })
 }
 
@@ -835,7 +914,7 @@ fn quoted(ctx: &Ctx, s: &str) -> String {
 }
 
 fn create_ticket_tool(ctx: &Ctx, v: &Value) -> R {
-    let a = args(ctx, v, &["project", "type", "title", "parent", "fields"])?;
+    let a = args(ctx, v, &["project", "type", "title", "parent", "fields", "description", "due", "labels"])?;
     let p = project_arg(ctx, &a, "project")?;
     if p.system {
         return Err(ctx.err("forbidden", "Das System-Projekt Todolist ist schreibgeschützt (add_todo gibt es nur im einfachen Modus).", "The system project Todolist is read-only (add_todo exists only in simple mode)."));
@@ -852,23 +931,25 @@ fn create_ticket_tool(ctx: &Ctx, v: &Value) -> R {
     }
     let fields = pl(ctx, list_fields(ctx.conn, ty.id))?;
     n.values = parse_fields(ctx, &a, &fields)?;
+    builtin_args(ctx, &a, &fields, &mut n.values)?;
     let (t, _op) = tk(ctx, create_ticket(ctx.conn, &n, &ctx.source))?;
     let text = ctx.tx(format!("{} angelegt: {}", t.key(), quoted(ctx, &t.title)), format!("created {}: {}", t.key(), quoted(ctx, &t.title)));
     wrote(json!({"ticket": with_fields(ctx, &t)?}), text, Some(t.key()))
 }
 
 fn update_ticket_tool(ctx: &Ctx, v: &Value) -> R {
-    let a = args(ctx, v, &["ticket", "title", "fields"])?;
+    let a = args(ctx, v, &["ticket", "title", "fields", "description", "due", "labels"])?;
     let t = ticket_arg(ctx, &a, "ticket")?;
-    if !a.has("title") && !a.has("fields") {
-        return Err(ctx.bad("Nichts zu ändern: title oder fields angeben", "Nothing to change: give title or fields"));
+    if !["title", "fields", "description", "due", "labels"].iter().any(|k| a.has(k)) {
+        return Err(ctx.bad("Nichts zu ändern: title, description, due, labels oder fields angeben", "Nothing to change: give title, description, due, labels or fields"));
     }
     let title = match a.get("title") {
         Some(_) => Some(a.req_str("title", 1_000)?),
         None => None,
     };
     let fields = pl(ctx, list_fields(ctx.conn, t.type_id))?;
-    let values = parse_fields(ctx, &a, &fields)?;
+    let mut values = parse_fields(ctx, &a, &fields)?;
+    builtin_args(ctx, &a, &fields, &mut values)?;
     let op = tk(ctx, update_ticket(ctx.conn, t.id, &TicketUpdate { title, values }, &ctx.source))?;
     let t = tk(ctx, get_ticket(ctx.conn, t.id))?;
     let result = json!({"changed": op.is_some(), "ticket": with_fields(ctx, &t)?});
@@ -1014,8 +1095,10 @@ pub fn ticket_param(ctx: &Ctx, v: &Value) -> Result<(String, Option<u64>), ToolE
 
 // ------------------------------------------------------------------ Todo-Liste
 
-fn todo_json(it: &tasks::Item, tags: &[tasks::Tag]) -> Value {
+fn todo_json(ctx: &Ctx, it: &tasks::Item, tags: &[tasks::Tag], thresholds: &[crate::due::DueThreshold]) -> Value {
     json!({
+        "due": it.due,
+        "due_state": due_state_json(ctx, thresholds, it.due.as_deref(), it.done),
         "id": it.id,
         "key": it.key(),
         "title": it.title,
@@ -1038,6 +1121,7 @@ pub fn list_todos_tool(ctx: &Ctx, v: &Value, read_only: bool) -> R {
     }
     let (limit, offset) = a.paging()?;
     let all_tags = tasks::list_tags(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
+    let th = tasks::due_thresholds(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
     // Ein unbekannter Tag-Name ergibt eine leere Liste (kein Fehler): dann gibt es keine solche Karte.
     let mut tag_ids = Vec::new();
     let mut unknown_tag = false;
@@ -1051,7 +1135,7 @@ pub fn list_todos_tool(ctx: &Ctx, v: &Value, read_only: bool) -> R {
     let items: Vec<&tasks::Item> = items.iter().filter(|i| state != "done" || i.done).collect();
     let total = items.len();
     read(json!({
-        "todos": items.iter().skip(offset as usize).take(limit as usize).map(|i| todo_json(i, &all_tags)).collect::<Vec<_>>(),
+        "todos": items.iter().skip(offset as usize).take(limit as usize).map(|i| todo_json(ctx, i, &all_tags, &th)).collect::<Vec<_>>(),
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -1061,15 +1145,17 @@ pub fn list_todos_tool(ctx: &Ctx, v: &Value, read_only: bool) -> R {
 }
 
 fn add_todo_tool(ctx: &Ctx, v: &Value) -> R {
-    let a = args(ctx, v, &["title", "text", "tags"])?;
+    let a = args(ctx, v, &["title", "text", "tags", "due"])?;
     let title = a.opt_str("title", super::tickets::MAX_TITLE_CHARS)?.unwrap_or_default();
     let text = a.opt_str("text", MAX_TEXT_CHARS)?.unwrap_or_default();
     let tags = a.str_list("tags", MAX_TAGS, tasks::MAX_TAG_CHARS)?;
-    let (item, _op) = tasks::create_item(ctx.conn, &title, &text, &tags).map_err(|e| task_err(ctx.lang, e))?;
+    let due = a.opt_str("due", 32)?;
+    let (item, _op) = tasks::create_item(ctx.conn, &title, &text, due.as_deref(), &tags).map_err(|e| task_err(ctx.lang, e))?;
     let all_tags = tasks::list_tags(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
+    let th = tasks::due_thresholds(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
     let shown = super::todo_bridge::display_title(&item.title, &item.body);
     wrote(
-        json!({"todo": todo_json(&item, &all_tags)}),
+        json!({"todo": todo_json(ctx, &item, &all_tags, &th)}),
         ctx.tx(format!("Todo {} angelegt: {}", item.key(), quoted(ctx, &shown)), format!("added to-do {}: {}", item.key(), quoted(ctx, &shown))),
         Some(item.key()),
     )
@@ -1100,7 +1186,8 @@ fn set_todo_done_tool(ctx: &Ctx, v: &Value) -> R {
     let op = tasks::set_done(ctx.conn, id, done).map_err(|e| task_err(ctx.lang, e))?;
     let item = tasks::get_item(ctx.conn, id).map_err(|e| task_err(ctx.lang, e))?;
     let all_tags = tasks::list_tags(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
-    let result = json!({"changed": op.is_some(), "todo": todo_json(&item, &all_tags)});
+    let th = tasks::due_thresholds(ctx.conn).map_err(|e| task_err(ctx.lang, e))?;
+    let result = json!({"changed": op.is_some(), "todo": todo_json(ctx, &item, &all_tags, &th)});
     if op.is_none() {
         return read(result);
     }
@@ -1174,6 +1261,77 @@ mod tests {
 
     fn fail(f: &Fx, tool: &str, v: Value) -> ToolError {
         call(&ctx(f), tool, &v, false).expect_err(tool)
+    }
+
+    #[test]
+    fn description_and_due_date_are_parameters_and_answer_fields() {
+        let f = Fx::new();
+        // jetzt = 2026-11-14 12:00 (siehe ctx)
+        let d = ok(&f, "create_ticket", json!({"project": "PAN", "type": "Dev task", "title": "Mit Termin", "description": "Erst **lesen**", "due": "2026-11-15"}));
+        let t = &d.result["ticket"];
+        assert_eq!((t["due"].as_str(), t["description"].as_str()), (Some("2026-11-15"), Some("Erst **lesen**")));
+        // 1 Tag 12 h bis zum Ende des 15.: gelbes Warndreieck, keine Tönung
+        assert_eq!(t["due_state"]["overdue"], false);
+        assert_eq!(t["due_state"]["minutes_left"], 36 * 60);
+        assert_eq!(t["due_state"]["text"], "due in 1 day");
+        assert_eq!((t["due_state"]["marker"]["frame"].as_str(), t["due_state"]["marker"]["symbol"].as_str(), t["due_state"]["marker"]["color"].as_str()), (Some("triangle"), Some("alert"), Some(crate::due::YELLOW)));
+        assert!(t["due_state"]["tint"].is_null());
+        assert!(t["fields"].as_array().unwrap().iter().any(|x| x["key"] == "due" && x["value"] == "2026-11-15"), "auch in den Feldern");
+        // mit Uhrzeit, deutsches Datum, überfällig
+        let d = ok(&f, "update_ticket", json!({"ticket": "PAN-1", "due": "13.11.2026 09:30"}));
+        let t = &d.result["ticket"];
+        assert_eq!(t["due"], "2026-11-13T09:30", "wie bei Todo-Karten ohne Sekunden");
+        assert_eq!((t["due_state"]["overdue"].as_bool(), t["due_state"]["text"].as_str()), (Some(true), Some("overdue by 1 day")));
+        assert_eq!(t["due_state"]["marker"]["color"], crate::due::RED);
+        // leeren, unlesbar, falscher Typ
+        let d = ok(&f, "update_ticket", json!({"ticket": "PAN-1", "due": null, "description": null}));
+        assert!(d.result["ticket"]["due"].is_null() && d.result["ticket"]["due_state"].is_null() && d.result["ticket"]["description"].is_null());
+        assert_eq!(fail(&f, "update_ticket", json!({"ticket": "PAN-1", "due": "morgen"})).code, "invalid_value");
+        assert_eq!(fail(&f, "update_ticket", json!({"ticket": "PAN-1", "due": 5})).code, "bad_args");
+        // gefunden über die Abfragesprache, sortiert nach Fälligkeit
+        ok(&f, "create_ticket", json!({"project": "PAN", "type": "Epic", "title": "Bald", "due": "2026-11-20T08:00"}));
+        ok(&f, "update_ticket", json!({"ticket": "PAN-1", "due": "2026-11-10"}));
+        let s = ok(&f, "search_tickets", json!({"project": "PAN", "query": "due < currentDate() ORDER BY due"}));
+        let keys: Vec<&str> = s.result["tickets"].as_array().unwrap().iter().map(|x| x["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, vec!["PAN-1"]);
+        let s = ok(&f, "search_tickets", json!({"project": "PAN", "query": "due IS NOT EMPTY ORDER BY due DESC"}));
+        let keys: Vec<&str> = s.result["tickets"].as_array().unwrap().iter().map(|x| x["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, vec!["PAN-2", "PAN-1"]);
+        // Projekt: Schwellen
+        let p = ok(&f, "list_projects", json!({}));
+        let pan = p.result["projects"].as_array().unwrap().iter().find(|x| x["key"] == "PAN").unwrap().clone();
+        assert_eq!(pan["due_thresholds"].as_array().unwrap().len(), 2);
+        assert_eq!(pan["due_thresholds"][0]["under_minutes"], 10080);
+        assert_eq!(pan["due_thresholds"][0]["tint"], false);
+    }
+
+    #[test]
+    fn built_in_labels_are_a_parameter_and_an_answer_field() {
+        let f = Fx::new();
+        let d = ok(&f, "create_ticket", json!({"project": "PAN", "type": "Epic", "title": "Mit Labels", "labels": ["api", "API", "ui"]}));
+        assert_eq!(d.result["ticket"]["labels"], json!(["api", "ui"]), "ohne Doppelte (Groß-/Kleinschreibung egal)");
+        let d = ok(&f, "update_ticket", json!({"ticket": "PAN-1", "labels": null}));
+        assert_eq!(d.result["ticket"]["labels"], json!([]));
+        assert_eq!(fail(&f, "update_ticket", json!({"ticket": "PAN-1", "labels": "api"})).code, "bad_args");
+        ok(&f, "update_ticket", json!({"ticket": "PAN-1", "labels": ["mcp"]}));
+        let s = ok(&f, "search_tickets", json!({"project": "PAN", "query": "labels = mcp"}));
+        assert_eq!(s.result["total"], 1);
+    }
+
+    #[test]
+    fn todo_cards_take_and_return_a_due_date() {
+        let f = Fx::new();
+        let d = ok(&f, "add_todo", json!({"title": "Abgabe", "due": "2026-11-14 18:00"}));
+        assert_eq!(d.result["todo"]["due"], "2026-11-14T18:00");
+        assert_eq!(d.result["todo"]["due_state"]["text"], "due in 6 h");
+        assert_eq!(d.result["todo"]["due_state"]["marker"]["color"], crate::due::RED);
+        assert_eq!(fail(&f, "add_todo", json!({"title": "x", "due": "irgendwann"})).code, "bad_args");
+        let l = ok(&f, "list_todos", json!({}));
+        assert_eq!(l.result["todos"][0]["due"], "2026-11-14T18:00");
+        // erledigt: keine Markierung mehr
+        ok(&f, "set_todo_done", json!({"id": 1}));
+        let l = ok(&f, "list_todos", json!({"state": "all"}));
+        assert!(l.result["todos"][0]["due_state"]["marker"].is_null());
     }
 
     #[test]

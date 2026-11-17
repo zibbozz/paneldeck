@@ -4,7 +4,7 @@
 pub mod lucide;
 
 pub const ICONS: &[&str] = &[
-    "bolt", "bookmark", "bug", "check", "checkbox", "clipboard", "clock", "code", "cog", "comment", "compass", "document", "fire", "flag", "flask",
+    "alert", "bolt", "bookmark", "bug", "check", "checkbox", "clipboard", "clock", "code", "cog", "comment", "compass", "document", "fire", "flag", "flask",
     "folder", "globe", "heart", "key", "layers", "lightbulb", "link", "list", "lock", "mail", "package", "puzzle", "rocket", "shield", "star",
     "subtask", "tag", "target", "terminal", "user", "wrench",
 ];
