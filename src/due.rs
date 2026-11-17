@@ -194,7 +194,9 @@ pub fn validate_thresholds(list: &[DueThreshold]) -> Result<Vec<DueThreshold>, T
         let color = clean_color(&t.marker.color).ok_or(ThresholdProblem::Color)?;
         let symbol = match t.marker.symbol.as_deref().map(str::trim) {
             None | Some("") => None,
-            Some(s) if crate::planning::icons::is_valid(s) => Some(s.to_string()),
+            // Wie bei Tickettypen (#190): auch unbekannte, aber wohlgeformte `lucide:`-Namen (neuere Lucide-Version)
+            // bleiben erhalten; alte Lucide-Namen werden auf den aktuellen umgestellt.
+            Some(s) if crate::planning::icons::is_storable(s) => Some(crate::planning::icons::normalize(s)),
             Some(_) => return Err(ThresholdProblem::Symbol),
         };
         let name = t.marker.name.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -661,6 +663,20 @@ mod tests {
         assert_eq!(tooltip(0, Lang::En), "due in 0 min");
         let st = evaluate(&default_thresholds(), "2026-11-20", at("2026-11-17T00:00:00")).unwrap();
         assert_eq!(tooltip(st.minutes_left, Lang::En), "due in 4 days");
+    }
+
+    #[test]
+    fn marker_symbols_accept_lucide_names_like_ticket_types() {
+        let with = |s: &str| {
+            let mut t = default_thresholds()[0].clone();
+            t.marker.symbol = Some(s.into());
+            validate_thresholds(&[t]).map(|v| v[0].marker.symbol.clone())
+        };
+        assert_eq!(with("lucide:alarm-clock").unwrap().as_deref(), Some("lucide:alarm-clock"));
+        // alter Lucide-Name -> aktueller Name; unbekannter, wohlgeformter Name (neuere Version) bleibt
+        assert_eq!(with("lucide:alarm-check").unwrap().as_deref(), Some("lucide:alarm-clock-check"));
+        assert_eq!(with("lucide:icon-from-a-newer-version").unwrap().as_deref(), Some("lucide:icon-from-a-newer-version"));
+        assert!(with("lucide:Bad Name").is_err() && with("no-such-icon").is_err());
     }
 
     #[test]
