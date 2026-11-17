@@ -109,6 +109,29 @@ function Check($name, [bool]$ok, $detail = '') {
 # Pruefung, die in diesem Build nicht moeglich ist (z. B. Funktion eines anderen Teils fehlt): weder bestanden noch fehlgeschlagen.
 $script:skip = 0
 function Skip($name, $why) { $script:skip++; Write-Host "  skip  $name  ($why)" -ForegroundColor Yellow }
+# #193: eine Ausgabezeile, die genau die Terminalbreite fuellt (ConPTY laesst den Zeilenvorschub weg, die Zeile gilt als
+# umbrochen), kam als leere Ausgabe mit quality exact an. Geprueft: Breite-1, Breite, Breite+1, 2 x Breite (PowerShell, Git Bash).
+# #197: Bei vollem Verlauf (Einstellung 1000 Zeilen, siehe Set-Level) verschoben sich alle absoluten Zeilen mit jedem
+# Rollen; danach fand run_command das Echo nicht mehr (leere Ausgabe, quality heuristic). Verlauf fuellen, dann pruefen.
+function Test-FullHistory([int]$sid, [string]$sh) {
+  $fill = if ($sh -eq 'gitbash') { 'seq 1 1500' } else { '1..1500' }
+  [void](Tool 'run_command' @{ session = $sid; command = $fill; timeout_secs = 40 })
+  foreach ($i in 1..3) {
+    $r = Tool 'run_command' @{ session = $sid; command = "echo voll-$i"; timeout_secs = 25 }
+    Check "run_command $sh (voller Verlauf, Befehl ${i}: Ausgabe exakt)" ($r.data.finished -and $r.data.output -eq "voll-$i" -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+  }
+  Test-WrapWidth $sid $sh 'voller Verlauf: '
+}
+function Test-WrapWidth([int]$sid, [string]$sh, [string]$prefix = '') {
+  $cols = (Tool 'read_terminal' @{ session = $sid; lines = 1 }).data.cols
+  if (-not $cols) { Skip "${prefix}run_command $sh (Zeile in Terminalbreite)" 'cols unbekannt'; return }
+  foreach ($n in @(($cols - 1), $cols, ($cols + 1), (2 * $cols))) {
+    $cmd = if ($sh -eq 'gitbash') { "printf 'w%.0s' `$(seq 1 $n); echo" } else { "'w' * $n" }
+    $r = Tool 'run_command' @{ session = $sid; command = $cmd; timeout_secs = 25 }
+    $want = 'w' * $n
+    Check "${prefix}run_command $sh (Zeile mit $n Zeichen bei $cols Spalten: Ausgabe exakt)" ($r.data.finished -and $r.data.output -eq $want -and $r.data.quality -eq 'exact') "len=$("$($r.data.output)".Length) q=$($r.data.quality) finished=$($r.data.finished)"
+  }
+}
 # OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
 # Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
 # inzwischen niemand anderes etwas kopiert hat). Enthaelt sie andere als reine Textformate (Bild, Dateien, HTML, RTF ...), wird die
@@ -147,6 +170,8 @@ function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
   if ($ConPty -eq 'system') { $j | Add-Member -Force bundled_conpty $false }
+  # Kleinster Verlauf (1000 Zeilen), damit Test-FullHistory ihn schnell fuellt (#197).
+  $j | Add-Member -Force scrollback_lines 1000
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
   # -Empty: ohne gespeicherte Sitzungen (Set-IsolationProfile legt dann einen state.json nur mit dem Projekt an)
@@ -264,6 +289,10 @@ try {
       $want = "$($script:iso.Profile)|$($script:iso.Profile)\.claude|"
       Check 'Isolation: Terminal-Umgebung mit Schein-Profil, ohne CLAUDECODE/CLAUDE_CODE_*/ANTHROPIC_*' ($r.data.output.Trim() -eq $want) "'$($r.data.output.Trim())' statt '$want'"
       if ($script:lastOk) { $script:psClaudeFake = $true }
+      # Die Registry-Auffrischung darf den Benutzer nicht durch HKLM-Werte ersetzen (dort steht USERNAME=SYSTEM).
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:USERNAME|$env:USERDOMAIN"'; timeout_secs = 25 }
+      $want = "$env:USERNAME|$env:USERDOMAIN"
+      Check 'Terminal: USERNAME = aktueller Benutzer (USERDOMAIN ebenso)' ($r.data.output.Trim() -eq $want) "'$($r.data.output.Trim())' statt '$want'"
     }
     if ($sh -eq 'cmd') {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-cmd'; timeout_secs = 25 }
@@ -275,6 +304,8 @@ try {
       Check "run_command $sh (Exit 1, leere Ausgabe)" ($r.data.exit_code -eq 1 -and $r.data.output -eq '') $r.text
       $r = Tool 'run_command' @{ session = $id; command = 'printf "x\ny\n"'; timeout_secs = 25 }
       Check "run_command $sh (zweiter Befehl sauber)" ($r.data.output -eq "x`ny") $r.text
+      Test-WrapWidth $id $sh
+      Test-FullHistory $id $sh
       Test-Osc52 $id $sh
     } else {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-ps'; timeout_secs = 25 }
@@ -290,6 +321,8 @@ try {
       $long = 'Write-Output hallo-lang # ' + ('z' * 220)
       $r = Tool 'run_command' @{ session = $id; command = $long; timeout_secs = 25 }
       Check "run_command $sh (langer Befehl: Ausgabe exakt)" ($r.data.output -eq 'hallo-lang' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+      Test-WrapWidth $id $sh
+      Test-FullHistory $id $sh
       Test-Osc52 $id $sh
       $r = Tool 'run_command' @{ session = $id; command = 'Start-Sleep 4'; timeout_secs = 1 }
       Check "run_command $sh (Zeitlimit)" ($r.data.timed_out -eq $true -and -not $r.data.finished) $r.text
@@ -478,7 +511,89 @@ Start-Sleep -Seconds 3
   $pl = Tool 'create_session' @{ shell = 'cmd'; cwd = "$proj"; name = 'smoke-plain' }
   $plr = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $pl.data.id }
   Check 'list_sessions: ohne Claude sind die Optionen null' ($plr.PSObject.Properties.Name -contains 'effort' -and $null -eq $plr.model -and $null -eq $plr.effort -and $null -eq $plr.permission_mode -and $null -eq $plr.agent)
+  Check 'list_sessions: ohne Claude keine claude_flags/claude_user_options' ($plr.PSObject.Properties.Name -contains 'claude_flags' -and @($plr.claude_flags).Count -eq 0 -and @($plr.claude_user_options).Count -eq 0)
   [void](Tool 'close_session' @{ session = $pl.data.id })
+
+  Write-Host "== Weitere Claude-Optionen (#182)" -ForegroundColor Cyan
+  Check 'create_session: claude_flags ohne claude -> bad_args' ((Code (Tool 'create_session' @{ shell = 'cmd'; claude_flags = @('chrome') })) -eq 'bad_args')
+  foreach ($bad in @('add-dir', '--dangerously-skip-permissions', 'mcp-config', 'allowed-tools', 'resume', 'settings', 'remote-control', 'safe-mode', 'autocompact')) {
+    $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @($bad) }
+    Check "create_session: claude_flags [$bad] -> bad_args (never allowed)" ((Code $r) -eq 'bad_args' -and $r.text -match 'never allowed via MCP') $r.text
+  }
+  $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @('chrome', 'no-chrome') }
+  Check 'create_session: chrome + no-chrome -> bad_args' ((Code $r) -eq 'bad_args' -and $r.text -match 'mutually exclusive') $r.text
+  Check 'create_session: claude_flags als String -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = 'chrome' })) -eq 'bad_args')
+  Check 'create_session: unbekannter Schalter -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @('chrome; calc') })) -eq 'bad_args')
+  foreach ($k in @('add_dir', 'mcp_config', 'append_system_prompt', 'allowed_tools', 'safe_mode')) {
+    $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; $k = "$proj" }
+    Check "create_session: Parameter $k -> bad_args" ((Code $r) -eq 'bad_args' -and $r.text -match 'not allowed via MCP') $r.text
+  }
+  Check 'create_session (Chat): claude_flags -> bad_args' ((Code (Tool 'create_session' @{ kind = 'chat'; claude_flags = @('ide') })) -eq 'bad_args')
+  $cf = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-flags'; claude_flags = @('verbose', '--chrome', 'ide') }
+  Check 'create_session mit claude_flags' (-not $cf.err -and (@($cf.data.claude_flags) -join ',') -eq 'chrome,ide,verbose') $cf.text
+  if ($script:lastOk) {
+    $cfl = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $cf.data.id }
+    Check 'list_sessions meldet claude_flags' ((@($cfl.claude_flags) -join ',') -eq 'chrome,ide,verbose' -and @($cfl.claude_user_options).Count -eq 0) ($cfl | ConvertTo-Json -Compress)
+    $re3 = 'args=.*--permission-mode default --chrome --ide --verbose --session-id [0-9a-f-]{36}'
+    $ct3 = Wait-FakeFile $calls $re3
+    Check 'Ersatz-claude bekommt --chrome --ide --verbose (fakebin\calls.txt)' ($ct3 -match $re3) "calls.txt='$ct3'"
+    [void](Tool 'close_session' @{ session = $cf.data.id })
+  }
+  Check 'keine verbotenen Flags in fakebin\calls.txt' ((Wait-FakeFile $calls 'add-dir|mcp-config|dangerously| --allowed-tools|remote-control' 1) -notmatch 'add-dir|mcp-config|dangerously| --allowed-tools|remote-control')
+
+  # Standards des Nutzers mit Rechte erweiternden Wertoptionen: gelten fuer Sitzungen des Nutzers (hier: --open --claude
+  # von aussen), nie fuer Sitzungen eines Agenten. Neustart mit vorbereiteter settings.json.
+  Write-Host "== Weitere Claude-Optionen: Standards des Nutzers (#182)" -ForegroundColor Cyan
+  $mcpCfg = "$work\smoke-mcp-config.json"
+  [IO.File]::WriteAllText($mcpCfg, '{"mcpServers":{}}', (New-Object Text.UTF8Encoding $false))
+  $script:prestart = {
+    $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $d = [pscustomobject]@{ flags = @('verbose', 'no-chrome', 'safe-mode'); add_dirs = @("$proj", "$work\smoke-missing-dir"); allowed_tools = 'Read'; disallowed_tools = 'WebFetch'; mcp_config = $mcpCfg; fallback_model = 'haiku' }
+    $j | Add-Member -Force claude_defaults $d
+    $j | Add-Member -Force default_shell 'powershell'
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  }
+  Set-Level 'Control'
+  # Beim naechsten Neustart die Standards wieder entfernen (spaetere Abschnitte erwarten keine).
+  $script:prestart = {
+    $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $j.PSObject.Properties.Remove('claude_defaults'); $j.PSObject.Properties.Remove('default_shell')
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  }
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  # Nach dem Neustart erneut bestaetigen, dass claude im PowerShell-Terminal nur der Ersatz ist.
+  $iso2 = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'smoke-iso2' }
+  Start-Sleep 4
+  $r = Tool 'run_command' @{ session = $iso2.data.id; command = 'Get-Command claude -All | ForEach-Object { if ($_.CommandType -in ''Application'', ''ExternalScript'') { $_.Source } else { "$($_.CommandType):$($_.Name)" } }'; timeout_secs = 25 }
+  Check 'Isolation nach Neustart: claude im PowerShell-Terminal ist nur der Ersatz' (Only-Fake $r.data.output) $r.data.output
+  [void](Tool 'close_session' @{ session = $iso2.data.id })
+  if (-not $script:lastOk) { throw 'SICHERHEIT: claude nach dem Neustart nicht als Ersatz bestaetigt - keine Claude-Sitzung' }
+  $chr = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; claude_flags = @('chrome') }
+  Check 'Agent: chrome gegen no-chrome des Nutzers -> bad_args' ((Code $chr) -eq 'bad_args' -and $chr.text -match 'turned Chrome off') $chr.text
+  $ag = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-risky'; claude_flags = @('ide') }
+  $uo = @($ag.data.claude_user_options)
+  Check 'Agenten-Sitzung: Schalter des Nutzers + eigene, nur harmlose Wertoptionen' (-not $ag.err -and (@($ag.data.claude_flags) -join ',') -eq 'no-chrome,ide,verbose' -and ($uo -join ',') -eq 'disallowed_tools,fallback_model') $ag.text
+  if ($script:lastOk) {
+    $re4 = 'args=.*--permission-mode default --no-chrome --ide --verbose --disallowed-tools WebFetch --fallback-model haiku --session-id [0-9a-f-]{36}'
+    $ct4 = Wait-FakeFile $calls $re4
+    $line4 = @(($ct4 -split "`r?`n") | Where-Object { $_ -match $re4 }) | Select-Object -Last 1
+    Check 'Ersatz-claude (Agent): ohne --add-dir/--allowed-tools/--mcp-config/--safe-mode' ($line4 -and $line4 -notmatch '--add-dir|--mcp-config| --allowed-tools|--safe-mode') "calls.txt='$ct4'"
+    [void](Tool 'close_session' @{ session = $ag.data.id })
+  }
+  # Sitzung des Nutzers: Start von aussen (wie aus dem Explorer) per --open --claude -> alle Standards.
+  $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
+  # Der zweite Aufruf reicht nur per IPC an den laufenden Hub weiter und endet sofort (sonst nach 15 s beenden).
+  $op = Start-Process "$dir\paneldeck.exe" -ArgumentList '--open', "`"$proj`"", '--claude' -WindowStyle Hidden -PassThru
+  if (-not $op.WaitForExit(15000)) { $op.Kill() }
+  $us = $null; $t0 = Get-Date
+  while (-not $us -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500; $us = (Tool 'list_sessions').data.sessions | Where-Object { $before -notcontains $_.id -and $_.claude } | Select-Object -First 1 }
+  Check 'Sitzung des Nutzers (--open --claude): alle Wertoptionen der Standards' ($us -and (@($us.claude_user_options) -join ',') -eq 'add_dir,allowed_tools,disallowed_tools,mcp_config,fallback_model' -and (@($us.claude_flags) -join ',') -eq 'no-chrome,verbose,safe-mode') ($us | ConvertTo-Json -Compress)
+  if ($script:lastOk) {
+    $re5 = 'args=.*--no-chrome --verbose --safe-mode --add-dir "?' + [regex]::Escape("$proj") + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? --fallback-model haiku --session-id'
+    $ct5 = Wait-FakeFile $calls $re5
+    Check 'Ersatz-claude (Nutzer) bekommt --add-dir/--allowed-tools/--mcp-config gequotet (fakebin\calls.txt)' ($ct5 -match $re5) "calls.txt='$ct5'"
+    [void](Tool 'close_session' @{ session = $us.id })
+  }
 
   if ($Visible) {
     Write-Host "== Screenshot (Fenster sichtbar)" -ForegroundColor Cyan
@@ -1014,7 +1129,9 @@ c.close()
   $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
   $rc = Tool 'read_chat' @{ session = $C; last = 4 }
   $rt = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_chat' })
-  Check 'read_chat ueber ein Chat-Modell: neueste Nachrichten, more_above und Status statt der aeltesten' ($w.data.matched -eq $true -and $rt.Count -ge 1 -and $rt[-1].status -eq 'ok' -and $rt[-1].content -match 'big-39' -and $rt[-1].content -match '"more_above":true' -and $rt[-1].content -match '"status":"ready"' -and $rt[-1].content -notmatch 'big-00') (($rc.text) -replace '(.{600}).*', '$1')
+  $rtc = if ($rt.Count -ge 1) { [string]$rt[-1].content } else { '' }
+  $diag = 'matched=' + $w.data.matched + ' n=' + $rt.Count + ' b39=' + ($rtc -match 'big-39') + ' more=' + ($rtc -match '"more_above":true') + ' ready=' + ($rtc -match '"status":"ready"') + ' b00=' + ($rtc -match 'big-00') + ' len=' + $rtc.Length + ' tail=' + $(if ($rtc.Length -gt 500) { $rtc.Substring($rtc.Length - 500) } else { $rtc })
+  Check 'read_chat ueber ein Chat-Modell: neueste Nachrichten, more_above und Status statt der aeltesten' ($w.data.matched -eq $true -and $rt.Count -ge 1 -and $rt[-1].status -eq 'ok' -and $rt[-1].content -match 'big-39' -and $rt[-1].content -match '"more_above":true' -and $rt[-1].content -match '"status":"ready"' -and $rt[-1].content -notmatch 'big-00') $diag
   Check 'read_chat: Feld paused (false)' ($rc.data.paused -eq $false -and $rc.data.PSObject.Properties.Name -contains 'pause_note')
   # Stufe des Modells nie gewaehlt: die einmalige Frage erscheint, der Agent bekommt permission_pending.
   $raw = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-raw'; name = 'Smoke-Raw' }
@@ -1228,7 +1345,7 @@ c.close()
       Check "ConPTY: run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'conpty-ok') "out='$($r.data.output)' q=$($r.data.quality)"
       $r = Tool 'run_command' @{ session = $c.data.id; command = 'cmd /c exit 4'; timeout_secs = 25 }
       if ($sh -eq 'cmd') { Check 'ConPTY: run_command cmd (Befehl beendet)' ($r.data.finished) $r.text }
-      else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text }
+      else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text; Test-WrapWidth $c.data.id $sh 'ConPTY: ' }
     }
     # Git Bash und Vollbildprogramme (alternativer Bildschirm) ueber die gewaehlte ConPTY.
     if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {

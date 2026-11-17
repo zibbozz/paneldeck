@@ -16,7 +16,7 @@ pub struct TicketType {
     pub project_id: i64,
     pub key: Option<String>,
     pub name: Option<String>,
-    /// Name aus dem festen Icon-Satz (`icons::ICONS`), optional.
+    /// Name aus dem festen Icon-Satz (`icons::ICONS`) oder `lucide:<name>`, optional.
     pub icon: Option<String>,
     pub color: String,
     /// `false`: der Typ hat kein Statusfeld und erscheint nicht im Board.
@@ -58,7 +58,8 @@ fn from_row(r: &rusqlite::Row) -> rusqlite::Result<TicketType> {
         project_id: r.get(1)?,
         key: r.get(2)?,
         name: r.get(3)?,
-        icon: r.get(4)?,
+        // alte Lucide-Namen gleich in die neue Form (gespeichert beim nächsten Ändern des Typs)
+        icon: r.get::<_, Option<String>>(4)?.map(|i| icons::normalize(&i)),
         color: r.get(5)?,
         workflow: r.get::<_, i64>(6)? != 0,
         system: r.get::<_, i64>(7)? != 0,
@@ -85,9 +86,12 @@ pub fn editable_type(conn: &Connection, id: i64) -> Res<TicketType> {
     Ok(t)
 }
 
+/// Prüft ein Icon beim Speichern: eingebaut oder formal richtiges `lucide:<name>` ([`icons::is_storable`]) – ein in dieser
+/// Version unbekanntes Lucide-Icon (z. B. aus der Sicherung einer neueren Version) bricht den Import nicht ab, es wird als
+/// Platzhalter gezeichnet. Die Oberfläche bietet nur bekannte Icons an.
 fn check_icon(icon: &Option<String>) -> Res<()> {
     match icon {
-        Some(i) if !icons::is_valid(i) => Err(PlanError::IconInvalid),
+        Some(i) if !icons::is_storable(i) => Err(PlanError::IconInvalid),
         _ => Ok(()),
     }
 }
@@ -111,7 +115,7 @@ pub fn create_type(conn: &Connection, n: &NewType) -> Res<i64> {
         let pos = common::next_position(conn, "ticket_types", "project_id = ?1", &[n.project_id])?;
         conn.execute(
             "INSERT INTO ticket_types (project_id, key, name, icon, color, workflow, system, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-            params![n.project_id, n.key, name, n.icon, color, bool_i(n.workflow), pos],
+            params![n.project_id, n.key, name, n.icon.as_deref().map(icons::normalize), color, bool_i(n.workflow), pos],
         )?;
         Ok(conn.last_insert_rowid())
     })
@@ -130,7 +134,7 @@ pub fn update_type(conn: &Connection, id: i64, u: &UpdateType) -> Res<()> {
     let icon = match &u.icon {
         Some(i) => {
             check_icon(i)?;
-            i.clone()
+            i.as_deref().map(icons::normalize)
         }
         None => cur.icon.clone(),
     };
@@ -342,6 +346,24 @@ mod tests {
         assert_eq!(get_type(&c, a).unwrap().icon, None);
         assert_eq!(update_type(&c, a, &UpdateType { icon: Some(Some("nope".into())), ..Default::default() }), Err(PlanError::IconInvalid));
         assert_eq!(create_type(&c, &NewType { icon: Some("nope".into()), ..ty(p, "X") }), Err(PlanError::IconInvalid));
+        // Lucide-Icons: bekannte und formal richtige unbekannte werden gespeichert, formal falsche abgelehnt.
+        update_type(&c, a, &UpdateType { icon: Some(Some("lucide:alarm-clock".into())), ..Default::default() }).unwrap();
+        assert_eq!(get_type(&c, a).unwrap().icon.as_deref(), Some("lucide:alarm-clock"));
+        let future = create_type(&c, &NewType { icon: Some("lucide:icon-from-the-future".into()), ..ty(proj(&c, "AB"), "Future") }).unwrap();
+        assert_eq!(get_type(&c, future).unwrap().icon.as_deref(), Some("lucide:icon-from-the-future"));
+        assert_eq!(update_type(&c, a, &UpdateType { icon: Some(Some("lucide:Bad Name".into())), ..Default::default() }), Err(PlanError::IconInvalid));
+        assert_eq!(update_type(&c, a, &UpdateType { icon: Some(Some("lucide:".into())), ..Default::default() }), Err(PlanError::IconInvalid));
+        // Alte Lucide-Namen: beim Speichern gleich der neue Name, ein schon gespeicherter alter Name wird beim Lesen
+        // übersetzt und beim nächsten Ändern des Typs neu geschrieben.
+        update_type(&c, a, &UpdateType { icon: Some(Some("lucide:alarm-check".into())), ..Default::default() }).unwrap();
+        let raw = |c: &Connection| -> Option<String> { c.query_row("SELECT icon FROM ticket_types WHERE id = ?1", [a], |r| r.get(0)).unwrap() };
+        assert_eq!(raw(&c).as_deref(), Some("lucide:alarm-clock-check"));
+        c.execute("UPDATE ticket_types SET icon = 'lucide:alarm-minus' WHERE id = ?1", [a]).unwrap();
+        assert_eq!(get_type(&c, a).unwrap().icon.as_deref(), Some("lucide:alarm-clock-minus"));
+        update_type(&c, a, &UpdateType { color: Some("#00ff00".into()), ..Default::default() }).unwrap();
+        assert_eq!(raw(&c).as_deref(), Some("lucide:alarm-clock-minus"));
+        let old = create_type(&c, &NewType { icon: Some("lucide:alarm-check".into()), ..ty(proj(&c, "AC"), "Old") }).unwrap();
+        assert_eq!(get_type(&c, old).unwrap().icon.as_deref(), Some("lucide:alarm-clock-check"));
         reorder_types(&c, p, &[k, a, b]).unwrap();
         assert_eq!(list_types(&c, p).unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), vec![k, a, b]);
         assert_eq!(reorder_types(&c, p, &[k, a]), Err(PlanError::ReorderMismatch));
