@@ -362,20 +362,21 @@ fn date_cmp(actual: &str, wanted: &str) -> Option<std::cmp::Ordering> {
     })
 }
 
-fn num_or_str_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+/// `due` = das Feld der Bedingung ist die eingebaute Fälligkeit: dann gilt [`date_cmp`], sonst der bisherige Vergleich.
+fn num_or_str_cmp(a: &Value, b: &Value, due: bool) -> Option<std::cmp::Ordering> {
     match (a.as_f64(), b.as_f64()) {
         (Some(x), Some(y)) => x.partial_cmp(&y),
         _ => match (a.as_str(), b.as_str()) {
-            (Some(x), Some(y)) => Some(date_cmp(x, y).unwrap_or_else(|| x.cmp(y))),
+            (Some(x), Some(y)) => Some(due.then(|| date_cmp(x, y)).flatten().unwrap_or_else(|| x.cmp(y))),
             _ => None,
         },
     }
 }
 
-fn same(a: &Value, b: &Value) -> bool {
+fn same(a: &Value, b: &Value, due: bool) -> bool {
     match (a.as_f64(), b.as_f64()) {
         (Some(x), Some(y)) => x == y,
-        _ if a.is_string() && b.is_string() => match date_cmp(a.as_str().unwrap_or_default(), b.as_str().unwrap_or_default()) {
+        _ if due && a.is_string() && b.is_string() => match date_cmp(a.as_str().unwrap_or_default(), b.as_str().unwrap_or_default()) {
             Some(o) => o.is_eq(),
             None => a == b,
         },
@@ -384,8 +385,9 @@ fn same(a: &Value, b: &Value) -> bool {
 }
 
 /// Trifft die Bedingung auf den aktuellen Wert des Feldes zu? Bei Listenwerten (Mehrfachauswahl, Labels) gilt `Eq`/`In` als
-/// „enthält“ und `Ne`/`NotIn` als „enthält nicht“.
-pub fn condition_matches(c: &Condition, actual: Option<&Value>) -> bool {
+/// „enthält“ und `Ne`/`NotIn` als „enthält nicht“. `due` = das Feld ist die eingebaute Fälligkeit (Vergleich wie in der
+/// Abfragesprache, #214).
+pub fn condition_matches(c: &Condition, actual: Option<&Value>, due: bool) -> bool {
     let contains_any = |wanted: &dyn Fn(&Value) -> bool| match actual {
         Some(Value::Array(a)) => a.iter().any(wanted),
         Some(v) if !v.is_null() => wanted(v),
@@ -394,17 +396,17 @@ pub fn condition_matches(c: &Condition, actual: Option<&Value>) -> bool {
     match c.op {
         ConditionOp::IsEmpty => is_empty_value(actual),
         ConditionOp::IsNotEmpty => !is_empty_value(actual),
-        ConditionOp::Eq => contains_any(&|v| same(v, &c.value)),
-        ConditionOp::Ne => !contains_any(&|v| same(v, &c.value)),
+        ConditionOp::Eq => contains_any(&|v| same(v, &c.value, due)),
+        ConditionOp::Ne => !contains_any(&|v| same(v, &c.value, due)),
         ConditionOp::In => {
             let list = c.value.as_array().cloned().unwrap_or_default();
-            contains_any(&|v| list.iter().any(|w| same(v, w)))
+            contains_any(&|v| list.iter().any(|w| same(v, w, due)))
         }
         ConditionOp::NotIn => {
             let list = c.value.as_array().cloned().unwrap_or_default();
-            !contains_any(&|v| list.iter().any(|w| same(v, w)))
+            !contains_any(&|v| list.iter().any(|w| same(v, w, due)))
         }
-        ConditionOp::Gt | ConditionOp::Ge | ConditionOp::Lt | ConditionOp::Le => match actual.and_then(|a| num_or_str_cmp(a, &c.value)) {
+        ConditionOp::Gt | ConditionOp::Ge | ConditionOp::Lt | ConditionOp::Le => match actual.and_then(|a| num_or_str_cmp(a, &c.value, due)) {
             Some(o) => match c.op {
                 ConditionOp::Gt => o.is_gt(),
                 ConditionOp::Ge => o.is_ge(),
@@ -417,10 +419,10 @@ pub fn condition_matches(c: &Condition, actual: Option<&Value>) -> bool {
 }
 
 /// Entscheidet, ob die Bedingungen eines Übergangs ihn erlauben (Regel siehe Moduldoku). `value_of` liefert den aktuellen
-/// Wert eines Feldes des Tickets.
-pub fn evaluate_conditions(conditions: &[Condition], value_of: &dyn Fn(i64) -> Option<Value>) -> bool {
+/// Wert eines Feldes des Tickets; `due_field` ist die Kennung der eingebauten Fälligkeit des Typs (falls vorhanden).
+pub fn evaluate_conditions(conditions: &[Condition], value_of: &dyn Fn(i64) -> Option<Value>, due_field: Option<i64>) -> bool {
     for c in conditions {
-        if condition_matches(c, value_of(c.field_id).as_ref()) {
+        if condition_matches(c, value_of(c.field_id).as_ref(), due_field == Some(c.field_id)) {
             return c.allow;
         }
     }
@@ -756,7 +758,9 @@ mod tests {
     #[test]
     fn condition_logic() {
         let cond = |op, value: Value, allow| Condition { field_id: 1, op, value, allow };
-        let m = |c: &Condition, v: Option<Value>| condition_matches(c, v.as_ref());
+        let m = |c: &Condition, v: Option<Value>| condition_matches(c, v.as_ref(), false);
+        // die eingebaute Fälligkeit (#214)
+        let md = |c: &Condition, v: Option<Value>| condition_matches(c, v.as_ref(), true);
         assert!(m(&cond(ConditionOp::Eq, json!(2), true), Some(json!(2.0))));
         assert!(!m(&cond(ConditionOp::Eq, json!(2), true), None));
         assert!(m(&cond(ConditionOp::Ne, json!(2), true), None));
@@ -764,14 +768,21 @@ mod tests {
         assert!(!m(&cond(ConditionOp::Gt, json!(2), true), Some(json!(2))) && m(&cond(ConditionOp::Ge, json!(2), true), Some(json!(2))));
         assert!(m(&cond(ConditionOp::Lt, json!("2026-02-01"), true), Some(json!("2026-01-31"))), "Datum als ISO-Text");
         // #214: Fälligkeit wie in der Abfragesprache (reines Datum = ganzer Tag bzw. Ende des Tages, Sekunden optional)
-        assert!(m(&cond(ConditionOp::Eq, json!("2026-11-20"), true), Some(json!("2026-11-20T14:30"))), "Datum trifft den ganzen Tag");
-        assert!(m(&cond(ConditionOp::Eq, json!("2026-11-20T14:30:00"), true), Some(json!("2026-11-20T14:30"))), "Sekunden optional");
-        assert!(!m(&cond(ConditionOp::Lt, json!("2026-11-20"), true), Some(json!("2026-11-20T09:00"))), "am selben Tag nicht davor");
-        assert!(m(&cond(ConditionOp::Le, json!("2026-11-20"), true), Some(json!("2026-11-20T09:00"))));
-        assert!(m(&cond(ConditionOp::Gt, json!("2026-11-20T14:30"), true), Some(json!("2026-11-20"))), "reines Datum = Ende des Tages");
-        assert!(!m(&cond(ConditionOp::Lt, json!("2026-11-20T14:30"), true), Some(json!("2026-11-20"))));
-        assert!(m(&cond(ConditionOp::In, json!(["2026-11-19", "2026-11-20"]), true), Some(json!("2026-11-20T08:00"))));
-        assert!(m(&cond(ConditionOp::Eq, json!("abc"), true), Some(json!("abc"))) && !m(&cond(ConditionOp::Eq, json!("abc"), true), Some(json!("abd"))), "Text bleibt Text");
+        assert!(md(&cond(ConditionOp::Eq, json!("2026-11-20"), true), Some(json!("2026-11-20T14:30"))), "Datum trifft den ganzen Tag");
+        assert!(md(&cond(ConditionOp::Eq, json!("2026-11-20T14:30:00"), true), Some(json!("2026-11-20T14:30"))), "Sekunden optional");
+        assert!(!md(&cond(ConditionOp::Lt, json!("2026-11-20"), true), Some(json!("2026-11-20T09:00"))), "am selben Tag nicht davor");
+        assert!(md(&cond(ConditionOp::Le, json!("2026-11-20"), true), Some(json!("2026-11-20T09:00"))));
+        assert!(md(&cond(ConditionOp::Gt, json!("2026-11-20T14:30"), true), Some(json!("2026-11-20"))), "reines Datum = Ende des Tages");
+        assert!(!md(&cond(ConditionOp::Lt, json!("2026-11-20T14:30"), true), Some(json!("2026-11-20"))));
+        assert!(md(&cond(ConditionOp::In, json!(["2026-11-19", "2026-11-20"]), true), Some(json!("2026-11-20T08:00"))));
+        assert!(md(&cond(ConditionOp::Eq, json!("abc"), true), Some(json!("abc"))) && !md(&cond(ConditionOp::Eq, json!("abc"), true), Some(json!("abd"))), "Text bleibt Text");
+        // andere Felder (eigenes Datum+Uhrzeit, Text) behalten den bisherigen Vergleich
+        assert!(!m(&cond(ConditionOp::Eq, json!("2026-11-20"), true), Some(json!("2026-11-20T14:30"))));
+        assert!(m(&cond(ConditionOp::Lt, json!("2026-11-20"), true), Some(json!("2026-11-19T23:00"))));
+        // nur die Bedingung auf dem Fälligkeitsfeld vergleicht als Fälligkeit
+        let on = |fid: i64| Condition { field_id: fid, op: ConditionOp::Eq, value: json!("2026-11-20"), allow: true };
+        let v = |_id: i64| Some(json!("2026-11-20T14:30"));
+        assert!(evaluate_conditions(&[on(1)], &v, Some(1)) && !evaluate_conditions(&[on(1)], &v, Some(2)) && !evaluate_conditions(&[on(1)], &v, None));
         assert!(!m(&cond(ConditionOp::Lt, json!(2), true), None), "kein Wert: Vergleich trifft nicht zu");
         assert!(m(&cond(ConditionOp::In, json!([1, 2]), true), Some(json!(2))));
         assert!(m(&cond(ConditionOp::NotIn, json!([1, 2]), true), Some(json!(3))));
@@ -783,18 +794,18 @@ mod tests {
         assert!(m(&cond(ConditionOp::Ne, json!(3), true), Some(json!([1, 2]))));
         // Auswertung
         let vals = |v: Option<Value>| move |_id: i64| v.clone();
-        assert!(evaluate_conditions(&[], &vals(None)), "keine Bedingungen: erlaubt");
+        assert!(evaluate_conditions(&[], &vals(None), None), "keine Bedingungen: erlaubt");
         let block = cond(ConditionOp::Eq, json!(1), false);
-        assert!(evaluate_conditions(&[block.clone()], &vals(Some(json!(2)))), "nur sperrende, keine trifft zu: erlaubt");
-        assert!(!evaluate_conditions(&[block.clone()], &vals(Some(json!(1)))));
+        assert!(evaluate_conditions(&[block.clone()], &vals(Some(json!(2))), None), "nur sperrende, keine trifft zu: erlaubt");
+        assert!(!evaluate_conditions(&[block.clone()], &vals(Some(json!(1))), None));
         let allow = cond(ConditionOp::Eq, json!(5), true);
-        assert!(evaluate_conditions(&[allow.clone()], &vals(Some(json!(5)))));
-        assert!(!evaluate_conditions(&[allow.clone()], &vals(Some(json!(6)))), "erlaubende Bedingung ohne Treffer: gesperrt");
+        assert!(evaluate_conditions(&[allow.clone()], &vals(Some(json!(5))), None));
+        assert!(!evaluate_conditions(&[allow.clone()], &vals(Some(json!(6))), None), "erlaubende Bedingung ohne Treffer: gesperrt");
         // die erste zutreffende entscheidet
-        assert!(!evaluate_conditions(&[block.clone(), allow.clone()], &vals(Some(json!(1)))));
+        assert!(!evaluate_conditions(&[block.clone(), allow.clone()], &vals(Some(json!(1))), None));
         let both = [cond(ConditionOp::Gt, json!(0), true), cond(ConditionOp::Eq, json!(7), false)];
-        assert!(!evaluate_conditions(&[both[1].clone(), both[0].clone()], &vals(Some(json!(7)))));
-        assert!(evaluate_conditions(&both, &vals(Some(json!(7)))), "Reihenfolge entscheidet");
+        assert!(!evaluate_conditions(&[both[1].clone(), both[0].clone()], &vals(Some(json!(7))), None));
+        assert!(evaluate_conditions(&both, &vals(Some(json!(7))), None), "Reihenfolge entscheidet");
     }
 
     #[test]

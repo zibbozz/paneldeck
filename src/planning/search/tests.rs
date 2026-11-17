@@ -459,6 +459,43 @@ fn keywords_on_the_built_in_due_field_compare_like_the_query_language() {
 }
 
 #[test]
+fn custom_datetime_fields_compare_with_and_without_stored_seconds() {
+    // #214 (gleiche Fehlerklasse): ein eigenes Datum+Uhrzeit-Feld; gespeichert wird `…:SS`, ein Wert ohne Sekunden (ältere oder
+    // von außen geschriebene Daten) muss genauso passen – in Abfragen, Schlüsselwort-Bedingungen und der Sortierung.
+    let f = Fx::new();
+    let fld = f.add_field(f.task, "Planned", FieldKind::Datetime, FieldOptions::default(), false);
+    let mk = |title: &str, v: &str| {
+        let mut n = NewTicket::new(f.project, f.task, title);
+        n.values.push((fld.id, json!(v)));
+        create_ticket(&f.c, &n, &ui()).unwrap().0
+    };
+    let a = mk("Normal", "2026-11-20T14:30");
+    let b = mk("Ohne Sekunden", "2026-11-20T14:30");
+    let c = mk("Später", "2026-11-21T08:00");
+    let stored: String = f.c.query_row("SELECT text FROM ticket_values WHERE ticket_id = ?1 AND field_id = ?2", [a.id, fld.id], |r| r.get(0)).unwrap();
+    assert_eq!(stored, "2026-11-20T14:30:00", "normal gespeichert mit Sekunden");
+    f.c.execute("UPDATE ticket_values SET text = '2026-11-20T14:30' WHERE ticket_id = ?1 AND field_id = ?2", [b.id, fld.id]).unwrap();
+    f.c.execute("UPDATE ticket_values SET text = '2026-11-21T08:00' WHERE ticket_id = ?1 AND field_id = ?2", [c.id, fld.id]).unwrap();
+    let (a, b, c) = (a.key(), b.key(), c.key());
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |jql: &str| -> Vec<String> { run_query(&f.c, &ctx, Scope::Project(f.project), jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    assert_eq!(q("Planned = \"2026-11-20 14:30\""), vec![a.clone(), b.clone()]);
+    assert_eq!(q("Planned >= \"2026-11-20 14:30\""), vec![a.clone(), b.clone(), c.clone()]);
+    assert_eq!(q("Planned > \"2026-11-20 14:30\""), vec![c.clone()]);
+    assert_eq!(q("Planned < \"2026-11-21 08:00\""), vec![a.clone(), b.clone()]);
+    // ohne die Regel der Fälligkeit: ein reines Datum ist Mitternacht
+    assert!(q("Planned = 2026-11-20").is_empty());
+    assert_eq!(q("Planned IS NOT EMPTY ORDER BY Planned DESC"), vec![c.clone(), a.clone(), b.clone()]);
+    let pred = |name: &str, op: ConditionOp, value: Value| {
+        create_keyword(&f.c, &NewKeyword { name: name.into(), description: String::new(), definition: Definition::Predicate { condition: Cond::Compare { field_id: fld.id, op, value } } }).unwrap();
+    };
+    pred("attime", ConditionOp::Eq, json!("2026-11-20T14:30"));
+    pred("fromtime", ConditionOp::Ge, json!("2026-11-20T14:30"));
+    assert_eq!(q("IS attime"), vec![a.clone(), b.clone()]);
+    assert_eq!(q("IS fromtime"), vec![a, b, c]);
+}
+
+#[test]
 fn every_custom_field_kind_is_searchable_by_name_and_key_also_on_user_types() {
     use crate::planning::types::{create_type, NewType};
     let f = Fx::new();

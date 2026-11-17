@@ -175,6 +175,15 @@ fn norm_datetime(s: &str) -> Option<String> {
 /// Fälligkeit als vergleichbarer Zeitpunkt `JJJJ-MM-TTTHH:MM:SS` (nur Datum = Ende des Tages).
 const DUE_EXPR: &str = "(CASE WHEN length(v.text) = 10 THEN v.text || 'T23:59:59' WHEN length(v.text) = 16 THEN v.text || ':00' ELSE v.text END)";
 
+/// Wert eines eigenen Datum+Uhrzeit-Feldes als vergleichbarer Zeitpunkt `JJJJ-MM-TTTHH:MM:SS`: ein gespeicherter Wert ohne
+/// Sekunden (`JJJJ-MM-TTTHH:MM`) bekommt `:00` – wie bei [`DUE_EXPR`], aber ohne die Regel „reines Datum = Ende des Tages“.
+const DT_EXPR: &str = "(CASE WHEN length(v.text) = 16 THEN v.text || ':00' ELSE v.text END)";
+
+/// Spalte zum Vergleich: Datum unverändert, Datum+Uhrzeit mit Sekunden ([`DT_EXPR`]).
+fn date_col(datetime: bool) -> &'static str {
+    if datetime { DT_EXPR } else { "v.text" }
+}
+
 fn parse_bool(s: &str) -> Option<bool> {
     match s.to_lowercase().as_str() {
         "true" | "yes" | "1" => Some(true),
@@ -588,7 +597,7 @@ impl<'a> Cx<'a> {
                     let n = if v.class == Class::Date { norm_date(s) } else { norm_datetime(s) };
                     if let Some(d) = n {
                         let p = self.text(&d);
-                        parts.push(format!("v.text {} {p}", if ordering { ord_sql } else { "=" }));
+                        parts.push(format!("{} {} {p}", date_col(v.class == Class::DateTime), if ordering { ord_sql } else { "=" }));
                     }
                 }
                 let cond = or_join(parts);
@@ -746,7 +755,7 @@ impl<'a> Cx<'a> {
                 let s = v.as_str()?;
                 let n = if f.kind == FieldKind::Date { norm_date(s) } else { norm_datetime(s) }?;
                 let p = self.text(&n);
-                Some(format!("v.text {o} {p}"))
+                Some(format!("{} {o} {p}", date_col(f.kind == FieldKind::Datetime)))
             }
         }
     }
@@ -879,7 +888,7 @@ impl<'a> Cx<'a> {
         let agg = |col: &str, f: &str| format!("(SELECT MIN({col}) FROM ticket_values v WHERE v.ticket_id = t.id AND {f})");
         Ok(match v.class {
             Class::Number | Class::Bool => vec![OExpr { sql: agg("v.num", &f), nocase: false, nullable: true }],
-            Class::Date | Class::DateTime => vec![OExpr { sql: agg("v.text", &f), nocase: false, nullable: true }],
+            Class::Date | Class::DateTime => vec![OExpr { sql: agg(date_col(v.class == Class::DateTime), &f), nocase: false, nullable: true }],
             Class::Due => vec![OExpr { sql: agg(DUE_EXPR, &f), nocase: false, nullable: true }],
             Class::Text | Class::Terminal => {
                 let mut sql = agg("v.text", &f);
