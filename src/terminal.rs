@@ -1032,3 +1032,22 @@ mod osc52_tests {
         assert!(!got.is_empty());
     }
 }
+
+#[cfg(all(test, windows))]
+mod win_env_tests {
+    use portable_pty::CommandBuilder;
+
+    /// Die Standard-Umgebung eines Terminals (portable-pty frischt sie aus der Registry auf) muss den angemeldeten
+    /// Benutzer behalten: HKLM\...\Session Manager\Environment enthält `USERNAME=SYSTEM`, das wie bei
+    /// CreateEnvironmentBlock nicht übernommen werden darf. Auch die Benutzer-Variablen der Anmeldung bleiben.
+    #[test]
+    fn registry_refresh_keeps_the_current_user() {
+        let cmd = CommandBuilder::new("cmd.exe");
+        for k in ["USERNAME", "USERDOMAIN", "USERPROFILE"] {
+            if let Some(want) = std::env::var_os(k) {
+                assert_eq!(cmd.get_env(k), Some(want.as_os_str()), "{k} aus der Prozessumgebung, nicht aus HKLM");
+            }
+        }
+        assert_ne!(cmd.get_env("USERNAME").map(|v| v.to_ascii_uppercase()), Some("SYSTEM".into()));
+    }
+}
