@@ -417,11 +417,39 @@ pub struct JobProc {
     pub window: bool,
 }
 
-/// Welche Prozesse eines Jobs überleben das Schließen der Sitzung? Alle außer der Shell, den Prozessen, die an ihrer
-/// Konsole hängen (die beendet ConPTY beim Schließen ohnehin, z. B. ein laufendes `claude` oder `vim`), und
-/// Konsolen-Hosts (`conhost.exe`, `OpenConsole.exe`). `console = None`: Konsole nicht zu ermitteln (Shell beendet) –
-/// dann zählt alles außer Shell und Konsolen-Hosts.
-pub fn survivors(job: &[u32], shell: Option<u32>, console: Option<&[u32]>, name_of: impl Fn(u32) -> String) -> Vec<u32> {
+/// Welche Prozesse eines Jobs überleben das Schließen der Sitzung? Alle außer
+/// * der Shell und den Prozessen, die an ihrer Konsole hängen (die beendet ConPTY beim Schließen ohnehin, z. B. ein
+///   laufendes `claude` oder `vim`),
+/// * Konsolen-Hosts (`conhost.exe`, `OpenConsole.exe`),
+/// * Hilfsprozessen eines Vordergrundprogramms (#213): ohne sichtbares Fenster, gestartet von einem Prozess an der
+///   Konsole der Shell (nicht von der Shell selbst) oder von einem solchen Hilfsprozess – z. B. die stdio-MCP-Server und
+///   Werkzeugaufrufe von Claude Code. Sie laufen mit `CREATE_NO_WINDOW` in einer eigenen, unsichtbaren Konsole, hängen
+///   aber an den Pipes ihres Elternprozesses und enden mit ihm. Weiter gezählt werden Programme mit Fenster, alles, was
+///   die Shell selbst startet (`Start-Process`, `start`), und Prozesse, deren Elternprozess nicht mehr im Job läuft.
+///
+/// `console = None`: Konsole nicht zu ermitteln (Shell beendet) – dann zählt alles außer Shell und Konsolen-Hosts.
+/// `parent_of`: Elternprozess (nur einer im Job, der vor dem Kind entstand, [`job_parents`]); `has_window`: hat ein
+/// sichtbares Fenster.
+pub fn survivors(job: &[u32], shell: Option<u32>, console: Option<&[u32]>, parent_of: impl Fn(u32) -> Option<u32>, has_window: impl Fn(u32) -> bool, name_of: impl Fn(u32) -> String) -> Vec<u32> {
+    // Hilfsprozess eines Vordergrundprogramms: über Prozesse ohne Fenster im Job bis zu einem an der Konsole (≠ Shell).
+    let helper = |p: u32| {
+        let Some(c) = console else { return false };
+        let mut cur = p;
+        for _ in 0..32 {
+            if has_window(cur) {
+                return false;
+            }
+            let Some(q) = parent_of(cur) else { return false };
+            if q == cur || !job.contains(&q) || Some(q) == shell {
+                return false;
+            }
+            if c.contains(&q) {
+                return true;
+            }
+            cur = q;
+        }
+        false
+    };
     job.iter()
         .copied()
         .filter(|p| Some(*p) != shell && !console.is_some_and(|c| c.contains(p)))
@@ -429,7 +457,25 @@ pub fn survivors(job: &[u32], shell: Option<u32>, console: Option<&[u32]>, name_
             let n = name_of(*p).to_ascii_lowercase();
             n != "conhost.exe" && n != "openconsole.exe"
         })
+        .filter(|p| !helper(*p))
         .collect()
+}
+
+/// Elternprozesse der Prozesse `pids` (eines Jobs), soweit der Elternprozess selbst in `pids` liegt und vor dem Kind
+/// entstand (sonst gehört die Eltern-PID einem früheren Prozess) – für [`survivors`].
+#[cfg(windows)]
+pub fn job_parents(pids: &[u32]) -> std::collections::HashMap<u32, u32> {
+    let born: std::collections::HashMap<u32, u64> = pids.iter().filter_map(|p| Proc::open(*p).and_then(|h| h.created()).map(|t| (*p, t))).collect();
+    process_parents()
+        .into_iter()
+        .filter(|(c, p)| c != p && pids.contains(c) && pids.contains(p))
+        .filter(|(c, p)| matches!((born.get(p), born.get(c)), (Some(tp), Some(tc)) if tp <= tc))
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn job_parents(_pids: &[u32]) -> std::collections::HashMap<u32, u32> {
+    std::collections::HashMap::new()
 }
 
 /// Prozesse, die an derselben Konsole hängen wie `pid` (die Shell einer Sitzung). Der Hub hängt sich dafür kurz an diese
@@ -567,7 +613,8 @@ pub fn lingering(job: &SessionJob, shell: Option<u32>, info: &ProcInfo) -> Vec<J
     }
     let console = shell.and_then(console_pids);
     let names = info.names();
-    let keep = survivors(&pids, shell, console.as_deref(), |p| names.get(&p).cloned().unwrap_or_default());
+    let parents = job_parents(&pids);
+    let keep = survivors(&pids, shell, console.as_deref(), |p| parents.get(&p).copied(), |p| info.windows().contains_key(&p), |p| names.get(&p).cloned().unwrap_or_default());
     if keep.is_empty() {
         return Vec::new();
     }
@@ -954,12 +1001,42 @@ mod peer_tests {
             8 => "OpenConsole.exe".to_string(),
             _ => "x.exe".to_string(),
         };
+        let none = |_: u32| None;
+        let no_win = |_: u32| false;
         // Shell 1, an ihrer Konsole 1 und 2 (z. B. claude im Vordergrund); 3 losgelöst; 7/8 Konsolen-Hosts
-        assert_eq!(survivors(&[1, 2, 3, 7, 8], Some(1), Some(&[1, 2]), names), [3]);
-        assert_eq!(survivors(&[1, 2], Some(1), Some(&[1, 2]), names), Vec::<u32>::new(), "nur Vordergrund: nichts");
+        assert_eq!(survivors(&[1, 2, 3, 7, 8], Some(1), Some(&[1, 2]), none, no_win, names), [3]);
+        assert_eq!(survivors(&[1, 2], Some(1), Some(&[1, 2]), none, no_win, names), Vec::<u32>::new(), "nur Vordergrund: nichts");
         // Konsole unbekannt (Shell beendet): alles außer Shell und Hosts
-        assert_eq!(survivors(&[1, 2, 3, 7], Some(1), None, names), [2, 3]);
-        assert_eq!(survivors(&[2, 3], None, None, names), [2, 3]);
+        assert_eq!(survivors(&[1, 2, 3, 7], Some(1), None, none, no_win, names), [2, 3]);
+        assert_eq!(survivors(&[2, 3], None, None, none, no_win, names), [2, 3]);
+    }
+
+    #[test]
+    fn helpers_of_a_foreground_program_do_not_count_as_survivors() {
+        let names = |_: u32| "x.exe".to_string();
+        // Shell 1, claude 2 an der Konsole; 3 = MCP-Server von claude (eigene unsichtbare Konsole), 4 = dessen Kind,
+        // 5 = von der Shell gestartet (Start-Process), 6 = Fenster-Programm von claude, 9 = Kind des Fensterprogramms,
+        // 10 = Elternprozess nicht im Job (verwaist).
+        let parent = |p: u32| match p {
+            2 | 5 => Some(1),
+            3 | 6 => Some(2),
+            4 => Some(3),
+            9 => Some(6),
+            10 => Some(99),
+            _ => None,
+        };
+        let window = |p: u32| p == 6;
+        let job = [1, 2, 3, 4, 5, 6, 9, 10];
+        assert_eq!(survivors(&job, Some(1), Some(&[1, 2]), parent, window, names), [5, 6, 9, 10]);
+        // Konsole unbekannt: keine Ausnahme für Hilfsprozesse (das Vordergrundprogramm ist nicht zu bestimmen)
+        assert_eq!(survivors(&job, Some(1), None, parent, window, names), [2, 3, 4, 5, 6, 9, 10]);
+        // Schleife in den Eltern-PIDs bricht ab
+        let looped = |p: u32| match p {
+            3 => Some(4),
+            4 => Some(3),
+            _ => None,
+        };
+        assert_eq!(survivors(&[1, 3, 4], Some(1), Some(&[1]), looped, |_| false, names), [3, 4]);
     }
 
     /// Hilfsprozess ohne Konsole (`DETACHED_PROCESS`) für [`lingering_processes_are_listed_and_end_all_ends_them`]: meldet
@@ -1021,7 +1098,8 @@ mod peer_tests {
         assert!(console.contains(&shell.id()) && fg.iter().all(|p| console.contains(p)), "Shell und Vordergrund an der Konsole: {console:?}");
         assert!(!console.contains(&bg.id()));
         let names = process_names();
-        let keep = survivors(&pids, Some(shell.id()), Some(&console), |p| names.get(&p).cloned().unwrap_or_default());
+        let parents = job_parents(&pids);
+        let keep = survivors(&pids, Some(shell.id()), Some(&console), |p| parents.get(&p).copied(), |_| false, |p| names.get(&p).cloned().unwrap_or_default());
         assert_eq!(keep, [bg.id()], "nur der losgelöste Prozess überlebt das Schließen");
         assert_eq!(names.get(&bg.id()).map(|n| n.to_ascii_lowercase()), Some("ping.exe".into()));
         // „Alle beenden“
@@ -1033,6 +1111,79 @@ mod peer_tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(job.pids().is_empty(), "alle beendet");
+    }
+
+    #[test]
+    fn a_hidden_console_helper_of_a_foreground_program_is_not_lingering() {
+        use std::io::BufRead;
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        let exe = std::env::current_exe().unwrap();
+        // „Shell“ (cmd, eigene unsichtbare Konsole) mit einem Vordergrundprogramm daran (PowerShell; der Testprozess
+        // selbst ist im Release-Build ein GUI-Programm ohne Konsole). Es startet ein Kind mit CREATE_NO_WINDOW
+        // (`CreateNoWindow`, wie Claude Code seine stdio-MCP-Server) in einer eigenen Konsole und wartet darauf.
+        let ps = "$i=New-Object Diagnostics.ProcessStartInfo 'ping','-n 30 127.0.0.1'; $i.UseShellExecute=$false; $i.CreateNoWindow=$true; [Diagnostics.Process]::Start($i).WaitForExit()";
+        let mut shell = std::process::Command::new("cmd").raw_arg(format!("/c powershell -NoProfile -NonInteractive -Command \"{ps}\"")).creation_flags(CREATE_NO_WINDOW).spawn().unwrap();
+        let job = SessionJob::new().expect("Job");
+        assert!(job.adopt(shell.as_raw_handle(), shell.id()));
+        let t0 = std::time::Instant::now();
+        let (fg, mcp) = loop {
+            let names = process_names();
+            let procs = process_parents();
+            let kid = |parent: u32, name: &str| procs.iter().find(|(c, p)| *p == parent && names.get(c).is_some_and(|n| n.eq_ignore_ascii_case(name))).map(|(c, _)| *c);
+            let fg = kid(shell.id(), "powershell.exe");
+            let mcp = fg.and_then(|f| kid(f, "ping.exe"));
+            if let (Some(f), Some(m)) = (fg, mcp) {
+                break (f, m);
+            }
+            assert!(t0.elapsed() < std::time::Duration::from_secs(20), "Vordergrundprogramm und Kind gestartet");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let pids = job.pids();
+        assert!([shell.id(), fg, mcp].iter().all(|p| pids.contains(p)), "alle im Job: {pids:?}");
+        // Konsole der Shell aus einem Prozess ohne eigene Konsole bestimmen
+        let out = std::process::Command::new(&exe)
+            .args(["--exact", "winctl::peer_tests::job_console_helper", "--nocapture", "--test-threads=1"])
+            .env("PANELDECK_CONSOLE_OF", shell.id().to_string())
+            .creation_flags(DETACHED_PROCESS)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let line = out.stdout.lines().map_while(Result::ok).find_map(|l| l.find("CONSOLE ").map(|i| l[i + 8..].to_string())).expect("Ausgabe des Hilfsprozesses");
+        let console: Vec<u32> = line.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        assert!(console.contains(&shell.id()) && console.contains(&fg), "Shell und Vordergrund an der Konsole: {console:?}");
+        assert!(!console.contains(&mcp), "CREATE_NO_WINDOW: eigene, unsichtbare Konsole: {console:?}");
+        let names = process_names();
+        let name = |p: u32| names.get(&p).cloned().unwrap_or_default();
+        // 2.3.0: das Kind zählte als Hintergrundprozess (Fehlalarm, #213)
+        let old = survivors(&pids, Some(shell.id()), Some(&console), |_| None, |_| false, name);
+        assert!(old.contains(&mcp), "ohne Elternprüfung: Fehlalarm {old:?}");
+        let parents = job_parents(&pids);
+        assert_eq!(parents.get(&mcp), Some(&fg), "Elternprozess im Job: {parents:?}");
+        let keep = survivors(&pids, Some(shell.id()), Some(&console), |p| parents.get(&p).copied(), |_| false, name);
+        assert!(keep.is_empty(), "Hilfsprozess des Vordergrundprogramms überlebt nicht: {keep:?}");
+        assert!(job.terminate_all());
+        let _ = shell.wait();
+    }
+
+    #[test]
+    fn dropping_a_process_handle_closes_it() {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+        let count = || {
+            let mut n = 0u32;
+            // SAFETY: Pseudo-Handle des eigenen Prozesses; `n` ist ein lokaler Ausgabewert.
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut n) };
+            n
+        };
+        let before = count();
+        for _ in 0..500 {
+            let h = Proc::open(std::process::id()).expect("eigener Prozess");
+            assert!(h.alive());
+        }
+        // Andere Tests laufen parallel und öffnen eigene Handles; 500 vergessene wären deutlich zu sehen.
+        assert!(count() < before + 250, "Handles geschlossen: {before} → {}", count());
     }
 
     #[test]

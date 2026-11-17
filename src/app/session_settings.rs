@@ -608,7 +608,7 @@ impl App {
         match o {
             Outcome::Go | Outcome::Keep => {
                 if o == Outcome::Go && jobs {
-                    actions.push(Action::EndJobs(vec![ask.id]));
+                    actions.push(Action::EndJobs(super::closing::job_refs(&ask.lingering)));
                 }
                 actions.push(Action::Restart(ask.id));
                 // Den Fokus nur holen, wenn die Sitzung hier im Layout steht (nicht minimiert, nicht in einem anderen Fenster).

@@ -71,8 +71,22 @@ impl CloseAsk {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Lingering {
     pub(super) id: u64,
+    /// Job Object der Sitzung beim Öffnen der Rückfrage (`terminal::Session::job_key`). „Alle beenden“ gilt nur diesem
+    /// Job: Wurde die Sitzung inzwischen neu gestartet, hat sie einen neuen (#213).
+    pub(super) job: u64,
     pub(super) name: String,
     pub(super) procs: Vec<JobProc>,
+}
+
+/// Was „Alle beenden“ beendet: (Sitzung, Job beim Öffnen der Rückfrage) je Sitzung mit Hintergrundprozessen.
+pub(super) fn job_refs(list: &[Lingering]) -> Vec<(u64, u64)> {
+    list.iter().map(|l| (l.id, l.job)).collect()
+}
+
+/// Sitzungen aus `refs`, deren Job noch derselbe ist wie beim Öffnen der Rückfrage (`current` = Job jetzt, `None` ohne
+/// laufende Sitzung). Eine inzwischen neu gestartete Sitzung bleibt unberührt (#213).
+pub(super) fn jobs_to_end(refs: &[(u64, u64)], current: impl Fn(u64) -> Option<u64>) -> Vec<u64> {
+    refs.iter().filter(|(id, job)| current(*id) == Some(*job)).map(|(id, _)| *id).collect()
 }
 
 /// Eine Zeile je Prozess: „notepad.exe (PID 42) · Fenster offen – Titel“.
@@ -366,16 +380,19 @@ impl App {
         ids.iter()
             .filter_map(|id| {
                 let e = self.entries.get(id)?;
-                let procs = e.live.as_ref()?.lingering(&info);
-                (!procs.is_empty()).then(|| Lingering { id: *id, name: e.display_name(), procs })
+                let live = e.live.as_ref()?;
+                let procs = live.lingering(&info);
+                (!procs.is_empty()).then(|| Lingering { id: *id, job: live.job_key().unwrap_or_default(), name: e.display_name(), procs })
             })
             .collect()
     }
 
-    /// „Alle beenden“: alle Prozesse in den Jobs dieser Sitzungen beenden (#168).
-    pub(super) fn end_jobs(&mut self, ids: &[u64]) {
-        for id in ids {
-            if let Some(s) = self.entries.get(id).and_then(|e| e.live.as_ref()) {
+    /// „Alle beenden“: alle Prozesse in den Jobs dieser Sitzungen beenden (#168) – nur, solange es noch der Job von der
+    /// Rückfrage ist (`refs` = (Sitzung, Job), [`job_refs`]); eine inzwischen neu gestartete Sitzung bleibt (#213).
+    pub(super) fn end_jobs(&mut self, refs: &[(u64, u64)]) {
+        let live = |id: u64| self.entries.get(&id).and_then(|e| e.live.as_ref());
+        for id in jobs_to_end(refs, |id| live(id).and_then(|s| s.job_key())) {
+            if let Some(s) = live(id) {
                 s.end_job();
             }
         }
@@ -450,7 +467,7 @@ impl App {
                     lingering_section(ui, &ask.lingering, lang, false);
                 });
                 match o {
-                    Outcome::Go if jobs => actions.extend([Action::EndJobs(vec![*id]), Action::Close(*id)]),
+                    Outcome::Go if jobs => actions.extend([Action::EndJobs(job_refs(&ask.lingering)), Action::Close(*id)]),
                     Outcome::Go | Outcome::Keep => actions.push(Action::Close(*id)),
                     _ => {}
                 }
@@ -464,8 +481,7 @@ impl App {
                 match o {
                     Outcome::Go | Outcome::Keep => {
                         if o == Outcome::Go {
-                            let ids: Vec<u64> = ask.lingering.iter().map(|l| l.id).collect();
-                            self.end_jobs(&ids);
+                            self.end_jobs(&job_refs(&ask.lingering));
                         }
                         self.quit_ok = true;
                         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
@@ -516,7 +532,7 @@ impl App {
                 });
                 let ids: Vec<u64> = items.iter().map(|i| i.id).collect();
                 match o {
-                    Outcome::Go if jobs => actions.extend([Action::EndJobs(ids.clone()), Action::CloseMany(ids)]),
+                    Outcome::Go if jobs => actions.extend([Action::EndJobs(job_refs(&ask.lingering)), Action::CloseMany(ids)]),
                     Outcome::Go | Outcome::Keep => actions.push(Action::CloseMany(ids)),
                     _ => {}
                 }
@@ -538,6 +554,19 @@ mod tests {
 
     fn item(id: u64) -> CloseItem {
         CloseItem { id, name: format!("s{id}"), project: "P".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn end_all_only_hits_the_job_from_the_prompt() {
+        let list = [Lingering { id: 1, job: 10, ..Default::default() }, Lingering { id: 2, job: 20, ..Default::default() }, Lingering { id: 3, job: 30, ..Default::default() }];
+        assert_eq!(job_refs(&list), [(1, 10), (2, 20), (3, 30)]);
+        // 1 unverändert, 2 inzwischen neu gestartet (neuer Job), 3 läuft nicht mehr bzw. ist geschlossen
+        let now = |id: u64| match id {
+            1 => Some(10),
+            2 => Some(21),
+            _ => None,
+        };
+        assert_eq!(jobs_to_end(&job_refs(&list), now), [1]);
     }
 
     #[test]
@@ -767,15 +796,15 @@ mod tests {
         assert_eq!(proc_line(&jp(42, "notepad.exe", "Editor"), Lang::En), "notepad.exe (PID 42) · window open – Editor");
         assert_eq!(proc_line(&jp(7, "node.exe", ""), Lang::En), "node.exe (PID 7)");
         // Warnung: ohne Speichern; mit Fenstern zusätzlich der Rat, vorher selbst zu schließen
-        let quiet = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "node.exe", "")] }];
-        let win = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "code.exe", "proj")] }];
+        let quiet = [Lingering { id: 1, job: 1, name: "A".into(), procs: vec![jp(1, "node.exe", "")] }];
+        let win = [Lingering { id: 1, job: 1, name: "A".into(), procs: vec![jp(1, "code.exe", "proj")] }];
         assert!(end_all_warning(&quiet, Lang::En).contains("without saving") && !end_all_warning(&quiet, Lang::En).contains("window"));
         assert!(end_all_warning(&win, Lang::En).contains("open window"));
         assert!(end_all_warning(&win, Lang::De).contains("ohne zu speichern") && end_all_warning(&win, Lang::De).contains("offenem Fenster"));
-        let one = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "a.exe", "")] }];
+        let one = [Lingering { id: 1, job: 1, name: "A".into(), procs: vec![jp(1, "a.exe", "")] }];
         assert_eq!(lingering_intro(&one, Lang::En), "1 background process is still running and stays after closing unless you end it:");
         assert_eq!(lingering_intro(&one, Lang::De), "1 Hintergrundprozess läuft noch und bleibt nach dem Schließen bestehen, wenn du ihn nicht beendest:");
-        let two = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "a.exe", ""), jp(2, "b.exe", "")] }, Lingering { id: 2, name: "B".into(), procs: vec![jp(3, "c.exe", "")] }];
+        let two = [Lingering { id: 1, job: 1, name: "A".into(), procs: vec![jp(1, "a.exe", ""), jp(2, "b.exe", "")] }, Lingering { id: 2, job: 2, name: "B".into(), procs: vec![jp(3, "c.exe", "")] }];
         assert_eq!(lingering_intro(&two, Lang::En), "3 background processes in 2 sessions are still running and stay after closing unless you end them:");
         assert!(lingering_intro(&two[..1], Lang::De).starts_with("2 Hintergrundprozesse laufen noch"));
         assert_ne!(keep_label(Lang::De), keep_label(Lang::En));

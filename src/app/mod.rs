@@ -376,7 +376,8 @@ enum Action {
     RequestClose(u64),
     Close(u64),
     /// „Alle beenden“ (#168): alle Prozesse im Job dieser Sitzungen beenden (vor `Close`/`CloseMany`/`Restart`).
-    EndJobs(Vec<u64>),
+    /// (Sitzung, Job beim Öffnen der Rückfrage) – ein inzwischen neu gestarteter Job bleibt (#213).
+    EndJobs(Vec<(u64, u64)>),
     Split(u64, Dir),
     SplitAt(u64, Dir, bool),
     /// Bereich minimieren: aus dem Layout nehmen, Sitzung läuft weiter (`App::minimize_pane`).
@@ -649,6 +650,10 @@ struct WtClose {
     id: u64,
     changes: usize,
     discard: bool,
+    /// Hintergrundprozesse im Job der Sitzung beim Öffnen (#168, #213).
+    lingering: Vec<closing::Lingering>,
+    /// „Hintergrundprozesse beenden“ angehakt.
+    end_jobs: bool,
 }
 
 struct Palette {
@@ -3622,10 +3627,27 @@ impl App {
                 self.new_dialog = Some(d);
             }
             Action::FolderRestartAll(path) => {
+                // Wie „Neu laden“ (#213): Hat eine beendete Sitzung noch Hintergrundprozesse im Job, wird erst gefragt
+                // (eine Rückfrage zur Zeit; weitere solche Sitzungen bleiben und werden gemeldet).
+                let mut skipped = 0;
                 for id in self.folder_sessions(&path) {
-                    if self.entries.get(&id).is_some_and(|e| !e.is_chat() && e.exited()) {
-                        self.apply(ctx, Action::Restart(id));
+                    if !self.entries.get(&id).is_some_and(|e| !e.is_chat() && e.exited()) {
+                        continue;
                     }
+                    if self.lingering_of(&[id]).is_empty() {
+                        self.apply(ctx, Action::Restart(id));
+                    } else if self.reload_ask.is_none() {
+                        self.request_reload(ctx, id);
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                if skipped > 0 {
+                    let lang = self.settings.language;
+                    self.notify_text(match lang {
+                        Lang::De => format!("{skipped} weitere beendete Sitzung(en) mit Hintergrundprozessen nicht neu gestartet – bitte einzeln neu starten."),
+                        Lang::En => format!("{skipped} more ended session(s) with background processes not restarted – please restart them one by one."),
+                    });
                 }
             }
             Action::CloseAll(scope) => self.request_close_many(scope),
@@ -3698,7 +3720,9 @@ impl App {
                     .and_then(|e| e.meta.worktree.as_ref())
                     .map(|w| gitops::status(std::path::Path::new(&w.path)).map(|c| c.len()).unwrap_or(0))
                     .unwrap_or(0);
-                self.wt_close = Some(WtClose { id, changes, discard: false });
+                // Hintergrundprozesse im Job (#213): auch hier nennen; sie können den Ordner belegt halten.
+                let lingering = self.lingering_of(&[id]);
+                self.wt_close = Some(WtClose { id, changes, discard: false, lingering, end_jobs: false });
             }
             Action::RequestClose(id) => {
                 // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft). Hintergrundprozesse
@@ -4302,8 +4326,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                 ui.scope_builder(UiBuilder::new().max_rect(bar.shrink2(Vec2::new(8.0, 3.0))), |ui| {
                     ui.horizontal(|ui| {
                         ui.colored_label(Color32::from_gray(220), lang.t("Prozess beendet.", "Process exited."));
+                        // Wie „Neu laden“: mit Hintergrundprozessen im Job erst fragen (#213).
                         if ui.button(lang.t("Neu starten", "Restart")).clicked() {
-                            cx.actions.push(Action::Restart(id));
+                            cx.actions.push(Action::RequestReload(id));
                         }
                     });
                 });
@@ -4315,7 +4340,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             ui.scope_builder(UiBuilder::new().max_rect(body.shrink(12.0)), |ui| {
                 ui.colored_label(Color32::LIGHT_RED, format!("{}: {msg}", lang.t("Start fehlgeschlagen", "Failed to start")));
                 if ui.button(lang.t("Neu starten", "Restart")).clicked() {
-                    cx.actions.push(Action::Restart(id));
+                    cx.actions.push(Action::RequestReload(id));
                 }
             });
         }

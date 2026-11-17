@@ -993,7 +993,7 @@ impl App {
                             ui.add_enabled(false, egui::Button::new(lang.t("Schließen, alle beenden", "Close and end all")))
                         };
                         if end.clicked() && secs == 0 && plan.can_close() {
-                            actions.push(Action::EndJobs(lingering.iter().map(|l| l.id).collect()));
+                            actions.push(Action::EndJobs(super::closing::job_refs(&lingering)));
                             w.ask_close = false;
                             w.close = true;
                         }
