@@ -235,7 +235,7 @@ impl Listener {
     pub fn push_reply(&self, r: Reply) {
         let mut q = self.replies.lock().unwrap_or_else(|e| e.into_inner());
         // Ein Programm, das in einer Schleife fragt, soll den Speicher nicht füllen (nach jedem Stück wird geleert).
-        if q.len() < 4096 {
+        if q.len() < REPLIES_MAX {
             q.push(r);
         }
     }
@@ -266,6 +266,10 @@ impl Listener {
         self.replies.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
+
+/// Höchstzahl wartender Antworten (Reihe des Listeners, ebenso die bis zum Ende eines Synchronized Update
+/// zurückgehaltenen, #212); weitere Anfragen bleiben unbeantwortet.
+const REPLIES_MAX: usize = 4096;
 
 /// Emulator-Einstellungen eines Terminals. OSC 52 nur zum Kopieren: Programme dürfen die Zwischenablage
 /// beschreiben, aber nie lesen (`ClipboardLoad` wird gar nicht erst ausgelöst).
@@ -552,6 +556,7 @@ impl Session {
                 let hist_track = hist_track;
                 let mut win32_scan = crate::vtkeys::Win32ModeScanner::default();
                 let mut kitty_guard = crate::vtkeys::KittyStackGuard::default();
+                let mut osc_limit = crate::osc::OscLimit::default();
                 // Antworten des Scanners, während ein „Synchronized Update“ (CSI ?2026h) puffert: vte verarbeitet den
                 // Block erst an seinem Ende, dessen Antworten kämen sonst nach unseren.
                 let mut deferred: Vec<Reply> = Vec::new();
@@ -563,7 +568,9 @@ impl Session {
                     match msg {
                         Ok(bytes) => {
                             activity.store(mono_ms(), Ordering::Relaxed);
-                            // kitty-Stapel begrenzen, bevor alacritty ihn sieht (Absturz bei 4097 Pushes).
+                            // Nie beendete OSC kappen (vte puffert sie sonst ohne Grenze, #212) und den kitty-Stapel
+                            // begrenzen (Absturz bei 4097 Pushes), bevor alacritty beides sieht.
+                            let bytes = osc_limit.filter(&bytes);
                             let bytes = kitty_guard.filter(&bytes).into_owned();
                             // win32-input-mode gibt es nur unter ConPTY.
                             if cfg!(windows) {
@@ -1051,7 +1058,10 @@ fn process_chunk<T: EventListener>(processor: &mut Processor, t: &mut Term<T>, b
                 // In die Reihe der Antworten: nach allem, was davor im Strom stand – während eines Synchronized Update
                 // erst nach dem Block (`release_deferred`).
                 if p.sync_timeout().sync_timeout().is_some() {
-                    deferred.push(Reply::Query(*q));
+                    // Begrenzt (#212): Ein Programm kann den Block mit immer neuen `?2026h` endlos offen halten.
+                    if deferred.len() < REPLIES_MAX {
+                        deferred.push(Reply::Query(*q));
+                    }
                 } else {
                     // Ein Block, der in diesem Stück endete: dessen zurückgehaltene Antworten zuerst.
                     release_deferred(p, lst, deferred);
@@ -2224,6 +2234,7 @@ mod vt_reply_tests {
         stale: AtomicBool,
         deferred: Vec<Reply>,
         guard: crate::vtkeys::KittyStackGuard,
+        osc_limit: crate::osc::OscLimit,
         hs: HistoryTrack,
         pending: Option<u64>,
     }
@@ -2253,6 +2264,7 @@ mod vt_reply_tests {
                 stale: AtomicBool::new(false),
                 deferred: Vec::new(),
                 guard: Default::default(),
+                osc_limit: Default::default(),
                 hs: HistoryTrack::new(100, Arc::new(std::sync::atomic::AtomicU64::new(0))),
                 pending: None,
             }
@@ -2264,8 +2276,9 @@ mod vt_reply_tests {
 
         /// Ausgabe des Programms verarbeiten (wie der PTY-Thread) und die Antworten an das Programm liefern.
         fn feed(&mut self, s: &str) -> String {
-            // wie der Lese-Thread: erst der kitty-Wächter, dann Scanner und Emulation
-            let bytes = self.guard.filter(s.as_bytes()).into_owned();
+            // wie der Lese-Thread: erst die OSC-Grenze und der kitty-Wächter, dann Scanner und Emulation
+            let bytes = self.osc_limit.filter(s.as_bytes()).into_owned();
+            let bytes = self.guard.filter(&bytes).into_owned();
             let bytes = &bytes[..];
             let scanned = self.scanner.feed_at(bytes);
             let mut rd = ReaderState { hs: &self.hs, pending: &mut self.pending, lst: &self.lst, shell_state: &self.shell, stale: &self.stale, deferred: &mut self.deferred, kitty_guard: &mut self.guard };
@@ -2291,6 +2304,51 @@ mod vt_reply_tests {
         assert_eq!(out, "");
         let out = r.feed("\x1b[?2026l\x1b[16t");
         assert!(out.starts_with("\x1bP>|Paneldeck ") && out.ends_with("\x1b\\\x1b[6;18;9t"), "{out:?}");
+    }
+
+    /// #212: Ein Synchronized Update, das mit immer neuen `?2026h` offen bleibt, sammelt nicht endlos Antworten an.
+    #[test]
+    fn deferred_replies_are_bounded() {
+        let mut r = Rig::new();
+        let flood = "\x1b[?2026h\x1b[16t".repeat(1000);
+        for _ in 0..20 {
+            assert_eq!(r.feed(&flood), "");
+            assert!(r.deferred.len() <= REPLIES_MAX, "{}", r.deferred.len());
+        }
+        assert_eq!(r.deferred.len(), REPLIES_MAX);
+        // Endet der Block doch, kommen die gesammelten Antworten (höchstens die Grenze).
+        let out = r.feed("\x1b[?2026l");
+        assert_eq!(out.matches("\x1b[6;18;9t").count(), REPLIES_MAX);
+        assert!(r.deferred.is_empty());
+        assert_eq!(r.feed("\x1b[16t"), "\x1b[6;18;9t");
+    }
+
+    /// #212: Ein nie beendetes OSC (`printf '\e]0;'; yes`) wächst im Lese-Weg nicht über die Grenze; danach geht alles
+    /// normal weiter.
+    #[test]
+    fn unterminated_osc_is_bounded() {
+        // Kleine Grenze, deren Ausgabe hier gezählt wird; die des Rigs lässt alles durch.
+        let mut g = crate::osc::OscLimit::with_limit(4096);
+        let mut r = Rig::new();
+        r.osc_limit = crate::osc::OscLimit::with_limit(usize::MAX);
+        let mut feed = |r: &mut Rig, s: &str| {
+            let b = g.filter(s.as_bytes()).into_owned();
+            r.feed(std::str::from_utf8(&b).unwrap());
+            b.iter().filter(|b| **b >= 0x20).count()
+        };
+        feed(&mut r, "\x1b]0;");
+        let chunk = "y\n".repeat(32 * 1024);
+        let mut passed = 0usize;
+        for _ in 0..64 {
+            passed += feed(&mut r, &chunk);
+        }
+        // Höchstens die Grenze plus Ersatzzeichen hat vte gesehen.
+        assert!(passed <= 4096 + 3, "{passed}");
+        // Ende des OSC: Titel gekürzt (mit Ersatzzeichen), danach Text und Antworten wie gewohnt.
+        feed(&mut r, "y\x07");
+        let title = r.lst.title.lock().unwrap().clone().unwrap_or_default();
+        assert!(title.len() <= 4096 + 3 && title.starts_with("yyy"), "{}", title.len());
+        assert_eq!(r.feed("\x1b[16t"), "\x1b[6;18;9t");
     }
 
     /// Eine Sitzung beantwortet Abfragen mit dem Theme, das ihr beim Start mitgegeben wurde (auch ungezeichnet).

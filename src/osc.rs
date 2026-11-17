@@ -156,6 +156,122 @@ impl OscScanner {
     }
 }
 
+/// Höchstlänge des Inhalts einer OSC-Sequenz, den die Emulation zu sehen bekommt (#212). vte 0.15 puffert ein OSC
+/// (mit `std`) ohne Grenze; ein nie beendetes OSC (`printf '\e]0;'; yes`) füllte den Speicher, bis der Hub abstürzt.
+/// Groß genug für OSC 52 bis `terminal::OSC52_MAX_BYTES` (Base64 plus Kopf), damit dort weiter die Warnung kommt.
+pub const OSC_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Kappt OSC-Sequenzen im Ausgabestrom, bevor vte sie sieht (wie `vtkeys::KittyStackGuard`). Verfolgt nur die
+/// Zustände des vte-0.15-Parsers, die über Anfang und Ende eines OSC entscheiden. Über die Grenze hinaus wird der Inhalt
+/// verworfen, bis das OSC endet (BEL, ESC, CAN/SUB gehen weiter an vte, das das gekürzte OSC dann ausführt). An der
+/// Grenze steht einmal U+FFFD: Das gekürzte OSC ist damit ungültig statt unbemerkt abgeschnitten (ein gekürztes OSC 52
+/// legte sonst einen Teil des Textes in die Zwischenablage).
+pub struct OscLimit {
+    state: LimitState,
+    /// Bisher weitergegebene Bytes des Inhalts des laufenden OSC.
+    len: usize,
+    limit: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LimitState {
+    /// Grundzustand und alle Sequenzen außer OSC (dort zählt nur, dass ESC/CAN/SUB sie beenden).
+    Ground,
+    Esc,
+    /// `ESC` mit Zwischenbyte(s): ein folgendes `]` ist Endbyte, kein OSC.
+    EscInter,
+    Osc,
+}
+
+impl Default for OscLimit {
+    fn default() -> Self {
+        Self::with_limit(OSC_LIMIT)
+    }
+}
+
+/// Ersatzzeichen an der Grenze eines gekappten OSC (U+FFFD).
+const OSC_CUT: &[u8] = "\u{fffd}".as_bytes();
+
+impl OscLimit {
+    pub fn with_limit(limit: usize) -> Self {
+        OscLimit { state: LimitState::Ground, len: 0, limit }
+    }
+
+    /// Ausgabe-Chunk ohne den Inhalt über der Grenze (meist unverändert; dann ohne Kopie).
+    pub fn filter<'a>(&mut self, bytes: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        let mut out: Option<Vec<u8>> = None;
+        for (i, &b) in bytes.iter().enumerate() {
+            match self.step(b) {
+                LimitStep::Keep => {
+                    if let Some(o) = out.as_mut() {
+                        o.push(b);
+                    }
+                }
+                LimitStep::Cut => out.get_or_insert_with(|| bytes[..i].to_vec()).extend_from_slice(OSC_CUT),
+                LimitStep::Drop => {
+                    out.get_or_insert_with(|| bytes[..i].to_vec());
+                }
+            }
+        }
+        match out {
+            Some(o) => std::borrow::Cow::Owned(o),
+            None => std::borrow::Cow::Borrowed(bytes),
+        }
+    }
+
+    /// Ein Byte wie vte 0.15 (`Parser::advance`): ESC beginnt überall eine neue Sequenz, CAN/SUB kehren überall in den
+    /// Grundzustand zurück (ein OSC wird dabei ausgeführt), BEL beendet ein OSC, übrige C0 überspringt vte im OSC.
+    fn step(&mut self, b: u8) -> LimitStep {
+        match b {
+            0x18 | 0x1a => {
+                self.state = LimitState::Ground;
+                return LimitStep::Keep;
+            }
+            0x1b => {
+                self.state = LimitState::Esc;
+                return LimitStep::Keep;
+            }
+            _ => {}
+        }
+        match self.state {
+            LimitState::Ground => {}
+            LimitState::Esc => match b {
+                b']' => {
+                    self.state = LimitState::Osc;
+                    self.len = 0;
+                }
+                // C0 führt vte aus, DEL und Bytes ab 0x80 übergeht es: der Zustand bleibt.
+                0x00..=0x1f | 0x7f..=0xff => {}
+                0x20..=0x2f => self.state = LimitState::EscInter,
+                _ => self.state = LimitState::Ground,
+            },
+            LimitState::EscInter => {
+                if (0x30..=0x7e).contains(&b) {
+                    self.state = LimitState::Ground;
+                }
+            }
+            LimitState::Osc => match b {
+                0x07 => self.state = LimitState::Ground,
+                0x00..=0x1f => {}
+                _ if self.len < self.limit => self.len += 1,
+                _ if self.len == self.limit => {
+                    self.len += 1;
+                    return LimitStep::Cut;
+                }
+                _ => return LimitStep::Drop,
+            },
+        }
+        LimitStep::Keep
+    }
+}
+
+enum LimitStep {
+    Keep,
+    /// Byte durch `OSC_CUT` ersetzen (erstes Byte über der Grenze).
+    Cut,
+    Drop,
+}
+
 /// Byte nach ESC (wie vte): `]` OSC, `[` CSI, `c` RIS; Steuerzeichen (außer CAN/SUB) und DEL lassen den Zustand
 /// unverändert.
 fn esc_next(b: u8, out: &mut Vec<OscEvent>) -> State {
