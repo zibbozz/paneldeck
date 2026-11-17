@@ -347,11 +347,26 @@ fn is_empty_value(v: Option<&Value>) -> bool {
     }
 }
 
+/// Vergleich zweier Zeitangaben wie in der Abfragesprache (Fälligkeit, #214): `actual` ist der Feldwert (`JJJJ-MM-TT` oder
+/// `JJJJ-MM-TTTHH:MM[:SS]`), `wanted` der Wert der Bedingung. Ein reines Datum in der Bedingung vergleicht nur den Tag; mit
+/// Uhrzeit den Zeitpunkt, wobei ein reines Datum als Feldwert das Ende des Tages (23:59:59) ist. `None`, wenn eines kein Datum ist.
+fn date_cmp(actual: &str, wanted: &str) -> Option<std::cmp::Ordering> {
+    let (ad, at) = crate::due::parse_stored(actual)?;
+    let (wd, wt) = crate::due::parse_stored(wanted)?;
+    Some(match wt {
+        None => ad.cmp(&wd),
+        Some(wt) => {
+            let end_of_day = chrono::NaiveTime::from_hms_opt(23, 59, 59).unwrap_or(chrono::NaiveTime::MIN);
+            ad.and_time(at.unwrap_or(end_of_day)).cmp(&wd.and_time(wt))
+        }
+    })
+}
+
 fn num_or_str_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a.as_f64(), b.as_f64()) {
         (Some(x), Some(y)) => x.partial_cmp(&y),
         _ => match (a.as_str(), b.as_str()) {
-            (Some(x), Some(y)) => Some(x.cmp(y)),
+            (Some(x), Some(y)) => Some(date_cmp(x, y).unwrap_or_else(|| x.cmp(y))),
             _ => None,
         },
     }
@@ -360,6 +375,10 @@ fn num_or_str_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 fn same(a: &Value, b: &Value) -> bool {
     match (a.as_f64(), b.as_f64()) {
         (Some(x), Some(y)) => x == y,
+        _ if a.is_string() && b.is_string() => match date_cmp(a.as_str().unwrap_or_default(), b.as_str().unwrap_or_default()) {
+            Some(o) => o.is_eq(),
+            None => a == b,
+        },
         _ => a == b,
     }
 }
@@ -744,6 +763,15 @@ mod tests {
         assert!(m(&cond(ConditionOp::Gt, json!(2), true), Some(json!(3))));
         assert!(!m(&cond(ConditionOp::Gt, json!(2), true), Some(json!(2))) && m(&cond(ConditionOp::Ge, json!(2), true), Some(json!(2))));
         assert!(m(&cond(ConditionOp::Lt, json!("2026-02-01"), true), Some(json!("2026-01-31"))), "Datum als ISO-Text");
+        // #214: Fälligkeit wie in der Abfragesprache (reines Datum = ganzer Tag bzw. Ende des Tages, Sekunden optional)
+        assert!(m(&cond(ConditionOp::Eq, json!("2026-11-20"), true), Some(json!("2026-11-20T14:30"))), "Datum trifft den ganzen Tag");
+        assert!(m(&cond(ConditionOp::Eq, json!("2026-11-20T14:30:00"), true), Some(json!("2026-11-20T14:30"))), "Sekunden optional");
+        assert!(!m(&cond(ConditionOp::Lt, json!("2026-11-20"), true), Some(json!("2026-11-20T09:00"))), "am selben Tag nicht davor");
+        assert!(m(&cond(ConditionOp::Le, json!("2026-11-20"), true), Some(json!("2026-11-20T09:00"))));
+        assert!(m(&cond(ConditionOp::Gt, json!("2026-11-20T14:30"), true), Some(json!("2026-11-20"))), "reines Datum = Ende des Tages");
+        assert!(!m(&cond(ConditionOp::Lt, json!("2026-11-20T14:30"), true), Some(json!("2026-11-20"))));
+        assert!(m(&cond(ConditionOp::In, json!(["2026-11-19", "2026-11-20"]), true), Some(json!("2026-11-20T08:00"))));
+        assert!(m(&cond(ConditionOp::Eq, json!("abc"), true), Some(json!("abc"))) && !m(&cond(ConditionOp::Eq, json!("abc"), true), Some(json!("abd"))), "Text bleibt Text");
         assert!(!m(&cond(ConditionOp::Lt, json!(2), true), None), "kein Wert: Vergleich trifft nicht zu");
         assert!(m(&cond(ConditionOp::In, json!([1, 2]), true), Some(json!(2))));
         assert!(m(&cond(ConditionOp::NotIn, json!([1, 2]), true), Some(json!(3))));

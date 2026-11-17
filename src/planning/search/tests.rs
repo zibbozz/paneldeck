@@ -420,6 +420,45 @@ fn built_in_due_and_description_in_queries() {
 }
 
 #[test]
+fn keywords_on_the_built_in_due_field_compare_like_the_query_language() {
+    // #214: Schlüsselwort-Bedingungen und eigene Sortierung auf der eingebauten Fälligkeit (reines Datum = ganzer Tag bzw.
+    // Ende des Tages, gespeicherte Werte ohne Sekunden)
+    let f = Fx::new();
+    let due = crate::planning::builtin_fields::field_id(&f.c, f.task, "due").unwrap().unwrap();
+    let mk = |title: &str, d: &str| {
+        let mut n = NewTicket::new(f.project, f.task, title);
+        n.values.push((due, json!(d)));
+        create_ticket(&f.c, &n, &ui()).unwrap().0.key()
+    };
+    let a = mk("Morgens", "2026-11-16T09:00");
+    let b = mk("Tagesende", "2026-11-16");
+    let c = mk("Morgen", "2026-11-17T08:00");
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |jql: &str| -> Vec<String> { run_query(&f.c, &ctx, Scope::Project(f.project), jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    let pred = |name: &str, op: ConditionOp, value: Value| {
+        create_keyword(&f.c, &NewKeyword { name: name.into(), description: String::new(), definition: Definition::Predicate { condition: Cond::Compare { field_id: due, op, value } } }).unwrap();
+    };
+    pred("onday", ConditionOp::Eq, json!("2026-11-16"));
+    pred("attime", ConditionOp::Eq, json!("2026-11-16T09:00"));
+    pred("beforeday", ConditionOp::Lt, json!("2026-11-16"));
+    pred("beforenoon", ConditionOp::Lt, json!("2026-11-16T12:00"));
+    pred("afternoon", ConditionOp::Gt, json!("2026-11-16T12:00"));
+    pred("notonday", ConditionOp::Ne, json!("2026-11-16"));
+    assert_eq!(q("IS onday"), q("due = 2026-11-16"));
+    assert_eq!(q("IS onday"), vec![a.clone(), b.clone()]);
+    assert_eq!(q("IS attime"), vec![a.clone()], "Wert mit Uhrzeit trifft den gespeicherten Wert ohne Sekunden");
+    assert!(q("IS beforeday").is_empty(), "ein reines Datum am selben Tag ist nicht davor");
+    assert_eq!(q("IS beforenoon"), q("due < \"2026-11-16 12:00\""));
+    assert_eq!(q("IS beforenoon"), vec![a.clone()]);
+    assert_eq!(q("IS afternoon"), vec![b.clone(), c.clone()], "reines Datum = Ende des Tages");
+    assert_eq!(q("IS notonday"), vec![c.clone()]);
+    create_keyword(&f.c, &NewKeyword { name: "bydue".into(), description: String::new(), definition: Definition::Sort { field_id: due, dir: KwDir::Asc } }).unwrap();
+    assert_eq!(q("ORDER BY bydue"), q("ORDER BY due"));
+    assert_eq!(q("ORDER BY bydue"), vec![a.clone(), b.clone(), c.clone()], "reines Datum sortiert als Ende des Tages");
+    assert_eq!(q("ORDER BY bydue DESC"), vec![c, b, a]);
+}
+
+#[test]
 fn every_custom_field_kind_is_searchable_by_name_and_key_also_on_user_types() {
     use crate::planning::types::{create_type, NewType};
     let f = Fx::new();
