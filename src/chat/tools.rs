@@ -19,7 +19,14 @@ pub const MAX_RESULT_BYTES: usize = 16 * 1024;
 /// Werkzeuge der Stufe „Steuern“, die trotzdem ohne Nachfrage laufen: Sie ändern weder Terminalinhalt noch Daten
 /// (`wait_for_status` wartet nur, `focus_session` zeigt nur eine Sitzung im Fenster). Alle anderen Werkzeuge ab
 /// „Steuern“ brauchen bei „Vor Schreibzugriff fragen“ eine Freigabe.
+/// `focus_session` nur ohne `placement` (#162: mit `placement` ändert der Chat das Layout gezielt – dann gelten die normalen
+/// Freigaberegeln, siehe [`approval_free`]).
 pub const NO_APPROVAL: &[&str] = &["wait_for_status", "focus_session"];
+
+/// Läuft dieser Aufruf ohne Freigabe? Werkzeuge aus [`NO_APPROVAL`]; `focus_session` aber nur ohne `placement`.
+pub fn approval_free(name: &str, args: &Value) -> bool {
+    NO_APPROVAL.contains(&name) && (name != "focus_session" || args.get("placement").is_none_or(Value::is_null))
+}
 
 /// Werkzeuge, deren Ergebnis vor allem am Ende interessant ist (Terminalinhalt, Befehlsausgabe): Beim Kürzen bleibt
 /// dort das Ende von `text`/`output`, der Anfang fällt weg. (`read_chat` hat eine eigene Kürzung: [`cap_read_chat`].)
@@ -40,8 +47,9 @@ pub struct ToolPolicy {
     pub tools_supported: Option<bool>,
     /// Expertenmodus der Todo-Liste (bestimmt die Werkzeug-Gruppe).
     pub expert: bool,
-    /// Sitzungen der Agenten-Kette, die die laufende Runde ausgelöst hat (`ChatState::origin_sessions`): schreibende
-    /// Aufrufe dorthin sind verboten, schon vor einer Freigabe-Frage. Leer = vom Nutzer ausgelöst.
+    /// Vorfahren des Chats: seine gespeicherte Agenten-Kette (`SessionMeta::agent_chain`, #152) und die Kette, die die
+    /// laufende Runde ausgelöst hat (`ChatState::origin_sessions`). Schreibende Aufrufe dorthin sind verboten, schon vor
+    /// einer Freigabe-Frage. Leer = vom Nutzer angelegt und ausgelöst.
     pub origin_sessions: Vec<u64>,
 }
 
@@ -109,11 +117,11 @@ impl ToolPolicy {
         if proxy_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", PROXY_MESSAGE)));
         }
-        // Und kein Ausweg über neu gestartete Agenten (Claude-Sitzung, MCP-Brücke), die nicht zur Kette zählen würden.
+        // Und kein Start neuer Agenten (Claude-Sitzung, MCP-Brücke) – zweite Linie neben der Markierung (#152).
         if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
-        Ok(def.level >= McpLevel::Control && !NO_APPROVAL.contains(&def.name))
+        Ok(def.level >= McpLevel::Control && !approval_free(def.name, &call.arguments))
     }
 
     /// Muss der Nutzer diesen Aufruf freigeben? `ask` aus [`ToolPolicy::check`]; `always` = dauerhafte Freigaben des
@@ -142,11 +150,14 @@ pub const SPAWN_CLAUDE_MESSAGE: &str = "a chat started by an agent cannot start 
 /// Meldung, wenn eine von einem Agenten ausgelöste Runde die MCP-Brücke (`paneldeck mcp`) starten will.
 pub const SPAWN_BRIDGE_MESSAGE: &str = "a chat started by an agent cannot start the Paneldeck MCP bridge";
 
-/// Würde dieser Aufruf einer von einem Agenten ausgelösten Runde (`origins` nicht leer) einen neuen Agenten starten, der
-/// nicht zur Kette zählt? Eine Sitzung, die ein Glied der Kette startet, ist nicht „markiert“ (geplant für 2.3.0) – ihr
-/// Agent dürfte sonst wieder in die Sitzungen der Kette schreiben. Verboten sind daher:
+/// Würde dieser Aufruf eines Chats mit Vorfahren (`origins` nicht leer) einen neuen Agenten starten? Verboten sind:
 /// * `create_session` mit `claude: true` oder einem `prompt`;
 /// * `run_command`/`send_text`/`send_keys`, deren Text „paneldeck“ und „mcp“ enthält (Start der MCP-Brücke).
+///
+/// Seit 2.3.0 (#152) ist jede Sitzung markiert, die ein Glied der Kette anlegt oder beschreibt, und ein dort gestarteter
+/// Agent erbt die Kette, wenn der Hub ihn über den Prozessbaum zuordnen kann. Das Verbot bleibt als zweite
+/// Verteidigungslinie (wie in 2.2.0 zugesagt): ein Agent, der sich der Zuordnung entzieht (losgelöster Prozess, WSL),
+/// gälte sonst als Agent außerhalb von Paneldeck ohne Kette.
 ///
 /// **Nach bestem Bemühen:** Die Erkennung der Brücke prüft nur den Text eines einzelnen Aufrufs (Groß-/Kleinschreibung
 /// egal); auf mehrere Aufrufe verteilter oder verschleierter Text, Skripte oder andere Agenten-Programme erkennt sie nicht.
@@ -605,7 +616,8 @@ mod tests {
         ] {
             assert_eq!(p.check(&call(tool, args.clone())), Ok(true), "{tool}: {args}");
         }
-        assert_eq!(spawn_forbidden("create_session", &json!({"claude": true}), &[]), None);
+        assert_eq!(spawn_forbidden("create_session", &json!({"claude": true}), &[]), None, "Nutzer-Runde");
+        assert_eq!(spawn_forbidden("run_command", &json!({"command": "paneldeck mcp"}), &[]), None, "Nutzer-Runde");
     }
 
     #[test]
@@ -663,6 +675,11 @@ mod tests {
             assert_eq!(c.check(&call(t, json!({}))), Ok(false), "{t}: ohne Freigabe");
             assert_eq!(mcp::tool_level(t), Some(McpLevel::Control), "{t} ist ein Steuern-Werkzeug");
         }
+        // focus_session mit placement (#162): normale Freigaberegeln; null zählt wie „ohne“
+        assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": "solo"}))), Ok(true));
+        assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": "replace"}))), Ok(true));
+        assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": null}))), Ok(false));
+        assert_eq!(c.check(&call("wait_for_status", json!({"session": 1, "placement": "solo"}))), Ok(false));
         assert!(c.check(&call("create_ticket", json!({}))).unwrap_err().1.contains("wrong_mode"));
         assert!(policy(McpLevel::Off, &[], false).check(&call("list_sessions", json!({}))).unwrap_err().1.contains("forbidden"));
         // Freigabe

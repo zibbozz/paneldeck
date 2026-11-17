@@ -93,7 +93,7 @@ pub fn pie(ui: &mut Ui, salt: impl Hash, groups: &[Group], lang: Lang) -> Option
     let radius = (pie_rect.width().min(pie_rect.height()) / 2.0 - 6.0).max(8.0);
     let counts: Vec<u32> = groups.iter().map(|g| g.count).collect();
     let total: u32 = counts.iter().sum();
-    let resp = ui.interact(pie_rect, salt.with("pie"), Sense::click());
+    let resp = crate::afford::Clickable::no_pointer(ui.interact(pie_rect, salt.with("pie"), Sense::click())); // Hand nur über einem Stück
     let hover = resp.hover_pos().and_then(|p| logic::pie_hit(center, radius, p, &counts));
     let angles = logic::pie_angles(&counts);
     if angles.is_empty() {

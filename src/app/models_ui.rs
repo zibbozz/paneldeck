@@ -508,7 +508,7 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
         row(ui, lang.t("Stufe", "Level"), |ui| {
             for l in [McpLevel::Off, McpLevel::Read, McpLevel::Control] {
                 // Jede Wahl hier gilt als bewusst getroffen (der erste Chat fragt dann nicht mehr nach).
-                if ui.selectable_value(&mut cfg.level, l, level_label(l, lang)).clicked() {
+                if crate::afford::choice_value(ui, &mut cfg.level, l, level_label(l, lang), 0.0).clicked() {
                     cfg.level_chosen = true;
                 }
             }
@@ -532,9 +532,9 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
                 Some(false) => lang.t("erkannt: nein", "detected: no"),
                 None => lang.t("unbekannt", "unknown"),
             });
-            ui.selectable_value(&mut cfg.tools, None, auto);
-            ui.selectable_value(&mut cfg.tools, Some(true), lang.t("An", "On"));
-            ui.selectable_value(&mut cfg.tools, Some(false), lang.t("Aus", "Off"));
+            crate::afford::choice_value(ui, &mut cfg.tools, None, auto, 0.0);
+            crate::afford::choice_value(ui, &mut cfg.tools, Some(true), lang.t("An", "On"), 0.0);
+            crate::afford::choice_value(ui, &mut cfg.tools, Some(false), lang.t("Aus", "Off"), 0.0);
         });
         row(ui, lang.t("Kontextlänge", "Context length"), |ui| {
             let mut own = cfg.context_length.is_some();

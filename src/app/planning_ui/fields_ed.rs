@@ -2,7 +2,7 @@
 //! und ein Dialog je Feld mit den typspezifischen Optionen (Werteliste mit Farben, Zahl, Textlänge, Zeilen, Ziel-Typen).
 
 use super::delete::Target;
-use super::helpers::{color_of, kind_label, move_id, PALETTE};
+use super::helpers::{color_of, kind_label, move_id};
 use super::values;
 use super::widgets::{self, hint};
 use super::{Cx, PlanUi};
@@ -215,7 +215,21 @@ impl PlanUi {
                 ui.label(RichText::new(h).small().color(style::dim(ui)));
             }
             ui.end_row();
+            // Eingebaut: der Titel (kein Feld, immer Pflicht)
+            builtin_badge(ui, lang);
+            ui.label(RichText::new(lang.t("Titel", "Title")).strong());
+            ui.label(kind_label(FieldKind::Text, lang));
+            ui.label(lang.t("ja", "yes"));
+            for _ in 0..3 {
+                ui.label(RichText::new("–").color(style::dim(ui)));
+            }
+            ui.label("");
+            ui.end_row();
             for f in &t.fields {
+                let rc = row_controls(f);
+                if !rc.movable {
+                    builtin_badge(ui, lang);
+                } else {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     if style::icon_btn_small(ui, SIcon::Up, lang.t("Nach oben", "Move up")).clicked() {
@@ -233,13 +247,18 @@ impl PlanUi {
                         }
                     }
                 });
+                }
                 let name = f.display(lang);
-                if ui.add(egui::Label::new(RichText::new(&name).strong()).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                if !rc.editable {
+                    ui.label(RichText::new(&name).strong());
+                } else if ui.add(egui::Label::new(RichText::new(&name).strong()).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     self.fields.dlg = Some(FieldDlg::from_field(f, lang));
                 }
-                ui.label(kind_label(f.kind, lang));
+                ui.label(if f.is_due() { lang.t("Datum, Uhrzeit optional", "Date, time optional") } else { kind_label(f.kind, lang) });
                 let mut req = f.required;
-                if widgets::check(ui, &mut req, "").changed() {
+                if !rc.editable {
+                    ui.label(RichText::new("–").color(style::dim(ui)));
+                } else if widgets::check(ui, &mut req, "").changed() {
                     let r = update_field(cx.conn, f.id, &UpdateField { required: Some(req), ..Default::default() });
                     self.run(cx, r);
                 }
@@ -257,10 +276,10 @@ impl PlanUi {
                 }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    if ui.small_button(lang.t("Bearbeiten …", "Edit …")).clicked() {
+                    if rc.editable && ui.small_button(lang.t("Bearbeiten …", "Edit …")).clicked() {
                         self.fields.dlg = Some(FieldDlg::from_field(f, lang));
                     }
-                    if style::icon_btn_small(ui, SIcon::Trash, lang.t("Feld löschen …", "Delete field …")).clicked() {
+                    if rc.deletable && style::icon_btn_small(ui, SIcon::Trash, lang.t("Feld löschen …", "Delete field …")).clicked() {
                         self.ask_delete(cx, Target::Field(f.id));
                     }
                 });
@@ -274,6 +293,31 @@ impl PlanUi {
     }
 
     // ------------------------------------------------------------------ Dialog
+}
+
+/// Was eine Zeile der Feldliste anbietet: Reihenfolge, Bearbeiten (Dialog, Pflicht), Löschen. Eingebaute Felder (Beschreibung,
+/// Fälligkeit) stehen fest oben und lassen sich weder bearbeiten noch löschen; Abschnitt und „Auf Karte“ bleiben änderbar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RowControls {
+    pub movable: bool,
+    pub editable: bool,
+    pub deletable: bool,
+}
+
+pub(super) fn row_controls(f: &crate::planning::fields::Field) -> RowControls {
+    let free = !f.is_fixed();
+    RowControls { movable: free, editable: free, deletable: free }
+}
+
+/// Kennzeichen „Eingebaut“ in der ersten Spalte (Schloss, Tooltip).
+fn builtin_badge(ui: &mut Ui, lang: Lang) {
+    ui.label(RichText::new(lang.t("Eingebaut", "Built-in")).small().color(style::dim(ui))).on_hover_text(lang.t(
+        "Titel, Beschreibung, Fälligkeit und Labels hat jedes Ticket. Sie lassen sich nicht löschen.",
+        "Every ticket has a title, a description, a due date and labels. They cannot be deleted.",
+    ));
+}
+
+impl PlanUi {
 
     pub(super) fn fields_dialogs(&mut self, ctx: &egui::Context, cx: &Cx) {
         let Some(mut d) = self.fields.dlg.take() else { return };
@@ -547,7 +591,7 @@ fn values_editor(ui: &mut Ui, d: &mut FieldDlg, lang: Lang) {
         };
     }
     if ui.button(format!("+ {}", lang.t("Wert hinzufügen", "Add value"))).clicked() {
-        let color = PALETTE[d.values.len() % PALETTE.len()].to_string();
+        let color = crate::palette::nth(crate::palette::Area::Expert, d.values.len());
         d.values.push(OptionValue { id: 0, key: None, name: Some(format!("{} {}", lang.t("Wert", "Value"), d.values.len() + 1)), color: Some(color) });
     }
 }

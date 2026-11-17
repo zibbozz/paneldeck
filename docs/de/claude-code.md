@@ -7,9 +7,22 @@ Paneldeck ist dafür gebaut, viele [Claude-Code](https://docs.anthropic.com/en/d
 > Paneldeck ist ein unabhängiges Projekt und nicht mit Anthropic verbunden. Es startet das `claude`-Programm, das du selbst installiert hast, und liest dessen lokale Dateien; es enthält keinen Code von Anthropic.
 
 ## Eine Claude-Sitzung starten
-- Auf den **Funken-Knopf** klicken (oder *Neue Claude-Sitzung …* in der Seitenleiste bzw. im leeren Terminal Hub), Ordner wählen, fertig. Der Start-Dialog bietet auch Modell und Permission-Mode an.
+- Auf den **Funken-Knopf** klicken (oder *Neue Claude-Sitzung …* in der Seitenleiste bzw. im leeren Terminal Hub), Ordner wählen, fertig. Der Dialog bietet auch die [Startoptionen](#startoptionen) an.
 - Rechtsklick auf einen Ordner im Explorer → *Mit Claude in Paneldeck starten* (siehe [Windows-Integration](windows-integration.md)) oder `paneldeck.exe --open <ordner> --claude` (siehe [Kommandozeile](command-line.md)).
 - Eine Schnellaktion eines Tickets kann eine mit dem Ticket verknüpfte Claude-Sitzung starten (siehe [Todo-Liste und Tickets](todo-and-tickets.md#schnellaktionen-und-schnellmenü)).
+
+## Startoptionen
+Claude-Sitzungen lassen sich mit Optionen für Claude Code starten. Du setzt sie an drei Stellen: als **Standard** unter *Einstellungen → Claude → Standards für neue Claude-Sitzungen*, je Sitzung im Dialog **Neue Sitzung** (er wählt deine letzte Auswahl vor) und später in den **Einstellungen der Sitzung** (Kontextmenü der Seitenleiste → *Einstellungen …*; eine Änderung fragt *Jetzt neu laden?*). Ein leeres Feld heißt „Standard von Claude Code“.
+
+- **Modell** (ein Alias wie `fable`, `opus`, `sonnet`, `haiku` oder ein voller Modellname), **Effort** (`low`, `medium`, `high`, `xhigh`, `max`), **Permission-Mode** (`acceptEdits`, `auto`, `plan`, `default`, `dontAsk`) und **Agent** (der Name eines Claude-Code-Agenten, den du angelegt hast). Namen dürfen nur Buchstaben, Ziffern und `. _ : -` enthalten (höchstens 100 Zeichen).
+- **bypassPermissions** geht nur als ausdrückliche Wahl für eine Sitzung, mit Warnung – nie als Standard, nie als Vorauswahl beim nächsten Mal und nie für Agenten. Ein `bypassPermissions`-Standard aus einer älteren Einstellungsdatei wird mit Hinweis verworfen; alte `--dangerously-*`-Argumente einer Sitzung fallen ebenfalls weg.
+- **Konversation fortsetzen** (je Sitzung, auch im Dialog „Neue Sitzung“, standardmäßig an): Beim *Neu laden* und beim Start von Paneldeck setzt Claude die Konversation der Sitzung fort; ist es aus, beginnt Claude neu.
+- **Weitere Claude-Optionen** (aufklappbar, im Dialog, in den Einstellungen der Sitzung und bei den Standards):
+  - **Schalter** ohne Wert: `--chrome` / `--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` und `--safe-mode`. `--safe-mode` schaltet Hooks und MCP-Server ab – Paneldeck erkennt dann Status und Freigabe-Fragen nicht – und zeigt eine Warnung.
+  - **Zusätzliche Ordner** (`--add-dir`, einer je Zeile), **Erlaubte Werkzeuge** und **Verbotene Werkzeuge**, eine **MCP-Konfiguration** (JSON-Datei), **System-Prompt ergänzen**, ein **Ersatzmodell**, **Budget (USD)** und **Auto-Komprimierung** (`auto` oder eine Tokenzahl, z. B. `200k`).
+  - Optionen, die Zugriffe erweitern (zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration), zeigen eine Warnung. Pfade müssen lokal sein; Netzwerkfreigaben werden nie berührt, auch nicht über Verknüpfungen. Ordner oder Dateien, die beim Start fehlen, werden mit Hinweis weggelassen. Alle Werte werden geprüft und für die Shell gequotet.
+- **Für Sitzungen, die Agenten anlegen** (MCP), und für `paneldeck --open --claude` aus einem Hub-Terminal gelten deine Standards für zusätzliche Ordner, erlaubte Werkzeuge, die MCP-Konfiguration und `--safe-mode` nie; Agenten können nur harmlose Schalter ergänzen (siehe [Agenten-Schnittstelle](agent-interface.md#claude-startoptionen)).
+- Die Optionen stehen je Sitzung in `state.json` (`claude_opts`, `claude_continue`) und als Standard in `settings.json` (`claude_defaults`); siehe [Datenordner](data-and-backups.md#neue-felder-in-230).
 
 ## Status, Benachrichtigungen und Posteingang
 - Paneldeck richtet **Hooks** für Claude Code ein (*Einstellungen → Claude*; erzeugte Konfiguration `claude-hooks*.json` im Datenordner, auf Wunsch global in `~/.claude/settings.json` installiert). Damit zeigt jede Sitzung ihren Status: **arbeitet**, **Freigabe?** oder **bereit**.
@@ -25,7 +38,8 @@ Paneldeck ist dafür gebaut, viele [Claude-Code](https://docs.anthropic.com/en/d
 
 ## Verlauf und Fortsetzen
 - **Claude-Verlauf** (Seitenleiste): frühere Unterhaltungen durchsuchen und exakt fortsetzen.
-- *Claude-Sitzungen beim Start mit --resume wiederherstellen* (*Einstellungen → Claude*): Nach einem Neustart von Paneldeck (auch nach einem Selbst-Update) machen Claude-Sitzungen dort weiter, wo sie waren.
+- *Claude-Sitzungen beim Start mit --resume wiederherstellen* (*Einstellungen → Claude*): Nach einem Neustart von Paneldeck (auch nach einem Selbst-Update) machen Claude-Sitzungen dort weiter, wo sie waren – außer *Konversation fortsetzen* ist bei einer Sitzung aus.
+- **Neu laden** (Kopf des Bereichs, Kontextmenü der Seitenleiste, Palette) startet Claude Code in der Sitzung mit ihren Startoptionen neu: Es setzt die Konversation fort oder beginnt eine neue, je nach Einstellung der Sitzung (siehe [Terminals – Neu laden](terminals.md#neu-laden-und-einstellungen-der-sitzung)).
 
 ## Claude-Dateien
 - **Strg+Umschalt+K** öffnet einen Editor für `CLAUDE.md` und die Claude-Einstellungsdateien des Sitzungsordners (und die globalen).

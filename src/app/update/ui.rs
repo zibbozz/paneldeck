@@ -64,11 +64,12 @@ impl App {
         self.updater.start_install(self.exe.clone(), backup, self.settings.language, ctx);
     }
 
-    /// Zustand speichern (Sitzungen werden beim Start wiederhergestellt) und neu starten.
+    /// Zustand speichern (Sitzungen werden beim Start wiederhergestellt – mit „Sitzungen merken“ aus genau einmal, #157) und
+    /// neu starten. Scheitert der Neustart, geht nichts verloren (es wurde nur normal gespeichert).
     fn update_restart(&mut self) {
         let lang = self.settings.language;
-        self.save_all();
-        match install::spawn_restart(&self.exe) {
+        let keep_once = self.save_for_update_restart();
+        match install::spawn_restart(&self.exe, keep_once) {
             Ok(()) => {
                 crate::app::winchrome::shutdown();
                 self.tray = None; // Tray-Symbol entfernen (sonst bleibt bis zum Überfahren ein totes Symbol stehen)
@@ -232,10 +233,17 @@ impl App {
                             ),
                         }).small().color(dim));
                         ui.label(RichText::new(format!("{} ({}) · {}", asset.name, fmt_mb(asset.size), lang.t("geprüft per SHA-256", "verified with SHA-256"))).small().color(dim));
-                        ui.label(RichText::new(lang.t(
-                            "Laufende Terminals werden beim Neustart beendet; die Sitzungen werden danach wiederhergestellt.",
-                            "Running terminals end when Paneldeck restarts; the sessions are restored afterwards.",
-                        )).small().color(dim));
+                        ui.label(RichText::new(if self.settings.remember_sessions {
+                            lang.t(
+                                "Laufende Terminals werden beim Neustart beendet; die Sitzungen werden danach wiederhergestellt.",
+                                "Running terminals end when Paneldeck restarts; the sessions are restored afterwards.",
+                            )
+                        } else {
+                            lang.t(
+                                "Laufende Terminals werden beim Neustart beendet; die Sitzungen werden danach einmal wiederhergestellt. „Sitzungen merken“ ist aus: Beim nächsten Beenden werden sie verworfen.",
+                                "Running terminals end when Paneldeck restarts; the sessions are restored once afterwards. “Remember sessions” is off: they are discarded on the next exit.",
+                            )
+                        }).small().color(dim));
                     }
                 }
                 if phase == Phase::Downloading {
@@ -344,10 +352,17 @@ impl App {
                 } else if chats > 1 {
                     ui.label(format!("{chats} {}", lang.t("Chats arbeiten noch (sie werden angehalten).", "chats are still working (they will be stopped).")));
                 }
-                ui.label(lang.t(
-                    "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach wiederhergestellt.",
-                    "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored afterwards.",
-                ));
+                ui.label(if self.settings.remember_sessions {
+                    lang.t(
+                        "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach wiederhergestellt.",
+                        "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored afterwards.",
+                    )
+                } else {
+                    lang.t(
+                        "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach einmal wiederhergestellt. „Sitzungen merken“ ist aus: Beim nächsten Beenden werden sie verworfen.",
+                        "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored once afterwards. “Remember sessions” is off: they are discarded on the next exit.",
+                    )
+                });
             }
             if major {
                 ui.label(RichText::new(lang.t("Vorher wird die Datenbank gesichert.", "The database is backed up first.")).small().color(style::dim(ui)));

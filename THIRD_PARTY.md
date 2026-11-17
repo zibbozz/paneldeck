@@ -7,7 +7,7 @@ Paneldeck ist aus freier Software aufgebaut. Die wichtigsten Bestandteile und ih
 |---|---|---|
 | egui / eframe | Oberfläche, Fenster, OpenGL-Darstellung | MIT oder Apache-2.0 |
 | alacritty_terminal, vte | Terminal-Emulation | Apache-2.0 (vte: Apache-2.0 oder MIT) |
-| portable-pty | Pseudo-Konsole (ConPTY unter Windows) | MIT |
+| portable-pty | Pseudo-Konsole (ConPTY unter Windows); als Kopie mit kleinem Patch in `vendor/portable-pty` (Laden der mitgelieferten ConPTY) | MIT |
 | ttf-parser | Auslesen der Emoji-Bitmaps und Ligaturen | MIT oder Apache-2.0 |
 | image | PNG-Dekodierung, Skalierung | MIT oder Apache-2.0 |
 | serde, serde_json | Einstellungen und Zustand | MIT oder Apache-2.0 |
@@ -28,9 +28,17 @@ Alle weiteren transitiven Abhängigkeiten stehen unter MIT, Apache-2.0, BSD, Zli
 |---|---|
 | Cascadia Mono (Microsoft) | SIL Open Font License 1.1 |
 | Noto Color Emoji (Google) | SIL Open Font License 1.1 |
+| Lucide-Icons (`lucide.ttf` aus dem npm-Paket `lucide-static` 1.66.0, https://lucide.dev; Icon-Explorer, Icons `lucide:<name>`) | ISC (aus Feather Icons abgeleitete Icons: MIT) |
 | Standardschriften von egui (Hack, Ubuntu-Light, Noto Emoji, emoji-icon-font) | siehe egui-Projekt: Hack (MIT/Bitstream Vera), Ubuntu Font Licence, SIL OFL |
 
 Die Lizenztexte der eingebetteten Schriften liegen unter `assets/fonts/`.
+
+## Mitgelieferte Programmdateien
+| Bestandteil | Verwendung | Lizenz |
+|---|---|---|
+| ConPTY von Microsoft (`conpty.dll`, `OpenConsole.exe`; NuGet-Paket Microsoft.Windows.Console.ConPTY, x64, unverändert und von Microsoft signiert) | neuere Pseudo-Konsole neben `paneldeck.exe` (Installer und portables ZIP) | MIT |
+
+Version und SHA-256 stehen in `tools/fetch-conpty.ps1`; der Lizenztext liegt als `licenses/LICENSE-ConPTY.txt` bei, die Hinweise zu Fremdcode in OpenConsole (NOTICE.md von microsoft/terminal, Tag v1.25.3131.0: u. a. {fmt}, wil, chromium/base/numerics, jsoncpp) als `licenses/NOTICE-ConPTY.md` (Quellen: `tools/license-extra/conpty-MIT.txt`, `conpty-NOTICE.md`); beides steht auch in `THIRD_PARTY_LICENSES.txt`. Quelltext: https://github.com/microsoft/terminal
 
 ## Installer
 Das Setup wird mit NSIS erstellt (zlib/libpng-Lizenz).

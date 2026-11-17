@@ -106,8 +106,10 @@ pub fn read_limited(path: &std::path::Path) -> std::io::Result<Result<Vec<u8>, B
 
 /// Kennung des Dokumentformats.
 pub const FORMAT: &str = "paneldeck-project";
-/// Aktuelle Format-Version.
-pub const VERSION: u32 = 2;
+/// Aktuelle Format-Version. 3 (Paneldeck 2.3): eingebaute Felder Beschreibung, Fälligkeit (Datum allein erlaubt) und Labels,
+/// Schwellen der Fälligkeit (`project.due_thresholds`). Ältere Programmversionen lehnen ein Dokument der Version 3 ab, statt an
+/// einem reinen Datum in der Fälligkeit mit einem unverständlichen Wertfehler abzubrechen; Version 1 und 2 bleiben lesbar.
+pub const VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDoc {
@@ -210,6 +212,10 @@ pub struct DocProject {
     /// Nummer des nächsten Tickets (wird nie zurückgesetzt).
     pub next_number: i64,
     pub created_at: String,
+    /// Schwellen der Fälligkeits-Markierung (ab Paneldeck 2.3). Fehlt das Feld (ältere Sicherung), bekommt ein Projekt mit den
+    /// mitgelieferten Typen die Standard-Schwellen, sonst keine – wie beim Update der Datenbank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_thresholds: Option<Vec<crate::due::DueThreshold>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

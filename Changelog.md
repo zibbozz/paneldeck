@@ -9,6 +9,122 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.3.0] - WIP
 
+### Added
+
+- Middle-click on a session in the sidebar closes it, with the same confirmation as the close button (#155).
+- Close all sessions at once (#156): a trash button on folders in the sidebar (on hover, subtle until hovered, then red; includes subfolders, minimized sessions and chats) and one right of the filter field (all sessions of all projects and windows); also in the project context menu, the command palette and as a shortcut (no default). The confirmation lists what will end and enables "Close all" after 3 seconds; Git worktrees and branches are kept.
+- Setting *Remember sessions* (Settings → General, on by default; new optional `settings.json` field `remember_sessions`) (#157). When off, every start is fresh: no terminals, chats, projects or folders from the last run; chat histories are deleted on exit. Settings, to-do list and tickets stay. Turning it off asks first; the state is backed up to `state.json.bak-<date>` (newest kept).
+- Context menu "Reset agent chain" for sessions started from an agent chain; the session tooltip names the chain.
+- Reload button in the pane header (also in detached windows, the palette and the sidebar context menu): restarts the session's shell, or Claude Code according to the session's options; asks first while a program is running, without the 3-second wait. Optional keyboard shortcut "Reload session" (no default). (#169)
+- Session settings dialog (sidebar context menu → Settings…): change profile, shell, start folder, name, colour, tree folder, tags, notes, Claude on/off and the Claude start options (model, effort, permission mode, agent) of an existing session; offers "Reload now?" when a change only takes effect on the next start. bypassPermissions only as an explicit choice for that session, with the warning. (#170)
+- Per-session option "Continue the conversation" (also in the New-session dialog): on reload and program start, Claude resumes the session's conversation or starts fresh (`state.json` field `claude_continue`, default on). (#169, #170)
+- WSL sessions can start in a folder inside WSL. The folder field in "New session" offers a "Windows path / WSL path" switch, all installed WSL distributions (default first; templates and Docker Desktop hidden), Linux path completion with an existence check, a folder dialog that opens in the distribution's home folder (the choice becomes the Linux path), and recently used WSL folders per distribution. (#172)
+- Default folders of tree folders and projects whose shell is WSL can be chosen as Linux paths; Explorer "Open here" on a `\\wsl.localhost\<distro>\…` folder opens a WSL session of that distribution in the matching Linux path. (#172)
+- MCP `create_session` accepts a Linux path as `cwd` when the session starts in WSL (absolute or `~`). The folder is checked in WSL first: `bad_args` if it is missing, and a new result field `cwd_checked` (`false` = WSL did not answer in time; the session is still created and starts in `/` if the folder does not exist). (#172)
+- `settings.json`: optional field `wsl_recent` (recently used WSL folders per distribution, capped). (#172)
+- Setting "Allow programs to copy to the clipboard (OSC 52)" (Settings → Appearance, on by default; `settings.json` field `osc52_copy`). (#181)
+- Editable color palette (Settings → Colors): one shared palette by default for the Terminal Hub (session, folder, project, profile colors), todo-list tags and expert mode (projects, types, statuses, dropdown values, charts), or optionally a separate palette per area (both are kept when switching). Add, edit (color wheel or hex), delete and drag to reorder colors, give them optional names (shown in the tooltip, e.g. "Cool blue (#2288FF)"), and restore deleted defaults. Every color picker also offers "Custom color …" for a one-off color. Existing items keep their color; automatically assigned colors stay as before until you edit the palette. Stored in `settings.json` (new optional field `palette`; untouched lists are not written). (#173)
+- Bundled console host: the installer and the portable ZIP now include a newer ConPTY from Microsoft (`conpty.dll` and `OpenConsole.exe`, 1.25). It passes colour queries (OSC 10/11) and synchronized output (mode 2026) through to Paneldeck in the right order, so full-screen programs flicker less. New setting *Settings → Appearance → Use the bundled console host (recommended)*, on by default. When it is off, or the files are missing or fail, sessions use the console host built into Windows; a notice appears if this happens repeatedly. Changes apply to new sessions. New optional field `bundled_conpty` in `settings.json`. (#183)
+- MCP: `list_sessions` reports the console host of each terminal in the new optional field `console_host` (`bundled` or `system`). (#183)
+- Agents can choose where `focus_session` and `create_session` show a session with the new optional `placement`: `replace` (default for `focus_session`; replaces only the active pane – the agent's own pane if visible, otherwise the one the user focused – and minimizes it), `split_right` / `split_down` (split only the active pane) or `solo` (only pane, the others are minimized). Placement never moves the user's keyboard focus (unless their pane was replaced) and never brings a window to the front; panes waiting for an approval and sessions of the agent's chain are never displaced. Without `placement`, `create_session` stays quiet as before. `list_sessions` reports `shown` (the pane is on screen). (#162)
+- Ctrl+Tab also reaches minimized sessions and shows them in the focused pane; the pane they replace is minimized. After a session opens alone, a short notice shows how many panes were minimized. (#162)
+- Setting "Inherit Paneldeck's environment" (Settings → General, off by default; `settings.json` field `inherit_env`): new terminals get exactly the environment Paneldeck was started with instead of the variables read fresh from Windows. (#175)
+- More Claude start options under "More Claude options" in the New session dialog, in the session settings (a change asks "Reload now?") and as defaults under Settings → Claude: switches `--chrome`/`--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` and `--safe-mode` (with a warning); extra folders (`--add-dir`), allowed and disallowed tools, an MCP config, an addition to the system prompt, a fallback model, a maximum budget and auto-compact. Options that widen access show a warning; missing folders or files are left out at start with a notice. (#182)
+- MCP: `create_session` takes `claude_flags` (switches only); `list_sessions`, `whoami` and `create_session` report `claude_flags` and `claude_user_options` (names only, as applied). (#182)
+- Icon explorer with the Lucide icon set (more than 2,000 icons, ISC): from any icon picker, "More icons …" opens a window with the built-in icons (category "Built-in") and all Lucide icons – search by name and tag, categories, a grid with hover preview, a large preview and Select/Cancel (Esc closes). The built-in icons stay in the pickers. A Lucide icon is stored as `lucide:<name>`; backups, template export/import and the MCP tool `get_project` carry it. Old Lucide names are shown with the current icon and saved under the new name; icons from a newer Lucide version show as a placeholder instead of failing the import. Backups and templates with Lucide icons cannot be imported into versions before 2.3. (#190)
+- Claude start options: model, effort, permission mode and agent – as defaults under Settings → Claude and per session in the New session dialog; stored per session in `state.json` (optional field `claude_opts`). (#161)
+- MCP: `create_session` accepts `model`, `effort`, `permission_mode` and `agent` (only with `claude: true`, validated); `list_sessions`, `whoami` and `create_session` report them. (#161)
+- Closing a session, several sessions, a window or Paneldeck itself, or reloading a session, lists the session's background processes that would keep running: name, PID, window title, with programs that have an open window marked. You choose "Keep running" or "End all"; "End all" terminates them immediately, without saving. (#168)
+- A running session waits 3 seconds before closing, as do closing many sessions and quitting. (#168)
+- MCP `close_session` never asks; it keeps the processes running and reports them in the new optional field `remaining_processes` (pid, name, window, title; untrusted). (#168)
+- Every ticket (all types) and every to-do card has a built-in description and an optional due date (a date, optionally with a time; a date alone counts until the end of that day). They show as fixed "Built-in" rows in the field editor and cannot be deleted. (#188)
+- Due-date markers with configurable thresholds: per project in the new "Due dates" tab of the project settings, and for the simple to-do list under "Due dates …". Each threshold has a duration, a marker (frame, symbol, colour, optional name) and an optional "tint row/card". Projects created with the preset types and the to-do list start with a yellow warning triangle under 1 week and a red one under 1 day; the tooltip reads e.g. "due in 3 days" or "overdue by 2 h". (#188)
+- Lists, boards, cards and the ticket view show the due date with its marker; the header shows counts such as "3 overdue" per project and for the to-do list. The to-do list gets a due date in the card editor and on the card, sorting by due date and a filter (with due date / overdue / marked). (#188)
+- Query language: `due` and `description`, e.g. `due < currentDate() ORDER BY due`. (#188)
+- MCP: `description` and `due` for `create_ticket`/`update_ticket`, `due` for `add_todo`, `due`/`due_state` in ticket and to-do answers, `due_thresholds` in `list_projects`. (#188)
+- New icon "alert" (exclamation mark). (#188)
+- Labels is a built-in field on every ticket type, including your own types, like title, description and due date; it cannot be deleted. MCP: `labels` parameter for `create_ticket`/`update_ticket` and `labels` in ticket answers. (#195)
+- Query language: custom fields can also be searched by their key (e.g. `story_points`); the built-in fields answer to their English and German names in either UI language. (#195)
+- Kitty keyboard protocol: programs that enable it (e.g. Claude Code) get unambiguous keys (Shift+Enter, Ctrl+Backspace, Esc, Alt combinations as CSI u). (#183)
+- win32-input-mode under ConPTY: PowerShell/cmd receive Ctrl+Space, Ctrl+Enter, Ctrl+/, Ctrl+Shift+letter, Esc and numpad keys as real key events; Ctrl+3…0 now reach the terminal. (#183)
+- Setting "Shift+Enter = new line in PowerShell" (off by default): PSReadLine inserts a line instead of running the command. (#183)
+- MCP `send_keys` accepts ctrl+/alt+/shift+ combinations and more keys (space, insert, f1–f20, letters, digits, punctuation) and encodes them like the keyboard; in kitty mode e.g. `ctrl+c` is sent as `CSI 99;5u` and `esc` as `CSI 27u`. (#183)
+- `TERM_PROGRAM=Paneldeck` and `TERM_PROGRAM_VERSION` in every shell. (#183)
+- Replies to colour queries (OSC 4/10/11/12), size queries (CSI 14t/16t) and XTVERSION, also for sessions in the background. (#183)
+- Focus events (DECSET 1004). (#183)
+- Setting "Warn before pasting multiple lines" (on by default, for programs without bracketed paste; confirm after a short delay). (#183)
+- Progress reported by programs (OSC 9;4) is shown in the sidebar and on the taskbar button; MCP `list_sessions` has a new `progress` field. (#183)
+- Notifications from programs (OSC 9, OSC 777) notify you when the session isn't being looked at (rate-limited, can be turned off); a terminal bell marks the session in the sidebar, with an optional toast. (#183)
+- Hyperlinks set by programs (OSC 8) can be Ctrl+clicked; the tooltip shows the real target and host. (#183)
+- Any installed monospace font (e.g. Nerd Fonts) can be chosen as the terminal font; Powerline separators are drawn so they line up without gaps. (#183)
+- Bold and italic text, underline styles (double, curly, dotted, dashed) and underline colours; a blinking cursor when the program asks for it (setting). (#183)
+
+### Changed
+
+- Esc/Enter in the close confirmation no longer reach the terminal behind it; closing a single session still asks without a wait, only closing many sessions enables *Close all* after 3 seconds (#156).
+- A folder's *Close all sessions …* opens a confirmation with a list instead of the double-click button.
+- Restoring a minimized session with a sidebar click or the palette's "Switch to" now opens it alone: it replaces the layout of the window/project and the panes that were visible become minimized sessions that keep running. Ctrl+Shift+W only minimizes; the old place in the split is no longer remembered. Ctrl+Tab shows a minimized session in the focused pane instead; MCP `focus_session` uses `placement` (default `replace`) (#162).
+- A WSL session without a start folder now starts in the Linux home (`~`) instead of the Windows user folder; a restored WSL session whose saved folder cannot be used starts in `~` with a note. (#172)
+- MCP `create_session` refuses Linux paths for Windows shells, and `\\wsl$` paths of another distribution. (#172)
+- Updates replace `paneldeck.exe`, `conpty.dll` and `OpenConsole.exe` together even while Paneldeck is running: the installer writes the console host first and puts the previous file back if writing fails; the portable self-update replaces all files or none. Leftover `.old` files are removed on the next start, and uninstalling removes the console host too. (#183)
+- MCP `focus_session` on a minimized session now uses the default `replace` instead of opening it alone (use `placement: "solo"` for that); a chat needs approval for `focus_session` with `placement`. (#162)
+- With "Remember sessions" off, an update restart restores the sessions once; the next exit discards them as usual. (#157)
+- MCP `create_session` now refuses value options that it used to ignore silently (e.g. `add_dir`, `allowed_tools`, `mcp_config`, `append_system_prompt`, `safe_mode`) with `bad_args`. (#182)
+- Everything that works like a button now shows the hand cursor: main tabs, window buttons, list and menu entries, drop-downs, checkboxes, collapsible headings, toasts, and buttons over the terminal. (#187)
+- Settings → Agent interface: the levels Off / Read only / Control are real buttons; language, prompt language, profiles, model level, tool calling, Windows/WSL path and Unstaged/Staged work the same way. (#187)
+- The cost summary has its own line at the bottom of the sidebar and looks like a small button, with arrow, hover state and tooltip; the MCP chip looks the same. (#187)
+- Agent chain: a session created by an agent the user started (one without an agent chain) is no longer marked and may write back into its creator; the block applies only when the creator itself has an agent chain. `paneldeck --open … --claude` typed in a terminal marks the new session only if that terminal has an agent chain. (#152)
+- Existing description fields become the built-in description when updating; values, history and rules are kept. A required description becomes optional. (#188)
+- Converting a to-do card into a ticket also carries over its due date. Project backups include the due thresholds; older backups import with the defaults. (#188)
+- On update, existing custom fields named "Labels" become the built-in Labels field; values, history and rules are kept. Custom fields that would have the same name as a built-in field are renamed "… (custom)". (#195)
+- Project backups use format version 3; older versions refuse them with a clear message. Version 1 and 2 backups still import, and their own Description/Labels fields are converted like on update. (#188)
+- Due dates are stored as `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (without seconds). (#188)
+- Colour palette: deleting a colour no longer asks first; instead "Undo" is offered for a few seconds. An area's own palette starts with that area's previous colours and can be replaced with a copy of the shared palette ("Copy from shared palette", can be undone). (#173)
+- Fields that become built-in fields on update lose their default value (built-in fields have none); a custom field of another kind named like a built-in one (e.g. a text field "Labels") keeps its values and is renamed "… (custom)" – agents that set it by its old name now reach the built-in field. (#195)
+- Ctrl+Backspace sends 0x08 like Windows Terminal (PowerShell deletes the previous word) instead of Ctrl+W; in bash it now deletes one character. (#183)
+- Esc is sent as a win32-input-mode key event under ConPTY. (#183)
+- `reset` (RIS) restores colours changed by programs to the theme. (#183)
+
+### Deprecated
+
+- `state.json`: the `slot` field of minimized sessions (2.2.0) is no longer used or created; an existing value is passed through unchanged and dropped once the session is minimized or shown again. It will be removed in 3.0.0.
+
+### Fixed
+
+- A middle-click with a slight mouse movement no longer starts dragging a session or folder.
+- No see-through gap between the session sidebar and the terminal area when a sidebar row is wider than the sidebar; the sidebar keeps its width and clips the row instead (#160).
+- A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
+- Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
+- Terminals no longer inherit Paneldeck's internal or test-only `PANELDECK_*` variables (for example when Paneldeck was started from another Paneldeck's terminal). (#175)
+- Clickable elements without any hint (cost summary, MCP chip, toasts, tag colours, parent ticket key) now show a hover state, the hand cursor and a tooltip. (#187)
+- MCP `read_chat` no longer cuts a chat's tool results at 8 KB from the start; they come through up to the 16 KB tool-result limit, so the end with the newest messages and the status is kept. (#194)
+- `run_command` (MCP) no longer returns empty output when the command prints a line that exactly fills the terminal width (PowerShell, Git Bash); jumping between prompts also lands on the right row then. (#193)
+- `run_command` (MCP) and jumping between prompts work again once the terminal's scrollback is full; until now the output came back empty and prompt jumps landed on the wrong rows. (#197)
+- The query bar above the ticket list now knows fields that were added after the first query (a custom "Labels" field could not be searched). (#195)
+- Alt+digit and Alt+punctuation (e.g. Alt+. in bash) sent nothing; Alt shortcuts used by Paneldeck no longer leak characters into the terminal. (#183)
+- Broadcast encodes keys per target terminal. (#183)
+- Kitty keyboard flags left behind by a crashed program are cleared at the next shell prompt. (#183)
+
+### Security
+
+- Sessions started from an agent chain are now marked (#152): a terminal, Claude session or chat that an agent creates with `create_session` (or `paneldeck --open` from inside a session) inherits the creator's agent chain plus the creator, and a chain member that writes into another session (`send_text`, `send_keys`, `run_command`, `queue_prompt`, `send_chat_message`) passes the chain on. No agent – MCP bridge, Claude session or chat – may write into, rename, focus or close a session of its own chain (`forbidden`). Chains are kept in `state.json` (new optional field `agent_chain`), survive a restart and are reported by `whoami` and `list_sessions`. Agents started by the user behave as before, except that a session an agent creates can no longer write back into its creator.
+- The hub now identifies the calling process itself, right when the connection arrives (TCP table, the live process and its process tree with creation times), and ignores a process id supplied by the client; a caller that cannot be identified (already exited, connection gone) is refused. `PANELDECK_SESSION` only counts for WSL terminals and only together with the session's secret key `PANELDECK_SESSION_KEY`. Best effort against a malicious agent with its own shell: processes that cannot be attributed to any session count as external callers; detached or orphaned processes (started after Paneldeck, whose parent has exited) are blocked from writing into sessions that belong to an agent chain and from `--open --claude`; processes started outside Paneldeck entirely (e.g. scheduled tasks, WMI) remain outside the protection.
+- WSL start folders containing `"` or `\` are rejected everywhere, so `wsl.exe --cd` cannot be used to inject commands; administrator starts quote every argument correctly. (#172)
+- MCP `create_session` refuses network paths as `cwd` for terminals and chats without accessing them; `\\wsl$` paths are no longer probed on the UI thread. (#172)
+- OSC 52 is write-only: programs can never read the clipboard. Only the focused session in the foreground window may copy, at most 1 MB, at most once every 0.3 s; empty texts never clear the clipboard. Note: an agent with control access (MCP) can make the focused session copy text, too. (#181)
+- Paneldeck no longer loads DLLs from the current working folder: right at startup the DLL search is restricted to the program folder and System32, and the bundled console host is loaded by its full path. (#183)
+- The C runtime is now linked into `paneldeck.exe`; it no longer needs `VCRUNTIME140.dll`, which Windows would look for before Paneldeck starts. (#183)
+- Agents (MCP) can only add switches that don't affect rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; not chrome if you turned Chrome off by default). Value options, flags that widen rights or access, flags that turn off hooks (`--safe-mode`) and flags Paneldeck controls are refused. Extra folders, allowed tools, an MCP config and `--safe-mode` from your defaults never apply to agent-created sessions or to `paneldeck --open --claude` from a Hub terminal. Paths must be local and existing (network shares, also via links, are never accessed); all values are validated and quoted per shell. (#182)
+- Sessions created via MCP without a permission mode get an explicit `--permission-mode default`, so the user's own Claude settings cannot turn on bypassPermissions; `bypassPermissions` is never possible via MCP, never a stored default and never remembered – only an explicit per-session choice with a warning. Old `--dangerously-*` arguments are dropped. (#161)
+- Paneldeck starts every terminal's shell inside its own Windows Job Object and attributes MCP callers and `paneldeck --open` by job membership. Processes started detached or orphaned (`Start-Process`, `cmd /c start`, double fork) still belong to their session and its agent chain; programs cannot break away from the job. The process-tree check remains as a fallback. (#168)
+- A program pushing thousands of kitty keyboard modes can no longer crash Paneldeck. (#183)
+- Pasted text is filtered like Windows Terminal (control characters incl. ESC and C1), so hidden Enter sequences cannot bypass the multi-line warning. (#183)
+- Window titles from programs are sanitised (control, bidi, line-separator and zero-width characters, length cap). (#183)
+- OSC 8 links: http/https open directly only with a plain host name; every other link asks first and shows the full target. Overlong or disguised targets (control, bidi or invisible characters, also percent-encoded), script schemes, abused Windows protocol handlers (including the Office handlers), and `file:` links to anything but local drive paths are never opened. (#183)
+- Network and device paths such as `\\.\GLOBALROOT\…` or `\??\UNC\…` are no longer treated as local (links, working folder from OSC 7/9;9). (#183)
+- "Show in folder" no longer passes commas or quotes to Explorer; more file types (e.g. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc`), trailing dots/spaces and alternate data streams are treated as executable. (#183)
+- Notification texts and session names in toasts are cleaned (control, bidi and invisible characters removed, length limited); toasts always name Paneldeck and the session. (#183)
+
 ## [2.2.0] - 2026-11-16
 
 ### Added

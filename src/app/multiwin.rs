@@ -25,7 +25,7 @@ macro_rules! view_fields {
     ($mac:ident!($($args:tt)*)) => {
         $mac!($($args)*;
             layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
-            confirm_close, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
+            confirm_close, reload_ask, session_settings, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
             queue_open, queue_draft, files_open, diff_open, diff_sel, composer_open, composer_focus, composer_text, history_open,
             history_filter, history_hits, history_hits_rx, templates_open, tpl_name, cost_open, gsearch, prompts_open, prompt_sel,
             broadcast, wt_close, editor, confirm_restore, restore_error, dragging, dragging_folder, folder_rects, tree_geo,
@@ -57,7 +57,9 @@ pub(super) struct WinView {
     group_prompt: Option<Prompt>,
     new_dialog: Option<NewDialog>,
     new_chat: Option<models_ui::NewChatDlg>,
-    confirm_close: Option<u64>,
+    confirm_close: Option<super::closing::CloseAsk>,
+    reload_ask: Option<super::session_settings::ReloadAsk>,
+    session_settings: Option<super::session_settings::SessionForm>,
     settings_open: bool,
     settings_tab: usize,
     /// Laufende Kürzel-Aufnahme in den Einstellungen dieses Fensters (sperrt nur hier die Kürzel).
@@ -120,6 +122,8 @@ impl WinView {
             new_dialog: None,
             new_chat: None,
             confirm_close: None,
+            reload_ask: None,
+            session_settings: None,
             settings_open: false,
             settings_tab: 0,
             capture_key: None,
@@ -206,7 +210,7 @@ pub(super) fn drop_closed<T>(queue: &mut Vec<(u64, T)>, alive: impl Fn(u64) -> b
 /// `session_window`: Fenster der Zielsitzung (falls es sie gibt); abgedockte Sitzungen holt jedes Fenster selbst nach vorn.
 pub(super) fn route_target(action: &Action, session_window: impl Fn(u64) -> Option<u64>, detached: impl Fn(u64) -> bool, cur: u64) -> Option<u64> {
     let (id, follows_detached) = match action {
-        Action::Activate(id) | Action::Focus(id) | Action::JumpTo(id) => (*id, true),
+        Action::Activate(id) | Action::Focus(id) | Action::JumpTo(id) | Action::Place(id, ..) => (*id, true),
         Action::GlobalJump(id, ..) => (*id, true),
         Action::Attach(id) => (*id, false),
         _ => return None,
@@ -215,6 +219,11 @@ pub(super) fn route_target(action: &Action, session_window: impl Fn(u64) -> Opti
         return None;
     }
     session_window(id).filter(|w| *w != cur)
+}
+
+/// Holt eine weitergereichte Aktion ihr Fenster nach vorn? Alle außer der Platzierung für einen Agenten (`Action::Place`).
+pub(super) fn brings_to_front(a: &Action) -> bool {
+    !matches!(a, Action::Place(..))
 }
 
 /// Strg+Klick auf einen Reiter öffnet ihn in einem neuen Fenster, ein normaler Klick wechselt nur den Reiter.
@@ -365,6 +374,10 @@ pub(super) struct HubWindow {
     /// Rückfrage „Fenster schließen?“ ist offen.
     ask_close: bool,
     close: bool,
+    /// Hintergrundprozesse der Sitzungen, die mit dem Fenster enden (#168), beim Öffnen der Rückfrage ermittelt.
+    close_lingering: Vec<super::closing::Lingering>,
+    /// Beginn der Wartezeit dieser Rückfrage (mit Hintergrundprozessen, #168).
+    close_since: Instant,
     /// Layout beim ersten Zeichnen prüfen (wiederhergestellte Fenster).
     needs_load: bool,
     /// egui-Gedächtnis dieses Fensters (`Memory::data`: Bildlauf, Textfelder, aufgeklappte Abschnitte, Bereichsgrößen …).
@@ -375,7 +388,7 @@ pub(super) struct HubWindow {
 
 impl HubWindow {
     pub(super) fn new(id: u64, view: WinView, pos: Option<Pos2>, size: Vec2, maximized: bool) -> Self {
-        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, restored: false, hidden: false, outer: None, inner: None, maximized, ask_close: false, close: false, needs_load: true, mem: Default::default() }
+        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, restored: false, hidden: false, outer: None, inner: None, maximized, ask_close: false, close: false, close_lingering: Vec::new(), close_since: Instant::now(), needs_load: true, mem: Default::default() }
     }
     fn viewport(&self) -> egui::ViewportId {
         viewport_of(self.id)
@@ -473,6 +486,10 @@ impl App {
         if mine.is_empty() {
             return Vec::new();
         }
+        // Platzierungen für Agenten (#162) holen das Fenster nicht nach vorn: der Nutzer arbeitet weiter, wo er war.
+        if mine.iter().all(|(_, a)| !brings_to_front(a)) {
+            return mine.into_iter().map(|(_, a)| a).collect();
+        }
         if cur == 0 && self.in_tray {
             self.from_tray(ctx);
         } else {
@@ -532,6 +549,9 @@ impl App {
         }
         if !self.wins.is_empty() {
             self.prune_view();
+        } else {
+            // Ohne weitere Fenster läuft `prune_view` nicht; der Abgleich „im Layout = nicht minimiert“ gilt trotzdem.
+            super::unminimize_shown(self.layout.as_ref(), &mut self.entries);
         }
         self.take_routed(ctx)
     }
@@ -540,6 +560,11 @@ impl App {
     /// ist im Vordergrund (dann zeichnet dieses sie, siehe `child_frame`).
     pub(super) fn main_overlay(&self) -> bool {
         self.overlay_window() == 0
+    }
+
+    /// Weitere Fenster mit bekanntem Fensterhandle: (Fenster-ID, HWND) – für den Fortschritt in der Taskleiste (#183).
+    pub(super) fn extra_hwnds(&self) -> Vec<(u64, isize)> {
+        self.wins.list.iter().filter_map(|w| w.hwnd.map(|h| (w.id, h))).collect()
     }
 
     /// Fenster, das für eine Sitzung in der Taskleiste blinken soll: ihr abgedocktes Fenster, sonst das Paneldeck-Fenster,
@@ -581,6 +606,21 @@ impl App {
         }
     }
 
+    /// Steht die Sitzung gerade als Bereich auf dem Bildschirm (im Layout der aktuellen Ansicht ihres Fensters oder in einem
+    /// eigenen abgedockten Fenster)? Für `list_sessions` `shown` (#162: Ergebnis einer Platzierung). Wie `session_view_info`
+    /// aus dem Hauptdurchlauf (`wins.cur == 0`) aufgerufen.
+    pub(super) fn session_shown(&self, id: u64) -> bool {
+        let Some(e) = self.entries.get(&id) else { return false };
+        if self.detached.contains(&id) {
+            return true;
+        }
+        let in_view = |layout: Option<&Node>, project: u64| e.meta.project == project && layout.is_some_and(|l| l.contains(id));
+        if e.meta.window == 0 {
+            return in_view(self.layout.as_ref(), self.active_project);
+        }
+        self.wins.list.iter().find(|x| x.id == e.meta.window).is_some_and(|x| in_view(x.view.layout.as_ref(), x.view.active_project))
+    }
+
     /// Layout der gerade gezeichneten Ansicht bereinigen: nur Sitzungen dieses Fensters und Projekts, nichts Abgedocktes.
     fn prune_view(&mut self) {
         if !self.projects.iter().any(|p| p.id == self.active_project) {
@@ -596,15 +636,7 @@ impl App {
             let detached = &self.detached;
             self.layout = prune_layout(l, |id| entries.get(&id).is_some_and(|e| e.meta.project == pid && e.meta.window == win) && !detached.contains(&id));
         }
-        // Was im Layout steht, ist nicht minimiert – egal, wie es hineinkam (Ziehen, Ordner-Layout, Vorlage …).
-        if let Some(l) = &self.layout {
-            for id in l.leaf_ids() {
-                if let Some(e) = self.entries.get_mut(&id).filter(|e| e.meta.minimized || e.meta.slot.is_some()) {
-                    e.meta.minimized = false;
-                    e.meta.slot = None;
-                }
-            }
-        }
+        super::unminimize_shown(self.layout.as_ref(), &mut self.entries);
         let ok = self.layout.as_ref().is_some_and(|l| l.contains(self.focused));
         if !ok {
             let mut v = Vec::new();
@@ -731,7 +763,7 @@ impl App {
         self.sync_accent();
         self.ensure_style(ctx);
         if self.wins.exit_after_save {
-            self.save_all();
+            self.save_for_exit();
             std::process::exit(0);
         }
         if let Some(req) = self.wins.open_req.take() {
@@ -768,9 +800,14 @@ impl App {
             w.inner = inner.or(w.inner);
         }
         if close_req && !w.close {
-            if self.window_close_plan(w.id).ask() {
+            let plan = self.window_close_plan(w.id);
+            // Hintergrundprozesse der Sitzungen, die mit dem Fenster enden (#168): einmal beim Öffnen der Rückfrage.
+            let lingering = self.lingering_of(&plan.end);
+            if plan.ask() || !lingering.is_empty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 w.ask_close = true;
+                w.close_lingering = lingering;
+                w.close_since = Instant::now();
             } else {
                 w.close = true;
             }
@@ -854,7 +891,7 @@ impl App {
     fn close_window_dialog(&mut self, ctx: &egui::Context, w: &mut HubWindow, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
         let plan = self.window_close_plan(w.id);
-        if !plan.ask() {
+        if !plan.ask() && w.close_lingering.is_empty() {
             w.ask_close = false;
             w.close = true;
             return;
@@ -862,6 +899,14 @@ impl App {
         if self.wt_close.is_some() {
             return; // die Worktree-Rückfrage einer Sitzung ist offen; danach geht es hier weiter
         }
+        let lingering = w.close_lingering.clone();
+        // Mit Hintergrundprozessen (#168): 3 s Wartezeit für beide Schließen-Knöpfe; Enter (= weiterlaufen lassen, nach der
+        // Wartezeit) und Esc (= abbrechen) gehören dem Dialog, nicht dem Terminal.
+        let secs = if lingering.is_empty() { 0 } else { super::planning_ui::countdown_secs(w.close_since, Instant::now()) };
+        if secs > 0 {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), !lingering.is_empty() && i.consume_key(Modifiers::NONE, Key::Enter)));
         let names = |ids: &[u64]| ids.iter().filter_map(|id| self.entries.get(id).map(|e| (*id, e.display_name()))).collect::<Vec<_>>();
         let (adopt, worktrees) = (names(&plan.adopt), names(&plan.worktrees));
         // Was beendet wird, aber nicht im Layout steht (minimiert oder weggewechselt) – sonst übersieht man es leicht.
@@ -925,21 +970,35 @@ impl App {
                         });
                     }
                 }
+                super::closing::lingering_section(ui, &lingering, lang, true);
                 ui.add_space(S2);
                 ui.horizontal(|ui| {
+                    let label = if lingering.is_empty() { lang.t("Fenster schließen", "Close window") } else { lang.t("Schließen, weiterlaufen lassen", "Close, keep running") };
                     let close = ui
-                        .add_enabled(plan.can_close(), egui::Button::new(lang.t("Fenster schließen", "Close window")))
+                        .add_enabled(plan.can_close() && secs == 0, egui::Button::new(label))
                         .on_disabled_hover_text(lang.t("Erst die Sitzungen mit Worktree schließen.", "Close the sessions with a worktree first."));
-                    if close.clicked() {
+                    if close.clicked() || (enter && plan.can_close() && secs == 0) {
                         w.ask_close = false;
                         w.close = true;
+                    }
+                    if !lingering.is_empty() {
+                        let end = if plan.can_close() {
+                            super::planning_ui::danger_button(ui, lang.t("Schließen, alle beenden", "Close and end all"), secs)
+                        } else {
+                            ui.add_enabled(false, egui::Button::new(lang.t("Schließen, alle beenden", "Close and end all")))
+                        };
+                        if end.clicked() && secs == 0 && plan.can_close() {
+                            actions.push(Action::EndJobs(lingering.iter().map(|l| l.id).collect()));
+                            w.ask_close = false;
+                            w.close = true;
+                        }
                     }
                     if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
                         w.ask_close = false;
                     }
                 });
             });
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if esc {
             w.ask_close = false;
         }
     }
@@ -1111,6 +1170,11 @@ mod tests {
         let detached = |id: u64| id == 9;
         assert_eq!(route_target(&Action::Activate(2), window, detached, 0), Some(3));
         assert_eq!(route_target(&Action::Focus(2), window, detached, 0), Some(3));
+        // Platzierung für einen Agenten (#162): im Fenster der Sitzung (dort ist der aktive Bereich zu bestimmen)
+        assert_eq!(route_target(&Action::Place(2, crate::layout::Placement::SplitRight, Some(1), vec![]), window, detached, 0), Some(3));
+        assert_eq!(route_target(&Action::Place(1, crate::layout::Placement::Replace, None, vec![]), window, detached, 0), None);
+        assert!(!brings_to_front(&Action::Place(2, crate::layout::Placement::Solo, None, vec![])), "Platzierung: Fenster bleibt, wo es ist");
+        assert!(brings_to_front(&Action::Focus(2)) && brings_to_front(&Action::Activate(2)));
         assert_eq!(route_target(&Action::JumpTo(1), window, detached, 3), Some(0));
         assert_eq!(route_target(&Action::GlobalJump(2, 4, "x".into()), window, detached, 0), Some(3));
         assert_eq!(route_target(&Action::Attach(2), window, detached, 0), Some(3));

@@ -4,7 +4,7 @@
 //! * Eine Karte hat optionalen Titel und optionalen Text – mindestens eins von beiden muss gefüllt sein.
 //! * Die Nummer (`id`, Anzeige `TODO-<n>`) wird fortlaufend vergeben und nie wiederverwendet.
 //! * Tags werden beim Zuordnen automatisch angelegt (Name ohne Beachtung der Groß-/Kleinschreibung eindeutig, angezeigt
-//!   wird der zuerst angelegte Name) und bekommen reihum eine Farbe aus [`PALETTE`].
+//!   wird der zuerst angelegte Name) und bekommen reihum eine Farbe aus der geltenden Palette (`palette::Area::Todo`).
 //! * Alle Änderungen außer dem Löschen liefern eine [`TaskOp`] zurück, die sich mit `undo::History` rückgängig machen
 //!   und wiederholen lässt. Löschen bleibt endgültig.
 
@@ -12,11 +12,6 @@ use crate::state::{self, Lang};
 use crate::undo::Op;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
-
-/// Farbpalette der Tags (Text „#RRGGBB“, für dunkle wie helle Oberflächen brauchbar).
-pub const PALETTE: [&str; 10] = [
-    "#E06C75", "#E5A04B", "#D8B94A", "#7FBF6A", "#4FB8A8", "#58A6E6", "#7B8CF0", "#B77FE0", "#E07BB0", "#97A3B0",
-];
 
 /// Längste Tag-Bezeichnung in Zeichen.
 pub const MAX_TAG_CHARS: usize = 32;
@@ -33,6 +28,10 @@ pub enum TaskError {
     TagExists(i64),
     /// Ein Tag lässt sich nicht wiederherstellen, weil sein Name inzwischen anders belegt ist.
     TagNameTaken,
+    /// Fälligkeit nicht lesbar (Form `JJJJ-MM-TT` oder `JJJJ-MM-TTTHH:MM`).
+    DueInvalid,
+    /// Schwellen der Fälligkeits-Markierung ungültig.
+    Thresholds(crate::due::ThresholdProblem),
     Db(String),
 }
 
@@ -50,6 +49,8 @@ impl TaskError {
             TaskError::TagNameEmpty => lang.t("Der Tag-Name darf nicht leer sein.", "The tag name must not be empty.").to_string(),
             TaskError::TagExists(_) => lang.t("Ein Tag mit diesem Namen gibt es schon.", "A tag with this name already exists.").to_string(),
             TaskError::TagNameTaken => lang.t("Der Tag-Name ist inzwischen anders vergeben.", "The tag name is now used by another tag.").to_string(),
+            TaskError::DueInvalid => lang.t("Fälligkeit nicht lesbar – so geht es: 2026-11-20 oder 2026-11-20 14:30.", "Due date not readable – use 2026-11-20 or 2026-11-20 14:30.").to_string(),
+            TaskError::Thresholds(p) => p.message(lang).to_string(),
             TaskError::Db(e) => format!("{}: {e}", lang.t("Datenbankfehler", "Database error")),
         }
     }
@@ -69,6 +70,8 @@ pub struct Item {
     pub done_at: Option<String>,
     /// Tag-Ids, aufsteigend.
     pub tags: Vec<i64>,
+    /// Fälligkeit (`JJJJ-MM-TT` oder `JJJJ-MM-TTTHH:MM`, siehe `due.rs`), optional.
+    pub due: Option<String>,
 }
 
 impl Item {
@@ -78,7 +81,7 @@ impl Item {
     }
 
     fn state(&self) -> ItemState {
-        ItemState { title: self.title.clone(), body: self.body.clone(), done: self.done, done_at: self.done_at.clone(), tags: self.tags.clone() }
+        ItemState { title: self.title.clone(), body: self.body.clone(), done: self.done, done_at: self.done_at.clone(), tags: self.tags.clone(), due: self.due.clone() }
     }
 }
 
@@ -103,6 +106,7 @@ pub struct ItemState {
     pub done_at: Option<String>,
     /// Tag-Ids, aufsteigend.
     pub tags: Vec<i64>,
+    pub due: Option<String>,
 }
 
 /// Welche Karten die Liste zeigt.
@@ -166,9 +170,101 @@ pub fn tag_key(name: &str) -> String {
     clean_tag(name).to_lowercase()
 }
 
+/// Fälligkeit bereinigen: leer → `None`, sonst Eingabe wie `2026-11-20`, `20.11.2026 14:30` in die gespeicherte Form bringen.
+pub fn clean_due(due: Option<&str>) -> Res<Option<String>> {
+    match due {
+        None => Ok(None),
+        Some(s) => crate::due::parse_input(s).map_err(|_| TaskError::DueInvalid),
+    }
+}
+
+// ------------------------------------------------------------------ Fälligkeit: Schwellen, Filter, Sortierung
+
+/// Meta-Schlüssel der Schwellen der Todo-Liste (JSON wie bei den Projekten).
+const THRESHOLDS_META: &str = "todo_due_thresholds";
+
+/// Schwellen der Fälligkeits-Markierung der Todo-Liste. Nie gesetzt = die Standard-Schwellen.
+pub fn due_thresholds(conn: &Connection) -> Res<Vec<crate::due::DueThreshold>> {
+    let json: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = ?1", [THRESHOLDS_META], |r| r.get(0)).optional()?;
+    Ok(match json {
+        Some(j) => crate::due::parse_thresholds(&j),
+        None => crate::due::default_thresholds(),
+    })
+}
+
+/// Schwellen der Todo-Liste setzen (geprüft wie bei den Projekten; leer = keine Markierung).
+pub fn set_due_thresholds(conn: &Connection, list: &[crate::due::DueThreshold]) -> Res<()> {
+    let list = crate::due::validate_thresholds(list).map_err(TaskError::Thresholds)?;
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![THRESHOLDS_META, crate::due::thresholds_json(&list)],
+    )?;
+    Ok(())
+}
+
+/// Filter der Liste nach Fälligkeit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DueFilter {
+    #[default]
+    All,
+    /// Nur Karten mit Fälligkeit.
+    WithDue,
+    /// Nur überfällige Karten.
+    Overdue,
+    /// Nur Karten mit Markierung oder Tönung (nach den Schwellen).
+    Marked,
+}
+
+impl DueFilter {
+    pub const ALL: [DueFilter; 4] = [DueFilter::All, DueFilter::WithDue, DueFilter::Overdue, DueFilter::Marked];
+
+    pub fn label(self, lang: Lang) -> &'static str {
+        match self {
+            DueFilter::All => lang.t("Alle", "All"),
+            DueFilter::WithDue => lang.t("Mit Fälligkeit", "With due date"),
+            DueFilter::Overdue => lang.t("Überfällig", "Overdue"),
+            DueFilter::Marked => lang.t("Markiert", "Marked"),
+        }
+    }
+
+    /// Passt die Karte? Erledigte Karten sind nie überfällig oder markiert.
+    pub fn matches(self, it: &Item, thresholds: &[crate::due::DueThreshold], now: chrono::NaiveDateTime) -> bool {
+        let st = || if it.done { None } else { it.due.as_deref().and_then(|d| crate::due::evaluate(thresholds, d, now)) };
+        match self {
+            DueFilter::All => true,
+            DueFilter::WithDue => it.due.is_some(),
+            DueFilter::Overdue => st().is_some_and(|s| s.overdue()),
+            DueFilter::Marked => st().is_some_and(|s| s.flagged()),
+        }
+    }
+}
+
+/// Sortierung der Liste.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ItemSort {
+    /// Eigene Reihenfolge (Ziehen).
+    #[default]
+    Manual,
+    /// Nach Fälligkeit, früheste zuerst; ohne Fälligkeit am Ende (in eigener Reihenfolge).
+    Due,
+}
+
+/// Karten nach Fälligkeit sortieren (stabil; „nur Datum“ zählt als Ende des Tages).
+pub fn sort_by_due(items: &mut [Item]) {
+    items.sort_by_key(|i| (i.due.as_deref().and_then(crate::due::deadline).is_none(), i.due.as_deref().and_then(crate::due::deadline)));
+}
+
+/// Zählung für die Übersicht (Reiter-Kopf): (überfällig, markiert) der offenen Karten.
+pub fn due_counts(conn: &Connection, now: chrono::NaiveDateTime) -> Res<(usize, usize)> {
+    let th = due_thresholds(conn)?;
+    let mut st = conn.prepare("SELECT due FROM todo_items WHERE done = 0 AND due IS NOT NULL")?;
+    let dues = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    Ok(crate::due::count(&th, dues, now))
+}
+
 // ------------------------------------------------------------------ Lesen
 
-const ITEM_COLS: &str = "id, title, body, done, position, created_at, updated_at, done_at";
+const ITEM_COLS: &str = "id, title, body, done, position, created_at, updated_at, done_at, due";
 
 fn item_from_row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
     Ok(Item {
@@ -181,6 +277,7 @@ fn item_from_row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         updated_at: r.get(6)?,
         done_at: r.get(7)?,
         tags: Vec::new(),
+        due: r.get(8)?,
     })
 }
 
@@ -280,15 +377,17 @@ pub fn suggest<'a>(tags: &'a [Tag], query: &str, exclude: &[String], limit: usiz
 
 // ------------------------------------------------------------------ Tags schreiben
 
-/// Palettenfarbe, die bisher am seltensten vergeben ist (bei Gleichstand die erste) – so rotiert die Vergabe.
+/// Palettenfarbe, die bisher am seltensten vergeben ist (bei Gleichstand die erste) – so rotiert die Vergabe. Palette:
+/// die geltende der Todo-Liste (`palette::auto`, bei leerer Palette die eingebauten Vorgaben).
 pub fn next_color(conn: &Connection) -> Res<String> {
-    let mut used: HashMap<String, usize> = HashMap::new();
+    next_color_from(conn, &crate::palette::auto(crate::palette::Area::Todo))
+}
+
+/// Wie [`next_color`] mit vorgegebener Palette (`pool` darf nicht leer sein).
+pub fn next_color_from(conn: &Connection, pool: &[String]) -> Res<String> {
     let mut st = conn.prepare("SELECT color FROM todo_tags")?;
-    for c in st.query_map([], |r| r.get::<_, String>(0))? {
-        *used.entry(c?.to_uppercase()).or_default() += 1;
-    }
-    let pick = PALETTE.iter().min_by_key(|c| used.get(&c.to_uppercase()).copied().unwrap_or(0)).copied().unwrap_or(PALETTE[0]);
-    Ok(pick.to_string())
+    let used: Vec<String> = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?;
+    Ok(crate::palette::least_used(pool, used.iter().map(|s| s.as_str())).unwrap_or_else(|| crate::palette::TODO_DEFAULTS[0].to_string()))
 }
 
 /// Tag zum Namen finden oder (mit der nächsten Palettenfarbe) anlegen.
@@ -440,8 +539,8 @@ fn set_item_tags(conn: &Connection, id: i64, tags: &[i64]) -> Res<()> {
 
 fn apply_state(conn: &Connection, id: i64, st: &ItemState) -> Res<()> {
     let n = conn.execute(
-        "UPDATE todo_items SET title = ?2, body = ?3, done = ?4, done_at = ?5, updated_at = ?6 WHERE id = ?1",
-        params![id, st.title, st.body, st.done as i64, st.done_at, now()],
+        "UPDATE todo_items SET title = ?2, body = ?3, done = ?4, done_at = ?5, updated_at = ?6, due = ?7 WHERE id = ?1",
+        params![id, st.title, st.body, st.done as i64, st.done_at, now(), st.due],
     )?;
     if n == 0 {
         return Err(TaskError::NotFound);
@@ -451,22 +550,23 @@ fn apply_state(conn: &Connection, id: i64, st: &ItemState) -> Res<()> {
 
 fn insert_item(conn: &Connection, it: &Item) -> Res<()> {
     conn.execute(
-        "INSERT INTO todo_items (id, title, body, done, position, created_at, updated_at, done_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![it.id, it.title, it.body, it.done as i64, it.position, it.created_at, it.updated_at, it.done_at],
+        "INSERT INTO todo_items (id, title, body, done, position, created_at, updated_at, done_at, due) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![it.id, it.title, it.body, it.done as i64, it.position, it.created_at, it.updated_at, it.done_at, it.due],
     )?;
     set_item_tags(conn, it.id, &it.tags)
 }
 
 /// Neue Karte oben in der Liste anlegen. Titel/Text: mindestens eins gefüllt, sonst `Empty` (dann entsteht auch kein Tag).
-pub fn create_item(conn: &Connection, title: &str, body: &str, tag_names: &[String]) -> Res<(Item, TaskOp)> {
+pub fn create_item(conn: &Connection, title: &str, body: &str, due: Option<&str>, tag_names: &[String]) -> Res<(Item, TaskOp)> {
     let (title, body) = validate(title, body)?;
+    let due = clean_due(due)?;
     let tx = conn.unchecked_transaction()?;
     let tags = resolve_tags(&tx, tag_names)?;
     let position: i64 = tx.query_row("SELECT COALESCE(MIN(position), 0) - 1 FROM todo_items", [], |r| r.get(0))?;
     let t = now();
     tx.execute(
-        "INSERT INTO todo_items (title, body, done, position, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?4, ?4)",
-        params![title, body, position, t],
+        "INSERT INTO todo_items (title, body, done, position, created_at, updated_at, due) VALUES (?1, ?2, 0, ?3, ?4, ?4, ?5)",
+        params![title, body, position, t, due],
     )?;
     let id = tx.last_insert_rowid();
     set_item_tags(&tx, id, &tags)?;
@@ -475,13 +575,14 @@ pub fn create_item(conn: &Connection, title: &str, body: &str, tag_names: &[Stri
     Ok((item.clone(), TaskOp::Presence { item, present: true }))
 }
 
-/// Titel, Text und Tags einer Karte ändern (gleiche Regel wie beim Anlegen). `None` = nichts geändert.
-pub fn edit_item(conn: &Connection, id: i64, title: &str, body: &str, tag_names: &[String]) -> Res<Option<TaskOp>> {
+/// Titel, Text, Fälligkeit und Tags einer Karte ändern (gleiche Regel wie beim Anlegen). `None` = nichts geändert.
+pub fn edit_item(conn: &Connection, id: i64, title: &str, body: &str, due: Option<&str>, tag_names: &[String]) -> Res<Option<TaskOp>> {
     let (title, body) = validate(title, body)?;
+    let due = clean_due(due)?;
     let tx = conn.unchecked_transaction()?;
     let before = get_item(&tx, id)?.state();
     let tags = resolve_tags(&tx, tag_names)?;
-    let after = ItemState { title, body, done: before.done, done_at: before.done_at.clone(), tags };
+    let after = ItemState { title, body, done: before.done, done_at: before.done_at.clone(), tags, due };
     if before == after {
         return Ok(None);
     }
@@ -651,7 +752,7 @@ mod tests {
     }
 
     fn mk(conn: &Connection, text: &str) -> i64 {
-        create_item(conn, "", text, &[]).unwrap().0.id
+        create_item(conn, "", text, None, &[]).unwrap().0.id
     }
 
     fn tag_names(conn: &Connection, item: i64) -> Vec<String> {
@@ -673,21 +774,21 @@ mod tests {
     fn card_needs_title_or_text() {
         let c = db();
         for (t, b) in [("", ""), ("   ", "\n\t "), ("", "  ")] {
-            assert_eq!(create_item(&c, t, b, &names(&["x"])).unwrap_err(), TaskError::Empty);
+            assert_eq!(create_item(&c, t, b, None, &names(&["x"])).unwrap_err(), TaskError::Empty);
         }
         assert!(list_items(&c, &all()).unwrap().is_empty());
         assert!(list_tags(&c).unwrap().is_empty(), "bei einem Fehler entsteht kein Tag");
         // nur Titel, nur Text, beides – jeweils ohne Leerraum am Rand
-        let a = create_item(&c, "  Titel  ", "", &[]).unwrap().0;
+        let a = create_item(&c, "  Titel  ", "", None, &[]).unwrap().0;
         assert_eq!((a.title.as_str(), a.body.as_str()), ("Titel", ""));
-        let b = create_item(&c, "", " nur Text\n", &[]).unwrap().0;
+        let b = create_item(&c, "", " nur Text\n", None, &[]).unwrap().0;
         assert_eq!((b.title.as_str(), b.body.as_str()), ("", "nur Text"));
-        let d = create_item(&c, "T", "B\nzweite Zeile", &[]).unwrap().0;
+        let d = create_item(&c, "T", "B\nzweite Zeile", None, &[]).unwrap().0;
         assert_eq!((d.title.as_str(), d.body.as_str()), ("T", "B\nzweite Zeile"));
         // gleiche Regel beim Bearbeiten
-        assert_eq!(edit_item(&c, a.id, " ", "", &[]).unwrap_err(), TaskError::Empty);
+        assert_eq!(edit_item(&c, a.id, " ", "", None, &[]).unwrap_err(), TaskError::Empty);
         assert_eq!(get_item(&c, a.id).unwrap().title, "Titel");
-        assert!(edit_item(&c, a.id, "", "jetzt Text", &[]).unwrap().is_some());
+        assert!(edit_item(&c, a.id, "", "jetzt Text", None, &[]).unwrap().is_some());
         assert_eq!(get_item(&c, a.id).unwrap().title, "");
         // Fehlertexte in beiden Sprachen
         assert_ne!(TaskError::Empty.message(Lang::De), TaskError::Empty.message(Lang::En));
@@ -767,20 +868,20 @@ mod tests {
     #[test]
     fn tags_are_created_case_insensitively() {
         let c = db();
-        let (it, _) = create_item(&c, "t", "", &names(&["Bug", "bug", " BUG ", "Feature", "", "  "])).unwrap();
+        let (it, _) = create_item(&c, "t", "", None, &names(&["Bug", "bug", " BUG ", "Feature", "", "  "])).unwrap();
         assert_eq!(it.tags.len(), 2, "Doppelte (auch anders geschrieben) zählen einmal");
         assert_eq!(tag_names(&c, it.id), vec!["Bug", "Feature"], "Anzeige wie zuerst angelegt");
-        let (it2, _) = create_item(&c, "u", "", &names(&["BUG", "  neu   mit   Leerraum "])).unwrap();
+        let (it2, _) = create_item(&c, "u", "", None, &names(&["BUG", "  neu   mit   Leerraum "])).unwrap();
         let tags = list_tags(&c).unwrap();
         assert_eq!(tags.len(), 3);
         assert_eq!(tag_names(&c, it2.id), vec!["Bug", "neu mit Leerraum"]);
         // Umlaute werden ebenfalls ohne Beachtung der Schreibweise verglichen
-        let (it3, _) = create_item(&c, "v", "", &names(&["Ärger", "ärger"])).unwrap();
+        let (it3, _) = create_item(&c, "v", "", None, &names(&["Ärger", "ärger"])).unwrap();
         assert_eq!(it3.tags.len(), 1);
         assert_eq!(find_tag(&c, "ÄRGER").unwrap().unwrap().name, "Ärger");
         // lange Namen werden gekürzt
         let long = "x".repeat(100);
-        let (it4, _) = create_item(&c, "w", "", &[long]).unwrap();
+        let (it4, _) = create_item(&c, "w", "", None, &[long]).unwrap();
         assert_eq!(list_tags(&c).unwrap().iter().find(|t| t.id == it4.tags[0]).unwrap().name.chars().count(), MAX_TAG_CHARS);
     }
 
@@ -788,19 +889,26 @@ mod tests {
     fn tag_colors_rotate_through_the_palette() {
         let c = db();
         let mut seen = Vec::new();
-        for i in 0..PALETTE.len() {
-            create_item(&c, "t", "", &[format!("tag{i}")]).unwrap();
+        let pal = crate::palette::auto(crate::palette::Area::Todo);
+        for i in 0..pal.len() {
+            create_item(&c, "t", "", None, &[format!("tag{i}")]).unwrap();
         }
         for t in list_tags(&c).unwrap() {
-            assert!(PALETTE.contains(&t.color.as_str()));
+            assert!(pal.contains(&t.color));
             seen.push(t.color);
         }
         seen.sort();
         seen.dedup();
-        assert_eq!(seen.len(), PALETTE.len(), "die ersten zehn Tags haben zehn verschiedene Farben");
-        // der elfte beginnt wieder von vorn
-        create_item(&c, "t", "", &names(&["elf"])).unwrap();
-        assert_eq!(find_tag(&c, "elf").unwrap().unwrap().color, PALETTE[0]);
+        assert_eq!(seen.len(), pal.len(), "die ersten Tags haben lauter verschiedene Farben");
+        // der nächste beginnt wieder von vorn
+        create_item(&c, "t", "", None, &names(&["elf"])).unwrap();
+        assert_eq!(find_tag(&c, "elf").unwrap().unwrap().color, pal[0]);
+        // eigene Palette: Vergabe daraus, Kleinbuchstaben in der Datenbank zählen mit
+        let pool = vec!["#010101".to_string(), "#020202".to_string()];
+        assert_eq!(next_color_from(&c, &pool).unwrap(), "#010101");
+        create_item(&c, "t", "", None, &names(&["zwölf"])).unwrap();
+        set_tag_color(&c, find_tag(&c, "zwölf").unwrap().unwrap().id, "#010101").unwrap();
+        assert_eq!(next_color_from(&c, &pool).unwrap(), "#020202");
         assert_eq!(rgb("#E06C75"), (0xe0, 0x6c, 0x75));
         assert_eq!(rgb("kaputt"), (0x97, 0xa3, 0xb0));
     }
@@ -808,8 +916,8 @@ mod tests {
     #[test]
     fn rename_and_color() {
         let c = db();
-        let (a, _) = create_item(&c, "a", "", &names(&["alt"])).unwrap();
-        let (b, _) = create_item(&c, "b", "", &names(&["alt", "andere"])).unwrap();
+        let (a, _) = create_item(&c, "a", "", None, &names(&["alt"])).unwrap();
+        let (b, _) = create_item(&c, "b", "", None, &names(&["alt", "andere"])).unwrap();
         let alt = find_tag(&c, "alt").unwrap().unwrap().id;
         let andere = find_tag(&c, "andere").unwrap().unwrap().id;
         // Umbenennen wirkt auf allen Karten
@@ -826,18 +934,19 @@ mod tests {
         assert_eq!(rename_tag(&c, alt, "  ").unwrap_err(), TaskError::TagNameEmpty);
         assert_eq!(rename_tag(&c, 999, "x").unwrap_err(), TaskError::NotFound);
         // Farbe
-        assert!(set_tag_color(&c, alt, PALETTE[3]).unwrap().is_some());
-        assert_eq!(find_tag(&c, "neu").unwrap().unwrap().color, PALETTE[3]);
-        assert!(set_tag_color(&c, alt, &PALETTE[3].to_lowercase()).unwrap().is_none());
+        let p3 = crate::palette::TODO_DEFAULTS[3];
+        assert!(set_tag_color(&c, alt, p3).unwrap().is_some());
+        assert_eq!(find_tag(&c, "neu").unwrap().unwrap().color, p3);
+        assert!(set_tag_color(&c, alt, &p3.to_lowercase()).unwrap().is_none());
     }
 
     #[test]
     fn merge_and_delete_tags() {
         let c = db();
-        let (a, _) = create_item(&c, "a", "", &names(&["x"])).unwrap();
-        let (b, _) = create_item(&c, "b", "", &names(&["x", "y"])).unwrap();
-        let (d, _) = create_item(&c, "d", "", &names(&["y"])).unwrap();
-        let (e, _) = create_item(&c, "e", "", &[]).unwrap();
+        let (a, _) = create_item(&c, "a", "", None, &names(&["x"])).unwrap();
+        let (b, _) = create_item(&c, "b", "", None, &names(&["x", "y"])).unwrap();
+        let (d, _) = create_item(&c, "d", "", None, &names(&["y"])).unwrap();
+        let (e, _) = create_item(&c, "e", "", None, &[]).unwrap();
         let x = find_tag(&c, "x").unwrap().unwrap().id;
         let y = find_tag(&c, "y").unwrap().unwrap().id;
         assert_eq!(merge_tags(&c, x, x).unwrap_err(), TaskError::NotFound);
@@ -860,9 +969,9 @@ mod tests {
     #[test]
     fn filters_by_tags_with_and_and_hides_done() {
         let c = db();
-        let (a, _) = create_item(&c, "a", "", &names(&["rot"])).unwrap();
-        let (b, _) = create_item(&c, "b", "", &names(&["rot", "blau"])).unwrap();
-        let (d, _) = create_item(&c, "d", "", &names(&["blau"])).unwrap();
+        let (a, _) = create_item(&c, "a", "", None, &names(&["rot"])).unwrap();
+        let (b, _) = create_item(&c, "b", "", None, &names(&["rot", "blau"])).unwrap();
+        let (d, _) = create_item(&c, "d", "", None, &names(&["blau"])).unwrap();
         let e = mk(&c, "e");
         let rot = find_tag(&c, "rot").unwrap().unwrap().id;
         let blau = find_tag(&c, "blau").unwrap().unwrap().id;
@@ -882,8 +991,8 @@ mod tests {
     #[test]
     fn delete_done_removes_only_done_and_links() {
         let c = db();
-        let (a, _) = create_item(&c, "a", "", &names(&["t"])).unwrap();
-        let (b, _) = create_item(&c, "b", "", &names(&["t"])).unwrap();
+        let (a, _) = create_item(&c, "a", "", None, &names(&["t"])).unwrap();
+        let (b, _) = create_item(&c, "b", "", None, &names(&["t"])).unwrap();
         let d = mk(&c, "d");
         set_done(&c, a.id, true).unwrap();
         set_done(&c, d, true).unwrap();
@@ -902,7 +1011,7 @@ mod tests {
     #[test]
     fn suggestions_prefer_prefix_and_skip_chosen() {
         let c = db();
-        create_item(&c, "a", "", &names(&["Frontend", "Backend", "Bug", "Dokumentation", "Fehler"])).unwrap();
+        create_item(&c, "a", "", None, &names(&["Frontend", "Backend", "Bug", "Dokumentation", "Fehler"])).unwrap();
         let tags = list_tags(&c).unwrap();
         let s = |q: &str, ex: &[&str]| suggest(&tags, q, &names(ex), 10).iter().map(|t| t.name.clone()).collect::<Vec<_>>();
         assert_eq!(s("", &[]), vec!["Backend", "Bug", "Dokumentation", "Fehler", "Frontend"]);
@@ -946,15 +1055,15 @@ mod tests {
         let mut states = vec![snapshot(&c)];
 
         // 1 anlegen (mit neuem Tag)
-        let (a, op) = create_item(&c, "Titel", "Text", &names(&["Alpha"])).unwrap();
+        let (a, op) = create_item(&c, "Titel", "Text", None, &names(&["Alpha"])).unwrap();
         h.push(op);
         states.push(snapshot(&c));
         // 2 anlegen
-        let (b, op) = create_item(&c, "", "zweite", &names(&["Beta"])).unwrap();
+        let (b, op) = create_item(&c, "", "zweite", None, &names(&["Beta"])).unwrap();
         h.push(op);
         states.push(snapshot(&c));
         // 3 bearbeiten (Tag Alpha raus, Beta rein, Text geändert)
-        push(&mut h, edit_item(&c, a.id, "Titel neu", "", &names(&["beta", "Gamma"])).unwrap());
+        push(&mut h, edit_item(&c, a.id, "Titel neu", "", None, &names(&["beta", "Gamma"])).unwrap());
         states.push(snapshot(&c));
         // 4 abhaken
         push(&mut h, set_done(&c, b.id, true).unwrap());
@@ -966,7 +1075,7 @@ mod tests {
         let alpha = find_tag(&c, "alpha").unwrap().unwrap().id;
         push(&mut h, rename_tag(&c, alpha, "Alpha 2").unwrap());
         states.push(snapshot(&c));
-        push(&mut h, set_tag_color(&c, alpha, PALETTE[9]).unwrap());
+        push(&mut h, set_tag_color(&c, alpha, crate::palette::TODO_DEFAULTS[9]).unwrap());
         states.push(snapshot(&c));
         let gamma = find_tag(&c, "gamma").unwrap().unwrap().id;
         let beta = find_tag(&c, "beta").unwrap().unwrap().id;
@@ -993,7 +1102,7 @@ mod tests {
         let c = db();
         let mut h: History<TaskOp> = History::new(25);
         let a = mk(&c, "a");
-        let (b, op) = create_item(&c, "b", "text", &names(&["T"])).unwrap();
+        let (b, op) = create_item(&c, "b", "text", None, &names(&["T"])).unwrap();
         h.push(op);
         assert_eq!(h.undo(&c), Ok(true));
         assert!(get_item(&c, b.id).is_err());
@@ -1004,7 +1113,7 @@ mod tests {
         assert_eq!(ids(&c, &all()), vec![b.id, a]);
         // nach Zurücknehmen + neuer Änderung wird die Nummer nicht vergeben, weil sie nie frei war
         h.undo(&c).unwrap();
-        let (n, op) = create_item(&c, "n", "", &[]).unwrap();
+        let (n, op) = create_item(&c, "n", "", None, &[]).unwrap();
         h.push(op);
         assert!(n.id > b.id, "die Nummer der zurückgenommenen Karte wird nicht neu vergeben");
         assert!(!h.can_redo());
@@ -1014,9 +1123,9 @@ mod tests {
     fn new_change_after_undo_discards_future() {
         let c = db();
         let mut h: History<TaskOp> = History::new(25);
-        let (a, op) = create_item(&c, "a", "", &[]).unwrap();
+        let (a, op) = create_item(&c, "a", "", None, &[]).unwrap();
         h.push(op);
-        push(&mut h, edit_item(&c, a.id, "b", "", &[]).unwrap());
+        push(&mut h, edit_item(&c, a.id, "b", "", None, &[]).unwrap());
         h.undo(&c).unwrap();
         assert!(h.can_redo());
         push(&mut h, set_done(&c, a.id, true).unwrap());
@@ -1029,9 +1138,9 @@ mod tests {
     #[test]
     fn merge_undo_restores_tag_and_links_exactly() {
         let c = db();
-        let (a, _) = create_item(&c, "a", "", &names(&["x"])).unwrap();
-        let (b, _) = create_item(&c, "b", "", &names(&["x", "y"])).unwrap();
-        let (d, _) = create_item(&c, "d", "", &names(&["y"])).unwrap();
+        let (a, _) = create_item(&c, "a", "", None, &names(&["x"])).unwrap();
+        let (b, _) = create_item(&c, "b", "", None, &names(&["x", "y"])).unwrap();
+        let (d, _) = create_item(&c, "d", "", None, &names(&["y"])).unwrap();
         let x = find_tag(&c, "x").unwrap().unwrap();
         let y = find_tag(&c, "y").unwrap().unwrap();
         let before = snapshot(&c);
@@ -1046,15 +1155,15 @@ mod tests {
         op.apply(&c).unwrap();
         assert_eq!(snapshot(&c), after);
         // Der Name ist inzwischen von einem benutzten Tag belegt: Wiederherstellen schlägt sauber fehl.
-        let (_, _) = create_item(&c, "n", "", &names(&["X"])).unwrap();
+        let (_, _) = create_item(&c, "n", "", None, &names(&["X"])).unwrap();
         assert!(op.inverse().apply(&c).is_err());
         // Ein unbenutzter Tag mit dem Namen weicht dagegen.
         let cc = db();
-        let (_, _) = create_item(&cc, "a", "", &names(&["x", "y"])).unwrap();
+        let (_, _) = create_item(&cc, "a", "", None, &names(&["x", "y"])).unwrap();
         let x = find_tag(&cc, "x").unwrap().unwrap();
         let y = find_tag(&cc, "y").unwrap().unwrap();
         let op = merge_tags(&cc, x.id, y.id).unwrap();
-        create_item(&cc, "n", "", &names(&["X"])).unwrap();
+        create_item(&cc, "n", "", None, &names(&["X"])).unwrap();
         let junk = find_tag(&cc, "x").unwrap().unwrap().id;
         delete_item(&cc, 2).unwrap(); // der Tag „X“ bleibt unbenutzt zurück
         assert!(list_tags(&cc).unwrap().iter().any(|t| t.id == junk));
@@ -1087,11 +1196,11 @@ mod tests {
     fn history_survives_deletion_of_referenced_items() {
         let c = db();
         let mut h: History<TaskOp> = History::new(25);
-        let (a, op) = create_item(&c, "a", "", &[]).unwrap();
+        let (a, op) = create_item(&c, "a", "", None, &[]).unwrap();
         h.push(op);
-        let (b, op) = create_item(&c, "b", "", &[]).unwrap();
+        let (b, op) = create_item(&c, "b", "", None, &[]).unwrap();
         h.push(op);
-        push(&mut h, edit_item(&c, a.id, "a2", "", &[]).unwrap());
+        push(&mut h, edit_item(&c, a.id, "a2", "", None, &[]).unwrap());
         push(&mut h, set_done(&c, b.id, true).unwrap());
         // Löschen ist endgültig: a verschwindet samt seiner Einträge in der Historie
         delete_item(&c, a.id).unwrap();
@@ -1104,16 +1213,16 @@ mod tests {
         assert_eq!(h.undo(&c), Ok(false));
         // Ohne Bereinigung scheitert das Zurücknehmen sauber statt etwas Falsches zu tun
         let mut h2: History<TaskOp> = History::new(25);
-        let (x, op) = create_item(&c, "x", "", &[]).unwrap();
+        let (x, op) = create_item(&c, "x", "", None, &[]).unwrap();
         h2.push(op);
-        push(&mut h2, edit_item(&c, x.id, "x2", "", &[]).unwrap());
+        push(&mut h2, edit_item(&c, x.id, "x2", "", None, &[]).unwrap());
         delete_item(&c, x.id).unwrap();
         assert!(h2.undo(&c).is_err());
         assert!(h2.undo(&c).is_err(), "auch das Rückgängigmachen des Anlegens: nichts mehr da");
         assert!(get_item(&c, x.id).is_err());
         // Tag gelöscht: Operationen auf ihn fallen weg, Karten-Änderungen laufen ohne den Tag weiter
         let mut h3: History<TaskOp> = History::new(25);
-        let (y, op) = create_item(&c, "y", "", &names(&["T"])).unwrap();
+        let (y, op) = create_item(&c, "y", "", None, &names(&["T"])).unwrap();
         h3.push(op);
         let t = find_tag(&c, "T").unwrap().unwrap().id;
         h3.push(rename_tag(&c, t, "U").unwrap().unwrap());
@@ -1130,19 +1239,19 @@ mod tests {
     #[test]
     fn edit_without_change_is_no_op() {
         let c = db();
-        let (a, _) = create_item(&c, "a", "b", &names(&["t"])).unwrap();
-        assert!(edit_item(&c, a.id, "a", "b", &names(&["T"])).unwrap().is_none());
-        assert!(edit_item(&c, a.id, " a ", "b", &names(&["t"])).unwrap().is_none());
-        assert!(edit_item(&c, a.id, "a", "b", &names(&["t", "u"])).unwrap().is_some());
-        assert_eq!(edit_item(&c, 77, "a", "", &[]).unwrap_err(), TaskError::NotFound);
+        let (a, _) = create_item(&c, "a", "b", None, &names(&["t"])).unwrap();
+        assert!(edit_item(&c, a.id, "a", "b", None, &names(&["T"])).unwrap().is_none());
+        assert!(edit_item(&c, a.id, " a ", "b", None, &names(&["t"])).unwrap().is_none());
+        assert!(edit_item(&c, a.id, "a", "b", None, &names(&["t", "u"])).unwrap().is_some());
+        assert_eq!(edit_item(&c, 77, "a", "", None, &[]).unwrap_err(), TaskError::NotFound);
     }
 
     #[test]
     fn edit_keeps_done_state_and_updates_tags() {
         let c = db();
-        let (a, _) = create_item(&c, "a", "", &names(&["x"])).unwrap();
+        let (a, _) = create_item(&c, "a", "", None, &names(&["x"])).unwrap();
         set_done(&c, a.id, true).unwrap();
-        edit_item(&c, a.id, "a", "neuer Text", &names(&["y"])).unwrap().unwrap();
+        edit_item(&c, a.id, "a", "neuer Text", None, &names(&["y"])).unwrap().unwrap();
         let it = get_item(&c, a.id).unwrap();
         assert!(it.done && it.done_at.is_some());
         assert_eq!(it.body, "neuer Text");

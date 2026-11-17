@@ -12,6 +12,10 @@
   (Typ Task mit Workflow, Pflichtfeld "Area", Übergangsregel "Result", Dropdown "Priority") und dem Expertenmodus präpariert.
   Mit -Visible zusätzlich: Screenshot-Werkzeug (braucht ein sichtbares Fenster).
   Es werden weder Maus noch Tastatur benutzt.
+  Isolation (tools\test-env.ps1): Hubs, Bruecken und Terminals laufen mit Schein-Profil (USERPROFILE, HOME, APPDATA,
+  LOCALAPPDATA, CLAUDE_CONFIG_DIR unter dem Arbeitsordner), ohne CLAUDECODE/CLAUDE_*/ANTHROPIC_* und mit einem PATH, in
+  dem nur ein Ersatz-claude (fakebin\claude.cmd) liegt; das echte Claude Code wird nie gestartet. Am Ende prueft der Test,
+  dass das echte ~/.claude unberuehrt blieb.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File tools\smoke-mcp.ps1
@@ -22,7 +26,20 @@ param(
   [switch]$Visible,
   [switch]$KeepFiles,
   # Ordner fuer die Kopie der .exe und die Test-Datenordner (z. B. ein vom Virenscanner ausgenommener Ordner)
-  [string]$WorkRoot = $env:TEMP
+  [string]$WorkRoot = $env:TEMP,
+  # Schutzpruefung streng: jede Aenderung von ~/.claude.json bzw. ~/.claude/settings.json ist ein Fehler (sonst nur,
+  # wenn sie den Testordner nennt - ein gleichzeitig laufendes, echtes Claude Code schreibt ~/.claude.json laufend)
+  [switch]$StrictClaudeConfig,
+  # Konsolen-Host (#183): conpty.dll + OpenConsole.exe neben -Exe werden mitkopiert (tools\fetch-conpty.ps1 -Dest <ordner der exe>).
+  #   auto    = Standardeinstellung; mitgelieferte ConPTY, wenn die Dateien da sind
+  #   bundled = wie auto, aber die Dateien muessen da sein und genutzt werden
+  #   system  = Einstellung "Mitgelieferten Konsolen-Host verwenden" aus (Dateien liegen trotzdem daneben)
+  [ValidateSet('auto', 'bundled', 'system')][string]$ConPty = 'auto',
+  # Ordner mit conpty.dll + OpenConsole.exe (Standard: der Ordner von -Exe); release.sh gibt dist\conpty an
+  [string]$ConPtyDir = '',
+  # OSC-52-Pruefung (#181) auslassen: sie setzt kurz die echte Windows-Zwischenablage (Text wird gesichert und
+  # wiederhergestellt, eine Zwischenablage mit anderen als reinen Textformaten bleibt ohnehin unberuehrt)
+  [switch]$NoClipboard
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -30,6 +47,16 @@ New-Item -ItemType Directory -Force $WorkRoot | Out-Null
 $work = Join-Path $WorkRoot ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $dir = New-Item -ItemType Directory -Force "$work\hub"; $proj = New-Item -ItemType Directory -Force "$work\proj"
 Copy-Item $Exe "$dir\paneldeck.exe"
+$exeDir = if ($ConPtyDir) { $ConPtyDir } else { Split-Path $Exe }
+$hasConPty = (Test-Path "$exeDir\conpty.dll") -and (Test-Path "$exeDir\OpenConsole.exe")
+if ($hasConPty) { Copy-Item "$exeDir\conpty.dll", "$exeDir\OpenConsole.exe" $dir }
+if ($ConPty -eq 'bundled' -and -not $hasConPty) { Write-Host "-ConPty bundled: conpty.dll/OpenConsole.exe fehlen in $exeDir (tools\fetch-conpty.ps1 -Dest $exeDir)" -ForegroundColor Red; exit 1 }
+$useBundled = $hasConPty -and $ConPty -ne 'system'
+Write-Host ("Konsolen-Host: " + $(if ($useBundled) { 'mitgeliefert (OpenConsole)' } elseif ($ConPty -eq 'system') { 'Windows (Einstellung aus)' } else { 'Windows (keine mitgelieferten Dateien)' })) -ForegroundColor DarkGray
+# Arbeitsordner des naechsten Hub-Starts (Set-Level), sonst der des Skripts.
+$script:hubCwd = $null
+# Farbabfragen (OSC 10/11) kommen nur mit der mitgelieferten ConPTY beim Programm an (#183).
+$script:bundledConpty = $useBundled
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
@@ -37,6 +64,41 @@ $data = "$dir\paneldeck-data"
 # jedes Terminal gesetzt) liessen die Bruecke sonst als "Sitzung 1" der Test-Instanz gelten, und die Pruefungen
 # "von aussen" schluegen fehl, wenn das Skript selbst in einem Paneldeck-Terminal laeuft.
 Get-ChildItem Env: | Where-Object { $_.Name -like 'PANELDECK_*' } | ForEach-Object { Remove-Item -LiteralPath "Env:$($_.Name)" -ErrorAction SilentlyContinue }
+# Isolation (fail closed): nie das echte Claude Code und nie das echte ~/.claude. Ab hier gelten fuer dieses Skript und damit
+# fuer jeden Hub, jede Bruecke und jedes Terminal ein Schein-Profil unter $work\profile, ein PATH ohne echtes claude und ein
+# Ersatz-claude in $work\fakebin (Aufrufe -> fakebin\calls.txt, Eingaben -> fakebin\input.txt). Siehe tools\test-env.ps1.
+. "$PSScriptRoot\test-env.ps1"
+$realHome = $env:USERPROFILE
+$realSnap = Get-RealClaudeSnapshot $realHome
+$tag = Split-Path -Leaf $work
+$fakebin = New-FakeClaudeBin "$work\fakebin"
+$calls = "$fakebin\calls.txt"; $inputs = "$fakebin\input.txt"
+$script:iso = Enter-IsolatedTestEnv $work $fakebin
+# OSC 52 (#181): Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren. Der Test-Hub laeuft minimiert und ohne
+# Fokus, deshalb hebt diese Variable (nur in der Umgebung der Test-Hubs) die Fokus-Regel auf; siehe src\app\osc52.rs.
+$env:PANELDECK_TEST_OSC52_ANY_FOCUS = '1'
+Write-Host "Isolation: USERPROFILE=$env:USERPROFILE, claude -> $((Get-Command claude -CommandType Application).Source)" -ForegroundColor DarkGray
+# Die Terminals des Hubs bekommen ihre Umgebung von portable-pty frisch aus der Registry (echter PATH mit ~/.local/bin).
+# Deshalb laeuft jede Sitzung ueber das Profil 1 "Smoke-Isolation" (Standardprofil jedes Projekts, auch jeder
+# wiederhergestellten Sitzung), dessen Variablen PATH/Profil wieder auf die Schein-Umgebung setzen. Vor jedem Hub-Start.
+$ptyEnv = Get-PtyIsolationEnv $script:iso
+function Set-IsolationProfile {
+  $u8 = New-Object Text.UTF8Encoding $false
+  $f = "$data\settings.json"
+  $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+  $p = [pscustomobject]@{ id = 1; name = 'Smoke-Isolation'; env = $ptyEnv }
+  if ($j.PSObject.Properties.Name -contains 'profiles') { $j.profiles = @($p) } else { $j | Add-Member profiles @($p) }
+  [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), $u8)
+  $sf = "$data\state.json"
+  if (Test-Path $sf) {
+    $s = [IO.File]::ReadAllText($sf).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    if (-not ($s.PSObject.Properties.Name -contains 'projects') -or -not @($s.projects).Count) { $s | Add-Member -Force projects @([pscustomobject]@{ id = 1; name = 'Standard' }) }
+    foreach ($o in @($s.projects) + @($s.sessions | Where-Object { $_ })) { $o | Add-Member -Force profile 1 }
+    [IO.File]::WriteAllText($sf, ($s | ConvertTo-Json -Depth 30), $u8)
+  } else {
+    [IO.File]::WriteAllText($sf, '{"projects":[{"id":1,"name":"Standard","profile":1}],"active_project":1,"next_id":1}', $u8)
+  }
+}
 $script:extra = @()
 $script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
@@ -49,24 +111,125 @@ function Check($name, [bool]$ok, $detail = '') {
 # Pruefung, die in diesem Build nicht moeglich ist (z. B. Funktion eines anderen Teils fehlt): weder bestanden noch fehlgeschlagen.
 $script:skip = 0
 function Skip($name, $why) { $script:skip++; Write-Host "  skip  $name  ($why)" -ForegroundColor Yellow }
+# #193: eine Ausgabezeile, die genau die Terminalbreite fuellt (ConPTY laesst den Zeilenvorschub weg, die Zeile gilt als
+# umbrochen), kam als leere Ausgabe mit quality exact an. Geprueft: Breite-1, Breite, Breite+1, 2 x Breite (PowerShell, Git Bash).
+# #197: Bei vollem Verlauf (Einstellung 1000 Zeilen, siehe Set-Level) verschoben sich alle absoluten Zeilen mit jedem
+# Rollen; danach fand run_command das Echo nicht mehr (leere Ausgabe, quality heuristic). Verlauf fuellen, dann pruefen.
+function Test-FullHistory([int]$sid, [string]$sh) {
+  $fill = if ($sh -eq 'gitbash') { 'seq 1 1500' } else { '1..1500' }
+  [void](Tool 'run_command' @{ session = $sid; command = $fill; timeout_secs = 40 })
+  foreach ($i in 1..3) {
+    $r = Tool 'run_command' @{ session = $sid; command = "echo voll-$i"; timeout_secs = 25 }
+    Check "run_command $sh (voller Verlauf, Befehl ${i}: Ausgabe exakt)" ($r.data.finished -and $r.data.output -eq "voll-$i" -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+  }
+  Test-WrapWidth $sid $sh 'voller Verlauf: '
+}
+function Test-WrapWidth([int]$sid, [string]$sh, [string]$prefix = '') {
+  $cols = (Tool 'read_terminal' @{ session = $sid; lines = 1 }).data.cols
+  if (-not $cols) { Skip "${prefix}run_command $sh (Zeile in Terminalbreite)" 'cols unbekannt'; return }
+  foreach ($n in @(($cols - 1), $cols, ($cols + 1), (2 * $cols))) {
+    $cmd = if ($sh -eq 'gitbash') { "printf 'w%.0s' `$(seq 1 $n); echo" } else { "'w' * $n" }
+    $r = Tool 'run_command' @{ session = $sid; command = $cmd; timeout_secs = 25 }
+    $want = 'w' * $n
+    Check "${prefix}run_command $sh (Zeile mit $n Zeichen bei $cols Spalten: Ausgabe exakt)" ($r.data.finished -and $r.data.output -eq $want -and $r.data.quality -eq 'exact') "len=$("$($r.data.output)".Length) q=$($r.data.quality) finished=$($r.data.finished)"
+  }
+}
+# OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
+# Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
+# inzwischen niemand anderes etwas kopiert hat). Enthaelt sie andere als reine Textformate (Bild, Dateien, HTML, RTF ...), wird die
+# Pruefung uebersprungen und die Zwischenablage nicht angefasst. -NoClipboard ueberspringt sie immer.
+function Test-Osc52([int]$sid, [string]$sh) {
+  $name = "OSC 52: Programm in $sh kopiert in die Windows-Zwischenablage"
+  if ($NoClipboard) { Skip $name '-NoClipboard'; return }
+  Add-Type -AssemblyName System.Windows.Forms
+  $C = [System.Windows.Forms.Clipboard]
+  try {
+    # Nur reine Textformate (leere Zwischenablage = keine Formate) - alles andere ginge beim Wiederherstellen verloren.
+    $textOnly = @('Text', 'UnicodeText', 'OEMText', 'Locale', 'System.String')
+    $obj = $C::GetDataObject()
+    $formats = if ($obj) { @($obj.GetFormats()) } else { @() }
+    $other = @($formats | Where-Object { $textOnly -notcontains $_ })
+    if ($other.Count -gt 0) {
+      Skip $name "Zwischenablage enthaelt andere Formate ($($other -join ', ')) und bleibt unberuehrt"; return
+    }
+    $had = $C::ContainsText(); $saved = if ($had) { $C::GetText() } else { '' }
+  } catch { Skip $name "Zwischenablage nicht lesbar: $($_.Exception.Message)"; return }
+  $marker = 'hello-osc52-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+  $cmd = if ($sh -eq 'gitbash') { "printf '\033]52;c;%s\a' `"`$(printf $marker | base64)`"" }
+         else { '$b = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(''' + $marker + ''')); [Console]::Write("$([char]27)]52;c;$b$([char]7)")' }
+  $r = Tool 'run_command' @{ session = $sid; command = $cmd; timeout_secs = 25 }
+  $got = ''
+  for ($i = 0; $i -lt 50 -and $got -ne $marker; $i++) { Start-Sleep -Milliseconds 100; try { $got = $C::GetText() } catch { } }
+  Check $name ($got -eq $marker) "Zwischenablage: '$got', run_command: $($r.text)"
+  try {
+    if ($C::GetText() -eq $marker) { if ($had) { $C::SetText($saved) } else { $C::Clear() } }
+  } catch { Write-Host "  Hinweis: Zwischenablage nicht wiederhergestellt: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+# Tastenkodierung (#183): send_keys kodiert wie die Tastatur. Ein klassisches Konsolenprogramm ([Console]::ReadKey =
+# ReadConsoleInput) und ein Programm mit VT-Eingabe (node im Rohmodus wie Claude Code, ohne und mit kitty-Flags).
+function Test-Keys([int]$sid) {
+  $out = Join-Path $work 'keys-classic.txt'
+  Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
+  $cmd = '$r = 1..4 | ForEach-Object { $k = [Console]::ReadKey($true); ''{0}/{1}/{2}'' -f $k.Key, $k.Modifiers, [int]$k.KeyChar }; [IO.File]::WriteAllText(''' + $out + ''', ($r -join '' ''))'
+  [void](Tool 'send_text' @{ session = $sid; text = $cmd; submit = $true })
+  Start-Sleep -Milliseconds 1500
+  foreach ($k in @('ctrl+backspace', 'alt+.', 'ctrl+space', 'shift+enter')) { [void](Tool 'send_keys' @{ session = $sid; keys = @($k) }); Start-Sleep -Milliseconds 300 }
+  for ($i = 0; $i -lt 50 -and -not (Test-Path -LiteralPath $out); $i++) { Start-Sleep -Milliseconds 100 }
+  $got = if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { '<nichts>' }
+  # Umschalt+Enter kommt bei klassischen Programmen als Alt+Enter an (ESC CR, damit VT-Programme es behalten).
+  Check 'send_keys (#183): klassisches Programm bekommt Strg+Rueck, Alt+., Strg+Leertaste (win32-input)' ($got -eq 'Backspace/Control/127 OemPeriod/Alt/46 Spacebar/Control/32 Enter/Alt/13') $got
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Skip 'send_keys (#183): Programm mit VT-Eingabe' 'node fehlt'; return }
+  $js = Join-Path $work 'keys-vt.js'
+  [IO.File]::WriteAllText($js, @'
+const fs = require('fs');
+const out = process.argv[2], fl = process.argv[3] || '';
+process.stdin.setRawMode(true); process.stdin.resume();
+const got = [];
+process.stdin.on('data', d => { for (const c of d) got.push(c); });
+if (fl) process.stdout.write('\x1b[>' + fl + 'u');
+process.stdout.write('keys-ready\r\n');
+setTimeout(() => { if (fl) process.stdout.write('\x1b[<u'); fs.writeFileSync(out, got.map(c => c.toString(16).padStart(2, '0')).join(' ')); process.exit(0); }, 3500);
+'@)
+  foreach ($case in @(@('', '1b 0d 1b 2e 08'), @('1', '1b 5b 31 33 3b 32 75 1b 5b 34 36 3b 33 75 1b 5b 31 32 37 3b 35 75'))) {
+    $fl = $case[0]; $want = $case[1]
+    $out = Join-Path $work "keys-vt$fl.txt"
+    Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
+    [void](Tool 'send_text' @{ session = $sid; text = "node '$js' '$out' '$fl'"; submit = $true })
+    Start-Sleep -Milliseconds 1500
+    foreach ($k in @('shift+enter', 'alt+.', 'ctrl+backspace')) { [void](Tool 'send_keys' @{ session = $sid; keys = @($k) }); Start-Sleep -Milliseconds 300 }
+    for ($i = 0; $i -lt 60 -and -not (Test-Path -LiteralPath $out); $i++) { Start-Sleep -Milliseconds 100 }
+    $got = if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { '<nichts>' }
+    $what = if ($fl) { 'mit kitty-Flags: CSI 13;2u, CSI 46;3u, CSI 127;5u' } else { 'ohne kitty: ESC CR, ESC ., 0x08' }
+    Check "send_keys (#183): VT-Programm (node) $what" ($got -eq $want) $got
+    Start-Sleep -Milliseconds 500
+  }
+}
 function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   Stop-Hub
   $f = "$data\settings.json"
   New-Item -ItemType Directory -Force "$data" | Out-Null
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
+  # Festes Theme, das nicht das erste der Liste ist: Farbabfragen (OSC 11) muessen dessen Werte melden (#183).
+  $j | Add-Member -NotePropertyName theme -NotePropertyValue 'Dracula' -Force
+  if ($ConPty -eq 'system') { $j | Add-Member -Force bundled_conpty $false }
+  # Kleinster Verlauf (1000 Zeilen), damit Test-FullHistory ihn schnell fuellt (#197).
+  $j | Add-Member -Force scrollback_lines 1000
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
+  # -Empty: ohne gespeicherte Sitzungen (Set-IsolationProfile legt dann einen state.json nur mit dem Projekt an)
+  if ($Empty) { Remove-Item -LiteralPath "$data\state.json" -ErrorAction SilentlyContinue }
+  Set-IsolationProfile
   $style = if ($Visible) { 'Normal' } else { 'Minimized' }
+  $cwdArg = if ($script:hubCwd) { @{ WorkingDirectory = $script:hubCwd } } else { @{} }
   # Paneldeck startet ohne Terminal (#111); sonst eine Sitzung des Nutzers per --open anlegen (wie ein Start aus dem Explorer).
   if ($Empty) {
-    Remove-Item -LiteralPath "$data\state.json" -ErrorAction SilentlyContinue
-    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style @cwdArg
   } elseif ($Tray) {
     # Vorbereiteten state.json behalten; mit --tray bleiben auch wiederhergestellte weitere Fenster verborgen (#110).
-    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--tray'
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--tray' @cwdArg
   } else {
-    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--open', "`"$proj`""
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--open', "`"$proj`"" @cwdArg
   }
   $t0 = Get-Date
   while (-not (Test-Path "$data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
@@ -102,6 +265,22 @@ function Tool($name, $arguments = @{}, $ms = 30000) {
   } else { [pscustomobject]@{ err = $true; text = 'KEINE ANTWORT'; data = $null; raw = $r } }
 }
 function Code($r) { if ($r.err) { ($r.text -split ':')[0] } else { '' } }
+# Inhalt einer Datei des Ersatz-claude (leer, wenn es sie nicht gibt); wartet bis $ms auf $pattern.
+function Wait-FakeFile([string]$f, [string]$pattern, [int]$ms = 15000) {
+  $t0 = Get-Date
+  do {
+    $txt = if (Test-Path -LiteralPath $f) { try { [IO.File]::ReadAllText($f) } catch { '' } } else { '' }
+    if ($txt -match $pattern) { return $txt }
+    Start-Sleep -Milliseconds 250
+  } while (((Get-Date) - $t0).TotalMilliseconds -lt $ms)
+  $txt
+}
+# Jeder gefundene claude-Pfad (eine Zeile je Treffer) muss im Ersatz-Ordner liegen; mindestens einer.
+function Only-Fake([string]$out) {
+  $l = @(($out -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  $l.Count -ge 1 -and -not ($l | Where-Object { $_ -notmatch 'fakebin[\\/]claude(\.cmd)?$' })
+}
+$script:psClaudeFake = $false
 
 try {
   Write-Host "== Protokoll" -ForegroundColor Cyan
@@ -144,6 +323,20 @@ try {
     Check "create_session $sh" (-not $c.err) $c.text
     if ($c.err) { continue }
     $id = $c.data.id; Start-Sleep 4
+    # Isolation im Terminal des Hubs: `claude` darf nur der Ersatz sein.
+    $wc = switch ($sh) { 'cmd' { 'where claude' } 'gitbash' { 'type -ap claude' } default { 'Get-Command claude -All | ForEach-Object { if ($_.CommandType -in ''Application'', ''ExternalScript'') { $_.Source } else { "$($_.CommandType):$($_.Name)" } }' } }
+    $r = Tool 'run_command' @{ session = $id; command = $wc; timeout_secs = 25 }
+    Check "Isolation: claude im $sh-Terminal des Hubs ist nur der Ersatz (fakebin)" (Only-Fake $r.data.output) $r.data.output
+    if ($sh -eq 'powershell' -and $script:lastOk) {
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:USERPROFILE|$env:CLAUDE_CONFIG_DIR|" + ((Get-ChildItem Env: | Where-Object { $_.Name -match ''^(CLAUDECODE|CLAUDE_CODE_|ANTHROPIC_)'' -and $_.Value }).Name -join '','')'; timeout_secs = 25 }
+      $want = "$($script:iso.Profile)|$($script:iso.Profile)\.claude|"
+      Check 'Isolation: Terminal-Umgebung mit Schein-Profil, ohne CLAUDECODE/CLAUDE_CODE_*/ANTHROPIC_*' ($r.data.output.Trim() -eq $want) "'$($r.data.output.Trim())' statt '$want'"
+      if ($script:lastOk) { $script:psClaudeFake = $true }
+      # Die Registry-Auffrischung darf den Benutzer nicht durch HKLM-Werte ersetzen (dort steht USERNAME=SYSTEM).
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:USERNAME|$env:USERDOMAIN"'; timeout_secs = 25 }
+      $want = "$env:USERNAME|$env:USERDOMAIN"
+      Check 'Terminal: USERNAME = aktueller Benutzer (USERDOMAIN ebenso)' ($r.data.output.Trim() -eq $want) "'$($r.data.output.Trim())' statt '$want'"
+    }
     if ($sh -eq 'cmd') {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-cmd'; timeout_secs = 25 }
       Check "run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'hallo-cmd') $r.text
@@ -154,6 +347,9 @@ try {
       Check "run_command $sh (Exit 1, leere Ausgabe)" ($r.data.exit_code -eq 1 -and $r.data.output -eq '') $r.text
       $r = Tool 'run_command' @{ session = $id; command = 'printf "x\ny\n"'; timeout_secs = 25 }
       Check "run_command $sh (zweiter Befehl sauber)" ($r.data.output -eq "x`ny") $r.text
+      Test-WrapWidth $id $sh
+      Test-FullHistory $id $sh
+      Test-Osc52 $id $sh
     } else {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-ps'; timeout_secs = 25 }
       Check "run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'hallo-ps') $r.text
@@ -168,12 +364,32 @@ try {
       $long = 'Write-Output hallo-lang # ' + ('z' * 220)
       $r = Tool 'run_command' @{ session = $id; command = $long; timeout_secs = 25 }
       Check "run_command $sh (langer Befehl: Ausgabe exakt)" ($r.data.output -eq 'hallo-lang' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+      Test-WrapWidth $id $sh
+      Test-FullHistory $id $sh
+      Test-Osc52 $id $sh
+      # Name/Version des Terminals in der Umgebung der Shell (#183)
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:TERM_PROGRAM|$env:TERM_PROGRAM_VERSION"'; timeout_secs = 25 }
+      Check "TERM_PROGRAM=Paneldeck und TERM_PROGRAM_VERSION in $sh" ($r.data.output.Trim() -match '^Paneldeck\|\d+\.\d+\.\d+') "'$($r.data.output)'"
+      # Farbabfrage OSC 11: Antwort kommt als Eingabe zurueck (nur mit der mitgelieferten ConPTY; die des Systems
+      # reicht die Abfrage nicht an das Terminal weiter)
+      if ($script:bundledConpty) {
+        $q = '[Console]::Write("$([char]27)]11;?$([char]27)\"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''rgb:[0-9a-f/]+'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'' -replace "$([char]7)", ''BEL'')'
+        $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
+        # Sitzung per MCP angelegt und nie gezeichnet: Antwort trotzdem mit dem Theme der Sitzung (Dracula, 282a36).
+        Check "OSC 11 (Hintergrundfarbe abfragen) meldet das Theme der Sitzung ($sh, mitgelieferte ConPTY, ungezeichnet)" ($r.data.output -match 'reply=ESC\]11;rgb:2828/2a2a/3636') "'$($r.data.output)'"
+        $q = '[Console]::Write("$([char]27)[16t"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''t$'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'')'
+        $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
+        Check "CSI 16t (Zellgroesse) meldet eine echte Groesse ($sh, ungezeichnet)" ($r.data.output -match 'reply=ESC\[6;[1-9]\d*;[1-9]\d*t') "'$($r.data.output)'"
+      } else {
+        Skip "OSC 11 (Hintergrundfarbe abfragen) wird beantwortet ($sh)" 'keine mitgelieferte ConPTY (conpty.dll + OpenConsole.exe) neben der .exe'
+      }
       $r = Tool 'run_command' @{ session = $id; command = 'Start-Sleep 4'; timeout_secs = 1 }
       Check "run_command $sh (Zeitlimit)" ($r.data.timed_out -eq $true -and -not $r.data.finished) $r.text
       Start-Sleep 5
       Check 'send_text' (-not (Tool 'send_text' @{ session = $id; text = 'echo per-send_text'; submit = $true }).err); Start-Sleep 1
       Check 'send_keys' (-not (Tool 'send_keys' @{ session = $id; keys = @('ctrl+l') }).err)
       Check 'send_keys ungueltige Taste' ((Code (Tool 'send_keys' @{ session = $id; keys = @('ctrl+alt+entf') })) -eq 'bad_args')
+      Test-Keys $id
       Check 'rename_session' ((Tool 'rename_session' @{ session = $id; name = 'Agent' }).data.name -eq 'Agent')
       Check 'wait_for_status: keine Claude-Sitzung' ((Code (Tool 'wait_for_status' @{ session = $id; status = @('ready'); timeout_secs = 1 })) -eq 'not_claude')
       Check 'queue_prompt: keine Claude-Sitzung' ((Code (Tool 'queue_prompt' @{ session = $id; prompt = 'x' })) -eq 'not_claude')
@@ -186,16 +402,69 @@ try {
   Check 'unbekannte Shell' ((Code (Tool 'create_session' @{ shell = 'gibtsnicht' })) -eq 'bad_args')
   Check 'ungueltiger Ordner' ((Code (Tool 'create_session' @{ cwd = "$work\gibtsnicht" })) -eq 'bad_args')
 
+  Write-Host "== WSL: Linux-Startordner (#172)" -ForegroundColor Cyan
+  # Erkannte WSL-Shells aus der Fehlermeldung zu einer unbekannten Shell; Vorlagen/System-Distributionen auslassen.
+  $avail = (Tool 'create_session' @{ shell = 'gibtsnicht' }).text
+  $wslSh = [regex]::Matches($avail, 'wsl:[^,\s]+') | ForEach-Object { $_.Value.TrimEnd('.') } | Where-Object { $_ -notmatch '(?i)-template$|^wsl:docker-desktop' } | Select-Object -First 1
+  if (-not $wslSh) {
+    Skip 'WSL: Linux-Startordner' 'keine WSL-Distribution'
+  } else {
+    # Einschleusung ueber `wsl.exe --cd` (ein `"` beendet dort den Wert): immer bad_args, ohne zu starten
+    $inj = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/x" echo INJECTED-$((6*7)); #'; name = 'smoke-wsl-inj' }
+    Check "WSL: cwd mit Anfuehrungszeichen abgelehnt ($wslSh)" ((Code $inj) -eq 'bad_args') $inj.text
+    Check 'WSL: cwd mit Backslash abgelehnt' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/a\b' })) -eq 'bad_args')
+    Check 'WSL: ~/x abgelehnt (nur ~ allein)' ((Code (Tool 'create_session' @{ shell = $wslSh; cwd = '~/x' })) -eq 'bad_args')
+    Check 'Linux-cwd fuer Windows-Shell abgelehnt' ((Code (Tool 'create_session' @{ shell = 'powershell'; cwd = '/tmp' })) -eq 'bad_args')
+    # Fehlender Ordner: Pruefung in WSL im Hintergrund -> bad_args (antwortet WSL nicht, wird angelegt mit cwd_checked=false)
+    $miss = Tool 'create_session' @{ shell = $wslSh; cwd = '/paneldeck-smoke-gibt-es-nicht'; name = 'smoke-wsl-miss' } 60000
+    if ($miss.err) { Check 'WSL: fehlender Linux-Ordner = bad_args' ((Code $miss) -eq 'bad_args') $miss.text }
+    else { Check 'WSL: fehlender Linux-Ordner (WSL antwortete nicht: cwd_checked=false)' ($miss.data.cwd_checked -eq $false) $miss.text; [void](Tool 'close_session' @{ session = $miss.data.id }) }
+    # Vorhandener Ordner: Sitzung startet dort (wsl.exe --cd /tmp)
+    $w = Tool 'create_session' @{ shell = $wslSh; cwd = '/tmp/'; name = 'smoke-wsl' } 60000
+    Check "WSL: create_session mit Linux-cwd ($wslSh)" (-not $w.err -and $w.data.cwd -eq '/tmp' -and $w.data.shell -eq $wslSh) $w.text
+    if (-not $w.err) {
+      Check 'WSL: cwd_checked gesetzt' ($null -ne $w.data.cwd_checked) $w.text
+      Start-Sleep 6
+      $r = Tool 'run_command' @{ session = $w.data.id; command = 'pwd'; timeout_secs = 30 } 45000
+      if ($r.data.finished) { Check 'WSL: Sitzung laeuft in /tmp (pwd)' ($r.data.output.Trim() -eq '/tmp') $r.text }
+      else { $rt = Tool 'read_terminal' @{ session = $w.data.id; lines = 30 }; Skip 'WSL: pwd' "run_command nicht beendet (Shell-Integration in WSL?): $($rt.data.text)" }
+      Check 'WSL: close_session' (-not (Tool 'close_session' @{ session = $w.data.id }).err)
+    }
+  }
+
   Write-Host "== Selbst-Identifikation und Kinder-Sitzungen" -ForegroundColor Cyan
   $w0 = Tool 'whoami'
   Check 'whoami von aussen: nicht in einem Hub-Terminal' ($null -eq $w0.data.session -and $w0.data.identified_by -eq 'none')
   $ac = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Eltern-Agent' }; $A = $ac.data.id; Start-Sleep 4
   # Ein Agent in der Sitzung $A: startet die Bruecke als Kindprozess der Shell (Prozessbaum), ohne Umgebungsvariable.
-  function InA($tool, $targs) {
+  function InS($s, $tool, $targs) {
     $req = @{ jsonrpc = '2.0'; id = 1; method = 'tools/call'; params = @{ name = $tool; arguments = $targs } } | ConvertTo-Json -Depth 8 -Compress
     $cmd = "`$env:PANELDECK_SESSION=`$null; '" + $req.Replace("'", "''") + "' | & '$dir\paneldeck.exe' mcp | Out-String"
-    $r = Tool 'run_command' @{ session = $A; command = $cmd; timeout_secs = 40 }
+    $r = Tool 'run_command' @{ session = $s; command = $cmd; timeout_secs = 40 }
     try { ($r.data.output | ConvertFrom-Json).result } catch { $null }
+  }
+  function InA($tool, $targs) { InS $A $tool $targs }
+  # Losgeloester Absender: eine kurzlebige Shell (in Sitzung $s per run_command, ohne $s vom Test selbst gestartet)
+  # startet per Start-Process eine PowerShell und endet sofort; diese schickt nach 3 s eine rohe Anfrage ohne Aufrufer
+  # (Token aus ipc.json) an den Hub. Rueckgabe: die rohe Antwort ('' ohne Antwort).
+  function Detached($s, [string]$tool, [string]$argsJson) {
+    $n = [guid]::NewGuid().ToString('N').Substring(0, 6)
+    $out = "$work\det-$n.txt"; $ps = "$work\det-$n.ps1"
+    [IO.File]::WriteAllText($ps, @"
+Start-Sleep -Seconds 3
+`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json
+`$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port)
+`$s = `$c.GetStream()
+`$b = [Text.Encoding]::UTF8.GetBytes('{"token":"' + `$j.token + '","cmd":"mcp","tool":"$tool","args":$argsJson}')
+`$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1)
+[IO.File]::WriteAllText('$out', (New-Object IO.StreamReader(`$s)).ReadToEnd())
+"@, (New-Object Text.UTF8Encoding $false))
+    $inner = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$ps'"
+    if ($s) { [void](Tool 'run_command' @{ session = $s; command = "powershell -NoProfile -Command ""$inner"""; timeout_secs = 30 }) }
+    else { $p = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', $inner; [void]$p.WaitForExit(15000) }
+    $deadline = (Get-Date).AddSeconds(25)
+    while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    if (Test-Path $out) { [IO.File]::ReadAllText($out) } else { '' }
   }
   $me = InA 'whoami' @{}
   Check 'whoami in Hub-Sitzung (Prozessbaum, ohne Umgebungsvariable)' ($me.structuredContent.session -eq $A -and $me.structuredContent.identified_by -eq 'process') ($me | ConvertTo-Json -Compress -Depth 5)
@@ -210,7 +479,31 @@ try {
   Check 'Eltern-Agent steuert sein Kind (run_command)' ($rc.structuredContent.output.Trim() -eq 'kind-ok') ($rc | ConvertTo-Json -Compress -Depth 5)
   $self = InA 'send_text' @{ session = $A; text = 'x' }
   Check 'Eltern-Agent darf nicht in die eigene Sitzung schreiben' ($self.isError -eq $true -and $self.content[0].text -like 'forbidden*')
+  # Agenten-Kette, gelockert (#152, Entscheidung des Nutzers): Der Eltern-Agent wurde vom Nutzer gestartet (keine Kette),
+  # also ist sein Kind nicht markiert und darf in ihn zurueckschreiben.
+  $kw = InS $K 'whoami' @{}
+  Check 'Kette gelockert: Kind eines vom Nutzer gestarteten Agenten ist frei (agent_chain leer)' ($kw.structuredContent.session -eq $K -and @($kw.structuredContent.agent_chain).Count -eq 0) ($kw | ConvertTo-Json -Compress -Depth 5)
+  $kb = InS $K 'rename_session' @{ session = $A; name = 'Eltern-Agent' }
+  Check 'Kette gelockert: Agent im Kind darf in den Eltern-Agenten zurueckschreiben (rename_session)' ($kb.isError -ne $true) ($kb | ConvertTo-Json -Compress -Depth 5)
+  # Job Objects (#168): ein losgeloester Enkel (eine kurzlebige Shell im Kind startet per Start-Process eine PowerShell und
+  # endet sofort; deren Elternteil gibt es dann nicht mehr) wird ueber den Job des Kindes zugeordnet - frueher "verwaist".
+  $det = Detached $K 'whoami' '{}'
+  Check 'Job: losgeloester Enkel (Start-Process nach Ende seiner Shell) -> der Sitzung des Kindes zugeordnet' ($det -match ('"session":' + $K + '[,}]') -and $det -match '"identified_by":"process"') $det
+  # Gegenprobe: derselbe losgeloeste Start vom Test selbst (ausserhalb jeder Sitzung) -> keiner Sitzung zugeordnet.
+  $out = Detached $null 'whoami' '{}'
+  Check 'Job: losgeloester Prozess ausserhalb jeder Sitzung -> keiner Sitzung zugeordnet' ($out -match '"session":null' -and $out -match '"identified_by":"none"') $out
+  # Hintergrundprozess (#168): das Kind startet eine versteckte PowerShell mit eigener Konsole (ueberlebt das Schliessen);
+  # close_session per MCP fragt nie, laesst sie weiterlaufen und meldet sie in remaining_processes.
+  $bgMark = "$work\bg-$([guid]::NewGuid().ToString('N').Substring(0, 6)).txt"
+  $bgCmd = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','`$PID | Out-File -Encoding ascii ''$bgMark''; Start-Sleep 120'"
+  [void](Tool 'run_command' @{ session = $K; command = $bgCmd; timeout_secs = 30 })
+  $t0 = Get-Date; while (-not (Test-Path $bgMark) -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 200 }
+  $bgPid = if (Test-Path $bgMark) { [int]([IO.File]::ReadAllText($bgMark).Trim()) } else { 0 }
   $cl = InA 'close_session' @{ session = $K }
+  $rem = @($cl.structuredContent.remaining_processes)
+  Check 'close_session (MCP) fragt nicht und meldet den Hintergrundprozess in remaining_processes' ($cl.isError -ne $true -and $bgPid -gt 0 -and @($rem | Where-Object { $_.pid -eq $bgPid -and $_.name -match '^powershell' }).Count -eq 1) ($cl | ConvertTo-Json -Compress -Depth 6)
+  Check 'close_session (MCP): Hintergrundprozess laeuft weiter (Weiterlaufen lassen)' ($bgPid -gt 0 -and $null -ne (Get-Process -Id $bgPid -ErrorAction SilentlyContinue))
+  if ($bgPid -gt 0) { Stop-Process -Id $bgPid -Force -ErrorAction SilentlyContinue }
   Check 'Eltern-Agent schliesst sein Kind' ($cl.isError -ne $true)
   [void](Tool 'close_session' @{ session = $A })
 
@@ -219,10 +512,16 @@ try {
   $o = (Tool 'run_command' @{ session = $psid; command = '"$env:PANELDECK_PORT|$env:PANELDECK_TOKEN"'; timeout_secs = 25 }).data.output.Trim()
   $port, $hookTok = $o.Split('|')
   Check 'Hook-Zugang aus der Sitzung gelesen' ($port -match '^\d+$' -and $hookTok.Length -gt 20)
-  $cs = Tool 'create_session' @{ claude = $true; cwd = "$proj"; name = 'smoke-claude' }
-  Check 'create_session claude' (-not $cs.err) $cs.text
+  # Fail closed: ohne bestaetigten Ersatz im PowerShell-Terminal des Hubs wird keine Claude-Sitzung angelegt.
+  if (-not $script:psClaudeFake) { throw 'SICHERHEIT: claude im PowerShell-Terminal des Hubs nicht als Ersatz bestaetigt - keine Claude-Sitzung' }
+  # Shell fest auf PowerShell (nie WSL: dort gaelte der Ersatz-PATH nicht).
+  $cs = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-claude' }
+  Check 'create_session claude (PowerShell, nicht WSL)' (-not $cs.err -and $cs.data.shell -notlike 'wsl*') $cs.text
   if ($script:lastOk) {
-    $cid = $cs.data.id; Start-Sleep 2
+    $cid = $cs.data.id
+    $ct = Wait-FakeFile $calls '--session-id'
+    Check 'Claude-Start erreicht den Ersatz (fakebin\calls.txt: --session-id, Hooks per --settings aus dem Test-Datenordner)' ($ct -match 'claude\.cmd' -and $ct -match '--session-id [0-9a-f-]{36}' -and $ct -match ('--settings "?[^ ]*' + [regex]::Escape($tag) + '/hub/paneldeck-data/claude-hooks\.json')) "calls.txt='$ct'"
+    Check 'Schein-Profil: keine globalen Hooks in ~/.claude/settings.json angelegt' (-not (Test-Path "$($script:iso.Profile)\.claude\settings.json"))
     function Hook($evt, $extra = @{}) {
       $body = @{ token = $hookTok; session = [uint64]$cid; payload = (@{ hook_event_name = $evt; session_id = 'smoke1' } + $extra) } | ConvertTo-Json -Compress -Depth 5
       $cl = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]$port); $st = $cl.GetStream(); $by = [Text.Encoding]::UTF8.GetBytes($body)
@@ -234,6 +533,7 @@ try {
     Check 'wait_for_status nach SessionStart' ((Tool 'wait_for_status' @{ session = $cid; status = @('ready'); timeout_secs = 5 }).data.matched -eq $true)
     $q = Tool 'queue_prompt' @{ session = $cid; prompt = 'hallo' }
     Check 'queue_prompt sendet sofort' ($q.data.sent_immediately -eq $true)
+    Check 'queue_prompt kommt beim Ersatz-claude an (fakebin\input.txt: hallo)' ((Wait-FakeFile $inputs 'hallo' 10000) -match 'hallo') "input.txt='$(Wait-FakeFile $inputs 'hallo' 1)'"
     Send-Raw (@{ jsonrpc = '2.0'; id = 900; method = 'tools/call'; params = @{ name = 'wait_for_status'; arguments = @{ session = $cid; status = @('ready'); timeout_secs = 20 } } } | ConvertTo-Json -Depth 8 -Compress)
     Start-Sleep 2; Hook 'Stop'
     $wr = (Read-Line 15000).result.structuredContent
@@ -243,6 +543,124 @@ try {
     [void](Tool 'close_session' @{ session = $cid })
   }
   [void](Tool 'close_session' @{ session = $psid })
+
+  Write-Host "== Claude-Startoptionen (#161)" -ForegroundColor Cyan
+  Check 'create_session: model ohne claude -> bad_args' ((Code (Tool 'create_session' @{ model = 'opus' })) -eq 'bad_args')
+  Check 'create_session: effort ohne claude -> bad_args' ((Code (Tool 'create_session' @{ shell = 'cmd'; effort = 'high' })) -eq 'bad_args')
+  $bp = Tool 'create_session' @{ claude = $true; cwd = "$proj"; permission_mode = 'bypassPermissions' }
+  Check 'create_session: bypassPermissions -> bad_args' ((Code $bp) -eq 'bad_args' -and $bp.text -match 'never allowed via MCP') $bp.text
+  Check 'create_session: ungueltiges Modell -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; model = 'opus; calc' })) -eq 'bad_args')
+  Check 'create_session: unbekannter effort -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; effort = 'ultra' })) -eq 'bad_args')
+  # Gestartet wird nur der Ersatz (fakebin, bestaetigt im PowerShell-Terminal); geprueft werden die Argumente, die er
+  # bekommt (fakebin\calls.txt), nicht die angezeigte Zeile.
+  if (-not $script:psClaudeFake) { throw 'SICHERHEIT: claude im PowerShell-Terminal des Hubs nicht als Ersatz bestaetigt - keine Claude-Sitzung' }
+  $co = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-copts'; model = 'haiku'; effort = 'high'; permission_mode = 'plan'; agent = 'smoke-agent' }
+  Check 'create_session mit model/effort/permission_mode/agent' (-not $co.err -and $co.data.model -eq 'haiku' -and $co.data.effort -eq 'high' -and $co.data.permission_mode -eq 'plan' -and $co.data.agent -eq 'smoke-agent') $co.text
+  if ($script:lastOk) {
+    $coid = $co.data.id
+    $cl = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $coid }
+    Check 'list_sessions meldet die Startoptionen' ($cl.claude -eq $true -and $cl.model -eq 'haiku' -and $cl.effort -eq 'high' -and $cl.permission_mode -eq 'plan' -and $cl.agent -eq 'smoke-agent') ($cl | ConvertTo-Json -Compress)
+    $re = 'args=.*--model haiku --effort high --permission-mode plan --agent smoke-agent --session-id [0-9a-f-]{36}'
+    $ct = Wait-FakeFile $calls $re
+    Check 'Ersatz-claude bekommt die geprueften Optionen (fakebin\calls.txt)' ($ct -match $re) "calls.txt='$ct'"
+    [void](Tool 'close_session' @{ session = $coid })
+  }
+  # Ohne permission_mode: ausdruecklich "default" (sonst gaelte permissions.defaultMode aus ~/.claude/settings.json).
+  $cd = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-copts2'; model = 'sonnet' }
+  Check 'create_session ohne permission_mode meldet "default"' (-not $cd.err -and $cd.data.permission_mode -eq 'default') $cd.text
+  if ($script:lastOk) {
+    $re2 = 'args=.*--model sonnet --permission-mode default --session-id'
+    $ct2 = Wait-FakeFile $calls $re2
+    Check 'Ersatz-claude bekommt --permission-mode default' ($ct2 -match $re2) "calls.txt='$ct2'"
+    [void](Tool 'close_session' @{ session = $cd.data.id })
+  }
+  Check 'kein bypassPermissions in fakebin\calls.txt' ((Wait-FakeFile $calls 'bypassPermissions' 1) -notmatch 'bypassPermissions|dangerously')
+  $pl = Tool 'create_session' @{ shell = 'cmd'; cwd = "$proj"; name = 'smoke-plain' }
+  $plr = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $pl.data.id }
+  Check 'list_sessions: ohne Claude sind die Optionen null' ($plr.PSObject.Properties.Name -contains 'effort' -and $null -eq $plr.model -and $null -eq $plr.effort -and $null -eq $plr.permission_mode -and $null -eq $plr.agent)
+  Check 'list_sessions: ohne Claude keine claude_flags/claude_user_options' ($plr.PSObject.Properties.Name -contains 'claude_flags' -and @($plr.claude_flags).Count -eq 0 -and @($plr.claude_user_options).Count -eq 0)
+  [void](Tool 'close_session' @{ session = $pl.data.id })
+
+  Write-Host "== Weitere Claude-Optionen (#182)" -ForegroundColor Cyan
+  Check 'create_session: claude_flags ohne claude -> bad_args' ((Code (Tool 'create_session' @{ shell = 'cmd'; claude_flags = @('chrome') })) -eq 'bad_args')
+  foreach ($bad in @('add-dir', '--dangerously-skip-permissions', 'mcp-config', 'allowed-tools', 'resume', 'settings', 'remote-control', 'safe-mode', 'autocompact')) {
+    $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @($bad) }
+    Check "create_session: claude_flags [$bad] -> bad_args (never allowed)" ((Code $r) -eq 'bad_args' -and $r.text -match 'never allowed via MCP') $r.text
+  }
+  $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @('chrome', 'no-chrome') }
+  Check 'create_session: chrome + no-chrome -> bad_args' ((Code $r) -eq 'bad_args' -and $r.text -match 'mutually exclusive') $r.text
+  Check 'create_session: claude_flags als String -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = 'chrome' })) -eq 'bad_args')
+  Check 'create_session: unbekannter Schalter -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @('chrome; calc') })) -eq 'bad_args')
+  foreach ($k in @('add_dir', 'mcp_config', 'append_system_prompt', 'allowed_tools', 'safe_mode')) {
+    $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; $k = "$proj" }
+    Check "create_session: Parameter $k -> bad_args" ((Code $r) -eq 'bad_args' -and $r.text -match 'not allowed via MCP') $r.text
+  }
+  Check 'create_session (Chat): claude_flags -> bad_args' ((Code (Tool 'create_session' @{ kind = 'chat'; claude_flags = @('ide') })) -eq 'bad_args')
+  $cf = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-flags'; claude_flags = @('verbose', '--chrome', 'ide') }
+  Check 'create_session mit claude_flags' (-not $cf.err -and (@($cf.data.claude_flags) -join ',') -eq 'chrome,ide,verbose') $cf.text
+  if ($script:lastOk) {
+    $cfl = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $cf.data.id }
+    Check 'list_sessions meldet claude_flags' ((@($cfl.claude_flags) -join ',') -eq 'chrome,ide,verbose' -and @($cfl.claude_user_options).Count -eq 0) ($cfl | ConvertTo-Json -Compress)
+    $re3 = 'args=.*--permission-mode default --chrome --ide --verbose --session-id [0-9a-f-]{36}'
+    $ct3 = Wait-FakeFile $calls $re3
+    Check 'Ersatz-claude bekommt --chrome --ide --verbose (fakebin\calls.txt)' ($ct3 -match $re3) "calls.txt='$ct3'"
+    [void](Tool 'close_session' @{ session = $cf.data.id })
+  }
+  Check 'keine verbotenen Flags in fakebin\calls.txt' ((Wait-FakeFile $calls 'add-dir|mcp-config|dangerously| --allowed-tools|remote-control' 1) -notmatch 'add-dir|mcp-config|dangerously| --allowed-tools|remote-control')
+
+  # Standards des Nutzers mit Rechte erweiternden Wertoptionen: gelten fuer Sitzungen des Nutzers (hier: --open --claude
+  # von aussen), nie fuer Sitzungen eines Agenten. Neustart mit vorbereiteter settings.json.
+  Write-Host "== Weitere Claude-Optionen: Standards des Nutzers (#182)" -ForegroundColor Cyan
+  $mcpCfg = "$work\smoke-mcp-config.json"
+  [IO.File]::WriteAllText($mcpCfg, '{"mcpServers":{}}', (New-Object Text.UTF8Encoding $false))
+  $script:prestart = {
+    $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $d = [pscustomobject]@{ flags = @('verbose', 'no-chrome', 'safe-mode'); add_dirs = @("$proj", "$work\smoke-missing-dir"); allowed_tools = 'Read'; disallowed_tools = 'WebFetch'; mcp_config = $mcpCfg; fallback_model = 'haiku' }
+    $j | Add-Member -Force claude_defaults $d
+    $j | Add-Member -Force default_shell 'powershell'
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  }
+  Set-Level 'Control'
+  # Beim naechsten Neustart die Standards wieder entfernen (spaetere Abschnitte erwarten keine).
+  $script:prestart = {
+    $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $j.PSObject.Properties.Remove('claude_defaults'); $j.PSObject.Properties.Remove('default_shell')
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  }
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  # Nach dem Neustart erneut bestaetigen, dass claude im PowerShell-Terminal nur der Ersatz ist.
+  $iso2 = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'smoke-iso2' }
+  Start-Sleep 4
+  $r = Tool 'run_command' @{ session = $iso2.data.id; command = 'Get-Command claude -All | ForEach-Object { if ($_.CommandType -in ''Application'', ''ExternalScript'') { $_.Source } else { "$($_.CommandType):$($_.Name)" } }'; timeout_secs = 25 }
+  Check 'Isolation nach Neustart: claude im PowerShell-Terminal ist nur der Ersatz' (Only-Fake $r.data.output) $r.data.output
+  [void](Tool 'close_session' @{ session = $iso2.data.id })
+  if (-not $script:lastOk) { throw 'SICHERHEIT: claude nach dem Neustart nicht als Ersatz bestaetigt - keine Claude-Sitzung' }
+  $chr = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; claude_flags = @('chrome') }
+  Check 'Agent: chrome gegen no-chrome des Nutzers -> bad_args' ((Code $chr) -eq 'bad_args' -and $chr.text -match 'turned Chrome off') $chr.text
+  $ag = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-risky'; claude_flags = @('ide') }
+  $uo = @($ag.data.claude_user_options)
+  Check 'Agenten-Sitzung: Schalter des Nutzers + eigene, nur harmlose Wertoptionen' (-not $ag.err -and (@($ag.data.claude_flags) -join ',') -eq 'no-chrome,ide,verbose' -and ($uo -join ',') -eq 'disallowed_tools,fallback_model') $ag.text
+  if ($script:lastOk) {
+    $re4 = 'args=.*--permission-mode default --no-chrome --ide --verbose --disallowed-tools WebFetch --fallback-model haiku --session-id [0-9a-f-]{36}'
+    $ct4 = Wait-FakeFile $calls $re4
+    $line4 = @(($ct4 -split "`r?`n") | Where-Object { $_ -match $re4 }) | Select-Object -Last 1
+    Check 'Ersatz-claude (Agent): ohne --add-dir/--allowed-tools/--mcp-config/--safe-mode' ($line4 -and $line4 -notmatch '--add-dir|--mcp-config| --allowed-tools|--safe-mode') "calls.txt='$ct4'"
+    [void](Tool 'close_session' @{ session = $ag.data.id })
+  }
+  # Sitzung des Nutzers: Start von aussen (wie aus dem Explorer) per --open --claude -> alle Standards.
+  $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
+  # Der zweite Aufruf reicht nur per IPC an den laufenden Hub weiter und endet sofort (sonst nach 15 s beenden).
+  $op = Start-Process "$dir\paneldeck.exe" -ArgumentList '--open', "`"$proj`"", '--claude' -WindowStyle Hidden -PassThru
+  if (-not $op.WaitForExit(15000)) { $op.Kill() }
+  $us = $null; $t0 = Get-Date
+  while (-not $us -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500; $us = (Tool 'list_sessions').data.sessions | Where-Object { $before -notcontains $_.id -and $_.claude } | Select-Object -First 1 }
+  Check 'Sitzung des Nutzers (--open --claude): alle Wertoptionen der Standards' ($us -and (@($us.claude_user_options) -join ',') -eq 'add_dir,allowed_tools,disallowed_tools,mcp_config,fallback_model' -and (@($us.claude_flags) -join ',') -eq 'no-chrome,verbose,safe-mode') ($us | ConvertTo-Json -Compress)
+  if ($script:lastOk) {
+    $re5 = 'args=.*--no-chrome --verbose --safe-mode --add-dir "?' + [regex]::Escape("$proj") + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? --fallback-model haiku --session-id'
+    $ct5 = Wait-FakeFile $calls $re5
+    Check 'Ersatz-claude (Nutzer) bekommt --add-dir/--allowed-tools/--mcp-config gequotet (fakebin\calls.txt)' ($ct5 -match $re5) "calls.txt='$ct5'"
+    [void](Tool 'close_session' @{ session = $us.id })
+  }
 
   if ($Visible) {
     Write-Host "== Screenshot (Fenster sichtbar)" -ForegroundColor Cyan
@@ -263,8 +681,10 @@ try {
   Check 'einfacher Modus: tools/list hat die Todo-Werkzeuge' ($names -contains 'list_todos' -and $names -contains 'add_todo' -and $names -contains 'set_todo_done')
   Check 'einfacher Modus: tools/list hat keine Ticket-Werkzeuge' ($names -notcontains 'create_ticket' -and $names -notcontains 'get_ticket' -and $names -notcontains 'link_terminal')
   Check 'kein Werkzeug zum Loeschen von Tickets/Karten' (-not ($names | Where-Object { $_ -match 'delete|remove' }))
-  $t1 = Tool 'add_todo' @{ title = 'Milch kaufen'; text = '2 Liter'; tags = @('Haushalt', 'haushalt', 'Einkauf') }
+  $t1 = Tool 'add_todo' @{ title = 'Milch kaufen'; text = '2 Liter'; tags = @('Haushalt', 'haushalt', 'Einkauf'); due = '20.11.2026 18:00' }
   Check 'add_todo legt eine Karte an (Tags automatisch, ohne Doppelte)' (-not $t1.err -and $t1.data.todo.key -eq 'TODO-1' -and $t1.data.todo.tags.Count -eq 2) $t1.text
+  Check 'add_todo: Faelligkeit (deutsches Datum mit Uhrzeit) wird gespeichert und ausgewertet' ($t1.data.todo.due -eq '2026-11-20T18:00' -and $null -ne $t1.data.todo.due_state.minutes_left) $t1.text
+  Check 'add_todo: unlesbare Faelligkeit -> bad_args' ((Code (Tool 'add_todo' @{ title = 'x'; due = 'irgendwann' })) -eq 'bad_args')
   Check 'add_todo ohne Titel und Text: bad_args' ((Code (Tool 'add_todo' @{})) -eq 'bad_args')
   Check 'add_todo: unbekannter Parameter: bad_args' ((Code (Tool 'add_todo' @{ title = 'x'; bogus = 1 })) -eq 'bad_args')
   Check 'add_todo: zu langer Titel: too_large' ((Code (Tool 'add_todo' @{ title = ('x' * 300) })) -eq 'too_large')
@@ -340,7 +760,7 @@ c.close()
     Check 'list_projects: TODO (schreibgeschuetzt) und PAN' (@($lp.data.projects | Where-Object { $_.key -eq 'TODO' -and $_.read_only }).Count -eq 1 -and @($lp.data.projects | Where-Object key -eq 'PAN').Count -eq 1)
     $gp = Tool 'get_project' @{ project = 'pan' }
     $task = $gp.data.types | Where-Object name -eq 'Task'
-    Check 'get_project: Typ, Felder, Workflow, Uebergaenge' (-not $gp.err -and @($task.fields).Count -eq 3 -and @($task.workflow.transitions).Count -eq 4 -and (($task.workflow.transitions | Where-Object { $_.to -eq 'Done' }).required_fields -contains 'Result'))
+    Check 'get_project: Typ, Felder, Workflow, Uebergaenge' (-not $gp.err -and @($task.fields).Count -eq 6 -and @($task.workflow.transitions).Count -eq 4 -and (($task.workflow.transitions | Where-Object { $_.to -eq 'Done' }).required_fields -contains 'Result'))
     Check 'get_project: unbekanntes Projekt nennt die verfuegbaren' ((Tool 'get_project' @{ project = 'ZZZ' }).data.error.details.available -contains 'PAN')
     $c1 = Tool 'create_ticket' @{ project = 'PAN'; type = 'Task'; title = 'Login reparieren' }
     Check 'create_ticket ohne Pflichtfeld: required_missing mit Liste' ((Code $c1) -eq 'required_missing' -and $c1.data.error.details.missing_fields[0].name -eq 'Area') $c1.text
@@ -407,6 +827,22 @@ c.close()
     Check 'get_ticket: Kommentar, Zeit, Verknuepfung, Verlauf' (-not $gt.err -and $gt.data.comments_total -eq 1 -and $gt.data.time.entries_total -eq 2 -and @($gt.data.links).Count -eq 1 -and @($gt.data.history | Where-Object source -eq 'agent').Count -ge 5)
     Check 'get_ticket: Hinweis auf nicht vertrauenswuerdige Texte' ($gt.data.note -match 'untrusted')
     Check 'Ticket-Aufruf im Protokoll ohne Kommentartext' ((Get-Content "$data\mcp-log.jsonl" -Raw) -notmatch 'GEHEIM-KOMMENTAR')
+    Check 'get_project: eingebaute Felder Beschreibung, Faelligkeit und Labels an jedem Typ' (@($task.fields | Where-Object { $_.key -eq 'description' -or $_.key -eq 'due' -or $_.key -eq 'labels' }).Count -eq 3)
+    $dd = Tool 'create_ticket' @{ project = 'PAN'; type = 'Note'; title = 'Mit Termin'; description = 'Erst **lesen**'; due = '2026-11-20 14:30' }
+    Check 'create_ticket: Beschreibung und Faelligkeit (Datum mit Uhrzeit)' (-not $dd.err -and $dd.data.ticket.due -eq '2026-11-20T14:30' -and $dd.data.ticket.description -eq 'Erst **lesen**' -and $null -ne $dd.data.ticket.due_state) $dd.text
+    $ddk = $dd.data.ticket.key
+    $gd = Tool 'get_ticket' @{ ticket = $ddk }
+    Check 'get_ticket: Faelligkeit lesen (auch in den Feldern)' ($gd.data.due -eq '2026-11-20T14:30' -and @($gd.data.fields | Where-Object { $_.key -eq 'due' -and $_.value -eq '2026-11-20T14:30' }).Count -eq 1) $gd.text
+    $ud = Tool 'update_ticket' @{ ticket = $ddk; due = '2026-11-21' }
+    Check 'update_ticket: nur Datum (Ende des Tages)' (-not $ud.err -and $ud.data.ticket.due -eq '2026-11-21') $ud.text
+    Check 'update_ticket: unlesbare Faelligkeit -> invalid_value' ((Code (Tool 'update_ticket' @{ ticket = $ddk; due = 'morgen' })) -eq 'invalid_value')
+    $sq = Tool 'search_tickets' @{ project = 'PAN'; query = 'due = 2026-11-21 AND description ~ lesen' }
+    Check 'search_tickets: due und description in der Abfrage' (-not $sq.err -and $sq.data.total -eq 1 -and $sq.data.tickets[0].key -eq $ddk) $sq.text
+    $ul = Tool 'update_ticket' @{ ticket = $ddk; labels = @('smoke', 'Smoke', 'mcp') }
+    Check 'update_ticket: eingebaute Labels (ohne Doppelte)' (-not $ul.err -and @($ul.data.ticket.labels).Count -eq 2) $ul.text
+    Check 'search_tickets: labels in der Abfrage' ((Tool 'search_tickets' @{ project = 'PAN'; query = 'labels = mcp' }).data.total -eq 1)
+    $cl = Tool 'update_ticket' @{ ticket = $ddk; due = $null }
+    Check 'update_ticket: due null leert die Faelligkeit' (-not $cl.err -and $null -eq $cl.data.ticket.due) $cl.text
 
     Write-Host "== Aufgaben-Werkzeuge: Sitzung und Ticket verknuepfen, Quelle im Verlauf" -ForegroundColor Cyan
     $foreign = ((Tool 'list_sessions').data.sessions | Select-Object -First 1).id
@@ -650,6 +1086,7 @@ c.close()
           if ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
           elseif ($hasTools -and $last -match 'chain please (\d+) (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_chat_message","arguments":{"session":' + $Matches[1] + ',"text":"proxy please ' + $Matches[2] + '"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'read please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_chat","arguments":{"session":' + $Matches[1] + ',"last":40}}}]},"done":false}' }
+          elseif ($hasTools -and $last -match 'spawn please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"create_session","arguments":{"shell":"powershell","name":"Chat-Kind"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'proxy please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_text","arguments":{"session":' + $Matches[1] + ',"text":"echo proxy-leak"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'tools please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_sessions","arguments":{}}}]},"done":false}' }
           else {
@@ -755,7 +1192,57 @@ c.close()
   Check 'Umweg-Schutz ueber eine Kette: Chat -> Chat -> send_text in die Sitzung des Agenten -> forbidden' ($px.isError -ne $true -and $w2.data.matched -eq $true -and $sc.Count -ge 1 -and $sc[-1].status -eq 'ok' -and $pu2.note -eq 'Sent by agent Smoke-LLM' -and $pt2.Count -ge 1 -and $pt2[-1].status -eq 'denied' -and $pt2[-1].content -match 'cannot write into that agent') "$($rc1.text) /// $($rc2.text)"
   Start-Sleep 1
   Check 'Umweg-Schutz: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'proxy-leak')
+  # Markierung (#152): Agent $A -> Chat $C legt per create_session ein Terminal an; ein Agent dort darf weder in $A
+  # noch in $C schreiben (bis 2.2.0 war ein solches Terminal nicht markiert).
+  [void](InA 'send_chat_message' @{ session = $C; text = 'spawn please' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $T = @((Tool 'list_sessions').data.sessions) | Where-Object { $_.parent -eq $C -and $_.kind -eq 'terminal' } | Select-Object -First 1
+  Check 'Markierung: Terminal eines Chats der Kette erbt sie (agent_chain = Agent + Chat)' ($null -ne $T -and @($T.agent_chain) -contains $A -and @($T.agent_chain) -contains $C) ($T | ConvertTo-Json -Compress)
+  if ($T) {
+    Start-Sleep 4
+    $tw = InS $T.id 'send_text' @{ session = $A; text = 'echo taint-leak' }
+    Check 'Markierung: Agent im Terminal des Chats -> send_text in den urspruenglichen Agenten forbidden' ($tw.isError -eq $true -and $tw.content[0].text -like 'forbidden*' -and $tw.content[0].text -match 'agent chain') ($tw | ConvertTo-Json -Compress -Depth 5)
+    $tc = InS $T.id 'send_chat_message' @{ session = $C; text = 'x' }
+    Check 'Markierung: ... und nicht in den Chat der Kette' ($tc.isError -eq $true -and $tc.content[0].text -like 'forbidden*') ($tc | ConvertTo-Json -Compress -Depth 5)
+    Check 'Markierung: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'taint-leak')
+    # Agenten-Kette (#152) im Terminal $T (Glied der Kette $A -> $C): whoami/list_sessions nennen sie, nur Lesen in $A.
+    $Ti = $T.id
+    $kw = InS $Ti 'whoami' @{}
+    Check 'Kette: whoami im Glied nennt agent_chain (Agent + Chat)' ($kw.structuredContent.session -eq $Ti -and @($kw.structuredContent.agent_chain) -contains $A -and @($kw.structuredContent.agent_chain) -contains $C) ($kw | ConvertTo-Json -Compress -Depth 5)
+    Check 'Kette: Glied -> rename_session des Vorfahren forbidden' ((InS $Ti 'rename_session' @{ session = $A; name = 'x' }).content[0].text -like 'forbidden*')
+    Check 'Kette: Glied darf den Vorfahren lesen' ((InS $Ti 'read_terminal' @{ session = $A; lines = 5 }).isError -ne $true)
+    foreach ($t in @(@('run_command', @{ session = $A; command = 'echo kind-leak' }), @('send_keys', @{ session = $A; keys = @('enter') }), @('queue_prompt', @{ session = $A; prompt = 'x' }), @('focus_session', @{ session = $A }))) {
+      $kr = InS $Ti $t[0] $t[1]
+      Check "Kette: Glied -> $($t[0]) in den Vorfahren forbidden" ($kr.isError -eq $true -and $kr.content[0].text -like 'forbidden*') ($kr | ConvertTo-Json -Compress -Depth 5)
+    }
+    # Gefaelschter/fehlender Aufrufer: rohe TCP-Anfrage mit dem Token aus ipc.json, ohne caller/caller_pid, aus $T ->
+    # der Hub ermittelt den Absender selbst (TCP-Tabelle + Job Object bzw. Prozessbaum) und weist ab.
+    $rawCmd = "`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json; `$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port); `$s = `$c.GetStream(); `$b = [Text.Encoding]::UTF8.GetBytes('{""token"":""' + `$j.token + '"",""cmd"":""mcp"",""tool"":""send_text"",""caller"":null,""caller_pid"":4,""args"":{""session"":$A,""text"":""echo raw-leak""}}'); `$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1); (New-Object IO.StreamReader(`$s)).ReadToEnd()"
+    $raw = Tool 'run_command' @{ session = $Ti; command = $rawCmd; timeout_secs = 30 }
+    Check 'Kette: rohe TCP-Anfrage ohne Aufrufer aus dem Glied -> zugeordnet und forbidden' ($raw.data.output -match '"code":"forbidden"' -and $raw.data.output -match 'agent chain') $raw.text
+    # Losgeloester Enkel des Glieds (#168): ueber den Job von $T zugeordnet -> als Glied der Kette abgewiesen.
+    $det = Detached $Ti 'send_text' ('{"session":' + $A + ',"text":"echo detached-leak"}')
+    Check 'Job: losgeloester Enkel eines Glieds -> der Kette zugeordnet, forbidden in den Vorfahren' ($det -match '"code":"forbidden"' -and $det -match 'agent chain') $det
+    # Rueckfallweg: ein losgeloester Prozess ausserhalb jeder Sitzung (vom Test, verwaist) ist nicht zuzuordnen und darf
+    # nicht in einen moeglichen Vorfahren ($A steht in einer Kette) schreiben.
+    $det = Detached $null 'send_text' ('{"session":' + $A + ',"text":"echo orphan-leak"}')
+    Check 'Verwaist ausserhalb jeder Sitzung -> nicht zuzuordnen, forbidden in einen moeglichen Vorfahren' ($det -match '"code":"forbidden"' -and $det -match 'cannot be attributed') $det
+    # paneldeck --open aus einem Terminal (#152): markiert nur, wenn das Terminal selbst eine Kette hat.
+    $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
+    [void](Tool 'run_command' @{ session = $Ti; command = "& '$dir\paneldeck.exe' --open '$proj'"; timeout_secs = 30 })
+    Start-Sleep 3
+    $o1 = @((Tool 'list_sessions').data.sessions) | Where-Object { $before -notcontains $_.id } | Select-Object -First 1
+    Check '--open aus einem Glied der Kette: neue Sitzung erbt die Kette samt Glied' ($null -ne $o1 -and @($o1.agent_chain) -contains $Ti -and @($o1.agent_chain) -contains $A) ($o1 | ConvertTo-Json -Compress)
+    $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
+    [void](Tool 'run_command' @{ session = $A; command = "& '$dir\paneldeck.exe' --open '$proj'"; timeout_secs = 30 })
+    Start-Sleep 3
+    $o2 = @((Tool 'list_sessions').data.sessions) | Where-Object { $before -notcontains $_.id } | Select-Object -First 1
+    Check '--open aus einem Terminal ohne Kette: neue Sitzung bleibt frei' ($null -ne $o2 -and @($o2.agent_chain).Count -eq 0) ($o2 | ConvertTo-Json -Compress)
+    Start-Sleep 1
+    Check 'Kette: im Vorfahren wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'kind-leak|raw-leak|detached-leak|orphan-leak')
+  }
   Check 'wait_for_status auf die eigene Sitzung -> bad_args' ((InA 'wait_for_status' @{ session = $A; status = @('ready'); timeout_secs = 5 }).content[0].text -like 'bad_args*')
+  Check 'Kette: von aussen (ohne Kette) bleibt Schreiben in den Vorfahren erlaubt' (-not (Tool 'send_text' @{ session = $A; text = ' '; submit = $false }).err)
   [void](Tool 'close_session' @{ session = $C2 })
   [void](Tool 'close_session' @{ session = $A })
   # read_chat ueber ein Chat-Modell (Ergebnis gekuerzt): die neuesten Nachrichten und der Status kommen an, nicht die aeltesten.
@@ -763,7 +1250,9 @@ c.close()
   $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
   $rc = Tool 'read_chat' @{ session = $C; last = 4 }
   $rt = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_chat' })
-  Check 'read_chat ueber ein Chat-Modell: neueste Nachrichten, more_above und Status statt der aeltesten' ($w.data.matched -eq $true -and $rt.Count -ge 1 -and $rt[-1].status -eq 'ok' -and $rt[-1].content -match 'big-39' -and $rt[-1].content -match '"more_above":true' -and $rt[-1].content -match '"status":"ready"' -and $rt[-1].content -notmatch 'big-00') (($rc.text) -replace '(.{600}).*', '$1')
+  $rtc = if ($rt.Count -ge 1) { [string]$rt[-1].content } else { '' }
+  $diag = 'matched=' + $w.data.matched + ' n=' + $rt.Count + ' b39=' + ($rtc -match 'big-39') + ' more=' + ($rtc -match '"more_above":true') + ' ready=' + ($rtc -match '"status":"ready"') + ' b00=' + ($rtc -match 'big-00') + ' len=' + $rtc.Length + ' tail=' + $(if ($rtc.Length -gt 500) { $rtc.Substring($rtc.Length - 500) } else { $rtc })
+  Check 'read_chat ueber ein Chat-Modell: neueste Nachrichten, more_above und Status statt der aeltesten' ($w.data.matched -eq $true -and $rt.Count -ge 1 -and $rt[-1].status -eq 'ok' -and $rt[-1].content -match 'big-39' -and $rt[-1].content -match '"more_above":true' -and $rt[-1].content -match '"status":"ready"' -and $rt[-1].content -notmatch 'big-00') $diag
   Check 'read_chat: Feld paused (false)' ($rc.data.paused -eq $false -and $rc.data.PSObject.Properties.Name -contains 'pause_note')
   # Stufe des Modells nie gewaehlt: die einmalige Frage erscheint, der Agent bekommt permission_pending.
   $raw = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-raw'; name = 'Smoke-Raw' }
@@ -783,9 +1272,9 @@ c.close()
   Check 'Nur lesen: create_session kind=chat verboten (forbidden)' ((Code (Tool 'create_session' @{ kind = 'chat' })) -eq 'forbidden')
   $script:prestart = $null
 
-  Write-Host "== Minimierte Bereiche (#142): Wiederherstellung, kaputtes Layout, focus_session holt zurueck" -ForegroundColor Cyan
+  Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session mit placement" -ForegroundColor Cyan
   Stop-Hub
-  # 960 ist minimiert (Platz: rechts neben 961); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
+  # 960 ist minimiert (mit `slot` wie in 2.2.0 – seit 2.3.0 deprecated, nur durchgereicht); das Layout enthaelt eine unbekannte Sitzung (777), ein Duplikat und Anteil null (NaN)
   $bad = [ordered]@{ Split = [ordered]@{ dir = 'Horizontal'; ratio = $null; a = @{ Leaf = 961 }; b = [ordered]@{ Split = [ordered]@{ dir = 'Vertical'; ratio = 0.5; a = @{ Leaf = 777 }; b = @{ Leaf = 961 } } } } }
   $st = [ordered]@{
     sessions = @(
@@ -802,10 +1291,273 @@ c.close()
   Check 'Kaputtes Layout (unbekannt, doppelt, Anteil null): Hub startet, beide Sitzungen da' ($ss.Count -eq 2 -and $null -ne $mn -and $null -ne $vs) ($ss | ConvertTo-Json -Compress)
   Check 'list_sessions: minimiert aus state.json wiederhergestellt (minimized = true)' ($mn.minimized -eq $true -and $vs.minimized -eq $false) ($ss | ConvertTo-Json -Compress)
   Check 'Fokus zeigt nicht auf die minimierte Sitzung' ($mn.focused -eq $false -and $vs.focused -eq $true) ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 960; placement = 'solo' }
+  Start-Sleep -Milliseconds 600
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session placement=solo oeffnet die minimierte Sitzung allein (minimized = false, fokussiert)' (-not $fr.err -and $fr.data.placement -eq 'solo' -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($fr.text + ' ' + ($mn | ConvertTo-Json -Compress))
+  Check 'focus_session solo: der bisher sichtbare Bereich ist jetzt minimiert (laeuft weiter)' ($vs.minimized -eq $true -and $vs.focused -eq $false -and $vs.status -ne 'exited') ($vs | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961; placement = 'solo' }
+  Start-Sleep -Milliseconds 600
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session solo zurueck: Plaetze getauscht (961 sichtbar, 960 minimiert)' (-not $fr.err -and $vs.minimized -eq $false -and $vs.focused -eq $true -and $mn.minimized -eq $true) ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961 }
+  Start-Sleep -Milliseconds 300
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }
+  Check 'focus_session auf eine sichtbare Sitzung minimiert nichts' (-not $fr.err -and $mn.minimized -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 1) ($ss | ConvertTo-Json -Compress)
+
+  Write-Host "== Platzierung fuer Agenten (#162): Standard replace, split_right, create_session mit placement" -ForegroundColor Cyan
+  # Bruecke von aussen (keine eigene Sitzung): aktiver Bereich = der fokussierte (961).
   $fr = Tool 'focus_session' @{ session = 960 }
   Start-Sleep -Milliseconds 600
-  $mn = ((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq 960 })
-  Check 'focus_session holt die minimierte Sitzung zurueck (minimized = false, fokussiert)' (-not $fr.err -and $mn.minimized -eq $false -and $mn.focused -eq $true) ($mn | ConvertTo-Json -Compress)
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'focus_session ohne placement = replace (Antwort placement)' (-not $fr.err -and $fr.data.placement -eq 'replace') $fr.text
+  Check 'replace: minimierte 960 ersetzt den aktiven Bereich (sichtbar, nicht minimiert; Fokus folgt, weil der fokussierte Bereich ersetzt wurde)' ($mn.shown -eq $true -and $mn.focused -eq $true -and $mn.minimized -eq $false) ($mn | ConvertTo-Json -Compress)
+  Check 'replace: der ersetzte Bereich 961 ist jetzt minimiert (laeuft weiter); sonst nichts minimiert' ($vs.shown -eq $false -and $vs.minimized -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 1 -and $vs.status -ne 'exited') ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 961; placement = 'split_right' }
+  Start-Sleep -Milliseconds 600
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'split_right: aktiver Bereich geteilt, beide sichtbar, nichts minimiert' (-not $fr.err -and $fr.data.placement -eq 'split_right' -and $mn.shown -eq $true -and $vs.shown -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 0) ($ss | ConvertTo-Json -Compress)
+  Check 'split_right: Tastaturfokus des Nutzers bleibt (960), 961 nicht fokussiert' ($mn.focused -eq $true -and $vs.focused -eq $false) ($ss | ConvertTo-Json -Compress)
+  $fr = Tool 'focus_session' @{ session = 960; placement = 'split_down' }
+  Start-Sleep -Milliseconds 300
+  $ss = @((Tool 'list_sessions').data.sessions)
+  Check 'split_* auf eine schon sichtbare Sitzung: Layout und Fokus bleiben (beide sichtbar)' (-not $fr.err -and @($ss | Where-Object { $_.shown }).Count -eq 2 -and ($ss | Where-Object { $_.id -eq 960 }).focused -eq $true) ($ss | ConvertTo-Json -Compress)
+  Check 'focus_session mit unbekanntem placement: bad_args' ((Code (Tool 'focus_session' @{ session = 960; placement = 'left' })) -eq 'bad_args')
+  $n0 = @((Tool 'list_sessions').data.sessions).Count
+  Check 'create_session mit unbekanntem placement: bad_args, nichts angelegt' ((Code (Tool 'create_session' @{ shell = 'powershell'; placement = 'everywhere' })) -eq 'bad_args' -and @((Tool 'list_sessions').data.sessions).Count -eq $n0)
+  # 960 fokussiert (links), 961 rechts: replace mit einer neuen Sitzung ersetzt nur 960
+  $c = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Smoke-Place'; placement = 'replace' }
+  Start-Sleep -Milliseconds 800
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $nw = $ss | Where-Object { $_.id -eq $c.data.id }; $mn = $ss | Where-Object { $_.id -eq 960 }; $vs = $ss | Where-Object { $_.id -eq 961 }
+  Check 'create_session placement=replace: neue Sitzung sichtbar und fokussiert, ersetzt nur den aktiven Bereich' (-not $c.err -and $c.data.placement -eq 'replace' -and $nw.shown -eq $true -and $nw.focused -eq $true -and $mn.shown -eq $false -and $vs.shown -eq $true) ($c.text + ' ' + ($ss | ConvertTo-Json -Compress))
+  $q = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Smoke-Quiet' }
+  Start-Sleep -Milliseconds 500
+  $ss = @((Tool 'list_sessions').data.sessions)
+  $qq = $ss | Where-Object { $_.id -eq $q.data.id }
+  Check 'create_session ohne placement bleibt leise (nicht sichtbar, Fokus unveraendert)' (-not $q.err -and $null -eq $q.data.placement -and $qq.shown -eq $false -and ($ss | Where-Object { $_.id -eq $c.data.id }).focused -eq $true) ($q.text + ' ' + ($qq | ConvertTo-Json -Compress))
+
+  Write-Host "== Umgebung der Terminals (#175): Registry (Standard) und 'Umgebung von Paneldeck erben'" -ForegroundColor Cyan
+  # Eine Variable nur im Prozess des Hubs und eine Benutzervariable aus HKCU\Environment (nicht vom Isolationsprofil
+  # gesetzt), die im Prozess des Hubs einen eigenen Wert bekommt: Standard = portable-pty frischt sie aus der Registry auf,
+  # mit inherit_env bleibt der Wert des Prozesses.
+  $profVars = @(($ptyEnv -split "`n") | ForEach-Object { ($_ -split '=', 2)[0].ToUpper() })
+  $regVar = $null
+  $hk = Get-Item -LiteralPath 'HKCU:\Environment' -ErrorAction SilentlyContinue
+  if ($hk) { $regVar = @($hk.GetValueNames() | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*$' -and $profVars -notcontains $_.ToUpper() -and $_ -notmatch '^(PATH|PATHEXT|PSModulePath|TEMP|TMP|PANELDECK_.*)$' -and "$($hk.GetValue($_))" -ne '' }) | Select-Object -First 1 }
+  $ownVal = 'aus-dem-prozess-statt-registry'
+  # Vorherigen Wert merken und nach der Schleife wiederherstellen (die folgenden Abschnitte laufen mit der Standardeinstellung).
+  $sj = [IO.File]::ReadAllText("$data\settings.json").TrimStart([char]0xFEFF) | ConvertFrom-Json
+  $prevInherit = if ($sj.PSObject.Properties.Name -contains 'inherit_env') { $sj.inherit_env } else { $null }
+  foreach ($inherit in @($false, $true)) {
+    Stop-Hub
+    $f = "$data\settings.json"
+    $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    if ($j.PSObject.Properties.Name -contains 'inherit_env') { $j.inherit_env = $inherit } else { $j | Add-Member inherit_env $inherit }
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+    $oldVal = if ($regVar) { [Environment]::GetEnvironmentVariable($regVar) } else { $null }
+    if ($regVar) { [Environment]::SetEnvironmentVariable($regVar, $ownVal) }
+    $env:PD_SMOKE_INHERIT = 'aus-dem-prozess'
+    try { Set-Level 'Control' -Tray } finally { if ($regVar) { [Environment]::SetEnvironmentVariable($regVar, $oldVal) }; Remove-Item Env:PD_SMOKE_INHERIT -ErrorAction SilentlyContinue }
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    $c = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = "Smoke-Env-$inherit" }
+    # Auf den Prompt warten (sichtbarer Bildschirm zeigt "PS ...>"), statt eine feste Zeit zu schlafen.
+    $t0 = Get-Date
+    do { Start-Sleep -Milliseconds 300; $scr = "$((Tool 'read_terminal' @{ session = $c.data.id; screen = $true }).data.text)" } while ($scr -notmatch 'PS [^\r\n]*>' -and ((Get-Date) - $t0).TotalSeconds -lt 30)
+    if ($scr -notmatch 'PS [^\r\n]*>') { Write-Host "  info  inherit_env: kein Prompt nach 30 s" -ForegroundColor Yellow }
+    $rv = if ($regVar) { "`$env:$regVar" } else { "''" }
+    # Ein Wert je Zeile (mit Marke davor): eine einzige lange Zeile, die genau am Zeilenende umbricht, liefert bei run_command
+    # leere Ausgabe (Befund, siehe Bericht zu #175) - das soll diese Pruefung nicht verdecken, aber auch nicht ausloesen.
+    $probe = '"v0=$env:PD_SMOKE_INHERIT"; "v1=$(' + $rv + ')"; "v2=$env:PANELDECK_SESSION"; "v3=$env:USERPROFILE"; "v4=" + (@(Get-Command claude -All -CommandType Application,ExternalScript | ForEach-Object Source) -join '','')'
+    # Bis zu drei Versuche; jeder leere Versuch wird mit quality und dem sichtbaren Bildschirm protokolliert (keine stille
+    # Wiederholung: ein leeres Ergebnis trotz Prompt ist ein Befund von run_command, kein Fehler dieser Pruefung).
+    for ($try = 1; $try -le 3; $try++) {
+      $r = Tool 'run_command' @{ session = $c.data.id; command = $probe; timeout_secs = 25 }
+      if ("$($r.data.output)".Trim()) { break }
+      $scr = "$((Tool 'read_terminal' @{ session = $c.data.id; screen = $true }).data.text)".Trim() -replace '\s+', ' '
+      if ($scr.Length -gt 300) { $scr = $scr.Substring($scr.Length - 300) }
+      Write-Host "  info  inherit_env: Versuch $try ohne Ausgabe (quality=$($r.data.quality), finished=$($r.data.finished), timed_out=$($r.data.timed_out), duration_ms=$($r.data.duration_ms)); Bildschirm: $scr" -ForegroundColor Yellow
+      Start-Sleep 2
+    }
+    $o = "$($r.data.output)".Trim()
+    $parts = @(0..4 | ForEach-Object { $k = "v$_="; $l = @($o -split "`r?`n" | Where-Object { $_.StartsWith($k) }) | Select-Object -First 1; if ($l) { $l.Substring($k.Length).Trim() } else { $null } })
+    if (-not $o) { $o = "(leer) create: $($c.text) | run_command: $($r.text)" }
+    $label = if ($inherit) { 'an' } else { 'aus' }
+    Check "inherit_env $($label): Paneldecks Variable PANELDECK_SESSION = eigene Sitzung" (-not $c.err -and $parts.Count -ge 5 -and $parts[2] -eq "$($c.data.id)") $o
+    Check "inherit_env $($label): Isolation haelt (Schein-Profil, claude nur der Ersatz)" ($parts.Count -ge 5 -and $parts[3] -eq $script:iso.Profile -and (Only-Fake ($parts[4] -replace ',', "`n"))) $o
+    Check "inherit_env $($label): Variable nur im Prozess kommt an" ($parts[0] -eq 'aus-dem-prozess') $o
+    if (-not $regVar) { Skip "inherit_env $($label): Benutzervariable aus Registry vs. Prozess" 'keine geeignete Variable in HKCU\Environment' }
+    elseif ($inherit) { Check "inherit_env an: Wert des Prozesses bleibt ($regVar, nicht aus der Registry)" ($parts[1] -eq $ownVal) $o }
+    else { Check "inherit_env aus: Wert frisch aus der Registry ($regVar, nicht der des Prozesses)" ($parts[1] -ne $ownVal -and $parts[1] -ne '') $o }
+    # Git Bash bekommt dieselbe Umgebung: Shell-Integration (PROMPT_COMMAND/PS0) muss auch mit geerbter Umgebung laden.
+    if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {
+      $g = Tool 'create_session' @{ shell = 'gitbash'; cwd = "$proj"; name = "Smoke-Env-Bash-$inherit" }
+      $t0 = Get-Date
+      do { Start-Sleep -Milliseconds 500; $r = Tool 'run_command' @{ session = $g.data.id; command = 'echo env-bash-ok'; timeout_secs = 20 } } while ((Code $r) -eq 'no_shell_integration' -and ((Get-Date) - $t0).TotalSeconds -lt 30)
+      $info = "$([int]((Get-Date) - $t0).TotalSeconds) s: $($r.text)"
+      if (-not ($r.data.finished -and "$($r.data.output)".Trim() -eq 'env-bash-ok')) {
+        $info += ' | Bildschirm: ' + "$((Tool 'read_terminal' @{ session = $g.data.id; screen = $true }).data.text)".Trim()
+      }
+      Check "inherit_env $($label): run_command gitbash (Shell-Integration geladen)" (-not $g.err -and $r.data.finished -and "$($r.data.output)".Trim() -eq 'env-bash-ok') $info
+    }
+  }
+  # Einstellung wie vorher (Standard aus) - die folgenden Abschnitte pruefen nicht #175.
+  Stop-Hub
+  $sj = [IO.File]::ReadAllText("$data\settings.json").TrimStart([char]0xFEFF) | ConvertFrom-Json
+  if ($null -eq $prevInherit) { $sj.PSObject.Properties.Remove('inherit_env') } else { $sj.inherit_env = $prevInherit }
+  [IO.File]::WriteAllText("$data\settings.json", ($sj | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+
+  Write-Host "== Konsolen-Host und DLL-Suche (#183)" -ForegroundColor Cyan
+  # Eine ladbare conpty.dll im Arbeitsordner des Hubs (wie "In Paneldeck oeffnen" auf einem fremden Ordner) darf nie
+  # geladen werden: DLLs nur aus dem Programmordner und System32, die mitgelieferte ConPTY nur per vollem Pfad.
+  $plant = New-Item -ItemType Directory -Force "$work\plant"
+  function Start-ConPtyHub {
+    $script:hubCwd = "$plant"
+    Set-Level 'Control' -Empty
+    $script:hubCwd = $null
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  }
+  function Get-HubConPty {
+    $all = @((Get-Process -Id $script:hub.Id).Modules | ForEach-Object { $_.FileName })
+    [pscustomobject]@{
+      All  = $all
+      Dlls = @($all | Where-Object { (Split-Path -Leaf $_) -eq 'conpty.dll' })
+      Kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($script:hub.Id)" | Where-Object { $_.Name -eq 'OpenConsole.exe' })
+    }
+  }
+  if ($hasConPty) {
+    Copy-Item "$dir\conpty.dll" "$plant\conpty.dll"
+    # A: ohne mitgelieferte Dateien neben der .exe (aeltere Installation). Frueher lud portable-pty "conpty.dll" per Name
+    #    ueber die Suchreihenfolge - mit dem Arbeitsordner darin.
+    Rename-Item "$dir\conpty.dll" 'conpty.dll.off'; Rename-Item "$dir\OpenConsole.exe" 'OpenConsole.exe.off'
+    try {
+      Start-ConPtyHub
+      $c = Tool 'create_session' @{ shell = 'cmd'; cwd = "$plant"; name = 'smoke-plant' }
+      Check 'DLL-Suche: create_session im Ordner mit fremder conpty.dll' (-not $c.err) $c.text
+      if (-not $c.err) {
+        Start-Sleep 3
+        $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $c.data.id })
+        Check 'DLL-Suche: ohne mitgelieferte Dateien console_host = system' ($me.Count -eq 1 -and $me[0].console_host -eq 'system') ($me | ConvertTo-Json -Compress)
+        $r = Tool 'run_command' @{ session = $c.data.id; command = 'echo plant-ok'; timeout_secs = 25 }
+        Check 'DLL-Suche: Sitzung laeuft (ConPTY von Windows)' ($r.data.finished -and $r.data.output.Trim() -eq 'plant-ok') $r.text
+      }
+      $h = Get-HubConPty
+      Check 'DLL-Suche: conpty.dll aus dem Arbeitsordner nicht geladen (keine conpty.dll, kein OpenConsole.exe)' ($h.Dlls.Count -eq 0 -and $h.Kids.Count -eq 0) "dlls=$($h.Dlls -join ', ') kids=$($h.Kids.Count)"
+      Stop-Hub
+    } finally {
+      Rename-Item "$dir\conpty.dll.off" 'conpty.dll'; Rename-Item "$dir\OpenConsole.exe.off" 'OpenConsole.exe'
+    }
+    # B: mit mitgelieferten Dateien; Einstellung je nach -ConPty.
+    Start-ConPtyHub
+    foreach ($sh in @('cmd', 'powershell')) {
+      $c = Tool 'create_session' @{ shell = $sh; cwd = "$plant"; name = "smoke-conpty-$sh" }
+      Check "ConPTY: create_session $sh" (-not $c.err) $c.text
+      if ($c.err) { continue }
+      Start-Sleep 3
+      $want = if ($useBundled) { 'bundled' } else { 'system' }
+      $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $c.data.id })
+      Check "ConPTY: list_sessions console_host = $want ($sh)" ($me.Count -eq 1 -and $me[0].console_host -eq $want) ($me | ConvertTo-Json -Compress)
+      $r = Tool 'run_command' @{ session = $c.data.id; command = 'echo conpty-ok'; timeout_secs = 25 }
+      Check "ConPTY: run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'conpty-ok') "out='$($r.data.output)' q=$($r.data.quality)"
+      $r = Tool 'run_command' @{ session = $c.data.id; command = 'cmd /c exit 4'; timeout_secs = 25 }
+      if ($sh -eq 'cmd') { Check 'ConPTY: run_command cmd (Befehl beendet)' ($r.data.finished) $r.text }
+      else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text; Test-WrapWidth $c.data.id $sh 'ConPTY: ' }
+      if ($sh -eq 'powershell') {
+        # Fortschritt (OSC 9;4, #183): list_sessions meldet ihn, der naechste Prompt entfernt ihn wieder. Mit ST statt BEL
+        # beendet, damit keine Glocke (Benachrichtigung) ausgeloest wird.
+        $sid = $c.data.id
+        $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })
+        Check 'OSC 9;4: list_sessions hat das Feld progress (null ohne Fortschritt)' ($me.Count -eq 1 -and ($me[0].PSObject.Properties.Name -contains 'progress') -and $null -eq $me[0].progress) ($me | ConvertTo-Json -Compress)
+        [void](Tool 'send_text' @{ session = $sid; text = '[Console]::Write("$([char]27)]9;4;1;42$([char]27)\"); Start-Sleep 6'; submit = $true })
+        $pg = $null
+        for ($i = 0; $i -lt 40 -and -not $pg; $i++) { Start-Sleep -Milliseconds 150; $pg = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })[0].progress }
+        if ($useBundled -or $pg) {
+          Check "OSC 9;4: list_sessions progress = normal/42 ($want)" ($pg.state -eq 'normal' -and $pg.percent -eq 42) ($pg | ConvertTo-Json -Compress)
+          $gone = $false
+          for ($i = 0; $i -lt 60 -and -not $gone; $i++) { Start-Sleep -Milliseconds 200; $gone = $null -eq @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })[0].progress }
+          Check 'OSC 9;4: Fortschritt nach dem naechsten Prompt entfernt' $gone
+        } else { Skip 'OSC 9;4: list_sessions progress' 'ConPTY von Windows reicht OSC 9;4 nicht durch' }
+      }
+    }
+    # Git Bash und Vollbildprogramme (alternativer Bildschirm) ueber die gewaehlte ConPTY.
+    if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {
+      $g = Tool 'create_session' @{ shell = 'gitbash'; cwd = "$plant"; name = 'smoke-conpty-bash' }
+      Check 'ConPTY: create_session gitbash' (-not $g.err) $g.text
+      if (-not $g.err) {
+        $gid = $g.data.id
+        # Git Bash (Login-Shell, Git-Prompt) braucht unter Last mehrere Sekunden bis zum ersten Prompt und fuer jeden
+        # weiteren: auf Zustaende warten statt fester Pausen (sonst landen Eingaben vor dem Prompt bzw. im falschen Programm).
+        $t0 = Get-Date
+        do { Start-Sleep -Milliseconds 500; $r = Tool 'run_command' @{ session = $gid; command = 'echo bash-ok'; timeout_secs = 25 } } while ((Code $r) -eq 'no_shell_integration' -and ((Get-Date) - $t0).TotalSeconds -lt 30)
+        Check 'ConPTY: run_command gitbash (Ausgabe)' ($r.data.finished -and $r.data.output.Trim() -eq 'bash-ok') $r.text
+        $r = Tool 'run_command' @{ session = $gid; command = 'false'; timeout_secs = 25 }
+        Check 'ConPTY: run_command gitbash (Exit 1)' ($r.data.exit_code -eq 1) $r.text
+        # Sichtbarer Bildschirm, bis $pattern passt (oder Zeitlimit). Prompt der Bash = letzte Zeile "$".
+        function Wait-Screen([string]$pattern, [int]$secs = 20) {
+          $t = Get-Date
+          do { Start-Sleep -Milliseconds 300; $s = "$((Tool 'read_terminal' @{ session = $gid; screen = $true }).data.text)" } while ($s -notmatch $pattern -and ((Get-Date) - $t).TotalSeconds -lt $secs)
+          $s
+        }
+        $bashPrompt = '(?s)\$\s*$'
+        [void](Wait-Screen $bashPrompt)
+        [IO.File]::WriteAllLines("$plant\zeilen.txt", [string[]](1..300 | ForEach-Object { "zeile-$_" }))
+        [void](Tool 'send_text' @{ session = $gid; text = 'less zeilen.txt' })
+        $scr = Wait-Screen '(?m)^zeile-1\b'
+        Check 'ConPTY: less im alternativen Bildschirm zeigt die Datei' ($scr -match '(?m)^zeile-1\b' -and $scr -notmatch 'bash-ok') $scr
+        [void](Tool 'send_text' @{ session = $gid; text = 'q'; submit = $false })
+        [void](Wait-Screen $bashPrompt)
+        $r = Tool 'run_command' @{ session = $gid; command = 'echo nach-less'; timeout_secs = 15 }
+        Check 'ConPTY: nach less zurueck in der Shell' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-less') $r.text
+        if (Test-Path "$env:ProgramFiles\Git\usr\bin\vim.exe") {
+          # vim beendet sich selbst (send_text ist ein Einfuegen und landete in vim als Text).
+          [void](Wait-Screen $bashPrompt)
+          [void](Tool 'send_text' @{ session = $gid; text = 'vim -u NONE -c redraw -c "sleep 4" -c "qa!" zeilen.txt' })
+          $scr = Wait-Screen '(?m)^zeile-1\b'
+          Check 'ConPTY: vim zeigt die Datei' ($scr -match '(?m)^zeile-1\b') $scr
+          [void](Wait-Screen $bashPrompt 25)
+          $r = Tool 'run_command' @{ session = $gid; command = 'echo nach-vim'; timeout_secs = 15 }
+          Check 'ConPTY: nach vim zurueck in der Shell' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-vim') $r.text
+        }
+      }
+    }
+    # WSL (falls eine Distribution eingerichtet ist; docker-desktop-Distributionen haben keine Shell).
+    $distro = @(& wsl.exe -l -q 2>$null | ForEach-Object { ($_ -replace "`0", '').Trim() } | Where-Object { $_ -and $_ -notlike 'docker-desktop*' }) | Select-Object -First 1
+    if ($distro) {
+      $w = Tool 'create_session' @{ shell = "wsl:$distro"; cwd = "$plant"; name = 'smoke-conpty-wsl' }
+      Check "ConPTY: create_session wsl:$distro" (-not $w.err) $w.text
+      if (-not $w.err) {
+        # Ein kalter WSL-Start kann dauern: warten, bis die Shell-Integration da ist.
+        $t0 = Get-Date
+        do {
+          Start-Sleep 3
+          $r = Tool 'run_command' @{ session = $w.data.id; command = 'echo wsl-ok'; timeout_secs = 40 }
+        } while ((Code $r) -eq 'no_shell_integration' -and ((Get-Date) - $t0).TotalSeconds -lt 60)
+        Check 'ConPTY: run_command wsl (Ausgabe)' ($r.data.finished -and $r.data.output.Trim() -eq 'wsl-ok') $r.text
+      }
+    } else { Skip 'ConPTY: WSL' 'keine WSL-Distribution' }
+    $h = Get-HubConPty
+    # Zur Diagnose der eingeschraenkten DLL-Suche: Module ausserhalb von System32/WinSxS (Grafiktreiber, Erweiterungen).
+    $foreign = @($h.All | Where-Object { $_ -notlike "$env:SystemRoot\System32\*" -and $_ -notlike "$env:SystemRoot\WinSxS\*" })
+    Write-Host "      Module ausserhalb System32 ($($h.All.Count) gesamt): $($foreign -join '; ')" -ForegroundColor DarkGray
+    Check 'DLL-Suche: OpenGL geladen (Darstellung laeuft)' ([bool]($h.All | Where-Object { $_ -like '*\opengl32.dll' }))
+    Check 'DLL-Suche: conpty.dll aus dem Arbeitsordner nicht geladen' (-not ($h.Dlls | Where-Object { $_ -like "$plant\*" })) ($h.Dlls -join ', ')
+    if ($useBundled) {
+      Check 'Mitgelieferte conpty.dll aus dem Programmordner geladen' ($h.Dlls -contains "$dir\conpty.dll") ($h.Dlls -join ', ')
+      Check 'OpenConsole.exe aus dem Programmordner ist Konsolen-Host der Sitzungen' ($h.Kids.Count -ge 2 -and -not ($h.Kids | Where-Object { $_.ExecutablePath -ne "$dir\OpenConsole.exe" })) (($h.Kids | ForEach-Object ExecutablePath) -join ', ')
+    } else {
+      Check 'Einstellung aus: keine conpty.dll geladen, kein OpenConsole.exe' ($h.Dlls.Count -eq 0 -and $h.Kids.Count -eq 0) "dlls=$($h.Dlls -join ', ') kids=$($h.Kids.Count)"
+    }
+  } else {
+    Skip 'Konsolen-Host und DLL-Suche' 'keine conpty.dll/OpenConsole.exe neben der .exe (tools\fetch-conpty.ps1)'
+  }
+} catch {
+  # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.
+  $script:fail++; Write-Host "  ABBRUCH  $($_.Exception.Message)" -ForegroundColor Red
 } finally {
   if ($script:fakeListener) { try { $script:fakeListener.Stop() } catch {} }
   if ($script:fakePs) {
@@ -814,7 +1566,22 @@ c.close()
   }
   Stop-Hub
   foreach ($h in $script:extra) { if ($h -and -not $h.HasExited) { $h.Kill() } }
+  if (Test-Path -LiteralPath $calls) { Write-Host "Ersatz-claude, Aufrufe (fakebin\calls.txt):" -ForegroundColor DarkGray; Get-Content -LiteralPath $calls | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray } }
+  else { Write-Host "Ersatz-claude wurde nicht aufgerufen (fakebin\calls.txt fehlt)." -ForegroundColor DarkGray }
+  Exit-IsolatedTestEnv $script:iso
   if (-not $KeepFiles) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+}
+# Schutzpruefung: das echte ~/.claude des aufrufenden Nutzers muss unberuehrt sein.
+Write-Host "== Schutzpruefung: echtes ~/.claude ($realHome)" -ForegroundColor Cyan
+$guard = Test-RealClaudeUntouched $realSnap $tag -Strict:$StrictClaudeConfig
+foreach ($m in $guard.Warnings) { Write-Host "  WARNUNG  $m" -ForegroundColor Yellow }
+Check 'Echtes ~/.claude unberuehrt (kein projects-Ordner des Tests, .claude.json/settings.json ohne Testordner)' ($guard.Violations.Count -eq 0) ($guard.Violations -join '; ')
+if ($guard.Violations.Count) {
+  Write-Host ""
+  Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+  Write-Host "!!! SICHERHEIT: Der Smoke-Test hat das ECHTE Claude-Profil beruehrt:" -ForegroundColor Red
+  foreach ($m in $guard.Violations) { Write-Host "!!!   $m" -ForegroundColor Red }
+  Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
 }
 Write-Host ""
 Write-Host ("Ergebnis: {0} bestanden, {1} fehlgeschlagen, {2} uebersprungen" -f $script:pass, $script:fail, $script:skip) -ForegroundColor $(if ($script:fail -eq 0) { 'Green' } else { 'Red' })

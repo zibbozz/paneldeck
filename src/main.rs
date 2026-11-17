@@ -1,27 +1,34 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod afford;
 mod app;
 mod backup;
 mod boxdraw;
 mod calc;
 mod chat;
+mod claude_opts;
 mod db;
+mod due;
 mod clip;
 mod emoji;
 mod pathfmt;
 mod quote;
 mod gitinfo;
+mod glyphs;
 mod gitops;
 mod history;
+mod hyperlink;
 mod hooks;
 mod cli;
 mod console;
+mod conpty;
 mod help;
 mod integration;
 mod launch;
 mod keys;
 mod notify;
 mod osc;
+mod palette;
 mod paths;
 mod planning;
 mod prompts;
@@ -35,15 +42,20 @@ mod mcp;
 mod shells;
 mod state;
 mod style;
+mod sysfonts;
+mod taskbar;
 mod tasks;
 mod templates;
 mod terminal;
 mod undo;
 mod tray;
+mod vtkeys;
 mod termview;
 mod theme;
 mod usage;
+mod vtnotify;
 mod winctl;
+mod wsl;
 
 fn app_icon() -> eframe::egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon64.png")).unwrap_or_default()
@@ -124,6 +136,8 @@ fn early_lang(arg: Option<state::Lang>, cli: &cli::Cli) -> state::Lang {
 }
 
 fn main() -> eframe::Result<()> {
+    // Zuerst: DLLs nur noch aus Programmordner und System32 laden, nie aus dem Arbeitsordner (#183).
+    conpty::harden_dll_search();
     // Hook-Aufrufe von Claude Code (`--hook`) MÜSSEN vor der Einzelinstanz-Weiterleitung behandelt werden:
     // sie laufen mit demselben Datenordner wie die laufende App und dürfen nicht als „Fenster zeigen“ enden.
     if cli::is_hook_invocation(&std::env::args().collect::<Vec<_>>()) {
@@ -198,7 +212,7 @@ fn main() -> eframe::Result<()> {
     // "paneldeck.exe.old" (Update über eine laufende Instanz) wird erst nach dem ersten gezeichneten Frame gelöscht –
     // siehe `app::update::install::remove_old_exe`.
     let cmd = match &cli.open {
-        Some(p) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude },
+        Some(p) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude, origin: None },
         None => hooks::IpcCmd::Show,
     };
     // `--reset-settings` nur, wenn keine Instanz mit diesem Datenordner läuft (sie würde die Datei wieder schreiben).

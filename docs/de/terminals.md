@@ -8,8 +8,35 @@ Der **Terminal Hub** ist der Hauptbereich von Paneldeck: viele Terminal-Sitzunge
 
 ## Shells und Emulation
 - Terminals mit voller Emulation (ConPTY): **PowerShell 7, Windows PowerShell, CMD, Git Bash und WSL-Distributionen**.
-- Farben, Alt-Screen, Maus, Unicode, farbige Emojis, CJK und lückenlose Rahmenzeichen. Die Terminalschrift ist Cascadia Mono (eingebettet); fehlende Zeichen kommen aus den Windows-Systemschriften.
+- Farben, Alt-Screen, Maus, Unicode, farbige Emojis, CJK und lückenlose Rahmenzeichen; **fetter und kursiver** Text, Unterstreichungsarten (doppelt, Welle, gepunktet, gestrichelt) und Unterstreichungsfarben. Ein Programm kann einen **blinkenden Cursor** anfordern (*Einstellungen → Darstellung → Blinkender Cursor*, standardmäßig an; nur im fokussierten Terminal).
+- **Terminalschrift** (*Einstellungen → Darstellung → Terminalschrift*): Cascadia Mono (eingebaut, Standard), Hack (eingebaut) oder **jede installierte Festbreitenschrift**, z. B. eine Nerd Font. Powerline-Trenner, Rahmen- und Blockzeichen zeichnet Paneldeck selbst, damit sie lückenlos anschließen. Fehlende Zeichen kommen aus den Windows-Systemschriften.
+- **Mitgelieferter Konsolen-Host:** Installer und portables ZIP enthalten eine neuere ConPTY von Microsoft (`conpty.dll` und `OpenConsole.exe` neben `paneldeck.exe`). Sie reicht Farbabfragen und synchronisierte Ausgabe in der richtigen Reihenfolge durch, Vollbildprogramme flimmern dadurch weniger. *Einstellungen → Darstellung → Mitgelieferten Konsolen-Host verwenden (empfohlen)* ist standardmäßig an; ist sie aus oder fehlen die Dateien bzw. starten sie nicht, nutzen Sitzungen den Konsolen-Host von Windows (passiert das wiederholt, erscheint ein Hinweis). Die Einstellung gilt für neue Sitzungen.
+- Jede Shell bekommt `TERM_PROGRAM=Paneldeck` und `TERM_PROGRAM_VERSION`. Paneldeck beantwortet Farbabfragen (OSC 4/10/11/12), Größenabfragen (CSI 14t/16t) und XTVERSION – auch für Sitzungen im Hintergrund – und meldet Programmen, die danach fragen, Fokuswechsel (DECSET 1004). `reset` setzt von einem Programm geänderte Farben auf das Theme zurück.
 - **Profile** (*Einstellungen → Profile*) bündeln Shell, Startbefehl, Umgebungsvariablen und Darstellung – z. B. „Produktion“ rot oder „Claude in WSL“. Projekte und Ordner können ein Profil für neue Sitzungen vorgeben.
+- **Umgebung:** Neue Terminals lesen die Umgebungsvariablen frisch aus Windows, eine mit `setx` gesetzte Variable wirkt also sofort. *Einstellungen → Allgemein → Umgebung von Paneldeck erben* (standardmäßig aus) gibt ihnen stattdessen genau die Umgebung, mit der Paneldeck gestartet wurde. Paneldecks eigene Variablen und die des Profils gelten in beiden Fällen; interne `PANELDECK_*`-Variablen eines Paneldeck, das dieses gestartet hat, werden nie weitergereicht.
+
+## Tastatur
+- **Kitty-Tastaturprotokoll:** Programme, die es einschalten (z. B. Claude Code), bekommen eindeutige Tasten – Umschalt+Enter, Strg+Rück, Esc und Alt-Kombinationen kommen als `CSI u`-Sequenzen an. Flags, die ein abgestürztes Programm stehen ließ, werden am nächsten Shell-Prompt zurückgesetzt.
+- **win32-input-mode** unter ConPTY: PowerShell und cmd erhalten Strg+Leertaste, Strg+Enter, Strg+/, Strg+Umschalt+Buchstabe, Esc und den Ziffernblock als echte Tastenereignisse; Strg+3 … Strg+0 kommen im Terminal an.
+- **Strg+Rück** sendet `0x08` wie Windows Terminal (PowerShell löscht das vorige Wort; in bash löscht es ein Zeichen). Alt+Ziffer und Alt+Satzzeichen (z. B. Alt+. in bash) funktionieren; Alt-Kürzel, die Paneldeck selbst belegt, schicken keine Zeichen ins Terminal.
+- *Einstellungen → Darstellung → Umschalt+Enter = neue Zeile in PowerShell* (standardmäßig aus): PSReadLine fügt eine neue Zeile ein, statt den Befehl auszuführen. Programme in PowerShell, die das kitty-Tastaturprotokoll nicht nutzen, bekommen dann ein normales Enter.
+- **Broadcast** kodiert Tasten für jedes Zielterminal einzeln.
+
+## Links, Zwischenablage und Einfügen
+- **Links** im Terminal öffnen sich nur mit **Strg+Klick**. Programme können Links auch selbst setzen (**OSC 8**, der sichtbare Text kann vom Ziel abweichen); der Tooltip zeigt das echte Ziel und den Rechner. Für diese Links gilt:
+  - `http`/`https`-Links mit schlichtem Rechnernamen öffnen direkt; jeder andere Link – andere Schemata, ein Benutzername in der Adresse (`user@host`), Rechnernamen mit Nicht-ASCII-Zeichen – fragt erst mit *Link öffnen?* und dem ganzen Ziel nach.
+  - Nie geöffnet, auch nicht nach Rückfrage: überlange oder getarnte Ziele (Steuer-, Bidi- oder unsichtbare Zeichen, auch prozent-kodiert), Skript-Schemata, missbrauchte Windows-Protokolle (auch die Office-Handler), `file:`-Links auf anderes als einen lokalen Laufwerkspfad und alternative Datenströme.
+  - Netzwerk- und Gerätepfade wie `\\.\GLOBALROOT\…` oder `\??\UNC\…` gelten nie als lokal – weder bei Links noch beim Arbeitsordner, den die Shell meldet (OSC 7, OSC 9;9).
+  - Ausführbare Dateien (auch z. B. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc` und Namen mit Punkten oder Leerzeichen am Ende) werden nie gestartet; der Explorer zeigt sie nur markiert in ihrem Ordner.
+- **Kopieren aus Programmen (OSC 52):** Programme können Text in die Windows-Zwischenablage legen – z. B. Claude Code in einer WSL- oder SSH-Sitzung; ein kurzer Hinweis nennt die Sitzung. *Einstellungen → Darstellung → Programme dürfen in die Zwischenablage kopieren (OSC 52)* ist standardmäßig an. Es geht nur in eine Richtung (Programme können die Zwischenablage nie lesen), nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB und höchstens alle 0,3 s, und ein leerer Text leert die Zwischenablage nie. Hinweis: Ein Agent mit Zugriff *Steuern* kann die fokussierte Sitzung ebenfalls etwas kopieren lassen.
+- **Einfügen:** Eingefügter Text wird wie bei Windows Terminal gefiltert (Steuerzeichen inkl. ESC und C1 werden entfernt), versteckte Enter-Sequenzen kommen also nicht durch. *Einstellungen → Darstellung → Vor dem Einfügen mehrerer Zeilen nachfragen* (standardmäßig an) fragt *Mehrere Zeilen einfügen?*, wenn das Programm kein Bracketed Paste nutzt – sonst könnte die Shell jede eingefügte Zeile sofort als Befehl ausführen. *Einfügen* wird nach einer kurzen Wartezeit frei.
+
+## Benachrichtigungen, Glocke und Fortschritt
+Unter *Einstellungen → Benachrichtigungen*:
+- **Benachrichtigungen von Programmen** (OSC 9, OSC 777; standardmäßig an): Ein Programm kann eine Benachrichtigung schicken; sie erreicht dich nur bei Sitzungen, die du gerade nicht ansiehst, auf den üblichen Wegen (Toast, blinkende Taskleiste) und höchstens einige pro Minute.
+- **Glocke:** Die Glocke (BEL) einer Sitzung, die du gerade nicht ansiehst, markiert die Sitzung immer in der Seitenleiste; **Toast bei Glocke** (standardmäßig aus) zeigt zusätzlich einen Toast bzw. Hinweis.
+- **Fortschritt anzeigen** (standardmäßig an): Fortschritt, den Programme melden (OSC 9;4 – normal, Fehler, angehalten oder unbestimmt), erscheint in der Seitenleiste und am Taskleistenknopf.
+- Benachrichtigungstexte und Sitzungsnamen in Toasts werden bereinigt (Steuer-, Bidi- und unsichtbare Zeichen entfernt, Länge begrenzt); Toasts nennen immer Paneldeck und die Sitzung. Fenstertitel, die Programme setzen, werden genauso bereinigt.
 
 ## Mausrad
 - **Normale Shell:** Das Mausrad scrollt den Verlauf von Paneldeck.
@@ -23,26 +50,44 @@ Der **Terminal Hub** ist der Hauptbereich von Paneldeck: viele Terminal-Sitzunge
 - Bei einem frischen Start öffnet Paneldeck **kein Terminal**: Der leere Terminal Hub zeigt einen kurzen Hinweis mit *Neues Terminal* (im Claude-Modus auch *Neue Claude-Sitzung …*) und den Tastenkürzeln. Sitzungen des letzten Laufs werden wie bisher wiederhergestellt. Siehe [Mehrere Fenster](windows.md#der-leere-terminal-hub).
 - Von außen: das Explorer-Kontextmenü (*In Paneldeck öffnen* / *Mit Claude in Paneldeck starten*), `paneldeck.exe --open <ordner>` oder ein auf `paneldeck.exe` gezogener Ordner (siehe [Kommandozeile](command-line.md) und [Windows-Integration](windows-integration.md)).
 
+### WSL-Startordner
+Eine WSL-Sitzung kann in einem Ordner **innerhalb von WSL** starten:
+- Das Ordnerfeld von *Neue Sitzung* hat einen Umschalter **Windows-Pfad / WSL-Pfad**. Mit *WSL-Pfad* wählst du eine der installierten Distributionen (die Standard-Distribution zuerst; Vorlagen und Docker Desktop sind ausgeblendet) und gibst einen Linux-Pfad ein – absolut oder `~` – mit Vervollständigung und Prüfung, ob der Ordner existiert. *Ordner wählen* öffnet im Home-Ordner der Distribution, die Auswahl wird zum Linux-Pfad. *Zuletzt benutzte WSL-Ordner* werden je Distribution gemerkt.
+- Standardordner von Baumordnern und Projekten mit WSL-Shell können ebenfalls Linux-Pfade sein.
+- *In Paneldeck öffnen* im Explorer auf einem `\\wsl.localhost\<Distro>\…`-Ordner öffnet eine WSL-Sitzung dieser Distribution im passenden Linux-Pfad.
+- Eine WSL-Sitzung ohne Startordner startet im Linux-Home (`~`). Eine wiederhergestellte WSL-Sitzung, deren gespeicherter Ordner nicht verwendbar ist, startet mit Hinweis in `~`. Ordner mit `"` oder `\` werden abgelehnt.
+
 ## Organisation
 - **Projekte** mit eigenem Layout, dazu **Ordner**, Gruppen, Farben, Tags, Filter (`Filtern: Name oder #Tag`) und Notizen. Die Seitenleiste zeigt die Sitzungen als Liste oder Ordnerbaum; Drag & Drop verschiebt Sitzungen und Ordner.
 - Ordner können einen Arbeitsordner und **Vorgaben für neue Sitzungen** (Profil) haben; *Als Vorlage speichern …* legt eine Gruppe von Sitzungen als **Sitzungs-Vorlage** ab.
 - **Bereiche:** rechts teilen (**Strg+Umschalt+D**) oder darunter (**Strg+Umschalt+E**), per Drag & Drop umordnen, einen Bereich minimieren (**Strg+Umschalt+W**) oder eine Sitzung in ein eigenes Fenster abdocken (siehe [Bereiche und Minimieren](#bereiche-und-minimieren)).
 - **Mehrere Fenster:** **Strg+Klick** auf den Reiter *Terminal Hub* öffnet ein weiteres Fenster mit eigenen Sitzungen (siehe [Mehrere Fenster](windows.md)).
+- **Farben** von Sitzungen, Ordnern, Projekten und Profilen kommen aus der bearbeitbaren Farbpalette (*Einstellungen → Farben*, siehe [Sprache und Darstellung](#sprache-und-darstellung)).
 - Beim Neustart stellt Paneldeck Sitzungen, Projekte und Layout wieder her; der Verlauf jedes Terminals wird im Datenordner gespeichert (`scrollback/`).
+- **Sitzungen merken** (*Einstellungen → Allgemein*, standardmäßig an): Ist es aus, ist jeder Start frisch – keine Terminals, Chats, Projekte oder Ordner aus dem letzten Lauf, Chatverläufe werden beim Beenden gelöscht. Einstellungen, Todo-Liste und Tickets bleiben. Das Ausschalten fragt nach und sichert den aktuellen Stand als `state.json.bak-<Datum>` (nur die neueste bleibt). Ein Neustart nach einem Update stellt die Sitzungen trotzdem einmal wieder her.
 
 ## Bereiche und Minimieren
-- **Knöpfe im Kopf eines Bereichs** (von links nach rechts): *Ticket verknüpfen …* (nur wenn Ticket-Verknüpfungen verfügbar sind), *Rechts teilen*, *Darunter teilen*, *In eigenem Fenster öffnen*, **Bereich minimieren** und *Sitzung schließen* (×). Ein abgedocktes Fenster hat *Wieder andocken* (×, **Strg+Umschalt+W**) und *Minimieren*.
+- **Knöpfe im Kopf eines Bereichs** (von links nach rechts): *Ticket verknüpfen …* (nur wenn Ticket-Verknüpfungen verfügbar sind), *Rechts teilen*, *Darunter teilen*, *In eigenem Fenster öffnen*, **Neu laden** (siehe [Neu laden und Einstellungen der Sitzung](#neu-laden-und-einstellungen-der-sitzung)), **Bereich minimieren** und *Sitzung schließen* (×). Ein abgedocktes Fenster hat *Wieder andocken* (×, **Strg+Umschalt+W**) und *Minimieren*.
 - **Minimieren** nimmt den Bereich aus dem geteilten Layout; sein Nachbar übernimmt den Platz, und das Terminal oder der Chat **läuft weiter**. Das geht auch mit dem letzten Bereich – der Terminal Hub zeigt dann „Alle Bereiche sind minimiert“. Minimieren gibt es im Kopf des Bereichs, in den Kontextmenüs des Bereichs und der Sitzung in der Seitenleiste, in der Befehls-Palette (*Bereich minimieren*) und auf **Strg+Umschalt+W**. In einem abgedockten Fenster schließt *Minimieren* das Fenster, ohne die Sitzung wieder anzudocken.
 - **Seitenleiste:** Ein **abgeblendeter** Name heißt, die Sitzung steht gerade nicht im Layout; eine kleine **Unterstrich-Markierung** heißt, sie ist minimiert. Der Tooltip sagt, was ein Klick tut.
-- **Eine Sitzung zurückholen** – Klick in der Seitenleiste, *Wechseln zu:* in der Palette oder das Agenten-Werkzeug `focus_session`:
+- **Eine Sitzung zurückholen** – Klick in der Seitenleiste oder *Wechseln zu:* in der Palette:
   - schon im Layout → sie bekommt nur den Fokus;
   - leerer Terminal Hub → sie wird der einzige Bereich;
-  - minimiert, und ihre alten Nachbarn sind noch da → sie kommt **genau an ihren alten Platz** zurück (gleiche Richtung, Seite und Breite; wurden die Nachbarn inzwischen minimiert oder geschlossen, folgt Paneldeck ihnen zu dem, was an ihre Stelle gerückt ist);
-  - minimiert, aber die Nachbarn sind weg → der fokussierte Bereich wird geteilt, die Sitzung rechts;
+  - **minimiert → sie öffnet sich allein:** Sie ersetzt das Layout des Fensters bzw. Projekts, die bisher sichtbaren Bereiche werden zu minimierten Sitzungen und laufen weiter. Ein kurzer Hinweis sagt, wie viele Bereiche minimiert wurden. Der alte Platz in der Teilung wird nicht gemerkt;
   - nur weggewechselt (nicht minimiert) → sie ersetzt den fokussierten Bereich.
-- **Strg+Tab** überspringt minimierte Sitzungen. Minimierte Sitzungen bleiben auch nach einem Neustart minimiert.
-- Bereiche behalten eine **Mindestgröße** von etwa 120 × 70 px, auch in tiefen Teilungen und beim Ziehen einer Trennlinie.
-- Beim Schließen eines Fensters nennt die Frage auch die Sitzungen, die beendet werden, obwohl sie nicht im Layout stehen (minimiert oder weggewechselt).
+- **Strg+Tab** / **Strg+Umschalt+Tab** erreichen auch minimierte Sitzungen: Eine minimierte Sitzung erscheint im fokussierten Bereich, der ersetzte Bereich wird minimiert.
+- Agenten bestimmen mit `placement`, wo eine Sitzung erscheint (siehe [Agenten-Schnittstelle](agent-interface.md#platzierung-und-sichtbarkeit)).
+- Minimierte Sitzungen bleiben auch nach einem Neustart minimiert. Bereiche behalten eine **Mindestgröße** von etwa 120 × 70 px, auch in tiefen Teilungen und beim Ziehen einer Trennlinie.
+
+## Neu laden und Einstellungen der Sitzung
+- **Neu laden** (Knopf im Kopf des Bereichs – auch in abgedockten Fenstern –, *Neu laden …* im Kontextmenü der Seitenleiste, *Sitzung neu laden …* in der Palette, optionales Tastenkürzel *Sitzung neu laden* ohne Vorbelegung) startet die Shell der Sitzung neu bzw. Claude Code nach den Optionen der Sitzung. Läuft ein Programm, fragt es vorher (*Sitzung neu laden?*); hat die Sitzung Hintergrundprogramme, siehe [Sitzungen schließen](#sitzungen-schließen-und-hintergrundprogramme).
+- **Einstellungen der Sitzung** (*Einstellungen …* im Kontextmenü der Seitenleiste, *Einstellungen der Sitzung …* in der Palette) ändern eine bestehende Sitzung: Profil, Shell, Startordner, Name, Farbe, Baum-Ordner, Tags, Notizen, Claude an/aus und die Claude-Startoptionen (siehe [Claude Code](claude-code.md#startoptionen)). Änderungen, die erst beim nächsten Start wirken, bieten *Jetzt neu laden?* an.
+
+## Sitzungen schließen und Hintergrundprogramme
+- **Schließen** einer Sitzung mit dem × im Kopf des Bereichs, über die Kontextmenüs oder per **Mittelklick** auf die Sitzung in der Seitenleiste (mit derselben Rückfrage wie der Schließen-Knopf, wenn *Einstellungen → Allgemein → Schließen bestätigen* an ist).
+- **Alle Sitzungen auf einmal schließen:** ein Papierkorb an Ordnern in der Seitenleiste (erscheint beim Überfahren; inklusive Unterordnern, minimierten Sitzungen und Chats), einer rechts neben dem Filterfeld (alle Sitzungen aller Projekte und Fenster), *Alle Sitzungen des Projekts schließen …* im Projekt-Kontextmenü, die Befehls-Palette und ein optionales Tastenkürzel *Alle Sitzungen schließen* (ohne Vorbelegung). Die Rückfrage listet auf, was beendet wird, und gibt *Alle schließen* nach 3 Sekunden frei. Git-Worktrees und Branches bleiben erhalten.
+- **Hintergrundprogramme (Job Objects):** Die Shell jedes Terminals läuft in einem eigenen Windows-Job-Object; Programme, die aus einer Sitzung gestartet werden, gehören dazu, auch losgelöst gestartet (`Start-Process`, `cmd /c start`, doppelter Fork). Das gilt auch für langlebige Programme wie `code .`, einen Browser oder `wt`. Laufen solche Programme noch, wenn du eine Sitzung schließt oder neu lädst, ein Fenster schließt oder Paneldeck beendest, listet die Rückfrage sie auf – Name, PID und Fenstertitel, Programme mit offenem Fenster markiert – und bietet **Weiterlaufen lassen** oder **Alle beenden** (beim Neu laden: *Neu laden, weiterlaufen lassen* / *Neu laden, alle beenden*; bei einem Fenster: *Schließen, weiterlaufen lassen* / *Schließen, alle beenden*). **„Alle beenden“ beendet sie sofort, ohne zu speichern** – Programme mit offenem Fenster besser vorher selbst speichern und schließen. Der Knopf wird nach 3 Sekunden frei, auch beim Beenden. Programme in einer Sitzung können ihren Job nicht verlassen (`CREATE_BREAKAWAY_FROM_JOB` schlägt fehl); das ist gewollt.
+- **Agenten-Kette:** Sitzungen, die Agenten angelegt haben, sind markiert; ihr Kontextmenü hat *Agenten-Kette zurücksetzen*, der Tooltip nennt die Kette (siehe [Agenten-Schnittstelle](agent-interface.md#sicherheit)).
 
 ## Komfort
 - **Befehls-Palette** (**Strg+Umschalt+P**): alle Befehle, Sitzungen und – im Expertenmodus – Tickets.
@@ -50,7 +95,7 @@ Der **Terminal Hub** ist der Hauptbereich von Paneldeck: viele Terminal-Sitzunge
 - **Prompt-Bibliothek**, **Prompt-Composer** (**Strg+Umschalt+M**) und eine **Warteschlange** je Sitzung (**Strg+Umschalt+Q**).
 - **Broadcast** (**Strg+Umschalt+B**): in alle sichtbaren Bereiche gleichzeitig tippen.
 - **Dateibaum** (**Strg+Umschalt+O**), **Änderungen** mit Diff, Stage und Commit (**Strg+Umschalt+H**), Git-Info im Kopf.
-- Drag & Drop von Dateien, Bilder aus der Zwischenablage (14 Tage im Datenordner), klickbare Links (öffnen sich nur auf Klick).
+- Drag & Drop von Dateien, Bilder aus der Zwischenablage (14 Tage im Datenordner), klickbare Links (Strg+Klick, siehe [Links, Zwischenablage und Einfügen](#links-zwischenablage-und-einfügen)).
 - Tray-Symbol, Transparenz, Themes (JSON, siehe [Datenordner](data-and-backups.md)), weiche Animationen.
 
 ## Tastenkürzel
@@ -73,12 +118,14 @@ Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 | `Strg+Umschalt+Q` | Warteschlange der Sitzung |
 | `Strg+Umschalt+M` | Prompt-Composer |
 | `Strg+Umschalt+Pfeil hoch` / `Strg+Umschalt+Pfeil runter` | Zum vorherigen / nächsten Befehl springen |
-| `Strg+Tab` / `Strg+Umschalt+Tab` | Nächste / vorherige Sitzung |
+| `Strg+Tab` / `Strg+Umschalt+Tab` | Nächste / vorherige Sitzung (auch minimierte) |
 | `Strg+1` / `Strg+2` (auch `Alt+Umschalt+1` / `Alt+Umschalt+2`) | Reiter *Terminal Hub* / *Todo-Liste* |
 | `Strg`+Klick auf einen Reiter der Fensterleiste | Reiter in einem neuen Fenster öffnen |
+| (keins) | *Sitzung neu laden*, *Alle Sitzungen schließen* – Taste unter *Einstellungen → Tastenkürzel* zuweisen |
 
 Die Kürzel der Todo-Liste stehen unter [Todo-Liste und Tickets](todo-and-tickets.md#tastenkürzel).
 
 ## Sprache und Darstellung
 - Englisch oder Deutsch: *Einstellungen → Allgemein → Sprache* (Standard: Englisch). `--lang en|de` wechselt die Sprache nur für einen Start (siehe [Kommandozeile](command-line.md#--lang-ende)).
-- Themes, Schriftgröße und Transparenz: *Einstellungen → Darstellung*; eigene Themes sind JSON-Dateien in `themes/` im Datenordner (ein Beispiel liegt bei).
+- Themes, Terminalschrift, Schriftgröße und Transparenz: *Einstellungen → Darstellung*; eigene Themes sind JSON-Dateien in `themes/` im Datenordner (ein Beispiel liegt bei).
+- **Farbpalette** (*Einstellungen → Farben*): standardmäßig eine gemeinsame Palette für den Terminal Hub (Farben von Sitzungen, Ordnern, Projekten und Profilen), die Tags der Todo-Liste und den Expertenmodus (Projekte, Typen, Status, Auswahlwerte, Diagramme) – oder mit *Eigene Palette je Bereich* eine je Bereich (beim Umschalten bleiben beide erhalten). Farben hinzufügen (Farbwähler oder Hex), optional benennen (im Tooltip, z. B. „Cooles Blau (#2288FF)“), per Ziehen sortieren und löschen; nach dem Löschen gibt es einige Sekunden lang *Rückgängig*. *Vorgaben wiederherstellen* hängt gelöschte Vorgabefarben wieder an. Die eigene Palette eines Bereichs beginnt mit dessen bisherigen Farben; *Aus der gemeinsamen Palette kopieren* ersetzt sie durch eine Kopie der gemeinsamen (rückgängig machbar). Jede Farbauswahl bietet zusätzlich *Eigene Farbe …* für eine einmalige Farbe, die nicht in die Palette aufgenommen wird. Vorhandene Elemente behalten ihre Farbe.

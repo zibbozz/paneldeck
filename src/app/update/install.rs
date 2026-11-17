@@ -8,6 +8,25 @@ use std::path::{Path, PathBuf};
 /// Einzelinstanz-Prüfung macht (sonst würde sie sich an die noch laufende alte Instanz übergeben und beenden).
 pub const WAIT_PID_ENV: &str = "PANELDECK_UPDATE_WAIT_PID";
 
+/// Umgebungsvariable für den Neustart nach einem Update mit „Sitzungen merken“ aus (#157): `1` = die neue Instanz stellt die
+/// Sitzungen **einmal** wieder her (ein Update soll laufende Arbeit nicht beenden). Gilt nur zusammen mit `WAIT_PID_ENV`
+/// (also nur für einen echten Update-Neustart) und wird beim Start sofort entfernt – sie bleibt nie hängen: Weder Terminals
+/// noch ein späterer Start erben sie, ein Absturz danach führt beim nächsten Start zum gewohnten frischen Start.
+pub const KEEP_SESSIONS_ENV: &str = "PANELDECK_UPDATE_KEEP_SESSIONS";
+
+/// Ergebnis von `wait_for_previous_instance`: diese Instanz ist ein Update-Neustart, der die Sitzungen einmal wiederherstellt.
+static RESTORE_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stellt dieser Start die Sitzungen einmal wieder her, obwohl „Sitzungen merken“ aus ist (Update-Neustart, #157)?
+pub fn restore_once() -> bool {
+    RESTORE_ONCE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Gilt die Einmal-Wiederherstellung? Nur mit beiden Variablen (Update-Neustart) und genau dem Wert `1`.
+fn keep_requested(wait_pid: Option<&std::ffi::OsStr>, keep: Option<&std::ffi::OsStr>) -> bool {
+    wait_pid.is_some() && keep.and_then(|k| k.to_str()) == Some("1")
+}
+
 /// Pfad ohne `\\?\`-Präfix, mit `\`, ohne abschließenden Trenner, klein geschrieben (Windows-Pfade sind nicht case-sensitiv).
 pub fn norm_dir(p: &str) -> String {
     let s = p.trim().trim_matches('"').replace('/', "\\");
@@ -59,36 +78,97 @@ mod reg {
     }
 }
 
-/// Neue Programmdatei an den Platz der laufenden setzen: `<exe>.new` schreiben, die laufende in `<exe>.old` umbenennen (Windows
-/// erlaubt das bei laufenden Programmen), die neue umbenennen. Schlägt ein Schritt fehl, wird zurückgerollt. `<exe>.old` löscht erst die neue
-/// Version, nachdem sie ihren ersten Frame gezeichnet hat (`remove_old_exe`).
-pub fn swap_exe(exe: &Path, new_bytes: &[u8]) -> Result<(), String> {
-    let with = |ext: &str| {
-        let mut s = exe.as_os_str().to_owned();
-        s.push(ext);
-        PathBuf::from(s)
-    };
-    let (new, old) = (with(".new"), with(".old"));
-    let _ = std::fs::remove_file(&new);
-    std::fs::write(&new, new_bytes).map_err(|e| format!("{}: {e}", new.display()))?;
-    if old.exists() {
-        if let Err(e) = std::fs::remove_file(&old) {
-            let _ = std::fs::remove_file(&new);
-            return Err(format!("{}: {e}", old.display()));
+/// `<p><ext>`
+fn suffixed(p: &Path, ext: &str) -> PathBuf {
+    let mut s = p.as_os_str().to_owned();
+    s.push(ext);
+    PathBuf::from(s)
+}
+
+/// `<p>.old` freimachen: löschen, und wenn das nicht geht (die alte Datei läuft noch, z. B. eine OpenConsole.exe einer
+/// Sitzung), unter einem freien Namen `<p>.old.<n>` beiseitelegen. `remove_old_exe` räumt später alle `.old*` auf.
+fn clear_old(p: &Path) -> Result<(), String> {
+    let old = suffixed(p, ".old");
+    if !old.exists() || std::fs::remove_file(&old).is_ok() {
+        return Ok(());
+    }
+    for n in 1..1000 {
+        let alt = suffixed(p, &format!(".old.{n}"));
+        if !alt.exists() {
+            return std::fs::rename(&old, &alt).map_err(|e| format!("{}: {e}", old.display()));
         }
     }
-    if let Err(e) = std::fs::rename(exe, &old) {
-        let _ = std::fs::remove_file(&new);
-        return Err(format!("{}: {e}", exe.display()));
+    Err(format!("{}: {}", old.display(), crate::state::t("kein freier Name", "no free name")))
+}
+
+/// Mehrere Dateien gemeinsam ersetzen (alles oder nichts): erst alle `<p>.new` schreiben, dann je Datei die bisherige in
+/// `<p>.old` umbenennen (Windows erlaubt das bei laufenden Programmen und geladenen DLLs) und die neue an ihren Platz.
+/// Schlägt ein Schritt fehl, werden alle schon getauschten Dateien zurückgerollt. Fehlt eine Datei noch (portable
+/// Installation vor 2.3.0 ohne ConPTY), wird sie neu angelegt. `<p>.old` löscht erst die neue Version, nachdem sie ihren
+/// ersten Frame gezeichnet hat (`remove_old_exe`).
+pub fn swap_files(items: &[(PathBuf, Vec<u8>)]) -> Result<(), String> {
+    let news: Vec<PathBuf> = items.iter().map(|(p, _)| suffixed(p, ".new")).collect();
+    let drop_news = || {
+        for n in &news {
+            let _ = std::fs::remove_file(n);
+        }
+    };
+    for ((_, bytes), new) in items.iter().zip(&news) {
+        let _ = std::fs::remove_file(new);
+        if let Err(e) = std::fs::write(new, bytes) {
+            drop_news();
+            return Err(format!("{}: {e}", new.display()));
+        }
     }
-    if let Err(e) = std::fs::rename(&new, exe) {
-        // Zurückrollen: die alte Datei wieder an ihren Platz
-        let _ = std::fs::rename(&old, exe);
-        let _ = std::fs::remove_file(&new);
-        return Err(format!("{}: {e}", exe.display()));
+    for (p, _) in items {
+        if let Err(e) = clear_old(p) {
+            drop_news();
+            return Err(e);
+        }
+    }
+    // (Pfad, hatte eine alte Fassung) der schon getauschten Dateien – für das Zurückrollen.
+    let mut done: Vec<(&Path, bool)> = Vec::new();
+    let rollback = |done: &[(&Path, bool)]| {
+        for (p, had_old) in done.iter().rev() {
+            let _ = std::fs::remove_file(p);
+            if *had_old {
+                let _ = std::fs::rename(suffixed(p, ".old"), p);
+            }
+        }
+    };
+    for ((p, _), new) in items.iter().zip(&news) {
+        let had_old = p.exists();
+        if had_old {
+            if let Err(e) = std::fs::rename(p, suffixed(p, ".old")) {
+                rollback(&done);
+                drop_news();
+                return Err(format!("{}: {e}", p.display()));
+            }
+        }
+        if let Err(e) = std::fs::rename(new, p) {
+            if had_old {
+                let _ = std::fs::rename(suffixed(p, ".old"), p);
+            }
+            rollback(&done);
+            drop_news();
+            return Err(format!("{}: {e}", p.display()));
+        }
+        done.push((p.as_path(), had_old));
     }
     Ok(())
 }
+
+/// Neue Programmdatei an den Platz der laufenden setzen (`swap_files` mit einer Datei); die bisherige muss es geben.
+pub fn swap_exe(exe: &Path, new_bytes: &[u8]) -> Result<(), String> {
+    if !exe.is_file() {
+        return Err(format!("{}: {}", exe.display(), crate::state::t("nicht gefunden", "not found")));
+    }
+    swap_files(&[(exe.to_path_buf(), new_bytes.to_vec())])
+}
+
+/// Neben `paneldeck.exe` mitgelieferte Programmdateien (ConPTY, #183): das portable Update ersetzt sie gemeinsam mit
+/// (`swap_files`), alte Fassungen bleiben als `<name>.old` liegen, bis die neue Version gestartet ist.
+pub const COMPANIONS: [&str; 2] = [crate::conpty::DLL, crate::conpty::HOST_EXE];
 
 /// Kommandozeilen-Teil `/D=<ordner>` für NSIS: muss der letzte Parameter sein und darf nicht in Anführungszeichen stehen
 /// (auch nicht bei Leerzeichen). Zeichen, die NSIS bzw. die Kommandozeile verwirren, werden abgelehnt.
@@ -169,21 +249,43 @@ pub fn wait_setup(child: &mut std::process::Child, timeout: std::time::Duration)
 /// Wiederherstellung von Hand, falls eine neue Version gar nicht startet: Paneldeck beenden, `paneldeck.exe` löschen (oder
 /// umbenennen) und `paneldeck.exe.old` wieder in `paneldeck.exe` umbenennen.
 pub fn remove_old_exe(exe: &Path) {
-    let mut old = exe.as_os_str().to_owned();
-    old.push(".old");
-    let _ = std::fs::remove_file(PathBuf::from(old));
+    // `<name>.old` und beiseitegelegte `<name>.old.<n>` der .exe und der mitgelieferten Dateien; was noch läuft (eine
+    // OpenConsole.exe einer alten Sitzung), bleibt bis zum nächsten Start liegen.
+    let Some(dir) = exe.parent() else { return };
+    let exe_name = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let names: Vec<String> = std::iter::once(exe_name).chain(COMPANIONS.iter().map(|s| s.to_string())).collect();
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for f in rd.flatten() {
+        let file = f.file_name().to_string_lossy().into_owned();
+        if names.iter().any(|n| is_old_of(&file, n)) {
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
+}
+
+/// `file` ist `<name>.old` oder `<name>.old.<zahl>` (Groß-/Kleinschreibung egal wie unter Windows).
+fn is_old_of(file: &str, name: &str) -> bool {
+    let (f, n) = (file.to_ascii_lowercase(), format!("{}.old", name.to_ascii_lowercase()));
+    match f.strip_prefix(&n) {
+        Some("") => true,
+        Some(rest) => rest.strip_prefix('.').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())),
+        None => false,
+    }
 }
 
 /// Startet `exe` neu mit denselben Instanz-Parametern (`--data-dir`/`--profile` aus `paths::instance_args`, als einzelne
 /// Argumente). Nie `--open`, `--claude` oder `mcp`: der Neustart soll nur dieselbe Instanz öffnen. Die neue Instanz wartet
-/// über `WAIT_PID_ENV`, bis dieser Prozess beendet ist.
-pub fn spawn_restart(exe: &Path) -> Result<(), String> {
-    std::process::Command::new(exe)
-        .args(restart_args(crate::paths::instance_args()))
-        .env(WAIT_PID_ENV, std::process::id().to_string())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("{}: {e}", exe.display()))
+/// über `WAIT_PID_ENV`, bis dieser Prozess beendet ist. `keep_sessions`: die neue Instanz stellt die Sitzungen einmal wieder
+/// her, obwohl „Sitzungen merken“ aus ist (`KEEP_SESSIONS_ENV`, #157).
+pub fn spawn_restart(exe: &Path, keep_sessions: bool) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(restart_args(crate::paths::instance_args())).env(WAIT_PID_ENV, std::process::id().to_string());
+    if keep_sessions {
+        cmd.env(KEEP_SESSIONS_ENV, "1");
+    } else {
+        cmd.env_remove(KEEP_SESSIONS_ENV);
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
 /// Argumente für den Neustart: nur Instanz-Parameter, Start-Aktionen (`--open`, `--claude`, `mcp`) fallen sicherheitshalber weg.
@@ -204,14 +306,21 @@ fn restart_args(args: Vec<String>) -> Vec<String> {
 
 /// Für `main.rs`, nach den `--hook`/`--uninstall-hooks`/`--help`/`mcp`-Zweigen und vor der Einzelinstanz-Weiterleitung: wurde
 /// diese Instanz von einem Update neu gestartet, warten, bis die alte beendet ist (höchstens 30 s) – sonst übergäbe sie sich an
-/// die noch laufende alte und beendete sich. Danach die Variable entfernen (Terminals sollen sie nicht erben).
+/// die noch laufende alte und beendete sich. Merkt sich `KEEP_SESSIONS_ENV` ([`restore_once`]). Danach beide Variablen
+/// entfernen (Terminals und spätere Neustarts sollen sie nicht erben).
 pub fn wait_for_previous_instance() {
-    let Some(v) = std::env::var_os(WAIT_PID_ENV) else { return };
+    let (wait, keep) = (std::env::var_os(WAIT_PID_ENV), std::env::var_os(KEEP_SESSIONS_ENV));
+    RESTORE_ONCE.store(keep_requested(wait.as_deref(), keep.as_deref()), std::sync::atomic::Ordering::SeqCst);
+    if keep.is_some() {
+        // SAFETY: wird früh in `main` aufgerufen, bevor weitere Fäden laufen.
+        unsafe { std::env::remove_var(KEEP_SESSIONS_ENV) };
+    }
+    let Some(v) = wait else { return };
     let pid = v.to_str().and_then(|s| s.parse::<u32>().ok()).filter(|p| *p != std::process::id());
     if let Some(pid) = pid {
         wait_pid(pid);
     }
-    // SAFETY: wird früh in `main` aufgerufen, bevor weitere Fäden laufen.
+    // SAFETY: wie oben.
     unsafe { std::env::remove_var(WAIT_PID_ENV) };
 }
 
@@ -365,16 +474,134 @@ mod tests {
         remove_old_exe(&exe);
         assert!(!d.join("paneldeck.exe.old").exists() && exe.exists());
         remove_old_exe(&exe); // ohne .old: nichts
+        // Mitgelieferte Dateien: `.old` weg, die aktuellen bleiben.
+        for n in COMPANIONS {
+            std::fs::write(d.join(n), b"MZ new").unwrap();
+            std::fs::write(d.join(format!("{n}.old")), b"MZ old").unwrap();
+        }
+        remove_old_exe(&exe);
+        for n in COMPANIONS {
+            assert!(d.join(n).exists() && !d.join(format!("{n}.old")).exists(), "{n}");
+        }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn swap_files_creates_swaps_and_rolls_back() {
+        let d = tmp("swapfiles");
+        let (a, b) = (d.join("conpty.dll"), d.join("OpenConsole.exe"));
+        // Noch nicht vorhanden (portable Installation vor 2.3.0): neu angelegt, kein .old.
+        swap_files(&[(a.clone(), b"MZ a1".to_vec()), (b.clone(), b"MZ b1".to_vec())]).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), b"MZ a1");
+        assert_eq!(std::fs::read(&b).unwrap(), b"MZ b1");
+        assert!(!d.join("conpty.dll.old").exists() && !d.join("conpty.dll.new").exists());
+        // Vorhanden: beide getauscht, alte als .old.
+        swap_files(&[(a.clone(), b"MZ a2".to_vec()), (b.clone(), b"MZ b2".to_vec())]).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), b"MZ a2");
+        assert_eq!(std::fs::read(d.join("OpenConsole.exe.old")).unwrap(), b"MZ b1");
+        // Zweite Datei scheitert (offen ohne FILE_SHARE_DELETE: nicht umbenennbar): die erste wird zurückgerollt.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let _hold = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&b).unwrap();
+            assert!(swap_files(&[(a.clone(), b"MZ a3".to_vec()), (b.clone(), b"MZ b3".to_vec())]).is_err());
+            assert_eq!(std::fs::read(&a).unwrap(), b"MZ a2", "zurückgerollt");
+            assert!(!d.join("conpty.dll.new").exists() && !d.join("OpenConsole.exe.new").exists());
+        }
+        assert_eq!(std::fs::read(&b).unwrap(), b"MZ b2");
+        assert!(swap_files(&[(d.join("missing").join("conpty.dll"), b"x".to_vec())]).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Eine noch laufende alte Fassung (`.old` ist ein laufendes Programm: nicht löschbar, aber umbenennbar) wird als
+    /// `.old.<n>` beiseitegelegt; `remove_old_exe` räumt alle `.old*` auf, sobald sie nicht mehr laufen.
+    #[cfg(windows)]
+    #[test]
+    fn busy_old_is_moved_aside_and_cleaned_up() {
+        let d = tmp("busyold");
+        let f = d.join("OpenConsole.exe");
+        std::fs::write(&f, b"MZ cur").unwrap();
+        std::fs::write(d.join("OpenConsole.exe.old.1"), b"MZ older").unwrap();
+        let old = d.join("OpenConsole.exe.old");
+        let sys = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        std::fs::copy(sys.join("System32").join("cmd.exe"), &old).unwrap();
+        let mut running = std::process::Command::new(&old)
+            .args(["/c", "ping", "-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(std::fs::remove_file(&old).is_err(), "laufendes Programm lässt sich nicht löschen");
+        let res = swap_files(&[(f.clone(), b"MZ new".to_vec())]);
+        let aside = d.join("OpenConsole.exe.old.2");
+        let aside_ok = aside.is_file();
+        let _ = running.kill();
+        let _ = running.wait();
+        res.unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"MZ new");
+        assert_eq!(std::fs::read(d.join("OpenConsole.exe.old")).unwrap(), b"MZ cur");
+        assert!(aside_ok, "unter freiem Namen beiseitegelegt (.old.1 war belegt)");
+        // Aufräumen: alle .old* der .exe und der mitgelieferten Dateien, anderes bleibt.
+        std::fs::write(d.join("OpenConsole.exe.older"), b"keep").unwrap();
+        std::fs::write(d.join("paneldeck.exe"), b"MZ").unwrap();
+        std::fs::write(d.join("paneldeck.exe.old.3"), b"MZ").unwrap();
+        let t0 = std::time::Instant::now();
+        loop {
+            remove_old_exe(&d.join("paneldeck.exe"));
+            if !aside.exists() || t0.elapsed() > std::time::Duration::from_secs(5) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["OpenConsole.exe", "OpenConsole.exe.older", "paneldeck.exe"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn old_names() {
+        assert!(is_old_of("paneldeck.exe.old", "paneldeck.exe"));
+        assert!(is_old_of("conpty.dll.old.12", "conpty.dll"));
+        assert!(is_old_of("OPENCONSOLE.EXE.OLD.3", "OpenConsole.exe"));
+        assert!(!is_old_of("conpty.dll.old.", "conpty.dll"));
+        assert!(!is_old_of("conpty.dll.older", "conpty.dll"));
+        assert!(!is_old_of("conpty.dll", "conpty.dll"));
+        assert!(!is_old_of("x.conpty.dll.old", "conpty.dll"));
     }
 
     #[test]
     fn wait_env_is_consumed() {
         // Eigene PID: sofort zurück, Variable entfernt
-        // SAFETY: Test setzt eine nur hier gelesene Variable.
+        // SAFETY: Test setzt nur hier gelesene Variablen (einziger Test, der sie anfasst).
         unsafe { std::env::set_var(WAIT_PID_ENV, std::process::id().to_string()) };
         wait_for_previous_instance();
         assert!(std::env::var_os(WAIT_PID_ENV).is_none());
+        assert!(!restore_once());
         wait_for_previous_instance(); // ohne Variable: nichts
+        // Update-Neustart mit „Sitzungen merken“ aus: einmal wiederherstellen, beide Variablen sind danach weg (#157).
+        unsafe {
+            std::env::set_var(WAIT_PID_ENV, std::process::id().to_string());
+            std::env::set_var(KEEP_SESSIONS_ENV, "1");
+        }
+        wait_for_previous_instance();
+        assert!(restore_once());
+        assert!(std::env::var_os(KEEP_SESSIONS_ENV).is_none() && std::env::var_os(WAIT_PID_ENV).is_none(), "nichts bleibt hängen");
+        // Nur die Merk-Variable ohne Update-Neustart (z. B. von Hand gesetzt): gilt nicht, wird aber entfernt.
+        unsafe { std::env::set_var(KEEP_SESSIONS_ENV, "1") };
+        wait_for_previous_instance();
+        assert!(!restore_once());
+        assert!(std::env::var_os(KEEP_SESSIONS_ENV).is_none());
+    }
+
+    #[test]
+    fn keep_sessions_needs_an_update_restart() {
+        use std::ffi::OsStr;
+        assert!(keep_requested(Some(OsStr::new("42")), Some(OsStr::new("1"))));
+        assert!(!keep_requested(None, Some(OsStr::new("1"))), "ohne Update-Neustart nie");
+        assert!(!keep_requested(Some(OsStr::new("42")), None));
+        assert!(!keep_requested(Some(OsStr::new("42")), Some(OsStr::new("0"))));
+        assert!(!keep_requested(Some(OsStr::new("42")), Some(OsStr::new("yes"))));
     }
 }

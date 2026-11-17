@@ -49,6 +49,10 @@ const MIGRATIONS: &[&str] = &[
     crate::planning::ticket_schema::MIGRATION,
     // 7: Sprints, Zugehörigkeit der Tickets, Versionen und Meilensteine, SQL in `planning/sprints/schema.rs`
     crate::planning::sprints::schema::MIGRATION,
+    // 8: eingebaute Felder Beschreibung/Fälligkeit, Fälligkeits-Schwellen je Projekt, Fälligkeit der Todo-Karten, SQL in `planning/builtin_fields.rs`
+    crate::planning::builtin_fields::MIGRATION,
+    // 9: eingebaute Labels an jedem Typ (Issue #195), SQL in `planning/builtin_fields.rs`
+    crate::planning::builtin_fields::MIGRATION_LABELS,
 ];
 
 /// Aktuelle Schema-Version dieser Programmversion.
@@ -65,6 +69,7 @@ pub fn open_memory() -> Connection {
     for m in MIGRATIONS {
         conn.execute_batch(m).unwrap();
     }
+    conn.pragma_update(None, "user_version", MIGRATIONS.len() as u32).unwrap();
     conn
 }
 
@@ -133,6 +138,9 @@ fn open_with(data_dir: &Path, backup_dir: &Path, migrations: &[&str]) -> Result<
             tx.commit().map_err(other)?;
         }
     }
+    // eingebaute Felder für Typen nachtragen, die von außen in die Datenbank kamen (idempotent; nur Felder, deren Migration schon
+    // gelaufen ist – das prüft `ensure` an der Schema-Version)
+    crate::planning::builtin_fields::ensure(&conn).map_err(other)?;
     let db = Db { conn, path };
     if db.meta("created_at").is_none() {
         db.set_meta("created_at", &chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string());
@@ -194,9 +202,10 @@ mod tests {
             let v: u32 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
             assert_eq!(v, 3);
             assert!(db.conn.prepare("SELECT * FROM tickets").is_err(), "Tickets gibt es erst ab Version 4");
-            let mut np = NewProject::new("PAN", "Paneldeck", "#112233");
-            np.with_defaults = true;
-            create_project(&db.conn, &np).unwrap()
+            // die Standards von Hand (das Anlegen „mit Standards“ setzt die Schwellen-Spalte, die es erst ab Version 8 gibt)
+            let pid = create_project(&db.conn, &NewProject::new("PAN", "Paneldeck", "#112233")).unwrap();
+            crate::planning::defaults::apply(&db.conn, pid, false).unwrap();
+            pid
         };
         let db = open(&d, &bdir).unwrap();
         let v: u32 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
@@ -309,9 +318,8 @@ mod tests {
                 )
                 .unwrap();
                 if from >= 3 {
-                    let mut np = crate::planning::projects::NewProject::new("PAN", "Paneldeck", "#112233");
-                    np.with_defaults = true;
-                    crate::planning::projects::create_project(c, &np).unwrap();
+                    let pid = crate::planning::projects::create_project(c, &crate::planning::projects::NewProject::new("PAN", "Paneldeck", "#112233")).unwrap();
+                    crate::planning::defaults::apply(c, pid, false).unwrap();
                 }
                 db.set_meta("marker", "vorher");
             }
@@ -377,6 +385,169 @@ mod tests {
         assert_eq!(db.meta("marker").as_deref(), Some("vorher"));
         let n: i64 = db.conn.query_row("SELECT COUNT(*) FROM a", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Eine Datenbank wie von 2.2.0 (Schema 7): ein Projekt mit den mitgelieferten Typen (Beschreibung als Feld mit Schlüssel
+    /// `description`, umbenannt in einem Typ, Pflicht in einem anderen), ein Projekt ohne Vorlagen mit eigenem Text-Feld
+    /// „Beschreibung“ und eigenem Feld „Due date“, Werte, Verlauf und eine Übergangsregel auf die Beschreibung, Todo-Karten.
+    /// Nach dem Update sind die Beschreibungen eingebaut (gleiche Kennung: Werte, Verlauf, Regel bleiben), jede Typ hat eine
+    /// Fälligkeit, „Due date“ bleibt eigenes Feld, nur das Projekt mit Vorlagen hat Schwellen – und ein zweiter Lauf ändert nichts.
+    #[test]
+    fn migration_8_turns_description_fields_into_built_ins_and_is_idempotent() {
+        use crate::planning::fields::{list_fields, FieldKind};
+        let d = tmp("db-v7-due");
+        let bdir = d.join("backups");
+        {
+            let db = open_with(&d, &bdir, &MIGRATIONS[..7]).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO projects (id, key, name, color, system, next_number, position, created_at) VALUES
+                        (10, 'PAN', 'Paneldeck', '#112233', 0, 3, 1, '2026-01-01T00:00:00'),
+                        (11, 'OWN', 'Eigen', '#445566', 0, 2, 2, '2026-01-01T00:00:00');
+                     INSERT INTO statuses (id, project_id, key, name, color, category, position) VALUES
+                        (20, 10, 'todo', NULL, '#97A3B0', 'todo', 0), (21, 10, 'done', NULL, '#7FBF6A', 'done', 1);
+                     INSERT INTO ticket_types (id, project_id, key, name, icon, color, workflow, system, position) VALUES
+                        (30, 10, 'epic', NULL, 'bolt', '#B77FE0', 1, 0, 0),
+                        (31, 10, 'devtask', NULL, 'code', '#58A6E6', 1, 0, 1),
+                        (32, 11, NULL, 'Aufgabe', NULL, '#445566', 0, 0, 0);
+                     INSERT INTO type_statuses (type_id, status_id, position) VALUES (30, 20, 0), (30, 21, 1), (31, 20, 0), (31, 21, 1);
+                     INSERT INTO fields (id, type_id, key, name, kind, options, required, position, builtin) VALUES
+                        (40, 30, 'description', NULL, 'rich', '{\"rows\":8}', 0, 0, 1),
+                        (41, 30, 'priority', NULL, 'dropdown', '{}', 0, 1, 1),
+                        (42, 31, 'description', 'Details', 'rich', '{\"rows\":8}', 1, 0, 1),
+                        (43, 32, NULL, 'Beschreibung', 'text', '{\"max_length\":500}', 0, 0, 0),
+                        (44, 32, NULL, 'Due date', 'date', '{}', 0, 1, 0),
+                        (45, 30, NULL, 'Labels', 'labels', '{}', 1, 2, 0),
+                        (46, 31, NULL, 'Labels', 'text', '{}', 0, 1, 0);
+                     INSERT INTO transitions (id, type_id, from_status_id, to_status_id, required_fields) VALUES (50, 31, 20, 21, '[42]');
+                     INSERT INTO tickets (id, project_id, number, type_id, title, status_id, rank, created_at, updated_at) VALUES
+                        (60, 10, 1, 30, 'Epic', 20, 0, '2026-01-01T00:00:00', '2026-01-01T00:00:00'),
+                        (61, 10, 2, 31, 'Task', 20, 1, '2026-01-01T00:00:00', '2026-01-01T00:00:00'),
+                        (62, 11, 1, 32, 'Eigen', NULL, 0, '2026-01-01T00:00:00', '2026-01-01T00:00:00');
+                     INSERT INTO ticket_values (ticket_id, field_id, pos, text, num) VALUES
+                        (60, 40, 0, 'Epic **Text**', NULL), (61, 42, 0, 'Details ä😀', NULL), (62, 43, 0, 'Eigener Text', NULL), (62, 44, 0, '2026-12-24', NULL),
+                        (60, 45, 0, 'backend', NULL), (60, 45, 1, 'ui', NULL), (61, 46, 0, 'kein Label', NULL);
+                     INSERT INTO history (ticket_id, at, source, field, old, new, batch) VALUES
+                        (61, '2026-01-02T00:00:00', 'ui', 'field:42', NULL, '\"Details ä😀\"', 1),
+                        (60, '2026-01-02T00:00:00', 'ui', 'field:45', NULL, '[\"backend\",\"ui\"]', 2);
+                     INSERT INTO todo_items (title, body, done, position, created_at, updated_at) VALUES ('Karte', 'Text', 0, 1, '2026-01-01T00:00:00', '2026-01-01T00:00:00');",
+                )
+                .unwrap();
+        }
+        let check = |c: &Connection| {
+            let fields = |t: i64| list_fields(c, t).unwrap();
+            // Beschreibungen: gleiche Kennung, eingebaut, Rich-Text, nicht Pflicht, oben; Name „Details“ bleibt
+            for (t, fid) in [(30, 40), (31, 42)] {
+                let fs = fields(t);
+                assert_eq!(fs[0].id, fid, "Beschreibung oben in Typ {t}");
+                assert!(fs[0].is_description() && fs[0].kind == FieldKind::Rich && !fs[0].required);
+                assert!(fs[1].is_due() && fs[1].kind == FieldKind::Datetime && fs[1].options.date_only_ok() && !fs[1].required);
+            }
+            assert_eq!(fields(31)[0].name.as_deref(), Some("Details"));
+            // eigenes Text-Feld „Beschreibung“ wird die eingebaute Beschreibung (Wert bleibt), „Due date“ bleibt eigenes Feld
+            // (umbenannt, damit es nicht wie die Fälligkeit heißt), dazu die eingebauten Labels
+            let own = fields(32);
+            assert_eq!(own.len(), 4);
+            assert!(own[0].is_description() && own[1].is_due() && own[2].is_labels());
+            let desc = own.iter().find(|f| f.id == 43).unwrap();
+            assert!(desc.is_description() && desc.kind == FieldKind::Rich && desc.name.is_none());
+            assert_eq!(desc.options.rows, Some(8));
+            let custom_due = own.iter().find(|f| f.id == 44).unwrap();
+            assert!(!custom_due.is_fixed() && custom_due.kind == FieldKind::Date && custom_due.name.as_deref() == Some("Due date (custom)"));
+            // Labels: das eigene Labels-Feld des Epics wird das eingebaute (gleiche Kennung, Werte, Verlauf; nicht mehr Pflicht),
+            // das Text-Feld „Labels“ der Dev-Aufgabe bleibt eigenes Feld mit Zusatz, die Dev-Aufgabe bekommt neue Labels
+            let epic = fields(30);
+            assert_eq!((epic[2].id, epic[2].is_labels(), epic[2].required, epic[2].default_value.clone()), (45, true, false, None));
+            let lv: Vec<String> = { let mut st = c.prepare("SELECT text FROM ticket_values WHERE ticket_id = 60 AND field_id = 45 ORDER BY pos").unwrap(); st.query_map([], |r| r.get(0)).unwrap().map(|x| x.unwrap()).collect() };
+            assert_eq!(lv, vec!["backend", "ui"]);
+            let hl: i64 = c.query_row("SELECT COUNT(*) FROM history WHERE field = 'field:45'", [], |r| r.get(0)).unwrap();
+            assert_eq!(hl, 1);
+            let dev = fields(31);
+            assert!(dev[2].is_labels() && dev[2].id != 46);
+            let text_labels = dev.iter().find(|f| f.id == 46).unwrap();
+            assert_eq!((text_labels.kind, text_labels.name.as_deref(), text_labels.is_fixed()), (FieldKind::Text, Some("Labels (custom)"), false));
+            assert!(own.iter().any(|f| f.is_due()));
+            // Werte, Verlauf, Regel bleiben
+            let v = |t: i64, f: i64| -> String { c.query_row("SELECT text FROM ticket_values WHERE ticket_id = ?1 AND field_id = ?2", [t, f], |r| r.get(0)).unwrap() };
+            assert_eq!((v(60, 40), v(61, 42), v(62, 43), v(62, 44)), ("Epic **Text**".into(), "Details ä😀".into(), "Eigener Text".into(), "2026-12-24".into()));
+            let h: String = c.query_row("SELECT field FROM history WHERE ticket_id = 61", [], |r| r.get(0)).unwrap();
+            assert_eq!(h, "field:42");
+            let rf: String = c.query_row("SELECT required_fields FROM transitions WHERE id = 50", [], |r| r.get(0)).unwrap();
+            assert_eq!(rf, "[42]");
+            // Schwellen nur beim Projekt mit Vorlagen; Todo-Karten haben die Spalte `due`
+            assert_eq!(crate::planning::projects::due_thresholds(c, 10).unwrap(), crate::due::default_thresholds());
+            assert!(crate::planning::projects::due_thresholds(c, 11).unwrap().is_empty());
+            let items = crate::tasks::list_items(c, &crate::tasks::ItemFilter { show_done: true, tags: Vec::new() }).unwrap();
+            assert_eq!((items.len(), items[0].due.clone()), (1, None));
+            // der System-Typ bleibt ohne Felder
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM fields f JOIN ticket_types t ON t.id = f.type_id WHERE t.system = 1", [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0);
+        };
+        let db = open(&d, &bdir).unwrap();
+        assert_eq!(user_version(&db.conn), latest_version());
+        assert_healthy(&db.conn);
+        check(&db.conn);
+        let snapshot: Vec<(i64, i64, Option<String>, String, String, i64, i64)> = {
+            let mut st = db.conn.prepare("SELECT id, type_id, key, kind, options, position, builtin FROM fields ORDER BY id").unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        // die Sicherung vor dem Update ist der Stand von 2.2.0
+        let l = backup::list(&bdir);
+        assert!(l.len() == 1 && matches!(l[0].kind, backup::Kind::PreMigration { from: 7, to: 9 }));
+        // idempotent: die Umwandlung noch einmal (wie nach jedem neuen Typ) ändert nichts
+        crate::planning::builtin_fields::ensure(&db.conn).unwrap();
+        crate::planning::builtin_fields::ensure(&db.conn).unwrap();
+        check(&db.conn);
+        let again: Vec<(i64, i64, Option<String>, String, String, i64, i64)> = {
+            let mut st = db.conn.prepare("SELECT id, type_id, key, kind, options, position, builtin FROM fields ORDER BY id").unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(snapshot, again);
+        drop(db);
+        // erneutes Öffnen: keine weitere Migration, keine weitere Sicherung
+        let db = open(&d, &bdir).unwrap();
+        check(&db.conn);
+        assert_eq!(backup::list(&bdir).len(), 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Ein Stand mit Schema 8 (Beschreibung und Fälligkeit, noch keine eingebauten Labels) und einem eigenen Feld „Labels“ mit
+    /// Standardwert: Öffnen mit Schema 8 legt die Labels noch nicht an (sonst könnte Migration 9 das eigene Feld nicht mehr
+    /// umwandeln), das Update auf 9 wandelt es um (gleiche Kennung, Wert bleibt, Standardwert entfällt).
+    #[test]
+    fn ensure_waits_for_migration_9_before_adding_labels() {
+        use crate::planning::fields::list_fields;
+        let d = tmp("db-v8-labels");
+        let bdir = d.join("backups");
+        let (ty, fid) = {
+            let db = open_with(&d, &bdir, &MIGRATIONS[..8]).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO projects (id, key, name, color, system, next_number, position, created_at) VALUES (20, 'LAB', 'L', '#112233', 0, 2, 1, '2026-01-01T00:00:00');
+                     INSERT INTO ticket_types (id, project_id, key, name, icon, color, workflow, system, position) VALUES (70, 20, NULL, 'Story', NULL, '#445566', 0, 0, 0);
+                     INSERT INTO fields (id, type_id, key, name, kind, options, required, default_value, position, builtin) VALUES (80, 70, NULL, 'Labels', 'labels', '{}', 0, '[\"neu\"]', 0, 0);
+                     INSERT INTO tickets (id, project_id, number, type_id, title, status_id, rank, created_at, updated_at) VALUES (90, 20, 1, 70, 'T', NULL, 0, '2026-01-01T00:00:00', '2026-01-01T00:00:00');
+                     INSERT INTO ticket_values (ticket_id, field_id, pos, text, num) VALUES (90, 80, 0, 'alt', NULL);",
+                )
+                .unwrap();
+            (70_i64, 80_i64)
+        };
+        // erneut mit Schema 8 öffnen: Beschreibung und Fälligkeit kommen dazu, Labels noch nicht
+        {
+            let db = open_with(&d, &bdir, &MIGRATIONS[..8]).unwrap();
+            let keys: Vec<Option<String>> = list_fields(&db.conn, ty).unwrap().into_iter().map(|f| f.key).collect();
+            assert_eq!(keys, vec![Some("description".into()), Some("due".into()), None]);
+        }
+        let db = open(&d, &bdir).unwrap();
+        let fs = list_fields(&db.conn, ty).unwrap();
+        assert_eq!(fs.len(), 3);
+        let lab = fs.iter().find(|f| f.is_labels()).unwrap();
+        assert_eq!((lab.id, lab.default_value.clone()), (fid, None), "das eigene Feld wurde umgewandelt, ohne Standardwert");
+        let v: String = db.conn.query_row("SELECT text FROM ticket_values WHERE ticket_id = 90 AND field_id = 80", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, "alt");
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
     }

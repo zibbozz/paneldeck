@@ -27,6 +27,8 @@ Starts Paneldeck minimized in the tray after login (`"<exe>" --tray`, Run value 
 ## Explorer context menu
 Right-click a folder or the empty background of a folder window (also of a drive root such as `C:\`): **Open in Paneldeck** / **Start with Claude in Paneldeck**. The entries are registered for folders (`Directory\shell`) and folder backgrounds (`Directory\Background\shell`), not for the drive icons themselves (e.g. in *This PC*). The commands are `"<exe>" [instance options] --open "%1"` and `"<exe>" [instance options] --claude --open "%1"` (`%V` for the background).
 
+*Open in Paneldeck* on a WSL folder (`\\wsl.localhost\<distro>\…`) opens a WSL session of that distribution in the matching Linux path (see [WSL start folders](terminals.md#wsl-start-folders)).
+
 There is **only one context menu**: the instance that switches it on last is the one it starts. Another instance then shows "→ another Paneldeck" next to the switch (the command is in the tooltip); switching it on there takes it over.
 
 ## Status in the settings
@@ -36,7 +38,7 @@ If the path of `paneldeck.exe` contains a `%` character, Paneldeck cannot write 
 
 ## Installer and uninstaller
 - The installer offers a desktop shortcut, autostart and the context menu for the **default instance** only. A silent update (also the [self-update](updates.md)) keeps your choice: a deleted desktop shortcut or a switched-off context menu does not come back.
-- The uninstaller removes the default entries, the autostart values `Paneldeck (…)` of profile instances that point to the installed program, the Claude Code hooks and the MCP registrations of this Paneldeck (see [Agent interface](agent-interface.md#uninstalling)). Foreign entries stay untouched. It asks whether the data folder should be deleted.
+- The uninstaller removes the default entries, the autostart values `Paneldeck (…)` of profile instances that point to the installed program, the Claude Code hooks and the MCP registrations of this Paneldeck (see [Agent interface](agent-interface.md#uninstalling)). Foreign entries stay untouched. It also removes the bundled console host (`conpty.dll`, `OpenConsole.exe`) and asks whether the data folder should be deleted.
 
 ## Language
 The labels of the context menu are written in the saved language of the instance that switched it on (English or German; `--lang` does not change them).

@@ -84,6 +84,9 @@ pub struct Card {
     pub fields: Vec<CardField>,
     /// Werte der Labels-Felder (als Chips).
     pub labels: Vec<String>,
+    /// Eingebaute Fälligkeit (gespeicherter Text) und ihre Auswertung beim Laden (keine bei erledigten Karten).
+    pub due: Option<String>,
+    pub due_state: Option<crate::due::DueState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -251,6 +254,9 @@ pub fn load_board(conn: &Connection, sum: &ProjectSummary, cfg: &BoardConfig, q:
         }
     }
     let ccx = CardCx { conn, names, refs, lang };
+    let dues = crate::planning::builtin_fields::due_map(conn, sum.project.id)?;
+    let thresholds = crate::planning::projects::due_thresholds(conn, sum.project.id)?;
+    let now = chrono::Local::now().naive_local();
     for t in page.items {
         if source.as_ref().is_some_and(|ids| !ids.contains(&t.id)) {
             continue;
@@ -288,7 +294,9 @@ pub fn load_board(conn: &Connection, sum: &ProjectSummary, cfg: &BoardConfig, q:
         if let Some(p) = points {
             columns[ci].points += p;
         }
-        columns[ci].cards.push(Card { type_name: ty.ticket_type.display(lang), type_color: ty.ticket_type.color.clone(), type_icon: ty.ticket_type.icon.clone(), done, points, fields, labels, ticket: t });
+        let due = dues.get(&t.id).cloned();
+        let due_state = if done { None } else { due.as_deref().and_then(|d| crate::due::evaluate(&thresholds, d, now)) };
+        columns[ci].cards.push(Card { type_name: ty.ticket_type.display(lang), type_color: ty.ticket_type.color.clone(), type_icon: ty.ticket_type.icon.clone(), done, points, fields, labels, due, due_state, ticket: t });
         data.total += 1;
     }
     data.columns = columns;

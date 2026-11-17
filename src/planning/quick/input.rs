@@ -504,6 +504,7 @@ mod tests {
             max_length: Some(30),
             rows: Some(6),
             target_types: vec![4, 5],
+            time_optional: None,
         };
         let expect = |k: FieldKind| InputKind::for_field(&field(k, opts.clone()), Lang::En);
         assert_eq!(expect(FieldKind::Text), InputKind::Text { max_length: Some(30) });

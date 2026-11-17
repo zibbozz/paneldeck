@@ -4,7 +4,8 @@
 //!
 //! Umwandlung ([`convert_todo_to_ticket`]):
 //! * Titel = Titel der Karte, sonst die erste Textzeile (höchstens 255 Zeichen);
-//! * der Text der Karte kommt in das Feld „Description“ (Schlüssel `description`, Rich-Text oder Text), falls der Typ eines hat;
+//! * der Text der Karte kommt in die eingebaute Beschreibung (sonst ein Feld „Description“, Rich-Text oder Text);
+//! * die Fälligkeit der Karte kommt in die eingebaute Fälligkeit (Datum bzw. Datum mit Uhrzeit bleiben, wie sie sind);
 //! * die Tags werden zu Werten des ersten Labels-Felds, falls der Typ eines hat – sonst verworfen und gemeldet;
 //! * danach ist die Karte erledigt und als umgewandelt vermerkt; eine Karte lässt sich nur einmal umwandeln;
 //! * die ganze Umwandlung (Ticket, Zuordnung, Abhaken) ist **eine** [`TicketOp`] für Strg+Z / Strg+Y: Rückgängig öffnet die
@@ -38,6 +39,8 @@ pub struct TodoTicket {
     pub body: String,
     /// Namen der Tags.
     pub labels: Vec<String>,
+    /// Fälligkeit der Karte (`JJJJ-MM-TT` oder `JJJJ-MM-TTTHH:MM`).
+    pub due: Option<String>,
     /// „Done“, wenn abgehakt, sonst „To Do“.
     pub category: StatusCategory,
     pub done: bool,
@@ -84,6 +87,7 @@ fn build(item: tasks::Item, tags: &HashMap<i64, String>, conv: &HashMap<i64, i64
         category: if item.done { StatusCategory::Done } else { StatusCategory::Todo },
         done: item.done,
         converted_to: conv.get(&item.id).copied(),
+        due: item.due,
         body: item.body,
         created_at: item.created_at,
         updated_at: item.updated_at,
@@ -127,7 +131,7 @@ pub struct Conversion {
 
 fn description_field(fields: &[Field]) -> Option<&Field> {
     let text_like = |f: &&Field| matches!(f.kind, FieldKind::Rich | FieldKind::Text);
-    fields.iter().filter(text_like).find(|f| f.key.as_deref() == Some("description")).or_else(|| {
+    fields.iter().find(|f| f.is_description()).or_else(|| fields.iter().filter(text_like).find(|f| f.key.as_deref() == Some("description"))).or_else(|| {
         fields.iter().filter(text_like).find(|f| common::same_label(Some("description"), None, f.key.as_deref(), f.name.as_deref()))
     })
 }
@@ -165,11 +169,16 @@ pub fn convert_todo_with_values(conn: &Connection, todo_id: i64, project_id: i64
                     None => body_dropped = true,
                 }
             }
+            if let Some(due) = item.due.as_deref() {
+                if let Some(v) = fields.iter().find(|f| f.is_due()).and_then(|f| normalize_value(conn, &ctx, f, &json!(due)).ok().flatten().map(|v| (f.id, v))) {
+                    values.push(v);
+                }
+            }
             let mut dropped_tags: Vec<String> = Vec::new();
             if !item.tags.is_empty() {
                 let all: HashMap<i64, String> = tasks::list_tags(conn).map_err(task_err)?.into_iter().map(|t| (t.id, t.name)).collect();
                 let names: Vec<String> = item.tags.iter().filter_map(|t| all.get(t).cloned()).collect();
-                let target = fields.iter().find(|f| f.kind == FieldKind::Labels);
+                let target = fields.iter().find(|f| f.is_labels()).or_else(|| fields.iter().find(|f| f.kind == FieldKind::Labels));
                 match target.and_then(|f| normalize_value(conn, &ctx, f, &json!(names)).ok().flatten().map(|v| (f.id, v))) {
                     Some(v) => values.push(v),
                     None => dropped_tags = names,
@@ -220,7 +229,6 @@ pub(crate) fn run_conversion(conn: &Connection, todo_id: i64, ticket_id: i64, wa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planning::fields::{create_field, NewField};
     use crate::planning::tickets::fixture::Fx;
     use crate::planning::values::get_value;
     use crate::state::Lang;
@@ -230,7 +238,7 @@ mod tests {
     }
 
     fn todo(c: &Connection, title: &str, body: &str, tags: &[&str]) -> i64 {
-        tasks::create_item(c, title, body, &tags.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap().0.id
+        tasks::create_item(c, title, body, None, &tags.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap().0.id
     }
 
     #[test]
@@ -265,9 +273,29 @@ mod tests {
     }
 
     #[test]
+    fn converts_title_description_and_due_date_one_to_one() {
+        let f = Fx::new();
+        let desc = f.field(f.task, "description");
+        let due = f.field(f.task, "due");
+        assert!(desc.is_description() && due.is_due());
+        for (input, stored) in [("2026-11-20", "2026-11-20"), ("2026-11-20 14:30", "2026-11-20T14:30")] {
+            let id = tasks::create_item(&f.c, "Mit Termin", "Beschreibung **fett**", Some(input), &[]).unwrap().0.id;
+            assert_eq!(todo_ticket(&f.c, id).unwrap().due.as_deref().map(|d| d.len()), Some(if input.len() == 10 { 10 } else { 16 }));
+            let conv = convert_todo_to_ticket(&f.c, id, f.project, f.task, &ui()).unwrap();
+            assert_eq!(conv.ticket.title, "Mit Termin");
+            assert_eq!(get_value(&f.c, conv.ticket.id, &desc).unwrap(), Some(json!("Beschreibung **fett**")));
+            assert_eq!(get_value(&f.c, conv.ticket.id, &due).unwrap(), Some(json!(stored)));
+        }
+        // ohne Fälligkeit bleibt das Feld leer
+        let id = todo(&f.c, "Ohne", "", &[]);
+        let conv = convert_todo_to_ticket(&f.c, id, f.project, f.task, &ui()).unwrap();
+        assert_eq!(get_value(&f.c, conv.ticket.id, &due).unwrap(), None);
+    }
+
+    #[test]
     fn converts_title_text_and_tags() {
         let f = Fx::new();
-        let labels = f.add_field(f.task, "Labels", FieldKind::Labels, Default::default(), false);
+        let labels = f.field(f.task, "labels");
         let a = todo(&f.c, "Einkaufen", "Milch\nBrot", &["Haushalt", "dringend"]);
         let conv = convert_todo_to_ticket(&f.c, a, f.project, f.task, &Source::agent("S")).unwrap();
         assert_eq!(conv.ticket.title, "Einkaufen");
@@ -295,24 +323,20 @@ mod tests {
     }
 
     #[test]
-    fn tags_are_dropped_and_reported_without_a_labels_field() {
+    fn tags_go_into_the_built_in_labels_of_every_type() {
         let f = Fx::new();
         let a = todo(&f.c, "T", "", &["x", "y"]);
         let conv = convert_todo_to_ticket(&f.c, a, f.project, f.task, &ui()).unwrap();
-        assert_eq!(conv.dropped_tags, vec!["x", "y"]);
-        // Typ ohne Description-Feld: Text wird gemeldet
+        assert!(conv.dropped_tags.is_empty(), "jeder Typ hat Labels");
+        assert_eq!(get_value(&f.c, conv.ticket.id, &f.field(f.task, "labels")).unwrap(), Some(json!(["x", "y"])));
+        // ein neuer Typ ohne eigene Felder hat trotzdem die eingebaute Beschreibung: der Text kommt an
         let plain = crate::planning::types::create_type(&f.c, &crate::planning::types::NewType { project_id: f.project, key: None, name: Some("Notiz".into()), icon: None, color: "#445566".into(), workflow: false }).unwrap();
         let b = todo(&f.c, "B", "Inhalt", &[]);
         let conv = convert_todo_to_ticket(&f.c, b, f.project, plain, &ui()).unwrap();
-        assert!(conv.body_dropped);
+        assert!(!conv.body_dropped);
         assert!(conv.dropped_tags.is_empty());
-        // Description als einfaches Text-Feld mit zu kleiner Grenze: auch gemeldet
-        let small = crate::planning::types::create_type(&f.c, &crate::planning::types::NewType { project_id: f.project, key: None, name: Some("Klein".into()), icon: None, color: "#445566".into(), workflow: false }).unwrap();
-        let mut nf = NewField::new(small, "Beschreibung", FieldKind::Text);
-        nf.options.max_length = Some(3);
-        create_field(&f.c, &nf).unwrap();
-        let c = todo(&f.c, "C", "viel zu lang", &[]);
-        assert!(convert_todo_to_ticket(&f.c, c, f.project, small, &ui()).unwrap().body_dropped);
+        let desc = crate::planning::fields::list_fields(&f.c, plain).unwrap().into_iter().find(|x| x.is_description()).unwrap();
+        assert_eq!(get_value(&f.c, conv.ticket.id, &desc).unwrap(), Some(json!("Inhalt")));
     }
 
     #[test]

@@ -12,6 +12,8 @@ Rust (rustup, Toolchain `stable-x86_64-pc-windows-msvc`) und die Visual-Studio-B
 
 Eine selbst gebaute `paneldeck.exe` ist portabel: Sie legt `paneldeck-data` neben sich an (hier unter `target\release\`). Mit `--data-dir` oder `--profile` hältst du Testdaten von deinen echten Daten getrennt (siehe [Kommandozeile](command-line.md)).
 
+Der [mitgelieferte Konsolen-Host](terminals.md#shells-und-emulation) (`conpty.dll`, `OpenConsole.exe` aus Microsofts NuGet-Paket `Microsoft.Windows.Console.ConPTY`, MIT) liegt nicht im Git. Ohne ihn nutzt eine selbst gebaute `paneldeck.exe` den Konsolen-Host von Windows. `tools/fetch-conpty.ps1` lädt die festgelegte Version, prüft sie gegen fest eingetragene SHA-256-Werte und kopiert beide Dateien, z. B. `powershell -ExecutionPolicy Bypass -File tools\fetch-conpty.ps1 -Dest target\release`.
+
 ## Cross-Build unter Linux
 Möglich, wird aber nicht regelmäßig getestet:
 
@@ -24,7 +26,7 @@ Releases entstehen auf einem Branch `release/x.y` mit `tools/release.sh <version
 | Datei | Inhalt |
 |---|---|
 | `Paneldeck-Setup-<Version>.exe` | Installer (pro Benutzer, ohne Administratorrechte) |
-| `paneldeck-<Version>-windows-x64.zip` | portables ZIP: Ordner `paneldeck-<Version>/` mit `paneldeck.exe`, Lizenzen, README und Changelog |
+| `paneldeck-<Version>-windows-x64.zip` | portables ZIP: Ordner `paneldeck-<Version>/` mit `paneldeck.exe`, `conpty.dll`, `OpenConsole.exe`, Lizenzen, README und Changelog |
 | `SHA256SUMS.txt` | SHA-256-Prüfsummen beider Dateien (für das [Selbst-Update](updates.md)) |
 
 Mit `--publish` wird zusätzlich das Tag gepusht und das GitHub-Release angelegt (GitHub CLI `gh`, angemeldet), mit `--no-git` nur gebaut und gepackt.

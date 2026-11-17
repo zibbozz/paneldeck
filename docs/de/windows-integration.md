@@ -27,6 +27,8 @@ Startet Paneldeck nach der Anmeldung minimiert im Tray (`"<exe>" --tray`, Run-We
 ## Explorer-Kontextmenü
 Rechtsklick auf einen Ordner oder den leeren Hintergrund eines Ordnerfensters (auch einer Laufwerkswurzel wie `C:\`): **In Paneldeck öffnen** / **Mit Claude in Paneldeck starten**. Die Einträge gelten für Ordner (`Directory\shell`) und Ordner-Hintergründe (`Directory\Background\shell`), nicht für die Laufwerkssymbole selbst (z. B. unter *Dieser PC*). Die Befehle sind `"<exe>" [Instanz-Optionen] --open "%1"` und `"<exe>" [Instanz-Optionen] --claude --open "%1"` (`%V` für den Hintergrund).
 
+*In Paneldeck öffnen* auf einem WSL-Ordner (`\\wsl.localhost\<Distro>\…`) öffnet eine WSL-Sitzung dieser Distribution im passenden Linux-Pfad (siehe [WSL-Startordner](terminals.md#wsl-startordner)).
+
 Es gibt **nur ein Kontextmenü**: Die Instanz, die es zuletzt einschaltet, wird von ihm gestartet. Eine andere Instanz zeigt dann „→ anderes Paneldeck“ neben dem Schalter (der Befehl steht im Tooltip); schaltet man es dort ein, übernimmt sie es.
 
 ## Status in den Einstellungen
@@ -36,7 +38,7 @@ Enthält der Pfad von `paneldeck.exe` ein `%`, kann Paneldeck diese Befehle nich
 
 ## Installer und Deinstallation
 - Der Installer bietet Desktop-Verknüpfung, Autostart und Kontextmenü nur für die **Standardinstanz** an. Ein stilles Update (auch das [Selbst-Update](updates.md)) behält deine Wahl: Eine gelöschte Desktop-Verknüpfung oder ein abgeschaltetes Kontextmenü kommen nicht zurück.
-- Die Deinstallation entfernt die Standard-Einträge, die Autostart-Werte `Paneldeck (…)` von Profil-Instanzen, die auf das installierte Programm zeigen, die Claude-Code-Hooks und die MCP-Registrierungen dieses Paneldeck (siehe [Agenten-Schnittstelle](agent-interface.md#deinstallieren)). Fremde Einträge bleiben unberührt. Sie fragt, ob der Datenordner gelöscht werden soll.
+- Die Deinstallation entfernt die Standard-Einträge, die Autostart-Werte `Paneldeck (…)` von Profil-Instanzen, die auf das installierte Programm zeigen, die Claude-Code-Hooks und die MCP-Registrierungen dieses Paneldeck (siehe [Agenten-Schnittstelle](agent-interface.md#deinstallieren)). Fremde Einträge bleiben unberührt. Sie entfernt auch den mitgelieferten Konsolen-Host (`conpty.dll`, `OpenConsole.exe`) und fragt, ob der Datenordner gelöscht werden soll.
 
 ## Sprache
 Die Beschriftungen des Kontextmenüs stehen in der gespeicherten Sprache der Instanz, die es eingeschaltet hat (Englisch oder Deutsch; `--lang` ändert sie nicht).

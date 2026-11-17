@@ -3,7 +3,7 @@ Lizenztexte der Abhängigkeiten von Paneldeck
 
 Paneldeck selbst steht unter der MIT-Lizenz (Datei LICENSE). Die folgenden Pakete werden in die Programmdatei
 eingebunden; ihre Lizenztexte stehen unten (gleiche Texte nur einmal). Die eingebetteten Schriften haben eigene
-Lizenzdateien im Ordner assets/fonts/ (SIL Open Font License 1.1).
+Lizenzdateien im Ordner assets/fonts/ (SIL Open Font License 1.1; Lucide-Icons: ISC, siehe unten).
 
 Pakete und ihre Lizenz-Ausdrücke:
 
@@ -234,6 +234,11 @@ Pakete und ihre Lizenz-Ausdrücke:
   zmij 1.0.23 - MIT
   zune-core 0.5.3 - MIT OR Apache-2.0 OR Zlib
   zune-jpeg 0.5.15 - MIT OR Apache-2.0 OR Zlib
+  lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf.deflate) 1.66.0 - ISC (aus Feather abgeleitete Icons: MIT)
+
+Mitgelieferte Programmdateien (neben paneldeck.exe, unverändert):
+
+  Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe) 1.25.261109001 - MIT
 
 
 ------------------------------------------------------------------------------
@@ -4927,7 +4932,56 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 70 – gilt für: memoffset 0.9.1
+Text 70 – gilt für: lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf.deflate) 1.66.0
+------------------------------------------------------------------------------
+
+ISC License
+
+Copyright (c) 2026 Lucide Icons and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+---
+
+The following Lucide icons are derived from the Feather project:
+
+airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+
+The MIT License (MIT) (for the icons listed above)
+
+Copyright (c) 2013-present Cole Bemis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+------------------------------------------------------------------------------
+Text 71 – gilt für: memoffset 0.9.1
 ------------------------------------------------------------------------------
 
 Copyright (c) 2017 Gilad Naaman
@@ -4952,7 +5006,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 71 – gilt für: miniz_oxide 0.8.9, miniz_oxide 0.9.1
+Text 72 – gilt für: miniz_oxide 0.8.9, miniz_oxide 0.9.1
 ------------------------------------------------------------------------------
 
 MIT License
@@ -4983,7 +5037,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 72 – gilt für: miniz_oxide 0.8.9, miniz_oxide 0.9.1
+Text 73 – gilt für: miniz_oxide 0.8.9, miniz_oxide 0.9.1
 ------------------------------------------------------------------------------
 
 Copyright 2013-2014 RAD Game Tools and Valve Software
@@ -5003,7 +5057,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 
 ------------------------------------------------------------------------------
-Text 73 – gilt für: moxcms 0.8.1, pxfm 0.1.30
+Text 74 – gilt für: moxcms 0.8.1, pxfm 0.1.30
 ------------------------------------------------------------------------------
 
 Apache License
@@ -5210,7 +5264,7 @@ Apache License
 
 
 ------------------------------------------------------------------------------
-Text 74 – gilt für: moxcms 0.8.1, pxfm 0.1.30
+Text 75 – gilt für: moxcms 0.8.1, pxfm 0.1.30
 ------------------------------------------------------------------------------
 
 Copyright (c) Radzivon Bartoshyk. All rights reserved.
@@ -5242,7 +5296,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ------------------------------------------------------------------------------
-Text 75 – gilt für: muda 0.17.2, tray-icon 0.21.3
+Text 76 – gilt für: muda 0.17.2, tray-icon 0.21.3
 ------------------------------------------------------------------------------
 
 MIT License
@@ -5269,7 +5323,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 76 – gilt für: naga 27.0.3, wgpu 27.0.1, wgpu-core 27.0.3, wgpu-core-deps-windows-linux-android 27.0.0, wgpu-hal 27.0.4, wgpu-types 27.0.1
+Text 77 – gilt für: naga 27.0.3, wgpu 27.0.1, wgpu-core 27.0.3, wgpu-core-deps-windows-linux-android 27.0.0, wgpu-hal 27.0.4, wgpu-types 27.0.1
 ------------------------------------------------------------------------------
 
 MIT License
@@ -5296,7 +5350,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 77 – gilt für: nix 0.28.0
+Text 78 – gilt für: nix 0.28.0
 ------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -5323,7 +5377,7 @@ THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 78 – gilt für: nohash-hasher 0.2.0
+Text 79 – gilt für: nohash-hasher 0.2.0
 ------------------------------------------------------------------------------
 
 Copyright 2018 Parity Technologies (UK) Ltd.
@@ -5347,7 +5401,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 79 – gilt für: png 0.18.1
+Text 80 – gilt für: png 0.18.1
 ------------------------------------------------------------------------------
 
 Copyright (c) 2015 nwin
@@ -5378,7 +5432,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 80 – gilt für: profiling 1.0.18
+Text 81 – gilt für: profiling 1.0.18
 ------------------------------------------------------------------------------
 
 MIT License
@@ -5405,7 +5459,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 81 – gilt für: quick-error 2.0.1
+Text 82 – gilt für: quick-error 2.0.1
 ------------------------------------------------------------------------------
 
 Copyright (c) 2015 The quick-error Developers
@@ -5430,7 +5484,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 82 – gilt für: raw-window-handle 0.6.2
+Text 83 – gilt für: raw-window-handle 0.6.2
 ------------------------------------------------------------------------------
 
 MIT License
@@ -5457,7 +5511,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 83 – gilt für: raw-window-handle 0.6.2
+Text 84 – gilt für: raw-window-handle 0.6.2
 ------------------------------------------------------------------------------
 
 Copyright (c) 2020 Osspial
@@ -5474,7 +5528,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 
 ------------------------------------------------------------------------------
-Text 84 – gilt für: renderdoc-sys 1.1.0
+Text 85 – gilt für: renderdoc-sys 1.1.0
 ------------------------------------------------------------------------------
 
 Copyright (c) 2022 Eyal Kalderon
@@ -5505,7 +5559,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 85 – gilt für: rfd 0.17.2
+Text 86 – gilt für: rfd 0.17.2
 ------------------------------------------------------------------------------
 
 MIT License
@@ -5532,7 +5586,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 86 – gilt für: scopeguard 1.2.0
+Text 87 – gilt für: scopeguard 1.2.0
 ------------------------------------------------------------------------------
 
 Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
@@ -5563,7 +5617,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 87 – gilt für: serde_spanned 1.1.2, toml 1.2.0+spec-1.1.0, toml_datetime 1.1.2+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0, toml_writer 1.2.0+spec-1.1.0
+Text 88 – gilt für: serde_spanned 1.1.2, toml 1.2.0+spec-1.1.0, toml_datetime 1.1.2+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0, toml_writer 1.2.0+spec-1.1.0
 ------------------------------------------------------------------------------
 
 Apache License
@@ -5770,7 +5824,7 @@ Apache License
 
 
 ------------------------------------------------------------------------------
-Text 88 – gilt für: serde_spanned 1.1.2, toml 1.2.0+spec-1.1.0, toml_datetime 1.1.2+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0, toml_writer 1.2.0+spec-1.1.0
+Text 89 – gilt für: serde_spanned 1.1.2, toml 1.2.0+spec-1.1.0, toml_datetime 1.1.2+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0, toml_writer 1.2.0+spec-1.1.0
 ------------------------------------------------------------------------------
 
 Copyright (c) Individual contributors
@@ -5795,7 +5849,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 89 – gilt für: serial2 0.2.39
+Text 90 – gilt für: serial2 0.2.39
 ------------------------------------------------------------------------------
 
 Copyright 2021, Maarten de Vries <maarten@de-vri.es>
@@ -5814,7 +5868,7 @@ limitations under the License.
 
 
 ------------------------------------------------------------------------------
-Text 90 – gilt für: serial2 0.2.39
+Text 91 – gilt für: serial2 0.2.39
 ------------------------------------------------------------------------------
 
 BSD 2-Clause License
@@ -5844,7 +5898,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ------------------------------------------------------------------------------
-Text 91 – gilt für: shared_library 0.1.9
+Text 92 – gilt für: shared_library 0.1.9
 ------------------------------------------------------------------------------
 
 Copyright (c) 2017 Pierre Krieger
@@ -5875,7 +5929,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 92 – gilt für: shell-words 1.1.1
+Text 93 – gilt für: shell-words 1.1.1
 ------------------------------------------------------------------------------
 
 Copyright (c) 2016 Tomasz Miąsko
@@ -5906,7 +5960,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 93 – gilt für: shlex 2.0.1
+Text 94 – gilt für: shlex 2.0.1
 ------------------------------------------------------------------------------
 
 Copyright 2015 Nicholas Allegra (comex).
@@ -5925,7 +5979,7 @@ limitations under the License.
 
 
 ------------------------------------------------------------------------------
-Text 94 – gilt für: shlex 2.0.1
+Text 95 – gilt für: shlex 2.0.1
 ------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -5952,7 +6006,7 @@ THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 95 – gilt für: simd-adler32 0.3.10
+Text 96 – gilt für: simd-adler32 0.3.10
 ------------------------------------------------------------------------------
 
 MIT License
@@ -5979,7 +6033,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 96 – gilt für: smallvec 1.16.4
+Text 97 – gilt für: smallvec 1.16.4
 ------------------------------------------------------------------------------
 
 Copyright (c) 2018 The Servo Project Developers
@@ -6010,7 +6064,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 97 – gilt für: stable_deref_trait 1.2.1
+Text 98 – gilt für: stable_deref_trait 1.2.1
 ------------------------------------------------------------------------------
 
 Copyright (c) 2017 Robert Grosse
@@ -6041,7 +6095,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 98 – gilt für: static_assertions 1.1.0
+Text 99 – gilt für: static_assertions 1.1.0
 ------------------------------------------------------------------------------
 
 MIT License
@@ -6068,7 +6122,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 99 – gilt für: synstructure 0.14.0
+Text 100 – gilt für: synstructure 0.14.0
 ------------------------------------------------------------------------------
 
 Copyright 2016 Nika Layzell
@@ -6081,7 +6135,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 ------------------------------------------------------------------------------
-Text 100 – gilt für: tauri-winrt-notification 0.8.1
+Text 101 – gilt für: tauri-winrt-notification 0.8.1
 ------------------------------------------------------------------------------
 
 MIT License
@@ -6108,7 +6162,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 101 – gilt für: tiff 0.11.3
+Text 102 – gilt für: tiff 0.11.3
 ------------------------------------------------------------------------------
 
 MIT License
@@ -6135,7 +6189,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 102 – gilt für: tracing 0.1.44, tracing-core 0.1.36
+Text 103 – gilt für: tracing 0.1.44, tracing-core 0.1.36
 ------------------------------------------------------------------------------
 
 Copyright (c) 2019 Tokio Contributors
@@ -6166,7 +6220,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 103 – gilt für: ttf-parser 0.25.1
+Text 104 – gilt für: ttf-parser 0.25.1
 ------------------------------------------------------------------------------
 
 Copyright (c) 2018 Yevhenii Reizner
@@ -6191,7 +6245,7 @@ THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 104 – gilt für: type-map 0.5.1
+Text 105 – gilt für: type-map 0.5.1
 ------------------------------------------------------------------------------
 
 Apache License
@@ -6602,7 +6656,7 @@ limitations under the License.
 
 
 ------------------------------------------------------------------------------
-Text 105 – gilt für: type-map 0.5.1
+Text 106 – gilt für: type-map 0.5.1
 ------------------------------------------------------------------------------
 
 Copyright (c) 2022 Jacob Brown
@@ -6687,7 +6741,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 106 – gilt für: unicode-ident 1.0.27
+Text 107 – gilt für: unicode-ident 1.0.27
 ------------------------------------------------------------------------------
 
 UNICODE LICENSE V3
@@ -6732,7 +6786,7 @@ authorization of the copyright holder.
 
 
 ------------------------------------------------------------------------------
-Text 107 – gilt für: unicode-segmentation 1.13.3, unicode-width 0.2.3
+Text 108 – gilt für: unicode-segmentation 1.13.3, unicode-width 0.2.3
 ------------------------------------------------------------------------------
 
 Licensed under the Apache License, Version 2.0
@@ -6745,7 +6799,7 @@ according to those terms.
 
 
 ------------------------------------------------------------------------------
-Text 108 – gilt für: unicode-segmentation 1.13.3, unicode-width 0.2.3
+Text 109 – gilt für: unicode-segmentation 1.13.3, unicode-width 0.2.3
 ------------------------------------------------------------------------------
 
 Copyright (c) 2015 The Rust Project Developers
@@ -6776,7 +6830,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 109 – gilt für: utf8_iter 1.1.0
+Text 110 – gilt für: utf8_iter 1.1.0
 ------------------------------------------------------------------------------
 
 Copyright Mozilla Foundation
@@ -6824,7 +6878,7 @@ licensed under the Apache License, Version 2.0 <LICENSE-APACHE> or
 
 
 ------------------------------------------------------------------------------
-Text 110 – gilt für: utf8_iter 1.1.0, utf_types 1.0.0
+Text 111 – gilt für: utf8_iter 1.1.0, utf_types 1.0.0
 ------------------------------------------------------------------------------
 
 Copyright Mozilla Foundation
@@ -6855,7 +6909,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 111 – gilt für: utf_types 1.0.0
+Text 112 – gilt für: utf_types 1.0.0
 ------------------------------------------------------------------------------
 
 Copyright Mozilla Foundation
@@ -6881,7 +6935,7 @@ the individual files for PD/CC0-dedicated sections).
 
 
 ------------------------------------------------------------------------------
-Text 112 – gilt für: vcpkg 0.2.15
+Text 113 – gilt für: vcpkg 0.2.15
 ------------------------------------------------------------------------------
 
 Copyright (c) 2017 Jim McGrath
@@ -6912,7 +6966,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 113 – gilt für: version_check 0.9.5
+Text 114 – gilt für: version_check 0.9.5
 ------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -6937,7 +6991,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 114 – gilt für: vswhom 0.1.0, vswhom-sys 0.1.3
+Text 115 – gilt für: vswhom 0.1.0, vswhom-sys 0.1.3
 ------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -6964,7 +7018,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 115 – gilt für: vte 0.15.0
+Text 116 – gilt für: vte 0.15.0
 ------------------------------------------------------------------------------
 
 Copyright (c) 2016 Joe Wilm
@@ -6995,7 +7049,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 116 – gilt für: web-time 1.1.0
+Text 117 – gilt für: web-time 1.1.0
 ------------------------------------------------------------------------------
 
 Apache License
@@ -7202,7 +7256,7 @@ Apache License
 
 
 ------------------------------------------------------------------------------
-Text 117 – gilt für: web-time 1.1.0
+Text 118 – gilt für: web-time 1.1.0
 ------------------------------------------------------------------------------
 
 MIT License
@@ -7229,7 +7283,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 118 – gilt für: webbrowser 1.2.6
+Text 119 – gilt für: webbrowser 1.2.6
 ------------------------------------------------------------------------------
 
 Apache License
@@ -7425,7 +7479,7 @@ limitations under the License.
 
 
 ------------------------------------------------------------------------------
-Text 119 – gilt für: webbrowser 1.2.6
+Text 120 – gilt für: webbrowser 1.2.6
 ------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -7458,7 +7512,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 120 – gilt für: weezl 0.1.12
+Text 121 – gilt für: weezl 0.1.12
 ------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -7485,7 +7539,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 121 – gilt für: winapi 0.3.9
+Text 122 – gilt für: winapi 0.3.9
 ------------------------------------------------------------------------------
 
 Copyright (c) 2015-2018 The winapi-rs Developers
@@ -7510,7 +7564,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 122 – gilt für: windows 0.62.2, windows-collections 0.3.2, windows-core 0.62.2, windows-future 0.3.2, windows-implement 0.60.2, windows-interface 0.59.3, windows-link 0.2.1, windows-numerics 0.3.1, windows-result 0.4.1, windows-strings 0.5.1, windows-sys 0.52.0, windows-sys 0.59.0, windows-sys 0.60.2, windows-sys 0.61.2, windows-targets 0.52.6, windows-targets 0.53.5, windows-threading 0.2.1, windows-version 0.1.7, windows_x86_64_msvc 0.52.6, windows_x86_64_msvc 0.53.1
+Text 123 – gilt für: windows 0.62.2, windows-collections 0.3.2, windows-core 0.62.2, windows-future 0.3.2, windows-implement 0.60.2, windows-interface 0.59.3, windows-link 0.2.1, windows-numerics 0.3.1, windows-result 0.4.1, windows-strings 0.5.1, windows-sys 0.52.0, windows-sys 0.59.0, windows-sys 0.60.2, windows-sys 0.61.2, windows-targets 0.52.6, windows-targets 0.53.5, windows-threading 0.2.1, windows-version 0.1.7, windows_x86_64_msvc 0.52.6, windows_x86_64_msvc 0.53.1
 ------------------------------------------------------------------------------
 
 MIT License
@@ -7537,7 +7591,7 @@ MIT License
 
 
 ------------------------------------------------------------------------------
-Text 123 – gilt für: winreg 0.10.1, winreg 0.56.0
+Text 124 – gilt für: winreg 0.10.1, winreg 0.56.0
 ------------------------------------------------------------------------------
 
 Copyright (c) 2015 Igor Shaula
@@ -7562,7 +7616,7 @@ THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 124 – gilt für: xml-rs 0.8.29
+Text 125 – gilt für: xml-rs 0.8.29
 ------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -7589,7 +7643,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 125 – gilt für: zerocopy 0.8.63, zerocopy-derive 0.8.63
+Text 126 – gilt für: zerocopy 0.8.63, zerocopy-derive 0.8.63
 ------------------------------------------------------------------------------
 
 Apache License
@@ -7796,7 +7850,7 @@ Apache License
 
 
 ------------------------------------------------------------------------------
-Text 126 – gilt für: zerocopy 0.8.63, zerocopy-derive 0.8.63
+Text 127 – gilt für: zerocopy 0.8.63, zerocopy-derive 0.8.63
 ------------------------------------------------------------------------------
 
 Copyright 2019 The Fuchsia Authors.
@@ -7826,7 +7880,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ------------------------------------------------------------------------------
-Text 127 – gilt für: zerocopy 0.8.63, zerocopy-derive 0.8.63
+Text 128 – gilt für: zerocopy 0.8.63, zerocopy-derive 0.8.63
 ------------------------------------------------------------------------------
 
 Copyright 2023 The Fuchsia Authors
@@ -7857,7 +7911,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 128 – gilt für: zlib-rs 0.6.8
+Text 129 – gilt für: zlib-rs 0.6.8
 ------------------------------------------------------------------------------
 
 (C) 2024 Trifecta Tech Foundation 
@@ -7882,7 +7936,7 @@ freely, subject to the following restrictions:
 
 
 ------------------------------------------------------------------------------
-Text 129 – gilt für: zune-core 0.5.3, zune-jpeg 0.5.15
+Text 130 – gilt für: zune-core 0.5.3, zune-jpeg 0.5.15
 ------------------------------------------------------------------------------
 
 MIT License
@@ -7909,7 +7963,7 @@ SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 130 – gilt für: zune-core 0.5.3, zune-jpeg 0.5.15
+Text 131 – gilt für: zune-core 0.5.3, zune-jpeg 0.5.15
 ------------------------------------------------------------------------------
 
 zlib License
@@ -7931,4 +7985,572 @@ freely, subject to the following restrictions:
 2. Altered source versions must be plainly marked as such, and must not be
    misrepresented as being the original software.
 3. This notice may not be removed or altered from any source distribution.
+
+
+------------------------------------------------------------------------------
+Mitgeliefert: Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe) 1.25.261109001
+------------------------------------------------------------------------------
+
+Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe) - https://github.com/microsoft/terminal (LICENSE, tag v1.25.3131.0)
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Third-party notices of Microsoft.Windows.Console.ConPTY (conpty.dll, OpenConsole.exe) - NOTICE.md of https://github.com/microsoft/terminal, tag v1.25.3131.0
+
+# NOTICES AND INFORMATION
+Do Not Translate or Localize
+
+This software incorporates material from third parties. Microsoft makes certain
+open source code available at [http://3rdpartysource.microsoft.com](http://3rdpartysource.microsoft.com), or you may
+send a check or money order for US $5.00, including the product name, the open
+source component name, and version number, to:
+
+```
+Source Code Compliance Team
+Microsoft Corporation
+One Microsoft Way
+Redmond, WA 98052
+USA
+```
+
+Notwithstanding any other terms, you may reverse engineer this software to the
+extent required to debug changes to any libraries licensed under the GNU Lesser
+General Public License.
+
+## jsoncpp
+
+**Source**: [https://github.com/open-source-parsers/jsoncpp](https://github.com/open-source-parsers/jsoncpp)
+
+### License
+
+```
+Copyright (c) 2007-2010 Baptiste Lepilleur and The JsonCpp Authors
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use, copy,
+modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## chromium/base/numerics
+
+**Source**: [https://github.com/chromium/chromium/tree/master/base/numerics](https://github.com/chromium/chromium/tree/master/base/numerics)
+
+### License
+
+```
+Copyright 2015 The Chromium Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## \{fmt\}
+
+**Source**: [https://github.com/fmtlib/fmt](https://github.com/fmtlib/fmt)
+
+### License
+
+```
+MIT License
+
+Copyright (c) 2012 - present, Victor Zverovich
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+--- Optional exception to the license ---
+
+As an exception, if, as a result of your compiling your source code, portions
+of this Software are embedded into a machine-executable object form of such
+source code, you may redistribute such embedded portions in such object form
+without including the above copyright and permission notices.
+```
+
+## interval_tree
+
+**Source**: [https://github.com/ekg/IntervalTree](https://github.com/ekg/IntervalTree)
+
+### License
+
+```
+Copyright (c) 2011 Erik Garrison
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## PCG Random Number Generation
+
+**Source**: [https://github.com/imneme/pcg-cpp](https://github.com/imneme/pcg-cpp)
+
+### License
+
+```
+Copyright (c) 2014-2017 Melissa O'Neill and PCG Project contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## wyhash
+
+**Source**: [https://github.com/wangyi-fudan/wyhash](https://github.com/wangyi-fudan/wyhash)
+
+### License
+
+```
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <http://unlicense.org/>
+```
+
+## stb
+
+**Source**: [https://github.com/nothings/stb](https://github.com/nothings/stb)
+
+### License
+
+```
+This is free and unencumbered software released into the public domain.
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+software, either in source code form or as a compiled binary, for any purpose,
+commercial or non-commercial, and by any means.
+In jurisdictions that recognize copyright laws, the author or authors of this
+software dedicate any and all copyright interest in the software to the public
+domain. We make this dedication for the benefit of the public at large and to
+the detriment of our heirs and successors. We intend this dedication to be an
+overt act of relinquishment in perpetuity of all present and future rights to
+this software under copyright law.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## Oklab
+**Source**: [https://bottosson.github.io/posts/oklab/](https://bottosson.github.io/posts/oklab/)
+
+### License
+
+```
+Copyright (c) 2020 Björn Ottosson
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## ColorBrewer
+**Source**: [https://colorbrewer2.org/](https://colorbrewer2.org/)
+
+### License
+
+```
+Apache-Style Software License for ColorBrewer software and ColorBrewer Color Schemes
+
+Copyright (c) 2002 Cynthia Brewer, Mark Harrower, and The Pennsylvania State University.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+```
+
+## cmark
+**Source**: [https://github.com/commonmark/cmark](https://github.com/commonmark/cmark)
+
+### License
+
+```
+Copyright (c) 2014, John MacFarlane
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+-----
+
+houdini.h, houdini_href_e.c, houdini_html_e.c, houdini_html_u.c
+
+derive from https://github.com/vmg/houdini (with some modifications)
+
+Copyright (C) 2012 Vicent Martí
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-----
+
+buffer.h, buffer.c, chunk.h
+
+are derived from code (C) 2012 Github, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-----
+
+utf8.c and utf8.c
+
+are derived from utf8proc
+(<http://www.public-software-group.org/utf8proc>),
+(C) 2009 Public Software Group e. V., Berlin, Germany.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+-----
+
+The normalization code in normalize.py was derived from the
+markdowntest project, Copyright 2013 Karl Dubost:
+
+The MIT License (MIT)
+
+Copyright (c) 2013 Karl Dubost
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+-----
+
+The CommonMark spec (test/spec.txt) is
+
+Copyright (C) 2014-15 John MacFarlane
+
+Released under the Creative Commons CC-BY-SA 4.0 license:
+<http://creativecommons.org/licenses/by-sa/4.0/>.
+
+-----
+
+The test software in test/ is
+
+Copyright (c) 2014, John MacFarlane
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## fzf
+
+### License
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2013-2024 Junegunn Choi
+Copyright (c) 2021-2025 Simon Hauser
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+# Microsoft Open Source
+
+This product also incorporates source code from other Microsoft open source projects, all licensed under the MIT license.
+
+## `GSL`
+
+**Source**: [https://github.com/microsoft/GSL](https://github.com/microsoft/GSL)
+
+## `Microsoft-UI-XAML`
+
+**Source**: [https://github.com/microsoft/Microsoft-UI-XAML](https://github.com/microsoft/Microsoft-UI-XAML)
+
+## `VirtualDesktopUtils`
+
+**Source**: [https://github.com/microsoft/PowerToys](https://github.com/microsoft/PowerToys)
+
+## `wil`
+
+**Source**: [https://github.com/microsoft/wil](https://github.com/microsoft/wil)
+
+### License
+
+```
+The MIT License
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
 

@@ -48,3 +48,15 @@ pub fn image_to_file() -> Option<PathBuf> {
 pub fn image_to_file() -> Option<PathBuf> {
     None
 }
+
+/// Text in die Windows-Zwischenablage legen (OSC 52, #181). `false`, wenn das nicht ging (z. B. von einem
+/// anderen Programm gesperrt) – der Aufrufer nimmt dann den Weg über egui.
+#[cfg(windows)]
+pub fn set_text(text: &str) -> bool {
+    arboard::Clipboard::new().and_then(|mut c| c.set_text(text)).is_ok()
+}
+
+#[cfg(not(windows))]
+pub fn set_text(_text: &str) -> bool {
+    false
+}

@@ -213,6 +213,13 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress:
     if rep.has_conflicts() {
         return Err(BackupError::At(Where::Structure, Problem::StructureNames));
     }
+    // Schwellen der Fälligkeit: aus der Sicherung, sonst wie beim Update der Datenbank
+    let thresholds = match &p.due_thresholds {
+        Some(list) => list.clone(),
+        None if crate::planning::builtin_fields::has_preset_types(conn, pid)? => crate::due::default_thresholds(),
+        None => Vec::new(),
+    };
+    crate::planning::projects::set_due_thresholds(conn, pid, &thresholds).map_err(|e| BackupError::AtPlan(Where::Project, e))?;
     report.statuses = rep.created_statuses;
     report.types = rep.created_types;
     report.fields = rep.created_fields;
@@ -236,14 +243,26 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress:
         }
         for (t, d) in ty.iter().zip(&ds.types) {
             map.types.insert(d.id, t.id);
+            // eingebaute Felder (Beschreibung, Fälligkeit) über den Schlüssel, die übrigen in ihrer Reihenfolge; eine ältere
+            // Sicherung ohne Fälligkeit (vor 2.3) passt ebenso
             let fs = list_fields(conn, t.id)?;
-            if fs.len() != d.fields.len() {
-                return Err(BackupError::At(Where::Structure, Problem::StructureMismatch));
-            }
-            for (f, df) in fs.into_iter().zip(&d.fields) {
+            let mut used: Vec<i64> = Vec::new();
+            let targets = crate::planning::builtin_fields::builtin_targets(&d.fields.iter().map(|f| (f.key.as_deref(), f.name.as_deref(), f.kind)).collect::<Vec<_>>());
+            for (di, df) in d.fields.iter().enumerate() {
+                let f = match targets[di] {
+                    Some(k) => fs.iter().find(|f| f.is_fixed() && f.key.as_deref() == Some(k)),
+                    None => fs.iter().find(|f| !f.is_fixed() && !used.contains(&f.id)),
+                };
+                let Some(f) = f.filter(|f| !used.contains(&f.id)) else {
+                    return Err(BackupError::At(Where::Structure, Problem::StructureMismatch));
+                };
+                used.push(f.id);
                 map.fields.insert(df.id, f.id);
                 map.field_kinds.insert(df.id, f.kind);
-                field_info.insert(df.id, f);
+                field_info.insert(df.id, f.clone());
+            }
+            if fs.iter().any(|f| !f.is_fixed() && !used.contains(&f.id)) {
+                return Err(BackupError::At(Where::Structure, Problem::StructureMismatch));
             }
         }
     }

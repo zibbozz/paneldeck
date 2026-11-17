@@ -9,16 +9,19 @@ fn drive_split(p: &str) -> Option<(char, &str)> {
     }
 }
 
-/// Netzwerkpfad (UNC, auch `//server/…` oder `\\?\UNC\…`), der kein lokaler WSL-Pfad ist?
-/// Schon das bloße Prüfen eines solchen Pfads baut eine SMB-Verbindung auf (NTLM-Hash-Leak, Hänger).
+/// Netzwerk- oder Gerätepfad (UNC, `//server/…`, `\\?\UNC\…`, `\??\UNC\…`, `\\.\GLOBALROOT\Device\Mup\…` usw.), der kein
+/// lokaler Laufwerks- oder WSL-Pfad ist? Schon das bloße Prüfen eines solchen Pfads baut eine SMB-Verbindung auf (NTLM-Hash-
+/// Leak, Hänger). Gerätepfade (`\\?\`, `\\.\`, `\??\`) gelten nur mit Laufwerksbuchstaben dahinter als lokal (`\\?\C:\…`),
+/// andere `\\…`-Pfade nur als WSL-Freigabe (`\\wsl$\…`, `\\wsl.localhost\…`) – alles andere (auch `\\.\pipe\…`) gilt als
+/// entfernt. Übrige Pfade (`C:\…`, relativ, `/home/…` aus WSL) sind lokal.
 pub fn is_remote_unc(p: &str) -> bool {
     let s = p.replace('/', "\\").to_ascii_lowercase();
-    if !s.starts_with(r"\\") {
-        return false;
+    let dev = s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix(r"\\.\")).or_else(|| s.strip_prefix(r"\??\"));
+    if let Some(rest) = dev {
+        let b = rest.as_bytes();
+        return !(b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || b[2] == b'\\'));
     }
-    let s = s.strip_prefix(r"\\?\unc\").or_else(|| s.strip_prefix(r"\\.\unc\")).map(|r| format!(r"\\{r}")).unwrap_or(s.clone());
-    if s.starts_with(r"\\?\") || s.starts_with(r"\\.\") {
-        // Lokale Gerätepfade (\\?\C:\…) sind kein Netzwerk.
+    if !s.starts_with(r"\\") {
         return false;
     }
     !(s.starts_with(r"\\wsl$\") || s.starts_with(r"\\wsl.localhost\"))
@@ -77,5 +80,12 @@ mod tests {
         assert!(!is_remote_unc(r"\\?\C:\x"));
         assert!(!is_remote_unc(r"C:\Users\x"));
         assert!(!is_remote_unc("/home/x"));
+        // Geräte- und NT-Pfade, die auf Netzwerkfreigaben zeigen können: nie lokal.
+        for p in [r"\\.\GLOBALROOT\Device\Mup\evil\s", r"\??\UNC\evil\s", r"\\.\UNC\evil\s", r"\\.\pipe\x", r"\\?\Volume{x}\a", "//?/UNC/evil/s", r"\??\GLOBALROOT\x"] {
+            assert!(is_remote_unc(p), "{p}");
+        }
+        for p in [r"\\.\C:\x", r"\??\C:\x", "//?/c:/x", r"\\?\D:", r"\home\x", r"rel\a"] {
+            assert!(!is_remote_unc(p), "{p}");
+        }
     }
 }

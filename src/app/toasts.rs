@@ -283,6 +283,10 @@ impl App {
                     None => rect,
                 };
                 let resp = ui.interact(hit, Id::new(("toast-hit", id)), Sense::click());
+                if resp.hovered() {
+                    // Hover-Rahmen: der Toast schließt sich per Klick (#187)
+                    ui.painter().rect_stroke(rect, CornerRadius::same(RADIUS), Stroke::new(1.0_f32, ui.visuals().widgets.hovered.bg_stroke.color), egui::StrokeKind::Inside);
+                }
                 (rect, resp.on_hover_text(tip), action_hit)
             });
             let (rect, resp, hit_action) = out.inner;

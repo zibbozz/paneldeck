@@ -26,9 +26,13 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // Reiterwechsel der Fensterleiste (nicht Strg+Alt+Zahl: das ist AltGr auf deutschen Tastaturen)
     ("mode_terminals", "Alt+Shift+1"),
     ("mode_tasks", "Alt+Shift+2"),
-    // Zweite Belegung ohne Alt+Shift (Windows schaltet damit die Eingabesprache um); Strg+Zahl sendet das Terminal ohnehin nicht
+    // Zweite Belegung ohne Alt+Shift (Windows schaltet damit die Eingabesprache um); Strg+1/2 verbraucht der Hub; Strg+3…0 gehen ans Terminal (win32-input-mode, #183)
     ("mode_terminals_alt", "Ctrl+1"),
     ("mode_tasks_alt", "Ctrl+2"),
+    // Alle Sitzungen schließen (#156): standardmäßig ohne Kürzel (leer = keins)
+    ("close_all", ""),
+    // Sitzung neu laden (#169): standardmäßig ohne Kürzel
+    ("reload", ""),
 ];
 
 /// Kürzel, die in jedem Bereich gelten (Reiterwechsel) – die übrigen nur im Terminal-Bereich.
@@ -61,6 +65,8 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "mode_tasks" => ("Reiter „Todo-Liste“", "“Todo list” tab"),
         "mode_terminals_alt" => ("Reiter „Terminal Hub“ (zweite Belegung)", "“Terminal Hub” tab (alternative)"),
         "mode_tasks_alt" => ("Reiter „Todo-Liste“ (zweite Belegung)", "“Todo list” tab (alternative)"),
+        "close_all" => ("Alle Sitzungen schließen", "Close all sessions"),
+        "reload" => ("Sitzung neu laden", "Reload session"),
         _ => ("?", "?"),
     };
     if de { d } else { e }
@@ -111,7 +117,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for (_, d) in DEFAULTS {
+        for (_, d) in DEFAULTS.iter().filter(|(_, d)| !d.is_empty()) {
             let (m, k) = parse(d).unwrap_or_else(|| panic!("parse {d}"));
             assert_eq!(&format(m, k), d);
         }
@@ -127,10 +133,17 @@ mod tests {
     fn defaults_are_unique_and_labelled() {
         let mut seen = std::collections::HashSet::new();
         for (id, d) in DEFAULTS {
-            assert!(seen.insert(*d), "Kürzel {d} doppelt");
+            assert!(d.is_empty() || seen.insert(*d), "Kürzel {d} doppelt");
             assert_ne!(label(id, true), "?", "{id} ohne Beschriftung");
             assert_ne!(label(id, true), label(id, false), "{id}: Texte gleich in beiden Sprachen");
         }
         assert!(is_global("mode_tasks") && is_global("mode_terminals") && !is_global("new"));
+    }
+
+    #[test]
+    fn close_all_has_no_default_shortcut() {
+        assert_eq!(DEFAULTS.iter().find(|(id, _)| *id == "close_all").map(|(_, d)| *d), Some(""));
+        assert!(parse("").is_none(), "leeres Kürzel löst nie aus");
+        assert!(!is_global("close_all"));
     }
 }

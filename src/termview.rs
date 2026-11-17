@@ -1,6 +1,7 @@
 //! Zeichnen eines Terminals und Verarbeitung von Tastatur/Maus.
 
 use crate::terminal::Session;
+use crate::vtkeys;
 use crate::theme::Theme;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -14,6 +15,11 @@ use eframe::egui::{
 };
 
 const PAD: f32 = 8.0;
+
+/// Gleiche von Programmen gesetzte Farben? (`Colors` hat kein `PartialEq`.)
+fn same_colors(a: &alacritty_terminal::term::color::Colors, b: &alacritty_terminal::term::color::Colors) -> bool {
+    (0..alacritty_terminal::term::color::COUNT).all(|i| a[i] == b[i])
+}
 
 pub fn cell_size(ui: &Ui, font: &FontId) -> Vec2 {
     let g = ui.painter().layout_no_wrap("M".to_string(), font.clone(), Color32::WHITE);
@@ -31,6 +37,8 @@ pub fn show(
     cwd: &str,
     alt_wheel: crate::state::AltScreenWheel,
 ) -> Response {
+    // Kein eigener Zeiger (Pfeil; Entscheidung #187): Knöpfe über dem Terminal (Suche, „Neu starten“) bekommen so die Hand
+    // vom globalen Nachlauf (`afford`), ein Verweis mit Strg setzt sie unten selbst.
     let response = ui.interact(rect, id, Sense::click_and_drag());
     if response.clicked() || response.drag_started() || response.secondary_clicked() {
         response.request_focus();
@@ -49,17 +57,129 @@ pub fn show(
     let inner = rect.shrink(PAD);
     let cols = (inner.width() / cs.x).floor().max(2.0) as u16;
     let rows = (inner.height() / cs.y).floor().max(1.0) as u16;
+    // Für Antworten an das Programm (Farbabfragen OSC 4/10/11/12, Pixelgrößen CSI 14t/16t).
+    let ppp = ui.ctx().pixels_per_point();
+    session.set_view(theme, (cs.x * ppp).round().clamp(0.0, u16::MAX as f32) as u16, (cs.y * ppp).round().clamp(0.0, u16::MAX as f32) as u16);
     session.resize(cols, rows);
 
     if focused {
         handle_keyboard(ui, session);
     }
-    let opened_link = handle_links(ui, &response, session, inner, cs, cwd);
+    let (opened_link, osc8_hover) = handle_links(ui, &response, session, inner, cs, cwd);
     if !opened_link {
         handle_mouse(ui, &response, session, inner, cs, alt_wheel);
     }
-    paint(ui, rect, inner, session, theme, font, cs, focused);
+    let cursor_on = cursor_blink_phase(ui, id, session, focused);
+    paint(ui, rect, inner, session, theme, font, cs, focused, cursor_on, osc8_hover.as_ref());
     response
+}
+
+/// Einstellung „Blinkender Cursor“ (#183); die App schreibt sie jedes Bild (wie `mcp::LEVEL`).
+pub static CURSOR_BLINK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Halbe Blinkperiode (Sekunden), wie der Standard von Windows.
+const BLINK_HALF: f64 = 0.53;
+/// Nach so langer Zeit ohne Eingabe hört der Cursor auf zu blinken (spart Neuzeichnen).
+const BLINK_IDLE: f64 = 30.0;
+
+/// Ist der Cursor in dieser Blinkphase sichtbar? Blinkt nur, wenn das Programm es anfordert (DECSCUSR 1/3/5,
+/// `CSI ? 12 h`), die Einstellung an ist und das Terminal im Fenster im Vordergrund den Fokus hat; jede Eingabe
+/// beginnt die Phase neu (beim Tippen bleibt er sichtbar). Fordert das nächste Neuzeichnen zum Phasenwechsel an.
+fn cursor_blink_phase(ui: &Ui, id: Id, session: &Session, focused: bool) -> bool {
+    let blinking = session.term.lock().unwrap_or_else(|e| e.into_inner()).cursor_style().blinking;
+    if !(focused && blinking && CURSOR_BLINK.load(std::sync::atomic::Ordering::Relaxed) && ui.input(|i| i.focused)) {
+        return true;
+    }
+    let key = id.with("cursor-blink");
+    let (now, typed) = ui.input(|i| (i.time, i.events.iter().any(|e| matches!(e, Event::Key { pressed: true, .. } | Event::Text(_) | Event::Paste(_)))));
+    let epoch = match ui.data(|d| d.get_temp::<f64>(key)) {
+        Some(t) if !typed && t <= now => t,
+        _ => now,
+    };
+    ui.data_mut(|d| d.insert_temp(key, epoch));
+    let (on, next) = blink_state(now - epoch);
+    if let Some(s) = next {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(s));
+    }
+    on
+}
+
+/// Blinkzustand nach `elapsed` Sekunden seit der letzten Eingabe: (sichtbar, Sekunden bis zum nächsten Wechsel).
+fn blink_state(elapsed: f64) -> (bool, Option<f64>) {
+    if elapsed >= BLINK_IDLE {
+        return (true, None);
+    }
+    let phase = (elapsed / BLINK_HALF).floor() as i64;
+    let next = (BLINK_HALF - elapsed % BLINK_HALF).min(BLINK_IDLE - elapsed).max(0.01);
+    (phase % 2 == 0, Some(next))
+}
+
+/// Schriftfamilien der Schnitte fett/kursiv (einmal angelegt, statt je Zelle einen `Arc<str>`).
+fn style_family(name: &'static str) -> egui::FontFamily {
+    static FAMS: std::sync::OnceLock<[egui::FontFamily; 3]> = std::sync::OnceLock::new();
+    let f = FAMS.get_or_init(|| {
+        [crate::sysfonts::FAMILY_BOLD, crate::sysfonts::FAMILY_ITALIC, crate::sysfonts::FAMILY_BOLD_ITALIC].map(|n| egui::FontFamily::Name(n.into()))
+    });
+    match name {
+        crate::sysfonts::FAMILY_BOLD => f[0].clone(),
+        crate::sysfonts::FAMILY_ITALIC => f[1].clone(),
+        _ => f[2].clone(),
+    }
+}
+
+/// Neigung nachgezeichneter Kursivschrift (x-Versatz je Höheneinheit über der Grundlinie).
+const SLANT: f32 = 0.2;
+
+/// Text einer Zelle mit SGR-Fett/Kursiv zeichnen: echter Schnitt, wenn vorhanden, sonst nachgezeichnet (fett: zweimal
+/// um ein Pixel versetzt; kursiv: die Glyphen-Dreiecke geschert).
+#[allow(clippy::too_many_arguments)]
+fn draw_cell_text(ui: &Ui, painter: &egui::Painter, cell: Rect, width: f32, wide: bool, s: String, font: &FontId, fg: Color32, bold: bool, italic: bool, ppp: f32) {
+    let plan = crate::sysfonts::plan(bold, italic);
+    let f = match plan.family {
+        Some(n) => FontId::new(font.size, style_family(n)),
+        None => font.clone(),
+    };
+    let g = painter.layout_no_wrap(s, f, fg);
+    let x = if wide { cell.min.x + ((width - g.size().x) / 2.0).max(0.0) } else { cell.min.x };
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let pos = Pos2::new(snap(x), snap(cell.min.y));
+    let dx = snap((font.size / 20.0).max(1.0 / ppp)).max(1.0 / ppp);
+    if plan.fake_italic {
+        let base = cell.max.y - cell.height() * 0.22;
+        let size = ui.ctx().fonts(|fo| fo.font_image_size());
+        let mesh = skewed_text(&g, pos, base, fg, size);
+        if plan.fake_bold {
+            let mut m2 = mesh.clone();
+            m2.translate(Vec2::new(dx, 0.0));
+            painter.add(egui::Shape::mesh(m2));
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    } else {
+        if plan.fake_bold {
+            painter.galley(pos + Vec2::new(dx, 0.0), g.clone(), fg);
+        }
+        painter.galley(pos, g, fg);
+    }
+}
+
+/// Glyphen eines Galleys als geschertes Dreiecksnetz (nachgezeichnete Kursivschrift). `tex_size` = Größe des
+/// Schrift-Atlas (die Netze im Galley tragen Texel-Koordinaten, die der Tessellator sonst selbst umrechnet).
+fn skewed_text(g: &egui::Galley, pos: Pos2, base: f32, fg: Color32, tex_size: [usize; 2]) -> egui::Mesh {
+    let norm = Vec2::new(1.0 / tex_size[0].max(1) as f32, 1.0 / tex_size[1].max(1) as f32);
+    let mut mesh = egui::Mesh::default();
+    for row in &g.rows {
+        let m = &row.visuals.mesh;
+        if m.is_empty() {
+            continue;
+        }
+        mesh.texture_id = m.texture_id;
+        let off = mesh.vertices.len() as u32;
+        mesh.indices.extend(m.indices.iter().map(|i| i + off));
+        mesh.vertices.extend(m.vertices.iter().map(|v| {
+            let p = pos + row.pos.to_vec2() + v.pos.to_vec2();
+            egui::epaint::Vertex { pos: Pos2::new(p.x + (base - p.y) * SLANT, p.y), uv: (v.uv.to_vec2() * norm).to_pos2(), color: fg }
+        }));
+    }
+    mesh
 }
 
 fn paint(
@@ -71,12 +191,22 @@ fn paint(
     font: &FontId,
     cs: Vec2,
     focused: bool,
+    cursor_on: bool,
+    osc8_hover: Option<&alacritty_terminal::term::cell::Hyperlink>,
 ) {
     let ppp = ui.ctx().pixels_per_point();
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme.bg);
 
     let term = session.term.lock().unwrap_or_else(|e| e.into_inner());
+    // Von Programmen gesetzte Farben (OSC 4/10/11/12; zurückgesetzt mit OSC 104/110–112) vor denen des Themes.
+    let ov = *term.colors();
+    let mut cache = session.theme_cache.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = cache.as_ref().is_some_and(|(base, colors, _)| base == theme && same_colors(colors, &ov));
+    if !fresh {
+        *cache = theme.with_overrides(&ov).map(|t| (theme.clone(), Box::new(ov), t));
+    }
+    let theme = cache.as_ref().map(|(_, _, t)| t).unwrap_or(theme);
+    painter.rect_filled(rect, 0.0, theme.bg);
     let content = term.renderable_content();
     let offset = content.display_offset as i32;
     let rows = session.rows as i32;
@@ -102,6 +232,19 @@ fn paint(
 
     let cells: Vec<_> = content.display_iter.collect();
     let mut skip_until = 0usize;
+    // OSC-8-Unterstreichung je Zeile als zusammenhängender Lauf (gepunktet bzw. beim Strg-Hover durchgezogen), damit das
+    // Punktmuster nicht an jeder Zelle neu ansetzt: (Rechteck, Farbe, hervorgehoben).
+    let mut link_run: Option<(Rect, Color32, bool)> = None;
+    let flush_link = |run: Option<(Rect, Color32, bool)>| {
+        if let Some((r, col, hot)) = run {
+            if hot {
+                let yy = r.max.y - 1.5;
+                painter.line_segment([Pos2::new(r.min.x, yy), Pos2::new(r.max.x, yy)], Stroke::new(1.5_f32, crate::style::ACCENT));
+            } else {
+                crate::glyphs::draw_underline(&painter, crate::glyphs::Underline::Dotted, r, col, ppp);
+            }
+        }
+    };
     for (idx, ic) in cells.iter().enumerate() {
         if idx < skip_until {
             continue;
@@ -121,8 +264,8 @@ fn paint(
         let bold = flags.contains(Flags::BOLD);
         let dim = flags.contains(Flags::DIM);
 
-        let mut fg = theme.resolve(cell.fg, bold, dim);
-        let mut bg = theme.resolve(cell.bg, false, false);
+        let mut fg = theme.resolve_ov(cell.fg, bold, dim, &ov);
+        let mut bg = theme.resolve_ov(cell.bg, false, false, &ov);
         if flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
         }
@@ -153,7 +296,7 @@ fn paint(
             let zw = cell.zerowidth();
             let vs16 = zw.is_some_and(|z| z.contains(&'\u{fe0f}'));
             let wide = flags.contains(Flags::WIDE_CHAR);
-            let mut drawn = crate::boxdraw::draw(&painter, cell_rect, ch, fg, ppp);
+            let mut drawn = crate::boxdraw::draw(&painter, cell_rect, ch, fg, ppp) || crate::glyphs::draw_powerline(&painter, cell_rect, ch, fg, ppp);
             if !drawn && crate::emoji::wants_color(ch, wide, vs16) {
                 let side = if wide { (cs.x * 2.0).min(cs.y) } else { cs.y * 0.85 };
                 if let Some((tex, aspect)) = crate::emoji::texture(ui.ctx(), ch, (side * ppp).round() as u32) {
@@ -170,22 +313,30 @@ fn paint(
                 if let Some(z) = zw {
                     s.extend(z.iter().filter(|c| !matches!(**c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}' | '\u{200b}')));
                 }
-                if wide {
-                    // Breite Zeichen (CJK u. a.) in den zwei Zellen zentrieren.
-                    let g = painter.layout_no_wrap(s, font.clone(), fg);
-                    let x = cell_rect.min.x + ((width - g.size().x) / 2.0).max(0.0);
-                    painter.galley(Pos2::new(x, cell_rect.min.y), g, fg);
-                } else {
-                    painter.text(cell_rect.min, Align2::LEFT_TOP, s, font.clone(), fg);
-                }
+                // Breite Zeichen (CJK u. a.) werden in den zwei Zellen zentriert.
+                draw_cell_text(ui, &painter, cell_rect, width, wide, s, font, fg, bold, flags.contains(Flags::ITALIC), ppp);
             }
         }
-        if flags.intersects(Flags::ALL_UNDERLINES) {
-            let yy = cell_rect.max.y - 1.5;
-            painter.line_segment(
-                [Pos2::new(cell_rect.min.x, yy), Pos2::new(cell_rect.max.x, yy)],
-                Stroke::new(1.0_f32, fg),
-            );
+        // Unterstreichung (SGR 4:1–4:5, Farbe SGR 58); OSC-8-Links ohne eigene Unterstreichung dezent gepunktet.
+        let link = cell.hyperlink();
+        let link_hovered = osc8_hover.is_some_and(|h| link.as_ref() == Some(h));
+        if let Some(style) = crate::glyphs::underline_of(flags) {
+            let ucol = cell.underline_color().map(|c| theme.resolve(c, false, false)).unwrap_or(fg);
+            crate::glyphs::draw_underline(&painter, style, cell_rect, ucol, ppp);
+        }
+        let seg = if link_hovered {
+            Some((cell_rect, crate::style::ACCENT, true))
+        } else if link.is_some() && crate::glyphs::underline_of(flags).is_none() {
+            Some((cell_rect, fg.gamma_multiply(0.6), false))
+        } else {
+            None
+        };
+        if let Some((r, col, hot)) = seg {
+            match &mut link_run {
+                // Anschluss in derselben Zeile mit gleicher Art und Farbe: verlängern.
+                Some((lr, lc, lh)) if (lr.max.x - r.min.x).abs() < 0.5 && lr.min.y == r.min.y && *lc == col && *lh == hot => lr.max.x = r.max.x,
+                _ => flush_link(link_run.replace((r, col, hot))),
+            }
         }
         if flags.contains(Flags::STRIKEOUT) {
             let yy = cell_rect.center().y;
@@ -196,6 +347,8 @@ fn paint(
         }
     }
 
+    flush_link(link_run.take());
+
     // Cursor
     if cursor.shape != CursorShape::Hidden {
         let row = cursor.point.line.0 + offset;
@@ -205,6 +358,8 @@ fn paint(
             let cr = Rect::from_min_size(Pos2::new(x, y), cs);
             if !focused {
                 painter.rect_stroke(cr, 0.0, Stroke::new(1.0_f32, theme.cursor), StrokeKind::Inside);
+            } else if !cursor_on {
+                // Blinkender Cursor in der dunklen Phase: nichts zeichnen (das Zeichen darunter steht schon da).
             } else {
                 match cursor.shape {
                     CursorShape::Beam => {
@@ -479,28 +634,87 @@ pub fn wheel_arrow(up: bool, app_cursor: bool) -> &'static [u8] {
     }
 }
 
-/// Strg+Klick auf Links/Pfade. Gibt `true` zurück, wenn geöffnet wurde (dann keine weitere Mausbehandlung).
-fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect, cs: Vec2, cwd: &str) -> bool {
+/// Strg+Klick auf Links/Pfade und OSC-8-Links. Gibt zurück, ob geklickt wurde (dann keine weitere Mausbehandlung),
+/// und den OSC-8-Link unter dem Mauszeiger bei gedrückter Strg-Taste (zum Unterstreichen).
+fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect, cs: Vec2, cwd: &str) -> (bool, Option<alacritty_terminal::term::cell::Hyperlink>) {
     session.hover_link = None;
-    let ctrl = ui.input(|i| i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt);
-    if !ctrl || !response.hovered() {
-        return false;
+    if !response.hovered() {
+        return (false, None);
     }
-    let Some(pos) = response.hover_pos() else { return false };
+    let Some(pos) = response.hover_pos() else { return (false, None) };
     let col = ((pos.x - inner.min.x) / cs.x).floor();
     let row = ((pos.y - inner.min.y) / cs.y).floor();
-    if col < 0.0 || row < 0.0 || row as u16 >= session.rows {
-        return false;
+    if col < 0.0 || row < 0.0 || row as u16 >= session.rows || col as u16 >= session.cols {
+        return (false, None);
+    }
+    let ctrl = ui.input(|i| i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt);
+    // OSC 8: das Programm hat Text und Ziel getrennt gesetzt – das Ziel zeigt der Tooltip.
+    let osc8 = {
+        let t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+        let off = t.grid().display_offset() as i32;
+        t.grid()[Point::new(Line(row as i32 - off), Column(col as usize))].hyperlink()
+    };
+    if let Some(h) = osc8 {
+        use crate::hyperlink::LinkKind;
+        let kind = crate::hyperlink::classify(h.uri());
+        let (resting, idle) = ui.input(|i| (i.pointer.time_since_last_movement(), !i.pointer.any_down()));
+        if idle && (ctrl || resting >= TOOLTIP_DELAY) {
+            link_tooltip(ui, response, h.uri(), &kind);
+        } else if idle {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(TOOLTIP_DELAY - resting + 0.02));
+        }
+        if !ctrl {
+            return (false, None);
+        }
+        if !matches!(kind, LinkKind::Denied(_)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked_by(egui::PointerButton::Primary) {
+            match kind {
+                LinkKind::Web => crate::hyperlink::open(h.uri()),
+                LinkKind::Ask { .. } => crate::hyperlink::request_confirm(ui.ctx(), h.uri()),
+                LinkKind::Denied(_) => {}
+            }
+            return (true, Some(h));
+        }
+        return (false, Some(h));
+    }
+    if !ctrl {
+        return (false, None);
     }
     let chars = session.row_chars(row as usize);
-    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else { return false };
+    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else { return (false, None) };
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     session.hover_link = Some((row as usize, link.start, link.end, link.target.clone()));
     if response.clicked_by(egui::PointerButton::Primary) {
         crate::links::open(&link.target);
-        return true;
+        return (true, None);
     }
-    false
+    (false, None)
+}
+
+/// Ruhezeit des Mauszeigers über einem OSC-8-Link, bis der Tooltip ohne Strg erscheint (Sekunden).
+const TOOLTIP_DELAY: f32 = 0.6;
+
+/// Tooltip mit dem echten Ziel eines OSC-8-Links (bereinigt und gekürzt; die Rückfrage zeigt es ganz).
+fn link_tooltip(ui: &Ui, response: &Response, uri: &str, kind: &crate::hyperlink::LinkKind) {
+    use crate::hyperlink::LinkKind;
+    use crate::state::t;
+    // Bereinigt und in der Mitte gekürzt (Anfang und Dateiende bleiben sichtbar); der Rechnername eigens darunter.
+    let target = crate::hyperlink::middle_truncate(&crate::vtnotify::sanitize(uri, crate::hyperlink::URI_MAX), 160);
+    let host = crate::hyperlink::host(uri).filter(|h| !h.is_empty()).map(|h| crate::vtnotify::sanitize(h, 120));
+    let hint = match kind {
+        LinkKind::Web => t("Strg+Klick öffnet den Link", "Ctrl+click opens the link"),
+        LinkKind::Ask { .. } => t("Strg+Klick: vor dem Öffnen wird nachgefragt", "Ctrl+click: asks before opening"),
+        LinkKind::Denied(_) => t("Dieser Link wird nicht geöffnet (Schema oder Ziel nicht erlaubt)", "This link is not opened (scheme or target not allowed)"),
+    };
+    egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), response.id.with("osc8-tip"), egui::PopupAnchor::Pointer).gap(12.0).show(|ui| {
+        ui.label(egui::RichText::new(target).monospace());
+        if let Some(h) = host {
+            ui.label(egui::RichText::new(format!("{} {h}", t("Rechner:", "Host:"))).monospace().strong());
+        }
+        ui.label(egui::RichText::new(hint).small());
+    });
 }
 
 fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect, cs: Vec2, alt_wheel: crate::state::AltScreenWheel) {
@@ -624,6 +838,33 @@ fn insert_held() -> bool {
     }
 }
 
+/// Taste des Ziffernblocks? egui meldet den Ort nicht (Ziffernblock-5 = `Key::Num5`); unter Windows zeigt der
+/// Tastenzustand von VK_NUMPAD0…9 / VK_MULTIPLY / VK_ADD / VK_SUBTRACT / VK_DECIMAL / VK_DIVIDE, woher das Zeichen kam
+/// (NumLock an – sonst wären es Pfeil- und Bildtasten).
+#[cfg(windows)]
+fn numpad_down(c: char) -> bool {
+    let vk = match c {
+        '0'..='9' => 0x60 + (c as u16 - '0' as u16),
+        '*' => 0x6A,
+        '+' => 0x6B,
+        '-' => 0x6D,
+        '.' | ',' => 0x6E,
+        '/' => 0x6F,
+        _ => return false,
+    };
+    vk_down(vk)
+}
+
+#[cfg(not(windows))]
+fn numpad_down(_c: char) -> bool {
+    false
+}
+
+/// Tasten, deren Drücken gesendet wurde (mit Ziffernblock-Merkmal), und zu welcher Sitzung: nur deren Loslassen geht
+/// ans Programm (kitty-Flag 2). Sonst käme das Loslassen von Tastenkürzeln des Hubs an, deren Drücken egui schon
+/// verbraucht hat. Geleert bei Fokusverlust und Sitzungswechsel.
+static KEYS_DOWN: std::sync::Mutex<(usize, Vec<(Key, bool)>)> = std::sync::Mutex::new((0, Vec::new()));
+
 fn handle_keyboard(ui: &Ui, session: &mut Session) {
     let events = ui.input(|i| i.events.clone());
     let pasted_text = events.iter().any(|e| matches!(e, Event::Paste(_)));
@@ -633,8 +874,34 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
             paste(session, &format!("{t} "));
         }
     }
-    for ev in events {
+    let mode = session.key_mode();
+    {
+        let me = session as *const Session as usize;
+        let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+        if down.0 != me {
+            *down = (me, Vec::new());
+        }
+    }
+    // Der Broadcast bekommt jede Taste und jeden Text, auch wenn hier nichts gesendet wird: Ziele mit anderem Modus
+    // kodieren selbst (z. B. Text, den kitty-Flag 8 hier mit der Taste schon gesendet hat).
+    let key_input = |session: &mut Session, k: vtkeys::KeyPress| -> vtkeys::Encoded {
+        let out = vtkeys::encode_key(&k, mode);
+        if out.bytes.is_empty() {
+            session.write_input(&[], vtkeys::TeeInput::key(&k));
+        } else {
+            send_input(session, &out.bytes, vtkeys::TeeInput::key(&k));
+        }
+        out
+    };
+    // Index des `Event::Text`, das zur gerade kodierten Taste gehört und mit ihr schon gesendet ist.
+    let mut skip: Option<usize> = None;
+    // Das vorige Ereignis war ein nicht verbrauchter Tastendruck. Text mit reinem Alt gilt nur dann: Kürzel des Hubs
+    // (Alt+1…9, Alt+Umschalt+1/2, eigene Alt-Belegungen) verbraucht egui nur als Taste, ihr Text bliebe übrig.
+    let mut after_key = false;
+    for (i, ev) in events.iter().enumerate() {
+        let was_after_key = std::mem::take(&mut after_key);
         match ev {
+            Event::WindowFocused(false) => KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner()).1.clear(),
             // egui-winit wandelt Strg+C / Strg+X (und Strg+Einfg / Umschalt+Entf) in Copy/Cut um und
             // liefert dafür KEIN Key-Ereignis – ohne diese Zweige käme ^C nie im Terminal an.
             Event::Copy => {
@@ -643,53 +910,85 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                     ui.ctx().copy_text(t);
                     session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
                 } else if !ui.input(|i| i.modifiers.shift) && !insert_held() {
-                    send(session, b"\x03");
+                    key_input(session, vtkeys::KeyPress::new(Key::C, Modifiers::CTRL));
                 }
             }
             Event::Cut => {
                 let m = ui.input(|i| i.modifiers);
                 if m.ctrl {
-                    send(session, b"\x18");
+                    key_input(session, vtkeys::KeyPress::new(Key::X, Modifiers::CTRL));
                 } else {
                     // Umschalt+Entf
-                    let mode = *session.term.lock().unwrap_or_else(|e| e.into_inner()).mode();
-                    if let Some(bytes) = encode_key(Key::Delete, m, mode.contains(TermMode::APP_CURSOR)) {
-                        send(session, &bytes);
-                    }
+                    key_input(session, vtkeys::KeyPress::new(Key::Delete, m));
                 }
             }
             Event::Text(t) => {
                 let m = ui.input(|i| i.modifiers);
-                let altgr = m.ctrl && m.alt;
-                let pure_ctrl = m.ctrl && !m.alt;
-                let pure_alt = m.alt && !m.ctrl;
-                if !(pure_ctrl || pure_alt) || altgr {
-                    if !t.chars().all(|c| c.is_control()) {
-                        send(session, t.as_bytes());
-                    }
+                if m.alt && !m.ctrl && !was_after_key {
+                    continue; // Rest eines vom Hub verbrauchten Alt-Kürzels
                 }
-            }
-            Event::Paste(t) => paste(session, &t),
-            Event::Key { key, pressed: true, modifiers, .. } => {
-                // Einfügen: Text kommt über Event::Paste, Bilder über ctrl_v_pressed(); das Steuerzeichen ^V
-                // selbst wird nicht gesendet (sonst fügt z. B. PSReadLine doppelt ein).
-                if key == Key::V && modifiers.ctrl && !modifiers.alt {
+                let numpad = t.chars().count() == 1 && t.chars().next().is_some_and(numpad_down);
+                let tee = vtkeys::TeeInput::Text { text: t.clone(), mods: m, numpad };
+                if skip == Some(i) {
+                    session.write_input(&[], tee); // hier schon mit der Taste gesendet
                     continue;
                 }
-                // Kopieren
-                if key == Key::C && modifiers.ctrl && !modifiers.alt {
-                    let sel = session.term.lock().unwrap_or_else(|e| e.into_inner()).selection_to_string();
-                    if let Some(t) = sel.filter(|t| !t.is_empty()) {
-                        ui.ctx().copy_text(t);
-                        session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
-                        continue;
-                    } else if modifiers.shift {
+                let bytes = vtkeys::encode_text(t, m, numpad, mode);
+                if bytes.is_empty() {
+                    session.write_input(&[], tee);
+                } else {
+                    send_input(session, &bytes, tee);
+                }
+            }
+            Event::Paste(t) => paste(session, t),
+            Event::Key { key, physical_key, pressed, repeat, modifiers } => {
+                let (key, modifiers) = (*key, *modifiers);
+                if *pressed {
+                    // Einfügen: Text kommt über Event::Paste, Bilder über ctrl_v_pressed(); das Steuerzeichen ^V
+                    // selbst wird nicht gesendet (sonst fügt z. B. PSReadLine doppelt ein).
+                    if key == Key::V && modifiers.ctrl && !modifiers.alt {
                         continue;
                     }
+                    // Kopieren
+                    if key == Key::C && modifiers.ctrl && !modifiers.alt {
+                        let sel = session.term.lock().unwrap_or_else(|e| e.into_inner()).selection_to_string();
+                        if let Some(t) = sel.filter(|t| !t.is_empty()) {
+                            ui.ctx().copy_text(t);
+                            session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
+                            continue;
+                        } else if modifiers.shift {
+                            continue;
+                        }
+                    }
+                    after_key = true;
                 }
-                let mode = *session.term.lock().unwrap_or_else(|e| e.into_inner()).mode();
-                if let Some(bytes) = encode_key(key, modifiers, mode.contains(TermMode::APP_CURSOR)) {
-                    send(session, &bytes);
+                let text = match events.get(i + 1) {
+                    Some(Event::Text(t)) => Some(t.as_str()),
+                    _ => None,
+                };
+                let phase = match (*pressed, *repeat) {
+                    (false, _) => vtkeys::Phase::Release,
+                    (true, true) => vtkeys::Phase::Repeat,
+                    (true, false) => vtkeys::Phase::Press,
+                };
+                let numpad = if phase == vtkeys::Phase::Release {
+                    // Beim Loslassen ist die Taste schon oben: Merkmal vom Drücken nehmen.
+                    let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some(pos) = down.1.iter().position(|(k, _)| *k == key) else { continue };
+                    down.1.remove(pos).1
+                } else {
+                    key_digit(key).is_some_and(numpad_down)
+                };
+                let kp = vtkeys::KeyPress { key, physical: *physical_key, mods: modifiers, phase, numpad, text };
+                let out = key_input(session, kp);
+                if out.eat_text && text.is_some() {
+                    skip = Some(i + 1);
+                }
+                if !out.bytes.is_empty() && phase != vtkeys::Phase::Release {
+                    let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+                    if !down.1.iter().any(|(k, _)| *k == key) {
+                        down.1.push((key, numpad));
+                    }
                 }
             }
             _ => {}
@@ -697,104 +996,35 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
     }
 }
 
-fn send(session: &mut Session, bytes: &[u8]) {
-    {
-        let mut t = session.term.lock().unwrap_or_else(|e| e.into_inner());
-        if t.grid().display_offset() > 0 {
-            t.scroll_display(Scroll::Bottom);
-        }
-        t.selection = None;
-    }
-    session.write(bytes);
-}
-
-fn paste(session: &mut Session, text: &str) {
-    {
-        let mut t = session.term.lock().unwrap_or_else(|e| e.into_inner());
-        if t.grid().display_offset() > 0 {
-            t.scroll_display(Scroll::Bottom);
-        }
-        t.selection = None;
-    }
-    session.send_text(text, false);
-}
-
-fn mod_param(m: Modifiers) -> u8 {
-    1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.ctrl as u8
-}
-
-fn encode_key(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
-    let altgr = m.ctrl && m.alt;
-    let any_mod = m.shift || m.alt || m.ctrl;
-    let csi = |final_byte: char| -> Vec<u8> {
-        if any_mod {
-            format!("\x1b[1;{}{}", mod_param(m), final_byte).into_bytes()
-        } else if app_cursor {
-            format!("\x1bO{final_byte}").into_bytes()
-        } else {
-            format!("\x1b[{final_byte}").into_bytes()
-        }
-    };
-    let tilde = |n: u8| -> Vec<u8> {
-        if any_mod {
-            format!("\x1b[{};{}~", n, mod_param(m)).into_bytes()
-        } else {
-            format!("\x1b[{n}~").into_bytes()
-        }
-    };
-    let b = |s: &str| Some(s.as_bytes().to_vec());
+/// Ziffer bzw. Rechenzeichen einer Taste, die es auch auf dem Ziffernblock gibt.
+fn key_digit(key: Key) -> Option<char> {
+    let n = key.name();
     match key {
-        Key::Enter => {
-            if m.shift || m.alt || m.ctrl { b("\x1b\r") } else { b("\r") }
-        }
-        Key::Backspace => {
-            if m.ctrl { b("\x17") } else if m.alt { b("\x1b\x7f") } else { b("\x7f") }
-        }
-        Key::Tab => if m.shift { b("\x1b[Z") } else { b("\t") },
-        Key::Escape => b("\x1b"),
-        Key::ArrowUp => Some(csi('A')),
-        Key::ArrowDown => Some(csi('B')),
-        Key::ArrowRight => Some(csi('C')),
-        Key::ArrowLeft => Some(csi('D')),
-        Key::Home => Some(csi('H')),
-        Key::End => Some(csi('F')),
-        Key::Insert => Some(tilde(2)),
-        Key::Delete => Some(tilde(3)),
-        Key::PageUp => Some(tilde(5)),
-        Key::PageDown => Some(tilde(6)),
-        Key::F1 => Some(if any_mod { format!("\x1b[1;{}P", mod_param(m)).into_bytes() } else { b"\x1bOP".to_vec() }),
-        Key::F2 => Some(if any_mod { format!("\x1b[1;{}Q", mod_param(m)).into_bytes() } else { b"\x1bOQ".to_vec() }),
-        Key::F3 => Some(if any_mod { format!("\x1b[1;{}R", mod_param(m)).into_bytes() } else { b"\x1bOR".to_vec() }),
-        Key::F4 => Some(if any_mod { format!("\x1b[1;{}S", mod_param(m)).into_bytes() } else { b"\x1bOS".to_vec() }),
-        Key::F5 => Some(tilde(15)),
-        Key::F6 => Some(tilde(17)),
-        Key::F7 => Some(tilde(18)),
-        Key::F8 => Some(tilde(19)),
-        Key::F9 => Some(tilde(20)),
-        Key::F10 => Some(tilde(21)),
-        Key::F11 => Some(tilde(23)),
-        Key::F12 => Some(tilde(24)),
-        Key::Space if m.ctrl && !m.alt => Some(vec![0]),
-        Key::OpenBracket if m.ctrl && !m.alt => Some(vec![0x1b]),
-        Key::Backslash if m.ctrl && !m.alt => Some(vec![0x1c]),
-        Key::CloseBracket if m.ctrl && !m.alt => Some(vec![0x1d]),
-        Key::Slash if m.ctrl && !m.alt => Some(vec![0x1f]),
-        _ => {
-            // Buchstaben: Ctrl+X / Alt+X
-            let name = key.name();
-            if name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase() && !altgr {
-                let ch = name.as_bytes()[0];
-                if m.ctrl {
-                    return Some(vec![ch - b'A' + 1]);
-                }
-                if m.alt {
-                    let c = if m.shift { ch } else { ch.to_ascii_lowercase() };
-                    return Some(vec![0x1b, c]);
-                }
-            }
-            None
-        }
+        Key::Plus => Some('+'),
+        Key::Minus => Some('-'),
+        Key::Slash => Some('/'),
+        Key::Period => Some('.'),
+        Key::Comma => Some(','),
+        _ if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() => n.chars().next(),
+        _ => None,
     }
+}
+
+/// Tastatureingabe senden; der Broadcast bekommt die Eingabe selbst und kodiert sie je Ziel (`TeeInput`).
+fn send_input(session: &mut Session, bytes: &[u8], tee: vtkeys::TeeInput) {
+    {
+        let mut t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+        if t.grid().display_offset() > 0 {
+            t.scroll_display(Scroll::Bottom);
+        }
+        t.selection = None;
+    }
+    session.write_input(bytes, tee);
+}
+
+/// Einfügen durch den Nutzer; mehrere Zeilen ohne Bracketed Paste ggf. erst nach Rückfrage (`Session::paste_user`).
+fn paste(session: &mut Session, text: &str) {
+    session.paste_user(text);
 }
 
 #[cfg(test)]
@@ -809,6 +1039,19 @@ mod tests {
 
     fn some(v: &[u8]) -> Option<Vec<u8>> {
         Some(v.to_vec())
+    }
+
+    #[test]
+    fn cursor_blink_phases() {
+        assert!(blink_state(0.0).0);
+        assert!(!blink_state(BLINK_HALF + 0.01).0);
+        assert!(blink_state(2.0 * BLINK_HALF + 0.01).0);
+        let (_, next) = blink_state(0.1);
+        assert!((next.unwrap() - (BLINK_HALF - 0.1)).abs() < 1e-9);
+        // Nach langer Ruhe: sichtbar und kein weiteres Neuzeichnen.
+        assert_eq!(blink_state(BLINK_IDLE), (true, None));
+        assert_eq!(blink_state(BLINK_IDLE + 100.0), (true, None));
+        assert!(blink_state(BLINK_IDLE - 0.001).1.unwrap() <= 0.01 + 1e-9);
     }
 
     #[test]
@@ -942,6 +1185,42 @@ mod tests {
         assert!(prompt_with_stale_modes(mode_after("\x1b[?1002h\x1b[?1006h")));
         // `reset` (RIS) räumt beides auf.
         assert!(!prompt_with_stale_modes(mode_after("\x1b[?1049h\x1b[?1003h\x1bc")));
+    }
+
+    /// kitty-Tastaturflags, die ein abgestürztes Programm stehen ließ, setzt der Lese-Thread am Prompt zurück (#183).
+    #[test]
+    fn kitty_flags_reset_at_prompt() {
+        use crate::osc::OscScanner;
+        use crate::terminal::{kitty_left_at_prompt, term_config};
+        let run = |chunks: &[&str]| -> TermMode {
+            let mut term = Term::new(term_config(100), &TermSize::new(80, 24), VoidListener);
+            let mut p: Processor = Processor::new();
+            let mut scanner = OscScanner::default();
+            for chunk in chunks {
+                let bytes = chunk.as_bytes();
+                let (events, positions) = scanner.feed_at(bytes);
+                let mut done = 0;
+                for (ev, end) in events.into_iter().zip(positions) {
+                    p.advance(&mut term, &bytes[done..end]);
+                    done = end;
+                    if kitty_left_at_prompt(&ev, *term.mode()) {
+                        p.advance(&mut term, crate::terminal::KITTY_RESET);
+                    }
+                }
+                p.advance(&mut term, &bytes[done..]);
+            }
+            *term.mode()
+        };
+        const PROMPT: &str = "\x1b]133;A\x07PS> \x1b]133;B\x07";
+        // Programm schaltet kitty ein (wie Claude Code: Flags 5) – solange es läuft, bleiben sie.
+        let m = run(&[PROMPT, "\x1b[>5u"]);
+        assert_eq!(crate::vtkeys::KeyMode::new(m, true).kitty, 5);
+        // ordentlich beendet (Pop) oder abgestürzt: am nächsten Prompt aus
+        assert!(!run(&[PROMPT, "\x1b[>5u", "\x1b[<u", PROMPT]).intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
+        assert!(!run(&[PROMPT, "\x1b[>5u", PROMPT]).intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
+        assert!(!run(&[PROMPT, &format!("\x1b[>1u\x1b[>5uboom{PROMPT}")]).intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
+        // Text nach dem Prompt im selben Chunk, der kitty wieder einschaltet (Shell mit kitty-Unterstützung): bleibt.
+        assert!(run(&[&format!("{PROMPT}\x1b[>1u")]).contains(TermMode::DISAMBIGUATE_ESC_CODES));
     }
 
     /// Ausgabe-Chunks wie im Lese-Thread (`Session::new`) verarbeiten: an den Sequenzen teilen, nach jeder
