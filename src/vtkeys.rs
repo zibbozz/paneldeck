@@ -647,9 +647,12 @@ impl KittyStackGuard {
         }
     }
 
-    /// Alle Flags wurden mit `CSI < 65535 u` verworfen (`terminal::KITTY_RESET`).
-    pub fn cleared(&mut self) {
-        self.depth[self.alt as usize] = 0;
+    /// Alle Flags des Bildschirms `alt` wurden mit `CSI < 65535 u` verworfen (`terminal::KITTY_RESET`). Der Bildschirm
+    /// kommt vom Aufrufer (Stand der Emulation an der Prompt-Stelle): Der Wächter hat den ganzen Chunk schon gefiltert,
+    /// sein `alt` ist der Stand am Chunk-Ende. Mit diesem zurückgesetzt, verlöre er den Stapel des alternativen
+    /// Bildschirms (`1049l … OSC 133;A 1049h` + Pushes je Chunk) und alacritty käme doch über 4096 (#183 Review 3).
+    pub fn cleared(&mut self, alt: bool) {
+        self.depth[alt as usize] = 0;
     }
 
     /// Gezählte Tiefe des aktuellen Bildschirms (Tests).
@@ -1418,8 +1421,36 @@ mod tests {
         g.filter(b"\x1bc");
         assert_eq!(g.depth, [0, 0]);
         g.filter(b"\x1b[>1u");
-        g.cleared();
+        g.cleared(false);
         assert_eq!(g.depth, [0, 0]);
+    }
+
+    /// Regression (#183 Review 3): Prompt auf dem Hauptbildschirm, danach im selben Chunk Wechsel auf den alternativen
+    /// Bildschirm und Pushes. Das Rücksetzen am Prompt darf nur den Hauptstapel leeren – sonst zählte der Wächter den
+    /// alternativen Stapel je Chunk neu, während alacritty ihn über 1049-Wechsel behält (Absturz bei 4096).
+    #[test]
+    fn kitty_prompt_reset_clears_the_screen_of_the_prompt() {
+        use alacritty_terminal::term::TermMode;
+        use alacritty_terminal::vte::ansi::Processor;
+        let (mut term, replies) = kitty_term();
+        let mut p: Processor = Processor::new();
+        let mut g = KittyStackGuard::default();
+        let pushes = "\x1b[>1u".repeat(KITTY_STACK_CAP);
+        let chunk = format!("\x1b[?1049l\x1b[>1u\x1b]133;A\x07\x1b[?1049h{pushes}");
+        for _ in 0..100 {
+            let f = g.filter(chunk.as_bytes()).into_owned();
+            // wie der Lese-Thread: bis zum Prompt, dort KITTY_RESET für den Bildschirm an dieser Stelle, dann der Rest
+            let at = f.windows(7).position(|w| w == b"\x1b]133;A").unwrap();
+            p.advance(&mut term, &f[..at]);
+            let alt = term.mode().contains(TermMode::ALT_SCREEN);
+            p.advance(&mut term, crate::terminal::KITTY_RESET);
+            g.cleared(alt);
+            p.advance(&mut term, &f[at..]);
+        }
+        assert_eq!(g.depth, [0, KITTY_STACK_CAP]);
+        // alacritty hat auf dem alternativen Bildschirm genau so viele Einträge: nach KITTY_STACK_CAP Pops leer
+        p.advance(&mut term, format!("\x1b[<{KITTY_STACK_CAP}u\x1b[?u").as_bytes());
+        assert!(replies.0.lock().unwrap().ends_with("\x1b[?0u"));
     }
 
     /// `terminal::KITTY_RESET` verwirft den ganzen Stapel: `CSI ? u` meldet danach 0, ein späteres Pop holt nichts zurück.

@@ -1063,7 +1063,7 @@ fn process_chunk<T: EventListener>(processor: &mut Processor, t: &mut Term<T>, b
                 stale.store(next_stale_modes(was, ev, *t.mode()), Ordering::Relaxed);
                 if kitty_left_at_prompt(ev, *t.mode()) {
                     hs.advance(p, t, KITTY_RESET);
-                    kitty_guard.cleared();
+                    kitty_guard.cleared(t.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN));
                 }
             }
         }
