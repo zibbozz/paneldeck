@@ -2,3 +2,4 @@
 2.1.0|Paneldeck 2.1.0 – Command line, profiles, windows and self-update
 2.2.0|Paneldeck 2.2.0 – Chats with local models
 2.3.0|Paneldeck 2.3.0 – Modern terminal protocols, background processes and ticket fields
+2.3.1|Paneldeck 2.3.1 – Bug fixes for terminal limits, dialogs, background processes and due dates
