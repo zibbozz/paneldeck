@@ -29,6 +29,8 @@ Eine Bedingung ist *Feld Operator Wert*. Feldnamen und Texte mit Leerzeichen ste
 | Labels | `labels`, `Labels` | `labels = auth` |
 
 - `due` vergleicht eine Fälligkeit ohne Uhrzeit als Ende des Tages; ein Vergleich mit einem reinen Datum vergleicht nur den Tag (`due = 2026-11-20` trifft auch 14:30 an diesem Tag).
+- Ein eigenes Feld anderer Art, das ein eingebautes Feld verdeckt (z. B. ein eigenes Feld namens *Fällig* oder *Due*), erreichst du als `"<Name> (custom)"`, z. B. `"Fällig (custom)" = 2026-11-20`.
+- Eigene Felder mit Datum und Uhrzeit treffen Werte mit und ohne Sekunden.
 
 ## Beispiele
 Alle Beispiele stammen aus der Hilfeseite in Paneldeck (Demo-Daten); dort hat jedes einen Screenshot seines Ergebnisses. Eine Auswahl:

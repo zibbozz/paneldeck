@@ -74,7 +74,7 @@ Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the sessio
 All new fields are optional: a missing field means the previous behaviour, and older files load unchanged.
 
 - `settings.json`:
-  - `remember_sessions` (default `true`) – *Remember sessions*; when it is switched off, the previous state is backed up as `state.json.bak-<date>` (only the newest is kept).
+  - `remember_sessions` (default `true`) – *Remember sessions*; when it is switched off, the previous state is backed up as `state.json.bak-<date>` (only the newest is kept). While it is off, `state.json` only holds the trimmed state, so a crash keeps the backup.
   - `inherit_env` (default `false`) – *Inherit Paneldeck's environment*.
   - `bundled_conpty` (default `true`) – *Use the bundled console host (recommended)*.
   - `osc52_copy` (default `true`) – *Allow programs to copy to the clipboard (OSC 52)*.
