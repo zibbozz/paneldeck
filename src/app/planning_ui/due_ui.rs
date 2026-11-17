@@ -261,9 +261,24 @@ pub(crate) fn marker_color_picker(ui: &mut Ui, salt: impl std::hash::Hash, hex: 
     changed
 }
 
+/// Anzeige einer Dauer als (Anzahl, Einheit): die gemerkte Einheit `remembered` (zuletzt gewählt, zur Dauer `minutes`), solange
+/// sie noch zur Dauer gehört, sonst die größte glatte Einheit ([`due::split_duration`]).
+pub(crate) fn duration_parts(minutes: i64, remembered: Option<(i64, DurationUnit)>) -> (i64, DurationUnit) {
+    match remembered {
+        Some((m, u)) if m == minutes && minutes > 0 && minutes % u.minutes() == 0 => (minutes / u.minutes(), u),
+        _ => due::split_duration(minutes),
+    }
+}
+
+/// Salt des Symbol-Pickers im Markierungs-Editor `id` (damit der Verwalter weiß, ob dessen Icon-Explorer offen ist).
+fn marker_symbol_salt(id: Id) -> Id {
+    id.with("sym")
+}
+
 /// Kleines Vorschaubild einer Markierung als Knopf (öffnet die Bearbeitung).
-fn marker_preview(ui: &mut Ui, m: &DueMarker, size: f32) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+fn marker_preview(ui: &mut Ui, id: Id, m: &DueMarker, size: f32) -> Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click());
     if m.is_none() {
         ui.painter().circle_stroke(rect.center(), size * 0.3, Stroke::new(1.0_f32, style::dim(ui)));
     } else {
@@ -294,7 +309,10 @@ pub(crate) fn manager_ui(ui: &mut Ui, salt: &str, m: &mut Manager, todo: bool, l
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(lang.t("unter", "under"));
             let t = &mut m.list[i];
-            let (mut num, mut unit) = due::split_duration(t.under_minutes);
+            // Die zuletzt gewählte Einheit bleibt, solange sie zur Dauer passt – sonst springt sie beim Ziehen um (7 Tage → 1 Woche).
+            let unit_mem = id.with("unit_mem");
+            let remembered: Option<(i64, DurationUnit)> = ui.data(|d| d.get_temp(unit_mem));
+            let (mut num, mut unit) = duration_parts(t.under_minutes, remembered);
             let r = ui.add(egui::DragValue::new(&mut num).range(1..=9999).speed(0.2));
             let mut unit_changed = false;
             egui::ComboBox::from_id_salt(id.with("unit")).selected_text(unit.label(num, lang)).width(80.0).show_ui(ui, |ui| {
@@ -304,11 +322,16 @@ pub(crate) fn manager_ui(ui: &mut Ui, salt: &str, m: &mut Manager, todo: bool, l
             });
             if r.changed() || unit_changed {
                 t.under_minutes = num * unit.minutes();
+                ui.data_mut(|d| d.insert_temp(unit_mem, (t.under_minutes, unit)));
                 changed = true;
             }
             ui.label("→");
-            let pv = marker_preview(ui, &t.marker, 20.0).on_hover_text(lang.t("Markierung bearbeiten", "Edit marker"));
-            egui::Popup::from_toggle_button_response(&pv).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            let pv = marker_preview(ui, id.with("preview"), &t.marker, 20.0).on_hover_text(lang.t("Markierung bearbeiten", "Edit marker"));
+            // Solange der Icon-Explorer des Symbol-Pickers offen ist, darf ein Klick in sein Fenster (für das Popup „außerhalb“)
+            // die Bearbeitung nicht schließen – sonst verschwände mit ihr auch der Explorer (#215).
+            let explorer_open = widgets::icon_picker_explorer_open(ui.ctx(), marker_symbol_salt(id.with("ed")));
+            let close = if explorer_open { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClickOutside };
+            egui::Popup::from_toggle_button_response(&pv).close_behavior(close).show(|ui| {
                 changed |= marker_editor(ui, id.with("ed"), &mut t.marker, todo, lang);
             });
             egui::ComboBox::from_id_salt(id.with("frame")).selected_text(t.marker.frame.label(lang)).width(140.0).show_ui(ui, |ui| {
@@ -441,7 +464,7 @@ fn marker_editor(ui: &mut Ui, id: Id, mk: &mut DueMarker, todo: bool, lang: Lang
     ui.horizontal_wrapped(|ui| {
         for f in MarkerFrame::ALL {
             let sample = DueMarker { frame: f, symbol: None, color: mk.color.clone(), name: String::new() };
-            let r = marker_preview(ui, &sample, 24.0).on_hover_text(f.label(lang));
+            let r = marker_preview(ui, id.with(("frame", f.as_str())), &sample, 24.0).on_hover_text(f.label(lang));
             if mk.frame == f {
                 ui.painter().rect_stroke(r.rect.expand(2.0), 4.0, Stroke::new(1.5_f32, style::accent()), egui::StrokeKind::Outside);
             }
@@ -453,7 +476,7 @@ fn marker_editor(ui: &mut Ui, id: Id, mk: &mut DueMarker, todo: bool, lang: Lang
     });
     ui.add_space(S1);
     ui.label(RichText::new(lang.t("Symbol", "Symbol")).strong());
-    changed |= marker_symbol_picker(ui, id.with("sym"), &mut mk.symbol, super::helpers::color_of(&mk.color), lang);
+    changed |= marker_symbol_picker(ui, marker_symbol_salt(id), &mut mk.symbol, super::helpers::color_of(&mk.color), lang);
     ui.add_space(S2);
     changed
 }
@@ -571,6 +594,20 @@ mod tests {
         // eine kräftige Farbe bleibt als Symbol unverändert, gelb auf hellgelb wird abgedunkelt
         assert_eq!(marker_colors("#2050C0", MarkerFrame::Square, false, LIGHT_BG).symbol, hex_rgb("#2050C0"));
         assert_ne!(marker_colors("#D8B94A", MarkerFrame::Triangle, false, LIGHT_BG).symbol, hex_rgb("#D8B94A"));
+    }
+
+    #[test]
+    fn the_chosen_duration_unit_stays_while_dragging() {
+        let d = DurationUnit::Days;
+        // ohne gemerkte Einheit: größte glatte Einheit
+        assert_eq!(duration_parts(7 * 1440, None), (1, DurationUnit::Weeks));
+        // gezogen von 6 auf 7 Tage: bleibt „7 Tage“ statt „1 Woche“ (sonst springt der Wert beim Weiterziehen auf Wochen)
+        assert_eq!(duration_parts(7 * 1440, Some((7 * 1440, d))), (7, d));
+        assert_eq!(duration_parts(14 * 1440, Some((14 * 1440, d))), (14, d));
+        // gemerkt für eine andere Dauer (Zeile gelöscht/verschoben, Standard wiederhergestellt): wie ohne
+        assert_eq!(duration_parts(10080, Some((60, DurationUnit::Minutes))), (1, DurationUnit::Weeks));
+        // gemerkte Einheit passt nicht mehr glatt: größte glatte Einheit
+        assert_eq!(duration_parts(90, Some((90, DurationUnit::Hours))), (90, DurationUnit::Minutes));
     }
 
     #[test]

@@ -164,6 +164,20 @@ pub fn paste_user_text(text: &str) -> String {
     t
 }
 
+/// Bytes für das Einfügen eines Textes durch den Nutzer (unverändert aus der Zwischenablage): mit Bracketed Paste nur
+/// bereinigt und gerahmt (ein Zeilenende führt dann nichts aus), sonst wie `paste_user_text`.
+pub fn user_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let text = if bracketed { paste_clean(text) } else { paste_user_text(text) };
+    paste_payload(&text, bracketed).into_bytes()
+}
+
+/// Rückfrage vor dem Einfügen (`Session::paste_user`)? Nur mit Einstellung (`warn`), bei mehreren Zeilen und wenn eine
+/// Shell sie ohne Bracketed Paste bekäme: diese Sitzung selbst oder – im Broadcast (`broadcast`) – vielleicht ein Ziel
+/// (#220; welche Ziele, prüft die App erst dann, `App::ask_paste`).
+pub fn paste_needs_ask(text: &str, bracketed: bool, warn: bool, broadcast: bool) -> bool {
+    warn && (!bracketed || broadcast) && paste_line_count(&paste_user_text(text)).is_some()
+}
+
 /// Zeilen eines eingefügten Textes, wenn er Zeilenumbrüche enthält (sonst `None`): Grundlage der Rückfrage beim
 /// Einfügen mehrerer Zeilen ohne Bracketed Paste – jeder Umbruch kann dann einen Befehl ausführen. Auf den schon
 /// bereinigten Text anwenden (`paste_user_text`), sonst zählten als Escape-Sequenz versteckte Enter nicht.
@@ -235,7 +249,7 @@ impl Listener {
     pub fn push_reply(&self, r: Reply) {
         let mut q = self.replies.lock().unwrap_or_else(|e| e.into_inner());
         // Ein Programm, das in einer Schleife fragt, soll den Speicher nicht füllen (nach jedem Stück wird geleert).
-        if q.len() < 4096 {
+        if q.len() < REPLIES_MAX {
             q.push(r);
         }
     }
@@ -266,6 +280,10 @@ impl Listener {
         self.replies.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
+
+/// Höchstzahl wartender Antworten (Reihe des Listeners, ebenso die bis zum Ende eines Synchronized Update
+/// zurückgehaltenen, #212); weitere Anfragen bleiben unbeantwortet.
+const REPLIES_MAX: usize = 4096;
 
 /// Emulator-Einstellungen eines Terminals. OSC 52 nur zum Kopieren: Programme dürfen die Zwischenablage
 /// beschreiben, aber nie lesen (`ClipboardLoad` wird gar nicht erst ausgelöst).
@@ -320,6 +338,8 @@ pub struct Session {
     /// Aus dem Verlauf gefallene Zeilen (#197), nur unter der Sperre von `term` geändert: absolute Zeile =
     /// `dropped` + Verlaufszeilen + Bildschirmzeile, damit bleiben Marken und Positionen bei vollem Verlauf gültig.
     dropped: Arc<std::sync::atomic::AtomicU64>,
+    /// `HistoryTrack::primary` des Lese-Threads (#221): ein Größenwechsel meldet die neue Verlaufslänge.
+    hist_primary: Arc<std::sync::atomic::AtomicUsize>,
     writer: SharedWriter,
     master: Box<dyn MasterPty + Send>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
@@ -369,8 +389,8 @@ pub struct Session {
     focus_seen: AtomicU8,
     /// Vor dem Einfügen mehrerer Zeilen ohne Bracketed Paste nachfragen (Einstellung, vom UI-Thread gesetzt).
     paste_warn: AtomicBool,
-    /// Eingefügter Text, der auf die Rückfrage wartet (`take_paste_ask`).
-    paste_ask: Mutex<Option<String>>,
+    /// Eingefügter Text, der auf die Rückfrage wartet, mit `check_targets` (`take_paste_ask`).
+    paste_ask: Mutex<Option<(String, bool)>>,
     /// Theme mit den von Programmen gesetzten Farben (OSC 4/10/11/12) – zwischengespeichert, solange sich Theme und
     /// Farben nicht ändern (`termview`, sonst eine Kopie je Frame).
     pub theme_cache: Mutex<Option<(Theme, Box<Colors>, Theme)>>,
@@ -464,8 +484,9 @@ impl Session {
             cmd.arg(a);
         }
         if let Some(cwd) = opts.cwd {
-            // `\\wsl$`-Pfade ungeprüft (das Prüfen im UI-Thread könnte die WSL-VM starten und blockieren).
-            if crate::wsl::is_wsl_unc(cwd) || std::path::Path::new(cwd).is_dir() {
+            // `\\wsl$`-Pfade ungeprüft (das Prüfen im UI-Thread könnte die WSL-VM starten und blockieren); ein
+            // Netzwerkpfad nur mit kurzer Frist (#216) – antwortet die Freigabe nicht, startet die Shell im Standardordner.
+            if crate::wsl::is_wsl_unc(cwd) || crate::pathfmt::dir_exists_quick(cwd, std::time::Duration::from_millis(400)) == Some(true) {
                 cmd.cwd(cwd);
             }
         }
@@ -501,6 +522,7 @@ impl Session {
         let mut processor: Processor = Processor::new();
         let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let hist_track = HistoryTrack::new(opts.scrollback_lines, dropped.clone());
+        let hist_primary = hist_track.primary_handle();
 
         if let Some(text) = opts.restore_text {
             let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
@@ -552,6 +574,7 @@ impl Session {
                 let hist_track = hist_track;
                 let mut win32_scan = crate::vtkeys::Win32ModeScanner::default();
                 let mut kitty_guard = crate::vtkeys::KittyStackGuard::default();
+                let mut osc_limit = crate::osc::OscLimit::default();
                 // Antworten des Scanners, während ein „Synchronized Update“ (CSI ?2026h) puffert: vte verarbeitet den
                 // Block erst an seinem Ende, dessen Antworten kämen sonst nach unseren.
                 let mut deferred: Vec<Reply> = Vec::new();
@@ -563,7 +586,9 @@ impl Session {
                     match msg {
                         Ok(bytes) => {
                             activity.store(mono_ms(), Ordering::Relaxed);
-                            // kitty-Stapel begrenzen, bevor alacritty ihn sieht (Absturz bei 4097 Pushes).
+                            // Nie beendete OSC kappen (vte puffert sie sonst ohne Grenze, #212) und den kitty-Stapel
+                            // begrenzen (Absturz bei 4097 Pushes), bevor alacritty beides sieht.
+                            let bytes = osc_limit.filter(&bytes);
                             let bytes = kitty_guard.filter(&bytes).into_owned();
                             // win32-input-mode gibt es nur unter ConPTY.
                             if cfg!(windows) {
@@ -617,6 +642,7 @@ impl Session {
         let session = Session {
             term,
             dropped,
+            hist_primary,
             shell_state,
             writer,
             master: pair.master,
@@ -669,6 +695,12 @@ impl Session {
     #[cfg(not(windows))]
     fn adopt_into_job(_job: Option<crate::winctl::SessionJob>, _in_job: bool, _child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
         None
+    }
+
+    /// Job Object herausnehmen (Schließen/Neustart, #218): Der Hub behält es, solange noch Prozesse darin laufen, damit
+    /// er sie weiter dieser Sitzung zuordnen kann (`closing::Retired`). Danach hat die Sitzung keinen Job mehr.
+    pub fn take_job(&mut self) -> Option<crate::winctl::SessionJob> {
+        self.job.take()
     }
 
     /// Kennung des Job Objects dieser Sitzung (#168), `None` ohne Job (dann zählt nur der Prozessbaum).
@@ -828,8 +860,9 @@ impl Session {
     /// Text wie eingefügt senden (Bracketed Paste, falls die Anwendung es anfordert).
     pub fn send_text(&self, text: &str, submit: bool) {
         let bracketed = self.bracketed_paste();
-        // Steuerzeichen filtern (siehe `paste_payload`).
-        self.write(paste_payload(text, bracketed).as_bytes());
+        // Steuerzeichen filtern (siehe `paste_payload`). Der Broadcast bekommt den Text, nicht die für diese Sitzung
+        // gerahmten Bytes: jedes Ziel rahmt ihn selbst (#220).
+        self.write_input(paste_payload(text, bracketed).as_bytes(), crate::vtkeys::TeeInput::Paste { text: text.to_string(), user: false });
         if submit {
             self.write(b"\r");
         }
@@ -842,31 +875,37 @@ impl Session {
 
     /// Einfügen durch den Nutzer (Strg+V, Rechtsklick): mehrere Zeilen ohne Bracketed Paste warten auf die Rückfrage
     /// (Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“, `take_paste_ask`), alles andere geht sofort.
+    /// Im Broadcast (#220) zählen auch die Ziele: Hat diese Sitzung Bracketed Paste, wartet der Text trotzdem mit
+    /// `check_targets` = `true` – die App prüft dann erst die Ziele (`App::ask_paste`) und fügt sofort ein, wenn alle
+    /// Bracketed Paste haben. Gewartet wird mit dem unveränderten Text.
     pub fn paste_user(&self, text: &str) {
+        let warn = self.paste_warn.load(Ordering::Relaxed);
         let bracketed = self.bracketed_paste();
-        // Mit Bracketed Paste führt ein Zeilenende nichts aus – der Text bleibt, wie er ist (nur bereinigt).
-        let text = if bracketed { paste_clean(text) } else { paste_user_text(text) };
-        if self.paste_warn.load(Ordering::Relaxed) && paste_line_count(&text).is_some() && !bracketed {
-            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+        if paste_needs_ask(text, bracketed, warn, self.tee_on.load(Ordering::Relaxed)) {
+            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some((text.to_string(), bracketed));
             return;
         }
-        self.paste_now(&text);
+        self.paste_now(text);
     }
 
-    /// Text einfügen: ans Ende scrollen, Auswahl aufheben, senden.
+    /// Eingefügten Text des Nutzers (unverändert, wie aus der Zwischenablage) senden: ans Ende scrollen, Auswahl
+    /// aufheben, aufbereiten und rahmen wie `user_paste_bytes`. Der Broadcast bekommt den Text selbst
+    /// (`TeeInput::Paste`), damit jedes Ziel ihn mit seinem eigenen Bracketed-Paste-Modus aufbereitet (#220).
     pub fn paste_now(&self, text: &str) {
-        {
+        let bracketed = {
             let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
             if t.grid().display_offset() > 0 {
                 t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
             }
             t.selection = None;
-        }
-        self.send_text(text, false);
+            t.mode().contains(TermMode::BRACKETED_PASTE)
+        };
+        self.write_input(&user_paste_bytes(text, bracketed), crate::vtkeys::TeeInput::Paste { text: text.to_string(), user: true });
     }
 
-    /// Text, der auf die Rückfrage vor dem Einfügen wartet (einmal abholen).
-    pub fn take_paste_ask(&self) -> Option<String> {
+    /// Text, der auf die Rückfrage vor dem Einfügen wartet (einmal abholen), und ob die Rückfrage nur von den
+    /// Broadcast-Zielen abhängt (`check_targets`, siehe `paste_user`).
+    pub fn take_paste_ask(&self) -> Option<(String, bool)> {
         self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
@@ -981,7 +1020,11 @@ impl Session {
         }
         self.cols = cols;
         self.rows = rows;
-        self.term.lock().unwrap_or_else(|e| e.into_inner()).resize(TermSize::new(cols as usize, rows as usize));
+        {
+            let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+            t.resize(TermSize::new(cols as usize, rows as usize));
+            HistoryTrack::resized(&self.hist_primary, &t);
+        }
         let _ = self.master.resize(self.pty_size());
     }
 
@@ -1051,7 +1094,10 @@ fn process_chunk<T: EventListener>(processor: &mut Processor, t: &mut Term<T>, b
                 // In die Reihe der Antworten: nach allem, was davor im Strom stand – während eines Synchronized Update
                 // erst nach dem Block (`release_deferred`).
                 if p.sync_timeout().sync_timeout().is_some() {
-                    deferred.push(Reply::Query(*q));
+                    // Begrenzt (#212): Ein Programm kann den Block mit immer neuen `?2026h` endlos offen halten.
+                    if deferred.len() < REPLIES_MAX {
+                        deferred.push(Reply::Query(*q));
+                    }
                 } else {
                     // Ein Block, der in diesem Stück endete: dessen zurückgehaltene Antworten zuerst.
                     release_deferred(p, lst, deferred);
@@ -1222,11 +1268,24 @@ fn primary_history<T>(t: &Term<T>) -> Option<usize> {
 pub struct HistoryTrack {
     limit: usize,
     dropped: Arc<std::sync::atomic::AtomicU64>,
+    /// Verlaufslänge des Hauptbildschirms beim letzten Blick darauf (`PRIMARY_UNKNOWN` = unbekannt). Im alternativen
+    /// Bildschirm ist der Hauptbildschirm nicht erreichbar; RIS leert ihn dort trotzdem (#221). Auch `Session::resize`
+    /// schreibt hier (unter der Sperre der Emulation): Im alternativen Bildschirm ändert ein Größenwechsel die Länge
+    /// unbekannt (Umbruch), dann wird beim Zurückkehren nichts gezählt.
+    primary: Arc<std::sync::atomic::AtomicUsize>,
 }
+
+/// `HistoryTrack::primary`: Länge des Hauptbildschirm-Verlaufs unbekannt.
+const PRIMARY_UNKNOWN: usize = usize::MAX;
 
 impl HistoryTrack {
     pub fn new(limit: usize, dropped: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        HistoryTrack { limit, dropped }
+        HistoryTrack { limit, dropped, primary: Arc::new(std::sync::atomic::AtomicUsize::new(0)) }
+    }
+
+    /// Geteilter Merker der Verlaufslänge des Hauptbildschirms (für `Session::resize`).
+    fn primary_handle(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.primary.clone()
     }
 
     fn base(&self) -> u64 {
@@ -1244,18 +1303,36 @@ impl HistoryTrack {
 
     /// Nach Ausgabe: Verlauf über dem Limit selbst kürzen und mitzählen; ein geschrumpfter Verlauf (CSI 3J, RIS) zählt
     /// ebenfalls als verworfen. `before` = `primary_history` vor der Ausgabe.
+    ///
+    /// Zurück aus dem alternativen Bildschirm (`before` = `None`) zählt der Vergleich mit der zuletzt gesehenen Länge:
+    /// Dort kommt nichts in den Verlauf des Hauptbildschirms, kürzer wird er nur durch RIS (leert beide Bildschirme).
     fn settle<T>(&self, t: &mut Term<T>, before: Option<usize>) {
         let Some(h) = primary_history(t) else { return };
-        let mut gone = before.map_or(0, |b| b.saturating_sub(h));
+        let mut gone = match before {
+            Some(b) => b.saturating_sub(h),
+            None => match self.primary.load(Ordering::Relaxed) {
+                PRIMARY_UNKNOWN => 0,
+                last => last.saturating_sub(h),
+            },
+        };
+        let mut now = h;
         if h > self.limit {
             let g = t.grid_mut();
             g.update_history(self.limit);
             g.update_history(self.limit + HISTORY_SLACK);
             gone += h - self.limit;
+            now = self.limit;
         }
+        self.primary.store(now, Ordering::Relaxed);
         if gone > 0 {
             self.dropped.fetch_add(gone as u64, Ordering::Relaxed);
         }
+    }
+
+    /// Nach einem Größenwechsel (unter derselben Sperre): Länge des Hauptbildschirm-Verlaufs neu merken bzw. im
+    /// alternativen Bildschirm als unbekannt markieren.
+    fn resized<T>(primary: &std::sync::atomic::AtomicUsize, t: &Term<T>) {
+        primary.store(primary_history(t).unwrap_or(PRIMARY_UNKNOWN), Ordering::Relaxed);
     }
 }
 
@@ -1993,6 +2070,48 @@ mod run_output_tests {
         assert_eq!(lines_abs_in(&f.term, f.base(), 99, 99), vec!["zeile 99".to_string()]);
     }
 
+    /// #221: RIS im alternativen Bildschirm leert auch den Verlauf des Hauptbildschirms – das zählt als verworfen,
+    /// damit absolute Zeilen (Marken) stimmen. Ein normales Verlassen zählt nichts, ebenso nach einem Größenwechsel im
+    /// alternativen Bildschirm (Länge dann unbekannt).
+    #[test]
+    fn ris_in_alt_screen_counts_dropped_history() {
+        let fill = |f: &mut Fake| {
+            for i in 0..30 {
+                f.feed(&format!("zeile {i}\r\n"));
+            }
+        };
+        // Verlassen ohne RIS: nichts verworfen.
+        let mut f = Fake::with_history(COLS, 8, 100);
+        fill(&mut f);
+        let (base, hist) = (f.base(), f.term.grid().history_size());
+        assert!(hist > 0);
+        f.feed("\x1b[?1049hvim\r\n\x1b[?1049l");
+        assert_eq!((f.base(), f.term.grid().history_size()), (base, hist));
+        // RIS im alternativen Bildschirm: der ganze Verlauf zählt als verworfen.
+        f.feed("\x1b[?1049hvim\x1bc");
+        assert_eq!(f.term.grid().history_size(), 0);
+        assert_eq!(f.base(), base + hist as u64);
+        // Ebenso, wenn das RIS in einem Synchronized Update steht (vte verarbeitet den Block erst an dessen Ende).
+        let mut f = Fake::with_history(COLS, 8, 100);
+        fill(&mut f);
+        let (base, hist) = (f.base(), f.term.grid().history_size());
+        f.feed("\x1b[?1049h\x1b[?2026hx\x1bcy\x1b[?2026l");
+        assert_eq!(f.base(), base + hist as u64);
+        // Größenwechsel im alternativen Bildschirm: Länge unbekannt, beim Zurückkehren wird nichts gezählt.
+        let mut f = Fake::with_history(COLS, 8, 100);
+        fill(&mut f);
+        let base = f.base();
+        f.feed("\x1b[?1049h");
+        f.term.resize(TermSize::new(COLS, 20));
+        HistoryTrack::resized(&f.hs.primary, &f.term);
+        f.feed("\x1b[?1049l");
+        assert_eq!(f.base(), base, "Zeilen aus dem Verlauf in den größeren Bildschirm sind nicht verworfen");
+        // Auf dem Hauptbildschirm gemerkt: ein späteres RIS im alternativen Bildschirm zählt wieder.
+        let hist = f.term.grid().history_size();
+        f.feed("\x1b[?1049h\x1bc");
+        assert_eq!(f.base(), base + hist as u64);
+    }
+
     #[test]
     fn run_command_with_full_history() {
         // #197: vorher lieferte schon `echo hi` bei vollem Verlauf nichts (Echo nicht gefunden).
@@ -2189,7 +2308,7 @@ mod win_job_tests {
         assert!(s.job_key().is_some(), "Sitzung hat einen Job");
         assert!(s.lingering(&crate::winctl::ProcInfo::default()).is_empty(), "nur die Shell: nichts");
         let pid = s.shell_pid.expect("Shell-PID");
-        assert!(s.job.as_ref().unwrap().pids().contains(&pid), "Shell im Job");
+        assert!(s.job.as_ref().unwrap().pids().unwrap_or_default().contains(&pid), "Shell im Job");
         assert!(s.end_job());
     }
 }
@@ -2224,6 +2343,7 @@ mod vt_reply_tests {
         stale: AtomicBool,
         deferred: Vec<Reply>,
         guard: crate::vtkeys::KittyStackGuard,
+        osc_limit: crate::osc::OscLimit,
         hs: HistoryTrack,
         pending: Option<u64>,
     }
@@ -2253,6 +2373,7 @@ mod vt_reply_tests {
                 stale: AtomicBool::new(false),
                 deferred: Vec::new(),
                 guard: Default::default(),
+                osc_limit: Default::default(),
                 hs: HistoryTrack::new(100, Arc::new(std::sync::atomic::AtomicU64::new(0))),
                 pending: None,
             }
@@ -2264,8 +2385,9 @@ mod vt_reply_tests {
 
         /// Ausgabe des Programms verarbeiten (wie der PTY-Thread) und die Antworten an das Programm liefern.
         fn feed(&mut self, s: &str) -> String {
-            // wie der Lese-Thread: erst der kitty-Wächter, dann Scanner und Emulation
-            let bytes = self.guard.filter(s.as_bytes()).into_owned();
+            // wie der Lese-Thread: erst die OSC-Grenze und der kitty-Wächter, dann Scanner und Emulation
+            let bytes = self.osc_limit.filter(s.as_bytes()).into_owned();
+            let bytes = self.guard.filter(&bytes).into_owned();
             let bytes = &bytes[..];
             let scanned = self.scanner.feed_at(bytes);
             let mut rd = ReaderState { hs: &self.hs, pending: &mut self.pending, lst: &self.lst, shell_state: &self.shell, stale: &self.stale, deferred: &mut self.deferred, kitty_guard: &mut self.guard };
@@ -2291,6 +2413,51 @@ mod vt_reply_tests {
         assert_eq!(out, "");
         let out = r.feed("\x1b[?2026l\x1b[16t");
         assert!(out.starts_with("\x1bP>|Paneldeck ") && out.ends_with("\x1b\\\x1b[6;18;9t"), "{out:?}");
+    }
+
+    /// #212: Ein Synchronized Update, das mit immer neuen `?2026h` offen bleibt, sammelt nicht endlos Antworten an.
+    #[test]
+    fn deferred_replies_are_bounded() {
+        let mut r = Rig::new();
+        let flood = "\x1b[?2026h\x1b[16t".repeat(1000);
+        for _ in 0..20 {
+            assert_eq!(r.feed(&flood), "");
+            assert!(r.deferred.len() <= REPLIES_MAX, "{}", r.deferred.len());
+        }
+        assert_eq!(r.deferred.len(), REPLIES_MAX);
+        // Endet der Block doch, kommen die gesammelten Antworten (höchstens die Grenze).
+        let out = r.feed("\x1b[?2026l");
+        assert_eq!(out.matches("\x1b[6;18;9t").count(), REPLIES_MAX);
+        assert!(r.deferred.is_empty());
+        assert_eq!(r.feed("\x1b[16t"), "\x1b[6;18;9t");
+    }
+
+    /// #212: Ein nie beendetes OSC (`printf '\e]0;'; yes`) wächst im Lese-Weg nicht über die Grenze; danach geht alles
+    /// normal weiter.
+    #[test]
+    fn unterminated_osc_is_bounded() {
+        // Kleine Grenze, deren Ausgabe hier gezählt wird; die des Rigs lässt alles durch.
+        let mut g = crate::osc::OscLimit::with_limit(4096);
+        let mut r = Rig::new();
+        r.osc_limit = crate::osc::OscLimit::with_limit(usize::MAX);
+        let mut feed = |r: &mut Rig, s: &str| {
+            let b = g.filter(s.as_bytes()).into_owned();
+            r.feed(std::str::from_utf8(&b).unwrap());
+            b.iter().filter(|b| **b >= 0x20).count()
+        };
+        feed(&mut r, "\x1b]0;");
+        let chunk = "y\n".repeat(32 * 1024);
+        let mut passed = 0usize;
+        for _ in 0..64 {
+            passed += feed(&mut r, &chunk);
+        }
+        // Höchstens die Grenze plus Ersatzzeichen hat vte gesehen.
+        assert!(passed <= 4096 + 3, "{passed}");
+        // Ende des OSC: Titel gekürzt (mit Ersatzzeichen), danach Text und Antworten wie gewohnt.
+        feed(&mut r, "y\x07");
+        let title = r.lst.title.lock().unwrap().clone().unwrap_or_default();
+        assert!(title.len() <= 4096 + 3 && title.starts_with("yyy"), "{}", title.len());
+        assert_eq!(r.feed("\x1b[16t"), "\x1b[6;18;9t");
     }
 
     /// Eine Sitzung beantwortet Abfragen mit dem Theme, das ihr beim Start mitgegeben wurde (auch ungezeichnet).

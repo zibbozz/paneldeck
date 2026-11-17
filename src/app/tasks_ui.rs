@@ -1517,6 +1517,11 @@ impl App {
     /// Klick auf den Knopf eines Toasts (heute nur „Rückgängig“ des Schnellmenüs).
     /// `window`: Fenster, dessen Todo-Ansicht die Änderung gemacht hat; ihr Rückgängig-Stapel liegt dort.
     pub(super) fn toast_action_clicked(&mut self, ctx: &egui::Context, token: u64, window: u64) {
+        // „Alle beenden“ für übrige Prozesse einer geschlossenen Sitzung (gilt in jedem Fenster, #213)
+        if token & super::closing::RETIRED_TOKEN != 0 {
+            self.end_retired(token & !super::closing::RETIRED_TOKEN);
+            return;
+        }
         if window != self.wins.cur {
             self.wins_undo_later(ctx, window, token);
             return;

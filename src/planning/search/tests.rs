@@ -420,6 +420,82 @@ fn built_in_due_and_description_in_queries() {
 }
 
 #[test]
+fn keywords_on_the_built_in_due_field_compare_like_the_query_language() {
+    // #214: Schlüsselwort-Bedingungen und eigene Sortierung auf der eingebauten Fälligkeit (reines Datum = ganzer Tag bzw.
+    // Ende des Tages, gespeicherte Werte ohne Sekunden)
+    let f = Fx::new();
+    let due = crate::planning::builtin_fields::field_id(&f.c, f.task, "due").unwrap().unwrap();
+    let mk = |title: &str, d: &str| {
+        let mut n = NewTicket::new(f.project, f.task, title);
+        n.values.push((due, json!(d)));
+        create_ticket(&f.c, &n, &ui()).unwrap().0.key()
+    };
+    let a = mk("Morgens", "2026-11-16T09:00");
+    let b = mk("Tagesende", "2026-11-16");
+    let c = mk("Morgen", "2026-11-17T08:00");
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |jql: &str| -> Vec<String> { run_query(&f.c, &ctx, Scope::Project(f.project), jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    let pred = |name: &str, op: ConditionOp, value: Value| {
+        create_keyword(&f.c, &NewKeyword { name: name.into(), description: String::new(), definition: Definition::Predicate { condition: Cond::Compare { field_id: due, op, value } } }).unwrap();
+    };
+    pred("onday", ConditionOp::Eq, json!("2026-11-16"));
+    pred("attime", ConditionOp::Eq, json!("2026-11-16T09:00"));
+    pred("beforeday", ConditionOp::Lt, json!("2026-11-16"));
+    pred("beforenoon", ConditionOp::Lt, json!("2026-11-16T12:00"));
+    pred("afternoon", ConditionOp::Gt, json!("2026-11-16T12:00"));
+    pred("notonday", ConditionOp::Ne, json!("2026-11-16"));
+    assert_eq!(q("IS onday"), q("due = 2026-11-16"));
+    assert_eq!(q("IS onday"), vec![a.clone(), b.clone()]);
+    assert_eq!(q("IS attime"), vec![a.clone()], "Wert mit Uhrzeit trifft den gespeicherten Wert ohne Sekunden");
+    assert!(q("IS beforeday").is_empty(), "ein reines Datum am selben Tag ist nicht davor");
+    assert_eq!(q("IS beforenoon"), q("due < \"2026-11-16 12:00\""));
+    assert_eq!(q("IS beforenoon"), vec![a.clone()]);
+    assert_eq!(q("IS afternoon"), vec![b.clone(), c.clone()], "reines Datum = Ende des Tages");
+    assert_eq!(q("IS notonday"), vec![c.clone()]);
+    create_keyword(&f.c, &NewKeyword { name: "bydue".into(), description: String::new(), definition: Definition::Sort { field_id: due, dir: KwDir::Asc } }).unwrap();
+    assert_eq!(q("ORDER BY bydue"), q("ORDER BY due"));
+    assert_eq!(q("ORDER BY bydue"), vec![a.clone(), b.clone(), c.clone()], "reines Datum sortiert als Ende des Tages");
+    assert_eq!(q("ORDER BY bydue DESC"), vec![c, b, a]);
+}
+
+#[test]
+fn custom_datetime_fields_compare_with_and_without_stored_seconds() {
+    // #214 (gleiche Fehlerklasse): ein eigenes Datum+Uhrzeit-Feld; gespeichert wird `…:SS`, ein Wert ohne Sekunden (ältere oder
+    // von außen geschriebene Daten) muss genauso passen – in Abfragen, Schlüsselwort-Bedingungen und der Sortierung.
+    let f = Fx::new();
+    let fld = f.add_field(f.task, "Planned", FieldKind::Datetime, FieldOptions::default(), false);
+    let mk = |title: &str, v: &str| {
+        let mut n = NewTicket::new(f.project, f.task, title);
+        n.values.push((fld.id, json!(v)));
+        create_ticket(&f.c, &n, &ui()).unwrap().0
+    };
+    let a = mk("Normal", "2026-11-20T14:30");
+    let b = mk("Ohne Sekunden", "2026-11-20T14:30");
+    let c = mk("Später", "2026-11-21T08:00");
+    let stored: String = f.c.query_row("SELECT text FROM ticket_values WHERE ticket_id = ?1 AND field_id = ?2", [a.id, fld.id], |r| r.get(0)).unwrap();
+    assert_eq!(stored, "2026-11-20T14:30:00", "normal gespeichert mit Sekunden");
+    f.c.execute("UPDATE ticket_values SET text = '2026-11-20T14:30' WHERE ticket_id = ?1 AND field_id = ?2", [b.id, fld.id]).unwrap();
+    f.c.execute("UPDATE ticket_values SET text = '2026-11-21T08:00' WHERE ticket_id = ?1 AND field_id = ?2", [c.id, fld.id]).unwrap();
+    let (a, b, c) = (a.key(), b.key(), c.key());
+    let ctx = Ctx::new(TODAY, Lang::En);
+    let q = |jql: &str| -> Vec<String> { run_query(&f.c, &ctx, Scope::Project(f.project), jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+    assert_eq!(q("Planned = \"2026-11-20 14:30\""), vec![a.clone(), b.clone()]);
+    assert_eq!(q("Planned >= \"2026-11-20 14:30\""), vec![a.clone(), b.clone(), c.clone()]);
+    assert_eq!(q("Planned > \"2026-11-20 14:30\""), vec![c.clone()]);
+    assert_eq!(q("Planned < \"2026-11-21 08:00\""), vec![a.clone(), b.clone()]);
+    // ohne die Regel der Fälligkeit: ein reines Datum ist Mitternacht
+    assert!(q("Planned = 2026-11-20").is_empty());
+    assert_eq!(q("Planned IS NOT EMPTY ORDER BY Planned DESC"), vec![c.clone(), a.clone(), b.clone()]);
+    let pred = |name: &str, op: ConditionOp, value: Value| {
+        create_keyword(&f.c, &NewKeyword { name: name.into(), description: String::new(), definition: Definition::Predicate { condition: Cond::Compare { field_id: fld.id, op, value } } }).unwrap();
+    };
+    pred("attime", ConditionOp::Eq, json!("2026-11-20T14:30"));
+    pred("fromtime", ConditionOp::Ge, json!("2026-11-20T14:30"));
+    assert_eq!(q("IS attime"), vec![a.clone(), b.clone()]);
+    assert_eq!(q("IS fromtime"), vec![a, b, c]);
+}
+
+#[test]
 fn every_custom_field_kind_is_searchable_by_name_and_key_also_on_user_types() {
     use crate::planning::types::{create_type, NewType};
     let f = Fx::new();
@@ -628,6 +704,31 @@ fn a_custom_field_named_like_a_builtin_is_reported_not_used() {
     let ss = search_schema(&s.f.c, s.scope(), Lang::En).unwrap();
     assert!(ss.conflicts.iter().any(|c| c.name == "Status" && c.kept.is_none()));
     assert_eq!(s.q("status = Done"), ks(&[2, 9]), "das eingebaute Feld gewinnt");
+}
+
+#[test]
+fn a_custom_non_date_field_named_due_stays_queryable() {
+    // #221: ein eigenes Textfeld „Due“/„Fällig“ (vor 2.3 abfragbar) wird von der eingebauten Fälligkeit verdeckt; es bleibt als
+    // „Due (custom)“ abfragbar, `due` ist weiter die eingebaute Fälligkeit.
+    let f = Fx::new();
+    let due_text = f.add_field(f.task, "Due", FieldKind::Text, FieldOptions::default(), false);
+    let faellig = f.add_field(f.story, "Fällig", FieldKind::Number, FieldOptions::default(), false);
+    let builtin_due = crate::planning::builtin_fields::field_id(&f.c, f.task, "due").unwrap().unwrap();
+    let mut n = NewTicket::new(f.project, f.task, "Text");
+    n.values = vec![(due_text.id, json!("next sprint")), (builtin_due, json!("2026-11-20"))];
+    let a = create_ticket(&f.c, &n, &ui()).unwrap().0.key();
+    let mut n = NewTicket::new(f.project, f.story, "Zahl");
+    n.values = vec![(faellig.id, json!(3))];
+    let b = create_ticket(&f.c, &n, &ui()).unwrap().0.key();
+    for (lang, scope) in [(Lang::En, Scope::Project(f.project)), (Lang::De, Scope::All)] {
+        let ss = search_schema(&f.c, scope, lang).unwrap();
+        assert!(ss.conflicts.iter().all(|c| c.name != "Due" && c.name != "Fällig"), "{:?}", ss.conflicts);
+        let ctx = Ctx::new(TODAY, lang);
+        let q = |jql: &str| -> Vec<String> { run_query(&f.c, &ctx, scope, jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+        assert_eq!(q("\"Due (custom)\" ~ sprint"), vec![a.clone()]);
+        assert_eq!(q("\"Fällig (custom)\" > 2"), vec![b.clone()]);
+        assert_eq!(q("due = 2026-11-20"), vec![a.clone()], "`due` bleibt die eingebaute Fälligkeit");
+    }
 }
 
 #[test]

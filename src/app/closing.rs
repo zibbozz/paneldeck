@@ -71,8 +71,65 @@ impl CloseAsk {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Lingering {
     pub(super) id: u64,
+    /// Job Object der Sitzung beim Öffnen der Rückfrage (`terminal::Session::job_key`). „Alle beenden“ gilt nur diesem
+    /// Job: Wurde die Sitzung inzwischen neu gestartet, hat sie einen neuen (#213).
+    pub(super) job: u64,
     pub(super) name: String,
     pub(super) procs: Vec<JobProc>,
+}
+
+/// Job Object einer geschlossenen oder neu gestarteten Sitzung, in dem noch Prozesse laufen (#218, #213). Der Hub
+/// behält das Handle, bis der Job leer ist: Solange ordnet er übrig gebliebene Prozesse dieser Sitzung zu (als
+/// Aufrufer mit ihrer Kette, `mcp::attribute`, `taint::set_retired`) und prüft nach [`RECHECK`] einmal, ob dort noch
+/// etwas läuft, das die Rückfrage nicht genannt hat (Hilfsprozesse eines Vordergrundprogramms, die es überleben).
+pub(super) struct Retired {
+    pub(super) job: crate::winctl::SessionJob,
+    pub(super) session: u64,
+    name: String,
+    since: Instant,
+    /// Prozesse, die die Rückfrage beim Schließen genannt hätte (der Nutzer kennt sie): nicht noch einmal melden.
+    shown: Vec<u32>,
+    checked: bool,
+    /// In der Meldung genannte Prozesse (PID, Erzeugungszeit): nur sie beendet „Alle beenden“ der Meldung.
+    listed: Vec<(u32, u64)>,
+}
+
+/// Kennzeichen im Token der Toast-Aktion „Alle beenden“ eines aufbewahrten Jobs (Rest = Job-Kennung).
+pub(super) const RETIRED_TOKEN: u64 = 1 << 63;
+/// Nach so langer Zeit wird ein aufbewahrter Job einmal auf übrige Prozesse geprüft – länger als die Frist, die Windows
+/// Konsolenprogrammen nach CTRL_CLOSE_EVENT zum Beenden gibt (5 s), damit langsam endende keine Meldung auslösen.
+const RECHECK: Duration = Duration::from_secs(6);
+
+/// Prozesse für die Meldung „läuft noch“: ohne Konsolen-Hosts und ohne die schon in der Rückfrage genannten
+/// (`shown`), dazu die Zeilen „Programmname (PID)“ – höchstens sechs, dann „…“. Die PIDs sind alle gemeldeten (auch die
+/// hinter „…“); nur sie beendet „Alle beenden“ der Meldung.
+pub(super) fn leftover_lines(pids: &[u32], shown: &[u32], name_of: impl Fn(u32) -> String) -> (Vec<u32>, Vec<String>) {
+    let procs: Vec<(u32, String)> = pids
+        .iter()
+        .filter(|p| !shown.contains(p))
+        .map(|p| (*p, name_of(*p)))
+        .filter(|(_, n)| {
+            let l = n.to_ascii_lowercase();
+            l != "conhost.exe" && l != "openconsole.exe"
+        })
+        .collect();
+    let mut v: Vec<String> = procs.iter().map(|(p, n)| format!("{} (PID {p})", if n.is_empty() { "?" } else { n.as_str() })).collect();
+    if v.len() > 6 {
+        v.truncate(6);
+        v.push("…".into());
+    }
+    (procs.into_iter().map(|(p, _)| p).collect(), v)
+}
+
+/// Was „Alle beenden“ beendet: (Sitzung, Job beim Öffnen der Rückfrage) je Sitzung mit Hintergrundprozessen.
+pub(super) fn job_refs(list: &[Lingering]) -> Vec<(u64, u64)> {
+    list.iter().map(|l| (l.id, l.job)).collect()
+}
+
+/// Sitzungen aus `refs`, deren Job noch derselbe ist wie beim Öffnen der Rückfrage (`current` = Job jetzt, `None` ohne
+/// laufende Sitzung). Eine inzwischen neu gestartete Sitzung bleibt unberührt (#213).
+pub(super) fn jobs_to_end(refs: &[(u64, u64)], current: impl Fn(u64) -> Option<u64>) -> Vec<u64> {
+    refs.iter().filter(|(id, job)| current(*id) == Some(*job)).map(|(id, _)| *id).collect()
 }
 
 /// Eine Zeile je Prozess: „notepad.exe (PID 42) · Fenster offen – Titel“.
@@ -366,16 +423,85 @@ impl App {
         ids.iter()
             .filter_map(|id| {
                 let e = self.entries.get(id)?;
-                let procs = e.live.as_ref()?.lingering(&info);
-                (!procs.is_empty()).then(|| Lingering { id: *id, name: e.display_name(), procs })
+                let live = e.live.as_ref()?;
+                let procs = live.lingering(&info);
+                (!procs.is_empty()).then(|| Lingering { id: *id, job: live.job_key().unwrap_or_default(), name: e.display_name(), procs })
             })
             .collect()
     }
 
-    /// „Alle beenden“: alle Prozesse in den Jobs dieser Sitzungen beenden (#168).
-    pub(super) fn end_jobs(&mut self, ids: &[u64]) {
-        for id in ids {
-            if let Some(s) = self.entries.get(id).and_then(|e| e.live.as_ref()) {
+    /// (Job, Sitzung) der aufbewahrten Jobs für die Zuordnung von Aufrufern (`mcp::attribute`).
+    pub(super) fn retired_refs(&self) -> Vec<(u64, u64)> {
+        self.retired.iter().map(|r| (r.job.key(), r.session)).collect()
+    }
+
+    /// Die Sitzung `id` endet (Schließen) oder startet neu: Ihren Job behalten, wenn noch Prozesse darin laufen
+    /// ([`Retired`]). Vorher festhalten, was die Rückfrage genannt hätte (die Konsole lebt da noch).
+    pub(super) fn retire_job(&mut self, id: u64, name: String, s: &mut crate::terminal::Session) {
+        let shown: Vec<u32> = s.lingering(&crate::winctl::ProcInfo::default()).into_iter().map(|p| p.pid).collect();
+        let Some(job) = s.take_job() else { return };
+        if job.pids().is_some_and(|p| p.is_empty()) {
+            return;
+        }
+        self.retired.push(Retired { job, session: id, name, since: Instant::now(), shown, checked: false, listed: Vec::new() });
+    }
+
+    /// Aufbewahrte Jobs pflegen (Hauptfenster, höchstens einmal je Sekunde): leere freigeben (und die Kette einer
+    /// geschlossenen Sitzung vergessen), nach [`RECHECK`] übrige Prozesse melden – mit „Alle beenden“.
+    pub(super) fn poll_retired(&mut self, ctx: &egui::Context) {
+        if self.retired.is_empty() {
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_secs(1));
+        if self.retired_poll.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.retired_poll = Some(Instant::now());
+        let before: Vec<u64> = self.retired.iter().map(|r| r.session).collect();
+        // Nur sicher leere Jobs freigeben (scheitert die Abfrage, bleibt der Job – und mit ihm die Zuordnung).
+        self.retired.retain(|r| !r.job.pids().is_some_and(|p| p.is_empty()));
+        for s in before {
+            if !self.retired.iter().any(|r| r.session == s) && !self.entries.contains_key(&s) {
+                taint::remove_retired(s);
+            }
+        }
+        let lang = self.settings.language;
+        let mut names: Option<std::collections::HashMap<u32, String>> = None;
+        let mut out = Vec::new();
+        for r in self.retired.iter_mut().filter(|r| !r.checked && r.since.elapsed() >= RECHECK) {
+            r.checked = true;
+            let names = names.get_or_insert_with(crate::winctl::process_names);
+            let (pids, lines) = leftover_lines(&r.job.pids().unwrap_or_default(), &r.shown, |p| names.get(&p).cloned().unwrap_or_default());
+            r.listed = pids.into_iter().filter_map(|p| crate::winctl::process_born(p).map(|t| (p, t))).collect();
+            if !lines.is_empty() && !r.listed.is_empty() {
+                out.push((r.name.clone(), r.job.key(), lines.join(", ")));
+            }
+        }
+        for (name, key, list) in out {
+            let text = match lang {
+                Lang::De => format!("Aus {} laufen noch Prozesse: {list}", lang.q(&name)),
+                Lang::En => format!("Processes from {} are still running: {list}", lang.q(&name)),
+            };
+            let action = super::toasts::ToastAction { label: lang.t("Alle beenden", "End all").to_string(), token: RETIRED_TOKEN | key, window: self.wins.cur };
+            self.push_toast_action(text, super::toasts::ToastKind::Warning, None, Some(action));
+        }
+    }
+
+    /// „Alle beenden“ aus der Meldung: nur die dort genannten Prozesse beenden (noch im Job, gleiche Erzeugungszeit) –
+    /// nicht den ganzen Job, in dem auch Prozesse liegen können, die der Nutzer behalten wollte. Ist der Job schon
+    /// freigegeben: nichts.
+    pub(super) fn end_retired(&mut self, key: u64) {
+        if let Some(r) = self.retired.iter().find(|r| r.job.key() == key) {
+            r.job.terminate_listed(&r.listed);
+        }
+    }
+
+    /// „Alle beenden“: alle Prozesse in den Jobs dieser Sitzungen beenden (#168) – nur, solange es noch der Job von der
+    /// Rückfrage ist (`refs` = (Sitzung, Job), [`job_refs`]); eine inzwischen neu gestartete Sitzung bleibt (#213).
+    pub(super) fn end_jobs(&mut self, refs: &[(u64, u64)]) {
+        let live = |id: u64| self.entries.get(&id).and_then(|e| e.live.as_ref());
+        for id in jobs_to_end(refs, |id| live(id).and_then(|s| s.job_key())) {
+            if let Some(s) = live(id) {
                 s.end_job();
             }
         }
@@ -450,7 +576,7 @@ impl App {
                     lingering_section(ui, &ask.lingering, lang, false);
                 });
                 match o {
-                    Outcome::Go if jobs => actions.extend([Action::EndJobs(vec![*id]), Action::Close(*id)]),
+                    Outcome::Go if jobs => actions.extend([Action::EndJobs(job_refs(&ask.lingering)), Action::Close(*id)]),
                     Outcome::Go | Outcome::Keep => actions.push(Action::Close(*id)),
                     _ => {}
                 }
@@ -464,8 +590,7 @@ impl App {
                 match o {
                     Outcome::Go | Outcome::Keep => {
                         if o == Outcome::Go {
-                            let ids: Vec<u64> = ask.lingering.iter().map(|l| l.id).collect();
-                            self.end_jobs(&ids);
+                            self.end_jobs(&job_refs(&ask.lingering));
                         }
                         self.quit_ok = true;
                         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
@@ -516,7 +641,7 @@ impl App {
                 });
                 let ids: Vec<u64> = items.iter().map(|i| i.id).collect();
                 match o {
-                    Outcome::Go if jobs => actions.extend([Action::EndJobs(ids.clone()), Action::CloseMany(ids)]),
+                    Outcome::Go if jobs => actions.extend([Action::EndJobs(job_refs(&ask.lingering)), Action::CloseMany(ids)]),
                     Outcome::Go | Outcome::Keep => actions.push(Action::CloseMany(ids)),
                     _ => {}
                 }
@@ -538,6 +663,35 @@ mod tests {
 
     fn item(id: u64) -> CloseItem {
         CloseItem { id, name: format!("s{id}"), project: "P".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn leftover_lines_skip_hosts_and_known_processes() {
+        let name = |p: u32| match p {
+            1 => "node.exe".to_string(),
+            2 => "conhost.exe".to_string(),
+            3 => "notepad.exe".to_string(),
+            4 => "OpenConsole.exe".to_string(),
+            _ => String::new(),
+        };
+        assert_eq!(leftover_lines(&[1, 2, 3, 4, 5], &[3], name), (vec![1, 5], vec!["node.exe (PID 1)".to_string(), "? (PID 5)".to_string()]));
+        assert!(leftover_lines(&[2, 3, 4], &[3], name).0.is_empty());
+        let many: Vec<u32> = (10..20).collect();
+        let (pids, l) = leftover_lines(&many, &[], |_| "x.exe".into());
+        assert_eq!((l.len(), l.last().map(String::as_str), pids.len()), (7, Some("…"), 10));
+    }
+
+    #[test]
+    fn end_all_only_hits_the_job_from_the_prompt() {
+        let list = [Lingering { id: 1, job: 10, ..Default::default() }, Lingering { id: 2, job: 20, ..Default::default() }, Lingering { id: 3, job: 30, ..Default::default() }];
+        assert_eq!(job_refs(&list), [(1, 10), (2, 20), (3, 30)]);
+        // 1 unverändert, 2 inzwischen neu gestartet (neuer Job), 3 läuft nicht mehr bzw. ist geschlossen
+        let now = |id: u64| match id {
+            1 => Some(10),
+            2 => Some(21),
+            _ => None,
+        };
+        assert_eq!(jobs_to_end(&job_refs(&list), now), [1]);
     }
 
     #[test]
@@ -767,15 +921,15 @@ mod tests {
         assert_eq!(proc_line(&jp(42, "notepad.exe", "Editor"), Lang::En), "notepad.exe (PID 42) · window open – Editor");
         assert_eq!(proc_line(&jp(7, "node.exe", ""), Lang::En), "node.exe (PID 7)");
         // Warnung: ohne Speichern; mit Fenstern zusätzlich der Rat, vorher selbst zu schließen
-        let quiet = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "node.exe", "")] }];
-        let win = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "code.exe", "proj")] }];
+        let quiet = [Lingering { id: 1, job: 1, name: "A".into(), procs: vec![jp(1, "node.exe", "")] }];
+        let win = [Lingering { id: 1, job: 1, name: "A".into(), procs: vec![jp(1, "code.exe", "proj")] }];
         assert!(end_all_warning(&quiet, Lang::En).contains("without saving") && !end_all_warning(&quiet, Lang::En).contains("window"));
         assert!(end_all_warning(&win, Lang::En).contains("open window"));
         assert!(end_all_warning(&win, Lang::De).contains("ohne zu speichern") && end_all_warning(&win, Lang::De).contains("offenem Fenster"));
-        let one = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "a.exe", "")] }];
+        let one = [Lingering { id: 1, job: 1, name: "A".into(), procs: vec![jp(1, "a.exe", "")] }];
         assert_eq!(lingering_intro(&one, Lang::En), "1 background process is still running and stays after closing unless you end it:");
         assert_eq!(lingering_intro(&one, Lang::De), "1 Hintergrundprozess läuft noch und bleibt nach dem Schließen bestehen, wenn du ihn nicht beendest:");
-        let two = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "a.exe", ""), jp(2, "b.exe", "")] }, Lingering { id: 2, name: "B".into(), procs: vec![jp(3, "c.exe", "")] }];
+        let two = [Lingering { id: 1, job: 1, name: "A".into(), procs: vec![jp(1, "a.exe", ""), jp(2, "b.exe", "")] }, Lingering { id: 2, job: 2, name: "B".into(), procs: vec![jp(3, "c.exe", "")] }];
         assert_eq!(lingering_intro(&two, Lang::En), "3 background processes in 2 sessions are still running and stay after closing unless you end them:");
         assert!(lingering_intro(&two[..1], Lang::De).starts_with("2 Hintergrundprozesse laufen noch"));
         assert_ne!(keep_label(Lang::De), keep_label(Lang::En));

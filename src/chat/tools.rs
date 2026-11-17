@@ -166,6 +166,12 @@ pub fn spawn_forbidden(tool: &str, args: &Value, origins: &[u64]) -> Option<&'st
     if origins.is_empty() {
         return None;
     }
+    starts_agent(tool, args)
+}
+
+/// Würde dieser Aufruf einen neuen Agenten starten (Claude-Sitzung oder MCP-Brücke, Regeln wie [`spawn_forbidden`],
+/// unabhängig von einer Kette)? Auch für nicht zuzuordnende Absender (#218). `Some(Meldung)` = ja.
+pub fn starts_agent(tool: &str, args: &Value) -> Option<&'static str> {
     match tool {
         "create_session" => {
             let claude = args.get("claude").and_then(|v| v.as_bool()) == Some(true);

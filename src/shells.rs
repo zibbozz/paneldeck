@@ -72,17 +72,10 @@ pub fn detect() -> Vec<ShellSpec> {
 
 #[cfg(windows)]
 fn detect_wsl() -> Vec<ShellSpec> {
-    use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("wsl.exe")
-        .args(["-l", "-q"])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .output();
-    let Ok(out) = out else { return Vec::new() };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    // wsl.exe gibt UTF-16LE aus (mit WSL_UTF8=1 UTF-8); `wsl::parse_distro_list` kann beides.
-    crate::wsl::parse_distro_list(&out.stdout)
+    // Mit Zeitlimit (läuft beim Start im UI-Thread, #221); wsl.exe gibt UTF-16LE aus (mit WSL_UTF8=1 UTF-8),
+    // `wsl::parse_distro_list` kann beides.
+    crate::wsl::list_distros(crate::wsl::FAST_TIMEOUT)
+        .unwrap_or_default()
         .iter()
         .map(|name| {
             ShellSpec::new(

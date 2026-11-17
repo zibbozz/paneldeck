@@ -210,7 +210,8 @@ impl Palettes {
     }
 
     /// Tolerant aus JSON, je Feld und je Eintrag: ungültige Einträge fallen weg (die übrigen bleiben), eine unlesbare
-    /// Liste ergibt die Vorgaben, Doppelte entfallen, höchstens [`MAX_COLORS`] je Liste.
+    /// Liste – auch eine, in der kein Eintrag gültig ist – ergibt die Vorgaben (nur eine wirklich leere Liste bleibt leer),
+    /// Doppelte entfallen, höchstens [`MAX_COLORS`] je Liste.
     pub fn from_value(v: &Value) -> Self {
         let mut p = Palettes { per_area: v.get("per_area").and_then(Value::as_bool).unwrap_or(false), ..Default::default() };
         for w in Which::ALL {
@@ -220,6 +221,10 @@ impl Palettes {
                 if out.len() < MAX_COLORS && !out.iter().any(|o| o.hex == c.hex) {
                     out.push(c);
                 }
+            }
+            if out.is_empty() && !items.is_empty() {
+                // nur ungültige Einträge: Vorgaben statt einer leeren Liste, die sonst ohne Sicherung gespeichert würde (#221)
+                continue;
             }
             *p.slot_mut(w) = Some(out);
         }
@@ -446,6 +451,10 @@ mod tests {
         );
         assert_eq!(s.palette.hub, None, "unlesbare Liste: Vorgaben");
         assert_eq!(s.palette.todo, Some(vec![PaletteColor::new("#010101")]), "die anderen Listen bleiben");
+        // Nur ungültige Einträge (#221): Vorgaben, nicht leer; eine wirklich leere Liste bleibt leer.
+        let s: Settings = serde_json::from_str(r##"{"palette":{"shared":[7,{"hex":"#xyz"},"kaputt"],"todo":[]}}"##).unwrap();
+        assert_eq!(s.palette.shared, None, "nur ungültige Einträge: Vorgaben");
+        assert_eq!(s.palette.todo, Some(vec![]));
         // Zu viele Farben: gekappt
         let many: Vec<String> = (0..100).map(|i| format!(r##"{{"hex":"#0000{i:02X}"}}"##)).collect();
         let s: Settings = serde_json::from_str(&format!(r#"{{"palette":{{"shared":[{}]}}}}"#, many.join(","))).unwrap();

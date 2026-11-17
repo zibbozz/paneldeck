@@ -129,6 +129,8 @@ pub(super) enum Problem {
     UnknownProfile,
     UnknownShell,
     MissingFolder,
+    /// Die Prüfung des Linux-Ordners in WSL läuft noch (#216).
+    FolderCheckPending,
     InvalidClaudeOption,
 }
 
@@ -138,6 +140,7 @@ impl Problem {
             Problem::UnknownProfile => lang.t("Das Profil gibt es nicht mehr.", "The profile no longer exists."),
             Problem::UnknownShell => lang.t("Diese Shell wurde nicht gefunden.", "This shell was not found."),
             Problem::MissingFolder => lang.t("Den Arbeitsordner gibt es nicht.", "The working folder does not exist."),
+            Problem::FolderCheckPending => lang.t("Der Arbeitsordner wird in WSL noch geprüft – bitte gleich noch einmal speichern.", "The working folder is still being checked in WSL – please save again in a moment."),
             Problem::InvalidClaudeOption => lang.t("Ungültige Claude-Option (Modell oder Agent).", "Invalid Claude option (model or agent)."),
         }
     }
@@ -218,6 +221,18 @@ pub(super) struct SessionForm {
     pub(super) opts_ok: bool,
     /// Beim ersten Bild den Fokus ins Namensfeld (sonst tippte man ins Terminal dahinter).
     pub(super) focus: bool,
+    /// Wofür der Arbeitsordner gilt (Windows oder WSL der gewählten Shell); setzt die App vor jedem Bild (#216).
+    pub(super) target: folder_picker::Target,
+    /// Ordnerfeld mit WSL-Unterstützung (#172, #216), beim ersten Bild angelegt.
+    picker: Option<folder_picker::FolderPicker>,
+    /// Ausgangslage des Ordnerfelds: (angezeigter Wert, Arbeitsordner) beim Anlegen bzw. nach einer Änderung von außen.
+    /// Erst wenn sich die Anzeige ändert (Eingabe, anderer Modus, andere Shell), wird sie zum Arbeitsordner – eine bloß
+    /// umgerechnete Anzeige (`C:\x` als `/mnt/c/x`) ändert nichts.
+    picker_base: (String, String),
+    /// Arbeitsordner nach dem letzten Bild: Ändert er sich von außen (Profil gewählt), übernimmt das Feld ihn.
+    picker_cwd: String,
+    /// „Zuletzt benutzte“ WSL-Ordner (`Settings::wsl_recent`, beim Öffnen kopiert).
+    pub(super) wsl_recent: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl SessionForm {
@@ -234,7 +249,23 @@ impl SessionForm {
             problems: Vec::new(),
             opts_ok: true,
             focus: true,
+            target: folder_picker::Target::Windows,
+            picker: None,
+            picker_base: (String::new(), String::new()),
+            picker_cwd: String::new(),
+            wsl_recent: Default::default(),
         }
+    }
+
+    /// Grund, warum das Ordnerfeld den Wert nicht übernehmen lässt (ungültiger oder fehlender Linux-Ordner, andere
+    /// Distribution; Prüfung in WSL im Hintergrund), sonst None.
+    pub(super) fn folder_blocked(&self, lang: Lang) -> Option<String> {
+        self.picker.as_ref().filter(|_| self.worktree.is_none()).and_then(|p| p.blocking_error(lang))
+    }
+
+    /// Wird der geänderte Arbeitsordner gerade noch in WSL geprüft?
+    pub(super) fn folder_checking(&self) -> bool {
+        self.v.cwd.trim() != self.orig.cwd.trim() && self.picker.as_ref().filter(|_| self.worktree.is_none()).is_some_and(|p| p.checking())
     }
 
     /// Profil gewählt: Shell und Ordner wie im Dialog „Neue Sitzung“ übernehmen (den Ordner nicht bei einem Worktree).
@@ -366,9 +397,15 @@ pub(super) fn folder_field(ui: &mut Ui, cwd: &mut String, _shell_id: &str, locke
     });
 }
 
-/// Gibt es den Arbeitsordner für diese Shell? Hier zieht die WSL-Prüfung von #172 ein; bis dahin der Windows-Pfad.
-pub(super) fn folder_exists(_shell_id: &str, path: &str) -> bool {
-    std::path::Path::new(path).is_dir()
+/// Gibt es den Arbeitsordner (`wsl` = die Shell startet in WSL)? Nie blockierend im UI-Thread (#216): Ein Linux-Pfad
+/// einer WSL-Shell prüft das Ordnerfeld im Hintergrund (`SessionForm::folder_blocked`), ein `\\wsl$`-Pfad wird nie
+/// geprüft, ein Netzwerkpfad nur mit kurzer Frist (keine Antwort = kein Einwand). Sonst der Windows-Ordner.
+pub(super) fn folder_exists(wsl: bool, path: &str) -> bool {
+    let p = path.trim();
+    if wsl && crate::wsl::looks_linux(p) {
+        return true;
+    }
+    crate::pathfmt::dir_exists_quick(p, std::time::Duration::from_millis(400)) != Some(false)
 }
 
 /// Farbauswahl: die geltende Palette des Terminal-Hubs wie im Kontextmenü „Farbe“ (die gewählte ist umrandet) und
@@ -469,8 +506,30 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 }
                 ui.end_row();
                 ui.label(lang.t("Arbeitsordner", "Working folder"));
-                let shell = f.v.shell_id.clone();
-                folder_field(ui, &mut f.v.cwd, &shell, f.worktree.is_some(), lang);
+                if f.worktree.is_some() {
+                    let shell = f.v.shell_id.clone();
+                    folder_field(ui, &mut f.v.cwd, &shell, true, lang);
+                } else {
+                    // Wie im Dialog „Neue Sitzung“: bei einer WSL-Shell Linux-Pfade, Prüfung und Auswahl in WSL (#216).
+                    let target = f.target.clone();
+                    let (cwd, fresh) = (f.v.cwd.clone(), f.picker.is_none());
+                    let picker = f.picker.get_or_insert_with(|| folder_picker::FolderPicker::new(("sset_cwd", f.id), &cwd, target.clone()));
+                    picker.set_target(target);
+                    if fresh || cwd != f.picker_cwd {
+                        // Erstes Bild oder Ordner von außen geändert (Profil): Feld übernimmt ihn als neue Ausgangslage.
+                        if !fresh {
+                            picker.set_text(&cwd);
+                        }
+                        f.picker_base = (picker.value(), cwd.clone());
+                    }
+                    let r = picker.show(ui, lang, &f.wsl_recent);
+                    if let Some(sid) = r.distro_changed.and_then(|d| shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|x| x.eq_ignore_ascii_case(&d)))).map(|s| s.id.clone()) {
+                        f.v.shell_id = sid;
+                    }
+                    let shown = picker.value();
+                    f.v.cwd = if shown != f.picker_base.0 { shown } else { f.picker_base.1.clone() };
+                    f.picker_cwd = f.v.cwd.clone();
+                }
                 ui.end_row();
                 if f.worktree.is_some() {
                     ui.label("");
@@ -608,7 +667,7 @@ impl App {
         match o {
             Outcome::Go | Outcome::Keep => {
                 if o == Outcome::Go && jobs {
-                    actions.push(Action::EndJobs(vec![ask.id]));
+                    actions.push(Action::EndJobs(super::closing::job_refs(&ask.lingering)));
                 }
                 actions.push(Action::Restart(ask.id));
                 // Den Fokus nur holen, wenn die Sitzung hier im Layout steht (nicht minimiert, nicht in einem anderen Fenster).
@@ -623,8 +682,17 @@ impl App {
     pub(super) fn open_session_settings(&mut self, id: u64) {
         if let Some(e) = self.entries.get(&id) {
             let auto = if e.meta.custom_name { e.live.as_ref().and_then(|s| s.title()).unwrap_or_default() } else { e.display_name() };
-            self.session_settings = Some(SessionForm::from_meta(&e.meta, auto));
+            let mut f = SessionForm::from_meta(&e.meta, auto);
+            f.wsl_recent = self.settings.wsl_recent.clone();
+            self.session_settings = Some(f);
         }
+    }
+
+    /// Ziel des Ordnerfelds für die im Dialog gewählte Shell (samt Profil mit eigenem Programm, wie beim Start).
+    fn session_form_target(&self, f: &SessionForm, default_shell: &str) -> folder_picker::Target {
+        let sid = resolve_shell(self.settings.profiles.iter().find(|p| p.id == f.v.profile), &f.v.shell_id, default_shell);
+        let choose = sid.starts_with("wsl:") && self.shells.iter().any(|s| s.id == sid);
+        folder_picker::Target::for_shell(self.shell_by_id(&sid).as_ref(), choose)
     }
 
     /// Dialog „Einstellungen der Sitzung“ (je Fenster).
@@ -637,11 +705,18 @@ impl App {
         let default_shell = self.settings.default_shell.clone();
         let hint = f.needs_reload(&self.settings.profiles, &default_shell);
         let esc_ok = self.reload_ask.is_none();
+        f.target = self.session_form_target(&f, &default_shell);
         match session_form_ui(ctx, &mut f, &self.shells, &self.settings.profiles, self.settings.claude_mode, hint, esc_ok, lang) {
             FormOutcome::Open => self.session_settings = Some(f),
             FormOutcome::Cancel => self.want_focus = Some(self.focused),
             FormOutcome::Save => {
-                f.problems = f.validate(&self.shells, &self.settings.profiles, &default_shell, folder_exists);
+                let is_wsl = |sh: &str| self.shell_by_id(sh).is_some_and(|s| crate::shells::is_wsl(&s));
+                f.problems = f.validate(&self.shells, &self.settings.profiles, &default_shell, |sh, p| folder_exists(is_wsl(sh), p));
+                if f.folder_blocked(lang).is_some() && !f.problems.contains(&Problem::MissingFolder) {
+                    f.problems.push(Problem::MissingFolder);
+                } else if f.folder_checking() && !f.problems.contains(&Problem::MissingFolder) {
+                    f.problems.push(Problem::FolderCheckPending);
+                }
                 if !f.problems.is_empty() {
                     self.session_settings = Some(f);
                     return;
@@ -649,6 +724,9 @@ impl App {
                 let id = f.id;
                 let Some(e) = self.entries.get_mut(&id) else { return };
                 let reload = f.apply(&mut e.meta, &self.settings.profiles, &default_shell);
+                if let Some(p) = f.picker.as_ref().filter(|_| f.v.cwd.trim() != f.orig.cwd.trim()) {
+                    p.remember(&mut self.settings.wsl_recent);
+                }
                 let group = e.meta.group.clone();
                 self.set_group(id, group); // legt den Ordner im Projekt an
                 if reload {
@@ -826,7 +904,7 @@ mod tests {
         c.v.profile = 9;
         c.v.cwd = "C:\\missing".into();
         assert!(c.validate(&s, &p, "pwsh", dir).is_empty());
-        for pr in [Problem::UnknownProfile, Problem::UnknownShell, Problem::MissingFolder, Problem::InvalidClaudeOption] {
+        for pr in [Problem::UnknownProfile, Problem::UnknownShell, Problem::MissingFolder, Problem::FolderCheckPending, Problem::InvalidClaudeOption] {
             assert_ne!(pr.text(Lang::De), pr.text(Lang::En));
         }
     }
@@ -1031,6 +1109,43 @@ mod tests {
         assert_eq!(meta.kind, SessionKind::Chat);
         assert!(!meta.claude && meta.shell_id.is_empty() && meta.cwd.is_empty() && meta.profile == 0);
         assert_eq!(meta.name, "Ask");
+    }
+
+    #[test]
+    fn folder_check_respects_wsl_and_never_probes_shares() {
+        // WSL-Shell: Linux-Pfade prüft das Ordnerfeld im Hintergrund – hier kein Einwand (#216)
+        assert!(folder_exists(true, "/home/u/projekt"));
+        assert!(folder_exists(true, "~/x"));
+        // WSL-Freigaben werden nie geprüft (könnte die WSL-VM starten)
+        assert!(folder_exists(false, r"\\wsl.localhost\Ubuntu\home\u"));
+        assert!(folder_exists(true, r"\\wsl$\Ubuntu\home\u"));
+        // Windows-Ordner wie bisher
+        let here = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        assert!(folder_exists(false, &here) && folder_exists(true, &here));
+        assert!(!folder_exists(false, &format!("{here}\\gibt-es-nicht-xyz")));
+        assert!(!folder_exists(false, "/home/u/projekt"), "Linux-Pfad ohne WSL-Shell");
+    }
+
+    #[test]
+    fn the_folder_field_keeps_the_saved_folder_and_follows_profiles() {
+        let mut d = Dlg::new();
+        let mut f = form(&SessionMeta { id: 4, shell_id: "pwsh".into(), cwd: "C:\\a".into(), ..SessionMeta::default() });
+        for _ in 0..3 {
+            d.frame(&mut f, false, vec![]);
+        }
+        assert_eq!(f.v.cwd, "C:\\a", "unverändert");
+        assert!(f.folder_blocked(Lang::En).is_none(), "Windows-Pfad: keine Sperre");
+        // Profil mit Ordner gewählt: Feld und Wert folgen
+        f.pick_profile(Some(&profiles()[1]));
+        d.frame(&mut f, false, vec![]);
+        d.frame(&mut f, false, vec![]);
+        assert_eq!(f.v.cwd, "C:\\work");
+        assert_eq!(f.picker.as_ref().map(|p| p.value()), Some("C:\\work".to_string()));
+        // Worktree: kein Ordnerfeld, Wert fest
+        let mut w = form(&SessionMeta { id: 5, cwd: "C:\\wt".into(), worktree: Some(state::Worktree { repo: "C:\\r".into(), path: "C:\\wt".into(), branch: "b".into() }), ..SessionMeta::default() });
+        d.frame(&mut w, false, vec![]);
+        assert!(w.picker.is_none() && w.folder_blocked(Lang::En).is_none());
+        assert_eq!(w.v.cwd, "C:\\wt");
     }
 
     /// Dialog ohne Fenster: einige Bilder mit Ereignissen.

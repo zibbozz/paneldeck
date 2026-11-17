@@ -27,6 +27,52 @@ pub fn is_remote_unc(p: &str) -> bool {
     !(s.starts_with(r"\\wsl$\") || s.starts_with(r"\\wsl.localhost\"))
 }
 
+/// Netzwerkpfad im weiteren Sinn: [`is_remote_unc`] oder ein Pfad auf einem verbundenen Netzlaufwerk (`Z:\…`,
+/// `GetDriveTypeW` = `DRIVE_REMOTE`; die Abfrage selbst geht nicht ins Netz). Für Prüfungen, die den UI-Thread
+/// blockieren könnten (#216).
+pub fn is_remote(p: &str) -> bool {
+    is_remote_unc(p) || remote_drive(p)
+}
+
+#[cfg(windows)]
+fn remote_drive(p: &str) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetDriveTypeW(root: *const u16) -> u32;
+    }
+    const DRIVE_REMOTE: u32 = 4;
+    let s = p.replace('/', "\\");
+    let s = s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix(r"\\.\")).or_else(|| s.strip_prefix(r"\??\")).unwrap_or(&s);
+    let Some((d, _)) = drive_split(s) else { return false };
+    let root: Vec<u16> = format!("{d}:\\").encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: nullterminierter Pfad, der während des Aufrufs lebt.
+    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
+}
+
+#[cfg(not(windows))]
+fn remote_drive(_p: &str) -> bool {
+    false
+}
+
+/// Gibt es den Ordner? Ohne den Aufrufer (oft den UI-Thread) lange zu blockieren (#216): Ein `\\wsl$`-Pfad wird nie
+/// geprüft (das könnte die WSL-VM starten) – `None`; ein Netzwerkpfad ([`is_remote`], auch Netzlaufwerk) wird in einem Hilfsthread
+/// geprüft, auf den höchstens `wait` gewartet wird – kommt die Antwort nicht rechtzeitig, `None` (der Thread läuft
+/// allein zu Ende). Lokale Pfade direkt.
+pub fn dir_exists_quick(path: &str, wait: std::time::Duration) -> Option<bool> {
+    if crate::wsl::is_wsl_unc(path) {
+        return None;
+    }
+    if !is_remote(path) {
+        return Some(std::path::Path::new(path).is_dir());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = path.to_string();
+    std::thread::Builder::new().name("dir-check".into()).spawn(move || {
+        let _ = tx.send(std::path::Path::new(&p).is_dir());
+    }).ok()?;
+    rx.recv_timeout(wait).ok()
+}
+
 /// Pfad für die Shell umrechnen (ohne Quoting).
 pub fn convert(shell_id: &str, path: &str) -> String {
     if shell_id.starts_with("wsl") {
@@ -87,5 +133,25 @@ mod tests {
         for p in [r"\\.\C:\x", r"\??\C:\x", "//?/c:/x", r"\\?\D:", r"\home\x", r"rel\a"] {
             assert!(!is_remote_unc(p), "{p}");
         }
+    }
+
+    #[test]
+    fn quick_dir_check_never_waits_long() {
+        let ms = std::time::Duration::from_millis;
+        let here = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        assert_eq!(dir_exists_quick(&here, ms(10)), Some(true));
+        assert_eq!(dir_exists_quick(&format!("{here}\\gibt-es-nicht-xyz"), ms(10)), Some(false));
+        // WSL-Freigabe: nie geprüft
+        assert_eq!(dir_exists_quick(r"\\wsl.localhost\Ubuntu\home", ms(10)), None);
+        assert_eq!(dir_exists_quick(r"\\wsl$\Ubuntu\home", ms(10)), None);
+        // „Entfernter“ Pfad (laut is_remote_unc): nur im Hilfsthread, höchstens so lange wie erlaubt (Pipe-Namensraum, kein Netz)
+        let t0 = std::time::Instant::now();
+        let r = dir_exists_quick(r"\\.\pipe\paneldeck-gibt-es-nicht", ms(200));
+        assert!(t0.elapsed() < ms(2000), "{:?}", t0.elapsed());
+        assert_ne!(r, Some(true));
+        // Lokales Laufwerk ist kein Netzlaufwerk
+        let drive = &here[..3];
+        assert!(!is_remote(drive) && !is_remote(&here) && !is_remote(&format!(r"\\?\{here}")));
+        assert!(is_remote(r"\\server\share"));
     }
 }

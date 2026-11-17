@@ -141,6 +141,11 @@ fn open_with(data_dir: &Path, backup_dir: &Path, migrations: &[&str]) -> Result<
     // eingebaute Felder für Typen nachtragen, die von außen in die Datenbank kamen (idempotent; nur Felder, deren Migration schon
     // gelaufen ist – das prüft `ensure` an der Schema-Version)
     crate::planning::builtin_fields::ensure(&conn).map_err(other)?;
+    // eigene Felder, die die Migration wegen Groß-/Kleinschreibung jenseits von ASCII übersah (#221) – nur eine Aufräumarbeit:
+    // ein Fehler verhindert das Öffnen nicht (beim nächsten Start wird es erneut versucht)
+    if let Err(e) = crate::planning::builtin_fields::rename_clashing_custom(&conn) {
+        eprintln!("rename_clashing_custom: {e}");
+    }
     let db = Db { conn, path };
     if db.meta("created_at").is_none() {
         db.set_meta("created_at", &chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string());
@@ -510,6 +515,39 @@ mod tests {
         let db = open(&d, &bdir).unwrap();
         check(&db.conn);
         assert_eq!(backup::list(&bdir).len(), 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #221: Schritt 4 der Migration verglich nur ASCII-Kleinschreibung; „FÄLLIG AM“ bekommt den Zusatz beim Öffnen, einmal.
+    #[test]
+    fn custom_fields_named_like_a_built_in_with_non_ascii_case_are_renamed_once() {
+        use crate::planning::fields::list_fields;
+        let d = tmp("db-v7-unicode-due");
+        let bdir = d.join("backups");
+        {
+            let db = open_with(&d, &bdir, &MIGRATIONS[..7]).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO projects (id, key, name, color, system, next_number, position, created_at) VALUES (10, 'UNI', 'U', '#112233', 0, 1, 1, '2026-01-01T00:00:00');
+                     INSERT INTO ticket_types (id, project_id, key, name, icon, color, workflow, system, position) VALUES (30, 10, NULL, 'Story', NULL, '#445566', 0, 0, 0);
+                     INSERT INTO fields (id, type_id, key, name, kind, options, required, position, builtin) VALUES
+                        (40, 30, NULL, 'FÄLLIG AM', 'date', '{}', 0, 0, 0),
+                        (41, 30, NULL, 'Fällig am', 'text', '{}', 0, 1, 0),
+                        (42, 30, NULL, 'Fällig', 'text', '{}', 0, 2, 0),
+                        (43, 30, NULL, 'LABELS', 'text', '{}', 0, 3, 0);",
+                )
+                .unwrap();
+        }
+        let names = |c: &Connection| -> Vec<(i64, Option<String>)> { list_fields(c, 30).unwrap().into_iter().filter(|f| !f.is_fixed()).map(|f| (f.id, f.name)).collect() };
+        let want = vec![(40, Some("FÄLLIG AM (custom)".to_string())), (41, Some("Fällig am (custom)".to_string())), (42, Some("Fällig".to_string())), (43, Some("LABELS (custom)".to_string()))];
+        let db = open(&d, &bdir).unwrap();
+        assert_eq!(names(&db.conn), want);
+        // idempotent: erneut ausführen und erneut öffnen ändert nichts
+        assert_eq!(crate::planning::builtin_fields::rename_clashing_custom(&db.conn).unwrap(), 0);
+        drop(db);
+        let db = open(&d, &bdir).unwrap();
+        assert_eq!(names(&db.conn), want);
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
     }

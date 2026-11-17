@@ -34,7 +34,7 @@ Optionen mit Wert lassen sich auch als `--option=wert` schreiben (`--profile=arb
 ## Optionen im Einzelnen
 
 ### --open \<ordner\>
-Öffnet im laufenden Paneldeck (oder nach dem Start) eine neue Terminal-Sitzung in `<ordner>`. Ist `<ordner>` eine Datei, gilt ihr Ordner. Das Explorer-Kontextmenü nutzt das; Laufwerkswurzeln wie `"C:\"` funktionieren auch.
+Öffnet im laufenden Paneldeck (oder nach dem Start) eine neue Terminal-Sitzung in `<ordner>`. Ist `<ordner>` eine Datei, gilt ihr Ordner. Das Explorer-Kontextmenü nutzt das; Laufwerkswurzeln wie `"C:\"` funktionieren auch. Ein relativer Pfad gilt ab dem aktuellen Ordner des Aufrufers; Linux-Pfade (`/…`, `~`) werden für WSL unverändert weitergegeben.
 
     paneldeck.exe --open "C:\Dev\meine-app"
 

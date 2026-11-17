@@ -214,8 +214,9 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress:
         return Err(BackupError::At(Where::Structure, Problem::StructureNames));
     }
     // Schwellen der Fälligkeit: aus der Sicherung, sonst wie beim Update der Datenbank
+    // Ungültige Einträge fallen einzeln weg, wie beim Lesen aus der Datenbank (#221) – eine Schwelle verhindert nicht den Import.
     let thresholds = match &p.due_thresholds {
-        Some(list) => list.clone(),
+        Some(list) => crate::due::clean_threshold_values(list.iter().filter_map(|t| serde_json::to_value(t).ok())),
         None if crate::planning::builtin_fields::has_preset_types(conn, pid)? => crate::due::default_thresholds(),
         None => Vec::new(),
     };
