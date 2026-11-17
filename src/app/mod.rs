@@ -2204,6 +2204,7 @@ impl App {
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
                 s.set_tee(self.broadcast && *id == self.focused);
+                s.set_shift_enter_newline(self.settings.shift_enter_newline_powershell);
             }
         }
         {
@@ -2272,9 +2273,13 @@ impl App {
                 if let Some(l) = &self.layout {
                     l.leaves(&mut leaves);
                 }
+                // Tasten je Ziel mit dessen Modus kodieren (kitty, win32-input-mode, Cursor-Tasten).
                 for id in leaves.into_iter().filter(|i| *i != self.focused) {
                     if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
-                        s.write(&data);
+                        let bytes = crate::vtkeys::TeeInput::encode_all(&data, s.key_mode());
+                        if !bytes.is_empty() {
+                            s.write(&bytes);
+                        }
                     }
                 }
             }

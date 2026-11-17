@@ -145,7 +145,7 @@ pub struct Session {
     /// Link unter dem Mauszeiger bei gedrückter Strg-Taste: (Zeile, Start, Ende, Ziel)
     pub hover_link: Option<(usize, usize, usize, String)>,
     tee_on: AtomicBool,
-    tee: Mutex<Vec<u8>>,
+    tee: Mutex<Vec<crate::vtkeys::TeeInput>>,
     /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
     last_activity: Arc<std::sync::atomic::AtomicU64>,
     /// Die Shell meldete ihren Prompt (OSC 133;A), während noch der alternative Bildschirm oder ein Maus-Modus
@@ -162,6 +162,8 @@ pub struct Session {
     pub stale_modes: Arc<AtomicBool>,
     /// win32-input-mode (DECSET 9001) ist an: ConPTY verlangt ihn beim Start (`vtkeys::Win32ModeScanner`).
     pub win32_input: Arc<AtomicBool>,
+    /// Einstellung „Umschalt+Enter = neue Zeile in PowerShell“ (vom UI-Thread je Frame gesetzt, `set_shift_enter_newline`).
+    shift_enter_newline: AtomicBool,
     /// Konsolen-Host dieser Sitzung (#183): `"bundled"` (mitgelieferte ConPTY) oder `"system"`; `None` außerhalb von Windows.
     pub console_host: Option<&'static str>,
 }
@@ -268,6 +270,7 @@ impl Session {
                 use std::sync::mpsc::RecvTimeoutError;
                 let mut scanner = OscScanner::default();
                 let mut win32_scan = crate::vtkeys::Win32ModeScanner::default();
+                let mut kitty_guard = crate::vtkeys::KittyStackGuard::default();
                 loop {
                     let msg = match processor.sync_timeout().sync_timeout() {
                         Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
@@ -276,8 +279,13 @@ impl Session {
                     match msg {
                         Ok(bytes) => {
                             activity.store(mono_ms(), Ordering::Relaxed);
-                            if let Some(on) = win32_scan.feed(&bytes) {
-                                win32.store(on, Ordering::Relaxed);
+                            // kitty-Stapel begrenzen, bevor alacritty ihn sieht (Absturz bei 4097 Pushes).
+                            let bytes = kitty_guard.filter(&bytes).into_owned();
+                            // win32-input-mode gibt es nur unter ConPTY.
+                            if cfg!(windows) {
+                                if let Some(on) = win32_scan.feed(&bytes) {
+                                    win32.store(on, Ordering::Relaxed);
+                                }
                             }
                             let (events, positions) = scanner.feed_at(&bytes);
                             {
@@ -301,6 +309,7 @@ impl Session {
                                         stale.store(next_stale_modes(was, &ev, *t.mode()), Ordering::Relaxed);
                                         if kitty_left_at_prompt(&ev, *t.mode()) {
                                             processor.advance(&mut *t, KITTY_RESET);
+                                            kitty_guard.cleared();
                                         }
                                         if ev == OscEvent::FullscreenModeSet {
                                             continue; // keine Shell-Integration
@@ -351,6 +360,7 @@ impl Session {
             last_activity,
             stale_modes,
             win32_input,
+            shift_enter_newline: AtomicBool::new(false),
             console_host,
         };
         if let Some(input) = opts.initial_input {
@@ -361,7 +371,7 @@ impl Session {
 
     pub fn write(&self, bytes: &[u8]) {
         if self.tee_on.load(Ordering::Relaxed) {
-            self.tee.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(bytes);
+            self.tee.lock().unwrap_or_else(|e| e.into_inner()).push(crate::vtkeys::TeeInput::Bytes(bytes.to_vec()));
         }
         self.write_raw(bytes);
     }
@@ -428,7 +438,14 @@ impl Session {
     /// Wie Tasten gerade kodiert werden (Cursor-/Ziffernblock-Modus, win32-input-mode, kitty-Flags).
     pub fn key_mode(&self) -> crate::vtkeys::KeyMode {
         let mode = *self.term.lock().unwrap_or_else(|e| e.into_inner()).mode();
-        crate::vtkeys::KeyMode::new(mode, self.win32_input.load(Ordering::Relaxed))
+        let mut m = crate::vtkeys::KeyMode::new(mode, self.win32_input.load(Ordering::Relaxed));
+        m.shift_enter_win32 = self.shift_enter_newline.load(Ordering::Relaxed) && is_powershell(&self.shell_id);
+        m
+    }
+
+    /// Einstellung „Umschalt+Enter = neue Zeile in PowerShell“ übernehmen (UI-Thread; wirkt nur in PowerShell-Sitzungen).
+    pub fn set_shift_enter_newline(&self, on: bool) {
+        self.shift_enter_newline.store(on, Ordering::Relaxed);
     }
 
     pub fn alt_screen(&self) -> bool {
@@ -542,7 +559,16 @@ impl Session {
         }
     }
 
-    pub fn take_tee(&self) -> Vec<u8> {
+    /// Wie `write`, aber der Broadcast bekommt die Eingabe selbst (`tee`), damit jedes Ziel sie mit seinem eigenen
+    /// Tastenmodus kodiert.
+    pub fn write_input(&self, bytes: &[u8], tee: crate::vtkeys::TeeInput) {
+        if self.tee_on.load(Ordering::Relaxed) {
+            self.tee.lock().unwrap_or_else(|e| e.into_inner()).push(tee);
+        }
+        self.write_raw(bytes);
+    }
+
+    pub fn take_tee(&self) -> Vec<crate::vtkeys::TeeInput> {
         std::mem::take(&mut *self.tee.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
@@ -655,12 +681,18 @@ pub fn next_stale_modes(prev: bool, ev: &OscEvent, mode: alacritty_terminal::ter
     }
 }
 
-/// Setzt die kitty-Flags auf 0 (`CSI = 0 ; 1 u`).
-const KITTY_RESET: &[u8] = b"\x1b[=0;1u";
+/// PowerShell-Sitzung (Windows PowerShell oder PowerShell 7)? Nur dort gilt die Umschalt+Enter-Einstellung.
+pub fn is_powershell(shell_id: &str) -> bool {
+    matches!(shell_id, "powershell" | "pwsh")
+}
+
+/// Verwirft den ganzen kitty-Flag-Stapel (`CSI < 65535 u`). Nur auf 0 setzen (`CSI = 0 u`) ließe den Stapel stehen:
+/// ein späteres Pop holte alte Flags zurück.
+pub const KITTY_RESET: &[u8] = b"\x1b[<65535u";
 
 /// Meldet die Shell ihren Prompt (OSC 133;A), während noch kitty-Tastaturflags gesetzt sind, hat das Programm sie
 /// nicht zurückgenommen (Absturz, abgeschossen). Ohne Rücksetzen kämen Esc, Strg+C und Strg+Buchstabe als CSI u bei
-/// der Shell an. Dann setzt der Lese-Thread die Flags auf 0 (`KITTY_RESET`).
+/// der Shell an. Dann verwirft der Lese-Thread den Stapel (`KITTY_RESET`).
 pub fn kitty_left_at_prompt(ev: &OscEvent, mode: alacritty_terminal::term::TermMode) -> bool {
     *ev == OscEvent::PromptStart && mode.intersects(alacritty_terminal::term::TermMode::KITTY_KEYBOARD_PROTOCOL)
 }

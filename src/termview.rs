@@ -647,9 +647,10 @@ fn numpad_down(_c: char) -> bool {
     false
 }
 
-/// Tasten, deren Drücken gesendet wurde: nur deren Loslassen geht ans Programm (kitty-Flag 2). Sonst käme das
-/// Loslassen von Tastenkürzeln des Hubs an, deren Drücken egui schon verbraucht hat.
-static KEYS_DOWN: std::sync::Mutex<Vec<Key>> = std::sync::Mutex::new(Vec::new());
+/// Tasten, deren Drücken gesendet wurde (mit Ziffernblock-Merkmal), und zu welcher Sitzung: nur deren Loslassen geht
+/// ans Programm (kitty-Flag 2). Sonst käme das Loslassen von Tastenkürzeln des Hubs an, deren Drücken egui schon
+/// verbraucht hat. Geleert bei Fokusverlust und Sitzungswechsel.
+static KEYS_DOWN: std::sync::Mutex<(usize, Vec<(Key, bool)>)> = std::sync::Mutex::new((0, Vec::new()));
 
 fn handle_keyboard(ui: &Ui, session: &mut Session) {
     let events = ui.input(|i| i.events.clone());
@@ -661,11 +662,29 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
         }
     }
     let mode = session.key_mode();
-    let encode = |key: Key, mods: Modifiers| vtkeys::encode_key(&vtkeys::KeyPress::new(key, mods), mode).bytes;
-    // Das `Event::Text` direkt nach einer Taste gehört zu ihr; hat `encode_key` es schon gesendet, wird es übersprungen.
-    let mut eat_text = false;
+    {
+        let me = session as *const Session as usize;
+        let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+        if down.0 != me {
+            *down = (me, Vec::new());
+        }
+    }
+    let key_input = |session: &mut Session, k: vtkeys::KeyPress| -> vtkeys::Encoded {
+        let out = vtkeys::encode_key(&k, mode);
+        if !out.bytes.is_empty() {
+            send_input(session, &out.bytes, vtkeys::TeeInput::key(&k));
+        }
+        out
+    };
+    // Index des `Event::Text`, das zur gerade kodierten Taste gehört und mit ihr schon gesendet ist.
+    let mut skip: Option<usize> = None;
+    // Das vorige Ereignis war ein nicht verbrauchter Tastendruck. Text mit reinem Alt gilt nur dann: Kürzel des Hubs
+    // (Alt+1…9, Alt+Umschalt+1/2, eigene Alt-Belegungen) verbraucht egui nur als Taste, ihr Text bliebe übrig.
+    let mut after_key = false;
     for (i, ev) in events.iter().enumerate() {
+        let was_after_key = std::mem::take(&mut after_key);
         match ev {
+            Event::WindowFocused(false) => KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner()).1.clear(),
             // egui-winit wandelt Strg+C / Strg+X (und Strg+Einfg / Umschalt+Entf) in Copy/Cut um und
             // liefert dafür KEIN Key-Ereignis – ohne diese Zweige käme ^C nie im Terminal an.
             Event::Copy => {
@@ -674,32 +693,34 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                     ui.ctx().copy_text(t);
                     session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
                 } else if !ui.input(|i| i.modifiers.shift) && !insert_held() {
-                    send(session, &encode(Key::C, Modifiers::CTRL));
+                    key_input(session, vtkeys::KeyPress::new(Key::C, Modifiers::CTRL));
                 }
             }
             Event::Cut => {
                 let m = ui.input(|i| i.modifiers);
                 if m.ctrl {
-                    send(session, &encode(Key::X, Modifiers::CTRL));
+                    key_input(session, vtkeys::KeyPress::new(Key::X, Modifiers::CTRL));
                 } else {
                     // Umschalt+Entf
-                    send(session, &encode(Key::Delete, m));
+                    key_input(session, vtkeys::KeyPress::new(Key::Delete, m));
                 }
             }
             Event::Text(t) => {
-                if std::mem::take(&mut eat_text) {
+                if skip == Some(i) {
                     continue;
                 }
                 let m = ui.input(|i| i.modifiers);
+                if m.alt && !m.ctrl && !was_after_key {
+                    continue; // Rest eines vom Hub verbrauchten Alt-Kürzels
+                }
                 let numpad = t.chars().count() == 1 && t.chars().next().is_some_and(numpad_down);
                 let bytes = vtkeys::encode_text(t, m, numpad, mode);
                 if !bytes.is_empty() {
-                    send(session, &bytes);
+                    send_input(session, &bytes, vtkeys::TeeInput::Text { text: t.clone(), mods: m, numpad });
                 }
             }
             Event::Paste(t) => paste(session, t),
             Event::Key { key, physical_key, pressed, repeat, modifiers } => {
-                eat_text = false;
                 let (key, modifiers) = (*key, *modifiers);
                 if *pressed {
                     // Einfügen: Text kommt über Event::Paste, Bilder über ctrl_v_pressed(); das Steuerzeichen ^V
@@ -718,6 +739,7 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                             continue;
                         }
                     }
+                    after_key = true;
                 }
                 let text = match events.get(i + 1) {
                     Some(Event::Text(t)) => Some(t.as_str()),
@@ -728,28 +750,24 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                     (true, true) => vtkeys::Phase::Repeat,
                     (true, false) => vtkeys::Phase::Press,
                 };
-                {
+                let numpad = if phase == vtkeys::Phase::Release {
+                    // Beim Loslassen ist die Taste schon oben: Merkmal vom Drücken nehmen.
                     let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
-                    if phase == vtkeys::Phase::Release {
-                        let was_sent = down.contains(&key);
-                        down.retain(|k| *k != key);
-                        if !was_sent {
-                            continue;
-                        }
-                    }
-                }
-                let numpad = key_digit(key).is_some_and(numpad_down);
+                    let Some(pos) = down.1.iter().position(|(k, _)| *k == key) else { continue };
+                    down.1.remove(pos).1
+                } else {
+                    key_digit(key).is_some_and(numpad_down)
+                };
                 let kp = vtkeys::KeyPress { key, physical: *physical_key, mods: modifiers, phase, numpad, text };
-                let out = vtkeys::encode_key(&kp, mode);
-                eat_text = out.eat_text && text.is_some();
-                if !out.bytes.is_empty() {
-                    if phase != vtkeys::Phase::Release {
-                        let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
-                        if !down.contains(&key) {
-                            down.push(key);
-                        }
+                let out = key_input(session, kp);
+                if out.eat_text && text.is_some() {
+                    skip = Some(i + 1);
+                }
+                if !out.bytes.is_empty() && phase != vtkeys::Phase::Release {
+                    let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+                    if !down.1.iter().any(|(k, _)| *k == key) {
+                        down.1.push((key, numpad));
                     }
-                    send(session, &out.bytes);
                 }
             }
             _ => {}
@@ -771,7 +789,8 @@ fn key_digit(key: Key) -> Option<char> {
     }
 }
 
-fn send(session: &mut Session, bytes: &[u8]) {
+/// Tastatureingabe senden; der Broadcast bekommt die Eingabe selbst und kodiert sie je Ziel (`TeeInput`).
+fn send_input(session: &mut Session, bytes: &[u8], tee: vtkeys::TeeInput) {
     {
         let mut t = session.term.lock().unwrap_or_else(|e| e.into_inner());
         if t.grid().display_offset() > 0 {
@@ -779,7 +798,7 @@ fn send(session: &mut Session, bytes: &[u8]) {
         }
         t.selection = None;
     }
-    session.write(bytes);
+    session.write_input(bytes, tee);
 }
 
 fn paste(session: &mut Session, text: &str) {
@@ -957,7 +976,7 @@ mod tests {
                     p.advance(&mut term, &bytes[done..end]);
                     done = end;
                     if kitty_left_at_prompt(&ev, *term.mode()) {
-                        p.advance(&mut term, b"\x1b[=0;1u");
+                        p.advance(&mut term, crate::terminal::KITTY_RESET);
                     }
                 }
                 p.advance(&mut term, &bytes[done..]);

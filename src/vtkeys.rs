@@ -39,6 +39,10 @@ pub struct KeyMode {
     pub win32: bool,
     /// Aktive kitty-Flags (Bits `KITTY_*`), 0 = aus.
     pub kitty: u8,
+    /// Umschalt+Enter als echtes Tastenereignis (win32-input-mode), damit PSReadLine „AddLine“ ausführt
+    /// (Einstellung `shift_enter_newline_powershell`, nur in PowerShell-Sitzungen). Programme mit VT-Eingabe bekommen dann
+    /// aber ein nacktes CR – außer sie haben kitty eingeschaltet (Claude Code), das hat Vorrang.
+    pub shift_enter_win32: bool,
 }
 
 impl KeyMode {
@@ -55,7 +59,7 @@ impl KeyMode {
                 kitty |= bit;
             }
         }
-        KeyMode { app_cursor: mode.contains(TermMode::APP_CURSOR), app_keypad: mode.contains(TermMode::APP_KEYPAD), win32, kitty }
+        KeyMode { app_cursor: mode.contains(TermMode::APP_CURSOR), app_keypad: mode.contains(TermMode::APP_KEYPAD), win32, kitty, shift_enter_win32: false }
     }
 
     /// kitty kodiert (Flag 1 oder 8). Die Flags 2/4/16 allein ändern nichts an den Bytes.
@@ -196,12 +200,15 @@ pub fn encode_key(k: &KeyPress, mode: KeyMode) -> Encoded {
     }
     if k.numpad && !k.mods.ctrl && !k.mods.alt {
         if let Some(c) = single_char(k.text).or_else(|| key_char(k.key)) {
-            if let Some(b) = numpad(c, k.mods, mode) {
+            if let Some(b) = numpad(c, k.mods, k.phase, mode) {
                 return Encoded::with_text(b);
             }
         }
     }
     if mode.win32 {
+        if mode.shift_enter_win32 && k.key == Key::Enter && k.mods.shift && !k.mods.ctrl && !k.mods.alt {
+            return Encoded::with_text(win32_seq(0x0D, 0x1C, 0x0D, win32_state(k.mods)));
+        }
         if let Some(b) = win32_key(k) {
             return Encoded::with_text(b);
         }
@@ -235,7 +242,7 @@ pub fn encode_text(text: &str, mods: Modifiers, numpad_key: bool, mode: KeyMode)
     }
     if numpad_key && !altgr(mods) {
         if let Some(c) = single_char(Some(text)) {
-            if let Some(b) = numpad(c, mods, mode) {
+            if let Some(b) = numpad(c, mods, Phase::Press, mode) {
                 return b;
             }
         }
@@ -334,7 +341,7 @@ fn legacy_key(k: &KeyPress, mode: KeyMode) -> Encoded {
 }
 
 /// Ziffernblock: kitty mit Flag 8 eigene Codes, win32-input VK_NUMPADx, DECKPAM `ESC O p` …, sonst das Zeichen.
-fn numpad(c: char, mods: Modifiers, mode: KeyMode) -> Option<Vec<u8>> {
+fn numpad(c: char, mods: Modifiers, phase: Phase, mode: KeyMode) -> Option<Vec<u8>> {
     let (vk, sc, kp_code, ss3) = match c {
         '0'..='9' => {
             let n = c as u8 - b'0';
@@ -351,9 +358,11 @@ fn numpad(c: char, mods: Modifiers, mode: KeyMode) -> Option<Vec<u8>> {
     if mode.kitty_on() {
         if mode.kitty & KITTY_ALL_AS_ESC != 0 {
             let text = (mode.kitty & KITTY_TEXT != 0).then_some(c);
-            return Some(csi_u(kp_code, None, None, mod_param(mods), Phase::Press, text, mode));
+            let text = text.filter(|_| phase != Phase::Release);
+            return Some(csi_u(kp_code, None, None, mod_param(mods), phase, text, mode));
         }
-        return Some(c.to_string().into_bytes());
+        // Ohne Flag 8 ist der Ziffernblock Text; dessen Loslassen wird nicht gemeldet.
+        return Some(if phase == Phase::Release { Vec::new() } else { c.to_string().into_bytes() });
     }
     if mode.win32 {
         // NUMLOCK_ON (0x20); die Divisionstaste ist eine erweiterte Taste (0x100).
@@ -545,7 +554,7 @@ fn kitty_key(k: &KeyPress, mode: KeyMode) -> Encoded {
     // Ziffernblock
     if k.numpad && all {
         if let Some(c) = single_char(k.text).or_else(|| key_char(k.key)) {
-            if let Some(b) = numpad(c, m, mode) {
+            if let Some(b) = numpad(c, m, k.phase, mode) {
                 return Encoded::with_text(b);
             }
         }
@@ -558,19 +567,177 @@ fn kitty_key(k: &KeyPress, mode: KeyMode) -> Encoded {
     if !all && !m.ctrl && !m.alt {
         return Encoded::default(); // Text (auch mit Umschalt) bleibt Text
     }
-    // Code = Taste ohne Umschalt. Bei umgeschalteten Symbolen (Umschalt+1 = '!') die Ziffer der Taste nehmen.
     let typed = single_char(k.text);
-    let (code, shifted) = if m.shift && !logical.is_ascii_lowercase() && k.physical.and_then(key_char).is_some_and(|p| p.is_ascii_digit()) {
-        (k.physical.and_then(key_char).unwrap_or(logical), Some(logical))
+    // egui-winit nimmt für Zeichen ohne egui-Taste (deutsch ö ä ü ß #, Tottasten, AltGr) die US-Taste derselben
+    // Position. Passt der Text nicht zur Taste, gilt der Text: ohne Flag 8 bleibt er Text (Alt+ö kodiert
+    // `encode_text`), mit Flag 8 kommt der Code aus dem Text.
+    if let Some(t) = typed {
+        let mismatch = !t.is_ascii() || if m.shift { logical.is_ascii_lowercase() && t != logical.to_ascii_uppercase() } else { t != logical };
+        if mismatch {
+            if !all {
+                return Encoded::default();
+            }
+            let base = t.to_lowercase().next().unwrap_or(t);
+            let shifted = (base != t).then_some(t as u32);
+            let text = (mode.kitty & KITTY_TEXT != 0 && !m.ctrl && !m.alt).then_some(t);
+            return Encoded::with_text(csi_u(base as u32, shifted, None, mp, k.phase, text, mode));
+        }
+    }
+    // Code = Taste ohne Umschalt. Umgeschaltete Symbole (Umschalt+/ = '?', Umschalt+1 = '!') über die Taste der
+    // Position mit dem Symbol als umgeschalteter Taste (`47:63`).
+    let phys = k.physical.and_then(key_char);
+    let (code, shifted) = if m.shift && !logical.is_ascii_lowercase() && phys.is_some_and(|p| p != logical) {
+        (phys.unwrap_or(logical), Some(typed.unwrap_or(logical)))
     } else if m.shift && logical.is_ascii_lowercase() {
         (logical, Some(typed.unwrap_or(logical.to_ascii_uppercase())))
     } else {
         (logical, if m.shift { typed } else { None })
     };
-    let base = k.physical.and_then(key_char).filter(|p| *p != code);
-    let text = if all && mode.kitty & KITTY_TEXT != 0 && !m.ctrl && !m.alt { typed } else { None };
+    let base = phys.filter(|p| *p != code);
+    let text = if all && mode.kitty & KITTY_TEXT != 0 && !m.ctrl && !m.alt && k.phase != Phase::Release { typed } else { None };
     let shifted = shifted.filter(|s| *s != code).map(|c| c as u32);
     Encoded::with_text(csi_u(code as u32, shifted, base.map(|c| c as u32), mp, k.phase, text, mode))
+}
+
+// ───────────────────────────── kitty-Stapel begrenzen ─────────────────────────────
+
+/// Höchste Tiefe des kitty-Flag-Stapels, die ein Programm erreichen darf.
+pub const KITTY_STACK_CAP: usize = 64;
+
+/// Begrenzt den kitty-Flag-Stapel im Ausgabestrom, bevor alacritty ihn sieht. alacritty_terminal 0.26 entfernt beim
+/// vollen Stapel (4096) aus dem *Titel*-Stapel (`push_keyboard_mode`) und gerät bei leerem Titel-Stapel in Panik –
+/// mit `panic = abort` stürzte der ganze Hub ab (4097 × `CSI > 1 u`). Hier wird die Tiefe je Bildschirm mitgezählt
+/// (alacritty führt für den alternativen Bildschirm einen eigenen Stapel); ein Push über `KITTY_STACK_CAP` bekommt
+/// direkt dahinter `CSI < 2 u CSI > flags u` eingefügt: Er ersetzt den obersten Eintrag, die Tiefe bleibt bei der Grenze.
+#[derive(Default)]
+pub struct KittyStackGuard {
+    depth: [usize; 2],
+    alt: bool,
+    state: u8,
+    prefix: u8,
+    params: Vec<u8>,
+}
+
+impl KittyStackGuard {
+    /// Ausgabe-Chunk mit den nötigen Einfügungen (meist unverändert; dann ohne Kopie).
+    pub fn filter<'a>(&mut self, bytes: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        let mut out: Option<Vec<u8>> = None;
+        let mut copied = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if let Some(ins) = self.step(b) {
+                let o = out.get_or_insert_with(Vec::new);
+                o.extend_from_slice(&bytes[copied..=i]);
+                o.extend_from_slice(&ins);
+                copied = i + 1;
+            }
+        }
+        match out {
+            Some(mut o) => {
+                o.extend_from_slice(&bytes[copied..]);
+                std::borrow::Cow::Owned(o)
+            }
+            None => std::borrow::Cow::Borrowed(bytes),
+        }
+    }
+
+    /// Alle Flags wurden mit `CSI < 65535 u` verworfen (`terminal::KITTY_RESET`).
+    pub fn cleared(&mut self) {
+        self.depth[self.alt as usize] = 0;
+    }
+
+    fn step(&mut self, b: u8) -> Option<Vec<u8>> {
+        match (self.state, b) {
+            (_, 0x1b) => {
+                self.state = 1;
+                self.params.clear();
+                self.prefix = 0;
+            }
+            (1, b'c') => {
+                // RIS: alacritty leert beide Stapel
+                self.depth = [0, 0];
+                self.alt = false;
+                self.state = 0;
+            }
+            (1, b'[') => self.state = 2,
+            (2, b'?' | b'>' | b'<' | b'=') => {
+                self.prefix = b;
+                self.state = 3;
+            }
+            (2 | 3, b'0'..=b'9' | b';') => {
+                if self.params.len() < 64 {
+                    self.params.push(b);
+                }
+                self.state = 3;
+            }
+            (2 | 3, b'u') => {
+                self.state = 0;
+                let first: usize = self.params.split(|c| *c == b';').next().and_then(|p| std::str::from_utf8(p).ok()?.parse().ok()).unwrap_or(0);
+                let d = &mut self.depth[self.alt as usize];
+                match self.prefix {
+                    b'>' => {
+                        *d += 1;
+                        if *d > KITTY_STACK_CAP {
+                            *d = KITTY_STACK_CAP;
+                            return Some(format!("\x1b[<2u\x1b[>{first}u").into_bytes());
+                        }
+                    }
+                    b'<' => *d = d.saturating_sub(first.max(1)),
+                    _ => {}
+                }
+            }
+            (2 | 3, b'h' | b'l') => {
+                self.state = 0;
+                if self.prefix == b'?' && self.params.split(|c| *c == b';').any(|p| p == b"1049" || p == b"1047" || p == b"47") {
+                    self.alt = b == b'h';
+                }
+            }
+            _ => self.state = 0,
+        }
+        None
+    }
+}
+
+// ───────────────────────────── Broadcast ─────────────────────────────
+
+/// Eingabe, die im Broadcast an andere Terminals geht. Tasten werden je Ziel mit dessen Modus kodiert, sonst kämen
+/// z. B. kitty-Sequenzen des fokussierten Claude Code in einer PowerShell an.
+#[derive(Clone, Debug)]
+pub enum TeeInput {
+    Bytes(Vec<u8>),
+    Key { key: Key, physical: Option<Key>, mods: Modifiers, phase: Phase, numpad: bool, text: Option<String> },
+    Text { text: String, mods: Modifiers, numpad: bool },
+}
+
+impl TeeInput {
+    pub fn key(k: &KeyPress) -> Self {
+        TeeInput::Key { key: k.key, physical: k.physical, mods: k.mods, phase: k.phase, numpad: k.numpad, text: k.text.map(str::to_owned) }
+    }
+
+    /// Bytes für ein Ziel mit Modus `mode`. Text, den die Taste dort schon mitsendet, wird übersprungen.
+    pub fn encode_all(items: &[TeeInput], mode: KeyMode) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut skip_text = false;
+        for it in items {
+            match it {
+                TeeInput::Bytes(b) => {
+                    skip_text = false;
+                    out.extend_from_slice(b);
+                }
+                TeeInput::Key { key, physical, mods, phase, numpad, text } => {
+                    let kp = KeyPress { key: *key, physical: *physical, mods: *mods, phase: *phase, numpad: *numpad, text: text.as_deref() };
+                    let e = encode_key(&kp, mode);
+                    skip_text = e.eat_text && text.is_some();
+                    out.extend(e.bytes);
+                }
+                TeeInput::Text { text, mods, numpad } => {
+                    if !std::mem::take(&mut skip_text) {
+                        out.extend(encode_text(text, *mods, *numpad, mode));
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 // ───────────────────────────── DECSET 9001 im Ausgabestrom ─────────────────────────────
@@ -699,12 +866,12 @@ pub fn key_bytes(name: &str, mode: KeyMode) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const LEGACY: KeyMode = KeyMode { app_cursor: false, app_keypad: false, win32: false, kitty: 0 };
-    const WIN32: KeyMode = KeyMode { app_cursor: false, app_keypad: false, win32: true, kitty: 0 };
+    const LEGACY: KeyMode = KeyMode { app_cursor: false, app_keypad: false, win32: false, kitty: 0, shift_enter_win32: false };
+    const WIN32: KeyMode = KeyMode { app_cursor: false, app_keypad: false, win32: true, kitty: 0, shift_enter_win32: false };
 
     fn kitty(flags: u8) -> KeyMode {
         // kitty schlägt win32-input: ConPTY hat 9001 immer an.
-        KeyMode { app_cursor: false, app_keypad: false, win32: true, kitty: flags }
+        KeyMode { app_cursor: false, app_keypad: false, win32: true, kitty: flags, shift_enter_win32: false }
     }
 
     /// Modifikatoren aus Buchstaben: s = Umschalt, a = Alt, c = Strg.
@@ -770,6 +937,22 @@ mod tests {
             (Key::Enter, "", kitty(8 | 2), "\\e[13u"),
             (Key::Enter, "s", kitty(31), "\\e[13;2u"),
         ]);
+    }
+
+    /// Einstellung „Umschalt+Enter = neue Zeile in PowerShell“: echtes Umschalt+Enter nur unter win32-input-mode und
+    /// ohne kitty; Strg/Alt+Enter unverändert.
+    #[test]
+    fn shift_enter_setting() {
+        let ps = KeyMode { shift_enter_win32: true, ..WIN32 };
+        check(&[
+            (Key::Enter, "s", ps, "\\e[13;28;13;1;16;1_"),
+            (Key::Enter, "", ps, "\\r"),
+            (Key::Enter, "a", ps, "\\e\\r"),
+            (Key::Enter, "c", ps, "\\e[13;28;10;1;8;1_"),
+            (Key::Enter, "s", KeyMode { shift_enter_win32: true, ..kitty(1) }, "\\e[13;2u"),
+            (Key::Enter, "s", KeyMode { shift_enter_win32: true, ..LEGACY }, "\\e\\r"),
+        ]);
+        assert_eq!(key_bytes("shift+enter", ps), Some(b"\x1b[13;28;13;1;16;1_".to_vec()));
     }
 
     #[test]
@@ -978,7 +1161,7 @@ mod tests {
     #[test]
     fn mode_from_term() {
         let m = KeyMode::new(TermMode::APP_CURSOR | TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALTERNATE_KEYS, true);
-        assert_eq!(m, KeyMode { app_cursor: true, app_keypad: false, win32: true, kitty: 5 });
+        assert_eq!(m, KeyMode { app_cursor: true, app_keypad: false, win32: true, kitty: 5, shift_enter_win32: false });
         assert!(m.kitty_on());
         assert!(!KeyMode { kitty: KITTY_EVENT_TYPES, ..LEGACY }.kitty_on());
     }
@@ -1035,5 +1218,120 @@ mod tests {
         assert!(key_bytes("ctrl+", LEGACY).is_none());
         assert!(key_bytes("", LEGACY).is_none());
         assert!(key_bytes("shift+1", LEGACY).is_none()); // Zeichen hängt von der Belegung ab
+    }
+
+    /// Antworten der Emulation (für `CSI ? u`).
+    #[derive(Clone, Default)]
+    struct Replies(std::sync::Arc<std::sync::Mutex<String>>);
+    impl alacritty_terminal::event::EventListener for Replies {
+        fn send_event(&self, ev: alacritty_terminal::event::Event) {
+            if let alacritty_terminal::event::Event::PtyWrite(s) = ev {
+                self.0.lock().unwrap().push_str(&s);
+            }
+        }
+    }
+
+    fn kitty_term() -> (alacritty_terminal::Term<Replies>, Replies) {
+        use alacritty_terminal::term::{test::TermSize, Term};
+        let r = Replies::default();
+        (Term::new(crate::terminal::term_config(100), &TermSize::new(80, 24), r.clone()), r)
+    }
+
+    /// Regression (#183 Review): 5000 × `CSI > 1 u` brachten alacritty 0.26 zum Absturz (Titel-Stapel statt
+    /// Tastatur-Stapel, Panik → mit panic=abort der ganze Hub). Mit `KittyStackGuard` davor bleibt die Tiefe begrenzt.
+    #[test]
+    fn kitty_push_flood_is_capped() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (mut term, replies) = kitty_term();
+        let mut p: Processor = Processor::new();
+        let mut g = KittyStackGuard::default();
+        let flood = "\x1b[>1u".repeat(5000) + "\x1b[>5u";
+        // in ungeraden Stücken, damit Sequenzen über Chunk-Grenzen laufen
+        for chunk in flood.as_bytes().chunks(7) {
+            p.advance(&mut term, &g.filter(chunk));
+        }
+        p.advance(&mut term, b"\x1b[?u");
+        assert_eq!(replies.0.lock().unwrap().as_str(), "\x1b[?5u");
+        assert_eq!(g.depth[0], KITTY_STACK_CAP);
+        // KITTY_CAP Pops leeren den Stapel ganz (er ist nie tiefer geworden)
+        p.advance(&mut term, &g.filter(format!("\x1b[<{KITTY_STACK_CAP}u\x1b[?u").as_bytes()));
+        assert_eq!(replies.0.lock().unwrap().as_str(), "\x1b[?5u\x1b[?0u");
+        assert_eq!(g.depth[0], 0);
+    }
+
+    #[test]
+    fn kitty_guard_tracks_screens_and_reset() {
+        let mut g = KittyStackGuard::default();
+        assert!(matches!(g.filter(b"\x1b[>1u\x1b[>1u"), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(g.depth, [2, 0]);
+        g.filter(b"\x1b[?1049h\x1b[>3u");
+        assert_eq!(g.depth, [2, 1]);
+        g.filter(b"\x1b[?1049l\x1b[<u");
+        assert_eq!(g.depth, [1, 1]);
+        g.filter(b"\x1b[<9u");
+        assert_eq!(g.depth, [0, 1]);
+        g.filter(b"\x1bc");
+        assert_eq!(g.depth, [0, 0]);
+        g.filter(b"\x1b[>1u");
+        g.cleared();
+        assert_eq!(g.depth, [0, 0]);
+    }
+
+    /// `terminal::KITTY_RESET` verwirft den ganzen Stapel: `CSI ? u` meldet danach 0, ein späteres Pop holt nichts zurück.
+    #[test]
+    fn kitty_reset_pops_everything() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (mut term, replies) = kitty_term();
+        let mut p: Processor = Processor::new();
+        p.advance(&mut term, b"\x1b[>1u\x1b[>5u\x1b[>31u");
+        p.advance(&mut term, crate::terminal::KITTY_RESET);
+        p.advance(&mut term, b"\x1b[?u\x1b[<u\x1b[?u");
+        assert_eq!(replies.0.lock().unwrap().as_str(), "\x1b[?0u\x1b[?0u");
+    }
+
+    #[test]
+    fn kitty_text_that_does_not_match_the_key() {
+        // egui-winit meldet für ö (deutsch) die US-Taste derselben Position (Semicolon).
+        assert_eq!(esc(&typed(Key::Semicolon, Key::Semicolon, "a", "ö", kitty(1))), "\\e[246;3u");
+        assert_eq!(esc(&typed(Key::Semicolon, Key::Semicolon, "", "ö", kitty(1))), "\\xc3\\xb6");
+        assert_eq!(esc(&typed(Key::Semicolon, Key::Semicolon, "", "ö", kitty(8))), "\\e[246u");
+        assert_eq!(esc(&typed(Key::Semicolon, Key::Semicolon, "s", "Ö", kitty(8 | 4))), "\\e[246:214;2u");
+        // AltGr-Zeichen, falls die Modifikatoren fehlen: nie der Code der Taste (q), sondern '@'
+        assert_eq!(esc(&typed(Key::Q, Key::Q, "", "@", kitty(1))), "@");
+        assert_eq!(esc(&typed(Key::Q, Key::Q, "", "@", kitty(8 | 16))), "\\e[64;1;64u");
+        // Umgeschaltetes Symbol: Taste der Position + Symbol als umgeschaltete Taste
+        assert_eq!(esc(&typed(Key::Questionmark, Key::Slash, "cs", "?", kitty(1 | 4))), "\\e[47:63;6u");
+        assert_eq!(esc(&typed(Key::Questionmark, Key::Slash, "cs", "?", kitty(1))), "\\e[47;6u");
+        // Legacy: Alt+ö aus dem Text
+        assert_eq!(esc(&typed(Key::Semicolon, Key::Semicolon, "a", "ö", WIN32)), "\\e\\xc3\\xb6");
+    }
+
+    #[test]
+    fn kitty_numpad_phases() {
+        let np = |phase: Phase, mode: KeyMode| {
+            let kp = KeyPress { numpad: true, phase, text: None, ..KeyPress::new(Key::Num5, mods("")) };
+            esc(&encode_key(&kp, mode).bytes)
+        };
+        assert_eq!(np(Phase::Press, kitty(8 | 2)), "\\e[57404u");
+        assert_eq!(np(Phase::Repeat, kitty(8 | 2)), "\\e[57404;1:2u");
+        assert_eq!(np(Phase::Release, kitty(8 | 2)), "\\e[57404;1:3u");
+        assert_eq!(np(Phase::Release, kitty(1 | 2)), "");
+    }
+
+    #[test]
+    fn broadcast_encodes_per_target() {
+        let k = KeyPress { text: Some("\r"), ..KeyPress::new(Key::Enter, mods("s")) };
+        let items = vec![
+            TeeInput::Text { text: "ls".into(), mods: mods(""), numpad: false },
+            TeeInput::key(&k),
+            TeeInput::Bytes(b"\x1b[200~x\x1b[201~".to_vec()),
+        ];
+        assert_eq!(esc(&TeeInput::encode_all(&items, kitty(5))), "ls\\e[13;2u\\e[200~x\\e[201~");
+        assert_eq!(esc(&TeeInput::encode_all(&items, WIN32)), "ls\\e\\r\\e[200~x\\e[201~");
+        // Alt+. : der Text gehört zur Taste und kommt nur einmal
+        let k = KeyPress { text: Some("."), ..KeyPress::new(Key::Period, mods("a")) };
+        let items = vec![TeeInput::key(&k), TeeInput::Text { text: ".".into(), mods: mods("a"), numpad: false }];
+        assert_eq!(esc(&TeeInput::encode_all(&items, LEGACY)), "\\e.");
+        assert_eq!(esc(&TeeInput::encode_all(&items, kitty(1))), "\\e[46;3u");
     }
 }

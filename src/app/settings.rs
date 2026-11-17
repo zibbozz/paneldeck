@@ -209,6 +209,18 @@ impl App {
                             },
                         );
                         #[cfg(windows)]
+                        row(
+                            ui,
+                            lang.t("Umschalt+Enter = neue Zeile in PowerShell", "Shift+Enter = new line in PowerShell"),
+                            lang.t(
+                                "PSReadLine fügt dann eine Zeile ein, statt den Befehl auszuführen. Programme, die in PowerShell laufen und das kitty-Tastaturprotokoll nicht nutzen, bekommen dabei ein normales Enter.",
+                                "PSReadLine then inserts a line instead of running the command. Programs running inside PowerShell that do not use the kitty keyboard protocol receive a plain Enter.",
+                            ),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.shift_enter_newline_powershell);
+                            },
+                        );
+                        #[cfg(windows)]
                         {
                             row(
                                 ui,

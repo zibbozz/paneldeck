@@ -219,6 +219,10 @@ pub struct Settings {
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
     /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
     pub remember_sessions: bool,
+    /// Umschalt+Enter = neue Zeile in PowerShell (seit 2.3.0, Standard aus): sendet in PowerShell-Sitzungen ein echtes
+    /// Umschalt+Enter (win32-input-mode), das PSReadLine als „AddLine“ versteht. Aus = ESC CR wie bisher (Claude Code und
+    /// andere Programme mit VT-Eingabe behalten Umschalt+Enter). Fehlt in älteren Dateien (dann aus).
+    pub shift_enter_newline_powershell: bool,
     /// Farbpaletten (seit 2.3.0, `palette`): gemeinsam oder je Bereich. Fehlt in älteren Dateien (dann die Vorgaben);
     /// unveränderte Vorgaben werden nicht geschrieben, unlesbare Daten ergeben die Vorgaben.
     #[serde(skip_serializing_if = "crate::palette::Palettes::is_default", deserialize_with = "crate::palette::Palettes::lenient")]
@@ -326,6 +330,7 @@ impl Default for Settings {
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
+            shift_enter_newline_powershell: false,
             palette: Default::default(),
             osc52_copy: true,
             claude_defaults: Default::default(),
@@ -1138,6 +1143,19 @@ mod tests {
         assert_eq!(s.wsl_recent["Ubuntu"], vec!["/home/u".to_string()]);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.wsl_recent, s.wsl_recent);
+    }
+
+    #[test]
+    fn shift_enter_setting_back_compat_and_roundtrip() {
+        // settings.json ohne das Feld (vor 2.3.0): aus.
+        let s: Settings = serde_json::from_str(r#"{"language":"En","scrollback_lines":5000}"#).unwrap();
+        assert!(!s.shift_enter_newline_powershell);
+        let mut s = s;
+        s.shift_enter_newline_powershell = true;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["shift_enter_newline_powershell"], true);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.shift_enter_newline_powershell);
     }
 
     #[test]
