@@ -14,6 +14,39 @@ Unicode true
 !ifndef OUTFILE
   !define OUTFILE "Paneldeck-Setup-${VERSION}.exe"
 !endif
+; Mitgelieferte ConPTY (conpty.dll + OpenConsole.exe, geprüft von tools/fetch-conpty.ps1)
+!ifndef CONPTY_DIR
+  !define CONPTY_DIR "..\dist\conpty"
+!endif
+
+; Programmdatei ersetzen, auch wenn Paneldeck läuft: die laufende paneldeck.exe, eine geladene conpty.dll bzw. laufende
+; OpenConsole.exe (je Terminal eine) lassen sich nicht überschreiben, aber umbenennen. Die bisherige wird zu NAME.old;
+; ist eine ältere NAME.old noch in Benutzung, wird sie unter einem freien Namen NAME.old.<n> beiseitegelegt. Scheitert das
+; Schreiben, kommt die bisherige Datei zurück an ihren Platz (nie eine halbe Installation). Der neue Hub löscht alle
+; NAME.old* nach seinem ersten Frame; was dann noch läuft, beim nächsten Start (/REBOOTOK nur als Zusatz).
+!macro InstallBusyFile SRC NAME
+  Delete "$INSTDIR\${NAME}.old"
+  ${If} ${FileExists} "$INSTDIR\${NAME}.old"
+    StrCpy $R8 1
+    ${DoWhile} ${FileExists} "$INSTDIR\${NAME}.old.$R8"
+      IntOp $R8 $R8 + 1
+    ${Loop}
+    Rename "$INSTDIR\${NAME}.old" "$INSTDIR\${NAME}.old.$R8"
+    Delete /REBOOTOK "$INSTDIR\${NAME}.old.$R8"
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\${NAME}"
+    Rename "$INSTDIR\${NAME}" "$INSTDIR\${NAME}.old"
+  ${EndIf}
+  ClearErrors
+  File "/oname=${NAME}" "${SRC}"
+  ${If} ${Errors}
+    Delete "$INSTDIR\${NAME}"
+    Rename "$INSTDIR\${NAME}.old" "$INSTDIR\${NAME}"
+    MessageBox MB_OK|MB_ICONSTOP "${NAME} konnte nicht geschrieben werden. / Could not write ${NAME}." /SD IDOK
+    Abort
+  ${EndIf}
+  Delete /REBOOTOK "$INSTDIR\${NAME}.old"
+!macroend
 
 Name "Paneldeck ${VERSION}"
 OutFile "${OUTFILE}"
@@ -70,17 +103,12 @@ FunctionEnd
 Section "$(NAME_Main)" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
-  ; Läuft Paneldeck gerade (Update), ist die .exe gesperrt – umbenennen darf Windows aber. Die laufende Instanz
-  ; bleibt unberührt (alte Datei bis zum Beenden), die neue liegt sofort am Platz; der neue Hub löscht "*.old" nach seinem ersten gezeichneten Frame.
-  Delete "$INSTDIR\paneldeck.exe.old"
-  IfFileExists "$INSTDIR\paneldeck.exe" 0 +2
-    Rename "$INSTDIR\paneldeck.exe" "$INSTDIR\paneldeck.exe.old"
-  ClearErrors
-  File /oname=paneldeck.exe "${EXE}"
-  IfErrors 0 +3
-    MessageBox MB_OK|MB_ICONSTOP "paneldeck.exe konnte nicht geschrieben werden. / Could not write paneldeck.exe." /SD IDOK
-    Abort
-  Delete /REBOOTOK "$INSTDIR\paneldeck.exe.old"
+  ; Läuft Paneldeck gerade (Update), sind die Dateien gesperrt – umbenennen darf Windows aber (InstallBusyFile). Die laufende
+  ; Instanz bleibt unberührt, die neuen Dateien liegen sofort am Platz. Reihenfolge: erst die ConPTY, dann paneldeck.exe –
+  ; bricht die .exe ab, läuft die bisherige mit der neuen ConPTY (verträglich); nie eine neue .exe ohne ihre ConPTY.
+  !insertmacro InstallBusyFile "${CONPTY_DIR}\conpty.dll" "conpty.dll"
+  !insertmacro InstallBusyFile "${CONPTY_DIR}\OpenConsole.exe" "OpenConsole.exe"
+  !insertmacro InstallBusyFile "${EXE}" "paneldeck.exe"
   File "..\README.md"
   File "..\README.de.md"
   File "..\Changelog.md"
@@ -92,6 +120,8 @@ Section "$(NAME_Main)" SecMain
   File "..\assets\fonts\LICENSE-Cascadia.txt"
   File "..\assets\fonts\LICENSE-NotoColorEmoji.txt"
   File "..\assets\fonts\LICENSE-Lucide.txt"
+  File "/oname=LICENSE-ConPTY.txt" "..\tools\license-extra\conpty-MIT.txt"
+  File "/oname=NOTICE-ConPTY.md" "..\tools\license-extra\conpty-NOTICE.md"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
@@ -170,8 +200,13 @@ FunctionEnd
 Section "Uninstall"
   ; Globale Claude-Hooks entfernen, solange die .exe noch da ist
   ExecWait '"$INSTDIR\paneldeck.exe" --uninstall-hooks'
-  Delete "$INSTDIR\paneldeck.exe"
-  Delete "$INSTDIR\paneldeck.exe.old"
+  ; Noch laufende/geladene Dateien (Paneldeck oder eine OpenConsole.exe läuft) werden per /REBOOTOK vorgemerkt.
+  Delete /REBOOTOK "$INSTDIR\paneldeck.exe"
+  Delete /REBOOTOK "$INSTDIR\paneldeck.exe.old*"
+  Delete /REBOOTOK "$INSTDIR\conpty.dll"
+  Delete /REBOOTOK "$INSTDIR\conpty.dll.old*"
+  Delete /REBOOTOK "$INSTDIR\OpenConsole.exe"
+  Delete /REBOOTOK "$INSTDIR\OpenConsole.exe.old*"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\README.de.md"
   Delete "$INSTDIR\Changelog.md"
@@ -182,6 +217,8 @@ Section "Uninstall"
   Delete "$INSTDIR\licenses\LICENSE-Cascadia.txt"
   Delete "$INSTDIR\licenses\LICENSE-NotoColorEmoji.txt"
   Delete "$INSTDIR\licenses\LICENSE-Lucide.txt"
+  Delete "$INSTDIR\licenses\LICENSE-ConPTY.txt"
+  Delete "$INSTDIR\licenses\NOTICE-ConPTY.md"
   RMDir "$INSTDIR\licenses"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$SMPROGRAMS\Paneldeck\Paneldeck.lnk"
