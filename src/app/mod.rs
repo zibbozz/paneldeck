@@ -2122,7 +2122,7 @@ impl App {
                 cache.push((p, self.reply_view_for(ctx, p)));
             }
             if let Some((_, v)) = cache.iter().find(|(id, _)| *id == p) {
-                s.set_view(&v.theme, v.cell_w, v.cell_h);
+                s.seed_view(&v.theme, v.cell_w, v.cell_h);
             }
         }
     }

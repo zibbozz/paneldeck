@@ -153,8 +153,9 @@ pub fn paste_payload(text: &str, bracketed: bool) -> String {
     }
 }
 
-/// Einfügen durch den Nutzer: bereinigt (`paste_clean`); ein einzelner Zeilenumbruch am Ende einer sonst einzeiligen
-/// Auswahl (dreifach geklickte Zeile, „cmd\n“) fällt weg – er würde den Befehl sofort ausführen.
+/// Einfügen durch den Nutzer ohne Bracketed Paste: bereinigt (`paste_clean`); ein einzelner Zeilenumbruch am Ende einer
+/// sonst einzeiligen Auswahl (dreifach geklickte Zeile, „cmd\n“) fällt weg – er würde den Befehl sofort ausführen.
+/// Mit Bracketed Paste bleibt er (`Session::paste_user`).
 pub fn paste_user_text(text: &str) -> String {
     let mut t = paste_clean(text);
     if t.ends_with('\r') && t.matches('\r').count() == 1 {
@@ -743,8 +744,10 @@ impl Session {
     /// Einfügen durch den Nutzer (Strg+V, Rechtsklick): mehrere Zeilen ohne Bracketed Paste warten auf die Rückfrage
     /// (Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“, `take_paste_ask`), alles andere geht sofort.
     pub fn paste_user(&self, text: &str) {
-        let text = paste_user_text(text);
-        if self.paste_warn.load(Ordering::Relaxed) && paste_line_count(&text).is_some() && !self.bracketed_paste() {
+        let bracketed = self.bracketed_paste();
+        // Mit Bracketed Paste führt ein Zeilenende nichts aus – der Text bleibt, wie er ist (nur bereinigt).
+        let text = if bracketed { paste_clean(text) } else { paste_user_text(text) };
+        if self.paste_warn.load(Ordering::Relaxed) && paste_line_count(&text).is_some() && !bracketed {
             *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
             return;
         }
@@ -810,6 +813,17 @@ impl Session {
                 let _ = self.master.resize(self.pty_size());
             }
         }
+    }
+
+    /// Wie `set_view`, aber vom App-Thread für alle Sitzungen (jedes Frame): das Theme immer, die Zellgröße nur, solange
+    /// die Sitzung noch nie gezeichnet wurde. Gezeichnete Sitzungen setzt `termview` mit dem Pixelmaßstab ihres Fensters
+    /// (ein abgedocktes Fenster auf einem anderen Monitor hat einen anderen) – sonst wechselte die Größe jedes Frame.
+    pub fn seed_view(&self, theme: &Theme, cell_w: u16, cell_h: u16) {
+        let (w, h) = {
+            let v = self.view.lock().unwrap_or_else(|e| e.into_inner());
+            if v.cell_w == 0 && v.cell_h == 0 { (cell_w, cell_h) } else { (v.cell_w, v.cell_h) }
+        };
+        self.set_view(theme, w, h);
     }
 
     /// Größe für das Pseudo-Terminal: Zeilen/Spalten und die Pixelgröße des Textbereichs (0, solange unbekannt).
@@ -940,6 +954,8 @@ fn process_chunk(
             if processor.sync_timeout().sync_timeout().is_some() {
                 deferred.push(Reply::Query(q));
             } else {
+                // Ein Block, der in diesem Stück endete: dessen zurückgehaltene Antworten zuerst.
+                release_deferred(processor, lst, deferred);
                 lst.push_reply(Reply::Query(q));
             }
             continue;
@@ -1452,6 +1468,11 @@ mod vt_reply_tests {
         assert_eq!(out, "", "nichts, solange der Block offen ist");
         let out = r.feed("\x1b[?2026l");
         assert_eq!(out, "\x1b[1;1R\x1b[6;18;9t");
+        // Block endet und eine neue Anfrage folgt im selben Stück: die zurückgehaltene Antwort zuerst.
+        let out = r.feed("\x1b[?2026h\x1b[>q");
+        assert_eq!(out, "");
+        let out = r.feed("\x1b[?2026l\x1b[16t");
+        assert!(out.starts_with("\x1bP>|Paneldeck ") && out.ends_with("\x1b\\\x1b[6;18;9t"), "{out:?}");
     }
 
     /// Eine Sitzung beantwortet Abfragen mit dem Theme, das ihr beim Start mitgegeben wurde (auch ungezeichnet).

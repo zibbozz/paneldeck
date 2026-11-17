@@ -85,16 +85,7 @@ impl OscScanner {
                         State::Normal
                     }
                 }
-                State::Esc => match b {
-                    b']' => State::Osc(Vec::new()),
-                    b'[' => State::Csi(Vec::new()),
-                    0x1b => State::Esc,
-                    b'c' => {
-                        out.push(OscEvent::FullReset);
-                        State::Normal
-                    }
-                    _ => State::Normal,
-                },
+                State::Esc => esc_next(b, &mut out),
                 State::Csi(mut buf) => match b {
                     // Parameter (0–9 ; : < = > ?) und Zwischenbytes
                     0x20..=0x3f => {
@@ -141,8 +132,8 @@ impl OscScanner {
                         parse(&buf, &mut out);
                         State::Normal
                     }
-                    b']' => State::Osc(Vec::new()),
-                    _ => State::Normal,
+                    // ESC beendet in vte das OSC und beginnt eine neue Sequenz (z. B. RIS direkt dahinter).
+                    _ => esc_next(b, &mut out),
                 },
             };
             // Ereignisse, die mit diesem Byte abgeschlossen wurden, bekommen seine Position.
@@ -151,6 +142,22 @@ impl OscScanner {
             }
         }
         (out, pos)
+    }
+}
+
+/// Byte nach ESC (wie vte): `]` OSC, `[` CSI, `c` RIS; Steuerzeichen (außer CAN/SUB) und DEL lassen den Zustand
+/// unverändert.
+fn esc_next(b: u8, out: &mut Vec<OscEvent>) -> State {
+    match b {
+        b']' => State::Osc(Vec::new()),
+        b'[' => State::Csi(Vec::new()),
+        b'c' => {
+            out.push(OscEvent::FullReset);
+            State::Normal
+        }
+        0x18 | 0x1a => State::Normal,
+        0x00..=0x1f | 0x7f => State::Esc,
+        _ => State::Normal,
     }
 }
 
@@ -319,6 +326,10 @@ mod tests {
         }
         assert!(!OscEvent::Query(Query::CellSizePx).is_integration());
         assert_eq!(s.feed(b"x\x1bcy"), vec![OscEvent::FullReset]);
+        // mit Steuerzeichen zwischen ESC und c, direkt hinter einem mit ESC beendeten OSC
+        assert_eq!(s.feed(b"\x1b\x07\nc"), vec![OscEvent::FullReset]);
+        assert_eq!(s.feed(b"\x1b]0;t\x1bc"), vec![OscEvent::FullReset]);
+        assert!(s.feed(b"\x1b\x18c").is_empty());
         assert!(!OscEvent::FullReset.is_integration());
         // CAN/SUB brechen eine CSI-Sequenz ab wie in vte: danach ist `16t` keine Anfrage mehr.
         assert!(s.feed(b"\x1b[1\x186t").is_empty());
