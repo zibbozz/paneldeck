@@ -19,7 +19,14 @@ pub const MAX_RESULT_BYTES: usize = 16 * 1024;
 /// Werkzeuge der Stufe „Steuern“, die trotzdem ohne Nachfrage laufen: Sie ändern weder Terminalinhalt noch Daten
 /// (`wait_for_status` wartet nur, `focus_session` zeigt nur eine Sitzung im Fenster). Alle anderen Werkzeuge ab
 /// „Steuern“ brauchen bei „Vor Schreibzugriff fragen“ eine Freigabe.
+/// `focus_session` nur ohne `placement` (#162: mit `placement` ändert der Chat das Layout gezielt – dann gelten die normalen
+/// Freigaberegeln, siehe [`approval_free`]).
 pub const NO_APPROVAL: &[&str] = &["wait_for_status", "focus_session"];
+
+/// Läuft dieser Aufruf ohne Freigabe? Werkzeuge aus [`NO_APPROVAL`]; `focus_session` aber nur ohne `placement`.
+pub fn approval_free(name: &str, args: &Value) -> bool {
+    NO_APPROVAL.contains(&name) && (name != "focus_session" || args.get("placement").is_none_or(Value::is_null))
+}
 
 /// Werkzeuge, deren Ergebnis vor allem am Ende interessant ist (Terminalinhalt, Befehlsausgabe): Beim Kürzen bleibt
 /// dort das Ende von `text`/`output`, der Anfang fällt weg. (`read_chat` hat eine eigene Kürzung: [`cap_read_chat`].)
@@ -114,7 +121,7 @@ impl ToolPolicy {
         if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
-        Ok(def.level >= McpLevel::Control && !NO_APPROVAL.contains(&def.name))
+        Ok(def.level >= McpLevel::Control && !approval_free(def.name, &call.arguments))
     }
 
     /// Muss der Nutzer diesen Aufruf freigeben? `ask` aus [`ToolPolicy::check`]; `always` = dauerhafte Freigaben des
@@ -668,6 +675,11 @@ mod tests {
             assert_eq!(c.check(&call(t, json!({}))), Ok(false), "{t}: ohne Freigabe");
             assert_eq!(mcp::tool_level(t), Some(McpLevel::Control), "{t} ist ein Steuern-Werkzeug");
         }
+        // focus_session mit placement (#162): normale Freigaberegeln; null zählt wie „ohne“
+        assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": "solo"}))), Ok(true));
+        assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": "replace"}))), Ok(true));
+        assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": null}))), Ok(false));
+        assert_eq!(c.check(&call("wait_for_status", json!({"session": 1, "placement": "solo"}))), Ok(false));
         assert!(c.check(&call("create_ticket", json!({}))).unwrap_err().1.contains("wrong_mode"));
         assert!(policy(McpLevel::Off, &[], false).check(&call("list_sessions", json!({}))).unwrap_err().1.contains("forbidden"));
         // Freigabe

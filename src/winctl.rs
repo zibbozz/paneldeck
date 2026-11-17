@@ -410,6 +410,8 @@ pub struct JobProc {
     pub pid: u32,
     pub name: String,
     pub title: String,
+    /// Hat ein sichtbares Hauptfenster (ein Programm, das man vor „Alle beenden“ besser selbst speichert und schließt).
+    pub window: bool,
 }
 
 /// Welche Prozesse eines Jobs überleben das Schließen der Sitzung? Alle außer der Shell, den Prozessen, die an ihrer
@@ -502,7 +504,7 @@ pub fn process_names() -> std::collections::HashMap<u32, String> {
     std::collections::HashMap::new()
 }
 
-/// Titel der sichtbaren Fenster je Prozess (das erste mit Titel).
+/// Prozesse mit sichtbarem Hauptfenster und dessen Titel (das erste Fenster mit Titel; leer, wenn keins einen hat).
 #[cfg(windows)]
 pub fn window_titles() -> std::collections::HashMap<u32, String> {
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
@@ -517,14 +519,12 @@ pub fn window_titles() -> std::collections::HashMap<u32, String> {
             }
             let mut pid = 0u32;
             GetWindowThreadProcessId(h, &mut pid);
-            if pid == 0 || map.contains_key(&pid) {
+            if pid == 0 || map.get(&pid).is_some_and(|t| !t.is_empty()) {
                 return 1;
             }
             let mut buf = [0u16; 256];
             let n = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
-            if n > 0 {
-                map.insert(pid, String::from_utf16_lossy(&buf[..n as usize]));
-            }
+            map.insert(pid, String::from_utf16_lossy(&buf[..n.max(0) as usize]));
             1
         }
     }
@@ -539,20 +539,62 @@ pub fn window_titles() -> std::collections::HashMap<u32, String> {
     std::collections::HashMap::new()
 }
 
-/// Die überlebenden Prozesse eines Sitzungs-Jobs mit Namen und Fenstertitel (#168). `shell` = PID der Shell.
-pub fn lingering(job: &SessionJob, shell: Option<u32>) -> Vec<JobProc> {
+/// Prozessnamen und Fenster aller Prozesse, je Aufruf höchstens einmal und erst bei Bedarf ermittelt (für mehrere
+/// Sitzungen in einer Rückfrage, #168).
+#[derive(Default)]
+pub struct ProcInfo {
+    names: std::cell::OnceCell<std::collections::HashMap<u32, String>>,
+    windows: std::cell::OnceCell<std::collections::HashMap<u32, String>>,
+}
+
+impl ProcInfo {
+    fn names(&self) -> &std::collections::HashMap<u32, String> {
+        self.names.get_or_init(process_names)
+    }
+    fn windows(&self) -> &std::collections::HashMap<u32, String> {
+        self.windows.get_or_init(window_titles)
+    }
+}
+
+/// Die überlebenden Prozesse eines Sitzungs-Jobs mit Namen, Fenster und Fenstertitel (#168). `shell` = PID der Shell.
+pub fn lingering(job: &SessionJob, shell: Option<u32>, info: &ProcInfo) -> Vec<JobProc> {
     let pids = job.pids();
     if pids.iter().all(|p| Some(*p) == shell) {
         return Vec::new();
     }
     let console = shell.and_then(console_pids);
-    let names = process_names();
+    let names = info.names();
     let keep = survivors(&pids, shell, console.as_deref(), |p| names.get(&p).cloned().unwrap_or_default());
     if keep.is_empty() {
         return Vec::new();
     }
-    let titles = window_titles();
-    keep.into_iter().map(|pid| JobProc { pid, name: names.get(&pid).cloned().unwrap_or_else(|| "?".into()), title: titles.get(&pid).cloned().unwrap_or_default() }).collect()
+    let windows = info.windows();
+    keep.into_iter()
+        .map(|pid| JobProc {
+            pid,
+            name: names.get(&pid).cloned().unwrap_or_else(|| "?".into()),
+            title: windows.get(&pid).cloned().unwrap_or_default(),
+            window: windows.contains_key(&pid),
+        })
+        .collect()
+}
+
+/// Startet `spawn` (z. B. `spawn_command` einer Pseudokonsole) so, dass der neue Prozess schon im Job `job` beginnt
+/// (vendored portable-pty, `PROC_THREAD_ATTRIBUTE_JOB_LIST`, #168). Liefert das Ergebnis und ob der Start im Job gelang
+/// (sonst muss der Aufrufer den Prozess nachträglich zuweisen, [`SessionJob::adopt`]).
+#[cfg(windows)]
+pub fn spawn_in_job<T>(job: Option<&SessionJob>, spawn: impl FnOnce() -> T) -> (T, bool) {
+    portable_pty::win::set_spawn_job(job.and_then(|j| j.raw_handle()));
+    let out = spawn();
+    // Erst lesen, dann zurücksetzen: `set_spawn_job` setzt auch die Meldung zurück.
+    let in_job = job.is_some() && portable_pty::win::spawned_in_job();
+    portable_pty::win::set_spawn_job(None);
+    (out, in_job)
+}
+
+#[cfg(not(windows))]
+pub fn spawn_in_job<T>(_job: Option<&SessionJob>, spawn: impl FnOnce() -> T) -> (T, bool) {
+    (spawn(), false)
 }
 
 impl Drop for SessionJob {
@@ -880,12 +922,12 @@ mod peer_tests {
         let mut reader = pair.master.try_clone_reader().unwrap();
         std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
         let job = SessionJob::new().expect("Job");
-        portable_pty::win::set_spawn_job(job.raw_handle());
+        // Genau der Weg von `terminal::Session::spawn`
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.args(["/c", "ping -n 30 127.0.0.1 >nul"]);
-        let mut child = pair.slave.spawn_command(cmd).unwrap();
-        assert!(portable_pty::win::spawned_in_job(), "im Job gestartet (PROC_THREAD_ATTRIBUTE_JOB_LIST)");
-        portable_pty::win::set_spawn_job(None);
+        let (child, in_job) = spawn_in_job(Some(&job), || pair.slave.spawn_command(cmd));
+        let mut child = child.unwrap();
+        assert!(in_job, "im Job gestartet (PROC_THREAD_ATTRIBUTE_JOB_LIST)");
         let pid = child.process_id().unwrap();
         assert_eq!(job_of(pid), Some(job.key()));
         // Der Job gilt nur für einen Start: der nächste auf diesem Thread läuft ohne
@@ -893,6 +935,8 @@ mod peer_tests {
         cmd.args(["/c", "exit 0"]);
         let mut other = pair.slave.spawn_command(cmd).unwrap();
         assert!(!portable_pty::win::spawned_in_job());
+        let (_, in_job) = spawn_in_job(None, || ());
+        assert!(!in_job, "ohne Job: nie im Job");
         assert_ne!(other.process_id().and_then(job_of), Some(job.key()));
         let _ = other.kill();
         assert!(job.terminate_all());

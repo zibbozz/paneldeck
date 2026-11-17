@@ -64,15 +64,13 @@ impl App {
         self.updater.start_install(self.exe.clone(), backup, self.settings.language, ctx);
     }
 
-    /// Zustand speichern (Sitzungen werden beim Start wiederhergestellt) und neu starten.
+    /// Zustand speichern (Sitzungen werden beim Start wiederhergestellt – mit „Sitzungen merken“ aus genau einmal, #157) und
+    /// neu starten. Scheitert der Neustart, geht nichts verloren (es wurde nur normal gespeichert).
     fn update_restart(&mut self) {
         let lang = self.settings.language;
-        // Erst normal speichern; Verläufe und Scrollback (bei „Sitzungen merken“ aus) erst löschen, wenn der Neustart
-        // wirklich angestoßen ist – scheitert er, geht nichts verloren.
-        self.save_all();
-        match install::spawn_restart(&self.exe) {
+        let keep_once = self.save_for_update_restart();
+        match install::spawn_restart(&self.exe, keep_once) {
             Ok(()) => {
-                self.save_for_exit();
                 crate::app::winchrome::shutdown();
                 self.tray = None; // Tray-Symbol entfernen (sonst bleibt bis zum Überfahren ein totes Symbol stehen)
                 std::process::exit(0);
@@ -242,8 +240,8 @@ impl App {
                             )
                         } else {
                             lang.t(
-                                "Laufende Terminals werden beim Neustart beendet. „Sitzungen merken“ ist aus: Paneldeck startet danach leer, Chatverläufe werden gelöscht.",
-                                "Running terminals end when Paneldeck restarts. “Remember sessions” is off: Paneldeck starts empty afterwards and chat histories are deleted.",
+                                "Laufende Terminals werden beim Neustart beendet; die Sitzungen werden danach einmal wiederhergestellt. „Sitzungen merken“ ist aus: Beim nächsten Beenden werden sie verworfen.",
+                                "Running terminals end when Paneldeck restarts; the sessions are restored once afterwards. “Remember sessions” is off: they are discarded on the next exit.",
                             )
                         }).small().color(dim));
                     }
@@ -361,8 +359,8 @@ impl App {
                     )
                 } else {
                     lang.t(
-                        "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet. „Sitzungen merken“ ist aus: Paneldeck startet danach leer, Chatverläufe werden gelöscht.",
-                        "To finish the update Paneldeck restarts: running processes (including Claude sessions) end. “Remember sessions” is off: Paneldeck starts empty afterwards and chat histories are deleted.",
+                        "Für das Update startet Paneldeck neu: Laufende Prozesse (auch Claude-Sitzungen) werden beendet, die Sitzungen werden danach einmal wiederhergestellt. „Sitzungen merken“ ist aus: Beim nächsten Beenden werden sie verworfen.",
+                        "To finish the update Paneldeck restarts: running processes (including Claude sessions) end, the sessions are restored once afterwards. “Remember sessions” is off: they are discarded on the next exit.",
                     )
                 });
             }

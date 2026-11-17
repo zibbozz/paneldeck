@@ -1,10 +1,11 @@
 //! Sitzungen schließen mit Rückfrage: eine Sitzung (Schließen-Knopf, Kontextmenü, Mittelklick auf die Zeile in der
 //! Seitenleiste, #155) und viele auf einmal (#156: Papierkorb am Ordner, Papierkorb rechts neben dem Filterfeld für alle
-//! Sitzungen, Projekt-Kontextmenü, Befehls-Palette, Kürzel „close_all“). Die Rückfrage gibt „Schließen“ erst nach
-//! 3 Sekunden frei (wie das Löschen von Tickets und Karten) und nennt, was beendet wird.
+//! Sitzungen, Projekt-Kontextmenü, Befehls-Palette, Kürzel „close_all“). Die Rückfrage nennt, was beendet wird; nur beim
+//! Schließen vieler Sitzungen gibt sie „Alle schließen“ erst nach 3 Sekunden frei (wie das Löschen von Tickets und Karten,
+//! Entscheidung des Nutzers zu #156 – eine einzelne Sitzung fragt ohne Wartezeit wie in 2.2, [`wait_secs`]).
 //!
 //! * Eine Sitzung: Rückfrage nur bei laufendem Prozess bzw. Chat mit Verlauf und eingeschalteter Einstellung
-//!   „Schließen bestätigen“; Sitzungen mit Git-Worktree gehen wie bisher über die Worktree-Rückfrage.
+//!   „Schließen bestätigen“, ohne Wartezeit; Sitzungen mit Git-Worktree gehen wie bisher über die Worktree-Rückfrage.
 //! * Viele: Rückfrage immer (wie beim Schließen eines weiteren Fensters, da viele Sitzungen auf einmal enden). Beendet
 //!   werden genau die beim Öffnen aufgelisteten Sitzungen; Git-Worktrees und Branches bleiben dabei bestehen.
 //! * Hintergrundprozesse (#168): Laufen im Job Object einer Sitzung noch Prozesse, die das Schließen überleben würden
@@ -39,10 +40,20 @@ pub(super) enum CloseTarget {
 /// Offene Rückfrage (je Fenster, siehe `WinView::confirm_close`).
 pub(super) struct CloseAsk {
     pub(super) target: CloseTarget,
-    /// Beginn der Wartezeit (3 s, `countdown_secs`).
+    /// Beginn der Wartezeit (3 s, `countdown_secs`; nur bei vielen Sitzungen, siehe [`wait_secs`]).
     pub(super) since: Instant,
     /// Hintergrundprozesse der betroffenen Sitzungen beim Öffnen der Rückfrage (#168).
     pub(super) lingering: Vec<Lingering>,
+}
+
+/// Restliche Wartezeit der Rückfrage in Sekunden: beim Schließen vieler Sitzungen (Ordner-Papierkorb, „alle schließen“)
+/// und beim Beenden mit Hintergrundprozessen 3 Sekunden; eine einzelne Sitzung (Schließen-Knopf, Mittelklick,
+/// Kontextmenü) wartet nicht – außer sie läuft noch und hat Hintergrundprozesse (`running_with_jobs`, #168).
+pub(super) fn wait_secs(target: &CloseTarget, running_with_jobs: bool, since: Instant, now: Instant) -> u32 {
+    match target {
+        CloseTarget::One(_) if !running_with_jobs => 0,
+        CloseTarget::One(_) | CloseTarget::Many(..) | CloseTarget::Quit => countdown_secs(since, now),
+    }
 }
 
 impl CloseAsk {
@@ -64,14 +75,35 @@ pub(super) struct Lingering {
     pub(super) procs: Vec<JobProc>,
 }
 
-/// Eine Zeile je Prozess: „notepad.exe (PID 42) – Titel“.
-pub(super) fn proc_line(p: &JobProc) -> String {
+/// Eine Zeile je Prozess: „notepad.exe (PID 42) · Fenster offen – Titel“.
+pub(super) fn proc_line(p: &JobProc, lang: Lang) -> String {
     let mut s = format!("{} (PID {})", p.name, p.pid);
+    if p.window {
+        s.push_str(" · ");
+        s.push_str(lang.t("Fenster offen", "window open"));
+    }
     if !p.title.trim().is_empty() {
         s.push_str(" – ");
         s.push_str(p.title.trim());
     }
     s
+}
+
+/// Warnung unter der Liste: „Alle beenden“ beendet sofort, ohne zu speichern (#168).
+pub(super) fn end_all_warning(list: &[Lingering], lang: Lang) -> String {
+    let windows = list.iter().flat_map(|l| &l.procs).any(|p| p.window);
+    let base = lang.t(
+        "„Alle beenden“ beendet sie sofort – ohne zu speichern.",
+        "“End all” terminates them immediately – without saving.",
+    );
+    if windows {
+        format!(
+            "{base} {}",
+            lang.t("Programme mit offenem Fenster (z. B. Editor, Browser) besser vorher selbst speichern und schließen.", "Better save and close programs with an open window (e.g. an editor or browser) yourself first.")
+        )
+    } else {
+        base.to_string()
+    }
 }
 
 /// Einleitung der Prozessliste: wie viele Prozesse in wie vielen Sitzungen weiterlaufen würden.
@@ -103,11 +135,13 @@ pub(super) fn lingering_section(ui: &mut Ui, list: &[Lingering], lang: Lang, per
                     ui.label(RichText::new(&l.name).strong());
                 }
                 for p in &l.procs {
-                    ui.label(RichText::new(proc_line(p)).small());
+                    let line = RichText::new(proc_line(p, lang)).small();
+                    ui.label(if p.window { line.strong() } else { line });
                 }
             }
         });
     });
+    ui.label(RichText::new(end_all_warning(list, lang)).small().color(ui.visuals().warn_fg_color));
 }
 
 /// Knöpfe der Rückfrage bei Hintergrundprozessen.
@@ -327,10 +361,12 @@ impl App {
 
     /// Hintergrundprozesse dieser Sitzungen, die ihr Schließen überleben würden (#168). Nur Sitzungen mit solchen.
     pub(super) fn lingering_of(&self, ids: &[u64]) -> Vec<Lingering> {
+        // Prozessnamen und Fenster einmal je Aufruf (nicht je Sitzung), und nur, wenn eine Sitzung mehr als die Shell hat.
+        let info = crate::winctl::ProcInfo::default();
         ids.iter()
             .filter_map(|id| {
                 let e = self.entries.get(id)?;
-                let procs = e.live.as_ref()?.lingering();
+                let procs = e.live.as_ref()?.lingering(&info);
                 (!procs.is_empty()).then(|| Lingering { id: *id, name: e.display_name(), procs })
             })
             .collect()
@@ -378,13 +414,18 @@ impl App {
         }
     }
 
-    /// Rückfrage zum Schließen (eine oder viele Sitzungen) mit 3-Sekunden-Wartezeit.
+    /// Rückfrage zum Schließen: eine Sitzung ohne Wartezeit, viele mit 3-Sekunden-Wartezeit ([`wait_secs`]).
     pub(super) fn close_ask_ui(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(ask) = self.confirm_close.take() else { return };
         let lang = self.settings.language;
         let jobs = !ask.lingering.is_empty();
-        // Eine Sitzung mit Hintergrundprozessen: ohne Wartezeit (die Wahl „weiterlaufen/beenden“ ist die Rückfrage).
-        let secs = if jobs && matches!(ask.target, CloseTarget::One(_)) { 0 } else { countdown_secs(ask.since, Instant::now()) };
+        // Eine laufende Sitzung mit Hintergrundprozessen wartet 3 s: „Weiterlaufen lassen“ schließt sie trotzdem (ConPTY
+        // beendet ihren Vordergrund, z. B. claude), Enter soll das nicht sofort tun (#168).
+        let running_one = match &ask.target {
+            CloseTarget::One(id) => self.entries.get(id).is_some_and(|e| e.running()),
+            _ => false,
+        };
+        let secs = wait_secs(&ask.target, jobs && running_one, ask.since, Instant::now());
         if secs > 0 {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
@@ -649,6 +690,19 @@ mod tests {
     }
 
     #[test]
+    fn only_closing_many_waits() {
+        let t0 = Instant::now();
+        assert_eq!(wait_secs(&CloseTarget::One(1), false, t0, t0), 0, "eine Sitzung: ohne Wartezeit (wie 2.2)");
+        assert_eq!(wait_secs(&CloseTarget::Many(CloseScope::All, vec![1, 2]), false, t0, t0), 3);
+        assert_eq!(wait_secs(&CloseTarget::Many(CloseScope::Folder("a".into()), vec![1]), false, t0, t0 + Duration::from_millis(1500)), 2);
+        assert_eq!(wait_secs(&CloseTarget::Many(CloseScope::Project(1), vec![1]), false, t0, t0 + Duration::from_secs(4)), 0);
+        // #168: eine laufende Sitzung mit Hintergrundprozessen wartet; Beenden von Paneldeck mit Hintergrundprozessen auch
+        assert_eq!(wait_secs(&CloseTarget::One(1), true, t0, t0), 3);
+        assert_eq!(wait_secs(&CloseTarget::One(1), true, t0, t0 + Duration::from_secs(4)), 0);
+        assert_eq!(wait_secs(&CloseTarget::Quit, false, t0, t0), 3);
+    }
+
+    #[test]
     fn countdown_gates_confirmation() {
         assert!(!confirmed(3, true, false));
         assert!(!confirmed(1, false, true), "Enter während der Wartezeit tut nichts");
@@ -704,13 +758,20 @@ mod tests {
     }
 
     fn jp(pid: u32, name: &str, title: &str) -> JobProc {
-        JobProc { pid, name: name.into(), title: title.into() }
+        JobProc { pid, name: name.into(), title: title.into(), window: !title.is_empty() }
     }
 
     #[test]
     fn background_process_texts_in_both_languages() {
-        assert_eq!(proc_line(&jp(42, "notepad.exe", " Unbenannt - Editor ")), "notepad.exe (PID 42) – Unbenannt - Editor");
-        assert_eq!(proc_line(&jp(7, "node.exe", "")), "node.exe (PID 7)");
+        assert_eq!(proc_line(&jp(42, "notepad.exe", " Unbenannt - Editor "), Lang::De), "notepad.exe (PID 42) · Fenster offen – Unbenannt - Editor");
+        assert_eq!(proc_line(&jp(42, "notepad.exe", "Editor"), Lang::En), "notepad.exe (PID 42) · window open – Editor");
+        assert_eq!(proc_line(&jp(7, "node.exe", ""), Lang::En), "node.exe (PID 7)");
+        // Warnung: ohne Speichern; mit Fenstern zusätzlich der Rat, vorher selbst zu schließen
+        let quiet = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "node.exe", "")] }];
+        let win = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "code.exe", "proj")] }];
+        assert!(end_all_warning(&quiet, Lang::En).contains("without saving") && !end_all_warning(&quiet, Lang::En).contains("window"));
+        assert!(end_all_warning(&win, Lang::En).contains("open window"));
+        assert!(end_all_warning(&win, Lang::De).contains("ohne zu speichern") && end_all_warning(&win, Lang::De).contains("offenem Fenster"));
         let one = [Lingering { id: 1, name: "A".into(), procs: vec![jp(1, "a.exe", "")] }];
         assert_eq!(lingering_intro(&one, Lang::En), "1 background process is still running and stays after closing unless you end it:");
         assert_eq!(lingering_intro(&one, Lang::De), "1 Hintergrundprozess läuft noch und bleibt nach dem Schließen bestehen, wenn du ihn nicht beendest:");
