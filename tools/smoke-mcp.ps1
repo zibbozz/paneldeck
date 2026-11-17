@@ -109,6 +109,29 @@ function Check($name, [bool]$ok, $detail = '') {
 # Pruefung, die in diesem Build nicht moeglich ist (z. B. Funktion eines anderen Teils fehlt): weder bestanden noch fehlgeschlagen.
 $script:skip = 0
 function Skip($name, $why) { $script:skip++; Write-Host "  skip  $name  ($why)" -ForegroundColor Yellow }
+# #193: eine Ausgabezeile, die genau die Terminalbreite fuellt (ConPTY laesst den Zeilenvorschub weg, die Zeile gilt als
+# umbrochen), kam als leere Ausgabe mit quality exact an. Geprueft: Breite-1, Breite, Breite+1, 2 x Breite (PowerShell, Git Bash).
+# #197: Bei vollem Verlauf (Einstellung 1000 Zeilen, siehe Set-Level) verschoben sich alle absoluten Zeilen mit jedem
+# Rollen; danach fand run_command das Echo nicht mehr (leere Ausgabe, quality heuristic). Verlauf fuellen, dann pruefen.
+function Test-FullHistory([int]$sid, [string]$sh) {
+  $fill = if ($sh -eq 'gitbash') { 'seq 1 1500' } else { '1..1500' }
+  [void](Tool 'run_command' @{ session = $sid; command = $fill; timeout_secs = 40 })
+  foreach ($i in 1..3) {
+    $r = Tool 'run_command' @{ session = $sid; command = "echo voll-$i"; timeout_secs = 25 }
+    Check "run_command $sh (voller Verlauf, Befehl ${i}: Ausgabe exakt)" ($r.data.finished -and $r.data.output -eq "voll-$i" -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+  }
+  Test-WrapWidth $sid $sh 'voller Verlauf: '
+}
+function Test-WrapWidth([int]$sid, [string]$sh, [string]$prefix = '') {
+  $cols = (Tool 'read_terminal' @{ session = $sid; lines = 1 }).data.cols
+  if (-not $cols) { Skip "${prefix}run_command $sh (Zeile in Terminalbreite)" 'cols unbekannt'; return }
+  foreach ($n in @(($cols - 1), $cols, ($cols + 1), (2 * $cols))) {
+    $cmd = if ($sh -eq 'gitbash') { "printf 'w%.0s' `$(seq 1 $n); echo" } else { "'w' * $n" }
+    $r = Tool 'run_command' @{ session = $sid; command = $cmd; timeout_secs = 25 }
+    $want = 'w' * $n
+    Check "${prefix}run_command $sh (Zeile mit $n Zeichen bei $cols Spalten: Ausgabe exakt)" ($r.data.finished -and $r.data.output -eq $want -and $r.data.quality -eq 'exact') "len=$("$($r.data.output)".Length) q=$($r.data.quality) finished=$($r.data.finished)"
+  }
+}
 # OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
 # Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
 # inzwischen niemand anderes etwas kopiert hat). Enthaelt sie andere als reine Textformate (Bild, Dateien, HTML, RTF ...), wird die
@@ -147,6 +170,8 @@ function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
   if ($ConPty -eq 'system') { $j | Add-Member -Force bundled_conpty $false }
+  # Kleinster Verlauf (1000 Zeilen), damit Test-FullHistory ihn schnell fuellt (#197).
+  $j | Add-Member -Force scrollback_lines 1000
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
   # -Empty: ohne gespeicherte Sitzungen (Set-IsolationProfile legt dann einen state.json nur mit dem Projekt an)
@@ -275,6 +300,8 @@ try {
       Check "run_command $sh (Exit 1, leere Ausgabe)" ($r.data.exit_code -eq 1 -and $r.data.output -eq '') $r.text
       $r = Tool 'run_command' @{ session = $id; command = 'printf "x\ny\n"'; timeout_secs = 25 }
       Check "run_command $sh (zweiter Befehl sauber)" ($r.data.output -eq "x`ny") $r.text
+      Test-WrapWidth $id $sh
+      Test-FullHistory $id $sh
       Test-Osc52 $id $sh
     } else {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-ps'; timeout_secs = 25 }
@@ -290,6 +317,8 @@ try {
       $long = 'Write-Output hallo-lang # ' + ('z' * 220)
       $r = Tool 'run_command' @{ session = $id; command = $long; timeout_secs = 25 }
       Check "run_command $sh (langer Befehl: Ausgabe exakt)" ($r.data.output -eq 'hallo-lang' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+      Test-WrapWidth $id $sh
+      Test-FullHistory $id $sh
       Test-Osc52 $id $sh
       $r = Tool 'run_command' @{ session = $id; command = 'Start-Sleep 4'; timeout_secs = 1 }
       Check "run_command $sh (Zeitlimit)" ($r.data.timed_out -eq $true -and -not $r.data.finished) $r.text
@@ -1312,7 +1341,7 @@ c.close()
       Check "ConPTY: run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'conpty-ok') "out='$($r.data.output)' q=$($r.data.quality)"
       $r = Tool 'run_command' @{ session = $c.data.id; command = 'cmd /c exit 4'; timeout_secs = 25 }
       if ($sh -eq 'cmd') { Check 'ConPTY: run_command cmd (Befehl beendet)' ($r.data.finished) $r.text }
-      else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text }
+      else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text; Test-WrapWidth $c.data.id $sh 'ConPTY: ' }
     }
     # Git Bash und Vollbildprogramme (alternativer Bildschirm) ueber die gewaehlte ConPTY.
     if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {

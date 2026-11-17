@@ -63,6 +63,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Terminals no longer inherit Paneldeck's internal or test-only `PANELDECK_*` variables (for example when Paneldeck was started from another Paneldeck's terminal). (#175)
 - Clickable elements without any hint (cost summary, MCP chip, toasts, tag colours, parent ticket key) now show a hover state, the hand cursor and a tooltip. (#187)
 - MCP `read_chat` no longer cuts a chat's tool results at 8 KB from the start; they come through up to the 16 KB tool-result limit, so the end with the newest messages and the status is kept. (#194)
+- `run_command` (MCP) no longer returns empty output when the command prints a line that exactly fills the terminal width (PowerShell, Git Bash); jumping between prompts also lands on the right row then. (#193)
+- `run_command` (MCP) and jumping between prompts work again once the terminal's scrollback is full; until now the output came back empty and prompt jumps landed on the wrong rows. (#197)
 
 ### Security
 

@@ -63,6 +63,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Terminals erben keine internen oder reinen Test-Variablen `PANELDECK_*` von Paneldeck mehr (z. B. wenn Paneldeck aus dem Terminal eines anderen Paneldeck gestartet wurde). (#175)
 - Klickbare Elemente ohne jeden Hinweis (Kostenzeile, MCP-Chip, Toasts, Tag-Farben, Eltern-Ticket) zeigen jetzt Hover, Hand-Zeiger und Tooltip. (#187)
 - MCP `read_chat` schneidet Werkzeug-Ergebnisse eines Chats nicht mehr nach 8 KB vorn ab; sie kommen bis zur Grenze von 16 KB für Werkzeug-Ergebnisse, das Ende mit den neuesten Nachrichten und dem Status bleibt erhalten. (#194)
+- `run_command` (MCP) liefert keine leere Ausgabe mehr, wenn der Befehl eine Zeile ausgibt, die genau die Terminalbreite füllt (PowerShell, Git Bash); das Springen zwischen Prompts landet dann auch in der richtigen Zeile. (#193)
+- `run_command` (MCP) und das Springen zwischen Prompts funktionieren wieder, wenn der Verlauf des Terminals voll ist; bisher kam die Ausgabe leer zurück und Prompt-Sprünge landeten in falschen Zeilen. (#197)
 
 ### Security
 

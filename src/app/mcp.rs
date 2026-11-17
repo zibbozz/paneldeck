@@ -1536,34 +1536,8 @@ impl App {
                 if !advanced && !timed_out && !gone {
                     return None;
                 }
-                // Ausgabe: Zeilen nach der Eingabezeile bis vor den neuen Prompt.
-                let cursor = s.abs_cursor_line();
-                // Der neue Prompt kann umbrochen sein (schmales Terminal): sein Anfang ist die erste Zeile davon.
-                let end_incl = if advanced { s.unwrap_start(mark.unwrap_or(cursor)).saturating_sub(1) } else { cursor };
-                // Anfang der Ausgabe: die Zeile mit dem eingegebenen Befehl. Gesucht ab dem vorherigen Prompt-Anfang – die Cursorzeile
-                // beim Senden ist unsicher, weil langsame Prompts (z. B. Git Bash mit Git-Status) zeilenweise mit Pausen erscheinen.
-                let scan_from = mark0.map_or(*start_abs, |m| m.min(*start_abs));
-                let all = s.lines_abs(scan_from, end_incl.max(scan_from));
-                // Ein langer Befehl kann umbrochen sein: den ganzen Eingabeblock überspringen, nicht nur die erste Zeile. Das Echo
-                // wird am Befehlstext selbst verfolgt (WRAPLINE fehlt, wenn ConPTY/PSReadLine die Eingabe neu zeichnen).
-                let (first_ok, skip) = match crate::terminal::find_echo(&all, cmd) {
-                    Some((_, last)) => (true, last + 1),
-                    None => {
-                        // Rückfall (Echo unvollständig, z. B. aus dem Verlauf gefallen): erste Zeile mit dem Befehlsanfang.
-                        let key: String = cmd.chars().take(12).collect();
-                        match all.iter().position(|l| l.contains(key.as_str())) {
-                            Some(i) => (true, (s.wrap_end(scan_from + i as u64) - scan_from) as usize + 1),
-                            None => (false, (*start_abs - scan_from) as usize + 1),
-                        }
-                    }
-                };
-                // Ausgabe mit zusammengefügten Zeilenumbrüchen des Terminals (eine 300 Zeichen lange Zeile bleibt eine Zeile).
-                let first_out = scan_from + skip as u64;
-                let mut out: Vec<String> = if first_out <= end_incl { s.text_abs(first_out, end_incl) } else { Vec::new() };
-                drop(all);
-                while out.last().is_some_and(|l| l.is_empty()) {
-                    out.pop();
-                }
+                // Ausgabe: Zeilen nach der Eingabezeile bis vor den neuen Prompt (Echo-Suche und Prompt-Anfang: `terminal::run_output`).
+                let crate::terminal::RunOutput { first_ok, lines: mut out } = s.run_output(cmd, *start_abs, *mark0, mark, advanced);
                 let truncated = out.len() > *max_lines;
                 if truncated {
                     out = out.split_off(out.len() - *max_lines);
