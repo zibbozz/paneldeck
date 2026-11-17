@@ -29,6 +29,14 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Agenten bestimmen mit dem neuen optionalen `placement`, wo `focus_session` und `create_session` eine Sitzung zeigen: `replace` (Standard bei `focus_session`; ersetzt nur den aktiven Bereich – den eigenen Bereich des Agenten, wenn sichtbar, sonst den fokussierten – und minimiert ihn), `split_right` / `split_down` (teilt nur den aktiven Bereich) oder `solo` (einziger Bereich, die anderen werden minimiert). Die Platzierung bewegt nie den Tastaturfokus des Nutzers (außer sein Bereich wurde ersetzt) und holt kein Fenster nach vorn; Bereiche mit offener Freigabe-Frage und Sitzungen der Agenten-Kette werden nie verdrängt. Ohne `placement` bleibt `create_session` wie bisher leise. `list_sessions` meldet `shown` (Bereich ist zu sehen). (#162)
 - Strg+Tab erreicht auch minimierte Sitzungen und zeigt sie im fokussierten Bereich; der ersetzte Bereich wird minimiert. Nach dem Allein-Öffnen zeigt ein kurzer Hinweis, wie viele Bereiche minimiert wurden. (#162)
 - Einstellung „Umgebung von Paneldeck erben“ (Einstellungen → Allgemein, standardmäßig aus; Feld `inherit_env` in `settings.json`): Neue Terminals bekommen genau die Umgebung, mit der Paneldeck gestartet wurde, statt der frisch aus Windows gelesenen Variablen. (#175)
+- Kitty-Tastaturprotokoll: Programme, die es einschalten (z. B. Claude Code), bekommen eindeutige Tasten (Umschalt+Enter, Strg+Rück, Esc, Alt-Kombinationen als CSI u). (#183)
+- win32-input-mode unter ConPTY: PowerShell/cmd erhalten Strg+Leertaste, Strg+Enter, Strg+/, Strg+Umschalt+Buchstabe, Esc und den Ziffernblock als echte Tastenereignisse; Strg+3…0 kommen jetzt im Terminal an. (#183)
+- Einstellung „Umschalt+Enter = neue Zeile in PowerShell“ (standardmäßig aus): PSReadLine fügt eine Zeile ein, statt den Befehl auszuführen. (#183)
+- MCP `send_keys` versteht ctrl+/alt+/shift+-Kombinationen und mehr Tasten (space, insert, f1–f20, Buchstaben, Ziffern, Satzzeichen) und kodiert sie wie die Tastatur; im kitty-Modus geht z. B. `ctrl+c` als `CSI 99;5u` und `esc` als `CSI 27u`. (#183)
+- `TERM_PROGRAM=Paneldeck` und `TERM_PROGRAM_VERSION` in jeder Shell. (#183)
+- Antworten auf Farbabfragen (OSC 4/10/11/12), Größenabfragen (CSI 14t/16t) und XTVERSION, auch für Sitzungen im Hintergrund. (#183)
+- Fokusmeldungen (DECSET 1004). (#183)
+- Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“ (standardmäßig an, für Programme ohne Bracketed Paste; Bestätigen nach kurzer Wartezeit). (#183)
 
 ### Changed
 
@@ -40,6 +48,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Updates ersetzen `paneldeck.exe`, `conpty.dll` und `OpenConsole.exe` gemeinsam, auch bei laufendem Paneldeck: Der Installer schreibt zuerst den Konsolen-Host und legt bei einem Schreibfehler die bisherige Datei zurück; das portable Selbst-Update ersetzt alle Dateien oder keine. Übrig gebliebene `.old`-Dateien werden beim nächsten Start gelöscht, die Deinstallation entfernt auch den Konsolen-Host. (#183)
 - MCP `focus_session` auf eine minimierte Sitzung nutzt jetzt den Standard `replace` statt sie allein zu öffnen (dafür `placement: "solo"`); ein Chat braucht für `focus_session` mit `placement` eine Freigabe. (#162)
 - Mit „Sitzungen merken“ aus stellt ein Neustart nach einem Update die Sitzungen einmal wieder her; beim nächsten Beenden werden sie wie gewohnt verworfen. (#157)
+- Strg+Rück sendet 0x08 wie Windows Terminal (PowerShell löscht das vorige Wort) statt Strg+W; in bash löscht es jetzt ein Zeichen. (#183)
+- Esc geht unter ConPTY als Tastenereignis im win32-input-mode. (#183)
+- `reset` (RIS) setzt von Programmen geänderte Farben auf das Theme zurück. (#183)
 
 ### Deprecated
 
@@ -52,6 +63,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
 - Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
 - Terminals erben keine internen oder reinen Test-Variablen `PANELDECK_*` von Paneldeck mehr (z. B. wenn Paneldeck aus dem Terminal eines anderen Paneldeck gestartet wurde). (#175)
+- Alt+Ziffer und Alt+Satzzeichen (z. B. Alt+. in bash) sendeten nichts; von Paneldeck belegte Alt-Kürzel schicken keine Zeichen mehr ins Terminal. (#183)
+- Broadcast kodiert Tasten je Zielterminal. (#183)
+- Kitty-Tastaturflags, die ein abgestürztes Programm stehen ließ, werden am nächsten Shell-Prompt zurückgesetzt. (#183)
 
 ### Security
 
@@ -62,6 +76,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - OSC 52 nur zum Schreiben: Programme können die Zwischenablage nie lesen. Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB, höchstens alle 0,3 s; leere Texte leeren die Zwischenablage nie. Hinweis: Ein Agent mit Steuer-Zugriff (MCP) kann die fokussierte Sitzung ebenfalls etwas kopieren lassen. (#181)
 - Paneldeck lädt keine DLLs mehr aus dem Arbeitsordner: Gleich beim Start wird die DLL-Suche auf den Programmordner und System32 beschränkt, der mitgelieferte Konsolen-Host wird über seinen vollen Pfad geladen. (#183)
 - Die C-Laufzeit ist jetzt in `paneldeck.exe` eingebunden; die `VCRUNTIME140.dll`, die Windows noch vor dem Start von Paneldeck suchen würde, wird nicht mehr gebraucht. (#183)
+- Ein Programm, das tausende kitty-Tastaturmodi ablegt, bringt Paneldeck nicht mehr zum Absturz. (#183)
+- Eingefügter Text wird wie bei Windows Terminal gefiltert (Steuerzeichen inkl. ESC und C1), versteckte Enter-Sequenzen umgehen die Rückfrage nicht mehr. (#183)
+- Fenstertitel von Programmen werden bereinigt (Steuer-, Schreibrichtungs-, Zeilentrenn- und unsichtbare Zeichen, Längengrenze). (#183)
 
 ## [2.2.0] - 2026-11-16
 

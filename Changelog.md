@@ -29,6 +29,14 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Agents can choose where `focus_session` and `create_session` show a session with the new optional `placement`: `replace` (default for `focus_session`; replaces only the active pane – the agent's own pane if visible, otherwise the one the user focused – and minimizes it), `split_right` / `split_down` (split only the active pane) or `solo` (only pane, the others are minimized). Placement never moves the user's keyboard focus (unless their pane was replaced) and never brings a window to the front; panes waiting for an approval and sessions of the agent's chain are never displaced. Without `placement`, `create_session` stays quiet as before. `list_sessions` reports `shown` (the pane is on screen). (#162)
 - Ctrl+Tab also reaches minimized sessions and shows them in the focused pane; the pane they replace is minimized. After a session opens alone, a short notice shows how many panes were minimized. (#162)
 - Setting "Inherit Paneldeck's environment" (Settings → General, off by default; `settings.json` field `inherit_env`): new terminals get exactly the environment Paneldeck was started with instead of the variables read fresh from Windows. (#175)
+- Kitty keyboard protocol: programs that enable it (e.g. Claude Code) get unambiguous keys (Shift+Enter, Ctrl+Backspace, Esc, Alt combinations as CSI u). (#183)
+- win32-input-mode under ConPTY: PowerShell/cmd receive Ctrl+Space, Ctrl+Enter, Ctrl+/, Ctrl+Shift+letter, Esc and numpad keys as real key events; Ctrl+3…0 now reach the terminal. (#183)
+- Setting "Shift+Enter = new line in PowerShell" (off by default): PSReadLine inserts a line instead of running the command. (#183)
+- MCP `send_keys` accepts ctrl+/alt+/shift+ combinations and more keys (space, insert, f1–f20, letters, digits, punctuation) and encodes them like the keyboard; in kitty mode e.g. `ctrl+c` is sent as `CSI 99;5u` and `esc` as `CSI 27u`. (#183)
+- `TERM_PROGRAM=Paneldeck` and `TERM_PROGRAM_VERSION` in every shell. (#183)
+- Replies to colour queries (OSC 4/10/11/12), size queries (CSI 14t/16t) and XTVERSION, also for sessions in the background. (#183)
+- Focus events (DECSET 1004). (#183)
+- Setting "Ask before pasting multiple lines" (on by default, for programs without bracketed paste; confirm after a short delay). (#183)
 
 ### Changed
 
@@ -40,6 +48,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Updates replace `paneldeck.exe`, `conpty.dll` and `OpenConsole.exe` together even while Paneldeck is running: the installer writes the console host first and puts the previous file back if writing fails; the portable self-update replaces all files or none. Leftover `.old` files are removed on the next start, and uninstalling removes the console host too. (#183)
 - MCP `focus_session` on a minimized session now uses the default `replace` instead of opening it alone (use `placement: "solo"` for that); a chat needs approval for `focus_session` with `placement`. (#162)
 - With "Remember sessions" off, an update restart restores the sessions once; the next exit discards them as usual. (#157)
+- Ctrl+Backspace sends 0x08 like Windows Terminal (PowerShell deletes the previous word) instead of Ctrl+W; in bash it now deletes one character. (#183)
+- Esc is sent as a win32-input-mode key event under ConPTY. (#183)
+- `reset` (RIS) restores colours changed by programs to the theme. (#183)
 
 ### Deprecated
 
@@ -52,6 +63,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
 - Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
 - Terminals no longer inherit Paneldeck's internal or test-only `PANELDECK_*` variables (for example when Paneldeck was started from another Paneldeck's terminal). (#175)
+- Alt+digit and Alt+punctuation (e.g. Alt+. in bash) sent nothing; Alt shortcuts used by Paneldeck no longer leak characters into the terminal. (#183)
+- Broadcast encodes keys per target terminal. (#183)
+- Kitty keyboard flags left behind by a crashed program are cleared at the next shell prompt. (#183)
 
 ### Security
 
@@ -62,6 +76,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - OSC 52 is write-only: programs can never read the clipboard. Only the focused session in the foreground window may copy, at most 1 MB, at most once every 0.3 s; empty texts never clear the clipboard. Note: an agent with control access (MCP) can make the focused session copy text, too. (#181)
 - Paneldeck no longer loads DLLs from the current working folder: right at startup the DLL search is restricted to the program folder and System32, and the bundled console host is loaded by its full path. (#183)
 - The C runtime is now linked into `paneldeck.exe`; it no longer needs `VCRUNTIME140.dll`, which Windows would look for before Paneldeck starts. (#183)
+- A program pushing thousands of kitty keyboard modes can no longer crash Paneldeck. (#183)
+- Pasted text is filtered like Windows Terminal (control characters incl. ESC and C1), so hidden Enter sequences cannot bypass the multi-line warning. (#183)
+- Window titles from programs are sanitised (control, bidi, line-separator and zero-width characters, length cap). (#183)
 
 ## [2.2.0] - 2026-11-16
 
