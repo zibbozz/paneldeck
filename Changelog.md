@@ -29,6 +29,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Agents can choose where `focus_session` and `create_session` show a session with the new optional `placement`: `replace` (default for `focus_session`; replaces only the active pane – the agent's own pane if visible, otherwise the one the user focused – and minimizes it), `split_right` / `split_down` (split only the active pane) or `solo` (only pane, the others are minimized). Placement never moves the user's keyboard focus (unless their pane was replaced) and never brings a window to the front; panes waiting for an approval and sessions of the agent's chain are never displaced. Without `placement`, `create_session` stays quiet as before. `list_sessions` reports `shown` (the pane is on screen). (#162)
 - Ctrl+Tab also reaches minimized sessions and shows them in the focused pane; the pane they replace is minimized. After a session opens alone, a short notice shows how many panes were minimized. (#162)
 - Setting "Inherit Paneldeck's environment" (Settings → General, off by default; `settings.json` field `inherit_env`): new terminals get exactly the environment Paneldeck was started with instead of the variables read fresh from Windows. (#175)
+- Closing a session, several sessions, a window or Paneldeck itself, or reloading a session, lists the session's background processes that would keep running: name, PID, window title, with programs that have an open window marked. You choose "Keep running" or "End all"; "End all" terminates them immediately, without saving. (#168)
+- A running session waits 3 seconds before closing, as do closing many sessions and quitting. (#168)
+- MCP `close_session` never asks; it keeps the processes running and reports them in the new optional field `remaining_processes` (pid, name, window, title; untrusted). (#168)
 
 ### Changed
 
@@ -40,6 +43,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Updates replace `paneldeck.exe`, `conpty.dll` and `OpenConsole.exe` together even while Paneldeck is running: the installer writes the console host first and puts the previous file back if writing fails; the portable self-update replaces all files or none. Leftover `.old` files are removed on the next start, and uninstalling removes the console host too. (#183)
 - MCP `focus_session` on a minimized session now uses the default `replace` instead of opening it alone (use `placement: "solo"` for that); a chat needs approval for `focus_session` with `placement`. (#162)
 - With "Remember sessions" off, an update restart restores the sessions once; the next exit discards them as usual. (#157)
+- Agent chain: a session created by an agent the user started (one without an agent chain) is no longer marked and may write back into its creator; the block applies only when the creator itself has an agent chain. `paneldeck --open … --claude` typed in a terminal marks the new session only if that terminal has an agent chain. (#152)
 
 ### Deprecated
 
@@ -62,6 +66,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - OSC 52 is write-only: programs can never read the clipboard. Only the focused session in the foreground window may copy, at most 1 MB, at most once every 0.3 s; empty texts never clear the clipboard. Note: an agent with control access (MCP) can make the focused session copy text, too. (#181)
 - Paneldeck no longer loads DLLs from the current working folder: right at startup the DLL search is restricted to the program folder and System32, and the bundled console host is loaded by its full path. (#183)
 - The C runtime is now linked into `paneldeck.exe`; it no longer needs `VCRUNTIME140.dll`, which Windows would look for before Paneldeck starts. (#183)
+- Paneldeck starts every terminal's shell inside its own Windows Job Object and attributes MCP callers and `paneldeck --open` by job membership. Processes started detached or orphaned (`Start-Process`, `cmd /c start`, double fork) still belong to their session and its agent chain; programs cannot break away from the job. The process-tree check remains as a fallback. (#168)
 
 ## [2.2.0] - 2026-11-16
 

@@ -29,6 +29,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Agenten bestimmen mit dem neuen optionalen `placement`, wo `focus_session` und `create_session` eine Sitzung zeigen: `replace` (Standard bei `focus_session`; ersetzt nur den aktiven Bereich – den eigenen Bereich des Agenten, wenn sichtbar, sonst den fokussierten – und minimiert ihn), `split_right` / `split_down` (teilt nur den aktiven Bereich) oder `solo` (einziger Bereich, die anderen werden minimiert). Die Platzierung bewegt nie den Tastaturfokus des Nutzers (außer sein Bereich wurde ersetzt) und holt kein Fenster nach vorn; Bereiche mit offener Freigabe-Frage und Sitzungen der Agenten-Kette werden nie verdrängt. Ohne `placement` bleibt `create_session` wie bisher leise. `list_sessions` meldet `shown` (Bereich ist zu sehen). (#162)
 - Strg+Tab erreicht auch minimierte Sitzungen und zeigt sie im fokussierten Bereich; der ersetzte Bereich wird minimiert. Nach dem Allein-Öffnen zeigt ein kurzer Hinweis, wie viele Bereiche minimiert wurden. (#162)
 - Einstellung „Umgebung von Paneldeck erben“ (Einstellungen → Allgemein, standardmäßig aus; Feld `inherit_env` in `settings.json`): Neue Terminals bekommen genau die Umgebung, mit der Paneldeck gestartet wurde, statt der frisch aus Windows gelesenen Variablen. (#175)
+- Beim Schließen einer oder mehrerer Sitzungen, eines Fensters oder von Paneldeck und beim Neu laden zeigt die Rückfrage die Hintergrundprozesse der Sitzung, die weiterlaufen würden: Name, PID, Fenstertitel, Programme mit offenem Fenster markiert. Du wählst „Weiterlaufen lassen“ oder „Alle beenden“; „Alle beenden“ beendet sie sofort, ohne zu speichern. (#168)
+- Eine laufende Sitzung wartet vor dem Schließen 3 Sekunden, ebenso das Schließen vieler Sitzungen und das Beenden von Paneldeck. (#168)
+- MCP `close_session` fragt nie, lässt die Prozesse weiterlaufen und meldet sie im neuen optionalen Feld `remaining_processes` (pid, name, window, title; nicht vertrauenswürdig). (#168)
 
 ### Changed
 
@@ -40,6 +43,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Updates ersetzen `paneldeck.exe`, `conpty.dll` und `OpenConsole.exe` gemeinsam, auch bei laufendem Paneldeck: Der Installer schreibt zuerst den Konsolen-Host und legt bei einem Schreibfehler die bisherige Datei zurück; das portable Selbst-Update ersetzt alle Dateien oder keine. Übrig gebliebene `.old`-Dateien werden beim nächsten Start gelöscht, die Deinstallation entfernt auch den Konsolen-Host. (#183)
 - MCP `focus_session` auf eine minimierte Sitzung nutzt jetzt den Standard `replace` statt sie allein zu öffnen (dafür `placement: "solo"`); ein Chat braucht für `focus_session` mit `placement` eine Freigabe. (#162)
 - Mit „Sitzungen merken“ aus stellt ein Neustart nach einem Update die Sitzungen einmal wieder her; beim nächsten Beenden werden sie wie gewohnt verworfen. (#157)
+- Agenten-Kette: Eine Sitzung, die ein vom Nutzer gestarteter Agent (ohne Agenten-Kette) anlegt, wird nicht mehr markiert und darf in ihren Ersteller zurückschreiben; die Sperre gilt nur, wenn der Ersteller selbst eine Agenten-Kette hat. `paneldeck --open … --claude` in einem Terminal markiert die neue Sitzung nur, wenn dieses Terminal eine Agenten-Kette hat. (#152)
 
 ### Deprecated
 
@@ -62,6 +66,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - OSC 52 nur zum Schreiben: Programme können die Zwischenablage nie lesen. Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB, höchstens alle 0,3 s; leere Texte leeren die Zwischenablage nie. Hinweis: Ein Agent mit Steuer-Zugriff (MCP) kann die fokussierte Sitzung ebenfalls etwas kopieren lassen. (#181)
 - Paneldeck lädt keine DLLs mehr aus dem Arbeitsordner: Gleich beim Start wird die DLL-Suche auf den Programmordner und System32 beschränkt, der mitgelieferte Konsolen-Host wird über seinen vollen Pfad geladen. (#183)
 - Die C-Laufzeit ist jetzt in `paneldeck.exe` eingebunden; die `VCRUNTIME140.dll`, die Windows noch vor dem Start von Paneldeck suchen würde, wird nicht mehr gebraucht. (#183)
+- Paneldeck startet die Shell jedes Terminals in einem eigenen Windows-Job-Object und ordnet MCP-Aufrufer und `paneldeck --open` über die Mitgliedschaft zu. Losgelöst oder verwaist gestartete Prozesse (`Start-Process`, `cmd /c start`, doppelter Fork) gehören weiter zu ihrer Sitzung und deren Agenten-Kette; Programme können nicht aus dem Job ausbrechen. Die Prüfung über den Prozessbaum bleibt als Rückfallweg. (#168)
 
 ## [2.2.0] - 2026-11-16
 
