@@ -34,6 +34,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Icon-Explorer mit dem Lucide-Icon-Satz (über 2.000 Icons, ISC): In jedem Icon-Picker öffnet „Weitere Icons …“ ein Fenster mit den eingebauten Icons (Kategorie „Eingebaut“) und allen Lucide-Icons – Suche nach Name und Stichwort, Kategorien, Raster mit Vorschau beim Darüberfahren, große Vorschau und Auswählen/Abbrechen (Esc schließt). Die eingebauten Icons bleiben im Picker. Ein Lucide-Icon wird als `lucide:<name>` gespeichert; Sicherungen, Vorlagen-Export/-Import und das MCP-Werkzeug `get_project` übernehmen es. Alte Lucide-Namen werden mit dem aktuellen Icon angezeigt und unter dem neuen Namen gespeichert; Icons aus einer neueren Lucide-Version erscheinen als Platzhalter, statt den Import abzubrechen. Sicherungen und Vorlagen mit Lucide-Icons lassen sich nicht in Versionen vor 2.3 importieren. (#190)
 - Claude-Startoptionen: Modell, Effort, Permission-Mode und Agent – als Standard unter Einstellungen → Claude und je Sitzung im Dialog „Neue Sitzung“; je Sitzung in `state.json` gespeichert (optionales Feld `claude_opts`). (#161)
 - MCP: `create_session` nimmt `model`, `effort`, `permission_mode` und `agent` an (nur mit `claude: true`, geprüft); `list_sessions`, `whoami` und `create_session` melden sie. (#161)
+- Beim Schließen einer oder mehrerer Sitzungen, eines Fensters oder von Paneldeck und beim Neu laden zeigt die Rückfrage die Hintergrundprozesse der Sitzung, die weiterlaufen würden: Name, PID, Fenstertitel, Programme mit offenem Fenster markiert. Du wählst „Weiterlaufen lassen“ oder „Alle beenden“; „Alle beenden“ beendet sie sofort, ohne zu speichern. (#168)
+- Eine laufende Sitzung wartet vor dem Schließen 3 Sekunden, ebenso das Schließen vieler Sitzungen und das Beenden von Paneldeck. (#168)
+- MCP `close_session` fragt nie, lässt die Prozesse weiterlaufen und meldet sie im neuen optionalen Feld `remaining_processes` (pid, name, window, title; nicht vertrauenswürdig). (#168)
 
 ### Changed
 
@@ -49,6 +52,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Alles, was wie ein Knopf funktioniert, zeigt jetzt den Hand-Zeiger: Hauptreiter, Fensterknöpfe, Listen- und Menüeinträge, Auswahllisten, Kontrollkästchen, aufklappbare Überschriften, Toasts und Knöpfe über dem Terminal. (#187)
 - Einstellungen → Agenten-Schnittstelle: Die Stufen Aus / Nur lesen / Steuern sind echte Knöpfe; genauso Sprache, Prompt-Sprache, Profile, Modell-Stufe, Werkzeugaufrufe, Windows/WSL-Pfad und Nicht vorgemerkt/Vorgemerkt. (#187)
 - Die Kostenzeile steht in einer eigenen Zeile unten in der Seitenleiste und sieht wie ein kleiner Knopf aus, mit Pfeil, Hover und Tooltip; der MCP-Chip ebenso. (#187)
+- Agenten-Kette: Eine Sitzung, die ein vom Nutzer gestarteter Agent (ohne Agenten-Kette) anlegt, wird nicht mehr markiert und darf in ihren Ersteller zurückschreiben; die Sperre gilt nur, wenn der Ersteller selbst eine Agenten-Kette hat. `paneldeck --open … --claude` in einem Terminal markiert die neue Sitzung nur, wenn dieses Terminal eine Agenten-Kette hat. (#152)
 
 ### Deprecated
 
@@ -77,6 +81,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Die C-Laufzeit ist jetzt in `paneldeck.exe` eingebunden; die `VCRUNTIME140.dll`, die Windows noch vor dem Start von Paneldeck suchen würde, wird nicht mehr gebraucht. (#183)
 - Agenten (MCP) können nur Schalter ergänzen, die Rechte, Zugriffe und Hooks nicht berühren (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; chrome nicht, wenn du Chrome als Standard ausgeschaltet hast). Wertoptionen, Flags, die Rechte oder Zugriffe erweitern, Flags, die Hooks abschalten (`--safe-mode`), und Flags, die Paneldeck steuert, werden abgelehnt. Zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration und `--safe-mode` aus den Standards gelten nie für Sitzungen, die Agenten anlegen oder die per `paneldeck --open --claude` aus einem Hub-Terminal geöffnet werden. Pfade müssen lokal sein und existieren (Netzwerkfreigaben, auch über Verknüpfungen, werden nie berührt); alle Werte werden geprüft und je Shell gequotet. (#182)
 - Per MCP angelegte Sitzungen ohne Permission-Mode bekommen ausdrücklich `--permission-mode default`, damit die eigenen Claude-Einstellungen des Nutzers bypassPermissions nicht einschalten können; `bypassPermissions` geht nie per MCP, nie als gespeicherter Standard und wird nie gemerkt – nur als ausdrückliche Wahl je Sitzung mit Warnung. Alte `--dangerously-*`-Argumente fallen weg. (#161)
+- Paneldeck startet die Shell jedes Terminals in einem eigenen Windows-Job-Object und ordnet MCP-Aufrufer und `paneldeck --open` über die Mitgliedschaft zu. Losgelöst oder verwaist gestartete Prozesse (`Start-Process`, `cmd /c start`, doppelter Fork) gehören weiter zu ihrer Sitzung und deren Agenten-Kette; Programme können nicht aus dem Job ausbrechen. Die Prüfung über den Prozessbaum bleibt als Rückfallweg. (#168)
 
 ## [2.2.0] - 2026-11-16
 

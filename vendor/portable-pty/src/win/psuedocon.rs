@@ -81,6 +81,27 @@ pub enum ConPtyHost {
     System,
 }
 
+// Paneldeck patch: Job Object for the next `spawn_command` on this thread (see `set_spawn_job`).
+thread_local! {
+    static SPAWN_JOB: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static SPAWNED_IN_JOB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Paneldeck patch: start the process of the next `spawn_command` on this thread directly inside the Job Object
+/// `job` (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), so it is a member before its first instruction runs. Used once, then
+/// cleared. If `CreateProcessW` refuses the job (e.g. a job of the caller forbids nesting), the process is started
+/// without it and [`spawned_in_job`] returns `false`.
+pub fn set_spawn_job(job: Option<std::os::windows::io::RawHandle>) {
+    SPAWN_JOB.with(|j| j.set(job.map(|h| h as usize)));
+    SPAWNED_IN_JOB.with(|s| s.set(false));
+}
+
+/// Paneldeck patch: did the last `spawn_command` on this thread start its process inside the job from
+/// [`set_spawn_job`]?
+pub fn spawned_in_job() -> bool {
+    SPAWNED_IN_JOB.with(|s| s.get())
+}
+
 pub struct PsuedoCon {
     con: HPCON,
     funcs: &'static ConPtyFuncs,
@@ -184,33 +205,56 @@ impl PsuedoCon {
         si.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
         si.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
 
-        let mut attrs = ProcThreadAttributeList::with_capacity(1)?;
-        attrs.set_pty(self.con)?;
-        si.lpAttributeList = attrs.as_mut_ptr();
+        // Paneldeck patch: optionally start the process inside a Job Object (`set_spawn_job`), falling back to a
+        // start without it when CreateProcessW refuses the job.
+        let job = SPAWN_JOB.with(|j| j.take()).map(|h| h as HANDLE);
+        SPAWNED_IN_JOB.with(|s| s.set(false));
+        let jobs: Vec<HANDLE> = job.into_iter().collect();
 
         let mut pi: PROCESS_INFORMATION = unsafe { mem::zeroed() };
 
-        let (mut exe, mut cmdline) = cmd.cmdline()?;
+        let (mut exe, cmdline) = cmd.cmdline()?;
         let cmd_os = OsString::from_wide(&cmdline);
 
         let cwd = cmd.current_directory();
 
-        let res = unsafe {
-            CreateProcessW(
-                exe.as_mut_slice().as_mut_ptr(),
-                cmdline.as_mut_slice().as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
-                cwd.as_ref()
-                    .map(|c| c.as_slice().as_ptr())
-                    .unwrap_or(ptr::null()),
-                &mut si.StartupInfo,
-                &mut pi,
-            )
-        };
+        let mut res = 0;
+        for with_job in [true, false] {
+            if with_job && jobs.is_empty() {
+                continue;
+            }
+            let mut attrs = ProcThreadAttributeList::with_capacity(if with_job { 2 } else { 1 })?;
+            attrs.set_pty(self.con)?;
+            if with_job && attrs.set_job_list(&jobs).is_err() {
+                continue;
+            }
+            si.lpAttributeList = attrs.as_mut_ptr();
+            let mut cmdline_try = cmdline.clone();
+            res = unsafe {
+                CreateProcessW(
+                    exe.as_mut_slice().as_mut_ptr(),
+                    cmdline_try.as_mut_slice().as_mut_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                    cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
+                    cwd.as_ref()
+                        .map(|c| c.as_slice().as_ptr())
+                        .unwrap_or(ptr::null()),
+                    &mut si.StartupInfo,
+                    &mut pi,
+                )
+            };
+            si.lpAttributeList = ptr::null_mut();
+            if res != 0 {
+                SPAWNED_IN_JOB.with(|s| s.set(with_job));
+                break;
+            }
+            if with_job {
+                log::warn!("CreateProcessW with a job list failed, starting without it: {}", IoError::last_os_error());
+            }
+        }
         if res == 0 {
             let err = IoError::last_os_error();
             let msg = format!(

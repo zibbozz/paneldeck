@@ -11,7 +11,7 @@
 //!   Ändert sich etwas, das erst beim Start wirkt (Profil, Shell, Arbeitsordner, Claude an/aus), fragt der Dialog nach dem
 //!   Speichern „Jetzt neu laden?“; sonst gilt die Änderung beim nächsten Neu laden.
 
-use super::closing::{confirm_window, Outcome};
+use super::closing::{confirm_window_keep, Outcome};
 use crate::claude_opts::ClaudeOpts;
 use super::*;
 
@@ -101,10 +101,11 @@ pub(super) enum ReloadRoute {
     Ask,
 }
 
-pub(super) fn reload_route(chat: bool, exited: bool) -> ReloadRoute {
+/// `lingering`: im Job der Sitzung laufen Hintergrundprozesse, die das Neu laden überleben würden (#168).
+pub(super) fn reload_route(chat: bool, exited: bool, lingering: bool) -> ReloadRoute {
     if chat {
         ReloadRoute::Nothing
-    } else if exited {
+    } else if exited && !lingering {
         ReloadRoute::Now
     } else {
         ReloadRoute::Ask
@@ -118,6 +119,8 @@ pub(super) struct ReloadAsk {
     pub(super) after_settings: bool,
     /// Aus dem Fenster einer abgedockten Sitzung: die Rückfrage erscheint dort.
     pub(super) detached: bool,
+    /// Hintergrundprozesse im Job der Sitzung beim Öffnen (#168): dann „Weiterlaufen lassen“ oder „Alle beenden“.
+    pub(super) lingering: Vec<super::closing::Lingering>,
 }
 
 /// Fehler im Einstellungsdialog (Speichern bleibt gesperrt).
@@ -546,13 +549,15 @@ impl App {
     /// Rückfrage einer abgedockten Sitzung erscheint in deren Fenster.
     pub(super) fn request_reload(&mut self, ctx: &egui::Context, id: u64) {
         let Some(e) = self.entries.get(&id) else { return };
-        match reload_route(e.is_chat(), e.exited()) {
+        let (chat, exited) = (e.is_chat(), e.exited());
+        let lingering = if chat { Vec::new() } else { self.lingering_of(&[id]) };
+        match reload_route(chat, exited, !lingering.is_empty()) {
             ReloadRoute::Nothing => {}
             ReloadRoute::Now => self.apply(ctx, Action::Restart(id)),
             ReloadRoute::Ask => {
                 // Einmal den Fokus abgeben, damit Enter nicht noch ins Terminal geht; danach hält „Abbrechen“ ihn.
                 models_ui::release_focus(ctx);
-                self.reload_ask = Some(ReloadAsk { id, after_settings: false, detached: self.detached.contains(&id) });
+                self.reload_ask = Some(ReloadAsk { id, after_settings: false, detached: self.detached.contains(&id), lingering });
             }
         }
     }
@@ -580,7 +585,14 @@ impl App {
             (lang.t("Sitzung neu laden?", "Reload session?"), lang.t("Neu laden", "Reload"))
         };
         let running = !e.exited();
-        let o = confirm_window(ctx, Id::new("reload_ask"), title, button, 0, lang, 420.0, |ui| {
+        // Hintergrundprozesse im Job (#168): „Neu laden, weiterlaufen lassen“ oder „Neu laden, alle beenden“.
+        let jobs = !ask.lingering.is_empty();
+        let (button, keep) = if jobs {
+            (lang.t("Neu laden, alle beenden", "Reload and end all"), Some(lang.t("Neu laden, weiterlaufen lassen", "Reload, keep running")))
+        } else {
+            (button, None)
+        };
+        let o = confirm_window_keep(ctx, Id::new("reload_ask"), title, button, keep, 0, lang, 460.0, |ui| {
             ui.label(RichText::new(name).strong());
             ui.add_space(S1);
             ui.label(plan.text(lang));
@@ -591,9 +603,13 @@ impl App {
                 ui.add_space(S1);
                 ui.label(RichText::new(lang.t("Sonst gelten die Änderungen beim nächsten Neu laden.", "Otherwise the changes apply on the next reload.")).small().color(style::dim(ui)));
             }
+            super::closing::lingering_section(ui, &ask.lingering, lang, false);
         });
         match o {
-            Outcome::Go => {
+            Outcome::Go | Outcome::Keep => {
+                if o == Outcome::Go && jobs {
+                    actions.push(Action::EndJobs(vec![ask.id]));
+                }
                 actions.push(Action::Restart(ask.id));
                 // Den Fokus nur holen, wenn die Sitzung hier im Layout steht (nicht minimiert, nicht in einem anderen Fenster).
                 let shown = self.layout.as_ref().is_some_and(|l| l.contains(ask.id)) && !self.detached.contains(&ask.id);
@@ -637,7 +653,8 @@ impl App {
                 self.set_group(id, group); // legt den Ordner im Projekt an
                 if reload {
                     models_ui::release_focus(ctx);
-                    self.reload_ask = Some(ReloadAsk { id, after_settings: true, detached: false });
+                    let lingering = self.lingering_of(&[id]);
+                    self.reload_ask = Some(ReloadAsk { id, after_settings: true, detached: false, lingering });
                 } else {
                     self.want_focus = Some(self.focused);
                 }
@@ -677,10 +694,13 @@ mod tests {
 
     #[test]
     fn a_running_process_asks_first_an_ended_one_restarts_at_once() {
-        assert_eq!(reload_route(false, false), ReloadRoute::Ask);
-        assert_eq!(reload_route(false, true), ReloadRoute::Now);
-        assert_eq!(reload_route(true, false), ReloadRoute::Nothing);
-        assert_eq!(reload_route(true, true), ReloadRoute::Nothing);
+        assert_eq!(reload_route(false, false, false), ReloadRoute::Ask);
+        assert_eq!(reload_route(false, true, false), ReloadRoute::Now);
+        assert_eq!(reload_route(true, false, false), ReloadRoute::Nothing);
+        assert_eq!(reload_route(true, true, false), ReloadRoute::Nothing);
+        // Hintergrundprozesse im Job (#168): auch bei beendeter Shell fragen (weiterlaufen lassen oder beenden)
+        assert_eq!(reload_route(false, true, true), ReloadRoute::Ask);
+        assert_eq!(reload_route(false, false, true), ReloadRoute::Ask);
     }
 
     #[test]
@@ -692,7 +712,7 @@ mod tests {
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))), time: Some(t), events: ev, ..Default::default() };
             let mut o = Outcome::Open;
             let _ = ctx.run(input, |ctx| {
-                o = confirm_window(ctx, Id::new("reload_ask"), "Reload session?", "Reload", 0, Lang::En, 420.0, |ui| {
+                o = confirm_window_keep(ctx, Id::new("reload_ask"), "Reload session?", "Reload", None, 0, Lang::En, 420.0, |ui| {
                     ui.label(ReloadPlan::ClaudeFresh.text(Lang::En));
                 });
             });

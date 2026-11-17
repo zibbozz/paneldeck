@@ -34,6 +34,9 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Icon explorer with the Lucide icon set (more than 2,000 icons, ISC): from any icon picker, "More icons …" opens a window with the built-in icons (category "Built-in") and all Lucide icons – search by name and tag, categories, a grid with hover preview, a large preview and Select/Cancel (Esc closes). The built-in icons stay in the pickers. A Lucide icon is stored as `lucide:<name>`; backups, template export/import and the MCP tool `get_project` carry it. Old Lucide names are shown with the current icon and saved under the new name; icons from a newer Lucide version show as a placeholder instead of failing the import. Backups and templates with Lucide icons cannot be imported into versions before 2.3. (#190)
 - Claude start options: model, effort, permission mode and agent – as defaults under Settings → Claude and per session in the New session dialog; stored per session in `state.json` (optional field `claude_opts`). (#161)
 - MCP: `create_session` accepts `model`, `effort`, `permission_mode` and `agent` (only with `claude: true`, validated); `list_sessions`, `whoami` and `create_session` report them. (#161)
+- Closing a session, several sessions, a window or Paneldeck itself, or reloading a session, lists the session's background processes that would keep running: name, PID, window title, with programs that have an open window marked. You choose "Keep running" or "End all"; "End all" terminates them immediately, without saving. (#168)
+- A running session waits 3 seconds before closing, as do closing many sessions and quitting. (#168)
+- MCP `close_session` never asks; it keeps the processes running and reports them in the new optional field `remaining_processes` (pid, name, window, title; untrusted). (#168)
 
 ### Changed
 
@@ -49,6 +52,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Everything that works like a button now shows the hand cursor: main tabs, window buttons, list and menu entries, drop-downs, checkboxes, collapsible headings, toasts, and buttons over the terminal. (#187)
 - Settings → Agent interface: the levels Off / Read only / Control are real buttons; language, prompt language, profiles, model level, tool calling, Windows/WSL path and Unstaged/Staged work the same way. (#187)
 - The cost summary has its own line at the bottom of the sidebar and looks like a small button, with arrow, hover state and tooltip; the MCP chip looks the same. (#187)
+- Agent chain: a session created by an agent the user started (one without an agent chain) is no longer marked and may write back into its creator; the block applies only when the creator itself has an agent chain. `paneldeck --open … --claude` typed in a terminal marks the new session only if that terminal has an agent chain. (#152)
 
 ### Deprecated
 
@@ -77,6 +81,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - The C runtime is now linked into `paneldeck.exe`; it no longer needs `VCRUNTIME140.dll`, which Windows would look for before Paneldeck starts. (#183)
 - Agents (MCP) can only add switches that don't affect rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; not chrome if you turned Chrome off by default). Value options, flags that widen rights or access, flags that turn off hooks (`--safe-mode`) and flags Paneldeck controls are refused. Extra folders, allowed tools, an MCP config and `--safe-mode` from your defaults never apply to agent-created sessions or to `paneldeck --open --claude` from a Hub terminal. Paths must be local and existing (network shares, also via links, are never accessed); all values are validated and quoted per shell. (#182)
 - Sessions created via MCP without a permission mode get an explicit `--permission-mode default`, so the user's own Claude settings cannot turn on bypassPermissions; `bypassPermissions` is never possible via MCP, never a stored default and never remembered – only an explicit per-session choice with a warning. Old `--dangerously-*` arguments are dropped. (#161)
+- Paneldeck starts every terminal's shell inside its own Windows Job Object and attributes MCP callers and `paneldeck --open` by job membership. Processes started detached or orphaned (`Start-Process`, `cmd /c start`, double fork) still belong to their session and its agent chain; programs cannot break away from the job. The process-tree check remains as a fallback. (#168)
 
 ## [2.2.0] - 2026-11-16
 

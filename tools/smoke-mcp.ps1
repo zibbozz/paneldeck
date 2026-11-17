@@ -384,6 +384,28 @@ try {
     try { ($r.data.output | ConvertFrom-Json).result } catch { $null }
   }
   function InA($tool, $targs) { InS $A $tool $targs }
+  # Losgeloester Absender: eine kurzlebige Shell (in Sitzung $s per run_command, ohne $s vom Test selbst gestartet)
+  # startet per Start-Process eine PowerShell und endet sofort; diese schickt nach 3 s eine rohe Anfrage ohne Aufrufer
+  # (Token aus ipc.json) an den Hub. Rueckgabe: die rohe Antwort ('' ohne Antwort).
+  function Detached($s, [string]$tool, [string]$argsJson) {
+    $n = [guid]::NewGuid().ToString('N').Substring(0, 6)
+    $out = "$work\det-$n.txt"; $ps = "$work\det-$n.ps1"
+    [IO.File]::WriteAllText($ps, @"
+Start-Sleep -Seconds 3
+`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json
+`$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port)
+`$s = `$c.GetStream()
+`$b = [Text.Encoding]::UTF8.GetBytes('{"token":"' + `$j.token + '","cmd":"mcp","tool":"$tool","args":$argsJson}')
+`$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1)
+[IO.File]::WriteAllText('$out', (New-Object IO.StreamReader(`$s)).ReadToEnd())
+"@, (New-Object Text.UTF8Encoding $false))
+    $inner = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$ps'"
+    if ($s) { [void](Tool 'run_command' @{ session = $s; command = "powershell -NoProfile -Command ""$inner"""; timeout_secs = 30 }) }
+    else { $p = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', $inner; [void]$p.WaitForExit(15000) }
+    $deadline = (Get-Date).AddSeconds(25)
+    while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    if (Test-Path $out) { [IO.File]::ReadAllText($out) } else { '' }
+  }
   $me = InA 'whoami' @{}
   Check 'whoami in Hub-Sitzung (Prozessbaum, ohne Umgebungsvariable)' ($me.structuredContent.session -eq $A -and $me.structuredContent.identified_by -eq 'process') ($me | ConvertTo-Json -Compress -Depth 5)
   $kid = InA 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Kind' }; $K = $kid.structuredContent.id
@@ -397,46 +419,31 @@ try {
   Check 'Eltern-Agent steuert sein Kind (run_command)' ($rc.structuredContent.output.Trim() -eq 'kind-ok') ($rc | ConvertTo-Json -Compress -Depth 5)
   $self = InA 'send_text' @{ session = $A; text = 'x' }
   Check 'Eltern-Agent darf nicht in die eigene Sitzung schreiben' ($self.isError -eq $true -and $self.content[0].text -like 'forbidden*')
-  # Agenten-Kette (#152): das Kind ist markiert; ein Agent darin darf nicht in den Eltern-Agenten schreiben, nur lesen.
+  # Agenten-Kette, gelockert (#152, Entscheidung des Nutzers): Der Eltern-Agent wurde vom Nutzer gestartet (keine Kette),
+  # also ist sein Kind nicht markiert und darf in ihn zurueckschreiben.
   $kw = InS $K 'whoami' @{}
-  Check 'Kette: whoami im Kind nennt agent_chain = Eltern-Agent' ($kw.structuredContent.session -eq $K -and @($kw.structuredContent.agent_chain) -contains $A) ($kw | ConvertTo-Json -Compress -Depth 5)
-  Check 'Kette: list_sessions zeigt agent_chain des Kindes' (@(((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $K }).agent_chain) -contains $A)
-  $kx = InS $K 'send_text' @{ session = $A; text = 'echo kind-leak' }
-  Check 'Kette: Agent im Kind -> send_text in den Eltern-Agenten forbidden' ($kx.isError -eq $true -and $kx.content[0].text -like 'forbidden*' -and $kx.content[0].text -match 'agent chain') ($kx | ConvertTo-Json -Compress -Depth 5)
-  Check 'Kette: Agent im Kind -> rename_session des Eltern-Agenten forbidden' ((InS $K 'rename_session' @{ session = $A; name = 'x' }).content[0].text -like 'forbidden*')
-  Check 'Kette: Agent im Kind darf den Eltern-Agenten lesen' ((InS $K 'read_terminal' @{ session = $A; lines = 5 }).isError -ne $true)
-  foreach ($t in @(@('run_command', @{ session = $A; command = 'echo kind-leak' }), @('send_keys', @{ session = $A; keys = @('enter') }), @('queue_prompt', @{ session = $A; prompt = 'x' }), @('focus_session', @{ session = $A }))) {
-    $kr = InS $K $t[0] $t[1]
-    Check "Kette: Agent im Kind -> $($t[0]) in den Eltern-Agenten forbidden" ($kr.isError -eq $true -and $kr.content[0].text -like 'forbidden*') ($kr | ConvertTo-Json -Compress -Depth 5)
-  }
-  # Gefaelschter/fehlender Aufrufer: eine rohe TCP-Anfrage mit dem Token aus ipc.json, ohne caller/caller_pid, aus dem
-  # Prozessbaum des Kindes -> der Hub ermittelt den Absender selbst (TCP-Tabelle + Prozessbaum) und weist ab.
-  $rawCmd = "`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json; `$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port); `$s = `$c.GetStream(); `$b = [Text.Encoding]::UTF8.GetBytes('{""token"":""' + `$j.token + '"",""cmd"":""mcp"",""tool"":""send_text"",""caller"":null,""caller_pid"":4,""args"":{""session"":$A,""text"":""echo raw-leak""}}'); `$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1); (New-Object IO.StreamReader(`$s)).ReadToEnd()"
-  $raw = Tool 'run_command' @{ session = $K; command = $rawCmd; timeout_secs = 30 }
-  Check 'Kette: rohe TCP-Anfrage ohne Aufrufer aus dem Kind -> zugeordnet und forbidden' ($raw.data.output -match '"code":"forbidden"' -and $raw.data.output -match 'agent chain') $raw.text
-  # Losgeloester Absender: eine kurzlebige Shell im Kind startet per Start-Process einen Prozess und endet sofort; der
-  # Prozess (Elternteil beendet, nach dem Hub gestartet = verwaist) schickt dann eine rohe Anfrage in den Eltern-Agenten.
-  # Er ist keiner Sitzung zuzuordnen und darf nicht in einen moeglichen Vorfahren schreiben.
-  $detOut = "$work\detached-out.txt"; $detPs = "$work\detached.ps1"
-  [IO.File]::WriteAllText($detPs, @"
-Start-Sleep -Seconds 3
-`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json
-`$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port)
-`$s = `$c.GetStream()
-`$b = [Text.Encoding]::UTF8.GetBytes('{"token":"' + `$j.token + '","cmd":"mcp","tool":"send_text","args":{"session":$A,"text":"echo detached-leak"}}')
-`$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1)
-[IO.File]::WriteAllText('$detOut', (New-Object IO.StreamReader(`$s)).ReadToEnd())
-"@, (New-Object Text.UTF8Encoding $false))
-  $detCmd = "powershell -NoProfile -Command ""Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$detPs'"""
-  [void](Tool 'run_command' @{ session = $K; command = $detCmd; timeout_secs = 30 })
-  $deadline = (Get-Date).AddSeconds(25)
-  while (-not (Test-Path $detOut) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
-  $det = if (Test-Path $detOut) { [IO.File]::ReadAllText($detOut) } else { '' }
-  Check 'Kette: losgeloester Absender (Start-Process aus kurzlebiger Shell) -> forbidden in den Eltern-Agenten' ($det -match '"code":"forbidden"' -and $det -match 'cannot be attributed') $det
-  Start-Sleep 1
-  Check 'Kette: im Eltern-Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'kind-leak|raw-leak|detached-leak')
-  Check 'Kette: von aussen (ohne Kette) bleibt Schreiben erlaubt' (-not (Tool 'send_text' @{ session = $A; text = ' '; submit = $false }).err)
+  Check 'Kette gelockert: Kind eines vom Nutzer gestarteten Agenten ist frei (agent_chain leer)' ($kw.structuredContent.session -eq $K -and @($kw.structuredContent.agent_chain).Count -eq 0) ($kw | ConvertTo-Json -Compress -Depth 5)
+  $kb = InS $K 'rename_session' @{ session = $A; name = 'Eltern-Agent' }
+  Check 'Kette gelockert: Agent im Kind darf in den Eltern-Agenten zurueckschreiben (rename_session)' ($kb.isError -ne $true) ($kb | ConvertTo-Json -Compress -Depth 5)
+  # Job Objects (#168): ein losgeloester Enkel (eine kurzlebige Shell im Kind startet per Start-Process eine PowerShell und
+  # endet sofort; deren Elternteil gibt es dann nicht mehr) wird ueber den Job des Kindes zugeordnet - frueher "verwaist".
+  $det = Detached $K 'whoami' '{}'
+  Check 'Job: losgeloester Enkel (Start-Process nach Ende seiner Shell) -> der Sitzung des Kindes zugeordnet' ($det -match ('"session":' + $K + '[,}]') -and $det -match '"identified_by":"process"') $det
+  # Gegenprobe: derselbe losgeloeste Start vom Test selbst (ausserhalb jeder Sitzung) -> keiner Sitzung zugeordnet.
+  $out = Detached $null 'whoami' '{}'
+  Check 'Job: losgeloester Prozess ausserhalb jeder Sitzung -> keiner Sitzung zugeordnet' ($out -match '"session":null' -and $out -match '"identified_by":"none"') $out
+  # Hintergrundprozess (#168): das Kind startet eine versteckte PowerShell mit eigener Konsole (ueberlebt das Schliessen);
+  # close_session per MCP fragt nie, laesst sie weiterlaufen und meldet sie in remaining_processes.
+  $bgMark = "$work\bg-$([guid]::NewGuid().ToString('N').Substring(0, 6)).txt"
+  $bgCmd = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','`$PID | Out-File -Encoding ascii ''$bgMark''; Start-Sleep 120'"
+  [void](Tool 'run_command' @{ session = $K; command = $bgCmd; timeout_secs = 30 })
+  $t0 = Get-Date; while (-not (Test-Path $bgMark) -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 200 }
+  $bgPid = if (Test-Path $bgMark) { [int]([IO.File]::ReadAllText($bgMark).Trim()) } else { 0 }
   $cl = InA 'close_session' @{ session = $K }
+  $rem = @($cl.structuredContent.remaining_processes)
+  Check 'close_session (MCP) fragt nicht und meldet den Hintergrundprozess in remaining_processes' ($cl.isError -ne $true -and $bgPid -gt 0 -and @($rem | Where-Object { $_.pid -eq $bgPid -and $_.name -match '^powershell' }).Count -eq 1) ($cl | ConvertTo-Json -Compress -Depth 6)
+  Check 'close_session (MCP): Hintergrundprozess laeuft weiter (Weiterlaufen lassen)' ($bgPid -gt 0 -and $null -ne (Get-Process -Id $bgPid -ErrorAction SilentlyContinue))
+  if ($bgPid -gt 0) { Stop-Process -Id $bgPid -Force -ErrorAction SilentlyContinue }
   Check 'Eltern-Agent schliesst sein Kind' ($cl.isError -ne $true)
   [void](Tool 'close_session' @{ session = $A })
 
@@ -1120,8 +1127,44 @@ c.close()
     $tc = InS $T.id 'send_chat_message' @{ session = $C; text = 'x' }
     Check 'Markierung: ... und nicht in den Chat der Kette' ($tc.isError -eq $true -and $tc.content[0].text -like 'forbidden*') ($tc | ConvertTo-Json -Compress -Depth 5)
     Check 'Markierung: in der Sitzung des Agenten wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'taint-leak')
+    # Agenten-Kette (#152) im Terminal $T (Glied der Kette $A -> $C): whoami/list_sessions nennen sie, nur Lesen in $A.
+    $Ti = $T.id
+    $kw = InS $Ti 'whoami' @{}
+    Check 'Kette: whoami im Glied nennt agent_chain (Agent + Chat)' ($kw.structuredContent.session -eq $Ti -and @($kw.structuredContent.agent_chain) -contains $A -and @($kw.structuredContent.agent_chain) -contains $C) ($kw | ConvertTo-Json -Compress -Depth 5)
+    Check 'Kette: Glied -> rename_session des Vorfahren forbidden' ((InS $Ti 'rename_session' @{ session = $A; name = 'x' }).content[0].text -like 'forbidden*')
+    Check 'Kette: Glied darf den Vorfahren lesen' ((InS $Ti 'read_terminal' @{ session = $A; lines = 5 }).isError -ne $true)
+    foreach ($t in @(@('run_command', @{ session = $A; command = 'echo kind-leak' }), @('send_keys', @{ session = $A; keys = @('enter') }), @('queue_prompt', @{ session = $A; prompt = 'x' }), @('focus_session', @{ session = $A }))) {
+      $kr = InS $Ti $t[0] $t[1]
+      Check "Kette: Glied -> $($t[0]) in den Vorfahren forbidden" ($kr.isError -eq $true -and $kr.content[0].text -like 'forbidden*') ($kr | ConvertTo-Json -Compress -Depth 5)
+    }
+    # Gefaelschter/fehlender Aufrufer: rohe TCP-Anfrage mit dem Token aus ipc.json, ohne caller/caller_pid, aus $T ->
+    # der Hub ermittelt den Absender selbst (TCP-Tabelle + Job Object bzw. Prozessbaum) und weist ab.
+    $rawCmd = "`$j = Get-Content -Raw '$data\ipc.json' | ConvertFrom-Json; `$c = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]`$j.port); `$s = `$c.GetStream(); `$b = [Text.Encoding]::UTF8.GetBytes('{""token"":""' + `$j.token + '"",""cmd"":""mcp"",""tool"":""send_text"",""caller"":null,""caller_pid"":4,""args"":{""session"":$A,""text"":""echo raw-leak""}}'); `$s.Write(`$b, 0, `$b.Length); `$c.Client.Shutdown(1); (New-Object IO.StreamReader(`$s)).ReadToEnd()"
+    $raw = Tool 'run_command' @{ session = $Ti; command = $rawCmd; timeout_secs = 30 }
+    Check 'Kette: rohe TCP-Anfrage ohne Aufrufer aus dem Glied -> zugeordnet und forbidden' ($raw.data.output -match '"code":"forbidden"' -and $raw.data.output -match 'agent chain') $raw.text
+    # Losgeloester Enkel des Glieds (#168): ueber den Job von $T zugeordnet -> als Glied der Kette abgewiesen.
+    $det = Detached $Ti 'send_text' ('{"session":' + $A + ',"text":"echo detached-leak"}')
+    Check 'Job: losgeloester Enkel eines Glieds -> der Kette zugeordnet, forbidden in den Vorfahren' ($det -match '"code":"forbidden"' -and $det -match 'agent chain') $det
+    # Rueckfallweg: ein losgeloester Prozess ausserhalb jeder Sitzung (vom Test, verwaist) ist nicht zuzuordnen und darf
+    # nicht in einen moeglichen Vorfahren ($A steht in einer Kette) schreiben.
+    $det = Detached $null 'send_text' ('{"session":' + $A + ',"text":"echo orphan-leak"}')
+    Check 'Verwaist ausserhalb jeder Sitzung -> nicht zuzuordnen, forbidden in einen moeglichen Vorfahren' ($det -match '"code":"forbidden"' -and $det -match 'cannot be attributed') $det
+    # paneldeck --open aus einem Terminal (#152): markiert nur, wenn das Terminal selbst eine Kette hat.
+    $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
+    [void](Tool 'run_command' @{ session = $Ti; command = "& '$dir\paneldeck.exe' --open '$proj'"; timeout_secs = 30 })
+    Start-Sleep 3
+    $o1 = @((Tool 'list_sessions').data.sessions) | Where-Object { $before -notcontains $_.id } | Select-Object -First 1
+    Check '--open aus einem Glied der Kette: neue Sitzung erbt die Kette samt Glied' ($null -ne $o1 -and @($o1.agent_chain) -contains $Ti -and @($o1.agent_chain) -contains $A) ($o1 | ConvertTo-Json -Compress)
+    $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
+    [void](Tool 'run_command' @{ session = $A; command = "& '$dir\paneldeck.exe' --open '$proj'"; timeout_secs = 30 })
+    Start-Sleep 3
+    $o2 = @((Tool 'list_sessions').data.sessions) | Where-Object { $before -notcontains $_.id } | Select-Object -First 1
+    Check '--open aus einem Terminal ohne Kette: neue Sitzung bleibt frei' ($null -ne $o2 -and @($o2.agent_chain).Count -eq 0) ($o2 | ConvertTo-Json -Compress)
+    Start-Sleep 1
+    Check 'Kette: im Vorfahren wurde nichts getippt' ((Tool 'read_terminal' @{ session = $A; lines = 200 }).data.text -notmatch 'kind-leak|raw-leak|detached-leak|orphan-leak')
   }
   Check 'wait_for_status auf die eigene Sitzung -> bad_args' ((InA 'wait_for_status' @{ session = $A; status = @('ready'); timeout_secs = 5 }).content[0].text -like 'bad_args*')
+  Check 'Kette: von aussen (ohne Kette) bleibt Schreiben in den Vorfahren erlaubt' (-not (Tool 'send_text' @{ session = $A; text = ' '; submit = $false }).err)
   [void](Tool 'close_session' @{ session = $C2 })
   [void](Tool 'close_session' @{ session = $A })
   # read_chat ueber ein Chat-Modell (Ergebnis gekuerzt): die neuesten Nachrichten und der Status kommen an, nicht die aeltesten.
