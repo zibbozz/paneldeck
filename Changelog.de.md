@@ -29,6 +29,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Agenten bestimmen mit dem neuen optionalen `placement`, wo `focus_session` und `create_session` eine Sitzung zeigen: `replace` (Standard bei `focus_session`; ersetzt nur den aktiven Bereich – den eigenen Bereich des Agenten, wenn sichtbar, sonst den fokussierten – und minimiert ihn), `split_right` / `split_down` (teilt nur den aktiven Bereich) oder `solo` (einziger Bereich, die anderen werden minimiert). Die Platzierung bewegt nie den Tastaturfokus des Nutzers (außer sein Bereich wurde ersetzt) und holt kein Fenster nach vorn; Bereiche mit offener Freigabe-Frage und Sitzungen der Agenten-Kette werden nie verdrängt. Ohne `placement` bleibt `create_session` wie bisher leise. `list_sessions` meldet `shown` (Bereich ist zu sehen). (#162)
 - Strg+Tab erreicht auch minimierte Sitzungen und zeigt sie im fokussierten Bereich; der ersetzte Bereich wird minimiert. Nach dem Allein-Öffnen zeigt ein kurzer Hinweis, wie viele Bereiche minimiert wurden. (#162)
 - Einstellung „Umgebung von Paneldeck erben“ (Einstellungen → Allgemein, standardmäßig aus; Feld `inherit_env` in `settings.json`): Neue Terminals bekommen genau die Umgebung, mit der Paneldeck gestartet wurde, statt der frisch aus Windows gelesenen Variablen. (#175)
+- Weitere Claude-Startoptionen unter „Weitere Claude-Optionen“ im Dialog „Neue Sitzung“, in den Einstellungen der Sitzung (eine Änderung fragt „Jetzt neu laden?“) und als Standard unter Einstellungen → Claude: Schalter `--chrome`/`--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` und `--safe-mode` (mit Warnung); zusätzliche Ordner (`--add-dir`), erlaubte und verbotene Werkzeuge, eine MCP-Konfiguration, ein Zusatz zum System-Prompt, ein Ersatzmodell, ein Höchstbudget und Auto-Komprimierung. Optionen, die Zugriffe erweitern, zeigen eine Warnung; fehlende Ordner oder Dateien werden beim Start mit Hinweis weggelassen. (#182)
+- MCP: `create_session` nimmt `claude_flags` (nur Schalter); `list_sessions`, `whoami` und `create_session` melden `claude_flags` und `claude_user_options` (nur Namen, wie angewendet). (#182)
 
 ### Changed
 
@@ -40,6 +42,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Updates ersetzen `paneldeck.exe`, `conpty.dll` und `OpenConsole.exe` gemeinsam, auch bei laufendem Paneldeck: Der Installer schreibt zuerst den Konsolen-Host und legt bei einem Schreibfehler die bisherige Datei zurück; das portable Selbst-Update ersetzt alle Dateien oder keine. Übrig gebliebene `.old`-Dateien werden beim nächsten Start gelöscht, die Deinstallation entfernt auch den Konsolen-Host. (#183)
 - MCP `focus_session` auf eine minimierte Sitzung nutzt jetzt den Standard `replace` statt sie allein zu öffnen (dafür `placement: "solo"`); ein Chat braucht für `focus_session` mit `placement` eine Freigabe. (#162)
 - Mit „Sitzungen merken“ aus stellt ein Neustart nach einem Update die Sitzungen einmal wieder her; beim nächsten Beenden werden sie wie gewohnt verworfen. (#157)
+- MCP `create_session` lehnt Wertoptionen, die es bisher still ignorierte (z. B. `add_dir`, `allowed_tools`, `mcp_config`, `append_system_prompt`, `safe_mode`), jetzt mit `bad_args` ab. (#182)
 
 ### Deprecated
 
@@ -62,6 +65,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - OSC 52 nur zum Schreiben: Programme können die Zwischenablage nie lesen. Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB, höchstens alle 0,3 s; leere Texte leeren die Zwischenablage nie. Hinweis: Ein Agent mit Steuer-Zugriff (MCP) kann die fokussierte Sitzung ebenfalls etwas kopieren lassen. (#181)
 - Paneldeck lädt keine DLLs mehr aus dem Arbeitsordner: Gleich beim Start wird die DLL-Suche auf den Programmordner und System32 beschränkt, der mitgelieferte Konsolen-Host wird über seinen vollen Pfad geladen. (#183)
 - Die C-Laufzeit ist jetzt in `paneldeck.exe` eingebunden; die `VCRUNTIME140.dll`, die Windows noch vor dem Start von Paneldeck suchen würde, wird nicht mehr gebraucht. (#183)
+- Agenten (MCP) können nur Schalter ergänzen, die Rechte, Zugriffe und Hooks nicht berühren (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; chrome nicht, wenn du Chrome als Standard ausgeschaltet hast). Wertoptionen, Flags, die Rechte oder Zugriffe erweitern, Flags, die Hooks abschalten (`--safe-mode`), und Flags, die Paneldeck steuert, werden abgelehnt. Zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration und `--safe-mode` aus den Standards gelten nie für Sitzungen, die Agenten anlegen oder die per `paneldeck --open --claude` aus einem Hub-Terminal geöffnet werden. Pfade müssen lokal sein und existieren (Netzwerkfreigaben, auch über Verknüpfungen, werden nie berührt); alle Werte werden geprüft und je Shell gequotet. (#182)
 
 ## [2.2.0] - 2026-11-16
 

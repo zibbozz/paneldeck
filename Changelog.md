@@ -29,6 +29,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Agents can choose where `focus_session` and `create_session` show a session with the new optional `placement`: `replace` (default for `focus_session`; replaces only the active pane – the agent's own pane if visible, otherwise the one the user focused – and minimizes it), `split_right` / `split_down` (split only the active pane) or `solo` (only pane, the others are minimized). Placement never moves the user's keyboard focus (unless their pane was replaced) and never brings a window to the front; panes waiting for an approval and sessions of the agent's chain are never displaced. Without `placement`, `create_session` stays quiet as before. `list_sessions` reports `shown` (the pane is on screen). (#162)
 - Ctrl+Tab also reaches minimized sessions and shows them in the focused pane; the pane they replace is minimized. After a session opens alone, a short notice shows how many panes were minimized. (#162)
 - Setting "Inherit Paneldeck's environment" (Settings → General, off by default; `settings.json` field `inherit_env`): new terminals get exactly the environment Paneldeck was started with instead of the variables read fresh from Windows. (#175)
+- More Claude start options under "More Claude options" in the New session dialog, in the session settings (a change asks "Reload now?") and as defaults under Settings → Claude: switches `--chrome`/`--no-chrome`, `--ide`, `--verbose`, `--brief`, `--restricted`, `--disable-slash-commands` and `--safe-mode` (with a warning); extra folders (`--add-dir`), allowed and disallowed tools, an MCP config, an addition to the system prompt, a fallback model, a maximum budget and auto-compact. Options that widen access show a warning; missing folders or files are left out at start with a notice. (#182)
+- MCP: `create_session` takes `claude_flags` (switches only); `list_sessions`, `whoami` and `create_session` report `claude_flags` and `claude_user_options` (names only, as applied). (#182)
 
 ### Changed
 
@@ -40,6 +42,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Updates replace `paneldeck.exe`, `conpty.dll` and `OpenConsole.exe` together even while Paneldeck is running: the installer writes the console host first and puts the previous file back if writing fails; the portable self-update replaces all files or none. Leftover `.old` files are removed on the next start, and uninstalling removes the console host too. (#183)
 - MCP `focus_session` on a minimized session now uses the default `replace` instead of opening it alone (use `placement: "solo"` for that); a chat needs approval for `focus_session` with `placement`. (#162)
 - With "Remember sessions" off, an update restart restores the sessions once; the next exit discards them as usual. (#157)
+- MCP `create_session` now refuses value options that it used to ignore silently (e.g. `add_dir`, `allowed_tools`, `mcp_config`, `append_system_prompt`, `safe_mode`) with `bad_args`. (#182)
 
 ### Deprecated
 
@@ -62,6 +65,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - OSC 52 is write-only: programs can never read the clipboard. Only the focused session in the foreground window may copy, at most 1 MB, at most once every 0.3 s; empty texts never clear the clipboard. Note: an agent with control access (MCP) can make the focused session copy text, too. (#181)
 - Paneldeck no longer loads DLLs from the current working folder: right at startup the DLL search is restricted to the program folder and System32, and the bundled console host is loaded by its full path. (#183)
 - The C runtime is now linked into `paneldeck.exe`; it no longer needs `VCRUNTIME140.dll`, which Windows would look for before Paneldeck starts. (#183)
+- Agents (MCP) can only add switches that don't affect rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; not chrome if you turned Chrome off by default). Value options, flags that widen rights or access, flags that turn off hooks (`--safe-mode`) and flags Paneldeck controls are refused. Extra folders, allowed tools, an MCP config and `--safe-mode` from your defaults never apply to agent-created sessions or to `paneldeck --open --claude` from a Hub terminal. Paths must be local and existing (network shares, also via links, are never accessed); all values are validated and quoted per shell. (#182)
 
 ## [2.2.0] - 2026-11-16
 
