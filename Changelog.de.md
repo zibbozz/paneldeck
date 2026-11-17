@@ -7,7 +7,7 @@ Das Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 und dieses Projekt hält sich an [Semantic Versioning](https://semver.org/lang/de/).
 Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen unter der Nummer des nächsten Releases mit `WIP` statt Datum (z. B. `## [1.1.0] - WIP`).
 
-## [2.3.1] - WIP
+## [2.3.1] - 2026-11-17
 
 ### Fixed
 
@@ -311,7 +311,7 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Alle `unwrap()`/`expect()` im Programmcode sind durch Fehlerbehandlung ersetzt (der Release-Build bricht bei einem Panic komplett ab); die `unsafe`-Blöcke sind begründet.
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
-[2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...HEAD
+[2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/zibbozz/paneldeck/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/zibbozz/paneldeck/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/zibbozz/paneldeck/compare/v2.0.0...v2.1.0
