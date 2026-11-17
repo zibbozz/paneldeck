@@ -1063,7 +1063,11 @@ fn process_chunk<T: EventListener>(processor: &mut Processor, t: &mut Term<T>, b
                 stale.store(next_stale_modes(was, ev, *t.mode()), Ordering::Relaxed);
                 if kitty_left_at_prompt(ev, *t.mode()) {
                     hs.advance(p, t, KITTY_RESET);
-                    kitty_guard.cleared();
+                    // Während eines Synchronized Update puffert vte nur: `t.mode()` ist der Stand vor dem Block, der
+                    // Bildschirm am Prompt unbekannt. Dann nicht zurücksetzen – zu hoch zählen ist sicher (#183 Review 3).
+                    if p.sync_timeout().sync_timeout().is_none() {
+                        kitty_guard.cleared(t.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN));
+                    }
                 }
             }
         }
@@ -2312,6 +2316,27 @@ mod vt_reply_tests {
         r.feed("\x1b[>5u\x1b[>5u");
         assert_eq!(r.feed("\x1bc\x1b[?u"), "\x1b[?0u");
         assert_eq!(r.guard_depth(), 0);
+    }
+
+    /// Regression (#183 Review 3): Prompt auf dem Hauptbildschirm, danach im selben Chunk Pushes auf dem alternativen
+    /// Bildschirm – auch innerhalb eines Synchronized Update. Der Wächter darf den alternativen Stapel dabei nicht
+    /// vergessen (alacritty behält ihn über 1049-Wechsel); sonst Panik ab 4096 Einträgen.
+    #[test]
+    fn reader_path_keeps_alt_kitty_stack_across_prompts() {
+        let cap = crate::vtkeys::KITTY_STACK_CAP;
+        let pushes = "\x1b[>1u".repeat(cap);
+        for sync in [false, true] {
+            let mut r = Rig::new();
+            r.feed("\x1b[?1049h\x1b[>1u");
+            let body = format!("\x1b[?1049l\x1b[>1u\x1b]133;A\x07\x1b[?1049h{pushes}");
+            let chunk = if sync { format!("\x1b[?2026h{body}\x1b[?2026l") } else { body };
+            for _ in 0..100 {
+                r.feed(&chunk);
+            }
+            assert!(r.guard_depth() <= cap, "{sync}");
+            // alacritty hat auf dem alternativen Bildschirm höchstens so viele Einträge wie der Wächter zählt
+            assert_eq!(r.feed(&format!("\x1b[<{cap}u\x1b[?u")), "\x1b[?0u", "{sync}");
+        }
     }
 
     /// RIS (`ESC c`) setzt von Programmen geänderte Farben auf das Theme zurück (wie xterm/Windows Terminal).
