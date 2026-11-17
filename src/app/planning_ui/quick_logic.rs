@@ -397,7 +397,7 @@ impl FormState {
             (_, Some(InputKind::Checkbox), Some(v)) => f.flag = v.as_bool(),
             (_, Some(InputKind::Labels), Some(v)) => f.text = v.as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
             (_, Some(InputKind::Number { .. }), Some(v)) => f.text = v.as_f64().map(|x| if x.fract() == 0.0 { format!("{}", x as i64) } else { x.to_string() }).unwrap_or_default(),
-            (_, Some(InputKind::Date | InputKind::DateTime | InputKind::Text { .. } | InputKind::RichTextEditor { .. }), Some(v)) => f.text = v.as_str().unwrap_or_default().to_string(),
+            (_, Some(InputKind::Date | InputKind::DateTime { .. } | InputKind::Text { .. } | InputKind::RichTextEditor { .. }), Some(v)) => f.text = v.as_str().unwrap_or_default().to_string(),
             _ => {}
         }
         f

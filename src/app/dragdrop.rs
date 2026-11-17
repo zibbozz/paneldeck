@@ -288,7 +288,7 @@ impl App {
                     s.report_focus(ctx.input(|i| i.viewport().focused.unwrap_or(false)));
                 }
                 // Ebenso die Rückfrage „Link öffnen?“ (OSC 8), wenn der Link in diesem Fenster angeklickt wurde.
-                self.link_ask_ui(ctx);
+                self.link_ask_ui(ctx, id);
                 if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::W)) {
                     close = true;
                 }

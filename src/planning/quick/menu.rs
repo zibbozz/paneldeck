@@ -141,6 +141,7 @@ pub fn allowed_status_targets(cfg: &MenuConfig, ctx: &TicketContext) -> Vec<i64>
         return Vec::new();
     }
     let value_of = |f: i64| ctx.values.get(&f).cloned();
+    let due_field = cfg.fields.iter().find(|f| f.is_due()).map(|f| f.id);
     wf.iter()
         .copied()
         .filter(|to| *to != from)
@@ -148,7 +149,7 @@ pub fn allowed_status_targets(cfg: &MenuConfig, ctx: &TicketContext) -> Vec<i64>
             if cfg.transitions.is_empty() {
                 return true;
             }
-            cfg.transitions.iter().find(|t| t.def.from_status_id == from && t.def.to_status_id == *to).is_some_and(|t| evaluate_conditions(&t.def.conditions, &value_of))
+            cfg.transitions.iter().find(|t| t.def.from_status_id == from && t.def.to_status_id == *to).is_some_and(|t| evaluate_conditions(&t.def.conditions, &value_of, due_field))
         })
         .collect()
 }

@@ -247,6 +247,11 @@ impl FolderPicker {
         }
     }
 
+    /// Läuft die Prüfung des Linux-Ordners in WSL noch (Entprellung, Abfrage)? Dann ist weder „fehlt“ noch „ok“ bekannt.
+    pub fn checking(&self) -> bool {
+        self.wsl_mode && self.note.is_none() && self.check == Check::Pending
+    }
+
     /// WSL-Ordner in „zuletzt benutzt“ der Distribution aufnehmen (Windows-Pfade und die Vorgabe `~`: nichts).
     pub fn remember(&self, recent: &mut BTreeMap<String, Vec<String>>) {
         let v = self.value();

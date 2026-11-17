@@ -44,7 +44,8 @@ pub enum InputKind {
     /// Freie Marken, mit Komma getrennt; neue entstehen beim Eingeben.
     Labels,
     Date,
-    DateTime,
+    /// Datum+Uhrzeit; `time_optional` = ein Wert darf auch nur ein Datum sein (die eingebaute Fälligkeit, `date_only_ok`).
+    DateTime { time_optional: bool },
     Checkbox,
     /// Suche nach Ticketschlüssel/Titel; `target_types` = erlaubte Typen (leer = jeder).
     TicketSearch { target_types: Vec<i64> },
@@ -84,7 +85,7 @@ impl InputKind {
             FieldKind::Version => InputKind::VersionPick,
             FieldKind::Milestone => InputKind::MilestonePick,
             FieldKind::Date => InputKind::Date,
-            FieldKind::Datetime => InputKind::DateTime,
+            FieldKind::Datetime => InputKind::DateTime { time_optional: f.options.date_only_ok() },
             FieldKind::Multi => InputKind::MultiSelect { values: values() },
             FieldKind::Labels => InputKind::Labels,
         }
@@ -118,7 +119,10 @@ impl InputKind {
             InputKind::MultiSelect { .. } => t("Werte wählen (mit Komma getrennt)", "Choose values (comma separated)"),
             InputKind::Labels => t("Labels (mit Komma getrennt)", "Labels (comma separated)"),
             InputKind::Date => t("Datum (JJJJ-MM-TT, TT.MM.JJJJ, heute)", "Date (YYYY-MM-DD, DD.MM.YYYY, today)"),
-            InputKind::DateTime => t("Datum und Uhrzeit (z. B. 14.11.2026 09:30)", "Date and time (e.g. 2026-11-14 09:30)"),
+            InputKind::DateTime { time_optional: false } => t("Datum und Uhrzeit (z. B. 14.11.2026 09:30)", "Date and time (e.g. 2026-11-14 09:30)"),
+            InputKind::DateTime { time_optional: true } => {
+                t("Datum, Uhrzeit optional (z. B. 14.11.2026 oder 14.11.2026 09:30)", "Date, time optional (e.g. 2026-11-14 or 2026-11-14 09:30)")
+            }
             InputKind::Checkbox => t("Ja oder Nein", "Yes or no"),
             InputKind::TicketSearch { .. } => t("Ticket suchen (Schlüssel oder Titel)", "Search a ticket (key or title)"),
             InputKind::TerminalPick => t("Terminal wählen", "Choose a terminal"),
@@ -236,7 +240,14 @@ pub fn parse_input_at(kind: &InputKind, text: &str, now: NaiveDateTime) -> Resul
         InputKind::Number { min, max, decimals, unit } => parse_number(t, *min, *max, *decimals, unit.as_deref()),
         InputKind::Checkbox => parse_bool(t).map(Value::Bool).ok_or(InputError::NotYesNo),
         InputKind::Date => parse_date(t, now.date()).map(|d| json!(d.format("%Y-%m-%d").to_string())).ok_or(InputError::NotADate),
-        InputKind::DateTime => parse_datetime(t, now).map(|d| json!(format_datetime(d))).ok_or(InputError::NotADateTime),
+        InputKind::DateTime { time_optional } => parse_datetime(t, now)
+            .map(|d| {
+                // Ohne Uhrzeit (keine Zeitangabe mit `:`, nicht „jetzt“) bleibt eine Fälligkeit ein reines Datum (= Ende des
+                // Tages), nicht Mitternacht (#214).
+                let time_given = t.contains(':') || matches!(fold(t).as_str(), "now" | "jetzt");
+                if *time_optional && !time_given { json!(d.date().format("%Y-%m-%d").to_string()) } else { json!(format_datetime(d)) }
+            })
+            .ok_or(InputError::NotADateTime),
         InputKind::Dropdown { values } => Ok(json!(match_option(values, t)?.id)),
         InputKind::MultiSelect { values } => {
             let mut ids: Vec<i64> = Vec::new();
@@ -516,7 +527,10 @@ mod tests {
         assert_eq!(expect(FieldKind::Version), InputKind::VersionPick);
         assert_eq!(expect(FieldKind::Milestone), InputKind::MilestonePick);
         assert_eq!(expect(FieldKind::Date), InputKind::Date);
-        assert_eq!(expect(FieldKind::Datetime), InputKind::DateTime);
+        assert_eq!(expect(FieldKind::Datetime), InputKind::DateTime { time_optional: false });
+        let due_opts = FieldOptions { time_optional: Some(true), ..FieldOptions::default() };
+        assert_eq!(InputKind::for_field(&field(FieldKind::Datetime, due_opts), Lang::En), InputKind::DateTime { time_optional: true });
+        assert_ne!(InputKind::DateTime { time_optional: true }.hint(Lang::En), InputKind::DateTime { time_optional: false }.hint(Lang::En));
         assert_eq!(expect(FieldKind::Labels), InputKind::Labels);
         let InputKind::Dropdown { values } = expect(FieldKind::Dropdown) else { panic!() };
         assert_eq!(values.len(), 2);
@@ -699,7 +713,7 @@ mod tests {
 
     #[test]
     fn date_times() {
-        let d = |t: &str| p(&InputKind::DateTime, t);
+        let d = |t: &str| p(&InputKind::DateTime { time_optional: false }, t);
         assert_eq!(d("2026-11-14 09:30"), Ok(json!("2026-11-14T09:30")));
         assert_eq!(d("2026-11-14T09:30"), Ok(json!("2026-11-14T09:30")));
         assert_eq!(d("14.11.2026 9:05"), Ok(json!("2026-11-14T09:05")));
@@ -715,6 +729,28 @@ mod tests {
         for bad in ["2026-11-14 25:00", "2026-11-14 12:60", "2026-11-14 12", "2026-11-14 ", "14.11.2026 ab:cd", "xx 12:00", "2026-11-14 12:00:00:00"] {
             let r = d(bad);
             assert!(matches!(r, Err(InputError::NotADateTime)) || bad == "2026-11-14 " && r == Ok(json!("2026-11-14T00:00")), "{bad}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn due_date_keeps_date_only_values() {
+        // #214: die eingebaute Fälligkeit (Uhrzeit optional) speichert ein reines Datum, nicht Mitternacht.
+        let d = |t: &str| p(&InputKind::DateTime { time_optional: true }, t);
+        assert_eq!(d("2026-11-20"), Ok(json!("2026-11-20")));
+        assert_eq!(d("20.11.2026"), Ok(json!("2026-11-20")));
+        assert_eq!(d("today"), Ok(json!("2026-11-14")));
+        assert_eq!(d("morgen"), Ok(json!("2026-11-15")));
+        assert_eq!(d("Tomorrow"), Ok(json!("2026-11-15")));
+        assert_eq!(d("2026-11-20 14:30"), Ok(json!("2026-11-20T14:30")));
+        assert_eq!(d("2026-11-20T00:00"), Ok(json!("2026-11-20T00:00")), "ausdrücklich Mitternacht bleibt");
+        assert_eq!(d("14:45"), Ok(json!("2026-11-14T14:45")));
+        assert_eq!(d("now"), Ok(json!("2026-11-14T10:20")));
+        assert_eq!(d(""), Ok(Value::Null));
+        assert_eq!(d("xx"), Err(InputError::NotADateTime));
+        // Jeder gespeicherte Wert ist eine gültige Fälligkeit.
+        for t in ["2026-11-20", "today", "2026-11-20 14:30"] {
+            let v = d(t).unwrap();
+            assert!(crate::due::parse_stored(v.as_str().unwrap()).is_some(), "{t}");
         }
     }
 

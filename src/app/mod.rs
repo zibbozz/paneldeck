@@ -295,7 +295,8 @@ enum Nav {
 #[derive(Clone)]
 enum Action {
     /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
-    PasteAsk(u64, String, bool),
+    /// Sitzung, Text, aus abgedocktem Fenster, Rückfrage nur wegen möglicher Broadcast-Ziele (`Session::take_paste_ask`).
+    PasteAsk(u64, String, bool, bool),
     OpenPalette,
     OpenTemplates,
     OpenCosts,
@@ -375,7 +376,8 @@ enum Action {
     RequestClose(u64),
     Close(u64),
     /// „Alle beenden“ (#168): alle Prozesse im Job dieser Sitzungen beenden (vor `Close`/`CloseMany`/`Restart`).
-    EndJobs(Vec<u64>),
+    /// (Sitzung, Job beim Öffnen der Rückfrage) – ein inzwischen neu gestarteter Job bleibt (#213).
+    EndJobs(Vec<(u64, u64)>),
     Split(u64, Dir),
     SplitAt(u64, Dir, bool),
     /// Bereich minimieren: aus dem Layout nehmen, Sitzung läuft weiter (`App::minimize_pane`).
@@ -648,6 +650,10 @@ struct WtClose {
     id: u64,
     changes: usize,
     discard: bool,
+    /// Hintergrundprozesse im Job der Sitzung beim Öffnen (#168, #213).
+    lingering: Vec<closing::Lingering>,
+    /// „Hintergrundprozesse beenden“ angehakt.
+    end_jobs: bool,
 }
 
 struct Palette {
@@ -798,6 +804,9 @@ pub struct App {
     bg_rx: std::sync::mpsc::Receiver<String>,
     pending_wt: Option<PendingWt>,
     wt_close: Option<WtClose>,
+    /// Jobs geschlossener/neu gestarteter Sitzungen mit übrigen Prozessen (#218, #213) und letzte Pflege.
+    retired: Vec<closing::Retired>,
+    retired_poll: Option<Instant>,
     gsearch: Option<GlobalSearch>,
     notice: Option<(String, Instant)>,
     /// Toast-Stapel unten rechts (`toasts.rs`), Uhr dafür und Toast unter dem Mauszeiger.
@@ -966,14 +975,7 @@ impl App {
         let remember_at_start = settings.remember_sessions;
         let restored_once = fresh_start::restore_once_applies(settings.remember_sessions, update::install::restore_once());
         if !settings.remember_sessions && !restored_once {
-            if fresh_start::worth_keeping(&saved) {
-                if let Ok(raw) = std::fs::read(dir.join("state.json")) {
-                    fresh_start::backup_state(&dir, &raw);
-                }
-            }
-            let top = fresh_start::sweep_session_files(&dir);
-            saved.next_id = saved.next_id.max(top.saturating_add(1));
-            saved = fresh_start::forget(saved, state::persisted_lang(settings.language));
+            saved = fresh_start::start_fresh(&dir, saved, state::persisted_lang(settings.language));
         }
         let restored_once = restored_once && !saved.sessions.is_empty();
         // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
@@ -1097,6 +1099,8 @@ impl App {
             bg_rx: bg.1,
             pending_wt: None,
             wt_close: None,
+            retired: Vec::new(),
+            retired_poll: None,
             gsearch: None,
             notice: None,
             toasts: Default::default(),
@@ -2103,7 +2107,17 @@ impl App {
     fn close_session(&mut self, id: u64) {
         self.hide_pane(id);
         self.detached.retain(|d| *d != id);
-        self.entries.remove(&id);
+        // Job mit übrigen Prozessen behalten (#218): Sie handeln weiter als diese Sitzung, mit ihrer Kette.
+        let chain = taint::ancestors(&self.entries, Some(id));
+        if let Some(mut e) = self.entries.remove(&id) {
+            let name = e.display_name();
+            if let Some(s) = e.live.as_mut() {
+                self.retire_job(id, name, s);
+            }
+        }
+        if self.retired.iter().any(|r| r.session == id) {
+            taint::set_retired(id, chain);
+        }
         self.usage.remove(id);
         self.git.remove(id);
         // Agenten-Zuordnung: auf jedem Weg (Knopf, Mittelklick, „alle schließen“, MCP) aufräumen.
@@ -2152,8 +2166,12 @@ impl App {
 
     /// Nur `state.json` schreiben (Sitzungen, Layout, Projekte) – leicht genug für sofortiges Speichern, z. B. wenn sich
     /// eine Agenten-Kette ändert (#152).
+    /// Mit „Sitzungen merken“ aus (seit dem Start) steht dort nur der zugeschnittene Zustand – sonst würde ein Absturz beim
+    /// nächsten Start die Wegwerf-Sitzungen sichern und dabei die einzige echte Sicherung ersetzen (#219).
     fn save_state(&self) {
-        state::save_json(&self.dir.join("state.json"), &self.saved_state());
+        let throwaway = fresh_start::throwaway_run(self.settings.remember_sessions, self.remember_at_start);
+        let s = fresh_start::state_for_disk(self.saved_state(), throwaway, state::persisted_lang(self.settings.language));
+        state::save_json(&self.dir.join("state.json"), &s);
     }
 
     /// Inhalt von `state.json` (Sitzungen, Projekte mit dem aktuellen Layout, Fenster).
@@ -2377,7 +2395,9 @@ impl App {
     fn central(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Dialog „Neuer Chat“ offen: Terminals und Chat-Eingaben dahinter bekommen keine Tasten (Enter gehört dem Dialog).
         // Ebenso die Rückfrage „Schließen“: kein Terminal hält den Fokus (der liegt auf „Abbrechen“), Esc/Enter gehören ihr.
-        if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) {
+        // Die Rückfrage vor dem Einfügen mehrerer Zeilen zeichnet erst nach den Terminals: ohne das bekäme das Terminal
+        // im ersten Bild noch Tasten (#217).
+        if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) || self.paste_ask_here(None) {
             models_ui::release_focus(ctx);
         }
         let theme = self.theme();
@@ -2454,12 +2474,8 @@ impl App {
         if self.broadcast {
             let data = self.entries.get(&self.focused).and_then(|e| e.live.as_ref()).map(|s| s.take_tee()).unwrap_or_default();
             if !data.is_empty() {
-                let mut leaves = Vec::new();
-                if let Some(l) = &self.layout {
-                    l.leaves(&mut leaves);
-                }
-                // Tasten je Ziel mit dessen Modus kodieren (kitty, win32-input-mode, Cursor-Tasten).
-                for id in leaves.into_iter().filter(|i| *i != self.focused) {
+                // Tasten je Ziel mit dessen Modus kodieren (kitty, win32-input-mode, Cursor-Tasten, Bracketed Paste).
+                for id in self.broadcast_targets() {
                     if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
                         let bytes = crate::vtkeys::TeeInput::encode_all(&data, s.key_mode());
                         if !bytes.is_empty() {
@@ -2469,6 +2485,16 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Ziele des Broadcasts: alle Bereiche im Layout außer dem fokussierten.
+    pub(super) fn broadcast_targets(&self) -> Vec<u64> {
+        let mut leaves = Vec::new();
+        if let Some(l) = &self.layout {
+            l.leaves(&mut leaves);
+        }
+        leaves.retain(|i| *i != self.focused);
+        leaves
     }
 
     /// Ordner für Git-Abfrage und Transkript-Suche aktuell halten (alle 2 s).
@@ -3171,7 +3197,7 @@ impl App {
             return;
         }
         match a {
-            Action::PasteAsk(id, text, detached) => self.ask_paste(id, text, detached),
+            Action::PasteAsk(id, text, detached, check_targets) => self.ask_paste(id, text, detached, check_targets),
             Action::ToggleFiles => self.files_open = !self.files_open,
             Action::Cycle(d) => self.cycle(d),
             Action::JumpCmd(d) => {
@@ -3616,10 +3642,27 @@ impl App {
                 self.new_dialog = Some(d);
             }
             Action::FolderRestartAll(path) => {
+                // Wie „Neu laden“ (#213): Hat eine beendete Sitzung noch Hintergrundprozesse im Job, wird erst gefragt
+                // (eine Rückfrage zur Zeit; weitere solche Sitzungen bleiben und werden gemeldet).
+                let mut skipped = 0;
                 for id in self.folder_sessions(&path) {
-                    if self.entries.get(&id).is_some_and(|e| !e.is_chat() && e.exited()) {
-                        self.apply(ctx, Action::Restart(id));
+                    if !self.entries.get(&id).is_some_and(|e| !e.is_chat() && e.exited()) {
+                        continue;
                     }
+                    if self.lingering_of(&[id]).is_empty() {
+                        self.apply(ctx, Action::Restart(id));
+                    } else if self.reload_ask.is_none() {
+                        self.request_reload(ctx, id);
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                if skipped > 0 {
+                    let lang = self.settings.language;
+                    self.notify_text(match lang {
+                        Lang::De => format!("{skipped} weitere beendete Sitzung(en) mit Hintergrundprozessen nicht neu gestartet – bitte einzeln neu starten."),
+                        Lang::En => format!("{skipped} more ended session(s) with background processes not restarted – please restart them one by one."),
+                    });
                 }
             }
             Action::CloseAll(scope) => self.request_close_many(scope),
@@ -3638,6 +3681,11 @@ impl App {
             Action::Restart(id) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {} // ein Chat hat keinen Prozess
             Action::Restart(id) => {
                 if let Some(mut e) = self.entries.remove(&id) {
+                    // Alten Job mit übrigen Prozessen behalten (#218, #213), dann erst die alte Shell beenden.
+                    let name = e.display_name();
+                    if let Some(s) = e.live.as_mut() {
+                        self.retire_job(id, name, s);
+                    }
                     e.live = None;
                     self.spawn_into(ctx, &mut e, Launch { restore: false, restart: true, continue_last: false, prompt: None, resume_id: None });
                     self.entries.insert(id, e);
@@ -3692,7 +3740,9 @@ impl App {
                     .and_then(|e| e.meta.worktree.as_ref())
                     .map(|w| gitops::status(std::path::Path::new(&w.path)).map(|c| c.len()).unwrap_or(0))
                     .unwrap_or(0);
-                self.wt_close = Some(WtClose { id, changes, discard: false });
+                // Hintergrundprozesse im Job (#213): auch hier nennen; sie können den Ordner belegt halten.
+                let lingering = self.lingering_of(&[id]);
+                self.wt_close = Some(WtClose { id, changes, discard: false, lingering, end_jobs: false });
             }
             Action::RequestClose(id) => {
                 // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft). Hintergrundprozesse
@@ -3768,6 +3818,7 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.poll_mcp(ctx);
+        self.poll_retired(ctx);
         crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);
         if crate::conpty::take_fallback_hint() {
@@ -4278,8 +4329,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
             let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
-            if let Some(text) = session.take_paste_ask() {
-                cx.actions.push(Action::PasteAsk(id, text, cx.detached));
+            if let Some((text, check_targets)) = session.take_paste_ask() {
+                cx.actions.push(Action::PasteAsk(id, text, cx.detached, check_targets));
             }
             if session.search.is_some() && search_bar(ui, session, body, lang) {
                 session.search = None;
@@ -4296,8 +4347,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                 ui.scope_builder(UiBuilder::new().max_rect(bar.shrink2(Vec2::new(8.0, 3.0))), |ui| {
                     ui.horizontal(|ui| {
                         ui.colored_label(Color32::from_gray(220), lang.t("Prozess beendet.", "Process exited."));
+                        // Wie „Neu laden“: mit Hintergrundprozessen im Job erst fragen (#213).
                         if ui.button(lang.t("Neu starten", "Restart")).clicked() {
-                            cx.actions.push(Action::Restart(id));
+                            cx.actions.push(Action::RequestReload(id));
                         }
                     });
                 });
@@ -4309,7 +4361,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             ui.scope_builder(UiBuilder::new().max_rect(body.shrink(12.0)), |ui| {
                 ui.colored_label(Color32::LIGHT_RED, format!("{}: {msg}", lang.t("Start fehlgeschlagen", "Failed to start")));
                 if ui.button(lang.t("Neu starten", "Restart")).clicked() {
-                    cx.actions.push(Action::Restart(id));
+                    cx.actions.push(Action::RequestReload(id));
                 }
             });
         }
@@ -4565,7 +4617,7 @@ fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
     {
         use std::os::windows::process::CommandExt;
         // WSL-Pfade ungeprüft (keine Prüfung im UI-Thread); sonst nur vorhandene Ordner.
-        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || std::path::Path::new(c).is_dir()));
+        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || crate::pathfmt::dir_exists_quick(c, std::time::Duration::from_millis(400)) == Some(true)));
         let ok = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
             .creation_flags(0x0800_0000)

@@ -82,7 +82,7 @@ pub fn plan_transition(conn: &Connection, t: &Ticket, to: i64, provided: &[(i64,
         touched.push(*fid);
     }
     if let Some(tr) = &transition {
-        if !evaluate_conditions(&tr.def.conditions, &|id| effective.get(&id).cloned()) {
+        if !evaluate_conditions(&tr.def.conditions, &|id| effective.get(&id).cloned(), fields.iter().find(|f| f.is_due()).map(|f| f.id)) {
             return Err(TicketError::ConditionsNotMet);
         }
         for sv in &tr.def.set_values {
