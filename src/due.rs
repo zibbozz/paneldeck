@@ -61,6 +61,7 @@ impl MarkerFrame {
         }
     }
 
+    #[cfg(test)]
     pub fn parse(s: &str) -> Option<MarkerFrame> {
         MarkerFrame::ALL.into_iter().find(|m| m.as_str().eq_ignore_ascii_case(s.trim()))
     }
@@ -154,6 +155,7 @@ pub enum ThresholdProblem {
 }
 
 impl ThresholdProblem {
+    #[cfg(test)]
     pub const ALL: [ThresholdProblem; 6] = [ThresholdProblem::TooMany, ThresholdProblem::Duration, ThresholdProblem::Duplicate, ThresholdProblem::Color, ThresholdProblem::Symbol, ThresholdProblem::Name];
 
     pub fn message(self, lang: Lang) -> &'static str {
@@ -259,6 +261,7 @@ pub fn parse_input(s: &str) -> Result<Option<String>, ()> {
 }
 
 /// Ist der Text eine gültige gespeicherte Fälligkeit (`JJJJ-MM-TT` oder `JJJJ-MM-TTTHH:MM[:SS]`)?
+#[cfg(test)]
 pub fn is_valid(stored: &str) -> bool {
     parse_stored(stored).is_some()
 }
