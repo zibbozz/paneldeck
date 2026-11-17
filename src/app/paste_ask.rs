@@ -1,6 +1,8 @@
 //! Rückfrage vor dem Einfügen mehrerer Zeilen (#183, wie Windows Terminal): Ohne Bracketed Paste (DECSET 2004) führt
 //! die Shell jede Zeile eines eingefügten Textes sofort aus. Abschaltbar über `Settings::warn_multiline_paste`
-//! (Standard an). Programme mit Bracketed Paste (PSReadLine, bash/zsh, Claude Code) bekommen den Text ohne Rückfrage.
+//! (Standard an). Programme mit Bracketed Paste (PSReadLine, bash/zsh, Claude Code) bekommen den Text ohne Rückfrage –
+//! außer im Broadcast, wenn ein Zielbereich kein Bracketed Paste hat und die Zeilen ausführen würde (#220; geprüft erst
+//! beim Einfügen, `App::ask_paste`).
 //!
 //! Ablauf: `Session::paste_user` hält den Text zurück, `show_pane` holt ihn ab (`Action::PasteAsk`), der Dialog
 //! erscheint in dem Fenster, in dem eingefügt wurde (Hauptfenster, weiteres Fenster oder abgedockte Sitzung).
@@ -50,6 +52,12 @@ pub(super) fn preview(text: &str) -> String {
     out.join("\n")
 }
 
+/// Rückfrage zeigen? Ohne `check_targets` immer (die Sitzung selbst hat kein Bracketed Paste); sonst nur, wenn ein
+/// Broadcast-Ziel keins hat – die Ziele werden erst dann abgefragt (`targets_unbracketed`, sperrt jede Emulation).
+fn must_ask(check_targets: bool, targets_unbracketed: impl FnOnce() -> bool) -> bool {
+    !check_targets || targets_unbracketed()
+}
+
 /// Gehört die Rückfrage `ask` in das gerade gezeichnete Fenster? `viewport` = Id der abgedockten Sitzung, deren Fenster
 /// gezeichnet wird (`None` = Hauptfenster oder weiteres Fenster `cur`); `detached` = die Sitzung ist (noch) abgedockt.
 fn ask_is_here(ask: &PasteAsk, detached: bool, cur: u64, viewport: Option<u64>) -> bool {
@@ -61,8 +69,18 @@ fn ask_is_here(ask: &PasteAsk, detached: bool, cur: u64, viewport: Option<u64>) 
 }
 
 impl App {
-    /// Text aus `Session::paste_user` übernehmen (aus `apply`, im Fenster des Bereichs).
-    pub(super) fn ask_paste(&mut self, id: u64, text: String, detached: bool) {
+    /// Text aus `Session::paste_user` übernehmen (aus `apply`, im Fenster des Bereichs). `check_targets`: Die Sitzung
+    /// selbst hat Bracketed Paste, gefragt wird nur, wenn ein Broadcast-Ziel keins hat – sonst sofort einfügen.
+    pub(super) fn ask_paste(&mut self, id: u64, text: String, detached: bool, check_targets: bool) {
+        let ask = must_ask(check_targets, || {
+            self.broadcast && self.broadcast_targets().iter().any(|i| self.entries.get(i).and_then(|e| e.live.as_ref()).is_some_and(|s| !s.bracketed_paste()))
+        });
+        if !ask {
+            if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
+                s.paste_now(&text);
+            }
+            return;
+        }
         self.paste_ask = Some(PasteAsk { id, text, win: self.wins.cur, detached, since: std::time::Instant::now() });
     }
 
@@ -141,8 +159,12 @@ mod tests {
     fn broadcast_targets_without_bracketed_paste_ask_too() {
         use crate::terminal::paste_needs_ask;
         assert!(paste_needs_ask("a\nb", false, true, false));
-        assert!(!paste_needs_ask("a\nb", true, true, false), "Bracketed Paste ohne Ziele: keine Rückfrage");
-        assert!(paste_needs_ask("a\nb", true, true, true), "ein Ziel ohne Bracketed Paste führte die Zeilen aus");
+        assert!(!paste_needs_ask("a\nb", true, true, false), "Bracketed Paste ohne Broadcast: keine Rückfrage");
+        assert!(paste_needs_ask("a\nb", true, true, true), "im Broadcast entscheiden die Ziele");
+        // Die Ziele werden erst beim Einfügen und nur bei Bedarf abgefragt.
+        assert!(must_ask(false, || panic!("ohne check_targets nicht abfragen")));
+        assert!(must_ask(true, || true), "ein Ziel ohne Bracketed Paste führte die Zeilen aus");
+        assert!(!must_ask(true, || false), "alle Ziele mit Bracketed Paste: sofort einfügen");
         assert!(!paste_needs_ask("a\nb", false, false, true), "abgeschaltet");
         assert!(!paste_needs_ask("cmd\n", true, true, true), "eine Zeile mit Zeilenende bekommt das Ziel ohne Ende");
         assert!(!paste_needs_ask("eine Zeile", false, true, true));

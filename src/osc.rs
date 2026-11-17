@@ -162,7 +162,9 @@ impl OscScanner {
 
 /// Höchstlänge des Inhalts einer OSC-Sequenz, den die Emulation zu sehen bekommt (#212). vte 0.15 puffert ein OSC
 /// (mit `std`) ohne Grenze; ein nie beendetes OSC (`printf '\e]0;'; yes`) füllte den Speicher, bis der Hub abstürzt.
-/// Groß genug für OSC 52 bis `terminal::OSC52_MAX_BYTES` (Base64 plus Kopf), damit dort weiter die Warnung kommt.
+/// Groß genug für OSC 52 bis `terminal::OSC52_MAX_BYTES` (Base64 plus Kopf), damit dort weiter die Warnung „zu groß“
+/// kommt. Die Warnung gibt es nur bis zu dieser Grenze: Ein OSC 52 mit mehr als 2 MiB Inhalt (Base64) wird gekürzt und
+/// still verworfen, ohne Warnung.
 pub const OSC_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Kappt OSC-Sequenzen im Ausgabestrom, bevor vte sie sieht (wie `vtkeys::KittyStackGuard`). Verfolgt nur die

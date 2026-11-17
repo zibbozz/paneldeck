@@ -172,9 +172,10 @@ pub fn user_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 /// Rückfrage vor dem Einfügen (`Session::paste_user`)? Nur mit Einstellung (`warn`), bei mehreren Zeilen und wenn eine
-/// Shell sie ohne Bracketed Paste bekäme: diese Sitzung selbst oder ein Broadcast-Ziel (`targets_unbracketed`, #220).
-pub fn paste_needs_ask(text: &str, bracketed: bool, warn: bool, targets_unbracketed: bool) -> bool {
-    warn && (!bracketed || targets_unbracketed) && paste_line_count(&paste_user_text(text)).is_some()
+/// Shell sie ohne Bracketed Paste bekäme: diese Sitzung selbst oder – im Broadcast (`broadcast`) – vielleicht ein Ziel
+/// (#220; welche Ziele, prüft die App erst dann, `App::ask_paste`).
+pub fn paste_needs_ask(text: &str, bracketed: bool, warn: bool, broadcast: bool) -> bool {
+    warn && (!bracketed || broadcast) && paste_line_count(&paste_user_text(text)).is_some()
 }
 
 /// Zeilen eines eingefügten Textes, wenn er Zeilenumbrüche enthält (sonst `None`): Grundlage der Rückfrage beim
@@ -358,8 +359,6 @@ pub struct Session {
     /// Link unter dem Mauszeiger bei gedrückter Strg-Taste: (Zeile, Start, Ende, Ziel)
     pub hover_link: Option<(usize, usize, usize, String)>,
     tee_on: AtomicBool,
-    /// Broadcast: ein Ziel hat kein Bracketed Paste (`set_tee_targets_unbracketed`, #220).
-    tee_unbracketed: AtomicBool,
     tee: Mutex<Vec<crate::vtkeys::TeeInput>>,
     /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
     last_activity: Arc<std::sync::atomic::AtomicU64>,
@@ -390,8 +389,8 @@ pub struct Session {
     focus_seen: AtomicU8,
     /// Vor dem Einfügen mehrerer Zeilen ohne Bracketed Paste nachfragen (Einstellung, vom UI-Thread gesetzt).
     paste_warn: AtomicBool,
-    /// Eingefügter Text, der auf die Rückfrage wartet (`take_paste_ask`).
-    paste_ask: Mutex<Option<String>>,
+    /// Eingefügter Text, der auf die Rückfrage wartet, mit `check_targets` (`take_paste_ask`).
+    paste_ask: Mutex<Option<(String, bool)>>,
     /// Theme mit den von Programmen gesetzten Farben (OSC 4/10/11/12) – zwischengespeichert, solange sich Theme und
     /// Farben nicht ändern (`termview`, sonst eine Kopie je Frame).
     pub theme_cache: Mutex<Option<(Theme, Box<Colors>, Theme)>>,
@@ -660,7 +659,6 @@ impl Session {
             mouse_last: None,
             hover_link: None,
             tee_on: AtomicBool::new(false),
-            tee_unbracketed: AtomicBool::new(false),
             tee: Mutex::new(Vec::new()),
             last_activity,
             stale_modes,
@@ -870,12 +868,14 @@ impl Session {
 
     /// Einfügen durch den Nutzer (Strg+V, Rechtsklick): mehrere Zeilen ohne Bracketed Paste warten auf die Rückfrage
     /// (Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“, `take_paste_ask`), alles andere geht sofort.
-    /// Im Broadcast (#220) zählen auch die Ziele: Hat eines kein Bracketed Paste (`set_tee_targets_unbracketed`), kommt
-    /// die Rückfrage auch dann, wenn diese Sitzung selbst Bracketed Paste hat. Gewartet wird mit dem unveränderten Text.
+    /// Im Broadcast (#220) zählen auch die Ziele: Hat diese Sitzung Bracketed Paste, wartet der Text trotzdem mit
+    /// `check_targets` = `true` – die App prüft dann erst die Ziele (`App::ask_paste`) und fügt sofort ein, wenn alle
+    /// Bracketed Paste haben. Gewartet wird mit dem unveränderten Text.
     pub fn paste_user(&self, text: &str) {
         let warn = self.paste_warn.load(Ordering::Relaxed);
-        if paste_needs_ask(text, self.bracketed_paste(), warn, self.tee_on.load(Ordering::Relaxed) && self.tee_unbracketed.load(Ordering::Relaxed)) {
-            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
+        let bracketed = self.bracketed_paste();
+        if paste_needs_ask(text, bracketed, warn, self.tee_on.load(Ordering::Relaxed)) {
+            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some((text.to_string(), bracketed));
             return;
         }
         self.paste_now(text);
@@ -896,14 +896,9 @@ impl Session {
         self.write_input(&user_paste_bytes(text, bracketed), crate::vtkeys::TeeInput::Paste { text: text.to_string(), user: true });
     }
 
-    /// Broadcast (#220): Hat mindestens ein Ziel kein Bracketed Paste? Dann fragt `paste_user` vor mehreren Zeilen auch
-    /// hier (UI-Thread, jedes Frame; nur für die fokussierte Sitzung mit Broadcast von Bedeutung).
-    pub fn set_tee_targets_unbracketed(&self, on: bool) {
-        self.tee_unbracketed.store(on, Ordering::Relaxed);
-    }
-
-    /// Text, der auf die Rückfrage vor dem Einfügen wartet (einmal abholen).
-    pub fn take_paste_ask(&self) -> Option<String> {
+    /// Text, der auf die Rückfrage vor dem Einfügen wartet (einmal abholen), und ob die Rückfrage nur von den
+    /// Broadcast-Zielen abhängt (`check_targets`, siehe `paste_user`).
+    pub fn take_paste_ask(&self) -> Option<(String, bool)> {
         self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 

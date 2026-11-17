@@ -295,7 +295,8 @@ enum Nav {
 #[derive(Clone)]
 enum Action {
     /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
-    PasteAsk(u64, String, bool),
+    /// Sitzung, Text, aus abgedocktem Fenster, Rückfrage nur wegen möglicher Broadcast-Ziele (`Session::take_paste_ask`).
+    PasteAsk(u64, String, bool, bool),
     OpenPalette,
     OpenTemplates,
     OpenCosts,
@@ -2384,15 +2385,10 @@ impl App {
         let lang = self.settings.language;
 
         self.sync_reply_views(ctx);
-        // Broadcast: Ziele ohne Bracketed Paste – dann fragt auch eine fokussierte Sitzung mit Bracketed Paste vor dem
-        // Einfügen mehrerer Zeilen nach (#220).
-        let targets_unbracketed = self.broadcast && self.broadcast_targets().iter().any(|i| self.entries.get(i).and_then(|e| e.live.as_ref()).is_some_and(|s| !s.bracketed_paste()));
         // Broadcast: nur die fokussierte Sitzung zeichnet Eingaben mit.
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
-                let tee = self.broadcast && *id == self.focused;
-                s.set_tee(tee);
-                s.set_tee_targets_unbracketed(tee && targets_unbracketed);
+                s.set_tee(self.broadcast && *id == self.focused);
                 s.set_shift_enter_newline(self.settings.shift_enter_newline_powershell);
             }
         }
@@ -2472,7 +2468,7 @@ impl App {
     }
 
     /// Ziele des Broadcasts: alle Bereiche im Layout außer dem fokussierten.
-    fn broadcast_targets(&self) -> Vec<u64> {
+    pub(super) fn broadcast_targets(&self) -> Vec<u64> {
         let mut leaves = Vec::new();
         if let Some(l) = &self.layout {
             l.leaves(&mut leaves);
@@ -3181,7 +3177,7 @@ impl App {
             return;
         }
         match a {
-            Action::PasteAsk(id, text, detached) => self.ask_paste(id, text, detached),
+            Action::PasteAsk(id, text, detached, check_targets) => self.ask_paste(id, text, detached, check_targets),
             Action::ToggleFiles => self.files_open = !self.files_open,
             Action::Cycle(d) => self.cycle(d),
             Action::JumpCmd(d) => {
@@ -4288,8 +4284,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
             let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
-            if let Some(text) = session.take_paste_ask() {
-                cx.actions.push(Action::PasteAsk(id, text, cx.detached));
+            if let Some((text, check_targets)) = session.take_paste_ask() {
+                cx.actions.push(Action::PasteAsk(id, text, cx.detached, check_targets));
             }
             if session.search.is_some() && search_bar(ui, session, body, lang) {
                 session.search = None;
