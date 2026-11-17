@@ -100,8 +100,8 @@ pub(super) struct McpState {
     pub log: VecDeque<LogEntry>,
     /// Letzter Zugriff (Aktivitätsanzeige).
     pub last: Option<Instant>,
-    /// Sitzungen, die ein Agent angelegt hat (nur diese darf er standardmäßig schließen).
-    created: HashMap<u64, Option<u64>>,
+    /// Sitzungen, die ein Agent angelegt hat (nur diese darf er standardmäßig schließen), mit ihrem Anleger.
+    created: HashMap<u64, Creator>,
     /// Meldung zum Registrieren in Claude Code (Einstellungen).
     pub msg: std::sync::Arc<std::sync::Mutex<String>>,
     next_token: u64,
@@ -117,11 +117,44 @@ impl McpState {
     }
 }
 
-fn forget_created(created: &mut HashMap<u64, Option<u64>>, id: u64) {
+/// Wer eine Sitzung über `create_session` angelegt hat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Creator {
+    /// Ein Agent ohne Hub-Sitzung (`caller == None`).
+    External,
+    /// Der Agent in dieser Hub-Sitzung (Terminal oder Chat).
+    Session(u64),
+    /// Die anlegende Sitzung ist geschlossen: Das Kind gehört keinem Agenten mehr. Bis 2.3.0 wurde daraus „extern“
+    /// (`None`), dann durfte jeder externe Aufrufer es schließen und verknüpfen (#218).
+    Closed,
+}
+
+impl Creator {
+    fn of(caller: Option<u64>) -> Creator {
+        caller.map_or(Creator::External, Creator::Session)
+    }
+    /// Ist `caller` der Anleger?
+    fn is(self, caller: Option<u64>) -> bool {
+        match self {
+            Creator::External => caller.is_none(),
+            Creator::Session(s) => caller == Some(s),
+            Creator::Closed => false,
+        }
+    }
+    /// Anlegende Hub-Sitzung (Feld `parent`).
+    fn parent(self) -> Option<u64> {
+        match self {
+            Creator::Session(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+fn forget_created(created: &mut HashMap<u64, Creator>, id: u64) {
     created.remove(&id);
     for creator in created.values_mut() {
-        if *creator == Some(id) {
-            *creator = None;
+        if *creator == Creator::Session(id) {
+            *creator = Creator::Closed;
         }
     }
 }
@@ -198,10 +231,18 @@ fn planning_log_info(tool: &str, args: &Value) -> String {
     mcp::short(&info, 120)
 }
 
+/// Würde ein nicht zuzuordnender Absender (#152) mit diesem Aufruf einen Agenten starten (#218)? Eine Claude-Sitzung
+/// (`claude`/`prompt`), einen Chat (`kind = "chat"`) oder die MCP-Brücke – das darf er nicht (wie `--open --claude`):
+/// Der neue Agent hätte keine Kette und dürfte in die Herkunft des Absenders schreiben.
+fn orphan_spawn_forbidden(tool: &str, args: &Value) -> bool {
+    let chat = tool == "create_session" && args.get("kind").and_then(|v| v.as_str()).is_some_and(|k| k.trim() == "chat");
+    chat || crate::chat::tools::starts_agent(tool, args).is_some()
+}
+
 /// Darf der Agent diese Sitzung mit einem Ticket verknüpfen? Die eigene Sitzung oder eine, die er selbst angelegt hat
 /// (`created`: Sitzung → Anleger). Es wird nichts ins Terminal geschrieben – die Verknüpfung ist nur ein Datensatz.
-fn terminal_link_allowed(caller: Option<u64>, session: u64, created: &HashMap<u64, Option<u64>>) -> bool {
-    caller == Some(session) || created.get(&session).is_some_and(|creator| *creator == caller)
+fn terminal_link_allowed(caller: Option<u64>, session: u64, created: &HashMap<u64, Creator>) -> bool {
+    caller == Some(session) || created.get(&session).is_some_and(|creator| creator.is(caller))
 }
 
 /// Fehler eines Werkzeugs der Datenschicht in den (Code, Text) der Brücke übersetzen; Einzelheiten hängen am Text.
@@ -594,9 +635,18 @@ impl App {
                     }
                     CreateWait::Proceed(c) => {
                         let checked = (c, distro.clone(), path.clone());
-                        let r = match self.mcp_create(ctx, &p.args, p.caller, Some(checked)) {
-                            CreateStep::Done(r) => r,
-                            CreateStep::Check { .. } => Err(er("internal", "cwd check repeated")),
+                        // Stufe/Regeln erneut prüfen und den Absender wie beim Eingang behandeln (#218).
+                        let r = match self.deferred_access(&p.tool, &p.args, p.caller, p.how) {
+                            Err(e) => Err(e),
+                            Ok(()) => {
+                                self.mcp.unattributable = p.how == "orphan";
+                                let r = match self.mcp_create(ctx, &p.args, p.caller, Some(checked)) {
+                                    CreateStep::Done(r) => r,
+                                    CreateStep::Check { .. } => Err(er("internal", "cwd check repeated")),
+                                };
+                                self.mcp.unattributable = false;
+                                r
+                            }
                         };
                         self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r);
                     }
@@ -617,7 +667,7 @@ impl App {
             let (caller, how) = self.mcp_resolve_caller(&peer, env_caller.zip(caller_key.as_deref()));
             self.mcp.last = Some(Instant::now());
             // Stufe und Modus hier noch einmal prüfen: sie können sich zwischen Verbindung und UI geändert haben.
-            let out = match mcp::check_access(&tool, self.settings.mcp_level, self.plan.expert) {
+            let out = match self.external_access(&tool, &args, how) {
                 Err(e) => Out::Now(Err(e)),
                 Ok(()) => {
                     // Nicht zuzuordnender (losgelöster) Absender: gilt für die Prüfungen dieses Aufrufs (`chain_blocked`).
@@ -674,10 +724,35 @@ impl App {
         if super::taint::write_forbidden(&self.entries, caller, id) {
             return Some(super::taint::chain_error());
         }
-        if self.mcp.unattributable && super::taint::potential_ancestor(&self.entries, id) {
+        if self.mcp.unattributable && super::taint::orphan_target_forbidden(&self.entries, id) {
             return Some(super::taint::orphan_error());
         }
         None
+    }
+
+    /// Zugriff eines externen Agenten (über die Brücke): Stufe und Modus (`mcp::check_access`) und – für einen nicht
+    /// zuzuordnenden Absender (`how == "orphan"`) – kein Start eines Agenten (#218, wie `paneldeck --open --claude`).
+    fn external_access(&self, tool: &str, args: &Value, how: &str) -> Result<(), (String, String)> {
+        mcp::check_access(tool, self.settings.mcp_level, self.plan.expert)?;
+        if how == "orphan" && orphan_spawn_forbidden(tool, args) {
+            return Err(super::taint::orphan_error());
+        }
+        Ok(())
+    }
+
+    /// Darf ein zurückgestelltes `create_session` (Linux-`cwd`, Ordnerprüfung in WSL) jetzt noch laufen (#218)? Stufe,
+    /// Modus und Regeln werden wie beim Eingang erneut geprüft – sie können sich während der Prüfung geändert haben:
+    /// externe Agenten über [`App::external_access`], ein Chat über die Werkzeug-Regeln seines Modells (Stufe, gesperrte
+    /// Werkzeuge, Umweg- und Start-Schutz der Kette).
+    fn deferred_access(&self, tool: &str, args: &Value, caller: Option<u64>, how: &str) -> Result<(), (String, String)> {
+        if how != "chat" {
+            return self.external_access(tool, args, how);
+        }
+        let Some(chat) = caller.filter(|c| self.entries.get(c).is_some_and(|e| e.is_chat())) else {
+            return Err(er("not_found", tr("Der Chat, der die Sitzung anlegen wollte, ist geschlossen.", "The chat that wanted to create the session is closed.")));
+        };
+        let call = crate::chat::store::ToolCall { id: String::new(), name: tool.to_string(), arguments: args.clone() };
+        self.chat_policy(chat).check(&call).map(|_| ()).map_err(|(_, msg)| er("forbidden", msg))
     }
 
     fn mcp_finish(&mut self, reply: &SyncSender<R>, tool: &str, args: &Value, caller: Option<u64>, how: &str, r: R) {
@@ -955,7 +1030,7 @@ impl App {
         };
         let Some(e) = self.entries.get(&id) else { return json!({"session": null, "identified_by": "none"}) };
         let project = self.projects.iter().find(|p| p.id == e.meta.project).map(|p| p.name.clone()).unwrap_or_default();
-        let children: Vec<u64> = self.mcp.created.iter().filter(|(_, c)| **c == Some(id)).map(|(k, _)| *k).filter(|k| self.entries.contains_key(k)).collect();
+        let children: Vec<u64> = self.mcp.created.iter().filter(|(_, c)| **c == Creator::Session(id)).map(|(k, _)| *k).filter(|k| self.entries.contains_key(k)).collect();
         let mut v = json!({
             "session": id,
             "identified_by": public_how(how),
@@ -1012,7 +1087,7 @@ impl App {
                     "cost_usd": usage.as_ref().map(|u| (u.cost() * 100.0).round() / 100.0),
                     "git": git.map(|g| json!({"branch": g.branch, "changed_files": g.changed})),
                     "created_by_agent": self.mcp.created.contains_key(id),
-                    "parent": self.mcp.created.get(id).and_then(|c| *c),
+                    "parent": self.mcp.created.get(id).and_then(|c| c.parent()),
                     "agent_chain": super::taint::ancestors(&self.entries, Some(*id)),
                     "you": caller == Some(*id),
                     "error": e.error,
@@ -1232,7 +1307,7 @@ impl App {
             self.close_session(id);
             return Err(er("spawn_failed", err));
         }
-        self.mcp.created.insert(id, caller);
+        self.mcp.created.insert(id, Creator::of(caller));
         self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
         let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
@@ -1278,7 +1353,7 @@ impl App {
         let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
         let group = self.mcp_child_group(s("group"), caller);
         let id = self.new_session(ctx, NewOpts { cwd, name: s("name"), group, quiet: true, window: Some(window), project: Some(project), chat: Some(meta.clone()), ..NewOpts::default() });
-        self.mcp.created.insert(id, caller);
+        self.mcp.created.insert(id, Creator::of(caller));
         self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
         let server = self.settings.llm_servers.iter().find(|x| x.id == meta.server).map(|x| x.name.clone()).unwrap_or_default();
@@ -1682,7 +1757,7 @@ impl App {
 
     fn mcp_close(&mut self, args: &Value, caller: Option<u64>) -> R {
         let id = self.mcp_target(args, caller, true)?;
-        let mine = self.mcp.created.get(&id).is_some_and(|creator| *creator == caller);
+        let mine = self.mcp.created.get(&id).is_some_and(|creator| creator.is(caller));
         if !mine && !self.settings.mcp_close_any {
             return Err(er("forbidden", tr("Ein Agent darf nur Sitzungen schließen, die er selbst angelegt hat (Einstellungen → Agenten → „Agenten dürfen auch fremde Sitzungen schließen“ erlaubt mehr).", "An agent may only close sessions it created itself (Settings → Agents → “Agents may also close other sessions” allows more).")));
         }
@@ -2108,18 +2183,40 @@ mod tests {
 
     #[test]
     fn closing_a_session_forgets_it_and_orphans_its_children() {
-        let mut created: HashMap<u64, Option<u64>> = HashMap::new();
-        created.insert(5, Some(2)); // Kind von 2
-        created.insert(6, Some(2));
-        created.insert(2, None); // 2 selbst von einem externen Agenten angelegt
-        created.insert(7, Some(3));
+        let mut created: HashMap<u64, Creator> = HashMap::new();
+        created.insert(5, Creator::Session(2)); // Kind von 2
+        created.insert(6, Creator::Session(2));
+        created.insert(2, Creator::External); // 2 selbst von einem externen Agenten angelegt
+        created.insert(7, Creator::Session(3));
         forget_created(&mut created, 2);
         assert!(!created.contains_key(&2));
-        assert_eq!((created[&5], created[&6], created[&7]), (None, None, Some(3)));
+        assert_eq!((created[&5], created[&6], created[&7]), (Creator::Closed, Creator::Closed, Creator::Session(3)));
+        // #218: Die Kinder gehören danach niemandem – auch keinem externen Aufrufer (`caller == None`).
+        for caller in [None, Some(2), Some(3)] {
+            assert!(!created[&5].is(caller), "{caller:?}");
+            assert!(!terminal_link_allowed(caller, 5, &created), "{caller:?}");
+        }
+        assert!(!created[&5].is(Some(5)), "die Sitzung ist nicht ihr eigener Anleger");
+        assert_eq!(created[&5].parent(), None);
+        assert!(created[&7].is(Some(3)) && !created[&7].is(None));
         let mut st = McpState::default();
-        st.created.insert(9, Some(1));
+        st.created.insert(9, Creator::Session(1));
         st.session_closed(9);
         assert!(st.created.is_empty());
+    }
+
+    #[test]
+    fn unattributable_callers_cannot_start_agents() {
+        assert!(orphan_spawn_forbidden("create_session", &json!({"claude": true})));
+        assert!(orphan_spawn_forbidden("create_session", &json!({"prompt": "hi"})));
+        assert!(orphan_spawn_forbidden("create_session", &json!({"kind": " chat ", "model": "m"})));
+        assert!(orphan_spawn_forbidden("run_command", &json!({"session": 1, "command": "paneldeck.exe mcp"})));
+        assert!(orphan_spawn_forbidden("send_text", &json!({"session": 1, "text": "C:/x/Paneldeck mcp --profile p"})));
+        // Ein einfaches Terminal (wie `--open` ohne `--claude`) und gewöhnliche Befehle bleiben erlaubt.
+        assert!(!orphan_spawn_forbidden("create_session", &json!({})));
+        assert!(!orphan_spawn_forbidden("create_session", &json!({"kind": "terminal", "claude": false})));
+        assert!(!orphan_spawn_forbidden("run_command", &json!({"session": 1, "command": "dir"})));
+        assert!(!orphan_spawn_forbidden("list_sessions", &json!({})));
     }
 
     #[test]
@@ -2134,10 +2231,10 @@ mod tests {
 
     #[test]
     fn terminal_links_only_for_own_or_self_created_sessions() {
-        let mut created: HashMap<u64, Option<u64>> = HashMap::new();
-        created.insert(8, Some(3));
-        created.insert(9, Some(4));
-        created.insert(10, None);
+        let mut created: HashMap<u64, Creator> = HashMap::new();
+        created.insert(8, Creator::of(Some(3)));
+        created.insert(9, Creator::of(Some(4)));
+        created.insert(10, Creator::of(None));
         // eigene Sitzung
         assert!(terminal_link_allowed(Some(3), 3, &created));
         // selbst angelegt

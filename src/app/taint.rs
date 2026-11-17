@@ -135,14 +135,21 @@ pub(super) fn potential_ancestor(entries: &BTreeMap<u64, Entry>, id: u64) -> boo
     entries.values().any(|e| e.meta.agent_chain.contains(&id) || e.chat.as_ref().is_some_and(|c| c.origin_sessions.contains(&id)))
 }
 
-/// Fehler für einen nicht zuzuordnenden Absender (losgelöster Prozess), der in einen möglichen Vorfahren schreiben will
-/// oder `--open --claude` aufruft.
+/// Darf ein nicht zuzuordnender Absender (losgelöster Prozess, #152) nicht in `id` schreiben? Nicht in mögliche
+/// Vorfahren und – seit 2.3.1 (#218) – nicht in Agenten (Claude-Sitzung, Chat): die arbeiteten sonst ohne Kette für
+/// ihn weiter und könnten in seine Herkunft zurückschreiben.
+pub(super) fn orphan_target_forbidden(entries: &BTreeMap<u64, Entry>, id: u64) -> bool {
+    potential_ancestor(entries, id) || entries.get(&id).is_some_and(|e| e.is_chat() || e.is_claude() || e.meta.claude || e.hook_seen)
+}
+
+/// Fehler für einen nicht zuzuordnenden Absender (losgelöster Prozess), der in einen möglichen Vorfahren oder einen
+/// Agenten schreiben, einen Agenten starten oder `--open --claude` aufrufen will.
 pub(super) fn orphan_error() -> (String, String) {
     (
         "forbidden".to_string(),
         state::t(
-            "Der aufrufende Prozess lässt sich keiner Sitzung zuordnen (losgelöst von seiner Shell gestartet) – er darf nicht in Sitzungen schreiben, die zu einer Agenten-Kette gehören.",
-            "The calling process cannot be attributed to a session (it was started detached from its shell) – it must not write into sessions that belong to an agent chain.",
+            "Der aufrufende Prozess lässt sich keiner Sitzung zuordnen (losgelöst von seiner Shell gestartet) – er darf weder in Sitzungen einer Agenten-Kette, Claude-Sitzungen oder Chats schreiben noch Claude-Sitzungen oder Chats starten.",
+            "The calling process cannot be attributed to a session (it was started detached from its shell) – it must not write into sessions of an agent chain, Claude sessions or chats, nor start Claude sessions or chats.",
         )
         .to_string(),
     )
@@ -403,5 +410,22 @@ mod tests {
         let (code, msg) = chain_error();
         assert_eq!(code, "forbidden");
         assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn unattributable_callers_cannot_write_into_agents() {
+        // 1 einfaches Terminal, 2 Chat, 3 Claude-Sitzung, 4 Terminal mit Claude für den nächsten Start, 5 Terminal, in dem
+        // Claude von Hand gestartet wurde (Hooks), 6 Vorfahr einer Kette (von 7).
+        let mut w = world(&[(1, false), (2, true), (3, false), (4, false), (5, false), (6, false), (7, false)]);
+        w.get_mut(&3).unwrap().launched_claude = true;
+        w.get_mut(&4).unwrap().meta.claude = true;
+        w.get_mut(&5).unwrap().hook_seen = true;
+        member(&mut w, 7, &[6]);
+        assert!(!orphan_target_forbidden(&w, 1), "einfaches Terminal");
+        assert!(!orphan_target_forbidden(&w, 7), "Glied einer Kette, aber kein Vorfahr und kein Agent");
+        for id in [2, 3, 4, 5, 6] {
+            assert!(orphan_target_forbidden(&w, id), "{id}");
+        }
+        assert_eq!(orphan_error().0, "forbidden");
     }
 }
