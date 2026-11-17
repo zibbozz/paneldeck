@@ -247,6 +247,20 @@ pub struct Settings {
     /// begrenzt (`wsl::RECENT_MAX`). Fehlt in älteren Dateien; Unlesbares/Ungültiges wird beim Laden verworfen.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "lenient_wsl_recent")]
     pub wsl_recent: std::collections::BTreeMap<String, Vec<String>>,
+    /// Benachrichtigungen von Programmen (OSC 9 / OSC 777;notify) anzeigen – nur für nicht angesehene Sitzungen, über die
+    /// üblichen Wege (Toast/Blinken laut `notify_*`), begrenzt (seit 2.3.0, #183, Standard an). Fehlt in älteren Dateien (an).
+    #[serde(deserialize_with = "lenient_true")]
+    pub program_notify: bool,
+    /// Glocke (BEL) einer nicht angesehenen Sitzung wie eine Benachrichtigung behandeln (seit 2.3.0, #183, Standard an).
+    #[serde(deserialize_with = "lenient_true")]
+    pub bell_notify: bool,
+    /// Fortschritt von Programmen (OSC 9;4) in Seitenleiste und Taskleiste zeigen (seit 2.3.0, #183, Standard an).
+    #[serde(deserialize_with = "lenient_true")]
+    pub progress_indicator: bool,
+    /// Blinkender Cursor, wenn das Programm ihn anfordert (DECSCUSR 1/3/5, `CSI ? 12 h`); nur im fokussierten Terminal
+    /// (seit 2.3.0, #183, Standard an).
+    #[serde(deserialize_with = "lenient_true")]
+    pub cursor_blink: bool,
 }
 
 /// Tolerant lesen: nur `false` schaltet aus, alles andere (auch ein falscher Typ) ist `true`.
@@ -333,6 +347,10 @@ impl Default for Settings {
             claude_bypass_dropped: false,
             bundled_conpty: true,
             wsl_recent: Default::default(),
+            program_notify: true,
+            bell_notify: true,
+            progress_indicator: true,
+            cursor_blink: true,
         }
     }
 }
@@ -1120,6 +1138,19 @@ mod tests {
         assert_eq!(j["osc52_copy"], false);
         let back: Settings = serde_json::from_value(j).unwrap();
         assert!(!back.osc52_copy);
+    }
+
+    #[test]
+    fn vt_render_settings_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne die Felder): alles an; ein falscher Typ ergibt ebenfalls an, nur `false` schaltet aus.
+        let s: Settings = serde_json::from_str(r#"{"language":"En"}"#).unwrap();
+        assert!(s.program_notify && s.bell_notify && s.progress_indicator && s.cursor_blink);
+        let s: Settings = serde_json::from_str(r#"{"program_notify":"no","bell_notify":false,"progress_indicator":1,"cursor_blink":false}"#).unwrap();
+        assert!(s.program_notify && !s.bell_notify && s.progress_indicator && !s.cursor_blink);
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!((j["bell_notify"].as_bool(), j["cursor_blink"].as_bool(), j["program_notify"].as_bool()), (Some(false), Some(false), Some(true)));
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(!back.bell_notify && !back.cursor_blink);
     }
 
     #[test]

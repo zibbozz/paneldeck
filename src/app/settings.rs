@@ -169,13 +169,38 @@ impl App {
                         row(ui, lang.t("Animationen", "Animations"), lang.t("Weiche Übergänge bei Hover, Fokus und Panels", "Smooth transitions for hover, focus and panels"), |ui| {
                             style::toggle(ui, &mut self.settings.animations);
                         });
-                        row(ui, lang.t("Terminalschrift", "Terminal font"), lang.t("Systemschriften nur, wenn installiert", "System fonts only if installed"), |ui| {
-                            egui::ComboBox::from_id_salt("termfont").selected_text(self.settings.terminal_font.clone()).show_ui(ui, |ui| {
-                                for f in ["Cascadia Mono", "Hack", "Consolas", "Lucida Console", "Courier New"] {
-                                    ui.selectable_value(&mut self.settings.terminal_font, f.to_string(), f);
-                                }
-                            });
-                        });
+                        row(
+                            ui,
+                            lang.t("Terminalschrift", "Terminal font"),
+                            lang.t(
+                                "Jede installierte Festbreitenschrift, z. B. Nerd Fonts. Powerline-, Rahmen- und Blockzeichen zeichnet Paneldeck selbst, damit sie lückenlos anschließen.",
+                                "Any installed monospace font, e.g. Nerd Fonts. Paneldeck draws Powerline, box-drawing and block characters itself so they line up without gaps.",
+                            ),
+                            |ui| {
+                                let builtin = [("Cascadia Mono", lang.t("Cascadia Mono (eingebaut)", "Cascadia Mono (built-in)")), ("Hack", lang.t("Hack (eingebaut)", "Hack (built-in)"))];
+                                let shown = builtin.iter().find(|(k, _)| *k == self.settings.terminal_font).map(|(_, l)| l.to_string()).unwrap_or_else(|| self.settings.terminal_font.clone());
+                                egui::ComboBox::from_id_salt("termfont").selected_text(shown).height(360.0).show_ui(ui, |ui| {
+                                    for (k, l) in builtin {
+                                        ui.selectable_value(&mut self.settings.terminal_font, k.to_string(), l);
+                                    }
+                                    let installed = crate::sysfonts::monospace_families_cached();
+                                    if !installed.is_empty() {
+                                        ui.separator();
+                                    }
+                                    for f in installed.iter().filter(|f| !builtin.iter().any(|(k, _)| k == f)) {
+                                        ui.selectable_value(&mut self.settings.terminal_font, f.clone(), f.as_str());
+                                    }
+                                });
+                            },
+                        );
+                        row(
+                            ui,
+                            lang.t("Blinkender Cursor", "Blinking cursor"),
+                            lang.t("Wenn das Programm es anfordert; nur im fokussierten Terminal", "When the program asks for it; only in the focused terminal"),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.cursor_blink);
+                            },
+                        );
                         row(ui, lang.t("Eigene Themes", "Custom themes"), lang.t("JSON-Dateien im Ordner themes (Beispiel liegt dabei)", "JSON files in the themes folder (example included)"), |ui| {
                             if ui.button(lang.t("Neu laden", "Reload")).clicked() {
                                 self.reload_themes();
@@ -348,6 +373,33 @@ impl App {
                         row(ui, lang.t("Taskleiste blinken", "Flash taskbar"), "", |ui| {
                             style::toggle(ui, &mut self.settings.notify_flash);
                         });
+                        row(
+                            ui,
+                            lang.t("Benachrichtigungen von Programmen", "Notifications from programs"),
+                            lang.t(
+                                "OSC 9 und OSC 777 – nur für Sitzungen, die du gerade nicht ansiehst, höchstens einige pro Minute",
+                                "OSC 9 and OSC 777 – only for sessions you are not looking at, at most a few per minute",
+                            ),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.program_notify);
+                            },
+                        );
+                        row(
+                            ui,
+                            lang.t("Glocke melden", "Report the bell"),
+                            lang.t("Glocke (BEL) einer Sitzung, die du gerade nicht ansiehst, wie eine Benachrichtigung", "A bell (BEL) in a session you are not looking at counts as a notification"),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.bell_notify);
+                            },
+                        );
+                        row(
+                            ui,
+                            lang.t("Fortschritt anzeigen", "Show progress"),
+                            lang.t("Fortschritt von Programmen (OSC 9;4) in der Seitenleiste und in der Taskleiste", "Progress reported by programs (OSC 9;4) in the sidebar and on the taskbar"),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.progress_indicator);
+                            },
+                        );
                     }
                     6 => {
                         let shells: Vec<(String, String)> = self.shells.iter().map(|s| (s.id.clone(), s.label.clone())).collect();

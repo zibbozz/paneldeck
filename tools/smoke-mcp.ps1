@@ -1126,6 +1126,22 @@ c.close()
       $r = Tool 'run_command' @{ session = $c.data.id; command = 'cmd /c exit 4'; timeout_secs = 25 }
       if ($sh -eq 'cmd') { Check 'ConPTY: run_command cmd (Befehl beendet)' ($r.data.finished) $r.text }
       else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text }
+      if ($sh -eq 'powershell') {
+        # Fortschritt (OSC 9;4, #183): list_sessions meldet ihn, der naechste Prompt entfernt ihn wieder. Mit ST statt BEL
+        # beendet, damit keine Glocke (Benachrichtigung) ausgeloest wird.
+        $sid = $c.data.id
+        $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })
+        Check 'OSC 9;4: list_sessions hat das Feld progress (null ohne Fortschritt)' ($me.Count -eq 1 -and ($me[0].PSObject.Properties.Name -contains 'progress') -and $null -eq $me[0].progress) ($me | ConvertTo-Json -Compress)
+        [void](Tool 'send_text' @{ session = $sid; text = '[Console]::Write("$([char]27)]9;4;1;42$([char]27)\"); Start-Sleep 6'; submit = $true })
+        $pg = $null
+        for ($i = 0; $i -lt 40 -and -not $pg; $i++) { Start-Sleep -Milliseconds 150; $pg = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })[0].progress }
+        if ($useBundled -or $pg) {
+          Check "OSC 9;4: list_sessions progress = normal/42 ($want)" ($pg.state -eq 'normal' -and $pg.percent -eq 42) ($pg | ConvertTo-Json -Compress)
+          $gone = $false
+          for ($i = 0; $i -lt 60 -and -not $gone; $i++) { Start-Sleep -Milliseconds 200; $gone = $null -eq @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })[0].progress }
+          Check 'OSC 9;4: Fortschritt nach dem naechsten Prompt entfernt' $gone
+        } else { Skip 'OSC 9;4: list_sessions progress' 'ConPTY von Windows reicht OSC 9;4 nicht durch' }
+      }
     }
     # Git Bash und Vollbildprogramme (alternativer Bildschirm) ueber die gewaehlte ConPTY.
     if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {

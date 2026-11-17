@@ -3,6 +3,8 @@
 //!  - `ESC ] 9 ; 9 ; "pfad" BEL`      aktueller Ordner (ConEmu/Windows Terminal)
 //!  - `ESC ] 7 ; file://host/pfad BEL` aktueller Ordner (OSC 7)
 //!  - `ESC ] 7777 ; dur=<ms> BEL`      Dauer des letzten Befehls (eigene Erweiterung)
+//!  - `ESC ] 9 ; 4 ; st ; pr BEL`      Fortschritt; `ESC ] 9 ; text BEL` und `ESC ] 777 ; notify ; titel ; text BEL`
+//!    Benachrichtigungen eines Programms (#183, `vtnotify`; keine Shell-Integration)
 //!  - `ESC [ ? 47/1047/1049/1000/1002/1003 h` Programm schaltet Vollbild oder Maus-Modus ein (kein OSC, aber für
 //!    `Session::stale_modes`: ein `1049h` im schon aktiven alternativen Bildschirm ändert keine Modus-Bits)
 //! Die Bytes werden zusätzlich unverändert an die Terminal-Emulation weitergegeben (unbekannte OSC werden dort ignoriert).
@@ -17,6 +19,17 @@ pub enum OscEvent {
     /// DECSET für den alternativen Bildschirm (47/1047/1049) oder einen Maus-Modus (1000/1002/1003).
     /// Keine Shell-Integration: zählt nicht als `integration_seen`.
     FullscreenModeSet,
+    /// Fortschritt (OSC 9;4, `None` = entfernen; siehe `vtnotify`). Keine Shell-Integration.
+    Progress(Option<crate::vtnotify::Progress>),
+    /// Benachrichtigung eines Programms (OSC 9 / OSC 777;notify), schon bereinigt. Keine Shell-Integration.
+    Notify { title: String, body: String },
+}
+
+impl OscEvent {
+    /// Meldung eines Programms (Fortschritt/Benachrichtigung, #183) statt der Shell-Integration.
+    pub fn is_program_message(&self) -> bool {
+        matches!(self, OscEvent::Progress(_) | OscEvent::Notify { .. })
+    }
 }
 
 /// Private Modi, deren Einschalten ein Vollbildprogramm ankündigt (siehe `OscEvent::FullscreenModeSet`).
@@ -182,6 +195,27 @@ fn parse(payload: &[u8], out: &mut Vec<OscEvent>) {
         if let Ok(ms) = d.trim().parse() {
             out.push(OscEvent::DurationMs(ms));
         }
+    } else if let Some(rest) = s.strip_prefix("9;4").filter(|r| r.is_empty() || r.starts_with(';')) {
+        if let Some(p) = crate::vtnotify::parse_progress(rest) {
+            out.push(OscEvent::Progress(p));
+        }
+    } else if let Some(text) = s.strip_prefix("9;") {
+        // iTerm2-Benachrichtigung; `9;<zahl>;…` sind ConEmu-Befehle (u. a. 9;9 oben), die nie als Text erscheinen.
+        if !crate::vtnotify::is_conemu_command(text) {
+            push_note(out, "", text);
+        }
+    } else if let Some(rest) = s.strip_prefix("777;notify;") {
+        let (title, body) = rest.split_once(';').unwrap_or((rest, ""));
+        push_note(out, title, body);
+    }
+}
+
+/// Bereinigte Benachrichtigung anhängen (leere fallen weg).
+fn push_note(out: &mut Vec<OscEvent>, title: &str, body: &str) {
+    let title = crate::vtnotify::sanitize(title, crate::vtnotify::TITLE_MAX);
+    let body = crate::vtnotify::sanitize(body, crate::vtnotify::BODY_MAX);
+    if !title.is_empty() || !body.is_empty() {
+        out.push(OscEvent::Notify { title, body });
     }
 }
 
@@ -263,6 +297,28 @@ mod tests {
         assert_eq!(ev.len(), 1);
         // Netzwerkpfade werden ignoriert
         assert!(s.feed(b"\x1b]9;9;\\\\evil\\share\x07\x1b]7;file://h//evil/share\x07").is_empty());
+    }
+
+    #[test]
+    fn progress_and_notifications() {
+        use crate::vtnotify::{Progress, ProgressState};
+        let mut s = OscScanner::default();
+        let ev = s.feed(b"\x1b]9;4;1;42\x07\x1b]9;4;0;0\x1b\\\x1b]9;4;3\x07\x1b]9;4;9;1\x07");
+        assert_eq!(
+            ev,
+            vec![
+                OscEvent::Progress(Some(Progress { state: ProgressState::Normal, percent: 42 })),
+                OscEvent::Progress(None),
+                OscEvent::Progress(Some(Progress { state: ProgressState::Indeterminate, percent: 0 })),
+            ]
+        );
+        let note = |t: &str, b: &str| OscEvent::Notify { title: t.into(), body: b.into() };
+        let ev = s.feed("\x1b]9;Build fertig\x07\x1b]777;notify;Tests;3 rot\u{202e}\x07\x1b]777;notify;Nur Titel\x07".as_bytes());
+        assert_eq!(ev, vec![note("", "Build fertig"), note("Tests", "3 rot"), note("Nur Titel", "")]);
+        // ConEmu-Befehle sind keine Benachrichtigungen; 9;9 bleibt der Ordner, 9;40 ist kein Fortschritt.
+        let ev = s.feed(b"\x1b]9;1;500\x07\x1b]9;7;calc\x07\x1b]9;9;C:\\x\x07\x1b]9;40\x07\x1b]777;preexec\x07\x1b]777;notify;;\x07");
+        assert_eq!(ev, vec![OscEvent::Cwd("C:\\x".into())]);
+        assert!(OscEvent::Progress(None).is_program_message() && !OscEvent::PromptStart.is_program_message());
     }
 
     #[test]

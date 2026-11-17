@@ -111,6 +111,10 @@ pub struct ShellState {
     pub cwd_seq: u64,
     /// Es kamen schon Meldungen der Shell-Integration (sonst gibt es keine Befehlsgrenzen).
     pub integration_seen: bool,
+    /// Fortschritt laut Programm (OSC 9;4, #183); beim nächsten Prompt-Anfang gelöscht (Programm ohne Aufräumen beendet).
+    pub progress: Option<crate::vtnotify::Progress>,
+    /// Benachrichtigungen von Programmen (OSC 9/777), noch nicht abgeholt; höchstens `NOTES_MAX`.
+    pub notes: Vec<(String, String)>,
     pending_dur: Option<u64>,
     cmd_start: Option<std::time::Instant>,
 }
@@ -129,7 +133,7 @@ pub struct Session {
     child: Mutex<Box<dyn Child + Send + Sync>>,
     title: Arc<Mutex<Option<String>>>,
     exited: Arc<AtomicBool>,
-    #[allow(dead_code)] // wird gesetzt (Event::Bell); eine Anzeige dafür ist noch nicht eingebaut
+    /// Glocke (BEL) seit dem letzten Abholen (`App::poll_vt`).
     pub bell: Arc<AtomicBool>,
     clipboard: Arc<Mutex<ClipboardRequest>>,
     pub cols: u16,
@@ -640,13 +644,17 @@ pub fn next_stale_modes(prev: bool, ev: &OscEvent, mode: alacritty_terminal::ter
     }
 }
 
+/// Höchstzahl wartender Benachrichtigungen je Sitzung (`ShellState::notes`).
+const NOTES_MAX: usize = 8;
+
 fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line: u64) {
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     for ev in events {
-        st.integration_seen |= ev != OscEvent::FullscreenModeSet;
+        st.integration_seen |= ev != OscEvent::FullscreenModeSet && !ev.is_program_message();
         match ev {
             OscEvent::PromptStart => {
                 st.prompt_seq += 1;
+                st.progress = None;
                 if st.marks.last() != Some(&abs_line) {
                     st.marks.push(abs_line);
                     if st.marks.len() > 2000 {
@@ -674,6 +682,13 @@ fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line:
             OscEvent::DurationMs(ms) => st.pending_dur = Some(ms),
             // Kommt nicht von der Shell-Integration; der Lese-Thread wertet es selbst aus (`next_stale_modes`).
             OscEvent::FullscreenModeSet => {}
+            OscEvent::Progress(p) => st.progress = p,
+            OscEvent::Notify { title, body } => {
+                // Eine Flut wird hier schon gekappt (die App begrenzt die Anzeige zusätzlich je Sitzung).
+                if st.notes.len() < NOTES_MAX {
+                    st.notes.push((title, body));
+                }
+            }
         }
     }
 }

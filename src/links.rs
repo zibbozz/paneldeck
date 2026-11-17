@@ -131,6 +131,12 @@ pub fn open(target: &str) -> bool {
     launch(target)
 }
 
+/// URI mit seinem Protokoll-Handler öffnen (OSC-8-Links nach der Rückfrage, `hyperlink::open`), ohne die Prüfung auf
+/// ausführbare Dateiendungen (die gilt für Pfade, nicht für `mailto:`/`vscode:` usw.).
+pub fn launch_uri(uri: &str) {
+    launch(uri);
+}
+
 fn reveal(target: &str) {
     #[cfg(windows)]
     {

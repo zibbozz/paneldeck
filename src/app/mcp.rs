@@ -934,6 +934,8 @@ impl App {
                     "minimized": e.meta.minimized,
                     "window": window,
                     "queue_len": e.meta.queue.len(),
+                    // Fortschritt laut Programm (OSC 9;4): {"state": normal/error/indeterminate/paused, "percent": 0-100}, sonst null.
+                    "progress": e.progress.map(|p| json!({"state": p.state.as_str(), "percent": p.percent})),
                     "cost_usd": usage.as_ref().map(|u| (u.cost() * 100.0).round() / 100.0),
                     "git": git.map(|g| json!({"branch": g.branch, "changed_files": g.changed})),
                     "created_by_agent": self.mcp.created.contains_key(id),

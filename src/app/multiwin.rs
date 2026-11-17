@@ -549,6 +549,11 @@ impl App {
         self.overlay_window() == 0
     }
 
+    /// Weitere Fenster mit bekanntem Fensterhandle: (Fenster-ID, HWND) – für den Fortschritt in der Taskleiste (#183).
+    pub(super) fn extra_hwnds(&self) -> Vec<(u64, isize)> {
+        self.wins.list.iter().filter_map(|w| w.hwnd.map(|h| (w.id, h))).collect()
+    }
+
     /// Fenster, das für eine Sitzung in der Taskleiste blinken soll: ihr abgedocktes Fenster, sonst das Paneldeck-Fenster,
     /// zu dem sie gehört (nicht immer das Hauptfenster).
     pub(super) fn attention_viewport(&self, session: u64) -> egui::ViewportId {
