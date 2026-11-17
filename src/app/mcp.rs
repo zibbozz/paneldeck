@@ -282,7 +282,10 @@ fn cut_start(s: &str, max: usize) -> (String, bool) {
 
 /// Eine Chat-Nachricht für `read_chat`: Inhalt gekürzt (Flag `truncated`), Werkzeugaufrufe, -ergebnisse, Fehler, Hinweis.
 fn chat_msg_json(index: usize, m: &chatmod::ChatMsg) -> Value {
-    chat_msg_json_max(index, m, CHAT_MSG_MAX)
+    // Werkzeug-Ergebnisse sind beim Entstehen schon auf höchstens `MAX_RESULT_BYTES` gekürzt (dort bleibt das Wichtige
+    // erhalten, z. B. bei `read_chat` die neuesten Nachrichten und der Status); hier nicht noch einmal vorn abschneiden.
+    let max = if m.tool_name.is_some() { CHAT_MSG_MAX.max(crate::chat::tools::MAX_RESULT_BYTES) } else { CHAT_MSG_MAX };
+    chat_msg_json_max(index, m, max)
 }
 
 /// Wie [`chat_msg_json`], Inhalt höchstens `max` Bytes (für die neueste Nachricht, wenn das Gesamtbudget knapp ist).
@@ -2211,6 +2214,32 @@ mod tests {
         assert_eq!(v["servers"][1]["host"], "192.168.1.5:1234");
         assert!(v["servers"][2]["models"].as_array().unwrap().is_empty());
         assert!(v["note"].as_str().unwrap().contains("untrusted"));
+    }
+
+    #[test]
+    fn read_chat_keeps_tool_results_up_to_the_result_cap() {
+        use crate::chat::store::{ChatMsg, Role, ToolStatus};
+        // Ein Werkzeug-Ergebnis zwischen 8 KB und MAX_RESULT_BYTES kommt ungekürzt (sein Ende trägt Status/Neuestes).
+        let body = format!("{{\"head\":\"{}\",\"status\":\"ready\"}}", "w".repeat(12_000));
+        let mut file = chatmod::ChatFile::default();
+        file.messages.push(ChatMsg::new(Role::User, "read"));
+        let mut t = ChatMsg::new(Role::Tool, body.clone());
+        t.tool_call_id = Some("c1".into());
+        t.tool_name = Some("read_chat".into());
+        t.status = Some(ToolStatus::Ok);
+        file.messages.push(t);
+        let mut big = ChatMsg::new(Role::Assistant, "x".repeat(12_000));
+        big.note = None;
+        file.messages.push(big);
+        let mut c = ChatState::new(chatmod::ChatFile::default(), None);
+        c.file = file;
+        let v = read_chat_json(&c, 20, "ready");
+        let m = v["messages"].as_array().unwrap();
+        assert_eq!(m[1]["content"].as_str().unwrap(), body);
+        assert!(m[1].get("truncated").is_none());
+        // Normale Nachrichten bleiben bei CHAT_MSG_MAX.
+        assert_eq!(m[2]["truncated"], true);
+        assert!(m[2]["content"].as_str().unwrap().len() <= CHAT_MSG_MAX + 4);
     }
 
     #[test]

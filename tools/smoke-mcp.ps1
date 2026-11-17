@@ -1096,7 +1096,9 @@ c.close()
   $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
   $rc = Tool 'read_chat' @{ session = $C; last = 4 }
   $rt = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_chat' })
-  Check 'read_chat ueber ein Chat-Modell: neueste Nachrichten, more_above und Status statt der aeltesten' ($w.data.matched -eq $true -and $rt.Count -ge 1 -and $rt[-1].status -eq 'ok' -and $rt[-1].content -match 'big-39' -and $rt[-1].content -match '"more_above":true' -and $rt[-1].content -match '"status":"ready"' -and $rt[-1].content -notmatch 'big-00') (($rc.text) -replace '(.{600}).*', '$1')
+  $rtc = if ($rt.Count -ge 1) { [string]$rt[-1].content } else { '' }
+  $diag = 'matched=' + $w.data.matched + ' n=' + $rt.Count + ' b39=' + ($rtc -match 'big-39') + ' more=' + ($rtc -match '"more_above":true') + ' ready=' + ($rtc -match '"status":"ready"') + ' b00=' + ($rtc -match 'big-00') + ' len=' + $rtc.Length + ' tail=' + $(if ($rtc.Length -gt 500) { $rtc.Substring($rtc.Length - 500) } else { $rtc })
+  Check 'read_chat ueber ein Chat-Modell: neueste Nachrichten, more_above und Status statt der aeltesten' ($w.data.matched -eq $true -and $rt.Count -ge 1 -and $rt[-1].status -eq 'ok' -and $rt[-1].content -match 'big-39' -and $rt[-1].content -match '"more_above":true' -and $rt[-1].content -match '"status":"ready"' -and $rt[-1].content -notmatch 'big-00') $diag
   Check 'read_chat: Feld paused (false)' ($rc.data.paused -eq $false -and $rc.data.PSObject.Properties.Name -contains 'pause_note')
   # Stufe des Modells nie gewaehlt: die einmalige Frage erscheint, der Agent bekommt permission_pending.
   $raw = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-raw'; name = 'Smoke-Raw' }
