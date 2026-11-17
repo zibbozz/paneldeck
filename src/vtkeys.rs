@@ -43,6 +43,8 @@ pub struct KeyMode {
     /// (Einstellung `shift_enter_newline_powershell`, nur in PowerShell-Sitzungen). Programme mit VT-Eingabe bekommen dann
     /// aber ein nacktes CR – außer sie haben kitty eingeschaltet (Claude Code), das hat Vorrang.
     pub shift_enter_win32: bool,
+    /// Bracketed Paste (DECSET 2004): eingefügter Text aus dem Broadcast wird gerahmt (`TeeInput::Paste`, #220).
+    pub bracketed_paste: bool,
 }
 
 impl KeyMode {
@@ -59,7 +61,14 @@ impl KeyMode {
                 kitty |= bit;
             }
         }
-        KeyMode { app_cursor: mode.contains(TermMode::APP_CURSOR), app_keypad: mode.contains(TermMode::APP_KEYPAD), win32, kitty, shift_enter_win32: false }
+        KeyMode {
+            app_cursor: mode.contains(TermMode::APP_CURSOR),
+            app_keypad: mode.contains(TermMode::APP_KEYPAD),
+            win32,
+            kitty,
+            shift_enter_win32: false,
+            bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+        }
     }
 
     /// kitty kodiert (Flag 1 oder 8). Die Flags 2/4/16 allein ändern nichts an den Bytes.
@@ -813,6 +822,10 @@ pub enum TeeInput {
     Bytes(Vec<u8>),
     Key { key: Key, physical: Option<Key>, mods: Modifiers, phase: Phase, numpad: bool, text: Option<String> },
     Text { text: String, mods: Modifiers, numpad: bool },
+    /// Eingefügter Text (#220): jedes Ziel bereitet ihn mit seinem eigenen Bracketed-Paste-Modus auf. `user` = Einfügen
+    /// durch den Nutzer, unverändert aus der Zwischenablage (`terminal::user_paste_bytes`), sonst schon fertiger Text
+    /// (`terminal::paste_payload`).
+    Paste { text: String, user: bool },
 }
 
 impl TeeInput {
@@ -839,6 +852,14 @@ impl TeeInput {
                 TeeInput::Text { text, mods, numpad } => {
                     if !std::mem::take(&mut skip_text) {
                         out.extend(encode_text(text, *mods, *numpad, mode));
+                    }
+                }
+                TeeInput::Paste { text, user } => {
+                    skip_text = false;
+                    if *user {
+                        out.extend(crate::terminal::user_paste_bytes(text, mode.bracketed_paste));
+                    } else {
+                        out.extend(crate::terminal::paste_payload(text, mode.bracketed_paste).into_bytes());
                     }
                 }
             }
@@ -973,12 +994,12 @@ pub fn key_bytes(name: &str, mode: KeyMode) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const LEGACY: KeyMode = KeyMode { app_cursor: false, app_keypad: false, win32: false, kitty: 0, shift_enter_win32: false };
-    const WIN32: KeyMode = KeyMode { app_cursor: false, app_keypad: false, win32: true, kitty: 0, shift_enter_win32: false };
+    const LEGACY: KeyMode = KeyMode { app_cursor: false, app_keypad: false, win32: false, kitty: 0, shift_enter_win32: false, bracketed_paste: false };
+    const WIN32: KeyMode = KeyMode { app_cursor: false, app_keypad: false, win32: true, kitty: 0, shift_enter_win32: false, bracketed_paste: false };
 
     fn kitty(flags: u8) -> KeyMode {
         // kitty schlägt win32-input: ConPTY hat 9001 immer an.
-        KeyMode { app_cursor: false, app_keypad: false, win32: true, kitty: flags, shift_enter_win32: false }
+        KeyMode { app_cursor: false, app_keypad: false, win32: true, kitty: flags, shift_enter_win32: false, bracketed_paste: false }
     }
 
     /// Modifikatoren aus Buchstaben: s = Umschalt, a = Alt, c = Strg.
@@ -1268,7 +1289,7 @@ mod tests {
     #[test]
     fn mode_from_term() {
         let m = KeyMode::new(TermMode::APP_CURSOR | TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALTERNATE_KEYS, true);
-        assert_eq!(m, KeyMode { app_cursor: true, app_keypad: false, win32: true, kitty: 5, shift_enter_win32: false });
+        assert_eq!(m, KeyMode { app_cursor: true, app_keypad: false, win32: true, kitty: 5, shift_enter_win32: false, bracketed_paste: false });
         assert!(m.kitty_on());
         assert!(!KeyMode { kitty: KITTY_EVENT_TYPES, ..LEGACY }.kitty_on());
     }
@@ -1522,5 +1543,26 @@ mod tests {
         let items = typed(Key::Period, "a", Some("."));
         assert_eq!(esc(&TeeInput::encode_all(&items, LEGACY)), "\\e.");
         assert_eq!(esc(&TeeInput::encode_all(&items, kitty(1))), "\\e[46;3u");
+    }
+
+    /// #220: Eingefügter Text geht als Text in den Broadcast; jedes Ziel rahmt ihn mit seinem eigenen Bracketed Paste.
+    #[test]
+    fn broadcast_paste_is_framed_per_target() {
+        let bp = KeyMode { bracketed_paste: true, ..WIN32 };
+        let user = vec![TeeInput::Paste { text: "a\nb\n".into(), user: true }];
+        assert_eq!(esc(&TeeInput::encode_all(&user, bp)), "\\e[200~a\\rb\\r\\e[201~");
+        assert_eq!(esc(&TeeInput::encode_all(&user, WIN32)), "a\\rb\\r");
+        // Eine einzelne Zeile mit Zeilenende: ohne Bracketed Paste fällt das Ende weg (führt nichts aus), wie beim
+        // Einfügen direkt in diese Sitzung.
+        let one = vec![TeeInput::Paste { text: "rm -rf x\n".into(), user: true }];
+        assert_eq!(esc(&TeeInput::encode_all(&one, WIN32)), "rm -rf x");
+        assert_eq!(esc(&TeeInput::encode_all(&one, bp)), "\\e[200~rm -rf x\\r\\e[201~");
+        // Fertiger Text (abgelegte Dateien, Prompts): nur gerahmt bzw. bereinigt, ein folgendes Enter bleibt Enter.
+        let sent = vec![TeeInput::Paste { text: "x\x1b[31m".into(), user: false }, TeeInput::Bytes(b"\r".to_vec())];
+        assert_eq!(esc(&TeeInput::encode_all(&sent, bp)), "\\e[200~x[31m\\e[201~\\r");
+        assert_eq!(esc(&TeeInput::encode_all(&sent, LEGACY)), "x[31m\\r");
+        // Der Modus kommt aus der Emulation.
+        assert!(KeyMode::new(TermMode::BRACKETED_PASTE, false).bracketed_paste);
+        assert!(!KeyMode::new(TermMode::empty(), false).bracketed_paste);
     }
 }

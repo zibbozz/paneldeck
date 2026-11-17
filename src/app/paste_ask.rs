@@ -81,7 +81,8 @@ impl App {
         let Some(ask) = self.paste_ask.take() else { return };
         let Some(s) = self.entries.get(&ask.id).and_then(|e| e.live.as_ref()) else { return };
         let lang = self.settings.language;
-        let lines = crate::terminal::paste_line_count(&ask.text).unwrap_or(1);
+        // Der Text wartet unverändert (#220); gezählt wird wie ohne Bracketed Paste – so würde eine Shell ihn ausführen.
+        let lines = crate::terminal::paste_line_count(&crate::terminal::paste_user_text(&ask.text)).unwrap_or(1);
         let wait = CONFIRM_DELAY.saturating_sub(ask.since.elapsed());
         let secs = if wait.is_zero() { 0 } else { 1 };
         if secs > 0 {
@@ -118,6 +119,34 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #217: `central` gibt den Fokus ab, sobald die Rückfrage in seinem Fenster steht – dieselbe Zuordnung wie beim
+    /// Zeichnen der Rückfrage (Hauptfenster/weiteres Fenster bzw. abgedockte Sitzung).
+    #[test]
+    fn ask_belongs_to_its_window() {
+        let ask = |win, detached| PasteAsk { id: 7, text: "a\nb".into(), win, detached, since: std::time::Instant::now() };
+        // Im Hauptfenster eingefügt: nur dort, nicht in einem weiteren Fenster oder einem abgedockten.
+        assert!(ask_is_here(&ask(0, false), false, 0, None));
+        assert!(!ask_is_here(&ask(0, false), false, 1, None));
+        assert!(!ask_is_here(&ask(0, false), false, 0, Some(7)));
+        // Aus der abgedockten Sitzung: nur in deren Fenster; wieder angedockt im Fenster, in dem eingefügt wurde.
+        assert!(ask_is_here(&ask(0, true), true, 0, Some(7)));
+        assert!(!ask_is_here(&ask(0, true), true, 0, Some(8)));
+        assert!(!ask_is_here(&ask(0, true), true, 0, None));
+        assert!(ask_is_here(&ask(0, true), false, 0, None));
+    }
+
+    /// #220: Die Rückfrage hängt auch an den Broadcast-Zielen; gezählt wird am unveränderten Text.
+    #[test]
+    fn broadcast_targets_without_bracketed_paste_ask_too() {
+        use crate::terminal::paste_needs_ask;
+        assert!(paste_needs_ask("a\nb", false, true, false));
+        assert!(!paste_needs_ask("a\nb", true, true, false), "Bracketed Paste ohne Ziele: keine Rückfrage");
+        assert!(paste_needs_ask("a\nb", true, true, true), "ein Ziel ohne Bracketed Paste führte die Zeilen aus");
+        assert!(!paste_needs_ask("a\nb", false, false, true), "abgeschaltet");
+        assert!(!paste_needs_ask("cmd\n", true, true, true), "eine Zeile mit Zeilenende bekommt das Ziel ohne Ende");
+        assert!(!paste_needs_ask("eine Zeile", false, true, true));
+    }
 
     #[test]
     fn preview_is_short_and_clean() {

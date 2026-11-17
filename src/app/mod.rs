@@ -2384,10 +2384,15 @@ impl App {
         let lang = self.settings.language;
 
         self.sync_reply_views(ctx);
+        // Broadcast: Ziele ohne Bracketed Paste – dann fragt auch eine fokussierte Sitzung mit Bracketed Paste vor dem
+        // Einfügen mehrerer Zeilen nach (#220).
+        let targets_unbracketed = self.broadcast && self.broadcast_targets().iter().any(|i| self.entries.get(i).and_then(|e| e.live.as_ref()).is_some_and(|s| !s.bracketed_paste()));
         // Broadcast: nur die fokussierte Sitzung zeichnet Eingaben mit.
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
-                s.set_tee(self.broadcast && *id == self.focused);
+                let tee = self.broadcast && *id == self.focused;
+                s.set_tee(tee);
+                s.set_tee_targets_unbracketed(tee && targets_unbracketed);
                 s.set_shift_enter_newline(self.settings.shift_enter_newline_powershell);
             }
         }
@@ -2453,12 +2458,8 @@ impl App {
         if self.broadcast {
             let data = self.entries.get(&self.focused).and_then(|e| e.live.as_ref()).map(|s| s.take_tee()).unwrap_or_default();
             if !data.is_empty() {
-                let mut leaves = Vec::new();
-                if let Some(l) = &self.layout {
-                    l.leaves(&mut leaves);
-                }
-                // Tasten je Ziel mit dessen Modus kodieren (kitty, win32-input-mode, Cursor-Tasten).
-                for id in leaves.into_iter().filter(|i| *i != self.focused) {
+                // Tasten je Ziel mit dessen Modus kodieren (kitty, win32-input-mode, Cursor-Tasten, Bracketed Paste).
+                for id in self.broadcast_targets() {
                     if let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) {
                         let bytes = crate::vtkeys::TeeInput::encode_all(&data, s.key_mode());
                         if !bytes.is_empty() {
@@ -2468,6 +2469,16 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Ziele des Broadcasts: alle Bereiche im Layout außer dem fokussierten.
+    fn broadcast_targets(&self) -> Vec<u64> {
+        let mut leaves = Vec::new();
+        if let Some(l) = &self.layout {
+            l.leaves(&mut leaves);
+        }
+        leaves.retain(|i| *i != self.focused);
+        leaves
     }
 
     /// Ordner für Git-Abfrage und Transkript-Suche aktuell halten (alle 2 s).

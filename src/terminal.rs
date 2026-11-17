@@ -164,6 +164,19 @@ pub fn paste_user_text(text: &str) -> String {
     t
 }
 
+/// Bytes für das Einfügen eines Textes durch den Nutzer (unverändert aus der Zwischenablage): mit Bracketed Paste nur
+/// bereinigt und gerahmt (ein Zeilenende führt dann nichts aus), sonst wie `paste_user_text`.
+pub fn user_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let text = if bracketed { paste_clean(text) } else { paste_user_text(text) };
+    paste_payload(&text, bracketed).into_bytes()
+}
+
+/// Rückfrage vor dem Einfügen (`Session::paste_user`)? Nur mit Einstellung (`warn`), bei mehreren Zeilen und wenn eine
+/// Shell sie ohne Bracketed Paste bekäme: diese Sitzung selbst oder ein Broadcast-Ziel (`targets_unbracketed`, #220).
+pub fn paste_needs_ask(text: &str, bracketed: bool, warn: bool, targets_unbracketed: bool) -> bool {
+    warn && (!bracketed || targets_unbracketed) && paste_line_count(&paste_user_text(text)).is_some()
+}
+
 /// Zeilen eines eingefügten Textes, wenn er Zeilenumbrüche enthält (sonst `None`): Grundlage der Rückfrage beim
 /// Einfügen mehrerer Zeilen ohne Bracketed Paste – jeder Umbruch kann dann einen Befehl ausführen. Auf den schon
 /// bereinigten Text anwenden (`paste_user_text`), sonst zählten als Escape-Sequenz versteckte Enter nicht.
@@ -345,6 +358,8 @@ pub struct Session {
     /// Link unter dem Mauszeiger bei gedrückter Strg-Taste: (Zeile, Start, Ende, Ziel)
     pub hover_link: Option<(usize, usize, usize, String)>,
     tee_on: AtomicBool,
+    /// Broadcast: ein Ziel hat kein Bracketed Paste (`set_tee_targets_unbracketed`, #220).
+    tee_unbracketed: AtomicBool,
     tee: Mutex<Vec<crate::vtkeys::TeeInput>>,
     /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
     last_activity: Arc<std::sync::atomic::AtomicU64>,
@@ -645,6 +660,7 @@ impl Session {
             mouse_last: None,
             hover_link: None,
             tee_on: AtomicBool::new(false),
+            tee_unbracketed: AtomicBool::new(false),
             tee: Mutex::new(Vec::new()),
             last_activity,
             stale_modes,
@@ -839,8 +855,9 @@ impl Session {
     /// Text wie eingefügt senden (Bracketed Paste, falls die Anwendung es anfordert).
     pub fn send_text(&self, text: &str, submit: bool) {
         let bracketed = self.bracketed_paste();
-        // Steuerzeichen filtern (siehe `paste_payload`).
-        self.write(paste_payload(text, bracketed).as_bytes());
+        // Steuerzeichen filtern (siehe `paste_payload`). Der Broadcast bekommt den Text, nicht die für diese Sitzung
+        // gerahmten Bytes: jedes Ziel rahmt ihn selbst (#220).
+        self.write_input(paste_payload(text, bracketed).as_bytes(), crate::vtkeys::TeeInput::Paste { text: text.to_string(), user: false });
         if submit {
             self.write(b"\r");
         }
@@ -853,27 +870,36 @@ impl Session {
 
     /// Einfügen durch den Nutzer (Strg+V, Rechtsklick): mehrere Zeilen ohne Bracketed Paste warten auf die Rückfrage
     /// (Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“, `take_paste_ask`), alles andere geht sofort.
+    /// Im Broadcast (#220) zählen auch die Ziele: Hat eines kein Bracketed Paste (`set_tee_targets_unbracketed`), kommt
+    /// die Rückfrage auch dann, wenn diese Sitzung selbst Bracketed Paste hat. Gewartet wird mit dem unveränderten Text.
     pub fn paste_user(&self, text: &str) {
-        let bracketed = self.bracketed_paste();
-        // Mit Bracketed Paste führt ein Zeilenende nichts aus – der Text bleibt, wie er ist (nur bereinigt).
-        let text = if bracketed { paste_clean(text) } else { paste_user_text(text) };
-        if self.paste_warn.load(Ordering::Relaxed) && paste_line_count(&text).is_some() && !bracketed {
-            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+        let warn = self.paste_warn.load(Ordering::Relaxed);
+        if paste_needs_ask(text, self.bracketed_paste(), warn, self.tee_on.load(Ordering::Relaxed) && self.tee_unbracketed.load(Ordering::Relaxed)) {
+            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
             return;
         }
-        self.paste_now(&text);
+        self.paste_now(text);
     }
 
-    /// Text einfügen: ans Ende scrollen, Auswahl aufheben, senden.
+    /// Eingefügten Text des Nutzers (unverändert, wie aus der Zwischenablage) senden: ans Ende scrollen, Auswahl
+    /// aufheben, aufbereiten und rahmen wie `user_paste_bytes`. Der Broadcast bekommt den Text selbst
+    /// (`TeeInput::Paste`), damit jedes Ziel ihn mit seinem eigenen Bracketed-Paste-Modus aufbereitet (#220).
     pub fn paste_now(&self, text: &str) {
-        {
+        let bracketed = {
             let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
             if t.grid().display_offset() > 0 {
                 t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
             }
             t.selection = None;
-        }
-        self.send_text(text, false);
+            t.mode().contains(TermMode::BRACKETED_PASTE)
+        };
+        self.write_input(&user_paste_bytes(text, bracketed), crate::vtkeys::TeeInput::Paste { text: text.to_string(), user: true });
+    }
+
+    /// Broadcast (#220): Hat mindestens ein Ziel kein Bracketed Paste? Dann fragt `paste_user` vor mehreren Zeilen auch
+    /// hier (UI-Thread, jedes Frame; nur für die fokussierte Sitzung mit Broadcast von Bedeutung).
+    pub fn set_tee_targets_unbracketed(&self, on: bool) {
+        self.tee_unbracketed.store(on, Ordering::Relaxed);
     }
 
     /// Text, der auf die Rückfrage vor dem Einfügen wartet (einmal abholen).
