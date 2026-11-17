@@ -7,7 +7,7 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{test::TermSize, Config, Osc52, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use eframe::egui;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use crate::osc::{OscEvent, OscScanner};
 use crate::search::SearchState;
@@ -163,6 +163,8 @@ pub struct Session {
     job: Option<crate::winctl::SessionJob>,
     /// PID der Shell (beim Start festgehalten; `pid()` kann am gesperrten Kind scheitern).
     shell_pid: Option<u32>,
+    /// Konsolen-Host dieser Sitzung (#183): `"bundled"` (mitgelieferte ConPTY) oder `"system"`; `None` außerhalb von Windows.
+    pub console_host: Option<&'static str>,
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
@@ -185,10 +187,13 @@ pub struct SpawnOptions<'a> {
 impl Session {
     pub fn spawn(ctx: &egui::Context, opts: SpawnOptions) -> Result<Session, String> {
         let (cols, rows) = (100u16, 30u16);
-        let pty = native_pty_system();
+        // Mitgelieferte ConPTY (Einstellung, Dateien neben paneldeck.exe) oder die von Windows (#183).
+        let (pty, want_bundled) = crate::conpty::pty_system();
         let pair = pty
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
+        let console_host = crate::conpty::host_of(&*pair.master);
+        crate::conpty::note_spawn(want_bundled, console_host);
 
         let mut cmd = CommandBuilder::new(&opts.shell.program);
         for a in &opts.shell.args {
@@ -206,10 +211,18 @@ impl Session {
             cmd.env(k, v);
         }
 
-        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
-        // Shell sofort in das Job Object der Sitzung (#168): Ihre Nachfahren gehören dann sicher zu ihr, auch losgelöst.
-        // Scheitert das, bleibt der Prozessbaum als Zuordnung (`winctl::resolve_peer`).
-        let job = Self::adopt_into_job(child.as_ref());
+        // Job Object der Sitzung (#168): Die Shell startet schon darin (vendored portable-pty,
+        // `PROC_THREAD_ATTRIBUTE_JOB_LIST`) – kein Zeitfenster zwischen Start und Zuweisung. Ihre Nachfahren gehören
+        // dann sicher zu ihr, auch losgelöst. Lehnt Windows den Job beim Start ab, wird die Shell direkt danach
+        // zugewiesen (mit Nachholen schon gestarteter Kinder); scheitert auch das, bleibt der Prozessbaum.
+        let job = crate::winctl::SessionJob::new();
+        #[cfg(windows)]
+        portable_pty::win::set_spawn_job(job.as_ref().and_then(|j| j.raw_handle()));
+        let spawned = pair.slave.spawn_command(cmd).map_err(|e| e.to_string());
+        #[cfg(windows)]
+        portable_pty::win::set_spawn_job(None);
+        let child = spawned?;
+        let job = Self::adopt_into_job(job, child.as_ref());
         let shell_pid = child.process_id();
         drop(pair.slave);
 
@@ -343,6 +356,7 @@ impl Session {
             stale_modes,
             job,
             shell_pid,
+            console_host,
         };
         if let Some(input) = opts.initial_input {
             session.write(input.as_bytes());
@@ -353,14 +367,18 @@ impl Session {
     /// Job Object für die gerade gestartete Shell anlegen und sie hineinstecken (#168). `None` ohne Windows oder wenn
     /// das scheitert.
     #[cfg(windows)]
-    fn adopt_into_job(child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
+    fn adopt_into_job(job: Option<crate::winctl::SessionJob>, child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
+        let job = job?;
         let (h, pid) = (child.as_raw_handle()?, child.process_id()?);
-        let job = crate::winctl::SessionJob::new()?;
+        // Schon im Job gestartet: nichts nachzuholen (die Zuweisung wäre ein Nullbetrieb).
+        if portable_pty::win::spawned_in_job() {
+            return Some(job);
+        }
         job.adopt(h, pid).then_some(job)
     }
 
     #[cfg(not(windows))]
-    fn adopt_into_job(_child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
+    fn adopt_into_job(_job: Option<crate::winctl::SessionJob>, _child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
         None
     }
 

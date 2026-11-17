@@ -321,6 +321,13 @@ impl SessionJob {
         None
     }
 
+    /// Das Job-Handle (gültig, solange dieser `SessionJob` lebt – erst `Drop` schließt es), z. B. für den Start der
+    /// Shell direkt im Job (`portable_pty::win::set_spawn_job`).
+    #[cfg(windows)]
+    pub fn raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        jobs().iter().find(|(k, _)| *k == self.key).map(|&(_, h)| h as std::os::windows::io::RawHandle)
+    }
+
     /// Kennung für [`PeerChain::job`].
     pub fn key(&self) -> u64 {
         self.key
@@ -862,6 +869,38 @@ mod peer_tests {
         let _ = writeln!(stdin, "done");
         let _ = helper.wait();
         job.terminate_all();
+    }
+
+    #[test]
+    fn the_shell_starts_inside_its_job_without_a_race() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        // Wie `terminal::Session::spawn`: Job vor dem Start setzen, die Shell ist ab ihrer ersten Anweisung Mitglied.
+        let pair = native_pty_system().openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }).unwrap();
+        // Ausgabe abholen (sonst blockiert ConPTY seine Programme beim Schreiben)
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+        let job = SessionJob::new().expect("Job");
+        portable_pty::win::set_spawn_job(job.raw_handle());
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "ping -n 30 127.0.0.1 >nul"]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        assert!(portable_pty::win::spawned_in_job(), "im Job gestartet (PROC_THREAD_ATTRIBUTE_JOB_LIST)");
+        portable_pty::win::set_spawn_job(None);
+        let pid = child.process_id().unwrap();
+        assert_eq!(job_of(pid), Some(job.key()));
+        // Der Job gilt nur für einen Start: der nächste auf diesem Thread läuft ohne
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "exit 0"]);
+        let mut other = pair.slave.spawn_command(cmd).unwrap();
+        assert!(!portable_pty::win::spawned_in_job());
+        assert_ne!(other.process_id().and_then(job_of), Some(job.key()));
+        let _ = other.kill();
+        assert!(job.terminate_all());
+        let t0 = std::time::Instant::now();
+        while matches!(child.try_wait(), Ok(None)) && t0.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(matches!(child.try_wait(), Ok(Some(_))), "„Alle beenden“ beendet die Shell");
     }
 
     #[test]

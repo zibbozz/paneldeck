@@ -903,6 +903,8 @@ impl App {
             settings.language = l;
         }
         state::set_lang(settings.language);
+        // Vor dem Wiederherstellen der Sitzungen: welche ConPTY neue Sitzungen bekommen (#183).
+        crate::conpty::USE_BUNDLED.store(settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         let (mut saved, startup_note) = state::load_saved(&dir.join("state.json"));
         // „Sitzungen merken“ aus (#157): frischer Start. Steht in state.json noch etwas (Absturz nach dem Ausschalten, von
         // Hand geändert), wird die Datei vorher gesichert. Scrollback und Chatverläufe früherer Läufe werden gelöscht – auch
@@ -3566,6 +3568,18 @@ impl eframe::App for App {
         }
         self.handle_ipc(ctx);
         self.poll_mcp(ctx);
+        crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
+        if crate::conpty::take_fallback_hint() {
+            self.push_toast(
+                state::t(
+                    "Der mitgelieferte Konsolen-Host (OpenConsole) ließ sich mehrmals nicht starten – neue Sitzungen laufen auf dem Konsolen-Host von Windows. Ein Virenscanner kann OpenConsole.exe blockieren; abschalten lässt er sich unter Einstellungen → Darstellung.",
+                    "The bundled console host (OpenConsole) failed to start several times – new sessions run on the console host built into Windows. An antivirus may block OpenConsole.exe; it can be turned off under Settings → Appearance.",
+                )
+                .to_string(),
+                toasts::ToastKind::Warning,
+                None,
+            );
+        }
         crate::usage::set_prices(self.settings.prices.clone());
         // Paletten für alle Farbauswahlen und die automatische Vergabe (auch Todo-Tags, Expertenmodus, Diagramme).
         crate::palette::publish(&self.settings.palette);
