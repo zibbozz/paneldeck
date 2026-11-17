@@ -28,17 +28,14 @@ impl App {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let txt = if tok > 0 {
-                            format!("Σ {} {} · ≈ ${:.2}", fmt_tokens(tok), lang.t("Token", "tokens"), cost)
-                        } else {
-                            format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))
-                        };
                         if tok > 0 {
-                            if cost_summary(ui, &txt, lang).clicked() {
+                            let full = format!("Σ {} {} · ≈ ${:.2}", fmt_tokens(tok), lang.t("Token", "tokens"), cost);
+                            let medium = format!("Σ {} · ≈ ${:.2}", fmt_tokens(tok), cost);
+                            if cost_summary(ui, &[&full, &medium, &format!("≈ ${cost:.2}")], lang).clicked() {
                                 actions.push(Action::OpenCosts);
                             }
                         } else {
-                            ui.label(RichText::new(txt).small().color(style::dim(ui)));
+                            ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).small().color(style::dim(ui)));
                         }
                     });
                 });
@@ -761,10 +758,15 @@ pub(super) fn sidebar_panel<R>(ctx: &egui::Context, default_width: f32, fill: Co
 }
 
 /// Gesamtverbrauch unten in der Seitenleiste: öffnet die Kosten-Übersicht – darum als kleiner Knopf mit Pfeil, Hover,
-/// Hand und Tooltip (#187), nicht als stiller Text.
-pub(super) fn cost_summary(ui: &mut Ui, text: &str, lang: Lang) -> egui::Response {
+/// Hand und Tooltip (#187), nicht als stiller Text. `texts`: vom ausführlichsten zum kürzesten; es steht der erste, der
+/// in den Platz passt (schmale Seitenleiste, MCP-Chip daneben), sonst der letzte. Der Tooltip nennt immer den ersten.
+pub(super) fn cost_summary(ui: &mut Ui, texts: &[&str], lang: Lang) -> egui::Response {
     let col = style::dim(ui);
-    afford::link_button(ui, text, col, lang.t("Kosten-Übersicht öffnen (Token und Kosten je Sitzung und Tag)", "Open the cost overview (tokens and costs per session and day)"))
+    let avail = ui.available_width();
+    let text = texts.iter().copied().find(|t| afford::link_button_width(ui, t) <= avail).or(texts.last().copied()).unwrap_or_default();
+    let full = texts.first().copied().unwrap_or_default();
+    let tip = format!("{full}\n{}", lang.t("Kosten-Übersicht öffnen (Token und Kosten je Sitzung und Tag)", "Open the cost overview (tokens and costs per session and day)"));
+    afford::link_button(ui, text, col, &tip)
 }
 
 #[cfg(test)]
@@ -775,14 +777,18 @@ mod tests {
     fn cost_summary_looks_clickable_hand_and_tooltip() {
         use crate::afford::tests::{cursor_at, rect_of, tooltip_at};
         let txt = "Σ 1.2k tokens · ≈ $0.42";
-        let r = rect_of(&mut |ui| cost_summary(ui, txt, Lang::En).rect);
+        let texts = [txt, "Σ 1.2k · ≈ $0.42", "≈ $0.42"];
+        let r = rect_of(&mut |ui| cost_summary(ui, &texts, Lang::En).rect);
         assert!(r.width() > 40.0 && r.height() >= 18.0, "Knopffläche: {r:?}");
         let mut f = |ui: &mut Ui| {
-            cost_summary(ui, txt, Lang::En);
+            cost_summary(ui, &texts, Lang::En);
         };
         assert_eq!(cursor_at(r.center(), &mut f), egui::CursorIcon::PointingHand, "Hand über der Kostenzeile");
         assert!(tooltip_at(r.center(), &mut f), "Tooltip über der Kostenzeile");
         assert_ne!(cursor_at(r.center() + Vec2::new(0.0, 60.0), &mut f), egui::CursorIcon::PointingHand, "daneben keine Hand");
+        // Zu wenig Platz: nur die Kosten, nichts ragt über den Rand
+        let narrow = rect_of(&mut |ui| ui.allocate_ui(Vec2::new(90.0, 20.0), |ui| cost_summary(ui, &texts, Lang::En).rect).inner);
+        assert!(narrow.width() < r.width() && narrow.width() <= 90.0, "gekürzt: {narrow:?} statt {r:?}");
     }
 
     /// Ein Durchlauf: Seitenleiste mit Inhalt der Breite `content_w`, danach der Mittelbereich.

@@ -120,9 +120,8 @@ pub fn choice_value<V: PartialEq>(ui: &mut Ui, cur: &mut V, value: V, text: impl
 /// Versteckte Aktion als kleiner Knopf (z. B. Kostenzeile in der Seitenleiste): gedämpfter Text mit feinem Rahmen und
 /// Pfeil „›“, beim Überfahren Hover-Fläche, kräftiger Text, Hand und Tooltip.
 pub fn link_button(ui: &mut Ui, text: &str, color: Color32, tip: &str) -> Response {
-    let font = egui::FontId::proportional(11.5);
-    let g = ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER);
-    let size = Vec2::new(8.0 + g.size().x + 6.0 + 5.0 + 7.0, 20.0);
+    let g = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(11.5), Color32::PLACEHOLDER);
+    let size = Vec2::new(link_button_width(ui, text), 20.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         let h = hover_fill(ui, rect, &resp, 5.0);
@@ -138,6 +137,12 @@ pub fn link_button(ui: &mut Ui, text: &str, color: Color32, tip: &str) -> Respon
         ui.painter().line_segment([c + Vec2::new(1.5, 0.0), c + Vec2::new(-1.5, 3.0)], st);
     }
     resp.clickable(tip)
+}
+
+/// Breite, die [`link_button`] für `text` braucht (zum Kürzen, wenn der Platz nicht reicht).
+pub fn link_button_width(ui: &Ui, text: &str) -> f32 {
+    let g = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(11.5), Color32::PLACEHOLDER);
+    8.0 + g.size().x + 6.0 + 5.0 + 7.0
 }
 
 /// Farbfeld (18 px) zum Anklicken: beim Überfahren ein Ring und die Hand, gewählt mit kräftigem Rahmen.
