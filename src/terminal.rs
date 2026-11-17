@@ -324,6 +324,8 @@ pub struct Session {
     /// Aus dem Verlauf gefallene Zeilen (#197), nur unter der Sperre von `term` geändert: absolute Zeile =
     /// `dropped` + Verlaufszeilen + Bildschirmzeile, damit bleiben Marken und Positionen bei vollem Verlauf gültig.
     dropped: Arc<std::sync::atomic::AtomicU64>,
+    /// `HistoryTrack::primary` des Lese-Threads (#221): ein Größenwechsel meldet die neue Verlaufslänge.
+    hist_primary: Arc<std::sync::atomic::AtomicUsize>,
     writer: SharedWriter,
     master: Box<dyn MasterPty + Send>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
@@ -505,6 +507,7 @@ impl Session {
         let mut processor: Processor = Processor::new();
         let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let hist_track = HistoryTrack::new(opts.scrollback_lines, dropped.clone());
+        let hist_primary = hist_track.primary_handle();
 
         if let Some(text) = opts.restore_text {
             let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
@@ -624,6 +627,7 @@ impl Session {
         let session = Session {
             term,
             dropped,
+            hist_primary,
             shell_state,
             writer,
             master: pair.master,
@@ -988,7 +992,11 @@ impl Session {
         }
         self.cols = cols;
         self.rows = rows;
-        self.term.lock().unwrap_or_else(|e| e.into_inner()).resize(TermSize::new(cols as usize, rows as usize));
+        {
+            let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
+            t.resize(TermSize::new(cols as usize, rows as usize));
+            HistoryTrack::resized(&self.hist_primary, &t);
+        }
         let _ = self.master.resize(self.pty_size());
     }
 
@@ -1232,11 +1240,24 @@ fn primary_history<T>(t: &Term<T>) -> Option<usize> {
 pub struct HistoryTrack {
     limit: usize,
     dropped: Arc<std::sync::atomic::AtomicU64>,
+    /// Verlaufslänge des Hauptbildschirms beim letzten Blick darauf (`PRIMARY_UNKNOWN` = unbekannt). Im alternativen
+    /// Bildschirm ist der Hauptbildschirm nicht erreichbar; RIS leert ihn dort trotzdem (#221). Auch `Session::resize`
+    /// schreibt hier (unter der Sperre der Emulation): Im alternativen Bildschirm ändert ein Größenwechsel die Länge
+    /// unbekannt (Umbruch), dann wird beim Zurückkehren nichts gezählt.
+    primary: Arc<std::sync::atomic::AtomicUsize>,
 }
+
+/// `HistoryTrack::primary`: Länge des Hauptbildschirm-Verlaufs unbekannt.
+const PRIMARY_UNKNOWN: usize = usize::MAX;
 
 impl HistoryTrack {
     pub fn new(limit: usize, dropped: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        HistoryTrack { limit, dropped }
+        HistoryTrack { limit, dropped, primary: Arc::new(std::sync::atomic::AtomicUsize::new(0)) }
+    }
+
+    /// Geteilter Merker der Verlaufslänge des Hauptbildschirms (für `Session::resize`).
+    fn primary_handle(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.primary.clone()
     }
 
     fn base(&self) -> u64 {
@@ -1254,18 +1275,36 @@ impl HistoryTrack {
 
     /// Nach Ausgabe: Verlauf über dem Limit selbst kürzen und mitzählen; ein geschrumpfter Verlauf (CSI 3J, RIS) zählt
     /// ebenfalls als verworfen. `before` = `primary_history` vor der Ausgabe.
+    ///
+    /// Zurück aus dem alternativen Bildschirm (`before` = `None`) zählt der Vergleich mit der zuletzt gesehenen Länge:
+    /// Dort kommt nichts in den Verlauf des Hauptbildschirms, kürzer wird er nur durch RIS (leert beide Bildschirme).
     fn settle<T>(&self, t: &mut Term<T>, before: Option<usize>) {
         let Some(h) = primary_history(t) else { return };
-        let mut gone = before.map_or(0, |b| b.saturating_sub(h));
+        let mut gone = match before {
+            Some(b) => b.saturating_sub(h),
+            None => match self.primary.load(Ordering::Relaxed) {
+                PRIMARY_UNKNOWN => 0,
+                last => last.saturating_sub(h),
+            },
+        };
+        let mut now = h;
         if h > self.limit {
             let g = t.grid_mut();
             g.update_history(self.limit);
             g.update_history(self.limit + HISTORY_SLACK);
             gone += h - self.limit;
+            now = self.limit;
         }
+        self.primary.store(now, Ordering::Relaxed);
         if gone > 0 {
             self.dropped.fetch_add(gone as u64, Ordering::Relaxed);
         }
+    }
+
+    /// Nach einem Größenwechsel (unter derselben Sperre): Länge des Hauptbildschirm-Verlaufs neu merken bzw. im
+    /// alternativen Bildschirm als unbekannt markieren.
+    fn resized<T>(primary: &std::sync::atomic::AtomicUsize, t: &Term<T>) {
+        primary.store(primary_history(t).unwrap_or(PRIMARY_UNKNOWN), Ordering::Relaxed);
     }
 }
 
@@ -2001,6 +2040,48 @@ mod run_output_tests {
         assert_eq!(f.term.grid().history_size(), 0);
         assert_eq!(f.cursor(), 100);
         assert_eq!(lines_abs_in(&f.term, f.base(), 99, 99), vec!["zeile 99".to_string()]);
+    }
+
+    /// #221: RIS im alternativen Bildschirm leert auch den Verlauf des Hauptbildschirms – das zählt als verworfen,
+    /// damit absolute Zeilen (Marken) stimmen. Ein normales Verlassen zählt nichts, ebenso nach einem Größenwechsel im
+    /// alternativen Bildschirm (Länge dann unbekannt).
+    #[test]
+    fn ris_in_alt_screen_counts_dropped_history() {
+        let fill = |f: &mut Fake| {
+            for i in 0..30 {
+                f.feed(&format!("zeile {i}\r\n"));
+            }
+        };
+        // Verlassen ohne RIS: nichts verworfen.
+        let mut f = Fake::with_history(COLS, 8, 100);
+        fill(&mut f);
+        let (base, hist) = (f.base(), f.term.grid().history_size());
+        assert!(hist > 0);
+        f.feed("\x1b[?1049hvim\r\n\x1b[?1049l");
+        assert_eq!((f.base(), f.term.grid().history_size()), (base, hist));
+        // RIS im alternativen Bildschirm: der ganze Verlauf zählt als verworfen.
+        f.feed("\x1b[?1049hvim\x1bc");
+        assert_eq!(f.term.grid().history_size(), 0);
+        assert_eq!(f.base(), base + hist as u64);
+        // Ebenso, wenn das RIS in einem Synchronized Update steht (vte verarbeitet den Block erst an dessen Ende).
+        let mut f = Fake::with_history(COLS, 8, 100);
+        fill(&mut f);
+        let (base, hist) = (f.base(), f.term.grid().history_size());
+        f.feed("\x1b[?1049h\x1b[?2026hx\x1bcy\x1b[?2026l");
+        assert_eq!(f.base(), base + hist as u64);
+        // Größenwechsel im alternativen Bildschirm: Länge unbekannt, beim Zurückkehren wird nichts gezählt.
+        let mut f = Fake::with_history(COLS, 8, 100);
+        fill(&mut f);
+        let base = f.base();
+        f.feed("\x1b[?1049h");
+        f.term.resize(TermSize::new(COLS, 20));
+        HistoryTrack::resized(&f.hs.primary, &f.term);
+        f.feed("\x1b[?1049l");
+        assert_eq!(f.base(), base, "Zeilen aus dem Verlauf in den größeren Bildschirm sind nicht verworfen");
+        // Auf dem Hauptbildschirm gemerkt: ein späteres RIS im alternativen Bildschirm zählt wieder.
+        let hist = f.term.grid().history_size();
+        f.feed("\x1b[?1049h\x1bc");
+        assert_eq!(f.base(), base + hist as u64);
     }
 
     #[test]

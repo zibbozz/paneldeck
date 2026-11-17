@@ -124,11 +124,15 @@ impl OscScanner {
                     _ => State::Normal,
                 },
                 State::Osc(mut buf) => match b {
-                    0x07 => {
+                    // BEL beendet das OSC; CAN/SUB ebenso (vte führt das OSC dabei aus und kehrt in den Grundzustand
+                    // zurück, #221).
+                    0x07 | 0x18 | 0x1a => {
                         parse(&buf, &mut out);
                         State::Normal
                     }
                     0x1b => State::OscEsc(buf),
+                    // Übrige C0-Steuerzeichen überspringt vte im OSC (sie landen nicht im Inhalt).
+                    0x00..=0x1f => State::Osc(buf),
                     _ => {
                         if buf.len() < MAX_PAYLOAD {
                             buf.push(b);
@@ -506,6 +510,68 @@ mod tests {
         let ev = s.feed(b"\x1b]9;1;500\x07\x1b]9;7;calc\x07\x1b]9;9;C:\\x\x07\x1b]9;40\x07\x1b]777;preexec\x07\x1b]777;notify;;\x07");
         assert_eq!(ev, vec![OscEvent::Cwd("C:\\x".into())]);
         assert!(OscEvent::Progress(None).is_program_message() && !OscEvent::PromptStart.is_program_message());
+    }
+
+    /// CAN/SUB beenden ein OSC wie in vte (das es dabei ausführt); andere C0-Zeichen überspringt vte im OSC (#221).
+    #[test]
+    fn can_sub_end_osc_like_vte() {
+        let mut s = OscScanner::default();
+        assert_eq!(s.feed(b"\x1b]133;A\x18PS> "), vec![OscEvent::PromptStart]);
+        assert_eq!(s.feed(b"\x1b]133;D;0\x1a"), vec![OscEvent::CommandDone { exit: Some(0) }]);
+        // Nach CAN ist der Rest Text: ein späteres BEL beendet kein OSC mehr.
+        let note = OscEvent::Notify { title: String::new(), body: "hi".into() };
+        assert_eq!(s.feed(b"\x1b]9;hi\x18;rest\x07"), vec![note]);
+        // Steuerzeichen im OSC zählen nicht zum Inhalt.
+        assert_eq!(s.feed(b"\x1b]133;\r\nA\x07"), vec![OscEvent::PromptStart]);
+        // Über eine Chunk-Grenze, Position hinter CAN.
+        assert!(s.feed_at(b"\x1b]133;").0.is_empty());
+        assert_eq!(s.feed_at(b"A\x18x"), (vec![OscEvent::PromptStart], vec![2]));
+        // Mit vte verglichen: dieselbe Sequenz wird dort ebenfalls ausgeführt (OSC 2 = Titel).
+        use alacritty_terminal::event::{Event, EventListener};
+        use alacritty_terminal::term::{test::TermSize, Config, Term};
+        use alacritty_terminal::vte::ansi::Processor;
+        #[derive(Clone)]
+        struct Titles(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl EventListener for Titles {
+            fn send_event(&self, ev: Event) {
+                if let Event::Title(t) = ev {
+                    self.0.lock().unwrap().push(t);
+                }
+            }
+        }
+        let titles = Titles(Default::default());
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 5), titles.clone());
+        let mut p: Processor = Processor::new();
+        p.advance(&mut term, b"\x1b]2;a\x01b\x18c");
+        assert_eq!(*titles.0.lock().unwrap(), vec!["ab".to_string()]);
+    }
+
+    /// Ein nie beendetes OSC bleibt für vte begrenzt (#212); kurze OSC laufen unverändert durch.
+    #[test]
+    fn osc_limit_caps_unterminated_osc() {
+        let mut g = OscLimit::with_limit(16);
+        let normal = b"\x1b]0;Titel\x07text\x1b]133;A\x1b\\\x1b[31m]x";
+        assert!(matches!(g.filter(normal), std::borrow::Cow::Borrowed(_)));
+        // `printf '\e]0;'; yes`: der Inhalt endet nach der Grenze, Zeilenvorschübe (C0) bleiben, vte überspringt sie.
+        let mut fed = g.filter(b"\x1b]0;").into_owned();
+        for _ in 0..10_000 {
+            fed.extend_from_slice(&g.filter(b"y\n"));
+        }
+        let payload: Vec<u8> = fed[2..].iter().copied().filter(|b| *b >= 0x20).collect();
+        assert_eq!(payload, [b"0;".as_slice(), &[b'y'; 14], OSC_CUT].concat());
+        // Das Ende des OSC geht durch, danach ist wieder alles Text.
+        assert_eq!(&*g.filter(b"yy\x07after"), b"\x07after");
+        // ESC beendet das OSC ebenso; ein neues OSC zählt von vorn.
+        let long = [b"\x1b]2;".as_slice(), &[b'z'; 40], b"\x1b\\ok"].concat();
+        assert_eq!(&*g.filter(&long), [b"\x1b]2;".as_slice(), &[b'z'; 14], OSC_CUT, b"\x1b\\ok"].concat());
+        // `ESC ( ]` ist kein OSC (Zwischenbyte), `]` im Text auch nicht.
+        let other = [b"\x1b(]".as_slice(), &[b'q'; 40]].concat();
+        assert!(matches!(g.filter(&other), std::borrow::Cow::Borrowed(_)));
+        // CAN beendet das OSC.
+        let can = [b"\x1b]2;".as_slice(), &[b'z'; 30], b"\x18", &[b'z'; 30]].concat();
+        assert_eq!(&*g.filter(&can), [b"\x1b]2;".as_slice(), &[b'z'; 14], OSC_CUT, b"\x18", &[b'z'; 30]].concat());
+        // Die echte Grenze reicht für OSC 52 bis zur Höchstgröße der Zwischenablage (Base64).
+        assert!(OSC_LIMIT > crate::terminal::OSC52_MAX_BYTES.div_ceil(3) * 4 + 16);
     }
 
     #[test]
