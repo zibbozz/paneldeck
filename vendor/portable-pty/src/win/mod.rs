@@ -16,6 +16,7 @@ mod procthreadattr;
 mod psuedocon;
 
 pub use psuedocon::ConPtyHost; // Paneldeck patch
+pub use psuedocon::{set_spawn_job, spawned_in_job}; // Paneldeck patch (Job Objects)
 
 use filedescriptor::OwnedHandle;
 

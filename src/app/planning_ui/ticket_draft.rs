@@ -31,6 +31,8 @@ pub enum DraftError {
     NotANumber,
     BadDate,
     BadDatetime,
+    /// Fälligkeit (Datum, Uhrzeit optional) nicht lesbar.
+    BadDue,
 }
 
 impl DraftError {
@@ -39,6 +41,7 @@ impl DraftError {
             DraftError::NotANumber => lang.t("Das ist keine Zahl.", "That is not a number.").to_string(),
             DraftError::BadDate => lang.t("Datum nicht lesbar – so geht es: 2026-11-14 oder 14.11.2026.", "Date not readable – use 2026-11-14 or 14.11.2026.").to_string(),
             DraftError::BadDatetime => lang.t("Datum/Uhrzeit nicht lesbar – so geht es: 2026-11-14 09:30.", "Date/time not readable – use 2026-11-14 09:30.").to_string(),
+            DraftError::BadDue => lang.t("Fälligkeit nicht lesbar – so geht es: 2026-11-20 oder 2026-11-20 14:30.", "Due date not readable – use 2026-11-20 or 2026-11-20 14:30.").to_string(),
         }
     }
 }
@@ -84,8 +87,12 @@ pub fn parse_datetime(s: &str) -> Option<NaiveDateTime> {
     Some(NaiveDateTime::new(date, time))
 }
 
-/// Anzeigetext eines gespeicherten Datums mit Uhrzeit (`2026-11-14T10:00:00` → `2026-11-14 10:00`).
+/// Anzeigetext eines gespeicherten Datums mit Uhrzeit (`2026-11-14T10:00:00` → `2026-11-14 10:00`); ein reines Datum (Fälligkeit
+/// ohne Uhrzeit) bleibt, wie es ist.
 pub fn datetime_text(stored: &str) -> String {
+    if stored.trim().len() == 10 && parse_date(stored).is_some() {
+        return stored.trim().to_string();
+    }
     parse_datetime(stored).map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| stored.to_string())
 }
 
@@ -127,6 +134,12 @@ impl Draft {
                     Value::String(parse_date(&self.text).ok_or(DraftError::BadDate)?.format("%Y-%m-%d").to_string())
                 }
             }
+            FieldKind::Datetime if f.options.date_only_ok() => match crate::due::parse_input(&self.text) {
+                // Fälligkeit: Datum, Uhrzeit optional
+                Ok(Some(s)) => Value::String(s),
+                Ok(None) => Value::Null,
+                Err(()) => return Err(DraftError::BadDue),
+            },
             FieldKind::Datetime => {
                 if self.text.trim().is_empty() {
                     Value::Null
@@ -218,6 +231,7 @@ pub fn field_hint(f: &Field, lang: Lang) -> String {
         }
         FieldKind::Text => o.max_length.map(|m| format!("max. {m} {}", lang.t("Zeichen", "characters"))).unwrap_or_default(),
         FieldKind::Date => lang.t("JJJJ-MM-TT", "YYYY-MM-DD").to_string(),
+        FieldKind::Datetime if o.date_only_ok() => lang.t("JJJJ-MM-TT [HH:MM]", "YYYY-MM-DD [HH:MM]").to_string(),
         FieldKind::Datetime => lang.t("JJJJ-MM-TT HH:MM", "YYYY-MM-DD HH:MM").to_string(),
         _ => String::new(),
     }

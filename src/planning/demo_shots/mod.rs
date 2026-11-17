@@ -180,9 +180,7 @@ fn build_inner(b: &mut Builder, tx: &data::Texts, s12_start: NaiveDate) -> Res<B
 
     // ---- zusätzliche Felder
     let milestone_name = lang.t("Meilenstein", "Milestone");
-    for t in [Ty::Epic, Ty::Story, Ty::Task, Ty::Defect] {
-        create_field(conn, &NewField::new(type_id(t), "Labels", FieldKind::Labels)).ex("Labels")?;
-    }
+    // Labels sind eingebaut (jeder Typ hat sie)
     for t in [Ty::Story, Ty::Task, Ty::Defect] {
         create_field(conn, &NewField::new(type_id(t), milestone_name, FieldKind::Milestone)).ex("Meilenstein")?;
     }
@@ -334,6 +332,12 @@ fn build_inner(b: &mut Builder, tx: &data::Texts, s12_start: NaiveDate) -> Res<B
                 if let Some((_, en, de)) = data::DESCRIPTIONS.iter().find(|d| d.0 == tk.id) {
                     if let Some(f) = fid("description") {
                         values.push((f, json!(render(if b.de { de } else { en }))));
+                    }
+                }
+                // Fälligkeit: jedes dritte Ticket, verteilt von überfällig bis in zwei Wochen
+                if i % 3 == 0 {
+                    if let Some(f) = fid("due") {
+                        values.push((f, json!((today + Duration::days((i % 17) as i64 - 3)).format("%Y-%m-%d").to_string())));
                     }
                 }
                 if let Some((_, en, de)) = data::STEPS.iter().find(|d| d.0 == tk.id) {

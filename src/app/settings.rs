@@ -81,8 +81,8 @@ impl App {
                 match self.settings_tab {
                     0 => {
                         row(ui, lang.t("Sprache", "Language"), "", |ui| {
-                            let a = ui.selectable_value(&mut self.settings.language, Lang::De, "Deutsch");
-                            let b = ui.selectable_value(&mut self.settings.language, Lang::En, "English");
+                            let a = afford::choice_value(ui, &mut self.settings.language, Lang::De, "Deutsch", 0.0);
+                            let b = afford::choice_value(ui, &mut self.settings.language, Lang::En, "English", 0.0);
                             // Eine eigene Wahl beendet die Überschreibung durch `--lang` (sie wird dann gespeichert).
                             if a.clicked() || b.clicked() {
                                 state::clear_lang_override();
@@ -326,7 +326,7 @@ impl App {
                             let before = self.settings.claude_defaults.clone();
                             egui::Grid::new("claude_defaults").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
                                 // Ungültige Namen bleiben nur im Eingabefeld; gespeichert und angewendet werden nur gültige Werte.
-                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", false);
+                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults);
                             });
                             if self.settings.claude_defaults != before {
                                 // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).
@@ -468,7 +468,7 @@ impl App {
                         } else {
                             ui.horizontal_wrapped(|ui| {
                                 for (i, p) in self.settings.profiles.iter().enumerate() {
-                                    if ui.selectable_label(self.profile_sel == i, &p.name).clicked() {
+                                    if afford::choice(ui, self.profile_sel == i, &p.name, 0.0).clicked() {
                                         self.profile_sel = i;
                                     }
                                 }

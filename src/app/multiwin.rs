@@ -374,6 +374,10 @@ pub(super) struct HubWindow {
     /// Rückfrage „Fenster schließen?“ ist offen.
     ask_close: bool,
     close: bool,
+    /// Hintergrundprozesse der Sitzungen, die mit dem Fenster enden (#168), beim Öffnen der Rückfrage ermittelt.
+    close_lingering: Vec<super::closing::Lingering>,
+    /// Beginn der Wartezeit dieser Rückfrage (mit Hintergrundprozessen, #168).
+    close_since: Instant,
     /// Layout beim ersten Zeichnen prüfen (wiederhergestellte Fenster).
     needs_load: bool,
     /// egui-Gedächtnis dieses Fensters (`Memory::data`: Bildlauf, Textfelder, aufgeklappte Abschnitte, Bereichsgrößen …).
@@ -384,7 +388,7 @@ pub(super) struct HubWindow {
 
 impl HubWindow {
     pub(super) fn new(id: u64, view: WinView, pos: Option<Pos2>, size: Vec2, maximized: bool) -> Self {
-        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, restored: false, hidden: false, outer: None, inner: None, maximized, ask_close: false, close: false, needs_load: true, mem: Default::default() }
+        HubWindow { id, view, data_gen: 0, os_focused: false, hwnd: None, hwnd_tries: 0, init_pos: pos, init_size: size, init_max: maximized, restored: false, hidden: false, outer: None, inner: None, maximized, ask_close: false, close: false, close_lingering: Vec::new(), close_since: Instant::now(), needs_load: true, mem: Default::default() }
     }
     fn viewport(&self) -> egui::ViewportId {
         viewport_of(self.id)
@@ -796,9 +800,14 @@ impl App {
             w.inner = inner.or(w.inner);
         }
         if close_req && !w.close {
-            if self.window_close_plan(w.id).ask() {
+            let plan = self.window_close_plan(w.id);
+            // Hintergrundprozesse der Sitzungen, die mit dem Fenster enden (#168): einmal beim Öffnen der Rückfrage.
+            let lingering = self.lingering_of(&plan.end);
+            if plan.ask() || !lingering.is_empty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 w.ask_close = true;
+                w.close_lingering = lingering;
+                w.close_since = Instant::now();
             } else {
                 w.close = true;
             }
@@ -882,7 +891,7 @@ impl App {
     fn close_window_dialog(&mut self, ctx: &egui::Context, w: &mut HubWindow, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
         let plan = self.window_close_plan(w.id);
-        if !plan.ask() {
+        if !plan.ask() && w.close_lingering.is_empty() {
             w.ask_close = false;
             w.close = true;
             return;
@@ -890,6 +899,14 @@ impl App {
         if self.wt_close.is_some() {
             return; // die Worktree-Rückfrage einer Sitzung ist offen; danach geht es hier weiter
         }
+        let lingering = w.close_lingering.clone();
+        // Mit Hintergrundprozessen (#168): 3 s Wartezeit für beide Schließen-Knöpfe; Enter (= weiterlaufen lassen, nach der
+        // Wartezeit) und Esc (= abbrechen) gehören dem Dialog, nicht dem Terminal.
+        let secs = if lingering.is_empty() { 0 } else { super::planning_ui::countdown_secs(w.close_since, Instant::now()) };
+        if secs > 0 {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), !lingering.is_empty() && i.consume_key(Modifiers::NONE, Key::Enter)));
         let names = |ids: &[u64]| ids.iter().filter_map(|id| self.entries.get(id).map(|e| (*id, e.display_name()))).collect::<Vec<_>>();
         let (adopt, worktrees) = (names(&plan.adopt), names(&plan.worktrees));
         // Was beendet wird, aber nicht im Layout steht (minimiert oder weggewechselt) – sonst übersieht man es leicht.
@@ -953,21 +970,35 @@ impl App {
                         });
                     }
                 }
+                super::closing::lingering_section(ui, &lingering, lang, true);
                 ui.add_space(S2);
                 ui.horizontal(|ui| {
+                    let label = if lingering.is_empty() { lang.t("Fenster schließen", "Close window") } else { lang.t("Schließen, weiterlaufen lassen", "Close, keep running") };
                     let close = ui
-                        .add_enabled(plan.can_close(), egui::Button::new(lang.t("Fenster schließen", "Close window")))
+                        .add_enabled(plan.can_close() && secs == 0, egui::Button::new(label))
                         .on_disabled_hover_text(lang.t("Erst die Sitzungen mit Worktree schließen.", "Close the sessions with a worktree first."));
-                    if close.clicked() {
+                    if close.clicked() || (enter && plan.can_close() && secs == 0) {
                         w.ask_close = false;
                         w.close = true;
+                    }
+                    if !lingering.is_empty() {
+                        let end = if plan.can_close() {
+                            super::planning_ui::danger_button(ui, lang.t("Schließen, alle beenden", "Close and end all"), secs)
+                        } else {
+                            ui.add_enabled(false, egui::Button::new(lang.t("Schließen, alle beenden", "Close and end all")))
+                        };
+                        if end.clicked() && secs == 0 && plan.can_close() {
+                            actions.push(Action::EndJobs(lingering.iter().map(|l| l.id).collect()));
+                            w.ask_close = false;
+                            w.close = true;
+                        }
                     }
                     if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
                         w.ask_close = false;
                     }
                 });
             });
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if esc {
             w.ask_close = false;
         }
     }

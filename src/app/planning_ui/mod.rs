@@ -20,9 +20,15 @@ mod dash_logic;
 mod dash_tiles;
 mod dash_view;
 mod delete;
+pub(super) mod due_ui;
+#[cfg(test)]
+mod due_ui_tests;
 mod fields_ed;
 mod help_shots;
 mod helpers;
+mod icon_explorer;
+#[cfg(test)]
+mod icon_explorer_tests;
 mod keywords_ed;
 mod kinds_ed;
 mod links_ed;
@@ -86,6 +92,7 @@ mod sprint_ui_tests;
 pub(super) use helpers::color_of;
 pub(super) use quick_exec::SessionRequest;
 pub(super) use quick_menu::Out as QuickOut;
+pub(super) use icon_explorer::install_font as install_icon_font;
 pub(super) use widgets::type_icon;
 // Rückfrage mit 3-Sekunden-Wartezeit auch im Terminal Hub (Sitzungen schließen, `app::closing`).
 pub(super) use ticket_state::countdown_secs;
@@ -127,6 +134,8 @@ enum Tab {
     WorkKinds,
     Templates,
     Quick,
+    /// Fälligkeits-Markierungen (Schwellen) des Projekts.
+    DueMarkers,
 }
 
 /// Rückmeldung unter den Reitern (Fehler rot, Erfolg gedämpft); verschwindet nach einigen Sekunden.
@@ -176,6 +185,10 @@ pub(super) struct PlanUi {
     releases: release_view::State,
     quick: quick_menu::State,
     quick_ed: quick_ed::State,
+    /// Verwalter der Fälligkeits-Schwellen (Reiter „Fälligkeit“).
+    due_mgr: due_ui::Manager,
+    /// Zählung (überfällig, markiert) je Projekt (Kennung 0 = einfache Todo-Liste) für den Kopf, mit Zeitpunkt.
+    due_counts: due_ui::Counts,
 }
 
 impl Default for PlanUi {
@@ -213,6 +226,8 @@ impl Default for PlanUi {
             releases: Default::default(),
             quick: Default::default(),
             quick_ed: Default::default(),
+            due_mgr: Default::default(),
+            due_counts: Default::default(),
         }
     }
 }
@@ -244,6 +259,7 @@ impl PlanUi {
 
     fn reload(&mut self, cx: &Cx) {
         self.dirty = false;
+        self.due_counts.invalidate();
         self.projects = list_projects(cx.conn).unwrap_or_default();
         if !self.projects.iter().any(|p| p.id == self.selected) {
             self.selected = self.projects.first().map(|p| p.id).unwrap_or(0);
@@ -331,6 +347,8 @@ impl PlanUi {
         let mut new_project = false;
         let mut pick: Option<i64> = None;
         let mut expert = self.expert;
+        self.due_counts.refresh(&db.conn, &self.projects);
+        let counts = self.due_counts.clone();
         egui::TopBottomPanel::top("tasks_head").exact_height(44.0).show_separator_line(false).frame(egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(14, 0))).show(ctx, |ui| {
             let rect = ui.max_rect();
             let toggle_w = 210.0;
@@ -362,12 +380,21 @@ impl PlanUi {
                                 if r.clicked() {
                                     pick = Some(p.id);
                                 }
+                                if !p.system {
+                                    due_ui::count_label(ui, counts.get(p.id), lang);
+                                }
                             }
                             if ui.add(egui::Button::new(format!("+ {}", lang.t("Neues Projekt", "New project"))).small()).on_hover_text(lang.t("Neues Projekt anlegen …", "Create a new project …")).clicked() {
                                 new_project = true;
                             }
                         });
                     });
+                });
+            }
+            if !self.expert {
+                // einfache Liste: „3 überfällig“ links im Kopf
+                ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| {
+                    due_ui::count_label(ui, counts.get(0), lang);
                 });
             }
             ui.painter().line_segment([Pos2::new(rect.left() - 14.0, rect.bottom() - 0.5), Pos2::new(rect.right() + 14.0, rect.bottom() - 0.5)], egui::Stroke::new(1.0_f32, Color32::from_white_alpha(16)));
@@ -461,6 +488,7 @@ impl PlanUi {
                 (Tab::Statuses, lang.t("Status", "Statuses")),
                 (Tab::Workflows, lang.t("Workflows", "Workflows")),
                 (Tab::Quick, lang.t("Schnellaktionen", "Quick actions")),
+                (Tab::DueMarkers, lang.t("Fälligkeit", "Due dates")),
             ]);
         }
         v.push((Tab::Links, lang.t("Verknüpfungstypen", "Link types")));
@@ -540,6 +568,7 @@ impl PlanUi {
                     Tab::WorkKinds => self.kinds_tab(ui, cx),
                     Tab::Templates => self.templates_tab(ui, cx),
                     Tab::Quick => self.quick_tab(ui, cx),
+                    Tab::DueMarkers => self.due_tab(ui, cx, &proj),
                 }
                 ui.add_space(40.0);
             });

@@ -5,7 +5,7 @@
 //! Ablauf: `Session::paste_user` hält den Text zurück, `show_pane` holt ihn ab (`Action::PasteAsk`), der Dialog
 //! erscheint in dem Fenster, in dem eingefügt wurde (Hauptfenster, weiteres Fenster oder abgedockte Sitzung).
 
-use super::closing::{confirm_window, Outcome};
+use super::closing::{confirm_window_keep, Outcome};
 use super::*;
 
 /// Wartender Text und wo die Rückfrage erscheint.
@@ -77,7 +77,7 @@ impl App {
         if secs > 0 {
             ctx.request_repaint_after(wait);
         }
-        let o = confirm_window(ctx, Id::new("paste_ask"), lang.t("Mehrere Zeilen einfügen?", "Paste multiple lines?"), lang.t("Einfügen", "Paste"), secs, lang, 460.0, |ui| {
+        let o = confirm_window_keep(ctx, Id::new("paste_ask"), lang.t("Mehrere Zeilen einfügen?", "Paste multiple lines?"), lang.t("Einfügen", "Paste"), None, secs, lang, 460.0, |ui| {
             ui.label(if lang == Lang::De {
                 format!("Der Text enthält Zeilenumbrüche ({lines} {}). Die Shell kann jede Zeile sofort als Befehl ausführen.", if lines == 1 { "Zeile" } else { "Zeilen" })
             } else {
@@ -98,7 +98,8 @@ impl App {
                 s.paste_now(&ask.text);
                 self.want_focus = Some(ask.id);
             }
-            Outcome::Cancel => self.want_focus = Some(ask.id),
+            // `Keep` gibt es nur mit zweitem Knopf (Schließen-Dialoge, #168).
+            Outcome::Cancel | Outcome::Keep => self.want_focus = Some(ask.id),
             Outcome::Open => self.paste_ask = Some(ask),
         }
     }

@@ -207,6 +207,124 @@ fn titles(c: &Connection, project: i64) -> Vec<(i64, String)> {
     st.query_map([project], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|x| x.unwrap()).collect()
 }
 
+#[test]
+fn due_dates_descriptions_and_thresholds_survive_the_roundtrip() {
+    let fx = Fx::new();
+    let c = &fx.c;
+    let fid = |t: i64, k: &str| crate::planning::builtin_fields::field_id(c, t, k).unwrap().unwrap();
+    let mut n = NewTicket::new(fx.project, fx.task, "Mit Termin");
+    n.values = vec![(fid(fx.task, "due"), json!("2026-11-20T14:30")), (fid(fx.task, "description"), json!("Text **fett**"))];
+    create_ticket(c, &n, &Source::ui()).unwrap();
+    let mut n = NewTicket::new(fx.project, fx.epic, "Nur Datum");
+    n.values = vec![(fid(fx.epic, "due"), json!("2026-12-01"))];
+    create_ticket(c, &n, &Source::ui()).unwrap();
+    let mut th = crate::due::default_thresholds();
+    th[1].tint = true;
+    th[1].marker.name = "Dringend".into();
+    th.push(crate::due::DueThreshold { under_minutes: 60, marker: crate::due::DueMarker { frame: crate::due::MarkerFrame::Hexagon, symbol: None, color: "#58A6E6".into(), name: String::new() }, tint: false });
+    crate::planning::projects::set_due_thresholds(c, fx.project, &th).unwrap();
+    let a = export_project(c, fx.project).unwrap();
+    assert_eq!(a.project.due_thresholds.as_deref(), Some(th.as_slice()));
+    let d = fresh();
+    let res = import(&d, &a);
+    let b = export_project(&d, res.project_id).unwrap();
+    assert_eq!(norm(a.clone()), norm(b));
+    assert_eq!(crate::planning::projects::due_thresholds(&d, res.project_id).unwrap(), th);
+    let dues = crate::planning::builtin_fields::due_map(&d, res.project_id).unwrap();
+    let mut v: Vec<&String> = dues.values().collect();
+    v.sort();
+    assert_eq!(v, vec!["2026-11-20T14:30", "2026-12-01"]);
+}
+
+#[test]
+fn a_backup_from_before_2_3_imports_with_built_in_fields_and_default_thresholds() {
+    let fx = Fx::new();
+    let c = &fx.c;
+    let desc = crate::planning::builtin_fields::field_id(c, fx.task, "description").unwrap().unwrap();
+    let mut n = NewTicket::new(fx.project, fx.task, "Alt");
+    n.values = vec![(desc, json!("Beschreibung von früher"))];
+    create_ticket(c, &n, &Source::ui()).unwrap();
+    // so sah eine Sicherung von 2.2 aus: ohne Schwellen und ohne Fälligkeitsfeld in den Typen
+    let mut v = serde_json::to_value(export_project(c, fx.project).unwrap()).unwrap();
+    v["project"].as_object_mut().unwrap().remove("due_thresholds");
+    for t in v["structure"]["types"].as_array_mut().unwrap() {
+        t["fields"].as_array_mut().unwrap().retain(|f| f["key"] != "due");
+    }
+    let old: ProjectDoc = serde_json::from_value(v).unwrap();
+    assert!(old.project.due_thresholds.is_none());
+    let d = fresh();
+    let res = import(&d, &old);
+    assert_eq!(crate::planning::projects::due_thresholds(&d, res.project_id).unwrap(), crate::due::default_thresholds(), "Projekt mit Vorlagen");
+    let t = crate::planning::tickets::ticket_by_key(&d, "PAN-1").unwrap();
+    let fs = crate::planning::fields::list_fields(&d, t.type_id).unwrap();
+    assert!(fs[0].is_description() && fs[1].is_due());
+    assert_eq!(crate::planning::values::get_value(&d, t.id, &fs[0]).unwrap(), Some(json!("Beschreibung von früher")));
+    // ohne Vorlagen-Typen: keine Schwellen
+    let mut v2 = serde_json::to_value(&old).unwrap();
+    for t in v2["structure"]["types"].as_array_mut().unwrap() {
+        t["key"] = serde_json::Value::Null;
+        if t["name"].is_null() {
+            t["name"] = json!(format!("Typ {}", t["id"]));
+        }
+    }
+    let old2: ProjectDoc = serde_json::from_value(v2).unwrap();
+    let res2 = import_project(&d, &old2, Some("OLD".to_string())).unwrap();
+    assert!(crate::planning::projects::due_thresholds(&d, res2.project_id).unwrap().is_empty());
+}
+
+#[test]
+fn an_old_backup_with_own_description_and_labels_fields_converts_them_like_the_update() {
+    let fx = Fx::new();
+    let c = &fx.c;
+    let fid = |k: &str| crate::planning::builtin_fields::field_id(c, fx.task, k).unwrap().unwrap();
+    let mut n = NewTicket::new(fx.project, fx.task, "Alt");
+    n.values = vec![(fid("description"), json!("Freitext")), (fid("labels"), json!(["a", "b"]))];
+    create_ticket(c, &n, &Source::ui()).unwrap();
+    // so hätte eine 2.2-Sicherung eines Projekts mit eigenen Feldern „Beschreibung“ (Text) und „Labels“ ausgesehen
+    let mut v = serde_json::to_value(export_project(c, fx.project).unwrap()).unwrap();
+    v["version"] = json!(2);
+    v["project"].as_object_mut().unwrap().remove("due_thresholds");
+    for t in v["structure"]["types"].as_array_mut().unwrap() {
+        let fs = t["fields"].as_array_mut().unwrap();
+        fs.retain(|f| f["key"] != "due");
+        for f in fs.iter_mut() {
+            if f["key"] == "description" {
+                f["key"] = serde_json::Value::Null;
+                f["name"] = json!("Beschreibung");
+                f["kind"] = json!("text");
+                f["options"] = json!({});
+                f["builtin"] = json!(false);
+            } else if f["key"] == "labels" {
+                f["key"] = serde_json::Value::Null;
+                f["name"] = json!("Labels");
+                f["builtin"] = json!(false);
+            }
+        }
+    }
+    let old: ProjectDoc = serde_json::from_value(v).unwrap();
+    let d = fresh();
+    let res = import(&d, &old);
+    let t = crate::planning::tickets::ticket_by_key(&d, &format!("{}-1", res.key)).unwrap();
+    let fs = crate::planning::fields::list_fields(&d, t.type_id).unwrap();
+    assert!(fs[0].is_description() && fs[1].is_due() && fs[2].is_labels(), "{:?}", fs.iter().map(|f| (&f.key, &f.name)).collect::<Vec<_>>());
+    assert!(fs.iter().all(|f| f.is_fixed() || !crate::planning::builtin_fields::is_builtin_label(&f.display(Lang::En))), "keine doppelten Namen");
+    assert_eq!(crate::planning::values::get_value(&d, t.id, &fs[0]).unwrap(), Some(json!("Freitext")));
+    assert_eq!(crate::planning::values::get_value(&d, t.id, &fs[2]).unwrap(), Some(json!(["a", "b"])));
+    // ein eigenes Feld „Due date“ einer alten Sicherung bekommt wie beim Update den Zusatz
+    let mut v = serde_json::to_value(&old).unwrap();
+    let ty = &mut v["structure"]["types"][0];
+    let mut extra = ty["fields"][0].clone();
+    extra["id"] = json!(9999);
+    extra["name"] = json!("Due date");
+    extra["kind"] = json!("date");
+    extra["key"] = serde_json::Value::Null;
+    ty["fields"].as_array_mut().unwrap().push(extra);
+    let old2: ProjectDoc = serde_json::from_value(v).unwrap();
+    let res2 = import_project(&d, &old2, Some("OLD".to_string())).unwrap();
+    let first_type = crate::planning::types::list_types(&d, res2.project_id).unwrap()[0].id;
+    assert!(crate::planning::fields::list_fields(&d, first_type).unwrap().iter().any(|f| f.name.as_deref() == Some("Due date (custom)")));
+}
+
 // ------------------------------------------------------------------ Export
 
 #[test]
@@ -858,7 +976,7 @@ fn version_1_documents_still_import_but_their_version_values_are_skipped() {
 fn versions_milestones_and_sprints_roundtrip_with_all_details() {
     let r = rich();
     let a = export(&r);
-    assert_eq!(a.version, 2);
+    assert_eq!(a.version, 3);
     assert_eq!(a.versions.iter().map(|v| (v.name.as_str(), v.done, v.due_date.as_deref())).collect::<Vec<_>>(), vec![("1.0", true, Some("2026-12-01")), ("2.0", false, None)]);
     assert!(a.versions[0].done_at.is_some() && a.versions[1].done_at.is_none());
     assert_eq!(a.versions[0].description, "Erste Version");
@@ -1274,4 +1392,27 @@ fn sqlite_turns_integer_overflow_into_a_float() {
     c.execute_batch("CREATE TABLE t (rank INTEGER); INSERT INTO t VALUES (9223372036854775807);").unwrap();
     let n: rusqlite::Result<i64> = c.query_row("SELECT MAX(rank) + 1 FROM t", [], |r| r.get(0));
     assert!(n.is_err(), "die Zahl ist als Ganzzahl nicht mehr lesbar");
+}
+
+#[test]
+fn lucide_icons_survive_the_backup_and_unknown_ones_do_not_stop_the_import() {
+    use crate::planning::types::{list_types, update_type, UpdateType};
+    let r = rich();
+    let c = &r.fx.c;
+    let note = list_types(c, r.fx.project).unwrap().into_iter().find(|t| t.name.as_deref() == Some("Note")).unwrap().id;
+    update_type(c, note, &UpdateType { icon: Some(Some("lucide:alarm-clock".into())), ..Default::default() }).unwrap();
+    // Ein Icon aus einer neueren Lucide-Version (formal richtig, hier unbekannt) wird gespeichert und bleibt erhalten.
+    update_type(c, r.fx.task, &UpdateType { icon: Some(Some("lucide:icon-from-a-newer-version".into())), ..Default::default() }).unwrap();
+    let a = export(&r);
+    let icons: Vec<Option<&str>> = a.structure.types.iter().map(|t| t.icon.as_deref()).collect();
+    assert!(icons.contains(&Some("lucide:alarm-clock")) && icons.contains(&Some("lucide:icon-from-a-newer-version")));
+    let back = ProjectDoc::from_json(&a.to_json()).unwrap();
+    let c2 = fresh();
+    let res = import(&c2, &back);
+    assert_eq!(norm(export_project(&c2, res.project_id).unwrap()), norm(a.clone()));
+    // Formal falsche Namen lehnt der Import ab (atomar).
+    let mut bad = a;
+    bad.structure.types.iter_mut().find(|t| t.icon.as_deref() == Some("lucide:alarm-clock")).unwrap().icon = Some("lucide:Alarm Clock".into());
+    let e = fails(&bad);
+    assert!(format!("{e:?}").contains("IconInvalid"), "{e:?}");
 }

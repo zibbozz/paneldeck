@@ -165,9 +165,25 @@ pub fn create_project(conn: &Connection, p: &NewProject) -> Res<i64> {
         let id = conn.last_insert_rowid();
         if p.with_defaults {
             defaults::apply(conn, id, p.use_versions)?;
+            // Projekte mit den mitgelieferten Typen bekommen die Standard-Schwellen der Fälligkeit
+            conn.execute("UPDATE projects SET due_thresholds = ?1 WHERE id = ?2", params![crate::due::DEFAULT_THRESHOLDS_JSON, id])?;
         }
         Ok(id)
     })
+}
+
+/// Schwellen der Fälligkeits-Markierung eines Projekts (lange zuerst; leer = keine Markierung).
+pub fn due_thresholds(conn: &Connection, id: i64) -> Res<Vec<crate::due::DueThreshold>> {
+    let json: String = conn.query_row("SELECT due_thresholds FROM projects WHERE id = ?1", [id], |r| r.get(0)).optional()?.ok_or(PlanError::NotFound)?;
+    Ok(crate::due::parse_thresholds(&json))
+}
+
+/// Schwellen setzen (geprüft: höchstens 10, Dauer > 0, keine doppelte Dauer). Nicht beim System-Projekt.
+pub fn set_due_thresholds(conn: &Connection, id: i64, list: &[crate::due::DueThreshold]) -> Res<()> {
+    editable(conn, id)?;
+    let list = crate::due::validate_thresholds(list).map_err(PlanError::Thresholds)?;
+    conn.execute("UPDATE projects SET due_thresholds = ?1 WHERE id = ?2", params![crate::due::thresholds_json(&list), id])?;
+    Ok(())
 }
 
 pub fn update_project(conn: &Connection, id: i64, u: &UpdateProject) -> Res<()> {

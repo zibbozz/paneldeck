@@ -150,8 +150,8 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
     ui.horizontal(|ui| {
         ui.label(RichText::new(lang.t("Sprache des Prompts:", "Prompt language:")).small());
         let before = *env.prompt_lang;
-        ui.selectable_value(env.prompt_lang, Lang::En, "English");
-        ui.selectable_value(env.prompt_lang, Lang::De, "Deutsch");
+        crate::afford::choice_value(ui, env.prompt_lang, Lang::En, "English", 0.0);
+        crate::afford::choice_value(ui, env.prompt_lang, Lang::De, "Deutsch", 0.0);
         if *env.prompt_lang != before {
             changed = true;
             ed.lang_changed(env.dir, *env.prompt_lang, lang);

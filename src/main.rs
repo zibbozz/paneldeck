@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod afford;
 mod app;
 mod backup;
 mod boxdraw;
@@ -7,6 +8,7 @@ mod calc;
 mod chat;
 mod claude_opts;
 mod db;
+mod due;
 mod clip;
 mod emoji;
 mod pathfmt;

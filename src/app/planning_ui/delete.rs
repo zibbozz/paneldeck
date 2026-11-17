@@ -361,7 +361,11 @@ mod tests {
         let f_to = create_field(&db.conn, &NewField::new(to, "Aufwand", FieldKind::Number)).unwrap();
         let mut d = dlg(Target::Type(from), 1, true, Some(to), Vec::new());
         d.refresh_map(&cx(&db.conn, &db));
-        assert_eq!(d.map, vec![FieldMapEntry { from_field: f_from, to_field: Some(f_to) }], "gleichnamiges Feld mit gleichem Feldtyp wird vorgeschlagen");
+        // die eingebauten Felder (Beschreibung, Fälligkeit) gehen auf die des Ersatz-Typs, dazu das gleichnamige Feld
+        let fixed = |t: i64| crate::planning::fields::list_fields(&db.conn, t).unwrap().into_iter().filter(|f| f.is_fixed()).map(|f| f.id).collect::<Vec<_>>();
+        let mut want: Vec<FieldMapEntry> = fixed(from).into_iter().zip(fixed(to)).map(|(a, b)| FieldMapEntry { from_field: a, to_field: Some(b) }).collect();
+        want.push(FieldMapEntry { from_field: f_from, to_field: Some(f_to) });
+        assert_eq!(d.map, want, "gleichnamiges Feld mit gleichem Feldtyp wird vorgeschlagen");
         test_hook::add("type", "SELECT 1 + 0 * ?1");
         d.execute(&cx(&db.conn, &db)).unwrap();
         let left: Vec<i64> = list_types(&db.conn, p).unwrap().iter().map(|t| t.id).collect();
