@@ -219,6 +219,13 @@ pub struct Settings {
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
     /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
     pub remember_sessions: bool,
+    /// Farbpaletten (seit 2.3.0, `palette`): gemeinsam oder je Bereich. Fehlt in älteren Dateien (dann die Vorgaben);
+    /// unveränderte Vorgaben werden nicht geschrieben, unlesbare Daten ergeben die Vorgaben.
+    #[serde(skip_serializing_if = "crate::palette::Palettes::is_default", deserialize_with = "crate::palette::Palettes::lenient")]
+    pub palette: crate::palette::Palettes,
+    /// Programme dürfen per OSC 52 in die Zwischenablage kopieren (seit 2.3.0, #181, Standard an). Lesen der
+    /// Zwischenablage durch Programme gibt es nie. Fehlt in älteren Dateien (dann an).
+    pub osc52_copy: bool,
     /// Standard-Startoptionen für neue Claude-Sitzungen (seit 2.3.0; leeres Feld = Standard von Claude Code). Gelten für
     /// Sitzungen aus der Oberfläche und über MCP, wenn nichts angegeben ist – `bypassPermissions` nie für Agenten.
     /// Nie `bypassPermissions` und nur gültige Namen (beim Schreiben bereinigt, beim Laden verworfen, siehe `sanitize`).
@@ -231,10 +238,21 @@ pub struct Settings {
     /// (Hinweis unter *Einstellungen → Claude*).
     #[serde(skip)]
     pub claude_bypass_dropped: bool,
+    /// Mitgelieferten Konsolen-Host (neuere ConPTY: `conpty.dll` + `OpenConsole.exe` neben `paneldeck.exe`) verwenden,
+    /// seit 2.3.0, Standard an. Aus oder Dateien fehlen: ConPTY von Windows. Wirkt für neue Sitzungen (`conpty`).
+    /// Fehlt in älteren Dateien (dann an); ein anderer Wert als `false` ergibt ebenfalls an.
+    #[serde(deserialize_with = "lenient_true")]
+    pub bundled_conpty: bool,
     /// Zuletzt im Ordner-Auswahlfeld benutzte WSL-Ordner je Distribution (seit 2.3.0, #172), neueste zuerst,
     /// begrenzt (`wsl::RECENT_MAX`). Fehlt in älteren Dateien; Unlesbares/Ungültiges wird beim Laden verworfen.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "lenient_wsl_recent")]
     pub wsl_recent: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Tolerant lesen: nur `false` schaltet aus, alles andere (auch ein falscher Typ) ist `true`.
+fn lenient_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_bool() != Some(false))
 }
 
 fn lenient_wsl_recent<'de, D: serde::Deserializer<'de>>(d: D) -> Result<std::collections::BTreeMap<String, Vec<String>>, D::Error> {
@@ -308,9 +326,12 @@ impl Default for Settings {
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,
+            palette: Default::default(),
+            osc52_copy: true,
             claude_defaults: Default::default(),
             last_claude_opts: None,
             claude_bypass_dropped: false,
+            bundled_conpty: true,
             wsl_recent: Default::default(),
         }
     }
@@ -1060,6 +1081,45 @@ mod tests {
         assert_eq!(j["remember_sessions"], false);
         let back: Settings = serde_json::from_value(j).unwrap();
         assert!(!back.remember_sessions);
+    }
+
+    #[test]
+    fn bundled_conpty_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „an“, die übrigen Werte bleiben.
+        let old = r#"{"language":"De","confirm_close":false,"remember_sessions":false}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.bundled_conpty);
+        assert!(!s.confirm_close && !s.remember_sessions);
+        assert!(Settings::default().bundled_conpty);
+        // Aus bleibt aus.
+        let mut s = s;
+        s.bundled_conpty = false;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["bundled_conpty"], false);
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(!back.bundled_conpty);
+        // Falscher Typ: an, die übrigen Einstellungen bleiben lesbar.
+        for bad in [r#""no""#, "0", "null", "{}"] {
+            let s: Settings = serde_json::from_str(&format!(r#"{{"language":"De","bundled_conpty":{bad}}}"#)).unwrap();
+            assert!(s.bundled_conpty, "{bad}");
+            assert_eq!(s.language, Lang::De);
+        }
+    }
+
+    #[test]
+    fn osc52_copy_back_compat_and_roundtrip() {
+        // settings.json von 2.2.0 (ohne das Feld) lädt mit „an“, die übrigen Werte bleiben.
+        let old = r#"{"language":"De","confirm_close":false}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.osc52_copy);
+        assert!(!s.confirm_close);
+        assert!(Settings::default().osc52_copy);
+        let mut s = s;
+        s.osc52_copy = false;
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["osc52_copy"], false);
+        let back: Settings = serde_json::from_value(j).unwrap();
+        assert!(!back.osc52_copy);
     }
 
     #[test]

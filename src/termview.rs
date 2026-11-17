@@ -31,11 +31,9 @@ pub fn show(
     cwd: &str,
     alt_wheel: crate::state::AltScreenWheel,
 ) -> Response {
+    // Kein eigener Zeiger (Pfeil; Entscheidung #187): Knöpfe über dem Terminal (Suche, „Neu starten“) bekommen so die Hand
+    // vom globalen Nachlauf (`afford`), ein Verweis mit Strg setzt sie unten selbst.
     let response = ui.interact(rect, id, Sense::click_and_drag());
-    // Terminal = Text: I-Balken beim Überfahren und Markieren (ein Verweis mit Strg setzt danach die Hand, #187).
-    if response.hovered() || response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-    }
     if response.clicked() || response.drag_started() || response.secondary_clicked() {
         response.request_focus();
     }

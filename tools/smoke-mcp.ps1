@@ -29,7 +29,17 @@ param(
   [string]$WorkRoot = $env:TEMP,
   # Schutzpruefung streng: jede Aenderung von ~/.claude.json bzw. ~/.claude/settings.json ist ein Fehler (sonst nur,
   # wenn sie den Testordner nennt - ein gleichzeitig laufendes, echtes Claude Code schreibt ~/.claude.json laufend)
-  [switch]$StrictClaudeConfig
+  [switch]$StrictClaudeConfig,
+  # Konsolen-Host (#183): conpty.dll + OpenConsole.exe neben -Exe werden mitkopiert (tools\fetch-conpty.ps1 -Dest <ordner der exe>).
+  #   auto    = Standardeinstellung; mitgelieferte ConPTY, wenn die Dateien da sind
+  #   bundled = wie auto, aber die Dateien muessen da sein und genutzt werden
+  #   system  = Einstellung "Mitgelieferten Konsolen-Host verwenden" aus (Dateien liegen trotzdem daneben)
+  [ValidateSet('auto', 'bundled', 'system')][string]$ConPty = 'auto',
+  # Ordner mit conpty.dll + OpenConsole.exe (Standard: der Ordner von -Exe); release.sh gibt dist\conpty an
+  [string]$ConPtyDir = '',
+  # OSC-52-Pruefung (#181) auslassen: sie setzt kurz die echte Windows-Zwischenablage (Text wird gesichert und
+  # wiederhergestellt, eine Zwischenablage mit anderen als reinen Textformaten bleibt ohnehin unberuehrt)
+  [switch]$NoClipboard
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -37,6 +47,14 @@ New-Item -ItemType Directory -Force $WorkRoot | Out-Null
 $work = Join-Path $WorkRoot ("hubsmoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $dir = New-Item -ItemType Directory -Force "$work\hub"; $proj = New-Item -ItemType Directory -Force "$work\proj"
 Copy-Item $Exe "$dir\paneldeck.exe"
+$exeDir = if ($ConPtyDir) { $ConPtyDir } else { Split-Path $Exe }
+$hasConPty = (Test-Path "$exeDir\conpty.dll") -and (Test-Path "$exeDir\OpenConsole.exe")
+if ($hasConPty) { Copy-Item "$exeDir\conpty.dll", "$exeDir\OpenConsole.exe" $dir }
+if ($ConPty -eq 'bundled' -and -not $hasConPty) { Write-Host "-ConPty bundled: conpty.dll/OpenConsole.exe fehlen in $exeDir (tools\fetch-conpty.ps1 -Dest $exeDir)" -ForegroundColor Red; exit 1 }
+$useBundled = $hasConPty -and $ConPty -ne 'system'
+Write-Host ("Konsolen-Host: " + $(if ($useBundled) { 'mitgeliefert (OpenConsole)' } elseif ($ConPty -eq 'system') { 'Windows (Einstellung aus)' } else { 'Windows (keine mitgelieferten Dateien)' })) -ForegroundColor DarkGray
+# Arbeitsordner des naechsten Hub-Starts (Set-Level), sonst der des Skripts.
+$script:hubCwd = $null
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
@@ -54,6 +72,9 @@ $tag = Split-Path -Leaf $work
 $fakebin = New-FakeClaudeBin "$work\fakebin"
 $calls = "$fakebin\calls.txt"; $inputs = "$fakebin\input.txt"
 $script:iso = Enter-IsolatedTestEnv $work $fakebin
+# OSC 52 (#181): Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren. Der Test-Hub laeuft minimiert und ohne
+# Fokus, deshalb hebt diese Variable (nur in der Umgebung der Test-Hubs) die Fokus-Regel auf; siehe src\app\osc52.rs.
+$env:PANELDECK_TEST_OSC52_ANY_FOCUS = '1'
 Write-Host "Isolation: USERPROFILE=$env:USERPROFILE, claude -> $((Get-Command claude -CommandType Application).Source)" -ForegroundColor DarkGray
 # Die Terminals des Hubs bekommen ihre Umgebung von portable-pty frisch aus der Registry (echter PATH mit ~/.local/bin).
 # Deshalb laeuft jede Sitzung ueber das Profil 1 "Smoke-Isolation" (Standardprofil jedes Projekts, auch jeder
@@ -88,26 +109,59 @@ function Check($name, [bool]$ok, $detail = '') {
 # Pruefung, die in diesem Build nicht moeglich ist (z. B. Funktion eines anderen Teils fehlt): weder bestanden noch fehlgeschlagen.
 $script:skip = 0
 function Skip($name, $why) { $script:skip++; Write-Host "  skip  $name  ($why)" -ForegroundColor Yellow }
+# OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
+# Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
+# inzwischen niemand anderes etwas kopiert hat). Enthaelt sie andere als reine Textformate (Bild, Dateien, HTML, RTF ...), wird die
+# Pruefung uebersprungen und die Zwischenablage nicht angefasst. -NoClipboard ueberspringt sie immer.
+function Test-Osc52([int]$sid, [string]$sh) {
+  $name = "OSC 52: Programm in $sh kopiert in die Windows-Zwischenablage"
+  if ($NoClipboard) { Skip $name '-NoClipboard'; return }
+  Add-Type -AssemblyName System.Windows.Forms
+  $C = [System.Windows.Forms.Clipboard]
+  try {
+    # Nur reine Textformate (leere Zwischenablage = keine Formate) - alles andere ginge beim Wiederherstellen verloren.
+    $textOnly = @('Text', 'UnicodeText', 'OEMText', 'Locale', 'System.String')
+    $obj = $C::GetDataObject()
+    $formats = if ($obj) { @($obj.GetFormats()) } else { @() }
+    $other = @($formats | Where-Object { $textOnly -notcontains $_ })
+    if ($other.Count -gt 0) {
+      Skip $name "Zwischenablage enthaelt andere Formate ($($other -join ', ')) und bleibt unberuehrt"; return
+    }
+    $had = $C::ContainsText(); $saved = if ($had) { $C::GetText() } else { '' }
+  } catch { Skip $name "Zwischenablage nicht lesbar: $($_.Exception.Message)"; return }
+  $marker = 'hello-osc52-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+  $cmd = if ($sh -eq 'gitbash') { "printf '\033]52;c;%s\a' `"`$(printf $marker | base64)`"" }
+         else { '$b = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(''' + $marker + ''')); [Console]::Write("$([char]27)]52;c;$b$([char]7)")' }
+  $r = Tool 'run_command' @{ session = $sid; command = $cmd; timeout_secs = 25 }
+  $got = ''
+  for ($i = 0; $i -lt 50 -and $got -ne $marker; $i++) { Start-Sleep -Milliseconds 100; try { $got = $C::GetText() } catch { } }
+  Check $name ($got -eq $marker) "Zwischenablage: '$got', run_command: $($r.text)"
+  try {
+    if ($C::GetText() -eq $marker) { if ($had) { $C::SetText($saved) } else { $C::Clear() } }
+  } catch { Write-Host "  Hinweis: Zwischenablage nicht wiederhergestellt: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
 function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   Stop-Hub
   $f = "$data\settings.json"
   New-Item -ItemType Directory -Force "$data" | Out-Null
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
+  if ($ConPty -eq 'system') { $j | Add-Member -Force bundled_conpty $false }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
   # -Empty: ohne gespeicherte Sitzungen (Set-IsolationProfile legt dann einen state.json nur mit dem Projekt an)
   if ($Empty) { Remove-Item -LiteralPath "$data\state.json" -ErrorAction SilentlyContinue }
   Set-IsolationProfile
   $style = if ($Visible) { 'Normal' } else { 'Minimized' }
+  $cwdArg = if ($script:hubCwd) { @{ WorkingDirectory = $script:hubCwd } } else { @{} }
   # Paneldeck startet ohne Terminal (#111); sonst eine Sitzung des Nutzers per --open anlegen (wie ein Start aus dem Explorer).
   if ($Empty) {
-    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style @cwdArg
   } elseif ($Tray) {
     # Vorbereiteten state.json behalten; mit --tray bleiben auch wiederhergestellte weitere Fenster verborgen (#110).
-    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--tray'
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--tray' @cwdArg
   } else {
-    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--open', "`"$proj`""
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style -ArgumentList '--open', "`"$proj`"" @cwdArg
   }
   $t0 = Get-Date
   while (-not (Test-Path "$data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
@@ -221,6 +275,7 @@ try {
       Check "run_command $sh (Exit 1, leere Ausgabe)" ($r.data.exit_code -eq 1 -and $r.data.output -eq '') $r.text
       $r = Tool 'run_command' @{ session = $id; command = 'printf "x\ny\n"'; timeout_secs = 25 }
       Check "run_command $sh (zweiter Befehl sauber)" ($r.data.output -eq "x`ny") $r.text
+      Test-Osc52 $id $sh
     } else {
       $r = Tool 'run_command' @{ session = $id; command = 'echo hallo-ps'; timeout_secs = 25 }
       Check "run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'hallo-ps') $r.text
@@ -235,6 +290,7 @@ try {
       $long = 'Write-Output hallo-lang # ' + ('z' * 220)
       $r = Tool 'run_command' @{ session = $id; command = $long; timeout_secs = 25 }
       Check "run_command $sh (langer Befehl: Ausgabe exakt)" ($r.data.output -eq 'hallo-lang' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+      Test-Osc52 $id $sh
       $r = Tool 'run_command' @{ session = $id; command = 'Start-Sleep 4'; timeout_secs = 1 }
       Check "run_command $sh (Zeitlimit)" ($r.data.timed_out -eq $true -and -not $r.data.finished) $r.text
       Start-Sleep 5
@@ -1014,6 +1070,124 @@ c.close()
   $ss = @((Tool 'list_sessions').data.sessions)
   $mn = $ss | Where-Object { $_.id -eq 960 }
   Check 'focus_session auf eine sichtbare Sitzung minimiert nichts' (-not $fr.err -and $mn.minimized -eq $true -and @($ss | Where-Object { $_.minimized }).Count -eq 1) ($ss | ConvertTo-Json -Compress)
+
+  Write-Host "== Konsolen-Host und DLL-Suche (#183)" -ForegroundColor Cyan
+  # Eine ladbare conpty.dll im Arbeitsordner des Hubs (wie "In Paneldeck oeffnen" auf einem fremden Ordner) darf nie
+  # geladen werden: DLLs nur aus dem Programmordner und System32, die mitgelieferte ConPTY nur per vollem Pfad.
+  $plant = New-Item -ItemType Directory -Force "$work\plant"
+  function Start-ConPtyHub {
+    $script:hubCwd = "$plant"
+    Set-Level 'Control' -Empty
+    $script:hubCwd = $null
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  }
+  function Get-HubConPty {
+    $all = @((Get-Process -Id $script:hub.Id).Modules | ForEach-Object { $_.FileName })
+    [pscustomobject]@{
+      All  = $all
+      Dlls = @($all | Where-Object { (Split-Path -Leaf $_) -eq 'conpty.dll' })
+      Kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($script:hub.Id)" | Where-Object { $_.Name -eq 'OpenConsole.exe' })
+    }
+  }
+  if ($hasConPty) {
+    Copy-Item "$dir\conpty.dll" "$plant\conpty.dll"
+    # A: ohne mitgelieferte Dateien neben der .exe (aeltere Installation). Frueher lud portable-pty "conpty.dll" per Name
+    #    ueber die Suchreihenfolge - mit dem Arbeitsordner darin.
+    Rename-Item "$dir\conpty.dll" 'conpty.dll.off'; Rename-Item "$dir\OpenConsole.exe" 'OpenConsole.exe.off'
+    try {
+      Start-ConPtyHub
+      $c = Tool 'create_session' @{ shell = 'cmd'; cwd = "$plant"; name = 'smoke-plant' }
+      Check 'DLL-Suche: create_session im Ordner mit fremder conpty.dll' (-not $c.err) $c.text
+      if (-not $c.err) {
+        Start-Sleep 3
+        $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $c.data.id })
+        Check 'DLL-Suche: ohne mitgelieferte Dateien console_host = system' ($me.Count -eq 1 -and $me[0].console_host -eq 'system') ($me | ConvertTo-Json -Compress)
+        $r = Tool 'run_command' @{ session = $c.data.id; command = 'echo plant-ok'; timeout_secs = 25 }
+        Check 'DLL-Suche: Sitzung laeuft (ConPTY von Windows)' ($r.data.finished -and $r.data.output.Trim() -eq 'plant-ok') $r.text
+      }
+      $h = Get-HubConPty
+      Check 'DLL-Suche: conpty.dll aus dem Arbeitsordner nicht geladen (keine conpty.dll, kein OpenConsole.exe)' ($h.Dlls.Count -eq 0 -and $h.Kids.Count -eq 0) "dlls=$($h.Dlls -join ', ') kids=$($h.Kids.Count)"
+      Stop-Hub
+    } finally {
+      Rename-Item "$dir\conpty.dll.off" 'conpty.dll'; Rename-Item "$dir\OpenConsole.exe.off" 'OpenConsole.exe'
+    }
+    # B: mit mitgelieferten Dateien; Einstellung je nach -ConPty.
+    Start-ConPtyHub
+    foreach ($sh in @('cmd', 'powershell')) {
+      $c = Tool 'create_session' @{ shell = $sh; cwd = "$plant"; name = "smoke-conpty-$sh" }
+      Check "ConPTY: create_session $sh" (-not $c.err) $c.text
+      if ($c.err) { continue }
+      Start-Sleep 3
+      $want = if ($useBundled) { 'bundled' } else { 'system' }
+      $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $c.data.id })
+      Check "ConPTY: list_sessions console_host = $want ($sh)" ($me.Count -eq 1 -and $me[0].console_host -eq $want) ($me | ConvertTo-Json -Compress)
+      $r = Tool 'run_command' @{ session = $c.data.id; command = 'echo conpty-ok'; timeout_secs = 25 }
+      Check "ConPTY: run_command $sh (Ausgabe)" ($r.data.finished -and $r.data.output.Trim() -eq 'conpty-ok') "out='$($r.data.output)' q=$($r.data.quality)"
+      $r = Tool 'run_command' @{ session = $c.data.id; command = 'cmd /c exit 4'; timeout_secs = 25 }
+      if ($sh -eq 'cmd') { Check 'ConPTY: run_command cmd (Befehl beendet)' ($r.data.finished) $r.text }
+      else { Check 'ConPTY: run_command powershell (Exit-Code 4)' ($r.data.exit_code -eq 4) $r.text }
+    }
+    # Git Bash und Vollbildprogramme (alternativer Bildschirm) ueber die gewaehlte ConPTY.
+    if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {
+      $g = Tool 'create_session' @{ shell = 'gitbash'; cwd = "$plant"; name = 'smoke-conpty-bash' }
+      Check 'ConPTY: create_session gitbash' (-not $g.err) $g.text
+      if (-not $g.err) {
+        $gid = $g.data.id; Start-Sleep 4
+        $r = Tool 'run_command' @{ session = $gid; command = 'echo bash-ok'; timeout_secs = 25 }
+        Check 'ConPTY: run_command gitbash (Ausgabe)' ($r.data.finished -and $r.data.output.Trim() -eq 'bash-ok') $r.text
+        $r = Tool 'run_command' @{ session = $gid; command = 'false'; timeout_secs = 25 }
+        Check 'ConPTY: run_command gitbash (Exit 1)' ($r.data.exit_code -eq 1) $r.text
+        [IO.File]::WriteAllLines("$plant\zeilen.txt", [string[]](1..300 | ForEach-Object { "zeile-$_" }))
+        [void](Tool 'send_text' @{ session = $gid; text = 'less zeilen.txt' })
+        Start-Sleep 2
+        $scr = (Tool 'read_terminal' @{ session = $gid; screen = $true }).data.text
+        Check 'ConPTY: less im alternativen Bildschirm zeigt die Datei' ($scr -match 'zeile-1\b' -and $scr -notmatch 'bash-ok') $scr
+        [void](Tool 'send_text' @{ session = $gid; text = 'q'; submit = $false })
+        Start-Sleep 1
+        $r = Tool 'run_command' @{ session = $gid; command = 'echo nach-less'; timeout_secs = 15 }
+        Check 'ConPTY: nach less zurueck in der Shell' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-less') $r.text
+        if (Test-Path "$env:ProgramFiles\Git\usr\bin\vim.exe") {
+          # vim beendet sich selbst (send_text ist ein Einfuegen und landete in vim als Text).
+          [void](Tool 'send_text' @{ session = $gid; text = 'vim -u NONE -c redraw -c "sleep 4" -c "qa!" zeilen.txt' })
+          Start-Sleep 2
+          $scr = (Tool 'read_terminal' @{ session = $gid; screen = $true }).data.text
+          Check 'ConPTY: vim zeigt die Datei' ($scr -match 'zeile-1\b') $scr
+          Start-Sleep 4
+          $r = Tool 'run_command' @{ session = $gid; command = 'echo nach-vim'; timeout_secs = 15 }
+          Check 'ConPTY: nach vim zurueck in der Shell' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-vim') $r.text
+        }
+      }
+    }
+    # WSL (falls eine Distribution eingerichtet ist; docker-desktop-Distributionen haben keine Shell).
+    $distro = @(& wsl.exe -l -q 2>$null | ForEach-Object { ($_ -replace "`0", '').Trim() } | Where-Object { $_ -and $_ -notlike 'docker-desktop*' }) | Select-Object -First 1
+    if ($distro) {
+      $w = Tool 'create_session' @{ shell = "wsl:$distro"; cwd = "$plant"; name = 'smoke-conpty-wsl' }
+      Check "ConPTY: create_session wsl:$distro" (-not $w.err) $w.text
+      if (-not $w.err) {
+        # Ein kalter WSL-Start kann dauern: warten, bis die Shell-Integration da ist.
+        $t0 = Get-Date
+        do {
+          Start-Sleep 3
+          $r = Tool 'run_command' @{ session = $w.data.id; command = 'echo wsl-ok'; timeout_secs = 40 }
+        } while ((Code $r) -eq 'no_shell_integration' -and ((Get-Date) - $t0).TotalSeconds -lt 60)
+        Check 'ConPTY: run_command wsl (Ausgabe)' ($r.data.finished -and $r.data.output.Trim() -eq 'wsl-ok') $r.text
+      }
+    } else { Skip 'ConPTY: WSL' 'keine WSL-Distribution' }
+    $h = Get-HubConPty
+    # Zur Diagnose der eingeschraenkten DLL-Suche: Module ausserhalb von System32/WinSxS (Grafiktreiber, Erweiterungen).
+    $foreign = @($h.All | Where-Object { $_ -notlike "$env:SystemRoot\System32\*" -and $_ -notlike "$env:SystemRoot\WinSxS\*" })
+    Write-Host "      Module ausserhalb System32 ($($h.All.Count) gesamt): $($foreign -join '; ')" -ForegroundColor DarkGray
+    Check 'DLL-Suche: OpenGL geladen (Darstellung laeuft)' ([bool]($h.All | Where-Object { $_ -like '*\opengl32.dll' }))
+    Check 'DLL-Suche: conpty.dll aus dem Arbeitsordner nicht geladen' (-not ($h.Dlls | Where-Object { $_ -like "$plant\*" })) ($h.Dlls -join ', ')
+    if ($useBundled) {
+      Check 'Mitgelieferte conpty.dll aus dem Programmordner geladen' ($h.Dlls -contains "$dir\conpty.dll") ($h.Dlls -join ', ')
+      Check 'OpenConsole.exe aus dem Programmordner ist Konsolen-Host der Sitzungen' ($h.Kids.Count -ge 2 -and -not ($h.Kids | Where-Object { $_.ExecutablePath -ne "$dir\OpenConsole.exe" })) (($h.Kids | ForEach-Object ExecutablePath) -join ', ')
+    } else {
+      Check 'Einstellung aus: keine conpty.dll geladen, kein OpenConsole.exe' ($h.Dlls.Count -eq 0 -and $h.Kids.Count -eq 0) "dlls=$($h.Dlls -join ', ') kids=$($h.Kids.Count)"
+    }
+  } else {
+    Skip 'Konsolen-Host und DLL-Suche' 'keine conpty.dll/OpenConsole.exe neben der .exe (tools\fetch-conpty.ps1)'
+  }
 } catch {
   # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.
   $script:fail++; Write-Host "  ABBRUCH  $($_.Exception.Message)" -ForegroundColor Red

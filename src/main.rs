@@ -18,12 +18,14 @@ mod history;
 mod hooks;
 mod cli;
 mod console;
+mod conpty;
 mod help;
 mod integration;
 mod launch;
 mod keys;
 mod notify;
 mod osc;
+mod palette;
 mod paths;
 mod planning;
 mod prompts;
@@ -127,6 +129,8 @@ fn early_lang(arg: Option<state::Lang>, cli: &cli::Cli) -> state::Lang {
 }
 
 fn main() -> eframe::Result<()> {
+    // Zuerst: DLLs nur noch aus Programmordner und System32 laden, nie aus dem Arbeitsordner (#183).
+    conpty::harden_dll_search();
     // Hook-Aufrufe von Claude Code (`--hook`) MÜSSEN vor der Einzelinstanz-Weiterleitung behandelt werden:
     // sie laufen mit demselben Datenordner wie die laufende App und dürfen nicht als „Fenster zeigen“ enden.
     if cli::is_hook_invocation(&std::env::args().collect::<Vec<_>>()) {

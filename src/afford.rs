@@ -4,13 +4,14 @@
 //!   aktivierten Element, das nur Klicks annimmt (egui-Buttons, auswählbare Einträge, Kontrollkästchen, Auswahllisten,
 //!   aufklappbare Überschriften, Menüeinträge, eigene `Sense::click()`-Flächen …), und hat in diesem Bild niemand einen
 //!   anderen Zeiger gesetzt (Textfeld, markierbarer Text, Größe ändern, Ziehen), wird der Zeiger zur Hand. Neue
-//!   Oberfläche bekommt das damit von selbst.
-//! - Elemente, die auch Ziehen annehmen (Sitzungszeilen, Karten), und klickbarer markierbarer Text setzen den Zeiger
-//!   selbst: [`Clickable::pointer`] bzw. [`Clickable::clickable`] (Zeiger + Tooltip).
-//! - Große Klickflächen, die kein Knopf sind (Hintergrund eines Chats, Absätze mit Verweisen, Kopfzeile eines Bereichs,
-//!   Fensterknöpfe), nehmen sich mit [`Clickable::no_pointer`] aus.
+//!   Oberfläche mit reinen Klick-Elementen bekommt das damit von selbst.
+//! - Nicht automatisch erfasst werden Elemente, die auch Ziehen annehmen (`Sense::click_and_drag`: Sitzungszeilen,
+//!   Karten), und `Label`s mit `Sense::click` (markierbarer Text: egui setzt dort den I-Balken). Sie rufen
+//!   [`Clickable::pointer`] bzw. [`Clickable::clickable`] (Zeiger + Tooltip) selbst auf.
+//! - Große Klickflächen, die kein Knopf sind (Hintergrund eines Chats, Absätze mit Verweisen, Kreisdiagramm, Kopfzeile
+//!   eines Bereichs), nehmen sich mit [`Clickable::no_pointer`] aus.
 //! - Gemeinsamer Hover-Stil: [`hover_fill`]; Bausteine: [`choice`]/[`choice_value`] (Auswahl als echte Knöpfe),
-//!   [`link_button`] (versteckte Aktion als kleiner Knopf), [`swatch`] (Farbfeld).
+//!   [`link_button`] (versteckte Aktion als kleiner Knopf).
 
 use crate::style;
 use eframe::egui::{self, Color32, Context, CursorIcon, Id, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, ViewportId, WidgetText};
@@ -44,7 +45,14 @@ fn end_pass(ctx: &Context) {
         return; // Jemand hat schon entschieden (Textfeld, Ziehen, Größe ändern, Verweis im Terminal …).
     }
     let (vp, pass) = (ctx.viewport_id(), ctx.cumulative_pass_nr());
-    let skip: HashSet<Id> = NO_POINTER.with(|m| m.borrow().get(&vp).filter(|(p, _)| *p == pass).map(|(_, s)| s.clone()).unwrap_or_default());
+    // Eintrag dieses Fensters verbrauchen; Einträge anderer Fenster nur behalten, solange deren Durchgang noch läuft
+    // (Hauptfenster während eines eingebetteten Fensters) – alte Durchgänge und geschlossene Fenster fallen weg.
+    let skip: HashSet<Id> = NO_POINTER.with(|m| {
+        let mut m = m.borrow_mut();
+        let mine = m.remove(&vp).filter(|(p, _)| *p == pass).map(|(_, s)| s).unwrap_or_default();
+        m.retain(|other, (p, _)| ctx.cumulative_pass_nr_for(*other) == *p);
+        mine
+    });
     let hand = ctx.viewport(|v| {
         v.interact_widgets.hovered.iter().any(|id| {
             !skip.contains(id) && v.this_pass.widgets.get(*id).or_else(|| v.prev_pass.widgets.get(*id)).is_some_and(button_like)
@@ -104,6 +112,11 @@ pub fn hover_fill(ui: &Ui, rect: Rect, resp: &Response, radius: f32) -> f32 {
 /// gewählt in der Auswahlfarbe. Ersatz für `selectable_label` in Reihen nebeneinander (Stufen, Sprache, Modus).
 /// `min_w`: Mindestbreite (0 = nach Text), damit untereinanderstehende Knöpfe gleich breit sind.
 pub fn choice(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>, min_w: f32) -> Response {
+    let mut text: WidgetText = text.into();
+    if selected {
+        // egui färbt gewählten Text in der Akzentfarbe – im hellen Thema auf der Akzentfläche schlecht lesbar.
+        text = text.color(ui.visuals().strong_text_color());
+    }
     ui.add(egui::Button::new(text).selected(selected).frame(true).frame_when_inactive(true).min_size(Vec2::new(min_w, 0.0)))
 }
 
@@ -143,19 +156,6 @@ pub fn link_button(ui: &mut Ui, text: &str, color: Color32, tip: &str) -> Respon
 pub fn link_button_width(ui: &Ui, text: &str) -> f32 {
     let g = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(11.5), Color32::PLACEHOLDER);
     8.0 + g.size().x + 6.0 + 5.0 + 7.0
-}
-
-/// Farbfeld (18 px) zum Anklicken: beim Überfahren ein Ring und die Hand, gewählt mit kräftigem Rahmen.
-pub fn swatch(ui: &mut Ui, color: Color32, selected: bool) -> Response {
-    let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-    let h = style::anim(ui.ctx(), resp.id.with("afford_h"), resp.hovered(), style::D_FAST);
-    ui.painter().rect_filled(r, 4.0, color);
-    if selected {
-        ui.painter().rect_stroke(r.expand(2.0), 5.0, Stroke::new(1.5_f32, ui.visuals().strong_text_color()), StrokeKind::Outside);
-    } else if h > 0.0 {
-        ui.painter().rect_stroke(r.expand(2.0), 5.0, Stroke::new(1.5_f32, ui.visuals().widgets.hovered.bg_stroke.color.gamma_multiply(h)), StrokeKind::Outside);
-    }
-    resp.pointer()
 }
 
 #[cfg(test)]
@@ -320,9 +320,44 @@ pub mod tests {
         assert!(!tooltip_at(Pos2::new(700.0, 500.0), &mut f), "ohne Überfahren kein Tooltip");
     }
 
+    /// Knöpfe über einer Zieh-Fläche (Suche/„Neu starten“ über dem Terminal) bekommen die Hand, die Fläche selbst nicht.
     #[test]
-    fn swatch_shows_hand() {
-        let p = rect_of(&mut |ui| swatch(ui, Color32::RED, false).rect).center();
-        assert_eq!(cursor_at(p, &mut |ui| { swatch(ui, Color32::RED, false); }), CursorIcon::PointingHand);
+    fn button_over_a_drag_area_gets_the_hand() {
+        let b = Rect::from_min_size(Pos2::new(300.0, 30.0), Vec2::new(60.0, 24.0));
+        let mut draw = |ui: &mut Ui| {
+            let area = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(400.0, 300.0));
+            ui.interact(area, Id::new("term"), Sense::click_and_drag());
+            let _ = ui.put(b, egui::Button::new("Restart"));
+        };
+        assert_eq!(cursor_at(b.center(), &mut draw), CursorIcon::PointingHand, "Knopf über dem Terminal");
+        assert_eq!(cursor_at(Pos2::new(100.0, 200.0), &mut draw), CursorIcon::Default, "Terminal selbst: Pfeil");
+    }
+
+    /// Ausnahmen alter Durchgänge und fremder (geschlossener) Fenster werden nicht aufgehoben.
+    #[test]
+    fn no_pointer_entries_do_not_pile_up() {
+        let p = rect_of(&mut |ui| ui.allocate_exact_size(Vec2::splat(30.0), Sense::click()).0).center();
+        let mut f = |ui: &mut Ui| {
+            ui.allocate_exact_size(Vec2::splat(30.0), Sense::click()).1.no_pointer();
+        };
+        NO_POINTER.with(|m| m.borrow_mut().insert(ViewportId::from_hash_of("closed"), (7, HashSet::from([Id::new("x")]))));
+        assert_eq!(cursor_at(p, &mut f), CursorIcon::Default);
+        NO_POINTER.with(|m| assert!(m.borrow().is_empty(), "nach dem Durchgang leer: {:?}", m.borrow().keys().collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn selected_choice_uses_the_strong_text_color() {
+        let ctx = Context::default();
+        ctx.set_visuals(egui::Visuals::light());
+        let mut t = 0.0;
+        let out = frame_with(&ctx, &mut t, vec![], &mut |ui| {
+            choice(ui, true, "Control", 0.0);
+        });
+        let strong = ctx.style().visuals.strong_text_color();
+        let accent = ctx.style().visuals.selection.stroke.color;
+        let text_colors: Vec<Color32> = out.shapes.iter().filter_map(|c| if let egui::Shape::Text(t) = &c.shape { Some(t.galley.job.sections.first().map(|s| s.format.color).unwrap_or(t.fallback_color)) } else { None }).collect();
+        assert!(!text_colors.is_empty());
+        assert!(text_colors.iter().all(|c| *c == strong || *c != accent), "Text: {text_colors:?}, stark {strong:?}");
+        assert!(text_colors.contains(&strong), "Text: {text_colors:?}, stark {strong:?}");
     }
 }

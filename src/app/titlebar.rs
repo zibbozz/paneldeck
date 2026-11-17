@@ -87,9 +87,8 @@ impl App {
                 self.update_title_button(ui, bx); // Update-Knopf links neben Minimieren (update/ui.rs)
                 for (i, icon) in [SIcon::Minimize, if maximized { SIcon::Restore } else { SIcon::Maximize }, SIcon::Close].into_iter().enumerate() {
                     let r = Rect::from_min_size(Pos2::new(bx, rect.top()), Vec2::new(bw, BAR_HEIGHT));
-                    // Fensterknöpfe wie unter Windows üblich mit Pfeil (der Maximieren-Knopf gehört für die Snap-Layouts ohnehin
-                    // dem System); alle drei gleich (#187).
-                    let resp = crate::afford::Clickable::no_pointer(ui.interact(r, Id::new(("titlebar_btn", i)), Sense::click()));
+                    // Hand wie bei allen Knöpfen (#187); über dem Maximieren-Knopf entscheidet im Hauptfenster das System (Snap-Layouts).
+                    let resp = ui.interact(r, Id::new(("titlebar_btn", i)), Sense::click());
                     let close = i == 2;
                     // Maximieren-Knopf: Rechteck ans System melden (Snap-Layouts); dort kommt der Hover nicht mehr von egui.
                     // Nur im Hauptfenster: weitere Fenster haben keine eigene Fensterprozedur (dort ohne Snap-Layouts).

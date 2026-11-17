@@ -22,6 +22,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Standardordner von Baumordnern und Projekten mit WSL-Shell lassen sich als Linux-Pfad wählen; „Hier öffnen“ im Explorer auf einem `\\wsl.localhost\<Distro>\…`-Ordner öffnet eine WSL-Sitzung dieser Distribution im passenden Linux-Pfad. (#172)
 - MCP `create_session` nimmt als `cwd` einen Linux-Pfad an, wenn die Sitzung in WSL startet (absolut oder `~`). Der Ordner wird vorher in WSL geprüft: `bad_args`, wenn er fehlt, und ein neues Ergebnisfeld `cwd_checked` (`false` = WSL hat nicht rechtzeitig geantwortet; die Sitzung wird trotzdem angelegt und startet in `/`, falls es den Ordner nicht gibt). (#172)
 - `settings.json`: optionales Feld `wsl_recent` (zuletzt benutzte WSL-Ordner je Distribution, begrenzt). (#172)
+- Einstellung „Programme dürfen in die Zwischenablage kopieren (OSC 52)“ (Einstellungen → Terminal, standardmäßig an; Feld `osc52_copy` in `settings.json`). (#181)
+- Bearbeitbare Farbpalette (Einstellungen → Farben): standardmäßig eine gemeinsame Palette für den Terminal Hub (Farben von Sitzungen, Ordnern, Projekten, Profilen), die Tags der Todo-Liste und den Expertenmodus (Projekte, Typen, Status, Auswahlwerte, Diagramme), wahlweise je Bereich eine eigene (beim Umschalten bleiben beide erhalten). Farben hinzufügen, ändern (Farbwähler oder Hex), löschen und per Ziehen sortieren, optional benennen (im Tooltip, z. B. „Cooles Blau (#2288FF)“), gelöschte Vorgaben wiederherstellen. Jede Farbauswahl bietet zusätzlich „Eigene Farbe …“ für eine einmalige Farbe. Vorhandene Elemente behalten ihre Farbe; automatisch vergebene Farben bleiben wie bisher, bis du die Palette bearbeitest. Gespeichert in `settings.json` (neues optionales Feld `palette`; unveränderte Listen werden nicht geschrieben). (#173)
+- Mitgelieferter Konsolen-Host: Installer und portables ZIP enthalten jetzt eine neuere ConPTY von Microsoft (`conpty.dll` und `OpenConsole.exe`, 1.25). Sie reicht Farbabfragen (OSC 10/11) und synchronisierte Ausgabe (Modus 2026) in der richtigen Reihenfolge an Paneldeck durch, Vollbildprogramme flimmern dadurch weniger. Neue Einstellung *Einstellungen → Darstellung → Mitgelieferten Konsolen-Host verwenden (empfohlen)*, standardmäßig an. Ist sie aus oder fehlen die Dateien bzw. schlagen sie fehl, nutzen Sitzungen den Konsolen-Host von Windows; passiert das wiederholt, erscheint ein Hinweis. Änderungen gelten für neue Sitzungen. Neues optionales Feld `bundled_conpty` in `settings.json`. (#183)
+- MCP: `list_sessions` meldet den Konsolen-Host jedes Terminals im neuen optionalen Feld `console_host` (`bundled` oder `system`). (#183)
 
 ### Changed
 
@@ -30,6 +34,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Eine minimierte Sitzung zurückholen (Klick in der Seitenleiste, Palette „Wechseln zu“, MCP `focus_session`) öffnet sie jetzt allein: Sie ersetzt das Layout des Fensters/Projekts, die bisher sichtbaren Bereiche werden zu minimierten Sitzungen und laufen weiter. Strg+Umschalt+W minimiert nur noch; der alte Platz in der Teilung wird nicht mehr gemerkt (#162).
 - Eine WSL-Sitzung ohne Startordner startet jetzt im Linux-Home (`~`) statt im Windows-Benutzerordner; eine wiederhergestellte WSL-Sitzung, deren gespeicherter Ordner nicht verwendbar ist, startet mit Hinweis in `~`. (#172)
 - MCP `create_session` lehnt Linux-Pfade für Windows-Shells ab, ebenso `\\wsl$`-Pfade einer anderen Distribution. (#172)
+- Updates ersetzen `paneldeck.exe`, `conpty.dll` und `OpenConsole.exe` gemeinsam, auch bei laufendem Paneldeck: Der Installer schreibt zuerst den Konsolen-Host und legt bei einem Schreibfehler die bisherige Datei zurück; das portable Selbst-Update ersetzt alle Dateien oder keine. Übrig gebliebene `.old`-Dateien werden beim nächsten Start gelöscht, die Deinstallation entfernt auch den Konsolen-Host. (#183)
 
 ### Deprecated
 
@@ -40,6 +45,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Ein Mittelklick mit leichter Mausbewegung zieht keine Sitzung und keinen Ordner mehr.
 - Zwischen Seitenleiste und Terminalbereich bleibt keine durchsichtige Lücke mehr, wenn eine Zeile der Seitenleiste breiter ist als die Leiste; die Leiste behält ihre Breite und schneidet die Zeile ab (#160).
 - Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
+- Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
 
 ### Security
 
@@ -47,6 +53,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Der Hub ermittelt den aufrufenden Prozess jetzt selbst, sofort beim Eintreffen der Verbindung (TCP-Tabelle, der laufende Prozess und sein Prozessbaum mit Erzeugungszeiten), und ignoriert eine vom Client angegebene Prozess-ID; ein Aufrufer, der sich nicht ermitteln lässt (schon beendet, Verbindung weg), wird abgewiesen. `PANELDECK_SESSION` zählt nur noch für WSL-Terminals und nur zusammen mit dem geheimen Schlüssel der Sitzung `PANELDECK_SESSION_KEY`. Gegen einen böswilligen Agenten mit eigener Shell nur nach bestem Bemühen: Prozesse, die sich keiner Sitzung zuordnen lassen, gelten als externe Aufrufer; losgelöste oder verwaiste Prozesse (nach Paneldeck gestartet, ihr Elternprozess ist beendet) dürfen nicht in Sitzungen einer Agenten-Kette schreiben und kein `--open --claude` aufrufen; Prozesse, die ganz außerhalb von Paneldeck gestartet werden (z. B. geplante Tasks, WMI), bleiben außerhalb des Schutzes.
 - WSL-Startordner mit `"` oder `\` werden überall abgelehnt, damit über `wsl.exe --cd` keine Befehle eingeschleust werden können; Starts mit Administratorrechten maskieren jedes Argument korrekt. (#172)
 - MCP `create_session` lehnt Netzwerkpfade als `cwd` für Terminals und Chats ab, ohne auf sie zuzugreifen; `\\wsl$`-Pfade werden nicht mehr im UI-Thread geprüft. (#172)
+- OSC 52 nur zum Schreiben: Programme können die Zwischenablage nie lesen. Nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB, höchstens alle 0,3 s; leere Texte leeren die Zwischenablage nie. Hinweis: Ein Agent mit Steuer-Zugriff (MCP) kann die fokussierte Sitzung ebenfalls etwas kopieren lassen. (#181)
+- Paneldeck lädt keine DLLs mehr aus dem Arbeitsordner: Gleich beim Start wird die DLL-Suche auf den Programmordner und System32 beschränkt, der mitgelieferte Konsolen-Host wird über seinen vollen Pfad geladen. (#183)
+- Die C-Laufzeit ist jetzt in `paneldeck.exe` eingebunden; die `VCRUNTIME140.dll`, die Windows noch vor dem Start von Paneldeck suchen würde, wird nicht mehr gebraucht. (#183)
 
 ## [2.2.0] - 2026-11-16
 
