@@ -670,6 +670,31 @@ fn a_custom_field_named_like_a_builtin_is_reported_not_used() {
 }
 
 #[test]
+fn a_custom_non_date_field_named_due_stays_queryable() {
+    // #221: ein eigenes Textfeld „Due“/„Fällig“ (vor 2.3 abfragbar) wird von der eingebauten Fälligkeit verdeckt; es bleibt als
+    // „Due (custom)“ abfragbar, `due` ist weiter die eingebaute Fälligkeit.
+    let f = Fx::new();
+    let due_text = f.add_field(f.task, "Due", FieldKind::Text, FieldOptions::default(), false);
+    let faellig = f.add_field(f.story, "Fällig", FieldKind::Number, FieldOptions::default(), false);
+    let builtin_due = crate::planning::builtin_fields::field_id(&f.c, f.task, "due").unwrap().unwrap();
+    let mut n = NewTicket::new(f.project, f.task, "Text");
+    n.values = vec![(due_text.id, json!("next sprint")), (builtin_due, json!("2026-11-20"))];
+    let a = create_ticket(&f.c, &n, &ui()).unwrap().0.key();
+    let mut n = NewTicket::new(f.project, f.story, "Zahl");
+    n.values = vec![(faellig.id, json!(3))];
+    let b = create_ticket(&f.c, &n, &ui()).unwrap().0.key();
+    for (lang, scope) in [(Lang::En, Scope::Project(f.project)), (Lang::De, Scope::All)] {
+        let ss = search_schema(&f.c, scope, lang).unwrap();
+        assert!(ss.conflicts.iter().all(|c| c.name != "Due" && c.name != "Fällig"), "{:?}", ss.conflicts);
+        let ctx = Ctx::new(TODAY, lang);
+        let q = |jql: &str| -> Vec<String> { run_query(&f.c, &ctx, scope, jql, Page::ALL).unwrap_or_else(|e| panic!("{jql}: {}", e.message(Lang::En))).rows.iter().map(|r| r.key.clone()).collect() };
+        assert_eq!(q("\"Due (custom)\" ~ sprint"), vec![a.clone()]);
+        assert_eq!(q("\"Fällig (custom)\" > 2"), vec![b.clone()]);
+        assert_eq!(q("due = 2026-11-20"), vec![a.clone()], "`due` bleibt die eingebaute Fälligkeit");
+    }
+}
+
+#[test]
 fn unknown_field_without_sprints_is_a_validation_error() {
     let s = Sx::new();
     match s.err("sprint = activeSprint()") {

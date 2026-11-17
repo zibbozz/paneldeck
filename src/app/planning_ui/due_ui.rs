@@ -261,6 +261,15 @@ pub(crate) fn marker_color_picker(ui: &mut Ui, salt: impl std::hash::Hash, hex: 
     changed
 }
 
+/// Anzeige einer Dauer als (Anzahl, Einheit): die gemerkte Einheit `remembered` (zuletzt gewählt, zur Dauer `minutes`), solange
+/// sie noch zur Dauer gehört, sonst die größte glatte Einheit ([`due::split_duration`]).
+pub(crate) fn duration_parts(minutes: i64, remembered: Option<(i64, DurationUnit)>) -> (i64, DurationUnit) {
+    match remembered {
+        Some((m, u)) if m == minutes && minutes > 0 && minutes % u.minutes() == 0 => (minutes / u.minutes(), u),
+        _ => due::split_duration(minutes),
+    }
+}
+
 /// Salt des Symbol-Pickers im Markierungs-Editor `id` (damit der Verwalter weiß, ob dessen Icon-Explorer offen ist).
 fn marker_symbol_salt(id: Id) -> Id {
     id.with("sym")
@@ -300,7 +309,10 @@ pub(crate) fn manager_ui(ui: &mut Ui, salt: &str, m: &mut Manager, todo: bool, l
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(lang.t("unter", "under"));
             let t = &mut m.list[i];
-            let (mut num, mut unit) = due::split_duration(t.under_minutes);
+            // Die zuletzt gewählte Einheit bleibt, solange sie zur Dauer passt – sonst springt sie beim Ziehen um (7 Tage → 1 Woche).
+            let unit_mem = id.with("unit_mem");
+            let remembered: Option<(i64, DurationUnit)> = ui.data(|d| d.get_temp(unit_mem));
+            let (mut num, mut unit) = duration_parts(t.under_minutes, remembered);
             let r = ui.add(egui::DragValue::new(&mut num).range(1..=9999).speed(0.2));
             let mut unit_changed = false;
             egui::ComboBox::from_id_salt(id.with("unit")).selected_text(unit.label(num, lang)).width(80.0).show_ui(ui, |ui| {
@@ -310,6 +322,7 @@ pub(crate) fn manager_ui(ui: &mut Ui, salt: &str, m: &mut Manager, todo: bool, l
             });
             if r.changed() || unit_changed {
                 t.under_minutes = num * unit.minutes();
+                ui.data_mut(|d| d.insert_temp(unit_mem, (t.under_minutes, unit)));
                 changed = true;
             }
             ui.label("→");
@@ -581,6 +594,20 @@ mod tests {
         // eine kräftige Farbe bleibt als Symbol unverändert, gelb auf hellgelb wird abgedunkelt
         assert_eq!(marker_colors("#2050C0", MarkerFrame::Square, false, LIGHT_BG).symbol, hex_rgb("#2050C0"));
         assert_ne!(marker_colors("#D8B94A", MarkerFrame::Triangle, false, LIGHT_BG).symbol, hex_rgb("#D8B94A"));
+    }
+
+    #[test]
+    fn the_chosen_duration_unit_stays_while_dragging() {
+        let d = DurationUnit::Days;
+        // ohne gemerkte Einheit: größte glatte Einheit
+        assert_eq!(duration_parts(7 * 1440, None), (1, DurationUnit::Weeks));
+        // gezogen von 6 auf 7 Tage: bleibt „7 Tage“ statt „1 Woche“ (sonst springt der Wert beim Weiterziehen auf Wochen)
+        assert_eq!(duration_parts(7 * 1440, Some((7 * 1440, d))), (7, d));
+        assert_eq!(duration_parts(14 * 1440, Some((14 * 1440, d))), (14, d));
+        // gemerkt für eine andere Dauer (Zeile gelöscht/verschoben, Standard wiederhergestellt): wie ohne
+        assert_eq!(duration_parts(10080, Some((60, DurationUnit::Minutes))), (1, DurationUnit::Weeks));
+        // gemerkte Einheit passt nicht mehr glatt: größte glatte Einheit
+        assert_eq!(duration_parts(90, Some((90, DurationUnit::Hours))), (90, DurationUnit::Minutes));
     }
 
     #[test]

@@ -548,9 +548,16 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
             Class::Terminal => (FieldType::Terminal, false),
             Class::Version | Class::Milestone => (FieldType::Option(pending::version_names(conn, scope, g.class == Class::Milestone)?), false),
         };
-        let store = Store::Values(Vals { class: g.class, fields: g.fields.iter().map(|f| f.0).collect(), opts, links: false });
-        if reg.add(&g.names, ty, multi, store).is_none() {
-            // alle Namen sind von eingebauten Feldern belegt
+        let store = |opts: OptionSet| Store::Values(Vals { class: g.class, fields: g.fields.iter().map(|f| f.0).collect(), opts, links: false });
+        if reg.add(&g.names, ty.clone(), multi, store(opts.clone())).is_some() {
+            continue;
+        }
+        // Alle Namen sind belegt. Verdeckt ein eingebautes Feld jedes Tickets (Beschreibung, Fälligkeit, Labels) ein eigenes
+        // Feld anderer Art – z. B. ein Textfeld „Due“, das vor 2.3 abfragbar war –, bleibt es unter „<Name> (custom)“
+        // abfragbar, wie es die Migration bei gleichnamigen Feldern im selben Typ macht (#221).
+        let builtin_shadow = named(&g.names, &desc_names) || named(&g.names, &due_names) || named(&g.names, &labels_names);
+        let custom: Vec<String> = g.names.iter().map(|n| format!("{} (custom)", n.trim())).collect();
+        if !(builtin_shadow && reg.add(&custom, ty, multi, store(opts)).is_some()) {
             conflicts.push(Conflict { name: g.names[0].clone(), kept: None, dropped: g.fields.iter().map(|f| f.0.kind).collect() });
         }
     }

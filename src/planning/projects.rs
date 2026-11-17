@@ -178,7 +178,7 @@ pub fn due_thresholds(conn: &Connection, id: i64) -> Res<Vec<crate::due::DueThre
     Ok(crate::due::parse_thresholds(&json))
 }
 
-/// Schwellen setzen (geprüft: höchstens 10, Dauer > 0, keine doppelte Dauer). Nicht beim System-Projekt.
+/// Schwellen setzen (geprüft: höchstens [`crate::due::MAX_THRESHOLDS`] = 20, Dauer > 0, keine doppelte Dauer). Nicht beim System-Projekt.
 pub fn set_due_thresholds(conn: &Connection, id: i64, list: &[crate::due::DueThreshold]) -> Res<()> {
     editable(conn, id)?;
     let list = crate::due::validate_thresholds(list).map_err(PlanError::Thresholds)?;
