@@ -29,6 +29,14 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Agenten bestimmen mit dem neuen optionalen `placement`, wo `focus_session` und `create_session` eine Sitzung zeigen: `replace` (Standard bei `focus_session`; ersetzt nur den aktiven Bereich – den eigenen Bereich des Agenten, wenn sichtbar, sonst den fokussierten – und minimiert ihn), `split_right` / `split_down` (teilt nur den aktiven Bereich) oder `solo` (einziger Bereich, die anderen werden minimiert). Die Platzierung bewegt nie den Tastaturfokus des Nutzers (außer sein Bereich wurde ersetzt) und holt kein Fenster nach vorn; Bereiche mit offener Freigabe-Frage und Sitzungen der Agenten-Kette werden nie verdrängt. Ohne `placement` bleibt `create_session` wie bisher leise. `list_sessions` meldet `shown` (Bereich ist zu sehen). (#162)
 - Strg+Tab erreicht auch minimierte Sitzungen und zeigt sie im fokussierten Bereich; der ersetzte Bereich wird minimiert. Nach dem Allein-Öffnen zeigt ein kurzer Hinweis, wie viele Bereiche minimiert wurden. (#162)
 - Einstellung „Umgebung von Paneldeck erben“ (Einstellungen → Allgemein, standardmäßig aus; Feld `inherit_env` in `settings.json`): Neue Terminals bekommen genau die Umgebung, mit der Paneldeck gestartet wurde, statt der frisch aus Windows gelesenen Variablen. (#175)
+- Jedes Ticket (alle Typen) und jede Todo-Karte hat eine eingebaute Beschreibung und eine optionale Fälligkeit (Datum, optional mit Uhrzeit; ein Datum allein gilt bis zum Ende des Tages). Beide stehen im Feld-Editor als feste Zeilen „Eingebaut“ und lassen sich nicht löschen. (#188)
+- Fälligkeits-Markierungen mit einstellbaren Schwellen: je Projekt im neuen Reiter „Fälligkeit“ der Projekt-Einstellungen, für die einfache Todo-Liste unter „Fälligkeit …“. Jede Schwelle hat eine Dauer, eine Markierung (Rahmen, Symbol, Farbe, optionaler Name) und optional „Zeile/Karte tönen“. Projekte mit den mitgelieferten Typen und die Todo-Liste starten mit einem gelben Warndreieck unter 1 Woche und einem roten unter 1 Tag; der Tooltip zeigt z. B. „fällig in 3 Tagen“ bzw. „überfällig seit 2 h“. (#188)
+- Listen, Boards, Karten und die Ticket-Ansicht zeigen die Fälligkeit mit Markierung; der Kopf zeigt Zählungen wie „3 überfällig“ je Projekt und für die Todo-Liste. Die Todo-Liste bekommt die Fälligkeit im Karten-Editor und auf der Karte, Sortierung nach Fälligkeit und einen Filter (mit Fälligkeit / überfällig / markiert). (#188)
+- Abfragesprache: `due` und `description` (deutsch auch „Fällig“/„Beschreibung“). (#188)
+- MCP: `description` und `due` bei `create_ticket`/`update_ticket`, `due` bei `add_todo`, `due`/`due_state` in Ticket- und Todo-Antworten, `due_thresholds` in `list_projects`. (#188)
+- Neues Icon „alert“ (Ausrufezeichen). (#188)
+- Labels ist ein eingebautes Feld an jedem Tickettyp, auch an eigenen Typen, wie Titel, Beschreibung und Fälligkeit; es lässt sich nicht löschen. MCP: Parameter `labels` bei `create_ticket`/`update_ticket` und `labels` in den Ticket-Antworten. (#195)
+- Abfragesprache: Eigene Felder lassen sich auch über ihren Schlüssel suchen (z. B. `story_points`); die eingebauten Felder hören in jeder Oberflächensprache auf ihre deutschen und englischen Namen. (#195)
 
 ### Changed
 
@@ -40,6 +48,13 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Updates ersetzen `paneldeck.exe`, `conpty.dll` und `OpenConsole.exe` gemeinsam, auch bei laufendem Paneldeck: Der Installer schreibt zuerst den Konsolen-Host und legt bei einem Schreibfehler die bisherige Datei zurück; das portable Selbst-Update ersetzt alle Dateien oder keine. Übrig gebliebene `.old`-Dateien werden beim nächsten Start gelöscht, die Deinstallation entfernt auch den Konsolen-Host. (#183)
 - MCP `focus_session` auf eine minimierte Sitzung nutzt jetzt den Standard `replace` statt sie allein zu öffnen (dafür `placement: "solo"`); ein Chat braucht für `focus_session` mit `placement` eine Freigabe. (#162)
 - Mit „Sitzungen merken“ aus stellt ein Neustart nach einem Update die Sitzungen einmal wieder her; beim nächsten Beenden werden sie wie gewohnt verworfen. (#157)
+- Vorhandene Beschreibungsfelder werden beim Update zur eingebauten Beschreibung; Werte, Verlauf und Regeln bleiben erhalten. Eine Pflicht-Beschreibung wird optional. (#188)
+- Die Umwandlung einer Todo-Karte in ein Ticket übernimmt auch die Fälligkeit. Projektsicherungen enthalten die Schwellen; ältere Sicherungen werden mit den Standards importiert. (#188)
+- Beim Update werden vorhandene eigene Felder namens „Labels“ zum eingebauten Labels-Feld; Werte, Verlauf und Regeln bleiben erhalten. Eigene Felder, die genauso heißen würden wie ein eingebautes, heißen danach „… (custom)“. (#195)
+- Projektsicherungen haben das Format Version 3; ältere Versionen lehnen sie mit einer verständlichen Meldung ab. Sicherungen der Versionen 1 und 2 lassen sich weiter importieren, ihre eigenen Beschreibungs-/Labels-Felder werden wie beim Update umgewandelt. (#188)
+- Fälligkeiten werden als `JJJJ-MM-TT` bzw. `JJJJ-MM-TTTHH:MM` (ohne Sekunden) gespeichert. (#188)
+- Farbpalette: Das Löschen einer Farbe fragt nicht nach, sondern bietet einige Sekunden lang „Rückgängig“ an. Die eigene Palette eines Bereichs beginnt mit dessen bisherigen Farben und lässt sich durch eine Kopie der gemeinsamen ersetzen („Aus der gemeinsamen Palette kopieren“, rückgängig machbar). (#173)
+- Felder, die beim Update zu eingebauten Feldern werden, verlieren ihren Standardwert (eingebaute Felder haben keinen); ein eigenes Feld anderer Art mit dem Namen eines eingebauten (z. B. ein Textfeld „Labels“) behält seine Werte und heißt „… (custom)“ – Agenten, die es unter dem alten Namen setzen, treffen jetzt das eingebaute Feld. (#195)
 
 ### Deprecated
 
@@ -52,6 +67,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Eine minimierte Sitzung, die per Ziehen oder Ordner-Layout wieder ins Layout kam, blieb als minimiert markiert.
 - Programme können per OSC 52 in die Windows-Zwischenablage kopieren, z. B. Claude Code in WSL- oder SSH-Sitzungen, das „kopiert“ meldete, ohne dass etwas ankam. Ein kurzer Hinweis nennt die Sitzung. (#181)
 - Terminals erben keine internen oder reinen Test-Variablen `PANELDECK_*` von Paneldeck mehr (z. B. wenn Paneldeck aus dem Terminal eines anderen Paneldeck gestartet wurde). (#175)
+- Die Abfrage-Leiste über der Ticket-Liste kennt jetzt auch Felder, die nach der ersten Abfrage angelegt wurden (ein eigenes Feld „Labels“ war nicht suchbar). (#195)
 
 ### Security
 

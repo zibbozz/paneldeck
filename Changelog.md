@@ -29,6 +29,14 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Agents can choose where `focus_session` and `create_session` show a session with the new optional `placement`: `replace` (default for `focus_session`; replaces only the active pane – the agent's own pane if visible, otherwise the one the user focused – and minimizes it), `split_right` / `split_down` (split only the active pane) or `solo` (only pane, the others are minimized). Placement never moves the user's keyboard focus (unless their pane was replaced) and never brings a window to the front; panes waiting for an approval and sessions of the agent's chain are never displaced. Without `placement`, `create_session` stays quiet as before. `list_sessions` reports `shown` (the pane is on screen). (#162)
 - Ctrl+Tab also reaches minimized sessions and shows them in the focused pane; the pane they replace is minimized. After a session opens alone, a short notice shows how many panes were minimized. (#162)
 - Setting "Inherit Paneldeck's environment" (Settings → General, off by default; `settings.json` field `inherit_env`): new terminals get exactly the environment Paneldeck was started with instead of the variables read fresh from Windows. (#175)
+- Every ticket (all types) and every to-do card has a built-in description and an optional due date (a date, optionally with a time; a date alone counts until the end of that day). They show as fixed "Built-in" rows in the field editor and cannot be deleted. (#188)
+- Due-date markers with configurable thresholds: per project in the new "Due dates" tab of the project settings, and for the simple to-do list under "Due dates …". Each threshold has a duration, a marker (frame, symbol, colour, optional name) and an optional "tint row/card". Projects created with the preset types and the to-do list start with a yellow warning triangle under 1 week and a red one under 1 day; the tooltip reads e.g. "due in 3 days" or "overdue by 2 h". (#188)
+- Lists, boards, cards and the ticket view show the due date with its marker; the header shows counts such as "3 overdue" per project and for the to-do list. The to-do list gets a due date in the card editor and on the card, sorting by due date and a filter (with due date / overdue / marked). (#188)
+- Query language: `due` and `description`, e.g. `due < currentDate() ORDER BY due`. (#188)
+- MCP: `description` and `due` for `create_ticket`/`update_ticket`, `due` for `add_todo`, `due`/`due_state` in ticket and to-do answers, `due_thresholds` in `list_projects`. (#188)
+- New icon "alert" (exclamation mark). (#188)
+- Labels is a built-in field on every ticket type, including your own types, like title, description and due date; it cannot be deleted. MCP: `labels` parameter for `create_ticket`/`update_ticket` and `labels` in ticket answers. (#195)
+- Query language: custom fields can also be searched by their key (e.g. `story_points`); the built-in fields answer to their English and German names in either UI language. (#195)
 
 ### Changed
 
@@ -40,6 +48,13 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Updates replace `paneldeck.exe`, `conpty.dll` and `OpenConsole.exe` together even while Paneldeck is running: the installer writes the console host first and puts the previous file back if writing fails; the portable self-update replaces all files or none. Leftover `.old` files are removed on the next start, and uninstalling removes the console host too. (#183)
 - MCP `focus_session` on a minimized session now uses the default `replace` instead of opening it alone (use `placement: "solo"` for that); a chat needs approval for `focus_session` with `placement`. (#162)
 - With "Remember sessions" off, an update restart restores the sessions once; the next exit discards them as usual. (#157)
+- Existing description fields become the built-in description when updating; values, history and rules are kept. A required description becomes optional. (#188)
+- Converting a to-do card into a ticket also carries over its due date. Project backups include the due thresholds; older backups import with the defaults. (#188)
+- On update, existing custom fields named "Labels" become the built-in Labels field; values, history and rules are kept. Custom fields that would have the same name as a built-in field are renamed "… (custom)". (#195)
+- Project backups use format version 3; older versions refuse them with a clear message. Version 1 and 2 backups still import, and their own Description/Labels fields are converted like on update. (#188)
+- Due dates are stored as `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (without seconds). (#188)
+- Colour palette: deleting a colour no longer asks first; instead "Undo" is offered for a few seconds. An area's own palette starts with that area's previous colours and can be replaced with a copy of the shared palette ("Copy from shared palette", can be undone). (#173)
+- Fields that become built-in fields on update lose their default value (built-in fields have none); a custom field of another kind named like a built-in one (e.g. a text field "Labels") keeps its values and is renamed "… (custom)" – agents that set it by its old name now reach the built-in field. (#195)
 
 ### Deprecated
 
@@ -52,6 +67,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - A minimized session that got back into the layout by drag and drop or a folder layout stayed marked as minimized.
 - Programs can copy to the Windows clipboard via OSC 52, e.g. Claude Code in WSL or SSH sessions, which reported "copied" but nothing arrived. A short notice names the session. (#181)
 - Terminals no longer inherit Paneldeck's internal or test-only `PANELDECK_*` variables (for example when Paneldeck was started from another Paneldeck's terminal). (#175)
+- The query bar above the ticket list now knows fields that were added after the first query (a custom "Labels" field could not be searched). (#195)
 
 ### Security
 
