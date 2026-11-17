@@ -161,6 +161,51 @@ pub fn ensure(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("RELEASE ensure_builtin_fields")
 }
 
+/// Nachtrag zu Schritt 4 der Migrationen 8 und 9 (#221): Deren SQL vergleicht mit `lower()`, das in SQLite nur ASCII kennt –
+/// ein eigenes Feld „FÄLLIG AM“ behielt so seinen Namen und hieß danach wie die eingebaute Fälligkeit. Hier wird mit der
+/// Groß-/Kleinschreibung von Unicode verglichen (wie beim Anlegen von Feldern und beim Import von Vorlagen) und wie in der
+/// Migration „ (custom)“ angehängt – nur in Typen, die das eingebaute Feld schon haben, und nur für Felder, deren Migration
+/// gelaufen ist. Idempotent (ein umbenanntes Feld passt nicht mehr); neue gleichnamige Felder lässt die Oberfläche ohnehin
+/// nicht zu. Gibt die Zahl der umbenannten Felder zurück.
+pub fn rename_clashing_custom(conn: &Connection) -> rusqlite::Result<usize> {
+    let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let since = |key: &str| INSERTS.iter().find(|(k, _, _)| *k == key).map_or(u32::MAX, |(_, v, _)| *v);
+    if INSERTS.iter().all(|(_, v, _)| version < *v) {
+        return Ok(0); // vor Migration 8 (noch keine eingebauten Felder, ggf. noch keine Tabelle `fields`)
+    }
+    let mut todo: Vec<(i64, String)> = Vec::new();
+    {
+        let mut st = conn.prepare(
+            "SELECT f.id, f.name, g.key FROM fields f JOIN fields g ON g.type_id = f.type_id AND g.builtin = 1
+              WHERE f.key IS NULL AND f.name IS NOT NULL AND g.key IN ('description', 'due', 'labels') ORDER BY f.id",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        for row in rows {
+            let (id, name, key) = row?;
+            if version < since(&key) || todo.iter().any(|(i, _)| *i == id) {
+                continue;
+            }
+            let n = name.trim().to_lowercase();
+            let clash = [crate::state::Lang::En, crate::state::Lang::De].iter().any(|l| super::names::display_name(Some(&key), None, *l).to_lowercase() == n);
+            if clash {
+                todo.push((id, format!("{name} (custom)")));
+            }
+        }
+    }
+    if todo.is_empty() {
+        return Ok(0);
+    }
+    conn.execute_batch("SAVEPOINT rename_clashing_custom")?;
+    for (id, name) in &todo {
+        if let Err(e) = conn.execute("UPDATE fields SET name = ?1 WHERE id = ?2", rusqlite::params![name, id]) {
+            let _ = conn.execute_batch("ROLLBACK TO rename_clashing_custom; RELEASE rename_clashing_custom");
+            return Err(e);
+        }
+    }
+    conn.execute_batch("RELEASE rename_clashing_custom")?;
+    Ok(todo.len())
+}
+
 /// Passt ein Feldtyp zum eingebauten Feld?
 fn kind_fits(key: &str, kind: super::fields::FieldKind) -> bool {
     use super::fields::FieldKind;

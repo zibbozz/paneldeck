@@ -50,6 +50,28 @@ pub fn bundled_dll() -> Option<PathBuf> {
     exe_dir().and_then(|d| bundled_dll_in(&d))
 }
 
+/// Wie [`bundled_dll`], aber höchstens alle [`CACHE_TTL`] neu geprüft – für die Oberfläche, die das jedes Bild fragt (#221);
+/// der Start einer Sitzung prüft weiter direkt ([`pty_system`]).
+pub fn bundled_dll_cached() -> Option<PathBuf> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<PathBuf>)>> = std::sync::Mutex::new(None);
+    cached(&CACHE, std::time::Instant::now(), bundled_dll)
+}
+
+/// Wie lange [`bundled_dll_cached`] ein Ergebnis wiederverwendet.
+pub const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn cached(cache: &std::sync::Mutex<Option<(std::time::Instant, Option<PathBuf>)>>, now: std::time::Instant, probe: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, v)) = c.as_ref() {
+        if now.saturating_duration_since(*at) < CACHE_TTL {
+            return v.clone();
+        }
+    }
+    let v = probe();
+    *c = Some((now, v.clone()));
+    v
+}
+
 /// `conpty.dll` für die nächste Sitzung: die mitgelieferte, wenn eingeschaltet und vorhanden; `None` = ConPTY von Windows.
 pub fn selected_dll(use_bundled: bool, found: Option<PathBuf>) -> Option<PathBuf> {
     if use_bundled { found } else { None }
@@ -124,6 +146,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn the_ui_check_is_cached() {
+        let cache = std::sync::Mutex::new(None);
+        let t0 = std::time::Instant::now();
+        let calls = std::cell::Cell::new(0);
+        let probe = |v: Option<&str>| {
+            calls.set(calls.get() + 1);
+            v.map(PathBuf::from)
+        };
+        assert_eq!(cached(&cache, t0, || probe(Some("a"))), Some(PathBuf::from("a")));
+        // innerhalb der Frist: kein neuer Blick auf die Platte
+        assert_eq!(cached(&cache, t0 + std::time::Duration::from_secs(1), || probe(None)), Some(PathBuf::from("a")));
+        assert_eq!(calls.get(), 1);
+        // danach neu geprüft
+        assert_eq!(cached(&cache, t0 + CACHE_TTL, || probe(None)), None);
+        assert_eq!(calls.get(), 2);
     }
 
     #[test]

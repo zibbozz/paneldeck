@@ -214,7 +214,8 @@ pub struct DocProject {
     pub created_at: String,
     /// Schwellen der Fälligkeits-Markierung (ab Paneldeck 2.3). Fehlt das Feld (ältere Sicherung), bekommt ein Projekt mit den
     /// mitgelieferten Typen die Standard-Schwellen, sonst keine – wie beim Update der Datenbank.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Ungültige Einträge fallen beim Lesen einzeln weg (wie beim Lesen aus der Datenbank), statt den Import zu verhindern.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::due::lenient_thresholds")]
     pub due_thresholds: Option<Vec<crate::due::DueThreshold>>,
 }
 

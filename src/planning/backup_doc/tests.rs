@@ -237,6 +237,41 @@ fn due_dates_descriptions_and_thresholds_survive_the_roundtrip() {
 }
 
 #[test]
+fn invalid_due_thresholds_in_a_backup_are_dropped_one_by_one() {
+    // #221: wie beim Lesen aus der Datenbank fällt eine ungültige Schwelle einzeln weg, statt den Import zu verhindern.
+    let fx = Fx::new();
+    let mut v = serde_json::to_value(export_project(&fx.c, fx.project).unwrap()).unwrap();
+    v["project"]["due_thresholds"] = json!([
+        {"under_minutes": 10080, "marker": {"frame": "triangle", "symbol": "alert", "color": "#D8B94A"}, "tint": false},
+        {"under_minutes": 600, "marker": {"frame": "triangle", "symbol": "alert", "color": "rot"}},
+        {"under_minutes": 10080, "marker": {"frame": "square", "color": "#112233"}},
+        {"under_minutes": -5},
+        {"under_minutes": 120, "marker": {"frame": "gibt-es-nicht", "color": "#112233"}},
+        {"under_minutes": 60, "marker": {"frame": "circle", "symbol": "unknown-symbol-xyz", "color": "#112233"}},
+        "kaputt",
+        {"under_minutes": 1440, "marker": {"frame": "hexagon", "color": "#e06c75"}, "tint": true}
+    ]);
+    let doc: ProjectDoc = serde_json::from_value(v.clone()).expect("ein ungültiger Eintrag macht die Sicherung nicht unlesbar");
+    let d = fresh();
+    let res = import(&d, &doc);
+    let th = crate::planning::projects::due_thresholds(&d, res.project_id).unwrap();
+    assert_eq!(th.iter().map(|t| t.under_minutes).collect::<Vec<_>>(), vec![10080, 1440], "nur die gültigen Schwellen");
+    assert_eq!(th[1].marker.color, "#E06C75");
+    // auch eine im Speicher gebaute Liste mit ungültigen Einträgen (z. B. aus einer anderen Quelle) importiert
+    let mut doc = doc;
+    let mut bad = crate::due::default_thresholds();
+    bad.push(crate::due::DueThreshold { under_minutes: 0, marker: Default::default(), tint: false });
+    doc.project.due_thresholds = Some(bad);
+    let d = fresh();
+    let res = import(&d, &doc);
+    assert_eq!(crate::planning::projects::due_thresholds(&d, res.project_id).unwrap(), crate::due::default_thresholds());
+    // `null` wie fehlend
+    v["project"]["due_thresholds"] = serde_json::Value::Null;
+    let doc: ProjectDoc = serde_json::from_value(v).unwrap();
+    assert!(doc.project.due_thresholds.is_none());
+}
+
+#[test]
 fn a_backup_from_before_2_3_imports_with_built_in_fields_and_default_thresholds() {
     let fx = Fx::new();
     let c = &fx.c;

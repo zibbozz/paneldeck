@@ -175,6 +175,15 @@ fn norm_datetime(s: &str) -> Option<String> {
 /// Fälligkeit als vergleichbarer Zeitpunkt `JJJJ-MM-TTTHH:MM:SS` (nur Datum = Ende des Tages).
 const DUE_EXPR: &str = "(CASE WHEN length(v.text) = 10 THEN v.text || 'T23:59:59' WHEN length(v.text) = 16 THEN v.text || ':00' ELSE v.text END)";
 
+/// Wert eines eigenen Datum+Uhrzeit-Feldes als vergleichbarer Zeitpunkt `JJJJ-MM-TTTHH:MM:SS`: ein gespeicherter Wert ohne
+/// Sekunden (`JJJJ-MM-TTTHH:MM`) bekommt `:00` – wie bei [`DUE_EXPR`], aber ohne die Regel „reines Datum = Ende des Tages“.
+const DT_EXPR: &str = "(CASE WHEN length(v.text) = 16 THEN v.text || ':00' ELSE v.text END)";
+
+/// Spalte zum Vergleich: Datum unverändert, Datum+Uhrzeit mit Sekunden ([`DT_EXPR`]).
+fn date_col(datetime: bool) -> &'static str {
+    if datetime { DT_EXPR } else { "v.text" }
+}
+
 fn parse_bool(s: &str) -> Option<bool> {
     match s.to_lowercase().as_str() {
         "true" | "yes" | "1" => Some(true),
@@ -588,7 +597,7 @@ impl<'a> Cx<'a> {
                     let n = if v.class == Class::Date { norm_date(s) } else { norm_datetime(s) };
                     if let Some(d) = n {
                         let p = self.text(&d);
-                        parts.push(format!("v.text {} {p}", if ordering { ord_sql } else { "=" }));
+                        parts.push(format!("{} {} {p}", date_col(v.class == Class::DateTime), if ordering { ord_sql } else { "=" }));
                     }
                 }
                 let cond = or_join(parts);
@@ -599,14 +608,8 @@ impl<'a> Cx<'a> {
                 let o = if ordering { ord_sql } else { "=" };
                 let mut parts = Vec::new();
                 for s in vals {
-                    if s.trim().len() == 10 {
-                        if let Some(d) = norm_date(s) {
-                            let p = self.text(&d);
-                            parts.push(format!("substr(v.text, 1, 10) {o} {p}"));
-                        }
-                    } else if let Some(d) = norm_datetime(s) {
-                        let p = self.text(&d);
-                        parts.push(format!("{DUE_EXPR} {o} {p}"));
+                    if let Some(c) = self.due_cond(s, o) {
+                        parts.push(c);
                     }
                 }
                 let cond = or_join(parts);
@@ -650,6 +653,20 @@ impl<'a> Cx<'a> {
                 if cond == "0" { Ok(cond) } else { Ok(self.exists_v(&ids, &cond)) }
             }
             Class::Version | Class::Milestone => pending::version_condition(self, &ids, v.class == Class::Milestone, Some(op), vals),
+        }
+    }
+
+    /// Bedingung „Fälligkeit `o` Wert“ wie in der Abfragesprache: ein reines Datum vergleicht nur den Tag, mit Uhrzeit den
+    /// Zeitpunkt (ein gespeichertes reines Datum gilt als Ende des Tages, fehlende Sekunden als `:00`). `None` = kein Datum.
+    fn due_cond(&mut self, s: &str, o: &str) -> Option<String> {
+        if s.trim().len() == 10 {
+            let d = norm_date(s)?;
+            let p = self.text(&d);
+            Some(format!("substr(v.text, 1, 10) {o} {p}"))
+        } else {
+            let d = norm_datetime(s)?;
+            let p = self.text(&d);
+            Some(format!("{DUE_EXPR} {o} {p}"))
         }
     }
 
@@ -710,6 +727,10 @@ impl<'a> Cx<'a> {
     /// `ticket_values`-Bedingung für einen JSON-Wert (Dropdown/Mehrfachauswahl: Wert-Kennung, Verweise: Kennung).
     fn json_eq(&mut self, f: &Field, v: &serde_json::Value, op: Option<&str>) -> Option<String> {
         let o = op.unwrap_or("=");
+        if f.is_due() {
+            // dieselbe Bedeutung wie `due …` in der Abfragesprache (#214)
+            return self.due_cond(v.as_str()?, o);
+        }
         match f.kind {
             FieldKind::Dropdown | FieldKind::Multi | FieldKind::Number | FieldKind::Checkbox => {
                 let x = match v {
@@ -734,7 +755,7 @@ impl<'a> Cx<'a> {
                 let s = v.as_str()?;
                 let n = if f.kind == FieldKind::Date { norm_date(s) } else { norm_datetime(s) }?;
                 let p = self.text(&n);
-                Some(format!("v.text {o} {p}"))
+                Some(format!("{} {o} {p}", date_col(f.kind == FieldKind::Datetime)))
             }
         }
     }
@@ -867,7 +888,7 @@ impl<'a> Cx<'a> {
         let agg = |col: &str, f: &str| format!("(SELECT MIN({col}) FROM ticket_values v WHERE v.ticket_id = t.id AND {f})");
         Ok(match v.class {
             Class::Number | Class::Bool => vec![OExpr { sql: agg("v.num", &f), nocase: false, nullable: true }],
-            Class::Date | Class::DateTime => vec![OExpr { sql: agg("v.text", &f), nocase: false, nullable: true }],
+            Class::Date | Class::DateTime => vec![OExpr { sql: agg(date_col(v.class == Class::DateTime), &f), nocase: false, nullable: true }],
             Class::Due => vec![OExpr { sql: agg(DUE_EXPR, &f), nocase: false, nullable: true }],
             Class::Text | Class::Terminal => {
                 let mut sql = agg("v.text", &f);
@@ -923,5 +944,7 @@ fn single_vals(f: &Field) -> Vals {
         // Reihenfolge der Werte im Feld; ein Name ist hier nur ein Platzhalter für die Zusammenlegung (jeder Wert für sich)
         opts.opts.push(super::schema::MOpt { names: vec![format!("#{}", o.id)], members: vec![(f.id, o.id)] });
     }
-    Vals { class: super::schema::class_of(f.kind), fields: vec![ValField { id: f.id, kind: f.kind }], opts, links: false }
+    // die eingebaute Fälligkeit sortiert wie `due` in der Abfragesprache (reines Datum = Ende des Tages, #214)
+    let class = if f.is_due() { Class::Due } else { super::schema::class_of(f.kind) };
+    Vals { class, fields: vec![ValField { id: f.id, kind: f.kind }], opts, links: false }
 }

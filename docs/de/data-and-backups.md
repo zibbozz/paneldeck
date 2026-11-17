@@ -74,7 +74,7 @@ Jeder [Chat](chat.md) speichert seinen Verlauf in `chats/<id>.json` (`<id>` = Ke
 Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verhalten, ältere Dateien laden unverändert.
 
 - `settings.json`:
-  - `remember_sessions` (Standard `true`) – *Sitzungen merken*; beim Ausschalten wird der bisherige Stand als `state.json.bak-<Datum>` gesichert (nur die neueste bleibt).
+  - `remember_sessions` (Standard `true`) – *Sitzungen merken*; beim Ausschalten wird der bisherige Stand als `state.json.bak-<Datum>` gesichert (nur die neueste bleibt). Solange es aus ist, enthält `state.json` nur den gekürzten Stand; ein Absturz lässt die Sicherung also unberührt.
   - `inherit_env` (Standard `false`) – *Umgebung von Paneldeck erben*.
   - `bundled_conpty` (Standard `true`) – *Mitgelieferten Konsolen-Host verwenden (empfohlen)*.
   - `osc52_copy` (Standard `true`) – *Programme dürfen in die Zwischenablage kopieren (OSC 52)*.

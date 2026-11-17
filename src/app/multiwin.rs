@@ -819,6 +819,11 @@ impl App {
         self.titlebar(ctx);
         self.window_edges(ctx);
         self.mode_shortcuts(ctx);
+        // Die Rückfrage „Fenster schließen?“ zeichnet erst nach den Terminals: Esc/Enter gehören ihr, kein Terminal behält
+        // den Fokus (sonst unterbrach Esc z. B. Claude, #217).
+        if w.ask_close {
+            super::models_ui::release_focus(ctx);
+        }
         let tasks = self.mode == titlebar::Mode::Tasks;
         if !tasks {
             self.shortcuts(ctx, &mut actions);
@@ -988,7 +993,7 @@ impl App {
                             ui.add_enabled(false, egui::Button::new(lang.t("Schließen, alle beenden", "Close and end all")))
                         };
                         if end.clicked() && secs == 0 && plan.can_close() {
-                            actions.push(Action::EndJobs(lingering.iter().map(|l| l.id).collect()));
+                            actions.push(Action::EndJobs(super::closing::job_refs(&lingering)));
                             w.ask_close = false;
                             w.close = true;
                         }
@@ -1000,6 +1005,10 @@ impl App {
             });
         if esc {
             w.ask_close = false;
+        }
+        // Abgebrochen: Fokus zurück ins Terminal des Fensters.
+        if !w.ask_close && !w.close {
+            self.want_focus = Some(self.focused);
         }
     }
 

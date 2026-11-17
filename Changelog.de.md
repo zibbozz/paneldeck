@@ -7,6 +7,39 @@ Das Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 und dieses Projekt hält sich an [Semantic Versioning](https://semver.org/lang/de/).
 Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen unter der Nummer des nächsten Releases mit `WIP` statt Datum (z. B. `## [1.1.0] - WIP`).
 
+## [2.3.1] - WIP
+
+### Fixed
+
+- Das Quick-Menü speichert eine Fälligkeit ohne Uhrzeit als Datum (fällig am Ende des Tages) statt als Mitternacht; Bedingungen von Schlüsselwörtern, eigene Sortier-Schlüsselwörter und Bedingungen von Workflow-Übergängen vergleichen Fälligkeiten wie die Abfragesprache (#214)
+- Abfragen und Schlüsselwort-Bedingungen auf eigenen Datum+Uhrzeit-Feldern passen auch zu Werten ohne Sekunden; Workflow-Bedingungen vergleichen nur bei der eingebauten Fälligkeit nach deren Regeln (#214)
+- Der Icon-Explorer lässt sich aus dem Editor der Fälligkeits-Markierung benutzen; ein Klick hinein schließt Editor und Explorer nicht mehr (#215)
+- Mit „Sitzungen merken“ aus ersetzt ein Absturz nicht mehr die Sicherung des zuletzt behaltenen Zustands (state.json.bak-…) durch die verworfenen Sitzungen (#219)
+- settings.json: ein falscher Werttyp in einer Einstellung aus 2.3 setzt nicht mehr alle Einstellungen zurück; ein einzelner ungültiger WSL-Ordner verwirft nicht mehr die ganze Liste; eine Farbpalette nur aus ungültigen Einträgen ergibt die Vorgaben (#221)
+- Projektsicherungen mit einer ungültigen Fälligkeits-Schwelle lassen sich wieder importieren (nur diese Schwelle entfällt) (#221)
+- Eigene Felder, die bis auf Groß-/Kleinschreibung jenseits von ASCII wie ein eingebautes heißen (z. B. „FÄLLIG AM“), heißen wie beim Update „… (custom)“; eigene Felder anderer Art namens „Due“/„Fällig“ sind als „Due (custom)“ abfragbar (#221)
+- Der Editor der Fälligkeits-Schwellen behält beim Ziehen die gewählte Einheit (7 Tage springt nicht mehr auf 1 Woche) (#221)
+- Die Einstellungen „Darstellung“ prüfen die mitgelieferten ConPTY-Dateien nicht mehr in jedem Bild (#221)
+- Ein Programm, das ein Synchronized Update endlos offen hielt und dabei Anfragen sendete, oder eine nie beendete OSC-Sequenz konnte den Speicher füllen, bis Paneldeck abstürzte; beides ist jetzt begrenzt (#212)
+- Dialoge geben keine Tasten mehr an das Terminal dahinter weiter: die Rückfrage beim Schließen eines weiteren Fensters (Esc unterbrach Claude, Enter ging an die Shell), das erste Bild der Rückfrage beim Einfügen mehrerer Zeilen; nach der Rückfrage „Link öffnen?“ bekommt das Terminal den Fokus zurück (#217)
+- Broadcast-Einfügen: Jeder Zielbereich rahmt eingefügten Text jetzt mit seinem eigenen Bracketed-Paste-Modus, und die Rückfrage vor mehreren Zeilen erscheint auch, wenn ein Zielbereich die Zeilen ausführen würde (#220)
+- Ein vollständiger Reset (RIS) im alternativen Bildschirm verschiebt Prompt-Marken und absolute Zeilennummern nicht mehr; CAN/SUB beenden OSC-Sequenzen wie in der Terminal-Emulation (#221)
+- Beim Schließen oder Neu laden einer Sitzung erscheinen versteckte Hilfsprozesse eines laufenden Programms (z. B. MCP-Server und Werkzeugaufrufe von Claude Code) nicht mehr als Hintergrundprozesse; laufen einige davon etwa 6 Sekunden später noch, nennt eine Meldung sie und bietet „Alle beenden“. (#213)
+- Beim Schließen einer Sitzung mit Git-Worktree werden jetzt auch ihre Hintergrundprozesse genannt und lassen sich vor dem Entfernen des Worktrees beenden. (#213)
+- Der Knopf „Neu starten“ einer beendeten Sitzung und „Beendete Sitzungen neu starten“ fragen jetzt wie „Neu laden“ nach Hintergrundprozessen. (#213)
+- „Alle beenden“ in einer Schließen- oder Neu-laden-Rückfrage beendet nur die dort genannten Prozesse; eine inzwischen neu gestartete Sitzung bleibt unberührt. (#213)
+- Einstellungen der Sitzung: Der Arbeitsordner einer WSL-Sitzung akzeptiert Linux-Pfade und bietet die WSL-Ordnerauswahl; Speichern während der Prüfung in WSL sagt das. WSL-Pfade, Netzwerkpfade und Netzlaufwerke werden nicht mehr im UI-Thread geprüft, ein Netzwerk-Arbeitsordner beim Start nur noch kurz. (#216)
+- `paneldeck --open` mit relativem Pfad öffnet den Ordner relativ zum Ort des Aufrufs, nicht zum laufenden Paneldeck. (#221)
+- Ein hängendes `wsl.exe` hält den Start von Paneldeck und WSL-Ordnerprüfungen nicht mehr unbegrenzt auf. (#221)
+- Ein Prozess-Handle-Leck beim Zuordnen eines MCP-Aufrufers wurde behoben. (#221)
+
+### Security
+
+- MCP: Sitzungen, deren anlegende Sitzung geschlossen wurde, können nicht mehr von jedem externen Agenten geschlossen oder verknüpft werden. (#218)
+- MCP: Ein Prozess, der von einer geschlossenen oder neu gestarteten Sitzung übrig ist, wird weiter dieser Sitzung zugeordnet (ihr Job Object bleibt, solange darin Prozesse laufen): Er behält ihre Agenten-Kette und gibt sie weiter, statt als unbekannter Aufrufer zu gelten. Agenten, die aus anderen Programmen gestartet wurden (z. B. über `code .`), gelten nicht mehr fälschlich als losgelöst. (#218)
+- MCP: Konnte eine Sitzung kein Job Object bekommen, darf ein losgelöster, nicht zuzuordnender Prozess keine Claude-Sitzungen, Chats oder die MCP-Brücke starten und nicht in Claude-Sitzungen oder Chats schreiben. (#218)
+- MCP: Ein `create_session`, das auf die Ordnerprüfung in WSL wartet, prüft vor dem Anlegen die Stufe (bzw. die Werkzeug-Regeln des Chat-Modells) erneut. (#218)
+
 ## [2.3.0] - 2026-11-17
 
 ### Added
@@ -278,6 +311,7 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Alle `unwrap()`/`expect()` im Programmcode sind durch Fehlerbehandlung ersetzt (der Release-Build bricht bei einem Panic komplett ab); die `unsafe`-Blöcke sind begründet.
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
+[2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...HEAD
 [2.3.0]: https://github.com/zibbozz/paneldeck/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/zibbozz/paneldeck/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/zibbozz/paneldeck/compare/v2.0.0...v2.1.0

@@ -6,7 +6,7 @@ impl App {
     pub(super) fn dialogs(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
         // Rückfrage „Link öffnen?“ (OSC 8, #183)
-        self.link_ask_ui(ctx);
+        self.link_ask_ui(ctx, self.focused);
 
         // Neue Sitzung
         if let Some(mut d) = self.new_dialog.take() {
@@ -499,6 +499,17 @@ impl App {
                 } else {
                     ui.label(RichText::new(lang.t("Keine offenen Änderungen.", "No pending changes.")).color(style::dim(ui)));
                 }
+                // Hintergrundprozesse im Job (#213): nennen und wahlweise beenden (sie können den Ordner belegt halten).
+                if !w.lingering.is_empty() {
+                    super::closing::lingering_section(ui, &w.lingering, lang, false);
+                    ui.checkbox(&mut w.end_jobs, lang.t("Hintergrundprozesse beenden", "End background processes"));
+                    let note = if w.end_jobs {
+                        super::closing::end_all_warning(&w.lingering, lang)
+                    } else {
+                        lang.t("Laufende Hintergrundprozesse können den Ordner belegen – dann schlägt das Entfernen des Worktrees fehl.", "Running background processes can keep the folder busy – removing the worktree then fails.").to_string()
+                    };
+                    ui.label(RichText::new(note).small().color(style::dim(ui)));
+                }
                 ui.add_space(S2);
                 ui.horizontal(|ui| {
                     if ui.button(lang.t("Behalten", "Keep")).on_hover_text(lang.t("Sitzung schließen, Worktree und Branch bleiben", "Close the session, keep worktree and branch")).clicked() {
@@ -517,6 +528,9 @@ impl App {
             });
         if let Some(a) = action {
             let id = w.id;
+            if w.end_jobs {
+                self.end_jobs(&super::closing::job_refs(&w.lingering));
+            }
             self.close_session(id);
             if a > 0 {
                 let (repo, path, branch, force) = (PathBuf::from(&wt.repo), PathBuf::from(&wt.path), wt.branch.clone(), w.discard);

@@ -212,6 +212,12 @@ pub fn validate_thresholds(list: &[DueThreshold]) -> Result<Vec<DueThreshold>, T
 /// eine doppelte Dauer) fallen weg, die übrigen bleiben.
 pub fn parse_thresholds(json: &str) -> Vec<DueThreshold> {
     let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json) else { return Vec::new() };
+    clean_threshold_values(items)
+}
+
+/// Wie [`parse_thresholds`], für eine schon gelesene Liste: ungültige Einträge (unlesbar, unbekanntes Symbol, doppelte Dauer,
+/// mehr als [`MAX_THRESHOLDS`]) fallen weg, die übrigen bleiben bereinigt.
+pub fn clean_threshold_values(items: impl IntoIterator<Item = serde_json::Value>) -> Vec<DueThreshold> {
     let mut out: Vec<DueThreshold> = Vec::new();
     for v in items {
         let Ok(t) = serde_json::from_value::<DueThreshold>(v) else { continue };
@@ -223,6 +229,18 @@ pub fn parse_thresholds(json: &str) -> Vec<DueThreshold> {
         }
     }
     out
+}
+
+/// `deserialize_with` für eine optionale Schwellen-Liste (Projektsicherung): fehlt/`null` = `None`, eine Liste = ihre gültigen
+/// Einträge ([`clean_threshold_values`]); ein anderer Wert (keine Liste) zählt wie fehlend (`None`, also die Vorgaben beim
+/// Import). Kein Ladefehler wegen eines einzelnen Eintrags.
+pub fn lenient_thresholds<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<DueThreshold>>, D::Error> {
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(a) => Some(clean_threshold_values(a)),
+        _ => None,
+    })
 }
 
 pub fn thresholds_json(list: &[DueThreshold]) -> String {

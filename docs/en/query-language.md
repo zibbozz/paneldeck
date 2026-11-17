@@ -29,6 +29,8 @@ A condition is *field operator value*. Field names with spaces and texts with sp
 | Labels | `labels`, `Labels` | `labels = auth` |
 
 - `due` compares a due date without a time as the end of that day; comparing with a plain date compares only the day (`due = 2026-11-20` also matches 14:30 on that day).
+- A custom field of another kind that a built-in field hides (e.g. a custom field named *Due* or *Fällig*) is available as `"<name> (custom)"`, e.g. `"Due (custom)" = 2026-11-20`.
+- Custom date-and-time fields match values with or without seconds.
 
 ## Examples
 All examples come from the help page in Paneldeck (demo data); each has a screenshot of its result there. A selection:
