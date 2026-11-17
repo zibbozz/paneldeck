@@ -669,9 +669,13 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
             *down = (me, Vec::new());
         }
     }
+    // Der Broadcast bekommt jede Taste und jeden Text, auch wenn hier nichts gesendet wird: Ziele mit anderem Modus
+    // kodieren selbst (z. B. Text, den kitty-Flag 8 hier mit der Taste schon gesendet hat).
     let key_input = |session: &mut Session, k: vtkeys::KeyPress| -> vtkeys::Encoded {
         let out = vtkeys::encode_key(&k, mode);
-        if !out.bytes.is_empty() {
+        if out.bytes.is_empty() {
+            session.write_input(&[], vtkeys::TeeInput::key(&k));
+        } else {
             send_input(session, &out.bytes, vtkeys::TeeInput::key(&k));
         }
         out
@@ -706,17 +710,21 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                 }
             }
             Event::Text(t) => {
-                if skip == Some(i) {
-                    continue;
-                }
                 let m = ui.input(|i| i.modifiers);
                 if m.alt && !m.ctrl && !was_after_key {
                     continue; // Rest eines vom Hub verbrauchten Alt-Kürzels
                 }
                 let numpad = t.chars().count() == 1 && t.chars().next().is_some_and(numpad_down);
+                let tee = vtkeys::TeeInput::Text { text: t.clone(), mods: m, numpad };
+                if skip == Some(i) {
+                    session.write_input(&[], tee); // hier schon mit der Taste gesendet
+                    continue;
+                }
                 let bytes = vtkeys::encode_text(t, m, numpad, mode);
-                if !bytes.is_empty() {
-                    send_input(session, &bytes, vtkeys::TeeInput::Text { text: t.clone(), mods: m, numpad });
+                if bytes.is_empty() {
+                    session.write_input(&[], tee);
+                } else {
+                    send_input(session, &bytes, tee);
                 }
             }
             Event::Paste(t) => paste(session, t),

@@ -565,7 +565,9 @@ impl Session {
         if self.tee_on.load(Ordering::Relaxed) {
             self.tee.lock().unwrap_or_else(|e| e.into_inner()).push(tee);
         }
-        self.write_raw(bytes);
+        if !bytes.is_empty() {
+            self.write_raw(bytes);
+        }
     }
 
     pub fn take_tee(&self) -> Vec<crate::vtkeys::TeeInput> {

@@ -614,8 +614,15 @@ pub struct KittyStackGuard {
     depth: [usize; 2],
     alt: bool,
     state: u8,
+    /// Privates Präfix der CSI-Sequenz (`>`, `<`, `?`, `=`), 0 = keins.
     prefix: u8,
-    params: Vec<u8>,
+    /// Weitere Zwischenbytes (dann führt vte die Sequenz nicht aus).
+    extra: bool,
+    /// Erste Werte der Parameter, laufender Wert, erster Unterparameter, Zahl der Trenner (`;` und `:`).
+    vals: Vec<u16>,
+    cur: u16,
+    cur_first: Option<u16>,
+    seps: usize,
 }
 
 impl KittyStackGuard {
@@ -645,57 +652,142 @@ impl KittyStackGuard {
         self.depth[self.alt as usize] = 0;
     }
 
+    /// Ein Byte wie der vte-0.15-Parser (`vte::Parser`) – nur die Zustände, die über einen Push/Pop, RIS oder den
+    /// Bildschirmwechsel entscheiden. Weicht der Zähler vom Parser ab, ließe sich die Grenze umgehen (Steuerzeichen
+    /// mitten in der Sequenz, `:`-Unterparameter, DEL).
     fn step(&mut self, b: u8) -> Option<Vec<u8>> {
-        match (self.state, b) {
-            (_, 0x1b) => {
-                self.state = 1;
-                self.params.clear();
-                self.prefix = 0;
+        // Überall: ESC beginnt eine neue Sequenz, CAN/SUB brechen ab.
+        match b {
+            0x1b => {
+                self.state = G_ESCAPE;
+                return None;
             }
-            (1, b'c') => {
-                // RIS: alacritty leert beide Stapel
-                self.depth = [0, 0];
-                self.alt = false;
-                self.state = 0;
+            0x18 | 0x1a => {
+                self.state = G_GROUND;
+                return None;
             }
-            (1, b'[') => self.state = 2,
-            (2, b'?' | b'>' | b'<' | b'=') => {
-                self.prefix = b;
-                self.state = 3;
-            }
-            (2 | 3, b'0'..=b'9' | b';') => {
-                if self.params.len() < 64 {
-                    self.params.push(b);
+            _ => {}
+        }
+        let c0 = b < 0x20; // übrige C0 führt der Parser aus, der Zustand bleibt
+        match self.state {
+            G_GROUND | G_STRING => {}
+            G_ESCAPE => match b {
+                _ if c0 || b == 0x7f || b >= 0x80 => {}
+                0x20..=0x2f => self.state = G_ESC_INTER,
+                b'[' => {
+                    self.state = G_CSI_ENTRY;
+                    self.prefix = 0;
+                    self.extra = false;
+                    self.vals.clear();
+                    self.cur = 0;
+                    self.cur_first = None;
+                    self.seps = 0;
                 }
-                self.state = 3;
+                b']' | b'P' | b'X' | b'^' | b'_' => self.state = G_STRING,
+                b'c' => {
+                    // RIS: alacritty leert beide Stapel und verlässt den alternativen Bildschirm
+                    self.depth = [0, 0];
+                    self.alt = false;
+                    self.state = G_GROUND;
+                }
+                _ => self.state = G_GROUND,
+            },
+            G_ESC_INTER => {
+                if (0x30..=0x7e).contains(&b) {
+                    self.state = G_GROUND;
+                }
             }
-            (2 | 3, b'u') => {
-                self.state = 0;
-                let first: usize = self.params.split(|c| *c == b';').next().and_then(|p| std::str::from_utf8(p).ok()?.parse().ok()).unwrap_or(0);
+            G_CSI_ENTRY | G_CSI_PARAM | G_CSI_INTER => match b {
+                _ if c0 || b == 0x7f || b >= 0x80 => {}
+                0x20..=0x2f => {
+                    self.extra = true;
+                    self.state = G_CSI_INTER;
+                }
+                0x30..=0x3f if self.state == G_CSI_INTER => self.state = G_CSI_IGNORE,
+                0x3c..=0x3f if self.state == G_CSI_ENTRY => {
+                    self.prefix = b;
+                    self.state = G_CSI_PARAM;
+                }
+                0x3c..=0x3f => self.state = G_CSI_IGNORE,
+                0x30..=0x39 => {
+                    self.cur = self.cur.saturating_mul(10).saturating_add((b - b'0') as u16);
+                    self.state = G_CSI_PARAM;
+                }
+                b':' => {
+                    // Unterparameter: zählt wie der erste Wert des Parameters
+                    self.cur_first.get_or_insert(self.cur);
+                    self.cur = 0;
+                    self.seps += 1;
+                    self.state = G_CSI_PARAM;
+                }
+                b';' => {
+                    self.end_param();
+                    self.seps += 1;
+                    self.state = G_CSI_PARAM;
+                }
+                _ => {
+                    self.state = G_GROUND;
+                    return self.dispatch(b);
+                }
+            },
+            G_CSI_IGNORE => {
+                if (0x40..=0x7e).contains(&b) {
+                    self.state = G_GROUND;
+                }
+            }
+            _ => self.state = G_GROUND,
+        }
+        None
+    }
+
+    fn end_param(&mut self) {
+        let v = self.cur_first.take().unwrap_or(self.cur);
+        if self.vals.len() < 32 {
+            self.vals.push(v);
+        }
+        self.cur = 0;
+    }
+
+    /// Abgeschlossene CSI-Sequenz mit Endbyte `fin` (wie `vte::ansi::Processor::csi_dispatch`). Pushes zählen immer
+    /// (auch wenn vte sie verwerfen würde – zu hoch gezählt ist sicher), Pops und der Bildschirmwechsel nur genau dann,
+    /// wenn vte sie ausführt (mehr als 32 Werte oder weitere Zwischenbytes: nichts).
+    fn dispatch(&mut self, fin: u8) -> Option<Vec<u8>> {
+        self.end_param();
+        let exact = !self.extra && self.seps < 32;
+        let first = self.vals.first().copied().unwrap_or(0);
+        match (fin, self.prefix) {
+            (b'u', b'>') => {
                 let d = &mut self.depth[self.alt as usize];
-                match self.prefix {
-                    b'>' => {
-                        *d += 1;
-                        if *d > KITTY_STACK_CAP {
-                            *d = KITTY_STACK_CAP;
-                            return Some(format!("\x1b[<2u\x1b[>{first}u").into_bytes());
-                        }
-                    }
-                    b'<' => *d = d.saturating_sub(first.max(1)),
-                    _ => {}
+                *d += 1;
+                if *d > KITTY_STACK_CAP {
+                    *d = KITTY_STACK_CAP;
+                    return Some(format!("\x1b[<2u\x1b[>{first}u").into_bytes());
                 }
             }
-            (2 | 3, b'h' | b'l') => {
-                self.state = 0;
-                if self.prefix == b'?' && self.params.split(|c| *c == b';').any(|p| p == b"1049" || p == b"1047" || p == b"47") {
-                    self.alt = b == b'h';
+            (b'u', b'<') if exact => {
+                let d = &mut self.depth[self.alt as usize];
+                *d = d.saturating_sub(first.max(1) as usize);
+            }
+            // Nur 1049 tauscht in alacritty 0.26 die Bildschirme (und damit die Stapel); 47/1047 nicht.
+            (b'h' | b'l', b'?') if exact => {
+                if self.vals.contains(&1049) {
+                    self.alt = fin == b'h';
                 }
             }
-            _ => self.state = 0,
+            _ => {}
         }
         None
     }
 }
+
+const G_GROUND: u8 = 0;
+const G_ESCAPE: u8 = 1;
+const G_ESC_INTER: u8 = 2;
+const G_CSI_ENTRY: u8 = 3;
+const G_CSI_PARAM: u8 = 4;
+const G_CSI_INTER: u8 = 5;
+const G_CSI_IGNORE: u8 = 6;
+const G_STRING: u8 = 7;
 
 // ───────────────────────────── Broadcast ─────────────────────────────
 
@@ -1259,6 +1351,47 @@ mod tests {
         assert_eq!(g.depth[0], 0);
     }
 
+    /// Regression (#183 Review 2): Varianten, die vte als Push ausführt, die ein einfacher Zähler aber übersah –
+    /// Steuerzeichen mitten in der Sequenz, Unterparameter, DEL, Steuerzeichen gleich nach ESC [.
+    #[test]
+    fn kitty_push_flood_variants_are_capped() {
+        use alacritty_terminal::vte::ansi::Processor;
+        for push in ["\x1b[>1\x00u", "\x1b[\x07>1u", "\x1b[>\n1u", "\x1b[>1:2u", "\x1b[>1\x7fu", "\x1b\x07[>1u", "\x1b[>1;2;3u"] {
+            let (mut term, replies) = kitty_term();
+            let mut p: Processor = Processor::new();
+            let mut g = KittyStackGuard::default();
+            let flood = push.repeat(5000);
+            for chunk in flood.as_bytes().chunks(5) {
+                p.advance(&mut term, &g.filter(chunk));
+            }
+            assert_eq!(g.depth[0], KITTY_STACK_CAP, "{push:?}");
+            // vte hat genau so viele Einträge: nach KITTY_STACK_CAP Pops ist der Stapel leer
+            p.advance(&mut term, &g.filter(format!("\x1b[<{KITTY_STACK_CAP}u\x1b[?u").as_bytes()));
+            assert!(replies.0.lock().unwrap().ends_with("\x1b[?0u"), "{push:?}");
+        }
+    }
+
+    /// Pops und Bildschirmwechsel zählen nur, wenn vte sie ausführt (sonst ließe sich die Grenze umgehen).
+    #[test]
+    fn kitty_guard_counts_only_executed_pops() {
+        let mut g = KittyStackGuard::default();
+        g.filter(b"\x1b[>1u\x1b[>1u\x1b[>1u");
+        // weiteres Zwischenbyte: vte führt das Pop nicht aus
+        g.filter(b"\x1b[< u");
+        assert_eq!(g.depth, [3, 0]);
+        // Pop 0 = Standard 1, Pop mit Unterparameter
+        g.filter(b"\x1b[<0u\x1b[<1:5u");
+        assert_eq!(g.depth, [1, 0]);
+        // 1049 mit führenden Nullen ist 1049; 47/1047 tauschen in alacritty 0.26 nicht
+        g.filter(b"\x1b[?47h\x1b[?1047h");
+        assert!(!g.alt);
+        g.filter(b"\x1b[?0001049h");
+        assert!(g.alt);
+        // RIS mit Steuerzeichen zwischen ESC und c
+        g.filter(b"\x1b\x07c");
+        assert_eq!((g.depth, g.alt), ([0, 0], false));
+    }
+
     #[test]
     fn kitty_guard_tracks_screens_and_reset() {
         let mut g = KittyStackGuard::default();
@@ -1320,17 +1453,30 @@ mod tests {
 
     #[test]
     fn broadcast_encodes_per_target() {
-        let k = KeyPress { text: Some("\r"), ..KeyPress::new(Key::Enter, mods("s")) };
-        let items = vec![
-            TeeInput::Text { text: "ls".into(), mods: mods(""), numpad: false },
-            TeeInput::key(&k),
-            TeeInput::Bytes(b"\x1b[200~x\x1b[201~".to_vec()),
-        ];
+        // Wie der Bildschirm-Code mitschneidet: jede Taste (Druck) und jeder Text, auch wenn die Taste den Text hier
+        // schon mitgesendet hat (`Session::write_input`). egui liefert je Taste erst `Key`, dann `Text`.
+        let typed = |k: Key, m: &str, text: Option<&str>| -> Vec<TeeInput> {
+            let kp = KeyPress { physical: Some(k), text, ..KeyPress::new(k, mods(m)) };
+            let mut v = vec![TeeInput::key(&kp)];
+            if let Some(t) = text {
+                v.push(TeeInput::Text { text: t.into(), mods: mods(m), numpad: false });
+            }
+            v
+        };
+        let mut items = Vec::new();
+        items.extend(typed(Key::L, "", Some("l")));
+        items.extend(typed(Key::S, "", Some("s")));
+        items.extend(typed(Key::Enter, "s", None)); // Enter hat keinen Text
+        items.push(TeeInput::Bytes(b"\x1b[200~x\x1b[201~".to_vec()));
         assert_eq!(esc(&TeeInput::encode_all(&items, kitty(5))), "ls\\e[13;2u\\e[200~x\\e[201~");
         assert_eq!(esc(&TeeInput::encode_all(&items, WIN32)), "ls\\e\\r\\e[200~x\\e[201~");
+        // Fokus mit kitty-Flag 8 sendet Buchstaben als CSI u – ein klassisches Ziel bekommt trotzdem den Text,
+        // ein Ziel mit Flag 8 jede Taste genau einmal.
+        let items = typed(Key::A, "", Some("a"));
+        assert_eq!(esc(&TeeInput::encode_all(&items, LEGACY)), "a");
+        assert_eq!(esc(&TeeInput::encode_all(&items, kitty(8))), "\\e[97u");
         // Alt+. : der Text gehört zur Taste und kommt nur einmal
-        let k = KeyPress { text: Some("."), ..KeyPress::new(Key::Period, mods("a")) };
-        let items = vec![TeeInput::key(&k), TeeInput::Text { text: ".".into(), mods: mods("a"), numpad: false }];
+        let items = typed(Key::Period, "a", Some("."));
         assert_eq!(esc(&TeeInput::encode_all(&items, LEGACY)), "\\e.");
         assert_eq!(esc(&TeeInput::encode_all(&items, kitty(1))), "\\e[46;3u");
     }
