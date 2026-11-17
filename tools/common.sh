@@ -30,6 +30,8 @@ fi
 # den Benutzernamen aus dem Cargo-Pfad in die .exe schreiben): Pfade per rustc auf neutrale Namen abbilden.
 _w() { if [ "$IS_WIN" = 1 ]; then cygpath -w "$1" 2>/dev/null || echo "$1"; else echo "$1"; fi; }
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$(_w "${CARGO_HOME:-$HOME/.cargo}")=/cargo --remap-path-prefix=$(_w "${RUSTUP_HOME:-$HOME/.rustup}")=/rustup --remap-path-prefix=$(_w "$PWD")=/paneldeck"
+# RUSTFLAGS ersetzt die rustflags aus .cargo/config.toml: die statische C-Laufzeit (MSVC, keine VCRUNTIME140.dll) hier erneut.
+if [ "$IS_WIN" = 1 ]; then export RUSTFLAGS="$RUSTFLAGS -C target-feature=+crt-static"; fi
 
 # Optionale Werkzeuge (auch wenn sie nicht im PATH der laufenden Shell stehen).
 find_tool() { # find_tool <name> <fallback-pfad>...
@@ -39,6 +41,17 @@ find_tool() { # find_tool <name> <fallback-pfad>...
 }
 MAKENSIS="$(find_tool makensis "/c/Program Files (x86)/NSIS/makensis.exe" "/c/Program Files/NSIS/makensis.exe")"
 GH="$(find_tool gh "/c/Program Files/GitHub CLI/gh.exe")"
+
+# Mitgelieferte ConPTY (conpty.dll + OpenConsole.exe aus NuGet, Version und SHA-256 fest in tools/fetch-conpty.ps1)
+# nach dist/conpty holen und prüfen. Installer und portables ZIP legen beide Dateien neben paneldeck.exe.
+fetch_conpty() {
+  local ps
+  if [ "$IS_WIN" = 1 ]; then ps=powershell.exe; else ps="$(find_tool pwsh)"; fi
+  [ -n "$ps" ] || { echo "PowerShell (pwsh) nicht gefunden – tools/fetch-conpty.ps1 braucht sie"; exit 1; }
+  mkdir -p dist/conpty dist/conpty-cache
+  "$ps" -NoProfile -ExecutionPolicy Bypass -File tools/fetch-conpty.ps1 -Dest "$(abspath dist/conpty)" -Cache "$(abspath dist/conpty-cache)" \
+    || { echo "ConPTY konnte nicht geholt oder geprüft werden (tools/fetch-conpty.ps1)"; exit 1; }
+}
 
 # Absoluter Pfad in der Schreibweise des Zielprogramms (Windows-Programme wollen C:/..., nicht /c/...).
 abspath() {

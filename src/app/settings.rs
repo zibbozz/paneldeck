@@ -99,6 +99,18 @@ impl App {
                         row(ui, lang.t("Shell-Integration", "Shell integration"), lang.t("Befehlsmarken, Ordner-Tracking (wirkt für neue Sitzungen; ändert keine Profile)", "Command marks, folder tracking (applies to new sessions; does not change profiles)"), |ui| {
                             style::toggle(ui, &mut self.settings.shell_integration);
                         });
+                        // #175: kurzer Hinweis in der Zeile, die Abwägung ausführlich im Tooltip des Schalters.
+                        row(
+                            ui,
+                            lang.t("Umgebung von Paneldeck erben", "Inherit Paneldeck's environment"),
+                            lang.t("Aus: frisch aus Windows (setx wirkt sofort). An: die Umgebung beim Start von Paneldeck.", "Off: fresh from Windows (setx applies at once). On: the environment Paneldeck was started with."),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.inherit_env).on_hover_text(lang.t(
+                                    "Aus (empfohlen): Neue Terminals lesen die Umgebungsvariablen frisch aus Windows – mit setx oder in den Systemeinstellungen geänderte Variablen gelten sofort, ohne Paneldeck neu zu starten; eine eigene Umgebung der Shell, aus der Paneldeck gestartet wurde, geht dabei für Variablen, die auch in Windows gesetzt sind (z. B. PATH), verloren.\n\nAn: Neue Terminals bekommen genau die Umgebung, mit der Paneldeck gestartet wurde (z. B. aus einer Shell mit eigenem PATH oder eigenen Variablen); in Windows später geänderte Variablen gelten dann erst nach einem Neustart von Paneldeck.\n\nIn beiden Fällen gelten die Variablen des Profils und Paneldecks eigene Variablen. Wirkt für neue Terminals.",
+                                    "Off (recommended): new terminals read the environment variables fresh from Windows – variables changed with setx or in the system settings apply at once, without restarting Paneldeck; a custom environment of the shell Paneldeck was started from is lost for variables that Windows also sets (e.g. PATH).\n\nOn: new terminals get exactly the environment Paneldeck was started with (e.g. from a shell with its own PATH or variables); variables changed in Windows later only apply after restarting Paneldeck.\n\nProfile variables and Paneldeck's own variables apply either way. Applies to new terminals.",
+                                ));
+                            },
+                        );
                         row(ui, lang.t("Befehl fertig melden", "Notify when command finishes"), lang.t("ab dieser Dauer in Sekunden (0 = aus)", "after this many seconds (0 = off)"), |ui| {
                             ui.add(egui::DragValue::new(&mut self.settings.cmd_notify_secs).range(0..=3600).speed(1.0).suffix(" s"));
                         });
@@ -208,6 +220,27 @@ impl App {
                                 });
                             },
                         );
+                        #[cfg(windows)]
+                        {
+                            row(
+                                ui,
+                                lang.t("Mitgelieferten Konsolen-Host verwenden (empfohlen)", "Use the bundled console host (recommended)"),
+                                lang.t(
+                                    "Neuere ConPTY (OpenConsole) neben paneldeck.exe: reicht Farbabfragen und flimmerfreie Ausgabe durch. Aus: Konsolen-Host von Windows. Wirkt für neue Sitzungen.",
+                                    "Newer ConPTY (OpenConsole) next to paneldeck.exe: passes colour queries and flicker-free output through. Off: the console host built into Windows. Applies to new sessions.",
+                                ),
+                                |ui| {
+                                    style::toggle(ui, &mut self.settings.bundled_conpty);
+                                },
+                            );
+                            if self.settings.bundled_conpty && crate::conpty::bundled_dll().is_none() {
+                                ui.label(RichText::new(lang.t(
+                                    "conpty.dll und OpenConsole.exe fehlen neben paneldeck.exe – Sitzungen nutzen den Konsolen-Host von Windows.",
+                                    "conpty.dll and OpenConsole.exe are missing next to paneldeck.exe – sessions use the console host built into Windows.",
+                                )).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
+                                ui.add_space(4.0);
+                            }
+                        }
                         row(
                             ui,
                             lang.t("Programme dürfen in die Zwischenablage kopieren (OSC 52)", "Allow programs to copy to the clipboard (OSC 52)"),
