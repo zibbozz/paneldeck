@@ -1393,3 +1393,26 @@ fn sqlite_turns_integer_overflow_into_a_float() {
     let n: rusqlite::Result<i64> = c.query_row("SELECT MAX(rank) + 1 FROM t", [], |r| r.get(0));
     assert!(n.is_err(), "die Zahl ist als Ganzzahl nicht mehr lesbar");
 }
+
+#[test]
+fn lucide_icons_survive_the_backup_and_unknown_ones_do_not_stop_the_import() {
+    use crate::planning::types::{list_types, update_type, UpdateType};
+    let r = rich();
+    let c = &r.fx.c;
+    let note = list_types(c, r.fx.project).unwrap().into_iter().find(|t| t.name.as_deref() == Some("Note")).unwrap().id;
+    update_type(c, note, &UpdateType { icon: Some(Some("lucide:alarm-clock".into())), ..Default::default() }).unwrap();
+    // Ein Icon aus einer neueren Lucide-Version (formal richtig, hier unbekannt) wird gespeichert und bleibt erhalten.
+    update_type(c, r.fx.task, &UpdateType { icon: Some(Some("lucide:icon-from-a-newer-version".into())), ..Default::default() }).unwrap();
+    let a = export(&r);
+    let icons: Vec<Option<&str>> = a.structure.types.iter().map(|t| t.icon.as_deref()).collect();
+    assert!(icons.contains(&Some("lucide:alarm-clock")) && icons.contains(&Some("lucide:icon-from-a-newer-version")));
+    let back = ProjectDoc::from_json(&a.to_json()).unwrap();
+    let c2 = fresh();
+    let res = import(&c2, &back);
+    assert_eq!(norm(export_project(&c2, res.project_id).unwrap()), norm(a.clone()));
+    // Formal falsche Namen lehnt der Import ab (atomar).
+    let mut bad = a;
+    bad.structure.types.iter_mut().find(|t| t.icon.as_deref() == Some("lucide:alarm-clock")).unwrap().icon = Some("lucide:Alarm Clock".into());
+    let e = fails(&bad);
+    assert!(format!("{e:?}").contains("IconInvalid"), "{e:?}");
+}

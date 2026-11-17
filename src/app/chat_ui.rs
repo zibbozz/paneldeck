@@ -1,6 +1,7 @@
 //! Inhalt eines Chat-Bereichs (#63): Nachrichtenliste, Werkzeugzeilen, Eingabe. Kennt kein Backend – Senden, Stopp,
 //! Neu erzeugen und Bearbeiten meldet [`chat_body`] zurück; die App führt sie aus (`Action::Chat*`).
 
+use crate::afford::Clickable;
 use crate::chat::session::{CallState, UiCache};
 use crate::chat::{AllowRule, ChatMsg, ChatState, Decision, Role, ToolStatus};
 use crate::mcp::McpLevel;
@@ -63,7 +64,8 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     // Trennlinie über der Eingabe
     ui.painter().hline(bar_rect.x_range(), bar_rect.min.y + 0.5, Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(0.7)));
 
-    let bg = ui.interact(list_rect, Id::new(("chat_bg", session)), Sense::click());
+    // Klick in den Verlauf fokussiert nur die Eingabe – kein Knopf, darum ohne Hand (#187).
+    let bg = ui.interact(list_rect, Id::new(("chat_bg", session)), Sense::click()).no_pointer();
     if bg.clicked() {
         out.focus = true;
     }

@@ -26,6 +26,9 @@ mod due_ui_tests;
 mod fields_ed;
 mod help_shots;
 mod helpers;
+mod icon_explorer;
+#[cfg(test)]
+mod icon_explorer_tests;
 mod keywords_ed;
 mod kinds_ed;
 mod links_ed;
@@ -89,6 +92,7 @@ mod sprint_ui_tests;
 pub(super) use helpers::color_of;
 pub(super) use quick_exec::SessionRequest;
 pub(super) use quick_menu::Out as QuickOut;
+pub(super) use icon_explorer::install_font as install_icon_font;
 pub(super) use widgets::type_icon;
 // Rückfrage mit 3-Sekunden-Wartezeit auch im Terminal Hub (Sitzungen schließen, `app::closing`).
 pub(super) use ticket_state::countdown_secs;

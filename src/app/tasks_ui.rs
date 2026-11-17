@@ -1352,6 +1352,10 @@ impl TasksUi {
                         let (r, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::CLICK);
                         ui.painter().circle_filled(r.center(), 8.0, tag_color(t));
                         ui.painter().circle_stroke(r.center(), 8.5, Stroke::new(1.0_f32, Color32::from_white_alpha(60)));
+                        if resp.hovered() {
+                            // Hover-Ring: das Farbfeld ist ein Knopf (öffnet die Farbauswahl, #187)
+                            ui.painter().circle_stroke(r.center(), 10.5, Stroke::new(1.5_f32, ui.visuals().widgets.hovered.bg_stroke.color));
+                        }
                         if resp.on_hover_text(lang.t("Farbe ändern", "Change color")).clicked() {
                             mgr.picker = if mgr.picker == Some(t.id) { None } else { Some(t.id) };
                         }
