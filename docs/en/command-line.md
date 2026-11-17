@@ -43,6 +43,8 @@ Together with `--open`: the new session starts Claude Code (needs Claude mode).
 
     paneldeck.exe --open "C:\Dev\my-app" --claude
 
+The session uses your default [Claude start options](claude-code.md#start-options). Typed in a Paneldeck terminal, `--open … --claude` never applies your defaults for extra folders, allowed tools, an MCP config or `--safe-mode`, and the new session is marked with an [agent chain](agent-interface.md#security) only if that terminal has one.
+
 ### --tray
 Starts minimized to the tray icon (used by *Start with Windows*). If Paneldeck already runs, it is shown instead.
 

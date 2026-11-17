@@ -23,6 +23,8 @@
   - **detached sessions** stay open in their own windows and move to the main window;
   - **sessions with a Git worktree** are never closed silently: each has a **Close …** button that opens the usual worktree question (keep, remove or merge the worktree). *Close window* stays disabled until they are closed.
 
+  - **background programs** that sessions of the window started and that would keep running (e.g. an editor or a browser, see [Closing sessions and background programs](terminals.md#closing-sessions-and-background-programs)) are listed; the buttons are then *Close, keep running* and *Close and end all* (enabled after 3 seconds; ends them immediately, without saving).
+
   *Cancel* (or `Esc`) keeps the window. A window without sessions (or with only ended sessions) closes without asking.
 - **Closing the main window closes all windows** (with *Close → tray* it goes to the tray instead).
 - When Paneldeck quits with further windows open, the next start restores them at their position and size, with their sessions. A window whose saved position is no longer on any monitor is moved onto a visible one. Restored windows don't take the focus from the main window, and when Paneldeck starts in the tray (`--tray`, *Start with Windows*) they stay hidden until the main window is shown.

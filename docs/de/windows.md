@@ -23,6 +23,8 @@
   - **abgedockte Sitzungen** bleiben in ihren eigenen Fenstern offen und gehören danach zum Hauptfenster;
   - **Sitzungen mit Git-Worktree** werden nie still geschlossen: Jede hat einen Knopf **Schließen …**, der die gewohnte Worktree-Rückfrage öffnet (Worktree behalten, entfernen oder mergen). *Fenster schließen* bleibt gesperrt, bis sie geschlossen sind.
 
+  - **Hintergrundprogramme**, die Sitzungen des Fensters gestartet haben und die weiterlaufen würden (z. B. ein Editor oder Browser, siehe [Sitzungen schließen und Hintergrundprogramme](terminals.md#sitzungen-schließen-und-hintergrundprogramme)), werden aufgelistet; die Knöpfe heißen dann *Schließen, weiterlaufen lassen* und *Schließen, alle beenden* (nach 3 Sekunden frei; beendet sie sofort, ohne zu speichern).
+
   *Abbrechen* (oder `Esc`) lässt das Fenster offen. Ein Fenster ohne Sitzungen (oder nur mit beendeten Sitzungen) schließt ohne Nachfrage.
 - **Das Hauptfenster zu schließen, schließt alle Fenster** (mit *Schließen → Tray* geht es stattdessen in den Tray).
 - Beendest du Paneldeck mit offenen weiteren Fenstern, stellt der nächste Start sie an Position und in Größe wieder her, mit ihren Sitzungen. Liegt die gespeicherte Lage auf keinem Monitor mehr, wird das Fenster auf einen sichtbaren Monitor gesetzt. Wiederhergestellte Fenster nehmen dem Hauptfenster nicht den Fokus, und startet Paneldeck im Tray (`--tray`, *Mit Windows starten*), bleiben sie verborgen, bis das Hauptfenster angezeigt wird.

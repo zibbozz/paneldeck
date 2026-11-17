@@ -20,8 +20,8 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | File/folder | Contents |
 |---|---|
 | `settings.json` | settings (hand-editable); `settings.json.bak-<time>` = copy made by `--reset-settings` |
-| `state.json` | sessions, projects, layout, further windows (`state.defekt.json` = backup if the file was corrupted) |
-| `paneldeck.db` | the local database (SQLite) with the to-do list, projects and tickets (`paneldeck.db-wal` / `-shm` exist while the app runs) |
+| `state.json` | sessions, projects, layout, further windows (`state.defekt.json` = backup if the file was corrupted; `state.json.bak-<date>` = backup made when *Remember sessions* was switched off) |
+| `paneldeck.db` | the local database (SQLite, schema version 9 since 2.3.0) with the to-do list, projects and tickets (`paneldeck.db-wal` / `-shm` exist while the app runs) |
 | `backups/` | automatic and manual copies of the database (the folder can be changed) |
 | `scrollback/` | saved terminal history |
 | `chats/` | histories of the [chats](chat.md), one `<id>.json` per chat (see [Chat histories](#chat-histories)) |
@@ -69,6 +69,33 @@ Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the sessio
 - `state.json` → per session `kind` (`"chat"`; missing = terminal) and `chat` (`{ "server": "<id>", "model": "<name>" }`). An older Paneldeck (2.1) opening this file shows chats as terminals and leaves `chats/*.json` alone.
 - `state.json` → per session `minimized` (`true` for a [minimized pane](terminals.md#panes-and-minimizing); missing = not minimized) and `slot` (where a minimized pane goes back to – internal, its content may change; leave it alone or delete it). Layouts and split ratios are read leniently: unknown or duplicate sessions, empty splits and invalid ratios are repaired, and a broken layout no longer resets the whole file.
 - `mcp-log.jsonl` → optional `how` (`"chat"`) and `model` (the chat's model) on entries of tool calls made by a [chat](chat.md#tool-calls-and-approvals); missing for external agents.
+
+## New fields in 2.3.0
+All new fields are optional: a missing field means the previous behaviour, and older files load unchanged.
+
+- `settings.json`:
+  - `remember_sessions` (default `true`) – *Remember sessions*; when it is switched off, the previous state is backed up as `state.json.bak-<date>` (only the newest is kept).
+  - `inherit_env` (default `false`) – *Inherit Paneldeck's environment*.
+  - `bundled_conpty` (default `true`) – *Use the bundled console host (recommended)*.
+  - `osc52_copy` (default `true`) – *Allow programs to copy to the clipboard (OSC 52)*.
+  - `warn_multiline_paste` (default `true`) – *Warn before pasting multiple lines*.
+  - `shift_enter_newline_powershell` (default `false`) – *Shift+Enter = new line in PowerShell*.
+  - `cursor_blink`, `program_notify`, `progress_indicator` (default `true`) and `bell_toast` (default `false`) – *Blinking cursor*, *Notifications from programs*, *Show progress* and *Toast on bell*.
+  - `terminal_font` can now name any installed monospace font.
+  - `wsl_recent` – recently used WSL folders per distribution (newest first, capped).
+  - `palette` – the [color palettes](terminals.md#language-and-appearance): `per_area` (`false` = one shared palette) and the lists `shared`, `hub`, `todo` and `expert`, each a list of `{ "hex": "#RRGGBB", "name": "…" }` (`name` optional). Lists that were never changed are not written.
+  - `claude_defaults` – the default [Claude start options](claude-code.md#start-options) (`model`, `effort`, `permission_mode`, `agent`, `flags`, `add_dirs`, `allowed_tools`, `disallowed_tools`, `mcp_config`, `append_system_prompt`, `fallback_model`, `max_budget_usd`, `autocompact`; empty values are not written); `last_claude_opts` – the last choice in the *New session* dialog. `bypassPermissions` is never stored there (it is dropped when loading).
+- `state.json` → per session:
+  - `claude_opts` – the session's Claude start options (same fields as `claude_defaults`; invalid values are dropped when loading). Sessions from before 2.3 may still have model and permission mode in `claude_args`; they keep working.
+  - `claude_continue` – *Continue the conversation* (missing = on).
+  - `agent_chain` – the [agent chain](agent-interface.md#security) of a session that an agent created or wrote into (session ids; missing = none).
+  - **Deprecated:** `slot` of minimized sessions (2.2.0) is no longer used or created; an existing value is passed through unchanged and dropped once the session is minimized or shown again. It will be removed in 3.0.0.
+- `paneldeck.db` → **schema version 9**: built-in description, due date and labels fields for every ticket type, due thresholds per project (`due_thresholds`) and for the to-do list, a due date for to-do cards. The update converts existing description and "Labels" fields (see [Todo list and tickets](todo-and-tickets.md#built-in-fields-and-due-dates)); as with every migration, Paneldeck backs up the database first. Due dates are stored as `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`.
+- **Project backups** (JSON export) → **format version 3**, with the built-in fields and `project.due_thresholds`. Paneldeck before 2.3 refuses them; version 1 and 2 backups still import.
+- **Icons** can be stored as `lucide:<name>` (Lucide icon set) in the database, in project backups and in templates; such files cannot be imported into versions before 2.3.
+- The bundled console host (`conpty.dll`, `OpenConsole.exe`) lives in the program folder next to `paneldeck.exe`, not in the data folder.
+
+**Going back to 2.2:** 2.2 refuses a database with schema version 9 ("The database has schema version …") and leaves it untouched. To go back, quit Paneldeck and copy the database backup that was made before the update (in the backup folder, by default `backups/`) over `paneldeck.db`, then start 2.2 – changes made since then are lost. Don't use *Restore* in 2.3 for this: 2.3 would update the restored copy again. 2.2 can still read `settings.json` and `state.json` and ignores the new fields, but drops them when it saves.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.

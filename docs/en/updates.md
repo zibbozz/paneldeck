@@ -28,6 +28,7 @@ A jump to a **new major version** (e.g. 2.x → 3.0) shows a clear warning, and 
 3. **Install:**
    - **Installed copies** download `Paneldeck-Setup-<version>.exe` and run it silently into the same folder. Your choice of desktop shortcut and context menu is kept.
    - **Portable copies** download `paneldeck-<version>-windows-x64.zip`, replace `paneldeck.exe` (the old one is kept as `paneldeck.exe.old` and deleted as soon as the new version has drawn its first frame) and restart. If a new version does not start at all: quit Paneldeck, delete `paneldeck.exe` and rename `paneldeck.exe.old` back to `paneldeck.exe`.
+   - Since 2.3 an update replaces `paneldeck.exe` and the [bundled console host](terminals.md#shells-and-emulation) (`conpty.dll`, `OpenConsole.exe`) together, also while Paneldeck is running: the installer writes the console host first and puts the previous file back if writing fails; the portable update replaces all files or none. Leftover `.old` files are removed at the next start.
 4. The new version starts with the **same parameters** (data folder, profile) and restores your sessions.
 
 A copy counts as *installed* when the installer's uninstall entry points to exactly its folder; every other copy (also a portable copy next to an installation) is *portable*.
@@ -45,7 +46,7 @@ You can check a manually downloaded file yourself, e.g. in PowerShell: `Get-File
 The check asks the public GitHub API (`api.github.com`) for the latest release – without a login, and only when you click *Check for updates* or have switched on the automatic check; a download also uses GitHub's download servers. GitHub sees your IP address and the Paneldeck version (`User-Agent: Paneldeck/<version>`); no other data is sent. See [Privacy](../../README.md#privacy).
 
 ## Updating by hand
-You can always update without the built-in update: run the new installer over the old version (also while Paneldeck runs), or replace `paneldeck.exe` of a portable copy. Settings, sessions and data stay. The self-update is first usable when updating **from** 2.1.0 to a later version.
+You can always update without the built-in update: run the new installer over the old version (also while Paneldeck runs), or replace `paneldeck.exe` of a portable copy – from 2.3 on together with `conpty.dll` and `OpenConsole.exe` from the ZIP. Settings, sessions and data stay. The self-update is first usable when updating **from** 2.1.0 to a later version.
 
 ## Testing the self-update (developers)
 Release builds only talk to GitHub. For local tests there is a test feed: build with the Cargo feature `update-test-feed` (`cargo build --release --features update-test-feed`), create a fake release with `tools/update-feed.sh <version> <feed folder> [<paneldeck.exe>]` and start the test copy with the environment variable `PANELDECK_UPDATE_TEST_FEED=<feed folder>`. Nothing is published; `tools/release.sh` checks that release builds don't contain this path. Details: `TESTPLAN.md`, section 52.

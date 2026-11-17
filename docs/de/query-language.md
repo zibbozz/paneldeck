@@ -18,6 +18,18 @@ Eine Bedingung ist *Feld Operator Wert*. Feldnamen und Texte mit Leerzeichen ste
 
 <p align="center"><img src="../../assets/query-help/query-help-basics-field-value.png" alt="Ergebnis von type = Defect" width="85%"></p>
 
+## Felder
+- **Eigene Felder** sprichst du über ihren Namen an (in Anführungszeichen, wenn er Leerzeichen enthält) oder, seit 2.3, über ihren **Schlüssel** (z. B. `story_points`).
+- **Eingebaute Felder** gibt es in jedem Projekt und jedem Tickettyp (siehe [Eingebaute Felder und Fälligkeit](todo-and-tickets.md#eingebaute-felder-und-fälligkeit)); sie hören in jeder Oberflächensprache auf ihre deutschen und englischen Namen, gespeicherte Abfragen gelten also in beiden Sprachen:
+
+| Feld | Namen | Beispiel |
+|---|---|---|
+| Beschreibung | `description`, `Description`, `Beschreibung` | `description ~ login` |
+| Fälligkeit | `due`, `Due date`, `Fällig`, `Fällig am` | `due < currentDate() ORDER BY due` |
+| Labels | `labels`, `Labels` | `labels = auth` |
+
+- `due` vergleicht eine Fälligkeit ohne Uhrzeit als Ende des Tages; ein Vergleich mit einem reinen Datum vergleicht nur den Tag (`due = 2026-11-20` trifft auch 14:30 an diesem Tag).
+
 ## Beispiele
 Alle Beispiele stammen aus der Hilfeseite in Paneldeck (Demo-Daten); dort hat jedes einen Screenshot seines Ergebnisses. Eine Auswahl:
 
