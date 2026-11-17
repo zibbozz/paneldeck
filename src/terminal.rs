@@ -2308,7 +2308,7 @@ mod win_job_tests {
         assert!(s.job_key().is_some(), "Sitzung hat einen Job");
         assert!(s.lingering(&crate::winctl::ProcInfo::default()).is_empty(), "nur die Shell: nichts");
         let pid = s.shell_pid.expect("Shell-PID");
-        assert!(s.job.as_ref().unwrap().pids().contains(&pid), "Shell im Job");
+        assert!(s.job.as_ref().unwrap().pids().unwrap_or_default().contains(&pid), "Shell im Job");
         assert!(s.end_job());
     }
 }

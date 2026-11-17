@@ -90,17 +90,21 @@ pub(super) struct Retired {
     /// Prozesse, die die Rückfrage beim Schließen genannt hätte (der Nutzer kennt sie): nicht noch einmal melden.
     shown: Vec<u32>,
     checked: bool,
+    /// In der Meldung genannte Prozesse (PID, Erzeugungszeit): nur sie beendet „Alle beenden“ der Meldung.
+    listed: Vec<(u32, u64)>,
 }
 
 /// Kennzeichen im Token der Toast-Aktion „Alle beenden“ eines aufbewahrten Jobs (Rest = Job-Kennung).
 pub(super) const RETIRED_TOKEN: u64 = 1 << 63;
-/// Nach so langer Zeit wird ein aufbewahrter Job einmal auf übrige Prozesse geprüft.
-const RECHECK: Duration = Duration::from_secs(2);
+/// Nach so langer Zeit wird ein aufbewahrter Job einmal auf übrige Prozesse geprüft – länger als die Frist, die Windows
+/// Konsolenprogrammen nach CTRL_CLOSE_EVENT zum Beenden gibt (5 s), damit langsam endende keine Meldung auslösen.
+const RECHECK: Duration = Duration::from_secs(6);
 
-/// Zeilen für die Meldung „läuft noch“: Programmname (PID) je Prozess, ohne Konsolen-Hosts und ohne die schon in der
-/// Rückfrage genannten (`shown`); höchstens sechs, dann „…“.
-pub(super) fn leftover_lines(pids: &[u32], shown: &[u32], name_of: impl Fn(u32) -> String) -> Vec<String> {
-    let mut v: Vec<String> = pids
+/// Prozesse für die Meldung „läuft noch“: ohne Konsolen-Hosts und ohne die schon in der Rückfrage genannten
+/// (`shown`), dazu die Zeilen „Programmname (PID)“ – höchstens sechs, dann „…“. Die PIDs sind alle gemeldeten (auch die
+/// hinter „…“); nur sie beendet „Alle beenden“ der Meldung.
+pub(super) fn leftover_lines(pids: &[u32], shown: &[u32], name_of: impl Fn(u32) -> String) -> (Vec<u32>, Vec<String>) {
+    let procs: Vec<(u32, String)> = pids
         .iter()
         .filter(|p| !shown.contains(p))
         .map(|p| (*p, name_of(*p)))
@@ -108,13 +112,13 @@ pub(super) fn leftover_lines(pids: &[u32], shown: &[u32], name_of: impl Fn(u32) 
             let l = n.to_ascii_lowercase();
             l != "conhost.exe" && l != "openconsole.exe"
         })
-        .map(|(p, n)| format!("{} (PID {p})", if n.is_empty() { "?" } else { n.as_str() }))
         .collect();
+    let mut v: Vec<String> = procs.iter().map(|(p, n)| format!("{} (PID {p})", if n.is_empty() { "?" } else { n.as_str() })).collect();
     if v.len() > 6 {
         v.truncate(6);
         v.push("…".into());
     }
-    v
+    (procs.into_iter().map(|(p, _)| p).collect(), v)
 }
 
 /// Was „Alle beenden“ beendet: (Sitzung, Job beim Öffnen der Rückfrage) je Sitzung mit Hintergrundprozessen.
@@ -436,10 +440,10 @@ impl App {
     pub(super) fn retire_job(&mut self, id: u64, name: String, s: &mut crate::terminal::Session) {
         let shown: Vec<u32> = s.lingering(&crate::winctl::ProcInfo::default()).into_iter().map(|p| p.pid).collect();
         let Some(job) = s.take_job() else { return };
-        if job.pids().is_empty() {
+        if job.pids().is_some_and(|p| p.is_empty()) {
             return;
         }
-        self.retired.push(Retired { job, session: id, name, since: Instant::now(), shown, checked: false });
+        self.retired.push(Retired { job, session: id, name, since: Instant::now(), shown, checked: false, listed: Vec::new() });
     }
 
     /// Aufbewahrte Jobs pflegen (Hauptfenster, höchstens einmal je Sekunde): leere freigeben (und die Kette einer
@@ -454,7 +458,8 @@ impl App {
         }
         self.retired_poll = Some(Instant::now());
         let before: Vec<u64> = self.retired.iter().map(|r| r.session).collect();
-        self.retired.retain(|r| !r.job.pids().is_empty());
+        // Nur sicher leere Jobs freigeben (scheitert die Abfrage, bleibt der Job – und mit ihm die Zuordnung).
+        self.retired.retain(|r| !r.job.pids().is_some_and(|p| p.is_empty()));
         for s in before {
             if !self.retired.iter().any(|r| r.session == s) && !self.entries.contains_key(&s) {
                 taint::remove_retired(s);
@@ -466,8 +471,9 @@ impl App {
         for r in self.retired.iter_mut().filter(|r| !r.checked && r.since.elapsed() >= RECHECK) {
             r.checked = true;
             let names = names.get_or_insert_with(crate::winctl::process_names);
-            let lines = leftover_lines(&r.job.pids(), &r.shown, |p| names.get(&p).cloned().unwrap_or_default());
-            if !lines.is_empty() {
+            let (pids, lines) = leftover_lines(&r.job.pids().unwrap_or_default(), &r.shown, |p| names.get(&p).cloned().unwrap_or_default());
+            r.listed = pids.into_iter().filter_map(|p| crate::winctl::process_born(p).map(|t| (p, t))).collect();
+            if !lines.is_empty() && !r.listed.is_empty() {
                 out.push((r.name.clone(), r.job.key(), lines.join(", ")));
             }
         }
@@ -481,10 +487,12 @@ impl App {
         }
     }
 
-    /// „Alle beenden“ aus der Meldung: den aufbewahrten Job beenden (ist er schon leer und freigegeben: nichts).
+    /// „Alle beenden“ aus der Meldung: nur die dort genannten Prozesse beenden (noch im Job, gleiche Erzeugungszeit) –
+    /// nicht den ganzen Job, in dem auch Prozesse liegen können, die der Nutzer behalten wollte. Ist der Job schon
+    /// freigegeben: nichts.
     pub(super) fn end_retired(&mut self, key: u64) {
         if let Some(r) = self.retired.iter().find(|r| r.job.key() == key) {
-            r.job.terminate_all();
+            r.job.terminate_listed(&r.listed);
         }
     }
 
@@ -666,11 +674,11 @@ mod tests {
             4 => "OpenConsole.exe".to_string(),
             _ => String::new(),
         };
-        assert_eq!(leftover_lines(&[1, 2, 3, 4, 5], &[3], name), ["node.exe (PID 1)", "? (PID 5)"]);
-        assert!(leftover_lines(&[2, 3, 4], &[3], name).is_empty());
+        assert_eq!(leftover_lines(&[1, 2, 3, 4, 5], &[3], name), (vec![1, 5], vec!["node.exe (PID 1)".to_string(), "? (PID 5)".to_string()]));
+        assert!(leftover_lines(&[2, 3, 4], &[3], name).0.is_empty());
         let many: Vec<u32> = (10..20).collect();
-        let l = leftover_lines(&many, &[], |_| "x.exe".into());
-        assert_eq!((l.len(), l.last().map(String::as_str)), (7, Some("…")));
+        let (pids, l) = leftover_lines(&many, &[], |_| "x.exe".into());
+        assert_eq!((l.len(), l.last().map(String::as_str), pids.len()), (7, Some("…"), 10));
     }
 
     #[test]

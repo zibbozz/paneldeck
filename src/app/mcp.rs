@@ -1347,7 +1347,7 @@ impl App {
         self.mcp.created.insert(id, self.creator_of(caller));
         self.mcp_taint_create(caller, id);
         let e = &self.entries[&id];
-        let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": caller, "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
+        let mut v = json!({"id": id, "name": e.display_name(), "group": e.meta.group, "parent": self.mcp.created.get(&id).and_then(|c| c.parent()), "shell": e.eff_shell(), "cwd": e.cwd_now(), "claude": e.is_claude(), "note": tr("Die Sitzung ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt sie).", "The session was created but is not opened in the window (focus_session shows it).")});
         add_claude_opts(&mut v, e);
         // Linux-`cwd`: ob der Ordner geprüft werden konnte (false = WSL antwortete nicht rechtzeitig, trotzdem angelegt).
         if let Some(c) = cwd_checked {
@@ -1395,7 +1395,7 @@ impl App {
         let e = &self.entries[&id];
         let server = self.settings.llm_servers.iter().find(|x| x.id == meta.server).map(|x| x.name.clone()).unwrap_or_default();
         Ok(json!({
-            "id": id, "kind": "chat", "name": e.display_name(), "group": e.meta.group, "parent": caller, "cwd": e.meta.cwd,
+            "id": id, "kind": "chat", "name": e.display_name(), "group": e.meta.group, "parent": self.mcp.created.get(&id).and_then(|c| c.parent()), "cwd": e.meta.cwd,
             "server": meta.server, "server_name": server, "model": meta.model,
             "note": tr("Der Chat ist angelegt, aber nicht im Fenster geöffnet (focus_session zeigt ihn). Nachrichten mit send_chat_message.", "The chat was created but is not opened in the window (focus_session shows it). Send messages with send_chat_message."),
         }))

@@ -194,6 +194,17 @@ fn process_created(h: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
     ok.then(|| ((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64)
 }
 
+/// Erzeugungszeit eines laufenden Prozesses (FILETIME-Ticks), `None`, wenn er nicht zu öffnen ist.
+#[cfg(windows)]
+pub fn process_born(pid: u32) -> Option<u64> {
+    Proc::open(pid)?.created()
+}
+
+#[cfg(not(windows))]
+pub fn process_born(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Startzeit dieses Prozesses (des Hubs).
 #[cfg(windows)]
 fn hub_started() -> u64 {
@@ -373,12 +384,46 @@ impl SessionJob {
         false
     }
 
-    /// PIDs aller laufenden Prozesse im Job (auch in darunter verschachtelten Jobs).
+    /// Nur diese Prozesse beenden ((PID, Erzeugungszeit), z. B. die in einer Meldung genannten): jeden nur, wenn er
+    /// noch in diesem Job läuft und dieselbe Erzeugungszeit hat (die PID also nicht neu vergeben ist). Anzahl beendeter.
     #[cfg(windows)]
-    pub fn pids(&self) -> Vec<u32> {
+    pub fn terminate_listed(&self, procs: &[(u32, u64)]) -> usize {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE};
+        let g = jobs();
+        let Some(&(_, jh)) = g.iter().find(|(k, _)| *k == self.key) else { return 0 };
+        let mut n = 0;
+        for &(pid, born) in procs {
+            // SAFETY: reiner Aufruf; ein Nullhandle wird übersprungen, ein geöffnetes genau einmal geschlossen; das
+            // Job-Handle ist unter der Sperre gültig, `r` ein lokaler Ausgabewert.
+            unsafe {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid);
+                if h.is_null() {
+                    continue;
+                }
+                let mut r = 0;
+                if IsProcessInJob(h, jh as windows_sys::Win32::Foundation::HANDLE, &mut r) != 0 && r != 0 && process_created(h) == Some(born) && TerminateProcess(h, 1) != 0 {
+                    n += 1;
+                }
+                CloseHandle(h);
+            }
+        }
+        n
+    }
+
+    #[cfg(not(windows))]
+    pub fn terminate_listed(&self, _procs: &[(u32, u64)]) -> usize {
+        0
+    }
+
+    /// PIDs aller laufenden Prozesse im Job (auch in darunter verschachtelten Jobs). `None`, wenn die Abfrage scheitert
+    /// (dann ist nicht bekannt, ob der Job leer ist).
+    #[cfg(windows)]
+    pub fn pids(&self) -> Option<Vec<u32>> {
         use windows_sys::Win32::System::JobObjects::{JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST};
         let g = jobs();
-        let Some(&(_, jh)) = g.iter().find(|(k, _)| *k == self.key) else { return Vec::new() };
+        let Some(&(_, jh)) = g.iter().find(|(k, _)| *k == self.key) else { return None };
         let off = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
         let mut cap = 64usize;
         for _ in 0..6 {
@@ -393,16 +438,16 @@ impl SessionJob {
             let (assigned, listed) = (head.NumberOfAssignedProcesses as usize, (head.NumberOfProcessIdsInList as usize).min(cap));
             if ok && listed >= assigned.min(cap) && assigned <= cap {
                 let ids = &buf[off / std::mem::size_of::<usize>()..][..listed];
-                return ids.iter().map(|p| *p as u32).filter(|p| *p != 0).collect();
+                return Some(ids.iter().map(|p| *p as u32).filter(|p| *p != 0).collect());
             }
             cap = assigned.max(cap * 2) + 16;
         }
-        Vec::new()
+        None
     }
 
     #[cfg(not(windows))]
-    pub fn pids(&self) -> Vec<u32> {
-        Vec::new()
+    pub fn pids(&self) -> Option<Vec<u32>> {
+        None
     }
 }
 
@@ -610,7 +655,7 @@ impl ProcInfo {
 
 /// Die überlebenden Prozesse eines Sitzungs-Jobs mit Namen, Fenster und Fenstertitel (#168). `shell` = PID der Shell.
 pub fn lingering(job: &SessionJob, shell: Option<u32>, info: &ProcInfo) -> Vec<JobProc> {
-    let pids = job.pids();
+    let pids = job.pids().unwrap_or_default();
     if pids.iter().all(|p| Some(*p) == shell) {
         return Vec::new();
     }
@@ -1077,7 +1122,7 @@ mod peer_tests {
         let job = SessionJob::new().expect("Job");
         assert!(job.adopt(shell.as_raw_handle(), shell.id()));
         assert!(job.adopt(bg.as_raw_handle(), bg.id()));
-        let mut pids = job.pids();
+        let mut pids = job.pids().unwrap();
         pids.sort_unstable();
         let mut want = vec![shell.id(), bg.id()];
         want.extend(&fg);
@@ -1110,10 +1155,10 @@ mod peer_tests {
         let _ = shell.wait();
         let _ = bg.wait();
         let t0 = std::time::Instant::now();
-        while !job.pids().is_empty() && t0.elapsed() < std::time::Duration::from_secs(5) {
+        while job.pids() != Some(Vec::new()) && t0.elapsed() < std::time::Duration::from_secs(5) {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(job.pids().is_empty(), "alle beendet");
+        assert_eq!(job.pids(), Some(Vec::new()), "alle beendet");
     }
 
     #[test]
@@ -1144,7 +1189,7 @@ mod peer_tests {
             assert!(t0.elapsed() < std::time::Duration::from_secs(20), "Vordergrundprogramm und Kind gestartet");
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
-        let pids = job.pids();
+        let pids = job.pids().unwrap();
         assert!([shell.id(), fg, mcp].iter().all(|p| pids.contains(p)), "alle im Job: {pids:?}");
         // Konsole der Shell aus einem Prozess ohne eigene Konsole bestimmen
         let out = std::process::Command::new(&exe)
@@ -1169,6 +1214,24 @@ mod peer_tests {
         assert!(keep.is_empty(), "Hilfsprozess des Vordergrundprogramms überlebt nicht: {keep:?}");
         assert!(job.terminate_all());
         let _ = shell.wait();
+    }
+
+    #[test]
+    fn terminate_listed_ends_only_the_listed_processes() {
+        use std::os::windows::io::AsRawHandle;
+        let mut a = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let mut b = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let job = SessionJob::new().expect("Job");
+        assert!(job.adopt(a.as_raw_handle(), a.id()) && job.adopt(b.as_raw_handle(), b.id()));
+        let born_a = process_born(a.id()).expect("Erzeugungszeit");
+        let born_b = process_born(b.id()).expect("Erzeugungszeit");
+        // Falsche Erzeugungszeit (PID neu vergeben) und Prozess außerhalb des Jobs: nichts
+        assert_eq!(job.terminate_listed(&[(a.id(), born_a + 1), (std::process::id(), process_born(std::process::id()).unwrap())]), 0);
+        assert_eq!(job.terminate_listed(&[(a.id(), born_a)]), 1);
+        let _ = a.wait();
+        assert!(matches!(b.try_wait(), Ok(None)), "nicht genannter Prozess läuft weiter");
+        assert_eq!(job.terminate_listed(&[(b.id(), born_b)]), 1);
+        let _ = b.wait();
     }
 
     #[test]

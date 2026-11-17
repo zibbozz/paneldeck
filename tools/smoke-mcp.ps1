@@ -1231,7 +1231,8 @@ c.close()
     Check 'Job: losgeloester Enkel eines Glieds -> der Kette zugeordnet, forbidden in den Vorfahren' ($det -match '"code":"forbidden"' -and $det -match 'agent chain') $det
     # Uebrig gebliebener Prozess einer geschlossenen Sitzung (#218): Der Hub behaelt ihren Job, der Prozess handelt als
     # die geschlossene Sitzung mit ihrer Kette -> forbidden in den Vorfahren. (Ein Prozess ganz ohne Job ist extern,
-    # solange jede Sitzung einen Job hat - siehe "losgeloester Prozess ausserhalb jeder Sitzung" oben.)
+    # solange jede Sitzung einen Job hat - siehe den Check "Job: losgeloester Prozess ausserhalb jeder Sitzung -> keiner
+    # Sitzung zugeordnet" weiter oben: identified_by "none".)
     $nn = (InS $Ti 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'smoke-retired' }).structuredContent.id
     Start-Sleep 4
     $flag = "$work\retired-go-$([guid]::NewGuid().ToString('N').Substring(0, 6)).txt"
