@@ -55,6 +55,8 @@ $useBundled = $hasConPty -and $ConPty -ne 'system'
 Write-Host ("Konsolen-Host: " + $(if ($useBundled) { 'mitgeliefert (OpenConsole)' } elseif ($ConPty -eq 'system') { 'Windows (Einstellung aus)' } else { 'Windows (keine mitgelieferten Dateien)' })) -ForegroundColor DarkGray
 # Arbeitsordner des naechsten Hub-Starts (Set-Level), sonst der des Skripts.
 $script:hubCwd = $null
+# Farbabfragen (OSC 10/11) kommen nur mit der mitgelieferten ConPTY beim Programm an (#183).
+$script:bundledConpty = $useBundled
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
@@ -185,6 +187,8 @@ function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   New-Item -ItemType Directory -Force "$data" | Out-Null
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
+  # Festes Theme, das nicht das erste der Liste ist: Farbabfragen (OSC 11) muessen dessen Werte melden (#183).
+  $j | Add-Member -NotePropertyName theme -NotePropertyValue 'Dracula' -Force
   if ($ConPty -eq 'system') { $j | Add-Member -Force bundled_conpty $false }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
@@ -330,6 +334,22 @@ try {
       $r = Tool 'run_command' @{ session = $id; command = $long; timeout_secs = 25 }
       Check "run_command $sh (langer Befehl: Ausgabe exakt)" ($r.data.output -eq 'hallo-lang' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
       Test-Osc52 $id $sh
+      # Name/Version des Terminals in der Umgebung der Shell (#183)
+      $r = Tool 'run_command' @{ session = $id; command = '"$env:TERM_PROGRAM|$env:TERM_PROGRAM_VERSION"'; timeout_secs = 25 }
+      Check "TERM_PROGRAM=Paneldeck und TERM_PROGRAM_VERSION in $sh" ($r.data.output.Trim() -match '^Paneldeck\|\d+\.\d+\.\d+') "'$($r.data.output)'"
+      # Farbabfrage OSC 11: Antwort kommt als Eingabe zurueck (nur mit der mitgelieferten ConPTY; die des Systems
+      # reicht die Abfrage nicht an das Terminal weiter)
+      if ($script:bundledConpty) {
+        $q = '[Console]::Write("$([char]27)]11;?$([char]27)\"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''rgb:[0-9a-f/]+'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'' -replace "$([char]7)", ''BEL'')'
+        $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
+        # Sitzung per MCP angelegt und nie gezeichnet: Antwort trotzdem mit dem Theme der Sitzung (Dracula, 282a36).
+        Check "OSC 11 (Hintergrundfarbe abfragen) meldet das Theme der Sitzung ($sh, mitgelieferte ConPTY, ungezeichnet)" ($r.data.output -match 'reply=ESC\]11;rgb:2828/2a2a/3636') "'$($r.data.output)'"
+        $q = '[Console]::Write("$([char]27)[16t"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''t$'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'')'
+        $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
+        Check "CSI 16t (Zellgroesse) meldet eine echte Groesse ($sh, ungezeichnet)" ($r.data.output -match 'reply=ESC\[6;[1-9]\d*;[1-9]\d*t') "'$($r.data.output)'"
+      } else {
+        Skip "OSC 11 (Hintergrundfarbe abfragen) wird beantwortet ($sh)" 'keine mitgelieferte ConPTY (conpty.dll + OpenConsole.exe) neben der .exe'
+      }
       $r = Tool 'run_command' @{ session = $id; command = 'Start-Sleep 4'; timeout_secs = 1 }
       Check "run_command $sh (Zeitlimit)" ($r.data.timed_out -eq $true -and -not $r.data.finished) $r.text
       Start-Sleep 5

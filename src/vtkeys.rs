@@ -652,6 +652,18 @@ impl KittyStackGuard {
         self.depth[self.alt as usize] = 0;
     }
 
+    /// Gezählte Tiefe des aktuellen Bildschirms (Tests).
+    #[cfg(test)]
+    pub fn depth(&self) -> usize {
+        self.depth[self.alt as usize]
+    }
+
+    /// RIS: beide Stapel leer, Hauptbildschirm.
+    pub fn reset(&mut self) {
+        self.depth = [0, 0];
+        self.alt = false;
+    }
+
     /// Ein Byte wie der vte-0.15-Parser (`vte::Parser`) – nur die Zustände, die über einen Push/Pop, RIS oder den
     /// Bildschirmwechsel entscheiden. Weicht der Zähler vom Parser ab, ließe sich die Grenze umgehen (Steuerzeichen
     /// mitten in der Sequenz, `:`-Unterparameter, DEL).

@@ -5,6 +5,7 @@
 //!  - `ESC ] 7777 ; dur=<ms> BEL`      Dauer des letzten Befehls (eigene Erweiterung)
 //!  - `ESC [ ? 47/1047/1049/1000/1002/1003 h` Programm schaltet Vollbild oder Maus-Modus ein (kein OSC, aber für
 //!    `Session::stale_modes`: ein `1049h` im schon aktiven alternativen Bildschirm ändert keine Modus-Bits)
+//!  - `ESC [ 16 t`, `ESC [ > q` Anfragen, die die Emulation nicht beantwortet (Zellgröße, XTVERSION; `OscEvent::Query`)
 //! Die Bytes werden zusätzlich unverändert an die Terminal-Emulation weitergegeben (unbekannte OSC werden dort ignoriert).
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +18,27 @@ pub enum OscEvent {
     /// DECSET für den alternativen Bildschirm (47/1047/1049) oder einen Maus-Modus (1000/1002/1003).
     /// Keine Shell-Integration: zählt nicht als `integration_seen`.
     FullscreenModeSet,
+    /// Anfrage des Programms, die die Emulation (alacritty/vte) nicht selbst beantwortet (#183). Keine Shell-Integration.
+    Query(Query),
+    /// RIS (`ESC c`, z. B. `reset`): alacritty setzt dabei die von Programmen geänderten Farben nicht zurück, Paneldeck
+    /// tut es selbst (wie xterm und Windows Terminal). Keine Shell-Integration.
+    FullReset,
+}
+
+impl OscEvent {
+    /// Meldung der Shell-Integration (zählt für `integration_seen`)?
+    pub fn is_integration(&self) -> bool {
+        !matches!(self, OscEvent::FullscreenModeSet | OscEvent::Query(_) | OscEvent::FullReset)
+    }
+}
+
+/// Anfragen, die Paneldeck selbst beantwortet (siehe `terminal::Reply`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Query {
+    /// `CSI 16 t`: Zellgröße in Pixeln → `CSI 6 ; Höhe ; Breite t`.
+    CellSizePx,
+    /// `CSI > q` / `CSI > 0 q` (XTVERSION): Name und Version → `DCS > | Paneldeck <Version> ST`.
+    XtVersion,
 }
 
 /// Private Modi, deren Einschalten ein Vollbildprogramm ankündigt (siehe `OscEvent::FullscreenModeSet`).
@@ -63,12 +85,7 @@ impl OscScanner {
                         State::Normal
                     }
                 }
-                State::Esc => match b {
-                    b']' => State::Osc(Vec::new()),
-                    b'[' => State::Csi(Vec::new()),
-                    0x1b => State::Esc,
-                    _ => State::Normal,
-                },
+                State::Esc => esc_next(b, &mut out),
                 State::Csi(mut buf) => match b {
                     // Parameter (0–9 ; : < = > ?) und Zwischenbytes
                     0x20..=0x3f => {
@@ -83,11 +100,15 @@ impl OscScanner {
                     0x40..=0x7e => {
                         if b == b'h' && is_fullscreen_decset(&buf) {
                             out.push(OscEvent::FullscreenModeSet);
+                        } else if let Some(q) = query_of(&buf, b) {
+                            out.push(OscEvent::Query(q));
                         }
                         State::Normal
                     }
                     0x1b => State::Esc,
-                    // C0-Steuerzeichen mitten in der Sequenz führt die Emulation aus, die Sequenz läuft weiter.
+                    // CAN/SUB brechen die Sequenz ab (wie vte).
+                    0x18 | 0x1a => State::Normal,
+                    // Andere C0-Steuerzeichen mitten in der Sequenz führt die Emulation aus, die Sequenz läuft weiter.
                     0x00..=0x1f => State::Csi(buf),
                     _ => State::Normal,
                 },
@@ -111,8 +132,8 @@ impl OscScanner {
                         parse(&buf, &mut out);
                         State::Normal
                     }
-                    b']' => State::Osc(Vec::new()),
-                    _ => State::Normal,
+                    // ESC beendet in vte das OSC und beginnt eine neue Sequenz (z. B. RIS direkt dahinter).
+                    _ => esc_next(b, &mut out),
                 },
             };
             // Ereignisse, die mit diesem Byte abgeschlossen wurden, bekommen seine Position.
@@ -124,11 +145,36 @@ impl OscScanner {
     }
 }
 
+/// Byte nach ESC (wie vte): `]` OSC, `[` CSI, `c` RIS; Steuerzeichen (außer CAN/SUB) und DEL lassen den Zustand
+/// unverändert.
+fn esc_next(b: u8, out: &mut Vec<OscEvent>) -> State {
+    match b {
+        b']' => State::Osc(Vec::new()),
+        b'[' => State::Csi(Vec::new()),
+        b'c' => {
+            out.push(OscEvent::FullReset);
+            State::Normal
+        }
+        0x18 | 0x1a => State::Normal,
+        0x00..=0x1f | 0x7f => State::Esc,
+        _ => State::Normal,
+    }
+}
+
 /// `? Pm` (Parameter einer CSI-Sequenz mit Endbyte `h`) schaltet einen der `FULLSCREEN_MODES` ein?
 fn is_fullscreen_decset(params: &[u8]) -> bool {
     let Some(rest) = params.strip_prefix(b"?") else { return false };
     let Ok(s) = std::str::from_utf8(rest) else { return false };
     s.split(';').any(|p| p.parse::<u32>().is_ok_and(|n| FULLSCREEN_MODES.contains(&n)))
+}
+
+/// CSI-Sequenz (Parameter `params`, Endbyte `fin`) als Anfrage, die Paneldeck selbst beantwortet.
+fn query_of(params: &[u8], fin: u8) -> Option<Query> {
+    match (params, fin) {
+        (b"16", b't') => Some(Query::CellSizePx),
+        (b">" | b">0", b'q') => Some(Query::XtVersion),
+        _ => None,
+    }
 }
 
 fn percent_decode(s: &str) -> String {
@@ -263,6 +309,33 @@ mod tests {
         assert_eq!(ev.len(), 1);
         // Netzwerkpfade werden ignoriert
         assert!(s.feed(b"\x1b]9;9;\\\\evil\\share\x07\x1b]7;file://h//evil/share\x07").is_empty());
+    }
+
+    #[test]
+    fn queries_are_detected() {
+        let mut s = OscScanner::default();
+        assert_eq!(s.feed(b"\x1b[16t"), vec![OscEvent::Query(Query::CellSizePx)]);
+        assert_eq!(s.feed(b"\x1b[>q\x1b[>0q"), vec![OscEvent::Query(Query::XtVersion), OscEvent::Query(Query::XtVersion)]);
+        // Über eine Chunk-Grenze, mit Position hinter dem Endbyte.
+        assert!(s.feed_at(b"ab\x1b[>").0.is_empty());
+        let (ev, pos) = s.feed_at(b"qcd");
+        assert_eq!((ev, pos), (vec![OscEvent::Query(Query::XtVersion)], vec![1]));
+        // Ähnliche Sequenzen sind keine Anfragen: 14t/18t beantwortet die Emulation, DECSCUSR, DA2, Fenster-Befehle.
+        for seq in ["\x1b[14t", "\x1b[18t", "\x1b[6 q", "\x1b[>c", "\x1b[>1q", "\x1b[16;1t", "\x1b[116t", "\x1b[q"] {
+            assert!(s.feed(seq.as_bytes()).is_empty(), "{seq:?}");
+        }
+        assert!(!OscEvent::Query(Query::CellSizePx).is_integration());
+        assert_eq!(s.feed(b"x\x1bcy"), vec![OscEvent::FullReset]);
+        // mit Steuerzeichen zwischen ESC und c, direkt hinter einem mit ESC beendeten OSC
+        assert_eq!(s.feed(b"\x1b\x07\nc"), vec![OscEvent::FullReset]);
+        assert_eq!(s.feed(b"\x1b]0;t\x1bc"), vec![OscEvent::FullReset]);
+        assert!(s.feed(b"\x1b\x18c").is_empty());
+        assert!(!OscEvent::FullReset.is_integration());
+        // CAN/SUB brechen eine CSI-Sequenz ab wie in vte: danach ist `16t` keine Anfrage mehr.
+        assert!(s.feed(b"\x1b[1\x186t").is_empty());
+        assert!(s.feed(b"\x1b[>\x1aq").is_empty());
+        assert!(!OscEvent::FullscreenModeSet.is_integration());
+        assert!(OscEvent::PromptStart.is_integration());
     }
 
     #[test]

@@ -311,6 +311,8 @@ impl App {
         // Einstellungen einer Sitzung und Rückfrage „Neu laden?“ (#169, #170).
         // Die Rückfrage zuerst: sie bekommt Esc/Enter, bevor der Einstellungsdialog darunter sie sieht.
         self.reload_ask_ui(ctx, actions, None);
+        // Rückfrage vor dem Einfügen mehrerer Zeilen (#183).
+        self.paste_ask_ui(ctx, None);
         self.session_settings_ui(ctx);
 
         self.history_ui(ctx, actions);

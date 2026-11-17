@@ -16,6 +16,11 @@ use eframe::egui::{
 
 const PAD: f32 = 8.0;
 
+/// Gleiche von Programmen gesetzte Farben? (`Colors` hat kein `PartialEq`.)
+fn same_colors(a: &alacritty_terminal::term::color::Colors, b: &alacritty_terminal::term::color::Colors) -> bool {
+    (0..alacritty_terminal::term::color::COUNT).all(|i| a[i] == b[i])
+}
+
 pub fn cell_size(ui: &Ui, font: &FontId) -> Vec2 {
     let g = ui.painter().layout_no_wrap("M".to_string(), font.clone(), Color32::WHITE);
     Vec2::new(g.size().x, g.size().y)
@@ -50,6 +55,9 @@ pub fn show(
     let inner = rect.shrink(PAD);
     let cols = (inner.width() / cs.x).floor().max(2.0) as u16;
     let rows = (inner.height() / cs.y).floor().max(1.0) as u16;
+    // Für Antworten an das Programm (Farbabfragen OSC 4/10/11/12, Pixelgrößen CSI 14t/16t).
+    let ppp = ui.ctx().pixels_per_point();
+    session.set_view(theme, (cs.x * ppp).round().clamp(0.0, u16::MAX as f32) as u16, (cs.y * ppp).round().clamp(0.0, u16::MAX as f32) as u16);
     session.resize(cols, rows);
 
     if focused {
@@ -75,9 +83,17 @@ fn paint(
 ) {
     let ppp = ui.ctx().pixels_per_point();
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme.bg);
 
     let term = session.term.lock().unwrap_or_else(|e| e.into_inner());
+    // Von Programmen gesetzte Farben (OSC 4/10/11/12; zurückgesetzt mit OSC 104/110–112) vor denen des Themes.
+    let ov = *term.colors();
+    let mut cache = session.theme_cache.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = cache.as_ref().is_some_and(|(base, colors, _)| base == theme && same_colors(colors, &ov));
+    if !fresh {
+        *cache = theme.with_overrides(&ov).map(|t| (theme.clone(), Box::new(ov), t));
+    }
+    let theme = cache.as_ref().map(|(_, _, t)| t).unwrap_or(theme);
+    painter.rect_filled(rect, 0.0, theme.bg);
     let content = term.renderable_content();
     let offset = content.display_offset as i32;
     let rows = session.rows as i32;
@@ -122,8 +138,8 @@ fn paint(
         let bold = flags.contains(Flags::BOLD);
         let dim = flags.contains(Flags::DIM);
 
-        let mut fg = theme.resolve(cell.fg, bold, dim);
-        let mut bg = theme.resolve(cell.bg, false, false);
+        let mut fg = theme.resolve_ov(cell.fg, bold, dim, &ov);
+        let mut bg = theme.resolve_ov(cell.bg, false, false, &ov);
         if flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
         }
@@ -809,15 +825,9 @@ fn send_input(session: &mut Session, bytes: &[u8], tee: vtkeys::TeeInput) {
     session.write_input(bytes, tee);
 }
 
+/// Einfügen durch den Nutzer; mehrere Zeilen ohne Bracketed Paste ggf. erst nach Rückfrage (`Session::paste_user`).
 fn paste(session: &mut Session, text: &str) {
-    {
-        let mut t = session.term.lock().unwrap_or_else(|e| e.into_inner());
-        if t.grid().display_offset() > 0 {
-            t.scroll_display(Scroll::Bottom);
-        }
-        t.selection = None;
-    }
-    session.send_text(text, false);
+    session.paste_user(text);
 }
 
 #[cfg(test)]

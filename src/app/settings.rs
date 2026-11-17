@@ -252,6 +252,17 @@ impl App {
                                 style::toggle(ui, &mut self.settings.osc52_copy);
                             },
                         );
+                        row(
+                            ui,
+                            lang.t("Vor dem Einfügen mehrerer Zeilen nachfragen", "Warn before pasting multiple lines"),
+                            lang.t(
+                                "Nur wenn das Programm kein „Bracketed Paste“ nutzt – dann kann die Shell jede eingefügte Zeile sofort als Befehl ausführen.",
+                                "Only when the program does not use bracketed paste – then the shell may run each pasted line as a command right away.",
+                            ),
+                            |ui| {
+                                style::toggle(ui, &mut self.settings.warn_multiline_paste);
+                            },
+                        );
                     }
                     2 => {
                         row(ui, lang.t("Claude-Modus", "Claude mode"), lang.t("Zeigt Claude-Funktionen: Start, Status, Kosten, Verlauf", "Shows Claude features: start, status, cost, history"), |ui| {

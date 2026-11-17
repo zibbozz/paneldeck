@@ -46,6 +46,7 @@ mod multiwin;
 mod palette_ui;
 mod osc52;
 mod panels;
+mod paste_ask;
 mod planning_ui;
 mod session_settings;
 mod settings;
@@ -285,6 +286,8 @@ enum Nav {
 
 #[derive(Clone)]
 enum Action {
+    /// Eingefügter Text mit mehreren Zeilen wartet auf die Rückfrage (Sitzung, Text, aus abgedocktem Fenster).
+    PasteAsk(u64, String, bool),
     OpenPalette,
     OpenTemplates,
     OpenCosts,
@@ -685,6 +688,8 @@ pub struct App {
     confirm_close: Option<closing::CloseAsk>,
     /// Rückfrage „Sitzung neu laden?“ (#169).
     reload_ask: Option<session_settings::ReloadAsk>,
+    /// Rückfrage vor dem Einfügen mehrerer Zeilen (#183).
+    paste_ask: Option<paste_ask::PasteAsk>,
     /// Dialog „Einstellungen der Sitzung“ (#170).
     session_settings: Option<session_settings::SessionForm>,
     settings_open: bool,
@@ -953,6 +958,7 @@ impl App {
             new_chat: None,
             confirm_close: None,
             reload_ask: None,
+            paste_ask: None,
             session_settings: None,
             settings_open: false,
             remember_at_start,
@@ -1648,7 +1654,14 @@ impl App {
         }
         if wsl {
             // Variablen an WSL durchreichen (und zurück an die Windows-.exe beim Hook-Aufruf); dazu die Profilvariablen.
-            let mut names = vec![hooks::ENV_SESSION.to_string(), hooks::ENV_PORT.to_string(), hooks::ENV_TOKEN.to_string()];
+            // Dazu Name/Version des Terminals (`terminal::term_env`), wie Windows Terminal es mit WT_SESSION macht.
+            let mut names = vec![
+                hooks::ENV_SESSION.to_string(),
+                hooks::ENV_PORT.to_string(),
+                hooks::ENV_TOKEN.to_string(),
+                "TERM_PROGRAM".to_string(),
+                "TERM_PROGRAM_VERSION".to_string(),
+            ];
             for (k, _) in env.iter().skip(1) {
                 if k != hooks::ENV_PORT && k != hooks::ENV_TOKEN && !names.contains(k) {
                     names.push(k.clone());
@@ -1685,6 +1698,8 @@ impl App {
                 initial_input: initial.as_deref(),
                 scrollback_lines: self.settings.scrollback_lines,
                 env,
+                // Farb- und Größenabfragen ab dem ersten Byte richtig beantworten (#183), auch ungezeichnet.
+                view: Some(self.reply_view_for(ctx, entry.meta.profile)),
             },
         ) {
             Ok(s) => {
@@ -2071,6 +2086,47 @@ impl App {
         self.applied_theme = key;
     }
 
+    /// Theme und Zellgröße (physische Pixel), mit denen eine Sitzung Farb- und Größenabfragen beantwortet (#183) – wie
+    /// beim Zeichnen in `show_pane`: Theme des Profils, sonst das der App; Schriftgröße des Profils, sonst die der App.
+    /// Vor dem ersten Frame (noch keine Schriften) ohne Zellgröße.
+    fn reply_view_for(&self, ctx: &egui::Context, profile_id: u64) -> crate::terminal::ReplyView {
+        let base = self.theme();
+        let prof = self.settings.profiles.iter().find(|p| p.id == profile_id);
+        let theme = match prof.filter(|p| !p.theme.is_empty()).and_then(|p| self.themes.iter().find(|t| t.name == p.theme)) {
+            Some(t) => {
+                let mut t = t.clone();
+                t.bg = Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), base.bg.a());
+                t
+            }
+            None => base,
+        };
+        let size = prof.filter(|p| p.font_size > 0.0).map(|p| p.font_size).unwrap_or(self.settings.font_size);
+        let (cell_w, cell_h) = if ctx.cumulative_pass_nr() > 0 {
+            let cs = ctx.fonts_mut(|f| f.layout_no_wrap("M".to_string(), FontId::monospace(size), Color32::WHITE).size());
+            let ppp = ctx.pixels_per_point();
+            ((cs.x * ppp).round().clamp(0.0, u16::MAX as f32) as u16, (cs.y * ppp).round().clamp(0.0, u16::MAX as f32) as u16)
+        } else {
+            (0, 0)
+        };
+        crate::terminal::ReplyView { theme, cell_w, cell_h }
+    }
+
+    /// Alle laufenden Sitzungen mit Theme und Zellgröße versorgen (jedes Frame): auch nicht sichtbare beantworten
+    /// Farb- und Größenabfragen richtig, und ein Theme-Wechsel erreicht sie sofort.
+    fn sync_reply_views(&self, ctx: &egui::Context) {
+        let mut cache: Vec<(u64, crate::terminal::ReplyView)> = Vec::new();
+        for e in self.entries.values() {
+            let Some(s) = &e.live else { continue };
+            let p = e.meta.profile;
+            if !cache.iter().any(|(id, _)| *id == p) {
+                cache.push((p, self.reply_view_for(ctx, p)));
+            }
+            if let Some((_, v)) = cache.iter().find(|(id, _)| *id == p) {
+                s.seed_view(&v.theme, v.cell_w, v.cell_h);
+            }
+        }
+    }
+
     fn theme(&self) -> Theme {
         let mut t = self
             .themes
@@ -2200,6 +2256,7 @@ impl App {
         let font = FontId::monospace(self.settings.font_size);
         let lang = self.settings.language;
 
+        self.sync_reply_views(ctx);
         // Broadcast: nur die fokussierte Sitzung zeichnet Eingaben mit.
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {
@@ -2477,8 +2534,15 @@ impl App {
         let lang = self.settings.language;
         let mut toasts: Vec<(u64, String, CmdDone)> = Vec::new();
         let mut copies: Vec<(u64, crate::terminal::ClipboardRequest)> = Vec::new();
+        let paste_warn = self.settings.warn_multiline_paste;
         for (id, e) in self.entries.iter_mut() {
             let Some(s) = e.live.as_ref() else { continue };
+            // Fokusmeldungen (DECSET 1004): gilt als fokussiert wie bei OSC 52 – fokussierte Sitzung des Fensters im
+            // Vordergrund; abgedockte Sitzungen meldet ihr eigenes Fenster (`detached_windows`). Gesendet wird nur beim Wechsel.
+            if !self.detached.contains(id) {
+                s.report_focus(window_focused && *id == focused_id);
+            }
+            s.set_paste_warn(paste_warn);
             // Immer abholen, auch bei abgeschalteter Einstellung: ein alter Wunsch darf nicht später doch noch greifen.
             if let Some(req) = s.take_clipboard() {
                 copies.push((*id, req));
@@ -2979,6 +3043,7 @@ impl App {
             return;
         }
         match a {
+            Action::PasteAsk(id, text, detached) => self.ask_paste(id, text, detached),
             Action::ToggleFiles => self.files_open = !self.files_open,
             Action::Cycle(d) => self.cycle(d),
             Action::JumpCmd(d) => {
@@ -4025,6 +4090,9 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
             let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
+            if let Some(text) = session.take_paste_ask() {
+                cx.actions.push(Action::PasteAsk(id, text, cx.detached));
+            }
             if session.search.is_some() && search_bar(ui, session, body, lang) {
                 session.search = None;
                 *cx.want_focus = Some(id);

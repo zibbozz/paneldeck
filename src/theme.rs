@@ -1,9 +1,10 @@
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use alacritty_terminal::term::color::Colors;
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use eframe::egui::Color32;
 use serde::Deserialize;
 use std::path::Path;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Theme {
     pub name: String,
     pub dark: bool,
@@ -118,6 +119,60 @@ impl Theme {
         }
     }
 
+    /// Farbe zu einem Index der Emulation (`Term::colors`, OSC 4/10/11/12): 0–255 Palette, 256 Vordergrund,
+    /// 257 Hintergrund, 258 Cursor; alles andere wie der Vordergrund. Ohne Transparenz.
+    pub fn index_color(&self, index: usize) -> Color32 {
+        let c = match index {
+            0..=255 => self.indexed(index as u8, false),
+            256 => self.fg,
+            257 => self.bg,
+            258 => self.cursor,
+            _ => self.fg,
+        };
+        // Color32 speichert vormultipliert: ein durchsichtiger Hintergrund (Fenster-Transparenz) hätte sonst dunklere Werte.
+        let [r, g, b, _] = c.to_srgba_unmultiplied();
+        Color32::from_rgb(r, g, b)
+    }
+
+    /// Theme mit den Farben, die ein Programm per OSC 4/10/11/12 gesetzt hat (Palette 0–15, Vorder-/Hintergrund,
+    /// Cursor). `None`, wenn keine davon überschrieben ist. Der Hintergrund behält die Deckkraft des Themes
+    /// (durchsichtiges Fenster). Überschriebene Palettenfarben ab 16 löst [`Theme::resolve_ov`] auf.
+    pub fn with_overrides(&self, ov: &Colors) -> Option<Theme> {
+        let any = (0..16).chain(256..=258).any(|i| ov[i].is_some());
+        if !any {
+            return None;
+        }
+        let rgb = |c: Rgb| Color32::from_rgb(c.r, c.g, c.b);
+        let mut t = self.clone();
+        for (i, a) in t.ansi.iter_mut().enumerate() {
+            if let Some(c) = ov[i] {
+                *a = rgb(c);
+            }
+        }
+        if let Some(c) = ov[NamedColor::Foreground] {
+            t.fg = rgb(c);
+        }
+        if let Some(c) = ov[NamedColor::Background] {
+            t.bg = Color32::from_rgba_unmultiplied(c.r, c.g, c.b, self.bg.a());
+        }
+        if let Some(c) = ov[NamedColor::Cursor] {
+            t.cursor = rgb(c);
+        }
+        Some(t)
+    }
+
+    /// Wie [`Theme::resolve`], aber mit den von Programmen gesetzten Palettenfarben 16–255 (`self` ist schon das
+    /// Theme aus [`Theme::with_overrides`]).
+    pub fn resolve_ov(&self, color: Color, bold: bool, dim: bool, ov: &Colors) -> Color32 {
+        if let Color::Indexed(i @ 16..=255) = color {
+            if let Some(c) = ov[i as usize] {
+                let col = Color32::from_rgb(c.r, c.g, c.b);
+                return if dim { col.gamma_multiply(0.66) } else { col };
+            }
+        }
+        self.resolve(color, bold, dim)
+    }
+
     fn indexed(&self, i: u8, bold: bool) -> Color32 {
         match i {
             0..=7 if bold => self.ansi[i as usize + 8],
@@ -226,5 +281,44 @@ mod tests {
         let t = from_file(f).unwrap();
         assert!(t.dark);
         assert_eq!(t.ansi[15], Color32::WHITE);
+    }
+
+    #[test]
+    fn program_colour_overrides() {
+        let mut base = all()[0].clone();
+        base.bg = Color32::from_rgba_unmultiplied(0x1e, 0x21, 0x27, 200);
+        let mut ov = Colors::default();
+        assert!(base.with_overrides(&ov).is_none());
+        // Indizes der Emulation: Palette, Vorder-/Hintergrund, Cursor (ohne Transparenz).
+        assert_eq!(base.index_color(1), base.ansi[1]);
+        assert_eq!(base.index_color(16), Color32::from_rgb(0, 0, 0));
+        assert_eq!(base.index_color(231), Color32::from_rgb(255, 255, 255));
+        assert_eq!(base.index_color(256), base.fg);
+        // Durchsichtiger Hintergrund: Farbe ohne Deckkraft (vormultipliert gespeichert, Rundung höchstens 1).
+        let bg = base.index_color(257);
+        assert_eq!(bg.a(), 255);
+        for (got, want) in [(bg.r(), 0x1e), (bg.g(), 0x21), (bg.b(), 0x27)] {
+            assert!((got as i32 - want).abs() <= 1, "{bg:?}");
+        }
+        assert_eq!(all()[0].index_color(257), all()[0].bg);
+        assert_eq!(base.index_color(258), base.cursor);
+        ov[1] = Some(Rgb { r: 1, g: 2, b: 3 });
+        ov[200] = Some(Rgb { r: 4, g: 5, b: 6 });
+        ov[NamedColor::Background] = Some(Rgb { r: 7, g: 8, b: 9 });
+        ov[NamedColor::Foreground] = Some(Rgb { r: 10, g: 11, b: 12 });
+        let t = base.with_overrides(&ov).unwrap();
+        assert_eq!(t.ansi[1], Color32::from_rgb(1, 2, 3));
+        assert_eq!(t.ansi[2], base.ansi[2]);
+        assert_eq!(t.bg, Color32::from_rgba_unmultiplied(7, 8, 9, 200), "Deckkraft bleibt");
+        assert_eq!(t.fg, Color32::from_rgb(10, 11, 12));
+        assert_eq!(t.cursor, base.cursor);
+        assert_eq!(t.resolve_ov(Color::Indexed(200), false, false, &ov), Color32::from_rgb(4, 5, 6));
+        assert_eq!(t.resolve_ov(Color::Indexed(201), false, false, &ov), base.index_color(201));
+        assert_eq!(t.resolve_ov(Color::Named(NamedColor::Red), false, false, &ov), Color32::from_rgb(1, 2, 3));
+        assert_eq!(t.resolve_ov(Color::Named(NamedColor::Foreground), false, false, &ov), Color32::from_rgb(10, 11, 12));
+        // Nur Palettenfarben ab 16 überschrieben: kein eigenes Theme nötig.
+        let mut ov2 = Colors::default();
+        ov2[100] = Some(Rgb { r: 0, g: 0, b: 0 });
+        assert!(base.with_overrides(&ov2).is_none());
     }
 }
