@@ -1113,6 +1113,9 @@ c.close()
   $hk = Get-Item -LiteralPath 'HKCU:\Environment' -ErrorAction SilentlyContinue
   if ($hk) { $regVar = @($hk.GetValueNames() | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*$' -and $profVars -notcontains $_.ToUpper() -and $_ -notmatch '^(PATH|PATHEXT|PSModulePath|TEMP|TMP|PANELDECK_.*)$' -and "$($hk.GetValue($_))" -ne '' }) | Select-Object -First 1 }
   $ownVal = 'aus-dem-prozess-statt-registry'
+  # Vorherigen Wert merken und nach der Schleife wiederherstellen (die folgenden Abschnitte laufen mit der Standardeinstellung).
+  $sj = [IO.File]::ReadAllText("$data\settings.json").TrimStart([char]0xFEFF) | ConvertFrom-Json
+  $prevInherit = if ($sj.PSObject.Properties.Name -contains 'inherit_env') { $sj.inherit_env } else { $null }
   foreach ($inherit in @($false, $true)) {
     Stop-Hub
     $f = "$data\settings.json"
@@ -1153,7 +1156,23 @@ c.close()
     if (-not $regVar) { Skip "inherit_env $($label): Benutzervariable aus Registry vs. Prozess" 'keine geeignete Variable in HKCU\Environment' }
     elseif ($inherit) { Check "inherit_env an: Wert des Prozesses bleibt ($regVar, nicht aus der Registry)" ($parts[1] -eq $ownVal) $o }
     else { Check "inherit_env aus: Wert frisch aus der Registry ($regVar, nicht der des Prozesses)" ($parts[1] -ne $ownVal -and $parts[1] -ne '') $o }
+    # Git Bash bekommt dieselbe Umgebung: Shell-Integration (PROMPT_COMMAND/PS0) muss auch mit geerbter Umgebung laden.
+    if (Test-Path "$env:ProgramFiles\Git\bin\bash.exe") {
+      $g = Tool 'create_session' @{ shell = 'gitbash'; cwd = "$proj"; name = "Smoke-Env-Bash-$inherit" }
+      $t0 = Get-Date
+      do { Start-Sleep -Milliseconds 500; $r = Tool 'run_command' @{ session = $g.data.id; command = 'echo env-bash-ok'; timeout_secs = 20 } } while ((Code $r) -eq 'no_shell_integration' -and ((Get-Date) - $t0).TotalSeconds -lt 30)
+      $info = "$([int]((Get-Date) - $t0).TotalSeconds) s: $($r.text)"
+      if (-not ($r.data.finished -and "$($r.data.output)".Trim() -eq 'env-bash-ok')) {
+        $info += ' | Bildschirm: ' + "$((Tool 'read_terminal' @{ session = $g.data.id; screen = $true }).data.text)".Trim()
+      }
+      Check "inherit_env $($label): run_command gitbash (Shell-Integration geladen)" (-not $g.err -and $r.data.finished -and "$($r.data.output)".Trim() -eq 'env-bash-ok') $info
+    }
   }
+  # Einstellung wie vorher (Standard aus) - die folgenden Abschnitte pruefen nicht #175.
+  Stop-Hub
+  $sj = [IO.File]::ReadAllText("$data\settings.json").TrimStart([char]0xFEFF) | ConvertFrom-Json
+  if ($null -eq $prevInherit) { $sj.PSObject.Properties.Remove('inherit_env') } else { $sj.inherit_env = $prevInherit }
+  [IO.File]::WriteAllText("$data\settings.json", ($sj | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
 
   Write-Host "== Konsolen-Host und DLL-Suche (#183)" -ForegroundColor Cyan
   # Eine ladbare conpty.dll im Arbeitsordner des Hubs (wie "In Paneldeck oeffnen" auf einem fremden Ordner) darf nie
@@ -1216,27 +1235,37 @@ c.close()
       $g = Tool 'create_session' @{ shell = 'gitbash'; cwd = "$plant"; name = 'smoke-conpty-bash' }
       Check 'ConPTY: create_session gitbash' (-not $g.err) $g.text
       if (-not $g.err) {
-        $gid = $g.data.id; Start-Sleep 4
-        $r = Tool 'run_command' @{ session = $gid; command = 'echo bash-ok'; timeout_secs = 25 }
+        $gid = $g.data.id
+        # Git Bash (Login-Shell, Git-Prompt) braucht unter Last mehrere Sekunden bis zum ersten Prompt und fuer jeden
+        # weiteren: auf Zustaende warten statt fester Pausen (sonst landen Eingaben vor dem Prompt bzw. im falschen Programm).
+        $t0 = Get-Date
+        do { Start-Sleep -Milliseconds 500; $r = Tool 'run_command' @{ session = $gid; command = 'echo bash-ok'; timeout_secs = 25 } } while ((Code $r) -eq 'no_shell_integration' -and ((Get-Date) - $t0).TotalSeconds -lt 30)
         Check 'ConPTY: run_command gitbash (Ausgabe)' ($r.data.finished -and $r.data.output.Trim() -eq 'bash-ok') $r.text
         $r = Tool 'run_command' @{ session = $gid; command = 'false'; timeout_secs = 25 }
         Check 'ConPTY: run_command gitbash (Exit 1)' ($r.data.exit_code -eq 1) $r.text
+        # Sichtbarer Bildschirm, bis $pattern passt (oder Zeitlimit). Prompt der Bash = letzte Zeile "$".
+        function Wait-Screen([string]$pattern, [int]$secs = 20) {
+          $t = Get-Date
+          do { Start-Sleep -Milliseconds 300; $s = "$((Tool 'read_terminal' @{ session = $gid; screen = $true }).data.text)" } while ($s -notmatch $pattern -and ((Get-Date) - $t).TotalSeconds -lt $secs)
+          $s
+        }
+        $bashPrompt = '(?s)\$\s*$'
+        [void](Wait-Screen $bashPrompt)
         [IO.File]::WriteAllLines("$plant\zeilen.txt", [string[]](1..300 | ForEach-Object { "zeile-$_" }))
         [void](Tool 'send_text' @{ session = $gid; text = 'less zeilen.txt' })
-        Start-Sleep 2
-        $scr = (Tool 'read_terminal' @{ session = $gid; screen = $true }).data.text
-        Check 'ConPTY: less im alternativen Bildschirm zeigt die Datei' ($scr -match 'zeile-1\b' -and $scr -notmatch 'bash-ok') $scr
+        $scr = Wait-Screen '(?m)^zeile-1\b'
+        Check 'ConPTY: less im alternativen Bildschirm zeigt die Datei' ($scr -match '(?m)^zeile-1\b' -and $scr -notmatch 'bash-ok') $scr
         [void](Tool 'send_text' @{ session = $gid; text = 'q'; submit = $false })
-        Start-Sleep 1
+        [void](Wait-Screen $bashPrompt)
         $r = Tool 'run_command' @{ session = $gid; command = 'echo nach-less'; timeout_secs = 15 }
         Check 'ConPTY: nach less zurueck in der Shell' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-less') $r.text
         if (Test-Path "$env:ProgramFiles\Git\usr\bin\vim.exe") {
           # vim beendet sich selbst (send_text ist ein Einfuegen und landete in vim als Text).
+          [void](Wait-Screen $bashPrompt)
           [void](Tool 'send_text' @{ session = $gid; text = 'vim -u NONE -c redraw -c "sleep 4" -c "qa!" zeilen.txt' })
-          Start-Sleep 2
-          $scr = (Tool 'read_terminal' @{ session = $gid; screen = $true }).data.text
-          Check 'ConPTY: vim zeigt die Datei' ($scr -match 'zeile-1\b') $scr
-          Start-Sleep 4
+          $scr = Wait-Screen '(?m)^zeile-1\b'
+          Check 'ConPTY: vim zeigt die Datei' ($scr -match '(?m)^zeile-1\b') $scr
+          [void](Wait-Screen $bashPrompt 25)
           $r = Tool 'run_command' @{ session = $gid; command = 'echo nach-vim'; timeout_secs = 15 }
           Check 'ConPTY: nach vim zurueck in der Shell' ($r.data.finished -and $r.data.output.Trim() -eq 'nach-vim') $r.text
         }
