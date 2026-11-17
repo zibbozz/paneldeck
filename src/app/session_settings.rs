@@ -280,7 +280,7 @@ impl SessionForm {
         if !cwd.is_empty() && cwd != self.orig.cwd.trim() && !is_dir(&shell, cwd) {
             v.push(Problem::MissingFolder);
         }
-        if self.v.claude && self.v.copts != self.orig.copts && (!self.opts_ok || self.v.copts.sanitized(true) != self.v.copts) {
+        if self.v.claude && self.v.copts != self.orig.copts && (!self.opts_ok || self.v.copts.sanitized(true) != self.v.copts.trimmed()) {
             v.push(Problem::InvalidClaudeOption);
         }
         v
@@ -497,7 +497,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                         mark(ui, "continue", &r);
                         ui.end_row();
                         // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
-                        f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", true);
+                        f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", super::dialogs::OptsPlace::Session);
                         ui.label("");
                         let r = ui.label(RichText::new(lang.t("Die Optionen gelten nur für diese Sitzung, ab dem nächsten Start.", "The options apply to this session only, from its next start.")).small().color(style::dim(ui)));
                         mark(ui, "copts", &r);
@@ -936,7 +936,8 @@ mod tests {
         assert_eq!(meta.claude_opts.effort, "high");
         assert_eq!(meta.claude_opts.permission_mode, "bypassPermissions", "nur für diese Sitzung");
         assert!(meta.claude_opts.model.is_empty());
-        assert_eq!(meta.claude_args, "--verbose", "alte Modell-/Modus-Angaben fallen weg, sonst käme opus zurück");
+        assert_eq!(meta.claude_args, "", "alte Angaben fallen weg, sonst käme opus zurück");
+        assert_eq!(meta.claude_opts.extra.flags, ["verbose"], "der alte Schalter ist jetzt ein Schalter (#182)");
         assert_eq!(meta.claude_opts_eff().0.model, "", "geleertes Modell bleibt Standard");
         // Ungültiger Name sperrt das Speichern
         let mut f = form(&meta);
@@ -950,6 +951,50 @@ mod tests {
         assert!(!f.needs_reload(&p, "pwsh"));
         f.apply(&mut t, &p, "pwsh");
         assert_eq!(t.claude_opts.model, "haiku", "gespeichert für einen späteren Claude-Start");
+    }
+
+    #[test]
+    fn more_claude_options_are_start_time_settings() {
+        use crate::claude_opts::ExtraOpts;
+        let p = profiles();
+        let mut meta = SessionMeta { id: 8, claude: true, shell_id: "pwsh".into(), ..SessionMeta::default() };
+        // Schalter ändern = Start-Änderung („Jetzt neu laden?“)
+        let mut f = form(&meta);
+        f.v.copts.extra.flags = vec!["chrome".into(), "ide".into()];
+        assert!(f.needs_reload(&p, "pwsh"));
+        assert!(f.validate(&shells(), &p, "pwsh", |_, _| true).is_empty());
+        assert!(f.apply(&mut meta, &p, "pwsh"));
+        assert_eq!(meta.claude_opts.extra.flags, ["chrome", "ide"]);
+        // Wertoptionen des Nutzers (auch die Rechte erweiternden) für diese Sitzung; Text mit Leerzeichen am Rand ist gültig.
+        let mut f = form(&meta);
+        f.v.copts.extra.append_system_prompt = "Be brief. ".into();
+        f.v.copts.extra.allowed_tools = "Read".into();
+        assert!(f.needs_reload(&p, "pwsh"));
+        assert!(f.validate(&shells(), &p, "pwsh", |_, _| true).is_empty());
+        assert!(f.apply(&mut meta, &p, "pwsh"));
+        assert_eq!(meta.claude_opts.extra, ExtraOpts { flags: vec!["chrome".into(), "ide".into()], allowed_tools: "Read".into(), append_system_prompt: "Be brief.".into(), ..Default::default() });
+        // Ungültiger Wert sperrt das Speichern (auch wenn die Zeilen ihn nicht gemeldet hätten).
+        let mut f = form(&meta);
+        f.v.copts.extra.max_budget_usd = "lots".into();
+        assert_eq!(f.validate(&shells(), &p, "pwsh", |_, _| true), vec![Problem::InvalidClaudeOption]);
+        // Unverändert: kein Neu laden
+        assert!(!form(&meta).needs_reload(&p, "pwsh"));
+    }
+
+    #[test]
+    fn the_dialog_shows_more_claude_options() {
+        let mut d = Dlg::new();
+        let mut f = form(&SessionMeta { id: 9, claude: true, shell_id: "pwsh".into(), ..SessionMeta::default() });
+        f.v.copts.extra.flags = vec!["verbose".into()];
+        d.frame(&mut f, true, vec![]);
+        d.frame(&mut f, true, vec![]);
+        assert!(f.opts_ok);
+        assert_eq!(f.v.copts.extra.flags, ["verbose"], "Abschnitt offen, Häkchen unverändert");
+        // Ungültiger Wert im Abschnitt wird erkannt.
+        f.v.copts.extra.append_system_prompt = "100% sure".into();
+        d.frame(&mut f, true, vec![]);
+        assert!(!f.opts_ok);
+        assert_eq!(f.validate(&shells(), &profiles(), "pwsh", |_, _| true), vec![Problem::InvalidClaudeOption]);
     }
 
     #[test]

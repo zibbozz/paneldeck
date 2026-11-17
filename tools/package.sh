@@ -17,7 +17,7 @@ z=zipfile.ZipFile(f'dist/paneldeck-{v}-windows-x64.zip','w',zipfile.ZIP_DEFLATED
 z.write(f'dist/paneldeck-{v}.exe', d+'paneldeck.exe')   # im Ordner heißt die Datei paneldeck.exe (Hooks/MCP-Eintrag verweisen auf den Namen)
 for f in ('conpty.dll','OpenConsole.exe'): z.write('dist/conpty/'+f, d+f)   # mitgelieferte ConPTY (MIT, Microsoft) neben paneldeck.exe
 for f in ('LICENSE','THIRD_PARTY.md','THIRD_PARTY_LICENSES.txt','README.md','README.de.md','Changelog.md','Changelog.de.md'): z.write(f, d+f)
-for f in ('LICENSE-Cascadia.txt','LICENSE-NotoColorEmoji.txt'): z.write('assets/fonts/'+f, d+'licenses/'+f)
+for f in ('LICENSE-Cascadia.txt','LICENSE-NotoColorEmoji.txt','LICENSE-Lucide.txt'): z.write('assets/fonts/'+f, d+'licenses/'+f)
 z.write('tools/license-extra/conpty-MIT.txt', d+'licenses/LICENSE-ConPTY.txt')
 z.write('tools/license-extra/conpty-NOTICE.md', d+'licenses/NOTICE-ConPTY.md')   # Hinweise Dritter (Fremdcode in OpenConsole)
 import glob,os

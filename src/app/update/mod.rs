@@ -13,7 +13,7 @@
 pub(super) mod http;
 pub mod install;
 pub(super) mod release;
-mod sha256;
+pub(crate) mod sha256;
 mod ui;
 pub(super) mod version;
 mod zip;
