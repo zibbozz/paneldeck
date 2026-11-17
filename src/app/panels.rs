@@ -231,10 +231,10 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&c.path).strong());
                             if c.staged() && c.unstaged() {
-                                if ui.selectable_label(!*staged_view, lang.t("Nicht vorgemerkt", "Unstaged")).clicked() {
+                                if afford::choice(ui, !*staged_view, lang.t("Nicht vorgemerkt", "Unstaged"), 0.0).clicked() {
                                     select = Some((c.path.clone(), false));
                                 }
-                                if ui.selectable_label(*staged_view, lang.t("Vorgemerkt", "Staged")).clicked() {
+                                if afford::choice(ui, *staged_view, lang.t("Vorgemerkt", "Staged"), 0.0).clicked() {
                                     select = Some((c.path.clone(), true));
                                 }
                             }

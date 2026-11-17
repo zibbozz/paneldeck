@@ -1,3 +1,4 @@
+use crate::afford::{self, Clickable};
 use crate::claude_opts::ClaudeOpts;
 use crate::clip;
 use crate::gitinfo::{GitInfo, GitWatcher};
@@ -97,13 +98,16 @@ struct Entry {
     /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
     /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
     session_key: String,
+    /// Hinweis vom letzten Start (z. B. weggelassene Pfade aus den Claude-Optionen, #182); wird im nächsten Bild als
+    /// Meldung gezeigt.
+    launch_note: Option<String>,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts, launch_note: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -368,6 +372,11 @@ enum Action {
     /// Bereich minimieren: aus dem Layout nehmen, Sitzung läuft weiter (`App::minimize_pane`).
     MinimizePane(u64),
     Focus(u64),
+    /// Sitzung für einen Agenten zeigen (`focus_session`/`create_session` mit `placement`, #162): Sitzung, Platzierung,
+    /// aufrufende Sitzung des Agenten (deren Bereich ist der aktive Bereich, wenn er zu sehen ist), geschützte Sitzungen (nie
+    /// verdrängen: Freigabe-Frage offen, Kette des Agenten). Bewegt nie den Tastaturfokus des Nutzers und holt kein Fenster
+    /// nach vorn (`multiwin::brings_to_front`).
+    Place(u64, crate::layout::Placement, Option<u64>, Vec<u64>),
     /// Zur Sitzung springen (aus einem Ticket): Terminal Hub ihres Fensters zeigen und sie aktivieren.
     JumpTo(u64),
     NewQuick,
@@ -823,6 +832,8 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../assets/fonts/CascadiaMono-Regular.ttf"))),
     );
     fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "cascadia".to_owned());
+    // Lucide-Icons (ISC) als eigene Familie nur für Icons (Icon-Explorer, `lucide:<name>`).
+    planning_ui::install_icon_font(&mut fonts);
     // Optionale Systemschriften als Fallback für Symbole, Sonderzeichen, CJK, Thai, Indisch, Mathe usw.
     // Es werden nur vorhandene Dateien geladen; fehlt eine, ändert sich nichts.
     let candidates: [(&str, &str); 14] = [
@@ -904,9 +915,12 @@ impl App {
         let (mut saved, startup_note) = state::load_saved(&dir.join("state.json"));
         // „Sitzungen merken“ aus (#157): frischer Start. Steht in state.json noch etwas (Absturz nach dem Ausschalten, von
         // Hand geändert), wird die Datei vorher gesichert. Scrollback und Chatverläufe früherer Läufe werden gelöscht – auch
-        // nach einem Absturz, bei dem `save_for_exit` nicht mehr lief.
+        // nach einem Absturz, bei dem `save_for_exit` nicht mehr lief. Ausnahme: Neustart nach einem Update – dann werden
+        // die Sitzungen einmal wiederhergestellt (`update::install::restore_once`, die Variable ist schon entfernt; beim
+        // nächsten Beenden bzw. nach einem Absturz beim nächsten Start gilt wieder der frische Start).
         let remember_at_start = settings.remember_sessions;
-        if !settings.remember_sessions {
+        let restored_once = fresh_start::restore_once_applies(settings.remember_sessions, update::install::restore_once());
+        if !settings.remember_sessions && !restored_once {
             if fresh_start::worth_keeping(&saved) {
                 if let Ok(raw) = std::fs::read(dir.join("state.json")) {
                     fresh_start::backup_state(&dir, &raw);
@@ -916,6 +930,7 @@ impl App {
             saved.next_id = saved.next_id.max(top.saturating_add(1));
             saved = fresh_start::forget(saved, state::persisted_lang(settings.language));
         }
+        let restored_once = restored_once && !saved.sessions.is_empty();
         // Vorgemerkte Wiederherstellung einspielen, dann die Datenbank öffnen (Migrationen inklusive).
         let restore_result = crate::backup::apply_pending_restore(&dir, crate::db::FILE);
         let backup_dir = crate::cli::get().backup_dir.clone().unwrap_or_else(|| crate::backup::dir(&dir, &settings.backup_dir));
@@ -1063,6 +1078,7 @@ impl App {
             winchrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
         }
         clip::init(&app.dir);
+        crate::afford::install(&cc.egui_ctx); // Hand-Zeiger über allem, was wie ein Knopf funktioniert (#187)
         app.reload_themes();
         app.prompts = state::load_json(&app.dir.join("prompts.json")).unwrap_or_else(|| prompts::defaults(state::persisted_lang(app.settings.language)));
         if let Some(h) = &app.hook_server {
@@ -1138,13 +1154,19 @@ impl App {
         // Start aus dem Explorer-Kontextmenü: Sitzung im übergebenen Ordner öffnen.
         let cli = crate::cli::get();
         if let Some(p) = &cli.open {
-            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude);
+            let _ = app.open_folder(&cc.egui_ctx, p, cli.claude, false);
         }
         app.want_focus = Some(app.focused);
         if let Some(n) = startup_note {
             app.notify_text(n);
         }
         let lang = app.settings.language;
+        if restored_once {
+            app.notify_text(lang.t(
+                "Nach dem Update wiederhergestellt. „Sitzungen merken“ ist aus: Beim nächsten Beenden werden die Sitzungen verworfen.",
+                "Restored after the update. “Remember sessions” is off: the sessions are discarded on the next exit.",
+            ).to_string());
+        }
         if let Some(b) = state::SETTINGS_RESET.get() {
             app.notify_text(format!("{} {}", lang.t("Einstellungen zurückgesetzt (--reset-settings). Sicherung:", "Settings reset (--reset-settings). Backup:"), b.display()));
         }
@@ -1162,7 +1184,10 @@ impl App {
 
     /// Neue Sitzung in einem Ordner (Dateien → deren Ordner).
     /// Ordner (oder Ordner einer Datei) als neue Sitzung öffnen; gibt deren Kennung zurück.
-    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool) -> u64 {
+    /// `from_hub` = angestoßen aus einem Hub-Terminal (`paneldeck --open` dort, möglicherweise von einem Agenten): dann
+    /// Optionen wie bei Sitzungen über MCP (#182): ohne die Rechte erweiternden Wertoptionen der Standards und mit
+    /// ausdrücklichem Permission-Mode (`ClaudeOpts::for_agent`).
+    fn open_folder(&mut self, ctx: &egui::Context, path: &str, claude: bool, from_hub: bool) -> u64 {
         let p = std::path::Path::new(path);
         // Ein WSL-Pfad gilt ungeprüft als Ordner (schon das Prüfen kann die WSL-VM starten und die Oberfläche blockieren).
         let dir = if !crate::wsl::is_wsl_unc(path) && p.is_file() { p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() } else { path.to_string() };
@@ -1178,7 +1203,8 @@ impl App {
             Some((sid, linux)) => (Some(sid), linux),
             None => (None, dir),
         };
-        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, ..NewOpts::default() })
+        let claude_opts = from_hub.then(|| ClaudeOpts::default().for_agent(&self.settings.claude_defaults));
+        self.new_session(ctx, NewOpts { shell_id, cwd: Some(cwd), claude: claude && self.settings.claude_mode, claude_opts, ..NewOpts::default() })
     }
 
     fn handle_ipc(&mut self, ctx: &egui::Context) {
@@ -1194,7 +1220,7 @@ impl App {
                     self.notify_text(taint::orphan_error().1);
                     continue;
                 }
-                let id = self.open_folder(ctx, &path, claude);
+                let id = self.open_folder(ctx, &path, claude, origin.is_some());
                 if origin.is_some() && taint::on_create(&mut self.entries, origin, id) {
                     self.save_state();
                 }
@@ -1482,13 +1508,16 @@ impl App {
         self.settings.last_claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone()).sanitized(false)
     }
 
-    /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt.
-    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool) {
+    /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt; dritter: die tatsächlich gesetzten
+    /// Optionen und die weggelassenen Pfade (#182).
+    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs) {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
         let is_wsl = sid.starts_with("wsl");
-        let mut c = String::from("claude");
+        // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
+        let style = crate::claude_opts::PathStyle::for_shell(&sid, spec.as_ref().map(|s| s.program.as_str()).unwrap_or(""), kind);
+        let mut c = String::from(style.claude_program());
         if is_wsl {
             // WSL: eigene Hook-Datei mit WSL-Pfad zur .exe (Aufruf über Interop); die globale Windows-Konfiguration gilt dort nicht.
             if let Some(f) = hooks::write_session_settings_wsl(&self.dir, &self.exe, &sid) {
@@ -1500,12 +1529,11 @@ impl App {
             }
         }
         // Gespeicherte Optionen nur in harmloser Form übernehmen (state.json ist eine Vertrauensgrenze):
-        // geprüfte Startoptionen (#161), gequotet für die Shell, dazu ältere freie `claude_args` bereinigt.
+        // geprüfte Startoptionen (#161, #182; Pfade erst hier auf Existenz geprüft und für WSL umgerechnet), gequotet für
+        // die Shell, dazu ältere freie `claude_args` bereinigt (vor den mehrwertigen Wertoptionen).
         let (opts, args) = meta.claude_opts_eff();
-        c += &opts.args(kind);
-        if !args.is_empty() {
-            c += &format!(" {}", crate::claude_opts::legacy_args(&args, kind));
-        }
+        let launch = opts.launch(kind, style, &args);
+        c += &launch.line;
         // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
         // der globalen Einstellung (`session_settings::resume_wanted`).
         let resume_wanted = session_settings::resume_wanted(l.restore, l.restart, meta.claude_continue, self.settings.claude_resume);
@@ -1526,7 +1554,7 @@ impl App {
         if let Some(p) = l.prompt.filter(|p| !p.trim().is_empty()) {
             meta.queue.insert(0, p.trim().to_string());
         }
-        (c + "\r", fresh)
+        (c + "\r", fresh, launch)
     }
 
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
@@ -1546,7 +1574,17 @@ impl App {
             None
         };
         let claude_cmd = if entry.launched_claude {
-            let (c, fresh) = self.claude_command(&mut entry.meta, &l);
+            let (c, fresh, launch) = self.claude_command(&mut entry.meta, &l);
+            // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
+            entry.launched_opts = launch.applied;
+            if !launch.dropped.is_empty() {
+                entry.launch_note = Some(format!(
+                    "{} ({}): {}",
+                    state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
+                    entry.display_name(),
+                    launch.dropped.join(", "),
+                ));
+            }
             if fresh {
                 // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
                 entry.meta.transcript.clear();
@@ -1685,6 +1723,7 @@ impl App {
                 initial_input: initial.as_deref(),
                 scrollback_lines: self.settings.scrollback_lines,
                 env,
+                inherit_env: self.settings.inherit_env,
             },
         ) {
             Ok(s) => {
@@ -1885,14 +1924,53 @@ impl App {
     ///
     /// Eine Sitzung eines anderen Fensters kommt hier nicht an (`route_target` reicht die Aktion dorthin weiter, dort gilt
     /// dieselbe Regel); bei einer eines anderen Projekts wechselt `Action::Activate` vorher das Projekt.
+    ///
+    /// Werden dabei Bereiche minimiert, erscheint kurz der Hinweis „N Bereiche minimiert“ (#162).
     fn activate(&mut self, id: u64) {
         let Some(e) = self.entries.get_mut(&id) else { return };
         e.attention = false;
         // Eine Sitzung darf nie gleichzeitig abgedockt und im Hauptlayout sein (zwei Größen kämpften um die PTY).
         self.detached.retain(|d| *d != id);
-        show_session(&mut self.layout, &mut self.entries, id, self.focused);
+        let n = show_session(&mut self.layout, &mut self.entries, id, self.focused);
         self.focused = id;
         self.want_focus = Some(id);
+        if n > 0 {
+            self.notify_text(minimized_hint(n, self.settings.language));
+        }
+    }
+
+    /// Sitzung für einen Agenten platzieren (`Action::Place`, #162). Aktiver Bereich ist der Bereich der aufrufenden Sitzung,
+    /// wenn er im Layout steht, sonst der fokussierte Bereich des Nutzers (`agent_anchor`). `Solo` minimiert die übrigen
+    /// Bereiche (mit Hinweis), `Replace` ersetzt nur den aktiven Bereich (er wird minimiert), die Teilungen teilen nur ihn.
+    /// `protected` wird nie verdrängt (`layout::place`).
+    ///
+    /// Entscheidung des Nutzers: Der Tastaturfokus bleibt, wo er war – außer der fokussierte Bereich hat das Layout verlassen
+    /// (dann die neue Sitzung). Gehört die Sitzung zu einem anderen als dem gezeigten Projekt, wird dessen gespeichertes
+    /// Layout geändert, ohne das Projekt zu wechseln.
+    fn place(&mut self, id: u64, placement: crate::layout::Placement, caller: Option<u64>, protected: &[u64]) {
+        let Some(e) = self.entries.get_mut(&id) else { return };
+        e.attention = false;
+        let pid = e.meta.project;
+        self.detached.retain(|d| *d != id);
+        let prot = |x: u64| protected.contains(&x);
+        if pid != self.active_project {
+            if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+                let anchor = agent_anchor(p.layout.as_ref(), caller, p.focused);
+                place_session(&mut p.layout, &mut self.entries, id, anchor, placement, &prot);
+                p.focused = keep_focus(p.layout.as_ref(), p.focused, id);
+            }
+            return;
+        }
+        let anchor = agent_anchor(self.layout.as_ref(), caller, self.focused);
+        let n = place_session(&mut self.layout, &mut self.entries, id, anchor, placement, &prot);
+        let focus = keep_focus(self.layout.as_ref(), self.focused, id);
+        if focus != self.focused {
+            self.focused = focus;
+            self.want_focus = Some(focus);
+        }
+        if n > 0 {
+            self.notify_text(minimized_hint(n, self.settings.language));
+        }
     }
 
     /// Bereich minimieren: die Sitzung verlässt das Layout, läuft aber weiter und bleibt in der Seitenleiste (abgeblendet).
@@ -1983,15 +2061,20 @@ impl App {
         }
     }
 
-    /// Strg+Tab: reihum durch die Sitzungen (minimierte bleiben draußen, bis man sie gezielt holt).
+    /// Strg+Tab: reihum durch die Sitzungen des Fensters/Projekts, auch durch minimierte (#162: nachdem eine minimierte
+    /// Sitzung allein geöffnet wurde, sind die übrigen minimiert – Strg+Tab erreicht sie trotzdem). Eine minimierte öffnet
+    /// sich dabei wie per Klick allein (`activate`).
     fn cycle(&mut self, delta: i32) {
-        let ids: Vec<u64> = self.unminimized_docked();
-        if ids.is_empty() {
-            return;
-        }
-        let pos = ids.iter().position(|i| *i == self.focused).unwrap_or(0) as i32;
-        let next = (pos + delta).rem_euclid(ids.len() as i32) as usize;
-        self.activate(ids[next]);
+        let ids: Vec<u64> = self.docked_ids();
+        let Some(next) = cycle_target(&ids, self.focused, delta) else { return };
+        let Some(e) = self.entries.get_mut(&next) else { return };
+        e.attention = false;
+        self.detached.retain(|d| *d != next);
+        // Entscheidung des Nutzers: im fokussierten Bereich zeigen (`replace`), die Teilung bleibt; der verdrängte Bereich
+        // wird minimiert. Kein Hinweis (jeder Schritt verdrängt höchstens einen Bereich).
+        place_session(&mut self.layout, &mut self.entries, next, self.focused, crate::layout::Placement::Replace, &|_| false);
+        self.focused = next;
+        self.want_focus = Some(next);
     }
 
     fn save_all(&self) {
@@ -3240,6 +3323,9 @@ impl App {
                 }
                 self.activate(id)
             }
+            // Abgedockt: schon in seinem eigenen Fenster zu sehen; nichts nach vorn holen (Fokus des Nutzers bleibt).
+            Action::Place(id, ..) if self.detached.contains(&id) => {}
+            Action::Place(id, placement, caller, protected) => self.place(id, placement, caller, &protected),
             Action::JumpTo(id) => {
                 if self.entries.contains_key(&id) {
                     self.set_mode(titlebar::Mode::Terminals);
@@ -3558,6 +3644,11 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.handle_ipc(ctx);
+        // Hinweise vom Start einer Sitzung (weggelassene Pfade der Claude-Optionen, #182).
+        let notes: Vec<String> = self.entries.values_mut().filter_map(|e| e.launch_note.take()).collect();
+        for n in notes {
+            self.notify_text(n);
+        }
         self.poll_mcp(ctx);
         crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         if crate::conpty::take_fallback_hint() {
@@ -3694,15 +3785,60 @@ fn min_extent(node: &Node, dir: Dir) -> f32 {
 
 /// Kern von `App::activate`: Sitzung `id` nach `layout::show` ins Layout bringen. Eine minimierte öffnet sich allein; die
 /// Bereiche, die dabei das Layout verlassen, werden als minimiert markiert. Den veralteten `slot` (2.2.0) beider Seiten löschen.
-fn show_session(layout: &mut Option<Node>, entries: &mut BTreeMap<u64, Entry>, id: u64, focused: u64) {
-    let Some(e) = entries.get_mut(&id) else { return };
+/// Liefert, wie viele Bereiche dabei minimiert wurden.
+fn show_session(layout: &mut Option<Node>, entries: &mut BTreeMap<u64, Entry>, id: u64, focused: u64) -> usize {
+    let Some(e) = entries.get_mut(&id) else { return 0 };
     let minimized = std::mem::take(&mut e.meta.minimized);
     e.meta.slot = None;
-    for gone in crate::layout::show(layout, id, focused, minimized) {
-        if let Some(e) = entries.get_mut(&gone) {
+    mark_minimized(entries, &crate::layout::show(layout, id, focused, minimized))
+}
+
+/// Kern von `App::place` und Strg+Tab: Sitzung `id` nach `layout::place` ins Layout bringen (sie ist danach nicht mehr
+/// minimiert); die verdrängten Bereiche (`Solo`, `Replace`) werden als minimiert markiert. Liefert, wie viele das sind.
+fn place_session(layout: &mut Option<Node>, entries: &mut BTreeMap<u64, Entry>, id: u64, anchor: u64, placement: crate::layout::Placement, protected: &dyn Fn(u64) -> bool) -> usize {
+    let Some(e) = entries.get_mut(&id) else { return 0 };
+    e.meta.minimized = false;
+    e.meta.slot = None;
+    mark_minimized(entries, &crate::layout::place(layout, id, anchor, placement, protected).minimized)
+}
+
+/// Fokus nach einer Platzierung für einen Agenten: bleibt `focused`, solange es im Layout steht; sonst (ersetzt, minimiert,
+/// leerer Hub) die gezeigte Sitzung `shown`.
+fn keep_focus(layout: Option<&Node>, focused: u64, shown: u64) -> u64 {
+    if layout.is_some_and(|l| l.contains(focused)) { focused } else { shown }
+}
+
+fn mark_minimized(entries: &mut BTreeMap<u64, Entry>, ids: &[u64]) -> usize {
+    for gone in ids {
+        if let Some(e) = entries.get_mut(gone) {
             e.meta.minimized = true;
             e.meta.slot = None;
         }
+    }
+    ids.len()
+}
+
+/// Aktiver Bereich für einen Agenten (#162): der Bereich seiner eigenen Sitzung, wenn sie im gezeichneten Layout steht,
+/// sonst der Bereich, den der Nutzer fokussiert hat.
+fn agent_anchor(layout: Option<&Node>, caller: Option<u64>, focused: u64) -> u64 {
+    caller.filter(|c| layout.is_some_and(|l| l.contains(*c))).unwrap_or(focused)
+}
+
+/// Nächste Sitzung für Strg+Tab (`delta` = +1/−1) in `ids` ab `focused` (nicht dabei: die erste); `None` ohne Sitzungen.
+fn cycle_target(ids: &[u64], focused: u64, delta: i32) -> Option<u64> {
+    if ids.is_empty() {
+        return None;
+    }
+    let Some(pos) = ids.iter().position(|i| *i == focused) else { return Some(ids[0]) };
+    Some(ids[(pos as i32 + delta).rem_euclid(ids.len() as i32) as usize])
+}
+
+/// Kurzer Hinweis, nachdem eine Sitzung allein geöffnet wurde (#162).
+fn minimized_hint(n: usize, lang: Lang) -> String {
+    if n == 1 {
+        lang.t("1 Bereich minimiert", "1 pane minimized").to_string()
+    } else {
+        format!("{n} {}", lang.t("Bereiche minimiert", "panes minimized"))
     }
 }
 
@@ -3828,7 +3964,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         [Pos2::new(header.min.x, header.max.y - 0.5), Pos2::new(header.max.x, header.max.y - 0.5)],
         Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(0.7)),
     );
-    let hresp = ui.interact(header, Id::new(("hdr", id)), if cx.detached { Sense::click() } else { Sense::click_and_drag() });
+    // Kopfzeile = Titelleiste des Bereichs (Klick fokussiert, Ziehen verschiebt): kein Knopf, darum ohne Hand (#187).
+    let hresp = ui.interact(header, Id::new(("hdr", id)), if cx.detached { Sense::click() } else { Sense::click_and_drag() }).no_pointer();
     if hresp.drag_started() {
         *cx.dragging = Some(id);
     }
@@ -4662,6 +4799,104 @@ mod tests {
         assert!(e[&2].meta.slot.is_none());
         unminimize_shown(None, &mut e);
         assert_eq!(minimized_ids(&e), vec![3], "leerer Hub: nichts ändert sich");
+    }
+
+    #[test]
+    fn show_session_counts_the_minimized_panes() {
+        let h = |a: u64, b: u64| Node::Split { dir: Dir::Horizontal, ratio: 0.5, a: Box::new(Node::Leaf(a)), b: Box::new(Node::Leaf(b)) };
+        let mut e = sessions(&[(1, false), (2, false), (3, true)]);
+        let mut l = Some(h(1, 2));
+        assert_eq!(show_session(&mut l, &mut e, 3, 1), 2);
+        assert_eq!(show_session(&mut l, &mut e, 3, 3), 0, "schon sichtbar");
+        assert_eq!(show_session(&mut l, &mut e, 1, 3), 1);
+        assert_eq!(show_session(&mut l, &mut e, 99, 1), 0, "unbekannt");
+    }
+
+    #[test]
+    fn agent_placement_minimizes_displaced_panes() {
+        use crate::layout::Placement;
+        let free = |_: u64| false;
+        let h = |a: u64, b: u64| Node::Split { dir: Dir::Horizontal, ratio: 0.5, a: Box::new(Node::Leaf(a)), b: Box::new(Node::Leaf(b)) };
+        // 1 | 2 sichtbar, 3 minimiert, 4 nur weggewechselt
+        let mut e = sessions(&[(1, false), (2, false), (3, true), (4, false)]);
+        // replace: die minimierte 3 ersetzt nur den aktiven Bereich 2; 2 ist danach minimiert (Entscheidung des Nutzers)
+        let mut l = Some(h(1, 2));
+        assert_eq!(place_session(&mut l, &mut e, 3, 2, Placement::Replace, &free), 1);
+        assert_eq!(l, Some(h(1, 3)));
+        assert_eq!(minimized_ids(&e), vec![2]);
+        // split_right am Bereich 1: nur 1 wird geteilt, nichts minimiert
+        assert_eq!(place_session(&mut l, &mut e, 4, 1, Placement::SplitRight, &free), 0);
+        assert_eq!(l.as_ref().unwrap().leaf_ids(), vec![1, 4, 3]);
+        // solo: alle anderen minimiert; die gezeigte 2 ist es nicht mehr
+        assert_eq!(place_session(&mut l, &mut e, 2, 1, Placement::Solo, &free), 3);
+        assert_eq!(l, Some(Node::Leaf(2)));
+        assert_eq!(minimized_ids(&e), vec![1, 3, 4]);
+        // unbekannte Sitzung: nichts
+        assert_eq!(place_session(&mut l, &mut e, 99, 2, Placement::Solo, &free), 0);
+        assert_eq!(l, Some(Node::Leaf(2)));
+    }
+
+    #[test]
+    fn agent_placement_keeps_approval_and_chain_panes() {
+        use crate::layout::Placement;
+        let h = |a: u64, b: u64| Node::Split { dir: Dir::Horizontal, ratio: 0.5, a: Box::new(Node::Leaf(a)), b: Box::new(Node::Leaf(b)) };
+        // 1 wartet auf eine Freigabe, 2 frei, 5 minimiert
+        let mut e = sessions(&[(1, false), (2, false), (5, true)]);
+        let prot = |x: u64| x == 1;
+        let mut l = Some(h(1, 2));
+        // replace auf den geschützten aktiven Bereich: geteilt statt ersetzt, nichts minimiert
+        assert_eq!(place_session(&mut l, &mut e, 5, 1, Placement::Replace, &prot), 0);
+        assert_eq!(l.as_ref().unwrap().leaf_ids(), vec![1, 5, 2]);
+        assert!(minimized_ids(&e).is_empty());
+        // solo: 1 bleibt sichtbar, nur 5 wird minimiert
+        assert_eq!(place_session(&mut l, &mut e, 2, 1, Placement::Solo, &prot), 1);
+        assert_eq!(l.as_ref().unwrap().leaf_ids(), vec![1, 2]);
+        assert_eq!(minimized_ids(&e), vec![5]);
+    }
+
+    #[test]
+    fn agent_placement_keeps_the_users_focus() {
+        let h = |a: u64, b: u64| Node::Split { dir: Dir::Horizontal, ratio: 0.5, a: Box::new(Node::Leaf(a)), b: Box::new(Node::Leaf(b)) };
+        assert_eq!(keep_focus(Some(&h(1, 9)), 1, 9), 1, "fokussierter Bereich noch da: Fokus bleibt");
+        assert_eq!(keep_focus(Some(&h(9, 3)), 1, 9), 9, "fokussierter Bereich ersetzt: Fokus zur neuen Sitzung");
+        assert_eq!(keep_focus(Some(&Node::Leaf(9)), 0, 9), 9, "vorher leerer Hub");
+        assert_eq!(keep_focus(None, 1, 9), 9);
+    }
+
+    #[test]
+    fn agent_anchor_is_the_callers_pane_if_visible() {
+        let l = Node::Split { dir: Dir::Horizontal, ratio: 0.5, a: Box::new(Node::Leaf(1)), b: Box::new(Node::Leaf(2)) };
+        assert_eq!(agent_anchor(Some(&l), Some(2), 1), 2, "eigene Sitzung sichtbar");
+        assert_eq!(agent_anchor(Some(&l), Some(7), 1), 1, "eigene Sitzung nicht im Layout: Fokus des Nutzers");
+        assert_eq!(agent_anchor(Some(&l), None, 1), 1, "Agent außerhalb von Paneldeck");
+        assert_eq!(agent_anchor(None, Some(2), 0), 0);
+    }
+
+    #[test]
+    fn ctrl_tab_cycles_through_all_sessions_including_minimized() {
+        assert_eq!(cycle_target(&[1, 2, 3], 1, 1), Some(2));
+        assert_eq!(cycle_target(&[1, 2, 3], 3, 1), Some(1));
+        assert_eq!(cycle_target(&[1, 2, 3], 1, -1), Some(3));
+        assert_eq!(cycle_target(&[1, 2, 3], 9, 1), Some(1), "Fokus nicht in der Liste: die erste");
+        assert_eq!(cycle_target(&[1, 2, 3], 9, -1), Some(1));
+        assert_eq!(cycle_target(&[], 1, 1), None);
+        // Minimierte Sitzung: im fokussierten Bereich gezeigt (replace), die Teilung bleibt, der verdrängte wird minimiert.
+        let h = |a: u64, b: u64| Node::Split { dir: Dir::Horizontal, ratio: 0.5, a: Box::new(Node::Leaf(a)), b: Box::new(Node::Leaf(b)) };
+        let mut e = sessions(&[(1, false), (2, false), (3, true)]);
+        let mut l = Some(h(1, 2));
+        let next = cycle_target(&[1, 2, 3], 2, 1).unwrap();
+        assert_eq!(next, 3);
+        assert_eq!(place_session(&mut l, &mut e, next, 2, crate::layout::Placement::Replace, &|_| false), 1);
+        assert_eq!(l, Some(h(1, 3)));
+        assert_eq!(minimized_ids(&e), vec![2]);
+    }
+
+    #[test]
+    fn minimized_hint_in_both_languages() {
+        assert_eq!(minimized_hint(1, Lang::En), "1 pane minimized");
+        assert_eq!(minimized_hint(3, Lang::En), "3 panes minimized");
+        assert_eq!(minimized_hint(1, Lang::De), "1 Bereich minimiert");
+        assert_eq!(minimized_hint(2, Lang::De), "2 Bereiche minimiert");
     }
 
     #[test]

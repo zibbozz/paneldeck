@@ -663,3 +663,30 @@ mod tests {
         assert_eq!((rep.created_types, rep.created_fields), (1, 1));
     }
 }
+
+#[cfg(test)]
+mod lucide_tests {
+    use super::*;
+    use crate::planning::projects::{create_project, NewProject};
+    use crate::planning::types::{create_type, list_types, NewType};
+
+    #[test]
+    fn lucide_icons_roundtrip_through_the_template() {
+        let c = crate::db::open_memory();
+        let a = create_project(&c, &NewProject::new("AA", "A", "#112233")).unwrap();
+        create_type(&c, &NewType { project_id: a, key: None, name: Some("Alarm".into()), icon: Some("lucide:alarm-clock".into()), color: "#445566".into(), workflow: false }).unwrap();
+        create_type(&c, &NewType { project_id: a, key: None, name: Some("Future".into()), icon: Some("lucide:not-yet-known".into()), color: "#445566".into(), workflow: false }).unwrap();
+        let doc = TemplateDoc::from_json(&export_types(&c, a).unwrap().to_json()).unwrap();
+        let b = create_project(&c, &NewProject::new("BB", "B", "#112233")).unwrap();
+        import_types(&c, b, &doc).unwrap();
+        let icons: Vec<Option<String>> = list_types(&c, b).unwrap().into_iter().map(|t| t.icon).collect();
+        assert!(icons.contains(&Some("lucide:alarm-clock".into())) && icons.contains(&Some("lucide:not-yet-known".into())));
+        // Ein altes Dokument ohne Icon-Feld lädt weiter (Serde-Standard).
+        let mut v: serde_json::Value = serde_json::from_str(&doc.to_json()).unwrap();
+        for t in v["types"].as_array_mut().unwrap() {
+            t.as_object_mut().unwrap().remove("icon");
+        }
+        let old = TemplateDoc::from_json(&v.to_string()).unwrap();
+        assert!(old.types.iter().all(|t| t.icon.is_none()));
+    }
+}

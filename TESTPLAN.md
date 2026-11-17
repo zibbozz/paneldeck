@@ -709,3 +709,17 @@ Vorbereitung: Testinstanz wie 54 mit drei Terminals und einem Chat in einem gete
 - [ ] **Smoke-Test:** `tools\smoke-mcp.ps1 -Exe <exe> -WorkRoot E:\paneldeck-test` → alle Prüfungen bestanden (Zahl siehe Skript-Ausgabe „Ergebnis: N bestanden“).
 - [ ] **Release-Dateien und Defender:** wie in Abschnitt 53 (`tools/release.sh`, `SHA256SUMS.txt`, `tools\defender-scan.ps1` auf `paneldeck-2.2.0.exe` und `Paneldeck-Setup-2.2.0.exe`).
 - [ ] **Dokumentation:** README (Englisch/Deutsch), `docs/en/chat.md`/`docs/de/chat.md` und die geänderten Anleitungen stimmen mit dem Programm überein, alle Links funktionieren; Changelog (beide Sprachen) und `docs/release-notes/2.2.0.en.md` sind vollständig.
+
+## 62 · Klickbares sieht klickbar aus (#187, 2.3.0)
+Vorbereitung: Testinstanz wie 54 (Claude-Modus an, eine Claude-Sitzung mit Verbrauch, MCP-Stufe „Nur lesen“), dunkles und helles Thema. Automatisch: Unit-Tests `afford` (Hand über Knöpfen/Einträgen/Klickflächen, nicht über Textfeldern, Zieh-Flächen, deaktivierten Knöpfen, Fensterhintergründen; Knopf über dem Terminal; Auswahlknöpfe; Kostenknopf), `mcp::level_selector`, `sidebar::cost_summary`.
+- [ ] **Hand überall:** Hauptreiter (Terminal Hub / Todo-Liste), Fensterknöpfe Minimieren/Schließen (Maximieren: Zeiger des Systems), Icon-Knöpfe der Werkzeugleiste, Sitzungs- und Ordnerzeilen, Projekt-Pillen, Einstellungsreiter, Knöpfe, Kontrollkästchen, Auswahllisten und ihre Einträge, aufklappbare Überschriften, Menü- und Paletteneinträge, Toasts → Hand-Zeiger.
+- [ ] **Kein Hand-Zeiger:** Terminalfläche (Pfeil, auch beim Markieren; Strg über einem Verweis → Hand), Textfelder (I-Balken), Hintergrund eines Chats, Text eines Absatzes (Verweis darin → Hand), Kreisdiagramm außerhalb der Stücke, Kopfzeile eines Bereichs, deaktivierte Knöpfe; Trennlinien und Panelränder behalten die Größenpfeile.
+- [ ] **Knöpfe über dem Terminal:** Suche (Strg+F) „<“/„>“ und „Neu starten“ in der Leiste einer beendeten Sitzung → Hand.
+- [ ] **Agenten-Schnittstelle:** *Einstellungen → Agenten* → Aus / Nur lesen / Steuern sehen auch nicht gewählt wie Knöpfe aus (Rahmen, Fläche, gleich breit), gewählt in der Auswahlfarbe mit gut lesbarem Text (auch im hellen Thema); Klick wechselt die Stufe.
+- [ ] **Weitere Auswahlknöpfe:** Sprache, Prompt-Sprache (Systemprompt), Profil-Reiter, Modell-Stufe und Werkzeugaufrufe (*Modelle*), Windows-/WSL-Pfad (Ordnerauswahl), Nicht vorgemerkt/Vorgemerkt (Git-Panel) → wie oben.
+- [ ] **Kostenzeile:** unten in der Seitenleiste eigene Zeile „Σ … Token · ≈ $…“ als kleiner Knopf mit Pfeil „›“ → Überfahren: Fläche, Hand, Tooltip mit vollem Text; Klick öffnet die Kosten-Übersicht. Seitenleiste ganz schmal ziehen → Text wird kürzer („Σ … · ≈ $…“, dann „≈ $…“) bzw. verschwindet, ragt nie über den Rand. Ohne Verbrauch steht rechts neben dem Zahnrad die Version.
+- [ ] **MCP-Chip:** als kleiner Knopf, Hand und Tooltip, Klick öffnet *Einstellungen → Agenten*.
+- [ ] **Farbfelder:** Farbe von Projekt, Ordner, Sitzung, Profil und im Dialog *Sitzungseinstellungen* → Ring beim Überfahren, Hand; gewählte Farbe umrandet.
+- [ ] **Hover-Zustände:** Toast (Rahmen), Tag-Farbe in *Tags verwalten* (Ring), Eltern-Ticket-Kürzel in der Ticketansicht (Hand, Tooltip „Eltern-Ticket öffnen“).
+- [ ] **Weiteres Fenster:** dasselbe in einem weiteren Fenster (Strg+Klick auf einen Reiter).
+- [ ] **Beide Sprachen:** Tooltips auf Deutsch und Englisch.
