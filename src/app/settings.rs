@@ -208,6 +208,27 @@ impl App {
                                 });
                             },
                         );
+                        #[cfg(windows)]
+                        {
+                            row(
+                                ui,
+                                lang.t("Mitgelieferten Konsolen-Host verwenden (empfohlen)", "Use the bundled console host (recommended)"),
+                                lang.t(
+                                    "Neuere ConPTY (OpenConsole) neben paneldeck.exe: reicht Farbabfragen und flimmerfreie Ausgabe durch. Aus: Konsolen-Host von Windows. Wirkt für neue Sitzungen.",
+                                    "Newer ConPTY (OpenConsole) next to paneldeck.exe: passes colour queries and flicker-free output through. Off: the console host built into Windows. Applies to new sessions.",
+                                ),
+                                |ui| {
+                                    style::toggle(ui, &mut self.settings.bundled_conpty);
+                                },
+                            );
+                            if self.settings.bundled_conpty && crate::conpty::bundled_dll().is_none() {
+                                ui.label(RichText::new(lang.t(
+                                    "conpty.dll und OpenConsole.exe fehlen neben paneldeck.exe – Sitzungen nutzen den Konsolen-Host von Windows.",
+                                    "conpty.dll and OpenConsole.exe are missing next to paneldeck.exe – sessions use the console host built into Windows.",
+                                )).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
+                                ui.add_space(4.0);
+                            }
+                        }
                         row(
                             ui,
                             lang.t("Programme dürfen in die Zwischenablage kopieren (OSC 52)", "Allow programs to copy to the clipboard (OSC 52)"),
