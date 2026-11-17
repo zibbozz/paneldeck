@@ -33,9 +33,18 @@ pub fn is_lucide_slug(name: &str) -> bool {
 }
 
 /// Gültiger Icon-Name für neue Eingaben (Oberfläche, MCP): ein eingebautes Icon oder `lucide:<name>` mit einem Icon, das es in
-/// der eingebetteten Lucide-Version gibt.
+/// der eingebetteten Lucide-Version gibt (auch unter einem alten Namen; gespeichert wird der neue, siehe [`normalize`]).
 pub fn is_valid(name: &str) -> bool {
-    ICONS.contains(&name) || lucide_name(name).is_some_and(|n| lucide::get(n).is_some())
+    ICONS.contains(&name) || lucide_name(name).is_some_and(|n| lucide::canonical(n).is_some())
+}
+
+/// Gespeicherter Wert in aktueller Form: ein alter Lucide-Name (Alias) wird zum neuen (`lucide:alarm-check` →
+/// `lucide:alarm-clock-check`), alles andere bleibt unverändert. Angewandt beim Lesen und Speichern von Typen.
+pub fn normalize(name: &str) -> String {
+    match lucide_name(name).and_then(lucide::canonical) {
+        Some(c) if Some(c) != lucide_name(name) => lucide_value(c),
+        _ => name.to_string(),
+    }
 }
 
 /// Speicherbarer Icon-Name (Datenbank, Sicherung, Vorlagen-Import): wie [`is_valid`], aber ein formal richtiger `lucide:`-Name
@@ -78,5 +87,15 @@ mod tests {
         // Ein eingebauter Name mit Vorsatz ist kein Lucide-Icon, nur weil er eingebaut existiert (es gibt ihn aber auch bei Lucide).
         assert!(is_valid("lucide:bug") == lucide::get("bug").is_some());
         assert!(!is_storable("nope") && is_storable("bug"));
+    }
+
+    #[test]
+    fn old_lucide_names_are_valid_and_normalized_to_the_new_name() {
+        assert!(is_valid("lucide:alarm-check") && is_storable("lucide:alarm-check"));
+        assert_eq!(normalize("lucide:alarm-check"), "lucide:alarm-clock-check");
+        assert_eq!(normalize("lucide:alarm-clock"), "lucide:alarm-clock");
+        assert_eq!(normalize("lucide:not-an-icon-yet"), "lucide:not-an-icon-yet");
+        assert_eq!(normalize("bug"), "bug");
+        assert_eq!(normalize("lucide:Bad"), "lucide:Bad");
     }
 }

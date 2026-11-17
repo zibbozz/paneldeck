@@ -25,7 +25,7 @@ EXTRA_BY_PKG = {pkg: files.split() for files, pkgs in EXTRA_MAP.items() for pkg 
 # In die Programmdatei eingebettete Bestandteile, die keine Crates sind (Name, Version, Lizenz, Dateien in tools/license-extra/).
 # Lucide: Version wie in tools/update-lucide.ps1 (das Skript schreibt auch die Lizenzdatei).
 EMBEDDED = [
-    ("lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf)", "1.66.0", "ISC (aus Feather abgeleitete Icons: MIT)", ["lucide-LICENSE.txt"]),
+    ("lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf.deflate)", "1.66.0", "ISC (aus Feather abgeleitete Icons: MIT)", ["lucide-LICENSE.txt"]),
 ]
 # Mitgelieferte Programmdateien, die keine Crates sind (Version aus dem Fetch-Skript).
 FETCH_CONPTY = ROOT / "tools" / "fetch-conpty.ps1"

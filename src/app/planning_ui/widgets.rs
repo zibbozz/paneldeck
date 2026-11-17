@@ -437,11 +437,13 @@ fn icon_picker_impl(ui: &mut Ui, salt: Id, current: &mut Option<String>, color: 
     ui.add_space(3.0);
     let open = super::icon_explorer::explorer_open(ui.ctx(), explorer);
     let more = ui.add_enabled(!open, egui::Button::new(lang.t("Weitere Icons …", "More icons …")).min_size(Vec2::new(0.0, 24.0)));
-    if more.on_hover_text(lang.t("Icon-Explorer mit über 1.500 Lucide-Icons öffnen", "Open the icon explorer with more than 1,500 Lucide icons")).clicked() {
+    let more = more
+        .on_hover_text(lang.t("Icon-Explorer mit über 2.000 Lucide-Icons öffnen", "Open the icon explorer with more than 2,000 Lucide icons"))
+        .on_disabled_hover_text(lang.t("Der Icon-Explorer ist schon offen.", "The icon explorer is already open."));
+    if more.clicked() {
         super::icon_explorer::open_picker_explorer(ui.ctx(), explorer, current.as_deref());
     }
-    if let Some(name) = super::icon_explorer::picker_explorer(ui.ctx(), explorer, lang) {
-        let v = crate::planning::icons::lucide_value(&name);
+    if let Some(v) = super::icon_explorer::picker_explorer(ui.ctx(), explorer, lang) {
         if current.as_deref() != Some(v.as_str()) {
             *current = Some(v);
             changed = true;

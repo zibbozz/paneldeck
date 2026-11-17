@@ -234,7 +234,7 @@ Pakete und ihre Lizenz-Ausdrücke:
   zmij 1.0.23 - MIT
   zune-core 0.5.3 - MIT OR Apache-2.0 OR Zlib
   zune-jpeg 0.5.15 - MIT OR Apache-2.0 OR Zlib
-  lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf) 1.66.0 - ISC (aus Feather abgeleitete Icons: MIT)
+  lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf.deflate) 1.66.0 - ISC (aus Feather abgeleitete Icons: MIT)
 
 Mitgelieferte Programmdateien (neben paneldeck.exe, unverändert):
 
@@ -4932,7 +4932,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ------------------------------------------------------------------------------
-Text 70 – gilt für: lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf) 1.66.0
+Text 70 – gilt für: lucide-static (Lucide-Icons, Schrift assets/fonts/lucide.ttf.deflate) 1.66.0
 ------------------------------------------------------------------------------
 
 ISC License

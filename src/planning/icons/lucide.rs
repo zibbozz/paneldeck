@@ -1,6 +1,8 @@
 //! Lucide-Icons (https://lucide.dev, ISC): Tabelle Name → Zeichen der eingebetteten Schrift, Kategorien und Stichwörter,
 //! dazu die Suche des Icon-Explorers. Kein egui – gezeichnet wird in `app::planning_ui::icon_explorer` über die Schrift
-//! `assets/fonts/lucide.ttf`. Tabelle und Schrift erzeugt `tools/update-lucide.ps1` (feste Version, siehe [`VERSION`]).
+//! `assets/fonts/lucide.ttf.deflate` (komprimiert eingebettet, beim ersten Gebrauch entpackt: [`font_ttf`]). Tabelle und Schrift
+//! erzeugt `tools/update-lucide.ps1` (feste Version, siehe [`VERSION`]). Alte Lucide-Namen (Aliase) werden auf den neuen Namen
+//! abgebildet ([`resolve`], [`canonical`]); der Explorer zeigt nur die neuen.
 
 use crate::state::Lang;
 use std::sync::OnceLock;
@@ -9,6 +11,25 @@ use std::sync::OnceLock;
 pub const VERSION: &str = "1.66.0";
 
 static TSV: &str = include_str!("../../../assets/lucide/icons.tsv");
+
+/// Die Schrift, roh-deflate-komprimiert (spart rund 0,5 MB in der .exe).
+static FONT_DEFLATE: &[u8] = include_bytes!("../../../assets/fonts/lucide.ttf.deflate");
+
+/// SHA-256 der unkomprimierten Schrift `font/lucide.ttf` aus `lucide-static` [`VERSION`] (per Test geprüft).
+pub const FONT_SHA256: &str = "c6355db6e4f0834f62193f9effde900dab785c5c18877cf95cd1a44fa62fa8d5";
+
+static FONT: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// Die Schrift (`.ttf`), beim ersten Aufruf entpackt und danach im Speicher. Leer, falls das Entpacken scheitert (dann
+/// zeichnet die Oberfläche Platzhalter).
+pub fn font_ttf() -> &'static [u8] {
+    FONT.get_or_init(|| miniz_oxide::inflate::decompress_to_vec_with_limit(FONT_DEFLATE, 4 << 20).unwrap_or_default())
+}
+
+/// Die Schrift, falls sie schon entpackt ist (entpackt nichts).
+pub fn font_if_unpacked() -> Option<&'static [u8]> {
+    FONT.get().map(|v| v.as_slice()).filter(|v| !v.is_empty())
+}
 
 /// Ein Lucide-Icon: kanonischer Name (`kebab-case`), Zeichen in der Schrift, Kategorie-Schlüssel und Stichwörter (englisch).
 #[derive(Debug)]
@@ -31,11 +52,14 @@ pub struct Table {
     pub icons: Vec<LucideIcon>,
     /// In der Reihenfolge der Datei (nach Schlüssel sortiert).
     pub categories: Vec<Category>,
+    /// Alte Namen → neuer (kanonischer) Name, nach altem Namen sortiert.
+    pub aliases: Vec<(&'static str, &'static str)>,
 }
 
 fn parse(text: &'static str) -> Table {
     let mut icons = Vec::new();
     let mut categories = Vec::new();
+    let mut aliases = Vec::new();
     let split = |s: &'static str| -> Vec<&'static str> { s.split(',').filter(|x| !x.is_empty()).collect() };
     for line in text.lines() {
         if line.is_empty() || line.starts_with('#') {
@@ -48,13 +72,20 @@ fn parse(text: &'static str) -> Table {
             }
             continue;
         }
+        if parts[0] == "=" {
+            if let (Some(old), Some(new)) = (parts.get(1), parts.get(2)) {
+                aliases.push((*old, *new));
+            }
+            continue;
+        }
         let Some(ch) = parts.get(1).and_then(|h| u32::from_str_radix(h, 16).ok()).and_then(char::from_u32) else {
             continue;
         };
         icons.push(LucideIcon { name: parts[0], ch, categories: parts.get(2).map(|s| split(s)).unwrap_or_default(), tags: parts.get(3).map(|s| split(s)).unwrap_or_default() });
     }
     icons.sort_by(|a, b| a.name.cmp(b.name));
-    Table { icons, categories }
+    aliases.sort();
+    Table { icons, categories, aliases }
 }
 
 /// Die eingebettete Tabelle (beim ersten Zugriff gelesen).
@@ -63,10 +94,24 @@ pub fn table() -> &'static Table {
     T.get_or_init(|| parse(TSV))
 }
 
-/// Icon zum kanonischen Namen (ohne `lucide:`).
+/// Icon zum kanonischen Namen (ohne `lucide:`); alte Namen liefern hier `None` (siehe [`resolve`]).
 pub fn get(name: &str) -> Option<&'static LucideIcon> {
     let t = table();
     t.icons.binary_search_by(|i| i.name.cmp(name)).ok().map(|i| &t.icons[i])
+}
+
+/// Kanonischer Name zu einem kanonischen oder alten Namen (Alias), sonst `None`.
+pub fn canonical(name: &str) -> Option<&'static str> {
+    if let Some(i) = get(name) {
+        return Some(i.name);
+    }
+    let t = table();
+    t.aliases.binary_search_by(|(old, _)| (*old).cmp(name)).ok().map(|i| t.aliases[i].1)
+}
+
+/// Icon zu einem kanonischen oder alten Namen.
+pub fn resolve(name: &str) -> Option<&'static LucideIcon> {
+    canonical(name).and_then(get)
 }
 
 /// Deutsche Titel der Kategorien (die englischen kommen aus der Tabelle).
@@ -127,8 +172,7 @@ pub fn category_title(key: &str, lang: Lang) -> &str {
 
 /// Rang eines Suchworts für ein Icon (kleiner = besser): Name gleich 0, Name beginnt damit 1, ein Namensteil beginnt damit 2,
 /// Name enthält es 3, Stichwort gleich 4, Stichwort beginnt damit 5, Stichwort enthält es 6; `None` = kein Treffer.
-fn word_rank(icon: &LucideIcon, w: &str) -> Option<u8> {
-    let n = icon.name;
+fn word_rank(n: &str, tags: &[&str], w: &str) -> Option<u8> {
     if n == w {
         return Some(0);
     }
@@ -142,7 +186,7 @@ fn word_rank(icon: &LucideIcon, w: &str) -> Option<u8> {
         return Some(3);
     }
     let mut best: Option<u8> = None;
-    for t in &icon.tags {
+    for t in tags {
         let r = if *t == w {
             4
         } else if t.starts_with(w) || t.split(' ').any(|p| p.starts_with(w)) {
@@ -160,37 +204,74 @@ fn word_rank(icon: &LucideIcon, w: &str) -> Option<u8> {
     best
 }
 
-/// Suche im Explorer: `query` (Wörter durch Leerzeichen, Groß/klein egal; Bindestriche wie Leerzeichen) und optional eine
-/// Kategorie. Jedes Wort muss im Namen oder in einem Stichwort vorkommen. Treffer im Namen stehen vor Treffern in
-/// Stichwörtern (siehe [`word_rank`]), gleich gute nach Name. Leere Suche: alle Icons der Kategorie nach Name.
-pub fn search(query: &str, category: Option<&str>) -> Vec<&'static LucideIcon> {
+/// Rang eines Treffers (kleiner = besser): (schlechtester Wortrang, Summe der Wortränge).
+pub type Rank = (u8, u32);
+
+/// Rang von `name`/`tags` für die Suche `query` (Wörter durch Leerzeichen, Groß/klein egal; Bindestriche wie Leerzeichen).
+/// Jedes Wort muss im Namen oder in einem Stichwort vorkommen; Treffer im Namen sind besser als in Stichwörtern (siehe
+/// [`word_rank`]). Leere Suche: `(0, 0)`; kein Treffer: `None`. Auch für die eingebauten Icons (ohne Stichwörter) genutzt.
+pub fn rank(name: &str, tags: &[&str], query: &str) -> Option<Rank> {
     let q = query.trim().to_lowercase().replace('-', " ");
     let words: Vec<&str> = q.split_whitespace().collect();
-    let in_cat = |i: &LucideIcon| category.is_none_or(|c| i.categories.contains(&c));
-    // Ganze Eingabe mit Bindestrichen (z. B. „alarm clock“ → „alarm-clock“) zählt als ein Namenstreffer.
-    let joined = words.join("-");
-    let mut hits: Vec<((u8, u32), &'static LucideIcon)> = Vec::new();
-    for icon in table().icons.iter().filter(|i| in_cat(i)) {
-        if words.is_empty() {
-            hits.push(((0, 0), icon));
-            continue;
-        }
-        let whole = if words.len() > 1 { word_rank(icon, &joined).filter(|r| *r <= 3) } else { None };
-        let ranks: Option<Vec<u8>> = words.iter().map(|w| word_rank(icon, w)).collect();
-        let key = match (whole, ranks) {
-            (Some(r), _) => (r, 0),
-            (None, Some(rs)) => (rs.iter().copied().max().unwrap_or(0), rs.iter().map(|r| *r as u32).sum()),
-            (None, None) => continue,
-        };
-        hits.push((key, icon));
+    if words.is_empty() {
+        return Some((0, 0));
     }
+    // Ganze Eingabe mit Bindestrichen (z. B. „alarm clock“ → „alarm-clock“) zählt als ein Namenstreffer.
+    if words.len() > 1 {
+        if let Some(r) = word_rank(name, &[], &words.join("-")).filter(|r| *r <= 3) {
+            return Some((r, 0));
+        }
+    }
+    let ranks: Vec<u8> = words.iter().map(|w| word_rank(name, tags, w)).collect::<Option<_>>()?;
+    Some((ranks.iter().copied().max().unwrap_or(0), ranks.iter().map(|r| *r as u32).sum()))
+}
+
+/// Suche im Explorer mit Rang: nur aktuelle Namen, optional nur eine Kategorie; nach Rang, dann Name sortiert.
+pub fn search_ranked(query: &str, category: Option<&str>) -> Vec<(Rank, &'static LucideIcon)> {
+    let mut hits: Vec<(Rank, &'static LucideIcon)> = table()
+        .icons
+        .iter()
+        .filter(|i| category.is_none_or(|c| i.categories.contains(&c)))
+        .filter_map(|i| rank(i.name, &i.tags, query).map(|r| (r, i)))
+        .collect();
     hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(b.1.name)));
-    hits.into_iter().map(|(_, i)| i).collect()
+    hits
+}
+
+/// Wie [`search_ranked`], nur die Icons. Leere Suche: alle Icons der Kategorie nach Name.
+pub fn search(query: &str, category: Option<&str>) -> Vec<&'static LucideIcon> {
+    search_ranked(query, category).into_iter().map(|(_, i)| i).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_compressed_font_unpacks_to_the_pinned_file() {
+        let ttf = font_ttf();
+        assert!(ttf.len() > 500_000 && FONT_DEFLATE.len() < ttf.len() * 2 / 3, "{} / {}", FONT_DEFLATE.len(), ttf.len());
+        assert_eq!(crate::app::update::sha256::hex(&crate::app::update::sha256::digest(ttf)), FONT_SHA256);
+        assert!(TSV.lines().nth(2).unwrap().ends_with(&format!("font-sha256={FONT_SHA256}")), "Kopfzeile der Tabelle");
+        assert_eq!(font_if_unpacked().map(|f| f.len()), Some(ttf.len()));
+    }
+
+    #[test]
+    fn old_names_map_to_the_current_icon() {
+        let t = table();
+        assert!(t.aliases.len() > 100, "{}", t.aliases.len());
+        for (old, new) in &t.aliases {
+            assert!(get(old).is_none(), "{old} ist zugleich ein aktueller Name");
+            assert!(get(new).is_some(), "{old} → {new} fehlt");
+            assert!(super::super::is_lucide_slug(old));
+        }
+        assert_eq!(canonical("alarm-check"), Some("alarm-clock-check"));
+        assert_eq!(resolve("alarm-check").map(|i| i.name), Some("alarm-clock-check"));
+        assert_eq!(canonical("alarm-clock"), Some("alarm-clock"));
+        assert_eq!(canonical("nope-nope"), None);
+        // Der Explorer (Suche) zeigt nur aktuelle Namen.
+        assert!(search("alarm-check", None).iter().all(|i| i.name != "alarm-check"));
+    }
 
     #[test]
     fn the_table_loads_with_unique_names_and_characters() {
