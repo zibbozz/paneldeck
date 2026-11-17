@@ -16,7 +16,13 @@ pub(super) struct PasteAsk {
     pub(super) win: u64,
     /// Aus dem Fenster einer abgedockten Sitzung.
     pub(super) detached: bool,
+    /// Seit wann die Rückfrage steht: „Einfügen“ (Knopf und Enter) erst nach [`CONFIRM_DELAY`] – ein Enter, das schon
+    /// unterwegs war, bestätigt die Sicherheitsabfrage nicht.
+    pub(super) since: std::time::Instant,
 }
+
+/// Wartezeit, bevor die Rückfrage bestätigt werden kann.
+const CONFIRM_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Höchstens so viele Zeilen (je höchstens [`PREVIEW_CHARS`] Zeichen) zeigt die Vorschau.
 const PREVIEW_LINES: usize = 5;
@@ -27,7 +33,12 @@ pub(super) fn preview(text: &str) -> String {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut out: Vec<String> = Vec::new();
     for l in text.lines().take(PREVIEW_LINES) {
-        let mut s: String = l.chars().map(|c| if c == '\t' { ' ' } else { c }).filter(|c| !c.is_control()).take(PREVIEW_CHARS).collect();
+        let mut s: String = l
+            .chars()
+            .map(|c| if c == '\t' { ' ' } else { c })
+            .filter(|&c| !c.is_control() && !crate::terminal::is_hidden_format_char(c))
+            .take(PREVIEW_CHARS)
+            .collect();
         if l.chars().count() > PREVIEW_CHARS {
             s.push('…');
         }
@@ -42,7 +53,7 @@ pub(super) fn preview(text: &str) -> String {
 impl App {
     /// Text aus `Session::paste_user` übernehmen (aus `apply`, im Fenster des Bereichs).
     pub(super) fn ask_paste(&mut self, id: u64, text: String, detached: bool) {
-        self.paste_ask = Some(PasteAsk { id, text, win: self.wins.cur, detached });
+        self.paste_ask = Some(PasteAsk { id, text, win: self.wins.cur, detached, since: std::time::Instant::now() });
     }
 
     /// Rückfrage zeigen (je Fenster; `viewport` = Id der abgedockten Sitzung, deren Fenster gerade gezeichnet wird).
@@ -61,7 +72,12 @@ impl App {
         let Some(s) = self.entries.get(&ask.id).and_then(|e| e.live.as_ref()) else { return };
         let lang = self.settings.language;
         let lines = crate::terminal::paste_line_count(&ask.text).unwrap_or(1);
-        let o = confirm_window(ctx, Id::new("paste_ask"), lang.t("Mehrere Zeilen einfügen?", "Paste multiple lines?"), lang.t("Einfügen", "Paste"), 0, lang, 460.0, |ui| {
+        let wait = CONFIRM_DELAY.saturating_sub(ask.since.elapsed());
+        let secs = if wait.is_zero() { 0 } else { 1 };
+        if secs > 0 {
+            ctx.request_repaint_after(wait);
+        }
+        let o = confirm_window(ctx, Id::new("paste_ask"), lang.t("Mehrere Zeilen einfügen?", "Paste multiple lines?"), lang.t("Einfügen", "Paste"), secs, lang, 460.0, |ui| {
             ui.label(if lang == Lang::De {
                 format!("Der Text enthält Zeilenumbrüche ({lines} {}). Die Shell kann jede Zeile sofort als Befehl ausführen.", if lines == 1 { "Zeile" } else { "Zeilen" })
             } else {
@@ -102,5 +118,7 @@ mod tests {
         assert_eq!(lines[0].chars().count(), PREVIEW_CHARS + 1);
         assert!(lines[0].ends_with('…') && lines[PREVIEW_LINES] == "…");
         assert_eq!(preview("a\x1b[31mb\u{9b}c\td"), "a[31mbc d");
+        // Schreibrichtung und unsichtbare Zeichen täuschen in der Vorschau nichts vor
+        assert_eq!(preview("rm -rf \u{202e}fdsa\u{202c} \u{200b}x\u{2028}y"), "rm -rf fdsa xy");
     }
 }

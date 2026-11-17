@@ -148,6 +148,8 @@ function Set-Level($level, [switch]$Empty, [switch]$Tray) {
   New-Item -ItemType Directory -Force "$data" | Out-Null
   $j = if (Test-Path $f) { [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { [pscustomobject]@{} }
   if ($j.PSObject.Properties.Name -contains 'mcp_level') { $j.mcp_level = $level } else { $j | Add-Member mcp_level $level }
+  # Festes Theme, das nicht das erste der Liste ist: Farbabfragen (OSC 11) muessen dessen Werte melden (#183).
+  $j | Add-Member -NotePropertyName theme -NotePropertyValue 'Dracula' -Force
   if ($ConPty -eq 'system') { $j | Add-Member -Force bundled_conpty $false }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
   if ($script:prestart) { & $script:prestart }
@@ -301,7 +303,11 @@ try {
       if ($script:bundledConpty) {
         $q = '[Console]::Write("$([char]27)]11;?$([char]27)\"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''rgb:[0-9a-f/]+'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'' -replace "$([char]7)", ''BEL'')'
         $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
-        Check "OSC 11 (Hintergrundfarbe abfragen) wird beantwortet ($sh, mitgelieferte ConPTY)" ($r.data.output -match 'reply=ESC\]11;rgb:[0-9a-f]{4}/[0-9a-f]{4}/[0-9a-f]{4}') "'$($r.data.output)'"
+        # Sitzung per MCP angelegt und nie gezeichnet: Antwort trotzdem mit dem Theme der Sitzung (Dracula, 282a36).
+        Check "OSC 11 (Hintergrundfarbe abfragen) meldet das Theme der Sitzung ($sh, mitgelieferte ConPTY, ungezeichnet)" ($r.data.output -match 'reply=ESC\]11;rgb:2828/2a2a/3636') "'$($r.data.output)'"
+        $q = '[Console]::Write("$([char]27)[16t"); $s = ''''; $t0 = [DateTime]::Now; while (([DateTime]::Now - $t0).TotalMilliseconds -lt 2000) { while ([Console]::KeyAvailable) { $s += [Console]::ReadKey($true).KeyChar }; if ($s -match ''t$'') { break }; Start-Sleep -Milliseconds 50 }; ''reply='' + ($s -replace "$([char]27)", ''ESC'')'
+        $r = Tool 'run_command' @{ session = $id; command = $q; timeout_secs = 25 }
+        Check "CSI 16t (Zellgroesse) meldet eine echte Groesse ($sh, ungezeichnet)" ($r.data.output -match 'reply=ESC\[6;[1-9]\d*;[1-9]\d*t') "'$($r.data.output)'"
       } else {
         Skip "OSC 11 (Hintergrundfarbe abfragen) wird beantwortet ($sh)" 'keine mitgelieferte ConPTY (conpty.dll + OpenConsole.exe) neben der .exe'
       }

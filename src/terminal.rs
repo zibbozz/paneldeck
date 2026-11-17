@@ -122,31 +122,50 @@ pub fn render_replies(replies: Vec<Reply>, colors: &Colors, view: &ReplyView, co
 /// Titel eines Programms (OSC 0/2) bereinigen, bevor er in der Seitenleiste, im Fenstertitel oder über MCP erscheint:
 /// ohne Steuerzeichen (C0, DEL, C1) und ohne Zeichen zur Schreibrichtung (Überschreiben/Isolieren U+202A–202E,
 /// U+2066–2069 sowie die Marken U+200E/U+200F/U+061C), die die Anzeige umdrehen und einen anderen Titel vortäuschen
-/// könnten; höchstens [`TITLE_MAX_CHARS`] Zeichen.
+/// könnten, ohne Zeilen-/Absatztrenner (U+2028/2029) und unsichtbare Zeichen (U+200B–200D, U+2060, U+FEFF);
+/// höchstens [`TITLE_MAX_CHARS`] Zeichen.
 pub fn sanitize_title(t: &str) -> String {
-    t.chars()
-        .filter(|&c| !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}'))
-        .take(TITLE_MAX_CHARS)
-        .collect()
+    t.chars().filter(|&c| !c.is_control() && !is_hidden_format_char(c)).take(TITLE_MAX_CHARS).collect()
 }
 
-/// Eingefügten Text für das Programm aufbereiten: Zeilenumbrüche als `\r`, C1-Steuerzeichen (U+0080–U+009F) immer
-/// entfernt (manche Programme deuten sie als Escape-Sequenzen). Mit Bracketed Paste zusätzlich alle anderen
-/// Steuerzeichen (v. a. ESC: ein eingefügtes `ESC[201~` beendete sonst den Einfüge-Modus vorzeitig und der Rest liefe
-/// als getippte Befehle) außer Tab und Zeilenumbruch, eingerahmt in `ESC[200~` … `ESC[201~`.
-pub fn paste_payload(text: &str, bracketed: bool) -> String {
+/// Zeichen, die die Anzeige umdrehen, Zeilen trennen oder unsichtbar sind (Titel, Vorschau beim Einfügen).
+pub fn is_hidden_format_char(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{2028}' | '\u{2029}' | '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}')
+}
+
+/// Eingefügten Text bereinigen wie Windows Terminal (`filterOnPaste`): Zeilenumbrüche als `\r`, alle Steuerzeichen
+/// außer Tab und Zeilenumbruch entfernt – C0 (v. a. ESC: ein eingefügtes `ESC[201~` beendete sonst den Einfüge-Modus,
+/// ein `ESC[13;28;13;1;0;1_` (win32-input) oder `ESC O M` wäre ein Enter an der Rückfrage vorbei), DEL und C1
+/// (U+0080–U+009F, manche Programme deuten sie als Escape-Sequenzen).
+pub fn paste_clean(text: &str) -> String {
     let text = text.replace("\r\n", "\r").replace('\n', "\r");
-    let c1 = |c: char| ('\u{80}'..='\u{9f}').contains(&c);
+    text.chars().filter(|&c| !c.is_control() || c == '\t' || c == '\r').collect()
+}
+
+/// Eingefügten Text für das Programm aufbereiten (`paste_clean`), mit Bracketed Paste eingerahmt in
+/// `ESC[200~` … `ESC[201~`.
+pub fn paste_payload(text: &str, bracketed: bool) -> String {
+    let text = paste_clean(text);
     if bracketed {
-        let text: String = text.chars().filter(|&c| c >= ' ' && c != '\u{7f}' && !c1(c) || c == '\t' || c == '\r').collect();
         format!("\x1b[200~{text}\x1b[201~")
     } else {
-        text.chars().filter(|&c| !c1(c)).collect()
+        text
     }
 }
 
+/// Einfügen durch den Nutzer: bereinigt (`paste_clean`); ein einzelner Zeilenumbruch am Ende einer sonst einzeiligen
+/// Auswahl (dreifach geklickte Zeile, „cmd\n“) fällt weg – er würde den Befehl sofort ausführen.
+pub fn paste_user_text(text: &str) -> String {
+    let mut t = paste_clean(text);
+    if t.ends_with('\r') && t.matches('\r').count() == 1 {
+        t.pop();
+    }
+    t
+}
+
 /// Zeilen eines eingefügten Textes, wenn er Zeilenumbrüche enthält (sonst `None`): Grundlage der Rückfrage beim
-/// Einfügen mehrerer Zeilen ohne Bracketed Paste – jeder Umbruch kann dann einen Befehl ausführen.
+/// Einfügen mehrerer Zeilen ohne Bracketed Paste – jeder Umbruch kann dann einen Befehl ausführen. Auf den schon
+/// bereinigten Text anwenden (`paste_user_text`), sonst zählten als Escape-Sequenz versteckte Enter nicht.
 pub fn paste_line_count(text: &str) -> Option<usize> {
     if !text.contains(['\r', '\n']) {
         return None;
@@ -331,6 +350,9 @@ pub struct Session {
     paste_warn: AtomicBool,
     /// Eingefügter Text, der auf die Rückfrage wartet (`take_paste_ask`).
     paste_ask: Mutex<Option<String>>,
+    /// Theme mit den von Programmen gesetzten Farben (OSC 4/10/11/12) – zwischengespeichert, solange sich Theme und
+    /// Farben nicht ändern (`termview`, sonst eine Kopie je Frame).
+    pub theme_cache: Mutex<Option<(Theme, Box<Colors>, Theme)>>,
     /// Konsolen-Host dieser Sitzung (#183): `"bundled"` (mitgelieferte ConPTY) oder `"system"`; `None` außerhalb von Windows.
     pub console_host: Option<&'static str>,
 }
@@ -350,6 +372,9 @@ pub struct SpawnOptions<'a> {
     pub initial_input: Option<&'a str>,
     pub scrollback_lines: usize,
     pub env: Vec<(String, String)>,
+    /// Theme und Zellgröße für Antworten (Farb-/Größenabfragen) ab dem ersten Byte, auch bevor die Sitzung gezeichnet
+    /// wird (Hintergrund-Sitzungen, MCP `create_session`); `None` = Standard bis zum ersten `set_view`.
+    pub view: Option<ReplyView>,
 }
 
 impl Session {
@@ -391,7 +416,7 @@ impl Session {
         let listener = Listener::new(writer.clone());
         let (title, bell, clipboard) = (listener.title.clone(), listener.bell.clone(), listener.clipboard.clone());
         let lst = listener.clone();
-        let view: Arc<Mutex<ReplyView>> = Default::default();
+        let view: Arc<Mutex<ReplyView>> = Arc::new(Mutex::new(opts.view.clone().unwrap_or_default()));
 
         let config = term_config(opts.scrollback_lines);
         let mut term = Term::new(config, &TermSize::new(cols as usize, rows as usize), listener);
@@ -440,6 +465,9 @@ impl Session {
             std::thread::spawn(move || {
                 use std::sync::mpsc::RecvTimeoutError;
                 let mut scanner = OscScanner::default();
+                // Antworten des Scanners, während ein „Synchronized Update“ (CSI ?2026h) puffert: vte verarbeitet den
+                // Block erst an seinem Ende, dessen Antworten kämen sonst nach unseren.
+                let mut deferred: Vec<Reply> = Vec::new();
                 loop {
                     let msg = match processor.sync_timeout().sync_timeout() {
                         Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
@@ -454,7 +482,8 @@ impl Session {
                                 if processor.sync_timeout().sync_timeout().is_some_and(|d| d <= std::time::Instant::now()) {
                                     processor.stop_sync(&mut *t);
                                 }
-                                process_chunk(&mut processor, &mut t, &bytes, (events, positions), &lst, &shell_state, &stale);
+                                process_chunk(&mut processor, &mut t, &bytes, (events, positions), &lst, &shell_state, &stale, &mut deferred);
+                                release_deferred(&processor, &lst, &mut deferred);
                                 lst.take_reply_bytes(&t, &view)
                             };
                             lst.write_out(&replies);
@@ -464,6 +493,7 @@ impl Session {
                             let replies = {
                                 let mut t = term.lock().unwrap_or_else(|e| e.into_inner());
                                 processor.stop_sync(&mut *t);
+                                release_deferred(&processor, &lst, &mut deferred);
                                 lst.take_reply_bytes(&t, &view)
                             };
                             lst.write_out(&replies);
@@ -507,6 +537,7 @@ impl Session {
             focus_seen: AtomicU8::new(0),
             paste_warn: AtomicBool::new(true),
             paste_ask: Mutex::new(None),
+            theme_cache: Mutex::new(None),
             console_host,
         };
         if let Some(input) = opts.initial_input {
@@ -712,11 +743,12 @@ impl Session {
     /// Einfügen durch den Nutzer (Strg+V, Rechtsklick): mehrere Zeilen ohne Bracketed Paste warten auf die Rückfrage
     /// (Einstellung „Vor dem Einfügen mehrerer Zeilen nachfragen“, `take_paste_ask`), alles andere geht sofort.
     pub fn paste_user(&self, text: &str) {
-        if self.paste_warn.load(Ordering::Relaxed) && paste_line_count(text).is_some() && !self.bracketed_paste() {
-            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
+        let text = paste_user_text(text);
+        if self.paste_warn.load(Ordering::Relaxed) && paste_line_count(&text).is_some() && !self.bracketed_paste() {
+            *self.paste_ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
             return;
         }
-        self.paste_now(text);
+        self.paste_now(&text);
     }
 
     /// Text einfügen: ans Ende scrollen, Auswahl aufheben, senden.
@@ -860,6 +892,18 @@ impl Session {
     }
 }
 
+/// Setzt alle von Programmen geänderten Farben zurück (nach RIS, `OscEvent::FullReset`).
+const RIS_COLOR_RESET: &[u8] = b"\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07";
+
+/// Zurückgehaltene Antworten des Scanners einreihen, sobald kein Synchronized Update mehr puffert.
+fn release_deferred(processor: &Processor, lst: &Listener, deferred: &mut Vec<Reply>) {
+    if processor.sync_timeout().sync_timeout().is_none() {
+        for r in deferred.drain(..) {
+            lst.push_reply(r);
+        }
+    }
+}
+
 /// Ein Stück Programmausgabe durch die Emulation schicken (PTY-Thread, Emulation gesperrt). `scanned` = Ereignisse und
 /// ihre Positionen aus `OscScanner::feed_at` für genau diese Bytes. Antworten landen in der Reihe des Listeners
 /// (`lst`), Meldungen der Shell-Integration in `shell_state`.
@@ -871,6 +915,7 @@ fn process_chunk(
     lst: &Listener,
     shell_state: &Arc<Mutex<ShellState>>,
     stale: &AtomicBool,
+    deferred: &mut Vec<Reply>,
 ) {
     let (events, positions) = scanned;
     if events.is_empty() {
@@ -884,9 +929,19 @@ fn process_chunk(
         let end = end.clamp(done, bytes.len());
         processor.advance(t, &bytes[done..end]);
         done = end;
+        if ev == OscEvent::FullReset {
+            // Nach RIS die Farben des Themes: Palette (OSC 104), Vorder-/Hintergrund, Cursor (OSC 110–112).
+            processor.advance(t, RIS_COLOR_RESET);
+            continue;
+        }
         if let OscEvent::Query(q) = ev {
-            // In die Reihe der Antworten: nach allem, was davor im Strom stand.
-            lst.push_reply(Reply::Query(q));
+            // In die Reihe der Antworten: nach allem, was davor im Strom stand – während eines Synchronized Update
+            // erst nach dem Block (`release_deferred`).
+            if processor.sync_timeout().sync_timeout().is_some() {
+                deferred.push(Reply::Query(q));
+            } else {
+                lst.push_reply(Reply::Query(q));
+            }
             continue;
         }
         let hist = t.grid().total_lines().saturating_sub(t.grid().screen_lines()) as i64;
@@ -957,7 +1012,7 @@ fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line:
             }
             OscEvent::DurationMs(ms) => st.pending_dur = Some(ms),
             // Kommen nicht von der Shell-Integration; der Lese-Thread wertet sie selbst aus (`next_stale_modes`, Antworten).
-            OscEvent::FullscreenModeSet | OscEvent::Query(_) => {}
+            OscEvent::FullscreenModeSet | OscEvent::Query(_) | OscEvent::FullReset => {}
         }
     }
 }
@@ -1057,6 +1112,7 @@ mod tests {
                 initial_input: None,
                 scrollback_lines: 1000,
                 env: vec![],
+                view: None,
             },
         )
         .unwrap();
@@ -1083,7 +1139,7 @@ mod tests {
         };
         let s = Session::spawn(
             &ctx,
-            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![] },
+            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![], view: None },
         )
         .unwrap();
         let mut ok = false;
@@ -1345,6 +1401,7 @@ mod vt_reply_tests {
         out: Arc<Mutex<Vec<u8>>>,
         shell: Arc<Mutex<ShellState>>,
         stale: AtomicBool,
+        deferred: Vec<Reply>,
     }
 
     fn theme() -> Theme {
@@ -1370,6 +1427,7 @@ mod vt_reply_tests {
                 out,
                 shell: Default::default(),
                 stale: AtomicBool::new(false),
+                deferred: Vec::new(),
             }
         }
 
@@ -1377,11 +1435,43 @@ mod vt_reply_tests {
         fn feed(&mut self, s: &str) -> String {
             let bytes = s.as_bytes();
             let scanned = self.scanner.feed_at(bytes);
-            process_chunk(&mut self.p, &mut self.term, bytes, scanned, &self.lst, &self.shell, &self.stale);
+            process_chunk(&mut self.p, &mut self.term, bytes, scanned, &self.lst, &self.shell, &self.stale, &mut self.deferred);
+            release_deferred(&self.p, &self.lst, &mut self.deferred);
             let r = self.lst.take_reply_bytes(&self.term, &self.view);
             self.lst.write_out(&r);
             String::from_utf8(std::mem::take(&mut *self.out.lock().unwrap())).unwrap()
         }
+    }
+
+    /// Während ein Synchronized Update puffert, kommen Antworten des Scanners erst nach dem Block – hinter denen der
+    /// Emulation aus dem Block (Reihenfolge wie im Strom).
+    #[test]
+    fn scanner_replies_wait_for_synchronized_update() {
+        let mut r = Rig::new();
+        let out = r.feed("\x1b[?2026h\x1b[6n\x1b[16t");
+        assert_eq!(out, "", "nichts, solange der Block offen ist");
+        let out = r.feed("\x1b[?2026l");
+        assert_eq!(out, "\x1b[1;1R\x1b[6;18;9t");
+    }
+
+    /// Eine Sitzung beantwortet Abfragen mit dem Theme, das ihr beim Start mitgegeben wurde (auch ungezeichnet).
+    #[test]
+    fn spawn_view_seeds_replies() {
+        let dracula = crate::theme::all().into_iter().find(|t| t.name == "Dracula").unwrap();
+        let mut r = Rig::new();
+        *r.view.lock().unwrap() = ReplyView { theme: dracula, cell_w: 8, cell_h: 17 };
+        assert_eq!(r.feed("\x1b]11;?\x07\x1b[16t"), "\x1b]11;rgb:2828/2a2a/3636\x07\x1b[6;17;8t");
+    }
+
+    /// RIS (`ESC c`) setzt von Programmen geänderte Farben auf das Theme zurück (wie xterm/Windows Terminal).
+    #[test]
+    fn full_reset_restores_theme_colours() {
+        let mut r = Rig::new();
+        r.feed("\x1b]11;rgb:12/34/56\x07\x1b]10;rgb:ff/00/00\x07\x1b]4;1;rgb:00/ff/00\x07\x1b]12;rgb:01/02/03\x07");
+        assert!(theme().with_overrides(r.term.colors()).is_some());
+        r.feed("\x1bc");
+        assert!(theme().with_overrides(r.term.colors()).is_none(), "alle Farben wieder aus dem Theme");
+        assert_eq!(r.feed("\x1b]11;?\x07"), "\x1b]11;rgb:1e1e/2121/2727\x07");
     }
 
     #[test]
@@ -1496,14 +1586,24 @@ mod vt_reply_tests {
         // Bracketed: ESC, andere C0, DEL und C1 raus; Tab und Zeilenumbruch bleiben.
         let evil = "a\x1b[201~rm -rf /\r\nb\tc\u{9b}201~d\u{85}e\u{7f}\u{7}";
         assert_eq!(paste_payload(evil, true), "\x1b[200~a[201~rm -rf /\rb\tc201~de\x1b[201~");
-        // Ohne Bracketed Paste: nur C1 raus, Zeilenumbrüche als CR.
+        // Ohne Bracketed Paste genauso (wie Windows Terminal): ESC, C0, DEL, C1 raus, Zeilenumbrüche als CR.
         assert_eq!(paste_payload("x\u{9b}31m\u{90}y\nz", false), "x31my\rz");
+        assert_eq!(paste_payload(evil, false), "a[201~rm -rf /\rb\tc201~de");
+        // Als Escape-Sequenz versteckte Enter (win32-input-mode, SS3 Enter) kommen nicht an
+        assert_eq!(paste_payload("ls\x1b[13;28;13;1;0;1_rm\x1bOM", false), "ls[13;28;13;1;0;1_rmOM");
         assert_eq!(paste_payload("Grüße ✓ – ok", false), "Grüße ✓ – ok");
         assert_eq!(paste_payload("Grüße ✓", true), "\x1b[200~Grüße ✓\x1b[201~");
     }
 
     #[test]
     fn paste_line_counts() {
+        // Gezählt wird nach dem Bereinigen; ein einzelnes Zeilenende einer Zeile fällt weg (keine Rückfrage für „cmd\n“).
+        assert_eq!(paste_line_count(&paste_user_text("ls\x1b[13;28;13;1;0;1_rm")), None);
+        assert_eq!(paste_user_text("cmd\n"), "cmd");
+        assert_eq!(paste_user_text("cmd\r\n"), "cmd");
+        assert_eq!(paste_line_count(&paste_user_text("cmd\n")), None);
+        assert_eq!(paste_user_text("a\nb\n"), "a\rb\r");
+        assert_eq!(paste_line_count(&paste_user_text("a\nb\n")), Some(2));
         assert_eq!(paste_line_count("eine Zeile"), None);
         assert_eq!(paste_line_count("cmd\n"), Some(1));
         assert_eq!(paste_line_count("a\r\nb\r\nc"), Some(3));
@@ -1517,6 +1617,8 @@ mod vt_reply_tests {
         // Steuerzeichen (C0, DEL, C1) und Schreibrichtungs-Zeichen fallen weg.
         assert_eq!(sanitize_title("a\x07b\x1b[31mc\u{7f}d\u{9b}e"), "ab[31mcde");
         assert_eq!(sanitize_title("evil\u{202e}txt.exe\u{202c}\u{2066}x\u{2069}\u{200f}"), "eviltxt.exex");
+        // Zeilentrenner und unsichtbare Zeichen ebenso
+        assert_eq!(sanitize_title("a\u{2028}b\u{2029}c\u{200b}d\u{200d}e\u{2060}f\u{feff}g"), "abcdefg");
         assert_eq!(sanitize_title(&"x".repeat(1000)).chars().count(), TITLE_MAX_CHARS);
         assert_eq!(sanitize_title(&"ä".repeat(300)), "ä".repeat(TITLE_MAX_CHARS));
         // Über die Emulation: der Listener speichert nur den bereinigten Titel.
@@ -1555,7 +1657,7 @@ mod conpty_probe {
         let ctx = egui::Context::default();
         let s = Session::spawn(
             &ctx,
-            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![("PROBE_OUT".into(), out.display().to_string())] },
+            SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: vec![("PROBE_OUT".into(), out.display().to_string())], view: None },
         )
         .unwrap();
         s.set_view(&crate::theme::all()[0], 9, 18);

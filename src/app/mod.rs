@@ -1698,6 +1698,8 @@ impl App {
                 initial_input: initial.as_deref(),
                 scrollback_lines: self.settings.scrollback_lines,
                 env,
+                // Farb- und Größenabfragen ab dem ersten Byte richtig beantworten (#183), auch ungezeichnet.
+                view: Some(self.reply_view_for(ctx, entry.meta.profile)),
             },
         ) {
             Ok(s) => {
@@ -2084,6 +2086,47 @@ impl App {
         self.applied_theme = key;
     }
 
+    /// Theme und Zellgröße (physische Pixel), mit denen eine Sitzung Farb- und Größenabfragen beantwortet (#183) – wie
+    /// beim Zeichnen in `show_pane`: Theme des Profils, sonst das der App; Schriftgröße des Profils, sonst die der App.
+    /// Vor dem ersten Frame (noch keine Schriften) ohne Zellgröße.
+    fn reply_view_for(&self, ctx: &egui::Context, profile_id: u64) -> crate::terminal::ReplyView {
+        let base = self.theme();
+        let prof = self.settings.profiles.iter().find(|p| p.id == profile_id);
+        let theme = match prof.filter(|p| !p.theme.is_empty()).and_then(|p| self.themes.iter().find(|t| t.name == p.theme)) {
+            Some(t) => {
+                let mut t = t.clone();
+                t.bg = Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), base.bg.a());
+                t
+            }
+            None => base,
+        };
+        let size = prof.filter(|p| p.font_size > 0.0).map(|p| p.font_size).unwrap_or(self.settings.font_size);
+        let (cell_w, cell_h) = if ctx.cumulative_pass_nr() > 0 {
+            let cs = ctx.fonts_mut(|f| f.layout_no_wrap("M".to_string(), FontId::monospace(size), Color32::WHITE).size());
+            let ppp = ctx.pixels_per_point();
+            ((cs.x * ppp).round().clamp(0.0, u16::MAX as f32) as u16, (cs.y * ppp).round().clamp(0.0, u16::MAX as f32) as u16)
+        } else {
+            (0, 0)
+        };
+        crate::terminal::ReplyView { theme, cell_w, cell_h }
+    }
+
+    /// Alle laufenden Sitzungen mit Theme und Zellgröße versorgen (jedes Frame): auch nicht sichtbare beantworten
+    /// Farb- und Größenabfragen richtig, und ein Theme-Wechsel erreicht sie sofort.
+    fn sync_reply_views(&self, ctx: &egui::Context) {
+        let mut cache: Vec<(u64, crate::terminal::ReplyView)> = Vec::new();
+        for e in self.entries.values() {
+            let Some(s) = &e.live else { continue };
+            let p = e.meta.profile;
+            if !cache.iter().any(|(id, _)| *id == p) {
+                cache.push((p, self.reply_view_for(ctx, p)));
+            }
+            if let Some((_, v)) = cache.iter().find(|(id, _)| *id == p) {
+                s.set_view(&v.theme, v.cell_w, v.cell_h);
+            }
+        }
+    }
+
     fn theme(&self) -> Theme {
         let mut t = self
             .themes
@@ -2213,6 +2256,7 @@ impl App {
         let font = FontId::monospace(self.settings.font_size);
         let lang = self.settings.language;
 
+        self.sync_reply_views(ctx);
         // Broadcast: nur die fokussierte Sitzung zeichnet Eingaben mit.
         for (id, e) in &self.entries {
             if let Some(s) = &e.live {

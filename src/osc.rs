@@ -20,12 +20,15 @@ pub enum OscEvent {
     FullscreenModeSet,
     /// Anfrage des Programms, die die Emulation (alacritty/vte) nicht selbst beantwortet (#183). Keine Shell-Integration.
     Query(Query),
+    /// RIS (`ESC c`, z. B. `reset`): alacritty setzt dabei die von Programmen geänderten Farben nicht zurück, Paneldeck
+    /// tut es selbst (wie xterm und Windows Terminal). Keine Shell-Integration.
+    FullReset,
 }
 
 impl OscEvent {
     /// Meldung der Shell-Integration (zählt für `integration_seen`)?
     pub fn is_integration(&self) -> bool {
-        !matches!(self, OscEvent::FullscreenModeSet | OscEvent::Query(_))
+        !matches!(self, OscEvent::FullscreenModeSet | OscEvent::Query(_) | OscEvent::FullReset)
     }
 }
 
@@ -86,6 +89,10 @@ impl OscScanner {
                     b']' => State::Osc(Vec::new()),
                     b'[' => State::Csi(Vec::new()),
                     0x1b => State::Esc,
+                    b'c' => {
+                        out.push(OscEvent::FullReset);
+                        State::Normal
+                    }
                     _ => State::Normal,
                 },
                 State::Csi(mut buf) => match b {
@@ -108,7 +115,9 @@ impl OscScanner {
                         State::Normal
                     }
                     0x1b => State::Esc,
-                    // C0-Steuerzeichen mitten in der Sequenz führt die Emulation aus, die Sequenz läuft weiter.
+                    // CAN/SUB brechen die Sequenz ab (wie vte).
+                    0x18 | 0x1a => State::Normal,
+                    // Andere C0-Steuerzeichen mitten in der Sequenz führt die Emulation aus, die Sequenz läuft weiter.
                     0x00..=0x1f => State::Csi(buf),
                     _ => State::Normal,
                 },
@@ -309,6 +318,11 @@ mod tests {
             assert!(s.feed(seq.as_bytes()).is_empty(), "{seq:?}");
         }
         assert!(!OscEvent::Query(Query::CellSizePx).is_integration());
+        assert_eq!(s.feed(b"x\x1bcy"), vec![OscEvent::FullReset]);
+        assert!(!OscEvent::FullReset.is_integration());
+        // CAN/SUB brechen eine CSI-Sequenz ab wie in vte: danach ist `16t` keine Anfrage mehr.
+        assert!(s.feed(b"\x1b[1\x186t").is_empty());
+        assert!(s.feed(b"\x1b[>\x1aq").is_empty());
         assert!(!OscEvent::FullscreenModeSet.is_integration());
         assert!(OscEvent::PromptStart.is_integration());
     }
