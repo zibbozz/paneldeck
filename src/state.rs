@@ -217,11 +217,13 @@ pub struct Settings {
     pub alt_screen_wheel: AltScreenWheel,
     /// Sitzungen merken (seit 2.3.0, Standard an): Terminals, Chats, Projekte und Ordner beim nächsten Start
     /// wiederherstellen. Aus: jeder Start ist frisch, Chatverläufe werden beim Beenden gelöscht (`app::fresh_start`).
-    /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten).
+    /// Fehlt in älteren Dateien (dann an = bisheriges Verhalten); ein falscher Typ ergibt ebenfalls an.
+    #[serde(deserialize_with = "lenient_true")]
     pub remember_sessions: bool,
     /// Umschalt+Enter = neue Zeile in PowerShell (seit 2.3.0, Standard aus): sendet in PowerShell-Sitzungen ein echtes
     /// Umschalt+Enter (win32-input-mode), das PSReadLine als „AddLine“ versteht. Aus = ESC CR wie bisher (Claude Code und
     /// andere Programme mit VT-Eingabe behalten Umschalt+Enter). Fehlt in älteren Dateien (dann aus).
+    #[serde(deserialize_with = "lenient_false")]
     pub shift_enter_newline_powershell: bool,
     /// Farbpaletten (seit 2.3.0, `palette`): gemeinsam oder je Bereich. Fehlt in älteren Dateien (dann die Vorgaben);
     /// unveränderte Vorgaben werden nicht geschrieben, unlesbare Daten ergeben die Vorgaben.
@@ -229,9 +231,11 @@ pub struct Settings {
     pub palette: crate::palette::Palettes,
     /// Programme dürfen per OSC 52 in die Zwischenablage kopieren (seit 2.3.0, #181, Standard an). Lesen der
     /// Zwischenablage durch Programme gibt es nie. Fehlt in älteren Dateien (dann an).
+    #[serde(deserialize_with = "lenient_true")]
     pub osc52_copy: bool,
     /// Vor dem Einfügen mehrerer Zeilen nachfragen, wenn das Programm kein Bracketed Paste nutzt (seit 2.3.0, #183,
     /// Standard an wie in Windows Terminal). Fehlt in älteren Dateien (dann an).
+    #[serde(deserialize_with = "lenient_true")]
     pub warn_multiline_paste: bool,
     /// Standard-Startoptionen für neue Claude-Sitzungen (seit 2.3.0; leeres Feld = Standard von Claude Code). Gelten für
     /// Sitzungen aus der Oberfläche und über MCP, wenn nichts angegeben ist – `bypassPermissions` nie für Agenten.
@@ -259,6 +263,7 @@ pub struct Settings {
     /// und Benutzervariablen aus der Registry – so wirkt `setx` sofort). An: genau die Prozessumgebung, z. B. für einen Start
     /// aus einer Shell mit eigener Umgebung. Paneldecks eigene Variablen (`PANELDECK_SESSION` …) und die Variablen des Profils
     /// gelten in beiden Fällen. Fehlt in älteren Dateien (dann aus = bisheriges Verhalten).
+    #[serde(deserialize_with = "lenient_false")]
     pub inherit_env: bool,
     /// Benachrichtigungen von Programmen (OSC 9 / OSC 777;notify) anzeigen – nur für nicht angesehene Sitzungen, über die
     /// üblichen Wege (Toast/Blinken laut `notify_*`), begrenzt (seit 2.3.0, #183, Standard an). Fehlt in älteren Dateien (an).
@@ -267,6 +272,7 @@ pub struct Settings {
     /// Glocke (BEL) einer nicht angesehenen Sitzung: die Markierung in der Seitenleiste gibt es immer; mit dieser Einstellung
     /// zusätzlich Toast/Blinken bzw. Hinweis wie bei Benachrichtigungen (seit 2.3.0, #183, Standard aus – Entscheidung des
     /// Nutzers). Fehlt in älteren Dateien (dann aus).
+    #[serde(deserialize_with = "lenient_false")]
     pub bell_toast: bool,
     /// Fortschritt von Programmen (OSC 9;4) in Seitenleiste und Taskleiste zeigen (seit 2.3.0, #183, Standard an).
     #[serde(deserialize_with = "lenient_true")]
@@ -283,9 +289,25 @@ fn lenient_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error
     Ok(v.as_bool() != Some(false))
 }
 
+/// Tolerant lesen: nur `true` schaltet ein, alles andere (auch ein falscher Typ) ist `false`.
+fn lenient_false<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_bool() == Some(true))
+}
+
+/// `wsl_recent` tolerant lesen: je Distribution eine Liste von Pfaden; ein Eintrag mit falschem Typ (kein Text, keine Liste)
+/// fällt allein weg, die übrigen bleiben.
 fn lenient_wsl_recent<'de, D: serde::Deserializer<'de>>(d: D) -> Result<std::collections::BTreeMap<String, Vec<String>>, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
-    let mut m: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_value(v).unwrap_or_default();
+    let mut m: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    if let serde_json::Value::Object(o) = v {
+        for (distro, paths) in o {
+            let list: Vec<String> = paths.as_array().map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            if !list.is_empty() {
+                m.insert(distro, list);
+            }
+        }
+    }
     crate::wsl::sanitize_recent(&mut m);
     Ok(m)
 }
@@ -1216,6 +1238,36 @@ mod tests {
         assert_eq!(s.wsl_recent["Ubuntu"], vec!["/home/u".to_string()]);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.wsl_recent, s.wsl_recent);
+    }
+
+    #[test]
+    fn new_2_3_settings_with_a_wrong_type_do_not_reset_the_file() {
+        // #221: ein falscher Typ in einem der Felder aus 2.3.0 ergibt dessen Standard, die übrigen Einstellungen bleiben.
+        let j = r#"{"language":"De","confirm_close":false,"font_size":17.0,
+            "remember_sessions":"no","osc52_copy":0,"warn_multiline_paste":null,"shift_enter_newline_powershell":"yes",
+            "inherit_env":1,"bell_toast":{},"program_notify":[],"progress_indicator":"x","cursor_blink":5,"bundled_conpty":"off",
+            "claude_defaults":7,"last_claude_opts":"x","palette":3,"wsl_recent":[1]}"#;
+        let s: Settings = serde_json::from_str(j).expect("darf nicht scheitern");
+        assert_eq!(s.language, Lang::De);
+        assert!(!s.confirm_close && s.font_size == 17.0, "übrige Einstellungen bleiben");
+        let d = Settings::default();
+        assert_eq!((s.remember_sessions, s.osc52_copy, s.warn_multiline_paste), (d.remember_sessions, d.osc52_copy, d.warn_multiline_paste));
+        assert_eq!((s.shift_enter_newline_powershell, s.inherit_env, s.bell_toast), (false, false, false));
+        assert!(s.program_notify && s.progress_indicator && s.cursor_blink && s.bundled_conpty);
+        assert!(s.claude_defaults.is_empty() && s.last_claude_opts.as_ref().is_none_or(|o| o.is_empty()));
+        assert!(s.wsl_recent.is_empty());
+        // echte Werte gelten weiter
+        let s: Settings = serde_json::from_str(r#"{"remember_sessions":false,"osc52_copy":false,"warn_multiline_paste":false,"shift_enter_newline_powershell":true,"inherit_env":true,"bell_toast":true}"#).unwrap();
+        assert!(!s.remember_sessions && !s.osc52_copy && !s.warn_multiline_paste && s.shift_enter_newline_powershell && s.inherit_env && s.bell_toast);
+    }
+
+    #[test]
+    fn wsl_recent_drops_only_the_bad_entry() {
+        // #221: eine Distribution mit falschem Typ (oder ein Pfad, der kein Text ist) fällt allein weg.
+        let s: Settings = serde_json::from_str(r#"{"wsl_recent": {"Ubuntu": ["/home/u", 5, "/srv"], "Debian": 3, "Arch": "/x", "Alpine": ["/a"]}}"#).unwrap();
+        assert_eq!(s.wsl_recent.len(), 2, "{:?}", s.wsl_recent);
+        assert_eq!(s.wsl_recent["Ubuntu"], vec!["/home/u".to_string(), "/srv".to_string()]);
+        assert_eq!(s.wsl_recent["Alpine"], vec!["/a".to_string()]);
     }
 
     #[test]

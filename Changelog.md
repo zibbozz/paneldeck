@@ -9,6 +9,18 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.3.1] - WIP
 
+### Fixed
+
+- The quick menu keeps a due date without a time as a date (due at the end of that day) instead of midnight; keyword conditions, custom sort keywords and workflow transition conditions compare due dates like the query language (#214)
+- Queries and keyword conditions on custom date-time fields also match values stored without seconds; workflow conditions use the due-date rules only for the built-in due field (#214)
+- The icon explorer can be used from the due marker editor; clicking into it no longer closes the editor and the explorer (#215)
+- With “Remember sessions” off, a crash no longer replaces the backup of the last kept state (state.json.bak-…) with the discarded sessions (#219)
+- settings.json: a wrong value type in a setting introduced in 2.3 no longer resets all settings; a single bad WSL folder entry no longer drops the whole list; a color palette with only invalid entries falls back to the defaults (#221)
+- Project backups with an invalid due threshold now import (only that threshold is dropped) (#221)
+- Custom fields named like a built-in field with different upper/lower case beyond ASCII (e.g. “FÄLLIG AM”) are renamed “… (custom)” like during the update; custom fields of another kind named “Due”/“Fällig” can be queried as “Due (custom)” (#221)
+- The due threshold editor keeps the chosen unit while dragging (7 days no longer jumps to 1 week) (#221)
+- The Appearance settings no longer check the bundled ConPTY files on every frame (#221)
+
 ## [2.3.0] - 2026-11-17
 
 ### Added

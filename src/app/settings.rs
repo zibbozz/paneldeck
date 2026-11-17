@@ -270,7 +270,7 @@ impl App {
                                     style::toggle(ui, &mut self.settings.bundled_conpty);
                                 },
                             );
-                            if self.settings.bundled_conpty && crate::conpty::bundled_dll().is_none() {
+                            if self.settings.bundled_conpty && crate::conpty::bundled_dll_cached().is_none() {
                                 ui.label(RichText::new(lang.t(
                                     "conpty.dll und OpenConsole.exe fehlen neben paneldeck.exe – Sitzungen nutzen den Konsolen-Host von Windows.",
                                     "conpty.dll and OpenConsole.exe are missing next to paneldeck.exe – sessions use the console host built into Windows.",

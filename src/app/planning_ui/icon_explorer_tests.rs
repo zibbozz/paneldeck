@@ -303,6 +303,49 @@ fn picker_button_opens_the_explorer_and_stores_a_lucide_value() {
 }
 
 #[test]
+fn the_explorer_works_from_the_due_marker_editor_popup() {
+    // #215: Der Markierungs-Editor ist ein Popup, das bei einem Klick außerhalb schließt; ein Klick in das Fenster des
+    // Icon-Explorers darf es (und damit den Explorer) nicht schließen.
+    use super::due_ui::{manager_ui, Manager};
+    let mut h = H::new(true);
+    let mut m = Manager::new(1, crate::due::default_thresholds());
+    fn ui_fn(m: &mut Manager) -> impl FnMut(&mut egui::Ui) + '_ {
+        move |ui: &mut egui::Ui| {
+            let _ = manager_ui(ui, "t215", m, false, Lang::En);
+        }
+    }
+    let row = Id::new(("t215", "due_row", 0usize));
+    let preview = row.with("preview");
+    let _ = h.frame(vec![], ui_fn(&mut m));
+    let popup = egui::Popup::default_response_id(&h.ctx.read_response(preview).expect("Vorschau der Markierung"));
+    let explorer = Id::new(row.with("ed").with("sym")).with("icon_explorer");
+    h.click_id(preview, ui_fn(&mut m));
+    assert!(egui::Popup::is_id_open(&h.ctx, popup), "Klick auf die Vorschau öffnet den Editor");
+    let _ = h.frame(vec![], ui_fn(&mut m));
+    let out = h.frame(vec![], ui_fn(&mut m));
+    let more = find_text(&out, "More icons …").expect("„More icons …“ im Editor");
+    h.click(more, ui_fn(&mut m));
+    assert!(icon_explorer::explorer_open(&h.ctx, explorer), "Explorer offen");
+    assert!(egui::Popup::is_id_open(&h.ctx, popup));
+    let _ = h.frame(vec![], ui_fn(&mut m));
+    let _ = h.frame(vec![Event::Text("alarm-clock".into())], ui_fn(&mut m));
+    let _ = h.frame(vec![], ui_fn(&mut m));
+    // Klick in das Explorer-Fenster: Editor und Explorer bleiben offen
+    h.click_id(IconExplorer::cell_id(explorer, "lucide:alarm-clock"), ui_fn(&mut m));
+    assert!(egui::Popup::is_id_open(&h.ctx, popup), "Klick in den Explorer schließt den Editor nicht");
+    assert!(icon_explorer::explorer_open(&h.ctx, explorer), "Explorer bleibt offen");
+    let out = h.frame(vec![], ui_fn(&mut m));
+    h.click(find_text(&out, "Select").expect("Select"), ui_fn(&mut m));
+    let _ = h.frame(vec![], ui_fn(&mut m));
+    assert_eq!(m.list[0].marker.symbol.as_deref(), Some("lucide:alarm-clock"), "gewähltes Icon steht in der Markierung");
+    assert!(!icon_explorer::explorer_open(&h.ctx, explorer));
+    assert!(egui::Popup::is_id_open(&h.ctx, popup), "Editor bleibt nach der Wahl offen");
+    // Ohne offenen Explorer schließt ein Klick außerhalb den Editor wie bisher.
+    h.click(Pos2::new(1300.0, 850.0), ui_fn(&mut m));
+    assert!(!egui::Popup::is_id_open(&h.ctx, popup), "Klick außerhalb schließt den Editor");
+}
+
+#[test]
 fn required_picker_has_no_none_cell() {
     let mut h = H::new(true);
     let mut cur = "bug".to_string();

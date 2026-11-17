@@ -111,6 +111,32 @@ pub(super) fn sweep_session_files(dir: &Path) -> u64 {
     max
 }
 
+/// Wirft dieser Lauf seine Sitzungen weg? „Sitzungen merken“ ist aus und war es schon beim Start. (Wurde die Einstellung erst
+/// in diesem Lauf ausgeschaltet, gehört der laufende Stand noch zum Übergang und wird beim Beenden gesichert.)
+pub(super) fn throwaway_run(remember_now: bool, remember_at_start: bool) -> bool {
+    !remember_now && !remember_at_start
+}
+
+/// Was beim laufenden Speichern in `state.json` steht: in einem Wegwerf-Lauf ([`throwaway_run`]) der zugeschnittene Zustand
+/// ([`forget`]), sonst der volle. So findet der nächste Start nach einem Absturz nichts, das er sichern müsste, und die
+/// Sicherung des Übergangs (die einzige, siehe [`backup_state`]) bleibt erhalten (#219).
+pub(super) fn state_for_disk(current: SavedState, throwaway: bool, lang: Lang) -> SavedState {
+    if throwaway { forget(current, lang) } else { current }
+}
+
+/// Start mit „aus“ (ohne Update-Neustart): `state.json` sichern, wenn sie noch etwas enthält (Absturz nach dem Ausschalten,
+/// von Hand geändert), Scrollback und Chatverläufe früherer Läufe löschen und den zugeschnittenen Zustand liefern.
+pub(super) fn start_fresh(dir: &Path, mut saved: SavedState, lang: Lang) -> SavedState {
+    if worth_keeping(&saved) {
+        if let Ok(raw) = std::fs::read(dir.join("state.json")) {
+            backup_state(dir, &raw);
+        }
+    }
+    let top = sweep_session_files(dir);
+    saved.next_id = saved.next_id.max(top.saturating_add(1));
+    forget(saved, lang)
+}
+
 /// Beenden mit „aus“: bei Bedarf sichern (`backup` und es gibt etwas zu verlieren), zugeschnittenen Zustand schreiben und
 /// die Dateien der offenen Sitzungen löschen. Gibt die Sicherung zurück.
 pub(super) fn trim_for_exit(dir: &Path, current: SavedState, open: impl IntoIterator<Item = u64>, lang: Lang, backup: bool) -> Option<PathBuf> {
@@ -140,6 +166,8 @@ impl App {
     /// Sicherung). Liefert, ob die neue Instanz die Sitzungen einmal wiederherstellen soll.
     pub(super) fn save_for_update_restart(&self) -> bool {
         self.save_all();
+        // `save_all` schreibt bei „aus“ nur den zugeschnittenen Zustand; die neue Instanz braucht den vollen.
+        state::save_json(&self.dir.join("state.json"), &self.saved_state());
         if self.settings.remember_sessions {
             return false;
         }
@@ -324,6 +352,35 @@ mod tests {
         assert!(!restore_once_applies(false, false), "aus + normaler Start (auch nach Absturz): frisch");
         assert!(!restore_once_applies(true, true), "an: normale Wiederherstellung, kein Sonderfall");
         assert!(!restore_once_applies(true, false));
+    }
+
+    #[test]
+    fn a_crash_in_a_fresh_run_keeps_the_transition_backup() {
+        // #219: Übergang (an → aus) beim Beenden gesichert; der nächste Lauf startet frisch, legt Sitzungen an und stürzt ab.
+        let dir = tmp(line!());
+        let folder = state::Folder { path: "real".into(), ..Default::default() };
+        let real = SavedState { sessions: vec![meta(1, 0)], next_id: 2, projects: vec![Project { id: 2, folders: vec![folder], ..Project::default() }], active_project: 2, ..Default::default() };
+        let bak = trim_for_exit(&dir, real, [1], Lang::En, true).expect("Sicherung des Übergangs");
+        let (st, _) = state::load_saved(&dir.join("state.json"));
+        let st = start_fresh(&dir, st, Lang::En);
+        assert!(throwaway_run(false, false) && !throwaway_run(false, true) && !throwaway_run(true, false) && !throwaway_run(true, true));
+        // laufendes Speichern im Wegwerf-Lauf (alle 60 s) mit neuen Sitzungen
+        let running = SavedState { sessions: vec![meta(5, 0), meta(6, 0)], next_id: 7, projects: vec![Project { id: 3, folder: "C:\tmp".into(), ..Project::default() }], active_project: 3, ..st };
+        state::save_json(&dir.join("state.json"), &state_for_disk(running, true, Lang::En));
+        // Absturz: kein `save_for_exit`. Nächster Start mit „aus“.
+        let (st, _) = state::load_saved(&dir.join("state.json"));
+        assert!(st.sessions.is_empty(), "nur der zugeschnittene Zustand stand auf der Platte");
+        assert_eq!(st.next_id, 7, "Ids werden auch nach dem Absturz nicht wiederverwendet");
+        let _ = start_fresh(&dir, st, Lang::En);
+        assert!(bak.exists(), "die Sicherung des Übergangs bleibt");
+        let full: SavedState = serde_json::from_str(&std::fs::read_to_string(&bak).unwrap()).unwrap();
+        assert_eq!(full.projects[0].folders[0].path, "real");
+        let baks = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(BAK_PREFIX)).count();
+        assert_eq!(baks, 1);
+        // Mit „an“ (oder im Lauf des Ausschaltens) bleibt der volle Zustand.
+        let running = SavedState { sessions: vec![meta(5, 0), meta(6, 0)], next_id: 7, ..Default::default() };
+        assert_eq!(state_for_disk(running, false, Lang::En).sessions.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

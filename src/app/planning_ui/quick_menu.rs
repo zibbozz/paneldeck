@@ -666,7 +666,7 @@ fn draw_form(ui: &mut Ui, ctx: &egui::Context, cx: &Cx, ids: &[i64], project_id:
         (_, Some(kind)) => {
             widgets::hint(ui, &kind.hint(lang));
             first_resp = Some(single(ui, &mut f.text, "", first_id));
-            if matches!(kind, InputKind::Number { .. } | InputKind::Text { .. } | InputKind::Labels | InputKind::Date | InputKind::DateTime) {
+            if matches!(kind, InputKind::Number { .. } | InputKind::Text { .. } | InputKind::Labels | InputKind::Date | InputKind::DateTime { .. }) {
                 widgets::hint(ui, lang.t("Leer lassen leert das Feld.", "Leave empty to clear the field."));
             }
         }

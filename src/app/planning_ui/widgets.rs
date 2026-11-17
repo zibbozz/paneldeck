@@ -392,9 +392,18 @@ pub fn icon_picker_required(ui: &mut Ui, salt: impl Hash, current: &mut String, 
     changed
 }
 
+/// Ist der Icon-Explorer des Pickers mit diesem `salt` (wie bei [`icon_picker`]) offen?
+pub fn icon_picker_explorer_open(ctx: &egui::Context, salt: impl Hash) -> bool {
+    super::icon_explorer::explorer_open(ctx, picker_explorer_id(Id::new(salt)))
+}
+
+fn picker_explorer_id(salt: Id) -> Id {
+    salt.with("icon_explorer")
+}
+
 fn icon_picker_impl(ui: &mut Ui, salt: Id, current: &mut Option<String>, color: Color32, lang: Lang, allow_none: bool) -> bool {
     let mut changed = false;
-    let explorer = salt.with("icon_explorer");
+    let explorer = picker_explorer_id(salt);
     let dim = ui.visuals().text_color().gamma_multiply(0.85);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(3.0);

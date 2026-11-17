@@ -9,6 +9,18 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.3.1] - WIP
 
+### Fixed
+
+- Das Quick-Menü speichert eine Fälligkeit ohne Uhrzeit als Datum (fällig am Ende des Tages) statt als Mitternacht; Bedingungen von Schlüsselwörtern, eigene Sortier-Schlüsselwörter und Bedingungen von Workflow-Übergängen vergleichen Fälligkeiten wie die Abfragesprache (#214)
+- Abfragen und Schlüsselwort-Bedingungen auf eigenen Datum+Uhrzeit-Feldern passen auch zu Werten ohne Sekunden; Workflow-Bedingungen vergleichen nur bei der eingebauten Fälligkeit nach deren Regeln (#214)
+- Der Icon-Explorer lässt sich aus dem Editor der Fälligkeits-Markierung benutzen; ein Klick hinein schließt Editor und Explorer nicht mehr (#215)
+- Mit „Sitzungen merken“ aus ersetzt ein Absturz nicht mehr die Sicherung des zuletzt behaltenen Zustands (state.json.bak-…) durch die verworfenen Sitzungen (#219)
+- settings.json: ein falscher Werttyp in einer Einstellung aus 2.3 setzt nicht mehr alle Einstellungen zurück; ein einzelner ungültiger WSL-Ordner verwirft nicht mehr die ganze Liste; eine Farbpalette nur aus ungültigen Einträgen ergibt die Vorgaben (#221)
+- Projektsicherungen mit einer ungültigen Fälligkeits-Schwelle lassen sich wieder importieren (nur diese Schwelle entfällt) (#221)
+- Eigene Felder, die bis auf Groß-/Kleinschreibung jenseits von ASCII wie ein eingebautes heißen (z. B. „FÄLLIG AM“), heißen wie beim Update „… (custom)“; eigene Felder anderer Art namens „Due“/„Fällig“ sind als „Due (custom)“ abfragbar (#221)
+- Der Editor der Fälligkeits-Schwellen behält beim Ziehen die gewählte Einheit (7 Tage springt nicht mehr auf 1 Woche) (#221)
+- Die Einstellungen „Darstellung“ prüfen die mitgelieferten ConPTY-Dateien nicht mehr in jedem Bild (#221)
+
 ## [2.3.0] - 2026-11-17
 
 ### Added

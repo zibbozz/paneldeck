@@ -76,6 +76,9 @@ impl App {
                 std::process::exit(0);
             }
             Err(e) => {
+                // Mit „Sitzungen merken“ aus stand für den Neustart der volle Zustand auf der Platte; er läuft hier weiter wie
+                // bisher, also wieder den zugeschnittenen schreiben – sonst sicherte ein späterer Absturz die Wegwerf-Sitzungen (#219).
+                self.save_state();
                 self.updater.phase = Phase::Idle;
                 self.updater.offer = None;
                 self.updater.error = Some(format!(
