@@ -758,15 +758,7 @@ pub(super) fn sidebar_panel<R>(ctx: &egui::Context, default_width: f32, fill: Co
         .default_width(default_width)
         .width_range(SIDEBAR_WIDTHS)
         .frame(egui::Frame::new().fill(fill).inner_margin(Margin::symmetric(10, 10)))
-        .show(ctx, |ui| {
-            let area = ui.max_rect();
-            let mut body = ui.new_child(egui::UiBuilder::new().id_salt("sidebar_body").max_rect(area).layout(*ui.layout()));
-            let r = add(&mut body);
-            // Genau die verfügbare Fläche belegen – nicht mehr (Inhalt zu breit) und nicht weniger (Inhalt zu schmal).
-            // (ohne Widget: nichts darf Klicks oder Hover der Zeilen darunter abfangen).
-            ui.advance_cursor_after_rect(area);
-            r
-        })
+        .show(ctx, |ui| super::panels::fixed_body(ui, add))
 }
 
 /// Gesamtverbrauch unten in der Seitenleiste: öffnet die Kosten-Übersicht – darum als kleiner Knopf mit Pfeil, Hover,

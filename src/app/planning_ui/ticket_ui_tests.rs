@@ -932,3 +932,72 @@ fn clone_and_move_previews_show_names_instead_of_ids() {
         assert_eq!(vals.get(&r.mf), Some(&json!(r.m1)));
     });
 }
+
+/// Kopf, Liste und Ticket-Panel grenzen ohne Lücke und ohne Überlappung aneinander (#236) – bei verschiedenen
+/// Skalierungen (Windows-DPI × Zoom der Oberfläche) und Fensterbreiten; die Liste behält neben dem Panel Platz.
+#[test]
+fn ticket_panel_list_and_header_touch_at_every_scale_and_width() {
+    let bg = Color32::from_rgb(24, 24, 28);
+    for (native, zoom) in [(1.0f32, 1.0f32), (1.0, 0.9), (1.25, 1.0), (1.5, 1.1), (1.75, 1.0), (1.25, 1.1), (2.0, 1.25)] {
+        for px_w in [2560.0f32, 1600.0, 1100.0, 800.0] {
+            if px_w / (native * zoom) < 640.0 {
+                continue; // schmaler als das kleinste Fenster (640 Punkte)
+            }
+            let mut h = H::new(Lang::En);
+            let a = h.mk("devtask", "First ticket");
+            h.ui.tickets.invalidate();
+            h.ui.tickets.mode = ViewMode::Panel;
+            h.ctx.set_zoom_factor(zoom);
+            h.frames(2);
+            h.open(a);
+            let ppp = native * zoom;
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(px_w, 1000.0) / ppp);
+            let mut out = None;
+            for _ in 0..3 {
+                h.time += 0.1;
+                let mut input = RawInput { screen_rect: Some(screen), time: Some(h.time), ..Default::default() };
+                input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(native);
+                let H { ctx, db, ui, lang, .. } = &mut h;
+                let env = Env { db: Some(db), db_error: None, lang: *lang, bg, undo_steps: 25 };
+                out = Some(ctx.run(input, |ctx| {
+                    ui.ensure_loaded(Some(db));
+                    ui.header(ctx, &env, db);
+                    ui.page(ctx, &env, db);
+                }));
+            }
+            let out = out.unwrap();
+            let shapes: Vec<&egui::epaint::RectShape> = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Rect(r) if r.fill == bg && r.rect.width() > 100.0 && r.rect.height() > 20.0 => Some(r),
+                    _ => None,
+                })
+                .collect();
+            let fills: Vec<Rect> = shapes.iter().map(|r| r.rect).collect();
+            let ctxt = format!("native {native}, zoom {zoom}, {px_w} px: {fills:?}");
+            let head = *fills.iter().find(|r| r.min.y < 0.01).unwrap_or_else(|| panic!("kein Kopf: {ctxt}"));
+            let central = *fills.iter().find(|r| r.min.y > 1.0 && r.min.x < 0.01).unwrap_or_else(|| panic!("keine Liste: {ctxt}"));
+            let panel = *fills.iter().find(|r| r.min.y > 1.0 && r.min.x > 1.0).unwrap_or_else(|| panic!("kein Panel: {ctxt}"));
+            assert!((central.min.y - head.max.y).abs() < 0.01 && (panel.min.y - head.max.y).abs() < 0.01, "Lücke unter dem Kopf: {ctxt}");
+            assert!((central.max.x - panel.min.x).abs() < 0.01, "Lücke/Überlappung zwischen Liste und Panel: {ctxt}");
+            // Bis zum Rand (bis auf das Runden auf ganze Pixel)
+            let px = 0.5 / ppp;
+            assert!((panel.max.x - screen.max.x).abs() < px && head.width() >= screen.width() - px, "Panel/Kopf nicht bis zum Rand: {ctxt}");
+            assert!(central.width() >= (screen.width() - 320.0).min(300.0) - px, "Liste zu schmal neben dem Panel: {ctxt}");
+            // Keine eigene Rahmenlinie des Panels: oben läge sie direkt unter der Linie des Kopfs (doppelte Kante).
+            assert!(shapes.iter().all(|r| r.stroke.width == 0.0), "Rahmenlinie am Panel: {ctxt}");
+        }
+    }
+}
+
+#[test]
+fn ticket_panel_width_keeps_room_for_the_list() {
+    use super::ticket_view::panel_width_range;
+    for total in [640.0f32, 800.0, 1000.0, 1600.0, 2400.0] {
+        let (min, max) = panel_width_range(total);
+        assert!(min <= max && min >= 280.0, "{total}: {min}..{max}");
+        assert!(total - max >= 320.0_f32.min(total - 320.0), "{total}: Liste behält zu wenig ({max})");
+    }
+    assert_eq!(panel_width_range(1600.0).1, 1120.0);
+}
