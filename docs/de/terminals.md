@@ -18,7 +18,7 @@ Der **Terminal Hub** ist der Hauptbereich von Paneldeck: viele Terminal-Sitzunge
 ## Tastatur
 - **Kitty-Tastaturprotokoll:** Programme, die es einschalten (z. B. Claude Code), bekommen eindeutige Tasten – Umschalt+Enter, Strg+Rück, Esc und Alt-Kombinationen kommen als `CSI u`-Sequenzen an. Flags, die ein abgestürztes Programm stehen ließ, werden am nächsten Shell-Prompt zurückgesetzt.
 - **win32-input-mode** unter ConPTY: PowerShell und cmd erhalten Strg+Leertaste, Strg+Enter, Strg+/, Strg+Umschalt+Buchstabe, Esc und den Ziffernblock als echte Tastenereignisse; Strg+3 … Strg+0 kommen im Terminal an.
-- **Strg+Rück** sendet `0x08` wie Windows Terminal (PowerShell löscht das vorige Wort; in bash löscht es ein Zeichen). Alt+Ziffer und Alt+Satzzeichen (z. B. Alt+. in bash) funktionieren; Alt-Kürzel, die Paneldeck selbst belegt, schicken keine Zeichen ins Terminal.
+- **Strg+Rück** sendet `0x08` wie Windows Terminal (PowerShell löscht das vorige Wort; in bash löscht es ein Zeichen). Alt+Satzzeichen (z. B. Alt+. in bash) funktioniert; Alt+Ziffer geht ans Terminal, wenn es keine Sitzung mit dieser Nummer gibt (sonst wechselt es dorthin). Linkes Strg+Alt wirkt wie AltGr (z. B. Strg+Alt+Q für `@` auf deutscher Tastatur), und IME-Eingaben (Japanisch, Chinesisch, Koreanisch) erscheinen am Cursor.
 - *Einstellungen → Darstellung → Umschalt+Enter = neue Zeile in PowerShell* (standardmäßig aus): PSReadLine fügt eine neue Zeile ein, statt den Befehl auszuführen. Programme in PowerShell, die das kitty-Tastaturprotokoll nicht nutzen, bekommen dann ein normales Enter.
 - **Broadcast** kodiert Tasten für jedes Zielterminal einzeln.
 
@@ -27,7 +27,7 @@ Der **Terminal Hub** ist der Hauptbereich von Paneldeck: viele Terminal-Sitzunge
   - `http`/`https`-Links mit schlichtem Rechnernamen öffnen direkt; jeder andere Link – andere Schemata, ein Benutzername in der Adresse (`user@host`), Rechnernamen mit Nicht-ASCII-Zeichen – fragt erst mit *Link öffnen?* und dem ganzen Ziel nach.
   - Nie geöffnet, auch nicht nach Rückfrage: überlange oder getarnte Ziele (Steuer-, Bidi- oder unsichtbare Zeichen, auch prozent-kodiert), Skript-Schemata, missbrauchte Windows-Protokolle (auch die Office-Handler), `file:`-Links auf anderes als einen lokalen Laufwerkspfad und alternative Datenströme.
   - Netzwerk- und Gerätepfade wie `\\.\GLOBALROOT\…` oder `\??\UNC\…` gelten nie als lokal – weder bei Links noch beim Arbeitsordner, den die Shell meldet (OSC 7, OSC 9;9).
-  - Ausführbare Dateien (auch z. B. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc` und Namen mit Punkten oder Leerzeichen am Ende) werden nie gestartet; der Explorer zeigt sie nur markiert in ihrem Ordner.
+  - Ausführbare Dateien und Skripte (jeder Typ aus `PATHEXT`, `.py`, `.pyw`, `.pl`, `.rb`, `.ahk`, `.php`, `.lua` und ähnliche, auch z. B. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc` und Namen mit Punkten oder Leerzeichen am Ende) werden nie gestartet; der Explorer zeigt sie nur markiert in ihrem Ordner.
 - **Kopieren aus Programmen (OSC 52):** Programme können Text in die Windows-Zwischenablage legen – z. B. Claude Code in einer WSL- oder SSH-Sitzung; ein kurzer Hinweis nennt die Sitzung. *Einstellungen → Darstellung → Programme dürfen in die Zwischenablage kopieren (OSC 52)* ist standardmäßig an. Es geht nur in eine Richtung (Programme können die Zwischenablage nie lesen), nur die fokussierte Sitzung im Fenster im Vordergrund darf kopieren, höchstens 1 MB und höchstens alle 0,3 s (größere Texte melden einen Hinweis; eine Sequenz über 2 MiB wird abgeschnitten und ohne Hinweis ignoriert), und ein leerer Text leert die Zwischenablage nie. Hinweis: Ein Agent mit Zugriff *Steuern* kann die fokussierte Sitzung ebenfalls etwas kopieren lassen.
 - **Einfügen:** Eingefügter Text wird wie bei Windows Terminal gefiltert (Steuerzeichen inkl. ESC und C1 werden entfernt), versteckte Enter-Sequenzen kommen also nicht durch. *Einstellungen → Darstellung → Vor dem Einfügen mehrerer Zeilen nachfragen* (standardmäßig an) fragt *Mehrere Zeilen einfügen?*, wenn das Programm kein Bracketed Paste nutzt – sonst könnte die Shell jede eingefügte Zeile sofort als Befehl ausführen. *Einfügen* wird nach einer kurzen Wartezeit frei. Jeder Bereich rahmt eingefügten Text nach seinem eigenen Bracketed-Paste-Modus; bei eingeschaltetem Broadcast kommt die Frage auch, wenn ein Zielbereich kein Bracketed Paste nutzt.
 
@@ -124,6 +124,11 @@ Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 | `Strg+1` / `Strg+2` (auch `Alt+Umschalt+1` / `Alt+Umschalt+2`) | Reiter *Terminal Hub* / *Todo-Liste* |
 | `Strg`+Klick auf einen Reiter der Fensterleiste | Reiter in einem neuen Fenster öffnen |
 | (keins) | *Sitzung neu laden*, *Alle Sitzungen schließen* – Taste unter *Einstellungen → Tastenkürzel* zuweisen |
+| `Strg+Umschalt+1`…`9` (fest) | Zu Projekt 1–9 wechseln |
+| `Alt+1`…`9` (fest) | Sitzung 1–9 des aktuellen Projekts |
+| `Strg+Alt+Pfeile` (fest) | Nachbarbereich fokussieren |
+
+Die Modifikatoren müssen genau passen (`Strg+Umschalt+1` ist nicht `Strg+1`). Die festen Kürzel greifen nur, wenn es ihr Ziel gibt; sonst geht die Taste ans Terminal. Eigene Kürzel brauchen Strg oder Alt (F-Tasten gehen auch allein); bei der Aufnahme bricht Esc ab. *Einstellungen*, der Update-Knopf und der MCP-Status stehen in der Fensterleiste rechts neben den Reitern.
 
 Die Kürzel der Todo-Liste stehen unter [Todo-Liste und Tickets](todo-and-tickets.md#tastenkürzel).
 
