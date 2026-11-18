@@ -295,7 +295,7 @@ impl PlanUi {
         // benutzte Labels je Labels-Feld des Projekts (einmal je Öffnen gezählt, #239)
         let project = self.sum.as_ref().map(|s| s.project.id).unwrap_or(self.selected);
         let label_fields: Vec<Field> = d.fields.iter().filter(|f| f.kind == FieldKind::Labels).cloned().collect();
-        let used = |fid: i64| -> Option<std::rc::Rc<Vec<Counted>>> {
+        let used = |fid: i64| -> Option<std::sync::Arc<Vec<Counted>>> {
             let f = label_fields.iter().find(|f| f.id == fid)?;
             Some(cached_per_open(ctx, Id::new(("wf_labels", fid)), || label_counts(cx.conn, project, &label_ident(f.key.as_deref(), f.name.as_deref()))))
         };
@@ -357,7 +357,7 @@ fn field_label(f: &Field, lang: Lang) -> String {
 }
 
 /// `used`: benutzte Werte eines Labels-Feldes (Vorschläge mit Anzahl), `None` für andere Felder.
-fn rules_form(ui: &mut Ui, d: &mut RulesDlg, lang: Lang, used: &dyn Fn(i64) -> Option<std::rc::Rc<Vec<Counted>>>) {
+fn rules_form(ui: &mut Ui, d: &mut RulesDlg, lang: Lang, used: &dyn Fn(i64) -> Option<std::sync::Arc<Vec<Counted>>>) {
     if d.fields.is_empty() {
         hint(ui, lang.t("Dieser Typ hat keine Felder – Regeln brauchen Felder.", "This type has no fields – rules need fields."));
         return;

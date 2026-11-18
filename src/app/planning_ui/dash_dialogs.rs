@@ -86,7 +86,8 @@ impl Dlg {
         }
         .unwrap_or_default();
         let projects = list_projects(cx.conn).unwrap_or_default().into_iter().filter(|p| !p.system).map(|p| (p.id, p.key, p.name)).collect();
-        let mut bar = QueryBarState::new("dash_tile");
+        // eigene Kennung je Dashboard und Kachel: Cursor und Rückgängig-Verlauf des Textfelds wandern nicht mit (#237)
+        let mut bar = QueryBarState::new("dash_tile").scoped((d.id, tile));
         bar.set_text(&draft.jql);
         let mut dlg = TileDlg { tile, dash_id: d.id, dash_project: d.project_id, draft, err: None, filters, projects, check: (String::new(), None), bar, schema: SchemaCache::default() };
         dlg.recheck(cx);
@@ -678,6 +679,20 @@ mod tests {
         t.draft.jql = "((".into();
         t.recheck(&cx_for(&d, Lang::En));
         assert_eq!(tile_problem(&t, Lang::En), None);
+    }
+
+    #[test]
+    fn each_tile_dialog_has_its_own_query_field() {
+        let d = mem();
+        let dash = |id: i64| Dashboard { id, name: "D".into(), scope: DashboardScope::Global, project_id: None, position: 0, is_default: false, layout: Default::default() };
+        let id_of = |dash_id: i64, tile: Option<u32>| {
+            let Dlg::Tile(t) = Dlg::tile(&cx_for(&d, Lang::En), &dash(dash_id), tile, TileDraft::new(KindSel::Search)) else { panic!() };
+            t.bar.id()
+        };
+        assert_ne!(id_of(1, Some(1)), id_of(1, Some(2)), "andere Kachel: eigener Rückgängig-Verlauf");
+        assert_ne!(id_of(1, Some(1)), id_of(2, Some(1)), "anderes Dashboard");
+        assert_ne!(id_of(1, None), id_of(1, Some(1)), "neue Kachel");
+        assert_eq!(id_of(1, Some(1)), id_of(1, Some(1)));
     }
 
     #[test]

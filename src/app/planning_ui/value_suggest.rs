@@ -1,6 +1,6 @@
 //! Vorschläge für Label-, Tag- und ähnliche Felder (#239): Beim Tippen erscheinen die schon benutzten Werte mit der Zahl
-//! ihrer Verwendungen, z. B. `backend (12)` – nach Häufigkeit, dann Name sortiert, ohne Beachtung der Groß-/Kleinschreibung
-//! nach dem Getippten gefiltert. Ein Vorschlag lässt sich übernehmen, neue Werte bleiben erlaubt.
+//! ihrer Verwendungen, z. B. `backend (12)` – ohne Beachtung der Groß-/Kleinschreibung nach dem Getippten gefiltert, Treffer
+//! am Wortanfang zuerst, dann nach Häufigkeit und Name. Ein Vorschlag lässt sich übernehmen, neue Werte bleiben erlaubt.
 //!
 //! * Reine Logik (ohne egui, getestet): [`count_values`] (Zählen und Zusammenfassen), [`filter`], [`token_at`] /
 //!   [`replace_token`] / [`list_items`] für kommagetrennte Felder.
@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// So viele Vorschläge zeigt das Popup höchstens (der Rest ist über das Tippen erreichbar).
 pub const MAX_SHOWN: usize = 50;
@@ -88,11 +89,20 @@ pub fn sort(v: &mut [Counted]) {
 }
 
 /// Die Vorschläge zum Getippten: Werte, die `typed` enthalten (ohne Beachtung der Groß-/Kleinschreibung, leer = alle), ohne
-/// die schon gewählten (`exclude`), in der Reihenfolge von `all` (also nach Häufigkeit), höchstens `limit`.
+/// die schon gewählten (`exclude`), höchstens `limit`. Werte, die mit dem Getippten beginnen, kommen zuerst, danach die, die
+/// es nur enthalten; innerhalb davon nach Häufigkeit, dann Name (wie [`sort`]).
 pub fn filter<'a>(all: &'a [Counted], typed: &str, exclude: &[String], limit: usize) -> Vec<&'a Counted> {
     let q = fold(typed);
     let skip: Vec<String> = exclude.iter().map(|e| fold(e)).collect();
-    all.iter().filter(|c| { let k = fold(&c.name); k.contains(&q) && !skip.contains(&k) }).take(limit).collect()
+    let mut hits: Vec<(bool, &Counted)> = all
+        .iter()
+        .filter_map(|c| {
+            let k = fold(&c.name);
+            (k.contains(&q) && !skip.contains(&k)).then(|| (!k.starts_with(&q), c))
+        })
+        .collect();
+    hits.sort_by(|(pa, a), (pb, b)| pa.cmp(pb).then_with(|| b.count.cmp(&a.count)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())).then_with(|| a.name.cmp(&b.name)));
+    hits.into_iter().take(limit).map(|(_, c)| c).collect()
 }
 
 // ------------------------------------------------------------------ kommagetrennte Felder
@@ -191,17 +201,18 @@ impl<K: Hash + Eq> CountCache<K> {
 
 /// Für Felder ohne Datenbank: Werte einmal je Öffnen zählen. Neu gezählt wird, wenn das Feld im letzten Bild nicht zu sehen
 /// war (Dialog neu geöffnet).
-pub fn cached_per_open(ctx: &egui::Context, id: Id, load: impl FnOnce() -> Vec<Counted>) -> Rc<Vec<Counted>> {
-    // In egui-Daten (Send + Sync) als Liste mit der Nummer des Bildes, in dem sie zuletzt gebraucht wurde.
+pub fn cached_per_open(ctx: &egui::Context, id: Id, load: impl FnOnce() -> Vec<Counted>) -> Arc<Vec<Counted>> {
+    // In egui-Daten (Send + Sync) als geteilte Liste mit der Nummer des Bildes, in dem sie zuletzt gebraucht wurde – so
+    // kostet ein Bild nur das Zählen einer Referenz, nicht das Kopieren aller Namen.
     let key = id.with("value_suggest_values");
     let frame = ctx.cumulative_pass_nr();
-    let prev: Option<(u64, Vec<Counted>)> = ctx.data(|d| d.get_temp::<(u64, Vec<Counted>)>(key));
+    let prev: Option<(u64, Arc<Vec<Counted>>)> = ctx.data(|d| d.get_temp::<(u64, Arc<Vec<Counted>>)>(key));
     let v = match prev {
         Some((f, v)) if f + 1 >= frame => v,
-        _ => load(),
+        _ => Arc::new(load()),
     };
     ctx.data_mut(|d| d.insert_temp(key, (frame, v.clone())));
-    Rc::new(v)
+    v
 }
 
 // ------------------------------------------------------------------ Eingabefeld mit Popup
@@ -255,73 +266,113 @@ fn set_cursor(ctx: &egui::Context, id: Id, text: &str, byte: usize) {
     s.store(ctx, id);
 }
 
+/// Der getippte Eintrag (im Listenmodus der unter dem Cursor), ohne Ränder und `#`.
+fn typed_now(text: &str, cursor: usize, mode: Mode) -> String {
+    match mode {
+        Mode::Single => text.trim().trim_start_matches('#').trim().to_string(),
+        Mode::List => typed_at(text, cursor),
+    }
+}
+
 /// Die Vorschläge zum aktuellen Stand.
 fn candidates(values: &[Counted], text: &str, cursor: usize, exclude: &[String], mode: Mode) -> Vec<Counted> {
-    let (typed, mut skip) = match mode {
-        Mode::Single => (text.trim().trim_start_matches('#').to_string(), Vec::new()),
-        Mode::List => (typed_at(text, cursor), list_items(text, Some(cursor))),
+    let typed = typed_now(text, cursor, mode);
+    let mut skip = match mode {
+        Mode::Single => Vec::new(),
+        Mode::List => list_items(text, Some(cursor)),
     };
     skip.extend(exclude.iter().cloned());
     filter(values, &typed, &skip, MAX_SHOWN).into_iter().cloned().collect()
 }
 
+/// Nimmt die Taste `key`, aber nur ohne jede Zusatztaste. (`consume_key(Modifiers::NONE, …)` vergleicht „logisch“ und nähme
+/// auch Umschalt+Tab oder Umschalt+Enter.)
+fn take_plain(i: &mut egui::InputState, key: Key) -> bool {
+    let before = i.events.len();
+    i.events.retain(|e| !matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. } if *k == key && modifiers.is_none()));
+    i.events.len() != before
+}
+
 /// Ein Eingabefeld mit Vorschlägen. `edit` zeichnet das Textfeld (Größe, Hinweis, Rand nach Wahl des Aufrufers) und muss
 /// ihm die Kennung `id` geben – z. B. `|ui, te| ui.add(te.desired_width(200.0))`. `exclude`: schon gewählte Werte.
+///
+/// Tab übernimmt nur, wenn etwas getippt oder ein Vorschlag mit ↑/↓ gewählt ist; sonst (und bei Umschalt+Tab) wandert der
+/// Fokus wie gewohnt weiter. Enter übernimmt nur einen gewählten Vorschlag, Umschalt+Enter nie.
+#[allow(clippy::too_many_arguments)]
 pub fn suggest_edit(ui: &mut Ui, id: Id, text: &mut String, values: &[Counted], exclude: &[String], mode: Mode, lang: Lang, edit: impl FnOnce(&mut Ui, egui::TextEdit<'_>) -> Response) -> SuggestOut {
     let ctx = ui.ctx().clone();
     let skey = id.with("value_suggest_state");
     let mut st: PopState = ctx.data(|d| d.get_temp(skey)).unwrap_or_default();
     let focused_before = ctx.memory(|m| m.has_focus(id));
     let cur0 = cursor_of(&ctx, id, text).unwrap_or(st.cursor).min(text.len());
-    let cands = candidates(values, text, cur0, exclude, mode);
 
-    // ---- Tasten, bevor das Textfeld sie sieht
+    // ---- Tasten, bevor das Textfeld sie sieht (Vorschläge nur rechnen, wenn das Feld den Fokus hat)
     let mut accept: Option<usize> = None;
+    let mut cands0: Vec<Counted> = Vec::new();
     if focused_before {
-        let n = cands.len();
+        cands0 = candidates(values, text, cur0, exclude, mode);
+        let n = cands0.len();
         let visible = st.open && n > 0;
+        let typed_empty = typed_now(text, cur0, mode).is_empty();
+        let mut focus_move = None;
         ctx.input_mut(|i| {
             if visible {
-                if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                if take_plain(i, Key::ArrowDown) {
                     st.sel = Some(st.sel.map_or(0, |s| (s + 1) % n));
                     st.scroll = true;
                 }
-                if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                if take_plain(i, Key::ArrowUp) {
                     st.sel = Some(st.sel.map_or(n - 1, |s| if s == 0 { n - 1 } else { s - 1 }));
                     st.scroll = true;
                 }
-                if i.consume_key(Modifiers::NONE, Key::Tab) {
+                // Tab übernimmt nur Getipptes oder eine ausdrückliche Wahl; bei leerem Eintrag geht der Fokus weiter.
+                if (st.sel.is_some() || !typed_empty) && take_plain(i, Key::Tab) {
                     accept = Some(st.sel.unwrap_or(0));
                 }
-                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                if take_plain(i, Key::Escape) {
                     st.open = false;
                     st.sel = None;
                 }
-                if st.sel.is_some() && i.consume_key(Modifiers::NONE, Key::Enter) {
+                if st.sel.is_some() && take_plain(i, Key::Enter) {
                     accept = st.sel;
                 }
-            } else if n > 0 && i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+            } else if n > 0 && take_plain(i, Key::ArrowDown) {
                 st.open = true;
                 st.sel = Some(0);
             }
             if i.consume_key(Modifiers::CTRL, Key::Space) {
                 st.open = true;
             }
+            // Das Feld sperrt Tab für egui (Sperre unten); ein nicht übernommenes Tab bewegt den Fokus deshalb selbst.
+            if accept.is_none() {
+                focus_move = i.events.iter().find_map(|e| match e {
+                    egui::Event::Key { key: Key::Tab, pressed: true, modifiers, .. } if !modifiers.ctrl && !modifiers.alt && !modifiers.command => {
+                        Some(if modifiers.shift { egui::FocusDirection::Previous } else { egui::FocusDirection::Next })
+                    }
+                    _ => None,
+                });
+            }
         });
+        if accept.is_some() {
+            // falls egui das Tab schon als Fokuswechsel vorgemerkt hat (Sperre noch nicht aktiv): verwerfen
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        } else if let Some(dir) = focus_move {
+            ctx.memory_mut(|m| m.move_focus(dir));
+            st.open = false;
+            st.sel = None;
+        }
     }
     let mut picked: Option<String> = None;
-    if let Some(c) = accept.and_then(|i| cands.get(i)) {
+    if let Some(c) = accept.and_then(|i| cands0.get(i)) {
         picked = Some(c.name.clone());
         st.sel = None;
-        match mode {
-            Mode::Single => st.open = false,
-            Mode::List => {
-                let (t, cur) = replace_token(text, cur0, &c.name);
-                *text = t;
-                set_cursor(&ctx, id, text, cur);
-                st.cursor = cur;
-                st.open = true;
-            }
+        // nach dem Übernehmen zu: ein weiteres Tab auf dem leeren Eintrag wandert weiter, statt erneut zu übernehmen
+        st.open = false;
+        if mode == Mode::List {
+            let (t, cur) = replace_token(text, cur0, &c.name);
+            *text = t;
+            set_cursor(&ctx, id, text, cur);
+            st.cursor = cur;
         }
     }
 
@@ -330,15 +381,18 @@ pub fn suggest_edit(ui: &mut Ui, id: Id, text: &mut String, values: &[Counted], 
     let focused = response.has_focus();
     let cursor = cursor_of(&ctx, id, text).unwrap_or(text.len()).min(text.len());
     if response.changed() {
-        st.open = true;
+        // leer getippt (alles gelöscht, im Listenmodus ein neuer Eintrag nach dem Komma): nicht alle Werte aufdrängen
+        st.open = !typed_now(text, cursor, mode).is_empty();
         st.sel = None;
     } else if cursor != st.cursor && accept.is_none() {
         // Cursor ohne Tippen bewegt (Klick, Pfeile): Vorschläge nicht aufdrängen.
         st.open = false;
     }
     st.cursor = cursor;
-    let over_popup = st.rect.is_some_and(|r| ctx.input(|i| i.pointer.hover_pos().is_some_and(|p| r.contains(p))));
-    if !focused && !over_popup {
+    // Ohne Fokus bleibt das Popup nur, solange die Maus darauf gedrückt wird (der Klick auf einen Vorschlag nimmt dem Feld
+    // den Fokus erst beim Loslassen): so bleibt es nie hängen und hält auch kein Esc eines Dialogs auf.
+    let pressing_popup = st.rect.is_some_and(|r| ctx.input(|i| (i.pointer.any_down() || i.pointer.any_released()) && i.pointer.interact_pos().is_some_and(|p| r.contains(p))));
+    if !focused && !pressing_popup {
         st.open = false;
     }
     if ctx.input(|i| i.pointer.any_pressed()) {
@@ -349,17 +403,20 @@ pub fn suggest_edit(ui: &mut Ui, id: Id, text: &mut String, values: &[Counted], 
     }
 
     // ---- Popup
-    let cands = candidates(values, text, cursor, exclude, mode);
+    let live = st.open && (focused || pressing_popup);
+    let cands = if live { candidates(values, text, cursor, exclude, mode) } else { Vec::new() };
     if st.sel.is_some_and(|i| i >= cands.len()) {
         st.sel = None;
     }
     let pid = popup_id(id);
     let mut clicked: Option<usize> = None;
-    if st.open && !cands.is_empty() && (focused || over_popup) {
-        if focused {
-            // Esc soll nur das Popup schließen, nicht dem Feld den Fokus nehmen.
-            ctx.memory_mut(|m| m.set_focus_lock_filter(id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true }));
-        }
+    let shown = live && !cands.is_empty();
+    if focused {
+        // Tab gehört dem Feld (übernehmen oder Fokus oben selbst weitergeben), Esc nur bei offenem Popup: dann schließt es
+        // nur das Popup und nimmt dem Feld nicht den Fokus.
+        ctx.memory_mut(|m| m.set_focus_lock_filter(id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: shown }));
+    }
+    if shown {
         // jedes Bild neu anmelden (hält es für egui offen, `Popup::is_any_open` sieht es)
         egui::Popup::open_id(&ctx, pid);
         let pos = response.rect.left_bottom() + Vec2::new(0.0, 2.0);
@@ -376,14 +433,12 @@ pub fn suggest_edit(ui: &mut Ui, id: Id, text: &mut String, values: &[Counted], 
     if let Some(c) = clicked.and_then(|i| cands.get(i)) {
         picked = Some(c.name.clone());
         st.sel = None;
-        match mode {
-            Mode::Single => st.open = false,
-            Mode::List => {
-                let (t, cur) = replace_token(text, cursor, &c.name);
-                *text = t;
-                set_cursor(&ctx, id, text, cur);
-                st.cursor = cur;
-            }
+        st.open = false;
+        if mode == Mode::List {
+            let (t, cur) = replace_token(text, cursor, &c.name);
+            *text = t;
+            set_cursor(&ctx, id, text, cur);
+            st.cursor = cur;
         }
         ctx.memory_mut(|m| m.request_focus(id));
         ctx.request_repaint();
@@ -546,11 +601,13 @@ mod tests {
         mode: Mode,
         t: f64,
         picked: Vec<String>,
+        /// Ein zweites Feld dahinter, damit Tab den Fokus weitergeben kann.
+        other: String,
     }
 
     impl H {
         fn new(mode: Mode) -> H {
-            let mut h = H { ctx: egui::Context::default(), text: String::new(), values: count_values([("backend", 12), ("ops", 7), ("Frontend", 3)]), mode, t: 0.0, picked: Vec::new() };
+            let mut h = H { ctx: egui::Context::default(), text: String::new(), values: count_values([("backend", 12), ("ops", 7), ("Frontend", 3)]), mode, t: 0.0, picked: Vec::new(), other: String::new() };
             h.ctx.memory_mut(|m| m.request_focus(Id::new("vs_field")));
             h.frame(vec![]);
             h.frame(vec![]);
@@ -561,11 +618,13 @@ mod tests {
             self.t += 0.05;
             let modifiers = events.iter().find_map(|e| if let Event::Key { modifiers, .. } = e { Some(*modifiers) } else { None }).unwrap_or_default();
             let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))), events, focused: true, time: Some(self.t), modifiers, ..Default::default() };
-            let (text, values, mode) = (&mut self.text, &self.values, self.mode);
+            let (text, values, mode, other) = (&mut self.text, &self.values, self.mode, &mut self.other);
             let mut out = None;
             let _ = self.ctx.run(raw, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     out = Some(suggest_edit(ui, Id::new("vs_field"), text, values, &[], mode, Lang::En, |ui, te| ui.add(te.desired_width(200.0))));
+                    ui.add_space(300.0);
+                    ui.add(egui::TextEdit::singleline(other).id(Id::new("other")));
                 });
             });
             let out = out.unwrap();
@@ -576,8 +635,24 @@ mod tests {
         }
 
         fn key(&mut self, key: Key) -> bool {
-            self.frame(vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
-            self.frame(vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }])
+            self.key_mod(key, Modifiers::NONE)
+        }
+
+        fn key_mod(&mut self, key: Key, modifiers: Modifiers) -> bool {
+            self.frame(vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }]);
+            self.frame(vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers }])
+        }
+
+        fn focused(&self) -> bool {
+            self.ctx.memory(|m| m.has_focus(Id::new("vs_field")))
+        }
+
+        fn other_focused(&self) -> bool {
+            self.ctx.memory(|m| m.has_focus(Id::new("other")))
+        }
+
+        fn press(&mut self, pos: Pos2, pressed: bool) -> bool {
+            self.frame(vec![Event::PointerMoved(pos), Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE }])
         }
 
         fn st(&self) -> PopState {
@@ -654,5 +729,141 @@ mod tests {
             cached_per_open(ctx, id, || { loads += 1; vec![c("a", 1)] });
         });
         assert_eq!(loads, 2, "nach einem Bild ohne Feld (neu geöffnet): neu gezählt");
+    }
+
+    #[test]
+    fn tab_on_an_empty_entry_moves_focus_instead_of_accepting() {
+        // Strg+Leertaste zeigt alle Werte, aber ohne Getipptes und ohne Wahl geht Tab weiter
+        let mut h = H::new(Mode::Single);
+        h.frame(vec![Event::Key { key: Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::CTRL }]);
+        assert!(h.frame(vec![]) && h.st().open, "Strg+Leertaste öffnet");
+        h.key(Key::Tab);
+        assert!(h.picked.is_empty(), "nichts übernommen");
+        assert!(h.other_focused(), "der Fokus wandert zum nächsten Feld");
+        assert!(!h.st().open);
+        // mit ausdrücklicher Wahl übernimmt Tab dagegen
+        let mut h = H::new(Mode::Single);
+        h.key(Key::ArrowDown);
+        assert_eq!(h.st().sel, Some(0));
+        h.key(Key::Tab);
+        assert_eq!(h.picked, vec!["backend"]);
+        assert!(h.focused(), "nach dem Übernehmen bleibt der Fokus im Feld");
+    }
+
+    #[test]
+    fn tab_without_popup_moves_focus() {
+        let mut h = H::new(Mode::Single);
+        h.key(Key::Tab);
+        assert!(h.other_focused() && h.picked.is_empty());
+    }
+
+    #[test]
+    fn list_mode_closes_after_accepting_so_tab_moves_on() {
+        let mut h = H::new(Mode::List);
+        h.frame(vec![Event::Text("ops, fr".into())]);
+        h.key(Key::Tab);
+        assert_eq!(h.text, "ops, Frontend, ");
+        assert!(!h.st().open, "nach dem Übernehmen zu");
+        assert!(!h.frame(vec![]), "kein Popup angemeldet");
+        h.key(Key::Tab);
+        assert_eq!(h.picked, vec!["Frontend"], "kein zweites Übernehmen auf dem leeren Eintrag");
+        assert_eq!(h.text, "ops, Frontend, ");
+        assert!(h.other_focused(), "Tab gibt den Fokus weiter");
+    }
+
+    #[test]
+    fn clearing_the_text_does_not_offer_all_values() {
+        let mut h = H::new(Mode::Single);
+        h.frame(vec![Event::Text("b".into())]);
+        assert!(h.st().open);
+        h.key(Key::Backspace);
+        assert_eq!(h.text, "");
+        assert!(!h.st().open && !h.frame(vec![]), "leer getippt: kein Popup");
+        h.key(Key::Tab);
+        assert!(h.picked.is_empty() && h.other_focused());
+        // Listenmodus: ein neuer, leerer Eintrag nach dem Komma öffnet ebenfalls nichts
+        let mut h = H::new(Mode::List);
+        h.frame(vec![Event::Text("ops,".into())]);
+        assert!(!h.st().open);
+        h.frame(vec![Event::Text(" ".into())]);
+        assert!(!h.st().open);
+        h.frame(vec![Event::Text("u".into())]);
+        assert!(h.st().open, "erst Getipptes öffnet");
+    }
+
+    #[test]
+    fn shift_tab_and_shift_enter_never_accept() {
+        let mut h = H::new(Mode::Single);
+        h.frame(vec![Event::Text("e".into())]);
+        h.key(Key::ArrowDown);
+        assert_eq!(h.st().sel, Some(0));
+        h.key_mod(Key::Enter, Modifiers::SHIFT);
+        assert!(h.picked.is_empty(), "Umschalt+Enter übernimmt nicht");
+        // Umschalt+Tab: nichts übernommen, das Popup schließt, der Fokus verlässt das Feld
+        let mut h = H::new(Mode::Single);
+        h.frame(vec![Event::Text("e".into())]);
+        h.key(Key::ArrowDown);
+        h.key_mod(Key::Tab, Modifiers::SHIFT);
+        assert!(h.picked.is_empty(), "Umschalt+Tab übernimmt nicht");
+        assert!(!h.st().open);
+        assert!(!h.focused(), "der Fokus geht zurück");
+        // aus dem zweiten Feld kommt Umschalt+Tab ins Vorschlagsfeld zurück
+        h.ctx.memory_mut(|m| m.request_focus(Id::new("other")));
+        h.frame(vec![]);
+        h.frame(vec![]);
+        h.key_mod(Key::Tab, Modifiers::SHIFT);
+        h.frame(vec![]);
+        assert!(h.focused(), "Umschalt+Tab erreicht das Feld");
+    }
+
+    #[test]
+    fn popup_without_focus_closes_even_under_the_pointer() {
+        let mut h = H::new(Mode::Single);
+        h.frame(vec![Event::Text("e".into())]);
+        assert!(h.frame(vec![]));
+        let r = h.st().rect.expect("Popup gezeichnet");
+        h.frame(vec![Event::PointerMoved(r.center())]);
+        h.ctx.memory_mut(|m| m.surrender_focus(Id::new("vs_field")));
+        let open = h.frame(vec![Event::PointerMoved(r.center())]);
+        assert!(!open && !h.st().open, "nur Schweben hält das Popup nicht offen");
+        assert!(!h.frame(vec![]), "und es kommt nicht wieder (blockiert kein Esc des Dialogs)");
+    }
+
+    #[test]
+    fn clicking_a_suggestion_still_picks_it() {
+        let mut h = H::new(Mode::List);
+        h.frame(vec![Event::Text("ops, fr".into())]);
+        assert!(h.frame(vec![]));
+        let r = h.st().rect.expect("Popup gezeichnet");
+        let row = Pos2::new(r.min.x + 30.0, r.min.y + 4.0 + 11.0);
+        h.frame(vec![Event::PointerMoved(row)]);
+        h.press(row, true);
+        h.press(row, false);
+        assert_eq!(h.picked, vec!["Frontend"]);
+        assert_eq!(h.text, "ops, Frontend, ");
+        h.frame(vec![]);
+        assert!(h.focused(), "der Fokus kehrt ins Feld zurück");
+        assert!(!h.st().open, "nach dem Übernehmen zu");
+    }
+
+    #[test]
+    fn prefix_matches_come_before_contains_matches() {
+        let all = count_values([("backend", 12), ("ops", 7), ("Endpoint", 1), ("frontend", 3), ("end", 2)]);
+        let names = |v: Vec<&Counted>| v.into_iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(filter(&all, "end", &[], 10)), vec!["end", "Endpoint", "backend", "frontend"], "Anfang vor Enthalten, dann Anzahl");
+        // auch bei unsortierter Eingabe: nach Anzahl, dann Name
+        let raw = vec![c("b", 1), c("Ab", 1), c("ab", 5), c("xab", 9)];
+        assert_eq!(names(filter(&raw, "a", &[], 10)), vec!["ab", "Ab", "xab"]);
+    }
+
+    #[test]
+    fn per_open_values_are_shared_not_copied() {
+        let ctx = egui::Context::default();
+        let id = Id::new("shared");
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            let _ = ctx.run(RawInput::default(), |ctx| got.push(cached_per_open(ctx, id, || vec![c("a", 1)])));
+        }
+        assert!(Arc::ptr_eq(&got[0], &got[1]), "dieselbe Liste in jedem Bild");
     }
 }

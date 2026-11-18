@@ -100,6 +100,9 @@ pub struct QueryBarOutput {
 /// Zustand einer Leiste (je Leiste einer, mit eigenem Namen).
 pub struct QueryBarState {
     salt: &'static str,
+    /// Zusätzliche Kennung (z. B. Dashboard und Kachel), damit Textfeld-Zustand und Rückgängig-Verlauf nicht von einem Editor
+    /// zum nächsten wandern.
+    scope: Option<Id>,
     /// Der Abfragetext im Feld.
     pub text: String,
     pub history: History,
@@ -119,6 +122,7 @@ impl QueryBarState {
     pub fn new(salt: &'static str) -> Self {
         Self {
             salt,
+            scope: None,
             text: String::new(),
             history: History::default(),
             filters: FilterUi::default(),
@@ -133,8 +137,18 @@ impl QueryBarState {
         }
     }
 
-    fn id(&self) -> Id {
-        Id::new(("query_bar_edit", self.salt))
+    /// Dieselbe Leiste mit eigener Kennung je `scope` (z. B. `(Dashboard, Kachel)`).
+    pub fn scoped(mut self, scope: impl std::hash::Hash) -> Self {
+        self.scope = Some(Id::new(scope));
+        self
+    }
+
+    pub(super) fn id(&self) -> Id {
+        let base = Id::new(("query_bar_edit", self.salt));
+        match self.scope {
+            Some(s) => base.with(s),
+            None => base,
+        }
     }
 
     /// Text setzen, ohne den Fokus zu holen (z. B. beim Öffnen eines Dialogs mit vorhandener Abfrage).
@@ -712,6 +726,17 @@ mod tests {
         SuggestionKind::Predicate,
         SuggestionKind::SortKey,
     ];
+
+    #[test]
+    fn scoped_bars_get_their_own_text_field_id() {
+        let a = QueryBarState::new("dash_tile").scoped((1i64, Some(2u32)));
+        let b = QueryBarState::new("dash_tile").scoped((1i64, Some(3u32)));
+        let c = QueryBarState::new("dash_tile").scoped((1i64, Some(2u32)));
+        assert_ne!(a.id(), b.id(), "andere Kachel: anderer Verlauf");
+        assert_eq!(a.id(), c.id());
+        assert_ne!(a.id(), QueryBarState::new("dash_tile").id());
+        assert_eq!(QueryBarState::new("search").id(), QueryBarState::new("search").id());
+    }
 
     #[test]
     fn every_suggestion_kind_has_a_symbol_and_both_names() {
