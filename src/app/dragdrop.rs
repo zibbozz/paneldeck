@@ -40,9 +40,10 @@ impl App {
 
     /// Sitzungen per Drag & Drop in Bereiche ziehen (Mitte = ersetzen/tauschen, Rand = teilen).
     pub(super) fn handle_drag(&mut self, ctx: &egui::Context) {
-        // Eine Vorlage aus der Bibliothek (#244) hat eigene Ziele.
+        // Eine Vorlage aus der Bibliothek (#244) hat eigene Ziele. Die Fläche der Sitzungsliste gilt nur für dieses Bild.
+        let list_rect = self.tpl.list_rect.take();
         if self.tpl.dragging.is_some() {
-            self.handle_tpl_drag(ctx);
+            self.handle_tpl_drag(ctx, list_rect);
             return;
         }
         let folder_drag = self.dragging_folder.clone();

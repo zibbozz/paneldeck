@@ -89,8 +89,76 @@ impl TplItem {
     /// Angaben des Agenten vor denen der Vorlage, danach wie jede Agenten-Sitzung ([`ClaudeOpts::for_agent`]) – nie
     /// `bypassPermissions`, nie die Rechte erweiternden Wertoptionen (zusätzliche Ordner, erlaubte Werkzeuge,
     /// MCP-Konfiguration), nie `--safe-mode`, ohne Permission-Mode ausdrücklich `default`.
+    /// Schalter (`claude_flags`) werden wie bei den Standards ergänzt, nicht ersetzt; `chrome`/`no-chrome` des Agenten
+    /// gehen vor. Ein `--append-system-prompt` der Vorlage gilt für Agenten ebenfalls nie (Text aus einer womöglich
+    /// weitergegebenen Datei, den niemand bestätigt hat).
     pub fn agent_opts(&self, asked: &ClaudeOpts, defaults: &ClaudeOpts) -> ClaudeOpts {
-        asked.or(&self.opts()).for_agent(defaults)
+        let mut tpl = self.opts();
+        tpl.extra.append_system_prompt.clear();
+        let mut merged = asked.or(&tpl);
+        let chrome = |f: &String| f == "chrome" || f == "no-chrome";
+        let own_chrome = asked.extra.flags.iter().any(chrome);
+        let mut flags = asked.extra.flags.clone();
+        for f in tpl.extra.flags.iter().filter(|f| !(own_chrome && chrome(f))) {
+            if !flags.contains(f) {
+                flags.push(f.clone());
+            }
+        }
+        merged.extra.flags = flags;
+        merged.for_agent(defaults)
+    }
+
+    /// Optionen dieser Vorlage, die für einen Agenten weggelassen werden (MCP-Feld `template_ignored`): Namen wie in
+    /// den MCP-Auskünften (`add_dir`, `allowed_tools`, `mcp_config`, `append_system_prompt`, `safe-mode`,
+    /// `bypassPermissions`, `continue_last`). Ohne Claude leer (dann gibt es keine Startoptionen).
+    pub fn agent_ignored(&self) -> Vec<&'static str> {
+        if !self.claude {
+            return Vec::new();
+        }
+        let o = self.opts();
+        let legacy_bypass = self.claude_opts.is_empty() && self.claude_args.to_ascii_lowercase().contains("bypasspermissions");
+        [
+            ("add_dir", !o.extra.add_dirs.is_empty()),
+            ("allowed_tools", !o.extra.allowed_tools.is_empty()),
+            ("mcp_config", !o.extra.mcp_config.is_empty()),
+            ("append_system_prompt", !o.extra.append_system_prompt.is_empty()),
+            ("safe-mode", o.extra.flags.iter().any(|f| !crate::claude_opts::agent_switch(f))),
+            ("bypassPermissions", self.claude_opts.permission_mode.trim() == crate::claude_opts::BYPASS || legacy_bypass),
+            ("continue_last", self.continue_last),
+        ]
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(n, _)| n)
+        .collect()
+    }
+
+    /// Optionen der Vorlage, die erweitern, worauf Claude zugreifen darf oder wie es läuft – vor einem Start durch den
+    /// Nutzer wird nachgefragt (#244, `templates.json` kann weitergegeben werden). Ohne Claude leer.
+    pub fn risky(&self) -> Vec<(Risk, String)> {
+        if !self.claude {
+            return Vec::new();
+        }
+        let o = self.opts();
+        let mut v: Vec<(Risk, String)> = o.extra.add_dirs.iter().map(|d| (Risk::AddDir, d.clone())).collect();
+        if !o.extra.allowed_tools.is_empty() {
+            v.push((Risk::AllowedTools, o.extra.allowed_tools.clone()));
+        }
+        if !o.extra.mcp_config.is_empty() {
+            v.push((Risk::McpConfig, o.extra.mcp_config.clone()));
+        }
+        if o.extra.flags.iter().any(|f| !crate::claude_opts::agent_switch(f)) {
+            v.push((Risk::SafeMode, "--safe-mode".into()));
+        }
+        if !o.extra.append_system_prompt.is_empty() {
+            v.push((Risk::AppendSystemPrompt, o.extra.append_system_prompt.clone()));
+        }
+        v
+    }
+
+    /// Startoptionen und bereinigte freie Reste der alten Zeile `claude_args` (frühere Vorlagen können dort Argumente
+    /// haben, die keine Option kennt; sie bleiben erhalten).
+    pub fn opts_and_rest(&self) -> (ClaudeOpts, String) {
+        (self.opts(), legacy_rest(&self.claude_args))
     }
 
     /// Tags bereinigt (Ränder, leere und doppelte weg).
@@ -114,6 +182,11 @@ impl Template {
     /// Ist das eine Terminal-Vorlage (genau eine Sitzung)?
     pub fn is_terminal(&self) -> bool {
         self.terminal && self.items.len() == 1
+    }
+
+    /// Optionen aller Sitzungen, nach denen vor dem Start gefragt wird ([`TplItem::risky`]): (Sitzungsname, Art, Wert).
+    pub fn risky(&self) -> Vec<(String, Risk, String)> {
+        self.items.iter().take(24).flat_map(|it| it.risky().into_iter().map(move |(k, v)| (it.name.trim().to_string(), k, v))).collect()
     }
 
     /// Die Sitzung einer Terminal-Vorlage.
@@ -145,6 +218,74 @@ impl Template {
         }
         query.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
     }
+}
+
+/// Option einer Vorlage, nach der vor dem Start gefragt wird ([`TplItem::risky`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Risk {
+    /// `--add-dir`
+    AddDir,
+    /// `--allowed-tools`
+    AllowedTools,
+    /// `--mcp-config`
+    McpConfig,
+    /// `--safe-mode` (Hooks und MCP-Server aus)
+    SafeMode,
+    /// `--append-system-prompt`
+    AppendSystemPrompt,
+}
+
+/// Dieselben Optionen ohne die, nach denen vor dem Start gefragt wird ([`TplItem::risky`]): „Ohne diese Optionen
+/// starten“.
+pub fn strip_risky(o: &ClaudeOpts) -> ClaudeOpts {
+    let mut o = o.clone();
+    o.extra = o.extra.agent_safe();
+    o.extra.append_system_prompt.clear();
+    o
+}
+
+/// Bereinigte freie Reste einer alten `claude_args`-Zeile (was keine Startoption ist).
+pub fn legacy_rest(claude_args: &str) -> String {
+    let c = crate::claude_opts::clean_legacy_report(claude_args, false);
+    ClaudeOpts::split_legacy(&c.line).1
+}
+
+/// Warum ein Agent eine Vorlage mit diesem Profil nicht starten darf (MCP `create_session` mit `template`): Ein
+/// Profil mit eigenem Programm, Argumenten oder Startbefehl ist nur erlaubt, wenn es das Standardprofil des Projekts ist
+/// (das bekäme der Agent ohnehin); nie, wenn darin `dangerously` oder `bypassPermissions` vorkommt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentProfileIssue {
+    /// Programm, Argumente oder Startbefehl enthalten `dangerously`/`bypassPermissions`.
+    Dangerous,
+    /// Eigenes Programm, Argumente oder Startbefehl – und nicht das Standardprofil des Projekts.
+    Custom,
+}
+
+/// Prüfung für [`AgentProfileIssue`].
+pub fn agent_profile_issue(program: &str, args: &str, startup: &str, is_project_default: bool) -> Option<AgentProfileIssue> {
+    let fields = [program, args, startup];
+    if fields.iter().any(|f| {
+        let l = f.to_ascii_lowercase();
+        l.contains("dangerously") || l.contains("bypasspermissions")
+    }) {
+        return Some(AgentProfileIssue::Dangerous);
+    }
+    (!is_project_default && fields.iter().any(|f| !f.trim().is_empty())).then_some(AgentProfileIssue::Custom)
+}
+
+/// Gruppen-Vorlage speichern (Ordner → „Als Vorlage speichern …“): eine Gruppen-Vorlage gleichen Namens (ohne
+/// Groß-/Kleinschreibung) wird ersetzt; heißt eine Terminal-Vorlage so, bekommt die neue einen freien Namen
+/// (`Name #2`), statt sie still zu überschreiben. Gibt den verwendeten Namen zurück.
+pub fn save_group(list: &mut Vec<Template>, mut t: Template) -> String {
+    let n = t.name.trim().to_string();
+    let clash_terminal = list.iter().any(|x| x.is_terminal() && x.name.trim().eq_ignore_ascii_case(&n));
+    t.name = if clash_terminal { unique_name(&n, list) } else { n };
+    let name = t.name.clone();
+    match list.iter().position(|x| !x.is_terminal() && x.name.trim().eq_ignore_ascii_case(&name)) {
+        Some(i) => list[i] = t,
+        None => list.push(t),
+    }
+    name
 }
 
 /// Name einer neuen Sitzung aus einer Vorlage: `base`, solange keine Sitzung so heißt, sonst `base #2`, `base #3` …
@@ -305,6 +446,114 @@ mod tests {
         assert_eq!(o.model, "opus");
         assert_eq!(o.permission_mode, "", "nie bypassPermissions");
         assert!(o.extra.add_dirs.is_empty(), "alte Zeile: keine Rechte erweiternden Wertoptionen");
+    }
+
+    #[test]
+    fn template_flags_are_added_to_the_agents_flags() {
+        let it = TplItem { claude: true, claude_opts: ClaudeOpts { extra: ExtraOpts { flags: vec!["ide".into(), "no-chrome".into()], ..ExtraOpts::default() }, ..ClaudeOpts::default() }, ..TplItem::default() };
+        let asked = ClaudeOpts { extra: ExtraOpts { flags: vec!["verbose".into()], ..ExtraOpts::default() }, ..ClaudeOpts::default() };
+        let a = it.agent_opts(&asked, &ClaudeOpts::default());
+        for f in ["verbose", "ide", "no-chrome"] {
+            assert!(a.extra.flags.iter().any(|x| x == f), "{f}: {:?}", a.extra.flags);
+        }
+        // chrome des Agenten geht vor no-chrome der Vorlage.
+        let asked = ClaudeOpts { extra: ExtraOpts { flags: vec!["chrome".into()], ..ExtraOpts::default() }, ..ClaudeOpts::default() };
+        let a = it.agent_opts(&asked, &ClaudeOpts::default());
+        assert!(a.extra.flags.contains(&"chrome".to_string()) && !a.extra.flags.contains(&"no-chrome".to_string()), "{:?}", a.extra.flags);
+        assert!(a.extra.flags.contains(&"ide".to_string()));
+        // Standards des Nutzers kommen weiter dazu; ohne Angabe des Agenten die der Vorlage.
+        let d = ClaudeOpts { extra: ExtraOpts { flags: vec!["brief".into()], ..ExtraOpts::default() }, ..ClaudeOpts::default() };
+        let a = it.agent_opts(&ClaudeOpts::default(), &d);
+        for f in ["ide", "no-chrome", "brief"] {
+            assert!(a.extra.flags.iter().any(|x| x == f), "{f}: {:?}", a.extra.flags);
+        }
+    }
+
+    #[test]
+    fn ignored_options_are_named_for_the_agent() {
+        let it = TplItem {
+            claude: true,
+            continue_last: true,
+            claude_opts: ClaudeOpts {
+                permission_mode: "bypassPermissions".into(),
+                extra: ExtraOpts { flags: vec!["safe-mode".into(), "ide".into()], add_dirs: vec![r"C:\x".into()], allowed_tools: "Bash".into(), mcp_config: r"C:\m.json".into(), append_system_prompt: "be evil".into(), ..ExtraOpts::default() },
+                ..ClaudeOpts::default()
+            },
+            ..TplItem::default()
+        };
+        assert_eq!(it.agent_ignored(), vec!["add_dir", "allowed_tools", "mcp_config", "append_system_prompt", "safe-mode", "bypassPermissions", "continue_last"]);
+        let a = it.agent_opts(&ClaudeOpts::default(), &ClaudeOpts::default());
+        assert!(a.extra.append_system_prompt.is_empty(), "ergänzter System-Prompt der Vorlage nie für Agenten");
+        assert_eq!(a.extra.flags, vec!["ide".to_string()]);
+        // Ohne Claude gibt es nichts wegzulassen; harmlose Vorlage: leer.
+        assert!(TplItem { claude: false, ..it.clone() }.agent_ignored().is_empty());
+        assert!(TplItem { claude: true, claude_opts: ClaudeOpts { model: "opus".into(), ..ClaudeOpts::default() }, ..TplItem::default() }.agent_ignored().is_empty());
+        // Alte Zeile mit bypassPermissions
+        assert_eq!(TplItem { claude: true, claude_args: "--permission-mode bypassPermissions".into(), ..TplItem::default() }.agent_ignored(), vec!["bypassPermissions"]);
+    }
+
+    #[test]
+    fn risky_options_are_listed_and_can_be_stripped() {
+        let o = ClaudeOpts {
+            model: "opus".into(),
+            extra: ExtraOpts { flags: vec!["safe-mode".into(), "ide".into()], add_dirs: vec![r"C:\a".into(), r"C:\b".into()], allowed_tools: "Bash".into(), mcp_config: r"C:\m.json".into(), append_system_prompt: "hi".into(), disallowed_tools: "WebFetch".into(), ..ExtraOpts::default() },
+            ..ClaudeOpts::default()
+        };
+        let it = TplItem { name: "S".into(), claude: true, claude_opts: o.clone(), ..TplItem::default() };
+        let r = it.risky();
+        let kinds: Vec<Risk> = r.iter().map(|x| x.0).collect();
+        assert_eq!(kinds, vec![Risk::AddDir, Risk::AddDir, Risk::AllowedTools, Risk::McpConfig, Risk::SafeMode, Risk::AppendSystemPrompt]);
+        assert_eq!(r[1].1, r"C:\b");
+        assert!(TplItem { claude: false, ..it.clone() }.risky().is_empty(), "ohne Claude keine Rückfrage");
+        assert!(TplItem { claude: true, claude_opts: ClaudeOpts { extra: ExtraOpts { disallowed_tools: "X".into(), flags: vec!["ide".into()], ..ExtraOpts::default() }, ..ClaudeOpts::default() }, ..TplItem::default() }.risky().is_empty(), "einschränkende Optionen sind harmlos");
+        let s = strip_risky(&o);
+        assert_eq!((s.model.as_str(), s.extra.disallowed_tools.as_str()), ("opus", "WebFetch"));
+        assert!(s.extra.add_dirs.is_empty() && s.extra.allowed_tools.is_empty() && s.extra.mcp_config.is_empty() && s.extra.append_system_prompt.is_empty());
+        assert_eq!(s.extra.flags, vec!["ide".to_string()]);
+        // Gruppen-Vorlage: je Sitzung
+        let g = Template { name: "G".into(), items: vec![TplItem { name: "a".into(), ..TplItem::default() }, it.clone()], ..Template::default() };
+        let gr = g.risky();
+        assert_eq!(gr.len(), 6);
+        assert!(gr.iter().all(|x| x.0 == "S"));
+        // Alte Zeile: --safe-mode und --append-system-prompt kommen aus ihr, Rechte erweiternde Wertoptionen nie.
+        let old = TplItem { claude: true, claude_args: r"--safe-mode --append-system-prompt hi --add-dir C:\x".into(), ..TplItem::default() };
+        let kinds: Vec<Risk> = old.risky().iter().map(|x| x.0).collect();
+        assert_eq!(kinds, vec![Risk::SafeMode, Risk::AppendSystemPrompt]);
+    }
+
+    #[test]
+    fn free_legacy_arguments_are_kept() {
+        let it = TplItem { claude: true, claude_args: "--model opus --foo bar --dangerously-skip-permissions --resume 123".into(), ..TplItem::default() };
+        let (o, rest) = it.opts_and_rest();
+        assert_eq!(o.model, "opus");
+        assert_eq!(rest, "--foo bar", "bereinigt, ohne Optionen");
+        assert_eq!(legacy_rest(""), "");
+    }
+
+    #[test]
+    fn custom_profiles_are_checked_for_agents() {
+        assert_eq!(agent_profile_issue("", "", "", false), None);
+        assert_eq!(agent_profile_issue(r"C:\x\tool.exe", "", "", false), Some(AgentProfileIssue::Custom));
+        assert_eq!(agent_profile_issue("", "-x", "", false), Some(AgentProfileIssue::Custom));
+        assert_eq!(agent_profile_issue("", "", "claude", false), Some(AgentProfileIssue::Custom));
+        assert_eq!(agent_profile_issue(r"C:\x\tool.exe", "-a", "make", true), None, "Standardprofil des Projekts");
+        assert_eq!(agent_profile_issue("", "", "claude --dangerously-skip-permissions", true), Some(AgentProfileIssue::Dangerous));
+        assert_eq!(agent_profile_issue("claude.exe", "--permission-mode BypassPermissions", "", true), Some(AgentProfileIssue::Dangerous));
+    }
+
+    #[test]
+    fn group_templates_replace_groups_but_never_terminal_templates() {
+        let term = Template::terminal("API", TplItem::default());
+        let group = |n: &str, k: usize| Template { name: n.into(), items: vec![TplItem::default(); k], ..Template::default() };
+        let mut list = vec![term.clone(), group("Web", 1)];
+        assert_eq!(save_group(&mut list, group("web", 2)), "web", "ohne Groß-/Kleinschreibung ersetzt");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].items.len(), 2);
+        assert_eq!(save_group(&mut list, group("api", 3)), "api #2", "Terminal-Vorlage bleibt");
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], term);
+        assert_eq!(save_group(&mut list, group("New", 1)), "New");
+        assert_eq!(list.len(), 4);
     }
 
     #[test]

@@ -151,6 +151,16 @@ impl Creator {
     }
 }
 
+/// Ordner einer Sitzung, die ein Agent aus einer Vorlage anlegt (ohne `group` im Aufruf): Ordner der Vorlage unter dem
+/// Kinder-Ordner des Agenten (`child/vorlage`), sonst der, den es gibt (#244). Leere Angaben zählen nicht.
+fn nest_group(child: Option<String>, tpl: Option<String>) -> Option<String> {
+    let tpl = tpl.map(|t| crate::state::clean_folder_path(t.trim())).filter(|t| !t.is_empty());
+    match (child.filter(|c| !c.is_empty()), tpl) {
+        (Some(c), Some(t)) => Some(format!("{c}/{t}")),
+        (c, t) => c.or(t),
+    }
+}
+
 fn forget_created(created: &mut HashMap<u64, Creator>, id: u64) {
     created.remove(&id);
     for creator in created.values_mut() {
@@ -1320,7 +1330,34 @@ impl App {
         let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
         // Profil der Vorlage (0 = keins) statt des Standardprofils des Projekts.
         let tpl_profile = item.map(|it| it.profile);
-        let default_profile = tpl_profile.unwrap_or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0));
+        let project_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        let default_profile = tpl_profile.unwrap_or(project_profile);
+        // Ein Profil mit eigenem Programm, Argumenten oder Startbefehl startet ein Agent aus einer Vorlage nur, wenn es das
+        // Standardprofil des Projekts ist (das bekäme er auch ohne Vorlage); nie mit `dangerously`/`bypassPermissions`.
+        if let Some(p) = tpl_profile.and_then(|pid| self.profile(pid)) {
+            use crate::templates::AgentProfileIssue;
+            match crate::templates::agent_profile_issue(&p.program, &p.args, &p.startup, p.id == project_profile) {
+                Some(AgentProfileIssue::Dangerous) => {
+                    return Err(er(
+                        "bad_args",
+                        tr(
+                            "Das Profil dieser Vorlage enthält „dangerously“ oder „bypassPermissions“ in Programm, Argumenten oder Startbefehl – über MCP nicht erlaubt.",
+                            "This template's profile contains “dangerously” or “bypassPermissions” in its program, arguments or startup command – not allowed via MCP.",
+                        ),
+                    ))
+                }
+                Some(AgentProfileIssue::Custom) => {
+                    return Err(er(
+                        "bad_args",
+                        tr(
+                            "Das Profil dieser Vorlage hat ein eigenes Programm, eigene Argumente oder einen Startbefehl und ist nicht das Standardprofil des Projekts – über MCP nicht erlaubt (Agenten starten nie eigene Programme). Der Nutzer kann die Vorlage selbst starten.",
+                            "This template's profile has its own program, arguments or startup command and is not the project's default profile – not allowed via MCP (agents never start custom programs). The user can start the template themselves.",
+                        ),
+                    ))
+                }
+                None => {}
+            }
+        }
         // Startet die Sitzung (nach Auflösung des Standardprofils mit eigenem Programm) in WSL, darf `cwd` ein
         // Linux-Pfad sein (#172); sonst nie.
         let eff_shell = match tpl_profile {
@@ -1368,7 +1405,11 @@ impl App {
         let before: HashSet<u64> = self.entries.keys().copied().collect();
         // Ohne `group`: Läuft der Agent in einer Hub-Sitzung, kommen seine neuen Sitzungen in einen Unterordner mit deren Namen
         // (Baumansicht) – so stehen Kinder unter dem Elternteil und sind leicht zu finden. Eine Vorlage bringt ihren Ordner mit.
-        let group = self.mcp_child_group(s("group").or_else(|| item.map(|it| it.group.clone()).filter(|g| !g.is_empty())), caller);
+        // Der Ordner einer Vorlage kommt unter den Kinder-Ordner (Kinder bleiben unter ihrem Elternteil).
+        let group = match s("group") {
+            Some(g) => Some(g),
+            None => nest_group(self.mcp_child_group(None, caller), item.map(|it| it.group.trim().to_string())),
+        };
         // „Letzte Konversation im Ordner fortsetzen“ einer Vorlage gilt für Agenten nie (fremde Konversation); „bei jedem Start
         // neu“ schon.
         let claude_continue = item.and_then(|it| it.claude_continue);
@@ -1390,8 +1431,10 @@ impl App {
         if let Some(c) = cwd_checked {
             v["cwd_checked"] = json!(c);
         }
-        if let Some((t, _)) = &tpl {
+        if let Some((t, it)) = &tpl {
             v["template"] = json!(t.name);
+            // Optionen der Vorlage, die für Agenten nie gelten (immer da, leer = nichts weggelassen).
+            v["template_ignored"] = json!(it.agent_ignored());
         }
         Ok(Ok(v))
     }
@@ -2181,6 +2224,19 @@ fn create_wait(recv: Result<crate::wsl::DirCheck, std::sync::mpsc::TryRecvError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ordner einer Vorlage unter dem Kinder-Ordner des Agenten (#244).
+    #[test]
+    fn template_folder_nests_under_the_child_folder() {
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(nest_group(s("Work/Agent"), s("Backend/API")), s("Work/Agent/Backend/API"));
+        assert_eq!(nest_group(s("Agent"), s(" /Backend// ")), s("Agent/Backend"));
+        assert_eq!(nest_group(s("Agent"), s("")), s("Agent"));
+        assert_eq!(nest_group(s("Agent"), None), s("Agent"));
+        assert_eq!(nest_group(None, s("Backend")), s("Backend"));
+        assert_eq!(nest_group(None, s("  ")), None);
+        assert_eq!(nest_group(None, None), None);
+    }
 
     /// Stufen-Auswahl (#187): jede Stufe ist ein echter Knopf – auch nicht gewählt mit sichtbarer Fläche –, zeigt die
     /// Hand und schaltet beim Klick um.

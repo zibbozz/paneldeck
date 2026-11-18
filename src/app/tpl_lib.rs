@@ -31,6 +31,121 @@ pub(super) struct TplView {
     pub(super) dragging: Option<usize>,
     /// Sitzungsliste der Seitenleiste in diesem Bild (Ablageziel in der Listenansicht).
     pub(super) list_rect: Option<Rect>,
+    /// Offene Rückfrage vor dem Start einer Vorlage mit erweiterten Claude-Optionen.
+    pub(super) confirm: Option<TplConfirm>,
+}
+
+/// Rückfrage vor dem Start einer Vorlage, deren Claude-Optionen erweitern, worauf Claude zugreifen darf oder wie es
+/// läuft (zusätzliche Ordner, erlaubte Werkzeuge, MCP-Konfiguration, `--safe-mode`, ergänzter System-Prompt):
+/// `templates.json` kann von jemand anderem stammen.
+#[derive(Clone, Debug)]
+pub(super) struct TplConfirm {
+    /// Index und Name der Vorlage beim Fragen (der Name findet sie wieder, falls sich die Liste geändert hat).
+    pub(super) index: usize,
+    pub(super) name: String,
+    pub(super) at: TplAt,
+    /// (Sitzungsname, Art, Wert)
+    pub(super) rows: Vec<(String, templates::Risk, String)>,
+    /// Gruppen-Vorlage (zeigt die Sitzung je Zeile).
+    pub(super) group: bool,
+    focus: bool,
+}
+
+impl TplConfirm {
+    pub(super) fn new(index: usize, t: &Template, at: TplAt) -> Self {
+        TplConfirm { index, name: t.name.clone(), at, rows: t.risky(), group: !t.is_terminal(), focus: true }
+    }
+
+    /// Index der gefragten Vorlage in `list` (über den Namen, falls sich die Liste inzwischen geändert hat).
+    pub(super) fn live_index(&self, list: &[Template]) -> Option<usize> {
+        if list.get(self.index).is_some_and(|t| t.name == self.name) {
+            return Some(self.index);
+        }
+        list.iter().position(|t| t.name == self.name)
+    }
+}
+
+/// Ergebnis eines Bilds der Rückfrage.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(super) enum ConfirmOut {
+    Open,
+    /// Mit allen Optionen starten.
+    Start,
+    /// Ohne die erfragten Optionen starten.
+    StartWithout,
+    Cancel,
+}
+
+/// Beschriftung einer erfragten Option.
+pub(super) fn risk_label(k: templates::Risk, lang: Lang) -> &'static str {
+    use templates::Risk::*;
+    match k {
+        AddDir => lang.t("Zusätzlicher Ordner (--add-dir)", "Extra folder (--add-dir)"),
+        AllowedTools => lang.t("Erlaubte Werkzeuge (--allowed-tools)", "Allowed tools (--allowed-tools)"),
+        McpConfig => lang.t("MCP-Konfiguration (--mcp-config)", "MCP config (--mcp-config)"),
+        SafeMode => lang.t("Hooks und MCP-Server aus (--safe-mode)", "Hooks and MCP servers off (--safe-mode)"),
+        AppendSystemPrompt => lang.t("System-Prompt ergänzen (--append-system-prompt)", "Append system prompt (--append-system-prompt)"),
+    }
+}
+
+/// Die Rückfrage als Fenster (rein, ohne App – headless testbar). Beim Öffnen bekommt „Abbrechen“ den Fokus (nicht das
+/// Terminal dahinter, #255); Esc bricht ab.
+pub(super) fn tpl_confirm_ui(ctx: &egui::Context, c: &mut TplConfirm, lang: Lang) -> ConfirmOut {
+    let mut out = ConfirmOut::Open;
+    let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    egui::Window::new(lang.t("Vorlage mit erweiterten Claude-Optionen starten?", "Start template with extended Claude options?"))
+        .id(Id::new("tpl_confirm"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .default_width(460.0)
+        .show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            let intro = if lang == Lang::De {
+                format!("Die Vorlage {} startet Claude Code mit Optionen, die erweitern, worauf Claude zugreifen darf oder wie es läuft. Vorlagen können von anderen stammen (templates.json lässt sich weitergeben) – prüfe die Werte:", lang.q(&c.name))
+            } else {
+                format!("The template {} starts Claude Code with options that widen what Claude may access or change how it runs. Templates can come from other people (templates.json can be shared) – check the values:", lang.q(&c.name))
+            };
+            dialogs::hint_label(ui, &intro, amber);
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().id_salt("tpl_confirm_rows").max_height(260.0).show(ui, |ui| {
+                egui::Grid::new("tpl_confirm_grid").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                    for (session, k, v) in &c.rows {
+                        let label = if c.group && !session.is_empty() { format!("{session}: {}", risk_label(*k, lang)) } else { risk_label(*k, lang).to_string() };
+                        ui.label(RichText::new(format!("⚠ {label}")).color(amber));
+                        ui.add(egui::Label::new(RichText::new(v).monospace()).wrap());
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let s = ui.button(lang.t("Starten", "Start"));
+                mark(ui, "confirm_start", &s);
+                if s.clicked() {
+                    out = ConfirmOut::Start;
+                }
+                let w = ui.button(lang.t("Ohne diese Optionen starten", "Start without these options"));
+                mark(ui, "confirm_without", &w);
+                if w.clicked() {
+                    out = ConfirmOut::StartWithout;
+                }
+                let x = ui.button(lang.t("Abbrechen", "Cancel"));
+                mark(ui, "confirm_cancel", &x);
+                if c.focus {
+                    x.request_focus();
+                    c.focus = false;
+                }
+                if x.clicked() {
+                    out = ConfirmOut::Cancel;
+                }
+            });
+        });
+    if esc && out == ConfirmOut::Open {
+        out = ConfirmOut::Cancel;
+    }
+    out
 }
 
 /// Editor einer Vorlage. Terminal-Vorlagen haben alle Felder einer Sitzung, Gruppen-Vorlagen nur Name und Raster.
@@ -52,6 +167,8 @@ pub(super) struct TplForm {
     pub(super) color: [u8; 3],
     pub(super) conv: ConvChoice,
     pub(super) opts: ClaudeOpts,
+    /// Freie Argumente aus der alten Zeile `claude_args` (frühere Versionen), die keine Option kennt: bleiben erhalten.
+    pub(super) legacy_rest: String,
     pub(super) error: Option<String>,
     focus: bool,
 }
@@ -78,6 +195,7 @@ impl TplForm {
             color: item.color.unwrap_or([0x56, 0x9c, 0xd6]),
             conv,
             opts: item.opts(),
+            legacy_rest: templates::legacy_rest(&item.claude_args),
             members: t.items.iter().map(|i| i.name.clone()).collect(),
             item,
             error: None,
@@ -117,8 +235,15 @@ impl TplForm {
             it.claude_continue = None;
             it.prompt = String::new();
         }
-        // Die alte Zeile entfällt: die Optionen stehen strukturiert in `claude_opts` (ältere Versionen starten ohne sie).
-        it.claude_args = String::new();
+        // Die alte Zeile für ältere Versionen (die kennen nur Modell, Effort, Permission-Mode, Agent und Schalter):
+        // ohne `--safe-mode` (ältere Versionen fragen nicht nach), dahinter die erhaltenen freien Argumente.
+        it.claude_args = if it.claude {
+            let mut legacy = it.claude_opts.clone();
+            legacy.extra.flags.retain(|f| crate::claude_opts::agent_switch(f));
+            format!("{} {}", legacy.to_legacy(), self.legacy_rest.trim()).trim().to_string()
+        } else {
+            String::new()
+        };
         Template::terminal(&name, it)
     }
 
@@ -135,10 +260,14 @@ impl TplForm {
         Ok(())
     }
 
-    /// Index der bearbeiteten Vorlage, solange es sie unter ihrem Namen noch gibt (sonst wird neu angelegt).
+    /// Index der bearbeiteten Vorlage, solange es sie unter ihrem Namen noch gibt (sonst wird neu angelegt). Hat sich
+    /// die Liste inzwischen verschoben (Löschen, Duplizieren), wird sie über ihren Namen gefunden.
     pub(super) fn live_index(&self, list: &[Template]) -> Option<usize> {
         let (i, n) = (self.index?, self.orig_name.as_ref()?);
-        list.get(i).filter(|t| &t.name == n).map(|_| i)
+        if list.get(i).is_some_and(|t| &t.name == n) {
+            return Some(i);
+        }
+        templates::find(list, n).map(|(i, _)| i)
     }
 }
 
@@ -205,7 +334,10 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
                     }
                 });
                 ui.end_row();
-                let custom = profiles.iter().find(|p| p.id == f.item.profile).is_some_and(|p| !p.program.trim().is_empty());
+                let custom_prof = profiles.iter().find(|p| p.id == f.item.profile).filter(|p| !p.program.trim().is_empty());
+                let custom = custom_prof.is_some();
+                // Shell, mit der die Sitzung startet: ein eigenes wsl.exe-Programm zählt als WSL (wie beim Start).
+                let eff_shell = custom_prof.map(super::custom_program_shell_id).unwrap_or_else(|| f.item.shell_id.clone());
                 ui.label("Shell");
                 if custom {
                     ui.label(RichText::new(lang.t("Programm des Profils", "Program of the profile")).color(style::dim(ui)));
@@ -220,9 +352,11 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
                 }
                 ui.end_row();
                 ui.label(lang.t("Startordner", "Start folder"));
-                session_settings::folder_field(ui, &mut f.item.cwd, &f.item.shell_id, false, lang);
+                session_settings::folder_field(ui, &mut f.item.cwd, &eff_shell, false, lang);
                 ui.end_row();
-                if f.item.shell_id.starts_with("wsl") {
+                if eff_shell.starts_with("wsl") {
+                    #[cfg(test)]
+                    ui.data_mut(|d| d.insert_temp(Id::new(("tpl_mark", "wsl_hint")), true));
                     ui.label("");
                     dialogs::hint_label(ui, lang.t("WSL: auch ein Linux-Pfad wie /home/ich/projekt oder ~", "WSL: also a Linux path such as /home/me/project or ~"), style::dim(ui));
                     ui.end_row();
@@ -268,7 +402,20 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
                         session_settings::conv_combo(ui, "tpl_conv", &mut f.conv, lang);
                         ui.end_row();
                         // Wie die Standards: kein bypassPermissions in einer Vorlage (Datei kann weitergegeben werden).
-                        opts_ok = dialogs::claude_opts_rows(ui, lang, &mut f.opts, "tpled", dialogs::OptsPlace::Defaults);
+                        opts_ok = dialogs::claude_opts_rows(ui, lang, &mut f.opts, "tpled", dialogs::OptsPlace::Template);
+                        if !f.legacy_rest.trim().is_empty() {
+                            ui.label(lang.t("Weitere Argumente", "Further arguments"));
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new(f.legacy_rest.trim()).monospace());
+                                if ui.small_button(lang.t("Entfernen", "Remove")).on_hover_text(lang.t("Diese Argumente aus einer früheren Version nicht mehr übergeben", "Stop passing these arguments from an earlier version")).clicked() {
+                                    f.legacy_rest.clear();
+                                }
+                            });
+                            ui.end_row();
+                            ui.label("");
+                            dialogs::hint_label(ui, lang.t("Aus einer früheren Version der Vorlage; werden beim Start unverändert (bereinigt) an Claude Code übergeben.", "From an earlier version of the template; passed to Claude Code at start as they are (cleaned)."), style::dim(ui));
+                            ui.end_row();
+                        }
                         ui.label(lang.t("Start-Prompt", "Start prompt"));
                         ui.add(egui::TextEdit::multiline(&mut f.item.prompt).desired_rows(2).desired_width(320.0));
                         ui.end_row();
@@ -322,13 +469,16 @@ impl App {
     pub(super) fn tpl_item_of(&self, e: &Entry) -> TplItem {
         let (o, rest) = e.meta.claude_opts_eff();
         let o = o.sanitized(false);
+        // Für ältere Versionen weiter auch als Zeile (die kennen nur Modell, Effort, Permission-Mode, Agent und
+        // Schalter) – ohne `--safe-mode`: ältere Versionen fragen vor dem Start nicht nach.
+        let mut legacy = o.clone();
+        legacy.extra.flags.retain(|f| crate::claude_opts::agent_switch(f));
         TplItem {
             name: e.display_name(),
             shell_id: e.meta.shell_id.clone(),
             cwd: e.cwd_now(),
             claude: e.meta.claude,
-            // Für ältere Versionen weiter auch als Zeile (die kennt nur Modell, Effort, Permission-Mode, Agent).
-            claude_args: format!("{} {rest}", o.to_legacy()).trim().to_string(),
+            claude_args: format!("{} {rest}", legacy.to_legacy()).trim().to_string(),
             profile: e.meta.profile,
             group: e.meta.group.clone(),
             prompt: String::new(),
@@ -361,8 +511,24 @@ impl App {
         self.entries.values().map(|e| e.display_name()).collect()
     }
 
-    /// Vorlage `i` starten (Nutzer: Seitenleiste, Palette, Kontextmenü, Ziehen). Gibt die neuen Sitzungen zurück.
+    /// Vorlage `i` starten (Nutzer: Seitenleiste, Palette, Kontextmenü, Ordner-Menü, Ziehen, alter Vorlagen-Dialog).
+    /// Bringt sie Claude-Optionen mit, die erweitern, worauf Claude zugreifen darf oder wie es läuft
+    /// ([`TplItem::risky`]), wird zuerst nachgefragt ([`tpl_confirm_ui`]) und noch nichts gestartet. Gibt die neuen
+    /// Sitzungen zurück.
     pub(super) fn start_template(&mut self, ctx: &egui::Context, i: usize, at: TplAt) -> Vec<u64> {
+        let Some(t) = self.templates.get(i) else { return Vec::new() };
+        if needs_confirm(t, self.settings.claude_mode) {
+            self.tpl.confirm = Some(TplConfirm::new(i, t, at));
+            self.tpl.dragging = None;
+            self.templates_open = false;
+            self.want_focus = None;
+            return Vec::new();
+        }
+        self.start_template_with(ctx, i, at, false)
+    }
+
+    /// Vorlage `i` ohne Rückfrage starten; `drop_risky` = ohne die erfragten Optionen ([`templates::strip_risky`]).
+    pub(super) fn start_template_with(&mut self, ctx: &egui::Context, i: usize, at: TplAt, drop_risky: bool) -> Vec<u64> {
         let Some(t) = self.templates.get(i).cloned() else { return Vec::new() };
         let terminal = t.is_terminal();
         // Gruppen-Vorlagen in einen Bereich: wie ein normaler Start (mit Raster).
@@ -393,8 +559,13 @@ impl App {
                 (None, _) => it.group.clone(),
             };
             let claude = it.claude && self.settings.claude_mode;
-            // Strukturierte Optionen der Vorlage vor den Standards des Nutzers; alte Vorlagen: nur die Zeile.
-            let claude_opts = (!it.claude_opts.is_empty()).then(|| it.opts().or(&defaults));
+            // Optionen der Vorlage (strukturiert oder aus der alten Zeile) vor den Standards des Nutzers; die freien Reste
+            // der alten Zeile bleiben dabei.
+            let (mut own, rest) = it.opts_and_rest();
+            if drop_risky {
+                own = templates::strip_risky(&own);
+            }
+            let claude_opts = claude.then(|| own.or(&defaults));
             let id = self.new_session(
                 ctx,
                 NewOpts {
@@ -402,7 +573,7 @@ impl App {
                     cwd: Some(it.cwd.clone()),
                     name: Some(name),
                     claude,
-                    claude_args: it.claude_args.clone(),
+                    claude_args: rest,
                     claude_opts,
                     continue_last: claude && it.continue_last,
                     prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
@@ -463,8 +634,25 @@ impl App {
         v
     }
 
+    /// Rückfrage vor dem Start zeigen (falls offen).
+    pub(super) fn tpl_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut c) = self.tpl.confirm.take() else { return };
+        let out = tpl_confirm_ui(ctx, &mut c, self.settings.language);
+        let (idx, at) = (c.live_index(&self.templates), c.at.clone());
+        match out {
+            ConfirmOut::Open => self.tpl.confirm = Some(c),
+            ConfirmOut::Cancel => {}
+            ConfirmOut::Start | ConfirmOut::StartWithout => {
+                if let Some(i) = idx {
+                    self.start_template_with(ctx, i, at, out == ConfirmOut::StartWithout);
+                }
+            }
+        }
+    }
+
     /// Editor zeigen (falls offen).
     pub(super) fn tpl_editor_ui(&mut self, ctx: &egui::Context) {
+        self.tpl_confirm_dialog(ctx);
         let Some(mut f) = self.tpl.form.take() else { return };
         let lang = self.settings.language;
         let folders = self.project_folders();
@@ -570,6 +758,16 @@ impl App {
         };
         style::paint_icon(&p, icon, Pos2::new(rect.min.x + 12.0, cy), icol);
         let mut right = rect.max.x - 6.0;
+        // Erweiterte Claude-Optionen: kleines Warnsymbol (Tooltip nennt sie; vor dem Start wird gefragt).
+        if needs_confirm(t, self.settings.claude_mode) {
+            let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+            let g = p.layout_no_wrap("⚠".to_string(), FontId::proportional(12.0), amber);
+            right -= g.size().x;
+            #[cfg(test)]
+            ui.data_mut(|d| d.insert_temp(Id::new(("tpl_mark_warn", i)), true));
+            p.galley(Pos2::new(right, cy - g.size().y / 2.0), g, amber);
+            right -= 6.0;
+        }
         if !t.is_terminal() {
             let g = p.layout_no_wrap(t.items.len().to_string(), FontId::proportional(11.0), weak);
             right -= g.size().x;
@@ -625,20 +823,30 @@ impl App {
     }
 
     /// Eine Vorlage wird gezogen: Ziel anzeigen (Ordner im Baum, Sitzungsliste, Bereich mit Zone) und beim Loslassen starten.
-    pub(super) fn handle_tpl_drag(&mut self, ctx: &egui::Context) {
+    /// `list_rect` = sichtbare Sitzungsliste der Seitenleiste in diesem Bild (Ordner zählen nur darin, nicht
+    /// herausgescrollte). Ohne Zeiger über dem Fenster gibt es kein Ziel (Loslassen außerhalb tut nichts); ist die Taste
+    /// nicht mehr gedrückt, ohne dass ein Loslassen ankam (z. B. Moduswechsel während des Ziehens), endet das Ziehen.
+    pub(super) fn handle_tpl_drag(&mut self, ctx: &egui::Context, list_rect: Option<Rect>) {
         let Some(i) = self.tpl.dragging else { return };
         let Some(t) = self.templates.get(i).cloned() else {
             self.tpl.dragging = None;
             return;
         };
         let lang = self.settings.language;
-        let (pos, released, esc) = ctx.input(|inp| (inp.pointer.hover_pos().or(inp.pointer.latest_pos()), inp.pointer.any_released(), inp.key_pressed(Key::Escape)));
+        let (pos, released, down, esc) = ctx.input(|inp| (inp.pointer.hover_pos(), inp.pointer.any_released(), inp.pointer.primary_down(), inp.key_pressed(Key::Escape)));
+        if !down && !released {
+            self.tpl.dragging = None;
+            return;
+        }
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("tpl_drag_layer")));
         let accent = style::ACCENT;
         let fill = Color32::from_rgba_unmultiplied(0xd9, 0x77, 0x57, 40);
         let own_group = t.items.first().map(|it| it.group.clone()).unwrap_or_default();
         let target: Option<(TplAt, String)> = pos.and_then(|p| {
-            let folder = self.folder_rects.iter().filter(|(_, r)| r.contains(p)).min_by(|a, b| (a.1.width() * a.1.height()).total_cmp(&(b.1.width() * b.1.height()))).map(|(f, r)| (f.clone(), *r));
+            let in_list = list_rect.is_some_and(|r| r.contains(p));
+            let folder = in_list
+                .then(|| self.folder_rects.iter().filter(|(_, r)| r.contains(p)).min_by(|a, b| (a.1.width() * a.1.height()).total_cmp(&(b.1.width() * b.1.height()))).map(|(f, r)| (f.clone(), list_rect.map_or(*r, |l| r.intersect(l)))))
+                .flatten();
             if let Some((f, r)) = folder {
                 if f.is_empty() {
                     let label = if own_group.is_empty() || !t.is_terminal() { lang.t("Kein Ordner", "No folder").to_string() } else { format!("→ {own_group}") };
@@ -648,7 +856,7 @@ impl App {
                 painter.rect_stroke(r.shrink(1.0), 6.0, Stroke::new(1.5_f32, accent), StrokeKind::Inside);
                 return Some((TplAt::Folder(f.clone()), format!("→ {f}")));
             }
-            if self.tpl.list_rect.is_some_and(|r| r.contains(p)) {
+            if in_list {
                 let label = if own_group.is_empty() || !t.is_terminal() { lang.t("Starten", "Start").to_string() } else { format!("→ {own_group}") };
                 return Some((TplAt::Default, label));
             }
@@ -687,6 +895,11 @@ impl App {
             }
         }
     }
+}
+
+/// Fragt Paneldeck vor dem Start dieser Vorlage nach (erweiterte Claude-Optionen, nur mit Claude-Modus)?
+pub(super) fn needs_confirm(t: &Template, claude_mode: bool) -> bool {
+    claude_mode && !t.risky().is_empty()
 }
 
 /// Text der Zone eines Bereichs (wie beim Ziehen von Sitzungen).
@@ -740,6 +953,15 @@ pub(super) fn tpl_tip(t: &Template, shells: &[ShellSpec], profiles: &[Profile], 
             }
         }
         None => lines.push(format!("{} {}: {}", t.items.len(), lang.t("Sitzungen", "sessions"), t.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>().join(", "))),
+    }
+    let risky = t.risky();
+    if !risky.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("⚠ {}", lang.t("Erweiterte Claude-Optionen (vor dem Start wird gefragt):", "Extended Claude options (asks before starting):")));
+        for (_, k, v) in risky.iter().take(8) {
+            let v: String = v.chars().take(80).collect();
+            lines.push(format!("  {}: {v}", risk_label(*k, lang)));
+        }
     }
     lines.push(String::new());
     lines.push(lang.t("Doppelklick startet; ziehen in die Sitzungsliste, einen Ordner oder einen Bereich.", "Double-click starts; drag into the session list, a folder or a pane.").to_string());
@@ -806,7 +1028,9 @@ mod tests {
         let back = f.to_template(Some(&t));
         let b = back.item().unwrap();
         assert_eq!((b.group.as_str(), b.prompt.as_str(), b.notes.as_str()), ("Work/API", "hi", "n"));
-        assert!(b.continue_last && b.claude_continue.is_none() && b.claude_args.is_empty());
+        assert!(b.continue_last && b.claude_continue.is_none());
+        // Für ältere Versionen auch als Zeile (#244 Review).
+        assert_eq!(b.claude_args, "--model opus");
         assert_eq!(b.claude_opts.model, "opus");
         assert_eq!(b.color, Some([9, 8, 7]));
         // Claude aus: Optionen, Prompt und Konversation entfallen.
@@ -846,9 +1070,126 @@ mod tests {
         assert!(e.check(&list, Lang::En).is_ok());
         e.name = "Web".into();
         assert!(e.check(&list, Lang::En).is_err());
-        // Wurde die Vorlage inzwischen gelöscht/umbenannt, wird neu angelegt.
+        // Hat sich die Liste verschoben (Löschen/Duplizieren davor), wird sie über ihren Namen gefunden (#244 Review);
+        // gibt es sie nicht mehr, wird neu angelegt.
         assert_eq!(TplForm::of(Some(0), &list[0]).live_index(&list), Some(0));
-        assert_eq!(TplForm::of(Some(1), &list[0]).live_index(&list), None);
+        assert_eq!(TplForm::of(Some(1), &list[0]).live_index(&list), Some(0));
+        assert_eq!(TplForm::of(Some(5), &list[0]).live_index(&list), Some(0));
+        let gone = Template { name: "Gone".into(), ..Template::default() };
+        assert_eq!(TplForm::of(Some(0), &gone).live_index(&list), None);
+    }
+
+    #[test]
+    fn editing_keeps_free_legacy_arguments_and_writes_the_line_for_old_versions() {
+        // Vorlage einer früheren Version: nur die Zeile.
+        let old = Template::terminal("Old", TplItem { claude: true, claude_args: "--model opus --foo bar".into(), ..TplItem::default() });
+        let mut f = TplForm::of(Some(0), &old);
+        assert_eq!((f.opts.model.as_str(), f.legacy_rest.as_str()), ("opus", "--foo bar"));
+        f.opts.extra.flags = vec!["ide".into(), "safe-mode".into()];
+        f.opts.effort = "high".into();
+        let t = f.to_template(Some(&old));
+        let it = t.item().unwrap();
+        assert_eq!(it.claude_opts.model, "opus");
+        // Ältere Versionen: Modell, Effort und Schalter als Zeile (ohne --safe-mode), dahinter die freien Argumente.
+        assert_eq!(it.claude_args, "--model opus --effort high --ide --foo bar");
+        // Wieder geöffnet: dieselben freien Argumente, nicht doppelt.
+        let f2 = TplForm::of(Some(0), &t);
+        assert_eq!(f2.legacy_rest, "--foo bar");
+        assert_eq!(f2.to_template(Some(&t)).items[0].claude_args, it.claude_args);
+        // Entfernt der Nutzer sie, fallen sie weg.
+        let mut f3 = f2.clone();
+        f3.legacy_rest.clear();
+        assert_eq!(f3.to_template(Some(&t)).items[0].claude_args, "--model opus --effort high --ide");
+        // Ohne Claude keine Zeile.
+        let mut f4 = f2.clone();
+        f4.item.claude = false;
+        assert!(f4.to_template(None).items[0].claude_args.is_empty());
+    }
+
+    #[test]
+    fn custom_wsl_program_counts_as_wsl_in_the_editor() {
+        let ctx = egui::Context::default();
+        let prof = Profile { id: 7, name: "My WSL".into(), program: r"C:\Windows\System32\wsl.exe".into(), args: "-d Debian".into(), ..Profile::default() };
+        let mut f = TplForm::blank();
+        f.item.profile = 7;
+        f.item.shell_id = "powershell".into();
+        let hint = |ctx: &egui::Context| ctx.data(|d| d.get_temp::<bool>(Id::new(("tpl_mark", "wsl_hint")))).unwrap_or(false);
+        let run = |ctx: &egui::Context, f: &mut TplForm, profiles: &[Profile]| {
+            ctx.data_mut(|d| d.remove::<bool>(Id::new(("tpl_mark", "wsl_hint"))));
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0))), ..RawInput::default() };
+            let _ = ctx.run(input, |ctx| {
+                tpl_form_ui(ctx, f, &shells(), profiles, &[], true, Lang::En);
+            });
+        };
+        run(&ctx, &mut f, std::slice::from_ref(&prof));
+        assert!(hint(&ctx), "eigenes wsl.exe-Programm = WSL");
+        run(&ctx, &mut f, &[Profile { program: r"C:\tools\nu.exe".into(), ..prof.clone() }]);
+        assert!(!hint(&ctx), "anderes Programm: kein WSL");
+        assert_eq!(super::super::custom_program_shell_id(&prof), "wsl:Debian");
+    }
+
+    fn risky_template() -> Template {
+        let o = ClaudeOpts { extra: crate::claude_opts::ExtraOpts { add_dirs: vec![r"C:\secret".into()], flags: vec!["safe-mode".into()], ..Default::default() }, ..ClaudeOpts::default() };
+        Template::terminal("Risky", TplItem { claude: true, claude_opts: o, ..TplItem::default() })
+    }
+
+    #[test]
+    fn risky_templates_ask_before_starting() {
+        let t = risky_template();
+        assert!(needs_confirm(&t, true));
+        assert!(!needs_confirm(&t, false), "ohne Claude-Modus startet kein Claude");
+        assert!(!needs_confirm(&Template::terminal("Plain", TplItem { claude: true, ..TplItem::default() }), true));
+        let tip = tpl_tip(&t, &[], &[], Lang::En);
+        assert!(tip.contains("⚠") && tip.contains(r"C:\secret") && tip.contains("--safe-mode"), "{tip}");
+        assert!(tpl_tip(&t, &[], &[], Lang::De).contains("vor dem Start wird gefragt"));
+        // Die Rückfrage findet ihre Vorlage über den Namen wieder.
+        let c = TplConfirm::new(3, &t, TplAt::Default);
+        assert_eq!(c.rows.len(), 2);
+        let list = vec![Template::terminal("Other", TplItem::default()), t.clone()];
+        assert_eq!(c.live_index(&list), Some(1));
+        assert_eq!(c.live_index(&list[..1]), None);
+    }
+
+    fn confirm_frame(ctx: &egui::Context, c: &mut TplConfirm, events: Vec<Event>) -> ConfirmOut {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0))), events, ..RawInput::default() };
+        let mut out = ConfirmOut::Open;
+        let _ = ctx.run(input, |ctx| {
+            out = tpl_confirm_ui(ctx, c, Lang::En);
+        });
+        out
+    }
+
+    fn confirm_click(ctx: &egui::Context, c: &mut TplConfirm, key: &'static str) -> ConfirmOut {
+        let mut p = rect(ctx, key).expect(key).center();
+        for _ in 0..30 {
+            confirm_frame(ctx, c, vec![Event::PointerMoved(p)]);
+            let now = rect(ctx, key).expect(key).center();
+            if now == p {
+                break;
+            }
+            p = now;
+        }
+        confirm_frame(ctx, c, vec![Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+        confirm_frame(ctx, c, vec![Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }])
+    }
+
+    #[test]
+    fn confirm_dialog_buttons_focus_and_escape() {
+        let t = risky_template();
+        let ctx = egui::Context::default();
+        let mut c = TplConfirm::new(0, &t, TplAt::Default);
+        assert_eq!(confirm_frame(&ctx, &mut c, vec![]), ConfirmOut::Open);
+        // Der Dialog nimmt die Tastatur (Fokus auf „Abbrechen“), nicht das Terminal dahinter.
+        assert!(ctx.memory(|m| m.focused()).is_some());
+        confirm_frame(&ctx, &mut c, vec![]);
+        assert_eq!(confirm_click(&ctx, &mut c, "confirm_start"), ConfirmOut::Start);
+        assert_eq!(confirm_click(&ctx, &mut c, "confirm_without"), ConfirmOut::StartWithout);
+        assert_eq!(confirm_click(&ctx, &mut c, "confirm_cancel"), ConfirmOut::Cancel);
+        let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        assert_eq!(confirm_frame(&ctx, &mut c, vec![esc]), ConfirmOut::Cancel);
+        for k in [templates::Risk::AddDir, templates::Risk::AllowedTools, templates::Risk::McpConfig, templates::Risk::SafeMode, templates::Risk::AppendSystemPrompt] {
+            assert_ne!(risk_label(k, Lang::En), risk_label(k, Lang::De));
+        }
     }
 
     #[test]

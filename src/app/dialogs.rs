@@ -664,7 +664,8 @@ impl App {
 /// `bypassPermissions` nur mit `allow_bypass` (Dialog „Neue Sitzung“, gilt nur für diese Sitzung) und mit Warnung;
 /// in den Standards gibt es es nicht.
 pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, place: OptsPlace) -> bool {
-    let allow_bypass = place != OptsPlace::Defaults;
+    // Nie in den Standards und nie in einer Vorlage (die Datei kann weitergegeben werden).
+    let allow_bypass = !matches!(place, OptsPlace::Defaults | OptsPlace::Template);
     use crate::claude_opts::{valid_name, BYPASS, EFFORTS, MAX_NAME, MODEL_ALIASES, PERMISSION_MODES};
     let default = lang.t("Standard von Claude Code", "Claude Code default");
     let shown = |v: &str| match v {
@@ -774,6 +775,9 @@ pub(super) enum OptsPlace {
     Session,
     /// Standards unter Einstellungen → Claude.
     Defaults,
+    /// Editor einer Terminal-Vorlage (#244): wie die Standards ohne `bypassPermissions`; die Datei kann weitergegeben
+    /// werden, vor dem Start erweiterter Optionen wird nachgefragt.
+    Template,
 }
 
 /// Ergebnis einer Pfadprüfung im Abschnitt, je Pfad zwischengespeichert (keine Dateisystem-Zugriffe in jedem Bild).
@@ -910,6 +914,10 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
         hint(
             ui,
             match place {
+                OptsPlace::Template => lang.t(
+                    "⚠ --safe-mode schaltet Hooks und MCP-Server ab: Paneldeck erkennt dann weder Status noch Freigabe-Fragen der Sitzung – auch der Schutz, dass Agenten keine Freigaben beantworten, greift dort nicht. Vor dem Start dieser Vorlage fragt Paneldeck nach; startet ein Agent sie, gilt es nie.",
+                    "⚠ --safe-mode turns off hooks and MCP servers: Paneldeck then sees neither the status nor the permission prompts of the session – the protection that keeps agents from answering permission prompts does not work there either. Paneldeck asks before this template starts; when an agent starts it, it never applies.",
+                ),
                 OptsPlace::Defaults => lang.t(
                     "⚠ --safe-mode schaltet Hooks und MCP-Server ab: Paneldeck erkennt dann weder Status noch Freigabe-Fragen dieser Sitzungen – auch der Schutz, dass Agenten keine Freigaben beantworten, greift dort nicht. Gilt nur für Sitzungen, die du selbst startest, nie für Sitzungen von Agenten.",
                     "⚠ --safe-mode turns off hooks and MCP servers: Paneldeck then sees neither the status nor the permission prompts of these sessions – the protection that keeps agents from answering permission prompts does not work there either. Applies only to sessions you start yourself, never to sessions created by agents.",
@@ -1013,6 +1021,10 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
                 OptsPlace::NewSession => lang.t(
                     "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude in dieser Sitzung zugreifen und was es ohne Rückfrage tun darf.",
                     "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking in this session.",
+                ),
+                OptsPlace::Template => lang.t(
+                    "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude zugreifen und was es ohne Rückfrage tun darf. Sie werden mit der Vorlage gespeichert (templates.json lässt sich weitergeben): Vor dem Start zeigt Paneldeck die Werte und fragt nach; Sitzungen, die ein Agent aus der Vorlage startet, bekommen sie nie.",
+                    "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking. They are saved with the template (templates.json can be shared): before it starts, Paneldeck shows the values and asks; sessions an agent starts from the template never get them.",
                 ),
                 OptsPlace::Session => lang.t(
                     "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude in dieser Sitzung zugreifen und was es ohne Rückfrage tun darf – ab dem nächsten Start, auch wenn ein Agent die Sitzung angelegt hat.",
@@ -1446,5 +1458,9 @@ mod copts_tests {
         let mut d = ClaudeOpts { permission_mode: "bypassPermissions".into(), ..Default::default() };
         assert!(rows_with(&mut d, OptsPlace::Defaults));
         assert_eq!(d.permission_mode, "");
+        // Vorlagen (#244): ebenso nicht – die Datei kann weitergegeben werden.
+        let mut t = ClaudeOpts { permission_mode: "bypassPermissions".into(), ..Default::default() };
+        assert!(rows_with(&mut t, OptsPlace::Template));
+        assert_eq!(t.permission_mode, "");
     }
 }

@@ -1672,18 +1672,7 @@ impl App {
         if let Some(pid) = id.strip_prefix("custom:").and_then(|n| n.parse::<u64>().ok()) {
             if let Some(p) = self.profile(pid) {
                 let args = split_args(&p.args);
-                // Eigenes wsl.exe-Programm: wie eine erkannte WSL-Shell behandeln (Pfadumrechnung, Hooks).
-                // Andere bekannte Shells bekommen deren ID, damit eingefügte Pfade passend gequotet werden
-                // (sonst bekäme ein cmd-/PowerShell-Profil bash-Quoting mit '…').
-                let stem = std::path::Path::new(&p.program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-                let sid = match stem.as_str() {
-                    "wsl" => format!("wsl:{}", shells::wsl_distro(&args).unwrap_or_default()),
-                    // WSL-Starter aus System32: WSL mit der Standard-Distribution (Hooks, WSLENV, Pfade; #261).
-                    "bash" if shells::is_system_bash(&p.program) => "wsl:".to_string(),
-                    "pwsh" | "powershell" | "cmd" => stem.clone(),
-                    _ => id.to_string(),
-                };
-                return Some(ShellSpec { id: sid, label: p.name.clone(), program: p.program.clone(), args });
+                return Some(ShellSpec { id: custom_program_shell_id(p), label: p.name.clone(), program: p.program.clone(), args });
             }
         }
         self.shells
@@ -2620,7 +2609,8 @@ impl App {
         }
         // Weitere Dialoge über dem Terminal (#255): Neue Sitzung, Prompt an alle, Vorlagen, Worktree schließen. Nur ein
         // Terminal gibt den Fokus ab – ein Feld des Dialogs behält ihn.
-        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() {
+        // Ebenso der Editor der Vorlagen-Bibliothek und die Rückfrage vor dem Start einer Vorlage (#244).
+        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() || self.tpl.form.is_some() || self.tpl.confirm.is_some() {
             self.release_terminal_focus(ctx);
         }
         let theme = self.theme();
@@ -3805,8 +3795,8 @@ impl App {
                 } else {
                     let n = items.len();
                     let name = if name.trim().is_empty() { format!("{} {}", lang.t("Vorlage", "Template"), self.templates.len() + 1) } else { name.trim().to_string() };
-                    self.templates.retain(|t| t.name != name);
-                    self.templates.push(Template { name: name.clone(), grid: n > 1, items, terminal: false });
+                    // Gleichnamige Gruppen-Vorlage (ohne Groß-/Kleinschreibung) ersetzen, nie still eine Terminal-Vorlage.
+                    let name = templates::save_group(&mut self.templates, Template { name, grid: n > 1, items, terminal: false });
                     templates::save(&self.dir, &self.templates);
                     self.notify_text(format!("{} {} ({} {})", lang.t("Vorlage gespeichert:", "Template saved:"), lang.q(&name), n, lang.t("Sitzungen", "sessions")));
                 }
@@ -4898,6 +4888,21 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
             }
             r.context_menu(|ui| menu(ui, actions));
         }
+    }
+}
+
+/// Shell-ID eines Profils mit eigenem Programm (`custom:<id>`, aufgelöst wie [`App::shell_by_id`]): Ein eigenes
+/// wsl.exe-Programm wird wie eine erkannte WSL-Shell behandelt (Pfadumrechnung, Hooks, Linux-Startordner). Andere
+/// bekannte Shells bekommen deren ID, damit eingefügte Pfade passend gequotet werden (sonst bekäme ein
+/// cmd-/PowerShell-Profil bash-Quoting mit '…'); sonst bleibt es `custom:<id>`.
+pub(super) fn custom_program_shell_id(p: &Profile) -> String {
+    let stem = std::path::Path::new(&p.program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match stem.as_str() {
+        "wsl" => format!("wsl:{}", shells::wsl_distro(&split_args(&p.args)).unwrap_or_default()),
+        // WSL-Starter aus System32: WSL mit der Standard-Distribution (Hooks, WSLENV, Pfade; #261).
+        "bash" if shells::is_system_bash(&p.program) => "wsl:".to_string(),
+        "pwsh" | "powershell" | "cmd" => stem,
+        _ => format!("custom:{}", p.id),
     }
 }
 

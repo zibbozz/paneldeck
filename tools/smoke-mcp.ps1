@@ -660,11 +660,18 @@ $wait
       [pscustomobject]@{ name = 'smoke-tpl'; terminal = $true; grid = $false; items = @([pscustomobject]@{ name = 'API'; shell_id = 'powershell'; cwd = "$proj"; claude = $true; profile = 1; group = 'tplgrp'; prompt = ''; tags = @('smoke'); color = @(1, 2, 3); notes = 'tpl-note'; claude_opts = [pscustomobject]@{ model = 'haiku'; permission_mode = 'bypassPermissions'; flags = @('ide', 'safe-mode'); add_dirs = @("$proj"); allowed_tools = 'Read'; mcp_config = $mcpCfg } }) },
       [pscustomobject]@{ name = 'smoke-plain'; terminal = $true; items = @([pscustomobject]@{ name = ''; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 1; group = 'tplplain' }) },
       [pscustomobject]@{ name = 'smoke-admin'; terminal = $true; items = @([pscustomobject]@{ name = 'adm'; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 77 }) },
-      [pscustomobject]@{ name = 'smoke-group'; items = @([pscustomobject]@{ name = 'a'; shell_id = 'cmd'; profile = 1 }, [pscustomobject]@{ name = 'b'; shell_id = 'cmd'; profile = 1 }) }
+      [pscustomobject]@{ name = 'smoke-group'; items = @([pscustomobject]@{ name = 'a'; shell_id = 'cmd'; profile = 1 }, [pscustomobject]@{ name = 'b'; shell_id = 'cmd'; profile = 1 }) },
+      # Profile mit eigenem Programm bzw. gefaehrlichem Startbefehl (Review #244): fuer Agenten nie.
+      [pscustomobject]@{ name = 'smoke-custom'; terminal = $true; items = @([pscustomobject]@{ name = 'cust'; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 78 }) },
+      [pscustomobject]@{ name = 'smoke-danger'; terminal = $true; items = @([pscustomobject]@{ name = 'dng'; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 79 }) }
     )
     [IO.File]::WriteAllText("$data\templates.json", (ConvertTo-Json -InputObject $tpl -Depth 10), (New-Object Text.UTF8Encoding $false))
   }
-  $script:extraProfiles = @([pscustomobject]@{ id = 77; name = 'Smoke-Admin'; env = $ptyEnv; admin = $true })
+  $script:extraProfiles = @(
+    [pscustomobject]@{ id = 77; name = 'Smoke-Admin'; env = $ptyEnv; admin = $true },
+    [pscustomobject]@{ id = 78; name = 'Smoke-Custom'; env = $ptyEnv; program = "$env:SystemRoot\System32\cmd.exe"; args = '/k echo smoke-custom' },
+    [pscustomobject]@{ id = 79; name = 'Smoke-Danger'; env = $ptyEnv; startup = 'claude --dangerously-skip-permissions' }
+  )
   Set-Level 'Control'
   $script:extraProfiles = @()
   # Beim naechsten Neustart die Standards wieder entfernen (spaetere Abschnitte erwarten keine).
@@ -717,6 +724,13 @@ $wait
   Check 'template: Gruppen-Vorlage -> bad_args' ((Code $g) -eq 'bad_args' -and $g.text -match 'group template') $g.text
   $ad = Tool 'create_session' @{ template = 'smoke-admin' }
   Check 'template: Administrator-Profil der Vorlage -> admin_profile' ((Code $ad) -eq 'admin_profile') $ad.text
+  $cu = Tool 'create_session' @{ template = 'smoke-custom' }
+  Check 'template: Profil mit eigenem Programm (nicht Standardprofil) -> bad_args' ((Code $cu) -eq 'bad_args' -and $cu.text -match 'own program') $cu.text
+  $dg = Tool 'create_session' @{ template = 'smoke-danger' }
+  Check 'template: Profil mit dangerously im Startbefehl -> bad_args' ((Code $dg) -eq 'bad_args' -and $dg.text -match 'dangerously') $dg.text
+  $ign = @($t1.data.template_ignored)
+  Check 'template: template_ignored nennt die weggelassenen Optionen' (-not $t1.err -and $ign -contains 'add_dir' -and $ign -contains 'allowed_tools' -and $ign -contains 'mcp_config' -and $ign -contains 'safe-mode') $t1.text
+  Check 'template ohne riskante Optionen: template_ignored leer' (-not $t4.err -and ($t4.data.PSObject.Properties.Name -contains 'template_ignored') -and @($t4.data.template_ignored).Count -eq 0) $t4.text
   Check 'template mit kind=chat -> bad_args' ((Code (Tool 'create_session' @{ template = 'smoke-plain'; kind = 'chat' })) -eq 'bad_args')
   foreach ($x in @($t1, $t2, $t3, $t4)) { if ($x.data.id) { [void](Tool 'close_session' @{ session = $x.data.id }) } }
   # Sitzung des Nutzers: Start von aussen (wie aus dem Explorer) per --open --claude -> alle Standards.
