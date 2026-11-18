@@ -3731,11 +3731,32 @@ impl App {
                 }
             }
             Action::StartRename(id) => {
-                // Die Zeile muss zu sehen sein (Filter, eingeklappter Ordner), sonst geschähe nichts Sichtbares und das
-                // wartende Umbenennen holte sich später den Fokus vom Terminal (#259).
-                if self.reveal_row(id) {
-                    if let Some(e) = self.entries.get(&id) {
-                        self.rename = Some((id, e.display_name()));
+                let target = self.entries.get(&id).map(|e| (self.in_win(e), self.sidebar_match(e), e.meta.window, e.meta.project));
+                match target {
+                    None => {}
+                    Some((false, _, window, _)) => {
+                        // Sitzung eines anderen Fensters (Palette): dort umbenennen; das Fenster kommt dabei nach vorn
+                        // (Review zu #259).
+                        self.route_to(ctx, window, Action::StartRename(id));
+                    }
+                    Some((true, matched, _, project)) => {
+                        if !matched && project != self.active_project {
+                            // Anderes Projekt: dorthin wechseln, damit die Zeile erscheint. Der Fokus bleibt beim
+                            // Umbenennen-Feld (ein Terminal, das ihn danach nähme, beendete das Umbenennen sofort).
+                            self.filter.clear();
+                            self.switch_project(project);
+                            self.want_focus = None;
+                        }
+                        // Die Zeile muss zu sehen sein (Filter, eingeklappter Ordner), sonst geschähe nichts Sichtbares und
+                        // das wartende Umbenennen holte sich später den Fokus vom Terminal (#259).
+                        if self.reveal_row(id) {
+                            if let Some(e) = self.entries.get(&id) {
+                                self.rename = Some((id, e.display_name()));
+                            }
+                        } else {
+                            let lang = self.settings.language;
+                            self.notify_text(lang.t("Diese Sitzung lässt sich hier nicht umbenennen.", "This session can't be renamed here.").to_string());
+                        }
                     }
                 }
             }

@@ -572,11 +572,19 @@ impl App {
                             let dup = !cur.is_empty() && current.iter().filter(|(_, c)| c == cur).count() > 1;
                             // Alte Belegung ohne Strg/Alt (vor #256 aufnehmbar): wirkt nicht mehr, darum der Hinweis.
                             let plain = keys::parse(cur).is_some_and(|(m, k)| !keys::usable(m, k));
+                            // Von Hand eingetragenes Zeichen ohne Umschalt (z. B. `Ctrl+?`): löste bis 2.3.1 auch mit Umschalt
+                            // aus, seit #254 nur noch genau so.
+                            let shift = keys::parse(cur).is_some_and(|(m, k)| keys::may_need_shift(m, k));
                             let capturing = self.capture_key.as_deref() == Some(*id);
                             let warn = if dup {
                                 lang.t("Doppelt belegt!", "Duplicate!")
                             } else if plain {
                                 lang.t("Ohne Strg/Alt – wirkt nicht", "No Ctrl/Alt – inactive")
+                            } else if shift {
+                                lang.t(
+                                    "Ohne Umschalt – wirkt nur, wenn die Tastatur das Zeichen ohne Umschalt liefert; sonst neu aufnehmen",
+                                    "No Shift – works only if your keyboard types this character without Shift; otherwise record it again",
+                                )
                             } else {
                                 ""
                             };

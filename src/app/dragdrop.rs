@@ -231,7 +231,12 @@ impl App {
     pub(super) fn handle_drops(&mut self, ctx: &egui::Context) {
         // Nur im Terminal Hub: die Bereichsflächen (`pane_rects`) stammen vom letzten Zeichnen dort – in der Todo-Liste
         // landete der Pfad sonst in einem unsichtbaren Terminal und das Layout änderte sich (#259).
+        // Die Ablage-Hervorhebung wird je Bild neu gezeichnet (kein Zustand, der stehen bliebe); die abgelegten Dateien
+        // bleiben unangetastet in der Eingabe (hier wird nur gelesen), andere Empfänger sehen sie weiter. Die Flächen der
+        // Bereiche gelten in der Todo-Liste nicht: leeren, damit nichts (Ablage-Ziele beim Ziehen, Screenshot einer
+        // Sitzung über MCP) mit Flächen des unsichtbaren Terminal Hub rechnet.
         if self.mode != titlebar::Mode::Terminals {
+            self.pane_rects.clear();
             return;
         }
         let (files, hover, hovering) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos(), !i.raw.hovered_files.is_empty()));
