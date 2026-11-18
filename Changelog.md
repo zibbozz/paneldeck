@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.3.2] - WIP
 
+### Changed
+
+- New-session dialog: the two ways to continue a Claude conversation are now one *Conversation* choice – new (resumed on reload/restart), continue the last conversation in the folder, or a new one on every start (#241)
+
 ### Fixed
 
 - Switching back to the Terminals tab (tab, shortcut, ticket “back”, extra windows) focuses the previously focused pane again (otherwise the top-left one), unless a dialog or popup is open (#238)
@@ -20,6 +24,15 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Ctrl+click no longer runs scripts such as .py, .pyw, .pl, .rb or .ahk (or any PATHEXT type), it shows them in Explorer; Ctrl-hover no longer checks paths on network drives or `\wsl$` on the UI thread (#251)
 - Typed letters followed quickly by Alt/Ctrl are no longer sent as Alt combinations; the block cursor covers wide characters fully and draws bold/italic/emoji correctly; the release of Ctrl+C is reported to programs using kitty key events (#252)
 - `run_command`: the output of a line exactly as wide as the terminal is no longer empty in Git Bash with the Windows console host (setting *Use the bundled console host* off); the prompt mark is no longer placed on that output line (#231)
+- Claude sessions (especially in WSL) no longer start with `--continue` or `--resume` of an unrelated conversation: a session only resumes its own conversation, and only if it exists; on Windows this also works without hooks. Changing the working folder or shell starts a new conversation, saved old arguments can no longer resume or continue a conversation, and Claude history *Resume* uses a Windows shell, refuses entries without a conversation id and switches to a session that already has the conversation open. Templates keep the session's *continue* setting. Old saved Claude arguments that Paneldeck knows (extra folders, tools, MCP config, fallback model, budget, system prompt addition) become Claude options; the others are named once in a notice (#245)
+- Hook messages only count for the session's current launch: a `claude -p` started from within a session, leftover processes or other terminals no longer change a session's conversation or status. Global hooks that still point to an older or other `paneldeck.exe` keep updating the status, and *Settings → Claude → Hooks* offers to reinstall them; sessions started with `--safe-mode` ignore hook messages (#260)
+- New-session dialog: Esc closes an open list first; with Claude mode off, program start, reload and Duplicate no longer start Claude; profiles with the WSL launcher `bash.exe` from System32 are treated as WSL (hooks, status, paths) (#261)
+- New-session dialog, session settings, close-window dialog, session templates and command palette fit on small screens: the content scrolls, the buttons stay visible and hints no longer cover other controls (#241)
+- *New session*, *Prompt to all sessions in folder*, *Session templates* and *Close session with worktree* take the keyboard focus from the terminal; Esc no longer reaches the terminal, and Ctrl+Enter in a terminal no longer sends the open prompt composer (#255)
+
+### Security
+
+- Changes window: viewing a diff and the automatic `git status` no longer run external diff, textconv or filter commands defined in a repository's own Git configuration – also not from submodules; the standard Git LFS filter of a repository keeps working (#253)
 
 ## [2.3.1] - 2026-11-17
 

@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.3.2] - WIP
 
+### Changed
+
+- Dialog „Neue Sitzung“: Die zwei Wege, eine Claude-Konversation fortzusetzen, sind jetzt eine Auswahl „Konversation“ – neu (beim Neu laden/Neustart fortgesetzt), letzte Konversation im Ordner fortsetzen oder bei jedem Start eine neue (#241)
+
 ### Fixed
 
 - Zurück im Reiter „Terminals“ (Reiter, Kürzel, „Zurück“ aus einem Ticket, weitere Fenster) bekommt wieder die zuvor fokussierte Pane den Fokus (sonst die oben links) – außer ein Dialog oder Popup ist offen (#238)
@@ -20,6 +24,15 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Strg+Klick startet keine Skripte wie .py, .pyw, .pl, .rb oder .ahk mehr (auch keine Typen aus PATHEXT), sondern zeigt sie im Explorer; Strg+Hover prüft Pfade auf Netzlaufwerken und `\wsl$` nicht mehr im UI-Thread (#251)
 - Schnell getippte Buchstaben mit folgendem Alt/Strg kommen nicht mehr als Alt-Kombination an; der Block-Cursor deckt breite Zeichen ganz ab und zeigt fett/kursiv/Emoji richtig; das Loslassen von Strg+C wird Programmen mit kitty-Tastenereignissen gemeldet (#252)
 - `run_command`: Die Ausgabe einer Zeile in genau Terminalbreite ist in Git Bash mit dem Konsolen-Host von Windows (Einstellung „Mitgelieferten Konsolen-Host verwenden“ aus) nicht mehr leer; die Prompt-Marke landet nicht mehr auf dieser Ausgabezeile (#231)
+- Claude-Sitzungen (vor allem in WSL) starten nicht mehr mit `--continue` oder `--resume` einer fremden Konversation: Eine Sitzung setzt nur ihre eigene Konversation fort und nur, wenn es sie gibt; unter Windows auch ohne Hooks. Ein geänderter Arbeitsordner oder eine andere Shell beginnt eine neue Konversation, gespeicherte alte Argumente können keine Konversation mehr fortsetzen, und „Fortsetzen“ im Claude-Verlauf nutzt eine Windows-Shell, lehnt Einträge ohne Konversations-ID ab und wechselt zu einer Sitzung, in der die Konversation schon offen ist. Vorlagen behalten die Einstellung „fortsetzen“ der Sitzung. Alte gespeicherte Claude-Argumente, die Paneldeck kennt (weitere Ordner, Werkzeuge, MCP-Konfiguration, Ersatzmodell, Budget, Zusatz zum System-Prompt), werden zu Claude-Optionen; die übrigen nennt einmalig ein Hinweis (#245)
+- Hook-Meldungen zählen nur für den laufenden Start der Sitzung: Ein aus der Sitzung gestartetes `claude -p`, übrig gebliebene Prozesse oder andere Terminals ändern Konversation und Status einer Sitzung nicht mehr. Globale Hooks, die noch auf eine ältere oder andere `paneldeck.exe` zeigen, melden weiter den Status, und *Einstellungen → Claude → Hooks* bietet an, sie neu einzutragen; mit `--safe-mode` gestartete Sitzungen ignorieren Hook-Meldungen (#260)
+- Dialog „Neue Sitzung“: Esc schließt zuerst eine offene Auswahlliste; mit ausgeschaltetem Claude-Modus starten Programmstart, Neu laden und Duplizieren kein Claude mehr; Profile mit dem WSL-Starter `bash.exe` aus System32 gelten als WSL (Hooks, Status, Pfade) (#261)
+- Dialog „Neue Sitzung“, Einstellungen der Sitzung, „Fenster schließen?“, Sitzungs-Vorlagen und Befehls-Palette passen auf kleine Bildschirme: Der Inhalt scrollt, die Knöpfe bleiben sichtbar und Hinweise verdecken keine Bedienelemente mehr (#241)
+- „Neue Sitzung“, „Prompt an alle Sitzungen im Ordner“, „Sitzungs-Vorlagen“ und „Sitzung mit Worktree schließen“ nehmen dem Terminal den Tastaturfokus; Esc erreicht das Terminal nicht mehr, und Strg+Enter im Terminal sendet nicht mehr den offenen Prompt-Composer (#255)
+
+### Security
+
+- Fenster „Änderungen“: Das Anzeigen eines Diffs und der automatische `git status` starten keine externen Diff-, textconv- oder Filter-Befehle mehr, die in der Git-Konfiguration eines Repositorys selbst stehen – auch nicht aus Untermodulen; der Standard-Git-LFS-Filter eines Repositorys funktioniert weiter (#253)
 
 ## [2.3.1] - 2026-11-17
 
