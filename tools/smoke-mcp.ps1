@@ -574,6 +574,73 @@ $wait
     Check 'Neu gestarteter Claude im selben Terminal wird zugeordnet (UserPromptSubmit -> working)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
     Hook 'Stop'; Start-Sleep 0.5
     Check 'Stop des neuen Claude -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+
+    # --- Status ohne passenden Hook: Claude meldet nicht jedes Ende (kein Stop nach Esc, kein Stop fuer Hintergrund-Agenten ...)
+    $rowOf = { (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $cid } }
+    # Wartet bis $ms auf den Status $want; gibt den letzten Status zurueck.
+    function Wait-Status([string]$want, [int]$ms = 12000) {
+      $t0 = Get-Date
+      do { $s = & $stOf; if ($s -eq $want) { return $s }; Start-Sleep -Milliseconds 400 } while (((Get-Date) - $t0).TotalMilliseconds -lt $ms)
+      $s
+    }
+    # Hintergrund-Agent nach dem Ende der Runde: Werkzeug-Meldung -> working, sein Ende (SubagentStop) -> ready.
+    Hook 'PostToolUse' @{ tool_name = 'Bash'; agent_id = 'bg1' }; Start-Sleep 0.5
+    Check 'Hintergrund-Agent arbeitet nach dem Stop -> working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'SubagentStop'; Start-Sleep 0.5
+    Check 'SubagentStop ausserhalb einer Runde -> ready (vorher blieb working stehen)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    # Automatisches Zusammenfassen mitten in der Runde: SessionStart(compact) heisst nicht "bereit".
+    Hook 'UserPromptSubmit'; Hook 'SessionStart' @{ source = 'compact' }; Start-Sleep 0.5
+    Check 'SessionStart(compact) mitten in der Runde bleibt working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'SubagentStop'; Start-Sleep 0.3
+    Check 'SubagentStop in einer Runde bleibt working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 0.5
+    Hook 'Notification' @{ notification_type = 'auth_success'; message = 'Auth ok' }; Start-Sleep 0.5
+    Check 'Benachrichtigung auth_success aendert den Status nicht (vorher input)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    # Offene Freigabe-Frage: die Meldung eines anderen, gleichzeitig laufenden Werkzeugs ueberschreibt sie nicht.
+    Hook 'UserPromptSubmit'; Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'Claude needs your permission to use Bash' }; Start-Sleep 0.5
+    Check 'Freigabe-Frage -> approval' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Hook 'PostToolUse' @{ tool_name = 'Read'; agent_id = 'sub1' }; Hook 'PreToolUse' @{ tool_name = 'Bash' }; Start-Sleep 0.5
+    Check 'Meldungen anderer Werkzeuge lassen approval stehen (vorher working)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Hook 'PostToolUse' @{ tool_name = 'Bash' }; Start-Sleep 0.5
+    Check 'Das gefragte Werkzeug ist fertig -> working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 0.5
+    # Unterbrechung mit Esc: kein Stop-Hook. Das Transkript belegt das Ende der Runde -> ready; die Warteschlange wartet.
+    $u8n = New-Object Text.UTF8Encoding $false
+    $trFile = "$work\smoke-transcript.jsonl"
+    $tsNow = { [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fff') + 'Z' }
+    [IO.File]::WriteAllText($trFile, ('{"type":"user","timestamp":"' + (& $tsNow) + '","message":{"role":"user","content":"los"}}' + "`n"), $u8n)
+    Hook 'UserPromptSubmit' @{ transcript_path = $trFile }; Start-Sleep 0.5
+    $q2 = Tool 'queue_prompt' @{ session = $cid; prompt = 'nach-der-unterbrechung' }
+    Check 'queue_prompt waehrend working: wartet' ($q2.data.sent_immediately -eq $false -and $q2.data.queue_len -eq 1) $q2.text
+    Start-Sleep 6
+    Check 'Ohne Stop und ohne Beleg bleibt working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    [IO.File]::AppendAllText($trFile, ('{"type":"user","timestamp":"' + (& $tsNow) + '","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}' + "`n"), $u8n)
+    $st = Wait-Status 'ready' 15000
+    Check 'Unterbrechung ohne Stop-Hook: Status wird ready (Beleg im Transkript; vorher blieb working stehen)' ($st -eq 'ready') "status=$st"
+    Start-Sleep 1
+    Check 'Nach der Unterbrechung wartet die Warteschlange (nichts gesendet)' ((& $rowOf).queue_len -eq 1 -and (Wait-FakeFile $inputs 'nach-der-unterbrechung' 1) -notmatch 'nach-der-unterbrechung') "queue_len=$((& $rowOf).queue_len)"
+    Hook 'UserPromptSubmit'; Hook 'Stop'
+    Check 'Nach dem naechsten echten Stop laeuft die Warteschlange weiter' ((Wait-FakeFile $inputs 'nach-der-unterbrechung' 10000) -match 'nach-der-unterbrechung')
+    # Runde des gesendeten Prompts (ein blosser zweiter Stop gleich danach gaelte als doppelt zugestellt).
+    Hook 'UserPromptSubmit'; Start-Sleep 0.3; Hook 'Stop'; Start-Sleep 0.5
+    Check 'Runde des Warteschlangen-Prompts beendet -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    # Vom Hub angenommenes "arbeitet" (send_text mit Enter), das keine Meldung bestaetigt (lokaler Befehl): zurueck auf ready.
+    [void](Tool 'send_text' @{ session = $cid; text = '/model' }); Start-Sleep 0.5
+    Check 'send_text mit Enter -> working (angenommen)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    $t0 = Get-Date; $st = Wait-Status 'ready' 20000; $took = ((Get-Date) - $t0).TotalSeconds
+    Check 'Unbestaetigtes working faellt auf ready zurueck (nach ca. 10 s, vorher nie)' ($st -eq 'ready' -and $took -ge 6) "status=$st nach $([int]$took) s"
+    # Claude endet ohne SessionEnd (abgeschossen): die Shell steht wieder am Prompt -> Status weg, neuer Claude wird zugeordnet.
+    [void](Tool 'send_text' @{ session = $cid; text = 'exit-fake-claude' })
+    $st = Wait-Status 'unknown' 12000
+    Check 'Claude beendet ohne SessionEnd: Status faellt am Prompt der Shell weg' ($st -eq 'unknown') "status=$st"
+    Hook 'Stop'; Start-Sleep 0.5
+    Check 'Nachzuegler des beendeten Claude zaehlt nicht' ((& $stOf) -eq 'unknown') "status=$(& $stOf)"
+    $script:hookSid = [guid]::NewGuid().ToString()
+    Hook 'SessionStart' @{ source = 'startup' }; Start-Sleep 0.5
+    Check 'Neuer Claude nach einem Ende ohne SessionEnd wird zugeordnet (vorher fuer immer fremd)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Hook 'UserPromptSubmit'; Start-Sleep 0.4; Hook 'Stop'; Start-Sleep 0.5
+    Check 'Der neue Claude meldet seinen Status' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+
     Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'darf ich?' }; Start-Sleep 0.5
     Check 'Freigabe-Frage: send_text verweigert' ((Code (Tool 'send_text' @{ session = $cid; text = 'ja' })) -eq 'permission_pending')
     [void](Tool 'close_session' @{ session = $cid })

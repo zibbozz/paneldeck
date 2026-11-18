@@ -4,7 +4,8 @@
 # (~/.claude, ~/.claude.json, Anmeldedaten) sehen. Dafuer:
 #   - New-FakeClaudeBin: Ordner mit einem Ersatz-`claude` (claude.cmd fuer PowerShell/cmd, `claude` als sh-Skript fuer
 #     Git Bash). Jeder Aufruf schreibt eine Zeile nach <Ordner>\calls.txt, danach liest der Ersatz Eingabezeilen und
-#     schreibt sie nach <Ordner>\input.txt (so laesst sich pruefen, dass queue_prompt angekommen ist).
+#     schreibt sie nach <Ordner>\input.txt (so laesst sich pruefen, dass queue_prompt angekommen ist). Die Zeile
+#     "exit-fake-claude" beendet ihn (wie ein Claude, der ohne SessionEnd-Hook endet).
 #   - Enter-IsolatedTestEnv: setzt fuer diesen Prozess (und damit alles, was er startet) ein Schein-Profil
 #     (USERPROFILE, HOME, APPDATA, LOCALAPPDATA, CLAUDE_CONFIG_DIR), entfernt CLAUDECODE, CLAUDE_*, ANTHROPIC_* und
 #     NoDefaultCurrentDirectoryInExePath und baut PATH als <FakeBin>;<alle Eintraege ohne ein claude*>.
@@ -28,6 +29,7 @@ function New-FakeClaudeBin([string]$Dir) {
     'if not defined line goto loop',
     'setlocal EnableDelayedExpansion',
     '>>"%~dp0input.txt" echo(!line!',
+    'if "!line!"=="exit-fake-claude" (endlocal & exit /b 0)',
     'endlocal',
     'goto loop',
     '')
@@ -37,7 +39,7 @@ function New-FakeClaudeBin([string]$Dir) {
     'd=$(cd "$(dirname "$0")" && pwd)',
     'printf ''claude(sh) cwd=%s key=%s args=%s\n'' "$PWD" "$PANELDECK_SESSION_KEY" "$*" >> "$d/calls.txt"',
     'echo "Fake Claude (Paneldeck test) - the real Claude Code is NOT started."',
-    'while IFS= read -r line; do printf ''%s\n'' "$line" >> "$d/input.txt"; done',
+    'while IFS= read -r line; do printf ''%s\n'' "$line" >> "$d/input.txt"; [ "$line" = "exit-fake-claude" ] && exit 0; done',
     '')
   [IO.File]::WriteAllText((Join-Path $Dir 'claude'), ($sh -join "`n"), (New-Object Text.UTF8Encoding $false))
   (Resolve-Path $Dir).Path
