@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.4.0] - WIP
 
+### Changed
+
+- Das Einstellungsfenster lässt sich wie ein normales Fenster verschieben; es öffnet mittig und bleibt im Fenster (#275)
+
 ## [2.3.2] - 2026-11-18
 
 ### Added

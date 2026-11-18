@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.4.0] - WIP
 
+### Changed
+
+- The Settings window can be moved like a normal window; it opens centred and stays inside the window (#275)
+
 ## [2.3.2] - 2026-11-18
 
 ### Added
