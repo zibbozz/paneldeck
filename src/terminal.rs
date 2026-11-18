@@ -367,6 +367,8 @@ pub struct Session {
     pub mouse_last: Option<(usize, usize)>,
     /// Link unter dem Mauszeiger bei gedrückter Strg-Taste: (Zeile, Start, Ende, Ziel)
     pub hover_link: Option<(usize, usize, usize, String)>,
+    /// Laufende IME-Eingabe (Japanisch, Chinesisch, Koreanisch …), noch nicht übernommen; leer = keine (#248).
+    pub ime_preedit: String,
     tee_on: AtomicBool,
     tee: Mutex<Vec<crate::vtkeys::TeeInput>>,
     /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
@@ -669,6 +671,7 @@ impl Session {
             mouse_down: None,
             mouse_last: None,
             hover_link: None,
+            ime_preedit: String::new(),
             tee_on: AtomicBool::new(false),
             tee: Mutex::new(Vec::new()),
             last_activity,

@@ -71,7 +71,34 @@ pub fn show(
     }
     let cursor_on = cursor_blink_phase(ui, id, session, focused);
     paint(ui, rect, inner, session, theme, font, cs, focused, cursor_on, osc8_hover.as_ref());
+    if focused {
+        ime_output(ui, rect, inner, session, theme, font, cs);
+    }
     response
+}
+
+/// IME (#248): Solange das Terminal den Fokus hat, die Eingabemethode erlauben (ohne `PlatformOutput::ime` schaltet
+/// egui-winit sie für das Fenster ab) und ihr Fenster an den Cursor setzen; ein laufender Zwischenstand
+/// (`Session::ime_preedit`) wird über dem Cursor gezeichnet, unterstrichen.
+fn ime_output(ui: &Ui, rect: Rect, inner: Rect, session: &Session, theme: &Theme, font: &FontId, cs: Vec2) {
+    let (col, row) = {
+        let t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+        let p = t.grid().cursor.point;
+        (p.column.0, p.line.0 + t.grid().display_offset() as i32)
+    };
+    let pos = Pos2::new(inner.min.x + col as f32 * cs.x, inner.min.y + row.clamp(0, session.rows as i32 - 1) as f32 * cs.y);
+    let mut cursor_rect = Rect::from_min_size(pos, Vec2::new(1.0, cs.y));
+    if !session.ime_preedit.is_empty() {
+        let painter = ui.painter_at(rect);
+        let galley = painter.layout_no_wrap(session.ime_preedit.clone(), font.clone(), theme.fg);
+        let r = Rect::from_min_size(pos, Vec2::new(galley.size().x.max(cs.x), cs.y));
+        painter.rect_filled(r, 0.0, theme.bg.to_opaque());
+        painter.galley(pos, galley, theme.fg);
+        painter.line_segment([Pos2::new(r.min.x, r.max.y - 1.0), Pos2::new(r.max.x, r.max.y - 1.0)], Stroke::new(1.0_f32, theme.fg));
+        cursor_rect = Rect::from_min_size(Pos2::new(r.max.x, pos.y), Vec2::new(1.0, cs.y));
+    }
+    let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+    ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: to_global * rect, cursor_rect: to_global * cursor_rect }));
 }
 
 /// Einstellung „Blinkender Cursor“ (#183); die App schreibt sie jedes Bild (wie `mcp::LEVEL`).
@@ -931,7 +958,10 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
     for (i, ev) in events.iter().enumerate() {
         let was_after_key = std::mem::take(&mut after_key);
         match ev {
-            Event::WindowFocused(false) => KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner()).1.clear(),
+            Event::WindowFocused(false) => {
+                KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
+                session.ime_preedit.clear();
+            }
             // egui-winit wandelt Strg+C / Strg+X (und Strg+Einfg / Umschalt+Entf) in Copy/Cut um und
             // liefert dafür KEIN Key-Ereignis – ohne diese Zweige käme ^C nie im Terminal an.
             Event::Copy => {
@@ -953,6 +983,27 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                     remember_down(key);
                 }
             }
+            // IME (#248): Zwischenstand merken (wird am Cursor gezeichnet), Übernommenes wie getippten Text senden.
+            Event::Ime(ime) => match ime {
+                egui::ImeEvent::Preedit(t) => session.ime_preedit = t.clone(),
+                egui::ImeEvent::Disabled => session.ime_preedit.clear(),
+                egui::ImeEvent::Enabled => {}
+                egui::ImeEvent::Commit(t) => {
+                    session.ime_preedit.clear();
+                    if !t.is_empty() {
+                        let tee = vtkeys::TeeInput::Text { text: t.clone(), mods: Modifiers::NONE, numpad: false };
+                        let bytes = vtkeys::encode_text(t, Modifiers::NONE, false, mode);
+                        if bytes.is_empty() {
+                            session.write_input(&[], tee);
+                        } else {
+                            send_input(session, &bytes, tee);
+                        }
+                    }
+                }
+            },
+            // Während einer IME-Eingabe gehören Tasten (Leertaste zum Umwandeln, Enter zum Übernehmen, Rück, Esc) dem
+            // IME; egui-winit meldet sie trotzdem als Tasten. Nicht ans Programm senden (#248).
+            Event::Text(_) | Event::Key { .. } if !session.ime_preedit.is_empty() => {}
             Event::Text(t) => {
                 let m = if was_after_key { key_mods } else { ui.input(|i| i.modifiers) };
                 if m.alt && !m.ctrl && !was_after_key {
