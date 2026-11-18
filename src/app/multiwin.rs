@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 macro_rules! view_fields {
     ($mac:ident!($($args:tt)*)) => {
         $mac!($($args)*;
-            layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
+            layout, focused, want_focus, focus_return, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
             confirm_close, reload_ask, session_settings, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
             queue_open, queue_draft, files_open, diff_open, diff_sel, composer_open, composer_focus, composer_text, history_open,
             history_filter, history_hits, history_hits_rx, templates_open, tpl_name, cost_open, gsearch, prompts_open, prompt_sel,
@@ -48,6 +48,7 @@ pub(super) struct WinView {
     layout: Option<Node>,
     focused: u64,
     want_focus: Option<u64>,
+    focus_return: Option<u8>,
     active_project: u64,
     mode: titlebar::Mode,
     filter: String,
@@ -112,6 +113,7 @@ impl WinView {
             layout: None,
             focused: 0,
             want_focus: None,
+            focus_return: None,
             active_project: project,
             mode,
             filter: String::new(),
@@ -850,6 +852,7 @@ impl App {
         for a in actions {
             self.apply(ctx, a);
         }
+        self.focus_return_tick(ctx);
         let title = self.view_title(w.id);
         if title != self.last_title {
             self.last_title = title;
