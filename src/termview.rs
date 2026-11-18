@@ -688,7 +688,13 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
         return (false, None);
     }
     let chars = session.row_chars(row as usize);
-    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else { return (false, None) };
+    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else {
+        // Pfad auf einem Netzlaufwerk/`\\wsl$` wird gerade im Hilfsthread geprüft (#251): gleich noch einmal schauen.
+        if crate::links::checks_pending() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        return (false, None);
+    };
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     session.hover_link = Some((row as usize, link.start, link.end, link.target.clone()));
     if response.clicked_by(egui::PointerButton::Primary) {
