@@ -5,6 +5,7 @@
 use super::quick_exec::{buttons_for, QuickButton};
 use super::ticket_draft::Draft;
 use super::ticket_state::Filters;
+use super::value_suggest::{count_values, CountCache, Counted};
 use crate::calc::duration::Minutes;
 use crate::calc::progress::{Basis, Progress};
 use crate::planning::comments::{comments_of, Comment};
@@ -80,12 +81,36 @@ pub fn search_tickets(conn: &Connection, project: Option<i64>, text: &str, types
     list_tickets(conn, project, &f).map(|p| p.items.into_iter().filter(|t| !exclude.contains(&t.id)).take(limit).collect()).unwrap_or_default()
 }
 
-/// Bereits benutzte Labels des Projekts (für Vorschläge beim Eintippen).
-pub fn label_suggestions(conn: &Connection, project_id: i64) -> Vec<String> {
-    let q = "SELECT DISTINCT v.text FROM ticket_values v JOIN fields f ON f.id = v.field_id JOIN tickets t ON t.id = v.ticket_id
-             WHERE f.kind = 'labels' AND t.project_id = ?1 AND v.text IS NOT NULL ORDER BY lower(v.text) LIMIT 300";
+/// Zwischenspeicher der Label-Zählungen: Schlüssel (Projekt, [`label_ident`]), Stempel = `Connection::total_changes`.
+pub type LabelCounts = CountCache<(i64, String)>;
+
+/// Wofür Label-Werte gemeinsam gezählt werden: das eingebaute Labels-Feld aller Typen über seinen Schlüssel, eigene
+/// Labels-Felder über ihren Namen (ohne Beachtung der Groß-/Kleinschreibung) – so zählt z. B. „Komponente“ in allen Typen
+/// zusammen, aber nicht mit den Labels.
+pub fn label_ident(key: Option<&str>, name: Option<&str>) -> String {
+    match key {
+        Some(k) => format!("key:{k}"),
+        None => format!("name:{}", name.unwrap_or("").trim().to_lowercase()),
+    }
+}
+
+/// Benutzte Werte des Labels-Feldes `f` im Projekt, aus dem Zwischenspeicher; neu gezählt nur nach einer Änderung über diese
+/// Verbindung (`total_changes`) oder nach `LabelCounts::clear` (Änderungen von außen).
+pub fn used_labels(cache: &LabelCounts, conn: &Connection, project_id: i64, f: &crate::planning::fields::Field) -> std::rc::Rc<Vec<Counted>> {
+    let ident = label_ident(f.key.as_deref(), f.name.as_deref());
+    cache.get((project_id, ident.clone()), conn.total_changes(), || label_counts(conn, project_id, &ident))
+}
+
+/// Benutzte Werte eines Labels-Feldes im Projekt mit der Zahl der Tickets, die sie tragen (für Vorschläge beim Eintippen,
+/// sortiert nach Häufigkeit, dann Name; siehe `value_suggest`).
+pub fn label_counts(conn: &Connection, project_id: i64, ident: &str) -> Vec<Counted> {
+    let q = "SELECT f.key, f.name, v.text, COUNT(DISTINCT v.ticket_id) FROM ticket_values v JOIN fields f ON f.id = v.field_id JOIN tickets t ON t.id = v.ticket_id
+             WHERE f.kind = 'labels' AND t.project_id = ?1 AND v.text IS NOT NULL GROUP BY f.key, f.name, v.text";
     let Ok(mut st) = conn.prepare(q) else { return Vec::new() };
-    st.query_map([project_id], |r| r.get::<_, String>(0)).map(|rows| rows.filter_map(Result::ok).collect()).unwrap_or_default()
+    let rows = st.query_map([project_id], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)));
+    let Ok(rows) = rows else { return Vec::new() };
+    let hits: Vec<(String, usize)> = rows.filter_map(Result::ok).filter(|(k, n, _, _)| label_ident(k.as_deref(), n.as_deref()) == ident).map(|(_, _, text, c)| (text, c.max(0) as usize)).collect();
+    count_values(hits)
 }
 
 /// Todo-Karten, die schon in Tickets umgewandelt wurden: Karte → Ticket.
@@ -299,8 +324,41 @@ mod tests {
         for (title, labels) in [("a", json!(["Backend", "UI"])), ("b", json!(["backend2"]))] {
             create_ticket(&f.c, &NewTicket { values: vec![(l.id, labels)], ..NewTicket::new(f.project, f.task, title) }, &Source::ui()).unwrap();
         }
-        assert_eq!(label_suggestions(&f.c, f.project), vec!["Backend", "backend2", "UI"]);
-        assert!(label_suggestions(&f.c, 9999).is_empty());
+        let id = label_ident(None, Some("Tags"));
+        let counted = label_counts(&f.c, f.project, &id);
+        let shown: Vec<String> = counted.iter().map(|c| c.label()).collect();
+        assert_eq!(shown, vec!["Backend (1)", "backend2 (1)", "UI (1)"]);
+        assert!(label_counts(&f.c, 9999, &id).is_empty());
+        assert!(label_counts(&f.c, f.project, &label_ident(Some("labels"), None)).is_empty(), "andere Felder zählen getrennt");
+    }
+
+    #[test]
+    fn label_counts_are_per_project_sorted_by_use_and_merge_spellings() {
+        let f = Fx::new();
+        // dasselbe eigene Feld „Tags“ in zwei Typen zählt zusammen, die eingebauten Labels getrennt
+        let lt = f.add_field(f.task, "Tags", FieldKind::Labels, Default::default(), false);
+        let le = f.add_field(f.epic, "tags", FieldKind::Labels, Default::default(), false);
+        let mk = |ty: i64, field: i64, title: &str, v: Value| {
+            create_ticket(&f.c, &NewTicket { values: vec![(field, v)], ..NewTicket::new(f.project, ty, title) }, &Source::ui()).unwrap();
+        };
+        mk(f.task, lt.id, "1", json!(["ops", "backend"]));
+        mk(f.task, lt.id, "2", json!(["Backend"]));
+        mk(f.epic, le.id, "3", json!(["backend", "zeta"]));
+        mk(f.epic, le.id, "4", json!(["ops"]));
+        let c = label_counts(&f.c, f.project, &label_ident(None, Some(" TAGS ")));
+        assert_eq!(c.iter().map(|c| c.label()).collect::<Vec<_>>(), vec!["backend (3)", "ops (2)", "zeta (1)"]);
+        // der Zwischenspeicher fragt erst nach einer Änderung wieder
+        let cache = LabelCounts::default();
+        let key = (f.project, label_ident(None, Some("Tags")));
+        let mut loads = 0;
+        let get = |loads: &mut i32| cache.get(key.clone(), f.c.total_changes(), || { *loads += 1; label_counts(&f.c, f.project, &key.1) });
+        get(&mut loads);
+        get(&mut loads);
+        assert_eq!(loads, 1);
+        mk(f.task, lt.id, "5", json!(["zeta"]));
+        let after = get(&mut loads);
+        assert_eq!(loads, 2, "nach einer Änderung neu gezählt");
+        assert_eq!(after.iter().find(|c| c.name == "zeta").map(|c| c.count), Some(2));
     }
 
     #[test]

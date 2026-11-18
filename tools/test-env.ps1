@@ -17,7 +17,7 @@ function New-FakeClaudeBin([string]$Dir) {
   $cmd = @(
     '@echo off',
     'setlocal EnableExtensions DisableDelayedExpansion',
-    '>>"%~dp0calls.txt" echo(claude.cmd cwd=%CD% args=%*',
+    '>>"%~dp0calls.txt" echo(claude.cmd cwd=%CD% key=%PANELDECK_SESSION_KEY% args=%*',
     'echo Fake Claude (Paneldeck test) - the real Claude Code is NOT started.',
     'set /a empty=0',
     ':loop',
@@ -35,7 +35,7 @@ function New-FakeClaudeBin([string]$Dir) {
   $sh = @(
     '#!/bin/sh',
     'd=$(cd "$(dirname "$0")" && pwd)',
-    'printf ''claude(sh) cwd=%s args=%s\n'' "$PWD" "$*" >> "$d/calls.txt"',
+    'printf ''claude(sh) cwd=%s key=%s args=%s\n'' "$PWD" "$PANELDECK_SESSION_KEY" "$*" >> "$d/calls.txt"',
     'echo "Fake Claude (Paneldeck test) - the real Claude Code is NOT started."',
     'while IFS= read -r line; do printf ''%s\n'' "$line" >> "$d/input.txt"; done',
     '')

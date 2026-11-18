@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// Inhalt eines Panels so zeigen, dass er die Größe des Panels nicht verändern kann (#160, #236).
+///
+/// egui füllt den Rahmen eines `SidePanel`/`TopBottomPanel` nur innerhalb des Panel-Rechtecks (Clip), reserviert aber das
+/// ganze Rechteck des Inhalts: Ragt eine Zeile über die Breite (Seitenleiste, Dateibaum) oder der Inhalt über die feste
+/// Höhe (Kopf der Todo-Liste), beginnt das Nachbar-Panel erst dahinter. Der Streifen dazwischen wird von keiner Fläche
+/// gefüllt und ist im transparenten Fenster durchsichtig – eine Lücke zwischen zwei Bereichen. Darum läuft der Inhalt in
+/// einem Kind-Ui, das seine Größe nicht weitergibt; das Panel belegt genau seine Fläche (Überstehendes wird abgeschnitten).
+pub(super) fn fixed_body<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let area = ui.max_rect();
+    let mut body = ui.new_child(egui::UiBuilder::new().id_salt("fixed_body").max_rect(area).layout(*ui.layout()));
+    let r = add(&mut body);
+    // Genau die verfügbare Fläche belegen – nicht mehr (Inhalt zu groß) und nicht weniger (Inhalt zu klein); ohne Widget,
+    // damit nichts Klicks oder Hover des Inhalts abfängt.
+    ui.advance_cursor_after_rect(area);
+    r
+}
+
 impl App {
     pub(super) fn files_ui(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
@@ -12,7 +29,7 @@ impl App {
             self.tree_stamp = Instant::now();
         }
         let hidden = self.files_hidden;
-        egui::SidePanel::right(style::salted(Id::new("files"))).resizable(true).default_width(270.0).width_range(180.0..=520.0).show_animated(ctx, self.files_open, |ui| {
+        egui::SidePanel::right(style::salted(Id::new("files"))).resizable(true).default_width(270.0).width_range(180.0..=520.0).show_animated(ctx, self.files_open, |ui| fixed_body(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.strong(lang.t("Dateien", "Files"));
@@ -29,7 +46,7 @@ impl App {
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                 tree_children(ui, Path::new(&root), hidden, &mut self.tree_cache, actions, lang);
             });
-        });
+        }));
     }
 
     pub(super) fn queue_ui(&mut self, ctx: &egui::Context) {
@@ -599,7 +616,9 @@ impl App {
         v.push((lang.t("Neues Projekt …", "New project …").into(), String::new(), Action::NewProjectPrompt));
         for (i, p) in self.projects.iter().enumerate() {
             if p.id != self.active_project {
-                v.push((format!("{} {}", lang.t("Projekt wechseln:", "Switch project:"), p.name), keys::pretty(&format!("Ctrl+Shift+{}", i + 1), lang == Lang::De), Action::SwitchProject(p.id)));
+                // Feste Kürzel gibt es nur für die ersten neun Projekte (#254)
+                let hint = if i < 9 { keys::pretty(&format!("Ctrl+Shift+{}", i + 1), lang == Lang::De) } else { String::new() };
+                v.push((format!("{} {}", lang.t("Projekt wechseln:", "Switch project:"), p.name), hint, Action::SwitchProject(p.id)));
             }
         }
         for (id, e) in &self.entries {
@@ -660,11 +679,16 @@ impl App {
         if enter {
             chosen = items.get(p.sel).map(|i| i.3.clone());
         }
+        // Auf kleinen Fenstern (ab 400 pt Höhe) bleibt die Palette im Bild: Treffer scrollen, Abstand oben schrumpft (#241).
+        let screen = ctx.content_rect();
+        let top = (screen.height() * 0.1).clamp(8.0, 70.0);
+        let list_h = (screen.height() - top - 90.0).max(80.0);
+        let width = (screen.width() - 32.0).clamp(240.0, 560.0);
         egui::Window::new("palette")
             .title_bar(false)
             .resizable(false)
-            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 70.0))
-            .fixed_size([560.0, 0.0])
+            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, top))
+            .fixed_size([width, 0.0])
             .show(ctx, |ui| {
                 let before = p.query.clone();
                 let te = ui.add(
@@ -681,18 +705,23 @@ impl App {
                     p.sel = 0;
                 }
                 ui.add_space(4.0);
-                for (i, (_, label, hint, act)) in items.iter().enumerate() {
-                    let r = ui.horizontal(|ui| {
-                        let resp = ui.selectable_label(i == p.sel, label);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak(hint);
+                egui::ScrollArea::vertical().id_salt("palette_list").max_height(list_h).min_scrolled_height(list_h).show(ui, |ui| {
+                    for (i, (_, label, hint, act)) in items.iter().enumerate() {
+                        let r = ui.horizontal(|ui| {
+                            let resp = ui.selectable_label(i == p.sel, label);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.weak(hint);
+                            });
+                            resp
                         });
-                        resp
-                    });
-                    if r.inner.clicked() {
-                        chosen = Some(act.clone());
+                        if i == p.sel && (down || up) {
+                            r.inner.scroll_to_me(None);
+                        }
+                        if r.inner.clicked() {
+                            chosen = Some(act.clone());
+                        }
                     }
-                }
+                });
                 if items.is_empty() {
                     ui.weak(lang.t("Keine Treffer", "No matches"));
                 }
@@ -707,6 +736,64 @@ impl App {
             self.want_focus = Some(self.focused);
         } else {
             self.palette = Some(p);
+        }
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    //! Lücken zwischen Bereichen (#160, #236): ein Panel, dessen Inhalt größer ist als das Panel, darf den Nachbarn nicht
+    //! verschieben – sonst bleibt zwischen den Füllflächen ein durchsichtiger Streifen.
+    use super::fixed_body;
+    use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
+
+    /// Ein Durchlauf mit Kopf (feste Höhe 44), rechtem Panel (Breite 300) und Mitte. `big`: Inhalt größer als die Panels.
+    /// Liefert (Kopf-Füllung, Panel-Füllung, Mitte).
+    fn run(ctx: &egui::Context, helper: bool, big: bool) -> (Rect, Rect, Rect) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 700.0))), ..Default::default() };
+        let (mut head, mut side, mut central) = (Rect::NOTHING, Rect::NOTHING, Rect::NOTHING);
+        let content = |ui: &mut egui::Ui, size: Vec2| {
+            let s = if big { size * 2.0 } else { size * 0.5 };
+            ui.allocate_exact_size(s, Sense::hover());
+            ui.clip_rect()
+        };
+        let _ = ctx.run(input, |ctx| {
+            head = egui::TopBottomPanel::top("head")
+                .exact_height(44.0)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE.fill(Color32::DARK_GRAY))
+                .show(ctx, |ui| if helper { fixed_body(ui, |ui| content(ui, Vec2::new(100.0, 44.0))) } else { content(ui, Vec2::new(100.0, 44.0)) })
+                .inner;
+            side = egui::SidePanel::right("side")
+                .resizable(true)
+                .default_width(300.0)
+                .width_range(200.0..=500.0)
+                .frame(egui::Frame::NONE.fill(Color32::DARK_GRAY))
+                .show(ctx, |ui| if helper { fixed_body(ui, |ui| content(ui, Vec2::new(300.0, 10.0))) } else { content(ui, Vec2::new(300.0, 10.0)) })
+                .inner;
+            central = egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| ui.max_rect()).response.rect;
+        });
+        (head, side, central)
+    }
+
+    #[test]
+    fn plain_panels_leave_gaps_when_their_content_is_too_big() {
+        // Nachweis der Ursache mit egui allein: die Füllung endet an der festen Größe, der Nachbar beginnt dahinter.
+        let ctx = egui::Context::default();
+        let (head, _, central) = run(&ctx, false, true);
+        assert!(central.top() - head.bottom() > 20.0, "erwartet eine Lücke unter dem Kopf: {head:?} / {central:?}");
+    }
+
+    #[test]
+    fn fixed_panels_touch_their_neighbours() {
+        for big in [false, true] {
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                let (head, side, central) = run(&ctx, true, big);
+                assert!((head.bottom() - 44.0).abs() < 0.01 && (central.top() - head.bottom()).abs() < 0.01, "Kopf {head:?} / Mitte {central:?} (groß: {big})");
+                assert!((side.top() - head.bottom()).abs() < 0.01, "Panel {side:?} beginnt nicht unter dem Kopf {head:?}");
+                assert!((side.left() - central.right()).abs() < 0.01 && (side.width() - 300.0).abs() < 0.01, "Panel {side:?} / Mitte {central:?} (groß: {big})");
+            }
         }
     }
 }

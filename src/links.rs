@@ -69,14 +69,67 @@ fn resolve(token: &str, cwd: &str, shell_id: &str) -> Option<String> {
         return None;
     };
     // Endgültigen Pfad nochmals prüfen (relativer Pfad auf einem UNC-Arbeitsordner, `//server/…` usw.).
-    if crate::pathfmt::is_remote_unc(&path.to_string_lossy()) {
+    let p = path.to_string_lossy().to_string();
+    if crate::pathfmt::is_remote_unc(&p) {
         return None;
     }
-    if path.exists() {
-        Some(path.to_string_lossy().to_string())
-    } else {
-        None
+    // Netzlaufwerke und `\\wsl$` nie im aufrufenden (UI-)Thread prüfen: das läuft bei jedem Bild mit Strg über dem Text
+    // und kann dort hängen (#251). Bis die Antwort aus dem Hilfsthread da ist, gibt es keinen Link.
+    let exists = if crate::pathfmt::is_remote(&p) || crate::wsl::is_wsl_unc(&p) { exists_cached(&p) == Some(true) } else { path.exists() };
+    exists.then_some(p)
+}
+
+/// Prüfungen langsamer Pfade (Netzlaufwerk, `\\wsl$`), die gerade laufen oder kürzlich liefen (#251).
+struct SlowCheck {
+    result: Option<bool>,
+    at: std::time::Instant,
+}
+
+static SLOW_CHECKS: std::sync::Mutex<Option<std::collections::HashMap<String, SlowCheck>>> = std::sync::Mutex::new(None);
+/// So lange gilt eine Antwort; höchstens so viele Prüfungen gleichzeitig; so viele Einträge höchstens.
+const SLOW_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const SLOW_PARALLEL: usize = 4;
+const SLOW_MAX: usize = 256;
+
+/// Gibt es `path`? Antwort aus dem Zwischenspeicher; fehlt sie (oder ist sie alt), startet eine Prüfung im Hilfsthread
+/// und das Ergebnis ist vorerst `None`. Hängt eine Prüfung, bleibt sie bis zu ihrem Ende als laufend stehen (kein neuer
+/// Thread für denselben Pfad).
+fn exists_cached(path: &str) -> Option<bool> {
+    let mut g = SLOW_CHECKS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(Default::default);
+    let now = std::time::Instant::now();
+    if let Some(c) = map.get(path) {
+        match c.result {
+            None => return None,
+            Some(r) if now.duration_since(c.at) < SLOW_TTL => return Some(r),
+            Some(_) => {}
+        }
     }
+    if map.values().filter(|c| c.result.is_none()).count() >= SLOW_PARALLEL {
+        return None;
+    }
+    if map.len() >= SLOW_MAX {
+        map.retain(|_, c| c.result.is_none());
+    }
+    map.insert(path.to_string(), SlowCheck { result: None, at: now });
+    let p = path.to_string();
+    let spawned = std::thread::Builder::new().name("link-check".into()).spawn(move || {
+        let r = Path::new(&p).exists();
+        let mut g = SLOW_CHECKS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = g.get_or_insert_with(Default::default).get_mut(&p) {
+            c.result = Some(r);
+            c.at = std::time::Instant::now();
+        }
+    });
+    if spawned.is_err() {
+        map.remove(path);
+    }
+    None
+}
+
+/// Läuft gerade eine Pfadprüfung im Hilfsthread? Dann zeichnet das Terminal bald noch einmal, damit der Link erscheint.
+pub fn checks_pending() -> bool {
+    SLOW_CHECKS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|m| m.values().any(|c| c.result.is_none()))
 }
 
 /// Link unter Spalte `col` der Zeile `chars` finden (URL oder existierender Pfad).
@@ -115,7 +168,15 @@ const EXECUTABLE: &[&str] = &[
     "appref-ms", "settingcontent-ms", "diagcab", "library-ms", "searchconnector-ms", "theme", "themepack", "rdp", "wsc", "sct", "inf",
     "scf", "iso", "img", "vhd", "vhdx", "website", "ws", "appinstaller", "msixbundle", "appxbundle", "mde", "mda", "ade", "adp",
     "ins", "isp", "jnlp", "ps1xml", "psc1", "psd1", "pssc", "cdxml", "xbap", "vsix", "msh", "msh1", "msh2", "mshxml",
+    // Skriptsprachen, deren Standardzuordnung die Datei ausführt (#251)
+    "py", "pyw", "pyz", "pyzw", "pyc", "pyo", "pl", "plx", "rb", "rbw", "ahk", "au3", "a3x", "tcl", "lua", "php", "wsb", "mof",
 ];
+
+/// Endungen aus `PATHEXT` (z. B. `.PY`, wenn Python sich dort eingetragen hat): was die Shell ohne Endung startet, gilt
+/// ebenfalls als ausführbar (#251).
+fn in_pathext(ext: &str) -> bool {
+    std::env::var("PATHEXT").is_ok_and(|v| v.split(';').any(|e| e.trim().trim_start_matches('.').eq_ignore_ascii_case(ext)))
+}
 
 pub fn is_executable_like(target: &str) -> bool {
     let lower = target.get(..8).unwrap_or(target).to_ascii_lowercase();
@@ -128,7 +189,10 @@ pub fn is_executable_like(target: &str) -> bool {
     if t.char_indices().any(|(i, c)| c == ':' && i > 2) {
         return true;
     }
-    Path::new(t).extension().is_some_and(|e| EXECUTABLE.contains(&e.to_string_lossy().to_lowercase().as_str()))
+    Path::new(t).extension().is_some_and(|e| {
+        let e = e.to_string_lossy().to_lowercase();
+        EXECUTABLE.contains(&e.as_str()) || in_pathext(&e)
+    })
 }
 
 /// Mit dem Standardprogramm öffnen (URL im Browser, Datei in der zugeordneten App, Ordner im Explorer).
@@ -232,8 +296,34 @@ mod tests {
         assert!(is_executable_like(r"C:\x\a.txt:evil.exe"));
         assert!(is_executable_like(r"C:\x\a.settingcontent-ms") && is_executable_like("/x/b.CHM") && is_executable_like("c.library-ms"));
         assert!(!is_executable_like(r"C:\x\notes.txt"));
+        // Skripte mit ausführender Standardzuordnung (#251)
+        for f in [r"C:\x\tool.py", "a.PYW", "b.pyz", "c.pl", "d.rb", "e.ahk", "f.wsb"] {
+            assert!(is_executable_like(f), "{f}");
+        }
+        assert!(!is_executable_like("notes.md") && !is_executable_like("data.json"));
         assert!(reveal_safe(r"C:\x\a.exe"));
         assert!(!reveal_safe(r"C:\x\a,/root,\\evil\s\y.exe") && !reveal_safe(r#"C:\x\a"b.exe"#) && !reveal_safe(r"\\evil\s\a.exe"));
+    }
+
+    #[test]
+    fn slow_paths_are_checked_off_the_calling_thread() {
+        let dir = std::env::temp_dir().join(format!("links-slow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.to_string_lossy().to_string();
+        assert_eq!(exists_cached(&p), None, "erst im Hilfsthread");
+        let t0 = std::time::Instant::now();
+        while exists_cached(&p).is_none() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(exists_cached(&p), Some(true));
+        let missing = dir.join("fehlt").to_string_lossy().to_string();
+        let _ = exists_cached(&missing);
+        let t0 = std::time::Instant::now();
+        while exists_cached(&missing).is_none() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(exists_cached(&missing), Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

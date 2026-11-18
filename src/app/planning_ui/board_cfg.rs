@@ -6,6 +6,7 @@
 use super::board_logic as logic;
 use super::helpers::color_of;
 use super::ref_inputs::ref_value_editor;
+use super::ticket_data::used_labels;
 use super::ticket_inputs::InCx;
 use super::values;
 use super::widgets;
@@ -423,6 +424,7 @@ impl PlanUi {
         let (mut go, mut close) = (false, false);
         let can_submit = d.fields.iter().all(|f| f.field.as_ref().is_some_and(|f| fillable(f.kind)));
         let (project_id, ticket_id) = (d.project_id, d.ticket_id);
+        let labels = std::mem::take(&mut self.tickets.labels);
         let m = egui::Modal::new(Self::modal_id("board_needs")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 480.0));
             widgets::dialog_title(ui, lang.t("Pflichtfelder ausfüllen", "Fill in required fields"));
@@ -439,7 +441,7 @@ impl PlanUi {
                         let salt = Id::new(("board_need", i));
                         if is_release_or_terminal(field.kind) {
                             // dieselben Eingaben wie in der Ticket-Ansicht (Versionen des Ticket-Projekts, laufende Sitzungen)
-                            let ic = InCx { conn: cx.conn, lang, project_id, ticket_id: Some(ticket_id), prefixes: &[], labels: &[], id: Id::new(("board_need_in", i)) };
+                            let ic = InCx { conn: cx.conn, lang, project_id, ticket_id: Some(ticket_id), prefixes: &[], labels: &labels, id: Id::new(("board_need_in", i)) };
                             ref_value_editor(ui, &ic, salt, field.kind, &mut f.value, true, &mut None);
                         } else if field.kind == FieldKind::Rich {
                             let mut s = f.value.as_str().unwrap_or("").to_string();
@@ -447,7 +449,8 @@ impl PlanUi {
                                 f.value = Value::String(s);
                             }
                         } else {
-                            values::full_editor(ui, salt, field.kind, &field.options, &mut f.value, lang);
+                            let used = (field.kind == FieldKind::Labels).then(|| used_labels(&labels, cx.conn, project_id, field));
+                            values::full_editor_with(ui, salt, field.kind, &field.options, &mut f.value, lang, used.as_deref().map(|v| v.as_slice()));
                         }
                     }
                     _ => {
@@ -469,6 +472,7 @@ impl PlanUi {
                 }
             });
         });
+        self.tickets.labels = labels;
         if m.should_close() {
             close = true;
         }

@@ -10,7 +10,9 @@
 //! Die Dialog-Logik ([`Dlg`]) ist ohne Oberfläche testbar.
 
 use super::helpers::{color_of, move_id};
-use super::values::{blank_full, full_editor};
+use super::ticket_data::{label_counts, label_ident};
+use super::value_suggest::cached_per_open;
+use super::values::{blank_full, full_editor, full_editor_with};
 use super::widgets::{self, hint};
 use super::{Cx, Msg, PlanUi};
 use crate::planning::fields::{Field, FieldKind};
@@ -684,6 +686,12 @@ fn value_editor(ui: &mut Ui, salt: (&str, usize), f: &Field, v: &mut Value, sum:
                     }
                 }
             });
+        }
+        FieldKind::Labels => {
+            // benutzte Labels dieses Feldes im Projekt (einmal je Öffnen des Dialogs gezählt, #239)
+            let project = sum.project.id;
+            let used = cached_per_open(ui.ctx(), id.with(f.id), || label_counts(cx.conn, project, &label_ident(f.key.as_deref(), f.name.as_deref())));
+            full_editor_with(ui, id, FieldKind::Labels, &f.options, v, lang, Some(used.as_slice()));
         }
         k => {
             full_editor(ui, id, k, &f.options, v, lang);

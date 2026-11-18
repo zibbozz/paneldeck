@@ -373,6 +373,7 @@ impl App {
                                 "Hub sessions use hooks automatically (via --settings). Install globally to also track manually started claude.",
                             )).small().color(style::dim(ui)));
                             ui.add_space(S1);
+                            let mut install = false;
                             ui.horizontal(|ui| {
                                 if self.hooks_global {
                                     ui.colored_label(Color32::from_rgb(0x4c, 0xc2, 0x6a), lang.t("global installiert", "installed globally"));
@@ -382,17 +383,39 @@ impl App {
                                             Some(Err(e)) => e,
                                             None => state::t("~/.claude nicht gefunden", "~/.claude not found").into(),
                                         };
-                                        self.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
+                                        self.refresh_hooks_global();
                                     }
                                 } else if ui.button(lang.t("In ~/.claude/settings.json installieren", "Install into ~/.claude/settings.json")).clicked() {
-                                    self.hooks_msg = match hooks::global_settings_path().map(|p| hooks::install_global(&p, &self.exe)) {
-                                        Some(Ok(())) => String::new(),
-                                        Some(Err(e)) => e,
-                                        None => state::t("~/.claude nicht gefunden", "~/.claude not found").into(),
-                                    };
-                                    self.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
+                                    install = true;
                                 }
                             });
+                            // Global eingetragen, aber für eine andere paneldeck.exe (#260): Meldungen ohne Schlüssel zählen nur
+                            // für den Status.
+                            if let Some(other) = self.hooks_foreign.clone() {
+                                ui.colored_label(
+                                    Color32::from_rgb(0xe0, 0xa0, 0x40),
+                                    format!(
+                                        "{} {}",
+                                        lang.t("⚠ Die eingetragenen Hooks zeigen auf eine andere paneldeck.exe:", "⚠ The installed hooks point to another paneldeck.exe:"),
+                                        crate::mcp::short(&other, 80)
+                                    ),
+                                );
+                                ui.label(RichText::new(lang.t(
+                                    "Ihre Meldungen zählen nur für den Status (keine Zuordnung der Konversation). Neu eintragen, damit sie auf dieses Programm zeigen.",
+                                    "Their messages only count for the status (no conversation tracking). Reinstall so they point to this program.",
+                                )).small().color(style::dim(ui)));
+                                if ui.button(lang.t("Neu eintragen", "Reinstall")).clicked() {
+                                    install = true;
+                                }
+                            }
+                            if install {
+                                self.hooks_msg = match hooks::global_settings_path().map(|p| hooks::install_global(&p, &self.exe)) {
+                                    Some(Ok(())) => String::new(),
+                                    Some(Err(e)) => e,
+                                    None => state::t("~/.claude nicht gefunden", "~/.claude not found").into(),
+                                };
+                                self.refresh_hooks_global();
+                            }
                             if !self.hooks_msg.is_empty() {
                                 ui.colored_label(Color32::LIGHT_RED, &self.hooks_msg);
                             }
@@ -547,8 +570,25 @@ impl App {
                         for (id, cur) in &current {
                             // Leer = kein Kürzel (z. B. „Alle Sitzungen schließen“): nie „doppelt“.
                             let dup = !cur.is_empty() && current.iter().filter(|(_, c)| c == cur).count() > 1;
+                            // Alte Belegung ohne Strg/Alt (vor #256 aufnehmbar): wirkt nicht mehr, darum der Hinweis.
+                            let plain = keys::parse(cur).is_some_and(|(m, k)| !keys::usable(m, k));
+                            // Von Hand eingetragenes Zeichen ohne Umschalt (z. B. `Ctrl+?`): löste bis 2.3.1 auch mit Umschalt
+                            // aus, seit #254 nur noch genau so.
+                            let shift = keys::parse(cur).is_some_and(|(m, k)| keys::may_need_shift(m, k));
                             let capturing = self.capture_key.as_deref() == Some(*id);
-                            row(ui, keys::label(id, de), if dup { lang.t("Doppelt belegt!", "Duplicate!") } else { "" }, |ui| {
+                            let warn = if dup {
+                                lang.t("Doppelt belegt!", "Duplicate!")
+                            } else if plain {
+                                lang.t("Ohne Strg/Alt – wirkt nicht", "No Ctrl/Alt – inactive")
+                            } else if shift {
+                                lang.t(
+                                    "Ohne Umschalt – wirkt nur, wenn die Tastatur das Zeichen ohne Umschalt liefert; sonst neu aufnehmen",
+                                    "No Shift – works only if your keyboard types this character without Shift; otherwise record it again",
+                                )
+                            } else {
+                                ""
+                            };
+                            row(ui, keys::label(id, de), warn, |ui| {
                                 let txt = if capturing {
                                     lang.t("Taste drücken …", "Press keys …").to_string()
                                 } else if cur.is_empty() {
@@ -571,18 +611,37 @@ impl App {
                             "Fixed: Ctrl+Shift+1…9 project · Alt+1…9 session · Ctrl+Alt+arrows pane",
                         )).small().color(style::dim(ui)));
                         // Aufnahme
+                        let reject_id = egui::Id::new("key_capture_rejected");
                         if let Some(id) = self.capture_key.clone() {
-                            let ev = ctx.input(|i| i.events.clone());
+                            // Tasten und Text der Aufnahme verbrauchen: sonst schlösse das Esc weiter unten im selben Bild die
+                            // Einstellungen (statt nur die Aufnahme abzubrechen), und nichts landet woanders (#256).
+                            let ev: Vec<Event> = ctx.input_mut(|i| {
+                                let (taken, rest): (Vec<Event>, Vec<Event>) = std::mem::take(&mut i.events).into_iter().partition(|e| matches!(e, Event::Key { .. } | Event::Text(_)));
+                                i.events = rest;
+                                taken
+                            });
                             for e in ev {
                                 if let Event::Key { key, pressed: true, modifiers, .. } = e {
                                     if key == Key::Escape {
                                         self.capture_key = None;
-                                    } else {
+                                    } else if keys::usable(modifiers, key) {
                                         self.settings.keys.insert(id.clone(), keys::format(modifiers, key));
                                         self.capture_key = None;
+                                    } else {
+                                        // Ohne Strg/Alt: nicht übernehmen, weiter aufnehmen und erklären.
+                                        ctx.data_mut(|d| d.insert_temp(reject_id, keys::pretty(&keys::format(modifiers, key), de)));
                                     }
                                 }
                             }
+                            if let Some(k) = ctx.data(|d| d.get_temp::<String>(reject_id)).filter(|_| self.capture_key.is_some()) {
+                                ui.label(RichText::new(match lang {
+                                    Lang::De => format!("„{k}“ geht nicht ohne Strg oder Alt – es finge jede solche Eingabe in den Terminals ab (F-Tasten gehen auch allein)."),
+                                    Lang::En => format!("“{k}” needs Ctrl or Alt – on its own it would catch every such keystroke in the terminals (F keys also work alone)."),
+                                }).small().color(Color32::LIGHT_RED));
+                            }
+                        }
+                        if self.capture_key.is_none() {
+                            ctx.data_mut(|d| d.remove::<String>(reject_id));
                         }
                     }
                     7 => self.mcp_settings_ui(ui, ctx),

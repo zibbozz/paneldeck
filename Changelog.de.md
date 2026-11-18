@@ -7,6 +7,49 @@ Das Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 und dieses Projekt hält sich an [Semantic Versioning](https://semver.org/lang/de/).
 Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen unter der Nummer des nächsten Releases mit `WIP` statt Datum (z. B. `## [1.1.0] - WIP`).
 
+## [2.3.2] - WIP
+
+### Added
+
+- Label- und Tag-Felder schlagen beim Tippen die bereits benutzten Werte mit ihrer Häufigkeit vor, z. B. `backend (12)` – Ticket-Labels und eigene Labels-Felder (je Projekt), Tags der Todo-Karten und Sitzungs-Tags (über alle Sitzungen); nach Häufigkeit sortiert, beim Tippen gefiltert, ↑/↓/Tab/Enter/Esc wie im Abfrage-Editor; neue Werte bleiben möglich (#239)
+
+### Changed
+
+- Dialog „Neue Sitzung“: Die zwei Wege, eine Claude-Konversation fortzusetzen, sind jetzt eine Auswahl „Konversation“ – neu (beim Neu laden/Neustart fortgesetzt), letzte Konversation im Ordner fortsetzen oder bei jedem Start eine neue (#241)
+- Einstellungen, Update-Knopf und MCP-Status stehen jetzt in der Fensterleiste, in jedem Reiter und Fenster sichtbar (von rechts: Einstellungen, Update, MCP); Einstellungs-Knopf und MCP-Chip unten in der Seitenleiste entfallen, der Eintrag in der Befehlspalette bleibt (#240)
+- Tastenkürzel brauchen Strg oder Alt (F-Tasten gehen auch allein); eine Belegung ohne wird abgelehnt, eine alte als wirkungslos angezeigt; von Hand eingetragene Zeichen-Kürzel ohne Umschalt (z. B. Strg+?) bekommen einen Hinweis (#256)
+
+### Fixed
+
+- Zurück im Reiter „Terminals“ (Reiter, Kürzel, „Zurück“ aus einem Ticket, weitere Fenster) bekommt wieder die zuvor fokussierte Pane den Fokus (sonst die oben links) – außer ein Dialog oder Popup ist offen (#238)
+- Sprünge zum Prompt (Strg+Umschalt+Hoch/Runter) und die Ausgabe von MCP `run_command` stimmen auch nach einer Größenänderung mit Neuumbruch (#246)
+- Broadcast schickt Mausklicks und Mausrad-Pfeiltasten der fokussierten Pane nicht mehr an die anderen Panes (#247)
+- IME-Eingabe (Japanisch, Chinesisch, Koreanisch) funktioniert in Terminals; die laufende Eingabe erscheint am Cursor (#248)
+- Linkes Strg+Alt statt AltGr (z. B. Strg+Alt+Q für @ auf deutscher Tastatur) tippt das Zeichen in Terminals (#249)
+- Suche im Verlauf: Treffer auf farbigen Zeilen sind sichtbar, CJK-Text wird gefunden, bei sehr vielen Treffern bleiben die neuesten erreichbar, und Markierungen folgen neuer Ausgabe (#250)
+- Strg+Klick startet keine Skripte wie .py, .pyw, .pl, .rb oder .ahk mehr (auch keine Typen aus PATHEXT), sondern zeigt sie im Explorer; Strg+Hover prüft Pfade auf Netzlaufwerken und `\wsl$` nicht mehr im UI-Thread (#251)
+- Schnell getippte Buchstaben mit folgendem Alt/Strg kommen nicht mehr als Alt-Kombination an; der Block-Cursor deckt breite Zeichen ganz ab und zeigt fett/kursiv/Emoji richtig; das Loslassen von Strg+C wird Programmen mit kitty-Tastenereignissen gemeldet (#252)
+- `run_command`: Die Ausgabe einer Zeile in genau Terminalbreite ist in Git Bash mit dem Konsolen-Host von Windows (Einstellung „Mitgelieferten Konsolen-Host verwenden“ aus) nicht mehr leer; die Prompt-Marke landet nicht mehr auf dieser Ausgabezeile (#231)
+- Claude-Sitzungen (vor allem in WSL) starten nicht mehr mit `--continue` oder `--resume` einer fremden Konversation: Eine Sitzung setzt nur ihre eigene Konversation fort und nur, wenn es sie gibt; unter Windows auch ohne Hooks. Ein geänderter Arbeitsordner oder eine andere Shell beginnt eine neue Konversation, gespeicherte alte Argumente können keine Konversation mehr fortsetzen, und „Fortsetzen“ im Claude-Verlauf nutzt eine Windows-Shell, lehnt Einträge ohne Konversations-ID ab und wechselt zu einer Sitzung, in der die Konversation schon offen ist. Vorlagen behalten die Einstellung „fortsetzen“ der Sitzung. Alte gespeicherte Claude-Argumente, die Paneldeck kennt (weitere Ordner, Werkzeuge, MCP-Konfiguration, Ersatzmodell, Budget, Zusatz zum System-Prompt), werden zu Claude-Optionen; die übrigen nennt einmalig ein Hinweis (#245)
+- Hook-Meldungen zählen nur für den laufenden Start der Sitzung: Ein aus der Sitzung gestartetes `claude -p`, übrig gebliebene Prozesse oder andere Terminals ändern Konversation und Status einer Sitzung nicht mehr. Globale Hooks, die noch auf eine ältere oder andere `paneldeck.exe` zeigen, melden weiter den Status, und *Einstellungen → Claude → Hooks* bietet an, sie neu einzutragen; mit `--safe-mode` gestartete Sitzungen ignorieren Hook-Meldungen (#260)
+- Dialog „Neue Sitzung“: Esc schließt zuerst eine offene Auswahlliste; mit ausgeschaltetem Claude-Modus starten Programmstart, Neu laden und Duplizieren kein Claude mehr; Profile mit dem WSL-Starter `bash.exe` aus System32 gelten als WSL (Hooks, Status, Pfade) (#261)
+- Dialog „Neue Sitzung“, Einstellungen der Sitzung, „Fenster schließen?“, Sitzungs-Vorlagen und Befehls-Palette passen auf kleine Bildschirme: Der Inhalt scrollt, die Knöpfe bleiben sichtbar und Hinweise verdecken keine Bedienelemente mehr (#241)
+- „Neue Sitzung“, „Prompt an alle Sitzungen im Ordner“, „Sitzungs-Vorlagen“ und „Sitzung mit Worktree schließen“ nehmen dem Terminal den Tastaturfokus; Esc erreicht das Terminal nicht mehr, und Strg+Enter im Terminal sendet nicht mehr den offenen Prompt-Composer (#255)
+- Keine Lücken mehr zwischen Kopf, Ticketliste und Ticket-Panel in der geteilten Ticketansicht, bei jeder Skalierung; die Liste behält neben dem Panel ihren Platz, das Panel hat keine doppelte Kante (#236)
+- Tastenkürzel prüfen die Modifikatoren genau: Strg+Umschalt+1/2 und Strg+AltGr+2 wechseln nicht mehr den Reiter, Projekt-Kürzel gehen mit jeder Tastaturbelegung, und Alt+1…9, Strg+Umschalt+1…9 und Strg+Alt+Pfeile gehen ans Terminal, wenn es keine Sitzung, kein Projekt bzw. keinen Bereich dafür gibt (#254)
+- Esc bei der Aufnahme eines Kürzels bricht nur die Aufnahme ab, statt die Einstellungen zu schließen (#256)
+- Sitzungen eines anderen Projekts (gefilterte Seitenleiste, Duplizieren, nach einem Projektwechsel fertig gewordener Worktree, Verschieben in Ordner) landen nicht mehr im Layout oder in Ordnern des gezeigten Projekts (#258)
+- Eine im Reiter Todo-Liste abgelegte Datei landet nicht mehr in einem unsichtbaren Terminal (#259)
+- Umbenennen einer durch Filter oder eingeklappten Ordner verborgenen Sitzung zeigt die Zeile jetzt an – auch für Sitzungen eines anderen Projekts oder Fensters aus der Befehlspalette (#259)
+- In schmalen Bereichen ragen die Kopf-Knöpfe nicht mehr in den Nachbarn; was nicht passt, steht im Kontextmenü (#259)
+- Der Fenstertitel wird auf den freien Platz gekürzt und überdeckt keine Reiter oder Knöpfe mehr (#259)
+- Schließen einer Worktree-Sitzung friert das Fenster bei großen Repositories nicht mehr ein (#259)
+- Das Abfragefeld der Such- und Zahlen-Kacheln im Dashboard nutzt jetzt denselben Editor wie der Reiter „Suche“, mit Vorschlägen, Fehlermeldungen beim Tippen und einer neuen Liste „Felder“ (auch in der Suche und der Abfrage-Leiste der Tickets), die alle Felder mit Typ zeigt (#237)
+
+### Security
+
+- Fenster „Änderungen“: Das Anzeigen eines Diffs und der automatische `git status` starten keine externen Diff-, textconv- oder Filter-Befehle mehr, die in der Git-Konfiguration eines Repositorys selbst stehen – auch nicht aus Untermodulen; der Standard-Git-LFS-Filter eines Repositorys funktioniert weiter (#253)
+
 ## [2.3.1] - 2026-11-17
 
 ### Fixed
@@ -311,6 +354,7 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Alle `unwrap()`/`expect()` im Programmcode sind durch Fehlerbehandlung ersetzt (der Release-Build bricht bei einem Panic komplett ab); die `unsafe`-Blöcke sind begründet.
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
+[2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...HEAD
 [2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/zibbozz/paneldeck/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/zibbozz/paneldeck/compare/v2.1.0...v2.2.0

@@ -97,6 +97,10 @@ All new fields are optional: a missing field means the previous behaviour, and o
 
 **Going back to 2.2:** 2.2 refuses a database with schema version 9 ("The database has schema version …") and leaves it untouched. To go back, quit Paneldeck and copy the database backup that was made before the update (in the backup folder, by default `backups/`) over `paneldeck.db`, then start 2.2 – changes made since then are lost. Don't use *Restore* in 2.3 for this: 2.3 would update the restored copy again. 2.2 can still read `settings.json` and `state.json` and ignores the new fields, but drops them when it saves.
 
+## New fields in 2.3.2
+- `templates.json` → per session: `claude_continue` (`false` = *A new one on every start*; missing = resume on reload/restart). Older Paneldeck versions ignore it.
+- `state.json` → `claude_continue` now means *Resume this session's conversation on reload/restart*; the session's own conversation id is used and only if it exists.
+
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 

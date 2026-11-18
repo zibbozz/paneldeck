@@ -3,7 +3,6 @@
 //! Enter im Titel bzw. Strg+Enter speichert.
 
 use super::helpers::color_of;
-use super::ticket_data::label_suggestions;
 use super::ticket_draft::{group_sections, Draft};
 use super::ticket_inputs::{field_block, ticket_search, InCx};
 use super::widgets;
@@ -180,7 +179,6 @@ impl PlanUi {
         }
         // Der zuletzt gewählte Typ bleibt Standard, solange er erlaubt ist.
         let pick = self.tickets.create_last_type.filter(|id| allowed.iter().any(|t| t.ticket_type.id == *id)).or(first);
-        self.tickets.labels = label_suggestions(cx.conn, sum_use.project.id);
         self.tickets.create = CreateDlg::new(&sum_use, pick, parent);
     }
 

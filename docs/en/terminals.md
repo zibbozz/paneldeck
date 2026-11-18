@@ -18,7 +18,7 @@ The **Terminal Hub** is Paneldeck's main area: many terminal sessions in one win
 ## Keyboard
 - **Kitty keyboard protocol:** programs that switch it on (e.g. Claude Code) get unambiguous keys – Shift+Enter, Ctrl+Backspace, Esc and Alt combinations arrive as `CSI u` sequences. Flags that a crashed program left behind are cleared at the next shell prompt.
 - **win32-input-mode** under ConPTY: PowerShell and cmd receive Ctrl+Space, Ctrl+Enter, Ctrl+/, Ctrl+Shift+letter, Esc and the numpad keys as real key events; Ctrl+3 … Ctrl+0 reach the terminal.
-- **Ctrl+Backspace** sends `0x08` like Windows Terminal (PowerShell deletes the previous word; in bash it deletes one character). Alt+digit and Alt+punctuation (e.g. Alt+. in bash) work; Alt shortcuts that Paneldeck uses itself don't send characters into the terminal.
+- **Ctrl+Backspace** sends `0x08` like Windows Terminal (PowerShell deletes the previous word; in bash it deletes one character). Alt+punctuation (e.g. Alt+. in bash) works; Alt+digit reaches the terminal when there is no session with that number (otherwise it switches to it). Left Ctrl+Alt works as AltGr (e.g. Ctrl+Alt+Q for `@` on German layouts), and IME input (Japanese, Chinese, Korean) is shown at the cursor.
 - *Settings → Appearance → Shift+Enter = new line in PowerShell* (off by default): PSReadLine inserts a new line instead of running the command. Programs inside PowerShell that don't use the kitty keyboard protocol then receive a plain Enter.
 - **Broadcast** encodes keys separately for every target terminal.
 
@@ -27,7 +27,7 @@ The **Terminal Hub** is Paneldeck's main area: many terminal sessions in one win
   - `http`/`https` links with a plain host name open directly; every other link – other schemes, a user name in the address (`user@host`), host names with non-ASCII characters – first asks *Open link?* with the full target.
   - Never opened, not even after asking: overlong or disguised targets (control, bidi or invisible characters, also percent-encoded), script schemes, misused Windows protocol handlers (including the Office handlers), `file:` links to anything but a local drive path, and alternate data streams.
   - Network and device paths such as `\\.\GLOBALROOT\…` or `\??\UNC\…` never count as local – neither for links nor for the working folder reported by the shell (OSC 7, OSC 9;9).
-  - Executable files (also e.g. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc`, and names with trailing dots or spaces) are never started; Explorer only shows them selected in their folder.
+  - Executable files and scripts (every type in `PATHEXT`, `.py`, `.pyw`, `.pl`, `.rb`, `.ahk`, `.php`, `.lua` and similar, also e.g. `.settingcontent-ms`, `.library-ms`, `.chm`, `.msc`, and names with trailing dots or spaces) are never started; Explorer only shows them selected in their folder.
 - **Copy from programs (OSC 52):** programs can put text on the Windows clipboard – e.g. Claude Code in a WSL or SSH session; a short notice names the session. *Settings → Appearance → Allow programs to copy to the clipboard (OSC 52)* is on by default. It is write-only (programs can never read the clipboard), only the focused session in the foreground window may copy, at most 1 MB and at most once every 0.3 s (larger texts show a notice; a sequence above 2 MiB is cut off and ignored without it), and an empty text never clears the clipboard. Note: an agent with *Control* access can make the focused session copy text, too.
 - **Paste:** pasted text is filtered like in Windows Terminal (control characters including ESC and C1 are removed), so hidden Enter sequences cannot slip through. *Settings → Appearance → Warn before pasting multiple lines* (on by default) asks *Paste multiple lines?* when the program does not use bracketed paste – otherwise the shell could run every pasted line as a command right away. *Paste* is enabled after a short delay. Every pane frames pasted text according to its own bracketed-paste mode; with broadcast on, the question also appears when any target pane does not use bracketed paste.
 
@@ -96,7 +96,7 @@ A WSL session can start in a folder **inside WSL**:
 - **Search** in the scrollback (**Ctrl+Shift+F**) and across all sessions (**Ctrl+Shift+G**); jump between commands (**Ctrl+Shift+Up/Down**, needs shell integration).
 - **Prompt library**, **prompt composer** (**Ctrl+Shift+M**) and a **queue** per session (**Ctrl+Shift+Q**).
 - **Broadcast** (**Ctrl+Shift+B**): type into all visible panes at once.
-- **File tree** (**Ctrl+Shift+O**), **changes** with diff, stage and commit (**Ctrl+Shift+H**), git info in the header.
+- **File tree** (**Ctrl+Shift+O**), **changes** with diff, stage and commit (**Ctrl+Shift+H**), git info in the header. Reading changes never runs commands from a repository's own Git configuration (external diff, textconv, filters – except the standard Git LFS filter) and does not look into submodule working trees; a changed submodule commit still shows.
 - Drag & drop of files, images from the clipboard (stored in the data folder for 14 days), clickable links (Ctrl+click, see [Links, clipboard and paste](#links-clipboard-and-paste)).
 - Tray icon, transparency, themes (JSON, see [Data folder](data-and-backups.md)), smooth animations.
 
@@ -124,6 +124,11 @@ All shortcuts can be changed under *Settings → Shortcuts*.
 | `Ctrl+1` / `Ctrl+2` (also `Alt+Shift+1` / `Alt+Shift+2`) | *Terminal Hub* / *Todo list* tab |
 | `Ctrl`+click on a title bar tab | Open the tab in a new window |
 | (none) | *Reload session*, *Close all sessions* – assign a key under *Settings → Shortcuts* |
+| `Ctrl+Shift+1`…`9` (fixed) | Switch to project 1–9 |
+| `Alt+1`…`9` (fixed) | Session 1–9 of the current project |
+| `Ctrl+Alt+arrows` (fixed) | Focus the neighbouring pane |
+
+Modifiers must match exactly (`Ctrl+Shift+1` is not `Ctrl+1`). The fixed shortcuts are only used when their target exists; otherwise the key goes to the terminal. Custom shortcuts need Ctrl or Alt (F keys also work alone); while recording, Esc cancels. *Settings*, the update button and the MCP status are in the window header, right of the tabs.
 
 The shortcuts of the to-do list are listed in [Todo list and tickets](todo-and-tickets.md#keyboard-shortcuts).
 

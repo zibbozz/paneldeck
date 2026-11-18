@@ -7,6 +7,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Deviation: instead of `[Unreleased]`, changes that are not yet released are listed under the number of the next release with `WIP` instead of a date (e.g. `## [1.1.0] - WIP`).
 
+## [2.3.2] - WIP
+
+### Added
+
+- Label and tag fields suggest the values already in use, with how often each is used, e.g. `backend (12)` – ticket labels and custom labels fields (per project), to-do card tags and session tags (across all sessions); sorted by use, filtered as you type, ↑/↓/Tab/Enter/Esc like the query editor; new values are still allowed (#239)
+
+### Changed
+
+- New-session dialog: the two ways to continue a Claude conversation are now one *Conversation* choice – new (resumed on reload/restart), continue the last conversation in the folder, or a new one on every start (#241)
+- Settings, the update button and the MCP status are now in the window header, visible in every tab and window (right to left: Settings, Update, MCP); the Settings button and MCP chip at the bottom of the sidebar are gone, the command palette entry stays (#240)
+- Shortcuts need Ctrl or Alt (F keys also work alone); a binding without them is rejected and an old one is shown as inactive; hand-written symbol shortcuts without Shift (e.g. Ctrl+?) get a hint (#256)
+
+### Fixed
+
+- Switching back to the Terminals tab (tab, shortcut, ticket “back”, extra windows) focuses the previously focused pane again (otherwise the top-left one), unless a dialog or popup is open (#238)
+- Prompt jumps (Ctrl+Shift+Up/Down) and MCP `run_command` output stay correct after a pane is resized with text reflow (#246)
+- Broadcast no longer sends mouse clicks and mouse-wheel arrow keys of the focused pane to the other panes (#247)
+- IME input (Japanese, Chinese, Korean) works in terminals; the composition is shown at the cursor (#248)
+- Left Ctrl+Alt used instead of AltGr (e.g. Ctrl+Alt+Q for @ on German layouts) types the character in terminals (#249)
+- Scrollback search: matches on coloured lines are visible, CJK text is found, the newest matches stay reachable with very many hits, and highlights follow new output (#250)
+- Ctrl+click no longer runs scripts such as .py, .pyw, .pl, .rb or .ahk (or any PATHEXT type), it shows them in Explorer; Ctrl-hover no longer checks paths on network drives or `\wsl$` on the UI thread (#251)
+- Typed letters followed quickly by Alt/Ctrl are no longer sent as Alt combinations; the block cursor covers wide characters fully and draws bold/italic/emoji correctly; the release of Ctrl+C is reported to programs using kitty key events (#252)
+- `run_command`: the output of a line exactly as wide as the terminal is no longer empty in Git Bash with the Windows console host (setting *Use the bundled console host* off); the prompt mark is no longer placed on that output line (#231)
+- Claude sessions (especially in WSL) no longer start with `--continue` or `--resume` of an unrelated conversation: a session only resumes its own conversation, and only if it exists; on Windows this also works without hooks. Changing the working folder or shell starts a new conversation, saved old arguments can no longer resume or continue a conversation, and Claude history *Resume* uses a Windows shell, refuses entries without a conversation id and switches to a session that already has the conversation open. Templates keep the session's *continue* setting. Old saved Claude arguments that Paneldeck knows (extra folders, tools, MCP config, fallback model, budget, system prompt addition) become Claude options; the others are named once in a notice (#245)
+- Hook messages only count for the session's current launch: a `claude -p` started from within a session, leftover processes or other terminals no longer change a session's conversation or status. Global hooks that still point to an older or other `paneldeck.exe` keep updating the status, and *Settings → Claude → Hooks* offers to reinstall them; sessions started with `--safe-mode` ignore hook messages (#260)
+- New-session dialog: Esc closes an open list first; with Claude mode off, program start, reload and Duplicate no longer start Claude; profiles with the WSL launcher `bash.exe` from System32 are treated as WSL (hooks, status, paths) (#261)
+- New-session dialog, session settings, close-window dialog, session templates and command palette fit on small screens: the content scrolls, the buttons stay visible and hints no longer cover other controls (#241)
+- *New session*, *Prompt to all sessions in folder*, *Session templates* and *Close session with worktree* take the keyboard focus from the terminal; Esc no longer reaches the terminal, and Ctrl+Enter in a terminal no longer sends the open prompt composer (#255)
+- No more gaps between header, ticket list and ticket panel in the split ticket view, at any display scaling; the list keeps its room next to the panel and the panel has no double edge (#236)
+- Shortcuts match their exact modifiers: Ctrl+Shift+1/2 and Ctrl+AltGr+2 no longer switch tabs, project shortcuts work on every keyboard layout, and Alt+1…9, Ctrl+Shift+1…9 and Ctrl+Alt+arrows reach the terminal when there is no session, project or pane to switch to (#254)
+- Esc while recording a shortcut only cancels the recording instead of closing Settings (#256)
+- Sessions of another project (filtered sidebar, Duplicate, a worktree finishing after a project switch, Move to folder) no longer end up in the current project's layout or folders (#258)
+- Dropping a file in the To-do tab no longer types into a hidden terminal (#259)
+- Renaming a session hidden by the filter or a collapsed folder now shows the row – also for sessions of another project or window started from the command palette (#259)
+- Narrow panes no longer let their header buttons overlap the neighbour; buttons that don't fit move to the right-click menu (#259)
+- The window title is shortened to the free space and no longer covers tabs or buttons (#259)
+- Closing a worktree session no longer freezes the window on large repositories (#259)
+- The query field of dashboard search and count tiles now uses the same editor as the Search tab, with suggestions, live error messages and a new *Fields* list (also in the Search tab and the Tickets query bar) showing every field with its type (#237)
+
+### Security
+
+- Changes window: viewing a diff and the automatic `git status` no longer run external diff, textconv or filter commands defined in a repository's own Git configuration – also not from submodules; the standard Git LFS filter of a repository keeps working (#253)
+
 ## [2.3.1] - 2026-11-17
 
 ### Fixed
@@ -311,6 +354,7 @@ First public release. From here on, the public API (MCP interface, command line,
 - All `unwrap()`/`expect()` calls in the program code were replaced by error handling (the release build aborts completely on a panic); the `unsafe` blocks are justified.
 - The executable contains no paths of the build machine.
 
+[2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...HEAD
 [2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/zibbozz/paneldeck/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/zibbozz/paneldeck/compare/v2.1.0...v2.2.0
