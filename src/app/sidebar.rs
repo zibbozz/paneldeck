@@ -629,9 +629,12 @@ impl App {
         } else {
             resp.on_hover_text(format!("{status_tip}\n{}", lang.t("Mittelklick schließt die Sitzung.", "Middle-click closes the session.")))
         };
+        // Nur Ordner des Projekts dieser Sitzung (und Gruppen dieses Fensters) – ein Ordner eines anderen Projekts würde
+        // still im Projekt der Sitzung angelegt (#258).
+        let own_project = self.entries.get(&id).map(|e| e.meta.project).unwrap_or(self.active_project);
         let existing_groups: Vec<String> = {
-            let mut g: Vec<String> = self.entries.values().map(|e| e.meta.group.clone()).filter(|g| !g.is_empty()).collect();
-            if let Some(p) = self.projects.iter().find(|p| p.id == self.active_project) {
+            let mut g: Vec<String> = self.entries.values().filter(|e| e.meta.project == own_project && self.in_win(e)).map(|e| e.meta.group.clone()).filter(|g| !g.is_empty()).collect();
+            if let Some(p) = self.projects.iter().find(|p| p.id == own_project) {
                 g.extend(p.folders.iter().map(|f| f.path.clone()));
             }
             g.sort_by_key(|x| x.to_lowercase());

@@ -51,8 +51,10 @@ impl App {
             Some(f) => format!("📁 {} ({})", state::folder_leaf(f), self.folder_sessions(f).len()),
             None => self.entries.get(&dragged).map(|e| e.display_name()).unwrap_or_default(),
         };
+        // Sitzung eines anderen Projekts (gefilterte Seitenleiste): nie in Ordner oder Layout des gezeigten Projekts (#258).
+        let foreign = folder_drag.is_none() && self.entries.get(&dragged).is_some_and(|e| e.meta.project != self.active_project);
         // Ordner in der Seitenleiste als Ablageziel: der kleinste Bereich unter dem Zeiger gewinnt.
-        let folder_target = pos.and_then(|p| {
+        let folder_target = pos.filter(|_| !foreign).and_then(|p| {
             self.folder_rects.iter().filter(|(f, r)| r.contains(p) && folder_drag.as_ref().is_none_or(|d| !state::folder_within(f, d))).min_by(|a, b| (a.1.width() * a.1.height()).total_cmp(&(b.1.width() * b.1.height()))).map(|(f, r)| (f.clone(), *r))
         });
         if let Some((fpath, r)) = folder_target {
@@ -188,6 +190,11 @@ impl App {
         let z = zone(r, p);
         if let Some(fd) = folder_drag {
             self.open_folder_at(&fd, tid, z);
+            return;
+        }
+        if foreign {
+            // Wie ein Klick in der Seitenleiste: in ihr Projekt wechseln und sie dort zeigen.
+            self.apply(ctx, Action::Activate(dragged));
             return;
         }
         // Eine abgedockte Sitzung, die ins Hauptfenster gezogen wird, wird wieder angedockt.

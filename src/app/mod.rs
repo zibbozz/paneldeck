@@ -2005,6 +2005,9 @@ impl App {
         self.entries.insert(id, entry);
         if !quiet {
             if window == self.wins.cur {
+                // Gehört die neue Sitzung zu einem anderen Projekt (z. B. „Duplizieren“ einer gefilterten Sitzung), erst dorthin
+                // wechseln – sonst landete sie im Layout des gezeigten Projekts und verschwände beim nächsten Wechsel (#258).
+                self.switch_project(project);
                 self.activate(id);
             } else {
                 // Anderes Fenster: dort zeigen (es kommt nach vorn), nicht im gerade gezeichneten Layout.
@@ -2822,9 +2825,23 @@ impl App {
             let Some(p) = self.pending_wt.take() else { return };
             match res {
                 Ok(()) => {
-                    let id = self.new_session(ctx, p.opts);
+                    let mut opts = p.opts;
+                    // Inzwischen ein anderes Projekt gewählt: die Sitzung still in ihrem Projekt anlegen und Bescheid geben,
+                    // statt den Nutzer zurückzuholen oder sie ins falsche Layout zu legen (#258).
+                    let elsewhere = opts.window.is_none_or(|w| w == self.wins.cur) && opts.project.is_some_and(|pr| pr != self.active_project);
+                    opts.quiet |= elsewhere;
+                    let id = self.new_session(ctx, opts);
                     if let Some(e) = self.entries.get_mut(&id) {
                         e.meta.worktree = Some(p.wt);
+                    }
+                    if elsewhere {
+                        let lang = self.settings.language;
+                        let name = self.entries.get(&id).map(|e| e.display_name()).unwrap_or_default();
+                        let proj = self.entries.get(&id).and_then(|e| self.projects.iter().find(|p| p.id == e.meta.project)).map(|p| p.name.clone()).unwrap_or_default();
+                        self.notify_text(match lang {
+                            Lang::De => format!("Worktree-Sitzung {} ist im Projekt {} bereit.", lang.q(&name), lang.q(&proj)),
+                            Lang::En => format!("Worktree session {} is ready in project {}.", lang.q(&name), lang.q(&proj)),
+                        });
                     }
                 }
                 Err(e) => self.notify_text(format!("{}: {e}", self.settings.language.t("Worktree konnte nicht angelegt werden", "Could not create worktree"))),
