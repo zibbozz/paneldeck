@@ -72,7 +72,8 @@ fn parse_placement(args: &Value) -> Result<Option<crate::layout::Placement>, (St
 }
 
 enum Pend {
-    Run { cmd: String, prompt0: u64, cwd0: u64, start_abs: u64, max_lines: usize, cmd_shell: bool, started: Instant, mark0: Option<u64> },
+    /// `start_abs`/`mark0` sind festgehaltene Zeilen (`Session::pin_abs`): ein Größenwechsel mit Umbruch führt sie mit (#246).
+    Run { cmd: String, prompt0: u64, cwd0: u64, start_abs: crate::terminal::AbsPin, max_lines: usize, cmd_shell: bool, started: Instant, mark0: Option<crate::terminal::AbsPin> },
     Wait { statuses: Vec<ClaudeStatus>, started: Instant },
     /// Screenshot angefordert; das Bild kommt im nächsten Frame als `Event::Screenshot` mit diesem Token.
     Shot { token: u64, crop: Option<egui::Rect> },
@@ -1565,7 +1566,8 @@ impl App {
                 return Err(er("no_shell_integration", tr("Von dieser Shell kamen noch keine Integrations-Meldungen (Shell neu gestartet? Eigener Prompt überschreibt die Hooks?).", "No integration messages have arrived from this shell yet (shell restarted? A custom prompt overriding the hooks?).")));
             }
             self.mcp_check_writable(id)?;
-            let start_abs = s.abs_cursor_line();
+            let start_abs = s.pin_abs(s.abs_cursor_line());
+            let mark0 = mark0.map(|m| s.pin_abs(m));
             s.send_text_agent(&cmd, true);
             let cmd_shell = self.entries[&id].eff_shell() == "cmd";
             Ok(PendingMcp {
@@ -1695,7 +1697,7 @@ impl App {
                 let mut advanced = advanced;
                 if advanced && *cmd_shell {
                     let cur = s.abs_cursor_line();
-                    let prompt_ready = cur > *start_abs && s.lines_abs(cur, cur).first().is_some_and(|l| l.ends_with('>'));
+                    let prompt_ready = cur > start_abs.get() && s.lines_abs(cur, cur).first().is_some_and(|l| l.ends_with('>'));
                     advanced = prompt_ready;
                 }
                 // Prompt erst ganz ausgegeben (Terminal ruhig), damit Ausgabe und nächster Start sauber getrennt sind.
@@ -1706,7 +1708,7 @@ impl App {
                     return None;
                 }
                 // Ausgabe: Zeilen nach der Eingabezeile bis vor den neuen Prompt (Echo-Suche und Prompt-Anfang: `terminal::run_output`).
-                let crate::terminal::RunOutput { first_ok, lines: mut out } = s.run_output(cmd, *start_abs, *mark0, mark, advanced);
+                let crate::terminal::RunOutput { first_ok, lines: mut out } = s.run_output(cmd, start_abs.get(), mark0.as_ref().map(|m| m.get()), mark, advanced);
                 let truncated = out.len() > *max_lines;
                 if truncated {
                     out = out.split_off(out.len() - *max_lines);

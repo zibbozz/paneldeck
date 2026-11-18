@@ -11,8 +11,10 @@
 //!   so gut fahren wie mit der klassischen Kodierung (`win32_key`). Umschalt+Enter bleibt `ESC CR`.
 //! - **klassisch** (xterm/VT) für alles andere.
 //!
-//! Text (Buchstaben, AltGr-Zeichen, Tottasten, IME) kommt als `egui::Event::Text` und läuft über `encode_text`;
-//! nur reine Alt-Kombinationen und (mit kitty-Flag 8) alle Tasten werden aus dem Tastenereignis kodiert.
+//! Text (Buchstaben, AltGr-Zeichen, Tottasten) kommt als `egui::Event::Text`, IME-Eingaben als
+//! `egui::ImeEvent::Commit` (#248); beides läuft über `encode_text`. Linkes Strg+Alt als AltGr-Ersatz liefert keinen
+//! Text (egui-winit verwirft Text bei Strg): das Zeichen holt `termview` über `ctrl_alt_text_scan` aus der Belegung
+//! (#249). Nur reine Alt-Kombinationen und (mit kitty-Flag 8) alle Tasten werden aus dem Tastenereignis kodiert.
 
 use alacritty_terminal::term::TermMode;
 use eframe::egui::{Key, Modifiers};
@@ -409,6 +411,36 @@ fn scan_code(key: Key) -> Option<u16> {
         '0' => 0x0B,
         _ => return None,
     })
+}
+
+/// Scancode (Satz 1) einer Zeichentaste nach US-Position, auch der Satzzeichen-Tasten (für `ctrl_alt_text_scan`).
+fn char_scan_code(key: Key) -> Option<u16> {
+    Some(match key {
+        Key::Minus => 0x0C,
+        Key::Equals => 0x0D,
+        Key::OpenBracket => 0x1A,
+        Key::CloseBracket => 0x1B,
+        Key::Backslash => 0x2B,
+        Key::Semicolon => 0x27,
+        Key::Quote => 0x28,
+        Key::Backtick => 0x29,
+        Key::Comma => 0x33,
+        Key::Period => 0x34,
+        Key::Slash => 0x35,
+        _ => return scan_code(key),
+    })
+}
+
+/// Strg+Alt als AltGr-Ersatz (#249): Mit linkem Strg+Alt (statt AltGr) liefert egui-winit das Zeichen nicht als Text
+/// (Text bei gedrücktem Strg wird verworfen), die Taste allein ergibt nichts (`altgr`). Ist die Taste so eine
+/// Zeichentaste ohne folgenden Text, gibt diese Funktion den Scancode der Position zurück; das Zeichen ermittelt dann
+/// die Tastaturbelegung (unter Windows `ToUnicodeEx`). `None`, wenn der Text schon kam, es kein Strg+Alt ist, die Taste
+/// Bytes erzeugt hat (`produced`) oder es eine Taste des Ziffernblocks bzw. ohne bekannte Position ist.
+pub fn ctrl_alt_text_scan(k: &KeyPress, produced: bool) -> Option<u16> {
+    if produced || k.text.is_some() || k.phase == Phase::Release || !altgr(k.mods) || k.numpad {
+        return None;
+    }
+    char_scan_code(k.physical?)
 }
 
 /// Tasten, die unter win32-input-mode als echtes Tastenereignis gehen. Die Liste folgt der Sondierung (#183): nur wo
@@ -1283,7 +1315,43 @@ mod tests {
             assert_eq!(esc(&encode_text("é", mods("s"), false, mode)), "\\xc3\\xa9", "{mode:?}");
             // Steuerzeichen als Text nie
             assert!(encode_text("\u{7f}", mods(""), false, mode).is_empty());
+            // IME-Übernahme (#248) und das Zeichen von Strg+Alt als AltGr-Ersatz (#249) laufen wie Text
+            assert_eq!(esc(&encode_text("日本", mods(""), false, mode)), "\\xe6\\x97\\xa5\\xe6\\x9c\\xac", "{mode:?}");
+            assert_eq!(esc(&encode_text("@", mods("ca"), false, mode)), "@", "{mode:?}");
+            assert_eq!(esc(&encode_text("[", mods("ca"), false, mode)), "[", "{mode:?}");
         }
+    }
+
+    #[test]
+    fn ctrl_alt_without_text_asks_the_layout() {
+        let kp = |key: Key, physical: Option<Key>, m: &str, text: Option<&'static str>| KeyPress { key, physical, mods: mods(m), phase: Phase::Press, numpad: false, text };
+        // linkes Strg+Alt+Q / +8 / +ß (deutsch): kein Text → Scancode der Position
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::Q, Some(Key::Q), "ca", None), false), Some(0x10));
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::Num8, Some(Key::Num8), "ca", None), false), Some(0x09));
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::Minus, Some(Key::Minus), "ca", None), false), Some(0x0C));
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::CloseBracket, Some(Key::CloseBracket), "cas", None), false), Some(0x1B));
+        // echtes AltGr (Text kam), andere Modifikatoren, Loslassen, Ziffernblock, schon gesendete Bytes: nichts
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::Q, Some(Key::Q), "ca", Some("@")), false), None);
+        for m in ["", "c", "a", "s", "cs", "as"] {
+            assert_eq!(ctrl_alt_text_scan(&kp(Key::Q, Some(Key::Q), m, None), false), None, "{m}");
+        }
+        assert_eq!(ctrl_alt_text_scan(&KeyPress { phase: Phase::Release, ..kp(Key::Q, Some(Key::Q), "ca", None) }, false), None);
+        assert_eq!(ctrl_alt_text_scan(&KeyPress { numpad: true, ..kp(Key::Num8, Some(Key::Num8), "ca", None) }, false), None);
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::Q, Some(Key::Q), "ca", None), true), None);
+        // Tasten ohne Zeichenposition (Pfeile, F-Tasten, Enter) und ohne bekannte Position
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::ArrowUp, Some(Key::ArrowUp), "ca", None), false), None);
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::Enter, Some(Key::Enter), "ca", None), false), None);
+        assert_eq!(ctrl_alt_text_scan(&kp(Key::Q, None, "ca", None), false), None);
+        // Die Taste selbst bleibt bei Strg+Alt in allen Modi stumm (sonst käme das Zeichen doppelt)
+        for mode in [LEGACY, WIN32, kitty(1), kitty(5)] {
+            assert!(encode_key(&kp(Key::Q, Some(Key::Q), "ca", None), mode).bytes.is_empty(), "{mode:?}");
+            assert!(encode_key(&kp(Key::Num8, Some(Key::Num8), "ca", None), mode).bytes.is_empty(), "{mode:?}");
+        }
+        // Normales Tippen und Kürzel unverändert: Buchstabe ohne Modifikator = Text, Strg+C = ^C, Alt+x = ESC x
+        assert!(encode_key(&kp(Key::A, Some(Key::A), "", Some("a")), LEGACY).bytes.is_empty());
+        assert_eq!(esc(&encode_text("a", mods(""), false, LEGACY)), "a");
+        assert_eq!(esc(&encode_key(&kp(Key::C, Some(Key::C), "c", None), LEGACY).bytes), "\\x03");
+        assert_eq!(esc(&encode_key(&kp(Key::X, Some(Key::X), "a", Some("x")), LEGACY).bytes), "\\ex");
     }
 
     #[test]

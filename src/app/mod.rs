@@ -687,6 +687,9 @@ pub struct App {
     focused: u64,
     next_id: u64,
     want_focus: Option<u64>,
+    /// Zurück in den Terminal Hub (#238): Zahl der Bilder seit dem Umschalten; nach zwei vollen Terminal-Bildern bekommt
+    /// das zuvor fokussierte Terminal (sonst die Pane oben links) den Fokus – nur, wenn kein Dialog/Popup offen ist.
+    focus_return: Option<u8>,
     rename: Option<(u64, String)>,
     group_prompt: Option<Prompt>,
     templates: Vec<Template>,
@@ -996,6 +999,7 @@ impl App {
             focused: 0,
             next_id: saved.next_id.max(1),
             want_focus: None,
+            focus_return: None,
             rename: None,
             group_prompt: None,
             templates: templates::load(&dir),
@@ -2306,15 +2310,41 @@ impl App {
         }
     }
 
-    /// Bereich wechseln; beim Zurück in die Terminals bekommt das zuletzt aktive Terminal wieder den Fokus.
+    /// Bereich wechseln; beim Zurück in die Terminals bekommt das zuletzt aktive Terminal wieder den Fokus
+    /// (verzögert, siehe `focus_return_tick`).
     fn set_mode(&mut self, mode: titlebar::Mode) {
-        if self.mode != mode && mode == titlebar::Mode::Terminals {
-            self.want_focus = Some(self.focused);
+        if self.mode != mode {
+            self.focus_return = (mode == titlebar::Mode::Terminals).then_some(0);
         }
         if mode != titlebar::Mode::Tasks {
             self.plan.forget_terminal_return(); // von Hand weggeschaltet: der Rückweg „Zurück zum Terminal Hub“ gilt nicht mehr
         }
         self.mode = mode;
+    }
+
+    /// Am Ende jedes Bilds: steht ein Rückweg in den Terminal Hub an (`focus_return`), nach zwei vollen Terminal-Bildern
+    /// (damit Ebenen des alten Reiters nicht mehr als „sichtbar“ zählen) das Ziel fokussieren. Das Ziel ist das zuletzt
+    /// fokussierte Terminal, falls es im Layout steht, sonst die Pane oben links. Ist dann ein Dialog, Fenster oder Popup
+    /// offen, bleibt der Fokus dort (#238).
+    fn focus_return_tick(&mut self, ctx: &egui::Context) {
+        let Some(n) = self.focus_return else { return };
+        if self.mode != titlebar::Mode::Terminals {
+            self.focus_return = None;
+            return;
+        }
+        if n < 2 {
+            self.focus_return = Some(n + 1);
+            ctx.request_repaint();
+            return;
+        }
+        self.focus_return = None;
+        if focus_held_elsewhere(ctx) {
+            return;
+        }
+        if let Some(id) = self.layout.as_ref().and_then(|l| return_focus_target(l, self.focused)) {
+            self.want_focus = Some(id);
+            ctx.request_repaint();
+        }
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -3256,14 +3286,17 @@ impl App {
                     self.activate(sid);
                 }
                 if let Some(s) = self.entries.get_mut(&sid).and_then(|e| e.live.as_mut()) {
-                    let matches = search::find_all(&s.term.lock().unwrap_or_else(|e| e.into_inner()), &query);
                     let mut st = SearchState::new();
                     st.focus_input = false;
-                    st.current = matches.iter().position(|m| m.line == line).unwrap_or(0);
                     st.query = query.clone();
                     st.last_query = query;
-                    st.matches = matches;
-                    search::scroll_to(&mut s.term.lock().unwrap_or_else(|e| e.into_inner()), line);
+                    let activity = s.output_stamp();
+                    let mut t = s.term.lock().unwrap_or_else(|e| e.into_inner());
+                    st.compute(&t, s.hist_base(), activity);
+                    st.refreshed = ctx.input(|i| i.time);
+                    st.current = st.matches.iter().position(|m| m.line == line).unwrap_or(st.matches.len().saturating_sub(1));
+                    search::scroll_to(&mut t, line);
+                    drop(t);
                     s.search = Some(st);
                 }
             }
@@ -3878,6 +3911,7 @@ impl eframe::App for App {
         for a in actions {
             self.apply(ctx, a);
         }
+        self.focus_return_tick(ctx);
 
         // Fenstertitel
         let waiting = self.entries.values().filter(|e| e.needs_you()).count();
@@ -4316,8 +4350,10 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     match entry.live.as_mut() {
         Some(session) => {
             let tid = Id::new(("term", id));
-            if *cx.want_focus == Some(id) {
-                ui.memory_mut(|m| m.request_focus(tid));
+            // Erst NACH `termview::show` fokussieren: egui nimmt einem fokussierten Widget den Fokus beim `interact`
+            // wieder weg, wenn im selben Bild woanders geklickt wurde (Reiter, Palette, Dialogknopf; #238).
+            let grab = *cx.want_focus == Some(id);
+            if grab {
                 *cx.want_focus = None;
             }
             let prof = cx.profiles.iter().find(|p| p.id == profile_id);
@@ -4329,6 +4365,10 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
             let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
+            if grab {
+                ui.memory_mut(|m| m.request_focus(tid));
+                ui.ctx().request_repaint();
+            }
             if let Some((text, check_targets)) = session.take_paste_ask() {
                 cx.actions.push(Action::PasteAsk(id, text, cx.detached, check_targets));
             }
@@ -4410,19 +4450,37 @@ fn search_bar(ui: &mut Ui, session: &mut Session, body: Rect, lang: Lang) -> boo
                 step = 1;
             }
             let changed = st.query != st.last_query;
+            let now = ui.input(|i| i.time);
+            let activity = session.output_stamp();
             if changed || step != 0 {
-                st.matches = search::find_all(&session.term.lock().unwrap_or_else(|e| e.into_inner()), &st.query);
-                st.last_query = st.query.clone();
-                let n = st.matches.len();
-                if n == 0 {
-                    st.current = 0;
-                } else if changed {
-                    st.current = n - 1;
+                let mut t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+                let base = session.hist_base();
+                if changed {
+                    st.compute(&t, base, activity);
+                    st.current = st.matches.len().saturating_sub(1);
                 } else {
-                    st.current = (st.current as i32 + step).rem_euclid(n as i32) as usize;
+                    // erst auf den aktuellen Stand bringen (derselbe Treffer), dann weiter (#250)
+                    st.refresh(&t, base, activity);
+                    let n = st.matches.len();
+                    st.current = if n == 0 { 0 } else { (st.current as i32 + step).rem_euclid(n as i32) as usize };
                 }
+                st.refreshed = now;
+                st.last_query = st.query.clone();
                 if let Some(m) = st.matches.get(st.current) {
-                    search::scroll_to(&mut session.term.lock().unwrap_or_else(|e| e.into_inner()), m.line);
+                    search::scroll_to(&mut t, m.line);
+                }
+            } else {
+                // Neue Ausgabe: Treffer nachführen, damit Markierungen nicht wandern und `current` gültig bleibt (#250);
+                // bei laufender Ausgabe höchstens viermal pro Sekunde.
+                let t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+                let base = session.hist_base();
+                if st.stale(&t, base, activity) {
+                    if now - st.refreshed >= 0.25 {
+                        st.refresh(&t, base, activity);
+                        st.refreshed = now;
+                    } else {
+                        ui.ctx().request_repaint_after(Duration::from_millis(260));
+                    }
                 }
             }
             let n = st.matches.len();
@@ -4885,6 +4943,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn return_focus_goes_to_the_last_focused_pane_or_the_top_left_one() {
+        let row = Node::grid(&[4, 7, 9], Dir::Horizontal).unwrap();
+        assert_eq!(return_focus_target(&row, 7), Some(7), "zuletzt fokussiert und sichtbar");
+        assert_eq!(return_focus_target(&row, 42), Some(row.leaf_ids()[0]), "unbekannt: erste Pane (oben links)");
+        assert_eq!(return_focus_target(&Node::Leaf(3), 0), Some(3));
+    }
+
+    /// Ein Bild mit Zentralbereich (Widget `term`) und optional einem Fenster/Tooltip; gibt zurück, ob ein Dialog offen ist.
+    fn focus_frame(ctx: &egui::Context, events: Vec<egui::Event>, window: bool, tooltip: bool, request: Option<bool>) -> bool {
+        let tid = Id::new("term");
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))), events, ..Default::default() };
+        let mut held = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // `Some(true)`: vor dem Widget fokussieren (alt), `Some(false)`: danach (#238)
+                if request == Some(true) {
+                    ui.memory_mut(|m| m.request_focus(tid));
+                }
+                let _ = ui.interact(Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 500.0)), tid, Sense::click_and_drag());
+                if request == Some(false) {
+                    ui.memory_mut(|m| m.request_focus(tid));
+                }
+            });
+            if window {
+                egui::Window::new("dlg").show(ctx, |ui| ui.label("x"));
+            }
+            if tooltip {
+                egui::Area::new(Id::new("toast")).order(egui::Order::Tooltip).show(ctx, |ui| ui.label("t"));
+            }
+            held = focus_held_elsewhere(ctx);
+        });
+        held
+    }
+
+    #[test]
+    fn return_focus_respects_open_dialogs_and_survives_the_tab_click() {
+        let ctx = egui::Context::default();
+        assert!(!focus_frame(&ctx, vec![], false, false, None));
+        assert!(!focus_frame(&ctx, vec![], false, true, None), "Toasts/Tooltips halten keinen Fokus");
+        assert!(focus_frame(&ctx, vec![], true, false, None), "offenes Fenster");
+        let _ = focus_frame(&ctx, vec![], false, false, None);
+        assert!(!focus_frame(&ctx, vec![], false, false, None), "Fenster wieder zu");
+        // Klick auf einen Reiter oberhalb des Terminals: Druck in einem, Loslassen im nächsten Bild
+        let at = Pos2::new(20.0, 20.0);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let tid = Id::new("term");
+        for (before, keeps) in [(true, false), (false, true)] {
+            let ctx = egui::Context::default();
+            let _ = focus_frame(&ctx, vec![egui::Event::PointerMoved(at)], false, false, None);
+            let _ = focus_frame(&ctx, vec![press(true)], false, false, None);
+            let _ = focus_frame(&ctx, vec![press(false)], false, false, Some(before));
+            let _ = focus_frame(&ctx, vec![], false, false, None);
+            assert_eq!(ctx.memory(|m| m.has_focus(tid)), keeps, "Fokus vor dem Widget angefordert: {before}");
+        }
+    }
+
+    #[test]
     fn wsl_spawn_cwd_fallbacks() {
         // Profil mit eigenem `--cd`: ein Linux-/WSL-Ordner wird nie zum Windows-Startordner.
         assert!(spawn_cwd_is_windows(r"C:\Work"));
@@ -5100,6 +5215,23 @@ mod tests {
         assert!(split_args("   ").is_empty());
         assert_eq!(split_args("\"\""), vec![""]);
     }
+}
+
+/// Ziel beim Zurück in den Terminal Hub (#238): die zuletzt fokussierte Sitzung, wenn sie im Layout steht, sonst die
+/// erste Pane (oben links).
+fn return_focus_target(layout: &Node, focused: u64) -> Option<u64> {
+    let ids = layout.leaf_ids();
+    if ids.contains(&focused) { Some(focused) } else { ids.first().copied() }
+}
+
+/// Hält gerade ein Dialog, Fenster oder Popup den Fokus bzw. ist eines offen? Dann holt sich ein Terminal den Fokus
+/// nicht von selbst (#238). Fenster und Modale liegen in den Ebenen `Middle`/`Foreground`; Tooltips und Toasts
+/// (`Tooltip`) zählen nicht.
+fn focus_held_elsewhere(ctx: &egui::Context) -> bool {
+    egui::Popup::is_any_open(ctx)
+        || ctx.memory(|m| {
+            m.top_modal_layer().is_some() || m.areas().visible_layer_ids().iter().any(|l| matches!(l.order, egui::Order::Middle | egui::Order::Foreground))
+        })
 }
 
 /// „+“-Knopf am Rand eines Terminals: erscheint, wenn die Maus nahe an einem Rand ist, und teilt dort den Bereich.
