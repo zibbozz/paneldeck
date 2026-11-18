@@ -313,8 +313,8 @@ enum Action {
     TemplateStart(usize),
     /// Vorlage starten, mit Ziel (Ordner, Bereich; #244).
     TemplateStartAt(usize, tpl_lib::TplAt),
-    /// Vorlage löschen – nach der Rückfrage, über ihren Namen (Indizes können sich verschieben, #276).
-    TemplateDelete(String),
+    /// Vorlage löschen – nach der Rückfrage; nur, wenn an Index noch dieser Name steht (#276).
+    TemplateDelete(usize, String),
     /// Rückfrage vor dem Löschen einer Vorlage (#276).
     TemplateDeleteAsk(usize),
     TemplateSave(String, Option<String>),
@@ -3374,9 +3374,10 @@ impl App {
                 }
             }
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
-                e.live_cwd = c.clone();
+                // Linux-Pfad einer WSL-Sitzung als Windows-Pfad wie bei OSC 7 (Dateibaum, Links, #277).
+                e.live_cwd = pathfmt::from_wsl(e.eff_shell(), c);
                 if e.start_cwd.is_empty() {
-                    e.start_cwd = pathfmt::from_wsl(e.eff_shell(), c);
+                    e.start_cwd = e.live_cwd.clone();
                 }
             }
             if e.is_claude() && !keyless {
@@ -3787,11 +3788,12 @@ impl App {
             Action::OpenCosts => self.cost_open = true,
             Action::TemplateDeleteAsk(i) => {
                 if let Some(t) = self.templates.get(i) {
-                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::DeleteTemplate(t.name.clone())));
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::DeleteTemplate(i, t.name.clone())));
                 }
             }
-            Action::TemplateDelete(name) => {
-                if let Some((i, _)) = templates::find(&self.templates, &name) {
+            Action::TemplateDelete(i, name) => {
+                // Nur, wenn an dieser Stelle noch genau diese Vorlage steht (die Liste kann sich verschoben haben).
+                if self.templates.get(i).is_some_and(|t| t.name == name) {
                     self.templates.remove(i);
                     templates::save(&self.dir, &self.templates);
                 }
@@ -4867,7 +4869,18 @@ fn list_dir(p: &Path, hidden: bool) -> Vec<TreeItem> {
 
 /// Ein Ordner des Dateibaums mit Inhalt; `mark` = aktueller Ordner der Shell (aufklappen und markieren, #277).
 fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<PathBuf, Vec<TreeItem>>, actions: &mut Vec<Action>, lang: Lang, mark: &panels::TreeMark) {
-    let items = cache.entry(dir.to_path_buf()).or_insert_with(|| list_dir(dir, hidden)).clone();
+    // Langsame Wurzel (Netzwerk, WSL): im Hilfsthread lesen, bis dahin „wird geladen …“ (#277 Review).
+    let items = if mark.slow {
+        match panels::slow_list(ui.ctx(), dir, hidden) {
+            Some(v) => v,
+            None => {
+                ui.weak(lang.t("wird geladen …", "loading …"));
+                return;
+            }
+        }
+    } else {
+        cache.entry(dir.to_path_buf()).or_insert_with(|| list_dir(dir, hidden)).clone()
+    };
     if items.is_empty() {
         ui.weak(lang.t("(leer)", "(empty)"));
     }
@@ -4895,7 +4908,7 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
                 name = name.color(style::accent());
             }
             // Auf dem Weg zum aktuellen Ordner der Shell: einmal aufklappen, wenn er sich ändert (danach frei zuklappbar).
-            let r = egui::CollapsingHeader::new(name).id_salt(("tree", &it.path)).open((on_way && mark.reveal).then_some(true)).show(ui, |ui| {
+            let r = egui::CollapsingHeader::new(name).id_salt(("tree", &it.path)).open((on_way && mark.reveal && (!mark.slow || panels::slow_cached(&it.path, hidden))).then_some(true)).show(ui, |ui| {
                 tree_children(ui, &it.path, hidden, cache, actions, lang, mark);
             });
             if current {

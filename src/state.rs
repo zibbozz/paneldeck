@@ -720,13 +720,38 @@ impl Project {
         self.folders.retain(|f| !folder_within(&f.path, path));
     }
 
-    /// Löscht nur den Ordner selbst; Unterordner rücken eine Ebene hoch. Seine Vorgaben für neue Sitzungen
-    /// (Arbeitsordner, Profil) gehen an die direkten Unterordner, die keine eigenen haben – so starten neue Sitzungen
-    /// darin wie vorher (#276).
-    pub fn delete_folder_lift(&mut self, path: &str) {
-        if path.is_empty() {
-            return;
+    /// Wohin die direkten Unterordner von `path` beim Löschen (Inhalt bleibt) rücken: (alter Pfad, neuer Pfad). Gibt es
+    /// im übergeordneten Ordner schon einen Ordner dieses Namens, bekommt der hochgerückte einen freien Namen
+    /// („c (2)“) – sonst flössen beide zusammen und die Vorgaben des hochgerückten gingen verloren (#276).
+    pub fn lift_plan(&self, path: &str) -> Vec<(String, String)> {
+        let parent = folder_parent(path);
+        let mut taken: std::collections::HashSet<String> = self.folders.iter().filter(|f| !folder_within(&f.path, path)).map(|f| f.path.clone()).collect();
+        let mut kids: Vec<&Folder> = self.folders.iter().filter(|f| folder_parent(&f.path) == path && f.path != path).collect();
+        kids.sort_by(|a, b| a.path.cmp(&b.path));
+        let join = |leaf: &str| if parent.is_empty() { leaf.to_string() } else { format!("{parent}/{leaf}") };
+        let mut plan = Vec::new();
+        for k in kids {
+            let leaf = folder_leaf(&k.path);
+            let mut new = join(leaf);
+            let mut n = 2;
+            while taken.contains(&new) {
+                new = join(&format!("{leaf} ({n})"));
+                n += 1;
+            }
+            taken.insert(new.clone());
+            plan.push((k.path.clone(), new));
         }
+        plan
+    }
+
+    /// Löscht nur den Ordner selbst; Unterordner rücken eine Ebene hoch ([`Project::lift_plan`], [`lift_mapped`]). Seine
+    /// Vorgaben für neue Sitzungen (Arbeitsordner, Profil) gehen an die direkten Unterordner, die keine eigenen haben –
+    /// so starten neue Sitzungen darin wie vorher (#276). Gibt den Plan zurück (für die Sitzungen).
+    pub fn delete_folder_lift(&mut self, path: &str) -> Vec<(String, String)> {
+        if path.is_empty() {
+            return Vec::new();
+        }
+        let plan = self.lift_plan(path);
         if let Some(gone) = self.folder(path).cloned() {
             for f in self.folders.iter_mut().filter(|f| folder_parent(&f.path) == path) {
                 if f.cwd.is_empty() {
@@ -739,11 +764,23 @@ impl Project {
         }
         self.folders.retain(|f| f.path != path);
         for f in &mut self.folders {
-            f.path = lift_path(&f.path, path);
+            f.path = lift_mapped(&f.path, path, &plan);
         }
         let mut seen = std::collections::HashSet::new();
         self.folders.retain(|f| !f.path.is_empty() && seen.insert(f.path.clone()));
+        plan
     }
+}
+
+/// Pfad nach dem Löschen von `deleted` (Inhalt bleibt) mit dem Plan aus [`Project::lift_plan`]; Pfade ohne Eintrag im
+/// Plan wie [`lift_path`].
+pub fn lift_mapped(p: &str, deleted: &str, plan: &[(String, String)]) -> String {
+    for (old, new) in plan {
+        if folder_within(p, old) {
+            return format!("{new}{}", &p[old.len()..]);
+        }
+    }
+    lift_path(p, deleted)
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -1027,6 +1064,32 @@ mod folder_tests {
         p.delete_folder_lift("a/b");
         let v: Vec<_> = p.folders.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(v, ["a", "a/c"]);
+    }
+    #[test]
+    fn lifting_into_an_existing_name_keeps_both_folders() {
+        // #276: a/b löschen, obwohl a/c schon existiert: a/b/c wird „a/c (2)“ (mit seinen Vorgaben und Unterordnern).
+        let mut p = Project::default();
+        for f in ["a/c", "a/b/c/d", "a/b/e"] {
+            p.ensure_folder(f);
+        }
+        p.folders.iter_mut().find(|f| f.path == "a/b/c").unwrap().cwd = "C:/bc".into();
+        let plan = p.lift_plan("a/b");
+        assert_eq!(plan, vec![("a/b/c".to_string(), "a/c (2)".to_string()), ("a/b/e".to_string(), "a/e".to_string())]);
+        assert_eq!(lift_mapped("a/b/c/d", "a/b", &plan), "a/c (2)/d");
+        assert_eq!(lift_mapped("a/b", "a/b", &plan), "a");
+        assert_eq!(lift_mapped("a/b/x", "a/b", &plan), "a/x", "ohne Ordnereintrag wie lift_path");
+        assert_eq!(p.delete_folder_lift("a/b"), plan);
+        let mut v: Vec<_> = p.folders.iter().map(|f| f.path.as_str()).collect();
+        v.sort();
+        assert_eq!(v, ["a", "a/c", "a/c (2)", "a/c (2)/d", "a/e"]);
+        assert_eq!(p.folder("a/c (2)").map(|f| f.cwd.as_str()), Some("C:/bc"));
+        assert_eq!(p.folder("a/c").map(|f| f.cwd.as_str()), Some(""));
+        // oberste Ebene
+        let mut p = Project::default();
+        for f in ["x", "t/x"] {
+            p.ensure_folder(f);
+        }
+        assert_eq!(p.lift_plan("t"), vec![("t/x".to_string(), "x (2)".to_string())]);
     }
     #[test]
     fn deleting_a_folder_keeps_the_defaults_consistent() {

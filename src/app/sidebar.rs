@@ -286,8 +286,11 @@ impl App {
         let g = p.layout_job(job);
         p.galley(Pos2::new(rect.min.x + 42.0, cy - g.size().y / 2.0), g, text_c);
         if let Some(b) = trash {
-            let tip = if ids.is_empty() {
+            // Leer = keine Sitzungen in irgendeinem Fenster und keine Unterordner: nur dann ohne Rückfrage (#276).
+            let tip = if closing::empty_folder(self.folder_content(self.active_project, &f.path)) {
                 lang.t("Leeren Ordner löschen", "Delete empty folder")
+            } else if ids.is_empty() {
+                lang.t("Ordner löschen … (mit Unterordnern; Sitzungen anderer Fenster rücken hoch)", "Delete folder … (with its subfolders; sessions in other windows move up)")
             } else {
                 lang.t(
                     "Ordner löschen und alle Sitzungen darin schließen … (auch Unterordner, minimierte Sitzungen und Chats)",
