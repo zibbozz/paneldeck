@@ -38,6 +38,8 @@ impl App {
                     });
                 }
             });
+            // Vorlagen-Bibliothek (#244): einklappbar über der Fußzeile.
+            self.templates_section(ui, actions);
 
             // Werkzeugleiste
             ui.horizontal_wrapped(|ui| {
@@ -130,6 +132,8 @@ impl App {
             groups.sort_by_key(|g| !g.is_empty()); // ohne Gruppe zuerst
             let empty = groups.is_empty();
 
+            // Fläche der Sitzungsliste: Ablageziel für Vorlagen in der Listenansicht (#244).
+            self.tpl.list_rect = Some(ui.available_rect_before_wrap());
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 if empty && !(tree_on && self.filter.trim().is_empty()) {
@@ -335,6 +339,20 @@ impl App {
             if ui.button(lang.t("Als Vorlage speichern …", "Save as template …")).clicked() {
                 actions.push(Action::FolderTemplate(path.clone()));
                 ui.close();
+            }
+            // Vorlage in diesem Ordner starten (#244).
+            if !self.templates.is_empty() {
+                ui.menu_button(lang.t("Vorlage hier starten", "Start template here"), |ui| {
+                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                        for (i, t) in self.templates.iter().enumerate() {
+                            let label = if t.is_terminal() { t.name.clone() } else { format!("{} ({})", t.name, t.items.len()) };
+                            if ui.button(label).clicked() {
+                                actions.push(Action::TemplateStartAt(i, tpl_lib::TplAt::Folder(path.clone())));
+                                ui.close();
+                            }
+                        }
+                    });
+                });
             }
             ui.separator();
             palette_ui::color_menu(ui, lang.t("Farbe", "Color"), |ui| {
@@ -729,6 +747,10 @@ impl App {
             }
             if ui.button(lang.t("Duplizieren", "Duplicate")).clicked() {
                 actions.push(Action::Duplicate(id));
+                ui.close();
+            }
+            if !is_chat && ui.button(lang.t("Als Terminal-Vorlage speichern …", "Save as terminal template …")).clicked() {
+                actions.push(Action::TemplateFromSession(id));
                 ui.close();
             }
             ui.separator();
