@@ -73,6 +73,50 @@ pub fn apply_suggestion(text: &str, s: &Suggestion) -> (String, usize) {
     (out, cursor)
 }
 
+// ------------------------------------------------------------------ Feldliste
+
+/// Ein Eintrag der Feldliste („Felder ▾“): Name und Typ zum Anzeigen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldEntry {
+    pub name: String,
+    /// Typ in der Sprache der Oberfläche (bei Mehrfachwerten mit Zusatz).
+    pub kind: String,
+}
+
+/// Alle Felder des Schemas für die Feldliste, alphabetisch (ohne Beachtung der Groß-/Kleinschreibung).
+pub fn field_list(schema: &Schema, lang: Lang) -> Vec<FieldEntry> {
+    let mut out: Vec<FieldEntry> = schema
+        .fields
+        .iter()
+        .map(|f| {
+            let k = f.ty.kind().label(lang);
+            let kind = if f.multi { format!("{k}, {}", lang.t("mehrfach", "multiple")) } else { k.to_string() };
+            FieldEntry { name: f.name.clone(), kind }
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// Setzt einen Feldnamen am Cursor ein (bei Bedarf in Anführungszeichen), mit Leerzeichen davor, wenn direkt davor ein
+/// Wort steht, und dahinter, damit gleich der Operator folgen kann. Ergebnis: neuer Text und Cursor hinter dem Leerzeichen.
+pub fn insert_name(text: &str, cursor: usize, name: &str) -> (String, usize) {
+    let c = clamp_boundary(text, cursor);
+    let (before, after) = text.split_at(c);
+    let mut ins = String::new();
+    if before.chars().next_back().is_some_and(|ch| !ch.is_whitespace() && ch != '(') {
+        ins.push(' ');
+    }
+    ins.push_str(&name_literal(name));
+    ins.push(' ');
+    let mut out = String::with_capacity(text.len() + ins.len());
+    out.push_str(before);
+    out.push_str(&ins);
+    let cursor = out.len();
+    out.push_str(after.strip_prefix(' ').unwrap_or(after));
+    (out, cursor)
+}
+
 // ------------------------------------------------------------------ Prüfung
 
 /// Wie ernst eine Meldung ist.
@@ -571,6 +615,37 @@ mod tests {
         assert!(History::from_json("kaputt").is_empty());
         assert!(History::from_json("").is_empty());
         assert!(History::from_json("[1,2]").is_empty());
+    }
+
+    #[test]
+    fn field_list_is_sorted_and_names_the_types_in_both_languages() {
+        let sc = schema().with_multi_field("Komponente", FieldType::Labels);
+        let en = field_list(&sc, Lang::En);
+        let names: Vec<&str> = en.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["due", "Größe", "Komponente", "Priorität", "Release version", "status", "summary", "type"]);
+        let size = en.iter().find(|f| f.name == "Größe").unwrap();
+        assert_eq!(size.kind, "number");
+        let de = field_list(&sc, Lang::De);
+        assert_eq!(de.iter().find(|f| f.name == "Größe").unwrap().kind, "Zahl");
+        assert!(en.iter().find(|f| f.name == "Komponente").unwrap().kind.contains("multiple"));
+        assert!(de.iter().find(|f| f.name == "Komponente").unwrap().kind.contains("mehrfach"));
+        assert!(field_list(&Schema::new(), Lang::En).is_empty());
+    }
+
+    #[test]
+    fn insert_name_quotes_and_spaces_as_needed() {
+        assert_eq!(insert_name("", 0, "status"), ("status ".to_string(), 7));
+        let (t, c) = insert_name("type = Epic AND", 15, "Release version");
+        assert_eq!(t, "type = Epic AND \"Release version\" ");
+        assert_eq!(c, t.len());
+        // mitten im Text: kein doppeltes Leerzeichen, der Rest bleibt
+        let (t, c) = insert_name("( = 1", 1, "Größe");
+        assert_eq!(t, "(Größe = 1");
+        assert_eq!(&t[..c], "(Größe ");
+        // Cursor hinter einem Umlaut, Offset mitten im Zeichen wird abgerundet
+        let (t, _) = insert_name("ä", 1, "x");
+        assert_eq!(t, "x ä");
+        assert!(diagnose(&insert_name("", 0, "Priorität").0, &schema(), Lang::En).iter().all(|d| d.severity == Severity::Incomplete));
     }
 
     #[test]

@@ -8,6 +8,10 @@
 //! * **Verlauf** der letzten Abfragen (Pfeil hoch/runter im leeren/unveränderten Feld, dazu ein Dropdown).
 //! * Knöpfe „?“ (Hilfe), „Filter speichern“, Dropdown „Gespeicherte Filter“ und „Schlüsselwörter …“.
 //!
+//! * **Feldliste** („Felder ▾“): alle Felder des Schemas mit Typ; ein Klick setzt den Namen am Cursor ein.
+//! * **Eingebettet** ([`QueryBarCtx::embedded`]): nur Feld, Vorschläge, Feldliste und Meldungen – ohne „Suchen“, Verlauf und
+//!   gespeicherte Filter. So nutzen Dialoge (z. B. die Such- und Zahlen-Kachel eines Dashboards) denselben Editor.
+//!
 //! Der Baustein **führt nichts aus**: eine fertige Abfrage kommt als [`QueryBarOutput::submitted`] zum Aufrufer, der sie
 //! ausführt (Suche, Board-Quelle, Dashboard-Kachel …). Hilfeseite, Schlüsselwort-Editor und Ausführung öffnet ebenfalls der
 //! Aufrufer (`help_clicked`, `keywords_clicked`). Nur die Dialoge für gespeicherte Filter gehören zur Leiste selbst.
@@ -18,7 +22,7 @@
 //! if let Some(q) = out.submitted { /* ausführen */ }
 //! ```
 
-use super::query_logic::{Diag, Fix, History, Severity, apply_fix, apply_suggestion, byte_of, char_of, diagnose, is_submittable, one_line, wave_ranges};
+use super::query_logic::{Diag, Fix, History, Severity, apply_fix, apply_suggestion, byte_of, char_of, diagnose, field_list, insert_name, is_submittable, one_line, wave_ranges};
 use super::saved_filters::{FilterEvent, FilterUi};
 use crate::query::{Schema, Suggestion, SuggestionKind, suggest};
 use crate::state::Lang;
@@ -48,11 +52,23 @@ pub struct QueryBarCtx<'a> {
     pub show_help: bool,
     /// Gibt es einen Schlüsselwort-Editor? Dann zeigt die Leiste den Knopf „Schlüsselwörter …“.
     pub show_keywords: bool,
+    /// Eingebettet in ein Formular: ohne „Suchen“, Verlauf und gespeicherte Filter (siehe [`QueryBarCtx::embedded`]).
+    pub embedded: bool,
 }
 
 impl<'a> QueryBarCtx<'a> {
     pub fn new(schema: &'a Schema, lang: Lang) -> Self {
-        Self { schema, lang, conn: None, project_id: None, project_key: "", show_help: true, show_keywords: true }
+        Self { schema, lang, conn: None, project_id: None, project_key: "", show_help: true, show_keywords: true, embedded: false }
+    }
+
+    /// Nur der Editor (Feld, Vorschläge, Feldliste, Meldungen) für ein Formular: kein „Suchen“, kein „?“, kein Verlauf, keine
+    /// gespeicherten Filter, keine Schlüsselwörter. Enter meldet eine gültige Abfrage trotzdem als `submitted`.
+    pub fn embedded(mut self) -> Self {
+        self.embedded = true;
+        self.show_help = false;
+        self.show_keywords = false;
+        self.conn = None;
+        self
     }
 
     /// Mit gespeicherten Filtern (Datenbank, Projekt, Projektkürzel).
@@ -119,6 +135,15 @@ impl QueryBarState {
 
     fn id(&self) -> Id {
         Id::new(("query_bar_edit", self.salt))
+    }
+
+    /// Text setzen, ohne den Fokus zu holen (z. B. beim Öffnen eines Dialogs mit vorhandener Abfrage).
+    pub fn set_text(&mut self, q: &str) {
+        self.text = q.to_string();
+        self.cursor_next = Some(self.text.len());
+        self.last_cursor = self.text.len();
+        self.open = false;
+        self.sel = None;
     }
 
     /// Abfrage von außen setzen (z. B. „In Suche übernehmen“): Text ersetzen, Cursor ans Ende, Feld fokussieren.
@@ -238,7 +263,7 @@ pub fn query_bar(ui: &mut Ui, st: &mut QueryBarState, cx: &QueryBarCtx) -> Query
     let mut search_clicked = false;
     let mut edit = None;
     ui.horizontal_top(|ui| {
-        let buttons = 78.0 + if cx.show_help { 34.0 } else { 0.0 };
+        let buttons = if cx.embedded { 0.0 } else { 78.0 } + if cx.show_help { 34.0 } else { 0.0 };
         let w = (ui.available_width() - buttons - S2 * 2.0).max(160.0);
         let o = egui::TextEdit::multiline(&mut st.text)
             .id(id)
@@ -248,10 +273,17 @@ pub fn query_bar(ui: &mut Ui, st: &mut QueryBarState, cx: &QueryBarCtx) -> Query
             .lock_focus(true)
             .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
             .margin(egui::Margin::symmetric(8, 6))
-            .hint_text(RichText::new(lang.t("Abfrage, z. B. type = Epic AND status != Done ORDER BY priority", "Query, e.g. type = Epic AND status != Done ORDER BY priority")).color(style::dim(ui)))
+            .hint_text(
+                RichText::new(if cx.embedded {
+                    lang.t("z. B. type = Defect ORDER BY updated DESC – leer = alle Tickets", "e.g. type = Defect ORDER BY updated DESC – empty = all tickets")
+                } else {
+                    lang.t("Abfrage, z. B. type = Epic AND status != Done ORDER BY priority", "Query, e.g. type = Epic AND status != Done ORDER BY priority")
+                })
+                .color(style::dim(ui)),
+            )
             .show(ui);
         edit = Some(o);
-        if ui.add_sized([72.0, 30.0], egui::Button::new(RichText::new(lang.t("Suchen", "Search")).strong()).fill(style::accent().gamma_multiply(0.45))).on_hover_text(lang.t("Abfrage ausführen (Enter)", "Run the query (Enter)")).clicked() {
+        if !cx.embedded && ui.add_sized([72.0, 30.0], egui::Button::new(RichText::new(lang.t("Suchen", "Search")).strong()).fill(style::accent().gamma_multiply(0.45))).on_hover_text(lang.t("Abfrage ausführen (Enter)", "Run the query (Enter)")).clicked() {
             search_clicked = true;
         }
         if cx.show_help && help_button(ui, lang.t("Hilfe zur Abfragesprache", "Help for the query language")).clicked() {
@@ -310,7 +342,7 @@ pub fn query_bar(ui: &mut Ui, st: &mut QueryBarState, cx: &QueryBarCtx) -> Query
         let first = st.sugg[0].replace_range.start;
         let cur = o.galley.pos_from_cursor(CCursor::new(char_of(&st.text, first)));
         let pos = o.galley_pos + cur.left_bottom().to_vec2() + Vec2::new(0.0, 3.0);
-        let r = suggestion_popup(&ctx, id, pos, st, lang, &mut clicked_accept);
+        let r = suggestion_popup(&ctx, id, pos, popup_order(ui), st, lang, &mut clicked_accept);
         st.popup_rect = Some(r);
     } else {
         st.popup_rect = None;
@@ -347,7 +379,21 @@ pub fn query_bar(ui: &mut Ui, st: &mut QueryBarState, cx: &QueryBarCtx) -> Query
 
     // ---- Abschicken
     if (submit_key || search_clicked) && is_submittable(&diags_now(&st.text, cx)) {
-        submit(st, &mut out);
+        submit(st, &mut out, !cx.embedded);
+    }
+
+    // ---- Eingebettet: nur Feldliste und Hinweis
+    let mut insert: Option<String> = None;
+    if cx.embedded {
+        ui.add_space(S1);
+        ui.horizontal_wrapped(|ui| {
+            insert = fields_menu(ui, cx.schema, lang, id);
+            ui.label(RichText::new(lang.t("Strg+Leertaste zeigt Vorschläge · Umschalt+Enter neue Zeile", "Ctrl+Space shows suggestions · Shift+Enter new line")).small().color(style::dim(ui)));
+        });
+        if let Some(name) = insert {
+            insert_field(&ctx, st, &name, &mut out);
+        }
+        return out;
     }
 
     // ---- Werkzeugzeile: Verlauf, gespeicherte Filter, Filter speichern, Schlüsselwörter
@@ -356,6 +402,7 @@ pub fn query_bar(ui: &mut Ui, st: &mut QueryBarState, cx: &QueryBarCtx) -> Query
     let mut load: Option<String> = None;
     ui.horizontal_wrapped(|ui| {
         history_menu(ui, st, lang, &mut out);
+        insert = fields_menu(ui, cx.schema, lang, id);
         if let Some(conn) = cx.conn {
             if let Some(FilterEvent::Load(q)) = st.filters.menu(ui, conn, cx.project_id, lang) {
                 load = Some(q);
@@ -377,27 +424,77 @@ pub fn query_bar(ui: &mut Ui, st: &mut QueryBarState, cx: &QueryBarCtx) -> Query
             load = Some(q);
         }
     }
+    if let Some(name) = insert {
+        insert_field(&ctx, st, &name, &mut out);
+    }
     if let Some(q) = load {
         st.set_query(&q);
         out.changed = true;
         if is_submittable(&diags_now(&st.text, cx)) {
-            submit(st, &mut out);
+            submit(st, &mut out, true);
         }
     }
     out
+}
+
+/// Feldnamen aus der Feldliste am Cursor einsetzen; danach Fokus ins Feld und Vorschläge (Operatoren) auf.
+fn insert_field(ctx: &egui::Context, st: &mut QueryBarState, name: &str, out: &mut QueryBarOutput) {
+    let (t, c) = insert_name(&st.text, st.last_cursor, name);
+    st.text = t;
+    st.last_cursor = c;
+    st.cursor_next = Some(c);
+    st.focus_next = true;
+    st.open = true;
+    st.sel = None;
+    st.history.reset_nav();
+    out.changed = true;
+    ctx.request_repaint();
+}
+
+/// Dropdown „Felder ▾“: alle Felder des Schemas mit Typ. Gibt den angeklickten Namen zurück.
+fn fields_menu(ui: &mut Ui, schema: &Schema, lang: Lang, id: Id) -> Option<String> {
+    let resp = ui
+        .add(egui::Button::new(format!("{} ▾", lang.t("Felder", "Fields"))))
+        .on_hover_text(lang.t("Alle Felder, die die Abfrage kennt – ein Klick setzt den Namen am Cursor ein", "All fields the query knows – a click inserts the name at the cursor"));
+    let mut pick = None;
+    egui::Popup::from_toggle_button_response(&resp).id(id.with("fields_menu")).show(|ui| {
+        ui.set_min_width(320.0);
+        let list = field_list(schema, lang);
+        if list.is_empty() {
+            ui.label(RichText::new(lang.t("Keine Felder.", "No fields.")).color(style::dim(ui)));
+        }
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            for f in &list {
+                let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(300.0), 22.0), Sense::click());
+                if r.hovered() {
+                    ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                ui.painter().text(Pos2::new(rect.min.x + 6.0, rect.center().y), egui::Align2::LEFT_CENTER, &f.name, FontId::monospace(13.0), ui.visuals().text_color());
+                ui.painter().text(Pos2::new(rect.max.x - 6.0, rect.center().y), egui::Align2::RIGHT_CENTER, &f.kind, FontId::proportional(11.0), style::dim(ui));
+                if r.clicked() {
+                    pick = Some(f.name.clone());
+                }
+            }
+        });
+    });
+    pick
 }
 
 fn diags_now(text: &str, cx: &QueryBarCtx) -> Vec<Diag> {
     diagnose(text, cx.schema, cx.lang)
 }
 
-/// Abfrage abschicken: in den Verlauf, an den Aufrufer, Vorschläge zu.
-fn submit(st: &mut QueryBarState, out: &mut QueryBarOutput) {
+/// Abfrage abschicken: in den Verlauf (wenn `remember`), an den Aufrufer, Vorschläge zu.
+fn submit(st: &mut QueryBarState, out: &mut QueryBarOutput, remember: bool) {
     let q = st.text.trim().to_string();
-    st.history.push(&q);
+    if remember {
+        st.history.push(&q);
+        out.history_changed = true;
+    }
     st.open = false;
     st.sel = None;
-    out.history_changed = true;
     out.submitted = Some(q);
 }
 
@@ -516,6 +613,12 @@ fn paint_waves(ui: &Ui, o: &egui::text_edit::TextEditOutput, text: &str, ranges:
 
 // ------------------------------------------------------------------ Popup
 
+/// Ebene eines Vorschlags-Popups: Über einem Dialog (Modal, Ebene „Vordergrund“) muss es höher liegen, sonst verdeckt der
+/// Dialog es, sobald man ins Feld klickt.
+pub fn popup_order(ui: &Ui) -> egui::Order {
+    if ui.layer_id().order >= egui::Order::Foreground { egui::Order::Tooltip } else { egui::Order::Foreground }
+}
+
 fn kind_color(k: SuggestionKind) -> Color32 {
     match k {
         SuggestionKind::Field => Color32::from_rgb(0x58, 0xA6, 0xE6),
@@ -555,9 +658,9 @@ pub fn kind_name(k: SuggestionKind, lang: Lang) -> &'static str {
 }
 
 /// Das Popup mit den Vorschlägen; gibt sein Rechteck zurück. Ein Klick landet in `clicked`.
-fn suggestion_popup(ctx: &egui::Context, id: Id, pos: Pos2, st: &mut QueryBarState, lang: Lang, clicked: &mut Option<usize>) -> Rect {
+fn suggestion_popup(ctx: &egui::Context, id: Id, pos: Pos2, order: egui::Order, st: &mut QueryBarState, lang: Lang, clicked: &mut Option<usize>) -> Rect {
     let scroll_sel = std::mem::take(&mut st.scroll_sel);
-    let area = egui::Area::new(id.with("suggest_popup")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+    let area = egui::Area::new(id.with("suggest_popup")).order(order).fixed_pos(pos).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
             // Breite nach dem längsten Vorschlag (Zeichen in Festbreite + Symbol + Art rechts)
             let longest = st.sugg.iter().map(|s| s.label.chars().count()).max().unwrap_or(0) as f32;
@@ -651,6 +754,7 @@ mod tests {
         st: QueryBarState,
         schema: Schema,
         t: f64,
+        embedded: bool,
     }
 
     impl Harness {
@@ -660,7 +764,7 @@ mod tests {
                 .with_field("type", FieldType::Option(vec!["Epic".into(), "Defect".into()]))
                 .with_field("summary", FieldType::Text)
                 .with_sort_keyword("favorites");
-            let mut h = Harness { ctx: egui::Context::default(), st: QueryBarState::new("test"), schema, t: 0.0 };
+            let mut h = Harness { ctx: egui::Context::default(), st: QueryBarState::new("test"), schema, t: 0.0, embedded: false };
             h.st.set_query("");
             h.frame(vec![]);
             h.frame(vec![]);
@@ -672,10 +776,11 @@ mod tests {
             let modifiers = events.iter().find_map(|e| if let Event::Key { modifiers, .. } = e { Some(*modifiers) } else { None }).unwrap_or_default();
             let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))), events, focused: true, time: Some(self.t), modifiers, ..Default::default() };
             let mut out = None;
-            let (st, schema) = (&mut self.st, &self.schema);
+            let (st, schema, embedded) = (&mut self.st, &self.schema, self.embedded);
             let _ = self.ctx.run(raw, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    out = Some(query_bar(ui, st, &QueryBarCtx::new(schema, Lang::En)));
+                    let cx = QueryBarCtx::new(schema, Lang::En);
+                    out = Some(query_bar(ui, st, &if embedded { cx.embedded() } else { cx }));
                 });
             });
             out.unwrap()
@@ -815,6 +920,47 @@ mod tests {
         assert_eq!(h.st.text, "Priorität = Hoch");
         let o = h.key(Key::Enter, Modifiers::NONE);
         assert_eq!(o.submitted.as_deref(), Some("Priorität = Hoch"));
+    }
+
+    #[test]
+    fn embedded_editor_suggests_validates_and_keeps_no_history() {
+        let mut h = Harness::new();
+        h.embedded = true;
+        h.frame(vec![]);
+        h.typed("sta");
+        assert_eq!(h.labels(), vec!["status"], "dieselben Vorschläge wie in der Suche");
+        h.key(Key::Tab, Modifiers::NONE);
+        let o = h.typed("= Dne");
+        assert!(!o.valid, "Meldungen auch eingebettet");
+        h.st.text = "status = Done".into();
+        let o = h.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(o.submitted.as_deref(), Some("status = Done"));
+        assert!(!o.history_changed && h.st.history.is_empty(), "eingebettet kein Verlauf");
+        let cx = QueryBarCtx::new(&h.schema, Lang::En).embedded();
+        assert!(cx.embedded && !cx.show_help && !cx.show_keywords && cx.conn.is_none());
+    }
+
+    #[test]
+    fn the_field_list_inserts_at_the_cursor_and_opens_the_operators() {
+        let mut h = Harness::new();
+        h.st.set_text("status = Done AND");
+        let mut out = QueryBarOutput::default();
+        insert_field(&h.ctx, &mut h.st, "type", &mut out);
+        assert_eq!(h.st.text, "status = Done AND type ");
+        assert!(out.changed && h.st.open && h.st.focus_next);
+        h.frame(vec![]);
+        assert!(h.labels().contains(&"=".to_string()), "{:?}", h.labels());
+    }
+
+    #[test]
+    fn popups_above_a_dialog_use_a_higher_layer() {
+        let ctx = egui::Context::default();
+        let mut seen = Vec::new();
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| seen.push(popup_order(ui)));
+            egui::Area::new(Id::new("modal_like")).order(egui::Order::Foreground).show(ctx, |ui| seen.push(popup_order(ui)));
+        });
+        assert_eq!(seen, vec![egui::Order::Foreground, egui::Order::Tooltip]);
     }
 
     #[test]

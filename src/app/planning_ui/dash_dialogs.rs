@@ -3,6 +3,8 @@
 //! dazu der Export einer Datei. Die Prüfung der Einstellungen macht die Datenschicht (`views::dashboards`, zweisprachige Fehler).
 
 use super::board_logic::free_name;
+use super::query_bar::{query_bar, QueryBarCtx, QueryBarState};
+use super::search_run::SchemaCache;
 use super::dash_logic::{self as logic, KindSel, Template, TileDraft, COLUMNS, KIND_SELS};
 use super::widgets::{self, hint};
 use super::{Cx, PlanUi};
@@ -62,6 +64,9 @@ pub(super) struct TileDlg {
     projects: Vec<(i64, String, String)>,
     /// Zuletzt geprüfte Abfrage und ihr Fehler.
     check: (String, Option<String>),
+    /// Abfrage-Editor (derselbe wie im Reiter „Suche“, eingebettet) und das Schema seines Bereichs.
+    bar: QueryBarState,
+    schema: SchemaCache,
 }
 
 pub(super) struct ImportDlg {
@@ -81,7 +86,9 @@ impl Dlg {
         }
         .unwrap_or_default();
         let projects = list_projects(cx.conn).unwrap_or_default().into_iter().filter(|p| !p.system).map(|p| (p.id, p.key, p.name)).collect();
-        let mut dlg = TileDlg { tile, dash_id: d.id, dash_project: d.project_id, draft, err: None, filters, projects, check: (String::new(), None) };
+        let mut bar = QueryBarState::new("dash_tile");
+        bar.set_text(&draft.jql);
+        let mut dlg = TileDlg { tile, dash_id: d.id, dash_project: d.project_id, draft, err: None, filters, projects, check: (String::new(), None), bar, schema: SchemaCache::default() };
         dlg.recheck(cx);
         Dlg::Tile(Box::new(dlg))
     }
@@ -89,11 +96,15 @@ impl Dlg {
 
 /// Prüft eine Abfrage im Bereich des Dashboards; liefert die (zweisprachige) Fehlermeldung. Leer ist gültig (alle Tickets).
 pub(super) fn check_jql(cx: &Cx, dash_project: Option<i64>, jql: &str) -> Option<String> {
-    let scope = match dash_project {
+    prepare(cx.conn, &Ctx::today_local(cx.lang), scope_of(dash_project), jql).err().map(|e| e.message(cx.lang))
+}
+
+/// Suchbereich eines Dashboards: sein Projekt oder (global) alle Projekte.
+fn scope_of(dash_project: Option<i64>) -> Scope {
+    match dash_project {
         Some(p) => Scope::Project(p),
         None => Scope::All,
-    };
-    prepare(cx.conn, &Ctx::today_local(cx.lang), scope, jql).err().map(|e| e.message(cx.lang))
+    }
 }
 
 impl TileDlg {
@@ -341,6 +352,8 @@ impl PlanUi {
     fn tile_dialog(&mut self, ctx: &egui::Context, cx: &Cx, mut d: Box<TileDlg>) -> Option<Box<TileDlg>> {
         let lang = cx.lang;
         d.recheck(cx);
+        d.schema.ensure(cx.conn, scope_of(d.dash_project), lang);
+        let loaded = d.schema.loaded();
         let problem = d.problem(lang);
         let (mut go, mut close) = (false, false);
         let editing = d.tile.is_some();
@@ -348,7 +361,7 @@ impl PlanUi {
         let m = egui::Modal::new(Self::modal_id("dash_tile")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 660.0));
             widgets::dialog_title(ui, if editing { lang.t("Kachel einstellen", "Tile settings") } else { lang.t("Kachel hinzufügen", "Add a tile") });
-            let TileDlg { draft, filters, projects, check, err, .. } = &mut *d;
+            let TileDlg { draft, filters, projects, check, err, bar, .. } = &mut *d;
             egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 250.0).max(220.0)).auto_shrink([false, true]).show(ui, |ui| {
                 ui.set_width(ui.available_width() - 8.0);
                 ui.label(RichText::new(lang.t("Art", "Kind")).strong());
@@ -370,14 +383,22 @@ impl PlanUi {
                             ui.add(egui::TextEdit::singleline(&mut draft.title).desired_width(340.0).margin(egui::Margin::symmetric(8, 5)).hint_text(lang.t("Tickets", "Tickets")));
                         }
                         widgets::section(ui, lang.t("Abfrage (JQL)", "Query (JQL)"));
-                        ui.add(
-                            egui::TextEdit::multiline(&mut draft.jql)
-                                .desired_rows(2)
-                                .desired_width(f32::INFINITY)
-                                .margin(egui::Margin::symmetric(8, 5))
-                                .hint_text(lang.t("z. B. type = Defect ORDER BY updated DESC – leer = alle Tickets", "e.g. type = Defect ORDER BY updated DESC – empty = all tickets")),
-                        );
-                        if let Some(msg) = &check.1 {
+                        // Derselbe Editor wie im Reiter „Suche“: Vorschläge, Feldliste, Meldungen (#237).
+                        let mut valid = true;
+                        match &loaded {
+                            Some(l) => {
+                                let out = query_bar(ui, bar, &QueryBarCtx::new(&l.schema, lang).embedded());
+                                valid = out.valid;
+                                if bar.text != draft.jql {
+                                    draft.jql = bar.text.clone();
+                                }
+                            }
+                            None => {
+                                ui.add(egui::TextEdit::multiline(&mut draft.jql).desired_rows(2).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(8, 5)));
+                            }
+                        }
+                        // Fehler, die erst die Ausführung findet (die Meldungen des Editors stehen schon darüber)
+                        if let Some(msg) = check.1.as_ref().filter(|_| valid) {
                             ui.add(egui::Label::new(RichText::new(msg).color(widgets::DANGER)).wrap());
                         }
                         if !filters.is_empty() {
@@ -386,6 +407,7 @@ impl PlanUi {
                                 for f in filters.iter() {
                                     if ui.selectable_label(false, &f.name).on_hover_text(&f.jql).clicked() {
                                         draft.jql = f.jql.clone();
+                                        bar.set_text(&f.jql);
                                         if draft.sel == KindSel::Search && draft.title.trim().is_empty() {
                                             draft.title = f.name.clone();
                                         }
@@ -656,6 +678,21 @@ mod tests {
         t.draft.jql = "((".into();
         t.recheck(&cx_for(&d, Lang::En));
         assert_eq!(tile_problem(&t, Lang::En), None);
+    }
+
+    #[test]
+    fn tile_dialog_edits_the_query_in_the_search_editor_with_the_scope_schema() {
+        let d = mem();
+        let p = project(&d.conn, "AA", true);
+        let mut draft = TileDraft::new(KindSel::Counts);
+        draft.jql = "type = Defect".into();
+        let mut t = dlg(&d, Some(p), draft);
+        assert_eq!(t.bar.text, "type = Defect", "der Editor startet mit der Abfrage der Kachel");
+        assert!(t.schema.ensure(&d.conn, scope_of(Some(p)), Lang::En));
+        let l = t.schema.loaded().expect("Schema des Projekts");
+        assert!(l.schema.field("status").is_some() && l.schema.field("type").is_some(), "Felder für Vorschläge und Feldliste");
+        assert!(!t.schema.ensure(&d.conn, scope_of(Some(p)), Lang::En), "zwischengespeichert");
+        assert!(matches!(scope_of(None), Scope::All));
     }
 
     #[test]
