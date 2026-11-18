@@ -13,6 +13,9 @@ impl App {
             let mut keep = true;
             let mut create = false;
             let mut opts_ok = true;
+            // Esc schließt den Dialog nicht, solange eine Auswahlliste offen ist (die schließt Esc zuerst), und wird
+            // verbraucht – kein Terminal dahinter bekommt es (#261, wie in den Einstellungen der Sitzung).
+            let esc = !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
             egui::Window::new(if d.claude { lang.t("Neue Claude-Sitzung", "New Claude session") } else { lang.t("Neue Sitzung", "New session") })
                 .collapsible(false)
                 .resizable(false)
@@ -124,7 +127,7 @@ impl App {
                         }
                     });
                 });
-            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if esc && !create {
                 keep = false;
             }
             if create && d.claude {

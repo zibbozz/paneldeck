@@ -1562,6 +1562,8 @@ impl App {
                 let stem = std::path::Path::new(&p.program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
                 let sid = match stem.as_str() {
                     "wsl" => format!("wsl:{}", shells::wsl_distro(&args).unwrap_or_default()),
+                    // WSL-Starter aus System32: WSL mit der Standard-Distribution (Hooks, WSLENV, Pfade; #261).
+                    "bash" if shells::is_system_bash(&p.program) => "wsl:".to_string(),
                     "pwsh" | "powershell" | "cmd" => stem.clone(),
                     _ => id.to_string(),
                 };
@@ -1591,7 +1593,7 @@ impl App {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
-        let is_wsl = sid.starts_with("wsl");
+        let is_wsl = sid.starts_with("wsl") || spec.as_ref().is_some_and(shells::is_wsl);
         // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
         let style = crate::claude_opts::PathStyle::for_shell(&sid, spec.as_ref().map(|s| s.program.as_str()).unwrap_or(""), kind);
         let mut c = String::from(style.claude_program());
@@ -1639,7 +1641,9 @@ impl App {
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
         // Ab hier gilt die Einstellung für diesen Start (auch wenn der Start gleich scheitert: dann läuft nichts mehr
         // aus der alten Konfiguration).
-        entry.launched_claude = entry.meta.claude && !entry.is_chat();
+        // Mit ausgeschaltetem Claude-Modus startet keine Sitzung Claude – auch nicht beim Programmstart, Neu laden oder
+        // Duplizieren (#261); die Einstellung der Sitzung bleibt für später erhalten.
+        entry.launched_claude = entry.meta.claude && !entry.is_chat() && self.settings.claude_mode;
         entry.launched_opts = if entry.launched_claude { entry.meta.claude_opts_eff().0 } else { Default::default() };
         entry.hook_seen = false;
         entry.hook_conv = None;
@@ -1660,7 +1664,9 @@ impl App {
         let cwd = if wsl {
             let distro = shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args));
             let de = self.settings.language == Lang::De;
-            match crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) {
+            // Der WSL-Starter `bash.exe` kennt kein `--cd`: er startet im Windows-Ordner (#261).
+            let cd = if shells::is_system_bash(&shell.program) { crate::wsl::Cd::Windows } else { crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) };
+            match cd {
                 crate::wsl::Cd::Linux => home_dir(),
                 // Eigenes `--cd`/`~` des Profils (oder keine bekannte Distribution): nie einen Linux- oder WSL-Pfad als
                 // Windows-Startordner (CreateProcess) – und keine Prüfung eines \\wsl$-Pfads im UI-Thread.
@@ -3814,7 +3820,7 @@ impl App {
                         shell_id: Some(src.meta.shell_id.clone()),
                         cwd: Some(src.meta.cwd.clone()),
                         name: Some(format!("{} (2)", src.display_name())),
-                        claude: src.meta.claude,
+                        claude: src.meta.claude && self.settings.claude_mode,
                         claude_args: src.meta.claude_args.clone(),
                         claude_continue: Some(src.meta.claude_continue),
                         claude_opts: Some(src.meta.claude_opts.clone()),

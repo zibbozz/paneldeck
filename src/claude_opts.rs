@@ -313,11 +313,7 @@ impl PathStyle {
     /// Art der Shell aus Kennung und Programm: WSL auch bei eigenen Profilen mit `wsl.exe` oder dem `bash.exe` aus
     /// System32; andere POSIX-Shells unter Windows (Git Bash) mit Schrägstrichen.
     pub fn for_shell(shell_id: &str, program: &str, kind: Kind) -> PathStyle {
-        let prog = program.replace('/', "\\").to_ascii_lowercase();
-        let file = prog.rsplit('\\').next().unwrap_or("");
-        let stem = file.strip_suffix(".exe").unwrap_or(file);
-        let system_bash = stem == "bash" && (prog.contains("\\system32\\") || prog.contains("\\sysnative\\") || prog.contains("\\windowsapps\\"));
-        if cfg!(windows) && (shell_id.starts_with("wsl") || stem == "wsl" || system_bash) {
+        if cfg!(windows) && (shell_id.starts_with("wsl") || crate::shells::is_wsl_program(program)) {
             PathStyle::Wsl
         } else if cfg!(windows) && kind == Kind::Posix {
             PathStyle::Slash
