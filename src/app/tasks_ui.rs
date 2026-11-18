@@ -6,6 +6,7 @@ use crate::state::UNDO_STEP_CHOICES;
 use crate::tasks::{self, Item, ItemFilter, Tag, TaskError, TaskOp};
 use crate::undo::History;
 use super::planning_ui::due_ui;
+use super::planning_ui::value_suggest::{self, Counted};
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align, FontFamily, Galley, Layout, Painter, Response};
 use std::sync::Arc;
@@ -46,9 +47,6 @@ struct CardForm {
     /// Gewählte Tag-Namen (neue entstehen erst beim Bestätigen).
     tags: Vec<String>,
     tag_input: String,
-    tag_sel: Option<usize>,
-    /// Bereich der Vorschläge im letzten Bild (damit ein Klick darauf nicht am verlorenen Fokus scheitert).
-    sugg_rect: Option<Rect>,
 }
 
 impl CardForm {
@@ -75,7 +73,6 @@ fn add_tag_name(form: &mut CardForm, all: &[Tag], name: &str) {
         form.tags.push(shown);
     }
     form.tag_input.clear();
-    form.tag_sel = None;
 }
 
 struct EditDialog {
@@ -144,6 +141,8 @@ pub(super) struct TasksUi {
     items: Vec<Item>,
     tags: Vec<Tag>,
     tag_use: HashMap<i64, usize>,
+    /// Tags mit Zahl der Karten, nach Häufigkeit sortiert (Vorschläge der Tag-Eingabe, #239; neu beim Neuladen).
+    tag_counted: Vec<Counted>,
     total: usize,
     done_total: usize,
     show_done: bool,
@@ -182,6 +181,7 @@ impl Default for TasksUi {
             items: Vec::new(),
             tags: Vec::new(),
             tag_use: HashMap::new(),
+            tag_counted: Vec::new(),
             total: 0,
             done_total: 0,
             show_done: true,
@@ -435,8 +435,9 @@ fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors
 
 // ------------------------------------------------------------------ Formular (Anlegen und Bearbeiten)
 
-/// Felder Titel, Text und Tags. Gibt `true` zurück, wenn mit Strg+Enter bestätigt wurde.
-fn card_form_ui(ui: &mut Ui, form: &mut CardForm, all: &[Tag], lang: Lang, salt: &str, focus_title: bool) -> bool {
+/// Felder Titel, Text und Tags. Gibt `true` zurück, wenn mit Strg+Enter bestätigt wurde. `counted`: alle Tags mit Zahl der
+/// Karten (Vorschläge).
+fn card_form_ui(ui: &mut Ui, form: &mut CardForm, all: &[Tag], counted: &[Counted], lang: Lang, salt: &str, focus_title: bool) -> bool {
     let dim = style::dim(ui);
     let tid = if salt == "new" { title_id() } else { Id::new((salt, "title")) };
     ui.label(RichText::new(lang.t("Titel (optional)", "Title (optional)")).small().color(dim));
@@ -454,57 +455,42 @@ fn card_form_ui(ui: &mut Ui, form: &mut CardForm, all: &[Tag], lang: Lang, salt:
     let due_focus = ui.memory(|m| m.has_focus(due_id));
     ui.add_space(S1);
     ui.label(RichText::new("Tags").small().color(dim));
-    let tag_focus = tag_editor(ui, form, all, lang, Id::new((salt, "tag")));
+    let tag_focus = tag_editor(ui, form, all, counted, lang, Id::new((salt, "tag")));
     let any_focus = r_title.has_focus() || r_body.has_focus() || tag_focus || due_focus;
     any_focus && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter))
 }
 
-/// Tag-Eingabe mit Chips der gewählten Tags und Autovervollständigung. Gibt zurück, ob das Eingabefeld den Fokus hat.
-fn tag_editor(ui: &mut Ui, form: &mut CardForm, all: &[Tag], lang: Lang, id: Id) -> bool {
+/// Alle Tags mit der Zahl ihrer Karten, nach Häufigkeit und Name sortiert (Vorschläge der Tag-Eingabe).
+fn counted_tags(all: &[Tag], uses: &HashMap<i64, usize>) -> Vec<Counted> {
+    let mut v: Vec<Counted> = all.iter().map(|t| Counted { name: t.name.clone(), count: uses.get(&t.id).copied().unwrap_or(0) }).collect();
+    value_suggest::sort(&mut v);
+    v
+}
+
+/// Tag-Eingabe mit Chips der gewählten Tags und Vorschlägen wie im Abfrage-Editor: die vorhandenen Tags mit der Zahl ihrer
+/// Karten, z. B. `arbeit (12)` (#239). Gibt zurück, ob das Eingabefeld den Fokus hat.
+fn tag_editor(ui: &mut Ui, form: &mut CardForm, all: &[Tag], counted: &[Counted], lang: Lang, id: Id) -> bool {
     let focused_before = ui.memory(|m| m.has_focus(id));
-    let over_sugg = form.sugg_rect.is_some_and(|r| ui.rect_contains_pointer(r));
-    let sugg: Vec<Tag> = tasks::suggest(all, &form.tag_input, &form.tags, 8).into_iter().cloned().collect();
-    let (mut down, mut up, mut tab, mut enter, mut back) = (false, false, false, false, false);
+    // Enter mit gewähltem Vorschlag übernimmt diesen (das Feld selbst), sonst legt Enter das Getippte an.
+    let sugg_takes_enter = value_suggest::wants_enter(ui.ctx(), id);
+    let (mut enter, mut back) = (false, false);
     if focused_before {
         ui.input_mut(|i| {
-            down = i.consume_key(Modifiers::NONE, Key::ArrowDown);
-            up = i.consume_key(Modifiers::NONE, Key::ArrowUp);
-            enter = i.consume_key(Modifiers::NONE, Key::Enter);
-            back = i.key_pressed(Key::Backspace);
-            if !form.tag_input.trim().is_empty() && !sugg.is_empty() {
-                tab = i.consume_key(Modifiers::NONE, Key::Tab);
+            if !sugg_takes_enter {
+                enter = i.consume_key(Modifiers::NONE, Key::Enter);
             }
+            back = i.key_pressed(Key::Backspace);
         });
     }
-    let n = sugg.len();
-    if down && n > 0 {
-        form.tag_sel = Some(form.tag_sel.map_or(0, |i| (i + 1).min(n - 1)));
-    }
-    if up {
-        form.tag_sel = match form.tag_sel {
-            Some(i) if i > 0 => Some(i - 1),
-            _ => None,
-        };
-    }
-    if tab {
-        let pick = sugg.get(form.tag_sel.unwrap_or(0)).map(|t| t.name.clone());
-        if let Some(name) = pick {
-            add_tag_name(form, all, &name);
-        }
-    } else if enter {
-        let pick = form.tag_sel.and_then(|i| sugg.get(i)).map(|t| t.name.clone());
-        match pick {
-            Some(name) => add_tag_name(form, all, &name),
-            None => {
-                let t = std::mem::take(&mut form.tag_input);
-                add_tag_name(form, all, &t);
-            }
-        }
+    if enter {
+        let t = std::mem::take(&mut form.tag_input);
+        add_tag_name(form, all, &t);
     } else if back && form.tag_input.is_empty() {
         form.tags.pop();
     }
     let mut remove = None;
     let mut has_focus = false;
+    let mut picked = None;
     ui.horizontal_wrapped(|ui| {
         for (i, name) in form.tags.iter().enumerate() {
             let k = tasks::tag_key(name);
@@ -514,47 +500,34 @@ fn tag_editor(ui: &mut Ui, form: &mut CardForm, all: &[Tag], lang: Lang, id: Id)
                 remove = Some(i);
             }
         }
-        let r = ui.add(egui::TextEdit::singleline(&mut form.tag_input).id(id).desired_width(170.0).margin(Margin::symmetric(8, 4)).hint_text(lang.t("Tag hinzufügen (Enter) …", "Add a tag (Enter) …")));
-        if r.changed() {
-            form.tag_sel = None;
+        let hint = lang.t("Tag hinzufügen (Enter) …", "Add a tag (Enter) …");
+        let out = value_suggest::suggest_edit(ui, id, &mut form.tag_input, counted, &form.tags, value_suggest::Mode::Single, lang, |ui, te| ui.add(te.desired_width(170.0).margin(Margin::symmetric(8, 4)).hint_text(hint)));
+        picked = out.picked;
+        let r = out.response;
+        if r.changed() && form.tag_input.contains(',') {
             // Komma schließt einen Tag ab
-            if form.tag_input.contains(',') {
-                let text = std::mem::take(&mut form.tag_input);
-                let mut parts: Vec<&str> = text.split(',').collect();
-                let rest = parts.pop().unwrap_or("").to_string();
-                for p in parts {
-                    add_tag_name(form, all, p);
-                }
-                form.tag_input = rest;
+            let text = std::mem::take(&mut form.tag_input);
+            let mut parts: Vec<&str> = text.split(',').collect();
+            let rest = parts.pop().unwrap_or("").to_string();
+            for p in parts {
+                add_tag_name(form, all, p);
             }
+            form.tag_input = rest;
         }
         has_focus = r.has_focus();
     });
     if let Some(i) = remove {
         form.tags.remove(i);
     }
-    // Vorschläge
-    form.sugg_rect = None;
+    if let Some(name) = picked {
+        add_tag_name(form, all, &name);
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    // Hinweis, wenn das Getippte ein neuer Tag wäre
     let typed = tasks::clean_tag(&form.tag_input);
     let is_new = !typed.is_empty() && !all.iter().any(|t| tasks::tag_key(&t.name) == tasks::tag_key(&typed));
-    if (has_focus || focused_before || over_sugg) && (!sugg.is_empty() || is_new) {
-        let mut pick = None;
-        let r = ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(lang.t("Vorschläge:", "Suggestions:")).small().color(style::dim(ui)));
-            for (i, t) in sugg.iter().enumerate() {
-                if chip(ui, &t.name, Some(tag_color(t)), false, form.tag_sel == Some(i)).on_hover_text(lang.t("Tag übernehmen (Tab)", "Use this tag (Tab)")).clicked() {
-                    pick = Some(t.name.clone());
-                }
-            }
-            if is_new {
-                ui.label(RichText::new(format!("{} {}", lang.t("Enter: neuen Tag anlegen:", "Enter: create new tag:"), lang.q(&typed))).small().color(style::dim(ui)));
-            }
-        });
-        form.sugg_rect = Some(r.response.rect.expand(4.0));
-        if let Some(name) = pick {
-            add_tag_name(form, all, &name);
-            ui.memory_mut(|m| m.request_focus(id));
-        }
+    if (has_focus || focused_before) && is_new {
+        ui.label(RichText::new(format!("{} {}", lang.t("Enter: neuen Tag anlegen:", "Enter: create new tag:"), lang.q(&typed))).small().color(style::dim(ui)));
     }
     has_focus
 }
@@ -571,6 +544,7 @@ impl TasksUi {
         let r = (|| -> Result<(), TaskError> {
             self.tags = tasks::list_tags(conn)?;
             self.tag_use = tasks::tag_counts(conn)?;
+            self.tag_counted = counted_tags(&self.tags, &self.tag_use);
             let (t, d) = tasks::counts(conn)?;
             self.total = t;
             self.done_total = d;
@@ -777,7 +751,8 @@ impl TasksUi {
             egui::Frame::new().fill(col.fill).stroke(Stroke::new(1.0_f32, col.stroke)).corner_radius(10.0).inner_margin(Margin::same(12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let all = self.tags.clone();
-                let submit = card_form_ui(ui, &mut self.form, &all, lang, "new", focus == Some(Focus::Title));
+                let counted = self.tag_counted.clone();
+                let submit = card_form_ui(ui, &mut self.form, &all, &counted, lang, "new", focus == Some(Focus::Title));
                 ui.add_space(S2);
                 let mut create = submit;
                 ui.horizontal(|ui| {
@@ -1126,6 +1101,7 @@ impl TasksUi {
     fn edit_dialog(&mut self, ctx: &egui::Context, conn: &rusqlite::Connection, lang: Lang) {
         let Some(mut ed) = self.edit.take() else { return };
         let all = self.tags.clone();
+        let counted = self.tag_counted.clone();
         let mut save = false;
         let mut close = false;
         let m = egui::Modal::new(Id::new("todo_edit_modal")).show(ctx, |ui| {
@@ -1138,7 +1114,7 @@ impl TasksUi {
             });
             ui.add_space(S2);
             let focus = std::mem::take(&mut ed.focus_title);
-            if card_form_ui(ui, &mut ed.form, &all, lang, "edit", focus) {
+            if card_form_ui(ui, &mut ed.form, &all, &counted, lang, "edit", focus) {
                 save = true;
             }
             ui.add_space(S2);
@@ -1568,6 +1544,27 @@ impl App {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tag_suggest_tests {
+    use super::*;
+
+    fn tag(id: i64, name: &str) -> Tag {
+        Tag { id, name: name.into(), color: "#336699".into() }
+    }
+
+    #[test]
+    fn tag_suggestions_carry_card_counts_sorted_by_use_then_name() {
+        let all = vec![tag(1, "frontend"), tag(2, "Backend"), tag(3, "bug"), tag(4, "unused")];
+        let uses: HashMap<i64, usize> = [(1, 2), (2, 7), (3, 2)].into_iter().collect();
+        let c = counted_tags(&all, &uses);
+        let shown: Vec<String> = c.iter().map(|c| c.label()).collect();
+        assert_eq!(shown, vec!["Backend (7)", "bug (2)", "frontend (2)", "unused (0)"]);
+        // gefiltert ohne Beachtung der Groß-/Kleinschreibung, schon gewählte fehlen
+        let hits: Vec<&str> = value_suggest::filter(&c, "B", &["backend".into()], 10).into_iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(hits, vec!["bug"]);
     }
 }
 

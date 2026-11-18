@@ -82,6 +82,7 @@ mod ticket_ui_tests;
 mod ticket_view;
 mod types_ed;
 mod undo_keys;
+pub(super) mod value_suggest;
 mod values;
 mod widgets;
 mod workflow_ed;
@@ -270,6 +271,8 @@ impl PlanUi {
         self.search.stale = true;
         self.tickets.invalidate();
         self.tickets.counts_dirty = true;
+        // Labels können sich außerhalb dieser Verbindung geändert haben (Agent, Import): neu zählen.
+        self.tickets.labels.clear();
     }
 
     fn project(&self) -> Option<&Project> {
