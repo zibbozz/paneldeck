@@ -244,7 +244,8 @@ impl App {
                 PromptKind::FolderCwd => lang.t("Arbeitsordner", "Working folder"),
             }
         };
-        let (mut ok, mut cancel) = (false, ctx.input(|i| i.key_pressed(Key::Escape)));
+        // Esc bei offener Vorschlagsliste schließt nur die Liste.
+        let (mut ok, mut cancel) = (false, ctx.input(|i| i.key_pressed(Key::Escape)) && !egui::Popup::is_any_open(ctx));
         egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
             let blocked = match &mut p.picker {
                 // Ordnervorgabe mit WSL-Shell: Ordnerfeld mit Linux-Pfad (#172).
@@ -253,7 +254,15 @@ impl App {
                     picker.blocking_error(lang)
                 }
                 None => {
-                    let te = ui.add(egui::TextEdit::singleline(&mut p.text).desired_width(340.0));
+                    let te = match p.tags_for {
+                        // Tags: Vorschläge aus allen Sitzungen mit Anzahl (#239)
+                        Some(sid) => {
+                            let id = egui::Id::new(("tags_prompt", sid));
+                            let used = super::planning_ui::value_suggest::cached_per_open(ctx, id, || self.session_tag_counts());
+                            super::planning_ui::value_suggest::suggest_edit(ui, id, &mut p.text, &used, &[], super::planning_ui::value_suggest::Mode::List, lang, |ui, te| ui.add(te.desired_width(340.0))).response
+                        }
+                        None => ui.add(egui::TextEdit::singleline(&mut p.text).desired_width(340.0)),
+                    };
                     if !te.has_focus() {
                         te.request_focus();
                     }

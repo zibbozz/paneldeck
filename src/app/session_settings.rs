@@ -12,6 +12,7 @@
 //!   Speichern „Jetzt neu laden?“; sonst gilt die Änderung beim nächsten Neu laden.
 
 use super::closing::{confirm_window_keep, Outcome};
+use super::planning_ui::value_suggest;
 use crate::claude_opts::ClaudeOpts;
 use super::*;
 
@@ -181,6 +182,27 @@ pub(super) fn parse_tags(s: &str) -> Vec<String> {
     s.split(',').map(|t| t.trim().trim_start_matches('#').trim().to_string()).filter(|t| !t.is_empty()).collect()
 }
 
+/// Zählt die Tags der Sitzungen (je Sitzung einmal), nach Häufigkeit und Name sortiert.
+pub(super) fn count_session_tags<'a>(metas: impl Iterator<Item = &'a SessionMeta>) -> Vec<value_suggest::Counted> {
+    value_suggest::count_values(metas.flat_map(|m| {
+        let mut seen: Vec<String> = Vec::new();
+        m.tags.iter().filter(move |t| { let k = value_suggest::fold(t); let new = !seen.contains(&k); seen.push(k); new }).map(|t| (t.as_str(), 1)).collect::<Vec<_>>()
+    }))
+}
+
+#[cfg(test)]
+mod tag_count_tests {
+    use super::*;
+
+    #[test]
+    fn session_tags_are_counted_once_per_session_across_all_sessions() {
+        let meta = |tags: &[&str]| SessionMeta { tags: tags.iter().map(|t| t.to_string()).collect(), ..SessionMeta::default() };
+        let all = [meta(&["backend", "Backend", "ops"]), meta(&["backend"]), meta(&[]), meta(&["ui", "OPS"])];
+        let shown: Vec<String> = count_session_tags(all.iter()).iter().map(|c| c.label()).collect();
+        assert_eq!(shown, vec!["backend (2)", "ops (2)", "ui (1)"]);
+    }
+}
+
 /// Shell-Kennung für eine Sitzung mit diesem Profil (wie beim Anlegen, `App::new_session`): ein Profil mit eigenem
 /// Programm bestimmt sie (`custom:<id>`), sonst die gewählte Shell. Eine übrig gebliebene `custom:`-Kennung (Profil
 /// gewechselt) fällt auf die Shell des Profils bzw. die Standard-Shell zurück.
@@ -263,6 +285,8 @@ pub(super) struct SessionForm {
     picker_cwd: String,
     /// „Zuletzt benutzte“ WSL-Ordner (`Settings::wsl_recent`, beim Öffnen kopiert).
     pub(super) wsl_recent: std::collections::BTreeMap<String, Vec<String>>,
+    /// Tags aller Sitzungen mit Anzahl (Vorschläge im Tag-Feld, #239; beim Öffnen gezählt).
+    pub(super) tag_values: Vec<value_suggest::Counted>,
 }
 
 impl SessionForm {
@@ -284,6 +308,7 @@ impl SessionForm {
             picker_base: (String::new(), String::new()),
             picker_cwd: String::new(),
             wsl_recent: Default::default(),
+            tag_values: Vec::new(),
         }
     }
 
@@ -505,7 +530,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     ui.add(egui::TextEdit::singleline(&mut f.v.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(320.0));
                     ui.end_row();
                     ui.label(lang.t("Tags", "Tags"));
-                    ui.add(egui::TextEdit::singleline(&mut f.v.tags).hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(320.0));
+                    value_suggest::suggest_edit(ui, egui::Id::new(("session_tags", f.id)), &mut f.v.tags, &f.tag_values, &[], value_suggest::Mode::List, lang, |ui, te| ui.add(te.hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(320.0)));
                     ui.end_row();
                     ui.label(lang.t("Notizen", "Notes"));
                     ui.add(egui::TextEdit::multiline(&mut f.v.notes).desired_rows(3).desired_width(320.0));
@@ -791,8 +816,14 @@ impl App {
             let auto = if e.meta.custom_name { e.live.as_ref().and_then(|s| s.title()).unwrap_or_default() } else { e.display_name() };
             let mut f = SessionForm::from_meta(&e.meta, auto);
             f.wsl_recent = self.settings.wsl_recent.clone();
+            f.tag_values = self.session_tag_counts();
             self.session_settings = Some(f);
         }
+    }
+
+    /// Tags aller Sitzungen mit der Zahl der Sitzungen, die sie tragen (Vorschläge in Tag-Feldern, #239).
+    pub(super) fn session_tag_counts(&self) -> Vec<value_suggest::Counted> {
+        count_session_tags(self.entries.values().map(|e| &e.meta))
     }
 
     /// Ziel des Ordnerfelds für die im Dialog gewählte Shell (samt Profil mit eigenem Programm, wie beim Start).

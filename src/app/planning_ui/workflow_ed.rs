@@ -2,6 +2,8 @@
 //! Pflichtfelder, Bedingungen und Setze-Werte. Ohne definierte Übergänge gilt freie Bewegung zwischen allen Status.
 
 use super::helpers::{color_of, has_transition, kind_label, linear_transitions, op_label, op_needs_value, ops_for, problem_text};
+use super::ticket_data::{label_counts, label_ident};
+use super::value_suggest::{cached_per_open, Counted};
 use super::values;
 use super::widgets::{self, hint};
 use super::{Cx, PlanUi, Tab};
@@ -290,6 +292,13 @@ impl PlanUi {
         let mut save = false;
         let mut remove = false;
         let mut close = false;
+        // benutzte Labels je Labels-Feld des Projekts (einmal je Öffnen gezählt, #239)
+        let project = self.sum.as_ref().map(|s| s.project.id).unwrap_or(self.selected);
+        let label_fields: Vec<Field> = d.fields.iter().filter(|f| f.kind == FieldKind::Labels).cloned().collect();
+        let used = |fid: i64| -> Option<std::sync::Arc<Vec<Counted>>> {
+            let f = label_fields.iter().find(|f| f.id == fid)?;
+            Some(cached_per_open(ctx, Id::new(("wf_labels", fid)), || label_counts(cx.conn, project, &label_ident(f.key.as_deref(), f.name.as_deref()))))
+        };
         let m = egui::Modal::new(Self::modal_id("rules")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 640.0));
             widgets::dialog_title(ui, lang.t("Regeln für den Übergang", "Transition rules"));
@@ -297,7 +306,7 @@ impl PlanUi {
             hint(ui, lang.t("Alles hier ist optional und unabhängig voneinander nutzbar. Die Regeln gelten für Oberfläche, Quick-Menü und Agenten gleichermaßen.", "Everything here is optional and independent. The rules apply to the UI, the quick menu and agents alike."));
             ui.add_space(S2);
             egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 300.0).max(220.0)).auto_shrink([true, true]).show(ui, |ui| {
-                rules_form(ui, &mut d, lang);
+                rules_form(ui, &mut d, lang, &used);
             });
             ui.add_space(S2);
             if let Some(e) = &d.err {
@@ -347,7 +356,8 @@ fn field_label(f: &Field, lang: Lang) -> String {
     format!("{} ({})", f.display(lang), kind_label(f.kind, lang))
 }
 
-fn rules_form(ui: &mut Ui, d: &mut RulesDlg, lang: Lang) {
+/// `used`: benutzte Werte eines Labels-Feldes (Vorschläge mit Anzahl), `None` für andere Felder.
+fn rules_form(ui: &mut Ui, d: &mut RulesDlg, lang: Lang, used: &dyn Fn(i64) -> Option<std::sync::Arc<Vec<Counted>>>) {
     if d.fields.is_empty() {
         hint(ui, lang.t("Dieser Typ hat keine Felder – Regeln brauchen Felder.", "This type has no fields – rules need fields."));
         return;
@@ -415,7 +425,8 @@ fn rules_form(ui: &mut Ui, d: &mut RulesDlg, lang: Lang) {
                     if !c.value.is_array() {
                         c.value = json!([]);
                     }
-                    values::list_editor(ui, Id::new(("cond_val", i)), kind, &opts, &mut c.value, lang);
+                    let u = used(c.field_id);
+                    values::list_editor_with(ui, Id::new(("cond_val", i)), kind, &opts, &mut c.value, lang, u.as_deref().map(|v| v.as_slice()));
                 } else {
                     if c.value.is_null() || c.value.is_array() {
                         c.value = values::blank(kind, &opts);
@@ -462,7 +473,8 @@ fn rules_form(ui: &mut Ui, d: &mut RulesDlg, lang: Lang) {
                     s.value = values::blank_full(f.kind, &f.options);
                 }
                 ui.label("=");
-                values::full_editor(ui, Id::new(("set_val", i)), f.kind, &f.options, &mut s.value, lang);
+                let u = used(f.id);
+                values::full_editor_with(ui, Id::new(("set_val", i)), f.kind, &f.options, &mut s.value, lang, u.as_deref().map(|v| v.as_slice()));
             }
             if style::icon_btn_small(ui, SIcon::Trash, lang.t("Eintrag entfernen", "Remove entry")).clicked() {
                 remove = Some(i);

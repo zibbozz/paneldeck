@@ -72,7 +72,7 @@ pub(super) struct VCx<'a> {
     pub lang: Lang,
     pub link_types: &'a [LinkType],
     pub prefixes: &'a [String],
-    pub labels: &'a [String],
+    pub labels: &'a super::ticket_data::LabelCounts,
     pub mode: ViewMode,
     /// Im Seitenpanel (schmaler, mit Schließen-Kreuz) statt auf der eigenen Seite.
     pub panel: bool,

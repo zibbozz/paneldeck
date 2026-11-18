@@ -2,6 +2,7 @@
 //! passend zum Feldtyp und seinen Optionen. Dropdown-Werte werden über ihre stabile Kennung gespeichert.
 
 use super::helpers::parse_csv;
+use super::value_suggest::{suggest_edit, Counted, Mode};
 use super::widgets;
 use crate::planning::fields::{FieldKind, FieldOptions};
 use crate::state::Lang;
@@ -122,6 +123,12 @@ pub fn element_editor(ui: &mut Ui, salt: Id, kind: FieldKind, o: &FieldOptions, 
 
 /// Eingabe einer Liste von Elementen (Mehrfachauswahl, „ist einer von“): Haken je Wert oder kommagetrennter Text.
 pub fn list_editor(ui: &mut Ui, salt: Id, kind: FieldKind, o: &FieldOptions, v: &mut Value, lang: Lang) -> bool {
+    list_editor_with(ui, salt, kind, o, v, lang, None)
+}
+
+/// Wie [`list_editor`]; bei Labels mit `used` schlägt das kommagetrennte Feld beim Tippen die benutzten Werte mit ihrer
+/// Anzahl vor (#239).
+pub fn list_editor_with(ui: &mut Ui, salt: Id, kind: FieldKind, o: &FieldOptions, v: &mut Value, lang: Lang, used: Option<&[Counted]>) -> bool {
     let mut changed = false;
     match kind {
         FieldKind::Dropdown | FieldKind::Multi => {
@@ -159,7 +166,15 @@ pub fn list_editor(ui: &mut Ui, salt: Id, kind: FieldKind, o: &FieldOptions, v: 
             let focused = ui.memory(|m| m.has_focus(field_id));
             let mut text: String = if focused { ui.data_mut(|d| d.get_temp::<String>(buf_id)).unwrap_or_else(|| current.join(", ")) } else { current.join(", ") };
             let hint = if kind == FieldKind::Number { lang.t("Zahlen, durch Komma getrennt", "numbers, comma-separated") } else { lang.t("Werte, durch Komma getrennt", "values, comma-separated") };
-            if ui.add(egui::TextEdit::singleline(&mut text).id(field_id).desired_width(220.0).hint_text(hint).margin(egui::Margin::symmetric(8, 4))).changed() {
+            let edit = |ui: &mut Ui, te: egui::TextEdit<'_>| ui.add(te.desired_width(220.0).hint_text(hint).margin(egui::Margin::symmetric(8, 4)));
+            let (resp, picked) = match used.filter(|_| kind == FieldKind::Labels) {
+                Some(used) => {
+                    let o = suggest_edit(ui, field_id, &mut text, used, &[], Mode::List, lang, edit);
+                    (o.response, o.picked.is_some())
+                }
+                None => (edit(ui, egui::TextEdit::singleline(&mut text).id(field_id)), false),
+            };
+            if resp.changed() || picked {
                 ui.data_mut(|d| d.insert_temp(buf_id, text.clone()));
                 let parts = parse_csv(&text);
                 let list: Vec<Value> = if kind == FieldKind::Number { parts.iter().filter_map(|p| p.replace(',', ".").parse::<f64>().ok()).map(|x| json!(x)).collect() } else { parts.into_iter().map(Value::String).collect() };
@@ -173,8 +188,13 @@ pub fn list_editor(ui: &mut Ui, salt: Id, kind: FieldKind, o: &FieldOptions, v: 
 
 /// Eingabe in der Form, wie der Feldtyp den Wert speichert (Mehrfachauswahl/Labels als Liste, sonst Einzelwert).
 pub fn full_editor(ui: &mut Ui, salt: Id, kind: FieldKind, o: &FieldOptions, v: &mut Value, lang: Lang) -> bool {
+    full_editor_with(ui, salt, kind, o, v, lang, None)
+}
+
+/// Wie [`full_editor`], Labels mit Vorschlägen der benutzten Werte (siehe [`list_editor_with`]).
+pub fn full_editor_with(ui: &mut Ui, salt: Id, kind: FieldKind, o: &FieldOptions, v: &mut Value, lang: Lang, used: Option<&[Counted]>) -> bool {
     match kind {
-        FieldKind::Multi | FieldKind::Labels => list_editor(ui, salt, kind, o, v, lang),
+        FieldKind::Multi | FieldKind::Labels => list_editor_with(ui, salt, kind, o, v, lang, used),
         _ => element_editor(ui, salt, kind, o, v, lang),
     }
 }
