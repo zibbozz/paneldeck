@@ -19,7 +19,10 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            // Frei verschiebbar (#275): zuerst mittig, danach merkt sich egui die Position; constrain hält es im Fenster.
+            .pivot(Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .constrain(true)
             .min_width(560.0_f32.min(ctx.content_rect().width() - 40.0))
             .max_width(560.0_f32.min(ctx.content_rect().width() - 40.0))
             .max_height((ctx.content_rect().height() - 60.0).max(200.0))
