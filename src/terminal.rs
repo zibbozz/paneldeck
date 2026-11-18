@@ -313,6 +313,10 @@ pub struct ShellState {
     pub last_dur_ms: Option<u64>,
     /// Absolute Zeilen (ab Anfang des Verlaufs) der Prompt-Anfänge.
     pub marks: Vec<u64>,
+    /// Die letzte Marke ist noch vorläufig (Prompt-Anfang bei ausstehendem Umbruch, `advance_tracked`, #231): Ihre Zeile
+    /// hält noch die Ausgabezeile in Terminalbreite; erst das nächste Zeichen des Prompts entscheidet, ob er sie
+    /// überschreibt oder eine Zeile tiefer beginnt. Siehe [`ShellState::prompt_start`].
+    pub mark_open: bool,
     /// Beendete Befehle, die noch nicht ausgewertet wurden (Benachrichtigungen).
     pub done: Vec<CmdDone>,
     /// Monotone Zähler (nie zurückgesetzt, anders als `done`): Prompts, beendete Befehle, Ordnermeldungen.
@@ -330,6 +334,16 @@ pub struct ShellState {
     pub notes: Vec<(String, String)>,
     pending_dur: Option<u64>,
     cmd_start: Option<std::time::Instant>,
+}
+
+impl ShellState {
+    /// Erste Zeile des letzten Prompts nach jetzigem Stand des Bildschirms (absolut), für [`run_output`]. Ist die Marke
+    /// noch vorläufig (`mark_open`), steht in ihrer Zeile noch die Ausgabe: Der Prompt beginnt dann frühestens darunter.
+    /// Git Bash auf der ConPTY von Windows rechnet nach OSC 133;A oft länger am Prompt (Git-Status), als `run_command`
+    /// auf Ruhe wartet (#231).
+    pub fn prompt_start(&self) -> Option<u64> {
+        self.marks.last().map(|m| if self.mark_open { m + 1 } else { *m })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1524,9 +1538,10 @@ impl HistoryTrack {
 /// Prompt-Anfang bei „Umbruch ausstehend“ (#193): Füllt die letzte Ausgabezeile die Breite genau und lässt ConPTY den
 /// Zeilenvorschub weg, steht der Cursor bei OSC 133;A noch am Rand der Ausgabezeile. Wo der Prompt beginnt, entscheidet
 /// erst das nächste Zeichen: ein druckbares Zeichen bricht in die nächste Zeile um (bei vollem Verlauf rollt dabei nur
-/// der Inhalt, die absolute Zeile bleibt gleich), CR oder eine Cursorbewegung (oh-my-posh, starship) heben den Umbruch
-/// auf. Die Marke wird deshalb vorläufig gesetzt (`pending`, auch über Chunk-Grenzen) und danach Byte für Byte bis zu
-/// dieser Entscheidung auf die Cursorzeile korrigiert.
+/// der Inhalt, die absolute Zeile bleibt gleich), eine Cursorbewegung oder CR plus Prompt-Text (oh-my-posh, starship)
+/// heben den Umbruch auf, CR plus Zeilenvorschub beginnt die nächste Zeile (#231). Die Marke wird deshalb vorläufig
+/// gesetzt (`pending` und `ShellState::mark_open`, auch über Chunk-Grenzen) und danach Byte für Byte bis zu dieser
+/// Entscheidung auf die Cursorzeile korrigiert.
 fn advance_tracked<T: EventListener>(
     p: &mut Processor,
     t: &mut Term<T>,
@@ -1554,6 +1569,7 @@ fn advance_tracked<T: EventListener>(
         apply_events(state, vec![ev], abs);
         if prompt {
             *pending = t.grid().cursor.input_needs_wrap.then_some(abs);
+            state.lock().unwrap_or_else(|e| e.into_inner()).mark_open = pending.is_some();
         }
     }
     advance_resolving(p, t, hs, &bytes[done..], pending, state);
@@ -1571,14 +1587,21 @@ fn advance_resolving<T: EventListener>(p: &mut Processor, t: &mut Term<T>, hs: &
 }
 
 /// Offene Marke festlegen, sobald der ausstehende Umbruch erledigt ist: auf die Zeile, in der der Cursor dann steht.
+///
+/// Ein CR allein entscheidet noch nichts (#231): Die Ausgabezeile gehört erst dann dem Prompt, wenn er hineinschreibt
+/// (oh-my-posh, starship überschreiben sie). Die ConPTY von Windows (conhost) schickt bei Git Bash nach einer Zeile in
+/// genau Terminalbreite `…www` + OSC 133;A + `\r\n` + Prompt-Text – der Zeilenvorschub von `echo` fehlt, der aus PS1 kommt
+/// erst nach dem CR. Der Prompt beginnt dann in der nächsten Zeile.
 fn resolve_mark<T>(t: &Term<T>, base: u64, pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
     let Some(old) = *pending else { return };
     let now = cursor_abs_in(t, base);
-    if t.grid().cursor.input_needs_wrap && now == old {
-        return; // noch offen (z. B. Farbsequenz vor dem Prompt-Text)
+    let cur = &t.grid().cursor;
+    if now == old && (cur.input_needs_wrap || cur.point.column.0 == 0) {
+        return; // noch offen (z. B. Farbsequenz vor dem Prompt-Text, CR vor dem Zeilenvorschub)
     }
     *pending = None;
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    st.mark_open = false;
     if now != old && st.marks.last() == Some(&old) {
         st.marks.pop();
         if st.marks.last() != Some(&now) {
@@ -2285,6 +2308,66 @@ mod run_output_tests {
         let prompt_cr = "\x1b]133;D;0\x07\x1b]133;A\x07\rPS C:\\> \x1b]133;B\x07";
         let r = run(COLS, 20, "'r'*40", &format!("kurz\r\n{line}{prompt_cr}"));
         assert_eq!(text(&r), "kurz");
+    }
+
+    /// Git-Bash-Prompt wie `shells::BASH_PC` plus Standard-PS1 von Git for Windows (beginnt mit einem Zeilenvorschub).
+    const BASH_END: &str = "\x1b]133;D;0\x07\x1b]9;9;\"C:\\Users\\u\"\x07\x1b]133;A\x07";
+    const BASH_PS1: &str = "\x1b[32m\r\nu@pc \x1b[35mMINGW64 \x1b[33m~\x1b[m\r\n$ ";
+
+    #[test]
+    fn exact_width_git_bash_on_system_conpty() {
+        // #231, mitgeschnitten (ConPTY von Windows, 100 Spalten, hier auf COLS gekürzt): nach
+        // `printf 'w%.0s' $(seq 1 100); echo` fehlt der Zeilenvorschub von `echo`; OSC 133;A kommt bei ausstehendem
+        // Umbruch, ca. 300 ms später (Git Bash rechnet am Prompt) `ESC[?2004h`, dann `\r\n` aus PS1 und der Prompt-Text.
+        // `run_command` wertet schon nach 80 ms Ruhe aus – früher fiel die Ausgabezeile dabei dem Prompt zu (leere Ausgabe).
+        let line = "w".repeat(COLS);
+        for history in [0, 20, 200] {
+            let mut f = Fake::with_history(COLS, 8, 50);
+            for i in 0..history {
+                f.feed(&format!("alt {i}\r\n"));
+            }
+            f.feed(BASH_END);
+            f.feed("\x1b[?2004h");
+            f.feed(BASH_PS1);
+            let start_abs = f.cursor();
+            let mark0 = f.last_mark();
+            let seq0 = f.st.lock().unwrap().prompt_seq;
+            f.feed("printf w40\r\n\x1b]133;C\x07");
+            f.feed(&line);
+            f.feed(BASH_END);
+            let out_row = f.cursor();
+            let check = |f: &Fake, open: bool, what: &str| {
+                let st = f.st.lock().unwrap();
+                assert!(st.prompt_seq > seq0, "neuer Prompt ({what})");
+                assert_eq!(st.mark_open, open, "{what}, Verlauf {history}");
+                let r = run_output(&f.term, f.base(), "printf w40", start_abs, mark0, st.prompt_start(), true);
+                assert_eq!(text(&r), line, "{what}, Verlauf {history}");
+            };
+            // Ruhe nach OSC 133;A: Marke vorläufig, ihre Zeile ist noch die Ausgabezeile.
+            check(&f, true, "Prompt-Anfang offen");
+            f.feed("\x1b[?2004h");
+            check(&f, true, "Modus allein entscheidet nichts");
+            // `\r` und `\n` in getrennten Stücken: das CR allein entscheidet noch nichts.
+            f.feed("\x1b[32m\r");
+            check(&f, true, "nach CR");
+            f.feed(&BASH_PS1["\x1b[32m\r".len()..]);
+            check(&f, false, "Prompt fertig");
+            assert_eq!(f.last_mark(), Some(out_row + 1), "Marke in der Zeile nach der Ausgabe, Verlauf {history}");
+            // Mitgelieferte ConPTY (OpenConsole): mit Zeilenvorschub, unverändert.
+            let r = run_in(Fake::with_history(COLS, 8, 50), history, "printf w40", &format!("{line}\r\n{BASH_END}{BASH_PS1}"));
+            assert_eq!(text(&r), line, "mit Zeilenvorschub, Verlauf {history}");
+        }
+        // Ein Prompt, der nach dem CR in die Zeile schreibt, überschreibt sie: die Marke bleibt dort.
+        let mut f = Fake::new(COLS, 8);
+        f.feed(&format!("x\r\n{line}\x1b]133;A\x07\r\x1b[K"));
+        assert!(f.st.lock().unwrap().mark_open);
+        f.feed("$ ");
+        assert_eq!(f.last_mark(), Some(1));
+        assert!(!f.st.lock().unwrap().mark_open);
+        // Ohne ausstehenden Umbruch ist die Marke sofort fest.
+        f.feed("\r\n\x1b]133;A\x07$ ");
+        assert_eq!(f.last_mark(), Some(2));
+        assert!(!f.st.lock().unwrap().mark_open);
     }
 
     #[test]
