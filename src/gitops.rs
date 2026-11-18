@@ -26,6 +26,61 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Nur lesende Befehle (`status`, `diff`): Filter-Treiber (`filter.<x>.clean`/`smudge`/`process`) aus der Konfiguration
+/// des Repositorys selbst (`.git/config`, eingebundene Dateien, `config.worktree`) abschalten. Eine fremde Konfiguration
+/// (z. B. aus einem entpackten ZIP) könnte sonst beim automatischen `git status` oder beim Anzeigen eines Diffs beliebige
+/// Befehle starten (#253). Filter aus der System-/Benutzerkonfiguration (z. B. Git LFS) bleiben, sie sind die des Nutzers.
+pub fn read_only_overrides(dir: &Path) -> Vec<String> {
+    let names = match git(dir, &["config", "--show-scope", "--includes", "--name-only", "--get-regexp", r"^filter\."]) {
+        Ok(o) => local_filter_names(&o, true),
+        // Kein Treffer: Exit-Code 1 ohne Meldung.
+        Err(e) if e.trim().is_empty() => Vec::new(),
+        // Ältere git-Versionen kennen `--show-scope` nicht: dann nur die Datei des Repositorys (mit eingebundenen Dateien).
+        Err(_) => git(dir, &["config", "--local", "--includes", "--name-only", "--get-regexp", r"^filter\."]).map(|o| local_filter_names(&o, false)).unwrap_or_default(),
+    };
+    let mut v = Vec::new();
+    for n in names {
+        for k in ["clean", "smudge", "process"] {
+            v.push("-c".to_string());
+            v.push(format!("filter.{n}.{k}="));
+        }
+        v.push("-c".to_string());
+        v.push(format!("filter.{n}.required=false"));
+    }
+    v
+}
+
+/// Namen der Filter-Treiber aus der Ausgabe von `git config [--show-scope] --name-only --get-regexp ^filter\.`;
+/// mit `scoped` nur die aus der Konfiguration des Repositorys (`local`/`worktree`, unbekannte Bereiche ebenso).
+fn local_filter_names(out: &str, scoped: bool) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    for line in out.lines() {
+        let (scope, key) = if scoped { line.split_once('\t').unwrap_or(("local", line)) } else { ("local", line) };
+        if matches!(scope.trim(), "system" | "global" | "command") {
+            continue;
+        }
+        // filter.<name>.<schlüssel>; der Name darf Punkte enthalten.
+        let Some(rest) = key.trim().strip_prefix("filter.") else { continue };
+        let Some((name, _)) = rest.rsplit_once('.') else { continue };
+        // Nur Namen, die als `-c`-Schlüssel eindeutig bleiben (kein `=`, keine Steuerzeichen).
+        if name.is_empty() || name.contains('=') || name.chars().any(|c| c.is_control()) {
+            continue;
+        }
+        if !v.iter().any(|x| x == name) {
+            v.push(name.to_string());
+        }
+    }
+    v
+}
+
+/// Wie [`git`], aber für nur lesende Befehle ohne Filter-Treiber des Repositorys ([`read_only_overrides`]).
+pub fn git_read(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let ov = read_only_overrides(dir);
+    let mut all: Vec<&str> = ov.iter().map(String::as_str).collect();
+    all.extend_from_slice(args);
+    git(dir, &all)
+}
+
 pub fn repo_root(dir: &Path) -> Option<PathBuf> {
     git(dir, &["rev-parse", "--show-toplevel"]).ok().map(|s| PathBuf::from(s.trim()))
 }
@@ -74,7 +129,7 @@ pub fn parse_status(out: &str) -> Vec<Change> {
 }
 
 pub fn status(repo: &Path) -> Result<Vec<Change>, String> {
-    git(repo, &["status", "--porcelain=v1", "-z", "-uall"]).map(|o| parse_status(&o))
+    git_read(repo, &["status", "--porcelain=v1", "-z", "-uall"]).map(|o| parse_status(&o))
 }
 
 /// Diff einer Datei: `staged` = Index gegen HEAD, sonst Arbeitsverzeichnis gegen Index.
@@ -106,12 +161,14 @@ pub fn diff_of(repo: &Path, c: &Change, staged: bool) -> String {
             Err(_) => format!("{}: {} {}", crate::state::t("neue Datei", "new file"), c.path, crate::state::t("(nicht als Text lesbar)", "(not readable as text)")),
         }
     } else {
+        // Kein externes Diff-Programm und keine textconv-Treiber (`diff.external`, `diff.<x>.textconv` einer fremden
+        // Konfiguration würden sonst beim Anzeigen starten, #253).
         let args: Vec<&str> = if staged {
-            vec!["diff", "--no-color", "--cached", "--", &c.path]
+            vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--cached", "--", &c.path]
         } else {
-            vec!["diff", "--no-color", "--", &c.path]
+            vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--", &c.path]
         };
-        git(repo, &args).unwrap_or_else(|e| e)
+        git_read(repo, &args).unwrap_or_else(|e| e)
     };
     if text.len() > MAX {
         let mut t = text;
@@ -346,6 +403,62 @@ mod tests {
         assert!(!status(&d).unwrap().iter().find(|c| c.path == "a.txt").unwrap().staged());
         let n = status(&d).unwrap().into_iter().find(|c| c.path == "neu.txt").unwrap();
         assert!(diff_of(&d, &n, false).contains("+x"));
+    }
+
+    #[test]
+    fn foreign_filters_and_diff_drivers_never_run_when_reading() {
+        // #253: eine fremde .git/config mit Filter-, textconv- und externem Diff-Treiber; status/diff dürfen nichts starten.
+        let d = tmp("foreign");
+        init(&d);
+        std::fs::write(d.join(".gitattributes"), "*.txt filter=evil diff=evil
+").unwrap();
+        std::fs::write(d.join("a.txt"), "eins
+").unwrap();
+        stage_all(&d).unwrap();
+        commit(&d, "init").unwrap();
+        let marker = |n: &str| d.parent().unwrap().join(format!("gitops-marker-{n}-{}", std::process::id()));
+        let unix = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        for n in ["clean", "textconv", "external"] {
+            let _ = std::fs::remove_file(marker(n));
+        }
+        git(&d, &["config", "filter.evil.clean", &format!("touch '{}'; cat", unix(&marker("clean")))]).unwrap();
+        git(&d, &["config", "filter.evil.process", ""]).unwrap();
+        git(&d, &["config", "diff.evil.textconv", &format!("touch '{}'; cat", unix(&marker("textconv")))]).unwrap();
+        git(&d, &["config", "diff.external", &format!("touch '{}'", unix(&marker("external")))]).unwrap();
+        std::fs::write(d.join("a.txt"), "eins
+zwei
+").unwrap();
+        let ch = status(&d).unwrap();
+        let a = ch.iter().find(|c| c.path == "a.txt").expect("a.txt geändert");
+        let diff = diff_of(&d, a, false);
+        assert!(diff.contains("+zwei"), "{diff}");
+        assert!(read_only_overrides(&d).iter().any(|o| o == "filter.evil.clean="));
+        for n in ["clean", "textconv", "external"] {
+            assert!(!marker(n).exists(), "{n} wurde ausgeführt");
+        }
+        // Gegenprobe: ein gewöhnliches `git diff` startet die Treiber (der Test prüft also wirklich etwas).
+        let _ = git(&d, &["diff", "--", "a.txt"]);
+        assert!(marker("external").exists() || marker("clean").exists() || marker("textconv").exists(), "Gegenprobe: Treiber liefen nicht");
+        for n in ["clean", "textconv", "external"] {
+            let _ = std::fs::remove_file(marker(n));
+        }
+    }
+
+    #[test]
+    fn filter_names_only_from_the_repository() {
+        let out = "local	filter.evil.clean
+global	filter.lfs.process
+worktree	filter.a.b.smudge
+system	filter.s.clean
+command	filter.c.clean
+local	filter.evil.smudge
+";
+        assert_eq!(local_filter_names(out, true), vec!["evil", "a.b"]);
+        assert_eq!(local_filter_names("filter.x.clean
+filter.x.process
+", false), vec!["x"]);
+        assert!(local_filter_names("local	filter.bad=x.clean
+", true).is_empty());
     }
 
     #[test]

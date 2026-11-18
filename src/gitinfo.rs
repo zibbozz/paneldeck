@@ -44,7 +44,8 @@ fn branch_of(repo: &Path) -> Option<String> {
 
 fn changed_files(repo: &Path) -> usize {
     let mut cmd = Command::new("git");
-    cmd.args(["-c", "core.fsmonitor=false", "--no-optional-locks", "status", "--porcelain"]).current_dir(repo);
+    // Keine Filter-Treiber aus der Konfiguration des Repositorys (#253): der Aufruf läuft automatisch alle paar Sekunden.
+    cmd.args(["-c", "core.fsmonitor=false"]).args(crate::gitops::read_only_overrides(repo)).args(["--no-optional-locks", "status", "--porcelain"]).current_dir(repo);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
