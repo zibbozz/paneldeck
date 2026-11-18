@@ -4,7 +4,7 @@
 
 In expert mode, tickets can be searched with a JQL-like query language. It is available in the **query bar** above the ticket list (a valid query replaces the local filters there), in the **Search** tab (hits as a table, for this project or for all projects), in board sources, dashboard tiles and for agents (`search_tickets` with `query`, read-only).
 
-The query bar highlights the syntax, underlines errors in red with a message and a suggestion ("did you mean …?") in the language of the interface, and offers autocomplete (`↑` `↓`, `Tab`/`Enter`, `Esc` closes) and a history of recent queries. **Save filter** stores a query per project or globally; *Manage filters* renames, replaces and deletes them, and *Keywords* opens the keyword editor.
+The query bar highlights the syntax, underlines errors in red with a message and a suggestion ("did you mean …?") in the language of the interface, and offers autocomplete (`↑` `↓`, `Tab`/`Enter`, `Esc` closes), a **Fields ▾** list of every field with its type (a click inserts it at the cursor) and a history of recent queries. The query field of dashboard tiles (*Search*, *Counts*) uses the same editor with suggestions, field list and messages. **Save filter** stores a query per project or globally; *Manage filters* renames, replaces and deletes them, and *Keywords* opens the keyword editor.
 
 The **help page** (question-mark button next to the search field) contains the complete tutorial with all examples below, a troubleshooting section, the reference and the grammar, a full-text search, and a screenshot of the result for every example; a click on an example puts the query into the search.
 
