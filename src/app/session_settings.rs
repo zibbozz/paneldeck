@@ -483,121 +483,125 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
         .show(ctx, |ui| {
-            egui::Grid::new("sset_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-                ui.label(lang.t("Name", "Name"));
-                let auto = lang.t("automatisch", "automatic");
-                let hint = if f.auto_name.is_empty() { auto.to_string() } else { format!("{} ({auto})", f.auto_name) };
-                let te = ui.add(egui::TextEdit::singleline(&mut f.v.name).hint_text(hint).desired_width(320.0));
-                if f.focus {
-                    te.request_focus();
-                    f.focus = false;
-                }
-                ui.end_row();
-                ui.label(lang.t("Farbe", "Color"));
-                color_row(ui, &mut f.v.color, lang);
-                ui.end_row();
-                ui.label(lang.t("Ordner im Baum", "Tree folder"));
-                ui.add(egui::TextEdit::singleline(&mut f.v.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(320.0));
-                ui.end_row();
-                ui.label(lang.t("Tags", "Tags"));
-                ui.add(egui::TextEdit::singleline(&mut f.v.tags).hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(320.0));
-                ui.end_row();
-                ui.label(lang.t("Notizen", "Notes"));
-                ui.add(egui::TextEdit::multiline(&mut f.v.notes).desired_rows(3).desired_width(320.0));
-                ui.end_row();
-                if f.chat {
-                    return;
-                }
-                ui.separator();
-                ui.separator();
-                ui.end_row();
-                let prog_profile = profiles.iter().find(|p| p.id == f.v.profile).is_some_and(|p| !p.program.trim().is_empty());
-                if !profiles.is_empty() || f.v.profile != 0 {
-                    ui.label(lang.t("Profil", "Profile"));
-                    let cur = profiles.iter().find(|p| p.id == f.v.profile).map(|p| p.name.clone()).unwrap_or_else(|| lang.t("Keins", "None").to_string());
-                    let r = egui::ComboBox::from_id_salt("sset_prof").selected_text(cur).show_ui(ui, |ui| {
-                        if ui.selectable_label(f.v.profile == 0, lang.t("Keins", "None")).clicked() {
-                            f.pick_profile(None);
-                        }
-                        for p in profiles {
-                            if ui.selectable_label(f.v.profile == p.id, &p.name).clicked() {
-                                f.pick_profile(Some(p));
+            // Scrollfläche mit Höchsthöhe nach dem Bildschirm: Speichern/Abbrechen bleiben sichtbar (#241).
+            let body_h = super::dialogs::dialog_body_height(ui.ctx());
+            egui::ScrollArea::vertical().id_salt("sset_scroll").max_height(body_h).min_scrolled_height(body_h).show(ui, |ui| {
+                egui::Grid::new("sset_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+                    ui.label(lang.t("Name", "Name"));
+                    let auto = lang.t("automatisch", "automatic");
+                    let hint = if f.auto_name.is_empty() { auto.to_string() } else { format!("{} ({auto})", f.auto_name) };
+                    let te = ui.add(egui::TextEdit::singleline(&mut f.v.name).hint_text(hint).desired_width(320.0));
+                    if f.focus {
+                        te.request_focus();
+                        f.focus = false;
+                    }
+                    ui.end_row();
+                    ui.label(lang.t("Farbe", "Color"));
+                    color_row(ui, &mut f.v.color, lang);
+                    ui.end_row();
+                    ui.label(lang.t("Ordner im Baum", "Tree folder"));
+                    ui.add(egui::TextEdit::singleline(&mut f.v.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(320.0));
+                    ui.end_row();
+                    ui.label(lang.t("Tags", "Tags"));
+                    ui.add(egui::TextEdit::singleline(&mut f.v.tags).hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(320.0));
+                    ui.end_row();
+                    ui.label(lang.t("Notizen", "Notes"));
+                    ui.add(egui::TextEdit::multiline(&mut f.v.notes).desired_rows(3).desired_width(320.0));
+                    ui.end_row();
+                    if f.chat {
+                        return;
+                    }
+                    ui.separator();
+                    ui.separator();
+                    ui.end_row();
+                    let prog_profile = profiles.iter().find(|p| p.id == f.v.profile).is_some_and(|p| !p.program.trim().is_empty());
+                    if !profiles.is_empty() || f.v.profile != 0 {
+                        ui.label(lang.t("Profil", "Profile"));
+                        let cur = profiles.iter().find(|p| p.id == f.v.profile).map(|p| p.name.clone()).unwrap_or_else(|| lang.t("Keins", "None").to_string());
+                        let r = egui::ComboBox::from_id_salt("sset_prof").selected_text(cur).show_ui(ui, |ui| {
+                            if ui.selectable_label(f.v.profile == 0, lang.t("Keins", "None")).clicked() {
+                                f.pick_profile(None);
                             }
-                        }
-                    });
-                    mark(ui, "profile", &r.response);
-                    ui.end_row();
-                }
-                ui.label("Shell");
-                if prog_profile {
-                    ui.label(RichText::new(lang.t("eigenes Programm des Profils", "the profile's own program")).color(style::dim(ui)));
-                } else {
-                    let cur = shells.iter().find(|s| s.id == f.v.shell_id).map(|s| s.label.clone()).unwrap_or_else(|| f.v.shell_id.clone());
-                    egui::ComboBox::from_id_salt("sset_shell").selected_text(cur).show_ui(ui, |ui| {
-                        for s in shells {
-                            ui.selectable_value(&mut f.v.shell_id, s.id.clone(), &s.label);
-                        }
-                    });
-                }
-                ui.end_row();
-                ui.label(lang.t("Arbeitsordner", "Working folder"));
-                if f.worktree.is_some() {
-                    let shell = f.v.shell_id.clone();
-                    folder_field(ui, &mut f.v.cwd, &shell, true, lang);
-                } else {
-                    // Wie im Dialog „Neue Sitzung“: bei einer WSL-Shell Linux-Pfade, Prüfung und Auswahl in WSL (#216).
-                    let target = f.target.clone();
-                    let (cwd, fresh) = (f.v.cwd.clone(), f.picker.is_none());
-                    let picker = f.picker.get_or_insert_with(|| folder_picker::FolderPicker::new(("sset_cwd", f.id), &cwd, target.clone()));
-                    picker.set_target(target);
-                    if fresh || cwd != f.picker_cwd {
-                        // Erstes Bild oder Ordner von außen geändert (Profil): Feld übernimmt ihn als neue Ausgangslage.
-                        if !fresh {
-                            picker.set_text(&cwd);
-                        }
-                        f.picker_base = (picker.value(), cwd.clone());
-                    }
-                    let r = picker.show(ui, lang, &f.wsl_recent);
-                    if let Some(sid) = r.distro_changed.and_then(|d| shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|x| x.eq_ignore_ascii_case(&d)))).map(|s| s.id.clone()) {
-                        f.v.shell_id = sid;
-                    }
-                    let shown = picker.value();
-                    f.v.cwd = if shown != f.picker_base.0 { shown } else { f.picker_base.1.clone() };
-                    f.picker_cwd = f.v.cwd.clone();
-                }
-                ui.end_row();
-                if f.worktree.is_some() {
-                    ui.label("");
-                    let r = ui.label(RichText::new(lang.t("Der Arbeitsordner ist der Git-Worktree dieser Sitzung und bleibt fest.", "The working folder is this session's Git worktree and stays fixed.")).small().color(style::dim(ui)));
-                    mark(ui, "worktree", &r);
-                    ui.end_row();
-                }
-                ui.label("");
-                let prof = profiles.iter().find(|p| p.id == f.v.profile);
-                let start_note = match prof {
-                    Some(p) if !p.startup.trim().is_empty() || !p.env.trim().is_empty() => format!("{} {}", lang.t("Startbefehl und Umgebungsvariablen kommen aus dem Profil", "Start command and environment variables come from the profile"), lang.q(&p.name)),
-                    _ => lang.t("Startbefehl und Umgebungsvariablen legt ein Profil fest (Einstellungen → Profile).", "A profile sets the start command and environment variables (Settings → Profiles).").to_string(),
-                };
-                ui.label(RichText::new(start_note).small().color(style::dim(ui)));
-                ui.end_row();
-                if claude_mode || f.v.claude {
-                    ui.label("");
-                    let r = ui.checkbox(&mut f.v.claude, lang.t("Claude Code starten", "Start Claude Code"));
-                    mark(ui, "claude", &r);
-                    ui.end_row();
-                    if f.v.claude {
-                        ui.label("");
-                        let r = continue_checkbox(ui, &mut f.v.claude_continue, lang);
-                        mark(ui, "continue", &r);
-                        ui.end_row();
-                        // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
-                        f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", super::dialogs::OptsPlace::Session);
-                        ui.label("");
-                        let r = ui.label(RichText::new(lang.t("Die Optionen gelten nur für diese Sitzung, ab dem nächsten Start.", "The options apply to this session only, from its next start.")).small().color(style::dim(ui)));
-                        mark(ui, "copts", &r);
+                            for p in profiles {
+                                if ui.selectable_label(f.v.profile == p.id, &p.name).clicked() {
+                                    f.pick_profile(Some(p));
+                                }
+                            }
+                        });
+                        mark(ui, "profile", &r.response);
                         ui.end_row();
                     }
-                }
+                    ui.label("Shell");
+                    if prog_profile {
+                        ui.label(RichText::new(lang.t("eigenes Programm des Profils", "the profile's own program")).color(style::dim(ui)));
+                    } else {
+                        let cur = shells.iter().find(|s| s.id == f.v.shell_id).map(|s| s.label.clone()).unwrap_or_else(|| f.v.shell_id.clone());
+                        egui::ComboBox::from_id_salt("sset_shell").selected_text(cur).show_ui(ui, |ui| {
+                            for s in shells {
+                                ui.selectable_value(&mut f.v.shell_id, s.id.clone(), &s.label);
+                            }
+                        });
+                    }
+                    ui.end_row();
+                    ui.label(lang.t("Arbeitsordner", "Working folder"));
+                    if f.worktree.is_some() {
+                        let shell = f.v.shell_id.clone();
+                        folder_field(ui, &mut f.v.cwd, &shell, true, lang);
+                    } else {
+                        // Wie im Dialog „Neue Sitzung“: bei einer WSL-Shell Linux-Pfade, Prüfung und Auswahl in WSL (#216).
+                        let target = f.target.clone();
+                        let (cwd, fresh) = (f.v.cwd.clone(), f.picker.is_none());
+                        let picker = f.picker.get_or_insert_with(|| folder_picker::FolderPicker::new(("sset_cwd", f.id), &cwd, target.clone()));
+                        picker.set_target(target);
+                        if fresh || cwd != f.picker_cwd {
+                            // Erstes Bild oder Ordner von außen geändert (Profil): Feld übernimmt ihn als neue Ausgangslage.
+                            if !fresh {
+                                picker.set_text(&cwd);
+                            }
+                            f.picker_base = (picker.value(), cwd.clone());
+                        }
+                        let r = picker.show(ui, lang, &f.wsl_recent);
+                        if let Some(sid) = r.distro_changed.and_then(|d| shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|x| x.eq_ignore_ascii_case(&d)))).map(|s| s.id.clone()) {
+                            f.v.shell_id = sid;
+                        }
+                        let shown = picker.value();
+                        f.v.cwd = if shown != f.picker_base.0 { shown } else { f.picker_base.1.clone() };
+                        f.picker_cwd = f.v.cwd.clone();
+                    }
+                    ui.end_row();
+                    if f.worktree.is_some() {
+                        ui.label("");
+                        let r = super::dialogs::hint_label(ui, lang.t("Der Arbeitsordner ist der Git-Worktree dieser Sitzung und bleibt fest.", "The working folder is this session's Git worktree and stays fixed."), style::dim(ui));
+                        mark(ui, "worktree", &r);
+                        ui.end_row();
+                    }
+                    ui.label("");
+                    let prof = profiles.iter().find(|p| p.id == f.v.profile);
+                    let start_note = match prof {
+                        Some(p) if !p.startup.trim().is_empty() || !p.env.trim().is_empty() => format!("{} {}", lang.t("Startbefehl und Umgebungsvariablen kommen aus dem Profil", "Start command and environment variables come from the profile"), lang.q(&p.name)),
+                        _ => lang.t("Startbefehl und Umgebungsvariablen legt ein Profil fest (Einstellungen → Profile).", "A profile sets the start command and environment variables (Settings → Profiles).").to_string(),
+                    };
+                    super::dialogs::hint_label(ui, &start_note, style::dim(ui));
+                    ui.end_row();
+                    if claude_mode || f.v.claude {
+                        ui.label("");
+                        let r = ui.checkbox(&mut f.v.claude, lang.t("Claude Code starten", "Start Claude Code"));
+                        mark(ui, "claude", &r);
+                        ui.end_row();
+                        if f.v.claude {
+                            ui.label("");
+                            let r = continue_checkbox(ui, &mut f.v.claude_continue, lang);
+                            mark(ui, "continue", &r);
+                            ui.end_row();
+                            // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
+                            f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", super::dialogs::OptsPlace::Session);
+                            ui.label("");
+                            let r = super::dialogs::hint_label(ui, lang.t("Die Optionen gelten nur für diese Sitzung, ab dem nächsten Start.", "The options apply to this session only, from its next start."), style::dim(ui));
+                            mark(ui, "copts", &r);
+                            ui.end_row();
+                        }
+                    }
+                });
             });
             if f.chat {
                 ui.add_space(S1);
@@ -630,12 +634,78 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
     out
 }
 
-/// Häkchen „Konversation fortsetzen“ (Einstellungen der Sitzung und Dialog „Neue Sitzung“).
+/// Häkchen „Konversation fortsetzen“ (Einstellungen der Sitzung).
 pub(super) fn continue_checkbox(ui: &mut Ui, on: &mut bool, lang: Lang) -> egui::Response {
-    ui.checkbox(on, lang.t("Konversation fortsetzen", "Continue the conversation")).on_hover_text(lang.t(
-        "Beim Neu laden, Neu starten und Programmstart setzt Claude die bisherige Konversation fort. Aus: jedes Mal eine neue Konversation.",
-        "On reload, restart and program start Claude continues the previous conversation. Off: a new conversation every time.",
+    ui.checkbox(on, lang.t("Konversation dieser Sitzung beim Neu laden/Neustart fortsetzen", "Resume this session's conversation on reload/restart")).on_hover_text(lang.t(
+        "Beim Neu laden, Neu starten und Programmstart setzt Claude die Konversation dieser Sitzung fort (sofern es sie gibt). Aus: jedes Mal eine neue Konversation.",
+        "On reload, restart and program start Claude resumes this session's own conversation (if there is one). Off: a new conversation every time.",
     ))
+}
+
+/// Eine Auswahl im Dialog „Neue Sitzung“ statt zweier Häkchen (#241, #245): wie die Konversation beginnt und ob die
+/// Konversation der Sitzung beim Neu laden/Neustart fortgesetzt wird. Die Kombination „letzte im Ordner, danach immer
+/// neu“ gibt es nicht mehr (MCP und alle anderen Wege kennen ohnehin nur „fortsetzen an/aus“).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConvChoice {
+    /// Neue Konversation; beim Neu laden/Neustart wird sie fortgesetzt (Standard).
+    Resume,
+    /// Einmalig die letzte Konversation im Ordner fortsetzen (`--continue`), danach wie `Resume`.
+    ContinueLast,
+    /// Bei jedem Start eine neue Konversation.
+    AlwaysNew,
+}
+
+impl ConvChoice {
+    pub(super) const ALL: [ConvChoice; 3] = [ConvChoice::Resume, ConvChoice::ContinueLast, ConvChoice::AlwaysNew];
+
+    /// Beim Anlegen `--continue`.
+    pub(super) fn continue_last(self) -> bool {
+        self == ConvChoice::ContinueLast
+    }
+
+    /// `claude_continue` der Sitzung.
+    pub(super) fn resume_later(self) -> bool {
+        self != ConvChoice::AlwaysNew
+    }
+
+    pub(super) fn label(self, lang: Lang) -> &'static str {
+        match self {
+            ConvChoice::Resume => lang.t("Neu – beim Neu laden/Neustart fortsetzen", "New – resume it on reload/restart"),
+            ConvChoice::ContinueLast => lang.t("Letzte Konversation im Ordner fortsetzen", "Continue the last conversation in this folder"),
+            ConvChoice::AlwaysNew => lang.t("Bei jedem Start eine neue", "A new one on every start"),
+        }
+    }
+
+    pub(super) fn tip(self, lang: Lang) -> &'static str {
+        match self {
+            ConvChoice::Resume => lang.t(
+                "Claude beginnt eine neue Konversation. Beim Neu laden, Neu starten und Programmstart setzt die Sitzung genau diese Konversation fort.",
+                "Claude starts a new conversation. On reload, restart and program start the session resumes exactly this conversation.",
+            ),
+            ConvChoice::ContinueLast => lang.t(
+                "Setzt die zuletzt benutzte Konversation in diesem Ordner fort (claude --continue) – das kann die einer anderen Sitzung sein. Danach setzt die Sitzung diese Konversation beim Neu laden fort.",
+                "Continues the most recent conversation in this folder (claude --continue) – that can be another session's. After that the session resumes this conversation on reload.",
+            ),
+            ConvChoice::AlwaysNew => lang.t(
+                "Jeder Start (auch Neu laden und Programmstart) beginnt eine neue Konversation.",
+                "Every start (also reload and program start) begins a new conversation.",
+            ),
+        }
+    }
+}
+
+/// Auswahl „Konversation“ im Dialog „Neue Sitzung“.
+pub(super) fn conv_combo(ui: &mut Ui, salt: &str, c: &mut ConvChoice, lang: Lang) -> egui::Response {
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(c.label(lang))
+        .width(320.0)
+        .show_ui(ui, |ui| {
+            for x in ConvChoice::ALL {
+                ui.selectable_value(c, x, x.label(lang)).on_hover_text(x.tip(lang));
+            }
+        })
+        .response
+        .on_hover_text(c.tip(lang))
 }
 
 impl App {
@@ -1303,8 +1373,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_settings_window_fits_small_screens_with_everything_open() {
+        for size in [Vec2::new(1280.0, 720.0), Vec2::new(800.0, 600.0)] {
+            let ctx = egui::Context::default();
+            ctx.data_mut(|m| m.insert_temp(Id::new(("claude_more_open", "sset")), true));
+            let mut copts = crate::claude_opts::ClaudeOpts { permission_mode: crate::claude_opts::BYPASS.into(), ..Default::default() };
+            copts.extra.flags = vec!["chrome".into(), "safe-mode".into()];
+            copts.extra.add_dirs = (0..6).map(|i| format!("C:\\gibt-es-nicht\\{i}")).collect();
+            let meta = SessionMeta { id: 9, claude: true, shell_id: "pwsh".into(), notes: "a\nb\nc\nd".into(), claude_opts: copts, ..SessionMeta::default() };
+            let mut f = form(&meta);
+            let (s, p) = (shells(), profiles());
+            for i in 0..6 {
+                let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(i as f64 * 0.1), ..Default::default() };
+                let _ = ctx.run(input, |ctx| {
+                    session_form_ui(ctx, &mut f, &s, &p, true, true, true, Lang::En);
+                });
+            }
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let win = ctx.memory(|m| m.area_rect(Id::new("session_settings"))).expect("Fenster");
+            assert!(screen.contains_rect(win), "{size:?}: {win:?}");
+            for k in ["save", "cancel"] {
+                let r = ctx.data(|d| d.get_temp::<Rect>(Id::new(("sset_mark", k)))).unwrap();
+                assert!(screen.contains_rect(r), "{size:?}: {k} {r:?}");
+            }
+        }
+    }
+
     fn esc() -> Event {
         Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }
+    }
+
+    /// #241: mit Scrollfläche steht das Fenster nach drei Bildern fest (wächst nicht Bild für Bild nach).
+    #[test]
+    fn the_settings_window_settles_at_once() {
+        let mut d = Dlg::new();
+        let mut f = form(&SessionMeta { id: 1, claude: true, shell_id: "pwsh".into(), ..SessionMeta::default() });
+        for _ in 0..3 {
+            d.frame(&mut f, true, vec![]);
+        }
+        let win = |d: &Dlg| d.ctx.memory(|m| m.area_rect(Id::new("session_settings")));
+        let first = win(&d);
+        for _ in 0..4 {
+            d.frame(&mut f, true, vec![]);
+            assert_eq!(win(&d), first);
+        }
     }
 
     #[test]

@@ -423,9 +423,10 @@ struct NewDialog {
     claude: bool,
     /// Claude-Startoptionen (Modell, Effort, Permission-Mode, Agent); vorbelegt mit der letzten Wahl bzw. den Standards.
     copts: ClaudeOpts,
-    continue_last: bool,
-    /// „Konversation fortsetzen“ beim Neu laden/Neustart (#170), Standard an.
-    claude_continue: bool,
+    /// Wie die Konversation beginnt und ob sie beim Neu laden/Neustart fortgesetzt wird (#170, eine Auswahl seit #241).
+    conv: session_settings::ConvChoice,
+    /// Beim ersten Bild den Fokus ins Namensfeld (nicht ins Terminal dahinter, #255).
+    focus: bool,
     profile: u64,
     prompt: String,
     worktree: bool,
@@ -480,7 +481,7 @@ impl NewDialog {
     fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
         let cwd = home_dir();
         let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
-        NewDialog { shell_id, cwd, name: String::new(), claude, copts, continue_last: false, claude_continue: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+        NewDialog { shell_id, cwd, name: String::new(), claude, copts, conv: session_settings::ConvChoice::Resume, focus: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
     }
 
     /// Startordner von außen setzen (Profil, Ordnervorgabe).
@@ -1547,6 +1548,18 @@ impl App {
         self.shells.iter().find(|s| !shells::is_wsl(s)).map(|s| s.id.clone())
     }
 
+    /// Hat ein Terminal den Tastaturfokus?
+    fn terminal_has_focus(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.focused()).is_some_and(|f| self.entries.keys().any(|id| Id::new(("term", *id)) == f))
+    }
+
+    /// Fokus eines Terminals abgeben (ein Feld eines Dialogs behält ihn).
+    fn release_terminal_focus(&self, ctx: &egui::Context) {
+        if self.terminal_has_focus(ctx) {
+            models_ui::release_focus(ctx);
+        }
+    }
+
     /// Erkannte WSL-Shell einer Distribution (Groß-/Kleinschreibung egal, wie Windows).
     fn wsl_shell_for(&self, distro: &str) -> Option<String> {
         self.shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|d| d.eq_ignore_ascii_case(distro))).map(|s| s.id.clone())
@@ -2459,6 +2472,11 @@ impl App {
         // im ersten Bild noch Tasten (#217).
         if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) || self.paste_ask_here(None) {
             models_ui::release_focus(ctx);
+        }
+        // Weitere Dialoge über dem Terminal (#255): Neue Sitzung, Prompt an alle, Vorlagen, Worktree schließen. Nur ein
+        // Terminal gibt den Fokus ab – ein Feld des Dialogs behält ihn.
+        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() {
+            self.release_terminal_focus(ctx);
         }
         let theme = self.theme();
         let font = FontId::monospace(self.settings.font_size);
@@ -3426,6 +3444,8 @@ impl App {
             Action::OpenSettings => self.settings_open = true,
             Action::OpenPrompts => self.prompts_open = true,
             Action::NewDialog(claude) => {
+                // Aus der Palette: den Fokus nicht ans Terminal zurückgeben, er gehört dem Dialog (#255).
+                self.want_focus = None;
                 self.new_dialog = Some(NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode, self.dialog_claude_opts()));
             }
             Action::OpenNotes(id) => {
@@ -3585,7 +3605,10 @@ impl App {
                 }
             }
             Action::SetGroup(id, g) => self.set_group(id, g),
-            Action::OpenTemplates => self.templates_open = true,
+            Action::OpenTemplates => {
+                self.want_focus = None;
+                self.templates_open = true;
+            }
             Action::OpenCosts => self.cost_open = true,
             Action::TemplateDelete(i) => {
                 if i < self.templates.len() {
@@ -3686,7 +3709,10 @@ impl App {
                 }
             }
             Action::FolderTemplate(path) => self.folder_prompt = Some(FolderPrompt { kind: 3, text: state::folder_leaf(&path).to_string(), path }),
-            Action::FolderBroadcast(path) => self.folder_prompt = Some(FolderPrompt { kind: 2, path, text: String::new() }),
+            Action::FolderBroadcast(path) => {
+                self.want_focus = None;
+                self.folder_prompt = Some(FolderPrompt { kind: 2, path, text: String::new() });
+            }
             Action::FolderDelete(path) => {
                 let pid = self.active_project;
                 for e in self.entries.values_mut() {
