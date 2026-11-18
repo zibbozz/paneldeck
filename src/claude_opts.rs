@@ -850,6 +850,7 @@ pub fn legacy_args(rest: &str, kind: Kind) -> String {
 /// steuert oder die nur über MCP verboten sind ([`NEVER_VIA_MCP`] außer `--safe-mode`/`--autocompact`, die als
 /// Optionen übernommen werden) – samt ihrem Wert (#245: ein gespeichertes `--resume <id>`, `--continue` oder
 /// `--session-id` setzte sonst ungefragt eine Konversation fort oder brach den Start ab).
+#[cfg(test)]
 pub fn clean_legacy(args: &str) -> String {
     clean_legacy_report(args, false).line
 }
@@ -948,6 +949,7 @@ pub fn clean_legacy_report(args: &str, allow_risky: bool) -> LegacyClean {
 /// Optionen einer neuen Sitzung (alle Wege laufen hier durch): `explicit` (Dialog, MCP, Vorlage, Duplikat) oder sonst
 /// die Standards des Nutzers, ergänzt um Optionen aus alten `claude_args`. `bypassPermissions` bleibt nur mit
 /// `allow_bypass` (ausdrückliche Wahl im Dialog „Neue Sitzung“). Rückgabe: Optionen und bereinigte freie Reste.
+#[cfg(test)]
 pub fn resolve_new(explicit: Option<&ClaudeOpts>, allow_bypass: bool, defaults: &ClaudeOpts, legacy_args: &str) -> (ClaudeOpts, String) {
     let (o, rest, _) = resolve_new_report(explicit, allow_bypass, defaults, legacy_args);
     (o, rest)
