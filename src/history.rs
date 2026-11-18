@@ -24,6 +24,10 @@ pub fn projects_dir() -> Option<PathBuf> {
 /// wird `-` (je UTF-16-Einheit, wie Claude Code). `None` bei sehr langen Pfaden (dort kürzt Claude Code den Namen und
 /// hängt eine Prüfsumme an; der Ordner ist dann nicht vorherzusagen).
 pub fn project_slug(cwd: &str) -> Option<String> {
+    // Abschließende Trenner gehören nicht zum Arbeitsordner von Claude Code (`C:\a\` ist `C:\a`); Wurzeln (`C:\`, `/`)
+    // bleiben, wie sie sind.
+    let trimmed = cwd.trim_end_matches(['\\', '/']);
+    let cwd = if trimmed.is_empty() || (trimmed.len() == 2 && trimmed.ends_with(':')) { cwd } else { trimmed };
     let mut s = String::new();
     for c in cwd.chars() {
         if c.is_ascii_alphanumeric() {

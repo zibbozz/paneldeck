@@ -101,9 +101,12 @@ struct Entry {
     /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
     /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
     session_key: String,
-    /// Konversation, die die Hooks dieses Starts gemeldet haben (#260): Meldungen mit einer anderen Konversations-ID
-    /// (z. B. ein von Claude gestartetes `claude -p`, das die Umgebung erbt) zählen nicht. Je Start neu.
-    hook_conv: Option<String>,
+    /// Konversation, die zu diesem Start gehört (#260): Meldungen mit einer anderen Konversations-ID (z. B. ein von
+    /// Claude gestartetes `claude -p`, das die Umgebung erbt) zählen nicht. Je Start neu.
+    hook_conv: hooks::ConvBinding,
+    /// In diesem Start kam schon eine Meldung mit Schlüssel: Meldungen ohne Schlüssel (globale Hooks einer älteren
+    /// paneldeck.exe) zählen dann nicht mehr.
+    hook_keyed: bool,
     /// Hinweis vom letzten Start (z. B. weggelassene Pfade aus den Claude-Optionen, #182); wird im nächsten Bild als
     /// Meldung gezeigt.
     launch_note: Option<String>,
@@ -115,7 +118,7 @@ impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: None, launched_claude, launched_opts, launch_note: None, progress: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -748,6 +751,9 @@ pub struct App {
     hook_server: Option<HookServer>,
     hooks_file: Option<PathBuf>,
     hooks_global: bool,
+    /// Die globalen Hooks zeigen auf eine andere paneldeck.exe (Pfad): deren Meldungen tragen keinen Schlüssel und zählen
+    /// nur für den Status (#260); die Einstellungen bieten „Neu eintragen“ an.
+    hooks_foreign: Option<String>,
     hooks_msg: String,
     exe: PathBuf,
     palette: Option<Palette>,
@@ -851,6 +857,34 @@ fn home_dir() -> String {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_default()
+}
+
+/// Hinweis: aus alten Claude-Argumenten der Sitzung `name` weggelassene Flags (Review zu #245).
+fn legacy_dropped_note(name: &str, dropped: &[String]) -> String {
+    format!(
+        "{} ({name}): {}",
+        state::t(
+            "Alte Claude-Argumente werden nicht mehr unterstützt oder sind ungültig, weggelassen",
+            "Old Claude arguments are no longer supported or invalid, left out"
+        ),
+        dropped.join(", ")
+    )
+}
+
+/// Hinweis: die globalen Hooks gehören zu einer anderen paneldeck.exe (`other`, #260).
+fn hooks_foreign_note(other: &str) -> String {
+    format!(
+        "{} ({}). {}",
+        state::t(
+            "Die globalen Claude-Hooks in ~/.claude/settings.json zeigen auf eine andere paneldeck.exe",
+            "The global Claude hooks in ~/.claude/settings.json point to another paneldeck.exe"
+        ),
+        crate::mcp::short(other, 80),
+        state::t(
+            "Ihre Meldungen zählen nur für den Status. Einstellungen → Claude → Hooks: „Neu eintragen“.",
+            "Their messages only count for the status. Settings → Claude → Hooks: “Reinstall”."
+        ),
+    )
 }
 
 fn setup_fonts(ctx: &egui::Context, choice: &str) {
@@ -1048,6 +1082,7 @@ impl App {
             hook_server: HookServer::start(&cc.egui_ctx),
             hooks_file: None,
             hooks_global: false,
+            hooks_foreign: None,
             hooks_msg: String::new(),
             exe: std::env::current_exe().unwrap_or_default(),
             palette: None,
@@ -1147,7 +1182,10 @@ impl App {
             hooks::write_ipc_file(&app.dir, h.port, &h.ipc_token);
         }
         app.hooks_file = hooks::write_session_settings(&app.dir, &app.exe);
-        app.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
+        app.refresh_hooks_global();
+        if let Some(other) = &app.hooks_foreign {
+            app.spawn_notes.borrow_mut().push(hooks_foreign_note(other));
+        }
         if app.settings.default_shell.is_empty() {
             app.settings.default_shell = app.shells.first().map(|s| s.id.clone()).unwrap_or_default();
         }
@@ -1548,6 +1586,13 @@ impl App {
         self.shells.iter().find(|s| !shells::is_wsl(s)).map(|s| s.id.clone())
     }
 
+    /// Stand der globalen Hooks neu lesen (nur lesend): eingetragen? Auf eine andere paneldeck.exe?
+    fn refresh_hooks_global(&mut self) {
+        let path = hooks::global_settings_path();
+        self.hooks_global = path.as_deref().is_some_and(hooks::global_installed);
+        self.hooks_foreign = if self.hooks_global { path.as_deref().and_then(|p| hooks::global_foreign_exe(p, &self.exe)) } else { None };
+    }
+
     /// Hat ein Terminal den Tastaturfokus?
     fn terminal_has_focus(&self, ctx: &egui::Context) -> bool {
         ctx.memory(|m| m.focused()).is_some_and(|f| self.entries.keys().any(|id| Id::new(("term", *id)) == f))
@@ -1602,7 +1647,7 @@ impl App {
 
     /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt; dritter: die tatsächlich gesetzten
     /// Optionen und die weggelassenen Pfade (#182).
-    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs) {
+    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs, hooks::ConvBinding) {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
@@ -1633,22 +1678,33 @@ impl App {
         let has_conv = resume_wanted && session_settings::conversation_exists(meta, is_wsl, crate::history::projects_dir().as_deref(), &home_dir());
         let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, has_conv);
         let fresh = start == session_settings::ClaudeStart::Fresh;
-        match start {
-            session_settings::ClaudeStart::Resume(id) => c += &format!(" --resume {id}"),
-            session_settings::ClaudeStart::Continue => c += " --continue",
+        let expect = match start {
+            session_settings::ClaudeStart::Resume(id) => {
+                c += &format!(" --resume {id}");
+                Some(id)
+            }
+            session_settings::ClaudeStart::Continue => {
+                c += " --continue";
+                None
+            }
             session_settings::ClaudeStart::Fresh => {
                 // Neue Konversation mit eigener ID, damit sie später exakt wiedergefunden wird.
                 meta.claude_session = hooks::new_uuid();
                 meta.claude_started = false;
                 c += &format!(" --session-id {}", meta.claude_session);
+                Some(meta.claude_session.clone())
             }
-        }
+        };
         // Der Start-Prompt wird nicht in die Kommandozeile geschrieben (Shell-Expansion von $, `, % …),
         // sondern als erster Eintrag der Warteschlange gesendet, sobald Claude bereit ist.
         if let Some(p) = l.prompt.filter(|p| !p.trim().is_empty()) {
             meta.queue.insert(0, p.trim().to_string());
         }
-        (c + "\r", fresh, launch)
+        // Zuordnung der Hook-Meldungen dieses Starts (#260): die übergebene Konversations-ID und ob `--safe-mode`
+        // (Option oder alte `claude_args`) die Hooks des Claude dieser Sitzung abschaltet.
+        let hooks_off = launch.applied.extra.flags.iter().any(|f| f == "safe-mode") || args.split_whitespace().any(|t| t == "--safe-mode");
+        let binding = hooks::ConvBinding::launch(expect, hooks_off);
+        (c + "\r", fresh, launch, binding)
     }
 
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
@@ -1659,7 +1715,8 @@ impl App {
         entry.launched_claude = entry.meta.claude && !entry.is_chat() && self.settings.claude_mode;
         entry.launched_opts = if entry.launched_claude { entry.meta.claude_opts_eff().0 } else { Default::default() };
         entry.hook_seen = false;
-        entry.hook_conv = None;
+        entry.hook_conv = hooks::ConvBinding::default();
+        entry.hook_keyed = false;
         let Some(mut shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
@@ -1721,16 +1778,27 @@ impl App {
         };
         // Erst nach dem Startordner: ein unbrauchbarer gespeicherter Ordner setzt die Konversation zurück (#245).
         let claude_cmd = if entry.launched_claude {
-            let (c, fresh, launch) = self.claude_command(&mut entry.meta, &l);
+            // Alte freie Argumente einmalig umstellen; was nicht mehr geht (z. B. `--resume`, `--print`), meldet ein
+            // Hinweis – einmal, danach steht es nicht mehr in der Sitzung.
+            let legacy_dropped = entry.meta.migrate_legacy_args();
+            let (c, fresh, launch, binding) = self.claude_command(&mut entry.meta, &l);
+            entry.hook_conv = binding;
             // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
             entry.launched_opts = launch.applied;
+            let mut notes = Vec::new();
+            if !legacy_dropped.is_empty() {
+                notes.push(legacy_dropped_note(&entry.display_name(), &legacy_dropped));
+            }
             if !launch.dropped.is_empty() {
-                entry.launch_note = Some(format!(
+                notes.push(format!(
                     "{} ({}): {}",
                     state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
                     entry.display_name(),
                     launch.dropped.join(", "),
                 ));
+            }
+            if !notes.is_empty() {
+                entry.launch_note = Some(notes.join("\n"));
             }
             if fresh {
                 // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
@@ -1868,10 +1936,10 @@ impl App {
         let label = self.shell_by_id(&shell_id).map(|s| s.label).unwrap_or_else(|| "Shell".into());
         // Alle Wege (Dialog, MCP, Kontextmenü, --claude, IPC, Vorlagen, Duplikat, Verlauf) laufen hier durch;
         // bypassPermissions nur bei ausdrücklicher Wahl im Dialog.
-        let (claude_opts, claude_args) = if o.claude {
-            crate::claude_opts::resolve_new(o.claude_opts.as_ref(), o.allow_bypass, &self.settings.claude_defaults, &o.claude_args)
+        let (claude_opts, claude_args, legacy_dropped) = if o.claude {
+            crate::claude_opts::resolve_new_report(o.claude_opts.as_ref(), o.allow_bypass, &self.settings.claude_defaults, &o.claude_args)
         } else {
-            (ClaudeOpts::default(), o.claude_args.clone())
+            (ClaudeOpts::default(), o.claude_args.clone(), Vec::new())
         };
         let (name, custom) = match o.name.filter(|n| !n.trim().is_empty()) {
             Some(n) => (n, true),
@@ -1921,6 +1989,14 @@ impl App {
                     &mut entry,
                     Launch { restore: false, restart: false, continue_last: o.continue_last, prompt: o.prompt.as_deref(), resume_id: o.resume_id.as_deref() },
                 );
+                // Aus alten Argumenten (Vorlage, Duplikat) weggelassene Flags melden (Review zu #245).
+                if !legacy_dropped.is_empty() {
+                    let n = legacy_dropped_note(&entry.display_name(), &legacy_dropped);
+                    entry.launch_note = Some(match entry.launch_note.take() {
+                        Some(old) => format!("{n}\n{old}"),
+                        None => n,
+                    });
+                }
                 entry
             }
         };
@@ -3190,15 +3266,21 @@ impl App {
             // Nur Meldungen des laufenden Starts (#260): Schlüssel `PANELDECK_SESSION_KEY` dieses Starts. Ein anderes
             // Terminal, ein übrig gebliebener Prozess eines früheren Starts oder eine Fälschung mit der bloßen Nummer
             // ändert weder Status noch Konversation.
-            if !hooks::key_matches(&e.session_key, m.key.as_deref()) {
-                continue;
-            }
+            // Ausnahme: Meldungen ganz ohne Schlüssel stammen von globalen Hooks einer älteren paneldeck.exe (Hinweis in den
+            // Einstellungen). Sie zählen nur für den Status, solange in diesem Start keine Meldung mit Schlüssel kam, und
+            // ordnen nie eine Konversation zu.
+            let keyless = match hooks::admit(&e.session_key, e.hook_keyed, &e.hook_conv, &m) {
+                hooks::Admit::Drop => continue,
+                hooks::Admit::Keyed => {
+                    e.hook_keyed = true;
+                    false
+                }
+                hooks::Admit::StatusOnly => true,
+            };
             // Eine andere Konversation als die dieses Starts (z. B. `claude -p` aus der Sitzung heraus) zählt nicht.
-            let conv = hooks::conv_match(e.hook_conv.as_deref(), &m);
-            match &conv {
-                hooks::ConvMatch::Foreign => continue,
-                hooks::ConvMatch::Bind(id) | hooks::ConvMatch::Switch(id) => e.hook_conv = Some(id.clone()),
-                hooks::ConvMatch::NoId | hooks::ConvMatch::Same => {}
+            let conv = if keyless { hooks::ConvMatch::NoId } else { e.hook_conv.feed(&m) };
+            if conv == hooks::ConvMatch::Foreign {
+                continue;
             }
             let old = e.status;
             e.hook_seen = true;
@@ -3208,7 +3290,7 @@ impl App {
                 cwd: m.cwd.as_ref().map(|p| pathfmt::from_wsl(&sh, p)),
                 ..m
             };
-            if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty()) {
+            if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty() && !keyless) {
                 if e.meta.transcript != *tp {
                     e.meta.transcript = tp.clone();
                     self.usage.set_path(m.session, PathBuf::from(tp));
@@ -3217,7 +3299,7 @@ impl App {
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
                 e.live_cwd = c.clone();
             }
-            if e.is_claude() {
+            if e.is_claude() && !keyless {
                 if let hooks::ConvMatch::Bind(cs) | hooks::ConvMatch::Switch(cs) = &conv {
                     if e.meta.claude_session != *cs {
                         e.meta.claude_session = cs.clone();

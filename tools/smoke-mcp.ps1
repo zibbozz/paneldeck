@@ -532,8 +532,15 @@ $wait
     $hookKey = ''
     foreach ($ln in ($ct -split "`r?`n")) { if ($ln -match '--session-id' -and $ln -match 'key=([0-9a-f]{16,})') { $hookKey = $Matches[1] } }
     Check 'Schluessel des Starts im Ersatz-claude (PANELDECK_SESSION_KEY)' ($hookKey.Length -ge 16) "calls.txt='$ct'"
-    function Hook($evt, $extra = @{}, $key = $hookKey, $sid = 'smoke1') {
-      $body = @{ token = $hookTok; session = [uint64]$cid; key = $key; payload = (@{ hook_event_name = $evt; session_id = $sid } + $extra) } | ConvertTo-Json -Compress -Depth 5
+    # Konversation des Starts: Claude meldet die per --session-id uebergebene ID; nur sie wird zugeordnet (#260).
+    $script:hookSid = ''
+    foreach ($ln in ($ct -split "`r?`n")) { if ($ln -match '--session-id ([0-9a-f-]{36})') { $script:hookSid = $Matches[1] } }
+    Check 'Konversations-ID des Starts im Ersatz-claude (--session-id)' ($script:hookSid.Length -eq 36) "calls.txt='$ct'"
+    # $key = $null: Meldung ganz ohne Schluessel (globale Hooks einer aelteren paneldeck.exe).
+    function Hook($evt, $extra = @{}, $key = $hookKey, $sid = $script:hookSid) {
+      $msg = @{ token = $hookTok; session = [uint64]$cid; payload = (@{ hook_event_name = $evt; session_id = $sid } + $extra) }
+      if ($null -ne $key) { $msg.key = $key }
+      $body = $msg | ConvertTo-Json -Compress -Depth 5
       $cl = New-Object Net.Sockets.TcpClient('127.0.0.1', [int]$port); $st = $cl.GetStream(); $by = [Text.Encoding]::UTF8.GetBytes($body)
       $st.Write($by, 0, $by.Length); $cl.Client.Shutdown('Send'); Start-Sleep -Milliseconds 300; $cl.Close()
     }
@@ -556,6 +563,15 @@ $wait
     Check 'Hook mit fremdem Schluessel wird verworfen (#260)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
     Hook 'UserPromptSubmit' @{} $hookKey 'nested-claude-p'; Start-Sleep 0.5
     Check 'Hook einer anderen Konversation (claude -p) wird verworfen (#260)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'alt' } $null; Start-Sleep 0.5
+    Check 'Hook ganz ohne Schluessel zaehlt nicht mehr, sobald Meldungen mit Schluessel kamen (#260)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    # Claude beendet und im selben Terminal neu gestartet: neue Konversation wird wieder zugeordnet (Review zu #260).
+    Hook 'SessionEnd'; Start-Sleep 0.3
+    $script:hookSid = [guid]::NewGuid().ToString()
+    Hook 'SessionStart' @{ source = 'startup' }; Hook 'UserPromptSubmit'; Start-Sleep 0.5
+    Check 'Neu gestarteter Claude im selben Terminal wird zugeordnet (UserPromptSubmit -> working)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 0.5
+    Check 'Stop des neuen Claude -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
     Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'darf ich?' }; Start-Sleep 0.5
     Check 'Freigabe-Frage: send_text verweigert' ((Code (Tool 'send_text' @{ session = $cid; text = 'ja' })) -eq 'permission_pending')
     [void](Tool 'close_session' @{ session = $cid })

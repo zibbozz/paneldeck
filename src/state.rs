@@ -531,8 +531,24 @@ impl SessionMeta {
     /// Modell/Permission-Mode noch in `claude_args`; sie zählen, solange das neue Feld leer ist.
     pub fn claude_opts_eff(&self) -> (crate::claude_opts::ClaudeOpts, String) {
         // Nie ein `--dangerously-*`-Flag aus alten Zeilen; ein für diese Sitzung gewähltes bypassPermissions bleibt.
-        let (legacy, rest) = crate::claude_opts::ClaudeOpts::split_legacy(&crate::claude_opts::clean_legacy(&self.claude_args));
+        // Wertoptionen aus der alten Zeile, die die Optionen kennen, gelten weiter (sie liefen in dieser Sitzung schon).
+        let c = crate::claude_opts::clean_legacy_report(&self.claude_args, true);
+        let (mut legacy, rest) = crate::claude_opts::ClaudeOpts::split_legacy(&c.line);
+        legacy.extra = legacy.extra.or(&c.migrated);
         (self.claude_opts.or(&legacy), rest)
+    }
+
+    /// Alte `claude_args` einmalig umstellen (Review zu #245): Wertoptionen, die die Claude-Optionen kennen, wandern
+    /// gültig geprüft in `claude_opts` (ein dort schon gesetzter Wert gilt weiter), Weggelassenes verschwindet aus der
+    /// Zeile. Rückgabe: die weggelassenen Flags (leer = nichts zu melden); danach liefert ein zweiter Aufruf nichts mehr.
+    pub fn migrate_legacy_args(&mut self) -> Vec<String> {
+        let c = crate::claude_opts::clean_legacy_report(&self.claude_args, true);
+        if c.dropped.is_empty() && c.migrated.is_empty() {
+            return Vec::new();
+        }
+        self.claude_args = c.line;
+        self.claude_opts.extra = self.claude_opts.extra.or(&c.migrated);
+        c.dropped
     }
 }
 

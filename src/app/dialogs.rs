@@ -1216,7 +1216,13 @@ mod layout_tests {
     /// Dialog mit allem, was ihn groß macht: bypassPermissions- und safe-mode-Warnung, alle weiteren Optionen offen,
     /// viele Ordner, Worktree mit Hinweis.
     fn big_dialog() -> NewDialog {
-        let here = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        // Eigenes, frisches Repository als Startordner: unabhängig davon, ob die Tests in einem Git-Checkout laufen.
+        let repo = std::env::temp_dir().join(format!("pd-dlg-repo-{}", std::process::id()));
+        if !repo.join(".git").exists() {
+            std::fs::create_dir_all(&repo).unwrap();
+            crate::gitops::git(&repo, &["init", "-q"]).expect("git init");
+        }
+        let here = repo.to_string_lossy().to_string();
         let mut copts = ClaudeOpts { permission_mode: crate::claude_opts::BYPASS.into(), ..ClaudeOpts::default() };
         copts.extra.flags = vec!["chrome".into(), "ide".into(), "verbose".into(), "safe-mode".into()];
         copts.extra.add_dirs = (0..6).map(|i| format!("C:\\gibt-es-nicht\\ordner-{i}")).collect();

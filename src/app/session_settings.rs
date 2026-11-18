@@ -68,7 +68,9 @@ pub(super) fn conversation_exists(meta: &SessionMeta, wsl: bool, projects: Optio
     }
     let cwd = if meta.cwd.trim().is_empty() { home } else { meta.cwd.trim() };
     match projects.and_then(|p| crate::history::transcript_file(p, cwd, id)) {
-        Some(f) => f.is_file(),
+        // Nicht gefunden, aber von den Hooks dieser Sitzung gemeldet (Prompt gesendet oder fortgesetzt): trotzdem
+        // fortsetzen – der erwartete Ordnername kann abweichen (eigener CLAUDE_CONFIG_DIR, andere Schreibweise des Pfads).
+        Some(f) => f.is_file() || meta.claude_started,
         // Ordnername nicht vorherzusagen: wie bisher nach den Hooks.
         None => meta.claude_started,
     }
@@ -986,9 +988,21 @@ mod tests {
         // Leerer Ordner = Benutzerordner
         let home = SessionMeta { cwd: String::new(), ..m.clone() };
         assert!(conversation_exists(&home, false, Some(&projects), cwd));
+        // Gespeicherter Ordner mit abschließendem Trenner: derselbe Ordnername wie bei Claude Code
+        let trailing = SessionMeta { cwd: "C:\\work\\app\\".into(), ..m.clone() };
+        assert!(conversation_exists(&trailing, false, Some(&projects), "C:\\u"));
+        // Transkript nicht am erwarteten Ort, aber die Hooks dieser Sitzung haben die Konversation gemeldet: fortsetzen
+        let elsewhere = SessionMeta { cwd: "C:\\other".into(), claude_started: true, ..m.clone() };
+        assert!(conversation_exists(&elsewhere, false, Some(&projects), "C:\\u"));
+        assert_eq!(claude_start(None, true, false, &elsewhere, true), ClaudeStart::Resume(uuid()));
         let _ = std::fs::remove_dir_all(&root);
         // Ordnernamen wie Claude Code (Nicht-ASCII je UTF-16-Einheit)
         assert_eq!(crate::history::project_slug("E:\\claude-hub").as_deref(), Some("E--claude-hub"));
+        assert_eq!(crate::history::project_slug("E:\\claude-hub\\").as_deref(), Some("E--claude-hub"));
+        assert_eq!(crate::history::project_slug("/home/u/app/").as_deref(), Some("-home-u-app"));
+        // Wurzel bleibt Wurzel
+        assert_eq!(crate::history::project_slug("C:\\").as_deref(), Some("C--"));
+        assert_eq!(crate::history::project_slug("/").as_deref(), Some("-"));
         assert_eq!(crate::history::project_slug("C:\\Ü").as_deref(), Some("C---"));
         assert_eq!(crate::history::project_slug(&"a".repeat(201)), None);
     }

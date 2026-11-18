@@ -68,6 +68,29 @@ pub fn key_matches(current: &str, sent: Option<&str>) -> bool {
     !current.is_empty() && current.len() == sent.len() && current.bytes().zip(sent.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
 }
 
+/// Annahme einer Hook-Meldung für eine Sitzung (#260).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    /// Verwerfen.
+    Drop,
+    /// Mit dem Schlüssel des laufenden Starts: voll verarbeiten.
+    Keyed,
+    /// Ganz ohne Schlüssel (globale Hooks einer älteren paneldeck.exe): nur für den Status, nie für Konversation,
+    /// Transkript oder „Prompt gesendet“.
+    StatusOnly,
+}
+
+/// `current` = Schlüssel des laufenden Starts, `keyed_seen` = in diesem Start kam schon eine Meldung mit Schlüssel
+/// (dann stammen solche ohne nicht vom Claude dieser Sitzung), `conv` = Zuordnung der Konversation.
+pub fn admit(current: &str, keyed_seen: bool, conv: &ConvBinding, m: &HookMsg) -> Admit {
+    match m.key.as_deref() {
+        Some(k) if key_matches(current, Some(k)) => Admit::Keyed,
+        Some(_) => Admit::Drop,
+        None if current.is_empty() || keyed_seen || conv.is_foreign(m) => Admit::Drop,
+        None => Admit::StatusOnly,
+    }
+}
+
 /// Zuordnung einer Meldung zur Konversation des laufenden Starts (#260, #245).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConvMatch {
@@ -83,15 +106,72 @@ pub enum ConvMatch {
     Foreign,
 }
 
-/// `bound` = schon zugeordnete Konversation dieses Starts. Eine neue Konversation zählt nur als erste des Starts oder
-/// über SessionStart mit `source` `clear`/`resume`/`compact`; alles andere mit fremder ID wird verworfen.
-pub fn conv_match(bound: Option<&str>, m: &HookMsg) -> ConvMatch {
-    let Some(id) = m.claude_session.as_deref().filter(|c| !c.is_empty()) else { return ConvMatch::NoId };
-    match bound {
-        None => ConvMatch::Bind(id.to_string()),
-        Some(b) if b == id => ConvMatch::Same,
-        Some(_) if m.event == "SessionStart" && matches!(m.source.as_deref(), Some("clear" | "resume" | "compact")) => ConvMatch::Switch(id.to_string()),
-        Some(_) => ConvMatch::Foreign,
+/// Konversation, die zum laufenden Start einer Sitzung gehört (#260, #245). Je Start neu ([`ConvBinding::launch`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConvBinding {
+    /// Zugeordnete Konversation des laufenden Claude.
+    pub bound: Option<String>,
+    /// Beim Start übergebene Konversations-ID (`--session-id`/`--resume`): solange noch nichts zugeordnet ist, zählt
+    /// nur sie. Fällt weg, sobald der beim Start aufgerufene Claude endet.
+    pub expect: Option<String>,
+    /// Der Start hat die Hooks abgeschaltet (`--safe-mode`): alle Meldungen stammen dann von anderen Prozessen (z. B.
+    /// einem `claude -p` mit den globalen Hooks) und zählen nie.
+    pub hooks_off: bool,
+}
+
+impl ConvBinding {
+    pub fn launch(expect: Option<String>, hooks_off: bool) -> Self {
+        ConvBinding { bound: None, expect: expect.filter(|e| !e.is_empty()), hooks_off }
+    }
+
+    /// Meldung `m` zuordnen und den Zustand fortschreiben. Eine neue Konversation zählt nur
+    /// - als erste des Starts: mit der beim Start übergebenen ID, ohne solche (`--continue`) nur über SessionStart;
+    /// - nach dem Ende der zugeordneten Konversation (SessionEnd, z. B. Claude beendet und im selben Terminal neu
+    ///   gestartet): wieder über SessionStart;
+    /// - als Wechsel über SessionStart mit `source` `clear`/`resume`/`compact`.
+    ///
+    /// Alles andere mit fremder ID (z. B. ein von Claude gestartetes `claude -p` mit geerbter Umgebung) wird verworfen.
+    pub fn feed(&mut self, m: &HookMsg) -> ConvMatch {
+        if self.hooks_off {
+            return ConvMatch::Foreign;
+        }
+        let Some(id) = m.claude_session.as_deref().filter(|c| !c.is_empty()) else { return ConvMatch::NoId };
+        let start = m.event == "SessionStart";
+        let r = match self.bound.as_deref() {
+            Some(b) if b == id => ConvMatch::Same,
+            Some(_) if start && matches!(m.source.as_deref(), Some("clear" | "resume" | "compact")) => ConvMatch::Switch(id.to_string()),
+            Some(_) => ConvMatch::Foreign,
+            None => match self.expect.as_deref() {
+                Some(x) if x == id => ConvMatch::Bind(id.to_string()),
+                Some(_) => ConvMatch::Foreign,
+                None if start => ConvMatch::Bind(id.to_string()),
+                None => ConvMatch::Foreign,
+            },
+        };
+        match &r {
+            ConvMatch::Bind(id) | ConvMatch::Switch(id) => {
+                self.bound = Some(id.clone());
+                self.expect = None;
+            }
+            // Der Claude dieser Konversation ist beendet: ein im selben Terminal neu gestarteter Claude darf sich mit
+            // seinem SessionStart wieder zuordnen.
+            ConvMatch::Same if m.event == "SessionEnd" => {
+                self.bound = None;
+                self.expect = None;
+            }
+            _ => {}
+        }
+        r
+    }
+
+    /// Ohne Zustandsänderung: gehört die Meldung sicher zu einer anderen Konversation (für Meldungen ohne Schlüssel,
+    /// die nie etwas zuordnen dürfen)?
+    pub fn is_foreign(&self, m: &HookMsg) -> bool {
+        if self.hooks_off {
+            return true;
+        }
+        let Some(id) = m.claude_session.as_deref().filter(|c| !c.is_empty()) else { return false };
+        self.bound.as_deref().or(self.expect.as_deref()).is_some_and(|b| b != id)
     }
 }
 
@@ -515,6 +595,34 @@ pub fn global_installed(path: &Path) -> bool {
     v["hooks"]["Stop"].as_array().is_some_and(|a| a.iter().any(is_hub_entry))
 }
 
+/// Nur lesend: zeigen die global eingetragenen Paneldeck-Hooks auf eine andere `paneldeck.exe` als `exe` (z. B. eine
+/// ältere Kopie)? Dann deren Pfad. Solche Hooks senden keinen Schlüssel des Starts (#260) und zählen nur noch für den
+/// Status; neu eintragen behebt das.
+pub fn global_foreign_exe(path: &Path, exe: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
+    let v = serde_json::from_str::<Value>(crate::state::strip_bom(&s)).ok()?;
+    let norm = |c: &str| c.trim().replace('\\', "/").to_lowercase();
+    let ours = norm(&hook_command(exe));
+    let groups = v["hooks"]["Stop"].as_array()?;
+    let cmds = groups.iter().filter(|g| is_hub_entry(g)).flat_map(|g| g["hooks"].as_array().into_iter().flatten()).filter_map(|h| h["command"].as_str());
+    let mut foreign = None;
+    for c in cmds {
+        if !c.contains("--hook") || !c.to_lowercase().contains("paneldeck") {
+            continue;
+        }
+        if norm(c) == ours {
+            return None;
+        }
+        let t = c.trim();
+        let exe_part = match t.strip_prefix('"') {
+            Some(r) => r.split('"').next().unwrap_or(r),
+            None => t.trim_end_matches("--hook").trim(),
+        };
+        foreign.get_or_insert_with(|| exe_part.to_string());
+    }
+    foreign
+}
+
 fn load_settings(path: &Path) -> Result<Value, String> {
     match std::fs::read_to_string(path) {
         Ok(s) if crate::state::strip_bom(&s).trim().is_empty() => Ok(json!({})),
@@ -614,20 +722,95 @@ mod tests {
         assert!(!key_matches("abcd", None), "alte/fremde Meldung ohne Schlüssel");
         assert!(!key_matches("", Some("")), "kein laufender Start");
         let msg = |ev: &str, id: Option<&str>, src: Option<&str>| HookMsg { event: ev.into(), claude_session: id.map(str::to_string), source: src.map(str::to_string), ..HookMsg::default() };
-        assert_eq!(conv_match(None, &msg("Stop", None, None)), ConvMatch::NoId);
-        assert_eq!(conv_match(None, &msg("SessionStart", Some("A"), Some("startup"))), ConvMatch::Bind("A".into()));
-        assert_eq!(conv_match(Some("A"), &msg("Stop", Some("A"), None)), ConvMatch::Same);
+        let bind = |b: &str| ConvBinding { bound: Some(b.into()), ..ConvBinding::default() };
+        assert_eq!(ConvBinding::default().feed(&msg("Stop", None, None)), ConvMatch::NoId);
+        assert_eq!(ConvBinding::default().feed(&msg("SessionStart", Some("A"), Some("startup"))), ConvMatch::Bind("A".into()));
+        assert_eq!(bind("A").feed(&msg("Stop", Some("A"), None)), ConvMatch::Same);
         // Verschachteltes `claude -p` mit geerbter Umgebung: eigene Konversation, wird ignoriert
-        assert_eq!(conv_match(Some("A"), &msg("SessionStart", Some("B"), Some("startup"))), ConvMatch::Foreign);
-        assert_eq!(conv_match(Some("A"), &msg("UserPromptSubmit", Some("B"), None)), ConvMatch::Foreign);
-        assert_eq!(conv_match(Some("A"), &msg("SessionEnd", Some("B"), None)), ConvMatch::Foreign);
+        assert_eq!(bind("A").feed(&msg("SessionStart", Some("B"), Some("startup"))), ConvMatch::Foreign);
+        assert_eq!(bind("A").feed(&msg("UserPromptSubmit", Some("B"), None)), ConvMatch::Foreign);
+        assert_eq!(bind("A").feed(&msg("SessionEnd", Some("B"), None)), ConvMatch::Foreign);
         // /clear und /resume wechseln die Konversation
-        assert_eq!(conv_match(Some("A"), &msg("SessionStart", Some("C"), Some("clear"))), ConvMatch::Switch("C".into()));
-        assert_eq!(conv_match(Some("A"), &msg("SessionStart", Some("D"), Some("resume"))), ConvMatch::Switch("D".into()));
+        assert_eq!(bind("A").feed(&msg("SessionStart", Some("C"), Some("clear"))), ConvMatch::Switch("C".into()));
+        assert_eq!(bind("A").feed(&msg("SessionStart", Some("D"), Some("resume"))), ConvMatch::Switch("D".into()));
         // `source` und der Schlüssel werden vom Hook-Aufruf weitergereicht
         let raw = json!({"token": "t", "session": 3, "key": "k", "payload": {"hook_event_name": "SessionStart", "source": "clear", "session_id": "C"}}).to_string();
         let m = parse_message(&raw, "t").unwrap();
         assert_eq!((m.key.as_deref(), m.source.as_deref()), (Some("k"), Some("clear")));
+    }
+
+    /// Review zu #260: Claude endet und wird im selben Terminal neu gestartet – der neue Claude ordnet sich wieder zu.
+    #[test]
+    fn a_restarted_claude_in_the_same_shell_binds_again() {
+        let msg = |ev: &str, id: &str, src: Option<&str>| HookMsg { event: ev.into(), claude_session: Some(id.into()), source: src.map(str::to_string), ..HookMsg::default() };
+        let mut c = ConvBinding::launch(Some("A".into()), false);
+        assert_eq!(c.feed(&msg("SessionStart", "A", Some("startup"))), ConvMatch::Bind("A".into()));
+        assert_eq!(c.feed(&msg("Stop", "A", None)), ConvMatch::Same);
+        // Ein `claude -p` aus der Sitzung heraus bleibt fremd, auch sein Ende löst nichts
+        assert_eq!(c.feed(&msg("SessionStart", "N", Some("startup"))), ConvMatch::Foreign);
+        assert_eq!(c.feed(&msg("SessionEnd", "N", None)), ConvMatch::Foreign);
+        assert_eq!(c.bound.as_deref(), Some("A"));
+        // Ende der eigenen Konversation: Zuordnung frei
+        assert_eq!(c.feed(&msg("SessionEnd", "A", None)), ConvMatch::Same);
+        assert_eq!(c, ConvBinding::default());
+        // Vor einem neuen SessionStart zählen fremde Meldungen nicht
+        assert_eq!(c.feed(&msg("UserPromptSubmit", "X", None)), ConvMatch::Foreign);
+        // `claude` erneut im selben Terminal: neue ID, wird zugeordnet und bleibt es
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"))), ConvMatch::Bind("B".into()));
+        assert_eq!(c.feed(&msg("UserPromptSubmit", "B", None)), ConvMatch::Same);
+        assert_eq!(c.feed(&msg("SessionStart", "C", Some("startup"))), ConvMatch::Foreign);
+        // /clear: SessionEnd der alten, SessionStart der neuen Konversation
+        assert_eq!(c.feed(&msg("SessionEnd", "B", None)), ConvMatch::Same);
+        assert_eq!(c.feed(&msg("SessionStart", "D", Some("clear"))), ConvMatch::Bind("D".into()));
+    }
+
+    /// Review zu #260: Meldungen ohne Schlüssel (globale Hooks einer älteren paneldeck.exe) zählen nur für den Status.
+    #[test]
+    fn keyless_messages_only_count_for_the_status() {
+        let msg = |key: Option<&str>, id: Option<&str>| HookMsg { event: "Stop".into(), key: key.map(str::to_string), claude_session: id.map(str::to_string), ..HookMsg::default() };
+        let c = ConvBinding::launch(Some("A".into()), false);
+        assert_eq!(admit("k", false, &c, &msg(Some("k"), Some("A"))), Admit::Keyed);
+        assert_eq!(admit("k", false, &c, &msg(Some("x"), Some("A"))), Admit::Drop, "falscher Schlüssel");
+        assert_eq!(admit("k", false, &c, &msg(None, Some("A"))), Admit::StatusOnly);
+        assert_eq!(admit("k", false, &c, &msg(None, None)), Admit::StatusOnly);
+        // Fremde Konversation, schon eine Meldung mit Schlüssel, kein laufender Start, Hooks abgeschaltet: verwerfen
+        assert_eq!(admit("k", false, &c, &msg(None, Some("B"))), Admit::Drop);
+        assert_eq!(admit("k", true, &c, &msg(None, Some("A"))), Admit::Drop);
+        assert_eq!(admit("", false, &c, &msg(None, Some("A"))), Admit::Drop);
+        assert_eq!(admit("k", false, &ConvBinding::launch(None, true), &msg(None, Some("A"))), Admit::Drop);
+        // Ohne bekannte Konversation (`--continue`): Status ja – zugeordnet wird dabei nichts
+        let mut open = ConvBinding::launch(None, false);
+        assert_eq!(admit("k", false, &open, &msg(None, Some("Z"))), Admit::StatusOnly);
+        assert_eq!(open.bound, None);
+        // Eine Meldung mit Schlüssel ordnet weiter normal zu
+        assert_eq!(open.feed(&HookMsg { event: "SessionStart".into(), claude_session: Some("Z".into()), ..HookMsg::default() }), ConvMatch::Bind("Z".into()));
+    }
+
+    /// Review zu #260: nur die beim Start übergebene ID wird zugeordnet; mit `--safe-mode` nie eine aus den Hooks.
+    #[test]
+    fn only_the_launch_id_binds_and_safe_mode_takes_nothing() {
+        let msg = |ev: &str, id: &str, src: Option<&str>| HookMsg { event: ev.into(), claude_session: Some(id.into()), source: src.map(str::to_string), ..HookMsg::default() };
+        // `--session-id A`: ein `claude -p` (B), dessen Meldung zuerst ankommt, wird nicht zur Konversation der Sitzung
+        let mut c = ConvBinding::launch(Some("A".into()), false);
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"))), ConvMatch::Foreign);
+        assert_eq!(c.feed(&msg("UserPromptSubmit", "B", None)), ConvMatch::Foreign);
+        assert_eq!(c.feed(&msg("UserPromptSubmit", "A", None)), ConvMatch::Bind("A".into()), "auch ohne SessionStart");
+        // `--continue` (keine ID bekannt): nur SessionStart ordnet zu
+        let mut c = ConvBinding::launch(None, false);
+        assert_eq!(c.feed(&msg("UserPromptSubmit", "B", None)), ConvMatch::Foreign);
+        assert_eq!(c.feed(&msg("SessionStart", "C", Some("resume"))), ConvMatch::Bind("C".into()));
+        // `--safe-mode`: der Claude der Sitzung meldet nichts; was kommt, stammt von anderen Prozessen
+        let mut c = ConvBinding::launch(Some("A".into()), true);
+        for m in [msg("SessionStart", "B", Some("startup")), msg("SessionStart", "A", Some("startup")), msg("Stop", "B", None)] {
+            assert_eq!(c.feed(&m), ConvMatch::Foreign);
+            assert!(c.is_foreign(&m));
+        }
+        assert_eq!(c.bound, None);
+        // Ohne Zustandsänderung (Meldungen ohne Schlüssel): fremd nur bei bekannter, abweichender Konversation
+        let c = ConvBinding::launch(Some("A".into()), false);
+        assert!(c.is_foreign(&msg("Stop", "B", None)) && !c.is_foreign(&msg("Stop", "A", None)));
+        assert!(!ConvBinding::default().is_foreign(&msg("Stop", "B", None)));
+        assert!(!c.is_foreign(&HookMsg { event: "Stop".into(), ..HookMsg::default() }));
     }
 
     #[test]
@@ -652,6 +835,30 @@ mod tests {
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert!(v["hooks"].get("PreToolUse").is_none());
+    }
+
+    /// Review zu #260: globale Hooks einer anderen paneldeck.exe (ohne Schlüssel) werden erkannt – nur lesend.
+    #[test]
+    fn global_hooks_of_another_exe_are_detected() {
+        let dir = std::env::temp_dir().join(format!("hubtest-{}", random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("settings.json");
+        let exe = Path::new("C:\\Tools\\Paneldeck\\paneldeck.exe");
+        assert_eq!(global_foreign_exe(&f, exe), None, "keine Datei");
+        install_global(&f, exe).unwrap();
+        assert_eq!(global_foreign_exe(&f, exe), None);
+        // Groß-/Kleinschreibung und Trenner zählen unter Windows nicht
+        assert_eq!(global_foreign_exe(&f, Path::new("c:/tools/paneldeck/PANELDECK.EXE")), None);
+        let before = std::fs::read(&f).unwrap();
+        assert_eq!(global_foreign_exe(&f, Path::new("D:\\Neu\\paneldeck.exe")).as_deref(), Some("C:/Tools/Paneldeck/paneldeck.exe"));
+        assert_eq!(std::fs::read(&f).unwrap(), before, "nur lesen");
+        // Neu eintragen behebt es
+        install_global(&f, Path::new("D:\\Neu\\paneldeck.exe")).unwrap();
+        assert_eq!(global_foreign_exe(&f, Path::new("D:\\Neu\\paneldeck.exe")), None);
+        // Fremde Hooks ohne Paneldeck zählen nicht
+        std::fs::write(&f, r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo fremd"}]}]}}"#).unwrap();
+        assert_eq!(global_foreign_exe(&f, exe), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
