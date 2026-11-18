@@ -877,6 +877,7 @@ mod tests {
         match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
             IpcCmd::Open { path, claude, origin } => {
                 assert_eq!((path.as_str(), claude), ("C:\\x", true));
+                #[cfg(windows)] // Absender über die TCP-Tabelle (`platform::process::resolve_peer`; anderswo noch unbekannt)
                 assert_eq!(origin.as_ref().and_then(|o| o.chain.first()), Some(&std::process::id()));
                 let origin = origin.unwrap();
                 assert!(!origin.orphan);
@@ -959,6 +960,7 @@ mod tests {
         let job = srv.mcp_rx.recv_timeout(Duration::from_secs(3)).expect("Anfrage kommt in der UI-Schleife an");
         // Absender: der Hub ermittelt den Prozess am anderen Ende selbst (dieser Testprozess).
         assert_eq!((job.tool.as_str(), job.caller, job.caller_key.as_deref()), ("list_sessions", Some(7), Some("k")));
+        #[cfg(windows)] // Absender über die TCP-Tabelle (`platform::process::resolve_peer`; anderswo noch unbekannt)
         assert_eq!(job.peer.chain.first(), Some(&std::process::id()));
         assert!(!job.peer.orphan);
         assert_eq!(job.args["include_exited"], false);

@@ -140,9 +140,12 @@ mod tests {
         let r = dir_exists_quick(r"\\.\pipe\paneldeck-gibt-es-nicht", ms(200));
         assert!(t0.elapsed() < ms(2000), "{:?}", t0.elapsed());
         assert_ne!(r, Some(true));
-        // Lokales Laufwerk ist kein Netzlaufwerk
-        let drive = &here[..3];
-        assert!(!is_remote(drive) && !is_remote(&here) && !is_remote(&format!(r"\\?\{here}")));
+        // Lokales Laufwerk ist kein Netzlaufwerk (nur mit Laufwerksbuchstaben)
+        #[cfg(windows)]
+        {
+            let drive = &here[..3];
+            assert!(!is_remote(drive) && !is_remote(&here) && !is_remote(&format!(r"\\?\{here}")));
+        }
         assert!(is_remote(r"\\server\share"));
     }
 }
