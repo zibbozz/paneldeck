@@ -82,6 +82,9 @@ struct Entry {
     attention: bool,
     /// Aktueller Ordner laut Claude-Hooks (sonst Startordner).
     live_cwd: String,
+    /// Erster gemeldeter Ordner (wo die Shell gestartet ist): Wurzel des Dateibaums, wenn der eingestellte
+    /// Arbeitsordner nicht als Windows-Pfad bekannt ist (WSL ohne Ordner bzw. mit `~`, #277).
+    start_cwd: String,
     /// Es kamen Hook-Ereignisse (sonst Status ggf. aus dem Transkript abgeleitet).
     hook_seen: bool,
     /// Die Warteschlange hat zuletzt automatisch gesendet.
@@ -119,7 +122,7 @@ impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -2931,6 +2934,9 @@ impl App {
             };
             if let Some(c) = cwd {
                 e.live_cwd = pathfmt::from_wsl(e.eff_shell(), &c);
+                if e.start_cwd.is_empty() {
+                    e.start_cwd = e.live_cwd.clone();
+                }
             }
             for d in done {
                 if threshold > 0 && d.dur_ms.unwrap_or(0) >= threshold && (!window_focused || *id != focused_id) {
@@ -3368,6 +3374,9 @@ impl App {
             }
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
                 e.live_cwd = c.clone();
+                if e.start_cwd.is_empty() {
+                    e.start_cwd = pathfmt::from_wsl(e.eff_shell(), c);
+                }
             }
             if e.is_claude() && !keyless {
                 if let hooks::ConvMatch::Bind(cs) | hooks::ConvMatch::Switch(cs) = &conv {
@@ -4855,7 +4864,8 @@ fn list_dir(p: &Path, hidden: bool) -> Vec<TreeItem> {
     v
 }
 
-fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<PathBuf, Vec<TreeItem>>, actions: &mut Vec<Action>, lang: Lang) {
+/// Ein Ordner des Dateibaums mit Inhalt; `mark` = aktueller Ordner der Shell (aufklappen und markieren, #277).
+fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<PathBuf, Vec<TreeItem>>, actions: &mut Vec<Action>, lang: Lang, mark: &panels::TreeMark) {
     let items = cache.entry(dir.to_path_buf()).or_insert_with(|| list_dir(dir, hidden)).clone();
     if items.is_empty() {
         ui.weak(lang.t("(leer)", "(empty)"));
@@ -4878,9 +4888,21 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
             }
         };
         if it.is_dir {
-            let r = egui::CollapsingHeader::new(RichText::new(&it.name).strong()).id_salt(("tree", &it.path)).show(ui, |ui| {
-                tree_children(ui, &it.path, hidden, cache, actions, lang);
+            let (on_way, current) = mark.role(&it.path);
+            let mut name = RichText::new(&it.name).strong();
+            if current {
+                name = name.color(style::accent());
+            }
+            // Auf dem Weg zum aktuellen Ordner der Shell: einmal aufklappen, wenn er sich ändert (danach frei zuklappbar).
+            let r = egui::CollapsingHeader::new(name).id_salt(("tree", &it.path)).open((on_way && mark.reveal).then_some(true)).show(ui, |ui| {
+                tree_children(ui, &it.path, hidden, cache, actions, lang, mark);
             });
+            if current {
+                if mark.reveal {
+                    r.header_response.scroll_to_me(Some(egui::Align::Center));
+                }
+                r.header_response.clone().on_hover_text(lang.t("Aktueller Ordner der Shell", "Current folder of the shell"));
+            }
             r.header_response.clone().context_menu(|ui| menu(ui, actions));
             if r.header_response.double_clicked() {
                 actions.push(Action::InsertPath(path_s.clone()));
