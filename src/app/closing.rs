@@ -42,8 +42,8 @@ pub(super) enum CloseTarget {
     FolderLift(u64, String),
     /// Projekt löschen; seine Sitzungen wandern in ein anderes Projekt (#276, früher „zweimal klicken“).
     DeleteProject(u64),
-    /// Sitzungs-Vorlage löschen (Index, Name zur Kontrolle, #276).
-    DeleteTemplate(usize, String),
+    /// Sitzungs-Vorlage löschen, über ihren Namen (Indizes können sich verschieben, #244/#276).
+    DeleteTemplate(String),
 }
 
 /// Offene Rückfrage (je Fenster, siehe `WinView::confirm_close`).
@@ -801,8 +801,9 @@ impl App {
                 }
                 o
             }
-            CloseTarget::DeleteTemplate(i, name) => {
-                let Some(t) = self.templates.get(*i).filter(|t| t.name == *name) else { return };
+            CloseTarget::DeleteTemplate(name) => {
+                // Über den Namen finden: die Liste kann sich inzwischen verschoben haben (Löschen, Duplizieren, #244).
+                let Some((_, t)) = crate::templates::find(&self.templates, name) else { return };
                 let items = t.items.iter().map(|it| it.name.as_str()).collect::<Vec<_>>().join(", ");
                 let o = confirm_window_keep(ctx, Id::new("template_delete_ask"), lang.t("Vorlage löschen?", "Delete template?"), lang.t("Löschen", "Delete"), None, secs, lang, 420.0, |ui| {
                     ui.label(RichText::new(name.as_str()).strong());
@@ -813,7 +814,7 @@ impl App {
                     ui.label(RichText::new(lang.t("Laufende Sitzungen bleiben. Das lässt sich nicht rückgängig machen.", "Running sessions stay. This cannot be undone.")).small().color(style::dim(ui)));
                 });
                 if o == Outcome::Go {
-                    actions.push(Action::TemplateDelete(*i));
+                    actions.push(Action::TemplateDelete(name.clone()));
                 }
                 o
             }
@@ -1013,7 +1014,7 @@ mod tests {
     fn deleting_waits_like_close_all() {
         // #276: Löschen von Ordner, Projekt und Vorlage fragt mit 3-Sekunden-Wartezeit statt „zweimal klicken“.
         let t0 = Instant::now();
-        for target in [CloseTarget::FolderLift(1, "a".into()), CloseTarget::DeleteProject(2), CloseTarget::DeleteTemplate(0, "T".into()), CloseTarget::Many(CloseScope::DeleteFolder(1, "a".into()), vec![1])] {
+        for target in [CloseTarget::FolderLift(1, "a".into()), CloseTarget::DeleteProject(2), CloseTarget::DeleteTemplate("T".into()), CloseTarget::Many(CloseScope::DeleteFolder(1, "a".into()), vec![1])] {
             assert_eq!(wait_secs(&target, false, t0, t0), 3);
             assert_eq!(wait_secs(&target, false, t0, t0 + Duration::from_secs(4)), 0);
         }

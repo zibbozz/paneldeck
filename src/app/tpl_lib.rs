@@ -811,8 +811,9 @@ impl App {
                 actions.push(Action::TemplateDuplicate(i));
                 ui.close();
             }
-            if armed_button(ui, ("tpl_del_side", i), lang.t("Löschen", "Delete"), lang.t("Wirklich löschen? Nochmal klicken", "Really delete? Click again")) {
-                actions.push(Action::TemplateDelete(i));
+            // Rückfrage mit Wartezeit statt „zweimal klicken“ (#276, `closing`).
+            if ui.button(lang.t("Löschen …", "Delete …")).clicked() {
+                actions.push(Action::TemplateDeleteAsk(i));
                 ui.close();
             }
             if !terminal {

@@ -313,7 +313,8 @@ enum Action {
     TemplateStart(usize),
     /// Vorlage starten, mit Ziel (Ordner, Bereich; #244).
     TemplateStartAt(usize, tpl_lib::TplAt),
-    TemplateDelete(usize),
+    /// Vorlage löschen – nach der Rückfrage, über ihren Namen (Indizes können sich verschieben, #276).
+    TemplateDelete(String),
     /// Rückfrage vor dem Löschen einer Vorlage (#276).
     TemplateDeleteAsk(usize),
     TemplateSave(String, Option<String>),
@@ -3786,11 +3787,11 @@ impl App {
             Action::OpenCosts => self.cost_open = true,
             Action::TemplateDeleteAsk(i) => {
                 if let Some(t) = self.templates.get(i) {
-                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::DeleteTemplate(i, t.name.clone())));
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::DeleteTemplate(t.name.clone())));
                 }
             }
-            Action::TemplateDelete(i) => {
-                if i < self.templates.len() {
+            Action::TemplateDelete(name) => {
+                if let Some((i, _)) = templates::find(&self.templates, &name) {
                     self.templates.remove(i);
                     templates::save(&self.dir, &self.templates);
                 }
