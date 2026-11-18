@@ -712,14 +712,31 @@ impl Project {
         true
     }
 
-    /// Löscht den Ordner mit Unterordnern aus der Liste.
-    #[cfg(test)]
+    /// Löscht den Ordner mit Unterordnern (und ihren Vorgaben) aus der Liste (Papierkorb am Ordner, #276).
     pub fn remove_folder(&mut self, path: &str) {
+        if path.is_empty() {
+            return;
+        }
         self.folders.retain(|f| !folder_within(&f.path, path));
     }
 
-    /// Löscht nur den Ordner selbst; Unterordner rücken eine Ebene hoch.
+    /// Löscht nur den Ordner selbst; Unterordner rücken eine Ebene hoch. Seine Vorgaben für neue Sitzungen
+    /// (Arbeitsordner, Profil) gehen an die direkten Unterordner, die keine eigenen haben – so starten neue Sitzungen
+    /// darin wie vorher (#276).
     pub fn delete_folder_lift(&mut self, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+        if let Some(gone) = self.folder(path).cloned() {
+            for f in self.folders.iter_mut().filter(|f| folder_parent(&f.path) == path) {
+                if f.cwd.is_empty() {
+                    f.cwd = gone.cwd.clone();
+                }
+                if f.profile == 0 {
+                    f.profile = gone.profile;
+                }
+            }
+        }
         self.folders.retain(|f| f.path != path);
         for f in &mut self.folders {
             f.path = lift_path(&f.path, path);
@@ -1010,6 +1027,44 @@ mod folder_tests {
         p.delete_folder_lift("a/b");
         let v: Vec<_> = p.folders.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(v, ["a", "a/c"]);
+    }
+    #[test]
+    fn deleting_a_folder_keeps_the_defaults_consistent() {
+        // Löschen mit Inhalt (#276): Unterordner und ihre Vorgaben verschwinden, nichts bleibt verwaist.
+        let mut p = Project::default();
+        for f in ["a/b/c", "a/bx", "z"] {
+            p.ensure_folder(f);
+        }
+        p.folders.iter_mut().find(|f| f.path == "a/b").unwrap().cwd = "C:/b".into();
+        p.remove_folder("a/b");
+        let v: Vec<_> = p.folders.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(v, ["a", "a/bx", "z"], "nur gleicher Anfang (a/bx) bleibt");
+        p.remove_folder("");
+        assert_eq!(p.folders.len(), 3, "leerer Pfad löscht nichts");
+        // Löschen, Inhalt bleibt: die Vorgaben gehen an direkte Unterordner ohne eigene.
+        let mut p = Project::default();
+        for f in ["a/b/c", "a/b/d", "a/b/d/e"] {
+            p.ensure_folder(f);
+        }
+        let set = |p: &mut Project, path: &str, cwd: &str, profile: u64| {
+            let f = p.folders.iter_mut().find(|f| f.path == path).unwrap();
+            f.cwd = cwd.into();
+            f.profile = profile;
+        };
+        set(&mut p, "a/b", "C:/b", 7);
+        set(&mut p, "a/b/d", "C:/d", 0);
+        let before_c = p.inherited("a/b/c", |f| Some(f.cwd.clone()).filter(|c| !c.is_empty()));
+        p.delete_folder_lift("a/b");
+        assert_eq!(p.folder("a/c").map(|f| (f.cwd.as_str(), f.profile)), Some(("C:/b", 7)));
+        assert_eq!(p.folder("a/d").map(|f| (f.cwd.as_str(), f.profile)), Some(("C:/d", 7)), "eigener Arbeitsordner bleibt");
+        assert_eq!(p.folder("a/d/e").map(|f| (f.cwd.as_str(), f.profile)), Some(("", 0)), "tiefer liegende erben weiter");
+        assert_eq!(p.inherited("a/c", |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())), before_c);
+        assert!(p.folder("a/b").is_none());
+        // Gespeichert und wieder geladen: kein Eintrag des gelöschten Ordners mehr (auch alte Dateien laden weiter).
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(!j.contains("\"a/b\""), "{j}");
+        let old: Project = serde_json::from_str(r#"{"id":1,"name":"P","folders":[{"path":"a","cwd":"C:/x"}]}"#).unwrap();
+        assert_eq!(old.folders[0].cwd, "C:/x");
     }
     #[test]
     fn json_with_bom_is_not_corrupt() {

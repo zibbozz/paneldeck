@@ -28,6 +28,9 @@ pub(super) enum CloseScope {
     Project(u64),
     /// Wirklich alle Sitzungen: alle Projekte, alle Fenster, auch abgedockte.
     All,
+    /// Ordner löschen (Papierkorb an der Ordnerzeile, #276): Sitzungen wie bei `Folder` (Projekt, Pfad), danach
+    /// verschwindet der Ordner samt Unterordnern und ihren Vorgaben.
+    DeleteFolder(u64, String),
 }
 
 pub(super) enum CloseTarget {
@@ -35,6 +38,12 @@ pub(super) enum CloseTarget {
     Many(CloseScope, Vec<u64>),
     /// Paneldeck beenden, obwohl Sitzungen Hintergrundprozesse haben (#168).
     Quit,
+    /// Nur den Ordner löschen (Projekt, Pfad); Sitzungen und Unterordner rücken eine Ebene hoch (#276).
+    FolderLift(u64, String),
+    /// Projekt löschen; seine Sitzungen wandern in ein anderes Projekt (#276, früher „zweimal klicken“).
+    DeleteProject(u64),
+    /// Sitzungs-Vorlage löschen (Index, Name zur Kontrolle, #276).
+    DeleteTemplate(usize, String),
 }
 
 /// Offene Rückfrage (je Fenster, siehe `WinView::confirm_close`).
@@ -52,7 +61,44 @@ pub(super) struct CloseAsk {
 pub(super) fn wait_secs(target: &CloseTarget, running_with_jobs: bool, since: Instant, now: Instant) -> u32 {
     match target {
         CloseTarget::One(_) if !running_with_jobs => 0,
-        CloseTarget::One(_) | CloseTarget::Many(..) | CloseTarget::Quit => countdown_secs(since, now),
+        // Löschen (Ordner, Projekt, Vorlage) wartet wie „Alle schließen“ (#276).
+        CloseTarget::One(_) | CloseTarget::Many(..) | CloseTarget::Quit | CloseTarget::FolderLift(..) | CloseTarget::DeleteProject(_) | CloseTarget::DeleteTemplate(..) => countdown_secs(since, now),
+    }
+}
+
+/// Was beim Löschen eines Ordners (Inhalt bleibt) passiert: „3 Sitzungen und 1 Unterordner rücken nach „a“ hoch.“
+pub(super) fn lift_summary(sessions: usize, subfolders: usize, parent: &str, lang: Lang) -> String {
+    let what = match (sessions, subfolders) {
+        (0, 0) => return lang.t("Der Ordner ist leer.", "The folder is empty.").to_string(),
+        (s, 0) => n_of(s, lang, ("Sitzung", "Sitzungen"), ("session", "sessions")),
+        (0, f) => n_of(f, lang, ("Unterordner", "Unterordner"), ("subfolder", "subfolders")),
+        (s, f) => format!(
+            "{} {} {}",
+            n_of(s, lang, ("Sitzung", "Sitzungen"), ("session", "sessions")),
+            lang.t("und", "and"),
+            n_of(f, lang, ("Unterordner", "Unterordner"), ("subfolder", "subfolders"))
+        ),
+    };
+    let one = sessions + subfolders == 1;
+    match (lang, parent.is_empty()) {
+        (Lang::De, true) => format!("{what} {} auf die oberste Ebene.", if one { "rückt" } else { "rücken" }),
+        (Lang::De, false) => format!("{what} {} nach {} hoch.", if one { "rückt" } else { "rücken" }, lang.q(parent)),
+        (Lang::En, true) => format!("{what} {} to the top level.", if one { "moves" } else { "move" }),
+        (Lang::En, false) => format!("{what} {} up to {}.", if one { "moves" } else { "move" }, lang.q(parent)),
+    }
+}
+
+/// Hinweis beim Löschen eines Ordners mit seinen Sitzungen: was außer den Sitzungen verschwindet.
+pub(super) fn folder_delete_note(subfolders: usize, lang: Lang) -> String {
+    if subfolders == 0 {
+        lang.t("Danach wird der Ordner mit seinen Vorgaben für neue Sitzungen gelöscht.", "Afterwards the folder is deleted with its defaults for new sessions.").to_string()
+    } else {
+        // Dativ im Deutschen: „mit 1 Unterordner“, „mit 2 Unterordnern“.
+        let n = n_of(subfolders, lang, ("Unterordner", "Unterordnern"), ("subfolder", "subfolders"));
+        match lang {
+            Lang::De => format!("Danach wird der Ordner mit {n} und den Vorgaben für neue Sitzungen gelöscht."),
+            Lang::En => format!("Afterwards the folder is deleted with {n} and the defaults for new sessions."),
+        }
     }
 }
 
@@ -322,6 +368,7 @@ pub(super) fn folder_button_rect(row: Rect) -> Rect {
 pub(super) fn in_scope(scope: &CloseScope, meta: &SessionMeta, project: u64, window: u64) -> bool {
     match scope {
         CloseScope::Folder(path) => meta.project == project && meta.window == window && !meta.group.is_empty() && state::folder_within(&meta.group, path),
+        CloseScope::DeleteFolder(pid, path) => meta.project == *pid && meta.window == window && !meta.group.is_empty() && state::folder_within(&meta.group, path),
         CloseScope::Project(pid) => meta.project == *pid && meta.window == window,
         CloseScope::All => true,
     }
@@ -407,6 +454,14 @@ impl App {
     /// „Alle schließen“: Rückfrage mit der Liste öffnen (ohne Sitzungen nur ein Hinweis).
     pub(super) fn request_close_many(&mut self, scope: CloseScope) {
         let ids = self.scope_ids(&scope);
+        if let (true, CloseScope::DeleteFolder(pid, path)) = (ids.is_empty(), &scope) {
+            // Ordner ohne Sitzungen (in diesem Fenster): gleich löschen, nichts geht verloren außer den Vorgaben (#276).
+            let (pid, path) = (*pid, path.clone());
+            self.remove_folder_tree(pid, &path);
+            let lang = self.settings.language;
+            self.notify_text(format!("{} {}", lang.t("Ordner gelöscht:", "Folder deleted:"), path));
+            return;
+        }
         if ids.is_empty() {
             let lang = self.settings.language;
             self.notify_text(lang.t("Keine Sitzungen zum Schließen.", "No sessions to close.").to_string());
@@ -414,6 +469,52 @@ impl App {
         }
         let lingering = self.lingering_of(&ids);
         self.confirm_close = Some(CloseAsk::new(CloseTarget::Many(scope, ids)).with(lingering));
+    }
+
+    /// Sitzungen (alle Fenster) und Unterordner im Ordner `path` des Projekts `pid`.
+    pub(super) fn folder_content(&self, pid: u64, path: &str) -> (usize, usize) {
+        let sessions = self.entries.values().filter(|e| e.meta.project == pid && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path)).count();
+        let subfolders = self.projects.iter().find(|p| p.id == pid).map(|p| p.folders.iter().filter(|f| f.path != path && state::folder_within(&f.path, path)).count()).unwrap_or(0);
+        (sessions, subfolders)
+    }
+
+    /// Ordner samt Unterordnern (und ihren Vorgaben) entfernen. Sitzungen, die noch darin liegen (andere Fenster,
+    /// inzwischen neu angelegte), rücken in den übergeordneten Ordner – sonst legte `sync_folders` ihn wieder an.
+    pub(super) fn remove_folder_tree(&mut self, pid: u64, path: &str) {
+        let parent = state::folder_parent(path).to_string();
+        for e in self.entries.values_mut() {
+            if e.meta.project == pid && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path) {
+                e.meta.group = parent.clone();
+            }
+        }
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.remove_folder(path);
+        }
+    }
+
+    /// Nur den Ordner löschen: Sitzungen und Unterordner rücken eine Ebene hoch (`Project::delete_folder_lift`).
+    pub(super) fn lift_folder(&mut self, pid: u64, path: &str) {
+        for e in self.entries.values_mut() {
+            if e.meta.project == pid && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path) {
+                e.meta.group = state::lift_path(&e.meta.group, path);
+            }
+        }
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.delete_folder_lift(path);
+        }
+    }
+
+    /// „Ordner löschen (Inhalt bleibt)“ aus dem Kontextmenü: Rückfrage mit Wartezeit; ein leerer Ordner (keine
+    /// Sitzungen, keine Unterordner) verschwindet gleich (#276).
+    pub(super) fn ask_folder_lift(&mut self, path: String) {
+        let pid = self.active_project;
+        if self.folder_content(pid, &path) == (0, 0) {
+            self.lift_folder(pid, &path);
+            let lang = self.settings.language;
+            self.notify_text(format!("{} {}", lang.t("Ordner gelöscht:", "Folder deleted:"), path));
+        } else {
+            self.confirm_close = Some(CloseAsk::new(CloseTarget::FolderLift(pid, path)));
+        }
     }
 
     /// Hintergrundprozesse dieser Sitzungen, die ihr Schließen überleben würden (#168). Nur Sitzungen mit solchen.
@@ -612,9 +713,18 @@ impl App {
                         self.projects.iter().find(|p| p.id == *pid).map(|p| p.name.clone()).unwrap_or_default(),
                     ),
                     CloseScope::All => (lang.t("Alle Sitzungen schließen?", "Close all sessions?"), lang.t("Alle Projekte und Fenster", "All projects and windows").to_string()),
+                    CloseScope::DeleteFolder(_, path) => (lang.t("Ordner mit seinen Sitzungen löschen?", "Delete the folder with its sessions?"), path.clone()),
+                };
+                let delete = match scope {
+                    CloseScope::DeleteFolder(pid, path) => Some((*pid, path.clone(), self.folder_content(*pid, path).1)),
+                    _ => None,
                 };
                 let with_project = matches!(scope, CloseScope::All) && items.iter().any(|i| i.project != items[0].project);
-                let button = if jobs { end_all_label(lang) } else { lang.t("Alle schließen", "Close all") };
+                let button = match (jobs, delete.is_some()) {
+                    (true, _) => end_all_label(lang),
+                    (false, true) => lang.t("Schließen und löschen", "Close and delete"),
+                    (false, false) => lang.t("Alle schließen", "Close all"),
+                };
                 let o = confirm_window_keep(ctx, Id::new("close_many_ask"), title, button, keep, secs, lang, 460.0, |ui| {
                     ui.label(RichText::new(what).strong());
                     ui.add_space(S1);
@@ -636,6 +746,10 @@ impl App {
                         });
                     });
                     lingering_section(ui, &ask.lingering, lang, true);
+                    if let Some((_, _, subfolders)) = &delete {
+                        ui.add_space(S1);
+                        ui.label(folder_delete_note(*subfolders, lang));
+                    }
                     ui.add_space(S1);
                     ui.label(RichText::new(lang.t("Das lässt sich nicht rückgängig machen.", "This cannot be undone.")).small().color(style::dim(ui)));
                 });
@@ -644,6 +758,62 @@ impl App {
                     Outcome::Go if jobs => actions.extend([Action::EndJobs(job_refs(&ask.lingering)), Action::CloseMany(ids)]),
                     Outcome::Go | Outcome::Keep => actions.push(Action::CloseMany(ids)),
                     _ => {}
+                }
+                // Erst schließen, dann den Ordner entfernen (übrige Sitzungen rücken hoch, `remove_folder_tree`).
+                if let (Outcome::Go | Outcome::Keep, Some((pid, path, _))) = (o, delete) {
+                    actions.push(Action::FolderRemove(pid, path));
+                }
+                o
+            }
+            CloseTarget::FolderLift(pid, path) => {
+                let Some(proj) = self.projects.iter().find(|p| p.id == *pid) else { return };
+                if proj.folder(path).is_none() {
+                    return; // inzwischen umbenannt oder gelöscht
+                }
+                let (sessions, subfolders) = self.folder_content(*pid, path);
+                let parent = state::folder_parent(path).to_string();
+                let o = confirm_window_keep(ctx, Id::new("folder_lift_ask"), lang.t("Ordner löschen?", "Delete folder?"), lang.t("Ordner löschen", "Delete folder"), None, secs, lang, 420.0, |ui| {
+                    ui.label(RichText::new(path.as_str()).strong());
+                    ui.add_space(S1);
+                    ui.label(lift_summary(sessions, subfolders, &parent, lang));
+                    ui.label(lang.t("Es wird nichts geschlossen. Die Vorgaben des Ordners für neue Sitzungen gehen an seine Unterordner.", "Nothing is closed. The folder's defaults for new sessions pass to its subfolders."));
+                });
+                if o == Outcome::Go {
+                    actions.push(Action::FolderDelete(*pid, path.clone()));
+                }
+                o
+            }
+            CloseTarget::DeleteProject(pid) => {
+                let (Some(p), Some(other)) = (self.projects.iter().find(|p| p.id == *pid), self.projects.iter().find(|p| p.id != *pid)) else { return };
+                let n = self.entries.values().filter(|e| e.meta.project == *pid).count();
+                let (name, other) = (p.name.clone(), other.name.clone());
+                let o = confirm_window_keep(ctx, Id::new("project_delete_ask"), lang.t("Projekt löschen?", "Delete project?"), lang.t("Projekt löschen", "Delete project"), None, secs, lang, 420.0, |ui| {
+                    ui.label(RichText::new(&name).strong());
+                    ui.add_space(S1);
+                    let moved = n_of(n, lang, ("Sitzung", "Sitzungen"), ("session", "sessions"));
+                    ui.label(match lang {
+                        Lang::De => format!("Nichts wird geschlossen: {moved} {} ins Projekt {}.", if n == 1 { "wechselt" } else { "wechseln" }, lang.q(&other)),
+                        Lang::En => format!("Nothing is closed: {moved} {} to the project {}.", if n == 1 { "moves" } else { "move" }, lang.q(&other)),
+                    });
+                });
+                if o == Outcome::Go {
+                    actions.push(Action::DeleteProject(*pid));
+                }
+                o
+            }
+            CloseTarget::DeleteTemplate(i, name) => {
+                let Some(t) = self.templates.get(*i).filter(|t| t.name == *name) else { return };
+                let items = t.items.iter().map(|it| it.name.as_str()).collect::<Vec<_>>().join(", ");
+                let o = confirm_window_keep(ctx, Id::new("template_delete_ask"), lang.t("Vorlage löschen?", "Delete template?"), lang.t("Löschen", "Delete"), None, secs, lang, 420.0, |ui| {
+                    ui.label(RichText::new(name.as_str()).strong());
+                    if !items.is_empty() {
+                        ui.label(RichText::new(items).small().color(style::dim(ui)));
+                    }
+                    ui.add_space(S1);
+                    ui.label(RichText::new(lang.t("Laufende Sitzungen bleiben. Das lässt sich nicht rückgängig machen.", "Running sessions stay. This cannot be undone.")).small().color(style::dim(ui)));
+                });
+                if o == Outcome::Go {
+                    actions.push(Action::TemplateDelete(*i));
                 }
                 o
             }
@@ -834,6 +1004,31 @@ mod tests {
         assert_eq!(ids(&CloseScope::All), vec![1, 2, 3, 4, 5, 6, 7], "alle: auch andere Fenster und Projekte");
         // Aus Sicht des zweiten Fensters
         assert_eq!(sessions.iter().filter(|m| in_scope(&CloseScope::Folder("a".into()), m, 1, 1)).map(|m| m.id).collect::<Vec<_>>(), vec![5]);
+        // Ordner löschen (#276): dieselben Sitzungen wie „im Ordner schließen“, Projekt aus der Rückfrage
+        assert_eq!(ids(&CloseScope::DeleteFolder(1, "a".into())), vec![1, 2, 4]);
+        assert_eq!(sessions.iter().filter(|m| in_scope(&CloseScope::DeleteFolder(2, "a".into()), m, 1, 0)).map(|m| m.id).collect::<Vec<_>>(), vec![6]);
+    }
+
+    #[test]
+    fn deleting_waits_like_close_all() {
+        // #276: Löschen von Ordner, Projekt und Vorlage fragt mit 3-Sekunden-Wartezeit statt „zweimal klicken“.
+        let t0 = Instant::now();
+        for target in [CloseTarget::FolderLift(1, "a".into()), CloseTarget::DeleteProject(2), CloseTarget::DeleteTemplate(0, "T".into()), CloseTarget::Many(CloseScope::DeleteFolder(1, "a".into()), vec![1])] {
+            assert_eq!(wait_secs(&target, false, t0, t0), 3);
+            assert_eq!(wait_secs(&target, false, t0, t0 + Duration::from_secs(4)), 0);
+        }
+    }
+
+    #[test]
+    fn folder_delete_texts_in_both_languages() {
+        assert_eq!(lift_summary(3, 1, "a", Lang::En), "3 sessions and 1 subfolder move up to “a”.");
+        assert_eq!(lift_summary(1, 0, "", Lang::En), "1 session moves to the top level.");
+        assert_eq!(lift_summary(0, 2, "a/b", Lang::De), "2 Unterordner rücken nach „a/b“ hoch.");
+        assert_eq!(lift_summary(1, 0, "", Lang::De), "1 Sitzung rückt auf die oberste Ebene.");
+        assert_eq!(lift_summary(0, 0, "", Lang::En), "The folder is empty.");
+        assert_eq!(folder_delete_note(0, Lang::En), "Afterwards the folder is deleted with its defaults for new sessions.");
+        assert_eq!(folder_delete_note(2, Lang::De), "Danach wird der Ordner mit 2 Unterordnern und den Vorgaben für neue Sitzungen gelöscht.");
+        assert_eq!(folder_delete_note(1, Lang::En), "Afterwards the folder is deleted with 1 subfolder and the defaults for new sessions.");
     }
 
     #[test]
