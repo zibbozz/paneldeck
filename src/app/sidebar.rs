@@ -7,7 +7,7 @@ impl App {
         let lang = self.settings.language;
         let panel_fill = ctx.style().visuals.panel_fill;
         let panel = sidebar_panel(ctx, self.settings.sidebar_width, panel_fill, |ui| {
-            // Fußzeile: Einstellungen + Gesamtverbrauch
+            // Fußzeile: Gesamtverbrauch und Version (Einstellungen und MCP-Status stehen in der Fensterleiste, #240)
             egui::TopBottomPanel::bottom("sidebar_footer").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
                 ui.add_space(S1);
                 let (mut tok, mut cost) = (0u64, 0.0f64);
@@ -30,20 +30,13 @@ impl App {
                     });
                     ui.add_space(2.0);
                 }
-                ui.horizontal(|ui| {
-                    if style::icon_btn(ui, SIcon::Gear, lang.t("Einstellungen", "Settings"), self.settings_open).clicked() {
-                        self.settings_open = !self.settings_open;
-                    }
-                    if self.mcp_chip(ui) {
-                        self.settings_open = true;
-                        self.settings_tab = 7;
-                    }
-                    if tok == 0 {
+                if tok == 0 {
+                    ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add(egui::Label::new(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).small().color(style::dim(ui))).truncate());
                         });
-                    }
-                });
+                    });
+                }
             });
 
             // Werkzeugleiste
