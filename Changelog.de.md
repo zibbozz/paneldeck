@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.3.2] - WIP
 
+### Added
+
+- Label- und Tag-Felder schlagen beim Tippen die bereits benutzten Werte mit ihrer Häufigkeit vor, z. B. `backend (12)` – Ticket-Labels und eigene Labels-Felder (je Projekt), Tags der Todo-Karten und Sitzungs-Tags (über alle Sitzungen); nach Häufigkeit sortiert, beim Tippen gefiltert, ↑/↓/Tab/Enter/Esc wie im Abfrage-Editor; neue Werte bleiben möglich (#239)
+
 ### Changed
 
 - Dialog „Neue Sitzung“: Die zwei Wege, eine Claude-Konversation fortzusetzen, sind jetzt eine Auswahl „Konversation“ – neu (beim Neu laden/Neustart fortgesetzt), letzte Konversation im Ordner fortsetzen oder bei jedem Start eine neue (#241)
@@ -40,6 +44,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - In schmalen Bereichen ragen die Kopf-Knöpfe nicht mehr in den Nachbarn; was nicht passt, steht im Kontextmenü (#259)
 - Der Fenstertitel wird auf den freien Platz gekürzt und überdeckt keine Reiter oder Knöpfe mehr (#259)
 - Schließen einer Worktree-Sitzung friert das Fenster bei großen Repositories nicht mehr ein (#259)
+- Das Abfragefeld der Such- und Zahlen-Kacheln im Dashboard nutzt jetzt denselben Editor wie der Reiter „Suche“, mit Vorschlägen, Fehlermeldungen beim Tippen und einer neuen Liste „Felder“ (auch in der Suche und der Abfrage-Leiste der Tickets), die alle Felder mit Typ zeigt (#237)
 
 ### Security
 

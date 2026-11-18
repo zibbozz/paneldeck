@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.3.2] - WIP
 
+### Added
+
+- Label and tag fields suggest the values already in use, with how often each is used, e.g. `backend (12)` – ticket labels and custom labels fields (per project), to-do card tags and session tags (across all sessions); sorted by use, filtered as you type, ↑/↓/Tab/Enter/Esc like the query editor; new values are still allowed (#239)
+
 ### Changed
 
 - New-session dialog: the two ways to continue a Claude conversation are now one *Conversation* choice – new (resumed on reload/restart), continue the last conversation in the folder, or a new one on every start (#241)
@@ -40,6 +44,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Narrow panes no longer let their header buttons overlap the neighbour; buttons that don't fit move to the right-click menu (#259)
 - The window title is shortened to the free space and no longer covers tabs or buttons (#259)
 - Closing a worktree session no longer freezes the window on large repositories (#259)
+- The query field of dashboard search and count tiles now uses the same editor as the Search tab, with suggestions, live error messages and a new *Fields* list (also in the Search tab and the Tickets query bar) showing every field with its type (#237)
 
 ### Security
 
