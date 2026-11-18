@@ -1432,9 +1432,11 @@ impl App {
     }
 
     fn binding(&self, id: &str) -> Option<(Modifiers, Key)> {
-        self.settings.keys.get(id).and_then(|s| keys::parse(s)).or_else(|| {
-            keys::DEFAULTS.iter().find(|(i, _)| *i == id).and_then(|(_, d)| keys::parse(d))
-        })
+        match self.settings.keys.get(id).and_then(|s| keys::parse(s)) {
+            // Eine früher aufgenommene Taste ohne Strg/Alt (z. B. „A“) wirkt nicht – sie finge jede Eingabe ab (#256).
+            Some((m, k)) => keys::usable(m, k).then_some((m, k)),
+            None => keys::DEFAULTS.iter().find(|(i, _)| *i == id).and_then(|(_, d)| keys::parse(d)),
+        }
     }
 
     /// Anzeigetext des aktuellen Kürzels (für Tooltips).

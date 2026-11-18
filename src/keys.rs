@@ -102,6 +102,17 @@ pub fn format(m: Modifiers, k: Key) -> String {
     v.join("+")
 }
 
+/// Taugt die Kombination als Kürzel? Nur mit Strg oder Alt – oder eine F-Taste (auch allein). Eine einfache Taste
+/// (`A`, Umschalt+A, Enter …) finge sonst jede solche Eingabe in allen Terminals ab (#256).
+pub fn usable(m: Modifiers, k: Key) -> bool {
+    m.ctrl || m.alt || m.command || is_f_key(k)
+}
+
+fn is_f_key(k: Key) -> bool {
+    let n = k.name();
+    n.len() >= 2 && n.starts_with('F') && n[1..].chars().all(|c| c.is_ascii_digit())
+}
+
 /// Anzeige im Menü/Tooltip (deutsch: Strg/Umschalt).
 pub fn pretty(s: &str, de: bool) -> String {
     if de {
@@ -138,6 +149,22 @@ mod tests {
             assert_ne!(label(id, true), label(id, false), "{id}: Texte gleich in beiden Sprachen");
         }
         assert!(is_global("mode_tasks") && is_global("mode_terminals") && !is_global("new"));
+    }
+
+    #[test]
+    fn plain_keys_are_not_usable_as_shortcuts() {
+        for s in ["A", "Shift+A", "Enter", "Shift+Enter", "Space", "1", "Shift+1", "Escape", "Tab"] {
+            let (m, k) = parse(s).unwrap_or_else(|| panic!("parse {s}"));
+            assert!(!usable(m, k), "{s} darf kein Kürzel sein");
+        }
+        for s in ["Ctrl+A", "Alt+A", "Ctrl+Shift+T", "F2", "Shift+F5", "F12", "Ctrl+F1", "Alt+Shift+1"] {
+            let (m, k) = parse(s).unwrap_or_else(|| panic!("parse {s}"));
+            assert!(usable(m, k), "{s} ist ein gültiges Kürzel");
+        }
+        for (_, d) in DEFAULTS.iter().filter(|(_, d)| !d.is_empty()) {
+            let (m, k) = parse(d).unwrap();
+            assert!(usable(m, k), "Standard {d} muss gültig sein");
+        }
     }
 
     #[test]
