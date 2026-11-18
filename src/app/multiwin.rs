@@ -27,7 +27,7 @@ macro_rules! view_fields {
             layout, focused, want_focus, focus_return, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
             confirm_close, reload_ask, session_settings, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
             queue_open, queue_draft, files_open, diff_open, diff_sel, composer_open, composer_focus, composer_text, history_open,
-            history_filter, history_hits, history_hits_rx, templates_open, tpl_name, cost_open, gsearch, prompts_open, prompt_sel,
+            history_filter, history_hits, history_hits_rx, templates_open, tpl_name, tpl, cost_open, gsearch, prompts_open, prompt_sel,
             broadcast, wt_close, editor, confirm_restore, restore_error, dragging, dragging_folder, folder_rects, tree_geo,
             tree_root, plan, tasks
         )
@@ -84,6 +84,7 @@ pub(super) struct WinView {
     history_hits_rx: Option<std::sync::mpsc::Receiver<Vec<(history::HistoryItem, String)>>>,
     templates_open: bool,
     tpl_name: String,
+    tpl: super::tpl_lib::TplView,
     cost_open: bool,
     gsearch: Option<GlobalSearch>,
     prompts_open: bool,
@@ -148,6 +149,7 @@ impl WinView {
             history_hits_rx: None,
             templates_open: false,
             tpl_name: String::new(),
+            tpl: super::tpl_lib::TplView::default(),
             cost_open: false,
             gsearch: None,
             prompts_open: false,

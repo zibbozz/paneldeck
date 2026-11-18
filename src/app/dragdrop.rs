@@ -40,6 +40,11 @@ impl App {
 
     /// Sitzungen per Drag & Drop in Bereiche ziehen (Mitte = ersetzen/tauschen, Rand = teilen).
     pub(super) fn handle_drag(&mut self, ctx: &egui::Context) {
+        // Eine Vorlage aus der Bibliothek (#244) hat eigene Ziele.
+        if self.tpl.dragging.is_some() {
+            self.handle_tpl_drag(ctx);
+            return;
+        }
         let folder_drag = self.dragging_folder.clone();
         let dragged = match (&folder_drag, self.dragging) {
             (Some(_), _) => u64::MAX,
@@ -97,11 +102,7 @@ impl App {
         }
         let target = pos.and_then(|p| self.pane_rects.iter().find(|(_, r)| r.contains(p)).map(|(id, r)| (*id, *r, p)));
 
-        // Zone bestimmen: 0 Mitte, 1 links, 2 rechts, 3 oben, 4 unten
-        let zone = |r: Rect, p: Pos2| -> u8 {
-            let (fx, fy) = ((p.x - r.min.x) / r.width(), (p.y - r.min.y) / r.height());
-            if fx < 0.25 { 1 } else if fx > 0.75 { 2 } else if fy < 0.25 { 3 } else if fy > 0.75 { 4 } else { 0 }
-        };
+        let zone = drop_zone;
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("drag_layer")));
         let accent = Color32::from_rgb(0xd9, 0x77, 0x57);
         // Ablage-Symbole an allen Rändern der Bereiche (das aktive Ziel hervorgehoben).
@@ -197,6 +198,11 @@ impl App {
             self.apply(ctx, Action::Activate(dragged));
             return;
         }
+        self.drop_into_pane(dragged, tid, z);
+    }
+
+    /// Sitzung `dragged` in den Bereich `tid` legen (Zone `z` wie [`drop_zone`]): ersetzen/tauschen oder teilen.
+    pub(super) fn drop_into_pane(&mut self, dragged: u64, tid: u64, z: u8) {
         // Eine abgedockte Sitzung, die ins Hauptfenster gezogen wird, wird wieder angedockt.
         self.detached.retain(|d| *d != dragged);
         let Some(mut layout) = self.layout.take() else { return };
@@ -396,6 +402,22 @@ impl App {
             };
             t.set_tooltip(&tip);
         }
+    }
+}
+
+/// Ablage-Zone eines Bereichs unter dem Zeiger: 0 Mitte (ersetzen/tauschen), 1 links, 2 rechts, 3 oben, 4 unten.
+pub(super) fn drop_zone(r: Rect, p: Pos2) -> u8 {
+    let (fx, fy) = ((p.x - r.min.x) / r.width(), (p.y - r.min.y) / r.height());
+    if fx < 0.25 {
+        1
+    } else if fx > 0.75 {
+        2
+    } else if fy < 0.25 {
+        3
+    } else if fy > 0.75 {
+        4
+    } else {
+        0
     }
 }
 

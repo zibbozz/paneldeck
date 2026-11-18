@@ -215,6 +215,7 @@ impl App {
 
         self.history_ui(ctx, actions);
         self.templates_ui(ctx, actions);
+        self.tpl_editor_ui(ctx);
         self.costs_ui(ctx);
         self.gsearch_ui(ctx, actions);
         self.queue_ui(ctx);
@@ -339,7 +340,7 @@ impl App {
         let mut open = true;
         let mut changed = false;
         egui::Window::new(lang.t("Sitzungs-Vorlagen", "Session templates")).open(&mut open).default_width(480.0).show(ctx, |ui| {
-            ui.label(RichText::new(lang.t("Eine Vorlage startet mehrere Sitzungen mit Ordner, Profil, Claude-Optionen und (optional) als Raster – mit einem Klick.", "A template starts several sessions with folder, profile, Claude options and (optionally) as a grid – in one click.")).small().color(style::dim(ui)));
+            ui.label(RichText::new(lang.t("Eine Gruppen-Vorlage startet mehrere Sitzungen mit Ordner, Profil, Claude-Optionen und (optional) als Raster – mit einem Klick. Eine Terminal-Vorlage startet eine Sitzung mit allen Einstellungen. Alle Vorlagen stehen auch unten in der Seitenleiste.", "A group template starts several sessions with folder, profile, Claude options and (optionally) as a grid – in one click. A terminal template starts one session with all its settings. All templates are also at the bottom of the sidebar.")).small().color(style::dim(ui)));
             ui.add_space(S1);
             if self.templates.is_empty() {
                 ui.weak(lang.t("Noch keine Vorlagen.", "No templates yet."));
@@ -361,7 +362,10 @@ impl App {
                             if armed_button(ui, ("tpldel", i), "🗑", lang.t("Wirklich?", "Sure?")) {
                                 actions.push(Action::TemplateDelete(i));
                             }
-                            if ui.checkbox(&mut t.grid, lang.t("Raster", "Grid")).changed() {
+                            if ui.button(lang.t("Bearbeiten …", "Edit …")).clicked() {
+                                actions.push(Action::TemplateEdit(i));
+                            }
+                            if !t.is_terminal() && ui.checkbox(&mut t.grid, lang.t("Raster", "Grid")).changed() {
                                 changed = true;
                             }
                         });

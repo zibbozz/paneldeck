@@ -62,6 +62,7 @@ mod tasks_ui;
 mod terminal_links;
 mod titlebar;
 mod toasts;
+mod tpl_lib;
 pub(crate) mod update;
 mod winchrome;
 
@@ -307,8 +308,15 @@ enum Action {
     OpenTemplates,
     OpenCosts,
     TemplateStart(usize),
+    /// Vorlage starten, mit Ziel (Ordner, Bereich; #244).
+    TemplateStartAt(usize, tpl_lib::TplAt),
     TemplateDelete(usize),
     TemplateSave(String, Option<String>),
+    /// Editor der Bibliothek: Vorlage bearbeiten / neue Terminal-Vorlage / duplizieren / aus einer Sitzung (#244).
+    TemplateEdit(usize),
+    TemplateNew,
+    TemplateDuplicate(usize),
+    TemplateFromSession(u64),
     ResumeItem(history::HistoryItem),
     ToggleTree,
     FolderNew(String),
@@ -718,6 +726,8 @@ pub struct App {
     templates: Vec<Template>,
     templates_open: bool,
     tpl_name: String,
+    /// Vorlagen-Bibliothek der Seitenleiste (#244), je Fenster.
+    tpl: tpl_lib::TplView,
     cost_open: bool,
     budget_warned_day: String,
     last_budget_check: Instant,
@@ -1059,6 +1069,7 @@ impl App {
             templates: templates::load(&dir),
             templates_open: false,
             tpl_name: String::new(),
+            tpl: tpl_lib::TplView::default(),
             cost_open: false,
             budget_warned_day: String::new(),
             last_budget_check: Instant::now(),
@@ -3787,25 +3798,7 @@ impl App {
                     .map(|(i, _)| *i)
                     .collect();
                 ids.sort();
-                let items: Vec<TplItem> = ids
-                    .iter()
-                    .filter_map(|i| self.entries.get(i))
-                    .map(|e| TplItem {
-                        name: e.display_name(),
-                        shell_id: e.meta.shell_id.clone(),
-                        cwd: e.cwd_now(),
-                        claude: e.meta.claude,
-                        // Das Vorlagenformat kennt nur die Zeile `claude_args`: Startoptionen dort hinein.
-                        claude_args: {
-                            let (o, rest) = e.meta.claude_opts_eff();
-                            format!("{} {rest}", o.sanitized(false).to_legacy()).trim().to_string()
-                        },
-                        profile: e.meta.profile,
-                        group: e.meta.group.clone(),
-                        prompt: String::new(),
-                        claude_continue: (!e.meta.claude_continue).then_some(false),
-                    })
-                    .collect();
+                let items: Vec<TplItem> = ids.iter().filter_map(|i| self.entries.get(i)).map(|e| self.tpl_item_of(e)).collect();
                 let lang = self.settings.language;
                 if items.is_empty() {
                     self.notify_text(lang.t("Keine Sitzungen zum Speichern", "No sessions to save").to_string());
@@ -3813,42 +3806,50 @@ impl App {
                     let n = items.len();
                     let name = if name.trim().is_empty() { format!("{} {}", lang.t("Vorlage", "Template"), self.templates.len() + 1) } else { name.trim().to_string() };
                     self.templates.retain(|t| t.name != name);
-                    self.templates.push(Template { name: name.clone(), grid: n > 1, items });
+                    self.templates.push(Template { name: name.clone(), grid: n > 1, items, terminal: false });
                     templates::save(&self.dir, &self.templates);
                     self.notify_text(format!("{} {} ({} {})", lang.t("Vorlage gespeichert:", "Template saved:"), lang.q(&name), n, lang.t("Sitzungen", "sessions")));
                 }
             }
             Action::TemplateStart(i) => {
-                if let Some(t) = self.templates.get(i).cloned() {
-                    let mut ids = Vec::new();
-                    for it in t.items.iter().take(24) {
-                        let id = self.new_session(
-                            ctx,
-                            NewOpts {
-                                shell_id: Some(it.shell_id.clone()).filter(|x| !x.is_empty()),
-                                cwd: Some(it.cwd.clone()),
-                                name: Some(it.name.clone()),
-                                claude: it.claude && self.settings.claude_mode,
-                                // Optionen der Vorlage vor den aktuellen Standards (alte Vorlagen ohne Optionen: nur Standards).
-                                claude_args: it.claude_args.clone(),
-                                prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
-                                profile: Some(it.profile),
-                                group: Some(it.group.clone()),
-                                claude_continue: it.claude_continue,
-                                ..NewOpts::default()
-                            },
-                        );
-                        ids.push(id);
+                self.start_template(ctx, i, tpl_lib::TplAt::Default);
+            }
+            Action::TemplateStartAt(i, at) => {
+                self.start_template(ctx, i, at);
+            }
+            Action::TemplateEdit(i) => {
+                if let Some(t) = self.templates.get(i) {
+                    self.want_focus = None;
+                    self.tpl.form = Some(tpl_lib::TplForm::of(Some(i), t));
+                }
+            }
+            Action::TemplateNew => {
+                self.want_focus = None;
+                let mut f = tpl_lib::TplForm::blank();
+                f.item.claude = false;
+                self.tpl.form = Some(f);
+            }
+            Action::TemplateDuplicate(i) => {
+                if let Some(mut t) = self.templates.get(i).cloned() {
+                    let lang = self.settings.language;
+                    t.name = templates::unique_name(&format!("{} {}", t.name.trim(), lang.t("(Kopie)", "(copy)")), &self.templates);
+                    let name = t.name.clone();
+                    self.templates.insert(i + 1, t);
+                    templates::save(&self.dir, &self.templates);
+                    self.notify_text(format!("{} {}", lang.t("Vorlage dupliziert:", "Template duplicated:"), lang.q(&name)));
+                }
+            }
+            Action::TemplateFromSession(id) => {
+                if let Some(e) = self.entries.get(&id).filter(|e| !e.is_chat()) {
+                    let mut it = self.tpl_item_of(e);
+                    let name = e.display_name();
+                    // Nur ein selbst vergebener Name wird zum Sitzungsnamen; sonst gilt der Name der Vorlage.
+                    if !e.meta.custom_name {
+                        it.name = String::new();
                     }
-                    if t.grid && ids.len() > 1 {
-                        let shown: Vec<u64> = ids.iter().copied().take(12).collect();
-                        if let Some(l) = Node::grid(&shown, Dir::Horizontal) {
-                            self.layout = Some(l);
-                            self.focused = shown[0];
-                            self.want_focus = Some(shown[0]);
-                        }
-                    }
-                    self.templates_open = false;
+                    let base = templates::unique_name(&name, &self.templates);
+                    self.want_focus = None;
+                    self.tpl.form = Some(tpl_lib::TplForm::of(None, &Template::terminal(&base, it)));
                 }
             }
             Action::ToggleTree => {
