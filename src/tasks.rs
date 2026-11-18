@@ -352,29 +352,6 @@ pub fn tag_counts(conn: &Connection) -> Res<HashMap<i64, usize>> {
     Ok(m)
 }
 
-/// Vorschläge für die Tag-Eingabe: Tags, deren Name mit `query` beginnt, danach solche, die ihn enthalten (ohne Beachtung
-/// der Groß-/Kleinschreibung); bereits gewählte (`exclude`) fehlen. Bei leerer Eingabe alle (alphabetisch).
-pub fn suggest<'a>(tags: &'a [Tag], query: &str, exclude: &[String], limit: usize) -> Vec<&'a Tag> {
-    let q = tag_key(query);
-    let skip: Vec<String> = exclude.iter().map(|e| tag_key(e)).collect();
-    let mut starts = Vec::new();
-    let mut contains = Vec::new();
-    for t in tags {
-        let k = tag_key(&t.name);
-        if skip.contains(&k) {
-            continue;
-        }
-        if k.starts_with(&q) {
-            starts.push(t);
-        } else if k.contains(&q) {
-            contains.push(t);
-        }
-    }
-    starts.extend(contains);
-    starts.truncate(limit);
-    starts
-}
-
 // ------------------------------------------------------------------ Tags schreiben
 
 /// Palettenfarbe, die bisher am seltensten vergeben ist (bei Gleichstand die erste) – so rotiert die Vergabe. Palette:
@@ -1006,21 +983,6 @@ mod tests {
         delete_item(&c, b.id).unwrap();
         let links: i64 = c.query_row("SELECT COUNT(*) FROM todo_item_tags", [], |r| r.get(0)).unwrap();
         assert_eq!(links, 0);
-    }
-
-    #[test]
-    fn suggestions_prefer_prefix_and_skip_chosen() {
-        let c = db();
-        create_item(&c, "a", "", None, &names(&["Frontend", "Backend", "Bug", "Dokumentation", "Fehler"])).unwrap();
-        let tags = list_tags(&c).unwrap();
-        let s = |q: &str, ex: &[&str]| suggest(&tags, q, &names(ex), 10).iter().map(|t| t.name.clone()).collect::<Vec<_>>();
-        assert_eq!(s("", &[]), vec!["Backend", "Bug", "Dokumentation", "Fehler", "Frontend"]);
-        assert_eq!(s("f", &[]), vec!["Fehler", "Frontend"]);
-        assert_eq!(s("END", &[]), vec!["Backend", "Frontend"], "enthält, auch ohne Präfix");
-        assert_eq!(s("b", &[]), vec!["Backend", "Bug"]);
-        assert_eq!(s("b", &["bug"]), vec!["Backend"], "bereits gewählte fehlen");
-        assert!(s("zzz", &[]).is_empty());
-        assert_eq!(suggest(&tags, "", &[], 2).len(), 2);
     }
 
     // ---- Rückgängig/Wiederholen

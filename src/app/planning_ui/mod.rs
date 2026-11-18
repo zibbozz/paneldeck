@@ -82,6 +82,7 @@ mod ticket_ui_tests;
 mod ticket_view;
 mod types_ed;
 mod undo_keys;
+pub(super) mod value_suggest;
 mod values;
 mod widgets;
 mod workflow_ed;
@@ -270,6 +271,8 @@ impl PlanUi {
         self.search.stale = true;
         self.tickets.invalidate();
         self.tickets.counts_dirty = true;
+        // Labels können sich außerhalb dieser Verbindung geändert haben (Agent, Import): neu zählen.
+        self.tickets.labels.clear();
     }
 
     fn project(&self) -> Option<&Project> {
@@ -349,7 +352,8 @@ impl PlanUi {
         let mut expert = self.expert;
         self.due_counts.refresh(&db.conn, &self.projects);
         let counts = self.due_counts.clone();
-        egui::TopBottomPanel::top("tasks_head").exact_height(44.0).show_separator_line(false).frame(egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(14, 0))).show(ctx, |ui| {
+        // Fester Kopf: sein Inhalt darf ihn nie höher machen, sonst klafft darunter ein durchsichtiger Streifen (#236).
+        egui::TopBottomPanel::top("tasks_head").exact_height(44.0).show_separator_line(false).frame(egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(14, 0))).show(ctx, |ui| super::panels::fixed_body(ui, |ui| {
             let rect = ui.max_rect();
             let toggle_w = 210.0;
             let right = Rect::from_min_max(Pos2::new(rect.right() - toggle_w, rect.top()), rect.max);
@@ -398,7 +402,7 @@ impl PlanUi {
                 });
             }
             ui.painter().line_segment([Pos2::new(rect.left() - 14.0, rect.bottom() - 0.5), Pos2::new(rect.right() + 14.0, rect.bottom() - 0.5)], egui::Stroke::new(1.0_f32, Color32::from_white_alpha(16)));
-        });
+        }));
         if expert != self.expert {
             self.set_expert(db, expert);
         }
@@ -424,7 +428,8 @@ impl PlanUi {
         if side {
             self.ticket_panel(ctx, &cx, env.bg);
         }
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(env.bg)).show(ctx, |ui| {
+        // Die Mitte bleibt in ihrer Fläche: eine breite Liste ragt sonst unter das Ticket-Panel und übermalt dessen Rand (#236).
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(env.bg)).show(ctx, |ui| super::panels::fixed_body(ui, |ui| {
             if self.help.open {
                 // Die Hilfe liegt wie ein Ticket über dem Reiterinhalt (Vollfläche); „X“ oder Esc schließt sie.
                 let out = query_help_ui::help_page(ui, &mut self.help, cx.lang, true);
@@ -438,7 +443,7 @@ impl PlanUi {
             } else {
                 self.body(ui, &cx);
             }
-        });
+        }));
         self.dialogs(ctx, &cx);
         self.toast(ctx);
         if self.dirty {
@@ -509,7 +514,8 @@ impl PlanUi {
         };
         let avail = ui.available_rect_before_wrap();
         let wide = self.tab == Tab::Tickets;
-        let w = (avail.width() - 40.0).clamp(300.0, if wide { 1600.0 } else { 1040.0 });
+        // Sehr schmal (Ticket-Panel daneben): die Spalte bleibt in ihrer Fläche, statt unter das Panel zu ragen (#236).
+        let w = (avail.width() - 40.0).clamp(300.0_f32.min(avail.width() - 16.0).max(80.0), if wide { 1600.0 } else { 1040.0 });
         let x0 = avail.center().x - w / 2.0;
         let col = Rect::from_min_size(Pos2::new(x0, avail.top() + S3), Vec2::new(w, avail.height() - S3));
         let mut below = avail.top() + S3;

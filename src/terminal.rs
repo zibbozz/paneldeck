@@ -225,6 +225,12 @@ impl Listener {
         Listener { title: Default::default(), writer, bell: Default::default(), clipboard: Default::default(), replies: Default::default() }
     }
 
+    /// Für Tests: schreibt ins Leere.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        Listener::new(Arc::new(Mutex::new(Box::new(std::io::sink()))))
+    }
+
     /// Ereignis der Emulation verarbeiten (Inhalt von `send_event`). Läuft im PTY-Thread, während er die Emulation
     /// gesperrt hält – deshalb wird hier nichts geschrieben, nur gesammelt.
     fn on_event(&self, event: Event) {
@@ -307,6 +313,10 @@ pub struct ShellState {
     pub last_dur_ms: Option<u64>,
     /// Absolute Zeilen (ab Anfang des Verlaufs) der Prompt-Anfänge.
     pub marks: Vec<u64>,
+    /// Die letzte Marke ist noch vorläufig (Prompt-Anfang bei ausstehendem Umbruch, `advance_tracked`, #231): Ihre Zeile
+    /// hält noch die Ausgabezeile in Terminalbreite; erst das nächste Zeichen des Prompts entscheidet, ob er sie
+    /// überschreibt oder eine Zeile tiefer beginnt. Siehe [`ShellState::prompt_start`].
+    pub mark_open: bool,
     /// Beendete Befehle, die noch nicht ausgewertet wurden (Benachrichtigungen).
     pub done: Vec<CmdDone>,
     /// Monotone Zähler (nie zurückgesetzt, anders als `done`): Prompts, beendete Befehle, Ordnermeldungen.
@@ -326,6 +336,16 @@ pub struct ShellState {
     cmd_start: Option<std::time::Instant>,
 }
 
+impl ShellState {
+    /// Erste Zeile des letzten Prompts nach jetzigem Stand des Bildschirms (absolut), für [`run_output`]. Ist die Marke
+    /// noch vorläufig (`mark_open`), steht in ihrer Zeile noch die Ausgabe: Der Prompt beginnt dann frühestens darunter.
+    /// Git Bash auf der ConPTY von Windows rechnet nach OSC 133;A oft länger am Prompt (Git-Status), als `run_command`
+    /// auf Ruhe wartet (#231).
+    pub fn prompt_start(&self) -> Option<u64> {
+        self.marks.last().map(|m| if self.mark_open { m + 1 } else { *m })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CmdDone {
     pub exit: Option<i32>,
@@ -340,6 +360,9 @@ pub struct Session {
     dropped: Arc<std::sync::atomic::AtomicU64>,
     /// `HistoryTrack::primary` des Lese-Threads (#221): ein Größenwechsel meldet die neue Verlaufslänge.
     hist_primary: Arc<std::sync::atomic::AtomicUsize>,
+    /// Absolute Zeilen, die andere festhalten (`pin_abs`, z. B. `run_command`); ein Größenwechsel mit Umbruch führt sie mit
+    /// (#246). Tote Einträge (Halter weg) räumt `resize` ab.
+    pins: Mutex<Vec<std::sync::Weak<std::sync::atomic::AtomicU64>>>,
     writer: SharedWriter,
     master: Box<dyn MasterPty + Send>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
@@ -358,6 +381,8 @@ pub struct Session {
     pub mouse_last: Option<(usize, usize)>,
     /// Link unter dem Mauszeiger bei gedrückter Strg-Taste: (Zeile, Start, Ende, Ziel)
     pub hover_link: Option<(usize, usize, usize, String)>,
+    /// Laufende IME-Eingabe (Japanisch, Chinesisch, Koreanisch …), noch nicht übernommen; leer = keine (#248).
+    pub ime_preedit: String,
     tee_on: AtomicBool,
     tee: Mutex<Vec<crate::vtkeys::TeeInput>>,
     /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
@@ -643,6 +668,7 @@ impl Session {
             term,
             dropped,
             hist_primary,
+            pins: Mutex::new(Vec::new()),
             shell_state,
             writer,
             master: pair.master,
@@ -659,6 +685,7 @@ impl Session {
             mouse_down: None,
             mouse_last: None,
             hover_link: None,
+            ime_preedit: String::new(),
             tee_on: AtomicBool::new(false),
             tee: Mutex::new(Vec::new()),
             last_activity,
@@ -756,6 +783,16 @@ impl Session {
     /// Wie lange das Programm schon nichts mehr ausgegeben hat.
     pub fn quiet_for(&self) -> std::time::Duration {
         std::time::Duration::from_millis(mono_ms().saturating_sub(self.last_activity.load(Ordering::Relaxed)))
+    }
+
+    /// Zeitpunkt der letzten Ausgabe (monotone ms); ändert sich mit jeder Ausgabe (Suche, #250).
+    pub fn output_stamp(&self) -> u64 {
+        self.last_activity.load(Ordering::Relaxed)
+    }
+
+    /// Aus dem Verlauf gefallene Zeilen (absolute Zeile von Verlaufszeile 0); unter der Sperre von `term` lesen.
+    pub fn hist_base(&self) -> u64 {
+        self.base()
     }
 
     /// Prozess-ID der Shell dieser Sitzung (Kind des Pseudo-Terminals).
@@ -1022,10 +1059,39 @@ impl Session {
         self.rows = rows;
         {
             let mut t = self.term.lock().unwrap_or_else(|e| e.into_inner());
-            t.resize(TermSize::new(cols as usize, rows as usize));
+            // Umbruch (#246): Neue Breite → der Hauptbildschirm wird neu umbrochen, die Zahl der Zeilen davor ändert sich.
+            // Prompt-Marken und festgehaltene Zeilen (`pin_abs`) über ihre logische Zeile mitführen (gleiche Reihenfolge der
+            // Sperren wie der Lese-Thread: erst `term`, dann `shell_state`). Im alternativen Bildschirm ist der
+            // Hauptbildschirm nicht erreichbar; dort bleiben die Zeilen, wie sie sind.
+            let mut st = self.shell_state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pins = self.pins.lock().unwrap_or_else(|e| e.into_inner());
+            pins.retain(|p| p.strong_count() > 0);
+            let held: Vec<Arc<std::sync::atomic::AtomicU64>> = pins.iter().filter_map(|p| p.upgrade()).collect();
+            drop(pins);
+            let mut abs: Vec<u64> = st.marks.clone();
+            abs.extend(held.iter().map(|p| p.load(Ordering::Relaxed)));
+            let now = resize_keeping(&mut t, self.base(), cols as usize, rows as usize, &abs);
+            let (marks_new, pins_new) = now.split_at(st.marks.len());
+            let mut marks: Vec<u64> = marks_new.iter().flatten().copied().collect();
+            marks.sort_unstable();
+            marks.dedup();
+            st.marks = marks;
+            drop(st);
+            // aus dem Verlauf gefallen: oberste Verlaufszeile
+            for (p, v) in held.iter().zip(pins_new) {
+                p.store(v.unwrap_or(self.base()), Ordering::Relaxed);
+            }
             HistoryTrack::resized(&self.hist_primary, &t);
         }
         let _ = self.master.resize(self.pty_size());
+    }
+
+    /// Absolute Zeile festhalten, die über Größenwechsel mit Umbruch gültig bleiben soll (#246): `AbsPin::get` liefert die
+    /// Zeile, in der derselbe Inhalt danach steht. Freigegeben wird sie mit dem letzten `AbsPin`.
+    pub fn pin_abs(&self, abs: u64) -> AbsPin {
+        let p = Arc::new(std::sync::atomic::AtomicU64::new(abs));
+        self.pins.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&p));
+        AbsPin(p)
     }
 
     /// Gesamten Verlauf (Scrollback + sichtbarer Bereich) als Text, auf `max_lines` begrenzt.
@@ -1252,6 +1318,132 @@ fn cursor_abs_in<T>(t: &Term<T>, base: u64) -> u64 {
     (hist_of(t) + base as i64 + t.grid().cursor.point.line.0 as i64).max(0) as u64
 }
 
+/// Festgehaltene absolute Zeile (`Session::pin_abs`), die ein Größenwechsel mit Umbruch mitführt (#246).
+#[derive(Clone, Debug)]
+pub struct AbsPin(Arc<std::sync::atomic::AtomicU64>);
+
+impl AbsPin {
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// `Term::resize` und dabei die absoluten Zeilen `abs` mitführen (#246): Ergebnis je Eintrag die neue absolute Zeile
+/// bzw. `None`, wenn sie aus dem Verlauf gefallen ist. Ohne neue Breite oder im alternativen Bildschirm (dann wird nur
+/// der unerreichbare Hauptbildschirm umbrochen) bleiben sie unverändert.
+fn resize_keeping<T>(t: &mut Term<T>, base: u64, cols: usize, rows: usize, abs: &[u64]) -> Vec<Option<u64>> {
+    let reflow = t.columns() != cols && !t.mode().contains(TermMode::ALT_SCREEN) && !abs.is_empty();
+    if !reflow {
+        t.resize(TermSize::new(cols, rows));
+        return abs.iter().map(|a| Some(*a)).collect();
+    }
+    let anchors = anchors_before(t, base, abs);
+    t.resize(TermSize::new(cols, rows));
+    resolve_anchors(t, base, &anchors)
+}
+
+/// Lage einer Zeile unabhängig von der Breite (#246): `lines_up` logische Zeilen (eine Zeile ohne WRAPLINE am Ende
+/// beendet eine) über der logischen Zeile des Cursors, `cells` Zellen nach deren Anfang; Zeilen unter dem Cursor als
+/// Abstand. alacritty hält beim Umbruch den Cursor an seinem Inhalt fest, deshalb ist er der Bezugspunkt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Anchor {
+    Above { lines_up: usize, cells: usize },
+    Below(i64),
+}
+
+fn wraps_into_next<T>(t: &Term<T>, row: i64) -> bool {
+    let g = t.grid();
+    g[Line(row as i32)][Column(g.columns() - 1)].flags.contains(alacritty_terminal::term::cell::Flags::WRAPLINE)
+}
+
+/// Vor dem Größenwechsel: absolute Zeilen → `Anchor` (`None`: liegt nicht mehr im Verlauf).
+fn anchors_before<T>(t: &Term<T>, base: u64, abs: &[u64]) -> Vec<Option<Anchor>> {
+    let g = t.grid();
+    let hist = hist_of(t);
+    let off = hist + base as i64;
+    let top = -hist;
+    let cur = g.cursor.point.line.0 as i64;
+    let cols = g.columns();
+    let mut out = vec![None; abs.len()];
+    let mut idx: Vec<(i64, usize)> = Vec::new();
+    for (i, a) in abs.iter().enumerate() {
+        let r = *a as i64 - off;
+        if r > cur {
+            out[i] = Some(Anchor::Below(r - cur));
+        } else if r >= top {
+            idx.push((r, i));
+        }
+    }
+    if idx.is_empty() {
+        return out;
+    }
+    idx.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    let (mut k, mut lines_up, mut waiting) = (0usize, 0usize, Vec::new());
+    let mut row = cur;
+    loop {
+        while k < idx.len() && idx[k].0 == row {
+            waiting.push(idx[k]);
+            k += 1;
+        }
+        if row == top || !wraps_into_next(t, row - 1) {
+            for (r, i) in waiting.drain(..) {
+                out[i] = Some(Anchor::Above { lines_up, cells: (r - row) as usize * cols });
+            }
+            if k >= idx.len() {
+                break;
+            }
+            lines_up += 1;
+        }
+        if row == top {
+            break;
+        }
+        row -= 1;
+    }
+    out
+}
+
+/// Nach dem Größenwechsel: `Anchor` → absolute Zeile (`None`: die logische Zeile ist aus dem Verlauf gefallen).
+fn resolve_anchors<T>(t: &Term<T>, base: u64, anchors: &[Option<Anchor>]) -> Vec<Option<u64>> {
+    let g = t.grid();
+    let hist = hist_of(t);
+    let off = hist + base as i64;
+    let top = -hist;
+    let bottom = g.bottommost_line().0 as i64;
+    let cur = g.cursor.point.line.0 as i64;
+    let cols = g.columns();
+    let need = anchors.iter().flatten().filter_map(|a| if let Anchor::Above { lines_up, .. } = a { Some(*lines_up) } else { None }).max();
+    // Anfänge der logischen Zeilen 0..=need (vom Cursor aufwärts)
+    let mut starts: Vec<i64> = Vec::new();
+    if let Some(need) = need {
+        let mut row = cur;
+        loop {
+            if row == top || !wraps_into_next(t, row - 1) {
+                starts.push(row);
+                if starts.len() > need {
+                    break;
+                }
+            }
+            if row == top {
+                break;
+            }
+            row -= 1;
+        }
+    }
+    anchors
+        .iter()
+        .map(|a| match a {
+            None => None,
+            Some(Anchor::Below(d)) => Some((off + (cur + d).min(bottom)).max(0) as u64),
+            Some(Anchor::Above { lines_up, cells }) => {
+                let start = *starts.get(*lines_up)?;
+                // nicht über das Ende der logischen Zeile hinaus (die nächste beginnt bei `starts[lines_up - 1]`)
+                let end = if *lines_up == 0 { cur } else { starts[*lines_up - 1] - 1 };
+                Some((off + (start + (*cells / cols) as i64).min(end.max(start))).max(0) as u64)
+            }
+        })
+        .collect()
+}
+
 /// Spielraum über dem eingestellten Verlauf (#197): alacritty verwirft bei vollem Verlauf die ältesten Zeilen, ohne das
 /// zu melden. Die Emulation bekommt deshalb `HISTORY_SLACK` Zeilen mehr; `HistoryTrack` kürzt nach jedem Stück der
 /// Ausgabe (höchstens `HISTORY_SLACK` Bytes, je Byte meist höchstens eine neue Zeile) selbst auf das Limit und zählt die
@@ -1346,9 +1538,10 @@ impl HistoryTrack {
 /// Prompt-Anfang bei „Umbruch ausstehend“ (#193): Füllt die letzte Ausgabezeile die Breite genau und lässt ConPTY den
 /// Zeilenvorschub weg, steht der Cursor bei OSC 133;A noch am Rand der Ausgabezeile. Wo der Prompt beginnt, entscheidet
 /// erst das nächste Zeichen: ein druckbares Zeichen bricht in die nächste Zeile um (bei vollem Verlauf rollt dabei nur
-/// der Inhalt, die absolute Zeile bleibt gleich), CR oder eine Cursorbewegung (oh-my-posh, starship) heben den Umbruch
-/// auf. Die Marke wird deshalb vorläufig gesetzt (`pending`, auch über Chunk-Grenzen) und danach Byte für Byte bis zu
-/// dieser Entscheidung auf die Cursorzeile korrigiert.
+/// der Inhalt, die absolute Zeile bleibt gleich), eine Cursorbewegung oder CR plus Prompt-Text (oh-my-posh, starship)
+/// heben den Umbruch auf, CR plus Zeilenvorschub beginnt die nächste Zeile (#231). Die Marke wird deshalb vorläufig
+/// gesetzt (`pending` und `ShellState::mark_open`, auch über Chunk-Grenzen) und danach Byte für Byte bis zu dieser
+/// Entscheidung auf die Cursorzeile korrigiert.
 fn advance_tracked<T: EventListener>(
     p: &mut Processor,
     t: &mut Term<T>,
@@ -1376,6 +1569,7 @@ fn advance_tracked<T: EventListener>(
         apply_events(state, vec![ev], abs);
         if prompt {
             *pending = t.grid().cursor.input_needs_wrap.then_some(abs);
+            state.lock().unwrap_or_else(|e| e.into_inner()).mark_open = pending.is_some();
         }
     }
     advance_resolving(p, t, hs, &bytes[done..], pending, state);
@@ -1393,14 +1587,21 @@ fn advance_resolving<T: EventListener>(p: &mut Processor, t: &mut Term<T>, hs: &
 }
 
 /// Offene Marke festlegen, sobald der ausstehende Umbruch erledigt ist: auf die Zeile, in der der Cursor dann steht.
+///
+/// Ein CR allein entscheidet noch nichts (#231): Die Ausgabezeile gehört erst dann dem Prompt, wenn er hineinschreibt
+/// (oh-my-posh, starship überschreiben sie). Die ConPTY von Windows (conhost) schickt bei Git Bash nach einer Zeile in
+/// genau Terminalbreite `…www` + OSC 133;A + `\r\n` + Prompt-Text – der Zeilenvorschub von `echo` fehlt, der aus PS1 kommt
+/// erst nach dem CR. Der Prompt beginnt dann in der nächsten Zeile.
 fn resolve_mark<T>(t: &Term<T>, base: u64, pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
     let Some(old) = *pending else { return };
     let now = cursor_abs_in(t, base);
-    if t.grid().cursor.input_needs_wrap && now == old {
-        return; // noch offen (z. B. Farbsequenz vor dem Prompt-Text)
+    let cur = &t.grid().cursor;
+    if now == old && (cur.input_needs_wrap || cur.point.column.0 == 0) {
+        return; // noch offen (z. B. Farbsequenz vor dem Prompt-Text, CR vor dem Zeilenvorschub)
     }
     *pending = None;
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    st.mark_open = false;
     if now != old && st.marks.last() == Some(&old) {
         st.marks.pop();
         if st.marks.last() != Some(&now) {
@@ -1996,6 +2197,86 @@ mod run_output_tests {
         assert_eq!(text(&r), "");
     }
 
+    /// Wie `Session::resize`: Marken über `resize_keeping` mitführen.
+    fn resize_fake(f: &mut Fake, cols: usize, rows: usize, extra: &[u64]) -> Vec<Option<u64>> {
+        let base = f.base();
+        let mut st = f.st.lock().unwrap();
+        let mut abs = st.marks.clone();
+        abs.extend_from_slice(extra);
+        let now = resize_keeping(&mut f.term, base, cols, rows, &abs);
+        let (m, rest) = now.split_at(st.marks.len());
+        st.marks = m.iter().flatten().copied().collect();
+        rest.to_vec()
+    }
+
+    fn row_at(f: &Fake, abs: u64) -> String {
+        lines_abs_in(&f.term, f.base(), abs, abs).pop().unwrap_or_default()
+    }
+
+    #[test]
+    fn marks_and_pins_follow_a_reflowing_resize() {
+        let mut f = Fake::new(20, 10);
+        for i in 0..6 {
+            f.feed(&format!("\x1b]133;A\x07P{i}> \x1b]133;B\x07cmd\r\n"));
+            for j in 0..4 {
+                f.feed(&format!("out{i}{j}-{}\r\n", "x".repeat(40)));
+            }
+        }
+        f.feed("\x1b]133;A\x07P6> ");
+        let marks = f.st.lock().unwrap().marks.clone();
+        assert_eq!(marks.len(), 7);
+        for (i, m) in marks.iter().enumerate() {
+            assert!(row_at(&f, *m).starts_with(&format!("P{i}>")), "vorher {i}: {}", row_at(&f, *m));
+        }
+        let out_row = marks[3] + 4; // zweite Ausgabe nach P3 (jede ist drei Zeilen hoch)
+        assert!(row_at(&f, out_row).starts_with("out31"), "{}", row_at(&f, out_row));
+        let cont_row = marks[3] + 2; // Fortsetzungszeile der ersten Ausgabe nach P3
+        assert!(row_at(&f, cont_row).starts_with("xxx"), "{}", row_at(&f, cont_row));
+        let cmd_row = marks[5];
+        // breiter: weniger Zeilen davor
+        let pins = resize_fake(&mut f, 60, 10, &[cmd_row, out_row, cont_row]);
+        let marks = f.st.lock().unwrap().marks.clone();
+        assert_eq!(marks.len(), 7);
+        for (i, m) in marks.iter().enumerate() {
+            assert!(row_at(&f, *m).starts_with(&format!("P{i}>")), "breiter {i}: {}", row_at(&f, *m));
+        }
+        assert_eq!(marks.last().copied(), Some(f.cursor()), "Prompt-Zeile = Cursorzeile");
+        assert!(row_at(&f, pins[0].unwrap()).starts_with("P5> cmd"));
+        assert!(row_at(&f, pins[1].unwrap()).starts_with("out31"), "logische Zeile: {}", row_at(&f, pins[1].unwrap()));
+        assert!(row_at(&f, pins[2].unwrap()).starts_with("out30"), "jetzt in einer Zeile: {}", row_at(&f, pins[2].unwrap()));
+        // schmaler: mehr Zeilen davor
+        let _ = resize_fake(&mut f, 12, 10, &[]);
+        let marks = f.st.lock().unwrap().marks.clone();
+        for (i, m) in marks.iter().enumerate() {
+            assert!(row_at(&f, *m).starts_with(&format!("P{i}>")), "schmaler {i}: {}", row_at(&f, *m));
+        }
+        // zum Prompt springen trifft nach dem Größenwechsel die richtige Zeile
+        let base = f.base();
+        jump_mark_in(&mut f.term, base, &marks, -1);
+        let top = f.term.grid().display_offset();
+        assert!(top > 0);
+        // nur die Höhe: nichts ändert sich
+        let before = f.st.lock().unwrap().marks.clone();
+        let _ = resize_fake(&mut f, 12, 6, &[]);
+        assert_eq!(f.st.lock().unwrap().marks, before);
+    }
+
+    #[test]
+    fn reflow_drops_marks_that_left_the_history() {
+        let mut f = Fake::with_history(10, 4, 5);
+        f.feed("\x1b]133;A\x07OLD> \r\n");
+        for _ in 0..3 {
+            f.feed("zzzzz\r\n");
+        }
+        f.feed("\x1b]133;A\x07NEW> ");
+        assert_eq!(f.st.lock().unwrap().marks.len(), 2);
+        // Ein Pin oberhalb des Verlaufs fällt heraus; die Marken bleiben, solange ihre Zeilen da sind.
+        let pins = resize_fake(&mut f, 30, 4, &[0]);
+        let marks = f.st.lock().unwrap().marks.clone();
+        assert!(marks.iter().all(|m| row_at(&f, *m).ends_with('>')), "{marks:?}");
+        assert!(pins[0].is_some());
+    }
+
     #[test]
     fn mark_after_pending_wrap_is_next_row() {
         let mut f = Fake::new(COLS, 8);
@@ -2027,6 +2308,66 @@ mod run_output_tests {
         let prompt_cr = "\x1b]133;D;0\x07\x1b]133;A\x07\rPS C:\\> \x1b]133;B\x07";
         let r = run(COLS, 20, "'r'*40", &format!("kurz\r\n{line}{prompt_cr}"));
         assert_eq!(text(&r), "kurz");
+    }
+
+    /// Git-Bash-Prompt wie `shells::BASH_PC` plus Standard-PS1 von Git for Windows (beginnt mit einem Zeilenvorschub).
+    const BASH_END: &str = "\x1b]133;D;0\x07\x1b]9;9;\"C:\\Users\\u\"\x07\x1b]133;A\x07";
+    const BASH_PS1: &str = "\x1b[32m\r\nu@pc \x1b[35mMINGW64 \x1b[33m~\x1b[m\r\n$ ";
+
+    #[test]
+    fn exact_width_git_bash_on_system_conpty() {
+        // #231, mitgeschnitten (ConPTY von Windows, 100 Spalten, hier auf COLS gekürzt): nach
+        // `printf 'w%.0s' $(seq 1 100); echo` fehlt der Zeilenvorschub von `echo`; OSC 133;A kommt bei ausstehendem
+        // Umbruch, ca. 300 ms später (Git Bash rechnet am Prompt) `ESC[?2004h`, dann `\r\n` aus PS1 und der Prompt-Text.
+        // `run_command` wertet schon nach 80 ms Ruhe aus – früher fiel die Ausgabezeile dabei dem Prompt zu (leere Ausgabe).
+        let line = "w".repeat(COLS);
+        for history in [0, 20, 200] {
+            let mut f = Fake::with_history(COLS, 8, 50);
+            for i in 0..history {
+                f.feed(&format!("alt {i}\r\n"));
+            }
+            f.feed(BASH_END);
+            f.feed("\x1b[?2004h");
+            f.feed(BASH_PS1);
+            let start_abs = f.cursor();
+            let mark0 = f.last_mark();
+            let seq0 = f.st.lock().unwrap().prompt_seq;
+            f.feed("printf w40\r\n\x1b]133;C\x07");
+            f.feed(&line);
+            f.feed(BASH_END);
+            let out_row = f.cursor();
+            let check = |f: &Fake, open: bool, what: &str| {
+                let st = f.st.lock().unwrap();
+                assert!(st.prompt_seq > seq0, "neuer Prompt ({what})");
+                assert_eq!(st.mark_open, open, "{what}, Verlauf {history}");
+                let r = run_output(&f.term, f.base(), "printf w40", start_abs, mark0, st.prompt_start(), true);
+                assert_eq!(text(&r), line, "{what}, Verlauf {history}");
+            };
+            // Ruhe nach OSC 133;A: Marke vorläufig, ihre Zeile ist noch die Ausgabezeile.
+            check(&f, true, "Prompt-Anfang offen");
+            f.feed("\x1b[?2004h");
+            check(&f, true, "Modus allein entscheidet nichts");
+            // `\r` und `\n` in getrennten Stücken: das CR allein entscheidet noch nichts.
+            f.feed("\x1b[32m\r");
+            check(&f, true, "nach CR");
+            f.feed(&BASH_PS1["\x1b[32m\r".len()..]);
+            check(&f, false, "Prompt fertig");
+            assert_eq!(f.last_mark(), Some(out_row + 1), "Marke in der Zeile nach der Ausgabe, Verlauf {history}");
+            // Mitgelieferte ConPTY (OpenConsole): mit Zeilenvorschub, unverändert.
+            let r = run_in(Fake::with_history(COLS, 8, 50), history, "printf w40", &format!("{line}\r\n{BASH_END}{BASH_PS1}"));
+            assert_eq!(text(&r), line, "mit Zeilenvorschub, Verlauf {history}");
+        }
+        // Ein Prompt, der nach dem CR in die Zeile schreibt, überschreibt sie: die Marke bleibt dort.
+        let mut f = Fake::new(COLS, 8);
+        f.feed(&format!("x\r\n{line}\x1b]133;A\x07\r\x1b[K"));
+        assert!(f.st.lock().unwrap().mark_open);
+        f.feed("$ ");
+        assert_eq!(f.last_mark(), Some(1));
+        assert!(!f.st.lock().unwrap().mark_open);
+        // Ohne ausstehenden Umbruch ist die Marke sofort fest.
+        f.feed("\r\n\x1b]133;A\x07$ ");
+        assert_eq!(f.last_mark(), Some(2));
+        assert!(!f.st.lock().unwrap().mark_open);
     }
 
     #[test]

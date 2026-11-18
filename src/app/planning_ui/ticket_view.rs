@@ -72,7 +72,7 @@ pub(super) struct VCx<'a> {
     pub lang: Lang,
     pub link_types: &'a [LinkType],
     pub prefixes: &'a [String],
-    pub labels: &'a [String],
+    pub labels: &'a super::ticket_data::LabelCounts,
     pub mode: ViewMode,
     /// Im Seitenpanel (schmaler, mit Schließen-Kreuz) statt auf der eigenen Seite.
     pub panel: bool,
@@ -377,6 +377,13 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
     });
     ui.add_space(30.0);
     acts
+}
+
+/// Breitenbereich des Ticket-Panels bei `total` Punkten Fensterbreite: höchstens 70 % und so, dass die Liste daneben
+/// mindestens 360 Punkte behält, nie schmaler als 320 (sonst schrumpfte die Liste in schmalen Fenstern auf nichts, #236).
+pub(super) fn panel_width_range(total: f32) -> (f32, f32) {
+    let max = (total - 360.0).min(total * 0.7).max(320.0);
+    (320.0_f32.min(max), max)
 }
 
 // ------------------------------------------------------------------ Schnellaktionen
@@ -876,13 +883,16 @@ impl PlanUi {
 
     /// Seitenpanel rechts neben der Liste (Modus „Panel“).
     pub(super) fn ticket_panel(&mut self, ctx: &egui::Context, cx: &Cx, bg: Color32) {
+        let (min_w, max_w) = panel_width_range(ctx.available_rect().width());
+        // Ohne Rahmenlinie: oben läge sie direkt unter der Linie des Kopfs (doppelte, hellere Kante über dem Ticket, #236);
+        // links trennt die Trennlinie des Panels. Der Inhalt kann das Panel nicht verbreitern (`fixed_body`).
         egui::SidePanel::right("ticket_side_panel")
             .resizable(true)
-            .default_width(540.0)
-            .width_range(380.0..=(ctx.content_rect().width() * 0.7).max(420.0))
-            .frame(egui::Frame::NONE.fill(bg).inner_margin(egui::Margin { left: 14, right: 14, top: 12, bottom: 0 }).stroke(Stroke::new(1.0_f32, Color32::from_white_alpha(16))))
+            .default_width(540.0_f32.clamp(min_w, max_w))
+            .width_range(min_w..=max_w)
+            .frame(egui::Frame::NONE.fill(bg).inner_margin(egui::Margin { left: 14, right: 14, top: 12, bottom: 0 }))
             .show(ctx, |ui| {
-                self.ticket_content(ui, cx, true);
+                super::super::panels::fixed_body(ui, |ui| self.ticket_content(ui, cx, true));
             });
     }
 

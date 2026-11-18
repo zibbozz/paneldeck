@@ -114,14 +114,14 @@ impl App {
         }
     }
 
-    /// Knopf in der Fensterleiste, rechtsbündig direkt links neben Minimieren (`right` = linke Kante des Minimieren-Knopfs).
-    /// Nur sichtbar, wenn ein Update verfügbar ist oder gerade läuft (dann mit Fortschritt).
-    pub(crate) fn update_title_button(&mut self, ui: &egui::Ui, right: f32) {
+    /// Knopf in der Fensterleiste, links neben „Einstellungen“ (`right` = rechte Kante, #240). Nur sichtbar, wenn ein Update
+    /// verfügbar ist oder gerade läuft (dann mit Fortschritt). Liefert die rechte Kante für den nächsten Knopf links davon.
+    pub(crate) fn update_title_button(&mut self, ui: &egui::Ui, right: f32) -> f32 {
         if !self.updater.button_visible() {
-            return;
+            return right;
         }
         let lang = self.settings.language;
-        let Some(version) = self.updater.offer.as_ref().map(|o| o.version.to_string()) else { return };
+        let Some(version) = self.updater.offer.as_ref().map(|o| o.version.to_string()) else { return right };
         let (done, total) = self.updater.progress();
         let frac = if total > 0 { (done as f32 / total as f32).clamp(0.0, 1.0) } else { 0.0 };
         let (label, tip) = match self.updater.phase {
@@ -137,7 +137,7 @@ impl App {
         let h = super::super::titlebar::BAR_HEIGHT - 8.0;
         let w = g.size().x + 36.0;
         let top = ui.max_rect().top() + 4.0;
-        let r = Rect::from_min_size(Pos2::new(right - 6.0 - w, top), Vec2::new(w, h));
+        let r = Rect::from_min_size(Pos2::new(right - w, top), Vec2::new(w, h));
         let resp = ui.interact(r, Id::new("titlebar_update"), Sense::click()).on_hover_text(tip);
         // Wie ein aktiver Reiter (Akzentfläche), beim Überfahren etwas kräftiger
         painter.rect_filled(r, 6.0, style::accent().gamma_multiply(if resp.hovered() { 0.34 } else { 0.22 }));
@@ -157,6 +157,7 @@ impl App {
                 self.updater.dialog = true;
             }
         }
+        r.left() - 4.0
     }
 
     fn update_dialog_ui(&mut self, ctx: &egui::Context) {

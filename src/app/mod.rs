@@ -101,6 +101,12 @@ struct Entry {
     /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
     /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
     session_key: String,
+    /// Konversation, die zu diesem Start gehört (#260): Meldungen mit einer anderen Konversations-ID (z. B. ein von
+    /// Claude gestartetes `claude -p`, das die Umgebung erbt) zählen nicht. Je Start neu.
+    hook_conv: hooks::ConvBinding,
+    /// In diesem Start kam schon eine Meldung mit Schlüssel: Meldungen ohne Schlüssel (globale Hooks einer älteren
+    /// paneldeck.exe) zählen dann nicht mehr.
+    hook_keyed: bool,
     /// Hinweis vom letzten Start (z. B. weggelassene Pfade aus den Claude-Optionen, #182); wird im nächsten Bild als
     /// Meldung gezeigt.
     launch_note: Option<String>,
@@ -112,7 +118,7 @@ impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts, launch_note: None, progress: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -420,9 +426,10 @@ struct NewDialog {
     claude: bool,
     /// Claude-Startoptionen (Modell, Effort, Permission-Mode, Agent); vorbelegt mit der letzten Wahl bzw. den Standards.
     copts: ClaudeOpts,
-    continue_last: bool,
-    /// „Konversation fortsetzen“ beim Neu laden/Neustart (#170), Standard an.
-    claude_continue: bool,
+    /// Wie die Konversation beginnt und ob sie beim Neu laden/Neustart fortgesetzt wird (#170, eine Auswahl seit #241).
+    conv: session_settings::ConvChoice,
+    /// Beim ersten Bild den Fokus ins Namensfeld (nicht ins Terminal dahinter, #255).
+    focus: bool,
     profile: u64,
     prompt: String,
     worktree: bool,
@@ -477,7 +484,7 @@ impl NewDialog {
     fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
         let cwd = home_dir();
         let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
-        NewDialog { shell_id, cwd, name: String::new(), claude, copts, continue_last: false, claude_continue: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+        NewDialog { shell_id, cwd, name: String::new(), claude, copts, conv: session_settings::ConvChoice::Resume, focus: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
     }
 
     /// Startordner von außen setzen (Profil, Ordnervorgabe).
@@ -649,11 +656,27 @@ struct PendingWt {
 struct WtClose {
     id: u64,
     changes: usize,
+    /// Läuft noch die Prüfung auf offene Änderungen (`git status` im Hintergrund, #259)?
+    changes_rx: Option<std::sync::mpsc::Receiver<usize>>,
     discard: bool,
     /// Hintergrundprozesse im Job der Sitzung beim Öffnen (#168, #213).
     lingering: Vec<closing::Lingering>,
     /// „Hintergrundprozesse beenden“ angehakt.
     end_jobs: bool,
+}
+
+impl WtClose {
+    /// Ergebnis der Prüfung abholen; `true`, solange sie noch läuft.
+    fn checking(&mut self) -> bool {
+        let Some(rx) = &self.changes_rx else { return false };
+        match rx.try_recv() {
+            Ok(n) => self.changes = n,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {} // wie bisher bei einem Fehler: keine Änderungen bekannt
+        }
+        self.changes_rx = None;
+        false
+    }
 }
 
 struct Palette {
@@ -687,6 +710,9 @@ pub struct App {
     focused: u64,
     next_id: u64,
     want_focus: Option<u64>,
+    /// Zurück in den Terminal Hub (#238): Zahl der Bilder seit dem Umschalten; nach zwei vollen Terminal-Bildern bekommt
+    /// das zuvor fokussierte Terminal (sonst die Pane oben links) den Fokus – nur, wenn kein Dialog/Popup offen ist.
+    focus_return: Option<u8>,
     rename: Option<(u64, String)>,
     group_prompt: Option<Prompt>,
     templates: Vec<Template>,
@@ -741,6 +767,9 @@ pub struct App {
     hook_server: Option<HookServer>,
     hooks_file: Option<PathBuf>,
     hooks_global: bool,
+    /// Die globalen Hooks zeigen auf eine andere paneldeck.exe (Pfad): deren Meldungen tragen keinen Schlüssel und zählen
+    /// nur für den Status (#260); die Einstellungen bieten „Neu eintragen“ an.
+    hooks_foreign: Option<String>,
     hooks_msg: String,
     exe: PathBuf,
     palette: Option<Palette>,
@@ -844,6 +873,34 @@ fn home_dir() -> String {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_default()
+}
+
+/// Hinweis: aus alten Claude-Argumenten der Sitzung `name` weggelassene Flags (Review zu #245).
+fn legacy_dropped_note(name: &str, dropped: &[String]) -> String {
+    format!(
+        "{} ({name}): {}",
+        state::t(
+            "Alte Claude-Argumente werden nicht mehr unterstützt oder sind ungültig, weggelassen",
+            "Old Claude arguments are no longer supported or invalid, left out"
+        ),
+        dropped.join(", ")
+    )
+}
+
+/// Hinweis: die globalen Hooks gehören zu einer anderen paneldeck.exe (`other`, #260).
+fn hooks_foreign_note(other: &str) -> String {
+    format!(
+        "{} ({}). {}",
+        state::t(
+            "Die globalen Claude-Hooks in ~/.claude/settings.json zeigen auf eine andere paneldeck.exe",
+            "The global Claude hooks in ~/.claude/settings.json point to another paneldeck.exe"
+        ),
+        crate::mcp::short(other, 80),
+        state::t(
+            "Ihre Meldungen zählen nur für den Status. Einstellungen → Claude → Hooks: „Neu eintragen“.",
+            "Their messages only count for the status. Settings → Claude → Hooks: “Reinstall”."
+        ),
+    )
 }
 
 fn setup_fonts(ctx: &egui::Context, choice: &str) {
@@ -996,6 +1053,7 @@ impl App {
             focused: 0,
             next_id: saved.next_id.max(1),
             want_focus: None,
+            focus_return: None,
             rename: None,
             group_prompt: None,
             templates: templates::load(&dir),
@@ -1040,6 +1098,7 @@ impl App {
             hook_server: HookServer::start(&cc.egui_ctx),
             hooks_file: None,
             hooks_global: false,
+            hooks_foreign: None,
             hooks_msg: String::new(),
             exe: std::env::current_exe().unwrap_or_default(),
             palette: None,
@@ -1139,7 +1198,10 @@ impl App {
             hooks::write_ipc_file(&app.dir, h.port, &h.ipc_token);
         }
         app.hooks_file = hooks::write_session_settings(&app.dir, &app.exe);
-        app.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
+        app.refresh_hooks_global();
+        if let Some(other) = &app.hooks_foreign {
+            app.spawn_notes.borrow_mut().push(hooks_foreign_note(other));
+        }
         if app.settings.default_shell.is_empty() {
             app.settings.default_shell = app.shells.first().map(|s| s.id.clone()).unwrap_or_default();
         }
@@ -1386,9 +1448,11 @@ impl App {
     }
 
     fn binding(&self, id: &str) -> Option<(Modifiers, Key)> {
-        self.settings.keys.get(id).and_then(|s| keys::parse(s)).or_else(|| {
-            keys::DEFAULTS.iter().find(|(i, _)| *i == id).and_then(|(_, d)| keys::parse(d))
-        })
+        match self.settings.keys.get(id).and_then(|s| keys::parse(s)) {
+            // Eine früher aufgenommene Taste ohne Strg/Alt (z. B. „A“) wirkt nicht – sie finge jede Eingabe ab (#256).
+            Some((m, k)) => keys::usable(m, k).then_some((m, k)),
+            None => keys::DEFAULTS.iter().find(|(i, _)| *i == id).and_then(|(_, d)| keys::parse(d)),
+        }
     }
 
     /// Anzeigetext des aktuellen Kürzels (für Tooltips).
@@ -1472,6 +1536,35 @@ impl App {
         self.load_project_view(p.layout, p.focused);
     }
 
+    /// Zeile der Sitzung in der Seitenleiste sichtbar machen: Filter leeren, wenn er sie verbirgt, eingeklappte Ordner
+    /// darüber aufklappen (die Gruppen der Listenansicht öffnet die Seitenleiste selbst, solange umbenannt wird).
+    /// `false`, wenn sie hier nicht erscheinen kann (anderes Fenster, anderes Projekt ohne Filter, unbekannt).
+    fn reveal_row(&mut self, id: u64) -> bool {
+        let Some(e) = self.entries.get(&id) else { return false };
+        if !self.in_win(e) {
+            return false;
+        }
+        if !self.sidebar_match(e) {
+            self.filter.clear();
+        }
+        let Some(e) = self.entries.get(&id) else { return false };
+        if !self.sidebar_match(e) {
+            return false;
+        }
+        let (project, mut path) = (e.meta.project, e.meta.group.clone());
+        if self.filter.trim().is_empty() {
+            if let Some(p) = self.projects.iter_mut().find(|p| p.id == project) {
+                while !path.is_empty() {
+                    if let Some(f) = p.folders.iter_mut().find(|f| f.path == path) {
+                        f.collapsed = false;
+                    }
+                    path = state::folder_parent(&path).to_string();
+                }
+            }
+        }
+        true
+    }
+
     fn sidebar_match(&self, e: &Entry) -> bool {
         if !self.in_win(e) {
             return false;
@@ -1525,6 +1618,40 @@ impl App {
         folder_picker::Target::for_shell(self.shell_by_id(&sid).as_ref(), choose)
     }
 
+    /// Shell für eine Konversation aus dem (Windows-)Verlauf: `None` = wie gewohnt (Standard-Shell bzw. Profil des
+    /// Projekts, beides Windows); sonst eine Windows-Shell, wenn Standard-Shell oder Projektprofil in WSL laufen.
+    fn windows_shell_id(&self) -> Option<String> {
+        let profile = self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0);
+        let sid = match self.profile(profile) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            Some(p) if !p.shell_id.is_empty() => p.shell_id.clone(),
+            _ => self.settings.default_shell.clone(),
+        };
+        if !self.shell_by_id(&sid).is_some_and(|s| shells::is_wsl(&s)) {
+            return None;
+        }
+        self.shells.iter().find(|s| !shells::is_wsl(s)).map(|s| s.id.clone())
+    }
+
+    /// Stand der globalen Hooks neu lesen (nur lesend): eingetragen? Auf eine andere paneldeck.exe?
+    fn refresh_hooks_global(&mut self) {
+        let path = hooks::global_settings_path();
+        self.hooks_global = path.as_deref().is_some_and(hooks::global_installed);
+        self.hooks_foreign = if self.hooks_global { path.as_deref().and_then(|p| hooks::global_foreign_exe(p, &self.exe)) } else { None };
+    }
+
+    /// Hat ein Terminal den Tastaturfokus?
+    fn terminal_has_focus(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.focused()).is_some_and(|f| self.entries.keys().any(|id| Id::new(("term", *id)) == f))
+    }
+
+    /// Fokus eines Terminals abgeben (ein Feld eines Dialogs behält ihn).
+    fn release_terminal_focus(&self, ctx: &egui::Context) {
+        if self.terminal_has_focus(ctx) {
+            models_ui::release_focus(ctx);
+        }
+    }
+
     /// Erkannte WSL-Shell einer Distribution (Groß-/Kleinschreibung egal, wie Windows).
     fn wsl_shell_for(&self, distro: &str) -> Option<String> {
         self.shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|d| d.eq_ignore_ascii_case(distro))).map(|s| s.id.clone())
@@ -1540,6 +1667,8 @@ impl App {
                 let stem = std::path::Path::new(&p.program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
                 let sid = match stem.as_str() {
                     "wsl" => format!("wsl:{}", shells::wsl_distro(&args).unwrap_or_default()),
+                    // WSL-Starter aus System32: WSL mit der Standard-Distribution (Hooks, WSLENV, Pfade; #261).
+                    "bash" if shells::is_system_bash(&p.program) => "wsl:".to_string(),
                     "pwsh" | "powershell" | "cmd" => stem.clone(),
                     _ => id.to_string(),
                 };
@@ -1565,11 +1694,11 @@ impl App {
 
     /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt; dritter: die tatsächlich gesetzten
     /// Optionen und die weggelassenen Pfade (#182).
-    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs) {
+    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs, hooks::ConvBinding) {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
-        let is_wsl = sid.starts_with("wsl");
+        let is_wsl = sid.starts_with("wsl") || spec.as_ref().is_some_and(shells::is_wsl);
         // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
         let style = crate::claude_opts::PathStyle::for_shell(&sid, spec.as_ref().map(|s| s.program.as_str()).unwrap_or(""), kind);
         let mut c = String::from(style.claude_program());
@@ -1591,33 +1720,50 @@ impl App {
         c += &launch.line;
         // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
         // der globalen Einstellung (`session_settings::resume_wanted`).
+        // Fortgesetzt wird nur eine Konversation, die es wirklich gibt (#245); sonst eine neue mit eigener ID.
         let resume_wanted = session_settings::resume_wanted(l.restore, l.restart, meta.claude_continue, self.settings.claude_resume);
-        let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, is_wsl);
+        let has_conv = resume_wanted && session_settings::conversation_exists(meta, is_wsl, crate::history::projects_dir().as_deref(), &home_dir());
+        let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, has_conv);
         let fresh = start == session_settings::ClaudeStart::Fresh;
-        match start {
-            session_settings::ClaudeStart::Resume(id) => c += &format!(" --resume {id}"),
-            session_settings::ClaudeStart::Continue => c += " --continue",
+        let expect = match start {
+            session_settings::ClaudeStart::Resume(id) => {
+                c += &format!(" --resume {id}");
+                Some(id)
+            }
+            session_settings::ClaudeStart::Continue => {
+                c += " --continue";
+                None
+            }
             session_settings::ClaudeStart::Fresh => {
                 // Neue Konversation mit eigener ID, damit sie später exakt wiedergefunden wird.
                 meta.claude_session = hooks::new_uuid();
                 meta.claude_started = false;
                 c += &format!(" --session-id {}", meta.claude_session);
+                Some(meta.claude_session.clone())
             }
-        }
+        };
         // Der Start-Prompt wird nicht in die Kommandozeile geschrieben (Shell-Expansion von $, `, % …),
         // sondern als erster Eintrag der Warteschlange gesendet, sobald Claude bereit ist.
         if let Some(p) = l.prompt.filter(|p| !p.trim().is_empty()) {
             meta.queue.insert(0, p.trim().to_string());
         }
-        (c + "\r", fresh, launch)
+        // Zuordnung der Hook-Meldungen dieses Starts (#260): die übergebene Konversations-ID und ob `--safe-mode`
+        // (Option oder alte `claude_args`) die Hooks des Claude dieser Sitzung abschaltet.
+        let hooks_off = launch.applied.extra.flags.iter().any(|f| f == "safe-mode") || args.split_whitespace().any(|t| t == "--safe-mode");
+        let binding = hooks::ConvBinding::launch(expect, hooks_off);
+        (c + "\r", fresh, launch, binding)
     }
 
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
         // Ab hier gilt die Einstellung für diesen Start (auch wenn der Start gleich scheitert: dann läuft nichts mehr
         // aus der alten Konfiguration).
-        entry.launched_claude = entry.meta.claude && !entry.is_chat();
+        // Mit ausgeschaltetem Claude-Modus startet keine Sitzung Claude – auch nicht beim Programmstart, Neu laden oder
+        // Duplizieren (#261); die Einstellung der Sitzung bleibt für später erhalten.
+        entry.launched_claude = entry.meta.claude && !entry.is_chat() && self.settings.claude_mode;
         entry.launched_opts = if entry.launched_claude { entry.meta.claude_opts_eff().0 } else { Default::default() };
         entry.hook_seen = false;
+        entry.hook_conv = hooks::ConvBinding::default();
+        entry.hook_keyed = false;
         let Some(mut shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
@@ -1628,35 +1774,6 @@ impl App {
         } else {
             None
         };
-        let claude_cmd = if entry.launched_claude {
-            let (c, fresh, launch) = self.claude_command(&mut entry.meta, &l);
-            // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
-            entry.launched_opts = launch.applied;
-            if !launch.dropped.is_empty() {
-                entry.launch_note = Some(format!(
-                    "{} ({}): {}",
-                    state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
-                    entry.display_name(),
-                    launch.dropped.join(", "),
-                ));
-            }
-            if fresh {
-                // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
-                entry.meta.transcript.clear();
-                self.usage.reset(entry.meta.id);
-            }
-            Some(c)
-        } else {
-            self.usage.reset(entry.meta.id);
-            None
-        };
-        let profile = self.profile(entry.meta.profile).cloned();
-        let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
-        let initial = match (&startup, claude_cmd) {
-            (Some(st), Some(c)) => Some(format!("{st}\r{c}")),
-            (Some(st), None) => Some(format!("{st}\r")),
-            (None, c) => c,
-        };
         // WSL: ein Linux-Startordner (leer = Linux-Home `~`, #172) geht als `wsl.exe --cd <pfad>` mit; der
         // Windows-Startordner ist dann nur ein gültiger Platzhalter. Windows-Pfade übersetzt wsl.exe wie bisher selbst.
         // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
@@ -1664,7 +1781,9 @@ impl App {
         let cwd = if wsl {
             let distro = shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args));
             let de = self.settings.language == Lang::De;
-            match crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) {
+            // Der WSL-Starter `bash.exe` kennt kein `--cd`: er startet im Windows-Ordner (#261).
+            let cd = if shells::is_system_bash(&shell.program) { crate::wsl::Cd::Windows } else { crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) };
+            match cd {
                 crate::wsl::Cd::Linux => home_dir(),
                 // Eigenes `--cd`/`~` des Profils (oder keine bekannte Distribution): nie einen Linux- oder WSL-Pfad als
                 // Windows-Startordner (CreateProcess) – und keine Prüfung eines \\wsl$-Pfads im UI-Thread.
@@ -1685,6 +1804,8 @@ impl App {
                     // ist als Startordner unzulässig: im Linux-Home starten und das melden, statt die Sitzung zu verweigern.
                     // Dialog und MCP lehnen solche Pfade schon vorher ab.
                     let old = std::mem::replace(&mut entry.meta.cwd, "~".into());
+                    // Die Konversation gehört zum alten Ordner: nicht im Linux-Home mit `--resume` suchen (#245).
+                    entry.meta.claude_started = false;
                     let _ = crate::wsl::apply_cd(&mut shell.args, "~", distro.as_deref());
                     self.spawn_notes.borrow_mut().push(if de {
                         format!("Startordner nicht verwendbar ({}): {} – die Sitzung startet im Linux-Home (~).", e.message(true), crate::mcp::short(&old, 80))
@@ -1701,6 +1822,47 @@ impl App {
             crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
         } else {
             entry.meta.cwd.clone()
+        };
+        // Erst nach dem Startordner: ein unbrauchbarer gespeicherter Ordner setzt die Konversation zurück (#245).
+        let claude_cmd = if entry.launched_claude {
+            // Alte freie Argumente einmalig umstellen; was nicht mehr geht (z. B. `--resume`, `--print`), meldet ein
+            // Hinweis – einmal, danach steht es nicht mehr in der Sitzung.
+            let legacy_dropped = entry.meta.migrate_legacy_args();
+            let (c, fresh, launch, binding) = self.claude_command(&mut entry.meta, &l);
+            entry.hook_conv = binding;
+            // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
+            entry.launched_opts = launch.applied;
+            let mut notes = Vec::new();
+            if !legacy_dropped.is_empty() {
+                notes.push(legacy_dropped_note(&entry.display_name(), &legacy_dropped));
+            }
+            if !launch.dropped.is_empty() {
+                notes.push(format!(
+                    "{} ({}): {}",
+                    state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
+                    entry.display_name(),
+                    launch.dropped.join(", "),
+                ));
+            }
+            if !notes.is_empty() {
+                entry.launch_note = Some(notes.join("\n"));
+            }
+            if fresh {
+                // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
+                entry.meta.transcript.clear();
+                self.usage.reset(entry.meta.id);
+            }
+            Some(c)
+        } else {
+            self.usage.reset(entry.meta.id);
+            None
+        };
+        let profile = self.profile(entry.meta.profile).cloned();
+        let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
+        let initial = match (&startup, claude_cmd) {
+            (Some(st), Some(c)) => Some(format!("{st}\r{c}")),
+            (Some(st), None) => Some(format!("{st}\r")),
+            (None, c) => c,
         };
         // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
         entry.session_key = hooks::random_hex();
@@ -1821,10 +1983,10 @@ impl App {
         let label = self.shell_by_id(&shell_id).map(|s| s.label).unwrap_or_else(|| "Shell".into());
         // Alle Wege (Dialog, MCP, Kontextmenü, --claude, IPC, Vorlagen, Duplikat, Verlauf) laufen hier durch;
         // bypassPermissions nur bei ausdrücklicher Wahl im Dialog.
-        let (claude_opts, claude_args) = if o.claude {
-            crate::claude_opts::resolve_new(o.claude_opts.as_ref(), o.allow_bypass, &self.settings.claude_defaults, &o.claude_args)
+        let (claude_opts, claude_args, legacy_dropped) = if o.claude {
+            crate::claude_opts::resolve_new_report(o.claude_opts.as_ref(), o.allow_bypass, &self.settings.claude_defaults, &o.claude_args)
         } else {
-            (ClaudeOpts::default(), o.claude_args.clone())
+            (ClaudeOpts::default(), o.claude_args.clone(), Vec::new())
         };
         let (name, custom) = match o.name.filter(|n| !n.trim().is_empty()) {
             Some(n) => (n, true),
@@ -1874,12 +2036,23 @@ impl App {
                     &mut entry,
                     Launch { restore: false, restart: false, continue_last: o.continue_last, prompt: o.prompt.as_deref(), resume_id: o.resume_id.as_deref() },
                 );
+                // Aus alten Argumenten (Vorlage, Duplikat) weggelassene Flags melden (Review zu #245).
+                if !legacy_dropped.is_empty() {
+                    let n = legacy_dropped_note(&entry.display_name(), &legacy_dropped);
+                    entry.launch_note = Some(match entry.launch_note.take() {
+                        Some(old) => format!("{n}\n{old}"),
+                        None => n,
+                    });
+                }
                 entry
             }
         };
         self.entries.insert(id, entry);
         if !quiet {
             if window == self.wins.cur {
+                // Gehört die neue Sitzung zu einem anderen Projekt (z. B. „Duplizieren“ einer gefilterten Sitzung), erst dorthin
+                // wechseln – sonst landete sie im Layout des gezeigten Projekts und verschwände beim nächsten Wechsel (#258).
+                self.switch_project(project);
                 self.activate(id);
             } else {
                 // Anderes Fenster: dort zeigen (es kommt nach vorn), nicht im gerade gezeichneten Layout.
@@ -2299,22 +2472,48 @@ impl App {
             ("mode_tasks_alt", titlebar::Mode::Tasks),
         ] {
             if let Some((m, k)) = self.binding(id) {
-                if ctx.input_mut(|i| consume_key_physical(i, m, k)) {
+                if ctx.input_mut(|i| consume_key_exact(i, m, k, true)) {
                     self.set_mode(mode);
                 }
             }
         }
     }
 
-    /// Bereich wechseln; beim Zurück in die Terminals bekommt das zuletzt aktive Terminal wieder den Fokus.
+    /// Bereich wechseln; beim Zurück in die Terminals bekommt das zuletzt aktive Terminal wieder den Fokus
+    /// (verzögert, siehe `focus_return_tick`).
     fn set_mode(&mut self, mode: titlebar::Mode) {
-        if self.mode != mode && mode == titlebar::Mode::Terminals {
-            self.want_focus = Some(self.focused);
+        if self.mode != mode {
+            self.focus_return = (mode == titlebar::Mode::Terminals).then_some(0);
         }
         if mode != titlebar::Mode::Tasks {
             self.plan.forget_terminal_return(); // von Hand weggeschaltet: der Rückweg „Zurück zum Terminal Hub“ gilt nicht mehr
         }
         self.mode = mode;
+    }
+
+    /// Am Ende jedes Bilds: steht ein Rückweg in den Terminal Hub an (`focus_return`), nach zwei vollen Terminal-Bildern
+    /// (damit Ebenen des alten Reiters nicht mehr als „sichtbar“ zählen) das Ziel fokussieren. Das Ziel ist das zuletzt
+    /// fokussierte Terminal, falls es im Layout steht, sonst die Pane oben links. Ist dann ein Dialog, Fenster oder Popup
+    /// offen, bleibt der Fokus dort (#238).
+    fn focus_return_tick(&mut self, ctx: &egui::Context) {
+        let Some(n) = self.focus_return else { return };
+        if self.mode != titlebar::Mode::Terminals {
+            self.focus_return = None;
+            return;
+        }
+        if n < 2 {
+            self.focus_return = Some(n + 1);
+            ctx.request_repaint();
+            return;
+        }
+        self.focus_return = None;
+        if focus_held_elsewhere(ctx) {
+            return;
+        }
+        if let Some(id) = self.layout.as_ref().and_then(|l| return_focus_target(l, self.focused)) {
+            self.want_focus = Some(id);
+            ctx.request_repaint();
+        }
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -2329,23 +2528,31 @@ impl App {
         let mut extra: Vec<Action> = Vec::new();
         let mut alt_n: Option<usize> = None;
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
+        // Die festen Kürzel nur verbrauchen, wenn es ein Ziel gibt – sonst gehören die Tasten dem Terminal (Alt+Zahl ist
+        // z. B. `digit-argument` in bash, #254).
+        let (n_projects, n_sessions) = (self.projects.len(), self.project_ids().len());
+        let dirs: Vec<(Key, Nav)> = [(Key::ArrowLeft, Nav::Left), (Key::ArrowRight, Nav::Right), (Key::ArrowUp, Nav::Up), (Key::ArrowDown, Nav::Down)]
+            .into_iter()
+            .filter(|(_, n)| focus_target(&self.pane_rects, self.focused, *n).is_some())
+            .collect();
         ctx.input_mut(|i| {
             for (id, m, k) in &binds {
-                if i.consume_key(*m, *k) {
+                if consume_key_exact(i, *m, *k, false) {
                     fired.push(id);
                 }
             }
             for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].into_iter().enumerate() {
-                if i.consume_key(cs, k) {
+                // Physisch: mit Umschalt liefert die Zifferntaste ein Zeichen („!“, „/“ …), nicht `Key::Num1`.
+                if n < n_projects && consume_key_exact(i, cs, k, true) {
                     extra.push(Action::SwitchProject(n as u64 + 1_000_000));
                 }
-                if i.consume_key(Modifiers::ALT, k) {
+                if n < n_sessions && consume_key_exact(i, Modifiers::ALT, k, true) {
                     alt_n = Some(n);
                 }
             }
             let ca = Modifiers::CTRL | Modifiers::ALT;
-            for (k, n) in [(Key::ArrowLeft, Nav::Left), (Key::ArrowRight, Nav::Right), (Key::ArrowUp, Nav::Up), (Key::ArrowDown, Nav::Down)] {
-                if i.consume_key(ca, k) {
+            for (k, n) in dirs {
+                if consume_key_exact(i, ca, k, false) {
                     extra.push(Action::FocusDir(n));
                 }
             }
@@ -2399,6 +2606,11 @@ impl App {
         // im ersten Bild noch Tasten (#217).
         if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) || self.paste_ask_here(None) {
             models_ui::release_focus(ctx);
+        }
+        // Weitere Dialoge über dem Terminal (#255): Neue Sitzung, Prompt an alle, Vorlagen, Worktree schließen. Nur ein
+        // Terminal gibt den Fokus ab – ein Feld des Dialogs behält ihn.
+        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() {
+            self.release_terminal_focus(ctx);
         }
         let theme = self.theme();
         let font = FontId::monospace(self.settings.font_size);
@@ -2666,9 +2878,23 @@ impl App {
             let Some(p) = self.pending_wt.take() else { return };
             match res {
                 Ok(()) => {
-                    let id = self.new_session(ctx, p.opts);
+                    let mut opts = p.opts;
+                    // Inzwischen ein anderes Projekt gewählt: die Sitzung still in ihrem Projekt anlegen und Bescheid geben,
+                    // statt den Nutzer zurückzuholen oder sie ins falsche Layout zu legen (#258).
+                    let elsewhere = opts.window.is_none_or(|w| w == self.wins.cur) && opts.project.is_some_and(|pr| pr != self.active_project);
+                    opts.quiet |= elsewhere;
+                    let id = self.new_session(ctx, opts);
                     if let Some(e) = self.entries.get_mut(&id) {
                         e.meta.worktree = Some(p.wt);
+                    }
+                    if elsewhere {
+                        let lang = self.settings.language;
+                        let name = self.entries.get(&id).map(|e| e.display_name()).unwrap_or_default();
+                        let proj = self.entries.get(&id).and_then(|e| self.projects.iter().find(|p| p.id == e.meta.project)).map(|p| p.name.clone()).unwrap_or_default();
+                        self.notify_text(match lang {
+                            Lang::De => format!("Worktree-Sitzung {} ist im Projekt {} bereit.", lang.q(&name), lang.q(&proj)),
+                            Lang::En => format!("Worktree session {} is ready in project {}.", lang.q(&name), lang.q(&proj)),
+                        });
                     }
                 }
                 Err(e) => self.notify_text(format!("{}: {e}", self.settings.language.t("Worktree konnte nicht angelegt werden", "Could not create worktree"))),
@@ -3109,6 +3335,25 @@ impl App {
             if e.is_chat() {
                 continue;
             }
+            // Nur Meldungen des laufenden Starts (#260): Schlüssel `PANELDECK_SESSION_KEY` dieses Starts. Ein anderes
+            // Terminal, ein übrig gebliebener Prozess eines früheren Starts oder eine Fälschung mit der bloßen Nummer
+            // ändert weder Status noch Konversation.
+            // Ausnahme: Meldungen ganz ohne Schlüssel stammen von globalen Hooks einer älteren paneldeck.exe (Hinweis in den
+            // Einstellungen). Sie zählen nur für den Status, solange in diesem Start keine Meldung mit Schlüssel kam, und
+            // ordnen nie eine Konversation zu.
+            let keyless = match hooks::admit(&e.session_key, e.hook_keyed, &e.hook_conv, &m) {
+                hooks::Admit::Drop => continue,
+                hooks::Admit::Keyed => {
+                    e.hook_keyed = true;
+                    false
+                }
+                hooks::Admit::StatusOnly => true,
+            };
+            // Eine andere Konversation als die dieses Starts (z. B. `claude -p` aus der Sitzung heraus) zählt nicht.
+            let conv = if keyless { hooks::ConvMatch::NoId } else { e.hook_conv.feed(&m) };
+            if conv == hooks::ConvMatch::Foreign {
+                continue;
+            }
             let old = e.status;
             e.hook_seen = true;
             let sh = e.eff_shell().to_string();
@@ -3117,7 +3362,7 @@ impl App {
                 cwd: m.cwd.as_ref().map(|p| pathfmt::from_wsl(&sh, p)),
                 ..m
             };
-            if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty()) {
+            if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty() && !keyless) {
                 if e.meta.transcript != *tp {
                     e.meta.transcript = tp.clone();
                     self.usage.set_path(m.session, PathBuf::from(tp));
@@ -3126,12 +3371,20 @@ impl App {
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
                 e.live_cwd = c.clone();
             }
-            if e.is_claude() {
-                if let Some(cs) = m.claude_session.as_ref().filter(|c| !c.is_empty()) {
-                    e.meta.claude_session = cs.clone();
+            if e.is_claude() && !keyless {
+                if let hooks::ConvMatch::Bind(cs) | hooks::ConvMatch::Switch(cs) = &conv {
+                    if e.meta.claude_session != *cs {
+                        e.meta.claude_session = cs.clone();
+                        // Eine andere Konversation als beim Start angegeben: Inhalt hat sie nur, wenn sie fortgesetzt wurde.
+                        e.meta.claude_started = false;
+                    }
                 }
-                if m.event == "UserPromptSubmit" {
-                    e.meta.claude_started = true;
+                match (m.event.as_str(), m.source.as_deref()) {
+                    // Fortgesetzte Konversation (`--resume`, `--continue`, `/resume`): sie hat Inhalt.
+                    ("SessionStart", Some("resume")) | ("UserPromptSubmit", _) => e.meta.claude_started = true,
+                    // `/clear`: neue, leere Konversation.
+                    ("SessionStart", Some("clear")) => e.meta.claude_started = false,
+                    _ => {}
                 }
             }
             let new = hooks::status_after(old, &m);
@@ -3256,14 +3509,17 @@ impl App {
                     self.activate(sid);
                 }
                 if let Some(s) = self.entries.get_mut(&sid).and_then(|e| e.live.as_mut()) {
-                    let matches = search::find_all(&s.term.lock().unwrap_or_else(|e| e.into_inner()), &query);
                     let mut st = SearchState::new();
                     st.focus_input = false;
-                    st.current = matches.iter().position(|m| m.line == line).unwrap_or(0);
                     st.query = query.clone();
                     st.last_query = query;
-                    st.matches = matches;
-                    search::scroll_to(&mut s.term.lock().unwrap_or_else(|e| e.into_inner()), line);
+                    let activity = s.output_stamp();
+                    let mut t = s.term.lock().unwrap_or_else(|e| e.into_inner());
+                    st.compute(&t, s.hist_base(), activity);
+                    st.refreshed = ctx.input(|i| i.time);
+                    st.current = st.matches.iter().position(|m| m.line == line).unwrap_or(st.matches.len().saturating_sub(1));
+                    search::scroll_to(&mut t, line);
+                    drop(t);
                     s.search = Some(st);
                 }
             }
@@ -3303,11 +3559,28 @@ impl App {
                 }
             }
             Action::ResumeItem(h) => {
+                let lang = self.settings.language;
+                // Der Verlauf liest nur Windows-Konversationen (`~/.claude`); eine Datei ohne Konversations-ID wäre still
+                // als neue Konversation gestartet worden (#245).
+                if !crate::quote::is_uuid(&h.session_id) {
+                    self.notify_text(lang.t("Diese Konversation lässt sich nicht fortsetzen (keine gültige Konversations-ID).", "This conversation cannot be resumed (no valid conversation id).").to_string());
+                    return;
+                }
+                // Schon in einer Sitzung offen: dorthin wechseln statt sie ein zweites Mal zu öffnen (#245).
+                if let Some(open) = self.entries.iter().find(|(_, e)| e.launched_claude && !e.exited() && e.meta.claude_session == h.session_id).map(|(id, _)| *id) {
+                    self.notify_text(lang.t("Die Konversation ist schon in einer Sitzung offen.", "The conversation is already open in a session.").to_string());
+                    self.apply(ctx, Action::Activate(open));
+                    self.history_open = false;
+                    return;
+                }
                 {
                     let name: String = h.title.chars().take(32).collect();
                     self.new_session(
                         ctx,
                         NewOpts {
+                            // Windows-Konversation: in einer Windows-Shell fortsetzen, auch wenn WSL die Standard-Shell ist.
+                            shell_id: self.windows_shell_id(),
+                            profile: self.windows_shell_id().map(|_| 0),
                             cwd: Some(h.cwd.clone()),
                             name: Some(name),
                             claude: true,
@@ -3325,6 +3598,8 @@ impl App {
             Action::OpenSettings => self.settings_open = true,
             Action::OpenPrompts => self.prompts_open = true,
             Action::NewDialog(claude) => {
+                // Aus der Palette: den Fokus nicht ans Terminal zurückgeben, er gehört dem Dialog (#255).
+                self.want_focus = None;
                 self.new_dialog = Some(NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode, self.dialog_claude_opts()));
             }
             Action::OpenNotes(id) => {
@@ -3360,26 +3635,8 @@ impl App {
                 self.want_focus = Some(self.focused);
             }
             Action::FocusDir(nav) => {
-                if let Some(cur) = self.pane_rects.get(&self.focused).copied() {
-                    let c = cur.center();
-                    let best = self
-                        .pane_rects
-                        .iter()
-                        .filter(|(id, _)| **id != self.focused)
-                        .filter_map(|(id, r)| {
-                            let d = r.center() - c;
-                            let (along, across) = match nav {
-                                Nav::Left => (-d.x, d.y.abs()),
-                                Nav::Right => (d.x, d.y.abs()),
-                                Nav::Up => (-d.y, d.x.abs()),
-                                Nav::Down => (d.y, d.x.abs()),
-                            };
-                            (along > 1.0).then_some((*id, along + 2.0 * across))
-                        })
-                        .min_by(|a, b| a.1.total_cmp(&b.1));
-                    if let Some((id, _)) = best {
-                        self.activate(id);
-                    }
+                if let Some(id) = focus_target(&self.pane_rects, self.focused, nav) {
+                    self.activate(id);
                 }
             }
             Action::Detach(id) => {
@@ -3474,8 +3731,33 @@ impl App {
                 }
             }
             Action::StartRename(id) => {
-                if let Some(e) = self.entries.get(&id) {
-                    self.rename = Some((id, e.display_name()));
+                let target = self.entries.get(&id).map(|e| (self.in_win(e), self.sidebar_match(e), e.meta.window, e.meta.project));
+                match target {
+                    None => {}
+                    Some((false, _, window, _)) => {
+                        // Sitzung eines anderen Fensters (Palette): dort umbenennen; das Fenster kommt dabei nach vorn
+                        // (Review zu #259).
+                        self.route_to(ctx, window, Action::StartRename(id));
+                    }
+                    Some((true, matched, _, project)) => {
+                        if !matched && project != self.active_project {
+                            // Anderes Projekt: dorthin wechseln, damit die Zeile erscheint. Der Fokus bleibt beim
+                            // Umbenennen-Feld (ein Terminal, das ihn danach nähme, beendete das Umbenennen sofort).
+                            self.filter.clear();
+                            self.switch_project(project);
+                            self.want_focus = None;
+                        }
+                        // Die Zeile muss zu sehen sein (Filter, eingeklappter Ordner), sonst geschähe nichts Sichtbares und
+                        // das wartende Umbenennen holte sich später den Fokus vom Terminal (#259).
+                        if self.reveal_row(id) {
+                            if let Some(e) = self.entries.get(&id) {
+                                self.rename = Some((id, e.display_name()));
+                            }
+                        } else {
+                            let lang = self.settings.language;
+                            self.notify_text(lang.t("Diese Sitzung lässt sich hier nicht umbenennen.", "This session can't be renamed here.").to_string());
+                        }
+                    }
                 }
             }
             Action::SetColor(id, c) => {
@@ -3484,7 +3766,10 @@ impl App {
                 }
             }
             Action::SetGroup(id, g) => self.set_group(id, g),
-            Action::OpenTemplates => self.templates_open = true,
+            Action::OpenTemplates => {
+                self.want_focus = None;
+                self.templates_open = true;
+            }
             Action::OpenCosts => self.cost_open = true,
             Action::TemplateDelete(i) => {
                 if i < self.templates.len() {
@@ -3518,6 +3803,7 @@ impl App {
                         profile: e.meta.profile,
                         group: e.meta.group.clone(),
                         prompt: String::new(),
+                        claude_continue: (!e.meta.claude_continue).then_some(false),
                     })
                     .collect();
                 let lang = self.settings.language;
@@ -3548,6 +3834,7 @@ impl App {
                                 prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
                                 profile: Some(it.profile),
                                 group: Some(it.group.clone()),
+                                claude_continue: it.claude_continue,
                                 ..NewOpts::default()
                             },
                         );
@@ -3583,7 +3870,10 @@ impl App {
                 }
             }
             Action::FolderTemplate(path) => self.folder_prompt = Some(FolderPrompt { kind: 3, text: state::folder_leaf(&path).to_string(), path }),
-            Action::FolderBroadcast(path) => self.folder_prompt = Some(FolderPrompt { kind: 2, path, text: String::new() }),
+            Action::FolderBroadcast(path) => {
+                self.want_focus = None;
+                self.folder_prompt = Some(FolderPrompt { kind: 2, path, text: String::new() });
+            }
             Action::FolderDelete(path) => {
                 let pid = self.active_project;
                 for e in self.entries.values_mut() {
@@ -3717,7 +4007,7 @@ impl App {
                         shell_id: Some(src.meta.shell_id.clone()),
                         cwd: Some(src.meta.cwd.clone()),
                         name: Some(format!("{} (2)", src.display_name())),
-                        claude: src.meta.claude,
+                        claude: src.meta.claude && self.settings.claude_mode,
                         claude_args: src.meta.claude_args.clone(),
                         claude_continue: Some(src.meta.claude_continue),
                         claude_opts: Some(src.meta.claude_opts.clone()),
@@ -3734,15 +4024,18 @@ impl App {
                 }
             }
             Action::RequestClose(id) if self.entries.get(&id).is_some_and(|e| e.meta.worktree.is_some()) => {
-                let changes = self
-                    .entries
-                    .get(&id)
-                    .and_then(|e| e.meta.worktree.as_ref())
-                    .map(|w| gitops::status(std::path::Path::new(&w.path)).map(|c| c.len()).unwrap_or(0))
-                    .unwrap_or(0);
+                // `git status` im Hintergrund: in großen oder langsamen Repos fröre sonst jedes Fenster ein (#259). Bis das
+                // Ergebnis da ist, zeigt die Rückfrage „wird geprüft“ und bietet nur Behalten/Abbrechen an.
+                let path = self.entries.get(&id).and_then(|e| e.meta.worktree.as_ref()).map(|w| PathBuf::from(&w.path)).unwrap_or_default();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx2 = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(gitops::status(&path).map(|c| c.len()).unwrap_or(0));
+                    ctx2.request_repaint();
+                });
                 // Hintergrundprozesse im Job (#213): auch hier nennen; sie können den Ordner belegt halten.
                 let lingering = self.lingering_of(&[id]);
-                self.wt_close = Some(WtClose { id, changes, discard: false, lingering, end_jobs: false });
+                self.wt_close = Some(WtClose { id, changes: 0, changes_rx: Some(rx), discard: false, lingering, end_jobs: false });
             }
             Action::RequestClose(id) => {
                 // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft). Hintergrundprozesse
@@ -3776,20 +4069,37 @@ impl App {
     }
 }
 
-/// Wie `consume_key`, erkennt aber auch die physische Taste: mit Umschalt liefert die Tastatur eine andere logische Taste
-/// (Umschalt+1 = „!“), `consume_key` sähe dann nicht `Key::Num1`.
-fn consume_key_physical(i: &mut egui::InputState, m: Modifiers, k: Key) -> bool {
-    let pos = i.events.iter().position(|e| {
-        matches!(e, Event::Key { key, physical_key, pressed: true, modifiers, .. }
-            if (*key == k || *physical_key == Some(k)) && modifiers.matches_logically(m))
+/// Wie `consume_key`, aber mit genau diesen Modifikatoren (#254): ein zusätzliches Umschalt oder Alt (AltGr = Strg+Alt)
+/// ist eine andere Kombination – sonst löste Strg+Umschalt+1 das Kürzel Strg+1 aus und Strg+AltGr+2 („²“) Strg+2.
+/// `physical`: auch die physische Taste erkennen – mit Umschalt liefert die Tastatur eine andere logische Taste
+/// (Umschalt+1 = „!“ bzw. „/“ je nach Belegung), `consume_key` sähe dann nicht `Key::Num1`.
+fn consume_key_exact(i: &mut egui::InputState, m: Modifiers, k: Key, physical: bool) -> bool {
+    let before = i.events.len();
+    i.events.retain(|e| {
+        !matches!(e, Event::Key { key, physical_key, pressed: true, modifiers, .. }
+            if (*key == k || (physical && *physical_key == Some(k))) && modifiers.matches_exact(m))
     });
-    match pos {
-        Some(p) => {
-            i.events.remove(p);
-            true
-        }
-        None => false,
-    }
+    i.events.len() != before
+}
+
+/// Nächster Bereich in Richtung `nav` vom fokussierten aus (Strg+Alt+Pfeil); `None`, wenn dort keiner liegt.
+fn focus_target(rects: &HashMap<u64, Rect>, focused: u64, nav: Nav) -> Option<u64> {
+    let c = rects.get(&focused)?.center();
+    rects
+        .iter()
+        .filter(|(id, _)| **id != focused)
+        .filter_map(|(id, r)| {
+            let d = r.center() - c;
+            let (along, across) = match nav {
+                Nav::Left => (-d.x, d.y.abs()),
+                Nav::Right => (d.x, d.y.abs()),
+                Nav::Up => (-d.y, d.x.abs()),
+                Nav::Down => (d.y, d.x.abs()),
+            };
+            (along > 1.0).then_some((*id, along + 2.0 * across))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id)
 }
 
 impl eframe::App for App {
@@ -3878,6 +4188,7 @@ impl eframe::App for App {
         for a in actions {
             self.apply(ctx, a);
         }
+        self.focus_return_tick(ctx);
 
         // Fenstertitel
         let waiting = self.entries.values().filter(|e| e.needs_you()).count();
@@ -4109,6 +4420,42 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
     }
 }
 
+/// Knöpfe im Kopf eines Bereichs, von rechts nach links (wichtigste zuerst).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PaneBtn {
+    Close,
+    Minimize,
+    Reload,
+    Detach,
+    SplitDown,
+    SplitRight,
+    Link,
+}
+
+const PANE_BTN_W: f32 = 22.0;
+
+/// Alle Knöpfe eines Bereichs (abgedockt: Andocken, Minimieren, ggf. Neu laden).
+fn pane_buttons(detached: bool, reload: bool, link: bool) -> Vec<PaneBtn> {
+    let mut v = vec![PaneBtn::Close, PaneBtn::Minimize];
+    if reload {
+        v.push(PaneBtn::Reload);
+    }
+    if !detached {
+        v.extend([PaneBtn::Detach, PaneBtn::SplitDown, PaneBtn::SplitRight]);
+        if link {
+            v.push(PaneBtn::Link);
+        }
+    }
+    v
+}
+
+/// Wie viele der `n` Knöpfe in einen Kopf der Breite `width` passen: links bleiben Statuspunkt und ein Stück Name
+/// (60 Punkte) frei, rechts etwas Luft; Schließen und Minimieren stehen immer da (#259).
+fn pane_buttons_fit(width: f32, n: usize) -> usize {
+    let room = width - 16.0 - 60.0;
+    ((room / PANE_BTN_W).floor().max(0.0) as usize).clamp(2.min(n), n)
+}
+
 fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     let lang = cx.lang;
     cx.rects.insert(id, rect);
@@ -4144,6 +4491,13 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if hresp.clicked() {
         cx.actions.push(Action::Focus(id));
     }
+    // „Neu laden“ (#169) nur für Terminals; ein Chat hat keinen Prozess.
+    let reload = session_settings::reload_plan(&entry.meta);
+    // Knöpfe rechts im Kopf (von rechts nach links). In schmalen Bereichen nur so viele, wie hineinpassen – sonst ragten sie
+    // in den Kopf des Nachbarn, und ein Klick träfe dessen Teilen/Schließen (#259); die übrigen stehen im Kontextmenü.
+    let all_btns = pane_buttons(cx.detached, reload.is_some(), tl_enabled);
+    let fit = if cx.detached { all_btns.len() } else { pane_buttons_fit(header.width(), all_btns.len()) };
+    let (shown_btns, hidden_btns) = all_btns.split_at(fit);
     hresp.context_menu(|ui| {
         if ui.button(lang.t("Bereich minimieren", "Minimize pane")).clicked() {
             cx.actions.push(Action::MinimizePane(id));
@@ -4153,10 +4507,21 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             cx.actions.push(Action::LinkTicket(id));
             ui.close();
         }
+        for b in hidden_btns {
+            let (label, action) = match b {
+                PaneBtn::Reload => (lang.t("Neu laden …", "Reload …"), Action::RequestReload(id)),
+                PaneBtn::Detach => (lang.t("In eigenem Fenster öffnen", "Open in own window"), Action::Detach(id)),
+                PaneBtn::SplitDown => (lang.t("Darunter teilen", "Split below"), Action::Split(id, Dir::Vertical)),
+                PaneBtn::SplitRight => (lang.t("Rechts teilen", "Split right"), Action::Split(id, Dir::Horizontal)),
+                _ => continue, // Schließen/Minimieren stehen immer da, Verknüpfen schon oben
+            };
+            if ui.button(label).clicked() {
+                cx.actions.push(action);
+                ui.close();
+            }
+        }
     });
     let claude = entry.is_claude() && cx.claude_mode;
-    // „Neu laden“ (#169) nur für Terminals; ein Chat hat keinen Prozess.
-    let reload = session_settings::reload_plan(&entry.meta);
     let status_label = entry.status_label(lang);
     let status_col = entry.status_color(t);
     let (text_c, strong_c, weak) = {
@@ -4172,10 +4537,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
-    // Breite des Knopfbereichs rechts: fünf Knöpfe (abgedockt zwei), mit Ticket-Verknüpfung und Neu laden je einer mehr.
-    let tl_btn = tl_enabled;
-    let reload_w = if reload.is_some() { 22.0 } else { 0.0 };
-    let btns_w = if cx.detached { 52.0 + reload_w } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } + reload_w };
+    // Breite des Knopfbereichs rechts: die gezeigten Knöpfe (je 22) und etwas Luft.
+    let btns_w = PANE_BTN_W * shown_btns.len() as f32 + 16.0;
     let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
     let chips = cx.tl.chips_of(id);
@@ -4234,44 +4597,31 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                if cx.detached {
-                    if style::icon_btn_small(ui, SIcon::Close, lang.t("Wieder andocken (Strg+Umschalt+W)", "Dock back (Ctrl+Shift+W)")).clicked() {
-                        cx.actions.push(Action::Attach(id));
-                    }
-                    if style::icon_btn_small(ui, SIcon::Collapse, lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)")).clicked() {
-                        cx.actions.push(Action::MinimizePane(id));
-                    }
-                    if let Some(plan) = reload {
-                        if style::icon_btn_small(ui, SIcon::Reload, plan.tip(lang)).clicked() {
-                            cx.actions.push(Action::RequestReload(id));
+                for b in shown_btns {
+                    let (icon, tip, action): (SIcon, String, Action) = match b {
+                        PaneBtn::Close if cx.detached => (SIcon::Close, lang.t("Wieder andocken (Strg+Umschalt+W)", "Dock back (Ctrl+Shift+W)").into(), Action::Attach(id)),
+                        PaneBtn::Close => (SIcon::Close, lang.t("Sitzung schließen", "Close session").into(), Action::RequestClose(id)),
+                        PaneBtn::Minimize if cx.detached => (
+                            SIcon::Collapse,
+                            lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)").into(),
+                            Action::MinimizePane(id),
+                        ),
+                        PaneBtn::Minimize => {
+                            let tip = lang.t("Bereich minimieren – die Sitzung läuft weiter, ein Klick in der Seitenleiste holt sie zurück", "Minimize pane – the session keeps running, click it in the sidebar to bring it back");
+                            (SIcon::Collapse, if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) }, Action::MinimizePane(id))
                         }
+                        PaneBtn::Reload => match &reload {
+                            Some(plan) => (SIcon::Reload, plan.tip(lang).to_string(), Action::RequestReload(id)),
+                            None => continue,
+                        },
+                        PaneBtn::Detach => (SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window").into(), Action::Detach(id)),
+                        PaneBtn::SplitDown => (SIcon::SplitDown, lang.t("Darunter teilen (Strg+Umschalt+E)", "Split below (Ctrl+Shift+E)").into(), Action::Split(id, Dir::Vertical)),
+                        PaneBtn::SplitRight => (SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)").into(), Action::Split(id, Dir::Horizontal)),
+                        PaneBtn::Link => (SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …").into(), Action::LinkTicket(id)),
+                    };
+                    if style::icon_btn_small(ui, icon, &tip).clicked() {
+                        cx.actions.push(action);
                     }
-                    return;
-                }
-                if style::icon_btn_small(ui, SIcon::Close, lang.t("Sitzung schließen", "Close session")).clicked() {
-                    cx.actions.push(Action::RequestClose(id));
-                }
-                let tip = lang.t("Bereich minimieren – die Sitzung läuft weiter, ein Klick in der Seitenleiste holt sie zurück", "Minimize pane – the session keeps running, click it in the sidebar to bring it back");
-                let tip = if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) };
-                if style::icon_btn_small(ui, SIcon::Collapse, &tip).clicked() {
-                    cx.actions.push(Action::MinimizePane(id));
-                }
-                if let Some(plan) = reload {
-                    if style::icon_btn_small(ui, SIcon::Reload, plan.tip(lang)).clicked() {
-                        cx.actions.push(Action::RequestReload(id));
-                    }
-                }
-                if style::icon_btn_small(ui, SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window")).clicked() {
-                    cx.actions.push(Action::Detach(id));
-                }
-                if style::icon_btn_small(ui, SIcon::SplitDown, lang.t("Darunter teilen (Strg+Umschalt+E)", "Split below (Ctrl+Shift+E)")).clicked() {
-                    cx.actions.push(Action::Split(id, Dir::Vertical));
-                }
-                if style::icon_btn_small(ui, SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)")).clicked() {
-                    cx.actions.push(Action::Split(id, Dir::Horizontal));
-                }
-                if tl_btn && style::icon_btn_small(ui, SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
-                    cx.actions.push(Action::LinkTicket(id));
                 }
             });
         },
@@ -4316,8 +4666,10 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     match entry.live.as_mut() {
         Some(session) => {
             let tid = Id::new(("term", id));
-            if *cx.want_focus == Some(id) {
-                ui.memory_mut(|m| m.request_focus(tid));
+            // Erst NACH `termview::show` fokussieren: egui nimmt einem fokussierten Widget den Fokus beim `interact`
+            // wieder weg, wenn im selben Bild woanders geklickt wurde (Reiter, Palette, Dialogknopf; #238).
+            let grab = *cx.want_focus == Some(id);
+            if grab {
                 *cx.want_focus = None;
             }
             let prof = cx.profiles.iter().find(|p| p.id == profile_id);
@@ -4329,6 +4681,10 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             }
             let font_local = prof.filter(|p| p.font_size > 0.0).map(|p| FontId::monospace(p.font_size));
             let resp = termview::show(ui, body, tid, session, theme_local.as_ref().unwrap_or(cx.theme), font_local.as_ref().unwrap_or(cx.font), &cwd_now, cx.alt_wheel);
+            if grab {
+                ui.memory_mut(|m| m.request_focus(tid));
+                ui.ctx().request_repaint();
+            }
             if let Some((text, check_targets)) = session.take_paste_ask() {
                 cx.actions.push(Action::PasteAsk(id, text, cx.detached, check_targets));
             }
@@ -4410,19 +4766,37 @@ fn search_bar(ui: &mut Ui, session: &mut Session, body: Rect, lang: Lang) -> boo
                 step = 1;
             }
             let changed = st.query != st.last_query;
+            let now = ui.input(|i| i.time);
+            let activity = session.output_stamp();
             if changed || step != 0 {
-                st.matches = search::find_all(&session.term.lock().unwrap_or_else(|e| e.into_inner()), &st.query);
-                st.last_query = st.query.clone();
-                let n = st.matches.len();
-                if n == 0 {
-                    st.current = 0;
-                } else if changed {
-                    st.current = n - 1;
+                let mut t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+                let base = session.hist_base();
+                if changed {
+                    st.compute(&t, base, activity);
+                    st.current = st.matches.len().saturating_sub(1);
                 } else {
-                    st.current = (st.current as i32 + step).rem_euclid(n as i32) as usize;
+                    // erst auf den aktuellen Stand bringen (derselbe Treffer), dann weiter (#250)
+                    st.refresh(&t, base, activity);
+                    let n = st.matches.len();
+                    st.current = if n == 0 { 0 } else { (st.current as i32 + step).rem_euclid(n as i32) as usize };
                 }
+                st.refreshed = now;
+                st.last_query = st.query.clone();
                 if let Some(m) = st.matches.get(st.current) {
-                    search::scroll_to(&mut session.term.lock().unwrap_or_else(|e| e.into_inner()), m.line);
+                    search::scroll_to(&mut t, m.line);
+                }
+            } else {
+                // Neue Ausgabe: Treffer nachführen, damit Markierungen nicht wandern und `current` gültig bleibt (#250);
+                // bei laufender Ausgabe höchstens viermal pro Sekunde.
+                let t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+                let base = session.hist_base();
+                if st.stale(&t, base, activity) {
+                    if now - st.refreshed >= 0.25 {
+                        st.refresh(&t, base, activity);
+                        st.refreshed = now;
+                    } else {
+                        ui.ctx().request_repaint_after(Duration::from_millis(260));
+                    }
                 }
             }
             let n = st.matches.len();
@@ -4885,6 +5259,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn return_focus_goes_to_the_last_focused_pane_or_the_top_left_one() {
+        let row = Node::grid(&[4, 7, 9], Dir::Horizontal).unwrap();
+        assert_eq!(return_focus_target(&row, 7), Some(7), "zuletzt fokussiert und sichtbar");
+        assert_eq!(return_focus_target(&row, 42), Some(row.leaf_ids()[0]), "unbekannt: erste Pane (oben links)");
+        assert_eq!(return_focus_target(&Node::Leaf(3), 0), Some(3));
+    }
+
+    /// Ein Bild mit Zentralbereich (Widget `term`) und optional einem Fenster/Tooltip; gibt zurück, ob ein Dialog offen ist.
+    fn focus_frame(ctx: &egui::Context, events: Vec<egui::Event>, window: bool, tooltip: bool, request: Option<bool>) -> bool {
+        let tid = Id::new("term");
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))), events, ..Default::default() };
+        let mut held = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // `Some(true)`: vor dem Widget fokussieren (alt), `Some(false)`: danach (#238)
+                if request == Some(true) {
+                    ui.memory_mut(|m| m.request_focus(tid));
+                }
+                let _ = ui.interact(Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 500.0)), tid, Sense::click_and_drag());
+                if request == Some(false) {
+                    ui.memory_mut(|m| m.request_focus(tid));
+                }
+            });
+            if window {
+                egui::Window::new("dlg").show(ctx, |ui| ui.label("x"));
+            }
+            if tooltip {
+                egui::Area::new(Id::new("toast")).order(egui::Order::Tooltip).show(ctx, |ui| ui.label("t"));
+            }
+            held = focus_held_elsewhere(ctx);
+        });
+        held
+    }
+
+    #[test]
+    fn return_focus_respects_open_dialogs_and_survives_the_tab_click() {
+        let ctx = egui::Context::default();
+        assert!(!focus_frame(&ctx, vec![], false, false, None));
+        assert!(!focus_frame(&ctx, vec![], false, true, None), "Toasts/Tooltips halten keinen Fokus");
+        assert!(focus_frame(&ctx, vec![], true, false, None), "offenes Fenster");
+        let _ = focus_frame(&ctx, vec![], false, false, None);
+        assert!(!focus_frame(&ctx, vec![], false, false, None), "Fenster wieder zu");
+        // Klick auf einen Reiter oberhalb des Terminals: Druck in einem, Loslassen im nächsten Bild
+        let at = Pos2::new(20.0, 20.0);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let tid = Id::new("term");
+        for (before, keeps) in [(true, false), (false, true)] {
+            let ctx = egui::Context::default();
+            let _ = focus_frame(&ctx, vec![egui::Event::PointerMoved(at)], false, false, None);
+            let _ = focus_frame(&ctx, vec![press(true)], false, false, None);
+            let _ = focus_frame(&ctx, vec![press(false)], false, false, Some(before));
+            let _ = focus_frame(&ctx, vec![], false, false, None);
+            assert_eq!(ctx.memory(|m| m.has_focus(tid)), keeps, "Fokus vor dem Widget angefordert: {before}");
+        }
+    }
+
+    #[test]
     fn wsl_spawn_cwd_fallbacks() {
         // Profil mit eigenem `--cd`: ein Linux-/WSL-Ordner wird nie zum Windows-Startordner.
         assert!(spawn_cwd_is_windows(r"C:\Work"));
@@ -5102,6 +5533,23 @@ mod tests {
     }
 }
 
+/// Ziel beim Zurück in den Terminal Hub (#238): die zuletzt fokussierte Sitzung, wenn sie im Layout steht, sonst die
+/// erste Pane (oben links).
+fn return_focus_target(layout: &Node, focused: u64) -> Option<u64> {
+    let ids = layout.leaf_ids();
+    if ids.contains(&focused) { Some(focused) } else { ids.first().copied() }
+}
+
+/// Hält gerade ein Dialog, Fenster oder Popup den Fokus bzw. ist eines offen? Dann holt sich ein Terminal den Fokus
+/// nicht von selbst (#238). Fenster und Modale liegen in den Ebenen `Middle`/`Foreground`; Tooltips und Toasts
+/// (`Tooltip`) zählen nicht.
+fn focus_held_elsewhere(ctx: &egui::Context) -> bool {
+    egui::Popup::is_any_open(ctx)
+        || ctx.memory(|m| {
+            m.top_modal_layer().is_some() || m.areas().visible_layer_ids().iter().any(|l| matches!(l.order, egui::Order::Middle | egui::Order::Foreground))
+        })
+}
+
 /// „+“-Knopf am Rand eines Terminals: erscheint, wenn die Maus nahe an einem Rand ist, und teilt dort den Bereich.
 /// `bottom = false`: nicht am unteren Rand (ein Chat hat dort sein Eingabefeld).
 fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx, bottom: bool) {
@@ -5276,4 +5724,78 @@ pub(super) enum ChatSendResult {
     Empty,
     /// Keine Chat-Sitzung mit dieser Id.
     NotAChat,
+}
+
+#[cfg(test)]
+mod shortcut_match_tests {
+    //! Feste und eigene Kürzel (#254): genaue Modifikatoren, physische Zifferntasten, Ziele; Knöpfe im Bereichskopf (#259).
+    use super::*;
+
+    fn key(k: Key, physical: Key, m: Modifiers) -> Event {
+        Event::Key { key: k, physical_key: Some(physical), pressed: true, repeat: false, modifiers: m }
+    }
+
+    /// Ein Bild mit `events`; `f` prüft/verbraucht. Liefert (Ergebnis, übrig gebliebene Tasten-Ereignisse).
+    fn run(events: Vec<Event>, f: impl Fn(&mut egui::InputState) -> bool) -> (bool, usize) {
+        let ctx = egui::Context::default();
+        let (mut hit, mut left) = (false, 0);
+        let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
+            hit = ctx.input_mut(|i| f(i));
+            left = ctx.input(|i| i.events.iter().filter(|e| matches!(e, Event::Key { .. })).count());
+        });
+        (hit, left)
+    }
+
+    const CTRL: Modifiers = Modifiers { ctrl: true, command: true, alt: false, shift: false, mac_cmd: false };
+
+    #[test]
+    fn extra_shift_or_altgr_is_another_shortcut() {
+        // Strg+1 = Reiter „Terminal Hub“
+        assert_eq!(run(vec![key(Key::Num1, Key::Num1, CTRL)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num1, true)), (true, 0));
+        // Strg+Umschalt+1 (Projekt 1) und Strg+AltGr+2 („²“ auf deutschen Tastaturen) lösen Strg+1/2 nicht aus
+        let cs = CTRL | Modifiers::SHIFT;
+        assert_eq!(run(vec![key(Key::Exclamationmark, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num1, true)), (false, 1));
+        let altgr = CTRL | Modifiers::ALT;
+        assert_eq!(run(vec![key(Key::Num2, Key::Num2, altgr)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num2, true)), (false, 1));
+        // … wohl aber Strg+Umschalt+1 das Projekt-Kürzel, auch wenn die Belegung „!“ oder „/“ liefert (physisch)
+        for logical in [Key::Exclamationmark, Key::Slash, Key::Num1] {
+            assert_eq!(run(vec![key(logical, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::Num1, true)), (true, 0), "{logical:?}");
+        }
+        // Eigene Kürzel logisch: Strg+Umschalt+T nicht durch Strg+Alt+Umschalt+T
+        assert_eq!(run(vec![key(Key::T, Key::T, cs | Modifiers::ALT)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::T, false)), (false, 1));
+        assert_eq!(run(vec![key(Key::T, Key::T, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::T, false)), (true, 0));
+        // Ohne `physical` zählt nur die logische Taste
+        assert_eq!(run(vec![key(Key::Exclamationmark, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::Num1, false)), (false, 1));
+    }
+
+    #[test]
+    fn focus_target_only_where_a_pane_lies() {
+        let mut rects = HashMap::new();
+        rects.insert(1, Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 300.0)));
+        rects.insert(2, Rect::from_min_size(Pos2::new(406.0, 0.0), Vec2::new(400.0, 300.0)));
+        rects.insert(3, Rect::from_min_size(Pos2::new(406.0, 306.0), Vec2::new(400.0, 300.0)));
+        assert_eq!(focus_target(&rects, 1, Nav::Right), Some(2));
+        assert_eq!(focus_target(&rects, 1, Nav::Left), None, "links liegt nichts: Taste bleibt beim Terminal");
+        assert_eq!(focus_target(&rects, 1, Nav::Up), None);
+        assert_eq!(focus_target(&rects, 2, Nav::Down), Some(3));
+        assert_eq!(focus_target(&rects, 3, Nav::Left), Some(1));
+        assert_eq!(focus_target(&HashMap::new(), 1, Nav::Right), None);
+    }
+
+    #[test]
+    fn narrow_pane_headers_keep_their_buttons_inside() {
+        let all = pane_buttons(false, true, true);
+        assert_eq!(all, vec![PaneBtn::Close, PaneBtn::Minimize, PaneBtn::Reload, PaneBtn::Detach, PaneBtn::SplitDown, PaneBtn::SplitRight, PaneBtn::Link]);
+        assert_eq!(pane_buttons(true, false, true), vec![PaneBtn::Close, PaneBtn::Minimize], "abgedockt");
+        for w in [MIN_PANE_W, 140.0, 174.0, 200.0, 260.0, 400.0, 1000.0] {
+            let n = pane_buttons_fit(w, all.len());
+            assert!(n >= 2, "Schließen und Minimieren immer ({w})");
+            // Knöpfe plus Luft und ein Stück Name passen in den Kopf: nichts ragt in den Nachbarn
+            if n > 2 {
+                assert!(PANE_BTN_W * n as f32 + 16.0 + 60.0 <= w + 0.01, "{n} Knöpfe in {w}");
+            }
+        }
+        assert_eq!(pane_buttons_fit(1000.0, all.len()), all.len(), "breit: alle");
+        assert_eq!(pane_buttons_fit(MIN_PANE_W, all.len()), 2);
+    }
 }

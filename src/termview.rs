@@ -10,7 +10,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::CursorShape;
 use eframe::egui::{
-    self, Align2, Color32, Event, EventFilter, FontId, Id, Key, Modifiers, Pos2, Rect, Response,
+    self, Color32, Event, EventFilter, FontId, Id, Key, Modifiers, Pos2, Rect, Response,
     Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 
@@ -71,7 +71,34 @@ pub fn show(
     }
     let cursor_on = cursor_blink_phase(ui, id, session, focused);
     paint(ui, rect, inner, session, theme, font, cs, focused, cursor_on, osc8_hover.as_ref());
+    if focused {
+        ime_output(ui, rect, inner, session, theme, font, cs);
+    }
     response
+}
+
+/// IME (#248): Solange das Terminal den Fokus hat, die Eingabemethode erlauben (ohne `PlatformOutput::ime` schaltet
+/// egui-winit sie für das Fenster ab) und ihr Fenster an den Cursor setzen; ein laufender Zwischenstand
+/// (`Session::ime_preedit`) wird über dem Cursor gezeichnet, unterstrichen.
+fn ime_output(ui: &Ui, rect: Rect, inner: Rect, session: &Session, theme: &Theme, font: &FontId, cs: Vec2) {
+    let (col, row) = {
+        let t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+        let p = t.grid().cursor.point;
+        (p.column.0, p.line.0 + t.grid().display_offset() as i32)
+    };
+    let pos = Pos2::new(inner.min.x + col as f32 * cs.x, inner.min.y + row.clamp(0, session.rows as i32 - 1) as f32 * cs.y);
+    let mut cursor_rect = Rect::from_min_size(pos, Vec2::new(1.0, cs.y));
+    if !session.ime_preedit.is_empty() {
+        let painter = ui.painter_at(rect);
+        let galley = painter.layout_no_wrap(session.ime_preedit.clone(), font.clone(), theme.fg);
+        let r = Rect::from_min_size(pos, Vec2::new(galley.size().x.max(cs.x), cs.y));
+        painter.rect_filled(r, 0.0, theme.bg.to_opaque());
+        painter.galley(pos, galley, theme.fg);
+        painter.line_segment([Pos2::new(r.min.x, r.max.y - 1.0), Pos2::new(r.max.x, r.max.y - 1.0)], Stroke::new(1.0_f32, theme.fg));
+        cursor_rect = Rect::from_min_size(Pos2::new(r.max.x, pos.y), Vec2::new(1.0, cs.y));
+    }
+    let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+    ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: to_global * rect, cursor_rect: to_global * cursor_rect }));
 }
 
 /// Einstellung „Blinkender Cursor“ (#183); die App schreibt sie jedes Bild (wie `mcp::LEVEL`).
@@ -213,23 +240,26 @@ fn paint(
     let selection = content.selection;
     let cursor = content.cursor;
 
-    // Suchtreffer
+    // Suchtreffer je sichtbarer Zeile: (erste Spalte, Ende, aktueller Treffer). Gezeichnet wird je Zelle NACH deren
+    // Hintergrund, sonst verdecken farbige Zeilen (Diffs, Statuszeilen) die Markierung (#250).
+    let hl = Color32::from_rgba_unmultiplied(0xe5, 0xc0, 0x7b, 90);
+    let hl_cur = Color32::from_rgba_unmultiplied(0xd9, 0x77, 0x57, 170);
+    let mut hits: Vec<Vec<(usize, usize, bool)>> = Vec::new();
     if let Some(st) = &session.search {
-        let hl = Color32::from_rgba_unmultiplied(0xe5, 0xc0, 0x7b, 90);
-        let hl_cur = Color32::from_rgba_unmultiplied(0xd9, 0x77, 0x57, 170);
+        hits = vec![Vec::new(); rows.max(0) as usize];
         for (i, m) in st.matches.iter().enumerate() {
             let row = m.line + offset;
             if row < 0 || row >= rows {
                 continue;
             }
-            let r = Rect::from_min_size(
-                Pos2::new(inner.min.x + m.col as f32 * cs.x, inner.min.y + row as f32 * cs.y),
-                Vec2::new(m.len as f32 * cs.x, cs.y),
-            );
-            painter.rect_filled(r, 2.0, if i == st.current { hl_cur } else { hl });
+            hits[row as usize].push((m.col, m.col + m.len, i == st.current));
         }
     }
+    let hit_at = |row: i32, col: usize| -> Option<bool> { hits.get(row as usize)?.iter().find(|(a, b, _)| col >= *a && col < *b).map(|h| h.2) };
 
+    // Zelle des gefüllten Block-Cursors (nur fokussiert und in der hellen Blinkphase); die anderen Formen zeichnet der
+    // Abschnitt „Cursor“ unten.
+    let block_cursor = (focused && cursor_on && matches!(cursor.shape, CursorShape::Block)).then_some(cursor.point);
     let cells: Vec<_> = content.display_iter.collect();
     let mut skip_until = 0usize;
     // OSC-8-Unterstreichung je Zeile als zusammenhängender Lauf (gepunktet bzw. beim Strg-Hover durchgezogen), damit das
@@ -273,10 +303,19 @@ fn paint(
         if selected {
             bg = theme.selection;
         }
+        // Block-Cursor als Zellhintergrund: das Zeichen darüber läuft durch den normalen Weg (breite Zeichen zwei Zellen,
+        // Kombinationszeichen, fett/kursiv, Emoji) in der deckenden Hintergrundfarbe (#252).
+        if block_cursor == Some(ic.point) {
+            bg = theme.cursor;
+            fg = theme.bg.to_opaque();
+        }
         fg = ensure_contrast(fg, bg);
         let cell_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, cs.y));
         if bg != theme.bg {
             painter.rect_filled(cell_rect, 0.0, bg);
+        }
+        if let Some(cur) = hit_at(row, ic.point.column.0) {
+            painter.rect_filled(cell_rect, 0.0, if cur { hl_cur } else { hl });
         }
         let ch = cell.c;
         // Emoji-Sequenzen (ZWJ, Flaggen, Hautfarbe, Keycap) zu einem Bild zusammensetzen.
@@ -355,7 +394,9 @@ fn paint(
         if row >= 0 && row < rows {
             let x = inner.min.x + cursor.point.column.0 as f32 * cs.x;
             let y = inner.min.y + row as f32 * cs.y;
-            let cr = Rect::from_min_size(Pos2::new(x, y), cs);
+            // Auf einem breiten Zeichen ist der Cursor zwei Zellen breit (#252).
+            let wide = term.grid()[cursor.point].flags.contains(Flags::WIDE_CHAR);
+            let cr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(if wide { cs.x * 2.0 } else { cs.x }, cs.y));
             if !focused {
                 painter.rect_stroke(cr, 0.0, Stroke::new(1.0_f32, theme.cursor), StrokeKind::Inside);
             } else if !cursor_on {
@@ -379,13 +420,8 @@ fn paint(
                     CursorShape::HollowBlock => {
                         painter.rect_stroke(cr, 0.0, Stroke::new(1.0_f32, theme.cursor), StrokeKind::Inside);
                     }
-                    _ => {
-                        painter.rect_filled(cr, 0.0, theme.cursor);
-                        let ch = term.grid()[cursor.point].c;
-                        if ch != ' ' && ch != '\0' {
-                            painter.text(cr.min, Align2::LEFT_TOP, ch, font.clone(), theme.bg);
-                        }
-                    }
+                    // Block: schon mit der Zelle gezeichnet (`block_cursor`).
+                    _ => {}
                 }
             }
         }
@@ -546,9 +582,11 @@ fn cell_at(s: &Session, inner: Rect, cs: Vec2, pos: Pos2) -> (usize, usize) {
     (col, row)
 }
 
+/// Mausberichte gehen nur an DIESE Sitzung: ohne Broadcast-Mitschnitt, denn Klickpositionen passen nicht zu den
+/// anderen Panes (#247).
 fn write_mouse(s: &Session, seq: Option<Vec<u8>>) {
     if let Some(seq) = seq {
-        s.write(&seq);
+        s.write_raw(&seq);
     }
 }
 
@@ -683,7 +721,13 @@ fn handle_links(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
         return (false, None);
     }
     let chars = session.row_chars(row as usize);
-    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else { return (false, None) };
+    let Some(link) = crate::links::find(&chars, col as usize, cwd, &session.shell_id) else {
+        // Pfad auf einem Netzlaufwerk/`\\wsl$` wird gerade im Hilfsthread geprüft (#251): gleich noch einmal schauen.
+        if crate::links::checks_pending() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        return (false, None);
+    };
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     session.hover_link = Some((row as usize, link.start, link.end, link.target.clone()));
     if response.clicked_by(egui::PointerButton::Primary) {
@@ -783,13 +827,16 @@ fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
                             let btn = if lines > 0 { WHEEL_UP } else { WHEEL_DOWN };
                             let seq = mouse_seq(MouseEncoding::of(mode), btn | mouse_mod_bits(mods), col, row, false);
                             if let Some(seq) = seq {
-                                session.write(&seq.repeat(lines.unsigned_abs() as usize));
+                                // Wie `write_mouse`: nicht an Broadcast-Ziele (#247).
+                                session.write_raw(&seq.repeat(lines.unsigned_abs() as usize));
                             }
                         }
                     }
                     WheelAction::Arrows => {
                         let seq = wheel_arrow(lines > 0, mode.contains(TermMode::APP_CURSOR));
-                        session.write(&seq.repeat(lines.unsigned_abs() as usize));
+                        // Mausrad-Pfeile (z. B. in `less`) gelten nur dieser Pane, sonst blättern die anderen Shells
+                        // durch ihren Verlauf (#247).
+                        session.write_raw(&seq.repeat(lines.unsigned_abs() as usize));
                     }
                     WheelAction::Scrollback => {
                         session.term.lock().unwrap_or_else(|e| e.into_inner()).scroll_display(Scroll::Delta(lines));
@@ -799,6 +846,41 @@ fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
             }
         }
     }
+}
+
+/// Zeichen der aktuellen Tastaturbelegung für die Taste mit Scancode `sc` bei gedrücktem Strg+Alt (= AltGr-Ebene) und
+/// ggf. Umschalt (#249). `ToUnicodeEx` mit Flag 4 lässt den Zustand der Tottasten unberührt. Nur druckbare Zeichen;
+/// eine Tottaste oder eine Belegung ohne AltGr-Ebene ergibt `None`.
+#[cfg(windows)]
+fn layout_char(sc: u16, shift: bool) -> Option<String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, GetKeyboardLayout, MapVirtualKeyExW, ToUnicodeEx, MAPVK_VSC_TO_VK_EX};
+    // SAFETY: reine Abfragen; `state` und `buf` leben während der Aufrufe, die Längen stimmen.
+    unsafe {
+        let hkl = GetKeyboardLayout(0);
+        let vk = MapVirtualKeyExW(sc as u32, MAPVK_VSC_TO_VK_EX, hkl);
+        if vk == 0 {
+            return None;
+        }
+        let mut state = [0u8; 256];
+        state[0x11] = 0x80; // VK_CONTROL
+        state[0x12] = 0x80; // VK_MENU
+        if shift {
+            state[0x10] = 0x80; // VK_SHIFT
+        }
+        state[0x14] = (GetKeyState(0x14) & 1) as u8; // VK_CAPITAL (eingerastet)
+        let mut buf = [0u16; 8];
+        let n = ToUnicodeEx(vk, sc as u32, state.as_ptr(), buf.as_mut_ptr(), buf.len() as i32, 4, hkl);
+        if n <= 0 {
+            return None;
+        }
+        let s = String::from_utf16(&buf[..n as usize]).ok()?;
+        (!s.is_empty() && s.chars().all(|c| !c.is_control())).then_some(s)
+    }
+}
+
+#[cfg(not(windows))]
+fn layout_char(_sc: u16, _shift: bool) -> Option<String> {
+    None
 }
 
 /// Windows: ist die Taste (virtueller Tastencode) gerade gedrückt?
@@ -898,10 +980,23 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
     // Das vorige Ereignis war ein nicht verbrauchter Tastendruck. Text mit reinem Alt gilt nur dann: Kürzel des Hubs
     // (Alt+1…9, Alt+Umschalt+1/2, eigene Alt-Belegungen) verbraucht egui nur als Taste, ihr Text bliebe übrig.
     let mut after_key = false;
+    // Modifikatoren des Tastendrucks, zu dem ein folgendes `Event::Text` gehört: `i.modifiers` ist der Stand am Ende des
+    // Bilds – ein Buchstabe und ein danach gedrücktes Alt/Strg im selben Bild kämen sonst als `ESC a` an (#252).
+    let mut key_mods = Modifiers::NONE;
+    // Strg+C/Strg+X (Copy/Cut) als Taste gesendet: für kitty-Flag 2 das Loslassen vormerken (#252).
+    let remember_down = |key: Key| {
+        let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+        if !down.1.iter().any(|(k, _)| *k == key) {
+            down.1.push((key, false));
+        }
+    };
     for (i, ev) in events.iter().enumerate() {
         let was_after_key = std::mem::take(&mut after_key);
         match ev {
-            Event::WindowFocused(false) => KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner()).1.clear(),
+            Event::WindowFocused(false) => {
+                KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
+                session.ime_preedit.clear();
+            }
             // egui-winit wandelt Strg+C / Strg+X (und Strg+Einfg / Umschalt+Entf) in Copy/Cut um und
             // liefert dafür KEIN Key-Ereignis – ohne diese Zweige käme ^C nie im Terminal an.
             Event::Copy => {
@@ -910,20 +1005,42 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                     ui.ctx().copy_text(t);
                     session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
                 } else if !ui.input(|i| i.modifiers.shift) && !insert_held() {
-                    key_input(session, vtkeys::KeyPress::new(Key::C, Modifiers::CTRL));
+                    if !key_input(session, vtkeys::KeyPress::new(Key::C, Modifiers::CTRL)).bytes.is_empty() {
+                        remember_down(Key::C);
+                    }
                 }
             }
             Event::Cut => {
                 let m = ui.input(|i| i.modifiers);
-                if m.ctrl {
-                    key_input(session, vtkeys::KeyPress::new(Key::X, Modifiers::CTRL));
-                } else {
-                    // Umschalt+Entf
-                    key_input(session, vtkeys::KeyPress::new(Key::Delete, m));
+                let key = if m.ctrl { Key::X } else { Key::Delete }; // sonst Umschalt+Entf
+                let mods = if m.ctrl { Modifiers::CTRL } else { m };
+                if !key_input(session, vtkeys::KeyPress::new(key, mods)).bytes.is_empty() {
+                    remember_down(key);
                 }
             }
+            // IME (#248): Zwischenstand merken (wird am Cursor gezeichnet), Übernommenes wie getippten Text senden.
+            Event::Ime(ime) => match ime {
+                egui::ImeEvent::Preedit(t) => session.ime_preedit = t.clone(),
+                egui::ImeEvent::Disabled => session.ime_preedit.clear(),
+                egui::ImeEvent::Enabled => {}
+                egui::ImeEvent::Commit(t) => {
+                    session.ime_preedit.clear();
+                    if !t.is_empty() {
+                        let tee = vtkeys::TeeInput::Text { text: t.clone(), mods: Modifiers::NONE, numpad: false };
+                        let bytes = vtkeys::encode_text(t, Modifiers::NONE, false, mode);
+                        if bytes.is_empty() {
+                            session.write_input(&[], tee);
+                        } else {
+                            send_input(session, &bytes, tee);
+                        }
+                    }
+                }
+            },
+            // Während einer IME-Eingabe gehören Tasten (Leertaste zum Umwandeln, Enter zum Übernehmen, Rück, Esc) dem
+            // IME; egui-winit meldet sie trotzdem als Tasten. Nicht ans Programm senden (#248).
+            Event::Text(_) | Event::Key { .. } if !session.ime_preedit.is_empty() => {}
             Event::Text(t) => {
-                let m = ui.input(|i| i.modifiers);
+                let m = if was_after_key { key_mods } else { ui.input(|i| i.modifiers) };
                 if m.alt && !m.ctrl && !was_after_key {
                     continue; // Rest eines vom Hub verbrauchten Alt-Kürzels
                 }
@@ -961,6 +1078,7 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                         }
                     }
                     after_key = true;
+                    key_mods = modifiers;
                 }
                 let text = match events.get(i + 1) {
                     Some(Event::Text(t)) => Some(t.as_str()),
@@ -983,6 +1101,16 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                 let out = key_input(session, kp);
                 if out.eat_text && text.is_some() {
                     skip = Some(i + 1);
+                }
+                // Linkes Strg+Alt statt AltGr (#249): das Zeichen der Belegung als Text senden, wie es AltGr täte.
+                if let Some(t) = vtkeys::ctrl_alt_text_scan(&kp, !out.bytes.is_empty()).and_then(|sc| layout_char(sc, modifiers.shift)) {
+                    let tee = vtkeys::TeeInput::Text { text: t.clone(), mods: modifiers, numpad: false };
+                    let bytes = vtkeys::encode_text(&t, modifiers, false, mode);
+                    if bytes.is_empty() {
+                        session.write_input(&[], tee);
+                    } else {
+                        send_input(session, &bytes, tee);
+                    }
                 }
                 if !out.bytes.is_empty() && phase != vtkeys::Phase::Release {
                     let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());

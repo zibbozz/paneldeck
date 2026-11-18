@@ -5,7 +5,8 @@
 
 use super::helpers::color_of;
 use super::ref_inputs::ref_value_editor;
-use super::ticket_data::search_tickets;
+use super::ticket_data::{search_tickets, used_labels, LabelCounts};
+use super::value_suggest::{suggest_edit, Mode};
 use super::ticket_draft::{field_hint, Draft};
 use super::widgets;
 use crate::markdown::{is_safe_url, rich_text_field_ex, FieldOpts};
@@ -28,7 +29,8 @@ pub(super) struct InCx<'a> {
     pub ticket_id: Option<i64>,
     /// Projektschlüssel, die in Markdown als Ticket-Verweis gelten.
     pub prefixes: &'a [String],
-    pub labels: &'a [String],
+    /// Zählungen der benutzten Labels (Vorschläge mit Anzahl, #239).
+    pub labels: &'a LabelCounts,
     /// Eindeutige Grundlage für Widget-Kennungen (je Dialog/Ticket verschieden).
     pub id: Id,
 }
@@ -350,32 +352,25 @@ pub(super) fn field_input(ui: &mut Ui, ic: &InCx, f: &Field, d: &mut Draft, expl
                 }
             });
             let id = salt.with("add");
-            let r = ui.add_sized([220.0, 26.0], egui::TextEdit::singleline(&mut d.text).id(id).hint_text(lang.t("Label eingeben, Enter fügt hinzu", "Type a label, Enter adds it")).margin(egui::Margin::symmetric(8, 4)));
+            // Benutzte Werte dieses Feldes im Projekt mit Anzahl, neu gezählt erst nach einer Änderung (#239).
+            let used = used_labels(ic.labels, ic.conn, ic.project_id, f);
+            let hint = lang.t("Label eingeben, Enter fügt hinzu", "Type a label, Enter adds it");
+            let out = suggest_edit(ui, id, &mut d.text, &used, &list, Mode::Single, lang, |ui, te| ui.add_sized([220.0, 26.0], te.hint_text(hint).margin(egui::Margin::symmetric(8, 4))));
+            let r = out.response;
             if r.changed() {
                 d.err = None;
             }
-            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !d.text.trim().is_empty() {
+            if let Some(name) = out.picked {
+                d.add_label(&name);
+                ev.changed = true;
+                ev.commit = true;
+                ui.memory_mut(|m| m.request_focus(id));
+            } else if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !d.text.trim().is_empty() {
                 let t = d.text.clone();
                 d.add_label(&t);
                 ev.changed = true;
                 ev.commit = true;
                 ui.memory_mut(|m| m.request_focus(id));
-            }
-            let q = d.text.trim().to_lowercase();
-            if !q.is_empty() {
-                let sugg: Vec<&String> = ic.labels.iter().filter(|l| l.to_lowercase().contains(&q) && !list.iter().any(|x| x.eq_ignore_ascii_case(l))).take(6).collect();
-                if !sugg.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(lang.t("Vorhanden:", "Existing:")).small().color(style::dim(ui)));
-                        for s in sugg {
-                            if ui.small_button(s).clicked() {
-                                d.add_label(s);
-                                ev.changed = true;
-                                ev.commit = true;
-                            }
-                        }
-                    });
-                }
             }
         }
         FieldKind::Ticket => {
