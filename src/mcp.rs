@@ -1243,7 +1243,8 @@ mod tests {
         });
         let t = std::time::Instant::now();
         assert_eq!(probe_at(port, "x", PROBE_TIMEOUT), None);
-        assert!(t.elapsed() < std::time::Duration::from_millis(2000), "{:?}", t.elapsed());
+        // Frist 1,5 s; Spielraum für ausgelastete CI-Rechner, aber deutlich unter den 4 s, die die Gegenseite schweigt.
+        assert!(t.elapsed() < std::time::Duration::from_millis(3000), "{:?}", t.elapsed());
         let _ = hold.join();
         // nichts lauscht: sofort None
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -1259,7 +1260,9 @@ mod tests {
             assert!(req.contains("\"_level\"") && req.contains("\"tok\""));
             s.write_all(br#"{"ok":true,"result":{"level":2,"expert":true}}"#).unwrap();
         });
-        assert_eq!(probe_at(port, "tok", PROBE_TIMEOUT), Some(HubInfo { level: McpLevel::Control, expert: true }));
+        // Hier geht es um die Antwort, nicht um die Frist: großzügig, damit ein ausgelasteter CI-Rechner (macOS) den
+        // Server-Faden nicht zu spät startet.
+        assert_eq!(probe_at(port, "tok", std::time::Duration::from_secs(20)), Some(HubInfo { level: McpLevel::Control, expert: true }));
         srv.join().unwrap();
     }
 
