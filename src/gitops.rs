@@ -510,7 +510,7 @@ zwei
         // Ein geänderter Commit des Untermoduls erscheint weiter
         std::fs::write(sup.join("sub").join("b.txt"), "b\n").unwrap();
         git(&sup.join("sub"), &["-c", "filter.evil.clean=", "add", "b.txt"]).unwrap();
-        git(&sup.join("sub"), &["-c", "filter.evil.clean=", "commit", "-q", "-m", "b"]).unwrap();
+        git(&sup.join("sub"), &["-c", "filter.evil.clean=", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "b"]).unwrap();
         let _ = std::fs::remove_file(&marker);
         touch(&sup.join("sub").join("a.txt"));
         let ch = status(&sup).unwrap();
