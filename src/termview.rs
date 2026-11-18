@@ -10,7 +10,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::CursorShape;
 use eframe::egui::{
-    self, Align2, Color32, Event, EventFilter, FontId, Id, Key, Modifiers, Pos2, Rect, Response,
+    self, Color32, Event, EventFilter, FontId, Id, Key, Modifiers, Pos2, Rect, Response,
     Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 
@@ -230,6 +230,9 @@ fn paint(
     }
     let hit_at = |row: i32, col: usize| -> Option<bool> { hits.get(row as usize)?.iter().find(|(a, b, _)| col >= *a && col < *b).map(|h| h.2) };
 
+    // Zelle des gefüllten Block-Cursors (nur fokussiert und in der hellen Blinkphase); die anderen Formen zeichnet der
+    // Abschnitt „Cursor“ unten.
+    let block_cursor = (focused && cursor_on && matches!(cursor.shape, CursorShape::Block)).then_some(cursor.point);
     let cells: Vec<_> = content.display_iter.collect();
     let mut skip_until = 0usize;
     // OSC-8-Unterstreichung je Zeile als zusammenhängender Lauf (gepunktet bzw. beim Strg-Hover durchgezogen), damit das
@@ -272,6 +275,12 @@ fn paint(
         let selected = selection.is_some_and(|s| s.contains(Point::new(ic.point.line, ic.point.column)));
         if selected {
             bg = theme.selection;
+        }
+        // Block-Cursor als Zellhintergrund: das Zeichen darüber läuft durch den normalen Weg (breite Zeichen zwei Zellen,
+        // Kombinationszeichen, fett/kursiv, Emoji) in der deckenden Hintergrundfarbe (#252).
+        if block_cursor == Some(ic.point) {
+            bg = theme.cursor;
+            fg = theme.bg.to_opaque();
         }
         fg = ensure_contrast(fg, bg);
         let cell_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, cs.y));
@@ -358,7 +367,9 @@ fn paint(
         if row >= 0 && row < rows {
             let x = inner.min.x + cursor.point.column.0 as f32 * cs.x;
             let y = inner.min.y + row as f32 * cs.y;
-            let cr = Rect::from_min_size(Pos2::new(x, y), cs);
+            // Auf einem breiten Zeichen ist der Cursor zwei Zellen breit (#252).
+            let wide = term.grid()[cursor.point].flags.contains(Flags::WIDE_CHAR);
+            let cr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(if wide { cs.x * 2.0 } else { cs.x }, cs.y));
             if !focused {
                 painter.rect_stroke(cr, 0.0, Stroke::new(1.0_f32, theme.cursor), StrokeKind::Inside);
             } else if !cursor_on {
@@ -382,13 +393,8 @@ fn paint(
                     CursorShape::HollowBlock => {
                         painter.rect_stroke(cr, 0.0, Stroke::new(1.0_f32, theme.cursor), StrokeKind::Inside);
                     }
-                    _ => {
-                        painter.rect_filled(cr, 0.0, theme.cursor);
-                        let ch = term.grid()[cursor.point].c;
-                        if ch != ' ' && ch != '\0' {
-                            painter.text(cr.min, Align2::LEFT_TOP, ch, font.clone(), theme.bg);
-                        }
-                    }
+                    // Block: schon mit der Zelle gezeichnet (`block_cursor`).
+                    _ => {}
                 }
             }
         }
@@ -912,6 +918,16 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
     // Das vorige Ereignis war ein nicht verbrauchter Tastendruck. Text mit reinem Alt gilt nur dann: Kürzel des Hubs
     // (Alt+1…9, Alt+Umschalt+1/2, eigene Alt-Belegungen) verbraucht egui nur als Taste, ihr Text bliebe übrig.
     let mut after_key = false;
+    // Modifikatoren des Tastendrucks, zu dem ein folgendes `Event::Text` gehört: `i.modifiers` ist der Stand am Ende des
+    // Bilds – ein Buchstabe und ein danach gedrücktes Alt/Strg im selben Bild kämen sonst als `ESC a` an (#252).
+    let mut key_mods = Modifiers::NONE;
+    // Strg+C/Strg+X (Copy/Cut) als Taste gesendet: für kitty-Flag 2 das Loslassen vormerken (#252).
+    let remember_down = |key: Key| {
+        let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
+        if !down.1.iter().any(|(k, _)| *k == key) {
+            down.1.push((key, false));
+        }
+    };
     for (i, ev) in events.iter().enumerate() {
         let was_after_key = std::mem::take(&mut after_key);
         match ev {
@@ -924,20 +940,21 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                     ui.ctx().copy_text(t);
                     session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
                 } else if !ui.input(|i| i.modifiers.shift) && !insert_held() {
-                    key_input(session, vtkeys::KeyPress::new(Key::C, Modifiers::CTRL));
+                    if !key_input(session, vtkeys::KeyPress::new(Key::C, Modifiers::CTRL)).bytes.is_empty() {
+                        remember_down(Key::C);
+                    }
                 }
             }
             Event::Cut => {
                 let m = ui.input(|i| i.modifiers);
-                if m.ctrl {
-                    key_input(session, vtkeys::KeyPress::new(Key::X, Modifiers::CTRL));
-                } else {
-                    // Umschalt+Entf
-                    key_input(session, vtkeys::KeyPress::new(Key::Delete, m));
+                let key = if m.ctrl { Key::X } else { Key::Delete }; // sonst Umschalt+Entf
+                let mods = if m.ctrl { Modifiers::CTRL } else { m };
+                if !key_input(session, vtkeys::KeyPress::new(key, mods)).bytes.is_empty() {
+                    remember_down(key);
                 }
             }
             Event::Text(t) => {
-                let m = ui.input(|i| i.modifiers);
+                let m = if was_after_key { key_mods } else { ui.input(|i| i.modifiers) };
                 if m.alt && !m.ctrl && !was_after_key {
                     continue; // Rest eines vom Hub verbrauchten Alt-Kürzels
                 }
@@ -975,6 +992,7 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                         }
                     }
                     after_key = true;
+                    key_mods = modifiers;
                 }
                 let text = match events.get(i + 1) {
                     Some(Event::Text(t)) => Some(t.as_str()),
