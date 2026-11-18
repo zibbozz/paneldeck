@@ -616,7 +616,9 @@ impl App {
         v.push((lang.t("Neues Projekt …", "New project …").into(), String::new(), Action::NewProjectPrompt));
         for (i, p) in self.projects.iter().enumerate() {
             if p.id != self.active_project {
-                v.push((format!("{} {}", lang.t("Projekt wechseln:", "Switch project:"), p.name), keys::pretty(&format!("Ctrl+Shift+{}", i + 1), lang == Lang::De), Action::SwitchProject(p.id)));
+                // Feste Kürzel gibt es nur für die ersten neun Projekte (#254)
+                let hint = if i < 9 { keys::pretty(&format!("Ctrl+Shift+{}", i + 1), lang == Lang::De) } else { String::new() };
+                v.push((format!("{} {}", lang.t("Projekt wechseln:", "Switch project:"), p.name), hint, Action::SwitchProject(p.id)));
             }
         }
         for (id, e) in &self.entries {

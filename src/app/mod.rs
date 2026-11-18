@@ -2472,7 +2472,7 @@ impl App {
             ("mode_tasks_alt", titlebar::Mode::Tasks),
         ] {
             if let Some((m, k)) = self.binding(id) {
-                if ctx.input_mut(|i| consume_key_physical(i, m, k)) {
+                if ctx.input_mut(|i| consume_key_exact(i, m, k, true)) {
                     self.set_mode(mode);
                 }
             }
@@ -2528,23 +2528,31 @@ impl App {
         let mut extra: Vec<Action> = Vec::new();
         let mut alt_n: Option<usize> = None;
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
+        // Die festen Kürzel nur verbrauchen, wenn es ein Ziel gibt – sonst gehören die Tasten dem Terminal (Alt+Zahl ist
+        // z. B. `digit-argument` in bash, #254).
+        let (n_projects, n_sessions) = (self.projects.len(), self.project_ids().len());
+        let dirs: Vec<(Key, Nav)> = [(Key::ArrowLeft, Nav::Left), (Key::ArrowRight, Nav::Right), (Key::ArrowUp, Nav::Up), (Key::ArrowDown, Nav::Down)]
+            .into_iter()
+            .filter(|(_, n)| focus_target(&self.pane_rects, self.focused, *n).is_some())
+            .collect();
         ctx.input_mut(|i| {
             for (id, m, k) in &binds {
-                if i.consume_key(*m, *k) {
+                if consume_key_exact(i, *m, *k, false) {
                     fired.push(id);
                 }
             }
             for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].into_iter().enumerate() {
-                if i.consume_key(cs, k) {
+                // Physisch: mit Umschalt liefert die Zifferntaste ein Zeichen („!“, „/“ …), nicht `Key::Num1`.
+                if n < n_projects && consume_key_exact(i, cs, k, true) {
                     extra.push(Action::SwitchProject(n as u64 + 1_000_000));
                 }
-                if i.consume_key(Modifiers::ALT, k) {
+                if n < n_sessions && consume_key_exact(i, Modifiers::ALT, k, true) {
                     alt_n = Some(n);
                 }
             }
             let ca = Modifiers::CTRL | Modifiers::ALT;
-            for (k, n) in [(Key::ArrowLeft, Nav::Left), (Key::ArrowRight, Nav::Right), (Key::ArrowUp, Nav::Up), (Key::ArrowDown, Nav::Down)] {
-                if i.consume_key(ca, k) {
+            for (k, n) in dirs {
+                if consume_key_exact(i, ca, k, false) {
                     extra.push(Action::FocusDir(n));
                 }
             }
@@ -3627,26 +3635,8 @@ impl App {
                 self.want_focus = Some(self.focused);
             }
             Action::FocusDir(nav) => {
-                if let Some(cur) = self.pane_rects.get(&self.focused).copied() {
-                    let c = cur.center();
-                    let best = self
-                        .pane_rects
-                        .iter()
-                        .filter(|(id, _)| **id != self.focused)
-                        .filter_map(|(id, r)| {
-                            let d = r.center() - c;
-                            let (along, across) = match nav {
-                                Nav::Left => (-d.x, d.y.abs()),
-                                Nav::Right => (d.x, d.y.abs()),
-                                Nav::Up => (-d.y, d.x.abs()),
-                                Nav::Down => (d.y, d.x.abs()),
-                            };
-                            (along > 1.0).then_some((*id, along + 2.0 * across))
-                        })
-                        .min_by(|a, b| a.1.total_cmp(&b.1));
-                    if let Some((id, _)) = best {
-                        self.activate(id);
-                    }
+                if let Some(id) = focus_target(&self.pane_rects, self.focused, nav) {
+                    self.activate(id);
                 }
             }
             Action::Detach(id) => {
@@ -4058,20 +4048,37 @@ impl App {
     }
 }
 
-/// Wie `consume_key`, erkennt aber auch die physische Taste: mit Umschalt liefert die Tastatur eine andere logische Taste
-/// (Umschalt+1 = „!“), `consume_key` sähe dann nicht `Key::Num1`.
-fn consume_key_physical(i: &mut egui::InputState, m: Modifiers, k: Key) -> bool {
-    let pos = i.events.iter().position(|e| {
-        matches!(e, Event::Key { key, physical_key, pressed: true, modifiers, .. }
-            if (*key == k || *physical_key == Some(k)) && modifiers.matches_logically(m))
+/// Wie `consume_key`, aber mit genau diesen Modifikatoren (#254): ein zusätzliches Umschalt oder Alt (AltGr = Strg+Alt)
+/// ist eine andere Kombination – sonst löste Strg+Umschalt+1 das Kürzel Strg+1 aus und Strg+AltGr+2 („²“) Strg+2.
+/// `physical`: auch die physische Taste erkennen – mit Umschalt liefert die Tastatur eine andere logische Taste
+/// (Umschalt+1 = „!“ bzw. „/“ je nach Belegung), `consume_key` sähe dann nicht `Key::Num1`.
+fn consume_key_exact(i: &mut egui::InputState, m: Modifiers, k: Key, physical: bool) -> bool {
+    let before = i.events.len();
+    i.events.retain(|e| {
+        !matches!(e, Event::Key { key, physical_key, pressed: true, modifiers, .. }
+            if (*key == k || (physical && *physical_key == Some(k))) && modifiers.matches_exact(m))
     });
-    match pos {
-        Some(p) => {
-            i.events.remove(p);
-            true
-        }
-        None => false,
-    }
+    i.events.len() != before
+}
+
+/// Nächster Bereich in Richtung `nav` vom fokussierten aus (Strg+Alt+Pfeil); `None`, wenn dort keiner liegt.
+fn focus_target(rects: &HashMap<u64, Rect>, focused: u64, nav: Nav) -> Option<u64> {
+    let c = rects.get(&focused)?.center();
+    rects
+        .iter()
+        .filter(|(id, _)| **id != focused)
+        .filter_map(|(id, r)| {
+            let d = r.center() - c;
+            let (along, across) = match nav {
+                Nav::Left => (-d.x, d.y.abs()),
+                Nav::Right => (d.x, d.y.abs()),
+                Nav::Up => (-d.y, d.x.abs()),
+                Nav::Down => (d.y, d.x.abs()),
+            };
+            (along > 1.0).then_some((*id, along + 2.0 * across))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id)
 }
 
 impl eframe::App for App {
@@ -5696,4 +5703,78 @@ pub(super) enum ChatSendResult {
     Empty,
     /// Keine Chat-Sitzung mit dieser Id.
     NotAChat,
+}
+
+#[cfg(test)]
+mod shortcut_match_tests {
+    //! Feste und eigene Kürzel (#254): genaue Modifikatoren, physische Zifferntasten, Ziele; Knöpfe im Bereichskopf (#259).
+    use super::*;
+
+    fn key(k: Key, physical: Key, m: Modifiers) -> Event {
+        Event::Key { key: k, physical_key: Some(physical), pressed: true, repeat: false, modifiers: m }
+    }
+
+    /// Ein Bild mit `events`; `f` prüft/verbraucht. Liefert (Ergebnis, übrig gebliebene Tasten-Ereignisse).
+    fn run(events: Vec<Event>, f: impl Fn(&mut egui::InputState) -> bool) -> (bool, usize) {
+        let ctx = egui::Context::default();
+        let (mut hit, mut left) = (false, 0);
+        let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
+            hit = ctx.input_mut(|i| f(i));
+            left = ctx.input(|i| i.events.iter().filter(|e| matches!(e, Event::Key { .. })).count());
+        });
+        (hit, left)
+    }
+
+    const CTRL: Modifiers = Modifiers { ctrl: true, command: true, alt: false, shift: false, mac_cmd: false };
+
+    #[test]
+    fn extra_shift_or_altgr_is_another_shortcut() {
+        // Strg+1 = Reiter „Terminal Hub“
+        assert_eq!(run(vec![key(Key::Num1, Key::Num1, CTRL)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num1, true)), (true, 0));
+        // Strg+Umschalt+1 (Projekt 1) und Strg+AltGr+2 („²“ auf deutschen Tastaturen) lösen Strg+1/2 nicht aus
+        let cs = CTRL | Modifiers::SHIFT;
+        assert_eq!(run(vec![key(Key::Exclamationmark, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num1, true)), (false, 1));
+        let altgr = CTRL | Modifiers::ALT;
+        assert_eq!(run(vec![key(Key::Num2, Key::Num2, altgr)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num2, true)), (false, 1));
+        // … wohl aber Strg+Umschalt+1 das Projekt-Kürzel, auch wenn die Belegung „!“ oder „/“ liefert (physisch)
+        for logical in [Key::Exclamationmark, Key::Slash, Key::Num1] {
+            assert_eq!(run(vec![key(logical, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::Num1, true)), (true, 0), "{logical:?}");
+        }
+        // Eigene Kürzel logisch: Strg+Umschalt+T nicht durch Strg+Alt+Umschalt+T
+        assert_eq!(run(vec![key(Key::T, Key::T, cs | Modifiers::ALT)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::T, false)), (false, 1));
+        assert_eq!(run(vec![key(Key::T, Key::T, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::T, false)), (true, 0));
+        // Ohne `physical` zählt nur die logische Taste
+        assert_eq!(run(vec![key(Key::Exclamationmark, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::Num1, false)), (false, 1));
+    }
+
+    #[test]
+    fn focus_target_only_where_a_pane_lies() {
+        let mut rects = HashMap::new();
+        rects.insert(1, Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 300.0)));
+        rects.insert(2, Rect::from_min_size(Pos2::new(406.0, 0.0), Vec2::new(400.0, 300.0)));
+        rects.insert(3, Rect::from_min_size(Pos2::new(406.0, 306.0), Vec2::new(400.0, 300.0)));
+        assert_eq!(focus_target(&rects, 1, Nav::Right), Some(2));
+        assert_eq!(focus_target(&rects, 1, Nav::Left), None, "links liegt nichts: Taste bleibt beim Terminal");
+        assert_eq!(focus_target(&rects, 1, Nav::Up), None);
+        assert_eq!(focus_target(&rects, 2, Nav::Down), Some(3));
+        assert_eq!(focus_target(&rects, 3, Nav::Left), Some(1));
+        assert_eq!(focus_target(&HashMap::new(), 1, Nav::Right), None);
+    }
+
+    #[test]
+    fn narrow_pane_headers_keep_their_buttons_inside() {
+        let all = pane_buttons(false, true, true);
+        assert_eq!(all, vec![PaneBtn::Close, PaneBtn::Minimize, PaneBtn::Reload, PaneBtn::Detach, PaneBtn::SplitDown, PaneBtn::SplitRight, PaneBtn::Link]);
+        assert_eq!(pane_buttons(true, false, true), vec![PaneBtn::Close, PaneBtn::Minimize], "abgedockt");
+        for w in [MIN_PANE_W, 140.0, 174.0, 200.0, 260.0, 400.0, 1000.0] {
+            let n = pane_buttons_fit(w, all.len());
+            assert!(n >= 2, "Schließen und Minimieren immer ({w})");
+            // Knöpfe plus Luft und ein Stück Name passen in den Kopf: nichts ragt in den Nachbarn
+            if n > 2 {
+                assert!(PANE_BTN_W * n as f32 + 16.0 + 60.0 <= w + 0.01, "{n} Knöpfe in {w}");
+            }
+        }
+        assert_eq!(pane_buttons_fit(1000.0, all.len()), all.len(), "breit: alle");
+        assert_eq!(pane_buttons_fit(MIN_PANE_W, all.len()), 2);
+    }
 }
