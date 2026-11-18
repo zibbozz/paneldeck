@@ -9,6 +9,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.4.0] - WIP
 
+### Added
+
+- Terminal template library: define a terminal once with all its settings (name, profile/shell, start folder incl. WSL paths, tree folder, colour, tags, notes, Claude on/off with start options, conversation and start prompt) and start it as often as you like. Templates live in a collapsible *Templates* section at the bottom of the sidebar, with search; start one by double-click, by dragging it into the session list, onto a folder or onto a pane (split/replace), from its context menu, the command palette or a folder's context menu (*Start template here*). Repeated starts count up: `API`, `API #2`, `API #3`. Create one from a session (context menu *Save as terminal template …*) or from scratch (+), then edit, duplicate or delete it. Group templates (*Save as template …* on a folder) share the same library and now also keep colour, tags, notes and all Claude start options. Before a template starts Claude Code with extra folders, allowed tools, an MCP config, `--safe-mode` or an appended system prompt, Paneldeck lists these values and asks (*Start* / *Start without these options* / *Cancel*); such templates are marked with ⚠ (#244)
+- MCP: `create_session` takes an optional `template` (name of a terminal template); the call's parameters override the template, repeated starts count up, and the result has a `template` field. Agent rules apply: administrator profiles are refused, and the template's extra folders, allowed tools, MCP config, `--safe-mode`, `bypassPermissions` and *continue the last conversation* are never used and are listed in the new result field `template_ignored`; templates whose profile runs its own program, arguments or startup command are refused unless it is the project's default profile (#244)
+
 ### Changed
 
 - The Settings window can be moved like a normal window; it opens centred and stays inside the window (#275)

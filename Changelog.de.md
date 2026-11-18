@@ -9,6 +9,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.4.0] - WIP
 
+### Added
+
+- Bibliothek für Terminal-Vorlagen: Ein Terminal einmal mit allen Einstellungen festlegen (Name, Profil/Shell, Startordner auch als WSL-Pfad, Ordner im Baum, Farbe, Tags, Notizen, Claude an/aus mit Startoptionen, Konversation und Start-Prompt) und beliebig oft starten. Die Vorlagen stehen in einem einklappbaren Abschnitt „Vorlagen“ unten in der Seitenleiste, mit Suche; gestartet wird per Doppelklick, durch Ziehen in die Sitzungsliste, auf einen Ordner oder einen Bereich (teilen/ersetzen), über das Kontextmenü, die Befehlspalette oder das Kontextmenü eines Ordners („Vorlage hier starten“). Wiederholte Starts zählen hoch: `API`, `API #2`, `API #3`. Anlegen aus einer Sitzung (Kontextmenü „Als Terminal-Vorlage speichern …“) oder neu (+), danach bearbeiten, duplizieren oder löschen. Gruppen-Vorlagen („Als Vorlage speichern …“ am Ordner) liegen in derselben Bibliothek und merken sich jetzt auch Farbe, Tags, Notizen und alle Claude-Startoptionen. Bevor eine Vorlage Claude Code mit zusätzlichen Ordnern, erlaubten Werkzeugen, einer MCP-Konfiguration, `--safe-mode` oder ergänztem System-Prompt startet, zeigt Paneldeck diese Werte und fragt nach („Starten“ / „Ohne diese Optionen starten“ / „Abbrechen“); solche Vorlagen sind mit ⚠ markiert (#244)
+- MCP: `create_session` nimmt optional `template` (Name einer Terminal-Vorlage); die Parameter des Aufrufs gehen vor, wiederholte Starts zählen hoch, das Ergebnis hat das Feld `template`. Es gelten die Agenten-Regeln: Administrator-Profile werden abgelehnt, zusätzliche Ordner, erlaubte Werkzeuge, MCP-Konfiguration, `--safe-mode`, `bypassPermissions` und „letzte Konversation fortsetzen“ aus der Vorlage gelten nie und stehen im neuen Ergebnisfeld `template_ignored`; Vorlagen, deren Profil ein eigenes Programm, eigene Argumente oder einen Startbefehl hat, werden abgelehnt, außer es ist das Standardprofil des Projekts (#244)
+
 ### Changed
 
 - Das Einstellungsfenster lässt sich wie ein normales Fenster verschieben; es öffnet mittig und bleibt im Fenster (#275)
