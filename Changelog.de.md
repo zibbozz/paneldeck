@@ -12,6 +12,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Changed
 
 - Dialog „Neue Sitzung“: Die zwei Wege, eine Claude-Konversation fortzusetzen, sind jetzt eine Auswahl „Konversation“ – neu (beim Neu laden/Neustart fortgesetzt), letzte Konversation im Ordner fortsetzen oder bei jedem Start eine neue (#241)
+- Einstellungen, Update-Knopf und MCP-Status stehen jetzt in der Fensterleiste, in jedem Reiter und Fenster sichtbar (von rechts: Einstellungen, Update, MCP); Einstellungs-Knopf und MCP-Chip unten in der Seitenleiste entfallen, der Eintrag in der Befehlspalette bleibt (#240)
+- Tastenkürzel brauchen Strg oder Alt (F-Tasten gehen auch allein); eine Belegung ohne wird abgelehnt, eine alte als wirkungslos angezeigt; von Hand eingetragene Zeichen-Kürzel ohne Umschalt (z. B. Strg+?) bekommen einen Hinweis (#256)
 
 ### Fixed
 
@@ -29,6 +31,15 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Dialog „Neue Sitzung“: Esc schließt zuerst eine offene Auswahlliste; mit ausgeschaltetem Claude-Modus starten Programmstart, Neu laden und Duplizieren kein Claude mehr; Profile mit dem WSL-Starter `bash.exe` aus System32 gelten als WSL (Hooks, Status, Pfade) (#261)
 - Dialog „Neue Sitzung“, Einstellungen der Sitzung, „Fenster schließen?“, Sitzungs-Vorlagen und Befehls-Palette passen auf kleine Bildschirme: Der Inhalt scrollt, die Knöpfe bleiben sichtbar und Hinweise verdecken keine Bedienelemente mehr (#241)
 - „Neue Sitzung“, „Prompt an alle Sitzungen im Ordner“, „Sitzungs-Vorlagen“ und „Sitzung mit Worktree schließen“ nehmen dem Terminal den Tastaturfokus; Esc erreicht das Terminal nicht mehr, und Strg+Enter im Terminal sendet nicht mehr den offenen Prompt-Composer (#255)
+- Keine Lücken mehr zwischen Kopf, Ticketliste und Ticket-Panel in der geteilten Ticketansicht, bei jeder Skalierung; die Liste behält neben dem Panel ihren Platz, das Panel hat keine doppelte Kante (#236)
+- Tastenkürzel prüfen die Modifikatoren genau: Strg+Umschalt+1/2 und Strg+AltGr+2 wechseln nicht mehr den Reiter, Projekt-Kürzel gehen mit jeder Tastaturbelegung, und Alt+1…9, Strg+Umschalt+1…9 und Strg+Alt+Pfeile gehen ans Terminal, wenn es keine Sitzung, kein Projekt bzw. keinen Bereich dafür gibt (#254)
+- Esc bei der Aufnahme eines Kürzels bricht nur die Aufnahme ab, statt die Einstellungen zu schließen (#256)
+- Sitzungen eines anderen Projekts (gefilterte Seitenleiste, Duplizieren, nach einem Projektwechsel fertig gewordener Worktree, Verschieben in Ordner) landen nicht mehr im Layout oder in Ordnern des gezeigten Projekts (#258)
+- Eine im Reiter Todo-Liste abgelegte Datei landet nicht mehr in einem unsichtbaren Terminal (#259)
+- Umbenennen einer durch Filter oder eingeklappten Ordner verborgenen Sitzung zeigt die Zeile jetzt an – auch für Sitzungen eines anderen Projekts oder Fensters aus der Befehlspalette (#259)
+- In schmalen Bereichen ragen die Kopf-Knöpfe nicht mehr in den Nachbarn; was nicht passt, steht im Kontextmenü (#259)
+- Der Fenstertitel wird auf den freien Platz gekürzt und überdeckt keine Reiter oder Knöpfe mehr (#259)
+- Schließen einer Worktree-Sitzung friert das Fenster bei großen Repositories nicht mehr ein (#259)
 
 ### Security
 
