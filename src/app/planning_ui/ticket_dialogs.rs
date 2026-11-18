@@ -202,7 +202,6 @@ impl PlanUi {
         let fields: Vec<Field> = d.ty.fields.iter().filter(|f| needs.iter().any(|n| n.id == f.id)).cloned().collect();
         let drafts = fields.iter().map(|f| (f.id, Draft::from_value(f, d.stored.get(&f.id)))).collect();
         let to_name = d.sum.status(to).map(|s| s.display(lang)).unwrap_or_default();
-        self.tickets.labels = super::ticket_data::label_suggestions(cx.conn, d.ticket.project_id);
         self.tickets.transition = Some(TransitionDlg { ticket: ticket_id, key: d.ticket.key(), to, to_name, fields, drafts, project: d.ticket.project_id, err: None });
     }
 
@@ -505,7 +504,6 @@ impl PlanUi {
         };
         dlg.load_types(cx);
         dlg.refresh(cx);
-        self.tickets.labels = super::ticket_data::label_suggestions(cx.conn, t.project_id);
         self.tickets.change = Some(dlg);
     }
 
@@ -887,7 +885,6 @@ impl PlanUi {
             err: None,
         };
         dlg.load(cx, None);
-        self.tickets.labels = super::ticket_data::label_suggestions(cx.conn, project);
         self.tickets.convert = Some(dlg);
     }
 
@@ -973,7 +970,6 @@ impl PlanUi {
         if let Some(p) = new_project {
             dlg.project = p;
             dlg.load(cx, None);
-            self.tickets.labels = super::ticket_data::label_suggestions(cx.conn, p);
         } else if let Some(t) = new_type {
             dlg.load(cx, Some(t));
         }

@@ -313,11 +313,7 @@ impl PathStyle {
     /// Art der Shell aus Kennung und Programm: WSL auch bei eigenen Profilen mit `wsl.exe` oder dem `bash.exe` aus
     /// System32; andere POSIX-Shells unter Windows (Git Bash) mit Schrägstrichen.
     pub fn for_shell(shell_id: &str, program: &str, kind: Kind) -> PathStyle {
-        let prog = program.replace('/', "\\").to_ascii_lowercase();
-        let file = prog.rsplit('\\').next().unwrap_or("");
-        let stem = file.strip_suffix(".exe").unwrap_or(file);
-        let system_bash = stem == "bash" && (prog.contains("\\system32\\") || prog.contains("\\sysnative\\") || prog.contains("\\windowsapps\\"));
-        if cfg!(windows) && (shell_id.starts_with("wsl") || stem == "wsl" || system_bash) {
+        if cfg!(windows) && (shell_id.starts_with("wsl") || crate::shells::is_wsl_program(program)) {
             PathStyle::Wsl
         } else if cfg!(windows) && kind == Kind::Posix {
             PathStyle::Slash
@@ -849,23 +845,128 @@ pub fn legacy_args(rest: &str, kind: Kind) -> String {
     rest.split_whitespace().map(|t| if t.starts_with('-') { t.to_string() } else { quote_value(kind, t) }).collect::<Vec<_>>().join(" ")
 }
 
-/// Alte `claude_args` bereinigen: nur harmlose Token ([`crate::quote::sanitize_claude_args`]) und nie ein
-/// `--dangerously-*`/`--allow-dangerously-*`-Flag (würde Freigaben abschalten).
+/// Alte `claude_args` bereinigen: nur harmlose Token ([`crate::quote::sanitize_claude_args`]), nie ein
+/// `--dangerously-*`/`--allow-dangerously-*`-Flag (würde Freigaben abschalten) und keine Flags, die Paneldeck selbst
+/// steuert oder die nur über MCP verboten sind ([`NEVER_VIA_MCP`] außer `--safe-mode`/`--autocompact`, die als
+/// Optionen übernommen werden) – samt ihrem Wert (#245: ein gespeichertes `--resume <id>`, `--continue` oder
+/// `--session-id` setzte sonst ungefragt eine Konversation fort oder brach den Start ab).
+#[cfg(test)]
 pub fn clean_legacy(args: &str) -> String {
-    crate::quote::sanitize_claude_args(args).split_whitespace().filter(|t| !t.to_ascii_lowercase().contains("dangerously")).collect::<Vec<_>>().join(" ")
+    clean_legacy_report(args, false).line
+}
+
+/// Ergebnis von [`clean_legacy_report`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LegacyClean {
+    /// Bereinigte Zeile (wie [`clean_legacy`]).
+    pub line: String,
+    /// Aus der Zeile übernommene Wertoptionen (geprüft wie in der Oberfläche).
+    pub migrated: ExtraOpts,
+    /// Weggelassene Flags (mit `--`, ohne Werte, jedes einmal), z. B. `--resume`.
+    pub dropped: Vec<String>,
+}
+
+/// Flags aus [`NEVER_VIA_MCP`], die in alten Zeilen mehrere Werte nehmen (bis zum nächsten Flag).
+fn legacy_many(name: &str) -> bool {
+    matches!(name, "add-dir" | "allowed-tools" | "allowedtools" | "disallowed-tools" | "disallowedtools" | "tools" | "mcp-config" | "plugin-dir")
+}
+
+/// Wertoption einer alten Zeile in `e` übernehmen, wenn [`ExtraOpts`] sie kennt und der Wert gültig ist (dieselben
+/// Prüfungen wie in der Oberfläche). Rechte erweiternde ([`RISKY`]) nur mit `allow_risky`.
+fn migrate_legacy_value(e: &mut ExtraOpts, name: &str, vals: &[&str], allow_risky: bool) -> bool {
+    let one = || if vals.len() == 1 { Some(vals[0]) } else { None };
+    let set = |slot: &mut String, v: Option<&str>, ok: fn(&str) -> bool| match v {
+        Some(v) if ok(v) && slot.is_empty() => {
+            *slot = v.to_string();
+            true
+        }
+        _ => false,
+    };
+    let joined = vals.join(" ");
+    let tools = Some(joined.as_str()).filter(|s| !s.is_empty());
+    match name {
+        "add-dir" if allow_risky => {
+            if vals.is_empty() || vals.len() > MAX_DIRS || !e.add_dirs.is_empty() || !vals.iter().all(|v| valid_path(v)) {
+                return false;
+            }
+            for v in vals {
+                if !e.add_dirs.iter().any(|d| d == v) {
+                    e.add_dirs.push(v.to_string());
+                }
+            }
+            true
+        }
+        "allowed-tools" | "allowedtools" if allow_risky => set(&mut e.allowed_tools, tools, valid_tools),
+        "mcp-config" if allow_risky => set(&mut e.mcp_config, one(), valid_path),
+        "disallowed-tools" | "disallowedtools" => set(&mut e.disallowed_tools, tools, valid_tools),
+        "append-system-prompt" => set(&mut e.append_system_prompt, one(), valid_text),
+        "fallback-model" => set(&mut e.fallback_model, one(), valid_name),
+        "max-budget-usd" => set(&mut e.max_budget_usd, one(), valid_budget),
+        _ => false,
+    }
+}
+
+/// Wie [`clean_legacy`], dazu: Wertoptionen, die [`ExtraOpts`] kennt, werden übernommen statt weggeworfen
+/// (`--add-dir`, `--allowed-tools`, `--mcp-config` nur mit `allow_risky`: aus der eigenen Sitzung, nie aus einer
+/// weitergebbaren Vorlage), alles andere Weggelassene wird aufgezählt (für einen Hinweis an den Nutzer).
+pub fn clean_legacy_report(args: &str, allow_risky: bool) -> LegacyClean {
+    let clean = crate::quote::sanitize_claude_args(args);
+    let toks: Vec<&str> = clean.split_whitespace().collect();
+    let mut r = LegacyClean::default();
+    let mut out: Vec<&str> = Vec::new();
+    let note = |r: &mut LegacyClean, f: String| {
+        if !r.dropped.contains(&f) {
+            r.dropped.push(f);
+        }
+    };
+    let mut i = 0;
+    while i < toks.len() {
+        let t = toks[i];
+        i += 1;
+        let lower = t.to_ascii_lowercase();
+        if lower.contains("dangerously") {
+            note(&mut r, lower);
+            continue;
+        }
+        let name = lower.trim_start_matches('-');
+        if !(t.starts_with('-') && NEVER_VIA_MCP.contains(&name) && !matches!(name, "safe-mode" | "autocompact")) {
+            out.push(t);
+            continue;
+        }
+        let mut vals: Vec<&str> = Vec::new();
+        while i < toks.len() && !toks[i].starts_with('-') && (vals.is_empty() || legacy_many(name)) {
+            vals.push(toks[i]);
+            i += 1;
+        }
+        if !migrate_legacy_value(&mut r.migrated, name, &vals, allow_risky) {
+            note(&mut r, if name.len() == 1 { format!("-{name}") } else { format!("--{name}") });
+        }
+    }
+    r.line = out.join(" ");
+    r
 }
 
 /// Optionen einer neuen Sitzung (alle Wege laufen hier durch): `explicit` (Dialog, MCP, Vorlage, Duplikat) oder sonst
 /// die Standards des Nutzers, ergänzt um Optionen aus alten `claude_args`. `bypassPermissions` bleibt nur mit
 /// `allow_bypass` (ausdrückliche Wahl im Dialog „Neue Sitzung“). Rückgabe: Optionen und bereinigte freie Reste.
+#[cfg(test)]
 pub fn resolve_new(explicit: Option<&ClaudeOpts>, allow_bypass: bool, defaults: &ClaudeOpts, legacy_args: &str) -> (ClaudeOpts, String) {
-    let (legacy, rest) = ClaudeOpts::split_legacy(&clean_legacy(legacy_args));
+    let (o, rest, _) = resolve_new_report(explicit, allow_bypass, defaults, legacy_args);
+    (o, rest)
+}
+
+/// Wie [`resolve_new`], dazu die aus der alten Zeile weggelassenen Flags ([`clean_legacy_report`], ohne die Rechte
+/// erweiternden Wertoptionen: die Zeile kann aus einer weitergegebenen Vorlage stammen).
+pub fn resolve_new_report(explicit: Option<&ClaudeOpts>, allow_bypass: bool, defaults: &ClaudeOpts, legacy_args: &str) -> (ClaudeOpts, String, Vec<String>) {
+    let c = clean_legacy_report(legacy_args, false);
+    let (mut legacy, rest) = ClaudeOpts::split_legacy(&c.line);
+    legacy.extra = legacy.extra.or(&c.migrated);
     // Ausdrückliche Angabe vor alter Zeile; eine alte Zeile (Vorlage) vor den Standards des Nutzers.
     let o = match explicit {
         Some(e) => e.or(&legacy),
         None => legacy.or(&defaults.sanitized(false)),
     };
-    (o.sanitized(allow_bypass), rest)
+    (o.sanitized(allow_bypass), rest, c.dropped)
 }
 
 /// Gespeicherte Standards/letzte Wahl in `settings.json`: nur gültige Werte, nie `bypassPermissions`.
@@ -1113,6 +1214,63 @@ mod tests {
         assert_eq!(legacy_args("--model opus[1m]", Kind::Posix), "--model 'opus[1m]'");
         assert_eq!(legacy_args("--model opus[1m]", Kind::Cmd), "--model opus[1m]");
         assert_eq!(clean_legacy("--dangerously-skip-permissions --model x;y --ok"), "--model --ok");
+    }
+
+    /// #245: gespeicherte `claude_args` (state.json, templates.json, Duplikat) setzen nie selbst eine Konversation fort.
+    #[test]
+    fn legacy_args_never_resume_or_continue() {
+        let id = "5d28a95e-dbaf-4f27-b2f3-6c0c42fab338";
+        assert_eq!(clean_legacy(&format!("--model opus --resume {id} --continue --verbose")), "--model opus --verbose");
+        assert_eq!(clean_legacy(&format!("-r {id} -c --session-id {id} --fork-session -p hi --print --settings x.json --ide")), "--ide");
+        assert_eq!(clean_legacy("--add-dir /tmp --mcp-config m.json --output-format json --chrome"), "--chrome");
+        // Als Optionen übernommen, nicht weggeworfen
+        assert_eq!(clean_legacy("--safe-mode --autocompact auto"), "--safe-mode --autocompact auto");
+        for line in [format!("--resume {id}"), "--continue".to_string(), format!("--session-id {id}"), format!("-r {id}")] {
+            let (o, r) = resolve_new(None, false, &ClaudeOpts::default(), &line);
+            let l = o.launch(Kind::Posix, PathStyle::Native, &r);
+            assert!(!l.line.contains("--resume") && !l.line.contains("--continue") && !l.line.contains("--session-id") && !l.line.contains(id), "{line}: {}", l.line);
+            let meta = crate::state::SessionMeta { claude: true, claude_args: line.clone(), ..crate::state::SessionMeta::default() };
+            let (o, r) = meta.claude_opts_eff();
+            assert!(!o.launch(Kind::Pwsh, PathStyle::Native, &r).line.contains(id), "{line}");
+        }
+    }
+
+    /// Review zu #245: Wertoptionen aus alten `claude_args` werden übernommen statt still weggeworfen, der Rest gemeldet.
+    #[test]
+    fn legacy_value_options_are_migrated_and_drops_reported() {
+        let dir = if cfg!(windows) { "C:/work/lib" } else { "/work/lib" };
+        let dir2 = if cfg!(windows) { "D:/data" } else { "/data" };
+        let line = format!("--model opus --add-dir {dir} {dir2} --allowed-tools Read Grep --fallback-model sonnet --max-budget-usd 2.5 --append-system-prompt kurz --disallowed-tools Bash --resume x --print hi --verbose --dangerously-skip-permissions");
+        let r = clean_legacy_report(&line, true);
+        assert_eq!(r.line, "--model opus --verbose");
+        assert_eq!(r.migrated.add_dirs, vec![dir.to_string(), dir2.to_string()]);
+        assert_eq!((r.migrated.allowed_tools.as_str(), r.migrated.disallowed_tools.as_str()), ("Read Grep", "Bash"));
+        assert_eq!((r.migrated.fallback_model.as_str(), r.migrated.max_budget_usd.as_str(), r.migrated.append_system_prompt.as_str()), ("sonnet", "2.5", "kurz"));
+        assert_eq!(r.dropped, vec!["--resume", "--print", "--dangerously-skip-permissions"]);
+        // Ungültige Werte (wie in der Oberfläche) werden nicht übernommen, sondern gemeldet; Werte nie als Prompt übrig
+        let r = clean_legacy_report("--add-dir relative/x more --max-budget-usd 0 --fallback-model --mcp-config a b --verbose", true);
+        assert_eq!(r.line, "--verbose");
+        assert!(r.migrated.is_empty(), "{:?}", r.migrated);
+        assert_eq!(r.dropped, vec!["--add-dir", "--max-budget-usd", "--fallback-model", "--mcp-config"]);
+        // Aus einer Vorlage (weitergebbar) nie Rechte erweiternde Optionen
+        let r = clean_legacy_report(&format!("--add-dir {dir} --allowed-tools Read --mcp-config {dir}/m.json --fallback-model haiku"), false);
+        assert_eq!((r.migrated.add_dirs.len(), r.migrated.allowed_tools.as_str(), r.migrated.mcp_config.as_str(), r.migrated.fallback_model.as_str()), (0, "", "", "haiku"));
+        assert_eq!(r.dropped, vec!["--add-dir", "--allowed-tools", "--mcp-config"]);
+        let (o, rest, dropped) = resolve_new_report(None, false, &ClaudeOpts::default(), &format!("--add-dir {dir} --fallback-model haiku -c"));
+        assert_eq!((o.extra.fallback_model.as_str(), o.extra.add_dirs.len(), rest.as_str()), ("haiku", 0, ""));
+        assert_eq!(dropped, vec!["--add-dir", "-c"]);
+        // Sitzung aus state.json: einmalig umgestellt, danach nichts mehr zu melden; ein gesetzter Wert gewinnt
+        let mut meta = crate::state::SessionMeta { claude: true, claude_args: format!("--add-dir {dir} --fallback-model haiku --continue --verbose"), ..crate::state::SessionMeta::default() };
+        meta.claude_opts.extra.fallback_model = "opus".into();
+        let before = meta.claude_opts_eff().0;
+        assert_eq!(meta.migrate_legacy_args(), vec!["--continue"]);
+        assert_eq!(meta.claude_args, "--verbose");
+        assert_eq!((meta.claude_opts.extra.add_dirs.clone(), meta.claude_opts.extra.fallback_model.as_str()), (vec![dir.to_string()], "opus"));
+        assert_eq!(meta.claude_opts_eff().0, before, "wirksame Optionen bleiben gleich");
+        assert!(meta.migrate_legacy_args().is_empty(), "nur einmal");
+        let mut plain = crate::state::SessionMeta { claude: true, claude_args: "--model opus".into(), ..crate::state::SessionMeta::default() };
+        assert!(plain.migrate_legacy_args().is_empty());
+        assert_eq!(plain.claude_args, "--model opus");
     }
 
     #[test]

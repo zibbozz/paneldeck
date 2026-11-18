@@ -128,10 +128,25 @@ pub fn integration(shell: &ShellSpec) -> (Vec<String>, Vec<(String, String)>) {
     }
 }
 
-/// Ist das eine WSL-Shell (Kennung `wsl:…` oder Programm `wsl.exe`)?
+/// Ist das eine WSL-Shell (Kennung `wsl:…`, Programm `wsl.exe` oder das `bash.exe` aus System32)?
 pub fn is_wsl(shell: &ShellSpec) -> bool {
-    shell.id.starts_with("wsl")
-        || std::path::Path::new(&shell.program).file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("wsl"))
+    shell.id.starts_with("wsl") || is_wsl_program(&shell.program)
+}
+
+/// Startet das Programm WSL: `wsl.exe` oder der WSL-Starter `bash.exe` aus System32/Sysnative/WindowsApps (#261: eine
+/// gemeinsame Erkennung für Pfade, Hooks, Umgebung und Status). Git Bash (`…\Git\bin\bash.exe`) ist kein WSL.
+pub fn is_wsl_program(program: &str) -> bool {
+    let prog = program.replace('/', "\\").to_ascii_lowercase();
+    let file = prog.rsplit('\\').next().unwrap_or("");
+    let stem = file.strip_suffix(".exe").unwrap_or(file);
+    stem == "wsl" || (stem == "bash" && is_system_bash(&prog))
+}
+
+/// Der WSL-Starter `bash.exe` (kennt kein `--cd`, startet im Windows-Ordner).
+pub fn is_system_bash(program: &str) -> bool {
+    let prog = program.replace('/', "\\").to_ascii_lowercase();
+    let file = prog.rsplit('\\').next().unwrap_or("");
+    file.strip_suffix(".exe").unwrap_or(file) == "bash" && (prog.contains("\\system32\\") || prog.contains("\\sysnative\\") || prog.contains("\\windowsapps\\"))
 }
 
 /// Distribution aus `-d <Name>` / `--distribution <Name>` in den Argumenten.
@@ -177,6 +192,18 @@ mod tests {
         assert_eq!(wsl_distro(&["-d".into(), "-e".into()]), None);
         assert_eq!(wsl_distro(&["--distribution".into(), "U\" x".into()]), None);
         assert!(!is_wsl(&spec("pwsh.exe", &[])));
+        // #261: der WSL-Starter bash.exe aus System32 ist WSL, Git Bash nicht – überall dieselbe Erkennung
+        assert!(is_wsl(&spec("C:\\Windows\\System32\\bash.exe", &[])));
+        assert!(is_wsl(&spec("c:/windows/sysnative/BASH.EXE", &[])));
+        assert!(is_system_bash("C:\\Windows\\System32\\bash.exe") && !is_system_bash("C:\\Windows\\System32\\wsl.exe"));
+        assert!(!is_wsl(&spec("C:\\Program Files\\Git\\bin\\bash.exe", &[])));
+        assert!(!is_system_bash("C:\\Program Files\\Git\\bin\\bash.exe"));
+        if cfg!(windows) {
+            use crate::claude_opts::PathStyle;
+            use crate::quote::Kind;
+            assert_eq!(PathStyle::for_shell("custom:1", "C:\\Windows\\System32\\bash.exe", Kind::Posix), PathStyle::Wsl);
+            assert_eq!(PathStyle::for_shell("custom:1", "C:\\Program Files\\Git\\bin\\bash.exe", Kind::Posix), PathStyle::Slash);
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@ impl App {
         let lang = self.settings.language;
         let panel_fill = ctx.style().visuals.panel_fill;
         let panel = sidebar_panel(ctx, self.settings.sidebar_width, panel_fill, |ui| {
-            // Fußzeile: Einstellungen + Gesamtverbrauch
+            // Fußzeile: Gesamtverbrauch und Version (Einstellungen und MCP-Status stehen in der Fensterleiste, #240)
             egui::TopBottomPanel::bottom("sidebar_footer").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
                 ui.add_space(S1);
                 let (mut tok, mut cost) = (0u64, 0.0f64);
@@ -30,20 +30,13 @@ impl App {
                     });
                     ui.add_space(2.0);
                 }
-                ui.horizontal(|ui| {
-                    if style::icon_btn(ui, SIcon::Gear, lang.t("Einstellungen", "Settings"), self.settings_open).clicked() {
-                        self.settings_open = !self.settings_open;
-                    }
-                    if self.mcp_chip(ui) {
-                        self.settings_open = true;
-                        self.settings_tab = 7;
-                    }
-                    if tok == 0 {
+                if tok == 0 {
+                    ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add(egui::Label::new(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).small().color(style::dim(ui))).truncate());
                         });
-                    }
-                });
+                    });
+                }
             });
 
             // Werkzeugleiste
@@ -165,7 +158,9 @@ impl App {
                         }
                     } else {
                         let title = RichText::new(format!("{}  {}", g.to_uppercase(), ids.len())).small().color(style::dim(ui));
-                        egui::CollapsingHeader::new(title).id_salt(("grp", &g)).default_open(true).show(ui, |ui| {
+                        // Wird eine Sitzung darin umbenannt, die Gruppe aufklappen (sonst wäre das Eingabefeld unsichtbar, #259).
+                        let renaming = self.rename.as_ref().is_some_and(|(rid, _)| ids.contains(rid));
+                        egui::CollapsingHeader::new(title).id_salt(("grp", &g)).default_open(true).open(renaming.then_some(true)).show(ui, |ui| {
                             for id in ids {
                                 self.session_row(ui, id, actions);
                             }
@@ -636,9 +631,12 @@ impl App {
         } else {
             resp.on_hover_text(format!("{status_tip}\n{}", lang.t("Mittelklick schließt die Sitzung.", "Middle-click closes the session.")))
         };
+        // Nur Ordner des Projekts dieser Sitzung (und Gruppen dieses Fensters) – ein Ordner eines anderen Projekts würde
+        // still im Projekt der Sitzung angelegt (#258).
+        let own_project = self.entries.get(&id).map(|e| e.meta.project).unwrap_or(self.active_project);
         let existing_groups: Vec<String> = {
-            let mut g: Vec<String> = self.entries.values().map(|e| e.meta.group.clone()).filter(|g| !g.is_empty()).collect();
-            if let Some(p) = self.projects.iter().find(|p| p.id == self.active_project) {
+            let mut g: Vec<String> = self.entries.values().filter(|e| e.meta.project == own_project && self.in_win(e)).map(|e| e.meta.group.clone()).filter(|g| !g.is_empty()).collect();
+            if let Some(p) = self.projects.iter().find(|p| p.id == own_project) {
                 g.extend(p.folders.iter().map(|f| f.path.clone()));
             }
             g.sort_by_key(|x| x.to_lowercase());
@@ -758,15 +756,7 @@ pub(super) fn sidebar_panel<R>(ctx: &egui::Context, default_width: f32, fill: Co
         .default_width(default_width)
         .width_range(SIDEBAR_WIDTHS)
         .frame(egui::Frame::new().fill(fill).inner_margin(Margin::symmetric(10, 10)))
-        .show(ctx, |ui| {
-            let area = ui.max_rect();
-            let mut body = ui.new_child(egui::UiBuilder::new().id_salt("sidebar_body").max_rect(area).layout(*ui.layout()));
-            let r = add(&mut body);
-            // Genau die verfügbare Fläche belegen – nicht mehr (Inhalt zu breit) und nicht weniger (Inhalt zu schmal).
-            // (ohne Widget: nichts darf Klicks oder Hover der Zeilen darunter abfangen).
-            ui.advance_cursor_after_rect(area);
-            r
-        })
+        .show(ctx, |ui| super::panels::fixed_body(ui, add))
 }
 
 /// Gesamtverbrauch unten in der Seitenleiste: öffnet die Kosten-Übersicht – darum als kleiner Knopf mit Pfeil, Hover,

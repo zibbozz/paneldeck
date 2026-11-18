@@ -77,14 +77,22 @@ impl App {
                     }
                     x += 44.0;
                 }
-                // Fenstertitel (mittig, ohne die Knöpfe zu überdecken)
-                let max_chars = 70;
-                let shown: String = if title.chars().count() > max_chars { title.chars().take(max_chars - 1).chain(std::iter::once('…')).collect() } else { title };
-                painter.text(Pos2::new(rect.center().x, rect.center().y), Align2::CENTER_CENTER, shown, FontId::proportional(12.5), if focused { dim } else { dim.gamma_multiply(0.7) });
-                // Fensterknöpfe rechts
+                let tabs_end = x;
+                // Fensterknöpfe rechts; links davon (von rechts nach links) Einstellungen, Update und MCP-Status (#240) –
+                // in jedem Bereich und jedem Fenster. Der MCP-Status entfällt, wenn sonst kein Platz für die Reiter bliebe.
                 let bw = 46.0;
                 let mut bx = rect.right() - bw * 3.0;
-                self.update_title_button(ui, bx); // Update-Knopf links neben Minimieren (update/ui.rs)
+                let mut right = bx - 4.0;
+                right = self.settings_title_button(ui, right);
+                right = self.update_title_button(ui, right); // update/ui.rs
+                right = self.mcp_title_button(ui, right, tabs_end + 40.0); // mcp.rs
+                // Fenstertitel: mittig, wenn er dort zwischen Reitern und Knöpfen Platz hat, sonst in der freien Mitte;
+                // gekürzt auf den freien Platz (#259), nie über Reiter oder Knöpfe.
+                let font = FontId::proportional(12.5);
+                let col = if focused { dim } else { dim.gamma_multiply(0.7) };
+                if let Some((text, cx)) = title_place(&title, tabs_end + 8.0, right - 8.0, rect.center().x, |s| painter.layout_no_wrap(s.to_string(), font.clone(), col).size().x) {
+                    painter.text(Pos2::new(cx, rect.center().y), Align2::CENTER_CENTER, text, font, col);
+                }
                 for (i, icon) in [SIcon::Minimize, if maximized { SIcon::Restore } else { SIcon::Maximize }, SIcon::Close].into_iter().enumerate() {
                     let r = Rect::from_min_size(Pos2::new(bx, rect.top()), Vec2::new(bw, BAR_HEIGHT));
                     // Hand wie bei allen Knöpfen (#187); über dem Maximieren-Knopf entscheidet im Hauptfenster das System (Snap-Layouts).
@@ -112,6 +120,20 @@ impl App {
                 }
                 painter.line_segment([Pos2::new(rect.left(), rect.bottom() - 0.5), Pos2::new(rect.right(), rect.bottom() - 0.5)], Stroke::new(1.0_f32, Color32::from_white_alpha(18)));
             });
+    }
+
+    /// Knopf „Einstellungen“ in der Fensterleiste (#240), rechts vor den Fensterknöpfen; `right` = rechte Kante.
+    /// Liefert die rechte Kante für den nächsten Knopf links davon.
+    fn settings_title_button(&mut self, ui: &egui::Ui, right: f32) -> f32 {
+        let lang = self.settings.language;
+        let r = Rect::from_min_size(Pos2::new(right - 40.0, ui.max_rect().top() + 4.0), Vec2::new(40.0, BAR_HEIGHT - 8.0));
+        let resp = title_button(ui, r, Id::new("titlebar_settings"), lang.t("Einstellungen", "Settings"), self.settings_open);
+        let fg = if self.settings_open { style::accent() } else { ui.visuals().text_color() };
+        style::paint_icon(ui.painter(), SIcon::Gear, r.center(), fg);
+        if resp.clicked() {
+            self.settings_open = !self.settings_open;
+        }
+        r.left() - 4.0
     }
 
     /// Resize-Ränder des rahmenlosen Fensters (Zeiger am Rand → Pfeil, Ziehen → Größe ändern) und eine feine Umrandung.
@@ -149,5 +171,96 @@ impl App {
                 }
             }
         }
+    }
+}
+
+
+/// Knopf im Stil der Reiter der Fensterleiste (#240): Fläche beim Überfahren, aktiv in der Akzentfarbe, Hand, Tooltip.
+pub(super) fn title_button(ui: &egui::Ui, r: Rect, id: Id, tip: &str, active: bool) -> egui::Response {
+    let resp = ui.interact(r, id, Sense::click()).on_hover_text(tip);
+    let painter = ui.painter();
+    if active {
+        painter.rect_filled(r, 6.0, style::accent().gamma_multiply(if resp.hovered() { 0.34 } else { 0.22 }));
+    } else if resp.hovered() {
+        painter.rect_filled(r, 6.0, Color32::from_white_alpha(14));
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    resp
+}
+
+/// Fenstertitel in den freien Platz zwischen `left` und `right` legen: möglichst mittig bei `center`, sonst mittig im
+/// freien Platz; zu lang → mit „…“ gekürzt. `None`, wenn kein sinnvoller Platz bleibt. `width` misst einen Text.
+/// Liefert (Text, x-Mitte).
+fn title_place(title: &str, left: f32, right: f32, center: f32, width: impl Fn(&str) -> f32) -> Option<(String, f32)> {
+    let room = right - left;
+    if room < 24.0 || title.is_empty() {
+        return None;
+    }
+    let text = if width(title) <= room {
+        title.to_string()
+    } else {
+        // Längsten Anfang suchen, der mit „…“ passt (binäre Suche über die Zeichenzahl).
+        let chars: Vec<char> = title.chars().collect();
+        let (mut lo, mut hi) = (0usize, chars.len());
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            let cand: String = chars[..mid].iter().collect::<String>() + "…";
+            if width(&cand) <= room { lo = mid } else { hi = mid - 1 }
+        }
+        if lo == 0 {
+            return None;
+        }
+        chars[..lo].iter().collect::<String>().trim_end().to_string() + "…"
+    };
+    let w = width(&text);
+    let cx = if center - w / 2.0 >= left && center + w / 2.0 <= right { center } else { (left + right) / 2.0 };
+    Some((text, cx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{title_button, title_place};
+    use eframe::egui::{self, Id, Pos2, Rect, Vec2};
+
+    /// Knöpfe der Fensterleiste (Einstellungen, MCP-Status, #240): Hand und Tooltip wie bei allen Knöpfen, daneben nicht.
+    #[test]
+    fn title_buttons_show_the_hand_and_a_tooltip() {
+        use crate::afford::tests::{cursor_at, tooltip_at};
+        let r = Rect::from_min_size(Pos2::new(300.0, 4.0), Vec2::new(40.0, 26.0));
+        for active in [false, true] {
+            let mut f = |ui: &mut egui::Ui| {
+                title_button(ui, r, Id::new("t"), "Settings", active);
+            };
+            assert_eq!(cursor_at(r.center(), &mut f), egui::CursorIcon::PointingHand, "Hand (aktiv: {active})");
+            assert!(tooltip_at(r.center(), &mut f), "Tooltip (aktiv: {active})");
+            assert_ne!(cursor_at(r.center() + Vec2::new(80.0, 0.0), &mut f), egui::CursorIcon::PointingHand, "daneben keine Hand");
+        }
+    }
+
+    fn w(s: &str) -> f32 {
+        s.chars().count() as f32 * 7.0
+    }
+
+    #[test]
+    fn title_stays_centered_when_it_fits() {
+        let (t, cx) = title_place("api-server – Paneldeck", 130.0, 1000.0, 600.0, w).unwrap();
+        assert_eq!(t, "api-server – Paneldeck");
+        assert_eq!(cx, 600.0);
+    }
+
+    #[test]
+    fn title_moves_into_the_free_space_and_is_truncated_to_it() {
+        // Mitte wäre von den Knöpfen rechts überdeckt: in die freie Mitte rücken
+        let (t, cx) = title_place("abcdefghij", 130.0, 300.0, 320.0, w).unwrap();
+        assert_eq!((t.as_str(), cx), ("abcdefghij", 215.0));
+        // zu lang für den freien Platz (640-pt-Fenster mit Update- und MCP-Knopf): gekürzt, passt hinein
+        let long = "(3) a very long session name that never fits – Paneldeck";
+        let (t, cx) = title_place(long, 130.0, 300.0, 320.0, w).unwrap();
+        assert!(t.ends_with('…') && w(&t) <= 170.0, "{t}");
+        assert!(cx - w(&t) / 2.0 >= 130.0 && cx + w(&t) / 2.0 <= 300.0, "{t} bei {cx}");
+        // kein Platz: kein Titel
+        assert!(title_place(long, 130.0, 140.0, 320.0, w).is_none());
     }
 }

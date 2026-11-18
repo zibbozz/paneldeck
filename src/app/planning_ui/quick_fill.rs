@@ -47,7 +47,7 @@ pub struct Fill {
     /// Fehlende Felder (Vereinigung über alle Tickets) mit ihrem Eingabepuffer.
     pub fields: Vec<(Field, Draft)>,
     /// Bekannte Labels des Projekts (Vorschläge für Label-Felder).
-    pub labels: Vec<String>,
+    pub labels: super::ticket_data::LabelCounts,
     pub error: Option<String>,
 }
 
@@ -77,7 +77,7 @@ fn build(conn: &Connection, need: Vec<i64>, run: Run, create: bool, name: String
         let d = Draft::from_value(&f, None);
         fields.push((f, d));
     }
-    let labels = super::ticket_data::label_suggestions(conn, project_id);
+    let labels = Default::default();
     Ok(Some(Fill { run, create, name, project_id, fields, labels, error: None }))
 }
 

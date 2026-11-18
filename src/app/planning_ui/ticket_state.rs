@@ -265,7 +265,8 @@ pub struct TicketUi {
     pub detail: Option<Detail>,
     pub view: ViewState,
     pub history: History<TicketOp>,
-    pub labels: Vec<String>,
+    /// Zählungen benutzter Labels je Projekt und Feld (Vorschläge, #239).
+    pub labels: super::ticket_data::LabelCounts,
     pub create: Option<super::ticket_create::CreateDlg>,
     pub create_another: bool,
     pub transition: Option<TransitionDlg>,
@@ -327,7 +328,7 @@ impl Default for TicketUi {
             detail: None,
             view: ViewState::default(),
             history: History::new(25),
-            labels: Vec::new(),
+            labels: Default::default(),
             create: None,
             create_another: false,
             transition: None,

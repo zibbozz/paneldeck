@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 macro_rules! view_fields {
     ($mac:ident!($($args:tt)*)) => {
         $mac!($($args)*;
-            layout, focused, want_focus, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
+            layout, focused, want_focus, focus_return, active_project, mode, filter, pane_rects, last_title, rename, group_prompt, new_dialog, new_chat,
             confirm_close, reload_ask, session_settings, settings_open, settings_tab, capture_key, profile_sel, palette, text_prompt, folder_prompt, notes_open,
             queue_open, queue_draft, files_open, diff_open, diff_sel, composer_open, composer_focus, composer_text, history_open,
             history_filter, history_hits, history_hits_rx, templates_open, tpl_name, cost_open, gsearch, prompts_open, prompt_sel,
@@ -48,6 +48,7 @@ pub(super) struct WinView {
     layout: Option<Node>,
     focused: u64,
     want_focus: Option<u64>,
+    focus_return: Option<u8>,
     active_project: u64,
     mode: titlebar::Mode,
     filter: String,
@@ -112,6 +113,7 @@ impl WinView {
             layout: None,
             focused: 0,
             want_focus: None,
+            focus_return: None,
             active_project: project,
             mode,
             filter: String::new(),
@@ -850,6 +852,7 @@ impl App {
         for a in actions {
             self.apply(ctx, a);
         }
+        self.focus_return_tick(ctx);
         let title = self.view_title(w.id);
         if title != self.last_title {
             self.last_title = title;
@@ -943,39 +946,43 @@ impl App {
                         format!("The histories of {} chats will be deleted.", plan.chats)
                     });
                 }
-                if !hidden.is_empty() {
-                    ui.add_space(S1);
-                    ui.label(lang.t(
-                        "Auch diese Sitzungen werden beendet, obwohl sie gerade nicht im Layout stehen (minimiert oder weggewechselt):",
-                        "These sessions will also end, although they are not in the layout right now (minimized or switched away):",
-                    ));
-                    for (_, name) in &hidden {
-                        ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                // Lange Listen (viele versteckte Sitzungen) in einer Scrollfläche: die Knöpfe bleiben sichtbar (#241).
+                let body_h = (super::dialogs::dialog_body_height(ctx) - 60.0).max(100.0);
+                egui::ScrollArea::vertical().id_salt("close_win_lists").max_height(body_h).min_scrolled_height(body_h).show(ui, |ui| {
+                    if !hidden.is_empty() {
+                        ui.add_space(S1);
+                        ui.label(lang.t(
+                            "Auch diese Sitzungen werden beendet, obwohl sie gerade nicht im Layout stehen (minimiert oder weggewechselt):",
+                            "These sessions will also end, although they are not in the layout right now (minimized or switched away):",
+                        ));
+                        for (_, name) in &hidden {
+                            ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                        }
                     }
-                }
-                if !adopt.is_empty() {
-                    ui.add_space(S1);
-                    ui.label(lang.t("Abgedockte Sitzungen bleiben offen und gehören danach zum Hauptfenster:", "Detached sessions stay open and move to the main window:"));
-                    for (_, name) in &adopt {
-                        ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                    if !adopt.is_empty() {
+                        ui.add_space(S1);
+                        ui.label(lang.t("Abgedockte Sitzungen bleiben offen und gehören danach zum Hauptfenster:", "Detached sessions stay open and move to the main window:"));
+                        for (_, name) in &adopt {
+                            ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                        }
                     }
-                }
-                if !worktrees.is_empty() {
-                    ui.add_space(S1);
-                    ui.label(lang.t(
-                        "Sitzungen mit Git-Worktree zuerst schließen (Worktree behalten, entfernen oder mergen):",
-                        "Close the sessions with a Git worktree first (keep, remove or merge the worktree):",
-                    ));
-                    for (id, name) in &worktrees {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("• {name}"));
-                            if ui.small_button(lang.t("Schließen …", "Close …")).clicked() {
-                                actions.push(Action::RequestClose(*id));
-                            }
-                        });
+                    if !worktrees.is_empty() {
+                        ui.add_space(S1);
+                        ui.label(lang.t(
+                            "Sitzungen mit Git-Worktree zuerst schließen (Worktree behalten, entfernen oder mergen):",
+                            "Close the sessions with a Git worktree first (keep, remove or merge the worktree):",
+                        ));
+                        for (id, name) in &worktrees {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("• {name}"));
+                                if ui.small_button(lang.t("Schließen …", "Close …")).clicked() {
+                                    actions.push(Action::RequestClose(*id));
+                                }
+                            });
+                        }
                     }
-                }
-                super::closing::lingering_section(ui, &lingering, lang, true);
+                    super::closing::lingering_section(ui, &lingering, lang, true);
+                });
                 ui.add_space(S2);
                 ui.horizontal(|ui| {
                     let label = if lingering.is_empty() { lang.t("Fenster schließen", "Close window") } else { lang.t("Schließen, weiterlaufen lassen", "Close, keep running") };

@@ -51,8 +51,10 @@ impl App {
             Some(f) => format!("📁 {} ({})", state::folder_leaf(f), self.folder_sessions(f).len()),
             None => self.entries.get(&dragged).map(|e| e.display_name()).unwrap_or_default(),
         };
+        // Sitzung eines anderen Projekts (gefilterte Seitenleiste): nie in Ordner oder Layout des gezeigten Projekts (#258).
+        let foreign = folder_drag.is_none() && self.entries.get(&dragged).is_some_and(|e| e.meta.project != self.active_project);
         // Ordner in der Seitenleiste als Ablageziel: der kleinste Bereich unter dem Zeiger gewinnt.
-        let folder_target = pos.and_then(|p| {
+        let folder_target = pos.filter(|_| !foreign).and_then(|p| {
             self.folder_rects.iter().filter(|(f, r)| r.contains(p) && folder_drag.as_ref().is_none_or(|d| !state::folder_within(f, d))).min_by(|a, b| (a.1.width() * a.1.height()).total_cmp(&(b.1.width() * b.1.height()))).map(|(f, r)| (f.clone(), *r))
         });
         if let Some((fpath, r)) = folder_target {
@@ -190,6 +192,11 @@ impl App {
             self.open_folder_at(&fd, tid, z);
             return;
         }
+        if foreign {
+            // Wie ein Klick in der Seitenleiste: in ihr Projekt wechseln und sie dort zeigen.
+            self.apply(ctx, Action::Activate(dragged));
+            return;
+        }
         // Eine abgedockte Sitzung, die ins Hauptfenster gezogen wird, wird wieder angedockt.
         self.detached.retain(|d| *d != dragged);
         let Some(mut layout) = self.layout.take() else { return };
@@ -222,6 +229,16 @@ impl App {
     }
 
     pub(super) fn handle_drops(&mut self, ctx: &egui::Context) {
+        // Nur im Terminal Hub: die Bereichsflächen (`pane_rects`) stammen vom letzten Zeichnen dort – in der Todo-Liste
+        // landete der Pfad sonst in einem unsichtbaren Terminal und das Layout änderte sich (#259).
+        // Die Ablage-Hervorhebung wird je Bild neu gezeichnet (kein Zustand, der stehen bliebe); die abgelegten Dateien
+        // bleiben unangetastet in der Eingabe (hier wird nur gelesen), andere Empfänger sehen sie weiter. Die Flächen der
+        // Bereiche gelten in der Todo-Liste nicht: leeren, damit nichts (Ablage-Ziele beim Ziehen, Screenshot einer
+        // Sitzung über MCP) mit Flächen des unsichtbaren Terminal Hub rechnet.
+        if self.mode != titlebar::Mode::Terminals {
+            self.pane_rects.clear();
+            return;
+        }
         let (files, hover, hovering) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos(), !i.raw.hovered_files.is_empty()));
         let target = hover.and_then(|p| self.pane_rects.iter().find(|(_, r)| r.contains(p)).map(|(id, r)| (*id, *r)));
         if hovering {
