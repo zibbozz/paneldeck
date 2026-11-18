@@ -946,39 +946,43 @@ impl App {
                         format!("The histories of {} chats will be deleted.", plan.chats)
                     });
                 }
-                if !hidden.is_empty() {
-                    ui.add_space(S1);
-                    ui.label(lang.t(
-                        "Auch diese Sitzungen werden beendet, obwohl sie gerade nicht im Layout stehen (minimiert oder weggewechselt):",
-                        "These sessions will also end, although they are not in the layout right now (minimized or switched away):",
-                    ));
-                    for (_, name) in &hidden {
-                        ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                // Lange Listen (viele versteckte Sitzungen) in einer Scrollfläche: die Knöpfe bleiben sichtbar (#241).
+                let body_h = (super::dialogs::dialog_body_height(ctx) - 60.0).max(100.0);
+                egui::ScrollArea::vertical().id_salt("close_win_lists").max_height(body_h).min_scrolled_height(body_h).show(ui, |ui| {
+                    if !hidden.is_empty() {
+                        ui.add_space(S1);
+                        ui.label(lang.t(
+                            "Auch diese Sitzungen werden beendet, obwohl sie gerade nicht im Layout stehen (minimiert oder weggewechselt):",
+                            "These sessions will also end, although they are not in the layout right now (minimized or switched away):",
+                        ));
+                        for (_, name) in &hidden {
+                            ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                        }
                     }
-                }
-                if !adopt.is_empty() {
-                    ui.add_space(S1);
-                    ui.label(lang.t("Abgedockte Sitzungen bleiben offen und gehören danach zum Hauptfenster:", "Detached sessions stay open and move to the main window:"));
-                    for (_, name) in &adopt {
-                        ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                    if !adopt.is_empty() {
+                        ui.add_space(S1);
+                        ui.label(lang.t("Abgedockte Sitzungen bleiben offen und gehören danach zum Hauptfenster:", "Detached sessions stay open and move to the main window:"));
+                        for (_, name) in &adopt {
+                            ui.label(RichText::new(format!("• {name}")).color(style::dim(ui)));
+                        }
                     }
-                }
-                if !worktrees.is_empty() {
-                    ui.add_space(S1);
-                    ui.label(lang.t(
-                        "Sitzungen mit Git-Worktree zuerst schließen (Worktree behalten, entfernen oder mergen):",
-                        "Close the sessions with a Git worktree first (keep, remove or merge the worktree):",
-                    ));
-                    for (id, name) in &worktrees {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("• {name}"));
-                            if ui.small_button(lang.t("Schließen …", "Close …")).clicked() {
-                                actions.push(Action::RequestClose(*id));
-                            }
-                        });
+                    if !worktrees.is_empty() {
+                        ui.add_space(S1);
+                        ui.label(lang.t(
+                            "Sitzungen mit Git-Worktree zuerst schließen (Worktree behalten, entfernen oder mergen):",
+                            "Close the sessions with a Git worktree first (keep, remove or merge the worktree):",
+                        ));
+                        for (id, name) in &worktrees {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("• {name}"));
+                                if ui.small_button(lang.t("Schließen …", "Close …")).clicked() {
+                                    actions.push(Action::RequestClose(*id));
+                                }
+                            });
+                        }
                     }
-                }
-                super::closing::lingering_section(ui, &lingering, lang, true);
+                    super::closing::lingering_section(ui, &lingering, lang, true);
+                });
                 ui.add_space(S2);
                 ui.horizontal(|ui| {
                     let label = if lingering.is_empty() { lang.t("Fenster schließen", "Close window") } else { lang.t("Schließen, weiterlaufen lassen", "Close, keep running") };

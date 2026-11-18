@@ -660,11 +660,16 @@ impl App {
         if enter {
             chosen = items.get(p.sel).map(|i| i.3.clone());
         }
+        // Auf kleinen Fenstern (ab 400 pt Höhe) bleibt die Palette im Bild: Treffer scrollen, Abstand oben schrumpft (#241).
+        let screen = ctx.content_rect();
+        let top = (screen.height() * 0.1).clamp(8.0, 70.0);
+        let list_h = (screen.height() - top - 90.0).max(80.0);
+        let width = (screen.width() - 32.0).clamp(240.0, 560.0);
         egui::Window::new("palette")
             .title_bar(false)
             .resizable(false)
-            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 70.0))
-            .fixed_size([560.0, 0.0])
+            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, top))
+            .fixed_size([width, 0.0])
             .show(ctx, |ui| {
                 let before = p.query.clone();
                 let te = ui.add(
@@ -681,18 +686,23 @@ impl App {
                     p.sel = 0;
                 }
                 ui.add_space(4.0);
-                for (i, (_, label, hint, act)) in items.iter().enumerate() {
-                    let r = ui.horizontal(|ui| {
-                        let resp = ui.selectable_label(i == p.sel, label);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak(hint);
+                egui::ScrollArea::vertical().id_salt("palette_list").max_height(list_h).min_scrolled_height(list_h).show(ui, |ui| {
+                    for (i, (_, label, hint, act)) in items.iter().enumerate() {
+                        let r = ui.horizontal(|ui| {
+                            let resp = ui.selectable_label(i == p.sel, label);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.weak(hint);
+                            });
+                            resp
                         });
-                        resp
-                    });
-                    if r.inner.clicked() {
-                        chosen = Some(act.clone());
+                        if i == p.sel && (down || up) {
+                            r.inner.scroll_to_me(None);
+                        }
+                        if r.inner.clicked() {
+                            chosen = Some(act.clone());
+                        }
                     }
-                }
+                });
                 if items.is_empty() {
                     ui.weak(lang.t("Keine Treffer", "No matches"));
                 }

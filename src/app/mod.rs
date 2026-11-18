@@ -101,6 +101,12 @@ struct Entry {
     /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
     /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
     session_key: String,
+    /// Konversation, die zu diesem Start gehört (#260): Meldungen mit einer anderen Konversations-ID (z. B. ein von
+    /// Claude gestartetes `claude -p`, das die Umgebung erbt) zählen nicht. Je Start neu.
+    hook_conv: hooks::ConvBinding,
+    /// In diesem Start kam schon eine Meldung mit Schlüssel: Meldungen ohne Schlüssel (globale Hooks einer älteren
+    /// paneldeck.exe) zählen dann nicht mehr.
+    hook_keyed: bool,
     /// Hinweis vom letzten Start (z. B. weggelassene Pfade aus den Claude-Optionen, #182); wird im nächsten Bild als
     /// Meldung gezeigt.
     launch_note: Option<String>,
@@ -112,7 +118,7 @@ impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts, launch_note: None, progress: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -420,9 +426,10 @@ struct NewDialog {
     claude: bool,
     /// Claude-Startoptionen (Modell, Effort, Permission-Mode, Agent); vorbelegt mit der letzten Wahl bzw. den Standards.
     copts: ClaudeOpts,
-    continue_last: bool,
-    /// „Konversation fortsetzen“ beim Neu laden/Neustart (#170), Standard an.
-    claude_continue: bool,
+    /// Wie die Konversation beginnt und ob sie beim Neu laden/Neustart fortgesetzt wird (#170, eine Auswahl seit #241).
+    conv: session_settings::ConvChoice,
+    /// Beim ersten Bild den Fokus ins Namensfeld (nicht ins Terminal dahinter, #255).
+    focus: bool,
     profile: u64,
     prompt: String,
     worktree: bool,
@@ -477,7 +484,7 @@ impl NewDialog {
     fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
         let cwd = home_dir();
         let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
-        NewDialog { shell_id, cwd, name: String::new(), claude, copts, continue_last: false, claude_continue: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+        NewDialog { shell_id, cwd, name: String::new(), claude, copts, conv: session_settings::ConvChoice::Resume, focus: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
     }
 
     /// Startordner von außen setzen (Profil, Ordnervorgabe).
@@ -744,6 +751,9 @@ pub struct App {
     hook_server: Option<HookServer>,
     hooks_file: Option<PathBuf>,
     hooks_global: bool,
+    /// Die globalen Hooks zeigen auf eine andere paneldeck.exe (Pfad): deren Meldungen tragen keinen Schlüssel und zählen
+    /// nur für den Status (#260); die Einstellungen bieten „Neu eintragen“ an.
+    hooks_foreign: Option<String>,
     hooks_msg: String,
     exe: PathBuf,
     palette: Option<Palette>,
@@ -847,6 +857,34 @@ fn home_dir() -> String {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_default()
+}
+
+/// Hinweis: aus alten Claude-Argumenten der Sitzung `name` weggelassene Flags (Review zu #245).
+fn legacy_dropped_note(name: &str, dropped: &[String]) -> String {
+    format!(
+        "{} ({name}): {}",
+        state::t(
+            "Alte Claude-Argumente werden nicht mehr unterstützt oder sind ungültig, weggelassen",
+            "Old Claude arguments are no longer supported or invalid, left out"
+        ),
+        dropped.join(", ")
+    )
+}
+
+/// Hinweis: die globalen Hooks gehören zu einer anderen paneldeck.exe (`other`, #260).
+fn hooks_foreign_note(other: &str) -> String {
+    format!(
+        "{} ({}). {}",
+        state::t(
+            "Die globalen Claude-Hooks in ~/.claude/settings.json zeigen auf eine andere paneldeck.exe",
+            "The global Claude hooks in ~/.claude/settings.json point to another paneldeck.exe"
+        ),
+        crate::mcp::short(other, 80),
+        state::t(
+            "Ihre Meldungen zählen nur für den Status. Einstellungen → Claude → Hooks: „Neu eintragen“.",
+            "Their messages only count for the status. Settings → Claude → Hooks: “Reinstall”."
+        ),
+    )
 }
 
 fn setup_fonts(ctx: &egui::Context, choice: &str) {
@@ -1044,6 +1082,7 @@ impl App {
             hook_server: HookServer::start(&cc.egui_ctx),
             hooks_file: None,
             hooks_global: false,
+            hooks_foreign: None,
             hooks_msg: String::new(),
             exe: std::env::current_exe().unwrap_or_default(),
             palette: None,
@@ -1143,7 +1182,10 @@ impl App {
             hooks::write_ipc_file(&app.dir, h.port, &h.ipc_token);
         }
         app.hooks_file = hooks::write_session_settings(&app.dir, &app.exe);
-        app.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
+        app.refresh_hooks_global();
+        if let Some(other) = &app.hooks_foreign {
+            app.spawn_notes.borrow_mut().push(hooks_foreign_note(other));
+        }
         if app.settings.default_shell.is_empty() {
             app.settings.default_shell = app.shells.first().map(|s| s.id.clone()).unwrap_or_default();
         }
@@ -1529,6 +1571,40 @@ impl App {
         folder_picker::Target::for_shell(self.shell_by_id(&sid).as_ref(), choose)
     }
 
+    /// Shell für eine Konversation aus dem (Windows-)Verlauf: `None` = wie gewohnt (Standard-Shell bzw. Profil des
+    /// Projekts, beides Windows); sonst eine Windows-Shell, wenn Standard-Shell oder Projektprofil in WSL laufen.
+    fn windows_shell_id(&self) -> Option<String> {
+        let profile = self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0);
+        let sid = match self.profile(profile) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            Some(p) if !p.shell_id.is_empty() => p.shell_id.clone(),
+            _ => self.settings.default_shell.clone(),
+        };
+        if !self.shell_by_id(&sid).is_some_and(|s| shells::is_wsl(&s)) {
+            return None;
+        }
+        self.shells.iter().find(|s| !shells::is_wsl(s)).map(|s| s.id.clone())
+    }
+
+    /// Stand der globalen Hooks neu lesen (nur lesend): eingetragen? Auf eine andere paneldeck.exe?
+    fn refresh_hooks_global(&mut self) {
+        let path = hooks::global_settings_path();
+        self.hooks_global = path.as_deref().is_some_and(hooks::global_installed);
+        self.hooks_foreign = if self.hooks_global { path.as_deref().and_then(|p| hooks::global_foreign_exe(p, &self.exe)) } else { None };
+    }
+
+    /// Hat ein Terminal den Tastaturfokus?
+    fn terminal_has_focus(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.focused()).is_some_and(|f| self.entries.keys().any(|id| Id::new(("term", *id)) == f))
+    }
+
+    /// Fokus eines Terminals abgeben (ein Feld eines Dialogs behält ihn).
+    fn release_terminal_focus(&self, ctx: &egui::Context) {
+        if self.terminal_has_focus(ctx) {
+            models_ui::release_focus(ctx);
+        }
+    }
+
     /// Erkannte WSL-Shell einer Distribution (Groß-/Kleinschreibung egal, wie Windows).
     fn wsl_shell_for(&self, distro: &str) -> Option<String> {
         self.shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|d| d.eq_ignore_ascii_case(distro))).map(|s| s.id.clone())
@@ -1544,6 +1620,8 @@ impl App {
                 let stem = std::path::Path::new(&p.program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
                 let sid = match stem.as_str() {
                     "wsl" => format!("wsl:{}", shells::wsl_distro(&args).unwrap_or_default()),
+                    // WSL-Starter aus System32: WSL mit der Standard-Distribution (Hooks, WSLENV, Pfade; #261).
+                    "bash" if shells::is_system_bash(&p.program) => "wsl:".to_string(),
                     "pwsh" | "powershell" | "cmd" => stem.clone(),
                     _ => id.to_string(),
                 };
@@ -1569,11 +1647,11 @@ impl App {
 
     /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt; dritter: die tatsächlich gesetzten
     /// Optionen und die weggelassenen Pfade (#182).
-    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs) {
+    fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs, hooks::ConvBinding) {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
-        let is_wsl = sid.starts_with("wsl");
+        let is_wsl = sid.starts_with("wsl") || spec.as_ref().is_some_and(shells::is_wsl);
         // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
         let style = crate::claude_opts::PathStyle::for_shell(&sid, spec.as_ref().map(|s| s.program.as_str()).unwrap_or(""), kind);
         let mut c = String::from(style.claude_program());
@@ -1595,33 +1673,50 @@ impl App {
         c += &launch.line;
         // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
         // der globalen Einstellung (`session_settings::resume_wanted`).
+        // Fortgesetzt wird nur eine Konversation, die es wirklich gibt (#245); sonst eine neue mit eigener ID.
         let resume_wanted = session_settings::resume_wanted(l.restore, l.restart, meta.claude_continue, self.settings.claude_resume);
-        let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, is_wsl);
+        let has_conv = resume_wanted && session_settings::conversation_exists(meta, is_wsl, crate::history::projects_dir().as_deref(), &home_dir());
+        let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, has_conv);
         let fresh = start == session_settings::ClaudeStart::Fresh;
-        match start {
-            session_settings::ClaudeStart::Resume(id) => c += &format!(" --resume {id}"),
-            session_settings::ClaudeStart::Continue => c += " --continue",
+        let expect = match start {
+            session_settings::ClaudeStart::Resume(id) => {
+                c += &format!(" --resume {id}");
+                Some(id)
+            }
+            session_settings::ClaudeStart::Continue => {
+                c += " --continue";
+                None
+            }
             session_settings::ClaudeStart::Fresh => {
                 // Neue Konversation mit eigener ID, damit sie später exakt wiedergefunden wird.
                 meta.claude_session = hooks::new_uuid();
                 meta.claude_started = false;
                 c += &format!(" --session-id {}", meta.claude_session);
+                Some(meta.claude_session.clone())
             }
-        }
+        };
         // Der Start-Prompt wird nicht in die Kommandozeile geschrieben (Shell-Expansion von $, `, % …),
         // sondern als erster Eintrag der Warteschlange gesendet, sobald Claude bereit ist.
         if let Some(p) = l.prompt.filter(|p| !p.trim().is_empty()) {
             meta.queue.insert(0, p.trim().to_string());
         }
-        (c + "\r", fresh, launch)
+        // Zuordnung der Hook-Meldungen dieses Starts (#260): die übergebene Konversations-ID und ob `--safe-mode`
+        // (Option oder alte `claude_args`) die Hooks des Claude dieser Sitzung abschaltet.
+        let hooks_off = launch.applied.extra.flags.iter().any(|f| f == "safe-mode") || args.split_whitespace().any(|t| t == "--safe-mode");
+        let binding = hooks::ConvBinding::launch(expect, hooks_off);
+        (c + "\r", fresh, launch, binding)
     }
 
     fn spawn_into(&self, ctx: &egui::Context, entry: &mut Entry, l: Launch) {
         // Ab hier gilt die Einstellung für diesen Start (auch wenn der Start gleich scheitert: dann läuft nichts mehr
         // aus der alten Konfiguration).
-        entry.launched_claude = entry.meta.claude && !entry.is_chat();
+        // Mit ausgeschaltetem Claude-Modus startet keine Sitzung Claude – auch nicht beim Programmstart, Neu laden oder
+        // Duplizieren (#261); die Einstellung der Sitzung bleibt für später erhalten.
+        entry.launched_claude = entry.meta.claude && !entry.is_chat() && self.settings.claude_mode;
         entry.launched_opts = if entry.launched_claude { entry.meta.claude_opts_eff().0 } else { Default::default() };
         entry.hook_seen = false;
+        entry.hook_conv = hooks::ConvBinding::default();
+        entry.hook_keyed = false;
         let Some(mut shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
@@ -1632,35 +1727,6 @@ impl App {
         } else {
             None
         };
-        let claude_cmd = if entry.launched_claude {
-            let (c, fresh, launch) = self.claude_command(&mut entry.meta, &l);
-            // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
-            entry.launched_opts = launch.applied;
-            if !launch.dropped.is_empty() {
-                entry.launch_note = Some(format!(
-                    "{} ({}): {}",
-                    state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
-                    entry.display_name(),
-                    launch.dropped.join(", "),
-                ));
-            }
-            if fresh {
-                // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
-                entry.meta.transcript.clear();
-                self.usage.reset(entry.meta.id);
-            }
-            Some(c)
-        } else {
-            self.usage.reset(entry.meta.id);
-            None
-        };
-        let profile = self.profile(entry.meta.profile).cloned();
-        let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
-        let initial = match (&startup, claude_cmd) {
-            (Some(st), Some(c)) => Some(format!("{st}\r{c}")),
-            (Some(st), None) => Some(format!("{st}\r")),
-            (None, c) => c,
-        };
         // WSL: ein Linux-Startordner (leer = Linux-Home `~`, #172) geht als `wsl.exe --cd <pfad>` mit; der
         // Windows-Startordner ist dann nur ein gültiger Platzhalter. Windows-Pfade übersetzt wsl.exe wie bisher selbst.
         // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
@@ -1668,7 +1734,9 @@ impl App {
         let cwd = if wsl {
             let distro = shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args));
             let de = self.settings.language == Lang::De;
-            match crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) {
+            // Der WSL-Starter `bash.exe` kennt kein `--cd`: er startet im Windows-Ordner (#261).
+            let cd = if shells::is_system_bash(&shell.program) { crate::wsl::Cd::Windows } else { crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) };
+            match cd {
                 crate::wsl::Cd::Linux => home_dir(),
                 // Eigenes `--cd`/`~` des Profils (oder keine bekannte Distribution): nie einen Linux- oder WSL-Pfad als
                 // Windows-Startordner (CreateProcess) – und keine Prüfung eines \\wsl$-Pfads im UI-Thread.
@@ -1689,6 +1757,8 @@ impl App {
                     // ist als Startordner unzulässig: im Linux-Home starten und das melden, statt die Sitzung zu verweigern.
                     // Dialog und MCP lehnen solche Pfade schon vorher ab.
                     let old = std::mem::replace(&mut entry.meta.cwd, "~".into());
+                    // Die Konversation gehört zum alten Ordner: nicht im Linux-Home mit `--resume` suchen (#245).
+                    entry.meta.claude_started = false;
                     let _ = crate::wsl::apply_cd(&mut shell.args, "~", distro.as_deref());
                     self.spawn_notes.borrow_mut().push(if de {
                         format!("Startordner nicht verwendbar ({}): {} – die Sitzung startet im Linux-Home (~).", e.message(true), crate::mcp::short(&old, 80))
@@ -1705,6 +1775,47 @@ impl App {
             crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
         } else {
             entry.meta.cwd.clone()
+        };
+        // Erst nach dem Startordner: ein unbrauchbarer gespeicherter Ordner setzt die Konversation zurück (#245).
+        let claude_cmd = if entry.launched_claude {
+            // Alte freie Argumente einmalig umstellen; was nicht mehr geht (z. B. `--resume`, `--print`), meldet ein
+            // Hinweis – einmal, danach steht es nicht mehr in der Sitzung.
+            let legacy_dropped = entry.meta.migrate_legacy_args();
+            let (c, fresh, launch, binding) = self.claude_command(&mut entry.meta, &l);
+            entry.hook_conv = binding;
+            // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
+            entry.launched_opts = launch.applied;
+            let mut notes = Vec::new();
+            if !legacy_dropped.is_empty() {
+                notes.push(legacy_dropped_note(&entry.display_name(), &legacy_dropped));
+            }
+            if !launch.dropped.is_empty() {
+                notes.push(format!(
+                    "{} ({}): {}",
+                    state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
+                    entry.display_name(),
+                    launch.dropped.join(", "),
+                ));
+            }
+            if !notes.is_empty() {
+                entry.launch_note = Some(notes.join("\n"));
+            }
+            if fresh {
+                // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
+                entry.meta.transcript.clear();
+                self.usage.reset(entry.meta.id);
+            }
+            Some(c)
+        } else {
+            self.usage.reset(entry.meta.id);
+            None
+        };
+        let profile = self.profile(entry.meta.profile).cloned();
+        let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
+        let initial = match (&startup, claude_cmd) {
+            (Some(st), Some(c)) => Some(format!("{st}\r{c}")),
+            (Some(st), None) => Some(format!("{st}\r")),
+            (None, c) => c,
         };
         // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
         entry.session_key = hooks::random_hex();
@@ -1825,10 +1936,10 @@ impl App {
         let label = self.shell_by_id(&shell_id).map(|s| s.label).unwrap_or_else(|| "Shell".into());
         // Alle Wege (Dialog, MCP, Kontextmenü, --claude, IPC, Vorlagen, Duplikat, Verlauf) laufen hier durch;
         // bypassPermissions nur bei ausdrücklicher Wahl im Dialog.
-        let (claude_opts, claude_args) = if o.claude {
-            crate::claude_opts::resolve_new(o.claude_opts.as_ref(), o.allow_bypass, &self.settings.claude_defaults, &o.claude_args)
+        let (claude_opts, claude_args, legacy_dropped) = if o.claude {
+            crate::claude_opts::resolve_new_report(o.claude_opts.as_ref(), o.allow_bypass, &self.settings.claude_defaults, &o.claude_args)
         } else {
-            (ClaudeOpts::default(), o.claude_args.clone())
+            (ClaudeOpts::default(), o.claude_args.clone(), Vec::new())
         };
         let (name, custom) = match o.name.filter(|n| !n.trim().is_empty()) {
             Some(n) => (n, true),
@@ -1878,6 +1989,14 @@ impl App {
                     &mut entry,
                     Launch { restore: false, restart: false, continue_last: o.continue_last, prompt: o.prompt.as_deref(), resume_id: o.resume_id.as_deref() },
                 );
+                // Aus alten Argumenten (Vorlage, Duplikat) weggelassene Flags melden (Review zu #245).
+                if !legacy_dropped.is_empty() {
+                    let n = legacy_dropped_note(&entry.display_name(), &legacy_dropped);
+                    entry.launch_note = Some(match entry.launch_note.take() {
+                        Some(old) => format!("{n}\n{old}"),
+                        None => n,
+                    });
+                }
                 entry
             }
         };
@@ -2429,6 +2548,11 @@ impl App {
         // im ersten Bild noch Tasten (#217).
         if self.new_chat.is_some() || self.confirm_close.is_some() || self.link_ask_here(ctx) || self.paste_ask_here(None) {
             models_ui::release_focus(ctx);
+        }
+        // Weitere Dialoge über dem Terminal (#255): Neue Sitzung, Prompt an alle, Vorlagen, Worktree schließen. Nur ein
+        // Terminal gibt den Fokus ab – ein Feld des Dialogs behält ihn.
+        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() {
+            self.release_terminal_focus(ctx);
         }
         let theme = self.theme();
         let font = FontId::monospace(self.settings.font_size);
@@ -3139,6 +3263,25 @@ impl App {
             if e.is_chat() {
                 continue;
             }
+            // Nur Meldungen des laufenden Starts (#260): Schlüssel `PANELDECK_SESSION_KEY` dieses Starts. Ein anderes
+            // Terminal, ein übrig gebliebener Prozess eines früheren Starts oder eine Fälschung mit der bloßen Nummer
+            // ändert weder Status noch Konversation.
+            // Ausnahme: Meldungen ganz ohne Schlüssel stammen von globalen Hooks einer älteren paneldeck.exe (Hinweis in den
+            // Einstellungen). Sie zählen nur für den Status, solange in diesem Start keine Meldung mit Schlüssel kam, und
+            // ordnen nie eine Konversation zu.
+            let keyless = match hooks::admit(&e.session_key, e.hook_keyed, &e.hook_conv, &m) {
+                hooks::Admit::Drop => continue,
+                hooks::Admit::Keyed => {
+                    e.hook_keyed = true;
+                    false
+                }
+                hooks::Admit::StatusOnly => true,
+            };
+            // Eine andere Konversation als die dieses Starts (z. B. `claude -p` aus der Sitzung heraus) zählt nicht.
+            let conv = if keyless { hooks::ConvMatch::NoId } else { e.hook_conv.feed(&m) };
+            if conv == hooks::ConvMatch::Foreign {
+                continue;
+            }
             let old = e.status;
             e.hook_seen = true;
             let sh = e.eff_shell().to_string();
@@ -3147,7 +3290,7 @@ impl App {
                 cwd: m.cwd.as_ref().map(|p| pathfmt::from_wsl(&sh, p)),
                 ..m
             };
-            if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty()) {
+            if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty() && !keyless) {
                 if e.meta.transcript != *tp {
                     e.meta.transcript = tp.clone();
                     self.usage.set_path(m.session, PathBuf::from(tp));
@@ -3156,12 +3299,20 @@ impl App {
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
                 e.live_cwd = c.clone();
             }
-            if e.is_claude() {
-                if let Some(cs) = m.claude_session.as_ref().filter(|c| !c.is_empty()) {
-                    e.meta.claude_session = cs.clone();
+            if e.is_claude() && !keyless {
+                if let hooks::ConvMatch::Bind(cs) | hooks::ConvMatch::Switch(cs) = &conv {
+                    if e.meta.claude_session != *cs {
+                        e.meta.claude_session = cs.clone();
+                        // Eine andere Konversation als beim Start angegeben: Inhalt hat sie nur, wenn sie fortgesetzt wurde.
+                        e.meta.claude_started = false;
+                    }
                 }
-                if m.event == "UserPromptSubmit" {
-                    e.meta.claude_started = true;
+                match (m.event.as_str(), m.source.as_deref()) {
+                    // Fortgesetzte Konversation (`--resume`, `--continue`, `/resume`): sie hat Inhalt.
+                    ("SessionStart", Some("resume")) | ("UserPromptSubmit", _) => e.meta.claude_started = true,
+                    // `/clear`: neue, leere Konversation.
+                    ("SessionStart", Some("clear")) => e.meta.claude_started = false,
+                    _ => {}
                 }
             }
             let new = hooks::status_after(old, &m);
@@ -3336,11 +3487,28 @@ impl App {
                 }
             }
             Action::ResumeItem(h) => {
+                let lang = self.settings.language;
+                // Der Verlauf liest nur Windows-Konversationen (`~/.claude`); eine Datei ohne Konversations-ID wäre still
+                // als neue Konversation gestartet worden (#245).
+                if !crate::quote::is_uuid(&h.session_id) {
+                    self.notify_text(lang.t("Diese Konversation lässt sich nicht fortsetzen (keine gültige Konversations-ID).", "This conversation cannot be resumed (no valid conversation id).").to_string());
+                    return;
+                }
+                // Schon in einer Sitzung offen: dorthin wechseln statt sie ein zweites Mal zu öffnen (#245).
+                if let Some(open) = self.entries.iter().find(|(_, e)| e.launched_claude && !e.exited() && e.meta.claude_session == h.session_id).map(|(id, _)| *id) {
+                    self.notify_text(lang.t("Die Konversation ist schon in einer Sitzung offen.", "The conversation is already open in a session.").to_string());
+                    self.apply(ctx, Action::Activate(open));
+                    self.history_open = false;
+                    return;
+                }
                 {
                     let name: String = h.title.chars().take(32).collect();
                     self.new_session(
                         ctx,
                         NewOpts {
+                            // Windows-Konversation: in einer Windows-Shell fortsetzen, auch wenn WSL die Standard-Shell ist.
+                            shell_id: self.windows_shell_id(),
+                            profile: self.windows_shell_id().map(|_| 0),
                             cwd: Some(h.cwd.clone()),
                             name: Some(name),
                             claude: true,
@@ -3358,6 +3526,8 @@ impl App {
             Action::OpenSettings => self.settings_open = true,
             Action::OpenPrompts => self.prompts_open = true,
             Action::NewDialog(claude) => {
+                // Aus der Palette: den Fokus nicht ans Terminal zurückgeben, er gehört dem Dialog (#255).
+                self.want_focus = None;
                 self.new_dialog = Some(NewDialog::new(self.settings.default_shell.clone(), claude && self.settings.claude_mode, self.dialog_claude_opts()));
             }
             Action::OpenNotes(id) => {
@@ -3517,7 +3687,10 @@ impl App {
                 }
             }
             Action::SetGroup(id, g) => self.set_group(id, g),
-            Action::OpenTemplates => self.templates_open = true,
+            Action::OpenTemplates => {
+                self.want_focus = None;
+                self.templates_open = true;
+            }
             Action::OpenCosts => self.cost_open = true,
             Action::TemplateDelete(i) => {
                 if i < self.templates.len() {
@@ -3551,6 +3724,7 @@ impl App {
                         profile: e.meta.profile,
                         group: e.meta.group.clone(),
                         prompt: String::new(),
+                        claude_continue: (!e.meta.claude_continue).then_some(false),
                     })
                     .collect();
                 let lang = self.settings.language;
@@ -3581,6 +3755,7 @@ impl App {
                                 prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
                                 profile: Some(it.profile),
                                 group: Some(it.group.clone()),
+                                claude_continue: it.claude_continue,
                                 ..NewOpts::default()
                             },
                         );
@@ -3616,7 +3791,10 @@ impl App {
                 }
             }
             Action::FolderTemplate(path) => self.folder_prompt = Some(FolderPrompt { kind: 3, text: state::folder_leaf(&path).to_string(), path }),
-            Action::FolderBroadcast(path) => self.folder_prompt = Some(FolderPrompt { kind: 2, path, text: String::new() }),
+            Action::FolderBroadcast(path) => {
+                self.want_focus = None;
+                self.folder_prompt = Some(FolderPrompt { kind: 2, path, text: String::new() });
+            }
             Action::FolderDelete(path) => {
                 let pid = self.active_project;
                 for e in self.entries.values_mut() {
@@ -3750,7 +3928,7 @@ impl App {
                         shell_id: Some(src.meta.shell_id.clone()),
                         cwd: Some(src.meta.cwd.clone()),
                         name: Some(format!("{} (2)", src.display_name())),
-                        claude: src.meta.claude,
+                        claude: src.meta.claude && self.settings.claude_mode,
                         claude_args: src.meta.claude_args.clone(),
                         claude_continue: Some(src.meta.claude_continue),
                         claude_opts: Some(src.meta.claude_opts.clone()),

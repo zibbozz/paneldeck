@@ -26,6 +26,86 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Nur lesende Befehle (`status`, `diff`): Filter-Treiber (`filter.<x>.clean`/`smudge`/`process`) aus der Konfiguration
+/// des Repositorys selbst (`.git/config`, eingebundene Dateien, `config.worktree`) abschalten. Eine fremde Konfiguration
+/// (z. B. aus einem entpackten ZIP) könnte sonst beim automatischen `git status` oder beim Anzeigen eines Diffs beliebige
+/// Befehle starten (#253). Filter aus der System-/Benutzerkonfiguration (z. B. Git LFS) bleiben, sie sind die des Nutzers;
+/// ebenso der Git-LFS-Filter eines Repositorys, wenn er genau die Standardbefehle von `git lfs install --local` enthält.
+pub fn read_only_overrides(dir: &Path) -> Vec<String> {
+    let names = match git(dir, &["config", "--show-scope", "--includes", "-z", "--get-regexp", r"^filter\."]) {
+        Ok(o) => local_filter_names(&o, true),
+        // Kein Treffer: Exit-Code 1 ohne Meldung.
+        Err(e) if e.trim().is_empty() => Vec::new(),
+        // Ältere git-Versionen kennen `--show-scope` nicht: dann nur die Datei des Repositorys (mit eingebundenen Dateien).
+        Err(_) => git(dir, &["config", "--local", "--includes", "-z", "--get-regexp", r"^filter\."]).map(|o| local_filter_names(&o, false)).unwrap_or_default(),
+    };
+    let mut v = Vec::new();
+    for n in names {
+        for k in ["clean", "smudge", "process"] {
+            v.push("-c".to_string());
+            v.push(format!("filter.{n}.{k}="));
+        }
+        v.push("-c".to_string());
+        v.push(format!("filter.{n}.required=false"));
+    }
+    v
+}
+
+/// Standardbefehle des Git-LFS-Filters (`git lfs install --local` schreibt genau diese).
+const LFS_STANDARD: [(&str, &str); 3] = [("clean", "git-lfs clean -- %f"), ("smudge", "git-lfs smudge -- %f"), ("process", "git-lfs filter-process")];
+
+/// Namen der abzuschaltenden Filter-Treiber aus der Ausgabe von `git config [--show-scope] -z --get-regexp ^filter\.`
+/// (Einträge `[<bereich>\0]<schlüssel>[\n<wert>]\0`); mit `scoped` nur die aus der Konfiguration des Repositorys
+/// (`local`/`worktree`, unbekannte Bereiche ebenso). Ausnahme: `filter.lfs` mit genau den Standardbefehlen.
+fn local_filter_names(out: &str, scoped: bool) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    let mut it = out.split('\0');
+    loop {
+        let scope = if scoped {
+            match it.next() {
+                Some(s) if !s.is_empty() => s,
+                _ => break,
+            }
+        } else {
+            "local"
+        };
+        let Some(kv) = it.next().filter(|s| !s.is_empty()) else { break };
+        if matches!(scope.trim(), "system" | "global" | "command") {
+            continue;
+        }
+        let (key, value) = kv.split_once('\n').map(|(k, v)| (k, Some(v))).unwrap_or((kv, None));
+        // filter.<name>.<schlüssel>; der Name darf Punkte enthalten.
+        let Some(rest) = key.strip_prefix("filter.") else { continue };
+        let Some((name, sub)) = rest.rsplit_once('.') else { continue };
+        // Nur Namen, die als `-c`-Schlüssel eindeutig bleiben (kein `=`, keine Steuerzeichen).
+        if name.is_empty() || name.contains('=') || name.chars().any(|c| c.is_control()) {
+            continue;
+        }
+        if name == "lfs" {
+            let sub = sub.to_ascii_lowercase();
+            match LFS_STANDARD.iter().find(|(k, _)| *k == sub) {
+                // Ein Befehl mit genau dem Standardwert: unbedenklich.
+                Some((_, std)) if value == Some(*std) => continue,
+                Some(_) => {}
+                // Kein Befehl (z. B. `required`): startet nichts.
+                None => continue,
+            }
+        }
+        if !v.iter().any(|x| x == name) {
+            v.push(name.to_string());
+        }
+    }
+    v
+}
+
+/// Wie [`git`], aber für nur lesende Befehle ohne Filter-Treiber des Repositorys ([`read_only_overrides`]).
+pub fn git_read(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let ov = read_only_overrides(dir);
+    let mut all: Vec<&str> = ov.iter().map(String::as_str).collect();
+    all.extend_from_slice(args);
+    git(dir, &all)
+}
+
 pub fn repo_root(dir: &Path) -> Option<PathBuf> {
     git(dir, &["rev-parse", "--show-toplevel"]).ok().map(|s| PathBuf::from(s.trim()))
 }
@@ -73,8 +153,13 @@ pub fn parse_status(out: &str) -> Vec<Change> {
     v
 }
 
+/// Untermodule nur über den gespeicherten Commit vergleichen, nie in ihnen selbst `git status` ausführen
+/// (`--ignore-submodules=dirty`): ihre eigene Konfiguration (Filter, fsmonitor) wird von [`read_only_overrides`] nicht
+/// erfasst und könnte sonst Befehle starten (#253). Ein geänderter Commit eines Untermoduls erscheint weiter.
+pub const IGNORE_SUBMODULES: &str = "--ignore-submodules=dirty";
+
 pub fn status(repo: &Path) -> Result<Vec<Change>, String> {
-    git(repo, &["status", "--porcelain=v1", "-z", "-uall"]).map(|o| parse_status(&o))
+    git_read(repo, &["status", "--porcelain=v1", "-z", "-uall", IGNORE_SUBMODULES]).map(|o| parse_status(&o))
 }
 
 /// Diff einer Datei: `staged` = Index gegen HEAD, sonst Arbeitsverzeichnis gegen Index.
@@ -106,12 +191,14 @@ pub fn diff_of(repo: &Path, c: &Change, staged: bool) -> String {
             Err(_) => format!("{}: {} {}", crate::state::t("neue Datei", "new file"), c.path, crate::state::t("(nicht als Text lesbar)", "(not readable as text)")),
         }
     } else {
+        // Kein externes Diff-Programm und keine textconv-Treiber (`diff.external`, `diff.<x>.textconv` einer fremden
+        // Konfiguration würden sonst beim Anzeigen starten, #253).
         let args: Vec<&str> = if staged {
-            vec!["diff", "--no-color", "--cached", "--", &c.path]
+            vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv", IGNORE_SUBMODULES, "--cached", "--", &c.path]
         } else {
-            vec!["diff", "--no-color", "--", &c.path]
+            vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv", IGNORE_SUBMODULES, "--", &c.path]
         };
-        git(repo, &args).unwrap_or_else(|e| e)
+        git_read(repo, &args).unwrap_or_else(|e| e)
     };
     if text.len() > MAX {
         let mut t = text;
@@ -346,6 +433,127 @@ mod tests {
         assert!(!status(&d).unwrap().iter().find(|c| c.path == "a.txt").unwrap().staged());
         let n = status(&d).unwrap().into_iter().find(|c| c.path == "neu.txt").unwrap();
         assert!(diff_of(&d, &n, false).contains("+x"));
+    }
+
+    #[test]
+    fn foreign_filters_and_diff_drivers_never_run_when_reading() {
+        // #253: eine fremde .git/config mit Filter-, textconv- und externem Diff-Treiber; status/diff dürfen nichts starten.
+        let d = tmp("foreign");
+        init(&d);
+        std::fs::write(d.join(".gitattributes"), "*.txt filter=evil diff=evil
+").unwrap();
+        std::fs::write(d.join("a.txt"), "eins
+").unwrap();
+        stage_all(&d).unwrap();
+        commit(&d, "init").unwrap();
+        let marker = |n: &str| d.parent().unwrap().join(format!("gitops-marker-{n}-{}", std::process::id()));
+        let unix = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        for n in ["clean", "textconv", "external"] {
+            let _ = std::fs::remove_file(marker(n));
+        }
+        git(&d, &["config", "filter.evil.clean", &format!("touch '{}'; cat", unix(&marker("clean")))]).unwrap();
+        git(&d, &["config", "filter.evil.process", ""]).unwrap();
+        git(&d, &["config", "diff.evil.textconv", &format!("touch '{}'; cat", unix(&marker("textconv")))]).unwrap();
+        git(&d, &["config", "diff.external", &format!("touch '{}'", unix(&marker("external")))]).unwrap();
+        std::fs::write(d.join("a.txt"), "eins
+zwei
+").unwrap();
+        let ch = status(&d).unwrap();
+        let a = ch.iter().find(|c| c.path == "a.txt").expect("a.txt geändert");
+        let diff = diff_of(&d, a, false);
+        assert!(diff.contains("+zwei"), "{diff}");
+        assert!(read_only_overrides(&d).iter().any(|o| o == "filter.evil.clean="));
+        for n in ["clean", "textconv", "external"] {
+            assert!(!marker(n).exists(), "{n} wurde ausgeführt");
+        }
+        // Gegenprobe: ein gewöhnliches `git diff` startet die Treiber (der Test prüft also wirklich etwas).
+        let _ = git(&d, &["diff", "--", "a.txt"]);
+        assert!(marker("external").exists() || marker("clean").exists() || marker("textconv").exists(), "Gegenprobe: Treiber liefen nicht");
+        for n in ["clean", "textconv", "external"] {
+            let _ = std::fs::remove_file(marker(n));
+        }
+    }
+
+    /// Review zu #253: Untermodule mit eigener (fremder) Konfiguration – status/diff führen dort nichts aus.
+    #[test]
+    fn submodule_config_never_runs_when_reading() {
+        let root = tmp("sub");
+        let (sub, sup) = (root.join("subsrc"), root.join("super"));
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&sup).unwrap();
+        init(&sub);
+        std::fs::write(sub.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+        std::fs::write(sub.join("a.txt"), "eins\n").unwrap();
+        stage_all(&sub).unwrap();
+        commit(&sub, "init").unwrap();
+        init(&sup);
+        std::fs::write(sup.join("x.txt"), "x\n").unwrap();
+        let src = sub.to_string_lossy().replace('\\', "/");
+        git(&sup, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &src, "sub"]).unwrap();
+        stage_all(&sup).unwrap();
+        commit(&sup, "init").unwrap();
+        // Fremde Konfiguration im Untermodul (.git/modules/sub/config)
+        let marker = root.join("marker");
+        let unix = marker.to_string_lossy().replace('\\', "/");
+        git(&sup.join("sub"), &["config", "filter.evil.clean", &format!("touch '{unix}'; cat")]).unwrap();
+        // Veraltete Stat-Daten (wie frisch entpackt): git müsste die Datei neu einlesen, also den Filter starten
+        let touch = |p: &Path| {
+            let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+            f.set_modified(std::time::SystemTime::now() + Duration::from_secs(120)).unwrap();
+        };
+        touch(&sup.join("sub").join("a.txt"));
+        std::fs::write(sup.join("x.txt"), "x\ny\n").unwrap();
+        let ch = status(&sup).unwrap();
+        let x = ch.iter().find(|c| c.path == "x.txt").expect("x.txt geändert");
+        assert!(diff_of(&sup, x, false).contains("+y"));
+        assert!(!marker.exists(), "Filter im Untermodul wurde ausgeführt");
+        // Ein geänderter Commit des Untermoduls erscheint weiter
+        std::fs::write(sup.join("sub").join("b.txt"), "b\n").unwrap();
+        git(&sup.join("sub"), &["-c", "filter.evil.clean=", "add", "b.txt"]).unwrap();
+        git(&sup.join("sub"), &["-c", "filter.evil.clean=", "commit", "-q", "-m", "b"]).unwrap();
+        let _ = std::fs::remove_file(&marker);
+        touch(&sup.join("sub").join("a.txt"));
+        let ch = status(&sup).unwrap();
+        let s = ch.iter().find(|c| c.path == "sub").expect("Untermodul mit neuem Commit");
+        assert!(diff_of(&sup, s, false).contains("Subproject commit"));
+        assert!(!marker.exists(), "Filter im Untermodul wurde ausgeführt");
+        // Gegenprobe: ein gewöhnliches `git status` geht ins Untermodul und startet den Filter
+        let _ = git(&sup, &["status", "--porcelain"]);
+        assert!(marker.exists(), "Gegenprobe: Filter lief nicht");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn filter_names_only_from_the_repository() {
+        let out = "local\0filter.evil.clean\ntouch x\0global\0filter.lfs.process\ngit-lfs filter-process\0worktree\0filter.a.b.smudge\nx\0system\0filter.s.clean\nx\0command\0filter.c.clean\nx\0local\0filter.evil.smudge\0local\0filter.a b.clean\n\0";
+        assert_eq!(local_filter_names(out, true), vec!["evil", "a.b", "a b"]);
+        assert_eq!(local_filter_names("filter.x.clean\ny\0filter.x.process\nz\0", false), vec!["x"]);
+        assert!(local_filter_names("local\0filter.bad=x.clean\ny\0", true).is_empty());
+        assert!(local_filter_names("", true).is_empty());
+    }
+
+    /// Review zu #253: `git lfs install --local` – der Standard-LFS-Filter des Repositorys bleibt, alles andere nicht.
+    #[test]
+    fn standard_lfs_filter_of_the_repository_stays() {
+        let std_lfs = "local\0filter.lfs.clean\ngit-lfs clean -- %f\0local\0filter.lfs.smudge\ngit-lfs smudge -- %f\0local\0filter.lfs.process\ngit-lfs filter-process\0local\0filter.lfs.required\ntrue\0";
+        assert!(local_filter_names(std_lfs, true).is_empty());
+        assert!(local_filter_names(&std_lfs.replace("local\0", ""), false).is_empty());
+        // Ein abweichender Befehl (auch leer, ohne Wert oder anders geschrieben) schaltet den ganzen Filter ab
+        for bad in ["filter.lfs.process\ngit-lfs filter-process; touch x", "filter.lfs.clean\n", "filter.lfs.smudge", "filter.lfs.clean\ngit-lfs  clean -- %f", "filter.LFS.clean\ngit-lfs clean -- %f; x"] {
+            let out = format!("{std_lfs}local\0{bad}\0");
+            assert!(!local_filter_names(&out, true).is_empty(), "{bad:?}");
+        }
+        // Echtes Repository: nur der Standard-LFS-Filter → keine Überschreibung
+        let d = tmp("lfs");
+        init(&d);
+        for (k, v) in LFS_STANDARD {
+            git(&d, &["config", &format!("filter.lfs.{k}"), v]).unwrap();
+        }
+        git(&d, &["config", "filter.lfs.required", "true"]).unwrap();
+        assert!(!read_only_overrides(&d).iter().any(|o| o.starts_with("filter.lfs.")), "{:?}", read_only_overrides(&d));
+        git(&d, &["config", "filter.lfs.process", "sh -c 'touch x'"]).unwrap();
+        assert!(read_only_overrides(&d).iter().any(|o| o == "filter.lfs.process="));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

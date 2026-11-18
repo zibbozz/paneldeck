@@ -373,6 +373,7 @@ impl App {
                                 "Hub sessions use hooks automatically (via --settings). Install globally to also track manually started claude.",
                             )).small().color(style::dim(ui)));
                             ui.add_space(S1);
+                            let mut install = false;
                             ui.horizontal(|ui| {
                                 if self.hooks_global {
                                     ui.colored_label(Color32::from_rgb(0x4c, 0xc2, 0x6a), lang.t("global installiert", "installed globally"));
@@ -382,17 +383,39 @@ impl App {
                                             Some(Err(e)) => e,
                                             None => state::t("~/.claude nicht gefunden", "~/.claude not found").into(),
                                         };
-                                        self.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
+                                        self.refresh_hooks_global();
                                     }
                                 } else if ui.button(lang.t("In ~/.claude/settings.json installieren", "Install into ~/.claude/settings.json")).clicked() {
-                                    self.hooks_msg = match hooks::global_settings_path().map(|p| hooks::install_global(&p, &self.exe)) {
-                                        Some(Ok(())) => String::new(),
-                                        Some(Err(e)) => e,
-                                        None => state::t("~/.claude nicht gefunden", "~/.claude not found").into(),
-                                    };
-                                    self.hooks_global = hooks::global_settings_path().is_some_and(|p| hooks::global_installed(&p));
+                                    install = true;
                                 }
                             });
+                            // Global eingetragen, aber für eine andere paneldeck.exe (#260): Meldungen ohne Schlüssel zählen nur
+                            // für den Status.
+                            if let Some(other) = self.hooks_foreign.clone() {
+                                ui.colored_label(
+                                    Color32::from_rgb(0xe0, 0xa0, 0x40),
+                                    format!(
+                                        "{} {}",
+                                        lang.t("⚠ Die eingetragenen Hooks zeigen auf eine andere paneldeck.exe:", "⚠ The installed hooks point to another paneldeck.exe:"),
+                                        crate::mcp::short(&other, 80)
+                                    ),
+                                );
+                                ui.label(RichText::new(lang.t(
+                                    "Ihre Meldungen zählen nur für den Status (keine Zuordnung der Konversation). Neu eintragen, damit sie auf dieses Programm zeigen.",
+                                    "Their messages only count for the status (no conversation tracking). Reinstall so they point to this program.",
+                                )).small().color(style::dim(ui)));
+                                if ui.button(lang.t("Neu eintragen", "Reinstall")).clicked() {
+                                    install = true;
+                                }
+                            }
+                            if install {
+                                self.hooks_msg = match hooks::global_settings_path().map(|p| hooks::install_global(&p, &self.exe)) {
+                                    Some(Ok(())) => String::new(),
+                                    Some(Err(e)) => e,
+                                    None => state::t("~/.claude nicht gefunden", "~/.claude not found").into(),
+                                };
+                                self.refresh_hooks_global();
+                            }
                             if !self.hooks_msg.is_empty() {
                                 ui.colored_label(Color32::LIGHT_RED, &self.hooks_msg);
                             }

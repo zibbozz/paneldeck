@@ -8,124 +8,15 @@ impl App {
         // Rückfrage „Link öffnen?“ (OSC 8, #183)
         self.link_ask_ui(ctx, self.focused);
 
-        // Neue Sitzung
+        // Neue Sitzung (Inhalt in `new_dialog_ui`, ohne App testbar)
         if let Some(mut d) = self.new_dialog.take() {
-            let mut keep = true;
-            let mut create = false;
-            let mut opts_ok = true;
-            egui::Window::new(if d.claude { lang.t("Neue Claude-Sitzung", "New Claude session") } else { lang.t("Neue Sitzung", "New session") })
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ctx, |ui| {
-                    egui::Grid::new("newgrid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-                        if !self.settings.profiles.is_empty() {
-                            ui.label(lang.t("Profil", "Profile"));
-                            let cur = self.settings.profiles.iter().find(|p| p.id == d.profile).map(|p| p.name.clone()).unwrap_or_else(|| lang.t("Keins", "None").to_string());
-                            egui::ComboBox::from_id_salt("newprof").selected_text(cur).show_ui(ui, |ui| {
-                                if ui.selectable_label(d.profile == 0, lang.t("Keins", "None")).clicked() {
-                                    d.profile = 0;
-                                }
-                                for p in &self.settings.profiles {
-                                    if ui.selectable_label(d.profile == p.id, &p.name).clicked() {
-                                        d.profile = p.id;
-                                        if !p.shell_id.is_empty() {
-                                            d.shell_id = p.shell_id.clone();
-                                        }
-                                        if !p.cwd.is_empty() {
-                                            d.set_cwd(&p.cwd);
-                                        }
-                                    }
-                                }
-                            });
-                            ui.end_row();
-                        }
-                        ui.label("Shell");
-                        let cur = self.shells.iter().find(|s| s.id == d.shell_id).map(|s| s.label.clone()).unwrap_or_default();
-                        egui::ComboBox::from_id_salt("shellsel").selected_text(cur).show_ui(ui, |ui| {
-                            for s in &self.shells {
-                                ui.selectable_value(&mut d.shell_id, s.id.clone(), &s.label);
-                            }
-                        });
-                        ui.end_row();
-                        ui.label(lang.t("Ordner", "Folder"));
-                        // WSL-Shell: Linux-Pfad mit Vervollständigung, Distribution wählbar (wechselt die Shell), #172.
-                        d.picker.set_target(self.new_dialog_target(&d.shell_id, d.profile));
-                        let r = d.picker.show(ui, lang, &self.settings.wsl_recent);
-                        if let Some(sid) = r.distro_changed.and_then(|dist| self.wsl_shell_for(&dist)) {
-                            d.shell_id = sid;
-                        }
-                        d.cwd = d.picker.value();
-                        ui.end_row();
-                        ui.label(lang.t("Name (optional)", "Name (optional)"));
-                        ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(320.0));
-                        ui.end_row();
-                        ui.label(lang.t("Ordner im Baum", "Tree folder"));
-                        ui.add(egui::TextEdit::singleline(&mut d.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(320.0));
-                        ui.end_row();
-                        if self.settings.claude_mode {
-                            ui.label("");
-                            ui.checkbox(&mut d.claude, lang.t("Claude Code starten", "Start Claude Code"));
-                            ui.end_row();
-                            if d.claude {
-                                opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg", OptsPlace::NewSession);
-                                ui.label("");
-                                ui.checkbox(&mut d.continue_last, lang.t("Letzte Konversation im Ordner fortsetzen (--continue)", "Continue last conversation in folder (--continue)"));
-                                ui.end_row();
-                                ui.label("");
-                                session_settings::continue_checkbox(ui, &mut d.claude_continue, lang);
-                                ui.end_row();
-                                ui.label(lang.t("Start-Prompt", "Start prompt"));
-                                ui.add(egui::TextEdit::singleline(&mut d.prompt).desired_width(320.0));
-                                ui.end_row();
-                                // Git-Worktree anbieten, wenn der Ordner in einem Repository liegt (Prüfung nur bei Änderung des Pfads,
-                                // ohne git-Prozess pro Tastendruck; das echte Wurzelverzeichnis ermittelt erst das Anlegen).
-                                if d.repo_for != d.cwd {
-                                    d.repo_for = d.cwd.clone();
-                                    let p = std::path::Path::new(&d.cwd);
-                                    // Linux-Pfad (WSL): kein Worktree-Angebot (git liefe in Windows auf einem fremden Pfad).
-                                    // Ebenso kein Prüfen eines \\wsl$-Pfads im UI-Thread.
-                                    d.repo = (!d.picker.is_wsl() && !crate::wsl::is_wsl_unc(&d.cwd) && gitops::inside_repo_fs(p)).then(|| p.to_path_buf());
-                                }
-                                if d.repo.is_some() {
-                                    ui.label("Git");
-                                    ui.horizontal(|ui| {
-                                        if ui.checkbox(&mut d.worktree, lang.t("Eigener Worktree", "Own worktree")).changed() && d.branch.is_empty() {
-                                            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|x| x.as_secs() % 100000).unwrap_or(0);
-                                            d.branch = format!("claude/{secs}");
-                                        }
-                                        if d.worktree {
-                                            ui.add(egui::TextEdit::singleline(&mut d.branch).desired_width(180.0).hint_text("Branch"));
-                                        }
-                                    });
-                                    ui.end_row();
-                                    if d.worktree {
-                                        ui.label("");
-                                        ui.label(RichText::new(lang.t("Legt einen neuen Branch und Ordner neben dem Repo an, damit parallele Sitzungen sich nicht stören.", "Creates a new branch and folder next to the repo so parallel sessions don't interfere.")).small().color(style::dim(ui)));
-                                        ui.end_row();
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    ui.add_space(6.0);
-                    // Ungültiger oder fehlender WSL-Ordner: Erstellen gesperrt (Grund steht unter dem Ordnerfeld).
-                    let blocked = d.picker.blocking_error(lang);
-                    ui.horizontal(|ui| {
-                        let b = ui.add_enabled(opts_ok && blocked.is_none(), egui::Button::new(lang.t("Erstellen", "Create")));
-                        if b.clicked() {
-                            create = true;
-                        }
-                        if let Some(e) = &blocked {
-                            b.on_disabled_hover_text(e.as_str());
-                        }
-                        if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
-                            keep = false;
-                        }
-                    });
-                });
-            if ctx.input(|i| i.key_pressed(Key::Escape)) {
-                keep = false;
+            let target = self.new_dialog_target(&d.shell_id, d.profile);
+            let out = new_dialog_ui(ctx, &mut d, &self.shells, &self.settings.profiles, self.settings.claude_mode, &self.settings.wsl_recent, target, lang);
+            let create = out == NewDlgOut::Create;
+            let keep = out == NewDlgOut::Open;
+            if out == NewDlgOut::Cancel {
+                // Fokus zurück ins Terminal, aus dem der Dialog kam.
+                self.want_focus = Some(self.focused);
             }
             if create && d.claude {
                 // Letzte Wahl merken (Vorauswahl beim nächsten Mal) – nie bypassPermissions.
@@ -147,8 +38,8 @@ impl App {
                     claude: d.claude,
                     claude_opts: Some(d.copts.sanitized(true)),
                     allow_bypass: true,
-                    continue_last: d.continue_last,
-                    claude_continue: Some(d.claude_continue),
+                    continue_last: d.conv.continue_last(),
+                    claude_continue: Some(d.conv.resume_later()),
                     prompt: Some(d.prompt.clone()),
                     profile: Some(d.profile),
                     group: Some(d.group.clone()),
@@ -244,7 +135,11 @@ impl App {
                 if fp.kind == 2 {
                     let n = self.folder_sessions(&fp.path).len();
                     ui.label(RichText::new(format!("{} {}", n, lang.t("Sitzungen", "sessions"))).small().color(style::dim(ui)));
-                    ui.add(egui::TextEdit::multiline(&mut fp.text).desired_rows(4).desired_width(360.0));
+                    let te = ui.add(egui::TextEdit::multiline(&mut fp.text).desired_rows(4).desired_width(360.0));
+                    // Tasten gehören dem Dialog, nicht dem Terminal dahinter (#255).
+                    if !te.has_focus() {
+                        te.request_focus();
+                    }
                 } else {
                     if fp.kind == 0 && !fp.path.is_empty() {
                         ui.label(RichText::new(format!("{}: {}", lang.t("In", "In"), fp.path)).small().color(style::dim(ui)));
@@ -264,7 +159,8 @@ impl App {
                     }
                 });
             });
-            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            // Esc verbrauchen: es erreicht kein Terminal dahinter (#255).
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 keep = false;
             }
             if ok {
@@ -439,27 +335,31 @@ impl App {
             if self.templates.is_empty() {
                 ui.weak(lang.t("Noch keine Vorlagen.", "No templates yet."));
             }
-            for i in 0..self.templates.len() {
-                let t = &mut self.templates[i];
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&t.name).strong());
-                        ui.label(RichText::new(t.items.iter().map(|it| it.name.as_str()).collect::<Vec<_>>().join(", ")).small().color(style::dim(ui)));
+            // Viele Vorlagen: Liste scrollt, Speichern bleibt sichtbar (#241).
+            let list_h = (dialog_body_height(ctx) - 110.0).max(100.0);
+            egui::ScrollArea::vertical().id_salt("tpl_list").max_height(list_h).min_scrolled_height(list_h).show(ui, |ui| {
+                for i in 0..self.templates.len() {
+                    let t = &mut self.templates[i];
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(&t.name).strong());
+                            ui.label(RichText::new(t.items.iter().map(|it| it.name.as_str()).collect::<Vec<_>>().join(", ")).small().color(style::dim(ui)));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(lang.t("Starten", "Start")).clicked() {
+                                actions.push(Action::TemplateStart(i));
+                            }
+                            if armed_button(ui, ("tpldel", i), "🗑", lang.t("Wirklich?", "Sure?")) {
+                                actions.push(Action::TemplateDelete(i));
+                            }
+                            if ui.checkbox(&mut t.grid, lang.t("Raster", "Grid")).changed() {
+                                changed = true;
+                            }
+                        });
                     });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(lang.t("Starten", "Start")).clicked() {
-                            actions.push(Action::TemplateStart(i));
-                        }
-                        if armed_button(ui, ("tpldel", i), "🗑", lang.t("Wirklich?", "Sure?")) {
-                            actions.push(Action::TemplateDelete(i));
-                        }
-                        if ui.checkbox(&mut t.grid, lang.t("Raster", "Grid")).changed() {
-                            changed = true;
-                        }
-                    });
-                });
-                ui.separator();
-            }
+                    ui.separator();
+                }
+            });
             ui.label(lang.t("Alle Sitzungen dieses Projekts als Vorlage speichern:", "Save all sessions of this project as a template:"));
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.tpl_name).hint_text(lang.t("Name der Vorlage", "Template name")).desired_width(240.0));
@@ -563,7 +463,8 @@ impl App {
         let target = self.entries.get(&self.focused).map(|e| e.display_name()).unwrap_or_default();
         let esc_close = ctx.input(|i| i.key_pressed(Key::Escape));
         let mut open = true;
-        let ctrl_enter = ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Enter));
+        // Strg+Enter gehört dem Composer nur, wenn kein Terminal den Fokus hat (sonst bekommt es das Terminal, #255).
+        let ctrl_enter = !self.terminal_has_focus(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Enter));
         let mut send = ctrl_enter;
         let (mut paste_only, mut to_queue, mut to_all, mut save_prompt) = (false, false, false, false);
         egui::Window::new(lang.t("Prompt-Composer", "Prompt composer")).open(&mut open).default_size([680.0, 420.0]).show(ctx, |ui| {
@@ -756,7 +657,7 @@ pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt
     let hint = |ui: &mut Ui, text: &str, warn: bool| {
         ui.label("");
         let c = if warn { Color32::from_rgb(0xe0, 0x6c, 0x75) } else { style::dim(ui) };
-        ui.add(egui::Label::new(RichText::new(text).small().color(c)).wrap());
+        hint_label(ui, text, c);
         ui.end_row();
     };
     let name_err = lang.t("Nur Buchstaben, Ziffern und . _ : - (höchstens 100 Zeichen).", "Only letters, digits and . _ : - (at most 100 characters).");
@@ -873,7 +774,15 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
     let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
     let hint = |ui: &mut Ui, text: &str, c: Color32| {
         ui.label("");
-        ui.add(egui::Label::new(RichText::new(text).small().color(c)).wrap());
+        let r = hint_label(ui, text, c);
+        #[cfg(test)]
+        ui.data_mut(|d| d.insert_temp(Id::new(("dlg_mark", "more_hint", d.get_temp::<usize>(Id::new("dlg_hint_n")).unwrap_or(0))), r.rect));
+        #[cfg(test)]
+        ui.data_mut(|d| {
+            let n = d.get_temp::<usize>(Id::new("dlg_hint_n")).unwrap_or(0);
+            d.insert_temp(Id::new("dlg_hint_n"), n + 1);
+        });
+        let _ = r;
         ui.end_row();
     };
 
@@ -950,26 +859,33 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
 
     let e = &mut o.extra;
     ui.label(lang.t("Schalter", "Switches"));
-    ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(330.0);
-        for (n, f) in SWITCHES.iter().chain(USER_SWITCHES.iter()) {
-            let mut on = e.flags.iter().any(|x| x == n);
-            if ui.checkbox(&mut on, *f).on_hover_text(switch_help(n, lang)).changed() {
-                e.flags.retain(|x| x != n);
-                if on {
-                    e.flags.push(n.to_string());
-                    // chrome und no-chrome schließen sich aus.
-                    let other = match *n {
-                        "chrome" => "no-chrome",
-                        "no-chrome" => "chrome",
-                        _ => "",
-                    };
-                    e.flags.retain(|x| x != other);
+    // Feste Breite (#241): die Zeile bricht immer gleich um, das Raster springt nicht.
+    let sw = ui.vertical(|ui| {
+            ui.set_max_width(HINT_W);
+            ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(HINT_W);
+            for (n, f) in SWITCHES.iter().chain(USER_SWITCHES.iter()) {
+                let mut on = e.flags.iter().any(|x| x == n);
+                if ui.checkbox(&mut on, *f).on_hover_text(switch_help(n, lang)).changed() {
+                    e.flags.retain(|x| x != n);
+                    if on {
+                        e.flags.push(n.to_string());
+                        // chrome und no-chrome schließen sich aus.
+                        let other = match *n {
+                            "chrome" => "no-chrome",
+                            "no-chrome" => "chrome",
+                            _ => "",
+                        };
+                        e.flags.retain(|x| x != other);
+                    }
+                    e.flags = SWITCHES.iter().chain(USER_SWITCHES.iter()).filter(|(s, _)| e.flags.iter().any(|x| x == s)).map(|(s, _)| s.to_string()).collect();
                 }
-                e.flags = SWITCHES.iter().chain(USER_SWITCHES.iter()).filter(|(s, _)| e.flags.iter().any(|x| x == s)).map(|(s, _)| s.to_string()).collect();
             }
-        }
+            });
     });
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(Id::new(("dlg_mark", "switches", 0usize)), sw.response.rect));
+    let _ = sw;
     ui.end_row();
     if e.flags.iter().any(|f| !agent_switch(f)) {
         hint(
@@ -1097,6 +1013,302 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
         dim,
     );
     ok
+}
+
+/// Breite der Hinweistexte in den Dialogen (fester Umbruch, damit das Raster nicht von Bild zu Bild springt, #241).
+pub(super) const HINT_W: f32 = 330.0;
+
+/// Platz, den Titel, Knöpfe und Rand eines Dialogs außer der Scrollfläche brauchen.
+const DLG_CHROME: f32 = 170.0;
+
+/// Höchsthöhe der Scrollfläche eines Dialogs: die Knöpfe darunter bleiben auch auf kleinen Bildschirmen sichtbar (#241).
+pub(super) fn dialog_body_height(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - DLG_CHROME).max(120.0)
+}
+
+/// Kleiner Hinweistext mit fester Umbruchbreite [`HINT_W`] (auch in einem Raster).
+pub(super) fn hint_label(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
+    ui.vertical(|ui| {
+        ui.set_max_width(HINT_W);
+        ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap())
+    })
+    .inner
+}
+
+/// Rechteck eines Elements für die Tests ohne Fenster.
+fn dlg_mark(ui: &Ui, key: &'static str, r: &egui::Response) {
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(Id::new(("dlg_mark", key, 0usize)), r.rect));
+    let _ = (ui, key, r);
+}
+
+/// Ergebnis eines Bildes des Dialogs „Neue Sitzung“.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NewDlgOut {
+    Open,
+    Create,
+    Cancel,
+}
+
+/// Der Dialog „Neue Sitzung“ (ohne App, für Tests ohne Fenster). Inhalt in einer Scrollfläche mit Höchsthöhe nach dem
+/// Bildschirm, „Erstellen“/„Abbrechen“ immer darunter sichtbar (#241). Beim Öffnen bekommt das Namensfeld den Fokus
+/// (nicht das Terminal dahinter, #255); Esc wird verbraucht und gilt nicht bei offener Auswahlliste (#261).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn new_dialog_ui(
+    ctx: &egui::Context,
+    d: &mut NewDialog,
+    shells: &[ShellSpec],
+    profiles: &[Profile],
+    claude_mode: bool,
+    wsl_recent: &std::collections::BTreeMap<String, Vec<String>>,
+    target: folder_picker::Target,
+    lang: Lang,
+) -> NewDlgOut {
+    let mut out = NewDlgOut::Open;
+    let mut opts_ok = true;
+    // Esc schließt den Dialog nicht, solange eine Auswahlliste offen ist (die schließt Esc zuerst), und wird
+    // verbraucht – kein Terminal dahinter bekommt es (#261, wie in den Einstellungen der Sitzung).
+    let esc = !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    let body_h = dialog_body_height(ctx);
+    egui::Window::new(if d.claude { lang.t("Neue Claude-Sitzung", "New Claude session") } else { lang.t("Neue Sitzung", "New session") })
+        .id(Id::new("new_session_dialog"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().id_salt("newdlg_scroll").max_height(body_h).min_scrolled_height(body_h).show(ui, |ui| {
+                egui::Grid::new("newgrid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+                    if !profiles.is_empty() {
+                        ui.label(lang.t("Profil", "Profile"));
+                        let cur = profiles.iter().find(|p| p.id == d.profile).map(|p| p.name.clone()).unwrap_or_else(|| lang.t("Keins", "None").to_string());
+                        egui::ComboBox::from_id_salt("newprof").selected_text(cur).show_ui(ui, |ui| {
+                            if ui.selectable_label(d.profile == 0, lang.t("Keins", "None")).clicked() {
+                                d.profile = 0;
+                            }
+                            for p in profiles {
+                                if ui.selectable_label(d.profile == p.id, &p.name).clicked() {
+                                    d.profile = p.id;
+                                    if !p.shell_id.is_empty() {
+                                        d.shell_id = p.shell_id.clone();
+                                    }
+                                    if !p.cwd.is_empty() {
+                                        d.set_cwd(&p.cwd);
+                                    }
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    ui.label("Shell");
+                    let cur = shells.iter().find(|s| s.id == d.shell_id).map(|s| s.label.clone()).unwrap_or_default();
+                    egui::ComboBox::from_id_salt("shellsel").selected_text(cur).show_ui(ui, |ui| {
+                        for s in shells {
+                            ui.selectable_value(&mut d.shell_id, s.id.clone(), &s.label);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label(lang.t("Ordner", "Folder"));
+                    // WSL-Shell: Linux-Pfad mit Vervollständigung, Distribution wählbar (wechselt die Shell), #172.
+                    d.picker.set_target(target);
+                    let r = d.picker.show(ui, lang, wsl_recent);
+                    if let Some(sid) = r.distro_changed.and_then(|dist| shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|x| x.eq_ignore_ascii_case(&dist)))).map(|s| s.id.clone()) {
+                        d.shell_id = sid;
+                    }
+                    d.cwd = d.picker.value();
+                    ui.end_row();
+                    ui.label(lang.t("Name (optional)", "Name (optional)"));
+                    let te = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(320.0));
+                    if d.focus {
+                        // Beim Öffnen: Tasten gehören dem Dialog, nicht dem Terminal dahinter (#255).
+                        te.request_focus();
+                        d.focus = false;
+                    }
+                    dlg_mark(ui, "name", &te);
+                    ui.end_row();
+                    ui.label(lang.t("Ordner im Baum", "Tree folder"));
+                    ui.add(egui::TextEdit::singleline(&mut d.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(320.0));
+                    ui.end_row();
+                    if claude_mode {
+                        ui.label("");
+                        ui.checkbox(&mut d.claude, lang.t("Claude Code starten", "Start Claude Code"));
+                        ui.end_row();
+                        if d.claude {
+                            // Eine Auswahl statt zweier Häkchen (#241, #245): wie die Konversation beginnt und ob sie beim
+                            // Neu laden/Neustart fortgesetzt wird.
+                            ui.label(lang.t("Konversation", "Conversation"));
+                            let r = session_settings::conv_combo(ui, "newdlg_conv", &mut d.conv, lang);
+                            dlg_mark(ui, "conv", &r);
+                            ui.end_row();
+                            opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg", OptsPlace::NewSession);
+                            ui.label(lang.t("Start-Prompt", "Start prompt"));
+                            ui.add(egui::TextEdit::singleline(&mut d.prompt).desired_width(320.0));
+                            ui.end_row();
+                            // Git-Worktree anbieten, wenn der Ordner in einem Repository liegt (Prüfung nur bei Änderung des Pfads,
+                            // ohne git-Prozess pro Tastendruck; das echte Wurzelverzeichnis ermittelt erst das Anlegen).
+                            if d.repo_for != d.cwd {
+                                d.repo_for = d.cwd.clone();
+                                let p = std::path::Path::new(&d.cwd);
+                                // Linux-Pfad (WSL): kein Worktree-Angebot (git liefe in Windows auf einem fremden Pfad).
+                                // Ebenso kein Prüfen eines \\wsl$-Pfads im UI-Thread.
+                                d.repo = (!d.picker.is_wsl() && !crate::wsl::is_wsl_unc(&d.cwd) && gitops::inside_repo_fs(p)).then(|| p.to_path_buf());
+                            }
+                            if d.repo.is_some() {
+                                ui.label("Git");
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut d.worktree, lang.t("Eigener Worktree", "Own worktree")).changed() && d.branch.is_empty() {
+                                        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|x| x.as_secs() % 100000).unwrap_or(0);
+                                        d.branch = format!("claude/{secs}");
+                                    }
+                                    if d.worktree {
+                                        ui.add(egui::TextEdit::singleline(&mut d.branch).desired_width(180.0).hint_text("Branch"));
+                                    }
+                                });
+                                ui.end_row();
+                                if d.worktree {
+                                    ui.label("");
+                                    hint_label(ui, lang.t("Legt einen neuen Branch und Ordner neben dem Repo an, damit parallele Sitzungen sich nicht stören.", "Creates a new branch and folder next to the repo so parallel sessions don't interfere."), style::dim(ui));
+                                    ui.end_row();
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            // Ungültiger oder fehlender WSL-Ordner: Erstellen gesperrt (Grund steht unter dem Ordnerfeld).
+            let blocked = d.picker.blocking_error(lang);
+            ui.horizontal(|ui| {
+                let b = ui.add_enabled(opts_ok && blocked.is_none(), egui::Button::new(lang.t("Erstellen", "Create")));
+                dlg_mark(ui, "create", &b);
+                if b.clicked() {
+                    out = NewDlgOut::Create;
+                }
+                if let Some(e) = &blocked {
+                    b.on_disabled_hover_text(e.as_str());
+                }
+                let c = ui.button(lang.t("Abbrechen", "Cancel"));
+                dlg_mark(ui, "cancel", &c);
+                if c.clicked() {
+                    out = NewDlgOut::Cancel;
+                }
+            });
+        });
+    if esc && out == NewDlgOut::Open {
+        out = NewDlgOut::Cancel;
+    }
+    out
+}
+
+#[cfg(test)]
+mod layout_tests {
+    //! #241: Dialoge passen auf kleine Bildschirme, die Knöpfe bleiben sichtbar, Hinweise überdecken nichts.
+    use super::*;
+    use eframe::egui::{Event, RawInput};
+
+    fn shells() -> Vec<ShellSpec> {
+        vec![ShellSpec { id: "pwsh".into(), label: "PowerShell".into(), program: "pwsh.exe".into(), args: vec![] }, ShellSpec { id: "wsl:Ubuntu".into(), label: "Ubuntu".into(), program: "wsl.exe".into(), args: vec![] }]
+    }
+
+    pub(super) fn mark(ctx: &egui::Context, key: &'static str, n: usize) -> Option<Rect> {
+        ctx.data(|d| d.get_temp::<Rect>(Id::new(("dlg_mark", key, n))))
+    }
+
+    /// Dialog mit allem, was ihn groß macht: bypassPermissions- und safe-mode-Warnung, alle weiteren Optionen offen,
+    /// viele Ordner, Worktree mit Hinweis.
+    fn big_dialog() -> NewDialog {
+        // Eigenes, frisches Repository als Startordner: unabhängig davon, ob die Tests in einem Git-Checkout laufen.
+        let repo = std::env::temp_dir().join(format!("pd-dlg-repo-{}", std::process::id()));
+        if !repo.join(".git").exists() {
+            std::fs::create_dir_all(&repo).unwrap();
+            crate::gitops::git(&repo, &["init", "-q"]).expect("git init");
+        }
+        let here = repo.to_string_lossy().to_string();
+        let mut copts = ClaudeOpts { permission_mode: crate::claude_opts::BYPASS.into(), ..ClaudeOpts::default() };
+        copts.extra.flags = vec!["chrome".into(), "ide".into(), "verbose".into(), "safe-mode".into()];
+        copts.extra.add_dirs = (0..6).map(|i| format!("C:\\gibt-es-nicht\\ordner-{i}")).collect();
+        copts.extra.allowed_tools = "Read".into();
+        let mut d = NewDialog::new("pwsh".into(), true, copts);
+        d.set_cwd(&here);
+        d.worktree = true;
+        d.branch = "claude/1".into();
+        d
+    }
+
+    fn frame(ctx: &egui::Context, d: &mut NewDialog, size: Vec2, t: f64, events: Vec<Event>) -> (NewDlgOut, Vec<Key>) {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), events, ..Default::default() };
+        let (mut out, mut left) = (NewDlgOut::Open, Vec::new());
+        let s = shells();
+        let target = folder_picker::Target::Windows;
+        let _ = ctx.run(input, |ctx| {
+            ctx.data_mut(|m| m.insert_temp(Id::new("dlg_hint_n"), 0usize));
+            out = new_dialog_ui(ctx, d, &s, &[], true, &Default::default(), target.clone(), Lang::En);
+            left = ctx.input(|i| i.events.iter().filter_map(|e| if let Event::Key { key, pressed: true, .. } = e { Some(*key) } else { None }).collect());
+        });
+        (out, left)
+    }
+
+    #[test]
+    fn the_new_session_dialog_fits_small_screens_with_everything_open() {
+        for size in [Vec2::new(1280.0, 720.0), Vec2::new(800.0, 600.0)] {
+            let ctx = egui::Context::default();
+            ctx.data_mut(|m| m.insert_temp(Id::new(("claude_more_open", "newdlg")), true));
+            let mut d = big_dialog();
+            for i in 0..6 {
+                frame(&ctx, &mut d, size, i as f64 * 0.1, vec![]);
+            }
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let win = ctx.memory(|m| m.area_rect(Id::new("new_session_dialog"))).expect("Fenster gezeichnet");
+            assert!(screen.contains_rect(win), "{size:?}: Fenster {win:?} ragt aus dem Bildschirm");
+            for k in ["create", "cancel"] {
+                let r = mark(&ctx, k, 0).unwrap_or_else(|| panic!("{k} fehlt"));
+                assert!(screen.contains_rect(r) && win.contains_rect(r), "{size:?}: {k} {r:?} nicht sichtbar");
+            }
+            assert!(d.repo.is_some(), "der Testordner liegt in einem Repository");
+            // Die Warnung zu --safe-mode überdeckt die Schalter nicht
+            let sw = mark(&ctx, "switches", 0).expect("Schalter gezeichnet");
+            let hint = mark(&ctx, "more_hint", 0).expect("Warnung gezeichnet");
+            assert!(!sw.intersects(hint.shrink(1.0)), "{size:?}: Warnung {hint:?} über den Schaltern {sw:?}");
+            assert!(hint.width() <= HINT_W + 1.0, "fester Umbruch: {hint:?}");
+        }
+    }
+
+    #[test]
+    fn the_new_session_dialog_takes_focus_and_eats_escape() {
+        let ctx = egui::Context::default();
+        let mut d = NewDialog::new("pwsh".into(), true, ClaudeOpts::default());
+        let size = Vec2::new(1000.0, 700.0);
+        frame(&ctx, &mut d, size, 0.0, vec![]);
+        assert!(!d.focus, "Fokus beim ersten Bild vergeben");
+        let name = mark(&ctx, "name", 0).unwrap();
+        frame(&ctx, &mut d, size, 0.1, vec![]);
+        assert!(ctx.memory(|m| m.focused()).is_some(), "ein Feld des Dialogs hat den Fokus");
+        // Tippen landet im Namensfeld
+        frame(&ctx, &mut d, size, 0.2, vec![Event::Text("abc".into())]);
+        assert_eq!(d.name, "abc");
+        let _ = name;
+        // Esc schließt und wird verbraucht
+        let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let (o, left) = frame(&ctx, &mut d, size, 0.3, vec![esc]);
+        assert_eq!(o, NewDlgOut::Cancel);
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn one_conversation_control_maps_onto_the_launch() {
+        use session_settings::ConvChoice;
+        let ctx = egui::Context::default();
+        let mut d = NewDialog::new("pwsh".into(), true, ClaudeOpts::default());
+        assert_eq!(d.conv, ConvChoice::Resume, "Standard wie bisher: neu, beim Neu laden fortsetzen");
+        frame(&ctx, &mut d, Vec2::new(1000.0, 700.0), 0.0, vec![]);
+        assert!(mark(&ctx, "conv", 0).is_some(), "eine Auswahl im Dialog");
+        assert_eq!((ConvChoice::Resume.continue_last(), ConvChoice::Resume.resume_later()), (false, true));
+        assert_eq!((ConvChoice::ContinueLast.continue_last(), ConvChoice::ContinueLast.resume_later()), (true, true));
+        assert_eq!((ConvChoice::AlwaysNew.continue_last(), ConvChoice::AlwaysNew.resume_later()), (false, false));
+        for c in ConvChoice::ALL {
+            assert_ne!(c.label(Lang::De), c.label(Lang::En));
+            assert_ne!(c.tip(Lang::De), c.tip(Lang::En));
+        }
+    }
 }
 
 #[cfg(test)]
