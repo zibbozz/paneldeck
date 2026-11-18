@@ -20,6 +20,28 @@ pub fn projects_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".claude").join("projects"))
 }
 
+/// Ordnername, unter dem Claude Code die Konversationen eines Arbeitsordners ablegt: jedes Zeichen außer `a-z A-Z 0-9`
+/// wird `-` (je UTF-16-Einheit, wie Claude Code). `None` bei sehr langen Pfaden (dort kürzt Claude Code den Namen und
+/// hängt eine Prüfsumme an; der Ordner ist dann nicht vorherzusagen).
+pub fn project_slug(cwd: &str) -> Option<String> {
+    let mut s = String::new();
+    for c in cwd.chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c);
+        } else {
+            for _ in 0..c.len_utf16() {
+                s.push('-');
+            }
+        }
+    }
+    (!s.is_empty() && s.len() <= 200).then_some(s)
+}
+
+/// Erwartete Transkript-Datei der Konversation `id` im Arbeitsordner `cwd` (`projects` = [`projects_dir`]).
+pub fn transcript_file(projects: &Path, cwd: &str, id: &str) -> Option<PathBuf> {
+    Some(projects.join(project_slug(cwd)?).join(format!("{id}.jsonl")))
+}
+
 fn text_of(content: &Value) -> Option<String> {
     match content {
         Value::String(s) => Some(s.clone()),

@@ -1532,6 +1532,21 @@ impl App {
         folder_picker::Target::for_shell(self.shell_by_id(&sid).as_ref(), choose)
     }
 
+    /// Shell für eine Konversation aus dem (Windows-)Verlauf: `None` = wie gewohnt (Standard-Shell bzw. Profil des
+    /// Projekts, beides Windows); sonst eine Windows-Shell, wenn Standard-Shell oder Projektprofil in WSL laufen.
+    fn windows_shell_id(&self) -> Option<String> {
+        let profile = self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.profile).unwrap_or(0);
+        let sid = match self.profile(profile) {
+            Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+            Some(p) if !p.shell_id.is_empty() => p.shell_id.clone(),
+            _ => self.settings.default_shell.clone(),
+        };
+        if !self.shell_by_id(&sid).is_some_and(|s| shells::is_wsl(&s)) {
+            return None;
+        }
+        self.shells.iter().find(|s| !shells::is_wsl(s)).map(|s| s.id.clone())
+    }
+
     /// Erkannte WSL-Shell einer Distribution (Groß-/Kleinschreibung egal, wie Windows).
     fn wsl_shell_for(&self, distro: &str) -> Option<String> {
         self.shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|d| d.eq_ignore_ascii_case(distro))).map(|s| s.id.clone())
@@ -1598,8 +1613,10 @@ impl App {
         c += &launch.line;
         // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
         // der globalen Einstellung (`session_settings::resume_wanted`).
+        // Fortgesetzt wird nur eine Konversation, die es wirklich gibt (#245); sonst eine neue mit eigener ID.
         let resume_wanted = session_settings::resume_wanted(l.restore, l.restart, meta.claude_continue, self.settings.claude_resume);
-        let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, is_wsl);
+        let has_conv = resume_wanted && session_settings::conversation_exists(meta, is_wsl, crate::history::projects_dir().as_deref(), &home_dir());
+        let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, has_conv);
         let fresh = start == session_settings::ClaudeStart::Fresh;
         match start {
             session_settings::ClaudeStart::Resume(id) => c += &format!(" --resume {id}"),
@@ -1636,35 +1653,6 @@ impl App {
         } else {
             None
         };
-        let claude_cmd = if entry.launched_claude {
-            let (c, fresh, launch) = self.claude_command(&mut entry.meta, &l);
-            // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
-            entry.launched_opts = launch.applied;
-            if !launch.dropped.is_empty() {
-                entry.launch_note = Some(format!(
-                    "{} ({}): {}",
-                    state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
-                    entry.display_name(),
-                    launch.dropped.join(", "),
-                ));
-            }
-            if fresh {
-                // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
-                entry.meta.transcript.clear();
-                self.usage.reset(entry.meta.id);
-            }
-            Some(c)
-        } else {
-            self.usage.reset(entry.meta.id);
-            None
-        };
-        let profile = self.profile(entry.meta.profile).cloned();
-        let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
-        let initial = match (&startup, claude_cmd) {
-            (Some(st), Some(c)) => Some(format!("{st}\r{c}")),
-            (Some(st), None) => Some(format!("{st}\r")),
-            (None, c) => c,
-        };
         // WSL: ein Linux-Startordner (leer = Linux-Home `~`, #172) geht als `wsl.exe --cd <pfad>` mit; der
         // Windows-Startordner ist dann nur ein gültiger Platzhalter. Windows-Pfade übersetzt wsl.exe wie bisher selbst.
         // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
@@ -1693,6 +1681,8 @@ impl App {
                     // ist als Startordner unzulässig: im Linux-Home starten und das melden, statt die Sitzung zu verweigern.
                     // Dialog und MCP lehnen solche Pfade schon vorher ab.
                     let old = std::mem::replace(&mut entry.meta.cwd, "~".into());
+                    // Die Konversation gehört zum alten Ordner: nicht im Linux-Home mit `--resume` suchen (#245).
+                    entry.meta.claude_started = false;
                     let _ = crate::wsl::apply_cd(&mut shell.args, "~", distro.as_deref());
                     self.spawn_notes.borrow_mut().push(if de {
                         format!("Startordner nicht verwendbar ({}): {} – die Sitzung startet im Linux-Home (~).", e.message(true), crate::mcp::short(&old, 80))
@@ -1709,6 +1699,36 @@ impl App {
             crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
         } else {
             entry.meta.cwd.clone()
+        };
+        // Erst nach dem Startordner: ein unbrauchbarer gespeicherter Ordner setzt die Konversation zurück (#245).
+        let claude_cmd = if entry.launched_claude {
+            let (c, fresh, launch) = self.claude_command(&mut entry.meta, &l);
+            // Auskünfte über MCP nennen nur, was wirklich gesetzt ist; weggelassene Pfade meldet ein Hinweis.
+            entry.launched_opts = launch.applied;
+            if !launch.dropped.is_empty() {
+                entry.launch_note = Some(format!(
+                    "{} ({}): {}",
+                    state::t("Claude-Optionen nicht gefunden oder nicht lokal, weggelassen", "Claude options not found or not local, left out"),
+                    entry.display_name(),
+                    launch.dropped.join(", "),
+                ));
+            }
+            if fresh {
+                // Neue Konversation: altes Transkript und dessen Token/Kosten gehören nicht mehr dazu.
+                entry.meta.transcript.clear();
+                self.usage.reset(entry.meta.id);
+            }
+            Some(c)
+        } else {
+            self.usage.reset(entry.meta.id);
+            None
+        };
+        let profile = self.profile(entry.meta.profile).cloned();
+        let startup = profile.as_ref().map(|p| p.startup.trim().to_string()).filter(|s| !s.is_empty());
+        let initial = match (&startup, claude_cmd) {
+            (Some(st), Some(c)) => Some(format!("{st}\r{c}")),
+            (Some(st), None) => Some(format!("{st}\r")),
+            (None, c) => c,
         };
         // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
         entry.session_key = hooks::random_hex();
@@ -3361,11 +3381,28 @@ impl App {
                 }
             }
             Action::ResumeItem(h) => {
+                let lang = self.settings.language;
+                // Der Verlauf liest nur Windows-Konversationen (`~/.claude`); eine Datei ohne Konversations-ID wäre still
+                // als neue Konversation gestartet worden (#245).
+                if !crate::quote::is_uuid(&h.session_id) {
+                    self.notify_text(lang.t("Diese Konversation lässt sich nicht fortsetzen (keine gültige Konversations-ID).", "This conversation cannot be resumed (no valid conversation id).").to_string());
+                    return;
+                }
+                // Schon in einer Sitzung offen: dorthin wechseln statt sie ein zweites Mal zu öffnen (#245).
+                if let Some(open) = self.entries.iter().find(|(_, e)| e.launched_claude && !e.exited() && e.meta.claude_session == h.session_id).map(|(id, _)| *id) {
+                    self.notify_text(lang.t("Die Konversation ist schon in einer Sitzung offen.", "The conversation is already open in a session.").to_string());
+                    self.apply(ctx, Action::Activate(open));
+                    self.history_open = false;
+                    return;
+                }
                 {
                     let name: String = h.title.chars().take(32).collect();
                     self.new_session(
                         ctx,
                         NewOpts {
+                            // Windows-Konversation: in einer Windows-Shell fortsetzen, auch wenn WSL die Standard-Shell ist.
+                            shell_id: self.windows_shell_id(),
+                            profile: self.windows_shell_id().map(|_| 0),
                             cwd: Some(h.cwd.clone()),
                             name: Some(name),
                             claude: true,
@@ -3576,6 +3613,7 @@ impl App {
                         profile: e.meta.profile,
                         group: e.meta.group.clone(),
                         prompt: String::new(),
+                        claude_continue: (!e.meta.claude_continue).then_some(false),
                     })
                     .collect();
                 let lang = self.settings.language;
@@ -3606,6 +3644,7 @@ impl App {
                                 prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
                                 profile: Some(it.profile),
                                 group: Some(it.group.clone()),
+                                claude_continue: it.claude_continue,
                                 ..NewOpts::default()
                             },
                         );

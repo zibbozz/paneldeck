@@ -32,17 +32,45 @@ pub(super) fn resume_wanted(restore: bool, restart: bool, session_continue: bool
     session_continue && (restart || (restore && global_resume))
 }
 
-/// Entscheidung, wie Claude startet. `resume_id` = ausdrücklich gewünschte Konversation (Verlauf), `continue_last` =
-/// Häkchen „--continue“ beim Anlegen, `wsl` = die Sitzung läuft in WSL (dort gibt es keine Konversations-ID aus den Hooks).
-pub(super) fn claude_start(resume_id: Option<&str>, resume_wanted: bool, continue_last: bool, meta: &SessionMeta, wsl: bool) -> ClaudeStart {
+/// Entscheidung, wie Claude startet (#245). `resume_id` = ausdrücklich gewünschte Konversation (Verlauf),
+/// `continue_last` = „Letzte Konversation im Ordner fortsetzen“ beim Anlegen (der einzige Weg zu `--continue`),
+/// `has_conv` = die Konversation der Sitzung gibt es wirklich ([`conversation_exists`]). Sonst immer eine neue
+/// Konversation mit eigener ID – nie `--continue` als Ersatz (das öffnete die neueste Konversation des Ordners, oft die
+/// einer anderen Sitzung).
+pub(super) fn claude_start(resume_id: Option<&str>, resume_wanted: bool, continue_last: bool, meta: &SessionMeta, has_conv: bool) -> ClaudeStart {
     if let Some(id) = resume_id.filter(|id| crate::quote::is_uuid(id)) {
         ClaudeStart::Resume(id.to_string())
-    } else if resume_wanted && meta.claude_started && crate::quote::is_uuid(&meta.claude_session) {
-        ClaudeStart::Resume(meta.claude_session.clone())
-    } else if (resume_wanted && wsl) || continue_last {
+    } else if continue_last {
         ClaudeStart::Continue
+    } else if resume_wanted && has_conv && crate::quote::is_uuid(&meta.claude_session) {
+        ClaudeStart::Resume(meta.claude_session.clone())
     } else {
         ClaudeStart::Fresh
+    }
+}
+
+/// Gibt es die Konversation der Sitzung, sodass `--resume <id>` sie im Arbeitsordner findet (#245)? Windows: die
+/// Transkript-Datei (von den Hooks gemeldet, sonst unter `projects` = `~/.claude/projects` erwartet) – so geht
+/// „Konversation fortsetzen“ auch ohne Hooks (`--safe-mode`), und eine nie benutzte oder gelöschte Konversation wird
+/// nicht fortgesetzt. WSL: die Linux-Seite wird im UI-Thread nie geprüft (könnte die VM starten); dort zählt, was die
+/// Hooks gemeldet haben (ein Prompt oder eine fortgesetzte Konversation, `claude_started`).
+pub(super) fn conversation_exists(meta: &SessionMeta, wsl: bool, projects: Option<&std::path::Path>, home: &str) -> bool {
+    let id = meta.claude_session.as_str();
+    if !crate::quote::is_uuid(id) {
+        return false;
+    }
+    if wsl {
+        return meta.claude_started;
+    }
+    let reported = std::path::Path::new(&meta.transcript);
+    if !meta.transcript.is_empty() && reported.file_stem().is_some_and(|s| s == id) && !crate::wsl::is_wsl_unc(&meta.transcript) {
+        return reported.is_file();
+    }
+    let cwd = if meta.cwd.trim().is_empty() { home } else { meta.cwd.trim() };
+    match projects.and_then(|p| crate::history::transcript_file(p, cwd, id)) {
+        Some(f) => f.is_file(),
+        // Ordnername nicht vorherzusagen: wie bisher nach den Hooks.
+        None => meta.claude_started,
     }
 }
 
@@ -358,12 +386,19 @@ impl SessionForm {
             meta.notes = v.notes.clone();
         }
         if !self.chat {
+            let (old_shell, old_cwd) = (meta.shell_id.clone(), meta.cwd.clone());
             if v.profile != o.profile || v.shell_id != o.shell_id {
                 meta.profile = v.profile;
                 meta.shell_id = Self::shell_of(v, profiles, default_shell);
             }
             if v.cwd.trim() != o.cwd.trim() && self.worktree.is_none() {
                 meta.cwd = v.cwd.trim().to_string();
+            }
+            if meta.shell_id != old_shell || meta.cwd != old_cwd {
+                // Die bisherige Konversation liegt beim alten Ordner bzw. auf der anderen Seite (Windows/WSL): beim
+                // nächsten Start nicht mit `--resume` suchen (#245).
+                meta.claude_started = false;
+                meta.transcript.clear();
             }
             if v.claude != o.claude {
                 meta.claude = v.claude;
@@ -806,14 +841,14 @@ mod tests {
         // Neu laden (restart): fortsetzen nur mit der Option der Sitzung
         let w = resume_wanted(false, true, true, false);
         assert!(w);
-        assert_eq!(claude_start(None, w, false, &claude_meta(true, true), false), ClaudeStart::Resume(uuid()));
+        assert_eq!(claude_start(None, w, false, &claude_meta(true, true), true), ClaudeStart::Resume(uuid()));
         let w = resume_wanted(false, true, false, true);
         assert!(!w);
-        assert_eq!(claude_start(None, w, false, &claude_meta(true, false), false), ClaudeStart::Fresh);
-        // Noch kein Prompt gesendet: nichts fortzusetzen → neu (Windows) bzw. --continue (WSL, keine ID aus den Hooks)
+        assert_eq!(claude_start(None, w, false, &claude_meta(true, false), true), ClaudeStart::Fresh);
+        // Keine Konversation da (noch kein Prompt, Transkript fehlt): neu – auch in WSL nie --continue (#245)
         assert_eq!(claude_start(None, true, false, &claude_meta(false, true), false), ClaudeStart::Fresh);
-        assert_eq!(claude_start(None, true, false, &claude_meta(false, true), true), ClaudeStart::Continue);
-        assert_eq!(claude_start(None, false, false, &claude_meta(false, false), true), ClaudeStart::Fresh, "WSL ohne fortsetzen: neu");
+        assert_eq!(claude_start(None, true, false, &claude_meta(true, true), false), ClaudeStart::Fresh);
+        assert_eq!(claude_start(None, false, false, &claude_meta(false, false), false), ClaudeStart::Fresh, "ohne fortsetzen: neu");
         // Programmstart (restore): globale Einstellung und Option der Sitzung
         assert!(resume_wanted(true, false, true, true));
         assert!(!resume_wanted(true, false, true, false));
@@ -826,7 +861,88 @@ mod tests {
         assert_eq!(claude_start(Some("not-a-uuid"), false, true, &claude_meta(true, false), false), ClaudeStart::Continue);
         // Kaputte gespeicherte ID wird nicht übernommen
         let bad = SessionMeta { claude_session: "x; rm -rf".into(), ..claude_meta(true, true) };
-        assert_eq!(claude_start(None, true, false, &bad, false), ClaudeStart::Fresh);
+        assert_eq!(claude_start(None, true, false, &bad, true), ClaudeStart::Fresh);
+        assert!(!conversation_exists(&bad, false, None, "C:\\u"));
+    }
+
+    /// #245: Programmstart/Neu laden einer WSL-Sitzung ohne gesendeten Prompt nutzt nie `--continue` (das öffnete die
+    /// neueste Konversation des Linux-Ordners, oft die einer anderen Sitzung), auf keinem Weg.
+    #[test]
+    fn wsl_restore_of_an_unprompted_session_never_continues_the_folder() {
+        let m = SessionMeta { id: 1, claude: true, claude_started: false, claude_session: uuid(), ..SessionMeta::default() };
+        assert!(SessionMeta::default().claude_continue, "Standard bleibt: fortsetzen an");
+        for (restore, restart) in [(true, false), (false, true)] {
+            let w = resume_wanted(restore, restart, m.claude_continue, true);
+            let has = conversation_exists(&m, true, None, "/home/u");
+            assert!(!has);
+            assert_eq!(claude_start(None, w, false, &m, has), ClaudeStart::Fresh, "restore={restore}");
+        }
+        // Nach dem ersten Prompt (Hooks): die eigene Konversation, nie die des Ordners
+        let m = SessionMeta { claude_started: true, ..m };
+        let has = conversation_exists(&m, true, None, "/home/u");
+        assert_eq!(claude_start(None, resume_wanted(true, false, true, true), false, &m, has), ClaudeStart::Resume(uuid()));
+        // Nur „Letzte Konversation im Ordner fortsetzen“ beim Anlegen ergibt --continue
+        assert_eq!(claude_start(None, false, true, &m, has), ClaudeStart::Continue);
+        for w in [true, false] {
+            for has in [true, false] {
+                assert_ne!(claude_start(None, w, false, &m, has), ClaudeStart::Continue);
+            }
+        }
+    }
+
+    /// #245: Windows entscheidet nach dem Transkript auf der Platte (geht auch ohne Hooks, z. B. mit --safe-mode).
+    #[test]
+    fn windows_resume_needs_the_transcript_of_this_folder() {
+        let root = std::env::temp_dir().join(format!("pd-conv-{}", std::process::id()));
+        let projects = root.join("projects");
+        let cwd = "C:\\work\\app";
+        let slug = crate::history::project_slug(cwd).unwrap();
+        assert_eq!(slug, "C--work-app");
+        let f = projects.join(&slug).join(format!("{}.jsonl", uuid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let m = SessionMeta { cwd: cwd.into(), ..claude_meta(false, true) };
+        assert!(!conversation_exists(&m, false, Some(&projects), "C:\\u"), "noch kein Transkript");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, "{}\n").unwrap();
+        assert!(conversation_exists(&m, false, Some(&projects), "C:\\u"), "ohne Hooks: Datei zählt");
+        // Anderer Arbeitsordner: die Konversation liegt nicht dort → neu
+        let moved = SessionMeta { cwd: "C:\\other".into(), ..m.clone() };
+        assert!(!conversation_exists(&moved, false, Some(&projects), "C:\\u"));
+        // Von den Hooks gemeldetes Transkript geht vor (eigener CLAUDE_CONFIG_DIR) – fehlt es, wird nicht fortgesetzt
+        let gone = SessionMeta { transcript: root.join("x").join(format!("{}.jsonl", uuid())).to_string_lossy().to_string(), claude_started: true, ..m.clone() };
+        assert!(!conversation_exists(&gone, false, Some(&projects), "C:\\u"));
+        let reported = SessionMeta { transcript: f.to_string_lossy().to_string(), cwd: "C:\\other".into(), ..m.clone() };
+        assert!(conversation_exists(&reported, false, Some(&projects), "C:\\u"));
+        // Leerer Ordner = Benutzerordner
+        let home = SessionMeta { cwd: String::new(), ..m.clone() };
+        assert!(conversation_exists(&home, false, Some(&projects), cwd));
+        let _ = std::fs::remove_dir_all(&root);
+        // Ordnernamen wie Claude Code (Nicht-ASCII je UTF-16-Einheit)
+        assert_eq!(crate::history::project_slug("E:\\claude-hub").as_deref(), Some("E--claude-hub"));
+        assert_eq!(crate::history::project_slug("C:\\Ü").as_deref(), Some("C---"));
+        assert_eq!(crate::history::project_slug(&"a".repeat(201)), None);
+    }
+
+    /// #245: Arbeitsordner oder Shell geändert → die alte Konversation gehört nicht mehr dazu.
+    #[test]
+    fn changing_folder_or_shell_drops_the_resume() {
+        let p = profiles();
+        let meta = SessionMeta { id: 3, claude: true, claude_started: true, claude_session: uuid(), shell_id: "pwsh".into(), cwd: "C:\\a".into(), transcript: "C:\\t.jsonl".into(), ..SessionMeta::default() };
+        let mut f = form(&meta);
+        f.v.name = "x".into();
+        let mut m = meta.clone();
+        f.apply(&mut m, &p, "pwsh");
+        assert!(m.claude_started && !m.transcript.is_empty(), "nur der Name geändert");
+        let mut f = form(&meta);
+        f.v.cwd = "C:\\b".into();
+        let mut m = meta.clone();
+        f.apply(&mut m, &p, "pwsh");
+        assert!(!m.claude_started && m.transcript.is_empty(), "Ordner geändert");
+        let mut f = form(&meta);
+        f.v.shell_id = "wsl:Ubuntu".into();
+        let mut m = meta.clone();
+        f.apply(&mut m, &p, "pwsh");
+        assert!(!m.claude_started && m.transcript.is_empty(), "Shell geändert");
     }
 
     fn profiles() -> Vec<Profile> {

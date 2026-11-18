@@ -849,10 +849,35 @@ pub fn legacy_args(rest: &str, kind: Kind) -> String {
     rest.split_whitespace().map(|t| if t.starts_with('-') { t.to_string() } else { quote_value(kind, t) }).collect::<Vec<_>>().join(" ")
 }
 
-/// Alte `claude_args` bereinigen: nur harmlose Token ([`crate::quote::sanitize_claude_args`]) und nie ein
-/// `--dangerously-*`/`--allow-dangerously-*`-Flag (würde Freigaben abschalten).
+/// Alte `claude_args` bereinigen: nur harmlose Token ([`crate::quote::sanitize_claude_args`]), nie ein
+/// `--dangerously-*`/`--allow-dangerously-*`-Flag (würde Freigaben abschalten) und keine Flags, die Paneldeck selbst
+/// steuert oder die nur über MCP verboten sind ([`NEVER_VIA_MCP`] außer `--safe-mode`/`--autocompact`, die als
+/// Optionen übernommen werden) – samt ihrem Wert (#245: ein gespeichertes `--resume <id>`, `--continue` oder
+/// `--session-id` setzte sonst ungefragt eine Konversation fort oder brach den Start ab).
 pub fn clean_legacy(args: &str) -> String {
-    crate::quote::sanitize_claude_args(args).split_whitespace().filter(|t| !t.to_ascii_lowercase().contains("dangerously")).collect::<Vec<_>>().join(" ")
+    let clean = crate::quote::sanitize_claude_args(args);
+    let mut out: Vec<&str> = Vec::new();
+    let mut skip_value = false;
+    for t in clean.split_whitespace() {
+        let flag = t.starts_with('-');
+        if skip_value {
+            skip_value = false;
+            if !flag {
+                continue;
+            }
+        }
+        let lower = t.to_ascii_lowercase();
+        if lower.contains("dangerously") {
+            continue;
+        }
+        let name = lower.trim_start_matches('-');
+        if flag && NEVER_VIA_MCP.contains(&name) && !matches!(name, "safe-mode" | "autocompact") {
+            skip_value = true;
+            continue;
+        }
+        out.push(t);
+    }
+    out.join(" ")
 }
 
 /// Optionen einer neuen Sitzung (alle Wege laufen hier durch): `explicit` (Dialog, MCP, Vorlage, Duplikat) oder sonst
@@ -1113,6 +1138,25 @@ mod tests {
         assert_eq!(legacy_args("--model opus[1m]", Kind::Posix), "--model 'opus[1m]'");
         assert_eq!(legacy_args("--model opus[1m]", Kind::Cmd), "--model opus[1m]");
         assert_eq!(clean_legacy("--dangerously-skip-permissions --model x;y --ok"), "--model --ok");
+    }
+
+    /// #245: gespeicherte `claude_args` (state.json, templates.json, Duplikat) setzen nie selbst eine Konversation fort.
+    #[test]
+    fn legacy_args_never_resume_or_continue() {
+        let id = "5d28a95e-dbaf-4f27-b2f3-6c0c42fab338";
+        assert_eq!(clean_legacy(&format!("--model opus --resume {id} --continue --verbose")), "--model opus --verbose");
+        assert_eq!(clean_legacy(&format!("-r {id} -c --session-id {id} --fork-session -p hi --print --settings x.json --ide")), "--ide");
+        assert_eq!(clean_legacy("--add-dir /tmp --mcp-config m.json --output-format json --chrome"), "--chrome");
+        // Als Optionen übernommen, nicht weggeworfen
+        assert_eq!(clean_legacy("--safe-mode --autocompact auto"), "--safe-mode --autocompact auto");
+        for line in [format!("--resume {id}"), "--continue".to_string(), format!("--session-id {id}"), format!("-r {id}")] {
+            let (o, r) = resolve_new(None, false, &ClaudeOpts::default(), &line);
+            let l = o.launch(Kind::Posix, PathStyle::Native, &r);
+            assert!(!l.line.contains("--resume") && !l.line.contains("--continue") && !l.line.contains("--session-id") && !l.line.contains(id), "{line}: {}", l.line);
+            let meta = crate::state::SessionMeta { claude: true, claude_args: line.clone(), ..crate::state::SessionMeta::default() };
+            let (o, r) = meta.claude_opts_eff();
+            assert!(!o.launch(Kind::Pwsh, PathStyle::Native, &r).line.contains(id), "{line}");
+        }
     }
 
     #[test]
