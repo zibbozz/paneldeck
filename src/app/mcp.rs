@@ -1973,11 +1973,13 @@ impl App {
         });
     }
 
-    /// Kleine Anzeige in der Seitenleiste, solange die Schnittstelle an ist; pulsiert bei Zugriffen. `true` = angeklickt.
-    pub(super) fn mcp_chip(&self, ui: &mut egui::Ui) -> bool {
+    /// MCP-Status in der Fensterleiste links neben Update/Einstellungen (#240), solange die Schnittstelle an ist; leuchtet
+    /// bei Zugriffen auf. Klick öffnet die Einstellungen der Schnittstelle. `right` = rechte Kante; fehlt der Platz bis
+    /// `min_left` (sehr schmales Fenster), entfällt die Anzeige. Liefert die rechte Kante für den nächsten Knopf.
+    pub(super) fn mcp_title_button(&mut self, ui: &egui::Ui, right: f32, min_left: f32) -> f32 {
         let lang = self.settings.language;
         if self.settings.mcp_level == McpLevel::Off {
-            return false;
+            return right;
         }
         let active = self.mcp.last.is_some_and(|t| t.elapsed() < Duration::from_secs(3));
         if active {
@@ -1989,7 +1991,20 @@ impl App {
         };
         let col = if active { Color32::from_rgb(0xd9, 0x77, 0x57) } else { Color32::from_rgb(0x4c, 0xc2, 0x6a) };
         let tip = format!("{}: {}\n{}", lang.t("Agenten-Schnittstelle", "Agent interface"), level_txt, lang.t("Klicken für die Einstellungen", "Click for settings"));
-        afford::link_button(ui, label, col, &tip).clicked()
+        let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(12.5), col);
+        let w = g.size().x + 20.0;
+        if right - w < min_left {
+            return right;
+        }
+        let r = Rect::from_min_size(Pos2::new(right - w, ui.max_rect().top() + 4.0), Vec2::new(w, super::titlebar::BAR_HEIGHT - 8.0));
+        let active_tab = self.settings_open && self.settings_tab == 7;
+        let resp = super::titlebar::title_button(ui, r, Id::new("titlebar_mcp"), &tip, active_tab);
+        ui.painter().galley(Pos2::new(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, col);
+        if resp.clicked() {
+            self.settings_open = true;
+            self.settings_tab = 7;
+        }
+        r.left() - 4.0
     }
 }
 

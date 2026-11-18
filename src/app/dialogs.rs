@@ -382,6 +382,7 @@ impl App {
         let lang = self.settings.language;
         let Some(mut w) = self.wt_close.take() else { return };
         let Some(wt) = self.entries.get(&w.id).and_then(|e| e.meta.worktree.clone()) else { return };
+        let checking = w.checking(); // `git status` läuft im Hintergrund (#259)
         let name = self.entries.get(&w.id).map(|e| e.display_name()).unwrap_or_default();
         let mut keep = true;
         let mut action: Option<u8> = None; // 0 behalten, 1 entfernen, 2 mergen
@@ -393,7 +394,12 @@ impl App {
                 ui.label(lang.q(&name));
                 ui.label(RichText::new(format!("{}: {}\n{}: {}", lang.t("Branch", "Branch"), wt.branch, lang.t("Ordner", "Folder"), wt.path)).small().color(style::dim(ui)));
                 ui.add_space(S2);
-                if w.changes > 0 {
+                if checking {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new(lang.t("Prüfe auf nicht committete Änderungen …", "Checking for uncommitted changes …")).color(style::dim(ui)));
+                    });
+                } else if w.changes > 0 {
                     ui.colored_label(Color32::from_rgb(0xe5, 0xc0, 0x7b), format!("{} {}", w.changes, lang.t("Datei(en) mit nicht committeten Änderungen.", "file(s) with uncommitted changes.")));
                     ui.checkbox(&mut w.discard, lang.t("Änderungen verwerfen (Entfernen erzwingen)", "Discard changes (force removal)"));
                 } else {
@@ -415,10 +421,10 @@ impl App {
                     if ui.button(lang.t("Behalten", "Keep")).on_hover_text(lang.t("Sitzung schließen, Worktree und Branch bleiben", "Close the session, keep worktree and branch")).clicked() {
                         action = Some(0);
                     }
-                    if ui.add_enabled(w.changes == 0 || w.discard, egui::Button::new(lang.t("Entfernen", "Remove"))).on_hover_text(lang.t("Worktree und Branch löschen", "Delete worktree and branch")).clicked() {
+                    if ui.add_enabled(!checking && (w.changes == 0 || w.discard), egui::Button::new(lang.t("Entfernen", "Remove"))).on_hover_text(lang.t("Worktree und Branch löschen", "Delete worktree and branch")).clicked() {
                         action = Some(1);
                     }
-                    if ui.add_enabled(w.changes == 0, egui::Button::new(lang.t("Mergen & entfernen", "Merge & remove"))).on_hover_text(lang.t("Branch in den aktuellen Branch des Haupt-Repos mergen, dann aufräumen (bei Konflikt wird abgebrochen)", "Merge the branch into the main repo's current branch, then clean up (aborts on conflict)")).clicked() {
+                    if ui.add_enabled(!checking && w.changes == 0, egui::Button::new(lang.t("Mergen & entfernen", "Merge & remove"))).on_hover_text(lang.t("Branch in den aktuellen Branch des Haupt-Repos mergen, dann aufräumen (bei Konflikt wird abgebrochen)", "Merge the branch into the main repo's current branch, then clean up (aborts on conflict)")).clicked() {
                         action = Some(2);
                     }
                     if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {

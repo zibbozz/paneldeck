@@ -656,11 +656,27 @@ struct PendingWt {
 struct WtClose {
     id: u64,
     changes: usize,
+    /// Läuft noch die Prüfung auf offene Änderungen (`git status` im Hintergrund, #259)?
+    changes_rx: Option<std::sync::mpsc::Receiver<usize>>,
     discard: bool,
     /// Hintergrundprozesse im Job der Sitzung beim Öffnen (#168, #213).
     lingering: Vec<closing::Lingering>,
     /// „Hintergrundprozesse beenden“ angehakt.
     end_jobs: bool,
+}
+
+impl WtClose {
+    /// Ergebnis der Prüfung abholen; `true`, solange sie noch läuft.
+    fn checking(&mut self) -> bool {
+        let Some(rx) = &self.changes_rx else { return false };
+        match rx.try_recv() {
+            Ok(n) => self.changes = n,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {} // wie bisher bei einem Fehler: keine Änderungen bekannt
+        }
+        self.changes_rx = None;
+        false
+    }
 }
 
 struct Palette {
@@ -1432,9 +1448,11 @@ impl App {
     }
 
     fn binding(&self, id: &str) -> Option<(Modifiers, Key)> {
-        self.settings.keys.get(id).and_then(|s| keys::parse(s)).or_else(|| {
-            keys::DEFAULTS.iter().find(|(i, _)| *i == id).and_then(|(_, d)| keys::parse(d))
-        })
+        match self.settings.keys.get(id).and_then(|s| keys::parse(s)) {
+            // Eine früher aufgenommene Taste ohne Strg/Alt (z. B. „A“) wirkt nicht – sie finge jede Eingabe ab (#256).
+            Some((m, k)) => keys::usable(m, k).then_some((m, k)),
+            None => keys::DEFAULTS.iter().find(|(i, _)| *i == id).and_then(|(_, d)| keys::parse(d)),
+        }
     }
 
     /// Anzeigetext des aktuellen Kürzels (für Tooltips).
@@ -1516,6 +1534,35 @@ impl App {
         }
         self.active_project = id;
         self.load_project_view(p.layout, p.focused);
+    }
+
+    /// Zeile der Sitzung in der Seitenleiste sichtbar machen: Filter leeren, wenn er sie verbirgt, eingeklappte Ordner
+    /// darüber aufklappen (die Gruppen der Listenansicht öffnet die Seitenleiste selbst, solange umbenannt wird).
+    /// `false`, wenn sie hier nicht erscheinen kann (anderes Fenster, anderes Projekt ohne Filter, unbekannt).
+    fn reveal_row(&mut self, id: u64) -> bool {
+        let Some(e) = self.entries.get(&id) else { return false };
+        if !self.in_win(e) {
+            return false;
+        }
+        if !self.sidebar_match(e) {
+            self.filter.clear();
+        }
+        let Some(e) = self.entries.get(&id) else { return false };
+        if !self.sidebar_match(e) {
+            return false;
+        }
+        let (project, mut path) = (e.meta.project, e.meta.group.clone());
+        if self.filter.trim().is_empty() {
+            if let Some(p) = self.projects.iter_mut().find(|p| p.id == project) {
+                while !path.is_empty() {
+                    if let Some(f) = p.folders.iter_mut().find(|f| f.path == path) {
+                        f.collapsed = false;
+                    }
+                    path = state::folder_parent(&path).to_string();
+                }
+            }
+        }
+        true
     }
 
     fn sidebar_match(&self, e: &Entry) -> bool {
@@ -2003,6 +2050,9 @@ impl App {
         self.entries.insert(id, entry);
         if !quiet {
             if window == self.wins.cur {
+                // Gehört die neue Sitzung zu einem anderen Projekt (z. B. „Duplizieren“ einer gefilterten Sitzung), erst dorthin
+                // wechseln – sonst landete sie im Layout des gezeigten Projekts und verschwände beim nächsten Wechsel (#258).
+                self.switch_project(project);
                 self.activate(id);
             } else {
                 // Anderes Fenster: dort zeigen (es kommt nach vorn), nicht im gerade gezeichneten Layout.
@@ -2422,7 +2472,7 @@ impl App {
             ("mode_tasks_alt", titlebar::Mode::Tasks),
         ] {
             if let Some((m, k)) = self.binding(id) {
-                if ctx.input_mut(|i| consume_key_physical(i, m, k)) {
+                if ctx.input_mut(|i| consume_key_exact(i, m, k, true)) {
                     self.set_mode(mode);
                 }
             }
@@ -2478,23 +2528,31 @@ impl App {
         let mut extra: Vec<Action> = Vec::new();
         let mut alt_n: Option<usize> = None;
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
+        // Die festen Kürzel nur verbrauchen, wenn es ein Ziel gibt – sonst gehören die Tasten dem Terminal (Alt+Zahl ist
+        // z. B. `digit-argument` in bash, #254).
+        let (n_projects, n_sessions) = (self.projects.len(), self.project_ids().len());
+        let dirs: Vec<(Key, Nav)> = [(Key::ArrowLeft, Nav::Left), (Key::ArrowRight, Nav::Right), (Key::ArrowUp, Nav::Up), (Key::ArrowDown, Nav::Down)]
+            .into_iter()
+            .filter(|(_, n)| focus_target(&self.pane_rects, self.focused, *n).is_some())
+            .collect();
         ctx.input_mut(|i| {
             for (id, m, k) in &binds {
-                if i.consume_key(*m, *k) {
+                if consume_key_exact(i, *m, *k, false) {
                     fired.push(id);
                 }
             }
             for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].into_iter().enumerate() {
-                if i.consume_key(cs, k) {
+                // Physisch: mit Umschalt liefert die Zifferntaste ein Zeichen („!“, „/“ …), nicht `Key::Num1`.
+                if n < n_projects && consume_key_exact(i, cs, k, true) {
                     extra.push(Action::SwitchProject(n as u64 + 1_000_000));
                 }
-                if i.consume_key(Modifiers::ALT, k) {
+                if n < n_sessions && consume_key_exact(i, Modifiers::ALT, k, true) {
                     alt_n = Some(n);
                 }
             }
             let ca = Modifiers::CTRL | Modifiers::ALT;
-            for (k, n) in [(Key::ArrowLeft, Nav::Left), (Key::ArrowRight, Nav::Right), (Key::ArrowUp, Nav::Up), (Key::ArrowDown, Nav::Down)] {
-                if i.consume_key(ca, k) {
+            for (k, n) in dirs {
+                if consume_key_exact(i, ca, k, false) {
                     extra.push(Action::FocusDir(n));
                 }
             }
@@ -2820,9 +2878,23 @@ impl App {
             let Some(p) = self.pending_wt.take() else { return };
             match res {
                 Ok(()) => {
-                    let id = self.new_session(ctx, p.opts);
+                    let mut opts = p.opts;
+                    // Inzwischen ein anderes Projekt gewählt: die Sitzung still in ihrem Projekt anlegen und Bescheid geben,
+                    // statt den Nutzer zurückzuholen oder sie ins falsche Layout zu legen (#258).
+                    let elsewhere = opts.window.is_none_or(|w| w == self.wins.cur) && opts.project.is_some_and(|pr| pr != self.active_project);
+                    opts.quiet |= elsewhere;
+                    let id = self.new_session(ctx, opts);
                     if let Some(e) = self.entries.get_mut(&id) {
                         e.meta.worktree = Some(p.wt);
+                    }
+                    if elsewhere {
+                        let lang = self.settings.language;
+                        let name = self.entries.get(&id).map(|e| e.display_name()).unwrap_or_default();
+                        let proj = self.entries.get(&id).and_then(|e| self.projects.iter().find(|p| p.id == e.meta.project)).map(|p| p.name.clone()).unwrap_or_default();
+                        self.notify_text(match lang {
+                            Lang::De => format!("Worktree-Sitzung {} ist im Projekt {} bereit.", lang.q(&name), lang.q(&proj)),
+                            Lang::En => format!("Worktree session {} is ready in project {}.", lang.q(&name), lang.q(&proj)),
+                        });
                     }
                 }
                 Err(e) => self.notify_text(format!("{}: {e}", self.settings.language.t("Worktree konnte nicht angelegt werden", "Could not create worktree"))),
@@ -3563,26 +3635,8 @@ impl App {
                 self.want_focus = Some(self.focused);
             }
             Action::FocusDir(nav) => {
-                if let Some(cur) = self.pane_rects.get(&self.focused).copied() {
-                    let c = cur.center();
-                    let best = self
-                        .pane_rects
-                        .iter()
-                        .filter(|(id, _)| **id != self.focused)
-                        .filter_map(|(id, r)| {
-                            let d = r.center() - c;
-                            let (along, across) = match nav {
-                                Nav::Left => (-d.x, d.y.abs()),
-                                Nav::Right => (d.x, d.y.abs()),
-                                Nav::Up => (-d.y, d.x.abs()),
-                                Nav::Down => (d.y, d.x.abs()),
-                            };
-                            (along > 1.0).then_some((*id, along + 2.0 * across))
-                        })
-                        .min_by(|a, b| a.1.total_cmp(&b.1));
-                    if let Some((id, _)) = best {
-                        self.activate(id);
-                    }
+                if let Some(id) = focus_target(&self.pane_rects, self.focused, nav) {
+                    self.activate(id);
                 }
             }
             Action::Detach(id) => {
@@ -3677,8 +3731,33 @@ impl App {
                 }
             }
             Action::StartRename(id) => {
-                if let Some(e) = self.entries.get(&id) {
-                    self.rename = Some((id, e.display_name()));
+                let target = self.entries.get(&id).map(|e| (self.in_win(e), self.sidebar_match(e), e.meta.window, e.meta.project));
+                match target {
+                    None => {}
+                    Some((false, _, window, _)) => {
+                        // Sitzung eines anderen Fensters (Palette): dort umbenennen; das Fenster kommt dabei nach vorn
+                        // (Review zu #259).
+                        self.route_to(ctx, window, Action::StartRename(id));
+                    }
+                    Some((true, matched, _, project)) => {
+                        if !matched && project != self.active_project {
+                            // Anderes Projekt: dorthin wechseln, damit die Zeile erscheint. Der Fokus bleibt beim
+                            // Umbenennen-Feld (ein Terminal, das ihn danach nähme, beendete das Umbenennen sofort).
+                            self.filter.clear();
+                            self.switch_project(project);
+                            self.want_focus = None;
+                        }
+                        // Die Zeile muss zu sehen sein (Filter, eingeklappter Ordner), sonst geschähe nichts Sichtbares und
+                        // das wartende Umbenennen holte sich später den Fokus vom Terminal (#259).
+                        if self.reveal_row(id) {
+                            if let Some(e) = self.entries.get(&id) {
+                                self.rename = Some((id, e.display_name()));
+                            }
+                        } else {
+                            let lang = self.settings.language;
+                            self.notify_text(lang.t("Diese Sitzung lässt sich hier nicht umbenennen.", "This session can't be renamed here.").to_string());
+                        }
+                    }
                 }
             }
             Action::SetColor(id, c) => {
@@ -3945,15 +4024,18 @@ impl App {
                 }
             }
             Action::RequestClose(id) if self.entries.get(&id).is_some_and(|e| e.meta.worktree.is_some()) => {
-                let changes = self
-                    .entries
-                    .get(&id)
-                    .and_then(|e| e.meta.worktree.as_ref())
-                    .map(|w| gitops::status(std::path::Path::new(&w.path)).map(|c| c.len()).unwrap_or(0))
-                    .unwrap_or(0);
+                // `git status` im Hintergrund: in großen oder langsamen Repos fröre sonst jedes Fenster ein (#259). Bis das
+                // Ergebnis da ist, zeigt die Rückfrage „wird geprüft“ und bietet nur Behalten/Abbrechen an.
+                let path = self.entries.get(&id).and_then(|e| e.meta.worktree.as_ref()).map(|w| PathBuf::from(&w.path)).unwrap_or_default();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx2 = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(gitops::status(&path).map(|c| c.len()).unwrap_or(0));
+                    ctx2.request_repaint();
+                });
                 // Hintergrundprozesse im Job (#213): auch hier nennen; sie können den Ordner belegt halten.
                 let lingering = self.lingering_of(&[id]);
-                self.wt_close = Some(WtClose { id, changes, discard: false, lingering, end_jobs: false });
+                self.wt_close = Some(WtClose { id, changes: 0, changes_rx: Some(rx), discard: false, lingering, end_jobs: false });
             }
             Action::RequestClose(id) => {
                 // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft). Hintergrundprozesse
@@ -3987,20 +4069,37 @@ impl App {
     }
 }
 
-/// Wie `consume_key`, erkennt aber auch die physische Taste: mit Umschalt liefert die Tastatur eine andere logische Taste
-/// (Umschalt+1 = „!“), `consume_key` sähe dann nicht `Key::Num1`.
-fn consume_key_physical(i: &mut egui::InputState, m: Modifiers, k: Key) -> bool {
-    let pos = i.events.iter().position(|e| {
-        matches!(e, Event::Key { key, physical_key, pressed: true, modifiers, .. }
-            if (*key == k || *physical_key == Some(k)) && modifiers.matches_logically(m))
+/// Wie `consume_key`, aber mit genau diesen Modifikatoren (#254): ein zusätzliches Umschalt oder Alt (AltGr = Strg+Alt)
+/// ist eine andere Kombination – sonst löste Strg+Umschalt+1 das Kürzel Strg+1 aus und Strg+AltGr+2 („²“) Strg+2.
+/// `physical`: auch die physische Taste erkennen – mit Umschalt liefert die Tastatur eine andere logische Taste
+/// (Umschalt+1 = „!“ bzw. „/“ je nach Belegung), `consume_key` sähe dann nicht `Key::Num1`.
+fn consume_key_exact(i: &mut egui::InputState, m: Modifiers, k: Key, physical: bool) -> bool {
+    let before = i.events.len();
+    i.events.retain(|e| {
+        !matches!(e, Event::Key { key, physical_key, pressed: true, modifiers, .. }
+            if (*key == k || (physical && *physical_key == Some(k))) && modifiers.matches_exact(m))
     });
-    match pos {
-        Some(p) => {
-            i.events.remove(p);
-            true
-        }
-        None => false,
-    }
+    i.events.len() != before
+}
+
+/// Nächster Bereich in Richtung `nav` vom fokussierten aus (Strg+Alt+Pfeil); `None`, wenn dort keiner liegt.
+fn focus_target(rects: &HashMap<u64, Rect>, focused: u64, nav: Nav) -> Option<u64> {
+    let c = rects.get(&focused)?.center();
+    rects
+        .iter()
+        .filter(|(id, _)| **id != focused)
+        .filter_map(|(id, r)| {
+            let d = r.center() - c;
+            let (along, across) = match nav {
+                Nav::Left => (-d.x, d.y.abs()),
+                Nav::Right => (d.x, d.y.abs()),
+                Nav::Up => (-d.y, d.x.abs()),
+                Nav::Down => (d.y, d.x.abs()),
+            };
+            (along > 1.0).then_some((*id, along + 2.0 * across))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id)
 }
 
 impl eframe::App for App {
@@ -4321,6 +4420,42 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
     }
 }
 
+/// Knöpfe im Kopf eines Bereichs, von rechts nach links (wichtigste zuerst).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PaneBtn {
+    Close,
+    Minimize,
+    Reload,
+    Detach,
+    SplitDown,
+    SplitRight,
+    Link,
+}
+
+const PANE_BTN_W: f32 = 22.0;
+
+/// Alle Knöpfe eines Bereichs (abgedockt: Andocken, Minimieren, ggf. Neu laden).
+fn pane_buttons(detached: bool, reload: bool, link: bool) -> Vec<PaneBtn> {
+    let mut v = vec![PaneBtn::Close, PaneBtn::Minimize];
+    if reload {
+        v.push(PaneBtn::Reload);
+    }
+    if !detached {
+        v.extend([PaneBtn::Detach, PaneBtn::SplitDown, PaneBtn::SplitRight]);
+        if link {
+            v.push(PaneBtn::Link);
+        }
+    }
+    v
+}
+
+/// Wie viele der `n` Knöpfe in einen Kopf der Breite `width` passen: links bleiben Statuspunkt und ein Stück Name
+/// (60 Punkte) frei, rechts etwas Luft; Schließen und Minimieren stehen immer da (#259).
+fn pane_buttons_fit(width: f32, n: usize) -> usize {
+    let room = width - 16.0 - 60.0;
+    ((room / PANE_BTN_W).floor().max(0.0) as usize).clamp(2.min(n), n)
+}
+
 fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     let lang = cx.lang;
     cx.rects.insert(id, rect);
@@ -4356,6 +4491,13 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if hresp.clicked() {
         cx.actions.push(Action::Focus(id));
     }
+    // „Neu laden“ (#169) nur für Terminals; ein Chat hat keinen Prozess.
+    let reload = session_settings::reload_plan(&entry.meta);
+    // Knöpfe rechts im Kopf (von rechts nach links). In schmalen Bereichen nur so viele, wie hineinpassen – sonst ragten sie
+    // in den Kopf des Nachbarn, und ein Klick träfe dessen Teilen/Schließen (#259); die übrigen stehen im Kontextmenü.
+    let all_btns = pane_buttons(cx.detached, reload.is_some(), tl_enabled);
+    let fit = if cx.detached { all_btns.len() } else { pane_buttons_fit(header.width(), all_btns.len()) };
+    let (shown_btns, hidden_btns) = all_btns.split_at(fit);
     hresp.context_menu(|ui| {
         if ui.button(lang.t("Bereich minimieren", "Minimize pane")).clicked() {
             cx.actions.push(Action::MinimizePane(id));
@@ -4365,10 +4507,21 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             cx.actions.push(Action::LinkTicket(id));
             ui.close();
         }
+        for b in hidden_btns {
+            let (label, action) = match b {
+                PaneBtn::Reload => (lang.t("Neu laden …", "Reload …"), Action::RequestReload(id)),
+                PaneBtn::Detach => (lang.t("In eigenem Fenster öffnen", "Open in own window"), Action::Detach(id)),
+                PaneBtn::SplitDown => (lang.t("Darunter teilen", "Split below"), Action::Split(id, Dir::Vertical)),
+                PaneBtn::SplitRight => (lang.t("Rechts teilen", "Split right"), Action::Split(id, Dir::Horizontal)),
+                _ => continue, // Schließen/Minimieren stehen immer da, Verknüpfen schon oben
+            };
+            if ui.button(label).clicked() {
+                cx.actions.push(action);
+                ui.close();
+            }
+        }
     });
     let claude = entry.is_claude() && cx.claude_mode;
-    // „Neu laden“ (#169) nur für Terminals; ein Chat hat keinen Prozess.
-    let reload = session_settings::reload_plan(&entry.meta);
     let status_label = entry.status_label(lang);
     let status_col = entry.status_color(t);
     let (text_c, strong_c, weak) = {
@@ -4384,10 +4537,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
-    // Breite des Knopfbereichs rechts: fünf Knöpfe (abgedockt zwei), mit Ticket-Verknüpfung und Neu laden je einer mehr.
-    let tl_btn = tl_enabled;
-    let reload_w = if reload.is_some() { 22.0 } else { 0.0 };
-    let btns_w = if cx.detached { 52.0 + reload_w } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } + reload_w };
+    // Breite des Knopfbereichs rechts: die gezeigten Knöpfe (je 22) und etwas Luft.
+    let btns_w = PANE_BTN_W * shown_btns.len() as f32 + 16.0;
     let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
     let chips = cx.tl.chips_of(id);
@@ -4446,44 +4597,31 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                if cx.detached {
-                    if style::icon_btn_small(ui, SIcon::Close, lang.t("Wieder andocken (Strg+Umschalt+W)", "Dock back (Ctrl+Shift+W)")).clicked() {
-                        cx.actions.push(Action::Attach(id));
-                    }
-                    if style::icon_btn_small(ui, SIcon::Collapse, lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)")).clicked() {
-                        cx.actions.push(Action::MinimizePane(id));
-                    }
-                    if let Some(plan) = reload {
-                        if style::icon_btn_small(ui, SIcon::Reload, plan.tip(lang)).clicked() {
-                            cx.actions.push(Action::RequestReload(id));
+                for b in shown_btns {
+                    let (icon, tip, action): (SIcon, String, Action) = match b {
+                        PaneBtn::Close if cx.detached => (SIcon::Close, lang.t("Wieder andocken (Strg+Umschalt+W)", "Dock back (Ctrl+Shift+W)").into(), Action::Attach(id)),
+                        PaneBtn::Close => (SIcon::Close, lang.t("Sitzung schließen", "Close session").into(), Action::RequestClose(id)),
+                        PaneBtn::Minimize if cx.detached => (
+                            SIcon::Collapse,
+                            lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)").into(),
+                            Action::MinimizePane(id),
+                        ),
+                        PaneBtn::Minimize => {
+                            let tip = lang.t("Bereich minimieren – die Sitzung läuft weiter, ein Klick in der Seitenleiste holt sie zurück", "Minimize pane – the session keeps running, click it in the sidebar to bring it back");
+                            (SIcon::Collapse, if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) }, Action::MinimizePane(id))
                         }
+                        PaneBtn::Reload => match &reload {
+                            Some(plan) => (SIcon::Reload, plan.tip(lang).to_string(), Action::RequestReload(id)),
+                            None => continue,
+                        },
+                        PaneBtn::Detach => (SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window").into(), Action::Detach(id)),
+                        PaneBtn::SplitDown => (SIcon::SplitDown, lang.t("Darunter teilen (Strg+Umschalt+E)", "Split below (Ctrl+Shift+E)").into(), Action::Split(id, Dir::Vertical)),
+                        PaneBtn::SplitRight => (SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)").into(), Action::Split(id, Dir::Horizontal)),
+                        PaneBtn::Link => (SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …").into(), Action::LinkTicket(id)),
+                    };
+                    if style::icon_btn_small(ui, icon, &tip).clicked() {
+                        cx.actions.push(action);
                     }
-                    return;
-                }
-                if style::icon_btn_small(ui, SIcon::Close, lang.t("Sitzung schließen", "Close session")).clicked() {
-                    cx.actions.push(Action::RequestClose(id));
-                }
-                let tip = lang.t("Bereich minimieren – die Sitzung läuft weiter, ein Klick in der Seitenleiste holt sie zurück", "Minimize pane – the session keeps running, click it in the sidebar to bring it back");
-                let tip = if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) };
-                if style::icon_btn_small(ui, SIcon::Collapse, &tip).clicked() {
-                    cx.actions.push(Action::MinimizePane(id));
-                }
-                if let Some(plan) = reload {
-                    if style::icon_btn_small(ui, SIcon::Reload, plan.tip(lang)).clicked() {
-                        cx.actions.push(Action::RequestReload(id));
-                    }
-                }
-                if style::icon_btn_small(ui, SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window")).clicked() {
-                    cx.actions.push(Action::Detach(id));
-                }
-                if style::icon_btn_small(ui, SIcon::SplitDown, lang.t("Darunter teilen (Strg+Umschalt+E)", "Split below (Ctrl+Shift+E)")).clicked() {
-                    cx.actions.push(Action::Split(id, Dir::Vertical));
-                }
-                if style::icon_btn_small(ui, SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)")).clicked() {
-                    cx.actions.push(Action::Split(id, Dir::Horizontal));
-                }
-                if tl_btn && style::icon_btn_small(ui, SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
-                    cx.actions.push(Action::LinkTicket(id));
                 }
             });
         },
@@ -5586,4 +5724,78 @@ pub(super) enum ChatSendResult {
     Empty,
     /// Keine Chat-Sitzung mit dieser Id.
     NotAChat,
+}
+
+#[cfg(test)]
+mod shortcut_match_tests {
+    //! Feste und eigene Kürzel (#254): genaue Modifikatoren, physische Zifferntasten, Ziele; Knöpfe im Bereichskopf (#259).
+    use super::*;
+
+    fn key(k: Key, physical: Key, m: Modifiers) -> Event {
+        Event::Key { key: k, physical_key: Some(physical), pressed: true, repeat: false, modifiers: m }
+    }
+
+    /// Ein Bild mit `events`; `f` prüft/verbraucht. Liefert (Ergebnis, übrig gebliebene Tasten-Ereignisse).
+    fn run(events: Vec<Event>, f: impl Fn(&mut egui::InputState) -> bool) -> (bool, usize) {
+        let ctx = egui::Context::default();
+        let (mut hit, mut left) = (false, 0);
+        let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
+            hit = ctx.input_mut(|i| f(i));
+            left = ctx.input(|i| i.events.iter().filter(|e| matches!(e, Event::Key { .. })).count());
+        });
+        (hit, left)
+    }
+
+    const CTRL: Modifiers = Modifiers { ctrl: true, command: true, alt: false, shift: false, mac_cmd: false };
+
+    #[test]
+    fn extra_shift_or_altgr_is_another_shortcut() {
+        // Strg+1 = Reiter „Terminal Hub“
+        assert_eq!(run(vec![key(Key::Num1, Key::Num1, CTRL)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num1, true)), (true, 0));
+        // Strg+Umschalt+1 (Projekt 1) und Strg+AltGr+2 („²“ auf deutschen Tastaturen) lösen Strg+1/2 nicht aus
+        let cs = CTRL | Modifiers::SHIFT;
+        assert_eq!(run(vec![key(Key::Exclamationmark, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num1, true)), (false, 1));
+        let altgr = CTRL | Modifiers::ALT;
+        assert_eq!(run(vec![key(Key::Num2, Key::Num2, altgr)], |i| consume_key_exact(i, Modifiers::CTRL, Key::Num2, true)), (false, 1));
+        // … wohl aber Strg+Umschalt+1 das Projekt-Kürzel, auch wenn die Belegung „!“ oder „/“ liefert (physisch)
+        for logical in [Key::Exclamationmark, Key::Slash, Key::Num1] {
+            assert_eq!(run(vec![key(logical, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::Num1, true)), (true, 0), "{logical:?}");
+        }
+        // Eigene Kürzel logisch: Strg+Umschalt+T nicht durch Strg+Alt+Umschalt+T
+        assert_eq!(run(vec![key(Key::T, Key::T, cs | Modifiers::ALT)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::T, false)), (false, 1));
+        assert_eq!(run(vec![key(Key::T, Key::T, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::T, false)), (true, 0));
+        // Ohne `physical` zählt nur die logische Taste
+        assert_eq!(run(vec![key(Key::Exclamationmark, Key::Num1, cs)], |i| consume_key_exact(i, Modifiers::CTRL | Modifiers::SHIFT, Key::Num1, false)), (false, 1));
+    }
+
+    #[test]
+    fn focus_target_only_where_a_pane_lies() {
+        let mut rects = HashMap::new();
+        rects.insert(1, Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 300.0)));
+        rects.insert(2, Rect::from_min_size(Pos2::new(406.0, 0.0), Vec2::new(400.0, 300.0)));
+        rects.insert(3, Rect::from_min_size(Pos2::new(406.0, 306.0), Vec2::new(400.0, 300.0)));
+        assert_eq!(focus_target(&rects, 1, Nav::Right), Some(2));
+        assert_eq!(focus_target(&rects, 1, Nav::Left), None, "links liegt nichts: Taste bleibt beim Terminal");
+        assert_eq!(focus_target(&rects, 1, Nav::Up), None);
+        assert_eq!(focus_target(&rects, 2, Nav::Down), Some(3));
+        assert_eq!(focus_target(&rects, 3, Nav::Left), Some(1));
+        assert_eq!(focus_target(&HashMap::new(), 1, Nav::Right), None);
+    }
+
+    #[test]
+    fn narrow_pane_headers_keep_their_buttons_inside() {
+        let all = pane_buttons(false, true, true);
+        assert_eq!(all, vec![PaneBtn::Close, PaneBtn::Minimize, PaneBtn::Reload, PaneBtn::Detach, PaneBtn::SplitDown, PaneBtn::SplitRight, PaneBtn::Link]);
+        assert_eq!(pane_buttons(true, false, true), vec![PaneBtn::Close, PaneBtn::Minimize], "abgedockt");
+        for w in [MIN_PANE_W, 140.0, 174.0, 200.0, 260.0, 400.0, 1000.0] {
+            let n = pane_buttons_fit(w, all.len());
+            assert!(n >= 2, "Schließen und Minimieren immer ({w})");
+            // Knöpfe plus Luft und ein Stück Name passen in den Kopf: nichts ragt in den Nachbarn
+            if n > 2 {
+                assert!(PANE_BTN_W * n as f32 + 16.0 + 60.0 <= w + 0.01, "{n} Knöpfe in {w}");
+            }
+        }
+        assert_eq!(pane_buttons_fit(1000.0, all.len()), all.len(), "breit: alle");
+        assert_eq!(pane_buttons_fit(MIN_PANE_W, all.len()), 2);
+    }
 }
