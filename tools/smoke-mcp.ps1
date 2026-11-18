@@ -87,7 +87,8 @@ function Set-IsolationProfile {
   $f = "$data\settings.json"
   $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
   $p = [pscustomobject]@{ id = 1; name = 'Smoke-Isolation'; env = $ptyEnv }
-  if ($j.PSObject.Properties.Name -contains 'profiles') { $j.profiles = @($p) } else { $j | Add-Member profiles @($p) }
+  $all = @($p) + @($script:extraProfiles)
+  if ($j.PSObject.Properties.Name -contains 'profiles') { $j.profiles = $all } else { $j | Add-Member profiles $all }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), $u8)
   $sf = "$data\state.json"
   if (Test-Path $sf) {
@@ -100,6 +101,7 @@ function Set-IsolationProfile {
   }
 }
 $script:extra = @()
+$script:extraProfiles = @()
 $script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
 
@@ -653,13 +655,24 @@ $wait
     $j | Add-Member -Force claude_defaults $d
     $j | Add-Member -Force default_shell 'powershell'
     [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+    # Terminal-Vorlagen (#244): mit Isolationsprofil 1 (Schein-PATH); riskante Optionen, die ein Agent nie bekommt.
+    $tpl = @(
+      [pscustomobject]@{ name = 'smoke-tpl'; terminal = $true; grid = $false; items = @([pscustomobject]@{ name = 'API'; shell_id = 'powershell'; cwd = "$proj"; claude = $true; profile = 1; group = 'tplgrp'; prompt = ''; tags = @('smoke'); color = @(1, 2, 3); notes = 'tpl-note'; claude_opts = [pscustomobject]@{ model = 'haiku'; permission_mode = 'bypassPermissions'; flags = @('ide', 'safe-mode'); add_dirs = @("$proj"); allowed_tools = 'Read'; mcp_config = $mcpCfg } }) },
+      [pscustomobject]@{ name = 'smoke-plain'; terminal = $true; items = @([pscustomobject]@{ name = ''; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 1; group = 'tplplain' }) },
+      [pscustomobject]@{ name = 'smoke-admin'; terminal = $true; items = @([pscustomobject]@{ name = 'adm'; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 77 }) },
+      [pscustomobject]@{ name = 'smoke-group'; items = @([pscustomobject]@{ name = 'a'; shell_id = 'cmd'; profile = 1 }, [pscustomobject]@{ name = 'b'; shell_id = 'cmd'; profile = 1 }) }
+    )
+    [IO.File]::WriteAllText("$data\templates.json", (ConvertTo-Json -InputObject $tpl -Depth 10), (New-Object Text.UTF8Encoding $false))
   }
+  $script:extraProfiles = @([pscustomobject]@{ id = 77; name = 'Smoke-Admin'; env = $ptyEnv; admin = $true })
   Set-Level 'Control'
+  $script:extraProfiles = @()
   # Beim naechsten Neustart die Standards wieder entfernen (spaetere Abschnitte erwarten keine).
   $script:prestart = {
     $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
     $j.PSObject.Properties.Remove('claude_defaults'); $j.PSObject.Properties.Remove('default_shell')
     [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+    Remove-Item -LiteralPath "$data\templates.json" -ErrorAction SilentlyContinue
   }
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   # Nach dem Neustart erneut bestaetigen, dass claude im PowerShell-Terminal nur der Ersatz ist.
@@ -681,6 +694,31 @@ $wait
     Check 'Ersatz-claude (Agent): ohne --add-dir/--allowed-tools/--mcp-config/--safe-mode' ($line4 -and $line4 -notmatch '--add-dir|--mcp-config| --allowed-tools|--safe-mode') "calls.txt='$ct4'"
     [void](Tool 'close_session' @{ session = $ag.data.id })
   }
+  Write-Host "== Terminal-Vorlagen: create_session mit template (#244)" -ForegroundColor Cyan
+  $t1 = Tool 'create_session' @{ template = 'smoke-tpl' }
+  Check 'create_session mit template: Name, Ordner, Shell und Claude aus der Vorlage' (-not $t1.err -and $t1.data.name -eq 'API' -and $t1.data.group -eq 'tplgrp' -and $t1.data.template -eq 'smoke-tpl' -and $t1.data.claude -and $t1.data.shell -eq 'powershell') $t1.text
+  $tuo = @($t1.data.claude_user_options); $tfl = @($t1.data.claude_flags)
+  Check 'create_session mit template: Optionen der Vorlage, nie bypassPermissions/--safe-mode/riskante Wertoptionen' (-not $t1.err -and $t1.data.model -eq 'haiku' -and $t1.data.permission_mode -eq 'default' -and $tfl -contains 'ide' -and $tfl -notcontains 'safe-mode' -and -not ($tuo | Where-Object { $_ -in 'add_dir', 'allowed_tools', 'mcp_config' })) $t1.text
+  if ($script:lastOk) {
+    $re6 = 'args=.*--model haiku --permission-mode default .*--session-id [0-9a-f-]{36}'
+    $ct6 = Wait-FakeFile $calls $re6
+    $line6 = @(($ct6 -split "`r?`n") | Where-Object { $_ -match $re6 }) | Select-Object -Last 1
+    Check 'Ersatz-claude (Vorlage per Agent): ohne --add-dir/--allowed-tools/--mcp-config/--safe-mode/bypassPermissions' ($line6 -and $line6 -notmatch '--add-dir|--mcp-config| --allowed-tools|--safe-mode|bypass') "calls.txt='$ct6'"
+  }
+  $t2 = Tool 'create_session' @{ template = 'SMOKE-TPL'; claude = $false }
+  Check 'template: zweiter Start zaehlt hoch (API #2), Name ohne Gross-/Kleinschreibung, claude=false gewinnt' (-not $t2.err -and $t2.data.name -eq 'API #2' -and -not $t2.data.claude) $t2.text
+  $t3 = Tool 'create_session' @{ template = 'smoke-plain'; name = 'tpl-eigener-name'; group = 'tplg2' }
+  Check 'template: Parameter des Aufrufs gehen vor (name, group), Shell aus der Vorlage' (-not $t3.err -and $t3.data.name -eq 'tpl-eigener-name' -and $t3.data.group -eq 'tplg2' -and $t3.data.shell -eq 'cmd' -and -not $t3.data.claude) $t3.text
+  $t4 = Tool 'create_session' @{ template = 'smoke-plain' }
+  Check 'template ohne Sitzungsnamen: Name der Vorlage' (-not $t4.err -and $t4.data.name -eq 'smoke-plain' -and $t4.data.group -eq 'tplplain') $t4.text
+  $u = Tool 'create_session' @{ template = 'gibt-es-nicht' }
+  Check 'template: unbekannte Vorlage -> bad_args mit den Terminal-Vorlagen' ((Code $u) -eq 'bad_args' -and $u.text -match 'smoke-tpl' -and $u.text -notmatch 'smoke-group') $u.text
+  $g = Tool 'create_session' @{ template = 'smoke-group' }
+  Check 'template: Gruppen-Vorlage -> bad_args' ((Code $g) -eq 'bad_args' -and $g.text -match 'group template') $g.text
+  $ad = Tool 'create_session' @{ template = 'smoke-admin' }
+  Check 'template: Administrator-Profil der Vorlage -> admin_profile' ((Code $ad) -eq 'admin_profile') $ad.text
+  Check 'template mit kind=chat -> bad_args' ((Code (Tool 'create_session' @{ template = 'smoke-plain'; kind = 'chat' })) -eq 'bad_args')
+  foreach ($x in @($t1, $t2, $t3, $t4)) { if ($x.data.id) { [void](Tool 'close_session' @{ session = $x.data.id }) } }
   # Sitzung des Nutzers: Start von aussen (wie aus dem Explorer) per --open --claude -> alle Standards.
   $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
   # Der zweite Aufruf reicht nur per IPC an den laufenden Hub weiter und endet sofort (sonst nach 15 s beenden).

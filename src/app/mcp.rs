@@ -1266,13 +1266,20 @@ impl App {
             Some("chat") => true,
             Some(k) => return Err(er("bad_args", if de() { format!("kind: „terminal“ oder „chat“, nicht „{k}“") } else { format!("kind: “terminal” or “chat”, not “{k}”") })),
         };
+        // Terminal-Vorlage (#244): ihre Einstellungen, soweit der Aufruf sie nicht selbst angibt.
+        let tpl = match s("template") {
+            Some(_) if chat => return Err(er("bad_args", tr("template gibt es nur für Terminals (nicht mit kind = „chat“).", "template only applies to terminals (not with kind = “chat”)."))),
+            Some(n) => Some(self.mcp_template(&n)?),
+            None => None,
+        };
+        let item = tpl.as_ref().map(|(_, it)| it);
         if chat {
             return self.mcp_create_chat(ctx, args, caller).map(Ok);
         }
         if s("server").is_some() {
             return Err(er("bad_args", tr("server gibt es nur mit kind = „chat“.", "server only applies with kind = “chat”.")));
         }
-        let claude = args.get("claude").and_then(|v| v.as_bool()).unwrap_or(false);
+        let claude = args.get("claude").and_then(|v| v.as_bool()).unwrap_or(item.is_some_and(|it| it.claude));
         if !claude && has_claude_opts(args) {
             return Err(er(
                 "bad_args",
@@ -1288,7 +1295,12 @@ impl App {
         let asked = ClaudeOpts::from_mcp(args).map_err(bad)?;
         // `no-chrome` als Standard des Nutzers gewinnt: `chrome` eines Agenten wird abgelehnt.
         asked.agent_conflict(&self.settings.claude_defaults).map_err(bad)?;
-        let copts = asked.for_agent(&self.settings.claude_defaults);
+        // Aus einer Vorlage: deren Optionen hinter denen des Agenten, mit denselben Regeln (nie bypassPermissions, nie
+        // zusätzliche Ordner, erlaubte Werkzeuge, MCP-Konfiguration oder --safe-mode).
+        let copts = match item {
+            Some(it) => it.agent_opts(&asked, &self.settings.claude_defaults),
+            None => asked.for_agent(&self.settings.claude_defaults),
+        };
         if claude && !self.settings.claude_mode {
             return Err(er("claude_mode_off", tr("Der Claude-Modus ist in den Einstellungen ausgeschaltet.", "Claude mode is switched off in the settings.")));
         }
@@ -1301,19 +1313,28 @@ impl App {
                 }
                 Some(id)
             }
-            None => None,
+            // Shell der Vorlage, wenn es sie hier gibt (sonst entscheidet das Profil bzw. die Standard-Shell).
+            None => item.map(|it| it.shell_id.clone()).filter(|id| self.shells.iter().any(|x| &x.id == id)),
         };
         // Läuft der Agent in einer Hub-Sitzung, kommt das Kind in deren Fenster und Projekt (#110), sonst ins Hauptfenster.
         let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
-        let default_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        // Profil der Vorlage (0 = keins) statt des Standardprofils des Projekts.
+        let tpl_profile = item.map(|it| it.profile);
+        let default_profile = tpl_profile.unwrap_or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0));
         // Startet die Sitzung (nach Auflösung des Standardprofils mit eigenem Programm) in WSL, darf `cwd` ein
         // Linux-Pfad sein (#172); sonst nie.
-        let eff_shell = self.effective_shell_id(shell.as_deref(), project);
+        let eff_shell = match tpl_profile {
+            Some(pid) => match self.profile(pid) {
+                Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+                _ => shell.clone().unwrap_or_else(|| self.shell_for_profile(pid)),
+            },
+            None => self.effective_shell_id(shell.as_deref(), project),
+        };
         let wsl = match super::folder_picker::Target::for_shell(self.shell_by_id(&eff_shell).as_ref(), false) {
             super::folder_picker::Target::Wsl { distro, .. } => Some(distro),
             super::folder_picker::Target::Windows => None,
         };
-        let cwd = match s("cwd") {
+        let cwd = match s("cwd").or_else(|| item.map(|it| it.cwd.trim().to_string()).filter(|c| !c.is_empty())) {
             Some(c) => Some(check_create_cwd(&c, wsl.as_ref().map(|d| d.as_deref()), de(), |p| std::path::Path::new(p).is_dir())?),
             None => None,
         };
@@ -1332,18 +1353,33 @@ impl App {
         };
         // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
         if self.profile(default_profile).is_some_and(|p| p.admin) {
-            return Err(er("admin_profile", tr("Das Standardprofil dieses Projekts startet als Administrator – über MCP nicht erlaubt.", "This project's default profile starts as administrator – not allowed via MCP.")));
+            return Err(er(
+                "admin_profile",
+                if item.is_some() {
+                    tr("Das Profil dieser Vorlage startet als Administrator – über MCP nicht erlaubt.", "This template's profile starts as administrator – not allowed via MCP.")
+                } else {
+                    tr("Das Standardprofil dieses Projekts startet als Administrator – über MCP nicht erlaubt.", "This project's default profile starts as administrator – not allowed via MCP.")
+                },
+            ));
         }
-        let prompt = if claude { s("prompt") } else { None };
+        let prompt = if claude { s("prompt").or_else(|| item.map(|it| it.prompt.trim().to_string()).filter(|p| !p.is_empty())) } else { None };
+        // Wiederholte Starts einer Vorlage zählen hoch: API, API #2 …
+        let name = s("name").or_else(|| tpl.as_ref().map(|(t, _)| crate::templates::numbered_name(&t.session_name(), &self.session_names())));
         let before: HashSet<u64> = self.entries.keys().copied().collect();
         // Ohne `group`: Läuft der Agent in einer Hub-Sitzung, kommen seine neuen Sitzungen in einen Unterordner mit deren Namen
-        // (Baumansicht) – so stehen Kinder unter dem Elternteil und sind leicht zu finden.
-        let group = self.mcp_child_group(s("group"), caller);
-        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, claude_opts: Some(copts), prompt, group, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
+        // (Baumansicht) – so stehen Kinder unter dem Elternteil und sind leicht zu finden. Eine Vorlage bringt ihren Ordner mit.
+        let group = self.mcp_child_group(s("group").or_else(|| item.map(|it| it.group.clone()).filter(|g| !g.is_empty())), caller);
+        // „Letzte Konversation im Ordner fortsetzen“ einer Vorlage gilt für Agenten nie (fremde Konversation); „bei jedem Start
+        // neu“ schon.
+        let claude_continue = item.and_then(|it| it.claude_continue);
+        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name, claude, claude_opts: Some(copts), prompt, group, claude_continue, profile: tpl_profile, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
         if let Some(err) = self.entries.get(&id).and_then(|e| e.error.clone()) {
             self.close_session(id);
             return Err(er("spawn_failed", err));
+        }
+        if let Some(it) = item {
+            self.apply_tpl_extras(id, it);
         }
         self.mcp.created.insert(id, self.creator_of(caller));
         self.mcp_taint_create(caller, id);
@@ -1354,7 +1390,31 @@ impl App {
         if let Some(c) = cwd_checked {
             v["cwd_checked"] = json!(c);
         }
+        if let Some((t, _)) = &tpl {
+            v["template"] = json!(t.name);
+        }
         Ok(Ok(v))
+    }
+
+    /// Terminal-Vorlage für `create_session` per Name (#244). Gruppen-Vorlagen und unbekannte Namen: `bad_args` mit den
+    /// verfügbaren Terminal-Vorlagen.
+    fn mcp_template(&self, name: &str) -> Result<(crate::templates::Template, crate::templates::TplItem), (String, String)> {
+        let names: Vec<String> = self.templates.iter().filter(|t| t.is_terminal()).map(|t| t.name.clone()).take(40).collect();
+        let list = if names.is_empty() { tr("(keine)", "(none)").to_string() } else { names.join(", ") };
+        match crate::templates::find(&self.templates, name) {
+            Some((_, t)) => match t.item() {
+                Some(it) => Ok((t.clone(), it.clone())),
+                None => Err(er(
+                    "bad_args",
+                    if de() {
+                        format!("„{}“ ist eine Gruppen-Vorlage; über MCP lassen sich nur Terminal-Vorlagen starten: {list}", t.name)
+                    } else {
+                        format!("“{}” is a group template; only terminal templates can be started via MCP: {list}", t.name)
+                    },
+                )),
+            },
+            None => Err(er("bad_args", if de() { format!("Unbekannte Vorlage „{name}“. Terminal-Vorlagen: {list}") } else { format!("Unknown template “{name}”. Terminal templates: {list}") })),
+        }
     }
 
     /// Gruppe einer neuen Sitzung: `group` oder – läuft der Agent in einer Hub-Sitzung – ein Unterordner mit deren Namen

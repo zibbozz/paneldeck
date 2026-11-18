@@ -176,7 +176,9 @@ pub fn starts_agent(tool: &str, args: &Value) -> Option<&'static str> {
         "create_session" => {
             let claude = args.get("claude").and_then(|v| v.as_bool()) == Some(true);
             let prompt = args.get("prompt").and_then(|v| v.as_str()).is_some_and(|p| !p.trim().is_empty());
-            (claude || prompt).then_some(SPAWN_CLAUDE_MESSAGE)
+            // Eine Terminal-Vorlage (#244) kann Claude starten, solange der Aufruf es nicht ausdrücklich abschaltet.
+            let template = args.get("template").and_then(|v| v.as_str()).is_some_and(|t| !t.trim().is_empty()) && args.get("claude").and_then(|v| v.as_bool()) != Some(false);
+            (claude || prompt || template).then_some(SPAWN_CLAUDE_MESSAGE)
         }
         "run_command" | "send_text" | "send_keys" => {
             let text = match tool {
@@ -601,6 +603,8 @@ mod tests {
         for (tool, args, msg) in [
             ("create_session", json!({"claude": true}), SPAWN_CLAUDE_MESSAGE),
             ("create_session", json!({"prompt": "do things"}), SPAWN_CLAUDE_MESSAGE),
+            // Eine Terminal-Vorlage kann Claude starten (#244).
+            ("create_session", json!({"template": "API"}), SPAWN_CLAUDE_MESSAGE),
             ("run_command", json!({"session": 9, "command": "paneldeck mcp"}), SPAWN_BRIDGE_MESSAGE),
             ("run_command", json!({"session": 9, "command": r"& 'C:\Tools\PanelDeck.exe' MCP < req.json"}), SPAWN_BRIDGE_MESSAGE),
             ("send_text", json!({"session": 9, "text": "echo x | paneldeck.exe mcp"}), SPAWN_BRIDGE_MESSAGE),
@@ -615,6 +619,8 @@ mod tests {
         for (tool, args) in [
             ("create_session", json!({"shell": "powershell"})),
             ("create_session", json!({"claude": false, "prompt": "  "})),
+            ("create_session", json!({"template": "API", "claude": false})),
+            ("create_session", json!({"template": " "})),
             ("run_command", json!({"session": 9, "command": "cargo build"})),
             ("run_command", json!({"session": 9, "command": "mcp-server paneldeck"})),
             ("send_text", json!({"session": 9, "text": "dir"})),
