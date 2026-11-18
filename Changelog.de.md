@@ -17,6 +17,12 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Changed
 
 - Das Einstellungsfenster lässt sich wie ein normales Fenster verschieben; es öffnet mittig und bleibt im Fenster (#275)
+- Ordner in der Terminal-Seitenleiste löschen: Der Papierkorb an einem Ordner schließt jetzt alle seine Sitzungen (dieselbe Rückfrage mit Liste, auch Unterordner, minimierte Sitzungen und Chats) und löscht danach den Ordner samt Unterordnern; ein leerer Ordner wird sofort gelöscht. „Ordner löschen (Inhalt bleibt)“ im Kontextmenü sowie das Löschen eines Projekts oder einer Vorlage fragen jetzt in einem Dialog mit 3-Sekunden-Wartezeit statt per „zweimal klicken“. Der neue Menüpunkt „Ordner mit seinen Sitzungen löschen …“ macht dasselbe wie der Papierkorb (#276)
+
+### Fixed
+
+- Wird ein Ordner gelöscht und sein Inhalt behalten, gehen seine Vorgaben für neue Sitzungen (Arbeitsordner, Profil) an seine direkten Unterordner; beim Löschen mit Sitzungen bleibt nichts von ihm zurück (#276)
+- Der Dateibaum (Strg+Umschalt+O) nimmt immer den Arbeitsordner der Sitzung als Wurzel, statt der Shell (oder Claude) in Unterordner zu folgen; der aktuelle Ordner der Shell wird im Baum aufgeklappt und markiert, auch bei WSL-Sitzungen; Netzwerk- und WSL-Ordner werden im Hintergrund gelesen (#277)
 
 ## [2.3.2] - 2026-11-18
 
