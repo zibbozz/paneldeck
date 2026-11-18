@@ -96,7 +96,7 @@ A WSL session can start in a folder **inside WSL**:
 - **Search** in the scrollback (**Ctrl+Shift+F**) and across all sessions (**Ctrl+Shift+G**); jump between commands (**Ctrl+Shift+Up/Down**, needs shell integration).
 - **Prompt library**, **prompt composer** (**Ctrl+Shift+M**) and a **queue** per session (**Ctrl+Shift+Q**).
 - **Broadcast** (**Ctrl+Shift+B**): type into all visible panes at once.
-- **File tree** (**Ctrl+Shift+O**), **changes** with diff, stage and commit (**Ctrl+Shift+H**), git info in the header.
+- **File tree** (**Ctrl+Shift+O**), **changes** with diff, stage and commit (**Ctrl+Shift+H**), git info in the header. Reading changes never runs commands from a repository's own Git configuration (external diff, textconv, filters – except the standard Git LFS filter) and does not look into submodule working trees; a changed submodule commit still shows.
 - Drag & drop of files, images from the clipboard (stored in the data folder for 14 days), clickable links (Ctrl+click, see [Links, clipboard and paste](#links-clipboard-and-paste)).
 - Tray icon, transparency, themes (JSON, see [Data folder](data-and-backups.md)), smooth animations.
 

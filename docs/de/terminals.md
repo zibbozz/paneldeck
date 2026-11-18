@@ -96,7 +96,7 @@ Eine WSL-Sitzung kann in einem Ordner **innerhalb von WSL** starten:
 - **Suche** im Verlauf (**Strg+Umschalt+F**) und über alle Sitzungen (**Strg+Umschalt+G**); zwischen Befehlen springen (**Strg+Umschalt+Pfeil hoch/runter**, braucht Shell-Integration).
 - **Prompt-Bibliothek**, **Prompt-Composer** (**Strg+Umschalt+M**) und eine **Warteschlange** je Sitzung (**Strg+Umschalt+Q**).
 - **Broadcast** (**Strg+Umschalt+B**): in alle sichtbaren Bereiche gleichzeitig tippen.
-- **Dateibaum** (**Strg+Umschalt+O**), **Änderungen** mit Diff, Stage und Commit (**Strg+Umschalt+H**), Git-Info im Kopf.
+- **Dateibaum** (**Strg+Umschalt+O**), **Änderungen** mit Diff, Stage und Commit (**Strg+Umschalt+H**), Git-Info im Kopf. Das Lesen der Änderungen führt nie Befehle aus der Git-Konfiguration eines Repositorys aus (externes Diff, textconv, Filter – außer dem Standard-Filter von Git LFS) und schaut nicht in die Arbeitsordner von Untermodulen; ein geänderter Untermodul-Commit erscheint weiterhin.
 - Drag & Drop von Dateien, Bilder aus der Zwischenablage (14 Tage im Datenordner), klickbare Links (Strg+Klick, siehe [Links, Zwischenablage und Einfügen](#links-zwischenablage-und-einfügen)).
 - Tray-Symbol, Transparenz, Themes (JSON, siehe [Datenordner](data-and-backups.md)), weiche Animationen.
 
