@@ -848,6 +848,41 @@ fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
     }
 }
 
+/// Zeichen der aktuellen Tastaturbelegung für die Taste mit Scancode `sc` bei gedrücktem Strg+Alt (= AltGr-Ebene) und
+/// ggf. Umschalt (#249). `ToUnicodeEx` mit Flag 4 lässt den Zustand der Tottasten unberührt. Nur druckbare Zeichen;
+/// eine Tottaste oder eine Belegung ohne AltGr-Ebene ergibt `None`.
+#[cfg(windows)]
+fn layout_char(sc: u16, shift: bool) -> Option<String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, GetKeyboardLayout, MapVirtualKeyExW, ToUnicodeEx, MAPVK_VSC_TO_VK_EX};
+    // SAFETY: reine Abfragen; `state` und `buf` leben während der Aufrufe, die Längen stimmen.
+    unsafe {
+        let hkl = GetKeyboardLayout(0);
+        let vk = MapVirtualKeyExW(sc as u32, MAPVK_VSC_TO_VK_EX, hkl);
+        if vk == 0 {
+            return None;
+        }
+        let mut state = [0u8; 256];
+        state[0x11] = 0x80; // VK_CONTROL
+        state[0x12] = 0x80; // VK_MENU
+        if shift {
+            state[0x10] = 0x80; // VK_SHIFT
+        }
+        state[0x14] = (GetKeyState(0x14) & 1) as u8; // VK_CAPITAL (eingerastet)
+        let mut buf = [0u16; 8];
+        let n = ToUnicodeEx(vk, sc as u32, state.as_ptr(), buf.as_mut_ptr(), buf.len() as i32, 4, hkl);
+        if n <= 0 {
+            return None;
+        }
+        let s = String::from_utf16(&buf[..n as usize]).ok()?;
+        (!s.is_empty() && s.chars().all(|c| !c.is_control())).then_some(s)
+    }
+}
+
+#[cfg(not(windows))]
+fn layout_char(_sc: u16, _shift: bool) -> Option<String> {
+    None
+}
+
 /// Windows: ist die Taste (virtueller Tastencode) gerade gedrückt?
 #[cfg(windows)]
 fn vk_down(vk: u16) -> bool {
@@ -1066,6 +1101,16 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
                 let out = key_input(session, kp);
                 if out.eat_text && text.is_some() {
                     skip = Some(i + 1);
+                }
+                // Linkes Strg+Alt statt AltGr (#249): das Zeichen der Belegung als Text senden, wie es AltGr täte.
+                if let Some(t) = vtkeys::ctrl_alt_text_scan(&kp, !out.bytes.is_empty()).and_then(|sc| layout_char(sc, modifiers.shift)) {
+                    let tee = vtkeys::TeeInput::Text { text: t.clone(), mods: modifiers, numpad: false };
+                    let bytes = vtkeys::encode_text(&t, modifiers, false, mode);
+                    if bytes.is_empty() {
+                        session.write_input(&[], tee);
+                    } else {
+                        send_input(session, &bytes, tee);
+                    }
                 }
                 if !out.bytes.is_empty() && phase != vtkeys::Phase::Release {
                     let mut down = KEYS_DOWN.lock().unwrap_or_else(|e| e.into_inner());
