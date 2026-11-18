@@ -1,4 +1,5 @@
-//! Konsolen-Host der Terminals (ConPTY) und sichere DLL-Suche (#183).
+//! Konsolen-Host der Terminals (ConPTY) und sichere DLL-Suche (#183). Other platforms: `portable_pty::native_pty_system`
+//! (openpty), no bundled host, no DLL search to harden.
 //!
 //! - `harden_dll_search` steht ganz am Anfang von `main`: DLLs, die per Name geladen werden, kommen danach nur noch aus
 //!   dem Programmordner und `System32` – nie aus dem Arbeitsordner (z. B. „In Paneldeck öffnen“ auf einem fremden Ordner).
@@ -7,6 +8,9 @@
 //!   synchronisierte Ausgabe (Modus 2026) in der richtigen Reihenfolge durch. Die Einstellung `bundled_conpty` (Standard
 //!   an) wählt sie für neue Sitzungen; fehlt eine der Dateien oder schlägt sie fehl, läuft die Sitzung auf der ConPTY von
 //!   Windows (kernel32). Die Auswahl je Sitzung macht der kleine Patch in `vendor/portable-pty` möglich.
+
+// Die mitgelieferte ConPTY gibt es nur unter Windows; anderswo bleiben Dateinamen, Suche und Zwischenspeicher ungenutzt.
+#![cfg_attr(not(windows), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

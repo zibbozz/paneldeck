@@ -1,45 +1,165 @@
-//! Windows-Fensterfunktionen: Fenster im Tray verstecken (minimiert, ohne Taskleistenbutton).
+//! Processes: the peer of a local TCP connection, the process tree, process names and windows, Job Objects of the
+//! sessions (#168), and how child processes are started (hidden window, raw arguments, elevated rights, `claude`).
 //!
-//! Das Fenster bleibt dabei "minimiert sichtbar", damit die Ereignisschleife (Hooks, Benachrichtigungen)
-//! weiterläuft; nur der Taskleisten-/Alt+Tab-Eintrag verschwindet (WS_EX_TOOLWINDOW).
+//! Windows: TCP table, ToolHelp snapshot, Job Objects. Other platforms: stubs – no peer process, no process tree, no Job
+//! Objects (see the blocker in the `platform` module docs); "is this PID alive" uses `kill(pid, 0)` on Unix. Real
+//! implementations follow in #149/#150.
 
-#[cfg(windows)]
-pub fn hwnd_from(cc: &eframe::CreationContext<'_>) -> Option<isize> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    match cc.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
-        _ => None,
+use std::process::Command;
+
+/// The raw command line of this process, unsplit (`cli::split_command_line` splits it, so that `"C:\"` and paths with
+/// spaces after a drive root arrive correctly). `None` where the system only hands over split arguments.
+pub fn raw_command_line() -> Option<String> {
+    #[cfg(windows)]
+    {
+        // SAFETY: GetCommandLineW liefert einen nullterminierten Zeiger, der für die Prozesslaufzeit gültig ist.
+        let p = unsafe { windows_sys::Win32::System::Environment::GetCommandLineW() };
+        if p.is_null() {
+            return None;
+        }
+        let mut n = 0usize;
+        while unsafe { *p.add(n) } != 0 {
+            n += 1;
+        }
+        Some(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, n) }))
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
-#[cfg(not(windows))]
-pub fn hwnd_from(_cc: &eframe::CreationContext<'_>) -> Option<isize> {
-    None
+/// Start the child without a console window of its own (Windows: `CREATE_NO_WINDOW`). No effect elsewhere.
+pub fn hide_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000)
+    }
+    #[cfg(not(windows))]
+    {
+        cmd
+    }
 }
 
-/// `hidden = true`: minimieren und aus Taskleiste/Alt+Tab ausblenden; `false`: wiederherstellen.
-#[cfg(windows)]
-pub fn set_tray_hidden(hwnd: isize, hidden: bool) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-    let h = hwnd as *mut core::ffi::c_void;
-    // SAFETY: reine Win32-Aufrufe auf ein Fenster-Handle; ein ungültiges Handle lässt sie fehlschlagen,
-    // es werden keine Zeiger auf Rust-Speicher übergeben.
-    unsafe {
-        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        ShowWindow(h, SW_HIDE);
-        if hidden {
-            SetWindowLongPtrW(h, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize));
-            ShowWindow(h, SW_SHOWMINNOACTIVE);
-        } else {
-            SetWindowLongPtrW(h, GWL_EXSTYLE, (ex & !(WS_EX_TOOLWINDOW as isize)) | WS_EX_APPWINDOW as isize);
-            ShowWindow(h, SW_RESTORE);
-            SetForegroundWindow(h);
+/// Append an argument verbatim, without the quoting of the standard library (Windows: `raw_arg`, e.g. NSIS `/D=` must
+/// be the last argument and unquoted). Elsewhere arguments are passed separately anyway: a normal `arg`.
+pub fn raw_arg(cmd: &mut Command, arg: String) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.raw_arg(arg)
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.arg(arg)
+    }
+}
+
+/// Läuft der (fremde) Prozess `pid` noch? Im Zweifel (z. B. kein Zugriff) ja.
+pub fn is_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        const STILL_ACTIVE: u32 = 259;
+        // SAFETY: OpenProcess nur mit Abfragerecht; das Handle wird geschlossen. GetLastError liest nur den Fehlerwert.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                // ERROR_INVALID_PARAMETER = keine solche PID (mehr)
+                return GetLastError() != ERROR_INVALID_PARAMETER;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code) != 0;
+            CloseHandle(h);
+            !ok || code == STILL_ACTIVE
         }
     }
+    #[cfg(unix)]
+    {
+        // PID 0 wäre bei kill() die eigene Prozessgruppe, negative Werte ganze Gruppen: nie „lebt“.
+        let Ok(p) = libc::pid_t::try_from(pid) else { return false };
+        if p <= 0 {
+            return false;
+        }
+        // SAFETY: Signal 0 wird nicht zugestellt; kill prüft nur, ob es den Prozess gibt und ob wir ihn erreichen dürften.
+        if unsafe { libc::kill(p, 0) } == 0 {
+            return true;
+        }
+        // EPERM: Prozess existiert, gehört aber jemand anderem.
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
-#[cfg(not(windows))]
-pub fn set_tray_hidden(_hwnd: isize, _hidden: bool) {}
+/// Warten, bis der Prozess `pid` beendet ist, höchstens `timeout_ms`. Ohne Umsetzung: sofort zurück.
+pub fn wait_for_exit(pid: u32, timeout_ms: u32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+        // SAFETY: OpenProcess mit reinem Warte-Recht; das Handle wird geschlossen.
+        unsafe {
+            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if !h.is_null() {
+                WaitForSingleObject(h, timeout_ms);
+                CloseHandle(h);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (pid, timeout_ms);
+}
+
+/// Can this platform start a program with elevated rights in a window of its own (`spawn_elevated`)? Windows only;
+/// #149 decided that Linux/macOS get no admin/sudo shell.
+pub const ELEVATED: bool = cfg!(windows);
+
+/// Run a PowerShell script (`Start-Process … -Verb RunAs`, built by the caller) hidden, which raises the UAC prompt.
+/// `false` if PowerShell could not be started or there is no implementation (`ELEVATED`).
+pub fn spawn_elevated(script: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = script;
+        false
+    }
+}
+
+/// `claude <args>` als Prozess vorbereiten. Unter Windows über `cmd.exe /d /v:off /c` (kein AutoRun, keine verzögerte
+/// Erweiterung; `claude` kann eine .cmd sein) mit selbst quotierter Zeile (`launch::claude_cmd_line`); sonst direkt.
+pub fn claude_command(args: &[String], cwd: &std::path::Path) -> Result<Command, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let line = crate::launch::claude_cmd_line(args)?;
+        let mut c = Command::new("cmd.exe");
+        c.raw_arg(line).current_dir(cwd).creation_flags(0x0800_0000);
+        Ok(c)
+    }
+    #[cfg(not(windows))]
+    {
+        for a in args {
+            crate::launch::check_arg(a)?;
+        }
+        let mut c = Command::new("claude");
+        c.args(args).current_dir(cwd);
+        Ok(c)
+    }
+}
 
 /// Prozess am anderen Ende einer angenommenen IPv4-Verbindung (#152): `peer` = Adresse des Clients (`peer_addr`),
 /// `local` = Adresse des Hubs (`local_addr`). Gesucht wird in der TCP-Tabelle des Systems (`GetExtendedTcpTable`,
@@ -103,6 +223,7 @@ pub fn tcp_peer_pid(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> 
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)] // noch ohne Aufrufer: `resolve_peer` hat hier keine Umsetzung (#149/#150)
 pub fn tcp_peer_pid(_peer: std::net::SocketAddr, _local: std::net::SocketAddr) -> Option<u32> {
     None
 }
@@ -145,6 +266,7 @@ pub fn resolve_peer(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> 
     }
 }
 
+/// Ohne Umsetzung (#149/#150): Absender unbekannt (leere Kette), nichts wird abgewiesen – siehe Blocker in `platform`.
 #[cfg(not(windows))]
 pub fn resolve_peer(_peer: std::net::SocketAddr, _local: std::net::SocketAddr) -> Option<PeerChain> {
     Some(PeerChain::default())
@@ -769,76 +891,9 @@ fn sweep(job: windows_sys::Win32::Foundation::HANDLE, root: u32, root_born: u64)
 
 /// Ein Abriss des Baums zählt als „verwaist“, wenn der letzte geprüfte Prozess nach dem Hub entstand. Ältere Abrisse
 /// sind normal (z. B. der Explorer, dessen Elternprozess `userinit` längst beendet ist).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn orphaned(last_born: u64, hub_born: u64) -> bool {
     last_born >= hub_born
-}
-
-/// Eigenes Fenster (dieses Prozesses) mit genau diesem Titel suchen – für weitere Fenster, deren Handle egui nicht herausgibt
-/// (runde Ecken über DWM). Der Titel ist beim Anlegen eindeutig (`Paneldeck #<n>`).
-#[cfg(windows)]
-pub fn find_own_window(title: &str) -> Option<isize> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: `wide` ist nullterminiert und lebt über den Aufruf; `pid` ist ein lokaler Ausgabewert.
-    unsafe {
-        let h = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if h.is_null() {
-            return None;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(h, &mut pid);
-        (pid == std::process::id()).then_some(h as isize)
-    }
-}
-
-#[cfg(not(windows))]
-pub fn find_own_window(_title: &str) -> Option<isize> {
-    None
-}
-
-/// Liegt der Punkt (Bildschirmkoordinaten in physischen Pixeln) auf einem angeschlossenen Monitor? Für gespeicherte
-/// Fensterlagen: nach einem Wechsel der Monitore soll kein Fenster unsichtbar außerhalb landen.
-#[cfg(windows)]
-pub fn point_on_screen(x: f32, y: f32) -> bool {
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
-    // Etwas Abstand nach innen: die Titelleiste soll greifbar bleiben.
-    let pt = POINT { x: x as i32 + 40, y: y as i32 + 10 };
-    // SAFETY: reine Abfrage mit einem Wert-Argument.
-    !unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONULL) }.is_null()
-}
-
-#[cfg(not(windows))]
-pub fn point_on_screen(_x: f32, _y: f32) -> bool {
-    true
-}
-
-/// Arbeitsfläche (ohne Taskleiste) des Monitors am Punkt oder des nächstgelegenen, in physischen Pixeln:
-/// `[links, oben, rechts, unten]`.
-#[cfg(windows)]
-pub fn work_area(x: f32, y: f32) -> Option<[f32; 4]> {
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-    // SAFETY: `mi` ist ein lokal genulltes MONITORINFO mit gesetztem `cbSize`; der Monitor-Griff stammt direkt aus
-    // MonitorFromPoint (mit MONITOR_DEFAULTTONEAREST nie null) und wird nur gelesen.
-    unsafe {
-        let m = MonitorFromPoint(POINT { x: x as i32, y: y as i32 }, MONITOR_DEFAULTTONEAREST);
-        if m.is_null() {
-            return None;
-        }
-        let mut mi: MONITORINFO = std::mem::zeroed();
-        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(m, &mut mi) == 0 {
-            return None;
-        }
-        let r = mi.rcWork;
-        Some([r.left as f32, r.top as f32, r.right as f32, r.bottom as f32])
-    }
-}
-
-#[cfg(not(windows))]
-pub fn work_area(_x: f32, _y: f32) -> Option<[f32; 4]> {
-    None
 }
 
 #[cfg(all(test, windows))]
@@ -984,7 +1039,7 @@ mod peer_tests {
         use std::os::windows::io::AsRawHandle;
         let exe = std::env::current_exe().unwrap();
         let mut helper = std::process::Command::new(exe)
-            .args(["--exact", "winctl::peer_tests::job_helper_process", "--nocapture", "--test-threads=1"])
+            .args(["--exact", "platform::process::peer_tests::job_helper_process", "--nocapture", "--test-threads=1"])
             .env("PANELDECK_JOB_HELPER", "1")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1135,7 +1190,7 @@ mod peer_tests {
         // Konsole der Shell aus einem Prozess ohne eigene Konsole bestimmen (der Testprozess hat eine)
         let exe = std::env::current_exe().unwrap();
         let out = std::process::Command::new(exe)
-            .args(["--exact", "winctl::peer_tests::job_console_helper", "--nocapture", "--test-threads=1"])
+            .args(["--exact", "platform::process::peer_tests::job_console_helper", "--nocapture", "--test-threads=1"])
             .env("PANELDECK_CONSOLE_OF", shell.id().to_string())
             .creation_flags(DETACHED_PROCESS)
             .stderr(std::process::Stdio::null())
@@ -1193,7 +1248,7 @@ mod peer_tests {
         assert!([shell.id(), fg, mcp].iter().all(|p| pids.contains(p)), "alle im Job: {pids:?}");
         // Konsole der Shell aus einem Prozess ohne eigene Konsole bestimmen
         let out = std::process::Command::new(&exe)
-            .args(["--exact", "winctl::peer_tests::job_console_helper", "--nocapture", "--test-threads=1"])
+            .args(["--exact", "platform::process::peer_tests::job_console_helper", "--nocapture", "--test-threads=1"])
             .env("PANELDECK_CONSOLE_OF", shell.id().to_string())
             .creation_flags(DETACHED_PROCESS)
             .stderr(std::process::Stdio::null())

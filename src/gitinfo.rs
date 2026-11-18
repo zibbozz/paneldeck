@@ -50,11 +50,7 @@ fn changed_files(repo: &Path) -> usize {
         .args(crate::gitops::read_only_overrides(repo))
         .args(["--no-optional-locks", "status", "--porcelain", crate::gitops::IGNORE_SUBMODULES])
         .current_dir(repo);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::platform::process::hide_window(&mut cmd);
     cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).lines().count()).unwrap_or(0)
 }
 

@@ -17,7 +17,7 @@
 
 use super::planning_ui::{countdown_secs, danger_button};
 use super::*;
-use crate::winctl::JobProc;
+use crate::platform::process::JobProc;
 
 /// Welche Sitzungen „alle schließen“ beendet.
 #[derive(Clone, Debug, PartialEq)]
@@ -83,7 +83,7 @@ pub(super) struct Lingering {
 /// Aufrufer mit ihrer Kette, `mcp::attribute`, `taint::set_retired`) und prüft nach [`RECHECK`] einmal, ob dort noch
 /// etwas läuft, das die Rückfrage nicht genannt hat (Hilfsprozesse eines Vordergrundprogramms, die es überleben).
 pub(super) struct Retired {
-    pub(super) job: crate::winctl::SessionJob,
+    pub(super) job: crate::platform::process::SessionJob,
     pub(super) session: u64,
     name: String,
     since: Instant,
@@ -419,7 +419,7 @@ impl App {
     /// Hintergrundprozesse dieser Sitzungen, die ihr Schließen überleben würden (#168). Nur Sitzungen mit solchen.
     pub(super) fn lingering_of(&self, ids: &[u64]) -> Vec<Lingering> {
         // Prozessnamen und Fenster einmal je Aufruf (nicht je Sitzung), und nur, wenn eine Sitzung mehr als die Shell hat.
-        let info = crate::winctl::ProcInfo::default();
+        let info = crate::platform::process::ProcInfo::default();
         ids.iter()
             .filter_map(|id| {
                 let e = self.entries.get(id)?;
@@ -438,7 +438,7 @@ impl App {
     /// Die Sitzung `id` endet (Schließen) oder startet neu: Ihren Job behalten, wenn noch Prozesse darin laufen
     /// ([`Retired`]). Vorher festhalten, was die Rückfrage genannt hätte (die Konsole lebt da noch).
     pub(super) fn retire_job(&mut self, id: u64, name: String, s: &mut crate::terminal::Session) {
-        let shown: Vec<u32> = s.lingering(&crate::winctl::ProcInfo::default()).into_iter().map(|p| p.pid).collect();
+        let shown: Vec<u32> = s.lingering(&crate::platform::process::ProcInfo::default()).into_iter().map(|p| p.pid).collect();
         let Some(job) = s.take_job() else { return };
         if job.pids().is_some_and(|p| p.is_empty()) {
             return;
@@ -470,9 +470,9 @@ impl App {
         let mut out = Vec::new();
         for r in self.retired.iter_mut().filter(|r| !r.checked && r.since.elapsed() >= RECHECK) {
             r.checked = true;
-            let names = names.get_or_insert_with(crate::winctl::process_names);
+            let names = names.get_or_insert_with(crate::platform::process::process_names);
             let (pids, lines) = leftover_lines(&r.job.pids().unwrap_or_default(), &r.shown, |p| names.get(&p).cloned().unwrap_or_default());
-            r.listed = pids.into_iter().filter_map(|p| crate::winctl::process_born(p).map(|t| (p, t))).collect();
+            r.listed = pids.into_iter().filter_map(|p| crate::platform::process::process_born(p).map(|t| (p, t))).collect();
             if !lines.is_empty() && !r.listed.is_empty() {
                 out.push((r.name.clone(), r.job.key(), lines.join(", ")));
             }

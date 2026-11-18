@@ -282,16 +282,15 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
 /// die Datei nach `exports/`.
 fn save_as(dir: &Path, text: &str, lang: Lang) -> Option<(String, bool)> {
     let name = "paneldeck-system-prompt.md";
-    let picked = crate::notify::save_md(name);
-    #[cfg(windows)]
-    let path = picked?;
-    #[cfg(not(windows))]
-    let path = picked.unwrap_or_else(|| {
-        let d = dir.join("exports");
-        let _ = std::fs::create_dir_all(&d);
-        d.join(name)
-    });
-    let _ = dir;
+    let path = match crate::platform::notify::save_md(name) {
+        Some(p) => p,
+        None if crate::platform::notify::DIALOGS => return None,
+        None => {
+            let d = dir.join("exports");
+            let _ = std::fs::create_dir_all(&d);
+            d.join(name)
+        }
+    };
     Some(match std::fs::write(&path, text) {
         Ok(()) => (format!("{} {}", lang.t("Gespeichert:", "Saved:"), path.display()), false),
         Err(e) => (format!("{}: {e}", lang.t("Speichern fehlgeschlagen", "Saving failed")), true),

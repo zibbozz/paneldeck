@@ -278,24 +278,17 @@ fn local_chain(p: &Path, depth: u8) -> Result<(), PathIssue> {
 }
 
 /// Liegt der Pfad auf einem Netzwerk- oder unbekannten Laufwerk? Lokal sind feste, Wechsel-, CD- und RAM-Laufwerke.
-#[cfg(windows)]
+/// Ohne Laufwerksbuchstaben (`platform::fs::DRIVE_LETTERS`) nie.
 fn is_remote_drive(p: &str) -> bool {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetDriveTypeW(root: *const u16) -> u32;
+    if !crate::platform::fs::DRIVE_LETTERS {
+        return false;
     }
     let b = p.as_bytes();
     if b.len() < 2 || !b[0].is_ascii_alphabetic() || b[1] != b':' {
         return true;
     }
-    let root: Vec<u16> = format!("{}:\\", b[0] as char).encode_utf16().chain([0]).collect();
     // 2 = Wechsel-, 3 = festes, 5 = CD-, 6 = RAM-Laufwerk; 4 = Netzwerk, 0/1 = unbekannt/kein Laufwerk.
-    !matches!(unsafe { GetDriveTypeW(root.as_ptr()) }, 2 | 3 | 5 | 6)
-}
-
-#[cfg(not(windows))]
-fn is_remote_drive(_p: &str) -> bool {
-    false
+    !matches!(crate::platform::fs::drive_type(b[0] as char), Some(2 | 3 | 5 | 6))
 }
 
 /// Wie Pfade für die Shell geschrieben werden, in der Claude startet.

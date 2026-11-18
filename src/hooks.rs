@@ -217,7 +217,7 @@ pub enum IpcCmd {
     Show,
     /// `origin`: Prozessbaum des Absenders – ermittelt der Hub selbst aus der Verbindung (#152), nie aus der Anfrage.
     /// Liegt eine Sitzung darin, erbt die neue Sitzung deren Agenten-Kette.
-    Open { path: String, claude: bool, origin: Option<crate::winctl::PeerChain> },
+    Open { path: String, claude: bool, origin: Option<crate::platform::process::PeerChain> },
 }
 
 pub struct HookServer {
@@ -241,11 +241,11 @@ pub struct McpJob {
     /// Sitzung, aus der der Agent nach eigener Angabe aufruft (Umgebungsvariable `PANELDECK_SESSION` der Brücke) –
     /// nur ein Hinweis, siehe `App::mcp_resolve_caller`.
     pub caller: Option<u64>,
-    /// Prozessbaum des Absenders, vom Hub auf dem Verbindungs-Thread ermittelt (`winctl::resolve_peer`, seit 2.3.0, #152):
+    /// Prozessbaum des Absenders, vom Hub auf dem Verbindungs-Thread ermittelt (`platform::process::resolve_peer`, seit 2.3.0, #152):
     /// TCP-Tabelle → Prozess geöffnet und lebend → Job Object einer Sitzung (#168), sonst Vorfahren mit Erzeugungszeiten.
     /// Ein `caller_pid` in der Anfrage wird
     /// ignoriert (ein Client könnte ihn fälschen). Nicht zu ermitteln = Anfrage abgewiesen, nie „extern“.
-    pub peer: crate::winctl::PeerChain,
+    pub peer: crate::platform::process::PeerChain,
     /// `PANELDECK_SESSION_KEY` der Brücke (nur für die Zuordnung über `caller` in WSL).
     pub caller_key: Option<String>,
     pub reply: std::sync::mpsc::SyncSender<Result<Value, (String, String)>>,
@@ -348,8 +348,8 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
 }
 
 /// Prozess am anderen Ende der Verbindung (vom Hub ermittelt, nicht vom Client angegeben).
-fn peer_chain(s: &TcpStream) -> Option<crate::winctl::PeerChain> {
-    crate::winctl::resolve_peer(s.peer_addr().ok()?, s.local_addr().ok()?)
+fn peer_chain(s: &TcpStream) -> Option<crate::platform::process::PeerChain> {
+    crate::platform::process::resolve_peer(s.peer_addr().ok()?, s.local_addr().ok()?)
 }
 
 fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
@@ -872,7 +872,7 @@ mod tests {
         write_ipc_file(&dir, srv.port, &srv.token);
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
         write_ipc_file(&dir, srv.port, &srv.ipc_token);
-        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin: Some(crate::winctl::PeerChain { chain: vec![1], orphan: true, job: Some(9) }) }));
+        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin: Some(crate::platform::process::PeerChain { chain: vec![1], orphan: true, job: Some(9) }) }));
         // Der Hub ermittelt den Absender selbst (hier: dieser Testprozess), eine Angabe im Befehl zählt nicht.
         match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
             IpcCmd::Open { path, claude, origin } => {

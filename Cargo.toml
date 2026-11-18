@@ -27,6 +27,10 @@ update-test-feed = []
 [build-dependencies]
 embed-resource = "3"
 
+[target.'cfg(unix)'.dependencies]
+# „Lebt die PID noch?“ (`src/platform/process.rs`, `kill(pid, 0)`); steckt über portable-pty ohnehin schon im Baum.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8"
 tray-icon = { version = "0.21", default-features = false }

@@ -286,7 +286,7 @@ fn env_caller_ok(is_chat: Option<bool>) -> bool {
 /// (`PANELDECK_SESSION_KEY`).
 type CallerCand<'a> = (u64, Option<u32>, Option<u64>, Option<&'a str>);
 
-/// Wer ruft auf (#152, #168)? `peer` = Absender, auf dem Verbindungs-Thread geprüft (`winctl::resolve_peer`: sein Job
+/// Wer ruft auf (#152, #168)? `peer` = Absender, auf dem Verbindungs-Thread geprüft (`platform::process::resolve_peer`: sein Job
 /// Object bzw. sein Prozessbaum); `hint` = `PANELDECK_SESSION` und `PANELDECK_SESSION_KEY` der Brücke. Regeln:
 /// 1. Läuft der Absender im Job Object einer Sitzung, ist sie der Aufrufer (`"job"`) – auch wenn er losgelöst oder
 ///    verwaist ist. Ein abweichender Hinweis zählt dann nicht. Ein Job ohne passende Sitzung ergibt `"orphan"`.
@@ -304,7 +304,7 @@ type CallerCand<'a> = (u64, Option<u32>, Option<u64>, Option<&'a str>);
 ///
 /// `retired` = (Job, Sitzung) der aufbewahrten Jobs geschlossener bzw. neu gestarteter Sitzungen (`closing::Retired`):
 /// Ein übrig gebliebener Prozess darin handelt als diese Sitzung (`"retired"`, mit ihrer Kette, `taint::set_retired`).
-fn attribute(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], retired: &[(u64, u64)], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+fn attribute(peer: &crate::platform::process::PeerChain, sessions: &[CallerCand], retired: &[(u64, u64)], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
     if let Some(job) = peer.job {
         if let Some((id, ..)) = sessions.iter().find(|(_, _, j, _)| *j == Some(job)) {
             return (Some(*id), "job");
@@ -336,14 +336,14 @@ fn attribute(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], retired: 
 
 /// [`attribute`] ohne aufbewahrte Jobs (Tests).
 #[cfg(test)]
-fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+fn pick_caller(peer: &crate::platform::process::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
     attribute(peer, sessions, &[], hint)
 }
 
 /// Antwort von `close_session`: `{"ok": true}`, dazu `remaining_processes` (`[{pid, name, window, title?}]`) und ein
 /// Hinweis `note` (nicht vertrauenswürdig), wenn Prozesse der Sitzung weiterlaufen (#168; additive Felder, fehlen ohne
 /// solche Prozesse).
-fn close_reply(lingering: &[crate::winctl::JobProc]) -> Value {
+fn close_reply(lingering: &[crate::platform::process::JobProc]) -> Value {
     let mut v = json!({"ok": true});
     if !lingering.is_empty() {
         v["remaining_processes"] = lingering
@@ -727,7 +727,7 @@ impl App {
     /// Welche Hub-Sitzung ruft auf? `peer` ist der Prozessbaum des Absenders, vom Hub selbst auf dem Verbindungs-Thread
     /// ermittelt (`hooks::McpJob::peer`, nie die Angabe des Clients); `hint` = (`PANELDECK_SESSION`, Schlüssel). Regeln in
     /// [`pick_caller`]. Ein Chat hat keine PTY und ist nie Aufrufer über diesen Weg.
-    fn mcp_resolve_caller(&self, peer: &crate::winctl::PeerChain, hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+    fn mcp_resolve_caller(&self, peer: &crate::platform::process::PeerChain, hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
         let sessions: Vec<CallerCand> = self
             .entries
             .iter()
@@ -742,7 +742,7 @@ impl App {
 
     /// Absender eines `--open` (#152): `(Sitzung, aus der er stammt, nicht zuzuordnen)` – nur über Job Object bzw.
     /// Prozessbaum (#168), nie über Umgebungsvariablen.
-    pub(super) fn open_origin(&self, peer: Option<&crate::winctl::PeerChain>) -> (Option<u64>, bool) {
+    pub(super) fn open_origin(&self, peer: Option<&crate::platform::process::PeerChain>) -> (Option<u64>, bool) {
         let Some(peer) = peer else { return (None, false) };
         let sessions: Vec<CallerCand> = self
             .entries
@@ -2378,7 +2378,7 @@ mod tests {
 
     #[test]
     fn leftover_processes_and_the_orphan_fallback() {
-        use crate::winctl::PeerChain;
+        use crate::platform::process::PeerChain;
         // Alle laufenden Sitzungen haben einen Job: 5 (Job 1), 20 (Job 2); 40 ist ein Chat (ohne PID)
         let with_jobs: [CallerCand; 3] = [(5, Some(500), Some(1), None), (20, Some(2000), Some(2), None), (40, None, None, None)];
         // Übrig gebliebener Prozess im aufbewahrten Job 9 der geschlossenen Sitzung 7 bzw. im alten Job 8 von 20
@@ -2457,7 +2457,7 @@ mod tests {
 
     #[test]
     fn the_caller_comes_from_the_peer_process_tree_not_from_its_own_claims() {
-        use crate::winctl::PeerChain;
+        use crate::platform::process::PeerChain;
         let pc = |chain: &[u32], orphan: bool| PeerChain { chain: chain.to_vec(), orphan, job: None };
         // Sitzungen: 5 (Shell-PID 500), 20 (PID 2000, markiert), 30 (WSL-Terminal, PID 3000, Schlüssel), 40 (Chat)
         let key30 = "a".repeat(64);
@@ -2490,7 +2490,7 @@ mod tests {
 
     #[test]
     fn the_job_object_attributes_detached_and_orphaned_callers_first() {
-        use crate::winctl::PeerChain;
+        use crate::platform::process::PeerChain;
         // Sitzungen mit Jobs: 5 (PID 500, Job 1), 20 (PID 2000, Job 2), 30 (WSL, Job 3, Schlüssel), 40 (ohne Job, PID 4000)
         let key30 = "a".repeat(64);
         let sessions: [CallerCand; 4] = [(5, Some(500), Some(1), None), (20, Some(2000), Some(2), None), (30, Some(3000), Some(3), Some(key30.as_str())), (40, Some(4000), None, None)];
@@ -2519,7 +2519,7 @@ mod tests {
 
     #[test]
     fn close_reports_remaining_processes_only_when_there_are_some() {
-        use crate::winctl::JobProc;
+        use crate::platform::process::JobProc;
         assert_eq!(close_reply(&[]), json!({"ok": true}), "Antwort wie vor 2.3.0");
         let mut v = close_reply(&[JobProc { pid: 7, name: "notepad.exe".into(), title: "Editor".into(), window: true }, JobProc { pid: 8, name: "node.exe".into(), title: " ".into(), window: false }]);
         let note = v.as_object_mut().unwrap().remove("note").expect("Hinweis: nicht vertrauenswürdig");

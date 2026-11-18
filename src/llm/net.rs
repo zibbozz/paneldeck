@@ -195,6 +195,7 @@ fn allowed_v4(ip: Ipv4Addr) -> bool {
 /// Namensauflösung (austauschbar für Tests).
 pub type Resolver<'a> = &'a dyn Fn(&str, u16) -> std::io::Result<Vec<IpAddr>>;
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn system_resolve(host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
     Ok((host, port).to_socket_addrs()?.map(|a| a.ip()).collect())
 }
