@@ -546,9 +546,11 @@ fn cell_at(s: &Session, inner: Rect, cs: Vec2, pos: Pos2) -> (usize, usize) {
     (col, row)
 }
 
+/// Mausberichte gehen nur an DIESE Sitzung: ohne Broadcast-Mitschnitt, denn Klickpositionen passen nicht zu den
+/// anderen Panes (#247).
 fn write_mouse(s: &Session, seq: Option<Vec<u8>>) {
     if let Some(seq) = seq {
-        s.write(&seq);
+        s.write_raw(&seq);
     }
 }
 
@@ -783,13 +785,16 @@ fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
                             let btn = if lines > 0 { WHEEL_UP } else { WHEEL_DOWN };
                             let seq = mouse_seq(MouseEncoding::of(mode), btn | mouse_mod_bits(mods), col, row, false);
                             if let Some(seq) = seq {
-                                session.write(&seq.repeat(lines.unsigned_abs() as usize));
+                                // Wie `write_mouse`: nicht an Broadcast-Ziele (#247).
+                                session.write_raw(&seq.repeat(lines.unsigned_abs() as usize));
                             }
                         }
                     }
                     WheelAction::Arrows => {
                         let seq = wheel_arrow(lines > 0, mode.contains(TermMode::APP_CURSOR));
-                        session.write(&seq.repeat(lines.unsigned_abs() as usize));
+                        // Mausrad-Pfeile (z. B. in `less`) gelten nur dieser Pane, sonst blättern die anderen Shells
+                        // durch ihren Verlauf (#247).
+                        session.write_raw(&seq.repeat(lines.unsigned_abs() as usize));
                     }
                     WheelAction::Scrollback => {
                         session.term.lock().unwrap_or_else(|e| e.into_inner()).scroll_display(Scroll::Delta(lines));
