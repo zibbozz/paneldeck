@@ -1689,7 +1689,8 @@ impl App {
                 let (advanced, exit, mark) = {
                     let st = s.shell_state.lock().unwrap_or_else(|x| x.into_inner());
                     let adv = st.prompt_seq > *prompt0 || (*cmd_shell && st.cwd_seq > *cwd0);
-                    (adv, if adv { st.last_exit } else { None }, if st.prompt_seq > *prompt0 { st.marks.last().copied() } else { None })
+                    // Prompt-Anfang nach jetzigem Stand (bei noch vorläufiger Marke die Zeile danach, #231).
+                    (adv, if adv { st.last_exit } else { None }, if st.prompt_seq > *prompt0 { st.prompt_start() } else { None })
                 };
                 let gone = s.has_exited();
                 // cmd meldet nur „Ordner“ (OSC 9;9), und das schon beim Zeilenvorschub der Eingabe: erst wenn der Cursor unter der
