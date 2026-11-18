@@ -229,6 +229,11 @@ impl App {
     }
 
     pub(super) fn handle_drops(&mut self, ctx: &egui::Context) {
+        // Nur im Terminal Hub: die Bereichsflächen (`pane_rects`) stammen vom letzten Zeichnen dort – in der Todo-Liste
+        // landete der Pfad sonst in einem unsichtbaren Terminal und das Layout änderte sich (#259).
+        if self.mode != titlebar::Mode::Terminals {
+            return;
+        }
         let (files, hover, hovering) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos(), !i.raw.hovered_files.is_empty()));
         let target = hover.and_then(|p| self.pane_rects.iter().find(|(_, r)| r.contains(p)).map(|(id, r)| (*id, *r)));
         if hovering {

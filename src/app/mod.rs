@@ -656,11 +656,27 @@ struct PendingWt {
 struct WtClose {
     id: u64,
     changes: usize,
+    /// Läuft noch die Prüfung auf offene Änderungen (`git status` im Hintergrund, #259)?
+    changes_rx: Option<std::sync::mpsc::Receiver<usize>>,
     discard: bool,
     /// Hintergrundprozesse im Job der Sitzung beim Öffnen (#168, #213).
     lingering: Vec<closing::Lingering>,
     /// „Hintergrundprozesse beenden“ angehakt.
     end_jobs: bool,
+}
+
+impl WtClose {
+    /// Ergebnis der Prüfung abholen; `true`, solange sie noch läuft.
+    fn checking(&mut self) -> bool {
+        let Some(rx) = &self.changes_rx else { return false };
+        match rx.try_recv() {
+            Ok(n) => self.changes = n,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {} // wie bisher bei einem Fehler: keine Änderungen bekannt
+        }
+        self.changes_rx = None;
+        false
+    }
 }
 
 struct Palette {
@@ -1518,6 +1534,35 @@ impl App {
         }
         self.active_project = id;
         self.load_project_view(p.layout, p.focused);
+    }
+
+    /// Zeile der Sitzung in der Seitenleiste sichtbar machen: Filter leeren, wenn er sie verbirgt, eingeklappte Ordner
+    /// darüber aufklappen (die Gruppen der Listenansicht öffnet die Seitenleiste selbst, solange umbenannt wird).
+    /// `false`, wenn sie hier nicht erscheinen kann (anderes Fenster, anderes Projekt ohne Filter, unbekannt).
+    fn reveal_row(&mut self, id: u64) -> bool {
+        let Some(e) = self.entries.get(&id) else { return false };
+        if !self.in_win(e) {
+            return false;
+        }
+        if !self.sidebar_match(e) {
+            self.filter.clear();
+        }
+        let Some(e) = self.entries.get(&id) else { return false };
+        if !self.sidebar_match(e) {
+            return false;
+        }
+        let (project, mut path) = (e.meta.project, e.meta.group.clone());
+        if self.filter.trim().is_empty() {
+            if let Some(p) = self.projects.iter_mut().find(|p| p.id == project) {
+                while !path.is_empty() {
+                    if let Some(f) = p.folders.iter_mut().find(|f| f.path == path) {
+                        f.collapsed = false;
+                    }
+                    path = state::folder_parent(&path).to_string();
+                }
+            }
+        }
+        true
     }
 
     fn sidebar_match(&self, e: &Entry) -> bool {
@@ -3696,8 +3741,12 @@ impl App {
                 }
             }
             Action::StartRename(id) => {
-                if let Some(e) = self.entries.get(&id) {
-                    self.rename = Some((id, e.display_name()));
+                // Die Zeile muss zu sehen sein (Filter, eingeklappter Ordner), sonst geschähe nichts Sichtbares und das
+                // wartende Umbenennen holte sich später den Fokus vom Terminal (#259).
+                if self.reveal_row(id) {
+                    if let Some(e) = self.entries.get(&id) {
+                        self.rename = Some((id, e.display_name()));
+                    }
                 }
             }
             Action::SetColor(id, c) => {
@@ -3964,15 +4013,18 @@ impl App {
                 }
             }
             Action::RequestClose(id) if self.entries.get(&id).is_some_and(|e| e.meta.worktree.is_some()) => {
-                let changes = self
-                    .entries
-                    .get(&id)
-                    .and_then(|e| e.meta.worktree.as_ref())
-                    .map(|w| gitops::status(std::path::Path::new(&w.path)).map(|c| c.len()).unwrap_or(0))
-                    .unwrap_or(0);
+                // `git status` im Hintergrund: in großen oder langsamen Repos fröre sonst jedes Fenster ein (#259). Bis das
+                // Ergebnis da ist, zeigt die Rückfrage „wird geprüft“ und bietet nur Behalten/Abbrechen an.
+                let path = self.entries.get(&id).and_then(|e| e.meta.worktree.as_ref()).map(|w| PathBuf::from(&w.path)).unwrap_or_default();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx2 = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(gitops::status(&path).map(|c| c.len()).unwrap_or(0));
+                    ctx2.request_repaint();
+                });
                 // Hintergrundprozesse im Job (#213): auch hier nennen; sie können den Ordner belegt halten.
                 let lingering = self.lingering_of(&[id]);
-                self.wt_close = Some(WtClose { id, changes, discard: false, lingering, end_jobs: false });
+                self.wt_close = Some(WtClose { id, changes: 0, changes_rx: Some(rx), discard: false, lingering, end_jobs: false });
             }
             Action::RequestClose(id) => {
                 // Chat: nachfragen, wenn dabei ein Verlauf gelöscht würde (oder eine Antwort läuft). Hintergrundprozesse
@@ -4340,6 +4392,42 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
     }
 }
 
+/// Knöpfe im Kopf eines Bereichs, von rechts nach links (wichtigste zuerst).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PaneBtn {
+    Close,
+    Minimize,
+    Reload,
+    Detach,
+    SplitDown,
+    SplitRight,
+    Link,
+}
+
+const PANE_BTN_W: f32 = 22.0;
+
+/// Alle Knöpfe eines Bereichs (abgedockt: Andocken, Minimieren, ggf. Neu laden).
+fn pane_buttons(detached: bool, reload: bool, link: bool) -> Vec<PaneBtn> {
+    let mut v = vec![PaneBtn::Close, PaneBtn::Minimize];
+    if reload {
+        v.push(PaneBtn::Reload);
+    }
+    if !detached {
+        v.extend([PaneBtn::Detach, PaneBtn::SplitDown, PaneBtn::SplitRight]);
+        if link {
+            v.push(PaneBtn::Link);
+        }
+    }
+    v
+}
+
+/// Wie viele der `n` Knöpfe in einen Kopf der Breite `width` passen: links bleiben Statuspunkt und ein Stück Name
+/// (60 Punkte) frei, rechts etwas Luft; Schließen und Minimieren stehen immer da (#259).
+fn pane_buttons_fit(width: f32, n: usize) -> usize {
+    let room = width - 16.0 - 60.0;
+    ((room / PANE_BTN_W).floor().max(0.0) as usize).clamp(2.min(n), n)
+}
+
 fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     let lang = cx.lang;
     cx.rects.insert(id, rect);
@@ -4375,6 +4463,13 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     if hresp.clicked() {
         cx.actions.push(Action::Focus(id));
     }
+    // „Neu laden“ (#169) nur für Terminals; ein Chat hat keinen Prozess.
+    let reload = session_settings::reload_plan(&entry.meta);
+    // Knöpfe rechts im Kopf (von rechts nach links). In schmalen Bereichen nur so viele, wie hineinpassen – sonst ragten sie
+    // in den Kopf des Nachbarn, und ein Klick träfe dessen Teilen/Schließen (#259); die übrigen stehen im Kontextmenü.
+    let all_btns = pane_buttons(cx.detached, reload.is_some(), tl_enabled);
+    let fit = if cx.detached { all_btns.len() } else { pane_buttons_fit(header.width(), all_btns.len()) };
+    let (shown_btns, hidden_btns) = all_btns.split_at(fit);
     hresp.context_menu(|ui| {
         if ui.button(lang.t("Bereich minimieren", "Minimize pane")).clicked() {
             cx.actions.push(Action::MinimizePane(id));
@@ -4384,10 +4479,21 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             cx.actions.push(Action::LinkTicket(id));
             ui.close();
         }
+        for b in hidden_btns {
+            let (label, action) = match b {
+                PaneBtn::Reload => (lang.t("Neu laden …", "Reload …"), Action::RequestReload(id)),
+                PaneBtn::Detach => (lang.t("In eigenem Fenster öffnen", "Open in own window"), Action::Detach(id)),
+                PaneBtn::SplitDown => (lang.t("Darunter teilen", "Split below"), Action::Split(id, Dir::Vertical)),
+                PaneBtn::SplitRight => (lang.t("Rechts teilen", "Split right"), Action::Split(id, Dir::Horizontal)),
+                _ => continue, // Schließen/Minimieren stehen immer da, Verknüpfen schon oben
+            };
+            if ui.button(label).clicked() {
+                cx.actions.push(action);
+                ui.close();
+            }
+        }
     });
     let claude = entry.is_claude() && cx.claude_mode;
-    // „Neu laden“ (#169) nur für Terminals; ein Chat hat keinen Prozess.
-    let reload = session_settings::reload_plan(&entry.meta);
     let status_label = entry.status_label(lang);
     let status_col = entry.status_color(t);
     let (text_c, strong_c, weak) = {
@@ -4403,10 +4509,8 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
-    // Breite des Knopfbereichs rechts: fünf Knöpfe (abgedockt zwei), mit Ticket-Verknüpfung und Neu laden je einer mehr.
-    let tl_btn = tl_enabled;
-    let reload_w = if reload.is_some() { 22.0 } else { 0.0 };
-    let btns_w = if cx.detached { 52.0 + reload_w } else { 126.0 + if tl_btn { 26.0 } else { 0.0 } + reload_w };
+    // Breite des Knopfbereichs rechts: die gezeigten Knöpfe (je 22) und etwas Luft.
+    let btns_w = PANE_BTN_W * shown_btns.len() as f32 + 16.0;
     let right_edge = header.max.x - (btns_w + 4.0);
     let avail = right_edge - hx - 8.0;
     let chips = cx.tl.chips_of(id);
@@ -4465,44 +4569,31 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                if cx.detached {
-                    if style::icon_btn_small(ui, SIcon::Close, lang.t("Wieder andocken (Strg+Umschalt+W)", "Dock back (Ctrl+Shift+W)")).clicked() {
-                        cx.actions.push(Action::Attach(id));
-                    }
-                    if style::icon_btn_small(ui, SIcon::Collapse, lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)")).clicked() {
-                        cx.actions.push(Action::MinimizePane(id));
-                    }
-                    if let Some(plan) = reload {
-                        if style::icon_btn_small(ui, SIcon::Reload, plan.tip(lang)).clicked() {
-                            cx.actions.push(Action::RequestReload(id));
+                for b in shown_btns {
+                    let (icon, tip, action): (SIcon, String, Action) = match b {
+                        PaneBtn::Close if cx.detached => (SIcon::Close, lang.t("Wieder andocken (Strg+Umschalt+W)", "Dock back (Ctrl+Shift+W)").into(), Action::Attach(id)),
+                        PaneBtn::Close => (SIcon::Close, lang.t("Sitzung schließen", "Close session").into(), Action::RequestClose(id)),
+                        PaneBtn::Minimize if cx.detached => (
+                            SIcon::Collapse,
+                            lang.t("Minimieren – Fenster schließen, Sitzung läuft weiter (in der Seitenleiste zurückholen)", "Minimize – close the window, the session keeps running (bring it back from the sidebar)").into(),
+                            Action::MinimizePane(id),
+                        ),
+                        PaneBtn::Minimize => {
+                            let tip = lang.t("Bereich minimieren – die Sitzung läuft weiter, ein Klick in der Seitenleiste holt sie zurück", "Minimize pane – the session keeps running, click it in the sidebar to bring it back");
+                            (SIcon::Collapse, if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) }, Action::MinimizePane(id))
                         }
+                        PaneBtn::Reload => match &reload {
+                            Some(plan) => (SIcon::Reload, plan.tip(lang).to_string(), Action::RequestReload(id)),
+                            None => continue,
+                        },
+                        PaneBtn::Detach => (SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window").into(), Action::Detach(id)),
+                        PaneBtn::SplitDown => (SIcon::SplitDown, lang.t("Darunter teilen (Strg+Umschalt+E)", "Split below (Ctrl+Shift+E)").into(), Action::Split(id, Dir::Vertical)),
+                        PaneBtn::SplitRight => (SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)").into(), Action::Split(id, Dir::Horizontal)),
+                        PaneBtn::Link => (SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …").into(), Action::LinkTicket(id)),
+                    };
+                    if style::icon_btn_small(ui, icon, &tip).clicked() {
+                        cx.actions.push(action);
                     }
-                    return;
-                }
-                if style::icon_btn_small(ui, SIcon::Close, lang.t("Sitzung schließen", "Close session")).clicked() {
-                    cx.actions.push(Action::RequestClose(id));
-                }
-                let tip = lang.t("Bereich minimieren – die Sitzung läuft weiter, ein Klick in der Seitenleiste holt sie zurück", "Minimize pane – the session keeps running, click it in the sidebar to bring it back");
-                let tip = if cx.hide_key.is_empty() { tip.to_string() } else { format!("{tip} ({})", cx.hide_key) };
-                if style::icon_btn_small(ui, SIcon::Collapse, &tip).clicked() {
-                    cx.actions.push(Action::MinimizePane(id));
-                }
-                if let Some(plan) = reload {
-                    if style::icon_btn_small(ui, SIcon::Reload, plan.tip(lang)).clicked() {
-                        cx.actions.push(Action::RequestReload(id));
-                    }
-                }
-                if style::icon_btn_small(ui, SIcon::Detach, lang.t("In eigenem Fenster öffnen", "Open in own window")).clicked() {
-                    cx.actions.push(Action::Detach(id));
-                }
-                if style::icon_btn_small(ui, SIcon::SplitDown, lang.t("Darunter teilen (Strg+Umschalt+E)", "Split below (Ctrl+Shift+E)")).clicked() {
-                    cx.actions.push(Action::Split(id, Dir::Vertical));
-                }
-                if style::icon_btn_small(ui, SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)")).clicked() {
-                    cx.actions.push(Action::Split(id, Dir::Horizontal));
-                }
-                if tl_btn && style::icon_btn_small(ui, SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …")).clicked() {
-                    cx.actions.push(Action::LinkTicket(id));
                 }
             });
         },

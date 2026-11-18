@@ -158,7 +158,9 @@ impl App {
                         }
                     } else {
                         let title = RichText::new(format!("{}  {}", g.to_uppercase(), ids.len())).small().color(style::dim(ui));
-                        egui::CollapsingHeader::new(title).id_salt(("grp", &g)).default_open(true).show(ui, |ui| {
+                        // Wird eine Sitzung darin umbenannt, die Gruppe aufklappen (sonst wäre das Eingabefeld unsichtbar, #259).
+                        let renaming = self.rename.as_ref().is_some_and(|(rid, _)| ids.contains(rid));
+                        egui::CollapsingHeader::new(title).id_salt(("grp", &g)).default_open(true).open(renaming.then_some(true)).show(ui, |ui| {
                             for id in ids {
                                 self.session_row(ui, id, actions);
                             }
