@@ -9,6 +9,17 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.3.2] - WIP
 
+### Fixed
+
+- Switching back to the Terminals tab (tab, shortcut, ticket “back”, extra windows) focuses the previously focused pane again (otherwise the top-left one), unless a dialog or popup is open (#238)
+- Prompt jumps (Ctrl+Shift+Up/Down) and MCP `run_command` output stay correct after a pane is resized with text reflow (#246)
+- Broadcast no longer sends mouse clicks and mouse-wheel arrow keys of the focused pane to the other panes (#247)
+- IME input (Japanese, Chinese, Korean) works in terminals; the composition is shown at the cursor (#248)
+- Left Ctrl+Alt used instead of AltGr (e.g. Ctrl+Alt+Q for @ on German layouts) types the character in terminals (#249)
+- Scrollback search: matches on coloured lines are visible, CJK text is found, the newest matches stay reachable with very many hits, and highlights follow new output (#250)
+- Ctrl+click no longer runs scripts such as .py, .pyw, .pl, .rb or .ahk (or any PATHEXT type), it shows them in Explorer; Ctrl-hover no longer checks paths on network drives or `\wsl$` on the UI thread (#251)
+- Typed letters followed quickly by Alt/Ctrl are no longer sent as Alt combinations; the block cursor covers wide characters fully and draws bold/italic/emoji correctly; the release of Ctrl+C is reported to programs using kitty key events (#252)
+
 ## [2.3.1] - 2026-11-17
 
 ### Fixed

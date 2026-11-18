@@ -9,6 +9,17 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.3.2] - WIP
 
+### Fixed
+
+- Zurück im Reiter „Terminals“ (Reiter, Kürzel, „Zurück“ aus einem Ticket, weitere Fenster) bekommt wieder die zuvor fokussierte Pane den Fokus (sonst die oben links) – außer ein Dialog oder Popup ist offen (#238)
+- Sprünge zum Prompt (Strg+Umschalt+Hoch/Runter) und die Ausgabe von MCP `run_command` stimmen auch nach einer Größenänderung mit Neuumbruch (#246)
+- Broadcast schickt Mausklicks und Mausrad-Pfeiltasten der fokussierten Pane nicht mehr an die anderen Panes (#247)
+- IME-Eingabe (Japanisch, Chinesisch, Koreanisch) funktioniert in Terminals; die laufende Eingabe erscheint am Cursor (#248)
+- Linkes Strg+Alt statt AltGr (z. B. Strg+Alt+Q für @ auf deutscher Tastatur) tippt das Zeichen in Terminals (#249)
+- Suche im Verlauf: Treffer auf farbigen Zeilen sind sichtbar, CJK-Text wird gefunden, bei sehr vielen Treffern bleiben die neuesten erreichbar, und Markierungen folgen neuer Ausgabe (#250)
+- Strg+Klick startet keine Skripte wie .py, .pyw, .pl, .rb oder .ahk mehr (auch keine Typen aus PATHEXT), sondern zeigt sie im Explorer; Strg+Hover prüft Pfade auf Netzlaufwerken und `\wsl$` nicht mehr im UI-Thread (#251)
+- Schnell getippte Buchstaben mit folgendem Alt/Strg kommen nicht mehr als Alt-Kombination an; der Block-Cursor deckt breite Zeichen ganz ab und zeigt fett/kursiv/Emoji richtig; das Loslassen von Strg+C wird Programmen mit kitty-Tastenereignissen gemeldet (#252)
+
 ## [2.3.1] - 2026-11-17
 
 ### Fixed
