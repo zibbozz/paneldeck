@@ -17,6 +17,12 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Changed
 
 - The Settings window can be moved like a normal window; it opens centred and stays inside the window (#275)
+- Deleting folders in the Terminals sidebar: the trash icon on a folder now closes all its sessions (same confirmation listing what ends, including subfolders, minimized sessions and chats) and then deletes the folder with its subfolders; an empty folder is deleted directly. *Delete folder (content stays)* in the context menu, and deleting a project or a template, now ask in a confirmation dialog with the 3-second timer instead of “click twice”. The new menu entry *Delete folder with its sessions …* does what the trash icon does (#276)
+
+### Fixed
+
+- When a folder is deleted while keeping its content, its defaults for new sessions (working folder, profile) pass to its direct subfolders; deleting a folder with its sessions leaves no entries of it behind (#276)
+- The file tree (Ctrl+Shift+O) always uses the session's working folder as its root instead of following the shell (or Claude) into subfolders; the shell's current folder is expanded and highlighted inside the tree, also for WSL sessions; network and WSL folders are read in the background (#277)
 
 ## [2.3.2] - 2026-11-18
 

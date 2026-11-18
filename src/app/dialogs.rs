@@ -359,8 +359,9 @@ impl App {
                             if ui.button(lang.t("Starten", "Start")).clicked() {
                                 actions.push(Action::TemplateStart(i));
                             }
-                            if armed_button(ui, ("tpldel", i), "🗑", lang.t("Wirklich?", "Sure?")) {
-                                actions.push(Action::TemplateDelete(i));
+                            // Rückfrage mit Wartezeit statt „zweimal klicken“ (#276, `closing`).
+                            if ui.button("🗑").on_hover_text(lang.t("Vorlage löschen …", "Delete template …")).clicked() {
+                                actions.push(Action::TemplateDeleteAsk(i));
                             }
                             if ui.button(lang.t("Bearbeiten …", "Edit …")).clicked() {
                                 actions.push(Action::TemplateEdit(i));

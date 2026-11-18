@@ -82,6 +82,9 @@ struct Entry {
     attention: bool,
     /// Aktueller Ordner laut Claude-Hooks (sonst Startordner).
     live_cwd: String,
+    /// Erster gemeldeter Ordner (wo die Shell gestartet ist): Wurzel des Dateibaums, wenn der eingestellte
+    /// Arbeitsordner nicht als Windows-Pfad bekannt ist (WSL ohne Ordner bzw. mit `~`, #277).
+    start_cwd: String,
     /// Es kamen Hook-Ereignisse (sonst Status ggf. aus dem Transkript abgeleitet).
     hook_seen: bool,
     /// Die Warteschlange hat zuletzt automatisch gesendet.
@@ -119,7 +122,7 @@ impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -310,7 +313,10 @@ enum Action {
     TemplateStart(usize),
     /// Vorlage starten, mit Ziel (Ordner, Bereich; #244).
     TemplateStartAt(usize, tpl_lib::TplAt),
-    TemplateDelete(usize),
+    /// Vorlage löschen – nach der Rückfrage; nur, wenn an Index noch dieser Name steht (#276).
+    TemplateDelete(usize, String),
+    /// Rückfrage vor dem Löschen einer Vorlage (#276).
+    TemplateDeleteAsk(usize),
     TemplateSave(String, Option<String>),
     /// Editor der Bibliothek: Vorlage bearbeiten / neue Terminal-Vorlage / duplizieren / aus einer Sitzung (#244).
     TemplateEdit(usize),
@@ -321,7 +327,12 @@ enum Action {
     ToggleTree,
     FolderNew(String),
     FolderRename(String),
-    FolderDelete(String),
+    /// Ordner (Projekt, Pfad) löschen, Inhalt rückt hoch – nach der Rückfrage von `FolderDeleteAsk` (#276).
+    FolderDelete(u64, String),
+    /// Kontextmenü „Ordner löschen (Inhalt bleibt)“: Rückfrage, ein leerer Ordner verschwindet sofort (#276).
+    FolderDeleteAsk(String),
+    /// Ordner (Projekt, Pfad) samt Unterordnern entfernen – nach dem Schließen seiner Sitzungen (#276).
+    FolderRemove(u64, String),
     FolderToggle(String),
     FolderColor(String, Option<[u8; 3]>),
     FolderCwd(String, bool),
@@ -355,6 +366,8 @@ enum Action {
     ProjectPrompt(u64, PromptKind),
     SetProjectColor(u64, [u8; 3]),
     DeleteProject(u64),
+    /// Rückfrage vor dem Löschen eines Projekts (#276).
+    DeleteProjectAsk(u64),
     TagsPrompt(u64),
     ToggleFiles,
     InsertPath(String),
@@ -2820,22 +2833,10 @@ impl App {
                     }
                     if self.projects.len() > 1 {
                         ui.separator();
-                        let confirm_id = egui::Id::new(("delproj", id));
-                        let now_t = ui.input(|i| i.time);
-                        let armed = ui.memory(|m| m.data.get_temp::<f64>(confirm_id)).is_some_and(|t| now_t - t < 4.0);
-                        let label = if armed {
-                            lang.t("Wirklich löschen? Nochmal klicken", "Really delete? Click again")
-                        } else {
-                            lang.t("Projekt löschen (Sitzungen bleiben)", "Delete project (sessions are kept)")
-                        };
-                        if ui.button(label).clicked() {
-                            if armed {
-                                ui.memory_mut(|m| m.data.remove::<f64>(confirm_id));
-                                actions.push(Action::DeleteProject(id));
-                                ui.close();
-                            } else {
-                                ui.memory_mut(|m| m.data.insert_temp(confirm_id, now_t));
-                            }
+                        // Rückfrage mit Wartezeit statt „zweimal klicken“ (#276, `closing`).
+                        if ui.button(lang.t("Projekt löschen (Sitzungen bleiben) …", "Delete project (sessions are kept) …")).clicked() {
+                            actions.push(Action::DeleteProjectAsk(id));
+                            ui.close();
                         }
                     }
                 });
@@ -2934,6 +2935,9 @@ impl App {
             };
             if let Some(c) = cwd {
                 e.live_cwd = pathfmt::from_wsl(e.eff_shell(), &c);
+                if e.start_cwd.is_empty() {
+                    e.start_cwd = e.live_cwd.clone();
+                }
             }
             for d in done {
                 if threshold > 0 && d.dur_ms.unwrap_or(0) >= threshold && (!window_focused || *id != focused_id) {
@@ -3370,7 +3374,11 @@ impl App {
                 }
             }
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
-                e.live_cwd = c.clone();
+                // Linux-Pfad einer WSL-Sitzung als Windows-Pfad wie bei OSC 7 (Dateibaum, Links, #277).
+                e.live_cwd = pathfmt::from_wsl(e.eff_shell(), c);
+                if e.start_cwd.is_empty() {
+                    e.start_cwd = e.live_cwd.clone();
+                }
             }
             if e.is_claude() && !keyless {
                 if let hooks::ConvMatch::Bind(cs) | hooks::ConvMatch::Switch(cs) = &conv {
@@ -3694,6 +3702,12 @@ impl App {
                 let text = self.entries.get(&id).map(|e| e.meta.tags.join(", ")).unwrap_or_default();
                 self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: Some(id), text, folder: String::new(), picker: None });
             }
+            Action::DeleteProjectAsk(id) => {
+                if self.projects.len() > 1 {
+                    self.want_focus = None;
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::DeleteProject(id)));
+                }
+            }
             Action::DeleteProject(id) => {
                 let other = self.projects.iter().find(|p| p.id != id).map(|p| p.id);
                 if let (true, Some(other)) = (self.projects.len() > 1, other) {
@@ -3772,8 +3786,14 @@ impl App {
                 self.templates_open = true;
             }
             Action::OpenCosts => self.cost_open = true,
-            Action::TemplateDelete(i) => {
-                if i < self.templates.len() {
+            Action::TemplateDeleteAsk(i) => {
+                if let Some(t) = self.templates.get(i) {
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::DeleteTemplate(i, t.name.clone())));
+                }
+            }
+            Action::TemplateDelete(i, name) => {
+                // Nur, wenn an dieser Stelle noch genau diese Vorlage steht (die Liste kann sich verschoben haben).
+                if self.templates.get(i).is_some_and(|t| t.name == name) {
                     self.templates.remove(i);
                     templates::save(&self.dir, &self.templates);
                 }
@@ -3865,17 +3885,13 @@ impl App {
                 self.want_focus = None;
                 self.folder_prompt = Some(FolderPrompt { kind: 2, path, text: String::new() });
             }
-            Action::FolderDelete(path) => {
-                let pid = self.active_project;
-                for e in self.entries.values_mut() {
-                    if e.meta.project == pid && state::folder_within(&e.meta.group, &path) {
-                        e.meta.group = state::lift_path(&e.meta.group, &path);
-                    }
-                }
-                if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
-                    p.delete_folder_lift(&path);
-                }
+            // Ordner löschen (#276): Rückfrage mit Wartezeit statt „zweimal klicken“ (`closing`).
+            Action::FolderDeleteAsk(path) => {
+                self.want_focus = None;
+                self.ask_folder_lift(path);
             }
+            Action::FolderDelete(pid, path) => self.lift_folder(pid, &path),
+            Action::FolderRemove(pid, path) => self.remove_folder_tree(pid, &path),
             Action::FolderToggle(path) => {
                 if let Some(f) = self.active_folder_mut(&path) {
                     f.collapsed = !f.collapsed;
@@ -4851,8 +4867,20 @@ fn list_dir(p: &Path, hidden: bool) -> Vec<TreeItem> {
     v
 }
 
-fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<PathBuf, Vec<TreeItem>>, actions: &mut Vec<Action>, lang: Lang) {
-    let items = cache.entry(dir.to_path_buf()).or_insert_with(|| list_dir(dir, hidden)).clone();
+/// Ein Ordner des Dateibaums mit Inhalt; `mark` = aktueller Ordner der Shell (aufklappen und markieren, #277).
+fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<PathBuf, Vec<TreeItem>>, actions: &mut Vec<Action>, lang: Lang, mark: &panels::TreeMark) {
+    // Langsame Wurzel (Netzwerk, WSL): im Hilfsthread lesen, bis dahin „wird geladen …“ (#277 Review).
+    let items = if mark.slow {
+        match panels::slow_list(ui.ctx(), dir, hidden) {
+            Some(v) => v,
+            None => {
+                ui.weak(lang.t("wird geladen …", "loading …"));
+                return;
+            }
+        }
+    } else {
+        cache.entry(dir.to_path_buf()).or_insert_with(|| list_dir(dir, hidden)).clone()
+    };
     if items.is_empty() {
         ui.weak(lang.t("(leer)", "(empty)"));
     }
@@ -4874,9 +4902,21 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
             }
         };
         if it.is_dir {
-            let r = egui::CollapsingHeader::new(RichText::new(&it.name).strong()).id_salt(("tree", &it.path)).show(ui, |ui| {
-                tree_children(ui, &it.path, hidden, cache, actions, lang);
+            let (on_way, current) = mark.role(&it.path);
+            let mut name = RichText::new(&it.name).strong();
+            if current {
+                name = name.color(style::accent());
+            }
+            // Auf dem Weg zum aktuellen Ordner der Shell: einmal aufklappen, wenn er sich ändert (danach frei zuklappbar).
+            let r = egui::CollapsingHeader::new(name).id_salt(("tree", &it.path)).open((on_way && mark.reveal && (!mark.slow || panels::slow_cached(&it.path, hidden))).then_some(true)).show(ui, |ui| {
+                tree_children(ui, &it.path, hidden, cache, actions, lang, mark);
             });
+            if current {
+                if mark.reveal {
+                    r.header_response.scroll_to_me(Some(egui::Align::Center));
+                }
+                r.header_response.clone().on_hover_text(lang.t("Aktueller Ordner der Shell", "Current folder of the shell"));
+            }
             r.header_response.clone().context_menu(|ui| menu(ui, actions));
             if r.header_response.double_clicked() {
                 actions.push(Action::InsertPath(path_s.clone()));
@@ -5600,7 +5640,6 @@ fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx, bottom: bool)
     resp.on_hover_text(tip);
 }
 
-/// Button mit Zwei-Klick-Bestätigung (die Bestätigung verfällt nach 4 s).
 /// Geometrie des Ordnerbaums der letzten Frame (für die Ablage-Linie beim Ziehen).
 #[derive(Default)]
 struct TreeGeo {
@@ -5609,20 +5648,6 @@ struct TreeGeo {
     full: std::collections::HashMap<String, Rect>,
     x: std::collections::HashMap<String, f32>,
     right: f32,
-}
-
-fn armed_button(ui: &mut Ui, key: impl std::hash::Hash, label: &str, armed_label: &str) -> bool {
-    let id = egui::Id::new(("armed", key));
-    let now = ui.input(|i| i.time);
-    let armed = ui.memory(|m| m.data.get_temp::<f64>(id)).is_some_and(|t| now - t < 4.0);
-    if ui.button(if armed { armed_label } else { label }).clicked() {
-        if armed {
-            ui.memory_mut(|m| m.data.remove::<f64>(id));
-            return true;
-        }
-        ui.memory_mut(|m| m.data.insert_temp(id, now));
-    }
-    false
 }
 
 /// Status eines Chats als Sitzungsstatus: Freigabe/Frage offen → `Permission` (Seitenleiste „braucht dich“, MCP
