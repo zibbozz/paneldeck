@@ -19,6 +19,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Suche im Verlauf: Treffer auf farbigen Zeilen sind sichtbar, CJK-Text wird gefunden, bei sehr vielen Treffern bleiben die neuesten erreichbar, und Markierungen folgen neuer Ausgabe (#250)
 - Strg+Klick startet keine Skripte wie .py, .pyw, .pl, .rb oder .ahk mehr (auch keine Typen aus PATHEXT), sondern zeigt sie im Explorer; Strg+Hover prüft Pfade auf Netzlaufwerken und `\wsl$` nicht mehr im UI-Thread (#251)
 - Schnell getippte Buchstaben mit folgendem Alt/Strg kommen nicht mehr als Alt-Kombination an; der Block-Cursor deckt breite Zeichen ganz ab und zeigt fett/kursiv/Emoji richtig; das Loslassen von Strg+C wird Programmen mit kitty-Tastenereignissen gemeldet (#252)
+- `run_command`: Die Ausgabe einer Zeile in genau Terminalbreite ist in Git Bash mit dem Konsolen-Host von Windows (Einstellung „Mitgelieferten Konsolen-Host verwenden“ aus) nicht mehr leer; die Prompt-Marke landet nicht mehr auf dieser Ausgabezeile (#231)
 
 ## [2.3.1] - 2026-11-17
 

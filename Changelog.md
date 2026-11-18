@@ -19,6 +19,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Scrollback search: matches on coloured lines are visible, CJK text is found, the newest matches stay reachable with very many hits, and highlights follow new output (#250)
 - Ctrl+click no longer runs scripts such as .py, .pyw, .pl, .rb or .ahk (or any PATHEXT type), it shows them in Explorer; Ctrl-hover no longer checks paths on network drives or `\wsl$` on the UI thread (#251)
 - Typed letters followed quickly by Alt/Ctrl are no longer sent as Alt combinations; the block cursor covers wide characters fully and draws bold/italic/emoji correctly; the release of Ctrl+C is reported to programs using kitty key events (#252)
+- `run_command`: the output of a line exactly as wide as the terminal is no longer empty in Git Bash with the Windows console host (setting *Use the bundled console host* off); the prompt mark is no longer placed on that output line (#231)
 
 ## [2.3.1] - 2026-11-17
 
