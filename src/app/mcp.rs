@@ -1611,8 +1611,9 @@ impl App {
             s.send_text_agent(text, submit);
         }
         // Ein abgeschickter Prompt macht Claude sofort „arbeitet“ (der Hook kommt erst Sekundenbruchteile später).
+        // Bestätigt keine Meldung die Annahme (lokaler Befehl wie `/model`, Text in einem Dialog), gilt wieder „bereit“.
         if submit && e.is_claude() && e.status == ClaudeStatus::Idle {
-            e.status = ClaudeStatus::Working;
+            e.assume_working();
         }
         self.mcp_taint_write(caller, id);
         Ok(json!({"ok": true}))

@@ -269,8 +269,8 @@ impl App {
         egui::Window::new(title).id(Id::new("queue_win")).open(&mut open).default_size([520.0, 420.0]).show(ctx, |ui| {
             let Some(e) = self.entries.get_mut(&id) else { return };
             ui.label(RichText::new(lang.t(
-                "Die Prompts werden nacheinander gesendet: der nächste, sobald Claude „bereit“ meldet. Bei Freigabe-Fragen wartet die Warteschlange.",
-                "Prompts are sent one after another: the next as soon as Claude reports “ready”. It waits during approval requests.",
+                "Die Prompts werden nacheinander gesendet: der nächste, sobald Claude „bereit“ meldet. Bei Freigabe-Fragen wartet die Warteschlange – ebenso nach einer Unterbrechung (Esc) oder einem Fehler, bis die nächste Antwort fertig ist oder du „Nächsten jetzt senden“ wählst.",
+                "Prompts are sent one after another: the next as soon as Claude reports “ready”. It waits during approval requests – and after an interruption (Esc) or an error, until the next answer is finished or you choose “Send next now”.",
             )).small().color(style::dim(ui)));
             ui.add_space(S2);
             ui.horizontal(|ui| {
