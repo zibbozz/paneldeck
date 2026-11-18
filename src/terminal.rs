@@ -225,6 +225,12 @@ impl Listener {
         Listener { title: Default::default(), writer, bell: Default::default(), clipboard: Default::default(), replies: Default::default() }
     }
 
+    /// Für Tests: schreibt ins Leere.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        Listener::new(Arc::new(Mutex::new(Box::new(std::io::sink()))))
+    }
+
     /// Ereignis der Emulation verarbeiten (Inhalt von `send_event`). Läuft im PTY-Thread, während er die Emulation
     /// gesperrt hält – deshalb wird hier nichts geschrieben, nur gesammelt.
     fn on_event(&self, event: Event) {
@@ -760,6 +766,16 @@ impl Session {
     /// Wie lange das Programm schon nichts mehr ausgegeben hat.
     pub fn quiet_for(&self) -> std::time::Duration {
         std::time::Duration::from_millis(mono_ms().saturating_sub(self.last_activity.load(Ordering::Relaxed)))
+    }
+
+    /// Zeitpunkt der letzten Ausgabe (monotone ms); ändert sich mit jeder Ausgabe (Suche, #250).
+    pub fn output_stamp(&self) -> u64 {
+        self.last_activity.load(Ordering::Relaxed)
+    }
+
+    /// Aus dem Verlauf gefallene Zeilen (absolute Zeile von Verlaufszeile 0); unter der Sperre von `term` lesen.
+    pub fn hist_base(&self) -> u64 {
+        self.base()
     }
 
     /// Prozess-ID der Shell dieser Sitzung (Kind des Pseudo-Terminals).

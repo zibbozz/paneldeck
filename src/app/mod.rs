@@ -3286,14 +3286,17 @@ impl App {
                     self.activate(sid);
                 }
                 if let Some(s) = self.entries.get_mut(&sid).and_then(|e| e.live.as_mut()) {
-                    let matches = search::find_all(&s.term.lock().unwrap_or_else(|e| e.into_inner()), &query);
                     let mut st = SearchState::new();
                     st.focus_input = false;
-                    st.current = matches.iter().position(|m| m.line == line).unwrap_or(0);
                     st.query = query.clone();
                     st.last_query = query;
-                    st.matches = matches;
-                    search::scroll_to(&mut s.term.lock().unwrap_or_else(|e| e.into_inner()), line);
+                    let activity = s.output_stamp();
+                    let mut t = s.term.lock().unwrap_or_else(|e| e.into_inner());
+                    st.compute(&t, s.hist_base(), activity);
+                    st.refreshed = ctx.input(|i| i.time);
+                    st.current = st.matches.iter().position(|m| m.line == line).unwrap_or(st.matches.len().saturating_sub(1));
+                    search::scroll_to(&mut t, line);
+                    drop(t);
                     s.search = Some(st);
                 }
             }
@@ -4447,19 +4450,37 @@ fn search_bar(ui: &mut Ui, session: &mut Session, body: Rect, lang: Lang) -> boo
                 step = 1;
             }
             let changed = st.query != st.last_query;
+            let now = ui.input(|i| i.time);
+            let activity = session.output_stamp();
             if changed || step != 0 {
-                st.matches = search::find_all(&session.term.lock().unwrap_or_else(|e| e.into_inner()), &st.query);
-                st.last_query = st.query.clone();
-                let n = st.matches.len();
-                if n == 0 {
-                    st.current = 0;
-                } else if changed {
-                    st.current = n - 1;
+                let mut t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+                let base = session.hist_base();
+                if changed {
+                    st.compute(&t, base, activity);
+                    st.current = st.matches.len().saturating_sub(1);
                 } else {
-                    st.current = (st.current as i32 + step).rem_euclid(n as i32) as usize;
+                    // erst auf den aktuellen Stand bringen (derselbe Treffer), dann weiter (#250)
+                    st.refresh(&t, base, activity);
+                    let n = st.matches.len();
+                    st.current = if n == 0 { 0 } else { (st.current as i32 + step).rem_euclid(n as i32) as usize };
                 }
+                st.refreshed = now;
+                st.last_query = st.query.clone();
                 if let Some(m) = st.matches.get(st.current) {
-                    search::scroll_to(&mut session.term.lock().unwrap_or_else(|e| e.into_inner()), m.line);
+                    search::scroll_to(&mut t, m.line);
+                }
+            } else {
+                // Neue Ausgabe: Treffer nachführen, damit Markierungen nicht wandern und `current` gültig bleibt (#250);
+                // bei laufender Ausgabe höchstens viermal pro Sekunde.
+                let t = session.term.lock().unwrap_or_else(|e| e.into_inner());
+                let base = session.hist_base();
+                if st.stale(&t, base, activity) {
+                    if now - st.refreshed >= 0.25 {
+                        st.refresh(&t, base, activity);
+                        st.refreshed = now;
+                    } else {
+                        ui.ctx().request_repaint_after(Duration::from_millis(260));
+                    }
                 }
             }
             let n = st.matches.len();

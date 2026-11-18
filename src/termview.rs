@@ -213,22 +213,22 @@ fn paint(
     let selection = content.selection;
     let cursor = content.cursor;
 
-    // Suchtreffer
+    // Suchtreffer je sichtbarer Zeile: (erste Spalte, Ende, aktueller Treffer). Gezeichnet wird je Zelle NACH deren
+    // Hintergrund, sonst verdecken farbige Zeilen (Diffs, Statuszeilen) die Markierung (#250).
+    let hl = Color32::from_rgba_unmultiplied(0xe5, 0xc0, 0x7b, 90);
+    let hl_cur = Color32::from_rgba_unmultiplied(0xd9, 0x77, 0x57, 170);
+    let mut hits: Vec<Vec<(usize, usize, bool)>> = Vec::new();
     if let Some(st) = &session.search {
-        let hl = Color32::from_rgba_unmultiplied(0xe5, 0xc0, 0x7b, 90);
-        let hl_cur = Color32::from_rgba_unmultiplied(0xd9, 0x77, 0x57, 170);
+        hits = vec![Vec::new(); rows.max(0) as usize];
         for (i, m) in st.matches.iter().enumerate() {
             let row = m.line + offset;
             if row < 0 || row >= rows {
                 continue;
             }
-            let r = Rect::from_min_size(
-                Pos2::new(inner.min.x + m.col as f32 * cs.x, inner.min.y + row as f32 * cs.y),
-                Vec2::new(m.len as f32 * cs.x, cs.y),
-            );
-            painter.rect_filled(r, 2.0, if i == st.current { hl_cur } else { hl });
+            hits[row as usize].push((m.col, m.col + m.len, i == st.current));
         }
     }
+    let hit_at = |row: i32, col: usize| -> Option<bool> { hits.get(row as usize)?.iter().find(|(a, b, _)| col >= *a && col < *b).map(|h| h.2) };
 
     let cells: Vec<_> = content.display_iter.collect();
     let mut skip_until = 0usize;
@@ -277,6 +277,9 @@ fn paint(
         let cell_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, cs.y));
         if bg != theme.bg {
             painter.rect_filled(cell_rect, 0.0, bg);
+        }
+        if let Some(cur) = hit_at(row, ic.point.column.0) {
+            painter.rect_filled(cell_rect, 0.0, if cur { hl_cur } else { hl });
         }
         let ch = cell.c;
         // Emoji-Sequenzen (ZWJ, Flaggen, Hautfarbe, Keycap) zu einem Bild zusammensetzen.
