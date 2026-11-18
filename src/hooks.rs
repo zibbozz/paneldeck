@@ -54,6 +54,45 @@ pub struct HookMsg {
     pub claude_session: Option<String>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
+    /// `PANELDECK_SESSION_KEY` des Absenders (#260): nur Meldungen mit dem Schlüssel des laufenden Starts zählen.
+    pub key: Option<String>,
+    /// `source` bei SessionStart (`startup`, `resume`, `clear`, `compact`).
+    pub source: Option<String>,
+}
+
+/// Stammt die Meldung vom laufenden Start der Sitzung (#260)? `current` = Schlüssel dieses Starts (`Entry::session_key`).
+/// Ohne oder mit falschem Schlüssel (anderes Terminal, Prozess eines früheren Starts, Fälschung) nie.
+pub fn key_matches(current: &str, sent: Option<&str>) -> bool {
+    let Some(sent) = sent else { return false };
+    // Vergleich ohne frühen Abbruch (der Schlüssel ist ein Geheimnis).
+    !current.is_empty() && current.len() == sent.len() && current.bytes().zip(sent.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
+/// Zuordnung einer Meldung zur Konversation des laufenden Starts (#260, #245).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConvMatch {
+    /// Meldung ohne Konversations-ID: normal verarbeiten.
+    NoId,
+    /// Erste Konversation dieses Starts: übernehmen.
+    Bind(String),
+    /// Dieselbe Konversation.
+    Same,
+    /// Claude wechselt die Konversation (`/clear`, `/resume`, Zusammenfassen): übernehmen.
+    Switch(String),
+    /// Eine andere Konversation (z. B. ein von Claude gestartetes `claude -p` mit geerbter Umgebung): ignorieren.
+    Foreign,
+}
+
+/// `bound` = schon zugeordnete Konversation dieses Starts. Eine neue Konversation zählt nur als erste des Starts oder
+/// über SessionStart mit `source` `clear`/`resume`/`compact`; alles andere mit fremder ID wird verworfen.
+pub fn conv_match(bound: Option<&str>, m: &HookMsg) -> ConvMatch {
+    let Some(id) = m.claude_session.as_deref().filter(|c| !c.is_empty()) else { return ConvMatch::NoId };
+    match bound {
+        None => ConvMatch::Bind(id.to_string()),
+        Some(b) if b == id => ConvMatch::Same,
+        Some(_) if m.event == "SessionStart" && matches!(m.source.as_deref(), Some("clear" | "resume" | "compact")) => ConvMatch::Switch(id.to_string()),
+        Some(_) => ConvMatch::Foreign,
+    }
 }
 
 pub fn status_after(cur: ClaudeStatus, m: &HookMsg) -> ClaudeStatus {
@@ -375,6 +414,7 @@ fn parse_message(raw: &str, token: &str) -> Option<HookMsg> {
         return None;
     }
     let session = v.get("session")?.as_u64()?;
+    let key = v.get("key").and_then(|k| k.as_str()).map(str::to_string);
     let p = v.get("payload").cloned().unwrap_or(Value::Null);
     let s = |k: &str| p.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
     Some(HookMsg {
@@ -385,6 +425,8 @@ fn parse_message(raw: &str, token: &str) -> Option<HookMsg> {
         claude_session: s("session_id"),
         transcript_path: s("transcript_path"),
         cwd: s("cwd"),
+        key,
+        source: s("source"),
     })
 }
 
@@ -400,19 +442,20 @@ pub fn run_hook_client() -> i32 {
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
     // Nur die vom Hub benutzten Felder weiterreichen: Prompts, Tool-Eingaben und -Ausgaben sind oft > 64 KiB und
     // würden vom Server verworfen (→ Status/Fortsetzen/„Fertig“ gingen verloren).
-    const KEEP: [&str; 7] = ["hook_event_name", "notification_type", "message", "tool_name", "session_id", "transcript_path", "cwd"];
+    const KEEP: [&str; 8] = ["hook_event_name", "notification_type", "message", "tool_name", "session_id", "transcript_path", "cwd", "source"];
     let payload = match payload {
         Value::Object(m) => Value::Object(m.into_iter().filter(|(k, _)| KEEP.contains(&k.as_str())).collect()),
         other => other,
     };
-    send_event(port, &token, session, payload);
+    // Schlüssel des Starts mitsenden (#260): ohne ihn verwirft der Hub die Meldung.
+    send_event(port, &token, session, get(ENV_SESSION_KEY).as_deref(), payload);
     0
 }
 
-pub fn send_event(port: u16, token: &str, session: u64, payload: Value) {
+pub fn send_event(port: u16, token: &str, session: u64, key: Option<&str>, payload: Value) {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
-        let body = json!({"token": token, "session": session, "payload": payload}).to_string();
+        let body = json!({"token": token, "session": session, "key": key, "payload": payload}).to_string();
         let _ = s.write_all(body.as_bytes());
     }
 }
@@ -546,18 +589,45 @@ mod tests {
         let ctx = egui::Context::default();
         let srv = HookServer::start(&ctx).unwrap();
         // falscher Token wird ignoriert
-        send_event(srv.port, "falsch", 1, json!({"hook_event_name": "Stop"}));
+        send_event(srv.port, "falsch", 1, None, json!({"hook_event_name": "Stop"}));
         send_event(
             srv.port,
             &srv.token,
             7,
+            Some("k7"),
             json!({"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs permission", "session_id": "abc"}),
         );
         let m = srv.rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(m.session, 7);
+        assert_eq!(m.key.as_deref(), Some("k7"));
         assert_eq!(m.claude_session.as_deref(), Some("abc"));
         assert_eq!(status_after(ClaudeStatus::Working, &m), ClaudeStatus::Permission);
         assert!(srv.rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn hook_messages_are_bound_to_the_launch() {
+        // #260: nur der Schlüssel des laufenden Starts zählt
+        assert!(key_matches("abcd", Some("abcd")));
+        assert!(!key_matches("abcd", Some("abce")));
+        assert!(!key_matches("abcd", Some("abc")));
+        assert!(!key_matches("abcd", None), "alte/fremde Meldung ohne Schlüssel");
+        assert!(!key_matches("", Some("")), "kein laufender Start");
+        let msg = |ev: &str, id: Option<&str>, src: Option<&str>| HookMsg { event: ev.into(), claude_session: id.map(str::to_string), source: src.map(str::to_string), ..HookMsg::default() };
+        assert_eq!(conv_match(None, &msg("Stop", None, None)), ConvMatch::NoId);
+        assert_eq!(conv_match(None, &msg("SessionStart", Some("A"), Some("startup"))), ConvMatch::Bind("A".into()));
+        assert_eq!(conv_match(Some("A"), &msg("Stop", Some("A"), None)), ConvMatch::Same);
+        // Verschachteltes `claude -p` mit geerbter Umgebung: eigene Konversation, wird ignoriert
+        assert_eq!(conv_match(Some("A"), &msg("SessionStart", Some("B"), Some("startup"))), ConvMatch::Foreign);
+        assert_eq!(conv_match(Some("A"), &msg("UserPromptSubmit", Some("B"), None)), ConvMatch::Foreign);
+        assert_eq!(conv_match(Some("A"), &msg("SessionEnd", Some("B"), None)), ConvMatch::Foreign);
+        // /clear und /resume wechseln die Konversation
+        assert_eq!(conv_match(Some("A"), &msg("SessionStart", Some("C"), Some("clear"))), ConvMatch::Switch("C".into()));
+        assert_eq!(conv_match(Some("A"), &msg("SessionStart", Some("D"), Some("resume"))), ConvMatch::Switch("D".into()));
+        // `source` und der Schlüssel werden vom Hook-Aufruf weitergereicht
+        let raw = json!({"token": "t", "session": 3, "key": "k", "payload": {"hook_event_name": "SessionStart", "source": "clear", "session_id": "C"}}).to_string();
+        let m = parse_message(&raw, "t").unwrap();
+        assert_eq!((m.key.as_deref(), m.source.as_deref()), (Some("k"), Some("clear")));
     }
 
     #[test]

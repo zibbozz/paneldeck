@@ -101,6 +101,9 @@ struct Entry {
     /// Geheimer Schlüssel des laufenden Prozesses (`PANELDECK_SESSION_KEY`, #152): belegt die Sitzung als Aufrufer, wenn
     /// der Prozessbaum nicht hilft (WSL). Je Start neu, nie angezeigt, protokolliert oder gespeichert.
     session_key: String,
+    /// Konversation, die die Hooks dieses Starts gemeldet haben (#260): Meldungen mit einer anderen Konversations-ID
+    /// (z. B. ein von Claude gestartetes `claude -p`, das die Umgebung erbt) zählen nicht. Je Start neu.
+    hook_conv: Option<String>,
     /// Hinweis vom letzten Start (z. B. weggelassene Pfade aus den Claude-Optionen, #182); wird im nächsten Bild als
     /// Meldung gezeigt.
     launch_note: Option<String>,
@@ -112,7 +115,7 @@ impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), launched_claude, launched_opts, launch_note: None, progress: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: None, launched_claude, launched_opts, launch_note: None, progress: None }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -1622,6 +1625,7 @@ impl App {
         entry.launched_claude = entry.meta.claude && !entry.is_chat();
         entry.launched_opts = if entry.launched_claude { entry.meta.claude_opts_eff().0 } else { Default::default() };
         entry.hook_seen = false;
+        entry.hook_conv = None;
         let Some(mut shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
@@ -3139,6 +3143,19 @@ impl App {
             if e.is_chat() {
                 continue;
             }
+            // Nur Meldungen des laufenden Starts (#260): Schlüssel `PANELDECK_SESSION_KEY` dieses Starts. Ein anderes
+            // Terminal, ein übrig gebliebener Prozess eines früheren Starts oder eine Fälschung mit der bloßen Nummer
+            // ändert weder Status noch Konversation.
+            if !hooks::key_matches(&e.session_key, m.key.as_deref()) {
+                continue;
+            }
+            // Eine andere Konversation als die dieses Starts (z. B. `claude -p` aus der Sitzung heraus) zählt nicht.
+            let conv = hooks::conv_match(e.hook_conv.as_deref(), &m);
+            match &conv {
+                hooks::ConvMatch::Foreign => continue,
+                hooks::ConvMatch::Bind(id) | hooks::ConvMatch::Switch(id) => e.hook_conv = Some(id.clone()),
+                hooks::ConvMatch::NoId | hooks::ConvMatch::Same => {}
+            }
             let old = e.status;
             e.hook_seen = true;
             let sh = e.eff_shell().to_string();
@@ -3157,11 +3174,19 @@ impl App {
                 e.live_cwd = c.clone();
             }
             if e.is_claude() {
-                if let Some(cs) = m.claude_session.as_ref().filter(|c| !c.is_empty()) {
-                    e.meta.claude_session = cs.clone();
+                if let hooks::ConvMatch::Bind(cs) | hooks::ConvMatch::Switch(cs) = &conv {
+                    if e.meta.claude_session != *cs {
+                        e.meta.claude_session = cs.clone();
+                        // Eine andere Konversation als beim Start angegeben: Inhalt hat sie nur, wenn sie fortgesetzt wurde.
+                        e.meta.claude_started = false;
+                    }
                 }
-                if m.event == "UserPromptSubmit" {
-                    e.meta.claude_started = true;
+                match (m.event.as_str(), m.source.as_deref()) {
+                    // Fortgesetzte Konversation (`--resume`, `--continue`, `/resume`): sie hat Inhalt.
+                    ("SessionStart", Some("resume")) | ("UserPromptSubmit", _) => e.meta.claude_started = true,
+                    // `/clear`: neue, leere Konversation.
+                    ("SessionStart", Some("clear")) => e.meta.claude_started = false,
+                    _ => {}
                 }
             }
             let new = hooks::status_after(old, &m);
