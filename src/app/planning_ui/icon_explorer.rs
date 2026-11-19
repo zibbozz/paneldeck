@@ -282,16 +282,13 @@ impl IconExplorer {
         let mut open = true;
         let screen = ctx.content_rect();
         let size = Vec2::new(widgets::modal_width(ctx, 820.0), (screen.height() - 80.0).clamp(320.0, 560.0));
-        egui::Window::new(lang.t("Icon-Explorer", "Icon explorer"))
-            .id(style::salted(id))
+        style::movable(ctx, style::salted(id), egui::Window::new(lang.t("Icon-Explorer", "Icon explorer")))
             .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(true)
             .open(&mut open)
             .default_size(size)
             .min_size(Vec2::new(480.0, 320.0))
-            .pivot(Align2::CENTER_CENTER)
-            .default_pos(screen.center())
             .show(ctx, |ui| {
                 result = self.body(ui, id, lang, enter);
             });

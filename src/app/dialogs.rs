@@ -96,10 +96,9 @@ impl App {
         if let Some(mut p) = self.group_prompt.take() {
             let mut keep = true;
             let mut ok = false;
-            egui::Window::new(lang.t("Neuer Ordner für die Sitzung (z. B. Backend/API)", "New folder for the session (e.g. Backend/API)"))
+            style::movable(ctx, Id::new("group_prompt"), egui::Window::new(lang.t("Neuer Ordner für die Sitzung (z. B. Backend/API)", "New folder for the session (e.g. Backend/API)")))
                 .collapsible(false)
                 .resizable(false)
-                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
                 .show(ctx, |ui| {
                     let te = ui.text_edit_singleline(&mut p.text);
                     if !te.has_focus() {
@@ -131,7 +130,7 @@ impl App {
                 3 => lang.t("Als Vorlage speichern – Name", "Save as template – name"),
                 _ => lang.t("Prompt an alle Sitzungen im Ordner", "Prompt to all sessions in folder"),
             };
-            egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            style::movable(ctx, Id::new("folder_prompt"), egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
                 if fp.kind == 2 {
                     let n = self.folder_sessions(&fp.path).len();
                     ui.label(RichText::new(format!("{} {}", n, lang.t("Sitzungen", "sessions"))).small().color(style::dim(ui)));
@@ -247,7 +246,7 @@ impl App {
         };
         // Esc bei offener Vorschlagsliste schließt nur die Liste.
         let (mut ok, mut cancel) = (false, ctx.input(|i| i.key_pressed(Key::Escape)) && !egui::Popup::is_any_open(ctx));
-        egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+        style::movable(ctx, Id::new("text_prompt"), egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
             let blocked = match &mut p.picker {
                 // Ordnervorgabe mit WSL-Shell: Ordnerfeld mit Linux-Pfad (#172).
                 Some(picker) => {
@@ -339,7 +338,7 @@ impl App {
         let lang = self.settings.language;
         let mut open = true;
         let mut changed = false;
-        egui::Window::new(lang.t("Sitzungs-Vorlagen", "Session templates")).open(&mut open).default_width(480.0).show(ctx, |ui| {
+        style::movable(ctx, Id::new("templates_win"), egui::Window::new(lang.t("Sitzungs-Vorlagen", "Session templates"))).open(&mut open).default_width(480.0).show(ctx, |ui| {
             ui.label(RichText::new(lang.t("Eine Gruppen-Vorlage startet mehrere Sitzungen mit Ordner, Profil, Claude-Optionen und (optional) als Raster – mit einem Klick. Eine Terminal-Vorlage startet eine Sitzung mit allen Einstellungen. Alle Vorlagen stehen auch unten in der Seitenleiste.", "A group template starts several sessions with folder, profile, Claude options and (optionally) as a grid – in one click. A terminal template starts one session with all its settings. All templates are also at the bottom of the sidebar.")).small().color(style::dim(ui)));
             ui.add_space(S1);
             if self.templates.is_empty() {
@@ -400,10 +399,9 @@ impl App {
         let name = self.entries.get(&w.id).map(|e| e.display_name()).unwrap_or_default();
         let mut keep = true;
         let mut action: Option<u8> = None; // 0 behalten, 1 entfernen, 2 mergen
-        egui::Window::new(lang.t("Sitzung mit Worktree schließen", "Close session with worktree"))
+        style::movable(ctx, Id::new("wt_close_dialog"), egui::Window::new(lang.t("Sitzung mit Worktree schließen", "Close session with worktree")))
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.label(lang.q(&name));
                 ui.label(RichText::new(format!("{}: {}\n{}: {}", lang.t("Branch", "Branch"), wt.branch, lang.t("Ordner", "Folder"), wt.path)).small().color(style::dim(ui)));
@@ -487,7 +485,7 @@ impl App {
         let ctrl_enter = !self.terminal_has_focus(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Enter));
         let mut send = ctrl_enter;
         let (mut paste_only, mut to_queue, mut to_all, mut save_prompt) = (false, false, false, false);
-        egui::Window::new(lang.t("Prompt-Composer", "Prompt composer")).open(&mut open).default_size([680.0, 420.0]).show(ctx, |ui| {
+        style::movable(ctx, Id::new("composer_win"), egui::Window::new(lang.t("Prompt-Composer", "Prompt composer"))).open(&mut open).default_size([680.0, 420.0]).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{}: {}", lang.t("Ziel", "Target"), target)).strong());
                 ui.label(RichText::new(format!("{} {} · {} {}", self.composer_text.lines().count(), lang.t("Zeilen", "lines"), self.composer_text.chars().count(), lang.t("Zeichen", "characters"))).small().color(style::dim(ui)));
@@ -583,7 +581,7 @@ impl App {
         }
         let lang = self.settings.language;
         let mut open = true;
-        egui::Window::new(lang.t("Prompt-Bibliothek", "Prompt library"))
+        style::movable(ctx, Id::new("prompt_lib_win"), egui::Window::new(lang.t("Prompt-Bibliothek", "Prompt library")))
             .open(&mut open)
             .default_size([640.0, 360.0])
             .show(ctx, |ui| {
@@ -642,8 +640,7 @@ impl App {
             return;
         };
         let mut open = true;
-        egui::Window::new(format!("{} – {}", lang.t("Notizen", "Notes"), e.display_name()))
-            .id(Id::new("notes_win"))
+        style::movable(ctx, Id::new("notes_win"), egui::Window::new(format!("{} – {}", lang.t("Notizen", "Notes"), e.display_name())))
             .open(&mut open)
             .default_size([340.0, 220.0])
             .show(ctx, |ui| {
@@ -1102,11 +1099,11 @@ pub(super) fn new_dialog_ui(
     // verbraucht – kein Terminal dahinter bekommt es (#261, wie in den Einstellungen der Sitzung).
     let esc = !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     let body_h = dialog_body_height(ctx);
-    egui::Window::new(if d.claude { lang.t("Neue Claude-Sitzung", "New Claude session") } else { lang.t("Neue Sitzung", "New session") })
-        .id(Id::new("new_session_dialog"))
+    let title = if d.claude { lang.t("Neue Claude-Sitzung", "New Claude session") } else { lang.t("Neue Sitzung", "New session") };
+    // Verschiebbar an der Titelleiste, öffnet mittig, bleibt im Bild (#288).
+    style::movable(ctx, Id::new("new_session_dialog"), egui::Window::new(title))
         .collapsible(false)
         .resizable(false)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().id_salt("newdlg_scroll").max_height(body_h).min_scrolled_height(body_h).show(ui, |ui| {
                 egui::Grid::new("newgrid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
@@ -1340,6 +1337,69 @@ mod layout_tests {
             assert_ne!(c.label(Lang::De), c.label(Lang::En));
             assert_ne!(c.tip(Lang::De), c.tip(Lang::En));
         }
+    }
+
+    /// #288: Der Dialog öffnet mittig, lässt sich an der Titelleiste verschieben, behält die Position, solange er offen
+    /// ist, bleibt im Bildschirm und öffnet nach dem Schließen wieder mittig.
+    #[test]
+    fn the_new_session_dialog_can_be_dragged_by_its_title_bar_and_stays_on_screen() {
+        let ctx = egui::Context::default();
+        let mut d = NewDialog::new("pwsh".into(), true, ClaudeOpts::default());
+        let size = Vec2::new(1200.0, 800.0);
+        let screen = Rect::from_min_size(Pos2::ZERO, size);
+        let mut t = 0.0;
+        let mut step = |d: &mut NewDialog, ev: Vec<Event>| {
+            t += 0.1;
+            frame(&ctx, d, size, t, ev).0
+        };
+        let win = || ctx.memory(|m| m.area_rect(Id::new("new_session_dialog"))).expect("Fenster gezeichnet");
+        let btn = |pos: Pos2, pressed: bool| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        // Ziehen über mehrere Bilder (Drücken, Bewegen, Loslassen) wie mit der Maus.
+        let drag = |step: &mut dyn FnMut(&mut NewDialog, Vec<Event>) -> NewDlgOut, d: &mut NewDialog, from: Pos2, to: Pos2| {
+            assert_eq!(step(d, vec![Event::PointerMoved(from)]), NewDlgOut::Open);
+            assert_eq!(step(d, vec![btn(from, true)]), NewDlgOut::Open);
+            step(d, vec![Event::PointerMoved(from.lerp(to, 0.5))]);
+            step(d, vec![Event::PointerMoved(to)]);
+            assert_eq!(step(d, vec![btn(to, false)]), NewDlgOut::Open, "Ziehen schließt den Dialog nicht");
+            step(d, vec![]);
+        };
+        for _ in 0..4 {
+            step(&mut d, vec![]);
+        }
+        let start = win();
+        assert!((start.center() - screen.center()).length() < 2.0, "öffnet mittig: {start:?}");
+        // Titelleiste: oberer Rand des Fensters, rechts vom Titeltext (kein Knopf dort).
+        let grip = Pos2::new(start.max.x - 30.0, start.min.y + 10.0);
+        let delta = Vec2::new(-150.0, -90.0);
+        drag(&mut step, &mut d, grip, grip + delta);
+        let moved = win();
+        assert!((moved.min - (start.min + delta)).length() < 1.5, "verschoben um {delta:?}: {start:?} → {moved:?}");
+        assert_eq!(moved.size(), start.size(), "Größe bleibt");
+        // Solange der Dialog offen ist, bleibt er dort.
+        for _ in 0..3 {
+            step(&mut d, vec![]);
+        }
+        assert_eq!(win(), moved, "Position bleibt, solange der Dialog offen ist");
+        // Weit über den Rand gezogen: bleibt im Bildschirm.
+        let grip = Pos2::new(moved.max.x - 30.0, moved.min.y + 10.0);
+        drag(&mut step, &mut d, grip, grip + Vec2::new(-3000.0, -3000.0));
+        let edge = win();
+        assert!(screen.contains_rect(edge), "bleibt im Bildschirm: {edge:?}");
+        assert!(edge.min.x <= 1.0 && edge.min.y <= 1.0, "am linken oberen Rand: {edge:?}");
+        let grip = Pos2::new(edge.max.x - 30.0, edge.min.y + 10.0);
+        drag(&mut step, &mut d, grip, grip + Vec2::new(5000.0, 5000.0));
+        // (egui rundet auf Pixel; Rahmenstrich kann Bruchteile überstehen)
+        assert!(screen.expand(0.5).contains_rect(win()), "bleibt im Bildschirm: {:?}", win());
+        assert!(win().max.x >= size.x - 1.0 && win().max.y >= size.y - 1.0, "am rechten unteren Rand: {:?}", win());
+        // Ein Bild ohne Dialog (geschlossen), dann wieder öffnen: wieder mittig.
+        t += 0.1;
+        let _ = ctx.run(RawInput { screen_rect: Some(screen), time: Some(t), ..Default::default() }, |_| {});
+        let mut d = NewDialog::new("pwsh".into(), true, ClaudeOpts::default());
+        for _ in 0..3 {
+            t += 0.1;
+            frame(&ctx, &mut d, size, t, vec![]);
+        }
+        assert!((win().center() - screen.center()).length() < 2.0, "öffnet wieder mittig: {:?}", win());
     }
 }
 

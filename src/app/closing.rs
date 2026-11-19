@@ -432,7 +432,7 @@ pub(super) fn confirmed(secs: u32, clicked: bool, enter: bool) -> bool {
 pub(super) fn confirm_window_keep(ctx: &egui::Context, id: Id, title: &str, button: &str, keep: Option<&str>, secs: u32, lang: Lang, width: f32, body: impl FnOnce(&mut Ui)) -> Outcome {
     let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), i.consume_key(Modifiers::NONE, Key::Enter)));
     let (mut clicked, mut kept, mut cancel) = (false, false, esc);
-    egui::Window::new(title).id(id).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+    style::movable(ctx, id, egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
         ui.set_max_width(width);
         body(ui);
         ui.add_space(S2);

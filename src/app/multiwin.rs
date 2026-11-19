@@ -923,11 +923,9 @@ impl App {
         let hidden_ids: Vec<u64> = plan.end.iter().copied().filter(|id| !self.layout.as_ref().is_some_and(|l| l.contains(*id))).collect();
         let hidden = names(&hidden_ids);
         let n = plan.running;
-        egui::Window::new(lang.t("Fenster schließen?", "Close window?"))
-            .id(Id::new(("close_win_ask", w.id)))
+        style::movable(ctx, Id::new(("close_win_ask", w.id)), egui::Window::new(lang.t("Fenster schließen?", "Close window?")))
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_max_width(420.0);
                 if n == 1 {
