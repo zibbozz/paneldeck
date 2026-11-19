@@ -49,6 +49,7 @@ mod palette_ui;
 mod osc52;
 mod link_ask;
 mod list_edit;
+mod opts_tabs;
 mod vt_notify;
 mod panels;
 mod paste_ask;
@@ -4191,6 +4192,12 @@ impl eframe::App for App {
         self.check_budget(ctx);
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = self.main_frame_begin(ctx);
+        // Reiter der Sitzungsdialoge (#292): Standards zum Zählen/Zurücksetzen; Tasten zum Wechseln der Reiter gehören
+        // dem offenen Dialog, nicht den globalen Kürzeln.
+        ctx.data_mut(|d| d.insert_temp(Id::new("claude_user_defaults"), self.settings.claude_defaults.sanitized(false)));
+        if self.new_dialog.is_some() || self.session_settings.is_some() || self.tpl.form.is_some() {
+            opts_tabs::grab_keys(ctx);
+        }
         self.titlebar(ctx);
         self.backup_tick(ctx);
         self.window_edges(ctx);
