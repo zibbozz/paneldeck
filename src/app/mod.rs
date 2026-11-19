@@ -1754,6 +1754,15 @@ impl App {
         self.dir.join("scrollback").join(format!("{id}.txt"))
     }
 
+    /// Shell einer Sitzung, wie sie beim Start aufgelöst wird (Profil mit eigenem Programm, sonst die Shell bzw. die
+    /// Standard-Shell) – für die Vorschau der Kommandozeile in den Dialogen (#292).
+    fn preview_spec(&self, shell_id: &str, profile: u64) -> Option<ShellSpec> {
+        if let Some(p) = self.profile(profile).filter(|p| !p.program.trim().is_empty()) {
+            return Some(ShellSpec { id: custom_program_shell_id(p), label: p.name.clone(), program: p.program.clone(), args: split_args(&p.args) });
+        }
+        self.shell_by_id(shell_id)
+    }
+
     /// Vorbelegung der Claude-Optionen im Dialog „Neue Sitzung“: letzte Wahl, sonst die Standards der Einstellungen.
     fn dialog_claude_opts(&self) -> ClaudeOpts {
         self.settings.last_claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone()).sanitized(false)
@@ -1936,7 +1945,28 @@ impl App {
                 entry.meta.transcript.clear();
                 self.usage.reset(entry.meta.id);
             }
-            Some(c)
+            // Zu lang für cmd (claude.cmd läuft darüber, #289): Claude nicht starten, sondern sagen, warum.
+            let len = c.trim_end().chars().count();
+            if len > crate::claude_opts::MAX_COMMAND_LEN {
+                let msg = format!(
+                    "{} ({}): {len} > {}",
+                    state::t(
+                        "Claude nicht gestartet – die Befehlszeile ist zu lang (System-Prompt oder Listen in den Claude-Optionen kürzen)",
+                        "Claude not started – the command line is too long (shorten the system prompt or the lists in the Claude options)",
+                    ),
+                    entry.display_name(),
+                    crate::claude_opts::MAX_COMMAND_LEN,
+                );
+                entry.launch_note = Some(match entry.launch_note.take() {
+                    Some(n) => format!("{n}\n{msg}"),
+                    None => msg,
+                });
+                entry.launched_claude = false;
+                entry.launched_opts = Default::default();
+                None
+            } else {
+                Some(c)
+            }
         } else {
             self.usage.reset(entry.meta.id);
             None
@@ -4235,8 +4265,16 @@ impl eframe::App for App {
         // Reiter der Sitzungsdialoge (#292): Standards zum Zählen/Zurücksetzen; Tasten zum Wechseln der Reiter gehören
         // dem offenen Dialog, nicht den globalen Kürzeln.
         ctx.data_mut(|d| d.insert_temp(Id::new("claude_user_defaults"), self.settings.claude_defaults.sanitized(false)));
-        if self.new_dialog.is_some() || self.session_settings.is_some() || self.tpl.form.is_some() {
-            opts_tabs::grab_keys(ctx);
+        // Nur der Dialog, der gerade die Tastatur hat (Fokus bzw. letzter Klick in seinem Fenster), nimmt sie.
+        for (open, salt, win) in [
+            (self.new_dialog.is_some(), "newdlg", "new_session_dialog"),
+            (self.session_settings.is_some(), "sset", "session_settings"),
+            (self.tpl.form.is_some(), "tpled", "tpl_editor"),
+            (self.settings_open && self.settings_tab == 2, "defaults", "settings_win"),
+        ] {
+            if open {
+                opts_tabs::grab_keys(ctx, salt, Id::new(win));
+            }
         }
         self.titlebar(ctx);
         self.backup_tick(ctx);

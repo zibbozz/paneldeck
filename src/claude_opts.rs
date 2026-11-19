@@ -221,18 +221,40 @@ pub fn normalize_multiline(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
 }
 
-/// Mehrzeiligen Text als ein Argument für die Shell: POSIX-Shells (bash, zsh in WSL und Git Bash) `$'z1\nz2'` mit
-/// echten Zeilenumbrüchen. PowerShell und cmd: Zeilen mit Leerzeichen verbunden – ein Zeilenumbruch in einem Argument
-/// beendet in cmd die Zeile, und `claude` ist unter Windows oft eine `.cmd`-Datei (npm), die über cmd läuft: der Rest
-/// der Zeile (auch `--session-id`) ginge verloren. Einzeilig wie [`quote`]. Der Text ist geprüft
+/// Mehrzeiligen Text als ein Argument für die Shell. Echte Zeilenumbrüche nur mit `ansi_c` – einer Shell, die sicher
+/// bash ist (Git Bash): `$'z1\nz2'`. Sonst werden die Zeilen mit Leerzeichen verbunden: in WSL kann die Login-Shell
+/// fish (Syntaxfehler) oder nushell sein (`$'…'` wertet dort `(…)` aus – ein Befehl liefe); ein Zeilenumbruch in einem
+/// Argument beendet in cmd die Zeile, und `claude` ist unter Windows oft eine `.cmd`-Datei (npm), die über cmd läuft –
+/// der Rest der Zeile (auch `--session-id`) ginge verloren. Einzeilig wie [`quote`]. Der Text ist geprüft
 /// ([`valid_system_prompt`]: kein `\`, keine Shell-Zeichen).
-fn quote_multiline(kind: Kind, s: &str) -> String {
+fn quote_multiline(kind: Kind, s: &str, ansi_c: bool) -> String {
     if !s.contains('\n') {
         return quote(kind, s);
     }
-    match kind {
-        Kind::Posix => format!("$'{}'", s.replace('\'', "\\'").replace('\n', "\\n")),
-        Kind::Pwsh | Kind::Cmd => quote(kind, &s.split('\n').map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")),
+    if kind == Kind::Posix && ansi_c {
+        return format!("$'{}'", s.replace('\'', "\\'").replace('\n', "\\n"));
+    }
+    quote(kind, &s.split('\n').map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" "))
+}
+
+/// Grenze von cmd für eine Befehlszeile (`claude.cmd` läuft über cmd): länger startet Paneldeck Claude nicht.
+pub const MAX_COMMAND_LEN: usize = 8191;
+/// Ab dieser Länge der Befehlszeile warnt die Oberfläche.
+pub const WARN_COMMAND_LEN: usize = 8000;
+
+/// Vergleichsschlüssel eines Pfads gegen Doppelte: Windows-Pfade ohne Groß-/Kleinschreibung und ohne Trenner am Ende,
+/// Linux-Pfade nur ohne `/` am Ende.
+pub fn path_key(p: &str) -> String {
+    let t = p.trim();
+    let b = t.as_bytes();
+    let windows = (b.len() >= 2 && b[1] == b':') || t.starts_with("\\\\");
+    if windows {
+        let s = t.replace('/', "\\").to_lowercase();
+        let s = s.trim_end_matches('\\');
+        if s.len() == 2 { format!("{s}\\") } else { s.to_string() }
+    } else {
+        let s = t.trim_end_matches('/');
+        if s.is_empty() { "/".to_string() } else { s.to_string() }
     }
 }
 
@@ -464,7 +486,7 @@ impl Serialize for ExtraOpts {
 fn clean_paths(list: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for d in list.iter().map(|d| d.trim()) {
-        if valid_list_path(d) && !out.iter().any(|x| x == d) && out.len() < MAX_DIRS {
+        if valid_list_path(d) && !out.iter().any(|x| path_key(x) == path_key(d)) && out.len() < MAX_DIRS {
             out.push(d.to_string());
         }
     }
@@ -604,14 +626,15 @@ impl ExtraOpts {
 
     /// Wertoptionen als Kommandozeilen-Teil (mit führendem Leerzeichen), gequotet für `kind`. Pfade, die es (noch) nicht
     /// gibt oder die nicht lokal sind, fallen weg (geprüft bei jedem Start) und werden gemeldet.
-    fn value_args(&self, kind: Kind, style: PathStyle) -> ValueArgs {
+    fn value_args(&self, kind: Kind, style: PathStyle, check_fs: bool) -> ValueArgs {
         let mut e = self.sanitized();
         let mut dropped = Vec::new();
         let mut line = String::new();
         // Lokale Pfade müssen existieren; Linux-Pfade gelten nur in WSL-Sitzungen (ungeprüft, siehe `wsl_linux_path`).
+        // Ohne `check_fs` (Vorschau) nur die Form, nie ein Zugriff aufs Dateisystem.
         let mut usable = |list: &mut Vec<String>, dir: bool| {
             let (ok, missing): (Vec<String>, Vec<String>) =
-                std::mem::take(list).into_iter().partition(|p| if wsl_linux_path(p) { style == PathStyle::Wsl } else { check_path(p, dir).is_ok() });
+                std::mem::take(list).into_iter().partition(|p| if wsl_linux_path(p) { style == PathStyle::Wsl } else { !check_fs || check_path(p, dir).is_ok() });
             dropped.extend(missing);
             *list = ok;
         };
@@ -641,7 +664,7 @@ impl ExtraOpts {
             line += " --strict-mcp-config";
         }
         if !e.system_prompt.is_empty() {
-            line += &format!(" --system-prompt {}", quote_multiline(kind, &e.system_prompt));
+            line += &format!(" --system-prompt {}", quote_multiline(kind, &e.system_prompt, style == PathStyle::Slash));
         }
         if !e.append_system_prompt.is_empty() {
             line += &format!(" --append-system-prompt {}", quote(kind, &e.append_system_prompt));
@@ -785,9 +808,20 @@ impl ClaudeOpts {
         if !legacy_rest.trim().is_empty() {
             line += &format!(" {}", legacy_args(legacy_rest, kind));
         }
-        let v = o.extra.value_args(kind, style);
+        let v = o.extra.value_args(kind, style, true);
         line += &v.line;
         LaunchArgs { line, applied: ClaudeOpts { extra: ExtraOpts { flags: o.extra.flags.clone(), ..v.applied }, ..o }, dropped: v.dropped }
+    }
+
+    /// Wie [`ClaudeOpts::launch`] für die Vorschau in der Oberfläche: ohne jeden Zugriff aufs Dateisystem (Pfade nur
+    /// nach Form; fehlende würden erst beim Start weggelassen).
+    pub fn preview(&self, kind: Kind, style: PathStyle, legacy_rest: &str) -> String {
+        let o = self.sanitized(true);
+        let mut line = o.args(kind);
+        if !legacy_rest.trim().is_empty() {
+            line += &format!(" {}", legacy_args(legacy_rest, kind));
+        }
+        line + &o.extra.value_args(kind, style, false).line
     }
 
     /// Prüft die optionalen Parameter `model`/`effort`/`permission_mode`/`agent`/`claude_flags` von `create_session`.
@@ -1153,14 +1187,12 @@ impl<'de> Deserialize<'de> for ClaudeOpts {
             plugin_dirs: list("plugin_dirs"),
             allowed_tools: s("allowed_tools"),
             disallowed_tools: s("disallowed_tools"),
-            // Liste (#289); der einzelne Wert älterer Versionen kommt dazu (vorn, ohne Doppelte).
-            mcp_configs: {
-                let mut v = list("mcp_configs");
-                let one = s("mcp_config");
-                if !one.is_empty() && !v.contains(&one) {
-                    v.insert(0, one);
-                }
-                v
+            // Liste (#289); der einzelne Wert älterer Versionen nur, wenn die Liste fehlt (sonst ist er nur ihr gespiegelter
+            // erster Eintrag – ein von Hand entfernter Eintrag käme sonst zurück).
+            mcp_configs: if v.get("mcp_configs").is_some() {
+                list("mcp_configs")
+            } else {
+                Some(s("mcp_config")).filter(|x| !x.is_empty()).into_iter().collect()
             },
             strict_mcp_config: v.get("strict_mcp_config").and_then(|x| x.as_bool()).unwrap_or(false),
             system_prompt: v.get("system_prompt").and_then(|x| x.as_str()).map(normalize_multiline).unwrap_or_default(),
@@ -2008,9 +2040,11 @@ mod tests {
         // Neue Datei: Liste, erster Eintrag doppelt als mcp_config – keine Doppelten.
         let new: ClaudeOpts = serde_json::from_value(json!({"mcp_config": a, "mcp_configs": [a, b]})).unwrap();
         assert_eq!(new.extra.mcp_configs, vec![a.to_string(), b.to_string()]);
-        // Von einer älteren Version geändert (nur mcp_config neu): kommt vorn dazu.
+        // Mit Liste zählt nur die Liste: ein von Hand entfernter Eintrag kommt über den Spiegel nicht zurück.
         let mixed: ClaudeOpts = serde_json::from_value(json!({"mcp_config": b, "mcp_configs": [a]})).unwrap();
-        assert_eq!(mixed.extra.mcp_configs, vec![b.to_string(), a.to_string()]);
+        assert_eq!(mixed.extra.mcp_configs, vec![a.to_string()]);
+        let emptied: ClaudeOpts = serde_json::from_value(json!({"mcp_config": a, "mcp_configs": []})).unwrap();
+        assert!(emptied.extra.mcp_configs.is_empty());
         // Rundweg
         let back: ClaudeOpts = serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
         assert_eq!(back, new);
@@ -2041,7 +2075,11 @@ mod tests {
         // Mehrzeilig je Shell: POSIX-Shells $'…' mit Zeilenumbrüchen, PowerShell und cmd mit Leerzeichen (claude.cmd).
         let m = o("Line 1\nIt's 2\n\n$x");
         assert_eq!(m.args_for(Kind::Pwsh, PathStyle::Native), " --system-prompt 'Line 1 It''s 2 $x' --append-system-prompt 'Then this.'");
-        assert_eq!(m.args_for(Kind::Posix, PathStyle::Native), " --system-prompt $'Line 1\\nIt\\'s 2\\n\\n$x' --append-system-prompt 'Then this.'");
+        assert_eq!(m.args_for(Kind::Posix, PathStyle::Slash), " --system-prompt $'Line 1\\nIt\\'s 2\\n\\n$x' --append-system-prompt 'Then this.'", "Git Bash: echte Zeilenumbrüche");
+        // WSL (Login-Shell unbekannt: fish, nushell …) und andere POSIX-Shells: kein $'…', Zeilen mit Leerzeichen.
+        for style in [PathStyle::Wsl, PathStyle::Native] {
+            assert_eq!(m.args_for(Kind::Posix, style), " --system-prompt 'Line 1 It'\\''s 2 $x' --append-system-prompt 'Then this.'", "{style:?}");
+        }
         assert_eq!(m.args_for(Kind::Cmd, PathStyle::Native), " --system-prompt \"Line 1 It's 2 $x\" --append-system-prompt \"Then this.\"");
         // Die Zeile enthält nie einen echten Zeilenumbruch (sie wird in die Shell getippt).
         for k in [Kind::Pwsh, Kind::Posix, Kind::Cmd] {
@@ -2050,6 +2088,23 @@ mod tests {
         // Ungültig: nicht übergeben
         assert_eq!(o("a & calc").args_for(Kind::Pwsh, PathStyle::Native), " --append-system-prompt 'Then this.'");
         assert_eq!(o("x").to_json()["claude_user_options"], json!(["system_prompt", "append_system_prompt"]));
+    }
+
+    #[test]
+    fn duplicates_ignore_case_and_trailing_separators_and_preview_never_touches_the_disk() {
+        assert_eq!(path_key("C:\\Work\\"), path_key("c:/work"));
+        assert_eq!(path_key("D:\\"), path_key("d:"));
+        assert_ne!(path_key("/home/U"), path_key("/home/u"), "Linux-Pfade unterscheiden Groß-/Kleinschreibung");
+        assert_eq!(path_key("/srv/x/"), path_key("/srv/x"));
+        if cfg!(windows) {
+            let e = ExtraOpts { add_dirs: vec!["C:\\Work".into(), "c:\\work\\".into(), "C:/WORK".into()], ..Default::default() };
+            assert_eq!(e.sanitized().add_dirs, vec!["C:\\Work".to_string()]);
+            // Vorschau: fehlende Pfade bleiben (nur Form), Start: weggelassen.
+            let o = ClaudeOpts { extra: ExtraOpts { add_dirs: vec!["C:\\gibt-es-nicht\\x".into()], ..Default::default() }, ..Default::default() };
+            assert!(o.preview(Kind::Pwsh, PathStyle::Native, "").contains("--add-dir 'C:\\gibt-es-nicht\\x'"));
+            assert!(!o.launch(Kind::Pwsh, PathStyle::Native, "").line.contains("--add-dir"));
+            assert!(o.preview(Kind::Pwsh, PathStyle::Native, "--x val").contains("--x"), "mit freien Resten");
+        }
     }
 
     #[test]

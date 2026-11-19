@@ -507,16 +507,19 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
     let mut out = FormOutcome::Open;
     let esc = esc_ok && !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     // Reiter wie im Dialog „Neue Sitzung“ (#292): öffnet auf „Allgemein“, Strg+Tab/Alt+1 … wechseln, Enter speichert.
-    let enter = esc_ok && !value_suggest::wants_enter(ctx, egui::Id::new(("session_tags", f.id))) && tabs::enter_confirms(ctx);
+    let win = Id::new("session_settings");
     if f.focus {
         tabs::set(ctx, SALT, Tab::General);
+        tabs::activate(ctx, SALT);
     }
+    // Nicht modal: nur mit der Tastatur im Fenster (Enter im Terminal speichert nicht).
+    let enter = esc_ok && !value_suggest::wants_enter(ctx, egui::Id::new(("session_tags", f.id))) && tabs::enter_confirms(ctx, SALT, win);
     let claude_on = f.v.claude && !f.chat;
     let tab_list = tabs::session_tabs(claude_on);
-    tabs::handle_keys(ctx, SALT, &tab_list);
+    tabs::handle_keys(ctx, SALT, win, &tab_list);
     let defaults = super::dialogs::user_defaults(ctx);
     let width = tabs::dialog_width(ctx);
-    style::movable(ctx, Id::new("session_settings"), egui::Window::new(lang.t("Einstellungen der Sitzung", "Session settings")))
+    style::movable(ctx, win, egui::Window::new(lang.t("Einstellungen der Sitzung", "Session settings")))
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
@@ -530,6 +533,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 infos.extend(super::dialogs::claude_tab_infos(&f.v.copts, &defaults, &chk));
             }
             let tab = tabs::strip(ui, lang, SALT, &infos);
+            let invalid = tabs::invalid_hint(lang, &infos);
             tabs::body(ui, SALT, tab, body_h, |ui| {
                 if tab != Tab::General {
                     let SessionForm { v, .. } = &mut *f;
@@ -586,7 +590,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     value_suggest::suggest_edit(ui, egui::Id::new(("session_tags", f.id)), &mut f.v.tags, &f.tag_values, &[], value_suggest::Mode::List, lang, |ui, te| ui.add(te.hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(320.0)));
                     ui.end_row();
                     ui.label(lang.t("Notizen", "Notes"));
-                    super::opts_tabs::notes_edit(ui, &mut f.v.notes, super::dialogs::FIELD_W);
+                    super::opts_tabs::notes_edit(ui, SALT, &mut f.v.notes, super::dialogs::FIELD_W);
                     ui.end_row();
                     if f.chat {
                         return;
@@ -668,8 +672,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
             // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
             f.opts_ok = !f.v.claude || super::dialogs::check_opts(ui.ctx(), lang, &f.v.copts, SALT, super::dialogs::OptsPlace::Session, &target).ok();
             if claude_on {
-                let spec = shells.iter().find(|s| s.id == f.v.shell_id);
-                tabs::preview(ui, lang, SALT, || super::dialogs::preview_line(&f.v.copts, spec));
+                super::dialogs::claude_preview(ui, lang, SALT, &f.v.copts, shells.iter().find(|s| s.id == f.v.shell_id));
             }
             if f.chat {
                 ui.add_space(S1);
@@ -688,6 +691,9 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 mark(ui, "save", &save);
                 if save.clicked() {
                     out = FormOutcome::Save;
+                }
+                if let Some(h) = &invalid {
+                    ui.label(RichText::new(h).small().color(Color32::from_rgb(0xe0, 0x6c, 0x75)));
                 }
                 let cancel = ui.button(lang.t("Abbrechen", "Cancel"));
                 mark(ui, "cancel", &cancel);
@@ -888,6 +894,10 @@ impl App {
         let hint = f.needs_reload(&self.settings.profiles, &default_shell);
         let esc_ok = self.reload_ask.is_none();
         f.target = self.session_form_target(&f, &default_shell);
+        // Vorschau der Kommandozeile wie beim Start: Shell (auch eigenes Programm des Profils) und freie Reste.
+        let legacy = self.entries.get(&f.id).map(|e| e.meta.claude_opts_eff().1).unwrap_or_default();
+        let spec = self.preview_spec(&f.v.shell_id, f.v.profile);
+        ctx.data_mut(|d| d.insert_temp(super::dialogs::preview_target_id("sset"), (spec, legacy)));
         match session_form_ui(ctx, &mut f, &self.shells, &self.settings.profiles, self.settings.claude_mode, hint, esc_ok, lang) {
             FormOutcome::Open => self.session_settings = Some(f),
             FormOutcome::Cancel => self.want_focus = Some(self.focused),

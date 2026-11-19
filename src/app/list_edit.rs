@@ -79,7 +79,8 @@ fn mark(ui: &Ui, salt: &str, key: &'static str, r: &egui::Response) {
 }
 
 /// Die Liste mit **+**/**−** zeichnen. `issue(eintrag)` liefert eine Begründung, wenn der Eintrag ungültig ist;
-/// `pick` öffnet den Dialog und liefert den neuen Eintrag (`Ok(None)` = abgebrochen, `Err` = Hinweis). `max` =
+/// `pick` öffnet den Dialog und liefert den neuen Eintrag samt optionalem Hinweis (`Ok(None)` = abgebrochen, `Err` =
+/// Hinweis statt Eintrag). Doppelte zählen ohne Groß-/Kleinschreibung und Trenner am Ende (Windows-Pfade). `max` =
 /// Höchstzahl der Einträge. Rückgabe: Liste geändert.
 pub(super) fn list_editor(
     ui: &mut Ui,
@@ -89,7 +90,7 @@ pub(super) fn list_editor(
     kind: ListKind,
     max: usize,
     issue: &dyn Fn(&str) -> Option<String>,
-    pick: &mut dyn FnMut() -> Result<Option<String>, String>,
+    pick: &mut dyn FnMut() -> Result<Option<(String, Option<String>)>, String>,
 ) -> bool {
     let id = Id::new(("list_edit", salt.to_string()));
     let mut st: State = ui.data(|d| d.get_temp(id)).unwrap_or_default();
@@ -167,9 +168,11 @@ pub(super) fn list_editor(
                 if add.clicked() {
                     st.note = None;
                     match pick() {
-                        Ok(Some(p)) => {
+                        Ok(Some((p, note))) => {
                             let p = p.trim().to_string();
-                            match items.iter().position(|x| x == &p) {
+                            st.note = note;
+                            let key = crate::claude_opts::path_key(&p);
+                            match items.iter().position(|x| crate::claude_opts::path_key(x) == key) {
                                 Some(i) => {
                                     st.selected = Some(i);
                                     st.note = Some(lang.t("Schon in der Liste.", "Already in the list.").to_string());
@@ -249,9 +252,10 @@ pub(super) fn list_editor(
 }
 
 /// Neuen Eintrag über den Dialog wählen: Ordner bzw. JSON-Datei. Für WSL-Sitzungen startet der Dialog in
-/// `\\wsl.localhost\<Distro>\` (ungeprüft, siehe `folder_picker`); ein Pfad dort wird zum Linux-Pfad (andere
-/// Distribution: Hinweis). Windows-Pfade bleiben, wie sie sind (sie werden beim Start für WSL umgerechnet).
-pub(super) fn pick_entry(kind: ListKind, target: &Target, lang: Lang) -> Result<Option<String>, String> {
+/// `\\wsl.localhost\<Distro>\` (ungeprüft, siehe `folder_picker`); ein Pfad dort wird zum Linux-Pfad. `linux_ok`: auch
+/// ohne WSL-Shell Linux-Pfade annehmen (Standards, Vorlagen – sie gelten dann nur in WSL-Sitzungen). Windows-Pfade
+/// bleiben, wie sie sind (sie werden beim Start für WSL umgerechnet).
+pub(super) fn pick_entry(kind: ListKind, target: &Target, lang: Lang, linux_ok: bool) -> Result<Option<(String, Option<String>)>, String> {
     let start = match target {
         Target::Wsl { distro, .. } => format!(r"\\wsl.localhost\{}", distro.as_deref().map(|d| format!("{d}\\")).unwrap_or_default()),
         Target::Windows => String::new(),
@@ -262,32 +266,38 @@ pub(super) fn pick_entry(kind: ListKind, target: &Target, lang: Lang) -> Result<
         (ListKind::JsonFiles, _) => crate::platform::notify::pick_json(&start),
     };
     match picked {
-        Some(p) => picked_to_entry(&p, target, lang).map(Some),
+        Some(p) => picked_to_entry(&p, target, lang, linux_ok).map(Some),
         None => Ok(None),
     }
 }
 
-/// Gewählten Pfad als Eintrag: `\\wsl.localhost\<D>\…` → Linux-Pfad (nur für WSL-Sitzungen derselben Distribution),
-/// sonst unverändert.
-pub(super) fn picked_to_entry(p: &str, target: &Target, lang: Lang) -> Result<String, String> {
+/// Gewählten Pfad als Eintrag (mit Hinweis): `\\wsl.localhost\<D>\…` → Linux-Pfad – für eine WSL-Sitzung derselben
+/// Distribution; ist ihre Distribution die Standard-Distribution (unbekannt, welche), mit Hinweis; ohne WSL-Shell nur mit
+/// `linux_ok` und Hinweis. Sonst unverändert.
+pub(super) fn picked_to_entry(p: &str, target: &Target, lang: Lang, linux_ok: bool) -> Result<(String, Option<String>), String> {
     let Some((d, linux)) = crate::wsl::unc_to_linux(p) else {
-        return Ok(p.to_string());
+        return Ok((p.to_string(), None));
     };
+    if !(crate::claude_opts::wsl_linux_path(&linux) || (!cfg!(windows) && crate::claude_opts::valid_path(&linux))) {
+        return Err(format!("{}: {}", lang.q(&linux), lang.t("Pfad mit unerlaubten Zeichen (\" % ! ^ & | < > \\)", "path with characters that are not allowed (\" % ! ^ & | < > \\)")));
+    }
     match target {
-        Target::Wsl { distro, .. } => {
-            if distro.as_deref().is_some_and(|x| !x.eq_ignore_ascii_case(&d)) {
-                return Err(if lang == Lang::De {
-                    format!("{} liegt in der Distribution {}, die Sitzung nutzt {}.", lang.q(p), lang.q(&d), lang.q(distro.as_deref().unwrap_or("")))
-                } else {
-                    format!("{} is in the distribution {}, the session uses {}.", lang.q(p), lang.q(&d), lang.q(distro.as_deref().unwrap_or("")))
-                });
-            }
-            if crate::claude_opts::wsl_linux_path(&linux) || (!cfg!(windows) && crate::claude_opts::valid_path(&linux)) {
-                Ok(linux)
+        Target::Wsl { distro: Some(x), .. } if !x.eq_ignore_ascii_case(&d) => Err(if lang == Lang::De {
+            format!("{} liegt in der Distribution {}, die Sitzung nutzt {}.", lang.q(p), lang.q(&d), lang.q(x))
+        } else {
+            format!("{} is in the distribution {}, the session uses {}.", lang.q(p), lang.q(&d), lang.q(x))
+        }),
+        Target::Wsl { distro: Some(_), .. } => Ok((linux, None)),
+        // Standard-Distribution: welche das ist, lässt sich hier nicht prüfen (wsl.exe könnte die Oberfläche blockieren).
+        Target::Wsl { distro: None, .. } => Ok((
+            linux,
+            Some(if lang == Lang::De {
+                format!("Gilt nur, wenn {} deine Standard-Distribution ist.", lang.q(&d))
             } else {
-                Err(format!("{}: {}", lang.q(&linux), lang.t("Pfad mit unerlaubten Zeichen (\" % ! ^ & | < > \\)", "path with characters that are not allowed (\" % ! ^ & | < > \\)")))
-            }
-        }
+                format!("Applies only if {} is your default WSL distribution.", lang.q(&d))
+            }),
+        )),
+        Target::Windows if linux_ok => Ok((linux, Some(lang.t("Linux-Pfad: gilt nur in WSL-Sitzungen.", "Linux path: applies only to WSL sessions.").to_string()))),
         Target::Windows => Err(lang.t("Ordner in WSL gibt es nur für WSL-Sitzungen.", "WSL folders are only available for WSL sessions.").to_string()),
     }
 }
@@ -300,7 +310,7 @@ mod tests {
     struct H {
         ctx: egui::Context,
         items: Vec<String>,
-        picks: Vec<Result<Option<String>, String>>,
+        picks: Vec<Result<Option<(String, Option<String>)>, String>>,
         changed: bool,
         esc_left: bool,
     }
@@ -354,14 +364,18 @@ mod tests {
         let mut h = H::new(&[]);
         h.frame(vec![]);
         h.frame(vec![]);
-        h.picks = vec![Ok(Some(r"C:\a".into()))];
+        h.picks = vec![Ok(Some((r"C:\a".into(), None)))];
         h.click("add");
         assert_eq!(h.items, [r"C:\a"]);
         // Abgebrochen: nichts passiert.
         h.click("add");
         assert_eq!(h.items, [r"C:\a"]);
         // Doppelt: nicht erneut, Hinweis.
-        h.picks = vec![Ok(Some(r"C:\a".into()))];
+        h.picks = vec![Ok(Some((r"C:\a".into(), None)))];
+        h.click("add");
+        assert_eq!(h.items, [r"C:\a"]);
+        // Doppelt ohne Groß-/Kleinschreibung und Trenner am Ende.
+        h.picks = vec![Ok(Some((r"c:\A\".into(), None)))];
         h.click("add");
         assert_eq!(h.items, [r"C:\a"]);
         // Hinweis statt Eintrag (z. B. andere Distribution).
@@ -369,7 +383,7 @@ mod tests {
         h.click("add");
         assert_eq!(h.items.len(), 1);
         // Voll: + gesperrt.
-        h.picks = vec![Ok(Some(r"C:\b".into())), Ok(Some(r"C:\c".into())), Ok(Some(r"C:\d".into()))];
+        h.picks = vec![Ok(Some((r"C:\b".into(), None))), Ok(Some((r"C:\c".into(), None))), Ok(Some((r"C:\d".into(), None)))];
         h.click("add");
         h.click("add");
         h.click("add");
@@ -428,14 +442,22 @@ mod tests {
     fn wsl_paths_from_the_dialog() {
         let wsl = Target::Wsl { distro: Some("Ubuntu".into()), choose_distro: false };
         let any = Target::Wsl { distro: None, choose_distro: false };
-        assert_eq!(picked_to_entry(r"C:\x", &wsl, Lang::En), Ok(r"C:\x".to_string()));
-        assert_eq!(picked_to_entry(r"C:\x", &Target::Windows, Lang::En), Ok(r"C:\x".to_string()));
-        assert_eq!(picked_to_entry(r"\\wsl.localhost\Ubuntu\home\u\p", &wsl, Lang::En), Ok("/home/u/p".to_string()));
-        assert_eq!(picked_to_entry(r"\\wsl.localhost\ubuntu\home\u\p", &wsl, Lang::En), Ok("/home/u/p".to_string()), "Groß-/Kleinschreibung egal");
-        assert_eq!(picked_to_entry(r"\\wsl$\Debian\srv", &any, Lang::En), Ok("/srv".to_string()));
-        assert!(picked_to_entry(r"\\wsl.localhost\Debian\srv", &wsl, Lang::En).is_err(), "andere Distribution");
-        assert!(picked_to_entry(r"\\wsl.localhost\Ubuntu\srv", &Target::Windows, Lang::En).is_err(), "WSL-Pfad nur für WSL-Sitzungen");
-        assert_ne!(picked_to_entry(r"\\wsl.localhost\Debian\srv", &wsl, Lang::De), picked_to_entry(r"\\wsl.localhost\Debian\srv", &wsl, Lang::En));
+        let ok = |p: &str| Ok((p.to_string(), None));
+        assert_eq!(picked_to_entry(r"C:\x", &wsl, Lang::En, false), ok(r"C:\x"));
+        assert_eq!(picked_to_entry(r"C:\x", &Target::Windows, Lang::En, false), ok(r"C:\x"));
+        assert_eq!(picked_to_entry(r"\\wsl.localhost\Ubuntu\home\u\p", &wsl, Lang::En, false), ok("/home/u/p"));
+        assert_eq!(picked_to_entry(r"\\wsl.localhost\ubuntu\home\u\p", &wsl, Lang::En, false), ok("/home/u/p"), "Groß-/Kleinschreibung egal");
+        // Standard-Distribution (unbekannt): angenommen, aber mit Hinweis – nicht still.
+        let (p, note) = picked_to_entry(r"\\wsl$\Debian\srv", &any, Lang::En, false).unwrap();
+        assert_eq!(p, "/srv");
+        assert!(note.is_some_and(|n| n.contains("Debian")));
+        assert!(picked_to_entry(r"\\wsl.localhost\Debian\srv", &wsl, Lang::En, false).is_err(), "andere Distribution");
+        assert!(picked_to_entry(r"\\wsl.localhost\Ubuntu\srv", &Target::Windows, Lang::En, false).is_err(), "WSL-Pfad nur für WSL-Sitzungen");
+        // Standards/Vorlagen: als Linux-Pfad mit Hinweis.
+        let (p, note) = picked_to_entry(r"\\wsl.localhost\Ubuntu\srv", &Target::Windows, Lang::En, true).unwrap();
+        assert_eq!(p, "/srv");
+        assert!(note.is_some());
+        assert_ne!(picked_to_entry(r"\\wsl.localhost\Debian\srv", &wsl, Lang::De, false), picked_to_entry(r"\\wsl.localhost\Debian\srv", &wsl, Lang::En, false));
         for k in [ListKind::Folders, ListKind::JsonFiles] {
             assert_ne!(k.confirm_text(Lang::De), k.confirm_text(Lang::En));
             assert_ne!(k.add_tip(Lang::De), k.add_tip(Lang::En));

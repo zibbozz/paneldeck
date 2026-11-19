@@ -99,53 +99,119 @@ pub(super) fn set(ctx: &egui::Context, salt: &str, tab: Tab) {
 enum TabKey {
     Next,
     Prev,
-    Nth(usize),
+    /// Alt+Ziffer (0-basiert); gilt erst, wenn Alt losgelassen ist und nur eine Ziffer kam (Alt+Ziffernblock-Codes wie
+    /// Alt+0228 wechseln so keinen Reiter).
+    Digit(usize),
 }
 
-fn stash_id() -> Id {
-    Id::new("opts_tab_key")
+fn stash_id(salt: &str) -> Id {
+    Id::new(("opts_tab_key", salt.to_string()))
 }
 
-fn take_keys(i: &mut egui::InputState) -> Option<TabKey> {
-    // Spezifischere zuerst: Strg+Umschalt+Tab würde sonst auch zu Strg+Tab passen.
-    if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
-        return Some(TabKey::Prev);
+fn alt_seq_id(salt: &str) -> Id {
+    Id::new(("opts_tab_alt", salt.to_string()))
+}
+
+fn active_id(salt: &str) -> Id {
+    Id::new(("opts_tab_active", salt.to_string()))
+}
+
+/// Ebene eines Dialogfensters mit der Id `window` (wie sie `egui::Window` bzw. `style::movable` vergibt).
+pub(super) fn window_layer(window: Id) -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, window)
+}
+
+/// Der Dialog bekommt die Tastatur (beim Öffnen; danach, bis woanders hingeklickt oder der Fokus woandershin geht).
+pub(super) fn activate(ctx: &egui::Context, salt: &str) {
+    ctx.data_mut(|d| d.insert_temp(active_id(salt), true));
+}
+
+/// Hat der Dialog (Fenster `window`) gerade die Tastatur? Ein fokussiertes Element entscheidet nach seiner Ebene (das
+/// Fenster selbst, ein Popup darüber – sonst nicht); ohne Fokus zählt der letzte Mausklick (ins Fenster oder in ein
+/// Popup: ja, in ein Terminal oder ein anderes Fenster: nein). So nimmt ein nicht modaler Dialog (Einstellungen der
+/// Sitzung) keine Tasten, die ins Terminal getippt werden.
+pub(super) fn active(ctx: &egui::Context, salt: &str, window: Id) -> bool {
+    let layer = window_layer(window);
+    let ours = |l: egui::LayerId| l == layer || matches!(l.order, egui::Order::Foreground | egui::Order::Tooltip | egui::Order::Debug);
+    if let Some(pos) = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) {
+        let inside = ctx.layer_id_at(pos).is_some_and(ours);
+        ctx.data_mut(|d| d.insert_temp(active_id(salt), inside));
     }
-    if i.consume_key(Modifiers::CTRL, Key::Tab) {
-        return Some(TabKey::Next);
-    }
-    for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4].into_iter().enumerate() {
-        if i.consume_key(Modifiers::ALT, k) {
-            return Some(TabKey::Nth(n));
+    // Ein Fokuswechsel (z. B. mit Tab in den Dialog oder aus ihm heraus) entscheidet neu; ein Klick daneben bleibt
+    // gültig, auch wenn der Fokus noch auf einem Knopf des Dialogs liegt.
+    let focused = ctx.memory(|m| m.focused());
+    let last_id = Id::new(("opts_tab_focus", salt.to_string()));
+    if ctx.data(|d| d.get_temp::<Option<Id>>(last_id)) != Some(focused) {
+        ctx.data_mut(|d| d.insert_temp(last_id, focused));
+        if let Some(r) = focused.and_then(|f| ctx.read_response(f)) {
+            let inside = ours(r.layer_id);
+            ctx.data_mut(|d| d.insert_temp(active_id(salt), inside));
         }
     }
-    None
+    ctx.data(|d| d.get_temp::<bool>(active_id(salt))).unwrap_or(false)
 }
 
-/// Vor den globalen Kürzeln aufrufen, solange ein Dialog mit Reitern offen ist: verbraucht die Tasten zum Wechseln der
-/// Reiter und merkt sie für [`handle_keys`] (sonst wechselte z. B. Alt+1 die Sitzung).
-pub(super) fn grab_keys(ctx: &egui::Context) {
-    if let Some(k) = ctx.input_mut(take_keys) {
-        ctx.data_mut(|d| d.insert_temp(stash_id(), Some(k)));
+fn take_keys(i: &mut egui::InputState) -> Vec<TabKey> {
+    let mut out = Vec::new();
+    // Spezifischere zuerst: Strg+Umschalt+Tab würde sonst auch zu Strg+Tab passen.
+    while i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
+        out.push(TabKey::Prev);
+    }
+    while i.consume_key(Modifiers::CTRL, Key::Tab) {
+        out.push(TabKey::Next);
+    }
+    for (n, k) in [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].into_iter().enumerate() {
+        // Alle Ziffern mit Alt nehmen, damit Alt+Ziffernblock-Codes (mehrere Ziffern) erkannt werden.
+        while i.consume_key(Modifiers::ALT, k) {
+            out.push(TabKey::Digit((n + 9) % 10));
+        }
+    }
+    out
+}
+
+/// Vor den globalen Kürzeln aufrufen, solange der Dialog `salt` (Fenster `window`) offen ist: hat er die Tastatur
+/// ([`active`]), verbraucht er die Tasten zum Wechseln der Reiter und merkt sie für [`handle_keys`] (sonst wechselte z. B.
+/// Alt+1 die Sitzung). Sonst bleiben sie dem Terminal und den Kürzeln.
+pub(super) fn grab_keys(ctx: &egui::Context, salt: &str, window: Id) {
+    if !active(ctx, salt, window) {
+        return;
+    }
+    let keys = ctx.input_mut(take_keys);
+    if !keys.is_empty() {
+        ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<TabKey>>(stash_id(salt)).extend(keys));
     }
 }
 
-/// Tasten zum Wechseln der Reiter auswerten (am Anfang des Dialogs, vor dem Zeichnen). Rückgabe: Reiter gewechselt.
-pub(super) fn handle_keys(ctx: &egui::Context, salt: &str, tabs: &[Tab]) -> bool {
-    let stashed = ctx.data_mut(|d| d.remove_temp::<Option<TabKey>>(stash_id())).flatten();
-    let Some(k) = stashed.or_else(|| ctx.input_mut(take_keys)) else { return false };
+/// Tasten zum Wechseln der Reiter auswerten (am Anfang des Dialogs, vor dem Zeichnen; nur mit der Tastatur, siehe
+/// [`active`]). Rückgabe: Reiter gewechselt.
+pub(super) fn handle_keys(ctx: &egui::Context, salt: &str, window: Id, tabs: &[Tab]) -> bool {
+    let mut keys = ctx.data_mut(|d| d.remove_temp::<Vec<TabKey>>(stash_id(salt))).unwrap_or_default();
+    if active(ctx, salt, window) {
+        keys.extend(ctx.input_mut(take_keys));
+    }
     if tabs.is_empty() {
         return false;
     }
-    let cur = tabs.iter().position(|t| *t == current(ctx, salt, tabs)).unwrap_or(0);
-    let next = match k {
-        TabKey::Next => (cur + 1) % tabs.len(),
-        TabKey::Prev => (cur + tabs.len() - 1) % tabs.len(),
-        TabKey::Nth(n) if n < tabs.len() => n,
-        TabKey::Nth(_) => return false,
-    };
-    set(ctx, salt, tabs[next]);
-    true
+    let before = current(ctx, salt, tabs);
+    let mut seq: Vec<usize> = ctx.data(|d| d.get_temp(alt_seq_id(salt))).unwrap_or_default();
+    for k in keys {
+        let cur = tabs.iter().position(|t| *t == current(ctx, salt, tabs)).unwrap_or(0);
+        match k {
+            TabKey::Next => set(ctx, salt, tabs[(cur + 1) % tabs.len()]),
+            TabKey::Prev => set(ctx, salt, tabs[(cur + tabs.len() - 1) % tabs.len()]),
+            TabKey::Digit(n) => seq.push(n),
+        }
+    }
+    if !seq.is_empty() && !ctx.input(|i| i.modifiers.alt) {
+        if let [n] = seq[..] {
+            if n < tabs.len() {
+                set(ctx, salt, tabs[n]);
+            }
+        }
+        seq.clear();
+    }
+    ctx.data_mut(|d| d.insert_temp(alt_seq_id(salt), seq));
+    current(ctx, salt, tabs) != before
 }
 
 /// Leiste der Reiter. Rückgabe: der gewählte Reiter.
@@ -235,108 +301,174 @@ pub(super) fn preview(ui: &mut Ui, lang: Lang, salt: &str, line: impl FnOnce() -
     }
 }
 
-fn multiline_id() -> Id {
-    Id::new("opts_multiline_ids")
+fn multiline_id(salt: &str) -> Id {
+    Id::new(("opts_multiline_ids", salt.to_string()))
 }
 
-/// Mehrzeiliges Feld anmelden: dort gibt Enter einen Zeilenumbruch und bestätigt den Dialog nicht.
-pub(super) fn multiline(ui: &Ui, r: &egui::Response) {
-    ui.data_mut(|d| d.get_temp_mut_or_default::<Vec<Id>>(multiline_id()).push(r.id));
+/// Mehrzeiliges Feld des Dialogs `salt` anmelden: dort gibt Enter einen Zeilenumbruch und bestätigt den Dialog nicht.
+pub(super) fn multiline(ui: &Ui, salt: &str, r: &egui::Response) {
+    ui.data_mut(|d| d.get_temp_mut_or_default::<Vec<Id>>(multiline_id(salt)).push(r.id));
 }
 
-/// Zu Beginn des Dialogs aufrufen: Enter (ohne Modifikator, kein Popup offen, Fokus nicht in einem mehrzeiligen Feld)
-/// oder Strg+Enter bestätigt. Liest die mehrzeiligen Felder des letzten Bilds und setzt die Liste zurück.
-pub(super) fn enter_confirms(ctx: &egui::Context) -> bool {
-    let ml = ctx.data_mut(|d| d.remove_temp::<Vec<Id>>(multiline_id())).unwrap_or_default();
-    if egui::Popup::is_any_open(ctx) {
+/// Zu Beginn des Dialogs aufrufen (nur mit der Tastatur, [`active`]): Strg+Enter bestätigt immer; Enter (ohne
+/// Modifikator) nur, wenn kein Element oder ein einzeiliges Textfeld den Fokus hat – auf einem Knopf, Häkchen, einer
+/// Auswahl oder einem Listeneintrag löst Enter dieses Element aus, in einem mehrzeiligen Feld gibt es einen
+/// Zeilenumbruch. Bei offenem Popup bestätigt Enter nur aus einem Textfeld (z. B. Tag-Vorschläge ohne Auswahl). Liest
+/// die mehrzeiligen Felder des letzten Bilds und setzt die Liste zurück.
+pub(super) fn enter_confirms(ctx: &egui::Context, salt: &str, window: Id) -> bool {
+    let ml = ctx.data_mut(|d| d.remove_temp::<Vec<Id>>(multiline_id(salt))).unwrap_or_default();
+    if !active(ctx, salt, window) {
         return false;
     }
     let focused = ctx.memory(|m| m.focused());
-    let in_ml = focused.is_some_and(|f| ml.contains(&f));
+    let text_field = focused.is_some_and(|f| egui::TextEdit::load_state(ctx, f).is_some() && !ml.contains(&f));
+    let plain_ok = match focused {
+        None => !egui::Popup::is_any_open(ctx),
+        Some(_) => text_field,
+    };
     ctx.input_mut(|i| {
         if i.consume_key(Modifiers::CTRL, Key::Enter) {
             return true;
         }
-        !in_ml && i.modifiers.is_none() && i.key_pressed(Key::Enter) && i.consume_key(Modifiers::NONE, Key::Enter)
+        plain_ok && i.modifiers.is_none() && i.key_pressed(Key::Enter) && i.consume_key(Modifiers::NONE, Key::Enter)
     })
 }
 
+/// Hinweis neben gesperrtem „Erstellen“/„Speichern“: in welchen Reitern ein Wert ungültig ist (`None`: keiner).
+pub(super) fn invalid_hint(lang: Lang, infos: &[TabInfo]) -> Option<String> {
+    let bad: Vec<String> = infos.iter().filter(|i| i.mark == Mark::Error).map(|i| lang.q(i.tab.label(lang))).collect();
+    if bad.is_empty() {
+        return None;
+    }
+    Some(if lang == Lang::De { format!("Ungültiger Wert im Reiter {}", bad.join(", ")) } else { format!("Invalid value in tab {}", bad.join(", ")) })
+}
+
+/// Hinweis zeigen (rot, klein) und als Tooltip des gesperrten Knopfs.
+pub(super) fn show_invalid(ui: &mut Ui, hint: &Option<String>, button: &egui::Response) {
+    if let Some(h) = hint {
+        ui.label(RichText::new(h).small().color(RED));
+        button.clone().on_disabled_hover_text(h.as_str());
+    }
+}
+
 /// Notizen: eine Zeile, die beim Tippen bis auf 4 Zeilen wächst.
-pub(super) fn notes_edit(ui: &mut Ui, text: &mut String, width: f32) -> egui::Response {
+pub(super) fn notes_edit(ui: &mut Ui, salt: &str, text: &mut String, width: f32) -> egui::Response {
     let lines = text.lines().count().max(1) + usize::from(text.ends_with('\n'));
     let r = ui.add(egui::TextEdit::multiline(text).desired_rows(lines.clamp(1, 4)).desired_width(width));
-    multiline(ui, &r);
+    multiline(ui, salt, &r);
     r
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eframe::egui::{Event, RawInput};
+    use eframe::egui::{Event, Pos2, RawInput, Rect};
 
     fn key(k: Key, m: Modifiers) -> Event {
         Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m }
     }
 
-    fn run(ctx: &egui::Context, events: Vec<Event>, f: impl FnMut(&egui::Context)) {
-        let _ = ctx.run(RawInput { events, ..Default::default() }, f);
+    fn run(ctx: &egui::Context, events: Vec<Event>, mods: Modifiers, f: impl FnMut(&egui::Context)) {
+        let _ = ctx.run(RawInput { events, modifiers: mods, screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() }, f);
+    }
+
+    const WIN: &str = "t_win";
+
+    /// Ein Fenster mit einem Textfeld und einem Knopf; gibt die Rechtecke zurück.
+    fn window(ctx: &egui::Context, text: &mut String, multi: bool) -> Option<(Rect, Id)> {
+        let mut out = None;
+        egui::Window::new("t").id(Id::new(WIN)).fixed_pos(Pos2::new(100.0, 100.0)).show(ctx, |ui| {
+            let t = if multi { notes_edit(ui, "t", text, 200.0) } else { ui.text_edit_singleline(text) };
+            let b = ui.button("b");
+            out = Some((t.rect, b.id));
+        });
+        out
     }
 
     #[test]
-    fn keys_switch_tabs_and_are_consumed() {
+    fn keys_switch_tabs_only_with_focus_and_are_consumed() {
         let ctx = egui::Context::default();
         let tabs = session_tabs(true);
-        let step = |events: Vec<Event>| {
+        activate(&ctx, "t");
+        let step = |events: Vec<Event>, mods: Modifiers| {
             let mut left = 0;
-            run(&ctx, events, |ctx| {
-                handle_keys(ctx, "t", &tabs);
+            run(&ctx, events, mods, |ctx| {
+                handle_keys(ctx, "t", Id::new(WIN), &tabs);
                 left = ctx.input(|i| i.events.len());
             });
             (current(&ctx, "t", &tabs), left)
         };
-        assert_eq!(step(vec![]).0, Tab::General);
-        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL)]), (Tab::Claude, 0), "gewechselt und verbraucht");
-        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL | Modifiers::SHIFT)]).0, Tab::General);
-        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL | Modifiers::SHIFT)]).0, Tab::Advanced, "rundum");
-        assert_eq!(step(vec![key(Key::Num3, Modifiers::ALT)]).0, Tab::Access);
-        assert_eq!(step(vec![key(Key::Num1, Modifiers::ALT)]).0, Tab::General);
+        assert_eq!(step(vec![], Modifiers::NONE).0, Tab::General);
+        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL)], Modifiers::NONE), (Tab::Claude, 0), "gewechselt und verbraucht");
+        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL | Modifiers::SHIFT)], Modifiers::NONE).0, Tab::General);
+        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL | Modifiers::SHIFT)], Modifiers::NONE).0, Tab::Advanced, "rundum");
+        assert_eq!(step(vec![key(Key::Num3, Modifiers::ALT)], Modifiers::NONE).0, Tab::Access);
+        // Alt gehalten: erst beim Loslassen; Alt+Ziffernblock-Code (mehrere Ziffern) wechselt nicht.
+        assert_eq!(step(vec![key(Key::Num1, Modifiers::ALT)], Modifiers::ALT).0, Tab::Access);
+        assert_eq!(step(vec![], Modifiers::NONE).0, Tab::General);
+        assert_eq!(step(vec![key(Key::Num0, Modifiers::ALT)], Modifiers::ALT).0, Tab::General);
+        assert_eq!(step(vec![key(Key::Num2, Modifiers::ALT)], Modifiers::ALT).0, Tab::General);
+        assert_eq!(step(vec![key(Key::Num8, Modifiers::ALT)], Modifiers::ALT).0, Tab::General);
+        assert_eq!(step(vec![], Modifiers::NONE).0, Tab::General, "Alt+0228 ist ein Zeichen, kein Reiterwechsel");
         // Ohne Claude gibt es nur „Allgemein“.
         assert_eq!(current(&ctx, "t", &session_tabs(false)), Tab::General);
         // Vorab abgeholt (vor den globalen Kürzeln): wirkt im Dialog.
-        run(&ctx, vec![key(Key::Num4, Modifiers::ALT)], |ctx| {
-            grab_keys(ctx);
+        run(&ctx, vec![key(Key::Num4, Modifiers::ALT)], Modifiers::NONE, |ctx| {
+            grab_keys(ctx, "t", Id::new(WIN));
             assert_eq!(ctx.input(|i| i.events.len()), 0);
-            handle_keys(ctx, "t", &session_tabs(true));
+            handle_keys(ctx, "t", Id::new(WIN), &session_tabs(true));
         });
         assert_eq!(current(&ctx, "t", &session_tabs(true)), Tab::Advanced);
+        // Ohne Tastatur (z. B. ins Terminal geklickt): Tasten bleiben liegen, nichts wechselt.
+        ctx.data_mut(|d| d.insert_temp(active_id("t"), false));
+        assert_eq!(step(vec![key(Key::Tab, Modifiers::CTRL)], Modifiers::NONE), (Tab::Advanced, 1));
+        run(&ctx, vec![key(Key::Num1, Modifiers::ALT)], Modifiers::NONE, |ctx| {
+            grab_keys(ctx, "t", Id::new(WIN));
+            assert_eq!(ctx.input(|i| i.events.len()), 1, "nicht verbraucht");
+        });
         for t in [Tab::General, Tab::Access, Tab::Advanced] {
             assert_ne!(t.label(Lang::De), t.label(Lang::En));
         }
         assert_eq!(TabInfo { tab: Tab::Access, count: 2, mark: Mark::Warn }.text(Lang::En), "Access (2)");
+        let infos = [TabInfo::plain(Tab::General), TabInfo { tab: Tab::Access, count: 1, mark: Mark::Error }];
+        assert_eq!(invalid_hint(Lang::En, &infos).as_deref(), Some("Invalid value in tab “Access”"));
+        assert!(invalid_hint(Lang::De, &infos).unwrap().contains("Zugriff"));
+        assert_eq!(invalid_hint(Lang::En, &infos[..1]), None);
     }
 
     #[test]
-    fn enter_confirms_except_in_multiline_fields() {
-        let ctx = egui::Context::default();
-        let mut text = String::from("a");
-        let mut ok = false;
-        let mut frame = |events: Vec<Event>, focus: bool| {
-            run(&ctx, events, |ctx| {
-                ok = enter_confirms(ctx);
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let r = notes_edit(ui, &mut text, 200.0);
-                    if focus {
-                        r.request_focus();
-                    }
+    fn enter_confirms_only_from_text_fields_of_the_focused_dialog() {
+        for multi in [false, true] {
+            let ctx = egui::Context::default();
+            let mut text = String::from("a");
+            let rects = std::cell::Cell::new(None);
+            let mut frame = |events: Vec<Event>, mods: Modifiers| {
+                let mut ok = false;
+                run(&ctx, events, mods, |ctx| {
+                    ok = enter_confirms(ctx, "t", Id::new(WIN));
+                    rects.set(window(ctx, &mut text, multi));
                 });
-            });
-            ok
-        };
-        frame(vec![], false);
-        assert!(frame(vec![key(Key::Enter, Modifiers::NONE)], false), "Enter bestätigt");
-        frame(vec![], true);
-        frame(vec![], false);
-        assert!(!frame(vec![key(Key::Enter, Modifiers::NONE)], false), "im mehrzeiligen Feld: Zeilenumbruch");
-        assert!(frame(vec![key(Key::Enter, Modifiers::CTRL)], false), "Strg+Enter bestätigt immer");
+                ok
+            };
+            frame(vec![], Modifiers::NONE);
+            frame(vec![], Modifiers::NONE);
+            let (t, b) = rects.get().unwrap();
+            let click = |p: Pos2| vec![Event::PointerMoved(p), Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }, Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }];
+            // Ohne Klick in den Dialog: nichts.
+            assert!(!frame(vec![key(Key::Enter, Modifiers::NONE)], Modifiers::NONE), "Dialog ohne Tastatur");
+            // Ins Textfeld geklickt.
+            frame(click(t.center()), Modifiers::NONE);
+            frame(vec![], Modifiers::NONE);
+            assert_eq!(frame(vec![key(Key::Enter, Modifiers::NONE)], Modifiers::NONE), !multi, "einzeilig bestätigt, mehrzeilig Zeilenumbruch");
+            assert!(frame(vec![key(Key::Enter, Modifiers::CTRL)], Modifiers::CTRL), "Strg+Enter bestätigt immer");
+            // Knopf fokussiert (Tab): Enter löst den Knopf aus, nicht den Dialog.
+            ctx.memory_mut(|m| m.request_focus(b));
+            frame(vec![], Modifiers::NONE);
+            assert!(!frame(vec![key(Key::Enter, Modifiers::NONE)], Modifiers::NONE), "Fokus auf einem Knopf");
+            // Klick daneben (Hintergrund, z. B. ein Terminal): der Dialog hat die Tastatur nicht mehr.
+            frame(click(Pos2::new(700.0, 550.0)), Modifiers::NONE);
+            frame(vec![], Modifiers::NONE);
+            assert!(!frame(vec![key(Key::Enter, Modifiers::CTRL)], Modifiers::CTRL), "nicht im Dialog");
+        }
     }
 }

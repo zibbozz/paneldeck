@@ -288,21 +288,24 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
     let mut opts_ok = true;
     let esc = !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     // Reiter wie im Dialog „Neue Sitzung“ (#292), Name der Vorlage darüber; Enter speichert.
-    let enter = tabs::enter_confirms(ctx);
+    let win = Id::new("tpl_editor");
     if f.focus {
         tabs::set(ctx, SALT, Tab::General);
+        tabs::activate(ctx, SALT);
     }
+    let enter = tabs::enter_confirms(ctx, SALT, win);
     let tab_list = tabs::session_tabs(f.terminal && f.item.claude);
-    tabs::handle_keys(ctx, SALT, &tab_list);
+    tabs::handle_keys(ctx, SALT, win, &tab_list);
     let defaults = dialogs::user_defaults(ctx);
     let width = tabs::dialog_width(ctx);
     let body_h = dialogs::dialog_body_height(ctx) - 110.0;
+    let mut invalid: Option<String> = None;
     let title = match (f.index.is_some(), f.terminal) {
         (true, true) => lang.t("Terminal-Vorlage bearbeiten", "Edit terminal template"),
         (false, true) => lang.t("Neue Terminal-Vorlage", "New terminal template"),
         _ => lang.t("Gruppen-Vorlage bearbeiten", "Edit group template"),
     };
-    style::movable(ctx, Id::new("tpl_editor"), egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
+    style::movable(ctx, win, egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
         ui.set_width(width);
         egui::Grid::new("tpl_editor_name").num_columns(2).spacing([8.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
             ui.label(lang.t("Name der Vorlage", "Template name"));
@@ -341,6 +344,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
                 infos.extend(dialogs::claude_tab_infos(&f.opts, &defaults, &chk));
             }
             let tab = tabs::strip(ui, lang, SALT, &infos);
+            invalid = tabs::invalid_hint(lang, &infos);
             tabs::body(ui, SALT, tab, body_h, |ui| {
                 if tab == Tab::General {
                     tpl_general(ui, f, shells, profiles, folders, claude_mode, &eff_shell, custom_prof.is_some(), lang);
@@ -378,7 +382,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
                         }
                         ui.label(lang.t("Start-Prompt", "Start prompt"));
                         let r = ui.add(egui::TextEdit::multiline(&mut item.prompt).desired_rows(2).desired_width(dialogs::FIELD_W));
-                        super::opts_tabs::multiline(ui, &r);
+                        super::opts_tabs::multiline(ui, SALT, &r);
                         ui.end_row();
                         ui.label("");
                         dialogs::hint_label(
@@ -395,8 +399,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
             });
             if claude_on {
                 opts_ok = dialogs::check_opts(ctx, lang, &f.opts, SALT, dialogs::OptsPlace::Template, &target).ok();
-                let spec = shells.iter().find(|s| s.id == eff_shell);
-                tabs::preview(ui, lang, SALT, || dialogs::preview_line(&f.opts, spec));
+                dialogs::claude_preview(ui, lang, SALT, &f.opts, shells.iter().find(|s| s.id == eff_shell));
             }
         }
         if let Some(e) = &f.error {
@@ -410,6 +413,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
             if b.clicked() {
                 out = FormOut::Save;
             }
+            tabs::show_invalid(ui, &invalid, &b);
             let c = ui.button(lang.t("Abbrechen", "Cancel"));
             mark(ui, "cancel", &c);
             if c.clicked() {
@@ -512,7 +516,7 @@ fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[P
         ui.add(egui::TextEdit::singleline(&mut f.tags).hint_text(lang.t("durch Komma getrennt", "comma-separated")).desired_width(dialogs::FIELD_W));
         ui.end_row();
         ui.label(lang.t("Notizen", "Notes"));
-        super::opts_tabs::notes_edit(ui, &mut f.item.notes, dialogs::FIELD_W);
+        super::opts_tabs::notes_edit(ui, "tpled", &mut f.item.notes, dialogs::FIELD_W);
         ui.end_row();
     });
 }
@@ -716,6 +720,9 @@ impl App {
         let Some(mut f) = self.tpl.form.take() else { return };
         let lang = self.settings.language;
         let folders = self.project_folders();
+        let spec = self.preview_spec(&f.item.shell_id, f.item.profile);
+        let legacy = f.legacy_rest.clone();
+        ctx.data_mut(|d| d.insert_temp(dialogs::preview_target_id("tpled"), (spec, legacy)));
         let out = tpl_form_ui(ctx, &mut f, &self.shells, &self.settings.profiles, &folders, self.settings.claude_mode, lang);
         self.tpl.form = Some(f);
         match out {

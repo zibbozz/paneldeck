@@ -330,7 +330,7 @@ impl App {
                                 let target = super::folder_picker::Target::Windows;
                                 let none = ClaudeOpts::default();
                                 let chk = super::dialogs::check_opts(ui.ctx(), lang, &self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults, &target);
-                                tabs::handle_keys(ui.ctx(), "defaults", &DEFAULTS_TABS);
+                                tabs::handle_keys(ui.ctx(), "defaults", Id::new("settings_win"), &DEFAULTS_TABS);
                                 let infos = super::dialogs::claude_tab_infos(&self.settings.claude_defaults, &none, &chk);
                                 let tab = tabs::strip(ui, lang, "defaults", &infos);
                                 super::dialogs::claude_tab(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults, &target, &none, &chk, tab, |_| {}, |_| {});
