@@ -728,7 +728,7 @@ pub(super) fn new_chat_body(ui: &mut Ui, d: &mut NewChatDlg, servers: &[LlmServe
 /// Der Dialog als [`egui::Modal`]: sperrt alles dahinter (auch Klicks ins Terminal), Esc/Klick daneben bricht ab.
 pub(super) fn new_chat_modal(ctx: &egui::Context, d: &mut NewChatDlg, servers: &[LlmServer], conn: &Connector, lang: Lang) -> DlgOut {
     let mut out = DlgOut::default();
-    let r = egui::Modal::new(egui::Id::new("new_chat_modal")).show(ctx, |ui| {
+    let r = crate::style::modal(egui::Id::new("new_chat_modal")).show(ctx, |ui| {
         ui.set_width(400.0);
         ui.label(RichText::new(lang.t("Neuer Chat", "New chat")).heading());
         ui.add_space(S1);

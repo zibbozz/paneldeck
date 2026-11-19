@@ -211,7 +211,7 @@ impl PlanUi {
         let prefixes: Vec<String> = self.projects.iter().map(|p| p.key.clone()).collect();
         let labels = std::mem::take(&mut self.tickets.labels);
         let (mut go, mut close) = (ctrl_enter(ctx), false);
-        let m = egui::Modal::new(Self::modal_id("ticket_transition")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("ticket_transition")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 560.0));
             let title = match lang {
                 Lang::De => format!("{} nach {} verschieben", dlg.key, lang.q(&dlg.to_name)),
@@ -292,7 +292,7 @@ impl PlanUi {
         let lang = cx.lang;
         let secs = countdown_secs(dlg.since, Instant::now());
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("ticket_delete")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("ticket_delete")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 480.0));
             ui.horizontal(|ui| {
                 ui.colored_label(widgets::DANGER, RichText::new("!").heading().strong());
@@ -378,7 +378,7 @@ impl PlanUi {
         let Some(mut dlg) = self.tickets.clone.take() else { return };
         let lang = cx.lang;
         let (mut go, mut close) = (ctrl_enter(ctx), false);
-        let m = egui::Modal::new(Self::modal_id("ticket_clone")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("ticket_clone")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 640.0));
             let title = match lang {
                 Lang::De => format!("{} klonen", dlg.key),
@@ -514,7 +514,7 @@ impl PlanUi {
         let labels = std::mem::take(&mut self.tickets.labels);
         let (mut go, mut close) = (false, false);
         let (mut new_project, mut new_type) = (None, None);
-        let m = egui::Modal::new(Self::modal_id("ticket_change")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("ticket_change")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 720.0));
             let title = match lang {
                 Lang::De => format!("Typ von {} ändern oder verschieben", dlg.key),
@@ -739,7 +739,7 @@ impl PlanUi {
         let Some(mut dlg) = self.tickets.time.take() else { return };
         let lang = cx.lang;
         let (mut go, mut close) = (ctrl_enter(ctx), false);
-        let m = egui::Modal::new(Self::modal_id("ticket_time")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("ticket_time")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 560.0));
             let title = match (lang, dlg.edit.is_some()) {
                 (Lang::De, false) => format!("Zeit erfassen – {}", dlg.key),
@@ -895,7 +895,7 @@ impl PlanUi {
         let labels = std::mem::take(&mut self.tickets.labels);
         let (mut go, mut close) = (ctrl_enter(ctx), false);
         let (mut new_project, mut new_type) = (None, None);
-        let m = egui::Modal::new(Self::modal_id("ticket_convert")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("ticket_convert")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 600.0));
             let title = match lang {
                 Lang::De => format!("{} in ein Ticket umwandeln", dlg.todo_key),
@@ -1037,7 +1037,7 @@ impl PlanUi {
         let Some(dlg) = self.tickets.confirm.take() else { return };
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("ticket_confirm")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("ticket_confirm")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 420.0));
             let (title, text) = match dlg.kind {
                 ConfirmKind::Comment { .. } => (lang.t("Kommentar löschen?", "Delete comment?"), lang.t("Der Kommentar wird endgültig gelöscht.", "The comment will be deleted permanently.")),

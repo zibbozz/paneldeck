@@ -34,16 +34,107 @@ pub fn set_id_salt(window: u64) {
 /// Jedes Paneldeck-Fenster ist ein eigener egui-Viewport mit eigenem Speicher – Position und Zähler gelten je Fenster.
 pub fn movable<'a>(ctx: &egui::Context, id: egui::Id, w: egui::Window<'a>) -> egui::Window<'a> {
     let center = ctx.content_rect().center();
+    let reopened = just_opened(ctx, id.with("pd_movable_pass"));
+    let w = w.id(id).pivot(egui::Align2::CENTER_CENTER).default_pos(center).constrain(true);
+    if reopened { w.current_pos(center) } else { w }
+}
+
+/// Im vorigen Durchlauf nicht gezeichnet = gerade geöffnet (merkt sich den aktuellen Durchlauf unter `key`).
+fn just_opened(ctx: &egui::Context, key: egui::Id) -> bool {
     let pass = ctx.cumulative_pass_nr();
-    let key = id.with("pd_movable_pass");
-    // Im vorigen Durchlauf nicht gezeichnet = gerade geöffnet: wieder in die Mitte.
-    let reopened = ctx.data_mut(|d| {
+    ctx.data_mut(|d| {
         let last = d.get_temp::<u64>(key);
         d.insert_temp(key, pass);
         last.is_none_or(|l| pass > l + 1)
-    });
-    let w = w.id(id).pivot(egui::Align2::CENTER_CENTER).default_pos(center).constrain(true);
-    if reopened { w.current_pos(center) } else { w }
+    })
+}
+
+/// Höhe der Zieh-Leiste eines Modals unter dem oberen Rand des Rahmens (dazu kommt der Innenabstand des Rahmens).
+pub const MODAL_STRIP_H: f32 = 8.0;
+
+/// Verschiebbares Modal (#288): wie [`egui::Modal`] (Hintergrund sperrt den Rest, Esc/Klick daneben über
+/// `should_close`, gleicher Rahmen), aber mit einer schmalen Zieh-Leiste oben, an der man es verschieben kann. Öffnet bei
+/// jedem Öffnen an seinem Anker (Standard: Mitte), behält die gezogene Position, solange es offen ist, und bleibt immer im
+/// Fenster – auch wenn das Fenster kleiner wird. Ersetzt `egui::Modal::new(id).show(ctx, …)` eins zu eins.
+pub struct Modal {
+    id: egui::Id,
+    align: egui::Align2,
+    offset: Vec2,
+}
+
+/// Verschiebbares Modal mit Anker Mitte, siehe [`Modal`].
+pub fn modal(id: egui::Id) -> Modal {
+    Modal { id, align: egui::Align2::CENTER_CENTER, offset: Vec2::ZERO }
+}
+
+impl Modal {
+    /// Anderer Anker als die Mitte (z. B. oben mittig mit Abstand), Ausgangslage beim Öffnen.
+    pub fn anchor(mut self, align: egui::Align2, offset: Vec2) -> Self {
+        self.align = align;
+        self.offset = offset;
+        self
+    }
+
+    pub fn show<T>(self, ctx: &egui::Context, content: impl FnOnce(&mut Ui) -> T) -> egui::ModalResponse<T> {
+        let Modal { id, align, offset } = self;
+        let key = id.with("pd_modal_drag");
+        let reopened = just_opened(ctx, id.with("pd_modal_pass"));
+        let screen = ctx.content_rect();
+        let mut drag: Vec2 = if reopened { Vec2::ZERO } else { ctx.data(|d| d.get_temp(key)).unwrap_or_default() };
+        // Mit der Größe des letzten Bildes im Fenster halten (auch nach dem Verkleinern des Fensters).
+        if let Some(size) = egui::AreaState::load(ctx, id).and_then(|s| s.size) {
+            drag = clamp_modal_drag(screen, size, align, offset, drag);
+        }
+        let frame = egui::Frame::popup(&ctx.style());
+        let area = egui::Modal::default_area(id).anchor(align, offset + drag);
+        let mut delta = Vec2::ZERO;
+        let r = egui::Modal::new(id).area(area).frame(frame).show(ctx, |ui| {
+            let top = ui.cursor().top();
+            ui.add_space(MODAL_STRIP_H);
+            let inner = content(ui);
+            let m = frame.inner_margin;
+            let c = ui.min_rect();
+            let rect = Rect::from_min_max(
+                Pos2::new(c.left() - m.left as f32, top - m.top as f32),
+                Pos2::new(c.right() + m.right as f32, top + MODAL_STRIP_H),
+            );
+            let resp = ui.interact(rect, id.with("pd_modal_strip"), Sense::drag());
+            paint_modal_strip(ui, rect, &resp, frame.corner_radius);
+            if resp.dragged() {
+                delta = resp.drag_delta();
+            }
+            inner
+        });
+        if delta != Vec2::ZERO {
+            drag = clamp_modal_drag(screen, r.response.rect.size(), align, offset, drag + delta);
+            ctx.request_repaint();
+        }
+        ctx.data_mut(|d| d.insert_temp(key, drag));
+        r
+    }
+}
+
+/// Verschiebung so begrenzen, dass ein Modal der Größe `size` ganz im Fenster `screen` liegt (ist es größer als das
+/// Fenster, bleibt die linke bzw. obere Kante sichtbar).
+fn clamp_modal_drag(screen: Rect, size: Vec2, align: egui::Align2, offset: Vec2, drag: Vec2) -> Vec2 {
+    let base = align.align_size_within_rect(size, screen).left_top() + offset;
+    let lo = screen.min - base;
+    let hi = screen.max - size - base;
+    Vec2::new(drag.x.min(hi.x).max(lo.x), drag.y.min(hi.y).max(lo.y))
+}
+
+/// Zieh-Leiste: in Ruhe nur ein dezenter Griff, beim Überfahren leicht hinterlegt, Mauszeiger „Greifen“.
+fn paint_modal_strip(ui: &Ui, rect: Rect, resp: &Response, radius: CornerRadius) {
+    let hot = resp.hovered() || resp.dragged();
+    let v = ui.visuals();
+    if hot {
+        ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+        let r = CornerRadius { nw: radius.nw, ne: radius.ne, sw: 0, se: 0 };
+        ui.painter().rect_filled(rect.shrink(1.0), r, v.widgets.hovered.weak_bg_fill.gamma_multiply(0.6));
+    }
+    let grip = Rect::from_center_size(Pos2::new(rect.center().x, rect.center().y + 1.0), Vec2::new(32.0, 4.0));
+    let c = v.weak_text_color().gamma_multiply(if hot { 0.9 } else { 0.45 });
+    ui.painter().rect_filled(grip, CornerRadius::same(2), c);
 }
 
 /// Id je Fenster unterscheiden (im Hauptfenster unverändert).
@@ -585,6 +676,21 @@ mod tests {
         assert!(half.r() > half.g(), "Übergang wird rötlich");
         let off = danger_icon_color(text, false, 1.0);
         assert!(off.r() == off.g() && off.a() < rest.a(), "deaktiviert: blass, nie rot");
+    }
+
+    #[test]
+    fn modal_drag_keeps_the_dialog_inside_the_window() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0));
+        let size = Vec2::new(400.0, 300.0);
+        let c = egui::Align2::CENTER_CENTER;
+        assert_eq!(clamp_modal_drag(screen, size, c, Vec2::ZERO, Vec2::new(100.0, -50.0)), Vec2::new(100.0, -50.0), "innen: unverändert");
+        assert_eq!(clamp_modal_drag(screen, size, c, Vec2::ZERO, Vec2::new(-900.0, 900.0)), Vec2::new(-300.0, 250.0), "an den Rand");
+        // Anker oben mittig mit Abstand (Schnellmenü): nach oben nur bis zum Rand.
+        let top = egui::Align2::CENTER_TOP;
+        assert_eq!(clamp_modal_drag(screen, size, top, Vec2::new(0.0, 90.0), Vec2::new(0.0, -500.0)), Vec2::new(0.0, -90.0));
+        // Größer als das Fenster: linke/obere Kante bleibt sichtbar.
+        let huge = Vec2::new(1200.0, 900.0);
+        assert_eq!(clamp_modal_drag(screen, huge, c, Vec2::ZERO, Vec2::new(300.0, 300.0)), Vec2::new(100.0, 50.0));
     }
 
     #[test]

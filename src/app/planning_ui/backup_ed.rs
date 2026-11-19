@@ -372,7 +372,7 @@ impl PlanUi {
         // Esc bricht ab (vor dem Dialog gelesen: er verbraucht die Taste selbst); ein Klick daneben nicht, damit ein langer Import
         // nicht aus Versehen endet.
         let mut cancel = ctx.input(|i| i.key_pressed(Key::Escape));
-        egui::Modal::new(Self::modal_id("backup_busy")).show(ctx, |ui| {
+        crate::style::modal(Self::modal_id("backup_busy")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 460.0));
             widgets::dialog_title(ui, title);
             ui.label(RichText::new(&file).monospace());
@@ -446,7 +446,7 @@ impl PlanUi {
         let live = if need_new { check_new_key(cx.conn, &p.new_key) } else { Ok(String::new()) };
         let mut go = false;
         let mut close = false;
-        let m = egui::Modal::new(Self::modal_id("backup_import")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("backup_import")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 520.0));
             widgets::dialog_title(ui, lang.t("Projekt importieren", "Import project"));
             ui.label(RichText::new(&p.file).monospace());
@@ -532,7 +532,7 @@ impl PlanUi {
         let Some(res) = self.templates.backup.project_report.take() else { return };
         let mut close = false;
         let r = &res.report;
-        let m = egui::Modal::new(Self::modal_id("backup_report")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("backup_report")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 520.0));
             widgets::dialog_title(ui, lang.t("Import abgeschlossen", "Import finished"));
             ui.label(match lang {
@@ -579,7 +579,7 @@ impl PlanUi {
         let Some(mut p) = self.templates.backup.csv.take() else { return };
         let mut go = false;
         let mut close = false;
-        let m = egui::Modal::new(Self::modal_id("csv_import")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("csv_import")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 560.0));
             widgets::dialog_title(ui, lang.t("Tickets importieren (CSV)", "Import tickets (CSV)"));
             ui.label(RichText::new(&p.file).monospace());
@@ -637,7 +637,7 @@ impl PlanUi {
         let lang = cx.lang;
         let Some((key, rep)) = self.templates.backup.csv_report.take() else { return };
         let mut close = false;
-        let m = egui::Modal::new(Self::modal_id("csv_report")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("csv_report")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 520.0));
             widgets::dialog_title(ui, lang.t("Import abgeschlossen", "Import finished"));
             ui.label(match lang {
