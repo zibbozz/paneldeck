@@ -1290,7 +1290,12 @@ mod tests {
     /// Review #282 (LOW-5, LOW-7): wann eine Sitzung die Hooks per `--settings` bekommt, obwohl es globale gibt.
     #[test]
     fn sessions_get_their_own_hooks_when_the_global_ones_do_not_apply() {
-        let global = Path::new("C:\\Users\\x\\.claude\\settings.json");
+        // Pfade in der Form der Plattform (`\` trennt nur unter Windows Ordner).
+        let (global, same_dir) = if cfg!(windows) {
+            (Path::new("C:\\Users\\x\\.claude\\settings.json"), "CLAUDE_CONFIG_DIR=c:/users/x/.claude/")
+        } else {
+            (Path::new("/home/x/.claude/settings.json"), "CLAUDE_CONFIG_DIR=/home/x/.claude/")
+        };
         let needs = |g: bool, incomplete: bool, foreign: bool, env: &str| session_needs_settings(g, incomplete, foreign, env, Some(global));
         assert!(needs(false, false, false, ""), "ohne globale Hooks immer");
         assert!(!needs(true, false, false, ""), "vollständige globale Hooks reichen");
@@ -1303,7 +1308,7 @@ mod tests {
         assert!(needs(true, false, false, "FOO=1\nCLAUDE_CONFIG_DIR=D:\\cfg\n"));
         assert!(needs(true, false, true, "claude_config_dir = D:/cfg"), "Name ohne Rücksicht auf Groß-/Kleinschreibung");
         // … dasselbe Verzeichnis (andere Schreibweise) oder leer: nicht
-        assert!(!needs(true, false, false, "CLAUDE_CONFIG_DIR=c:/users/x/.claude/"));
+        assert!(!needs(true, false, false, same_dir));
         assert!(!needs(true, false, false, "CLAUDE_CONFIG_DIR=\nFOO=1"));
         assert!(session_needs_settings(true, false, false, "CLAUDE_CONFIG_DIR=D:\\cfg", None));
         assert_eq!(profile_config_dir("A=1\nCLAUDE_CONFIG_DIR=x\nCLAUDE_CONFIG_DIR=y"), Some("y"), "die letzte Zeile gilt");
