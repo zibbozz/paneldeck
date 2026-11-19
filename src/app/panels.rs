@@ -1129,7 +1129,10 @@ mod files_root_tests {
         assert!(files_blocked("~", true, Lang::En).is_some_and(|t| t.contains("not known yet")));
         assert!(files_blocked(r"\\wsl.localhost\Ubuntu\home\u", false, Lang::De).is_some_and(|t| t.contains("läuft nicht")));
         assert!(files_blocked(r"\\wsl.localhost\Ubuntu\home\u", true, Lang::En).is_none());
-        assert!(files_blocked(r"C:\Work", false, Lang::En).is_none(), "Windows-Ordner auch ohne laufende Sitzung");
+        // Ein lokaler (absoluter) Ordner der Plattform wird auch ohne laufende Sitzung gezeigt. `files_blocked` prüft mit
+        // `Path::is_absolute`: `C:\Work` ist nur unter Windows absolut, unter Linux/macOS ein relativer Name.
+        let local = if cfg!(windows) { r"C:\Work" } else { "/srv/work" };
+        assert!(files_blocked(local, false, Lang::En).is_none(), "lokaler Ordner auch ohne laufende Sitzung");
         assert!(is_slow_root(r"\\wsl.localhost\Ubuntu\home") && is_slow_root(r"\\server\share\x") && !is_slow_root(r"C:\Work"));
     }
 }

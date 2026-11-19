@@ -582,13 +582,18 @@ fn probe_at(port: u16, token: &str, budget: std::time::Duration) -> Option<HubIn
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let mut stream = std::net::TcpStream::connect_timeout(&addr, budget.min(Duration::from_millis(800))).ok()?;
     let _ = stream.set_write_timeout(Some(budget));
+    // Lesefrist schon vor dem Halbschließen setzen: macOS (XNU `sosetopt`) lehnt `setsockopt` mit EINVAL ab, sobald der
+    // Socket in beide Richtungen zu ist – nach unserem `shutdown(Write)` also, sobald der Hub geantwortet und geschlossen
+    // hat. Im Lese-Schritt darf das Nachstellen der Frist daher scheitern: Dann kann nichts mehr ankommen, `read` blockiert
+    // nicht mehr (gepufferte Antwort, dann EOF), und die zuvor gesetzte Frist gilt weiter.
+    stream.set_read_timeout(Some(budget)).ok()?;
     let body = json!({"token": token, "cmd": "mcp", "tool": "_level", "args": {}, "caller": null, "caller_pid": null});
     stream.write_all(body.to_string().as_bytes()).ok()?;
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
     loop {
         let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
-        stream.set_read_timeout(Some(left)).ok()?;
+        let _ = stream.set_read_timeout(Some(left));
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) if buf.len() + n <= 64 * 1024 => buf.extend_from_slice(&chunk[..n]),
@@ -1266,9 +1271,11 @@ mod tests {
             s.write_all(br#"{"ok":true,"result":{"level":2,"expert":true}}"#).unwrap();
         });
         // Hier geht es um die Antwort, nicht um die Frist: großzügig, damit ein ausgelasteter CI-Rechner (macOS) den
-        // Server-Faden nicht zu spät startet.
-        assert_eq!(probe_at(port, "tok", std::time::Duration::from_secs(20)), Some(HubInfo { level: McpLevel::Control, expert: true }));
-        srv.join().unwrap();
+        // Server-Faden nicht zu spät startet. Der Hub antwortet und schließt sofort: Unter macOS scheiterte danach das
+        // Nachstellen der Lesefrist (EINVAL auf einem in beide Richtungen geschlossenen Socket).
+        let got = probe_at(port, "tok", std::time::Duration::from_secs(20));
+        srv.join().expect("Schein-Hub ohne Fehler");
+        assert_eq!(got, Some(HubInfo { level: McpLevel::Control, expert: true }));
     }
 
     #[test]
