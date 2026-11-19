@@ -19,6 +19,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Das Einstellungsfenster lässt sich wie ein normales Fenster verschieben; es öffnet mittig und bleibt im Fenster (#275)
 - Ordner in der Terminal-Seitenleiste löschen: Der Papierkorb an einem Ordner schließt jetzt alle seine Sitzungen (dieselbe Rückfrage mit Liste, auch Unterordner, minimierte Sitzungen und Chats) und löscht danach den Ordner samt Unterordnern; ein leerer Ordner wird sofort gelöscht. „Ordner löschen (Inhalt bleibt)“ im Kontextmenü sowie das Löschen eines Projekts oder einer Vorlage fragen jetzt in einem Dialog mit 3-Sekunden-Wartezeit statt per „zweimal klicken“. Der neue Menüpunkt „Ordner mit seinen Sitzungen löschen …“ macht dasselbe wie der Papierkorb (#276)
 - Alle Dialogfenster (Neue Sitzung, Einstellungen der Sitzung, Vorlagen-Editor, Rückfragen, Worktree-Dialog, Vorlagen, Prompt-Composer, Prompt-Bibliothek, Notizen, Warteschlange, Änderungen, Kosten-Übersicht, Claude-Verlauf, Suche, Claude-Dateien, Update-Dialoge, Icon-Explorer …) lassen sich wie ein normales Fenster an der Titelleiste verschieben; sie öffnen mittig, behalten ihre Position, solange sie offen sind, und bleiben immer im Fenster (#288)
+- Modale Dialoge (Ticket, Sprint, Board, Version, Dashboard, Sicherung/CSV, Schlagwörter, Filter, Todo-Dialoge, Schnellmenü, Neuer Chat, Link-Rückfrage) lassen sich an einer schmalen Leiste oben verschieben; sie öffnen mittig, behalten ihre Position, solange sie offen sind, und bleiben immer im Fenster (#288)
 
 ### Fixed
 

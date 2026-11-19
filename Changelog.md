@@ -19,6 +19,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - The Settings window can be moved like a normal window; it opens centred and stays inside the window (#275)
 - Deleting folders in the Terminals sidebar: the trash icon on a folder now closes all its sessions (same confirmation listing what ends, including subfolders, minimized sessions and chats) and then deletes the folder with its subfolders; an empty folder is deleted directly. *Delete folder (content stays)* in the context menu, and deleting a project or a template, now ask in a confirmation dialog with the 3-second timer instead of “click twice”. The new menu entry *Delete folder with its sessions …* does what the trash icon does (#276)
 - All dialog windows (New session, session settings, template editor, confirmations, worktree dialog, templates, prompt composer, prompt library, notes, queue, changes, cost overview, Claude history, search, Claude files, update dialogs, icon explorer …) can be moved by dragging their title bar like a normal window; they open centred, keep their position while open and always stay inside the window (#288)
+- Modal dialogs (ticket, sprint, board, release, dashboard, backup/CSV, keywords, filter, to-do dialogs, quick menu, New chat, link prompt) can be moved by a slim drag strip at the top; they open centred, keep their position while open and always stay inside the window (#288)
 
 ### Fixed
 
