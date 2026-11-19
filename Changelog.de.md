@@ -9,6 +9,12 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.5.0] - WIP
 
+## [2.4.1] - WIP
+
+### Fixed
+
+- Eine Textauswahl im Terminal beginnt jetzt bei dem Zeichen, auf dem die Maustaste gedrückt wurde; die ersten Zeichen fehlen nicht mehr (#300)
+
 ## [2.4.0] - 2026-11-19
 
 ### Added
@@ -388,6 +394,7 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
 [2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
+[2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
 [2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1

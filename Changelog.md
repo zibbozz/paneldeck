@@ -9,6 +9,12 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.5.0] - WIP
 
+## [2.4.1] - WIP
+
+### Fixed
+
+- Selecting text in a terminal now starts at the character under the mouse when the button is pressed, so the first characters are no longer missed (#300)
+
 ## [2.4.0] - 2026-11-19
 
 ### Added
@@ -388,6 +394,7 @@ First public release. From here on, the public API (MCP interface, command line,
 - The executable contains no paths of the build machine.
 
 [2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
+[2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
 [2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1
