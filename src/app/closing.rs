@@ -17,7 +17,7 @@
 
 use super::planning_ui::{countdown_secs, danger_button};
 use super::*;
-use crate::winctl::JobProc;
+use crate::platform::process::JobProc;
 
 /// Welche Sitzungen „alle schließen“ beendet.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +28,9 @@ pub(super) enum CloseScope {
     Project(u64),
     /// Wirklich alle Sitzungen: alle Projekte, alle Fenster, auch abgedockte.
     All,
+    /// Ordner löschen (Papierkorb an der Ordnerzeile, #276): Sitzungen wie bei `Folder` (Projekt, Pfad), danach
+    /// verschwindet der Ordner samt Unterordnern und ihren Vorgaben.
+    DeleteFolder(u64, String),
 }
 
 pub(super) enum CloseTarget {
@@ -35,6 +38,12 @@ pub(super) enum CloseTarget {
     Many(CloseScope, Vec<u64>),
     /// Paneldeck beenden, obwohl Sitzungen Hintergrundprozesse haben (#168).
     Quit,
+    /// Nur den Ordner löschen (Projekt, Pfad); Sitzungen und Unterordner rücken eine Ebene hoch (#276).
+    FolderLift(u64, String),
+    /// Projekt löschen; seine Sitzungen wandern in ein anderes Projekt (#276, früher „zweimal klicken“).
+    DeleteProject(u64),
+    /// Sitzungs-Vorlage löschen (Index und Name; gelöscht wird nur, wenn beide noch passen – #244/#276).
+    DeleteTemplate(usize, String),
 }
 
 /// Offene Rückfrage (je Fenster, siehe `WinView::confirm_close`).
@@ -52,7 +61,73 @@ pub(super) struct CloseAsk {
 pub(super) fn wait_secs(target: &CloseTarget, running_with_jobs: bool, since: Instant, now: Instant) -> u32 {
     match target {
         CloseTarget::One(_) if !running_with_jobs => 0,
-        CloseTarget::One(_) | CloseTarget::Many(..) | CloseTarget::Quit => countdown_secs(since, now),
+        // Löschen (Ordner, Projekt, Vorlage) wartet wie „Alle schließen“ (#276).
+        CloseTarget::One(_) | CloseTarget::Many(..) | CloseTarget::Quit | CloseTarget::FolderLift(..) | CloseTarget::DeleteProject(_) | CloseTarget::DeleteTemplate(..) => countdown_secs(since, now),
+    }
+}
+
+/// Was beim Löschen eines Ordners (Inhalt bleibt) passiert: „3 Sitzungen und 1 Unterordner rücken nach „a“ hoch.“
+pub(super) fn lift_summary(sessions: usize, subfolders: usize, parent: &str, lang: Lang) -> String {
+    let what = match (sessions, subfolders) {
+        (0, 0) => return lang.t("Der Ordner ist leer.", "The folder is empty.").to_string(),
+        (s, 0) => n_of(s, lang, ("Sitzung", "Sitzungen"), ("session", "sessions")),
+        (0, f) => n_of(f, lang, ("Unterordner", "Unterordner"), ("subfolder", "subfolders")),
+        (s, f) => format!(
+            "{} {} {}",
+            n_of(s, lang, ("Sitzung", "Sitzungen"), ("session", "sessions")),
+            lang.t("und", "and"),
+            n_of(f, lang, ("Unterordner", "Unterordner"), ("subfolder", "subfolders"))
+        ),
+    };
+    let one = sessions + subfolders == 1;
+    match (lang, parent.is_empty()) {
+        (Lang::De, true) => format!("{what} {} auf die oberste Ebene.", if one { "rückt" } else { "rücken" }),
+        (Lang::De, false) => format!("{what} {} nach {} hoch.", if one { "rückt" } else { "rücken" }, lang.q(parent)),
+        (Lang::En, true) => format!("{what} {} to the top level.", if one { "moves" } else { "move" }),
+        (Lang::En, false) => format!("{what} {} up to {}.", if one { "moves" } else { "move" }, lang.q(parent)),
+    }
+}
+
+/// Darf ein Ordner ohne Rückfrage verschwinden? Nur ganz leer: keine Sitzungen in irgendeinem Fenster (`content.0`,
+/// [`App::folder_content`]) und keine Unterordner (`content.1`) – auch wenn dieses Fenster keine Sitzungen darin zeigt
+/// (#276 Review).
+pub(super) fn empty_folder(content: (usize, usize)) -> bool {
+    content == (0, 0)
+}
+
+/// Sitzungen des Ordners in anderen Fenstern (werden nicht geschlossen, rücken hoch, #276).
+pub(super) fn elsewhere_line(n: usize, parent: &str, lang: Lang) -> String {
+    let what = n_of(n, lang, ("Sitzung", "Sitzungen"), ("session", "sessions"));
+    match (lang, parent.is_empty()) {
+        (Lang::De, true) => format!("{what} in anderen Fenstern {} auf die oberste Ebene (bleiben offen).", if n == 1 { "rückt" } else { "rücken" }),
+        (Lang::De, false) => format!("{what} in anderen Fenstern {} nach {} (bleiben offen).", if n == 1 { "rückt" } else { "rücken" }, lang.q(parent)),
+        (Lang::En, true) => format!("{what} in other windows {} to the top level (they stay open).", if n == 1 { "moves" } else { "move" }),
+        (Lang::En, false) => format!("{what} in other windows {} to {} (they stay open).", if n == 1 { "moves" } else { "move" }, lang.q(parent)),
+    }
+}
+
+/// Unterordner, die beim Hochrücken umbenannt werden, weil ihr Name im übergeordneten Ordner schon vergeben ist.
+pub(super) fn rename_lines(plan: &[(String, String)], deleted: &str, lang: Lang) -> Vec<String> {
+    plan.iter()
+        .filter(|(old, new)| *new != state::lift_path(old, deleted))
+        .map(|(old, new)| match lang {
+            Lang::De => format!("{} heißt danach {} (der Name ist dort schon vergeben).", lang.q(state::folder_leaf(old)), lang.q(state::folder_leaf(new))),
+            Lang::En => format!("{} becomes {} (the name is already taken there).", lang.q(state::folder_leaf(old)), lang.q(state::folder_leaf(new))),
+        })
+        .collect()
+}
+
+/// Hinweis beim Löschen eines Ordners mit seinen Sitzungen: was außer den Sitzungen verschwindet.
+pub(super) fn folder_delete_note(subfolders: usize, lang: Lang) -> String {
+    if subfolders == 0 {
+        lang.t("Danach wird der Ordner mit seinen Vorgaben für neue Sitzungen gelöscht.", "Afterwards the folder is deleted with its defaults for new sessions.").to_string()
+    } else {
+        // Dativ im Deutschen: „mit 1 Unterordner“, „mit 2 Unterordnern“.
+        let n = n_of(subfolders, lang, ("Unterordner", "Unterordnern"), ("subfolder", "subfolders"));
+        match lang {
+            Lang::De => format!("Danach wird der Ordner mit {n} und den Vorgaben für neue Sitzungen gelöscht."),
+            Lang::En => format!("Afterwards the folder is deleted with {n} and the defaults for new sessions."),
+        }
     }
 }
 
@@ -83,7 +158,7 @@ pub(super) struct Lingering {
 /// Aufrufer mit ihrer Kette, `mcp::attribute`, `taint::set_retired`) und prüft nach [`RECHECK`] einmal, ob dort noch
 /// etwas läuft, das die Rückfrage nicht genannt hat (Hilfsprozesse eines Vordergrundprogramms, die es überleben).
 pub(super) struct Retired {
-    pub(super) job: crate::winctl::SessionJob,
+    pub(super) job: crate::platform::process::SessionJob,
     pub(super) session: u64,
     name: String,
     since: Instant,
@@ -322,6 +397,7 @@ pub(super) fn folder_button_rect(row: Rect) -> Rect {
 pub(super) fn in_scope(scope: &CloseScope, meta: &SessionMeta, project: u64, window: u64) -> bool {
     match scope {
         CloseScope::Folder(path) => meta.project == project && meta.window == window && !meta.group.is_empty() && state::folder_within(&meta.group, path),
+        CloseScope::DeleteFolder(pid, path) => meta.project == *pid && meta.window == window && !meta.group.is_empty() && state::folder_within(&meta.group, path),
         CloseScope::Project(pid) => meta.project == *pid && meta.window == window,
         CloseScope::All => true,
     }
@@ -356,7 +432,7 @@ pub(super) fn confirmed(secs: u32, clicked: bool, enter: bool) -> bool {
 pub(super) fn confirm_window_keep(ctx: &egui::Context, id: Id, title: &str, button: &str, keep: Option<&str>, secs: u32, lang: Lang, width: f32, body: impl FnOnce(&mut Ui)) -> Outcome {
     let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), i.consume_key(Modifiers::NONE, Key::Enter)));
     let (mut clicked, mut kept, mut cancel) = (false, false, esc);
-    egui::Window::new(title).id(id).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+    style::movable(ctx, id, egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
         ui.set_max_width(width);
         body(ui);
         ui.add_space(S2);
@@ -407,6 +483,21 @@ impl App {
     /// „Alle schließen“: Rückfrage mit der Liste öffnen (ohne Sitzungen nur ein Hinweis).
     pub(super) fn request_close_many(&mut self, scope: CloseScope) {
         let ids = self.scope_ids(&scope);
+        if let CloseScope::DeleteFolder(pid, path) = &scope {
+            // Ganz leerer Ordner (keine Sitzungen in irgendeinem Fenster, keine Unterordner): gleich löschen (#276).
+            // Sonst immer die Rückfrage – auch ohne Sitzungen in diesem Fenster (sie nennt Unterordner und Sitzungen
+            // anderer Fenster).
+            if empty_folder(self.folder_content(*pid, path)) {
+                let (pid, path) = (*pid, path.clone());
+                self.remove_folder_tree(pid, &path);
+                let lang = self.settings.language;
+                self.notify_text(format!("{} {}", lang.t("Ordner gelöscht:", "Folder deleted:"), path));
+                return;
+            }
+            let lingering = self.lingering_of(&ids);
+            self.confirm_close = Some(CloseAsk::new(CloseTarget::Many(scope, ids)).with(lingering));
+            return;
+        }
         if ids.is_empty() {
             let lang = self.settings.language;
             self.notify_text(lang.t("Keine Sitzungen zum Schließen.", "No sessions to close.").to_string());
@@ -416,10 +507,61 @@ impl App {
         self.confirm_close = Some(CloseAsk::new(CloseTarget::Many(scope, ids)).with(lingering));
     }
 
+    /// Sitzungen des Ordners `path` (Projekt `pid`) in anderen Fenstern als diesem (rücken beim Löschen hoch, #276).
+    pub(super) fn folder_elsewhere(&self, pid: u64, path: &str) -> usize {
+        self.entries.values().filter(|e| e.meta.project == pid && e.meta.window != self.wins.cur && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path)).count()
+    }
+
+    /// Sitzungen (alle Fenster) und Unterordner im Ordner `path` des Projekts `pid`.
+    pub(super) fn folder_content(&self, pid: u64, path: &str) -> (usize, usize) {
+        let sessions = self.entries.values().filter(|e| e.meta.project == pid && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path)).count();
+        let subfolders = self.projects.iter().find(|p| p.id == pid).map(|p| p.folders.iter().filter(|f| f.path != path && state::folder_within(&f.path, path)).count()).unwrap_or(0);
+        (sessions, subfolders)
+    }
+
+    /// Ordner samt Unterordnern (und ihren Vorgaben) entfernen. Sitzungen, die noch darin liegen (andere Fenster,
+    /// inzwischen neu angelegte), rücken in den übergeordneten Ordner – sonst legte `sync_folders` ihn wieder an.
+    pub(super) fn remove_folder_tree(&mut self, pid: u64, path: &str) {
+        let parent = state::folder_parent(path).to_string();
+        for e in self.entries.values_mut() {
+            if e.meta.project == pid && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path) {
+                e.meta.group = parent.clone();
+            }
+        }
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.remove_folder(path);
+        }
+    }
+
+    /// Nur den Ordner löschen: Sitzungen und Unterordner rücken eine Ebene hoch (`Project::delete_folder_lift`).
+    pub(super) fn lift_folder(&mut self, pid: u64, path: &str) {
+        let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) else { return };
+        // Plan zuerst (Namenskonflikte im übergeordneten Ordner: freier Name), dann Ordner und Sitzungen gleich abbilden.
+        let plan = p.delete_folder_lift(path);
+        for e in self.entries.values_mut() {
+            if e.meta.project == pid && !e.meta.group.is_empty() && state::folder_within(&e.meta.group, path) {
+                e.meta.group = state::lift_mapped(&e.meta.group, path, &plan);
+            }
+        }
+    }
+
+    /// „Ordner löschen (Inhalt bleibt)“ aus dem Kontextmenü: Rückfrage mit Wartezeit; ein leerer Ordner (keine
+    /// Sitzungen, keine Unterordner) verschwindet gleich (#276).
+    pub(super) fn ask_folder_lift(&mut self, path: String) {
+        let pid = self.active_project;
+        if empty_folder(self.folder_content(pid, &path)) {
+            self.lift_folder(pid, &path);
+            let lang = self.settings.language;
+            self.notify_text(format!("{} {}", lang.t("Ordner gelöscht:", "Folder deleted:"), path));
+        } else {
+            self.confirm_close = Some(CloseAsk::new(CloseTarget::FolderLift(pid, path)));
+        }
+    }
+
     /// Hintergrundprozesse dieser Sitzungen, die ihr Schließen überleben würden (#168). Nur Sitzungen mit solchen.
     pub(super) fn lingering_of(&self, ids: &[u64]) -> Vec<Lingering> {
         // Prozessnamen und Fenster einmal je Aufruf (nicht je Sitzung), und nur, wenn eine Sitzung mehr als die Shell hat.
-        let info = crate::winctl::ProcInfo::default();
+        let info = crate::platform::process::ProcInfo::default();
         ids.iter()
             .filter_map(|id| {
                 let e = self.entries.get(id)?;
@@ -438,7 +580,7 @@ impl App {
     /// Die Sitzung `id` endet (Schließen) oder startet neu: Ihren Job behalten, wenn noch Prozesse darin laufen
     /// ([`Retired`]). Vorher festhalten, was die Rückfrage genannt hätte (die Konsole lebt da noch).
     pub(super) fn retire_job(&mut self, id: u64, name: String, s: &mut crate::terminal::Session) {
-        let shown: Vec<u32> = s.lingering(&crate::winctl::ProcInfo::default()).into_iter().map(|p| p.pid).collect();
+        let shown: Vec<u32> = s.lingering(&crate::platform::process::ProcInfo::default()).into_iter().map(|p| p.pid).collect();
         let Some(job) = s.take_job() else { return };
         if job.pids().is_some_and(|p| p.is_empty()) {
             return;
@@ -470,9 +612,9 @@ impl App {
         let mut out = Vec::new();
         for r in self.retired.iter_mut().filter(|r| !r.checked && r.since.elapsed() >= RECHECK) {
             r.checked = true;
-            let names = names.get_or_insert_with(crate::winctl::process_names);
+            let names = names.get_or_insert_with(crate::platform::process::process_names);
             let (pids, lines) = leftover_lines(&r.job.pids().unwrap_or_default(), &r.shown, |p| names.get(&p).cloned().unwrap_or_default());
-            r.listed = pids.into_iter().filter_map(|p| crate::winctl::process_born(p).map(|t| (p, t))).collect();
+            r.listed = pids.into_iter().filter_map(|p| crate::platform::process::process_born(p).map(|t| (p, t))).collect();
             if !lines.is_empty() && !r.listed.is_empty() {
                 out.push((r.name.clone(), r.job.key(), lines.join(", ")));
             }
@@ -602,7 +744,7 @@ impl App {
             }
             CloseTarget::Many(scope, ids) => {
                 let items: Vec<CloseItem> = ids.iter().filter_map(|id| self.close_item(*id)).collect();
-                if items.is_empty() {
+                if items.is_empty() && !matches!(scope, CloseScope::DeleteFolder(..)) {
                     return;
                 }
                 let (title, what) = match scope {
@@ -612,30 +754,55 @@ impl App {
                         self.projects.iter().find(|p| p.id == *pid).map(|p| p.name.clone()).unwrap_or_default(),
                     ),
                     CloseScope::All => (lang.t("Alle Sitzungen schließen?", "Close all sessions?"), lang.t("Alle Projekte und Fenster", "All projects and windows").to_string()),
+                    CloseScope::DeleteFolder(_, path) => (lang.t("Ordner mit seinen Sitzungen löschen?", "Delete the folder with its sessions?"), path.clone()),
                 };
+                let delete = match scope {
+                    CloseScope::DeleteFolder(pid, path) => {
+                        if self.projects.iter().find(|p| p.id == *pid).is_none_or(|p| p.folder(path).is_none()) {
+                            return; // inzwischen umbenannt oder gelöscht
+                        }
+                        Some((*pid, path.clone(), self.folder_content(*pid, path).1, self.folder_elsewhere(*pid, path)))
+                    }
+                    _ => None,
+                };
+                let title = if delete.is_some() && items.is_empty() { lang.t("Ordner löschen?", "Delete folder?") } else { title };
                 let with_project = matches!(scope, CloseScope::All) && items.iter().any(|i| i.project != items[0].project);
-                let button = if jobs { end_all_label(lang) } else { lang.t("Alle schließen", "Close all") };
+                let button = match (jobs, delete.is_some(), items.is_empty()) {
+                    (true, ..) => end_all_label(lang),
+                    (false, true, true) => lang.t("Ordner löschen", "Delete folder"),
+                    (false, true, false) => lang.t("Schließen und löschen", "Close and delete"),
+                    (false, false, _) => lang.t("Alle schließen", "Close all"),
+                };
                 let o = confirm_window_keep(ctx, Id::new("close_many_ask"), title, button, keep, secs, lang, 460.0, |ui| {
                     ui.label(RichText::new(what).strong());
                     ui.add_space(S1);
-                    for (n, line) in summary_lines(&items, lang).into_iter().enumerate() {
+                    for (n, line) in summary_lines(&items, lang).into_iter().enumerate().filter(|_| !items.is_empty()) {
                         ui.label(if n == 0 { line } else { format!("• {line}") });
                     }
                     ui.add_space(S1);
-                    egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
-                        egui::ScrollArea::vertical().max_height(180.0).auto_shrink([false, true]).show(ui, |ui| {
-                            for i in &items {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(&i.name);
-                                    let tags = item_tags(i, lang, with_project);
-                                    if !tags.is_empty() {
-                                        ui.label(RichText::new(tags).small().color(style::dim(ui)));
-                                    }
-                                });
-                            }
+                    if !items.is_empty() {
+                        egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(180.0).auto_shrink([false, true]).show(ui, |ui| {
+                                for i in &items {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(&i.name);
+                                        let tags = item_tags(i, lang, with_project);
+                                        if !tags.is_empty() {
+                                            ui.label(RichText::new(tags).small().color(style::dim(ui)));
+                                        }
+                                    });
+                                }
+                            });
                         });
-                    });
+                    }
                     lingering_section(ui, &ask.lingering, lang, true);
+                    if let Some((_, path, subfolders, elsewhere)) = &delete {
+                        ui.add_space(S1);
+                        if *elsewhere > 0 {
+                            ui.label(elsewhere_line(*elsewhere, state::folder_parent(path), lang));
+                        }
+                        ui.label(folder_delete_note(*subfolders, lang));
+                    }
                     ui.add_space(S1);
                     ui.label(RichText::new(lang.t("Das lässt sich nicht rückgängig machen.", "This cannot be undone.")).small().color(style::dim(ui)));
                 });
@@ -644,6 +811,67 @@ impl App {
                     Outcome::Go if jobs => actions.extend([Action::EndJobs(job_refs(&ask.lingering)), Action::CloseMany(ids)]),
                     Outcome::Go | Outcome::Keep => actions.push(Action::CloseMany(ids)),
                     _ => {}
+                }
+                // Erst schließen, dann den Ordner entfernen (übrige Sitzungen rücken hoch, `remove_folder_tree`).
+                if let (Outcome::Go | Outcome::Keep, Some((pid, path, ..))) = (o, delete) {
+                    actions.push(Action::FolderRemove(pid, path));
+                }
+                o
+            }
+            CloseTarget::FolderLift(pid, path) => {
+                let Some(proj) = self.projects.iter().find(|p| p.id == *pid) else { return };
+                if proj.folder(path).is_none() {
+                    return; // inzwischen umbenannt oder gelöscht
+                }
+                let (sessions, subfolders) = self.folder_content(*pid, path);
+                let parent = state::folder_parent(path).to_string();
+                let renamed = rename_lines(&proj.lift_plan(path), path, lang);
+                let o = confirm_window_keep(ctx, Id::new("folder_lift_ask"), lang.t("Ordner löschen?", "Delete folder?"), lang.t("Ordner löschen", "Delete folder"), None, secs, lang, 420.0, |ui| {
+                    ui.label(RichText::new(path.as_str()).strong());
+                    ui.add_space(S1);
+                    ui.label(lift_summary(sessions, subfolders, &parent, lang));
+                    for r in &renamed {
+                        ui.label(RichText::new(r).color(ui.visuals().warn_fg_color));
+                    }
+                    ui.label(lang.t("Es wird nichts geschlossen. Die Vorgaben des Ordners für neue Sitzungen gehen an seine Unterordner.", "Nothing is closed. The folder's defaults for new sessions pass to its subfolders."));
+                });
+                if o == Outcome::Go {
+                    actions.push(Action::FolderDelete(*pid, path.clone()));
+                }
+                o
+            }
+            CloseTarget::DeleteProject(pid) => {
+                let (Some(p), Some(other)) = (self.projects.iter().find(|p| p.id == *pid), self.projects.iter().find(|p| p.id != *pid)) else { return };
+                let n = self.entries.values().filter(|e| e.meta.project == *pid).count();
+                let (name, other) = (p.name.clone(), other.name.clone());
+                let o = confirm_window_keep(ctx, Id::new("project_delete_ask"), lang.t("Projekt löschen?", "Delete project?"), lang.t("Projekt löschen", "Delete project"), None, secs, lang, 420.0, |ui| {
+                    ui.label(RichText::new(&name).strong());
+                    ui.add_space(S1);
+                    let moved = n_of(n, lang, ("Sitzung", "Sitzungen"), ("session", "sessions"));
+                    ui.label(match lang {
+                        Lang::De => format!("Nichts wird geschlossen: {moved} {} ins Projekt {}.", if n == 1 { "wechselt" } else { "wechseln" }, lang.q(&other)),
+                        Lang::En => format!("Nothing is closed: {moved} {} to the project {}.", if n == 1 { "moves" } else { "move" }, lang.q(&other)),
+                    });
+                });
+                if o == Outcome::Go {
+                    actions.push(Action::DeleteProject(*pid));
+                }
+                o
+            }
+            CloseTarget::DeleteTemplate(i, name) => {
+                // Hat sich die Liste inzwischen verschoben (Löschen, Duplizieren, #244), schließt die Rückfrage einfach.
+                let Some(t) = self.templates.get(*i).filter(|t| t.name == *name) else { return };
+                let items = t.items.iter().map(|it| it.name.as_str()).collect::<Vec<_>>().join(", ");
+                let o = confirm_window_keep(ctx, Id::new("template_delete_ask"), lang.t("Vorlage löschen?", "Delete template?"), lang.t("Löschen", "Delete"), None, secs, lang, 420.0, |ui| {
+                    ui.label(RichText::new(name.as_str()).strong());
+                    if !items.is_empty() {
+                        ui.label(RichText::new(items).small().color(style::dim(ui)));
+                    }
+                    ui.add_space(S1);
+                    ui.label(RichText::new(lang.t("Laufende Sitzungen bleiben. Das lässt sich nicht rückgängig machen.", "Running sessions stay. This cannot be undone.")).small().color(style::dim(ui)));
+                });
+                if o == Outcome::Go {
+                    actions.push(Action::TemplateDelete(*i, name.clone()));
                 }
                 o
             }
@@ -834,6 +1062,47 @@ mod tests {
         assert_eq!(ids(&CloseScope::All), vec![1, 2, 3, 4, 5, 6, 7], "alle: auch andere Fenster und Projekte");
         // Aus Sicht des zweiten Fensters
         assert_eq!(sessions.iter().filter(|m| in_scope(&CloseScope::Folder("a".into()), m, 1, 1)).map(|m| m.id).collect::<Vec<_>>(), vec![5]);
+        // Ordner löschen (#276): dieselben Sitzungen wie „im Ordner schließen“, Projekt aus der Rückfrage
+        assert_eq!(ids(&CloseScope::DeleteFolder(1, "a".into())), vec![1, 2, 4]);
+        assert_eq!(sessions.iter().filter(|m| in_scope(&CloseScope::DeleteFolder(2, "a".into()), m, 1, 0)).map(|m| m.id).collect::<Vec<_>>(), vec![6]);
+    }
+
+    #[test]
+    fn deleting_waits_like_close_all() {
+        // #276: Löschen von Ordner, Projekt und Vorlage fragt mit 3-Sekunden-Wartezeit statt „zweimal klicken“.
+        let t0 = Instant::now();
+        for target in [CloseTarget::FolderLift(1, "a".into()), CloseTarget::DeleteProject(2), CloseTarget::DeleteTemplate(0, "T".into()), CloseTarget::Many(CloseScope::DeleteFolder(1, "a".into()), vec![1])] {
+            assert_eq!(wait_secs(&target, false, t0, t0), 3);
+            assert_eq!(wait_secs(&target, false, t0, t0 + Duration::from_secs(4)), 0);
+        }
+    }
+
+    #[test]
+    fn only_a_completely_empty_folder_is_deleted_without_asking() {
+        assert!(empty_folder((0, 0)));
+        assert!(!empty_folder((2, 0)), "Sitzungen (z. B. nur in einem anderen Fenster)");
+        assert!(!empty_folder((0, 1)), "leere Unterordner (mit Vorgaben)");
+    }
+
+    #[test]
+    fn folder_delete_names_other_windows_and_renames() {
+        assert_eq!(elsewhere_line(2, "a", Lang::En), "2 sessions in other windows move to “a” (they stay open).");
+        assert_eq!(elsewhere_line(1, "", Lang::De), "1 Sitzung in anderen Fenstern rückt auf die oberste Ebene (bleiben offen).");
+        let plan = vec![("a/b/c".to_string(), "a/c (2)".to_string()), ("a/b/e".to_string(), "a/e".to_string())];
+        assert_eq!(rename_lines(&plan, "a/b", Lang::En), vec!["“c” becomes “c (2)” (the name is already taken there).".to_string()]);
+        assert_eq!(rename_lines(&plan, "a/b", Lang::De), vec!["„c“ heißt danach „c (2)“ (der Name ist dort schon vergeben).".to_string()]);
+    }
+
+    #[test]
+    fn folder_delete_texts_in_both_languages() {
+        assert_eq!(lift_summary(3, 1, "a", Lang::En), "3 sessions and 1 subfolder move up to “a”.");
+        assert_eq!(lift_summary(1, 0, "", Lang::En), "1 session moves to the top level.");
+        assert_eq!(lift_summary(0, 2, "a/b", Lang::De), "2 Unterordner rücken nach „a/b“ hoch.");
+        assert_eq!(lift_summary(1, 0, "", Lang::De), "1 Sitzung rückt auf die oberste Ebene.");
+        assert_eq!(lift_summary(0, 0, "", Lang::En), "The folder is empty.");
+        assert_eq!(folder_delete_note(0, Lang::En), "Afterwards the folder is deleted with its defaults for new sessions.");
+        assert_eq!(folder_delete_note(2, Lang::De), "Danach wird der Ordner mit 2 Unterordnern und den Vorgaben für neue Sitzungen gelöscht.");
+        assert_eq!(folder_delete_note(1, Lang::En), "Afterwards the folder is deleted with 1 subfolder and the defaults for new sessions.");
     }
 
     #[test]

@@ -153,10 +153,9 @@ impl App {
         let lang = self.settings.language;
         let mut close = false;
         let mut go = false;
-        egui::Window::new(lang.t("Sicherung wiederherstellen", "Restore backup"))
+        style::movable(ctx, Id::new("restore_dialog"), egui::Window::new(lang.t("Sicherung wiederherstellen", "Restore backup")))
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.label(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
                 ui.add_space(S2);

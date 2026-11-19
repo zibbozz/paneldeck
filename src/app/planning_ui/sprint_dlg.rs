@@ -147,7 +147,7 @@ impl PlanUi {
         let cal = self.sprints.cal.calendar();
         let (mut save, mut close) = (false, false);
         let active = form.state == SprintState::Active;
-        let m = egui::Modal::new(Self::modal_id("sprint_form")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("sprint_form")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 520.0));
             widgets::dialog_title(ui, if form.id.is_some() { lang.t("Sprint bearbeiten", "Edit sprint") } else { lang.t("Neuer Sprint", "New sprint") });
             ui.label(RichText::new(lang.t("Name", "Name")).strong());
@@ -261,7 +261,7 @@ impl PlanUi {
         let Some(d) = self.sprints.del.take() else { return };
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("sprint_delete")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("sprint_delete")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 460.0));
             let title = match lang {
                 Lang::De => format!("Sprint {} löschen?", lang.q(&d.name)),
@@ -305,7 +305,7 @@ impl PlanUi {
         let Some(mut d) = self.sprints.complete.take() else { return };
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("sprint_complete")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("sprint_complete")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 520.0));
             let title = match lang {
                 Lang::De => format!("Sprint {} abschließen", lang.q(&d.name)),
@@ -404,7 +404,7 @@ impl PlanUi {
         let Some(mut d) = self.sprints.cal_dlg.take() else { return };
         let lang = cx.lang;
         let (mut save, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("sprint_cal")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("sprint_cal")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 460.0));
             widgets::dialog_title(ui, lang.t("Kalender des Projekts", "Project calendar"));
             widgets::hint(ui, lang.t("Bestimmt die Arbeitstage für die Dauer eines Sprints, die Ideal-Linie im Burndown und die verbleibenden Tage.", "Defines the work days used for the length of a sprint, the ideal line of the burndown and the remaining days."));

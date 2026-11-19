@@ -8,13 +8,13 @@ use crate::hooks::{self, ClaudeStatus, HookMsg, HookServer, IpcCmd};
 use crate::keys;
 use crate::usage::{self, fmt_tokens, Usage, UsageWatcher};
 use crate::layout::{Dir, Node};
-use crate::notify;
+use crate::platform::notify;
 use crate::pathfmt;
 use crate::prompts::{self, Snippet};
 use crate::search::{self, SearchState};
 use crate::style::{self, Icon as SIcon};
 use crate::templates::{self, Template, TplItem};
-use crate::tray::{Tray, TrayCmd};
+use crate::platform::tray::{Tray, TrayCmd};
 use crate::shells::{self, ShellSpec};
 use crate::state::{self, Lang, Profile, Project, SavedState, SessionKind, SessionMeta, Settings};
 use crate::chat::{self as chatmod, ChatBackend, ChatState};
@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod chat_ui;
+mod claude_status;
 mod data;
 mod dialogs;
 mod dragdrop;
@@ -47,6 +48,8 @@ mod multiwin;
 mod palette_ui;
 mod osc52;
 mod link_ask;
+mod list_edit;
+mod opts_tabs;
 mod vt_notify;
 mod panels;
 mod paste_ask;
@@ -62,8 +65,8 @@ mod tasks_ui;
 mod terminal_links;
 mod titlebar;
 mod toasts;
+mod tpl_lib;
 pub(crate) mod update;
-mod winchrome;
 
 /// Vorgabefarbe einer neuen Sitzung/eines neuen Projekts Nummer `i` aus der geltenden Palette des Terminal-Hubs
 /// (läuft im Kreis; bis 2.2 die feste Palette, jetzt `crate::palette::HUB_DEFAULTS` bzw. die gemeinsame).
@@ -81,6 +84,9 @@ struct Entry {
     attention: bool,
     /// Aktueller Ordner laut Claude-Hooks (sonst Startordner).
     live_cwd: String,
+    /// Erster gemeldeter Ordner (wo die Shell gestartet ist): Wurzel des Dateibaums, wenn der eingestellte
+    /// Arbeitsordner nicht als Windows-Pfad bekannt ist (WSL ohne Ordner bzw. mit `~`, #277).
+    start_cwd: String,
     /// Es kamen Hook-Ereignisse (sonst Status ggf. aus dem Transkript abgeleitet).
     hook_seen: bool,
     /// Die Warteschlange hat zuletzt automatisch gesendet.
@@ -112,13 +118,16 @@ struct Entry {
     launch_note: Option<String>,
     /// Fortschritt laut Programm (OSC 9;4, #183) für Seitenleiste, Taskleiste und `list_sessions`.
     progress: Option<crate::vtnotify::Progress>,
+    /// Stand des Claude dieses Starts über die Hook-Meldungen hinaus (laufende Runde, letzte Meldung, offene Rückfrage,
+    /// Prompt der Shell) – für den Rückfall, wenn Meldungen ausbleiben (`claude_status`). Je Start neu.
+    track: claude_status::Track,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default() }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -193,12 +202,14 @@ impl Entry {
             return;
         }
         let text = self.meta.queue.remove(0);
-        if let Some(s) = &self.live {
-            s.send_text(&text, true);
-            self.status = ClaudeStatus::Working;
-            self.queue_active = true;
-        } else {
-            self.meta.queue.insert(0, text);
+        match &self.live {
+            // In eine beendete Shell geht nichts mehr: der Prompt bleibt in der Warteschlange.
+            Some(s) if !s.has_exited() => {
+                s.send_text(&text, true);
+                self.assume_working();
+                self.queue_active = true;
+            }
+            _ => self.meta.queue.insert(0, text),
         }
     }
 
@@ -307,13 +318,28 @@ enum Action {
     OpenTemplates,
     OpenCosts,
     TemplateStart(usize),
-    TemplateDelete(usize),
+    /// Vorlage starten, mit Ziel (Ordner, Bereich; #244).
+    TemplateStartAt(usize, tpl_lib::TplAt),
+    /// Vorlage löschen – nach der Rückfrage; nur, wenn an Index noch dieser Name steht (#276).
+    TemplateDelete(usize, String),
+    /// Rückfrage vor dem Löschen einer Vorlage (#276).
+    TemplateDeleteAsk(usize),
     TemplateSave(String, Option<String>),
+    /// Editor der Bibliothek: Vorlage bearbeiten / neue Terminal-Vorlage / duplizieren / aus einer Sitzung (#244).
+    TemplateEdit(usize),
+    TemplateNew,
+    TemplateDuplicate(usize),
+    TemplateFromSession(u64),
     ResumeItem(history::HistoryItem),
     ToggleTree,
     FolderNew(String),
     FolderRename(String),
-    FolderDelete(String),
+    /// Ordner (Projekt, Pfad) löschen, Inhalt rückt hoch – nach der Rückfrage von `FolderDeleteAsk` (#276).
+    FolderDelete(u64, String),
+    /// Kontextmenü „Ordner löschen (Inhalt bleibt)“: Rückfrage, ein leerer Ordner verschwindet sofort (#276).
+    FolderDeleteAsk(String),
+    /// Ordner (Projekt, Pfad) samt Unterordnern entfernen – nach dem Schließen seiner Sitzungen (#276).
+    FolderRemove(u64, String),
     FolderToggle(String),
     FolderColor(String, Option<[u8; 3]>),
     FolderCwd(String, bool),
@@ -347,6 +373,8 @@ enum Action {
     ProjectPrompt(u64, PromptKind),
     SetProjectColor(u64, [u8; 3]),
     DeleteProject(u64),
+    /// Rückfrage vor dem Löschen eines Projekts (#276).
+    DeleteProjectAsk(u64),
     TagsPrompt(u64),
     ToggleFiles,
     InsertPath(String),
@@ -439,6 +467,14 @@ struct NewDialog {
     group: String,
     /// Ordnerfeld (WSL-fähig, #172); `cwd` wird jedes Bild daraus übernommen.
     picker: folder_picker::FolderPicker,
+    /// Eigene Farbe (#292); aus = Farbe des Profils bzw. automatisch.
+    own_color: bool,
+    color: [u8; 3],
+    /// Tags, mit Komma getrennt (Vorschläge aus den vorhandenen Sitzungen wie in den Einstellungen der Sitzung, #239).
+    tags: String,
+    notes: String,
+    /// Vorhandene Tags für die Vorschläge (setzt die App beim Öffnen).
+    tag_values: Vec<planning_ui::value_suggest::Counted>,
 }
 
 #[derive(Default)]
@@ -470,6 +506,15 @@ struct NewOpts {
     project: Option<u64>,
     /// Chat statt Terminal: mit diesem Server/Modell (kein Prozess, Verlauf in `chats/<id>.json`).
     chat: Option<state::ChatMeta>,
+    /// Eigene Farbe (Dialog „Neue Sitzung“, #292); None = Farbe des Profils bzw. automatisch.
+    color: Option<[u8; 3]>,
+    tags: Vec<String>,
+    notes: String,
+}
+
+/// Farbe einer neuen Sitzung: eigene (Dialog „Neue Sitzung“, #292), sonst die des Profils, sonst automatisch.
+fn session_color(own: Option<[u8; 3]>, profile: Option<[u8; 3]>, auto: [u8; 3]) -> [u8; 3] {
+    own.or(profile).unwrap_or(auto)
 }
 
 struct Launch<'a> {
@@ -484,7 +529,28 @@ impl NewDialog {
     fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
         let cwd = home_dir();
         let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
-        NewDialog { shell_id, cwd, name: String::new(), claude, copts, conv: session_settings::ConvChoice::Resume, focus: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+        NewDialog {
+            shell_id,
+            cwd,
+            name: String::new(),
+            claude,
+            copts,
+            conv: session_settings::ConvChoice::Resume,
+            focus: true,
+            profile: 0,
+            prompt: String::new(),
+            worktree: false,
+            branch: String::new(),
+            repo_for: String::new(),
+            repo: None,
+            group: String::new(),
+            picker,
+            own_color: false,
+            color: crate::palette::nth_rgb(crate::palette::Area::Hub, 0),
+            tags: String::new(),
+            notes: String::new(),
+            tag_values: Vec::new(),
+        }
     }
 
     /// Startordner von außen setzen (Profil, Ordnervorgabe).
@@ -718,6 +784,8 @@ pub struct App {
     templates: Vec<Template>,
     templates_open: bool,
     tpl_name: String,
+    /// Vorlagen-Bibliothek der Seitenleiste (#244), je Fenster.
+    tpl: tpl_lib::TplView,
     cost_open: bool,
     budget_warned_day: String,
     last_budget_check: Instant,
@@ -770,6 +838,11 @@ pub struct App {
     /// Die globalen Hooks zeigen auf eine andere paneldeck.exe (Pfad): deren Meldungen tragen keinen Schlüssel und zählen
     /// nur für den Status (#260); die Einstellungen bieten „Neu eintragen“ an.
     hooks_foreign: Option<String>,
+    /// Die globalen Hooks stammen von einer älteren Version und decken nicht alle Ereignisse ab: Sitzungen bekommen die
+    /// Hooks dann zusätzlich per `--settings`.
+    hooks_incomplete: bool,
+    /// Letzte Gegenprobe des Claude-Status (`claude_status_tick`).
+    last_status_check: Instant,
     hooks_msg: String,
     exe: PathBuf,
     palette: Option<Palette>,
@@ -847,7 +920,7 @@ pub struct App {
     /// Ratenbegrenzung der Programm-Benachrichtigungen und der Glocke je Sitzung (#183, `vt_notify.rs`).
     vt_limits: HashMap<u64, crate::vtnotify::RateLimit>,
     /// Zuletzt an die Taskleiste gemeldeter Fortschritt je Fenster (#183).
-    taskbar: crate::taskbar::Taskbar,
+    taskbar: crate::platform::taskbar::Taskbar,
     /// Offene Rückfrage „Link öffnen?“ für OSC-8-Links mit anderem Schema als http/https (#183, `link_ask.rs`).
     link_ask: Option<link_ask::LinkAsk>,
     hwnd: Option<isize>,
@@ -921,24 +994,25 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     planning_ui::install_icon_font(&mut fonts);
     // Optionale Systemschriften als Fallback für Symbole, Sonderzeichen, CJK, Thai, Indisch, Mathe usw.
     // Es werden nur vorhandene Dateien geladen; fehlt eine, ändert sich nichts.
-    let candidates: [(&str, &str); 14] = [
-        ("seguisym", r"C:\Windows\Fonts\seguisym.ttf"),
-        ("segoeui", r"C:\Windows\Fonts\segoeui.ttf"),
-        ("msyh", r"C:\Windows\Fonts\msyh.ttc"),
-        ("msjh", r"C:\Windows\Fonts\msjh.ttc"),
-        ("yugoth", r"C:\Windows\Fonts\YuGothM.ttc"),
-        ("meiryo", r"C:\Windows\Fonts\meiryo.ttc"),
-        ("malgun", r"C:\Windows\Fonts\malgun.ttf"),
-        ("simsun", r"C:\Windows\Fonts\simsun.ttc"),
-        ("nirmala", r"C:\Windows\Fonts\Nirmala.ttc"),
-        ("leelawui", r"C:\Windows\Fonts\LeelawUI.ttf"),
-        ("seguihis", r"C:\Windows\Fonts\seguihis.ttf"),
-        ("cambria", r"C:\Windows\Fonts\cambria.ttc"),
-        ("arial", r"C:\Windows\Fonts\arial.ttf"),
-        ("dejavu", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+    let sys = crate::platform::fonts::system_font;
+    let candidates: [(&str, Option<std::path::PathBuf>); 14] = [
+        ("seguisym", sys("seguisym.ttf")),
+        ("segoeui", sys("segoeui.ttf")),
+        ("msyh", sys("msyh.ttc")),
+        ("msjh", sys("msjh.ttc")),
+        ("yugoth", sys("YuGothM.ttc")),
+        ("meiryo", sys("meiryo.ttc")),
+        ("malgun", sys("malgun.ttf")),
+        ("simsun", sys("simsun.ttc")),
+        ("nirmala", sys("Nirmala.ttc")),
+        ("leelawui", sys("LeelawUI.ttf")),
+        ("seguihis", sys("seguihis.ttf")),
+        ("cambria", sys("cambria.ttc")),
+        ("arial", sys("arial.ttf")),
+        ("dejavu", Some("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into())),
     ];
     for (name, path) in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
+        if let Some(Ok(bytes)) = path.map(std::fs::read) {
             fonts.font_data.insert(name.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
             for fam in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
                 fonts.families.entry(fam).or_default().push(name.to_owned());
@@ -953,7 +1027,7 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     }
     // Fette UI-Schrift (Titel der Todo-Karten): Segoe UI Bold, sonst die normale UI-Schrift als Ersatz.
     let mut bold: Vec<String> = Vec::new();
-    if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\segoeuib.ttf") {
+    if let Some(Ok(bytes)) = sys("segoeuib.ttf").map(std::fs::read) {
         fonts.font_data.insert("segoeuib".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
         bold.push("segoeuib".to_owned());
     }
@@ -978,7 +1052,7 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
                     _ => None,
                 };
                 file.and_then(|(k, f)| {
-                    std::fs::read(format!(r"C:\Windows\Fonts\{f}")).ok().map(|b| {
+                    sys(f).and_then(|p| std::fs::read(p).ok()).map(|b| {
                         fonts.font_data.insert(k.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(b)));
                         k.to_string()
                     })
@@ -1022,7 +1096,7 @@ impl App {
         }
         state::set_lang(settings.language);
         // Vor dem Wiederherstellen der Sitzungen: welche ConPTY neue Sitzungen bekommen (#183).
-        crate::conpty::USE_BUNDLED.store(settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
+        crate::platform::conpty::USE_BUNDLED.store(settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         let (mut saved, startup_note) = state::load_saved(&dir.join("state.json"));
         // „Sitzungen merken“ aus (#157): frischer Start. Steht in state.json noch etwas (Absturz nach dem Ausschalten, von
         // Hand geändert), wird die Datei vorher gesichert. Scrollback und Chatverläufe früherer Läufe werden gelöscht – auch
@@ -1059,6 +1133,7 @@ impl App {
             templates: templates::load(&dir),
             templates_open: false,
             tpl_name: String::new(),
+            tpl: tpl_lib::TplView::default(),
             cost_open: false,
             budget_warned_day: String::new(),
             last_budget_check: Instant::now(),
@@ -1099,6 +1174,8 @@ impl App {
             hooks_file: None,
             hooks_global: false,
             hooks_foreign: None,
+            hooks_incomplete: false,
+            last_status_check: Instant::now(),
             hooks_msg: String::new(),
             exe: std::env::current_exe().unwrap_or_default(),
             palette: None,
@@ -1169,7 +1246,7 @@ impl App {
             vt_limits: HashMap::new(),
             taskbar: Default::default(),
             link_ask: None,
-            hwnd: crate::winctl::hwnd_from(cc),
+            hwnd: crate::platform::window::hwnd_from(cc),
             in_tray: false,
             editor: None,
             applied_font: String::new(),
@@ -1188,7 +1265,7 @@ impl App {
             app.tray_rx = rx;
         }
         if let Some(h) = app.hwnd {
-            winchrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
+            crate::platform::chrome::init(h, &cc.egui_ctx); // runde Ecken + Snap-Layouts am Maximieren-Knopf
         }
         clip::init(&app.dir);
         crate::afford::install(&cc.egui_ctx); // Hand-Zeiger über allem, was wie ein Knopf funktioniert (#187)
@@ -1356,7 +1433,7 @@ impl App {
     /// Zusammenfassung für Fehlerberichte (wird per Knopf in die Zwischenablage kopiert).
     fn diagnostics(&self) -> String {
         let font_files = ["seguisym.ttf", "segoeui.ttf", "msyh.ttc", "msjh.ttc", "YuGothM.ttc", "meiryo.ttc", "malgun.ttf", "simsun.ttc", "Nirmala.ttc", "LeelawUI.ttf", "seguihis.ttf", "cambria.ttc", "arial.ttf", "consola.ttf"];
-        let fonts: Vec<&str> = font_files.iter().copied().filter(|f| std::path::Path::new(&format!(r"C:\Windows\Fonts\{f}")).exists()).collect();
+        let fonts: Vec<&str> = font_files.iter().copied().filter(|f| crate::platform::fonts::system_font(f).is_some_and(|p| p.exists())).collect();
         let crash = self.dir.join("crash.log");
         let l = self.settings.language;
         let t = |de: &'static str, en: &'static str| l.t(de, en);
@@ -1638,6 +1715,7 @@ impl App {
         let path = hooks::global_settings_path();
         self.hooks_global = path.as_deref().is_some_and(hooks::global_installed);
         self.hooks_foreign = if self.hooks_global { path.as_deref().and_then(|p| hooks::global_foreign_exe(p, &self.exe)) } else { None };
+        self.hooks_incomplete = self.hooks_global && path.as_deref().is_some_and(hooks::global_incomplete);
     }
 
     /// Hat ein Terminal den Tastaturfokus?
@@ -1661,18 +1739,7 @@ impl App {
         if let Some(pid) = id.strip_prefix("custom:").and_then(|n| n.parse::<u64>().ok()) {
             if let Some(p) = self.profile(pid) {
                 let args = split_args(&p.args);
-                // Eigenes wsl.exe-Programm: wie eine erkannte WSL-Shell behandeln (Pfadumrechnung, Hooks).
-                // Andere bekannte Shells bekommen deren ID, damit eingefügte Pfade passend gequotet werden
-                // (sonst bekäme ein cmd-/PowerShell-Profil bash-Quoting mit '…').
-                let stem = std::path::Path::new(&p.program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-                let sid = match stem.as_str() {
-                    "wsl" => format!("wsl:{}", shells::wsl_distro(&args).unwrap_or_default()),
-                    // WSL-Starter aus System32: WSL mit der Standard-Distribution (Hooks, WSLENV, Pfade; #261).
-                    "bash" if shells::is_system_bash(&p.program) => "wsl:".to_string(),
-                    "pwsh" | "powershell" | "cmd" => stem.clone(),
-                    _ => id.to_string(),
-                };
-                return Some(ShellSpec { id: sid, label: p.name.clone(), program: p.program.clone(), args });
+                return Some(ShellSpec { id: custom_program_shell_id(p), label: p.name.clone(), program: p.program.clone(), args });
             }
         }
         self.shells
@@ -1685,6 +1752,15 @@ impl App {
 
     fn scrollback_path(&self, id: u64) -> PathBuf {
         self.dir.join("scrollback").join(format!("{id}.txt"))
+    }
+
+    /// Shell einer Sitzung, wie sie beim Start aufgelöst wird (Profil mit eigenem Programm, sonst die Shell bzw. die
+    /// Standard-Shell) – für die Vorschau der Kommandozeile in den Dialogen (#292).
+    fn preview_spec(&self, shell_id: &str, profile: u64) -> Option<ShellSpec> {
+        if let Some(p) = self.profile(profile).filter(|p| !p.program.trim().is_empty()) {
+            return Some(ShellSpec { id: custom_program_shell_id(p), label: p.name.clone(), program: p.program.clone(), args: split_args(&p.args) });
+        }
+        self.shell_by_id(shell_id)
     }
 
     /// Vorbelegung der Claude-Optionen im Dialog „Neue Sitzung“: letzte Wahl, sonst die Standards der Einstellungen.
@@ -1707,7 +1783,15 @@ impl App {
             if let Some(f) = hooks::write_session_settings_wsl(&self.dir, &self.exe, &sid) {
                 c += &format!(" --settings {}", crate::quote::quote(kind, &pathfmt::convert(&sid, &f.to_string_lossy())));
             }
-        } else if !self.hooks_global {
+        } else if hooks::session_needs_settings(
+            self.hooks_global,
+            self.hooks_incomplete,
+            self.hooks_foreign.is_some(),
+            self.profile(meta.profile).map_or("", |p| p.env.as_str()),
+            hooks::global_settings_path().as_deref(),
+        ) {
+            // Ohne globale Hooks immer; mit ihnen, wenn das Profil ein anderes CLAUDE_CONFIG_DIR setzt (dort gelten sie
+            // nicht) oder ihnen Ereignisse fehlen und sie dieselbe paneldeck.exe aufrufen (`session_needs_settings`).
             if let Some(f) = &self.hooks_file {
                 c += &format!(" --settings {}", crate::quote::quote(kind, &f.to_string_lossy().replace('\\', "/")));
             }
@@ -1764,11 +1848,20 @@ impl App {
         entry.hook_seen = false;
         entry.hook_conv = hooks::ConvBinding::default();
         entry.hook_keyed = false;
+        // Die Warteschlange hatte der Hub selbst angehalten, weil Claude beendet war: Mit dem neuen Start läuft sie wieder.
+        if entry.track.auto_paused {
+            entry.meta.queue_paused = false;
+        }
+        entry.track = Default::default();
+        entry.status_msg.clear();
+        entry.perm_since = None;
         let Some(mut shell) = self.shell_by_id(&entry.meta.shell_id) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
         };
         let wsl = shells::is_wsl(&shell);
+        // Ob im Vordergrund der Shell etwas läuft, sieht der Hub nur bei lokalen Shells (nicht in WSL).
+        entry.track.confirmable = shells::foreground_visible(&shell);
         let restore_text = if l.restore {
             std::fs::read_to_string(self.scrollback_path(entry.meta.id)).ok()
         } else {
@@ -1852,7 +1945,28 @@ impl App {
                 entry.meta.transcript.clear();
                 self.usage.reset(entry.meta.id);
             }
-            Some(c)
+            // Zu lang für cmd (claude.cmd läuft darüber, #289): Claude nicht starten, sondern sagen, warum.
+            let len = c.trim_end().chars().count();
+            if len > crate::claude_opts::MAX_COMMAND_LEN {
+                let msg = format!(
+                    "{} ({}): {len} > {}",
+                    state::t(
+                        "Claude nicht gestartet – die Befehlszeile ist zu lang (System-Prompt oder Listen in den Claude-Optionen kürzen)",
+                        "Claude not started – the command line is too long (shorten the system prompt or the lists in the Claude options)",
+                    ),
+                    entry.display_name(),
+                    crate::claude_opts::MAX_COMMAND_LEN,
+                );
+                entry.launch_note = Some(match entry.launch_note.take() {
+                    Some(n) => format!("{n}\n{msg}"),
+                    None => msg,
+                });
+                entry.launched_claude = false;
+                entry.launched_opts = Default::default();
+                None
+            } else {
+                Some(c)
+            }
         } else {
             self.usage.reset(entry.meta.id);
             None
@@ -1864,6 +1978,7 @@ impl App {
             (Some(st), None) => Some(format!("{st}\r")),
             (None, c) => c,
         };
+        entry.track.launch_lines = claude_status::launch_lines(initial.as_deref());
         // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
         entry.session_key = hooks::random_hex();
         let mut env = vec![(hooks::ENV_SESSION.to_string(), entry.meta.id.to_string()), (hooks::ENV_SESSION_KEY.to_string(), entry.session_key.clone())];
@@ -2001,7 +2116,9 @@ impl App {
             shell_id,
             cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.folder.clone())).unwrap_or_default(),
             project,
-            color: prof.as_ref().and_then(|p| p.color).unwrap_or_else(|| hub_color(id)),
+            color: session_color(o.color, prof.as_ref().and_then(|p| p.color), hub_color(id)),
+            tags: o.tags.clone(),
+            notes: o.notes.clone(),
             profile: pid,
             claude: o.claude,
             claude_args,
@@ -2609,7 +2726,8 @@ impl App {
         }
         // Weitere Dialoge über dem Terminal (#255): Neue Sitzung, Prompt an alle, Vorlagen, Worktree schließen. Nur ein
         // Terminal gibt den Fokus ab – ein Feld des Dialogs behält ihn.
-        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() {
+        // Ebenso der Editor der Vorlagen-Bibliothek und die Rückfrage vor dem Start einer Vorlage (#244).
+        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() || self.tpl.form.is_some() || self.tpl.confirm.is_some() {
             self.release_terminal_focus(ctx);
         }
         let theme = self.theme();
@@ -2749,7 +2867,8 @@ impl App {
             }
             // Ohne Hook-Daten (z. B. WSL ohne funktionierenden Interop): einfachen Status aus dem Transkript ableiten.
             if e.is_claude() && !e.hook_seen && !e.exited() {
-                if let Some(u) = self.usage.get(*id) {
+                // Nach dem Ende von Claude (Prompt der Shell) zählt das Transkript erst wieder, wenn es weitergeht.
+                if let Some(u) = self.usage.get(*id).filter(|u| e.transcript_status_ok(u.modified)) {
                     // Großzügige Frist: Claude schreibt bei langen Werkzeugläufen (Tests, Builds) lange nichts ins Transkript;
                     // ein zu früh erkanntes „bereit“ würde den nächsten Warteschlangen-Prompt mitten in die Arbeit tippen.
                     let recent = u.modified.and_then(|m| m.elapsed().ok()).is_some_and(|d| d < Duration::from_secs(20));
@@ -2819,22 +2938,10 @@ impl App {
                     }
                     if self.projects.len() > 1 {
                         ui.separator();
-                        let confirm_id = egui::Id::new(("delproj", id));
-                        let now_t = ui.input(|i| i.time);
-                        let armed = ui.memory(|m| m.data.get_temp::<f64>(confirm_id)).is_some_and(|t| now_t - t < 4.0);
-                        let label = if armed {
-                            lang.t("Wirklich löschen? Nochmal klicken", "Really delete? Click again")
-                        } else {
-                            lang.t("Projekt löschen (Sitzungen bleiben)", "Delete project (sessions are kept)")
-                        };
-                        if ui.button(label).clicked() {
-                            if armed {
-                                ui.memory_mut(|m| m.data.remove::<f64>(confirm_id));
-                                actions.push(Action::DeleteProject(id));
-                                ui.close();
-                            } else {
-                                ui.memory_mut(|m| m.data.insert_temp(confirm_id, now_t));
-                            }
+                        // Rückfrage mit Wartezeit statt „zweimal klicken“ (#276, `closing`).
+                        if ui.button(lang.t("Projekt löschen (Sitzungen bleiben) …", "Delete project (sessions are kept) …")).clicked() {
+                            actions.push(Action::DeleteProjectAsk(id));
+                            ui.close();
                         }
                     }
                 });
@@ -2933,6 +3040,9 @@ impl App {
             };
             if let Some(c) = cwd {
                 e.live_cwd = pathfmt::from_wsl(e.eff_shell(), &c);
+                if e.start_cwd.is_empty() {
+                    e.start_cwd = e.live_cwd.clone();
+                }
             }
             for d in done {
                 if threshold > 0 && d.dur_ms.unwrap_or(0) >= threshold && (!window_focused || *id != focused_id) {
@@ -3327,6 +3437,7 @@ impl App {
         let msgs: Vec<HookMsg> = self.hook_server.as_ref().map(|s| s.rx.try_iter().collect()).unwrap_or_default();
         let lang = self.settings.language;
         let mut queue_done: Vec<(u64, String)> = Vec::new();
+        let mut queue_paused: Vec<u64> = Vec::new();
         for m in msgs {
             let focused_id = seen_id;
             let Some(e) = self.entries.get_mut(&m.session) else { continue };
@@ -3335,27 +3446,11 @@ impl App {
             if e.is_chat() {
                 continue;
             }
-            // Nur Meldungen des laufenden Starts (#260): Schlüssel `PANELDECK_SESSION_KEY` dieses Starts. Ein anderes
-            // Terminal, ein übrig gebliebener Prozess eines früheren Starts oder eine Fälschung mit der bloßen Nummer
-            // ändert weder Status noch Konversation.
-            // Ausnahme: Meldungen ganz ohne Schlüssel stammen von globalen Hooks einer älteren paneldeck.exe (Hinweis in den
-            // Einstellungen). Sie zählen nur für den Status, solange in diesem Start keine Meldung mit Schlüssel kam, und
-            // ordnen nie eine Konversation zu.
-            let keyless = match hooks::admit(&e.session_key, e.hook_keyed, &e.hook_conv, &m) {
-                hooks::Admit::Drop => continue,
-                hooks::Admit::Keyed => {
-                    e.hook_keyed = true;
-                    false
-                }
-                hooks::Admit::StatusOnly => true,
-            };
-            // Eine andere Konversation als die dieses Starts (z. B. `claude -p` aus der Sitzung heraus) zählt nicht.
-            let conv = if keyless { hooks::ConvMatch::NoId } else { e.hook_conv.feed(&m) };
-            if conv == hooks::ConvMatch::Foreign {
-                continue;
+            // Annahme (Schlüssel des laufenden Starts und Konversation, #260) und neuer Status: `Entry::take_hook`.
+            let Some(claude_status::HookEffect { old, new, conv, keyless, advance, paused }) = e.take_hook(&m) else { continue };
+            if paused {
+                queue_paused.push(m.session);
             }
-            let old = e.status;
-            e.hook_seen = true;
             let sh = e.eff_shell().to_string();
             let m = HookMsg {
                 transcript_path: m.transcript_path.as_ref().map(|p| pathfmt::from_wsl(&sh, p)),
@@ -3369,7 +3464,11 @@ impl App {
                 }
             }
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
-                e.live_cwd = c.clone();
+                // Linux-Pfad einer WSL-Sitzung als Windows-Pfad wie bei OSC 7 (Dateibaum, Links, #277).
+                e.live_cwd = pathfmt::from_wsl(e.eff_shell(), c);
+                if e.start_cwd.is_empty() {
+                    e.start_cwd = e.live_cwd.clone();
+                }
             }
             if e.is_claude() && !keyless {
                 if let hooks::ConvMatch::Bind(cs) | hooks::ConvMatch::Switch(cs) = &conv {
@@ -3387,16 +3486,9 @@ impl App {
                     _ => {}
                 }
             }
-            let new = hooks::status_after(old, &m);
-            e.status = new;
-            if new == ClaudeStatus::Permission && old != ClaudeStatus::Permission {
-                e.perm_since = Some(std::time::Instant::now());
-            }
-            if e.queue_tick(old, new) {
+            // Von selbst weiter nur, wenn `take_hook` es erlaubt (der vom Hub gestartete Claude, Ende einer Runde mit Prompt).
+            if advance && e.queue_tick(old, new) {
                 queue_done.push((m.session, e.display_name()));
-            }
-            if new != old {
-                e.status_msg = m.message.clone().unwrap_or_default();
             }
             let needs = new != old && matches!(new, ClaudeStatus::Permission | ClaudeStatus::Input);
             let finished = m.event == "Stop" && old == ClaudeStatus::Working && e.status == ClaudeStatus::Idle;
@@ -3424,6 +3516,11 @@ impl App {
             }
         }
         self.queue_finished(ctx, queue_done);
+        for id in queue_paused {
+            if let Some(n) = self.queue_paused_note(id) {
+                self.notify_text(n);
+            }
+        }
     }
 
     fn queue_finished(&mut self, ctx: &egui::Context, names: Vec<(u64, String)>) {
@@ -3492,8 +3589,14 @@ impl App {
                         if let Some(s) = &e.live {
                             s.write(if yes { b"\r" } else { b"\x1b" });
                         }
-                        e.status = if yes { ClaudeStatus::Working } else { ClaudeStatus::Idle };
+                        if yes {
+                            e.assume_working();
+                        } else {
+                            // Abgelehnt: Claude bricht die Runde ab und wartet (dafür gibt es keinen Stop-Hook).
+                            e.apply_fallback(ClaudeStatus::Idle);
+                        }
                         e.status_msg.clear();
+                        e.perm_since = None;
                         e.attention = false;
                     }
                 }
@@ -3693,6 +3796,12 @@ impl App {
                 let text = self.entries.get(&id).map(|e| e.meta.tags.join(", ")).unwrap_or_default();
                 self.text_prompt = Some(TextPrompt { kind: PromptKind::NewProject, id: 0, tags_for: Some(id), text, folder: String::new(), picker: None });
             }
+            Action::DeleteProjectAsk(id) => {
+                if self.projects.len() > 1 {
+                    self.want_focus = None;
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::DeleteProject(id)));
+                }
+            }
             Action::DeleteProject(id) => {
                 let other = self.projects.iter().find(|p| p.id != id).map(|p| p.id);
                 if let (true, Some(other)) = (self.projects.len() > 1, other) {
@@ -3771,8 +3880,14 @@ impl App {
                 self.templates_open = true;
             }
             Action::OpenCosts => self.cost_open = true,
-            Action::TemplateDelete(i) => {
-                if i < self.templates.len() {
+            Action::TemplateDeleteAsk(i) => {
+                if let Some(t) = self.templates.get(i) {
+                    self.confirm_close = Some(closing::CloseAsk::new(closing::CloseTarget::DeleteTemplate(i, t.name.clone())));
+                }
+            }
+            Action::TemplateDelete(i, name) => {
+                // Nur, wenn an dieser Stelle noch genau diese Vorlage steht (die Liste kann sich verschoben haben).
+                if self.templates.get(i).is_some_and(|t| t.name == name) {
                     self.templates.remove(i);
                     templates::save(&self.dir, &self.templates);
                 }
@@ -3787,68 +3902,58 @@ impl App {
                     .map(|(i, _)| *i)
                     .collect();
                 ids.sort();
-                let items: Vec<TplItem> = ids
-                    .iter()
-                    .filter_map(|i| self.entries.get(i))
-                    .map(|e| TplItem {
-                        name: e.display_name(),
-                        shell_id: e.meta.shell_id.clone(),
-                        cwd: e.cwd_now(),
-                        claude: e.meta.claude,
-                        // Das Vorlagenformat kennt nur die Zeile `claude_args`: Startoptionen dort hinein.
-                        claude_args: {
-                            let (o, rest) = e.meta.claude_opts_eff();
-                            format!("{} {rest}", o.sanitized(false).to_legacy()).trim().to_string()
-                        },
-                        profile: e.meta.profile,
-                        group: e.meta.group.clone(),
-                        prompt: String::new(),
-                        claude_continue: (!e.meta.claude_continue).then_some(false),
-                    })
-                    .collect();
+                let items: Vec<TplItem> = ids.iter().filter_map(|i| self.entries.get(i)).map(|e| self.tpl_item_of(e)).collect();
                 let lang = self.settings.language;
                 if items.is_empty() {
                     self.notify_text(lang.t("Keine Sitzungen zum Speichern", "No sessions to save").to_string());
                 } else {
                     let n = items.len();
                     let name = if name.trim().is_empty() { format!("{} {}", lang.t("Vorlage", "Template"), self.templates.len() + 1) } else { name.trim().to_string() };
-                    self.templates.retain(|t| t.name != name);
-                    self.templates.push(Template { name: name.clone(), grid: n > 1, items });
+                    // Gleichnamige Gruppen-Vorlage (ohne Groß-/Kleinschreibung) ersetzen, nie still eine Terminal-Vorlage.
+                    let name = templates::save_group(&mut self.templates, Template { name, grid: n > 1, items, terminal: false });
                     templates::save(&self.dir, &self.templates);
                     self.notify_text(format!("{} {} ({} {})", lang.t("Vorlage gespeichert:", "Template saved:"), lang.q(&name), n, lang.t("Sitzungen", "sessions")));
                 }
             }
             Action::TemplateStart(i) => {
-                if let Some(t) = self.templates.get(i).cloned() {
-                    let mut ids = Vec::new();
-                    for it in t.items.iter().take(24) {
-                        let id = self.new_session(
-                            ctx,
-                            NewOpts {
-                                shell_id: Some(it.shell_id.clone()).filter(|x| !x.is_empty()),
-                                cwd: Some(it.cwd.clone()),
-                                name: Some(it.name.clone()),
-                                claude: it.claude && self.settings.claude_mode,
-                                // Optionen der Vorlage vor den aktuellen Standards (alte Vorlagen ohne Optionen: nur Standards).
-                                claude_args: it.claude_args.clone(),
-                                prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
-                                profile: Some(it.profile),
-                                group: Some(it.group.clone()),
-                                claude_continue: it.claude_continue,
-                                ..NewOpts::default()
-                            },
-                        );
-                        ids.push(id);
+                self.start_template(ctx, i, tpl_lib::TplAt::Default);
+            }
+            Action::TemplateStartAt(i, at) => {
+                self.start_template(ctx, i, at);
+            }
+            Action::TemplateEdit(i) => {
+                if let Some(t) = self.templates.get(i) {
+                    self.want_focus = None;
+                    self.tpl.form = Some(tpl_lib::TplForm::of(Some(i), t));
+                }
+            }
+            Action::TemplateNew => {
+                self.want_focus = None;
+                let mut f = tpl_lib::TplForm::blank();
+                f.item.claude = false;
+                self.tpl.form = Some(f);
+            }
+            Action::TemplateDuplicate(i) => {
+                if let Some(mut t) = self.templates.get(i).cloned() {
+                    let lang = self.settings.language;
+                    t.name = templates::unique_name(&format!("{} {}", t.name.trim(), lang.t("(Kopie)", "(copy)")), &self.templates);
+                    let name = t.name.clone();
+                    self.templates.insert(i + 1, t);
+                    templates::save(&self.dir, &self.templates);
+                    self.notify_text(format!("{} {}", lang.t("Vorlage dupliziert:", "Template duplicated:"), lang.q(&name)));
+                }
+            }
+            Action::TemplateFromSession(id) => {
+                if let Some(e) = self.entries.get(&id).filter(|e| !e.is_chat()) {
+                    let mut it = self.tpl_item_of(e);
+                    let name = e.display_name();
+                    // Nur ein selbst vergebener Name wird zum Sitzungsnamen; sonst gilt der Name der Vorlage.
+                    if !e.meta.custom_name {
+                        it.name = String::new();
                     }
-                    if t.grid && ids.len() > 1 {
-                        let shown: Vec<u64> = ids.iter().copied().take(12).collect();
-                        if let Some(l) = Node::grid(&shown, Dir::Horizontal) {
-                            self.layout = Some(l);
-                            self.focused = shown[0];
-                            self.want_focus = Some(shown[0]);
-                        }
-                    }
-                    self.templates_open = false;
+                    let base = templates::unique_name(&name, &self.templates);
+                    self.want_focus = None;
+                    self.tpl.form = Some(tpl_lib::TplForm::of(None, &Template::terminal(&base, it)));
                 }
             }
             Action::ToggleTree => {
@@ -3874,17 +3979,13 @@ impl App {
                 self.want_focus = None;
                 self.folder_prompt = Some(FolderPrompt { kind: 2, path, text: String::new() });
             }
-            Action::FolderDelete(path) => {
-                let pid = self.active_project;
-                for e in self.entries.values_mut() {
-                    if e.meta.project == pid && state::folder_within(&e.meta.group, &path) {
-                        e.meta.group = state::lift_path(&e.meta.group, &path);
-                    }
-                }
-                if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
-                    p.delete_folder_lift(&path);
-                }
+            // Ordner löschen (#276): Rückfrage mit Wartezeit statt „zweimal klicken“ (`closing`).
+            Action::FolderDeleteAsk(path) => {
+                self.want_focus = None;
+                self.ask_folder_lift(path);
             }
+            Action::FolderDelete(pid, path) => self.lift_folder(pid, &path),
+            Action::FolderRemove(pid, path) => self.remove_folder_tree(pid, &path),
             Action::FolderToggle(path) => {
                 if let Some(f) = self.active_folder_mut(&path) {
                     f.collapsed = !f.collapsed;
@@ -4129,9 +4230,9 @@ impl eframe::App for App {
         }
         self.poll_mcp(ctx);
         self.poll_retired(ctx);
-        crate::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
+        crate::platform::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);
-        if crate::conpty::take_fallback_hint() {
+        if crate::platform::conpty::take_fallback_hint() {
             self.push_toast(
                 state::t(
                     "Der mitgelieferte Konsolen-Host (OpenConsole) ließ sich mehrmals nicht starten – neue Sitzungen laufen auf dem Konsolen-Host von Windows. Ein Virenscanner kann OpenConsole.exe blockieren; abschalten lässt er sich unter Einstellungen → Darstellung.",
@@ -4150,6 +4251,7 @@ impl eframe::App for App {
 
         self.poll_hooks(ctx);
         self.poll_shell(ctx);
+        self.claude_status_tick(ctx);
         self.poll_vt(ctx);
         self.poll_chats(ctx);
         self.models_save_tick(ctx);
@@ -4160,6 +4262,20 @@ impl eframe::App for App {
         self.check_budget(ctx);
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = self.main_frame_begin(ctx);
+        // Reiter der Sitzungsdialoge (#292): Standards zum Zählen/Zurücksetzen; Tasten zum Wechseln der Reiter gehören
+        // dem offenen Dialog, nicht den globalen Kürzeln.
+        ctx.data_mut(|d| d.insert_temp(Id::new("claude_user_defaults"), self.settings.claude_defaults.sanitized(false)));
+        // Nur der Dialog, der gerade die Tastatur hat (Fokus bzw. letzter Klick in seinem Fenster), nimmt sie.
+        for (open, salt, win) in [
+            (self.new_dialog.is_some(), "newdlg", "new_session_dialog"),
+            (self.session_settings.is_some(), "sset", "session_settings"),
+            (self.tpl.form.is_some(), "tpled", "tpl_editor"),
+            (self.settings_open && self.settings_tab == 2, "defaults", "settings_win"),
+        ] {
+            if open {
+                opts_tabs::grab_keys(ctx, salt, Id::new(win));
+            }
+        }
         self.titlebar(ctx);
         self.backup_tick(ctx);
         self.window_edges(ctx);
@@ -4213,7 +4329,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        winchrome::shutdown();
+        crate::platform::chrome::shutdown();
         self.save_for_exit();
     }
 }
@@ -4860,8 +4976,20 @@ fn list_dir(p: &Path, hidden: bool) -> Vec<TreeItem> {
     v
 }
 
-fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<PathBuf, Vec<TreeItem>>, actions: &mut Vec<Action>, lang: Lang) {
-    let items = cache.entry(dir.to_path_buf()).or_insert_with(|| list_dir(dir, hidden)).clone();
+/// Ein Ordner des Dateibaums mit Inhalt; `mark` = aktueller Ordner der Shell (aufklappen und markieren, #277).
+fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<PathBuf, Vec<TreeItem>>, actions: &mut Vec<Action>, lang: Lang, mark: &panels::TreeMark) {
+    // Langsame Wurzel (Netzwerk, WSL): im Hilfsthread lesen, bis dahin „wird geladen …“ (#277 Review).
+    let items = if mark.slow {
+        match panels::slow_list(ui.ctx(), dir, hidden) {
+            Some(v) => v,
+            None => {
+                ui.weak(lang.t("wird geladen …", "loading …"));
+                return;
+            }
+        }
+    } else {
+        cache.entry(dir.to_path_buf()).or_insert_with(|| list_dir(dir, hidden)).clone()
+    };
     if items.is_empty() {
         ui.weak(lang.t("(leer)", "(empty)"));
     }
@@ -4876,16 +5004,27 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
                 actions.push(Action::NewSessionAt(path_s.clone()));
                 ui.close();
             }
-            #[cfg(windows)]
-            if ui.button(lang.t("Im Explorer anzeigen", "Show in Explorer")).clicked() {
-                let _ = std::process::Command::new("explorer").arg(if it.is_dir { path_s.clone() } else { format!("/select,{path_s}") }).spawn();
+            if crate::platform::open::FILE_MANAGER && ui.button(lang.t("Im Explorer anzeigen", "Show in Explorer")).clicked() {
+                crate::platform::open::show_in_file_manager(&path_s, it.is_dir);
                 ui.close();
             }
         };
         if it.is_dir {
-            let r = egui::CollapsingHeader::new(RichText::new(&it.name).strong()).id_salt(("tree", &it.path)).show(ui, |ui| {
-                tree_children(ui, &it.path, hidden, cache, actions, lang);
+            let (on_way, current) = mark.role(&it.path);
+            let mut name = RichText::new(&it.name).strong();
+            if current {
+                name = name.color(style::accent());
+            }
+            // Auf dem Weg zum aktuellen Ordner der Shell: einmal aufklappen, wenn er sich ändert (danach frei zuklappbar).
+            let r = egui::CollapsingHeader::new(name).id_salt(("tree", &it.path)).open((on_way && mark.reveal && (!mark.slow || panels::slow_cached(&it.path, hidden))).then_some(true)).show(ui, |ui| {
+                tree_children(ui, &it.path, hidden, cache, actions, lang, mark);
             });
+            if current {
+                if mark.reveal {
+                    r.header_response.scroll_to_me(Some(egui::Align::Center));
+                }
+                r.header_response.clone().on_hover_text(lang.t("Aktueller Ordner der Shell", "Current folder of the shell"));
+            }
             r.header_response.clone().context_menu(|ui| menu(ui, actions));
             if r.header_response.double_clicked() {
                 actions.push(Action::InsertPath(path_s.clone()));
@@ -4897,6 +5036,21 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
             }
             r.context_menu(|ui| menu(ui, actions));
         }
+    }
+}
+
+/// Shell-ID eines Profils mit eigenem Programm (`custom:<id>`, aufgelöst wie [`App::shell_by_id`]): Ein eigenes
+/// wsl.exe-Programm wird wie eine erkannte WSL-Shell behandelt (Pfadumrechnung, Hooks, Linux-Startordner). Andere
+/// bekannte Shells bekommen deren ID, damit eingefügte Pfade passend gequotet werden (sonst bekäme ein
+/// cmd-/PowerShell-Profil bash-Quoting mit '…'); sonst bleibt es `custom:<id>`.
+pub(super) fn custom_program_shell_id(p: &Profile) -> String {
+    let stem = std::path::Path::new(&p.program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match stem.as_str() {
+        "wsl" => format!("wsl:{}", shells::wsl_distro(&split_args(&p.args)).unwrap_or_default()),
+        // WSL-Starter aus System32: WSL mit der Standard-Distribution (Hooks, WSLENV, Pfade; #261).
+        "bash" if shells::is_system_bash(&p.program) => "wsl:".to_string(),
+        "pwsh" | "powershell" | "cmd" => stem,
+        _ => format!("custom:{}", p.id),
     }
 }
 
@@ -4985,28 +5139,17 @@ fn elevated_script(shell: &ShellSpec, cwd: Option<&str>) -> String {
     script
 }
 
-/// Startet die Shell mit erhöhten Rechten in einem externen Fenster (nur Windows).
+/// Startet die Shell mit erhöhten Rechten in einem externen Fenster (nur Windows, `platform::process::spawn_elevated`).
 fn launch_elevated(shell: &ShellSpec, cwd: &str) -> String {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // WSL-Pfade ungeprüft (keine Prüfung im UI-Thread); sonst nur vorhandene Ordner.
-        let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || crate::pathfmt::dir_exists_quick(c, std::time::Duration::from_millis(400)) == Some(true)));
-        let ok = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .is_ok();
-        return if ok {
-            state::t("Als Administrator in einem eigenen Fenster gestartet (UAC-Abfrage). Dieses Terminal ist nicht eingebettet.", "Started as administrator in its own window (UAC prompt). This terminal is not embedded.").to_string()
-        } else {
-            state::t("Start als Administrator fehlgeschlagen.", "Starting as administrator failed.").to_string()
-        };
+    if !crate::platform::process::ELEVATED {
+        return state::t("Start als Administrator wird nur unter Windows unterstützt.", "Starting as administrator is only supported on Windows.").to_string();
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (shell, cwd);
-        state::t("Start als Administrator wird nur unter Windows unterstützt.", "Starting as administrator is only supported on Windows.").to_string()
+    // WSL-Pfade ungeprüft (keine Prüfung im UI-Thread); sonst nur vorhandene Ordner.
+    let script = elevated_script(shell, Some(cwd).filter(|c| crate::wsl::is_wsl_unc(c) || crate::pathfmt::dir_exists_quick(c, std::time::Duration::from_millis(400)) == Some(true)));
+    if crate::platform::process::spawn_elevated(&script) {
+        state::t("Als Administrator in einem eigenen Fenster gestartet (UAC-Abfrage). Dieses Terminal ist nicht eingebettet.", "Started as administrator in its own window (UAC prompt). This terminal is not embedded.").to_string()
+    } else {
+        state::t("Start als Administrator fehlgeschlagen.", "Starting as administrator failed.").to_string()
     }
 }
 
@@ -5594,7 +5737,6 @@ fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx, bottom: bool)
     resp.on_hover_text(tip);
 }
 
-/// Button mit Zwei-Klick-Bestätigung (die Bestätigung verfällt nach 4 s).
 /// Geometrie des Ordnerbaums der letzten Frame (für die Ablage-Linie beim Ziehen).
 #[derive(Default)]
 struct TreeGeo {
@@ -5603,20 +5745,6 @@ struct TreeGeo {
     full: std::collections::HashMap<String, Rect>,
     x: std::collections::HashMap<String, f32>,
     right: f32,
-}
-
-fn armed_button(ui: &mut Ui, key: impl std::hash::Hash, label: &str, armed_label: &str) -> bool {
-    let id = egui::Id::new(("armed", key));
-    let now = ui.input(|i| i.time);
-    let armed = ui.memory(|m| m.data.get_temp::<f64>(id)).is_some_and(|t| now - t < 4.0);
-    if ui.button(if armed { armed_label } else { label }).clicked() {
-        if armed {
-            ui.memory_mut(|m| m.data.remove::<f64>(id));
-            return true;
-        }
-        ui.memory_mut(|m| m.data.insert_temp(id, now));
-    }
-    false
 }
 
 /// Status eines Chats als Sitzungsstatus: Freigabe/Frage offen → `Permission` (Seitenleiste „braucht dich“, MCP

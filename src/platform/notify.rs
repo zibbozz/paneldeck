@@ -1,5 +1,9 @@
 //! Desktop-Benachrichtigungen (Windows-Toast). Auf anderen Systemen ohne Wirkung.
 
+/// Native file and folder dialogs exist (Windows: `rfd`). Without them the dialog functions return `None` at once, and
+/// callers that save something fall back to a fixed folder.
+pub const DIALOGS: bool = cfg!(windows);
+
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str, sound: bool) {
     use tauri_winrt_notification::{Duration, Sound, Toast};
@@ -101,19 +105,19 @@ pub fn pick_folder(_start: &str) -> Option<String> {
     None
 }
 
-/// Datei-Auswahldialog (z. B. MCP-Konfiguration, #182); startet im Ordner von `start`, wenn das ein lokaler Pfad ist
-/// (Netzwerkpfade werden nicht berührt).
+/// Datei-Auswahldialog für JSON-Dateien (MCP-Konfiguration, #289). `start` ist ein Startordner: ein
+/// `\\wsl.localhost\…`-Pfad wird ungeprüft gesetzt (Prüfen könnte die WSL-VM starten), ein lokaler nur, wenn er existiert.
 #[cfg(windows)]
-pub fn pick_file(start: &str) -> Option<String> {
-    let mut d = rfd::FileDialog::new();
-    if let Some(dir) = std::path::Path::new(start).parent().filter(|p| crate::claude_opts::check_path(&p.to_string_lossy(), true).is_ok()) {
-        d = d.set_directory(dir);
+pub fn pick_json(start: &str) -> Option<String> {
+    let mut d = rfd::FileDialog::new().add_filter("JSON", &["json"]);
+    if crate::wsl::is_wsl_unc(start) || (!start.is_empty() && crate::claude_opts::check_path(start, true).is_ok()) {
+        d = d.set_directory(start);
     }
     d.pick_file().map(|p| p.to_string_lossy().to_string())
 }
 
 #[cfg(not(windows))]
-pub fn pick_file(_start: &str) -> Option<String> {
+pub fn pick_json(_start: &str) -> Option<String> {
     None
 }
 

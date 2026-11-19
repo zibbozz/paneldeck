@@ -1062,7 +1062,7 @@ impl TasksUi {
     fn due_dialog(&mut self, ctx: &egui::Context, conn: &rusqlite::Connection, lang: Lang) {
         let Some(mut mgr) = self.due_mgr.take() else { return };
         let mut close = false;
-        let m = egui::Modal::new(Id::new("todo_due_modal")).show(ctx, |ui| {
+        let m = crate::style::modal(Id::new("todo_due_modal")).show(ctx, |ui| {
             ui.set_width(Self::modal_width(ctx, 760.0));
             ui.label(RichText::new(lang.t("Fälligkeit – Markierungen", "Due dates – markers")).heading());
             ui.add_space(S2);
@@ -1104,7 +1104,7 @@ impl TasksUi {
         let counted = self.tag_counted.clone();
         let mut save = false;
         let mut close = false;
-        let m = egui::Modal::new(Id::new("todo_edit_modal")).show(ctx, |ui| {
+        let m = crate::style::modal(Id::new("todo_edit_modal")).show(ctx, |ui| {
             ui.set_width(Self::modal_width(ctx, 480.0));
             ui.horizontal(|ui| {
                 ui.label(RichText::new(lang.t("Karte bearbeiten", "Edit card")).heading());
@@ -1199,7 +1199,7 @@ impl TasksUi {
         };
         let mut go = false;
         let mut close = false;
-        let m = egui::Modal::new(Id::new("todo_confirm_modal")).show(ctx, |ui| {
+        let m = crate::style::modal(Id::new("todo_confirm_modal")).show(ctx, |ui| {
             ui.set_width(Self::modal_width(ctx, 400.0));
             ui.horizontal(|ui| {
                 ui.colored_label(DANGER, RichText::new("!").heading().strong());
@@ -1253,7 +1253,7 @@ impl TasksUi {
         let Some(ma) = self.merge_ask.take() else { return };
         let mut go = false;
         let mut close = false;
-        let m = egui::Modal::new(Id::new("todo_merge_modal")).show(ctx, |ui| {
+        let m = crate::style::modal(Id::new("todo_merge_modal")).show(ctx, |ui| {
             ui.set_width(Self::modal_width(ctx, 420.0));
             ui.label(RichText::new(lang.t("Tags zusammenführen", "Merge tags")).heading());
             ui.add_space(S2);
@@ -1314,7 +1314,7 @@ impl TasksUi {
         let mut recolor: Vec<(i64, String)> = Vec::new();
         let mut merge_into: Vec<(i64, i64)> = Vec::new();
         let mut delete: Vec<i64> = Vec::new();
-        let m = egui::Modal::new(Id::new("todo_tags_modal")).show(ctx, |ui| {
+        let m = crate::style::modal(Id::new("todo_tags_modal")).show(ctx, |ui| {
             ui.set_width(Self::modal_width(ctx, 540.0));
             ui.label(RichText::new(lang.t("Tags verwalten", "Manage tags")).heading());
             ui.add_space(S2);

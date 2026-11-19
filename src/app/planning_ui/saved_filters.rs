@@ -118,7 +118,7 @@ impl FilterUi {
         let Some(mut d) = self.save.take() else { return };
         let mut save = false;
         let mut close = false;
-        let m = egui::Modal::new(salt.with("save_filter")).show(ctx, |ui| {
+        let m = crate::style::modal(salt.with("save_filter")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 440.0));
             widgets::dialog_title(ui, lang.t("Filter speichern", "Save filter"));
             hint(ui, lang.t("Die Abfrage:", "The query:"));
@@ -180,7 +180,7 @@ impl FilterUi {
         let mut close = false;
         let mut ev = None;
         let mut act: Option<Act> = None;
-        let m = egui::Modal::new(salt.with("manage_filters")).show(ctx, |ui| {
+        let m = crate::style::modal(salt.with("manage_filters")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 640.0));
             widgets::dialog_title(ui, lang.t("Gespeicherte Filter", "Saved filters"));
             if list.is_empty() {
@@ -255,7 +255,7 @@ impl FilterUi {
         if let Some(id) = d.delete {
             if let Some(f) = list.iter().find(|f| f.id == id) {
                 let (mut yes, mut no) = (false, false);
-                let m = egui::Modal::new(salt.with("delete_filter")).show(ctx, |ui| {
+                let m = crate::style::modal(salt.with("delete_filter")).show(ctx, |ui| {
                     ui.set_width(widgets::modal_width(ctx, 420.0));
                     widgets::dialog_title(ui, lang.t("Filter löschen?", "Delete filter?"));
                     ui.label(match lang {

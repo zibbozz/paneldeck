@@ -188,6 +188,7 @@ pub fn claude_add_command(exe: &Path, inst_args: &[String]) -> Result<String, St
 
 /// Argumentzeile für `cmd.exe` (per `raw_arg`), um `claude <args>` zu starten: `/d` (kein AutoRun aus der
 /// Registry), `/v:off` (keine verzögerte Erweiterung mit `!`), `/c claude …`; jedes Argument über `quote_arg`.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn claude_cmd_line(args: &[String]) -> Result<String, String> {
     let mut s = String::from("/d /v:off /c claude");
     for a in args {

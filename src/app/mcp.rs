@@ -151,6 +151,16 @@ impl Creator {
     }
 }
 
+/// Ordner einer Sitzung, die ein Agent aus einer Vorlage anlegt (ohne `group` im Aufruf): Ordner der Vorlage unter dem
+/// Kinder-Ordner des Agenten (`child/vorlage`), sonst der, den es gibt (#244). Leere Angaben zählen nicht.
+fn nest_group(child: Option<String>, tpl: Option<String>) -> Option<String> {
+    let tpl = tpl.map(|t| crate::state::clean_folder_path(t.trim())).filter(|t| !t.is_empty());
+    match (child.filter(|c| !c.is_empty()), tpl) {
+        (Some(c), Some(t)) => Some(format!("{c}/{t}")),
+        (c, t) => c.or(t),
+    }
+}
+
 fn forget_created(created: &mut HashMap<u64, Creator>, id: u64) {
     created.remove(&id);
     for creator in created.values_mut() {
@@ -276,7 +286,7 @@ fn env_caller_ok(is_chat: Option<bool>) -> bool {
 /// (`PANELDECK_SESSION_KEY`).
 type CallerCand<'a> = (u64, Option<u32>, Option<u64>, Option<&'a str>);
 
-/// Wer ruft auf (#152, #168)? `peer` = Absender, auf dem Verbindungs-Thread geprüft (`winctl::resolve_peer`: sein Job
+/// Wer ruft auf (#152, #168)? `peer` = Absender, auf dem Verbindungs-Thread geprüft (`platform::process::resolve_peer`: sein Job
 /// Object bzw. sein Prozessbaum); `hint` = `PANELDECK_SESSION` und `PANELDECK_SESSION_KEY` der Brücke. Regeln:
 /// 1. Läuft der Absender im Job Object einer Sitzung, ist sie der Aufrufer (`"job"`) – auch wenn er losgelöst oder
 ///    verwaist ist. Ein abweichender Hinweis zählt dann nicht. Ein Job ohne passende Sitzung ergibt `"orphan"`.
@@ -294,7 +304,7 @@ type CallerCand<'a> = (u64, Option<u32>, Option<u64>, Option<&'a str>);
 ///
 /// `retired` = (Job, Sitzung) der aufbewahrten Jobs geschlossener bzw. neu gestarteter Sitzungen (`closing::Retired`):
 /// Ein übrig gebliebener Prozess darin handelt als diese Sitzung (`"retired"`, mit ihrer Kette, `taint::set_retired`).
-fn attribute(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], retired: &[(u64, u64)], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+fn attribute(peer: &crate::platform::process::PeerChain, sessions: &[CallerCand], retired: &[(u64, u64)], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
     if let Some(job) = peer.job {
         if let Some((id, ..)) = sessions.iter().find(|(_, _, j, _)| *j == Some(job)) {
             return (Some(*id), "job");
@@ -326,14 +336,14 @@ fn attribute(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], retired: 
 
 /// [`attribute`] ohne aufbewahrte Jobs (Tests).
 #[cfg(test)]
-fn pick_caller(peer: &crate::winctl::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+fn pick_caller(peer: &crate::platform::process::PeerChain, sessions: &[CallerCand], hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
     attribute(peer, sessions, &[], hint)
 }
 
 /// Antwort von `close_session`: `{"ok": true}`, dazu `remaining_processes` (`[{pid, name, window, title?}]`) und ein
 /// Hinweis `note` (nicht vertrauenswürdig), wenn Prozesse der Sitzung weiterlaufen (#168; additive Felder, fehlen ohne
 /// solche Prozesse).
-fn close_reply(lingering: &[crate::winctl::JobProc]) -> Value {
+fn close_reply(lingering: &[crate::platform::process::JobProc]) -> Value {
     let mut v = json!({"ok": true});
     if !lingering.is_empty() {
         v["remaining_processes"] = lingering
@@ -717,7 +727,7 @@ impl App {
     /// Welche Hub-Sitzung ruft auf? `peer` ist der Prozessbaum des Absenders, vom Hub selbst auf dem Verbindungs-Thread
     /// ermittelt (`hooks::McpJob::peer`, nie die Angabe des Clients); `hint` = (`PANELDECK_SESSION`, Schlüssel). Regeln in
     /// [`pick_caller`]. Ein Chat hat keine PTY und ist nie Aufrufer über diesen Weg.
-    fn mcp_resolve_caller(&self, peer: &crate::winctl::PeerChain, hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
+    fn mcp_resolve_caller(&self, peer: &crate::platform::process::PeerChain, hint: Option<(u64, &str)>) -> (Option<u64>, &'static str) {
         let sessions: Vec<CallerCand> = self
             .entries
             .iter()
@@ -732,7 +742,7 @@ impl App {
 
     /// Absender eines `--open` (#152): `(Sitzung, aus der er stammt, nicht zuzuordnen)` – nur über Job Object bzw.
     /// Prozessbaum (#168), nie über Umgebungsvariablen.
-    pub(super) fn open_origin(&self, peer: Option<&crate::winctl::PeerChain>) -> (Option<u64>, bool) {
+    pub(super) fn open_origin(&self, peer: Option<&crate::platform::process::PeerChain>) -> (Option<u64>, bool) {
         let Some(peer) = peer else { return (None, false) };
         let sessions: Vec<CallerCand> = self
             .entries
@@ -1266,13 +1276,20 @@ impl App {
             Some("chat") => true,
             Some(k) => return Err(er("bad_args", if de() { format!("kind: „terminal“ oder „chat“, nicht „{k}“") } else { format!("kind: “terminal” or “chat”, not “{k}”") })),
         };
+        // Terminal-Vorlage (#244): ihre Einstellungen, soweit der Aufruf sie nicht selbst angibt.
+        let tpl = match s("template") {
+            Some(_) if chat => return Err(er("bad_args", tr("template gibt es nur für Terminals (nicht mit kind = „chat“).", "template only applies to terminals (not with kind = “chat”)."))),
+            Some(n) => Some(self.mcp_template(&n)?),
+            None => None,
+        };
+        let item = tpl.as_ref().map(|(_, it)| it);
         if chat {
             return self.mcp_create_chat(ctx, args, caller).map(Ok);
         }
         if s("server").is_some() {
             return Err(er("bad_args", tr("server gibt es nur mit kind = „chat“.", "server only applies with kind = “chat”.")));
         }
-        let claude = args.get("claude").and_then(|v| v.as_bool()).unwrap_or(false);
+        let claude = args.get("claude").and_then(|v| v.as_bool()).unwrap_or(item.is_some_and(|it| it.claude));
         if !claude && has_claude_opts(args) {
             return Err(er(
                 "bad_args",
@@ -1288,7 +1305,12 @@ impl App {
         let asked = ClaudeOpts::from_mcp(args).map_err(bad)?;
         // `no-chrome` als Standard des Nutzers gewinnt: `chrome` eines Agenten wird abgelehnt.
         asked.agent_conflict(&self.settings.claude_defaults).map_err(bad)?;
-        let copts = asked.for_agent(&self.settings.claude_defaults);
+        // Aus einer Vorlage: deren Optionen hinter denen des Agenten, mit denselben Regeln (nie bypassPermissions, nie
+        // zusätzliche Ordner, erlaubte Werkzeuge, MCP-Konfiguration oder --safe-mode).
+        let copts = match item {
+            Some(it) => it.agent_opts(&asked, &self.settings.claude_defaults),
+            None => asked.for_agent(&self.settings.claude_defaults),
+        };
         if claude && !self.settings.claude_mode {
             return Err(er("claude_mode_off", tr("Der Claude-Modus ist in den Einstellungen ausgeschaltet.", "Claude mode is switched off in the settings.")));
         }
@@ -1301,19 +1323,55 @@ impl App {
                 }
                 Some(id)
             }
-            None => None,
+            // Shell der Vorlage, wenn es sie hier gibt (sonst entscheidet das Profil bzw. die Standard-Shell).
+            None => item.map(|it| it.shell_id.clone()).filter(|id| self.shells.iter().any(|x| &x.id == id)),
         };
         // Läuft der Agent in einer Hub-Sitzung, kommt das Kind in deren Fenster und Projekt (#110), sonst ins Hauptfenster.
         let (window, project) = super::multiwin::child_home(caller.and_then(|c| self.entries.get(&c)).map(|e| (e.meta.window, e.meta.project)), self.active_project);
-        let default_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        // Profil der Vorlage (0 = keins) statt des Standardprofils des Projekts.
+        let tpl_profile = item.map(|it| it.profile);
+        let project_profile = self.projects.iter().find(|p| p.id == project).map(|p| p.profile).unwrap_or(0);
+        let default_profile = tpl_profile.unwrap_or(project_profile);
+        // Ein Profil mit eigenem Programm, Argumenten oder Startbefehl startet ein Agent aus einer Vorlage nur, wenn es das
+        // Standardprofil des Projekts ist (das bekäme er auch ohne Vorlage); nie mit `dangerously`/`bypassPermissions`.
+        if let Some(p) = tpl_profile.and_then(|pid| self.profile(pid)) {
+            use crate::templates::AgentProfileIssue;
+            match crate::templates::agent_profile_issue(&p.program, &p.args, &p.startup, p.id == project_profile) {
+                Some(AgentProfileIssue::Dangerous) => {
+                    return Err(er(
+                        "bad_args",
+                        tr(
+                            "Das Profil dieser Vorlage enthält „dangerously“ oder „bypassPermissions“ in Programm, Argumenten oder Startbefehl – über MCP nicht erlaubt.",
+                            "This template's profile contains “dangerously” or “bypassPermissions” in its program, arguments or startup command – not allowed via MCP.",
+                        ),
+                    ))
+                }
+                Some(AgentProfileIssue::Custom) => {
+                    return Err(er(
+                        "bad_args",
+                        tr(
+                            "Das Profil dieser Vorlage hat ein eigenes Programm, eigene Argumente oder einen Startbefehl und ist nicht das Standardprofil des Projekts – über MCP nicht erlaubt (Agenten starten nie eigene Programme). Der Nutzer kann die Vorlage selbst starten.",
+                            "This template's profile has its own program, arguments or startup command and is not the project's default profile – not allowed via MCP (agents never start custom programs). The user can start the template themselves.",
+                        ),
+                    ))
+                }
+                None => {}
+            }
+        }
         // Startet die Sitzung (nach Auflösung des Standardprofils mit eigenem Programm) in WSL, darf `cwd` ein
         // Linux-Pfad sein (#172); sonst nie.
-        let eff_shell = self.effective_shell_id(shell.as_deref(), project);
+        let eff_shell = match tpl_profile {
+            Some(pid) => match self.profile(pid) {
+                Some(p) if !p.program.trim().is_empty() => format!("custom:{}", p.id),
+                _ => shell.clone().unwrap_or_else(|| self.shell_for_profile(pid)),
+            },
+            None => self.effective_shell_id(shell.as_deref(), project),
+        };
         let wsl = match super::folder_picker::Target::for_shell(self.shell_by_id(&eff_shell).as_ref(), false) {
             super::folder_picker::Target::Wsl { distro, .. } => Some(distro),
             super::folder_picker::Target::Windows => None,
         };
-        let cwd = match s("cwd") {
+        let cwd = match s("cwd").or_else(|| item.map(|it| it.cwd.trim().to_string()).filter(|c| !c.is_empty())) {
             Some(c) => Some(check_create_cwd(&c, wsl.as_ref().map(|d| d.as_deref()), de(), |p| std::path::Path::new(p).is_dir())?),
             None => None,
         };
@@ -1332,18 +1390,37 @@ impl App {
         };
         // Administrator-Profile würden eine UAC-Abfrage auslösen: nie über MCP.
         if self.profile(default_profile).is_some_and(|p| p.admin) {
-            return Err(er("admin_profile", tr("Das Standardprofil dieses Projekts startet als Administrator – über MCP nicht erlaubt.", "This project's default profile starts as administrator – not allowed via MCP.")));
+            return Err(er(
+                "admin_profile",
+                if item.is_some() {
+                    tr("Das Profil dieser Vorlage startet als Administrator – über MCP nicht erlaubt.", "This template's profile starts as administrator – not allowed via MCP.")
+                } else {
+                    tr("Das Standardprofil dieses Projekts startet als Administrator – über MCP nicht erlaubt.", "This project's default profile starts as administrator – not allowed via MCP.")
+                },
+            ));
         }
-        let prompt = if claude { s("prompt") } else { None };
+        let prompt = if claude { s("prompt").or_else(|| item.map(|it| it.prompt.trim().to_string()).filter(|p| !p.is_empty())) } else { None };
+        // Wiederholte Starts einer Vorlage zählen hoch: API, API #2 …
+        let name = s("name").or_else(|| tpl.as_ref().map(|(t, _)| crate::templates::numbered_name(&t.session_name(), &self.session_names())));
         let before: HashSet<u64> = self.entries.keys().copied().collect();
         // Ohne `group`: Läuft der Agent in einer Hub-Sitzung, kommen seine neuen Sitzungen in einen Unterordner mit deren Namen
-        // (Baumansicht) – so stehen Kinder unter dem Elternteil und sind leicht zu finden.
-        let group = self.mcp_child_group(s("group"), caller);
-        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name: s("name"), claude, claude_opts: Some(copts), prompt, group, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
+        // (Baumansicht) – so stehen Kinder unter dem Elternteil und sind leicht zu finden. Eine Vorlage bringt ihren Ordner mit.
+        // Der Ordner einer Vorlage kommt unter den Kinder-Ordner (Kinder bleiben unter ihrem Elternteil).
+        let group = match s("group") {
+            Some(g) => Some(g),
+            None => nest_group(self.mcp_child_group(None, caller), item.map(|it| it.group.trim().to_string())),
+        };
+        // „Letzte Konversation im Ordner fortsetzen“ einer Vorlage gilt für Agenten nie (fremde Konversation); „bei jedem Start
+        // neu“ schon.
+        let claude_continue = item.and_then(|it| it.claude_continue);
+        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name, claude, claude_opts: Some(copts), prompt, group, claude_continue, profile: tpl_profile, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
         if let Some(err) = self.entries.get(&id).and_then(|e| e.error.clone()) {
             self.close_session(id);
             return Err(er("spawn_failed", err));
+        }
+        if let Some(it) = item {
+            self.apply_tpl_extras(id, it);
         }
         self.mcp.created.insert(id, self.creator_of(caller));
         self.mcp_taint_create(caller, id);
@@ -1354,7 +1431,33 @@ impl App {
         if let Some(c) = cwd_checked {
             v["cwd_checked"] = json!(c);
         }
+        if let Some((t, it)) = &tpl {
+            v["template"] = json!(t.name);
+            // Optionen der Vorlage, die für Agenten nie gelten (immer da, leer = nichts weggelassen).
+            v["template_ignored"] = json!(it.agent_ignored());
+        }
         Ok(Ok(v))
+    }
+
+    /// Terminal-Vorlage für `create_session` per Name (#244). Gruppen-Vorlagen und unbekannte Namen: `bad_args` mit den
+    /// verfügbaren Terminal-Vorlagen.
+    fn mcp_template(&self, name: &str) -> Result<(crate::templates::Template, crate::templates::TplItem), (String, String)> {
+        let names: Vec<String> = self.templates.iter().filter(|t| t.is_terminal()).map(|t| t.name.clone()).take(40).collect();
+        let list = if names.is_empty() { tr("(keine)", "(none)").to_string() } else { names.join(", ") };
+        match crate::templates::find(&self.templates, name) {
+            Some((_, t)) => match t.item() {
+                Some(it) => Ok((t.clone(), it.clone())),
+                None => Err(er(
+                    "bad_args",
+                    if de() {
+                        format!("„{}“ ist eine Gruppen-Vorlage; über MCP lassen sich nur Terminal-Vorlagen starten: {list}", t.name)
+                    } else {
+                        format!("“{}” is a group template; only terminal templates can be started via MCP: {list}", t.name)
+                    },
+                )),
+            },
+            None => Err(er("bad_args", if de() { format!("Unbekannte Vorlage „{name}“. Terminal-Vorlagen: {list}") } else { format!("Unknown template “{name}”. Terminal templates: {list}") })),
+        }
     }
 
     /// Gruppe einer neuen Sitzung: `group` oder – läuft der Agent in einer Hub-Sitzung – ein Unterordner mit deren Namen
@@ -1508,8 +1611,9 @@ impl App {
             s.send_text_agent(text, submit);
         }
         // Ein abgeschickter Prompt macht Claude sofort „arbeitet“ (der Hook kommt erst Sekundenbruchteile später).
+        // Bestätigt keine Meldung die Annahme (lokaler Befehl wie `/model`, Text in einem Dialog), gilt wieder „bereit“.
         if submit && e.is_claude() && e.status == ClaudeStatus::Idle {
-            e.status = ClaudeStatus::Working;
+            e.assume_working();
         }
         self.mcp_taint_write(caller, id);
         Ok(json!({"ok": true}))
@@ -2122,6 +2226,19 @@ fn create_wait(recv: Result<crate::wsl::DirCheck, std::sync::mpsc::TryRecvError>
 mod tests {
     use super::*;
 
+    /// Ordner einer Vorlage unter dem Kinder-Ordner des Agenten (#244).
+    #[test]
+    fn template_folder_nests_under_the_child_folder() {
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(nest_group(s("Work/Agent"), s("Backend/API")), s("Work/Agent/Backend/API"));
+        assert_eq!(nest_group(s("Agent"), s(" /Backend// ")), s("Agent/Backend"));
+        assert_eq!(nest_group(s("Agent"), s("")), s("Agent"));
+        assert_eq!(nest_group(s("Agent"), None), s("Agent"));
+        assert_eq!(nest_group(None, s("Backend")), s("Backend"));
+        assert_eq!(nest_group(None, s("  ")), None);
+        assert_eq!(nest_group(None, None), None);
+    }
+
     /// Stufen-Auswahl (#187): jede Stufe ist ein echter Knopf – auch nicht gewählt mit sichtbarer Fläche –, zeigt die
     /// Hand und schaltet beim Klick um.
     #[test]
@@ -2262,7 +2379,7 @@ mod tests {
 
     #[test]
     fn leftover_processes_and_the_orphan_fallback() {
-        use crate::winctl::PeerChain;
+        use crate::platform::process::PeerChain;
         // Alle laufenden Sitzungen haben einen Job: 5 (Job 1), 20 (Job 2); 40 ist ein Chat (ohne PID)
         let with_jobs: [CallerCand; 3] = [(5, Some(500), Some(1), None), (20, Some(2000), Some(2), None), (40, None, None, None)];
         // Übrig gebliebener Prozess im aufbewahrten Job 9 der geschlossenen Sitzung 7 bzw. im alten Job 8 von 20
@@ -2341,7 +2458,7 @@ mod tests {
 
     #[test]
     fn the_caller_comes_from_the_peer_process_tree_not_from_its_own_claims() {
-        use crate::winctl::PeerChain;
+        use crate::platform::process::PeerChain;
         let pc = |chain: &[u32], orphan: bool| PeerChain { chain: chain.to_vec(), orphan, job: None };
         // Sitzungen: 5 (Shell-PID 500), 20 (PID 2000, markiert), 30 (WSL-Terminal, PID 3000, Schlüssel), 40 (Chat)
         let key30 = "a".repeat(64);
@@ -2374,7 +2491,7 @@ mod tests {
 
     #[test]
     fn the_job_object_attributes_detached_and_orphaned_callers_first() {
-        use crate::winctl::PeerChain;
+        use crate::platform::process::PeerChain;
         // Sitzungen mit Jobs: 5 (PID 500, Job 1), 20 (PID 2000, Job 2), 30 (WSL, Job 3, Schlüssel), 40 (ohne Job, PID 4000)
         let key30 = "a".repeat(64);
         let sessions: [CallerCand; 4] = [(5, Some(500), Some(1), None), (20, Some(2000), Some(2), None), (30, Some(3000), Some(3), Some(key30.as_str())), (40, Some(4000), None, None)];
@@ -2403,7 +2520,7 @@ mod tests {
 
     #[test]
     fn close_reports_remaining_processes_only_when_there_are_some() {
-        use crate::winctl::JobProc;
+        use crate::platform::process::JobProc;
         assert_eq!(close_reply(&[]), json!({"ok": true}), "Antwort wie vor 2.3.0");
         let mut v = close_reply(&[JobProc { pid: 7, name: "notepad.exe".into(), title: "Editor".into(), window: true }, JobProc { pid: 8, name: "node.exe".into(), title: " ".into(), window: false }]);
         let note = v.as_object_mut().unwrap().remove("note").expect("Hinweis: nicht vertrauenswürdig");

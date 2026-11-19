@@ -20,17 +20,15 @@ mod history;
 mod hyperlink;
 mod hooks;
 mod cli;
-mod console;
-mod conpty;
 mod help;
 mod integration;
 mod launch;
 mod keys;
-mod notify;
 mod osc;
 mod palette;
 mod paths;
 mod planning;
+mod platform;
 mod prompts;
 mod query;
 mod search;
@@ -43,19 +41,18 @@ mod shells;
 mod state;
 mod style;
 mod sysfonts;
-mod taskbar;
 mod tasks;
 mod templates;
 mod terminal;
 mod undo;
-mod tray;
 mod vtkeys;
 mod termview;
 mod theme;
 mod usage;
 mod vtnotify;
-mod winctl;
 mod wsl;
+
+use platform::console;
 
 fn app_icon() -> eframe::egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon64.png")).unwrap_or_default()
@@ -108,22 +105,12 @@ fn acquire_instance_lock() -> InstanceLock {
 }
 
 /// Rohe Kommandozeile mit eigener Zerlegung (`cli::split_command_line`), damit `"C:\"` und Pfade mit
-/// Leerzeichen nach einer Laufwerkswurzel richtig ankommen. Ohne Windows: `std::env::args`.
+/// Leerzeichen nach einer Laufwerkswurzel richtig ankommen. Ohne rohe Kommandozeile (`platform::process`): `std::env::args`.
 fn command_line_args() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        // SAFETY: GetCommandLineW liefert einen nullterminierten Zeiger, der für die Prozesslaufzeit gültig ist.
-        let p = unsafe { windows_sys::Win32::System::Environment::GetCommandLineW() };
-        if !p.is_null() {
-            let mut n = 0usize;
-            while unsafe { *p.add(n) } != 0 {
-                n += 1;
-            }
-            let raw = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, n) });
-            let v = cli::split_command_line(&raw);
-            if !v.is_empty() {
-                return v;
-            }
+    if let Some(raw) = platform::process::raw_command_line() {
+        let v = cli::split_command_line(&raw);
+        if !v.is_empty() {
+            return v;
         }
     }
     std::env::args().collect()
@@ -137,7 +124,7 @@ fn early_lang(arg: Option<state::Lang>, cli: &cli::Cli) -> state::Lang {
 
 fn main() -> eframe::Result<()> {
     // Zuerst: DLLs nur noch aus Programmordner und System32 laden, nie aus dem Arbeitsordner (#183).
-    conpty::harden_dll_search();
+    platform::conpty::harden_dll_search();
     // Hook-Aufrufe von Claude Code (`--hook`) MÜSSEN vor der Einzelinstanz-Weiterleitung behandelt werden:
     // sie laufen mit demselben Datenordner wie die laufende App und dürfen nicht als „Fenster zeigen“ enden.
     if cli::is_hook_invocation(&std::env::args().collect::<Vec<_>>()) {
@@ -159,7 +146,8 @@ fn main() -> eframe::Result<()> {
     let cli = cli::get();
     // Vom Deinstallationsprogramm: die globalen Claude-Hooks wieder entfernen, sonst zeigen sie auf eine gelöschte .exe.
     if cli.uninstall_hooks {
-        let ok = hooks::global_settings_path().map(|p| !p.exists() || hooks::uninstall_global(&p).is_ok()).unwrap_or(true);
+        // Am geltenden Ort und – mit CLAUDE_CONFIG_DIR – auch in ~/.claude, wohin ältere Versionen immer schrieben.
+        let ok = hooks::global_settings_candidates().iter().all(|p| !p.exists() || hooks::uninstall_global(p).is_ok());
         // Ebenso eine Registrierung als MCP-Server in Claude Code, falls sie auf diese .exe zeigt.
         mcp::unregister_if_ours();
         // Autostart-Werte `Paneldeck (…)` von Instanzen mit Profil/Datenordner (den Standardwert löscht der Installer).

@@ -7,7 +7,7 @@ use super::{install, Phase};
 use crate::app::App;
 use crate::state::Lang;
 use crate::style::{self, Icon as SIcon, S1, S2};
-use eframe::egui::{self, Align2, Color32, FontId, Id, Pos2, Rect, RichText, Sense, Vec2};
+use eframe::egui::{self, Color32, FontId, Id, Pos2, Rect, RichText, Sense, Vec2};
 use std::time::Duration;
 
 /// Release-Seite der Version im Standardbrowser öffnen. Die Adresse wird lokal aus der geprüften Versionsnummer gebaut (nichts
@@ -17,15 +17,7 @@ fn open_release_page(v: &Version) {
     if !super::release::safe_release_page(&url) {
         return;
     }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::Shell::ShellExecuteW;
-        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        let op: Vec<u16> = "open".encode_utf16().chain([0]).collect();
-        let u: Vec<u16> = url.encode_utf16().chain([0]).collect();
-        // SAFETY: nullterminierte UTF-16-Puffer, die den Aufruf überleben; kein Fenster-Handle nötig.
-        unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
-    }
+    crate::platform::open::url(&url);
 }
 
 /// Esc schließt ein Update-Fenster nur, wenn es vorn liegt und weder ein Terminal noch ein Textfeld die Tastatur hat (sonst
@@ -71,7 +63,7 @@ impl App {
         let keep_once = self.save_for_update_restart();
         match install::spawn_restart(&self.exe, keep_once) {
             Ok(()) => {
-                crate::app::winchrome::shutdown();
+                crate::platform::chrome::shutdown();
                 self.tray = None; // Tray-Symbol entfernen (sonst bleibt bis zum Überfahren ein totes Symbol stehen)
                 std::process::exit(0);
             }
@@ -166,7 +158,7 @@ impl App {
             // Kein Angebot (mehr), aber eine Meldung (z. B. Neustart fehlgeschlagen)
             if let Some(e) = self.updater.error.clone() {
                 let mut open = true;
-                let r = egui::Window::new(lang.t("Update", "Update")).id(Id::new("update_dialog")).open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+                let r = style::movable(ctx, Id::new("update_dialog"), egui::Window::new(lang.t("Update", "Update"))).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
                     ui.set_max_width(420.0);
                     ui.colored_label(Color32::LIGHT_RED, e);
                 });
@@ -184,12 +176,10 @@ impl App {
         let phase = self.updater.phase;
         let mut open = true;
         let (mut go, mut later, mut skip, mut cancel) = (false, false, false, false);
-        let shown = egui::Window::new(lang.t("Update verfügbar", "Update available"))
-            .id(Id::new("update_dialog"))
+        let shown = style::movable(ctx, Id::new("update_dialog"), egui::Window::new(lang.t("Update verfügbar", "Update available")))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_max_width(440.0);
                 let dim = style::dim(ui);
@@ -335,7 +325,7 @@ impl App {
         let major = self.updater.offer.as_ref().is_some_and(|o| o.major);
         let (mut go, mut no) = (false, false);
         let title = if n == 0 { lang.t("Jetzt neu starten, um zu aktualisieren?", "Restart now to update?") } else { lang.t("Paneldeck neu starten?", "Restart Paneldeck?") };
-        let shown = egui::Window::new(title).id(Id::new("update_confirm")).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+        let shown = style::movable(ctx, Id::new("update_confirm"), egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.set_max_width(420.0);
             if n == 0 {
                 ui.label(lang.t(

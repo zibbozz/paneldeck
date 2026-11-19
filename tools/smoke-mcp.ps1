@@ -87,7 +87,8 @@ function Set-IsolationProfile {
   $f = "$data\settings.json"
   $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
   $p = [pscustomobject]@{ id = 1; name = 'Smoke-Isolation'; env = $ptyEnv }
-  if ($j.PSObject.Properties.Name -contains 'profiles') { $j.profiles = @($p) } else { $j | Add-Member profiles @($p) }
+  $all = @($p) + @($script:extraProfiles)
+  if ($j.PSObject.Properties.Name -contains 'profiles') { $j.profiles = $all } else { $j | Add-Member profiles $all }
   [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), $u8)
   $sf = "$data\state.json"
   if (Test-Path $sf) {
@@ -100,6 +101,7 @@ function Set-IsolationProfile {
   }
 }
 $script:extra = @()
+$script:extraProfiles = @()
 $script:prestart = $null
 $script:pass = 0; $script:fail = 0; $script:hub = $null; $script:bridge = $null; $script:rpc = 0
 
@@ -565,13 +567,123 @@ $wait
     Check 'Hook einer anderen Konversation (claude -p) wird verworfen (#260)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
     Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'alt' } $null; Start-Sleep 0.5
     Check 'Hook ganz ohne Schluessel zaehlt nicht mehr, sobald Meldungen mit Schluessel kamen (#260)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
-    # Claude beendet und im selben Terminal neu gestartet: neue Konversation wird wieder zugeordnet (Review zu #260).
-    Hook 'SessionEnd'; Start-Sleep 0.3
-    $script:hookSid = [guid]::NewGuid().ToString()
-    Hook 'SessionStart' @{ source = 'startup' }; Hook 'UserPromptSubmit'; Start-Sleep 0.5
-    Check 'Neu gestarteter Claude im selben Terminal wird zugeordnet (UserPromptSubmit -> working)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    # --- Status ohne passenden Hook: Claude meldet nicht jedes Ende (kein Stop nach Esc, kein Stop fuer Hintergrund-Agenten ...)
+    $rowOf = { (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $cid } }
+    # Wartet bis $ms auf den Status $want; gibt den letzten Status zurueck.
+    function Wait-Status([string]$want, [int]$ms = 12000) {
+      $t0 = Get-Date
+      do { $s = & $stOf; if ($s -eq $want) { return $s }; Start-Sleep -Milliseconds 400 } while (((Get-Date) - $t0).TotalMilliseconds -lt $ms)
+      $s
+    }
+    $askBash = @{ notification_type = 'permission_prompt'; message = 'Claude needs your permission to use Bash' }
+    # Hintergrund-Agent nach dem Ende der Runde: Werkzeug-Meldung -> working, sein Ende (SubagentStop) -> ready.
+    Hook 'PostToolUse' @{ tool_name = 'Bash'; agent_id = 'bg1' }; Start-Sleep 0.5
+    Check 'Hintergrund-Agent arbeitet nach dem Stop -> working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'SubagentStop'; Start-Sleep 0.5
+    Check 'SubagentStop ausserhalb einer Runde -> ready (vorher blieb working stehen)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    # Automatisches Zusammenfassen mitten in der Runde: SessionStart(compact) heisst nicht "bereit".
+    Hook 'UserPromptSubmit'; Hook 'SessionStart' @{ source = 'compact' }; Start-Sleep 0.5
+    Check 'SessionStart(compact) mitten in der Runde bleibt working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'SubagentStop'; Start-Sleep 0.3
+    Check 'SubagentStop in einer Runde bleibt working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
     Hook 'Stop'; Start-Sleep 0.5
+    Hook 'Notification' @{ notification_type = 'auth_success'; message = 'Auth ok' }; Start-Sleep 0.5
+    Check 'Benachrichtigung auth_success aendert den Status nicht (vorher input)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    # Offene Freigabe-Frage: die Meldung eines anderen, gleichzeitig laufenden Werkzeugs ueberschreibt sie nicht.
+    Hook 'UserPromptSubmit'; Hook 'Notification' $askBash; Start-Sleep 0.5
+    Check 'Freigabe-Frage -> approval' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Hook 'PostToolUse' @{ tool_name = 'Read'; agent_id = 'sub1' }; Hook 'PreToolUse' @{ tool_name = 'Bash' }; Start-Sleep 0.5
+    Check 'Meldungen anderer Werkzeuge lassen approval stehen (vorher working)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Hook 'PostToolUse' @{ tool_name = 'Bash' }; Start-Sleep 0.5
+    Check 'Das gefragte Werkzeug ist fertig -> working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 0.5
+    # Unterbrechung mit Esc: kein Stop-Hook. Das Transkript belegt das Ende der Runde -> ready; die Warteschlange wartet.
+    # Ein Beleg zaehlt nur, wenn er in der Datei HINTER dem Stand bei der letzten Meldung steht (#282): die alte
+    # Unterbrechung am Anfang der Datei nicht.
+    $u8n = New-Object Text.UTF8Encoding $false
+    $trFile = "$work\smoke-transcript.jsonl"
+    $trPrompt = '{"type":"user","message":{"role":"user","content":"los"}}' + "`n"
+    $trStop = '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}' + "`n"
+    [IO.File]::WriteAllText($trFile, ($trPrompt + $trStop), $u8n)
+    Hook 'UserPromptSubmit' @{ transcript_path = $trFile }; Start-Sleep 0.5
+    $q2 = Tool 'queue_prompt' @{ session = $cid; prompt = 'nach-der-unterbrechung' }
+    Check 'queue_prompt waehrend working: wartet' ($q2.data.sent_immediately -eq $false -and $q2.data.queue_len -eq 1) $q2.text
+    Start-Sleep 6
+    Check 'Ohne Stop bleibt working; eine Unterbrechung von vor der Meldung ist kein Beleg (#282)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    [IO.File]::AppendAllText($trFile, ($trPrompt + $trStop), $u8n)
+    $st = Wait-Status 'ready' 15000
+    Check 'Unterbrechung ohne Stop-Hook: Status wird ready (Beleg im Transkript; vorher blieb working stehen)' ($st -eq 'ready') "status=$st"
+    Start-Sleep 1
+    Check 'Nach der Unterbrechung wartet die Warteschlange (nichts gesendet)' ((& $rowOf).queue_len -eq 1 -and (Wait-FakeFile $inputs 'nach-der-unterbrechung' 1) -notmatch 'nach-der-unterbrechung') "queue_len=$((& $rowOf).queue_len)"
+    # Ein Stop ohne abgeschickten Prompt davor (Runde von einem Hintergrund-Ergebnis geweckt) laesst sie auch nicht los (#282).
+    Hook 'PreToolUse' @{ tool_name = 'Bash' }; Hook 'Stop'; Start-Sleep 1
+    Check 'Stop einer Runde ohne Prompt: Warteschlange wartet weiter (#282)' ((& $rowOf).queue_len -eq 1 -and (& $stOf) -eq 'ready') "queue_len=$((& $rowOf).queue_len) status=$(& $stOf)"
+    Hook 'UserPromptSubmit'; Hook 'Stop'
+    Check 'Nach dem Stop einer Runde mit Prompt laeuft die Warteschlange weiter' ((Wait-FakeFile $inputs 'nach-der-unterbrechung' 10000) -match 'nach-der-unterbrechung')
+    # Runde des gesendeten Prompts (ein zweiter Stop ohne Meldung dazwischen gaelte als doppelt zugestellt).
+    Hook 'UserPromptSubmit'; Start-Sleep 0.3; Hook 'Stop'; Start-Sleep 0.5
+    Check 'Runde des Warteschlangen-Prompts beendet -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    # Vom Hub angenommenes "arbeitet" (send_text mit Enter), das keine Meldung bestaetigt (lokaler Befehl): zurueck auf ready.
+    [void](Tool 'send_text' @{ session = $cid; text = '/model' }); Start-Sleep 0.5
+    Check 'send_text mit Enter -> working (angenommen)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    $t0 = Get-Date; $st = Wait-Status 'ready' 20000; $took = ((Get-Date) - $t0).TotalSeconds
+    Check 'Unbestaetigtes working faellt auf ready zurueck (nach ca. 10 s, vorher nie)' ($st -eq 'ready' -and $took -ge 6) "status=$st nach $([int]$took) s"
+    # #282 (HIGH-1): Ein Programm taeuscht den Prompt der Shell vor (OSC 133;A), waehrend Claude laeuft und eine
+    # Freigabe-Frage offen ist. Ohne Bestaetigung (im Vordergrund der Shell laeuft noch etwas) aendert das nichts.
+    [void](Tool 'send_text' @{ session = $cid; text = 'spoof-shell-prompt' })
+    Hook 'UserPromptSubmit'; Hook 'Notification' $askBash; Start-Sleep 0.5
+    Check 'Freigabe-Frage offen (vor dem vorgetaeuschten Prompt)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    $t0 = Get-Date; while ((& $rowOf).cwd -notmatch 'spoof-prompt' -and ((Get-Date) - $t0).TotalSeconds -lt 12) { Start-Sleep -Milliseconds 400 }
+    Check 'Die vorgetaeuschten Sequenzen kommen im Hub an (Ordnermeldung OSC 9;9)' ((& $rowOf).cwd -match 'spoof-prompt') "cwd=$((& $rowOf).cwd)"
+    Start-Sleep 5
+    Check 'Vorgetaeuschter Prompt hebt die Freigabe-Frage nicht auf (#282)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Check 'Vorgetaeuschter Prompt: send_text bleibt verweigert (#282)' ((Code (Tool 'send_text' @{ session = $cid; text = 'ja' })) -eq 'permission_pending')
+    Hook 'SessionStart' @{ source = 'startup' } $hookKey 'nested-after-spoof'; Start-Sleep 0.5
+    Check 'Vorgetaeuschter Prompt: ein claude -p uebernimmt die Sitzung nicht (#282, #260)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Hook 'PostToolUse' @{ tool_name = 'Bash' }; Start-Sleep 0.5
+    Check 'Vorgetaeuschter Prompt: Meldungen der Konversation zaehlen weiter (#282)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 0.5
+    # #282 (MEDIUM-3/4): Solange unten im Bild eine Rueckfrage steht, macht weder "Claude wartet auf deine Eingabe"
+    # (idle_prompt) noch ein Beleg im Transkript aus approval ein ready. Die Zeile im Ersatz-claude sieht so aus.
+    [void](Tool 'send_text' @{ session = $cid; text = 'Do you want to proceed?' }); Start-Sleep 0.5
+    Hook 'UserPromptSubmit' @{ transcript_path = $trFile }; Hook 'Notification' $askBash; Start-Sleep 0.5
+    Hook 'Notification' @{ notification_type = 'idle_prompt'; message = 'Claude is waiting for your input' }; Start-Sleep 0.5
+    Check 'idle_prompt laesst eine sichtbare Rueckfrage stehen (#282)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    [IO.File]::AppendAllText($trFile, ($trPrompt + $trStop), $u8n)
+    Start-Sleep 6
+    Check 'Beleg im Transkript beendet eine sichtbare Rueckfrage nicht (#282)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 0.5
+    Check 'Stop beendet die Rueckfrage -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+
+    # Claude beendet (SessionEnd) und im selben Terminal neu gestartet: neue Konversation wird wieder zugeordnet (Review
+    # zu #260). Die Warteschlange wird angehalten und laeuft fuer den neuen Claude nicht von selbst weiter (#282): ein
+    # `claude -p` naehme den Prompt nicht an, und die Shell fuehrte ihn danach als Befehl aus.
+    Hook 'UserPromptSubmit'; Start-Sleep 0.3
+    $q3 = Tool 'queue_prompt' @{ session = $cid; prompt = 'nach-dem-ende' }
+    Check 'queue_prompt vor dem Ende von Claude: wartet' ($q3.data.sent_immediately -eq $false -and $q3.data.queue_len -eq 1) $q3.text
+    Hook 'SessionEnd' @{ reason = 'prompt_input_exit' }; Start-Sleep 0.3
+    $script:hookSid = [guid]::NewGuid().ToString()
+    Hook 'SessionStart' @{ source = 'startup' }; Start-Sleep 0.5
+    Check 'Neu gebundener Claude meldet sich bereit' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Hook 'UserPromptSubmit'; Start-Sleep 0.5
+    Check 'Neu gestarteter Claude im selben Terminal wird zugeordnet (UserPromptSubmit -> working)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 1.5
     Check 'Stop des neuen Claude -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Check 'Nach dem Ende von Claude laeuft die Warteschlange nicht von selbst weiter (#282)' ((& $rowOf).queue_len -eq 1 -and (Wait-FakeFile $inputs 'nach-dem-ende' 1) -notmatch 'nach-dem-ende') "queue_len=$((& $rowOf).queue_len)"
+    # Claude endet ohne SessionEnd (abgeschossen): die Shell steht wieder am Prompt und in ihrem Vordergrund laeuft nichts
+    # mehr -> Status weg, neuer Claude wird zugeordnet.
+    [void](Tool 'send_text' @{ session = $cid; text = 'exit-fake-claude' })
+    $st = Wait-Status 'unknown' 12000
+    Check 'Claude beendet ohne SessionEnd: Status faellt am (bestaetigten) Prompt der Shell weg' ($st -eq 'unknown') "status=$st"
+    Hook 'Stop'; Start-Sleep 0.5
+    Check 'Nachzuegler des beendeten Claude zaehlt nicht' ((& $stOf) -eq 'unknown') "status=$(& $stOf)"
+    $script:hookSid = [guid]::NewGuid().ToString()
+    Hook 'SessionStart' @{ source = 'startup' }; Start-Sleep 0.5
+    Check 'Neuer Claude nach einem Ende ohne SessionEnd wird zugeordnet (vorher fuer immer fremd)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Hook 'UserPromptSubmit'; Start-Sleep 0.4; Hook 'Stop'; Start-Sleep 0.5
+    Check 'Der neue Claude meldet seinen Status' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Check 'Die Warteschlange bleibt angehalten (nichts in die Shell getippt)' ((& $rowOf).queue_len -eq 1 -and (Wait-FakeFile $inputs 'nach-dem-ende' 1) -notmatch 'nach-dem-ende') "queue_len=$((& $rowOf).queue_len)"
+
     Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'darf ich?' }; Start-Sleep 0.5
     Check 'Freigabe-Frage: send_text verweigert' ((Code (Tool 'send_text' @{ session = $cid; text = 'ja' })) -eq 'permission_pending')
     [void](Tool 'close_session' @{ session = $cid })
@@ -617,7 +729,7 @@ $wait
 
   Write-Host "== Weitere Claude-Optionen (#182)" -ForegroundColor Cyan
   Check 'create_session: claude_flags ohne claude -> bad_args' ((Code (Tool 'create_session' @{ shell = 'cmd'; claude_flags = @('chrome') })) -eq 'bad_args')
-  foreach ($bad in @('add-dir', '--dangerously-skip-permissions', 'mcp-config', 'allowed-tools', 'resume', 'settings', 'remote-control', 'safe-mode', 'autocompact')) {
+  foreach ($bad in @('add-dir', '--dangerously-skip-permissions', 'mcp-config', 'allowed-tools', 'resume', 'settings', 'remote-control', 'safe-mode', 'autocompact', 'plugin-dir', '--strict-mcp-config', 'system-prompt')) {
     $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @($bad) }
     Check "create_session: claude_flags [$bad] -> bad_args (never allowed)" ((Code $r) -eq 'bad_args' -and $r.text -match 'never allowed via MCP') $r.text
   }
@@ -625,7 +737,7 @@ $wait
   Check 'create_session: chrome + no-chrome -> bad_args' ((Code $r) -eq 'bad_args' -and $r.text -match 'mutually exclusive') $r.text
   Check 'create_session: claude_flags als String -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = 'chrome' })) -eq 'bad_args')
   Check 'create_session: unbekannter Schalter -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @('chrome; calc') })) -eq 'bad_args')
-  foreach ($k in @('add_dir', 'mcp_config', 'append_system_prompt', 'allowed_tools', 'safe_mode')) {
+  foreach ($k in @('add_dir', 'mcp_config', 'append_system_prompt', 'allowed_tools', 'safe_mode', 'plugin_dir', 'plugin_dirs', 'mcp_configs', 'strict_mcp_config', 'system_prompt')) {
     $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; $k = "$proj" }
     Check "create_session: Parameter $k -> bad_args" ((Code $r) -eq 'bad_args' -and $r.text -match 'not allowed via MCP') $r.text
   }
@@ -647,19 +759,42 @@ $wait
   Write-Host "== Weitere Claude-Optionen: Standards des Nutzers (#182)" -ForegroundColor Cyan
   $mcpCfg = "$work\smoke-mcp-config.json"
   [IO.File]::WriteAllText($mcpCfg, '{"mcpServers":{}}', (New-Object Text.UTF8Encoding $false))
+  # #289: mehrere MCP-Konfigurationen, Plugin-Ordner, --strict-mcp-config und ein eigener (mehrzeiliger) System-Prompt.
+  $mcpCfg2 = "$work\smoke-mcp-config2.json"
+  [IO.File]::WriteAllText($mcpCfg2, '{"mcpServers":{}}', (New-Object Text.UTF8Encoding $false))
+  $plugDir = "$work\smoke-plugin"
+  New-Item -ItemType Directory -Force $plugDir | Out-Null
   $script:prestart = {
     $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
-    $d = [pscustomobject]@{ flags = @('verbose', 'no-chrome', 'safe-mode'); add_dirs = @("$proj", "$work\smoke-missing-dir"); allowed_tools = 'Read'; disallowed_tools = 'WebFetch'; mcp_config = $mcpCfg; fallback_model = 'haiku' }
+    $d = [pscustomobject]@{ flags = @('verbose', 'no-chrome', 'safe-mode'); add_dirs = @("$proj", "$work\smoke-missing-dir"); plugin_dirs = @($plugDir, "$work\smoke-missing-plugin"); allowed_tools = 'Read'; disallowed_tools = 'WebFetch'; mcp_configs = @($mcpCfg, $mcpCfg2); strict_mcp_config = $true; system_prompt = "Smoke prompt`nsecond line"; fallback_model = 'haiku' }
     $j | Add-Member -Force claude_defaults $d
     $j | Add-Member -Force default_shell 'powershell'
     [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+    # Terminal-Vorlagen (#244): mit Isolationsprofil 1 (Schein-PATH); riskante Optionen, die ein Agent nie bekommt.
+    $tpl = @(
+      [pscustomobject]@{ name = 'smoke-tpl'; terminal = $true; grid = $false; items = @([pscustomobject]@{ name = 'API'; shell_id = 'powershell'; cwd = "$proj"; claude = $true; profile = 1; group = 'tplgrp'; prompt = ''; tags = @('smoke'); color = @(1, 2, 3); notes = 'tpl-note'; claude_opts = [pscustomobject]@{ model = 'haiku'; permission_mode = 'bypassPermissions'; flags = @('ide', 'safe-mode'); add_dirs = @("$proj"); plugin_dirs = @($plugDir); allowed_tools = 'Read'; mcp_config = $mcpCfg; system_prompt = 'Template prompt' } }) },
+      [pscustomobject]@{ name = 'smoke-plain'; terminal = $true; items = @([pscustomobject]@{ name = ''; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 1; group = 'tplplain' }) },
+      [pscustomobject]@{ name = 'smoke-admin'; terminal = $true; items = @([pscustomobject]@{ name = 'adm'; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 77 }) },
+      [pscustomobject]@{ name = 'smoke-group'; items = @([pscustomobject]@{ name = 'a'; shell_id = 'cmd'; profile = 1 }, [pscustomobject]@{ name = 'b'; shell_id = 'cmd'; profile = 1 }) },
+      # Profile mit eigenem Programm bzw. gefaehrlichem Startbefehl (Review #244): fuer Agenten nie.
+      [pscustomobject]@{ name = 'smoke-custom'; terminal = $true; items = @([pscustomobject]@{ name = 'cust'; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 78 }) },
+      [pscustomobject]@{ name = 'smoke-danger'; terminal = $true; items = @([pscustomobject]@{ name = 'dng'; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 79 }) }
+    )
+    [IO.File]::WriteAllText("$data\templates.json", (ConvertTo-Json -InputObject $tpl -Depth 10), (New-Object Text.UTF8Encoding $false))
   }
+  $script:extraProfiles = @(
+    [pscustomobject]@{ id = 77; name = 'Smoke-Admin'; env = $ptyEnv; admin = $true },
+    [pscustomobject]@{ id = 78; name = 'Smoke-Custom'; env = $ptyEnv; program = "$env:SystemRoot\System32\cmd.exe"; args = '/k echo smoke-custom' },
+    [pscustomobject]@{ id = 79; name = 'Smoke-Danger'; env = $ptyEnv; startup = 'claude --dangerously-skip-permissions' }
+  )
   Set-Level 'Control'
+  $script:extraProfiles = @()
   # Beim naechsten Neustart die Standards wieder entfernen (spaetere Abschnitte erwarten keine).
   $script:prestart = {
     $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
     $j.PSObject.Properties.Remove('claude_defaults'); $j.PSObject.Properties.Remove('default_shell')
     [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+    Remove-Item -LiteralPath "$data\templates.json" -ErrorAction SilentlyContinue
   }
   [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
   # Nach dem Neustart erneut bestaetigen, dass claude im PowerShell-Terminal nur der Ersatz ist.
@@ -678,9 +813,41 @@ $wait
     $re4 = 'args=.*--permission-mode default --no-chrome --ide --verbose --disallowed-tools WebFetch --fallback-model haiku --session-id [0-9a-f-]{36}'
     $ct4 = Wait-FakeFile $calls $re4
     $line4 = @(($ct4 -split "`r?`n") | Where-Object { $_ -match $re4 }) | Select-Object -Last 1
-    Check 'Ersatz-claude (Agent): ohne --add-dir/--allowed-tools/--mcp-config/--safe-mode' ($line4 -and $line4 -notmatch '--add-dir|--mcp-config| --allowed-tools|--safe-mode') "calls.txt='$ct4'"
+    Check 'Ersatz-claude (Agent): ohne --add-dir/--plugin-dir/--allowed-tools/--mcp-config/--strict-mcp-config/--system-prompt/--safe-mode' ($line4 -and $line4 -notmatch '--add-dir|--plugin-dir|--mcp-config|--strict-mcp-config|--system-prompt| --allowed-tools|--safe-mode') "calls.txt='$ct4'"
     [void](Tool 'close_session' @{ session = $ag.data.id })
   }
+  Write-Host "== Terminal-Vorlagen: create_session mit template (#244)" -ForegroundColor Cyan
+  $t1 = Tool 'create_session' @{ template = 'smoke-tpl' }
+  Check 'create_session mit template: Name, Ordner, Shell und Claude aus der Vorlage' (-not $t1.err -and $t1.data.name -eq 'API' -and $t1.data.group -eq 'tplgrp' -and $t1.data.template -eq 'smoke-tpl' -and $t1.data.claude -and $t1.data.shell -eq 'powershell') $t1.text
+  $tuo = @($t1.data.claude_user_options); $tfl = @($t1.data.claude_flags)
+  Check 'create_session mit template: Optionen der Vorlage, nie bypassPermissions/--safe-mode/riskante Wertoptionen' (-not $t1.err -and $t1.data.model -eq 'haiku' -and $t1.data.permission_mode -eq 'default' -and $tfl -contains 'ide' -and $tfl -notcontains 'safe-mode' -and -not ($tuo | Where-Object { $_ -in 'add_dir', 'plugin_dir', 'allowed_tools', 'mcp_config', 'strict_mcp_config', 'system_prompt' })) $t1.text
+  if ($script:lastOk) {
+    $re6 = 'args=.*--model haiku --permission-mode default .*--session-id [0-9a-f-]{36}'
+    $ct6 = Wait-FakeFile $calls $re6
+    $line6 = @(($ct6 -split "`r?`n") | Where-Object { $_ -match $re6 }) | Select-Object -Last 1
+    Check 'Ersatz-claude (Vorlage per Agent): ohne --add-dir/--plugin-dir/--allowed-tools/--mcp-config/--system-prompt/--safe-mode/bypassPermissions' ($line6 -and $line6 -notmatch '--add-dir|--plugin-dir|--mcp-config|--system-prompt| --allowed-tools|--safe-mode|bypass') "calls.txt='$ct6'"
+  }
+  $t2 = Tool 'create_session' @{ template = 'SMOKE-TPL'; claude = $false }
+  Check 'template: zweiter Start zaehlt hoch (API #2), Name ohne Gross-/Kleinschreibung, claude=false gewinnt' (-not $t2.err -and $t2.data.name -eq 'API #2' -and -not $t2.data.claude) $t2.text
+  $t3 = Tool 'create_session' @{ template = 'smoke-plain'; name = 'tpl-eigener-name'; group = 'tplg2' }
+  Check 'template: Parameter des Aufrufs gehen vor (name, group), Shell aus der Vorlage' (-not $t3.err -and $t3.data.name -eq 'tpl-eigener-name' -and $t3.data.group -eq 'tplg2' -and $t3.data.shell -eq 'cmd' -and -not $t3.data.claude) $t3.text
+  $t4 = Tool 'create_session' @{ template = 'smoke-plain' }
+  Check 'template ohne Sitzungsnamen: Name der Vorlage' (-not $t4.err -and $t4.data.name -eq 'smoke-plain' -and $t4.data.group -eq 'tplplain') $t4.text
+  $u = Tool 'create_session' @{ template = 'gibt-es-nicht' }
+  Check 'template: unbekannte Vorlage -> bad_args mit den Terminal-Vorlagen' ((Code $u) -eq 'bad_args' -and $u.text -match 'smoke-tpl' -and $u.text -notmatch 'smoke-group') $u.text
+  $g = Tool 'create_session' @{ template = 'smoke-group' }
+  Check 'template: Gruppen-Vorlage -> bad_args' ((Code $g) -eq 'bad_args' -and $g.text -match 'group template') $g.text
+  $ad = Tool 'create_session' @{ template = 'smoke-admin' }
+  Check 'template: Administrator-Profil der Vorlage -> admin_profile' ((Code $ad) -eq 'admin_profile') $ad.text
+  $cu = Tool 'create_session' @{ template = 'smoke-custom' }
+  Check 'template: Profil mit eigenem Programm (nicht Standardprofil) -> bad_args' ((Code $cu) -eq 'bad_args' -and $cu.text -match 'own program') $cu.text
+  $dg = Tool 'create_session' @{ template = 'smoke-danger' }
+  Check 'template: Profil mit dangerously im Startbefehl -> bad_args' ((Code $dg) -eq 'bad_args' -and $dg.text -match 'dangerously') $dg.text
+  $ign = @($t1.data.template_ignored)
+  Check 'template: template_ignored nennt die weggelassenen Optionen' (-not $t1.err -and $ign -contains 'add_dir' -and $ign -contains 'allowed_tools' -and $ign -contains 'mcp_config' -and $ign -contains 'safe-mode' -and $ign -contains 'plugin_dir' -and $ign -contains 'system_prompt') $t1.text
+  Check 'template ohne riskante Optionen: template_ignored leer' (-not $t4.err -and ($t4.data.PSObject.Properties.Name -contains 'template_ignored') -and @($t4.data.template_ignored).Count -eq 0) $t4.text
+  Check 'template mit kind=chat -> bad_args' ((Code (Tool 'create_session' @{ template = 'smoke-plain'; kind = 'chat' })) -eq 'bad_args')
+  foreach ($x in @($t1, $t2, $t3, $t4)) { if ($x.data.id) { [void](Tool 'close_session' @{ session = $x.data.id }) } }
   # Sitzung des Nutzers: Start von aussen (wie aus dem Explorer) per --open --claude -> alle Standards.
   $before = @((Tool 'list_sessions').data.sessions | ForEach-Object id)
   # Der zweite Aufruf reicht nur per IPC an den laufenden Hub weiter und endet sofort (sonst nach 15 s beenden).
@@ -688,11 +855,11 @@ $wait
   if (-not $op.WaitForExit(15000)) { $op.Kill() }
   $us = $null; $t0 = Get-Date
   while (-not $us -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500; $us = (Tool 'list_sessions').data.sessions | Where-Object { $before -notcontains $_.id -and $_.claude } | Select-Object -First 1 }
-  Check 'Sitzung des Nutzers (--open --claude): alle Wertoptionen der Standards' ($us -and (@($us.claude_user_options) -join ',') -eq 'add_dir,allowed_tools,disallowed_tools,mcp_config,fallback_model' -and (@($us.claude_flags) -join ',') -eq 'no-chrome,verbose,safe-mode') ($us | ConvertTo-Json -Compress)
+  Check 'Sitzung des Nutzers (--open --claude): alle Wertoptionen der Standards' ($us -and (@($us.claude_user_options) -join ',') -eq 'add_dir,plugin_dir,allowed_tools,disallowed_tools,mcp_config,strict_mcp_config,system_prompt,fallback_model' -and (@($us.claude_flags) -join ',') -eq 'no-chrome,verbose,safe-mode') ($us | ConvertTo-Json -Compress)
   if ($script:lastOk) {
-    $re5 = 'args=.*--no-chrome --verbose --safe-mode --add-dir "?' + [regex]::Escape("$proj") + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? --fallback-model haiku --session-id'
+    $re5 = 'args=.*--no-chrome --verbose --safe-mode --add-dir "?' + [regex]::Escape("$proj") + '"? --plugin-dir "?' + [regex]::Escape($plugDir) + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? "?' + [regex]::Escape($mcpCfg2) + '"? --strict-mcp-config --system-prompt "Smoke prompt second line" --fallback-model haiku --session-id'
     $ct5 = Wait-FakeFile $calls $re5
-    Check 'Ersatz-claude (Nutzer) bekommt --add-dir/--allowed-tools/--mcp-config gequotet (fakebin\calls.txt)' ($ct5 -match $re5) "calls.txt='$ct5'"
+    Check 'Ersatz-claude (Nutzer) bekommt --add-dir/--plugin-dir/--allowed-tools/mehrere --mcp-config/--strict-mcp-config/--system-prompt gequotet (fakebin\calls.txt)' ($ct5 -match $re5) "calls.txt='$ct5'"
     [void](Tool 'close_session' @{ session = $us.id })
   }
 

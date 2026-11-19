@@ -52,7 +52,7 @@ impl App {
         let host = crate::hyperlink::host(&ask.uri).map(str::to_string);
         let mut open = false;
         let mut cancel = false;
-        let r = egui::Modal::new(egui::Id::new("osc8_link_ask")).show(ctx, |ui| {
+        let r = crate::style::modal(egui::Id::new("osc8_link_ask")).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.label(RichText::new(lang.t("Link öffnen?", "Open link?")).heading());
             ui.add_space(6.0);

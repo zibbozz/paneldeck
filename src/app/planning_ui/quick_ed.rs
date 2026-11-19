@@ -435,7 +435,7 @@ impl PlanUi {
         let mut close = false;
         let links: Vec<LinkType> = self.links.iter().filter(|l| l.target_kind == TargetKind::Ticket).cloned().collect();
         let owner = sum.type_by_id(d.type_id).cloned();
-        let m = egui::Modal::new(Self::modal_id("quick_ed")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("quick_ed")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 600.0));
             let title = match (d.id, lang) {
                 (None, Lang::De) => format!("Neue Aktion: {}", d.kind.label(lang)),

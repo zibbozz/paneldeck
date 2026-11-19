@@ -364,6 +364,7 @@ mod tests {
         )
     }
 
+    #[cfg(windows)] // nur für die Tests mit Windows-Pfaden
     fn line(s: &str) -> Result<Cli, CliError> {
         let a = split_command_line(s);
         parse(&a, &|s| PathBuf::from(s), &|_| Some(true))
@@ -378,6 +379,7 @@ mod tests {
         assert_eq!(v(r"x C:\a\b  "), vec!["x", r"C:\a\b"]);
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn installer_and_registry_forms() {
         // Autostart, Kontextmenü (%1 / %V, auch Laufwerkswurzel) und Deinstallation, wie in installer/paneldeck.nsi
@@ -409,6 +411,7 @@ mod tests {
         assert!(!is_hook_invocation(&["x.exe".to_string(), "--tray".to_string()]));
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn positional_folder_means_open() {
         assert_eq!(p(&["C:\\Dev\\app"]).unwrap().open.as_deref(), Some("C:\\Dev\\app"));
@@ -427,6 +430,7 @@ mod tests {
         assert!(matches!(p(&["mcp", "C:\\Dev\\app"]), Err(CliError::Unexpected(_))));
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn a_relative_open_path_becomes_absolute_before_forwarding() {
         assert_eq!(p(&["--open", "rel"]).unwrap().open.as_deref(), Some("C:\\cwd\\rel"));
@@ -450,6 +454,7 @@ mod tests {
         assert_eq!(scan_lang(&a(&["--bogus"])), None);
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn parses_existing_options() {
         let c = p(&["--open", "C:\\Dev\\app", "--claude", "--tray"]).unwrap();
@@ -466,6 +471,7 @@ mod tests {
         assert_eq!(c.profile.as_deref(), Some("work"));
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn parses_new_options() {
         let c = p(&["--data-dir", "D:\\pd", "--backup-dir", "bk", "--profile", "work_1-a", "--lang", "DE", "--no-tray", "--reset-settings"]).unwrap();
@@ -503,6 +509,7 @@ mod tests {
         assert!(matches!(p(&["mcp", "--no-update-check"]), Err(CliError::NotWithMcp(_))));
     }
 
+    #[cfg(windows)] // Windows-Pfade (Laufwerksbuchstaben, `\`)
     #[test]
     fn mcp_subcommand() {
         let c = p(&["mcp"]).unwrap();

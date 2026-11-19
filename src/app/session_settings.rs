@@ -472,7 +472,7 @@ pub(super) fn folder_exists(wsl: bool, path: &str) -> bool {
 
 /// Farbauswahl: die geltende Palette des Terminal-Hubs wie im Kontextmenü „Farbe“ (die gewählte ist umrandet) und
 /// „Eigene Farbe …“ (klappt im Dialog auf; die Farbe kommt nicht in die Palette).
-fn color_row(ui: &mut Ui, color: &mut [u8; 3], lang: Lang) {
+pub(super) fn color_row(ui: &mut Ui, color: &mut [u8; 3], lang: Lang) {
     ui.vertical(|ui| {
         let cur = crate::palette::hex_of(*color);
         if let Some(h) = palette_ui::pick(ui, "sset_color", crate::palette::Area::Hub, Some(&cur), palette_ui::PickOpts::HUB, lang) {
@@ -502,18 +502,68 @@ pub(super) enum FormOutcome {
 /// kein zweiter Dialog bekommt es) und gilt nicht, solange eine Auswahlliste offen ist (die schließt Esc zuerst).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: &[ShellSpec], profiles: &[Profile], claude_mode: bool, reload_hint: bool, esc_ok: bool, lang: Lang) -> FormOutcome {
+    use super::opts_tabs::{self as tabs, Tab, TabInfo};
+    const SALT: &str = "sset";
     let mut out = FormOutcome::Open;
     let esc = esc_ok && !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
-    egui::Window::new(lang.t("Einstellungen der Sitzung", "Session settings"))
-        .id(Id::new("session_settings"))
+    // Reiter wie im Dialog „Neue Sitzung“ (#292): öffnet auf „Allgemein“, Strg+Tab/Alt+1 … wechseln, Enter speichert.
+    let win = Id::new("session_settings");
+    if f.focus {
+        tabs::set(ctx, SALT, Tab::General);
+        tabs::activate(ctx, SALT);
+    }
+    // Nicht modal: nur mit der Tastatur im Fenster (Enter im Terminal speichert nicht).
+    let enter = esc_ok && !value_suggest::wants_enter(ctx, egui::Id::new(("session_tags", f.id))) && tabs::enter_confirms(ctx, SALT, win);
+    let claude_on = f.v.claude && !f.chat;
+    let tab_list = tabs::session_tabs(claude_on);
+    tabs::handle_keys(ctx, SALT, win, &tab_list);
+    let defaults = super::dialogs::user_defaults(ctx);
+    let width = tabs::dialog_width(ctx);
+    style::movable(ctx, win, egui::Window::new(lang.t("Einstellungen der Sitzung", "Session settings")))
         .collapsible(false)
         .resizable(false)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
         .show(ctx, |ui| {
-            // Scrollfläche mit Höchsthöhe nach dem Bildschirm: Speichern/Abbrechen bleiben sichtbar (#241).
-            let body_h = super::dialogs::dialog_body_height(ui.ctx());
-            egui::ScrollArea::vertical().id_salt("sset_scroll").max_height(body_h).min_scrolled_height(body_h).show(ui, |ui| {
-                egui::Grid::new("sset_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+            ui.set_width(width);
+            // Feste Höhe aller Reiter, Höchsthöhe nach dem Bildschirm: Speichern/Abbrechen bleiben sichtbar (#241).
+            let body_h = super::dialogs::dialog_body_height(ui.ctx()) - 70.0;
+            let target = f.target.clone();
+            let chk = super::dialogs::check_opts(ui.ctx(), lang, &f.v.copts, SALT, super::dialogs::OptsPlace::Session, &target);
+            let mut infos = vec![TabInfo::plain(Tab::General)];
+            if claude_on {
+                infos.extend(super::dialogs::claude_tab_infos(&f.v.copts, &defaults, &chk));
+            }
+            let tab = tabs::strip(ui, lang, SALT, &infos);
+            let invalid = tabs::invalid_hint(lang, &infos);
+            tabs::body(ui, SALT, tab, body_h, |ui| {
+                if tab != Tab::General {
+                    let SessionForm { v, .. } = &mut *f;
+                    let FormValues { copts, claude_continue, .. } = v;
+                    super::dialogs::claude_tab(
+                        ui,
+                        lang,
+                        copts,
+                        SALT,
+                        super::dialogs::OptsPlace::Session,
+                        &target,
+                        &defaults,
+                        &chk,
+                        tab,
+                        |ui| {
+                            ui.label("");
+                            let r = continue_checkbox(ui, claude_continue, lang);
+                            mark(ui, "continue", &r);
+                            ui.end_row();
+                        },
+                        |ui| {
+                            ui.label("");
+                            let r = super::dialogs::hint_label(ui, lang.t("Die Optionen gelten nur für diese Sitzung, ab dem nächsten Start.", "The options apply to this session only, from its next start."), style::dim(ui));
+                            mark(ui, "copts", &r);
+                            ui.end_row();
+                        },
+                    );
+                    return;
+                }
+                egui::Grid::new("sset_grid").num_columns(2).spacing([8.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
                     ui.label(lang.t("Name", "Name"));
                     let auto = lang.t("automatisch", "automatic");
                     let hint = if f.auto_name.is_empty() { auto.to_string() } else { format!("{} ({auto})", f.auto_name) };
@@ -523,6 +573,13 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                         f.focus = false;
                     }
                     ui.end_row();
+                    // „Claude Code starten“ direkt unter dem Namen (#292); zeigt die Claude-Reiter.
+                    if !f.chat && (claude_mode || f.v.claude) {
+                        ui.label("");
+                        let r = ui.checkbox(&mut f.v.claude, lang.t("Claude Code starten", "Start Claude Code"));
+                        mark(ui, "claude", &r);
+                        ui.end_row();
+                    }
                     ui.label(lang.t("Farbe", "Color"));
                     color_row(ui, &mut f.v.color, lang);
                     ui.end_row();
@@ -533,7 +590,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     value_suggest::suggest_edit(ui, egui::Id::new(("session_tags", f.id)), &mut f.v.tags, &f.tag_values, &[], value_suggest::Mode::List, lang, |ui, te| ui.add(te.hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(320.0)));
                     ui.end_row();
                     ui.label(lang.t("Notizen", "Notes"));
-                    ui.add(egui::TextEdit::multiline(&mut f.v.notes).desired_rows(3).desired_width(320.0));
+                    super::opts_tabs::notes_edit(ui, SALT, &mut f.v.notes, super::dialogs::FIELD_W);
                     ui.end_row();
                     if f.chat {
                         return;
@@ -610,26 +667,13 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     };
                     super::dialogs::hint_label(ui, &start_note, style::dim(ui));
                     ui.end_row();
-                    if claude_mode || f.v.claude {
-                        ui.label("");
-                        let r = ui.checkbox(&mut f.v.claude, lang.t("Claude Code starten", "Start Claude Code"));
-                        mark(ui, "claude", &r);
-                        ui.end_row();
-                        if f.v.claude {
-                            ui.label("");
-                            let r = continue_checkbox(ui, &mut f.v.claude_continue, lang);
-                            mark(ui, "continue", &r);
-                            ui.end_row();
-                            // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
-                            f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", super::dialogs::OptsPlace::Session);
-                            ui.label("");
-                            let r = super::dialogs::hint_label(ui, lang.t("Die Optionen gelten nur für diese Sitzung, ab dem nächsten Start.", "The options apply to this session only, from its next start."), style::dim(ui));
-                            mark(ui, "copts", &r);
-                            ui.end_row();
-                        }
-                    }
                 });
             });
+            // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
+            f.opts_ok = !f.v.claude || super::dialogs::check_opts(ui.ctx(), lang, &f.v.copts, SALT, super::dialogs::OptsPlace::Session, &target).ok();
+            if claude_on {
+                super::dialogs::claude_preview(ui, lang, SALT, &f.v.copts, shells.iter().find(|s| s.id == f.v.shell_id));
+            }
             if f.chat {
                 ui.add_space(S1);
                 ui.label(RichText::new(format!("{} {} – {}", lang.t("Chat mit", "Chat with"), f.chat_model, lang.t("lässt sich nicht in ein Terminal umwandeln.", "cannot be turned into a terminal."))).small().color(style::dim(ui)));
@@ -648,6 +692,9 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 if save.clicked() {
                     out = FormOutcome::Save;
                 }
+                if let Some(h) = &invalid {
+                    ui.label(RichText::new(h).small().color(Color32::from_rgb(0xe0, 0x6c, 0x75)));
+                }
                 let cancel = ui.button(lang.t("Abbrechen", "Cancel"));
                 mark(ui, "cancel", &cancel);
                 if cancel.clicked() {
@@ -655,6 +702,9 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 }
             });
         });
+    if enter && out == FormOutcome::Open {
+        out = FormOutcome::Save;
+    }
     if esc && out == FormOutcome::Open {
         out = FormOutcome::Cancel;
     }
@@ -844,6 +894,10 @@ impl App {
         let hint = f.needs_reload(&self.settings.profiles, &default_shell);
         let esc_ok = self.reload_ask.is_none();
         f.target = self.session_form_target(&f, &default_shell);
+        // Vorschau der Kommandozeile wie beim Start: Shell (auch eigenes Programm des Profils) und freie Reste.
+        let legacy = self.entries.get(&f.id).map(|e| e.meta.claude_opts_eff().1).unwrap_or_default();
+        let spec = self.preview_spec(&f.v.shell_id, f.v.profile);
+        ctx.data_mut(|d| d.insert_temp(super::dialogs::preview_target_id("sset"), (spec, legacy)));
         match session_form_ui(ctx, &mut f, &self.shells, &self.settings.profiles, self.settings.claude_mode, hint, esc_ok, lang) {
             FormOutcome::Open => self.session_settings = Some(f),
             FormOutcome::Cancel => self.want_focus = Some(self.focused),
@@ -1311,6 +1365,9 @@ mod tests {
         let mut d = Dlg::new();
         let mut f = form(&SessionMeta { id: 1, claude: true, shell_id: "pwsh".into(), ..SessionMeta::default() });
         d.frame(&mut f, true, vec![]);
+        // Die Optionen stehen im Reiter „Claude“ (#292).
+        super::super::opts_tabs::set(&d.ctx, "sset", super::super::opts_tabs::Tab::Claude);
+        d.frame(&mut f, true, vec![]);
         d.frame(&mut f, true, vec![]);
         assert!(d.find("copts").is_some(), "Claude-Optionen sichtbar");
         f.v.copts.agent = "bad name!".into();
@@ -1420,9 +1477,10 @@ mod tests {
 
     #[test]
     fn the_settings_window_fits_small_screens_with_everything_open() {
-        for size in [Vec2::new(1280.0, 720.0), Vec2::new(800.0, 600.0)] {
+        use super::super::opts_tabs::{self as tabs, Tab};
+        for size in [Vec2::new(1920.0, 1080.0), Vec2::new(1280.0, 720.0), Vec2::new(800.0, 600.0)] {
+          for tab in [Tab::General, Tab::Claude, Tab::Access, Tab::Advanced] {
             let ctx = egui::Context::default();
-            ctx.data_mut(|m| m.insert_temp(Id::new(("claude_more_open", "sset")), true));
             let mut copts = crate::claude_opts::ClaudeOpts { permission_mode: crate::claude_opts::BYPASS.into(), ..Default::default() };
             copts.extra.flags = vec!["chrome".into(), "safe-mode".into()];
             copts.extra.add_dirs = (0..6).map(|i| format!("C:\\gibt-es-nicht\\{i}")).collect();
@@ -1430,6 +1488,9 @@ mod tests {
             let mut f = form(&meta);
             let (s, p) = (shells(), profiles());
             for i in 0..6 {
+                if i == 1 {
+                    tabs::set(&ctx, "sset", tab);
+                }
                 let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(i as f64 * 0.1), ..Default::default() };
                 let _ = ctx.run(input, |ctx| {
                     session_form_ui(ctx, &mut f, &s, &p, true, true, true, Lang::En);
@@ -1442,6 +1503,11 @@ mod tests {
                 let r = ctx.data(|d| d.get_temp::<Rect>(Id::new(("sset_mark", k)))).unwrap();
                 assert!(screen.contains_rect(r), "{size:?}: {k} {r:?}");
             }
+            assert_eq!(tabs::current(&ctx, "sset", &tabs::session_tabs(true)), tab);
+            if size.y >= 720.0 {
+                assert!(!tabs::overflowed(&ctx, "sset"), "{size:?} {tab:?}: müsste scrollen");
+            }
+          }
         }
     }
 
@@ -1472,8 +1538,11 @@ mod tests {
         assert_eq!(d.frame(&mut f, true, vec![]), FormOutcome::Open);
         assert!(!f.focus, "Fokus ging beim ersten Bild ins Namensfeld");
         d.frame(&mut f, true, vec![]);
+        assert!(d.find("claude").is_some(), "„Claude Code starten“ im Reiter „Allgemein“");
+        super::super::opts_tabs::set(&d.ctx, "sset", super::super::opts_tabs::Tab::Claude);
+        d.frame(&mut f, true, vec![]);
+        d.frame(&mut f, true, vec![]);
         assert!(d.find("continue").is_some(), "Claude-Sitzung: Option sichtbar");
-        assert!(d.find("claude").is_some());
         assert!(d.find("worktree").is_none());
         // Häkchen klicken schaltet die Option
         let r = d.find("continue").unwrap();

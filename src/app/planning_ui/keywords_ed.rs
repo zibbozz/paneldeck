@@ -258,7 +258,7 @@ pub fn keywords_dialog(ctx: &egui::Context, st: &mut State, conn: &Connection, l
     let mut ask_delete: Option<i64> = None;
     let mut save: Option<()> = None;
     let mut back = false;
-    let m = egui::Modal::new(Id::new("keywords_dialog")).show(ctx, |ui| {
+    let m = crate::style::modal(Id::new("keywords_dialog")).show(ctx, |ui| {
         ui.set_width(widgets::modal_width(ctx, 760.0));
         match &mut st.mode {
             Mode::List => {
@@ -361,7 +361,7 @@ pub fn keywords_dialog(ctx: &egui::Context, st: &mut State, conn: &Connection, l
         match st.list.iter().find(|k| k.id == id).map(|k| k.name.clone()) {
             Some(name) => {
                 let (mut yes, mut no) = (false, false);
-                let m = egui::Modal::new(Id::new("keywords_delete")).show(ctx, |ui| {
+                let m = crate::style::modal(Id::new("keywords_delete")).show(ctx, |ui| {
                     ui.set_width(widgets::modal_width(ctx, 420.0));
                     widgets::dialog_title(ui, lang.t("Schlüsselwort löschen?", "Delete keyword?"));
                     ui.label(match lang {

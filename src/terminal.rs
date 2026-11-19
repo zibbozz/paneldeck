@@ -387,6 +387,9 @@ pub struct Session {
     tee: Mutex<Vec<crate::vtkeys::TeeInput>>,
     /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
     last_activity: Arc<std::sync::atomic::AtomicU64>,
+    /// Zeitpunkt der letzten Eingabe an das Programm (`write_raw`: Tasten, Einfügen, Agenten; monotone ms, 0 = noch
+    /// keine). Fokusmeldungen und Antworten auf Anfragen des Programms zählen nicht.
+    last_input: std::sync::atomic::AtomicU64,
     /// Die Shell meldete ihren Prompt (OSC 133;A), während noch der alternative Bildschirm oder ein Maus-Modus
     /// aktiv war – ein Vollbildprogramm ist wohl ohne Aufräumen beendet worden (Absturz, getrennte SSH-Verbindung).
     /// Mausrad und Klicks behandeln die Sitzung dann wie eine normale Shell (keine Pfeiltasten, keine Mausereignisse);
@@ -401,7 +404,7 @@ pub struct Session {
     pub stale_modes: Arc<AtomicBool>,
     /// Job Object der Shell und all ihrer Nachfahren (#168): ordnet MCP-Aufrufer auch losgelöst dieser Sitzung zu.
     /// Wird nach dem Beenden der Shell (`Drop`) freigegeben; die Prozesse darin laufen weiter.
-    job: Option<crate::winctl::SessionJob>,
+    job: Option<crate::platform::process::SessionJob>,
     /// PID der Shell (beim Start festgehalten; `pid()` kann am gesperrten Kind scheitern).
     shell_pid: Option<u32>,
     /// win32-input-mode (DECSET 9001) ist an: ConPTY verlangt ihn beim Start (`vtkeys::Win32ModeScanner`).
@@ -424,7 +427,7 @@ pub struct Session {
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
-fn mono_ms() -> u64 {
+pub fn mono_ms() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }
@@ -497,12 +500,12 @@ impl Session {
     pub fn spawn(ctx: &egui::Context, opts: SpawnOptions) -> Result<Session, String> {
         let (cols, rows) = (100u16, 30u16);
         // Mitgelieferte ConPTY (Einstellung, Dateien neben paneldeck.exe) oder die von Windows (#183).
-        let (pty, want_bundled) = crate::conpty::pty_system();
+        let (pty, want_bundled) = crate::platform::conpty::pty_system();
         let pair = pty
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
-        let console_host = crate::conpty::host_of(&*pair.master);
-        crate::conpty::note_spawn(want_bundled, console_host);
+        let console_host = crate::platform::conpty::host_of(&*pair.master);
+        crate::platform::conpty::note_spawn(want_bundled, console_host);
 
         let mut cmd = CommandBuilder::new(&opts.shell.program);
         for a in &opts.shell.args {
@@ -524,8 +527,8 @@ impl Session {
         // `PROC_THREAD_ATTRIBUTE_JOB_LIST`) – kein Zeitfenster zwischen Start und Zuweisung. Ihre Nachfahren gehören
         // dann sicher zu ihr, auch losgelöst. Lehnt Windows den Job beim Start ab, wird die Shell direkt danach
         // zugewiesen (mit Nachholen schon gestarteter Kinder); scheitert auch das, bleibt der Prozessbaum.
-        let job = crate::winctl::SessionJob::new();
-        let (spawned, in_job) = crate::winctl::spawn_in_job(job.as_ref(), || pair.slave.spawn_command(cmd));
+        let job = crate::platform::process::SessionJob::new();
+        let (spawned, in_job) = crate::platform::process::spawn_in_job(job.as_ref(), || pair.slave.spawn_command(cmd));
         let child = spawned.map_err(|e| e.to_string())?;
         let job = Self::adopt_into_job(job, in_job, child.as_ref());
         let shell_pid = child.process_id();
@@ -689,6 +692,7 @@ impl Session {
             tee_on: AtomicBool::new(false),
             tee: Mutex::new(Vec::new()),
             last_activity,
+            last_input: std::sync::atomic::AtomicU64::new(0),
             stale_modes,
             job,
             shell_pid,
@@ -707,10 +711,10 @@ impl Session {
         Ok(session)
     }
 
-    /// Job Object der gerade gestarteten Shell (#168): `in_job` = schon im Job gestartet (`winctl::spawn_in_job`), sonst
+    /// Job Object der gerade gestarteten Shell (#168): `in_job` = schon im Job gestartet (`platform::process::spawn_in_job`), sonst
     /// jetzt zuweisen (mit Nachholen schon gestarteter Kinder). `None` ohne Windows oder wenn das scheitert.
     #[cfg(windows)]
-    fn adopt_into_job(job: Option<crate::winctl::SessionJob>, in_job: bool, child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
+    fn adopt_into_job(job: Option<crate::platform::process::SessionJob>, in_job: bool, child: &(dyn Child + Send + Sync)) -> Option<crate::platform::process::SessionJob> {
         let job = job?;
         if in_job {
             return Some(job);
@@ -720,13 +724,13 @@ impl Session {
     }
 
     #[cfg(not(windows))]
-    fn adopt_into_job(_job: Option<crate::winctl::SessionJob>, _in_job: bool, _child: &(dyn Child + Send + Sync)) -> Option<crate::winctl::SessionJob> {
+    fn adopt_into_job(_job: Option<crate::platform::process::SessionJob>, _in_job: bool, _child: &(dyn Child + Send + Sync)) -> Option<crate::platform::process::SessionJob> {
         None
     }
 
     /// Job Object herausnehmen (Schließen/Neustart, #218): Der Hub behält es, solange noch Prozesse darin laufen, damit
     /// er sie weiter dieser Sitzung zuordnen kann (`closing::Retired`). Danach hat die Sitzung keinen Job mehr.
-    pub fn take_job(&mut self) -> Option<crate::winctl::SessionJob> {
+    pub fn take_job(&mut self) -> Option<crate::platform::process::SessionJob> {
         self.job.take()
     }
 
@@ -737,9 +741,9 @@ impl Session {
 
     /// Prozesse der Sitzung, die ihr Schließen überleben würden (#168): im Job, aber weder die Shell noch an ihrer
     /// Konsole (z. B. per `Start-Process` gestartet, ein GUI-Programm). Leer ohne Job.
-    /// `info`: Prozessnamen/Fenster, für mehrere Sitzungen einmal ermittelt (`winctl::ProcInfo::default()`).
-    pub fn lingering(&self, info: &crate::winctl::ProcInfo) -> Vec<crate::winctl::JobProc> {
-        self.job.as_ref().map(|j| crate::winctl::lingering(j, self.shell_pid, info)).unwrap_or_default()
+    /// `info`: Prozessnamen/Fenster, für mehrere Sitzungen einmal ermittelt (`platform::process::ProcInfo::default()`).
+    pub fn lingering(&self, info: &crate::platform::process::ProcInfo) -> Vec<crate::platform::process::JobProc> {
+        self.job.as_ref().map(|j| crate::platform::process::lingering(j, self.shell_pid, info)).unwrap_or_default()
     }
 
     /// Alle Prozesse im Job der Sitzung beenden („Alle beenden“, #168). `false` ohne Job.
@@ -760,9 +764,18 @@ impl Session {
         if bytes.contains(&b'\r') {
             self.stale_modes.store(false, Ordering::Relaxed);
         }
+        if !bytes.is_empty() {
+            self.last_input.store(mono_ms().max(1), Ordering::Relaxed);
+        }
         let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = w.write_all(bytes);
         let _ = w.flush();
+    }
+
+    /// Zeitpunkt der letzten Eingabe an das Programm (monotone ms wie [`mono_ms`], 0 = noch keine): Tasten, Einfügen,
+    /// Eingaben von Agenten – nicht Fokusmeldungen oder Antworten auf Anfragen.
+    pub fn input_stamp(&self) -> u64 {
+        self.last_input.load(Ordering::Relaxed)
     }
 
     /// Eingabe eines Agenten: Text wie eingefügt (Bracketed Paste, falls angefordert), optional mit Enter, in EINEM
@@ -798,6 +811,11 @@ impl Session {
     /// Prozess-ID der Shell dieser Sitzung (Kind des Pseudo-Terminals).
     pub fn pid(&self) -> Option<u32> {
         self.child.try_lock().ok().and_then(|c| c.process_id())
+    }
+
+    /// Prozess-ID der Shell, beim Start festgehalten (anders als [`Session::pid`] ohne Sperre).
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
     }
 
     /// Wie Tasten gerade kodiert werden (Cursor-/Ziffernblock-Modus, win32-input-mode, kitty-Flags).
@@ -2647,7 +2665,7 @@ mod win_job_tests {
         let shell = ShellSpec { id: "cmd".into(), label: "cmd".into(), program: "cmd.exe".into(), args: vec!["/q".into()] };
         let s = Session::spawn(&ctx, SpawnOptions { shell: &shell, cwd: None, restore_text: None, initial_input: None, scrollback_lines: 100, env: Vec::new(), view: None, inherit_env: false }).expect("Sitzung startet");
         assert!(s.job_key().is_some(), "Sitzung hat einen Job");
-        assert!(s.lingering(&crate::winctl::ProcInfo::default()).is_empty(), "nur die Shell: nichts");
+        assert!(s.lingering(&crate::platform::process::ProcInfo::default()).is_empty(), "nur die Shell: nichts");
         let pid = s.shell_pid.expect("Shell-PID");
         assert!(s.job.as_ref().unwrap().pids().unwrap_or_default().contains(&pid), "Shell im Job");
         assert!(s.end_job());

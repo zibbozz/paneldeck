@@ -325,7 +325,7 @@ impl PlanUi {
         let sum = self.sum.clone();
         let mut save = false;
         let mut close = false;
-        let m = egui::Modal::new(Self::modal_id("field")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("field")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 600.0));
             widgets::dialog_title(ui, if d.id.is_some() { lang.t("Feld bearbeiten", "Edit field") } else { lang.t("Neues Feld", "New field") });
             egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 250.0).max(260.0)).auto_shrink([true, true]).show(ui, |ui| {

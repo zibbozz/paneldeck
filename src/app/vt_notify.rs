@@ -101,7 +101,7 @@ impl App {
         let show = self.settings.progress_indicator;
         let mut add = |hwnd: Option<isize>, win: u64, entries: &BTreeMap<u64, Entry>| {
             if let Some(h) = hwnd {
-                let p = if show { crate::taskbar::aggregate(entries.values().filter(|e| e.meta.window == win).filter_map(|e| e.progress)) } else { None };
+                let p = if show { crate::platform::taskbar::aggregate(entries.values().filter(|e| e.meta.window == win).filter_map(|e| e.progress)) } else { None };
                 wins.push((h, p));
             }
         };

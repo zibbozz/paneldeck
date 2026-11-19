@@ -173,7 +173,7 @@ fn form_ui(ui: &mut Ui, f: &mut Form, lang: Lang, new: bool) -> bool {
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut f.work_dir).desired_width((w - 120.0).max(120.0)).hint_text(lang.t("optional", "optional")).margin(egui::Margin::symmetric(8, 5)));
         if ui.button(lang.t("Wählen …", "Browse …")).clicked() {
-            if let Some(d) = crate::notify::pick_folder(&f.work_dir) {
+            if let Some(d) = crate::platform::notify::pick_folder(&f.work_dir) {
                 f.work_dir = d;
             }
         }
@@ -214,7 +214,7 @@ impl PlanUi {
         let lang = cx.lang;
         let mut create = false;
         let mut close = false;
-        let m = egui::Modal::new(Self::modal_id("wizard")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("wizard")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 540.0));
             widgets::dialog_title(ui, lang.t("Neues Projekt", "New project"));
             egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 220.0).max(240.0)).auto_shrink([true, true]).show(ui, |ui| {
@@ -282,7 +282,7 @@ impl PlanUi {
         let lang = cx.lang;
         let mut save = false;
         let mut close = false;
-        let m = egui::Modal::new(Self::modal_id("settings")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("settings")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 540.0));
             widgets::dialog_title(ui, lang.t("Projekt-Einstellungen", "Project settings"));
             egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 220.0).max(240.0)).auto_shrink([true, true]).show(ui, |ui| {
@@ -349,7 +349,7 @@ impl PlanUi {
         let secs = left.ceil().max(0.0) as u32;
         let mut go = false;
         let mut close = false;
-        let m = egui::Modal::new(Self::modal_id("delete_project")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("delete_project")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 440.0));
             ui.horizontal(|ui| {
                 ui.colored_label(widgets::DANGER, RichText::new("!").heading().strong());

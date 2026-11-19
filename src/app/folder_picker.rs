@@ -325,8 +325,8 @@ impl FolderPicker {
                 if ui.button("…").on_hover_text(lang.t("Ordner wählen", "Choose folder")).clicked() {
                     let picked = match self.dialog_start() {
                         // Ohne vorherige Prüfung des wsl.localhost-Pfads (die könnte die Oberfläche blockieren).
-                        Some(s) if self.wsl_mode || wsl::is_wsl_unc(&s) => crate::notify::pick_folder_unchecked(&s),
-                        Some(s) => crate::notify::pick_folder(&s),
+                        Some(s) if self.wsl_mode || wsl::is_wsl_unc(&s) => crate::platform::notify::pick_folder_unchecked(&s),
+                        Some(s) => crate::platform::notify::pick_folder(&s),
                         None => None,
                     };
                     if let Some(p) = picked {

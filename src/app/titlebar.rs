@@ -101,9 +101,9 @@ impl App {
                     // Maximieren-Knopf: Rechteck ans System melden (Snap-Layouts); dort kommt der Hover nicht mehr von egui.
                     // Nur im Hauptfenster: weitere Fenster haben keine eigene Fensterprozedur (dort ohne Snap-Layouts).
                     let main = self.wins.cur == 0;
-                    let snap_hover = main && i == 1 && winchrome::max_hover();
+                    let snap_hover = main && i == 1 && crate::platform::chrome::max_hover();
                     if main && i == 1 {
-                        winchrome::report_max_button(r, ctx.pixels_per_point(), if maximized { 0.0 } else { EDGE });
+                        crate::platform::chrome::report_max_button(r, ctx.pixels_per_point(), if maximized { 0.0 } else { EDGE });
                     }
                     if resp.hovered() || snap_hover {
                         painter.rect_filled(r, 0.0, if close { Color32::from_rgb(0xc4, 0x2b, 0x1c) } else { Color32::from_white_alpha(20) });
@@ -142,7 +142,7 @@ impl App {
         let screen = ctx.content_rect();
         if !maximized && !fullscreen {
             ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("window_border")))
-                .rect_stroke(screen, winchrome::corner_radius_pts(ctx.zoom_factor(), winchrome::rounded(), false), Stroke::new(1.0_f32, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
+                .rect_stroke(screen, crate::platform::chrome::corner_radius_pts(ctx.zoom_factor(), crate::platform::chrome::rounded(), false), Stroke::new(1.0_f32, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
             let Some(p) = ctx.input(|i| i.pointer.hover_pos()) else { return };
             let left = p.x - screen.left() < EDGE;
             let right = screen.right() - p.x < EDGE;

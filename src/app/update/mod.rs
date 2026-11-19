@@ -384,28 +384,7 @@ fn pid_alive(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
     }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
-        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-        const STILL_ACTIVE: u32 = 259;
-        // SAFETY: OpenProcess nur mit Abfragerecht; das Handle wird geschlossen. GetLastError liest nur den Fehlerwert.
-        unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                // ERROR_INVALID_PARAMETER = keine solche PID (mehr)
-                return GetLastError() != ERROR_INVALID_PARAMETER;
-            }
-            let mut code = 0u32;
-            let ok = GetExitCodeProcess(h, &mut code) != 0;
-            CloseHandle(h);
-            !ok || code == STILL_ACTIVE
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        Path::new(&format!("/proc/{pid}")).exists()
-    }
+    crate::platform::process::is_alive(pid)
 }
 
 /// Download-Ordner beendeter Instanzen entfernen. Ordner laufender Instanzen (auch anderer Datenordner) und alles, was nicht

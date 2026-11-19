@@ -26,15 +26,9 @@ pub fn init(data_dir: &Path) {
 }
 
 /// Liefert den Pfad einer neuen PNG-Datei, wenn die Zwischenablage ein Bild (und keinen Text) enthält.
-#[cfg(windows)]
 pub fn image_to_file() -> Option<PathBuf> {
     let dir = DIR.get()?;
-    let mut cb = arboard::Clipboard::new().ok()?;
-    if cb.get_text().map(|t| !t.is_empty()).unwrap_or(false) {
-        return None;
-    }
-    let img = cb.get_image().ok()?;
-    let rgba = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())?;
+    let rgba = crate::platform::clipboard::image()?;
     // Millisekunden + laufende Nummer: zwei Bilder in derselben Sekunde überschreiben sich nicht.
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
@@ -44,19 +38,8 @@ pub fn image_to_file() -> Option<PathBuf> {
     Some(path)
 }
 
-#[cfg(not(windows))]
-pub fn image_to_file() -> Option<PathBuf> {
-    None
-}
-
-/// Text in die Windows-Zwischenablage legen (OSC 52, #181). `false`, wenn das nicht ging (z. B. von einem
-/// anderen Programm gesperrt) – der Aufrufer nimmt dann den Weg über egui.
-#[cfg(windows)]
+/// Text in die Zwischenablage des Systems legen (OSC 52, #181). `false`, wenn das nicht ging (z. B. von einem
+/// anderen Programm gesperrt oder ohne Plattform-Umsetzung) – der Aufrufer nimmt dann den Weg über egui.
 pub fn set_text(text: &str) -> bool {
-    arboard::Clipboard::new().and_then(|mut c| c.set_text(text)).is_ok()
-}
-
-#[cfg(not(windows))]
-pub fn set_text(_text: &str) -> bool {
-    false
+    crate::platform::clipboard::set_text(text)
 }

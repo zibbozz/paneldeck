@@ -188,7 +188,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "whoami",
             level: Read,
             group: Group::Always,
-            description: "Identify the calling agent inside Paneldeck: the session it runs in (by process tree, or inside WSL by the PANELDECK_SESSION and PANELDECK_SESSION_KEY variables), that session's name/folder/project, the Claude start options model/effort/permission_mode/agent (null when Paneldeck did not set them), claude_flags (the switches it was started with, e.g. [\"chrome\"]) and claude_user_options (names of the value options the user set, e.g. [\"add_dir\"], values are not returned), and the sessions it created (children). agent_chain lists the sessions it must not write into because it descends from them (they created it or wrote into it through MCP, directly or through other sessions). session=null means the agent does not run inside a Paneldeck terminal.",
+            description: "Identify the calling agent inside Paneldeck: the session it runs in (by process tree, or inside WSL by the PANELDECK_SESSION and PANELDECK_SESSION_KEY variables), that session's name/folder/project, the Claude start options model/effort/permission_mode/agent (null when Paneldeck did not set them), claude_flags (the switches it was started with, e.g. [\"chrome\"]) and claude_user_options (names of the value options the user set, e.g. [\"add_dir\", \"plugin_dir\", \"mcp_config\", \"strict_mcp_config\", \"system_prompt\"], values are not returned), and the sessions it created (children). agent_chain lists the sessions it must not write into because it descends from them (they created it or wrote into it through MCP, directly or through other sessions). session=null means the agent does not run inside a Paneldeck terminal.",
             schema: schema(json!({}), &[]),
         },
         ToolDef {
@@ -233,7 +233,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "create_session",
             level: Control,
             group: Group::Always,
-            description: "Create a new terminal session (does not steal focus unless `placement` is given; with `placement` the new session is shown like focus_session does). Optionally start Claude Code in it, with the validated start options model/effort/permission_mode/agent (only with claude=true; omitted options use the user's defaults from Settings -> Claude; without any permission mode the session gets an explicit permission_mode default, so the user's own Claude settings cannot turn on bypassPermissions; permission_mode bypassPermissions is never allowed), plus claude_flags: switches without a value and without effect on rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; added to the user's default switches; chrome is refused when the user turned Chrome off by default). No other arguments are possible: flags that widen rights or access, turn off hooks or that Paneldeck controls (--add-dir, --allowed-tools, --mcp-config, --safe-mode, --settings, --dangerously-*, --resume, --print, ...) and value options such as add_dir or append_system_prompt return bad_args - only the user can set value options in Paneldeck, and the ones that widen access (folders, allowed tools, MCP config) and --safe-mode never apply to sessions an agent creates. Administrator profiles are not allowed. With kind=\"chat\" a chat is created instead; it talks to a local model on an LLM server the user configured in Paneldeck (Settings -> Models; see list_models; `server` and `model` default to the model the user chose last, else the first one; shell/claude/prompt/effort/permission_mode/agent/claude_flags are not allowed then). Without `group`, a session created by an agent that runs in a Paneldeck terminal is placed in a sub-folder named after that session (tree view), so children are easy to find; the creating agent can control and close them.",
+            description: "Create a new terminal session (does not steal focus unless `placement` is given; with `placement` the new session is shown like focus_session does). Optionally start Claude Code in it, with the validated start options model/effort/permission_mode/agent (only with claude=true; omitted options use the user's defaults from Settings -> Claude; without any permission mode the session gets an explicit permission_mode default, so the user's own Claude settings cannot turn on bypassPermissions; permission_mode bypassPermissions is never allowed), plus claude_flags: switches without a value and without effect on rights, access or hooks (chrome, no-chrome, ide, verbose, brief, restricted, disable-slash-commands; added to the user's default switches; chrome is refused when the user turned Chrome off by default). No other arguments are possible: flags that widen rights or access, turn off hooks or that Paneldeck controls (--add-dir, --plugin-dir, --allowed-tools, --mcp-config, --strict-mcp-config, --system-prompt, --safe-mode, --settings, --dangerously-*, --resume, --print, ...) and value options such as add_dir, plugin_dir, mcp_config(s), system_prompt or append_system_prompt return bad_args - only the user can set value options in Paneldeck, and the ones that widen access (folders, plugin folders, allowed tools, MCP configs) as well as a replaced system prompt, --strict-mcp-config and --safe-mode never apply to sessions an agent creates. Administrator profiles are not allowed. With kind=\"chat\" a chat is created instead; it talks to a local model on an LLM server the user configured in Paneldeck (Settings -> Models; see list_models; `server` and `model` default to the model the user chose last, else the first one; shell/claude/prompt/effort/permission_mode/agent/claude_flags are not allowed then). Without `group`, a session created by an agent that runs in a Paneldeck terminal is placed in a sub-folder named after that session (tree view), so children are easy to find; the creating agent can control and close them. With `template` the session starts from a terminal template of the user's template library (its profile, shell, folder, tree folder, colour, tags, notes, Claude on/off with its start options and start prompt); parameters given in the call override the template, the template's claude_flags are added to yours like the user's default switches, a repeated start gets a counter in the name (API, API #2, API #3 ...). Without `group`, the template's tree folder is placed under your children's sub-folder (e.g. \"My session/Backend\"). The agent rules above also apply to templates: administrator profiles are refused (admin_profile), profiles with their own program, arguments or startup command are refused with bad_args unless it is the project's default profile (and always when they contain \"dangerously\" or \"bypassPermissions\"), and the template's extra folders, plugin folders, allowed tools, MCP configs, --strict-mcp-config, system prompt, appended system prompt, --safe-mode, bypassPermissions and \"continue the last conversation\" are never used; the result field template_ignored lists the ones that were left out.",
             schema: schema(
                 json!({
                     "kind": {"type": "string", "enum": ["terminal", "chat"], "description": "Default terminal"},
@@ -249,6 +249,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "claude": {"type": "boolean", "description": "Start Claude Code in the session"},
                     "prompt": {"type": "string", "description": "First prompt for Claude (only with claude=true)"},
                     "group": {"type": "string", "description": "Folder in the session tree"},
+                    "template": {"type": "string", "description": "Name of a terminal template from the user's template library (sidebar -> Templates; case-insensitive). The session gets the template's settings; the other parameters of this call override them. Unknown names and group templates return bad_args with the available terminal templates. Not with kind=\"chat\". \"Continue the last conversation in the folder\" from a template is ignored for agents; the result lists left-out template options in template_ignored"},
                     "placement": placement("Default: the session is created without being shown.")
                 }),
                 &[],
@@ -581,17 +582,27 @@ fn probe_at(port: u16, token: &str, budget: std::time::Duration) -> Option<HubIn
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let mut stream = std::net::TcpStream::connect_timeout(&addr, budget.min(Duration::from_millis(800))).ok()?;
     let _ = stream.set_write_timeout(Some(budget));
+    // Lesefrist schon vor dem Halbschließen setzen: macOS (XNU `sosetopt`) lehnt `setsockopt` mit EINVAL ab, sobald der
+    // Socket in beide Richtungen zu ist – nach unserem `shutdown(Write)` also, sobald der Hub geantwortet und geschlossen
+    // hat. Im Lese-Schritt darf das Nachstellen der Frist daher scheitern: Dann kann nichts mehr ankommen, `read` blockiert
+    // nicht mehr (gepufferte Antwort, dann EOF), und die zuvor gesetzte Frist gilt weiter.
+    stream.set_read_timeout(Some(budget)).ok()?;
     let body = json!({"token": token, "cmd": "mcp", "tool": "_level", "args": {}, "caller": null, "caller_pid": null});
     stream.write_all(body.to_string().as_bytes()).ok()?;
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
     loop {
         let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
-        stream.set_read_timeout(Some(left)).ok()?;
+        let _ = stream.set_read_timeout(Some(left));
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) if buf.len() + n <= 64 * 1024 => buf.extend_from_slice(&chunk[..n]),
-            _ => return None,
+            Ok(_) => return None,
+            // Manche Systeme (macOS) melden nach der vollständigen Antwort beim Schließen der Gegenseite einen
+            // Verbindungsfehler statt EOF: eine schon vollständige JSON-Antwort zählt dann trotzdem.
+            Err(e) if !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+                && serde_json::from_slice::<Value>(&buf).is_ok() => break,
+            Err(_) => return None,
         }
     }
     let r: Value = serde_json::from_slice(&buf).ok()?;
@@ -838,26 +849,9 @@ pub fn claude_cwd() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// `claude <args>` als Prozess vorbereiten. Unter Windows über `cmd.exe /d /v:off /c` (kein AutoRun, keine verzögerte
-/// Erweiterung; `claude` kann eine .cmd sein) mit selbst quotierter Zeile (`launch::claude_cmd_line`).
+/// `claude <args>` als Prozess vorbereiten (Aufruf je System: `platform::process::claude_command`).
 pub fn claude_command(args: &[String], cwd: &std::path::Path) -> Result<std::process::Command, String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let line = crate::launch::claude_cmd_line(args)?;
-        let mut c = std::process::Command::new("cmd.exe");
-        c.raw_arg(line).current_dir(cwd).creation_flags(0x0800_0000);
-        Ok(c)
-    }
-    #[cfg(not(windows))]
-    {
-        for a in args {
-            crate::launch::check_arg(a)?;
-        }
-        let mut c = std::process::Command::new("claude");
-        c.args(args).current_dir(cwd);
-        Ok(c)
-    }
+    crate::platform::process::claude_command(args, cwd)
 }
 
 /// Prozess starten und höchstens `limit` warten, sonst beenden (der Deinstaller darf nie hängen).
@@ -1003,14 +997,7 @@ fn remove_servers_text(text: &str, names: &[String]) -> Option<String> {
 /// Ob ein Pfad ein symbolischer Link bzw. Analysepunkt ist (dann schreiben wir nicht).
 fn is_link(path: &std::path::Path) -> bool {
     let Ok(m) = std::fs::symlink_metadata(path) else { return false };
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if m.file_attributes() & 0x400 != 0 {
-            return true; // FILE_ATTRIBUTE_REPARSE_POINT
-        }
-    }
-    m.file_type().is_symlink()
+    crate::platform::fs::is_reparse_point(&m) || m.file_type().is_symlink()
 }
 
 /// Unsere Einträge direkt aus einer `.claude.json` entfernen (Ersatzweg, wenn `claude` nicht verfügbar ist).
@@ -1266,7 +1253,8 @@ mod tests {
         });
         let t = std::time::Instant::now();
         assert_eq!(probe_at(port, "x", PROBE_TIMEOUT), None);
-        assert!(t.elapsed() < std::time::Duration::from_millis(2000), "{:?}", t.elapsed());
+        // Frist 1,5 s; Spielraum für ausgelastete CI-Rechner, aber deutlich unter den 4 s, die die Gegenseite schweigt.
+        assert!(t.elapsed() < std::time::Duration::from_millis(3000), "{:?}", t.elapsed());
         let _ = hold.join();
         // nichts lauscht: sofort None
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -1282,8 +1270,12 @@ mod tests {
             assert!(req.contains("\"_level\"") && req.contains("\"tok\""));
             s.write_all(br#"{"ok":true,"result":{"level":2,"expert":true}}"#).unwrap();
         });
-        assert_eq!(probe_at(port, "tok", PROBE_TIMEOUT), Some(HubInfo { level: McpLevel::Control, expert: true }));
-        srv.join().unwrap();
+        // Hier geht es um die Antwort, nicht um die Frist: großzügig, damit ein ausgelasteter CI-Rechner (macOS) den
+        // Server-Faden nicht zu spät startet. Der Hub antwortet und schließt sofort: Unter macOS scheiterte danach das
+        // Nachstellen der Lesefrist (EINVAL auf einem in beide Richtungen geschlossenen Socket).
+        let got = probe_at(port, "tok", std::time::Duration::from_secs(20));
+        srv.join().expect("Schein-Hub ohne Fehler");
+        assert_eq!(got, Some(HubInfo { level: McpLevel::Control, expert: true }));
     }
 
     #[test]
@@ -1485,6 +1477,13 @@ mod tests {
         // Keine Schalter nur für den Nutzer (safe-mode schaltet Hooks ab); Server zählt Doppelte einmal -> kein uniqueItems.
         assert!(!f.to_string().contains("\"safe-mode\"") && f.get("uniqueItems").is_none());
         assert!(c.description.contains("claude_flags") && c.description.contains("never apply to sessions an agent creates"));
+        // Terminal-Vorlagen (#244): optional, mit den Agenten-Regeln in der Beschreibung.
+        assert_eq!(c.schema["properties"]["template"]["type"], "string");
+        assert!(c.description.contains("template") && c.description.contains("administrator profiles are refused") && c.description.contains("are never used"));
+        // Review (#244): eigene Programme, ergänzte Schalter, Ordner unter dem Kinder-Ordner, Feld template_ignored.
+        for k in ["own program, arguments or startup command", "dangerously", "claude_flags are added to yours", "under your children's sub-folder", "template_ignored"] {
+            assert!(c.description.contains(k), "{k}");
+        }
         // Stufen: lesen geht bei Read, senden nicht
         assert!(check_access("read_chat", McpLevel::Read, false).is_ok() && check_access("list_models", McpLevel::Read, true).is_ok());
         assert_eq!(check_access("send_chat_message", McpLevel::Read, false).unwrap_err().0, "forbidden");

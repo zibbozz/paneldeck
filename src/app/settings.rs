@@ -15,11 +15,11 @@ impl App {
         self.remember_off_ui(ctx);
         let lang = self.settings.language;
         let mut open = true;
-        egui::Window::new(lang.t("Einstellungen", "Settings"))
+        // Frei verschiebbar (#275, #288): öffnet mittig, behält die gezogene Position, solange es offen ist, bleibt im Bild.
+        style::movable(ctx, Id::new("settings_win"), egui::Window::new(lang.t("Einstellungen", "Settings")))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .min_width(560.0_f32.min(ctx.content_rect().width() - 40.0))
             .max_width(560.0_f32.min(ctx.content_rect().width() - 40.0))
             .max_height((ctx.content_rect().height() - 60.0).max(200.0))
@@ -140,9 +140,8 @@ impl App {
                             if ui.button(lang.t("In Zwischenablage kopieren", "Copy to clipboard")).clicked() {
                                 ctx.copy_text(self.diagnostics());
                             }
-                            #[cfg(windows)]
-                            if ui.button(lang.t("Datenordner öffnen", "Open data folder")).clicked() {
-                                let _ = std::process::Command::new("explorer").arg(&self.dir).spawn();
+                            if crate::platform::open::FILE_MANAGER && ui.button(lang.t("Datenordner öffnen", "Open data folder")).clicked() {
+                                crate::platform::open::folder(&self.dir);
                             }
                         });
                         ui.label(RichText::new(format!("{}: {}", lang.t("Datenordner", "Data folder"), self.dir.display())).small().color(style::dim(ui)));
@@ -217,9 +216,8 @@ impl App {
                             if ui.button(lang.t("Neu laden", "Reload")).clicked() {
                                 self.reload_themes();
                             }
-                            #[cfg(windows)]
-                            if ui.button(lang.t("Ordner öffnen", "Open folder")).clicked() {
-                                let _ = std::process::Command::new("explorer").arg(self.themes_dir()).spawn();
+                            if crate::platform::open::FILE_MANAGER && ui.button(lang.t("Ordner öffnen", "Open folder")).clicked() {
+                                crate::platform::open::folder(&self.themes_dir());
                             }
                         });
                         row(ui, "Scrollback", lang.t("Zeilen pro Terminal (wirkt für neue Sitzungen)", "Lines per terminal (applies to new sessions)"), |ui| {
@@ -270,7 +268,7 @@ impl App {
                                     style::toggle(ui, &mut self.settings.bundled_conpty);
                                 },
                             );
-                            if self.settings.bundled_conpty && crate::conpty::bundled_dll_cached().is_none() {
+                            if self.settings.bundled_conpty && crate::platform::conpty::bundled_dll_cached().is_none() {
                                 ui.label(RichText::new(lang.t(
                                     "conpty.dll und OpenConsole.exe fehlen neben paneldeck.exe – Sitzungen nutzen den Konsolen-Host von Windows.",
                                     "conpty.dll and OpenConsole.exe are missing next to paneldeck.exe – sessions use the console host built into Windows.",
@@ -324,10 +322,19 @@ impl App {
                                 ui.add_space(S1);
                             }
                             let before = self.settings.claude_defaults.clone();
-                            egui::Grid::new("claude_defaults").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-                                // Ungültige Namen bleiben nur im Eingabefeld; gespeichert und angewendet werden nur gültige Werte.
-                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults);
-                            });
+                            // Reiter wie in den Sitzungsdialogen (#292), hier nur Claude | Zugriff | Erweitert. Ungültige Werte bleiben
+                            // nur im Eingabefeld; gespeichert und angewendet werden nur gültige Werte. Standards gelten für jede Shell:
+                            // Windows-Dialoge; Linux-Pfade bleiben möglich und gelten nur in WSL-Sitzungen.
+                            {
+                                use super::opts_tabs::{self as tabs, DEFAULTS_TABS};
+                                let target = super::folder_picker::Target::Windows;
+                                let none = ClaudeOpts::default();
+                                let chk = super::dialogs::check_opts(ui.ctx(), lang, &self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults, &target);
+                                tabs::handle_keys(ui.ctx(), "defaults", Id::new("settings_win"), &DEFAULTS_TABS);
+                                let infos = super::dialogs::claude_tab_infos(&self.settings.claude_defaults, &none, &chk);
+                                let tab = tabs::strip(ui, lang, "defaults", &infos);
+                                super::dialogs::claude_tab(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults, &target, &none, &chk, tab, |_| {}, |_| {});
+                            }
                             if self.settings.claude_defaults != before {
                                 // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).
                                 self.settings.last_claude_opts = None;
@@ -764,7 +771,7 @@ impl App {
         let Some(ed) = self.editor.as_mut() else { return };
         let mut open = true;
         let save_key = ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::S));
-        egui::Window::new(lang.t("Claude-Dateien", "Claude files"))
+        style::movable(ctx, Id::new("claude_files_win"), egui::Window::new(lang.t("Claude-Dateien", "Claude files")))
             .open(&mut open)
             .default_size([860.0, 520.0])
             .show(ctx, |ui| {

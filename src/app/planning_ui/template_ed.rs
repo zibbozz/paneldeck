@@ -60,7 +60,7 @@ impl PlanUi {
             Ok(d) => d,
             Err(e) => return self.fail(cx, &e),
         };
-        let Some(path) = crate::notify::save_json(&format!("{}-template.json", key.to_lowercase())) else { return };
+        let Some(path) = crate::platform::notify::save_json(&format!("{}-template.json", key.to_lowercase())) else { return };
         match std::fs::write(&path, doc.to_json()) {
             Ok(()) => self.note(match lang {
                 Lang::De => format!("Vorlage exportiert: {}", path.display()),
@@ -72,7 +72,7 @@ impl PlanUi {
 
     fn pick_template(&mut self, cx: &Cx) {
         let lang = cx.lang;
-        let Some(path) = crate::notify::open_json() else { return };
+        let Some(path) = crate::platform::notify::open_json() else { return };
         let text = match std::fs::read(&path) {
             Ok(b) => String::from_utf8_lossy(&b).to_string(),
             Err(e) => {
@@ -97,7 +97,7 @@ impl PlanUi {
             let mut go = false;
             let mut close = false;
             let fields: usize = p.doc.types.iter().map(|t| t.fields.len()).sum();
-            let m = egui::Modal::new(Self::modal_id("tpl_preview")).show(ctx, |ui| {
+            let m = crate::style::modal(Self::modal_id("tpl_preview")).show(ctx, |ui| {
                 ui.set_width(widgets::modal_width(ctx, 460.0));
                 widgets::dialog_title(ui, lang.t("Vorlage importieren", "Import template"));
                 ui.label(RichText::new(&p.file).monospace());
@@ -137,7 +137,7 @@ impl PlanUi {
         // Bericht nach dem Import
         if let Some(rep) = self.templates.report.take() {
             let mut close = false;
-            let m = egui::Modal::new(Self::modal_id("tpl_report")).show(ctx, |ui| {
+            let m = crate::style::modal(Self::modal_id("tpl_report")).show(ctx, |ui| {
                 ui.set_width(widgets::modal_width(ctx, 500.0));
                 widgets::dialog_title(ui, lang.t("Import abgeschlossen", "Import finished"));
                 let line = match lang {

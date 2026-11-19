@@ -160,7 +160,7 @@ impl PlanUi {
             Ok(d) => d,
             Err(e) => return self.dash.notify(e.message(lang), true),
         };
-        let Some(path) = crate::notify::save_json(&format!("{}.json", logic::file_slug(&doc.name))) else { return };
+        let Some(path) = crate::platform::notify::save_json(&format!("{}.json", logic::file_slug(&doc.name))) else { return };
         match std::fs::write(&path, doc.to_json()) {
             Ok(()) => self.dash.notify(
                 match lang {
@@ -176,7 +176,7 @@ impl PlanUi {
     /// Liest eine JSON-Datei (Öffnen-Dialog) und zeigt die Vorschau des Imports.
     pub(super) fn dash_start_import(&mut self, cx: &Cx, proj: &Project) {
         let lang = cx.lang;
-        let Some(path) = crate::notify::open_json() else { return };
+        let Some(path) = crate::platform::notify::open_json() else { return };
         let text = match std::fs::read(&path) {
             Ok(b) => String::from_utf8_lossy(&b).to_string(),
             Err(e) => return self.dash.notify(format!("{}: {e}", lang.t("Die Datei konnte nicht gelesen werden", "The file could not be read")), true),
@@ -210,7 +210,7 @@ impl PlanUi {
     fn new_dialog(&mut self, ctx: &egui::Context, cx: &Cx, mut d: NewDlg) -> Option<NewDlg> {
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("dash_new")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("dash_new")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 480.0));
             widgets::dialog_title(ui, lang.t("Neues Dashboard", "New dashboard"));
             ui.label(RichText::new(lang.t("Name", "Name")).strong());
@@ -273,7 +273,7 @@ impl PlanUi {
     fn rename_dialog(&mut self, ctx: &egui::Context, cx: &Cx, mut d: RenameDlg) -> Option<RenameDlg> {
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("dash_rename")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("dash_rename")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 420.0));
             widgets::dialog_title(ui, lang.t("Dashboard umbenennen", "Rename dashboard"));
             let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(340.0).margin(egui::Margin::symmetric(8, 5)));
@@ -312,7 +312,7 @@ impl PlanUi {
     fn delete_dashboard_dialog(&mut self, ctx: &egui::Context, cx: &Cx, d: DeleteDlg) -> Option<DeleteDlg> {
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("dash_delete")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("dash_delete")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 460.0));
             widgets::dialog_title(
                 ui,
@@ -359,7 +359,7 @@ impl PlanUi {
         let (mut go, mut close) = (false, false);
         let editing = d.tile.is_some();
         let dash_project = d.dash_project;
-        let m = egui::Modal::new(Self::modal_id("dash_tile")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("dash_tile")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 660.0));
             widgets::dialog_title(ui, if editing { lang.t("Kachel einstellen", "Tile settings") } else { lang.t("Kachel hinzufügen", "Add a tile") });
             let TileDlg { draft, filters, projects, check, err, bar, .. } = &mut *d;
@@ -524,7 +524,7 @@ impl PlanUi {
     fn import_dialog(&mut self, ctx: &egui::Context, cx: &Cx, mut d: Box<ImportDlg>) -> Option<Box<ImportDlg>> {
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("dash_import")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("dash_import")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 520.0));
             widgets::dialog_title(ui, lang.t("Dashboard importieren", "Import dashboard"));
             ui.label(RichText::new(&d.file).monospace());
