@@ -951,6 +951,58 @@ mod tests {
         h.join().unwrap();
     }
 
+    #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)
+    /// Wie im Bericht #299, aber mit allem, was die Verbindungsprüfung NICHT hat: Stufe „Steuern“ (alle Werkzeuge,
+    /// großer Rumpf), `localhost` gegen einen Server nur auf 127.0.0.1, Antwort wie Go/Ollama (chunked, erst nach einer
+    /// Pause wie beim Laden des Modells, dann in Stücken). Der Server prüft, dass der ganze Rumpf ankommt.
+    #[test]
+    fn end_to_end_control_level_big_body_chunked_like_ollama() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://localhost:{}", l.local_addr().unwrap().port());
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            let (mut buf, mut tmp) = (Vec::new(), [0u8; 8192]);
+            let head_end = loop {
+                let n = s.read(&mut tmp).unwrap();
+                assert!(n > 0, "Verbindung zu früh zu");
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let len: usize = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).expect("Content-Length");
+            while buf.len() < head_end + len {
+                let n = s.read(&mut tmp).unwrap();
+                assert!(n > 0, "Rumpf unvollständig");
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let body: serde_json::Value = serde_json::from_slice(&buf[head_end..head_end + len]).expect("Rumpf ist JSON");
+            // „Modell lädt“: Kopfzeilen erst nach einer Pause, dann Stücke mit Pausen dazwischen.
+            std::thread::sleep(Duration::from_millis(1500));
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+            for line in ["{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"hm\"},\"done\":false}\n", "{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"done\":false}\n", "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n"] {
+                s.write_all(format!("{:x}\r\n{line}\r\n", line.len()).as_bytes()).unwrap();
+                s.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            // Nach `done` liest der Client nicht mehr und schließt – das letzte Stück darf scheitern.
+            let _ = s.write_all(b"0\r\n\r\n");
+            (head, len, body)
+        });
+        let mut s = server(&base, ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
+        let ev = collect(&LlmBackend::new().start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![s]), Arc::new(|| {})));
+        assert_eq!(text(&ev), "Hi", "{ev:?}");
+        assert_eq!(ev.last(), Some(&TurnEvent::Done));
+        let (head, len, body) = h.join().unwrap();
+        assert!(head.starts_with("POST /api/chat HTTP/1.1") && head.contains("Host: localhost:"), "{head}");
+        assert!(len > 20_000, "großer Rumpf mit allen Werkzeugen: {len}");
+        assert!(body["tools"].as_array().is_some_and(|t| t.len() > 10), "Werkzeuge gesendet");
+        eprintln!("CHAT BODY {len} bytes, {} tools", body["tools"].as_array().unwrap().len());
+    }
+
     #[test]
     fn empty_answer_texts_in_both_languages() {
         for lang in [Lang::En, Lang::De] {

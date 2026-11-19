@@ -111,14 +111,23 @@ struct RowCx<'a> {
 
 /// Ab so vielen Sekunden ohne Daten zeigt eine leere Antwort, wie lange schon gewartet wird (#299).
 const WAIT_SHOW_SECS: u64 = 3;
+/// Ab so vielen Sekunden kommt der Hinweis dazu, dass der Server das Modell vermutlich noch lädt. Ollama zeigt ein
+/// Modell erst nach dem Laden in `ollama ps`; das erste Laden kann deutlich länger dauern (#299: 18 s, dann
+/// abgebrochen, weil nichts zu sehen war).
+const WAIT_LOAD_HINT_SECS: u64 = 10;
 
 /// Text unter einer noch leeren Antwort: „Denkt nach …“ bei Denk-Ausgabe, sonst ab [`WAIT_SHOW_SECS`] die Wartezeit
-/// (das erste Token kann dauern, z. B. während Ollama das Modell lädt), davor „…“ (#299).
+/// (das erste Token kann dauern, z. B. während Ollama das Modell lädt), ab [`WAIT_LOAD_HINT_SECS`] mit Hinweis aufs
+/// Laden, davor „…“ (#299).
 pub(super) fn waiting_text(thinking: bool, waited: Option<std::time::Duration>, lang: Lang) -> String {
     if thinking {
         return lang.t("Denkt nach …", "Thinking …").to_string();
     }
     match waited.map(|d| d.as_secs()) {
+        Some(s) if s >= WAIT_LOAD_HINT_SECS => match lang {
+            Lang::De => format!("Warte auf das Modell … {s} s – der Server lädt es vermutlich noch (das erste Laden kann länger dauern)"),
+            Lang::En => format!("Waiting for the model … {s} s – the server is probably still loading it (the first load can take a while)"),
+        },
         Some(s) if s >= WAIT_SHOW_SECS => match lang {
             Lang::De => format!("Warte auf das Modell … {s} s"),
             Lang::En => format!("Waiting for the model … {s} s"),
@@ -808,7 +817,9 @@ mod tests {
         }
         assert_eq!(waiting_text(false, Some(Duration::from_secs(2)), Lang::En), "…");
         assert_eq!(waiting_text(false, None, Lang::En), "…");
-        assert_eq!(waiting_text(false, Some(Duration::from_secs(65)), Lang::De), "Warte auf das Modell … 65 s");
+        assert_eq!(waiting_text(false, Some(Duration::from_secs(5)), Lang::De), "Warte auf das Modell … 5 s");
+        assert!(waiting_text(false, Some(Duration::from_secs(18)), Lang::En).starts_with("Waiting for the model … 18 s – the server is probably still loading it"));
+        assert!(waiting_text(false, Some(Duration::from_secs(65)), Lang::De).contains("lädt es vermutlich noch"));
     }
 
     #[test]
