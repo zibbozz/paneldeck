@@ -585,6 +585,50 @@ mod e2e {
         assert!(h.join().unwrap().head.starts_with("GET /v1/models HTTP/1.1\r\n"));
     }
 
+    /// #299: Lauscht auf [::1] am selben Port etwas anderes (z. B. die WSL-Weiterleitung eines zweiten Ollama, das nie
+    /// antwortet), muss `localhost` trotzdem beim Server auf 127.0.0.1 landen – wie `ollama ps`. Vorher nahm WinHTTP ::1
+    /// zuerst: die Verbindungsprüfung ging zum falschen Server, der Chat hing bei „…“.
+    #[test]
+    fn real_winhttp_localhost_prefers_ipv4_over_a_stray_ipv6_listener() {
+        let (base, h) = serve("127.0.0.1:0", |s| {
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{\"message\":{\"content\":\"v4\"}}\n{\"done\":true}\n").unwrap();
+        });
+        let port = base.rsplit(':').next().unwrap().to_string();
+        let Ok(decoy) = TcpListener::bind(format!("[::1]:{port}")) else {
+            eprintln!("IPv6-Loopback nicht verfügbar oder Port belegt – Test übersprungen");
+            let _ = std::net::TcpStream::connect(format!("127.0.0.1:{port}"));
+            return;
+        };
+        decoy.set_nonblocking(true).unwrap();
+        let ep = Endpoint::new(ServerKind::Ollama, &format!("http://localhost:{port}")).with_receive_timeout(Duration::from_secs(5));
+        let mut ev = Vec::new();
+        chat(system_transport().as_ref(), &ep, &req(), &no_cancel(), &mut |e| ev.push(e));
+        assert_eq!(text(&ev), "v4", "{ev:?}");
+        assert!(h.join().unwrap().head.contains("Host: localhost:"), "Host bleibt der Name");
+        assert!(decoy.accept().is_err(), "nichts ging an den Lauscher auf ::1");
+    }
+
+    /// Lauscht der Server nur auf [::1] (z. B. `OLLAMA_HOST=[::1]`), kommt `localhost` über den Rückfall trotzdem an.
+    #[test]
+    fn real_winhttp_localhost_falls_back_to_ipv6() {
+        let Ok(l) = TcpListener::bind("[::1]:0") else {
+            eprintln!("IPv6-Loopback nicht verfügbar – Test übersprungen");
+            return;
+        };
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        if TcpListener::bind(format!("127.0.0.1:{port}")).is_err() {
+            return; // IPv4-Port zufällig belegt: der Rückfall lässt sich so nicht prüfen
+        }
+        let (_, h) = serve(&format!("[::1]:{port}"), |s| {
+            let body = r#"{"models":[]}"#;
+            s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+        });
+        let r = list_models(system_transport().as_ref(), &Endpoint::new(ServerKind::Ollama, &format!("http://localhost:{port}")), &no_cancel());
+        assert_eq!(r, Ok(Vec::new()));
+        assert!(h.join().unwrap().head.starts_with("GET /api/tags HTTP/1.1\r\n"));
+    }
+
     #[test]
     fn real_winhttp_cancel_while_waiting_for_first_token() {
         let (base, h) = serve("127.0.0.1:0", |s| {
