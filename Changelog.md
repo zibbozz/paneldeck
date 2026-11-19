@@ -14,6 +14,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Fixed
 
 - Selecting text in a terminal now starts at the character under the mouse when the button is pressed, so the first characters are no longer missed (#300)
+- A Claude session no longer continues a conversation that is not its own: when Claude Code was started by hand in the same terminal after the session's Claude ended (or never started), Paneldeck adopted that conversation and resumed it with `--resume` on the next reload or restart. The first start of a new session always begins a new conversation, and `--resume` only ever uses the session's own conversation (the one Paneldeck started, continued with *Continue the last conversation in this folder*, or switched to inside it with `/clear` or `/resume`) (#302)
 
 ## [2.4.0] - 2026-11-19
 

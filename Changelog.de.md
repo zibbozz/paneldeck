@@ -14,6 +14,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Fixed
 
 - Eine Textauswahl im Terminal beginnt jetzt bei dem Zeichen, auf dem die Maustaste gedrückt wurde; die ersten Zeichen fehlen nicht mehr (#300)
+- Eine Claude-Sitzung setzt keine fremde Konversation mehr fort: Wurde Claude Code nach dem Ende des Claude der Sitzung (oder wenn er nie startete) im selben Terminal von Hand gestartet, übernahm Paneldeck dessen Konversation und setzte sie beim nächsten Neu laden oder Neustart mit `--resume` fort. Der erste Start einer neuen Sitzung beginnt immer eine neue Konversation, und `--resume` nutzt nur die eigene Konversation der Sitzung (die von Paneldeck gestartete, die mit *Letzte Konversation im Ordner fortsetzen* fortgesetzte oder die darin per `/clear` bzw. `/resume` gewählte) (#302)
 
 ## [2.4.0] - 2026-11-19
 
