@@ -22,7 +22,7 @@ impl Tray {
         use tray_icon::menu::{Menu, MenuEvent, MenuItem};
         use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-        let png = include_bytes!("../assets/icon64.png");
+        let png = include_bytes!("../../assets/icon64.png");
         let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
         let icon = tray_icon::Icon::from_rgba(img.to_vec(), img.width(), img.height()).ok()?;
 

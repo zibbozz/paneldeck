@@ -1,5 +1,9 @@
 //! Desktop-Benachrichtigungen (Windows-Toast). Auf anderen Systemen ohne Wirkung.
 
+/// Native file and folder dialogs exist (Windows: `rfd`). Without them the dialog functions return `None` at once, and
+/// callers that save something fall back to a fixed folder.
+pub const DIALOGS: bool = cfg!(windows);
+
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str, sound: bool) {
     use tauri_winrt_notification::{Duration, Sound, Toast};

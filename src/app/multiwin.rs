@@ -308,7 +308,7 @@ pub(super) fn close_plan(sessions: impl Iterator<Item = (u64, bool, bool, bool)>
 const MIN_SIZE: Vec2 = Vec2::new(640.0, 400.0);
 
 /// Gespeicherte Lage eines Fensters an die Bildschirme anpassen. `pos`/`size` in egui-Punkten, `ppp` = physische Pixel je
-/// Punkt (Bildschirmskalierung × Zoom), `on_screen`/`work` fragen in physischen Pixeln (`winctl`). Liegt die Position auf
+/// Punkt (Bildschirmskalierung × Zoom), `on_screen`/`work` fragen in physischen Pixeln (`platform::window`). Liegt die Position auf
 /// keinem Monitor mehr, wählt das System sie; die Größe passt in die Arbeitsfläche des Monitors, und das Fenster wird so
 /// verschoben, dass es ganz darauf liegt.
 pub(super) fn fit_window(pos: Option<Pos2>, size: Vec2, ppp: f32, on_screen: impl Fn(f32, f32) -> bool, work: impl Fn(f32, f32) -> Option<[f32; 4]>) -> (Option<Pos2>, Vec2) {
@@ -734,9 +734,9 @@ impl App {
             });
             if w.hwnd.is_none() && w.hwnd_tries < 120 {
                 w.hwnd_tries += 1;
-                if let Some(h) = crate::winctl::find_own_window(&title) {
+                if let Some(h) = crate::platform::window::find_own_window(&title) {
                     w.hwnd = Some(h);
-                    winchrome::apply_corners(h);
+                    crate::platform::chrome::apply_corners(h);
                 }
             }
             if w.close {
@@ -1054,7 +1054,7 @@ impl App {
             view.proj_views = s.views.iter().filter(|v| v.project != project).map(|v| (v.project, v.layout.clone(), v.focused)).collect();
             let pos = s.pos.map(|p| Pos2::new(p[0], p[1]));
             let size = s.size.map(|v| Vec2::new(v[0], v[1])).unwrap_or(Vec2::new(1100.0, 720.0));
-            let (pos, size) = fit_window(pos, size, ppp, crate::winctl::point_on_screen, crate::winctl::work_area);
+            let (pos, size) = fit_window(pos, size, ppp, crate::platform::window::point_on_screen, crate::platform::window::work_area);
             let mut w = HubWindow::new(s.id, view, pos, size, s.maximized);
             // Beim Start nicht den Fokus vom Hauptfenster nehmen; startet Paneldeck im Tray, bleiben sie bis dahin verborgen.
             w.restored = true;

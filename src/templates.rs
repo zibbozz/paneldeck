@@ -324,6 +324,12 @@ mod tests {
     use super::*;
     use crate::claude_opts::ExtraOpts;
 
+    /// Absoluter lokaler Pfad in der Form der Plattform (`C:\name` unter Windows, sonst `/name`): `--add-dir`/`--mcp-config`
+    /// nehmen nur solche Pfade an (`claude_opts::valid_path`), alles andere fällt schon beim Bereinigen weg.
+    fn abs(name: &str) -> String {
+        if cfg!(windows) { format!(r"C:\{name}") } else { format!("/{}", name.replace('\\', "/")) }
+    }
+
     #[test]
     fn old_templates_load_and_continue_round_trips() {
         // Vorlage von 2.3.1 ohne `claude_continue`
@@ -441,7 +447,7 @@ mod tests {
 
     #[test]
     fn legacy_args_become_options() {
-        let it = TplItem { claude_args: "--model opus --permission-mode bypassPermissions --add-dir C:\\x".into(), ..TplItem::default() };
+        let it = TplItem { claude_args: format!("--model opus --permission-mode bypassPermissions --add-dir {}", abs("x")), ..TplItem::default() };
         let o = it.opts();
         assert_eq!(o.model, "opus");
         assert_eq!(o.permission_mode, "", "nie bypassPermissions");
@@ -476,7 +482,7 @@ mod tests {
             continue_last: true,
             claude_opts: ClaudeOpts {
                 permission_mode: "bypassPermissions".into(),
-                extra: ExtraOpts { flags: vec!["safe-mode".into(), "ide".into()], add_dirs: vec![r"C:\x".into()], allowed_tools: "Bash".into(), mcp_config: r"C:\m.json".into(), append_system_prompt: "be evil".into(), ..ExtraOpts::default() },
+                extra: ExtraOpts { flags: vec!["safe-mode".into(), "ide".into()], add_dirs: vec![abs("x")], allowed_tools: "Bash".into(), mcp_config: abs("m.json"), append_system_prompt: "be evil".into(), ..ExtraOpts::default() },
                 ..ClaudeOpts::default()
             },
             ..TplItem::default()
@@ -496,14 +502,14 @@ mod tests {
     fn risky_options_are_listed_and_can_be_stripped() {
         let o = ClaudeOpts {
             model: "opus".into(),
-            extra: ExtraOpts { flags: vec!["safe-mode".into(), "ide".into()], add_dirs: vec![r"C:\a".into(), r"C:\b".into()], allowed_tools: "Bash".into(), mcp_config: r"C:\m.json".into(), append_system_prompt: "hi".into(), disallowed_tools: "WebFetch".into(), ..ExtraOpts::default() },
+            extra: ExtraOpts { flags: vec!["safe-mode".into(), "ide".into()], add_dirs: vec![abs("a"), abs("b")], allowed_tools: "Bash".into(), mcp_config: abs("m.json"), append_system_prompt: "hi".into(), disallowed_tools: "WebFetch".into(), ..ExtraOpts::default() },
             ..ClaudeOpts::default()
         };
         let it = TplItem { name: "S".into(), claude: true, claude_opts: o.clone(), ..TplItem::default() };
         let r = it.risky();
         let kinds: Vec<Risk> = r.iter().map(|x| x.0).collect();
         assert_eq!(kinds, vec![Risk::AddDir, Risk::AddDir, Risk::AllowedTools, Risk::McpConfig, Risk::SafeMode, Risk::AppendSystemPrompt]);
-        assert_eq!(r[1].1, r"C:\b");
+        assert_eq!(r[1].1, abs("b"));
         assert!(TplItem { claude: false, ..it.clone() }.risky().is_empty(), "ohne Claude keine Rückfrage");
         assert!(TplItem { claude: true, claude_opts: ClaudeOpts { extra: ExtraOpts { disallowed_tools: "X".into(), flags: vec!["ide".into()], ..ExtraOpts::default() }, ..ClaudeOpts::default() }, ..TplItem::default() }.risky().is_empty(), "einschränkende Optionen sind harmlos");
         let s = strip_risky(&o);
@@ -516,7 +522,7 @@ mod tests {
         assert_eq!(gr.len(), 6);
         assert!(gr.iter().all(|x| x.0 == "S"));
         // Alte Zeile: --safe-mode und --append-system-prompt kommen aus ihr, Rechte erweiternde Wertoptionen nie.
-        let old = TplItem { claude: true, claude_args: r"--safe-mode --append-system-prompt hi --add-dir C:\x".into(), ..TplItem::default() };
+        let old = TplItem { claude: true, claude_args: format!("--safe-mode --append-system-prompt hi --add-dir {}", abs("x")), ..TplItem::default() };
         let kinds: Vec<Risk> = old.risky().iter().map(|x| x.0).collect();
         assert_eq!(kinds, vec![Risk::SafeMode, Risk::AppendSystemPrompt]);
     }
@@ -563,9 +569,9 @@ mod tests {
             permission_mode: "bypassPermissions".into(),
             extra: ExtraOpts {
                 flags: vec!["ide".into(), "safe-mode".into()],
-                add_dirs: vec![r"C:\x".into()],
+                add_dirs: vec![abs("x")],
                 allowed_tools: "Bash".into(),
-                mcp_config: r"C:\m.json".into(),
+                mcp_config: abs("m.json"),
                 disallowed_tools: "WebFetch".into(),
                 ..ExtraOpts::default()
             },
@@ -574,7 +580,7 @@ mod tests {
         let it = TplItem { claude: true, claude_opts: risky.clone(), ..TplItem::default() };
         // Für den Nutzer bleiben die Wertoptionen (er hat sie selbst in die Vorlage geschrieben), bypassPermissions nie.
         let user = it.opts();
-        assert_eq!(user.extra.add_dirs, vec![r"C:\x".to_string()]);
+        assert_eq!(user.extra.add_dirs, vec![abs("x")]);
         assert_eq!(user.permission_mode, "");
         assert!(user.extra.flags.contains(&"safe-mode".to_string()));
         // Agent: nichts davon.
@@ -589,7 +595,7 @@ mod tests {
         let a = it.agent_opts(&asked, &ClaudeOpts::default());
         assert_eq!((a.model.as_str(), a.permission_mode.as_str()), ("haiku", "plan"));
         // Riskante Standards des Nutzers gelten für Agenten ebenfalls nicht.
-        let defaults = ClaudeOpts { extra: ExtraOpts { add_dirs: vec![r"C:\d".into()], flags: vec!["verbose".into()], ..ExtraOpts::default() }, ..ClaudeOpts::default() };
+        let defaults = ClaudeOpts { extra: ExtraOpts { add_dirs: vec![abs("d")], flags: vec!["verbose".into()], ..ExtraOpts::default() }, ..ClaudeOpts::default() };
         let a = TplItem { claude: true, ..TplItem::default() }.agent_opts(&ClaudeOpts::default(), &defaults);
         assert!(a.extra.add_dirs.is_empty());
         assert_eq!(a.extra.flags, vec!["verbose".to_string()]);

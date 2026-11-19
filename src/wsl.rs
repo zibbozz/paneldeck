@@ -28,6 +28,7 @@ pub const SLOW_TIMEOUT: Duration = Duration::from_secs(15);
 /// Zeitlimit für Vervollständigung und Ordnerprüfung.
 pub const FAST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Mehr Ausgabe wird nicht gelesen (die Abfrage gilt dann als gescheitert).
+#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_OUTPUT: usize = 1 << 20;
 
 /// Ausgabe von `wsl.exe` dekodieren: die eigenen Meldungen (z. B. `-l -q`) kommen als UTF-16LE (mit oder ohne BOM),
@@ -434,6 +435,7 @@ fn distro_cache() -> &'static Mutex<Option<DistroInfo>> {
 
 /// Namen aller Distributionen (`wsl.exe -l -q`, ungefiltert) mit Zeitlimit – für die Shell-Erkennung beim Start
 /// (bis 2.3.0 ohne Zeitlimit, ein hängendes `wsl.exe` hielt den Start auf, #221). `None` = nicht ermittelbar.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn list_distros(timeout: Duration) -> Option<Vec<String>> {
     run(&["-l".into(), "-q".into()], timeout).filter(|o| o.code == Some(0) && !o.truncated).map(|o| parse_distro_list(&o.stdout))
 }
@@ -515,6 +517,7 @@ struct Output {
 
 /// Nach dem Ende von `wsl.exe` höchstens so lange auf den Rest der Ausgabe warten: Ein von ihm gestarteter Prozess
 /// kann das Schreibende der Pipe erben und offen halten (#221).
+#[cfg_attr(not(windows), allow(dead_code))]
 const DRAIN_WAIT: Duration = Duration::from_secs(1);
 
 /// `wsl.exe` mit einzelnen Argumenten starten (kein Fenster, keine Eingabe), Ausgabe lesen (höchstens 1 MB);

@@ -1,3 +1,6 @@
+//! Window chrome of the borderless main window. Windows: rounded corners and Snap Layouts (below). Other platforms:
+//! `init`/`apply_corners`/`shutdown` do nothing, corners stay square, there is no system hover on the maximize button.
+//!
 //! Windows-Rahmen des rahmenlosen Hauptfensters (Windows 11):
 //! - abgerundete Fensterecken über DWM,
 //! - Snap-Layouts-Flyout am Maximieren-Knopf der eigenen Fensterleiste (Fensterprozedur meldet dort `HTMAXBUTTON`).
@@ -12,7 +15,7 @@
 //! vorhanden, und außer winit hängt sich im Hauptfenster niemand in die Prozedur.
 
 use eframe::egui;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::Relaxed};
 
 /// Ecken-Radius des Fensters in Pixeln bei 100 % Skalierung (`DWMWCP_ROUND` von Windows 11).
 const CORNER_PX: f32 = 8.0;
@@ -23,6 +26,7 @@ static BTN_VALID: AtomicBool = AtomicBool::new(false);
 /// Zeiger steht (laut Nachrichten des Systems) auf dem Maximieren-Knopf.
 static HOVER: AtomicBool = AtomicBool::new(false);
 /// Linke Maustaste wurde auf dem Knopf gedrückt (Klick wird erst beim Loslassen ausgeführt).
+#[cfg_attr(not(windows), allow(dead_code))]
 static PRESSED: AtomicBool = AtomicBool::new(false);
 /// Fensterecken sind tatsächlich rund (DWM hat das Attribut angenommen; unter Windows 10 nicht).
 static ROUNDED: AtomicBool = AtomicBool::new(false);
@@ -31,7 +35,7 @@ static ROUNDED: AtomicBool = AtomicBool::new(false);
 
 /// Rechteck in egui-Punkten → Client-Pixel `[links, oben, rechts, unten]`; `inset_top_right` (Punkte) lässt oben und rechts
 /// den Resize-Rand des Fensters frei. Links/oben werden abgerundet, rechts/unten aufgerundet (Treffer im Zweifel großzügig).
-pub(super) fn rect_to_px(min: (f32, f32), max: (f32, f32), ppp: f32, inset_top_right: f32) -> [i32; 4] {
+pub fn rect_to_px(min: (f32, f32), max: (f32, f32), ppp: f32, inset_top_right: f32) -> [i32; 4] {
     let l = (min.0 * ppp).floor() as i32;
     let t = ((min.1 + inset_top_right) * ppp).ceil() as i32;
     let r = ((max.0 - inset_top_right) * ppp).floor() as i32;
@@ -40,12 +44,13 @@ pub(super) fn rect_to_px(min: (f32, f32), max: (f32, f32), ppp: f32, inset_top_r
 }
 
 /// Liegt der Client-Punkt im Rechteck (links/oben eingeschlossen, rechts/unten ausgeschlossen)?
-pub(super) fn contains(r: [i32; 4], x: i32, y: i32) -> bool {
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn contains(r: [i32; 4], x: i32, y: i32) -> bool {
     r[2] > r[0] && r[3] > r[1] && x >= r[0] && x < r[2] && y >= r[1] && y < r[3]
 }
 
 /// Ecken-Radius in egui-Punkten: Windows skaliert ihn mit der Bildschirm-DPI (nicht mit dem Zoom der Oberfläche).
-pub(super) fn corner_radius_pts(zoom: f32, rounded: bool, maximized: bool) -> f32 {
+pub fn corner_radius_pts(zoom: f32, rounded: bool, maximized: bool) -> f32 {
     if !rounded || maximized {
         0.0
     } else {
@@ -54,14 +59,15 @@ pub(super) fn corner_radius_pts(zoom: f32, rounded: bool, maximized: bool) -> f3
 }
 
 /// Aus `lParam` von `WM_NCHITTEST` die Bildschirmkoordinaten holen (vorzeichenbehaftete 16-Bit-Werte).
-pub(super) fn point_from_lparam(lp: isize) -> (i32, i32) {
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn point_from_lparam(lp: isize) -> (i32, i32) {
     ((lp & 0xffff) as u16 as i16 as i32, ((lp >> 16) & 0xffff) as u16 as i16 as i32)
 }
 
 // ------------------------------------------------------------------ Schnittstelle zur Fensterleiste
 
 /// Rechteck des Maximieren-Knopfes (egui-Punkte) melden; jedes Frame aufrufen. Ohne aktives Subclass wirkungslos.
-pub(super) fn report_max_button(rect: egui::Rect, ppp: f32, inset_top_right: f32) {
+pub fn report_max_button(rect: egui::Rect, ppp: f32, inset_top_right: f32) {
     let px = rect_to_px((rect.min.x, rect.min.y), (rect.max.x, rect.max.y), ppp, inset_top_right);
     for (a, v) in BTN.iter().zip(px) {
         a.store(v, Relaxed);
@@ -70,12 +76,12 @@ pub(super) fn report_max_button(rect: egui::Rect, ppp: f32, inset_top_right: f32
 }
 
 /// Zeigt der Zeiger laut System auf den Maximieren-Knopf? (egui sieht dort keine Mausereignisse.)
-pub(super) fn max_hover() -> bool {
+pub fn max_hover() -> bool {
     HOVER.load(Relaxed)
 }
 
 /// Sind die Fensterecken rund?
-pub(super) fn rounded() -> bool {
+pub fn rounded() -> bool {
     ROUNDED.load(Relaxed)
 }
 
@@ -84,6 +90,7 @@ pub(super) fn rounded() -> bool {
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use std::sync::atomic::AtomicIsize;
     use std::sync::OnceLock;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
@@ -234,14 +241,14 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub(super) use imp::{apply_corners, init, shutdown};
+pub use imp::{apply_corners, init, shutdown};
 
 #[cfg(not(windows))]
-pub(super) fn init(_hwnd: isize, _ctx: &egui::Context) {}
+pub fn init(_hwnd: isize, _ctx: &egui::Context) {}
 #[cfg(not(windows))]
-pub(super) fn apply_corners(_hwnd: isize) {}
+pub fn apply_corners(_hwnd: isize) {}
 #[cfg(not(windows))]
-pub(super) fn shutdown() {}
+pub fn shutdown() {}
 
 #[cfg(test)]
 mod tests {

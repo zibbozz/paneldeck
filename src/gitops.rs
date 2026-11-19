@@ -12,11 +12,7 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     // Befehle starten, sobald die Hub-Ansicht automatisch `git status` aufruft. Pfade immer wörtlich
     // nehmen (sonst stagt „a[1].txt“ auch „a1.txt“).
     cmd.args(["-c", "core.fsmonitor=false", "--literal-pathspecs"]).args(args).current_dir(dir);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::platform::process::hide_window(&mut cmd);
     let out = cmd.output().map_err(|e| format!("{}: {e}", crate::state::t("git nicht gefunden", "git not found")))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())

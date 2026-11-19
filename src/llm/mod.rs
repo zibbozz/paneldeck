@@ -320,6 +320,7 @@ impl Drop for ChatHandle {
 
 /// Startet `chat` in einem Faden über die echte Verbindung; `repaint` wird nach jedem Ereignis aufgerufen.
 #[cfg(test)] // Faden-Hülle nur für die Tests; die Chats nutzen `chat::llm_backend`
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn spawn_chat(endpoint: Endpoint, request: ChatRequest, repaint: Box<dyn Fn() + Send>) -> ChatHandle {
     spawn_chat_with(system_transport(), endpoint, request, repaint)
 }

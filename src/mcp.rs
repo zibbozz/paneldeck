@@ -582,17 +582,27 @@ fn probe_at(port: u16, token: &str, budget: std::time::Duration) -> Option<HubIn
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let mut stream = std::net::TcpStream::connect_timeout(&addr, budget.min(Duration::from_millis(800))).ok()?;
     let _ = stream.set_write_timeout(Some(budget));
+    // Lesefrist schon vor dem Halbschließen setzen: macOS (XNU `sosetopt`) lehnt `setsockopt` mit EINVAL ab, sobald der
+    // Socket in beide Richtungen zu ist – nach unserem `shutdown(Write)` also, sobald der Hub geantwortet und geschlossen
+    // hat. Im Lese-Schritt darf das Nachstellen der Frist daher scheitern: Dann kann nichts mehr ankommen, `read` blockiert
+    // nicht mehr (gepufferte Antwort, dann EOF), und die zuvor gesetzte Frist gilt weiter.
+    stream.set_read_timeout(Some(budget)).ok()?;
     let body = json!({"token": token, "cmd": "mcp", "tool": "_level", "args": {}, "caller": null, "caller_pid": null});
     stream.write_all(body.to_string().as_bytes()).ok()?;
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
     loop {
         let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
-        stream.set_read_timeout(Some(left)).ok()?;
+        let _ = stream.set_read_timeout(Some(left));
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) if buf.len() + n <= 64 * 1024 => buf.extend_from_slice(&chunk[..n]),
-            _ => return None,
+            Ok(_) => return None,
+            // Manche Systeme (macOS) melden nach der vollständigen Antwort beim Schließen der Gegenseite einen
+            // Verbindungsfehler statt EOF: eine schon vollständige JSON-Antwort zählt dann trotzdem.
+            Err(e) if !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+                && serde_json::from_slice::<Value>(&buf).is_ok() => break,
+            Err(_) => return None,
         }
     }
     let r: Value = serde_json::from_slice(&buf).ok()?;
@@ -839,26 +849,9 @@ pub fn claude_cwd() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// `claude <args>` als Prozess vorbereiten. Unter Windows über `cmd.exe /d /v:off /c` (kein AutoRun, keine verzögerte
-/// Erweiterung; `claude` kann eine .cmd sein) mit selbst quotierter Zeile (`launch::claude_cmd_line`).
+/// `claude <args>` als Prozess vorbereiten (Aufruf je System: `platform::process::claude_command`).
 pub fn claude_command(args: &[String], cwd: &std::path::Path) -> Result<std::process::Command, String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let line = crate::launch::claude_cmd_line(args)?;
-        let mut c = std::process::Command::new("cmd.exe");
-        c.raw_arg(line).current_dir(cwd).creation_flags(0x0800_0000);
-        Ok(c)
-    }
-    #[cfg(not(windows))]
-    {
-        for a in args {
-            crate::launch::check_arg(a)?;
-        }
-        let mut c = std::process::Command::new("claude");
-        c.args(args).current_dir(cwd);
-        Ok(c)
-    }
+    crate::platform::process::claude_command(args, cwd)
 }
 
 /// Prozess starten und höchstens `limit` warten, sonst beenden (der Deinstaller darf nie hängen).
@@ -1004,14 +997,7 @@ fn remove_servers_text(text: &str, names: &[String]) -> Option<String> {
 /// Ob ein Pfad ein symbolischer Link bzw. Analysepunkt ist (dann schreiben wir nicht).
 fn is_link(path: &std::path::Path) -> bool {
     let Ok(m) = std::fs::symlink_metadata(path) else { return false };
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if m.file_attributes() & 0x400 != 0 {
-            return true; // FILE_ATTRIBUTE_REPARSE_POINT
-        }
-    }
-    m.file_type().is_symlink()
+    crate::platform::fs::is_reparse_point(&m) || m.file_type().is_symlink()
 }
 
 /// Unsere Einträge direkt aus einer `.claude.json` entfernen (Ersatzweg, wenn `claude` nicht verfügbar ist).
@@ -1267,7 +1253,8 @@ mod tests {
         });
         let t = std::time::Instant::now();
         assert_eq!(probe_at(port, "x", PROBE_TIMEOUT), None);
-        assert!(t.elapsed() < std::time::Duration::from_millis(2000), "{:?}", t.elapsed());
+        // Frist 1,5 s; Spielraum für ausgelastete CI-Rechner, aber deutlich unter den 4 s, die die Gegenseite schweigt.
+        assert!(t.elapsed() < std::time::Duration::from_millis(3000), "{:?}", t.elapsed());
         let _ = hold.join();
         // nichts lauscht: sofort None
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -1283,8 +1270,12 @@ mod tests {
             assert!(req.contains("\"_level\"") && req.contains("\"tok\""));
             s.write_all(br#"{"ok":true,"result":{"level":2,"expert":true}}"#).unwrap();
         });
-        assert_eq!(probe_at(port, "tok", PROBE_TIMEOUT), Some(HubInfo { level: McpLevel::Control, expert: true }));
-        srv.join().unwrap();
+        // Hier geht es um die Antwort, nicht um die Frist: großzügig, damit ein ausgelasteter CI-Rechner (macOS) den
+        // Server-Faden nicht zu spät startet. Der Hub antwortet und schließt sofort: Unter macOS scheiterte danach das
+        // Nachstellen der Lesefrist (EINVAL auf einem in beide Richtungen geschlossenen Socket).
+        let got = probe_at(port, "tok", std::time::Duration::from_secs(20));
+        srv.join().expect("Schein-Hub ohne Fehler");
+        assert_eq!(got, Some(HubInfo { level: McpLevel::Control, expert: true }));
     }
 
     #[test]

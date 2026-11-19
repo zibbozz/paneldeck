@@ -34,24 +34,15 @@ pub fn is_remote(p: &str) -> bool {
     is_remote_unc(p) || remote_drive(p)
 }
 
-#[cfg(windows)]
 fn remote_drive(p: &str) -> bool {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetDriveTypeW(root: *const u16) -> u32;
+    if !crate::platform::fs::DRIVE_LETTERS {
+        return false;
     }
     const DRIVE_REMOTE: u32 = 4;
     let s = p.replace('/', "\\");
     let s = s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix(r"\\.\")).or_else(|| s.strip_prefix(r"\??\")).unwrap_or(&s);
     let Some((d, _)) = drive_split(s) else { return false };
-    let root: Vec<u16> = format!("{d}:\\").encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: nullterminierter Pfad, der während des Aufrufs lebt.
-    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
-}
-
-#[cfg(not(windows))]
-fn remote_drive(_p: &str) -> bool {
-    false
+    crate::platform::fs::drive_type(d) == Some(DRIVE_REMOTE)
 }
 
 /// Gibt es den Ordner? Ohne den Aufrufer (oft den UI-Thread) lange zu blockieren (#216): Ein `\\wsl$`-Pfad wird nie
@@ -149,9 +140,12 @@ mod tests {
         let r = dir_exists_quick(r"\\.\pipe\paneldeck-gibt-es-nicht", ms(200));
         assert!(t0.elapsed() < ms(2000), "{:?}", t0.elapsed());
         assert_ne!(r, Some(true));
-        // Lokales Laufwerk ist kein Netzlaufwerk
-        let drive = &here[..3];
-        assert!(!is_remote(drive) && !is_remote(&here) && !is_remote(&format!(r"\\?\{here}")));
+        // Lokales Laufwerk ist kein Netzlaufwerk (nur mit Laufwerksbuchstaben)
+        #[cfg(windows)]
+        {
+            let drive = &here[..3];
+            assert!(!is_remote(drive) && !is_remote(&here) && !is_remote(&format!(r"\\?\{here}")));
+        }
         assert!(is_remote(r"\\server\share"));
     }
 }

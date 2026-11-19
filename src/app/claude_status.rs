@@ -13,7 +13,7 @@
 //!
 //! **Der Prompt der Shell ist kein Beweis** (Review #282): OSC 133;A bzw. OSC 9;9 kann jedes Programm ausgeben, das im
 //! Terminal läuft – auch eines, das Claude gestartet hat. Als Ende gilt er nur, wenn der Hub danach sieht, dass im
-//! Vordergrund der Shell nichts mehr läuft (`winctl::shell_is_idle`, [`Entry::prompt_checked`]). Erst dann fällt der
+//! Vordergrund der Shell nichts mehr läuft (`platform::process::shell_is_idle`, [`Entry::prompt_checked`]). Erst dann fällt der
 //! Status weg (auch eine offene Freigabe-Frage – die schützt vor Eingaben von Agenten), werden Nachzügler verworfen und
 //! darf ein SessionStart einer neuen Konversation übernehmen. Wo sich das nicht prüfen lässt (WSL: Linux-Prozesse sieht
 //! Windows nicht), ändert das Signal nur „bereit“/„arbeitet“ auf unbekannt ([`Entry::prompt_unconfirmed`]).
@@ -310,7 +310,7 @@ impl Entry {
     }
 
     /// Ergebnis einer Abfrage nach einem Prompt-Signal: `idle` = im Vordergrund der Shell läuft nichts
-    /// (`winctl::shell_is_idle`; `None` = nicht zu ermitteln). `Some(angehalten)`, wenn damit ein Ende feststeht.
+    /// (`platform::process::shell_is_idle`; `None` = nicht zu ermitteln). `Some(angehalten)`, wenn damit ein Ende feststeht.
     pub(super) fn prompt_checked(&mut self, idle: Option<bool>) -> Option<bool> {
         let (since, tries) = self.track.prompt_check?;
         self.track.last_prompt_try = Some(Instant::now());
@@ -452,7 +452,7 @@ impl App {
                 }
             }
             if let Some(pid) = shell_pid.filter(|_| !exited && e.prompt_try_due()) {
-                if let Some(was_paused) = e.prompt_checked(crate::winctl::shell_is_idle(pid)) {
+                if let Some(was_paused) = e.prompt_checked(crate::platform::process::shell_is_idle(pid)) {
                     changed = true;
                     if was_paused {
                         paused.push(*id);

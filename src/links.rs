@@ -216,33 +216,11 @@ fn reveal(target: &str) {
     if !reveal_safe(target) {
         return;
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("explorer.exe").arg(format!("/select,{target}")).creation_flags(0x0800_0000).spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        if let Some(dir) = Path::new(target).parent() {
-            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
-        }
-    }
+    crate::platform::open::reveal(target);
 }
 
 fn launch(target: &str) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", target])
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("xdg-open").arg(target).spawn().is_ok()
-    }
+    crate::platform::open::launch(target)
 }
 
 /// Darf der Pfad an `explorer.exe /select,<pfad>` gehen? (Keine Kommas/Anführungszeichen, keine Netzwerkpfade.)

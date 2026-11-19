@@ -487,7 +487,7 @@ pub enum IpcCmd {
     Show,
     /// `origin`: Prozessbaum des Absenders – ermittelt der Hub selbst aus der Verbindung (#152), nie aus der Anfrage.
     /// Liegt eine Sitzung darin, erbt die neue Sitzung deren Agenten-Kette.
-    Open { path: String, claude: bool, origin: Option<crate::winctl::PeerChain> },
+    Open { path: String, claude: bool, origin: Option<crate::platform::process::PeerChain> },
 }
 
 pub struct HookServer {
@@ -511,11 +511,11 @@ pub struct McpJob {
     /// Sitzung, aus der der Agent nach eigener Angabe aufruft (Umgebungsvariable `PANELDECK_SESSION` der Brücke) –
     /// nur ein Hinweis, siehe `App::mcp_resolve_caller`.
     pub caller: Option<u64>,
-    /// Prozessbaum des Absenders, vom Hub auf dem Verbindungs-Thread ermittelt (`winctl::resolve_peer`, seit 2.3.0, #152):
+    /// Prozessbaum des Absenders, vom Hub auf dem Verbindungs-Thread ermittelt (`platform::process::resolve_peer`, seit 2.3.0, #152):
     /// TCP-Tabelle → Prozess geöffnet und lebend → Job Object einer Sitzung (#168), sonst Vorfahren mit Erzeugungszeiten.
     /// Ein `caller_pid` in der Anfrage wird
     /// ignoriert (ein Client könnte ihn fälschen). Nicht zu ermitteln = Anfrage abgewiesen, nie „extern“.
-    pub peer: crate::winctl::PeerChain,
+    pub peer: crate::platform::process::PeerChain,
     /// `PANELDECK_SESSION_KEY` der Brücke (nur für die Zuordnung über `caller` in WSL).
     pub caller_key: Option<String>,
     pub reply: std::sync::mpsc::SyncSender<Result<Value, (String, String)>>,
@@ -618,8 +618,8 @@ fn handle_connection(mut s: TcpStream, token: &str, ipc_token: &str, tx: &std::s
 }
 
 /// Prozess am anderen Ende der Verbindung (vom Hub ermittelt, nicht vom Client angegeben).
-fn peer_chain(s: &TcpStream) -> Option<crate::winctl::PeerChain> {
-    crate::winctl::resolve_peer(s.peer_addr().ok()?, s.local_addr().ok()?)
+fn peer_chain(s: &TcpStream) -> Option<crate::platform::process::PeerChain> {
+    crate::platform::process::resolve_peer(s.peer_addr().ok()?, s.local_addr().ok()?)
 }
 
 fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
@@ -1290,7 +1290,12 @@ mod tests {
     /// Review #282 (LOW-5, LOW-7): wann eine Sitzung die Hooks per `--settings` bekommt, obwohl es globale gibt.
     #[test]
     fn sessions_get_their_own_hooks_when_the_global_ones_do_not_apply() {
-        let global = Path::new("C:\\Users\\x\\.claude\\settings.json");
+        // Pfade in der Form der Plattform (`\` trennt nur unter Windows Ordner).
+        let (global, same_dir) = if cfg!(windows) {
+            (Path::new("C:\\Users\\x\\.claude\\settings.json"), "CLAUDE_CONFIG_DIR=c:/users/x/.claude/")
+        } else {
+            (Path::new("/home/x/.claude/settings.json"), "CLAUDE_CONFIG_DIR=/home/x/.claude/")
+        };
         let needs = |g: bool, incomplete: bool, foreign: bool, env: &str| session_needs_settings(g, incomplete, foreign, env, Some(global));
         assert!(needs(false, false, false, ""), "ohne globale Hooks immer");
         assert!(!needs(true, false, false, ""), "vollständige globale Hooks reichen");
@@ -1303,7 +1308,7 @@ mod tests {
         assert!(needs(true, false, false, "FOO=1\nCLAUDE_CONFIG_DIR=D:\\cfg\n"));
         assert!(needs(true, false, true, "claude_config_dir = D:/cfg"), "Name ohne Rücksicht auf Groß-/Kleinschreibung");
         // … dasselbe Verzeichnis (andere Schreibweise) oder leer: nicht
-        assert!(!needs(true, false, false, "CLAUDE_CONFIG_DIR=c:/users/x/.claude/"));
+        assert!(!needs(true, false, false, same_dir));
         assert!(!needs(true, false, false, "CLAUDE_CONFIG_DIR=\nFOO=1"));
         assert!(session_needs_settings(true, false, false, "CLAUDE_CONFIG_DIR=D:\\cfg", None));
         assert_eq!(profile_config_dir("A=1\nCLAUDE_CONFIG_DIR=x\nCLAUDE_CONFIG_DIR=y"), Some("y"), "die letzte Zeile gilt");
@@ -1561,11 +1566,12 @@ mod tests {
         write_ipc_file(&dir, srv.port, &srv.token);
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
         write_ipc_file(&dir, srv.port, &srv.ipc_token);
-        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin: Some(crate::winctl::PeerChain { chain: vec![1], orphan: true, job: Some(9) }) }));
+        assert!(forward_to_running(&dir, &IpcCmd::Open { path: "C:\\x".into(), claude: true, origin: Some(crate::platform::process::PeerChain { chain: vec![1], orphan: true, job: Some(9) }) }));
         // Der Hub ermittelt den Absender selbst (hier: dieser Testprozess), eine Angabe im Befehl zählt nicht.
         match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
             IpcCmd::Open { path, claude, origin } => {
                 assert_eq!((path.as_str(), claude), ("C:\\x", true));
+                #[cfg(windows)] // Absender über die TCP-Tabelle (`platform::process::resolve_peer`; anderswo noch unbekannt)
                 assert_eq!(origin.as_ref().and_then(|o| o.chain.first()), Some(&std::process::id()));
                 let origin = origin.unwrap();
                 assert!(!origin.orphan);
@@ -1648,6 +1654,7 @@ mod tests {
         let job = srv.mcp_rx.recv_timeout(Duration::from_secs(3)).expect("Anfrage kommt in der UI-Schleife an");
         // Absender: der Hub ermittelt den Prozess am anderen Ende selbst (dieser Testprozess).
         assert_eq!((job.tool.as_str(), job.caller, job.caller_key.as_deref()), ("list_sessions", Some(7), Some("k")));
+        #[cfg(windows)] // Absender über die TCP-Tabelle (`platform::process::resolve_peer`; anderswo noch unbekannt)
         assert_eq!(job.peer.chain.first(), Some(&std::process::id()));
         assert!(!job.peer.orphan);
         assert_eq!(job.args["include_exited"], false);

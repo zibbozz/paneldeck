@@ -848,98 +848,25 @@ fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
     }
 }
 
-/// Zeichen der aktuellen Tastaturbelegung für die Taste mit Scancode `sc` bei gedrücktem Strg+Alt (= AltGr-Ebene) und
-/// ggf. Umschalt (#249). `ToUnicodeEx` mit Flag 4 lässt den Zustand der Tottasten unberührt. Nur druckbare Zeichen;
-/// eine Tottaste oder eine Belegung ohne AltGr-Ebene ergibt `None`.
-#[cfg(windows)]
-fn layout_char(sc: u16, shift: bool) -> Option<String> {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, GetKeyboardLayout, MapVirtualKeyExW, ToUnicodeEx, MAPVK_VSC_TO_VK_EX};
-    // SAFETY: reine Abfragen; `state` und `buf` leben während der Aufrufe, die Längen stimmen.
-    unsafe {
-        let hkl = GetKeyboardLayout(0);
-        let vk = MapVirtualKeyExW(sc as u32, MAPVK_VSC_TO_VK_EX, hkl);
-        if vk == 0 {
-            return None;
-        }
-        let mut state = [0u8; 256];
-        state[0x11] = 0x80; // VK_CONTROL
-        state[0x12] = 0x80; // VK_MENU
-        if shift {
-            state[0x10] = 0x80; // VK_SHIFT
-        }
-        state[0x14] = (GetKeyState(0x14) & 1) as u8; // VK_CAPITAL (eingerastet)
-        let mut buf = [0u16; 8];
-        let n = ToUnicodeEx(vk, sc as u32, state.as_ptr(), buf.as_mut_ptr(), buf.len() as i32, 4, hkl);
-        if n <= 0 {
-            return None;
-        }
-        let s = String::from_utf16(&buf[..n as usize]).ok()?;
-        (!s.is_empty() && s.chars().all(|c| !c.is_control())).then_some(s)
-    }
-}
-
-#[cfg(not(windows))]
-fn layout_char(_sc: u16, _shift: bool) -> Option<String> {
-    None
-}
-
-/// Windows: ist die Taste (virtueller Tastencode) gerade gedrückt?
-#[cfg(windows)]
-fn vk_down(vk: u16) -> bool {
-    // SAFETY: reine Abfrage des Tastenzustands, keine Zeiger.
-    unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32) < 0 }
-}
+use crate::platform::keyboard::{altgr_char as layout_char, numpad_down};
 
 /// Strg+V wurde gerade gedrückt (Flanke). egui-winit macht aus Strg+V nur dann ein `Event::Paste`, wenn die
 /// Zwischenablage Text enthält, und verschluckt den Tastendruck sonst ganz – ein Bild käme also nie an.
-#[cfg(windows)]
+/// Ohne Plattform-Umsetzung (`platform::keyboard`) nie gedrückt.
 fn ctrl_v_pressed(ui: &Ui) -> bool {
+    use crate::platform::keyboard::{is_down, Key};
     use std::sync::atomic::{AtomicBool, Ordering};
     static PREV: AtomicBool = AtomicBool::new(false);
-    let down = ui.input(|i| i.focused) && vk_down(0x11 /* VK_CONTROL */) && vk_down(b'V' as u16) && !vk_down(0x12 /* VK_MENU */);
+    let down = ui.input(|i| i.focused) && is_down(Key::Control) && is_down(Key::V) && !is_down(Key::Alt);
     // `swap` muss IMMER laufen: mit `down && !PREV.swap(..)` bliebe PREV nach dem ersten Druck dauerhaft `true`
     // (Kurzschluss), und nur das allererste Strg+V der Sitzung würde ein Bild einfügen.
     let prev = PREV.swap(down, Ordering::Relaxed);
     down && !prev
 }
 
-#[cfg(not(windows))]
-fn ctrl_v_pressed(_ui: &Ui) -> bool {
-    false
-}
-
 /// Strg+Einfg löst ebenfalls `Event::Copy` aus – dann ohne Auswahl kein ^C senden.
 fn insert_held() -> bool {
-    #[cfg(windows)]
-    {
-        vk_down(0x2D /* VK_INSERT */)
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-/// Taste des Ziffernblocks? egui meldet den Ort nicht (Ziffernblock-5 = `Key::Num5`); unter Windows zeigt der
-/// Tastenzustand von VK_NUMPAD0…9 / VK_MULTIPLY / VK_ADD / VK_SUBTRACT / VK_DECIMAL / VK_DIVIDE, woher das Zeichen kam
-/// (NumLock an – sonst wären es Pfeil- und Bildtasten).
-#[cfg(windows)]
-fn numpad_down(c: char) -> bool {
-    let vk = match c {
-        '0'..='9' => 0x60 + (c as u16 - '0' as u16),
-        '*' => 0x6A,
-        '+' => 0x6B,
-        '-' => 0x6D,
-        '.' | ',' => 0x6E,
-        '/' => 0x6F,
-        _ => return false,
-    };
-    vk_down(vk)
-}
-
-#[cfg(not(windows))]
-fn numpad_down(_c: char) -> bool {
-    false
+    crate::platform::keyboard::is_down(crate::platform::keyboard::Key::Insert)
 }
 
 /// Tasten, deren Drücken gesendet wurde (mit Ziffernblock-Merkmal), und zu welcher Sitzung: nur deren Loslassen geht

@@ -1107,6 +1107,9 @@ mod tests {
         assert!(f4.to_template(None).items[0].claude_args.is_empty());
     }
 
+    // Nur Windows: WSL gibt es nur dort (`wsl.exe` aus System32); außerhalb von Windows ist ein Programm `C:\…\wsl.exe` kein
+    // Pfad mit Ordnern (`\` trennt dort nicht), und ein eigenes Profil zählt dort absichtlich nie als WSL.
+    #[cfg(windows)]
     #[test]
     fn custom_wsl_program_counts_as_wsl_in_the_editor() {
         let ctx = egui::Context::default();
@@ -1129,8 +1132,13 @@ mod tests {
         assert_eq!(super::super::custom_program_shell_id(&prof), "wsl:Debian");
     }
 
+    /// Absoluter Ordner in der Form der Plattform: `--add-dir` nimmt nur solche an (`claude_opts::valid_path`).
+    fn secret_dir() -> &'static str {
+        if cfg!(windows) { r"C:\secret" } else { "/secret" }
+    }
+
     fn risky_template() -> Template {
-        let o = ClaudeOpts { extra: crate::claude_opts::ExtraOpts { add_dirs: vec![r"C:\secret".into()], flags: vec!["safe-mode".into()], ..Default::default() }, ..ClaudeOpts::default() };
+        let o = ClaudeOpts { extra: crate::claude_opts::ExtraOpts { add_dirs: vec![secret_dir().into()], flags: vec!["safe-mode".into()], ..Default::default() }, ..ClaudeOpts::default() };
         Template::terminal("Risky", TplItem { claude: true, claude_opts: o, ..TplItem::default() })
     }
 
@@ -1141,7 +1149,7 @@ mod tests {
         assert!(!needs_confirm(&t, false), "ohne Claude-Modus startet kein Claude");
         assert!(!needs_confirm(&Template::terminal("Plain", TplItem { claude: true, ..TplItem::default() }), true));
         let tip = tpl_tip(&t, &[], &[], Lang::En);
-        assert!(tip.contains("⚠") && tip.contains(r"C:\secret") && tip.contains("--safe-mode"), "{tip}");
+        assert!(tip.contains("⚠") && tip.contains(secret_dir()) && tip.contains("--safe-mode"), "{tip}");
         assert!(tpl_tip(&t, &[], &[], Lang::De).contains("vor dem Start wird gefragt"));
         // Die Rückfrage findet ihre Vorlage über den Namen wieder.
         let c = TplConfirm::new(3, &t, TplAt::Default);

@@ -434,8 +434,10 @@ fn the_progress_dialog_names_the_work_in_both_languages() {
         h.with(|ui, ctx, _| ui.begin_load_project(ctx, json));
         let reading = lang.t("Datei wird gelesen …", "Reading the file …");
         let outs = h.wait("Datei gelesen", |h| !h.busy());
-        // die Bilder, in denen noch gelesen wurde, zeigen den Dialog (das letzte Bild hat ihn schon verloren)
-        assert!(outs.len() < 2 || any_text(&outs[..outs.len() - 1], reading), "{lang:?}: {reading:?}");
+        // die Bilder, in denen noch gelesen wurde, zeigen den Dialog (das letzte Bild hat ihn schon verloren). Das erste Bild
+        // zählt nicht: egui zeichnet ein neues Fenster (Modal/Area) dort unsichtbar, um seine Größe zu messen. Liest ein
+        // schneller Rechner die Datei in zwei Bildern, gibt es also kein sichtbares Bild mit dem Dialog.
+        assert!(outs.len() < 3 || any_text(&outs[1..outs.len() - 1], reading), "{lang:?}: {reading:?}");
         let p = h.ui.templates.backup.project.take().unwrap();
         h.with(|ui, ctx, cx| ui.begin_project_import(ctx, cx, p, None));
         let importing = lang.t("Projekt wird importiert …", "Importing project …");

@@ -128,7 +128,7 @@ pub fn integration(shell: &ShellSpec) -> (Vec<String>, Vec<(String, String)>) {
     }
 }
 
-/// Sieht der Hub, ob im Vordergrund dieser Shell ein Programm läuft (`winctl::shell_is_idle`)? Nur bei lokalen Shells,
+/// Sieht der Hub, ob im Vordergrund dieser Shell ein Programm läuft (`platform::process::shell_is_idle`)? Nur bei lokalen Shells,
 /// deren Programme Windows-Prozesse an derselben Konsole sind: PowerShell, cmd, Git Bash. Nicht in WSL (Linux-Prozesse
 /// sieht Windows nicht) und nicht bei eigenen Programmen wie `ssh.exe` (dort läuft alles auf der anderen Seite).
 pub fn foreground_visible(shell: &ShellSpec) -> bool {
