@@ -48,6 +48,8 @@ mod multiwin;
 mod palette_ui;
 mod osc52;
 mod link_ask;
+mod list_edit;
+mod opts_tabs;
 mod vt_notify;
 mod panels;
 mod paste_ask;
@@ -465,6 +467,14 @@ struct NewDialog {
     group: String,
     /// Ordnerfeld (WSL-fähig, #172); `cwd` wird jedes Bild daraus übernommen.
     picker: folder_picker::FolderPicker,
+    /// Eigene Farbe (#292); aus = Farbe des Profils bzw. automatisch.
+    own_color: bool,
+    color: [u8; 3],
+    /// Tags, mit Komma getrennt (Vorschläge aus den vorhandenen Sitzungen wie in den Einstellungen der Sitzung, #239).
+    tags: String,
+    notes: String,
+    /// Vorhandene Tags für die Vorschläge (setzt die App beim Öffnen).
+    tag_values: Vec<planning_ui::value_suggest::Counted>,
 }
 
 #[derive(Default)]
@@ -496,6 +506,15 @@ struct NewOpts {
     project: Option<u64>,
     /// Chat statt Terminal: mit diesem Server/Modell (kein Prozess, Verlauf in `chats/<id>.json`).
     chat: Option<state::ChatMeta>,
+    /// Eigene Farbe (Dialog „Neue Sitzung“, #292); None = Farbe des Profils bzw. automatisch.
+    color: Option<[u8; 3]>,
+    tags: Vec<String>,
+    notes: String,
+}
+
+/// Farbe einer neuen Sitzung: eigene (Dialog „Neue Sitzung“, #292), sonst die des Profils, sonst automatisch.
+fn session_color(own: Option<[u8; 3]>, profile: Option<[u8; 3]>, auto: [u8; 3]) -> [u8; 3] {
+    own.or(profile).unwrap_or(auto)
 }
 
 struct Launch<'a> {
@@ -510,7 +529,28 @@ impl NewDialog {
     fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
         let cwd = home_dir();
         let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
-        NewDialog { shell_id, cwd, name: String::new(), claude, copts, conv: session_settings::ConvChoice::Resume, focus: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+        NewDialog {
+            shell_id,
+            cwd,
+            name: String::new(),
+            claude,
+            copts,
+            conv: session_settings::ConvChoice::Resume,
+            focus: true,
+            profile: 0,
+            prompt: String::new(),
+            worktree: false,
+            branch: String::new(),
+            repo_for: String::new(),
+            repo: None,
+            group: String::new(),
+            picker,
+            own_color: false,
+            color: crate::palette::nth_rgb(crate::palette::Area::Hub, 0),
+            tags: String::new(),
+            notes: String::new(),
+            tag_values: Vec::new(),
+        }
     }
 
     /// Startordner von außen setzen (Profil, Ordnervorgabe).
@@ -1714,6 +1754,15 @@ impl App {
         self.dir.join("scrollback").join(format!("{id}.txt"))
     }
 
+    /// Shell einer Sitzung, wie sie beim Start aufgelöst wird (Profil mit eigenem Programm, sonst die Shell bzw. die
+    /// Standard-Shell) – für die Vorschau der Kommandozeile in den Dialogen (#292).
+    fn preview_spec(&self, shell_id: &str, profile: u64) -> Option<ShellSpec> {
+        if let Some(p) = self.profile(profile).filter(|p| !p.program.trim().is_empty()) {
+            return Some(ShellSpec { id: custom_program_shell_id(p), label: p.name.clone(), program: p.program.clone(), args: split_args(&p.args) });
+        }
+        self.shell_by_id(shell_id)
+    }
+
     /// Vorbelegung der Claude-Optionen im Dialog „Neue Sitzung“: letzte Wahl, sonst die Standards der Einstellungen.
     fn dialog_claude_opts(&self) -> ClaudeOpts {
         self.settings.last_claude_opts.clone().unwrap_or_else(|| self.settings.claude_defaults.clone()).sanitized(false)
@@ -1896,7 +1945,28 @@ impl App {
                 entry.meta.transcript.clear();
                 self.usage.reset(entry.meta.id);
             }
-            Some(c)
+            // Zu lang für cmd (claude.cmd läuft darüber, #289): Claude nicht starten, sondern sagen, warum.
+            let len = c.trim_end().chars().count();
+            if len > crate::claude_opts::MAX_COMMAND_LEN {
+                let msg = format!(
+                    "{} ({}): {len} > {}",
+                    state::t(
+                        "Claude nicht gestartet – die Befehlszeile ist zu lang (System-Prompt oder Listen in den Claude-Optionen kürzen)",
+                        "Claude not started – the command line is too long (shorten the system prompt or the lists in the Claude options)",
+                    ),
+                    entry.display_name(),
+                    crate::claude_opts::MAX_COMMAND_LEN,
+                );
+                entry.launch_note = Some(match entry.launch_note.take() {
+                    Some(n) => format!("{n}\n{msg}"),
+                    None => msg,
+                });
+                entry.launched_claude = false;
+                entry.launched_opts = Default::default();
+                None
+            } else {
+                Some(c)
+            }
         } else {
             self.usage.reset(entry.meta.id);
             None
@@ -2046,7 +2116,9 @@ impl App {
             shell_id,
             cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.folder.clone())).unwrap_or_default(),
             project,
-            color: prof.as_ref().and_then(|p| p.color).unwrap_or_else(|| hub_color(id)),
+            color: session_color(o.color, prof.as_ref().and_then(|p| p.color), hub_color(id)),
+            tags: o.tags.clone(),
+            notes: o.notes.clone(),
             profile: pid,
             claude: o.claude,
             claude_args,
@@ -4190,6 +4262,20 @@ impl eframe::App for App {
         self.check_budget(ctx);
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = self.main_frame_begin(ctx);
+        // Reiter der Sitzungsdialoge (#292): Standards zum Zählen/Zurücksetzen; Tasten zum Wechseln der Reiter gehören
+        // dem offenen Dialog, nicht den globalen Kürzeln.
+        ctx.data_mut(|d| d.insert_temp(Id::new("claude_user_defaults"), self.settings.claude_defaults.sanitized(false)));
+        // Nur der Dialog, der gerade die Tastatur hat (Fokus bzw. letzter Klick in seinem Fenster), nimmt sie.
+        for (open, salt, win) in [
+            (self.new_dialog.is_some(), "newdlg", "new_session_dialog"),
+            (self.session_settings.is_some(), "sset", "session_settings"),
+            (self.tpl.form.is_some(), "tpled", "tpl_editor"),
+            (self.settings_open && self.settings_tab == 2, "defaults", "settings_win"),
+        ] {
+            if open {
+                opts_tabs::grab_keys(ctx, salt, Id::new(win));
+            }
+        }
         self.titlebar(ctx);
         self.backup_tick(ctx);
         self.window_edges(ctx);

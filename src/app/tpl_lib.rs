@@ -81,6 +81,8 @@ pub(super) fn risk_label(k: templates::Risk, lang: Lang) -> &'static str {
     use templates::Risk::*;
     match k {
         AddDir => lang.t("Zusätzlicher Ordner (--add-dir)", "Extra folder (--add-dir)"),
+        PluginDir => lang.t("Plugin-Ordner (--plugin-dir)", "Plugin folder (--plugin-dir)"),
+        SystemPrompt => lang.t("Eigener System-Prompt (--system-prompt)", "System prompt (--system-prompt)"),
         AllowedTools => lang.t("Erlaubte Werkzeuge (--allowed-tools)", "Allowed tools (--allowed-tools)"),
         McpConfig => lang.t("MCP-Konfiguration (--mcp-config)", "MCP config (--mcp-config)"),
         SafeMode => lang.t("Hooks und MCP-Server aus (--safe-mode)", "Hooks and MCP servers off (--safe-mode)"),
@@ -280,133 +282,97 @@ pub(super) enum FormOut {
 /// Der Editor als Fenster (rein, ohne App – headless testbar).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellSpec], profiles: &[Profile], folders: &[String], claude_mode: bool, lang: Lang) -> FormOut {
+    use super::opts_tabs::{self as tabs, Tab, TabInfo};
+    const SALT: &str = "tpled";
     let mut out = FormOut::Open;
     let mut opts_ok = true;
     let esc = !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
-    let body_h = dialogs::dialog_body_height(ctx);
+    // Reiter wie im Dialog „Neue Sitzung“ (#292), Name der Vorlage darüber; Enter speichert.
+    let win = Id::new("tpl_editor");
+    if f.focus {
+        tabs::set(ctx, SALT, Tab::General);
+        tabs::activate(ctx, SALT);
+    }
+    let enter = tabs::enter_confirms(ctx, SALT, win);
+    let tab_list = tabs::session_tabs(f.terminal && f.item.claude);
+    tabs::handle_keys(ctx, SALT, win, &tab_list);
+    let defaults = dialogs::user_defaults(ctx);
+    let width = tabs::dialog_width(ctx);
+    let body_h = dialogs::dialog_body_height(ctx) - 110.0;
+    let mut invalid: Option<String> = None;
     let title = match (f.index.is_some(), f.terminal) {
         (true, true) => lang.t("Terminal-Vorlage bearbeiten", "Edit terminal template"),
         (false, true) => lang.t("Neue Terminal-Vorlage", "New terminal template"),
         _ => lang.t("Gruppen-Vorlage bearbeiten", "Edit group template"),
     };
-    style::movable(ctx, Id::new("tpl_editor"), egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
-        egui::ScrollArea::vertical().id_salt("tpl_editor_scroll").max_height(body_h).show(ui, |ui| {
-            egui::Grid::new("tpl_editor_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-                ui.label(lang.t("Name der Vorlage", "Template name"));
-                let te = ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(320.0).hint_text(lang.t("z. B. API-Server", "e.g. API server")));
-                if f.focus {
-                    te.request_focus();
-                    f.focus = false;
-                }
-                mark(ui, "name", &te);
-                ui.end_row();
-                if !f.terminal {
-                    ui.label(lang.t("Sitzungen", "Sessions"));
-                    ui.label(RichText::new(f.members.join(", ")).color(style::dim(ui)));
-                    ui.end_row();
-                    ui.label("");
-                    ui.checkbox(&mut f.grid, lang.t("Als Raster öffnen", "Open as grid"));
-                    ui.end_row();
-                    return;
-                }
-                ui.label(lang.t("Sitzungsname", "Session name"));
-                ui.add(egui::TextEdit::singleline(&mut f.item.name).desired_width(320.0).hint_text(lang.t("leer = Name der Vorlage", "empty = template name")));
+    style::movable(ctx, win, egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
+        ui.set_width(width);
+        egui::Grid::new("tpl_editor_name").num_columns(2).spacing([8.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
+            ui.label(lang.t("Name der Vorlage", "Template name"));
+            let te = ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(dialogs::FIELD_W).hint_text(lang.t("z. B. API-Server", "e.g. API server")));
+            if f.focus {
+                te.request_focus();
+                f.focus = false;
+            }
+            mark(ui, "name", &te);
+            ui.end_row();
+            if !f.terminal {
+                ui.label(lang.t("Sitzungen", "Sessions"));
+                ui.label(RichText::new(f.members.join(", ")).color(style::dim(ui)));
                 ui.end_row();
                 ui.label("");
-                dialogs::hint_label(ui, lang.t("Weitere Starts zählen hoch: API, API #2, API #3 …", "Further starts count up: API, API #2, API #3 …"), style::dim(ui));
+                ui.checkbox(&mut f.grid, lang.t("Als Raster öffnen", "Open as grid"));
                 ui.end_row();
-                ui.label(lang.t("Profil", "Profile"));
-                let cur = profiles.iter().find(|p| p.id == f.item.profile).map(|p| p.name.clone()).unwrap_or_else(|| lang.t("Keins", "None").to_string());
-                egui::ComboBox::from_id_salt("tpl_prof").selected_text(cur).show_ui(ui, |ui| {
-                    if ui.selectable_label(f.item.profile == 0, lang.t("Keins", "None")).clicked() {
-                        f.item.profile = 0;
-                    }
-                    for p in profiles {
-                        let label = if p.admin { format!("{} ({})", p.name, lang.t("Administrator", "administrator")) } else { p.name.clone() };
-                        if ui.selectable_label(f.item.profile == p.id, label).clicked() {
-                            f.item.profile = p.id;
-                            if !p.shell_id.is_empty() {
-                                f.item.shell_id = p.shell_id.clone();
-                            }
-                        }
-                    }
-                });
-                ui.end_row();
-                let custom_prof = profiles.iter().find(|p| p.id == f.item.profile).filter(|p| !p.program.trim().is_empty());
-                let custom = custom_prof.is_some();
-                // Shell, mit der die Sitzung startet: ein eigenes wsl.exe-Programm zählt als WSL (wie beim Start).
-                let eff_shell = custom_prof.map(super::custom_program_shell_id).unwrap_or_else(|| f.item.shell_id.clone());
-                ui.label("Shell");
-                if custom {
-                    ui.label(RichText::new(lang.t("Programm des Profils", "Program of the profile")).color(style::dim(ui)));
-                } else {
-                    let cur = shells.iter().find(|s| s.id == f.item.shell_id).map(|s| s.label.clone()).unwrap_or_else(|| lang.t("Standard-Shell", "Default shell").to_string());
-                    egui::ComboBox::from_id_salt("tpl_shell").selected_text(cur).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut f.item.shell_id, String::new(), lang.t("Standard-Shell", "Default shell"));
-                        for s in shells {
-                            ui.selectable_value(&mut f.item.shell_id, s.id.clone(), &s.label);
-                        }
-                    });
+            }
+        });
+        if f.terminal {
+            ui.add_space(4.0);
+            let custom_prof = profiles.iter().find(|p| p.id == f.item.profile).filter(|p| !p.program.trim().is_empty());
+            // Shell, mit der die Sitzung startet: ein eigenes wsl.exe-Programm zählt als WSL (wie beim Start).
+            let eff_shell = custom_prof.map(super::custom_program_shell_id).unwrap_or_else(|| f.item.shell_id.clone());
+            // Shell der Vorlage (auch aus einem eigenen Profil): WSL-Ordner für WSL-Vorlagen.
+            let target = match shells.iter().find(|s| s.id == eff_shell) {
+                Some(s) => super::folder_picker::Target::for_shell(Some(s), false),
+                None if eff_shell.starts_with("wsl") => super::folder_picker::Target::Wsl { distro: eff_shell.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string), choose_distro: false },
+                None => super::folder_picker::Target::Windows,
+            };
+            let claude_on = f.item.claude;
+            // Wie die Standards: kein bypassPermissions in einer Vorlage (Datei kann weitergegeben werden).
+            let chk = dialogs::check_opts(ctx, lang, &f.opts, SALT, dialogs::OptsPlace::Template, &target);
+            let mut infos = vec![TabInfo::plain(Tab::General)];
+            if claude_on {
+                infos.extend(dialogs::claude_tab_infos(&f.opts, &defaults, &chk));
+            }
+            let tab = tabs::strip(ui, lang, SALT, &infos);
+            invalid = tabs::invalid_hint(lang, &infos);
+            tabs::body(ui, SALT, tab, body_h, |ui| {
+                if tab == Tab::General {
+                    tpl_general(ui, f, shells, profiles, folders, claude_mode, &eff_shell, custom_prof.is_some(), lang);
+                    return;
                 }
-                ui.end_row();
-                ui.label(lang.t("Startordner", "Start folder"));
-                session_settings::folder_field(ui, &mut f.item.cwd, &eff_shell, false, lang);
-                ui.end_row();
-                if eff_shell.starts_with("wsl") {
-                    #[cfg(test)]
-                    ui.data_mut(|d| d.insert_temp(Id::new(("tpl_mark", "wsl_hint")), true));
-                    ui.label("");
-                    dialogs::hint_label(ui, lang.t("WSL: auch ein Linux-Pfad wie /home/ich/projekt oder ~", "WSL: also a Linux path such as /home/me/project or ~"), style::dim(ui));
-                    ui.end_row();
-                }
-                ui.label(lang.t("Ordner im Baum", "Tree folder"));
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut f.item.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(290.0));
-                    if !folders.is_empty() {
-                        ui.menu_button("▾", |ui| {
-                            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                                for g in folders {
-                                    if ui.button(g).clicked() {
-                                        f.item.group = g.clone();
-                                        ui.close();
-                                    }
-                                }
-                            });
-                        });
-                    }
-                });
-                ui.end_row();
-                ui.label(lang.t("Farbe", "Color"));
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut f.own_color, lang.t("Eigene Farbe", "Own color"));
-                    if f.own_color {
-                        ui.color_edit_button_srgb(&mut f.color);
-                    }
-                });
-                ui.end_row();
-                ui.label("Tags");
-                ui.add(egui::TextEdit::singleline(&mut f.tags).hint_text(lang.t("durch Komma getrennt", "comma-separated")).desired_width(320.0));
-                ui.end_row();
-                ui.label(lang.t("Notizen", "Notes"));
-                ui.add(egui::TextEdit::multiline(&mut f.item.notes).desired_rows(2).desired_width(320.0));
-                ui.end_row();
-                if claude_mode || f.item.claude {
-                    ui.label("");
-                    let r = ui.checkbox(&mut f.item.claude, lang.t("Claude Code starten", "Start Claude Code"));
-                    mark(ui, "claude", &r);
-                    ui.end_row();
-                    if f.item.claude {
+                let TplForm { opts, conv, legacy_rest, item, .. } = &mut *f;
+                dialogs::claude_tab(
+                    ui,
+                    lang,
+                    opts,
+                    SALT,
+                    dialogs::OptsPlace::Template,
+                    &target,
+                    &defaults,
+                    &chk,
+                    tab,
+                    |ui| {
                         ui.label(lang.t("Konversation", "Conversation"));
-                        session_settings::conv_combo(ui, "tpl_conv", &mut f.conv, lang);
+                        session_settings::conv_combo(ui, "tpl_conv", conv, lang);
                         ui.end_row();
-                        // Wie die Standards: kein bypassPermissions in einer Vorlage (Datei kann weitergegeben werden).
-                        opts_ok = dialogs::claude_opts_rows(ui, lang, &mut f.opts, "tpled", dialogs::OptsPlace::Template);
-                        if !f.legacy_rest.trim().is_empty() {
+                    },
+                    |ui| {
+                        if !legacy_rest.trim().is_empty() {
                             ui.label(lang.t("Weitere Argumente", "Further arguments"));
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(f.legacy_rest.trim()).monospace());
+                                ui.label(RichText::new(legacy_rest.trim()).monospace());
                                 if ui.small_button(lang.t("Entfernen", "Remove")).on_hover_text(lang.t("Diese Argumente aus einer früheren Version nicht mehr übergeben", "Stop passing these arguments from an earlier version")).clicked() {
-                                    f.legacy_rest.clear();
+                                    legacy_rest.clear();
                                 }
                             });
                             ui.end_row();
@@ -415,22 +381,27 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
                             ui.end_row();
                         }
                         ui.label(lang.t("Start-Prompt", "Start prompt"));
-                        ui.add(egui::TextEdit::multiline(&mut f.item.prompt).desired_rows(2).desired_width(320.0));
+                        let r = ui.add(egui::TextEdit::multiline(&mut item.prompt).desired_rows(2).desired_width(dialogs::FIELD_W));
+                        super::opts_tabs::multiline(ui, SALT, &r);
                         ui.end_row();
                         ui.label("");
                         dialogs::hint_label(
                             ui,
                             lang.t(
-                                "Startet ein Agent die Vorlage (MCP), gelten seine Regeln: nie Administrator-Profile, keine zusätzlichen Ordner, erlaubten Werkzeuge, MCP-Konfiguration oder --safe-mode aus der Vorlage.",
-                                "When an agent starts the template (MCP), its rules apply: never administrator profiles, no extra folders, allowed tools, MCP config or --safe-mode from the template.",
+                                "Startet ein Agent die Vorlage (MCP), gelten seine Regeln: nie Administrator-Profile, keine zusätzlichen Ordner, Plugin-Ordner, erlaubten Werkzeuge, MCP-Konfigurationen, kein eigener System-Prompt und kein --safe-mode aus der Vorlage.",
+                                "When an agent starts the template (MCP), its rules apply: never administrator profiles, no extra folders, plugin folders, allowed tools, MCP configs, system prompt or --safe-mode from the template.",
                             ),
                             style::dim(ui),
                         );
                         ui.end_row();
-                    }
-                }
+                    },
+                );
             });
-        });
+            if claude_on {
+                opts_ok = dialogs::check_opts(ctx, lang, &f.opts, SALT, dialogs::OptsPlace::Template, &target).ok();
+                dialogs::claude_preview(ui, lang, SALT, &f.opts, shells.iter().find(|s| s.id == eff_shell));
+            }
+        }
         if let Some(e) = &f.error {
             ui.add_space(4.0);
             dialogs::hint_label(ui, e, Color32::from_rgb(0xe0, 0x6c, 0x75));
@@ -442,6 +413,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
             if b.clicked() {
                 out = FormOut::Save;
             }
+            tabs::show_invalid(ui, &invalid, &b);
             let c = ui.button(lang.t("Abbrechen", "Cancel"));
             mark(ui, "cancel", &c);
             if c.clicked() {
@@ -449,10 +421,104 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
             }
         });
     });
+    if enter && opts_ok && out == FormOut::Open {
+        out = FormOut::Save;
+    }
     if esc && out == FormOut::Open {
         out = FormOut::Cancel;
     }
     out
+}
+
+/// Reiter *Allgemein* einer Terminal-Vorlage: Sitzungsname, Claude starten, Profil, Shell, Startordner, Ordner im Baum,
+/// Farbe, Tags, Notizen.
+#[allow(clippy::too_many_arguments)]
+fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[Profile], folders: &[String], claude_mode: bool, eff_shell: &str, custom: bool, lang: Lang) {
+    egui::Grid::new("tpl_editor_grid").num_columns(2).spacing([8.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
+        ui.label(lang.t("Sitzungsname", "Session name"));
+        ui.add(egui::TextEdit::singleline(&mut f.item.name).desired_width(dialogs::FIELD_W).hint_text(lang.t("leer = Name der Vorlage", "empty = template name")));
+        ui.end_row();
+        ui.label("");
+        dialogs::hint_label(ui, lang.t("Weitere Starts zählen hoch: API, API #2, API #3 …", "Further starts count up: API, API #2, API #3 …"), style::dim(ui));
+        ui.end_row();
+        if claude_mode || f.item.claude {
+            ui.label("");
+            let r = ui.checkbox(&mut f.item.claude, lang.t("Claude Code starten", "Start Claude Code"));
+            mark(ui, "claude", &r);
+            ui.end_row();
+        }
+        ui.label(lang.t("Profil", "Profile"));
+        let cur = profiles.iter().find(|p| p.id == f.item.profile).map(|p| p.name.clone()).unwrap_or_else(|| lang.t("Keins", "None").to_string());
+        egui::ComboBox::from_id_salt("tpl_prof").selected_text(cur).show_ui(ui, |ui| {
+            if ui.selectable_label(f.item.profile == 0, lang.t("Keins", "None")).clicked() {
+                f.item.profile = 0;
+            }
+            for p in profiles {
+                let label = if p.admin { format!("{} ({})", p.name, lang.t("Administrator", "administrator")) } else { p.name.clone() };
+                if ui.selectable_label(f.item.profile == p.id, label).clicked() {
+                    f.item.profile = p.id;
+                    if !p.shell_id.is_empty() {
+                        f.item.shell_id = p.shell_id.clone();
+                    }
+                }
+            }
+        });
+        ui.end_row();
+        ui.label("Shell");
+        if custom {
+            ui.label(RichText::new(lang.t("Programm des Profils", "Program of the profile")).color(style::dim(ui)));
+        } else {
+            let cur = shells.iter().find(|s| s.id == f.item.shell_id).map(|s| s.label.clone()).unwrap_or_else(|| lang.t("Standard-Shell", "Default shell").to_string());
+            egui::ComboBox::from_id_salt("tpl_shell").selected_text(cur).show_ui(ui, |ui| {
+                ui.selectable_value(&mut f.item.shell_id, String::new(), lang.t("Standard-Shell", "Default shell"));
+                for s in shells {
+                    ui.selectable_value(&mut f.item.shell_id, s.id.clone(), &s.label);
+                }
+            });
+        }
+        ui.end_row();
+        ui.label(lang.t("Startordner", "Start folder"));
+        session_settings::folder_field(ui, &mut f.item.cwd, eff_shell, false, lang);
+        ui.end_row();
+        if eff_shell.starts_with("wsl") {
+            #[cfg(test)]
+            ui.data_mut(|d| d.insert_temp(Id::new(("tpl_mark", "wsl_hint")), true));
+            ui.label("");
+            dialogs::hint_label(ui, lang.t("WSL: auch ein Linux-Pfad wie /home/ich/projekt oder ~", "WSL: also a Linux path such as /home/me/project or ~"), style::dim(ui));
+            ui.end_row();
+        }
+        ui.label(lang.t("Ordner im Baum", "Tree folder"));
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut f.item.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(dialogs::FIELD_W - 30.0));
+            if !folders.is_empty() {
+                ui.menu_button("▾", |ui| {
+                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        for g in folders {
+                            if ui.button(g).clicked() {
+                                f.item.group = g.clone();
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+            }
+        });
+        ui.end_row();
+        ui.label(lang.t("Farbe", "Color"));
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut f.own_color, lang.t("Eigene Farbe", "Own color"));
+            if f.own_color {
+                ui.color_edit_button_srgb(&mut f.color);
+            }
+        });
+        ui.end_row();
+        ui.label("Tags");
+        ui.add(egui::TextEdit::singleline(&mut f.tags).hint_text(lang.t("durch Komma getrennt", "comma-separated")).desired_width(dialogs::FIELD_W));
+        ui.end_row();
+        ui.label(lang.t("Notizen", "Notes"));
+        super::opts_tabs::notes_edit(ui, "tpled", &mut f.item.notes, dialogs::FIELD_W);
+        ui.end_row();
+    });
 }
 
 /// Rechteck eines Elements für Tests merken.
@@ -654,6 +720,9 @@ impl App {
         let Some(mut f) = self.tpl.form.take() else { return };
         let lang = self.settings.language;
         let folders = self.project_folders();
+        let spec = self.preview_spec(&f.item.shell_id, f.item.profile);
+        let legacy = f.legacy_rest.clone();
+        ctx.data_mut(|d| d.insert_temp(dialogs::preview_target_id("tpled"), (spec, legacy)));
         let out = tpl_form_ui(ctx, &mut f, &self.shells, &self.settings.profiles, &folders, self.settings.claude_mode, lang);
         self.tpl.form = Some(f);
         match out {
@@ -1194,7 +1263,7 @@ mod tests {
         assert_eq!(confirm_click(&ctx, &mut c, "confirm_cancel"), ConfirmOut::Cancel);
         let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         assert_eq!(confirm_frame(&ctx, &mut c, vec![esc]), ConfirmOut::Cancel);
-        for k in [templates::Risk::AddDir, templates::Risk::AllowedTools, templates::Risk::McpConfig, templates::Risk::SafeMode, templates::Risk::AppendSystemPrompt] {
+        for k in [templates::Risk::AddDir, templates::Risk::PluginDir, templates::Risk::AllowedTools, templates::Risk::McpConfig, templates::Risk::SafeMode, templates::Risk::SystemPrompt, templates::Risk::AppendSystemPrompt] {
             assert_ne!(risk_label(k, Lang::En), risk_label(k, Lang::De));
         }
     }

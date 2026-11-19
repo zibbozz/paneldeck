@@ -322,10 +322,19 @@ impl App {
                                 ui.add_space(S1);
                             }
                             let before = self.settings.claude_defaults.clone();
-                            egui::Grid::new("claude_defaults").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-                                // Ungültige Namen bleiben nur im Eingabefeld; gespeichert und angewendet werden nur gültige Werte.
-                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults);
-                            });
+                            // Reiter wie in den Sitzungsdialogen (#292), hier nur Claude | Zugriff | Erweitert. Ungültige Werte bleiben
+                            // nur im Eingabefeld; gespeichert und angewendet werden nur gültige Werte. Standards gelten für jede Shell:
+                            // Windows-Dialoge; Linux-Pfade bleiben möglich und gelten nur in WSL-Sitzungen.
+                            {
+                                use super::opts_tabs::{self as tabs, DEFAULTS_TABS};
+                                let target = super::folder_picker::Target::Windows;
+                                let none = ClaudeOpts::default();
+                                let chk = super::dialogs::check_opts(ui.ctx(), lang, &self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults, &target);
+                                tabs::handle_keys(ui.ctx(), "defaults", Id::new("settings_win"), &DEFAULTS_TABS);
+                                let infos = super::dialogs::claude_tab_infos(&self.settings.claude_defaults, &none, &chk);
+                                let tab = tabs::strip(ui, lang, "defaults", &infos);
+                                super::dialogs::claude_tab(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults, &target, &none, &chk, tab, |_| {}, |_| {});
+                            }
                             if self.settings.claude_defaults != before {
                                 // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).
                                 self.settings.last_claude_opts = None;

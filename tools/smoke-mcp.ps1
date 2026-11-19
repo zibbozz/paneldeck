@@ -729,7 +729,7 @@ $wait
 
   Write-Host "== Weitere Claude-Optionen (#182)" -ForegroundColor Cyan
   Check 'create_session: claude_flags ohne claude -> bad_args' ((Code (Tool 'create_session' @{ shell = 'cmd'; claude_flags = @('chrome') })) -eq 'bad_args')
-  foreach ($bad in @('add-dir', '--dangerously-skip-permissions', 'mcp-config', 'allowed-tools', 'resume', 'settings', 'remote-control', 'safe-mode', 'autocompact')) {
+  foreach ($bad in @('add-dir', '--dangerously-skip-permissions', 'mcp-config', 'allowed-tools', 'resume', 'settings', 'remote-control', 'safe-mode', 'autocompact', 'plugin-dir', '--strict-mcp-config', 'system-prompt')) {
     $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @($bad) }
     Check "create_session: claude_flags [$bad] -> bad_args (never allowed)" ((Code $r) -eq 'bad_args' -and $r.text -match 'never allowed via MCP') $r.text
   }
@@ -737,7 +737,7 @@ $wait
   Check 'create_session: chrome + no-chrome -> bad_args' ((Code $r) -eq 'bad_args' -and $r.text -match 'mutually exclusive') $r.text
   Check 'create_session: claude_flags als String -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = 'chrome' })) -eq 'bad_args')
   Check 'create_session: unbekannter Schalter -> bad_args' ((Code (Tool 'create_session' @{ claude = $true; cwd = "$proj"; claude_flags = @('chrome; calc') })) -eq 'bad_args')
-  foreach ($k in @('add_dir', 'mcp_config', 'append_system_prompt', 'allowed_tools', 'safe_mode')) {
+  foreach ($k in @('add_dir', 'mcp_config', 'append_system_prompt', 'allowed_tools', 'safe_mode', 'plugin_dir', 'plugin_dirs', 'mcp_configs', 'strict_mcp_config', 'system_prompt')) {
     $r = Tool 'create_session' @{ claude = $true; cwd = "$proj"; $k = "$proj" }
     Check "create_session: Parameter $k -> bad_args" ((Code $r) -eq 'bad_args' -and $r.text -match 'not allowed via MCP') $r.text
   }
@@ -759,15 +759,20 @@ $wait
   Write-Host "== Weitere Claude-Optionen: Standards des Nutzers (#182)" -ForegroundColor Cyan
   $mcpCfg = "$work\smoke-mcp-config.json"
   [IO.File]::WriteAllText($mcpCfg, '{"mcpServers":{}}', (New-Object Text.UTF8Encoding $false))
+  # #289: mehrere MCP-Konfigurationen, Plugin-Ordner, --strict-mcp-config und ein eigener (mehrzeiliger) System-Prompt.
+  $mcpCfg2 = "$work\smoke-mcp-config2.json"
+  [IO.File]::WriteAllText($mcpCfg2, '{"mcpServers":{}}', (New-Object Text.UTF8Encoding $false))
+  $plugDir = "$work\smoke-plugin"
+  New-Item -ItemType Directory -Force $plugDir | Out-Null
   $script:prestart = {
     $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
-    $d = [pscustomobject]@{ flags = @('verbose', 'no-chrome', 'safe-mode'); add_dirs = @("$proj", "$work\smoke-missing-dir"); allowed_tools = 'Read'; disallowed_tools = 'WebFetch'; mcp_config = $mcpCfg; fallback_model = 'haiku' }
+    $d = [pscustomobject]@{ flags = @('verbose', 'no-chrome', 'safe-mode'); add_dirs = @("$proj", "$work\smoke-missing-dir"); plugin_dirs = @($plugDir, "$work\smoke-missing-plugin"); allowed_tools = 'Read'; disallowed_tools = 'WebFetch'; mcp_configs = @($mcpCfg, $mcpCfg2); strict_mcp_config = $true; system_prompt = "Smoke prompt`nsecond line"; fallback_model = 'haiku' }
     $j | Add-Member -Force claude_defaults $d
     $j | Add-Member -Force default_shell 'powershell'
     [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
     # Terminal-Vorlagen (#244): mit Isolationsprofil 1 (Schein-PATH); riskante Optionen, die ein Agent nie bekommt.
     $tpl = @(
-      [pscustomobject]@{ name = 'smoke-tpl'; terminal = $true; grid = $false; items = @([pscustomobject]@{ name = 'API'; shell_id = 'powershell'; cwd = "$proj"; claude = $true; profile = 1; group = 'tplgrp'; prompt = ''; tags = @('smoke'); color = @(1, 2, 3); notes = 'tpl-note'; claude_opts = [pscustomobject]@{ model = 'haiku'; permission_mode = 'bypassPermissions'; flags = @('ide', 'safe-mode'); add_dirs = @("$proj"); allowed_tools = 'Read'; mcp_config = $mcpCfg } }) },
+      [pscustomobject]@{ name = 'smoke-tpl'; terminal = $true; grid = $false; items = @([pscustomobject]@{ name = 'API'; shell_id = 'powershell'; cwd = "$proj"; claude = $true; profile = 1; group = 'tplgrp'; prompt = ''; tags = @('smoke'); color = @(1, 2, 3); notes = 'tpl-note'; claude_opts = [pscustomobject]@{ model = 'haiku'; permission_mode = 'bypassPermissions'; flags = @('ide', 'safe-mode'); add_dirs = @("$proj"); plugin_dirs = @($plugDir); allowed_tools = 'Read'; mcp_config = $mcpCfg; system_prompt = 'Template prompt' } }) },
       [pscustomobject]@{ name = 'smoke-plain'; terminal = $true; items = @([pscustomobject]@{ name = ''; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 1; group = 'tplplain' }) },
       [pscustomobject]@{ name = 'smoke-admin'; terminal = $true; items = @([pscustomobject]@{ name = 'adm'; shell_id = 'cmd'; cwd = "$proj"; claude = $false; profile = 77 }) },
       [pscustomobject]@{ name = 'smoke-group'; items = @([pscustomobject]@{ name = 'a'; shell_id = 'cmd'; profile = 1 }, [pscustomobject]@{ name = 'b'; shell_id = 'cmd'; profile = 1 }) },
@@ -808,19 +813,19 @@ $wait
     $re4 = 'args=.*--permission-mode default --no-chrome --ide --verbose --disallowed-tools WebFetch --fallback-model haiku --session-id [0-9a-f-]{36}'
     $ct4 = Wait-FakeFile $calls $re4
     $line4 = @(($ct4 -split "`r?`n") | Where-Object { $_ -match $re4 }) | Select-Object -Last 1
-    Check 'Ersatz-claude (Agent): ohne --add-dir/--allowed-tools/--mcp-config/--safe-mode' ($line4 -and $line4 -notmatch '--add-dir|--mcp-config| --allowed-tools|--safe-mode') "calls.txt='$ct4'"
+    Check 'Ersatz-claude (Agent): ohne --add-dir/--plugin-dir/--allowed-tools/--mcp-config/--strict-mcp-config/--system-prompt/--safe-mode' ($line4 -and $line4 -notmatch '--add-dir|--plugin-dir|--mcp-config|--strict-mcp-config|--system-prompt| --allowed-tools|--safe-mode') "calls.txt='$ct4'"
     [void](Tool 'close_session' @{ session = $ag.data.id })
   }
   Write-Host "== Terminal-Vorlagen: create_session mit template (#244)" -ForegroundColor Cyan
   $t1 = Tool 'create_session' @{ template = 'smoke-tpl' }
   Check 'create_session mit template: Name, Ordner, Shell und Claude aus der Vorlage' (-not $t1.err -and $t1.data.name -eq 'API' -and $t1.data.group -eq 'tplgrp' -and $t1.data.template -eq 'smoke-tpl' -and $t1.data.claude -and $t1.data.shell -eq 'powershell') $t1.text
   $tuo = @($t1.data.claude_user_options); $tfl = @($t1.data.claude_flags)
-  Check 'create_session mit template: Optionen der Vorlage, nie bypassPermissions/--safe-mode/riskante Wertoptionen' (-not $t1.err -and $t1.data.model -eq 'haiku' -and $t1.data.permission_mode -eq 'default' -and $tfl -contains 'ide' -and $tfl -notcontains 'safe-mode' -and -not ($tuo | Where-Object { $_ -in 'add_dir', 'allowed_tools', 'mcp_config' })) $t1.text
+  Check 'create_session mit template: Optionen der Vorlage, nie bypassPermissions/--safe-mode/riskante Wertoptionen' (-not $t1.err -and $t1.data.model -eq 'haiku' -and $t1.data.permission_mode -eq 'default' -and $tfl -contains 'ide' -and $tfl -notcontains 'safe-mode' -and -not ($tuo | Where-Object { $_ -in 'add_dir', 'plugin_dir', 'allowed_tools', 'mcp_config', 'strict_mcp_config', 'system_prompt' })) $t1.text
   if ($script:lastOk) {
     $re6 = 'args=.*--model haiku --permission-mode default .*--session-id [0-9a-f-]{36}'
     $ct6 = Wait-FakeFile $calls $re6
     $line6 = @(($ct6 -split "`r?`n") | Where-Object { $_ -match $re6 }) | Select-Object -Last 1
-    Check 'Ersatz-claude (Vorlage per Agent): ohne --add-dir/--allowed-tools/--mcp-config/--safe-mode/bypassPermissions' ($line6 -and $line6 -notmatch '--add-dir|--mcp-config| --allowed-tools|--safe-mode|bypass') "calls.txt='$ct6'"
+    Check 'Ersatz-claude (Vorlage per Agent): ohne --add-dir/--plugin-dir/--allowed-tools/--mcp-config/--system-prompt/--safe-mode/bypassPermissions' ($line6 -and $line6 -notmatch '--add-dir|--plugin-dir|--mcp-config|--system-prompt| --allowed-tools|--safe-mode|bypass') "calls.txt='$ct6'"
   }
   $t2 = Tool 'create_session' @{ template = 'SMOKE-TPL'; claude = $false }
   Check 'template: zweiter Start zaehlt hoch (API #2), Name ohne Gross-/Kleinschreibung, claude=false gewinnt' (-not $t2.err -and $t2.data.name -eq 'API #2' -and -not $t2.data.claude) $t2.text
@@ -839,7 +844,7 @@ $wait
   $dg = Tool 'create_session' @{ template = 'smoke-danger' }
   Check 'template: Profil mit dangerously im Startbefehl -> bad_args' ((Code $dg) -eq 'bad_args' -and $dg.text -match 'dangerously') $dg.text
   $ign = @($t1.data.template_ignored)
-  Check 'template: template_ignored nennt die weggelassenen Optionen' (-not $t1.err -and $ign -contains 'add_dir' -and $ign -contains 'allowed_tools' -and $ign -contains 'mcp_config' -and $ign -contains 'safe-mode') $t1.text
+  Check 'template: template_ignored nennt die weggelassenen Optionen' (-not $t1.err -and $ign -contains 'add_dir' -and $ign -contains 'allowed_tools' -and $ign -contains 'mcp_config' -and $ign -contains 'safe-mode' -and $ign -contains 'plugin_dir' -and $ign -contains 'system_prompt') $t1.text
   Check 'template ohne riskante Optionen: template_ignored leer' (-not $t4.err -and ($t4.data.PSObject.Properties.Name -contains 'template_ignored') -and @($t4.data.template_ignored).Count -eq 0) $t4.text
   Check 'template mit kind=chat -> bad_args' ((Code (Tool 'create_session' @{ template = 'smoke-plain'; kind = 'chat' })) -eq 'bad_args')
   foreach ($x in @($t1, $t2, $t3, $t4)) { if ($x.data.id) { [void](Tool 'close_session' @{ session = $x.data.id }) } }
@@ -850,11 +855,11 @@ $wait
   if (-not $op.WaitForExit(15000)) { $op.Kill() }
   $us = $null; $t0 = Get-Date
   while (-not $us -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500; $us = (Tool 'list_sessions').data.sessions | Where-Object { $before -notcontains $_.id -and $_.claude } | Select-Object -First 1 }
-  Check 'Sitzung des Nutzers (--open --claude): alle Wertoptionen der Standards' ($us -and (@($us.claude_user_options) -join ',') -eq 'add_dir,allowed_tools,disallowed_tools,mcp_config,fallback_model' -and (@($us.claude_flags) -join ',') -eq 'no-chrome,verbose,safe-mode') ($us | ConvertTo-Json -Compress)
+  Check 'Sitzung des Nutzers (--open --claude): alle Wertoptionen der Standards' ($us -and (@($us.claude_user_options) -join ',') -eq 'add_dir,plugin_dir,allowed_tools,disallowed_tools,mcp_config,strict_mcp_config,system_prompt,fallback_model' -and (@($us.claude_flags) -join ',') -eq 'no-chrome,verbose,safe-mode') ($us | ConvertTo-Json -Compress)
   if ($script:lastOk) {
-    $re5 = 'args=.*--no-chrome --verbose --safe-mode --add-dir "?' + [regex]::Escape("$proj") + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? --fallback-model haiku --session-id'
+    $re5 = 'args=.*--no-chrome --verbose --safe-mode --add-dir "?' + [regex]::Escape("$proj") + '"? --plugin-dir "?' + [regex]::Escape($plugDir) + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? "?' + [regex]::Escape($mcpCfg2) + '"? --strict-mcp-config --system-prompt "Smoke prompt second line" --fallback-model haiku --session-id'
     $ct5 = Wait-FakeFile $calls $re5
-    Check 'Ersatz-claude (Nutzer) bekommt --add-dir/--allowed-tools/--mcp-config gequotet (fakebin\calls.txt)' ($ct5 -match $re5) "calls.txt='$ct5'"
+    Check 'Ersatz-claude (Nutzer) bekommt --add-dir/--plugin-dir/--allowed-tools/mehrere --mcp-config/--strict-mcp-config/--system-prompt gequotet (fakebin\calls.txt)' ($ct5 -match $re5) "calls.txt='$ct5'"
     [void](Tool 'close_session' @{ session = $us.id })
   }
 
