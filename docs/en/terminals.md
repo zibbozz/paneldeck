@@ -130,7 +130,7 @@ All shortcuts can be changed under *Settings → Shortcuts*.
 | `Alt+1`…`9` (fixed) | Session 1–9 of the current project |
 | `Ctrl+Alt+arrows` (fixed) | Focus the neighbouring pane |
 
-Modifiers must match exactly (`Ctrl+Shift+1` is not `Ctrl+1`). The fixed shortcuts are only used when their target exists; otherwise the key goes to the terminal. Custom shortcuts need Ctrl or Alt (F keys also work alone); while recording, Esc cancels. *Settings*, the update button and the MCP status are in the window header, right of the tabs.
+Modifiers must match exactly (`Ctrl+Shift+1` is not `Ctrl+1`). The fixed shortcuts are only used when their target exists; otherwise the key goes to the terminal. Custom shortcuts need Ctrl or Alt (F keys also work alone); while recording, Esc cancels. *Settings*, the update button and the MCP status are in the window header, right of the tabs. Dialog windows can be moved by their title bar, modal dialogs by the slim strip at the top; they open centred and stay inside the window.
 
 The shortcuts of the to-do list are listed in [Todo list and tickets](todo-and-tickets.md#keyboard-shortcuts).
 
