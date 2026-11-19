@@ -119,9 +119,6 @@ pub fn line(l: &str, acc: &mut Acc, on: &mut dyn FnMut(StreamEvent)) {
         // Denkende Modelle (z. B. gemma4, qwen3) liefern lange nur `thinking` (#299).
         if let Some(t) = m.get("thinking").and_then(|t| t.as_str()) {
             acc.thinking(t, on);
-            if acc.error.is_some() {
-                return;
-            }
         }
         if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
             acc.delta(c, on);

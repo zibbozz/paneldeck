@@ -223,16 +223,13 @@ impl Acc {
         on(StreamEvent::Delta(s.to_string()));
     }
 
-    /// Denk-Ausgabe melden (nur als Lebenszeichen; mit derselben Obergrenze wie der Text).
+    /// Denk-Ausgabe melden (nur als Lebenszeichen). Der Text wird nicht behalten, darum bricht viel Denk-Ausgabe die
+    /// Antwort nicht ab: über `MAX_CONTENT` hinaus wird sie nur noch still übergangen.
     pub fn thinking(&mut self, s: &str, on: &mut dyn FnMut(StreamEvent)) {
-        if s.is_empty() {
+        if s.is_empty() || self.thinking_bytes > MAX_CONTENT {
             return;
         }
-        self.thinking_bytes += s.len();
-        if self.thinking_bytes > MAX_CONTENT {
-            self.error = Some(LlmError::TooLarge);
-            return;
-        }
+        self.thinking_bytes = self.thinking_bytes.saturating_add(s.len());
         on(StreamEvent::Thinking);
     }
 

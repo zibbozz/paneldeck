@@ -139,8 +139,9 @@ pub(super) fn waiting_text(thinking: bool, waited: Option<std::time::Duration>, 
 fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: Lang, out: &mut ChatOut) {
     let streaming = chat.busy();
     let waiting = waiting_text(chat.thinking, chat.turn_started.filter(|_| chat.streaming()).map(|t| t.elapsed()), lang);
-    if chat.streaming() && !chat.thinking {
-        // Wartezeit sekündlich nachführen (auch ohne neue Daten).
+    let still_empty = chat.messages().last().is_some_and(|m| m.role == Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty());
+    if chat.streaming() && !chat.thinking && still_empty {
+        // Wartezeit sekündlich nachführen (auch ohne neue Daten) – nur solange die Antwort noch leer ist.
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
     }
     let has_error = chat.has_error();
