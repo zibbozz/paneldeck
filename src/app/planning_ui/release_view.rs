@@ -220,7 +220,7 @@ impl PlanUi {
         let Some(mut f) = self.releases.form.take() else { return };
         let lang = cx.lang;
         let (mut save, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("release_form")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("release_form")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 480.0));
             let title = match (f.id.is_some(), f.kind) {
                 (false, ReleaseKind::Version) => lang.t("Neue Version", "New version"),
@@ -288,7 +288,7 @@ impl PlanUi {
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
         let noun = d.kind.label(lang);
-        let m = egui::Modal::new(Self::modal_id("release_delete")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("release_delete")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 500.0));
             let title = match lang {
                 Lang::De => format!("{noun} {} löschen?", lang.q(&d.name)),

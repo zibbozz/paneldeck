@@ -1001,3 +1001,91 @@ fn ticket_panel_width_keeps_room_for_the_list() {
     }
     assert_eq!(panel_width_range(1600.0).1, 1120.0);
 }
+
+/// Ein Bild mit eigener Fenstergröße (für das Verkleinern des Fensters).
+fn frame_in(h: &mut H, screen: Vec2, events: Vec<Event>) {
+    h.time += 0.1;
+    let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), time: Some(h.time), events, ..Default::default() };
+    let H { ctx, db, ui, lang, .. } = h;
+    let env = Env { db: Some(db), db_error: None, lang: *lang, bg: Color32::from_rgb(24, 24, 28), undo_steps: 25 };
+    let _ = ctx.run(input, |ctx| {
+        ui.ensure_loaded(Some(db));
+        ui.header(ctx, &env, db);
+        ui.page(ctx, &env, db);
+    });
+}
+
+/// Mit gedrückter linker Taste von `from` nach `to` ziehen (in kleinen Schritten, je ein Bild).
+fn drag_in(h: &mut H, screen: Vec2, from: Pos2, to: Pos2) {
+    let btn = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    frame_in(h, screen, vec![Event::PointerMoved(from)]);
+    frame_in(h, screen, vec![btn(from, true)]);
+    for i in 1..=10 {
+        frame_in(h, screen, vec![Event::PointerMoved(from + (to - from) * (i as f32 / 10.0))]);
+    }
+    frame_in(h, screen, vec![btn(to, false)]);
+    for _ in 0..3 {
+        frame_in(h, screen, vec![]);
+    }
+}
+
+#[test]
+fn the_create_dialog_can_be_dragged_by_its_strip_and_stays_in_the_window() {
+    let mut h = H::new(Lang::En);
+    let big = Vec2::new(1600.0, 900.0);
+    let id = PlanUi::modal_id("ticket_create");
+    let rect = |h: &H| h.ctx.memory(|m| m.area_rect(id)).expect("Dialog gezeichnet");
+    let open = |h: &mut H| {
+        frame_in(h, big, vec![ctrl(Key::N)]);
+        for _ in 0..3 {
+            frame_in(h, big, vec![]);
+        }
+        assert!(h.ui.tickets.create.is_some());
+    };
+    open(&mut h);
+    h.ui.tickets.create.as_mut().unwrap().title = "Entwurf".into();
+    let r0 = rect(&h);
+    assert!((r0.center() - Pos2::new(800.0, 450.0)).length() < 2.0, "öffnet mittig: {r0:?}");
+    assert!(r0.width() < 1200.0 && r0.height() < 880.0, "nur der Rahmen, nicht der Hintergrund: {r0:?}");
+
+    // An der Leiste oben ziehen: der Dialog folgt, der Entwurf bleibt.
+    let grip = Pos2::new(r0.center().x, r0.top() + 7.0);
+    drag_in(&mut h, big, grip, grip + Vec2::new(-200.0, -60.0));
+    let r1 = rect(&h);
+    assert!((r1.min - (r0.min + Vec2::new(-200.0, -60.0))).length() < 2.0, "folgt der Maus: {r0:?} -> {r1:?}");
+    assert_eq!(h.ui.tickets.create.as_ref().map(|d| d.title.as_str()), Some("Entwurf"), "Ziehen schließt nichts");
+
+    // Unterhalb der Leiste (im Inhalt) zu ziehen verschiebt nichts.
+    let inside = Pos2::new(r1.center().x, r1.bottom() - 6.0);
+    drag_in(&mut h, big, inside, inside + Vec2::new(150.0, 0.0));
+    assert!((rect(&h).min - r1.min).length() < 0.5, "nur die Leiste verschiebt: {:?}", rect(&h));
+
+    // Weit hinaus ziehen: bleibt ganz im Fenster.
+    let grip = Pos2::new(r1.center().x, r1.top() + 7.0);
+    drag_in(&mut h, big, grip, Pos2::new(-500.0, -400.0));
+    let r2 = rect(&h);
+    assert!(r2.min.x >= -0.5 && r2.min.y >= -0.5, "bleibt links/oben im Fenster: {r2:?}");
+    let grip = Pos2::new(r2.center().x, r2.top() + 7.0);
+    drag_in(&mut h, big, grip, Pos2::new(5000.0, 5000.0));
+    let r3 = rect(&h);
+    assert!(r3.max.x <= big.x + 0.5 && r3.max.y <= big.y + 0.5, "bleibt rechts/unten im Fenster: {r3:?}");
+
+    // Fenster kleiner: der Dialog rückt nach, bleibt also sichtbar.
+    let small = Vec2::new(1100.0, 760.0);
+    for _ in 0..3 {
+        frame_in(&mut h, small, vec![]);
+    }
+    let r4 = rect(&h);
+    assert!(r4.max.x <= small.x + 0.5 && r4.max.y <= small.y + 0.5 && r4.min.x >= -0.5 && r4.min.y >= -0.5, "im kleineren Fenster: {r4:?}");
+    assert!(h.ui.tickets.create.is_some(), "Verkleinern schließt nichts");
+
+    // Esc schließt wie bisher; beim nächsten Öffnen wieder mittig.
+    frame_in(&mut h, big, vec![Event::Key { key: Key::Escape, physical_key: Some(Key::Escape), pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+    for _ in 0..2 {
+        frame_in(&mut h, big, vec![]);
+    }
+    assert!(h.ui.tickets.create.is_none(), "Esc schließt");
+    open(&mut h);
+    let r5 = rect(&h);
+    assert!((r5.center() - Pos2::new(800.0, 450.0)).length() < 2.0, "öffnet wieder mittig: {r5:?}");
+}

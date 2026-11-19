@@ -205,7 +205,7 @@ impl PlanUi {
         let mut close = false;
         let mut new_type: Option<TypeSummary> = None;
         let check = check_create(cx.conn, dlg.project, &ty.fields, &dlg.title, &dlg.drafts, dlg.tried, lang);
-        let m = egui::Modal::new(Self::modal_id("ticket_create")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("ticket_create")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 660.0));
             let title = match &parent_ticket {
                 Some(p) => match lang {

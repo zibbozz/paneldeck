@@ -147,7 +147,7 @@ impl PlanUi {
         let status_color = |id: i64| sum.status(id).map(|s| color_of(&s.color)).unwrap_or(egui::Color32::GRAY);
         let (mut save, mut close) = (false, false);
         let mut acts: Vec<Act> = Vec::new();
-        let m = egui::Modal::new(Self::modal_id("board_cfg")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("board_cfg")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 740.0));
             widgets::dialog_title(ui, if d.id.is_some() { lang.t("Board bearbeiten", "Edit board") } else { lang.t("Neues Board", "New board") });
             egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 250.0).max(220.0)).auto_shrink([false, true]).show(ui, |ui| {
@@ -382,7 +382,7 @@ impl PlanUi {
         let Some(d) = self.boards.del.take() else { return };
         let lang = cx.lang;
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(Self::modal_id("board_delete")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("board_delete")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 460.0));
             let title = match lang {
                 crate::state::Lang::De => format!("Board {} löschen?", lang.q(&d.name)),
@@ -425,7 +425,7 @@ impl PlanUi {
         let can_submit = d.fields.iter().all(|f| f.field.as_ref().is_some_and(|f| fillable(f.kind)));
         let (project_id, ticket_id) = (d.project_id, d.ticket_id);
         let labels = std::mem::take(&mut self.tickets.labels);
-        let m = egui::Modal::new(Self::modal_id("board_needs")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("board_needs")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 480.0));
             widgets::dialog_title(ui, lang.t("Pflichtfelder ausfüllen", "Fill in required fields"));
             let intro = match lang {

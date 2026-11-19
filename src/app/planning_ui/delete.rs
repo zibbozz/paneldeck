@@ -126,7 +126,7 @@ impl PlanUi {
         let mut go = false;
         let mut close = false;
         let mut remap = false;
-        let m = egui::Modal::new(Self::modal_id("delete")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("delete")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 520.0));
             ui.horizontal(|ui| {
                 ui.colored_label(widgets::DANGER, RichText::new("!").heading().strong());

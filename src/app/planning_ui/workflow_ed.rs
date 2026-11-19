@@ -259,7 +259,7 @@ impl PlanUi {
         if let Some((tid, count)) = self.workflow.off {
             let mut go = false;
             let mut close = false;
-            let m = egui::Modal::new(Self::modal_id("wf_off")).show(ctx, |ui| {
+            let m = crate::style::modal(Self::modal_id("wf_off")).show(ctx, |ui| {
                 ui.set_width(widgets::modal_width(ctx, 440.0));
                 widgets::dialog_title(ui, lang.t("Workflow ausschalten?", "Turn the workflow off?"));
                 ui.label(match lang {
@@ -299,7 +299,7 @@ impl PlanUi {
             let f = label_fields.iter().find(|f| f.id == fid)?;
             Some(cached_per_open(ctx, Id::new(("wf_labels", fid)), || label_counts(cx.conn, project, &label_ident(f.key.as_deref(), f.name.as_deref()))))
         };
-        let m = egui::Modal::new(Self::modal_id("rules")).show(ctx, |ui| {
+        let m = crate::style::modal(Self::modal_id("rules")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 640.0));
             widgets::dialog_title(ui, lang.t("Regeln für den Übergang", "Transition rules"));
             ui.label(RichText::new(&d.title).strong());

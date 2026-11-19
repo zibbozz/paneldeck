@@ -264,7 +264,7 @@ impl PlanUi {
         let mut apply = false;
         let mut clicked: Option<usize> = None;
         let mut query_changed = false;
-        let resp = egui::Modal::new(Self::modal_id("quick")).area(egui::Modal::default_area(Self::modal_id("quick")).anchor(Align2::CENTER_TOP, Vec2::new(0.0, 90.0))).show(ctx, |ui| {
+        let resp = crate::style::modal(Self::modal_id("quick")).anchor(Align2::CENTER_TOP, Vec2::new(0.0, 90.0)).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 600.0));
             ui.label(RichText::new(&m.title).small().color(style::dim(ui)));
             ui.add_space(S1);
