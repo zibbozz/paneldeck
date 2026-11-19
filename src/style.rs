@@ -27,6 +27,25 @@ pub fn set_id_salt(window: u64) {
     ID_SALT.store(window, Ordering::Relaxed);
 }
 
+/// Dialogfenster wie ein normales Fenster verschiebbar machen (#275, #288): an der Titelleiste ziehen, bleibt im
+/// sichtbaren Bereich (`constrain`), öffnet mittig. Solange der Dialog offen ist (in jedem Durchlauf gezeichnet), behält
+/// er die gezogene Position (feste `id`, unabhängig vom Titel); nach dem Schließen öffnet er beim nächsten Mal wieder
+/// mittig. Drehpunkt ist die Mitte: wächst der Inhalt (z. B. „Weitere Optionen“), wächst das Fenster nach beiden Seiten.
+/// Jedes Paneldeck-Fenster ist ein eigener egui-Viewport mit eigenem Speicher – Position und Zähler gelten je Fenster.
+pub fn movable<'a>(ctx: &egui::Context, id: egui::Id, w: egui::Window<'a>) -> egui::Window<'a> {
+    let center = ctx.content_rect().center();
+    let pass = ctx.cumulative_pass_nr();
+    let key = id.with("pd_movable_pass");
+    // Im vorigen Durchlauf nicht gezeichnet = gerade geöffnet: wieder in die Mitte.
+    let reopened = ctx.data_mut(|d| {
+        let last = d.get_temp::<u64>(key);
+        d.insert_temp(key, pass);
+        last.is_none_or(|l| pass > l + 1)
+    });
+    let w = w.id(id).pivot(egui::Align2::CENTER_CENTER).default_pos(center).constrain(true);
+    if reopened { w.current_pos(center) } else { w }
+}
+
 /// Id je Fenster unterscheiden (im Hauptfenster unverändert).
 pub fn salted(id: egui::Id) -> egui::Id {
     match ID_SALT.load(Ordering::Relaxed) {

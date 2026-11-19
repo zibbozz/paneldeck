@@ -189,11 +189,9 @@ impl App {
         }
         let lang = self.settings.language;
         let (mut go, mut cancel) = (false, ctx.input(|i| i.key_pressed(Key::Escape)));
-        egui::Window::new(lang.t("„Sitzungen merken“ ausschalten?", "Turn off “Remember sessions”?"))
-            .id(Id::new("remember_off_ask"))
+        style::movable(ctx, Id::new("remember_off_ask"), egui::Window::new(lang.t("„Sitzungen merken“ ausschalten?", "Turn off “Remember sessions”?")))
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_max_width(440.0);

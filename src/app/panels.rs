@@ -266,7 +266,7 @@ impl App {
         let mut open = true;
         let title = format!("{} – {}", lang.t("Warteschlange", "Queue"), self.entries[&id].display_name());
         let mut add: Option<String> = None;
-        egui::Window::new(title).id(Id::new("queue_win")).open(&mut open).default_size([520.0, 420.0]).show(ctx, |ui| {
+        style::movable(ctx, Id::new("queue_win"), egui::Window::new(title)).open(&mut open).default_size([520.0, 420.0]).show(ctx, |ui| {
             let Some(e) = self.entries.get_mut(&id) else { return };
             ui.label(RichText::new(lang.t(
                 "Die Prompts werden nacheinander gesendet: der nächste, sobald Claude „bereit“ meldet. Bei Freigabe-Fragen wartet die Warteschlange – ebenso nach einer Unterbrechung (Esc) oder einem Fehler, bis die nächste Antwort fertig ist oder du „Nächsten jetzt senden“ wählst.",
@@ -400,7 +400,7 @@ impl App {
         let mut do_stage_all = false;
         let mut do_commit = false;
         let mut select: Option<(String, bool)> = None;
-        egui::Window::new(lang.t("Änderungen", "Changes")).open(&mut open).default_size([960.0, 540.0]).show(ctx, |ui| {
+        style::movable(ctx, Id::new("diff_win"), egui::Window::new(lang.t("Änderungen", "Changes"))).open(&mut open).default_size([960.0, 540.0]).show(ctx, |ui| {
             if let Some(err) = &snap.error {
                 ui.colored_label(Color32::from_rgb(0xe5, 0xc0, 0x7b), err);
                 ui.label(RichText::new(&dir).small().color(style::dim(ui)));
@@ -556,7 +556,7 @@ impl App {
         let total: f64 = per_session.iter().map(|s| s.2).sum::<f64>() + 0.0;
         let today_c = days.last().map(|d| d.1).unwrap_or(0.0);
         let budget = self.settings.daily_budget;
-        egui::Window::new(lang.t("Kosten-Übersicht", "Cost overview")).open(&mut open).default_size([560.0, 560.0]).show(ctx, |ui| {
+        style::movable(ctx, Id::new("cost_win"), egui::Window::new(lang.t("Kosten-Übersicht", "Cost overview"))).open(&mut open).default_size([560.0, 560.0]).show(ctx, |ui| {
             ui.label(RichText::new(lang.t("Geschätzt aus den lokalen Transkripten der Sitzungen in Paneldeck (nur Sitzungen, die hier geöffnet sind). Tage in UTC.", "Estimated from the local transcripts of sessions in Paneldeck (only sessions open here). Days in UTC.")).small().color(style::dim(ui)));
             ui.add_space(S1);
             ui.horizontal(|ui| {
@@ -641,7 +641,7 @@ impl App {
         }
         let lang = self.settings.language;
         let mut open = true;
-        egui::Window::new(lang.t("Claude-Verlauf", "Claude history"))
+        style::movable(ctx, Id::new("history_win"), egui::Window::new(lang.t("Claude-Verlauf", "Claude history")))
             .open(&mut open)
             .default_size([680.0, 460.0])
             .show(ctx, |ui| {
@@ -718,7 +718,7 @@ impl App {
         let now = ctx.input(|i| i.time);
         let mut open = !ctx.input(|i| i.key_pressed(Key::Escape));
         let mut jump: Option<(u64, i32)> = None;
-        egui::Window::new(lang.t("Alle Sitzungen durchsuchen", "Search all sessions"))
+        style::movable(ctx, Id::new("gsearch_win"), egui::Window::new(lang.t("Alle Sitzungen durchsuchen", "Search all sessions")))
             .open(&mut open)
             .default_size([640.0, 440.0])
             .show(ctx, |ui| {

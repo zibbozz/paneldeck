@@ -94,11 +94,9 @@ pub(super) fn tpl_confirm_ui(ctx: &egui::Context, c: &mut TplConfirm, lang: Lang
     let mut out = ConfirmOut::Open;
     let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
-    egui::Window::new(lang.t("Vorlage mit erweiterten Claude-Optionen starten?", "Start template with extended Claude options?"))
-        .id(Id::new("tpl_confirm"))
+    style::movable(ctx, Id::new("tpl_confirm"), egui::Window::new(lang.t("Vorlage mit erweiterten Claude-Optionen starten?", "Start template with extended Claude options?")))
         .collapsible(false)
         .resizable(false)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
         .default_width(460.0)
         .show(ctx, |ui| {
             ui.set_max_width(520.0);
@@ -291,7 +289,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
         (false, true) => lang.t("Neue Terminal-Vorlage", "New terminal template"),
         _ => lang.t("Gruppen-Vorlage bearbeiten", "Edit group template"),
     };
-    egui::Window::new(title).id(Id::new("tpl_editor")).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+    style::movable(ctx, Id::new("tpl_editor"), egui::Window::new(title)).collapsible(false).resizable(false).show(ctx, |ui| {
         egui::ScrollArea::vertical().id_salt("tpl_editor_scroll").max_height(body_h).show(ui, |ui| {
             egui::Grid::new("tpl_editor_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
                 ui.label(lang.t("Name der Vorlage", "Template name"));

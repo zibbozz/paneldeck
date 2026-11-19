@@ -15,14 +15,11 @@ impl App {
         self.remember_off_ui(ctx);
         let lang = self.settings.language;
         let mut open = true;
-        egui::Window::new(lang.t("Einstellungen", "Settings"))
+        // Frei verschiebbar (#275, #288): öffnet mittig, behält die gezogene Position, solange es offen ist, bleibt im Bild.
+        style::movable(ctx, Id::new("settings_win"), egui::Window::new(lang.t("Einstellungen", "Settings")))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            // Frei verschiebbar (#275): zuerst mittig, danach merkt sich egui die Position; constrain hält es im Fenster.
-            .pivot(Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .constrain(true)
             .min_width(560.0_f32.min(ctx.content_rect().width() - 40.0))
             .max_width(560.0_f32.min(ctx.content_rect().width() - 40.0))
             .max_height((ctx.content_rect().height() - 60.0).max(200.0))
@@ -765,7 +762,7 @@ impl App {
         let Some(ed) = self.editor.as_mut() else { return };
         let mut open = true;
         let save_key = ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::S));
-        egui::Window::new(lang.t("Claude-Dateien", "Claude files"))
+        style::movable(ctx, Id::new("claude_files_win"), egui::Window::new(lang.t("Claude-Dateien", "Claude files")))
             .open(&mut open)
             .default_size([860.0, 520.0])
             .show(ctx, |ui| {

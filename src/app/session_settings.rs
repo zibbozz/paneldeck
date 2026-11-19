@@ -504,11 +504,9 @@ pub(super) enum FormOutcome {
 pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: &[ShellSpec], profiles: &[Profile], claude_mode: bool, reload_hint: bool, esc_ok: bool, lang: Lang) -> FormOutcome {
     let mut out = FormOutcome::Open;
     let esc = esc_ok && !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
-    egui::Window::new(lang.t("Einstellungen der Sitzung", "Session settings"))
-        .id(Id::new("session_settings"))
+    style::movable(ctx, Id::new("session_settings"), egui::Window::new(lang.t("Einstellungen der Sitzung", "Session settings")))
         .collapsible(false)
         .resizable(false)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
         .show(ctx, |ui| {
             // Scrollfläche mit Höchsthöhe nach dem Bildschirm: Speichern/Abbrechen bleiben sichtbar (#241).
             let body_h = super::dialogs::dialog_body_height(ui.ctx());
