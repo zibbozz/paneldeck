@@ -130,7 +130,7 @@ Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 | `Alt+1`…`9` (fest) | Sitzung 1–9 des aktuellen Projekts |
 | `Strg+Alt+Pfeile` (fest) | Nachbarbereich fokussieren |
 
-Die Modifikatoren müssen genau passen (`Strg+Umschalt+1` ist nicht `Strg+1`). Die festen Kürzel greifen nur, wenn es ihr Ziel gibt; sonst geht die Taste ans Terminal. Eigene Kürzel brauchen Strg oder Alt (F-Tasten gehen auch allein); bei der Aufnahme bricht Esc ab. *Einstellungen*, der Update-Knopf und der MCP-Status stehen in der Fensterleiste rechts neben den Reitern.
+Die Modifikatoren müssen genau passen (`Strg+Umschalt+1` ist nicht `Strg+1`). Die festen Kürzel greifen nur, wenn es ihr Ziel gibt; sonst geht die Taste ans Terminal. Eigene Kürzel brauchen Strg oder Alt (F-Tasten gehen auch allein); bei der Aufnahme bricht Esc ab. *Einstellungen*, der Update-Knopf und der MCP-Status stehen in der Fensterleiste rechts neben den Reitern. Dialogfenster lassen sich an ihrer Titelleiste verschieben, modale Dialoge an der schmalen Leiste oben; sie öffnen mittig und bleiben im Fenster.
 
 Die Kürzel der Todo-Liste stehen unter [Todo-Liste und Tickets](todo-and-tickets.md#tastenkürzel).
 

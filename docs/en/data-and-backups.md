@@ -103,6 +103,7 @@ All new fields are optional: a missing field means the previous behaviour, and o
 
 ## New fields in 2.4.0
 - `templates.json` → per template `terminal` (`true` = a terminal template with exactly one session); per session `color`, `tags`, `notes`, `claude_opts` (same keys as in `state.json`) and `continue_last`. All optional; older files still load. Paneldeck before 2.4 starts a terminal template as a group of one session, without its structured Claude options.
+- `claude_opts` (state.json), `claude_defaults` / `last_claude_opts` (settings.json) and templates → new optional fields `plugin_dirs`, `mcp_configs` (list; the first entry is also written as `mcp_config` for older versions, and an old `mcp_config` is taken over), `strict_mcp_config` and `system_prompt`.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
