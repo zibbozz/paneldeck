@@ -619,7 +619,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                             mark(ui, "continue", &r);
                             ui.end_row();
                             // Claude-Optionen (#161) wie im Dialog „Neue Sitzung“; bypassPermissions nur als Wahl für diese Sitzung.
-                            f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", super::dialogs::OptsPlace::Session);
+                            f.opts_ok = super::dialogs::claude_opts_rows(ui, lang, &mut f.v.copts, "sset", super::dialogs::OptsPlace::Session, &f.target.clone());
                             ui.label("");
                             let r = super::dialogs::hint_label(ui, lang.t("Die Optionen gelten nur für diese Sitzung, ab dem nächsten Start.", "The options apply to this session only, from its next start."), style::dim(ui));
                             mark(ui, "copts", &r);

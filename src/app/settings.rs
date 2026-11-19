@@ -324,7 +324,8 @@ impl App {
                             let before = self.settings.claude_defaults.clone();
                             egui::Grid::new("claude_defaults").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
                                 // Ungültige Namen bleiben nur im Eingabefeld; gespeichert und angewendet werden nur gültige Werte.
-                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults);
+                                // Standards gelten für jede Shell: Windows-Dialoge; Linux-Pfade bleiben möglich und gelten nur in WSL-Sitzungen.
+                                super::dialogs::claude_opts_rows(ui, lang, &mut self.settings.claude_defaults, "defaults", super::dialogs::OptsPlace::Defaults, &super::folder_picker::Target::Windows);
                             });
                             if self.settings.claude_defaults != before {
                                 // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).

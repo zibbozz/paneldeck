@@ -660,8 +660,9 @@ impl App {
 /// Zeilen eines zweispaltigen Grids für die Claude-Startoptionen (#161): Modell, Effort, Permission-Mode, Agent.
 /// Leere Auswahl = Standard von Claude Code (Flag wird nicht gesetzt). `false`, solange ein Name ungültig ist.
 /// `bypassPermissions` nur mit `allow_bypass` (Dialog „Neue Sitzung“, gilt nur für diese Sitzung) und mit Warnung;
-/// in den Standards gibt es es nicht.
-pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, place: OptsPlace) -> bool {
+/// in den Standards gibt es es nicht. `target`: Shell der Sitzung (WSL: **+** der Ordnerlisten startet in der
+/// Distribution und liefert Linux-Pfade, #289).
+pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, place: OptsPlace, target: &folder_picker::Target) -> bool {
     // Nie in den Standards und nie in einer Vorlage (die Datei kann weitergegeben werden).
     let allow_bypass = !matches!(place, OptsPlace::Defaults | OptsPlace::Template);
     use crate::claude_opts::{valid_name, BYPASS, EFFORTS, MAX_NAME, MODEL_ALIASES, PERMISSION_MODES};
@@ -736,19 +737,8 @@ pub(super) fn claude_opts_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt
     }
     o.model = o.model.trim().to_string();
     o.agent = o.agent.trim().to_string();
-    let more_ok = claude_more_rows(ui, lang, o, salt, place);
+    let more_ok = claude_more_rows(ui, lang, o, salt, place, target);
     !bad_name(&o.model) && !bad_name(&o.agent) && more_ok
-}
-
-/// Zeilen „Ordner“ im Abschnitt „Weitere Claude-Optionen“: Text (ein Pfad je Zeile) bereinigt, ohne Doppelte.
-fn dir_lines(s: &str) -> Vec<String> {
-    let mut v: Vec<String> = Vec::new();
-    for l in s.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if !v.iter().any(|x| x == l) {
-            v.push(l.to_string());
-        }
-    }
-    v
 }
 
 /// Kurzhilfe zu einem Schalter (Tooltip).
@@ -789,8 +779,9 @@ const PATH_CACHE_SECS: f64 = 3.0;
 /// die Agenten-Schalter). Zugeklappt, solange nichts gesetzt ist. Warnung bei den Rechte erweiternden Optionen und bei
 /// `--safe-mode`. `false`, solange ein Wert ungültig ist – auch zugeklappt. Pfade werden nur bei offenem Abschnitt im
 /// Dateisystem geprüft (Ergebnis je Pfad zwischengespeichert); zugeklappt zählen nur Form und gespeicherte Ergebnisse.
-fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, place: OptsPlace) -> bool {
-    use crate::claude_opts::{agent_switch, check_path, valid_autocompact, valid_budget, valid_name, valid_path, valid_text, valid_tools, PathIssue, MAX_DIRS, MAX_NAME, MAX_PATH_LEN, MAX_TEXT_LEN, MAX_TOOLS_LEN, SWITCHES, USER_SWITCHES};
+fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, place: OptsPlace, target: &folder_picker::Target) -> bool {
+    use super::list_edit::{list_editor, pick_entry, ListKind};
+    use crate::claude_opts::{agent_switch, check_path, valid_autocompact, valid_budget, valid_name, valid_path, valid_system_prompt, valid_text, valid_tools, wsl_linux_path, PathIssue, MAX_DIRS, MAX_NAME, MAX_SYSTEM_PROMPT_LEN, MAX_TEXT_LEN, MAX_TOOLS_LEN, SWITCHES, USER_SWITCHES};
     let red = Color32::from_rgb(0xe0, 0x6c, 0x75);
     let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
     let hint = |ui: &mut Ui, text: &str, c: Color32| {
@@ -827,6 +818,10 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
     let now = ui.input(|i| i.time);
     let mut cache: PathCache = ui.data(|d| d.get_temp(cache_id)).unwrap_or_default();
     let mut check = |p: &str, dir: bool| -> Result<(), PathIssue> {
+        if wsl_linux_path(p) {
+            // Linux-Pfad: nur in WSL-Sitzungen; vom Windows-Programm aus ungeprüft (siehe `wsl_linux_path`).
+            return Ok(());
+        }
         if !valid_path(p) {
             return Err(PathIssue::Invalid);
         }
@@ -852,25 +847,39 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
         Some(format!("{}: {why}", lang.q(p)))
     };
 
+    // Linux-Pfade (WSL) in einer Sitzung, die nicht in WSL läuft: würden beim Start weggelassen.
+    let wsl_session = matches!(target, folder_picker::Target::Wsl { .. });
+    let linux_bad = |p: &str| wsl_linux_path(p) && !wsl_session && matches!(place, OptsPlace::NewSession | OptsPlace::Session);
+    let linux_err = |p: &str| format!("{}: {}", lang.q(p), lang.t("Linux-Pfad – gilt nur in WSL-Sitzungen", "Linux path – only for WSL sessions"));
+
     // Prüfen (auch zugeklappt): ungültige Werte sperren „Erstellen“/„Speichern“.
     let e = &o.extra;
-    let dirs: Vec<String> = e.add_dirs.iter().map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
-    let dir_err = if dirs.len() > MAX_DIRS {
-        Some(format!("{} {MAX_DIRS}", lang.t("Höchstens so viele Ordner:", "At most this many folders:")))
-    } else {
-        dirs.iter().find_map(|d| path_err(check(d, true), d, true))
+    let mut entry_errs: std::collections::HashMap<(String, bool), String> = std::collections::HashMap::new();
+    let mut list_err = |list: &[String], dir: bool, too_many: &str| -> Option<String> {
+        let items: Vec<&str> = list.iter().map(|d| d.trim()).filter(|d| !d.is_empty()).collect();
+        let mut first = (items.len() > MAX_DIRS).then(|| format!("{too_many} {MAX_DIRS}"));
+        for d in items {
+            let err = if linux_bad(d) { Some(linux_err(d)) } else { path_err(check(d, dir), d, dir) };
+            if let Some(err) = err {
+                entry_errs.insert((d.to_string(), dir), err.clone());
+                first.get_or_insert(err);
+            }
+        }
+        first
     };
+    let dir_err = list_err(&e.add_dirs, true, lang.t("Höchstens so viele Ordner:", "At most this many folders:"));
+    let plugin_err = list_err(&e.plugin_dirs, true, lang.t("Höchstens so viele Ordner:", "At most this many folders:"));
+    let mcp_err = list_err(&e.mcp_configs, false, lang.t("Höchstens so viele Dateien:", "At most this many files:"));
     let filled = |s: &str| !s.trim().is_empty();
     let tools_bad = |s: &str| filled(s) && !valid_tools(s.trim());
-    let mcp = e.mcp_config.trim().to_string();
-    let mcp_err = if mcp.is_empty() { None } else { path_err(check(&mcp, false), &mcp, false) };
     ui.data_mut(|d| d.insert_temp(cache_id, cache));
     let text_bad = filled(&e.append_system_prompt) && !valid_text(e.append_system_prompt.trim());
+    let sys_bad = filled(&e.system_prompt) && !valid_system_prompt(&crate::claude_opts::normalize_multiline(&e.system_prompt));
     let fallback_bad = filled(&e.fallback_model) && !valid_name(e.fallback_model.trim());
     let budget_bad = filled(&e.max_budget_usd) && !valid_budget(e.max_budget_usd.trim());
     let compact_bad = filled(&e.autocompact) && !valid_autocompact(e.autocompact.trim());
     let (allowed_bad, disallowed_bad) = (tools_bad(&e.allowed_tools), tools_bad(&e.disallowed_tools));
-    let ok = dir_err.is_none() && mcp_err.is_none() && !allowed_bad && !disallowed_bad && !text_bad && !fallback_bad && !budget_bad && !compact_bad;
+    let ok = dir_err.is_none() && plugin_err.is_none() && mcp_err.is_none() && !allowed_bad && !disallowed_bad && !text_bad && !sys_bad && !fallback_bad && !budget_bad && !compact_bad;
     if !open {
         if !ok {
             hint(ui, lang.t("Ein Wert unter „Weitere Claude-Optionen“ ist ungültig.", "A value under “More Claude options” is invalid."), red);
@@ -929,25 +938,20 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
         );
     }
 
+    // Listen mit + und − (#289): + öffnet den Ordner- bzw. Dateidialog (WSL-Sitzungen: in der Distribution), − fragt nach.
+    let dir_issue = |p: &str| entry_errs.get(&(p.trim().to_string(), true)).cloned();
+    let file_issue = |p: &str| entry_errs.get(&(p.trim().to_string(), false)).cloned();
     ui.label(lang.t("Zusätzliche Ordner", "Extra folders")).on_hover_text("--add-dir");
-    ui.horizontal(|ui| {
-        // Eingabepuffer im Speicher von egui: leere Zeilen und Leerzeichen am Rand bleiben beim Tippen erhalten.
-        let bid = Id::new(("claude_more_dirs", salt));
-        let mut buf = ui.data(|d| d.get_temp::<String>(bid)).filter(|b| dir_lines(b) == e.add_dirs).unwrap_or_else(|| e.add_dirs.join("\n"));
-        ui.add(egui::TextEdit::multiline(&mut buf).desired_rows(2).desired_width(260.0).hint_text(lang.t("ein Ordner je Zeile", "one folder per line")));
-        if ui.button("…").on_hover_text(lang.t("Ordner hinzufügen", "Add folder")).clicked() {
-            if let Some(p) = notify::pick_folder("") {
-                if !buf.is_empty() && !buf.ends_with('\n') {
-                    buf.push('\n');
-                }
-                buf.push_str(&p);
-            }
-        }
-        e.add_dirs = dir_lines(&buf);
-        ui.data_mut(|d| d.insert_temp(bid, buf));
-    });
+    list_editor(ui, lang, &format!("{salt}_add_dir"), &mut e.add_dirs, ListKind::Folders, MAX_DIRS, &dir_issue, &mut || pick_entry(ListKind::Folders, target, lang));
     ui.end_row();
     if let Some(err) = &dir_err {
+        hint(ui, err, red);
+    }
+
+    ui.label(lang.t("Plugin-Ordner", "Plugin folders")).on_hover_text("--plugin-dir");
+    list_editor(ui, lang, &format!("{salt}_plugin_dir"), &mut e.plugin_dirs, ListKind::Folders, MAX_DIRS, &dir_issue, &mut || pick_entry(ListKind::Folders, target, lang));
+    ui.end_row();
+    if let Some(err) = &plugin_err {
         hint(ui, err, red);
     }
 
@@ -967,24 +971,62 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
     }
 
     ui.label(lang.t("MCP-Konfiguration", "MCP config")).on_hover_text("--mcp-config");
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut e.mcp_config).hint_text(lang.t("JSON-Datei (optional)", "JSON file (optional)")).char_limit(MAX_PATH_LEN).desired_width(230.0));
-        if ui.button("…").on_hover_text(lang.t("Datei wählen", "Choose file")).clicked() {
-            if let Some(p) = notify::pick_file(e.mcp_config.trim()) {
-                e.mcp_config = p;
-            }
-        }
-    });
+    list_editor(ui, lang, &format!("{salt}_mcp_config"), &mut e.mcp_configs, ListKind::JsonFiles, MAX_DIRS, &file_issue, &mut || pick_entry(ListKind::JsonFiles, target, lang));
     ui.end_row();
     if let Some(err) = &mcp_err {
         hint(ui, err, red);
     }
+    // Nur mit mindestens einer MCP-Konfiguration wählbar (ohne sie wäre es wirkungslos).
+    ui.label("");
+    let has_mcp = !e.mcp_configs.is_empty();
+    if !has_mcp {
+        e.strict_mcp_config = false;
+    }
+    let strict = ui
+        .add_enabled(has_mcp, egui::Checkbox::new(&mut e.strict_mcp_config, lang.t("Nur MCP-Server aus diesen Dateien", "Only MCP servers from these files")))
+        .on_hover_text(lang.t(
+            "--strict-mcp-config: alle anderen MCP-Konfigurationen (Nutzer, Projekt, auch Paneldecks Agenten-Schnittstelle) werden ignoriert.",
+            "--strict-mcp-config: all other MCP configurations (user, project, also Paneldeck's agent interface) are ignored.",
+        ))
+        .on_disabled_hover_text(lang.t("Erst eine MCP-Konfiguration hinzufügen.", "Add an MCP config first."));
+    dlg_mark(ui, "strict_mcp", &strict);
+    ui.end_row();
 
     ui.label(lang.t("System-Prompt ergänzen", "Append system prompt")).on_hover_text("--append-system-prompt");
     ui.add(egui::TextEdit::singleline(&mut e.append_system_prompt).hint_text(lang.t("Text (eine Zeile, optional)", "Text (one line, optional)")).char_limit(MAX_TEXT_LEN).desired_width(260.0));
     ui.end_row();
     if text_bad {
         hint(ui, lang.t("Eine Zeile ohne \" % ! ^ & | < > \\, nicht mit - beginnend.", "One line without \" % ! ^ & | < > \\, not starting with -."), red);
+    }
+
+    ui.label(lang.t("Eigener System-Prompt", "System prompt")).on_hover_text("--system-prompt");
+    let sp = ui.add(
+        egui::TextEdit::multiline(&mut e.system_prompt)
+            .hint_text(lang.t("Ersetzt den System-Prompt von Claude Code (optional)", "Replaces Claude Code's system prompt (optional)"))
+            .char_limit(MAX_SYSTEM_PROMPT_LEN)
+            .desired_rows(3)
+            .desired_width(260.0),
+    );
+    dlg_mark(ui, "system_prompt", &sp);
+    ui.end_row();
+    if sys_bad {
+        hint(ui, lang.t("Ohne \" % ! ^ & | < > \\ und Steuerzeichen außer Zeilenumbrüchen, nicht mit - beginnend.", "Without \" % ! ^ & | < > \\ and control characters other than line breaks, not starting with -."), red);
+    }
+    if filled(&e.system_prompt) {
+        hint(
+            ui,
+            match place {
+                OptsPlace::Template => lang.t(
+                    "⚠ Ersetzt den eingebauten System-Prompt von Claude Code ganz (Anweisungen zu Werkzeugen, Sicherheit und Arbeitsweise) – Claude verhält sich dann womöglich ganz anders. „System-Prompt ergänzen“ wird danach angehängt. Vor dem Start dieser Vorlage zeigt Paneldeck den Text und fragt nach; Sitzungen von Agenten bekommen ihn nie. In PowerShell und cmd werden Zeilenumbrüche zu Leerzeichen.",
+                    "⚠ Replaces Claude Code's built-in system prompt completely (instructions on tools, safety and how to work) – Claude may then behave very differently. “Append system prompt” is added after it. Paneldeck shows the text and asks before this template starts; sessions created by agents never get it. In PowerShell and cmd, line breaks become spaces.",
+                ),
+                _ => lang.t(
+                    "⚠ Ersetzt den eingebauten System-Prompt von Claude Code ganz (Anweisungen zu Werkzeugen, Sicherheit und Arbeitsweise) – Claude verhält sich dann womöglich ganz anders. „System-Prompt ergänzen“ wird danach angehängt. Gilt nie für Sitzungen von Agenten. In PowerShell und cmd werden Zeilenumbrüche zu Leerzeichen.",
+                    "⚠ Replaces Claude Code's built-in system prompt completely (instructions on tools, safety and how to work) – Claude may then behave very differently. “Append system prompt” is added after it. Never applies to sessions created by agents. In PowerShell and cmd, line breaks become spaces.",
+                ),
+            },
+            amber,
+        );
     }
 
     ui.label(lang.t("Ersatzmodell", "Fallback model")).on_hover_text("--fallback-model");
@@ -1013,20 +1055,20 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
             ui,
             match place {
                 OptsPlace::Defaults => lang.t(
-                    "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude zugreifen und was es ohne Rückfrage tun darf. Als Standard gelten sie nur für Sitzungen, die du selbst startest – nie für Sitzungen von Agenten.",
-                    "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking. As defaults they apply only to sessions you start yourself – never to sessions created by agents.",
+                    "⚠ Zusätzliche Ordner, Plugin-Ordner, erlaubte Werkzeuge und MCP-Konfigurationen erweitern, worauf Claude zugreifen und was es ohne Rückfrage tun darf. Als Standard gelten sie nur für Sitzungen, die du selbst startest – nie für Sitzungen von Agenten.",
+                    "⚠ Extra folders, plugin folders, allowed tools and MCP configs widen what Claude may access and do without asking. As defaults they apply only to sessions you start yourself – never to sessions created by agents.",
                 ),
                 OptsPlace::NewSession => lang.t(
-                    "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude in dieser Sitzung zugreifen und was es ohne Rückfrage tun darf.",
-                    "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking in this session.",
+                    "⚠ Zusätzliche Ordner, Plugin-Ordner, erlaubte Werkzeuge und MCP-Konfigurationen erweitern, worauf Claude in dieser Sitzung zugreifen und was es ohne Rückfrage tun darf.",
+                    "⚠ Extra folders, plugin folders, allowed tools and MCP configs widen what Claude may access and do without asking in this session.",
                 ),
                 OptsPlace::Template => lang.t(
-                    "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude zugreifen und was es ohne Rückfrage tun darf. Sie werden mit der Vorlage gespeichert (templates.json lässt sich weitergeben): Vor dem Start zeigt Paneldeck die Werte und fragt nach; Sitzungen, die ein Agent aus der Vorlage startet, bekommen sie nie.",
-                    "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking. They are saved with the template (templates.json can be shared): before it starts, Paneldeck shows the values and asks; sessions an agent starts from the template never get them.",
+                    "⚠ Zusätzliche Ordner, Plugin-Ordner, erlaubte Werkzeuge und MCP-Konfigurationen erweitern, worauf Claude zugreifen und was es ohne Rückfrage tun darf. Sie werden mit der Vorlage gespeichert (templates.json lässt sich weitergeben): Vor dem Start zeigt Paneldeck die Werte und fragt nach; Sitzungen, die ein Agent aus der Vorlage startet, bekommen sie nie.",
+                    "⚠ Extra folders, plugin folders, allowed tools and MCP configs widen what Claude may access and do without asking. They are saved with the template (templates.json can be shared): before it starts, Paneldeck shows the values and asks; sessions an agent starts from the template never get them.",
                 ),
                 OptsPlace::Session => lang.t(
-                    "⚠ Zusätzliche Ordner, erlaubte Werkzeuge und eine MCP-Konfiguration erweitern, worauf Claude in dieser Sitzung zugreifen und was es ohne Rückfrage tun darf – ab dem nächsten Start, auch wenn ein Agent die Sitzung angelegt hat.",
-                    "⚠ Extra folders, allowed tools and an MCP config widen what Claude may access and do without asking in this session – from its next start, even if an agent created the session.",
+                    "⚠ Zusätzliche Ordner, Plugin-Ordner, erlaubte Werkzeuge und MCP-Konfigurationen erweitern, worauf Claude in dieser Sitzung zugreifen und was es ohne Rückfrage tun darf – ab dem nächsten Start, auch wenn ein Agent die Sitzung angelegt hat.",
+                    "⚠ Extra folders, plugin folders, allowed tools and MCP configs widen what Claude may access and do without asking in this session – from its next start, even if an agent created the session.",
                 ),
             },
             amber,
@@ -1036,8 +1078,8 @@ fn claude_more_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, salt: &str, pla
     hint(
         ui,
         lang.t(
-            "Die Werte setzt nur der Nutzer; Agenten können über MCP nur Schalter ohne Einfluss auf Rechte ergänzen. Ordner und Dateien werden bei jedem Start geprüft; fehlende werden mit Hinweis weggelassen.",
-            "Only you set the values; agents can only add switches without effect on rights via MCP. Folders and files are checked at every start; missing ones are left out with a notice.",
+            "Die Werte setzt nur der Nutzer; Agenten können über MCP nur Schalter ohne Einfluss auf Rechte ergänzen. Ordner und Dateien werden bei jedem Start geprüft; fehlende werden mit Hinweis weggelassen. Linux-Pfade (aus WSL) gelten nur in WSL-Sitzungen.",
+            "Only you set the values; agents can only add switches without effect on rights via MCP. Folders and files are checked at every start; missing ones are left out with a notice. Linux paths (from WSL) apply only to WSL sessions.",
         ),
         dim,
     );
@@ -1138,7 +1180,7 @@ pub(super) fn new_dialog_ui(
                     ui.end_row();
                     ui.label(lang.t("Ordner", "Folder"));
                     // WSL-Shell: Linux-Pfad mit Vervollständigung, Distribution wählbar (wechselt die Shell), #172.
-                    d.picker.set_target(target);
+                    d.picker.set_target(target.clone());
                     let r = d.picker.show(ui, lang, wsl_recent);
                     if let Some(sid) = r.distro_changed.and_then(|dist| shells.iter().find(|s| s.id.strip_prefix("wsl:").is_some_and(|x| x.eq_ignore_ascii_case(&dist)))).map(|s| s.id.clone()) {
                         d.shell_id = sid;
@@ -1168,7 +1210,7 @@ pub(super) fn new_dialog_ui(
                             let r = session_settings::conv_combo(ui, "newdlg_conv", &mut d.conv, lang);
                             dlg_mark(ui, "conv", &r);
                             ui.end_row();
-                            opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg", OptsPlace::NewSession);
+                            opts_ok = claude_opts_rows(ui, lang, &mut d.copts, "newdlg", OptsPlace::NewSession, &target);
                             ui.label(lang.t("Start-Prompt", "Start prompt"));
                             ui.add(egui::TextEdit::singleline(&mut d.prompt).desired_width(320.0));
                             ui.end_row();
@@ -1422,7 +1464,7 @@ mod copts_tests {
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::Grid::new("t").num_columns(2).show(ui, |ui| {
-                    ok = Some(claude_opts_rows(ui, Lang::En, o, "t", place));
+                    ok = Some(claude_opts_rows(ui, Lang::En, o, "t", place, &folder_picker::Target::Windows));
                 });
             });
         });
@@ -1450,10 +1492,13 @@ mod copts_tests {
         let (dir, file) = (d.to_string_lossy().to_string(), f.to_string_lossy().to_string());
         let mut o = extra(ExtraOpts {
             flags: vec!["chrome".into(), "ide".into(), "safe-mode".into()],
-            add_dirs: vec![format!("  {dir}  "), String::new(), dir.clone()],
+            add_dirs: vec![dir.clone()],
+            plugin_dirs: vec![dir.clone()],
             allowed_tools: "Bash(git log:*) Read".into(),
             disallowed_tools: "WebFetch".into(),
-            mcp_config: file.clone(),
+            mcp_configs: vec![file.clone()],
+            strict_mcp_config: true,
+            system_prompt: "You review code.\nBe strict.".into(),
             append_system_prompt: "Be brief. ".into(),
             fallback_model: "sonnet".into(),
             max_budget_usd: "2.50".into(),
@@ -1463,7 +1508,8 @@ mod copts_tests {
         assert!(rows_ctx(&ctx, &mut o, OptsPlace::NewSession), "gültige Werte");
         assert_eq!(o.extra.flags, ["chrome", "ide", "safe-mode"], "safe-mode ist ein Schalter für den Nutzer");
         assert!(shown(&ctx), "offen, sobald etwas gesetzt ist");
-        assert_eq!(o.extra.add_dirs, [dir.clone()], "Ordnerzeilen bereinigt, ohne Doppelte");
+        assert_eq!(o.extra.add_dirs, [dir.clone()]);
+        assert!(o.extra.strict_mcp_config, "mit MCP-Konfiguration wählbar");
         assert_eq!(o.extra.append_system_prompt, "Be brief. ", "Text wird beim Tippen nicht beschnitten");
         assert_eq!(o.sanitized(true), o.trimmed(), "gültig = bereinigt gleich getrimmt");
         // Standards (Einstellungen): dieselben Felder, auch die Rechte erweiternden.
@@ -1476,8 +1522,12 @@ mod copts_tests {
             ExtraOpts { add_dirs: vec![format!("{dir}{sep}missing")], ..Default::default() },
             ExtraOpts { add_dirs: vec!["\\\\server\\share".into()], ..Default::default() },
             ExtraOpts { add_dirs: vec!["relative".into()], ..Default::default() },
-            ExtraOpts { mcp_config: format!("{dir}{sep}missing.json"), ..Default::default() },
-            ExtraOpts { mcp_config: dir.clone(), ..Default::default() },
+            ExtraOpts { mcp_configs: vec![format!("{dir}{sep}missing.json")], ..Default::default() },
+            ExtraOpts { mcp_configs: vec![dir.clone()], ..Default::default() },
+            ExtraOpts { plugin_dirs: vec![format!("{dir}{sep}missing")], ..Default::default() },
+            ExtraOpts { plugin_dirs: vec!["\\\\server\\plug".into()], ..Default::default() },
+            ExtraOpts { system_prompt: "a & b".into(), ..Default::default() },
+            ExtraOpts { system_prompt: "ok\n-x|y".into(), ..Default::default() },
             ExtraOpts { allowed_tools: "Bash(x); calc".into(), ..Default::default() },
             ExtraOpts { disallowed_tools: "a\"b".into(), ..Default::default() },
             ExtraOpts { append_system_prompt: "50% & more".into(), ..Default::default() },
@@ -1504,6 +1554,34 @@ mod copts_tests {
         ctx.data_mut(|d| d.insert_temp(Id::new(("claude_more_open", "t")), false));
         assert!(!rows_ctx(&ctx, &mut missing, OptsPlace::NewSession), "Ergebnis aus dem Zwischenspeicher");
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn strict_mcp_config_needs_a_config_and_linux_paths_need_wsl() {
+        // Ohne MCP-Konfiguration wird --strict-mcp-config abgewählt (und ist gesperrt).
+        let ctx = egui::Context::default();
+        ctx.data_mut(|d| d.insert_temp(Id::new(("claude_more_open", "t")), true));
+        let mut o = extra(ExtraOpts { strict_mcp_config: true, ..Default::default() });
+        assert!(rows_ctx(&ctx, &mut o, OptsPlace::NewSession));
+        assert!(!o.extra.strict_mcp_config);
+        // Linux-Pfade: in einer Windows-Sitzung ungültig, als Standard/in Vorlagen erlaubt (gelten nur in WSL).
+        if cfg!(windows) {
+            let lin = || extra(ExtraOpts { plugin_dirs: vec!["/home/u/plug".into()], ..Default::default() });
+            assert!(!rows_with(&mut lin(), OptsPlace::NewSession));
+            assert!(!rows_with(&mut lin(), OptsPlace::Session));
+            assert!(rows_with(&mut lin(), OptsPlace::Defaults));
+            assert!(rows_with(&mut lin(), OptsPlace::Template));
+            let mut ok = None;
+            let wsl = folder_picker::Target::Wsl { distro: Some("Ubuntu".into()), choose_distro: false };
+            let _ = egui::Context::default().run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::Grid::new("t").num_columns(2).show(ui, |ui| {
+                        ok = Some(claude_opts_rows(ui, Lang::En, &mut lin(), "t", OptsPlace::NewSession, &wsl));
+                    });
+                });
+            });
+            assert_eq!(ok, Some(true), "WSL-Sitzung: Linux-Pfad gültig");
+        }
     }
 
     #[test]

@@ -81,6 +81,8 @@ pub(super) fn risk_label(k: templates::Risk, lang: Lang) -> &'static str {
     use templates::Risk::*;
     match k {
         AddDir => lang.t("Zusätzlicher Ordner (--add-dir)", "Extra folder (--add-dir)"),
+        PluginDir => lang.t("Plugin-Ordner (--plugin-dir)", "Plugin folder (--plugin-dir)"),
+        SystemPrompt => lang.t("Eigener System-Prompt (--system-prompt)", "System prompt (--system-prompt)"),
         AllowedTools => lang.t("Erlaubte Werkzeuge (--allowed-tools)", "Allowed tools (--allowed-tools)"),
         McpConfig => lang.t("MCP-Konfiguration (--mcp-config)", "MCP config (--mcp-config)"),
         SafeMode => lang.t("Hooks und MCP-Server aus (--safe-mode)", "Hooks and MCP servers off (--safe-mode)"),
@@ -400,7 +402,13 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
                         session_settings::conv_combo(ui, "tpl_conv", &mut f.conv, lang);
                         ui.end_row();
                         // Wie die Standards: kein bypassPermissions in einer Vorlage (Datei kann weitergegeben werden).
-                        opts_ok = dialogs::claude_opts_rows(ui, lang, &mut f.opts, "tpled", dialogs::OptsPlace::Template);
+                        // Shell der Vorlage (auch aus einem eigenen Profil): WSL-Ordner für WSL-Vorlagen.
+                        let target = match shells.iter().find(|s| s.id == eff_shell) {
+                            Some(s) => super::folder_picker::Target::for_shell(Some(s), false),
+                            None if eff_shell.starts_with("wsl") => super::folder_picker::Target::Wsl { distro: eff_shell.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string), choose_distro: false },
+                            None => super::folder_picker::Target::Windows,
+                        };
+                        opts_ok = dialogs::claude_opts_rows(ui, lang, &mut f.opts, "tpled", dialogs::OptsPlace::Template, &target);
                         if !f.legacy_rest.trim().is_empty() {
                             ui.label(lang.t("Weitere Argumente", "Further arguments"));
                             ui.horizontal_wrapped(|ui| {
@@ -1194,7 +1202,7 @@ mod tests {
         assert_eq!(confirm_click(&ctx, &mut c, "confirm_cancel"), ConfirmOut::Cancel);
         let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         assert_eq!(confirm_frame(&ctx, &mut c, vec![esc]), ConfirmOut::Cancel);
-        for k in [templates::Risk::AddDir, templates::Risk::AllowedTools, templates::Risk::McpConfig, templates::Risk::SafeMode, templates::Risk::AppendSystemPrompt] {
+        for k in [templates::Risk::AddDir, templates::Risk::PluginDir, templates::Risk::AllowedTools, templates::Risk::McpConfig, templates::Risk::SafeMode, templates::Risk::SystemPrompt, templates::Risk::AppendSystemPrompt] {
             assert_ne!(risk_label(k, Lang::En), risk_label(k, Lang::De));
         }
     }

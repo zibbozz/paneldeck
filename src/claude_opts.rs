@@ -16,8 +16,10 @@
 //!     Rechte, Zugriffe oder die Hooks, auf denen Paneldecks Status- und Freigabe-Erkennung beruht.
 //!   - Schalter nur für den Nutzer ([`USER_SWITCHES`]): `--safe-mode` schaltet Hooks und MCP-Server ab – dann erkennt
 //!     Paneldeck weder Status noch Freigabe-Fragen der Sitzung (der Schutz `permission_pending` greift nicht).
-//!   - Wertoptionen (`--add-dir`, `--allowed-tools`, `--disallowed-tools`, `--mcp-config`, `--append-system-prompt`,
-//!     `--fallback-model`, `--max-budget-usd`, `--autocompact`): nur der Nutzer in Paneldeck, nie über MCP. Die
+//!   - Wertoptionen (`--add-dir`, `--plugin-dir`, `--allowed-tools`, `--disallowed-tools`, `--mcp-config` (Liste) mit
+//!     `--strict-mcp-config`, `--system-prompt`, `--append-system-prompt`, `--fallback-model`, `--max-budget-usd`,
+//!     `--autocompact`; Listen und eigener System-Prompt seit #289): nur der Nutzer in Paneldeck, nie über MCP. Ein
+//!     eigener System-Prompt, MCP-Konfigurationen und Plugin-Ordner gelten nie für Agenten-Sitzungen. Die
 //!     Rechte erweiternden ([`RISKY`]) und die Nutzer-Schalter gelten nie für Sitzungen, die ein Agent anlegt – auch nicht
 //!     als Standard ([`ExtraOpts::agent_safe`]). Pfade müssen lokal sein und existieren (geprüft bei jedem Start, ohne
 //!     je eine Netzwerkfreigabe zu berühren, [`check_path`]); Texte enthalten keine Zeichen, die eine Shell auswertet;
@@ -100,9 +102,11 @@ pub const NEVER_VIA_MCP: [&str; 32] = [
 /// Parameter von `create_session` für Wertoptionen und gefährliche Flags: angegeben → `bad_args` statt still
 /// ignoriert (nur der Nutzer kann sie in Paneldeck setzen). Allgemeine Namen (`args`, `settings` …) bleiben wie
 /// bisher unbeachtet.
-pub const USER_ONLY_PARAMS: [&str; 15] = [
+pub const USER_ONLY_PARAMS: [&str; 17] = [
     "add_dir",
     "add_dirs",
+    "plugin_dirs",
+    "mcp_configs",
     "allowed_tools",
     "disallowed_tools",
     "mcp_config",
@@ -119,17 +123,19 @@ pub const USER_ONLY_PARAMS: [&str; 15] = [
 ];
 /// Wertoptionen, die Rechte oder Zugriffe erweitern (Namen wie in [`ExtraOpts::value_names`]): Warnung in der
 /// Oberfläche, nie für Sitzungen von Agenten ([`ExtraOpts::agent_safe`]).
-pub const RISKY: [&str; 3] = ["add_dir", "allowed_tools", "mcp_config"];
+pub const RISKY: [&str; 4] = ["add_dir", "plugin_dir", "allowed_tools", "mcp_config"];
 /// Höchstzahl der Einträge in `claude_flags`.
 pub const MAX_MCP_FLAGS: usize = 16;
-/// Höchstlänge eines Pfads (`--add-dir`, `--mcp-config`).
+/// Höchstlänge eines Pfads (`--add-dir`, `--plugin-dir`, `--mcp-config`).
 pub const MAX_PATH_LEN: usize = 400;
-/// Höchstzahl zusätzlicher Ordner.
+/// Höchstzahl der Einträge je Liste (zusätzliche Ordner, Plugin-Ordner, MCP-Konfigurationen).
 pub const MAX_DIRS: usize = 20;
 /// Höchstlänge der Werkzeuglisten.
 pub const MAX_TOOLS_LEN: usize = 1000;
 /// Höchstlänge des Zusatzes zum System-Prompt.
 pub const MAX_TEXT_LEN: usize = 2000;
+/// Höchstlänge des eigenen System-Prompts (`--system-prompt`, mehrzeilig; die Zeile wird in die Shell getippt).
+pub const MAX_SYSTEM_PROMPT_LEN: usize = 4000;
 
 /// Modell- oder Agentenname gültig?
 pub fn valid_name(s: &str) -> bool {
@@ -185,6 +191,49 @@ fn absolute_local(p: &str) -> bool {
 /// Pfad für `--add-dir`/`--mcp-config` gültig (nur die Form, ohne Dateisystem; siehe [`check_path`])?
 pub fn valid_path(p: &str) -> bool {
     plain(p, MAX_PATH_LEN) && absolute_local(p)
+}
+
+/// Linux-Pfad für eine WSL-Sitzung (nur unter Windows; sonst ist `/…` ohnehin ein lokaler Pfad, [`valid_path`]):
+/// absolut (`/…`, nicht `//…`), ohne `\`, Shell-sicher. Lässt sich vom Windows-Programm aus nicht prüfen (das könnte
+/// die WSL-VM starten); gilt nur in WSL-Sitzungen, sonst wird er beim Start mit Hinweis weggelassen.
+pub fn wsl_linux_path(p: &str) -> bool {
+    cfg!(windows) && p.starts_with('/') && !p.starts_with("//") && !p.contains('\\') && plain(p, MAX_PATH_LEN)
+}
+
+/// Eintrag einer Pfadliste (`--add-dir`, `--plugin-dir`, `--mcp-config`) gültig: lokaler Pfad oder Linux-Pfad für WSL.
+pub fn valid_list_path(p: &str) -> bool {
+    valid_path(p) || wsl_linux_path(p)
+}
+
+/// Eigener System-Prompt (`--system-prompt`) gültig? Wie [`valid_text`], aber mehrzeilig (nur `\n` als Steuerzeichen)
+/// und bis [`MAX_SYSTEM_PROMPT_LEN`] Zeichen.
+pub fn valid_system_prompt(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().count() <= MAX_SYSTEM_PROMPT_LEN
+        && s.trim() == s
+        && !s.starts_with('-')
+        && !s.contains('\\')
+        && s.split('\n').all(|l| shell_safe(l))
+}
+
+/// Zeilenumbrüche vereinheitlichen (`\r\n`/`\r` → `\n`) und den Rand trimmen (Eingabe im mehrzeiligen Feld).
+pub fn normalize_multiline(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
+}
+
+/// Mehrzeiligen Text als ein Argument für die Shell: POSIX-Shells (bash, zsh in WSL und Git Bash) `$'z1\nz2'` mit
+/// echten Zeilenumbrüchen. PowerShell und cmd: Zeilen mit Leerzeichen verbunden – ein Zeilenumbruch in einem Argument
+/// beendet in cmd die Zeile, und `claude` ist unter Windows oft eine `.cmd`-Datei (npm), die über cmd läuft: der Rest
+/// der Zeile (auch `--session-id`) ginge verloren. Einzeilig wie [`quote`]. Der Text ist geprüft
+/// ([`valid_system_prompt`]: kein `\`, keine Shell-Zeichen).
+fn quote_multiline(kind: Kind, s: &str) -> String {
+    if !s.contains('\n') {
+        return quote(kind, s);
+    }
+    match kind {
+        Kind::Posix => format!("$'{}'", s.replace('\'', "\\'").replace('\n', "\\n")),
+        Kind::Pwsh | Kind::Cmd => quote(kind, &s.split('\n').map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")),
+    }
 }
 
 /// Werkzeugliste für `--allowed-tools`/`--disallowed-tools` gültig? Z. B. `Bash(git log:*) Read mcp__github__*`.
@@ -343,36 +392,83 @@ fn shell_path(style: PathStyle, p: &str) -> String {
     }
 }
 
-/// Weitere Optionen (#182): Schalter und Wertoptionen. Leere Felder setzen nichts.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+/// Weitere Optionen (#182, #289): Schalter und Wertoptionen. Leere Felder setzen nichts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExtraOpts {
     /// Schalter aus [`SWITCHES`] und [`USER_SWITCHES`] (Namen ohne `--`, z. B. `chrome`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<String>,
     /// `--add-dir`: zusätzliche Ordner (nur Nutzer, nie für Agenten-Sitzungen).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub add_dirs: Vec<String>,
+    /// `--plugin-dir` (#289): Ordner mit Plugins, je Ordner ein `--plugin-dir` (nur Nutzer, nie für Agenten-Sitzungen).
+    pub plugin_dirs: Vec<String>,
     /// `--allowed-tools` (nur Nutzer, nie für Agenten-Sitzungen).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub allowed_tools: String,
     /// `--disallowed-tools` (nur Nutzer; schränkt ein und gilt deshalb auch für Agenten-Sitzungen).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub disallowed_tools: String,
-    /// `--mcp-config <Datei>` (nur Nutzer, nie für Agenten-Sitzungen).
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub mcp_config: String,
+    /// `--mcp-config <Datei> …` (#289: Liste; nur Nutzer, nie für Agenten-Sitzungen). In JSON `mcp_configs`, dazu
+    /// für ältere Versionen der erste Eintrag als `mcp_config` (beim Lesen zusammengeführt).
+    pub mcp_configs: Vec<String>,
+    /// `--strict-mcp-config` (#289): nur die MCP-Server aus `mcp_configs`; ohne MCP-Konfiguration wirkungslos.
+    pub strict_mcp_config: bool,
+    /// `--system-prompt <Text>` (#289): ersetzt den System-Prompt von Claude Code; mehrzeilig, nur Nutzer, nie für
+    /// Agenten-Sitzungen.
+    pub system_prompt: String,
     /// `--append-system-prompt <Text>` (nur Nutzer).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub append_system_prompt: String,
     /// `--fallback-model <Name>` (nur Nutzer).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub fallback_model: String,
     /// `--max-budget-usd <Zahl>` (nur Nutzer; als Text, wie eingegeben).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub max_budget_usd: String,
     /// `--autocompact <auto|Tokens>` (nur Nutzer).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub autocompact: String,
+}
+
+/// Kompakt (leere Felder fehlen), flach in [`ClaudeOpts`]. `mcp_config` (erster Eintrag) bleibt für ältere Versionen.
+impl Serialize for ExtraOpts {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(None)?;
+        for (k, v) in [("flags", &self.flags), ("add_dirs", &self.add_dirs), ("plugin_dirs", &self.plugin_dirs)] {
+            if !v.is_empty() {
+                m.serialize_entry(k, v)?;
+            }
+        }
+        for (k, v) in [("allowed_tools", &self.allowed_tools), ("disallowed_tools", &self.disallowed_tools)] {
+            if !v.is_empty() {
+                m.serialize_entry(k, v)?;
+            }
+        }
+        if let Some(first) = self.mcp_configs.first() {
+            m.serialize_entry("mcp_config", first)?;
+            m.serialize_entry("mcp_configs", &self.mcp_configs)?;
+        }
+        if self.strict_mcp_config {
+            m.serialize_entry("strict_mcp_config", &true)?;
+        }
+        for (k, v) in [
+            ("system_prompt", &self.system_prompt),
+            ("append_system_prompt", &self.append_system_prompt),
+            ("fallback_model", &self.fallback_model),
+            ("max_budget_usd", &self.max_budget_usd),
+            ("autocompact", &self.autocompact),
+        ] {
+            if !v.is_empty() {
+                m.serialize_entry(k, v)?;
+            }
+        }
+        m.end()
+    }
+}
+
+/// Pfadliste bereinigen: getrimmt, nur gültige ([`valid_list_path`]), ohne Doppelte, höchstens [`MAX_DIRS`].
+fn clean_paths(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for d in list.iter().map(|d| d.trim()) {
+        if valid_list_path(d) && !out.iter().any(|x| x == d) && out.len() < MAX_DIRS {
+            out.push(d.to_string());
+        }
+    }
+    out
 }
 
 /// Ergebnis der Wertoptionen beim Start: Zeile, tatsächlich gesetzte Optionen und weggelassene Pfade.
@@ -394,22 +490,21 @@ impl ExtraOpts {
         if flags.iter().any(|f| f == "chrome") && flags.iter().any(|f| f == "no-chrome") {
             flags.retain(|f| f != "chrome" && f != "no-chrome");
         }
-        let mut add_dirs: Vec<String> = Vec::new();
-        for d in self.add_dirs.iter().map(|d| d.trim()) {
-            if valid_path(d) && !add_dirs.iter().any(|x| x == d) && add_dirs.len() < MAX_DIRS {
-                add_dirs.push(d.to_string());
-            }
-        }
         let keep = |s: &str, ok: fn(&str) -> bool| {
             let s = s.trim();
             if ok(s) { s.to_string() } else { String::new() }
         };
+        let mcp_configs = clean_paths(&self.mcp_configs);
+        let system_prompt = normalize_multiline(&self.system_prompt);
         ExtraOpts {
             flags,
-            add_dirs,
+            add_dirs: clean_paths(&self.add_dirs),
+            plugin_dirs: clean_paths(&self.plugin_dirs),
             allowed_tools: keep(&self.allowed_tools, valid_tools),
             disallowed_tools: keep(&self.disallowed_tools, valid_tools),
-            mcp_config: keep(&self.mcp_config, valid_path),
+            strict_mcp_config: self.strict_mcp_config && !mcp_configs.is_empty(),
+            mcp_configs,
+            system_prompt: if valid_system_prompt(&system_prompt) { system_prompt } else { String::new() },
             append_system_prompt: keep(&self.append_system_prompt, valid_text),
             fallback_model: keep(&self.fallback_model, valid_name),
             max_budget_usd: keep(&self.max_budget_usd, valid_budget),
@@ -420,12 +515,17 @@ impl ExtraOpts {
     /// Ränder getrimmt, leere Ordnerzeilen weg, sonst unverändert (gleich [`ExtraOpts::sanitized`] = alles gültig).
     pub fn trimmed(&self) -> ExtraOpts {
         let t = |s: &str| s.trim().to_string();
+        let list = |v: &Vec<String>| -> Vec<String> { v.iter().map(|d| t(d)).filter(|d| !d.is_empty()).collect() };
+        let mcp_configs = list(&self.mcp_configs);
         ExtraOpts {
             flags: self.flags.iter().map(|f| t(f)).collect(),
-            add_dirs: self.add_dirs.iter().map(|d| t(d)).filter(|d| !d.is_empty()).collect(),
+            add_dirs: list(&self.add_dirs),
+            plugin_dirs: list(&self.plugin_dirs),
             allowed_tools: t(&self.allowed_tools),
             disallowed_tools: t(&self.disallowed_tools),
-            mcp_config: t(&self.mcp_config),
+            strict_mcp_config: self.strict_mcp_config && !mcp_configs.is_empty(),
+            mcp_configs,
+            system_prompt: normalize_multiline(&self.system_prompt),
             append_system_prompt: t(&self.append_system_prompt),
             fallback_model: t(&self.fallback_model),
             max_budget_usd: t(&self.max_budget_usd),
@@ -437,12 +537,17 @@ impl ExtraOpts {
     pub fn or(&self, fallback: &ExtraOpts) -> ExtraOpts {
         let pick = |a: &str, b: &str| if a.is_empty() { b.to_string() } else { a.to_string() };
         let pick_v = |a: &Vec<String>, b: &Vec<String>| if a.is_empty() { b.clone() } else { a.clone() };
+        // „Nur diese MCP-Server“ gehört zu den MCP-Konfigurationen, aus denen sie stammen.
+        let (mcp_configs, strict_mcp_config) = if self.mcp_configs.is_empty() { (fallback.mcp_configs.clone(), fallback.strict_mcp_config) } else { (self.mcp_configs.clone(), self.strict_mcp_config) };
         ExtraOpts {
             flags: pick_v(&self.flags, &fallback.flags),
             add_dirs: pick_v(&self.add_dirs, &fallback.add_dirs),
+            plugin_dirs: pick_v(&self.plugin_dirs, &fallback.plugin_dirs),
             allowed_tools: pick(&self.allowed_tools, &fallback.allowed_tools),
             disallowed_tools: pick(&self.disallowed_tools, &fallback.disallowed_tools),
-            mcp_config: pick(&self.mcp_config, &fallback.mcp_config),
+            mcp_configs,
+            strict_mcp_config,
+            system_prompt: pick(&self.system_prompt, &fallback.system_prompt),
             append_system_prompt: pick(&self.append_system_prompt, &fallback.append_system_prompt),
             fallback_model: pick(&self.fallback_model, &fallback.fallback_model),
             max_budget_usd: pick(&self.max_budget_usd, &fallback.max_budget_usd),
@@ -450,19 +555,32 @@ impl ExtraOpts {
         }
     }
 
-    /// Ohne die Rechte erweiternden Wertoptionen ([`RISKY`]) und ohne die Schalter nur für den Nutzer
-    /// ([`USER_SWITCHES`]) – für Sitzungen, die ein Agent anlegt.
+    /// Ohne die Rechte erweiternden Wertoptionen ([`RISKY`]: Ordner, Plugin-Ordner, erlaubte Werkzeuge,
+    /// MCP-Konfigurationen samt `--strict-mcp-config`), ohne eigenen System-Prompt und ohne die Schalter nur für den
+    /// Nutzer ([`USER_SWITCHES`]) – für Sitzungen, die ein Agent anlegt.
     pub fn agent_safe(&self) -> ExtraOpts {
-        ExtraOpts { flags: self.flags.iter().filter(|f| agent_switch(f)).cloned().collect(), add_dirs: Vec::new(), allowed_tools: String::new(), mcp_config: String::new(), ..self.clone() }
+        ExtraOpts {
+            flags: self.flags.iter().filter(|f| agent_switch(f)).cloned().collect(),
+            add_dirs: Vec::new(),
+            plugin_dirs: Vec::new(),
+            allowed_tools: String::new(),
+            mcp_configs: Vec::new(),
+            strict_mcp_config: false,
+            system_prompt: String::new(),
+            ..self.clone()
+        }
     }
 
     /// Namen der gesetzten Wertoptionen (für MCP-Auskünfte; die Werte bleiben beim Nutzer).
     pub fn value_names(&self) -> Vec<&'static str> {
         [
             ("add_dir", !self.add_dirs.is_empty()),
+            ("plugin_dir", !self.plugin_dirs.is_empty()),
             ("allowed_tools", !self.allowed_tools.is_empty()),
             ("disallowed_tools", !self.disallowed_tools.is_empty()),
-            ("mcp_config", !self.mcp_config.is_empty()),
+            ("mcp_config", !self.mcp_configs.is_empty()),
+            ("strict_mcp_config", self.strict_mcp_config && !self.mcp_configs.is_empty()),
+            ("system_prompt", !self.system_prompt.is_empty()),
             ("append_system_prompt", !self.append_system_prompt.is_empty()),
             ("fallback_model", !self.fallback_model.is_empty()),
             ("max_budget_usd", !self.max_budget_usd.is_empty()),
@@ -490,23 +608,40 @@ impl ExtraOpts {
         let mut e = self.sanitized();
         let mut dropped = Vec::new();
         let mut line = String::new();
-        let (ok, missing): (Vec<String>, Vec<String>) = e.add_dirs.iter().cloned().partition(|d| check_path(d, true).is_ok());
-        dropped.extend(missing);
-        e.add_dirs = ok;
+        // Lokale Pfade müssen existieren; Linux-Pfade gelten nur in WSL-Sitzungen (ungeprüft, siehe `wsl_linux_path`).
+        let mut usable = |list: &mut Vec<String>, dir: bool| {
+            let (ok, missing): (Vec<String>, Vec<String>) =
+                std::mem::take(list).into_iter().partition(|p| if wsl_linux_path(p) { style == PathStyle::Wsl } else { check_path(p, dir).is_ok() });
+            dropped.extend(missing);
+            *list = ok;
+        };
+        usable(&mut e.add_dirs, true);
+        usable(&mut e.plugin_dirs, true);
+        usable(&mut e.mcp_configs, false);
+        let paths = |list: &[String]| list.iter().map(|d| quote(kind, &shell_path(style, d))).collect::<Vec<_>>();
         if !e.add_dirs.is_empty() {
-            line += &format!(" --add-dir {}", e.add_dirs.iter().map(|d| quote(kind, &shell_path(style, d))).collect::<Vec<_>>().join(" "));
+            line += &format!(" --add-dir {}", paths(&e.add_dirs).join(" "));
+        }
+        // Je Plugin-Ordner ein eigenes `--plugin-dir` (wiederholbar).
+        for p in paths(&e.plugin_dirs) {
+            line += &format!(" --plugin-dir {p}");
         }
         for (flag, v) in [("--allowed-tools", &e.allowed_tools), ("--disallowed-tools", &e.disallowed_tools)] {
             if !v.is_empty() {
                 line += &format!(" {flag} {}", quote(kind, v));
             }
         }
-        if !e.mcp_config.is_empty() {
-            if check_path(&e.mcp_config, false).is_ok() {
-                line += &format!(" --mcp-config {}", quote(kind, &shell_path(style, &e.mcp_config)));
-            } else {
-                dropped.push(std::mem::take(&mut e.mcp_config));
-            }
+        // Mehrere Dateien durch Leerzeichen getrennt nach einem `--mcp-config` (wie in der Hilfe von Claude Code); die
+        // nächste Option begrenzt die Liste.
+        if !e.mcp_configs.is_empty() {
+            line += &format!(" --mcp-config {}", paths(&e.mcp_configs).join(" "));
+        }
+        e.strict_mcp_config &= !e.mcp_configs.is_empty();
+        if e.strict_mcp_config {
+            line += " --strict-mcp-config";
+        }
+        if !e.system_prompt.is_empty() {
+            line += &format!(" --system-prompt {}", quote_multiline(kind, &e.system_prompt));
         }
         if !e.append_system_prompt.is_empty() {
             line += &format!(" --append-system-prompt {}", quote(kind, &e.append_system_prompt));
@@ -890,7 +1025,26 @@ fn migrate_legacy_value(e: &mut ExtraOpts, name: &str, vals: &[&str], allow_risk
             true
         }
         "allowed-tools" | "allowedtools" if allow_risky => set(&mut e.allowed_tools, tools, valid_tools),
-        "mcp-config" if allow_risky => set(&mut e.mcp_config, one(), valid_path),
+        "mcp-config" if allow_risky => {
+            if vals.is_empty() || vals.len() > MAX_DIRS || !e.mcp_configs.is_empty() || !vals.iter().all(|v| valid_path(v)) {
+                return false;
+            }
+            e.mcp_configs = clean_paths(&vals.iter().map(|v| v.to_string()).collect::<Vec<_>>());
+            true
+        }
+        "plugin-dir" if allow_risky => {
+            if vals.len() != 1 || !valid_path(vals[0]) || e.plugin_dirs.len() >= MAX_DIRS {
+                return false;
+            }
+            if !e.plugin_dirs.iter().any(|d| d == vals[0]) {
+                e.plugin_dirs.push(vals[0].to_string());
+            }
+            true
+        }
+        "strict-mcp-config" if allow_risky => {
+            e.strict_mcp_config = vals.is_empty();
+            vals.is_empty()
+        }
         "disallowed-tools" | "disallowedtools" => set(&mut e.disallowed_tools, tools, valid_tools),
         "append-system-prompt" => set(&mut e.append_system_prompt, one(), valid_text),
         "fallback-model" => set(&mut e.fallback_model, one(), valid_name),
@@ -927,7 +1081,7 @@ pub fn clean_legacy_report(args: &str, allow_risky: bool) -> LegacyClean {
             continue;
         }
         let mut vals: Vec<&str> = Vec::new();
-        while i < toks.len() && !toks[i].starts_with('-') && (vals.is_empty() || legacy_many(name)) {
+        while i < toks.len() && !toks[i].starts_with('-') && name != "strict-mcp-config" && (vals.is_empty() || legacy_many(name)) {
             vals.push(toks[i]);
             i += 1;
         }
@@ -996,9 +1150,20 @@ impl<'de> Deserialize<'de> for ClaudeOpts {
         let extra = ExtraOpts {
             flags: list("flags"),
             add_dirs: list("add_dirs"),
+            plugin_dirs: list("plugin_dirs"),
             allowed_tools: s("allowed_tools"),
             disallowed_tools: s("disallowed_tools"),
-            mcp_config: s("mcp_config"),
+            // Liste (#289); der einzelne Wert älterer Versionen kommt dazu (vorn, ohne Doppelte).
+            mcp_configs: {
+                let mut v = list("mcp_configs");
+                let one = s("mcp_config");
+                if !one.is_empty() && !v.contains(&one) {
+                    v.insert(0, one);
+                }
+                v
+            },
+            strict_mcp_config: v.get("strict_mcp_config").and_then(|x| x.as_bool()).unwrap_or(false),
+            system_prompt: v.get("system_prompt").and_then(|x| x.as_str()).map(normalize_multiline).unwrap_or_default(),
             append_system_prompt: s("append_system_prompt"),
             fallback_model: s("fallback_model"),
             max_budget_usd: num("max_budget_usd"),
@@ -1039,7 +1204,7 @@ mod tests {
 
     /// Geprüfte Tabelle der Flags, die Paneldeck setzen kann (Stand der Hilfe von Claude Code laut #182 und Review;
     /// `claude --help` wird nie ausgeführt). Neue Flags erst hier eintragen, dann in die Listen übernehmen.
-    const FLAG_TABLE: [(&str, Arity, Effect); 17] = [
+    const FLAG_TABLE: [(&str, Arity, Effect); 20] = [
         ("--chrome", Arity::None, Effect::Harmless),
         ("--no-chrome", Arity::None, Effect::Restricts),
         ("--ide", Arity::None, Effect::Harmless),
@@ -1053,6 +1218,9 @@ mod tests {
         ("--allowed-tools", Arity::Many, Effect::Widens),
         ("--disallowed-tools", Arity::Many, Effect::Restricts),
         ("--mcp-config", Arity::Many, Effect::Widens),
+        ("--plugin-dir", Arity::One, Effect::Widens),
+        ("--strict-mcp-config", Arity::None, Effect::Restricts),
+        ("--system-prompt", Arity::One, Effect::Harmless),
         ("--append-system-prompt", Arity::One, Effect::Harmless),
         ("--fallback-model", Arity::One, Effect::Harmless),
         ("--max-budget-usd", Arity::One, Effect::Harmless),
@@ -1105,7 +1273,7 @@ mod tests {
         }
         assert_eq!(table("--safe-mode").1, Effect::DisablesHooks);
         // Wertoptionen nehmen laut Tabelle Werte; was Rechte erweitert, steht in RISKY.
-        for f in ["--add-dir", "--allowed-tools", "--disallowed-tools", "--mcp-config", "--append-system-prompt", "--fallback-model", "--max-budget-usd", "--autocompact"] {
+        for f in ["--add-dir", "--plugin-dir", "--allowed-tools", "--disallowed-tools", "--mcp-config", "--system-prompt", "--append-system-prompt", "--fallback-model", "--max-budget-usd", "--autocompact"] {
             assert_ne!(table(f).0, Arity::None, "{f}");
             let name = f.trim_start_matches("--").replace('-', "_");
             assert_eq!(table(f).1 == Effect::Widens, RISKY.contains(&name.as_str()), "{f}");
@@ -1116,10 +1284,13 @@ mod tests {
         let all = ClaudeOpts {
             extra: ExtraOpts {
                 flags: SWITCHES.iter().chain(USER_SWITCHES.iter()).map(|(n, _)| n.to_string()).filter(|n| n != "no-chrome").collect(),
-                add_dirs: vec![dir],
+                add_dirs: vec![dir.clone()],
+                plugin_dirs: vec![dir],
                 allowed_tools: "Read".into(),
                 disallowed_tools: "WebFetch".into(),
-                mcp_config: file,
+                mcp_configs: vec![file],
+                strict_mcp_config: true,
+                system_prompt: "sys".into(),
                 append_system_prompt: "x".into(),
                 fallback_model: "sonnet".into(),
                 max_budget_usd: "1".into(),
@@ -1247,8 +1418,17 @@ mod tests {
         assert_eq!(r.dropped, vec!["--add-dir", "--max-budget-usd", "--fallback-model", "--mcp-config"]);
         // Aus einer Vorlage (weitergebbar) nie Rechte erweiternde Optionen
         let r = clean_legacy_report(&format!("--add-dir {dir} --allowed-tools Read --mcp-config {dir}/m.json --fallback-model haiku"), false);
-        assert_eq!((r.migrated.add_dirs.len(), r.migrated.allowed_tools.as_str(), r.migrated.mcp_config.as_str(), r.migrated.fallback_model.as_str()), (0, "", "", "haiku"));
+        assert_eq!((r.migrated.add_dirs.len(), r.migrated.allowed_tools.as_str(), r.migrated.mcp_configs.len(), r.migrated.fallback_model.as_str()), (0, "", 0, "haiku"));
         assert_eq!(r.dropped, vec!["--add-dir", "--allowed-tools", "--mcp-config"]);
+        // #289: mehrere MCP-Konfigurationen, Plugin-Ordner (je einer) und --strict-mcp-config (ohne Wert) aus alten Zeilen
+        let r = clean_legacy_report(&format!("--mcp-config {dir}/a.json {dir}/b.json --strict-mcp-config --plugin-dir {dir} --plugin-dir {dir2} --system-prompt x --verbose"), true);
+        assert_eq!(r.migrated.mcp_configs, vec![format!("{dir}/a.json"), format!("{dir}/b.json")]);
+        assert!(r.migrated.strict_mcp_config);
+        assert_eq!(r.migrated.plugin_dirs, vec![dir.to_string(), dir2.to_string()]);
+        assert_eq!(r.line, "--verbose", "der Schalter nimmt keinen Wert");
+        assert_eq!(r.dropped, vec!["--system-prompt"], "eigener System-Prompt nie aus alten Zeilen");
+        let r = clean_legacy_report(&format!("--plugin-dir {dir} --strict-mcp-config"), false);
+        assert!(r.migrated.is_empty() && r.dropped == vec!["--plugin-dir", "--strict-mcp-config"], "{r:?}");
         let (o, rest, dropped) = resolve_new_report(None, false, &ClaudeOpts::default(), &format!("--add-dir {dir} --fallback-model haiku -c"));
         assert_eq!((o.extra.fallback_model.as_str(), o.extra.add_dirs.len(), rest.as_str()), ("haiku", 0, ""));
         assert_eq!(dropped, vec!["--add-dir", "-c"]);
@@ -1385,7 +1565,10 @@ mod tests {
                 add_dirs: vec!["C:\\work".into()],
                 allowed_tools: "Bash(git:*) Edit".into(),
                 disallowed_tools: "WebFetch".into(),
-                mcp_config: "C:\\cfg\\mcp.json".into(),
+                mcp_configs: vec!["C:\\cfg\\mcp.json".into()],
+                plugin_dirs: vec!["C:\\plug".into()],
+                strict_mcp_config: true,
+                system_prompt: "Replace.".into(),
                 append_system_prompt: "Be brief.".into(),
                 fallback_model: "sonnet".into(),
                 max_budget_usd: "5".into(),
@@ -1394,7 +1577,7 @@ mod tests {
             ..Default::default()
         };
         let o = ClaudeOpts::default().for_agent(&defaults);
-        assert!(o.extra.add_dirs.is_empty() && o.extra.allowed_tools.is_empty() && o.extra.mcp_config.is_empty(), "{o:?}");
+        assert!(o.extra.add_dirs.is_empty() && o.extra.allowed_tools.is_empty() && o.extra.mcp_configs.is_empty(), "{o:?}");
         assert!(!o.extra.has_risky());
         // Einschränkendes und Harmloses aus den Standards gilt weiter; Agenten-Schalter des Nutzers auch, safe-mode nie.
         assert_eq!(o.extra.disallowed_tools, "WebFetch");
@@ -1405,7 +1588,7 @@ mod tests {
         assert_eq!(o.extra.flags, ["no-chrome", "ide", "verbose"]);
         // Selbst wenn eine Angabe (nie aus from_mcp) Rechte erweiternde Werte oder safe-mode trüge: weg.
         let o = defaults.for_agent(&ClaudeOpts::default());
-        assert!(o.extra.add_dirs.is_empty() && o.extra.allowed_tools.is_empty() && o.extra.mcp_config.is_empty());
+        assert!(o.extra.add_dirs.is_empty() && o.extra.allowed_tools.is_empty() && o.extra.mcp_configs.is_empty());
         assert!(!o.extra.flags.iter().any(|f| f == "safe-mode"));
         let line = o.args_for(Kind::Pwsh, PathStyle::Native);
         assert!(!line.contains("--add-dir") && !line.contains("--allowed-tools") && !line.contains("--mcp-config") && !line.contains("--safe-mode"), "{line}");
@@ -1468,7 +1651,10 @@ mod tests {
             add_dirs: vec!["$(calc)".into(), "\\\\server\\share".into()],
             allowed_tools: "Bash(x)'; calc; '".into(),
             disallowed_tools: "\"a\"".into(),
-            mcp_config: "relative.json".into(),
+            mcp_configs: vec!["relative.json".into()],
+            plugin_dirs: vec!["relative".into(), "\\\\server\\plug".into()],
+            strict_mcp_config: true,
+            system_prompt: "a & b\nc".into(),
             append_system_prompt: "a\nb".into(),
             fallback_model: "a b".into(),
             max_budget_usd: "1e3".into(),
@@ -1622,7 +1808,10 @@ mod tests {
                 add_dirs: vec![dir.clone(), format!("{dir}{}missing", std::path::MAIN_SEPARATOR)],
                 allowed_tools: "Bash(git log:*) Read".into(),
                 disallowed_tools: "WebFetch".into(),
-                mcp_config: file.clone(),
+                mcp_configs: vec![file.clone()],
+                plugin_dirs: Vec::new(),
+                strict_mcp_config: false,
+                system_prompt: String::new(),
                 append_system_prompt: "It's $HOME `x` (y)".into(),
                 fallback_model: "sonnet".into(),
                 max_budget_usd: "1e3".into(),
@@ -1659,10 +1848,10 @@ mod tests {
             assert!(wsl.contains(&format!("--mcp-config '/mnt/{drive}/")), "{wsl}");
         }
         // Fehlende MCP-Konfiguration: weggelassen und gemeldet.
-        let m = ClaudeOpts { extra: ExtraOpts { mcp_config: format!("{dir}{}nope.json", std::path::MAIN_SEPARATOR), ..Default::default() }, ..Default::default() };
+        let m = ClaudeOpts { extra: ExtraOpts { mcp_configs: vec![format!("{dir}{}nope.json", std::path::MAIN_SEPARATOR)], ..Default::default() }, ..Default::default() };
         let l = m.launch(Kind::Pwsh, PathStyle::Native, "");
         assert_eq!((l.line.as_str(), l.dropped.len()), ("", 1));
-        assert!(l.applied.extra.mcp_config.is_empty() && l.applied.to_json()["claude_user_options"] == json!([]));
+        assert!(l.applied.extra.mcp_configs.is_empty() && l.applied.to_json()["claude_user_options"] == json!([]));
         // Budget gültig: als Wert.
         let b = ClaudeOpts { extra: ExtraOpts { max_budget_usd: "2.50".into(), ..Default::default() }, ..Default::default() };
         assert_eq!(b.args_for(Kind::Pwsh, PathStyle::Native), " --max-budget-usd '2.50'");
@@ -1705,7 +1894,10 @@ mod tests {
                     add_dirs: vec![h.into(), format!("C:\\{h}")],
                     allowed_tools: h.into(),
                     disallowed_tools: h.into(),
-                    mcp_config: format!("C:\\{h}"),
+                    mcp_configs: vec![format!("C:\\{h}")],
+                    plugin_dirs: vec![h.into(), format!("C:\\{h}")],
+                    strict_mcp_config: true,
+                    system_prompt: String::new(),
                     append_system_prompt: h.into(),
                     fallback_model: h.into(),
                     max_budget_usd: h.into(),
@@ -1763,7 +1955,10 @@ mod tests {
                 add_dirs: vec!["C:\\a".into(), "C:\\b c".into()],
                 allowed_tools: "Read".into(),
                 disallowed_tools: "WebFetch".into(),
-                mcp_config: "C:\\m.json".into(),
+                mcp_configs: vec!["C:\\m.json".into(), "C:\\n.json".into()],
+                strict_mcp_config: true,
+                plugin_dirs: vec!["C:\\plug".into()],
+                system_prompt: "Line 1\nLine 2".into(),
                 append_system_prompt: "Be brief.".into(),
                 fallback_model: "sonnet".into(),
                 max_budget_usd: "2.5".into(),
@@ -1772,6 +1967,13 @@ mod tests {
             ..Default::default()
         };
         let j = serde_json::to_value(&o).unwrap();
+        // #289: Listen und neue Felder; der erste Eintrag zusätzlich als `mcp_config` für ältere Versionen.
+        assert_eq!(j["mcp_configs"], json!(["C:\\m.json", "C:\\n.json"]));
+        assert_eq!(j["mcp_config"], "C:\\m.json");
+        assert_eq!(j["strict_mcp_config"], true);
+        assert_eq!(j["plugin_dirs"], json!(["C:\\plug"]));
+        assert_eq!(j["system_prompt"], "Line 1\nLine 2");
+        assert!(serde_json::to_value(ClaudeOpts::default()).unwrap().as_object().unwrap().is_empty(), "kompakt");
         assert_eq!(j["flags"], json!(["chrome", "verbose", "safe-mode"]));
         assert_eq!(j["add_dirs"], json!(["C:\\a", "C:\\b c"]));
         assert_eq!(j["max_budget_usd"], "2.5");
@@ -1795,6 +1997,130 @@ mod tests {
         assert_eq!(back.extra, ExtraOpts { flags: vec!["chrome".into()], max_budget_usd: "3".into(), autocompact: "100000".into(), ..Default::default() });
         let back: ClaudeOpts = serde_json::from_value(json!({"max_budget_usd": 2.5})).unwrap();
         assert_eq!(back.extra.max_budget_usd, "2.5");
+    }
+
+    #[test]
+    fn old_single_mcp_config_still_loads_and_merges() {
+        let (a, b) = if cfg!(windows) { ("C:\\a.json", "C:\\b.json") } else { ("/a.json", "/b.json") };
+        // Datei einer älteren Version: nur der einzelne Wert.
+        let old: ClaudeOpts = serde_json::from_value(json!({"mcp_config": a})).unwrap();
+        assert_eq!(old.extra.mcp_configs, vec![a.to_string()]);
+        // Neue Datei: Liste, erster Eintrag doppelt als mcp_config – keine Doppelten.
+        let new: ClaudeOpts = serde_json::from_value(json!({"mcp_config": a, "mcp_configs": [a, b]})).unwrap();
+        assert_eq!(new.extra.mcp_configs, vec![a.to_string(), b.to_string()]);
+        // Von einer älteren Version geändert (nur mcp_config neu): kommt vorn dazu.
+        let mixed: ClaudeOpts = serde_json::from_value(json!({"mcp_config": b, "mcp_configs": [a]})).unwrap();
+        assert_eq!(mixed.extra.mcp_configs, vec![b.to_string(), a.to_string()]);
+        // Rundweg
+        let back: ClaudeOpts = serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
+        // strict ohne MCP-Konfiguration fällt weg; falscher Typ ebenso.
+        let s: ClaudeOpts = serde_json::from_value(json!({"strict_mcp_config": true})).unwrap();
+        assert!(!s.extra.strict_mcp_config);
+        let s: ClaudeOpts = serde_json::from_value(json!({"strict_mcp_config": "yes", "mcp_configs": [a]})).unwrap();
+        assert!(!s.extra.strict_mcp_config);
+        let s: ClaudeOpts = serde_json::from_value(json!({"strict_mcp_config": true, "mcp_configs": [a], "plugin_dirs": [a, "relative", 3], "system_prompt": "x\r\ny"})).unwrap();
+        assert!(s.extra.strict_mcp_config);
+        assert_eq!(s.extra.plugin_dirs, vec![a.to_string()]);
+        assert_eq!(s.extra.system_prompt, "x\ny", "Zeilenumbrüche vereinheitlicht");
+    }
+
+    #[test]
+    fn system_prompt_validation_and_quoting() {
+        for ok in ["Du bist ein Reviewer.", "Line 1\nLine 2\n\n- point $HOME `x` 'q'", "a"] {
+            assert!(valid_system_prompt(ok), "{ok:?}");
+        }
+        let long = "a".repeat(MAX_SYSTEM_PROMPT_LEN + 1);
+        for bad in ["", "-x", " x", "x\n", "a\\b", "a\"b", "50%", "a & b", "a\tb", "a\rb", "x\n-y|z", long.as_str()] {
+            assert!(!valid_system_prompt(bad), "{bad:?}");
+        }
+        assert!(valid_system_prompt(&"a".repeat(MAX_SYSTEM_PROMPT_LEN)));
+        let o = |s: &str| ClaudeOpts { extra: ExtraOpts { system_prompt: s.into(), append_system_prompt: "Then this.".into(), ..Default::default() }, ..Default::default() };
+        // Einzeilig: wie jeder Text gequotet.
+        assert_eq!(o("It's me").args_for(Kind::Pwsh, PathStyle::Native), " --system-prompt 'It''s me' --append-system-prompt 'Then this.'");
+        // Mehrzeilig je Shell: POSIX-Shells $'…' mit Zeilenumbrüchen, PowerShell und cmd mit Leerzeichen (claude.cmd).
+        let m = o("Line 1\nIt's 2\n\n$x");
+        assert_eq!(m.args_for(Kind::Pwsh, PathStyle::Native), " --system-prompt 'Line 1 It''s 2 $x' --append-system-prompt 'Then this.'");
+        assert_eq!(m.args_for(Kind::Posix, PathStyle::Native), " --system-prompt $'Line 1\\nIt\\'s 2\\n\\n$x' --append-system-prompt 'Then this.'");
+        assert_eq!(m.args_for(Kind::Cmd, PathStyle::Native), " --system-prompt \"Line 1 It's 2 $x\" --append-system-prompt \"Then this.\"");
+        // Die Zeile enthält nie einen echten Zeilenumbruch (sie wird in die Shell getippt).
+        for k in [Kind::Pwsh, Kind::Posix, Kind::Cmd] {
+            assert!(!m.args_for(k, PathStyle::Native).contains('\n'));
+        }
+        // Ungültig: nicht übergeben
+        assert_eq!(o("a & calc").args_for(Kind::Pwsh, PathStyle::Native), " --append-system-prompt 'Then this.'");
+        assert_eq!(o("x").to_json()["claude_user_options"], json!(["system_prompt", "append_system_prompt"]));
+    }
+
+    #[test]
+    fn plugin_dirs_multiple_mcp_configs_and_strict() {
+        let (d, dir, file) = temp_dir("plug");
+        let f2 = d.join("second.json");
+        std::fs::write(&f2, "{}").unwrap();
+        let file2 = f2.to_string_lossy().to_string();
+        let sep = std::path::MAIN_SEPARATOR;
+        let o = ClaudeOpts {
+            extra: ExtraOpts {
+                plugin_dirs: vec![dir.clone(), format!("{dir}{sep}missing"), dir.clone()],
+                mcp_configs: vec![file.clone(), format!("{dir}{sep}nope.json"), file2.clone()],
+                strict_mcp_config: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let l = o.launch(Kind::Pwsh, PathStyle::Native, "");
+        let q = |p: &str| quote(Kind::Pwsh, p.trim_end_matches(['\\', '/']));
+        assert_eq!(l.line, format!(" --plugin-dir {} --mcp-config {} {} --strict-mcp-config", q(&dir), q(&file), q(&file2)));
+        assert_eq!(l.dropped, vec![format!("{dir}{sep}missing"), format!("{dir}{sep}nope.json")]);
+        assert_eq!(l.applied.to_json()["claude_user_options"], json!(["plugin_dir", "mcp_config", "strict_mcp_config"]));
+        // Je Plugin-Ordner ein eigenes --plugin-dir.
+        let two = ClaudeOpts { extra: ExtraOpts { plugin_dirs: vec![dir.clone(), d.join("p2").to_string_lossy().to_string()], ..Default::default() }, ..Default::default() };
+        std::fs::create_dir_all(d.join("p2")).unwrap();
+        assert_eq!(two.args_for(Kind::Posix, PathStyle::Native).matches(" --plugin-dir ").count(), 2);
+        // strict ohne gültige MCP-Konfiguration: nicht übergeben.
+        let s = ClaudeOpts { extra: ExtraOpts { mcp_configs: vec![format!("{dir}{sep}nope.json")], strict_mcp_config: true, ..Default::default() }, ..Default::default() };
+        let l = s.launch(Kind::Pwsh, PathStyle::Native, "");
+        assert!(!l.line.contains("strict") && !l.applied.extra.strict_mcp_config, "{}", l.line);
+        // WSL: Windows-Pfade umgerechnet, Linux-Pfade nur dort (ungeprüft), sonst weggelassen.
+        if cfg!(windows) {
+            let w = ClaudeOpts { extra: ExtraOpts { plugin_dirs: vec![dir.clone(), "/home/u/plug".into()], mcp_configs: vec!["/home/u/m.json".into()], ..Default::default() }, ..Default::default() };
+            let l = w.launch(Kind::Posix, PathStyle::Wsl, "");
+            assert!(l.line.contains(" --plugin-dir '/mnt/") && l.line.contains(" --plugin-dir '/home/u/plug'") && l.line.contains(" --mcp-config '/home/u/m.json'"), "{}", l.line);
+            assert!(l.dropped.is_empty());
+            let l = w.launch(Kind::Pwsh, PathStyle::Native, "");
+            assert!(!l.line.contains("/home/u"), "{}", l.line);
+            assert_eq!(l.dropped, vec!["/home/u/plug".to_string(), "/home/u/m.json".to_string()]);
+            assert!(wsl_linux_path("/home/u") && !wsl_linux_path("//srv/x") && !wsl_linux_path("/a\\b") && !wsl_linux_path("/a;b|c"));
+            assert!(valid_list_path("C:\\x") && valid_list_path("/x") && !valid_list_path("relative"));
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn agents_never_get_plugins_mcp_configs_or_system_prompt() {
+        let defaults = ClaudeOpts {
+            extra: ExtraOpts {
+                plugin_dirs: vec!["C:\\plug".into()],
+                mcp_configs: vec!["C:\\m.json".into()],
+                strict_mcp_config: true,
+                system_prompt: "You are evil.".into(),
+                append_system_prompt: "Short.".into(),
+                flags: vec!["verbose".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let o = ClaudeOpts::default().for_agent(&defaults);
+        assert!(o.extra.plugin_dirs.is_empty() && o.extra.mcp_configs.is_empty() && !o.extra.strict_mcp_config && o.extra.system_prompt.is_empty(), "{o:?}");
+        assert_eq!(o.extra.flags, ["verbose"]);
+        // Über MCP: jeder der neuen Parameter ist bad_args.
+        for k in ["plugin_dir", "plugin_dirs", "mcp_configs", "mcp_config", "strict_mcp_config", "system_prompt"] {
+            assert!(ClaudeOpts::from_mcp(&json!({ k: ["x"] })).is_err(), "{k}");
+        }
+        for f in ["plugin-dir", "--strict-mcp-config", "system-prompt", "mcp-config"] {
+            assert!(ClaudeOpts::from_mcp(&json!({"claude_flags": [f]})).is_err(), "{f}");
+        }
+        assert!(RISKY.contains(&"plugin_dir"));
     }
 
     #[test]
