@@ -472,7 +472,7 @@ pub(super) fn folder_exists(wsl: bool, path: &str) -> bool {
 
 /// Farbauswahl: die geltende Palette des Terminal-Hubs wie im Kontextmenü „Farbe“ (die gewählte ist umrandet) und
 /// „Eigene Farbe …“ (klappt im Dialog auf; die Farbe kommt nicht in die Palette).
-fn color_row(ui: &mut Ui, color: &mut [u8; 3], lang: Lang) {
+pub(super) fn color_row(ui: &mut Ui, color: &mut [u8; 3], lang: Lang) {
     ui.vertical(|ui| {
         let cur = crate::palette::hex_of(*color);
         if let Some(h) = palette_ui::pick(ui, "sset_color", crate::palette::Area::Hub, Some(&cur), palette_ui::PickOpts::HUB, lang) {
@@ -507,7 +507,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
     let mut out = FormOutcome::Open;
     let esc = esc_ok && !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     // Reiter wie im Dialog „Neue Sitzung“ (#292): öffnet auf „Allgemein“, Strg+Tab/Alt+1 … wechseln, Enter speichert.
-    let enter = esc_ok && tabs::enter_confirms(ctx);
+    let enter = esc_ok && !value_suggest::wants_enter(ctx, egui::Id::new(("session_tags", f.id))) && tabs::enter_confirms(ctx);
     if f.focus {
         tabs::set(ctx, SALT, Tab::General);
     }

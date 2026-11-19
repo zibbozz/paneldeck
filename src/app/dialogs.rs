@@ -10,6 +10,10 @@ impl App {
 
         // Neue Sitzung (Inhalt in `new_dialog_ui`, ohne App testbar)
         if let Some(mut d) = self.new_dialog.take() {
+            if d.focus {
+                // Beim Öffnen: vorhandene Tags für die Vorschläge (#239, #292).
+                d.tag_values = self.session_tag_counts();
+            }
             let target = self.new_dialog_target(&d.shell_id, d.profile);
             let out = new_dialog_ui(ctx, &mut d, &self.shells, &self.settings.profiles, self.settings.claude_mode, &self.settings.wsl_recent, target, lang);
             let create = out == NewDlgOut::Create;
@@ -31,20 +35,7 @@ impl App {
                     d.picker.remember(&mut self.settings.wsl_recent);
                     state::save_json(&self.dir.join("settings.json"), &self.settings);
                 }
-                let opts = NewOpts {
-                    shell_id: Some(d.shell_id.clone()),
-                    cwd: Some(d.cwd.clone()),
-                    name: Some(d.name.clone()),
-                    claude: d.claude,
-                    claude_opts: Some(d.copts.sanitized(true)),
-                    allow_bypass: true,
-                    continue_last: d.conv.continue_last(),
-                    claude_continue: Some(d.conv.resume_later()),
-                    prompt: Some(d.prompt.clone()),
-                    profile: Some(d.profile),
-                    group: Some(d.group.clone()),
-                    ..NewOpts::default()
-                };
+                let opts = new_dialog_opts(&d);
                 'create: {
                     let want_wt = d.worktree && d.claude && d.repo.is_some() && !d.branch.trim().is_empty();
                     if want_wt && self.pending_wt.is_some() {
@@ -1289,7 +1280,8 @@ pub(super) fn new_dialog_ui(
     // verbraucht – kein Terminal dahinter bekommt es (#261, wie in den Einstellungen der Sitzung).
     let esc = !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     // Reiter (#292): öffnet immer auf „Allgemein“ (Fokus auf dem Namen); Strg+Tab, Alt+1 … wechseln; Enter erstellt.
-    let enter = tabs::enter_confirms(ctx);
+    // Ein gewählter Tag-Vorschlag nimmt Enter selbst (#239).
+    let enter = !super::planning_ui::value_suggest::wants_enter(ctx, Id::new("newdlg_tags")) && tabs::enter_confirms(ctx);
     if d.focus {
         tabs::set(ctx, SALT, Tab::General);
     }
@@ -1376,6 +1368,27 @@ pub(super) fn new_dialog_ui(
     out
 }
 
+/// Anlage-Optionen aus dem Dialog „Neue Sitzung“ (mit Farbe, Tags und Notizen, #292).
+fn new_dialog_opts(d: &NewDialog) -> NewOpts {
+    NewOpts {
+        shell_id: Some(d.shell_id.clone()),
+        cwd: Some(d.cwd.clone()),
+        name: Some(d.name.clone()),
+        claude: d.claude,
+        claude_opts: Some(d.copts.sanitized(true)),
+        allow_bypass: true,
+        continue_last: d.conv.continue_last(),
+        claude_continue: Some(d.conv.resume_later()),
+        prompt: Some(d.prompt.clone()),
+        profile: Some(d.profile),
+        group: Some(d.group.clone()),
+        color: d.own_color.then_some(d.color),
+        tags: crate::templates::TplItem::clean_tags(&session_settings::parse_tags(&d.tags)),
+        notes: d.notes.trim_end().to_string(),
+        ..NewOpts::default()
+    }
+}
+
 /// Reiter *Allgemein* des Dialogs „Neue Sitzung“: Name, Claude starten, Profil, Shell, Ordner, Ordner im Baum, Worktree.
 #[allow(clippy::too_many_arguments)]
 fn new_dialog_general(ui: &mut Ui, d: &mut NewDialog, shells: &[ShellSpec], profiles: &[Profile], claude_mode: bool, wsl_recent: &std::collections::BTreeMap<String, Vec<String>>, target: &folder_picker::Target, lang: Lang) {
@@ -1435,6 +1448,24 @@ fn new_dialog_general(ui: &mut Ui, d: &mut NewDialog, shells: &[ShellSpec], prof
         ui.end_row();
         ui.label(lang.t("Ordner im Baum", "Tree folder"));
         ui.add(egui::TextEdit::singleline(&mut d.group).hint_text(lang.t("z. B. Backend/API (leer = keiner)", "e.g. Backend/API (empty = none)")).desired_width(FIELD_W));
+        ui.end_row();
+        // Farbe, Tags, Notizen (#292) wie in den Einstellungen der Sitzung.
+        ui.label(lang.t("Farbe", "Color"));
+        ui.vertical(|ui| {
+            let r = ui.checkbox(&mut d.own_color, lang.t("Eigene Farbe", "Own color")).on_hover_text(lang.t("Aus: Farbe des Profils bzw. automatisch", "Off: the profile's colour or automatic"));
+            dlg_mark(ui, "own_color", &r);
+            if d.own_color {
+                session_settings::color_row(ui, &mut d.color, lang);
+            }
+        });
+        ui.end_row();
+        ui.label(lang.t("Tags", "Tags"));
+        let r = super::planning_ui::value_suggest::suggest_edit(ui, Id::new("newdlg_tags"), &mut d.tags, &d.tag_values, &[], super::planning_ui::value_suggest::Mode::List, lang, |ui, te| ui.add(te.hint_text(lang.t("mit Komma getrennt", "comma separated")).desired_width(FIELD_W)));
+        let _ = r;
+        ui.end_row();
+        ui.label(lang.t("Notizen", "Notes"));
+        let r = super::opts_tabs::notes_edit(ui, &mut d.notes, FIELD_W);
+        dlg_mark(ui, "notes", &r);
         ui.end_row();
         if d.claude {
             // Git-Worktree anbieten, wenn der Ordner in einem Repository liegt (Prüfung nur bei Änderung des Pfads,
@@ -1608,6 +1639,31 @@ mod layout_tests {
         reset_tab(&mut o, &ClaudeOpts::default(), Tab::Access);
         assert_eq!(tab_counts(&o, &ClaudeOpts::default())[1], 0);
         assert!(o.extra.add_dirs.is_empty() && o.extra.mcp_configs.is_empty() && o.model == "opus", "nur der Reiter");
+    }
+
+    #[test]
+    fn colour_tags_and_notes_reach_the_new_session() {
+        // #292: im Reiter „Allgemein“ und in den Optionen der neuen Sitzung.
+        let ctx = egui::Context::default();
+        let size = Vec2::new(1280.0, 720.0);
+        let mut d = NewDialog::new("pwsh".into(), false, ClaudeOpts::default());
+        frame(&ctx, &mut d, size, 0.0, vec![]);
+        frame(&ctx, &mut d, size, 0.1, vec![]);
+        assert!(mark(&ctx, "own_color", 0).is_some() && mark(&ctx, "notes", 0).is_some());
+        let o = new_dialog_opts(&d);
+        assert_eq!((o.color, o.tags.len(), o.notes.as_str()), (None, 0, ""), "ohne Angaben: Farbe automatisch");
+        d.own_color = true;
+        d.color = [1, 2, 3];
+        d.tags = " web, #api ,web".into();
+        d.notes = "line 1\nline 2\n".into();
+        frame(&ctx, &mut d, size, 0.2, vec![]);
+        let o = new_dialog_opts(&d);
+        assert_eq!(o.color, Some([1, 2, 3]));
+        assert_eq!(o.tags, ["web", "api"], "ohne Doppelte");
+        assert_eq!(o.notes, "line 1\nline 2");
+        assert_eq!(session_color(o.color, Some([9, 9, 9]), [0, 0, 0]), [1, 2, 3], "eigene Farbe vor der des Profils");
+        assert_eq!(session_color(None, Some([9, 9, 9]), [0, 0, 0]), [9, 9, 9]);
+        assert_eq!(session_color(None, None, [7, 7, 7]), [7, 7, 7]);
     }
 
     #[test]

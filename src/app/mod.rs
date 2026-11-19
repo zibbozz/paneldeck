@@ -467,6 +467,14 @@ struct NewDialog {
     group: String,
     /// Ordnerfeld (WSL-fähig, #172); `cwd` wird jedes Bild daraus übernommen.
     picker: folder_picker::FolderPicker,
+    /// Eigene Farbe (#292); aus = Farbe des Profils bzw. automatisch.
+    own_color: bool,
+    color: [u8; 3],
+    /// Tags, mit Komma getrennt (Vorschläge aus den vorhandenen Sitzungen wie in den Einstellungen der Sitzung, #239).
+    tags: String,
+    notes: String,
+    /// Vorhandene Tags für die Vorschläge (setzt die App beim Öffnen).
+    tag_values: Vec<planning_ui::value_suggest::Counted>,
 }
 
 #[derive(Default)]
@@ -498,6 +506,15 @@ struct NewOpts {
     project: Option<u64>,
     /// Chat statt Terminal: mit diesem Server/Modell (kein Prozess, Verlauf in `chats/<id>.json`).
     chat: Option<state::ChatMeta>,
+    /// Eigene Farbe (Dialog „Neue Sitzung“, #292); None = Farbe des Profils bzw. automatisch.
+    color: Option<[u8; 3]>,
+    tags: Vec<String>,
+    notes: String,
+}
+
+/// Farbe einer neuen Sitzung: eigene (Dialog „Neue Sitzung“, #292), sonst die des Profils, sonst automatisch.
+fn session_color(own: Option<[u8; 3]>, profile: Option<[u8; 3]>, auto: [u8; 3]) -> [u8; 3] {
+    own.or(profile).unwrap_or(auto)
 }
 
 struct Launch<'a> {
@@ -512,7 +529,28 @@ impl NewDialog {
     fn new(shell_id: String, claude: bool, copts: ClaudeOpts) -> Self {
         let cwd = home_dir();
         let picker = folder_picker::FolderPicker::new("newdlg", &cwd, folder_picker::Target::Windows);
-        NewDialog { shell_id, cwd, name: String::new(), claude, copts, conv: session_settings::ConvChoice::Resume, focus: true, profile: 0, prompt: String::new(), worktree: false, branch: String::new(), repo_for: String::new(), repo: None, group: String::new(), picker }
+        NewDialog {
+            shell_id,
+            cwd,
+            name: String::new(),
+            claude,
+            copts,
+            conv: session_settings::ConvChoice::Resume,
+            focus: true,
+            profile: 0,
+            prompt: String::new(),
+            worktree: false,
+            branch: String::new(),
+            repo_for: String::new(),
+            repo: None,
+            group: String::new(),
+            picker,
+            own_color: false,
+            color: crate::palette::nth_rgb(crate::palette::Area::Hub, 0),
+            tags: String::new(),
+            notes: String::new(),
+            tag_values: Vec::new(),
+        }
     }
 
     /// Startordner von außen setzen (Profil, Ordnervorgabe).
@@ -2048,7 +2086,9 @@ impl App {
             shell_id,
             cwd: o.cwd.filter(|c| !c.is_empty()).or_else(|| self.projects.iter().find(|p| p.id == project).map(|p| p.folder.clone())).unwrap_or_default(),
             project,
-            color: prof.as_ref().and_then(|p| p.color).unwrap_or_else(|| hub_color(id)),
+            color: session_color(o.color, prof.as_ref().and_then(|p| p.color), hub_color(id)),
+            tags: o.tags.clone(),
+            notes: o.notes.clone(),
             profile: pid,
             claude: o.claude,
             claude_args,
