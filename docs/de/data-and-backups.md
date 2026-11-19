@@ -101,6 +101,9 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
 - `templates.json` → je Sitzung: `claude_continue` (`false` = *Bei jedem Start eine neue*; fehlt = beim Neu laden/Neustart fortsetzen). Ältere Paneldeck-Versionen ignorieren es.
 - `state.json` → `claude_continue` heißt jetzt *Konversation dieser Sitzung beim Neu laden/Neustart fortsetzen*; genutzt wird die eigene Konversations-ID der Sitzung und nur, wenn es sie gibt.
 
+## Neue Felder in 2.4.0
+- `templates.json` → je Vorlage `terminal` (`true` = Terminal-Vorlage mit genau einer Sitzung); je Sitzung `color`, `tags`, `notes`, `claude_opts` (gleiche Schlüssel wie in `state.json`) und `continue_last`. Alle optional; ältere Dateien laden weiter. Paneldeck vor 2.4 startet eine Terminal-Vorlage als Gruppe mit einer Sitzung, ohne ihre strukturierten Claude-Optionen.
+
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
 
