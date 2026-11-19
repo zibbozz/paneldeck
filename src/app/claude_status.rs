@@ -259,10 +259,21 @@ impl Entry {
     /// [`Entry::take_hook`]). Gespeichert – und später mit `--resume` fortgesetzt – wird nur eine Konversation, die der
     /// Sitzung gehört (`ConvBinding::own`, #302): die beim Start übergebene, die mit `--continue` fortgesetzte oder eine,
     /// zu der der vom Hub gestartete Claude selbst gewechselt hat. Ein von Hand im selben Terminal gestarteter Claude
-    /// oder ein anderer Prozess mit dem Schlüssel der Sitzung ändert sie nie, auch nicht „Inhalt vorhanden“.
-    pub(super) fn note_conversation(&mut self, m: &HookMsg, conv: &ConvMatch) {
-        if !self.is_claude() || !self.hook_conv.own {
-            return;
+    /// oder ein anderer Prozess mit dem Schlüssel der Sitzung ändert sie nie, auch nicht „Inhalt vorhanden“ oder das
+    /// Transkript (Kosten, MCP). Meldungen ohne Schlüssel (`keyless`) nie. `true`, wenn sich das Transkript geändert hat.
+    pub(super) fn note_conversation(&mut self, m: &HookMsg, conv: &ConvMatch, keyless: bool) -> bool {
+        if keyless || !self.hook_conv.own {
+            return false;
+        }
+        let mut transcript = false;
+        if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty()) {
+            if self.meta.transcript != *tp {
+                self.meta.transcript = tp.clone();
+                transcript = true;
+            }
+        }
+        if !self.is_claude() {
+            return transcript;
         }
         if let ConvMatch::Bind(cs) | ConvMatch::Switch(cs) = conv {
             if self.meta.claude_session != *cs {
@@ -278,6 +289,7 @@ impl Entry {
             ("SessionStart", Some("clear")) => self.meta.claude_started = false,
             _ => {}
         }
+        transcript
     }
 
     /// Der vom Hub gestartete Claude ist beendet (oder nie gestartet): Die Warteschlange läuft in diesem Start nicht
@@ -896,7 +908,7 @@ mod tests {
         };
         let deliver = |e: &mut Entry, m: HookMsg| {
             if let Some(f) = e.take_hook(&m) {
-                e.note_conversation(&m, &f.conv);
+                e.note_conversation(&m, &f.conv, f.keyless);
             }
         };
         let fresh = || {
@@ -951,5 +963,80 @@ mod tests {
         e.hook_conv = hooks::ConvBinding::launch(None, false);
         deliver(&mut e, with("SessionStart", "Z", Some("resume"), None));
         assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("Z", true));
+
+        // Review: vorgetäuschter Prompt der Shell, gleich danach /clear (ohne Meldung dazwischen): C gehört der Sitzung
+        let mut e = fresh();
+        deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+        e.hook_conv.shell_prompt();
+        deliver(&mut e, with("SessionEnd", "A", None, Some("clear")));
+        deliver(&mut e, with("SessionStart", "C", Some("clear"), None));
+        assert_eq!(e.meta.claude_session, "C");
+
+        // Review: /resume im gestarteten Claude mit SessionEnd-Grund `other` (oder ohne Grund): die fortgesetzte gehört der
+        // Sitzung; ein danach neu gestarteter Claude (`startup`) nie
+        for reason in [Some("other"), None, Some("resume")] {
+            let mut e = fresh();
+            deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+            deliver(&mut e, with("SessionEnd", "A", None, reason));
+            deliver(&mut e, with("SessionStart", "D", Some("resume"), None));
+            assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("D", true), "{reason:?}");
+            let mut e = fresh();
+            deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+            deliver(&mut e, with("SessionEnd", "A", None, reason));
+            deliver(&mut e, with("SessionStart", "B", Some("startup"), None));
+            deliver(&mut e, with("UserPromptSubmit", "B", None, None));
+            assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("A", false), "{reason:?}");
+            // … und auch dessen spätere Wechsel nicht
+            deliver(&mut e, with("SessionStart", "E", Some("clear"), None));
+            assert_eq!(e.meta.claude_session, "A", "{reason:?}");
+        }
+        // Eindeutig beendet: auch ein `claude --resume X` von Hand gehört nicht der Sitzung
+        for reason in ["prompt_input_exit", "logout", "bypass_permissions_disabled"] {
+            let mut e = fresh();
+            deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+            deliver(&mut e, with("SessionEnd", "A", None, Some(reason)));
+            deliver(&mut e, with("SessionStart", "X", Some("resume"), None));
+            assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("A", false), "{reason}");
+        }
+
+        // Review: Reihenfolge vertauscht – SessionStart(clear) der neuen vor SessionEnd(clear) der alten Konversation
+        let mut e = fresh();
+        deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+        deliver(&mut e, with("SessionStart", "C", Some("clear"), None));
+        deliver(&mut e, with("SessionEnd", "A", None, Some("clear")));
+        assert_eq!((e.meta.claude_session.as_str(), e.hook_conv.bound.as_deref(), e.hook_conv.own), ("C", Some("C"), true));
+        deliver(&mut e, with("UserPromptSubmit", "C", None, None));
+        assert!(e.meta.claude_started);
+
+        // Review: Transkript (Kosten, MCP) nur von der eigenen Konversation
+        let tp = |ev: &str, id: &str, src: Option<&str>, path: &str| HookMsg { transcript_path: Some(path.into()), ..with(ev, id, src, None) };
+        let mut e = fresh();
+        let m = tp("SessionStart", "A", Some("startup"), "C:\\p\\A.jsonl");
+        let f = e.take_hook(&m).unwrap();
+        assert!(e.note_conversation(&m, &f.conv, f.keyless), "eigenes Transkript übernommen");
+        assert!(!e.note_conversation(&m, &f.conv, f.keyless), "unverändert");
+        deliver(&mut e, with("SessionEnd", "A", None, Some("prompt_input_exit")));
+        let m = tp("SessionStart", "B", Some("startup"), "C:\\p\\B.jsonl");
+        let f = e.take_hook(&m).unwrap();
+        assert!(!e.note_conversation(&m, &f.conv, f.keyless));
+        let m = tp("Stop", "B", None, "C:\\p\\B.jsonl");
+        let f = e.take_hook(&m).unwrap();
+        assert!(!e.note_conversation(&m, &f.conv, f.keyless));
+        assert_eq!(e.meta.transcript, "C:\\p\\A.jsonl");
+
+        // Review: Meldungen ohne Schlüssel (globale Hooks einer älteren paneldeck.exe) ändern nie die Konversation
+        let mut e = fresh();
+        let keyless = |ev: &str, id: &str, src: Option<&str>| HookMsg { key: None, transcript_path: Some("C:\\p\\K.jsonl".into()), ..with(ev, id, src, None) };
+        for m in [keyless("SessionStart", "A", Some("resume")), keyless("UserPromptSubmit", "A", None)] {
+            let f = e.take_hook(&m).expect("für den Status angenommen");
+            assert!(f.keyless);
+            assert!(!e.note_conversation(&m, &f.conv, f.keyless));
+        }
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started, e.meta.transcript.as_str()), ("A", false, ""));
+        // Auch wenn die Zuordnung (aus Meldungen mit Schlüssel) der Sitzung gehört
+        deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+        assert!(e.hook_conv.own);
+        assert!(!e.note_conversation(&keyless("UserPromptSubmit", "A", None), &ConvMatch::Same, true));
+        assert!(!e.meta.claude_started);
     }
 }

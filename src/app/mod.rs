@@ -3458,11 +3458,9 @@ impl App {
                 cwd: m.cwd.as_ref().map(|p| pathfmt::from_wsl(&sh, p)),
                 ..m
             };
-            if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty() && !keyless) {
-                if e.meta.transcript != *tp {
-                    e.meta.transcript = tp.clone();
-                    self.usage.set_path(m.session, PathBuf::from(tp));
-                }
+            // Konversation und Transkript nur der eigenen Konversation der Sitzung (#302).
+            if e.note_conversation(&m, &conv, keyless) {
+                self.usage.set_path(m.session, PathBuf::from(&e.meta.transcript));
             }
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
                 // Linux-Pfad einer WSL-Sitzung als Windows-Pfad wie bei OSC 7 (Dateibaum, Links, #277).
@@ -3470,9 +3468,6 @@ impl App {
                 if e.start_cwd.is_empty() {
                     e.start_cwd = e.live_cwd.clone();
                 }
-            }
-            if !keyless {
-                e.note_conversation(&m, &conv);
             }
             // Von selbst weiter nur, wenn `take_hook` es erlaubt (der vom Hub gestartete Claude, Ende einer Runde mit Prompt).
             if advance && e.queue_tick(old, new) {

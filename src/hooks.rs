@@ -80,6 +80,13 @@ pub fn session_end_is_exit(m: &HookMsg) -> bool {
     m.event == "SessionEnd" && !matches!(m.reason.as_deref(), Some("clear" | "resume"))
 }
 
+/// Meldet SessionEnd eindeutig, dass Claude beendet wurde (`/exit`, Abmelden, Rechte-Modus abgeschaltet)? Strenger als
+/// [`session_end_is_exit`]: `other` oder ein fehlender Grund zählen nicht (#302) – damit ein `/resume` im laufenden
+/// Claude nicht wie ein Ende aussieht.
+pub fn session_end_is_quit(m: &HookMsg) -> bool {
+    m.event == "SessionEnd" && matches!(m.reason.as_deref(), Some("prompt_input_exit" | "logout" | "bypass_permissions_disabled"))
+}
+
 /// Stammt die Meldung vom laufenden Start der Sitzung (#260)? `current` = Schlüssel dieses Starts (`Entry::session_key`).
 /// Ohne oder mit falschem Schlüssel (anderes Terminal, Prozess eines früheren Starts, Fälschung) nie.
 pub fn key_matches(current: &str, sent: Option<&str>) -> bool {
@@ -153,12 +160,16 @@ pub struct ConvBinding {
     /// Zusammenfassen). Nur sie wird in der Sitzung gespeichert und später mit `--resume` fortgesetzt – nie die eines
     /// von Hand gestarteten Claude oder eines anderen Prozesses mit dem Schlüssel der Sitzung.
     pub own: bool,
+    /// Die eigene Konversation endete ohne eindeutiges Beenden (`clear`, `resume`, `other`, kein Grund): Der gestartete
+    /// Claude läuft vermutlich mit einer anderen weiter. Der nächste SessionStart gehört der Sitzung nur mit `source`
+    /// `clear`/`resume`/`compact` – ein `startup` ist ein neu gestarteter Claude (#302).
+    pub soft_end: bool,
 }
 
 impl ConvBinding {
     pub fn launch(expect: Option<String>, hooks_off: bool) -> Self {
         let expect = expect.filter(|e| !e.is_empty());
-        ConvBinding { bound: None, launched: expect.clone(), expect, hooks_off, open: false, chain: true, own: false }
+        ConvBinding { bound: None, launched: expect.clone(), expect, hooks_off, open: false, chain: true, own: false, soft_end: false }
     }
 
     /// Die Shell zeigt nach dem Startbefehl wieder ihren Prompt: Was darin an Claude lief, ist beendet. Ein von Claude
@@ -199,8 +210,15 @@ impl ConvBinding {
         match &r {
             ConvMatch::Bind(id) | ConvMatch::Switch(id) => {
                 // Der Sitzung gehört sie nur, wenn sie die beim Start übergebene ist oder der gestartete Claude noch läuft
-                // (`/clear`, `/resume`, `--continue`) – nicht nach seinem Ende (#302).
-                self.own = self.launched.as_deref() == Some(id.as_str()) || self.chain;
+                // (`/clear`, `/resume`, `--continue`) – nicht nach seinem Ende (#302). Nach einem nicht eindeutigen Ende
+                // der eigenen Konversation zählt nur ein Wechsel (`clear`/`resume`/`compact`), nie ein `startup`.
+                let switch = matches!(m.source.as_deref(), Some("clear" | "resume" | "compact"));
+                self.own = self.launched.as_deref() == Some(id.as_str()) || (self.chain && (!self.soft_end || switch));
+                if !self.own {
+                    // Ein anderer Claude meldet sich: der gestartete läuft nicht mehr (oder nicht mehr zuordenbar).
+                    self.chain = false;
+                }
+                self.soft_end = false;
                 self.bound = Some(id.clone());
                 self.expect = None;
                 self.open = false;
@@ -208,9 +226,16 @@ impl ConvBinding {
             // Der Claude dieser Konversation ist beendet: ein im selben Terminal neu gestarteter Claude darf sich mit
             // seinem SessionStart wieder zuordnen.
             ConvMatch::Same if m.event == "SessionEnd" => {
-                // Beendet (nicht `/clear`/`/resume`): was sich danach meldet, hat nicht der Hub gestartet (#302).
-                if session_end_is_exit(m) {
+                // Die eigene Konversation meldet sich: der gestartete Claude lief bis eben (auch nach einem vorgetäuschten
+                // Prompt der Shell). Eindeutig beendet (#302): was sich danach meldet, hat nicht der Hub gestartet; sonst
+                // (`/clear`, `/resume`, `other`) zählt nur ein folgender Wechsel als eigene Konversation.
+                if self.own {
+                    self.chain = true;
+                }
+                if session_end_is_quit(m) {
                     self.chain = false;
+                } else if self.own {
+                    self.soft_end = true;
                 }
                 self.bound = None;
                 self.expect = None;
@@ -1472,7 +1497,8 @@ mod tests {
         assert_eq!(c.bound.as_deref(), Some("A"));
         // Ende der eigenen Konversation: Zuordnung frei
         assert_eq!(c.feed(&msg("SessionEnd", "A", None)), ConvMatch::Same);
-        assert_eq!((c.bound.as_deref(), c.expect.as_deref(), c.open, c.chain, c.own), (None, None, false, false, false));
+        // Ohne eindeutigen Grund (#302): der gestartete Claude könnte weiterlaufen – nur ein Wechsel gehört noch der Sitzung
+        assert_eq!((c.bound.as_deref(), c.expect.as_deref(), c.open, c.chain, c.own, c.soft_end), (None, None, false, true, false, true));
         // Vor einem neuen SessionStart zählen fremde Meldungen nicht
         assert_eq!(c.feed(&msg("UserPromptSubmit", "X", None)), ConvMatch::Foreign);
         // `claude` erneut im selben Terminal: neue ID, wird zugeordnet und bleibt es
