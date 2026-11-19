@@ -813,6 +813,11 @@ impl Session {
         self.child.try_lock().ok().and_then(|c| c.process_id())
     }
 
+    /// Prozess-ID der Shell, beim Start festgehalten (anders als [`Session::pid`] ohne Sperre).
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
+    }
+
     /// Wie Tasten gerade kodiert werden (Cursor-/Ziffernblock-Modus, win32-input-mode, kitty-Flags).
     pub fn key_mode(&self) -> crate::vtkeys::KeyMode {
         let mode = *self.term.lock().unwrap_or_else(|e| e.into_inner()).mode();

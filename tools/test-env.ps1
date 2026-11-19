@@ -5,7 +5,9 @@
 #   - New-FakeClaudeBin: Ordner mit einem Ersatz-`claude` (claude.cmd fuer PowerShell/cmd, `claude` als sh-Skript fuer
 #     Git Bash). Jeder Aufruf schreibt eine Zeile nach <Ordner>\calls.txt, danach liest der Ersatz Eingabezeilen und
 #     schreibt sie nach <Ordner>\input.txt (so laesst sich pruefen, dass queue_prompt angekommen ist). Die Zeile
-#     "exit-fake-claude" beendet ihn (wie ein Claude, der ohne SessionEnd-Hook endet).
+#     "exit-fake-claude" beendet ihn (wie ein Claude, der ohne SessionEnd-Hook endet); nach der Zeile
+#     "spoof-shell-prompt" gibt er 3 s spaeter OSC 133;A aus (ein Programm taeuscht den Prompt der Shell vor) und
+#     laeuft weiter.
 #   - Enter-IsolatedTestEnv: setzt fuer diesen Prozess (und damit alles, was er startet) ein Schein-Profil
 #     (USERPROFILE, HOME, APPDATA, LOCALAPPDATA, CLAUDE_CONFIG_DIR), entfernt CLAUDECODE, CLAUDE_*, ANTHROPIC_* und
 #     NoDefaultCurrentDirectoryInExePath und baut PATH als <FakeBin>;<alle Eintraege ohne ein claude*>.
@@ -30,6 +32,9 @@ function New-FakeClaudeBin([string]$Dir) {
     'setlocal EnableDelayedExpansion',
     '>>"%~dp0input.txt" echo(!line!',
     'if "!line!"=="exit-fake-claude" (endlocal & exit /b 0)',
+    # Nach 3 s den Prompt der Shell vortaeuschen, waehrend der Ersatz weiterlaeuft: Ordnermeldung (OSC 9;9, daran sieht
+    # der Test, dass die Sequenzen ankommen) und Prompt-Anfang (OSC 133;A).
+    ('if "!line!"=="spoof-shell-prompt" (ping -n 4 127.0.0.1 >nul & <nul set /p "=' + [char]27 + ']9;9;C:\spoof-prompt' + [char]27 + '\' + [char]27 + ']133;A' + [char]27 + '\")'),
     'endlocal',
     'goto loop',
     '')
@@ -39,7 +44,7 @@ function New-FakeClaudeBin([string]$Dir) {
     'd=$(cd "$(dirname "$0")" && pwd)',
     'printf ''claude(sh) cwd=%s key=%s args=%s\n'' "$PWD" "$PANELDECK_SESSION_KEY" "$*" >> "$d/calls.txt"',
     'echo "Fake Claude (Paneldeck test) - the real Claude Code is NOT started."',
-    'while IFS= read -r line; do printf ''%s\n'' "$line" >> "$d/input.txt"; [ "$line" = "exit-fake-claude" ] && exit 0; done',
+    'while IFS= read -r line; do printf ''%s\n'' "$line" >> "$d/input.txt"; [ "$line" = "exit-fake-claude" ] && exit 0; [ "$line" = "spoof-shell-prompt" ] && { sleep 3; printf ''\033]9;9;C:\\spoof-prompt\033\\\033]133;A\033\\''; }; done',
     '')
   [IO.File]::WriteAllText((Join-Path $Dir 'claude'), ($sh -join "`n"), (New-Object Text.UTF8Encoding $false))
   (Resolve-Path $Dir).Path

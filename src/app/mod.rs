@@ -1734,9 +1734,15 @@ impl App {
             if let Some(f) = hooks::write_session_settings_wsl(&self.dir, &self.exe, &sid) {
                 c += &format!(" --settings {}", crate::quote::quote(kind, &pathfmt::convert(&sid, &f.to_string_lossy())));
             }
-        } else if !self.hooks_global || self.hooks_incomplete {
-            // Auch neben globalen Hooks einer älteren Version, denen Ereignisse fehlen (gleiche Befehle führt Claude Code
-            // nur einmal aus).
+        } else if hooks::session_needs_settings(
+            self.hooks_global,
+            self.hooks_incomplete,
+            self.hooks_foreign.is_some(),
+            self.profile(meta.profile).map_or("", |p| p.env.as_str()),
+            hooks::global_settings_path().as_deref(),
+        ) {
+            // Ohne globale Hooks immer; mit ihnen, wenn das Profil ein anderes CLAUDE_CONFIG_DIR setzt (dort gelten sie
+            // nicht) oder ihnen Ereignisse fehlen und sie dieselbe paneldeck.exe aufrufen (`session_needs_settings`).
             if let Some(f) = &self.hooks_file {
                 c += &format!(" --settings {}", crate::quote::quote(kind, &f.to_string_lossy().replace('\\', "/")));
             }
@@ -1793,6 +1799,10 @@ impl App {
         entry.hook_seen = false;
         entry.hook_conv = hooks::ConvBinding::default();
         entry.hook_keyed = false;
+        // Die Warteschlange hatte der Hub selbst angehalten, weil Claude beendet war: Mit dem neuen Start läuft sie wieder.
+        if entry.track.auto_paused {
+            entry.meta.queue_paused = false;
+        }
         entry.track = Default::default();
         entry.status_msg.clear();
         entry.perm_since = None;
@@ -1801,6 +1811,8 @@ impl App {
             return;
         };
         let wsl = shells::is_wsl(&shell);
+        // Ob im Vordergrund der Shell etwas läuft, sieht der Hub nur bei lokalen Shells (nicht in WSL).
+        entry.track.confirmable = shells::foreground_visible(&shell);
         let restore_text = if l.restore {
             std::fs::read_to_string(self.scrollback_path(entry.meta.id)).ok()
         } else {
@@ -1896,7 +1908,6 @@ impl App {
             (Some(st), None) => Some(format!("{st}\r")),
             (None, c) => c,
         };
-        // So viele Prompts zeigt die Shell bis zum Startbefehl; jeder weitere heißt, dass Claude beendet ist.
         entry.track.launch_lines = claude_status::launch_lines(initial.as_deref());
         // Schlüssel an zweiter Stelle: er landet so auch in WSLENV (siehe unten, alles ab Index 1 wird durchgereicht).
         entry.session_key = hooks::random_hex();
@@ -3354,6 +3365,7 @@ impl App {
         let msgs: Vec<HookMsg> = self.hook_server.as_ref().map(|s| s.rx.try_iter().collect()).unwrap_or_default();
         let lang = self.settings.language;
         let mut queue_done: Vec<(u64, String)> = Vec::new();
+        let mut queue_paused: Vec<u64> = Vec::new();
         for m in msgs {
             let focused_id = seen_id;
             let Some(e) = self.entries.get_mut(&m.session) else { continue };
@@ -3363,7 +3375,10 @@ impl App {
                 continue;
             }
             // Annahme (Schlüssel des laufenden Starts und Konversation, #260) und neuer Status: `Entry::take_hook`.
-            let Some(claude_status::HookEffect { old, new, conv, keyless }) = e.take_hook(&m) else { continue };
+            let Some(claude_status::HookEffect { old, new, conv, keyless, advance, paused }) = e.take_hook(&m) else { continue };
+            if paused {
+                queue_paused.push(m.session);
+            }
             let sh = e.eff_shell().to_string();
             let m = HookMsg {
                 transcript_path: m.transcript_path.as_ref().map(|p| pathfmt::from_wsl(&sh, p)),
@@ -3399,7 +3414,8 @@ impl App {
                     _ => {}
                 }
             }
-            if e.queue_tick(old, new) {
+            // Von selbst weiter nur, wenn `take_hook` es erlaubt (der vom Hub gestartete Claude, Ende einer Runde mit Prompt).
+            if advance && e.queue_tick(old, new) {
                 queue_done.push((m.session, e.display_name()));
             }
             let needs = new != old && matches!(new, ClaudeStatus::Permission | ClaudeStatus::Input);
@@ -3428,6 +3444,11 @@ impl App {
             }
         }
         self.queue_finished(ctx, queue_done);
+        for id in queue_paused {
+            if let Some(n) = self.queue_paused_note(id) {
+                self.notify_text(n);
+            }
+        }
     }
 
     fn queue_finished(&mut self, ctx: &egui::Context, names: Vec<(u64, String)>) {

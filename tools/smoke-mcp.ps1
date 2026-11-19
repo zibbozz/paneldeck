@@ -567,14 +567,6 @@ $wait
     Check 'Hook einer anderen Konversation (claude -p) wird verworfen (#260)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
     Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'alt' } $null; Start-Sleep 0.5
     Check 'Hook ganz ohne Schluessel zaehlt nicht mehr, sobald Meldungen mit Schluessel kamen (#260)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
-    # Claude beendet und im selben Terminal neu gestartet: neue Konversation wird wieder zugeordnet (Review zu #260).
-    Hook 'SessionEnd'; Start-Sleep 0.3
-    $script:hookSid = [guid]::NewGuid().ToString()
-    Hook 'SessionStart' @{ source = 'startup' }; Hook 'UserPromptSubmit'; Start-Sleep 0.5
-    Check 'Neu gestarteter Claude im selben Terminal wird zugeordnet (UserPromptSubmit -> working)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
-    Hook 'Stop'; Start-Sleep 0.5
-    Check 'Stop des neuen Claude -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
-
     # --- Status ohne passenden Hook: Claude meldet nicht jedes Ende (kein Stop nach Esc, kein Stop fuer Hintergrund-Agenten ...)
     $rowOf = { (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $cid } }
     # Wartet bis $ms auf den Status $want; gibt den letzten Status zurueck.
@@ -583,6 +575,7 @@ $wait
       do { $s = & $stOf; if ($s -eq $want) { return $s }; Start-Sleep -Milliseconds 400 } while (((Get-Date) - $t0).TotalMilliseconds -lt $ms)
       $s
     }
+    $askBash = @{ notification_type = 'permission_prompt'; message = 'Claude needs your permission to use Bash' }
     # Hintergrund-Agent nach dem Ende der Runde: Werkzeug-Meldung -> working, sein Ende (SubagentStop) -> ready.
     Hook 'PostToolUse' @{ tool_name = 'Bash'; agent_id = 'bg1' }; Start-Sleep 0.5
     Check 'Hintergrund-Agent arbeitet nach dem Stop -> working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
@@ -597,7 +590,7 @@ $wait
     Hook 'Notification' @{ notification_type = 'auth_success'; message = 'Auth ok' }; Start-Sleep 0.5
     Check 'Benachrichtigung auth_success aendert den Status nicht (vorher input)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
     # Offene Freigabe-Frage: die Meldung eines anderen, gleichzeitig laufenden Werkzeugs ueberschreibt sie nicht.
-    Hook 'UserPromptSubmit'; Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'Claude needs your permission to use Bash' }; Start-Sleep 0.5
+    Hook 'UserPromptSubmit'; Hook 'Notification' $askBash; Start-Sleep 0.5
     Check 'Freigabe-Frage -> approval' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
     Hook 'PostToolUse' @{ tool_name = 'Read'; agent_id = 'sub1' }; Hook 'PreToolUse' @{ tool_name = 'Bash' }; Start-Sleep 0.5
     Check 'Meldungen anderer Werkzeuge lassen approval stehen (vorher working)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
@@ -605,23 +598,29 @@ $wait
     Check 'Das gefragte Werkzeug ist fertig -> working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
     Hook 'Stop'; Start-Sleep 0.5
     # Unterbrechung mit Esc: kein Stop-Hook. Das Transkript belegt das Ende der Runde -> ready; die Warteschlange wartet.
+    # Ein Beleg zaehlt nur, wenn er in der Datei HINTER dem Stand bei der letzten Meldung steht (#282): die alte
+    # Unterbrechung am Anfang der Datei nicht.
     $u8n = New-Object Text.UTF8Encoding $false
     $trFile = "$work\smoke-transcript.jsonl"
-    $tsNow = { [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fff') + 'Z' }
-    [IO.File]::WriteAllText($trFile, ('{"type":"user","timestamp":"' + (& $tsNow) + '","message":{"role":"user","content":"los"}}' + "`n"), $u8n)
+    $trPrompt = '{"type":"user","message":{"role":"user","content":"los"}}' + "`n"
+    $trStop = '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}' + "`n"
+    [IO.File]::WriteAllText($trFile, ($trPrompt + $trStop), $u8n)
     Hook 'UserPromptSubmit' @{ transcript_path = $trFile }; Start-Sleep 0.5
     $q2 = Tool 'queue_prompt' @{ session = $cid; prompt = 'nach-der-unterbrechung' }
     Check 'queue_prompt waehrend working: wartet' ($q2.data.sent_immediately -eq $false -and $q2.data.queue_len -eq 1) $q2.text
     Start-Sleep 6
-    Check 'Ohne Stop und ohne Beleg bleibt working' ((& $stOf) -eq 'working') "status=$(& $stOf)"
-    [IO.File]::AppendAllText($trFile, ('{"type":"user","timestamp":"' + (& $tsNow) + '","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}' + "`n"), $u8n)
+    Check 'Ohne Stop bleibt working; eine Unterbrechung von vor der Meldung ist kein Beleg (#282)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    [IO.File]::AppendAllText($trFile, ($trPrompt + $trStop), $u8n)
     $st = Wait-Status 'ready' 15000
     Check 'Unterbrechung ohne Stop-Hook: Status wird ready (Beleg im Transkript; vorher blieb working stehen)' ($st -eq 'ready') "status=$st"
     Start-Sleep 1
     Check 'Nach der Unterbrechung wartet die Warteschlange (nichts gesendet)' ((& $rowOf).queue_len -eq 1 -and (Wait-FakeFile $inputs 'nach-der-unterbrechung' 1) -notmatch 'nach-der-unterbrechung') "queue_len=$((& $rowOf).queue_len)"
+    # Ein Stop ohne abgeschickten Prompt davor (Runde von einem Hintergrund-Ergebnis geweckt) laesst sie auch nicht los (#282).
+    Hook 'PreToolUse' @{ tool_name = 'Bash' }; Hook 'Stop'; Start-Sleep 1
+    Check 'Stop einer Runde ohne Prompt: Warteschlange wartet weiter (#282)' ((& $rowOf).queue_len -eq 1 -and (& $stOf) -eq 'ready') "queue_len=$((& $rowOf).queue_len) status=$(& $stOf)"
     Hook 'UserPromptSubmit'; Hook 'Stop'
-    Check 'Nach dem naechsten echten Stop laeuft die Warteschlange weiter' ((Wait-FakeFile $inputs 'nach-der-unterbrechung' 10000) -match 'nach-der-unterbrechung')
-    # Runde des gesendeten Prompts (ein blosser zweiter Stop gleich danach gaelte als doppelt zugestellt).
+    Check 'Nach dem Stop einer Runde mit Prompt laeuft die Warteschlange weiter' ((Wait-FakeFile $inputs 'nach-der-unterbrechung' 10000) -match 'nach-der-unterbrechung')
+    # Runde des gesendeten Prompts (ein zweiter Stop ohne Meldung dazwischen gaelte als doppelt zugestellt).
     Hook 'UserPromptSubmit'; Start-Sleep 0.3; Hook 'Stop'; Start-Sleep 0.5
     Check 'Runde des Warteschlangen-Prompts beendet -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
     # Vom Hub angenommenes "arbeitet" (send_text mit Enter), das keine Meldung bestaetigt (lokaler Befehl): zurueck auf ready.
@@ -629,10 +628,53 @@ $wait
     Check 'send_text mit Enter -> working (angenommen)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
     $t0 = Get-Date; $st = Wait-Status 'ready' 20000; $took = ((Get-Date) - $t0).TotalSeconds
     Check 'Unbestaetigtes working faellt auf ready zurueck (nach ca. 10 s, vorher nie)' ($st -eq 'ready' -and $took -ge 6) "status=$st nach $([int]$took) s"
-    # Claude endet ohne SessionEnd (abgeschossen): die Shell steht wieder am Prompt -> Status weg, neuer Claude wird zugeordnet.
+    # #282 (HIGH-1): Ein Programm taeuscht den Prompt der Shell vor (OSC 133;A), waehrend Claude laeuft und eine
+    # Freigabe-Frage offen ist. Ohne Bestaetigung (im Vordergrund der Shell laeuft noch etwas) aendert das nichts.
+    [void](Tool 'send_text' @{ session = $cid; text = 'spoof-shell-prompt' })
+    Hook 'UserPromptSubmit'; Hook 'Notification' $askBash; Start-Sleep 0.5
+    Check 'Freigabe-Frage offen (vor dem vorgetaeuschten Prompt)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    $t0 = Get-Date; while ((& $rowOf).cwd -notmatch 'spoof-prompt' -and ((Get-Date) - $t0).TotalSeconds -lt 12) { Start-Sleep -Milliseconds 400 }
+    Check 'Die vorgetaeuschten Sequenzen kommen im Hub an (Ordnermeldung OSC 9;9)' ((& $rowOf).cwd -match 'spoof-prompt') "cwd=$((& $rowOf).cwd)"
+    Start-Sleep 5
+    Check 'Vorgetaeuschter Prompt hebt die Freigabe-Frage nicht auf (#282)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Check 'Vorgetaeuschter Prompt: send_text bleibt verweigert (#282)' ((Code (Tool 'send_text' @{ session = $cid; text = 'ja' })) -eq 'permission_pending')
+    Hook 'SessionStart' @{ source = 'startup' } $hookKey 'nested-after-spoof'; Start-Sleep 0.5
+    Check 'Vorgetaeuschter Prompt: ein claude -p uebernimmt die Sitzung nicht (#282, #260)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Hook 'PostToolUse' @{ tool_name = 'Bash' }; Start-Sleep 0.5
+    Check 'Vorgetaeuschter Prompt: Meldungen der Konversation zaehlen weiter (#282)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 0.5
+    # #282 (MEDIUM-3/4): Solange unten im Bild eine Rueckfrage steht, macht weder "Claude wartet auf deine Eingabe"
+    # (idle_prompt) noch ein Beleg im Transkript aus approval ein ready. Die Zeile im Ersatz-claude sieht so aus.
+    [void](Tool 'send_text' @{ session = $cid; text = 'Do you want to proceed?' }); Start-Sleep 0.5
+    Hook 'UserPromptSubmit' @{ transcript_path = $trFile }; Hook 'Notification' $askBash; Start-Sleep 0.5
+    Hook 'Notification' @{ notification_type = 'idle_prompt'; message = 'Claude is waiting for your input' }; Start-Sleep 0.5
+    Check 'idle_prompt laesst eine sichtbare Rueckfrage stehen (#282)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    [IO.File]::AppendAllText($trFile, ($trPrompt + $trStop), $u8n)
+    Start-Sleep 6
+    Check 'Beleg im Transkript beendet eine sichtbare Rueckfrage nicht (#282)' ((& $stOf) -eq 'approval') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 0.5
+    Check 'Stop beendet die Rueckfrage -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+
+    # Claude beendet (SessionEnd) und im selben Terminal neu gestartet: neue Konversation wird wieder zugeordnet (Review
+    # zu #260). Die Warteschlange wird angehalten und laeuft fuer den neuen Claude nicht von selbst weiter (#282): ein
+    # `claude -p` naehme den Prompt nicht an, und die Shell fuehrte ihn danach als Befehl aus.
+    Hook 'UserPromptSubmit'; Start-Sleep 0.3
+    $q3 = Tool 'queue_prompt' @{ session = $cid; prompt = 'nach-dem-ende' }
+    Check 'queue_prompt vor dem Ende von Claude: wartet' ($q3.data.sent_immediately -eq $false -and $q3.data.queue_len -eq 1) $q3.text
+    Hook 'SessionEnd' @{ reason = 'prompt_input_exit' }; Start-Sleep 0.3
+    $script:hookSid = [guid]::NewGuid().ToString()
+    Hook 'SessionStart' @{ source = 'startup' }; Start-Sleep 0.5
+    Check 'Neu gebundener Claude meldet sich bereit' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Hook 'UserPromptSubmit'; Start-Sleep 0.5
+    Check 'Neu gestarteter Claude im selben Terminal wird zugeordnet (UserPromptSubmit -> working)' ((& $stOf) -eq 'working') "status=$(& $stOf)"
+    Hook 'Stop'; Start-Sleep 1.5
+    Check 'Stop des neuen Claude -> ready' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Check 'Nach dem Ende von Claude laeuft die Warteschlange nicht von selbst weiter (#282)' ((& $rowOf).queue_len -eq 1 -and (Wait-FakeFile $inputs 'nach-dem-ende' 1) -notmatch 'nach-dem-ende') "queue_len=$((& $rowOf).queue_len)"
+    # Claude endet ohne SessionEnd (abgeschossen): die Shell steht wieder am Prompt und in ihrem Vordergrund laeuft nichts
+    # mehr -> Status weg, neuer Claude wird zugeordnet.
     [void](Tool 'send_text' @{ session = $cid; text = 'exit-fake-claude' })
     $st = Wait-Status 'unknown' 12000
-    Check 'Claude beendet ohne SessionEnd: Status faellt am Prompt der Shell weg' ($st -eq 'unknown') "status=$st"
+    Check 'Claude beendet ohne SessionEnd: Status faellt am (bestaetigten) Prompt der Shell weg' ($st -eq 'unknown') "status=$st"
     Hook 'Stop'; Start-Sleep 0.5
     Check 'Nachzuegler des beendeten Claude zaehlt nicht' ((& $stOf) -eq 'unknown') "status=$(& $stOf)"
     $script:hookSid = [guid]::NewGuid().ToString()
@@ -640,6 +682,7 @@ $wait
     Check 'Neuer Claude nach einem Ende ohne SessionEnd wird zugeordnet (vorher fuer immer fremd)' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
     Hook 'UserPromptSubmit'; Start-Sleep 0.4; Hook 'Stop'; Start-Sleep 0.5
     Check 'Der neue Claude meldet seinen Status' ((& $stOf) -eq 'ready') "status=$(& $stOf)"
+    Check 'Die Warteschlange bleibt angehalten (nichts in die Shell getippt)' ((& $rowOf).queue_len -eq 1 -and (Wait-FakeFile $inputs 'nach-dem-ende' 1) -notmatch 'nach-dem-ende') "queue_len=$((& $rowOf).queue_len)"
 
     Hook 'Notification' @{ notification_type = 'permission_prompt'; message = 'darf ich?' }; Start-Sleep 0.5
     Check 'Freigabe-Frage: send_text verweigert' ((Code (Tool 'send_text' @{ session = $cid; text = 'ja' })) -eq 'permission_pending')
