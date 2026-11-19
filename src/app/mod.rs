@@ -48,6 +48,7 @@ mod multiwin;
 mod palette_ui;
 mod osc52;
 mod link_ask;
+mod list_edit;
 mod vt_notify;
 mod panels;
 mod paste_ask;
