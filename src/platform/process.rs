@@ -631,6 +631,57 @@ pub fn survivors(job: &[u32], shell: Option<u32>, console: Option<&[u32]>, paren
         .collect()
 }
 
+/// Hängt an der Konsole einer Shell nur noch die Shell selbst – läuft also kein Programm in ihrem Vordergrund?
+///
+/// `console` = Prozesse an der Konsole ([`console_pids`]), `shell` = PID der Shell. Zur Shell zählt auch eine Kette von
+/// Prozessen mit demselben Programmnamen, je als einziges solches Kind des vorigen: Git Bash startet als `bin\bash.exe`
+/// die eigentliche `usr\bin\bash.exe`. Jeder andere Prozess an der Konsole (ein laufendes `claude`, `node`, `vim`, ein
+/// Hilfsprozess ohne lebenden Elternprozess) heißt: nicht frei.
+///
+/// Damit bestätigt der Hub, dass der Prompt der Shell (OSC 133;A) echt ist: Die Sequenz kann jedes Programm ausgeben,
+/// aber solange es läuft, hängt es (oder das Programm, das es gestartet hat) an der Konsole.
+// Außerhalb von Windows ruft nur der Test sie auf (`shell_is_idle` meldet dort immer „nicht zu ermitteln“).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn shell_idle(console: &[u32], shell: u32, parent_of: impl Fn(u32) -> Option<u32>, name_of: impl Fn(u32) -> String) -> bool {
+    if !console.contains(&shell) {
+        return false;
+    }
+    let shell_name = name_of(shell).to_ascii_lowercase();
+    let mut rest: Vec<u32> = console.iter().copied().filter(|p| *p != shell).collect();
+    let mut cur = shell;
+    while !rest.is_empty() {
+        let kids: Vec<u32> = rest.iter().copied().filter(|p| parent_of(*p) == Some(cur)).collect();
+        match kids.as_slice() {
+            [k] if !shell_name.is_empty() && name_of(*k).to_ascii_lowercase() == shell_name => {
+                cur = *k;
+                rest.retain(|p| p != k);
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Läuft im Vordergrund der Shell `shell` (PID) gerade nichts ([`shell_idle`])? `None`, wenn es nicht zu ermitteln ist.
+/// Nur aus der UI-Schleife aufrufen (siehe [`console_pids`]).
+#[cfg(windows)]
+pub fn shell_is_idle(shell: u32) -> Option<bool> {
+    // Für die Abfrage hängt sich der Hub selbst kurz an die Konsole: er steht mit in der Liste.
+    let me = std::process::id();
+    let console: Vec<u32> = console_pids(shell)?.into_iter().filter(|p| *p != me).collect();
+    if console == [shell] {
+        return Some(true);
+    }
+    let parents = job_parents(&console);
+    let names = process_names();
+    Some(shell_idle(&console, shell, |p| parents.get(&p).copied(), |p| names.get(&p).cloned().unwrap_or_default()))
+}
+
+#[cfg(not(windows))]
+pub fn shell_is_idle(_shell: u32) -> Option<bool> {
+    None
+}
+
 /// Elternprozesse der Prozesse `pids` (eines Jobs), soweit der Elternprozess selbst in `pids` liegt und vor dem Kind
 /// entstand (sonst gehört die Eltern-PID einem früheren Prozess) – für [`survivors`].
 #[cfg(windows)]
@@ -1312,5 +1363,42 @@ mod peer_tests {
         assert!(orphaned(200, 100), "losgelöst nach dem Hub-Start");
         assert!(orphaned(100, 100));
         assert!(!orphaned(50, 100), "z. B. Explorer: Elternteil längst beendet, vor dem Hub gestartet");
+    }
+}
+
+/// Reine Logik, auf allen Plattformen getestet.
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    /// Review (#282): Der Prompt der Shell (OSC 133;A) lässt sich von jedem Programm ausgeben – echt ist er nur, wenn an
+    /// der Konsole nichts mehr außer der Shell hängt.
+    #[test]
+    fn a_shell_is_idle_only_when_nothing_else_hangs_on_its_console() {
+        let name = |p: u32| match p {
+            1 | 2 | 6 => "bash.exe".to_string(),
+            3 => "claude.exe".to_string(),
+            4 => "node.exe".to_string(),
+            _ => "powershell.exe".to_string(),
+        };
+        let parents = |pairs: &'static [(u32, u32)]| move |c: u32| pairs.iter().find(|(k, _)| *k == c).map(|(_, p)| *p);
+        let none = |_: u32| None;
+        // PowerShell (10) allein: frei. Mit einem laufenden Programm (3) nicht – auch wenn es den Prompt vortäuscht.
+        assert!(shell_idle(&[10], 10, none, name));
+        assert!(!shell_idle(&[10, 3], 10, parents(&[(3, 10)]), name));
+        assert!(!shell_idle(&[10, 3, 4], 10, parents(&[(3, 10), (4, 3)]), name), "Claude samt Hilfsprozess");
+        // Ein Prozess ohne lebenden Elternprozess an der Konsole (Rest eines abgeschossenen Programms): nicht frei
+        assert!(!shell_idle(&[10, 4], 10, none, name));
+        // Git Bash: der Starter (1) und die eigentliche bash (2) sind die Shell
+        assert!(shell_idle(&[1, 2], 1, parents(&[(2, 1)]), name));
+        assert!(!shell_idle(&[1, 2, 3], 1, parents(&[(2, 1), (3, 2)]), name), "claude unter der bash");
+        // Ein Skript in bash, das node startet: die Kette gleichnamiger Prozesse zählt zur Shell, node nicht
+        assert!(!shell_idle(&[1, 2, 6, 4], 1, parents(&[(2, 1), (6, 2), (4, 6)]), name));
+        // Zwei gleichnamige Kinder (eine Pipeline, ein Hintergrundprozess): nicht eindeutig, also nicht frei
+        assert!(!shell_idle(&[1, 2, 6], 1, parents(&[(2, 1), (6, 1)]), name));
+        // Ein gleichnamiger Prozess, der nicht von der Shell stammt, oder die Shell gar nicht an der Konsole: nicht frei
+        assert!(!shell_idle(&[10, 11], 10, parents(&[(11, 3)]), name));
+        assert!(!shell_idle(&[3], 10, none, name));
+        assert!(!shell_idle(&[], 10, none, name));
     }
 }

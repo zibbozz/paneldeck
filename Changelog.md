@@ -17,6 +17,20 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Changed
 
 - The Settings window can be moved like a normal window; it opens centred and stays inside the window (#275)
+- Deleting folders in the Terminals sidebar: the trash icon on a folder now closes all its sessions (same confirmation listing what ends, including subfolders, minimized sessions and chats) and then deletes the folder with its subfolders; an empty folder is deleted directly. *Delete folder (content stays)* in the context menu, and deleting a project or a template, now ask in a confirmation dialog with the 3-second timer instead of “click twice”. The new menu entry *Delete folder with its sessions …* does what the trash icon does (#276)
+
+### Fixed
+
+- When a folder is deleted while keeping its content, its defaults for new sessions (working folder, profile) pass to its direct subfolders; deleting a folder with its sessions leaves no entries of it behind (#276)
+- The file tree (Ctrl+Shift+O) always uses the session's working folder as its root instead of following the shell (or Claude) into subfolders; the shell's current folder is expanded and highlighted inside the tree, also for WSL sessions; network and WSL folders are read in the background (#277)
+- A Claude session no longer stays on “working” when Claude Code does not report the end of a turn: after an interruption with Esc, an API error or a reached usage limit the status turns to “ready” within a few seconds (Paneldeck reads from the transcript how the turn ended). If nothing shows how it ended, the status is cleared after 20 seconds without any sign of work (5 seconds after you typed into the terminal) (#282)
+- The queue only continues by itself after Claude finished answering a prompt: not after an interruption or an error, not after `/clear`, and not for a Claude started by hand in the same terminal (until *Resume* or Reload); when Claude ends while prompts are queued, the queue is paused with a notice. A prompt is no longer taken out of the queue when the shell has already exited, and a Stop message delivered twice no longer sends two prompts (#282)
+- “approval?” stays as long as the question is open – it no longer switches to “working” because another tool or sub-agent running at the same time reported something. After you answered in the terminal it no longer stays either: a denied approval becomes “ready”, an approved long-running tool “working” (#282)
+- A sub-agent that keeps running in the background after Claude's answer no longer leaves the session on “working” for good, and automatic compaction in the middle of a turn no longer shows “ready” (which sent the next queued prompt into the running work); `/compact` shows “working” while it runs (#282)
+- When Claude ends without reporting it (killed, crashed), the status disappears once the shell shows its prompt again and nothing else runs in it, and a Claude started again in the same terminal is tracked again – in PowerShell, cmd and Git Bash with the shell integration; in WSL only “working”/“ready” is cleared (Reload tracks a restarted Claude again). Program output that imitates a shell prompt cannot end an open approval or take over the session's conversation (#282)
+- A status Paneldeck only assumed – a prompt sent by the queue or an agent that started no turn (e.g. `/model`), a cancelled `/compact` – falls back to “ready” after 10 seconds instead of staying on “working” (#282)
+- Notifications that ask nothing of you (e.g. after signing in) no longer set the status to “input”; with older Claude Code versions approval and idle notifications are recognised by their text (#282)
+- Global hooks: with `CLAUDE_CONFIG_DIR` set, Paneldeck installs, detects and removes its hooks in that folder; hooks installed by an older version keep working (sessions additionally get the hooks via `--settings` until you reinstall them); removing the hooks no longer rewrites a settings file that contains none of Paneldeck's; sessions whose profile sets its own `CLAUDE_CONFIG_DIR` get the hooks via `--settings` (#282)
 
 ## [2.3.2] - 2026-11-18
 

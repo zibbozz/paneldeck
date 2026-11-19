@@ -387,6 +387,9 @@ pub struct Session {
     tee: Mutex<Vec<crate::vtkeys::TeeInput>>,
     /// Zeitpunkt der letzten Ausgabe des Programms (ms seit Programmstart) – für „Terminal ist ruhig“.
     last_activity: Arc<std::sync::atomic::AtomicU64>,
+    /// Zeitpunkt der letzten Eingabe an das Programm (`write_raw`: Tasten, Einfügen, Agenten; monotone ms, 0 = noch
+    /// keine). Fokusmeldungen und Antworten auf Anfragen des Programms zählen nicht.
+    last_input: std::sync::atomic::AtomicU64,
     /// Die Shell meldete ihren Prompt (OSC 133;A), während noch der alternative Bildschirm oder ein Maus-Modus
     /// aktiv war – ein Vollbildprogramm ist wohl ohne Aufräumen beendet worden (Absturz, getrennte SSH-Verbindung).
     /// Mausrad und Klicks behandeln die Sitzung dann wie eine normale Shell (keine Pfeiltasten, keine Mausereignisse);
@@ -424,7 +427,7 @@ pub struct Session {
 }
 
 /// Millisekunden seit dem ersten Aufruf (monotone, billige Uhr für `last_activity`).
-fn mono_ms() -> u64 {
+pub fn mono_ms() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }
@@ -689,6 +692,7 @@ impl Session {
             tee_on: AtomicBool::new(false),
             tee: Mutex::new(Vec::new()),
             last_activity,
+            last_input: std::sync::atomic::AtomicU64::new(0),
             stale_modes,
             job,
             shell_pid,
@@ -760,9 +764,18 @@ impl Session {
         if bytes.contains(&b'\r') {
             self.stale_modes.store(false, Ordering::Relaxed);
         }
+        if !bytes.is_empty() {
+            self.last_input.store(mono_ms().max(1), Ordering::Relaxed);
+        }
         let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = w.write_all(bytes);
         let _ = w.flush();
+    }
+
+    /// Zeitpunkt der letzten Eingabe an das Programm (monotone ms wie [`mono_ms`], 0 = noch keine): Tasten, Einfügen,
+    /// Eingaben von Agenten – nicht Fokusmeldungen oder Antworten auf Anfragen.
+    pub fn input_stamp(&self) -> u64 {
+        self.last_input.load(Ordering::Relaxed)
     }
 
     /// Eingabe eines Agenten: Text wie eingefügt (Bracketed Paste, falls angefordert), optional mit Enter, in EINEM
@@ -798,6 +811,11 @@ impl Session {
     /// Prozess-ID der Shell dieser Sitzung (Kind des Pseudo-Terminals).
     pub fn pid(&self) -> Option<u32> {
         self.child.try_lock().ok().and_then(|c| c.process_id())
+    }
+
+    /// Prozess-ID der Shell, beim Start festgehalten (anders als [`Session::pid`] ohne Sperre).
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
     }
 
     /// Wie Tasten gerade kodiert werden (Cursor-/Ziffernblock-Modus, win32-input-mode, kitty-Flags).

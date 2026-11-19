@@ -19,32 +19,239 @@ pub(super) fn fixed_body<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     r
 }
 
+/// Wurzel des Dateibaums (#277): immer der eingestellte Arbeitsordner der Sitzung (Sitzungseinstellungen bzw.
+/// Startordner) – nie der Ordner, in den die Shell (oder Claude) inzwischen gewechselt ist.
+/// * `cwd` = eingestellter Arbeitsordner (`SessionMeta::cwd`), `start` = erster gemeldeter Ordner der Sitzung,
+/// * `wsl` = `Some(Distribution)` bei einer WSL-Sitzung (`Some(None)`: Distribution unbekannt), `home` = Windows-Home.
+///
+/// Linux-Pfade einer WSL-Sitzung werden zu `\\wsl.localhost\<Distro>\…` (`/mnt/c/…` zu `C:\…`); `~` und eine leere
+/// Angabe bei WSL lassen sich ohne Rückfrage bei WSL nicht auflösen: dann der Startordner.
+pub(super) fn files_root(cwd: &str, start: &str, wsl: Option<Option<&str>>, home: &str) -> String {
+    let c = cwd.trim();
+    let fallback = || if start.is_empty() { if wsl.is_some() { "~".to_string() } else { home.to_string() } } else { start.to_string() };
+    if c.is_empty() {
+        return if wsl.is_some() { fallback() } else { home.to_string() };
+    }
+    if crate::wsl::looks_linux(c) {
+        return match wsl {
+            Some(d) if c.starts_with('/') => crate::wsl::linux_to_windows(d.unwrap_or(""), c).unwrap_or_else(fallback),
+            _ => fallback(),
+        };
+    }
+    c.to_string()
+}
+
+/// Vergleichsschlüssel eines Pfads im Dateibaum: WSL-Pfade (`\\wsl.localhost\…`, `\\wsl$\…`) als Distribution und
+/// Linux-Pfad, sonst der Windows-Pfad mit `\`, ohne Groß-/Kleinschreibung und ohne `\` am Ende.
+pub(super) fn tree_key(p: &str) -> String {
+    if let Some((d, l)) = crate::wsl::unc_to_linux(p) {
+        // `/mnt/<lw>/…` ist ein Windows-Laufwerk: so vergleicht der gemeldete Ordner (`\\wsl$\D\mnt\c\x`) mit einer
+        // Wurzel `C:\x` (aus `/mnt/c/x` im Arbeitsordner).
+        if let Some(w) = crate::wsl::linux_to_windows("", &l) {
+            return w.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+        }
+        return format!("wsl:{}:{}", d.to_lowercase(), l.trim_end_matches('/'));
+    }
+    p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// Liegt `cur` (aktueller Ordner der Shell) unter `root`: die Schlüssel der Ordner von unterhalb der Wurzel bis `cur`
+/// (zum Aufklappen und Markieren, #277). Sonst – auch bei `cur == root` – leer.
+pub(super) fn tree_chain(root: &str, cur: &str) -> Vec<String> {
+    if root.is_empty() || cur.is_empty() {
+        return Vec::new();
+    }
+    let (r, c) = (tree_key(root), tree_key(cur));
+    let sep = if r.starts_with("wsl:") { '/' } else { '\\' };
+    let Some(rest) = c.strip_prefix(&r).and_then(|x| x.strip_prefix(sep)) else { return Vec::new() };
+    let mut acc = r.clone();
+    rest.split(sep)
+        .filter(|s| !s.is_empty())
+        .map(|part| {
+            acc.push(sep);
+            acc.push_str(part);
+            acc.clone()
+        })
+        .collect()
+}
+
+/// Aktueller Ordner der Shell im Dateibaum (#277): Kette der Ordner bis dorthin (Schlüssel, [`tree_key`]) und ob sie in
+/// diesem Bild aufgeklappt werden soll (nur, wenn sich der Ordner geändert hat – danach darf man wieder zuklappen).
+#[derive(Default)]
+pub(super) struct TreeMark {
+    pub(super) chain: Vec<String>,
+    pub(super) reveal: bool,
+    /// Langsame Wurzel (Netzwerk, WSL): Ordner im Hilfsthread lesen ([`slow_list`]), nur Gelesenes aufklappen.
+    pub(super) slow: bool,
+}
+
+/// Wurzel, deren Ordner nicht im UI-Thread gelesen werden dürfen (#277 Review): Netzwerkpfade und Netzlaufwerke
+/// (`pathfmt::is_remote`) und WSL-Pfade (das Lesen kann die WSL-VM starten und blockieren).
+pub(super) fn is_slow_root(root: &str) -> bool {
+    crate::wsl::is_wsl_unc(root) || crate::pathfmt::is_remote(root)
+}
+
+/// Gelesener Inhalt eines langsamen Ordners (`items`: `None` = noch nie gelesen) und ob gerade gelesen wird.
+struct SlowDir {
+    items: Option<Vec<TreeItem>>,
+    at: Instant,
+    loading: bool,
+}
+
+/// Inhalte langsamer Ordner je (Ordner, versteckte zeigen) – wie `links::exists_cached` im Hilfsthread gelesen.
+static SLOW_DIRS: std::sync::Mutex<Option<HashMap<(PathBuf, bool), SlowDir>>> = std::sync::Mutex::new(None);
+/// So lange gilt ein gelesener Inhalt; danach wird im Hintergrund neu gelesen (der alte bleibt sichtbar).
+const SLOW_TTL: Duration = Duration::from_secs(30);
+const SLOW_PARALLEL: usize = 4;
+const SLOW_MAX: usize = 400;
+
+/// Inhalt eines langsamen Ordners ohne den UI-Thread zu blockieren: `None`, solange er zum ersten Mal gelesen wird
+/// (danach zeichnet `ctx` neu). Ein abgelaufener Inhalt wird im Hintergrund neu gelesen.
+pub(super) fn slow_list(ctx: &egui::Context, dir: &Path, hidden: bool) -> Option<Vec<TreeItem>> {
+    let key = (dir.to_path_buf(), hidden);
+    let mut g = SLOW_DIRS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(HashMap::new);
+    let stale = match map.get(&key) {
+        Some(d) if d.loading => return d.items.clone(),
+        Some(d) if d.at.elapsed() < SLOW_TTL => return d.items.clone(),
+        Some(_) => true,
+        None => false,
+    };
+    if map.values().filter(|d| d.loading).count() >= SLOW_PARALLEL {
+        return map.get(&key).and_then(|d| d.items.clone());
+    }
+    if !stale && map.len() >= SLOW_MAX {
+        map.retain(|_, d| d.loading);
+    }
+    let old = map.remove(&key).and_then(|d| d.items);
+    map.insert(key.clone(), SlowDir { items: old.clone(), at: Instant::now(), loading: true });
+    let ctx = ctx.clone();
+    let k = key.clone();
+    let spawned = std::thread::Builder::new().name("tree-list".into()).spawn(move || {
+        let items = list_dir(&k.0, k.1);
+        let mut g = SLOW_DIRS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(d) = g.get_or_insert_with(HashMap::new).get_mut(&k) {
+            *d = SlowDir { items: Some(items), at: Instant::now(), loading: false };
+        }
+        drop(g);
+        ctx.request_repaint();
+    });
+    if spawned.is_err() {
+        map.remove(&key);
+    }
+    old
+}
+
+/// Ist der Inhalt eines langsamen Ordners schon gelesen (dann darf er ohne Warten aufgeklappt werden)?
+pub(super) fn slow_cached(dir: &Path, hidden: bool) -> bool {
+    let g = SLOW_DIRS.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().and_then(|m| m.get(&(dir.to_path_buf(), hidden))).is_some_and(|d| d.items.is_some())
+}
+
+/// „Aktualisieren“: gelesene Inhalte langsamer Ordner vergessen (laufende Lesevorgänge bleiben).
+pub(super) fn slow_clear() {
+    let mut g = SLOW_DIRS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = g.as_mut() {
+        m.retain(|_, d| d.loading);
+    }
+}
+
+/// Warum der Dateibaum nichts liest (#277 Review): Wurzel unbekannt (WSL ohne Ordner, noch keine Meldung) oder WSL-Wurzel
+/// einer Sitzung, die nicht läuft (das Lesen könnte die WSL-VM starten).
+pub(super) fn files_blocked(root: &str, running: bool, lang: Lang) -> Option<&'static str> {
+    if !Path::new(root).is_absolute() && !crate::wsl::is_wsl_unc(root) {
+        return Some(lang.t(
+            "Der Arbeitsordner der Sitzung ist noch nicht bekannt (WSL ohne Ordner): Er erscheint, sobald die Shell ihren Ordner meldet.",
+            "The session's working folder is not known yet (WSL without a folder): it appears once the shell reports its folder.",
+        ));
+    }
+    if crate::wsl::is_wsl_unc(root) && !running {
+        return Some(lang.t(
+            "Die WSL-Sitzung läuft nicht – ihre Dateien werden gezeigt, sobald sie läuft.",
+            "The WSL session is not running – its files are shown once it runs.",
+        ));
+    }
+    None
+}
+
+impl TreeMark {
+    /// Rolle eines Ordners: (liegt auf dem Weg zum aktuellen Ordner, ist der aktuelle Ordner).
+    pub(super) fn role(&self, path: &Path) -> (bool, bool) {
+        if self.chain.is_empty() {
+            return (false, false);
+        }
+        let k = tree_key(&path.to_string_lossy());
+        match self.chain.iter().position(|c| *c == k) {
+            Some(i) => (true, i + 1 == self.chain.len()),
+            None => (false, false),
+        }
+    }
+}
+
 impl App {
+    /// Wurzel des Dateibaums für die Sitzung `id` ([`files_root`], #277).
+    pub(super) fn files_root_of(&self, id: u64) -> String {
+        let Some(e) = self.entries.get(&id) else { return home_dir() };
+        let shell = self.shell_by_id(e.eff_shell());
+        let wsl = match folder_picker::Target::for_shell(shell.as_ref(), false) {
+            folder_picker::Target::Wsl { distro, .. } => Some(distro),
+            _ if e.eff_shell().starts_with("wsl") => Some(e.eff_shell().strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string)),
+            _ => None,
+        };
+        let wsl = if e.is_chat() { None } else { wsl };
+        files_root(&e.meta.cwd, &e.start_cwd, wsl.as_ref().map(|d| d.as_deref()), &home_dir())
+    }
+
     pub(super) fn files_ui(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
-        let root = self.entries.get(&self.focused).map(|e| e.cwd_now()).unwrap_or_else(home_dir);
+        // Wurzel = Arbeitsordner der Sitzung, nicht ihr aktueller Ordner (#277); der wird darin aufgeklappt und markiert.
+        let root = self.files_root_of(self.focused);
+        let cur = self.entries.get(&self.focused).map(|e| e.live_cwd.clone()).unwrap_or_default();
         if root != self.tree_root || self.tree_stamp.elapsed() > Duration::from_secs(10) {
             self.tree_cache.clear();
             self.tree_root = root.clone();
             self.tree_stamp = Instant::now();
         }
         let hidden = self.files_hidden;
-        egui::SidePanel::right(style::salted(Id::new("files"))).resizable(true).default_width(270.0).width_range(180.0..=520.0).show_animated(ctx, self.files_open, |ui| fixed_body(ui, |ui| {
+        let running = self.entries.get(&self.focused).and_then(|e| e.live.as_ref()).is_some_and(|s| !s.has_exited());
+        let open = self.files_open;
+        egui::SidePanel::right(style::salted(Id::new("files"))).resizable(true).default_width(270.0).width_range(180.0..=520.0).show_animated(ctx, open, |ui| fixed_body(ui, |ui| {
+            let blocked = files_blocked(&root, running, lang);
+            let slow = blocked.is_none() && is_slow_root(&root);
+            let chain = tree_chain(&root, &cur);
+            // Aufklappen nur, wenn sich Wurzel oder aktueller Ordner geändert haben (gemerkt je Panel, also je Fenster).
+            let seen_id = ui.id().with("files_cur");
+            let now = format!("{root}\n{cur}");
+            let reveal = ui.data(|d| d.get_temp::<String>(seen_id)).as_deref() != Some(now.as_str());
+            if reveal {
+                ui.data_mut(|d| d.insert_temp(seen_id, now));
+            }
+            let outside = !cur.is_empty() && chain.is_empty() && tree_key(&cur) != tree_key(&root);
+            let mark = TreeMark { chain, reveal, slow };
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.strong(lang.t("Dateien", "Files"));
                 if ui.small_button(lang.t("Aktualisieren", "Refresh")).clicked() {
                     self.tree_cache.clear();
+                    slow_clear();
                 }
                 if ui.checkbox(&mut self.files_hidden, lang.t("versteckte", "hidden")).changed() {
                     self.tree_cache.clear();
                 }
             });
-            ui.add(egui::Label::new(RichText::new(&root).weak().small()).truncate());
+            ui.add(egui::Label::new(RichText::new(&root).weak().small()).truncate()).on_hover_text(lang.t("Arbeitsordner der Sitzung", "Working folder of the session"));
+            if outside {
+                // Die Shell ist außerhalb des Arbeitsordners: die Wurzel bleibt, der Ordner steht als Hinweis da.
+                ui.add(egui::Label::new(RichText::new(format!("{} {cur}", lang.t("Shell ist in:", "Shell is in:"))).weak().small()).truncate());
+            }
             ui.weak(lang.t("Doppelklick fügt den Pfad ins Terminal ein · Rechtsklick für mehr", "Double-click inserts the path · right-click for more"));
             ui.separator();
+            if let Some(why) = blocked {
+                ui.label(RichText::new(why).small().color(style::dim(ui)));
+                return;
+            }
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                tree_children(ui, Path::new(&root), hidden, &mut self.tree_cache, actions, lang);
+                tree_children(ui, Path::new(&root), hidden, &mut self.tree_cache, actions, lang, &mark);
             });
         }));
     }
@@ -62,8 +269,8 @@ impl App {
         egui::Window::new(title).id(Id::new("queue_win")).open(&mut open).default_size([520.0, 420.0]).show(ctx, |ui| {
             let Some(e) = self.entries.get_mut(&id) else { return };
             ui.label(RichText::new(lang.t(
-                "Die Prompts werden nacheinander gesendet: der nächste, sobald Claude „bereit“ meldet. Bei Freigabe-Fragen wartet die Warteschlange.",
-                "Prompts are sent one after another: the next as soon as Claude reports “ready”. It waits during approval requests.",
+                "Die Prompts werden nacheinander gesendet: der nächste, sobald Claude „bereit“ meldet. Bei Freigabe-Fragen wartet die Warteschlange – ebenso nach einer Unterbrechung (Esc) oder einem Fehler, bis die nächste Antwort fertig ist oder du „Nächsten jetzt senden“ wählst.",
+                "Prompts are sent one after another: the next as soon as Claude reports “ready”. It waits during approval requests – and after an interruption (Esc) or an error, until the next answer is finished or you choose “Send next now”.",
             )).small().color(style::dim(ui)));
             ui.add_space(S2);
             ui.horizontal(|ui| {
@@ -795,5 +1002,134 @@ mod fit_tests {
                 assert!((side.left() - central.right()).abs() < 0.01 && (side.width() - 300.0).abs() < 0.01, "Panel {side:?} / Mitte {central:?} (groß: {big})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod files_root_tests {
+    //! Wurzel des Dateibaums (#277): Arbeitsordner der Sitzung, nicht der aktuelle Ordner der Shell.
+    use super::*;
+
+    #[test]
+    fn root_is_the_working_folder_not_the_current_one() {
+        let home = r"C:\Users\u";
+        // Windows-Sitzung: eingestellter Ordner, egal wohin die Shell gewechselt ist; ohne Ordner das Home.
+        assert_eq!(files_root(r"C:\Work\proj", r"C:\Work\proj\src", None, home), r"C:\Work\proj");
+        assert_eq!(files_root("  ", r"C:\elsewhere", None, home), home);
+        assert_eq!(files_root("", "", None, home), home);
+        // WSL: Linux-Ordner über \\wsl.localhost, /mnt/c als Windows-Pfad.
+        assert_eq!(files_root("/home/u/p", "", Some(Some("Ubuntu")), home), r"\\wsl.localhost\Ubuntu\home\u\p");
+        assert_eq!(files_root("/mnt/c/Work", "", Some(Some("Ubuntu")), home), r"C:\Work");
+        assert_eq!(files_root(r"C:\Work", "", Some(Some("Ubuntu")), home), r"C:\Work");
+        // WSL ohne Ordner oder mit ~: der Startordner der Sitzung (wo die Shell begonnen hat), sonst ~ wie bisher.
+        assert_eq!(files_root("", r"\\wsl$\Ubuntu\home\u", Some(Some("Ubuntu")), home), r"\\wsl$\Ubuntu\home\u");
+        assert_eq!(files_root("~", r"\\wsl$\Ubuntu\home\u", Some(Some("Ubuntu")), home), r"\\wsl$\Ubuntu\home\u");
+        assert_eq!(files_root("~", "", Some(Some("Ubuntu")), home), "~");
+        // Distribution unbekannt: nur /mnt/<lw> lässt sich umrechnen.
+        assert_eq!(files_root("/mnt/d/x", "", Some(None), home), r"D:\x");
+        assert_eq!(files_root("/srv", r"\\wsl$\Arch\srv", Some(None), home), r"\\wsl$\Arch\srv");
+    }
+
+    #[test]
+    fn current_folder_below_the_root_is_revealed() {
+        assert_eq!(tree_chain(r"C:\Work\proj", r"c:/work/proj/src/app/"), vec![r"c:\work\proj\src".to_string(), r"c:\work\proj\src\app".to_string()]);
+        assert!(tree_chain(r"C:\Work\proj", r"C:\Work\proj").is_empty(), "Wurzel selbst: nichts aufzuklappen");
+        assert!(tree_chain(r"C:\Work\proj", r"C:\Work\project2").is_empty(), "nur gleicher Anfang");
+        assert!(tree_chain(r"C:\Work\proj", r"D:\x").is_empty());
+        assert!(tree_chain(r"C:\Work", "").is_empty());
+        // WSL: Wurzel über wsl.localhost, gemeldeter Ordner über wsl$ (from_wsl) – gleiche Distribution, Linux-Pfad zählt.
+        let chain = tree_chain(r"\\wsl.localhost\Ubuntu\home\u\p", r"\\wsl$\ubuntu\home\u\p\src");
+        assert_eq!(chain, vec!["wsl:ubuntu:/home/u/p/src".to_string()]);
+        assert!(tree_chain(r"\\wsl.localhost\Ubuntu\home\u\p", r"\\wsl$\Ubuntu\home\u\P\src").is_empty(), "Linux unterscheidet Groß-/Kleinschreibung");
+        let m = TreeMark { chain, reveal: true, slow: false };
+        assert_eq!(m.role(Path::new(r"\\wsl.localhost\Ubuntu\home\u\p\src")), (true, true));
+        assert_eq!(m.role(Path::new(r"\\wsl.localhost\Ubuntu\home\u\p\doc")), (false, false));
+        let m = TreeMark { chain: tree_chain(r"C:\W", r"C:\W\a\b"), reveal: false, slow: false };
+        assert_eq!((m.role(Path::new(r"C:\W\A")), m.role(Path::new(r"C:\W\a\b"))), ((true, false), (true, true)));
+    }
+
+    /// Headless: Der Baum klappt den Weg zum aktuellen Ordner auf (dessen Inhalt wird gelesen), sonst nur die Wurzel.
+    #[test]
+    fn tree_opens_the_way_to_the_current_folder() {
+        let dir = std::env::temp_dir().join(format!("pd-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a").join("b").join("c")).unwrap();
+        std::fs::create_dir_all(dir.join("z")).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let run = |ctx: &egui::Context, mark: &TreeMark, cache: &mut HashMap<PathBuf, Vec<TreeItem>>| {
+            let mut actions = Vec::new();
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    tree_children(ui, Path::new(&root), false, cache, &mut actions, Lang::En, mark);
+                });
+            });
+        };
+        // Ohne aktuellen Ordner darunter: nur die Wurzel wird gelesen (alles zugeklappt).
+        let mut cache = HashMap::new();
+        run(&egui::Context::default(), &TreeMark::default(), &mut cache);
+        assert_eq!(cache.len(), 1);
+        // Shell in a/b: a und a/b werden aufgeklappt (ihr Inhalt gelesen), c und z bleiben zu.
+        let ctx = egui::Context::default();
+        let mut cache = HashMap::new();
+        let cur = dir.join("a").join("b").to_string_lossy().to_string();
+        run(&ctx, &TreeMark { chain: tree_chain(&root, &cur), reveal: true, slow: false }, &mut cache);
+        assert!(cache.contains_key(&dir.join("a")) && cache.contains_key(&dir.join("a").join("b")), "{:?}", cache.keys().collect::<Vec<_>>());
+        assert!(!cache.contains_key(&dir.join("z")) && !cache.contains_key(&dir.join("a").join("b").join("c")));
+        // Im nächsten Bild ohne „reveal“ bleibt es offen (Zustand gemerkt), wird aber nicht mehr erzwungen.
+        let mut cache = HashMap::new();
+        run(&ctx, &TreeMark { chain: tree_chain(&root, &cur), reveal: false, slow: false }, &mut cache);
+        assert!(cache.contains_key(&dir.join("a").join("b")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Langsame Wurzel (Netzwerk, WSL): nichts wird im UI-Thread gelesen; aufgeklappt wird nur schon Gelesenes.
+    #[test]
+    fn slow_roots_are_listed_in_the_background_and_not_revealed_blindly() {
+        let dir = std::env::temp_dir().join(format!("pd-slowtree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a").join("b")).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let cur = dir.join("a").join("b").to_string_lossy().to_string();
+        let ctx = egui::Context::default();
+        let mut cache = HashMap::new();
+        let mark = TreeMark { chain: tree_chain(&root, &cur), reveal: true, slow: true };
+        let frame = |cache: &mut HashMap<PathBuf, Vec<TreeItem>>| {
+            let mut actions = Vec::new();
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    tree_children(ui, Path::new(&root), false, cache, &mut actions, Lang::En, &mark);
+                });
+            });
+        };
+        frame(&mut cache);
+        assert!(cache.is_empty(), "nichts im UI-Thread gelesen");
+        let t0 = Instant::now();
+        while !slow_cached(&dir, false) && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(slow_cached(&dir, false), "Wurzel im Hilfsthread gelesen");
+        assert_eq!(slow_list(&ctx, &dir, false).map(|v| v.len()), Some(1));
+        frame(&mut cache);
+        // „a“ war noch nicht gelesen: nicht blind aufgeklappt (das hätte ihn gelesen).
+        assert!(!slow_cached(&dir.join("a"), false));
+        assert!(cache.is_empty());
+        slow_clear();
+        assert!(!slow_cached(&dir, false), "Aktualisieren vergisst Gelesenes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mnt_drives_of_wsl_compare_with_windows_roots_and_blocked_roots_show_a_hint() {
+        // Arbeitsordner /mnt/c/Work → Wurzel C:\Work; die Shell meldet \\wsl$\Ubuntu\mnt\c\Work\src.
+        let root = files_root("/mnt/c/Work", "", Some(Some("Ubuntu")), "");
+        assert_eq!(tree_chain(&root, r"\\wsl$\Ubuntu\mnt\c\Work\src"), vec![r"c:\work\src".to_string()]);
+        assert_eq!(tree_key(r"\\wsl$\Ubuntu\mnt\c\Work"), tree_key(r"C:\Work"));
+        assert_eq!(tree_key(r"\\wsl.localhost\Ubuntu\mnt"), "wsl:ubuntu:/mnt");
+        // Hinweise statt Lesen
+        assert!(files_blocked("~", true, Lang::En).is_some_and(|t| t.contains("not known yet")));
+        assert!(files_blocked(r"\\wsl.localhost\Ubuntu\home\u", false, Lang::De).is_some_and(|t| t.contains("läuft nicht")));
+        assert!(files_blocked(r"\\wsl.localhost\Ubuntu\home\u", true, Lang::En).is_none());
+        assert!(files_blocked(r"C:\Work", false, Lang::En).is_none(), "Windows-Ordner auch ohne laufende Sitzung");
+        assert!(is_slow_root(r"\\wsl.localhost\Ubuntu\home") && is_slow_root(r"\\server\share\x") && !is_slow_root(r"C:\Work"));
     }
 }

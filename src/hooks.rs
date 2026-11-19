@@ -21,13 +21,19 @@ pub const ENV_SESSION_KEY: &str = "PANELDECK_SESSION_KEY";
 pub const ENV_PORT: &str = "PANELDECK_PORT";
 pub const ENV_TOKEN: &str = "PANELDECK_TOKEN";
 
-const EVENTS: [&str; 7] = [
+/// Ereignisse, für die Paneldeck sich einträgt. Nur solche, die Claude Code schon so lange kennt wie `SessionEnd`
+/// (1.0.85): Ein unbekannter Ereignisname macht für ältere Versionen die ganze Settings-Datei ungültig – neuere
+/// Ereignisse (`StopFailure`, `PermissionRequest`, `PostToolUseFailure` …) fehlen deshalb bewusst; was sie melden
+/// würden, fängt der Rückfall in [`stale_status`] ab.
+const EVENTS: [&str; 9] = [
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "Notification",
     "Stop",
+    "SubagentStop",
+    "PreCompact",
     "SessionEnd",
 ];
 
@@ -58,6 +64,20 @@ pub struct HookMsg {
     pub key: Option<String>,
     /// `source` bei SessionStart (`startup`, `resume`, `clear`, `compact`).
     pub source: Option<String>,
+    /// Werkzeug bei PreToolUse/PostToolUse.
+    pub tool_name: Option<String>,
+    /// Unter-Agent, in dem das Ereignis auftrat (fehlt beim Haupt-Agenten und bei älteren Claude-Versionen).
+    pub agent_id: Option<String>,
+    /// `trigger` bei PreCompact (`manual`, `auto`).
+    pub trigger: Option<String>,
+    /// `reason` bei SessionEnd (`clear`, `resume`, `logout`, `prompt_input_exit`, `other`).
+    pub reason: Option<String>,
+}
+
+/// Meldet SessionEnd, dass Claude wirklich beendet ist? Bei `/clear` und `/resume` endet nur die Konversation –
+/// derselbe Claude läuft mit einer anderen weiter.
+pub fn session_end_is_exit(m: &HookMsg) -> bool {
+    m.event == "SessionEnd" && !matches!(m.reason.as_deref(), Some("clear" | "resume"))
 }
 
 /// Stammt die Meldung vom laufenden Start der Sitzung (#260)? `current` = Schlüssel dieses Starts (`Entry::session_key`).
@@ -117,18 +137,33 @@ pub struct ConvBinding {
     /// Der Start hat die Hooks abgeschaltet (`--safe-mode`): alle Meldungen stammen dann von anderen Prozessen (z. B.
     /// einem `claude -p` mit den globalen Hooks) und zählen nie.
     pub hooks_off: bool,
+    /// Die Shell steht nach dem Start wieder an ihrem Prompt ([`ConvBinding::shell_prompt`]): der Claude dieser
+    /// Zuordnung ist beendet, ohne es zu melden (abgeschossen, abgestürzt, SessionEnd verloren). Ein SessionStart einer
+    /// neuen Konversation darf dann übernehmen – ein im selben Terminal neu gestarteter Claude bliebe sonst für immer
+    /// „fremd“ und der Status eingefroren. Fällt weg, sobald sich die zugeordnete Konversation wieder meldet (sie lebt
+    /// also doch) oder eine neue zugeordnet ist.
+    pub open: bool,
 }
 
 impl ConvBinding {
     pub fn launch(expect: Option<String>, hooks_off: bool) -> Self {
-        ConvBinding { bound: None, expect: expect.filter(|e| !e.is_empty()), hooks_off }
+        ConvBinding { bound: None, expect: expect.filter(|e| !e.is_empty()), hooks_off, open: false }
+    }
+
+    /// Die Shell zeigt nach dem Startbefehl wieder ihren Prompt: Was darin an Claude lief, ist beendet. Ein von Claude
+    /// gestartetes `claude -p` kann das nicht auslösen – solange Claude im Vordergrund läuft, gibt die Shell keinen
+    /// Prompt aus.
+    pub fn shell_prompt(&mut self) {
+        self.open = true;
     }
 
     /// Meldung `m` zuordnen und den Zustand fortschreiben. Eine neue Konversation zählt nur
     /// - als erste des Starts: mit der beim Start übergebenen ID, ohne solche (`--continue`) nur über SessionStart;
     /// - nach dem Ende der zugeordneten Konversation (SessionEnd, z. B. Claude beendet und im selben Terminal neu
     ///   gestartet): wieder über SessionStart;
-    /// - als Wechsel über SessionStart mit `source` `clear`/`resume`/`compact`.
+    /// - als Wechsel über SessionStart mit `source` `clear`/`resume`/`compact`;
+    /// - über SessionStart, nachdem die Shell wieder an ihrem Prompt stand ([`ConvBinding::shell_prompt`]): der bisherige
+    ///   Claude ist dann beendet, auch wenn sein SessionEnd nie ankam.
     ///
     /// Alles andere mit fremder ID (z. B. ein von Claude gestartetes `claude -p` mit geerbter Umgebung) wird verworfen.
     pub fn feed(&mut self, m: &HookMsg) -> ConvMatch {
@@ -139,10 +174,11 @@ impl ConvBinding {
         let start = m.event == "SessionStart";
         let r = match self.bound.as_deref() {
             Some(b) if b == id => ConvMatch::Same,
-            Some(_) if start && matches!(m.source.as_deref(), Some("clear" | "resume" | "compact")) => ConvMatch::Switch(id.to_string()),
+            Some(_) if start && (self.open || matches!(m.source.as_deref(), Some("clear" | "resume" | "compact"))) => ConvMatch::Switch(id.to_string()),
             Some(_) => ConvMatch::Foreign,
             None => match self.expect.as_deref() {
                 Some(x) if x == id => ConvMatch::Bind(id.to_string()),
+                Some(_) if start && self.open => ConvMatch::Bind(id.to_string()),
                 Some(_) => ConvMatch::Foreign,
                 None if start => ConvMatch::Bind(id.to_string()),
                 None => ConvMatch::Foreign,
@@ -152,13 +188,18 @@ impl ConvBinding {
             ConvMatch::Bind(id) | ConvMatch::Switch(id) => {
                 self.bound = Some(id.clone());
                 self.expect = None;
+                self.open = false;
             }
             // Der Claude dieser Konversation ist beendet: ein im selben Terminal neu gestarteter Claude darf sich mit
             // seinem SessionStart wieder zuordnen.
             ConvMatch::Same if m.event == "SessionEnd" => {
                 self.bound = None;
                 self.expect = None;
+                self.open = false;
             }
+            // Die zugeordnete Konversation meldet sich weiter: sie lebt, der Prompt der Shell hat getäuscht (Claude
+            // angehalten, ungewöhnlicher Startbefehl). Ab jetzt wieder streng – ein `claude -p` übernimmt nichts.
+            ConvMatch::Same => self.open = false,
             _ => {}
         }
         r
@@ -170,23 +211,252 @@ impl ConvBinding {
         if self.hooks_off {
             return true;
         }
+        // Nach dem Ende des bisherigen Claude ([`ConvBinding::shell_prompt`]) ist eine andere ID nicht mehr sicher fremd.
+        if self.open {
+            return false;
+        }
         let Some(id) = m.claude_session.as_deref().filter(|c| !c.is_empty()) else { return false };
         self.bound.as_deref().or(self.expect.as_deref()).is_some_and(|b| b != id)
     }
 }
 
-pub fn status_after(cur: ClaudeStatus, m: &HookMsg) -> ClaudeStatus {
-    match m.event.as_str() {
-        "SessionStart" | "Stop" => ClaudeStatus::Idle,
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => ClaudeStatus::Working,
-        "Notification" => match m.kind.as_deref() {
-            Some("permission_prompt") => ClaudeStatus::Permission,
-            Some("idle_prompt") => ClaudeStatus::Idle,
-            _ => ClaudeStatus::Input,
-        },
-        "SessionEnd" => ClaudeStatus::Unknown,
-        _ => cur,
+/// Was der Hub über die laufende Runde des Haupt-Agenten weiß (je Start neu).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnState {
+    /// Der Haupt-Agent steckt in einer Runde: ein Prompt wurde abgeschickt oder er selbst hat ein Werkzeug benutzt, und
+    /// seither kam kein Stop. Unterscheidet „Unter-Agent im Hintergrund fertig“ (dann bereit) von „Unter-Agent in einer
+    /// laufenden Runde fertig“ und sagt, ob Claude nach einem automatischen Zusammenfassen weiterarbeitet.
+    pub open: bool,
+    /// Die Runde begann mit einem abgeschickten Prompt (UserPromptSubmit). Nur das Ende einer solchen Runde lässt die
+    /// Warteschlange weiterlaufen – nicht ein SessionStart, eine Benachrichtigung oder das Ende eines Hintergrund-Agenten.
+    pub prompted: bool,
+    /// „arbeitet“ ist nur angenommen (der Hub hat einen Prompt geschickt, das Zusammenfassen hat begonnen) und noch von
+    /// keiner Meldung bestätigt: Bleibt die Bestätigung aus, gilt wieder dieser Status ([`stale_status`]).
+    pub tentative: Option<ClaudeStatus>,
+    /// Der Status ist unbekannt, weil Meldungen ausblieben ([`stale_status`]) – nicht, weil Claude beendet ist. Belegt
+    /// das Transkript danach doch noch das Ende der Runde, gilt „bereit“.
+    pub stale: bool,
+}
+
+/// Status einer Benachrichtigung. Ältere Claude-Versionen senden kein `notification_type`; dann entscheidet der Text.
+fn notification_status(cur: ClaudeStatus, m: &HookMsg) -> ClaudeStatus {
+    match m.kind.as_deref() {
+        Some("permission_prompt") => ClaudeStatus::Permission,
+        Some("idle_prompt") => ClaudeStatus::Idle,
+        // Reine Auskünfte: Claude braucht dafür niemanden.
+        Some("auth_success" | "elicitation_complete" | "elicitation_response") => cur,
+        Some(_) => ClaudeStatus::Input,
+        None => {
+            let text = m.message.as_deref().unwrap_or("").to_lowercase();
+            if text.contains("permission") || text.contains("approval") {
+                ClaudeStatus::Permission
+            } else if text.contains("waiting for your input") {
+                ClaudeStatus::Idle
+            } else {
+                ClaudeStatus::Input
+            }
+        }
     }
+}
+
+/// Stellt die Meldung eine Rückfrage (Freigabe oder sonstige Eingabe)? Auch dann, wenn schon eine offen war: Claude
+/// zeigt dann die nächste.
+pub fn notification_asks(m: &HookMsg) -> bool {
+    m.event == "Notification" && matches!(notification_status(ClaudeStatus::Unknown, m), ClaudeStatus::Permission | ClaudeStatus::Input)
+}
+
+/// Werkzeug, für das Claude laut Benachrichtigung eine Freigabe braucht („Claude needs your permission to use Bash“).
+pub fn permission_tool(message: &str) -> Option<&str> {
+    let rest = message.trim().strip_prefix("Claude needs your permission to use ")?;
+    let tool = rest.trim().trim_end_matches('.');
+    (!tool.is_empty()).then_some(tool)
+}
+
+/// Status nach einer Hook-Meldung; `turn` wird fortgeschrieben.
+///
+/// Nicht jede Meldung heißt, was ihr Name nahelegt:
+/// - `SessionStart` mit `source` `compact` kommt auch mitten in einer Runde (automatisches Zusammenfassen) – Claude
+///   arbeitet danach weiter; „bereit“ würde der Warteschlange den nächsten Prompt mitten in die Arbeit schicken.
+/// - Werkzeug-Meldungen eines Unter-Agenten (`agent_id`) kommen auch, nachdem der Haupt-Agent fertig ist
+///   (Hintergrund-Agenten); ihr Ende meldet `SubagentStop`, nicht `Stop`.
+/// - `Stop` fehlt nach einer Unterbrechung (Esc), einem API-Fehler oder einer abgelehnten Freigabe ganz – das fängt
+///   [`stale_status`] ab.
+pub fn status_after(cur: ClaudeStatus, turn: &mut TurnState, m: &HookMsg) -> ClaudeStatus {
+    // Jede Meldung bestätigt oder ersetzt eine Annahme.
+    let assumed = turn.tentative.take();
+    turn.stale = false;
+    match m.event.as_str() {
+        "SessionStart" if m.source.as_deref() == Some("compact") => {
+            if turn.open {
+                ClaudeStatus::Working
+            } else {
+                ClaudeStatus::Idle
+            }
+        }
+        "SessionStart" | "Stop" => {
+            turn.open = false;
+            turn.prompted = false;
+            ClaudeStatus::Idle
+        }
+        "UserPromptSubmit" => {
+            turn.open = true;
+            turn.prompted = true;
+            ClaudeStatus::Working
+        }
+        "PreToolUse" | "PostToolUse" => {
+            if m.agent_id.as_deref().is_none_or(str::is_empty) {
+                turn.open = true;
+            }
+            ClaudeStatus::Working
+        }
+        // Ein Unter-Agent ist fertig. In einer Runde arbeitet der Haupt-Agent weiter; außerhalb (Hintergrund-Agent) ist
+        // Claude damit wieder bereit.
+        "SubagentStop" if cur == ClaudeStatus::Working && !turn.open => ClaudeStatus::Idle,
+        "PreCompact" => {
+            // `/compact` gibt es nur, wenn der Haupt-Agent nicht arbeitet; von selbst fasst Claude nur in einer Runde
+            // zusammen (auch in einer, die ohne Prompt begann) und arbeitet danach weiter.
+            match m.trigger.as_deref() {
+                Some("manual") => turn.open = false,
+                Some("auto") => turn.open = true,
+                _ => {}
+            }
+            match cur {
+                // Wird das Zusammenfassen abgebrochen, kommt nichts mehr: dann gilt wieder der Status von vorher.
+                ClaudeStatus::Idle | ClaudeStatus::Unknown => {
+                    turn.tentative = Some(cur);
+                    ClaudeStatus::Working
+                }
+                _ => {
+                    turn.tentative = assumed;
+                    cur
+                }
+            }
+        }
+        "Notification" => {
+            let new = notification_status(cur, m);
+            if new == ClaudeStatus::Idle {
+                turn.open = false;
+                turn.prompted = false;
+            }
+            if new == cur {
+                turn.tentative = assumed;
+            }
+            new
+        }
+        "SessionEnd" => {
+            *turn = TurnState::default();
+            ClaudeStatus::Unknown
+        }
+        _ => {
+            turn.tentative = assumed;
+            cur
+        }
+    }
+}
+
+/// Was der Bildschirm einer Claude-Sitzung zeigt – nur als Gegenprobe für [`stale_status`], nie allein entscheidend.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScreenHints {
+    /// Die Arbeitsanzeige („… esc to interrupt“) steht unten im Bild.
+    pub spinner: bool,
+    /// Es sieht nach einer offenen Rückfrage aus (Freigabe, Auswahl).
+    pub dialog: bool,
+}
+
+/// Hinweise aus dem sichtbaren Bildschirm (`Session::screen_text`). Verglichen wird ohne Leerraum und ohne
+/// Groß-/Kleinschreibung: In schmalen Bereichen bricht Claude die Zeile um.
+pub fn screen_hints(screen: &str) -> ScreenHints {
+    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = |n: usize| -> String { lines[lines.len().saturating_sub(n)..].iter().flat_map(|l| l.chars()).filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect() };
+    // Beides steht am unteren Ende: die Arbeitsanzeige über dem Eingabefeld (dazwischen höchstens die Aufgabenliste),
+    // Frage, Auswahl und Fußzeile einer Rückfrage ganz unten. Text weiter oben (die Unterhaltung) zählt nicht.
+    let (work, ask) = (tail(20), tail(12));
+    ScreenHints { spinner: work.contains("esctointerrupt"), dialog: ["esctocancel", "doyouwantto", "wouldyouliketoproceed", "tellclaudewhattodo"].iter().any(|p| ask.contains(p)) }
+}
+
+/// Was der Hub außer den Hook-Meldungen über eine Claude-Sitzung beobachtet (für [`stale_status`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Observed {
+    /// Zeit seit der letzten Hook-Meldung bzw. seit der Hub den Status selbst gesetzt hat.
+    pub since_event: Duration,
+    /// So lange hat das Programm nichts mehr ausgegeben.
+    pub quiet: Duration,
+    pub screen: ScreenHints,
+    /// Zeit seit der letzten Eingabe ins Terminal, wenn sie nach der letzten Meldung kam (Esc, Antwort auf eine Rückfrage).
+    pub input_since: Option<Duration>,
+    /// Laut Transkript ist die Runde nach der letzten Meldung zu Ende gegangen (unterbrochen, API-Fehler, Antwort fertig).
+    pub turn_ended: bool,
+}
+
+/// Ruhe nach einem belegten Ende der Runde, bevor der Status wechselt.
+pub const STALE_SETTLE: Duration = Duration::from_secs(2);
+/// So lange darf ein nur angenommenes „arbeitet“ ([`TurnState::tentative`]) unbestätigt bleiben.
+pub const STALE_TENTATIVE: Duration = Duration::from_secs(10);
+/// So lange darf „arbeitet“ ohne Meldung, ohne Ausgabe und ohne Arbeitsanzeige stehen. Länger als Claude braucht, um eine
+/// Freigabe-Frage zu melden (die Benachrichtigung kommt erst nach einigen Sekunden ohne Eingabe).
+pub const STALE_WORKING: Duration = Duration::from_secs(20);
+/// Kürzere Frist, wenn der Nutzer seit der letzten Meldung ins Terminal getippt hat (meist Esc) und es seither still ist.
+pub const STALE_AFTER_INPUT: Duration = Duration::from_secs(5);
+
+/// Rückfall, wenn Hook-Meldungen ausbleiben: neuer Status oder `None` (so lassen).
+///
+/// Claude meldet das Ende einer Runde nicht immer – kein `Stop` nach Esc, nach einem API-Fehler oder einer im Terminal
+/// abgelehnten Freigabe, keine Meldung nach einer im Terminal erteilten Freigabe, bis das Werkzeug fertig ist. Ohne
+/// Rückfall bliebe „arbeitet“ bzw. „Freigabe?“ stehen, bis der nächste Prompt durch ist.
+///
+/// - „arbeitet“ → „bereit“, wenn das Transkript das Ende der Runde belegt (`turn_ended`: ein Eintrag, der in der Datei
+///   hinter dem Stand bei der letzten Meldung steht) und keine Rückfrage zu sehen ist;
+/// - angenommenes „arbeitet“ → Status von vorher, wenn nichts es bestätigt;
+/// - „arbeitet“ → unbekannt, wenn lange nichts kam (Meldung verloren, Claude abgeschossen) oder der Nutzer getippt hat
+///   und es seither still ist (Esc, bevor etwas im Transkript stand): lieber kein Status als ein falscher – „bereit“
+///   ohne Beleg nie, sonst tippte ein Agent oder die Warteschlange womöglich in eine offene Rückfrage. Kommt der Beleg
+///   später doch, wird daraus „bereit“;
+/// - „Freigabe?“/„Eingabe“ → „bereit“ mit Beleg aus dem Transkript; → „arbeitet“ nur, wenn der Nutzer ins Terminal
+///   getippt hat, die Arbeitsanzeige läuft und keine Rückfrage zu sehen ist.
+///
+/// Solange die Arbeitsanzeige zu sehen ist, bleibt „arbeitet“ in jedem Fall.
+pub fn stale_status(cur: ClaudeStatus, turn: &TurnState, o: &Observed) -> Option<ClaudeStatus> {
+    let calm = |d: Duration| o.since_event >= d && o.quiet >= d;
+    match cur {
+        ClaudeStatus::Working => {
+            if o.screen.spinner {
+                None
+            } else if o.turn_ended && !o.screen.dialog && calm(STALE_SETTLE) {
+                Some(ClaudeStatus::Idle)
+            } else if let Some(prev) = turn.tentative {
+                calm(STALE_TENTATIVE).then_some(prev)
+            } else if calm(STALE_WORKING) || (o.quiet >= STALE_AFTER_INPUT && o.input_since.is_some_and(|d| d >= STALE_AFTER_INPUT)) {
+                Some(ClaudeStatus::Unknown)
+            } else {
+                None
+            }
+        }
+        ClaudeStatus::Unknown if turn.stale && o.turn_ended && !o.screen.spinner && !o.screen.dialog && calm(STALE_SETTLE) => Some(ClaudeStatus::Idle),
+        ClaudeStatus::Permission | ClaudeStatus::Input => {
+            // Auch mit Beleg nie, solange eine Rückfrage zu sehen ist (z. B. die eines Hintergrund-Agenten gleich nach
+            // dem Ende der Runde): „bereit“ ließe Agenten und die Warteschlange hineintippen.
+            if o.turn_ended && !o.screen.dialog && calm(STALE_SETTLE) {
+                Some(ClaudeStatus::Idle)
+            } else if o.screen.spinner && !o.screen.dialog && o.quiet < Duration::from_secs(3) && o.input_since.is_some_and(|d| d >= Duration::from_secs(1)) {
+                Some(ClaudeStatus::Working)
+            } else {
+                None
+            }
+        }
+        ClaudeStatus::Idle | ClaudeStatus::Unknown => None,
+    }
+}
+
+/// Darf eine Werkzeug-Meldung (PreToolUse/PostToolUse) eine offene Rückfrage („Freigabe?“/„Eingabe“) beenden?
+///
+/// Mehrere Werkzeuge oder Unter-Agenten laufen oft gleichzeitig: Die Meldung eines anderen Werkzeugs sagt nichts über
+/// die Rückfrage – der Status sprang sonst auf „arbeitet“, während Claude weiter auf die Antwort wartet, und Claude
+/// meldet die Frage kein zweites Mal. Beantwortet ist sie, wenn der Nutzer seither ins Terminal getippt hat, genau das
+/// Werkzeug fertig ist, für das gefragt wurde, oder die Arbeitsanzeige wieder läuft (Antwort von anderswo, z. B. per
+/// Fernsteuerung; solange eine Rückfrage offen ist, zeigt Claude sie nicht) – und keine Rückfrage mehr zu sehen ist.
+pub fn tool_event_answers(m: &HookMsg, awaited_tool: &str, input_since: bool, screen: ScreenHints) -> bool {
+    let same_tool = m.event == "PostToolUse" && !awaited_tool.is_empty() && m.tool_name.as_deref() == Some(awaited_tool);
+    (input_since || same_tool || screen.spinner) && !screen.dialog
 }
 
 /// 32 Zufallsbytes aus dem Betriebssystem (Hex). Fällt nur im Notfall auf einen schwächeren Wert zurück.
@@ -507,7 +777,22 @@ fn parse_message(raw: &str, token: &str) -> Option<HookMsg> {
         cwd: s("cwd"),
         key,
         source: s("source"),
+        tool_name: s("tool_name"),
+        agent_id: s("agent_id"),
+        trigger: s("trigger"),
+        reason: s("reason"),
     })
+}
+
+/// Felder des Ereignisses, die der Hub auswertet (kurze Texte; nie Prompts, Werkzeug-Eingaben oder -Ausgaben).
+const KEEP: [&str; 11] = ["hook_event_name", "notification_type", "message", "tool_name", "session_id", "transcript_path", "cwd", "source", "agent_id", "trigger", "reason"];
+
+/// Ereignis-JSON von Claude auf die Felder kürzen, die der Hub braucht.
+fn slim_payload(payload: Value) -> Value {
+    match payload {
+        Value::Object(m) => Value::Object(m.into_iter().filter(|(k, v)| KEEP.contains(&k.as_str()) && v.is_string()).collect()),
+        other => other,
+    }
 }
 
 /// Wird mit `paneldeck.exe --hook` aufgerufen. Gibt immer 0 zurück, damit Claude nie blockiert wird.
@@ -517,16 +802,13 @@ pub fn run_hook_client() -> i32 {
         return 0; // nicht in einem Hub-Terminal gestartet
     };
     let (Ok(port), Ok(session)) = (port.parse::<u16>(), session.parse::<u64>()) else { return 0 };
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+    // Als Bytes lesen: ein einzelnes ungültiges UTF-8-Byte (z. B. in einer Werkzeug-Ausgabe) darf die Meldung nicht kosten.
+    let mut input = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut input);
+    let payload: Value = serde_json::from_str(&String::from_utf8_lossy(&input)).unwrap_or(Value::Null);
     // Nur die vom Hub benutzten Felder weiterreichen: Prompts, Tool-Eingaben und -Ausgaben sind oft > 64 KiB und
     // würden vom Server verworfen (→ Status/Fortsetzen/„Fertig“ gingen verloren).
-    const KEEP: [&str; 8] = ["hook_event_name", "notification_type", "message", "tool_name", "session_id", "transcript_path", "cwd", "source"];
-    let payload = match payload {
-        Value::Object(m) => Value::Object(m.into_iter().filter(|(k, _)| KEEP.contains(&k.as_str())).collect()),
-        other => other,
-    };
+    let payload = slim_payload(payload);
     // Schlüssel des Starts mitsenden (#260): ohne ihn verwirft der Hub die Meldung.
     send_event(port, &token, session, get(ENV_SESSION_KEY).as_deref(), payload);
     0
@@ -537,6 +819,8 @@ pub fn send_event(port: u16, token: &str, session: u64, key: Option<&str>, paylo
     if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
         let body = json!({"token": token, "session": session, "key": key, "payload": payload}).to_string();
         let _ = s.write_all(body.as_bytes());
+        // Ende ausdrücklich melden: Der Hub wertet die Meldung erst am Ende der Verbindung aus.
+        let _ = s.shutdown(std::net::Shutdown::Write);
     }
 }
 
@@ -576,9 +860,35 @@ pub fn write_session_settings_wsl(dir: &Path, exe: &Path, shell_id: &str) -> Opt
     Some(path)
 }
 
+/// Benutzer-Einstellungen von Claude Code: `$CLAUDE_CONFIG_DIR/settings.json`, sonst `~/.claude/settings.json`. Mit
+/// gesetztem `CLAUDE_CONFIG_DIR` liest Claude Code `~/.claude` nicht – dort eingetragene Hooks liefen nie, und weil sie
+/// als „global eingetragen“ galten, bekamen die Sitzungen auch keine eigenen.
 pub fn global_settings_path() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(PathBuf::from(home).join(".claude").join("settings.json"))
+    settings_path_for(std::env::var_os("CLAUDE_CONFIG_DIR"), home_os())
+}
+
+fn home_os() -> Option<std::ffi::OsString> {
+    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+}
+
+fn settings_path_for(config_dir: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let dir = match config_dir.filter(|c| !c.is_empty()) {
+        Some(c) => PathBuf::from(c),
+        None => PathBuf::from(home?).join(".claude"),
+    };
+    Some(dir.join("settings.json"))
+}
+
+/// Alle Orte, an denen Paneldeck seine Hooks global eingetragen haben kann (Deinstallation): der geltende und – mit
+/// `CLAUDE_CONFIG_DIR` – auch `~/.claude/settings.json`, wohin ältere Versionen immer schrieben.
+pub fn global_settings_candidates() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    for p in [global_settings_path(), settings_path_for(None, home_os())].into_iter().flatten() {
+        if !v.contains(&p) {
+            v.push(p);
+        }
+    }
+    v
 }
 
 fn is_hub_entry(group: &Value) -> bool {
@@ -593,6 +903,42 @@ pub fn global_installed(path: &Path) -> bool {
     let Ok(s) = std::fs::read_to_string(path) else { return false };
     let Ok(v) = serde_json::from_str::<Value>(crate::state::strip_bom(&s)) else { return false };
     v["hooks"]["Stop"].as_array().is_some_and(|a| a.iter().any(is_hub_entry))
+}
+
+/// Nur lesend: Sind die Paneldeck-Hooks global eingetragen, aber nicht für jedes Ereignis, das diese Version auswertet
+/// (von einer älteren Version eingetragen)? Hub-Sitzungen bekommen die Hooks dann zusätzlich per `--settings`; gleiche
+/// Befehle führt Claude Code nur einmal aus.
+pub fn global_incomplete(path: &Path) -> bool {
+    let Ok(s) = std::fs::read_to_string(path) else { return false };
+    let Ok(v) = serde_json::from_str::<Value>(crate::state::strip_bom(&s)) else { return false };
+    EVENTS.iter().any(|ev| !v["hooks"][ev].as_array().is_some_and(|a| a.iter().any(is_hub_entry)))
+}
+
+/// `CLAUDE_CONFIG_DIR` aus den Umgebungsvariablen eines Profils (Zeilen `NAME=Wert`), falls gesetzt und nicht leer.
+pub fn profile_config_dir(profile_env: &str) -> Option<&str> {
+    profile_env.lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| k.trim().eq_ignore_ascii_case("CLAUDE_CONFIG_DIR")).map(|(_, v)| v.trim()).rfind(|v| !v.is_empty())
+}
+
+/// Braucht eine Sitzung die Hooks per `--settings`, obwohl es globale gibt?
+///
+/// - `global`: Paneldeck-Hooks stehen in den Benutzer-Einstellungen, die der Hub sieht (`settings`). Ohne sie: immer.
+/// - Das Profil der Sitzung setzt ein anderes `CLAUDE_CONFIG_DIR` (`profile_env`): Claude liest dort andere
+///   Einstellungen, die globalen Hooks gelten für diese Sitzung nicht.
+/// - `incomplete`: Die globalen Hooks stammen von einer älteren Version und decken nicht alle Ereignisse ab. Zusätzliche
+///   Hooks per `--settings` nur, wenn sie dieselbe `paneldeck.exe` aufrufen (`foreign` = eine andere): Gleiche Befehle
+///   führt Claude Code einmal aus, verschiedene beide – dann käme jede Meldung doppelt.
+pub fn session_needs_settings(global: bool, incomplete: bool, foreign: bool, profile_env: &str, settings: Option<&Path>) -> bool {
+    if !global {
+        return true;
+    }
+    let norm = |p: &str| p.trim().trim_end_matches(['\\', '/']).replace('\\', "/").to_lowercase();
+    if let Some(dir) = profile_config_dir(profile_env) {
+        let same = settings.and_then(Path::parent).is_some_and(|g| norm(&g.to_string_lossy()) == norm(dir));
+        if !same {
+            return true;
+        }
+    }
+    incomplete && !foreign
 }
 
 /// Nur lesend: zeigen die global eingetragenen Paneldeck-Hooks auf eine andere `paneldeck.exe` als `exe` (z. B. eine
@@ -670,6 +1016,11 @@ pub fn install_global(path: &Path, exe: &Path) -> Result<(), String> {
 
 pub fn uninstall_global(path: &Path) -> Result<(), String> {
     let mut v = load_settings(path)?;
+    // Nichts von Paneldeck darin: die Datei des Nutzers nicht anfassen (weder neu formatieren noch leere Listen entfernen).
+    let ours = v["hooks"].as_object().is_some_and(|h| h.values().any(|arr| arr.as_array().is_some_and(|a| a.iter().any(is_hub_entry))));
+    if !ours {
+        return Ok(());
+    }
     let mut hooks_empty = false;
     if let Some(hooks) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
         for (_, arr) in hooks.iter_mut() {
@@ -709,8 +1060,346 @@ mod tests {
         assert_eq!(m.session, 7);
         assert_eq!(m.key.as_deref(), Some("k7"));
         assert_eq!(m.claude_session.as_deref(), Some("abc"));
-        assert_eq!(status_after(ClaudeStatus::Working, &m), ClaudeStatus::Permission);
+        assert_eq!(status_after(ClaudeStatus::Working, &mut TurnState::default(), &m), ClaudeStatus::Permission);
         assert!(srv.rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    fn ev(event: &str) -> HookMsg {
+        HookMsg { event: event.into(), ..HookMsg::default() }
+    }
+
+    /// Eine ganze Runde samt Unter-Agenten, Zusammenfassen und Hintergrund-Agenten: Der Status folgt dem Haupt-Agenten.
+    #[test]
+    fn status_follows_the_main_agents_turn() {
+        use ClaudeStatus::*;
+        let mut t = TurnState::default();
+        let mut s = Unknown;
+        let mut step = |m: HookMsg, t: &mut TurnState| {
+            s = status_after(s, t, &m);
+            s
+        };
+        let sub = |event: &str| HookMsg { agent_id: Some("a1".into()), ..ev(event) };
+        assert_eq!(step(HookMsg { source: Some("startup".into()), ..ev("SessionStart") }, &mut t), Idle);
+        assert_eq!(step(ev("UserPromptSubmit"), &mut t), Working);
+        assert!(t.open);
+        // Unter-Agent in der Runde: sein Ende lässt den Haupt-Agenten weiterarbeiten
+        assert_eq!(step(sub("PreToolUse"), &mut t), Working);
+        assert_eq!(step(ev("SubagentStop"), &mut t), Working);
+        // Automatisches Zusammenfassen mitten in der Runde: Claude arbeitet weiter – vorher „bereit“, und die
+        // Warteschlange schickte den nächsten Prompt mitten in die Arbeit
+        assert_eq!(step(HookMsg { trigger: Some("auto".into()), ..ev("PreCompact") }, &mut t), Working);
+        assert_eq!(step(HookMsg { source: Some("compact".into()), ..ev("SessionStart") }, &mut t), Working);
+        assert_eq!(step(ev("PostToolUse"), &mut t), Working);
+        assert_eq!(step(ev("Stop"), &mut t), Idle);
+        assert!(!t.open);
+        // Hintergrund-Agent nach dem Ende der Runde: „arbeitet“, bis er fertig ist – dann wieder bereit (vorher blieb
+        // „arbeitet“ stehen, weil dafür kein Stop kommt)
+        assert_eq!(step(sub("PostToolUse"), &mut t), Working);
+        assert!(!t.open, "der Haupt-Agent ist nicht in einer Runde");
+        assert_eq!(step(ev("SubagentStop"), &mut t), Idle);
+        // Der Haupt-Agent wird von einem Hintergrund-Ergebnis geweckt (kein UserPromptSubmit): seine Werkzeuge öffnen die Runde
+        assert_eq!(step(ev("PreToolUse"), &mut t), Working);
+        assert_eq!(step(ev("SubagentStop"), &mut t), Working);
+        assert_eq!(step(ev("Stop"), &mut t), Idle);
+        // `/compact` von Hand: „arbeitet“ während des Zusammenfassens, danach bereit
+        assert_eq!(step(HookMsg { trigger: Some("manual".into()), ..ev("PreCompact") }, &mut t), Working);
+        assert_eq!(t.tentative, Some(Idle), "bricht das Zusammenfassen ab, gilt wieder bereit");
+        assert_eq!(step(HookMsg { source: Some("compact".into()), ..ev("SessionStart") }, &mut t), Idle);
+        assert_eq!(t.tentative, None);
+        // `/clear` und das Ende
+        assert_eq!(step(ev("SessionEnd"), &mut t), Unknown);
+        assert_eq!(step(HookMsg { source: Some("clear".into()), ..ev("SessionStart") }, &mut t), Idle);
+        assert_eq!(step(ev("GibtEsNicht"), &mut t), Idle);
+        // Automatisches Zusammenfassen als Erstes in einer Runde, die ohne Prompt begann: danach arbeitet Claude weiter
+        assert_eq!(step(HookMsg { trigger: Some("auto".into()), ..ev("PreCompact") }, &mut t), Working);
+        assert_eq!(step(HookMsg { source: Some("compact".into()), ..ev("SessionStart") }, &mut t), Working);
+        assert_eq!(step(ev("Stop"), &mut t), Idle);
+    }
+
+    #[test]
+    fn notifications_map_by_type_and_by_text_for_older_claude_versions() {
+        use ClaudeStatus::*;
+        let note = |kind: Option<&str>, text: &str| HookMsg { kind: kind.map(str::to_string), message: Some(text.into()), ..ev("Notification") };
+        let after = |cur, m: &HookMsg| status_after(cur, &mut TurnState::default(), m);
+        assert_eq!(after(Working, &note(Some("permission_prompt"), "x")), Permission);
+        assert_eq!(after(Working, &note(Some("idle_prompt"), "x")), Idle);
+        assert_eq!(after(Working, &note(Some("elicitation_dialog"), "x")), Input);
+        // Reine Auskünfte ändern nichts – vorher „Eingabe“, bis zum nächsten Prompt
+        for kind in ["auth_success", "elicitation_complete", "elicitation_response"] {
+            assert_eq!(after(Idle, &note(Some(kind), "x")), Idle, "{kind}");
+            assert_eq!(after(Working, &note(Some(kind), "x")), Working, "{kind}");
+        }
+        // Ohne Typ (ältere Claude-Versionen): nach dem Text
+        assert_eq!(after(Working, &note(None, "Claude needs your permission to use Bash")), Permission);
+        assert_eq!(after(Idle, &note(None, "Claude is waiting for your input")), Idle);
+        assert_eq!(after(Working, &note(None, "etwas anderes")), Input);
+        assert_eq!(permission_tool("Claude needs your permission to use Bash"), Some("Bash"));
+        assert_eq!(permission_tool("Claude is waiting for your input"), None);
+        // idle_prompt schließt die Runde
+        let mut t = TurnState { open: true, ..TurnState::default() };
+        assert_eq!(status_after(Working, &mut t, &note(Some("idle_prompt"), "x")), Idle);
+        assert!(!t.open);
+    }
+
+    #[test]
+    fn screen_hints_find_the_spinner_and_open_questions() {
+        let working = "● Ich schaue nach.\n\n✻ Cogitating… (12s · ↓ 1.2k tokens · esc to interrupt)\n\n────────\n> \n────────\n  ? for shortcuts";
+        assert_eq!(screen_hints(working), ScreenHints { spinner: true, dialog: false });
+        // In einem schmalen Bereich bricht die Zeile um
+        assert!(screen_hints("✻ Cogitating… (12s · esc to\ninterrupt)\n> ").spinner);
+        let idle = "● Fertig.\n\n────────\n> \n────────\n  ? for shortcuts";
+        assert_eq!(screen_hints(idle), ScreenHints::default());
+        let ask = "Bash command\n\n  rm -rf build\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend";
+        assert_eq!(screen_hints(ask), ScreenHints { spinner: false, dialog: true });
+        // Nur der untere Teil zählt für die Arbeitsanzeige: alter Text weiter oben täuscht nicht
+        let old = format!("esc to interrupt\nDo you want to proceed?\n{}> ", "zeile\n".repeat(25));
+        assert_eq!(screen_hints(&old), ScreenHints::default());
+        assert_eq!(screen_hints(""), ScreenHints::default());
+    }
+
+    #[test]
+    fn stale_working_needs_evidence_or_long_silence() {
+        use ClaudeStatus::*;
+        let turn = TurnState { open: true, ..TurnState::default() };
+        let o = |secs: u64| Observed { since_event: Duration::from_secs(secs), quiet: Duration::from_secs(secs), ..Observed::default() };
+        // Ein langes Werkzeug: keine Meldung, aber die Arbeitsanzeige läuft
+        let busy = Observed { quiet: Duration::from_millis(300), screen: ScreenHints { spinner: true, dialog: false }, ..o(600) };
+        assert_eq!(stale_status(Working, &turn, &busy), None);
+        // Arbeitsanzeige zu sehen, aber still (Animation angehalten): bleibt „arbeitet“, auch mit Beleg
+        let frozen = Observed { screen: ScreenHints { spinner: true, dialog: false }, turn_ended: true, ..o(600) };
+        assert_eq!(stale_status(Working, &turn, &frozen), None);
+        // Beleg aus dem Transkript: nach kurzer Ruhe bereit
+        assert_eq!(stale_status(Working, &turn, &Observed { turn_ended: true, ..o(1) }), None);
+        assert_eq!(stale_status(Working, &turn, &Observed { turn_ended: true, ..o(2) }), Some(Idle));
+        // Die Meldung kam eben erst, das Terminal ist schon länger still: noch warten
+        assert_eq!(stale_status(Working, &turn, &Observed { turn_ended: true, since_event: Duration::from_millis(500), ..o(30) }), None);
+        // Ohne Beleg: erst nach langer Ruhe, und dann unbekannt – nie „bereit“
+        assert_eq!(stale_status(Working, &turn, &o(19)), None);
+        assert_eq!(stale_status(Working, &turn, &o(20)), Some(Unknown));
+        assert_eq!(stale_status(Working, &turn, &Observed { quiet: Duration::from_secs(1), ..o(600) }), None, "es kommt noch Ausgabe");
+        // Der Nutzer hat seit der letzten Meldung getippt (Esc) und es ist still: schon nach kurzer Zeit unbekannt
+        let typed = |secs: u64| Observed { input_since: Some(Duration::from_secs(secs)), ..o(secs) };
+        assert_eq!(stale_status(Working, &turn, &typed(4)), None);
+        assert_eq!(stale_status(Working, &turn, &typed(5)), Some(Unknown));
+        // … nicht, während Claude weiter ausgibt (Tippen während der Arbeit) oder die Arbeitsanzeige steht
+        assert_eq!(stale_status(Working, &turn, &Observed { quiet: Duration::from_secs(1), ..typed(8) }), None);
+        assert_eq!(stale_status(Working, &turn, &Observed { screen: ScreenHints { spinner: true, dialog: false }, ..typed(8) }), None);
+        // Bereit fasst der Rückfall nie an, unbekannt nur nach einem eigenen „Meldungen blieben aus“
+        for cur in [Idle, Unknown] {
+            assert_eq!(stale_status(cur, &turn, &Observed { turn_ended: true, ..o(600) }), None);
+        }
+        // Der Beleg kommt später als die Frist: aus unbekannt wird doch noch bereit
+        let stale = TurnState { stale: true, ..TurnState::default() };
+        assert_eq!(stale_status(Unknown, &stale, &Observed { turn_ended: true, ..o(30) }), Some(Idle));
+        assert_eq!(stale_status(Unknown, &stale, &o(3600)), None, "ohne Beleg nie");
+        assert_eq!(stale_status(Unknown, &stale, &Observed { turn_ended: true, screen: ScreenHints { spinner: true, dialog: false }, ..o(30) }), None);
+        // Jede Meldung beendet diesen Zustand (Claude ist dann wirklich beendet oder meldet sich wieder)
+        let mut t = stale.clone();
+        assert_eq!(status_after(Unknown, &mut t, &ev("SessionEnd")), Unknown);
+        assert!(!t.stale);
+        // Ein nur angenommenes „arbeitet“ wartet seine eigene Frist ab, auch wenn getippt wurde
+        let assumed = TurnState { tentative: Some(Idle), ..TurnState::default() };
+        assert_eq!(stale_status(Working, &assumed, &typed(6)), None);
+        assert_eq!(stale_status(Working, &assumed, &typed(10)), Some(Idle));
+    }
+
+    #[test]
+    fn a_stale_approval_question_needs_evidence_or_a_visible_answer() {
+        use ClaudeStatus::*;
+        let turn = TurnState { open: true, ..TurnState::default() };
+        let o = |secs: u64| Observed { since_event: Duration::from_secs(secs), quiet: Duration::from_secs(secs), ..Observed::default() };
+        for cur in [Permission, Input] {
+            // Die Frage steht da und niemand antwortet: bleibt, egal wie lange
+            assert_eq!(stale_status(cur, &turn, &o(3600)), None);
+            // Im Terminal abgelehnt (kein Hook): das Transkript belegt das Ende der Runde
+            assert_eq!(stale_status(cur, &turn, &Observed { turn_ended: true, ..o(2) }), Some(Idle));
+            // Im Terminal erlaubt, das Werkzeug läuft lange: Eingabe + laufende Arbeitsanzeige + keine Rückfrage mehr
+            let run = Observed { quiet: Duration::from_millis(200), screen: ScreenHints { spinner: true, dialog: false }, input_since: Some(Duration::from_secs(2)), ..o(30) };
+            assert_eq!(stale_status(cur, &turn, &run), Some(Working));
+            // … ohne Eingabe des Nutzers nie (andere Werkzeuge laufen weiter, die Frage steht noch)
+            assert_eq!(stale_status(cur, &turn, &Observed { input_since: None, ..run }), None);
+            // … nicht, solange eine Rückfrage zu sehen ist (die nächste Frage), und nicht ohne Arbeitsanzeige
+            assert_eq!(stale_status(cur, &turn, &Observed { screen: ScreenHints { spinner: true, dialog: true }, ..run }), None);
+            assert_eq!(stale_status(cur, &turn, &Observed { screen: ScreenHints::default(), ..run }), None);
+            // … und nicht in dem Augenblick, in dem getippt wird
+            assert_eq!(stale_status(cur, &turn, &Observed { input_since: Some(Duration::from_millis(200)), ..run }), None);
+        }
+    }
+
+    /// Der Hook-Aufruf reicht nur kurze Textfelder weiter (und die neuen: Unter-Agent, Auslöser des Zusammenfassens).
+    #[test]
+    fn hook_client_forwards_only_the_fields_the_hub_uses() {
+        let p = slim_payload(json!({
+            "hook_event_name": "PostToolUse", "session_id": "A", "tool_name": "Bash", "agent_id": "a1", "trigger": "auto",
+            "tool_input": {"command": "x".repeat(100_000)}, "tool_response": "y".repeat(100_000), "prompt": "geheim", "message": {"kein": "Text"}
+        }));
+        assert_eq!(p, json!({"hook_event_name": "PostToolUse", "session_id": "A", "tool_name": "Bash", "agent_id": "a1", "trigger": "auto"}));
+        let raw = json!({"token": "t", "session": 3, "key": "k", "payload": p}).to_string();
+        let m = parse_message(&raw, "t").unwrap();
+        assert_eq!((m.tool_name.as_deref(), m.agent_id.as_deref(), m.trigger.as_deref()), (Some("Bash"), Some("a1"), Some("auto")));
+        assert_eq!(slim_payload(Value::Null), Value::Null);
+    }
+
+    /// Jedes Ereignis, für das sich Paneldeck einträgt, kennt Claude Code mindestens so lange wie SessionEnd – ein
+    /// unbekannter Name machte die Settings-Datei für ältere Versionen ungültig.
+    #[test]
+    fn only_long_known_hook_events_are_registered() {
+        let known = ["PreToolUse", "PostToolUse", "Notification", "UserPromptSubmit", "Stop", "SubagentStop", "PreCompact", "SessionStart", "SessionEnd"];
+        let v = hooks_value("x --hook");
+        let names: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(names.len(), EVENTS.len());
+        for n in &names {
+            assert!(known.contains(n), "{n}");
+        }
+        for must in ["Stop", "SubagentStop", "PreCompact", "SessionEnd", "Notification"] {
+            assert!(names.contains(&must), "{must}");
+        }
+        // Nur Werkzeug-Ereignisse tragen einen Matcher
+        assert_eq!(v["PreToolUse"][0]["matcher"], "*");
+        assert!(v["Stop"][0].get("matcher").is_none() && v["PreCompact"][0].get("matcher").is_none());
+    }
+
+    /// Globale Hooks einer älteren Version (ohne die neuen Ereignisse) werden erkannt – nur lesend.
+    #[test]
+    fn global_hooks_of_an_older_version_are_incomplete() {
+        let dir = std::env::temp_dir().join(format!("hubtest-{}", random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("settings.json");
+        assert!(!global_incomplete(&f), "keine Datei");
+        let exe = Path::new("C:\\Tools\\paneldeck.exe");
+        install_global(&f, exe).unwrap();
+        assert!(global_installed(&f) && !global_incomplete(&f));
+        // Stand einer älteren Version: SubagentStop und PreCompact fehlen
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        for old in ["SubagentStop", "PreCompact"] {
+            v["hooks"].as_object_mut().unwrap().remove(old);
+        }
+        std::fs::write(&f, v.to_string()).unwrap();
+        let before = std::fs::read(&f).unwrap();
+        assert!(global_installed(&f) && global_incomplete(&f));
+        assert_eq!(std::fs::read(&f).unwrap(), before, "nur lesen");
+        // Neu eintragen ergänzt sie; Entfernen nimmt alle wieder heraus
+        install_global(&f, exe).unwrap();
+        assert!(!global_incomplete(&f));
+        uninstall_global(&f).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert!(v.get("hooks").is_none(), "{v}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review #282 (LOW-5, LOW-7): wann eine Sitzung die Hooks per `--settings` bekommt, obwohl es globale gibt.
+    #[test]
+    fn sessions_get_their_own_hooks_when_the_global_ones_do_not_apply() {
+        let global = Path::new("C:\\Users\\x\\.claude\\settings.json");
+        let needs = |g: bool, incomplete: bool, foreign: bool, env: &str| session_needs_settings(g, incomplete, foreign, env, Some(global));
+        assert!(needs(false, false, false, ""), "ohne globale Hooks immer");
+        assert!(!needs(true, false, false, ""), "vollständige globale Hooks reichen");
+        // Globale Hooks einer älteren Version: zusätzlich per --settings – aber nur, wenn es dieselbe paneldeck.exe ist.
+        // Bei einer anderen legt Claude Code die Befehle nicht zusammen, jede Meldung käme doppelt.
+        assert!(needs(true, true, false, ""));
+        assert!(!needs(true, true, true, ""));
+        assert!(!needs(true, false, true, ""));
+        // Das Profil setzt ein anderes CLAUDE_CONFIG_DIR: Claude liest die globalen Hooks dort nicht
+        assert!(needs(true, false, false, "FOO=1\nCLAUDE_CONFIG_DIR=D:\\cfg\n"));
+        assert!(needs(true, false, true, "claude_config_dir = D:/cfg"), "Name ohne Rücksicht auf Groß-/Kleinschreibung");
+        // … dasselbe Verzeichnis (andere Schreibweise) oder leer: nicht
+        assert!(!needs(true, false, false, "CLAUDE_CONFIG_DIR=c:/users/x/.claude/"));
+        assert!(!needs(true, false, false, "CLAUDE_CONFIG_DIR=\nFOO=1"));
+        assert!(session_needs_settings(true, false, false, "CLAUDE_CONFIG_DIR=D:\\cfg", None));
+        assert_eq!(profile_config_dir("A=1\nCLAUDE_CONFIG_DIR=x\nCLAUDE_CONFIG_DIR=y"), Some("y"), "die letzte Zeile gilt");
+        assert_eq!(profile_config_dir("A=1\nkeine Zuweisung"), None);
+    }
+
+    /// Review #282 (MEDIUM-2): Was die Warteschlange wissen muss – ob Claude wirklich endet und ob eine Runde mit einem
+    /// abgeschickten Prompt begann.
+    #[test]
+    fn turn_and_session_end_tell_what_the_queue_may_do() {
+        use ClaudeStatus::*;
+        let end = |reason: Option<&str>| HookMsg { reason: reason.map(str::to_string), ..ev("SessionEnd") };
+        assert!(session_end_is_exit(&end(None)) && session_end_is_exit(&end(Some("prompt_input_exit"))) && session_end_is_exit(&end(Some("logout"))) && session_end_is_exit(&end(Some("other"))));
+        assert!(!session_end_is_exit(&end(Some("clear"))) && !session_end_is_exit(&end(Some("resume"))), "/clear und /resume: derselbe Claude läuft weiter");
+        assert!(!session_end_is_exit(&HookMsg { reason: Some("other".into()), ..ev("Stop") }));
+        let raw = json!({"token": "t", "session": 3, "key": "k", "payload": slim_payload(json!({"hook_event_name": "SessionEnd", "reason": "clear", "x": 1}))}).to_string();
+        assert_eq!(parse_message(&raw, "t").unwrap().reason.as_deref(), Some("clear"));
+        // Nur UserPromptSubmit öffnet eine Runde „mit Prompt“; Stop, SessionStart, idle_prompt und SessionEnd schließen sie
+        let mut t = TurnState::default();
+        status_after(Idle, &mut t, &ev("PreToolUse"));
+        assert!(t.open && !t.prompted, "Werkzeug ohne Prompt (geweckte Runde)");
+        status_after(Working, &mut t, &ev("UserPromptSubmit"));
+        assert!(t.prompted);
+        status_after(Working, &mut t, &HookMsg { source: Some("compact".into()), ..ev("SessionStart") });
+        assert!(t.prompted, "automatisches Zusammenfassen mitten in der Runde");
+        for close in [ev("Stop"), HookMsg { source: Some("clear".into()), ..ev("SessionStart") }, HookMsg { kind: Some("idle_prompt".into()), ..ev("Notification") }, ev("SessionEnd")] {
+            let mut t = TurnState { open: true, prompted: true, ..TurnState::default() };
+            status_after(Working, &mut t, &close);
+            assert!(!t.prompted && !t.open, "{}", close.event);
+        }
+    }
+
+    /// Mit `CLAUDE_CONFIG_DIR` liest Claude Code seine Einstellungen dort, nicht in `~/.claude`.
+    #[test]
+    fn global_settings_follow_claude_config_dir() {
+        use std::ffi::OsString;
+        let p = |c: Option<&str>, h: Option<&str>| settings_path_for(c.map(OsString::from), h.map(OsString::from));
+        let home = PathBuf::from("C:\\Users\\x").join(".claude").join("settings.json");
+        assert_eq!(p(None, Some("C:\\Users\\x")), Some(home.clone()));
+        assert_eq!(p(Some(""), Some("C:\\Users\\x")), Some(home), "leer zählt nicht");
+        assert_eq!(p(Some("D:\\cfg"), Some("C:\\Users\\x")), Some(PathBuf::from("D:\\cfg").join("settings.json")));
+        assert_eq!(p(Some("D:\\cfg"), None), Some(PathBuf::from("D:\\cfg").join("settings.json")));
+        assert_eq!(p(None, None), None);
+    }
+
+    /// Entfernen fasst eine Datei ohne Paneldeck-Hooks nicht an (kein Umformatieren, keine Sicherungskopie).
+    #[test]
+    fn uninstall_leaves_a_file_without_paneldeck_hooks_untouched() {
+        let dir = std::env::temp_dir().join(format!("hubtest-{}", random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("settings.json");
+        let own = "{\n\t\"model\": \"opus\",   \"hooks\": {\"Stop\": [], \"PreToolUse\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"echo fremd\"}]}]}\n}\n";
+        std::fs::write(&f, own).unwrap();
+        uninstall_global(&f).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), own);
+        assert!(!f.with_extension("json.paneldeck-backup").exists());
+        // Eine fehlende Datei entsteht dabei nicht
+        let missing = dir.join("nichts.json");
+        uninstall_global(&missing).unwrap();
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Die Shell steht wieder am Prompt: der bisherige Claude ist beendet, ein neuer darf übernehmen (auch ohne SessionEnd).
+    #[test]
+    fn a_new_claude_may_take_over_after_the_shell_prompt() {
+        let msg = |ev: &str, id: &str, src: Option<&str>| HookMsg { event: ev.into(), claude_session: Some(id.into()), source: src.map(str::to_string), ..HookMsg::default() };
+        let mut c = ConvBinding::launch(Some("A".into()), false);
+        assert_eq!(c.feed(&msg("SessionStart", "A", Some("startup"))), ConvMatch::Bind("A".into()));
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"))), ConvMatch::Foreign, "claude -p, solange A läuft");
+        c.shell_prompt();
+        // Meldungen ohne Schlüssel sind danach nicht mehr sicher fremd
+        assert!(!c.is_foreign(&msg("Stop", "B", None)));
+        // Nur ein SessionStart übernimmt
+        assert_eq!(c.feed(&msg("UserPromptSubmit", "B", None)), ConvMatch::Foreign);
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"))), ConvMatch::Switch("B".into()));
+        assert!(!c.open);
+        assert_eq!(c.feed(&msg("SessionStart", "C", Some("startup"))), ConvMatch::Foreign, "wieder streng");
+        // Der Prompt hat getäuscht: A meldet sich weiter und bleibt zugeordnet
+        let mut c = ConvBinding::launch(Some("A".into()), false);
+        c.feed(&msg("SessionStart", "A", Some("startup")));
+        c.shell_prompt();
+        assert_eq!(c.feed(&msg("PreToolUse", "A", None)), ConvMatch::Same);
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"))), ConvMatch::Foreign);
+        // Nichts zugeordnet (Claude startete nie): nach dem Prompt bindet ein SessionStart, die Start-ID weiterhin auch
+        let mut c = ConvBinding::launch(Some("A".into()), false);
+        c.shell_prompt();
+        assert_eq!(c.feed(&msg("UserPromptSubmit", "A", None)), ConvMatch::Bind("A".into()));
+        let mut c = ConvBinding::launch(Some("A".into()), false);
+        c.shell_prompt();
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"))), ConvMatch::Bind("B".into()));
+        // `--safe-mode` bleibt taub
+        let mut c = ConvBinding::launch(Some("A".into()), true);
+        c.shell_prompt();
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"))), ConvMatch::Foreign);
+        assert!(c.is_foreign(&msg("Stop", "B", None)));
     }
 
     #[test]
