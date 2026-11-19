@@ -255,6 +255,31 @@ impl Entry {
         Some(HookEffect { old, new, conv, keyless, advance, paused })
     }
 
+    /// Konversation der Sitzung nach einer angenommenen Meldung mit Schlüssel fortschreiben (`conv` aus
+    /// [`Entry::take_hook`]). Gespeichert – und später mit `--resume` fortgesetzt – wird nur eine Konversation, die der
+    /// Sitzung gehört (`ConvBinding::own`, #302): die beim Start übergebene, die mit `--continue` fortgesetzte oder eine,
+    /// zu der der vom Hub gestartete Claude selbst gewechselt hat. Ein von Hand im selben Terminal gestarteter Claude
+    /// oder ein anderer Prozess mit dem Schlüssel der Sitzung ändert sie nie, auch nicht „Inhalt vorhanden“.
+    pub(super) fn note_conversation(&mut self, m: &HookMsg, conv: &ConvMatch) {
+        if !self.is_claude() || !self.hook_conv.own {
+            return;
+        }
+        if let ConvMatch::Bind(cs) | ConvMatch::Switch(cs) = conv {
+            if self.meta.claude_session != *cs {
+                self.meta.claude_session = cs.clone();
+                // Eine andere Konversation als beim Start angegeben: Inhalt hat sie nur, wenn sie fortgesetzt wurde.
+                self.meta.claude_started = false;
+            }
+        }
+        match (m.event.as_str(), m.source.as_deref()) {
+            // Fortgesetzte Konversation (`--resume`, `--continue`, `/resume`): sie hat Inhalt.
+            ("SessionStart", Some("resume")) | ("UserPromptSubmit", _) => self.meta.claude_started = true,
+            // `/clear`: neue, leere Konversation.
+            ("SessionStart", Some("clear")) => self.meta.claude_started = false,
+            _ => {}
+        }
+    }
+
     /// Der vom Hub gestartete Claude ist beendet (oder nie gestartet): Die Warteschlange läuft in diesem Start nicht
     /// mehr von selbst. Warten noch Prompts, wird sie angehalten (`true`) – sichtbar im Fenster der Warteschlange, bis
     /// der Nutzer sie fortsetzt oder die Sitzung neu lädt.
@@ -856,5 +881,75 @@ mod tests {
         e.status = ClaudeStatus::Permission;
         e.assume_working();
         assert_eq!(e.track.turn.tentative, None);
+    }
+
+    /// #302: Nur die Konversation der Sitzung wird gespeichert (und später mit `--resume` fortgesetzt). Ein Claude, der
+    /// nach dem Ende des gestarteten im selben Terminal läuft (von Hand, ein übrig gebliebener Prozess mit dem Schlüssel
+    /// der Sitzung), ändert sie nie – auch nicht „Inhalt vorhanden“.
+    #[test]
+    fn only_the_sessions_own_conversation_is_kept_for_resume() {
+        let with = |ev: &str, id: &str, src: Option<&str>, reason: Option<&str>| HookMsg {
+            claude_session: Some(id.into()),
+            source: src.map(str::to_string),
+            reason: reason.map(str::to_string),
+            ..msg(ev)
+        };
+        let deliver = |e: &mut Entry, m: HookMsg| {
+            if let Some(f) = e.take_hook(&m) {
+                e.note_conversation(&m, &f.conv);
+            }
+        };
+        let fresh = || {
+            let mut e = claude_entry();
+            e.meta.claude_session = "A".into();
+            e
+        };
+        // Gestarteter Claude meldet sich, Prompt: eigene Konversation mit Inhalt
+        let mut e = fresh();
+        deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+        deliver(&mut e, with("UserPromptSubmit", "A", None, None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("A", true));
+        // /clear im gestarteten Claude: neue eigene Konversation
+        deliver(&mut e, with("SessionEnd", "A", None, Some("clear")));
+        deliver(&mut e, with("SessionStart", "C", Some("clear"), None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("C", false));
+        deliver(&mut e, with("UserPromptSubmit", "C", None, None));
+        assert!(e.meta.claude_started);
+        // Claude beendet (/exit), danach `claude` von Hand im selben Terminal: bleibt C
+        deliver(&mut e, with("SessionEnd", "C", None, Some("prompt_input_exit")));
+        deliver(&mut e, with("SessionStart", "B", Some("startup"), None));
+        deliver(&mut e, with("UserPromptSubmit", "B", None, None));
+        assert_eq!(e.meta.claude_session, "C", "von Hand gestarteter Claude wird nicht zur Konversation der Sitzung");
+        assert_eq!(e.hook_conv.bound.as_deref(), Some("B"), "sein Status wird trotzdem verfolgt");
+        // Auch sein /resume nicht
+        deliver(&mut e, with("SessionStart", "D", Some("resume"), None));
+        assert_eq!(e.meta.claude_session, "C");
+
+        // Gestarteter Claude kam nie (Prompt der Shell), ein anderer meldet sich: die Sitzung behält ihre nie benutzte ID
+        // ohne Inhalt – Neu laden beginnt neu statt `--resume` mit fremder ID
+        let mut e = fresh();
+        e.hook_conv.shell_prompt();
+        deliver(&mut e, with("SessionStart", "B", Some("startup"), None));
+        deliver(&mut e, with("UserPromptSubmit", "B", None, None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("A", false));
+        // Meldet sich doch noch der gestartete Claude (seine ID), gehört sie der Sitzung
+        let mut e = fresh();
+        e.hook_conv.shell_prompt();
+        deliver(&mut e, with("UserPromptSubmit", "A", None, None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("A", true));
+        // Vorgetäuschter Prompt der Shell: die eigene Konversation meldet sich weiter und bleibt die der Sitzung
+        let mut e = fresh();
+        deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+        e.hook_conv.shell_prompt();
+        deliver(&mut e, with("PreToolUse", "A", None, None));
+        deliver(&mut e, with("SessionEnd", "A", None, Some("clear")));
+        deliver(&mut e, with("SessionStart", "C", Some("clear"), None));
+        assert_eq!(e.meta.claude_session, "C");
+
+        // `--continue` beim Anlegen (keine ID übergeben): die fortgesetzte Konversation gehört der Sitzung
+        let mut e = claude_entry();
+        e.hook_conv = hooks::ConvBinding::launch(None, false);
+        deliver(&mut e, with("SessionStart", "Z", Some("resume"), None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("Z", true));
     }
 }

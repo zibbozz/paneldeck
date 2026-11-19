@@ -143,11 +143,22 @@ pub struct ConvBinding {
     /// „fremd“ und der Status eingefroren. Fällt weg, sobald sich die zugeordnete Konversation wieder meldet (sie lebt
     /// also doch) oder eine neue zugeordnet ist.
     pub open: bool,
+    /// Beim Start übergebene Konversations-ID; bleibt für den ganzen Start (anders als `expect`).
+    pub launched: Option<String>,
+    /// Es meldet sich noch der Claude, den der Hub gestartet hat: kein Ende (SessionEnd mit Beenden, Prompt der Shell)
+    /// seit dem Start. Ein danach im selben Terminal von Hand gestarteter Claude gehört nicht zur Sitzung (#302).
+    pub chain: bool,
+    /// Die zugeordnete Konversation gehört der Sitzung (#302): die beim Start übergebene ID, die mit `--continue`
+    /// fortgesetzte oder eine, zu der der vom Hub gestartete Claude selbst gewechselt hat (`/clear`, `/resume`,
+    /// Zusammenfassen). Nur sie wird in der Sitzung gespeichert und später mit `--resume` fortgesetzt – nie die eines
+    /// von Hand gestarteten Claude oder eines anderen Prozesses mit dem Schlüssel der Sitzung.
+    pub own: bool,
 }
 
 impl ConvBinding {
     pub fn launch(expect: Option<String>, hooks_off: bool) -> Self {
-        ConvBinding { bound: None, expect: expect.filter(|e| !e.is_empty()), hooks_off, open: false }
+        let expect = expect.filter(|e| !e.is_empty());
+        ConvBinding { bound: None, launched: expect.clone(), expect, hooks_off, open: false, chain: true, own: false }
     }
 
     /// Die Shell zeigt nach dem Startbefehl wieder ihren Prompt: Was darin an Claude lief, ist beendet. Ein von Claude
@@ -155,6 +166,7 @@ impl ConvBinding {
     /// Prompt aus.
     pub fn shell_prompt(&mut self) {
         self.open = true;
+        self.chain = false;
     }
 
     /// Meldung `m` zuordnen und den Zustand fortschreiben. Eine neue Konversation zählt nur
@@ -186,6 +198,9 @@ impl ConvBinding {
         };
         match &r {
             ConvMatch::Bind(id) | ConvMatch::Switch(id) => {
+                // Der Sitzung gehört sie nur, wenn sie die beim Start übergebene ist oder der gestartete Claude noch läuft
+                // (`/clear`, `/resume`, `--continue`) – nicht nach seinem Ende (#302).
+                self.own = self.launched.as_deref() == Some(id.as_str()) || self.chain;
                 self.bound = Some(id.clone());
                 self.expect = None;
                 self.open = false;
@@ -193,13 +208,24 @@ impl ConvBinding {
             // Der Claude dieser Konversation ist beendet: ein im selben Terminal neu gestarteter Claude darf sich mit
             // seinem SessionStart wieder zuordnen.
             ConvMatch::Same if m.event == "SessionEnd" => {
+                // Beendet (nicht `/clear`/`/resume`): was sich danach meldet, hat nicht der Hub gestartet (#302).
+                if session_end_is_exit(m) {
+                    self.chain = false;
+                }
                 self.bound = None;
                 self.expect = None;
                 self.open = false;
+                self.own = false;
             }
             // Die zugeordnete Konversation meldet sich weiter: sie lebt, der Prompt der Shell hat getäuscht (Claude
             // angehalten, ungewöhnlicher Startbefehl). Ab jetzt wieder streng – ein `claude -p` übernimmt nichts.
-            ConvMatch::Same => self.open = false,
+            // War sie die der Sitzung, läuft auch der gestartete Claude noch.
+            ConvMatch::Same => {
+                self.open = false;
+                if self.own {
+                    self.chain = true;
+                }
+            }
             _ => {}
         }
         r
@@ -1446,7 +1472,7 @@ mod tests {
         assert_eq!(c.bound.as_deref(), Some("A"));
         // Ende der eigenen Konversation: Zuordnung frei
         assert_eq!(c.feed(&msg("SessionEnd", "A", None)), ConvMatch::Same);
-        assert_eq!(c, ConvBinding::default());
+        assert_eq!((c.bound.as_deref(), c.expect.as_deref(), c.open, c.chain, c.own), (None, None, false, false, false));
         // Vor einem neuen SessionStart zählen fremde Meldungen nicht
         assert_eq!(c.feed(&msg("UserPromptSubmit", "X", None)), ConvMatch::Foreign);
         // `claude` erneut im selben Terminal: neue ID, wird zugeordnet und bleibt es
