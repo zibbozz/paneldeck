@@ -159,7 +159,8 @@ fn main() -> eframe::Result<()> {
     let cli = cli::get();
     // Vom Deinstallationsprogramm: die globalen Claude-Hooks wieder entfernen, sonst zeigen sie auf eine gelöschte .exe.
     if cli.uninstall_hooks {
-        let ok = hooks::global_settings_path().map(|p| !p.exists() || hooks::uninstall_global(&p).is_ok()).unwrap_or(true);
+        // Am geltenden Ort und – mit CLAUDE_CONFIG_DIR – auch in ~/.claude, wohin ältere Versionen immer schrieben.
+        let ok = hooks::global_settings_candidates().iter().all(|p| !p.exists() || hooks::uninstall_global(p).is_ok());
         // Ebenso eine Registrierung als MCP-Server in Claude Code, falls sie auf diese .exe zeigt.
         mcp::unregister_if_ours();
         // Autostart-Werte `Paneldeck (…)` von Instanzen mit Profil/Datenordner (den Standardwert löscht der Installer).

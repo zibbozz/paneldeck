@@ -128,6 +128,14 @@ pub fn integration(shell: &ShellSpec) -> (Vec<String>, Vec<(String, String)>) {
     }
 }
 
+/// Sieht der Hub, ob im Vordergrund dieser Shell ein Programm läuft (`winctl::shell_is_idle`)? Nur bei lokalen Shells,
+/// deren Programme Windows-Prozesse an derselben Konsole sind: PowerShell, cmd, Git Bash. Nicht in WSL (Linux-Prozesse
+/// sieht Windows nicht) und nicht bei eigenen Programmen wie `ssh.exe` (dort läuft alles auf der anderen Seite).
+pub fn foreground_visible(shell: &ShellSpec) -> bool {
+    let stem = std::path::Path::new(&shell.program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    cfg!(windows) && !is_wsl(shell) && matches!(stem.as_str(), "pwsh" | "powershell" | "cmd" | "bash")
+}
+
 /// Ist das eine WSL-Shell (Kennung `wsl:…`, Programm `wsl.exe` oder das `bash.exe` aus System32)?
 pub fn is_wsl(shell: &ShellSpec) -> bool {
     shell.id.starts_with("wsl") || is_wsl_program(&shell.program)
@@ -204,6 +212,23 @@ mod tests {
             assert_eq!(PathStyle::for_shell("custom:1", "C:\\Windows\\System32\\bash.exe", Kind::Posix), PathStyle::Wsl);
             assert_eq!(PathStyle::for_shell("custom:1", "C:\\Program Files\\Git\\bin\\bash.exe", Kind::Posix), PathStyle::Slash);
         }
+    }
+
+    #[test]
+    fn only_local_shells_show_their_foreground_program() {
+        let named = |id: &str, program: &str| ShellSpec { id: id.into(), label: "x".into(), program: program.into(), args: vec![] };
+        if cfg!(windows) {
+            assert!(foreground_visible(&named("pwsh", "C:\\Program Files\\PowerShell\\7\\pwsh.exe")));
+            assert!(foreground_visible(&named("powershell", "powershell.exe")));
+            assert!(foreground_visible(&named("cmd", "cmd.exe")));
+            assert!(foreground_visible(&named("gitbash", "C:\\Program Files\\Git\\bin\\bash.exe")));
+        }
+        // WSL (auch über bash.exe aus System32 oder ein eigenes Profil) und fremde Programme nie
+        assert!(!foreground_visible(&named("wsl:Ubuntu", "wsl.exe")));
+        assert!(!foreground_visible(&named("custom:1", "C:\\Windows\\System32\\bash.exe")));
+        assert!(!foreground_visible(&named("custom:2", "wsl.exe")));
+        assert!(!foreground_visible(&named("custom:3", "ssh.exe")));
+        assert!(!foreground_visible(&named("custom:4", "nu.exe")));
     }
 
     #[test]
