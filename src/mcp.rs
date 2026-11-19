@@ -592,7 +592,12 @@ fn probe_at(port: u16, token: &str, budget: std::time::Duration) -> Option<HubIn
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) if buf.len() + n <= 64 * 1024 => buf.extend_from_slice(&chunk[..n]),
-            _ => return None,
+            Ok(_) => return None,
+            // Manche Systeme (macOS) melden nach der vollständigen Antwort beim Schließen der Gegenseite einen
+            // Verbindungsfehler statt EOF: eine schon vollständige JSON-Antwort zählt dann trotzdem.
+            Err(e) if !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+                && serde_json::from_slice::<Value>(&buf).is_ok() => break,
+            Err(_) => return None,
         }
     }
     let r: Value = serde_json::from_slice(&buf).ok()?;
