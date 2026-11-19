@@ -10,6 +10,7 @@ mod claude_opts;
 mod db;
 mod due;
 mod clip;
+mod conhost_wrap;
 mod emoji;
 mod pathfmt;
 mod quote;
