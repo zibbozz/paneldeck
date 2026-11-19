@@ -1,0 +1,394 @@
+//! Ausgleich für die ConPTY von Windows (conhost mit dem alten VT-Renderer) nach einer Zeile in genau Terminalbreite
+//! (#264, Folge von #231).
+//!
+//! Endet ein Frame von conhost mit dem Cursor am rechten Rand („Umbruch ausstehend“), nimmt sein Renderer danach an,
+//! das Terminal stehe schon am Anfang der nächsten Zeile. Ein `\r\n` im nächsten Frame meint dann „noch eine Zeile
+//! weiter“ – ein xterm-artiges Terminal (alacritty) hebt mit dem CR aber nur den ausstehenden Umbruch auf und landet
+//! eine Zeile zu hoch. Typisch bei Git Bash: `printf` füllt die Zeile, die Leerzeile vor dem Prompt fehlt, und das
+//! Terminal bleibt eine Zeile hinter conhost, bis neu gezeichnet wird (doppelte Echo-Zeilen bei Cursorsprüngen).
+//!
+//! Mitgeschnitten (Windows 11 26200, Git Bash, 40 Spalten, `POS` = Cursor laut conhost, CPR):
+//! - `W` (40 Zeichen), Pause, `\r\n\r\n`, Pause, `Y` → ConPTY schickt `W` | `\r\nY`, conhost hat `Y` zwei Zeilen tiefer.
+//! - `W\r\nY` ohne Pause (ein Frame) → ConPTY schickt `W\r\nY`, conhost hat `Y` eine Zeile tiefer (normal).
+//! - In der untersten Zeile rollt conhost anders (CR LF, dann Neuzeichnen des letzten Zeichens): dort normal.
+//! - Andere Ziele erreicht der Renderer per CUP (absolut), unabhängig vom Umbruch.
+//!
+//! Deshalb hier eng begrenzt: Nur wenn ein Lesestück (= Frame; ein kurzes Lesen heißt, die Pipe war leer) mit
+//! ausstehendem Umbruch außerhalb der untersten Zeile endet und bis zum nächsten CR nichts außer Farben, ein paar
+//! harmlosen Modi und OSC-Meldungen (Shell-Integration, Titel) kommt, bricht das Terminal vor diesem CR um.
+//! Die mitgelieferte ConPTY (OpenConsole 1.25) und neuere conhost-Versionen zeichnen richtig; sie fragen beim Start
+//! die Geräteattribute ab (DA1, `ESC [ c`), der alte Renderer nie – daran wird die Korrektur wieder abgeschaltet.
+
+use alacritty_terminal::event::EventListener;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Point;
+use alacritty_terminal::term::{Term, TermMode};
+use alacritty_terminal::vte::ansi::{Handler, Processor};
+
+/// So viele Bytes vom Anfang der Ausgabe werden nach der DA1-Anfrage eines neueren conhost durchsucht.
+const STARTUP_PROBE: usize = 64;
+
+/// Modi, die ein Frame zwischen der vollen Zeile und dem CR setzen darf (Cursor sichtbar, Bracketed Paste, Fokus,
+/// win32-input-mode, Blinken) – sie bewegen den Cursor nicht.
+const QUIET_MODES: &[&[u8]] = &[b"?25", b"?2004", b"?1004", b"?9001", b"?12"];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Scan {
+    #[default]
+    Ground,
+    Esc,
+    Csi,
+    /// In einer Zeichenkette (OSC, DCS, SOS, PM, APC): bis BEL bzw. ST.
+    Str,
+    StrEsc,
+}
+
+/// Wirkung eines Bytes auf die Bereitschaft.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Effect {
+    /// Bewegt den Cursor nicht (Teil einer Sequenz, Farbe, harmloser Modus, OSC, BEL).
+    Quiet,
+    /// CR im Grundzustand.
+    Cr,
+    /// Alles andere (Text, Cursorbewegung, andere Steuerzeichen): Bereitschaft verfällt.
+    Other,
+}
+
+/// Zustand der Korrektur je Sitzung (Lese-Thread).
+#[derive(Debug, Default)]
+pub struct ConhostWrap {
+    enabled: bool,
+    /// Cursor (mit ausstehendem Umbruch) am Ende des letzten Frames.
+    armed: Option<Point>,
+    scan: Scan,
+    /// Parameter der laufenden CSI-Sequenz (gekürzt).
+    params: Vec<u8>,
+    /// Anfang der Ausgabe, bis entschieden ist, ob ein neuerer conhost zeichnet.
+    probe: Option<Vec<u8>>,
+}
+
+impl ConhostWrap {
+    /// `system` = die Sitzung läuft auf der ConPTY von Windows (`console_host == "system"`).
+    pub fn new(system: bool) -> Self {
+        ConhostWrap { enabled: system, probe: system.then(Vec::new), ..Default::default() }
+    }
+
+    /// Ist die Korrektur (noch) aktiv?
+    #[cfg(test)]
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Wie `advance` (über `feed`), aber vor einem CR, der in conhost „eine Zeile weiter“ heißt, umbrechen.
+    /// `feed` bekommt die Bytes in Stücken (Verlaufszählung, offene Prompt-Marken); `wrap` bricht um (CR + LF direkt
+    /// an der Emulation, ohne den Parser zu berühren).
+    pub fn advance<T: EventListener>(
+        &mut self,
+        p: &mut Processor,
+        t: &mut Term<T>,
+        bytes: &[u8],
+        mut feed: impl FnMut(&mut Processor, &mut Term<T>, &[u8]),
+        mut wrap: impl FnMut(&mut Term<T>, &mut dyn FnMut(&mut Term<T>)),
+    ) {
+        if self.enabled {
+            self.probe_startup(bytes);
+        }
+        if !self.enabled {
+            feed(p, t, bytes);
+            return;
+        }
+        let mut start = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            match self.step(b) {
+                Effect::Quiet => {}
+                Effect::Other => self.armed = None,
+                Effect::Cr => {
+                    let Some(at) = self.armed.take() else { continue };
+                    feed(p, t, &bytes[start..i]);
+                    start = i;
+                    if p.sync_bytes_count() == 0 && pending_wrap_at(t) == Some(at) {
+                        wrap(t, &mut |t: &mut Term<T>| {
+                            t.carriage_return();
+                            t.linefeed();
+                        });
+                    }
+                }
+            }
+        }
+        feed(p, t, &bytes[start..]);
+    }
+
+    /// Nach einem Lesestück: `short` = die Pipe war leer (weniger als der Lesepuffer gelesen), das Stück endet also
+    /// mit einem Schreibvorgang von conhost (Frame-Ende).
+    pub fn chunk_end<T>(&mut self, p: &Processor, t: &Term<T>, short: bool) {
+        if !self.enabled || self.probe.is_some() {
+            return;
+        }
+        if short && self.scan == Scan::Ground && p.sync_bytes_count() == 0 {
+            if let Some(at) = pending_wrap_at(t) {
+                self.armed = Some(at);
+            }
+        }
+    }
+
+    /// Neuerer conhost (fragt DA1 ab) bzw. mitgelieferte ConPTY: Korrektur abschalten. Entschieden wird nach den
+    /// ersten `STARTUP_PROBE` Bytes.
+    fn probe_startup(&mut self, bytes: &[u8]) {
+        let Some(head) = self.probe.as_mut() else { return };
+        head.extend_from_slice(&bytes[..bytes.len().min(STARTUP_PROBE - head.len().min(STARTUP_PROBE))]);
+        if head.windows(3).any(|w| w == b"\x1b[c") || head.windows(4).any(|w| w == b"\x1b[0c") {
+            self.enabled = false;
+            self.armed = None;
+            self.probe = None;
+        } else if head.len() >= STARTUP_PROBE {
+            self.probe = None;
+        }
+    }
+
+    fn step(&mut self, b: u8) -> Effect {
+        match self.scan {
+            Scan::Ground => match b {
+                0x1b => {
+                    self.scan = Scan::Esc;
+                    Effect::Quiet
+                }
+                b'\r' => Effect::Cr,
+                0x07 => Effect::Quiet,
+                _ => Effect::Other,
+            },
+            Scan::Esc => self.after_esc(b),
+            Scan::Csi => match b {
+                0x20..=0x3f => {
+                    if self.params.len() < 16 {
+                        self.params.push(b);
+                    }
+                    Effect::Quiet
+                }
+                0x40..=0x7e => {
+                    self.scan = Scan::Ground;
+                    let quiet = match b {
+                        b'm' => true,
+                        b'h' | b'l' => self.params.split(|&c| c == b';').all(|p| QUIET_MODES.contains(&p)),
+                        _ => false,
+                    };
+                    if quiet {
+                        Effect::Quiet
+                    } else {
+                        Effect::Other
+                    }
+                }
+                0x1b => {
+                    self.scan = Scan::Esc;
+                    Effect::Other
+                }
+                0x18 | 0x1a => {
+                    self.scan = Scan::Ground;
+                    Effect::Other
+                }
+                // Steuerzeichen mitten in CSI führt vte aus (auch CR): nicht als Frame-Anfang werten.
+                _ => Effect::Other,
+            },
+            Scan::Str => {
+                match b {
+                    0x07 | 0x18 | 0x1a => self.scan = Scan::Ground,
+                    0x1b => self.scan = Scan::StrEsc,
+                    _ => {}
+                }
+                Effect::Quiet
+            }
+            Scan::StrEsc => {
+                if b == b'\\' {
+                    self.scan = Scan::Ground;
+                    Effect::Quiet
+                } else {
+                    self.after_esc(b)
+                }
+            }
+        }
+    }
+
+    fn after_esc(&mut self, b: u8) -> Effect {
+        match b {
+            b'[' => {
+                self.scan = Scan::Csi;
+                self.params.clear();
+                Effect::Quiet
+            }
+            b']' | b'P' | b'X' | b'^' | b'_' => {
+                self.scan = Scan::Str;
+                Effect::Quiet
+            }
+            0x1b => {
+                self.scan = Scan::Esc;
+                Effect::Other
+            }
+            _ => {
+                self.scan = Scan::Ground;
+                Effect::Other
+            }
+        }
+    }
+}
+
+/// Cursor mit ausstehendem Umbruch (automatischer Umbruch an), aber nicht in der untersten Zeile.
+fn pending_wrap_at<T>(t: &Term<T>) -> Option<Point> {
+    let c = &t.grid().cursor;
+    let wraps = c.input_needs_wrap && t.mode().contains(TermMode::LINE_WRAP);
+    (wraps && c.point.line.0 + 1 < t.screen_lines() as i32).then_some(c.point)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::term::{test::TermSize, Config};
+
+    struct Emu {
+        term: Term<VoidListener>,
+        p: Processor,
+        cw: ConhostWrap,
+    }
+
+    impl Emu {
+        fn new(cols: usize, rows: usize, system: bool) -> Self {
+            let mut e = Emu { term: Term::new(Config::default(), &TermSize::new(cols, rows), VoidListener), p: Processor::new(), cw: ConhostWrap::new(system) };
+            // Startfolge des alten conhost (ohne DA1)
+            e.chunk("\x1b[6n");
+            e.chunk("\x1b[?9001h\x1b[?1004h");
+            e.chunk("\x1b[m\x1b]0;C:\\Program Files\\Git\\bin\\bash.exe\x07\x1b[?25h");
+            e
+        }
+
+        /// Ein Lesestück (= ein Frame von conhost).
+        fn chunk(&mut self, s: &str) {
+            let Emu { term, p, cw } = self;
+            cw.advance(p, term, s.as_bytes(), |p, t, b| p.advance(t, b), |t, w| w(t));
+            cw.chunk_end(p, term, true);
+        }
+
+        /// Zeilen des Bildschirms (rechts ohne Leerzeichen), Cursor 1-basiert wie CPR.
+        fn screen(&self) -> (Vec<String>, (usize, usize)) {
+            let g = self.term.grid();
+            let rows = (0..self.term.screen_lines())
+                .map(|l| {
+                    let row = &g[alacritty_terminal::index::Line(l as i32)];
+                    (0..self.term.columns()).map(|c| row[alacritty_terminal::index::Column(c)].c).collect::<String>().trim_end().to_string()
+                })
+                .collect();
+            let c = g.cursor.point;
+            (rows, (c.line.0 as usize + 1, c.column.0 + 1))
+        }
+    }
+
+    const W: &str = "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"; // 40
+
+    /// Mitschnitte vom System-conhost (Windows 11 26200, Git Bash, 40×10 bzw. 40×5): Frames (Stücke) und die
+    /// Cursorposition, die conhost danach per CPR meldet.
+    #[test]
+    fn replays_of_the_system_conhost_end_where_conhost_is() {
+        // (Name, Zeilen, Frames, Cursor laut conhost nach dem letzten Zeichen)
+        let cases: &[(&str, usize, &[&str], (usize, usize))] = &[
+            // W, Pause, `\r\n\r\n`, Pause, Y
+            ("s3", 10, &["a\r\nb\r\n", W, "\r\nY"], (5, 2)),
+            // W, Pause, `\r\n`, Pause, `\r\n`, Pause, Y
+            ("s10", 10, &["a\r\nb\r\n", W, "\r\nY"], (5, 2)),
+            // dazwischen ein Frame nur mit einer Farbe
+            ("p5", 10, &["a\r\nb\r\n", W, "\x1b[31m", "\r\nY\x1b[m\x1b[31m"], (5, 2)),
+            // Drei Zeilenvorschübe bis in die unterste Zeile: der zweite rollt
+            ("p3", 5, &["1\r\n2\r\n", W, "\r\n\nY"], (5, 2)),
+            // ohne Pause: ein Frame, normaler Umbruch
+            ("s7", 10, &["a\r\nb\r\n", &format!("{W}\r\nY")], (4, 2)),
+            // ein einzelner Zeilenvorschub kommt gar nicht erst an, Y bricht selbst um
+            ("s2", 10, &["a\r\nb\r\n", W, "Y"], (4, 2)),
+            // CR zurück in dieselbe Zeile: conhost springt absolut
+            ("s1", 10, &["a\r\nb\r\n", W, "\x1b[3;1HX"], (3, 2)),
+            // CR in einem eigenen Frame, LF im nächsten
+            ("s9", 10, &["a\r\nb\r\n", W, "\x1b[3;1H", "\r\nY"], (4, 2)),
+            // unterste Zeile: conhost rollt mit CR LF und zeichnet das letzte Zeichen neu
+            ("s11", 5, &["6\r\n7\r\n8\r\n9\r\n10\r\n", W, "\r\n\x1b[4;40Hw\r\nY"], (5, 2)),
+            ("s5", 5, &["6\r\n7\r\n8\r\n9\r\n10\r\n", W, "\r\n\x1b[4;40Hw\r\n\nY"], (5, 2)),
+        ];
+        for (name, rows, frames, pos) in cases {
+            let mut e = Emu::new(40, *rows, true);
+            for f in *frames {
+                e.chunk(f);
+            }
+            assert_eq!(e.screen().1, *pos, "{name}: Cursor wie conhost");
+        }
+    }
+
+    #[test]
+    fn the_blank_line_before_the_git_bash_prompt_is_kept() {
+        // #264 (Mitschnitt #231, 100 Spalten): `printf 'w%.0s' $(seq 1 100); echo`, dann der Prompt mit der Leerzeile
+        // aus PS1; danach springt conhost für das Echo des nächsten Befehls absolut in die Prompt-Zeile.
+        let line = "w".repeat(100);
+        let frames = [
+            "\x1b[32m\r\nu@pc \x1b[35mMINGW64 \x1b[33m~\x1b[m\r\n$ ".to_string(),
+            "\x1b[7mprintf 'w%.0s' $(seq 1 100); echo".to_string(),
+            "\x1b[?2004l".to_string(),
+            "\x1b[?25l\x1b[27m\x1b[3;3Hprintf 'w%.0s' $(seq 1 100); echo\r\n\x1b[?25h\x1b]133;C\x07".to_string(),
+            line.clone(),
+            "\x1b]133;D;0\x07".to_string(),
+            "\x1b]9;9;\"C:\\Users\\u\"\x07".to_string(),
+            "\x1b]133;A\x07".to_string(),
+            "\x1b[?2004h".to_string(),
+            "\x1b[32m\r\nu@pc \x1b[35mMINGW64 \x1b[33m~\x1b[m\r\n$ ".to_string(),
+            "\x1b[7mecho next".to_string(),
+            "\x1b[?2004l".to_string(),
+            // conhost: Prompt in Zeile 7 (Leerzeile 5, Kopf 6)
+            "\x1b[?25l\x1b[27m\x1b[7;3Hecho next\r\n\x1b[?25h\x1b]133;C\x07".to_string(),
+            "next\r\n".to_string(),
+        ];
+        for (system, ok) in [(true, true), (false, false)] {
+            let mut e = Emu::new(100, 30, system);
+            for f in &frames {
+                e.chunk(f);
+            }
+            let (rows, _) = e.screen();
+            let expect = ["", "u@pc MINGW64 ~", "$ printf 'w%.0s' $(seq 1 100); echo", &line, "", "u@pc MINGW64 ~", "$ echo next", "next"];
+            assert_eq!(rows[..8] == expect, ok, "System-ConPTY {system}: {rows:?}");
+        }
+    }
+
+    #[test]
+    fn a_newer_conhost_or_the_bundled_conpty_is_left_alone() {
+        // OpenConsole 1.25: fragt beim Start DA1 ab und schickt den Zeilenvorschub selbst.
+        let mut e = Emu { term: Term::new(Config::default(), &TermSize::new(40, 10), VoidListener), p: Processor::new(), cw: ConhostWrap::new(true) };
+        e.chunk("\x1b[1t");
+        e.chunk("\x1b[6n\x1b[c\x1b[?1004h\x1b[?9001h");
+        assert!(!e.cw.enabled());
+        e.chunk("a\r\nb\r\n");
+        e.chunk(W);
+        e.chunk("\r\n");
+        e.chunk("Y");
+        assert_eq!(e.screen().1, (4, 2));
+        // Nicht Windows-ConPTY: nie aktiv.
+        assert!(!ConhostWrap::new(false).enabled());
+    }
+
+    #[test]
+    fn only_a_cr_right_after_the_frame_counts() {
+        // Text, Cursorbewegung oder ein Lesestück mit vollem Puffer (Frame geht weiter) heben die Bereitschaft auf.
+        for frames in [&["a\r\n", W, "\x1b[2;40H\r\nY"][..], &["a\r\n", W, "\x08\r\nY"][..], &["a\r\n", W, "\x1b[?1049h\x1b[?1049l\r\nY"][..]] {
+            let mut e = Emu::new(40, 10, true);
+            for f in frames {
+                e.chunk(f);
+            }
+            assert_eq!(e.screen().1, (3, 2), "{frames:?}");
+        }
+        let mut e = Emu::new(40, 10, true);
+        e.chunk("a\r\n");
+        let Emu { term, p, cw } = &mut e;
+        cw.advance(p, term, W.as_bytes(), |p, t, b| p.advance(t, b), |t, w| w(t));
+        cw.chunk_end(p, term, false);
+        e.chunk("\r\nY");
+        assert_eq!(e.screen().1, (3, 2), "voller Lesepuffer: kein Frame-Ende");
+        // OSC zwischen Frame-Ende und CR (Shell-Integration) ändert nichts.
+        let mut e = Emu::new(40, 10, true);
+        e.chunk("a\r\n");
+        e.chunk(W);
+        e.chunk("\x1b]133;D;0\x07\x1b]133;A\x1b\\");
+        e.chunk("\r\nY");
+        assert_eq!(e.screen().1, (4, 2));
+    }
+}
