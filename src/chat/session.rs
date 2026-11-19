@@ -130,6 +130,10 @@ pub struct ChatState {
     pub origin_sessions: Vec<u64>,
     /// Der Hinweis „Kontext zu klein für die Werkzeug-Stufe“ wurde in diesem Chat schon gezeigt (einmal je Chat).
     pub context_warned: bool,
+    /// Die laufende Antwort hat bisher nur Denk-Ausgabe geliefert (`TurnEvent::Thinking`; #299).
+    pub thinking: bool,
+    /// Beginn der laufenden Anfrage (für „Warte auf das Modell … N s“ solange nichts ankommt; #299).
+    pub turn_started: Option<std::time::Instant>,
 }
 
 /// Wer die einmalige Frage nach der Stufe des Modells ausgelöst hat.
@@ -216,6 +220,8 @@ impl ChatState {
             level_question: None,
             origin_sessions: Vec::new(),
             context_warned: false,
+            thinking: false,
+            turn_started: None,
         };
         if fixed > 0 {
             c.touch();
@@ -393,6 +399,8 @@ impl ChatState {
         // Die Kürzung gilt nur für eine Anfrage; das Backend meldet sie neu (`TurnEvent::ContextStart`), wenn es kürzt.
         self.file.context_start = None;
         self.usage = None;
+        self.thinking = false;
+        self.turn_started = Some(std::time::Instant::now());
         let handle = backend.start(meta, &self.file.messages, cx, repaint);
         self.file.messages.push(ChatMsg::new(Role::Assistant, ""));
         self.turn_msg = self.file.messages.len() - 1;
@@ -763,6 +771,7 @@ impl ChatState {
                         m.content += &d;
                     }
                 }
+                TurnEvent::Thinking => self.thinking = true,
                 TurnEvent::ToolCall(mut c) => {
                     // Kennungen müssen im ganzen Chat eindeutig sein (Ollama vergibt je Antwort `call_0`, `call_1` …).
                     let taken = |id: &str, msgs: &[ChatMsg]| id.is_empty() || msgs.iter().any(|m| m.tool_calls.iter().any(|x| x.id == id));
@@ -1299,6 +1308,27 @@ mod tests {
         let first = c.messages().iter().find(|m| m.role == Role::Tool).unwrap();
         assert!(!first.content.contains("\"elided\""), "ungesehenes Ergebnis bleibt");
         assert!(c.paused && c.pause_note.is_some());
+    }
+
+    /// „Denkt nach“ gilt nur für die laufende Antwort; eine neue Anfrage beginnt ohne und misst ihre Wartezeit neu (#299).
+    #[test]
+    fn thinking_flag_and_wait_start_belong_to_the_turn() {
+        let b = Script::new(vec![vec![TurnEvent::Thinking], vec![TurnEvent::Delta("x".into()), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        assert!(!c.thinking && c.turn_started.is_none());
+        c.draft = "q".into();
+        c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
+        let started = c.turn_started.expect("Beginn gemerkt");
+        c.poll();
+        // Das Drehbuch-Backend lässt den Kanal fallen: die Antwort endet mit „brach unerwartet ab“ – sichtbar, nie still.
+        assert!(c.thinking, "Denk-Ausgabe gemerkt");
+        assert!(!c.streaming() && c.has_error(), "{:?}", c.messages());
+        c.draft = "again".into();
+        assert!(c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {})));
+        assert!(!c.thinking, "neue Anfrage ohne „denkt nach“");
+        assert!(c.turn_started.unwrap() >= started);
+        c.poll();
+        assert_eq!(c.messages().last().unwrap().content, "x");
     }
 
     #[test]

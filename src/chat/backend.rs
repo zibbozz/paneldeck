@@ -19,6 +19,9 @@ pub type Repaint = Arc<dyn Fn() + Send + Sync>;
 pub enum TurnEvent {
     /// Nächstes Stück Antworttext.
     Delta(String),
+    /// Das Modell denkt noch (Denk-Ausgabe ohne Antworttext; der Text selbst wird nicht gezeigt) – die Oberfläche
+    /// zeigt „Denkt nach …“ statt nur „…“ (#299).
+    Thinking,
     /// Das Modell verlangt einen Werkzeugaufruf (kommt direkt vor `Done`; die Werkzeug-Schleife in `ChatState` führt
     /// ihn nach dem Ende der Antwort aus).
     ToolCall(ToolCall),

@@ -121,6 +121,34 @@ fn ollama_streams_text() {
     assert_eq!(log[0].body.as_ref().unwrap()["stream"], json!(true));
 }
 
+/// Denkende Modelle (gemma4 über Ollama): lange nur `message.thinking`, dann Text (#299).
+#[test]
+fn ollama_thinking_is_reported_but_not_shown() {
+    let body = concat!(
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":"","thinking":"Let me"},"done":false}"#,
+        "\n",
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":"","thinking":" think."},"done":false}"#,
+        "\n",
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":"Hi"},"done":false}"#,
+        "\n",
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}"#,
+        "\n"
+    );
+    let t = Fake::default().with(Method::Post, OL_CHAT, Canned::ok(body));
+    let ev = run(&t, &Endpoint::new(ServerKind::Ollama, OL), &req());
+    assert_eq!(ev, vec![StreamEvent::Thinking, StreamEvent::Thinking, StreamEvent::Delta("Hi".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: Some("stop".into()) }]);
+    // Nur Denken bis zur Token-Grenze: gültiger Strom (kein „unlesbar“), Ende mit `length`.
+    let body = concat!(
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":"","thinking":"hmm"},"done":false}"#,
+        "\n",
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":""},"done":true,"done_reason":"length","eval_count":4096}"#,
+        "\n"
+    );
+    let t = Fake::default().with(Method::Post, OL_CHAT, Canned::ok(body));
+    let ev = run(&t, &Endpoint::new(ServerKind::Ollama, OL), &req());
+    assert_eq!(ev, vec![StreamEvent::Thinking, StreamEvent::Done { prompt_tokens: None, completion_tokens: Some(4096), finish_reason: Some("length".into()) }]);
+}
+
 #[test]
 fn ollama_tool_calls() {
     let body = concat!(
@@ -258,6 +286,20 @@ fn openai_streams_text_and_usage() {
     let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
     let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
     assert_eq!(ev, vec![StreamEvent::Delta("Hi".into()), StreamEvent::Delta(" there".into()), StreamEvent::Done { prompt_tokens: Some(20), completion_tokens: Some(2), finish_reason: Some("stop".into()) }]);
+}
+
+/// Denk-Ausgabe OpenAI-kompatibler Server (`reasoning_content` bei llama.cpp/vLLM, `reasoning` bei LM Studio/Ollama).
+#[test]
+fn openai_reasoning_is_reported_but_not_shown() {
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" more\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
+    let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
+    assert_eq!(ev, vec![StreamEvent::Thinking, StreamEvent::Thinking, StreamEvent::Delta("ok".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: Some("stop".into()) }]);
 }
 
 #[test]

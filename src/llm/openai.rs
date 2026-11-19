@@ -159,6 +159,13 @@ impl Stream {
         }
         // `delta` beim Strom; `message` bei Servern, die doch am Stück antworten.
         let Some(d) = c0.get("delta").or_else(|| c0.get("message")) else { return };
+        // Denk-Ausgabe (llama.cpp/vLLM `reasoning_content`, LM Studio/Ollama `reasoning`): nur ein Lebenszeichen (#299).
+        if let Some(t) = d.get("reasoning_content").or_else(|| d.get("reasoning")).and_then(|c| c.as_str()) {
+            acc.thinking(t, on);
+            if acc.error.is_some() {
+                return;
+            }
+        }
         if let Some(t) = d.get("content").and_then(|c| c.as_str()) {
             acc.delta(t, on);
         }
