@@ -2738,6 +2738,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "secret-service",
+ "security-framework",
  "serde",
  "serde_json",
  "tauri-winrt-notification",

@@ -7,6 +7,8 @@ name: Release build
 # (glibc 2.35 als Untergrenze). Diese Dateien sind die offiziellen Linux-Release-Dateien: `tools/release.sh … --publish`
 # wartet nach dem Push des Tags auf diesen Job, lädt das Artefakt `paneldeck-<v>-linux`, prüft die Prüfsummen und hängt die
 # Dateien (und ihre Zeilen in SHA256SUMS.txt) an das Release.
+# macOS (#150, ab 2.5.0, experimentell): Job `macos` baut Paneldeck.app (Universal, ad-hoc signiert) als .dmg und .zip
+# (tools/package-macos.sh); `tools/release.sh … --publish` wartet ebenso darauf und hängt die Dateien an.
 # Vorbereitet für die Code-Signatur (SignPath Foundation): der Signatur-Schritt steht unten auskommentiert und wird
 # aktiviert, sobald das Projekt freigeschaltet ist und die Secrets/Variablen angelegt sind.
 on:
@@ -127,4 +129,52 @@ jobs:
         with:
           name: paneldeck-${{ steps.ver.outputs.version }}-linux
           path: dist/linux-${{ steps.ver.outputs.version }}/*
+          if-no-files-found: error
+
+  # macOS (#150, experimentell, unsigniert): Paneldeck.app als Universal-Binary (Apple Silicon + Intel, macOS 12+), ad-hoc
+  # signiert, als .dmg und .zip (tools/package-macos.sh, geprüft von tools/check-macos-packages.sh). Wie bei Linux sind diese
+  # Dateien die offiziellen macOS-Release-Dateien: `tools/release.sh … --publish` wartet auf diesen Job, lädt das Artefakt
+  # `paneldeck-<v>-macos`, prüft die Prüfsummen und hängt die Dateien (und ihre Zeilen in SHA256SUMS.txt) an das Release.
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      RUST_TOOLCHAIN: "1.99.1"
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      # Release build: no cache, no credentials in the checkout, toolchain pinned (as in the Linux job).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (pinned, both macOS targets)
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+      - name: Version from Cargo.toml
+        id: ver
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/' | tr -d '\r')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$v" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match version $v in Cargo.toml"; exit 1
+          fi
+      - name: Tests
+        run: cargo test --release --locked
+      - name: Build and package (universal .dmg and .zip)
+        run: bash tools/package-macos.sh "${{ steps.ver.outputs.version }}"
+      - name: Check the packages
+        run: bash tools/check-macos-packages.sh "${{ steps.ver.outputs.version }}"
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            dist/macos-${{ steps.ver.outputs.version }}/*.dmg
+            dist/macos-${{ steps.ver.outputs.version }}/*.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: paneldeck-${{ steps.ver.outputs.version }}-macos
+          path: dist/macos-${{ steps.ver.outputs.version }}/*
           if-no-files-found: error

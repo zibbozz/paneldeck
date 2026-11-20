@@ -657,6 +657,13 @@ impl App {
                     8 => self.data_settings_ui(ui),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
+                        // macOS (#150): experimentell, unsigniert – Hinweis wie im Release-Text.
+                        if cfg!(target_os = "macos") {
+                            ui.label(RichText::new(lang.t(
+                                "macOS-Version: experimentell und nicht signiert. Fehler und Eindrücke bitte als Issue auf GitHub melden.",
+                                "macOS version: experimental and not signed. Please report problems and feedback as an issue on GitHub.",
+                            )).color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
+                        }
                         ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – funktioniert offline; kontaktiert GitHub nur, wenn du nach Updates suchst oder die automatische Prüfung einschaltest.", "Terminal hub for Claude Code and many terminals – works offline; only contacts GitHub when you check for updates or switch on the automatic check.")).color(style::dim(ui)));
                         ui.add_space(S2);
                         for (k, v) in [
@@ -726,6 +733,14 @@ impl App {
                         }
                         let (auto_label, auto_tip) = if cfg!(windows) {
                             (lang.t("Mit Windows starten", "Start with Windows"), lang.t("Startet minimiert im Tray", "Starts minimized in the tray"))
+                        } else if cfg!(target_os = "macos") {
+                            (
+                                lang.t("Bei der Anmeldung starten", "Start at login"),
+                                lang.t(
+                                    "Startet minimiert in der Menüleiste (LaunchAgent in ~/Library/LaunchAgents; macOS zeigt ihn unter Systemeinstellungen → Allgemein → Anmeldeobjekte)",
+                                    "Starts minimized in the menu bar (LaunchAgent in ~/Library/LaunchAgents; macOS lists it under System Settings → General → Login Items)",
+                                ),
+                            )
                         } else {
                             (lang.t("Bei der Anmeldung starten", "Start at login"), lang.t("Startet minimiert im Tray (XDG-Autostart, ~/.config/autostart)", "Starts minimized in the tray (XDG autostart, ~/.config/autostart)"))
                         };
@@ -750,7 +765,13 @@ impl App {
                                 ),
                             )
                         };
-                        row(ui, ctx_label, ctx_tip, |ui| {
+                        // macOS (#150): Finder-Integration schreibt Paneldeck nicht – Hinweis auf die Anleitung (Schnellaktion).
+                        if cfg!(target_os = "macos") {
+                            ui.label(RichText::new(lang.t(
+                                "Finder: „In Paneldeck öffnen“ lässt sich als Schnellaktion selbst anlegen – Anleitung in docs/de/macos.md.",
+                                "Finder: “Open in Paneldeck” can be added as a Quick Action yourself – see docs/en/macos.md.",
+                            )).small().color(style::dim(ui)));
+                        } else { row(ui, ctx_label, ctx_tip, |ui| {
                             let mut v = self.win_context.is_mine();
                             if style::toggle(ui, &mut v).changed() {
                                 // Die Menütexte landen in der Registry: in der gespeicherten Sprache, nicht in der von `--lang`.
@@ -764,7 +785,7 @@ impl App {
                                 }
                             }
                             other_hint(ui, lang, &self.win_context, lang.t("Das Kontextmenü", "The context menu"));
-                        });
+                        }); }
                         if let Some(e) = err {
                             self.hooks_msg = e.clone();
                             ui.colored_label(Color32::LIGHT_RED, e);

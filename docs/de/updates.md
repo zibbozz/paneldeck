@@ -40,6 +40,7 @@ Als *installiert* gilt eine Kopie, wenn der Deinstallations-Eintrag des Installe
 - Der Sperrstatus des Zertifikats wird geprüft. Ist das Zertifikat widerrufen oder lässt sich die Sperrprüfung nicht durchführen (z. B. weil eine Firewall oder ein Proxy den Server für Sperrlisten blockiert), wird nichts geladen.
 - Ohne Code-Signatur (siehe [Hinweis in der README](../../README.de.md#hinweis-programm-ist-noch-nicht-signiert)) schützt das vor beschädigten oder unvollständigen Downloads, **nicht** vor einem kompromittierten GitHub-Konto.
 - **Linux (ab 2.5.0):** Nur die AppImage aktualisiert sich selbst (gleiche Prüfungen: `SHA256SUMS.txt`, GitHub-Hosts, Größengrenze; Zertifikate aus dem Zertifikatsspeicher des Systems). `.deb`, `.rpm` und Tarball melden eine neue Version nur. Siehe [Linux](linux.md#selbst-update-appimage).
+- **macOS (ab 2.5.0, experimentell):** `Paneldeck.app` aktualisiert sich selbst aus dem macOS-ZIP (gleiche Prüfungen), wenn ihr Ordner beschreibbar ist (z. B. `/Applications`); aus dem Disk-Image gestartet meldet sie eine neue Version nur. Siehe [macOS](macos.md#selbst-update).
 
 Eine von Hand heruntergeladene Datei kannst du selbst prüfen, z. B. in PowerShell: `Get-FileHash .\Paneldeck-Setup-2.1.0.exe` und mit der Zeile in `SHA256SUMS.txt` vergleichen; in Git Bash: `sha256sum -c SHA256SUMS.txt`.
 

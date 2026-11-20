@@ -155,25 +155,25 @@ mod win {
 }
 
 #[cfg(not(windows))]
-#[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))] // Linux: XDG-Dateien statt Registry (`platform::desktop`)
+#[cfg_attr(unix, allow(dead_code))] // Linux/macOS: Dateien statt Registry (`platform::desktop`)
 pub fn get_str(_subkey: &str, _value: Option<&str>) -> Option<String> {
     None
 }
 
 #[cfg(not(windows))]
-#[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))] // Linux: XDG-Dateien statt Registry (`platform::desktop`)
+#[cfg_attr(unix, allow(dead_code))] // Linux/macOS: Dateien statt Registry (`platform::desktop`)
 pub fn values(_subkey: &str) -> Vec<(String, String)> {
     Vec::new()
 }
 
 #[cfg(not(windows))]
-#[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))] // Linux: XDG-Dateien statt Registry (`platform::desktop`)
+#[cfg_attr(unix, allow(dead_code))] // Linux/macOS: Dateien statt Registry (`platform::desktop`)
 pub fn apply(_ops: &[RegOp]) -> Result<(), String> {
     Err(super::unsupported())
 }
 
 #[cfg(not(windows))]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(unix, allow(dead_code))]
 pub fn install_location() -> Option<String> {
     None
 }

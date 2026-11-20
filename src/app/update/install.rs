@@ -28,7 +28,7 @@ fn keep_requested(wait_pid: Option<&std::ffi::OsStr>, keep: Option<&std::ffi::Os
 }
 
 /// Pfad ohne `\\?\`-Präfix, mit `\`, ohne abschließenden Trenner, klein geschrieben (Windows-Pfade sind nicht case-sensitiv).
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: nur die AppImage (`appimage_flavor`)
+#[cfg_attr(unix, allow(dead_code))] // Linux: nur die AppImage (`appimage_flavor`), macOS: nur das Bündel
 pub fn norm_dir(p: &str) -> String {
     let s = p.trim().trim_matches('"').replace('/', "\\");
     let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
@@ -37,7 +37,7 @@ pub fn norm_dir(p: &str) -> String {
 
 /// Installiert oder portabel? Installiert = der Uninstall-Eintrag des Installers (HKCU) zeigt auf genau den Ordner dieser .exe
 /// und dort liegt `Uninstall.exe`. Alles andere (auch eine portable Kopie neben einer Installation) ist portabel.
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: nur die AppImage (`appimage_flavor`)
+#[cfg_attr(unix, allow(dead_code))] // Linux: nur die AppImage (`appimage_flavor`), macOS: nur das Bündel
 pub fn flavor_for(exe: &Path, install_location: Option<&str>) -> Flavor {
     let Some(dir) = exe.parent() else { return Flavor::Portable };
     match install_location {
@@ -48,14 +48,133 @@ pub fn flavor_for(exe: &Path, install_location: Option<&str>) -> Flavor {
 
 /// Installationsart dieser Instanz (`None`, wo es kein Selbst-Update gibt: `platform::SELF_UPDATE`, Windows; Linux nur als
 /// AppImage, #149 – .deb/.rpm/Tarball melden eine neue Version nur).
+/// macOS (#150): nur als `Paneldeck.app` in einem beschreibbaren Ordner (z. B. `/Applications`); aus dem Disk-Image oder
+/// per App Translocation gestartet nur der Hinweis mit Link.
 pub fn detect(exe: &Path) -> Option<Flavor> {
     #[cfg(target_os = "linux")]
     {
         appimage_flavor(exe, std::env::var_os("APPIMAGE").as_deref())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macapp_flavor(exe, &dir_writable)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         crate::platform::SELF_UPDATE.then(|| flavor_for(exe, crate::platform::registry::install_location().as_deref()))
+    }
+}
+
+/// Darf dieser Benutzer in den Ordner schreiben (Einträge anlegen/umbenennen)?
+#[cfg(target_os = "macos")]
+fn dir_writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return false };
+    // SAFETY: nullterminierter Pfad, der den Aufruf überlebt; `access` liest nur.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
+/// macOS (#150): das Bündel `…/<Name>.app` zu `…/<Name>.app/Contents/MacOS/<programm>`.
+pub fn mac_bundle(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    (macos.file_name()? == "MacOS" && contents.file_name()? == "Contents" && bundle.extension()? == "app").then(|| bundle.to_path_buf())
+}
+
+/// macOS: läuft diese Instanz aus einem `.app`-Bündel, dessen Ordner beschreibbar ist (nicht aus einem Disk-Image oder
+/// einem verschobenen Pfad der App Translocation)?
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn macapp_flavor(exe: &Path, writable: &dyn Fn(&Path) -> bool) -> Option<Flavor> {
+    let bundle = mac_bundle(exe)?;
+    let s = bundle.to_string_lossy();
+    if s.contains("/AppTranslocation/") || s.starts_with("/Volumes/") {
+        return None;
+    }
+    let parent = bundle.parent()?;
+    (bundle.join("Contents").join("Info.plist").is_file() && writable(parent)).then_some(Flavor::MacApp)
+}
+
+/// `<ordner>/.<Name>.app.<tag>` neben dem Bündel (versteckt, damit Finder in `/Applications` keine Kopie zeigt).
+fn bundle_sibling(bundle: &Path, tag: &str) -> Option<PathBuf> {
+    let name = bundle.file_name()?.to_string_lossy();
+    Some(bundle.parent()?.join(format!(".{name}.{tag}")))
+}
+
+/// Mach-O-Programm (auch Universal/„fat“)?
+pub fn is_macho(b: &[u8]) -> bool {
+    b.len() > 4096 && matches!(b.get(..4), Some([0xca, 0xfe, 0xba, 0xbe] | [0xca, 0xfe, 0xba, 0xbf] | [0xcf, 0xfa, 0xed, 0xfe]))
+}
+
+/// macOS (#150): das Bündel durch die Einträge aus dem geprüften ZIP ersetzen. Die neue Fassung entsteht vollständig als
+/// `.<Name>.app.new` daneben; dann wird die laufende in `.<Name>.app.old` umbenannt (die laufende Instanz läuft aus ihren
+/// offenen Dateien weiter) und die neue an ihren Platz – scheitert das, wird zurückgerollt. `.old` löscht erst die neue
+/// Version nach ihrem ersten Frame (`remove_old_exe`). Das Bündel muss ein echter Ordner sein (kein Symlink).
+pub fn swap_bundle(bundle: &Path, entries: &[super::zip::Entry]) -> Result<(), String> {
+    let has = |p: &str| entries.iter().find(|e| e.path == p && !e.dir);
+    if has("Contents/Info.plist").is_none() || !has("Contents/MacOS/paneldeck").is_some_and(|e| is_macho(&e.data)) {
+        return Err(crate::state::t("Das ZIP enthält keine gültige Paneldeck.app.", "The ZIP does not contain a valid Paneldeck.app.").to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+        let meta = std::fs::symlink_metadata(bundle).map_err(|e| err(bundle, e))?;
+        if !meta.file_type().is_dir() {
+            return Err(format!("{}: {}", bundle.display(), crate::state::t("kein Ordner (Symlink?)", "not a folder (symlink?)")));
+        }
+        let new = bundle_sibling(bundle, "new").ok_or("bundle path")?;
+        let old = bundle_sibling(bundle, "old").ok_or("bundle path")?;
+        if std::fs::symlink_metadata(&new).is_ok() {
+            std::fs::remove_dir_all(&new).map_err(|e| err(&new, e))?;
+        }
+        let write_all = || -> Result<(), String> {
+            std::fs::DirBuilder::new().mode(0o755).create(&new).map_err(|e| err(&new, e))?;
+            for e in entries {
+                let p = new.join(&e.path);
+                if e.dir {
+                    std::fs::DirBuilder::new().recursive(true).mode(0o755).create(&p).map_err(|x| err(&p, x))?;
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(e.mode | 0o700)).map_err(|x| err(&p, x))?;
+                    continue;
+                }
+                if let Some(d) = p.parent() {
+                    std::fs::DirBuilder::new().recursive(true).mode(0o755).create(d).map_err(|x| err(d, x))?;
+                }
+                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(e.mode | 0o600).open(&p).map_err(|x| err(&p, x))?;
+                f.write_all(&e.data).and_then(|_| f.sync_all()).map_err(|x| err(&p, x))?;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(e.mode | 0o600)).map_err(|x| err(&p, x))?;
+            }
+            Ok(())
+        };
+        if let Err(e) = write_all() {
+            let _ = std::fs::remove_dir_all(&new);
+            return Err(e);
+        }
+        if std::fs::symlink_metadata(&old).is_ok() {
+            if let Err(e) = std::fs::remove_dir_all(&old) {
+                let _ = std::fs::remove_dir_all(&new);
+                return Err(err(&old, e));
+            }
+        }
+        if let Err(e) = std::fs::rename(bundle, &old) {
+            let _ = std::fs::remove_dir_all(&new);
+            return Err(err(bundle, e));
+        }
+        if let Err(e) = std::fs::rename(&new, bundle) {
+            let _ = std::fs::rename(&old, bundle);
+            let _ = std::fs::remove_dir_all(&new);
+            return Err(err(bundle, e));
+        }
+        if let Some(dir) = bundle.parent() {
+            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = bundle;
+        Err(crate::platform::unsupported())
     }
 }
 
@@ -282,6 +401,12 @@ pub fn wait_setup(child: &mut std::process::Child, timeout: std::time::Duration)
 /// Wiederherstellung von Hand, falls eine neue Version gar nicht startet: Paneldeck beenden, `paneldeck.exe` löschen (oder
 /// umbenennen) und `paneldeck.exe.old` wieder in `paneldeck.exe` umbenennen.
 pub fn remove_old_exe(exe: &Path) {
+    // macOS (#150): das alte Bündel `.<Name>.app.old` neben dem neuen.
+    if let Some(old) = mac_bundle(exe).and_then(|b| bundle_sibling(&b, "old")) {
+        if std::fs::symlink_metadata(&old).is_ok_and(|m| m.is_dir()) {
+            let _ = std::fs::remove_dir_all(&old);
+        }
+    }
     // `<name>.old` und beiseitegelegte `<name>.old.<n>` der .exe und der mitgelieferten Dateien; was noch läuft (eine
     // OpenConsole.exe einer alten Sitzung), bleibt bis zum nächsten Start liegen.
     let Some(dir) = exe.parent() else { return };
@@ -623,6 +748,99 @@ mod tests {
         assert!(!keep_requested(Some(OsStr::new("42")), None));
         assert!(!keep_requested(Some(OsStr::new("42")), Some(OsStr::new("0"))));
         assert!(!keep_requested(Some(OsStr::new("42")), Some(OsStr::new("yes"))));
+    }
+}
+
+/// macOS (#150): Bündel erkennen (überall prüfbar), Tausch des ganzen `.app` (nur Unix).
+#[cfg(test)]
+mod macapp_tests {
+    use super::super::zip::Entry;
+    use super::*;
+
+    fn macho() -> Vec<u8> {
+        let mut b = vec![0xca, 0xfe, 0xba, 0xbe];
+        b.resize(8192, 7);
+        b
+    }
+
+    #[test]
+    fn bundle_detection() {
+        let d = std::env::temp_dir().join(format!("pd-macapp-det-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let exe = d.join("Paneldeck.app").join("Contents").join("MacOS").join("paneldeck");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        assert_eq!(mac_bundle(&exe), Some(d.join("Paneldeck.app")));
+        assert_eq!(mac_bundle(&d.join("paneldeck")), None);
+        assert_eq!(mac_bundle(&d.join("x").join("Contents").join("MacOS").join("p")), None, "no .app");
+        assert_eq!(macapp_flavor(&exe, &|_| true), None, "no Info.plist");
+        std::fs::write(d.join("Paneldeck.app").join("Contents").join("Info.plist"), "<plist/>").unwrap();
+        assert_eq!(macapp_flavor(&exe, &|_| true), Some(Flavor::MacApp));
+        assert_eq!(macapp_flavor(&exe, &|_| false), None, "folder not writable: hint only");
+        assert_eq!(macapp_flavor(Path::new("/private/var/folders/x/T/AppTranslocation/ABC/d/Paneldeck.app/Contents/MacOS/paneldeck"), &|_| true), None);
+        assert!(is_macho(&macho()) && !is_macho(b"\x7fELF") && !is_macho(&[0u8; 8192]));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bundle_without_program_is_refused() {
+        let e = vec![Entry { path: "Contents/Info.plist".into(), data: b"<plist/>".to_vec(), mode: 0o644, dir: false }];
+        assert!(swap_bundle(Path::new("/nowhere/Paneldeck.app"), &e).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_swap_and_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("pd-macapp-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let bundle = d.join("Paneldeck.app");
+        let exe = bundle.join("Contents").join("MacOS").join("paneldeck");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"old").unwrap();
+        std::fs::write(bundle.join("Contents").join("stale.txt"), b"gone after the update").unwrap();
+        let new_bin = macho();
+        let entries = vec![
+            Entry { path: "Contents".into(), data: vec![], mode: 0o755, dir: true },
+            Entry { path: "Contents/Info.plist".into(), data: b"<plist/>".to_vec(), mode: 0o644, dir: false },
+            Entry { path: "Contents/MacOS/paneldeck".into(), data: new_bin.clone(), mode: 0o755, dir: false },
+            Entry { path: "Contents/Resources/LICENSE".into(), data: b"MIT".to_vec(), mode: 0o644, dir: false },
+        ];
+        swap_bundle(&bundle, &entries).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), new_bin);
+        assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(!bundle.join("Contents").join("stale.txt").exists(), "the whole bundle is replaced");
+        let old = d.join(".Paneldeck.app.old");
+        assert_eq!(std::fs::read(old.join("Contents/MacOS/paneldeck")).unwrap(), b"old");
+        assert!(!d.join(".Paneldeck.app.new").exists());
+        remove_old_exe(&exe);
+        assert!(!old.exists(), "removed after the first frame of the new version");
+        // a symlinked bundle is refused
+        std::os::unix::fs::symlink(&bundle, d.join("Link.app")).unwrap();
+        assert!(swap_bundle(&d.join("Link.app"), &entries).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Mit dem echten Release-ZIP aus `tools/package-macos.sh` (`tools/check-macos-packages.sh` setzt
+    /// `PANELDECK_TEST_MACOS_ZIP`): entpacken mit dem eigenen ZIP-Leser und ein Bündel damit ersetzen.
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn macos_release_zip_installs() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(zip) = std::env::var_os("PANELDECK_TEST_MACOS_ZIP") else { return };
+        let data = std::fs::read(zip).unwrap();
+        let entries = super::super::zip::extract_tree(&data, super::super::release::MAC_APP_PREFIX, 256 << 20).unwrap();
+        let d = std::env::temp_dir().join(format!("pd-macapp-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let exe = d.join("Paneldeck.app").join("Contents").join("MacOS").join("paneldeck");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"old").unwrap();
+        swap_bundle(&d.join("Paneldeck.app"), &entries).unwrap();
+        assert!(is_macho(&std::fs::read(&exe).unwrap()));
+        assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o111, 0o111, "executable");
+        let out = std::process::Command::new(&exe).arg("--version").output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains(env!("CARGO_PKG_VERSION")), "{out:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 

@@ -51,4 +51,4 @@ Funktioniert wie unter Windows. Der Hub ermittelt den aufrufenden Prozess selbst
 - Dateidialoge (Export, Import, Ordner wählen) laufen über das XDG-Desktop-Portal (GNOME, KDE und die meisten Desktops). Ohne Portal (z. B. ein reiner Fenstermanager) öffnen sie sich nicht; Exporte landen dann im Datenordner.
 - Claude-Code-Hooks: Claude Code führt sie mit `/bin/sh` aus, egal welche Shell du nutzt (bash, zsh, fish); der Befehl setzt den Pfad des Programms (bei der AppImage die `.AppImage`-Datei) dafür in Anführungszeichen. `~/.claude` kommt aus `$HOME` (bzw. `$CLAUDE_CONFIG_DIR`).
 - Ein Bild aus der Zwischenablage einfügen (Strg+V ins Terminal) nutzt X11 (unter Wayland über XWayland).
-- macOS folgt getrennt (experimentell, #150).
+- macOS: siehe [macOS](macos.md) (experimentell).

@@ -48,6 +48,14 @@ pub fn zip_name(v: &Version) -> String {
     format!("paneldeck-{v}-windows-x64.zip")
 }
 
+/// macOS-ZIP des Releases (#150): enthält `Paneldeck.app/` (Universal-Binary, ad-hoc signiert).
+pub fn macos_zip_name(v: &Version) -> String {
+    format!("paneldeck-{v}-macos-universal.zip")
+}
+
+/// Ordner der App im macOS-ZIP.
+pub const MAC_APP_PREFIX: &str = "Paneldeck.app/";
+
 /// Pfad von `paneldeck.exe` im portablen ZIP.
 pub fn zip_exe_entry(v: &Version) -> String {
     zip_entry(v, "paneldeck.exe")
@@ -159,7 +167,7 @@ pub fn expected_hash(sums: &[([u8; 32], String)], name: &str) -> Option<[u8; 32]
 
 /// Art der Installation (bestimmt, welche Datei geladen wird).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: nur `AppImage`
+#[cfg_attr(not(windows), allow(dead_code))] // Linux: nur `AppImage`, macOS: nur `MacApp`
 pub enum Flavor {
     /// Mit dem Installer eingerichtet: Setup still in denselben Ordner ausführen.
     Installed,
@@ -167,6 +175,8 @@ pub enum Flavor {
     Portable,
     /// Linux-AppImage (#149): die `.AppImage`-Datei ersetzen (geprüft per `SHA256SUMS.txt`).
     AppImage,
+    /// macOS (#150): das ganze `Paneldeck.app` aus dem ZIP ersetzen (geprüft per `SHA256SUMS.txt`).
+    MacApp,
 }
 
 /// Was mit einer neueren Version möglich ist.
@@ -214,6 +224,7 @@ pub fn evaluate(current: &Version, rel: &Release, flavor: Option<Flavor>, skip_v
                 Flavor::Installed => setup_name(&rel.version),
                 Flavor::Portable => zip_name(&rel.version),
                 Flavor::AppImage => appimage_name(&rel.version),
+                Flavor::MacApp => macos_zip_name(&rel.version),
             };
             match (rel.asset(SUMS_NAME), rel.asset(&name)) {
                 (None, _) => Plan::AnnounceOnly(NoInstall::NoChecksums),

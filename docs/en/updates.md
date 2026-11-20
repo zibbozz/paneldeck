@@ -40,6 +40,7 @@ A copy counts as *installed* when the installer's uninstall entry points to exac
 - The revocation status of the server certificate is checked. If the certificate has been revoked, or the revocation check cannot be done (e.g. the revocation server is unreachable because of a firewall or proxy), nothing is downloaded.
 - Without code signing (see the [note in the README](../../README.md#note-the-program-is-not-yet-code-signed)) this protects against corrupted or incomplete downloads, **not** against a compromised GitHub account.
 - **Linux (from 2.5.0):** only the AppImage updates itself (same checks: `SHA256SUMS.txt`, GitHub hosts, size limit; certificates from the system trust store). `.deb`, `.rpm` and the tarball only announce a new version. See [Linux](linux.md#self-update-appimage).
+- **macOS (from 2.5.0, experimental):** `Paneldeck.app` updates itself from the macOS ZIP (same checks), if its folder is writable (e.g. `/Applications`); started from the disk image it only announces a new version. See [macOS](macos.md#self-update).
 
 You can check a manually downloaded file yourself, e.g. in PowerShell: `Get-FileHash .\Paneldeck-Setup-2.1.0.exe` and compare with the line in `SHA256SUMS.txt`; in Git Bash: `sha256sum -c SHA256SUMS.txt`.
 

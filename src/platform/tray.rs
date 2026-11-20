@@ -1,23 +1,24 @@
-//! Tray-Symbol (Windows, Linux): Klick = Fenster zeigen, Menü: Anzeigen / Beenden, Tooltip mit Status. macOS: noch
-//! keins (#150).
+//! Tray-Symbol (Windows, Linux; macOS: Symbol in der Menüleiste, #150): Klick = Fenster zeigen, Menü: Anzeigen /
+//! Beenden, Tooltip mit Status.
 
 use eframe::egui;
 use std::sync::mpsc::Sender;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub enum TrayCmd {
     Show,
     Quit,
 }
 
-#[cfg(windows)]
+/// Windows: Infobereich der Taskleiste; macOS (#150): `NSStatusItem` in der Menüleiste (tray-icon; wird im Hauptthread
+/// angelegt, nachdem die Ereignisschleife läuft – `App::new` erfüllt beides).
+#[cfg(any(windows, target_os = "macos"))]
 pub struct Tray {
     icon: tray_icon::TrayIcon,
     last_tip: String,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl Tray {
     pub fn create(ctx: &egui::Context, tx: Sender<TrayCmd>, show_label: &str, quit_label: &str) -> Option<Tray> {
         use tray_icon::menu::{Menu, MenuEvent, MenuItem};
@@ -150,13 +151,3 @@ impl Tray {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub struct Tray;
-
-#[cfg(target_os = "macos")]
-impl Tray {
-    pub fn create(_ctx: &egui::Context, _tx: Sender<TrayCmd>, _show: &str, _quit: &str) -> Option<Tray> {
-        None
-    }
-    pub fn set_tooltip(&mut self, _tip: &str) {}
-}

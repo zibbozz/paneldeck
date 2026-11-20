@@ -1,8 +1,9 @@
-//! Desktop-Benachrichtigungen (Windows-Toast, Linux: Freedesktop-Benachrichtigungen über D-Bus). macOS: noch ohne Wirkung (#150).
+//! Desktop-Benachrichtigungen (Windows-Toast, Linux: Freedesktop-Benachrichtigungen über D-Bus, macOS: Mitteilungen über
+//! `osascript`, #150).
 
-/// Native file and folder dialogs exist (Windows: `rfd`; Linux: `rfd` over the XDG desktop portal, #149). Without them the
+/// Native file and folder dialogs exist (Windows: `rfd`; Linux: `rfd` over the XDG desktop portal, #149; macOS: `rfd` with NSOpenPanel/NSSavePanel, #150). Without them the
 /// dialog functions return `None` at once, and callers that save something fall back to a fixed folder.
-pub const DIALOGS: bool = cfg!(any(windows, all(unix, not(target_os = "macos"))));
+pub const DIALOGS: bool = cfg!(any(windows, unix));
 
 #[cfg(windows)]
 pub fn toast(title: &str, body: &str, sound: bool) {
@@ -54,77 +55,117 @@ fn linux_notify(title: &str, body: &str, sound: bool) -> zbus::Result<()> {
     Ok(())
 }
 
+/// macOS (#150): `display notification` über `osascript` im Hintergrund. Die unsignierte App kann
+/// `UNUserNotificationCenter` nicht verlässlich nutzen; die Mitteilung erscheint deshalb unter „Skript-Editor“ (in den
+/// Systemeinstellungen → Mitteilungen erlaubt bzw. abschaltbar). Titel und Text gehen als Argumente an das Skript (`on run
+/// argv`), nie in den Skripttext – kein Quoting nötig.
 #[cfg(target_os = "macos")]
-pub fn toast(_title: &str, _body: &str, _sound: bool) {}
+pub fn toast(title: &str, body: &str, sound: bool) {
+    let args = osascript_args(title, body, sound);
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("/usr/bin/osascript")
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
+/// Argumente für `osascript`: das Skript (fest) und danach Titel und Text als `argv` (Steuerzeichen entfernt, gekürzt).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn osascript_args(title: &str, body: &str, sound: bool) -> Vec<String> {
+    let clean = |s: &str, max: usize| s.chars().filter(|c| !c.is_control() || *c == '\n').take(max).collect::<String>();
+    let show = if sound {
+        "display notification (item 2 of argv) with title (item 1 of argv) sound name \"default\""
+    } else {
+        "display notification (item 2 of argv) with title (item 1 of argv)"
+    };
+    vec!["-e".into(), "on run argv".into(), "-e".into(), show.into(), "-e".into(), "end run".into(), clean(title, 200), clean(body, 1000)]
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn osascript_gets_text_as_arguments_only() {
+        let a = super::osascript_args("Build \"done\"", "line1\nline2\u{7}", true);
+        assert_eq!(a.len(), 8);
+        assert_eq!(&a[6], "Build \"done\"", "title is an argument, never part of the script");
+        assert_eq!(&a[7], "line1\nline2", "control characters (bell) removed");
+        assert!(a[3].contains("sound name"));
+        assert!(!super::osascript_args("t", "b", false)[3].contains("sound"));
+        assert!(a[..6].iter().all(|s| !s.contains("done")));
+    }
+}
 
 /// Speichern-Dialog (Windows); anderswo `None`.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn save_file(default_name: &str) -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_file_name(default_name).add_filter("Text", &["txt"]).save_file()
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn save_file(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
 /// Speichern-Dialog für JSON-Dateien (Vorlagen); anderswo `None`.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn save_json(default_name: &str) -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_file_name(default_name).add_filter("JSON", &["json"]).save_file()
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn save_json(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
 /// Öffnen-Dialog für JSON-Dateien (Vorlagen); anderswo `None`.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn open_json() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file()
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn open_json() -> Option<std::path::PathBuf> {
     None
 }
 
 /// Speichern-Dialog für CSV-Dateien (Ticket-Export); anderswo `None`.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn save_csv(default_name: &str) -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_file_name(default_name).add_filter("CSV", &["csv"]).save_file()
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn save_csv(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
 /// Speichern-Dialog für Markdown-Dateien (Systemprompt); anderswo `None`.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn save_md(default_name: &str) -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_file_name(default_name).add_filter("Markdown", &["md"]).save_file()
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn save_md(_default_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
 /// Öffnen-Dialog für CSV-Dateien (Ticket-Import); anderswo `None`.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn open_csv() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().add_filter("CSV", &["csv"]).pick_file()
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn open_csv() -> Option<std::path::PathBuf> {
     None
 }
 
 /// Ordner-Auswahldialog.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn pick_folder(start: &str) -> Option<String> {
     let mut d = rfd::FileDialog::new();
     // Netzwerk- und WSL-Pfade nicht prüfen (UI-Thread: SMB-Verbindung bzw. Start der WSL-VM, #216).
@@ -134,14 +175,14 @@ pub fn pick_folder(start: &str) -> Option<String> {
     d.pick_folder().map(|p| p.to_string_lossy().to_string())
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn pick_folder(_start: &str) -> Option<String> {
     None
 }
 
 /// Datei-Auswahldialog für JSON-Dateien (MCP-Konfiguration, #289). `start` ist ein Startordner: ein
 /// `\\wsl.localhost\…`-Pfad wird ungeprüft gesetzt (Prüfen könnte die WSL-VM starten), ein lokaler nur, wenn er existiert.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn pick_json(start: &str) -> Option<String> {
     let mut d = rfd::FileDialog::new().add_filter("JSON", &["json"]);
     if crate::wsl::is_wsl_unc(start) || (!start.is_empty() && crate::claude_opts::check_path(start, true).is_ok()) {
@@ -150,19 +191,19 @@ pub fn pick_json(start: &str) -> Option<String> {
     d.pick_file().map(|p| p.to_string_lossy().to_string())
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn pick_json(_start: &str) -> Option<String> {
     None
 }
 
 /// Ordner-Auswahldialog mit Startordner ohne vorherige Prüfung (für `\\wsl.localhost\…`: schon das Prüfen kann die
 /// WSL-VM starten und blockieren; fehlt der Ordner, zeigt der Dialog einen Standardordner).
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, unix))]
 pub fn pick_folder_unchecked(start: &str) -> Option<String> {
     rfd::FileDialog::new().set_directory(start).pick_folder().map(|p| p.to_string_lossy().to_string())
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(not(any(windows, unix)))]
 pub fn pick_folder_unchecked(_start: &str) -> Option<String> {
     None
 }

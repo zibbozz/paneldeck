@@ -30,6 +30,8 @@ Paneldeck gibt es nur über **GitHub Releases**: https://github.com/zibbozz/pane
 
 **Linux** (ab 2.5.0, x86_64; Ubuntu 22.04 / Debian 12 / Fedora 39 oder neuer): eine AppImage (aktualisiert sich selbst), ein `.deb`, ein `.rpm` und ein Tarball, gebaut von GitHub Actions; ihre Prüfsummen stehen in derselben `SHA256SUMS.txt`. Installation, Datenordner und Desktop-Integration: [Linux](docs/de/linux.md).
 
+**macOS** (ab 2.5.0, **experimentell**, macOS 12 oder neuer, Apple Silicon und Intel): eine Universal-`Paneldeck.app` als `.dmg` und `.zip` (die App aktualisiert sich selbst), gebaut von GitHub Actions; Prüfsummen in derselben `SHA256SUMS.txt`. Die App ist **nicht signiert** – der erste Start braucht Rechtsklick → *Öffnen* (macOS 15: *Systemeinstellungen → Datenschutz & Sicherheit → Dennoch öffnen*) oder `xattr -d com.apple.quarantine /Applications/Paneldeck.app`. Details: [macOS](docs/de/macos.md).
+
 ### Hinweis: Programm ist (noch) nicht signiert
 Installer und `paneldeck.exe` sind **nicht code-signiert**. Ein Zertifikat kostet Geld, und Paneldeck soll ein kostenloses Hobbyprojekt bleiben. Deshalb gilt bis auf Weiteres:
 - Beim ersten Start zeigt **Windows SmartScreen** evtl. „Der Computer wurde durch Windows geschützt“. Auf **„Weitere Informationen“ → „Trotzdem ausführen“** klicken.
@@ -57,6 +59,7 @@ Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en
 - [Datenordner und Sicherungen](docs/de/data-and-backups.md) – Dateien, Sicherungen, portabel oder installiert
 - [Windows-Integration](docs/de/windows-integration.md) – Tray, Autostart, Explorer-Kontextmenü
 - [Linux](docs/de/linux.md) – Pakete, Datenordner, Tray, Autostart, Dateimanager, API-Schlüssel, Selbst-Update der AppImage
+- [macOS](docs/de/macos.md) (experimentell) – die unsignierte App installieren, Datenordner, Menüleiste, Autostart, Schlüsselbund, Selbst-Update
 - [Updates](docs/de/updates.md) – Selbst-Update, Prüfsummen, Datenschutz
 - [Fehlersuche](docs/de/troubleshooting.md) – häufige Probleme, Fehlalarme von Virenscannern
 - [Bauen](docs/de/building.md) – aus dem Quelltext bauen, Release-Dateien

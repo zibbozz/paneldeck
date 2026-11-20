@@ -10,7 +10,8 @@
 //!   in memory only until Paneldeck quits (only the derived keys, not the password; [`password_wanted`], [`begin_unlock`]).
 //!   PBKDF2 runs in a background thread. A keyring that is there but refuses reports `Keyring(..)` – the master
 //!   password is only used when there is no keyring service at all.
-//! macOS: only the master password for now (Keychain follows in #150).
+//! macOS (#150): the key lives in the login Keychain as a generic password (service "Paneldeck", account
+//! "api-key-encryption"); the master password only if there is no usable Keychain.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -300,17 +301,55 @@ mod unix {
             Refused(String),
         }
 
-        #[cfg(any(target_os = "macos", test))]
+        #[cfg(test)]
         pub fn key(_create: bool) -> Result<Key, Fail> {
             // Tests never touch the real keyring of the machine.
             let _ = &KEYRING_KEY;
             Err(Fail::Unavailable)
         }
 
+        /// macOS (#150): the 32-byte key as the generic password "Paneldeck" / "api-key-encryption" in the default
+        /// (login) Keychain. `create`: make it if missing (only when storing a key). The app is unsigned: macOS may ask
+        /// once whether Paneldeck may use the item (again after an update, the ad-hoc signature changes). Denied or
+        /// cancelled → `Refused`; no Keychain at all (e.g. no login session) → `Unavailable` (master password).
+        #[cfg(all(target_os = "macos", not(test)))]
+        pub fn key(create: bool) -> Result<Key, Fail> {
+            use security_framework::passwords::{get_generic_password, set_generic_password};
+            const SERVICE: &str = "Paneldeck";
+            const ACCOUNT: &str = "api-key-encryption";
+            // errSecItemNotFound, errSecNoSuchKeychain, errSecNotAvailable, errSecInteractionNotAllowed
+            const NOT_FOUND: i32 = -25300;
+            const NO_KEYCHAIN: [i32; 3] = [-25294, -25291, -25308];
+            if let Some(k) = super::lock(&KEYRING_KEY).as_ref() {
+                return Ok(k.clone());
+            }
+            let refused = |e: security_framework::base::Error| {
+                if NO_KEYCHAIN.contains(&e.code()) { Fail::Unavailable } else { Fail::Refused(format!("Keychain: {e}")) }
+            };
+            let key = match get_generic_password(SERVICE, ACCOUNT) {
+                Ok(v) => {
+                    let v = zeroize::Zeroizing::new(v);
+                    Key::new(<[u8; 32]>::try_from(v.as_slice()).map_err(|_| Fail::Refused("invalid key length".into()))?)
+                }
+                Err(e) if e.code() == NOT_FOUND && create => {
+                    let mut k = Key::new([0u8; 32]);
+                    getrandom::fill(&mut *k).map_err(|e| Fail::Refused(e.to_string()))?;
+                    set_generic_password(SERVICE, ACCOUNT, &*k).map_err(refused)?;
+                    k
+                }
+                Err(e) if e.code() == NOT_FOUND => {
+                    return Err(Fail::Refused(crate::state::t("Schlüssel im Schlüsselbund fehlt", "Key missing in the keyring").into()));
+                }
+                Err(e) => return Err(refused(e)),
+            };
+            *super::lock(&KEYRING_KEY) = Some(key.clone());
+            Ok(key)
+        }
+
         /// The 32-byte key of the item "Paneldeck – API key encryption" (attributes `application=paneldeck`,
         /// `purpose=api-key-encryption`). `create`: make it if missing (only when storing a key). Unlocking may show the
         /// keyring's own dialog.
-        #[cfg(all(not(target_os = "macos"), not(test)))]
+        #[cfg(all(unix, not(target_os = "macos"), not(test)))]
         pub fn key(create: bool) -> Result<Key, Fail> {
             use secret_service::blocking::SecretService;
             use secret_service::{EncryptionType, Error as E};

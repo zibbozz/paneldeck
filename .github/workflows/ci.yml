@@ -50,7 +50,7 @@ jobs:
 
   # Linux und macOS (Vorbereitung #149/#150): Build und Tests der plattformunabhängigen Teile. Die Windows-Teile stecken hinter
   # `src/platform/` und sind dort Stubs; Changelog, Lizenzen und Shell-Skripte prüft schon der Windows-Job.
-  # Keine Systempakete nötig: tray-icon, rfd, arboard und die WinRT-Benachrichtigungen sind nur Windows-Abhängigkeiten, eframe
+  # Keine Systempakete nötig: tray-icon/rfd (Windows, macOS), ksni/zbus (Linux, reines Rust), arboard; eframe
   # lädt X11/OpenGL zur Laufzeit (die Tests öffnen kein Fenster), SQLite wird mit dem C-Compiler des Runners gebaut.
   build-test-unix:
     name: build-test (${{ matrix.os }})
@@ -92,3 +92,28 @@ jobs:
       # Smoke test (#149): isolated hub (own data folder, fake HOME, fake claude), JSON-RPC through `paneldeck mcp`.
       - name: Smoke test (Xvfb)
         run: xvfb-run -a python3 tools/smoke-linux.py target/release/paneldeck
+
+  # macOS-Pakete (#150, experimentell): Paneldeck.app als Universal-Binary, .dmg und .zip bauen und prüfen (Aufbau, Signatur
+  # ad hoc, Start mit --version, Selbst-Update mit genau diesem ZIP), danach der Smoke-Test gegen die App aus dem ZIP
+  # (macOS-Runner haben eine Anmeldesitzung mit Fenstern). Kostenlos (Standard-Runner im öffentlichen Repository).
+  package-macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build and package
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/' | tr -d '\r')
+          bash tools/package-macos.sh "$v"
+          bash tools/check-macos-packages.sh "$v"
+      # Smoke test: isolated hub (own data folder, fake HOME, fake claude), JSON-RPC through `paneldeck mcp` – the app from
+      # the release ZIP.
+      - name: Smoke test (Paneldeck.app from the ZIP)
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/' | tr -d '\r')
+          d=$(mktemp -d)
+          ditto -x -k "dist/macos-$v/paneldeck-$v-macos-universal.zip" "$d"
+          python3 tools/smoke-linux.py "$d/Paneldeck.app/Contents/MacOS/paneldeck"

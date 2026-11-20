@@ -32,8 +32,8 @@ FETCH_CONPTY = ROOT / "tools" / "fetch-conpty.ps1"
 WANT = ("license", "licence", "copying", "copyright", "notice", "unlicense")
 
 
-# Release-Ziele: Windows und (ab 2.5.0, #149) Linux. Eine gemeinsame Datei für alle Release-Dateien (Vereinigung).
-PLATFORMS = ("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu")
+# Release-Ziele: Windows, (ab 2.5.0) Linux (#149) und macOS (#150, Universal: arm64 + x86_64). Eine gemeinsame Datei für alle Release-Dateien (Vereinigung).
+PLATFORMS = ("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin")
 
 
 def collect():
