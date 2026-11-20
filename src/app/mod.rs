@@ -1805,9 +1805,10 @@ impl App {
         // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
         // der globalen Einstellung (`session_settings::resume_wanted`).
         // Fortgesetzt wird nur eine Konversation, die es wirklich gibt (#245); sonst eine neue mit eigener ID.
-        let resume_wanted = session_settings::resume_wanted(l.restore, l.restart, meta.claude_continue, self.settings.claude_resume);
-        let has_conv = resume_wanted && session_settings::conversation_exists(meta, is_wsl, crate::history::projects_dir().as_deref(), &home_dir());
-        let start = session_settings::claude_start(l.resume_id, resume_wanted, l.continue_last, meta, has_conv);
+        // Der erste Start einer neuen Sitzung beginnt immer neu (`--session-id`), außer der Verlauf gibt eine ID vor (#302).
+        let start = session_settings::launch_start(l.restore, l.restart, l.resume_id, l.continue_last, self.settings.claude_resume, meta, |m| {
+            session_settings::conversation_exists(m, is_wsl, crate::history::projects_dir().as_deref(), &home_dir())
+        });
         let fresh = start == session_settings::ClaudeStart::Fresh;
         let expect = match start {
             session_settings::ClaudeStart::Resume(id) => {
@@ -3457,33 +3458,15 @@ impl App {
                 cwd: m.cwd.as_ref().map(|p| pathfmt::from_wsl(&sh, p)),
                 ..m
             };
-            if let Some(tp) = m.transcript_path.as_ref().filter(|p| !p.is_empty() && !keyless) {
-                if e.meta.transcript != *tp {
-                    e.meta.transcript = tp.clone();
-                    self.usage.set_path(m.session, PathBuf::from(tp));
-                }
+            // Konversation und Transkript nur der eigenen Konversation der Sitzung (#302).
+            if e.note_conversation(&m, &conv, keyless) {
+                self.usage.set_path(m.session, PathBuf::from(&e.meta.transcript));
             }
             if let Some(c) = m.cwd.as_ref().filter(|c| !c.is_empty()) {
                 // Linux-Pfad einer WSL-Sitzung als Windows-Pfad wie bei OSC 7 (Dateibaum, Links, #277).
                 e.live_cwd = pathfmt::from_wsl(e.eff_shell(), c);
                 if e.start_cwd.is_empty() {
                     e.start_cwd = e.live_cwd.clone();
-                }
-            }
-            if e.is_claude() && !keyless {
-                if let hooks::ConvMatch::Bind(cs) | hooks::ConvMatch::Switch(cs) = &conv {
-                    if e.meta.claude_session != *cs {
-                        e.meta.claude_session = cs.clone();
-                        // Eine andere Konversation als beim Start angegeben: Inhalt hat sie nur, wenn sie fortgesetzt wurde.
-                        e.meta.claude_started = false;
-                    }
-                }
-                match (m.event.as_str(), m.source.as_deref()) {
-                    // Fortgesetzte Konversation (`--resume`, `--continue`, `/resume`): sie hat Inhalt.
-                    ("SessionStart", Some("resume")) | ("UserPromptSubmit", _) => e.meta.claude_started = true,
-                    // `/clear`: neue, leere Konversation.
-                    ("SessionStart", Some("clear")) => e.meta.claude_started = false,
-                    _ => {}
                 }
             }
             // Von selbst weiter nur, wenn `take_hook` es erlaubt (der vom Hub gestartete Claude, Ende einer Runde mit Prompt).

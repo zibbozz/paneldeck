@@ -68,7 +68,8 @@ Ein Modell, für das du nie eine Stufe gewählt hast, gilt überall als **Aus** 
 ## Einen Chat benutzen
 - Nachricht tippen; **Enter** sendet, **Umschalt+Enter** macht eine neue Zeile. Die Antwort wird gestreamt und als Markdown angezeigt; Codeblöcke haben einen Knopf **Kopieren**.
 - **Stopp** beendet eine laufende Antwort (der Text bis dahin bleibt). **↻** unter der letzten Antwort erzeugt sie neu (sie ersetzt die alte). **✎** neben deiner letzten Nachricht holt sie zurück ins Eingabefeld („Letzte Nachricht wird bearbeitet – Senden ersetzt sie.“); **Esc** oder *Abbrechen* bricht das Bearbeiten ab.
-- Ein Fehler (Server nicht erreichbar, Modell nicht gefunden …) erscheint als roter Kasten mit **Wiederholen**.
+- Solange noch keine Antwort angekommen ist, zeigt der Chat „…“, ab 3 Sekunden „Warte auf das Modell … N s“ und ab 10 Sekunden zusätzlich, dass der Server das Modell vermutlich noch lädt (das erste Laden kann länger dauern). Ein Modell, das nur nachdenkt, zeigt „Denkt nach …“.
+- Ein Fehler (Server nicht erreichbar, Modell nicht gefunden, Antwort ohne Text …) erscheint als roter Kasten mit **Wiederholen**.
 - Unter einer Antwort: der **Token-Verbrauch** („Tokens: 120 Eingabe · 45 Antwort“, soweit der Server ihn meldet) und, wenn das Modell an seiner Token-Grenze aufgehört hat, „Antwort an der Token-Grenze des Modells abgeschnitten.“
 - Ein Modell ohne Werkzeug-Fähigkeit zeigt den Hinweis „Dieses Modell kann keine Werkzeuge nutzen – nur Chat.“
 - **Kontext:** Das Modell bekommt den [Systemprompt](agent-interface.md#systemprompt) (für die Stufe des Modells gerendert), den Projektnamen und den Ordner des Chats – aber keinen direkten Zugriff auf das Dateisystem. Passt der Verlauf nicht mehr in die Kontextlänge, fallen die ältesten Runden weg (der Systemprompt bleibt immer). Eine Markierung „Ältere Nachrichten sieht das Modell nicht mehr“ zeigt, ab wo das Modell die Unterhaltung noch sieht.
@@ -104,6 +105,8 @@ Paneldeck verbindet sich nur mit **diesem Rechner und privaten Netzen**:
 | private Netze | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` |
 | Link-Local | `169.254.0.0/16`, `fe80::/10` (IPv6-Link-Local-Adressen brauchen eine Zone, die Adressen hier nicht tragen können – besser IPv4 oder eine Adresse aus `fc00::/7`) |
 
+`localhost` verbindet zuerst mit `127.0.0.1` und nur, wenn das scheitert, mit `::1` – wie Ollama selbst.
+
 Alles andere wird abgelehnt, zum Beispiel **öffentliche Adressen** (`8.8.8.8`, `2001:…`), der Carrier-Grade-NAT-Bereich **`100.64.0.0/10`**, `0.0.0.0`, Multicast und Broadcast sowie IPv4-Adressen in IPv6-Schreibweise (`::ffff:8.8.8.8`, `64:ff9b::…`).
 
 - **Abgekürzte Zahlenformen** wie `127.1`, `0x7f.0.0.1`, `0177.0.0.1` oder `2130706433` werden abgelehnt statt geraten – Adressen als `192.168.1.10` schreiben. Benutzername/Passwort in der Adresse, Abfragen (`?`) und Fragmente (`#`) sind ebenfalls nicht erlaubt.
@@ -127,6 +130,7 @@ Alles andere wird abgelehnt, zum Beispiel **öffentliche Adressen** (`8.8.8.8`, 
 
 ## Fehlersuche
 - **„Keine Verbindung zum Server … (Ollama: Port 11434)“:** Ollama (bzw. der andere Server) läuft nicht, oder Adresse/Port stimmen nicht. Ollama starten (Tray-Symbol) und erneut *Verbinden* klicken.
+- **Der Chat zeigt nur „Warte auf das Modell …“ und `ollama ps` listet nichts:** Das Modell lädt noch – Ollama zeigt ein Modell erst nach dem Laden in `ollama ps`, und das erste Laden kann Minuten dauern (vor allem auf der CPU). Warten oder ins Ollama-Log schauen. Läuft zusätzlich ein Ollama in WSL, kann `localhost:11434` dieses sein (der Port gehört dann `wslrelay`): `ollama ps` unter Windows und in WSL fragen verschiedene Server. Nur ein Ollama betreiben und aktuell halten – neue Modelle brauchen eine aktuelle Version.
 - **„Nicht gefunden – Adresse, Server-Typ und Modellname prüfen (HTTP 404)“:** Das Modell wurde auf dem Server gelöscht oder umbenannt, oder der Server-Typ stimmt nicht. *Einstellungen → Modelle → Verbinden* zeigt die aktuellen Modelle; bei Ollama lädt `ollama pull <modell>` es neu.
 - **„Adresse nicht erlaubt“:** Die Adresse liegt weder auf diesem Rechner noch in einem privaten Netz (siehe oben).
 - **„Unerwartete Antwort des Servers – stimmt der Server-Typ?“:** Ein OpenAI-kompatibler Server wurde als Ollama eingetragen oder umgekehrt.

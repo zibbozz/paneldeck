@@ -50,6 +50,24 @@ pub(super) fn claude_start(resume_id: Option<&str>, resume_wanted: bool, continu
     }
 }
 
+/// Wie Claude bei einem Start beginnt – die ganze Entscheidung von `App::claude_command` (#245, #302). `restore` =
+/// Programmstart, `restart` = Neu laden/Neu starten; beides aus = erster Start einer neuen Sitzung: dann immer eine neue
+/// Konversation mit eigener ID (`--session-id`), außer `resume_id` (Verlauf) oder `continue_last` (`--continue`). Sonst
+/// `--resume` nur mit der eigenen ID der Sitzung, wenn es ihre Konversation gibt (`exists`, nur dann gefragt).
+pub(super) fn launch_start(
+    restore: bool,
+    restart: bool,
+    resume_id: Option<&str>,
+    continue_last: bool,
+    global_resume: bool,
+    meta: &SessionMeta,
+    exists: impl FnOnce(&SessionMeta) -> bool,
+) -> ClaudeStart {
+    let wanted = resume_wanted(restore, restart, meta.claude_continue, global_resume);
+    let has_conv = wanted && exists(meta);
+    claude_start(resume_id, wanted, continue_last, meta, has_conv)
+}
+
 /// Gibt es die Konversation der Sitzung, sodass `--resume <id>` sie im Arbeitsordner findet (#245)? Windows: die
 /// Transkript-Datei (von den Hooks gemeldet, sonst unter `projects` = `~/.claude/projects` erwartet) – so geht
 /// „Konversation fortsetzen“ auch ohne Hooks (`--safe-mode`), und eine nie benutzte oder gelöschte Konversation wird
@@ -1637,5 +1655,75 @@ mod tests {
         assert_eq!(d.click(&mut f, false, Pos2::new(hex.right() + 8.0 + 20.0, hex.center().y)), FormOutcome::Open, "der Dialog bleibt offen");
         assert_eq!(f.v.color, [0x22, 0x88, 0xFF]);
         assert!(!crate::palette::colors(crate::palette::Area::Hub).iter().any(|c| c.hex == "#2288FF"), "nicht in der Palette");
+    }
+
+    /// #302: Der erste Start einer neuen Sitzung beginnt immer neu (`--session-id`) – egal, was im Ordner liegt (auch
+    /// Transkripte anderer Sitzungen im Benutzerordner), welche Konversations-Auswahl gilt und was in der Sitzung steht.
+    #[test]
+    fn the_first_start_of_a_new_session_is_always_fresh() {
+        let root = std::env::temp_dir().join(format!("pd-302-first-{}", std::process::id()));
+        let projects = root.join("projects");
+        let home = "C:\\Users\\u";
+        let dir = projects.join(crate::history::project_slug(home).unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        // Konversationen anderer Sitzungen im selben (Standard-)Ordner – und sogar eine mit der ID der Sitzung
+        for id in ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", uuid().as_str()] {
+            std::fs::write(dir.join(format!("{id}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
+        }
+        for conv in ConvChoice::ALL {
+            for (started, global, wsl) in [(false, true, false), (true, true, false), (true, false, false), (true, true, true), (false, true, true)] {
+                let m = SessionMeta {
+                    cwd: String::new(),
+                    claude_continue: conv.resume_later(),
+                    transcript: dir.join(format!("{}.jsonl", uuid())).to_string_lossy().to_string(),
+                    ..claude_meta(started, true)
+                };
+                let mut asked = false;
+                let s = launch_start(false, false, None, conv.continue_last(), global, &m, |m| {
+                    asked = true;
+                    conversation_exists(m, wsl, Some(&projects), home)
+                });
+                // „Letzte Konversation im Ordner fortsetzen“ ist die ausdrückliche Wahl von `--continue`; sonst neu
+                let want = if conv.continue_last() { ClaudeStart::Continue } else { ClaudeStart::Fresh };
+                assert_eq!(s, want, "{conv:?} started={started} wsl={wsl}");
+                assert!(!asked, "beim ersten Start wird nach keiner Konversation gesucht");
+            }
+        }
+        // Nur der Verlauf („Fortsetzen“) gibt beim Anlegen eine ID vor – genau diese
+        let m = claude_meta(false, true);
+        let other = "11111111-1111-4111-8111-111111111111";
+        assert_eq!(launch_start(false, false, Some(other), false, true, &m, |_| true), ClaudeStart::Resume(other.into()));
+        assert_eq!(launch_start(false, false, Some("kein-uuid"), false, true, &m, |_| true), ClaudeStart::Fresh);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #302: Neu laden/Programmstart setzt nur die eigene Konversation der Sitzung fort – nie eine andere aus demselben
+    /// Ordner, auch wenn es dort Transkripte gibt.
+    #[test]
+    fn resume_only_ever_uses_the_sessions_own_conversation() {
+        let root = std::env::temp_dir().join(format!("pd-302-own-{}", std::process::id()));
+        let projects = root.join("projects");
+        let home = "C:\\Users\\u";
+        let dir = projects.join(crate::history::project_slug(home).unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        for id in ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"] {
+            std::fs::write(dir.join(format!("{id}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
+        }
+        let m = SessionMeta { cwd: String::new(), ..claude_meta(false, true) };
+        let exists = |m: &SessionMeta| conversation_exists(m, false, Some(&projects), home);
+        for (restore, restart) in [(true, false), (false, true)] {
+            // Eigene Konversation ohne Transkript (kein Prompt gesendet): neu, nie eine der anderen
+            assert_eq!(launch_start(restore, restart, None, false, true, &m, exists), ClaudeStart::Fresh);
+        }
+        // Mit eigenem Transkript: genau die eigene ID
+        std::fs::write(dir.join(format!("{}.jsonl", uuid())), "{\"type\":\"user\"}\n").unwrap();
+        for (restore, restart) in [(true, false), (false, true)] {
+            assert_eq!(launch_start(restore, restart, None, false, true, &m, exists), ClaudeStart::Resume(uuid()));
+        }
+        // „Bei jedem Start eine neue“ bzw. globale Einstellung aus (Programmstart): neu
+        let never = SessionMeta { claude_continue: false, ..m.clone() };
+        assert_eq!(launch_start(false, true, None, false, true, &never, exists), ClaudeStart::Fresh);
+        assert_eq!(launch_start(true, false, None, false, false, &m, exists), ClaudeStart::Fresh);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

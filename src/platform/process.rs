@@ -969,12 +969,17 @@ mod peer_tests {
         drop(c);
     }
 
-    /// Kinder von `pid` (laut Momentaufnahme), wartet bis zu 10 s auf mindestens eines.
+    /// Frist für das Starten von Hilfsprozessen (cmd, PowerShell, ping). Großzügig, weil ein ausgelasteter
+    /// CI-Runner (Virenscanner, kalter .NET-Start) PowerShell erst nach vielen Sekunden startet (#290); die Wartenden
+    /// fragen alle 50 ms ab und sind sonst sofort fertig.
+    const SPAWN_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Kinder von `pid` (laut Momentaufnahme), wartet bis zu [`SPAWN_WAIT`] auf mindestens eines.
     fn children_of(pid: u32) -> Vec<u32> {
         let t0 = std::time::Instant::now();
         loop {
             let c: Vec<u32> = process_parents().into_iter().filter(|(_, p)| *p == pid).map(|(c, _)| c).collect();
-            if !c.is_empty() || t0.elapsed() > std::time::Duration::from_secs(10) {
+            if !c.is_empty() || t0.elapsed() > SPAWN_WAIT {
                 return c;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1018,7 +1023,8 @@ mod peer_tests {
         // verbindet sich danach – sein Elternteil gibt es dann nicht mehr, der Job bleibt.
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        let ps = format!("$c = New-Object Net.Sockets.TcpClient('127.0.0.1', {port}); Start-Sleep 5");
+        // Lebt nach dem Verbinden noch lange genug für `resolve_peer`; `terminate_all` beendet ihn am Ende.
+        let ps = format!("$c = New-Object Net.Sockets.TcpClient('127.0.0.1', {port}); Start-Sleep 120");
         // `raw_arg`: cmd versteht die Anführungszeichen-Maskierung von `args` (\") nicht.
         let mut shell = std::process::Command::new("cmd")
             .raw_arg(format!("/c start \"\" /b powershell -NoProfile -WindowStyle Hidden -Command \"{ps}\""))
@@ -1029,11 +1035,14 @@ mod peer_tests {
         let _ = shell.wait();
         l.set_nonblocking(true).unwrap();
         let t0 = std::time::Instant::now();
+        // Nicht blockierend: WouldBlock (10035) heißt nur „noch keine Verbindung“ – weiter warten, bis die Frist abläuft.
         let s = loop {
             match l.accept() {
                 Ok((s, _)) => break s,
-                Err(_) if t0.elapsed() < std::time::Duration::from_secs(30) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                Err(e) => panic!("keine Verbindung des losgelösten Prozesses: {e}"),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) && t0.elapsed() < SPAWN_WAIT => {
+                    std::thread::sleep(std::time::Duration::from_millis(50))
+                }
+                Err(e) => panic!("keine Verbindung des losgelösten Prozesses nach {:?}: {e}", t0.elapsed()),
             }
         };
         let pc = resolve_peer(s.peer_addr().unwrap(), s.local_addr().unwrap()).expect("lebender Absender");
@@ -1218,7 +1227,7 @@ mod peer_tests {
         let fg: Vec<u32> = loop {
             let names = process_names();
             let pings: Vec<u32> = process_parents().into_iter().filter(|(c, p)| *p == shell.id() && names.get(c).is_some_and(|n| n.eq_ignore_ascii_case("ping.exe"))).map(|(c, _)| c).collect();
-            if !pings.is_empty() || t0.elapsed() > std::time::Duration::from_secs(10) {
+            if !pings.is_empty() || t0.elapsed() > SPAWN_WAIT {
                 break pings;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1278,7 +1287,8 @@ mod peer_tests {
         // „Shell“ (cmd, eigene unsichtbare Konsole) mit einem Vordergrundprogramm daran (PowerShell; der Testprozess
         // selbst ist im Release-Build ein GUI-Programm ohne Konsole). Es startet ein Kind mit CREATE_NO_WINDOW
         // (`CreateNoWindow`, wie Claude Code seine stdio-MCP-Server) in einer eigenen Konsole und wartet darauf.
-        let ps = "$i=New-Object Diagnostics.ProcessStartInfo 'ping','-n 30 127.0.0.1'; $i.UseShellExecute=$false; $i.CreateNoWindow=$true; [Diagnostics.Process]::Start($i).WaitForExit()";
+        // ping lebt lange genug für die Prüfungen auch auf einem langsamen Runner; `terminate_all` beendet ihn am Ende.
+        let ps = "$i=New-Object Diagnostics.ProcessStartInfo 'ping','-n 300 127.0.0.1'; $i.UseShellExecute=$false; $i.CreateNoWindow=$true; [Diagnostics.Process]::Start($i).WaitForExit()";
         let mut shell = std::process::Command::new("cmd").raw_arg(format!("/c powershell -NoProfile -NonInteractive -Command \"{ps}\"")).creation_flags(CREATE_NO_WINDOW).spawn().unwrap();
         let job = SessionJob::new().expect("Job");
         assert!(job.adopt(shell.as_raw_handle(), shell.id()));
@@ -1292,7 +1302,7 @@ mod peer_tests {
             if let (Some(f), Some(m)) = (fg, mcp) {
                 break (f, m);
             }
-            assert!(t0.elapsed() < std::time::Duration::from_secs(20), "Vordergrundprogramm und Kind gestartet");
+            assert!(t0.elapsed() < SPAWN_WAIT, "Vordergrundprogramm und Kind gestartet (nach {:?})", t0.elapsed());
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
         let pids = job.pids().unwrap();
