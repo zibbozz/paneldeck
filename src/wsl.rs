@@ -296,6 +296,51 @@ pub fn home_args(distro: &str) -> Vec<String> {
     ["-d", distro, "-e", "sh", "-c", "printf '%s' \"$HOME\""].iter().map(|s| s.to_string()).collect()
 }
 
+/// Abfrage für die Shell-Integration (#57): Login-Shell des Standardbenutzers (`getent passwd`, ohne `getent` – z. B.
+/// busybox – die Zeile aus `/etc/passwd`), die Einträge von `/etc/shells` (`PDSHELL=…`) und ob die `.zshenv` im
+/// Ordner `$PANELDECK_PROBE_Z` lesbar ist (`PDZ=1`; der Windows-Pfad kommt über `WSLENV …/p`, WSL rechnet ihn nach der
+/// eigenen Einhänge-Konfiguration um). Ohne `"` (siehe Moduldoku): `IFS=` und `set -f` verhindern Zerlegen und Globbing
+/// des Pfads; Benutzernamen enthalten keine Leer- oder Sonderzeichen der Shell.
+const LOGIN_SCRIPT: &str = "u=$(id -un); { getent passwd $u 2>/dev/null || grep ^$u: /etc/passwd; }; sed s/^/PDSHELL=/ /etc/shells 2>/dev/null; set -f; IFS=; test -n $PANELDECK_PROBE_Z && test -r $PANELDECK_PROBE_Z/.zshenv && echo PDZ=1; true";
+
+/// Variable mit dem Windows-Pfad des zsh-Ordners für die Abfrage.
+const PROBE_VAR: &str = "PANELDECK_PROBE_Z";
+
+/// `wsl.exe`-Argumente der Abfrage (`distro` leer = Standard-Distribution).
+pub fn login_args(distro: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    if !distro.is_empty() {
+        v.extend(["-d".to_string(), distro.to_string()]);
+    }
+    v.extend(["-e", "sh", "-c", LOGIN_SCRIPT].iter().map(|s| s.to_string()));
+    v
+}
+
+/// Umgebung der Abfrage: Pfad des zsh-Ordners und `WSLENV` (bestehendes `WSLENV` bleibt erhalten).
+pub fn login_env(zsh_dir: Option<&str>, wslenv: Option<&str>) -> Vec<(String, String)> {
+    let Some(z) = zsh_dir else { return Vec::new() };
+    let w = match wslenv.filter(|w| !w.is_empty()) {
+        Some(w) => format!("{w}:{PROBE_VAR}/p"),
+        None => format!("{PROBE_VAR}/p"),
+    };
+    vec![(PROBE_VAR.to_string(), z.to_string()), ("WSLENV".to_string(), w)]
+}
+
+/// Ausgabe der Abfrage (siehe [`LOGIN_SCRIPT`]) oder `None` (Zeitlimit, Fehler). Startet ggf. die VM.
+pub fn login_probe(distro: &str, zsh_dir: Option<&str>) -> Option<String> {
+    if !distro.is_empty() && !valid_distro(distro) {
+        return None;
+    }
+    let env = login_env(zsh_dir, std::env::var("WSLENV").ok().as_deref());
+    let out = run_env(&login_args(distro), &env, SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Laufende Distributionen (`wsl.exe -l --running -q`; startet keine VM).
+pub fn running_distros() -> Option<Vec<String>> {
+    run(&["-l".into(), "--running".into(), "-q".into()], FAST_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated).map(|o| parse_distro_list(&o.stdout))
+}
+
 /// `wsl.exe`-Argumente: Ordner auflisten (`-e` = ohne Shell). `dir` muss [`validate_linux_path`] bestehen.
 pub fn list_args(distro: &str, dir: &str) -> Vec<String> {
     ["-d", distro, "-e", "ls", "-1", "-p", "-A", "--", dir].iter().map(|s| s.to_string()).collect()
@@ -524,8 +569,17 @@ const DRAIN_WAIT: Duration = Duration::from_secs(1);
 /// nach `timeout` wird der Prozess beendet. `None` = nicht startbar oder Zeit überschritten.
 #[cfg(windows)]
 fn run(args: &[String], timeout: Duration) -> Option<Output> {
+    run_env(args, &[], timeout)
+}
+
+/// Wie [`run`] mit zusätzlichen Umgebungsvariablen.
+#[cfg(windows)]
+fn run_env(args: &[String], env: &[(String, String)], timeout: Duration) -> Option<Output> {
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     run_cmd(cmd, timeout)
 }
 
@@ -570,6 +624,11 @@ fn run_cmd(mut cmd: std::process::Command, timeout: Duration) -> Option<Output> 
 
 #[cfg(not(windows))]
 fn run(_args: &[String], _timeout: Duration) -> Option<Output> {
+    None
+}
+
+#[cfg(not(windows))]
+fn run_env(_args: &[String], _env: &[(String, String)], _timeout: Duration) -> Option<Output> {
     None
 }
 
@@ -779,6 +838,16 @@ mod tests {
         let h = home_args("Ubuntu-24.04");
         assert_eq!(&h[..5], &["-d", "Ubuntu-24.04", "-e", "sh", "-c"]);
         assert!(!h[5].contains("Ubuntu"), "nichts Veränderliches in der Shell-Zeichenkette");
+        // Login-Shell (#57): feste Zeichenkette ohne `"` (wsl.exe zerlegt die Kommandozeile selbst)
+        let l = login_args("Ubuntu-24.04");
+        assert_eq!(&l[..5], &["-d", "Ubuntu-24.04", "-e", "sh", "-c"]);
+        assert!(!l[5].contains('"') && !l[5].contains("Ubuntu") && l[5].contains("getent passwd"));
+        assert_eq!(&login_args("")[..2], &["-e", "sh"], "Standard-Distribution ohne -d");
+        assert!(l[5].contains("IFS=") && l[5].contains("set -f") && l[5].contains("PDZ=1") && l[5].contains("/etc/shells"));
+        // Pfad über WSLENV /p (WSL rechnet ihn selbst um); ein vorhandenes WSLENV bleibt
+        assert_eq!(login_env(Some(r"C:\d\zsh"), None), vec![("PANELDECK_PROBE_Z".to_string(), r"C:\d\zsh".to_string()), ("WSLENV".to_string(), "PANELDECK_PROBE_Z/p".to_string())]);
+        assert_eq!(login_env(Some("x"), Some("A:B/u"))[1].1, "A:B/u:PANELDECK_PROBE_Z/p");
+        assert!(login_env(None, Some("A")).is_empty());
         // Pfade mit Anführungszeichen erreichen wsl.exe nie (WslExe prüft vor jedem Aufruf).
         assert_eq!(WslExe.is_dir("Ubuntu", "/tmp/x\" echo pwned; #"), DirCheck::Unknown);
         assert_eq!(WslExe.list("Ubuntu", "/tmp/x\" echo pwned; #/"), None);

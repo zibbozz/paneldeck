@@ -273,7 +273,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "run_command",
             level: Control,
             group: Group::Always,
-            description: "Run one single-line command in a shell session and wait until the prompt returns. Returns output (approximate), exit code (PowerShell/bash only; null for cmd) and whether it timed out. Needs shell integration (default on); not for Claude sessions or full-screen programs.",
+            description: "Run one single-line command in a shell session and wait until the prompt returns. Returns output (approximate), exit code (PowerShell, bash, zsh, fish; null for cmd) and whether it timed out. Needs shell integration (default on); not for Claude sessions or full-screen programs.",
             schema: schema(
                 json!({"session": session, "command": {"type": "string"}, "timeout_secs": {"type": "integer", "description": "1-600, default 60"}, "max_output_lines": {"type": "integer", "description": "default 200"}}),
                 &["session", "command"],

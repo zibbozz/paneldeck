@@ -468,9 +468,12 @@ fn escape_cancels_a_running_import_and_nothing_is_created() {
         // (deterministisch, ohne auf das Tempo des Rechners zu wetten). Die Oberfläche selbst bleibt dabei bedienbar.
         h.db.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         h.with(|ui, ctx, cx| ui.begin_project_import(ctx, cx, p, None));
-        let out = h.frame_out(vec![key_event(Key::Escape, true)]);
-        let _ = h.frame_out(vec![key_event(Key::Escape, false)]);
+        // Erst einen Frame ohne Eingabe zeichnen (der Dialog erscheint), dann Esc – sonst hängt es vom ersten Layout-Durchlauf ab,
+        // ob der Dialog im selben Frame schon Text zeigt (unter Linux/macOS nicht immer).
+        let out = h.frame_out(Vec::new());
         assert!(texts_of(&out).iter().any(|t| t == lang.t("Projekt wird importiert …", "Importing project …")), "{lang:?}: Dialog gezeigt");
+        let _ = h.frame_out(vec![key_event(Key::Escape, true)]);
+        let _ = h.frame_out(vec![key_event(Key::Escape, false)]);
         // Ob der Lauf hier noch „busy“ ist, hängt vom Tempo ab (Esc kann ihn abbrechen, bevor er die Sperre erreicht) – nicht prüfen.
         h.db.conn.execute_batch("ROLLBACK").unwrap();
         h.wait("abgebrochen", |h| !h.busy());

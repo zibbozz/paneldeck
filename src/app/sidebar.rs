@@ -521,6 +521,13 @@ impl App {
                     segs.push((format!("Exit {code}"), Color32::from_rgb(0xe0, 0x6c, 0x75)));
                 }
             }
+            // Verschachtelte Shell (ssh, tmux, Unter-Shell) ohne unsere Marken (#57): run_command nur ungefähr.
+            if !claude && !is_chat && e.live.as_ref().is_some_and(|s| {
+                let alt = s.alt_screen();
+                s.shell_state.lock().unwrap_or_else(|x| x.into_inner()).nested(alt)
+            }) {
+                segs.push((lang.t("ohne Shell-Integration", "without shell integration").to_string(), weak_c));
+            }
         }
         let has_notes = !e.meta.notes.trim().is_empty();
         let mut status_tip = String::new();

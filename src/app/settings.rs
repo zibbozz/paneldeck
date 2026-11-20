@@ -39,9 +39,11 @@ impl App {
                     lang.t("Modelle", "Models"),
                     // Index 11 (`palette_ui::SETTINGS_TAB`), angezeigt hinter „Darstellung“.
                     lang.t("Farben", "Colors"),
+                    // Index 12 (`TERMINAL_TAB`, #57), angezeigt hinter „Allgemein“.
+                    "Terminal",
                 ];
                 // Anzeigereihenfolge (die Indizes bleiben fest).
-                const ORDER: [usize; 12] = [0, 1, palette_ui::SETTINGS_TAB, 2, 3, 4, 5, 6, 7, 8, 9, models_ui::SETTINGS_TAB];
+                const ORDER: [usize; 13] = [0, TERMINAL_TAB, 1, palette_ui::SETTINGS_TAB, 2, 3, 4, 5, 6, 7, 8, 9, models_ui::SETTINGS_TAB];
                 ui.horizontal_wrapped(|ui| {
                     for i in ORDER {
                         let t = tabs[i];
@@ -88,15 +90,15 @@ impl App {
                                 state::clear_lang_override();
                             }
                         });
-                        let cur = self.shells.iter().find(|s| s.id == self.settings.default_shell).map(|s| s.label.clone()).unwrap_or_default();
+                        let cur = self.shells.iter().find(|s| s.id == self.settings.default_shell).map(|s| crate::shells::display_label(s, lang)).unwrap_or_default();
                         row(ui, lang.t("Standard-Shell", "Default shell"), lang.t("Für neue Sitzungen und Teilungen", "For new sessions and splits"), |ui| {
                             egui::ComboBox::from_id_salt("defshell").selected_text(cur).show_ui(ui, |ui| {
                                 for s in &self.shells {
-                                    ui.selectable_value(&mut self.settings.default_shell, s.id.clone(), &s.label);
+                                    ui.selectable_value(&mut self.settings.default_shell, s.id.clone(), crate::shells::display_label(s, lang));
                                 }
                             });
                         });
-                        row(ui, lang.t("Shell-Integration", "Shell integration"), lang.t("Befehlsmarken, Ordner-Tracking (wirkt für neue Sitzungen; ändert keine Profile)", "Command marks, folder tracking (applies to new sessions; does not change profiles)"), |ui| {
+                        row(ui, lang.t("Shell-Integration", "Shell integration"), lang.t("Befehlsmarken, Ordner-Tracking für PowerShell, cmd, bash, zsh und fish (wirkt für neue Sitzungen; ändert keine Profile oder Startdateien)", "Command marks, folder tracking for PowerShell, cmd, bash, zsh and fish (applies to new sessions; does not change profiles or startup files)"), |ui| {
                             style::toggle(ui, &mut self.settings.shell_integration);
                         });
                         // #175: kurzer Hinweis in der Zeile, die Abwägung ausführlich im Tooltip des Schalters.
@@ -470,7 +472,9 @@ impl App {
                         );
                     }
                     6 => {
-                        let shells: Vec<(String, String)> = self.shells.iter().map(|s| (s.id.clone(), s.label.clone())).collect();
+                        let shells: Vec<(String, String)> = self.shells.iter().map(|s| (s.id.clone(), crate::shells::display_label(s, lang))).collect();
+                        // WSL-Shells (Kennung, Distribution) für die Shell-Wahl im Profil (#57).
+                        let wsl_shells: Vec<(String, String)> = self.shells.iter().filter(|s| crate::shells::is_wsl(s) && !crate::shells::is_system_bash(&s.program)).map(|s| (s.id.clone(), crate::shells::wsl_distro_key(s))).collect();
                         let theme_names: Vec<String> = self.themes.iter().map(|t| t.name.clone()).collect();
                         ui.horizontal(|ui| {
                             if ui.button(lang.t("+ Neues Profil", "+ New profile")).clicked() {
@@ -522,6 +526,39 @@ impl App {
                                     }
                                 });
                             });
+                            if let Some((_, distro)) = wsl_shells.iter().find(|(i, _)| *i == p.shell_id).filter(|_| p.program.trim().is_empty()) {
+                                // Startet die Abfrage (Login-Shell, /etc/shells), falls noch nichts bekannt ist.
+                                let login = crate::shellinit::ensure_wsl_login(distro);
+                                let list = match &login {
+                                    crate::shellinit::Login::Known(i) => Some(i.shells.clone()),
+                                    _ => None,
+                                };
+                                let item = |path: &str| match crate::shellinit::Flavor::of_unix_shell(path) {
+                                    Some(_) => path.to_string(),
+                                    None => format!("{path} ({})", lang.t("ohne Integration", "without integration")),
+                                };
+                                row(ui, "Shell in WSL", lang.t("Automatisch = Login-Shell; Auswahl aus /etc/shells", "Automatic = login shell; choice from /etc/shells"), |ui| {
+                                    let auto = format!("{}{}", lang.t("Automatisch", "Automatic"), crate::shellinit::login_suffix(Some(&login), lang));
+                                    let cur = if p.login_shell.is_empty() { auto.clone() } else { item(&p.login_shell) };
+                                    egui::ComboBox::from_id_salt("proflogin").selected_text(cur).show_ui(ui, |ui| {
+                                        if ui.selectable_label(p.login_shell.is_empty(), &auto).clicked() {
+                                            p.login_shell.clear();
+                                        }
+                                        match &list {
+                                            Some(l) => {
+                                                for sh in l {
+                                                    if ui.selectable_label(p.login_shell == *sh, item(sh)).clicked() {
+                                                        p.login_shell = sh.clone();
+                                                    }
+                                                }
+                                            }
+                                            None => {
+                                                ui.label(RichText::new(lang.t("/etc/shells wird gelesen …", "Reading /etc/shells …")).small().color(style::dim(ui)));
+                                            }
+                                        }
+                                    });
+                                });
+                            }
                             row(ui, lang.t("Eigenes Programm", "Custom program"), lang.t("Überschreibt die Shell, z. B. ssh.exe oder wsl.exe", "Overrides the shell, e.g. ssh.exe or wsl.exe"), |ui| {
                                 ui.add(egui::TextEdit::singleline(&mut p.program).desired_width(240.0));
                             });
@@ -655,6 +692,7 @@ impl App {
                     models_ui::SETTINGS_TAB => self.models_settings_ui(ui, ctx),
                     palette_ui::SETTINGS_TAB => palette_ui::settings_view(ui, &mut self.settings.palette, lang),
                     8 => self.data_settings_ui(ui),
+                    TERMINAL_TAB => terminal_tab(ui, lang),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
                         ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – funktioniert offline; kontaktiert GitHub nur, wenn du nach Updates suchst oder die automatische Prüfung einschaltest.", "Terminal hub for Claude Code and many terminals – works offline; only contacts GitHub when you check for updates or switch on the automatic check.")).color(style::dim(ui)));
@@ -848,5 +886,35 @@ impl App {
             setup_fonts(ctx, &self.settings.terminal_font);
             self.applied_font = self.settings.terminal_font.clone();
         }
+    }
+}
+
+/// Index des Tabs „Terminal“ (#57; am Ende angehängt, damit die übrigen Indizes gelten).
+pub(super) const TERMINAL_TAB: usize = 12;
+
+/// Einstellungen → Terminal: Schnipsel für die Shell-Integration auf entfernten Rechnern (ssh) und in eigenen
+/// Unter-Shells, je Shell zum Kopieren (#57).
+fn terminal_tab(ui: &mut Ui, lang: Lang) {
+    ui.label(RichText::new(lang.t("Shell-Integration auf anderen Rechnern", "Shell integration on other machines")).strong());
+    ui.label(RichText::new(lang.t(
+        "In einer verschachtelten Shell (ssh, tmux, eine Unter-Shell) kommen keine Befehlsmarken von Paneldeck an; die Seitenleiste zeigt dann „ohne Shell-Integration“, und run_command liefert nur eine ungefähre Ausgabe. Mit diesen Zeilen in der Startdatei der Shell auf dem anderen Rechner meldet sie Prompt, Befehlsstart und Exit-Code wieder (ohne Ordner).",
+        "In a nested shell (ssh, tmux, a sub-shell) no command marks reach Paneldeck; the sidebar then shows “without shell integration” and run_command only returns approximate output. With these lines in the shell's startup file on the other machine it reports prompt, command start and exit code again (without the folder).",
+    )).small().color(style::dim(ui)));
+    ui.add_space(S2);
+    for (name, file, text) in [
+        ("bash", "~/.bashrc", crate::shellinit::REMOTE_BASH),
+        ("zsh", "~/.zshrc", crate::shellinit::REMOTE_ZSH),
+        ("fish", "~/.config/fish/conf.d/paneldeck.fish", crate::shellinit::REMOTE_FISH),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(name).strong());
+            ui.label(RichText::new(file).small().monospace().color(style::dim(ui)));
+            if ui.small_button(lang.t("Kopieren", "Copy")).clicked() {
+                ui.ctx().copy_text(text.to_string());
+            }
+        });
+        let mut t = text.to_string();
+        ui.add(egui::TextEdit::multiline(&mut t).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(text.lines().count()).interactive(false));
+        ui.add_space(S1);
     }
 }

@@ -100,6 +100,8 @@ struct Entry {
     budget_warned: bool,
     /// Aufgelöste Shell-Kennung beim Start (z. B. `wsl:Ubuntu` auch bei Profilen mit eigenem Programm).
     shell_eff: String,
+    /// Shell-Integration, mit der die Sitzung gestartet wurde (#57; zsh: PROMPT_EOL_MARK in `run_command` entfernen).
+    shell_flavor: Option<crate::shellinit::Flavor>,
     /// Chat-Sitzung (`meta.kind = chat`): Verlauf, Eingabe, laufende Antwort. Hängt an der Sitzung, nicht am Fenster.
     chat: Option<ChatState>,
     /// Beim letzten Start lief Claude (`spawn_into`). `meta.claude` ist die Einstellung für den nächsten Start (#170);
@@ -132,7 +134,7 @@ impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), shell_flavor: None, chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -1131,6 +1133,11 @@ impl App {
             Err(e) => (None, Some(e.message(settings.language))),
         };
         let shells = shells::detect();
+        crate::shellinit::init(&dir);
+        // Login-Shells laufender WSL-Distributionen im Hintergrund ermitteln (#57; andere beim ersten Sitzungsstart).
+        if shells.iter().any(shells::is_wsl) {
+            crate::shellinit::detect_running_wsl();
+        }
         let bg = std::sync::mpsc::channel::<String>();
         let mut app = App {
             settings,
@@ -1784,7 +1791,18 @@ impl App {
         if let Some(p) = self.profile(profile).filter(|p| !p.program.trim().is_empty()) {
             return Some(ShellSpec { id: custom_program_shell_id(p), label: p.name.clone(), program: p.program.clone(), args: split_args(&p.args) });
         }
-        self.shell_by_id(shell_id)
+        self.session_shell(shell_id, profile)
+    }
+
+    /// Shell einer Sitzung mit der Shell-Wahl ihres Profils (#57, „Shell in WSL“: `-e <pfad> -l` statt der Login-Shell).
+    fn session_shell(&self, shell_id: &str, profile: u64) -> Option<ShellSpec> {
+        let mut s = self.shell_by_id(shell_id)?;
+        if let Some(p) = self.profile(profile).filter(|p| p.program.trim().is_empty() && !p.login_shell.is_empty()) {
+            if shells::is_wsl(&s) && !shells::is_system_bash(&s.program) {
+                crate::shellinit::apply_login_override(&mut s.args, &p.login_shell);
+            }
+        }
+        Some(s)
     }
 
     /// Vorbelegung der Claude-Optionen im Dialog „Neue Sitzung“: letzte Wahl, sonst die Standards der Einstellungen.
@@ -1795,8 +1813,9 @@ impl App {
     /// Befehlszeile für Claude; zweiter Wert: eine neue Konversation beginnt; dritter: die tatsächlich gesetzten
     /// Optionen und die weggelassenen Pfade (#182).
     fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs, hooks::ConvBinding) {
-        let spec = self.shell_by_id(&meta.shell_id);
-        let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
+        let spec = self.session_shell(&meta.shell_id, meta.profile);
+        // Quoting nach der laufenden Shell (#57: in WSL die erkannte Login-Shell – zsh, fish …).
+        let kind = spec.as_ref().map(shells::quote_kind).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
         let is_wsl = shell_is_wsl(spec.as_ref(), &meta.shell_id);
         // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
@@ -1881,7 +1900,7 @@ impl App {
         entry.track = Default::default();
         entry.status_msg.clear();
         entry.perm_since = None;
-        let Some(mut shell) = self.shell_by_id(&entry.meta.shell_id) else {
+        let Some(mut shell) = self.session_shell(&entry.meta.shell_id, entry.meta.profile) else {
             entry.error = Some(state::t("Keine Shell gefunden", "No shell found").into());
             return;
         };
@@ -2068,17 +2087,23 @@ impl App {
         entry.shell_eff = shell.id.clone();
         entry.status = ClaudeStatus::Unknown;
         if self.settings.shell_integration {
-            let (extra_args, extra_env) = shells::integration(&shell);
-            shell.args.extend(extra_args);
-            for (k, v) in extra_env {
+            // zsh/fish (#57): Hilfsdateien im Datenordner; ein ZDOTDIR aus dem Profil bleibt das des Nutzers.
+            let plan = shells::integration(&shell, &self.dir, &crate::shellinit::EnvCtx { env: &env, inherit: self.settings.inherit_env });
+            entry.shell_flavor = plan.flavor;
+            shell.args.extend(plan.args);
+            for (k, v) in plan.env {
                 if wsl {
-                    // Variable an WSL durchreichen.
-                    if let Some(w) = env.iter_mut().find(|(n, _)| n == "WSLENV") {
-                        w.1 = format!("{}:{k}", w.1);
+                    // Variable an WSL durchreichen (Pfade mit /p: WSL rechnet sie nach der eigenen Einhänge-Konfiguration
+                    // um). Das zuletzt gesetzte WSLENV gilt – ein WSLENV aus dem Profil steht davor.
+                    let flag = if plan.path_vars.contains(&k) { "/p" } else { "" };
+                    if let Some(w) = env.iter_mut().rev().find(|(n, _)| n == "WSLENV") {
+                        w.1 = wslenv_with(&w.1, &k, flag);
                     }
                 }
                 env.push((k, v));
             }
+        } else {
+            entry.shell_flavor = None;
         }
         match Session::spawn(
             ctx,
@@ -3650,7 +3675,7 @@ impl App {
                 if let Some(e) = self.entries.get_mut(&self.focused) {
                     // Chat: Pfad unverändert ins Eingabefeld; Terminal: passend zur Shell gequotet.
                     let text = match &e.live {
-                        Some(s) => format!("{} ", pathfmt::for_shell(&s.shell_id, &p)),
+                        Some(s) => format!("{} ", pathfmt::for_shell(&s.spec, &p)),
                         None => p.clone(),
                     };
                     e.insert_text(&text, false);
@@ -4351,6 +4376,8 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         crate::platform::chrome::shutdown();
         self.save_for_exit();
+        // Hilfsdateien der zsh/fish-Integration (#57) entfernen.
+        crate::shellinit::remove_files(&self.dir);
     }
 }
 
@@ -5123,6 +5150,15 @@ fn shell_is_wsl(spec: Option<&ShellSpec>, shell_id: &str) -> bool {
 }
 
 /// Distribution einer WSL-Shell: aus der Kennung `wsl:<Distro>`, sonst aus `-d <Distro>` der Argumente; `None` = Standard.
+/// `WSLENV` mit `name` (und Kennzeichen wie `/p`) am Ende; ein früherer Eintrag desselben Namens fällt weg (sonst gälte
+/// womöglich der ohne `/p`, etwa ein `ZDOTDIR` aus dem Profil).
+fn wslenv_with(wslenv: &str, name: &str, flag: &str) -> String {
+    let mut parts: Vec<&str> = wslenv.split(':').filter(|p| !p.is_empty() && p.split('/').next() != Some(name)).collect();
+    let add = format!("{name}{flag}");
+    parts.push(&add);
+    parts.join(":")
+}
+
 fn wsl_distro_of(shell: &ShellSpec) -> Option<String> {
     shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args))
 }
