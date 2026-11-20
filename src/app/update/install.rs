@@ -73,14 +73,53 @@ pub fn is_appimage(b: &[u8]) -> bool {
 
 /// Die neue AppImage an den Platz der laufenden setzen (die alte bleibt als `<datei>.old`, bis die neue Version gestartet
 /// ist) und ausführbar machen. Die laufende Instanz läuft aus ihrem eingehängten Abbild weiter.
+/// Sicher gegen Symlinks und halb geschriebene Dateien: Die Datei muss eine echte Datei sein (kein Symlink); `<datei>.new`
+/// entsteht neu (`create_new`) mit den Rechten des Originals (lesbar = ausführbar), wird vor dem Umbenennen auf die Platte
+/// geschrieben (`fsync`), danach auch der Ordner.
 pub fn swap_appimage(file: &Path, new_bytes: &[u8]) -> Result<(), String> {
-    swap_exe(file, new_bytes)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("{}: {e}", file.display()))?;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+        let meta = std::fs::symlink_metadata(file).map_err(|e| err(file, e))?;
+        if !meta.file_type().is_file() {
+            return Err(format!("{}: {}", file.display(), crate::state::t("keine normale Datei (Symlink?)", "not a regular file (symlink?)")));
+        }
+        let orig = meta.permissions().mode() & 0o777;
+        // ausführbar, wo lesbar (0644 → 0755, 0600 → 0700)
+        let mode = orig | ((orig & 0o444) >> 2);
+        let new = suffixed(file, ".new");
+        let _ = std::fs::remove_file(&new);
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&new).map_err(|e| err(&new, e))?;
+        let written = f.write_all(new_bytes).and_then(|_| f.sync_all());
+        drop(f);
+        if let Err(e) = written.and_then(|_| std::fs::set_permissions(&new, std::fs::Permissions::from_mode(mode))) {
+            let _ = std::fs::remove_file(&new);
+            return Err(err(&new, e));
+        }
+        clear_old(file).inspect_err(|_| {
+            let _ = std::fs::remove_file(&new);
+        })?;
+        let old = suffixed(file, ".old");
+        std::fs::rename(file, &old).map_err(|e| {
+            let _ = std::fs::remove_file(&new);
+            err(file, e)
+        })?;
+        if let Err(e) = std::fs::rename(&new, file) {
+            let _ = std::fs::rename(&old, file);
+            let _ = std::fs::remove_file(&new);
+            return Err(err(file, e));
+        }
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        swap_exe(file, new_bytes)
+    }
 }
 
 /// `<p><ext>`

@@ -141,6 +141,10 @@ fn dolphin_menu(exe: &Path, args: &[String]) -> Result<String, String> {
 }
 
 fn nemo_action(exe: &Path, args: &[String], claude: bool, background: bool) -> Result<String, String> {
+    // Nemo expands its own %-tokens and does not know `%%`: refuse a literal `%` instead of guessing.
+    if exe.to_string_lossy().contains('%') || args.iter().any(|a| a.contains('%')) {
+        return Err(crate::state::t("„%“ im Programmpfad oder in den Argumenten wird von Nemo nicht unterstützt", "“%” in the program path or the arguments is not supported by Nemo").to_string());
+    }
     let (open, with_claude) = labels();
     let name = if claude { with_claude } else { open };
     let mut extra: Vec<&str> = Vec::new();
@@ -194,12 +198,17 @@ pub fn context_plan(on: bool, data: &Path, exe: &Path, args: &[String]) -> Resul
     Ok(ops)
 }
 
-/// Carry out a plan. A file to remove is only removed if it carries [`MARKER`] (a file of the user stays).
+/// Carry out a plan. A file to remove is only removed if it carries [`MARKER`], and a file is only (over)written if it
+/// does not exist yet or carries the marker (a file of the user stays untouched).
 pub fn apply(ops: &[FileOp]) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     for op in ops {
         match &op.content {
             Some(c) => {
+                // never overwrite a file of the user (same name, without our marker)
+                if std::fs::symlink_metadata(&op.path).is_ok() && !std::fs::read_to_string(&op.path).is_ok_and(|x| x.contains(MARKER)) {
+                    return Err(format!("{}: {}", op.path.display(), crate::state::t("Datei gibt es schon (nicht von Paneldeck) – nicht überschrieben", "file exists (not from Paneldeck) – not overwritten")));
+                }
                 if let Some(dir) = op.path.parent() {
                     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                 }
@@ -324,6 +333,10 @@ mod tests {
         assert!(!script.exists());
         assert!(!t.join("kio/servicemenus/paneldeck.desktop").exists());
         assert!(foreign.exists(), "files without the marker are never removed");
+        // … and never overwritten
+        assert!(apply(&context_plan(true, &t, &exe, &[]).unwrap()).is_err());
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "[Nemo Action]\nName=mine\n");
+        assert!(context_plan(true, &t, &PathBuf::from("/opt/100%/paneldeck"), &[]).is_err(), "Nemo cannot quote %");
         let _ = std::fs::remove_dir_all(&t);
     }
 }

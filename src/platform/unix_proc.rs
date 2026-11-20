@@ -722,6 +722,10 @@ fn walk(snap: &HashMap<u32, Stat>, pid: u32, born: u64) -> Vec<u32> {
 /// Is the shell in the foreground of its terminal (nothing running in it)? The foreground process group of the
 /// controlling terminal is the shell's own group, and no other process is in that group (a shell without job control
 /// runs its commands in its own group). `None` if unknown.
+///
+/// Limit: a program can put itself into the background (`tcsetpgrp` back to the shell) and keep running, and a short
+/// command can end between two looks; this is a snapshot, not a guarantee. Paneldeck does not use it on Linux/macOS
+/// yet (`shells::foreground_visible` is Windows-only).
 pub fn shell_is_idle(shell: u32) -> Option<bool> {
     let s = sys::stat(shell).filter(|s| !s.zombie)?;
     if s.tty == 0 || s.tpgid <= 0 {

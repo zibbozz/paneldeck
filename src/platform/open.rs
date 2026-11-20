@@ -24,7 +24,7 @@ pub fn launch(target: &str) -> bool {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        std::process::Command::new("xdg-open").arg(target).spawn().is_ok()
+        xdg_open(std::ffi::OsStr::new(target))
     }
 }
 
@@ -43,8 +43,31 @@ pub fn reveal(target: &str) {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         if let Some(dir) = Path::new(target).parent() {
-            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+            xdg_open(dir.as_os_str());
         }
+    }
+}
+
+/// Linux: `xdg-open` in the background and waited for (no zombie). A path that starts with `-` would be read as an
+/// option: it is made `./-…`. `false` if it could not be started.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn xdg_open(target: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let arg: std::ffi::OsString = if target.as_bytes().starts_with(b"-") {
+        let mut s = std::ffi::OsString::from("./");
+        s.push(target);
+        s
+    } else {
+        target.to_owned()
+    };
+    match std::process::Command::new("xdg-open").arg(&arg).stdin(std::process::Stdio::null()).spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -56,7 +79,7 @@ pub fn folder(dir: &Path) {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        xdg_open(dir.as_os_str());
     }
     #[cfg(target_os = "macos")]
     let _ = dir;
@@ -74,7 +97,7 @@ pub fn show_in_file_manager(path: &str, is_dir: bool) {
         let p = Path::new(path);
         let target = if is_dir { Some(p) } else { p.parent() };
         if let Some(t) = target {
-            let _ = std::process::Command::new("xdg-open").arg(t).spawn();
+            xdg_open(t.as_os_str());
         }
     }
     #[cfg(target_os = "macos")]
