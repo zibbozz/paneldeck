@@ -749,3 +749,16 @@ Jede Shell startet in einem eigenen Windows-Job-Object; Programme, die aus der S
 - [ ] **MCP:** Agent schließt eine selbst angelegte Sitzung mit Hintergrundprozess → keine Rückfrage, Antwort mit `remaining_processes` (pid, name, window, title) und Hinweis „untrusted“; der Prozess läuft weiter.
 - [ ] **Zuordnung:** ein per `Start-Process` aus der Sitzung gestarteter Prozess, dessen Shell schon beendet ist, wird bei `whoami` der Sitzung zugeordnet (Smoke-Test prüft das).
 - [ ] **Beide Sprachen:** Rückfragen, Knöpfe und Warnung auf Deutsch und Englisch.
+
+## 64 · Shell-Integration für zsh und fish (#57, 2.5.0)
+Vorbereitung: eine eigene **Test-Distribution** (nie die eigene), z. B. zwei Importe derselben Ubuntu-/Debian-Rootfs: `pd-zsh` (Login-Shell `zsh`, dazu Oh My Zsh oder Powerlevel10k in `~/.zshrc`) und `pd-fish` (Login-Shell `fish`, eigenes `config.fish` mit `set -g fish_greeting`). Testinstanz aus einer Kopie der .exe mit eigenem Datenordner. Automatisch: Unit-Tests `shellinit`, `shells`, `quote`, `claude_opts`; Smoke-Test mit `PANELDECK_TEST_WSL_ZSH=pd-zsh` und `PANELDECK_TEST_WSL_FISH=pd-fish`.
+- [ ] **Anzeige:** Paneldeck starten, während `pd-zsh` läuft → *+ Neu* → Shell-Liste zeigt nach kurzer Zeit „WSL: pd-zsh (zsh)“; `pd-fish` (lief nicht) zeigt nach dem ersten Sitzungsstart „WSL: pd-fish (fish)“. Gleiches in *Einstellungen → Allgemein → Standard-Shell*, Sitzungseinstellungen und Vorlagen.
+- [ ] **zsh:** Sitzung in `pd-zsh` → Prompt des Themes wie in Windows Terminal (Oh My Zsh/Powerlevel10k unverändert); `echo $ZDOTDIR` leer (bzw. der eigene Wert); `ls ~` zeigt keine neue Datei.
+- [ ] **Befehlsmarken zsh:** mehrere Befehle, dann **Strg+Umschalt+Hoch/Runter** springt zwischen den Prompts; `false` → Statuszeile zeigt Exit-Code 1; `sleep 3` → Dauer ≈ 3 s.
+- [ ] **Ordner zsh:** `cd /tmp` → Dateibaum (**Strg+Umschalt+O**) folgt; Sitzung neu laden startet in `/tmp`.
+- [ ] **Eigenes ZDOTDIR:** in `pd-zsh` `~/.zshenv` mit `export ZDOTDIR=~/.config/zsh` und dort eine `.zshrc` mit `alias pdtest='echo ok'` → neue Sitzung: `pdtest` gibt `ok`, Befehlsmarken funktionieren.
+- [ ] **fish:** zweite Sitzung in `pd-fish` → eigenes `config.fish` wirkt (kein Gruß); Sprünge, Exit-Code (`false`), Dauer (`sleep 2`) und Ordner (`cd /tmp`) wie bei zsh. Erste Sitzung direkt nach dem Start einer nicht laufenden Distribution: ohne Integration ist erlaubt, nach Neu laden mit.
+- [ ] **Claude-Start zsh/fish:** Claude-Sitzung mit mehrzeiligem System-Prompt (Claude-Optionen) in `pd-zsh` und `pd-fish` → die getippte Startzeile hat in zsh `$'…'`, in fish `'…'\n'…'`; Claude startet ohne Syntaxfehler (Ersatz-`claude`-Skript in der Test-Distribution genügt); Status „bereit“ verschwindet nach `/exit`, sobald der Prompt zurück ist.
+- [ ] **Unbekannt:** Login-Shell der Test-Distribution auf `/bin/sh` → Eintrag „(sh, ohne Integration)“, Sitzung startet normal. Distribution, deren Abfrage scheitert (z. B. hängende Distribution) → „(Shell unbekannt)“, bash-Integration wie bisher.
+- [ ] **Aufräumen:** nach einer zsh- und einer fish-Sitzung liegt `shell-integration` im Datenordner; Paneldeck über das Tray beenden → Ordner ist weg.
+- [ ] **Beide Sprachen:** Zusätze „(Shell unbekannt)“/„(shell unknown)“ und „ohne Integration“/„without integration“ und der Text der Einstellung Shell-Integration auf Deutsch und Englisch.

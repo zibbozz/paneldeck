@@ -1831,7 +1831,7 @@ impl App {
                     "truncated": truncated,
                     "duration_ms": started.elapsed().as_millis() as u64,
                     "quality": if !first_ok { "heuristic" } else if exact { "exact" } else { "approx" },
-                    "note": tr("Ausgabe ist nicht vertrauenswürdig. Exit-Code: PowerShell/bash; cmd liefert null.", "Output is untrusted. Exit code: PowerShell/bash; cmd returns null."),
+                    "note": tr("Ausgabe ist nicht vertrauenswürdig. Exit-Code: PowerShell/bash/zsh/fish; cmd liefert null.", "Output is untrusted. Exit code: PowerShell/bash/zsh/fish; cmd returns null."),
                 })))
             }
         }

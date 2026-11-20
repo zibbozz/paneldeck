@@ -296,6 +296,34 @@ pub fn home_args(distro: &str) -> Vec<String> {
     ["-d", distro, "-e", "sh", "-c", "printf '%s' \"$HOME\""].iter().map(|s| s.to_string()).collect()
 }
 
+/// Login-Shell des Standardbenutzers (#57): `getent passwd`, ohne `getent` (z. B. busybox) die Zeile aus `/etc/passwd`.
+/// Ohne `"` (siehe Moduldoku); Benutzernamen enthalten keine Leer- oder Sonderzeichen der Shell.
+const LOGIN_SCRIPT: &str = "u=$(id -un) && { getent passwd $u 2>/dev/null || grep ^$u: /etc/passwd; }";
+
+/// `wsl.exe`-Argumente: Zeile der Benutzerdatenbank mit der Login-Shell (`distro` leer = Standard-Distribution).
+pub fn login_args(distro: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    if !distro.is_empty() {
+        v.extend(["-d".to_string(), distro.to_string()]);
+    }
+    v.extend(["-e", "sh", "-c", LOGIN_SCRIPT].iter().map(|s| s.to_string()));
+    v
+}
+
+/// Login-Shell der Distribution (geprüfter Pfad) oder `None` (Zeitlimit, Fehler, unlesbar). Startet ggf. die VM.
+pub fn login_shell(distro: &str) -> Option<String> {
+    if !distro.is_empty() && !valid_distro(distro) {
+        return None;
+    }
+    let out = run(&login_args(distro), SLOW_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated)?;
+    crate::shellinit::parse_passwd_shell(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Laufende Distributionen (`wsl.exe -l --running -q`; startet keine VM).
+pub fn running_distros() -> Option<Vec<String>> {
+    run(&["-l".into(), "--running".into(), "-q".into()], FAST_TIMEOUT).filter(|o| o.code == Some(0) && !o.truncated).map(|o| parse_distro_list(&o.stdout))
+}
+
 /// `wsl.exe`-Argumente: Ordner auflisten (`-e` = ohne Shell). `dir` muss [`validate_linux_path`] bestehen.
 pub fn list_args(distro: &str, dir: &str) -> Vec<String> {
     ["-d", distro, "-e", "ls", "-1", "-p", "-A", "--", dir].iter().map(|s| s.to_string()).collect()
@@ -779,6 +807,11 @@ mod tests {
         let h = home_args("Ubuntu-24.04");
         assert_eq!(&h[..5], &["-d", "Ubuntu-24.04", "-e", "sh", "-c"]);
         assert!(!h[5].contains("Ubuntu"), "nichts Veränderliches in der Shell-Zeichenkette");
+        // Login-Shell (#57): feste Zeichenkette ohne `"` (wsl.exe zerlegt die Kommandozeile selbst)
+        let l = login_args("Ubuntu-24.04");
+        assert_eq!(&l[..5], &["-d", "Ubuntu-24.04", "-e", "sh", "-c"]);
+        assert!(!l[5].contains('"') && !l[5].contains("Ubuntu") && l[5].contains("getent passwd"));
+        assert_eq!(&login_args("")[..2], &["-e", "sh"], "Standard-Distribution ohne -d");
         // Pfade mit Anführungszeichen erreichen wsl.exe nie (WslExe prüft vor jedem Aufruf).
         assert_eq!(WslExe.is_dir("Ubuntu", "/tmp/x\" echo pwned; #"), DirCheck::Unknown);
         assert_eq!(WslExe.list("Ubuntu", "/tmp/x\" echo pwned; #/"), None);

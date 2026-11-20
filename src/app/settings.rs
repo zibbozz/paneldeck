@@ -88,15 +88,15 @@ impl App {
                                 state::clear_lang_override();
                             }
                         });
-                        let cur = self.shells.iter().find(|s| s.id == self.settings.default_shell).map(|s| s.label.clone()).unwrap_or_default();
+                        let cur = self.shells.iter().find(|s| s.id == self.settings.default_shell).map(|s| crate::shells::display_label(s, lang)).unwrap_or_default();
                         row(ui, lang.t("Standard-Shell", "Default shell"), lang.t("Für neue Sitzungen und Teilungen", "For new sessions and splits"), |ui| {
                             egui::ComboBox::from_id_salt("defshell").selected_text(cur).show_ui(ui, |ui| {
                                 for s in &self.shells {
-                                    ui.selectable_value(&mut self.settings.default_shell, s.id.clone(), &s.label);
+                                    ui.selectable_value(&mut self.settings.default_shell, s.id.clone(), crate::shells::display_label(s, lang));
                                 }
                             });
                         });
-                        row(ui, lang.t("Shell-Integration", "Shell integration"), lang.t("Befehlsmarken, Ordner-Tracking (wirkt für neue Sitzungen; ändert keine Profile)", "Command marks, folder tracking (applies to new sessions; does not change profiles)"), |ui| {
+                        row(ui, lang.t("Shell-Integration", "Shell integration"), lang.t("Befehlsmarken, Ordner-Tracking für PowerShell, cmd, bash, zsh und fish (wirkt für neue Sitzungen; ändert keine Profile oder Startdateien)", "Command marks, folder tracking for PowerShell, cmd, bash, zsh and fish (applies to new sessions; does not change profiles or startup files)"), |ui| {
                             style::toggle(ui, &mut self.settings.shell_integration);
                         });
                         // #175: kurzer Hinweis in der Zeile, die Abwägung ausführlich im Tooltip des Schalters.
@@ -470,7 +470,7 @@ impl App {
                         );
                     }
                     6 => {
-                        let shells: Vec<(String, String)> = self.shells.iter().map(|s| (s.id.clone(), s.label.clone())).collect();
+                        let shells: Vec<(String, String)> = self.shells.iter().map(|s| (s.id.clone(), crate::shells::display_label(s, lang))).collect();
                         let theme_names: Vec<String> = self.themes.iter().map(|t| t.name.clone()).collect();
                         ui.horizontal(|ui| {
                             if ui.button(lang.t("+ Neues Profil", "+ New profile")).clicked() {

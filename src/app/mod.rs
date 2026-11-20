@@ -1126,6 +1126,10 @@ impl App {
             Err(e) => (None, Some(e.message(settings.language))),
         };
         let shells = shells::detect();
+        // Login-Shells laufender WSL-Distributionen im Hintergrund ermitteln (#57; andere beim ersten Sitzungsstart).
+        if shells.iter().any(shells::is_wsl) {
+            crate::shellinit::detect_running_wsl();
+        }
         let bg = std::sync::mpsc::channel::<String>();
         let mut app = App {
             settings,
@@ -1785,7 +1789,8 @@ impl App {
     /// Optionen und die weggelassenen Pfade (#182).
     fn claude_command(&self, meta: &mut SessionMeta, l: &Launch) -> (String, bool, crate::claude_opts::LaunchArgs, hooks::ConvBinding) {
         let spec = self.shell_by_id(&meta.shell_id);
-        let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
+        // Quoting nach der laufenden Shell (#57: in WSL die erkannte Login-Shell – zsh, fish …).
+        let kind = spec.as_ref().map(shells::quote_kind).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
         let is_wsl = shell_is_wsl(spec.as_ref(), &meta.shell_id);
         // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
@@ -2056,9 +2061,10 @@ impl App {
         entry.shell_eff = shell.id.clone();
         entry.status = ClaudeStatus::Unknown;
         if self.settings.shell_integration {
-            let (extra_args, extra_env) = shells::integration(&shell);
-            shell.args.extend(extra_args);
-            for (k, v) in extra_env {
+            // zsh/fish (#57): Hilfsdateien im Datenordner; ein ZDOTDIR aus dem Profil bleibt das des Nutzers.
+            let plan = shells::integration(&shell, &self.dir, &env);
+            shell.args.extend(plan.args);
+            for (k, v) in plan.env {
                 if wsl {
                     // Variable an WSL durchreichen.
                     if let Some(w) = env.iter_mut().find(|(n, _)| n == "WSLENV") {
@@ -4336,6 +4342,8 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         crate::platform::chrome::shutdown();
         self.save_for_exit();
+        // Hilfsdateien der zsh/fish-Integration (#57) entfernen.
+        crate::shellinit::remove_files(&self.dir);
     }
 }
 
