@@ -21,6 +21,7 @@ fn ctx(d: &Path) -> Ctx {
     Ctx {
         data_dir: d.to_path_buf(),
         backup_dir: d.join("backups"),
+        safety_dir: None,
         base_dir: d.to_path_buf(),
         open_ids: vec![1, 2],
         exe: PathBuf::from(r"C:\pd\paneldeck.exe"),
@@ -113,10 +114,14 @@ fn sizes_counts_and_orphans() {
     assert!(!s.visible(Item::RunTemp) && !s.visible(Item::HotExit) && !s.visible(Item::MaintenanceBackups), "optionale Einträge ohne Ordner fehlen");
     put(&d.join("hot-exit").join("a").join("buf.txt"), 3);
     put(&d.join("tmp").join(RUN_TEMP).join("1").join("paneldeck.exe"), 9);
-    put(&d.join("backups").join("maintenance-20260101.zip"), 11);
+    put(&d.join("backups").join("maintenance-20260101-120000.db"), 11);
+    // fremde Dateien mit „maintenance“ im Namen gehören nicht dazu
+    put(&d.join("backups").join("maintenance-20260101.zip"), 13);
+    put(&d.join("backups").join("my-maintenance-notes.db"), 13);
     let s = scan(&c);
     assert!(s.visible(Item::RunTemp) && s.visible(Item::HotExit) && s.visible(Item::MaintenanceBackups));
     assert_eq!(amount(Item::HotExit, s.found(Item::HotExit).unwrap(), &o, now), (3, 1, 0));
+    assert_eq!(amount(Item::MaintenanceBackups, s.found(Item::MaintenanceBackups).unwrap(), &o, now), (11, 1, 0));
     // Doppelt gewählte Dateien zählen einmal
     let (bytes, files) = total(&s, &sel(&[Item::ScrollbackAll, Item::ScrollbackOrphaned]), &o, now);
     assert_eq!((bytes, files), (300, 2));
@@ -128,14 +133,14 @@ fn age_filter_and_backup_keep() {
     let now = SystemTime::now();
     let old = now - Duration::from_secs(40 * 86_400);
     let f = |p: &str, m: SystemTime| FileEntry { path: PathBuf::from(p), bytes: 10, modified: Some(m) };
-    let found = Found { files: vec![f("1.txt", now), f("2.txt", old)], entries: vec![] };
+    let found = Found { files: vec![f("1.txt", now), f("2.txt", old)], ..Default::default() };
     let o = Opts { older_than_days: Some(30), ..Opts::default() };
     let names: Vec<&Path> = selected_files(Item::ScrollbackAll, &found, &o, now).iter().map(|e| e.path.as_path()).collect();
     assert_eq!(names, [Path::new("2.txt")]);
     assert_eq!(selected_files(Item::ScrollbackAll, &found, &Opts::default(), now).len(), 2);
     // Der Filter gilt nur für den Verlauf
     assert_eq!(selected_files(Item::Clipboard, &found, &o, now).len(), 2);
-    let b = Found { files: (0..5).map(|i| f(&format!("b{i}"), now)).collect(), entries: vec![] };
+    let b = Found { files: (0..5).map(|i| f(&format!("b{i}"), now)).collect(), ..Default::default() };
     let keep = |n| selected_files(Item::DbBackups, &b, &Opts { keep_backups: n, ..Opts::default() }, now).iter().map(|e| e.path.to_string_lossy().to_string()).collect::<Vec<_>>();
     assert_eq!(keep(3), ["b3", "b4"], "neueste zuerst: die ersten N bleiben");
     assert_eq!(keep(0).len(), 5);
@@ -254,7 +259,7 @@ fn pending_runs_at_start_without_integration() {
         done: vec![done.clone()],
     };
     schedule(&d, &p).unwrap();
-    let r = apply_pending(&d, || d.join("never")).expect("vorgemerkt");
+    let r = apply_pending(&d, || d.join("bk")).expect("vorgemerkt");
     assert!(!d.join(PENDING_FILE).exists(), "Vormerkung verbraucht");
     assert!(apply_pending(&d, || d.join("never")).is_none());
     assert_eq!(r[0], done, "Ergebnisse des laufenden Teils stehen vorn");
@@ -449,4 +454,156 @@ fn formatting_in_both_languages() {
     assert_eq!(fmt_amount(0, 0, 0, Lang::De), "0 B, 0 Dateien");
     assert_eq!(ItemReport::new("profile:work").label(Lang::De), "Profil „work“");
     assert_eq!(ItemReport::new("db_backup").label(Lang::En), "Database backup first");
+}
+
+#[test]
+fn maintenance_backups_match_only_paneldecks_own_names() {
+    for ok in ["maintenance-20260101-120000.db", "maintenance-20261231-235959-2.db"] {
+        assert!(is_maintenance_backup_name(ok), "{ok}");
+    }
+    for bad in [
+        "maintenance-20260101.zip",
+        "maintenance-20260101-120000.zip",
+        "Maintenance-20260101-120000.db",
+        "my-maintenance-20260101-120000.db",
+        "maintenance-20261301-120000.db",
+        "maintenance-20260101-120000-.db",
+        "maintenance-20260101-120000-2-3.db",
+        "maintenance-2026011-120000.db",
+        "notes-maintenance.db",
+    ] {
+        assert!(!is_maintenance_backup_name(bad), "{bad}");
+    }
+}
+
+#[test]
+fn pending_never_takes_the_backup_dir_from_the_file() {
+    let d = tmp("pending-bk");
+    make_db(&d.join(crate::db::FILE));
+    // Ein fremder Ordner mit einer Sicherung, die beim Zurücksetzen gelöscht würde
+    let foreign = tmp("pending-foreign");
+    put(&foreign.join("auto-20250101-000000.db"), 4);
+    let p = Pending { version: 1, items: vec!["database".into()], backup_dir: Some(foreign.clone()), ..Default::default() };
+    schedule(&d, &p).unwrap();
+    let here = d.join("backups");
+    let r = apply_pending(&d, || here.clone()).unwrap();
+    assert!(r.iter().all(|x| x.ok()), "{r:?}");
+    assert!(r.iter().any(|x| x.id == "pending" && !x.notes.is_empty()), "Abweichung wird genannt");
+    assert_eq!(crate::backup::list(&here).len(), 1, "Sicherung im Ordner dieses Starts");
+    assert_eq!(crate::backup::list(&foreign).len(), 1, "fremder Ordner unberührt");
+    // Zurücksetzen mit fremdem Ordner in der Datei: dessen Dateien bleiben
+    schedule(&d, &Pending { version: 1, items: vec!["factory_reset".into()], backup_dir: Some(foreign.clone()), ..Default::default() }).unwrap();
+    let r = apply_pending(&d, || d.join("backups")).unwrap();
+    assert!(r.iter().filter(|x| x.id != "pending").all(|x| x.ok()), "{r:?}");
+    assert!(foreign.join("auto-20250101-000000.db").exists());
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&foreign);
+}
+
+#[test]
+fn zip_backup_strips_credentials_from_copies_and_the_process_list() {
+    let d = tmp("zip-cred");
+    let key = r#"{"llm_servers": [{"id": "a", "name": "L", "kind": "openai", "url": "http://127.0.0.1:1", "api_key": "U0VDUkVU"}], "theme": "Dracula"}"#;
+    std::fs::write(d.join("settings.json"), key).unwrap();
+    std::fs::write(d.join("settings.json.bak-20260101-000000"), key).unwrap();
+    std::fs::write(d.join("settings.json.bak"), key).unwrap();
+    // eine kaputte Kopie mit Schlüssel: bleibt draußen
+    std::fs::write(d.join("settings.defekt-123.json"), r#"{"llm_servers": [{"api_key": "U0VDUkVU""#).unwrap();
+    std::fs::write(d.join("processes.json"), r#"{"version":1,"processes":[{"id":1,"name":"x","command":"y","env":[{"name":"TOKEN","value_protected":"QkxPQg=="}]}]}"#).unwrap();
+    std::fs::write(d.join("processes.defekt-5.json"), "kaputt QkxPQg==").unwrap();
+    // eine andere JSON-Datei mit Server-Liste
+    std::fs::write(d.join("other.json"), key).unwrap();
+    std::fs::write(d.join("notes.txt"), "api_key bleibt als Text").unwrap();
+    let entries = zip::data_folder_entries(&d, None).unwrap();
+    let get = |n: &str| entries.iter().find(|(x, _)| x == n).map(|(_, b)| String::from_utf8(b.clone()).unwrap());
+    for n in ["settings.json", "settings.json.bak-20260101-000000", "settings.json.bak", "other.json"] {
+        let s = get(n).unwrap_or_else(|| panic!("{n} fehlt"));
+        assert!(!s.contains("U0VDUkVU") && !s.contains("api_key") && s.contains("Dracula"), "{n}: {s}");
+    }
+    assert!(get("settings.defekt-123.json").is_none() && get("processes.defekt-5.json").is_none(), "unlesbare Kopien bleiben draußen");
+    let p = get("processes.json").unwrap();
+    assert!(!p.contains("QkxPQg==") && !p.contains("value_protected") && p.contains("TOKEN"), "{p}");
+    assert_eq!(get("notes.txt").unwrap(), "api_key bleibt als Text");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn reset_writes_integration_copies_next_to_the_zip() {
+    let d = tmp("safety");
+    let out = tmp("safety-out");
+    let exe = PathBuf::from(r"C:\pd\paneldeck.exe");
+    let cj = out.join("src.claude.json");
+    std::fs::write(&cj, r#"{"mcpServers": {"paneldeck": {"command": "C:\\pd\\paneldeck.exe", "args": ["mcp"]}}}"#).unwrap();
+    let c = Ctx {
+        integ_override: Some(integ::State { claude_json: Some(cj.clone()), claude_json_servers: vec!["paneldeck".into()], ..Default::default() }),
+        exe,
+        safety_dir: Some(out.clone()),
+        ..ctx(&d)
+    };
+    let r = execute(&c, &scan(&c), &sel(&[Item::ClaudeJson]), &Opts { backup_db: false, ..Opts::default() }, Phase::Live);
+    assert!(r[0].ok(), "{r:?}");
+    let baks: Vec<_> = walk(&out).into_iter().filter(|f| f.path.file_name().unwrap().to_string_lossy().starts_with("claude.json-")).collect();
+    assert_eq!(baks.len(), 1, "Kopie neben der ZIP-Datei");
+    assert!(!d.join("backups").exists(), "nicht im Datenordner (der wird gelöscht)");
+    let shown = baks[0].path.display().to_string();
+    assert!(r[0].notes.iter().any(|(de, en)| de.contains(&shown) && en.contains(&shown)), "Bericht nennt den echten Ort");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Einen Ordner-Link anlegen (Windows: Junction, sonst Symlink). `false`, wenn die Plattform das hier nicht erlaubt.
+fn make_dir_link(target: &Path, link: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+            && link.exists()
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+}
+
+#[test]
+fn linked_root_folders_are_not_followed() {
+    let d = tmp("link");
+    let outside = tmp("link-target");
+    put(&outside.join("keep.png"), 10);
+    put(&outside.join("sub").join("7.txt"), 10);
+    put(&outside.join("1.txt"), 10);
+    if !make_dir_link(&outside, &d.join("clipboard")) || !make_dir_link(&outside, &d.join("scrollback")) {
+        eprintln!("Ordner-Links hier nicht möglich - Test übersprungen");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&outside);
+        return;
+    }
+    assert!(root_is_link(&d.join("clipboard")));
+    assert!(walk(&d.join("clipboard")).is_empty());
+    let c = ctx(&d);
+    let s = scan(&c);
+    let clip = s.found(Item::Clipboard).unwrap();
+    assert!(clip.files.is_empty() && clip.linked == [d.join("clipboard")]);
+    assert!(s.found(Item::ScrollbackAll).unwrap().files.is_empty());
+    let r = execute(&c, &s, &sel(&[Item::Clipboard, Item::ScrollbackAll]), &Opts { backup_db: false, ..Opts::default() }, Phase::Live);
+    assert!(r.iter().all(|x| x.ok() && x.files == 0), "{r:?}");
+    assert!(r.iter().all(|x| x.notes.iter().any(|(_, en)| en.contains("is a link"))), "als nicht berührt gemeldet: {r:?}");
+    assert!(outside.join("keep.png").exists() && outside.join("1.txt").exists() && outside.join("sub").join("7.txt").exists(), "Ziel unberührt");
+    // Zurücksetzen beim Start: das Ziel bleibt ebenfalls
+    schedule(&d, &Pending { version: 1, items: vec!["factory_reset".into()], ..Default::default() }).unwrap();
+    let _ = apply_pending(&d, || d.join("backups"));
+    assert!(outside.join("keep.png").exists() && outside.join("sub").join("7.txt").exists(), "Ziel unberührt nach dem Zurücksetzen");
+    #[cfg(windows)]
+    {
+        let _ = std::fs::remove_dir(d.join("clipboard"));
+        let _ = std::fs::remove_dir(d.join("scrollback"));
+    }
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&outside);
 }

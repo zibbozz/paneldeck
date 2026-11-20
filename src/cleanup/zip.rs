@@ -1,9 +1,11 @@
 //! ZIP-Sicherung des Datenordners vor „Paneldeck komplett zurücksetzen“ (#307). Minimaler Schreiber (Deflate über
 //! `miniz_oxide`, UTF-8-Namen, kein ZIP64 – über 4 GB bzw. 65535 Einträge wird abgelehnt).
 //!
-//! Ohne Zugangsdaten: In `settings.json` fallen die gespeicherten API-Schlüssel der Modell-Server weg (sie liegen ohnehin
-//! nur verschlüsselt für diesen Windows-Benutzer dort). Ausgelassen werden außerdem Sperre, IPC-Datei (Token), andere
-//! Profile und die Vormerkung; die Datenbank kommt als konsistente Kopie (`VACUUM INTO`) hinein.
+//! Ohne Zugangsdaten: In `settings.json` und ihren Kopien (`.bak-*`, `.defekt-*`) fallen die gespeicherten API-Schlüssel
+//! der Modell-Server weg, in `processes.json` (und Kopien) die Werte der Umgebungsvariablen (beides liegt ohnehin nur
+//! verschlüsselt für diesen Windows-Benutzer dort); unlesbare Kopien solcher Dateien bleiben draußen ([`sanitized`]).
+//! Ausgelassen werden außerdem Sperre, IPC-Datei (Token), andere Profile und die Vormerkung; die Datenbank kommt als
+//! konsistente Kopie (`VACUUM INTO`) hinein.
 
 use super::FileEntry;
 use std::io::Write;
@@ -27,18 +29,54 @@ fn dos_time() -> (u16, u16) {
     (time, date)
 }
 
-/// `settings.json` ohne API-Schlüssel (`llm_servers[].api_key`). Unlesbares JSON bleibt draußen (`None`).
-pub fn strip_credentials(settings: &[u8]) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(settings).ok()?;
-    let mut v: serde_json::Value = serde_json::from_str(crate::state::strip_bom(text)).ok()?;
+/// Zugangsdaten aus einem JSON-Wert entfernen: `llm_servers[].api_key` (Einstellungen) und
+/// `processes[].env[].value_protected` (Werte der Umgebungsvariablen der Prozessliste). `true`, wenn etwas entfernt wurde.
+fn strip_value(v: &mut serde_json::Value) -> bool {
+    let mut changed = false;
     if let Some(list) = v.get_mut("llm_servers").and_then(|l| l.as_array_mut()) {
         for s in list {
             if let Some(o) = s.as_object_mut() {
-                o.remove("api_key");
+                changed |= o.remove("api_key").is_some();
             }
         }
     }
-    serde_json::to_vec_pretty(&v).ok()
+    if let Some(list) = v.get_mut("processes").and_then(|l| l.as_array_mut()) {
+        for p in list {
+            if let Some(env) = p.get_mut("env").and_then(|e| e.as_array_mut()) {
+                for e in env {
+                    if let Some(o) = e.as_object_mut() {
+                        changed |= o.remove("value_protected").is_some();
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Kann die Datei Zugangsdaten enthalten? Einstellungen und Prozessliste samt ihren Kopien (`settings.json.bak-*`,
+/// `settings.defekt-*.json`, `processes.defekt-*.json` …) – nach dem Namen, unabhängig von der Endung.
+fn holds_credentials(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    ["settings.", "settings-", "processes.", "processes-"].iter().any(|p| base.starts_with(p))
+}
+
+/// Inhalt für die Sicherung ohne Zugangsdaten. Dateien, die Zugangsdaten enthalten können ([`holds_credentials`]),
+/// kommen nur bereinigt hinein – sind sie kein lesbares JSON (z. B. eine `.defekt`-Kopie), bleiben sie draußen (`None`).
+/// Jede andere JSON-Datei mit `llm_servers`/`processes[].env` wird ebenfalls bereinigt; alles Übrige bleibt unverändert.
+pub fn sanitized(name: &str, data: Vec<u8>) -> Option<Vec<u8>> {
+    let parsed = std::str::from_utf8(&data).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(crate::state::strip_bom(t)).ok());
+    match parsed {
+        Some(mut v) => {
+            if strip_value(&mut v) {
+                serde_json::to_vec_pretty(&v).ok()
+            } else {
+                Some(data)
+            }
+        }
+        None if holds_credentials(name) => None,
+        None => Some(data),
+    }
 }
 
 /// Schreibt die ZIP-Datei `out` aus (Name im Archiv, Inhalt). Gibt (Bytes vor dem Packen, Dateien) zurück.
@@ -137,13 +175,9 @@ pub fn data_folder_entries(data_dir: &Path, db_copy: Option<&Path>) -> Result<Ve
             continue;
         }
         let data = std::fs::read(&f.path).map_err(|e| format!("{}: {e}", f.path.display()))?;
-        if name == "settings.json" {
-            if let Some(clean) = strip_credentials(&data) {
-                out.push((name, clean));
-            }
-            continue;
+        if let Some(clean) = sanitized(&name, data) {
+            out.push((name, clean));
         }
-        out.push((name, data));
     }
     if let Some(c) = db_copy {
         out.push((db.to_string(), std::fs::read(c).map_err(|e| format!("{}: {e}", c.display()))?));

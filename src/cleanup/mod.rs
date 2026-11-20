@@ -276,7 +276,7 @@ impl Item {
         use Item::*;
         match self {
             DbBackups => l.t("Alle außer den neuesten N im aktiven Sicherungsordner.", "All except the newest N in the active backup folder."),
-            MaintenanceBackups => l.t("Als „maintenance“ markierte Dateien im Sicherungsordner.", "Files marked “maintenance” in the backup folder."),
+            MaintenanceBackups => l.t("Wartungs-Sicherungen (maintenance-<Zeit>.db) im Sicherungsordner.", "Maintenance backups (maintenance-<time>.db) in the backup folder."),
             Clipboard => l.t("Eingefügte Bilder (clipboard\\).", "Pasted images (clipboard\\)."),
             OldBackups => l.t("*.bak-* und *.defekt-* im Datenordner.", "*.bak-* and *.defekt-* in the data folder."),
             RunTemp => l.t("Kopien der Programmdatei unter %TEMP%\\paneldeck-run.", "Copies of the program under %TEMP%\\paneldeck-run."),
@@ -321,11 +321,13 @@ pub struct Found {
     pub files: Vec<FileEntry>,
     /// Einträge außerhalb von Dateien (Registry-Werte, JSON-Einträge, Einstellungen) – für die Anzeige.
     pub entries: Vec<String>,
+    /// Ordner, die selbst ein Link (Symlink/Junction) sind: nicht betreten und nicht berührt (im Ergebnis genannt).
+    pub linked: Vec<PathBuf>,
 }
 
 impl Found {
     pub fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.entries.is_empty()
+        self.files.is_empty() && self.entries.is_empty() && self.linked.is_empty()
     }
 }
 
@@ -364,6 +366,9 @@ pub struct Ctx {
     pub data_dir: PathBuf,
     /// Aktiver Sicherungsordner (auch `--backup-dir`).
     pub backup_dir: PathBuf,
+    /// Ordner für die Sicherheitskopien der Integration (`.reg`, `claude.json-*.bak`), sonst `backup_dir`. Beim
+    /// Zurücksetzen der Ordner der ZIP-Sicherung – `backup_dir` im Datenordner wird beim Neustart gelöscht.
+    pub safety_dir: Option<PathBuf>,
     /// Datenordner ohne Profil (dort liegen `profiles\*`).
     pub base_dir: PathBuf,
     /// Sitzungen, die gerade offen sind (Dateien anderer Ids gelten als verwaist).
@@ -378,6 +383,13 @@ pub struct Ctx {
     pub system_integration: bool,
     /// Für Tests: Integration ohne System.
     pub integ_override: Option<integ::State>,
+}
+
+impl Ctx {
+    /// Wohin die Sicherheitskopien der Integration kommen.
+    pub fn safety_dir(&self) -> &Path {
+        self.safety_dir.as_deref().unwrap_or(&self.backup_dir)
+    }
 }
 
 /// Optionen eines Laufs.
@@ -529,8 +541,30 @@ fn is_link(m: &std::fs::Metadata) -> bool {
     m.file_type().is_symlink() || crate::platform::fs::is_reparse_point(m)
 }
 
-/// Alle Dateien unter `dir` (rekursiv, ohne Links zu folgen).
+/// Ist der Ordner `dir` selbst ein Link (Symlink, Junction, anderer Analysepunkt)? Fehlt er, `false`.
+pub fn root_is_link(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir).is_ok_and(|m| is_link(&m))
+}
+
+/// Alle Dateien unter `dir` (rekursiv, ohne Links zu folgen). Ist `dir` selbst ein Link, nichts (nie dem Ziel folgen).
 pub fn walk(dir: &Path) -> Vec<FileEntry> {
+    if root_is_link(dir) {
+        return Vec::new();
+    }
+    walk_followed(dir)
+}
+
+/// Ein Unterordner als Fund: seine Dateien – oder, ist er selbst ein Link, nichts und der Ordner in `linked`.
+fn sub_tree(dir: &Path) -> Found {
+    if root_is_link(dir) {
+        return Found { linked: vec![dir.to_path_buf()], ..Default::default() };
+    }
+    Found { files: walk_followed(dir), ..Default::default() }
+}
+
+/// Wie [`walk`], aber der Wurzel `dir` selbst wird gefolgt (Datenordner und Sicherungsordner dürfen verlinkt sein, z. B.
+/// auf ein anderes Laufwerk verschoben). Darunter wird keinem Link gefolgt.
+fn walk_followed(dir: &Path) -> Vec<FileEntry> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -548,8 +582,16 @@ pub fn walk(dir: &Path) -> Vec<FileEntry> {
     out
 }
 
-/// Dateien direkt in `dir`, deren Name `keep` erfüllt.
+/// Dateien direkt in `dir`, deren Name `keep` erfüllt. Ist `dir` selbst ein Link, nichts.
 fn files_in(dir: &Path, keep: impl Fn(&str) -> bool) -> Vec<FileEntry> {
+    if root_is_link(dir) {
+        return Vec::new();
+    }
+    files_in_followed(dir, keep)
+}
+
+/// Wie [`files_in`], aber der Wurzel `dir` selbst wird gefolgt (Datenordner, Sicherungsordner).
+fn files_in_followed(dir: &Path, keep: impl Fn(&str) -> bool) -> Vec<FileEntry> {
     let mut out: Vec<FileEntry> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -578,9 +620,11 @@ pub fn session_id_of(name: &str) -> Option<u64> {
     (id > 0 && rest.starts_with('.')).then_some(id)
 }
 
-/// Verlaufsdateien in `sub` (`scrollback` oder `chats`): (verwaist, alle).
-fn history_files(data_dir: &Path, sub: &str, open: &[u64]) -> (Vec<FileEntry>, Vec<FileEntry>) {
-    let all = files_in(&data_dir.join(sub), |n| session_id_of(n).is_some());
+/// Verlaufsdateien in `sub` (`scrollback` oder `chats`): (verwaist, alle, Ordner als Link übersprungen).
+fn history_files(data_dir: &Path, sub: &str, open: &[u64]) -> (Vec<FileEntry>, Vec<FileEntry>, Vec<PathBuf>) {
+    let dir = data_dir.join(sub);
+    let linked: Vec<PathBuf> = if root_is_link(&dir) { vec![dir.clone()] } else { Vec::new() };
+    let all = files_in(&dir, |n| session_id_of(n).is_some());
     let orphaned = all
         .iter()
         .filter(|f| {
@@ -590,7 +634,21 @@ fn history_files(data_dir: &Path, sub: &str, open: &[u64]) -> (Vec<FileEntry>, V
         })
         .cloned()
         .collect();
-    (orphaned, all)
+    (orphaned, all, linked)
+}
+
+/// Wartungs-Sicherung von Paneldeck (#308)? Genau `maintenance-JJJJMMTT-HHMMSS[-<n>].db` mit gültigem Datum – so streng
+/// wie die Datenbank-Sicherungen (`backup::list`); andere Dateien mit „maintenance“ im Namen gehören nicht dazu.
+pub fn is_maintenance_backup_name(n: &str) -> bool {
+    let Some(stem) = n.strip_suffix(".db") else { return false };
+    let parts: Vec<&str> = stem.split('-').collect();
+    let digits = |s: &str, len: usize| s.len() == len && s.chars().all(|c| c.is_ascii_digit());
+    let counter_ok = match parts.len() {
+        3 => true,
+        4 => !parts[3].is_empty() && parts[3].chars().all(|c| c.is_ascii_digit()),
+        _ => false,
+    };
+    counter_ok && parts[0] == "maintenance" && digits(parts[1], 8) && digits(parts[2], 6) && chrono::NaiveDateTime::parse_from_str(&format!("{}-{}", parts[1], parts[2]), "%Y%m%d-%H%M%S").is_ok()
 }
 
 /// Alte Sicherungsdateien im Datenordner.
@@ -611,7 +669,7 @@ fn reset_keeps(rel: &Path) -> bool {
 
 /// Alle Dateien dieser Instanz im Datenordner (ohne andere Profile, Sperre und IPC-Datei).
 pub fn data_files(data_dir: &Path) -> Vec<FileEntry> {
-    walk(data_dir).into_iter().filter(|f| f.path.strip_prefix(data_dir).map(|r| !reset_keeps(r)).unwrap_or(false)).collect()
+    walk_followed(data_dir).into_iter().filter(|f| f.path.strip_prefix(data_dir).map(|r| !reset_keeps(r)).unwrap_or(false)).collect()
 }
 
 fn settings_of(ctx: &Ctx) -> crate::state::Settings {
@@ -656,51 +714,62 @@ pub fn scan(ctx: &Ctx) -> Scan {
     };
     let backups = crate::backup::list(&ctx.backup_dir);
     let backup_paths: Vec<&Path> = backups.iter().map(|b| b.path.as_path()).collect();
-    let (sb_orph, sb_all) = history_files(d, "scrollback", &ctx.open_ids);
-    let (ch_orph, ch_all) = history_files(d, "chats", &ctx.open_ids);
+    let (sb_orph, sb_all, sb_link) = history_files(d, "scrollback", &ctx.open_ids);
+    let (ch_orph, ch_all, ch_link) = history_files(d, "chats", &ctx.open_ids);
+    let themes_dir = d.join("themes");
     let mut items = Vec::new();
     for item in Item::ALL {
         let f = match item {
             Item::DbBackups => Found {
                 files: backups.iter().map(|b| FileEntry { path: b.path.clone(), bytes: b.size, modified: std::fs::metadata(&b.path).and_then(|m| m.modified()).ok() }).collect(),
-                entries: Vec::new(),
+                ..Default::default()
             },
             Item::MaintenanceBackups => Found {
-                files: files_in(&ctx.backup_dir, |n| n.to_lowercase().contains("maintenance")).into_iter().filter(|f| !backup_paths.contains(&f.path.as_path())).collect(),
-                entries: Vec::new(),
+                files: files_in_followed(&ctx.backup_dir, is_maintenance_backup_name).into_iter().filter(|f| !backup_paths.contains(&f.path.as_path())).collect(),
+                ..Default::default()
             },
-            Item::Clipboard => Found { files: walk(&d.join("clipboard")), entries: Vec::new() },
-            Item::OldBackups => Found { files: files_in(d, is_old_backup_name), entries: Vec::new() },
-            Item::RunTemp => Found { files: if ctx.temp_dir.as_os_str().is_empty() { Vec::new() } else { walk(&ctx.temp_dir.join(RUN_TEMP)) }, entries: Vec::new() },
-            Item::HotExit => Found { files: walk(&d.join(HOT_EXIT)), entries: Vec::new() },
-            Item::ScrollbackOrphaned => Found { files: sb_orph.clone(), entries: Vec::new() },
-            Item::ScrollbackAll => Found { files: sb_all.clone(), entries: Vec::new() },
-            Item::ChatsOrphaned => Found { files: ch_orph.clone(), entries: Vec::new() },
-            Item::ChatsAll => Found { files: ch_all.clone(), entries: Vec::new() },
-            Item::CrashLog => Found { files: files_in(d, |n| n == "crash.log" || n.starts_with("crash.log.")), entries: Vec::new() },
-            Item::McpLog => Found { files: files_in(d, |n| n == "mcp-log.jsonl" || n == "mcp-log.old.jsonl"), entries: Vec::new() },
-            Item::Prompts => Found { files: one_file(&d.join("prompts.json")), entries: Vec::new() },
-            Item::Templates => Found { files: one_file(&d.join("templates.json")), entries: Vec::new() },
-            Item::Themes => Found { files: files_in(&d.join("themes"), |n| n.to_lowercase().ends_with(".json") && n != EXAMPLE_THEME), entries: Vec::new() },
-            Item::SystemPrompt => Found { files: one_file(&d.join(crate::mcp::sysprompt::FILE_NAME)), entries: Vec::new() },
-            Item::Database => Found { files: db_files(d), entries: Vec::new() },
+            Item::Clipboard => sub_tree(&d.join("clipboard")),
+            Item::OldBackups => Found { files: files_in_followed(d, is_old_backup_name), ..Default::default() },
+            Item::RunTemp => {
+                if ctx.temp_dir.as_os_str().is_empty() {
+                    Found::default()
+                } else {
+                    sub_tree(&ctx.temp_dir.join(RUN_TEMP))
+                }
+            }
+            Item::HotExit => sub_tree(&d.join(HOT_EXIT)),
+            Item::ScrollbackOrphaned => Found { files: sb_orph.clone(), linked: sb_link.clone(), ..Default::default() },
+            Item::ScrollbackAll => Found { files: sb_all.clone(), linked: sb_link.clone(), ..Default::default() },
+            Item::ChatsOrphaned => Found { files: ch_orph.clone(), linked: ch_link.clone(), ..Default::default() },
+            Item::ChatsAll => Found { files: ch_all.clone(), linked: ch_link.clone(), ..Default::default() },
+            Item::CrashLog => Found { files: files_in_followed(d, |n| n == "crash.log" || n.starts_with("crash.log.")), ..Default::default() },
+            Item::McpLog => Found { files: files_in_followed(d, |n| n == "mcp-log.jsonl" || n == "mcp-log.old.jsonl"), ..Default::default() },
+            Item::Prompts => Found { files: one_file(&d.join("prompts.json")), ..Default::default() },
+            Item::Templates => Found { files: one_file(&d.join("templates.json")), ..Default::default() },
+            Item::Themes => Found {
+                files: files_in(&themes_dir, |n| n.to_lowercase().ends_with(".json") && n != EXAMPLE_THEME),
+                linked: if root_is_link(&themes_dir) { vec![themes_dir.clone()] } else { Vec::new() },
+                ..Default::default()
+            },
+            Item::SystemPrompt => Found { files: one_file(&d.join(crate::mcp::sysprompt::FILE_NAME)), ..Default::default() },
+            Item::Database => Found { files: db_files(d), ..Default::default() },
             Item::Sessions => {
                 let mut files = one_file(&d.join("state.json"));
                 files.extend(sb_all.iter().cloned());
                 files.extend(ch_all.iter().cloned());
-                Found { files, entries: Vec::new() }
+                Found { files, linked: sb_link.iter().chain(ch_link.iter()).cloned().collect(), ..Default::default() }
             }
-            Item::SettingsAll => Found { files: one_file(&d.join("settings.json")), entries: Vec::new() },
-            Item::SettingsModels => Found { files: Vec::new(), entries: settings.llm_servers.list.iter().map(|s| s.label().to_string()).chain(settings.llm_servers.unreadable.iter().map(|_| "?".to_string())).collect() },
+            Item::SettingsAll => Found { files: one_file(&d.join("settings.json")), ..Default::default() },
+            Item::SettingsModels => Found { entries: settings.llm_servers.list.iter().map(|s| s.label().to_string()).chain(settings.llm_servers.unreadable.iter().map(|_| "?".to_string())).collect(), ..Default::default() },
             Item::SettingsClaude => Found {
-                files: Vec::new(),
                 entries: if settings.claude_defaults.is_empty() && settings.last_claude_opts.is_none() { Vec::new() } else { vec!["claude_defaults".into()] },
+                ..Default::default()
             },
-            Item::SettingsKeys => Found { files: Vec::new(), entries: settings.keys.keys().cloned().collect() },
-            Item::Autostart => Found { files: Vec::new(), entries: integ_state.run_values.iter().map(|(n, _)| n.clone()).collect() },
-            Item::ContextMenu => Found { files: Vec::new(), entries: integ_state.context.iter().map(|_| "Directory\\shell\\Paneldeck".to_string()).collect() },
-            Item::ClaudeJson => Found { files: Vec::new(), entries: integ_state.claude_json_servers.clone() },
-            Item::Hooks => Found { files: files_in(d, |n| n.starts_with("claude-hooks") && n.ends_with(".json")), entries: Vec::new() },
+            Item::SettingsKeys => Found { entries: settings.keys.keys().cloned().collect(), ..Default::default() },
+            Item::Autostart => Found { entries: integ_state.run_values.iter().map(|(n, _)| n.clone()).collect(), ..Default::default() },
+            Item::ContextMenu => Found { entries: integ_state.context.iter().map(|_| "Directory\\shell\\Paneldeck".to_string()).collect(), ..Default::default() },
+            Item::ClaudeJson => Found { entries: integ_state.claude_json_servers.clone(), ..Default::default() },
+            Item::Hooks => Found { files: files_in_followed(d, |n| n.starts_with("claude-hooks") && n.ends_with(".json")), ..Default::default() },
             Item::FactoryReset => {
                 let mut files = data_files(d);
                 // Ein eigener Sicherungsordner außerhalb des Datenordners: dessen Datenbank-Sicherungen gehören dazu.
@@ -708,7 +777,7 @@ pub fn scan(ctx: &Ctx) -> Scan {
                     files.extend(backups.iter().map(|b| FileEntry { path: b.path.clone(), bytes: b.size, modified: None }));
                 }
                 let entries = integ_state.run_values.len() + integ_state.context.iter().count() + integ_state.claude_json_servers.len();
-                Found { files, entries: (0..entries).map(|i| i.to_string()).collect() }
+                Found { files, entries: (0..entries).map(|i| i.to_string()).collect(), ..Default::default() }
             }
         };
         items.push((item, f));
@@ -774,8 +843,17 @@ pub fn delete_files<'a>(files: impl IntoIterator<Item = &'a FileEntry>, r: &mut 
     }
 }
 
-/// Leere Unterordner unter `dir` entfernen (nach dem Löschen von Dateien; `dir` selbst bleibt).
+/// Leere Unterordner unter `dir` entfernen (nach dem Löschen von Dateien; `dir` selbst bleibt). Ist `dir` ein Link,
+/// nichts (nie im Ziel aufräumen).
 fn prune_empty_dirs(dir: &Path) {
+    if root_is_link(dir) {
+        return;
+    }
+    prune_empty_dirs_followed(dir);
+}
+
+/// Wie [`prune_empty_dirs`], aber der Wurzel selbst wird gefolgt (Datenordner).
+fn prune_empty_dirs_followed(dir: &Path) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
@@ -954,10 +1032,16 @@ pub fn execute(ctx: &Ctx, scan: &Scan, sel: &Selection, opts: &Opts, phase: Phas
                 }
                 if item == Item::RunTemp {
                     let d = ctx.temp_dir.join(RUN_TEMP);
-                    prune_empty_dirs(&d);
-                    let _ = std::fs::remove_dir(&d);
+                    if !root_is_link(&d) {
+                        prune_empty_dirs(&d);
+                        let _ = std::fs::remove_dir(&d);
+                    }
                 }
             }
+        }
+        for l in &found.linked {
+            let p = l.display().to_string();
+            r.note(format!("Nicht berührt: {p} ist ein Link (Symlink/Junction)."), format!("Not touched: {p} is a link (symlink/junction)."));
         }
         if item == Item::Hooks && phase == Phase::Live {
             r.note("Paneldeck legt die Datei beim nächsten Start wieder an, solange es Claude-Sitzungen startet.", "Paneldeck creates the file again at its next start, as long as it starts Claude sessions.");
@@ -969,7 +1053,7 @@ pub fn execute(ctx: &Ctx, scan: &Scan, sel: &Selection, opts: &Opts, phase: Phas
         let mut r = ItemReport::new(Item::FactoryReset.id());
         let rest: Vec<FileEntry> = data_files(&ctx.data_dir).into_iter().filter(|f| !done.contains(&f.path)).collect();
         delete_files(&rest, &mut r);
-        prune_empty_dirs(&ctx.data_dir);
+        prune_empty_dirs_followed(&ctx.data_dir);
         out.push(r);
     }
     if phase == Phase::Live {
@@ -1028,6 +1112,12 @@ pub struct Pending {
     pub done: Vec<ItemReport>,
 }
 
+/// Derselbe Ordner (absolut, ohne Groß-/Kleinschreibung und Trenner am Ende)?
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| crate::launch::norm_path(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy());
+    norm(a) == norm(b)
+}
+
 /// Für den nächsten Start vormerken.
 pub fn schedule(data_dir: &Path, p: &Pending) -> Result<(), String> {
     let text = serde_json::to_string_pretty(p).map_err(|e| e.to_string())?;
@@ -1065,7 +1155,16 @@ pub fn apply_pending(data_dir: &Path, backup_dir: impl FnOnce() -> PathBuf) -> O
             }
         }
     }
-    let ctx = Ctx { data_dir: data_dir.to_path_buf(), backup_dir: p.backup_dir.clone().unwrap_or_else(backup_dir), base_dir: data_dir.to_path_buf(), ..Default::default() };
+    // Der Sicherungsordner kommt nie aus der Datei (sie liegt im Datenordner und könnte auf einen fremden Ordner zeigen,
+    // dessen Dateien beim Zurücksetzen gelöscht würden): immer der dieses Starts; ein abweichender Wert wird genannt.
+    let here = backup_dir();
+    if let Some(f) = p.backup_dir.as_ref().filter(|f| !same_dir(f, &here)) {
+        let mut r = ItemReport::new("pending");
+        let (a, b) = (f.display().to_string(), here.display().to_string());
+        r.note(format!("Sicherungsordner der Vormerkung ({a}) ignoriert – benutzt wird {b}."), format!("Backup folder of the scheduled clean-up ({a}) ignored – using {b}."));
+        out.push(r);
+    }
+    let ctx = Ctx { data_dir: data_dir.to_path_buf(), backup_dir: here, base_dir: data_dir.to_path_buf(), ..Default::default() };
     let scan = scan(&ctx);
     out.extend(execute(&ctx, &scan, &sel, &p.opts, Phase::Start));
     Some(out)

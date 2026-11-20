@@ -115,6 +115,7 @@ impl App {
         cleanup::Ctx {
             data_dir: self.dir.clone(),
             backup_dir: self.backup_dir_path(),
+            safety_dir: None,
             base_dir: crate::paths::get().base.clone(),
             open_ids: self.entries.keys().copied().collect(),
             exe: self.exe.clone(),
@@ -416,16 +417,21 @@ impl App {
         let items = c.sel.expanded();
         let mut affected = Vec::new();
         let mut running = Vec::new();
-        if items.iter().any(|i| i.affects_sessions()) {
+        // Mit Neustart enden alle laufenden Programme (auch in Sitzungen, die danach wiederhergestellt werden).
+        let restart = c.sel.needs_restart();
+        let sessions = items.iter().any(|i| i.affects_sessions());
+        if sessions || restart {
             let lang = self.settings.language;
             let ends = items.iter().any(|i| i.ends_sessions());
             for e in self.entries.values() {
-                let touched = ends || (e.is_chat() && (items.contains(&Item::ChatsAll))) || (!e.is_chat() && items.contains(&Item::ScrollbackAll));
-                if !touched {
+                let touched = sessions && (ends || (e.is_chat() && (items.contains(&Item::ChatsAll))) || (!e.is_chat() && items.contains(&Item::ScrollbackAll)));
+                if !touched && !restart {
                     continue;
                 }
                 let name = e.display_name();
-                affected.push(name.clone());
+                if touched {
+                    affected.push(name.clone());
+                }
                 let what = if let Some(chat) = &e.chat {
                     chat.busy().then(|| lang.t("Chat arbeitet", "chat is working").to_string())
                 } else if e.exited() {
@@ -491,6 +497,20 @@ impl App {
                 }
                 if restart {
                     ui.label(RichText::new(lang.t("Danach startet Paneldeck neu.", "Paneldeck then restarts.")).small().color(dim));
+                    ui.label(
+                        RichText::new(lang.t(
+                            "Beim Neustart enden alle laufenden Programme in Terminals sofort (ohne Strg+C) – vorher speichern und beenden.",
+                            "On the restart every program running in a terminal ends at once (without Ctrl+C) – save and quit them first.",
+                        ))
+                        .small()
+                        .color(if cf.running.is_empty() { dim } else { DANGER }),
+                    );
+                    if cf.affected.is_empty() && !cf.running.is_empty() {
+                        ui.label(RichText::new(lang.t("Darin laufen noch Programme:", "Programs are still running in:")).color(DANGER));
+                        for (n, w) in &cf.running {
+                            ui.label(RichText::new(format!("• {n} – {w}")).small());
+                        }
+                    }
                 }
                 if !cf.affected.is_empty() {
                     ui.add_space(S1);
@@ -543,13 +563,16 @@ impl App {
         if !restart {
             self.cleanup_memory(c, &items, &opts, lang);
         }
-        let cx = self.cleanup_ctx();
+        let mut cx = self.cleanup_ctx();
         let (live_sel, live_opts) = if restart {
             (Selection { items: items.iter().copied().filter(|i| i.outside_data()).collect(), profiles: sel.profiles.clone() }, Opts { backup_db: false, ..opts.clone() })
         } else {
             (sel.clone(), opts.clone())
         };
         let zip_to = reset.then(|| PathBuf::from(&c.zip_dir));
+        // Beim Zurücksetzen kommen die Sicherheitskopien der Integration (.reg, claude.json-*.bak) neben die ZIP-Datei:
+        // der Sicherungsordner im Datenordner wird beim Neustart mit gelöscht.
+        cx.safety_dir = zip_to.clone();
         if zip_to.is_some() {
             // Der aktuelle Stand gehört in die Sicherung.
             self.save_all();
@@ -759,7 +782,12 @@ impl App {
                     if can_retry && ui.add_enabled(!c.busy(), egui::Button::new(lang.t("Erneut versuchen", "Retry"))).clicked() {
                         retry = true;
                     }
-                    if wants_restart && ui.button(lang.t("Jetzt neu starten", "Restart now")).clicked() {
+                    if wants_restart
+                        && ui
+                            .button(lang.t("Jetzt neu starten", "Restart now"))
+                            .on_hover_text(lang.t("Laufende Programme in Terminals enden dabei sofort (ohne Strg+C).", "Programs running in terminals end at once (without Ctrl+C)."))
+                            .clicked()
+                    {
                         restart = true;
                     }
                     if ui.button(lang.t("Schließen", "Close")).clicked() {
