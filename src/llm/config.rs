@@ -28,6 +28,38 @@ use std::time::Duration;
 pub const DEFAULT_CONTEXT: u32 = 8192;
 pub const MIN_CONTEXT: u32 = 256;
 pub const MAX_CONTEXT: u32 = 16 << 20;
+/// Stufen des Kontext-Schiebereglers: Zweierpotenzen von 4096 bis 1M (jede Stufe genau das Doppelte).
+pub const CONTEXT_STEPS: [u32; 9] = [4096, 8192, 16384, 32768, 65536, 131_072, 262_144, 524_288, 1 << 20];
+
+/// Index der Regler-Stufe, die `v` logarithmisch am nächsten liegt (6000 → 8192); Werte außerhalb des Bereichs
+/// landen auf der ersten bzw. letzten Stufe.
+pub fn context_step_index(v: u32) -> usize {
+    let v = u64::from(v);
+    let mut best = 0;
+    for (i, s) in CONTEXT_STEPS.iter().enumerate().skip(1) {
+        // Grenze zwischen zwei Stufen ist das geometrische Mittel: v ≥ s/√2  ⇔  2·v² ≥ s².
+        if 2 * v * v >= u64::from(*s) * u64::from(*s) {
+            best = i;
+        }
+    }
+    best
+}
+
+/// Nächste Regler-Stufe zu `v` (siehe [`context_step_index`]).
+pub fn snap_context(v: u32) -> u32 {
+    CONTEXT_STEPS[context_step_index(v)]
+}
+
+/// Kurzform einer Kontextlänge: `K` bis 512K, ab 1M `M`; `None`, wenn sie sich nicht glatt kürzen lässt.
+pub fn context_short(v: u32) -> Option<String> {
+    if v >= 1 << 20 && v % (1 << 20) == 0 {
+        Some(format!("{}M", v >> 20))
+    } else if v >= 1024 && v % 1024 == 0 {
+        Some(format!("{}K", v >> 10))
+    } else {
+        None
+    }
+}
 pub const DEFAULT_MAX_STEPS: u32 = 10;
 pub const MAX_STEPS: u32 = 100;
 /// Höchstens so viele Modelle je Server werden aus der letzten Verbindung gemerkt.
@@ -387,6 +419,46 @@ pub fn quick_url_check(url: &str) -> Result<(), super::LlmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_steps_double_exactly() {
+        assert_eq!(CONTEXT_STEPS[0], 4096);
+        assert_eq!(*CONTEXT_STEPS.last().unwrap(), 1_048_576);
+        assert!(CONTEXT_STEPS.windows(2).all(|w| w[1] == w[0] * 2));
+        assert!(CONTEXT_STEPS.iter().all(|s| (MIN_CONTEXT..=MAX_CONTEXT).contains(s)));
+    }
+
+    #[test]
+    fn context_snaps_logarithmically() {
+        for (i, s) in CONTEXT_STEPS.iter().enumerate() {
+            assert_eq!(context_step_index(*s), i, "Stufe {s} bleibt");
+        }
+        assert_eq!(snap_context(6000), 8192, "6000 liegt logarithmisch näher an 8192");
+        assert_eq!(snap_context(5700), 4096, "unter 4096·√2 ≈ 5793");
+        assert_eq!(snap_context(5792), 4096);
+        assert_eq!(snap_context(5793), 8192);
+        assert_eq!(snap_context(12_000), 16384);
+        assert_eq!(snap_context(100_000), 131_072);
+        assert_eq!(snap_context(90_000), 65536);
+        // Alte Werte außerhalb: erste bzw. letzte Stufe (nur für die Reglerposition).
+        assert_eq!(snap_context(MIN_CONTEXT), 4096);
+        assert_eq!(snap_context(1000), 4096);
+        assert_eq!(snap_context(0), 4096);
+        assert_eq!(snap_context(2 << 20), 1 << 20);
+        assert_eq!(snap_context(MAX_CONTEXT), 1 << 20);
+        assert_eq!(snap_context(u32::MAX), 1 << 20, "kein Überlauf");
+    }
+
+    #[test]
+    fn context_short_labels() {
+        assert_eq!(context_short(4096).as_deref(), Some("4K"));
+        assert_eq!(context_short(32768).as_deref(), Some("32K"));
+        assert_eq!(context_short(524_288).as_deref(), Some("512K"));
+        assert_eq!(context_short(1 << 20).as_deref(), Some("1M"));
+        assert_eq!(context_short(16 << 20).as_deref(), Some("16M"));
+        assert_eq!(context_short(6000), None);
+        assert_eq!(context_short(256), None);
+    }
 
     #[test]
     fn server_roundtrip_and_defaults() {
