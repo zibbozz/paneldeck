@@ -1395,7 +1395,7 @@ c.close()
   $script:fakePs = [powershell]::Create(); [void]$script:fakePs.AddScript($fake).AddArgument($script:fakeListener).AddArgument($script:fakeLog)
   $script:fakeAsync = $script:fakePs.BeginInvoke()
   # Server in settings.json eintragen (vor jedem Start; als Text, damit ConvertTo-Json von PowerShell 5.1 nichts verbiegt).
-  $srvJson = '{"id":"srv-smoke","name":"Fake","kind":"ollama","url":"http://127.0.0.1:' + $fakePort + '","models":[{"name":"fake-model","level":"Control","level_chosen":true,"ask_write":false,"tools":true}],"last_models":[{"name":"fake-model","tools":true,"context_length":131072},{"name":"fake-raw","tools":true,"context_length":131072}]}'
+  $srvJson = '{"id":"srv-smoke","name":"Fake","kind":"ollama","url":"http://127.0.0.1:' + $fakePort + '","models":[{"name":"fake-model","level":"Control","level_chosen":true,"ask_write":false,"tools":true},{"name":"fake-raw","context_length":6000}],"last_models":[{"name":"fake-model","tools":true,"context_length":131072},{"name":"fake-raw","tools":true,"context_length":131072}]}'
   $script:prestart = {
     $f = "$data\settings.json"
     $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
@@ -1411,6 +1411,8 @@ c.close()
   $lm = Tool 'list_models'
   $fs = @($lm.data.servers) | Where-Object { $_.id -eq 'srv-smoke' }
   Check 'list_models: Fake-Server mit Modell und Host:Port, ohne Schluessel und Adresse' ($fs.name -eq 'Fake' -and $fs.host -eq "127.0.0.1:$fakePort" -and @($fs.models).Count -eq 2 -and $fs.models[0].name -eq 'fake-model' -and $fs.models[0].level -eq 'Control' -and $fs.models[0].level_chosen -eq $true -and $fs.models[1].level_chosen -eq $false -and $lm.text -notmatch 'http://' -and $lm.text -notmatch 'api_key') $lm.text
+  # #305: eine alte eigene Kontextlaenge, die keine Reglerstufe ist (6000), bleibt unveraendert; sonst die vom Server erkannte.
+  Check 'list_models: context_length (erkannt 131072, alte eigene 6000 unveraendert)' ($fs.models[0].context_length -eq 131072 -and $fs.models[1].name -eq 'fake-raw' -and $fs.models[1].context_length -eq 6000) $lm.text
   $bad = Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'gibts-nicht' }
   Check 'create_session kind=chat, unbekanntes Modell -> bad_args nennt die Modelle' ((Code $bad) -eq 'bad_args' -and $bad.text -match 'fake-model' -and $bad.text -notmatch 'http://') $bad.text
   $nm = Tool 'create_session' @{ kind = 'chat'; model = 'gibts-nicht' }
