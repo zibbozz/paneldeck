@@ -334,9 +334,30 @@ pub struct ShellState {
     pub notes: Vec<(String, String)>,
     pending_dur: Option<u64>,
     cmd_start: Option<std::time::Instant>,
+    /// Abgeschickte Eingaben (Enter) seit dem letzten Prompt und Zeitpunkt der letzten (#57, verschachtelte Shells).
+    pub enters_since_prompt: u32,
+    pub last_enter: Option<std::time::Instant>,
 }
 
+/// So lange nach dem letzten Enter ohne neuen Prompt gilt eine Sitzung als „ohne Shell-Integration“ (siehe
+/// [`ShellState::nested`]).
+pub const NESTED_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);
+
 impl ShellState {
+    /// Läuft in der Sitzung vermutlich eine Shell ohne unsere Integration (ssh, tmux, eine Unter-Shell, ein REPL)? Die
+    /// Shell meldete sich schon einmal mit Marken, seitdem kam aber nach mindestens zwei abgeschickten Eingaben kein
+    /// Prompt mehr: die erste startete das Programm, die weiteren gingen an dessen Prompt (#57). Nicht im Vollbild
+    /// (`alt`). `run_command` liefert dann nur `quality: approx`.
+    pub fn nested(&self, alt: bool) -> bool {
+        self.integration_seen && !alt && self.enters_since_prompt >= 2 && self.last_enter.is_some_and(|t| t.elapsed() >= NESTED_AFTER)
+    }
+
+    /// Eine Eingabe mit Enter ging an das Programm.
+    pub fn note_enter(&mut self) {
+        self.enters_since_prompt = self.enters_since_prompt.saturating_add(1);
+        self.last_enter = Some(std::time::Instant::now());
+    }
+
     /// Erste Zeile des letzten Prompts nach jetzigem Stand des Bildschirms (absolut), für [`run_output`]. Ist die Marke
     /// noch vorläufig (`mark_open`), steht in ihrer Zeile noch die Ausgabe: Der Prompt beginnt dann frühestens darunter.
     /// Git Bash auf der ConPTY von Windows rechnet nach OSC 133;A oft länger am Prompt (Git-Status), als `run_command`
@@ -377,6 +398,8 @@ pub struct Session {
     pub scroll_acc: f32,
     pub search: Option<SearchState>,
     pub shell_id: String,
+    /// Gestartete Shell (mit den Argumenten der Integration): Quoting eingefügter Pfade nach der laufenden Shell (#57).
+    pub spec: ShellSpec,
     pub mouse_down: Option<u8>,
     pub mouse_last: Option<(usize, usize)>,
     /// Link unter dem Mauszeiger bei gedrückter Strg-Taste: (Zeile, Start, Ende, Ziel)
@@ -685,6 +708,7 @@ impl Session {
             scroll_acc: 0.0,
             search: None,
             shell_id: opts.shell.id.clone(),
+            spec: opts.shell.clone(),
             mouse_down: None,
             mouse_last: None,
             hover_link: None,
@@ -763,6 +787,7 @@ impl Session {
         // Ein Befehl wird abgeschickt: die Shell verlässt ihren Prompt (siehe `stale_modes`).
         if bytes.contains(&b'\r') {
             self.stale_modes.store(false, Ordering::Relaxed);
+            self.shell_state.lock().unwrap_or_else(|e| e.into_inner()).note_enter();
         }
         if !bytes.is_empty() {
             self.last_input.store(mono_ms().max(1), Ordering::Relaxed);
@@ -853,9 +878,10 @@ impl Session {
     }
 
     /// Ausgabe eines `run_command` (MCP) aus dem Terminalinhalt, siehe [`run_output`].
-    pub fn run_output(&self, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool) -> RunOutput {
+    /// `eol_mark`: die Shell ist zsh (#57) – die PROMPT_EOL_MARK einer Ausgabe ohne Zeilenende fällt weg.
+    pub fn run_output(&self, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool, eol_mark: bool) -> RunOutput {
         let t = self.term.lock().unwrap_or_else(|e| e.into_inner());
-        run_output(&t, self.base(), cmd, start_abs, mark0, mark, advanced)
+        run_output_eol(&t, self.base(), cmd, start_abs, mark0, mark, advanced, eol_mark)
     }
 
     /// Letzte `n` Zeilen des Verlaufs (ohne leere Zeilen am Ende) und ob es davor noch mehr gab.
@@ -1253,6 +1279,7 @@ fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line:
         match ev {
             OscEvent::PromptStart => {
                 st.prompt_seq += 1;
+                st.enters_since_prompt = 0;
                 st.progress = None;
                 if st.marks.last() != Some(&abs_line) {
                     st.marks.push(abs_line);
@@ -1276,6 +1303,10 @@ fn apply_events(state: &Arc<Mutex<ShellState>>, events: Vec<OscEvent>, abs_line:
             }
             OscEvent::Cwd(p) => {
                 st.cwd_seq += 1;
+                // cmd meldet jeden Prompt nur mit dem Ordner.
+                if st.prompt_seq == 0 {
+                    st.enters_since_prompt = 0;
+                }
                 st.cwd = Some(p);
             }
             OscEvent::DurationMs(ms) => st.pending_dur = Some(ms),
@@ -1717,7 +1748,15 @@ pub struct RunOutput {
 /// `start_abs` = Cursorzeile beim Senden, `mark0` = Prompt-Anfang davor, `mark` = Anfang des neuen Prompts (OSC 133;A,
 /// falls die Shell ihn meldete), `advanced` = der Befehl ist fertig (neuer Prompt da); alle absolut (`base` =
 /// `Session::dropped`).
+#[cfg(test)]
 pub fn run_output<T: EventListener>(t: &Term<T>, base: u64, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool) -> RunOutput {
+    run_output_eol(t, base, cmd, start_abs, mark0, mark, advanced, false)
+}
+
+/// Wie [`run_output`]; mit `eol_mark` (zsh, #57) entfällt die Markierung einer Ausgabe ohne Zeilenende (PROMPT_SP:
+/// `%`/`#` und Leerzeichen bis zum Rand), wenn die letzte Ausgabezeile in die Prompt-Zeile umbricht.
+#[allow(clippy::too_many_arguments)]
+pub fn run_output_eol<T: EventListener>(t: &Term<T>, base: u64, cmd: &str, start_abs: u64, mark0: Option<u64>, mark: Option<u64>, advanced: bool, eol_mark: bool) -> RunOutput {
     let cursor = cursor_abs_in(t, base);
     // Ende: vor dem neuen Prompt. Die Marke ist sein genauer Anfang (`advance_tracked`); von dort nicht über umgebrochene
     // Zeilen zurücklaufen – eine Ausgabezeile, die die Breite genau füllt, trägt oft WRAPLINE (ConPTY lässt den
@@ -1753,6 +1792,9 @@ pub fn run_output<T: EventListener>(t: &Term<T>, base: u64, cmd: &str, start_abs
     let mut lines: Vec<String> = if first_out <= end_incl { text_abs_in(t, base, first_out, end_incl) } else { Vec::new() };
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
+    }
+    if eol_mark && advanced && mark.is_some() && first_out <= end_incl {
+        crate::shellinit::strip_eol_mark(&mut lines, wrap_end_in(t, base, end_incl) > end_incl);
     }
     RunOutput { first_ok, lines }
 }
@@ -2528,6 +2570,32 @@ mod run_output_tests {
             jump_mark_in(&mut f.term, f.hs.base(), &marks, -1);
         }
         assert_eq!(f.term.grid().display_offset(), 30);
+    }
+
+    #[test]
+    fn zsh_partial_line_mark_is_not_output() {
+        // #57: zsh mit PROMPT_SP – unsere precmd-Funktion schreibt die Markierung (`%` + Leerzeichen bis über den Rand +
+        // CR) vor dem Prompt-Anfang. `printf x` liefert genau `x`, eine Ausgabe „100%“ mit Zeilenende bleibt.
+        let zsh = |f: &mut Fake| {
+            let fill = " ".repeat(COLS - 1);
+            f.feed(&format!("%{fill}\r\x1b]133;D;0\x07\x1b]133;A\x07~ % "));
+        };
+        let mut f = Fake::new(COLS, 8);
+        f.feed("\x1b]133;A\x07~ % ");
+        for (cmd, out, want) in [("printf x", "x", "x"), ("echo 100%", "100%\r\n", "100%"), ("printf 'a\\nb'", "a\r\nb", "a\nb")] {
+            let mark0 = f.last_mark();
+            let start_abs = f.cursor();
+            f.feed(&format!("{cmd}\r\n{out}"));
+            zsh(&mut f);
+            let r = run_output_eol(&f.term, f.base(), cmd, start_abs, mark0, f.last_mark(), true, true);
+            assert_eq!(text(&r), want, "{cmd}");
+        }
+        // Ohne zsh (eol_mark aus) bleibt die Zeile, wie sie ist
+        let mark0 = f.last_mark();
+        let start_abs = f.cursor();
+        f.feed("printf y\r\ny");
+        zsh(&mut f);
+        assert_eq!(text(&run_output(&f.term, f.base(), "printf y", start_abs, mark0, f.last_mark(), true)), "y%");
     }
 
     #[test]

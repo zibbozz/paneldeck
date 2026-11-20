@@ -73,7 +73,9 @@ fn parse_placement(args: &Value) -> Result<Option<crate::layout::Placement>, (St
 
 enum Pend {
     /// `start_abs`/`mark0` sind festgehaltene Zeilen (`Session::pin_abs`): ein Größenwechsel mit Umbruch führt sie mit (#246).
-    Run { cmd: String, prompt0: u64, cwd0: u64, start_abs: crate::terminal::AbsPin, max_lines: usize, cmd_shell: bool, started: Instant, mark0: Option<crate::terminal::AbsPin> },
+    /// `nested`: in der Sitzung läuft eine Shell ohne Integration (#57) – fertig, sobald die Ausgabe ruht (`approx`);
+    /// `zsh`: PROMPT_EOL_MARK aus der Ausgabe entfernen.
+    Run { cmd: String, prompt0: u64, cwd0: u64, start_abs: crate::terminal::AbsPin, max_lines: usize, cmd_shell: bool, started: Instant, mark0: Option<crate::terminal::AbsPin>, nested: bool, zsh: bool },
     Wait { statuses: Vec<ClaudeStatus>, started: Instant },
     /// Screenshot angefordert; das Bild kommt im nächsten Frame als `Event::Screenshot` mit diesem Token.
     Shot { token: u64, crop: Option<egui::Rect> },
@@ -1665,18 +1667,20 @@ impl App {
             if s.alt_screen() {
                 return Err(er("fullscreen_program", tr("In der Sitzung läuft ein Vollbildprogramm – dort ist run_command nicht möglich.", "A full-screen program is running in the session – run_command is not possible there.")));
             }
-            let (prompt0, cwd0, seen, mark0) = {
+            let (prompt0, cwd0, seen, mark0, nested) = {
                 let st = s.shell_state.lock().unwrap_or_else(|x| x.into_inner());
-                (st.prompt_seq, st.cwd_seq, st.integration_seen, st.marks.last().copied())
+                (st.prompt_seq, st.cwd_seq, st.integration_seen, st.marks.last().copied(), st.nested(false))
             };
             if !seen {
                 return Err(er("no_shell_integration", tr("Von dieser Shell kamen noch keine Integrations-Meldungen (Shell neu gestartet? Eigener Prompt überschreibt die Hooks?).", "No integration messages have arrived from this shell yet (shell restarted? A custom prompt overriding the hooks?).")));
             }
             self.mcp_check_writable(id)?;
             let start_abs = s.pin_abs(s.abs_cursor_line());
-            let mark0 = mark0.map(|m| s.pin_abs(m));
+            // Verschachtelte Shell: die letzte Marke gehört zur äußeren Shell.
+            let mark0 = mark0.filter(|_| !nested).map(|m| s.pin_abs(m));
             s.send_text_agent(&cmd, true);
             let cmd_shell = self.entries[&id].eff_shell() == "cmd";
+            let zsh = self.entries[&id].shell_flavor == Some(crate::shellinit::Flavor::Zsh);
             Ok(PendingMcp {
                 reply: reply.clone(),
                 tool: tool.to_string(),
@@ -1685,7 +1689,7 @@ impl App {
                 how,
                 session: id,
                 deadline: Instant::now() + Duration::from_secs(timeout),
-                kind: Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started: Instant::now(), mark0 },
+                kind: Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started: Instant::now(), mark0, nested, zsh },
             })
         })();
         match r {
@@ -1791,7 +1795,7 @@ impl App {
                 None
             }
             Pend::Shot { .. } | Pend::Create { .. } => None,
-            Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started, mark0 } => {
+            Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started, mark0, nested, zsh } => {
                 let Some(s) = &e.live else { return Some(Err(er("session_not_running", tr("Die Sitzung läuft nicht mehr.", "The session is no longer running.")))) };
                 let (advanced, exit, mark) = {
                     let st = s.shell_state.lock().unwrap_or_else(|x| x.into_inner());
@@ -1803,6 +1807,13 @@ impl App {
                 // cmd meldet nur „Ordner“ (OSC 9;9), und das schon beim Zeilenvorschub der Eingabe: erst wenn der Cursor unter der
                 // Eingabezeile in einer Prompt-Zeile (endet auf „>“) steht, ist der Befehl wirklich fertig.
                 let mut advanced = advanced;
+                let mut exit = exit;
+                // Verschachtelte Shell ohne Marken (ssh, tmux …): fertig, wenn die Ausgabe ruht; Exit-Code unbekannt.
+                let quiet_done = *nested && !advanced && started.elapsed() >= crate::terminal::NESTED_AFTER && s.quiet_for() >= crate::terminal::NESTED_AFTER;
+                if quiet_done {
+                    advanced = true;
+                    exit = None;
+                }
                 if advanced && *cmd_shell {
                     let cur = s.abs_cursor_line();
                     let prompt_ready = cur > start_abs.get() && s.lines_abs(cur, cur).first().is_some_and(|l| l.ends_with('>'));
@@ -1816,12 +1827,12 @@ impl App {
                     return None;
                 }
                 // Ausgabe: Zeilen nach der Eingabezeile bis vor den neuen Prompt (Echo-Suche und Prompt-Anfang: `terminal::run_output`).
-                let crate::terminal::RunOutput { first_ok, lines: mut out } = s.run_output(cmd, start_abs.get(), mark0.as_ref().map(|m| m.get()), mark, advanced);
+                let crate::terminal::RunOutput { first_ok, lines: mut out } = s.run_output(cmd, start_abs.get(), mark0.as_ref().map(|m| m.get()), mark, advanced, *zsh);
                 let truncated = out.len() > *max_lines;
                 if truncated {
                     out = out.split_off(out.len() - *max_lines);
                 }
-                let exact = !*cmd_shell && mark.is_some();
+                let exact = !*cmd_shell && !*nested && mark.is_some();
                 Some(Ok(json!({
                     "output": clamp_str(out.join("\n"), 128 * 1024),
                     "exit_code": exit,

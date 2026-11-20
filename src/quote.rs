@@ -30,14 +30,6 @@ impl Kind {
     }
 }
 
-pub fn kind_of_id(shell_id: &str) -> Kind {
-    match shell_id {
-        "pwsh" | "powershell" => Kind::Pwsh,
-        "cmd" => Kind::Cmd,
-        _ => Kind::Posix,
-    }
-}
-
 /// Setzt `s` so in Anführungszeichen, dass die Shell es als EIN wörtliches Argument liest.
 pub fn quote(kind: Kind, s: &str) -> String {
     match kind {

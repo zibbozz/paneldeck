@@ -904,7 +904,7 @@ fn handle_keyboard(ui: &Ui, session: &mut Session) {
     let pasted_text = events.iter().any(|e| matches!(e, Event::Paste(_)));
     if ctrl_v_pressed(ui) && !pasted_text {
         if let Some(p) = crate::clip::image_to_file() {
-            let t = crate::pathfmt::for_shell(&session.shell_id, &p.to_string_lossy());
+            let t = crate::pathfmt::for_shell(&session.spec, &p.to_string_lossy());
             paste(session, &format!("{t} "));
         }
     }
