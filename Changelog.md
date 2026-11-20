@@ -25,7 +25,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - File names dropped or inserted into a terminal are quoted for the shell that actually runs there (e.g. fish on Linux/macOS), so a crafted name can no longer run commands (#57)
 - Folder names reported by the shell integration no longer contain control characters (#57)
 
-## [2.4.2] - WIP
+## [2.4.2] - 2026-11-20
 
 ### Fixed
 
@@ -419,8 +419,8 @@ First public release. From here on, the public API (MCP interface, command line,
 - All `unwrap()`/`expect()` calls in the program code were replaced by error handling (the release build aborts completely on a panic); the `unsafe` blocks are justified.
 - The executable contains no paths of the build machine.
 
-[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
-[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
+[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...HEAD
+[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...v2.4.2
 [2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2

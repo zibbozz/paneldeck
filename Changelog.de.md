@@ -25,7 +25,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - In ein Terminal gezogene oder eingefügte Dateinamen werden für die dort tatsächlich laufende Shell gequotet (z. B. fish unter Linux/macOS), ein präparierter Name kann so keine Befehle mehr ausführen (#57)
 - Von der Shell-Integration gemeldete Ordnernamen enthalten keine Steuerzeichen mehr (#57)
 
-## [2.4.2] - WIP
+## [2.4.2] - 2026-11-20
 
 ### Fixed
 
@@ -419,8 +419,8 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Alle `unwrap()`/`expect()` im Programmcode sind durch Fehlerbehandlung ersetzt (der Release-Build bricht bei einem Panic komplett ab); die `unsafe`-Blöcke sind begründet.
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
-[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
-[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
+[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...HEAD
+[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...v2.4.2
 [2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
