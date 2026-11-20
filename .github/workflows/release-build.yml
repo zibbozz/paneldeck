@@ -3,6 +3,10 @@ name: Release build
 # Baut die Release-Dateien (Programm, Installer, portables ZIP) bei einem Versions-Tag `vX.Y.Z` in einer sauberen,
 # nachvollziehbaren Umgebung und legt sie als Artefakte ab (mit Herkunftsnachweis/Attestation).
 # Es wird NICHT veröffentlicht: das GitHub-Release legt weiterhin `tools/release.sh … --publish` an.
+# Linux (#149, ab 2.5.0): Job `linux` baut AppImage, .deb, .rpm und Tarball (tools/package-linux.sh) auf ubuntu-22.04
+# (glibc 2.35 als Untergrenze). Diese Dateien sind die offiziellen Linux-Release-Dateien: `tools/release.sh … --publish`
+# wartet nach dem Push des Tags auf diesen Job, lädt das Artefakt `paneldeck-<v>-linux`, prüft die Prüfsummen und hängt die
+# Dateien (und ihre Zeilen in SHA256SUMS.txt) an das Release.
 # Vorbereitet für die Code-Signatur (SignPath Foundation): der Signatur-Schritt steht unten auskommentiert und wird
 # aktiviert, sobald das Projekt freigeschaltet ist und die Secrets/Variablen angelegt sind.
 on:
@@ -75,3 +79,42 @@ jobs:
       #     github-artifact-id: <ID des oben hochgeladenen Artefakts>
       #     wait-for-completion: true
       #     output-artifact-directory: signed
+
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install rpmbuild and desktop-file-utils (.rpm, AppImage)
+        run: sudo apt-get update -q && sudo apt-get install -y -q rpm desktop-file-utils
+      - name: Version from Cargo.toml
+        id: ver
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/' | tr -d '\r')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$v" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match version $v in Cargo.toml"; exit 1
+          fi
+      - name: Tests
+        run: cargo test --release --locked
+      - name: Build and package (AppImage, .deb, .rpm, tarball)
+        run: bash tools/package-linux.sh "${{ steps.ver.outputs.version }}"
+      - name: Check the packages
+        run: bash tools/check-linux-packages.sh "${{ steps.ver.outputs.version }}"
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            dist/linux-${{ steps.ver.outputs.version }}/Paneldeck-*.AppImage
+            dist/linux-${{ steps.ver.outputs.version }}/*.deb
+            dist/linux-${{ steps.ver.outputs.version }}/*.rpm
+            dist/linux-${{ steps.ver.outputs.version }}/*.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: paneldeck-${{ steps.ver.outputs.version }}-linux
+          path: dist/linux-${{ steps.ver.outputs.version }}/*
+          if-no-files-found: error

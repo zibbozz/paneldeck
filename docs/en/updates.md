@@ -39,6 +39,7 @@ A copy counts as *installed* when the installer's uninstall entry points to exac
 - Downloads only go over HTTPS to a fixed list of GitHub hosts (`api.github.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`; redirects only between them, at most 5) and only for this repository. A release file may be at most 64 MiB.
 - The revocation status of the server certificate is checked. If the certificate has been revoked, or the revocation check cannot be done (e.g. the revocation server is unreachable because of a firewall or proxy), nothing is downloaded.
 - Without code signing (see the [note in the README](../../README.md#note-the-program-is-not-yet-code-signed)) this protects against corrupted or incomplete downloads, **not** against a compromised GitHub account.
+- **Linux (from 2.5.0):** only the AppImage updates itself (same checks: `SHA256SUMS.txt`, GitHub hosts, size limit; certificates from the system trust store). `.deb`, `.rpm` and the tarball only announce a new version. See [Linux](linux.md#self-update-appimage).
 
 You can check a manually downloaded file yourself, e.g. in PowerShell: `Get-FileHash .\Paneldeck-Setup-2.1.0.exe` and compare with the line in `SHA256SUMS.txt`; in Git Bash: `sha256sum -c SHA256SUMS.txt`.
 

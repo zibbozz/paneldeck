@@ -71,3 +71,19 @@ jobs:
         run: cargo build --release --locked
       - name: Tests
         run: cargo test --release --locked
+
+  # Linux-Pakete (#149): AppImage, .deb, .rpm und Tarball bauen und prüfen (Start mit --version, Inhalt der Pakete) –
+  # wie im Release-Build, auf ubuntu-22.04 (glibc-Untergrenze). Kostenlos (Standard-Runner im öffentlichen Repository).
+  package-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install rpmbuild and desktop-file-utils
+        run: sudo apt-get update -q && sudo apt-get install -y -q rpm desktop-file-utils
+      - name: Build and package
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/' | tr -d '\r')
+          bash tools/package-linux.sh "$v"
+          bash tools/check-linux-packages.sh "$v"
