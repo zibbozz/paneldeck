@@ -391,4 +391,219 @@ mod tests {
         e.chunk("\r\nY");
         assert_eq!(e.screen().1, (4, 2));
     }
+
+    /// Ende eines Befehls mit Shell-Integration und der Prompt mit Leerzeile (Git Bash), Frame für Frame.
+    const BASH_PROMPT: [&str; 5] = [
+        "\x1b]133;D;0\x07",
+        "\x1b]9;9;\"C:\\Users\\u\"\x07",
+        "\x1b]133;A\x07",
+        "\x1b[?2004h",
+        "\x1b[32m\r\nu@pc \x1b[35mMINGW64 \x1b[33m~\x1b[m\r\n$ ",
+    ];
+
+    /// Getippter Text: conhost zeichnet jedes Zeichen in einem eigenen Frame.
+    fn typed(e: &mut Emu, text: &str) {
+        for ch in text.chars() {
+            e.chunk(&ch.to_string());
+        }
+    }
+
+    /// Mitschnitt (`conhost_capture`, Windows 11 26200, Git Bash, 60×30, Shell-Integration): Nach
+    /// `printf 'x%.0s' $(seq 1 $COLUMNS); sleep 1; echo` (die Zeile endet allein in einem Frame, der Zeilenvorschub von
+    /// `echo` kommt nie an) und Pausen tippt der Nutzer weitere Befehle. Der letzte ist länger als eine Zeile; nach Enter
+    /// zeichnet conhost ihn absolut (CUP) in seiner Zeile neu. Ohne Korrektur stand das Terminal da schon eine Zeile zu
+    /// hoch, das Echo erschien doppelt (#264). conhost meldet den Cursor danach in Zeile 16 (`POS 16 1`).
+    #[test]
+    fn the_echo_of_the_next_command_is_drawn_once() {
+        let x = "x".repeat(60);
+        let query = "IFS='[;' read -rs -d R -p $'\\e[6n' _ r c; echo \"POS $r $c\"";
+        for system in [true, false] {
+            let mut e = Emu::new(60, 30, system);
+            e.chunk("\x1b[2J");
+            e.chunk("\x1b[3J");
+            e.chunk(&format!("\x1b[?25l{}\x1b[K\x1b[H\x1b[?25h", "\x1b[K\r\n".repeat(29)));
+            let prompt = |e: &mut Emu| BASH_PROMPT.iter().for_each(|f| e.chunk(f));
+            prompt(&mut e);
+            typed(&mut e, "printf 'x%.0s' $(seq 1 $COLUMNS); sleep 1; echo");
+            e.chunk("\x1b[?2004l");
+            e.chunk("\r\n\x1b]133;C\x07");
+            e.chunk(&x);
+            prompt(&mut e);
+            for cmd in ["echo next", "echo third"] {
+                typed(&mut e, cmd);
+                for f in ["\r\n", "\x1b[?2004l", "\x1b]133;C\x07", &format!("{}\r\n", &cmd[5..])] {
+                    e.chunk(f);
+                }
+                prompt(&mut e);
+            }
+            // 58 Zeichen passen hinter „$ “, dann bricht readline mit Leerzeichen + CR um.
+            typed(&mut e, &query[..57]);
+            e.chunk(&format!("{} \r", &query[57..58]));
+            typed(&mut e, &query[58..]);
+            // Enter: conhost zeichnet die Eingabezeile absolut neu.
+            e.chunk("\x1b[?2004l");
+            e.chunk(&format!("\x1b[?25l\x1b[15;1H$ {query}\r\n\x1b[?25h\x1b]133;C\x07"));
+            e.chunk("POS 16 1\r\n");
+            prompt(&mut e);
+            let (rows, cursor) = e.screen();
+            let echoes = rows.iter().filter(|r| r.starts_with("$ IFS=")).count();
+            if system {
+                let expect = [
+                    "",
+                    "u@pc MINGW64 ~",
+                    "$ printf 'x%.0s' $(seq 1 $COLUMNS); sleep 1; echo",
+                    &x,
+                    "",
+                    "u@pc MINGW64 ~",
+                    "$ echo next",
+                    "next",
+                    "",
+                    "u@pc MINGW64 ~",
+                    "$ echo third",
+                    "third",
+                    "",
+                    "u@pc MINGW64 ~",
+                    &format!("$ {}", &query[..58]),
+                    "POS 16 1",
+                    "",
+                    "u@pc MINGW64 ~",
+                    "$",
+                ];
+                assert_eq!(rows[..19], expect, "System-ConPTY: wie conhost");
+                assert_eq!(cursor, (19, 3));
+                assert_eq!(echoes, 1, "Echo genau einmal: {rows:?}");
+            } else {
+                assert_eq!(echoes, 2, "ohne Korrektur doppelt (Mitschnitt stimmt): {rows:?}");
+            }
+        }
+    }
+
+    /// Mitschnitt vom System-conhost (#264), von Hand gestartet (Git Bash unter `C:\Program Files\Git`):
+    /// `cargo test --release conhost_capture -- --ignored --nocapture`. Startet Git Bash ohne Profil (eigenes HOME im
+    /// Temp-Ordner, ohne Verlaufsdatei) mit der Shell-Integration auf der ConPTY von Windows, tippt die Schritte der
+    /// Reproduktion und gibt die Lesestücke als Rust-Zeichenketten aus, dazu den Bildschirm der Emulation mit und ohne
+    /// Korrektur. Zum Schluss fragt Bash conhost nach dem Cursor (`POS Zeile Spalte`): Er muss in der Zeile dieser Ausgabe
+    /// stehen.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn conhost_capture() {
+        use portable_pty::{CommandBuilder, PtySize, PtySystem};
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+        let cols: usize = std::env::var("CAP_COLS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        let rows: usize = std::env::var("CAP_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+        let pause: u64 = std::env::var("CAP_PAUSE").ok().and_then(|v| v.parse().ok()).unwrap_or(3000);
+        let sys = portable_pty::win::conpty::ConPtySystem::with_sideloaded_conpty(None);
+        let pair = sys.openpty(PtySize { rows: rows as u16, cols: cols as u16, pixel_width: 0, pixel_height: 0 }).unwrap();
+        let git = r"C:\Program Files\Git";
+        let home = std::env::temp_dir().join(format!("pd-conhost-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let bash = format!(r"{git}\bin\bash.exe");
+        let mut cmd = CommandBuilder::new(&bash);
+        for a in ["--noprofile", "--norc", "-i"] {
+            cmd.arg(a);
+        }
+        cmd.cwd(&home);
+        cmd.env("HOME", &home);
+        cmd.env("HISTFILE", "");
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("PATH", format!(r"{git}\usr\bin;{}", std::env::var("PATH").unwrap_or_default()));
+        cmd.env("PS1", "\\n\\[\\033[32m\\]u@pc \\[\\033[35m\\]MINGW64 \\[\\033[33m\\]~\\[\\033[0m\\]\\n$ ");
+        let spec = crate::shells::ShellSpec { id: "bash".into(), label: "bash".into(), program: bash.clone(), args: vec![] };
+        for (k, v) in crate::shells::integration(&spec).1 {
+            cmd.env(k, v);
+        }
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        let t0 = Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel::<(Duration, Vec<u8>)>();
+        // CAP_READ_DELAY: Pause vor jedem Lesen (ms), damit Schreibvorgänge von conhost zu einem Lesestück verschmelzen.
+        let read_delay: u64 = std::env::var("CAP_READ_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 65536];
+            loop {
+                std::thread::sleep(Duration::from_millis(read_delay));
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send((t0.elapsed(), buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let with = Emu { term: Term::new(Config::default(), &TermSize::new(cols, rows), VoidListener), p: Processor::new(), cw: ConhostWrap::new(true) };
+        let without = Emu { term: Term::new(Config::default(), &TermSize::new(cols, rows), VoidListener), p: Processor::new(), cw: ConhostWrap::new(false) };
+        struct Cap {
+            rx: std::sync::mpsc::Receiver<(Duration, Vec<u8>)>,
+            writer: Box<dyn Write + Send>,
+            log: Vec<(Duration, String)>,
+            with: Emu,
+            without: Emu,
+        }
+        impl Cap {
+            fn pump(&mut self, ms: u64) {
+                let end = Instant::now() + Duration::from_millis(ms);
+                while let Some(left) = end.checked_duration_since(Instant::now()) {
+                    let Ok((at, bytes)) = self.rx.recv_timeout(left) else { continue };
+                    let s = String::from_utf8_lossy(&bytes).into_owned();
+                    self.with.chunk(&s);
+                    self.without.chunk(&s);
+                    if s.contains("[6n") {
+                        let (_, (r, c)) = self.with.screen();
+                        let _ = self.writer.write_all(format!("[{r};{c}R").as_bytes());
+                    }
+                    self.log.push((at, s));
+                }
+            }
+            fn typ(&mut self, text: &str, per_char: u64) {
+                for ch in text.chars() {
+                    let _ = self.writer.write_all(ch.to_string().as_bytes());
+                    let _ = self.writer.flush();
+                    self.pump(per_char);
+                }
+            }
+        }
+        let mut cap = Cap { rx, writer, log: Vec::new(), with, without };
+        cap.pump(2000);
+        let steps: Vec<(String, u64, u64)> = match std::env::var("CAP_STEPS") {
+            // Schritte: Text|ms je Zeichen|Pause danach, getrennt durch `;;`, `\r` als `<CR>`
+            Ok(s) => s
+                .split(";;")
+                .map(|st| {
+                    let mut it = st.split('|');
+                    (it.next().unwrap_or("").replace("<CR>", "\r"), it.next().and_then(|v| v.parse().ok()).unwrap_or(20), it.next().and_then(|v| v.parse().ok()).unwrap_or(1000))
+                })
+                .collect(),
+            Err(_) => vec![
+                ("printf '%*s\\n' \"$COLUMNS\" '' | tr ' ' x\r".into(), 15, pause),
+                ("echo next\r".into(), 120, pause),
+                ("echo third\r".into(), 15, 1500),
+            ],
+        };
+        for (text, per, after) in &steps {
+            cap.typ(text, *per);
+            cap.pump(*after);
+        }
+        cap.typ("IFS='[;' read -rs -d R -p $'\\e[6n' _ r c; echo \"POS $r $c\"\r", 5);
+        cap.pump(1500);
+        let _ = cap.writer.write_all(b"exit\r");
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&home);
+        println!("--- Lesestücke ({cols}x{rows}) ---");
+        for (at, s) in &cap.log {
+            println!("{:>6} {:?},", at.as_millis(), s);
+        }
+        for (name, e) in [("mit Korrektur", &cap.with), ("ohne Korrektur", &cap.without)] {
+            let (screen, cur) = e.screen();
+            println!("--- {name}: Cursor {cur:?} ---");
+            for (i, l) in screen.iter().enumerate() {
+                println!("{:>2}|{l}", i + 1);
+            }
+        }
+    }
 }

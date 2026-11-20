@@ -32,6 +32,7 @@ Für jeden Punkt: ✅ funktioniert / ❌ Fehler (kurz beschreiben).
 - [ ] Mausrad scrollt durch den Verlauf; `Get-ChildItem C:\Windows -Recurse` o. ä. erzeugt viel Ausgabe ohne Hänger.
 - [ ] Fenstergröße ändern: Terminal passt Spalten/Zeilen an (`mode con` oder `$Host.UI.RawUI.WindowSize`).
 - [ ] `vim`/`less`/`claude` (Vollbild-Programme) zeichnen korrekt, Beenden stellt den Verlauf wieder her.
+- [ ] **Zeile in Terminalbreite mit der ConPTY von Windows (2.4.2, #264)** – nur auf einem Windows mit älterem conhost (z. B. Windows 11 26200): Einstellungen → Darstellung → *Mitgelieferten Konsolen-Host verwenden* aus, neue Git-Bash-Sitzung, `clear`. `printf 'x%.0s' $(seq 1 $COLUMNS); sleep 1; echo` → die x-Zeile füllt genau eine Zeile, darunter die Leerzeile, dann der Prompt. Einige Sekunden warten, einen Befehl tippen, der länger als eine Zeile ist (z. B. `echo ok # ` und viele `z`), Enter → das Echo steht genau einmal da, keine doppelte Zeile; danach dasselbe mit `printf '%*s\n' "$COLUMNS" '' | tr ' ' x`. Gegenprobe mit eingeschaltetem Konsolen-Host: unverändert richtig.
 
 ## 4 · Sitzungen, Gruppen, Splits
 - [ ] Sitzung umbenennen: Doppelklick, F2, Strg+Umschalt+R; leerer Name → automatischer Titel.
