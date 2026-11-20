@@ -15,7 +15,6 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Profiles: "Shell in WSL" chooses the login shell per profile (automatic or an entry from the distribution's `/etc/shells`) (#57)
 - Nested shells (ssh, tmux …) without shell integration are detected and shown as "without shell integration"; `run_command` then reports `quality: approx` (#57)
 - *Settings → Terminal* offers copyable snippets for bash, zsh and fish to get command marks from remote machines (#57)
-=======
 
 ### Changed
 
@@ -31,7 +30,6 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 ### Fixed
 
 - Only with Windows' own console host on older Windows versions (*Use the bundled console host* off): after a line that exactly fills the terminal width, the terminal no longer falls one line behind (missing blank line before the Git Bash prompt), and the next command's echo is no longer drawn twice (#264)
->>>>>>> origin/develop
 
 ## [2.4.1] - 2026-11-20
 

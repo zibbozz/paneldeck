@@ -749,10 +749,19 @@ Jede Shell startet in einem eigenen Windows-Job-Object; Programme, die aus der S
 - [ ] **Programme mit Fenster:** `code .` bzw. ein Browser aus der Sitzung → in der Liste als „window open“ markiert; vor „Alle beenden“ selbst speichern.
 - [ ] **MCP:** Agent schließt eine selbst angelegte Sitzung mit Hintergrundprozess → keine Rückfrage, Antwort mit `remaining_processes` (pid, name, window, title) und Hinweis „untrusted“; der Prozess läuft weiter.
 - [ ] **Zuordnung:** ein per `Start-Process` aus der Sitzung gestarteter Prozess, dessen Shell schon beendet ist, wird bei `whoami` der Sitzung zugeordnet (Smoke-Test prüft das).
-<<<<<<< HEAD
 - [ ] **Beide Sprachen:** Rückfragen, Knöpfe und Warnung auf Deutsch und Englisch.
 
-## 64 · Shell-Integration für zsh und fish (#57, 2.5.0)
+## 64 · Kontextlänge als Schieberegler (#305, 2.5.0)
+*Einstellungen → Modelle → (Server) → (Modell) → Kontextlänge.* Regler in Zweierpotenzen 4096 … 1M, Zahlenfeld daneben für jeden Wert von 256 bis 16M.
+- [ ] **Standard:** ohne Häkchen *eigene* ist der Regler sichtbar, aber gesperrt (Ziehen/Klicken ändert nichts); daneben „vom Server: 128K · 131.072 Tokens“ bzw. „Standard 8K · 8.192 Tokens“.
+- [ ] **Eigene:** Häkchen setzen → Regler wird bedienbar und startet bei der erkannten Länge (bzw. 8192), auf die nächste Stufe gerundet; daneben Kurzform (z. B. `128K`) und Zahlenfeld „131.072 Tokens“.
+- [ ] **Ziehen:** Regler von ganz links nach ganz rechts → nur die Stufen 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M (jeweils genau das Doppelte), Zahlenfeld folgt.
+- [ ] **Pfeiltasten:** Regler anklicken bzw. per Tab fokussieren, → / ← verdoppeln bzw. halbieren den Wert um genau eine Stufe; an den Enden (4K, 1M) bleibt er stehen.
+- [ ] **Freier Wert:** im Zahlenfeld 6000 bzw. 3.000.000 eintippen + Enter → Wert bleibt exakt (auch nach Neustart in `settings.json`), der Regler steht auf der nächsten Stufe (8K bzw. 1M), die Kurzform fehlt bei 6000; 100 → wird zu 256, 20.000.000 → 16.777.216.
+- [ ] **Alte Werte:** `settings.json` mit `"context_length": 6000` bzw. `2000` bzw. `2097152` → nach dem Start unverändert angezeigt und gespeichert; erst wenn der Regler bewegt wird, springt der Wert auf eine Stufe.
+- [ ] **Beide Sprachen:** Tooltip des Reglers, „Tokens“/„tokens“ und Tausendertrenner (Deutsch `1.048.576`, Englisch `1,048,576`).
+
+## 66 · Shell-Integration für zsh und fish (#57, 2.5.0)
 Vorbereitung: eine eigene **Test-Distribution** (nie die eigene), z. B. zwei Importe derselben Ubuntu-/Debian-Rootfs: `pd-zsh` (Login-Shell `zsh`, dazu Oh My Zsh oder Powerlevel10k in `~/.zshrc`) und `pd-fish` (Login-Shell `fish`, eigenes `config.fish` mit `set -g fish_greeting`). Testinstanz aus einer Kopie der .exe mit eigenem Datenordner. Automatisch: Unit-Tests `shellinit`, `shells`, `quote`, `claude_opts`; Smoke-Test mit `PANELDECK_TEST_WSL_ZSH=pd-zsh` und `PANELDECK_TEST_WSL_FISH=pd-fish`.
 - [ ] **Anzeige:** Paneldeck starten, während `pd-zsh` läuft → *+ Neu* → Shell-Liste zeigt nach kurzer Zeit „WSL: pd-zsh (zsh)“; `pd-fish` (lief nicht) zeigt nach dem ersten Sitzungsstart „WSL: pd-fish (fish)“. Gleiches in *Einstellungen → Allgemein → Standard-Shell*, Sitzungseinstellungen und Vorlagen.
 - [ ] **zsh:** Sitzung in `pd-zsh` → Prompt des Themes wie in Windows Terminal (Oh My Zsh/Powerlevel10k unverändert); `echo $ZDOTDIR` leer (bzw. der eigene Wert); `ls ~` zeigt keine neue Datei.
@@ -772,16 +781,3 @@ Vorbereitung: eine eigene **Test-Distribution** (nie die eigene), z. B. zwei Imp
 - [ ] **Schnipsel:** *Einstellungen → Terminal* → je bash/zsh/fish „Kopieren“ → in die Startdatei auf dem anderen Rechner → nach neuem `ssh`: kein Hinweis „ohne Shell-Integration“, Sprünge funktionieren, `run_command` wieder exakt.
 - [ ] **Dateinamen:** eine Datei `x';touch pwned;#` (bzw. mit Backslash vor dem `'`) in eine fish-Sitzung ziehen → der Name steht korrekt gequotet in der Eingabe; Enter legt keine Datei `pwned` an.
 - [ ] **Beide Sprachen:** Zusätze „(Shell unbekannt)“/„(shell unknown)“ und „ohne Integration“/„without integration“ und der Text der Einstellung Shell-Integration auf Deutsch und Englisch.
-=======
-- [ ] **Beide Sprachen:** Rückfragen, Knöpfe und Warnung auf Deutsch und Englisch.
-
-## 64 · Kontextlänge als Schieberegler (#305, 2.5.0)
-*Einstellungen → Modelle → (Server) → (Modell) → Kontextlänge.* Regler in Zweierpotenzen 4096 … 1M, Zahlenfeld daneben für jeden Wert von 256 bis 16M.
-- [ ] **Standard:** ohne Häkchen *eigene* ist der Regler sichtbar, aber gesperrt (Ziehen/Klicken ändert nichts); daneben „vom Server: 128K · 131.072 Tokens“ bzw. „Standard 8K · 8.192 Tokens“.
-- [ ] **Eigene:** Häkchen setzen → Regler wird bedienbar und startet bei der erkannten Länge (bzw. 8192), auf die nächste Stufe gerundet; daneben Kurzform (z. B. `128K`) und Zahlenfeld „131.072 Tokens“.
-- [ ] **Ziehen:** Regler von ganz links nach ganz rechts → nur die Stufen 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M (jeweils genau das Doppelte), Zahlenfeld folgt.
-- [ ] **Pfeiltasten:** Regler anklicken bzw. per Tab fokussieren, → / ← verdoppeln bzw. halbieren den Wert um genau eine Stufe; an den Enden (4K, 1M) bleibt er stehen.
-- [ ] **Freier Wert:** im Zahlenfeld 6000 bzw. 3.000.000 eintippen + Enter → Wert bleibt exakt (auch nach Neustart in `settings.json`), der Regler steht auf der nächsten Stufe (8K bzw. 1M), die Kurzform fehlt bei 6000; 100 → wird zu 256, 20.000.000 → 16.777.216.
-- [ ] **Alte Werte:** `settings.json` mit `"context_length": 6000` bzw. `2000` bzw. `2097152` → nach dem Start unverändert angezeigt und gespeichert; erst wenn der Regler bewegt wird, springt der Wert auf eine Stufe.
-- [ ] **Beide Sprachen:** Tooltip des Reglers, „Tokens“/„tokens“ und Tausendertrenner (Deutsch `1.048.576`, Englisch `1,048,576`).
->>>>>>> origin/develop

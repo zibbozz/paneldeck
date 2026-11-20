@@ -15,7 +15,6 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Profile: „Shell in WSL“ wählt die Login-Shell je Profil (automatisch oder ein Eintrag aus `/etc/shells` der Distribution) (#57)
 - Verschachtelte Shells (ssh, tmux …) ohne Shell-Integration werden erkannt und als „ohne Shell-Integration“ angezeigt; `run_command` meldet dann `quality: approx` (#57)
 - *Einstellungen → Terminal* bietet kopierbare Schnipsel für bash, zsh und fish, um Befehlsmarken von entfernten Rechnern zu bekommen (#57)
-=======
 
 ### Changed
 
@@ -31,7 +30,6 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Fixed
 
 - Nur mit dem Konsolen-Host von Windows auf älteren Windows-Versionen (*Mitgelieferten Konsolen-Host verwenden* aus): Nach einer Zeile, die genau die Terminalbreite füllt, bleibt das Terminal nicht mehr eine Zeile zurück (fehlende Leerzeile vor dem Git-Bash-Prompt), und das Echo des nächsten Befehls erscheint nicht mehr doppelt (#264)
->>>>>>> origin/develop
 
 ## [2.4.1] - 2026-11-20
 
