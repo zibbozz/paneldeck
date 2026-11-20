@@ -1,7 +1,8 @@
 //! Aufräumen der Integration außerhalb des Datenordners (#307): Autostart-Werte und Explorer-Kontextmenü (Registry unter
 //! HKCU) sowie `paneldeck*`-Einträge in `~/.claude.json` – jeweils nur, was auf **diese** paneldeck.exe zeigt. Vor dem
 //! Ändern wird gesichert: Registry-Werte als `.reg`-Datei (Doppelklick stellt sie wieder her), `~/.claude.json` als Kopie,
-//! beides im Sicherungsordner.
+//! beides im Sicherungsordner (beim Zurücksetzen neben der ZIP-Sicherung, `Ctx::safety_dir` – der Sicherungsordner im
+//! Datenordner wird dabei gelöscht).
 //!
 //! Die Registry liest und schreibt `platform::registry`; außerhalb von Windows meldet sie nichts, dann sind die Einträge
 //! leer. Die Gegenstücke unter Linux/macOS (XDG-Autostart `.desktop`, Dateimanager-Aktion, LaunchAgent) kommen hier als
@@ -131,7 +132,7 @@ fn delete_run_values(ctx: &Ctx, vals: &[(String, String)], stem: &str, r: &mut I
         return;
     }
     let backup: Vec<(String, Option<String>, String)> = vals.iter().map(|(n, d)| (RUN_KEY.to_string(), Some(n.clone()), d.clone())).collect();
-    match write_reg_backup(&ctx.backup_dir, stem, &backup) {
+    match write_reg_backup(ctx.safety_dir(), stem, &backup) {
         Ok(p) => {
             let p = p.display().to_string();
             r.notes.push((format!("Gesichert: {p}"), format!("Saved: {p}")));
@@ -156,7 +157,7 @@ pub fn remove(ctx: &Ctx, item: Item, r: &mut ItemReport) {
         Item::Autostart => delete_run_values(ctx, &st.run_values, "autostart", r),
         Item::ContextMenu => {
             let Some(vals) = st.context.filter(|_| ctx.system_integration) else { return };
-            match write_reg_backup(&ctx.backup_dir, "context-menu", &vals) {
+            match write_reg_backup(ctx.safety_dir(), "context-menu", &vals) {
                 Ok(p) => {
                     let p = p.display().to_string();
                     r.notes.push((format!("Gesichert: {p}"), format!("Saved: {p}")));
@@ -173,7 +174,7 @@ pub fn remove(ctx: &Ctx, item: Item, r: &mut ItemReport) {
         }
         Item::ClaudeJson => {
             let Some(path) = st.claude_json.filter(|_| !st.claude_json_servers.is_empty()) else { return };
-            remove_claude_json(&path, &ctx.exe, &ctx.backup_dir, r);
+            remove_claude_json(&path, &ctx.exe, ctx.safety_dir(), r);
         }
         _ => {}
     }
