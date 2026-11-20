@@ -32,8 +32,9 @@ Options:
 Data folder (first match wins):
   1. --data-dir <folder>
   2. environment variable PANELDECK_DATA
-  3. portable folder "paneldeck-data" next to paneldeck.exe (if it can be written)
-  4. %APPDATA%\Paneldeck
+  3. portable folder "paneldeck-data" next to paneldeck.exe (if it can be written;
+     Linux: only if it exists, next to the program or the .AppImage)
+  4. %APPDATA%\Paneldeck (Linux: ~/.local/share/Paneldeck)
   5. the current directory (fallback)
   --profile <name> uses the subfolder "profiles\<name>" of that folder.
 
@@ -144,8 +145,9 @@ Optionen:
 Datenordner (der erste Treffer gilt):
   1. --data-dir <ordner>
   2. Umgebungsvariable PANELDECK_DATA
-  3. portabler Ordner „paneldeck-data“ neben paneldeck.exe (wenn beschreibbar)
-  4. %APPDATA%\Paneldeck
+  3. portabler Ordner „paneldeck-data“ neben paneldeck.exe (wenn beschreibbar;
+     Linux: nur wenn es ihn gibt, neben dem Programm bzw. der .AppImage)
+  4. %APPDATA%\Paneldeck (Linux: ~/.local/share/Paneldeck)
   5. das aktuelle Verzeichnis (Notlösung)
   --profile <name> nutzt den Unterordner „profiles\<name>“ dieses Ordners.
 

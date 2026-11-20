@@ -1,7 +1,10 @@
 //! Datenordner: einmal pro Prozess auflösen und zwischenspeichern.
 //!
 //! Reihenfolge: `--data-dir` > Umgebungsvariable `PANELDECK_DATA` > portabler Ordner `paneldeck-data` neben der .exe
-//! (wenn beschreibbar) > `%APPDATA%\Paneldeck` > `.` (Notlösung). `--profile <name>` hängt `profiles\<name>` an den
+//! (wenn beschreibbar) > `%APPDATA%\Paneldeck` > `.` (Notlösung). Linux/macOS (#149/#150): statt `%APPDATA%` der
+//! Benutzerordner des Systems (`$XDG_DATA_HOME` bzw. `~/.local/share`, macOS `~/Library/Application Support`); der
+//! portable Ordner zählt dort nur, wenn es ihn schon gibt (eine AppImage: neben der `.AppImage`-Datei), damit ein
+//! entpacktes Archiv nicht stillschweigend zum Datenordner wird. `--profile <name>` hängt `profiles\<name>` an den
 //! gefundenen Ordner an. Ein ausdrücklich angegebener Ordner (Argument, Umgebungsvariable, Profil), der sich nicht
 //! anlegen oder beschreiben lässt, ist ein Fehler – kein stiller Rückfall auf einen anderen Ordner.
 
@@ -99,7 +102,7 @@ pub fn resolve_with(inp: &Inputs, usable: &dyn Fn(&Path) -> bool) -> Result<Data
             return Err(PathError { path: e.clone(), source: Source::Env });
         }
         (e.clone(), Source::Env)
-    } else if let Some(p) = inp.exe_dir.as_ref().map(|d| d.join("paneldeck-data")).filter(|p| usable(p)) {
+    } else if let Some(p) = inp.exe_dir.as_ref().map(|d| d.join("paneldeck-data")).filter(|p| (cfg!(windows) || p.is_dir()) && usable(p)) {
         (p, Source::Portable)
     } else if let Some(p) = inp.appdata.as_ref().map(|d| d.join("Paneldeck")).filter(|p| usable(p)) {
         (p, Source::AppData)
@@ -132,10 +135,64 @@ pub fn inputs(cli: &Cli) -> Inputs {
     Inputs {
         arg: cli.data_dir.clone(),
         env: env_path(ENV_DATA),
-        exe_dir: std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())),
-        appdata: std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME")).map(PathBuf::from),
+        exe_dir: portable_base(),
+        appdata: user_data_root(),
         profile: cli.profile.clone(),
     }
+}
+
+/// Ordner, neben dem der portable Ordner `paneldeck-data` liegt: der Ordner der Programmdatei; bei einer AppImage
+/// (`$APPIMAGE`, die Programmdatei liegt dann in einem schreibgeschützten Einhängepunkt) der Ordner der `.AppImage`.
+fn portable_base() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(a) = std::env::var_os("APPIMAGE").filter(|a| !a.is_empty()) {
+        return PathBuf::from(a).parent().map(Path::to_path_buf);
+    }
+    std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf()))
+}
+
+/// Benutzerordner für Programmdaten, unter dem `Paneldeck` liegt: Windows `%APPDATA%`, Linux `$XDG_DATA_HOME`
+/// (absolut) bzw. `~/.local/share`, macOS `~/Library/Application Support`; Notlösung `HOME`.
+pub fn user_data_root() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA").map(PathBuf::from).or(home)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home.map(|h| h.join("Library").join("Application Support"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        xdg_data_home(std::env::var_os("XDG_DATA_HOME").map(PathBuf::from), home)
+    }
+}
+
+/// `$XDG_DATA_HOME`, wenn absolut, sonst `$HOME/.local/share` (XDG Base Directory Specification).
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+pub fn xdg_data_home(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    xdg.filter(|p| p.is_absolute()).or_else(|| home.map(|h| h.join(".local").join("share")))
+}
+
+/// Linux/macOS (#149 Review): Datenordner nur für den Benutzer (0700), auch einen schon vorhandenen. Der Basisordner
+/// eines Profils ebenso, außer bei `--data-dir`/`PANELDECK_DATA` (fremder Ordner des Nutzers: nur der Profilordner).
+fn harden(d: &DataDir) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut dirs = vec![d.path.clone()];
+        if d.base != d.path && !matches!(d.source, Source::Arg | Source::Env) {
+            dirs.push(d.base.clone());
+        }
+        for p in dirs {
+            if std::fs::metadata(&p).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o077 != 0) {
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = d;
 }
 
 static DIR: OnceLock<DataDir> = OnceLock::new();
@@ -146,6 +203,7 @@ pub fn init(cli: &Cli) -> Result<&'static DataDir, PathError> {
         return Ok(d);
     }
     let d = resolve_with(&inputs(cli), &usable)?;
+    harden(&d);
     Ok(DIR.get_or_init(|| d))
 }
 
@@ -197,7 +255,15 @@ pub fn source_label(s: Source, l: Lang) -> &'static str {
         Source::Arg => l.t("festgelegt mit --data-dir", "set by --data-dir"),
         Source::Env => l.t("festgelegt mit PANELDECK_DATA", "set by PANELDECK_DATA"),
         Source::Portable => l.t("portabler Ordner neben der .exe", "portable folder next to the .exe"),
-        Source::AppData => "%APPDATA%",
+        Source::AppData => {
+            if cfg!(windows) {
+                "%APPDATA%"
+            } else if cfg!(target_os = "macos") {
+                "~/Library/Application Support"
+            } else {
+                l.t("Benutzerordner (XDG, ~/.local/share)", "user folder (XDG, ~/.local/share)")
+            }
+        }
         Source::Fallback => l.t("Notlösung (aktuelles Verzeichnis)", "fallback (current directory)"),
     }
 }
@@ -210,6 +276,7 @@ pub fn peek_dir(inp: &Inputs) -> Option<PathBuf> {
         e.clone()
     } else {
         let portable = inp.exe_dir.as_ref().map(|d| d.join("paneldeck-data")).filter(|p| p.is_dir());
+        // (Linux/macOS: auch beim Start zählt der portable Ordner nur, wenn es ihn gibt – wie hier.)
         portable.or_else(|| inp.appdata.as_ref().map(|d| d.join("Paneldeck")))?
     };
     Some(match &inp.profile {
@@ -261,6 +328,8 @@ mod tests {
     }
 
     fn inputs_in(t: &Path) -> Inputs {
+        // Linux/macOS: der portable Ordner zählt nur, wenn es ihn gibt.
+        let _ = std::fs::create_dir_all(t.join("exe").join("paneldeck-data"));
         Inputs { arg: None, env: None, exe_dir: Some(t.join("exe")), appdata: Some(t.join("appdata")), profile: None }
     }
 
@@ -346,6 +415,49 @@ mod tests {
         inp.profile = Some("w".into());
         inp.env = Some(PathBuf::from("E:\\e"));
         assert_eq!(peek_dir(&inp), Some(PathBuf::from("E:\\e\\profiles\\w")));
+    }
+
+    #[test]
+    fn portable_folder_only_if_present_off_windows() {
+        let t = Tmp::new("present");
+        let inp = Inputs { arg: None, env: None, exe_dir: Some(t.0.join("bin")), appdata: Some(t.0.join("share")), profile: None };
+        std::fs::create_dir_all(t.0.join("bin")).unwrap();
+        let d = resolve_with(&inp, &usable).unwrap();
+        if cfg!(windows) {
+            assert_eq!(d.source, Source::Portable);
+        } else {
+            assert_eq!((d.path.clone(), d.source), (t.0.join("share").join("Paneldeck"), Source::AppData));
+            assert!(!t.0.join("bin").join("paneldeck-data").exists(), "nothing created next to the binary");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_folder_and_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("private");
+        let dir = t.0.join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        harden(&DataDir { path: dir.clone(), base: dir.clone(), source: Source::AppData, profile: None });
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        let f = dir.join("ipc.json");
+        std::fs::write(&f, b"old").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        crate::state::write_atomic(&f, b"{}").unwrap();
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&f).unwrap(), b"{}");
+    }
+
+    #[cfg(unix)] // Unix-Pfade
+    #[test]
+    fn xdg_rules() {
+        let home = Some(PathBuf::from("/home/a"));
+        assert_eq!(xdg_data_home(None, home.clone()), Some(PathBuf::from("/home/a/.local/share")));
+        assert_eq!(xdg_data_home(Some(PathBuf::from("/data/x")), home.clone()), Some(PathBuf::from("/data/x")));
+        // relative values are invalid per spec → default
+        assert_eq!(xdg_data_home(Some(PathBuf::from("rel")), home.clone()), Some(PathBuf::from("/home/a/.local/share")));
+        assert_eq!(xdg_data_home(None, None), None);
     }
 
     #[test]

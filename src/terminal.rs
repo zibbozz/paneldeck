@@ -475,8 +475,10 @@ pub struct SpawnOptions<'a> {
 /// Interne Variablen, die Paneldeck selbst setzt bzw. nur für einen Neustart nutzt: Ein Wert aus der Umgebung des
 /// Paneldeck-Prozesses (z. B. Start aus einem Terminal eines anderen Hubs) darf nie an ein Terminal gehen – sonst fände
 /// `paneldeck mcp` dort den falschen Hub. Die passenden Werte setzt `SpawnOptions::env` danach neu.
-pub const INTERNAL_ENV: [&str; 11] = [
+pub const INTERNAL_ENV: [&str; 12] = [
     crate::hooks::ENV_SESSION,
+    // Sitzungs-Markierung unter Linux/macOS (`platform::unix_proc::JOB_ENV`)
+    "PANELDECK_SESSION_JOB",
     crate::hooks::ENV_SESSION_KEY,
     crate::hooks::ENV_PORT,
     crate::hooks::ENV_TOKEN,
@@ -551,10 +553,19 @@ impl Session {
         // dann sicher zu ihr, auch losgelöst. Lehnt Windows den Job beim Start ab, wird die Shell direkt danach
         // zugewiesen (mit Nachholen schon gestarteter Kinder); scheitert auch das, bleibt der Prozessbaum.
         let job = crate::platform::process::SessionJob::new();
+        // Linux/macOS: Markierung der Sitzung in der Umgebung (erben alle Nachfahren, `platform::unix_proc`).
+        if let Some((k, v)) = job.as_ref().and_then(|j| j.env_var()) {
+            cmd.env(k, v);
+        }
         let (spawned, in_job) = crate::platform::process::spawn_in_job(job.as_ref(), || pair.slave.spawn_command(cmd));
         let child = spawned.map_err(|e| e.to_string())?;
         let job = Self::adopt_into_job(job, in_job, child.as_ref());
         let shell_pid = child.process_id();
+        // Linux: eigenes Kind – der Subreaper-Aufräumer fasst es nie an (`platform::unix_proc::note_own_child`).
+        #[cfg(unix)]
+        if let Some(p) = shell_pid {
+            crate::platform::unix_proc::note_own_child(p);
+        }
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -753,9 +764,11 @@ impl Session {
         job.adopt(h, pid).then_some(job)
     }
 
-    #[cfg(not(windows))]
-    fn adopt_into_job(_job: Option<crate::platform::process::SessionJob>, _in_job: bool, _child: &(dyn Child + Send + Sync)) -> Option<crate::platform::process::SessionJob> {
-        None
+    /// Linux/macOS: die Shell merken (Prozessbaum ab ihr; die Markierung steckt schon in ihrer Umgebung).
+    #[cfg(unix)]
+    fn adopt_into_job(job: Option<crate::platform::process::SessionJob>, _in_job: bool, child: &(dyn Child + Send + Sync)) -> Option<crate::platform::process::SessionJob> {
+        let job = job?;
+        job.adopt_pid(child.process_id()?).then_some(job)
     }
 
     /// Job Object herausnehmen (Schließen/Neustart, #218): Der Hub behält es, solange noch Prozesse darin laufen, damit

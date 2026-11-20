@@ -39,6 +39,11 @@ pub fn setup_name(v: &Version) -> String {
     format!("Paneldeck-Setup-{v}.exe")
 }
 
+/// Linux-AppImage des Releases (#149).
+pub fn appimage_name(v: &Version) -> String {
+    format!("Paneldeck-{v}-x86_64.AppImage")
+}
+
 pub fn zip_name(v: &Version) -> String {
     format!("paneldeck-{v}-windows-x64.zip")
 }
@@ -154,11 +159,14 @@ pub fn expected_hash(sums: &[([u8; 32], String)], name: &str) -> Option<[u8; 32]
 
 /// Art der Installation (bestimmt, welche Datei geladen wird).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: nur `AppImage`
 pub enum Flavor {
     /// Mit dem Installer eingerichtet: Setup still in denselben Ordner ausführen.
     Installed,
     /// Portables ZIP: `paneldeck.exe` ersetzen.
     Portable,
+    /// Linux-AppImage (#149): die `.AppImage`-Datei ersetzen (geprüft per `SHA256SUMS.txt`).
+    AppImage,
 }
 
 /// Was mit einer neueren Version möglich ist.
@@ -176,7 +184,7 @@ pub enum NoInstall {
     NoChecksums,
     /// Die passende Datei (Setup bzw. ZIP) fehlt im Release.
     NoAsset,
-    /// Kein Windows: hier gibt es nichts zu installieren.
+    /// Hier gibt es nichts zu installieren (Linux-Pakete .deb/.rpm/Tarball: über die Paketverwaltung bzw. von Hand).
     Unsupported,
 }
 
@@ -205,6 +213,7 @@ pub fn evaluate(current: &Version, rel: &Release, flavor: Option<Flavor>, skip_v
             let name = match f {
                 Flavor::Installed => setup_name(&rel.version),
                 Flavor::Portable => zip_name(&rel.version),
+                Flavor::AppImage => appimage_name(&rel.version),
             };
             match (rel.asset(SUMS_NAME), rel.asset(&name)) {
                 (None, _) => Plan::AnnounceOnly(NoInstall::NoChecksums),

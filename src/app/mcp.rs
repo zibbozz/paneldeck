@@ -329,7 +329,10 @@ fn attribute(peer: &crate::platform::process::PeerChain, sessions: &[CallerCand]
         }
     }
     let jobless = sessions.iter().any(|(_, pid, job, _)| pid.is_some() && job.is_none());
-    if peer.orphan && jobless {
+    // Linux/macOS (#149 review B1): `orphan` heißt dort „gehört zu Paneldeck, aber zu keiner nachweisbaren Sitzung“
+    // (losgelöster Nachfahre unter dem Subreaper-Hub, Markierung einer Sitzung außerhalb ihres Baums, Abriss nach dem
+    // Hub-Start ohne Subreaper) – nie extern, auch wenn alle Sitzungen einen „Job“ haben (kein Fail-open).
+    if peer.orphan && (jobless || cfg!(unix)) {
         (None, "orphan")
     } else {
         (None, "none")
@@ -734,7 +737,8 @@ impl App {
             .entries
             .iter()
             .map(|(id, e)| {
-                let wsl = env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl");
+                // Regel 3 (Umgebungs-Hinweis) nur für WSL unter Windows; unter Linux/macOS gewährt sie nie etwas (#149 Review N7).
+                let wsl = cfg!(windows) && env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl");
                 let live = e.live.as_ref();
                 (*id, live.and_then(|s| s.pid()), live.and_then(|s| s.job_key()), wsl.then_some(e.session_key.as_str()))
             })
@@ -2197,7 +2201,8 @@ fn check_create_cwd(c: &str, wsl: Option<Option<&str>>, de: bool, is_dir: impl F
                 Err(e) => bad(format!("Ungültiger Linux-Pfad: {}", e.message(true)), format!("Invalid Linux path: {}", e.message(false))),
             };
         }
-    } else if crate::wsl::looks_linux(c) {
+    } else if cfg!(windows) && crate::wsl::looks_linux(c) {
+        // (Linux/macOS, #149: dort sind Unix-Pfade die normalen Pfade.)
         // Nie einen Linux-Pfad an eine Windows-Shell geben (`/x` hieße dort `C:\x`).
         return bad(format!("Linux-Pfade gibt es nur für WSL-Shells: {c}"), format!("Linux paths are only allowed for WSL shells: {c}"));
     }
@@ -2287,6 +2292,15 @@ mod tests {
         assert_eq!(level, McpLevel::Read);
     }
 
+    /// Linux/macOS (#149): Unix-Pfade sind normale Startordner.
+    #[cfg(unix)]
+    #[test]
+    fn create_session_cwd_takes_unix_paths_on_unix() {
+        assert_eq!(check_create_cwd("/tmp", None, false, |_| true), Ok("/tmp".to_string()));
+        assert!(check_create_cwd("/gibt/es/nicht", None, false, |_| false).is_err());
+    }
+
+    #[cfg(windows)] // Windows-Shells (unter Linux/macOS sind Unix-Pfade die normalen Pfade)
     #[test]
     fn create_session_cwd_accepts_linux_paths_only_for_wsl() {
         let dirs = |p: &str| matches!(p, r"C:\Work" | r"\\wsl.localhost\Ubuntu\home\u");
@@ -2405,7 +2419,8 @@ mod tests {
         assert_eq!(attribute(&job(77), &with_jobs, &retired, None), (None, "orphan"));
         // Baum reißt ab (z. B. `code .`: der Startprozess ist beendet), aber alle Sitzungen haben Jobs: extern (#218)
         let broken = PeerChain { chain: vec![4242], orphan: true, job: None };
-        assert_eq!(attribute(&broken, &with_jobs, &retired, None), (None, "none"));
+        // (Linux/macOS: dort setzt `resolve_peer` `orphan` nur für sicher losgelöste Nachfahren – immer eingeschränkt.)
+        assert_eq!(attribute(&broken, &with_jobs, &retired, None), (None, if cfg!(unix) { "orphan" } else { "none" }));
         // Rückfallweg nur, wenn eine laufende Sitzung keinen Job hat
         let jobless: [CallerCand; 2] = [(5, Some(500), Some(1), None), (6, Some(600), None, None)];
         assert_eq!(attribute(&broken, &jobless, &retired, None), (None, "orphan"));

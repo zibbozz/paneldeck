@@ -4,7 +4,8 @@
 use std::path::Path;
 
 /// Does this platform have a file manager we can open (shows "Show in Explorer"/"Open folder" buttons)?
-pub const FILE_MANAGER: bool = cfg!(windows);
+/// Linux (#149): the desktop's file manager through `xdg-open`.
+pub const FILE_MANAGER: bool = cfg!(any(windows, all(unix, not(target_os = "macos"))));
 
 /// Open `target` (URL, file or folder) with its default program. `false` if nothing could be started.
 pub fn launch(target: &str) -> bool {
@@ -23,7 +24,7 @@ pub fn launch(target: &str) -> bool {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        std::process::Command::new("xdg-open").arg(target).spawn().is_ok()
+        xdg_open(std::ffi::OsStr::new(target))
     }
 }
 
@@ -42,8 +43,31 @@ pub fn reveal(target: &str) {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         if let Some(dir) = Path::new(target).parent() {
-            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+            xdg_open(dir.as_os_str());
         }
+    }
+}
+
+/// Linux: `xdg-open` in the background and waited for (no zombie). A path that starts with `-` would be read as an
+/// option: it is made `./-…`. `false` if it could not be started.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn xdg_open(target: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let arg: std::ffi::OsString = if target.as_bytes().starts_with(b"-") {
+        let mut s = std::ffi::OsString::from("./");
+        s.push(target);
+        s
+    } else {
+        target.to_owned()
+    };
+    match std::process::Command::new("xdg-open").arg(&arg).stdin(std::process::Stdio::null()).spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -53,7 +77,11 @@ pub fn folder(dir: &Path) {
     {
         let _ = std::process::Command::new("explorer").arg(dir).spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        xdg_open(dir.as_os_str());
+    }
+    #[cfg(target_os = "macos")]
     let _ = dir;
 }
 
@@ -63,7 +91,16 @@ pub fn show_in_file_manager(path: &str, is_dir: bool) {
     {
         let _ = std::process::Command::new("explorer").arg(if is_dir { path.to_string() } else { format!("/select,{path}") }).spawn();
     }
-    #[cfg(not(windows))]
+    // Linux: a folder is opened, for a file its folder (xdg-open has no "select").
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let p = Path::new(path);
+        let target = if is_dir { Some(p) } else { p.parent() };
+        if let Some(t) = target {
+            xdg_open(t.as_os_str());
+        }
+    }
+    #[cfg(target_os = "macos")]
     let _ = (path, is_dir);
 }
 

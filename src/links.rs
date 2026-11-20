@@ -39,7 +39,7 @@ fn strip_line_col(s: &str) -> &str {
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
+    (if cfg!(windows) { std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) } else { std::env::var_os("HOME") }).map(PathBuf::from)
 }
 
 fn resolve(token: &str, cwd: &str, shell_id: &str) -> Option<String> {

@@ -541,7 +541,13 @@ fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, want: &[u8; 32], off
             swap_companions(exe, &data, &offer.version);
             install::swap_exe(exe, &bytes).map_err(|e| Retry(format!("{} ({e})", lang.t("paneldeck.exe konnte nicht ersetzt werden", "Could not replace paneldeck.exe"))))
         }
-        None => Err(Discard(lang.t("Automatische Updates gibt es nur unter Windows.", "Automatic updates are only available on Windows.").into())),
+        Some(Flavor::AppImage) => {
+            if !install::is_appimage(&data) {
+                return Err(Discard(lang.t("Die heruntergeladene Datei ist keine AppImage.", "The downloaded file is not an AppImage.").into()));
+            }
+            install::swap_appimage(exe, &data).map_err(|e| Retry(format!("{} ({e})", lang.t("Die AppImage konnte nicht ersetzt werden", "Could not replace the AppImage"))))
+        }
+        None => Err(Discard(lang.t("Automatische Updates gibt es nur unter Windows und für die Linux-AppImage.", "Automatic updates are only available on Windows and for the Linux AppImage.").into())),
     };
     // Sperre erst hier lösen: das Setup ist beendet (oder läuft nach der Wartezeit allein weiter).
     drop(lock);

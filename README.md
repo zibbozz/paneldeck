@@ -28,6 +28,8 @@ Paneldeck works **offline**: it only contacts GitHub when you check for updates 
 ## Download
 Paneldeck is distributed only through **GitHub Releases**: https://github.com/zibbozz/paneldeck/releases – each release has an installer (`Paneldeck-Setup-<version>.exe`), a portable ZIP (`paneldeck-<version>-windows-x64.zip`) and, from 2.1.0 on, `SHA256SUMS.txt` with the checksums of both, all built from this repository.
 
+**Linux** (from 2.5.0, x86_64; Ubuntu 22.04 / Debian 12 / Fedora 39 or newer): an AppImage (updates itself), a `.deb`, an `.rpm` and a tarball, built by GitHub Actions; their checksums are in the same `SHA256SUMS.txt`. Installation, data folder and desktop integration: [Linux](docs/en/linux.md).
+
 ### Note: the program is not (yet) code-signed
 The installer and `paneldeck.exe` are **not code-signed**. A certificate costs money, and Paneldeck is meant to stay a free hobby project. For now this means:
 - On first start, **Windows SmartScreen** may show "Windows protected your PC". Click **"More info" → "Run anyway"**.
@@ -54,6 +56,7 @@ The guides live in [`docs/en/`](docs/en/) (German: [`docs/de/`](docs/de/)) and a
 - [Command line](docs/en/command-line.md) – every option, data folder lookup, profiles, exit codes
 - [Data folder and backups](docs/en/data-and-backups.md) – files, backups, portable vs. installed
 - [Windows integration](docs/en/windows-integration.md) – tray, autostart, Explorer context menu
+- [Linux](docs/en/linux.md) – packages, data folder, tray, autostart, file manager, API keys, self-update of the AppImage
 - [Updates](docs/en/updates.md) – self-update, checksums, privacy
 - [Troubleshooting](docs/en/troubleshooting.md) – common problems, antivirus false positives
 - [Building](docs/en/building.md) – building from source, release files

@@ -28,6 +28,7 @@ fn keep_requested(wait_pid: Option<&std::ffi::OsStr>, keep: Option<&std::ffi::Os
 }
 
 /// Pfad ohne `\\?\`-Präfix, mit `\`, ohne abschließenden Trenner, klein geschrieben (Windows-Pfade sind nicht case-sensitiv).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: nur die AppImage (`appimage_flavor`)
 pub fn norm_dir(p: &str) -> String {
     let s = p.trim().trim_matches('"').replace('/', "\\");
     let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
@@ -36,6 +37,7 @@ pub fn norm_dir(p: &str) -> String {
 
 /// Installiert oder portabel? Installiert = der Uninstall-Eintrag des Installers (HKCU) zeigt auf genau den Ordner dieser .exe
 /// und dort liegt `Uninstall.exe`. Alles andere (auch eine portable Kopie neben einer Installation) ist portabel.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: nur die AppImage (`appimage_flavor`)
 pub fn flavor_for(exe: &Path, install_location: Option<&str>) -> Flavor {
     let Some(dir) = exe.parent() else { return Flavor::Portable };
     match install_location {
@@ -44,9 +46,80 @@ pub fn flavor_for(exe: &Path, install_location: Option<&str>) -> Flavor {
     }
 }
 
-/// Installationsart dieser Instanz (`None`, wo es kein Selbst-Update gibt: `platform::SELF_UPDATE`, nur Windows).
+/// Installationsart dieser Instanz (`None`, wo es kein Selbst-Update gibt: `platform::SELF_UPDATE`, Windows; Linux nur als
+/// AppImage, #149 – .deb/.rpm/Tarball melden eine neue Version nur).
 pub fn detect(exe: &Path) -> Option<Flavor> {
-    crate::platform::SELF_UPDATE.then(|| flavor_for(exe, crate::platform::registry::install_location().as_deref()))
+    #[cfg(target_os = "linux")]
+    {
+        appimage_flavor(exe, std::env::var_os("APPIMAGE").as_deref())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::platform::SELF_UPDATE.then(|| flavor_for(exe, crate::platform::registry::install_location().as_deref()))
+    }
+}
+
+/// Linux: läuft diese Instanz als AppImage (`$APPIMAGE` = genau diese Datei, beschreibbar)?
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn appimage_flavor(exe: &Path, appimage: Option<&std::ffi::OsStr>) -> Option<Flavor> {
+    let a = Path::new(appimage?);
+    (a == exe && exe.is_file()).then_some(Flavor::AppImage)
+}
+
+/// Ist das eine AppImage (ELF mit der Kennung `AI\x02` ab Byte 8)?
+pub fn is_appimage(b: &[u8]) -> bool {
+    b.len() > 4096 && b.starts_with(b"\x7fELF") && b.get(8..11) == Some(b"AI\x02")
+}
+
+/// Die neue AppImage an den Platz der laufenden setzen (die alte bleibt als `<datei>.old`, bis die neue Version gestartet
+/// ist) und ausführbar machen. Die laufende Instanz läuft aus ihrem eingehängten Abbild weiter.
+/// Sicher gegen Symlinks und halb geschriebene Dateien: Die Datei muss eine echte Datei sein (kein Symlink); `<datei>.new`
+/// entsteht neu (`create_new`) mit den Rechten des Originals (lesbar = ausführbar), wird vor dem Umbenennen auf die Platte
+/// geschrieben (`fsync`), danach auch der Ordner.
+pub fn swap_appimage(file: &Path, new_bytes: &[u8]) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+        let meta = std::fs::symlink_metadata(file).map_err(|e| err(file, e))?;
+        if !meta.file_type().is_file() {
+            return Err(format!("{}: {}", file.display(), crate::state::t("keine normale Datei (Symlink?)", "not a regular file (symlink?)")));
+        }
+        let orig = meta.permissions().mode() & 0o777;
+        // ausführbar, wo lesbar (0644 → 0755, 0600 → 0700)
+        let mode = orig | ((orig & 0o444) >> 2);
+        let new = suffixed(file, ".new");
+        let _ = std::fs::remove_file(&new);
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&new).map_err(|e| err(&new, e))?;
+        let written = f.write_all(new_bytes).and_then(|_| f.sync_all());
+        drop(f);
+        if let Err(e) = written.and_then(|_| std::fs::set_permissions(&new, std::fs::Permissions::from_mode(mode))) {
+            let _ = std::fs::remove_file(&new);
+            return Err(err(&new, e));
+        }
+        clear_old(file).inspect_err(|_| {
+            let _ = std::fs::remove_file(&new);
+        })?;
+        let old = suffixed(file, ".old");
+        std::fs::rename(file, &old).map_err(|e| {
+            let _ = std::fs::remove_file(&new);
+            err(file, e)
+        })?;
+        if let Err(e) = std::fs::rename(&new, file) {
+            let _ = std::fs::rename(&old, file);
+            let _ = std::fs::remove_file(&new);
+            return Err(err(file, e));
+        }
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        swap_exe(file, new_bytes)
+    }
 }
 
 /// `<p><ext>`
@@ -550,5 +623,36 @@ mod tests {
         assert!(!keep_requested(Some(OsStr::new("42")), None));
         assert!(!keep_requested(Some(OsStr::new("42")), Some(OsStr::new("0"))));
         assert!(!keep_requested(Some(OsStr::new("42")), Some(OsStr::new("yes"))));
+    }
+}
+
+/// Linux-AppImage (#149): Erkennung, Prüfung der Datei, Tausch mit Ausführungsrecht.
+#[cfg(all(test, unix))]
+mod appimage_tests {
+    use super::*;
+
+    #[test]
+    fn appimage_detection_check_and_swap() {
+        let d = std::env::temp_dir().join(format!("pd-appimage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("Paneldeck-2.5.0-x86_64.AppImage");
+        let mut old = b"\x7fELF\x02\x01\x01\x00AI\x02".to_vec();
+        old.resize(8192, 0);
+        std::fs::write(&file, &old).unwrap();
+        assert_eq!(appimage_flavor(&file, Some(file.as_os_str())), Some(Flavor::AppImage));
+        assert_eq!(appimage_flavor(&file, None), None, "no $APPIMAGE: a package, not an AppImage");
+        assert_eq!(appimage_flavor(&file, Some(std::ffi::OsStr::new("/elsewhere.AppImage"))), None);
+        assert!(is_appimage(&old));
+        assert!(!is_appimage(b"\x7fELF\x02\x01\x01\x00\x00\x00\x00"), "plain ELF");
+        assert!(!is_appimage(&[0u8; 8192]));
+        let mut new = old.clone();
+        new[100] = 7;
+        swap_appimage(&file, &new).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), new);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::read(suffixed(&file, ".old")).unwrap(), old, "the old one stays until the new version runs");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
