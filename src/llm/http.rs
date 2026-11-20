@@ -13,9 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-#[cfg_attr(not(windows), allow(dead_code))]
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg_attr(not(windows), allow(dead_code))]
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Höchstens so viel vom Fehlertext bei 4xx/5xx.
@@ -34,7 +32,6 @@ pub enum Method {
 }
 
 impl Method {
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn as_str(self) -> &'static str {
         match self {
             Method::Get => "GET",
@@ -190,7 +187,6 @@ pub fn read_lines_max(r: &mut dyn HttpResponse, cancel: &AtomicBool, max_total: 
 }
 
 /// User-Agent ohne persönliche Daten.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub fn user_agent() -> String {
     format!("Paneldeck/{}", env!("CARGO_PKG_VERSION"))
 }
@@ -201,24 +197,18 @@ pub fn system_transport() -> Arc<dyn Transport> {
     {
         Arc::new(winhttp::WinHttp::default())
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        Arc::new(Unsupported)
-    }
-}
-
-#[cfg(not(windows))]
-struct Unsupported;
-
-#[cfg(not(windows))]
-impl Transport for Unsupported {
-    fn send(&self, _: &HttpRequest<'_>, _: &Arc<AtomicBool>) -> Result<Box<dyn HttpResponse>, LlmError> {
-        Err(LlmError::Unsupported)
+        Arc::new(unix::Ureq::default())
     }
 }
 
 #[cfg(windows)]
 pub mod winhttp;
+
+/// Linux/macOS (#149): ureq + rustls mit denselben Regeln.
+#[cfg(unix)]
+pub mod unix;
 
 #[cfg(test)]
 pub mod fake {

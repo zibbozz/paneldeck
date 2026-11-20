@@ -222,10 +222,11 @@ pub fn tcp_peer_pid(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> 
     Some(pid)
 }
 
-#[cfg(not(windows))]
-#[allow(dead_code)] // noch ohne Aufrufer: `resolve_peer` hat hier keine Umsetzung (#149/#150)
-pub fn tcp_peer_pid(_peer: std::net::SocketAddr, _local: std::net::SocketAddr) -> Option<u32> {
-    None
+/// Linux/macOS: Besitzer des Client-Sockets (`/proc/net/tcp` bzw. libproc, `platform::unix_proc`, #149/#150).
+#[cfg(unix)]
+#[allow(dead_code)] // nur `resolve_peer` und die Tests rufen sie auf
+pub fn tcp_peer_pid(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> Option<u32> {
+    super::unix_proc::tcp_peer_pid(peer, local)
 }
 
 /// Prozessbaum des Absenders einer Verbindung, auf dem Verbindungs-Thread ermittelt (#152).
@@ -266,10 +267,11 @@ pub fn resolve_peer(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> 
     }
 }
 
-/// Ohne Umsetzung (#149/#150): Absender unbekannt (leere Kette), nichts wird abgewiesen – siehe Blocker in `platform`.
-#[cfg(not(windows))]
-pub fn resolve_peer(_peer: std::net::SocketAddr, _local: std::net::SocketAddr) -> Option<PeerChain> {
-    Some(PeerChain::default())
+/// Linux/macOS (#149/#150): Socket-Besitzer, Prozessbaum und Sitzungs-Markierung in der Umgebung
+/// (`platform::unix_proc`). Nicht zu ermitteln → `None` (= abweisen), wie unter Windows.
+#[cfg(unix)]
+pub fn resolve_peer(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> Option<PeerChain> {
+    super::unix_proc::resolve_peer(peer, local)
 }
 
 /// Ein geöffneter Prozess (nur Abfragerechte). `Drop` schließt das Handle.
@@ -322,9 +324,9 @@ pub fn process_born(pid: u32) -> Option<u64> {
     Proc::open(pid)?.created()
 }
 
-#[cfg(not(windows))]
-pub fn process_born(_pid: u32) -> Option<u64> {
-    None
+#[cfg(unix)]
+pub fn process_born(pid: u32) -> Option<u64> {
+    super::unix_proc::process_born(pid)
 }
 
 /// Startzeit dieses Prozesses (des Hubs).
@@ -452,9 +454,29 @@ impl SessionJob {
         Some(SessionJob { key })
     }
 
-    #[cfg(not(windows))]
+    /// Linux/macOS: kein Job Object, sondern eine Markierung in der Umgebung der Shell ([`SessionJob::env_var`]) plus
+    /// der Prozessbaum ab der Shell (`platform::unix_proc`).
+    #[cfg(unix)]
     pub fn new() -> Option<SessionJob> {
-        None
+        super::unix_proc::job_new().map(|key| SessionJob { key })
+    }
+
+    /// Variable, die in die Umgebung der Shell gehört (Linux/macOS: die Markierung der Sitzung); Windows: keine.
+    pub fn env_var(&self) -> Option<(&'static str, String)> {
+        #[cfg(windows)]
+        {
+            None
+        }
+        #[cfg(unix)]
+        {
+            super::unix_proc::job_env(self.key)
+        }
+    }
+
+    /// Linux/macOS: die gestartete Shell (PID) merken – ihre Nachfahren gehören zur Sitzung.
+    #[cfg(unix)]
+    pub fn adopt_pid(&self, pid: u32) -> bool {
+        super::unix_proc::job_adopt(self.key, pid)
     }
 
     /// Das Job-Handle (gültig, solange dieser `SessionJob` lebt – erst `Drop` schließt es), z. B. für den Start der
@@ -501,9 +523,9 @@ impl SessionJob {
         })
     }
 
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     pub fn terminate_all(&self) -> bool {
-        false
+        super::unix_proc::job_terminate_all(self.key)
     }
 
     /// Alle Prozesse des Jobs enden, sobald sein Handle geschlossen wird (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) – auch
@@ -555,9 +577,9 @@ impl SessionJob {
         n
     }
 
-    #[cfg(not(windows))]
-    pub fn terminate_listed(&self, _procs: &[(u32, u64)]) -> usize {
-        0
+    #[cfg(unix)]
+    pub fn terminate_listed(&self, procs: &[(u32, u64)]) -> usize {
+        super::unix_proc::job_terminate_listed(self.key, procs)
     }
 
     /// PIDs aller laufenden Prozesse im Job (auch in darunter verschachtelten Jobs). `None`, wenn die Abfrage scheitert
@@ -588,9 +610,9 @@ impl SessionJob {
         None
     }
 
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     pub fn pids(&self) -> Option<Vec<u32>> {
-        None
+        super::unix_proc::job_pids(self.key)
     }
 }
 
@@ -698,9 +720,10 @@ pub fn shell_is_idle(shell: u32) -> Option<bool> {
     Some(shell_idle(&console, shell, |p| parents.get(&p).copied(), |p| names.get(&p).cloned().unwrap_or_default()))
 }
 
-#[cfg(not(windows))]
-pub fn shell_is_idle(_shell: u32) -> Option<bool> {
-    None
+/// Linux/macOS: Die Vordergrund-Prozessgruppe des Terminals ist die Gruppe der Shell (`platform::unix_proc`).
+#[cfg(unix)]
+pub fn shell_is_idle(shell: u32) -> Option<bool> {
+    super::unix_proc::shell_is_idle(shell)
 }
 
 /// Elternprozesse der Prozesse `pids` (eines Jobs), soweit der Elternprozess selbst in `pids` liegt und vor dem Kind
@@ -715,9 +738,9 @@ pub fn job_parents(pids: &[u32]) -> std::collections::HashMap<u32, u32> {
         .collect()
 }
 
-#[cfg(not(windows))]
-pub fn job_parents(_pids: &[u32]) -> std::collections::HashMap<u32, u32> {
-    std::collections::HashMap::new()
+#[cfg(unix)]
+pub fn job_parents(pids: &[u32]) -> std::collections::HashMap<u32, u32> {
+    super::unix_proc::job_parents(pids)
 }
 
 /// Prozesse, die an derselben Konsole hängen wie `pid` (die Shell einer Sitzung). Der Hub hängt sich dafür kurz an diese
@@ -758,9 +781,10 @@ pub fn console_pids(pid: u32) -> Option<Vec<u32>> {
     }
 }
 
-#[cfg(not(windows))]
-pub fn console_pids(_pid: u32) -> Option<Vec<u32>> {
-    None
+/// Linux/macOS: Prozesse mit demselben steuernden Terminal (bekommen beim Schließen der Sitzung SIGHUP).
+#[cfg(unix)]
+pub fn console_pids(pid: u32) -> Option<Vec<u32>> {
+    super::unix_proc::console_pids(pid)
 }
 
 /// Namen aller laufenden Prozesse (PID → Programmdatei, z. B. `notepad.exe`).
@@ -790,9 +814,9 @@ pub fn process_names() -> std::collections::HashMap<u32, String> {
     out
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 pub fn process_names() -> std::collections::HashMap<u32, String> {
-    std::collections::HashMap::new()
+    super::unix_proc::process_names()
 }
 
 /// Prozesse mit sichtbarem Hauptfenster und dessen Titel (das erste Fenster mit Titel; leer, wenn keins einen hat).
@@ -914,6 +938,8 @@ impl Drop for SessionJob {
                 unsafe { windows_sys::Win32::Foundation::CloseHandle(h as windows_sys::Win32::Foundation::HANDLE) };
             }
         }
+        #[cfg(unix)]
+        super::unix_proc::job_drop(self.key);
     }
 }
 

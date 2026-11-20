@@ -7,7 +7,9 @@ Das Format basiert auf [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 und dieses Projekt hält sich an [Semantic Versioning](https://semver.org/lang/de/).
 Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen unter der Nummer des nächsten Releases mit `WIP` statt Datum (z. B. `## [1.1.0] - WIP`).
 
-## [2.5.0] - WIP
+## [2.6.0] - WIP
+
+## [2.5.0] - 2026-11-20
 
 ### Added
 
@@ -15,6 +17,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Profile: „Shell in WSL“ wählt die Login-Shell je Profil (automatisch oder ein Eintrag aus `/etc/shells` der Distribution) (#57)
 - Verschachtelte Shells (ssh, tmux …) ohne Shell-Integration werden erkannt und als „ohne Shell-Integration“ angezeigt; `run_command` meldet dann `quality: approx` (#57)
 - *Einstellungen → Terminal* bietet kopierbare Schnipsel für bash, zsh und fish, um Befehlsmarken von entfernten Rechnern zu bekommen (#57)
+- Linux-Release (x86_64): AppImage (aktualisiert sich selbst, geprüft gegen `SHA256SUMS.txt`), `.deb`, `.rpm` und Tarball, gebaut von GitHub Actions mit Herkunftsnachweis; mindestens Ubuntu 22.04 / Debian 12 / Fedora 39, X11 und Wayland (#149)
+- Linux: Tray-Symbol (StatusNotifierItem), Desktop-Benachrichtigungen, native Dateidialoge (XDG-Portal), optional Start bei der Anmeldung (XDG-Autostart) und optional „In Paneldeck öffnen“ für Nautilus, Dolphin und Nemo; Datenordner `~/.local/share/Paneldeck` (nur für den Benutzer lesbar); Shells aus `/etc/shells`, als Login-Shell gestartet (#149)
+- Linux: API-Schlüssel der Chat-Server werden mit einem Schlüssel aus dem Schlüsselbund des Systems (Secret Service) verschlüsselt; ohne Schlüsselbund fragt Paneldeck beim ersten Zugriff auf einen Schlüssel nach einem Master-Passwort (#149)
+- Linux/macOS: Die Agenten-Schnittstelle bestimmt den aufrufenden Prozess selbst (Socket-Besitzer, vollständiger Prozessbaum; unter Linux ist Paneldeck Subreaper) und weist Aufrufer ab, die sich nicht bestimmen lassen; Programme, die sich von einer Sitzung lösen, bleiben wie unter Windows eingeschränkt (#149)
+- macOS-Version (experimentell, nicht signiert): eine Universal-App für Apple Silicon und Intel (macOS 12 oder neuer) als `.dmg` und `.zip`. Sie hat ein Symbol in der Menüleiste, Benachrichtigungen, Start bei der Anmeldung (LaunchAgent, standardmäßig aus), native Dateidialoge und API-Schlüssel, die mit einem Schlüssel im Schlüsselbund verschlüsselt sind. Die App aktualisiert sich selbst, geprüft gegen `SHA256SUMS.txt` und ihre Code-Signatur. Ein Klick auf einen Pfad startet nie eine App, ein Skript oder einen Installer – sie werden nur im Finder gezeigt. Die Info-Seite zeigt einen Hinweis „experimentell“; wie man die unsignierte App zum ersten Mal öffnet, steht in [macOS](docs/de/macos.md) (#150)
 
 ### Changed
 
@@ -24,6 +31,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 - In ein Terminal gezogene oder eingefügte Dateinamen werden für die dort tatsächlich laufende Shell gequotet (z. B. fish unter Linux/macOS), ein präparierter Name kann so keine Befehle mehr ausführen (#57)
 - Von der Shell-Integration gemeldete Ordnernamen enthalten keine Steuerzeichen mehr (#57)
+- Paneldeck nimmt beim Start im Tray (Autostart, `--tray`) oder minimiert dem Programm, in dem du gerade arbeitest, nicht mehr den Tastaturfokus
 
 ## [2.4.2] - 2026-11-20
 
@@ -419,7 +427,8 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Alle `unwrap()`/`expect()` im Programmcode sind durch Fehlerbehandlung ersetzt (der Release-Build bricht bei einem Panic komplett ab); die `unsafe`-Blöcke sind begründet.
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
-[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...HEAD
+[2.6.0]: https://github.com/zibbozz/paneldeck/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...v2.5.0
 [2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...v2.4.2
 [2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0

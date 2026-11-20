@@ -39,7 +39,7 @@ fn strip_line_col(s: &str) -> &str {
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
+    (if cfg!(windows) { std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) } else { std::env::var_os("HOME") }).map(PathBuf::from)
 }
 
 fn resolve(token: &str, cwd: &str, shell_id: &str) -> Option<String> {
@@ -170,6 +170,10 @@ const EXECUTABLE: &[&str] = &[
     "ins", "isp", "jnlp", "ps1xml", "psc1", "psd1", "pssc", "cdxml", "xbap", "vsix", "msh", "msh1", "msh2", "mshxml",
     // Skriptsprachen, deren Standardzuordnung die Datei ausführt (#251)
     "py", "pyw", "pyz", "pyzw", "pyc", "pyo", "pl", "plx", "rb", "rbw", "ahk", "au3", "a3x", "tcl", "lua", "php", "wsb", "mof",
+    // macOS (#150): Bündel, Terminal-Befehle, AppleScript, Installer, Internet-Verknüpfungen, Systemeinstellungen;
+    // Shell-Skripte (auch unter Linux)
+    "app", "command", "tool", "terminal", "workflow", "scpt", "scptd", "applescript", "pkg", "mpkg", "webloc", "inetloc",
+    "fileloc", "prefpane", "zsh", "bash", "csh", "ksh", "fish",
 ];
 
 /// Endungen aus `PATHEXT` (z. B. `.PY`, wenn Python sich dort eingetragen hat): was die Shell ohne Endung startet, gilt
@@ -192,7 +196,19 @@ pub fn is_executable_like(target: &str) -> bool {
     Path::new(t).extension().is_some_and(|e| {
         let e = e.to_string_lossy().to_lowercase();
         EXECUTABLE.contains(&e.as_str()) || in_pathext(&e)
-    })
+    }) || unix_exec_bit(t)
+}
+
+/// Linux/macOS: eine Datei mit Ausführungsrecht (auch ohne Endung) wird nie per `open`/`xdg-open` gestartet.
+#[cfg(unix)]
+fn unix_exec_bit(t: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(t).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn unix_exec_bit(_t: &str) -> bool {
+    false
 }
 
 /// Mit dem Standardprogramm öffnen (URL im Browser, Datei in der zugeordneten App, Ordner im Explorer).
@@ -279,6 +295,10 @@ mod tests {
             assert!(is_executable_like(f), "{f}");
         }
         assert!(!is_executable_like("notes.md") && !is_executable_like("data.json"));
+        // macOS (#150): Bündel und Dateien, die macOS beim Öffnen ausführt
+        for f in ["/Applications/Calculator.app", "/x/Foo.app/", "a.command", "b.tool", "c.terminal", "d.workflow", "e.scpt", "f.scptd", "g.applescript", "h.pkg", "i.mpkg", "j.webloc", "k.inetloc", "l.fileloc", "m.prefPane", "n.zsh", "o.bash", "p.csh", "q.ksh", "r.fish"] {
+            assert!(is_executable_like(f), "{f}");
+        }
         assert!(reveal_safe(r"C:\x\a.exe"));
         assert!(!reveal_safe(r"C:\x\a,/root,\\evil\s\y.exe") && !reveal_safe(r#"C:\x\a"b.exe"#) && !reveal_safe(r"\\evil\s\a.exe"));
     }

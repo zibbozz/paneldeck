@@ -4,7 +4,9 @@
 # Release-Lauf für den Branch release/x.y (siehe CLAUDE.md, „Branching- und Release-Strategie“). Dieses Skript committet NICHT:
 # Versionsnummer, Changelog-Datum und Titel kommen vorher über einen Pull Request in release/x.y (tools/release-prep.sh).
 #   (ohne Optionen)  prüft, testet, baut, packt nach dist/ und setzt lokal das Tag v<version> auf den Stand von release/x.y
-#   --publish        zusätzlich: nur das Tag pushen und das GitHub-Release anlegen (braucht `gh`, angemeldet)
+#   --publish        zusätzlich: nur das Tag pushen und das GitHub-Release anlegen (braucht `gh`, angemeldet); wartet dafür auf
+#                    die Linux- und macOS-Pakete aus GitHub Actions (release-build.yml, Jobs `linux`/`macos`) und hängt sie mit
+#                    an (#149, #150)
 #   --no-git         nur bauen und packen (Probelauf auf jedem Branch; kein Tag, kein Push)
 #   --skip-smoke     Smoke-Test und Update-Test (tools/smoke-mcp.ps1, tools/update-test.ps1; nur Windows) überspringen
 #   --ignore-defender  trotz Defender-Treffer weitermachen (nur nach Rücksprache mit dem Nutzer; Fehlalarm vorher bei Microsoft melden)
@@ -143,8 +145,58 @@ cat "$SUMS_DIR/SHA256SUMS.txt"
 
 if [ "$PUBLISH" = 1 ]; then
   git push origin "v$V"
+  # Linux-Pakete (#149) und macOS-Pakete (#150): baut .github/workflows/release-build.yml (Jobs `linux` und `macos`) auf dem
+  # gerade gepushten Tag. Hier auf beide warten, die Artefakte laden, ihre Prüfsummen und Herkunftsnachweise prüfen und die
+  # Zeilen in SHA256SUMS.txt übernehmen (das Selbst-Update der AppImage und der macOS-App prüft gegen diese Datei). Scheitert
+  # das, wird kein Release angelegt; das Tag ist dann schon gepusht – Ursache beheben (z. B. den Job in GitHub neu starten)
+  # und das Release danach von Hand anlegen.
+  SHA_TAG="$(git rev-parse "v$V^{commit}")"
+  RUN=""
+  for _ in $(seq 1 60); do
+    RUN="$("$GH" run list --workflow release-build.yml --event push --limit 20 --json databaseId,headSha,headBranch \
+      --jq ".[] | select(.headSha==\"$SHA_TAG\" and .headBranch==\"v$V\") | .databaseId" | head -1)"
+    [ -n "$RUN" ] && break
+    sleep 10
+  done
+  [ -n "$RUN" ] || { echo "Release-Build für v$V nicht gefunden (GitHub Actions)"; exit 1; }
+  # ci_assets <job> <ordner> <prüfsummen-datei> <datei>…: auf den Job warten, Artefakt `paneldeck-<v>-<job>` laden und prüfen.
+  ci_assets() {
+    local job="$1" dir="$2" sums="$3"; shift 3
+    echo "Warte auf den Build \`$job\` (Lauf $RUN) …"
+    local concl=""
+    for _ in $(seq 1 360); do
+      concl="$("$GH" run view "$RUN" --json jobs --jq ".jobs[] | select(.name==\"$job\") | .status + \":\" + (.conclusion // \"\")")"
+      case "$concl" in
+        completed:success) break ;;
+        completed:*) echo "Build \`$job\` fehlgeschlagen ($concl) – siehe gh run view $RUN"; exit 1 ;;
+      esac
+      sleep 10
+    done
+    [ "$concl" = "completed:success" ] || { echo "Build \`$job\` nicht rechtzeitig fertig (Lauf $RUN)"; exit 1; }
+    rm -rf "$dir"
+    "$GH" run download "$RUN" -n "paneldeck-$V-$job" -D "$dir"
+    (cd "$dir" && sha256sum -c --quiet "$sums") || { echo "Prüfsummen der Pakete von \`$job\` passen nicht"; exit 1; }
+    for f in "$@"; do
+      [ -f "$dir/$f" ] || { echo "Paket fehlt im Artefakt \`$job\`: $f"; exit 1; }
+      # Herkunftsnachweis (actions/attest-build-provenance im Job): gebaut von diesem Repository in GitHub Actions.
+      # Nur Nachweise aus release-build.yml für genau dieses Tag (kein anderer Workflow/Branch des Repositorys).
+      "$GH" attestation verify "$dir/$f" -R zibbozz/paneldeck \
+        --signer-workflow zibbozz/paneldeck/.github/workflows/release-build.yml --source-ref "refs/tags/v$V" >/dev/null || { echo "Herkunftsnachweis von $f nicht bestätigt"; exit 1; }
+      grep -q "  $f\$" "$SUMS_DIR/SHA256SUMS.txt" || grep "  $f\$" "$dir/$sums" >> "$SUMS_DIR/SHA256SUMS.txt"
+    done
+    (cd "$dir" && sha256sum -c --quiet --ignore-missing "../sums-$V/SHA256SUMS.txt") || { echo "SHA256SUMS.txt passt nicht zu den Paketen von \`$job\`"; exit 1; }
+  }
+  LINUX_DIR="dist/linux-ci-$V"
+  LINUX_FILES=("Paneldeck-$V-x86_64.AppImage" "paneldeck_${V}_amd64.deb" "paneldeck-$V-1.x86_64.rpm" "paneldeck-$V-linux-x86_64.tar.gz")
+  ci_assets linux "$LINUX_DIR" SHA256SUMS-linux.txt "${LINUX_FILES[@]}"
+  MACOS_DIR="dist/macos-ci-$V"
+  MACOS_FILES=("Paneldeck-$V-macos-universal.dmg" "paneldeck-$V-macos-universal.zip")
+  ci_assets macos "$MACOS_DIR" SHA256SUMS-macos.txt "${MACOS_FILES[@]}"
+  cat "$SUMS_DIR/SHA256SUMS.txt"
   ASSETS=("dist/paneldeck-$V-windows-x64.zip")
   [ -f "dist/Paneldeck-Setup-$V.exe" ] && ASSETS+=("dist/Paneldeck-Setup-$V.exe")
+  for f in "${LINUX_FILES[@]}"; do ASSETS+=("$LINUX_DIR/$f"); done
+  for f in "${MACOS_FILES[@]}"; do ASSETS+=("$MACOS_DIR/$f"); done
   ASSETS+=("$SUMS_DIR/SHA256SUMS.txt")
   PRE=(); [[ "$V" == *-* ]] && PRE=(--prerelease)
   "$GH" release create "v$V" "${ASSETS[@]}" --verify-tag ${PRE[@]+"${PRE[@]}"} \

@@ -60,6 +60,8 @@ mod session_settings;
 mod settings;
 #[cfg(feature = "readme-shots")]
 mod shot_start;
+#[cfg(unix)]
+mod secret_ui;
 mod sidebar;
 mod sysprompt_ui;
 mod taint;
@@ -954,6 +956,9 @@ pub struct App {
     /// (`models_save_tick`) – je Fenster getauscht, bliebe eine Änderung in einem gerade nicht gezeichneten Fenster
     /// ungespeichert. Folge: Ein offenes Server-Formular erscheint in jedem Fenster, das diesen Reiter zeigt.
     models_ui: models_ui::ModelsUi,
+    /// Linux/macOS: Eingaben der Master-Passwort-Frage (`secret_ui`, im Speicher überschrieben).
+    #[cfg(unix)]
+    master_pw: secret_ui::PwForm,
 }
 
 fn home_dir() -> String {
@@ -1009,7 +1014,7 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     // Optionale Systemschriften als Fallback für Symbole, Sonderzeichen, CJK, Thai, Indisch, Mathe usw.
     // Es werden nur vorhandene Dateien geladen; fehlt eine, ändert sich nichts.
     let sys = crate::platform::fonts::system_font;
-    let candidates: [(&str, Option<std::path::PathBuf>); 14] = [
+    let candidates: [(&str, Option<std::path::PathBuf>); 20] = [
         ("seguisym", sys("seguisym.ttf")),
         ("segoeui", sys("segoeui.ttf")),
         ("msyh", sys("msyh.ttc")),
@@ -1024,6 +1029,13 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
         ("cambria", sys("cambria.ttc")),
         ("arial", sys("arial.ttf")),
         ("dejavu", Some("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into())),
+        // macOS (#150): Symbole, breite Unicode-Abdeckung, CJK, Koreanisch, Thai, Mathe
+        ("applesymbols", sys("Apple Symbols.ttf")),
+        ("arialuni", sys("Arial Unicode.ttf")),
+        ("hiragino", sys("Hiragino Sans GB.ttc")),
+        ("applesdgothic", sys("AppleSDGothicNeo.ttc")),
+        ("thonburi", sys("Thonburi.ttc")),
+        ("stixmath", sys("STIXTwoMath.otf")),
     ];
     for (name, path) in candidates {
         if let Some(Ok(bytes)) = path.map(std::fs::read) {
@@ -1198,6 +1210,10 @@ impl App {
             hooks_incomplete: false,
             last_status_check: Instant::now(),
             hooks_msg: String::new(),
+            // Linux-AppImage: die `.AppImage`-Datei (Selbst-Update, Neustart, Integrationen), nicht das eingehängte Abbild.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            exe: crate::platform::desktop::this_exe(),
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
             exe: std::env::current_exe().unwrap_or_default(),
             palette: None,
             tlinks: Default::default(),
@@ -1278,6 +1294,8 @@ impl App {
             chat_backend: std::sync::Arc::new(chatmod::LlmBackend::new()),
             llm_conn: Default::default(),
             models_ui: Default::default(),
+            #[cfg(unix)]
+            master_pw: Default::default(),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
@@ -1950,7 +1968,8 @@ impl App {
             }
         } else if entry.meta.cwd.is_empty() {
             home_dir()
-        } else if crate::wsl::looks_linux(&entry.meta.cwd) {
+        } else if cfg!(windows) && crate::wsl::looks_linux(&entry.meta.cwd) {
+            // (Linux/macOS, #149: Unix-Pfade sind dort die normalen Pfade.)
             // Nie einen Linux-Pfad an eine Windows-Shell geben: `/mnt/c/x` → `C:\x`, sonst das Windows-Home.
             crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
         } else {
@@ -4272,6 +4291,9 @@ impl eframe::App for App {
         self.poll_mcp(ctx);
         self.poll_procs(ctx);
         self.poll_retired(ctx);
+        // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).
+        #[cfg(unix)]
+        self.master_password_ui(ctx);
         crate::platform::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);
         if crate::platform::conpty::take_fallback_hint() {
@@ -5063,7 +5085,7 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
                 actions.push(Action::NewSessionAt(path_s.clone()));
                 ui.close();
             }
-            if crate::platform::open::FILE_MANAGER && ui.button(lang.t("Im Explorer anzeigen", "Show in Explorer")).clicked() {
+            if crate::platform::open::FILE_MANAGER && ui.button(if cfg!(windows) { lang.t("Im Explorer anzeigen", "Show in Explorer") } else { lang.t("Im Dateimanager anzeigen", "Show in file manager") }).clicked() {
                 crate::platform::open::show_in_file_manager(&path_s, it.is_dir);
                 ui.close();
             }

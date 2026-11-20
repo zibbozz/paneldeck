@@ -869,7 +869,17 @@ pub fn send_event(port: u16, token: &str, session: u64, key: Option<&str>, paylo
 // ------------------------------------------------------------ Settings-Dateien
 
 pub fn hook_command(exe: &Path) -> String {
-    format!("\"{}\" --hook", exe.to_string_lossy().replace('\\', "/"))
+    #[cfg(windows)]
+    {
+        format!("\"{}\" --hook", exe.to_string_lossy().replace('\\', "/"))
+    }
+    // Linux/macOS (#149): Claude Code runs hook commands with `/bin/sh -c` – whatever the user's shell is (bash, zsh,
+    // fish). Single quotes keep every character of the path literal there (`$`, `` ` ``, `"`, spaces); a `'` in the path
+    // becomes `'\''`. For an AppImage `exe` is the `.AppImage` file (stable), not the temporary mount.
+    #[cfg(not(windows))]
+    {
+        format!("'{}' --hook", exe.to_string_lossy().replace('\'', "'\\''"))
+    }
 }
 
 fn hooks_value(cmd: &str) -> Value {
@@ -909,8 +919,15 @@ pub fn global_settings_path() -> Option<PathBuf> {
     settings_path_for(std::env::var_os("CLAUDE_CONFIG_DIR"), home_os())
 }
 
+/// Home folder: Windows `USERPROFILE` (else `HOME`); Linux/macOS only `HOME` (a `USERPROFILE` there, e.g. passed in from
+/// WSL interop, must never redirect `~/.claude`).
 fn home_os() -> Option<std::ffi::OsString> {
-    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    if cfg!(windows) {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    } else {
+        std::env::var_os("HOME")
+    }
+    .filter(|h| !h.is_empty())
 }
 
 fn settings_path_for(config_dir: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
@@ -1002,9 +1019,10 @@ pub fn global_foreign_exe(path: &Path, exe: &Path) -> Option<String> {
             return None;
         }
         let t = c.trim();
-        let exe_part = match t.strip_prefix('"') {
-            Some(r) => r.split('"').next().unwrap_or(r),
-            None => t.trim_end_matches("--hook").trim(),
+        let exe_part = match (t.strip_prefix('"'), t.strip_prefix('\'')) {
+            (Some(r), _) => r.split('"').next().unwrap_or(r),
+            (_, Some(r)) => r.split('\'').next().unwrap_or(r),
+            _ => t.trim_end_matches("--hook").trim(),
         };
         foreign.get_or_insert_with(|| exe_part.to_string());
     }
@@ -1624,6 +1642,7 @@ mod tests {
     }
 
     /// Review zu #260: globale Hooks einer anderen paneldeck.exe (ohne Schlüssel) werden erkannt – nur lesend.
+    #[cfg(windows)] // Windows-Pfade (Linux/macOS: `unix_hook_command_is_shell_safe`)
     #[test]
     fn global_hooks_of_another_exe_are_detected() {
         let dir = std::env::temp_dir().join(format!("hubtest-{}", random_hex()));
@@ -1647,6 +1666,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Linux/macOS (#149): the hook command is safe for `/bin/sh -c`, whatever the path contains.
+    #[cfg(unix)]
+    #[test]
+    fn unix_hook_command_is_shell_safe() {
+        let c = hook_command(Path::new("/home/a b/Apps/Paneldeck-2.5.0-x86_64.AppImage"));
+        assert_eq!(c, "'/home/a b/Apps/Paneldeck-2.5.0-x86_64.AppImage' --hook");
+        let odd = hook_command(Path::new("/tmp/it's $HOME `x`/paneldeck"));
+        assert_eq!(odd, "'/tmp/it'\\''s $HOME `x`/paneldeck' --hook");
+        // what sh makes of it: exactly the path and --hook
+        let out = std::process::Command::new("sh").args(["-c", &odd.replace(" --hook", " ; :").replacen('\'', "printf %s '", 1)]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "/tmp/it's $HOME `x`/paneldeck");
+        // a stored command of another copy is recognised (single quotes)
+        let d = std::env::temp_dir().join(format!("pd-hookq-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.json");
+        let mut v = json!({});
+        v["hooks"] = hooks_value("'/opt/old/paneldeck' --hook");
+        std::fs::write(&f, v.to_string()).unwrap();
+        let foreign = global_foreign_exe(&f, Path::new("/usr/bin/paneldeck"));
+        assert_eq!(foreign.as_deref(), Some("/opt/old/paneldeck"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn ipc_roundtrip() {
         let ctx = egui::Context::default();
@@ -1663,7 +1705,7 @@ mod tests {
         match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
             IpcCmd::Open { path, claude, origin } => {
                 assert_eq!((path.as_str(), claude), ("C:\\x", true));
-                #[cfg(windows)] // Absender über die TCP-Tabelle (`platform::process::resolve_peer`; anderswo noch unbekannt)
+                // Absender über die TCP-Tabelle bzw. /proc/net/tcp, libproc (`platform::process::resolve_peer`)
                 assert_eq!(origin.as_ref().and_then(|o| o.chain.first()), Some(&std::process::id()));
                 let origin = origin.unwrap();
                 assert!(!origin.orphan);
@@ -1674,6 +1716,32 @@ mod tests {
         // veraltete Datei (falscher Port) → keine Bestätigung
         write_ipc_file(&dir, 1, "x");
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
+    }
+
+    /// Linux/macOS (#149/#150, Blocker): Ein Absender, den der Hub nicht bestimmen kann, wird abgewiesen („fail closed“).
+    /// Hier schließt der Client seinen Socket, bevor der Hub ihn prüft (Anfrage gesendet, Verbindung zu) – dann hält kein
+    /// Prozess den Socket mehr: `--open` öffnet nichts.
+    #[cfg(unix)]
+    #[test]
+    fn unknown_open_caller_is_refused() {
+        let ctx = egui::Context::default();
+        let srv = HookServer::start(&ctx).unwrap();
+        let body = json!({"token": srv.ipc_token, "cmd": "open", "path": "/tmp", "claude": false}).to_string();
+        let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, srv.port)).unwrap();
+        c.write_all(body.as_bytes()).unwrap();
+        drop(c);
+        assert!(srv.cmd_rx.recv_timeout(Duration::from_millis(1500)).is_err(), "unattributable caller must not open anything");
+        // Gegenprobe: derselbe Befehl mit offenem Socket kommt an, mit dem Testprozess als Absender.
+        let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, srv.port)).unwrap();
+        c.write_all(body.as_bytes()).unwrap();
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        match srv.cmd_rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+            IpcCmd::Open { origin, .. } => assert_eq!(origin.and_then(|o| o.chain.first().copied()), Some(std::process::id())),
+            other => panic!("{other:?}"),
+        }
+        let mut reply = String::new();
+        let _ = c.read_to_string(&mut reply);
+        assert_eq!(reply, "ok");
     }
 
     /// Zugriffsprüfung der Agenten-Schnittstelle im Hub (ohne UI): Token, Stufe, unbekanntes Werkzeug.
@@ -1746,12 +1814,21 @@ mod tests {
         let job = srv.mcp_rx.recv_timeout(Duration::from_secs(3)).expect("Anfrage kommt in der UI-Schleife an");
         // Absender: der Hub ermittelt den Prozess am anderen Ende selbst (dieser Testprozess).
         assert_eq!((job.tool.as_str(), job.caller, job.caller_key.as_deref()), ("list_sessions", Some(7), Some("k")));
-        #[cfg(windows)] // Absender über die TCP-Tabelle (`platform::process::resolve_peer`; anderswo noch unbekannt)
+        // Absender über die TCP-Tabelle bzw. /proc/net/tcp, libproc (`platform::process::resolve_peer`)
         assert_eq!(job.peer.chain.first(), Some(&std::process::id()));
         assert!(!job.peer.orphan);
         assert_eq!(job.args["include_exited"], false);
         job.reply.send(Ok(json!({"sessions": []}))).unwrap();
         assert_eq!(reply.join().unwrap().unwrap()["sessions"], json!([]));
+        // Linux/macOS (#149/#150, Blocker): nicht zu bestimmender Absender (Socket vor der Prüfung geschlossen) → nichts
+        // erreicht die UI-Schleife.
+        #[cfg(unix)]
+        {
+            let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, srv.port)).unwrap();
+            c.write_all(json!({"token": srv.ipc_token, "cmd": "mcp", "tool": "list_sessions", "args": {}}).to_string().as_bytes()).unwrap();
+            drop(c);
+            assert!(srv.mcp_rx.recv_timeout(Duration::from_millis(1500)).is_err(), "unattributable MCP caller must be refused");
+        }
         // Falscher Token (der Hook-Token aus den Terminal-Umgebungen) wird abgewiesen.
         write_ipc_file(&dir, srv.port, &srv.token);
         assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "unauthorized");
