@@ -13,7 +13,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - Local chats: the custom context length in *Settings → Models* is now a slider in powers of two (4K, 8K … 512K, 1M; each step doubles the value, ←/→ move one step) with a number field next to it for any value from 256 to 16M; the short form (e.g. 32K) and the full number are shown. With the server default the slider is visible but disabled; older values that are not a step (e.g. 6000) are kept unchanged until the slider is moved (#305)
 
-## [2.4.2] - WIP
+## [2.4.2] - 2026-11-20
 
 ### Fixed
 
@@ -407,8 +407,8 @@ First public release. From here on, the public API (MCP interface, command line,
 - All `unwrap()`/`expect()` calls in the program code were replaced by error handling (the release build aborts completely on a panic); the `unsafe` blocks are justified.
 - The executable contains no paths of the build machine.
 
-[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
-[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
+[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...HEAD
+[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...v2.4.2
 [2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2

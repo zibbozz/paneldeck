@@ -13,7 +13,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 - Lokale Chats: Die eigene Kontextlänge unter *Einstellungen → Modelle* ist jetzt ein Schieberegler in Zweierpotenzen (4K, 8K … 512K, 1M; jede Stufe verdoppelt den Wert, ←/→ gehen eine Stufe) mit einem Zahlenfeld daneben für jeden Wert von 256 bis 16M; Kurzform (z. B. 32K) und volle Zahl werden angezeigt. Beim Server-Standard ist der Regler sichtbar, aber gesperrt; ältere Werte, die keine Stufe sind (z. B. 6000), bleiben unverändert, bis der Regler bewegt wird (#305)
 
-## [2.4.2] - WIP
+## [2.4.2] - 2026-11-20
 
 ### Fixed
 
@@ -407,8 +407,8 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Alle `unwrap()`/`expect()` im Programmcode sind durch Fehlerbehandlung ersetzt (der Release-Build bricht bei einem Panic komplett ab); die `unsafe`-Blöcke sind begründet.
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
-[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
-[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
+[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...HEAD
+[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...v2.4.2
 [2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
