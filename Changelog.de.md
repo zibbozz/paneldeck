@@ -9,6 +9,17 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.6.0] - WIP
 
+### Added
+
+- Theme-Editor (*Einstellungen → Darstellung → Theme bearbeiten … / Neues Theme …*): Farbliste mit Farbwähler, Hex-Eingabe und Verweisen auf andere Farben (`@text/20`), Live-Vorschau aller Bausteine der Oberfläche mit echten Bedienelementen (Klick auf ein Element springt zu seiner Farbe), Rückgängig/Wiederholen, Kontrastwerte, Theme aus Hintergrund + Akzent erzeugen, Umbenennen, Duplizieren, Löschen, Import und Export; die App ändert sich erst beim *Speichern* (#309)
+- Themes können **benannte Oberflächenfarben** im neuen optionalen Objekt `ui` von `themes/*.json` festlegen (Hintergründe, Text, Rahmen, Akzent, Status, Seitenleiste und Reiter, Chips, Chat, Diff und Syntax); nicht gesetzte Farben werden wie bisher abgeleitet, bestehende Themes funktionieren weiter (#309)
+- Design-Prüfung im Theme-Editor: Hinweise zu Kontrast (WCAG), unterscheidbaren Zuständen, Statusfarben bei Farbsehschwächen, der Terminal-Palette und Harmonie; blockiert das Speichern nie, einzelne Prüfungen lassen sich abschalten (#309)
+- Agenten-Schnittstelle: lesende Werkzeuge `theme_list` und `theme_get` (Stufe Lesen); Agenten können Themes nicht ändern (#309)
+
+### Changed
+
+- Eine Theme-Datei, die sich nicht laden lässt, wird mit dem Grund angezeigt und ist erst nach der Korrektur wählbar; ist das gewählte Theme ungültig, nutzt Paneldeck das Standard-Theme (#309)
+
 ## [2.5.0] - 2026-11-20
 
 ### Added

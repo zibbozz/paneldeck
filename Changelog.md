@@ -9,6 +9,17 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.6.0] - WIP
 
+### Added
+
+- Theme editor (*Settings → Appearance → Edit theme … / New theme …*): colour list with picker, hex input and links to other colours (`@text/20`), live preview of all UI building blocks with real controls (clicking an element jumps to its colour), undo/redo, contrast values, generate a theme from background + accent, rename, duplicate, delete, import and export; the app only changes on *Save* (#309)
+- Themes can set **named interface colours** in the new optional `ui` object of `themes/*.json` (backgrounds, text, borders, accent, status, sidebar and tabs, chips, chat, diff and syntax); colours that are not set are derived as before, so existing themes keep working (#309)
+- Design check in the theme editor: hints on contrast (WCAG), distinguishable states, status colours under colour blindness, the terminal palette and harmony; never blocks saving, single checks can be switched off (#309)
+- Agent interface: read-only tools `theme_list` and `theme_get` (level Read); agents cannot change themes (#309)
+
+### Changed
+
+- A theme file that cannot be loaded is listed with the reason and cannot be selected until it is fixed; with an invalid selected theme Paneldeck uses the default theme (#309)
+
 ## [2.5.0] - 2026-11-20
 
 ### Added
