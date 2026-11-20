@@ -32,13 +32,21 @@ FETCH_CONPTY = ROOT / "tools" / "fetch-conpty.ps1"
 WANT = ("license", "licence", "copying", "copyright", "notice", "unlicense")
 
 
+# Release-Ziele: Windows und (ab 2.5.0, #149) Linux. Eine gemeinsame Datei für alle Release-Dateien (Vereinigung).
+PLATFORMS = ("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu")
+
+
 def collect():
-    meta = json.loads(subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", "x86_64-pc-windows-msvc"],
-        cwd=ROOT, capture_output=True, text=True, check=True, encoding="utf-8").stdout)
-    own = {p["id"] for p in meta["packages"] if p["name"] == "paneldeck"}
+    packages = {}
+    for platform in PLATFORMS:
+        meta = json.loads(subprocess.run(
+            ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", platform],
+            cwd=ROOT, capture_output=True, text=True, check=True, encoding="utf-8").stdout)
+        for p in meta["packages"]:
+            packages.setdefault(p["id"], p)
+    own = {i for i, p in packages.items() if p["name"] == "paneldeck"}
     entries = []  # (name, version, license, [(dateiname, text)])
-    for p in sorted(meta["packages"], key=lambda p: (p["name"], p["version"])):
+    for p in sorted(packages.values(), key=lambda p: (p["name"], p["version"])):
         if p["id"] in own:
             continue
         d = pathlib.Path(p["manifest_path"]).parent

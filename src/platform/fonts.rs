@@ -3,7 +3,7 @@
 //!
 //! Windows: `C:\Windows\Fonts` and GDI (`EnumFontFamiliesExW`, `GetFontData`). Other platforms have neither these file
 //! names nor this folder: no system font is found there and egui's built-in fonts plus the embedded Cascadia Mono are
-//! used; the list of families is empty (fontconfig/CoreText follow in #149/#150).
+//! used. The installed families and their files come from fontconfig there (`fc-list`/`fc-match`, #149).
 
 use std::path::PathBuf;
 
@@ -138,13 +138,78 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
-pub fn families() -> Vec<String> {
-    Vec::new()
-}
+/// Linux/macOS (#149): fontconfig (`fc-list`, `fc-match`; on every Linux desktop, on macOS only with Homebrew/XQuartz).
+#[cfg(unix)]
+pub use fc::{families, load};
 
-/// Font data of the face `family` (bold/italic) as GDI hands it out; `None` where there is no implementation.
-#[cfg(not(windows))]
-pub fn load(_family: &str, _bold: bool, _italic: bool) -> Option<crate::sysfonts::FaceData> {
-    None
+#[cfg(unix)]
+mod fc {
+    use crate::sysfonts::FaceData;
+    use std::process::Command;
+
+    fn run(args: &[&str]) -> Option<String> {
+        let out = Command::new("fc-list").args(args).output().ok().filter(|o| o.status.success())?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Family names from `fc-list` output (one face per line, alternative names separated by commas).
+    pub fn parse_families(out: &str) -> Vec<String> {
+        out.lines()
+            .filter_map(|l| l.split(',').next())
+            .map(|f| f.replace("\\-", "-").trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect()
+    }
+
+    /// Monospace (spacing 100) and dual-width (90, e.g. some Nerd Fonts) families.
+    pub fn families() -> Vec<String> {
+        let mut v = Vec::new();
+        for spacing in [":spacing=100", ":spacing=90"] {
+            if let Some(out) = run(&[spacing, "family"]) {
+                v.extend(parse_families(&out));
+            }
+        }
+        v
+    }
+
+    /// Escape a family name for a fontconfig pattern (`-`, `:`, `,` and `\` are special).
+    pub fn escape(family: &str) -> String {
+        family.chars().flat_map(|c| if matches!(c, '-' | ':' | ',' | '\\') { vec!['\\', c] } else { vec![c] }).collect()
+    }
+
+    /// `fc-match` output `file|index|family` → (file, index) if the matched family is the wanted one (fontconfig always
+    /// returns *some* font).
+    pub fn parse_match(out: &str, family: &str) -> Option<(String, u32)> {
+        let mut p = out.splitn(3, '|');
+        let (file, index, fams) = (p.next()?, p.next()?, p.next()?);
+        if file.is_empty() || !fams.split(',').any(|f| f.trim().eq_ignore_ascii_case(family)) {
+            return None;
+        }
+        Some((file.to_string(), index.trim().parse().ok()?))
+    }
+
+    pub fn load(family: &str, bold: bool, italic: bool) -> Option<FaceData> {
+        let pattern = format!("{}:weight={}:slant={}", escape(family), if bold { 200 } else { 80 }, if italic { 100 } else { 0 });
+        let out = Command::new("fc-match").args(["--format=%{file}|%{index}|%{family}", &pattern]).output().ok().filter(|o| o.status.success())?;
+        let (file, index) = parse_match(&String::from_utf8_lossy(&out.stdout), family)?;
+        let meta = std::fs::metadata(&file).ok()?;
+        if meta.len() > 64 * 1024 * 1024 {
+            return None;
+        }
+        Some(FaceData { bytes: std::fs::read(&file).ok()?, index })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fontconfig_output() {
+            assert_eq!(parse_families("DejaVu Sans Mono,DejaVu Sans Mono Book\nHack\n\n"), ["DejaVu Sans Mono", "Hack"]);
+            assert_eq!(escape("Fira-Code:x"), "Fira\\-Code\\:x");
+            assert_eq!(parse_match("/usr/share/fonts/h.ttf|0|Hack", "hack"), Some(("/usr/share/fonts/h.ttf".into(), 0)));
+            assert_eq!(parse_match("/usr/share/fonts/d.ttf|0|DejaVu Sans", "Hack"), None, "substitute is no match");
+            assert_eq!(parse_match("/x.ttc|2|Noto Sans Mono CJK JP,Noto Sans Mono CJK", "Noto Sans Mono CJK"), Some(("/x.ttc".into(), 2)));
+        }
+    }
 }

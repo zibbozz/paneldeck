@@ -1,4 +1,4 @@
-//! Erkennung der installierten Shells (PowerShell, CMD, WSL, Git Bash).
+//! Erkennung der installierten Shells (PowerShell, CMD, WSL, Git Bash; Linux/macOS: `/etc/shells`).
 
 use serde::{Deserialize, Serialize};
 
@@ -88,12 +88,34 @@ fn detect_wsl() -> Vec<ShellSpec> {
         .collect()
 }
 
+/// Linux/macOS (#149): alle Shells aus `/etc/shells`, die es gibt, die Anmelde-Shell (`$SHELL`) zuerst; gestartet als
+/// Login-Shell (`-l`, PATH und Profil wie in einem normalen Terminal, `claude` wird gefunden). Kennung = Programmname.
 #[cfg(not(windows))]
 pub fn detect() -> Vec<ShellSpec> {
-    // Nur für Entwicklung/Tests unter Linux.
-    let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let _ = which("sh");
-    vec![ShellSpec::new("sh", "Shell", &sh, &[])]
+    let listed = std::fs::read_to_string("/etc/shells").unwrap_or_default();
+    unix_shells(&listed, std::env::var("SHELL").ok().as_deref(), &|p| std::path::Path::new(p).is_file())
+}
+
+/// Shells aus dem Text von `/etc/shells` (Kommentare und leere Zeilen übergangen), `login` zuerst, je Programmname nur
+/// einmal (z. B. `/bin/bash` und `/usr/bin/bash`), nur vorhandene. Ohne Treffer: `/bin/sh`.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn unix_shells(etc_shells: &str, login: Option<&str>, exists: &dyn Fn(&str) -> bool) -> Vec<ShellSpec> {
+    let mut v: Vec<ShellSpec> = Vec::new();
+    let candidates = login.into_iter().chain(etc_shells.lines().map(str::trim).filter(|l| l.starts_with('/')));
+    for path in candidates {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if name.is_empty() || v.iter().any(|s| s.id == name) || !exists(path) {
+            continue;
+        }
+        // Login-Shell: bekannte Shells verstehen `-l`.
+        let args: &[&str] = if matches!(name, "bash" | "zsh" | "fish" | "sh" | "dash" | "ksh" | "mksh" | "tcsh" | "csh") { &["-l"] } else { &[] };
+        v.push(ShellSpec::new(name, name, path, args));
+    }
+    if v.is_empty() {
+        v.push(ShellSpec::new("sh", "sh", "/bin/sh", &[]));
+    }
+    v
 }
 
 /// PowerShell-Init: umhüllt die vorhandene `prompt`-Funktion (Profile bleiben unangetastet) und sendet
@@ -175,6 +197,20 @@ mod tests {
 
     fn spec(program: &str, args: &[&str]) -> ShellSpec {
         ShellSpec { id: "x".into(), label: "x".into(), program: program.into(), args: args.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn unix_shell_list() {
+        let etc = "# /etc/shells: valid login shells\n/bin/sh\n/bin/bash\n/usr/bin/bash\n/usr/bin/zsh\n/usr/bin/fish\n/usr/bin/tmux\n/bin/gone\n";
+        let have = |p: &str| p != "/bin/gone";
+        let v = unix_shells(etc, Some("/usr/bin/zsh"), &have);
+        let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["zsh", "sh", "bash", "fish", "tmux"], "login shell first, one per name, only existing");
+        assert_eq!(v[0].program, "/usr/bin/zsh");
+        assert_eq!(v[0].args, ["-l"]);
+        assert!(v.iter().find(|s| s.id == "tmux").unwrap().args.is_empty());
+        assert_eq!(unix_shells("", None, &have)[0].program, "/bin/sh");
+        assert_eq!(unix_shells("", Some("/bin/gone"), &have)[0].program, "/bin/sh");
     }
 
     #[test]

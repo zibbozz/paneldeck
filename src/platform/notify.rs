@@ -1,4 +1,4 @@
-//! Desktop-Benachrichtigungen (Windows-Toast). Auf anderen Systemen ohne Wirkung.
+//! Desktop-Benachrichtigungen (Windows-Toast, Linux: Freedesktop-Benachrichtigungen über D-Bus). macOS: noch ohne Wirkung (#150).
 
 /// Native file and folder dialogs exist (Windows: `rfd`). Without them the dialog functions return `None` at once, and
 /// callers that save something fall back to a fixed folder.
@@ -20,7 +20,41 @@ pub fn toast(title: &str, body: &str, sound: bool) {
     });
 }
 
-#[cfg(not(windows))]
+/// Linux (#149): `org.freedesktop.Notifications.Notify` über D-Bus (zbus, im Hintergrund). Ohne Benachrichtigungsdienst
+/// passiert nichts. `sound`: Hinweis `sound-name` (Freedesktop-Klang „message-new-instant“), sonst `suppress-sound`.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn toast(title: &str, body: &str, sound: bool) {
+    let (title, body) = (title.to_string(), body.to_string());
+    std::thread::spawn(move || {
+        let _ = linux_notify(&title, &body, sound);
+    });
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_notify(title: &str, body: &str, sound: bool) -> zbus::Result<()> {
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+    let conn = zbus::blocking::Connection::session()?;
+    let mut hints: HashMap<&str, Value> = HashMap::new();
+    hints.insert("desktop-entry", Value::from("paneldeck"));
+    if sound {
+        hints.insert("sound-name", Value::from("message-new-instant"));
+    } else {
+        hints.insert("suppress-sound", Value::from(true));
+    }
+    let actions: Vec<&str> = Vec::new();
+    // Notify(app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout)
+    conn.call_method(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        Some("org.freedesktop.Notifications"),
+        "Notify",
+        &("Paneldeck", 0u32, "paneldeck", title, body, actions, hints, -1i32),
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn toast(_title: &str, _body: &str, _sound: bool) {}
 
 /// Speichern-Dialog (Windows); anderswo `None`.

@@ -1,5 +1,7 @@
 //! Windows-Integration pro Benutzer (ohne Administratorrechte): Autostart und Explorer-Kontextmenü.
 //! Gelesen und geschrieben wird über die Registry-API unter HKCU (Unicode-sicher); alles ist rückgängig machbar.
+//! Linux (#149): XDG-Autostart und „In Paneldeck öffnen“ für Nautilus/Dolphin/Nemo als Dateien im Benutzerordner
+//! (`platform::desktop`); macOS: noch nicht (#150, Status „aus“, Schreiben meldet „nicht unterstützt“).
 //!
 //! Instanzen mit eigenem Datenordner/Profil (`--data-dir`, `--profile`) tragen ihre Argumente in die Befehle ein
 //! (Aufbau und Namen: `crate::launch`). Autostart hat je Instanz einen eigenen Run-Wert; das Kontextmenü gibt es nur
@@ -8,9 +10,13 @@
 //! Was geschrieben wird, beschreibt ein reiner „Plan“ (`RegOp`-Liste, getestet); ausgeführt wird er von
 //! `platform::registry::apply` (ohne Umsetzung auf dem System: Status „aus“, Schreiben meldet „nicht unterstützt“).
 
+// Linux: der Registry-Plan wird nur von den Tests benutzt.
+#![cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
+
 use std::path::Path;
 
 use crate::launch;
+#[cfg_attr(all(unix, not(target_os = "macos")), allow(unused_imports))]
 use crate::platform::registry::{self, RegOp};
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -107,6 +113,43 @@ fn this_exe() -> std::path::PathBuf {
 }
 
 /// Autostart dieser Instanz: aus, an (eigener Run-Wert mit genau ihrem Befehl) oder auf etwas anderes zeigend.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn autostart_status() -> Status {
+    let args = launch::instance_args();
+    linux_status(crate::platform::desktop::autostart_stored(&args), crate::platform::desktop::autostart_expected(&args))
+}
+
+/// Linux: gespeicherter gegen erwarteten `Exec`-Wert (genau gleich = „an“).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_status(stored: Option<String>, want: Result<String, String>) -> Status {
+    match (stored, want) {
+        (None, _) => Status::Off,
+        (Some(s), Ok(w)) if s == w => Status::Mine,
+        (Some(s), _) => Status::Other(s),
+    }
+}
+
+/// Autostart dieser Instanz ein-/ausschalten (Linux: `~/.config/autostart/<name>.desktop`).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn set_autostart(on: bool, _exe: &Path) -> Result<(), String> {
+    crate::platform::desktop::set_autostart(on, &launch::instance_args())
+}
+
+/// Linux: „In Paneldeck öffnen“ in Nautilus/Dolphin/Nemo.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn context_status() -> Status {
+    linux_status(crate::platform::desktop::context_stored(), crate::platform::desktop::context_expected(&launch::instance_args()))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn set_context(on: bool, _exe: &Path) -> Result<(), String> {
+    crate::platform::desktop::set_context(on, &launch::instance_args())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn remove_instance_autostarts() {}
+
+#[cfg(any(windows, target_os = "macos"))]
 pub fn autostart_status() -> Status {
     let args = launch::instance_args();
     let name = launch::run_value_name(&launch::Instance::from_args(&args));
@@ -114,23 +157,27 @@ pub fn autostart_status() -> Status {
 }
 
 /// Autostart dieser Instanz ein-/ausschalten; berührt nur ihren eigenen Run-Wert.
+#[cfg(any(windows, target_os = "macos"))]
 pub fn set_autostart(on: bool, exe: &Path) -> Result<(), String> {
     registry::apply(&autostart_plan(on, exe, &launch::instance_args())?)
 }
 
 /// Kontextmenü: aus, an (zeigt auf diese Instanz) oder von einer anderen Instanz/.exe geschrieben.
+#[cfg(any(windows, target_os = "macos"))]
 pub fn context_status() -> Status {
     context_status_of(registry::get_str(CONTEXT_PROBE, None).as_deref(), &this_exe(), &launch::instance_args())
 }
 
 /// Kontextmenü ein-/ausschalten. Die Schlüssel sind für alle Instanzen dieselben; der Befehl trägt die Argumente
 /// der Instanz, die zuletzt schreibt.
+#[cfg(any(windows, target_os = "macos"))]
 pub fn set_context(on: bool, exe: &Path) -> Result<(), String> {
     registry::apply(&context_plan(on, exe, &launch::instance_args())?)
 }
 
 /// Vom Deinstallationsprogramm (`--uninstall-hooks`): Autostart-Werte `Paneldeck (…)` entfernen, die auf diese .exe
 /// zeigen. Best-Effort, still.
+#[cfg(any(windows, target_os = "macos"))]
 pub fn remove_instance_autostarts() {
     for name in instance_run_values_for(&registry::values(RUN_KEY), &this_exe()) {
         let _ = registry::apply(&[RegOp::DeleteValue { key: RUN_KEY.into(), name }]);

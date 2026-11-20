@@ -4,7 +4,8 @@
 use std::path::Path;
 
 /// Does this platform have a file manager we can open (shows "Show in Explorer"/"Open folder" buttons)?
-pub const FILE_MANAGER: bool = cfg!(windows);
+/// Linux (#149): the desktop's file manager through `xdg-open`.
+pub const FILE_MANAGER: bool = cfg!(any(windows, all(unix, not(target_os = "macos"))));
 
 /// Open `target` (URL, file or folder) with its default program. `false` if nothing could be started.
 pub fn launch(target: &str) -> bool {
@@ -53,7 +54,11 @@ pub fn folder(dir: &Path) {
     {
         let _ = std::process::Command::new("explorer").arg(dir).spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
+    #[cfg(target_os = "macos")]
     let _ = dir;
 }
 
@@ -63,7 +68,16 @@ pub fn show_in_file_manager(path: &str, is_dir: bool) {
     {
         let _ = std::process::Command::new("explorer").arg(if is_dir { path.to_string() } else { format!("/select,{path}") }).spawn();
     }
-    #[cfg(not(windows))]
+    // Linux: a folder is opened, for a file its folder (xdg-open has no "select").
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let p = Path::new(path);
+        let target = if is_dir { Some(p) } else { p.parent() };
+        if let Some(t) = target {
+            let _ = std::process::Command::new("xdg-open").arg(t).spawn();
+        }
+    }
+    #[cfg(target_os = "macos")]
     let _ = (path, is_dir);
 }
 

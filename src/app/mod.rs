@@ -59,6 +59,8 @@ mod session_settings;
 mod settings;
 #[cfg(feature = "readme-shots")]
 mod shot_start;
+#[cfg(unix)]
+mod secret_ui;
 mod sidebar;
 mod sysprompt_ui;
 mod taint;
@@ -1187,6 +1189,10 @@ impl App {
             hooks_incomplete: false,
             last_status_check: Instant::now(),
             hooks_msg: String::new(),
+            // Linux-AppImage: die `.AppImage`-Datei (Selbst-Update, Neustart, Integrationen), nicht das eingehängte Abbild.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            exe: crate::platform::desktop::this_exe(),
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
             exe: std::env::current_exe().unwrap_or_default(),
             palette: None,
             tlinks: Default::default(),
@@ -4234,6 +4240,9 @@ impl eframe::App for App {
         }
         self.poll_mcp(ctx);
         self.poll_retired(ctx);
+        // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).
+        #[cfg(unix)]
+        self.master_password_ui(ctx);
         crate::platform::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);
         if crate::platform::conpty::take_fallback_hint() {
@@ -5023,7 +5032,7 @@ fn tree_children(ui: &mut Ui, dir: &Path, hidden: bool, cache: &mut HashMap<Path
                 actions.push(Action::NewSessionAt(path_s.clone()));
                 ui.close();
             }
-            if crate::platform::open::FILE_MANAGER && ui.button(lang.t("Im Explorer anzeigen", "Show in Explorer")).clicked() {
+            if crate::platform::open::FILE_MANAGER && ui.button(if cfg!(windows) { lang.t("Im Explorer anzeigen", "Show in Explorer") } else { lang.t("Im Dateimanager anzeigen", "Show in file manager") }).clicked() {
                 crate::platform::open::show_in_file_manager(&path_s, it.is_dir);
                 ui.close();
             }

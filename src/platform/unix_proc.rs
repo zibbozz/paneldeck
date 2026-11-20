@@ -538,13 +538,17 @@ fn walk(snap: &HashMap<u32, Stat>, pid: u32, born: u64) -> Vec<u32> {
 }
 
 /// Is the shell in the foreground of its terminal (nothing running in it)? The foreground process group of the
-/// controlling terminal is the shell's own group. `None` if unknown.
+/// controlling terminal is the shell's own group, and no other process is in that group (a shell without job control
+/// runs its commands in its own group). `None` if unknown.
 pub fn shell_is_idle(shell: u32) -> Option<bool> {
     let s = sys::stat(shell).filter(|s| !s.zombie)?;
     if s.tty == 0 || s.tpgid <= 0 {
         return None;
     }
-    Some(s.tpgid == s.pgrp)
+    if s.tpgid != s.pgrp {
+        return Some(false);
+    }
+    Some(!snapshot().iter().any(|(p, o)| *p != shell && !o.zombie && o.pgrp == s.pgrp))
 }
 
 /// Processes on the same controlling terminal as `pid` (they get SIGHUP when the session's terminal closes).
