@@ -485,6 +485,9 @@ fn check_exe(b: &[u8], lang: Lang) -> Result<(), String> {
     Ok(())
 }
 
+/// Höchstens so viel wird aus dem macOS-ZIP entpackt (Universal-Binary + Ressourcen).
+const MAX_MAC_APP: usize = 256 << 20;
+
 /// Wie lange auf das Setup gewartet wird (danach läuft es weiter, Paneldeck wartet nur nicht mehr).
 const SETUP_WAIT: Duration = Duration::from_secs(300);
 
@@ -541,7 +544,18 @@ fn install(exe: &Path, flavor: Option<Flavor>, file: &Path, want: &[u8; 32], off
             swap_companions(exe, &data, &offer.version);
             install::swap_exe(exe, &bytes).map_err(|e| Retry(format!("{} ({e})", lang.t("paneldeck.exe konnte nicht ersetzt werden", "Could not replace paneldeck.exe"))))
         }
-        None => Err(Discard(lang.t("Automatische Updates gibt es nur unter Windows.", "Automatic updates are only available on Windows.").into())),
+        Some(Flavor::AppImage) => {
+            if !install::is_appimage(&data) {
+                return Err(Discard(lang.t("Die heruntergeladene Datei ist keine AppImage.", "The downloaded file is not an AppImage.").into()));
+            }
+            install::swap_appimage(exe, &data).map_err(|e| Retry(format!("{} ({e})", lang.t("Die AppImage konnte nicht ersetzt werden", "Could not replace the AppImage"))))
+        }
+        Some(Flavor::MacApp) => {
+            let bundle = install::mac_bundle(exe).ok_or_else(|| Retry(lang.t("Paneldeck.app nicht gefunden", "Paneldeck.app not found").into()))?;
+            let entries = zip::extract_tree(&data, release::MAC_APP_PREFIX, MAX_MAC_APP).map_err(|e| Discard(zip_err(e, lang)))?;
+            install::swap_bundle(&bundle, &entries).map_err(|e| Retry(format!("{} ({e})", lang.t("Paneldeck.app konnte nicht ersetzt werden", "Could not replace Paneldeck.app"))))
+        }
+        None => Err(Discard(lang.t("Automatische Updates gibt es nur unter Windows, für die Linux-AppImage und die macOS-App.", "Automatic updates are only available on Windows, for the Linux AppImage and for the macOS app.").into())),
     };
     // Sperre erst hier lösen: das Setup ist beendet (oder läuft nach der Wartezeit allein weiter).
     drop(lock);

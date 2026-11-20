@@ -182,7 +182,6 @@ pub fn fetch_bytes(t: &dyn Transport, url: &str, accept: &str, max: u64, cancel:
 }
 
 /// User-Agent ohne persönliche Daten.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub fn user_agent() -> String {
     format!("Paneldeck/{}", env!("CARGO_PKG_VERSION"))
 }
@@ -198,14 +197,18 @@ pub fn system_transport() -> Result<Box<dyn Transport>, FetchError> {
     {
         Ok(Box::new(winhttp::WinHttp::open()?))
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        Err(FetchError::Net(crate::platform::unsupported()))
+        Ok(Box::new(unix::Rustls::open()?))
     }
 }
 
 #[cfg(windows)]
 mod winhttp;
+
+/// Linux/macOS (#149): ureq + rustls mit den Stammzertifikaten des Systems.
+#[cfg(unix)]
+mod unix;
 
 /// Lokales Schein-Release für Ende-zu-Ende-Tests – **nur mit dem Cargo-Feature `update-test-feed`** (Standard: aus; Release-Builds
 /// über `tools/release.sh` haben es nie, das Skript prüft das) und nur über die

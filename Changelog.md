@@ -7,7 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Deviation: instead of `[Unreleased]`, changes that are not yet released are listed under the number of the next release with `WIP` instead of a date (e.g. `## [1.1.0] - WIP`).
 
-## [2.5.0] - WIP
+## [2.6.0] - WIP
+
+## [2.5.0] - 2026-11-20
 
 ### Added
 
@@ -15,6 +17,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Profiles: "Shell in WSL" chooses the login shell per profile (automatic or an entry from the distribution's `/etc/shells`) (#57)
 - Nested shells (ssh, tmux …) without shell integration are detected and shown as "without shell integration"; `run_command` then reports `quality: approx` (#57)
 - *Settings → Terminal* offers copyable snippets for bash, zsh and fish to get command marks from remote machines (#57)
+- Linux (x86_64) release: AppImage (updates itself, checked against `SHA256SUMS.txt`), `.deb`, `.rpm` and tarball, built by GitHub Actions with build provenance; minimum Ubuntu 22.04 / Debian 12 / Fedora 39, X11 and Wayland (#149)
+- Linux: tray icon (StatusNotifierItem), desktop notifications, native file dialogs (XDG portal), optional start at login (XDG autostart) and optional "Open in Paneldeck" for Nautilus, Dolphin and Nemo; data folder `~/.local/share/Paneldeck` (private to the user); shells from `/etc/shells` started as login shells (#149)
+- Linux: API keys of chat servers are encrypted with a key from the system keyring (Secret Service); without a keyring Paneldeck asks for a master password on the first access to a key (#149)
+- Linux/macOS: the agent interface identifies the calling process itself (socket owner, complete process tree; on Linux Paneldeck is a subreaper) and refuses callers it cannot identify; programs that detach from a session stay restricted, as on Windows (#149)
+- macOS version (experimental, not signed): one universal app for Apple Silicon and Intel (macOS 12 or newer) as `.dmg` and `.zip`. It has a menu-bar icon, notifications, start at login (LaunchAgent, off by default), native file dialogs and API keys encrypted with a key in the Keychain. The app updates itself, checked against `SHA256SUMS.txt` and its code signature. Clicking a path never starts an app, script or installer – it is only shown in Finder. The About page shows an "experimental" notice; how to open the unsigned app the first time is in [macOS](docs/en/macos.md) (#150)
 
 ### Changed
 
@@ -24,6 +31,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - File names dropped or inserted into a terminal are quoted for the shell that actually runs there (e.g. fish on Linux/macOS), so a crafted name can no longer run commands (#57)
 - Folder names reported by the shell integration no longer contain control characters (#57)
+- Paneldeck started in the tray (autostart, `--tray`) or minimized no longer takes the keyboard focus from the program you are working in
 
 ## [2.4.2] - 2026-11-20
 
@@ -419,7 +427,8 @@ First public release. From here on, the public API (MCP interface, command line,
 - All `unwrap()`/`expect()` calls in the program code were replaced by error handling (the release build aborts completely on a panic); the `unsafe` blocks are justified.
 - The executable contains no paths of the build machine.
 
-[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...HEAD
+[2.6.0]: https://github.com/zibbozz/paneldeck/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...v2.5.0
 [2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...v2.4.2
 [2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
