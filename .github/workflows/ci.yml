@@ -79,11 +79,16 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install rpmbuild and desktop-file-utils
-        run: sudo apt-get update -q && sudo apt-get install -y -q rpm desktop-file-utils
+        run: sudo apt-get update -q && sudo apt-get install -y -q rpm desktop-file-utils xvfb libgl1-mesa-dri libegl1 libxkbcommon-x11-0
       - name: Build and package
         run: |
           v=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/' | tr -d '\r')
           bash tools/package-linux.sh "$v"
           bash tools/check-linux-packages.sh "$v"
+      # Smoke test (#149): isolated hub (own data folder, fake HOME, fake claude), JSON-RPC through `paneldeck mcp`.
+      - name: Smoke test (Xvfb)
+        run: xvfb-run -a python3 tools/smoke-linux.py target/release/paneldeck

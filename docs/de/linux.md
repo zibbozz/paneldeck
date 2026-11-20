@@ -20,7 +20,7 @@ Jedes Release unter [GitHub Releases](https://github.com/zibbozz/paneldeck/relea
 - Einen Download selbst prüfen: `sha256sum -c --ignore-missing SHA256SUMS.txt`.
 
 ## Datenordner
-`~/.local/share/Paneldeck` (bzw. `$XDG_DATA_HOME/Paneldeck`). **Portabel:** einen Ordner `paneldeck-data` neben dem Programm (Tarball) bzw. neben der `.AppImage`-Datei anlegen – gibt es ihn, nimmt Paneldeck ihn. Anders als unter Windows wird er nie von selbst angelegt, damit ein entpacktes Archiv nicht unbemerkt zum Datenordner wird. `--data-dir`, `PANELDECK_DATA` und `--profile` gelten wie überall (siehe [Kommandozeile](command-line.md)).
+`~/.local/share/Paneldeck` (bzw. `$XDG_DATA_HOME/Paneldeck`), nur für dich lesbar (Ordner `0700`, Dateien `0600`; Paneldeck korrigiert die Rechte eines vorhandenen Ordners). **Portabel:** einen Ordner `paneldeck-data` neben dem Programm (Tarball) bzw. neben der `.AppImage`-Datei anlegen – gibt es ihn, nimmt Paneldeck ihn. Anders als unter Windows wird er nie von selbst angelegt, damit ein entpacktes Archiv nicht unbemerkt zum Datenordner wird. `--data-dir`, `PANELDECK_DATA` und `--profile` gelten wie überall (siehe [Kommandozeile](command-line.md)).
 
 ## Shells
 Die Terminals nutzen die Shells aus `/etc/shells`; Standard ist deine Anmelde-Shell (`$SHELL`).
@@ -41,9 +41,14 @@ API-Schlüssel landen nie im Klartext in einer Datei:
 Die AppImage aktualisiert sich wie die portable Windows-Version: Die neue `.AppImage` wird von GitHub geladen, **gegen `SHA256SUMS.txt` geprüft**, an die Stelle der alten gesetzt (die bleibt als `.old`, bis die neue Version gestartet ist) und Paneldeck startet neu. Ehrlich gesagt: Die Prüfsumme schützt vor **Übertragungsfehlern und unvollständigen Downloads, nicht vor einem manipulierten Release** – eine eigene Signatur gibt es nicht. `.deb`, `.rpm` und der Tarball melden eine neue Version nur mit Link; sie werden über die Paketverwaltung bzw. von Hand aktualisiert.
 
 ## Agenten-Schnittstelle (MCP)
-Funktioniert wie unter Windows. Der Hub ermittelt den aufrufenden Prozess selbst (Besitzer der TCP-Verbindung aus `/proc/net/tcp` und `/proc/<pid>/fd`, sein Prozessbaum und statt der Job Objects von Windows eine Markierung je Sitzung in der Umgebung). Ein Aufrufer, der sich nicht bestimmen lässt, wird **abgewiesen**. Wie unter Windows ist das keine Grenze gegen feindliche Programme desselben Benutzers, siehe [Agenten-Schnittstelle](agent-interface.md).
+Funktioniert wie unter Windows. Der Hub ermittelt den aufrufenden Prozess selbst (Besitzer der TCP-Verbindung aus `/proc/net/tcp` und `/proc/<pid>/fd` und sein Prozessbaum). Ein Aufrufer, der sich nicht bestimmen lässt, wird **abgewiesen**.
+- Zu einer Sitzung gehört ein Aufrufer nur, wenn er ihre Shell oder einer ihrer Nachfahren ist.
+- Paneldeck ist *Child Subreaper*: Ein Programm, das sich von einer Sitzung löst (`setsid`, `nohup … &`, doppelter Fork, auch mit geleerter Umgebung), hängt danach unter Paneldeck statt unter init. Es gilt dann als „gehört zu Paneldeck, aber zu keiner nachweisbaren Sitzung“ und ist wie unter Windows eingeschränkt (schreibt in keine Kette, startet keine Agenten) – nie als externer Aufrufer.
+- Jede Sitzung hat zusätzlich eine Markierung in der Umgebung. Jedes Programm desselben Benutzers kann sie lesen und kopieren; deshalb kann sie einen Aufrufer nur *einschränken*, ihm nie eine Sitzung geben.
+- Grenzen (wie WMI oder die Aufgabenplanung unter Windows): Ein Programm, das eine Sitzung über einen anderen Dienst starten lässt – `systemd-run --user`, `at`, D-Bus-Aktivierung – und das die Markierung entfernt, ist kein Nachfahre von Paneldeck und gilt als externer Aufrufer. Wie unter Windows ist das keine Grenze gegen feindliche Programme desselben Benutzers, siehe [Agenten-Schnittstelle](agent-interface.md).
 
 ## Grenzen (2.5.0)
-- Dateidialoge (Export, Import, Ordner wählen) sind noch nicht nativ: Exporte landen im Datenordner, Ordner werden eingetippt oder in Paneldecks eigener Ordnerauswahl gewählt.
+- Dateidialoge (Export, Import, Ordner wählen) laufen über das XDG-Desktop-Portal (GNOME, KDE und die meisten Desktops). Ohne Portal (z. B. ein reiner Fenstermanager) öffnen sie sich nicht; Exporte landen dann im Datenordner.
+- Claude-Code-Hooks: Claude Code führt sie mit `/bin/sh` aus, egal welche Shell du nutzt (bash, zsh, fish); der Befehl setzt den Pfad des Programms (bei der AppImage die `.AppImage`-Datei) dafür in Anführungszeichen. `~/.claude` kommt aus `$HOME` (bzw. `$CLAUDE_CONFIG_DIR`).
 - Ein Bild aus der Zwischenablage einfügen (Strg+V ins Terminal) nutzt X11 (unter Wayland über XWayland).
 - macOS folgt getrennt (experimentell, #150).

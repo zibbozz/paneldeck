@@ -146,7 +146,12 @@ try:
     err, text = b.tool("create_session", {"shell": "bash", "cwd": PROJ, "name": "smoke-bash"})
     check("create_session bash", not err, text)
     sid = json.loads(text).get("id") if not err else None
-    err, text = b.tool("run_command", {"session": sid, "command": "echo smoke-$((40+2))", "timeout_secs": 20})
+    # the shell needs a moment for its first prompt (shell integration)
+    for _ in range(40):
+        err, text = b.tool("run_command", {"session": sid, "command": "echo smoke-$((40+2))", "timeout_secs": 20})
+        if not (err and code(text) in ("no_shell_integration", "busy")):
+            break
+        time.sleep(0.5)
     out = json.loads(text).get("output", "") if not err else text
     check("run_command in bash", "smoke-42" in out, text[:400])
 
