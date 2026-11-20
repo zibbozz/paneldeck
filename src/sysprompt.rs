@@ -196,6 +196,7 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "read_chat" => ("Nachrichten eines Chats lesen (die letzten, mit Status).", "Read the messages of a chat (the latest ones, with its status)."),
         "send_chat_message" => ("Nachricht an einen Chat senden; das Modell des Chats antwortet.", "Send a message to a chat; the chat's model answers."),
         "list_models" => ("Eingerichtete LLM-Server und Modelle für Chats (ohne Schlüssel).", "Configured LLM servers and models for chats (without keys)."),
+        "cleanup_sizes" => ("Größen und Anzahlen der Paneldeck-Daten je Bereich (nur lesend, löschen kann nur der Nutzer).", "Sizes and counts of Paneldeck's data per area (read-only; only the user can delete)."),
         "list_processes" => ("Einträge der Prozessliste (Entwicklungsserver) mit Status, Adressen und Fehlerzahl.", "Entries of the process list (dev servers) with status, addresses and error count."),
         "read_process_output" => ("Ausgabe eines Prozesses der Prozessliste lesen.", "Read the output of a process-list entry."),
         "start_process" => ("Prozess oder Gruppe der Prozessliste starten.", "Start a process-list entry or group."),

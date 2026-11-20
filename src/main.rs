@@ -6,6 +6,7 @@ mod backup;
 mod boxdraw;
 mod calc;
 mod chat;
+mod cleanup;
 mod claude_opts;
 mod db;
 mod due;

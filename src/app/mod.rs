@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod chat_ui;
+mod cleanup_ui;
 mod claude_status;
 mod data;
 mod dialogs;
@@ -391,6 +392,8 @@ enum Action {
     ResumeHistory(usize),
     OpenSearch,
     OpenSettings,
+    /// Fenster „Aufräumen …“ (#307).
+    OpenCleanup,
     OpenPrompts,
     OpenNotes(u64),
     /// Agenten-Kette einer Sitzung aufheben (nur der Nutzer, Kontextmenü, #152).
@@ -843,6 +846,8 @@ pub struct App {
     backup_checked: Instant,
     backup_msg: Option<String>,
     backups_cache: Option<Vec<crate::backup::BackupInfo>>,
+    /// Fenster „Aufräumen …“ bzw. Ergebnis eines beim Start ausgeführten Aufräumens (#307).
+    cleanup: Option<cleanup_ui::CleanupUi>,
     backups_dirty: bool,
     confirm_restore: Option<PathBuf>,
     restore_error: Option<String>,
@@ -1113,6 +1118,11 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Schrift wird in update() über apply_font gesetzt.
         let dir = state::data_dir();
+        // Vorgemerktes Aufräumen (#307) zuerst: es kann Einstellungen, Zustand und Datenbank betreffen.
+        let cleanup_report = crate::cleanup::apply_pending(&dir, || {
+            let s: Settings = state::load_json(&dir.join("settings.json")).unwrap_or_default();
+            crate::cli::get().backup_dir.clone().unwrap_or_else(|| crate::backup::dir(&dir, &s.backup_dir))
+        });
         let mut settings: Settings = state::load_json(&dir.join("settings.json")).unwrap_or_default();
         settings.sanitize();
         // `--lang`: nur für diesen Start (beim Speichern bleibt die gespeicherte Sprache, siehe `state::ser_language`).
@@ -1200,6 +1210,7 @@ impl App {
             backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
             backup_msg: None,
             backups_cache: None,
+            cleanup: cleanup_report.map(cleanup_ui::CleanupUi::with_report),
             backups_dirty: true,
             confirm_restore: None,
             restore_error: None,
@@ -3752,6 +3763,7 @@ impl App {
                 }
             }
             Action::OpenSettings => self.settings_open = true,
+            Action::OpenCleanup => self.open_cleanup(ctx),
             Action::OpenPrompts => self.prompts_open = true,
             Action::NewDialog(claude) => {
                 // Aus der Palette: den Fokus nicht ans Terminal zurückgeben, er gehört dem Dialog (#255).
@@ -4365,6 +4377,7 @@ impl eframe::App for App {
             self.tlinks_picker_ui(ctx);
         }
         self.restore_dialog(ctx);
+        self.cleanup_ui(ctx);
         self.update_frame(ctx);
         for a in actions {
             self.apply(ctx, a);

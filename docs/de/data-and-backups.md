@@ -148,6 +148,26 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
 - Vor einem Update auf eine **neue Hauptversion** legt das Selbst-Update zuerst eine Datenbank-Sicherung an (siehe [Updates](updates.md)).
 - Der **Rückgängig-Verlauf** der Todo-Liste (3 bis 100 Schritte, Standard 25) wird im selben Tab eingestellt.
 
+## Aufräumen
+*Einstellungen → Daten & Sicherung → **Aufräumen …*** (auch in der Befehls-Palette) öffnet ein Fenster, in dem du ankreuzt, was gelöscht werden soll. Jeder Eintrag zeigt Größe bzw. Anzahl (im Hintergrund ermittelt) und eine kurze Erklärung, unten steht die Summe. Vorausgewählt ist nur Harmloses: Bilder aus der Zwischenablage, alte Sicherungsdateien (`*.bak-*`, `*.defekt-*`), `crash.log` sowie verwaiste Scrollback-/Chat-Dateien, zu denen es keine Sitzung mehr gibt.
+
+| Gruppe | Einträge |
+|---|---|
+| Platz schaffen | Datenbank-Sicherungen (alle außer den neuesten *N*, Standard 3; „alle löschen“ nur mit Eintippen), Bilder aus der Zwischenablage, alte Sicherungsdateien; nur wenn vorhanden: Programm-Kopien von Läufen (`%TEMP%\paneldeck-run`), Wartungs-Sicherungen (als „maintenance“ markierte Dateien im Sicherungsordner), Hot-Exit-Puffer (`hot-exit\`) |
+| Verlauf und Protokolle | Scrollback und Chatverläufe, je **ohne Sitzung** oder **alle** („alle“ betrifft auch offene Sitzungen: Terminals behalten nur den Bildschirm, Chats werden leer), wahlweise nur Dateien älter als *X* Tage (Standard 30); `crash.log`; das MCP-Protokoll `mcp-log.jsonl` (es dokumentiert, was Agenten getan haben) |
+| Inhalte | Prompt-Bibliothek, Terminal-/Gruppenvorlagen, eigene Themes (eingebaute Themes und das Beispiel bleiben; ein aktives gelöschtes Theme fällt auf den Standard zurück), `system-prompt.md`, die Todo-/Ticket-Datenbank, Sitzungen und Layout |
+| Einstellungen | alle Einstellungen (wie `--reset-settings`, mit Kopie `settings.json.bak-<zeit>`; die Sprache bleibt), Modell-Server und API-Schlüssel, Claude-Standards, Tastenkürzel |
+| Windows-Integration | Autostart-Run-Werte (auch von Profilen) und Explorer-Kontextmenü, die auf diese `paneldeck.exe` zeigen, `paneldeck*`-Einträge in `~/.claude.json`, die auf diese .exe zeigen, `claude-hooks*.json` im Datenordner |
+| Alles | **Paneldeck komplett zurücksetzen**: wählt alles samt Integration, sichert den Datenordner vorher als ZIP-Datei (Zielordner wählbar, außerhalb des Datenordners; API-Schlüssel bleiben draußen) und startet danach neu wie beim ersten Start |
+
+Andere Profile (`profiles\<name>` mit `settings.json`) lassen sich komplett löschen, aber nur, solange ihre Instanz nicht läuft.
+
+**Sicherheit.** Gelöscht wird endgültig (kein Papierkorb). *Löschen …* zeigt eine Zusammenfassung aller gewählten Einträge mit Größen; der Knopf wird nach 3 Sekunden frei, unwiderrufliche Einträge (Datenbank, alle Verläufe, Prompt-Bibliothek, Vorlagen, Themes, Systemprompt, Sitzungen/Layout, alle Einstellungen, alle Sicherungen, Profile, Zurücksetzen) verlangen zusätzlich das Eintippen von `LÖSCHEN` (Englisch: `DELETE`) – einmal je Lauf. Vor dem Löschen wird die Datenbank gesichert (`pre-cleanup-<zeit>.db` im Sicherungsordner; abschaltbar, immer, wenn die Datenbank selbst gelöscht wird – schlägt diese Sicherung fehl, bleibt die Datenbank). Registry-Werte werden als `.reg`-Datei und `~/.claude.json` als Kopie im Sicherungsordner gesichert, bevor sie sich ändern. Einträge, die offene Sitzungen beenden, nennen diese und laufende Programme (erkannt über die Kindprozesse der Shells): *Schließen und löschen* oder *Abbrechen*. Dateien in Benutzung werden übersprungen; das Ergebnis nennt jeden Eintrag mit ✓ oder dem Fehler und bietet *Erneut versuchen* und bei Bedarf *Jetzt neu starten*.
+
+Datenbank, Sitzungen/Layout und das komplette Zurücksetzen lassen sich nicht löschen, solange Paneldeck sie benutzt: Sie werden in `cleanup-pending.json` vorgemerkt und beim nächsten Start vor dem Laden ausgeführt; Paneldeck startet sofort neu und zeigt das Ergebnis. Integration, andere Profile und die ZIP-Sicherung laufen vor dem Neustart; ohne ZIP-Sicherung wird nichts zurückgesetzt.
+
+**Nie berührt:** die Daten von Claude Code selbst (`~/.claude/projects`, Transkripte). Agenten können nur die Größen lesen (MCP-Werkzeug [`cleanup_sizes`](agent-interface.md)); löschen können sie nichts.
+
 ## Daten verschieben oder kopieren
 Paneldeck beenden, dann den ganzen Datenordner kopieren. Um ihn von einem anderen Ort zu nutzen, Paneldeck mit `--data-dir <ordner>` starten oder `PANELDECK_DATA` setzen.
 

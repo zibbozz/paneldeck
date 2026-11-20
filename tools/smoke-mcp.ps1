@@ -1911,6 +1911,39 @@ c.close()
     Skip 'Konsolen-Host und DLL-Suche' 'keine conpty.dll/OpenConsole.exe neben der .exe (tools\fetch-conpty.ps1)'
   }
 
+  Write-Host "== Aufraeumen (#307): cleanup_sizes und vorgemerkter Lauf im Test-Datenordner" -ForegroundColor Cyan
+  Set-Level 'Read' -Empty
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'cleanup_sizes: in tools/list (Lesen), kein Werkzeug zum Loeschen' ($names -contains 'cleanup_sizes' -and -not ($names | Where-Object { $_ -match 'clean|delete|purge|reset' -and $_ -ne 'cleanup_sizes' })) ($names -join ',')
+  New-Item -ItemType Directory -Force "$data\clipboard", "$data\scrollback", "$data\chats" | Out-Null
+  [IO.File]::WriteAllBytes("$data\clipboard\clip-1-0.png", (New-Object byte[] 2048))
+  [IO.File]::WriteAllText("$data\crash.log", 'smoke')
+  [IO.File]::WriteAllText("$data\state.json.bak-20250101-000000", '{}')
+  [IO.File]::WriteAllText("$data\scrollback\99999.txt", 'alt')
+  [IO.File]::WriteAllText("$data\chats\99998.json", '{}')
+  $r = Tool 'cleanup_sizes'
+  $it = @{}; foreach ($x in @($r.data.items)) { $it[$x.id] = $x }
+  Check 'cleanup_sizes: Antwort mit Bereichen und Gruppen' (-not $r.err -and $it.Count -ge 10 -and $it['database'].group -eq 'content' -and $it['factory_reset'].needs_typing) $r.text
+  Check 'cleanup_sizes: Zwischenablage 2048 B, 1 Datei, vorausgewaehlt' ($it['clipboard_images'].bytes -eq 2048 -and $it['clipboard_images'].files -eq 1 -and $it['clipboard_images'].preselected) ($it['clipboard_images'] | ConvertTo-Json -Compress)
+  Check 'cleanup_sizes: verwaister Verlauf gezaehlt' ($it['scrollback_orphaned'].files -ge 1 -and $it['chats_orphaned'].files -ge 1)
+  Check 'cleanup_sizes: Datenordner-Summe und Profile' ($r.data.data_folder.bytes -gt 0 -and $null -ne $r.data.profiles.count)
+  Check 'cleanup_sizes: keine Pfade in der Antwort' ($r.text -notmatch [regex]::Escape($data) -and $r.text -notmatch [regex]::Escape($data.Replace('\', '\\')))
+  # Vorgemerkter Lauf (wie nach "Loeschen" mit Neustart): wird beim naechsten Start vor dem Laden ausgefuehrt. Integration
+  # (autostart) wird aus der Vormerkung nie ausgefuehrt - Registry bleibt unberuehrt.
+  Stop-Hub
+  $hadDb = Test-Path -LiteralPath "$data\paneldeck.db"
+  $pending = @{ version = 1; items = @('clipboard_images', 'crash_log', 'old_backup_files', 'scrollback_orphaned', 'chats_orphaned', 'database', 'autostart'); opts = @{ keep_backups = 3; backup_db = $true } } | ConvertTo-Json -Depth 5
+  [IO.File]::WriteAllText("$data\cleanup-pending.json", $pending, (New-Object Text.UTF8Encoding $false))
+  Set-Level 'Read' -Empty
+  Check 'Aufraeumen beim Start: Vormerkung verbraucht' (-not (Test-Path -LiteralPath "$data\cleanup-pending.json"))
+  Check 'Aufraeumen beim Start: Dateien geloescht' (-not (Test-Path "$data\clipboard\clip-1-0.png") -and -not (Test-Path "$data\crash.log") -and -not (Test-Path "$data\state.json.bak-20250101-000000") -and -not (Test-Path "$data\scrollback\99999.txt") -and -not (Test-Path "$data\chats\99998.json"))
+  if ($hadDb) {
+    $pre = @(Get-ChildItem -LiteralPath "$data\backups" -Filter 'pre-cleanup-*.db' -ErrorAction SilentlyContinue)
+    Check 'Aufraeumen beim Start: Datenbank vorher gesichert (pre-cleanup-*.db)' ($pre.Count -ge 1) ($pre.Name -join ',')
+  } else { Skip 'Aufraeumen: Datenbank-Sicherung' 'keine paneldeck.db im Test-Datenordner' }
+  $r = Tool 'cleanup_sizes'
+  $it = @{}; foreach ($x in @($r.data.items)) { $it[$x.id] = $x }
+  Check 'Aufraeumen beim Start: Hub laeuft, Zwischenablage leer' (-not $r.err -and $it['clipboard_images'].files -eq 0) $r.text
   Write-Host "== Prozessliste (#243)" -ForegroundColor Cyan
   # Eintraege von Hand in processes.json (Agenten koennen keine anlegen). Der Wert der Umgebungsvariable per DPAPI (aktueller
   # Benutzer) wie in Paneldeck; harmlose Programme: ping, ein TCP-Listener auf 127.0.0.1, exit 3, ein unbekannter Befehl.

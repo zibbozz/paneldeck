@@ -11,6 +11,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ### Added
 
+- Aufräumen-Fenster (*Einstellungen → Daten & Sicherung → Aufräumen …*, auch in der Befehls-Palette): ankreuzen, was gelöscht wird – Datenbank-Sicherungen, Bilder der Zwischenablage, alte Sicherungsdateien, Scrollback- und Chat-Verläufe (verwaist oder alle, optional älter als X Tage), Protokolle, Prompt-Bibliothek, Vorlagen, eigene Themes, System-Prompt, Datenbank, Sitzungen, Einstellungen, Windows-Integration, andere Profile – mit Größen, Summe und Übersicht vor dem Löschen; Unwiderrufliches erfordert das Eintippen von `LÖSCHEN`, die Datenbank wird vorher gesichert; *Paneldeck vollständig zurücksetzen* sichert den Datenordner vorher als ZIP (#307)
+- Agenten-Schnittstelle: lesendes Werkzeug `cleanup_sizes` (Stufe Lesen) liefert die Größen je Aufräum-Bereich; Agenten können nichts löschen (#307)
 - Prozessliste: ein Bereich *Prozesse* in der Terminal-Seitenleiste führt lang laufende Programme wie Dev-Server und Watcher getrennt von den Terminal-Sitzungen aus – Starten, Stoppen und Neustarten (auch als Gruppe in Reihenfolge), Ausgabe in einem eigenen Bereich mit Fehlerzähler und Link zu einer erkannten lokalen Adresse, optional Protokolldatei, Umgebungsvariablen (Werte verschlüsselt), Autostart mit Paneldeck oder dem Projekt; gespeichert in der neuen Datei `processes.json` (#243)
 - Agenten-Schnittstelle: Werkzeuge `list_processes` und `read_process_output` (Stufe Lesen) sowie `start_process`, `stop_process`, `restart_process` (Stufe Steuern) für die vom Nutzer angelegten Einträge; Agenten können keine Einträge anlegen oder ändern (#243)
 
