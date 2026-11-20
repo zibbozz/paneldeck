@@ -177,6 +177,9 @@ pub struct ChatRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamEvent {
     Delta(String),
+    /// Das Modell „denkt“ (Ollama `message.thinking`, OpenAI-kompatibel `reasoning_content`/`reasoning`): nur ein
+    /// Lebenszeichen, der Text selbst wird nicht weitergegeben (#299).
+    Thinking,
     ToolCalls(Vec<ToolCall>),
     Done { prompt_tokens: Option<u32>, completion_tokens: Option<u32>, finish_reason: Option<String> },
     Error(LlmError),
@@ -202,6 +205,8 @@ pub(crate) struct Acc {
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
     pub content_bytes: usize,
+    /// Bytes der Denk-Ausgabe (gleiche Obergrenze wie der Text).
+    pub thinking_bytes: usize,
 }
 
 impl Acc {
@@ -216,6 +221,16 @@ impl Acc {
             return;
         }
         on(StreamEvent::Delta(s.to_string()));
+    }
+
+    /// Denk-Ausgabe melden (nur als Lebenszeichen). Der Text wird nicht behalten, darum bricht viel Denk-Ausgabe die
+    /// Antwort nicht ab: über `MAX_CONTENT` hinaus wird sie nur noch still übergangen.
+    pub fn thinking(&mut self, s: &str, on: &mut dyn FnMut(StreamEvent)) {
+        if s.is_empty() || self.thinking_bytes > MAX_CONTENT {
+            return;
+        }
+        self.thinking_bytes = self.thinking_bytes.saturating_add(s.len());
+        on(StreamEvent::Thinking);
     }
 
     /// Werkzeugaufruf aufnehmen (mit Obergrenzen für Anzahl und Länge der Argumente).

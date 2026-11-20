@@ -68,7 +68,8 @@ A model you have never set a level for counts as **Off** everywhere – when sen
 ## Using a chat
 - Type your message; **Enter** sends, **Shift+Enter** adds a new line. The answer is streamed and shown as Markdown; code blocks have a **Copy** button.
 - **Stop** ends a running answer (the text so far stays). **↻** under the last answer generates it again (it replaces the old one). **✎** next to your last message puts it back into the input ("Editing the last message – sending replaces it."); **Esc** or *Cancel* aborts editing.
-- An error (server not reachable, model not found …) appears as a red box with **Retry**.
+- While no answer has arrived yet, the chat shows "…", from 3 seconds on "Waiting for the model … N s" and from 10 seconds on also that the server is probably still loading the model (the first load can take a while). A model that only thinks shows "Thinking …".
+- An error (server not reachable, model not found, an answer without text …) appears as a red box with **Retry**.
 - Below an answer: the **token usage** ("Tokens: 120 in · 45 out", as far as the server reports it) and, if the model stopped at its token limit, "Answer cut off at the model's token limit."
 - A model without tool support shows the notice "This model cannot use tools – chat only."
 - **Context:** the model receives the [system prompt](agent-interface.md#system-prompt) (rendered for the model's level), the project name and the folder of the chat – but no direct file system access. When the history no longer fits into the context length, the oldest turns are left out (the system prompt always stays). A marker "Older messages are no longer visible to the model" shows from where on the model still sees the conversation.
@@ -104,6 +105,8 @@ Paneldeck only connects to **this computer and private networks**:
 | private networks | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` |
 | link-local | `169.254.0.0/16`, `fe80::/10` (IPv6 link-local addresses need a zone, which addresses cannot carry here – use IPv4 or an `fc00::/7` address instead) |
 
+`localhost` connects to `127.0.0.1` first and to `::1` only if that fails – like Ollama itself.
+
 Everything else is rejected, for example **public addresses** (`8.8.8.8`, `2001:…`), the carrier-grade NAT range **`100.64.0.0/10`**, `0.0.0.0`, multicast and broadcast, and IPv4 addresses hidden in IPv6 forms (`::ffff:8.8.8.8`, `64:ff9b::…`).
 
 - **Numeric shorthand forms** such as `127.1`, `0x7f.0.0.1`, `0177.0.0.1` or `2130706433` are rejected instead of guessed – write addresses as `192.168.1.10`. User names/passwords in the address, queries (`?`) and fragments (`#`) are not allowed either.
@@ -127,6 +130,7 @@ Everything else is rejected, for example **public addresses** (`8.8.8.8`, `2001:
 
 ## Troubleshooting
 - **"Could not connect to the server … (Ollama: port 11434)":** Ollama (or the other server) is not running, or address/port are wrong. Start Ollama (tray icon) and click *Connect* again.
+- **The chat only shows "Waiting for the model …" and `ollama ps` lists nothing:** the model is still loading – Ollama lists a model in `ollama ps` only once it has loaded, and the first load can take minutes (especially on the CPU). Wait, or look at the Ollama log. If an Ollama also runs in WSL, `localhost:11434` may be that one (the port is then held by `wslrelay`): `ollama ps` on Windows and in WSL ask different servers. Run only one Ollama, and keep it up to date – new models need a current version.
 - **"Not found – check the address, the server type and the model name (HTTP 404)":** the model was deleted or renamed on the server, or the server type is wrong. *Settings → Models → Connect* shows the current models; for Ollama, `ollama pull <model>` downloads it again.
 - **"Address not allowed":** the address is not on this computer or in a private network (see above).
 - **"Unexpected answer from the server – is the server type right?":** an OpenAI-compatible server was added as Ollama or the other way round.

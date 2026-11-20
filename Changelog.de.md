@@ -14,6 +14,9 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 ### Fixed
 
 - Eine Textauswahl im Terminal beginnt jetzt bei dem Zeichen, auf dem die Maustaste gedrückt wurde; die ersten Zeichen fehlen nicht mehr (#300)
+- Chat mit lokalen Modellen: Eine Antwort ohne Text – etwa von einem denkenden Modell wie gemma4, das nur nachgedacht oder dabei seine Token-Grenze erreicht hat – endet nicht mehr still als leere Antwort, sondern zeigt einen Fehler mit „Wiederholen“; denkt das Modell, steht „Denkt nach …“ da (#299)
+- Chat mit lokalen Modellen: Solange noch nichts angekommen ist, zeigt der Chat statt nur „…“, wie lange er schon wartet, und nach 10 Sekunden, dass der Server das Modell vermutlich noch lädt – Ollama zeigt ein Modell erst nach dem Laden in `ollama ps` (#299)
+- Als `localhost` eingetragene Server werden zuerst über 127.0.0.1 und nur ersatzweise über ::1 erreicht, wie bei Ollama selbst; vorher konnte ein anderes Programm, das am selben Port auf ::1 lauscht (z. B. die WSL-Weiterleitung eines zweiten Ollama), die Anfragen bekommen, und der Chat hing (#299)
 - Eine Claude-Sitzung setzt keine fremde Konversation mehr fort: Wurde Claude Code nach dem Ende des Claude der Sitzung (oder wenn er nie startete) im selben Terminal von Hand gestartet, übernahm Paneldeck dessen Konversation und setzte sie beim nächsten Neu laden oder Neustart mit `--resume` fort. Der erste Start einer neuen Sitzung beginnt immer eine neue Konversation, und `--resume` nutzt nur die eigene Konversation der Sitzung (die von Paneldeck gestartete, die mit *Letzte Konversation im Ordner fortsetzen* fortgesetzte oder die darin per `/clear` bzw. `/resume` gewählte) (#302)
 
 ## [2.4.0] - 2026-11-19
