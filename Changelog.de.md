@@ -28,6 +28,7 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 - In ein Terminal gezogene oder eingefügte Dateinamen werden für die dort tatsächlich laufende Shell gequotet (z. B. fish unter Linux/macOS), ein präparierter Name kann so keine Befehle mehr ausführen (#57)
 - Von der Shell-Integration gemeldete Ordnernamen enthalten keine Steuerzeichen mehr (#57)
+- Paneldeck nimmt beim Start im Tray (Autostart, `--tray`) oder minimiert dem Programm, in dem du gerade arbeitest, nicht mehr den Tastaturfokus
 
 ## [2.4.2] - 2026-11-20
 

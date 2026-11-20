@@ -28,6 +28,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - File names dropped or inserted into a terminal are quoted for the shell that actually runs there (e.g. fish on Linux/macOS), so a crafted name can no longer run commands (#57)
 - Folder names reported by the shell integration no longer contain control characters (#57)
+- Paneldeck started in the tray (autostart, `--tray`) or minimized no longer takes the keyboard focus from the program you are working in
 
 ## [2.4.2] - 2026-11-20
 
