@@ -3,10 +3,11 @@
 //! * Neu laden: Knopf in der Kopfzeile des Bereichs (neben Schließen/Minimieren/Teilen), Eintrag in der Befehls-Palette
 //!   und im Kontextmenü der Seitenleiste. Rückfrage ohne Wartezeit, solange ein Prozess läuft (ein beendeter Prozess
 //!   startet gleich neu). Was neu startet, folgt den Einstellungen der Sitzung (`reload_plan`): ein Terminal startet
-//!   seine Shell neu, eine Claude-Sitzung Claude – mit Fortsetzen der Konversation nur bei `claude_continue`, sonst neu.
+//!   seine Shell neu, eine Claude-Sitzung Claude – nach „Fortsetzen nach Neustart“ (#302): aus = neu, fortsetzen =
+//!   `--continue`, auswählen = Auswahl der Konversationen des Arbeitsordners (`conv_pick`).
 //!   Chats haben keinen Prozess: dort gibt es kein Neu laden.
 //! * Einstellungen: „Einstellungen …“ im Kontextmenü einer Sitzung. Alles, was beim Anlegen einstellbar ist (Profil,
-//!   Shell, Arbeitsordner, Name, Farbe, Ordner im Baum, Tags, Notizen, Claude an/aus, „Konversation fortsetzen“).
+//!   Shell, Arbeitsordner, Name, Farbe, Ordner im Baum, Tags, Notizen, Claude an/aus, „Fortsetzen nach Neustart“).
 //!   Startbefehl und Umgebungsvariablen gehören zum Profil. Chats bleiben Chats (nur Name, Farbe, Ordner, Tags, Notizen).
 //!   Ändert sich etwas, das erst beim Start wirkt (Profil, Shell, Arbeitsordner, Claude an/aus), fragt der Dialog nach dem
 //!   Speichern „Jetzt neu laden?“; sonst gilt die Änderung beim nächsten Neu laden.
@@ -14,46 +15,53 @@
 use super::closing::{confirm_window_keep, Outcome};
 use super::planning_ui::value_suggest;
 use crate::claude_opts::ClaudeOpts;
+use crate::state::ResumeMode;
 use super::*;
 
 /// Wie Claude beim Start einer Sitzung beginnt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ClaudeStart {
-    /// Diese Konversation fortsetzen (`--resume <id>`).
+    /// Diese Konversation fortsetzen (`--resume <id>`): aus dem Verlauf oder in der Auswahl beim Neu laden gewählt.
     Resume(String),
     /// Letzte Konversation im Ordner fortsetzen (`--continue`).
     Continue,
-    /// Neue Konversation mit eigener ID (`--session-id`).
+    /// Neue Konversation: nur `claude` (samt Hook-Einstellungen und Optionen), ohne Konversations-ID (#302). Welche
+    /// Konversation daraus wird, meldet der erste SessionStart des gestarteten Claude (`hooks::ConvBinding`).
     Fresh,
 }
 
-/// Soll beim Start eine vorhandene Konversation fortgesetzt werden? Neu laden/Neu starten (`restart`) nur, wenn die
-/// Sitzung „Konversation fortsetzen“ an hat; beim Programmstart (`restore`) zusätzlich nach der globalen Einstellung.
-pub(super) fn resume_wanted(restore: bool, restart: bool, session_continue: bool, global_resume: bool) -> bool {
-    session_continue && (restart || (restore && global_resume))
+/// Soll beim Start eine vorhandene Konversation fortgesetzt (bzw. ausgewählt) werden? Neu laden/Neu starten
+/// (`restart`), sofern „Fortsetzen nach Neustart“ nicht aus ist; beim Programmstart (`restore`) zusätzlich nach der
+/// globalen Einstellung. Der erste Start einer Sitzung (beides aus) beginnt immer neu.
+pub(super) fn resume_wanted(restore: bool, restart: bool, mode: ResumeMode, global_resume: bool) -> bool {
+    mode != ResumeMode::Off && (restart || (restore && global_resume))
 }
 
-/// Entscheidung, wie Claude startet (#245). `resume_id` = ausdrücklich gewünschte Konversation (Verlauf),
-/// `continue_last` = „Letzte Konversation im Ordner fortsetzen“ beim Anlegen (der einzige Weg zu `--continue`),
-/// `has_conv` = die Konversation der Sitzung gibt es wirklich ([`conversation_exists`]). Sonst immer eine neue
-/// Konversation mit eigener ID – nie `--continue` als Ersatz (das öffnete die neueste Konversation des Ordners, oft die
-/// einer anderen Sitzung).
-pub(super) fn claude_start(resume_id: Option<&str>, resume_wanted: bool, continue_last: bool, meta: &SessionMeta, has_conv: bool) -> ClaudeStart {
+/// Soll vor diesem Start die Auswahl der Konversation erscheinen (Modus „Konversation auswählen“, #302)?
+pub(super) fn pick_wanted(restore: bool, restart: bool, mode: ResumeMode, global_resume: bool) -> bool {
+    mode == ResumeMode::Pick && resume_wanted(restore, restart, mode, global_resume)
+}
+
+/// Entscheidung, wie Claude startet (#245, #302). `resume_id` = ausdrücklich gewählte Konversation (Verlauf oder
+/// Auswahl beim Neu laden), `continue_last` = „Letzte Konversation im Ordner fortsetzen“ beim Anlegen, `continue_wanted`
+/// = Modus „Fortsetzen“ beim Neu laden/Neustart, `has_conv` = im Ordner gibt es eine Konversation
+/// ([`folder_has_conversation`]); ohne sie schlüge `claude --continue` fehl („No conversation found“). Sonst neu.
+pub(super) fn claude_start(resume_id: Option<&str>, continue_wanted: bool, continue_last: bool, has_conv: bool) -> ClaudeStart {
     if let Some(id) = resume_id.filter(|id| crate::quote::is_uuid(id)) {
         ClaudeStart::Resume(id.to_string())
-    } else if continue_last {
+    } else if continue_last || (continue_wanted && has_conv) {
         ClaudeStart::Continue
-    } else if resume_wanted && has_conv && crate::quote::is_uuid(&meta.claude_session) {
-        ClaudeStart::Resume(meta.claude_session.clone())
     } else {
         ClaudeStart::Fresh
     }
 }
 
 /// Wie Claude bei einem Start beginnt – die ganze Entscheidung von `App::claude_command` (#245, #302). `restore` =
-/// Programmstart, `restart` = Neu laden/Neu starten; beides aus = erster Start einer neuen Sitzung: dann immer eine neue
-/// Konversation mit eigener ID (`--session-id`), außer `resume_id` (Verlauf) oder `continue_last` (`--continue`). Sonst
-/// `--resume` nur mit der eigenen ID der Sitzung, wenn es ihre Konversation gibt (`exists`, nur dann gefragt).
+/// Programmstart, `restart` = Neu laden/Neu starten; beides aus = erster Start einer neuen Sitzung: dann immer neu, außer
+/// `resume_id` (Verlauf) oder `continue_last` (`--continue`). Danach nach „Fortsetzen nach Neustart“ der Sitzung:
+/// „Aus“ neu, „Fortsetzen“ `--continue` (nur wenn es im Ordner eine Konversation gibt: `has_conv`, nur dann gefragt),
+/// „Konversation auswählen“ die vorher gewählte (`resume_id`), sonst neu – auch bei einem Start ohne vorherige Auswahl:
+/// Die Auswahl erscheint nur vor Neu laden/Neustart/Programmstart (`App::begin_pick`), nie mitten in einem Start.
 pub(super) fn launch_start(
     restore: bool,
     restart: bool,
@@ -61,37 +69,43 @@ pub(super) fn launch_start(
     continue_last: bool,
     global_resume: bool,
     meta: &SessionMeta,
-    exists: impl FnOnce(&SessionMeta) -> bool,
+    has_conv: impl FnOnce(&SessionMeta) -> bool,
 ) -> ClaudeStart {
-    let wanted = resume_wanted(restore, restart, meta.claude_continue, global_resume);
-    let has_conv = wanted && exists(meta);
-    claude_start(resume_id, wanted, continue_last, meta, has_conv)
+    let mode = meta.resume_mode();
+    let wanted = mode == ResumeMode::Continue && resume_wanted(restore, restart, mode, global_resume);
+    let id_given = resume_id.is_some_and(crate::quote::is_uuid);
+    let has = wanted && !continue_last && !id_given && has_conv(meta);
+    claude_start(resume_id, wanted, continue_last, has)
 }
 
-/// Gibt es die Konversation der Sitzung, sodass `--resume <id>` sie im Arbeitsordner findet (#245)? Windows: die
-/// Transkript-Datei (von den Hooks gemeldet, sonst unter `projects` = `~/.claude/projects` erwartet) – so geht
-/// „Konversation fortsetzen“ auch ohne Hooks (`--safe-mode`), und eine nie benutzte oder gelöschte Konversation wird
-/// nicht fortgesetzt. WSL: die Linux-Seite wird im UI-Thread nie geprüft (könnte die VM starten); dort zählt, was die
-/// Hooks gemeldet haben (ein Prompt oder eine fortgesetzte Konversation, `claude_started`).
-pub(super) fn conversation_exists(meta: &SessionMeta, wsl: bool, projects: Option<&std::path::Path>, home: &str) -> bool {
-    let id = meta.claude_session.as_str();
-    if !crate::quote::is_uuid(id) {
-        return false;
+/// Gibt es im Arbeitsordner der Sitzung eine Konversation, die `claude --continue` fortsetzen kann (#302)? Windows: eine
+/// Transkript-Datei unter `projects/<Ordnername>` (`projects` = `~/.claude/projects`; nur das Verzeichnis wird gelistet).
+/// Haben die Hooks dieser Sitzung schon Inhalt gemeldet (`claude_started`), zählt das auch – der erwartete Ordnername kann
+/// abweichen (eigenes CLAUDE_CONFIG_DIR, andere Schreibweise des Pfads). WSL: die Linux-Seite wird im UI-Thread nie
+/// geprüft (könnte die VM starten); dort zählt nur, was die Hooks gemeldet haben.
+pub(super) fn folder_has_conversation(meta: &SessionMeta, wsl: bool, projects: Option<&std::path::Path>, home: &str) -> bool {
+    if meta.claude_started {
+        return true;
     }
     if wsl {
-        return meta.claude_started;
+        return false;
     }
-    let reported = std::path::Path::new(&meta.transcript);
-    if !meta.transcript.is_empty() && reported.file_stem().is_some_and(|s| s == id) && !crate::wsl::is_wsl_unc(&meta.transcript) {
-        return reported.is_file();
+    let cwd = windows_cwd(meta, home);
+    match projects.zip(crate::history::project_slug(&cwd)) {
+        Some((p, slug)) => crate::history::folder_has_conversation(&p.join(slug)),
+        None => false,
     }
-    let cwd = if meta.cwd.trim().is_empty() { home } else { meta.cwd.trim() };
-    match projects.and_then(|p| crate::history::transcript_file(p, cwd, id)) {
-        // Nicht gefunden, aber von den Hooks dieser Sitzung gemeldet (Prompt gesendet oder fortgesetzt): trotzdem
-        // fortsetzen – der erwartete Ordnername kann abweichen (eigener CLAUDE_CONFIG_DIR, andere Schreibweise des Pfads).
-        Some(f) => f.is_file() || meta.claude_started,
-        // Ordnername nicht vorherzusagen: wie bisher nach den Hooks.
-        None => meta.claude_started,
+}
+
+/// Arbeitsordner einer Windows-Sitzung, wie Claude ihn sieht (wie beim Start: leer = Home, `/mnt/c/x` = `C:\x`).
+pub(super) fn windows_cwd(meta: &SessionMeta, home: &str) -> String {
+    let cwd = meta.cwd.trim();
+    if cwd.is_empty() {
+        home.to_string()
+    } else if crate::wsl::looks_linux(cwd) {
+        crate::wsl::linux_to_windows("", cwd).unwrap_or_else(|| home.to_string())
+    } else {
+        cwd.to_string()
     }
 }
 
@@ -100,8 +114,10 @@ pub(super) fn conversation_exists(meta: &SessionMeta, wsl: bool, projects: Optio
 pub(super) enum ReloadPlan {
     /// Terminal ohne Claude: die Shell startet neu.
     Shell,
-    /// Claude startet neu und setzt die Konversation fort (falls es schon eine gibt).
+    /// Claude startet neu und setzt die letzte Konversation im Ordner fort (`--continue`, falls es schon eine gibt).
     ClaudeContinue,
+    /// Vor dem Start erscheint die Auswahl der Konversationen des Arbeitsordners (#302).
+    ClaudePick,
     /// Claude startet neu mit einer neuen Konversation.
     ClaudeFresh,
 }
@@ -113,10 +129,12 @@ pub(super) fn reload_plan(meta: &SessionMeta) -> Option<ReloadPlan> {
     }
     Some(if !meta.claude {
         ReloadPlan::Shell
-    } else if meta.claude_continue {
-        ReloadPlan::ClaudeContinue
     } else {
-        ReloadPlan::ClaudeFresh
+        match meta.resume_mode() {
+            ResumeMode::Continue => ReloadPlan::ClaudeContinue,
+            ResumeMode::Pick => ReloadPlan::ClaudePick,
+            ResumeMode::Off => ReloadPlan::ClaudeFresh,
+        }
     })
 }
 
@@ -124,7 +142,14 @@ impl ReloadPlan {
     pub(super) fn text(self, lang: Lang) -> &'static str {
         match self {
             ReloadPlan::Shell => lang.t("Die Shell wird neu gestartet.", "The shell restarts."),
-            ReloadPlan::ClaudeContinue => lang.t("Claude wird neu gestartet und setzt die Konversation fort.", "Claude restarts and continues the conversation."),
+            ReloadPlan::ClaudeContinue => lang.t(
+                "Claude wird neu gestartet und setzt die letzte Konversation im Arbeitsordner fort (claude --continue; ohne Konversation neu).",
+                "Claude restarts and continues the most recent conversation in the working folder (claude --continue; a new one if there is none).",
+            ),
+            ReloadPlan::ClaudePick => lang.t(
+                "Vor dem Start von Claude wählst du die Konversation aus (oder eine neue).",
+                "Before Claude starts you choose the conversation (or a new one).",
+            ),
             ReloadPlan::ClaudeFresh => lang.t("Claude wird mit einer neuen Konversation gestartet.", "Claude restarts with a new conversation."),
         }
     }
@@ -133,12 +158,12 @@ impl ReloadPlan {
     pub(super) fn tip(self, lang: Lang) -> &'static str {
         match self {
             ReloadPlan::Shell => lang.t("Neu laden – Shell neu starten", "Reload – restart the shell"),
-            ReloadPlan::ClaudeContinue => lang.t("Neu laden – Claude neu starten und die Konversation fortsetzen", "Reload – restart Claude and continue the conversation"),
+            ReloadPlan::ClaudeContinue => lang.t("Neu laden – Claude neu starten und die letzte Konversation fortsetzen", "Reload – restart Claude and continue the last conversation"),
+            ReloadPlan::ClaudePick => lang.t("Neu laden – Claude neu starten, Konversation auswählen", "Reload – restart Claude and choose the conversation"),
             ReloadPlan::ClaudeFresh => lang.t("Neu laden – Claude mit neuer Konversation starten", "Reload – start Claude with a new conversation"),
         }
     }
 }
-
 /// Was ein Klick auf „Neu laden“ tut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReloadRoute {
@@ -248,7 +273,8 @@ pub(super) struct FormValues {
     pub(super) shell_id: String,
     pub(super) cwd: String,
     pub(super) claude: bool,
-    pub(super) claude_continue: bool,
+    /// „Fortsetzen nach Neustart“ (#302).
+    pub(super) resume_mode: ResumeMode,
     /// Claude-Optionen (#161): wirksame Werte der Sitzung (auch alte aus `claude_args`).
     pub(super) copts: ClaudeOpts,
 }
@@ -265,7 +291,7 @@ impl FormValues {
             shell_id: meta.shell_id.clone(),
             cwd: meta.cwd.clone(),
             claude: meta.claude,
-            claude_continue: meta.claude_continue,
+            resume_mode: meta.resume_mode(),
             copts: meta.claude_opts_eff().0,
         }
     }
@@ -448,8 +474,8 @@ impl SessionForm {
             if v.claude != o.claude {
                 meta.claude = v.claude;
             }
-            if v.claude_continue != o.claude_continue {
-                meta.claude_continue = v.claude_continue;
+            if v.resume_mode != o.resume_mode {
+                meta.set_resume_mode(v.resume_mode);
             }
             if v.copts != o.copts {
                 // Nur für diese Sitzung (auch bypassPermissions als ausdrückliche Wahl); nie als Vorauswahl gemerkt.
@@ -555,7 +581,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
             tabs::body(ui, SALT, tab, body_h, |ui| {
                 if tab != Tab::General {
                     let SessionForm { v, .. } = &mut *f;
-                    let FormValues { copts, claude_continue, .. } = v;
+                    let FormValues { copts, resume_mode, .. } = v;
                     super::dialogs::claude_tab(
                         ui,
                         lang,
@@ -567,8 +593,8 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                         &chk,
                         tab,
                         |ui| {
-                            ui.label("");
-                            let r = continue_checkbox(ui, claude_continue, lang);
+                            ui.label(lang.t("Fortsetzen nach Neustart", "Resume after restart"));
+                            let r = resume_combo(ui, "sset_resume", resume_mode, lang);
                             mark(ui, "continue", &r);
                             ui.end_row();
                         },
@@ -729,67 +755,106 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
     out
 }
 
-/// Häkchen „Konversation fortsetzen“ (Einstellungen der Sitzung).
-pub(super) fn continue_checkbox(ui: &mut Ui, on: &mut bool, lang: Lang) -> egui::Response {
-    ui.checkbox(on, lang.t("Konversation dieser Sitzung beim Neu laden/Neustart fortsetzen", "Resume this session's conversation on reload/restart")).on_hover_text(lang.t(
-        "Beim Neu laden, Neu starten und Programmstart setzt Claude die Konversation dieser Sitzung fort (sofern es sie gibt). Aus: jedes Mal eine neue Konversation.",
-        "On reload, restart and program start Claude resumes this session's own conversation (if there is one). Off: a new conversation every time.",
-    ))
+/// Text und Tooltip eines Werts von „Fortsetzen nach Neustart“ (#302).
+pub(super) fn resume_mode_label(m: ResumeMode, lang: Lang) -> &'static str {
+    match m {
+        ResumeMode::Off => lang.t("Aus", "Off"),
+        ResumeMode::Continue => lang.t("Fortsetzen", "Continue"),
+        ResumeMode::Pick => lang.t("Konversation auswählen", "Pick conversation"),
+    }
 }
 
-/// Eine Auswahl im Dialog „Neue Sitzung“ statt zweier Häkchen (#241, #245): wie die Konversation beginnt und ob die
-/// Konversation der Sitzung beim Neu laden/Neustart fortgesetzt wird. Die Kombination „letzte im Ordner, danach immer
-/// neu“ gibt es nicht mehr (MCP und alle anderen Wege kennen ohnehin nur „fortsetzen an/aus“).
+pub(super) fn resume_mode_tip(m: ResumeMode, lang: Lang) -> &'static str {
+    match m {
+        ResumeMode::Off => lang.t(
+            "Jeder Start (auch Neu laden, Neustart und Programmstart) beginnt eine neue Konversation.",
+            "Every start (also reload, restart and program start) begins a new conversation.",
+        ),
+        ResumeMode::Continue => lang.t(
+            "Der erste Start beginnt neu. Ab dem ersten Neu laden/Neustart (und beim Programmstart, wenn das in den Einstellungen an ist) setzt Claude die letzte Konversation im Arbeitsordner fort (claude --continue) – das kann die einer anderen Sitzung im selben Ordner sein. Gibt es noch keine, beginnt eine neue.",
+            "The first start begins a new conversation. From the first reload/restart on (and at program start, if that is on in Settings) Claude continues the most recent conversation in the working folder (claude --continue) – that can be another session's in the same folder. If there is none yet, a new one begins.",
+        ),
+        ResumeMode::Pick => lang.t(
+            "Der erste Start beginnt neu. Vor jedem Neu laden/Neustart (und beim Programmstart, wenn das in den Einstellungen an ist) zeigt Paneldeck die Konversationen des Arbeitsordners zur Auswahl, dazu „Neue Konversation“. Gibt es keine, startet Claude ohne Rückfrage neu.",
+            "The first start begins a new conversation. Before every reload/restart (and at program start, if that is on in Settings) Paneldeck lists the conversations of the working folder to choose from, plus “New conversation”. If there are none, Claude starts a new one without asking.",
+        ),
+    }
+}
+
+/// Auswahl „Fortsetzen nach Neustart“ (Einstellungen der Sitzung, #302).
+pub(super) fn resume_combo(ui: &mut Ui, salt: &str, m: &mut ResumeMode, lang: Lang) -> egui::Response {
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(resume_mode_label(*m, lang))
+        .width(320.0)
+        .show_ui(ui, |ui| {
+            for x in [ResumeMode::Off, ResumeMode::Continue, ResumeMode::Pick] {
+                ui.selectable_value(m, x, resume_mode_label(x, lang)).on_hover_text(resume_mode_tip(x, lang));
+            }
+        })
+        .response
+        .on_hover_text(resume_mode_tip(*m, lang))
+}
+
+/// Auswahl „Fortsetzen nach Neustart“ im Dialog „Neue Sitzung“ und im Vorlagen-Editor (#241, #245, #302): die drei
+/// Modi und dazu „letzte Konversation im Ordner schon beim ersten Start fortsetzen“ (= „Fortsetzen“ ab dem ersten Start).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConvChoice {
-    /// Neue Konversation; beim Neu laden/Neustart wird sie fortgesetzt (Standard).
+    /// Erster Start neu, danach `--continue` (Standard).
     Resume,
-    /// Einmalig die letzte Konversation im Ordner fortsetzen (`--continue`), danach wie `Resume`.
+    /// Schon beim ersten Start die letzte Konversation im Ordner fortsetzen (`--continue`), danach wie `Resume`.
     ContinueLast,
+    /// Erster Start neu, vor jedem Neu laden/Neustart die Auswahl.
+    Pick,
     /// Bei jedem Start eine neue Konversation.
     AlwaysNew,
 }
 
 impl ConvChoice {
-    pub(super) const ALL: [ConvChoice; 3] = [ConvChoice::Resume, ConvChoice::ContinueLast, ConvChoice::AlwaysNew];
+    pub(super) const ALL: [ConvChoice; 4] = [ConvChoice::AlwaysNew, ConvChoice::Resume, ConvChoice::Pick, ConvChoice::ContinueLast];
+
+    /// Auswahl zu Modus und „letzte im Ordner“ (Vorlage, Sitzung).
+    pub(super) fn of(mode: ResumeMode, continue_last: bool) -> Self {
+        match mode {
+            ResumeMode::Off => ConvChoice::AlwaysNew,
+            ResumeMode::Pick => ConvChoice::Pick,
+            ResumeMode::Continue if continue_last => ConvChoice::ContinueLast,
+            ResumeMode::Continue => ConvChoice::Resume,
+        }
+    }
 
     /// Beim Anlegen `--continue`.
     pub(super) fn continue_last(self) -> bool {
         self == ConvChoice::ContinueLast
     }
 
-    /// `claude_continue` der Sitzung.
-    pub(super) fn resume_later(self) -> bool {
-        self != ConvChoice::AlwaysNew
+    /// „Fortsetzen nach Neustart“ der Sitzung.
+    pub(super) fn mode(self) -> ResumeMode {
+        match self {
+            ConvChoice::Resume | ConvChoice::ContinueLast => ResumeMode::Continue,
+            ConvChoice::Pick => ResumeMode::Pick,
+            ConvChoice::AlwaysNew => ResumeMode::Off,
+        }
     }
 
     pub(super) fn label(self, lang: Lang) -> &'static str {
         match self {
-            ConvChoice::Resume => lang.t("Neu – beim Neu laden/Neustart fortsetzen", "New – resume it on reload/restart"),
-            ConvChoice::ContinueLast => lang.t("Letzte Konversation im Ordner fortsetzen", "Continue the last conversation in this folder"),
-            ConvChoice::AlwaysNew => lang.t("Bei jedem Start eine neue", "A new one on every start"),
+            ConvChoice::ContinueLast => lang.t("Fortsetzen – auch beim ersten Start (letzte im Ordner)", "Continue – also at the first start (last in folder)"),
+            c => resume_mode_label(c.mode(), lang),
         }
     }
 
     pub(super) fn tip(self, lang: Lang) -> &'static str {
         match self {
-            ConvChoice::Resume => lang.t(
-                "Claude beginnt eine neue Konversation. Beim Neu laden, Neu starten und Programmstart setzt die Sitzung genau diese Konversation fort.",
-                "Claude starts a new conversation. On reload, restart and program start the session resumes exactly this conversation.",
-            ),
             ConvChoice::ContinueLast => lang.t(
-                "Setzt die zuletzt benutzte Konversation in diesem Ordner fort (claude --continue) – das kann die einer anderen Sitzung sein. Danach setzt die Sitzung diese Konversation beim Neu laden fort.",
-                "Continues the most recent conversation in this folder (claude --continue) – that can be another session's. After that the session resumes this conversation on reload.",
+                "Setzt schon beim ersten Start die zuletzt benutzte Konversation in diesem Ordner fort (claude --continue) – das kann die einer anderen Sitzung sein. Danach wie „Fortsetzen“.",
+                "Continues the most recent conversation in this folder already at the first start (claude --continue) – that can be another session's. After that like “Continue”.",
             ),
-            ConvChoice::AlwaysNew => lang.t(
-                "Jeder Start (auch Neu laden und Programmstart) beginnt eine neue Konversation.",
-                "Every start (also reload and program start) begins a new conversation.",
-            ),
+            c => resume_mode_tip(c.mode(), lang),
         }
     }
 }
 
-/// Auswahl „Konversation“ im Dialog „Neue Sitzung“.
+/// Auswahl „Fortsetzen nach Neustart“ im Dialog „Neue Sitzung“ und im Vorlagen-Editor.
 pub(super) fn conv_combo(ui: &mut Ui, salt: &str, c: &mut ConvChoice, lang: Lang) -> egui::Response {
     egui::ComboBox::from_id_salt(salt)
         .selected_text(c.label(lang))
@@ -960,8 +1025,10 @@ mod tests {
         "0123abcd-0000-4000-8000-00000000abcd".to_string()
     }
 
-    fn claude_meta(started: bool, cont: bool) -> SessionMeta {
-        SessionMeta { id: 1, claude: true, claude_started: started, claude_session: uuid(), claude_continue: cont, ..SessionMeta::default() }
+    fn claude_meta(started: bool, mode: ResumeMode) -> SessionMeta {
+        let mut m = SessionMeta { id: 1, claude: true, claude_started: started, claude_session: uuid(), ..SessionMeta::default() };
+        m.set_resume_mode(mode);
+        m
     }
 
     #[test]
@@ -969,12 +1036,13 @@ mod tests {
         // Terminal: Shell
         assert_eq!(reload_plan(&SessionMeta::default()), Some(ReloadPlan::Shell));
         // Claude mit „fortsetzen“ (Standard) bzw. ohne
-        assert_eq!(reload_plan(&claude_meta(true, true)), Some(ReloadPlan::ClaudeContinue));
-        assert_eq!(reload_plan(&claude_meta(true, false)), Some(ReloadPlan::ClaudeFresh));
+        assert_eq!(reload_plan(&claude_meta(true, ResumeMode::Continue)), Some(ReloadPlan::ClaudeContinue));
+        assert_eq!(reload_plan(&claude_meta(true, ResumeMode::Pick)), Some(ReloadPlan::ClaudePick));
+        assert_eq!(reload_plan(&claude_meta(true, ResumeMode::Off)), Some(ReloadPlan::ClaudeFresh));
         // Chat: kein Neu laden
         assert_eq!(reload_plan(&SessionMeta { kind: SessionKind::Chat, ..SessionMeta::default() }), None);
         // Texte in beiden Sprachen vorhanden und verschieden
-        for p in [ReloadPlan::Shell, ReloadPlan::ClaudeContinue, ReloadPlan::ClaudeFresh] {
+        for p in [ReloadPlan::Shell, ReloadPlan::ClaudeContinue, ReloadPlan::ClaudePick, ReloadPlan::ClaudeFresh] {
             assert_ne!(p.text(Lang::De), p.text(Lang::En));
             assert_ne!(p.tip(Lang::De), p.tip(Lang::En));
         }
@@ -1012,62 +1080,74 @@ mod tests {
     }
 
     #[test]
-    fn restart_resumes_only_with_continue_on() {
-        // Neu laden (restart): fortsetzen nur mit der Option der Sitzung
-        let w = resume_wanted(false, true, true, false);
-        assert!(w);
-        assert_eq!(claude_start(None, w, false, &claude_meta(true, true), true), ClaudeStart::Resume(uuid()));
-        let w = resume_wanted(false, true, false, true);
-        assert!(!w);
-        assert_eq!(claude_start(None, w, false, &claude_meta(true, false), true), ClaudeStart::Fresh);
-        // Keine Konversation da (noch kein Prompt, Transkript fehlt): neu – auch in WSL nie --continue (#245)
-        assert_eq!(claude_start(None, true, false, &claude_meta(false, true), false), ClaudeStart::Fresh);
-        assert_eq!(claude_start(None, true, false, &claude_meta(true, true), false), ClaudeStart::Fresh);
-        assert_eq!(claude_start(None, false, false, &claude_meta(false, false), false), ClaudeStart::Fresh, "ohne fortsetzen: neu");
-        // Programmstart (restore): globale Einstellung und Option der Sitzung
-        assert!(resume_wanted(true, false, true, true));
-        assert!(!resume_wanted(true, false, true, false));
-        assert!(!resume_wanted(true, false, false, true));
+    fn restart_continues_only_in_continue_mode() {
+        // Neu laden (restart): fortsetzen nach dem Modus der Sitzung
+        assert!(resume_wanted(false, true, ResumeMode::Continue, false));
+        assert!(resume_wanted(false, true, ResumeMode::Pick, false));
+        assert!(!resume_wanted(false, true, ResumeMode::Off, true));
+        assert_eq!(claude_start(None, true, false, true), ClaudeStart::Continue);
+        assert_eq!(claude_start(None, false, false, true), ClaudeStart::Fresh, "aus: neu");
+        // Keine Konversation im Ordner: neu (claude --continue schlüge fehl)
+        assert_eq!(claude_start(None, true, false, false), ClaudeStart::Fresh);
+        // Programmstart (restore): globale Einstellung und Modus der Sitzung
+        assert!(resume_wanted(true, false, ResumeMode::Continue, true));
+        assert!(!resume_wanted(true, false, ResumeMode::Continue, false));
+        assert!(!resume_wanted(true, false, ResumeMode::Off, true));
         // Neue Sitzung: weder restore noch restart
-        assert!(!resume_wanted(false, false, true, true));
-        // Ausdrückliche Konversation (Verlauf) und --continue beim Anlegen gehen immer vor
+        assert!(!resume_wanted(false, false, ResumeMode::Continue, true));
+        assert!(!pick_wanted(false, false, ResumeMode::Pick, true));
+        // Ausdrückliche Konversation (Verlauf, Auswahl) und --continue beim Anlegen gehen immer vor
         let other = "ffffffff-0000-4000-8000-000000000000";
-        assert_eq!(claude_start(Some(other), false, false, &claude_meta(true, false), false), ClaudeStart::Resume(other.into()));
-        assert_eq!(claude_start(Some("not-a-uuid"), false, true, &claude_meta(true, false), false), ClaudeStart::Continue);
-        // Kaputte gespeicherte ID wird nicht übernommen
-        let bad = SessionMeta { claude_session: "x; rm -rf".into(), ..claude_meta(true, true) };
-        assert_eq!(claude_start(None, true, false, &bad, true), ClaudeStart::Fresh);
-        assert!(!conversation_exists(&bad, false, None, "C:\\u"));
+        assert_eq!(claude_start(Some(other), false, false, false), ClaudeStart::Resume(other.into()));
+        assert_eq!(claude_start(Some("not-a-uuid"), false, true, false), ClaudeStart::Continue);
+        assert_eq!(claude_start(Some("x; rm -rf"), true, false, false), ClaudeStart::Fresh, "kaputte ID nie übernommen");
     }
 
-    /// #245: Programmstart/Neu laden einer WSL-Sitzung ohne gesendeten Prompt nutzt nie `--continue` (das öffnete die
-    /// neueste Konversation des Linux-Ordners, oft die einer anderen Sitzung), auf keinem Weg.
+    /// #302: Modus „Fortsetzen“ – erster Start neu, ab Neu laden/Neustart `--continue`, sofern es eine Konversation gibt.
     #[test]
-    fn wsl_restore_of_an_unprompted_session_never_continues_the_folder() {
-        let m = SessionMeta { id: 1, claude: true, claude_started: false, claude_session: uuid(), ..SessionMeta::default() };
-        assert!(SessionMeta::default().claude_continue, "Standard bleibt: fortsetzen an");
+    fn continue_mode_uses_continue_from_the_first_reload_on() {
+        let m = claude_meta(false, ResumeMode::Continue);
+        assert_eq!(launch_start(false, false, None, false, true, &m, |_| true), ClaudeStart::Fresh, "erster Start");
         for (restore, restart) in [(true, false), (false, true)] {
-            let w = resume_wanted(restore, restart, m.claude_continue, true);
-            let has = conversation_exists(&m, true, None, "/home/u");
-            assert!(!has);
-            assert_eq!(claude_start(None, w, false, &m, has), ClaudeStart::Fresh, "restore={restore}");
+            assert_eq!(launch_start(restore, restart, None, false, true, &m, |_| true), ClaudeStart::Continue);
+            assert_eq!(launch_start(restore, restart, None, false, true, &m, |_| false), ClaudeStart::Fresh, "keine Konversation");
         }
-        // Nach dem ersten Prompt (Hooks): die eigene Konversation, nie die des Ordners
-        let m = SessionMeta { claude_started: true, ..m };
-        let has = conversation_exists(&m, true, None, "/home/u");
-        assert_eq!(claude_start(None, resume_wanted(true, false, true, true), false, &m, has), ClaudeStart::Resume(uuid()));
-        // Nur „Letzte Konversation im Ordner fortsetzen“ beim Anlegen ergibt --continue
-        assert_eq!(claude_start(None, false, true, &m, has), ClaudeStart::Continue);
-        for w in [true, false] {
-            for has in [true, false] {
-                assert_ne!(claude_start(None, w, false, &m, has), ClaudeStart::Continue);
-            }
-        }
+        // Programmstart mit globaler Einstellung aus: neu, ohne zu suchen
+        let mut asked = false;
+        assert_eq!(launch_start(true, false, None, false, false, &m, |_| { asked = true; true }), ClaudeStart::Fresh);
+        assert!(!asked);
+        // Aus: immer neu, ohne zu suchen
+        let off = claude_meta(true, ResumeMode::Off);
+        assert_eq!(launch_start(false, true, None, false, true, &off, |_| { asked = true; true }), ClaudeStart::Fresh);
+        assert!(!asked);
+        // Auswählen: nur die vorher gewählte ID; ohne Auswahl (abgebrochen, „Neue Konversation“, MCP) neu
+        let pick = claude_meta(true, ResumeMode::Pick);
+        let other = "ffffffff-0000-4000-8000-000000000000";
+        assert_eq!(launch_start(false, true, Some(other), false, true, &pick, |_| true), ClaudeStart::Resume(other.into()));
+        assert_eq!(launch_start(true, false, Some(other), false, true, &pick, |_| true), ClaudeStart::Resume(other.into()));
+        assert_eq!(launch_start(false, true, None, false, true, &pick, |_| { asked = true; true }), ClaudeStart::Fresh);
+        assert!(!asked, "auswählen fragt hier nicht nach dem Ordner");
     }
 
-    /// #245: Windows entscheidet nach dem Transkript auf der Platte (geht auch ohne Hooks, z. B. mit --safe-mode).
+    /// #245/#302: WSL wird im UI-Thread nie geprüft; dort zählt nur, was die Hooks gemeldet haben.
     #[test]
-    fn windows_resume_needs_the_transcript_of_this_folder() {
+    fn wsl_continues_only_after_the_hooks_reported_a_conversation() {
+        let m = SessionMeta { id: 1, claude: true, claude_started: false, ..SessionMeta::default() };
+        assert_eq!(SessionMeta::default().resume_mode(), ResumeMode::Continue, "Standard bleibt: fortsetzen");
+        assert!(!folder_has_conversation(&m, true, None, "/home/u"));
+        for (restore, restart) in [(true, false), (false, true)] {
+            let s = launch_start(restore, restart, None, false, true, &m, |m| folder_has_conversation(m, true, None, "/home/u"));
+            assert_eq!(s, ClaudeStart::Fresh, "restore={restore}");
+        }
+        // Nach dem ersten Prompt (Hooks): fortsetzen
+        let m = SessionMeta { claude_started: true, ..m };
+        assert!(folder_has_conversation(&m, true, None, "/home/u"));
+        assert_eq!(launch_start(false, true, None, false, true, &m, |m| folder_has_conversation(m, true, None, "/home/u")), ClaudeStart::Continue);
+    }
+
+    /// #302: Windows entscheidet nach den Transkripten im Ordner des Arbeitsordners (geht auch ohne Hooks).
+    #[test]
+    fn windows_continue_needs_a_transcript_in_this_folder() {
         let root = std::env::temp_dir().join(format!("pd-conv-{}", std::process::id()));
         let projects = root.join("projects");
         let cwd = "C:\\work\\app";
@@ -1075,29 +1155,26 @@ mod tests {
         assert_eq!(slug, "C--work-app");
         let f = projects.join(&slug).join(format!("{}.jsonl", uuid()));
         let _ = std::fs::remove_dir_all(&root);
-        let m = SessionMeta { cwd: cwd.into(), ..claude_meta(false, true) };
-        assert!(!conversation_exists(&m, false, Some(&projects), "C:\\u"), "noch kein Transkript");
+        let m = SessionMeta { cwd: cwd.into(), ..claude_meta(false, ResumeMode::Continue) };
+        assert!(!folder_has_conversation(&m, false, Some(&projects), "C:\\u"), "noch kein Transkript");
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, "").unwrap();
+        assert!(!folder_has_conversation(&m, false, Some(&projects), "C:\\u"), "leere Datei zählt nicht");
         std::fs::write(&f, "{}\n").unwrap();
-        assert!(conversation_exists(&m, false, Some(&projects), "C:\\u"), "ohne Hooks: Datei zählt");
-        // Anderer Arbeitsordner: die Konversation liegt nicht dort → neu
+        assert!(folder_has_conversation(&m, false, Some(&projects), "C:\\u"), "ohne Hooks: Datei zählt");
+        // Anderer Arbeitsordner: dort liegt keine → neu
         let moved = SessionMeta { cwd: "C:\\other".into(), ..m.clone() };
-        assert!(!conversation_exists(&moved, false, Some(&projects), "C:\\u"));
-        // Von den Hooks gemeldetes Transkript geht vor (eigener CLAUDE_CONFIG_DIR) – fehlt es, wird nicht fortgesetzt
-        let gone = SessionMeta { transcript: root.join("x").join(format!("{}.jsonl", uuid())).to_string_lossy().to_string(), claude_started: true, ..m.clone() };
-        assert!(!conversation_exists(&gone, false, Some(&projects), "C:\\u"));
-        let reported = SessionMeta { transcript: f.to_string_lossy().to_string(), cwd: "C:\\other".into(), ..m.clone() };
-        assert!(conversation_exists(&reported, false, Some(&projects), "C:\\u"));
-        // Leerer Ordner = Benutzerordner
+        assert!(!folder_has_conversation(&moved, false, Some(&projects), "C:\\u"));
+        // Leerer Ordner = Benutzerordner; abschließender Trenner wie bei Claude Code
         let home = SessionMeta { cwd: String::new(), ..m.clone() };
-        assert!(conversation_exists(&home, false, Some(&projects), cwd));
-        // Gespeicherter Ordner mit abschließendem Trenner: derselbe Ordnername wie bei Claude Code
+        assert!(folder_has_conversation(&home, false, Some(&projects), cwd));
         let trailing = SessionMeta { cwd: "C:\\work\\app\\".into(), ..m.clone() };
-        assert!(conversation_exists(&trailing, false, Some(&projects), "C:\\u"));
-        // Transkript nicht am erwarteten Ort, aber die Hooks dieser Sitzung haben die Konversation gemeldet: fortsetzen
+        assert!(folder_has_conversation(&trailing, false, Some(&projects), "C:\\u"));
+        // Nicht am erwarteten Ort, aber die Hooks dieser Sitzung haben Inhalt gemeldet (eigenes CLAUDE_CONFIG_DIR)
         let elsewhere = SessionMeta { cwd: "C:\\other".into(), claude_started: true, ..m.clone() };
-        assert!(conversation_exists(&elsewhere, false, Some(&projects), "C:\\u"));
-        assert_eq!(claude_start(None, true, false, &elsewhere, true), ClaudeStart::Resume(uuid()));
+        assert!(folder_has_conversation(&elsewhere, false, Some(&projects), "C:\\u"));
+        // Linux-Pfad an einer Windows-Shell: wie beim Start umgerechnet
+        assert_eq!(windows_cwd(&SessionMeta { cwd: "/mnt/c/work/app".into(), ..m.clone() }, "C:\\u"), "C:\\work\\app");
         let _ = std::fs::remove_dir_all(&root);
         // Ordnernamen wie Claude Code (Nicht-ASCII je UTF-16-Einheit)
         assert_eq!(crate::history::project_slug("E:\\claude-hub").as_deref(), Some("E--claude-hub"));
@@ -1231,9 +1308,16 @@ mod tests {
         assert_eq!(meta.group, "a/b");
         assert_eq!(meta.tags, vec!["x", "y", "z"]);
         assert_eq!(meta.notes, "n");
-        // „Konversation fortsetzen“ allein: wirkt beim nächsten Neu laden, keine Rückfrage
+        // „Fortsetzen nach Neustart“ allein: wirkt beim nächsten Neu laden, keine Rückfrage
+        for m in [ResumeMode::Off, ResumeMode::Pick, ResumeMode::Continue] {
+            let mut f = form(&meta);
+            f.v.resume_mode = m;
+            assert!(!f.apply(&mut meta, &p, "pwsh"));
+            assert_eq!(meta.resume_mode(), m);
+            assert_eq!(meta.claude_continue, m != ResumeMode::Off, "für ältere Versionen");
+        }
         let mut f = form(&meta);
-        f.v.claude_continue = false;
+        f.v.resume_mode = ResumeMode::Off;
         assert!(!f.apply(&mut meta, &p, "pwsh"));
         assert!(!meta.claude_continue);
         // Name leeren → wieder automatisch
@@ -1260,7 +1344,7 @@ mod tests {
         f.apply(&mut m, &p, "pwsh");
         assert_eq!((m.profile, m.shell_id.as_str()), (1, "custom:1"));
         // Claude aus einer Claude-Sitzung → Terminal (und zurück)
-        let mut m = claude_meta(true, true);
+        let mut m = claude_meta(true, ResumeMode::Continue);
         let mut f = form(&m);
         f.v.claude = false;
         assert!(f.apply(&mut m, &p, "pwsh"));
@@ -1562,10 +1646,13 @@ mod tests {
         d.frame(&mut f, true, vec![]);
         assert!(d.find("continue").is_some(), "Claude-Sitzung: Option sichtbar");
         assert!(d.find("worktree").is_none());
-        // Häkchen klicken schaltet die Option
+        // Auswahl „Fortsetzen nach Neustart“ (#302): ein Klick öffnet die Liste
         let r = d.find("continue").unwrap();
+        assert_eq!(f.v.resume_mode, ResumeMode::Continue);
         d.click(&mut f, true, r.center());
-        assert!(!f.v.claude_continue);
+        assert!(egui::Popup::is_any_open(&d.ctx), "Liste offen");
+        d.click(&mut f, true, r.center());
+        f.v.resume_mode = ResumeMode::Pick;
         // Speichern
         let r = d.find("save").unwrap();
         assert_eq!(d.click(&mut f, true, r.center()), FormOutcome::Save);
@@ -1657,8 +1744,8 @@ mod tests {
         assert!(!crate::palette::colors(crate::palette::Area::Hub).iter().any(|c| c.hex == "#2288FF"), "nicht in der Palette");
     }
 
-    /// #302: Der erste Start einer neuen Sitzung beginnt immer neu (`--session-id`) – egal, was im Ordner liegt (auch
-    /// Transkripte anderer Sitzungen im Benutzerordner), welche Konversations-Auswahl gilt und was in der Sitzung steht.
+    /// #302: Der erste Start einer neuen Sitzung beginnt immer neu (ohne `--session-id`) – egal, was im Ordner liegt,
+    /// welche Auswahl gilt und was in der Sitzung steht; nur „letzte im Ordner“ ergibt `--continue`.
     #[test]
     fn the_first_start_of_a_new_session_is_always_fresh() {
         let root = std::env::temp_dir().join(format!("pd-302-first-{}", std::process::id()));
@@ -1666,63 +1753,53 @@ mod tests {
         let home = "C:\\Users\\u";
         let dir = projects.join(crate::history::project_slug(home).unwrap());
         std::fs::create_dir_all(&dir).unwrap();
-        // Konversationen anderer Sitzungen im selben (Standard-)Ordner – und sogar eine mit der ID der Sitzung
+        // Konversationen anderer Sitzungen im selben (Standard-)Ordner
         for id in ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", uuid().as_str()] {
             std::fs::write(dir.join(format!("{id}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
         }
         for conv in ConvChoice::ALL {
             for (started, global, wsl) in [(false, true, false), (true, true, false), (true, false, false), (true, true, true), (false, true, true)] {
-                let m = SessionMeta {
-                    cwd: String::new(),
-                    claude_continue: conv.resume_later(),
-                    transcript: dir.join(format!("{}.jsonl", uuid())).to_string_lossy().to_string(),
-                    ..claude_meta(started, true)
-                };
+                let mut m = SessionMeta { cwd: String::new(), ..claude_meta(started, ResumeMode::Continue) };
+                m.set_resume_mode(conv.mode());
                 let mut asked = false;
                 let s = launch_start(false, false, None, conv.continue_last(), global, &m, |m| {
                     asked = true;
-                    conversation_exists(m, wsl, Some(&projects), home)
+                    folder_has_conversation(m, wsl, Some(&projects), home)
                 });
-                // „Letzte Konversation im Ordner fortsetzen“ ist die ausdrückliche Wahl von `--continue`; sonst neu
                 let want = if conv.continue_last() { ClaudeStart::Continue } else { ClaudeStart::Fresh };
                 assert_eq!(s, want, "{conv:?} started={started} wsl={wsl}");
                 assert!(!asked, "beim ersten Start wird nach keiner Konversation gesucht");
             }
         }
         // Nur der Verlauf („Fortsetzen“) gibt beim Anlegen eine ID vor – genau diese
-        let m = claude_meta(false, true);
+        let m = claude_meta(false, ResumeMode::Continue);
         let other = "11111111-1111-4111-8111-111111111111";
         assert_eq!(launch_start(false, false, Some(other), false, true, &m, |_| true), ClaudeStart::Resume(other.into()));
         assert_eq!(launch_start(false, false, Some("kein-uuid"), false, true, &m, |_| true), ClaudeStart::Fresh);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// #302: Neu laden/Programmstart setzt nur die eigene Konversation der Sitzung fort – nie eine andere aus demselben
-    /// Ordner, auch wenn es dort Transkripte gibt.
+    /// #302: „Fortsetzen“ nutzt `--continue` erst, wenn es im Ordner eine Konversation gibt; „Aus“ und die globale
+    /// Einstellung (Programmstart) beginnen neu.
     #[test]
-    fn resume_only_ever_uses_the_sessions_own_conversation() {
+    fn reload_continues_the_folder_only_when_there_is_a_conversation() {
         let root = std::env::temp_dir().join(format!("pd-302-own-{}", std::process::id()));
         let projects = root.join("projects");
         let home = "C:\\Users\\u";
         let dir = projects.join(crate::history::project_slug(home).unwrap());
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&dir).unwrap();
-        for id in ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"] {
-            std::fs::write(dir.join(format!("{id}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
-        }
-        let m = SessionMeta { cwd: String::new(), ..claude_meta(false, true) };
-        let exists = |m: &SessionMeta| conversation_exists(m, false, Some(&projects), home);
+        let m = SessionMeta { cwd: String::new(), ..claude_meta(false, ResumeMode::Continue) };
+        let exists = |m: &SessionMeta| folder_has_conversation(m, false, Some(&projects), home);
         for (restore, restart) in [(true, false), (false, true)] {
-            // Eigene Konversation ohne Transkript (kein Prompt gesendet): neu, nie eine der anderen
-            assert_eq!(launch_start(restore, restart, None, false, true, &m, exists), ClaudeStart::Fresh);
+            assert_eq!(launch_start(restore, restart, None, false, true, &m, exists), ClaudeStart::Fresh, "noch keine Konversation");
         }
-        // Mit eigenem Transkript: genau die eigene ID
-        std::fs::write(dir.join(format!("{}.jsonl", uuid())), "{\"type\":\"user\"}\n").unwrap();
+        std::fs::write(dir.join("11111111-1111-4111-8111-111111111111.jsonl"), "{\"type\":\"user\"}\n").unwrap();
         for (restore, restart) in [(true, false), (false, true)] {
-            assert_eq!(launch_start(restore, restart, None, false, true, &m, exists), ClaudeStart::Resume(uuid()));
+            assert_eq!(launch_start(restore, restart, None, false, true, &m, exists), ClaudeStart::Continue);
         }
-        // „Bei jedem Start eine neue“ bzw. globale Einstellung aus (Programmstart): neu
-        let never = SessionMeta { claude_continue: false, ..m.clone() };
-        assert_eq!(launch_start(false, true, None, false, true, &never, exists), ClaudeStart::Fresh);
+        let never = claude_meta(false, ResumeMode::Off);
+        assert_eq!(launch_start(false, true, None, false, true, &SessionMeta { cwd: String::new(), ..never }, exists), ClaudeStart::Fresh);
         assert_eq!(launch_start(true, false, None, false, false, &m, exists), ClaudeStart::Fresh);
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -87,7 +87,7 @@ All new fields are optional: a missing field means the previous behaviour, and o
   - `claude_defaults` – the default [Claude start options](claude-code.md#start-options) (`model`, `effort`, `permission_mode`, `agent`, `flags`, `add_dirs`, `allowed_tools`, `disallowed_tools`, `mcp_config`, `append_system_prompt`, `fallback_model`, `max_budget_usd`, `autocompact`; empty values are not written); `last_claude_opts` – the last choice in the *New session* dialog. `bypassPermissions` is never stored there (it is dropped when loading).
 - `state.json` → per session:
   - `claude_opts` – the session's Claude start options (same fields as `claude_defaults`; invalid values are dropped when loading). Sessions from before 2.3 may still have model and permission mode in `claude_args`; they keep working.
-  - `claude_continue` – *Continue the conversation* (missing = on).
+  - `claude_continue` – *Continue the conversation* (missing = on); since 2.4.1 see `claude_resume_mode`.
   - `agent_chain` – the [agent chain](agent-interface.md#security) of a session that an agent created or wrote into (session ids; missing = none).
   - **Deprecated:** `slot` of minimized sessions (2.2.0) is no longer used or created; an existing value is passed through unchanged and dropped once the session is minimized or shown again. It will be removed in 3.0.0.
 - `paneldeck.db` → **schema version 9**: built-in description, due date and labels fields for every ticket type, due thresholds per project (`due_thresholds`) and for the to-do list, a due date for to-do cards. The update converts existing description and "Labels" fields (see [Todo list and tickets](todo-and-tickets.md#built-in-fields-and-due-dates)); as with every migration, Paneldeck backs up the database first. Due dates are stored as `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`.
@@ -104,6 +104,10 @@ All new fields are optional: a missing field means the previous behaviour, and o
 ## New fields in 2.4.0
 - `templates.json` → per template `terminal` (`true` = a terminal template with exactly one session); per session `color`, `tags`, `notes`, `claude_opts` (same keys as in `state.json`) and `continue_last`. All optional; older files still load. Paneldeck before 2.4 starts a terminal template as a group of one session, without its structured Claude options.
 - `claude_opts` (state.json), `claude_defaults` / `last_claude_opts` (settings.json) and templates → new optional fields `plugin_dirs`, `mcp_configs` (list; the first entry is also written as `mcp_config` for older versions, and an old `mcp_config` is taken over), `strict_mcp_config` and `system_prompt`.
+
+## New fields in 2.4.1
+- `state.json` and `templates.json` → per session `claude_resume_mode`: *Resume after restart* – `"off"`, `"continue"` or `"pick"`. Missing = taken from `claude_continue` (`false` → `off`, otherwise `continue`); written only when it is not `continue`. Unknown values load as if the field were missing. `claude_continue` is still written (`false` only for `off`), so older versions keep working: they treat `pick` like their resume option.
+- New Claude conversations are no longer started with `--session-id`; `claude_session` of a session stays empty until Claude reports its conversation through the hooks.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.

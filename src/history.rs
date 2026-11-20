@@ -41,11 +41,6 @@ pub fn project_slug(cwd: &str) -> Option<String> {
     (!s.is_empty() && s.len() <= 200).then_some(s)
 }
 
-/// Erwartete Transkript-Datei der Konversation `id` im Arbeitsordner `cwd` (`projects` = [`projects_dir`]).
-pub fn transcript_file(projects: &Path, cwd: &str, id: &str) -> Option<PathBuf> {
-    Some(projects.join(project_slug(cwd)?).join(format!("{id}.jsonl")))
-}
-
 fn text_of(content: &Value) -> Option<String> {
     match content {
         Value::String(s) => Some(s.clone()),
@@ -103,6 +98,60 @@ pub fn scan(dir: &Path, limit: usize) -> Vec<HistoryItem> {
     }
     files.sort_by(|a, b| b.0.cmp(&a.0));
     files.into_iter().take(limit).filter_map(|(_, p)| read_item(&p)).collect()
+}
+
+/// Eine Konversation im Ordner eines Arbeitsordners (Auswahl beim Neu laden, #302).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConvItem {
+    pub session_id: String,
+    /// Erster echter Prompt (wie im Verlauf).
+    pub title: String,
+    pub modified: SystemTime,
+    /// Größe der Transkript-Datei in Bytes.
+    pub size: u64,
+}
+
+/// Transkript-Dateien (`*.jsonl`) direkt in `dir` (= `projects/<slug>`), neueste zuerst: (Zeit, Größe, Pfad).
+fn folder_files(dir: &Path) -> Vec<(SystemTime, u64, PathBuf)> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let mut files: Vec<(SystemTime, u64, PathBuf)> = rd
+        .flatten()
+        .filter(|f| f.path().extension().is_some_and(|e| e == "jsonl"))
+        .filter_map(|f| {
+            let m = f.metadata().ok().filter(|m| m.is_file())?;
+            Some((m.modified().ok()?, m.len(), f.path()))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+    files
+}
+
+/// Konversationen eines Arbeitsordners (`dir` = `projects/<slug>`), neueste zuerst, höchstens `limit`. Konversationen
+/// ohne echten Prompt (leer, nur `/clear`) fehlen – sie fortzusetzen lohnt nicht. Liest Dateien: nur im Hintergrund.
+pub fn folder_conversations(dir: &Path, limit: usize) -> Vec<ConvItem> {
+    folder_files(dir)
+        .into_iter()
+        .filter_map(|(modified, size, p)| {
+            let it = read_item(&p)?;
+            crate::quote::is_uuid(&it.session_id).then(|| ConvItem { session_id: it.session_id, title: it.title, modified, size })
+        })
+        .take(limit)
+        .collect()
+}
+
+/// Gibt es im Ordner `dir` (= `projects/<slug>`) eine Konversation, die `claude --continue` fortsetzen kann (eine nicht
+/// leere Transkript-Datei)? Nur ein Verzeichnislisting, keine Inhalte.
+pub fn folder_has_conversation(dir: &Path) -> bool {
+    folder_files(dir).iter().any(|(_, size, _)| *size > 0)
+}
+
+/// Größe für die Anzeige (`12 KB`, `3.4 MB`).
+pub fn size_label(bytes: u64) -> String {
+    match bytes {
+        0..=1023 => format!("{bytes} B"),
+        1024..=1_048_575 => format!("{} KB", bytes / 1024),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+    }
 }
 
 /// Scannt im Hintergrund und liefert das Ergebnis über den Kanal.
@@ -238,6 +287,45 @@ mod tests {
         assert_eq!(items[0].session_id, "abc-123");
         assert_eq!(items[0].title, "Baue eine Login-Seite");
         assert_eq!(items[0].cwd, "C:\\Dev\\app");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    /// #302: Konversationen eines Arbeitsordners für die Auswahl beim Neu laden – neueste zuerst, leere fehlen.
+    #[test]
+    fn folder_conversations_are_newest_first_and_skip_empty_ones() {
+        let dir = std::env::temp_dir().join(format!("hist-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!folder_has_conversation(&dir));
+        assert!(folder_conversations(&dir, 10).is_empty());
+        let a = "11111111-1111-4111-8111-111111111111";
+        let b = "22222222-2222-4222-8222-222222222222";
+        let empty = "33333333-3333-4333-8333-333333333333";
+        let line = |t: &str| format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{t}\"}}}}
+");
+        std::fs::write(dir.join(format!("{a}.jsonl")), line("Erste")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(dir.join(format!("{b}.jsonl")), line("Zweite")).unwrap();
+        std::fs::write(dir.join(format!("{empty}.jsonl")), "").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        assert!(folder_has_conversation(&dir));
+        let v = folder_conversations(&dir, 10);
+        let ids: Vec<&str> = v.iter().map(|c| c.session_id.as_str()).collect();
+        assert_eq!(ids, vec![b, a]);
+        assert_eq!((v[0].title.as_str(), v[0].size > 0), ("Zweite", true));
+        assert_eq!(folder_conversations(&dir, 1).len(), 1);
+        // Nur leere Dateien: nichts fortzusetzen
+        let only_empty = dir.join("leer");
+        std::fs::create_dir_all(&only_empty).unwrap();
+        std::fs::write(only_empty.join(format!("{empty}.jsonl")), "").unwrap();
+        assert!(!folder_has_conversation(&only_empty));
+        assert!(!folder_has_conversation(&dir.join("fehlt")));
+        assert_eq!((size_label(10), size_label(2048), size_label(3 * 1_048_576)), ("10 B".into(), "2 KB".into(), "3.0 MB".into()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

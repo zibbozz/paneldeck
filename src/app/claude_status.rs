@@ -1039,4 +1039,50 @@ mod tests {
         assert!(!e.note_conversation(&keyless("UserPromptSubmit", "A", None), &ConvMatch::Same, true));
         assert!(!e.meta.claude_started);
     }
+
+    /// #302: Neuer Start ohne Konversations-ID (nur `claude`): der erste SessionStart des gestarteten Claude wird die
+    /// Konversation der Sitzung (samt Transkript); `/clear` wechselt sie; ein nach `/exit` von Hand gestarteter Claude
+    /// ändert nichts mehr.
+    #[test]
+    fn a_fresh_launch_without_id_records_the_launched_conversation() {
+        let with = |ev: &str, id: &str, src: Option<&str>, reason: Option<&str>| HookMsg {
+            claude_session: Some(id.into()),
+            source: src.map(str::to_string),
+            reason: reason.map(str::to_string),
+            transcript_path: Some(format!("C:/t/{id}.jsonl")),
+            ..msg(ev)
+        };
+        let deliver = |e: &mut Entry, m: HookMsg| {
+            if let Some(f) = e.take_hook(&m) {
+                e.note_conversation(&m, &f.conv, f.keyless);
+            }
+        };
+        let mut e = claude_entry();
+        e.hook_conv = hooks::ConvBinding::launch(None, false);
+        e.meta.claude_session.clear();
+        deliver(&mut e, with("SessionStart", "A", Some("startup"), None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started, e.meta.transcript.as_str()), ("A", false, "C:/t/A.jsonl"));
+        deliver(&mut e, with("UserPromptSubmit", "A", None, None));
+        assert!(e.meta.claude_started);
+        // claude -p mit geerbter Umgebung, solange A läuft: nichts
+        deliver(&mut e, with("SessionStart", "N", Some("startup"), None));
+        assert_eq!(e.meta.claude_session, "A");
+        // /clear: neue eigene Konversation
+        deliver(&mut e, with("SessionEnd", "A", None, Some("clear")));
+        deliver(&mut e, with("SessionStart", "C", Some("clear"), None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("C", false));
+        // /exit, dann `claude` von Hand: bleibt C
+        deliver(&mut e, with("SessionEnd", "C", None, Some("prompt_input_exit")));
+        deliver(&mut e, with("SessionStart", "H", Some("startup"), None));
+        deliver(&mut e, with("UserPromptSubmit", "H", None, None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started, e.meta.transcript.as_str()), ("C", false, "C:/t/C.jsonl"));
+        // Gestarteter Claude kam nie (Prompt der Shell): ein danach gestarteter wird nicht zur Konversation der Sitzung
+        let mut e = claude_entry();
+        e.hook_conv = hooks::ConvBinding::launch(None, false);
+        e.meta.claude_session.clear();
+        e.hook_conv.shell_prompt();
+        deliver(&mut e, with("SessionStart", "B", Some("startup"), None));
+        deliver(&mut e, with("UserPromptSubmit", "B", None, None));
+        assert_eq!((e.meta.claude_session.as_str(), e.meta.claude_started), ("", false));
+    }
 }
