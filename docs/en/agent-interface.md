@@ -35,8 +35,8 @@ If no hub runs there, the error `hub_not_running` names the data folder that was
 | Level | What the agent can do |
 |---|---|
 | **Off** (default) | nothing – every call returns `mcp_disabled` |
-| **Read only** | read sessions, terminal content, chats, screenshots, costs, the Claude history and the to-do list or tickets |
-| **Control** | additionally type text, send keys, run commands, send messages to chats, create, rename, focus and close sessions, and change the to-do list or tickets |
+| **Read only** | read sessions, terminal content, chats, screenshots, costs, the Claude history, the to-do list or tickets and the process list |
+| **Control** | additionally type text, send keys, run commands, send messages to chats, create, rename, focus and close sessions, change the to-do list or tickets, and start, stop and restart entries of the process list |
 
 A tool above the current level returns `forbidden`. The level is checked in the hub itself, not only in the bridge.
 
@@ -45,6 +45,8 @@ A tool above the current level returns `forbidden`. The level is checked in the 
 |---|---|---|
 | `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `screenshot`, `get_usage`, `search_history`, `cleanup_sizes` | Read | Who am I (the agent's own session), sessions (with their `kind` and the `window` they belong to), terminal text, the messages of a chat, the LLM servers and models for chats, image of window/session, costs, Claude history, sizes of Paneldeck's data |
 | `create_session`, `send_text`, `send_keys`, `run_command`, `queue_prompt`, `wait_for_status`, `rename_session`, `focus_session`, `close_session`, `send_chat_message` | Control | Create/control sessions (also chats), commands with output and exit code, wait for Claude or chat status, send a message to a chat |
+| `list_processes`, `read_process_output` | Read | The [process list](#process-list): entries with status, detected local addresses and error count; the output of an entry |
+| `start_process`, `stop_process`, `restart_process` | Control | Start, stop (Ctrl+C, after 5 s the whole tree) and restart an entry or a group of the process list |
 | `list_todos` | Read | The cards of the simple to-do list (every mode; read-only when expert mode is on) |
 | `add_todo`, `set_todo_done` | Control | **Expert mode off:** add a card, tick it off or reopen it |
 | `list_projects`, `get_project`, `search_tickets`, `get_ticket`, `get_time_entries`, `list_sprints`, `get_sprint`, `list_versions` | Read | **Expert mode on:** projects with their types, fields and workflows, tickets (also by query language), comments, history, time entries, sprints with their report, versions and milestones |
@@ -108,6 +110,15 @@ An agent always has only the options of the mode that is currently set (switch *
 - **Shortened results for chat models:** when a tool result is too large for a chat model, lists lose their last entries (`truncated`, `truncated_list`, `omitted_items`); `read_chat` drops the oldest messages instead (`more_above`) and always keeps `status`.
 
 **Chats use the same tools – from the inside:** when the model of a chat calls a tool, Paneldeck runs it in-process with the chat as the caller, under the [model's level](chat.md#settings-per-model) (independent of the level on this page) and with the same safety rules as below. Calls of a chat appear in the call log as well. **External agents can never approve a chat's tool calls** – approvals happen only in the chat window – and they cannot change model settings or type into a chat's input box; they can only send complete messages.
+
+## Process list
+The [process list](processes.md) (since 2.6.0) runs dev servers and watchers apart from the sessions. Agents can use it, but **only the user can add, change or delete entries**.
+
+- **`list_processes`** (Read): every entry with `id`, `name`, `command`, `cwd`, `shell`, `group`, `order`, `project` (`0` = none), `autostart` (`never`/`paneldeck`/`project`), `log_file`, `env_names` (only the names of the environment variables – **values are never returned**), `status`, `exit_code`, `urls` (local addresses found in the output, `0.0.0.0` shown as `localhost`), `error_lines`, `started_at` (seconds since 1970, while running), `leftover_processes` (`true`: the shell has ended but programs it started are still running – `stop_process` ends them) and, for `failed`, `message`; plus `groups`.
+- **`read_process_output`** (Read): `process` (id or name), `lines` (1–2000, default 100) → `text`, `more_above`, `status`, `exit_code`, `error_lines`. The output of the last run stays readable after it ended.
+- **`start_process`**, **`stop_process`**, **`restart_process`** (Control): either `process` (id or name) or `group` – exactly one, otherwise `bad_args`; an unknown entry or group gives `not_found`. A group starts in ascending `order` and stops in reverse. All three return at once with `processes` (`id`, `name`, `status`, `exit_code`, `message`); stopping sends Ctrl+C and ends the whole process tree after 5 s – `list_processes` shows `stopped` once it has ended.
+- `status` is one of `stopped` (by the user, or not started), `running`, `stopping`, `exited` (exit code 0), `crashed` (another exit code), `failed` (could not start: command, shell or folder not found; no exit code).
+- Commands and output are **untrusted data** (`note` in every answer). A program started from the process list that calls the agent interface itself counts as no session (`caller` = `null`, like an orphaned process), so it cannot act as an agent of any session.
 
 ## Security
 - Access only runs locally through the running instance (`127.0.0.1`, own token). The level is **Off** by default.

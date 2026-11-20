@@ -25,6 +25,8 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | `backups/` | automatic and manual copies of the database (the folder can be changed) |
 | `scrollback/` | saved terminal history |
 | `chats/` | histories of the [chats](chat.md), one `<id>.json` per chat (see [Chat histories](#chat-histories)) |
+| `processes.json` | entries of the [process list](processes.md) (see [below](#process-list-processesjson)) |
+| `process-logs/` | log files of process-list entries with *Log file* switched on |
 | `prompts.json` | prompt library |
 | `themes/*.json` | custom themes (an example is included) |
 | `system-prompt.md` | your own template of the [system prompt for agents](agent-interface.md#system-prompt) (only if you saved one); `system-prompt.md.bak` = the previous template after *Reset to default* |
@@ -35,7 +37,7 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | `profiles/<name>/` | data folders of the [profiles](command-line.md#profiles-and-several-instances), each with the same structure |
 | `ipc.json` | port and token of the running instance (internal) |
 
-`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json` and `mcp-log.jsonl` are stable formats: newer versions keep reading older files, and new fields are optional.
+`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json` and `mcp-log.jsonl` are stable formats: newer versions keep reading older files, and new fields are optional.
 
 ## Chat histories
 Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the session id; format version 1, since 2.2.0):
@@ -61,6 +63,36 @@ Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the sessio
 - The file is written **atomically** (temporary file, then rename). Reading is tolerant: a BOM is allowed, unknown fields are ignored, a single invalid message is skipped. A corrupt or too large file (over 8 MB) gives an empty chat with a notice; the file is first saved as `chats/<id>.defekt-<time>.json`. When saving, a history over 8 MB loses its oldest messages.
 - A history file that does not belong to a session (e.g. after `state.json` was reset) is never loaded into a new chat: it is moved aside as `chats/<id>.orphan-<time>.json`.
 - **Closing a chat deletes its file** (and its `.defekt-…` backups). *Save history to file …* in the chat's context menu exports it as Markdown first.
+
+## Process list (processes.json)
+The entries of the [process list](processes.md) (since 2.6.0, format version 1):
+
+```json
+{
+  "version": 1,
+  "processes": [
+    {
+      "id": 1,
+      "name": "API",
+      "command": "php -S localhost:8000",
+      "cwd": "C:\\work\\api",
+      "shell": "pwsh",
+      "env": [ { "name": "APP_ENV", "value_protected": "AQAAANCMnd8BFdER…" } ],
+      "project": 2,
+      "group": "Dev",
+      "order": 1,
+      "autostart": "project",
+      "log_file": true
+    },
+    { "id": 2, "name": "Web", "command": "npm run dev", "cwd": "C:\\work\\web", "group": "Dev", "order": 2 }
+  ]
+}
+```
+
+- Required per entry: `id` (unique number > 0), `name`, `command`. Everything else is optional; a missing field means its default and is not written: `cwd` (empty = the shell's default folder), `shell` (the id of a detected shell such as `powershell`, `pwsh`, `cmd`, `gitbash`, `wsl:<distribution>`; empty = PowerShell), `env`, `project` (`0` = none), `group` (empty = none), `order` (`0`; lower starts first), `autostart` (`"never"` default, `"paneldeck"`, `"project"`; unknown values count as `"never"`), `log_file` (`false`).
+- `env`: a list of `{ "name", "value_protected" }`. The value is **only** stored as `value_protected` = Base64 of a Windows DPAPI blob (current user) – never as plain text; a value that cannot be decrypted (other user or computer) is left out at start with a notice. Names may not contain `=` or spaces, and names starting with `PANELDECK_` are refused.
+- Reading is tolerant: a BOM is allowed, an invalid entry is skipped (the file is first saved as `processes.defekt-<time>.json`), duplicate or missing ids are renumbered. **Unknown fields are kept** when Paneldeck saves (in the entries and at the top level), so newer versions can add fields. The file is written atomically. Paneldeck does not overwrite the file when it could not read it (e.g. locked) or could not back up a damaged file, or when its `version` is newer than the one this Paneldeck knows – changes to the list are then not saved, with a notice.
+- Run states, output and detected addresses are not stored: after a restart every entry is stopped.
 
 ## New fields in 2.2.0
 - `settings.json` → `llm_servers`: the servers of *Settings → Models*, each with `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 of a Windows DPAPI blob – never plain text; only the same Windows user on the same computer can decrypt it), optional `receive_timeout_secs`, `models` (settings per model: `name`, `level`, `level_chosen`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`; `level_chosen: true` = the level was chosen in the [level question](chat.md#the-level-question) or under *Settings → Models* – missing or `false` means the model counts as *Off*, whatever `level` says) and `last_models` (the result of the last *Connect*). A server entry that cannot be read (e.g. an unknown `kind` from a newer version) is kept unchanged and shown read-only with *Remove*.

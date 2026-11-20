@@ -53,6 +53,7 @@ The guides live in [`docs/en/`](docs/en/) (German: [`docs/de/`](docs/de/)) and a
 - [Claude Code](docs/en/claude-code.md) – Claude mode, status, costs, history
 - [Todo list and tickets](docs/en/todo-and-tickets.md) – simple and expert mode, boards, sprints, dashboards, quick actions
 - [Query language](docs/en/query-language.md) – searching tickets, examples, reference
+- [Process list](docs/en/processes.md) – dev servers and watchers with their output in a pane of their own
 - [Chats with local models](docs/en/chat.md) – Ollama and OpenAI-compatible servers, models, tools and approvals, security
 - [Agent interface (MCP)](docs/en/agent-interface.md) – levels, tools, security, system prompt
 - [Command line](docs/en/command-line.md) – every option, data folder lookup, profiles, exit codes

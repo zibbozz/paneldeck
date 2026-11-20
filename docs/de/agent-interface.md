@@ -35,8 +35,8 @@ Läuft dort kein Hub, nennt der Fehler `hub_not_running` den durchsuchten Dateno
 | Stufe | Was der Agent darf |
 |---|---|
 | **Aus** (Standard) | nichts – jeder Aufruf liefert `mcp_disabled` |
-| **Nur lesen** | Sitzungen, Terminalinhalt, Chats, Screenshots, Kosten, den Claude-Verlauf und die Todo-Liste bzw. Tickets lesen |
-| **Steuern** | zusätzlich Text tippen, Tasten senden, Befehle ausführen, Nachrichten an Chats senden, Sitzungen anlegen, umbenennen, fokussieren und schließen, Todo-Liste bzw. Tickets ändern |
+| **Nur lesen** | Sitzungen, Terminalinhalt, Chats, Screenshots, Kosten, den Claude-Verlauf, die Todo-Liste bzw. Tickets und die Prozessliste lesen |
+| **Steuern** | zusätzlich Text tippen, Tasten senden, Befehle ausführen, Nachrichten an Chats senden, Sitzungen anlegen, umbenennen, fokussieren und schließen, Todo-Liste bzw. Tickets ändern, Einträge der Prozessliste starten, stoppen und neu starten |
 
 Ein Werkzeug oberhalb der aktuellen Stufe liefert `forbidden`. Die Stufe wird im Hub selbst geprüft, nicht erst in der Brücke.
 
@@ -45,6 +45,8 @@ Ein Werkzeug oberhalb der aktuellen Stufe liefert `forbidden`. Die Stufe wird im
 |---|---|---|
 | `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `screenshot`, `get_usage`, `search_history`, `cleanup_sizes` | Lesen | Wer bin ich (Sitzung des Agenten), Sitzungen (mit Art `kind` und Fenster `window`), Terminaltext, die Nachrichten eines Chats, die LLM-Server und Modelle für Chats, Bild von Fenster/Sitzung, Kosten, Claude-Verlauf, Größen der Paneldeck-Daten |
 | `create_session`, `send_text`, `send_keys`, `run_command`, `queue_prompt`, `wait_for_status`, `rename_session`, `focus_session`, `close_session`, `send_chat_message` | Steuern | Sitzungen anlegen/steuern (auch Chats), Befehle mit Ausgabe und Exit-Code, auf Claude- oder Chat-Status warten, Nachricht an einen Chat senden |
+| `list_processes`, `read_process_output` | Lesen | Die [Prozessliste](#prozessliste): Einträge mit Status, erkannten lokalen Adressen und Fehlerzahl; die Ausgabe eines Eintrags |
+| `start_process`, `stop_process`, `restart_process` | Steuern | Einen Eintrag oder eine Gruppe der Prozessliste starten, stoppen (Strg+C, nach 5 s der ganze Baum) und neu starten |
 | `list_todos` | Lesen | Die Karten der einfachen Todo-Liste (in jedem Modus; bei eingeschaltetem Expertenmodus nur lesbar) |
 | `add_todo`, `set_todo_done` | Steuern | **Expertenmodus aus:** Karte anlegen, abhaken oder wieder öffnen |
 | `list_projects`, `get_project`, `search_tickets`, `get_ticket`, `get_time_entries`, `list_sprints`, `get_sprint`, `list_versions` | Lesen | **Expertenmodus an:** Projekte mit Typen, Feldern und Workflows, Tickets (auch per Abfragesprache), Kommentare, Verlauf, Zeiteinträge, Sprints mit Bericht, Versionen und Meilensteine |
@@ -108,6 +110,15 @@ Ein Agent hat immer nur die Möglichkeiten des gerade eingestellten Modus (Schal
 - **Gekürzte Ergebnisse für Chat-Modelle:** Ist ein Werkzeug-Ergebnis für ein Chat-Modell zu groß, verlieren Listen ihre letzten Einträge (`truncated`, `truncated_list`, `omitted_items`); `read_chat` lässt stattdessen die ältesten Nachrichten weg (`more_above`) und behält immer `status`.
 
 **Chats nutzen dieselben Werkzeuge – von innen:** Ruft das Modell eines Chats ein Werkzeug auf, führt Paneldeck es im eigenen Prozess mit dem Chat als Aufrufer aus, mit der [Stufe des Modells](chat.md#einstellungen-je-modell) (unabhängig von der Stufe auf dieser Seite) und denselben Sicherheitsregeln wie unten. Aufrufe eines Chats stehen ebenfalls im Aufrufprotokoll. **Externe Agenten können Werkzeugaufrufe eines Chats nie freigeben** – Freigaben gibt es nur im Chat-Fenster –, sie können keine Modell-Einstellungen ändern und nicht ins Eingabefeld eines Chats tippen; sie können nur ganze Nachrichten senden.
+
+## Prozessliste
+Die [Prozessliste](processes.md) (seit 2.6.0) führt Entwicklungsserver und Watcher getrennt von den Sitzungen aus. Agenten können sie nutzen, aber **Einträge anlegen, ändern oder löschen kann nur der Nutzer**.
+
+- **`list_processes`** (Lesen): jeder Eintrag mit `id`, `name`, `command`, `cwd`, `shell`, `group`, `order`, `project` (`0` = keins), `autostart` (`never`/`paneldeck`/`project`), `log_file`, `env_names` (nur die Namen der Umgebungsvariablen – **Werte gibt es nie**), `status`, `exit_code`, `urls` (in der Ausgabe gefundene lokale Adressen, `0.0.0.0` als `localhost`), `error_lines`, `started_at` (Sekunden seit 1970, solange er läuft), `leftover_processes` (`true`: die Shell ist beendet, aber von ihr gestartete Programme laufen noch – `stop_process` beendet sie) und bei `failed` `message`; dazu `groups`.
+- **`read_process_output`** (Lesen): `process` (Kennung oder Name), `lines` (1–2000, Standard 100) → `text`, `more_above`, `status`, `exit_code`, `error_lines`. Die Ausgabe des letzten Laufs bleibt nach dem Ende lesbar.
+- **`start_process`**, **`stop_process`**, **`restart_process`** (Steuern): entweder `process` (Kennung oder Name) oder `group` – genau eines, sonst `bad_args`; ein unbekannter Eintrag bzw. eine unbekannte Gruppe ergibt `not_found`. Eine Gruppe startet aufsteigend nach `order` und stoppt umgekehrt. Alle drei antworten sofort mit `processes` (`id`, `name`, `status`, `exit_code`, `message`); Stoppen sendet Strg+C und beendet nach 5 s den ganzen Prozessbaum – `list_processes` zeigt `stopped`, sobald er beendet ist.
+- `status` ist `stopped` (vom Nutzer gestoppt oder nicht gestartet), `running`, `stopping`, `exited` (Exit-Code 0), `crashed` (anderer Exit-Code) oder `failed` (Start fehlgeschlagen: Befehl, Shell oder Ordner nicht gefunden; ohne Exit-Code).
+- Befehle und Ausgabe sind **nicht vertrauenswürdige Daten** (`note` in jeder Antwort). Ein aus der Prozessliste gestartetes Programm, das selbst die Agenten-Schnittstelle aufruft, zählt als keine Sitzung (`caller` = `null`, wie ein verwaister Prozess) und kann also nicht als Agent einer Sitzung handeln.
 
 ## Sicherheit
 - Der Zugriff läuft nur lokal über die laufende Instanz (`127.0.0.1`, eigener Token). Die Stufe ist standardmäßig **Aus**.

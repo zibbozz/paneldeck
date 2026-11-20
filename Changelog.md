@@ -13,6 +13,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - Clean up window (*Settings → Data & backup → Clean up …*, also in the command palette): tick what to delete – database backups, clipboard images, old backup files, scrollback and chat histories (orphaned or all, optionally older than X days), logs, prompt library, templates, custom themes, system prompt, database, sessions, settings, Windows integration, other profiles – with sizes, a total and a summary before deleting; irreversible items need typing `DELETE`, the database is backed up first; *Reset Paneldeck completely* saves the data folder as a ZIP first (#307)
 - Agent interface: read-only tool `cleanup_sizes` (level Read) returns the sizes per clean-up area; agents cannot delete anything (#307)
+- Process list: a *Processes* section in the Terminals sidebar runs long-running programs such as dev servers and watchers apart from the terminal sessions – start, stop and restart (also as a group in order), output in a pane of its own with error count and a link to a detected local address, optional log file, environment variables (values encrypted), autostart with Paneldeck or the project; stored in the new data file `processes.json` (#243)
+- Agent interface: tools `list_processes` and `read_process_output` (level Read) and `start_process`, `stop_process`, `restart_process` (level Control) for the entries the user created; agents cannot add or change entries (#243)
 
 ## [2.5.0] - 2026-11-20
 
