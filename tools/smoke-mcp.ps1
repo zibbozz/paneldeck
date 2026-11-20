@@ -39,7 +39,11 @@ param(
   [string]$ConPtyDir = '',
   # OSC-52-Pruefung (#181) auslassen: sie setzt kurz die echte Windows-Zwischenablage (Text wird gesichert und
   # wiederhergestellt, eine Zwischenablage mit anderen als reinen Textformaten bleibt ohnehin unberuehrt)
-  [switch]$NoClipboard
+  [switch]$NoClipboard,
+  # zsh/fish-Integration (#57) in eigenen WSL-Test-Distributionen (nie der eigenen): Name einer Distribution mit Login-Shell
+  # zsh bzw. fish. Ohne Angabe werden diese Pruefungen uebersprungen.
+  [string]$WslZsh = $env:PANELDECK_TEST_WSL_ZSH,
+  [string]$WslFish = $env:PANELDECK_TEST_WSL_FISH
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -135,6 +139,33 @@ function Test-WrapWidth([int]$sid, [string]$sh, [string]$prefix = '') {
     $want = 'w' * $n
     Check "${prefix}run_command $sh (Zeile mit $n Zeichen bei $cols Spalten: Ausgabe exakt)" ($r.data.finished -and $r.data.output -eq $want -and $r.data.quality -eq 'exact') "len=$("$($r.data.output)".Length) q=$($r.data.quality) finished=$($r.data.finished)"
   }
+}
+# #264: Mit der ConPTY von Windows (aelterer conhost) blieb das Terminal nach einer Zeile in genau Terminalbreite, die
+# allein in einem Frame von conhost endet, eine Zeile hinter conhost: Die Leerzeile vor dem Git-Bash-Prompt fehlte, und
+# ein spaeterer Befehl, den conhost nach Enter absolut neu zeichnet (laenger als eine Zeile), erschien doppelt.
+# `sleep 1` trennt die volle Zeile vom Zeilenvorschub (eigener Frame). Nur Sitzungen mit console_host = system; zeichnet
+# ein neuerer conhost ohnehin richtig, gelten die Pruefungen genauso.
+function Test-ConhostWrap([int]$sid, [string]$prefix = '') {
+  $name = "${prefix}#264 Git Bash, Zeile in Terminalbreite (System-ConPTY)"
+  $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })
+  if ($me.Count -ne 1 -or $me[0].console_host -ne 'system') { Skip $name "console_host = $(if ($me.Count) { $me[0].console_host } else { '?' })"; return }
+  $cols = (Tool 'read_terminal' @{ session = $sid; lines = 1 }).data.cols
+  if (-not $cols) { Skip $name 'cols unbekannt'; return }
+  [void](Tool 'run_command' @{ session = $sid; command = 'clear'; timeout_secs = 15 })
+  $r = Tool 'run_command' @{ session = $sid; command = "printf 'x%.0s' `$(seq 1 `$COLUMNS); sleep 1; echo"; timeout_secs = 25 }
+  $x = 'x' * $cols
+  Check "$name`: Ausgabe exakt" ($r.data.finished -and $r.data.output -eq $x -and $r.data.quality -eq 'exact') "len=$("$($r.data.output)".Length) q=$($r.data.quality) finished=$($r.data.finished)"
+  # Lange Pause wie beim Nutzer, dann ein Befehl laenger als eine Zeile.
+  Start-Sleep 3
+  $r = Tool 'run_command' @{ session = $sid; command = "echo nach-264 # $('z' * $cols)"; timeout_secs = 25 }
+  Check "$name`: naechster Befehl exakt" ($r.data.finished -and $r.data.output -eq 'nach-264' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+  Start-Sleep -Milliseconds 500
+  $lines = @("$((Tool 'read_terminal' @{ session = $sid; screen = $true }).data.text)" -split "`r?`n" | ForEach-Object { $_.TrimEnd() })
+  $i = [array]::IndexOf($lines, $x)
+  $blank = $i -ge 0 -and $i + 2 -lt $lines.Count -and $lines[$i + 1] -eq '' -and $lines[$i + 2] -ne ''
+  Check "$name`: Leerzeile vor dem Prompt bleibt" $blank ($lines -join ' | ')
+  $echoes = @($lines | Where-Object { $_ -match '^\$ echo nach-264 #' }).Count
+  Check "$name`: Echo des naechsten Befehls genau einmal" ($echoes -eq 1) "Echos=${echoes}: $($lines -join ' | ')"
 }
 # OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
 # Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
@@ -350,6 +381,7 @@ try {
       $r = Tool 'run_command' @{ session = $id; command = 'printf "x\ny\n"'; timeout_secs = 25 }
       Check "run_command $sh (zweiter Befehl sauber)" ($r.data.output -eq "x`ny") $r.text
       Test-WrapWidth $id $sh
+      Test-ConhostWrap $id
       Test-FullHistory $id $sh
       Test-Osc52 $id $sh
     } else {
@@ -434,6 +466,54 @@ try {
     }
   }
 
+  Write-Host "== WSL: zsh und fish (#57)" -ForegroundColor Cyan
+  # Nur in eigenen Test-Distributionen, nie in der des Nutzers: -WslZsh/-WslFish (bzw. PANELDECK_TEST_WSL_ZSH/_FISH) nennen
+  # je eine Distribution, deren Login-Shell zsh bzw. fish ist. Ohne Angabe wird der Teil uebersprungen.
+  $wslAll = [regex]::Matches($avail, 'wsl:[^,\s]+') | ForEach-Object { $_.Value.TrimEnd('.') }
+  foreach ($c in @(@{ sh = 'zsh'; distro = $WslZsh; ver = 'echo "zsh:$ZSH_VERSION"'; left = 'echo "[${ZDOTDIR-unset}][${PANELDECK_ZSH_ZDOTDIR-}]"'; leftWant = '[unset][]' },
+                   @{ sh = 'fish'; distro = $WslFish; ver = 'echo "fish:$FISH_VERSION"'; left = 'set -q PANELDECK_FISH_INIT; or echo "[gone]"'; leftWant = '[gone]' })) {
+    $sh = $c.sh
+    if (-not $c.distro) { Skip "WSL $sh (#57)" "keine Test-Distribution (-Wsl$((Get-Culture).TextInfo.ToTitleCase($sh)) <name> bzw. PANELDECK_TEST_WSL_$($sh.ToUpper()): eigene Distribution mit Login-Shell $sh, nie die eigene)"; continue }
+    $id = "wsl:$($c.distro)"
+    if ($wslAll -notcontains $id) { Check "WSL ${sh}: Test-Distribution $($c.distro) erkannt" $false "verfuegbar: $($wslAll -join ', ')"; continue }
+    # Die Login-Shell wird beim ersten Start abgefragt; fish bekommt die Integration erst, wenn sie bekannt ist (dann neu anlegen).
+    $sid = $null; $r = $null
+    for ($try = 1; $try -le 4 -and -not $sid; $try++) {
+      $w = Tool 'create_session' @{ shell = $id; cwd = '/tmp'; name = "smoke-$sh" } 60000
+      if ($w.err) { Check "WSL ${sh}: create_session" $false $w.text; break }
+      Start-Sleep 6
+      $r = Tool 'run_command' @{ session = $w.data.id; command = $c.ver; timeout_secs = 30 } 45000
+      if ($r.data.finished) { $sid = $w.data.id } else { [void](Tool 'close_session' @{ session = $w.data.id }); Start-Sleep 3 }
+    }
+    if (-not $sid) { Check "WSL ${sh}: Shell-Integration aktiv (run_command)" $false $r.text; continue }
+    Check "WSL ${sh}: laeuft wirklich $sh, Ausgabe exakt" ($r.data.output -match "^${sh}:\d" -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+    $r = Tool 'run_command' @{ session = $sid; command = 'false'; timeout_secs = 25 }
+    Check "WSL ${sh}: Exit-Code 1, leere Ausgabe" ($r.data.exit_code -eq 1 -and $r.data.output -eq '') $r.text
+    $r = Tool 'run_command' @{ session = $sid; command = 'printf "x\ny\n"'; timeout_secs = 25 }
+    Check "WSL ${sh}: zweiter Befehl sauber, Exit 0" ($r.data.output -eq "x`ny" -and $r.data.exit_code -eq 0 -and $r.data.quality -eq 'exact') $r.text
+    $r = Tool 'run_command' @{ session = $sid; command = 'sleep 2'; timeout_secs = 25 }
+    Check "WSL ${sh}: Dauer gemessen (sleep 2)" ($r.data.finished -and $r.data.duration_ms -ge 1500) $r.text
+    # Ausgabe ohne Zeilenende: zsh haengt PROMPT_EOL_MARK (%) an, run_command entfernt sie
+    $r = Tool 'run_command' @{ session = $sid; command = 'printf x'; timeout_secs = 25 }
+    Check "WSL ${sh}: printf x liefert genau x" ($r.data.output -eq 'x' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+    $r = Tool 'run_command' @{ session = $sid; command = $c.left; timeout_secs = 25 }
+    Check "WSL ${sh}: Hilfsvariablen aufgeraeumt (ZDOTDIR wiederhergestellt)" ($r.data.output -eq $c.leftWant) "out='$($r.data.output)'"
+    [void](Tool 'run_command' @{ session = $sid; command = 'cd /usr'; timeout_secs = 25 })
+    $l = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid }
+    Check "WSL ${sh}: Ordner folgt (cd /usr)" ($l.cwd -like '*usr') "cwd='$($l.cwd)'"
+    $f = if ($sh -eq 'zsh') { "$data\shell-integration\zsh\.zshenv" } else { "$data\shell-integration\paneldeck.fish" }
+    Check "WSL ${sh}: Hilfsdatei im Datenordner" (Test-Path -LiteralPath $f) $f
+    if ($sh -eq 'zsh') {
+      # Eigenes ZDOTDIR (nur in /tmp der Test-Distribution): dieselbe Huelle mit PANELDECK_ZSH_ZDOTDIR laedt die .zshrc von dort
+      [void](Tool 'run_command' @{ session = $sid; command = "mkdir -p /tmp/pd-zdot && echo 'PD_OWN_RC=ok' > /tmp/pd-zdot/.zshrc"; timeout_secs = 25 })
+      $wz = ("$data\shell-integration\zsh" -replace "'", "")
+      [void](Tool 'run_command' @{ session = $sid; command = "exec env PANELDECK_ZSH_ZDOTDIR=/tmp/pd-zdot ZDOTDIR=`"`$(wslpath '$wz')`" zsh -i"; timeout_secs = 30 })
+      $r = Tool 'run_command' @{ session = $sid; command = 'echo "[$PD_OWN_RC][$ZDOTDIR]"'; timeout_secs = 25 }
+      Check 'WSL zsh: eigenes ZDOTDIR des Nutzers gilt (dessen .zshrc geladen, Marken weiter da)' ($r.data.output -eq '[ok][/tmp/pd-zdot]' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+    }
+    Check "WSL ${sh}: close_session" (-not (Tool 'close_session' @{ session = $sid }).err)
+  }
+
   Write-Host "== Selbst-Identifikation und Kinder-Sitzungen" -ForegroundColor Cyan
   $w0 = Tool 'whoami'
   Check 'whoami von aussen: nicht in einem Hub-Terminal' ($null -eq $w0.data.session -and $w0.data.identified_by -eq 'none')
@@ -443,7 +523,9 @@ try {
     $req = @{ jsonrpc = '2.0'; id = 1; method = 'tools/call'; params = @{ name = $tool; arguments = $targs } } | ConvertTo-Json -Depth 8 -Compress
     $cmd = "`$env:PANELDECK_SESSION=`$null; '" + $req.Replace("'", "''") + "' | & '$dir\paneldeck.exe' mcp | Out-String"
     $r = Tool 'run_command' @{ session = $s; command = $cmd; timeout_secs = 40 }
-    try { ($r.data.output | ConvertFrom-Json).result } catch { $null }
+    $o = $null; try { $o = $r.data.output | ConvertFrom-Json } catch { }
+    if (-not $o) { Write-Host "      InS $tool`: keine JSON-Antwort: $($r.text)" -ForegroundColor DarkGray }
+    $o.result
   }
   function InA($tool, $targs) { InS $A $tool $targs }
   # Losgeloester Absender: eine kurzlebige Shell (in Sitzung $s per run_command, ohne $s vom Test selbst gestartet)
@@ -1769,6 +1851,7 @@ c.close()
         Check 'ConPTY: run_command gitbash (Ausgabe)' ($r.data.finished -and $r.data.output.Trim() -eq 'bash-ok') $r.text
         $r = Tool 'run_command' @{ session = $gid; command = 'false'; timeout_secs = 25 }
         Check 'ConPTY: run_command gitbash (Exit 1)' ($r.data.exit_code -eq 1) $r.text
+        Test-ConhostWrap $gid 'ConPTY: '
         # Sichtbarer Bildschirm, bis $pattern passt (oder Zeitlimit). Prompt der Bash = letzte Zeile "$".
         function Wait-Screen([string]$pattern, [int]$secs = 20) {
           $t = Get-Date
@@ -1826,6 +1909,23 @@ c.close()
     }
   } else {
     Skip 'Konsolen-Host und DLL-Suche' 'keine conpty.dll/OpenConsole.exe neben der .exe (tools\fetch-conpty.ps1)'
+  }
+
+  Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
+  # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.
+  Set-Level 'Control' -Empty
+  if ($script:hub -and -not $script:hub.HasExited) {
+    $si = "$data\shell-integration"
+    New-Item -ItemType Directory -Force "$si\zsh" | Out-Null
+    [IO.File]::WriteAllText("$si\zsh\.zshenv", '# smoke')
+    [void]$script:hub.CloseMainWindow()
+    if ($script:hub.WaitForExit(15000)) {
+      Check 'Beenden: Ordner shell-integration im Datenordner entfernt' (-not (Test-Path -LiteralPath $si)) $si
+    } else {
+      Skip 'Beenden: Hilfsdateien entfernt' 'Hub hat sich nicht ohne Rueckfrage beendet (wird abgebrochen)'
+    }
+  } else {
+    Skip 'Beenden: Hilfsdateien entfernt' 'kein laufender Hub'
   }
 } catch {
   # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.

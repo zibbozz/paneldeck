@@ -71,6 +71,9 @@ enum State {
 #[derive(Default)]
 pub struct OscScanner {
     state: State,
+    /// Letzte Befehlsmarke (OSC 133 A/C/D) ohne sichtbaren Inhalt danach. fish ≥ 4 sendet die Marken selbst, unsere
+    /// Integration auch (#57): Eine gleiche Marke direkt dahinter (nur andere Sequenzen dazwischen) zählt nicht doppelt.
+    last_mark: Option<std::mem::Discriminant<OscEvent>>,
 }
 
 const MAX_PAYLOAD: usize = 4096;
@@ -88,6 +91,12 @@ impl OscScanner {
         let mut pos: Vec<usize> = Vec::new();
         for (i, &b) in bytes.iter().enumerate() {
             let st = std::mem::take(&mut self.state);
+            // Sichtbarer Inhalt (auch Zeilenvorschub) oder eine CSI-Sequenz (Cursor, Löschen) zwischen zwei Marken:
+            // dann zählen beide. Nur andere OSC-Sequenzen dazwischen (fish ≥ 4: eigene Marke direkt neben unserer) nicht.
+            if (matches!(st, State::Normal) && b != 0x1b) || matches!(st, State::Csi(_)) {
+                self.last_mark = None;
+            }
+            let n0 = out.len();
             self.state = match st {
                 State::Normal => {
                     if b == 0x1b {
@@ -151,12 +160,29 @@ impl OscScanner {
                     _ => esc_next(b, &mut out),
                 },
             };
+            self.dedupe_marks(&mut out, n0);
             // Ereignisse, die mit diesem Byte abgeschlossen wurden, bekommen seine Position.
             while pos.len() < out.len() {
                 pos.push(i + 1);
             }
         }
         (out, pos)
+    }
+
+    /// Doppelte Befehlsmarken ab Index `from` entfernen (siehe `last_mark`).
+    fn dedupe_marks(&mut self, out: &mut Vec<OscEvent>, from: usize) {
+        let mut k = from;
+        while k < out.len() {
+            if matches!(out[k], OscEvent::PromptStart | OscEvent::CommandStart | OscEvent::CommandDone { .. }) {
+                let d = std::mem::discriminant(&out[k]);
+                if self.last_mark == Some(d) {
+                    out.remove(k);
+                    continue;
+                }
+                self.last_mark = Some(d);
+            }
+            k += 1;
+        }
     }
 }
 
@@ -413,6 +439,27 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_marks_without_content_count_once() {
+        // fish ≥ 4 sendet selbst OSC 133, unsere Integration auch (#57): D, Ordner, A doppelt – je einmal.
+        let mut s = OscScanner::default();
+        let ev = s.feed(b"out\r\n\x1b]133;D;0\x07\x1b]133;D;0\x07\x1b]9;9;\"/tmp\"\x07\x1b]133;A\x07\x1b]133;A;click_events=1\x07$ ");
+        assert_eq!(ev, vec![OscEvent::CommandDone { exit: Some(0) }, OscEvent::Cwd("/tmp".into()), OscEvent::PromptStart]);
+        // Über Chunk-Grenzen
+        let mut s = OscScanner::default();
+        assert_eq!(s.feed(b"ls\r\n\x1b]133;C\x07"), vec![OscEvent::CommandStart]);
+        assert!(s.feed(b"\x1b]133;C;cmdline_url=ls\x07").is_empty());
+        // Inhalt dazwischen: beide zählen (zwei leere Prompts nacheinander)
+        let mut s = OscScanner::default();
+        assert_eq!(s.feed(b"\x1b]133;A\x07$ \r\n\x1b]133;A\x07$ ").len(), 2);
+        assert_eq!(s.feed(b"\x1b]133;D;1\x07x\x1b]133;D;1\x07").len(), 2);
+        // Positionen passen nach dem Entfernen
+        let mut s = OscScanner::default();
+        let (ev, pos) = s.feed_at(b"\x1b]133;A\x07\x1b]133;A\x07ab\x1b]133;D;0\x07");
+        assert_eq!(ev, vec![OscEvent::PromptStart, OscEvent::CommandDone { exit: Some(0) }]);
+        assert_eq!(pos, vec![8, 28]);
+    }
+
+    #[test]
     fn parses_sequences_across_chunks() {
         let mut s = OscScanner::default();
         let mut ev = s.feed(b"hallo \x1b]133;D;3\x07\x1b]9;9;\"C:\\Dev\\app\"\x07\x1b]13");
@@ -523,9 +570,11 @@ mod tests {
         // Nach CAN ist der Rest Text: ein späteres BEL beendet kein OSC mehr.
         let note = OscEvent::Notify { title: String::new(), body: "hi".into() };
         assert_eq!(s.feed(b"\x1b]9;hi\x18;rest\x07"), vec![note]);
-        // Steuerzeichen im OSC zählen nicht zum Inhalt.
+        // Steuerzeichen im OSC zählen nicht zum Inhalt (neuer Scanner: zwei A ohne Inhalt dazwischen zählten einmal, #57).
+        let mut s = OscScanner::default();
         assert_eq!(s.feed(b"\x1b]133;\r\nA\x07"), vec![OscEvent::PromptStart]);
         // Über eine Chunk-Grenze, Position hinter CAN.
+        let mut s = OscScanner::default();
         assert!(s.feed_at(b"\x1b]133;").0.is_empty());
         assert_eq!(s.feed_at(b"A\x18x"), (vec![OscEvent::PromptStart], vec![2]));
         // Mit vte verglichen: dieselbe Sequenz wird dort ebenfalls ausgeführt (OSC 2 = Titel).

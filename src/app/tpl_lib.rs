@@ -462,11 +462,11 @@ fn tpl_general(ui: &mut Ui, f: &mut TplForm, shells: &[ShellSpec], profiles: &[P
         if custom {
             ui.label(RichText::new(lang.t("Programm des Profils", "Program of the profile")).color(style::dim(ui)));
         } else {
-            let cur = shells.iter().find(|s| s.id == f.item.shell_id).map(|s| s.label.clone()).unwrap_or_else(|| lang.t("Standard-Shell", "Default shell").to_string());
+            let cur = shells.iter().find(|s| s.id == f.item.shell_id).map(|s| crate::shells::display_label(s, lang)).unwrap_or_else(|| lang.t("Standard-Shell", "Default shell").to_string());
             egui::ComboBox::from_id_salt("tpl_shell").selected_text(cur).show_ui(ui, |ui| {
                 ui.selectable_value(&mut f.item.shell_id, String::new(), lang.t("Standard-Shell", "Default shell"));
                 for s in shells {
-                    ui.selectable_value(&mut f.item.shell_id, s.id.clone(), &s.label);
+                    ui.selectable_value(&mut f.item.shell_id, s.id.clone(), crate::shells::display_label(s, lang));
                 }
             });
         }

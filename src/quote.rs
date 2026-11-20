@@ -2,8 +2,12 @@
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
-    /// bash, sh, Git Bash, WSL
+    /// POSIX-Shell, deren Art nicht sicher bekannt ist (sh, WSL mit unbekannter Login-Shell): nur `'…'`
     Posix,
+    /// Sicher bash oder zsh (#57): wie [`Kind::Posix`], dazu `$'…'` für mehrzeilige Werte
+    Bash,
+    /// fish (#57): `'…'`, darin `\'` und `\\`
+    Fish,
     /// PowerShell 5/7
     Pwsh,
     /// cmd.exe
@@ -19,18 +23,19 @@ pub fn kind_of_program(program: &str) -> Kind {
     }
 }
 
-pub fn kind_of_id(shell_id: &str) -> Kind {
-    match shell_id {
-        "pwsh" | "powershell" => Kind::Pwsh,
-        "cmd" => Kind::Cmd,
-        _ => Kind::Posix,
+impl Kind {
+    /// POSIX-Quoting (`'…'` mit `'\''`): bash, zsh, sh und unbekannte Unix-Shells.
+    pub fn is_posix(self) -> bool {
+        matches!(self, Kind::Posix | Kind::Bash)
     }
 }
 
 /// Setzt `s` so in Anführungszeichen, dass die Shell es als EIN wörtliches Argument liest.
 pub fn quote(kind: Kind, s: &str) -> String {
     match kind {
-        Kind::Posix => format!("'{}'", s.replace('\'', r"'\''")),
+        Kind::Posix | Kind::Bash => format!("'{}'", s.replace('\'', r"'\''")),
+        // In fish maskieren in '…' nur \' und \\.
+        Kind::Fish => format!("'{}'", s.replace('\\', r"\\").replace('\'', r"\'")),
         Kind::Pwsh => {
             // In PowerShell gelten auch typografische Apostrophe als Anführungszeichen; sie müssen verdoppelt werden.
             let mut out = String::with_capacity(s.len() + 2);
@@ -52,7 +57,7 @@ pub fn quote(kind: Kind, s: &str) -> String {
 pub fn quote_if_needed(kind: Kind, s: &str) -> String {
     // PowerShell wertet auch typografische Anführungszeichen (‘ ’ ‚ ‛ “ ” „) als Quotes.
     let pwsh_special = |c: char| kind == Kind::Pwsh && matches!(c, '\u{2018}'..='\u{201E}');
-    if s.is_empty() || s.chars().any(|c| pwsh_special(c) || c.is_whitespace() || "&()[]{}^=;!'\"+,`~$#%<>|*?\\".contains(c) && !(c == '\\' && kind != Kind::Posix)) {
+    if s.is_empty() || s.chars().any(|c| pwsh_special(c) || c.is_whitespace() || "&()[]{}^=;!'\"+,`~$#%<>|*?\\".contains(c) && !(c == '\\' && !matches!(kind, Kind::Posix | Kind::Bash | Kind::Fish))) {
         quote(kind, s)
     } else {
         s.to_string()
@@ -84,6 +89,18 @@ mod tests {
     fn posix_quoting_neutralizes_expansion() {
         assert_eq!(quote(Kind::Posix, "a b"), "'a b'");
         assert_eq!(quote(Kind::Posix, "it's $(x) `y`"), r"'it'\''s $(x) `y`'");
+    }
+
+    #[test]
+    fn fish_quoting_escapes_backslash_and_apostrophe() {
+        assert_eq!(quote(Kind::Fish, "a b"), "'a b'");
+        assert_eq!(quote(Kind::Fish, "it's $(x) `y`"), r"'it\'s $(x) `y`'");
+        assert_eq!(quote(Kind::Fish, r"C:\x\"), r"'C:\\x\\'");
+        assert_eq!(quote_if_needed(Kind::Fish, r"a\b"), r"'a\\b'");
+        assert_eq!(quote_if_needed(Kind::Fish, "/tmp/x"), "/tmp/x");
+        // bash/zsh wie POSIX
+        assert_eq!(quote(Kind::Bash, "it's"), quote(Kind::Posix, "it's"));
+        assert!(Kind::Bash.is_posix() && Kind::Posix.is_posix() && !Kind::Fish.is_posix());
     }
 
     #[test]

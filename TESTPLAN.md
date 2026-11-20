@@ -32,6 +32,7 @@ Für jeden Punkt: ✅ funktioniert / ❌ Fehler (kurz beschreiben).
 - [ ] Mausrad scrollt durch den Verlauf; `Get-ChildItem C:\Windows -Recurse` o. ä. erzeugt viel Ausgabe ohne Hänger.
 - [ ] Fenstergröße ändern: Terminal passt Spalten/Zeilen an (`mode con` oder `$Host.UI.RawUI.WindowSize`).
 - [ ] `vim`/`less`/`claude` (Vollbild-Programme) zeichnen korrekt, Beenden stellt den Verlauf wieder her.
+- [ ] **Zeile in Terminalbreite mit der ConPTY von Windows (2.4.2, #264)** – nur auf einem Windows mit älterem conhost (z. B. Windows 11 26200): Einstellungen → Darstellung → *Mitgelieferten Konsolen-Host verwenden* aus, neue Git-Bash-Sitzung, `clear`. `printf 'x%.0s' $(seq 1 $COLUMNS); sleep 1; echo` → die x-Zeile füllt genau eine Zeile, darunter die Leerzeile, dann der Prompt. Einige Sekunden warten, einen Befehl tippen, der länger als eine Zeile ist (z. B. `echo ok # ` und viele `z`), Enter → das Echo steht genau einmal da, keine doppelte Zeile; danach dasselbe mit `printf '%*s\n' "$COLUMNS" '' | tr ' ' x`. Gegenprobe mit eingeschaltetem Konsolen-Host: unverändert richtig.
 
 ## 4 · Sitzungen, Gruppen, Splits
 - [ ] Sitzung umbenennen: Doppelklick, F2, Strg+Umschalt+R; leerer Name → automatischer Titel.
@@ -779,6 +780,28 @@ Automatisch (CI, Linux-Job): Aufrufer-Zuordnung inkl. Abweisung unbekannter MCP-
 - [ ] **Agenten-Schnittstelle:** MCP auf „Steuern“, `paneldeck mcp` aus einer Sitzung → `whoami` nennt die Sitzung; ein mit `setsid nohup … &` losgelöster Prozess aus der Sitzung → wird weiter der Sitzung zugeordnet; `env -i setsid …` (Markierung gelöscht und losgelöst) → gilt als extern; Smoke-Test-Erwartungen wie unter Windows.
 - [ ] **Zwischenablage:** Text kopieren/einfügen in beide Richtungen; Bildschirmfoto in der Zwischenablage → Strg+V im Terminal fügt den Bildpfad ein (X11/XWayland).
 - [ ] **Beide Sprachen:** neue Texte (Desktop-Integration, Master-Passwort, Update-Hinweise) auf Deutsch und Englisch.
+
+
+## 66 · Shell-Integration für zsh und fish (#57, 2.5.0)
+Vorbereitung: eine eigene **Test-Distribution** (nie die eigene), z. B. zwei Importe derselben Ubuntu-/Debian-Rootfs: `pd-zsh` (Login-Shell `zsh`, dazu Oh My Zsh oder Powerlevel10k in `~/.zshrc`) und `pd-fish` (Login-Shell `fish`, eigenes `config.fish` mit `set -g fish_greeting`). Testinstanz aus einer Kopie der .exe mit eigenem Datenordner. Automatisch: Unit-Tests `shellinit`, `shells`, `quote`, `claude_opts`; Smoke-Test mit `PANELDECK_TEST_WSL_ZSH=pd-zsh` und `PANELDECK_TEST_WSL_FISH=pd-fish`.
+- [ ] **Anzeige:** Paneldeck starten, während `pd-zsh` läuft → *+ Neu* → Shell-Liste zeigt nach kurzer Zeit „WSL: pd-zsh (zsh)“; `pd-fish` (lief nicht) zeigt nach dem ersten Sitzungsstart „WSL: pd-fish (fish)“. Gleiches in *Einstellungen → Allgemein → Standard-Shell*, Sitzungseinstellungen und Vorlagen.
+- [ ] **zsh:** Sitzung in `pd-zsh` → Prompt des Themes wie in Windows Terminal (Oh My Zsh/Powerlevel10k unverändert); `echo $ZDOTDIR` leer (bzw. der eigene Wert); `ls ~` zeigt keine neue Datei.
+- [ ] **Befehlsmarken zsh:** mehrere Befehle, dann **Strg+Umschalt+Hoch/Runter** springt zwischen den Prompts; `false` → Statuszeile zeigt Exit-Code 1; `sleep 3` → Dauer ≈ 3 s.
+- [ ] **Ordner zsh:** `cd /tmp` → Dateibaum (**Strg+Umschalt+O**) folgt; Sitzung neu laden startet in `/tmp`.
+- [ ] **Eigenes ZDOTDIR:** in `pd-zsh` `~/.zshenv` mit `export ZDOTDIR=~/.config/zsh` und dort eine `.zshrc` mit `alias pdtest='echo ok'` → neue Sitzung: `pdtest` gibt `ok`, Befehlsmarken funktionieren.
+- [ ] **fish:** zweite Sitzung in `pd-fish` → eigenes `config.fish` wirkt (kein Gruß); Sprünge, Exit-Code (`false`), Dauer (`sleep 2`) und Ordner (`cd /tmp`) wie bei zsh. Erste Sitzung direkt nach dem Start einer nicht laufenden Distribution: ohne Integration ist erlaubt, nach Neu laden mit.
+- [ ] **Claude-Start zsh/fish:** Claude-Sitzung mit mehrzeiligem System-Prompt (Claude-Optionen) in `pd-zsh` und `pd-fish` → die getippte Startzeile hat in zsh `$'…'`, in fish `'…'\n'…'`; Claude startet ohne Syntaxfehler (Ersatz-`claude`-Skript in der Test-Distribution genügt); Status „bereit“ verschwindet nach `/exit`, sobald der Prompt zurück ist.
+- [ ] **Unbekannt:** Login-Shell der Test-Distribution auf `/bin/sh` → Eintrag „(sh, ohne Integration)“, Sitzung startet normal. Distribution, deren Abfrage scheitert (z. B. hängende Distribution) → „(Shell unbekannt)“, bash-Integration wie bisher.
+- [ ] **Aufräumen:** nach einer zsh- und einer fish-Sitzung liegt `shell-integration` im Datenordner; Paneldeck über das Tray beenden → Ordner ist weg.
+- [ ] **fish ohne bekannte Login-Shell:** Paneldeck starten, während `pd-fish` nicht läuft, sofort eine Sitzung darin → Befehlsmarken kommen trotzdem (über `XDG_DATA_DIRS`); `echo $XDG_DATA_DIRS` ist leer bzw. ohne `shell-integration`, `set -q PANELDECK_XDG` falsch. Gleiches in einer bash-Distribution: `echo "$XDG_DATA_DIRS|$PANELDECK_XDG"` ergibt `|`.
+- [ ] **zsh vor der Abfrage:** in einer noch nicht laufenden zsh-Distribution die erste Sitzung: startet mit deiner Konfiguration (ggf. ohne Marken), die zweite mit Marken. `/etc/zsh/zshenv` mit `: ${ZDOTDIR:=$HOME/.config/zsh}` → Verhalten wie in der Doku beschrieben.
+- [ ] **printf x (zsh):** `run_command` mit `printf x` liefert genau `x` (Smoke prüft es mit Test-Distribution); im Terminal steht wie gewohnt die `%`-Markierung.
+- [ ] **fish 4:** mit fish ≥ 4 (sendet selbst OSC 133) springen Strg+Umschalt+Hoch/Runter genau einen Prompt weiter, kein doppelter Eintrag je Befehl.
+- [ ] **Shell je Profil:** *Einstellungen → Profile* → Profil mit Shell „WSL: pd-zsh“ → Zeile „Shell in WSL“ zeigt „Automatisch (zsh)“ und die Einträge aus `/etc/shells` (andere als „… (ohne Integration)“); `/usr/bin/fish` wählen → neue Sitzung mit dem Profil läuft in fish mit Marken; zurück auf Automatisch → zsh.
+- [ ] **Verschachtelt:** in einer bash-/PowerShell-Sitzung `ssh` zu einem Rechner ohne Schnipsel (oder `bash --norc` bzw. `python`), dort zwei Befehle → Seitenleiste zeigt „ohne Shell-Integration“; Agent: `run_command` liefert `quality: approx`, `exit_code: null`; nach `exit` (Prompt der äußeren Shell) verschwindet der Hinweis.
+- [ ] **Schnipsel:** *Einstellungen → Terminal* → je bash/zsh/fish „Kopieren“ → in die Startdatei auf dem anderen Rechner → nach neuem `ssh`: kein Hinweis „ohne Shell-Integration“, Sprünge funktionieren, `run_command` wieder exakt.
+- [ ] **Dateinamen:** eine Datei `x';touch pwned;#` (bzw. mit Backslash vor dem `'`) in eine fish-Sitzung ziehen → der Name steht korrekt gequotet in der Eingabe; Enter legt keine Datei `pwned` an.
+- [ ] **Beide Sprachen:** Zusätze „(Shell unbekannt)“/„(shell unknown)“ und „ohne Integration“/„without integration“ und der Text der Einstellung Shell-Integration auf Deutsch und Englisch.
 
 ## 67 · macOS (#150, 2.5.0, experimentell) – nur mit einem echten Mac (Freiwillige, Beta-Aufruf)
 

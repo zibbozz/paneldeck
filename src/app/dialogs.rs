@@ -1231,7 +1231,7 @@ pub(super) fn claude_tab(
 /// freien Resten alter `claude_args`. Ohne Zugriff aufs Dateisystem ([`ClaudeOpts::preview`]).
 pub(super) fn preview_line(o: &ClaudeOpts, shell: Option<&ShellSpec>, legacy_rest: &str) -> String {
     use crate::claude_opts::PathStyle;
-    let kind = shell.map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Pwsh);
+    let kind = shell.map(crate::shells::quote_kind).unwrap_or(crate::quote::Kind::Pwsh);
     let style = shell.map(|s| PathStyle::for_shell(&s.id, &s.program, kind)).unwrap_or(PathStyle::Native);
     format!("{}{}", style.claude_program(), o.preview(kind, style, legacy_rest))
 }
@@ -1488,10 +1488,11 @@ fn new_dialog_general(ui: &mut Ui, d: &mut NewDialog, shells: &[ShellSpec], prof
             ui.end_row();
         }
         ui.label("Shell");
-        let cur = shells.iter().find(|s| s.id == d.shell_id).map(|s| s.label.clone()).unwrap_or_default();
+        // WSL mit erkannter Login-Shell, z. B. „WSL: Ubuntu (zsh)“ (#57).
+        let cur = shells.iter().find(|s| s.id == d.shell_id).map(|s| crate::shells::display_label(s, lang)).unwrap_or_default();
         egui::ComboBox::from_id_salt("shellsel").selected_text(cur).show_ui(ui, |ui| {
             for s in shells {
-                ui.selectable_value(&mut d.shell_id, s.id.clone(), &s.label);
+                ui.selectable_value(&mut d.shell_id, s.id.clone(), crate::shells::display_label(s, lang));
             }
         });
         ui.end_row();
