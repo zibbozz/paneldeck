@@ -31,13 +31,26 @@ pub(super) struct ProcRun {
     started: Option<u64>,
     /// Ende bemerkt, Exit-Code noch nicht da (Unix: das Kind ist noch nicht eingesammelt).
     exit_seen: Option<Instant>,
+    /// Die Shell ist beendet, aber im Job laufen noch Nachfahren (z. B. ein Server, den `npm` gestartet hat): „Stoppen“
+    /// bleibt möglich und zählt beim Beenden mit.
+    pub leftover: bool,
+    /// Nächste Prüfung auf solche Nachfahren (nach dem Ende, dann jede Sekunde, solange welche laufen).
+    leftover_check: Option<Instant>,
+}
+
+impl ProcRun {
+    /// Läuft noch etwas – die Shell oder übrig gebliebene Nachfahren?
+    pub fn running(&self) -> bool {
+        self.life.status.active() || self.leftover
+    }
 }
 
 impl Drop for ProcRun {
     fn drop(&mut self) {
-        // Programme der Prozessliste enden mit Paneldeck (der Job hat zusätzlich KILL_ON_JOB_CLOSE).
+        // Programme der Prozessliste enden mit Paneldeck (der Job hat zusätzlich KILL_ON_JOB_CLOSE) – auch Nachfahren,
+        // die das Ende der Shell überlebt haben.
         if let Some(s) = &self.session {
-            if self.life.status.active() {
+            if self.life.status.active() || self.leftover || s.job_has_leftovers() {
                 s.kill_tree();
             }
         }
@@ -172,24 +185,44 @@ pub(super) struct ProcsState {
     own: Option<Vec<std::net::IpAddr>>,
     /// Hinweis beim Laden (beschädigte Datei), einmal als Toast.
     load_notice: Option<String>,
+    /// Unbekannte Felder der Datei und ob Speichern gesperrt ist (`procs::load`).
+    meta: procs::FileMeta,
 }
 
 impl ProcsState {
     pub fn load(dir: &std::path::Path) -> ProcsState {
-        let (defs, load_notice) = procs::load(dir);
-        ProcsState { defs, load_notice, ..Default::default() }
+        let (defs, meta, load_notice) = procs::load(dir);
+        ProcsState { defs, load_notice, meta, ..Default::default() }
     }
 
     pub fn status(&self, id: u64) -> Status {
         self.runs.get(&id).map(|r| r.life.status).unwrap_or_default()
     }
 
-    pub fn any_active(&self) -> bool {
-        self.runs.values().any(|r| r.life.status.active())
+    /// Läuft bei einem Eintrag noch etwas (Shell oder übrig gebliebene Nachfahren)?
+    pub fn running(&self, id: u64) -> bool {
+        self.runs.get(&id).is_some_and(|r| r.running())
     }
 
-    fn active_names(&self) -> Vec<String> {
-        self.defs.iter().filter(|d| self.status(d.id).active()).map(|d| d.name.clone()).collect()
+    pub fn any_active(&self) -> bool {
+        self.runs.values().any(|r| r.running())
+    }
+
+    /// Namen der laufenden Einträge (für die Rückfrage beim Beenden); übrig gebliebene Nachfahren mit Zusatz.
+    fn active_names(&self, lang: Lang) -> Vec<String> {
+        self.defs
+            .iter()
+            .filter_map(|d| {
+                let r = self.runs.get(&d.id)?;
+                if r.life.status.active() {
+                    Some(d.name.clone())
+                } else if r.leftover {
+                    Some(format!("{} {}", d.name, lang.t("(Restprozesse nach dem Ende der Shell)", "(processes left after the shell ended)")))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -240,8 +273,18 @@ impl App {
                     // Unix: Code kommt erst, wenn das Kind eingesammelt ist – kurz darauf warten.
                     if code.is_some() || now.duration_since(first) >= Duration::from_secs(1) {
                         run.exit_seen = None;
+                        let was_stopping = run.life.status == Status::Stopping;
                         let flavor = run.flavor.unwrap_or(procs::Flavor::Bash);
                         let fx = run.life.on_exit(flavor, code.map(procs::signed_code));
+                        // Gewünschter Stopp: was die Shell überlebt hat, gleich mit beenden.
+                        if was_stopping {
+                            if let Some(s) = run.session.as_ref() {
+                                if s.job_has_leftovers() {
+                                    s.kill_tree();
+                                }
+                            }
+                        }
+                        run.leftover_check = Some(now);
                         self.proc_scan(id, true);
                         self.proc_effects(ctx, id, fx);
                     } else {
@@ -250,6 +293,18 @@ impl App {
                 }
             }
             let Some(run) = self.procs.runs.get_mut(&id) else { continue };
+            // Nach dem Ende der Shell: laufen noch Nachfahren im Job? (jede Sekunde, solange ja)
+            if !run.life.status.active() {
+                if let Some(at) = run.leftover_check {
+                    if now >= at {
+                        run.leftover = run.session.as_ref().is_some_and(|s| s.job_has_leftovers());
+                        run.leftover_check = run.leftover.then(|| now + Duration::from_secs(1));
+                    }
+                    if run.leftover_check.is_some() {
+                        waiting = true;
+                    }
+                }
+            }
             let fx = run.life.tick(now);
             if run.life.status == Status::Stopping {
                 waiting = true;
@@ -271,6 +326,16 @@ impl App {
             Cmd::Start(id) => self.proc_start(ctx, id),
             Cmd::Stop(id) => {
                 if let Some(r) = self.procs.runs.get_mut(&id) {
+                    // Shell beendet, Nachfahren laufen weiter: den Job (Baum) beenden.
+                    if !r.life.status.active() && r.leftover {
+                        if let Some(s) = r.session.as_ref() {
+                            s.kill_tree();
+                        }
+                        r.leftover = false;
+                        r.leftover_check = Some(now + Duration::from_millis(500));
+                        ctx.request_repaint_after(Duration::from_millis(500));
+                        return;
+                    }
                     let fx = r.life.stop(now);
                     self.proc_effects(ctx, id, fx);
                 }
@@ -368,14 +433,28 @@ impl App {
         let res: Result<(Session, procs::Flavor), String> = (|| {
             let shell = procs::resolve_shell(&def.shell, &self.shells).ok_or_else(|| format!("{} {}", lang.t("Shell nicht gefunden:", "Shell not found:"), lang.q(&def.shell)))?;
             let cwd = def.cwd.trim();
-            if !cwd.is_empty() && !crate::wsl::is_wsl_unc(cwd) && !std::path::Path::new(cwd).is_dir() {
-                return Err(format!("{} {}", lang.t("Ordner nicht gefunden:", "Folder not found:"), lang.q(cwd)));
+            // Ohne den UI-Thread an einer hängenden Netzwerkfreigabe zu blockieren (#216); lässt sich der Ordner nicht
+            // bestätigen, startet der Prozess nicht (statt still im Standardordner der Shell).
+            if !cwd.is_empty() && !crate::wsl::is_wsl_unc(cwd) {
+                match crate::pathfmt::dir_exists_quick(cwd, Duration::from_millis(400)) {
+                    Some(true) => {}
+                    Some(false) => return Err(format!("{} {}", lang.t("Ordner nicht gefunden:", "Folder not found:"), lang.q(cwd))),
+                    None => return Err(format!("{} {}", lang.t("Ordner antwortet nicht (Netzwerk?), bitte erneut versuchen:", "Folder does not respond (network?), please try again:"), lang.q(cwd))),
+                }
             }
             let flavor = procs::flavor_of(shell);
             let (spec, mut env) = procs::launch_spec(shell, &def.command);
             let (vals, bad) = procs::env_values(&def);
             env.extend(vals);
             warn_env = bad;
+            // cmd ersetzt `%NAME%` im übergebenen Befehl nicht selbst – vorher in derselben Umgebung ersetzen.
+            if flavor == procs::Flavor::Cmd {
+                let lookup = crate::terminal::child_env_lookup(self.settings.inherit_env, &env);
+                let expanded = procs::expand_cmd_vars(&def.command, lookup);
+                if let Some(e) = env.iter_mut().find(|(k, _)| k == procs::ENV_COMMAND) {
+                    e.1 = expanded;
+                }
+            }
             let s = Session::spawn(
                 ctx,
                 SpawnOptions {
@@ -418,11 +497,15 @@ impl App {
                 run.log = log;
                 run.started = Some(now_secs());
                 run.exit_seen = None;
+                run.leftover = false;
+                run.leftover_check = None;
             }
             Err(m) => {
                 if let Some(old) = run.session.take() {
                     old.kill_tree();
                 }
+                run.leftover = false;
+                run.leftover_check = None;
                 run.life.on_spawned(Err(m));
                 self.proc_notify(ctx, id);
             }
@@ -476,7 +559,7 @@ impl App {
     }
 
     fn procs_save(&mut self) {
-        if let Err(e) = procs::save(&self.dir, &self.procs.defs) {
+        if let Err(e) = procs::save(&self.dir, &self.procs.defs, &self.procs.meta) {
             let lang = self.settings.language;
             self.push_toast(format!("{} {e}", lang.t("Prozessliste nicht gespeichert:", "Process list not saved:")), toasts::ToastKind::Error, None);
         }
@@ -596,8 +679,14 @@ impl App {
         let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(Vec2::new(6.0, 1.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
         child.spacing_mut().item_spacing.x = 0.0;
         let mut clicked_btn = false;
+        let leftover = !status.active() && self.procs.running(id);
         if status.active() {
             if style::icon_btn_small(&mut child, SIcon::Stop, &format!("{} (Strg+C, {})", lang.t("Stoppen", "Stop"), lang.t("nach 5 s ganzer Prozessbaum", "after 5 s the whole process tree"))).clicked() {
+                self.procs.cmds.push(Cmd::Stop(id));
+                clicked_btn = true;
+            }
+        } else if leftover {
+            if style::icon_btn_small(&mut child, SIcon::Stop, lang.t("Die Shell ist beendet, aber von ihr gestartete Programme laufen noch – alle beenden", "The shell has ended, but programs it started are still running – end them all")).clicked() {
                 self.procs.cmds.push(Cmd::Stop(id));
                 clicked_btn = true;
             }
@@ -617,10 +706,13 @@ impl App {
         }
         child.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             let (dr, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
-            ui.painter().circle_filled(dr.center(), 4.0, status_color(status));
+            ui.painter().circle_filled(dr.center(), 4.0, status_color(if leftover { Status::Stopping } else { status }));
             ui.add(egui::Label::new(RichText::new(&d.name)).truncate().selectable(false));
         });
-        let tip = format!("{} · {}\n{}", d.name, status.label(lang, code), d.command);
+        let mut tip = format!("{} · {}\n{}", d.name, status.label(lang, code), d.command);
+        if leftover {
+            tip.push_str(&format!("\n{}", lang.t("Von der Shell gestartete Programme laufen noch.", "Programs started by the shell are still running.")));
+        }
         let resp = resp.on_hover_text(tip);
         if resp.clicked() && !clicked_btn {
             self.procs.view = Some(id);
@@ -635,6 +727,10 @@ impl App {
                 ui.close();
             }
             if status.active() && ui.button(lang.t("Stoppen", "Stop")).clicked() {
+                self.procs.cmds.push(Cmd::Stop(id));
+                ui.close();
+            }
+            if leftover && ui.button(lang.t("Restprozesse beenden", "End remaining processes")).clicked() {
                 self.procs.cmds.push(Cmd::Stop(id));
                 ui.close();
             }
@@ -689,6 +785,7 @@ impl App {
             Some(r) => (r.life.status, r.life.exit_code, r.urls.clone(), r.life.message.clone()),
             None => (Status::Stopped, None, Vec::new(), None),
         };
+        let leftover = !status.active() && self.procs.running(id);
         let mut close = false;
         ui.scope_builder(UiBuilder::new().max_rect(head.shrink2(Vec2::new(10.0, 4.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -716,6 +813,10 @@ impl App {
             }
             if status.active() {
                 if style::icon_btn_small(ui, SIcon::Stop, lang.t("Stoppen (Strg+C, nach 5 s ganzer Prozessbaum)", "Stop (Ctrl+C, after 5 s the whole process tree)")).clicked() {
+                    self.procs.cmds.push(Cmd::Stop(id));
+                }
+            } else if leftover {
+                if style::icon_btn_small(ui, SIcon::Stop, lang.t("Restprozesse beenden (von der Shell gestartete Programme laufen noch)", "End remaining processes (programs started by the shell are still running)")).clicked() {
                     self.procs.cmds.push(Cmd::Stop(id));
                 }
             } else if style::icon_btn_small(ui, SIcon::Play, lang.t("Starten", "Start")).clicked() {
@@ -778,11 +879,17 @@ impl App {
             ui.painter().rect_filled(bar, 0.0, Color32::from_black_alpha(200));
             ui.scope_builder(UiBuilder::new().max_rect(bar.shrink2(Vec2::new(8.0, 3.0))), |ui| {
                 ui.horizontal(|ui| {
-                    let text = match &msg {
+                    let mut text = match &msg {
                         Some(m) => format!("{}: {m}", status.label(lang, code)),
                         None => status.label(lang, code),
                     };
+                    if leftover {
+                        text.push_str(&format!(" – {}", lang.t("von der Shell gestartete Programme laufen noch", "programs started by the shell are still running")));
+                    }
                     ui.colored_label(if status == Status::Exited { Color32::from_gray(220) } else { style::DANGER_SOFT }, text);
+                    if leftover && ui.button(lang.t("Restprozesse beenden", "End remaining processes")).clicked() {
+                        self.procs.cmds.push(Cmd::Stop(id));
+                    }
                     if ui.button(lang.t("Neu starten", "Restart")).clicked() {
                         self.procs.cmds.push(Cmd::Start(id));
                     }
@@ -983,7 +1090,7 @@ impl App {
         match self.procs.quit {
             QuitState::None => {}
             QuitState::Ask => {
-                let names = self.procs.active_names();
+                let names = self.procs.active_names(lang);
                 if names.is_empty() {
                     self.procs.quit = QuitState::None;
                     ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
@@ -1002,13 +1109,10 @@ impl App {
                 match o {
                     closing::Outcome::Go | closing::Outcome::Keep => {
                         self.quitting = true;
-                        let now = Instant::now();
                         let ids: Vec<u64> = self.procs.runs.keys().copied().collect();
                         for id in ids {
-                            if let Some(r) = self.procs.runs.get_mut(&id) {
-                                let fx = r.life.stop(now);
-                                self.proc_effects(ctx, id, fx);
-                            }
+                            // auch übrig gebliebene Nachfahren (Cmd::Stop beendet dann den Job)
+                            self.proc_cmd(ctx, Cmd::Stop(id));
                         }
                         self.procs.quit = QuitState::Stopping;
                     }
@@ -1020,7 +1124,7 @@ impl App {
                 }
             }
             QuitState::Stopping => {
-                let n = self.procs.active_names().len();
+                let n = self.procs.active_names(lang).len();
                 style::movable(ctx, Id::new("procs_quit_wait"), egui::Window::new(lang.t("Prozesse werden gestoppt …", "Stopping processes …"))).collapsible(false).resizable(false).show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -1057,6 +1161,7 @@ impl App {
             "urls": r.map(|r| r.urls.iter().map(|u| procs::browser_url(u)).collect::<Vec<_>>()).unwrap_or_default(),
             "error_lines": r.map(|r| r.errors).unwrap_or(0),
             "started_at": r.filter(|_| status.active()).and_then(|r| r.started),
+            "leftover_processes": r.is_some_and(|r| !status.active() && r.leftover),
         });
         if let Some(m) = r.and_then(|r| r.life.message.clone()) {
             v["message"] = json!(m);
@@ -1118,17 +1223,12 @@ impl App {
                     }
                     _ => return Err(er("bad_args", state::t("Genau eines von process oder group angeben.", "Give exactly one of process or group.").into())),
                 };
-                let now = Instant::now();
                 let order: Vec<u64> = if tool == "stop_process" { ids.iter().rev().copied().collect() } else { ids };
                 for id in order.iter().copied() {
                     match tool {
                         "start_process" => self.proc_start(ctx, id),
-                        "stop_process" => {
-                            if let Some(r) = self.procs.runs.get_mut(&id) {
-                                let fx = r.life.stop(now);
-                                self.proc_effects(ctx, id, fx);
-                            }
-                        }
+                        // auch übrig gebliebene Nachfahren nach dem Ende der Shell
+                        "stop_process" => self.proc_cmd(ctx, Cmd::Stop(id)),
                         _ => self.proc_cmd(ctx, Cmd::Restart(id)),
                     }
                 }

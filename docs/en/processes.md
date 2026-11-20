@@ -19,10 +19,10 @@ The *Processes* section sits in the Terminals sidebar above the templates and ca
 |---|---|
 | Name | Shown in the list, in notifications and to agents. |
 | Command | A command line, run through the chosen shell – so `npm`, `php`, `ng` and other programs are found via `PATH` like in a terminal. |
-| Folder | Working folder (empty = the shell's default folder). A folder that doesn't exist makes the start fail. |
-| Shell | PowerShell by default (PowerShell 7 if installed, else Windows PowerShell); or any detected shell – cmd, Git Bash, WSL. PowerShell starts without your profile (`-NoProfile`). |
+| Folder | Working folder (empty = the shell's default folder). A folder that doesn't exist makes the start fail – as does a network folder that doesn't answer within a moment (then try again). |
+| Shell | PowerShell by default (PowerShell 7 if installed, else Windows PowerShell); or any detected shell – cmd, Git Bash, WSL. PowerShell starts without your profile (`-NoProfile`). With cmd, `%NAME%` in the command is replaced like on a typed command line (e.g. `cd %USERPROFILE%pp && npm start`); unknown variables stay as they are, `%X:~0,3%` and `%X:a=b%` are not evaluated. |
 | Project | The project the entry belongs to (or none). |
-| Group, Order | Entries with the same group start and stop together: in ascending *Order* when starting (e.g. backend 1, frontend 2), in reverse when stopping. |
+| Group, Order | Entries with the same group start and stop together: in ascending *Order* when starting (e.g. backend 1, frontend 2), in reverse when stopping. *Order* is only the order of starting: the next entry starts as soon as the previous one has been started – Paneldeck does not wait until it is ready (e.g. listening on its port). |
 | Start automatically | *Never* (default), *With Paneldeck* or *When the project is opened* (also at start when it is the open project; once per run). |
 | Log file | Also write the output to `process-logs/<id>-<name>.log` in the data folder (off by default). Each line gets a time stamp; at 5 MB the file is rotated (`.1` … `.3`). |
 | Environment variables | Name and value. Values are stored **encrypted** (Windows DPAPI, readable only by the same Windows user on the same computer) and never shown to agents or written to logs. When editing, an empty value keeps the stored one. |
@@ -33,6 +33,8 @@ Changes to a running entry apply from its next start. An entry can only be delet
 A process runs in a console without input (colours and progress bars work, typing is disabled). The output keeps the last **10,000 lines**; *Search* (Ctrl+F), *Copy the whole output* and *Clear the output* are in the pane's header, and selected text is copied with Ctrl+C or a right-click.
 
 **Stop** (button or Ctrl+C in the output without a selection) sends Ctrl+C; if the process hasn't ended **after 5 seconds**, Paneldeck ends the **whole process tree** (Windows: the job object the process runs in; Linux/macOS: its process group). *Restart* stops a running process this way and starts it again.
+
+If the shell ends but programs it started keep running (e.g. a server started in the background), the entry keeps a yellow dot and a *Stop* button (*End remaining processes*) that ends them; they also count when quitting Paneldeck.
 
 | State | Meaning |
 |---|---|

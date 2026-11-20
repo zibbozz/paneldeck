@@ -164,39 +164,122 @@ impl ProcDef {
     }
 }
 
+/// Was beim Laden über die Datei selbst bekannt ist und beim Speichern gebraucht wird.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileMeta {
+    /// Unbekannte Felder der obersten Ebene (aus neueren Versionen); bleiben beim Speichern erhalten.
+    pub extra: serde_json::Map<String, Value>,
+    /// Speichern gesperrt (Grund für den Nutzer): Die Datei ließ sich nicht lesen und nicht sichern, oder sie stammt
+    /// aus einer neueren Version. Dann wird sie nie überschrieben.
+    pub locked: Option<String>,
+}
+
 /// Datei `processes.json` lesen (tolerant): BOM erlaubt, ein ungültiger Eintrag wird übersprungen, doppelte oder
-/// fehlende Kennungen neu vergeben. Fehlt die Datei: leere Liste. Gibt die Liste und ggf. einen Hinweis zurück
-/// (beschädigte Datei → Sicherung `processes.defekt-<zeit>.json`).
-pub fn load(dir: &Path) -> (Vec<ProcDef>, Option<String>) {
+/// fehlende Kennungen neu vergeben. Fehlt die Datei: leere Liste. Gibt die Liste, Angaben zur Datei und ggf. einen
+/// Hinweis zurück.
+/// * Teilweise unlesbar (kaputtes JSON, ungültiges UTF-8) → Sicherung `processes.defekt-<zeit>.json`, gespeichert wird
+///   erst, wenn die Sicherung existiert; ließ sie sich nicht anlegen, bleibt das Speichern gesperrt.
+/// * Nicht lesbar (gesperrt, keine Berechtigung …) → leere Liste, Speichern gesperrt (die Datei bleibt unverändert).
+/// * Neuere `version` als [`FORMAT_VERSION`] → Speichern gesperrt (kein Herabstufen).
+pub fn load(dir: &Path) -> (Vec<ProcDef>, FileMeta, Option<String>) {
     let path = dir.join(FILE);
-    let Ok(text) = std::fs::read_to_string(&path) else { return (Vec::new(), None) };
-    let (list, bad) = parse(&text);
-    if bad {
-        let b = crate::state::backup_corrupt(&path).map(|p| p.display().to_string()).unwrap_or_default();
-        let msg = if crate::state::lang() == Lang::De {
-            format!("Die Prozessliste (processes.json) war teilweise unlesbar – Sicherung: {b}")
-        } else {
-            format!("The process list (processes.json) was partly unreadable – backup: {b}")
-        };
-        return (list, Some(msg));
+    let de = crate::state::lang() == Lang::De;
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), FileMeta::default(), None),
+        Err(e) => {
+            let msg = if de {
+                format!("Die Prozessliste (processes.json) ließ sich nicht lesen ({e}). Änderungen an der Liste werden nicht gespeichert, damit die Datei erhalten bleibt – bitte prüfen und Paneldeck neu starten.")
+            } else {
+                format!("The process list (processes.json) could not be read ({e}). Changes to the list are not saved so the file stays intact – please check it and restart Paneldeck.")
+            };
+            return (Vec::new(), FileMeta { extra: Default::default(), locked: Some(msg.clone()) }, Some(msg));
+        }
+    };
+    let (text, bad_utf8) = match String::from_utf8(bytes) {
+        Ok(t) => (t, false),
+        Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), true),
+    };
+    let p = parse_file(&text);
+    let mut meta = FileMeta { extra: p.extra, locked: None };
+    let mut notice = None;
+    if p.bad || bad_utf8 {
+        match crate::state::backup_corrupt(&path) {
+            Some(b) => {
+                notice = Some(if de {
+                    format!("Die Prozessliste (processes.json) war teilweise unlesbar – Sicherung: {}", b.display())
+                } else {
+                    format!("The process list (processes.json) was partly unreadable – backup: {}", b.display())
+                });
+            }
+            None => {
+                let msg = if de {
+                    "Die Prozessliste (processes.json) war teilweise unlesbar und ließ sich nicht sichern. Änderungen werden nicht gespeichert, damit die Datei erhalten bleibt – bitte prüfen und Paneldeck neu starten."
+                } else {
+                    "The process list (processes.json) was partly unreadable and could not be backed up. Changes are not saved so the file stays intact – please check it and restart Paneldeck."
+                };
+                meta.locked = Some(msg.into());
+                notice = Some(msg.into());
+            }
+        }
     }
-    (list, None)
+    if p.version > FORMAT_VERSION as u64 {
+        let msg = if de {
+            format!("Die Prozessliste (processes.json) stammt aus einer neueren Paneldeck-Version (Format {}). Änderungen an der Liste werden nicht gespeichert, damit sie nicht verloren gehen.", p.version)
+        } else {
+            format!("The process list (processes.json) comes from a newer Paneldeck version (format {}). Changes to the list are not saved so nothing gets lost.", p.version)
+        };
+        meta.locked = Some(msg.clone());
+        notice = Some(msg);
+    }
+    (p.list, meta, notice)
+}
+
+/// Zerlegter Inhalt von `processes.json`.
+#[derive(Debug, Default)]
+pub struct Parsed {
+    pub list: Vec<ProcDef>,
+    /// Etwas war unlesbar (kaputtes JSON, ungültiger Eintrag).
+    pub bad: bool,
+    /// Feld `version` (fehlt = 1).
+    pub version: u64,
+    /// Unbekannte Felder der obersten Ebene.
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Inhalt von `processes.json` zerlegen (mit Version und unbekannten Feldern der obersten Ebene).
+pub fn parse_file(text: &str) -> Parsed {
+    let Ok(v) = serde_json::from_str::<Value>(crate::state::strip_bom(text)) else { return Parsed { bad: true, version: 1, ..Default::default() } };
+    let Some(obj) = v.as_object() else { return Parsed { bad: true, version: 1, ..Default::default() } };
+    // Eine unlesbare Version zählt als neuer (sicherer: nicht überschreiben).
+    let version = match obj.get("version") {
+        None => 1,
+        Some(x) => x.as_u64().unwrap_or(u64::MAX),
+    };
+    let extra: serde_json::Map<String, Value> = obj.iter().filter(|(k, _)| k.as_str() != "version" && k.as_str() != "processes").map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut bad = false;
+    let mut out: Vec<ProcDef> = Vec::new();
+    match obj.get("processes") {
+        None => {}
+        Some(Value::Array(items)) => {
+            for it in items {
+                match serde_json::from_value::<ProcDef>(it.clone()) {
+                    Ok(d) => out.push(d),
+                    Err(_) => bad = true,
+                }
+            }
+        }
+        Some(_) => bad = true,
+    }
+    fix_ids(&mut out);
+    Parsed { list: out, bad, version, extra }
 }
 
 /// Inhalt von `processes.json` zerlegen; `true` = etwas war unlesbar.
+#[cfg(test)]
 pub fn parse(text: &str) -> (Vec<ProcDef>, bool) {
-    let Ok(v) = serde_json::from_str::<Value>(crate::state::strip_bom(text)) else { return (Vec::new(), true) };
-    let Some(items) = v.get("processes").and_then(|p| p.as_array()) else { return (Vec::new(), !v.is_object()) };
-    let mut bad = false;
-    let mut out: Vec<ProcDef> = Vec::new();
-    for it in items {
-        match serde_json::from_value::<ProcDef>(it.clone()) {
-            Ok(d) => out.push(d),
-            Err(_) => bad = true,
-        }
-    }
-    fix_ids(&mut out);
-    (out, bad)
+    let p = parse_file(text);
+    (p.list, p.bad)
 }
 
 /// Kennung 0 und doppelte Kennungen neu vergeben (die erste behält ihre).
@@ -213,13 +296,26 @@ pub fn fix_ids(list: &mut [ProcDef]) {
 }
 
 /// JSON der Datei (Version + Einträge).
+#[cfg(test)]
 pub fn to_json(list: &[ProcDef]) -> Value {
-    serde_json::json!({ "version": FORMAT_VERSION, "processes": list })
+    to_json_with(list, &serde_json::Map::new())
 }
 
-/// Atomar speichern.
-pub fn save(dir: &Path, list: &[ProcDef]) -> std::io::Result<()> {
-    let text = serde_json::to_string_pretty(&to_json(list)).map_err(std::io::Error::other)?;
+/// JSON der Datei mit den unbekannten Feldern der obersten Ebene (`extra`, aus [`FileMeta`]).
+pub fn to_json_with(list: &[ProcDef], extra: &serde_json::Map<String, Value>) -> Value {
+    let mut m = extra.clone();
+    m.insert("version".into(), serde_json::json!(FORMAT_VERSION));
+    m.insert("processes".into(), serde_json::to_value(list).unwrap_or(Value::Array(Vec::new())));
+    Value::Object(m)
+}
+
+/// Atomar speichern. Ist das Speichern gesperrt ([`FileMeta::locked`]), bleibt die Datei unverändert (Fehler mit dem
+/// Grund).
+pub fn save(dir: &Path, list: &[ProcDef], meta: &FileMeta) -> std::io::Result<()> {
+    if let Some(why) = &meta.locked {
+        return Err(std::io::Error::other(why.clone()));
+    }
+    let text = serde_json::to_string_pretty(&to_json_with(list, &meta.extra)).map_err(std::io::Error::other)?;
     crate::state::write_atomic(&dir.join(FILE), text.as_bytes())
 }
 
@@ -361,6 +457,8 @@ pub fn launch_spec(shell: &ShellSpec, command: &str) -> (ShellSpec, Vec<(String,
             spec.args = vec!["-NoLogo".into(), "-NoProfile".into(), "-EncodedCommand".into(), encode_pwsh(&pwsh_script(command))];
         }
         Flavor::Cmd => {
+            // `%NAME%` in der Befehlszeile ersetzt die Laufzeit vorher ([`expand_cmd_vars`]), weil cmd den Inhalt
+            // der Variable nicht ein zweites Mal ersetzt.
             spec.args = vec!["/d".into(), "/c".into(), format!("%{ENV_COMMAND}%")];
             env.push((ENV_COMMAND.to_string(), command.to_string()));
         }
@@ -378,6 +476,42 @@ pub fn launch_spec(shell: &ShellSpec, command: &str) -> (ShellSpec, Vec<(String,
         }
     }
     (spec, env)
+}
+
+/// cmd: `%NAME%` so ersetzen, wie cmd es bei einer getippten Befehlszeile tut (Phase 1, vor dem Zerlegen an `&&`, `|`
+/// …), z. B. `cd %USERPROFILE%\app && npm start`. Nötig, weil cmd den per `%PANELDECK_PROCESS_COMMAND%` übergebenen
+/// Text nur einmal ersetzt – Variablen darin blieben sonst wörtlich stehen. `lookup` liefert den Wert aus der Umgebung,
+/// die das Programm bekommt (ohne Groß-/Kleinschreibung). Wie bei cmd auf der Befehlszeile: eine unbekannte Variable
+/// bleibt samt `%` stehen, ein einzelnes `%` auch; Teilstring/Ersetzen (`%X:~0,3%`, `%X:a=b%`) wird nicht ausgewertet.
+/// Ein Wert mit `&` wirkt danach wie in cmd als Operator – es ist dieselbe Umgebung, die der Nutzer selbst setzt.
+pub fn expand_cmd_vars(command: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut rest = command;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let Some(j) = after.find('%') else {
+            out.push('%');
+            rest = after;
+            continue;
+        };
+        let name = &after[..j];
+        let ok = !name.is_empty() && !name.contains(':') && !name.chars().any(|c| c.is_control());
+        match ok.then(|| lookup(name)).flatten() {
+            Some(v) => {
+                out.push_str(&v);
+                rest = &after[j + 1..];
+            }
+            None => {
+                // unbekannt: `%NAME` bleibt, die Suche geht am schließenden `%` weiter
+                out.push('%');
+                out.push_str(name);
+                rest = &after[j..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -828,6 +962,97 @@ mod tests {
         assert_eq!(parse("kaputt").0.len(), 0);
         assert!(parse("kaputt").1);
         assert_eq!(parse("{}"), (vec![], false));
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        static C: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!("paneldeck-test-procs-{tag}-{}-{}", std::process::id(), C.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn backups(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("processes.defekt-")).count()
+    }
+
+    #[test]
+    fn unknown_top_level_fields_are_kept_and_newer_versions_never_overwritten() {
+        let dir = temp_dir("top");
+        std::fs::write(dir.join(FILE), r#"{"version":1,"later":{"a":1},"processes":[{"id":1,"name":"x","command":"y"}]}"#).unwrap();
+        let (mut l, meta, note) = load(&dir);
+        assert!(note.is_none() && meta.locked.is_none());
+        l.push(ProcDef::new(2, "z", "w"));
+        save(&dir, &l, &meta).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(FILE)).unwrap()).unwrap();
+        assert_eq!(v["later"], serde_json::json!({"a": 1}), "{v}");
+        assert_eq!(v["version"], serde_json::json!(FORMAT_VERSION));
+        assert_eq!(v["processes"].as_array().unwrap().len(), 2);
+
+        let newer = r#"{"version":7,"processes":[{"id":1,"name":"x","command":"y"}]}"#;
+        std::fs::write(dir.join(FILE), newer).unwrap();
+        let (l, meta, note) = load(&dir);
+        assert_eq!(l.len(), 1);
+        assert!(meta.locked.is_some() && note.is_some());
+        assert!(save(&dir, &l, &meta).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), newer, "nie herabgestuft");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_utf8_keeps_entries_and_backs_up_first() {
+        let dir = temp_dir("utf8");
+        let mut bytes = br#"{"version":1,"processes":[{"id":1,"name":"API "#.to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(br#"","command":"php -S localhost:8000"}]}"#);
+        std::fs::write(dir.join(FILE), &bytes).unwrap();
+        let (l, meta, note) = load(&dir);
+        assert_eq!(l.len(), 1, "Einträge bleiben lesbar");
+        assert_eq!(l[0].command, "php -S localhost:8000");
+        assert!(note.is_some() && meta.locked.is_none());
+        assert_eq!(backups(&dir), 1, "Sicherung vor dem nächsten Speichern");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_file_is_an_empty_list() {
+        let dir = temp_dir("missing");
+        let (l, meta, note) = load(&dir);
+        assert!(l.is_empty() && note.is_none() && meta == FileMeta::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unreadable_file_is_never_overwritten() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = temp_dir("locked");
+        let text = r#"{"version":1,"processes":[{"id":1,"name":"x","command":"y"}]}"#;
+        std::fs::write(dir.join(FILE), text).unwrap();
+        // ohne Freigabe geöffnet: Lesen und Kopieren scheitern (Freigabeverletzung)
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(dir.join(FILE)).unwrap();
+        let (l, meta, note) = load(&dir);
+        assert!(l.is_empty());
+        assert!(meta.locked.is_some() && note.is_some());
+        assert!(save(&dir, &[ProcDef::new(1, "neu", "z")], &meta).is_err());
+        drop(lock);
+        assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), text, "Datei unverändert");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cmd_variables_are_expanded_like_a_typed_command_line() {
+        let env = |n: &str| match n.to_ascii_uppercase().as_str() {
+            "USERPROFILE" => Some(r"C:\Users\a b".to_string()),
+            "X" => Some("1".to_string()),
+            _ => None,
+        };
+        assert_eq!(expand_cmd_vars(r"cd %USERPROFILE%\app && npm start", env), r"cd C:\Users\a b\app && npm start");
+        assert_eq!(expand_cmd_vars("echo %userprofile%", env), r"echo C:\Users\a b");
+        assert_eq!(expand_cmd_vars("echo %NOPE% 100% %X%", env), "echo %NOPE% 100% 1");
+        assert_eq!(expand_cmd_vars("echo %NOPE%X%", env), "echo %NOPE1", "Suche geht am schließenden % weiter");
+        assert_eq!(expand_cmd_vars("echo %X:~0,1% %% %", env), "echo %X:~0,1% %% %");
+        assert_eq!(expand_cmd_vars("ohne", env), "ohne");
     }
 
     #[test]

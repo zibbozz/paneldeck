@@ -521,6 +521,15 @@ fn apply_env(cmd: &mut CommandBuilder, inherit: bool, process: impl IntoIterator
     }
 }
 
+/// Umgebungsvariablen nachschlagen, wie sie ein mit `inherit`/`extra` gestartetes Programm sieht (dieselbe Umgebung wie
+/// bei [`Session::spawn`] ohne `term_env`; Name ohne Groß-/Kleinschreibung). Für die Prozessliste (#243, `%NAME%` bei cmd).
+pub fn child_env_lookup(inherit: bool, extra: &[(String, String)]) -> impl Fn(&str) -> Option<String> {
+    let mut cmd = CommandBuilder::new("cmd");
+    apply_env(&mut cmd, inherit, std::env::vars_os(), extra);
+    let all: Vec<(String, String)> = cmd.iter_full_env_as_str().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    move |name: &str| all.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone())
+}
+
 impl Session {
     pub fn spawn(ctx: &egui::Context, opts: SpawnOptions) -> Result<Session, String> {
         let (cols, rows) = (100u16, 30u16);
@@ -797,6 +806,17 @@ impl Session {
     /// Prozessliste (#243): Alles im Job endet, wenn er geschlossen wird (auch beim Absturz des Hubs). `false` ohne Job.
     pub fn kill_on_close(&self) -> bool {
         self.job.as_ref().is_some_and(|j| j.kill_on_close())
+    }
+
+    /// Laufen im Job noch Prozesse außer der Shell und den Konsolen-Hosts (#243: Nachfahren, die das Ende der Shell
+    /// überlebt haben)? `false` ohne Job.
+    pub fn job_has_leftovers(&self) -> bool {
+        let Some(j) = self.job.as_ref() else { return false };
+        // Schnell: Job leer (bzw. nur die Shell) – dann ohne Prozessnamen.
+        if j.pids().is_some_and(|p| p.iter().all(|p| Some(*p) == self.shell_pid)) {
+            return false;
+        }
+        !crate::platform::process::lingering(j, self.shell_pid, &crate::platform::process::ProcInfo::default()).is_empty()
     }
 
     /// Den ganzen Prozessbaum beenden (#243): Job Object (Windows) bzw. Prozessgruppe (Unix), sonst nur das Kind.
