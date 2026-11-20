@@ -351,7 +351,7 @@ fn list_editor(ui: &mut Ui, salt: Id, list: &mut Vec<PaletteColor>, defaults: &[
                 remove = Some(i);
             }
             if let Some(t) = problem {
-                ui.label(RichText::new(t).small().color(style::DANGER_SOFT));
+                ui.label(RichText::new(t).small().color(style::danger_soft()));
             }
         });
         rects.push(row.response.rect);

@@ -46,8 +46,8 @@ pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool
     ui.scope_builder(UiBuilder::new().max_rect(Rect::from_center_size(rect.center(), Vec2::new(480.0, 300.0))), |ui| {
         ui.vertical_centered(|ui| {
             let (r, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
-            ui.painter().rect_filled(r, 14.0, style::ACCENT.gamma_multiply(0.18));
-            style::paint_icon(ui.painter(), SIcon::Spark, r.center(), style::ACCENT);
+            ui.painter().rect_filled(r, 14.0, style::brand().gamma_multiply(0.18));
+            style::paint_icon(ui.painter(), SIcon::Spark, r.center(), style::brand());
             ui.add_space(S3);
             ui.heading(match kind {
                 EmptyKind::Welcome => lang.t("Willkommen bei Paneldeck", "Welcome to Paneldeck"),
@@ -65,7 +65,7 @@ pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool
             ui.add_space(S3);
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - if claude_mode { 450.0 } else { 300.0 }) / 2.0);
-                let b = ui.add(egui::Button::new(RichText::new(lang.t("Neues Terminal", "New terminal")).strong()).fill(style::ACCENT.gamma_multiply(0.85)).min_size(Vec2::new(140.0, 32.0)));
+                let b = ui.add(egui::Button::new(RichText::new(lang.t("Neues Terminal", "New terminal")).strong()).fill(style::brand().gamma_multiply(0.85)).min_size(Vec2::new(140.0, 32.0)));
                 hits.new = Some(b.rect);
                 if b.clicked() {
                     actions.push(Action::NewQuick);

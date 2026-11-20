@@ -64,6 +64,11 @@ $script:bundledConpty = $useBundled
 # Datenordner der Test-Instanz (portabel neben der Kopie). Ein gesetztes PANELDECK_DATA bzw. PANELDECK_HUB_DATA
 # eines umgebenden Paneldeck-Terminals wuerde Hub und Bruecke sonst auf andere Ordner lenken.
 $data = "$dir\paneldeck-data"
+# Themes (#309): ein gueltiges eigenes Theme mit Oberflaechenfarben und eine ungueltige Datei (fuer theme_list/theme_get).
+New-Item -ItemType Directory -Force "$data\themes" | Out-Null
+$ansi = '"ansi":["#000000","#cc3333","#33aa33","#ccaa33","#3366cc","#aa33aa","#33aaaa","#cccccc","#555555","#ff5555","#55ff55","#ffff55","#5599ff","#ff55ff","#55ffff","#ffffff"]'
+[IO.File]::WriteAllText("$data\themes\smoke.json", '{"name":"Smoke Theme","dark":true,"fg":"#e0e0e0","bg":"#202020",' + $ansi + ',"ui":{"accent":"#0080ff","border":"@text/20","future_token":"#123456"},"future_field":1}', (New-Object Text.UTF8Encoding $false))
+[IO.File]::WriteAllText("$data\themes\broken.json", '{"name":"Broken","fg":"white","bg":"#000000",' + $ansi + '}', (New-Object Text.UTF8Encoding $false))
 # Alle PANELDECK_*-Variablen eines umgebenden Paneldeck-Terminals entfernen: PANELDECK_SESSION/PORT/TOKEN (vom Hub in
 # jedes Terminal gesetzt) liessen die Bruecke sonst als "Sitzung 1" der Test-Instanz gelten, und die Pruefungen
 # "von aussen" schluegen fehl, wenn das Skript selbst in einem Paneldeck-Terminal laeuft.
@@ -1624,6 +1629,19 @@ c.close()
   Check 'Nur lesen: read_chat und list_models ja, send_chat_message nein' ($names -contains 'read_chat' -and $names -contains 'list_models' -and $names -notcontains 'send_chat_message')
   Check 'Nur lesen: send_chat_message verboten (forbidden)' ((Code (Tool 'send_chat_message' @{ session = 950; text = 'x' })) -eq 'forbidden')
   Check 'Nur lesen: create_session kind=chat verboten (forbidden)' ((Code (Tool 'create_session' @{ kind = 'chat' })) -eq 'forbidden')
+  # Themes (#309): nur lesen, Stufe Lesen.
+  Check 'Nur lesen: theme_list und theme_get vorhanden' ($names -contains 'theme_list' -and $names -contains 'theme_get')
+  $tl = Tool 'theme_list'
+  $mine = @($tl.data.themes) | Where-Object { $_.name -eq 'Smoke Theme' }
+  $od = @($tl.data.themes) | Where-Object { $_.name -eq 'One Dark' }
+  Check 'theme_list: eigenes Theme mit Datei, eingebautes ohne, aktives gesetzt' ($mine.builtin -eq $false -and $mine.file -eq 'smoke.json' -and $od.builtin -eq $true -and $null -eq $od.file -and [string]$tl.data.active -ne '' -and @(@($tl.data.themes) | Where-Object { $_.active }).Count -eq 1) $tl.text
+  $inv = @($tl.data.invalid) | Where-Object { $_.file -eq 'broken.json' }
+  Check 'theme_list: ungueltige Datei mit Grund, nicht waehlbar, ohne Pfad' ($inv -and [string]$inv.error -match 'fg' -and -not (@($tl.data.themes) | Where-Object { $_.name -eq 'Broken' }) -and $tl.text -notmatch [regex]::Escape($dir)) $tl.text
+  $tg = Tool 'theme_get' @{ name = 'Smoke Theme' }
+  Check 'theme_get: Terminal, aufgeloeste Farben, gesetzte Werte, unbekannte ignoriert' ($tg.data.terminal.bg -eq '#202020' -and @($tg.data.terminal.ansi).Count -eq 16 -and $tg.data.colors.accent -eq '#0080ff' -and $tg.data.colors.link -eq '#0080ff' -and $tg.data.overrides.border -eq '@text/20' -and $null -eq $tg.data.overrides.future_token -and ([string]$tg.data.colors.border).Length -eq 9) $tg.text
+  $ta = Tool 'theme_get'
+  Check 'theme_get ohne Namen: aktives Theme' ($ta.data.name -eq $tl.data.active -and $ta.data.active -eq $true) $ta.text
+  Check 'theme_get: unbekannter Name -> not_found' ((Code (Tool 'theme_get' @{ name = 'Gibts nicht' })) -eq 'not_found')
   $script:prestart = $null
 
   Write-Host "== Minimierte Bereiche (#142, #162): Wiederherstellung, kaputtes Layout, focus_session mit placement" -ForegroundColor Cyan

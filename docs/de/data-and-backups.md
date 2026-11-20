@@ -26,7 +26,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `scrollback/` | gespeicherter Terminalverlauf |
 | `chats/` | Verläufe der [Chats](chat.md), je Chat eine `<id>.json` (siehe [Chatverläufe](#chatverläufe)) |
 | `prompts.json` | Prompt-Bibliothek |
-| `themes/*.json` | eigene Themes (Beispiel liegt bei) |
+| `themes/*.json` | eigene Themes (Beispiel liegt bei; Format und Farbnamen: [Themes](themes.md#dateiformat), optionales Feld `ui` seit 2.6.0, höchstens 1 MB) |
 | `system-prompt.md` | deine eigene Vorlage des [Systemprompts für Agenten](agent-interface.md#systemprompt) (nur wenn du eine gespeichert hast); `system-prompt.md.bak` = die vorige Vorlage nach *Auf Standard zurücksetzen* |
 | `clipboard/` | Bilder aus der Zwischenablage (nach 14 Tagen gelöscht) |
 | `claude-hooks*.json` | von Paneldeck erzeugte Hook-Konfiguration |

@@ -400,7 +400,7 @@ impl PlanUi {
                         }
                         // Fehler, die erst die Ausführung findet (die Meldungen des Editors stehen schon darüber)
                         if let Some(msg) = check.1.as_ref().filter(|_| valid) {
-                            ui.add(egui::Label::new(RichText::new(msg).color(widgets::DANGER)).wrap());
+                            ui.add(egui::Label::new(RichText::new(msg).color(widgets::DANGER())).wrap());
                         }
                         if !filters.is_empty() {
                             ui.add_space(S1);

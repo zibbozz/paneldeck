@@ -204,7 +204,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
             ui.add_space(S1);
         }
         if let Some(w) = warning.clone() {
-            egui::Frame::new().fill(Color32::from_rgb(0xe5, 0xc0, 0x7b).gamma_multiply(0.18)).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
+            egui::Frame::new().fill(crate::style::ui().chat_approval_bg).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(w);
                     if ui.small_button(lang.t("Ausblenden", "Dismiss")).clicked() {
@@ -286,7 +286,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
                 ui.label(RichText::new(&rc.waiting).color(style::dim(ui)));
             }
             if let Some(n) = &m.note {
-                ui.label(RichText::new(format!("⚠ {n}")).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
+                ui.label(RichText::new(format!("⚠ {n}")).small().color(crate::style::ui().warning));
             }
             if let (true, Some(e)) = (is_last && rc.has_error, &m.error) {
                 error_box(ui, e, lang, out);
@@ -331,7 +331,7 @@ fn usage_text(u: Option<(Option<u32>, Option<u32>)>, lang: Lang) -> Option<Strin
 }
 
 fn error_col() -> Color32 {
-    Color32::from_rgb(0xe0, 0x6c, 0x75)
+    crate::style::ui().error
 }
 
 /// Linie mit Hinweis: davor liegende Nachrichten sieht das Modell nicht mehr.
@@ -358,7 +358,7 @@ fn user_bubble(ui: &mut Ui, m: &ChatMsg, editable: bool, lang: Lang, out: &mut C
     let size = galley.size() + Vec2::new(20.0, 14.0);
     let (row, _) = ui.allocate_exact_size(Vec2::new(full, size.y), Sense::hover());
     let bubble = Rect::from_min_size(Pos2::new(row.max.x - size.x, row.min.y), size);
-    ui.painter().rect_filled(bubble, 10.0, style::ACCENT.gamma_multiply(0.28));
+    ui.painter().rect_filled(bubble, 10.0, crate::style::ui().chat_user_bg);
     ui.painter().galley(bubble.min + Vec2::new(10.0, 7.0), galley, text_col);
     if editable {
         let br = Rect::from_center_size(Pos2::new(bubble.min.x - 16.0, bubble.min.y + 12.0), Vec2::splat(22.0));
@@ -391,13 +391,13 @@ fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut U
 
 /// Zeichen und Farbe für den Stand eines Werkzeugaufrufs (`None` = läuft: Kreisel).
 fn tool_mark(result: Option<&ChatMsg>, state: Option<CallState>, lang: Lang, dim: Color32) -> Option<(&'static str, Color32)> {
-    let ok = Color32::from_rgb(0x4c, 0xc2, 0x6a);
+    let ok = crate::style::ui().success;
     Some(match (result.map(|r| r.status), state) {
         (Some(Some(ToolStatus::Ok)) | Some(None), _) => ("✓", ok),
         (Some(Some(ToolStatus::Error)), _) => ("✗", error_col()),
         (Some(Some(ToolStatus::Denied)), _) => (lang.t("⊘ abgelehnt", "⊘ denied"), error_col()),
         (None, Some(CallState::Running)) => return None,
-        (None, Some(CallState::Approval)) => (lang.t("wartet auf Freigabe", "needs approval"), Color32::from_rgb(0xe5, 0xc0, 0x7b)),
+        (None, Some(CallState::Approval)) => (lang.t("wartet auf Freigabe", "needs approval"), crate::style::ui().warning),
         (None, _) => ("…", dim),
     })
 }
@@ -439,7 +439,7 @@ fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::V
 /// Freigabe-Zeile eines schreibenden Aufrufs. Enter gilt nur, wenn ein Knopf hier den Fokus hat (Tab), nie aus der
 /// Eingabe heraus – so gibt niemand versehentlich frei, während er tippt.
 fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::Value, target: Option<&str>, lang: Lang, out: &mut ChatOut) {
-    let warn = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    let warn = crate::style::ui().warning;
     egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.label(RichText::new(lang.t("Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:", "The model wants to use a tool with write access:")).small());
@@ -466,7 +466,7 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
             ui.label(RichText::new(more).small().color(warn));
         }
         ui.horizontal_wrapped(|ui| {
-            let allow = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(style::ACCENT.gamma_multiply(0.7)));
+            let allow = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(crate::style::ui().chat_send));
             // „Immer“ nur mit Ziel-Sitzung (Werkzeug + Sitzung); Tickets, Todos, create_session … fragen jedes Mal.
             let call = crate::chat::store::ToolCall { id: call_id.to_string(), name: name.to_string(), arguments: args.clone() };
             let always = AllowRule::eligible(&call).then(|| {
@@ -515,7 +515,7 @@ fn paused_bar(ui: &mut Ui, steps: u32, note: Option<&str>, lang: Lang, out: &mut
 
 /// Einmalige Frage vor dem ersten Senden: Darf dieses Modell Paneldeck nutzen? (Aus / Lesen / Steuern.)
 fn level_bar(ui: &mut Ui, lang: Lang, out: &mut ChatOut) {
-    let warn = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    let warn = crate::style::ui().warning;
     egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.label(RichText::new(lang.t("Darf dieses Modell Paneldeck nutzen?", "May this model use Paneldeck?")).strong());
@@ -666,7 +666,7 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
         out.focus = true;
     }
     let (label, enabled) = if streaming { (lang.t("Stopp", "Stop"), true) } else { (lang.t("Senden", "Send"), !chat.draft.trim().is_empty()) };
-    let b = ui.put(btn, egui::Button::new(RichText::new(label).strong()).fill(if streaming { error_col().gamma_multiply(0.6) } else { style::ACCENT.gamma_multiply(0.7) }));
+    let b = ui.put(btn, egui::Button::new(RichText::new(label).strong()).fill(if streaming { error_col().gamma_multiply(0.6) } else { crate::style::ui().chat_send }));
     if enabled && b.clicked() {
         if streaming {
             out.stop = true;

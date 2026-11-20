@@ -178,7 +178,7 @@ pub(crate) fn due_line(ui: &mut Ui, due_text: &str, st: Option<&DueState>, lang:
             badge(ui, st, 14.0, lang);
         }
         let overdue = st.is_some_and(|s| s.overdue());
-        let color = if overdue { Color32::from_rgb(0xe0, 0x6c, 0x75) } else { style::dim(ui) };
+        let color = if overdue { crate::style::ui().error } else { style::dim(ui) };
         let r = ui.label(RichText::new(due::display(due_text, lang)).small().color(color));
         if let Some(st) = st {
             r.on_hover_text(tooltip_text(st, lang));
@@ -200,7 +200,7 @@ pub(crate) fn due_input(ui: &mut Ui, id: Id, buf: &mut String, lang: Lang) -> bo
             changed = true;
         }
         if due::parse_input(buf).is_err() {
-            ui.label(RichText::new(lang.t("z. B. 2026-11-20 oder 20.11.2026 14:30", "e.g. 2026-11-20 or 2026-11-20 14:30")).small().color(Color32::from_rgb(0xe0, 0x6c, 0x75)));
+            ui.label(RichText::new(lang.t("z. B. 2026-11-20 oder 20.11.2026 14:30", "e.g. 2026-11-20 or 2026-11-20 14:30")).small().color(crate::style::ui().error));
         }
     });
     changed
@@ -529,7 +529,7 @@ pub(crate) fn count_label(ui: &mut Ui, (overdue, marked): (usize, usize), lang: 
     if text.is_empty() {
         return;
     }
-    let color = if overdue > 0 { Color32::from_rgb(0xe0, 0x6c, 0x75) } else { style::dim(ui) };
+    let color = if overdue > 0 { crate::style::ui().error } else { style::dim(ui) };
     let tip = format!("{overdue} {} · {marked} {}", lang.t("überfällig", "overdue"), lang.t("markiert (nach den Schwellen der Fälligkeit)", "marked (by the due-date thresholds)"));
     ui.label(RichText::new(text).small().color(color)).on_hover_text(tip);
 }

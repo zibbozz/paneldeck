@@ -35,7 +35,10 @@ const MAX_SUGGESTIONS: usize = 80;
 /// So viele Meldungen stehen unter dem Feld, der Rest wird gezählt.
 const MAX_MESSAGES: usize = 3;
 /// Rot der Fehler (wie `widgets::error`).
-const RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+#[allow(non_snake_case)]
+fn RED() -> Color32 {
+    crate::style::ui().error
+}
 
 /// Was die Leiste von außen braucht.
 pub struct QueryBarCtx<'a> {
@@ -568,7 +571,7 @@ fn messages(ui: &mut Ui, diags: &[Diag], lang: Lang, apply: &mut Option<Fix>) {
     ui.add_space(S1);
     for d in diags.iter().take(MAX_MESSAGES) {
         let col = match d.severity {
-            Severity::Error => RED,
+            Severity::Error => RED(),
             Severity::Incomplete => style::dim(ui),
         };
         ui.horizontal_wrapped(|ui| {
@@ -620,7 +623,7 @@ fn paint_waves(ui: &Ui, o: &egui::text_edit::TextEditOutput, text: &str, ranges:
                 up = !up;
             }
             pts.push(o.galley_pos + Vec2::new(x1, y + if up { -1.6 } else { 0.4 }));
-            painter.add(egui::Shape::line(pts, Stroke::new(1.3_f32, RED)));
+            painter.add(egui::Shape::line(pts, Stroke::new(1.3_f32, RED())));
         }
     }
 }
@@ -635,13 +638,13 @@ pub fn popup_order(ui: &Ui) -> egui::Order {
 
 fn kind_color(k: SuggestionKind) -> Color32 {
     match k {
-        SuggestionKind::Field => Color32::from_rgb(0x58, 0xA6, 0xE6),
-        SuggestionKind::Operator => Color32::from_rgb(0xE5, 0xA0, 0x4B),
-        SuggestionKind::Value => Color32::from_rgb(0x7F, 0xBF, 0x6A),
-        SuggestionKind::Keyword => Color32::from_rgb(0xB7, 0x7F, 0xE0),
-        SuggestionKind::Function => Color32::from_rgb(0xE0, 0x7F, 0xB0),
-        SuggestionKind::Predicate => Color32::from_rgb(0x4F, 0xB8, 0xA8),
-        SuggestionKind::SortKey => Color32::from_rgb(0xD8, 0xB9, 0x4A),
+        SuggestionKind::Field => crate::style::ui().syntax_field,
+        SuggestionKind::Operator => crate::style::ui().syntax_operator,
+        SuggestionKind::Value => crate::style::ui().syntax_value,
+        SuggestionKind::Keyword => crate::style::ui().syntax_keyword,
+        SuggestionKind::Function => crate::style::ui().syntax_function,
+        SuggestionKind::Predicate => crate::style::ui().syntax_predicate,
+        SuggestionKind::SortKey => crate::style::ui().syntax_sort,
     }
 }
 

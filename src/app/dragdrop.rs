@@ -65,7 +65,7 @@ impl App {
         });
         if let Some((fpath, r)) = folder_target {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("drag_layer")));
-            let accent = Color32::from_rgb(0xd9, 0x77, 0x57);
+            let accent = crate::style::brand();
             let is_root = fpath.is_empty();
             if !is_root {
                 painter.rect_filled(r, 6.0, Color32::from_rgba_unmultiplied(0xd9, 0x77, 0x57, 40));
@@ -105,7 +105,7 @@ impl App {
 
         let zone = drop_zone;
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("drag_layer")));
-        let accent = Color32::from_rgb(0xd9, 0x77, 0x57);
+        let accent = crate::style::brand();
         // Ablage-Symbole an allen Rändern der Bereiche (das aktive Ziel hervorgehoben).
         {
             let lang = self.settings.language;
@@ -252,7 +252,7 @@ impl App {
             if let Some((_, r)) = target {
                 let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("drop_hint")));
                 painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(0xd9, 0x77, 0x57, 60));
-                painter.rect_stroke(r.shrink(2.0), 4.0, Stroke::new(2.0_f32, Color32::from_rgb(0xd9, 0x77, 0x57)), StrokeKind::Inside);
+                painter.rect_stroke(r.shrink(2.0), 4.0, Stroke::new(2.0_f32, crate::style::brand()), StrokeKind::Inside);
                 painter.text(
                     r.center(),
                     Align2::CENTER_CENTER,

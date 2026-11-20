@@ -339,6 +339,21 @@ pub fn tools() -> Vec<ToolDef> {
             description: "List the LLM servers configured in Paneldeck (Settings -> Models) for chats: id, name, kind (ollama/openai), host:port, and their models with the tool level the user allows the model (Off/Read/Control; level_chosen = false means the user has not decided yet - the first message to such a chat makes Paneldeck ask the user, send_chat_message then returns permission_pending), whether it can call tools, and `last_used` for the model chosen last. Use the names with create_session kind=chat. API keys are never returned.",
             schema: schema(json!({}), &[]),
         },
+        // ---- Themes (#309, nur lesen)
+        ToolDef {
+            name: "theme_list",
+            level: Read,
+            group: Group::Always,
+            description: "List the colour themes: name, dark, builtin (built-in themes are read-only), file (file name in the themes folder for custom themes), active (the theme the app uses) and `active` at the top level. Theme files that cannot be loaded are listed under `invalid` with file and error; they cannot be selected. Read-only: agents cannot change themes.",
+            schema: schema(json!({}), &[]),
+        },
+        ToolDef {
+            name: "theme_get",
+            level: Read,
+            group: Group::Always,
+            description: "Read one theme (default: the active one): name, dark, builtin, file, the terminal colours (fg, bg, cursor, selection, ansi[16]), `colors` with every named interface colour resolved to #rrggbb or #rrggbbaa, and `overrides` with the values the theme sets itself (a colour or a link such as \"@text/20\"; missing names are derived). Read-only. Unknown name: not_found.",
+            schema: schema(json!({"name": {"type": "string", "description": "Theme name from theme_list (default: the active theme)"}}), &[]),
+        },
         // ---- Todo-Liste (einfacher Modus) und Projekte/Tickets (Expertenmodus)
         ToolDef {
             name: "list_todos",
@@ -1454,6 +1469,14 @@ mod tests {
         assert_eq!(get("read_chat").schema["properties"]["last"]["type"], "integer");
         assert!(get("read_chat").description.contains("untrusted"));
         assert!(get("list_models").description.contains("never returned"));
+        // Themes (#309): nur lesen, Stufe Lesen, keine Pflichtparameter.
+        for name in ["theme_list", "theme_get"] {
+            let t = get(name);
+            assert_eq!((t.level, t.group), (McpLevel::Read, Group::Always), "{name}");
+            assert!(t.schema["required"].as_array().unwrap().is_empty() && t.description.contains("Read-only"), "{name}");
+            assert!(check_access(name, McpLevel::Read, false).is_ok());
+        }
+        assert_eq!(get("theme_get").schema["properties"]["name"]["type"], "string");
         // create_session: kind/server/model sind optional (alte Aufrufe bleiben gültig)
         let c = get("create_session");
         assert_eq!(c.schema["properties"]["kind"]["enum"], json!(["terminal", "chat"]));

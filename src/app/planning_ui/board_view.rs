@@ -430,10 +430,10 @@ impl PlanUi {
                         _ => lang.t("Nicht erlaubt", "Not allowed"),
                     };
                     if over {
-                        painter.rect_stroke(*r, 8.0, Stroke::new(1.5_f32, widgets::DANGER), StrokeKind::Inside);
+                        painter.rect_stroke(*r, 8.0, Stroke::new(1.5_f32, widgets::DANGER()), StrokeKind::Inside);
                     }
-                    let g = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(12.5), widgets::DANGER);
-                    painter.galley(Pos2::new(r.center().x - g.size().x / 2.0, r.top() + 40.0), g, widgets::DANGER);
+                    let g = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(12.5), widgets::DANGER());
+                    painter.galley(Pos2::new(r.center().x - g.size().x / 2.0, r.top() + 40.0), g, widgets::DANGER());
                 } else if over {
                     painter.rect_stroke(*r, 8.0, Stroke::new(2.0_f32, style::accent()), StrokeKind::Inside);
                 }
@@ -646,7 +646,7 @@ impl PlanUi {
         egui::Area::new(Id::new("board_toast")).anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -18.0)).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
             let mut f = egui::Frame::popup(ui.style()).corner_radius(egui::CornerRadius::same(10));
             if error {
-                f = f.stroke(Stroke::new(1.2_f32, widgets::DANGER));
+                f = f.stroke(Stroke::new(1.2_f32, widgets::DANGER()));
             }
             f.show(ui, |ui| {
                 ui.set_max_width(520.0);

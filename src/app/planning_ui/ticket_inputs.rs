@@ -209,7 +209,7 @@ fn ticket_chip(ui: &mut Ui, ic: &InCx, id: i64, ev: &mut Event, clearable: bool)
             }
         }
         Err(_) => {
-            ui.label(RichText::new(format!("#{id} ({})", ic.lang.t("nicht mehr vorhanden", "no longer exists"))).color(widgets::DANGER));
+            ui.label(RichText::new(format!("#{id} ({})", ic.lang.t("nicht mehr vorhanden", "no longer exists"))).color(widgets::DANGER()));
             if clearable && style::icon_btn_small(ui, style::Icon::Close, ic.lang.t("Verweis entfernen", "Remove the reference")).clicked() {
                 clear = true;
             }
@@ -461,7 +461,7 @@ pub(super) fn field_block(ui: &mut Ui, ic: &InCx, f: &Field, d: &mut Draft, expl
         }
         let r = ui.add(egui::Label::new(t).truncate());
         if f.required {
-            ui.label(RichText::new("*").color(widgets::DANGER).strong()).on_hover_text(lang.t("Pflichtfeld", "Required field"));
+            ui.label(RichText::new("*").color(widgets::DANGER()).strong()).on_hover_text(lang.t("Pflichtfeld", "Required field"));
         }
         if !f.help.is_empty() {
             r.on_hover_text(&f.help);

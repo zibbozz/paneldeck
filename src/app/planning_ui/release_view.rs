@@ -379,10 +379,10 @@ fn release_card(ui: &mut Ui, lang: Lang, row: &ReleaseRow, idx: usize, n: usize,
             if let Some(d) = r.due_date {
                 let over = r.is_overdue(today);
                 let text = format!("{} {}", lang.t("fällig", "due"), logic::fmt_date_ui(d, lang));
-                let col = if over { widgets::DANGER } else { style::dim(ui) };
+                let col = if over { widgets::DANGER() } else { style::dim(ui) };
                 ui.label(RichText::new(text).small().color(col));
                 if over {
-                    ui.label(RichText::new(lang.t("überfällig", "overdue")).small().strong().color(widgets::DANGER));
+                    ui.label(RichText::new(lang.t("überfällig", "overdue")).small().strong().color(widgets::DANGER()));
                 }
             }
             if r.done {

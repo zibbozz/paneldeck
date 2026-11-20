@@ -1,10 +1,19 @@
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use eframe::egui::Color32;
-use serde::Deserialize;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-#[derive(Clone, PartialEq)]
+pub mod checks;
+pub mod color;
+pub mod file;
+pub mod generate;
+pub mod tokens;
+
+pub use file::{load_dir, Issue};
+pub use tokens::{Spec, UiColors};
+
+#[derive(Clone, PartialEq, Debug)]
 pub struct Theme {
     pub name: String,
     pub dark: bool,
@@ -13,13 +22,63 @@ pub struct Theme {
     pub cursor: Color32,
     pub selection: Color32,
     pub ansi: [Color32; 16],
+    /// Gesetzte Oberflächenfarben (#309, Feld `ui` der Datei); fehlende werden abgeleitet ([`tokens::default_expr`]).
+    pub ui: BTreeMap<String, Spec>,
+    /// Eingebautes Theme (nur lesen; bearbeiten nur als Kopie).
+    pub builtin: bool,
+    /// Datei eines eigenen Themes.
+    pub source: Option<PathBuf>,
 }
 
 const fn c(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// Grobe Helligkeit (0–255) für „dunkel?“ ohne Angabe in der Datei.
+pub(crate) fn luma(c: Color32) -> f32 {
+    0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32
+}
+
+/// Farbe eines Namens (Oberfläche oder Terminal) auf einen festen Wert setzen. `false` bei unbekanntem Namen.
+pub fn set_color(t: &mut Theme, name: &str, col: Color32) -> bool {
+    let solid = || col.to_opaque();
+    match name {
+        "fg" => t.fg = solid(),
+        "bg" => {
+            let a = t.bg.a();
+            let [r, g, b, _] = col.to_srgba_unmultiplied();
+            t.bg = Color32::from_rgba_unmultiplied(r, g, b, a);
+        }
+        "cursor" => t.cursor = solid(),
+        "selection" => t.selection = solid(),
+        n if n.starts_with("ansi") => match n[4..].parse::<usize>() {
+            Ok(i) if i < 16 => t.ansi[i] = solid(),
+            _ => return false,
+        },
+        n if tokens::is_ui(n) => {
+            t.ui.insert(n.to_string(), Spec::Hex(col));
+        }
+        _ => return false,
+    }
+    true
+}
+
+impl Theme {
+    /// Alle Oberflächenfarben (gesetzt oder abgeleitet).
+    pub fn ui_colors(&self) -> UiColors {
+        tokens::ui_colors(self)
+    }
+}
+
 pub fn all() -> Vec<Theme> {
+    let mut v = builtin_list();
+    for t in &mut v {
+        t.builtin = true;
+    }
+    v
+}
+
+fn builtin_list() -> Vec<Theme> {
     vec![
         Theme {
             name: "One Dark".into(),
@@ -34,6 +93,9 @@ pub fn all() -> Vec<Theme> {
                 c(0x5c, 0x63, 0x70), c(0xe0, 0x6c, 0x75), c(0x98, 0xc3, 0x79), c(0xe5, 0xc0, 0x7b),
                 c(0x61, 0xaf, 0xef), c(0xc6, 0x78, 0xdd), c(0x56, 0xb6, 0xc2), c(0xff, 0xff, 0xff),
             ],
+            ui: BTreeMap::new(),
+            builtin: true,
+            source: None,
         },
         Theme {
             name: "Dracula".into(),
@@ -48,6 +110,9 @@ pub fn all() -> Vec<Theme> {
                 c(0x62, 0x72, 0xa4), c(0xff, 0x6e, 0x6e), c(0x69, 0xff, 0x94), c(0xff, 0xff, 0xa5),
                 c(0xd6, 0xac, 0xff), c(0xff, 0x92, 0xdf), c(0xa4, 0xff, 0xff), c(0xff, 0xff, 0xff),
             ],
+            ui: BTreeMap::new(),
+            builtin: true,
+            source: None,
         },
         Theme {
             name: "Solarized Dark".into(),
@@ -62,6 +127,9 @@ pub fn all() -> Vec<Theme> {
                 c(0x00, 0x2b, 0x36), c(0xcb, 0x4b, 0x16), c(0x58, 0x6e, 0x75), c(0x65, 0x7b, 0x83),
                 c(0x83, 0x94, 0x96), c(0x6c, 0x71, 0xc4), c(0x93, 0xa1, 0xa1), c(0xfd, 0xf6, 0xe3),
             ],
+            ui: BTreeMap::new(),
+            builtin: true,
+            source: None,
         },
         Theme {
             name: "Hell / Light".into(),
@@ -76,6 +144,9 @@ pub fn all() -> Vec<Theme> {
                 c(0x4f, 0x52, 0x5e), c(0xe4, 0x56, 0x49), c(0x62, 0xb5, 0x50), c(0xd9, 0xa0, 0x1a),
                 c(0x5c, 0x8f, 0xff), c(0xc0, 0x4a, 0xc0), c(0x20, 0x9f, 0xd0), c(0xff, 0xff, 0xff),
             ],
+            ui: BTreeMap::new(),
+            builtin: true,
+            source: None,
         },
         // Rosé hell: Puderrosa, Pflaume als Schrift, Beerenrosa als Cursor. „Weiß“ ist ein Malvengrau,
         // damit auch weißer Text auf dem hellen Grund lesbar bleibt.
@@ -92,6 +163,9 @@ pub fn all() -> Vec<Theme> {
                 c(0x86, 0x66, 0x7c), c(0xd2, 0x2e, 0x6a), c(0x3b, 0x8f, 0x5d), c(0xa4, 0x6b, 0x12),
                 c(0x58, 0x74, 0xd0), c(0xc2, 0x3c, 0x9c), c(0x23, 0x90, 0x9c), c(0x96, 0x7a, 0x8d),
             ],
+            ui: BTreeMap::new(),
+            builtin: true,
+            source: None,
         },
         // Rosé dunkel: Aubergine als Grund, zartes Rosa als Schrift, Rosa als Cursor. „Schwarz“ ist ein
         // gedämpftes Pflaumengrau, damit es auf dem dunklen Grund sichtbar bleibt.
@@ -108,6 +182,9 @@ pub fn all() -> Vec<Theme> {
                 c(0xa9, 0x86, 0x9f), c(0xff, 0x9d, 0xb2), c(0xa9, 0xf0, 0xbf), c(0xff, 0xe1, 0xa6),
                 c(0xbc, 0xcd, 0xff), c(0xf8, 0xb8, 0xec), c(0xa6, 0xee, 0xf0), c(0xff, 0xf1, 0xf7),
             ],
+            ui: BTreeMap::new(),
+            builtin: true,
+            source: None,
         },
     ]
 }
@@ -222,62 +299,6 @@ impl Theme {
     }
 }
 
-#[derive(Deserialize)]
-struct ThemeFile {
-    name: String,
-    dark: Option<bool>,
-    fg: String,
-    bg: String,
-    cursor: Option<String>,
-    selection: Option<String>,
-    ansi: Vec<String>,
-}
-
-fn hex(s: &str) -> Option<Color32> {
-    let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 {
-        return None;
-    }
-    let v = u32::from_str_radix(s, 16).ok()?;
-    Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
-}
-
-fn from_file(f: ThemeFile) -> Option<Theme> {
-    if f.ansi.len() < 16 {
-        return None;
-    }
-    let mut ansi = [Color32::BLACK; 16];
-    for (i, c) in f.ansi.iter().take(16).enumerate() {
-        ansi[i] = hex(c)?;
-    }
-    let bg = hex(&f.bg)?;
-    let fg = hex(&f.fg)?;
-    let lum = |c: Color32| 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
-    Some(Theme {
-        name: f.name,
-        dark: f.dark.unwrap_or(lum(bg) < 128.0),
-        fg,
-        bg,
-        cursor: f.cursor.as_deref().and_then(hex).unwrap_or(fg),
-        selection: f.selection.as_deref().and_then(hex).unwrap_or_else(|| crate::style::mix(bg, fg, 0.2)),
-        ansi,
-    })
-}
-
-/// Eigene Themes aus `<dir>/*.json` laden (ungültige Dateien werden übersprungen).
-pub fn load_dir(dir: &Path) -> Vec<Theme> {
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else { return out };
-    let mut files: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
-    files.sort();
-    for p in files {
-        if let Some(t) = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<ThemeFile>(crate::state::strip_bom(&s)).ok()).and_then(from_file) {
-            out.push(t);
-        }
-    }
-    out
-}
-
 /// Beispiel-Theme anlegen, damit das Format sichtbar ist.
 pub fn write_example(dir: &Path) {
     if dir.exists() {
@@ -306,12 +327,19 @@ mod tests {
 
     #[test]
     fn parses_custom_theme() {
-        let f: ThemeFile = serde_json::from_str(
+        let t = file::parse_str(
             r##"{"name":"X","fg":"#ffffff","bg":"#000000","ansi":["#000000","#111111","#222222","#333333","#444444","#555555","#666666","#777777","#888888","#999999","#aaaaaa","#bbbbbb","#cccccc","#dddddd","#eeeeee","#ffffff"]}"##,
         )
         .unwrap();
-        let t = from_file(f).unwrap();
-        assert!(t.dark);
+        assert!(t.dark && !t.builtin);
+        assert!(all().iter().all(|t| t.builtin && t.source.is_none() && t.ui.is_empty()));
+        // Setzen per Name: Terminal und Oberfläche; Hintergrund behält seine Deckkraft.
+        let mut x = t.clone();
+        x.bg = Color32::from_rgba_unmultiplied(0, 0, 0, 200);
+        assert!(set_color(&mut x, "ansi3", Color32::RED) && x.ansi[3] == Color32::RED);
+        assert!(set_color(&mut x, "bg", Color32::from_rgb(10, 20, 30)) && x.bg.a() == 200);
+        assert!(set_color(&mut x, "border", Color32::BLUE) && x.ui["border"] == Spec::Hex(Color32::BLUE));
+        assert!(!set_color(&mut x, "ansi16", Color32::RED) && !set_color(&mut x, "nope", Color32::RED));
         assert_eq!(t.ansi[15], Color32::WHITE);
     }
 

@@ -6,7 +6,7 @@
 //! Galley nur der fetten Läufe nachgebildet.
 
 use super::parse::{Align as TAlign, Block, Doc, Inline, ListItem, is_safe_url};
-use crate::style::{ACCENT, RADIUS, dim};
+use crate::style::{RADIUS, dim};
 use eframe::egui::{
     self, Color32, FontFamily, FontId, Galley, Margin, Pos2, Rect, Sense, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, Vec2,
     text::{LayoutJob, TextFormat},
@@ -101,14 +101,14 @@ impl Builder<'_> {
         TextFormat {
             font_id: FontId::new(self.size, FontFamily::Proportional),
             color: if st.link {
-                ACCENT
+                crate::style::brand()
             } else if st.bold {
                 self.look.strong
             } else {
                 self.look.color
             },
             italics: st.italic,
-            underline: if st.link { Stroke::new(1.0_f32, ACCENT) } else { Stroke::NONE },
+            underline: if st.link { Stroke::new(1.0_f32, crate::style::brand()) } else { Stroke::NONE },
             ..Default::default()
         }
     }
@@ -139,8 +139,8 @@ impl Builder<'_> {
                 }
                 Inline::TicketRef(id) => {
                     let mut f = self.plain(St { link: false, ..st });
-                    f.color = ACCENT;
-                    f.background = ACCENT.gamma_multiply(0.16);
+                    f.color = crate::style::brand();
+                    f.background = crate::style::brand().gamma_multiply(0.16);
                     let start = self.pos;
                     self.push(id, f, st.bold);
                     let end = self.pos;
@@ -348,7 +348,7 @@ fn quote(ui: &mut Ui, cx: &mut Cx, inner: &[Block]) {
     cx.look = saved;
     let rect = r.response.rect;
     let bar = Rect::from_min_max(Pos2::new(rect.min.x + 2.0, rect.min.y), Pos2::new(rect.min.x + 5.0, rect.max.y));
-    ui.painter().rect_filled(bar, 1.5, ACCENT.gamma_multiply(0.75));
+    ui.painter().rect_filled(bar, 1.5, crate::style::brand().gamma_multiply(0.75));
 }
 
 fn list(ui: &mut Ui, cx: &mut Cx, ordered: bool, start: u64, items: &[ListItem]) {
@@ -380,7 +380,7 @@ fn list(ui: &mut Ui, cx: &mut Cx, ordered: bool, start: u64, items: &[ListItem])
             Some(done) => {
                 let b = Rect::from_center_size(Pos2::new(area.min.x + 10.0, cy), Vec2::splat(14.0));
                 if done {
-                    p.rect_filled(b, 3.5, ACCENT);
+                    p.rect_filled(b, 3.5, crate::style::brand());
                     let w = Stroke::new(1.9_f32, Color32::WHITE);
                     let pt = |x: f32, y: f32| Pos2::new(b.min.x + b.width() * x, b.min.y + b.height() * y);
                     p.line_segment([pt(0.22, 0.52), pt(0.43, 0.74)], w);

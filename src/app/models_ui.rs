@@ -15,11 +15,11 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 
 fn warn_col() -> Color32 {
-    Color32::from_rgb(0xe5, 0xc0, 0x7b)
+    crate::style::ui().warning
 }
 
 fn err_col() -> Color32 {
-    Color32::from_rgb(0xe0, 0x6c, 0x75)
+    crate::style::ui().error
 }
 
 fn kind_label(k: ServerKind, lang: Lang) -> &'static str {

@@ -463,7 +463,7 @@ impl App {
         let hv = style::anim(ui.ctx(), resp.id.with("h"), resp.hovered(), style::D_FAST);
         let fo = style::anim(ui.ctx(), resp.id.with("f"), focused, style::D_BASE);
         p.rect_filled(rect, 8.0, hover_bg.gamma_multiply(hv * (1.0 - fo)));
-        p.rect_filled(rect, 8.0, style::ACCENT.gamma_multiply(0.16 * fo));
+        p.rect_filled(rect, 8.0, crate::style::ui().sidebar_active.gamma_multiply(fo));
         // Farbmarke der Sitzung
         p.rect_filled(Rect::from_min_size(Pos2::new(rect.min.x + 3.0, rect.min.y + 9.0), Vec2::new(3.0, rect.height() - 18.0)), 1.5, color);
 
@@ -512,13 +512,13 @@ impl App {
                 segs.push((format!("${:.2}", u.cost()), weak_c));
             }
             if !e.meta.queue.is_empty() {
-                segs.push((format!("Queue {}{}", e.meta.queue.len(), if e.meta.queue_paused { " ⏸" } else { "" }), style::ACCENT));
+                segs.push((format!("Queue {}{}", e.meta.queue.len(), if e.meta.queue_paused { " ⏸" } else { "" }), style::brand()));
             }
         }
         if status_label.is_empty() {
             if let Some(code) = e.live.as_ref().and_then(|s| s.shell_state.lock().unwrap_or_else(|x| x.into_inner()).last_exit) {
                 if code != 0 {
-                    segs.push((format!("Exit {code}"), Color32::from_rgb(0xe0, 0x6c, 0x75)));
+                    segs.push((format!("Exit {code}"), crate::style::ui().error));
                 }
             }
             // Verschachtelte Shell (ssh, tmux, Unter-Shell) ohne unsere Marken (#57): run_command nur ungefähr.
@@ -642,7 +642,7 @@ impl App {
             let g = p.layout_no_wrap(name, FontId::proportional(13.5), name_col);
             let mut nx = text_x;
             if claude {
-                style::paint_icon(&p, SIcon::SparkSmall, Pos2::new(nx + 4.0, name_y), style::ACCENT);
+                style::paint_icon(&p, SIcon::SparkSmall, Pos2::new(nx + 4.0, name_y), style::brand());
                 nx += 14.0;
             } else if is_chat {
                 style::paint_icon(&p, SIcon::Chat, Pos2::new(nx + 6.0, name_y), weak_c);
@@ -951,9 +951,9 @@ fn paint_progress(p: &egui::Painter, bar: Rect, pg: crate::vtnotify::Progress, t
     use crate::vtnotify::ProgressState::*;
     p.rect_filled(bar, 1.0, track.gamma_multiply(0.25));
     let col = match pg.state {
-        Normal | Indeterminate => style::ACCENT,
-        Error => Color32::from_rgb(0xe0, 0x6c, 0x75),
-        Paused => Color32::from_rgb(0xe5, 0xc0, 0x7b),
+        Normal | Indeterminate => crate::style::ui().progress,
+        Error => crate::style::ui().error,
+        Paused => crate::style::ui().warning,
     };
     if pg.state == Indeterminate {
         // Ein Drittel der Breite wandert hin und her.

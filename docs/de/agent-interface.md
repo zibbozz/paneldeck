@@ -43,7 +43,7 @@ Ein Werkzeug oberhalb der aktuellen Stufe liefert `forbidden`. Die Stufe wird im
 ## Werkzeuge
 | Werkzeug | Stufe | Zweck |
 |---|---|---|
-| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `screenshot`, `get_usage`, `search_history` | Lesen | Wer bin ich (Sitzung des Agenten), Sitzungen (mit Art `kind` und Fenster `window`), Terminaltext, die Nachrichten eines Chats, die LLM-Server und Modelle für Chats, Bild von Fenster/Sitzung, Kosten, Claude-Verlauf |
+| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `theme_list`, `theme_get`, `screenshot`, `get_usage`, `search_history` | Lesen | Wer bin ich (Sitzung des Agenten), Sitzungen (mit Art `kind` und Fenster `window`), Terminaltext, die Nachrichten eines Chats, die LLM-Server und Modelle für Chats, die Farbthemes, Bild von Fenster/Sitzung, Kosten, Claude-Verlauf |
 | `create_session`, `send_text`, `send_keys`, `run_command`, `queue_prompt`, `wait_for_status`, `rename_session`, `focus_session`, `close_session`, `send_chat_message` | Steuern | Sitzungen anlegen/steuern (auch Chats), Befehle mit Ausgabe und Exit-Code, auf Claude- oder Chat-Status warten, Nachricht an einen Chat senden |
 | `list_todos` | Lesen | Die Karten der einfachen Todo-Liste (in jedem Modus; bei eingeschaltetem Expertenmodus nur lesbar) |
 | `add_todo`, `set_todo_done` | Steuern | **Expertenmodus aus:** Karte anlegen, abhaken oder wieder öffnen |
@@ -107,6 +107,13 @@ Ein Agent hat immer nur die Möglichkeiten des gerade eingestellten Modus (Schal
 - **Gekürzte Ergebnisse für Chat-Modelle:** Ist ein Werkzeug-Ergebnis für ein Chat-Modell zu groß, verlieren Listen ihre letzten Einträge (`truncated`, `truncated_list`, `omitted_items`); `read_chat` lässt stattdessen die ältesten Nachrichten weg (`more_above`) und behält immer `status`.
 
 **Chats nutzen dieselben Werkzeuge – von innen:** Ruft das Modell eines Chats ein Werkzeug auf, führt Paneldeck es im eigenen Prozess mit dem Chat als Aufrufer aus, mit der [Stufe des Modells](chat.md#einstellungen-je-modell) (unabhängig von der Stufe auf dieser Seite) und denselben Sicherheitsregeln wie unten. Aufrufe eines Chats stehen ebenfalls im Aufrufprotokoll. **Externe Agenten können Werkzeugaufrufe eines Chats nie freigeben** – Freigaben gibt es nur im Chat-Fenster –, sie können keine Modell-Einstellungen ändern und nicht ins Eingabefeld eines Chats tippen; sie können nur ganze Nachrichten senden.
+
+## Themes
+
+Agenten können die Farbthemes lesen, nie ändern (beide Werkzeuge neu seit 2.6.0, Stufe *Lesen*):
+
+- **`theme_list`**: `active` (das Theme, das die App nutzt) und `themes`, je mit `name`, `dark`, `builtin` (eingebaute Themes sind schreibgeschützt), `file` (Dateiname in `themes/`, `null` bei eingebauten) und `active`. Dateien, die sich nicht laden lassen, stehen unter `invalid` mit `file` und `error`; sie sind nicht wählbar. Pfade werden nie zurückgegeben.
+- **`theme_get`**: optionaler Parameter `name` (Standard: das aktive Theme). Liefert `name`, `dark`, `builtin`, `file`, `active`, `terminal` (`fg`, `bg`, `cursor`, `selection`, `ansi` mit 16 Farben), `colors` (jede [Oberflächenfarbe](themes.md#oberflächenfarben) aufgelöst als `#rrggbb` oder `#rrggbbaa`) und `overrides` (nur die Werte, die das Theme selbst setzt – eine Farbe oder ein Verweis wie `"@text/20"`). Unbekannter Name: `not_found`.
 
 ## Sicherheit
 - Der Zugriff läuft nur lokal über die laufende Instanz (`127.0.0.1`, eigener Token). Die Stufe ist standardmäßig **Aus**.

@@ -95,7 +95,7 @@ pub(super) fn risk_label(k: templates::Risk, lang: Lang) -> &'static str {
 pub(super) fn tpl_confirm_ui(ctx: &egui::Context, c: &mut TplConfirm, lang: Lang) -> ConfirmOut {
     let mut out = ConfirmOut::Open;
     let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
-    let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    let amber = crate::style::ui().warning;
     style::movable(ctx, Id::new("tpl_confirm"), egui::Window::new(lang.t("Vorlage mit erweiterten Claude-Optionen starten?", "Start template with extended Claude options?")))
         .collapsible(false)
         .resizable(false)
@@ -398,7 +398,7 @@ pub(super) fn tpl_form_ui(ctx: &egui::Context, f: &mut TplForm, shells: &[ShellS
         }
         if let Some(e) = &f.error {
             ui.add_space(4.0);
-            dialogs::hint_label(ui, e, Color32::from_rgb(0xe0, 0x6c, 0x75));
+            dialogs::hint_label(ui, e, crate::style::ui().error);
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -816,7 +816,7 @@ impl App {
         let cy = rect.center().y;
         let item = t.item();
         let (icon, icol) = match item {
-            Some(it) if it.claude && self.settings.claude_mode => (SIcon::SparkSmall, style::ACCENT),
+            Some(it) if it.claude && self.settings.claude_mode => (SIcon::SparkSmall, style::brand()),
             Some(it) => (SIcon::Terminal, it.color.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(weak)),
             None => (SIcon::Template, weak),
         };
@@ -824,7 +824,7 @@ impl App {
         let mut right = rect.max.x - 6.0;
         // Erweiterte Claude-Optionen: kleines Warnsymbol (Tooltip nennt sie; vor dem Start wird gefragt).
         if needs_confirm(t, self.settings.claude_mode) {
-            let amber = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+            let amber = crate::style::ui().warning;
             let g = p.layout_no_wrap("⚠".to_string(), FontId::proportional(12.0), amber);
             right -= g.size().x;
             #[cfg(test)]
@@ -904,7 +904,7 @@ impl App {
             return;
         }
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("tpl_drag_layer")));
-        let accent = style::ACCENT;
+        let accent = style::brand();
         let fill = Color32::from_rgba_unmultiplied(0xd9, 0x77, 0x57, 40);
         let own_group = t.items.first().map(|it| it.group.clone()).unwrap_or_default();
         let target: Option<(TplAt, String)> = pos.and_then(|p| {

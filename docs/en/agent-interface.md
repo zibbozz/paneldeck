@@ -43,7 +43,7 @@ A tool above the current level returns `forbidden`. The level is checked in the 
 ## Tools
 | Tool | Level | Purpose |
 |---|---|---|
-| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `screenshot`, `get_usage`, `search_history` | Read | Who am I (the agent's own session), sessions (with their `kind` and the `window` they belong to), terminal text, the messages of a chat, the LLM servers and models for chats, image of window/session, costs, Claude history |
+| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `theme_list`, `theme_get`, `screenshot`, `get_usage`, `search_history` | Read | Who am I (the agent's own session), sessions (with their `kind` and the `window` they belong to), terminal text, the messages of a chat, the LLM servers and models for chats, the colour themes, image of window/session, costs, Claude history |
 | `create_session`, `send_text`, `send_keys`, `run_command`, `queue_prompt`, `wait_for_status`, `rename_session`, `focus_session`, `close_session`, `send_chat_message` | Control | Create/control sessions (also chats), commands with output and exit code, wait for Claude or chat status, send a message to a chat |
 | `list_todos` | Read | The cards of the simple to-do list (every mode; read-only when expert mode is on) |
 | `add_todo`, `set_todo_done` | Control | **Expert mode off:** add a card, tick it off or reopen it |
@@ -107,6 +107,13 @@ An agent always has only the options of the mode that is currently set (switch *
 - **Shortened results for chat models:** when a tool result is too large for a chat model, lists lose their last entries (`truncated`, `truncated_list`, `omitted_items`); `read_chat` drops the oldest messages instead (`more_above`) and always keeps `status`.
 
 **Chats use the same tools – from the inside:** when the model of a chat calls a tool, Paneldeck runs it in-process with the chat as the caller, under the [model's level](chat.md#settings-per-model) (independent of the level on this page) and with the same safety rules as below. Calls of a chat appear in the call log as well. **External agents can never approve a chat's tool calls** – approvals happen only in the chat window – and they cannot change model settings or type into a chat's input box; they can only send complete messages.
+
+## Themes
+
+Agents can read the colour themes, never change them (both tools are additive since 2.6.0, level *Read*):
+
+- **`theme_list`**: `active` (the theme the app uses) and `themes`, each with `name`, `dark`, `builtin` (built-in themes are read-only), `file` (file name in `themes/`, `null` for built-in themes) and `active`. Files that cannot be loaded are listed under `invalid` with `file` and `error`; they cannot be selected. No paths are returned.
+- **`theme_get`**: optional parameter `name` (default: the active theme). Returns `name`, `dark`, `builtin`, `file`, `active`, `terminal` (`fg`, `bg`, `cursor`, `selection`, `ansi` with 16 colours), `colors` (every [interface colour](themes.md#interface-colours) resolved to `#rrggbb` or `#rrggbbaa`) and `overrides` (only the values the theme sets itself – a colour or a link such as `"@text/20"`). Unknown name: `not_found`.
 
 ## Security
 - Access only runs locally through the running instance (`127.0.0.1`, own token). The level is **Off** by default.

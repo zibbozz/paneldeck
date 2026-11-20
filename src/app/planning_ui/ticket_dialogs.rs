@@ -295,7 +295,7 @@ impl PlanUi {
         let m = crate::style::modal(Self::modal_id("ticket_delete")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 480.0));
             ui.horizontal(|ui| {
-                ui.colored_label(widgets::DANGER, RichText::new("!").heading().strong());
+                ui.colored_label(widgets::DANGER(), RichText::new("!").heading().strong());
                 ui.label(RichText::new(lang.t("Ticket endgültig löschen?", "Delete ticket permanently?")).heading());
             });
             ui.add_space(S2);
@@ -593,7 +593,7 @@ impl PlanUi {
                     }
                     if !p.lost.is_empty() {
                         ui.add_space(S1);
-                        ui.label(RichText::new(lang.t("Diese Werte fallen weg:", "These values are dropped:")).strong().color(Color32::from_rgb(0xe0, 0x6c, 0x75)));
+                        ui.label(RichText::new(lang.t("Diese Werte fallen weg:", "These values are dropped:")).strong().color(crate::style::ui().error));
                         for (f, v) in &p.lost {
                             ui.label(format!("• {}: {}", f.display(lang), preview_value(cx.conn, f, v, lang)));
                         }
@@ -613,7 +613,7 @@ impl PlanUi {
                                 });
                                 ui.label(RichText::new(f.display(lang)).strong());
                                 if f.required {
-                                    ui.label(RichText::new("*").color(widgets::DANGER).strong()).on_hover_text(lang.t("Pflichtfeld", "Required field"));
+                                    ui.label(RichText::new("*").color(widgets::DANGER()).strong()).on_hover_text(lang.t("Pflichtfeld", "Required field"));
                                 }
                                 if !on {
                                     ui.label(RichText::new(lang.t("bleibt leer (bzw. Standardwert)", "stays empty (or its default)")).small().color(style::dim(ui)));
@@ -752,7 +752,7 @@ impl PlanUi {
             ui.horizontal(|ui| {
                 ui.allocate_ui_with_layout(Vec2::new(130.0, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.label(RichText::new(lang.t("Dauer", "Duration")).strong());
-                    ui.label(RichText::new("*").color(widgets::DANGER).strong());
+                    ui.label(RichText::new("*").color(widgets::DANGER()).strong());
                 });
                 let r = ui.add_sized([200.0, 28.0], egui::TextEdit::singleline(&mut dlg.duration).id(Id::new("time_duration")).hint_text("1h 30m").margin(egui::Margin::symmetric(8, 5)));
                 if dlg.focus {
@@ -767,7 +767,7 @@ impl PlanUi {
                         ui.label(RichText::new(format!("= {} ({} min)", format_duration(mins, DEFAULT_WORK_HOURS_PER_DAY, lang), mins)).color(style::dim(ui)));
                     }
                     Err(e) if !dlg.duration.trim().is_empty() => {
-                        ui.label(RichText::new(e.message(lang)).small().color(Color32::from_rgb(0xe0, 0x6c, 0x75)));
+                        ui.label(RichText::new(e.message(lang)).small().color(crate::style::ui().error));
                     }
                     _ => {}
                 }
@@ -804,7 +804,7 @@ impl PlanUi {
                     dlg.start = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
                 }
                 if !dlg.start.trim().is_empty() && StartInput::parse(&dlg.start).is_none() {
-                    ui.label(RichText::new(lang.t("nicht lesbar", "not readable")).small().color(Color32::from_rgb(0xe0, 0x6c, 0x75)));
+                    ui.label(RichText::new(lang.t("nicht lesbar", "not readable")).small().color(crate::style::ui().error));
                 }
             });
             ui.horizontal(|ui| {
@@ -1044,7 +1044,7 @@ impl PlanUi {
                 ConfirmKind::Time { .. } => (lang.t("Zeiteintrag löschen?", "Delete time entry?"), lang.t("Der Zeiteintrag wird endgültig gelöscht.", "The time entry will be deleted permanently.")),
             };
             ui.horizontal(|ui| {
-                ui.colored_label(widgets::DANGER, RichText::new("!").heading().strong());
+                ui.colored_label(widgets::DANGER(), RichText::new("!").heading().strong());
                 ui.label(RichText::new(title).heading());
             });
             ui.add_space(S2);

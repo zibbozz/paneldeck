@@ -161,6 +161,7 @@ impl App {
                                 }
                             });
                         });
+                        self.theme_manage_ui(ui);
                         row(ui, lang.t("Schriftgröße", "Font size"), lang.t("Terminalschrift (Cascadia Mono)", "Terminal font (Cascadia Mono)"), |ui| {
                             ui.add(egui::Slider::new(&mut self.settings.font_size, 9.0..=28.0).suffix(" pt"));
                         });
@@ -274,7 +275,7 @@ impl App {
                                 ui.label(RichText::new(lang.t(
                                     "conpty.dll und OpenConsole.exe fehlen neben paneldeck.exe – Sitzungen nutzen den Konsolen-Host von Windows.",
                                     "conpty.dll and OpenConsole.exe are missing next to paneldeck.exe – sessions use the console host built into Windows.",
-                                )).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
+                                )).small().color(crate::style::ui().warning));
                                 ui.add_space(4.0);
                             }
                         }
@@ -320,7 +321,7 @@ impl App {
                                 ui.label(RichText::new(lang.t(
                                     "Hinweis: bypassPermissions stand als Standard in settings.json und wurde entfernt – es ist nur noch im Dialog „Neue Sitzung“ für eine einzelne Sitzung wählbar.",
                                     "Note: bypassPermissions was set as a default in settings.json and has been removed – it can now only be chosen in the “New session” dialog for a single session.",
-                                )).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
+                                )).small().color(crate::style::ui().warning));
                                 ui.add_space(S1);
                             }
                             let before = self.settings.claude_defaults.clone();
@@ -385,7 +386,7 @@ impl App {
                             let mut install = false;
                             ui.horizontal(|ui| {
                                 if self.hooks_global {
-                                    ui.colored_label(Color32::from_rgb(0x4c, 0xc2, 0x6a), lang.t("global installiert", "installed globally"));
+                                    ui.colored_label(crate::style::ui().success, lang.t("global installiert", "installed globally"));
                                     if ui.button(lang.t("Entfernen", "Remove")).clicked() {
                                         self.hooks_msg = match hooks::global_settings_path().map(|p| hooks::uninstall_global(&p)) {
                                             Some(Ok(())) => String::new(),
@@ -641,7 +642,7 @@ impl App {
                                     keys::pretty(cur, de)
                                 };
                                 let b = egui::Button::new(RichText::new(txt).monospace()).min_size(Vec2::new(190.0, 24.0));
-                                let b = if capturing { b.fill(style::ACCENT.gamma_multiply(0.35)) } else { b };
+                                let b = if capturing { b.fill(style::brand().gamma_multiply(0.35)) } else { b };
                                 if ui.add(b).clicked() {
                                     self.capture_key = Some(id.to_string());
                                 }
@@ -759,7 +760,7 @@ impl App {
                                     crate::state::Lang::De => format!("{what} zeigt auf ein anderes Paneldeck:\n{cmd}\n\nEinschalten übernimmt ihn für diese Instanz."),
                                     crate::state::Lang::En => format!("{what} points to another Paneldeck:\n{cmd}\n\nTurning it on takes it over for this instance."),
                                 };
-                                ui.label(RichText::new(lang.t("→ anderes Paneldeck", "→ another Paneldeck")).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b))).on_hover_text(text);
+                                ui.label(RichText::new(lang.t("→ anderes Paneldeck", "→ another Paneldeck")).small().color(crate::style::ui().warning)).on_hover_text(text);
                             }
                         }
                         row(ui, lang.t("Mit Windows starten", "Start with Windows"), lang.t("Startet minimiert im Tray", "Starts minimized in the tray"), |ui| {
@@ -851,7 +852,7 @@ impl App {
                                 ed.msg.clear();
                             }
                             if !ed.msg.is_empty() {
-                                let col = if ed.msg_ok { Color32::from_rgb(0x4c, 0xc2, 0x6a) } else { Color32::LIGHT_RED };
+                                let col = if ed.msg_ok { crate::style::ui().success } else { Color32::LIGHT_RED };
                                 ui.colored_label(col, &ed.msg);
                             } else if ed.dirty() {
                                 ui.label(RichText::new(lang.t("Ungespeicherte Änderungen", "Unsaved changes")).color(style::dim(ui)));

@@ -27,8 +27,14 @@ use crate::style::{self, S1, S2};
 use eframe::egui::{self, Align, Color32, Id, Key, Layout, Modifiers, Pos2, Rect, Response, RichText, Sense, Stroke, Ui, Vec2};
 use rusqlite::Connection;
 
-const GOLD: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
-const FLAG_RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+#[allow(non_snake_case)]
+fn GOLD() -> Color32 {
+    crate::style::ui().ticket_star
+}
+#[allow(non_snake_case)]
+fn FLAG_RED() -> Color32 {
+    crate::style::ui().ticket_flag
+}
 
 /// Was die Oberfläche im Ticket ausgelöst hat; ausgeführt wird erst nach dem Zeichnen.
 #[derive(Debug)]
@@ -260,17 +266,17 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(RichText::new(lang.t("Löschen …", "Delete …")).color(Color32::from_rgb(0xe0, 0x6c, 0x75))).clicked() {
+                if ui.button(RichText::new(lang.t("Löschen …", "Delete …")).color(crate::style::ui().error)).clicked() {
                     acts.push(Act::Delete);
                     ui.close();
                 }
             })
             .response
             .on_hover_text(lang.t("Weitere Aktionen", "More actions"));
-            if tool_btn(ui, Tool::Flag, if t.flagged { lang.t("Markierung entfernen", "Remove the flag") } else { lang.t("Markieren (Flag)", "Flag") }, t.flagged, Some(FLAG_RED)).clicked() {
+            if tool_btn(ui, Tool::Flag, if t.flagged { lang.t("Markierung entfernen", "Remove the flag") } else { lang.t("Markieren (Flag)", "Flag") }, t.flagged, Some(FLAG_RED())).clicked() {
                 acts.push(Act::Flag(!t.flagged));
             }
-            if tool_btn(ui, Tool::Star, if t.starred { lang.t("Aus den Favoriten entfernen", "Remove from favorites") } else { lang.t("Zu den Favoriten", "Add to favorites") }, t.starred, Some(GOLD)).clicked() {
+            if tool_btn(ui, Tool::Star, if t.starred { lang.t("Aus den Favoriten entfernen", "Remove from favorites") } else { lang.t("Zu den Favoriten", "Add to favorites") }, t.starred, Some(GOLD())).clicked() {
                 acts.push(Act::Star(!t.starred));
             }
             ui.add_space(S2);

@@ -196,6 +196,8 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "read_chat" => ("Nachrichten eines Chats lesen (die letzten, mit Status).", "Read the messages of a chat (the latest ones, with its status)."),
         "send_chat_message" => ("Nachricht an einen Chat senden; das Modell des Chats antwortet.", "Send a message to a chat; the chat's model answers."),
         "list_models" => ("Eingerichtete LLM-Server und Modelle für Chats (ohne Schlüssel).", "Configured LLM servers and models for chats (without keys)."),
+        "theme_list" => ("Farbthemes auflisten (aktives, eingebaute, ungültige Dateien).", "List the colour themes (active, built-in, invalid files)."),
+        "theme_get" => ("Ein Farbtheme lesen: Terminal- und Oberflächenfarben.", "Read one colour theme: terminal and interface colours."),
         "list_todos" => ("Karten der einfachen Todo-Liste lesen.", "Read the cards of the simple to-do list."),
         "add_todo" => ("Karte zur einfachen Todo-Liste hinzufügen (optional mit Fälligkeit).", "Add a card to the simple to-do list (optionally with a due date)."),
         "set_todo_done" => ("Todo-Karte abhaken oder wieder öffnen.", "Tick off a to-do card or reopen it."),

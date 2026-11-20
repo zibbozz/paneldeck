@@ -352,7 +352,7 @@ impl PlanUi {
         let m = crate::style::modal(Self::modal_id("delete_project")).show(ctx, |ui| {
             ui.set_width(widgets::modal_width(ctx, 440.0));
             ui.horizontal(|ui| {
-                ui.colored_label(widgets::DANGER, RichText::new("!").heading().strong());
+                ui.colored_label(widgets::DANGER(), RichText::new("!").heading().strong());
                 ui.label(RichText::new(lang.t("Projekt endgültig löschen?", "Delete project permanently?")).heading());
             });
             ui.add_space(S2);

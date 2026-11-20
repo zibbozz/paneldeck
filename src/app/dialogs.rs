@@ -226,6 +226,7 @@ impl App {
 
         self.new_chat_ui(ctx);
         self.settings_ui(ctx);
+        self.theme_ui_frame(ctx);
     }
 
     pub(super) fn text_prompt_ui(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -409,7 +410,7 @@ impl App {
                         ui.label(RichText::new(lang.t("Prüfe auf nicht committete Änderungen …", "Checking for uncommitted changes …")).color(style::dim(ui)));
                     });
                 } else if w.changes > 0 {
-                    ui.colored_label(Color32::from_rgb(0xe5, 0xc0, 0x7b), format!("{} {}", w.changes, lang.t("Datei(en) mit nicht committeten Änderungen.", "file(s) with uncommitted changes.")));
+                    ui.colored_label(crate::style::ui().warning, format!("{} {}", w.changes, lang.t("Datei(en) mit nicht committeten Änderungen.", "file(s) with uncommitted changes.")));
                     ui.checkbox(&mut w.discard, lang.t("Änderungen verwerfen (Entfernen erzwingen)", "Discard changes (force removal)"));
                 } else {
                     ui.label(RichText::new(lang.t("Keine offenen Änderungen.", "No pending changes.")).color(style::dim(ui)));
@@ -501,7 +502,7 @@ impl App {
             }
             ui.add_space(S1);
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!self.composer_text.trim().is_empty(), egui::Button::new(RichText::new(lang.t("Senden (Strg+Enter)", "Send (Ctrl+Enter)")).strong()).fill(style::ACCENT.gamma_multiply(0.7))).clicked() {
+                if ui.add_enabled(!self.composer_text.trim().is_empty(), egui::Button::new(RichText::new(lang.t("Senden (Strg+Enter)", "Send (Ctrl+Enter)")).strong()).fill(crate::style::ui().chat_send)).clicked() {
                     send = true;
                 }
                 if ui.add_enabled(!self.composer_text.trim().is_empty(), egui::Button::new(lang.t("Nur einfügen", "Insert only"))).on_hover_text(lang.t("Ohne Enter – zum Weiterbearbeiten im Terminal", "Without Enter – to keep editing in the terminal")).clicked() {
@@ -671,7 +672,7 @@ pub(super) fn claude_basic_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, sal
     let bad_name = |v: &str| !v.trim().is_empty() && !valid_name(v.trim());
     let hint = |ui: &mut Ui, text: &str, warn: bool| {
         ui.label("");
-        let c = if warn { Color32::from_rgb(0xe0, 0x6c, 0x75) } else { style::dim(ui) };
+        let c = if warn { crate::style::ui().error } else { style::dim(ui) };
         hint_label(ui, text, c);
         ui.end_row();
     };
@@ -898,8 +899,14 @@ fn grid_hint(ui: &mut Ui, text: &str, c: Color32) {
     ui.end_row();
 }
 
-const RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
-const AMBER: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+#[allow(non_snake_case)]
+fn RED() -> Color32 {
+    crate::style::ui().error
+}
+#[allow(non_snake_case)]
+fn AMBER() -> Color32 {
+    crate::style::ui().warning
+}
 
 /// Reiter *Zugriff* (#292): zusätzliche Ordner, Plugin-Ordner, MCP-Konfigurationen (mit `--strict-mcp-config`) als
 /// Listen mit + und − (#289), erlaubte und verbotene Werkzeuge; Warnung bei Optionen, die Zugriffe erweitern.
@@ -915,21 +922,21 @@ pub(super) fn claude_access_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, sa
     list_editor(ui, lang, &format!("{salt}_add_dir"), &mut e.add_dirs, ListKind::Folders, MAX_DIRS, &dir_issue, &mut || pick_entry(ListKind::Folders, target, lang, linux_ok));
     ui.end_row();
     if let Some(err) = &chk.dir_err {
-        grid_hint(ui, err, RED);
+        grid_hint(ui, err, RED());
     }
 
     ui.label(lang.t("Plugin-Ordner", "Plugin folders")).on_hover_text("--plugin-dir");
     list_editor(ui, lang, &format!("{salt}_plugin_dir"), &mut e.plugin_dirs, ListKind::Folders, MAX_DIRS, &dir_issue, &mut || pick_entry(ListKind::Folders, target, lang, linux_ok));
     ui.end_row();
     if let Some(err) = &chk.plugin_err {
-        grid_hint(ui, err, RED);
+        grid_hint(ui, err, RED());
     }
 
     ui.label(lang.t("MCP-Konfiguration", "MCP config")).on_hover_text("--mcp-config");
     list_editor(ui, lang, &format!("{salt}_mcp_config"), &mut e.mcp_configs, ListKind::JsonFiles, MAX_DIRS, &file_issue, &mut || pick_entry(ListKind::JsonFiles, target, lang, linux_ok));
     ui.end_row();
     if let Some(err) = &chk.mcp_err {
-        grid_hint(ui, err, RED);
+        grid_hint(ui, err, RED());
     }
     // Nur mit mindestens einer MCP-Konfiguration wählbar (ohne sie wäre es wirkungslos).
     ui.label("");
@@ -952,13 +959,13 @@ pub(super) fn claude_access_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, sa
     ui.add(egui::TextEdit::singleline(&mut e.allowed_tools).hint_text("Bash(git log:*) Read").char_limit(MAX_TOOLS_LEN).desired_width(FIELD_W));
     ui.end_row();
     if chk.allowed_bad {
-        grid_hint(ui, tools_err, RED);
+        grid_hint(ui, tools_err, RED());
     }
     ui.label(lang.t("Verbotene Werkzeuge", "Disallowed tools")).on_hover_text("--disallowed-tools");
     ui.add(egui::TextEdit::singleline(&mut e.disallowed_tools).hint_text("WebFetch Bash(curl:*)").char_limit(MAX_TOOLS_LEN).desired_width(FIELD_W));
     ui.end_row();
     if chk.disallowed_bad {
-        grid_hint(ui, tools_err, RED);
+        grid_hint(ui, tools_err, RED());
     }
 
     if !chk.linux_ignored.is_empty() {
@@ -966,7 +973,7 @@ pub(super) fn claude_access_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, sa
         grid_hint(
             ui,
             &format!("⚠ {}: {list}", lang.t("Linux-Pfade gelten nur in WSL-Sitzungen – für diese Shell werden sie weggelassen", "Linux paths apply only to WSL sessions – ignored for this shell")),
-            AMBER,
+            AMBER(),
         );
     }
     if e.has_risky() {
@@ -990,7 +997,7 @@ pub(super) fn claude_access_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, sa
                     "⚠ Extra folders, plugin folders, allowed tools and MCP configs widen what Claude may access and do without asking in this session – from its next start, even if an agent created the session.",
                 ),
             },
-            AMBER,
+            AMBER(),
         );
     }
     let dim = style::dim(ui);
@@ -1055,7 +1062,7 @@ pub(super) fn claude_advanced_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, 
                     "⚠ --safe-mode turns off hooks and MCP servers: Paneldeck then sees neither the status nor the permission prompts of this session – the protection that keeps agents from answering permission prompts does not work here either.",
                 ),
             },
-            AMBER,
+            AMBER(),
         );
     }
 
@@ -1071,7 +1078,7 @@ pub(super) fn claude_advanced_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, 
     dlg_mark(ui, "system_prompt", &sp);
     ui.end_row();
     if chk.sys_bad {
-        grid_hint(ui, lang.t("Ohne \" % ! ^ & | < > \\ und Steuerzeichen außer Zeilenumbrüchen, nicht mit - beginnend.", "Without \" % ! ^ & | < > \\ and control characters other than line breaks, not starting with -."), RED);
+        grid_hint(ui, lang.t("Ohne \" % ! ^ & | < > \\ und Steuerzeichen außer Zeilenumbrüchen, nicht mit - beginnend.", "Without \" % ! ^ & | < > \\ and control characters other than line breaks, not starting with -."), RED());
     }
     if !e.system_prompt.trim().is_empty() {
         grid_hint(
@@ -1086,7 +1093,7 @@ pub(super) fn claude_advanced_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, 
                     "⚠ Replaces Claude Code's built-in system prompt completely (instructions on tools, safety and how to work) – Claude may then behave very differently. “Append system prompt” is added after it. Never applies to sessions created by agents. In PowerShell and cmd, line breaks become spaces.",
                 ),
             },
-            AMBER,
+            AMBER(),
         );
     }
 
@@ -1094,28 +1101,28 @@ pub(super) fn claude_advanced_rows(ui: &mut Ui, lang: Lang, o: &mut ClaudeOpts, 
     ui.add(egui::TextEdit::singleline(&mut e.append_system_prompt).hint_text(lang.t("Text (eine Zeile, optional)", "Text (one line, optional)")).char_limit(MAX_TEXT_LEN).desired_width(FIELD_W));
     ui.end_row();
     if chk.text_bad {
-        grid_hint(ui, lang.t("Eine Zeile ohne \" % ! ^ & | < > \\, nicht mit - beginnend.", "One line without \" % ! ^ & | < > \\, not starting with -."), RED);
+        grid_hint(ui, lang.t("Eine Zeile ohne \" % ! ^ & | < > \\, nicht mit - beginnend.", "One line without \" % ! ^ & | < > \\, not starting with -."), RED());
     }
 
     ui.label(lang.t("Ersatzmodell", "Fallback model")).on_hover_text("--fallback-model");
     ui.add(egui::TextEdit::singleline(&mut e.fallback_model).hint_text(lang.t("z. B. sonnet (optional)", "e.g. sonnet (optional)")).char_limit(MAX_NAME).desired_width(160.0));
     ui.end_row();
     if chk.fallback_bad {
-        grid_hint(ui, lang.t("Nur Buchstaben, Ziffern und . _ : - (höchstens 100 Zeichen).", "Only letters, digits and . _ : - (at most 100 characters)."), RED);
+        grid_hint(ui, lang.t("Nur Buchstaben, Ziffern und . _ : - (höchstens 100 Zeichen).", "Only letters, digits and . _ : - (at most 100 characters)."), RED());
     }
 
     ui.label(lang.t("Budget (USD)", "Max budget (USD)")).on_hover_text("--max-budget-usd");
     ui.add(egui::TextEdit::singleline(&mut e.max_budget_usd).hint_text(lang.t("z. B. 5", "e.g. 5")).char_limit(12).desired_width(80.0));
     ui.end_row();
     if chk.budget_bad {
-        grid_hint(ui, lang.t("Eine positive Zahl, z. B. 5 oder 2.50.", "A positive number, e.g. 5 or 2.50."), RED);
+        grid_hint(ui, lang.t("Eine positive Zahl, z. B. 5 oder 2.50.", "A positive number, e.g. 5 or 2.50."), RED());
     }
 
     ui.label(lang.t("Auto-Komprimierung", "Auto-compact")).on_hover_text("--autocompact");
     ui.add(egui::TextEdit::singleline(&mut e.autocompact).hint_text(lang.t("auto oder Tokens, z. B. 200k", "auto or tokens, e.g. 200k")).char_limit(12).desired_width(120.0));
     ui.end_row();
     if chk.compact_bad {
-        grid_hint(ui, lang.t("„auto“ oder eine Tokenzahl, z. B. 200000 oder 200k.", "“auto” or a number of tokens, e.g. 200000 or 200k."), RED);
+        grid_hint(ui, lang.t("„auto“ oder eine Tokenzahl, z. B. 200000 oder 200k.", "“auto” or a number of tokens, e.g. 200000 or 200k."), RED());
     }
 }
 
@@ -1252,7 +1259,7 @@ pub(super) fn claude_preview(ui: &mut Ui, lang: Lang, salt: &str, o: &ClaudeOpts
     let line = preview_line(o, spec.as_ref(), &legacy);
     let len = line.chars().count() + LAUNCH_EXTRA;
     if len > WARN_COMMAND_LEN {
-        let c = if len > MAX_COMMAND_LEN { RED } else { AMBER };
+        let c = if len > MAX_COMMAND_LEN { RED() } else { AMBER() };
         let text = if lang == Lang::De {
             format!("⚠ Die Befehlszeile wird etwa {len} Zeichen lang; über {MAX_COMMAND_LEN} (Grenze von cmd, über die claude.cmd läuft) startet Paneldeck Claude nicht. Kürze den System-Prompt oder die Listen.")
         } else {

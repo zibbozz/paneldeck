@@ -269,7 +269,7 @@ fn paint(
         if let Some((r, col, hot)) = run {
             if hot {
                 let yy = r.max.y - 1.5;
-                painter.line_segment([Pos2::new(r.min.x, yy), Pos2::new(r.max.x, yy)], Stroke::new(1.5_f32, crate::style::ACCENT));
+                painter.line_segment([Pos2::new(r.min.x, yy), Pos2::new(r.max.x, yy)], Stroke::new(1.5_f32, crate::style::brand()));
             } else {
                 crate::glyphs::draw_underline(&painter, crate::glyphs::Underline::Dotted, r, col, ppp);
             }
@@ -364,7 +364,7 @@ fn paint(
             crate::glyphs::draw_underline(&painter, style, cell_rect, ucol, ppp);
         }
         let seg = if link_hovered {
-            Some((cell_rect, crate::style::ACCENT, true))
+            Some((cell_rect, crate::style::brand(), true))
         } else if link.is_some() && crate::glyphs::underline_of(flags).is_none() {
             Some((cell_rect, fg.gamma_multiply(0.6), false))
         } else {
@@ -432,7 +432,7 @@ fn paint(
         let y = inner.min.y + (*row as f32 + 1.0) * cs.y - 1.5;
         painter.line_segment(
             [Pos2::new(inner.min.x + *c0 as f32 * cs.x, y), Pos2::new(inner.min.x + *c1 as f32 * cs.x, y)],
-            Stroke::new(1.5_f32, crate::style::ACCENT),
+            Stroke::new(1.5_f32, crate::style::brand()),
         );
     }
 

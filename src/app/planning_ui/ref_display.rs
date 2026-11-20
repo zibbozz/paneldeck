@@ -205,7 +205,7 @@ fn chip_color(ui: &Ui, c: &RefChip) -> Color32 {
     match c.kind {
         ChipKind::Version => style::accent(),
         ChipKind::Milestone => Color32::from_rgb(0xc6, 0x78, 0xdd),
-        ChipKind::Terminal => Color32::from_rgb(0x98, 0xc3, 0x79),
+        ChipKind::Terminal => crate::style::ui().diff_add,
     }
 }
 

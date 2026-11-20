@@ -12,8 +12,14 @@ use eframe::egui::{self, Color32, RichText};
 use std::path::Path;
 use std::time::SystemTime;
 
-const WARN: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
-const ERR: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+#[allow(non_snake_case)]
+fn WARN() -> Color32 {
+    crate::style::ui().warning
+}
+#[allow(non_snake_case)]
+fn ERR() -> Color32 {
+    crate::style::ui().error
+}
 
 /// Editor-Zustand (im egui-Speicher).
 #[derive(Clone, Default)]
@@ -159,17 +165,17 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
     });
     ui.horizontal_wrapped(|ui| {
         let (src, col) = if ed.custom {
-            (lang.t("Eigene Vorlage (system-prompt.md im Datenordner, für beide Sprachen)", "Custom template (system-prompt.md in the data folder, used for both languages)"), Color32::from_rgb(0x61, 0xaf, 0xef))
+            (lang.t("Eigene Vorlage (system-prompt.md im Datenordner, für beide Sprachen)", "Custom template (system-prompt.md in the data folder, used for both languages)"), crate::style::ui().diff_rename)
         } else {
             (lang.t("Eingebaute Vorlage", "Built-in template"), style::dim(ui))
         };
         ui.label(RichText::new(src).small().strong().color(col));
         if ed.dirty() {
-            ui.label(RichText::new(lang.t("· ungespeicherte Änderungen", "· unsaved changes")).small().color(WARN));
+            ui.label(RichText::new(lang.t("· ungespeicherte Änderungen", "· unsaved changes")).small().color(WARN()));
         }
     });
     if let Some(w) = &ed.load_warning {
-        ui.label(RichText::new(w).small().color(WARN));
+        ui.label(RichText::new(w).small().color(WARN()));
     }
     if ed.changed_on_disk {
         ui.label(
@@ -178,7 +184,7 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
                 "system-prompt.md was changed outside Paneldeck. “Save” overwrites those changes, “Discard changes” loads the file.",
             ))
             .small()
-            .color(WARN),
+            .color(WARN()),
         );
     }
     egui::ScrollArea::vertical().max_height(260.0).id_salt("sysprompt_edit").show(ui, |ui| {
@@ -190,12 +196,12 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
             Lang::De => format!("Zu groß: {} KB, höchstens {} KB – so lässt sich die Vorlage nicht speichern.", ed.text.len().div_ceil(1024), MAX_BYTES / 1024),
             Lang::En => format!("Too large: {} KB, at most {} KB – the template cannot be saved like this.", ed.text.len().div_ceil(1024), MAX_BYTES / 1024),
         };
-        ui.label(RichText::new(msg).small().color(ERR));
+        ui.label(RichText::new(msg).small().color(ERR()));
     }
     let unknown = sysprompt::unknown_placeholders(&ed.text);
     if !unknown.is_empty() {
         let list = unknown.iter().map(|n| format!("{{{{{n}}}}}")).collect::<Vec<_>>().join(", ");
-        ui.label(RichText::new(format!("{} {list}", lang.t("Unbekannte Platzhalter (bleiben unverändert stehen):", "Unknown placeholders (left as they are):"))).small().color(WARN));
+        ui.label(RichText::new(format!("{} {list}", lang.t("Unbekannte Platzhalter (bleiben unverändert stehen):", "Unknown placeholders (left as they are):"))).small().color(WARN()));
     }
     ui.horizontal_wrapped(|ui| {
         if ui.add_enabled(ed.dirty() && !too_large, egui::Button::new(lang.t("Speichern", "Save"))).on_hover_text(lang.t("Schreibt system-prompt.md in den Datenordner", "Writes system-prompt.md to the data folder")).clicked() {
@@ -271,7 +277,7 @@ pub(super) fn system_prompt_section(ui: &mut egui::Ui, env: &mut PromptEnv) -> b
         None => {}
     }
     if let Some((m, is_err)) = &ed.msg {
-        ui.label(RichText::new(m).small().color(if *is_err { ERR } else { style::dim(ui) }));
+        ui.label(RichText::new(m).small().color(if *is_err { ERR() } else { style::dim(ui) }));
     }
     ui.data_mut(|d| d.insert_temp(ed_id(), ed));
     changed
