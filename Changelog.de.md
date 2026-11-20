@@ -9,6 +9,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.6.0] - WIP
 
+### Added
+
+- Prozessliste: ein Bereich *Prozesse* in der Terminal-Seitenleiste führt lang laufende Programme wie Dev-Server und Watcher getrennt von den Terminal-Sitzungen aus – Starten, Stoppen und Neustarten (auch als Gruppe in Reihenfolge), Ausgabe in einem eigenen Bereich mit Fehlerzähler und Link zu einer erkannten lokalen Adresse, optional Protokolldatei, Umgebungsvariablen (Werte verschlüsselt), Autostart mit Paneldeck oder dem Projekt; gespeichert in der neuen Datei `processes.json` (#243)
+- Agenten-Schnittstelle: Werkzeuge `list_processes` und `read_process_output` (Stufe Lesen) sowie `start_process`, `stop_process`, `restart_process` (Stufe Steuern) für die vom Nutzer angelegten Einträge; Agenten können keine Einträge anlegen oder ändern (#243)
+
 ## [2.5.0] - 2026-11-20
 
 ### Added

@@ -9,6 +9,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.6.0] - WIP
 
+### Added
+
+- Process list: a *Processes* section in the Terminals sidebar runs long-running programs such as dev servers and watchers apart from the terminal sessions – start, stop and restart (also as a group in order), output in a pane of its own with error count and a link to a detected local address, optional log file, environment variables (values encrypted), autostart with Paneldeck or the project; stored in the new data file `processes.json` (#243)
+- Agent interface: tools `list_processes` and `read_process_output` (level Read) and `start_process`, `stop_process`, `restart_process` (level Control) for the entries the user created; agents cannot add or change entries (#243)
+
 ## [2.5.0] - 2026-11-20
 
 ### Added
