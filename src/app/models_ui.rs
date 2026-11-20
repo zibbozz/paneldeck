@@ -485,6 +485,36 @@ fn level_label(l: McpLevel, lang: Lang) -> &'static str {
     }
 }
 
+/// Ganze Zahl mit Tausendertrennern: deutsch `1.048.576`, englisch `1,048,576`.
+fn group_digits(v: u64, lang: Lang) -> String {
+    let sep = lang.t(".", ",");
+    let digits = v.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push_str(sep);
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Liest eine eingetippte Tokenzahl; Tausendertrenner (`.`, `,`, Leerzeichen, `_`) werden ignoriert.
+fn parse_digits(s: &str) -> Option<f64> {
+    let d: String = s.chars().filter(|c| !matches!(c, '.' | ',' | '_' | '\'' | ' ' | '\u{a0}' | '\u{202f}')).collect();
+    d.parse::<u64>().ok().map(|n| n as f64)
+}
+
+/// Anzeige neben dem gesperrten Regler, solange der Server-Standard gilt.
+fn context_default_label(detected: Option<u32>, lang: Lang) -> String {
+    let (head, n) = match detected {
+        Some(n) => (lang.t("vom Server:", "from the server:"), n),
+        None => (lang.t("Standard", "default"), config::DEFAULT_CONTEXT),
+    };
+    let short = config::context_short(n).map(|k| format!("{k} · ")).unwrap_or_default();
+    format!("{head} {short}{} {}", group_digits(u64::from(n), lang), lang.t("Tokens", "tokens"))
+}
+
 /// Kurzbeschreibung eines Modells in der Kopfzeile: Werkzeuge und Kontextlänge.
 pub(super) fn model_summary(s: &LlmServer, name: &str, lang: Lang) -> String {
     let tools = match s.tools_supported(name) {
@@ -538,17 +568,38 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
         });
         row(ui, lang.t("Kontextlänge", "Context length"), |ui| {
             let mut own = cfg.context_length.is_some();
+            let detected = s.info(name).and_then(|i| i.context_length).filter(|d| *d > 0);
             if ui.checkbox(&mut own, lang.t("eigene", "custom")).changed() {
-                cfg.context_length = own.then(|| s.info(name).and_then(|i| i.context_length).unwrap_or(config::DEFAULT_CONTEXT).clamp(config::MIN_CONTEXT, config::MAX_CONTEXT));
+                cfg.context_length = own.then(|| config::snap_context(detected.unwrap_or(config::DEFAULT_CONTEXT)));
+            }
+            // Regler in Zweierpotenzen (4096 … 1M): zeigt die nächste Stufe; ein Wert außerhalb oder zwischen den
+            // Stufen bleibt unverändert, bis der Regler bewegt wird. Pfeiltasten = eine Stufe.
+            let shown = cfg.context_length.unwrap_or(detected.unwrap_or(config::DEFAULT_CONTEXT));
+            let mut idx = config::context_step_index(shown);
+            let slider = egui::Slider::new(&mut idx, 0..=config::CONTEXT_STEPS.len() - 1).show_value(false);
+            let r = ui.add_enabled(cfg.context_length.is_some(), slider).on_hover_text(lang.t(
+                "Zweierpotenzen von 4K bis 1M (←/→ = eine Stufe). Andere Werte im Zahlenfeld daneben (256 bis 16M).",
+                "Powers of two from 4K to 1M (←/→ = one step). Other values in the number field next to it (256 to 16M).",
+            ));
+            // egui fokussiert einen Regler nur per Tab; nach Klick/Ziehen sollen die Pfeiltasten gleich wirken.
+            if r.clicked() || r.drag_started() {
+                r.request_focus();
+            }
+            if r.changed() {
+                cfg.context_length = Some(config::CONTEXT_STEPS[idx]);
             }
             if let Some(c) = cfg.context_length.as_mut() {
-                ui.add(egui::DragValue::new(c).range(config::MIN_CONTEXT..=config::MAX_CONTEXT).speed(256.0).suffix(lang.t(" Tokens", " tokens")));
+                ui.label(RichText::new(config::context_short(*c).unwrap_or_default()).strong());
+                ui.add(
+                    egui::DragValue::new(c)
+                        .range(config::MIN_CONTEXT..=config::MAX_CONTEXT)
+                        .speed(256.0)
+                        .custom_formatter(|v, _| group_digits(v as u64, lang))
+                        .custom_parser(parse_digits)
+                        .suffix(lang.t(" Tokens", " tokens")),
+                );
             } else {
-                let d = s.info(name).and_then(|i| i.context_length);
-                ui.label(RichText::new(match d {
-                    Some(n) => format!("{} {n}", lang.t("vom Server:", "from the server:")),
-                    None => format!("{} {}", lang.t("Standard", "default"), config::DEFAULT_CONTEXT),
-                }).small().color(style::dim(ui)));
+                ui.label(RichText::new(context_default_label(detected, lang)).small().color(style::dim(ui)));
             }
         });
         if cfg.level != McpLevel::Off {
@@ -873,8 +924,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("{text} nicht gefunden in {:?}", self.texts))
         }
         /// Klick auf den Text `text`; liefert die Ergebnisse der drei Bilder (zusammengefasst über `merge`).
-        fn click<R: Default>(&mut self, text: &str, mut f: impl FnMut(&mut Ui) -> R, mut merge: impl FnMut(&mut R, R)) -> R {
+        fn click<R: Default>(&mut self, text: &str, f: impl FnMut(&mut Ui) -> R, merge: impl FnMut(&mut R, R)) -> R {
             let pos = self.pos_of(text);
+            self.click_at(pos, f, merge)
+        }
+        /// Klick an die Stelle `pos` (wie [`H::click`]).
+        fn click_at<R: Default>(&mut self, pos: Pos2, mut f: impl FnMut(&mut Ui) -> R, mut merge: impl FnMut(&mut R, R)) -> R {
             let btn = |pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
             let mut acc = self.run(vec![Event::PointerMoved(pos)], &mut f);
             for e in [btn(true), btn(false)] {
@@ -985,6 +1040,100 @@ mod tests {
             assert_eq!(servers[0].model_cfg("llama3").context_length, Some(4096));
             assert_eq!(servers[0].models.len(), 1, "nur das geänderte Modell wird gespeichert");
         }
+    }
+
+    #[test]
+    fn token_numbers_are_grouped_and_parsed() {
+        assert_eq!(group_digits(0, Lang::En), "0");
+        assert_eq!(group_digits(256, Lang::En), "256");
+        assert_eq!(group_digits(4096, Lang::En), "4,096");
+        assert_eq!(group_digits(1_048_576, Lang::En), "1,048,576");
+        assert_eq!(group_digits(1_048_576, Lang::De), "1.048.576");
+        assert_eq!(group_digits(16 << 20, Lang::De), "16.777.216");
+        assert_eq!(parse_digits("1,048,576"), Some(1_048_576.0));
+        assert_eq!(parse_digits("1.048.576"), Some(1_048_576.0));
+        assert_eq!(parse_digits(" 6 000 "), Some(6000.0));
+        assert_eq!(parse_digits("6000"), Some(6000.0));
+        assert_eq!(parse_digits("abc"), None);
+        assert_eq!(parse_digits(""), None);
+        assert_eq!(context_default_label(Some(131_072), Lang::En), "from the server: 128K · 131,072 tokens");
+        assert_eq!(context_default_label(Some(6000), Lang::De), "vom Server: 6.000 Tokens");
+        assert_eq!(context_default_label(None, Lang::En), "default 8K · 8,192 tokens");
+    }
+
+    /// Regler der Kontextlänge: gesperrt beim Standard, alter Wert bleibt bis zur Bewegung, Pfeiltasten = eine Stufe,
+    /// das Zahlenfeld nimmt jeden Wert von 256 bis 16M.
+    #[test]
+    fn context_slider_steps_keeps_old_values_and_accepts_free_values() {
+        for lang in [Lang::En, Lang::De] {
+            let conn = Connector::with_transport(Arc::new(Fake::default()));
+            let mut s = LlmServer { id: "s1".into(), name: "Box".into(), url: "http://localhost:11434".into(), last_models: vec![info("llama3", Some(true)), info("old", Some(true))], ..Default::default() };
+            s.set_model_cfg(config::LlmModel { context_length: Some(6000), ..config::LlmModel::named("old") });
+            let mut servers: LlmServers = vec![s].into();
+            let mut st = ModelsUi::default();
+            let mut h = H::new();
+            h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            let head = format!("llama3{}", model_summary(&servers[0], "llama3", lang));
+            h.click(&head, |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            for _ in 0..5 {
+                h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            }
+            // Standard: Regler sichtbar, aber gesperrt; Anzeige mit Kurzform und voller Zahl.
+            let def = context_default_label(Some(4096), lang);
+            assert!(h.has(&def), "{:?}", h.texts);
+            let rail_y = h.pos_of(&def).y;
+            let custom_right = text_rect(&h, lang.t("eigene", "custom")).right();
+            let off_rail = Pos2::new(custom_right + 60.0, rail_y);
+            h.click_at(off_rail, |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            assert_eq!(servers[0].model_cfg("llama3").context_length, None, "gesperrter Regler ändert nichts");
+            // Eigene: startet bei der erkannten Länge (4096 = Stufe), Regler ganz links anklicken, dann Pfeiltasten.
+            h.click(lang.t("eigene", "custom"), |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            assert_eq!(servers[0].model_cfg("llama3").context_length, Some(4096));
+            h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            assert!(h.has("4K") && h.has(&format!("{} {}", group_digits(4096, lang), lang.t("Tokens", "tokens"))), "{:?}", h.texts);
+            let left = Pos2::new(text_rect(&h, lang.t("eigene", "custom")).right() + 12.0, rail_y);
+            h.click_at(left, |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            assert_eq!(servers[0].model_cfg("llama3").context_length, Some(4096), "ganz links = 4096");
+            for _ in 0..2 {
+                h.run(vec![key_ev(Key::ArrowRight)], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            }
+            assert_eq!(servers[0].model_cfg("llama3").context_length, Some(16384), "→ verdoppelt je Stufe");
+            h.run(vec![key_ev(Key::ArrowLeft)], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            assert_eq!(servers[0].model_cfg("llama3").context_length, Some(8192), "← halbiert");
+            for _ in 0..12 {
+                h.run(vec![key_ev(Key::ArrowRight)], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            }
+            assert_eq!(servers[0].model_cfg("llama3").context_length, Some(1 << 20), "höchstens 1M");
+            h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            assert!(h.has("1M") && h.has(&group_digits(1 << 20, lang)), "{:?}", h.texts);
+            // Zahlenfeld: freier Wert (auch über 1M), der Regler zeigt die nächste Stufe, der Wert bleibt exakt.
+            let field = format!("{} {}", group_digits(1 << 20, lang), lang.t("Tokens", "tokens"));
+            h.click(&field, |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            let sel_all = Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND };
+            h.run(vec![sel_all, Event::Text(group_digits(3_000_000, lang))], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            h.run(vec![key_ev(Key::Enter)], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            assert_eq!(servers[0].model_cfg("llama3").context_length, Some(3_000_000), "freier Wert bleibt exakt: {:?}", h.texts);
+            assert!(h.has(&group_digits(3_000_000, lang)), "{:?}", h.texts);
+            // Altes Modell mit 6000: unverändert angezeigt und gespeichert, solange der Regler nicht bewegt wird.
+            let head_old = format!("old{}", model_summary(&servers[0], "old", lang));
+            h.click(&head_old, |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false), merge_models);
+            for _ in 0..5 {
+                h.run(vec![], |ui| models_tab(ui, lang, &mut servers, &mut st, &conn, false));
+            }
+            assert!(h.has(&format!("{} {}", group_digits(6000, lang), lang.t("Tokens", "tokens"))), "{:?}", h.texts);
+            assert_eq!(servers[0].model_cfg("old").context_length, Some(6000), "Anzeigen allein ändert nichts");
+        }
+    }
+
+    fn text_rect(h: &H, text: &str) -> Rect {
+        h.shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.visual_bounding_rect()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text} nicht gefunden in {:?}", h.texts))
     }
 
     #[test]
