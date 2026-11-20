@@ -31,7 +31,7 @@ The terminals use the shells from `/etc/shells`; the default is your login shell
 ## Desktop integration
 All switches are under *Settings → Window*, section *Desktop integration*.
 - **Menu bar:** instead of a tray icon Paneldeck shows an icon in the menu bar (click = show the window, menu: *Show Paneldeck* / *Quit*). *Close → tray* and *Minimize → tray* use it.
-- **Start at login** (off by default): a LaunchAgent `~/Library/LaunchAgents/io.github.zibbozz.paneldeck.plist` (instances with `--profile`/`--data-dir` get their own file) that starts Paneldeck minimized at the next login. macOS shows "Background item added" and lists it under *System Settings → General → Login Items*. Turning the switch off removes the file (a file without Paneldeck's marker is never touched).
+- **Start at login** (off by default): a LaunchAgent `~/Library/LaunchAgents/io.github.zibbozz.paneldeck.plist` (instances with `--profile`/`--data-dir` get their own file) that starts Paneldeck minimized at the next login. macOS shows "Background item added" and lists it under *System Settings → General → Login Items*. Turning the switch off removes the file (a file without Paneldeck's marker is never touched). It cannot be turned on while Paneldeck runs from the disk image or a translocated location – move the app to *Applications* first.
 - **Notifications** (on by default) are shown through `osascript`. Because the app is not signed they appear under the name **"Script Editor"**; allow (or turn off) them in *System Settings → Notifications → Script Editor*.
 - **File dialogs** (export, import, choose a folder) are the native ones of macOS.
 - **Finder: "Open in Paneldeck"** is not set up by Paneldeck in 2.5.0. You can add it yourself as a Quick Action in two minutes:
@@ -48,15 +48,26 @@ All switches are under *Settings → Window*, section *Desktop integration*.
 API keys are never stored as plain text. Paneldeck keeps one random key in your **login Keychain** (item "Paneldeck", account "api-key-encryption") and stores the API keys encrypted with it in `settings.json`. Because the app is not signed, macOS may ask once whether Paneldeck may use this item – choose *Always Allow*. After an update the question can come again (the signature of the new version differs). If there is no usable Keychain, Paneldeck asks for a **master password** on the first access to a key (never at start), as on Linux.
 
 ## Self-update
-The app updates itself: the new `paneldeck-<version>-macos-universal.zip` is downloaded from GitHub, **checked against `SHA256SUMS.txt`**, unpacked next to the app and put in place of the old `Paneldeck.app` (which stays hidden as `.Paneldeck.app.old` until the new version has started), then Paneldeck restarts. This needs write access to the folder of the app (normal for `/Applications` for an admin user); otherwise Paneldeck only announces the new version with a link. Honestly: the checksum protects against **transfer errors and incomplete downloads, not against a compromised release** – there is no separate signature.
+The app updates itself: the new `paneldeck-<version>-macos-universal.zip` is downloaded from GitHub, **checked against `SHA256SUMS.txt`**, unpacked next to the app and put in place of the old `Paneldeck.app` (which stays hidden as `.Paneldeck.app.old` until the new version has started), then Paneldeck restarts. This needs write access to the folder of the app (normal for `/Applications` for an admin user); otherwise Paneldeck only announces the new version with a link. Before the swap the unpacked app is checked with `codesign --verify --deep --strict`; a damaged bundle is discarded.
+
+Honestly: the checksum protects against **transfer errors and incomplete downloads, not against a compromised release** – there is no separate signature. The app written by the self-update has **no quarantine attribute**, so Gatekeeper does not check updates at all. The only trust is the match with `SHA256SUMS.txt` of the GitHub release.
 
 ## Agent interface (MCP)
 Works as on Windows and Linux. The hub identifies the calling process itself (owner of the TCP connection through `libproc`, and its process tree). A caller that cannot be identified is **refused**. A caller belongs to a session only if it is the session's shell or one of its descendants. macOS has no "subreaper": a program that detaches from a session after the hub started (its parent chain ends at `launchd`) counts as "belongs to no session it can prove" and is restricted like on Windows. As on Windows and Linux this is no boundary against hostile programs of the same user, see [Agent interface](agent-interface.md).
+
+Known detours (like WMI or the task scheduler on Windows): a session can have a program that is **already running** start something for it. That program is then no descendant of the session, and the hub counts it as an outside client. Examples:
+- `open -a Terminal x.command` or `open x.command`: Terminal.app runs the script in a new window;
+- `osascript -e 'tell application "Terminal" to do script "…"'` (likewise for iTerm2): a command typed into an already open terminal window;
+- a `tmux`/`screen` server started before or outside the session: `tmux new-window …`, `tmux send-keys …`;
+- `launchctl` jobs or login items.
+
+The chain rules protect against steered agents (prompt injection), not against hostile local programs. An agent with level *Control* that can run shell commands can use these detours. Leave the level at *Off* or *Read* if that matters.
 
 ## Limits (2.5.0)
 - **Experimental**, not signed, not notarized.
 - Window: Paneldeck draws its own title bar with the window buttons on the right (as on Windows), not the macOS "traffic lights".
 - Keyboard: app shortcuts still use **Ctrl** (as on Windows/Linux), not Cmd.
 - Finder integration only by hand (see above).
+- Clicking a path in the terminal never starts a program: apps (`.app`), `.command`/`.tool`/`.terminal`, AppleScripts, installers (`.pkg`), `.webloc`/`.inetloc`/`.fileloc`, `.prefPane`, shell scripts and every file with the execute bit are only shown in Finder.
 - Notifications appear as "Script Editor".
 - Installed monospace fonts are read from `/System/Library/Fonts`, `/Library/Fonts` and `~/Library/Fonts`.

@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -97,7 +97,7 @@ jobs:
   # ad hoc, Start mit --version, Selbst-Update mit genau diesem ZIP), danach der Smoke-Test gegen die App aus dem ZIP
   # (macOS-Runner haben eine Anmeldesitzung mit Fenstern). Kostenlos (Standard-Runner im öffentlichen Repository).
   package-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

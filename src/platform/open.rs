@@ -20,7 +20,10 @@ pub fn launch(target: &str) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        mac_open(&[], std::ffi::OsStr::new(target))
+        // a bundle folder (X.app …) is only shown, never started
+        let p = Path::new(target);
+        let reveal = !target.contains("://") && p.is_dir() && is_bundle_like(p);
+        mac_open(if reveal { &["-R"] } else { &[] }, std::ffi::OsStr::new(target))
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -106,8 +109,15 @@ pub fn folder(dir: &Path) {
     }
     #[cfg(target_os = "macos")]
     {
-        mac_open(&[], dir.as_os_str());
+        mac_open(if is_bundle_like(dir) { &["-R"] } else { &[] }, dir.as_os_str());
     }
+}
+
+/// macOS: ein Ordner mit Endung (`X.app`, `Y.prefPane`, `Z.workflow` …) ist ein Bündel – `open` würde es starten bzw.
+/// installieren. Solche Ordner werden nur im Finder markiert (`open -R`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn is_bundle_like(p: &Path) -> bool {
+    p.extension().is_some_and(|e| !e.is_empty())
 }
 
 /// File tree: a folder is opened, a file is shown selected in its folder. Only where `FILE_MANAGER` is true.
@@ -125,10 +135,23 @@ pub fn show_in_file_manager(path: &str, is_dir: bool) {
             xdg_open(t.as_os_str());
         }
     }
-    // macOS: a folder is opened in Finder, a file is shown selected (`open -R`).
+    // macOS: a folder is opened in Finder, a file or a bundle (`X.app` is a folder too – `open` would start it) is shown
+    // selected (`open -R`).
     #[cfg(target_os = "macos")]
     {
-        mac_open(if is_dir { &[] } else { &["-R"] }, std::ffi::OsStr::new(path));
+        let reveal = !is_dir || is_bundle_like(Path::new(path));
+        mac_open(if reveal { &["-R"] } else { &[] }, std::ffi::OsStr::new(path));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bundles_are_recognised() {
+        use std::path::Path;
+        assert!(super::is_bundle_like(Path::new("/Applications/Calculator.app")));
+        assert!(super::is_bundle_like(Path::new("/x/Y.prefPane/")));
+        assert!(!super::is_bundle_like(Path::new("/Users/a/projects")));
     }
 }
 

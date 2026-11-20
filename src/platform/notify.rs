@@ -72,16 +72,19 @@ pub fn toast(title: &str, body: &str, sound: bool) {
     });
 }
 
-/// Argumente für `osascript`: das Skript (fest) und danach Titel und Text als `argv` (Steuerzeichen entfernt, gekürzt).
+/// Argumente für `osascript`: das Skript (fest), dann ein festes erstes Argument `paneldeck` und erst danach Titel und
+/// Text als `argv` (Steuerzeichen entfernt, gekürzt). Das feste Argument beendet die Optionen von `osascript` (getopt
+/// hört beim ersten Nicht-Options-Argument auf): Ein Titel wie `-e …` oder `-l JavaScript` (Terminaltitel per OSC 0/2
+/// sind fremder Text) wird so nie als Option gelesen.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn osascript_args(title: &str, body: &str, sound: bool) -> Vec<String> {
     let clean = |s: &str, max: usize| s.chars().filter(|c| !c.is_control() || *c == '\n').take(max).collect::<String>();
     let show = if sound {
-        "display notification (item 2 of argv) with title (item 1 of argv) sound name \"default\""
+        "display notification (item 3 of argv) with title (item 2 of argv) sound name \"default\""
     } else {
-        "display notification (item 2 of argv) with title (item 1 of argv)"
+        "display notification (item 3 of argv) with title (item 2 of argv)"
     };
-    vec!["-e".into(), "on run argv".into(), "-e".into(), show.into(), "-e".into(), "end run".into(), clean(title, 200), clean(body, 1000)]
+    vec!["-e".into(), "on run argv".into(), "-e".into(), show.into(), "-e".into(), "end run".into(), "paneldeck".into(), clean(title, 200), clean(body, 1000)]
 }
 
 #[cfg(test)]
@@ -89,12 +92,19 @@ mod tests {
     #[test]
     fn osascript_gets_text_as_arguments_only() {
         let a = super::osascript_args("Build \"done\"", "line1\nline2\u{7}", true);
-        assert_eq!(a.len(), 8);
-        assert_eq!(&a[6], "Build \"done\"", "title is an argument, never part of the script");
-        assert_eq!(&a[7], "line1\nline2", "control characters (bell) removed");
-        assert!(a[3].contains("sound name"));
+        assert_eq!(a.len(), 9);
+        assert_eq!(&a[6], "paneldeck", "fixed first argument ends the options of osascript");
+        assert_eq!(&a[7], "Build \"done\"", "title is an argument, never part of the script");
+        assert_eq!(&a[8], "line1\nline2", "control characters (bell) removed");
+        assert!(a[3].contains("item 3 of argv") && a[3].contains("title (item 2 of argv)") && a[3].contains("sound name"));
         assert!(!super::osascript_args("t", "b", false)[3].contains("sound"));
         assert!(a[..6].iter().all(|s| !s.contains("done")));
+        // titles that look like options (e.g. a terminal title set by a program) stay arguments after the fixed one
+        for t in ["-e x", "-l JavaScript", "-s", "-"] {
+            let a = super::osascript_args(t, "b", false);
+            assert_eq!((a[6].as_str(), a[7].as_str()), ("paneldeck", t));
+            assert_eq!(a[..6], super::osascript_args("plain", "b", false)[..6], "script unchanged");
+        }
     }
 }
 

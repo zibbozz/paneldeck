@@ -14,8 +14,24 @@
 
 use std::path::{Path, PathBuf};
 
-/// Marker in every file Paneldeck writes (an XML comment); only files with it are overwritten or removed.
+/// Marker word in every file Paneldeck writes (inside [`MARKER_LINE`]); only files with exactly that line count.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MARKER: &str = "X-Paneldeck-Integration";
+
+/// The whole marker line (an XML comment) of a LaunchAgent written by Paneldeck.
+pub const MARKER_LINE: &str = "<!-- X-Paneldeck-Integration: Paneldeck autostart (Settings → Desktop integration). -->";
+
+/// Is this a file Paneldeck wrote (the exact marker line, not just the word somewhere)?
+pub fn is_ours(content: &str) -> bool {
+    content.lines().any(|l| l.trim_end_matches('\r') == MARKER_LINE)
+}
+
+/// Does this program run from a place that changes or vanishes (App Translocation, a mounted disk image)? Then an
+/// autostart entry would point to a path that does not exist at the next login.
+pub fn transient_location(exe: &Path) -> bool {
+    let s = exe.to_string_lossy();
+    s.contains("/AppTranslocation/") || s.starts_with("/Volumes/")
+}
 
 /// The program to put into the entries: this executable (inside `Paneldeck.app/Contents/MacOS/`).
 pub fn this_exe() -> PathBuf {
@@ -63,7 +79,7 @@ pub fn autostart_plist(exe: &Path, args: &[String]) -> Result<String, String> {
         items.push_str(&format!("        <string>{}</string>\n", xml_escape(&a)?));
     }
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<!-- {MARKER}: Paneldeck autostart (Settings → Desktop integration). -->\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>{}</string>\n    <key>ProgramArguments</key>\n    <array>\n{items}    </array>\n    <key>RunAtLoad</key>\n    <true/>\n    <key>ProcessType</key>\n    <string>Interactive</string>\n    <key>LimitLoadToSessionType</key>\n    <string>Aqua</string>\n</dict>\n</plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n{MARKER_LINE}\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>{}</string>\n    <key>ProgramArguments</key>\n    <array>\n{items}    </array>\n    <key>RunAtLoad</key>\n    <true/>\n    <key>ProcessType</key>\n    <string>Interactive</string>\n    <key>LimitLoadToSessionType</key>\n    <string>Aqua</string>\n</dict>\n</plist>\n",
         xml_escape(&label(args))?
     ))
 }
@@ -90,10 +106,10 @@ pub fn args_line(v: &[String]) -> String {
     v.iter().map(|a| format!("'{}'", a.replace('\'', "'\\''"))).collect::<Vec<_>>().join(" ")
 }
 
-/// Write (`Some`) or remove (`None`) a file. Writing only replaces a missing file or one with [`MARKER`]; removing only
-/// removes a file with it (a file of the user stays untouched).
+/// Write (`Some`) or remove (`None`) a file. Writing only replaces a missing file or one with [`MARKER_LINE`]; removing
+/// only removes a file with it (a file of the user stays untouched).
 pub fn apply(path: &Path, content: Option<&str>) -> Result<(), String> {
-    let ours = || std::fs::read_to_string(path).is_ok_and(|c| c.contains(MARKER));
+    let ours = || std::fs::read_to_string(path).is_ok_and(|c| is_ours(&c));
     match content {
         Some(c) => {
             if std::fs::symlink_metadata(path).is_ok() && !ours() {
@@ -129,6 +145,13 @@ pub fn autostart_expected(args: &[String]) -> Result<String, String> {
 
 pub fn set_autostart(on: bool, args: &[String]) -> Result<(), String> {
     let path = autostart_file(&need_home()?, args);
+    if on && transient_location(&this_exe()) {
+        return Err(crate::state::t(
+            "Paneldeck läuft aus dem Disk-Image oder einem vorübergehenden Ort (App Translocation) – bitte zuerst Paneldeck.app nach „Programme“ ziehen und von dort starten.",
+            "Paneldeck runs from the disk image or a temporary location (App Translocation) – please drag Paneldeck.app to Applications first and start it from there.",
+        )
+        .to_string());
+    }
     if on {
         apply(&path, Some(&autostart_plist(&this_exe(), args)?))
     } else {
@@ -188,6 +211,16 @@ mod tests {
         assert!(apply(&f, Some(&c)).is_err(), "never overwritten");
         apply(&f, None).unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "<plist>mine</plist>", "never removed");
+        // the word alone (e.g. in a comment of the user) is not our marker
+        let theirs = format!("<!-- copied from {MARKER} -->\n<plist>mine</plist>");
+        std::fs::write(&f, &theirs).unwrap();
+        assert!(!is_ours(&theirs) && is_ours(&c));
+        assert!(apply(&f, Some(&c)).is_err());
+        apply(&f, None).unwrap();
+        assert!(f.exists());
+        assert!(transient_location(Path::new("/private/var/folders/x/T/AppTranslocation/ABC/d/Paneldeck.app/Contents/MacOS/paneldeck")));
+        assert!(transient_location(Path::new("/Volumes/Paneldeck 2.5.0/Paneldeck.app/Contents/MacOS/paneldeck")));
+        assert!(!transient_location(Path::new("/Applications/Paneldeck.app/Contents/MacOS/paneldeck")));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -110,7 +110,41 @@ pub fn is_macho(b: &[u8]) -> bool {
 /// `.<Name>.app.new` daneben; dann wird die laufende in `.<Name>.app.old` umbenannt (die laufende Instanz läuft aus ihren
 /// offenen Dateien weiter) und die neue an ihren Platz – scheitert das, wird zurückgerollt. `.old` löscht erst die neue
 /// Version nach ihrem ersten Frame (`remove_old_exe`). Das Bündel muss ein echter Ordner sein (kein Symlink).
+/// Vor dem Tausch wird die neue Fassung mit `codesign --verify --deep --strict` geprüft (das Release ist ad hoc signiert;
+/// ein beschädigtes oder verändertes Bündel wird verworfen). Gatekeeper prüft die vom Update geschriebene App nicht
+/// (kein Quarantäne-Attribut) – das Vertrauen kommt allein aus `SHA256SUMS.txt`.
 pub fn swap_bundle(bundle: &Path, entries: &[super::zip::Entry]) -> Result<(), String> {
+    swap_bundle_with(bundle, entries, &codesign_verify)
+}
+
+/// `codesign --verify --deep --strict <bündel>` (macOS); anderswo gibt es nichts zu prüfen.
+pub fn codesign_verify(dir: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("codesign: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "{} ({})",
+                crate::state::t("Die Signatur der neuen Paneldeck.app ist ungültig", "The signature of the new Paneldeck.app is invalid"),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// Wie [`swap_bundle`], mit eigener Prüfung der fertig entpackten neuen Fassung (Tests).
+pub fn swap_bundle_with(bundle: &Path, entries: &[super::zip::Entry], verify: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), String> {
     let has = |p: &str| entries.iter().find(|e| e.path == p && !e.dir);
     if has("Contents/Info.plist").is_none() || !has("Contents/MacOS/paneldeck").is_some_and(|e| is_macho(&e.data)) {
         return Err(crate::state::t("Das ZIP enthält keine gültige Paneldeck.app.", "The ZIP does not contain a valid Paneldeck.app.").to_string());
@@ -147,7 +181,7 @@ pub fn swap_bundle(bundle: &Path, entries: &[super::zip::Entry]) -> Result<(), S
             }
             Ok(())
         };
-        if let Err(e) = write_all() {
+        if let Err(e) = write_all().and_then(|_| verify(&new)) {
             let _ = std::fs::remove_dir_all(&new);
             return Err(e);
         }
@@ -173,7 +207,7 @@ pub fn swap_bundle(bundle: &Path, entries: &[super::zip::Entry]) -> Result<(), S
     }
     #[cfg(not(unix))]
     {
-        let _ = bundle;
+        let _ = (bundle, verify);
         Err(crate::platform::unsupported())
     }
 }
@@ -805,7 +839,11 @@ mod macapp_tests {
             Entry { path: "Contents/MacOS/paneldeck".into(), data: new_bin.clone(), mode: 0o755, dir: false },
             Entry { path: "Contents/Resources/LICENSE".into(), data: b"MIT".to_vec(), mode: 0o644, dir: false },
         ];
-        swap_bundle(&bundle, &entries).unwrap();
+        // a bundle that fails the check is thrown away, the old one stays
+        assert!(swap_bundle_with(&bundle, &entries, &|_| Err("bad signature".into())).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        assert!(!d.join(".Paneldeck.app.new").exists());
+        swap_bundle_with(&bundle, &entries, &|p| if p.join("Contents/MacOS/paneldeck").is_file() { Ok(()) } else { Err("incomplete".into()) }).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), new_bin);
         assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o755);
         assert!(!bundle.join("Contents").join("stale.txt").exists(), "the whole bundle is replaced");
@@ -816,7 +854,7 @@ mod macapp_tests {
         assert!(!old.exists(), "removed after the first frame of the new version");
         // a symlinked bundle is refused
         std::os::unix::fs::symlink(&bundle, d.join("Link.app")).unwrap();
-        assert!(swap_bundle(&d.join("Link.app"), &entries).is_err());
+        assert!(swap_bundle_with(&d.join("Link.app"), &entries, &|_| Ok(())).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 
