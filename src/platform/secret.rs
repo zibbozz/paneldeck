@@ -32,6 +32,9 @@ pub enum Error {
     /// Linux: the keyring refused (locked and the unlock prompt was dismissed, item missing …): text of the error.
     #[cfg_attr(windows, allow(dead_code))]
     Keyring(String),
+    /// Linux: the keyring is being opened in the background (never in the UI thread) – try again in a moment.
+    #[cfg_attr(windows, allow(dead_code))]
+    Pending,
 }
 
 #[cfg(windows)]
@@ -124,6 +127,8 @@ mod unix {
     }
 
     static STATE: Mutex<PwState> = Mutex::new(PwState::Idle);
+    /// Generation of the question: a check that ends after "cancel" (or after a newer check) is dropped.
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         m.lock().unwrap_or_else(|e| e.into_inner())
@@ -136,6 +141,7 @@ mod unix {
 
     /// The question was cancelled: it closes; the next access asks again.
     pub fn cancel_password() {
+        GENERATION.fetch_add(1, Ordering::SeqCst);
         WANTED.store(false, Ordering::Relaxed);
         *lock(&STATE) = PwState::Idle;
     }
@@ -154,7 +160,9 @@ mod unix {
     /// a lock): derive the key for the salt of every stored blob (`blobs`, kind `P`), check that it opens the first one,
     /// then keep the keys. Without stored blobs a new salt is made (a new password).
     pub fn begin_unlock(password: Zeroizing<String>, blobs: Vec<Vec<u8>>) {
+        let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&STATE) = PwState::Working;
+        let current = move || GENERATION.load(Ordering::SeqCst) == generation;
         std::thread::spawn(move || {
             let mut salts: Vec<[u8; SALT_LEN]> = Vec::new();
             for b in blobs.iter().filter(|b| is_password_blob(b) && b.len() > 1 + SALT_LEN) {
@@ -177,11 +185,19 @@ mod unix {
             if let Some(first) = blobs.iter().find(|b| is_password_blob(b) && b.len() > 1 + SALT_LEN) {
                 let key = derived.iter().find(|(s, _)| *s == first[1..1 + SALT_LEN]).map(|(_, k)| k);
                 if key.is_none_or(|k| open(KIND_PASSWORD, k, &first[1 + SALT_LEN..]).is_none()) {
-                    *lock(&STATE) = PwState::Wrong;
+                    if current() {
+                        *lock(&STATE) = PwState::Wrong;
+                    }
                     return;
                 }
             }
-            *lock(&DERIVED) = derived;
+            // cancelled (or superseded) meanwhile: keep nothing
+            let mut d = lock(&DERIVED);
+            if !current() {
+                return;
+            }
+            *d = derived;
+            drop(d);
             // (WANTED clears the window when it has read `Done`, see `cancel_password`.)
             *lock(&STATE) = PwState::Done;
         });
@@ -254,6 +270,7 @@ mod unix {
             }
             // a keyring that refuses (prompt dismissed, D-Bus error): no silent switch to the password
             Err(keyring::Fail::Refused(e)) => Err(Error::Keyring(e)),
+            Err(keyring::Fail::Pending) => Err(Error::Pending),
         }
     }
 
@@ -263,6 +280,7 @@ mod unix {
                 let key = keyring::key(false).map_err(|e| match e {
                     keyring::Fail::Unavailable => Error::Keyring(crate::state::t("Kein Schlüsselbund (Secret Service) erreichbar", "No keyring (Secret Service) reachable").into()),
                     keyring::Fail::Refused(e) => Error::Keyring(e),
+                    keyring::Fail::Pending => Error::Pending,
                 })?;
                 open(KIND_KEYRING, &key, &blob[1..]).ok_or(Error::Keyring(crate::state::t("Der Schlüssel im Schlüsselbund passt nicht", "The key in the keyring does not match").into()))
             }
@@ -280,6 +298,7 @@ mod unix {
         lock(&DERIVED).clear();
         WANTED.store(false, Ordering::Relaxed);
         *lock(&STATE) = PwState::Idle;
+        GENERATION.fetch_add(1, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -288,9 +307,10 @@ mod unix {
         seal(KIND_PASSWORD, &derive(password, &salt), &salt, plain).unwrap()
     }
 
-    /// The system keyring (Linux: Secret Service over D-Bus).
+    /// The system keyring (Linux: Secret Service over D-Bus). The D-Bus calls (and the keyring's own unlock dialog) run in
+    /// a background thread, never in the UI thread: the first access starts it and reports `Pending`.
     mod keyring {
-        use super::{Key, KEYRING_KEY};
+        use super::{lock, Key, KEYRING_KEY};
 
         pub enum Fail {
             /// No keyring service (no session bus, no Secret Service provider, macOS for now): the master password is used.
@@ -298,26 +318,75 @@ mod unix {
             /// The service is there but refused (locked and the prompt was dismissed, D-Bus error): text of the error.
             #[allow(dead_code)]
             Refused(String),
+            /// Still being opened in the background.
+            #[allow(dead_code)]
+            Pending,
         }
 
         #[cfg(any(target_os = "macos", test))]
         pub fn key(_create: bool) -> Result<Key, Fail> {
             // Tests never touch the real keyring of the machine.
             let _ = &KEYRING_KEY;
+            drop(lock(&KEYRING_KEY));
             Err(Fail::Unavailable)
         }
 
-        /// The 32-byte key of the item "Paneldeck – API key encryption" (attributes `application=paneldeck`,
-        /// `purpose=api-key-encryption`). `create`: make it if missing (only when storing a key). Unlocking may show the
-        /// keyring's own dialog.
+        #[cfg(all(not(target_os = "macos"), not(test)))]
+        enum State {
+            Idle,
+            Fetching,
+            Unavailable,
+            Refused(String),
+        }
+
+        #[cfg(all(not(target_os = "macos"), not(test)))]
+        static STATE: std::sync::Mutex<State> = std::sync::Mutex::new(State::Idle);
+
+        /// The 32-byte key, if already fetched; otherwise the fetch starts in the background (`Pending`). A refusal is
+        /// reported once, the next access tries again; "no service" stays for this run.
         #[cfg(all(not(target_os = "macos"), not(test)))]
         pub fn key(create: bool) -> Result<Key, Fail> {
+            if let Some(k) = lock(&KEYRING_KEY).as_ref() {
+                return Ok(k.clone());
+            }
+            let mut st = lock(&STATE);
+            match std::mem::replace(&mut *st, State::Idle) {
+                State::Unavailable => {
+                    *st = State::Unavailable;
+                    Err(Fail::Unavailable)
+                }
+                State::Refused(e) => Err(Fail::Refused(e)),
+                State::Fetching => {
+                    *st = State::Fetching;
+                    Err(Fail::Pending)
+                }
+                State::Idle => {
+                    *st = State::Fetching;
+                    std::thread::spawn(move || {
+                        let r = fetch(create);
+                        let mut st = lock(&STATE);
+                        *st = match r {
+                            Ok(k) => {
+                                *lock(&KEYRING_KEY) = Some(k);
+                                State::Idle
+                            }
+                            Err(Fail::Unavailable) => State::Unavailable,
+                            Err(Fail::Refused(e)) => State::Refused(e),
+                            Err(Fail::Pending) => State::Idle,
+                        };
+                    });
+                    Err(Fail::Pending)
+                }
+            }
+        }
+
+        /// Item "Paneldeck – API key encryption" (attributes `application=paneldeck`, `purpose=api-key-encryption`);
+        /// `create`: make it if missing (only when storing a key). Unlocking may show the keyring's own dialog.
+        #[cfg(all(not(target_os = "macos"), not(test)))]
+        fn fetch(create: bool) -> Result<Key, Fail> {
             use secret_service::blocking::SecretService;
             use secret_service::{EncryptionType, Error as E};
             use std::collections::HashMap;
-            if let Some(k) = super::lock(&KEYRING_KEY).as_ref() {
-                return Ok(k.clone());
-            }
             let refused = |e: E| Fail::Refused(e.to_string());
             let ss = match SecretService::connect(EncryptionType::Dh) {
                 Ok(s) => s,
@@ -328,11 +397,11 @@ mod unix {
             let attrs = HashMap::from([("application", "paneldeck"), ("purpose", "api-key-encryption")]);
             let found = ss.search_items(attrs.clone()).map_err(refused)?;
             let item = found.unlocked.into_iter().next().or_else(|| found.locked.into_iter().next());
-            let key = match item {
+            match item {
                 Some(item) => {
                     item.ensure_unlocked().map_err(refused)?;
                     let v = zeroize::Zeroizing::new(item.get_secret().map_err(refused)?);
-                    Key::new(<[u8; 32]>::try_from(v.as_slice()).map_err(|_| Fail::Refused("invalid key length".into()))?)
+                    Ok(Key::new(<[u8; 32]>::try_from(v.as_slice()).map_err(|_| Fail::Refused("invalid key length".into()))?))
                 }
                 None if create => {
                     let mut k = Key::new([0u8; 32]);
@@ -340,12 +409,10 @@ mod unix {
                     let coll = ss.get_default_collection().map_err(refused)?;
                     coll.ensure_unlocked().map_err(refused)?;
                     coll.create_item("Paneldeck – API key encryption", attrs, &*k, true, "application/octet-stream").map_err(refused)?;
-                    k
+                    Ok(k)
                 }
-                None => return Err(Fail::Refused(crate::state::t("Schlüssel im Schlüsselbund fehlt", "Key missing in the keyring").into())),
-            };
-            *super::lock(&KEYRING_KEY) = Some(key.clone());
-            Ok(key)
+                None => Err(Fail::Refused(crate::state::t("Schlüssel im Schlüsselbund fehlt", "Key missing in the keyring").into())),
+            }
         }
     }
 
@@ -400,6 +467,12 @@ mod unix {
             // keyring blob without keyring
             assert!(matches!(unprotect(b"Kxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), Err(Error::Keyring(_))));
             assert_eq!(unprotect(b"?"), Err(Error::TooLarge));
+            // a check that ends after "cancel" keeps nothing
+            test_reset();
+            begin_unlock(Zeroizing::new("late".into()), Vec::new());
+            cancel_password();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            assert_eq!(protect(b"x"), Err(Error::NeedPassword), "cancelled check must not set the keys");
             test_reset();
         }
     }

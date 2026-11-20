@@ -24,6 +24,9 @@ pub enum SecretError {
     /// Linux: Schlüsselbund verweigert (Text).
     #[cfg_attr(windows, allow(dead_code))]
     Keyring(String),
+    /// Linux: Der Schlüsselbund wird gerade im Hintergrund geöffnet.
+    #[cfg_attr(windows, allow(dead_code))]
+    Pending,
 }
 
 impl SecretError {
@@ -48,6 +51,12 @@ impl SecretError {
                 .t(
                     "Das Master-Passwort passt nicht zu diesem API-Schlüssel – bitte erneut eingeben oder den Schlüssel neu eintragen.",
                     "The master password does not match this API key – please enter it again or enter the key anew.",
+                )
+                .into(),
+            SecretError::Pending => lang
+                .t(
+                    "Der Schlüsselbund des Systems wird geöffnet (evtl. fragt er nach seinem Passwort) – bitte gleich noch einmal versuchen.",
+                    "The system keyring is being opened (it may ask for its password) – please try again in a moment.",
                 )
                 .into(),
             SecretError::Keyring(e) => format!("{} ({e})", lang.t("Der Schlüsselbund des Systems hat den Zugriff verweigert.", "The system keyring refused access.")),
@@ -118,6 +127,7 @@ mod imp {
             Error::NeedPassword => SecretError::NeedPassword,
             Error::WrongPassword => SecretError::WrongPassword,
             Error::Keyring(e) => SecretError::Keyring(e),
+            Error::Pending => SecretError::Pending,
         }
     }
 
