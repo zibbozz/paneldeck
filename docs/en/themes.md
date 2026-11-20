@@ -95,10 +95,10 @@ The names are part of the public interface (they are only ever added, never rena
 | `active_bg` | Accent and selection | Pressed and active elements | `@accent/45` |
 | `selection_bg` | Accent and selection | Text selection | `@accent/35` |
 | `focus` | Accent and selection | Focus ring and text cursor | `@accent` |
-| `success` | Status | Success, ready | `#4cc26a` |
-| `warning` | Status | Warning, waiting for input | `#e5c07b` |
-| `error` | Status | Error | `#e06c75` |
-| `danger` | Status | Critical (approval needed, error toast) | `#e04f5f` |
+| `success` | Status | Success, ready | `#4cc26a` (dark) / `#1a7f37` (light) |
+| `warning` | Status | Warning, waiting for input | `#e5c07b` (dark) / `#9a6700` (light) |
+| `error` | Status | Error | `#e06c75` (dark) / `#cf222e` (light) |
+| `danger` | Status | Critical (approval needed, error toast) | `#e04f5f` (dark) / `#a40e26` (light) |
 | `info` | Status | Information | `@accent` |
 | `sidebar_bg` | Sidebar and tabs | Sidebar and base panels | `mix(bg, black, 22%)` (dark) / `mix(bg, black, 4.5%)` (light) |
 | `sidebar_active` | Sidebar and tabs | Active session in the sidebar | `@accent/16` |

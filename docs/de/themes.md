@@ -95,10 +95,10 @@ Die Namen gehören zur öffentlichen Schnittstelle (sie kommen nur dazu, werden 
 | `active_bg` | Akzent und Auswahl | Gedrückte und aktive Elemente | `@accent/45` |
 | `selection_bg` | Akzent und Auswahl | Textauswahl | `@accent/35` |
 | `focus` | Akzent und Auswahl | Fokusrahmen und Textcursor | `@accent` |
-| `success` | Status | Erfolg, bereit | `#4cc26a` |
-| `warning` | Status | Warnung, wartet auf Eingabe | `#e5c07b` |
-| `error` | Status | Fehler | `#e06c75` |
-| `danger` | Status | Kritisch (Freigabe nötig, Fehlermeldung) | `#e04f5f` |
+| `success` | Status | Erfolg, bereit | `#4cc26a` (dunkel) / `#1a7f37` (hell) |
+| `warning` | Status | Warnung, wartet auf Eingabe | `#e5c07b` (dunkel) / `#9a6700` (hell) |
+| `error` | Status | Fehler | `#e06c75` (dunkel) / `#cf222e` (hell) |
+| `danger` | Status | Kritisch (Freigabe nötig, Fehlermeldung) | `#e04f5f` (dunkel) / `#a40e26` (hell) |
 | `info` | Status | Information | `@accent` |
 | `sidebar_bg` | Seitenleiste und Tabs | Seitenleiste und Grundfläche | `mix(bg, black, 22%)` (dunkel) / `mix(bg, black, 4.5%)` (hell) |
 | `sidebar_active` | Seitenleiste und Tabs | Aktive Sitzung in der Seitenleiste | `@accent/16` |

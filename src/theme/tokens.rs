@@ -236,7 +236,7 @@ const fn rgb(v: u32) -> Expr {
     Expr::C(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
-/// Standardwert (Ableitung) einer Oberflächenfarbe – entspricht der Darstellung vor 2.6.0. `white`/`black` sind
+/// Standardwert (Ableitung) einer Oberflächenfarbe – entspricht der Darstellung vor 2.6.0 (außer den Statusfarben heller Themes: seit 2.6.0 dunkler, damit sie auf hellem Grund lesbar sind). `white`/`black` sind
 /// Hilfsnamen, `fg`/`bg`/… die (deckenden) Terminalfarben.
 pub fn default_expr(name: &str, dark: bool) -> Expr {
     use Expr::*;
@@ -259,10 +259,10 @@ pub fn default_expr(name: &str, dark: bool) -> Expr {
         "active_bg" => A("accent", 45),
         "selection_bg" => A("accent", 35),
         "focus" => R("accent"),
-        "success" => rgb(0x4cc26a),
-        "warning" => rgb(0xe5c07b),
-        "error" => rgb(0xe06c75),
-        "danger" => rgb(0xe04f5f),
+        "success" => d(rgb(0x4cc26a), rgb(0x1a7f37)),
+        "warning" => d(rgb(0xe5c07b), rgb(0x9a6700)),
+        "error" => d(rgb(0xe06c75), rgb(0xcf222e)),
+        "danger" => d(rgb(0xe04f5f), rgb(0xa40e26)),
         "info" => R("accent"),
         "sidebar_bg" => d(M("bg", "black", 0.22), M("bg", "black", 0.045)),
         "sidebar_active" => A("accent", 16),
@@ -468,6 +468,9 @@ mod tests {
         let light = crate::theme::all().into_iter().find(|t| !t.dark).unwrap();
         let ul = ui_colors(&light);
         assert_eq!(ul.window_bg, ul.surface);
+        // Hell: dunklere Statusfarben (seit 2.6.0), lesbar auf hellem Grund.
+        assert_eq!(ul.warning, Color32::from_rgb(0x9a, 0x67, 0x00));
+        assert_eq!(ul.error, Color32::from_rgb(0xcf, 0x22, 0x2e));
         assert_eq!(ul.text_strong, Color32::BLACK);
     }
 
