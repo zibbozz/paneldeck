@@ -636,6 +636,7 @@ impl Session {
                                     processor.stop_sync(&mut *t);
                                     hist_track.settle(&mut t, before);
                                 }
+                                conhost_wrap.chunk_begin(&t, &bytes);
                                 let mut rd = ReaderState { hs: &hist_track, pending: &mut pending_mark, lst: &lst, shell_state: &shell_state, stale: &stale, deferred: &mut deferred, kitty_guard: &mut kitty_guard, conhost_wrap: &mut conhost_wrap };
                                 process_chunk(&mut processor, &mut t, &bytes, (events, positions), &mut rd);
                                 conhost_wrap.chunk_end(&processor, &t, short_read);
@@ -2154,6 +2155,7 @@ mod run_output_tests {
 
         /// Wie `feed`, als eigenes Lesestück (ein Frame der ConPTY) mit `ConhostWrap::chunk_end`.
         fn frame(&mut self, bytes: &str) {
+            self.cw.chunk_begin(&self.term, bytes.as_bytes());
             self.feed(bytes);
             self.cw.chunk_end(&self.p, &self.term, true);
         }
@@ -2422,6 +2424,42 @@ mod run_output_tests {
         f.feed("\r\n\x1b]133;A\x07$ ");
         assert_eq!(f.last_mark(), Some(2));
         assert!(!f.st.lock().unwrap().mark_open);
+    }
+
+    #[test]
+    fn exact_width_powershell_command_on_system_conpty() {
+        // #264, Mitschnitt (System-conhost, Windows PowerShell, 100 Spalten): Prompt + Befehl füllen genau drei Zeilen.
+        // conhost hat danach eine Leerzeile (absolute Sprünge späterer Prompts bestätigen das); die Ausgabe bleibt die
+        // JSON-Zeile.
+        let prompt = "PS C:\\Users\\u\\AppData\\Local\\Temp\\pd-conhost-cap-43416> ";
+        let ps = format!("\x1b]7777;dur=3\x07\x1b]133;D;0\x07\x1b]9;9;\"C:\\x\"\x07\x1b]133;A\x07{prompt}\x1b]133;B\x07");
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"bad_args: You cannot wait for your own session."}],"isError":true}}"#;
+        let head = format!("'{json}' ");
+        let pad = "a".repeat(300 - prompt.len() - head.len() - 2);
+        let cmd = format!("{head}# {pad}");
+        for system in [false, true] {
+            let mut f = Fake::new(100, 30);
+            f.cw = crate::conhost_wrap::ConhostWrap::new(system);
+            for chunk in ["\x1b[6n", "\x1b[?9001h\x1b[?1004h", "\x1b[m\x1b]0;powershell.exe\x07\x1b[?25h", &ps] {
+                f.frame(chunk);
+            }
+            let start_abs = f.cursor();
+            let mark0 = f.last_mark();
+            for chunk in [
+                "\x1b[?25l".to_string(),
+                "\x1b[36m'\x1b[?25h".into(),
+                "\x1b[m\x1b[?25l".into(),
+                format!("\x1b[36m\x08{head}\x1b[32m# {pad}\x1b[?25h"),
+                "\x1b[m".into(),
+                "\r\n".into(),
+                format!("\x1b]7777;dur=19\x07{json}\r\n{ps}"),
+            ] {
+                f.frame(&chunk);
+            }
+            let st = f.st.lock().unwrap();
+            let r = run_output(&f.term, f.base(), &cmd, start_abs, mark0, st.prompt_start(), true);
+            assert_eq!(r.lines.iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>(), vec![json.to_string()], "System-ConPTY {system}: {r:?}");
+        }
     }
 
     #[test]
