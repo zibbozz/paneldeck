@@ -67,10 +67,10 @@ Themes are JSON files in `themes/` in the [data folder](data-and-backups.md) (at
 }
 ```
 
-- `name`, `fg`, `bg` and `ansi` (16 colours) are required; `dark` is guessed from the background if missing; `cursor` (default: `fg`) and `selection` (default: background mixed with 20 % text) are optional. Terminal colours are `#RRGGBB` (or `#RRGGBBAA`; the transparency is ignored – the window opacity comes from the settings).
+- `name`, `fg`, `bg` and `ansi` (16 colours) are required; `dark` is guessed from the background if missing; `cursor` (default: `fg`) and `selection` (default: background mixed with 20 % text) are optional (an invalid value there also falls back to the default). Terminal colours are `#RRGGBB` (or `#RRGGBBAA`; the transparency is ignored – the window opacity comes from the settings).
 - `ui` (optional, since 2.6.0): interface colours by name. A value is a colour `#RRGGBB` / `#RRGGBBAA`, or a link `@name` or `@name/NN` (NN = opacity 0–100 %). A link can point to any interface colour and to `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi15`. A missing name is derived.
-- **Compatibility:** unknown fields and unknown names in `ui` are ignored, and so is a link to a colour this version does not know (that value counts as derived). So older versions read newer theme files (they just ignore the new colours), and newer versions read older ones.
-- **Invalid files** (not JSON, missing or malformed required field, fewer than 16 ANSI colours, a `ui` value that is neither a colour nor a link, opacity above 100, links in a loop, larger than 1 MB, a name that is already taken) are listed with the reason and cannot be selected. Import refuses them with the same message.
+- **Compatibility:** unknown fields and unknown names in `ui` are ignored, and so is a link to a colour this version does not know (that value counts as derived). Such content is kept: saving, renaming, duplicating or importing a theme writes it back unchanged. So older versions read newer theme files (they just ignore the new colours), and newer versions read older ones.
+- **Invalid files** (not JSON, missing or malformed required field, fewer than 16 ANSI colours, a `ui` value that is neither a colour nor a link, opacity above 100, links in a loop, larger than 1 MB, a name that is already taken exactly – names that differ only in case stay selectable) are listed with the reason and cannot be selected. Import refuses them with the same message.
 
 ### Interface colours
 

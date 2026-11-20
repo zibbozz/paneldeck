@@ -200,16 +200,23 @@ pub fn simulate(c: Color32, k: Cvd) -> Color32 {
 }
 
 /// Gleiche Farbe (Farbton und Buntheit im CIELAB) mit der Helligkeit `l` (0–100).
+/// Durchscheinende Farben behalten ihre Deckkraft; gerechnet wird mit den Kanälen ohne Vormultiplikation.
 pub fn with_lightness(c: Color32, l: f64) -> Color32 {
-    let [_, a, b] = lab(c);
+    let [_, a, b] = lab(unmultiplied(c));
     let out = from_lab([l.clamp(0.0, 100.0), a, b]);
-    Color32::from_rgba_unmultiplied(out.r(), out.g(), out.b(), c.to_srgba_unmultiplied()[3])
+    Color32::from_rgba_unmultiplied(out.r(), out.g(), out.b(), c.a())
+}
+
+/// Farbe ohne Vormultiplikation und ohne Deckkraft (für Rechnungen am Farbton selbst).
+fn unmultiplied(c: Color32) -> Color32 {
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    Color32::from_rgb(r, g, b)
 }
 
 /// Kleinste Helligkeitsänderung (CIELAB-L in Schritten von 0,5, Farbton bleibt), nach der `ok` gilt. `None`, wenn es
 /// weder heller noch dunkler gelingt. Die Farbe selbst zählt nicht (der Aufrufer prüft sie vorher).
 pub fn nudge_lightness(c: Color32, ok: impl Fn(Color32) -> bool) -> Option<Color32> {
-    let l0 = lab(c)[0];
+    let l0 = lab(unmultiplied(c))[0];
     let mut step = 0.5;
     while step <= 100.0 {
         for l in [l0 + step, l0 - step] {
@@ -334,6 +341,22 @@ mod tests {
         assert!((4.5..5.0).contains(&k), "knapp über der Grenze: {k}");
         assert!(lab(fixed)[0] > lab(dim)[0], "heller auf dunklem Grund");
         assert!(nudge_lightness(dim, |_| false).is_none());
+    }
+
+    #[test]
+    fn lightness_of_translucent_colours_uses_the_real_colour() {
+        let base = Color32::from_rgb(200, 100, 50);
+        let c = Color32::from_rgba_unmultiplied(200, 100, 50, 128);
+        // Gleiche Helligkeit → (fast) gleiche Farbe, Deckkraft bleibt.
+        let same = with_lightness(c, lab(base)[0]);
+        let [r, g, b, a] = same.to_srgba_unmultiplied();
+        assert_eq!(a, 128);
+        for (x, y) in [(r, 200), (g, 100), (b, 50)] {
+            assert!((x as i32 - y as i32).abs() <= 2, "{same:?}");
+        }
+        // Der kleinste Schritt geht von der echten Helligkeit aus, nicht von der vormultiplizierten (viel dunkleren).
+        let step = nudge_lightness(c, |_| true).unwrap();
+        assert!((lab(unmultiplied(step))[0] - lab(base)[0]).abs() <= 2.0, "{step:?}");
     }
 
     #[test]

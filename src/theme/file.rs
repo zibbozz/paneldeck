@@ -1,6 +1,8 @@
 //! Theme-Dateien `themes/*.json` (öffentliches Format): lesen mit klarer Fehlermeldung, schreiben, Größengrenze,
 //! eindeutige Namen. Neu in 2.6.0 (#309) ist nur das optionale Objekt `ui` (Oberflächenfarben); fehlt es oder ein
-//! Wert, gilt die Ableitung. Unbekannte Felder und Namen werden ignoriert (ältere/neuere Versionen).
+//! Wert, gilt die Ableitung. Unbekannte Felder und Namen (neuere Versionen) werden für die Darstellung ignoriert,
+//! aber in [`Extra`] aufbewahrt und beim Schreiben wieder eingefügt – Speichern, Umbenennen, Duplizieren und
+//! Importieren verlieren nichts.
 
 use super::color::{parse_hex, to_hex};
 use super::tokens::{find_cycle, Spec, SpecError, UI_TOKENS};
@@ -40,7 +42,34 @@ pub struct Issue {
     pub msg: Msg,
 }
 
+/// Inhalte einer Theme-Datei, die diese Version nicht versteht (neuere Versionen). Sie wirken nicht auf die
+/// Darstellung und werden von [`to_json`] unverändert wieder geschrieben.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Extra {
+    /// Felder der obersten Ebene, die diese Version nicht kennt.
+    pub top: serde_json::Map<String, Value>,
+    /// Einträge in `ui` mit unbekanntem Namen oder mit einem Verweis auf eine unbekannte Farbe. Ein gesetzter Wert
+    /// desselben Namens in [`Theme::ui`] geht beim Schreiben vor.
+    pub ui: serde_json::Map<String, Value>,
+}
+
+/// Felder der obersten Ebene, die diese Version liest.
+const KNOWN_FIELDS: &[&str] = &["name", "dark", "fg", "bg", "cursor", "selection", "ansi", "ui"];
+
+/// Längster Ausschnitt eines Werts in Meldungen (eine 1-MB-Datei soll keine riesigen Texte erzeugen).
+const SHOW_MAX: usize = 40;
+
+/// Wert für eine Meldung kürzen (höchstens [`SHOW_MAX`] Zeichen, dann „…“).
+pub fn short(s: &str) -> String {
+    if s.chars().count() <= SHOW_MAX {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(SHOW_MAX).collect::<String>())
+    }
+}
+
 fn field_err(field: &str, value: &str) -> Msg {
+    let value = short(value);
     Msg::new(
         format!("Ungültige Farbe in „{field}“: „{value}“ (erwartet #RRGGBB oder #RRGGBBAA)"),
         format!("Invalid colour in “{field}”: “{value}” (expected #RRGGBB or #RRGGBBAA)"),
@@ -66,14 +95,13 @@ pub fn parse_str(text: &str) -> Result<Theme, Msg> {
         return Err(Msg::new("Die Datei muss ein JSON-Objekt sein", "The file must contain a JSON object"));
     };
     let name = match obj.get("name") {
-        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+        // Unverändert (ohne Kürzen der Leerzeichen und ohne Längengrenze, wie vor 2.6.0): Auswahl und Profile
+        // verweisen auf den genauen Namen. Die 80-Zeichen-Grenze gilt nur für neu vergebene Namen im Editor.
+        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
         Some(Value::String(_)) => return Err(Msg::new("„name“ ist leer", "“name” is empty")),
         Some(_) => return Err(Msg::new("„name“ muss ein Text sein", "“name” must be a string")),
         None => return Err(Msg::new("Pflichtfeld „name“ fehlt", "Required field “name” is missing")),
     };
-    if name.chars().count() > 80 {
-        return Err(Msg::new("„name“ ist länger als 80 Zeichen", "“name” is longer than 80 characters"));
-    }
     let fg = color_field(&obj, "fg", true)?.unwrap_or(Color32::WHITE);
     let bg = color_field(&obj, "bg", true)?.unwrap_or(Color32::BLACK);
     // Terminalfarben ohne Transparenz (wie bisher); der Hintergrund bekommt die Deckkraft aus den Einstellungen.
@@ -82,8 +110,10 @@ pub fn parse_str(text: &str) -> Result<Theme, Msg> {
         Color32::from_rgb(r, g, b)
     };
     let (fg, bg) = (solid(fg), solid(bg));
-    let cursor = color_field(&obj, "cursor", false)?.map(solid).unwrap_or(fg);
-    let selection = color_field(&obj, "selection", false)?.map(solid).unwrap_or_else(|| crate::style::mix(bg, fg, 0.2));
+    // Optionale Felder: ein ungültiger Wert fällt wie vor 2.6.0 auf die Ableitung zurück (die Datei bleibt gültig).
+    let optional = |key: &str| color_field(&obj, key, false).ok().flatten().map(solid);
+    let cursor = optional("cursor").unwrap_or(fg);
+    let selection = optional("selection").unwrap_or_else(|| crate::style::mix(bg, fg, 0.2));
     let dark = match obj.get("dark") {
         None | Some(Value::Null) => super::luma(bg) < 128.0,
         Some(Value::Bool(b)) => *b,
@@ -106,33 +136,43 @@ pub fn parse_str(text: &str) -> Result<Theme, Msg> {
         };
     }
     let mut ui = BTreeMap::new();
+    let mut extra = Extra::default();
+    for (k, v) in &obj {
+        if !KNOWN_FIELDS.contains(&k.as_str()) {
+            extra.top.insert(k.clone(), v.clone());
+        }
+    }
     match obj.get("ui") {
         None | Some(Value::Null) => {}
         Some(Value::Object(m)) => {
             for (k, v) in m {
-                // Unbekannte Namen (neuere Versionen) ignorieren.
+                // Unbekannte Namen (neuere Versionen): nicht anzeigen, aber aufbewahren.
                 if !UI_TOKENS.iter().any(|t| t.name == k) {
+                    extra.ui.insert(k.clone(), v.clone());
                     continue;
                 }
                 let Value::String(s) = v else {
                     return Err(Msg::new(format!("„ui.{k}“ muss ein Text sein"), format!("“ui.{k}” must be a string")));
                 };
+                let shown = short(s);
                 match Spec::parse(s) {
                     Ok(spec) => {
                         ui.insert(k.clone(), spec);
                     }
-                    // Verweis auf eine Farbe, die diese Version nicht kennt: wie abgeleitet.
-                    Err(SpecError::Unknown(_)) => {}
+                    // Verweis auf eine Farbe, die diese Version nicht kennt: wie abgeleitet, aber aufbewahrt.
+                    Err(SpecError::Unknown(_)) => {
+                        extra.ui.insert(k.clone(), v.clone());
+                    }
                     Err(SpecError::Alpha) => {
                         return Err(Msg::new(
-                            format!("Ungültige Deckkraft in „ui.{k}“: „{s}“ (erwartet 0–100, z. B. @text/20)"),
-                            format!("Invalid opacity in “ui.{k}”: “{s}” (expected 0–100, e.g. @text/20)"),
+                            format!("Ungültige Deckkraft in „ui.{k}“: „{shown}“ (erwartet 0–100, z. B. @text/20)"),
+                            format!("Invalid opacity in “ui.{k}”: “{shown}” (expected 0–100, e.g. @text/20)"),
                         ))
                     }
                     Err(SpecError::Syntax) => {
                         return Err(Msg::new(
-                            format!("Ungültiger Wert für „ui.{k}“: „{s}“ (erwartet #RRGGBB, #RRGGBBAA oder @name bzw. @name/20)"),
-                            format!("Invalid value for “ui.{k}”: “{s}” (expected #RRGGBB, #RRGGBBAA or @name or @name/20)"),
+                            format!("Ungültiger Wert für „ui.{k}“: „{shown}“ (erwartet #RRGGBB, #RRGGBBAA oder @name bzw. @name/20)"),
+                            format!("Invalid value for “ui.{k}”: “{shown}” (expected #RRGGBB, #RRGGBBAA or @name or @name/20)"),
                         ))
                     }
                 }
@@ -140,7 +180,7 @@ pub fn parse_str(text: &str) -> Result<Theme, Msg> {
         }
         Some(_) => return Err(Msg::new("„ui“ muss ein Objekt sein", "“ui” must be an object")),
     }
-    let t = Theme { name, dark, fg, bg, cursor, selection, ansi, ui, builtin: false, source: None };
+    let t = Theme { name, dark, fg, bg, cursor, selection, ansi, ui, builtin: false, source: None, extra };
     if let Some(c) = find_cycle(&t) {
         let chain = c.join(" → ");
         return Err(Msg::new(format!("Verweise im Kreis: {chain}"), format!("Links form a loop: {chain}")));
@@ -168,8 +208,10 @@ pub fn read_file(path: &Path) -> Result<Theme, Msg> {
     Ok(t)
 }
 
-/// Eigene Themes aus `<dir>/*.json` laden. Ungültige Dateien und Namen, die schon vergeben sind (eingebaute Themes
-/// oder eine frühere Datei), landen mit Grund in der zweiten Liste und sind nicht wählbar.
+/// Eigene Themes aus `<dir>/*.json` laden. Ungültige Dateien und Namen, die schon genau so vergeben sind (eingebaute
+/// Themes oder eine frühere Datei), landen mit Grund in der zweiten Liste und sind nicht wählbar. Namen, die sich nur in
+/// Groß-/Kleinschreibung unterscheiden („one dark“), bleiben wie vor 2.6.0 wählbar; nur neu vergebene Namen müssen
+/// auch ohne Groß-/Kleinschreibung eindeutig sein ([`unique_name`]).
 pub fn load_dir(dir: &Path, builtin: &[Theme]) -> (Vec<Theme>, Vec<Issue>) {
     let (mut out, mut issues) = (Vec::new(), Vec::new());
     let Ok(rd) = std::fs::read_dir(dir) else { return (out, issues) };
@@ -178,9 +220,10 @@ pub fn load_dir(dir: &Path, builtin: &[Theme]) -> (Vec<Theme>, Vec<Issue>) {
     for p in files {
         match read_file(&p) {
             Ok(t) => {
-                if builtin.iter().chain(out.iter()).any(|o: &Theme| o.name.eq_ignore_ascii_case(&t.name)) {
+                if builtin.iter().chain(out.iter()).any(|o: &Theme| o.name == t.name) {
+                    let n = short(&t.name);
                     issues.push(Issue {
-                        msg: Msg::new(format!("Der Name „{}“ ist schon vergeben", t.name), format!("The name “{}” is already used", t.name)),
+                        msg: Msg::new(format!("Der Name „{n}“ ist schon vergeben"), format!("The name “{n}” is already used")),
                         path: p,
                     });
                 } else {
@@ -193,34 +236,28 @@ pub fn load_dir(dir: &Path, builtin: &[Theme]) -> (Vec<Theme>, Vec<Issue>) {
     (out, issues)
 }
 
-/// JSON-Text eines Themes (feste Reihenfolge, `ui` nur mit gesetzten Werten in der Reihenfolge der Tabelle).
+/// JSON-Text eines Themes (feste Reihenfolge, `ui` nur mit gesetzten Werten in der Reihenfolge der Tabelle). Unbekannte
+/// Inhalte ([`Extra`]) kommen unverändert dahinter: `ui`-Einträge ans Ende von `ui`, Felder ans Ende der Datei.
 pub fn to_json(t: &Theme) -> String {
     let q = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
-    let mut s = String::from("{\n");
-    s.push_str(&format!("  \"name\": {},\n", q(&t.name)));
-    s.push_str(&format!("  \"dark\": {},\n", t.dark));
+    // Mehrzeilige Werte (Objekte, Listen) passend einrücken.
+    let val = |v: &Value, indent: &str| serde_json::to_string_pretty(v).unwrap_or_else(|_| "null".into()).replace('\n', &format!("\n{indent}"));
+    let mut top: Vec<String> = Vec::new();
+    top.push(format!("  \"name\": {}", q(&t.name)));
+    top.push(format!("  \"dark\": {}", t.dark));
     for (k, c) in [("fg", t.fg), ("bg", t.bg), ("cursor", t.cursor), ("selection", t.selection)] {
         let [r, g, b, _] = c.to_srgba_unmultiplied();
-        s.push_str(&format!("  \"{k}\": \"{}\",\n", to_hex(Color32::from_rgb(r, g, b))));
+        top.push(format!("  \"{k}\": \"{}\"", to_hex(Color32::from_rgb(r, g, b))));
     }
-    s.push_str("  \"ansi\": [\n");
-    for row in 0..2 {
-        let items: Vec<String> = (0..8).map(|i| format!("\"{}\"", to_hex(t.ansi[row * 8 + i]))).collect();
-        s.push_str(&format!("    {}{}\n", items.join(", "), if row == 0 { "," } else { "" }));
+    let rows: Vec<String> = (0..2).map(|row| format!("    {}", (0..8).map(|i| format!("\"{}\"", to_hex(t.ansi[row * 8 + i]))).collect::<Vec<_>>().join(", "))).collect();
+    top.push(format!("  \"ansi\": [\n{}\n  ]", rows.join(",\n")));
+    let mut ui: Vec<String> = UI_TOKENS.iter().filter_map(|tok| t.ui.get(tok.name).map(|v: &Spec| format!("    \"{}\": \"{}\"", tok.name, v.to_text()))).collect();
+    ui.extend(t.extra.ui.iter().filter(|(k, _)| !t.ui.contains_key(k.as_str())).map(|(k, v)| format!("    {}: {}", q(k), val(v, "    "))));
+    if !ui.is_empty() {
+        top.push(format!("  \"ui\": {{\n{}\n  }}", ui.join(",\n")));
     }
-    s.push_str("  ]");
-    let set: Vec<(&str, &Spec)> = UI_TOKENS.iter().filter_map(|tok| t.ui.get(tok.name).map(|v| (tok.name, v))).collect();
-    if set.is_empty() {
-        s.push('\n');
-    } else {
-        s.push_str(",\n  \"ui\": {\n");
-        for (i, (k, v)) in set.iter().enumerate() {
-            s.push_str(&format!("    \"{k}\": \"{}\"{}\n", v.to_text(), if i + 1 < set.len() { "," } else { "" }));
-        }
-        s.push_str("  }\n");
-    }
-    s.push_str("}\n");
-    s
+    top.extend(t.extra.top.iter().filter(|(k, _)| !KNOWN_FIELDS.contains(&k.as_str())).map(|(k, v)| format!("  {}: {}", q(k), val(v, "  "))));
+    format!("{{\n{}\n}}\n", top.join(",\n"))
 }
 
 /// Name ohne angehängte Nummer („One Dark (3)“ → „One Dark“).
@@ -249,7 +286,14 @@ pub fn unique_name(name: &str, taken: &[String]) -> String {
     (2..).map(|i| format!("{base} ({i})")).find(|c| !used(c)).unwrap_or_else(|| n.to_string())
 }
 
-/// Freier Dateiname in `dir` zu einem Theme-Namen (Kleinbuchstaben, Ziffern, Bindestriche).
+/// Gerätename unter Windows („con.json“ lässt sich dort weder anlegen noch öffnen).
+fn reserved_on_windows(slug: &str) -> bool {
+    let b = slug.as_bytes();
+    matches!(slug, "con" | "prn" | "aux" | "nul") || (b.len() == 4 && (slug.starts_with("com") || slug.starts_with("lpt")) && (b'1'..=b'9').contains(&b[3]))
+}
+
+/// Freier Dateiname in `dir` zu einem Theme-Namen (Kleinbuchstaben, Ziffern, Bindestriche; Windows-Gerätenamen wie
+/// „con“ bekommen „-theme“ angehängt).
 pub fn file_for(dir: &Path, name: &str) -> PathBuf {
     let mut slug = String::new();
     for ch in name.chars().flat_map(|c| c.to_lowercase()) {
@@ -263,7 +307,13 @@ pub fn file_for(dir: &Path, name: &str) -> PathBuf {
         }
     }
     let slug = slug.trim_matches('-').to_string();
-    let slug = if slug.is_empty() { "theme".to_string() } else { slug };
+    let slug = if slug.is_empty() {
+        "theme".to_string()
+    } else if reserved_on_windows(&slug) {
+        format!("{slug}-theme")
+    } else {
+        slug
+    };
     let mut p = dir.join(format!("{slug}.json"));
     let mut i = 2;
     while p.exists() {
@@ -305,6 +355,58 @@ mod tests {
         assert_eq!(t.ui["accent"], Spec::Hex(Color32::from_rgb(0, 0x80, 0xff)));
         // BOM wie von PowerShell 5.1.
         assert!(parse_str(&format!("\u{feff}{}", file(""))).is_ok());
+        // Ungültige optionale Farben fallen wie vor 2.6.0 auf die Ableitung zurück.
+        let t = parse_str(&file(r##","cursor":"blau","selection":7"##)).unwrap();
+        assert_eq!(t.cursor, t.fg);
+        assert_eq!(t.selection, crate::style::mix(t.bg, t.fg, 0.2));
+        // Namen bleiben unverändert (Leerzeichen, Länge) – Auswahl und Profile verweisen auf den genauen Namen.
+        assert_eq!(parse_str(&file("").replace("\"X\"", "\" Foo \"")).unwrap().name, " Foo ");
+        let long = "L".repeat(120);
+        assert_eq!(parse_str(&file("").replace("\"X\"", &format!("\"{long}\""))).unwrap().name, long);
+    }
+
+    #[test]
+    fn unknown_content_survives_saving() {
+        let src = file(r##","future":{"a":[1,2],"b":"x"},"zzz":true,"ui":{"nope":{"deep":1},"accent":"#0080ff","border":"@future_token/20"}"##);
+        let mut t = parse_str(&src).unwrap();
+        // Für die Darstellung ignoriert: border bleibt abgeleitet.
+        assert_eq!(t.ui.len(), 1);
+        let plain = parse_str(&file(r##","ui":{"accent":"#0080ff"}"##)).unwrap();
+        assert_eq!(t.ui_colors(), plain.ui_colors());
+        assert_eq!(t.extra.top.len(), 2);
+        assert_eq!(t.extra.ui.len(), 2);
+        // Umbenennen und Speichern (wie Editor, Duplizieren, Import) behält alles.
+        t.name = "Renamed".into();
+        let json = to_json(&t);
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["future"], serde_json::json!({"a": [1, 2], "b": "x"}), "{json}");
+        assert_eq!(v["zzz"], true);
+        assert_eq!(v["ui"]["nope"], serde_json::json!({"deep": 1}));
+        assert_eq!(v["ui"]["border"], "@future_token/20");
+        assert_eq!(v["ui"]["accent"], "#0080ff");
+        let back = parse_str(&json).unwrap();
+        assert_eq!(back, t);
+        // Ein in dieser Version gesetzter Wert geht dem aufbewahrten vor.
+        t.ui.insert("border".into(), Spec::Hex(Color32::RED));
+        let v: Value = serde_json::from_str(&to_json(&t)).unwrap();
+        assert_eq!(v["ui"]["border"], "#ff0000");
+        // Ohne ui-Werte, aber mit unbekannten ui-Einträgen entsteht trotzdem ein ui-Objekt.
+        let mut t = parse_str(&file(r##","ui":{"nope":"#ffffff"}"##)).unwrap();
+        assert!(t.ui.is_empty());
+        t.name = "Y".into();
+        let v: Value = serde_json::from_str(&to_json(&t)).unwrap();
+        assert_eq!(v["ui"]["nope"], "#ffffff");
+    }
+
+    #[test]
+    fn messages_quote_only_a_short_part_of_the_value() {
+        let huge = format!("[{}]", vec!["1"; 50_000].join(","));
+        let e = parse_str(&file("").replace("\"#ffffff\",\"bg\"", &format!("{huge},\"bg\""))).unwrap_err();
+        assert!(e.en.contains("“fg”") && e.en.contains('…') && e.en.chars().count() < 160, "{}", e.en);
+        let e = parse_str(&file(&format!(r##","ui":{{"border":"{}"}}"##, "x".repeat(5000)))).unwrap_err();
+        assert!(e.en.contains("“ui.border”") && e.de.chars().count() < 200, "{}", e.de);
+        assert_eq!(short("abc"), "abc");
+        assert_eq!(short(&"ä".repeat(41)), format!("{}…", "ä".repeat(40)));
     }
 
     #[test]
@@ -335,9 +437,11 @@ mod tests {
         std::fs::write(dir.join("big.json"), &big).unwrap();
         std::fs::write(dir.join("ok.json"), file("")).unwrap();
         std::fs::write(dir.join("dup.json"), file("").replace("\"X\"", "\"One Dark\"")).unwrap();
+        // Nur in Groß-/Kleinschreibung anders: wie vor 2.6.0 wählbar.
+        std::fs::write(dir.join("lower.json"), file("").replace("\"X\"", "\"one dark\"")).unwrap();
         let (themes, issues) = load_dir(&dir, &crate::theme::all());
-        assert_eq!(themes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["X"]);
-        assert_eq!(themes[0].source.as_deref(), Some(dir.join("ok.json").as_path()));
+        assert_eq!(themes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["one dark", "X"]);
+        assert_eq!(themes[1].source.as_deref(), Some(dir.join("ok.json").as_path()));
         assert_eq!(issues.len(), 2, "{issues:?}");
         assert!(issues.iter().any(|i| i.path.ends_with("big.json") && i.msg.en.contains("1 MB")));
         assert!(issues.iter().any(|i| i.path.ends_with("dup.json") && i.msg.en.contains("already used")));
@@ -375,6 +479,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(file_for(&dir, "One Dark (2)"), dir.join("one-dark-2.json"));
         assert_eq!(file_for(&dir, "  ***  "), dir.join("theme.json"));
+        // Windows-Gerätenamen.
+        for (n, f) in [("CON", "con-theme.json"), ("Nul", "nul-theme.json"), ("com1", "com1-theme.json"), ("LPT9", "lpt9-theme.json"), ("com10", "com10.json"), ("console", "console.json")] {
+            assert_eq!(file_for(&dir, n), dir.join(f), "{n}");
+        }
         let mut t = crate::theme::all()[0].clone();
         t.builtin = false;
         write(&dir.join("one-dark-2.json"), &t).unwrap();

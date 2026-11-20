@@ -28,6 +28,8 @@ pub struct Theme {
     pub builtin: bool,
     /// Datei eines eigenen Themes.
     pub source: Option<PathBuf>,
+    /// Inhalte der Datei, die diese Version nicht kennt (neuere Versionen); werden beim Schreiben wieder eingefügt.
+    pub extra: file::Extra,
 }
 
 const fn c(r: u8, g: u8, b: u8) -> Color32 {
@@ -96,6 +98,7 @@ fn builtin_list() -> Vec<Theme> {
             ui: BTreeMap::new(),
             builtin: true,
             source: None,
+            extra: Default::default(),
         },
         Theme {
             name: "Dracula".into(),
@@ -113,6 +116,7 @@ fn builtin_list() -> Vec<Theme> {
             ui: BTreeMap::new(),
             builtin: true,
             source: None,
+            extra: Default::default(),
         },
         Theme {
             name: "Solarized Dark".into(),
@@ -130,6 +134,7 @@ fn builtin_list() -> Vec<Theme> {
             ui: BTreeMap::new(),
             builtin: true,
             source: None,
+            extra: Default::default(),
         },
         Theme {
             name: "Hell / Light".into(),
@@ -147,6 +152,7 @@ fn builtin_list() -> Vec<Theme> {
             ui: BTreeMap::new(),
             builtin: true,
             source: None,
+            extra: Default::default(),
         },
         // Rosé hell: Puderrosa, Pflaume als Schrift, Beerenrosa als Cursor. „Weiß“ ist ein Malvengrau,
         // damit auch weißer Text auf dem hellen Grund lesbar bleibt.
@@ -166,6 +172,7 @@ fn builtin_list() -> Vec<Theme> {
             ui: BTreeMap::new(),
             builtin: true,
             source: None,
+            extra: Default::default(),
         },
         // Rosé dunkel: Aubergine als Grund, zartes Rosa als Schrift, Rosa als Cursor. „Schwarz“ ist ein
         // gedämpftes Pflaumengrau, damit es auf dem dunklen Grund sichtbar bleibt.
@@ -185,6 +192,7 @@ fn builtin_list() -> Vec<Theme> {
             ui: BTreeMap::new(),
             builtin: true,
             source: None,
+            extra: Default::default(),
         },
     ]
 }

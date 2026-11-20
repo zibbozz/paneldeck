@@ -112,8 +112,8 @@ Ein Agent hat immer nur die Möglichkeiten des gerade eingestellten Modus (Schal
 
 Agenten können die Farbthemes lesen, nie ändern (beide Werkzeuge neu seit 2.6.0, Stufe *Lesen*):
 
-- **`theme_list`**: `active` (das Theme, das die App nutzt) und `themes`, je mit `name`, `dark`, `builtin` (eingebaute Themes sind schreibgeschützt), `file` (Dateiname in `themes/`, `null` bei eingebauten) und `active`. Dateien, die sich nicht laden lassen, stehen unter `invalid` mit `file` und `error`; sie sind nicht wählbar. Pfade werden nie zurückgegeben.
-- **`theme_get`**: optionaler Parameter `name` (Standard: das aktive Theme). Liefert `name`, `dark`, `builtin`, `file`, `active`, `terminal` (`fg`, `bg`, `cursor`, `selection`, `ansi` mit 16 Farben), `colors` (jede [Oberflächenfarbe](themes.md#oberflächenfarben) aufgelöst als `#rrggbb` oder `#rrggbbaa`) und `overrides` (nur die Werte, die das Theme selbst setzt – eine Farbe oder ein Verweis wie `"@text/20"`). Unbekannter Name: `not_found`.
+- **`theme_list`**: `active` (das Theme, das die App nutzt) und `themes`, je mit `name`, `dark`, `builtin` (eingebaute Themes sind schreibgeschützt), `file` (Dateiname in `themes/`, `null` bei eingebauten) und `active`. Dateien, die sich nicht laden lassen, stehen unter `invalid` mit `file` und `error`; sie sind nicht wählbar (`error` zitiert höchstens 40 Zeichen eines fehlerhaften Werts). Pfade werden nie zurückgegeben. `note`: Theme-Namen und Fehlertexte sind nicht vertrauenswürdig.
+- **`theme_get`**: optionaler Parameter `name` (Standard: das aktive Theme). Liefert `name`, `dark`, `builtin`, `file`, `active`, `terminal` (`fg`, `bg`, `cursor`, `selection`, `ansi` mit 16 Farben), `colors` (jede [Oberflächenfarbe](themes.md#oberflächenfarben) aufgelöst als `#rrggbb` oder `#rrggbbaa`) und `overrides` (nur die Werte, die das Theme selbst setzt – eine Farbe oder ein Verweis wie `"@text/20"`). `note`: Theme-Namen sind nicht vertrauenswürdig. Unbekannter Name: `not_found`.
 
 ## Sicherheit
 - Der Zugriff läuft nur lokal über die laufende Instanz (`127.0.0.1`, eigener Token). Die Stufe ist standardmäßig **Aus**.

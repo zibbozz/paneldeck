@@ -300,9 +300,11 @@ pub fn describe_expr(e: Expr) -> String {
     }
 }
 
+/// Deckende Fassung des Terminal-Hintergrunds für Ableitungen. Wie `style::apply` vor 2.6.0 aus den vormultiplizierten
+/// Kanälen: Bei einer Deckkraft unter 100 % (`App::theme` setzt sie auf `bg`) werden die Flächen dadurch dunkler –
+/// genau so sah die App bisher aus.
 fn opaque(c: Color32) -> Color32 {
-    let [r, g, b, _] = c.to_srgba_unmultiplied();
-    Color32::from_rgb(r, g, b)
+    Color32::from_rgb(c.r(), c.g(), c.b())
 }
 
 /// Terminalfarbe nach Name (deckend) oder `None`.
@@ -464,6 +466,22 @@ mod tests {
         assert_eq!(u.selection_bg, u.accent.gamma_multiply(0.35));
         assert_eq!(u.error, Color32::from_rgb(0xe0, 0x6c, 0x75));
         assert_eq!(u.ticket_flag, u.error);
+        // Durchscheinender Hintergrund (Deckkraft-Einstellung, wie `App::theme`): die alte Darstellung rechnete mit den
+        // vormultiplizierten Kanälen von `theme.bg`.
+        for a in [77u8, 128, 200] {
+            let mut tt = t.clone();
+            tt.bg = Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), a);
+            let old_bg = Color32::from_rgb(tt.bg.r(), tt.bg.g(), tt.bg.b());
+            let ut = ui_colors(&tt);
+            let side = mix(old_bg, Color32::BLACK, 0.22);
+            assert_eq!(ut.sidebar_bg, side, "Deckkraft {a}");
+            assert_eq!(ut.window_bg, mix(side, Color32::WHITE, 0.05));
+            assert_eq!(ut.input_bg, mix(side, Color32::BLACK, 0.30));
+            assert_eq!(ut.border, mix(old_bg, Color32::WHITE, 0.12));
+            assert_eq!(ut.hover_bg, mix(side, Color32::WHITE, 0.07));
+            assert_eq!(ut.widget_bg, mix(side, Color32::WHITE, 0.10));
+            assert_eq!(ut.text, u.text, "Schrift unabhängig von der Deckkraft");
+        }
         // Hell: Fenster = abgesetzte Fläche.
         let light = crate::theme::all().into_iter().find(|t| !t.dark).unwrap();
         let ul = ui_colors(&light);

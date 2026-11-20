@@ -55,6 +55,8 @@ pub(super) struct Editor {
     marks: Marks,
     hints: Vec<Hint>,
     hints_for: Option<(Theme, Vec<String>)>,
+    /// Zeitpunkt der letzten Design-Prüfung (Entprellen beim Ziehen).
+    hints_at: f64,
     style_for: Option<(Theme, Arc<egui::Style>)>,
 }
 
@@ -68,6 +70,8 @@ enum EdAction {
 const UNDO_MAX: usize = 100;
 /// Bearbeitungen innerhalb dieser Zeit (Ziehen im Farbwähler) zählen als ein Rückgängig-Schritt.
 const UNDO_MERGE_S: f64 = 0.6;
+/// Design-Prüfung höchstens so oft neu rechnen (Ziehen im Farbwähler ändert das Theme jedes Bild).
+const HINTS_EVERY_S: f64 = 0.15;
 
 impl Editor {
     fn new(theme: Theme, saved: Theme) -> Editor {
@@ -94,6 +98,7 @@ impl Editor {
             marks: Marks::new(),
             hints: Vec::new(),
             hints_for: None,
+            hints_at: f64::NEG_INFINITY,
             style_for: None,
         }
     }
@@ -120,6 +125,23 @@ impl Editor {
         self.last_edit = if merge { now } else { f64::NEG_INFINITY };
         self.hex_for = None;
         self.error = None;
+    }
+
+    /// Wie [`Editor::edit`] (ohne Zusammenfassen), aber nur, wenn dadurch kein Kreis aus Verweisen entsteht – sonst
+    /// bleibt alles, wie es ist, mit Meldung. Für Änderungen, die Ableitungen umstellen (hell/dunkel, Zurücksetzen,
+    /// Generator). `false`, wenn abgelehnt.
+    fn edit_checked(&mut self, now: f64, lang: Lang, f: impl FnOnce(&mut Theme)) -> bool {
+        let mut test = self.theme.clone();
+        f(&mut test);
+        if let Some(cy) = tokens::find_cycle(&test) {
+            // Ein schon vorhandener Kreis blockiert nichts (sonst ließe er sich nicht mehr beheben).
+            if tokens::find_cycle(&self.theme).is_none() {
+                self.error = Some(format!("{} {}", lang.t("Nicht übernommen – Verweise im Kreis:", "Not applied – links would form a loop:"), cy.join(" → ")));
+                return false;
+            }
+        }
+        self.edit(now, false, |t| *t = test);
+        true
     }
 
     fn undo(&mut self) {
@@ -154,12 +176,19 @@ impl Editor {
         tokens::resolve(&self.theme, name) != tokens::resolve(&self.saved, name) || self.theme.ui.get(name) != self.saved.ui.get(name)
     }
 
-    fn refresh_hints(&mut self, off: &[String]) {
-        let key = (self.theme.clone(), off.to_vec());
-        if self.hints_for.as_ref() != Some(&key) {
-            self.hints = checks::run(&self.theme, |r| !off.iter().any(|o| o == r.key()));
-            self.hints_for = Some(key);
+    /// Design-Prüfung nach einer Änderung neu rechnen, höchstens alle [`HINTS_EVERY_S`]. `true`, wenn eine Prüfung
+    /// noch aussteht (der Aufrufer zeichnet dann nach der Wartezeit erneut).
+    fn refresh_hints(&mut self, off: &[String], now: f64) -> bool {
+        if matches!(&self.hints_for, Some((t, o)) if *t == self.theme && o.as_slice() == off) {
+            return false;
         }
+        if self.hints_for.is_some() && now - self.hints_at < HINTS_EVERY_S {
+            return true;
+        }
+        self.hints = checks::run(&self.theme, |r| !off.iter().any(|o| o == r.key()));
+        self.hints_for = Some((self.theme.clone(), off.to_vec()));
+        self.hints_at = now;
+        false
     }
 
     fn preview_style(&mut self, base: &egui::Style) -> Arc<egui::Style> {
@@ -238,8 +267,15 @@ impl App {
     }
 
     /// Name prüfen: nicht leer, höchstens 80 Zeichen, von keinem anderen Theme belegt (ohne `own`, das eigene Theme).
-    fn theme_name_error(&self, name: &str, own: Option<&std::path::Path>) -> Option<String> {
+    /// `kept`: bisheriger Name der Datei – bleibt er unverändert, gilt nur, dass kein anderes Theme genau so heißt
+    /// (alte Dateien mit langen Namen oder „one dark“ neben „One Dark“ lassen sich weiter speichern).
+    fn theme_name_error(&self, name: &str, own: Option<&std::path::Path>, kept: Option<&str>) -> Option<String> {
         let lang = self.settings.language;
+        let other = |t: &&Theme| own.is_none() || t.source.as_deref() != own;
+        if kept == Some(name) {
+            let taken = self.themes.iter().filter(other).any(|t| t.name == name);
+            return taken.then(|| format!("{} {}", lang.t("Dieser Name ist schon vergeben:", "This name is already used:"), lang.q(&file::short(name))));
+        }
         let n = name.trim();
         if n.is_empty() {
             return Some(lang.t("Der Name ist leer.", "The name is empty.").into());
@@ -247,7 +283,7 @@ impl App {
         if n.chars().count() > 80 {
             return Some(lang.t("Der Name ist länger als 80 Zeichen.", "The name is longer than 80 characters.").into());
         }
-        let taken = self.themes.iter().any(|t| t.name.eq_ignore_ascii_case(n) && (own.is_none() || t.source.as_deref() != own));
+        let taken = self.themes.iter().filter(other).any(|t| t.name.eq_ignore_ascii_case(n));
         taken.then(|| format!("{} {}", lang.t("Dieser Name ist schon vergeben:", "This name is already used:"), lang.q(n)))
     }
 
@@ -266,8 +302,12 @@ impl App {
     /// Arbeitskopie speichern (neue Datei oder bestehende), Themes neu laden und das Theme auswählen.
     fn theme_save(&mut self, ed: &mut Editor) -> Result<(), String> {
         let lang = self.settings.language;
-        ed.theme.name = ed.theme.name.trim().to_string();
-        if let Some(e) = self.theme_name_error(&ed.theme.name, ed.theme.source.as_deref()) {
+        // Der Name einer bestehenden Datei bleibt, wie er ist, solange er nicht geändert wurde (auch mit Leerzeichen).
+        let kept = ed.saved.source.as_ref().map(|_| ed.saved.name.clone());
+        if kept.as_deref() != Some(ed.theme.name.as_str()) {
+            ed.theme.name = ed.theme.name.trim().to_string();
+        }
+        if let Some(e) = self.theme_name_error(&ed.theme.name, ed.theme.source.as_deref(), kept.as_deref()) {
             return Err(e);
         }
         if let Some(c) = tokens::find_cycle(&ed.theme) {
@@ -309,6 +349,9 @@ impl App {
 
     fn theme_delete(&mut self, name: &str) {
         let lang = self.settings.language;
+        if self.theme_ui.editor.is_some() {
+            return;
+        }
         let Some(path) = self.themes.iter().find(|t| t.name == name && !t.builtin).and_then(|t| t.source.clone()) else { return };
         match std::fs::remove_file(&path) {
             Ok(()) => {
@@ -324,12 +367,16 @@ impl App {
 
     fn theme_rename(&mut self, old: &str, new: &str) -> Result<(), String> {
         let lang = self.settings.language;
+        if self.theme_ui.editor.is_some() {
+            return Err(lang.t("Erst den Theme-Editor schließen (speichern oder verwerfen).", "Close the theme editor first (save or discard).").into());
+        }
         let Some(t) = self.themes.iter().find(|t| t.name == old && !t.builtin).cloned() else { return Err(lang.t("Theme nicht gefunden.", "Theme not found.").into()) };
-        let new = new.trim();
-        if new == old {
+        // Unverändert übernommen (auch ein alter Name mit Leerzeichen am Rand): nichts zu tun.
+        if new == old || new.trim() == old {
             return Ok(());
         }
-        if let Some(e) = self.theme_name_error(new, t.source.as_deref()) {
+        let new = new.trim();
+        if let Some(e) = self.theme_name_error(new, t.source.as_deref(), None) {
             return Err(e);
         }
         let mut t2 = t.clone();
@@ -392,8 +439,11 @@ impl App {
             if ui.add_enabled(!editing, egui::Button::new(lang.t("Neues Theme …", "New theme …"))).on_hover_text(lang.t("Aus wenigen Farben erzeugen und anpassen", "Generate from a few colours and fine-tune")).clicked() {
                 self.theme_new();
             }
+            // Solange der Editor offen ist, keine Datei-Aktionen, die seinen Stand überholen würden (ein Umbenennen
+            // würde beim Speichern still zurückgenommen, Profile zeigten dann ins Leere).
+            let busy = lang.t("Erst den Theme-Editor schließen (speichern oder verwerfen).", "Close the theme editor first (save or discard).");
             ui.menu_button("⋯", |ui| {
-                if ui.add_enabled(!cur.builtin, egui::Button::new(lang.t("Umbenennen …", "Rename …"))).clicked() {
+                if ui.add_enabled(!cur.builtin && !editing, egui::Button::new(lang.t("Umbenennen …", "Rename …"))).on_disabled_hover_text(if editing { busy } else { lang.t("Eingebaute Themes lassen sich nicht umbenennen.", "Built-in themes cannot be renamed.") }).clicked() {
                     self.theme_ui.rename = Some(Rename { old: cur.name.clone(), buf: cur.name.clone(), err: None });
                     ui.close();
                 }
@@ -401,7 +451,7 @@ impl App {
                     self.theme_duplicate(&cur.name);
                     ui.close();
                 }
-                if ui.add_enabled(!cur.builtin, egui::Button::new(lang.t("Löschen …", "Delete …"))).clicked() {
+                if ui.add_enabled(!cur.builtin && !editing, egui::Button::new(lang.t("Löschen …", "Delete …"))).on_disabled_hover_text(if editing { busy } else { lang.t("Eingebaute Themes lassen sich nicht löschen.", "Built-in themes cannot be deleted.") }).clicked() {
                     self.theme_ui.delete_ask = Some(cur.name.clone());
                     ui.close();
                 }
@@ -413,7 +463,7 @@ impl App {
                         }
                     }
                     ui.separator();
-                    if ui.button(lang.t("Importieren …", "Import …")).clicked() {
+                    if ui.add_enabled(!editing, egui::Button::new(lang.t("Importieren …", "Import …"))).on_disabled_hover_text(busy).clicked() {
                         ui.close();
                         self.theme_import();
                     }
@@ -447,7 +497,9 @@ impl App {
         let lang = self.settings.language;
         let now = ctx.input(|i| i.time);
         let off = self.settings.theme_checks_off.clone();
-        ed.refresh_hints(&off);
+        if ed.refresh_hints(&off, now) {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(HINTS_EVERY_S));
+        }
         let mut open = true;
         let mut action = None;
         let title = format!("{} – {}", lang.t("Theme-Editor", "Theme editor"), ed.theme.name);
@@ -589,7 +641,8 @@ fn body(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64, off: &[String], base
         }
         let mut dark = ed.theme.dark;
         if ui.checkbox(&mut dark, lang.t("Dunkel", "Dark")).on_hover_text(lang.t("Bestimmt, wie abgeleitete Farben berechnet werden", "Decides how derived colours are calculated")).changed() {
-            ed.edit(now, false, |t| t.dark = dark);
+            // Hell/dunkel stellt Ableitungen um – das darf mit eigenen Verweisen keinen Kreis ergeben.
+            ed.edit_checked(now, lang, |t| t.dark = dark);
         }
         ui.separator();
         if ui.button(lang.t("Aus Farben erzeugen …", "Generate from colours …")).on_hover_text(lang.t("Hintergrund, Akzent und hell/dunkel wählen – alles andere wird berechnet", "Pick background, accent and light/dark – everything else is calculated")).clicked() {
@@ -796,12 +849,14 @@ fn color_editor(ed: &mut Editor, ui: &mut Ui, name: &'static str, lang: Lang, no
         } else {
             (lang.t("Auf gespeicherten Wert", "Reset to saved value"), to_hex(tokens::resolve(&ed.saved, name)))
         };
-        let can = if is_ui { ed.theme.ui.contains_key(name) } else { true };
+        // Auch ein aufbewahrter Wert einer neueren Version (Verweis auf eine unbekannte Farbe) lässt sich zurücksetzen.
+        let can = if is_ui { ed.theme.ui.contains_key(name) || ed.theme.extra.ui.contains_key(name) } else { true };
         if ui.add_enabled(can, egui::Button::new(label)).on_hover_text(tip).clicked() {
             let saved = tokens::resolve(&ed.saved, name);
-            ed.edit(now, false, |t| {
+            ed.edit_checked(now, lang, |t| {
                 if is_ui {
                     t.ui.remove(name);
+                    t.extra.ui.remove(name);
                 } else if name == "cursor" {
                     t.cursor = t.fg;
                 } else if name == "selection" {
@@ -983,9 +1038,12 @@ fn generator_ui(ed: &mut Editor, ctx: &egui::Context, lang: Lang, now: f64) {
         });
     });
     if go {
-        ed.edit(now, false, |t| {
+        // Bei Ablehnung (Kreis) steht die Meldung in der Kopfzeile des Editors.
+        ed.edit_checked(now, lang, |t| {
             let mut g = generate::generate(&t.name, seed);
             g.source = t.source.clone();
+            // Unbekannte Inhalte der Datei (neuere Versionen) bleiben erhalten.
+            g.extra = std::mem::take(&mut t.extra);
             *t = g;
         });
         ed.generator = None;
@@ -1036,6 +1094,45 @@ mod tests {
     }
 
     #[test]
+    fn edits_that_would_form_a_loop_are_refused() {
+        let mut e = ed();
+        // Dunkel: surface → window_bg → sidebar_bg → bg (kein Kreis). Hell wäre window_bg = @surface → Kreis.
+        e.edit(1.0, false, |t| {
+            t.ui.insert("surface".into(), Spec::Link { to: "window_bg".into(), alpha: None });
+        });
+        assert!(tokens::find_cycle(&e.theme).is_none());
+        let steps = e.undo.len();
+        assert!(!e.edit_checked(2.0, Lang::En, |t| t.dark = false));
+        assert!(e.theme.dark && e.undo.len() == steps, "nichts übernommen");
+        assert!(e.error.as_deref().is_some_and(|m| m.contains("loop")), "{:?}", e.error);
+        // Zurücksetzen auf abgeleitet und danach hell: geht, und nimmt auch aufbewahrte Werte mit.
+        e.theme.extra.ui.insert("border".into(), serde_json::json!("@future/20"));
+        assert!(e.edit_checked(3.0, Lang::En, |t| {
+            t.ui.remove("surface");
+            t.extra.ui.remove("border");
+        }));
+        assert!(e.edit_checked(4.0, Lang::En, |t| t.dark = false));
+        assert!(!e.theme.dark && e.theme.extra.ui.is_empty() && e.error.is_none());
+    }
+
+    #[test]
+    fn design_checks_are_debounced_while_dragging() {
+        let mut e = ed();
+        assert!(!e.refresh_hints(&[], 10.0));
+        let first = e.hints_for.clone();
+        e.edit(10.01, true, |t| {
+            theme::set_color(t, "text", Color32::from_gray(40));
+        });
+        assert!(e.refresh_hints(&[], 10.05), "noch nicht neu geprüft");
+        assert_eq!(e.hints_for, first);
+        assert!(!e.refresh_hints(&[], 10.2));
+        assert_eq!(e.hints_for.as_ref().map(|h| &h.0), Some(&e.theme));
+        assert!(!e.hints.is_empty(), "dunkler Text auf dunklem Grund");
+        // Unverändert: keine weitere Prüfung nötig.
+        assert!(!e.refresh_hints(&[], 10.21));
+    }
+
+    #[test]
     fn new_themes_count_as_unsaved_and_search_matches_both_languages() {
         let mut e = ed();
         e.theme.source = None;
@@ -1055,7 +1152,7 @@ mod tests {
             let mut action = None;
             let _ = ctx.run(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))), ..Default::default() }, |ctx| {
                 let st = (*ctx.style()).clone();
-                e.refresh_hints(&[]);
+                e.refresh_hints(&[], 0.0);
                 egui::Window::new("t").default_size([1240.0, 800.0]).show(ctx, |ui| body(&mut e, ui, lang, 0.0, &[], &st, &mut action));
                 e.generator = Some(Seed::from_theme(&e.theme));
                 generator_ui(&mut e, ctx, lang, 0.0);

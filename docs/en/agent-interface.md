@@ -112,8 +112,8 @@ An agent always has only the options of the mode that is currently set (switch *
 
 Agents can read the colour themes, never change them (both tools are additive since 2.6.0, level *Read*):
 
-- **`theme_list`**: `active` (the theme the app uses) and `themes`, each with `name`, `dark`, `builtin` (built-in themes are read-only), `file` (file name in `themes/`, `null` for built-in themes) and `active`. Files that cannot be loaded are listed under `invalid` with `file` and `error`; they cannot be selected. No paths are returned.
-- **`theme_get`**: optional parameter `name` (default: the active theme). Returns `name`, `dark`, `builtin`, `file`, `active`, `terminal` (`fg`, `bg`, `cursor`, `selection`, `ansi` with 16 colours), `colors` (every [interface colour](themes.md#interface-colours) resolved to `#rrggbb` or `#rrggbbaa`) and `overrides` (only the values the theme sets itself – a colour or a link such as `"@text/20"`). Unknown name: `not_found`.
+- **`theme_list`**: `active` (the theme the app uses) and `themes`, each with `name`, `dark`, `builtin` (built-in themes are read-only), `file` (file name in `themes/`, `null` for built-in themes) and `active`. Files that cannot be loaded are listed under `invalid` with `file` and `error`; they cannot be selected (`error` quotes at most 40 characters of a faulty value). No paths are returned. `note`: theme names and error texts are untrusted.
+- **`theme_get`**: optional parameter `name` (default: the active theme). Returns `name`, `dark`, `builtin`, `file`, `active`, `terminal` (`fg`, `bg`, `cursor`, `selection`, `ansi` with 16 colours), `colors` (every [interface colour](themes.md#interface-colours) resolved to `#rrggbb` or `#rrggbbaa`) and `overrides` (only the values the theme sets itself – a colour or a link such as `"@text/20"`). `note`: theme names are untrusted. Unknown name: `not_found`.
 
 ## Security
 - Access only runs locally through the running instance (`127.0.0.1`, own token). The level is **Off** by default.
