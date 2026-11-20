@@ -1,0 +1,59 @@
+[← README](../../README.de.md) · [English](../en/processes.md) · **Deutsch**
+
+# Prozessliste
+
+Die **Prozessliste** führt lang laufende Programme wie Entwicklungsserver und Watcher aus – `php -S localhost:8000`, `ng serve`, `npm run dev`, `cargo watch` – getrennt von deinen interaktiven Terminal-Sitzungen. Getippt wird dort nicht: Du startest einen Prozess, siehst seine Ausgabe in einem eigenen Bereich und stoppst ihn wieder. *(Seit 2.6.0.)*
+
+## Der Abschnitt *Prozesse*
+Der Abschnitt *Prozesse* liegt in der Seitenleiste des Terminal Hubs über den Vorlagen und lässt sich einklappen. Sein Titel zeigt, wie viele Einträge laufen (z. B. `PROZESSE 2/5`).
+
+- **+** legt einen neuen Eintrag an.
+- Jede Zeile zeigt einen Statuspunkt, den Namen und rechts **Starten** (▷) bzw. **Stoppen** (□). Ein laufender Eintrag mit erkannter lokaler Adresse bekommt **↗** (im Browser öffnen), und `! n` zählt die Zeilen seiner Ausgabe, die nach Fehlern aussehen.
+- **Klick** auf eine Zeile zeigt ihre Ausgabe im Hauptbereich statt der Sitzungen; **Doppelklick** startet einen gestoppten Eintrag. Ein Klick auf eine Sitzung (oder **×** im Kopf der Ausgabe) holt die Sitzungen zurück.
+- **Rechtsklick** auf eine Zeile: *Starten*, *Stoppen*, *Neu starten*, *Ausgabe zeigen*, *Bearbeiten …*, *Duplizieren* und – mit Protokolldatei – *Ordner der Protokolle öffnen*.
+- Einträge eines anderen Projekts sind ausgeblendet, solange sie nicht laufen; Einträge ohne Projekt erscheinen in jedem Projekt.
+- Einträge mit **Gruppe** stehen unter dem Namen der Gruppe, mit Knöpfen zum Starten bzw. Stoppen der ganzen Gruppe.
+
+## Felder
+| Feld | Bedeutung |
+|---|---|
+| Name | Erscheint in der Liste, in Benachrichtigungen und für Agenten. |
+| Befehl | Eine Befehlszeile, ausgeführt über die gewählte Shell – `npm`, `php`, `ng` und andere Programme werden also wie im Terminal über `PATH` gefunden. |
+| Ordner | Arbeitsordner (leer = Standardordner der Shell). Ein Ordner, den es nicht gibt, lässt den Start fehlschlagen. |
+| Shell | Standard ist PowerShell (PowerShell 7, falls installiert, sonst Windows PowerShell); oder jede erkannte Shell – cmd, Git Bash, WSL. PowerShell startet ohne dein Profil (`-NoProfile`). |
+| Projekt | Das Projekt, zu dem der Eintrag gehört (oder keins). |
+| Gruppe, Reihenfolge | Einträge derselben Gruppe starten und stoppen gemeinsam: beim Starten aufsteigend nach *Reihenfolge* (z. B. Backend 1, Frontend 2), beim Stoppen umgekehrt. |
+| Automatisch starten | *Nie* (Standard), *Mit Paneldeck* oder *Wenn das Projekt geöffnet wird* (auch beim Start, wenn es das geöffnete Projekt ist; einmal je Lauf). |
+| Protokolldatei | Die Ausgabe zusätzlich nach `process-logs/<id>-<name>.log` im Datenordner schreiben (standardmäßig aus). Jede Zeile bekommt einen Zeitstempel; ab 5 MB wird rotiert (`.1` … `.3`). |
+| Umgebungsvariablen | Name und Wert. Werte werden **verschlüsselt** gespeichert (Windows-DPAPI, nur für denselben Windows-Benutzer auf demselben Rechner lesbar), nie Agenten gezeigt und nie protokolliert. Beim Bearbeiten behält ein leerer Wert den gespeicherten. |
+
+Änderungen an einem laufenden Eintrag gelten ab seinem nächsten Start. Löschen lässt sich ein Eintrag nur, wenn er nicht läuft.
+
+## Ausführen, Stoppen, Zustände
+Ein Prozess läuft in einer Konsole ohne Eingabe (Farben und Fortschrittsbalken funktionieren, Tippen ist abgeschaltet). Die Ausgabe behält die letzten **10.000 Zeilen**; *Suchen* (Strg+F), *Ganze Ausgabe kopieren* und *Ausgabe leeren* stehen im Kopf des Bereichs, markierter Text wird mit Strg+C oder Rechtsklick kopiert.
+
+**Stoppen** (Knopf oder Strg+C in der Ausgabe ohne Markierung) sendet Strg+C; ist der Prozess **nach 5 Sekunden** nicht beendet, beendet Paneldeck den **ganzen Prozessbaum** (Windows: das Job Object, in dem der Prozess läuft; Linux/macOS: seine Prozessgruppe). *Neu starten* stoppt einen laufenden Prozess so und startet ihn wieder.
+
+| Zustand | Bedeutung |
+|---|---|
+| läuft | Der Prozess läuft. |
+| wird gestoppt | Strg+C ist gesendet; Paneldeck wartet auf das Ende (höchstens 5 s, dann wird der Baum beendet). |
+| gestoppt | Von dir gestoppt – oder noch nicht gestartet. |
+| beendet | Von selbst mit Exit-Code 0 beendet. |
+| abgestürzt (Code X) | Von selbst mit einem anderen Exit-Code beendet. Du bekommst eine Benachrichtigung (wie bei Claude), der Eintrag wird rot und die Ausgabe zeigt *Neu starten*. |
+| Start fehlgeschlagen | Befehl oder Shell nicht gefunden oder der Ordner fehlt; die Meldung steht in der Ausgabe, ohne Exit-Code. |
+
+**Nach einem Neustart von Paneldeck** ist die Liste noch da und alle Prozesse sind gestoppt – von selbst starten nur Einträge mit *Mit Paneldeck* (und *Wenn das Projekt geöffnet wird* für das geöffnete Projekt).
+
+**Beim Beenden von Paneldeck** mit laufenden Prozessen kommt erst eine Rückfrage: *Alle stoppen* oder *Abbrechen* (ein *Weiterlaufen lassen* gibt es nicht – die Prozesse enden ohnehin mit Paneldeck). Das Verstecken im Tray fragt nicht und stoppt nichts.
+
+## Im Browser öffnen
+Paneldeck sucht in der Ausgabe nach Adressen (z. B. `http://localhost:4200/`). Angeboten werden nur **lokale** Adressen – `localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]` und die eigene Netzwerkadresse dieses Rechners – und sie öffnen sich **nur per Klick** (↗ in der Liste oder die Adressknöpfe im Kopf der Ausgabe). `0.0.0.0` wird als `localhost` geöffnet.
+
+## Agenten (MCP)
+Agenten lesen die Prozessliste ab der Stufe *Lesen* (`list_processes`, `read_process_output`; Ausgabe und Befehle sind als nicht vertrauenswürdig gekennzeichnet) und starten, stoppen und starten Einträge oder Gruppen neu ab der Stufe *Steuern* (`start_process`, `stop_process`, `restart_process`). Einträge anlegen, ändern oder löschen kannst nur du. Siehe [Agenten-Schnittstelle](agent-interface.md#prozessliste).
+
+Ein Programm der Prozessliste, das selbst die Agenten-Schnittstelle von Paneldeck aufruft, zählt als keine Sitzung.
+
+## Speicherung
+Die Einträge stehen in `processes.json` im Datenordner – siehe [Datenordner](data-and-backups.md#prozessliste-processesjson).

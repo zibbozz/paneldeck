@@ -30,6 +30,7 @@ mod palette;
 mod paths;
 mod planning;
 mod platform;
+mod procs;
 mod prompts;
 mod query;
 mod search;

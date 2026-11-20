@@ -55,6 +55,7 @@ mod vt_notify;
 mod panels;
 mod paste_ask;
 mod planning_ui;
+mod procs_ui;
 mod session_settings;
 mod settings;
 #[cfg(feature = "readme-shots")]
@@ -891,6 +892,8 @@ pub struct App {
     quitting: bool,
     /// Beenden trotz Hintergrundprozessen bestätigt (#168, `closing::App::quit_guard`): nicht noch einmal fragen.
     quit_ok: bool,
+    /// Prozessliste (#243): Einträge, Laufzeit, Ausgabeansicht, Dialoge.
+    procs: procs_ui::ProcsState,
     detached: Vec<u64>,
     settings_tab: usize,
     capture_key: Option<String>,
@@ -1134,6 +1137,7 @@ impl App {
             crate::shellinit::detect_running_wsl();
         }
         let bg = std::sync::mpsc::channel::<String>();
+        let procs_state = procs_ui::ProcsState::load(&dir);
         let mut app = App {
             settings,
             shells,
@@ -1227,6 +1231,7 @@ impl App {
             tray_rx: std::sync::mpsc::channel().1,
             quitting: false,
             quit_ok: false,
+            procs: procs_state,
             detached: saved.detached.clone(),
             settings_tab: 0,
             capture_key: None,
@@ -1631,6 +1636,7 @@ impl App {
         }
         self.active_project = id;
         self.load_project_view(p.layout, p.focused);
+        self.procs_project_opened(id);
     }
 
     /// Zeile der Sitzung in der Seitenleiste sichtbar machen: Filter leeren, wenn er sie verbirgt, eingeklappte Ordner
@@ -2811,6 +2817,10 @@ impl App {
             .frame(egui::Frame::NONE.fill(theme.bg))
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
+                // Ausgabe eines Prozesses der Prozessliste (#243) statt der Sitzungen.
+                if self.proc_pane(ui, rect, &theme, &font) {
+                    return;
+                }
                 let Some(mut layout) = self.layout.take() else {
                     let kind = self.empty_heading();
                     let hints = self.empty_hints();
@@ -3849,6 +3859,8 @@ impl App {
                 ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of(("detached", id)), egui::ViewportCommand::Focus);
             }
             Action::Activate(id) | Action::Focus(id) => {
+                // Eine Sitzung nach vorn: die Ausgabe eines Prozesses (#243) macht ihr Platz.
+                self.procs.view = None;
                 if let Some(pid) = self.entries.get(&id).map(|e| e.meta.project) {
                     self.switch_project(pid);
                 }
@@ -4258,6 +4270,7 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.poll_mcp(ctx);
+        self.poll_procs(ctx);
         self.poll_retired(ctx);
         crate::platform::conpty::USE_BUNDLED.store(self.settings.bundled_conpty, std::sync::atomic::Ordering::Relaxed);
         termview::CURSOR_BLINK.store(self.settings.cursor_blink, std::sync::atomic::Ordering::Relaxed);

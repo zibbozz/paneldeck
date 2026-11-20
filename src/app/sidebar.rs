@@ -40,6 +40,10 @@ impl App {
             });
             // Vorlagen-Bibliothek (#244): einklappbar über der Fußzeile.
             self.templates_section(ui, actions);
+            // Prozessliste (#243): über den Vorlagen, nur im Hauptfenster (ihre Ausgabe erscheint dort).
+            if self.wins.cur == 0 {
+                self.procs_section(ui);
+            }
 
             // Werkzeugleiste
             ui.horizontal_wrapped(|ui| {

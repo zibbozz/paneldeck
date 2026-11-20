@@ -309,6 +309,10 @@ pub enum Icon {
     Collapse,
     /// Kreispfeil: Sitzung neu laden.
     Reload,
+    /// Dreieck: Prozess starten (#243).
+    Play,
+    /// Quadrat: Prozess stoppen (#243).
+    Stop,
 }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, st: Stroke) {
@@ -525,6 +529,13 @@ pub fn paint_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
             for y in [-3.5, 0.0, 3.5] {
                 l(v(-5.0, y), v(5.0, y));
             }
+        }
+        Icon::Play => {
+            let pts = vec![c + v(-3.5, -5.0), c + v(-3.5, 5.0), c + v(5.0, 0.0)];
+            p.add(egui::Shape::convex_polygon(pts, Color32::TRANSPARENT, st));
+        }
+        Icon::Stop => {
+            p.rect_stroke(Rect::from_center_size(c, v(9.0, 9.0)), 1.5, st, StrokeKind::Inside);
         }
     }
 }
