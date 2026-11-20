@@ -750,7 +750,17 @@ Jede Shell startet in einem eigenen Windows-Job-Object; Programme, die aus der S
 - [ ] **Zuordnung:** ein per `Start-Process` aus der Sitzung gestarteter Prozess, dessen Shell schon beendet ist, wird bei `whoami` der Sitzung zugeordnet (Smoke-Test prüft das).
 - [ ] **Beide Sprachen:** Rückfragen, Knöpfe und Warnung auf Deutsch und Englisch.
 
-## 64 · Linux (#149, 2.5.0) – WSLg und ein echter Wayland-Desktop
+## 64 · Kontextlänge als Schieberegler (#305, 2.5.0)
+*Einstellungen → Modelle → (Server) → (Modell) → Kontextlänge.* Regler in Zweierpotenzen 4096 … 1M, Zahlenfeld daneben für jeden Wert von 256 bis 16M.
+- [ ] **Standard:** ohne Häkchen *eigene* ist der Regler sichtbar, aber gesperrt (Ziehen/Klicken ändert nichts); daneben „vom Server: 128K · 131.072 Tokens“ bzw. „Standard 8K · 8.192 Tokens“.
+- [ ] **Eigene:** Häkchen setzen → Regler wird bedienbar und startet bei der erkannten Länge (bzw. 8192), auf die nächste Stufe gerundet; daneben Kurzform (z. B. `128K`) und Zahlenfeld „131.072 Tokens“.
+- [ ] **Ziehen:** Regler von ganz links nach ganz rechts → nur die Stufen 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M (jeweils genau das Doppelte), Zahlenfeld folgt.
+- [ ] **Pfeiltasten:** Regler anklicken bzw. per Tab fokussieren, → / ← verdoppeln bzw. halbieren den Wert um genau eine Stufe; an den Enden (4K, 1M) bleibt er stehen.
+- [ ] **Freier Wert:** im Zahlenfeld 6000 bzw. 3.000.000 eintippen + Enter → Wert bleibt exakt (auch nach Neustart in `settings.json`), der Regler steht auf der nächsten Stufe (8K bzw. 1M), die Kurzform fehlt bei 6000; 100 → wird zu 256, 20.000.000 → 16.777.216.
+- [ ] **Alte Werte:** `settings.json` mit `"context_length": 6000` bzw. `2000` bzw. `2097152` → nach dem Start unverändert angezeigt und gespeichert; erst wenn der Regler bewegt wird, springt der Wert auf eine Stufe.
+- [ ] **Beide Sprachen:** Tooltip des Reglers, „Tokens“/„tokens“ und Tausendertrenner (Deutsch `1.048.576`, Englisch `1,048,576`).
+
+## 65 · Linux (#149, 2.5.0) – WSLg und ein echter Wayland-Desktop
 
 Automatisch (CI, Linux-Job): Aufrufer-Zuordnung inkl. Abweisung unbekannter MCP-/`--open`-Aufrufer (`platform::unix_proc`, `hooks::tests::unknown_open_caller_is_refused`, `mcp_access_checks`), HTTPS/LLM-Transport (`llm::http::unix`), Master-Passwort (`platform::secret`), Desktop-Dateien (`platform::desktop`), AppImage-Tausch (`app::update::install::appimage_tests`), Pakete bauen und prüfen (`tools/package-linux.sh`, `tools/check-linux-packages.sh`, Job `package-linux`). Von Hand **vor dem Release** – einmal unter **WSLg** (Windows 11, Ubuntu 22.04/24.04) und einmal auf einem **echten Wayland-Desktop** (Live-USB oder VM, z. B. Fedora Workstation/GNOME und Kubuntu/KDE). Immer mit eigenem Datenordner (`--data-dir /tmp/pd-test`), nie mit echten Schlüsseln.
 
