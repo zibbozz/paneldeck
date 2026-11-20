@@ -527,19 +527,19 @@ $wait
   Check 'create_session claude (PowerShell, nicht WSL)' (-not $cs.err -and $cs.data.shell -notlike 'wsl*') $cs.text
   if ($script:lastOk) {
     $cid = $cs.data.id
-    $ct = Wait-FakeFile $calls '--session-id'
-    Check 'Claude-Start erreicht den Ersatz (fakebin\calls.txt: --session-id, Hooks per --settings aus dem Test-Datenordner)' ($ct -match 'claude\.cmd' -and $ct -match '--session-id [0-9a-f-]{36}' -and $ct -match ('--settings "?[^ ]*' + [regex]::Escape($tag) + '/hub/paneldeck-data/claude-hooks\.json')) "calls.txt='$ct'"
-    # #302: der erste Start einer neuen Sitzung beginnt immer neu (--session-id), nie mit --resume/--continue.
-    Check 'Erster Start einer neuen Claude-Sitzung: --session-id, kein --resume/--continue (#302)' ($ct -notmatch '--resume' -and $ct -notmatch '--continue') "calls.txt='$ct'"
+    $ct = Wait-FakeFile $calls 'claude\.cmd'
+    Check 'Claude-Start erreicht den Ersatz (fakebin\calls.txt: Hooks per --settings aus dem Test-Datenordner)' ($ct -match 'claude\.cmd' -and $ct -match ('--settings "?[^ ]*' + [regex]::Escape($tag) + '/hub/paneldeck-data/claude-hooks\.json')) "calls.txt='$ct'"
+    # #302: der erste Start einer neuen Sitzung beginnt immer neu: nur claude mit den Hook-Einstellungen (und Optionen),
+    # ohne --session-id/--resume/--continue.
+    Check 'Erster Start einer neuen Claude-Sitzung: kein --session-id/--resume/--continue (#302)' ($ct -notmatch '--session-id' -and $ct -notmatch '--resume' -and $ct -notmatch '--continue') "calls.txt='$ct'"
     Check 'Schein-Profil: keine globalen Hooks in ~/.claude/settings.json angelegt' (-not (Test-Path "$($script:iso.Profile)\.claude\settings.json"))
     # Schluessel des Starts (#260): der Ersatz schreibt PANELDECK_SESSION_KEY in calls.txt; ohne ihn verwirft der Hub Hooks.
     $hookKey = ''
-    foreach ($ln in ($ct -split "`r?`n")) { if ($ln -match '--session-id' -and $ln -match 'key=([0-9a-f]{16,})') { $hookKey = $Matches[1] } }
+    foreach ($ln in ($ct -split "`r?`n")) { if ($ln -match 'claude\.cmd' -and $ln -match 'key=([0-9a-f]{16,})') { $hookKey = $Matches[1] } }
     Check 'Schluessel des Starts im Ersatz-claude (PANELDECK_SESSION_KEY)' ($hookKey.Length -ge 16) "calls.txt='$ct'"
-    # Konversation des Starts: Claude meldet die per --session-id uebergebene ID; nur sie wird zugeordnet (#260).
-    $script:hookSid = ''
-    foreach ($ln in ($ct -split "`r?`n")) { if ($ln -match '--session-id ([0-9a-f-]{36})') { $script:hookSid = $Matches[1] } }
-    Check 'Konversations-ID des Starts im Ersatz-claude (--session-id)' ($script:hookSid.Length -eq 36) "calls.txt='$ct'"
+    # Konversation des Starts (#302): ohne --session-id ordnet der erste SessionStart des gestarteten Claude sie zu;
+    # danach zaehlen Meldungen anderer Konversationen (claude -p) nicht (#260).
+    $script:hookSid = [guid]::NewGuid().ToString()
     # $key = $null: Meldung ganz ohne Schluessel (globale Hooks einer aelteren paneldeck.exe).
     function Hook($evt, $extra = @{}, $key = $hookKey, $sid = $script:hookSid) {
       $msg = @{ token = $hookTok; session = [uint64]$cid; payload = (@{ hook_event_name = $evt; session_id = $sid } + $extra) }
@@ -708,7 +708,7 @@ $wait
     $coid = $co.data.id
     $cl = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $coid }
     Check 'list_sessions meldet die Startoptionen' ($cl.claude -eq $true -and $cl.model -eq 'haiku' -and $cl.effort -eq 'high' -and $cl.permission_mode -eq 'plan' -and $cl.agent -eq 'smoke-agent') ($cl | ConvertTo-Json -Compress)
-    $re = 'args=.*--model haiku --effort high --permission-mode plan --agent smoke-agent --session-id [0-9a-f-]{36}'
+    $re = '(?m)args=.*--model haiku --effort high --permission-mode plan --agent smoke-agent\r?$'
     $ct = Wait-FakeFile $calls $re
     Check 'Ersatz-claude bekommt die geprueften Optionen (fakebin\calls.txt)' ($ct -match $re) "calls.txt='$ct'"
     [void](Tool 'close_session' @{ session = $coid })
@@ -717,7 +717,7 @@ $wait
   $cd = Tool 'create_session' @{ claude = $true; shell = 'powershell'; cwd = "$proj"; name = 'smoke-copts2'; model = 'sonnet' }
   Check 'create_session ohne permission_mode meldet "default"' (-not $cd.err -and $cd.data.permission_mode -eq 'default') $cd.text
   if ($script:lastOk) {
-    $re2 = 'args=.*--model sonnet --permission-mode default --session-id'
+    $re2 = '(?m)args=.*--model sonnet --permission-mode default\r?$'
     $ct2 = Wait-FakeFile $calls $re2
     Check 'Ersatz-claude bekommt --permission-mode default' ($ct2 -match $re2) "calls.txt='$ct2'"
     [void](Tool 'close_session' @{ session = $cd.data.id })
@@ -749,7 +749,7 @@ $wait
   if ($script:lastOk) {
     $cfl = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $cf.data.id }
     Check 'list_sessions meldet claude_flags' ((@($cfl.claude_flags) -join ',') -eq 'chrome,ide,verbose' -and @($cfl.claude_user_options).Count -eq 0) ($cfl | ConvertTo-Json -Compress)
-    $re3 = 'args=.*--permission-mode default --chrome --ide --verbose --session-id [0-9a-f-]{36}'
+    $re3 = '(?m)args=.*--permission-mode default --chrome --ide --verbose\r?$'
     $ct3 = Wait-FakeFile $calls $re3
     Check 'Ersatz-claude bekommt --chrome --ide --verbose (fakebin\calls.txt)' ($ct3 -match $re3) "calls.txt='$ct3'"
     [void](Tool 'close_session' @{ session = $cf.data.id })
@@ -812,7 +812,7 @@ $wait
   $uo = @($ag.data.claude_user_options)
   Check 'Agenten-Sitzung: Schalter des Nutzers + eigene, nur harmlose Wertoptionen' (-not $ag.err -and (@($ag.data.claude_flags) -join ',') -eq 'no-chrome,ide,verbose' -and ($uo -join ',') -eq 'disallowed_tools,fallback_model') $ag.text
   if ($script:lastOk) {
-    $re4 = 'args=.*--permission-mode default --no-chrome --ide --verbose --disallowed-tools WebFetch --fallback-model haiku --session-id [0-9a-f-]{36}'
+    $re4 = '(?m)args=.*--permission-mode default --no-chrome --ide --verbose --disallowed-tools WebFetch --fallback-model haiku\r?$'
     $ct4 = Wait-FakeFile $calls $re4
     $line4 = @(($ct4 -split "`r?`n") | Where-Object { $_ -match $re4 }) | Select-Object -Last 1
     Check 'Ersatz-claude (Agent): ohne --add-dir/--plugin-dir/--allowed-tools/--mcp-config/--strict-mcp-config/--system-prompt/--safe-mode' ($line4 -and $line4 -notmatch '--add-dir|--plugin-dir|--mcp-config|--strict-mcp-config|--system-prompt| --allowed-tools|--safe-mode') "calls.txt='$ct4'"
@@ -824,7 +824,7 @@ $wait
   $tuo = @($t1.data.claude_user_options); $tfl = @($t1.data.claude_flags)
   Check 'create_session mit template: Optionen der Vorlage, nie bypassPermissions/--safe-mode/riskante Wertoptionen' (-not $t1.err -and $t1.data.model -eq 'haiku' -and $t1.data.permission_mode -eq 'default' -and $tfl -contains 'ide' -and $tfl -notcontains 'safe-mode' -and -not ($tuo | Where-Object { $_ -in 'add_dir', 'plugin_dir', 'allowed_tools', 'mcp_config', 'strict_mcp_config', 'system_prompt' })) $t1.text
   if ($script:lastOk) {
-    $re6 = 'args=.*--model haiku --permission-mode default .*--session-id [0-9a-f-]{36}'
+    $re6 = '(?m)args=.*--model haiku --permission-mode default .*\r?$'
     $ct6 = Wait-FakeFile $calls $re6
     $line6 = @(($ct6 -split "`r?`n") | Where-Object { $_ -match $re6 }) | Select-Object -Last 1
     Check 'Ersatz-claude (Vorlage per Agent): ohne --add-dir/--plugin-dir/--allowed-tools/--mcp-config/--system-prompt/--safe-mode/bypassPermissions' ($line6 -and $line6 -notmatch '--add-dir|--plugin-dir|--mcp-config|--system-prompt| --allowed-tools|--safe-mode|bypass') "calls.txt='$ct6'"
@@ -859,7 +859,7 @@ $wait
   while (-not $us -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500; $us = (Tool 'list_sessions').data.sessions | Where-Object { $before -notcontains $_.id -and $_.claude } | Select-Object -First 1 }
   Check 'Sitzung des Nutzers (--open --claude): alle Wertoptionen der Standards' ($us -and (@($us.claude_user_options) -join ',') -eq 'add_dir,plugin_dir,allowed_tools,disallowed_tools,mcp_config,strict_mcp_config,system_prompt,fallback_model' -and (@($us.claude_flags) -join ',') -eq 'no-chrome,verbose,safe-mode') ($us | ConvertTo-Json -Compress)
   if ($script:lastOk) {
-    $re5 = 'args=.*--no-chrome --verbose --safe-mode --add-dir "?' + [regex]::Escape("$proj") + '"? --plugin-dir "?' + [regex]::Escape($plugDir) + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? "?' + [regex]::Escape($mcpCfg2) + '"? --strict-mcp-config --system-prompt "Smoke prompt second line" --fallback-model haiku --session-id'
+    $re5 = '(?m)args=.*--no-chrome --verbose --safe-mode --add-dir "?' + [regex]::Escape("$proj") + '"? --plugin-dir "?' + [regex]::Escape($plugDir) + '"? --allowed-tools Read --disallowed-tools WebFetch --mcp-config "?' + [regex]::Escape($mcpCfg) + '"? "?' + [regex]::Escape($mcpCfg2) + '"? --strict-mcp-config --system-prompt "Smoke prompt second line" --fallback-model haiku\r?$'
     $ct5 = Wait-FakeFile $calls $re5
     Check 'Ersatz-claude (Nutzer) bekommt --add-dir/--plugin-dir/--allowed-tools/mehrere --mcp-config/--strict-mcp-config/--system-prompt gequotet (fakebin\calls.txt)' ($ct5 -match $re5) "calls.txt='$ct5'"
     [void](Tool 'close_session' @{ session = $us.id })
@@ -1247,6 +1247,61 @@ c.close()
   Check 'read_terminal auf einem Chat -> not_a_terminal' ((Code (Tool 'read_terminal' @{ session = 950 })) -eq 'not_a_terminal')
   Check 'send_text auf einem Chat -> not_a_terminal' ((Code (Tool 'send_text' @{ session = 950; text = 'x' })) -eq 'not_a_terminal')
   Check 'Chatverlauf chats/950.json bleibt beim Start erhalten' ([IO.File]::ReadAllText("$data\chats\950.json") -match 'smoke-answer')
+
+  Write-Host "== Fortsetzen nach Neustart (#302): Programmstart mit Fortsetzen/Aus/Auswaehlen" -ForegroundColor Cyan
+  if (-not $script:psClaudeFake) { throw 'SICHERHEIT: claude im PowerShell-Terminal des Hubs nicht als Ersatz bestaetigt - keine Claude-Sitzung' }
+  Stop-Hub
+  # Stand der Chat-Pruefung oben merken (die folgenden Abschnitte brauchen ihn) und am Ende zurueckschreiben.
+  $prevState = [IO.File]::ReadAllText("$data\state.json")
+  # Je Sitzung ein eigener Arbeitsordner (die Zeilen in calls.txt unterscheiden sich an cwd=). Konversationen liegen im
+  # Schein-Profil unter .claude\projects\<Ordnername> (wie Claude Code: alles ausser a-z A-Z 0-9 wird '-').
+  $rsDirs = @{}
+  foreach ($n in 'r302-cont', 'r302-empty', 'r302-pick', 'r302-off') { $rsDirs[$n] = (New-Item -ItemType Directory -Force "$work\$n").FullName.TrimEnd('\') }
+  $slugOf = { param($p) $p -replace '[^A-Za-z0-9]', '-' }
+  $u8r = New-Object Text.UTF8Encoding $false
+  foreach ($n in 'r302-cont', 'r302-off') {
+    $pd = Join-Path "$($script:iso.Profile)\.claude\projects" (& $slugOf $rsDirs[$n])
+    New-Item -ItemType Directory -Force $pd | Out-Null
+    [IO.File]::WriteAllText((Join-Path $pd "$([guid]::NewGuid()).jsonl"), '{"type":"user","message":{"role":"user","content":"smoke 302"}}' + "`n", $u8r)
+  }
+  $st = [ordered]@{
+    sessions = @(
+      [ordered]@{ id = 970; name = 'R302-Cont'; custom_name = $true; shell_id = 'powershell'; cwd = $rsDirs['r302-cont']; project = 1; claude = $true },
+      [ordered]@{ id = 971; name = 'R302-Empty'; custom_name = $true; shell_id = 'powershell'; cwd = $rsDirs['r302-empty']; project = 1; claude = $true },
+      [ordered]@{ id = 972; name = 'R302-Pick'; custom_name = $true; shell_id = 'powershell'; cwd = $rsDirs['r302-pick']; project = 1; claude = $true; claude_resume_mode = 'pick' },
+      [ordered]@{ id = 973; name = 'R302-Off'; custom_name = $true; shell_id = 'powershell'; cwd = $rsDirs['r302-off']; project = 1; claude = $true; claude_continue = $false; claude_resume_mode = 'off' })
+    next_id = 974; projects = @([ordered]@{ id = 1; name = 'Standard' }); active_project = 1
+  }
+  [IO.File]::WriteAllText("$data\state.json", ($st | ConvertTo-Json -Depth 8), $u8r)
+  Set-Level 'Control' -Tray
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  # Zeile des Ersatz-claude fuer einen Arbeitsordner (die letzte; wartet bis zu 20 s). Starten mehrere Ersatz-claude
+  # gleichzeitig, kann ein `>>` von cmd an der gerade offenen calls.txt scheitern: dann zaehlt der Bildschirm der Sitzung
+  # (dort steht die eingetippte Befehlszeile samt Ausgabe des Ersatzes).
+  $lineOf = {
+    param($n, $sid)
+    $re = '(?m)^claude\.cmd cwd=' + [regex]::Escape($rsDirs[$n]) + ' .*$'
+    $txt = Wait-FakeFile $calls $re 20000
+    $l = @(($txt -split "`r?`n") | Where-Object { $_ -match ('^claude\.cmd cwd=' + [regex]::Escape($rsDirs[$n]) + ' ') }) | Select-Object -Last 1
+    if ($l) { return $l }
+    $scr = (Tool 'read_terminal' @{ session = $sid; lines = 40 }).data.text
+    if ($scr -match 'Fake Claude') { return "terminal: $(($scr -split "`r?`n" | Where-Object { $_ -match 'claude' }) -join ' ')" }
+    ''
+  }
+  $lc = & $lineOf 'r302-cont' 970
+  Check 'Programmstart, Fortsetzen mit Konversation im Ordner: claude --continue (#302)' ($lc -match '--continue(\s|$)' -and $lc -notmatch '--session-id|--resume') "line='$lc'"
+  $le = & $lineOf 'r302-empty' 971
+  Check 'Programmstart, Fortsetzen ohne Konversation: neu, ohne --continue/--session-id (#302)' ($le -and $le -notmatch '--cont|--sess|--resu') "line='$le'"
+  $lp = & $lineOf 'r302-pick' 972
+  Check 'Programmstart, Auswaehlen ohne Konversation: ohne Rueckfrage neu (#302)' ($lp -and $lp -notmatch '--cont|--sess|--resu') "line='$lp'"
+  $lo = & $lineOf 'r302-off' 973
+  Check 'Programmstart, Aus: neu trotz Konversation im Ordner (#302)' ($lo -and $lo -notmatch '--cont|--sess|--resu') "line='$lo'"
+  # Die Sitzungen behalten ihren Modus (state.json bleibt lesbar fuer aeltere Versionen: claude_continue)
+  Stop-Hub
+  $sj = [IO.File]::ReadAllText("$data\state.json").TrimStart([char]0xFEFF) | ConvertFrom-Json
+  $sp = $sj.sessions | Where-Object { $_.id -eq 972 }; $so = $sj.sessions | Where-Object { $_.id -eq 973 }; $sc = $sj.sessions | Where-Object { $_.id -eq 970 }
+  Check 'state.json: claude_resume_mode bleibt (pick/off), claude_continue fuer aeltere Versionen (#302)' ($sp.claude_resume_mode -eq 'pick' -and $so.claude_resume_mode -eq 'off' -and $so.claude_continue -eq $false -and $null -eq $sc.claude_resume_mode) ($sj.sessions | ConvertTo-Json -Compress -Depth 4)
+  [IO.File]::WriteAllText("$data\state.json", $prevState, $u8r)
 
   Write-Host "== Chats ueber MCP (#63): Fake-Ollama-Server, create_session kind=chat, send_chat_message, read_chat" -ForegroundColor Cyan
   Stop-Hub

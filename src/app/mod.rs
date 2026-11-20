@@ -40,6 +40,7 @@ mod empty_hub;
 pub(crate) mod folder_picker;
 mod fresh_start;
 mod closing;
+mod conv_pick;
 #[cfg(test)]
 mod glyph_tests;
 mod mcp;
@@ -121,13 +122,15 @@ struct Entry {
     /// Stand des Claude dieses Starts über die Hook-Meldungen hinaus (laufende Runde, letzte Meldung, offene Rückfrage,
     /// Prompt der Shell) – für den Rückfall, wenn Meldungen ausbleiben (`claude_status`). Je Start neu.
     track: claude_status::Track,
+    /// Die Sitzung wartet vor ihrem Start auf die Auswahl der Konversation (#302, `conv_pick`).
+    pick_pending: bool,
 }
 
 impl Entry {
     fn new(meta: SessionMeta) -> Self {
         let launched_claude = meta.claude && meta.kind != SessionKind::Chat;
         let launched_opts = if launched_claude { meta.claude_opts_eff().0 } else { Default::default() };
-        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default() }
+        Entry { meta, live: None, error: None, status: ClaudeStatus::Unknown, status_msg: String::new(), attention: false, live_cwd: String::new(), start_cwd: String::new(), hook_seen: false, queue_active: false, perm_since: None, budget_warned: false, shell_eff: String::new(), chat: None, session_key: String::new(), hook_conv: Default::default(), hook_keyed: false, launched_claude, launched_opts, launch_note: None, progress: None, track: Default::default(), pick_pending: false }
     }
     /// Chat-Sitzung mit geladenem Verlauf (kein Terminal, keine PTY).
     fn new_chat(meta: SessionMeta, chat: ChatState) -> Self {
@@ -402,6 +405,10 @@ enum Action {
     SetColor(u64, [u8; 3]),
     SetGroup(u64, String),
     Restart(u64),
+    /// Wartet die Sitzung auf die Auswahl der Konversation (#302): ohne Auswahl neu starten.
+    ConvPickFresh(u64),
+    /// Hauptfenster (mit der Auswahl der Konversation) nach vorn holen, auch aus dem Tray (#302).
+    ConvPickShow,
     /// „Neu laden“ (#169): Rückfrage, solange ein Prozess läuft, dann `Restart`. Chats: nichts.
     RequestReload(u64),
     /// Dialog „Einstellungen der Sitzung“ (#170) öffnen.
@@ -489,8 +496,8 @@ struct NewOpts {
     /// Nur der Dialog „Neue Sitzung“: der Nutzer hat bypassPermissions ausdrücklich für diese Sitzung gewählt.
     allow_bypass: bool,
     continue_last: bool,
-    /// „Konversation fortsetzen“ (None = an, wie bisher).
-    claude_continue: Option<bool>,
+    /// „Fortsetzen nach Neustart“ (#302; None = fortsetzen, wie bisher).
+    resume_mode: Option<crate::state::ResumeMode>,
     prompt: Option<String>,
     resume_id: Option<String>,
     transcript: String,
@@ -803,6 +810,8 @@ pub struct App {
     confirm_close: Option<closing::CloseAsk>,
     /// Rückfrage „Sitzung neu laden?“ (#169).
     reload_ask: Option<session_settings::ReloadAsk>,
+    /// Auswahl der Konversation vor Neu laden/Neustart/Programmstart (#302); global, erscheint im Hauptfenster.
+    conv_pick: conv_pick::ConvPick,
     /// Rückfrage vor dem Einfügen mehrerer Zeilen (#183).
     paste_ask: Option<paste_ask::PasteAsk>,
     /// Dialog „Einstellungen der Sitzung“ (#170).
@@ -1148,6 +1157,7 @@ impl App {
             new_chat: None,
             confirm_close: None,
             reload_ask: None,
+            conv_pick: Default::default(),
             paste_ask: None,
             session_settings: None,
             settings_open: false,
@@ -1297,7 +1307,10 @@ impl App {
                 continue;
             }
             let mut entry = Entry::new(meta);
-            app.spawn_into(&cc.egui_ctx, &mut entry, Launch { restore: true, restart: false, continue_last: false, prompt: None, resume_id: None });
+            // „Konversation auswählen“ (#302): erst die Auswahl (eine zur Zeit), dann der Start.
+            if !app.begin_pick(&cc.egui_ctx, &mut entry, true, false) {
+                app.spawn_into(&cc.egui_ctx, &mut entry, Launch { restore: true, restart: false, continue_last: false, prompt: None, resume_id: None });
+            }
             app.entries.insert(id, entry);
         }
         // Agenten-Ketten: Sitzungen, die es nicht mehr gibt, fallen heraus (#152).
@@ -1774,7 +1787,7 @@ impl App {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
-        let is_wsl = sid.starts_with("wsl") || spec.as_ref().is_some_and(shells::is_wsl);
+        let is_wsl = shell_is_wsl(spec.as_ref(), &meta.shell_id);
         // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
         let style = crate::claude_opts::PathStyle::for_shell(&sid, spec.as_ref().map(|s| s.program.as_str()).unwrap_or(""), kind);
         let mut c = String::from(style.claude_program());
@@ -1802,12 +1815,12 @@ impl App {
         let (opts, args) = meta.claude_opts_eff();
         let launch = opts.launch(kind, style, &args);
         c += &launch.line;
-        // Fortsetzen folgt der Option der Sitzung („Konversation fortsetzen“, #170) und beim Programmstart zusätzlich
-        // der globalen Einstellung (`session_settings::resume_wanted`).
-        // Fortgesetzt wird nur eine Konversation, die es wirklich gibt (#245); sonst eine neue mit eigener ID.
-        // Der erste Start einer neuen Sitzung beginnt immer neu (`--session-id`), außer der Verlauf gibt eine ID vor (#302).
+        // Fortsetzen folgt „Fortsetzen nach Neustart“ der Sitzung (#302) und beim Programmstart zusätzlich der globalen
+        // Einstellung (`session_settings::resume_wanted`): „Fortsetzen“ = `--continue`, aber nur, wenn es im Ordner schon
+        // eine Konversation gibt (sonst schlüge es fehl); „Konversation auswählen“ = die vorher gewählte (`resume_id`).
+        // Der erste Start einer neuen Sitzung beginnt immer neu, außer der Verlauf gibt eine ID vor oder „letzte im Ordner“.
         let start = session_settings::launch_start(l.restore, l.restart, l.resume_id, l.continue_last, self.settings.claude_resume, meta, |m| {
-            session_settings::conversation_exists(m, is_wsl, crate::history::projects_dir().as_deref(), &home_dir())
+            session_settings::folder_has_conversation(m, is_wsl, crate::history::projects_dir().as_deref(), &home_dir())
         });
         let fresh = start == session_settings::ClaudeStart::Fresh;
         let expect = match start {
@@ -1820,11 +1833,11 @@ impl App {
                 None
             }
             session_settings::ClaudeStart::Fresh => {
-                // Neue Konversation mit eigener ID, damit sie später exakt wiedergefunden wird.
-                meta.claude_session = hooks::new_uuid();
+                // Neue Konversation ohne eigene ID (#302): nur `claude` mit den Hook-Einstellungen. Der Sitzung gehört sie
+                // über den ersten SessionStart des gestarteten Claude (`hooks::ConvBinding`, wie bei `--continue`).
+                meta.claude_session.clear();
                 meta.claude_started = false;
-                c += &format!(" --session-id {}", meta.claude_session);
-                Some(meta.claude_session.clone())
+                None
             }
         };
         // Der Start-Prompt wird nicht in die Kommandozeile geschrieben (Shell-Expansion von $, `, % …),
@@ -1847,6 +1860,7 @@ impl App {
         entry.launched_claude = entry.meta.claude && !entry.is_chat() && self.settings.claude_mode;
         entry.launched_opts = if entry.launched_claude { entry.meta.claude_opts_eff().0 } else { Default::default() };
         entry.hook_seen = false;
+        entry.pick_pending = false;
         entry.hook_conv = hooks::ConvBinding::default();
         entry.hook_keyed = false;
         // Die Warteschlange hatte der Hub selbst angehalten, weil Claude beendet war: Mit dem neuen Start läuft sie wieder.
@@ -1873,7 +1887,7 @@ impl App {
         // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
         // erreichen die Kommandozeile nie (wsl.exe zerlegt sie selbst – Befehlseinschleusung).
         let cwd = if wsl {
-            let distro = shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args));
+            let distro = wsl_distro_of(&shell);
             let de = self.settings.language == Lang::De;
             // Der WSL-Starter `bash.exe` kennt kein `--cd`: er startet im Windows-Ordner (#261).
             let cd = if shells::is_system_bash(&shell.program) { crate::wsl::Cd::Windows } else { crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) };
@@ -2110,7 +2124,7 @@ impl App {
             None if o.claude => ("Claude".to_string(), false),
             None => (label, false),
         };
-        let meta = SessionMeta {
+        let mut meta = SessionMeta {
             id,
             name,
             custom_name: custom,
@@ -2129,9 +2143,9 @@ impl App {
             transcript: o.transcript.clone(),
             group: o.group.as_deref().map(state::clean_folder_path).unwrap_or_default(),
             window,
-            claude_continue: o.claude_continue.unwrap_or(true),
             ..SessionMeta::default()
         };
+        meta.set_resume_mode(o.resume_mode.unwrap_or_default());
         if !meta.group.is_empty() {
             let g = meta.group.clone();
             if let Some(pr) = self.projects.iter_mut().find(|p| p.id == meta.project) {
@@ -2728,7 +2742,9 @@ impl App {
         // Weitere Dialoge über dem Terminal (#255): Neue Sitzung, Prompt an alle, Vorlagen, Worktree schließen. Nur ein
         // Terminal gibt den Fokus ab – ein Feld des Dialogs behält ihn.
         // Ebenso der Editor der Vorlagen-Bibliothek und die Rückfrage vor dem Start einer Vorlage (#244).
-        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() || self.tpl.form.is_some() || self.tpl.confirm.is_some() {
+        // Ebenso die Auswahl der Konversation (#302, nur im Hauptfenster): Enter/Esc gehören ihr, nicht dem Terminal.
+        let pick_here = self.wins.cur == 0 && self.conv_pick.open();
+        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() || self.tpl.form.is_some() || self.tpl.confirm.is_some() || pick_here {
             self.release_terminal_focus(ctx);
         }
         let theme = self.theme();
@@ -4051,6 +4067,8 @@ impl App {
                 }
             }
             Action::RequestReload(id) => self.request_reload(ctx, id),
+            Action::ConvPickFresh(id) => self.pick_fresh(ctx, id),
+            Action::ConvPickShow => self.show_pick_window(ctx),
             Action::OpenSessionSettings(id) => self.open_session_settings(id),
             Action::Restart(id) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {} // ein Chat hat keinen Prozess
             Action::Restart(id) => {
@@ -4061,7 +4079,10 @@ impl App {
                         self.retire_job(id, name, s);
                     }
                     e.live = None;
-                    self.spawn_into(ctx, &mut e, Launch { restore: false, restart: true, continue_last: false, prompt: None, resume_id: None });
+                    // „Konversation auswählen“ (#302): erst die Auswahl, dann der Start (`conv_pick`).
+                    if !self.begin_pick(ctx, &mut e, false, true) {
+                        self.spawn_into(ctx, &mut e, Launch { restore: false, restart: true, continue_last: false, prompt: None, resume_id: None });
+                    }
                     self.entries.insert(id, e);
                 }
             }
@@ -4093,7 +4114,7 @@ impl App {
                         name: Some(format!("{} (2)", src.display_name())),
                         claude: src.meta.claude && self.settings.claude_mode,
                         claude_args: src.meta.claude_args.clone(),
-                        claude_continue: Some(src.meta.claude_continue),
+                        resume_mode: Some(src.meta.resume_mode()),
                         claude_opts: Some(src.meta.claude_opts.clone()),
                         profile: Some(src.meta.profile),
                         window: Some(src.meta.window),
@@ -4242,6 +4263,7 @@ impl eframe::App for App {
         self.sync_watchers(ctx);
         self.tlinks_frame(ctx);
         self.poll_history();
+        self.poll_picks(ctx);
         self.check_budget(ctx);
         self.handle_drops(ctx);
         let mut actions: Vec<Action> = self.main_frame_begin(ctx);
@@ -4814,6 +4836,20 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             ui.painter().rect_filled(body, 0.0, cx.theme.bg);
             let msg = entry.error.clone().unwrap_or_else(|| "—".into());
             ui.scope_builder(UiBuilder::new().max_rect(body.shrink(12.0)), |ui| {
+                if entry.pick_pending {
+                    // Kein Fehler: die Sitzung startet nach der Auswahl der Konversation (#302). Die Auswahl erscheint im
+                    // Hauptfenster; von hier aus lässt sie sich dorthin holen oder überspringen.
+                    ui.label(msg);
+                    ui.horizontal(|ui| {
+                        if ui.button(lang.t("Auswahl zeigen", "Show the choice")).clicked() {
+                            cx.actions.push(Action::ConvPickShow);
+                        }
+                        if ui.button(lang.t("Ohne Auswahl neu starten", "Start new without choosing")).clicked() {
+                            cx.actions.push(Action::ConvPickFresh(id));
+                        }
+                    });
+                    return;
+                }
                 ui.colored_label(Color32::LIGHT_RED, format!("{}: {msg}", lang.t("Start fehlgeschlagen", "Failed to start")));
                 if ui.button(lang.t("Neu starten", "Restart")).clicked() {
                     cx.actions.push(Action::RequestReload(id));
@@ -5064,6 +5100,18 @@ fn split_args(s: &str) -> Vec<String> {
 /// Taugt der gespeicherte Ordner einer WSL-Sitzung, deren Startordner `wsl.exe` nicht per `--cd` bekommt (eigenes
 /// `--cd` des Profils, Distribution unbekannt), als Windows-Startordner? Nie ein Linux-Pfad und nie ein `\\wsl$`-Pfad
 /// (den müsste der UI-Thread prüfen); sonst das Windows-Home.
+/// Läuft die Shell einer Sitzung in WSL? Eine Regel für den Start von Claude und die Auswahl der Konversation (#302):
+/// die Kennung (`wsl…`, auch ohne gefundene Shell) oder das Programm der Shell (eigene Profile mit wsl.exe/bash.exe).
+fn shell_is_wsl(spec: Option<&ShellSpec>, shell_id: &str) -> bool {
+    let sid = spec.map(|s| s.id.as_str()).unwrap_or(shell_id);
+    sid.starts_with("wsl") || spec.is_some_and(shells::is_wsl)
+}
+
+/// Distribution einer WSL-Shell: aus der Kennung `wsl:<Distro>`, sonst aus `-d <Distro>` der Argumente; `None` = Standard.
+fn wsl_distro_of(shell: &ShellSpec) -> Option<String> {
+    shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args))
+}
+
 fn spawn_cwd_is_windows(cwd: &str) -> bool {
     !cwd.trim().is_empty() && !crate::wsl::looks_linux(cwd.trim()) && !crate::wsl::is_wsl_unc(cwd)
 }
