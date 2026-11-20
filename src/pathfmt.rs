@@ -81,9 +81,10 @@ pub fn convert(shell_id: &str, path: &str) -> String {
     }
 }
 
-/// Pfad so formatieren, dass er in der Shell `shell_id` direkt eingefügt werden kann.
-pub fn for_shell(shell_id: &str, path: &str) -> String {
-    crate::quote::quote_if_needed(crate::quote::kind_of_id(shell_id), &convert(shell_id, path))
+/// Pfad so formatieren, dass er in der Shell der Sitzung direkt eingefügt werden kann. Gequotet wird nach der Shell, die
+/// dort wirklich läuft (`shells::quote_kind`: fish maskiert in `'…'` anders als bash, #57).
+pub fn for_shell(shell: &crate::shells::ShellSpec, path: &str) -> String {
+    crate::quote::quote_if_needed(crate::shells::quote_kind(shell), &convert(&shell.id, path))
 }
 
 /// Linux-Pfad aus einer WSL-Distribution als Windows-UNC-Pfad (`\\wsl$\<Distro>\…`).
@@ -99,13 +100,69 @@ pub fn from_wsl(shell_id: &str, path: &str) -> String {
 mod tests {
     use super::*;
 
+    fn sp(id: &str, program: &str) -> crate::shells::ShellSpec {
+        crate::shells::ShellSpec { id: id.into(), label: id.into(), program: program.into(), args: vec![] }
+    }
+
+    /// Wie eine POSIX-Shell bzw. fish ein Wort liest (nur `'…'`, `\x` außerhalb, Klartext); `None` bei einem Zeichen,
+    /// das ein Wort beendet oder etwas auslöst (`;`, Leerzeichen, `$`, …), also bei einer Einschleusung.
+    fn read_word(s: &str, fish: bool) -> Option<String> {
+        let mut out = String::new();
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
+            match c {
+                '\'' => loop {
+                    match it.next()? {
+                        '\'' => break,
+                        '\\' if fish && matches!(it.peek(), Some('\'') | Some('\\')) => out.push(it.next()?),
+                        x => out.push(x),
+                    }
+                },
+                '\\' => out.push(it.next()?),
+                c if c.is_whitespace() || ";&|$`#<>()\"".contains(c) => return None,
+                c => out.push(c),
+            }
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn file_names_cannot_inject_commands_in_any_shell() {
+        // #57: ein Dateiname, der in POSIX-Quoting für fish eine Einschleusung wäre (`\'` beendet dort nicht das Quoting)
+        let name = r"/tmp/x\';touch pwned;#";
+        let cases = [
+            (sp("sh", "/bin/sh"), false),
+            (sp("bash", "/bin/bash"), false),
+            (sp("zsh", "/usr/bin/zsh"), false),
+            (sp("fish", "/usr/bin/fish"), true),
+        ];
+        for (s, fish) in cases {
+            let q = for_shell(&s, name);
+            assert_eq!(read_word(&q, fish).as_deref(), Some(name), "{}: {q}", s.id);
+        }
+        // fish liest POSIX-Quoting anders: dort wäre es eine Einschleusung (Gegenprobe des Tests)
+        assert_ne!(read_word(&crate::quote::quote(crate::quote::Kind::Posix, name), true).as_deref(), Some(name));
+        // PowerShell und cmd: ein Argument in Anführungszeichen ohne Ende darin
+        let pw = for_shell(&sp("pwsh", "pwsh.exe"), r"C:\x\';touch pwned;#");
+        assert_eq!(pw, r"'C:\x\'';touch pwned;#'");
+        let cm = for_shell(&sp("cmd", "cmd.exe"), r"C:\x\';touch pwned;#");
+        assert_eq!(cm, "\"C:\\x\\';touch pwned;#\"");
+        // WSL mit fish als Login-Shell: Quoting für fish
+        crate::shellinit::set_login("pf-fish", crate::shellinit::Login::Known(crate::shellinit::LoginInfo { shell: "/usr/bin/fish".into(), ..Default::default() }));
+        let w = crate::shells::ShellSpec { id: "wsl:pf-fish".into(), label: "x".into(), program: "wsl.exe".into(), args: vec!["-d".into(), "pf-fish".into()] };
+        // (für WSL werden `\` eines Windows-Pfads zu `/`; ein `'` bleibt und wird für fish maskiert)
+        let fname = "/tmp/x';touch pwned;#";
+        assert_eq!(read_word(&for_shell(&w, fname), true).as_deref(), Some(fname));
+        assert_eq!(for_shell(&w, fname), r"'/tmp/x\';touch pwned;#'");
+    }
+
     #[test]
     fn conversions() {
-        assert_eq!(for_shell("powershell", r"C:\Users\Max\a.png"), r"C:\Users\Max\a.png");
-        assert_eq!(for_shell("cmd", r"C:\Program Files\x.txt"), "\"C:\\Program Files\\x.txt\"");
-        assert_eq!(for_shell("wsl:Ubuntu", r"C:\Users\Max\a.png"), "/mnt/c/Users/Max/a.png");
-        assert_eq!(for_shell("gitbash", r"D:\Dev\my app\f.rs"), "'/d/Dev/my app/f.rs'");
-        assert_eq!(for_shell("sh", "/home/u/a b"), "'/home/u/a b'");
+        assert_eq!(for_shell(&sp("powershell", "powershell.exe"), r"C:\Users\Max\a.png"), r"C:\Users\Max\a.png");
+        assert_eq!(for_shell(&sp("cmd", "cmd.exe"), r"C:\Program Files\x.txt"), "\"C:\\Program Files\\x.txt\"");
+        assert_eq!(for_shell(&sp("wsl:Ubuntu", "wsl.exe"), r"C:\Users\Max\a.png"), "/mnt/c/Users/Max/a.png");
+        assert_eq!(for_shell(&sp("gitbash", r"C:\Program Files\Git\bin\bash.exe"), r"D:\Dev\my app\f.rs"), "'/d/Dev/my app/f.rs'");
+        assert_eq!(for_shell(&sp("sh", "/bin/sh"), "/home/u/a b"), "'/home/u/a b'");
         assert_eq!(from_wsl("wsl:Ubuntu", "/home/max/.claude/x.jsonl"), r"\\wsl$\Ubuntu\home\max\.claude\x.jsonl");
         assert_eq!(from_wsl("powershell", "/home/x"), "/home/x");
         assert!(is_remote_unc(r"\\evil\share\x.txt"));

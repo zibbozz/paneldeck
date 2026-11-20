@@ -38,6 +38,7 @@ mod links;
 mod llm;
 mod markdown;
 mod mcp;
+mod shellinit;
 mod shells;
 mod state;
 mod style;

@@ -39,7 +39,11 @@ param(
   [string]$ConPtyDir = '',
   # OSC-52-Pruefung (#181) auslassen: sie setzt kurz die echte Windows-Zwischenablage (Text wird gesichert und
   # wiederhergestellt, eine Zwischenablage mit anderen als reinen Textformaten bleibt ohnehin unberuehrt)
-  [switch]$NoClipboard
+  [switch]$NoClipboard,
+  # zsh/fish-Integration (#57) in eigenen WSL-Test-Distributionen (nie der eigenen): Name einer Distribution mit Login-Shell
+  # zsh bzw. fish. Ohne Angabe werden diese Pruefungen uebersprungen.
+  [string]$WslZsh = $env:PANELDECK_TEST_WSL_ZSH,
+  [string]$WslFish = $env:PANELDECK_TEST_WSL_FISH
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -460,6 +464,54 @@ try {
       else { $rt = Tool 'read_terminal' @{ session = $w.data.id; lines = 30 }; Skip 'WSL: pwd' "run_command nicht beendet (Shell-Integration in WSL?): $($rt.data.text)" }
       Check 'WSL: close_session' (-not (Tool 'close_session' @{ session = $w.data.id }).err)
     }
+  }
+
+  Write-Host "== WSL: zsh und fish (#57)" -ForegroundColor Cyan
+  # Nur in eigenen Test-Distributionen, nie in der des Nutzers: -WslZsh/-WslFish (bzw. PANELDECK_TEST_WSL_ZSH/_FISH) nennen
+  # je eine Distribution, deren Login-Shell zsh bzw. fish ist. Ohne Angabe wird der Teil uebersprungen.
+  $wslAll = [regex]::Matches($avail, 'wsl:[^,\s]+') | ForEach-Object { $_.Value.TrimEnd('.') }
+  foreach ($c in @(@{ sh = 'zsh'; distro = $WslZsh; ver = 'echo "zsh:$ZSH_VERSION"'; left = 'echo "[${ZDOTDIR-unset}][${PANELDECK_ZSH_ZDOTDIR-}]"'; leftWant = '[unset][]' },
+                   @{ sh = 'fish'; distro = $WslFish; ver = 'echo "fish:$FISH_VERSION"'; left = 'set -q PANELDECK_FISH_INIT; or echo "[gone]"'; leftWant = '[gone]' })) {
+    $sh = $c.sh
+    if (-not $c.distro) { Skip "WSL $sh (#57)" "keine Test-Distribution (-Wsl$((Get-Culture).TextInfo.ToTitleCase($sh)) <name> bzw. PANELDECK_TEST_WSL_$($sh.ToUpper()): eigene Distribution mit Login-Shell $sh, nie die eigene)"; continue }
+    $id = "wsl:$($c.distro)"
+    if ($wslAll -notcontains $id) { Check "WSL ${sh}: Test-Distribution $($c.distro) erkannt" $false "verfuegbar: $($wslAll -join ', ')"; continue }
+    # Die Login-Shell wird beim ersten Start abgefragt; fish bekommt die Integration erst, wenn sie bekannt ist (dann neu anlegen).
+    $sid = $null; $r = $null
+    for ($try = 1; $try -le 4 -and -not $sid; $try++) {
+      $w = Tool 'create_session' @{ shell = $id; cwd = '/tmp'; name = "smoke-$sh" } 60000
+      if ($w.err) { Check "WSL ${sh}: create_session" $false $w.text; break }
+      Start-Sleep 6
+      $r = Tool 'run_command' @{ session = $w.data.id; command = $c.ver; timeout_secs = 30 } 45000
+      if ($r.data.finished) { $sid = $w.data.id } else { [void](Tool 'close_session' @{ session = $w.data.id }); Start-Sleep 3 }
+    }
+    if (-not $sid) { Check "WSL ${sh}: Shell-Integration aktiv (run_command)" $false $r.text; continue }
+    Check "WSL ${sh}: laeuft wirklich $sh, Ausgabe exakt" ($r.data.output -match "^${sh}:\d" -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+    $r = Tool 'run_command' @{ session = $sid; command = 'false'; timeout_secs = 25 }
+    Check "WSL ${sh}: Exit-Code 1, leere Ausgabe" ($r.data.exit_code -eq 1 -and $r.data.output -eq '') $r.text
+    $r = Tool 'run_command' @{ session = $sid; command = 'printf "x\ny\n"'; timeout_secs = 25 }
+    Check "WSL ${sh}: zweiter Befehl sauber, Exit 0" ($r.data.output -eq "x`ny" -and $r.data.exit_code -eq 0 -and $r.data.quality -eq 'exact') $r.text
+    $r = Tool 'run_command' @{ session = $sid; command = 'sleep 2'; timeout_secs = 25 }
+    Check "WSL ${sh}: Dauer gemessen (sleep 2)" ($r.data.finished -and $r.data.duration_ms -ge 1500) $r.text
+    # Ausgabe ohne Zeilenende: zsh haengt PROMPT_EOL_MARK (%) an, run_command entfernt sie
+    $r = Tool 'run_command' @{ session = $sid; command = 'printf x'; timeout_secs = 25 }
+    Check "WSL ${sh}: printf x liefert genau x" ($r.data.output -eq 'x' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+    $r = Tool 'run_command' @{ session = $sid; command = $c.left; timeout_secs = 25 }
+    Check "WSL ${sh}: Hilfsvariablen aufgeraeumt (ZDOTDIR wiederhergestellt)" ($r.data.output -eq $c.leftWant) "out='$($r.data.output)'"
+    [void](Tool 'run_command' @{ session = $sid; command = 'cd /usr'; timeout_secs = 25 })
+    $l = (Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid }
+    Check "WSL ${sh}: Ordner folgt (cd /usr)" ($l.cwd -like '*usr') "cwd='$($l.cwd)'"
+    $f = if ($sh -eq 'zsh') { "$data\shell-integration\zsh\.zshenv" } else { "$data\shell-integration\paneldeck.fish" }
+    Check "WSL ${sh}: Hilfsdatei im Datenordner" (Test-Path -LiteralPath $f) $f
+    if ($sh -eq 'zsh') {
+      # Eigenes ZDOTDIR (nur in /tmp der Test-Distribution): dieselbe Huelle mit PANELDECK_ZSH_ZDOTDIR laedt die .zshrc von dort
+      [void](Tool 'run_command' @{ session = $sid; command = "mkdir -p /tmp/pd-zdot && echo 'PD_OWN_RC=ok' > /tmp/pd-zdot/.zshrc"; timeout_secs = 25 })
+      $wz = ("$data\shell-integration\zsh" -replace "'", "")
+      [void](Tool 'run_command' @{ session = $sid; command = "exec env PANELDECK_ZSH_ZDOTDIR=/tmp/pd-zdot ZDOTDIR=`"`$(wslpath '$wz')`" zsh -i"; timeout_secs = 30 })
+      $r = Tool 'run_command' @{ session = $sid; command = 'echo "[$PD_OWN_RC][$ZDOTDIR]"'; timeout_secs = 25 }
+      Check 'WSL zsh: eigenes ZDOTDIR des Nutzers gilt (dessen .zshrc geladen, Marken weiter da)' ($r.data.output -eq '[ok][/tmp/pd-zdot]' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+    }
+    Check "WSL ${sh}: close_session" (-not (Tool 'close_session' @{ session = $sid }).err)
   }
 
   Write-Host "== Selbst-Identifikation und Kinder-Sitzungen" -ForegroundColor Cyan
@@ -1857,6 +1909,23 @@ c.close()
     }
   } else {
     Skip 'Konsolen-Host und DLL-Suche' 'keine conpty.dll/OpenConsole.exe neben der .exe (tools\fetch-conpty.ps1)'
+  }
+
+  Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
+  # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.
+  Set-Level 'Control' -Empty
+  if ($script:hub -and -not $script:hub.HasExited) {
+    $si = "$data\shell-integration"
+    New-Item -ItemType Directory -Force "$si\zsh" | Out-Null
+    [IO.File]::WriteAllText("$si\zsh\.zshenv", '# smoke')
+    [void]$script:hub.CloseMainWindow()
+    if ($script:hub.WaitForExit(15000)) {
+      Check 'Beenden: Ordner shell-integration im Datenordner entfernt' (-not (Test-Path -LiteralPath $si)) $si
+    } else {
+      Skip 'Beenden: Hilfsdateien entfernt' 'Hub hat sich nicht ohne Rueckfrage beendet (wird abgebrochen)'
+    }
+  } else {
+    Skip 'Beenden: Hilfsdateien entfernt' 'kein laufender Hub'
   }
 } catch {
   # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.

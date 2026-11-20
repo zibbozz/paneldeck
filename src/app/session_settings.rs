@@ -663,10 +663,10 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     if prog_profile {
                         ui.label(RichText::new(lang.t("eigenes Programm des Profils", "the profile's own program")).color(style::dim(ui)));
                     } else {
-                        let cur = shells.iter().find(|s| s.id == f.v.shell_id).map(|s| s.label.clone()).unwrap_or_else(|| f.v.shell_id.clone());
+                        let cur = shells.iter().find(|s| s.id == f.v.shell_id).map(|s| crate::shells::display_label(s, lang)).unwrap_or_else(|| f.v.shell_id.clone());
                         egui::ComboBox::from_id_salt("sset_shell").selected_text(cur).show_ui(ui, |ui| {
                             for s in shells {
-                                ui.selectable_value(&mut f.v.shell_id, s.id.clone(), &s.label);
+                                ui.selectable_value(&mut f.v.shell_id, s.id.clone(), crate::shells::display_label(s, lang));
                             }
                         });
                     }

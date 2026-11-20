@@ -27,6 +27,10 @@ pub struct Profile {
     pub color: Option<[u8; 3]>,
     /// Als Administrator starten (öffnet ein externes Fenster mit UAC-Abfrage)
     pub admin: bool,
+    /// Shell in WSL (#57): leer = Login-Shell der Distribution (automatisch), sonst ein Pfad aus deren `/etc/shells`
+    /// (z. B. `/usr/bin/zsh`); startet als `wsl.exe … -e <pfad> -l`. Nur für Profile mit einer WSL-Shell ohne eigenes Programm.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub login_shell: String,
 }
 
 impl Default for Profile {
@@ -44,6 +48,7 @@ impl Default for Profile {
             font_size: 0.0,
             color: None,
             admin: false,
+            login_shell: String::new(),
         }
     }
 }

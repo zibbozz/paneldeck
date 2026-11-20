@@ -276,7 +276,7 @@ impl App {
             let text: Vec<String> = files
                 .iter()
                 .filter_map(|f| f.path.as_ref())
-                .map(|p| pathfmt::for_shell(&s.shell_id, &p.to_string_lossy()))
+                .map(|p| pathfmt::for_shell(&s.spec, &p.to_string_lossy()))
                 .collect();
             if !text.is_empty() {
                 s.send_text(&format!("{} ", text.join(" ")), false);

@@ -221,9 +221,10 @@ pub fn normalize_multiline(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
 }
 
-/// Mehrzeiligen Text als ein Argument für die Shell. Echte Zeilenumbrüche nur mit `ansi_c` – einer Shell, die sicher
-/// bash ist (Git Bash): `$'z1\nz2'`. Sonst werden die Zeilen mit Leerzeichen verbunden: in WSL kann die Login-Shell
-/// fish (Syntaxfehler) oder nushell sein (`$'…'` wertet dort `(…)` aus – ein Befehl liefe); ein Zeilenumbruch in einem
+/// Mehrzeiligen Text als ein Argument für die Shell. Echte Zeilenumbrüche nur in einer Shell, die sicher bash oder zsh
+/// ist ([`Kind::Bash`], oder `ansi_c` = Git Bash): `$'z1\nz2'`; in fish ([`Kind::Fish`], #57) `'z1'\n'z2'`. Sonst werden
+/// die Zeilen mit Leerzeichen verbunden: in WSL mit unbekannter Login-Shell kann das nushell sein (`$'…'` wertet dort
+/// `(…)` aus – ein Befehl liefe); ein Zeilenumbruch in einem
 /// Argument beendet in cmd die Zeile, und `claude` ist unter Windows oft eine `.cmd`-Datei (npm), die über cmd läuft –
 /// der Rest der Zeile (auch `--session-id`) ginge verloren. Einzeilig wie [`quote`]. Der Text ist geprüft
 /// ([`valid_system_prompt`]: kein `\`, keine Shell-Zeichen).
@@ -231,8 +232,12 @@ fn quote_multiline(kind: Kind, s: &str, ansi_c: bool) -> String {
     if !s.contains('\n') {
         return quote(kind, s);
     }
-    if kind == Kind::Posix && ansi_c {
+    if kind == Kind::Bash || (kind == Kind::Posix && ansi_c) {
         return format!("$'{}'", s.replace('\'', "\\'").replace('\n', "\\n"));
+    }
+    if kind == Kind::Fish {
+        // Zeilen einzeln quoten, dazwischen `\n` außerhalb der Anführungszeichen (in fish ein Zeilenumbruch).
+        return s.split('\n').map(|l| quote(kind, l)).collect::<Vec<_>>().join("\\n");
     }
     quote(kind, &s.split('\n').map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" "))
 }
@@ -379,7 +384,7 @@ impl PathStyle {
     pub fn for_shell(shell_id: &str, program: &str, kind: Kind) -> PathStyle {
         if cfg!(windows) && (shell_id.starts_with("wsl") || crate::shells::is_wsl_program(program)) {
             PathStyle::Wsl
-        } else if cfg!(windows) && kind == Kind::Posix {
+        } else if cfg!(windows) && kind.is_posix() {
             PathStyle::Slash
         } else {
             PathStyle::Native
@@ -1165,7 +1170,7 @@ pub fn ser_user_opts_opt<S: serde::Serializer>(o: &Option<ClaudeOpts>, s: S) -> 
 fn quote_value(kind: Kind, v: &str) -> String {
     match kind {
         Kind::Cmd => v.to_string(),
-        Kind::Pwsh | Kind::Posix => quote(kind, v),
+        Kind::Pwsh | Kind::Posix | Kind::Bash | Kind::Fish => quote(kind, v),
     }
 }
 
@@ -2081,8 +2086,13 @@ mod tests {
             assert_eq!(m.args_for(Kind::Posix, style), " --system-prompt 'Line 1 It'\\''s 2 $x' --append-system-prompt 'Then this.'", "{style:?}");
         }
         assert_eq!(m.args_for(Kind::Cmd, PathStyle::Native), " --system-prompt \"Line 1 It's 2 $x\" --append-system-prompt \"Then this.\"");
+        // #57: erkannte Login-Shell – bash/zsh (auch in WSL) mit $'…', fish mit eigenem Quoting und `\n` zwischen den Zeilen.
+        for style in [PathStyle::Wsl, PathStyle::Native] {
+            assert_eq!(m.args_for(Kind::Bash, style), " --system-prompt $'Line 1\\nIt\\'s 2\\n\\n$x' --append-system-prompt 'Then this.'", "{style:?}");
+            assert_eq!(m.args_for(Kind::Fish, style), " --system-prompt 'Line 1'\\n'It\\'s 2'\\n''\\n'$x' --append-system-prompt 'Then this.'", "{style:?}");
+        }
         // Die Zeile enthält nie einen echten Zeilenumbruch (sie wird in die Shell getippt).
-        for k in [Kind::Pwsh, Kind::Posix, Kind::Cmd] {
+        for k in [Kind::Pwsh, Kind::Posix, Kind::Cmd, Kind::Bash, Kind::Fish] {
             assert!(!m.args_for(k, PathStyle::Native).contains('\n'));
         }
         // Ungültig: nicht übergeben
