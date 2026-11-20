@@ -9,7 +9,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.5.0] - WIP
 
-## [2.4.1] - WIP
+## [2.4.1] - 2026-11-20
 
 ### Fixed
 
@@ -397,8 +397,8 @@ First public release. From here on, the public API (MCP interface, command line,
 - All `unwrap()`/`expect()` calls in the program code were replaced by error handling (the release build aborts completely on a panic); the `unsafe` blocks are justified.
 - The executable contains no paths of the build machine.
 
-[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
-[2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
+[2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
+[2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
 [2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1
