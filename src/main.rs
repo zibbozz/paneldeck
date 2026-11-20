@@ -56,6 +56,27 @@ mod wsl;
 
 use platform::console;
 
+/// True when the process was started minimized or hidden (e.g. `Start-Process -WindowStyle Minimized`, a shortcut set to
+/// "Minimized"): STARTUPINFO carries the show state, which winit ignores.
+#[cfg(windows)]
+fn started_minimized() -> bool {
+    use windows_sys::Win32::System::Threading::{GetStartupInfoW, STARTF_USESHOWWINDOW, STARTUPINFOW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_MINIMIZE, SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE};
+    // SAFETY: GetStartupInfoW fills the given struct and cannot fail.
+    let si = unsafe {
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        GetStartupInfoW(&mut si);
+        si
+    };
+    si.dwFlags & STARTF_USESHOWWINDOW != 0 && [SW_HIDE, SW_MINIMIZE, SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE].contains(&(si.wShowWindow as i32))
+}
+
+#[cfg(not(windows))]
+fn started_minimized() -> bool {
+    false
+}
+
 fn app_icon() -> eframe::egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon64.png")).unwrap_or_default()
 }
@@ -256,8 +277,12 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    // Started in the tray (autostart) or minimized: open the window without activating it, so it does not take the
+    // keyboard focus from the program the user is working in (with `--tray` it goes to the tray after the first frame).
+    let quiet_start = cli.tray || started_minimized();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_active(!quiet_start)
             .with_title("Paneldeck")
             .with_inner_size([1320.0, 820.0])
             .with_min_inner_size([640.0, 400.0])
