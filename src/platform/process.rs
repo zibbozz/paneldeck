@@ -974,11 +974,19 @@ mod peer_tests {
     /// fragen alle 50 ms ab und sind sonst sofort fertig.
     const SPAWN_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
-    /// Kinder von `pid` (laut Momentaufnahme), wartet bis zu [`SPAWN_WAIT`] auf mindestens eines.
+    /// Kinder von `pid` (laut Momentaufnahme), wartet bis zu [`SPAWN_WAIT`] auf mindestens eines. Nur Prozesse, die nach
+    /// `pid` entstanden sind: Die Eltern-PID in der Momentaufnahme kann von einem früheren, längst beendeten Prozess mit
+    /// derselben PID stammen (unter Last vergibt Windows PIDs schnell neu, z. B. hinterlassen andere Tests losgelöste
+    /// PowerShell-Prozesse ohne Elternteil). Solche fremden „Kinder“ steckt [`sweep`] zu Recht nicht in den Job.
     fn children_of(pid: u32) -> Vec<u32> {
+        let born = process_born(pid).expect("Elternprozess läuft");
         let t0 = std::time::Instant::now();
         loop {
-            let c: Vec<u32> = process_parents().into_iter().filter(|(_, p)| *p == pid).map(|(c, _)| c).collect();
+            let c: Vec<u32> = process_parents()
+                .into_iter()
+                .filter(|&(c, p)| p == pid && process_born(c).is_some_and(|t| t >= born))
+                .map(|(c, _)| c)
+                .collect();
             if !c.is_empty() || t0.elapsed() > SPAWN_WAIT {
                 return c;
             }

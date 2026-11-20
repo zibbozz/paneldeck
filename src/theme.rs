@@ -77,6 +77,38 @@ pub fn all() -> Vec<Theme> {
                 c(0x5c, 0x8f, 0xff), c(0xc0, 0x4a, 0xc0), c(0x20, 0x9f, 0xd0), c(0xff, 0xff, 0xff),
             ],
         },
+        // Rosé hell: Puderrosa, Pflaume als Schrift, Beerenrosa als Cursor. „Weiß“ ist ein Malvengrau,
+        // damit auch weißer Text auf dem hellen Grund lesbar bleibt.
+        Theme {
+            name: "Mashkull".into(),
+            dark: false,
+            fg: c(0x4a, 0x19, 0x42),
+            bg: c(0xfb, 0xee, 0xf3),
+            cursor: c(0xc2, 0x18, 0x5b),
+            selection: c(0xf3, 0xc6, 0xd8),
+            ansi: [
+                c(0x3d, 0x1f, 0x36), c(0xb0, 0x10, 0x3f), c(0x2c, 0x73, 0x49), c(0x85, 0x54, 0x0a),
+                c(0x3a, 0x56, 0xb0), c(0xa0, 0x1f, 0x7c), c(0x17, 0x70, 0x7c), c(0x6c, 0x52, 0x66),
+                c(0x86, 0x66, 0x7c), c(0xd2, 0x2e, 0x6a), c(0x3b, 0x8f, 0x5d), c(0xa4, 0x6b, 0x12),
+                c(0x58, 0x74, 0xd0), c(0xc2, 0x3c, 0x9c), c(0x23, 0x90, 0x9c), c(0x96, 0x7a, 0x8d),
+            ],
+        },
+        // Rosé dunkel: Aubergine als Grund, zartes Rosa als Schrift, Rosa als Cursor. „Schwarz“ ist ein
+        // gedämpftes Pflaumengrau, damit es auf dem dunklen Grund sichtbar bleibt.
+        Theme {
+            name: "Mashkull Night".into(),
+            dark: true,
+            fg: c(0xf7, 0xd9, 0xe6),
+            bg: c(0x2b, 0x1a, 0x2c),
+            cursor: c(0xff, 0x8f, 0xbd),
+            selection: c(0x5c, 0x36, 0x58),
+            ansi: [
+                c(0x8a, 0x69, 0x82), c(0xff, 0x7c, 0x98), c(0x8e, 0xd5, 0xa5), c(0xf0, 0xcc, 0x8c),
+                c(0x9d, 0xb5, 0xf2), c(0xe7, 0x9c, 0xd9), c(0x88, 0xd2, 0xd6), c(0xe6, 0xcb, 0xd9),
+                c(0xa9, 0x86, 0x9f), c(0xff, 0x9d, 0xb2), c(0xa9, 0xf0, 0xbf), c(0xff, 0xe1, 0xa6),
+                c(0xbc, 0xcd, 0xff), c(0xf8, 0xb8, 0xec), c(0xa6, 0xee, 0xf0), c(0xff, 0xf1, 0xf7),
+            ],
+        },
     ]
 }
 
@@ -320,5 +352,72 @@ mod tests {
         let mut ov2 = Colors::default();
         ov2[100] = Some(Rgb { r: 0, g: 0, b: 0 });
         assert!(base.with_overrides(&ov2).is_none());
+    }
+
+    /// Relative Leuchtdichte nach WCAG 2.x.
+    fn luminance(c: Color32) -> f64 {
+        let lin = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+
+    /// Kontrastverhältnis nach WCAG (1–21).
+    fn contrast(a: Color32, b: Color32) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// Farbton in Grad (0–360).
+    fn hue(c: Color32) -> f64 {
+        let (r, g, b) = (c.r() as f64, c.g() as f64, c.b() as f64);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let d = max - min;
+        if d == 0.0 {
+            return 0.0;
+        }
+        let h = if max == r {
+            ((g - b) / d).rem_euclid(6.0)
+        } else if max == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        };
+        h * 60.0
+    }
+
+    #[test]
+    fn rose_themes_are_readable() {
+        let themes = all();
+        for name in ["Mashkull", "Mashkull Night"] {
+            let t = themes.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("{name} fehlt"));
+            assert_eq!(t.dark, name.ends_with("Night"), "{name}: hell/dunkel");
+            assert!(luminance(t.bg) > 0.5 || t.dark, "{name}: heller Grund");
+            assert!(contrast(t.fg, t.bg) >= 7.0, "{name}: Schrift {:.2}", contrast(t.fg, t.bg));
+            assert!(contrast(t.fg, t.selection) >= 4.5, "{name}: Schrift auf Auswahl {:.2}", contrast(t.fg, t.selection));
+            assert!(contrast(t.selection, t.bg) >= 1.25, "{name}: Auswahl sichtbar {:.2}", contrast(t.selection, t.bg));
+            // Block-Cursor: Fläche in Cursorfarbe, Zeichen in Hintergrundfarbe.
+            assert!(contrast(t.cursor, t.bg) >= 4.5, "{name}: Cursor {:.2}", contrast(t.cursor, t.bg));
+            for (i, &a) in t.ansi.iter().enumerate() {
+                let k = contrast(a, t.bg);
+                // Normale Farben (außer Schwarz im dunklen Thema) mindestens 4.5:1, alle mindestens 3:1.
+                let min = if i < 8 && !(t.dark && i == 0) { 4.5 } else { 3.0 };
+                assert!(k >= min, "{name}: ANSI {i} nur {k:.2}:1");
+                if i >= 8 {
+                    assert!(luminance(a) > luminance(t.ansi[i - 8]), "{name}: ANSI {i} nicht heller als {}", i - 8);
+                }
+            }
+            // Rot, Grün, Gelb, Blau bleiben unterscheidbar (Farbton mindestens 45° auseinander).
+            for base in [1, 9] {
+                for x in 0..4 {
+                    for y in x + 1..4 {
+                        let d = (hue(t.ansi[base + x]) - hue(t.ansi[base + y])).abs();
+                        let d = d.min(360.0 - d);
+                        assert!(d >= 45.0, "{name}: ANSI {} und {} zu ähnlich ({d:.0}°)", base + x, base + y);
+                    }
+                }
+            }
+        }
     }
 }
