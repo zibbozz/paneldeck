@@ -1663,7 +1663,7 @@ mod tests {
         match srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
             IpcCmd::Open { path, claude, origin } => {
                 assert_eq!((path.as_str(), claude), ("C:\\x", true));
-                #[cfg(windows)] // Absender über die TCP-Tabelle (`platform::process::resolve_peer`; anderswo noch unbekannt)
+                // Absender über die TCP-Tabelle bzw. /proc/net/tcp, libproc (`platform::process::resolve_peer`)
                 assert_eq!(origin.as_ref().and_then(|o| o.chain.first()), Some(&std::process::id()));
                 let origin = origin.unwrap();
                 assert!(!origin.orphan);
@@ -1674,6 +1674,32 @@ mod tests {
         // veraltete Datei (falscher Port) → keine Bestätigung
         write_ipc_file(&dir, 1, "x");
         assert!(!forward_to_running(&dir, &IpcCmd::Show));
+    }
+
+    /// Linux/macOS (#149/#150, Blocker): Ein Absender, den der Hub nicht bestimmen kann, wird abgewiesen („fail closed“).
+    /// Hier schließt der Client seinen Socket, bevor der Hub ihn prüft (Anfrage gesendet, Verbindung zu) – dann hält kein
+    /// Prozess den Socket mehr: `--open` öffnet nichts.
+    #[cfg(unix)]
+    #[test]
+    fn unknown_open_caller_is_refused() {
+        let ctx = egui::Context::default();
+        let srv = HookServer::start(&ctx).unwrap();
+        let body = json!({"token": srv.ipc_token, "cmd": "open", "path": "/tmp", "claude": false}).to_string();
+        let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, srv.port)).unwrap();
+        c.write_all(body.as_bytes()).unwrap();
+        drop(c);
+        assert!(srv.cmd_rx.recv_timeout(Duration::from_millis(1500)).is_err(), "unattributable caller must not open anything");
+        // Gegenprobe: derselbe Befehl mit offenem Socket kommt an, mit dem Testprozess als Absender.
+        let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, srv.port)).unwrap();
+        c.write_all(body.as_bytes()).unwrap();
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        match srv.cmd_rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+            IpcCmd::Open { origin, .. } => assert_eq!(origin.and_then(|o| o.chain.first().copied()), Some(std::process::id())),
+            other => panic!("{other:?}"),
+        }
+        let mut reply = String::new();
+        let _ = c.read_to_string(&mut reply);
+        assert_eq!(reply, "ok");
     }
 
     /// Zugriffsprüfung der Agenten-Schnittstelle im Hub (ohne UI): Token, Stufe, unbekanntes Werkzeug.
@@ -1746,12 +1772,21 @@ mod tests {
         let job = srv.mcp_rx.recv_timeout(Duration::from_secs(3)).expect("Anfrage kommt in der UI-Schleife an");
         // Absender: der Hub ermittelt den Prozess am anderen Ende selbst (dieser Testprozess).
         assert_eq!((job.tool.as_str(), job.caller, job.caller_key.as_deref()), ("list_sessions", Some(7), Some("k")));
-        #[cfg(windows)] // Absender über die TCP-Tabelle (`platform::process::resolve_peer`; anderswo noch unbekannt)
+        // Absender über die TCP-Tabelle bzw. /proc/net/tcp, libproc (`platform::process::resolve_peer`)
         assert_eq!(job.peer.chain.first(), Some(&std::process::id()));
         assert!(!job.peer.orphan);
         assert_eq!(job.args["include_exited"], false);
         job.reply.send(Ok(json!({"sessions": []}))).unwrap();
         assert_eq!(reply.join().unwrap().unwrap()["sessions"], json!([]));
+        // Linux/macOS (#149/#150, Blocker): nicht zu bestimmender Absender (Socket vor der Prüfung geschlossen) → nichts
+        // erreicht die UI-Schleife.
+        #[cfg(unix)]
+        {
+            let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, srv.port)).unwrap();
+            c.write_all(json!({"token": srv.ipc_token, "cmd": "mcp", "tool": "list_sessions", "args": {}}).to_string().as_bytes()).unwrap();
+            drop(c);
+            assert!(srv.mcp_rx.recv_timeout(Duration::from_millis(1500)).is_err(), "unattributable MCP caller must be refused");
+        }
         // Falscher Token (der Hook-Token aus den Terminal-Umgebungen) wird abgewiesen.
         write_ipc_file(&dir, srv.port, &srv.token);
         assert_eq!(code(call_mcp(&dir, "list_sessions", &json!({}), None, None)), "unauthorized");

@@ -45,12 +45,11 @@
 //! `$HOME/Paneldeck` (the `%APPDATA%` slot falls back to `HOME`). XDG (`~/.local/share`) and
 //! `~/Library/Application Support` follow in #149/#150.
 //!
-//! BLOCKER for #149/#150 (security): the MCP rules about the agent chain (#152) need the caller of a TCP connection.
-//! `process::resolve_peer` finds it on Windows (TCP table, process tree, Job Object; `None` = refused). Elsewhere it
-//! returns an empty chain: the caller is unknown, so only `PANELDECK_SESSION`/`PANELDECK_SESSION_KEY` tie a bridge to
-//! its session, and Job Objects (`process::SessionJob`) do not exist. Before releasing on a new target, implement
-//! `resolve_peer` there (Linux `/proc/net/tcp`, macOS libproc) with "unresolvable → refused" (#149 decision) and keep
-//! its tests running in CI.
+//! Caller attribution (security, #152): the MCP rules about the agent chain need the caller of a TCP connection.
+//! `process::resolve_peer` finds it on Windows (TCP table, process tree, Job Object) and on Linux/macOS
+//! (`unix_proc`: `/proc/net/tcp` + `/proc/<pid>/fd` resp. libproc, process tree, a session tag in the environment
+//! instead of Job Objects). Unresolvable → `None` = refused on every platform ("fail closed", #149 decision); the
+//! tests run in the Linux and macOS CI jobs.
 //!
 //! Test scripts (`tools/*.ps1`) and the installer (`installer/`) are Windows-only and not part of the crate.
 
@@ -68,6 +67,8 @@ pub mod registry;
 pub mod secret;
 pub mod taskbar;
 pub mod tray;
+#[cfg(unix)]
+pub mod unix_proc;
 pub mod window;
 
 /// Self-update (`app::update`): the release assets (NSIS installer, portable ZIP with `paneldeck.exe`) exist only for
