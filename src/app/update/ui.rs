@@ -212,7 +212,14 @@ impl App {
                                 "Das Release enthält keine passende Datei für diese Installation. Bitte von der Release-Seite herunterladen.",
                                 "The release has no matching file for this installation. Please download it from the release page.",
                             ),
-                            NoInstall::Unsupported => lang.t("Automatische Updates gibt es nur unter Windows.", "Automatic updates are only available on Windows."),
+                            NoInstall::Unsupported if cfg!(target_os = "macos") => lang.t(
+                                "Paneldeck.app liegt nicht in einem Ordner, in den du schreiben darfst (oder läuft direkt aus dem Disk-Image) – bitte die neue Version von der Release-Seite laden und nach „Programme“ ziehen.",
+                                "Paneldeck.app is not in a folder you can write to (or runs straight from the disk image) – please download the new version from the release page and drag it to Applications.",
+                            ),
+                            NoInstall::Unsupported => lang.t(
+                                "Automatische Updates gibt es nur unter Windows und für die Linux-AppImage – bitte über die Paketverwaltung bzw. von der Release-Seite aktualisieren.",
+                                "Automatic updates are only available on Windows and for the Linux AppImage – please update through your package manager or from the release page.",
+                            ),
                         }).color(dim));
                     }
                     Plan::Install { asset, .. } => {
@@ -220,6 +227,14 @@ impl App {
                             Some(Flavor::Installed) => lang.t(
                                 "Installierte Version: Das Setup läuft still im selben Ordner, danach startet Paneldeck neu.",
                                 "Installed copy: the setup runs silently in the same folder, then Paneldeck restarts.",
+                            ),
+                            Some(Flavor::MacApp) => lang.t(
+                                "macOS: Paneldeck.app wird komplett ersetzt (die alte bleibt versteckt als .Paneldeck.app.old liegen, bis die neue Version gestartet ist), danach startet Paneldeck neu. Die SHA-256-Prüfung schützt vor Übertragungsfehlern, nicht vor einem manipulierten Release (die App ist nicht signiert).",
+                                "macOS: Paneldeck.app is replaced as a whole (the old one stays hidden as .Paneldeck.app.old until the new version has started), then Paneldeck restarts. The SHA-256 check protects against transfer errors, not against a tampered release (the app is not signed).",
+                            ),
+                            Some(Flavor::AppImage) => lang.t(
+                                "AppImage: Die Datei wird ersetzt (die alte bleibt als .old liegen, bis die neue Version gestartet ist), danach startet Paneldeck neu. Die SHA-256-Prüfung schützt vor Übertragungsfehlern, nicht vor einem manipulierten Release.",
+                                "AppImage: the file is replaced (the old one stays as .old until the new version has started), then Paneldeck restarts. The SHA-256 check protects against transfer errors, not against a tampered release.",
                             ),
                             _ => lang.t(
                                 "Portable Version: paneldeck.exe wird ersetzt (die alte bleibt als paneldeck.exe.old liegen, bis die neue Version gestartet ist), danach startet Paneldeck neu.",
@@ -396,6 +411,8 @@ impl App {
             ui.label(RichText::new(match flavor {
                 Some(Flavor::Installed) => lang.t("(installiert)", "(installed)"),
                 Some(Flavor::Portable) => lang.t("(portabel)", "(portable)"),
+                Some(Flavor::AppImage) => "(AppImage)",
+                Some(Flavor::MacApp) => "(Paneldeck.app)",
                 None => "",
             }).small().color(dim));
         });
