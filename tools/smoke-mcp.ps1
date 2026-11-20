@@ -161,7 +161,7 @@ function Test-ConhostWrap([int]$sid, [string]$prefix = '') {
   $blank = $i -ge 0 -and $i + 2 -lt $lines.Count -and $lines[$i + 1] -eq '' -and $lines[$i + 2] -ne ''
   Check "$name`: Leerzeile vor dem Prompt bleibt" $blank ($lines -join ' | ')
   $echoes = @($lines | Where-Object { $_ -match '^\$ echo nach-264 #' }).Count
-  Check "$name`: Echo des naechsten Befehls genau einmal" ($echoes -eq 1) "Echos=$echoes: $($lines -join ' | ')"
+  Check "$name`: Echo des naechsten Befehls genau einmal" ($echoes -eq 1) "Echos=${echoes}: $($lines -join ' | ')"
 }
 # OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
 # Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
@@ -471,7 +471,9 @@ try {
     $req = @{ jsonrpc = '2.0'; id = 1; method = 'tools/call'; params = @{ name = $tool; arguments = $targs } } | ConvertTo-Json -Depth 8 -Compress
     $cmd = "`$env:PANELDECK_SESSION=`$null; '" + $req.Replace("'", "''") + "' | & '$dir\paneldeck.exe' mcp | Out-String"
     $r = Tool 'run_command' @{ session = $s; command = $cmd; timeout_secs = 40 }
-    try { ($r.data.output | ConvertFrom-Json).result } catch { $null }
+    $o = $null; try { $o = $r.data.output | ConvertFrom-Json } catch { }
+    if (-not $o) { Write-Host "      InS $tool`: keine JSON-Antwort: $($r.text)" -ForegroundColor DarkGray }
+    $o.result
   }
   function InA($tool, $targs) { InS $A $tool $targs }
   # Losgeloester Absender: eine kurzlebige Shell (in Sitzung $s per run_command, ohne $s vom Test selbst gestartet)

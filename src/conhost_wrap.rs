@@ -118,6 +118,16 @@ impl ConhostWrap {
         feed(p, t, &bytes[start..]);
     }
 
+    /// Vor einem Lesestück (dem ganzen, auch wenn `advance` es in Teilen bekommt): Rollt conhost in diesem Frame unter
+    /// der vollen Zeile weiter, rechnet es wie xterm (CR LF ab dem ausstehenden Umbruch) und zeichnet danach das letzte
+    /// Zeichen der umbrochenen Zeile absolut neu (CUP in die letzte Spalte). Zu erkennen an diesem CUP – dann bleibt die
+    /// Korrektur für diesen Frame aus (Mitschnitt mit Windows PowerShell: volle Eingabezeile in der vorletzten Zeile).
+    pub fn chunk_begin<T>(&mut self, t: &Term<T>, bytes: &[u8]) {
+        if self.armed.is_some() && cup_to_last_column(bytes, t.columns()) {
+            self.armed = None;
+        }
+    }
+
     /// Nach einem Lesestück: `short` = die Pipe war leer (weniger als der Lesepuffer gelesen), das Stück endet also
     /// mit einem Schreibvorgang von conhost (Frame-Ende).
     pub fn chunk_end<T>(&mut self, p: &Processor, t: &Term<T>, short: bool) {
@@ -230,6 +240,22 @@ impl ConhostWrap {
     }
 }
 
+/// Enthält `bytes` einen Sprung in die letzte Spalte (`ESC [ Zeile ; Spalten H`)?
+fn cup_to_last_column(bytes: &[u8], cols: usize) -> bool {
+    let tail = format!(";{cols}H");
+    let tail = tail.as_bytes();
+    let mut i = 0;
+    while let Some(off) = bytes[i..].windows(2).position(|w| w == b"\x1b[") {
+        let start = i + off + 2;
+        let digits = bytes[start..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if bytes[start + digits..].starts_with(tail) {
+            return true;
+        }
+        i = start;
+    }
+    false
+}
+
 /// Cursor mit ausstehendem Umbruch (automatischer Umbruch an), aber nicht in der untersten Zeile.
 fn pending_wrap_at<T>(t: &Term<T>) -> Option<Point> {
     let c = &t.grid().cursor;
@@ -262,6 +288,7 @@ mod tests {
         /// Ein Lesestück (= ein Frame von conhost).
         fn chunk(&mut self, s: &str) {
             let Emu { term, p, cw } = self;
+            cw.chunk_begin(term, s.as_bytes());
             cw.advance(p, term, s.as_bytes(), |p, t, b| p.advance(t, b), |t, w| w(t));
             cw.chunk_end(p, term, true);
         }
@@ -392,6 +419,32 @@ mod tests {
         assert_eq!(e.screen().1, (4, 2));
     }
 
+    #[test]
+    fn a_frame_that_scrolls_below_the_full_line_is_left_alone() {
+        // Mitschnitt (Windows PowerShell, 100×30, eingefügter Befehl über genau drei Zeilen): Die Eingabezeile endet in
+        // der vorletzten Zeile mit ausstehendem Umbruch (Frame-Ende). Der nächste Frame rollt (CR LF, LF) und zeichnet
+        // das letzte Zeichen der Zeile absolut neu – hier rechnet conhost wie xterm. Ein eingeschobener Umbruch rollte
+        // eine Zeile zu viel, das `g` stand allein in einer Zeile, und `run_command` lieferte es als Ausgabe (#264).
+        for system in [true, false] {
+            let mut e = Emu::new(40, 5, system);
+            e.chunk("1\r\n2\r\n3\r\n");
+            e.chunk(&format!("\x1b[93m{}g\x1b[?25h", &W[1..]));
+            e.chunk("\x1b[m\r\n\n\x1b[93m\x1b[3;40Hg\x1b[m\x1b[5;1H");
+            e.chunk("Y");
+            let (rows, cursor) = e.screen();
+            let full = format!("{}g", &W[1..]);
+            assert_eq!(rows, ["2", "3", full.as_str(), "", "Y"], "System-ConPTY {system}");
+            assert_eq!(cursor, (5, 2));
+        }
+        // Ohne den Sprung in die letzte Spalte bleibt es beim Umbruch wie conhost (s3).
+        let mut e = Emu::new(40, 5, true);
+        e.chunk("1\r\n2\r\n");
+        e.chunk(W);
+        e.chunk("\r\nY");
+        assert_eq!(e.screen().1, (5, 2));
+        assert!(cup_to_last_column(b"\x1b[m\x1b[28;100Hg", 100) && !cup_to_last_column(b"\x1b[28;10Hg\x1b[100C", 100));
+    }
+
     /// Ende eines Befehls mit Shell-Integration und der Prompt mit Leerzeile (Git Bash), Frame für Frame.
     const BASH_PROMPT: [&str; 5] = [
         "\x1b]133;D;0\x07",
@@ -478,12 +531,46 @@ mod tests {
         }
     }
 
+    /// Mitschnitt erneut abspielen (von Hand): `CAP_REPLAY=<datei.json>` (Liste der Lesestücke als JSON-Zeichenketten),
+    /// `CAP_COLS`/`CAP_ROWS`; gibt aus, nach welchem Stück sich die Cursorzeilen mit/ohne Korrektur trennen.
+    #[test]
+    #[ignore]
+    fn conhost_replay() {
+        let path = std::env::var("CAP_REPLAY").expect("CAP_REPLAY");
+        let cols: usize = std::env::var("CAP_COLS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+        let rows: usize = std::env::var("CAP_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+        let chunks: Vec<String> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut with = Emu { term: Term::new(Config::default(), &TermSize::new(cols, rows), VoidListener), p: Processor::new(), cw: ConhostWrap::new(true) };
+        let mut without = Emu { term: Term::new(Config::default(), &TermSize::new(cols, rows), VoidListener), p: Processor::new(), cw: ConhostWrap::new(false) };
+        let (mut diff, mut same) = (0i64, true);
+        for (i, c) in chunks.iter().enumerate() {
+            let before = (with.screen().1, without.screen().1);
+            with.chunk(c);
+            without.chunk(c);
+            let d = with.screen().1 .0 as i64 - without.screen().1 .0 as i64;
+            let s = with.screen().0 == without.screen().0;
+            if d != diff || s != same {
+                println!("Stück {i}: Abstand {diff} -> {d}, gleicher Bildschirm {same} -> {s}, Cursor vorher {before:?}, nachher {:?}/{:?}: {c:?}", with.screen().1, without.screen().1);
+                (diff, same) = (d, s);
+            }
+        }
+        for (name, e) in [("mit Korrektur", &with), ("ohne Korrektur", &without)] {
+            let (screen, cur) = e.screen();
+            println!("--- {name}: Cursor {cur:?} ---");
+            for (i, l) in screen.iter().enumerate() {
+                println!("{:>2}|{l}", i + 1);
+            }
+        }
+    }
+
     /// Mitschnitt vom System-conhost (#264), von Hand gestartet (Git Bash unter `C:\Program Files\Git`):
     /// `cargo test --release conhost_capture -- --ignored --nocapture`. Startet Git Bash ohne Profil (eigenes HOME im
     /// Temp-Ordner, ohne Verlaufsdatei) mit der Shell-Integration auf der ConPTY von Windows, tippt die Schritte der
     /// Reproduktion und gibt die Lesestücke als Rust-Zeichenketten aus, dazu den Bildschirm der Emulation mit und ohne
-    /// Korrektur. Zum Schluss fragt Bash conhost nach dem Cursor (`POS Zeile Spalte`): Er muss in der Zeile dieser Ausgabe
-    /// stehen.
+    /// Korrektur. Zum Schluss fragt die Shell conhost nach dem Cursor (`POS Zeile Spalte`): Er muss in der Zeile dieser
+    /// Ausgabe stehen. Einstellbar: `CAP_COLS`, `CAP_ROWS`, `CAP_SHELL=powershell`, `CAP_HOME`, `CAP_READ_DELAY`,
+    /// `CAP_STEPS` (`Text@@ms je Zeichen@@Pause;;…`, `<CR>`, `<PAD>`/`<PAD2>`/`<PAD3>` füllen Prompt + Befehl auf genau
+    /// 1–3 Zeilen). Markiert im Mitschnitt, wo sich die Cursorzeilen mit/ohne Korrektur trennen.
     #[cfg(windows)]
     #[test]
     #[ignore]
@@ -497,20 +584,33 @@ mod tests {
         let sys = portable_pty::win::conpty::ConPtySystem::with_sideloaded_conpty(None);
         let pair = sys.openpty(PtySize { rows: rows as u16, cols: cols as u16, pixel_width: 0, pixel_height: 0 }).unwrap();
         let git = r"C:\Program Files\Git";
-        let home = std::env::temp_dir().join(format!("pd-conhost-cap-{}", std::process::id()));
+        // CAP_HOME: eigener (leerer, neuer) Ordner, z. B. für eine bestimmte Prompt-Länge.
+        let home = std::env::var("CAP_HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join(format!("pd-conhost-cap-{}", std::process::id())));
         std::fs::create_dir_all(&home).unwrap();
-        let bash = format!(r"{git}\bin\bash.exe");
+        // CAP_SHELL=powershell: Windows PowerShell ohne Profil (mit Shell-Integration), Prompt `PS <HOME>> `.
+        let powershell = std::env::var("CAP_SHELL").is_ok_and(|s| s == "powershell");
+        let bash = if powershell { "powershell.exe".to_string() } else { format!(r"{git}\bin\bash.exe") };
         let mut cmd = CommandBuilder::new(&bash);
-        for a in ["--noprofile", "--norc", "-i"] {
-            cmd.arg(a);
+        let spec = crate::shells::ShellSpec { id: "s".into(), label: "s".into(), program: bash.clone(), args: vec![] };
+        if powershell {
+            cmd.arg("-NoLogo");
+            cmd.arg("-NoProfile");
+            for a in crate::shells::integration(&spec).0 {
+                cmd.arg(a);
+            }
+        } else {
+            for a in ["--noprofile", "--norc", "-i"] {
+                cmd.arg(a);
+            }
         }
+        // `<PAD>`/`<PAD2>` in einem Schritt: so viele `a`, dass Prompt + Text genau eine bzw. zwei Zeilen füllen.
+        let prompt_len = if powershell { format!("PS {}> ", home.display()).chars().count() } else { 2 };
         cmd.cwd(&home);
         cmd.env("HOME", &home);
         cmd.env("HISTFILE", "");
         cmd.env("TERM", "xterm-256color");
         cmd.env("PATH", format!(r"{git}\usr\bin;{}", std::env::var("PATH").unwrap_or_default()));
         cmd.env("PS1", "\\n\\[\\033[32m\\]u@pc \\[\\033[35m\\]MINGW64 \\[\\033[33m\\]~\\[\\033[0m\\]\\n$ ");
-        let spec = crate::shells::ShellSpec { id: "bash".into(), label: "bash".into(), program: bash.clone(), args: vec![] };
         for (k, v) in crate::shells::integration(&spec).1 {
             cmd.env(k, v);
         }
@@ -544,6 +644,7 @@ mod tests {
             log: Vec<(Duration, String)>,
             with: Emu,
             without: Emu,
+            diff: i64,
         }
         impl Cap {
             fn pump(&mut self, ms: u64) {
@@ -553,6 +654,12 @@ mod tests {
                     let s = String::from_utf8_lossy(&bytes).into_owned();
                     self.with.chunk(&s);
                     self.without.chunk(&s);
+                    // Abstand der Cursorzeilen mit/ohne Korrektur geändert: im Mitschnitt markieren.
+                    let d = self.with.screen().1 .0 as i64 - self.without.screen().1 .0 as i64;
+                    if d != self.diff {
+                        self.log.push((at, format!("<<Abstand {} -> {d} nach dem nächsten Stück>>", self.diff)));
+                        self.diff = d;
+                    }
                     if s.contains("[6n") {
                         let (_, (r, c)) = self.with.screen();
                         let _ = self.writer.write_all(format!("[{r};{c}R").as_bytes());
@@ -561,6 +668,11 @@ mod tests {
                 }
             }
             fn typ(&mut self, text: &str, per_char: u64) {
+                if per_char == 0 {
+                    // auf einmal samt Enter (wie `run_command`)
+                    let _ = self.writer.write_all(text.as_bytes());
+                    return;
+                }
                 for ch in text.chars() {
                     let _ = self.writer.write_all(ch.to_string().as_bytes());
                     let _ = self.writer.flush();
@@ -568,15 +680,22 @@ mod tests {
                 }
             }
         }
-        let mut cap = Cap { rx, writer, log: Vec::new(), with, without };
+        let mut cap = Cap { rx, writer, log: Vec::new(), with, without, diff: 0 };
         cap.pump(2000);
         let steps: Vec<(String, u64, u64)> = match std::env::var("CAP_STEPS") {
-            // Schritte: Text|ms je Zeichen|Pause danach, getrennt durch `;;`, `\r` als `<CR>`
+            // Schritte: Text@@ms je Zeichen (0 = auf einmal)@@Pause danach, getrennt durch `;;`, `\r` als `<CR>`
             Ok(s) => s
                 .split(";;")
                 .map(|st| {
-                    let mut it = st.split('|');
-                    (it.next().unwrap_or("").replace("<CR>", "\r"), it.next().and_then(|v| v.parse().ok()).unwrap_or(20), it.next().and_then(|v| v.parse().ok()).unwrap_or(1000))
+                    let mut it = st.split("@@");
+                    let mut text = it.next().unwrap_or("").replace("<CR>", "\r");
+                    for (tag, k) in [("<PAD3>", 3), ("<PAD2>", 2), ("<PAD>", 1)] {
+                        if text.contains(tag) {
+                            let rest = text.replace(tag, "").replace('\r', "").chars().count();
+                            text = text.replace(tag, &"a".repeat((cols * k).saturating_sub(prompt_len + rest)));
+                        }
+                    }
+                    (text, it.next().and_then(|v| v.parse().ok()).unwrap_or(20), it.next().and_then(|v| v.parse().ok()).unwrap_or(1000))
                 })
                 .collect(),
             Err(_) => vec![
@@ -589,7 +708,11 @@ mod tests {
             cap.typ(text, *per);
             cap.pump(*after);
         }
-        cap.typ("IFS='[;' read -rs -d R -p $'\\e[6n' _ r c; echo \"POS $r $c\"\r", 5);
+        if powershell {
+            cap.typ("$p = $Host.UI.RawUI.CursorPosition; \"POS $($p.Y + 1) $($p.X + 1)\"\r", 5);
+        } else {
+            cap.typ("IFS='[;' read -rs -d R -p $'\\e[6n' _ r c; echo \"POS $r $c\"\r", 5);
+        }
         cap.pump(1500);
         let _ = cap.writer.write_all(b"exit\r");
         let _ = child.wait();
