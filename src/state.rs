@@ -944,13 +944,31 @@ pub fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
     let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
     name.push(".tmp");
     let tmp = path.with_file_name(name);
-    if let Err(e) = std::fs::write(&tmp, data) {
+    if let Err(e) = write_private(&tmp, data) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Neue Datei schreiben; Linux/macOS (#149 Review): nur für den Benutzer lesbar (0600) – Datenordner-Dateien wie
+/// `ipc.json` (Token), `settings.json`, `state.json`, Chats. Eine vorhandene Datei wird vorher entfernt, damit die
+/// Rechte sicher neu gesetzt sind.
+pub fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::remove_file(path);
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        f.write_all(data)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data)
+    }
 }
 
 /// Defekte Datei nicht stillschweigend überschreiben, sondern mit Zeitstempel sichern (die letzten 5 bleiben).

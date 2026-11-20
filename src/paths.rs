@@ -175,6 +175,26 @@ pub fn xdg_data_home(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<Path
     xdg.filter(|p| p.is_absolute()).or_else(|| home.map(|h| h.join(".local").join("share")))
 }
 
+/// Linux/macOS (#149 Review): Datenordner nur für den Benutzer (0700), auch einen schon vorhandenen. Der Basisordner
+/// eines Profils ebenso, außer bei `--data-dir`/`PANELDECK_DATA` (fremder Ordner des Nutzers: nur der Profilordner).
+fn harden(d: &DataDir) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut dirs = vec![d.path.clone()];
+        if d.base != d.path && !matches!(d.source, Source::Arg | Source::Env) {
+            dirs.push(d.base.clone());
+        }
+        for p in dirs {
+            if std::fs::metadata(&p).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o077 != 0) {
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = d;
+}
+
 static DIR: OnceLock<DataDir> = OnceLock::new();
 
 /// Datenordner für diesen Prozess auflösen (einmal; spätere Aufrufe liefern das erste Ergebnis).
@@ -183,6 +203,7 @@ pub fn init(cli: &Cli) -> Result<&'static DataDir, PathError> {
         return Ok(d);
     }
     let d = resolve_with(&inputs(cli), &usable)?;
+    harden(&d);
     Ok(DIR.get_or_init(|| d))
 }
 
@@ -408,6 +429,24 @@ mod tests {
             assert_eq!((d.path.clone(), d.source), (t.0.join("share").join("Paneldeck"), Source::AppData));
             assert!(!t.0.join("bin").join("paneldeck-data").exists(), "nothing created next to the binary");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_folder_and_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new("private");
+        let dir = t.0.join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        harden(&DataDir { path: dir.clone(), base: dir.clone(), source: Source::AppData, profile: None });
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        let f = dir.join("ipc.json");
+        std::fs::write(&f, b"old").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        crate::state::write_atomic(&f, b"{}").unwrap();
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&f).unwrap(), b"{}");
     }
 
     #[cfg(unix)] // Unix-Pfade
