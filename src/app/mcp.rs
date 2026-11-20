@@ -327,7 +327,10 @@ fn attribute(peer: &crate::platform::process::PeerChain, sessions: &[CallerCand]
         }
     }
     let jobless = sessions.iter().any(|(_, pid, job, _)| pid.is_some() && job.is_none());
-    if peer.orphan && jobless {
+    // Linux/macOS (#149 review B1): `orphan` heißt dort „gehört zu Paneldeck, aber zu keiner nachweisbaren Sitzung“
+    // (losgelöster Nachfahre unter dem Subreaper-Hub, Markierung einer Sitzung außerhalb ihres Baums, Abriss nach dem
+    // Hub-Start ohne Subreaper) – nie extern, auch wenn alle Sitzungen einen „Job“ haben (kein Fail-open).
+    if peer.orphan && (jobless || cfg!(unix)) {
         (None, "orphan")
     } else {
         (None, "none")
@@ -2394,7 +2397,8 @@ mod tests {
         assert_eq!(attribute(&job(77), &with_jobs, &retired, None), (None, "orphan"));
         // Baum reißt ab (z. B. `code .`: der Startprozess ist beendet), aber alle Sitzungen haben Jobs: extern (#218)
         let broken = PeerChain { chain: vec![4242], orphan: true, job: None };
-        assert_eq!(attribute(&broken, &with_jobs, &retired, None), (None, "none"));
+        // (Linux/macOS: dort setzt `resolve_peer` `orphan` nur für sicher losgelöste Nachfahren – immer eingeschränkt.)
+        assert_eq!(attribute(&broken, &with_jobs, &retired, None), (None, if cfg!(unix) { "orphan" } else { "none" }));
         // Rückfallweg nur, wenn eine laufende Sitzung keinen Job hat
         let jobless: [CallerCand; 2] = [(5, Some(500), Some(1), None), (6, Some(600), None, None)];
         assert_eq!(attribute(&broken, &jobless, &retired, None), (None, "orphan"));

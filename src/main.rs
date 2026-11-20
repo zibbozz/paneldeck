@@ -264,6 +264,10 @@ fn main() -> eframe::Result<()> {
             .with_icon(app_icon()),
         ..Default::default()
     };
+    // Linux (#149): Hub als Subreaper – losgelöste Nachfahren der Sitzungen bleiben im Baum des Hubs
+    // (Aufrufer-Zuordnung, `platform::unix_proc`). Nur im Hub, nicht in Brücke/Weiterleitungen (die enden oben).
+    #[cfg(target_os = "linux")]
+    platform::unix_proc::become_subreaper();
     eframe::run_native(
         "Paneldeck",
         options,
