@@ -232,8 +232,21 @@ mod sys {
         }
     }
 
+    /// Short info works for processes of other users too (launchd, root daemons), but has no start time: such a
+    /// process gets start 0 ("older than everything"), so the PID-reuse check only applies to processes of this user.
+    fn short_stat(pid: u32) -> Option<Stat> {
+        // SAFETY: zeroed plain-old-data struct, passed with its exact size; the result is checked.
+        let i = unsafe {
+            let mut info: libc::proc_bsdshortinfo = std::mem::zeroed();
+            let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+            let n = libc::proc_pidinfo(pid as i32, libc::PROC_PIDT_SHORTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size);
+            (n == size).then_some(info)?
+        };
+        Some(Stat { ppid: i.pbsi_ppid, start: 0, pgrp: i.pbsi_pgid as i64, tpgid: 0, tty: 0, zombie: i.pbsi_status == libc::SZOMB })
+    }
+
     pub fn stat(pid: u32) -> Option<Stat> {
-        let i = bsdinfo(pid)?;
+        let Some(i) = bsdinfo(pid) else { return short_stat(pid) };
         Some(Stat {
             ppid: i.pbi_ppid,
             start: i.pbi_start_tvsec.saturating_mul(1_000_000).saturating_add(i.pbi_start_tvusec),
@@ -385,6 +398,7 @@ pub fn job_new() -> Option<u64> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let tag = random_tag()?;
     let key = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    remember_tag(&tag);
     jobs().push(Job { key, tag, shell: None });
     Some(key)
 }
@@ -407,52 +421,115 @@ pub fn job_drop(key: u64) {
     pids_cache().remove(&key);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Tags of earlier hub runs (#149 review N5)
+
+/// Tags of sessions of earlier runs of this hub (read once from `session-tags.txt` in the data folder, internal file):
+/// a leftover process of such a session carries one – it is "orphan", never an outside client.
+fn prev_tags() -> &'static [String] {
+    static PREV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    PREV.get_or_init(|| {
+        #[cfg(not(test))]
+        {
+            std::fs::read_to_string(crate::paths::get().path.join(TAGS_FILE)).map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| l.len() == 32).collect()).unwrap_or_default()
+        }
+        #[cfg(test)]
+        {
+            Vec::new()
+        }
+    })
+}
+
+#[cfg_attr(test, allow(dead_code))]
+const TAGS_FILE: &str = "session-tags.txt";
+/// Kept tags (newest last); older ones fall out.
+#[cfg_attr(test, allow(dead_code))]
+const MAX_TAGS: usize = 1000;
+
+fn remember_tag(tag: &str) {
+    let _ = prev_tags(); // read before the first write of this run
+    #[cfg(not(test))]
+    {
+        let f = crate::paths::get().path.join(TAGS_FILE);
+        let mut all: Vec<String> = std::fs::read_to_string(&f).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default();
+        all.push(tag.to_string());
+        let skip = all.len().saturating_sub(MAX_TAGS);
+        let _ = crate::state::write_atomic(&f, (all[skip..].join("\n") + "\n").as_bytes());
+    }
+    #[cfg(test)]
+    let _ = tag;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Process tree
+
 /// Snapshot of all processes: PID → stat.
 fn snapshot() -> HashMap<u32, Stat> {
     sys::all_pids().into_iter().filter_map(|p| Some((p, sys::stat(p)?))).collect()
 }
 
-/// Is `pid` (started at `born`) the shell or a descendant of the shell `shell` (PID, start)? `pid` must be in the
-/// snapshot with exactly this start time, and every parent must have started no later than its child (otherwise its
-/// PID was reused).
-fn below(snap: &HashMap<u32, Stat>, pid: u32, born: u64, shell: (u32, u64)) -> bool {
-    if snap.get(&pid).is_none_or(|s| s.start != born) {
-        return false;
+/// The complete chain of `pid` (started at `born`) up to the root, nearest first: every step must find the parent in
+/// the snapshot, started no later than its child (otherwise its PID was reused), without a cycle and without any depth
+/// limit (at most as many steps as there are processes). The chain is complete when it reaches a process whose
+/// parent is 0 (init/kthreadd, launchd). `None` for any other end – a gap is never treated as "no ancestor"
+/// (#149 review N1/N2).
+fn full_chain(snap: &HashMap<u32, Stat>, pid: u32, born: u64) -> Option<Vec<u32>> {
+    let first = snap.get(&pid)?;
+    if first.start != born || first.zombie {
+        return None;
     }
-    let (mut cur, mut cur_start) = (pid, born);
-    for _ in 0..64 {
-        if cur == shell.0 {
-            return cur_start == shell.1;
+    let mut chain = vec![pid];
+    let mut seen = std::collections::HashSet::from([pid]);
+    let (mut cur, mut cur_born) = (pid, born);
+    for _ in 0..=snap.len() {
+        let p = snap.get(&cur)?.ppid;
+        if p == 0 {
+            return Some(chain);
         }
-        let Some(s) = snap.get(&cur) else { return false };
-        let p = s.ppid;
-        if p == 0 || p == cur {
-            return false;
+        if !seen.insert(p) {
+            return None; // cycle
         }
-        match snap.get(&p) {
-            Some(ps) if ps.start <= cur_start => {
-                cur = p;
-                cur_start = ps.start;
-            }
-            _ => return false,
+        let ps = snap.get(&p)?; // ancestor missing (just ended, PID wrap)
+        if ps.start > cur_born {
+            return None; // PID of the parent reused
         }
+        chain.push(p);
+        cur = p;
+        cur_born = ps.start;
     }
-    false
+    None
 }
 
-/// Processes of a job: the shell, its descendants and every process with the job's tag (the tag only serves this
-/// listing for "close session" and never grants anything, see [`resolve_peer`]).
-fn compute_job_pids(tag: &str, shell: Option<(u32, u64)>) -> Option<Vec<u32>> {
+/// Is the shell `shell` (PID, start) in `chain` with exactly that start time?
+fn in_chain(snap: &HashMap<u32, Stat>, chain: &[u32], shell: (u32, u64)) -> bool {
+    chain.contains(&shell.0) && snap.get(&shell.0).is_some_and(|s| s.start == shell.1)
+}
+
+/// Processes of a job, for "close session" and "end all": the shell and its descendants, and processes with the job's
+/// tag – the latter only if they hang below the hub or started after the session's shell (tools such as
+/// `systemctl --user import-environment`, `dbus-update-activation-environment` or a tmux server could spread the tag to
+/// unrelated, older processes). Returns (PID, start).
+fn compute_job_pids(tag: &str, shell: Option<(u32, u64)>) -> Option<Vec<(u32, u64)>> {
     let snap = snapshot();
     if snap.is_empty() {
         return None;
     }
     let me = std::process::id();
-    let mut out: Vec<u32> = snap
+    let mut out: Vec<(u32, u64)> = snap
         .iter()
         .filter(|(p, s)| **p != me && !s.zombie)
-        .filter(|(p, s)| shell.is_some_and(|sh| below(&snap, **p, s.start, sh)) || sys::environ(**p).and_then(|e| env_value(&e, JOB_ENV)).is_some_and(|t| t == tag))
-        .map(|(p, _)| *p)
+        .filter(|(p, s)| {
+            let chain = full_chain(&snap, **p, s.start);
+            if let (Some(c), Some(sh)) = (&chain, shell) {
+                if in_chain(&snap, c, sh) {
+                    return true;
+                }
+            }
+            let tagged = || sys::environ(**p).and_then(|e| env_value(&e, JOB_ENV)).is_some_and(|t| t == tag);
+            let related = chain.as_ref().is_some_and(|c| c.contains(&me)) || shell.is_some_and(|sh| s.start >= sh.1);
+            related && tagged()
+        })
+        .map(|(p, s)| (*p, s.start))
         .collect();
     out.sort_unstable();
     Some(out)
@@ -482,7 +559,7 @@ pub fn job_pids(key: u64) -> Option<Vec<u32>> {
                 let Some((tag, shell)) = job_info(k) else { continue };
                 if let Some(v) = compute_job_pids(&tag, shell) {
                     if job_info(k).is_some() {
-                        pids_cache().insert(k, (std::time::Instant::now(), v));
+                        pids_cache().insert(k, (std::time::Instant::now(), v.into_iter().map(|(p, _)| p).collect()));
                     }
                 }
             }
@@ -494,33 +571,43 @@ pub fn job_pids(key: u64) -> Option<Vec<u32>> {
         }
     }
     let (tag, shell) = job_info(key)?;
-    let v = compute_job_pids(&tag, shell)?;
+    let v: Vec<u32> = compute_job_pids(&tag, shell)?.into_iter().map(|(p, _)| p).collect();
     pids_cache().insert(key, (std::time::Instant::now(), v.clone()));
     Some(v)
 }
 
 /// Fresh list (for killing: never act on a cached one).
-fn job_pids_now(key: u64) -> Option<Vec<u32>> {
+fn job_pids_now(key: u64) -> Option<Vec<(u32, u64)>> {
     let (tag, shell) = job_info(key)?;
     compute_job_pids(&tag, shell)
 }
 
-fn kill(pid: u32) -> bool {
-    // SAFETY: plain system call.
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) == 0 }
+/// SIGKILL exactly the process `pid` that started at `born`. Linux: through a pidfd opened before the start time is
+/// checked (the PID cannot be reused in between); elsewhere `kill` right after the check.
+fn kill_exact(pid: u32, born: u64) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(fd) = PidFd::open(pid) else { return false };
+        process_born(pid) == Some(born) && fd.signal(libc::SIGKILL)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: plain system call.
+        process_born(pid) == Some(born) && unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) == 0 }
+    }
 }
 
 pub fn job_terminate_all(key: u64) -> bool {
     let Some(pids) = job_pids_now(key) else { return false };
-    for p in pids {
-        kill(p);
+    for (p, born) in pids {
+        kill_exact(p, born);
     }
     true
 }
 
 pub fn job_terminate_listed(key: u64, procs: &[(u32, u64)]) -> usize {
     let Some(pids) = job_pids_now(key) else { return 0 };
-    procs.iter().filter(|(p, born)| pids.contains(p) && process_born(*p) == Some(*born) && kill(*p)).count()
+    procs.iter().filter(|(p, born)| pids.contains(&(*p, *born)) && kill_exact(*p, *born)).count()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -528,11 +615,26 @@ pub fn job_terminate_listed(key: u64, procs: &[(u32, u64)]) -> usize {
 
 static SUBREAPER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Children the hub started itself (PID, start): the session shells – also of closed sessions and when `job_adopt`
+/// failed. The reaper never touches them; their owners wait for them (#149 review N6).
+fn own_children() -> std::sync::MutexGuard<'static, Vec<(u32, u64)>> {
+    static OWN: std::sync::Mutex<Vec<(u32, u64)>> = std::sync::Mutex::new(Vec::new());
+    OWN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Note a child process the hub started itself (call right after spawning it).
+pub fn note_own_child(pid: u32) {
+    let start = sys::stat(pid).map(|s| s.start).unwrap_or(0);
+    let mut g = own_children();
+    g.retain(|(p, _)| *p != pid);
+    g.push((pid, start));
+}
+
 /// Linux: make the hub a child subreaper (`PR_SET_CHILD_SUBREAPER`). Descendants of the sessions that detach (`setsid`,
 /// double fork, `nohup … &` of a shell that ends) are then re-parented to the hub instead of init, so their tree still
 /// ends at the hub: [`resolve_peer`] marks such a caller "orphan" (it belongs to Paneldeck but to no session it can
-/// prove) and the MCP rules restrict it. A background thread reaps those orphans when they end (only zombies that are
-/// not session shells and have stayed zombies for 5 s – the hub's own child processes are waited for well before).
+/// prove) and the MCP rules restrict it. A background thread reaps those orphans when they end – only zombies that are
+/// not the hub's own children ([`note_own_child`]) and have stayed zombies for 5 s.
 /// Call once, in the hub process only (not in the MCP bridge or other short-lived modes). macOS has no subreaper.
 pub fn become_subreaper() -> bool {
     #[cfg(target_os = "linux")]
@@ -557,8 +659,15 @@ fn reaper() {
     let mut seen: HashMap<u32, std::time::Instant> = HashMap::new();
     loop {
         std::thread::sleep(std::time::Duration::from_secs(2));
+        let snap = snapshot();
+        {
+            // forget own children that are gone completely (their owner has waited)
+            let mut own = own_children();
+            own.retain(|(p, _)| snap.contains_key(p));
+        }
+        let own: Vec<u32> = own_children().iter().map(|(p, _)| *p).collect();
         let shells: Vec<u32> = jobs().iter().filter_map(|j| j.shell.map(|s| s.0)).collect();
-        let zombies: Vec<u32> = sys::all_pids().into_iter().filter(|p| sys::stat(*p).is_some_and(|s| s.ppid == me && s.zombie) && !shells.contains(p)).collect();
+        let zombies: Vec<u32> = snap.iter().filter(|(p, s)| s.ppid == me && s.zombie && !own.contains(p) && !shells.contains(p)).map(|(p, _)| *p).collect();
         seen.retain(|p, _| zombies.contains(p));
         for p in zombies {
             let first = *seen.entry(p).or_insert_with(std::time::Instant::now);
@@ -576,6 +685,21 @@ fn reaper() {
 fn hub_started() -> u64 {
     static T: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *T.get_or_init(|| sys::stat(std::process::id()).map(|s| s.start).unwrap_or(0))
+}
+
+/// Linux (#149 review N4): is `pid` in a transient systemd unit (`run-*.scope` / `run-*.service`, made by
+/// `systemd-run`) whose oldest process started after the hub? Then a session may have asked systemd to start it.
+#[cfg(target_os = "linux")]
+fn transient_unit_after_hub(pid: u32, snap: &HashMap<u32, Stat>) -> bool {
+    let Ok(cg) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) else { return false };
+    let Some(path) = cg.lines().find_map(|l| l.strip_prefix("0::")) else { return false };
+    let unit = path.rsplit('/').next().unwrap_or("");
+    if !(unit.starts_with("run-") && (unit.ends_with(".scope") || unit.ends_with(".service"))) || path.contains("..") {
+        return false;
+    }
+    let Ok(procs) = std::fs::read_to_string(format!("/sys/fs/cgroup{path}/cgroup.procs")) else { return true };
+    let oldest = procs.lines().filter_map(|l| l.trim().parse::<u32>().ok()).filter_map(|p| snap.get(&p).map(|s| s.start)).min();
+    oldest.is_none_or(|t| t >= hub_started())
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -596,7 +720,7 @@ pub fn tcp_peer_pid(peer: SocketAddr, local: SocketAddr) -> Option<u32> {
     owners.sort_by_key(|(_, t)| *t);
     let (pid, born) = *owners.last()?;
     if owners.len() > 1 {
-        let chain = walk(&snapshot(), pid, born);
+        let chain = full_chain(&snapshot(), pid, born)?;
         if !owners[..owners.len() - 1].iter().all(|(p, _)| chain.contains(p)) {
             return None;
         }
@@ -604,7 +728,7 @@ pub fn tcp_peer_pid(peer: SocketAddr, local: SocketAddr) -> Option<u32> {
     Some(pid)
 }
 
-/// Linux: a pidfd holds on to the process (no PID reuse in between); at the end it tells whether it still runs.
+/// Linux: a pidfd holds on to the process (no PID reuse in between).
 #[cfg(target_os = "linux")]
 struct PidFd(i32);
 
@@ -615,9 +739,12 @@ impl PidFd {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
         (fd >= 0).then_some(PidFd(fd as i32))
     }
+    fn signal(&self, sig: i32) -> bool {
+        // SAFETY: valid fd owned by this struct; no siginfo.
+        unsafe { libc::syscall(libc::SYS_pidfd_send_signal, self.0, sig, std::ptr::null::<libc::siginfo_t>(), 0) == 0 }
+    }
     fn alive(&self) -> bool {
-        // SAFETY: signal 0 only checks; valid fd owned by this struct.
-        unsafe { libc::syscall(libc::SYS_pidfd_send_signal, self.0, 0, std::ptr::null::<libc::siginfo_t>(), 0) == 0 }
+        self.signal(0)
     }
 }
 
@@ -631,17 +758,18 @@ impl Drop for PidFd {
 
 /// Caller of an accepted connection (see the module text). `None` = refuse.
 ///
-/// * The caller belongs to a session only through the **process tree** (`job` = that session): it is the session's
-///   shell or one of its descendants.
+/// * The process tree must be complete up to the root (init/launchd); a gap (ancestor ended, PID reused, cycle) is
+///   retried with a new snapshot (3 tries) and then refused – never treated as an outside client (#149 review N1/N2).
+/// * The caller belongs to a session only through that tree (`job` = that session): it is the session's shell or one of
+///   its descendants.
 /// * `orphan` (restricted by the MCP rules: writes nowhere in a chain, starts no agents) if it belongs to Paneldeck but
-///   to no session it can prove: its tree ends at the hub (detached descendant re-parented to the subreaper hub), it
-///   carries the tag of a session of this hub (detached, tree lost – the tag can only restrict, never grant), or –
-///   without a subreaper (macOS, or `prctl` failed) – its tree breaks at init/launchd with a process that started after
-///   the hub (like the orphan rule on Windows; this also hits programs started later by the desktop itself, e.g. a
-///   terminal app opened after Paneldeck).
-/// * Otherwise it is an external client. Known limit (like WMI/schtasks on Windows): a process that a session asks
-///   another service to start (`systemd-run --user`, `at`, D-Bus activation, launchd jobs) and that clears the tag is
-///   not a descendant of anything here and counts as external.
+///   to no session it can prove: its tree contains the hub (detached descendant re-parented to the subreaper hub), it
+///   carries the tag of a session of this or an earlier run of the hub (the tag can only restrict, never grant), it runs
+///   in a transient systemd unit made after the hub started (`systemd-run`), or – without a subreaper (macOS, or `prctl`
+///   failed) – its tree breaks at init/launchd below a process that started after the hub.
+/// * Otherwise it is an outside client. Known limits (like WMI/schtasks on Windows): requests relayed through a
+///   process that already ran before (an ssh ControlMaster, a tmux/screen server, a VS Code server, a container with the
+///   host network) and services that clear the tag (`at`, D-Bus activation) look like outside clients.
 pub fn resolve_peer(peer: SocketAddr, local: SocketAddr) -> Option<PeerChain> {
     let pid = tcp_peer_pid(peer, local)?;
     let born = process_born(pid)?;
@@ -651,12 +779,21 @@ pub fn resolve_peer(peer: SocketAddr, local: SocketAddr) -> Option<PeerChain> {
     if tcp_peer_pid(peer, local) != Some(pid) || process_born(pid) != Some(born) {
         return None;
     }
-    let snap = snapshot();
-    // The caller must be in the snapshot as this very process – otherwise it has just ended: refuse (never "external").
-    snap.get(&pid).filter(|s| s.start == born && !s.zombie)?;
-    let chain = walk(&snap, pid, born);
+    let mut found = None;
+    for _ in 0..3 {
+        let snap = snapshot();
+        if let Some(chain) = full_chain(&snap, pid, born) {
+            found = Some((snap, chain));
+            break;
+        }
+        if process_born(pid) != Some(born) {
+            return None; // the caller itself is gone
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let (snap, chain) = found?;
     let registered: Vec<(u64, String, Option<(u32, u64)>)> = jobs().iter().map(|j| (j.key, j.tag.clone(), j.shell)).collect();
-    let job = registered.iter().find(|(_, _, sh)| sh.is_some_and(|sh| below(&snap, pid, born, sh))).map(|(k, ..)| *k);
+    let job = registered.iter().find(|(_, _, sh)| sh.is_some_and(|sh| in_chain(&snap, &chain, sh))).map(|(k, ..)| *k);
     let mut orphan = false;
     if job.is_none() {
         let me = std::process::id();
@@ -667,10 +804,14 @@ pub fn resolve_peer(peer: SocketAddr, local: SocketAddr) -> Option<PeerChain> {
         if process_born(pid) != Some(born) {
             return None;
         }
-        if tag.is_some_and(|t| registered.iter().any(|(_, rt, _)| *rt == t)) {
+        if tag.is_some_and(|t| registered.iter().any(|(_, rt, _)| *rt == t) || prev_tags().contains(&t)) {
             orphan = true;
         }
         if !SUBREAPER.load(std::sync::atomic::Ordering::SeqCst) && detached_after(&snap, &chain, hub_started()) {
+            orphan = true;
+        }
+        #[cfg(target_os = "linux")]
+        if transient_unit_after_hub(pid, &snap) {
             orphan = true;
         }
     }
@@ -684,8 +825,8 @@ pub fn resolve_peer(peer: SocketAddr, local: SocketAddr) -> Option<PeerChain> {
     Some(PeerChain { chain, orphan, job })
 }
 
-/// Does the tree `chain` break at init/launchd (PID 1) below a process that started at or after `hub_born`? The last
-/// process before PID 1 is the one whose real parent is gone (or that the desktop started directly).
+/// Does the complete tree `chain` end at init/launchd (PID 1) below a process that started at or after `hub_born`? The
+/// last process before PID 1 is the one whose real parent is gone (or that the desktop started directly).
 fn detached_after(snap: &HashMap<u32, Stat>, chain: &[u32], hub_born: u64) -> bool {
     let top = match chain {
         [.., top, 1] => *top,
@@ -693,30 +834,6 @@ fn detached_after(snap: &HashMap<u32, Stat>, chain: &[u32], hub_born: u64) -> bo
         _ => return false,
     };
     snap.get(&top).is_some_and(|s| s.start >= hub_born)
-}
-
-/// Ancestors of `pid` (start `born`), nearest first, each started no later than its child.
-fn walk(snap: &HashMap<u32, Stat>, pid: u32, born: u64) -> Vec<u32> {
-    let mut chain = vec![pid];
-    if snap.get(&pid).is_some_and(|s| s.start != born) {
-        return chain;
-    }
-    let (mut cur, mut cur_born) = (pid, born);
-    for _ in 0..64 {
-        let Some(p) = snap.get(&cur).map(|s| s.ppid) else { break };
-        if p == 0 || chain.contains(&p) {
-            break;
-        }
-        match snap.get(&p) {
-            Some(ps) if ps.start <= cur_born => {
-                chain.push(p);
-                cur = p;
-                cur_born = ps.start;
-            }
-            _ => break,
-        }
-    }
-    chain
 }
 
 /// Is the shell in the foreground of its terminal (nothing running in it)? The foreground process group of the
@@ -921,33 +1038,69 @@ mod tree_tests {
     }
 
     #[test]
-    fn reused_pids_and_vanished_callers_are_never_matched() {
-        // 1 (init) → 10 (shell, start 100) → 20 (client, start 200)
-        let mut snap: HashMap<u32, Stat> = HashMap::from([(1, st(0, 1)), (10, st(1, 100)), (20, st(10, 200))]);
-        assert!(below(&snap, 20, 200, (10, 100)));
-        assert_eq!(walk(&snap, 20, 200), [20, 10, 1]);
-        // the client is gone (not in the snapshot) or its PID belongs to another process now
-        assert!(!below(&snap, 20, 199, (10, 100)));
-        assert_eq!(walk(&snap, 20, 199), [20]);
-        assert!(!below(&snap, 21, 200, (10, 100)));
-        // the shell's PID was reused by a process started after the client
-        snap.insert(10, st(1, 300));
-        assert!(!below(&snap, 20, 200, (10, 100)));
-        assert!(!below(&snap, 20, 200, (10, 300)));
-        assert_eq!(walk(&snap, 20, 200), [20]);
+    fn complete_chains_and_sessions() {
+        // 1 (init, parent 0) → 10 (shell, start 100) → 20 (client, start 200)
+        let snap: HashMap<u32, Stat> = HashMap::from([(1, st(0, 1)), (10, st(1, 100)), (20, st(10, 200))]);
+        let c = full_chain(&snap, 20, 200).unwrap();
+        assert_eq!(c, [20, 10, 1]);
+        assert!(in_chain(&snap, &c, (10, 100)));
+        assert!(!in_chain(&snap, &c, (10, 99)), "another start time: another process");
+        // the caller itself is gone or another process now
+        assert_eq!(full_chain(&snap, 20, 199), None);
+        assert_eq!(full_chain(&snap, 21, 200), None);
+    }
+
+    /// #149 review N2: an incomplete chain is never "external": missing ancestor, reused parent PID, cycle → None.
+    #[test]
+    fn gaps_in_the_chain_are_refused() {
+        // missing ancestor (ended between two reads / PID wrap)
+        let snap: HashMap<u32, Stat> = HashMap::from([(1, st(0, 1)), (20, st(10, 200))]);
+        assert_eq!(full_chain(&snap, 20, 200), None);
+        // the parent's PID belongs to a younger process now
+        let snap: HashMap<u32, Stat> = HashMap::from([(1, st(0, 1)), (10, st(1, 300)), (20, st(10, 200))]);
+        assert_eq!(full_chain(&snap, 20, 200), None);
+        // cycle
+        let snap: HashMap<u32, Stat> = HashMap::from([(5, st(6, 10)), (6, st(5, 10))]);
+        assert_eq!(full_chain(&snap, 5, 10), None);
+    }
+
+    /// #149 review N1: no depth limit – a client below 200 nested shells still reaches the hub (and init).
+    #[test]
+    fn deep_chains_have_no_limit() {
+        // 1 → 2 (hub) → 3 (shell) → 4 … 203 (client)
+        let mut snap: HashMap<u32, Stat> = HashMap::from([(1, st(0, 1)), (2, st(1, 2)), (3, st(2, 3))]);
+        for p in 4..=203u32 {
+            snap.insert(p, st(p - 1, p as u64));
+        }
+        let c = full_chain(&snap, 203, 203).unwrap();
+        assert_eq!(c.len(), 203);
+        assert_eq!(c.last(), Some(&1));
+        assert!(c.contains(&2), "the hub is found however deep");
+        assert!(in_chain(&snap, &c, (3, 3)));
+        // one gap deep down: refused, not external
+        snap.remove(&100);
+        assert_eq!(full_chain(&snap, 203, 203), None);
     }
 
     #[test]
     fn broken_tree_after_the_hub_start_is_detached() {
         let snap: HashMap<u32, Stat> = HashMap::from([(1, st(0, 1)), (30, st(1, 50)), (31, st(30, 60)), (40, st(1, 500)), (41, st(40, 510))]);
         // started from a terminal that is older than the hub: not detached
-        assert!(!detached_after(&snap, &walk(&snap, 31, 60), 100));
-        // tree breaks at init below a process younger than the hub (double fork, setsid)
-        assert!(detached_after(&snap, &walk(&snap, 41, 510), 100));
-        assert!(detached_after(&snap, &walk(&snap, 40, 500), 100));
-        // chain that does not end at init (unknown parent): not decided here
-        let partial: HashMap<u32, Stat> = HashMap::from([(50, st(49, 600))]);
-        assert!(!detached_after(&partial, &walk(&partial, 50, 600), 100));
+        assert!(!detached_after(&snap, &full_chain(&snap, 31, 60).unwrap(), 100));
+        // tree ends at init below a process younger than the hub (double fork, setsid)
+        assert!(detached_after(&snap, &full_chain(&snap, 41, 510).unwrap(), 100));
+        assert!(detached_after(&snap, &full_chain(&snap, 40, 500).unwrap(), 100));
+    }
+
+    /// The real process table: this test process has a complete chain up to the root (also on macOS, where processes of
+    /// other users come from the short info).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn own_chain_reaches_the_root() {
+        let me = std::process::id();
+        let snap = snapshot();
+        let c = full_chain(&snap, me, process_born(me).unwrap());
+        assert!(c.as_ref().is_some_and(|c| c.len() >= 2), "{c:?}");
     }
 }
 

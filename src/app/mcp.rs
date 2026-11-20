@@ -735,7 +735,8 @@ impl App {
             .entries
             .iter()
             .map(|(id, e)| {
-                let wsl = env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl");
+                // Regel 3 (Umgebungs-Hinweis) nur für WSL unter Windows; unter Linux/macOS gewährt sie nie etwas (#149 Review N7).
+                let wsl = cfg!(windows) && env_caller_ok(Some(e.is_chat())) && e.eff_shell().starts_with("wsl");
                 let live = e.live.as_ref();
                 (*id, live.and_then(|s| s.pid()), live.and_then(|s| s.job_key()), wsl.then_some(e.session_key.as_str()))
             })
