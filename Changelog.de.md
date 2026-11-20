@@ -9,6 +9,17 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.6.0] - WIP
 
+### Added
+
+- Experten-Projekte: Seite **Wartung** (Knopf im Reiter Übersicht) – prüft Tickets (liegen geblieben, überfällig, offen in abgeschlossenen Sprints/Versionen/Meilensteinen, defekte Struktur, mögliche Duplikate), Konfiguration (unbenutzte Felder, Optionen, Typen, Status, Labels, Verknüpfungsarten; defekte Schnellaktionen, Dashboards, Filter, Boards) und eigene Regeln (gespeicherte Abfragen); Aktionen mit Vorschau und vorheriger Datenbank-Sicherung mit der Markierung `maintenance` (höchstens drei bleiben): als „Wird nicht gemacht“ schließen (Zielstatus je Projekt), archivieren, Fälligkeit setzen, als Duplikat verknüpfen, unbenutzte Konfiguration entfernen, Labels zusammenführen; Funde lassen sich ignorieren; Protokoll aller Aktionen; die Wartung löscht nie Tickets (#308)
+- Ticket-Archiv: archivierte Tickets sind in Listen, Boards und Suche ausgeblendet, außer eine Abfrage fragt nach `archived = true`; *Archivieren* / *Aus dem Archiv holen* im Ticket-Menü (#308)
+- Datenbankpflege auf der Wartungsseite: Prüfen (`integrity_check`, `foreign_key_check` und eigene Prüfungen), Statistik, Komprimieren, Reparieren, was sich eindeutig wiederherstellen lässt, und Retten in eine neue Datei (#308)
+- Agenten-Schnittstelle: Werkzeug `maintenance_report` (Stufe Lesen, Expertenmodus, höchstens 200 Funde mit `truncated` und `total`); die Ticket-Werkzeuge erhalten den optionalen Parameter `include_archived` und das Feld `archived`; schreibende Werkzeuge liefern den neuen Fehler `busy` mit `details.retry_after_ms`, solange eine Wartungsaktion schreibt (#308)
+
+### Changed
+
+- Projekt-Sicherungen verwenden Formatversion 4 (archivierte Tickets, Wartungseinstellungen, eigene Regeln); Versionen vor 2.6.0 lehnen sie mit klarer Meldung ab, ältere Sicherungen lassen sich weiter importieren. Die Datenbank wird beim ersten Start auf Schema 10 migriert, vorher mit Sicherung (#308)
+
 ## [2.5.0] - 2026-11-20
 
 ### Added

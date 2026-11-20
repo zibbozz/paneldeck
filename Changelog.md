@@ -9,6 +9,17 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.6.0] - WIP
 
+### Added
+
+- Expert projects: **Maintenance** page (button on the Overview tab) – checks tickets (stale, overdue, open in finished sprints/versions/milestones, broken structure, possible duplicates), configuration (unused fields, options, types, statuses, labels, link types; broken quick actions, dashboards, filters, boards) and custom rules (saved queries); actions with a preview and a database backup marked `maintenance` first (at most three kept): close as Won't Do (target status per project), archive, set due date, link as duplicate, remove unused configuration, merge labels; findings can be ignored; a log of all actions; maintenance never deletes tickets (#308)
+- Ticket archive: archived tickets are hidden from lists, boards and search unless a query asks for `archived = true`; *Archive* / *Restore from archive* in the ticket menu (#308)
+- Database care on the maintenance page: check (`integrity_check`, `foreign_key_check` and own checks), statistics, compact, repair what can be rebuilt unambiguously, and rescue into a new file (#308)
+- Agent interface: tool `maintenance_report` (level Read, expert mode, at most 200 findings with `truncated` and `total`); the ticket tools get the optional parameter `include_archived` and the field `archived`; write tools return the new error `busy` with `details.retry_after_ms` while a maintenance action writes (#308)
+
+### Changed
+
+- Project backups use format version 4 (archived tickets, maintenance settings, custom rules); versions before 2.6.0 refuse them with a clear message, older backups still import. The database is migrated to schema 10 on the first start, with a backup first (#308)
+
 ## [2.5.0] - 2026-11-20
 
 ### Added
