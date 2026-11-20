@@ -50,7 +50,18 @@ Voraussetzung: `claude` ist installiert und angemeldet.
 - [ ] „Claude“-Button → Dialog (Modell, Permission-Mode, Start-Prompt) → Claude startet im Ordner.
 - [ ] Statuspunkt: *arbeitet* (pulsiert) → *Freigabe?* bei Rückfrage → *bereit* nach Antwort.
 - [ ] Anderes Fenster in den Vordergrund: Toast + Taskleisten-Blinken bei Freigabe/Fertig.
-- [ ] Neustart der App: Claude-Sitzung wird mit `--resume` fortgesetzt (richtige Konversation, auch bei zwei Sitzungen im selben Ordner).
+- [ ] Neustart der App: Claude-Sitzung mit *Fortsetzen nach Neustart = Fortsetzen* startet mit `--continue` (nur wenn es im Ordner schon eine Konversation gibt, sonst neu).
+- [ ] **Fortsetzen nach Neustart (2.4.1, #302)** – Sitzungseinstellungen → Reiter Claude → Auswahl *Aus* / *Fortsetzen* / *Konversation auswählen*:
+  - [ ] Neue Claude-Sitzung: erster Start ist nur `claude` mit `--settings …` (und Optionen), ohne `--session-id`/`--continue`/`--resume` (Befehlszeile in der Vorschau bzw. Prozessliste).
+  - [ ] *Fortsetzen*: Prompt senden, Neu laden → `claude --continue`, dieselbe Konversation erscheint. In einem leeren Ordner: Neu laden startet neu (keine Meldung „No conversation found“).
+  - [ ] *Aus*: Neu laden beginnt immer eine neue Konversation.
+  - [ ] *Konversation auswählen*: Neu laden → Fenster „Konversation auswählen“ mit den Konversationen des Ordners (neueste zuerst, Titel/Alter/Größe) und „Neue Konversation“; ↑/↓, Enter, Doppelklick; *Starten* → `--resume <id>` der gewählten; *Abbrechen*/Esc oder „Neue Konversation“ → neu; Ordner ohne Konversation → ohne Rückfrage neu. Während der Auswahl zeigt der Bereich „Wartet auf die Auswahl der Konversation …“.
+  - [ ] Zwei Sitzungen mit *Konversation auswählen*, App neu starten (globale Einstellung „beim Start fortsetzen“ an): die Auswahl erscheint nacheinander, je Sitzung einmal.
+  - [ ] WSL-Sitzung mit *Konversation auswählen*: die Liste kommt von der Linux-Seite (`~/.claude/projects`), die Oberfläche hängt dabei nicht.
+  - [ ] Nach `/exit` im gestarteten Claude von Hand `claude` starten und einen Prompt senden: Die Sitzung übernimmt diese Konversation nicht als ihre eigene (*Konversation auswählen* zeigt weiter die der Sitzung vorausgewählt). Bei *Fortsetzen* nimmt `--continue` trotzdem die neueste des Ordners – also auch die von Hand gestartete (so gewollt). „Nie übernommen“ gilt nur für *Aus* und für Neustarts ohne Fortsetzen.
+  - [ ] *Konversation auswählen*, während eine der Konversationen in einer anderen Sitzung läuft: Eintrag „Läuft in Sitzung <Name>“, nicht wählbar, ↑/↓ überspringen ihn.
+  - [ ] Während die Auswahl offen ist, bekommt das Terminal kein Enter/Esc; im Bereich der wartenden Sitzung: *Auswahl zeigen* (holt das Hauptfenster, auch aus dem Tray) und *Ohne Auswahl neu starten*. Hauptfenster im Tray: Hinweis/Toast, dass eine Auswahl wartet.
+  - [ ] Dialog „Neue Sitzung“ → *Fortsetzen – auch beim ersten Start (letzte im Ordner)*: erster Start mit `--continue`.
 - [ ] Einstellungen → Claude-Modus aus: Claude-Elemente verschwinden, Terminals funktionieren weiter.
 - [ ] Einstellungen → Hooks global installieren/entfernen: `~\.claude\settings.json` enthält/entfernt die Hub-Einträge, fremde Hooks bleiben.
 
@@ -118,7 +129,7 @@ Auf einem Monitor mit 100 % und – falls möglich – 150 % Skalierung prüfen.
 
 ## 14 · Härtung (0.10.0)
 - [ ] **WSL + Claude** (Voraussetzung: WSL-Distribution mit installiertem `claude`): Claude-Sitzung in einer WSL-Shell starten → Statuspunkt/Pille, Token/Kosten und Git-Info erscheinen wie bei PowerShell. Falls nicht: *Diagnose kopieren* und Beschreibung melden (WSL-Interop/WSLENV).
-- [ ] WSL: App schließen und neu starten → Claude-Sitzung wird mit `--resume` wiederhergestellt.
+- [ ] WSL: App schließen und neu starten → Claude-Sitzung (*Fortsetzen*, nach einem Prompt) wird mit `--continue` wiederhergestellt.
 - [ ] **Diagnose**: Einstellungen → Allgemein → *Diagnose kopieren*, in Notepad einfügen: Version, Shells, Schriften, Einstellungen sind plausibel.
 - [ ] **Beschädigte Datei**: App beenden, `state.json` mit Notepad zerstören (z. B. nur `{`), starten → App startet leer (kein Absturz), neben `state.json` liegt `state.defekt.json`.
 - [ ] **Absturzprotokoll**: Nach normalem Betrieb existiert keine `crash.log`. (Falls doch: Datei mitschicken.)

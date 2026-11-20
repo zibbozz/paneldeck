@@ -201,6 +201,10 @@ impl App {
         // Einstellungen einer Sitzung und Rückfrage „Neu laden?“ (#169, #170).
         // Die Rückfrage zuerst: sie bekommt Esc/Enter, bevor der Einstellungsdialog darunter sie sieht.
         self.reload_ask_ui(ctx, actions, None);
+        // Auswahl der Konversation vor einem Start (#302): nur im Hauptfenster, eine zur Zeit.
+        if self.wins.cur == 0 {
+            self.conv_pick_ui(ctx);
+        }
         // Rückfrage vor dem Einfügen mehrerer Zeilen (#183).
         self.paste_ask_ui(ctx, None);
         self.session_settings_ui(ctx);
@@ -1238,7 +1242,7 @@ pub(super) fn preview_target_id(salt: &str) -> Id {
     Id::new(("claude_preview_shell", salt.to_string()))
 }
 
-/// Zuschlag für das, was Paneldeck beim Start noch anhängt (`--settings <Pfad>`, `--session-id <uuid>`).
+/// Zuschlag für das, was Paneldeck beim Start noch anhängt (`--settings <Pfad>`, `--resume <uuid>`).
 const LAUNCH_EXTRA: usize = 300;
 
 /// Vorschau der Kommandozeile (einklappbar) und Warnung bei einer zu langen Zeile (cmd-Grenze, `claude.cmd`).
@@ -1372,7 +1376,7 @@ pub(super) fn new_dialog_ui(
                         |ui| {
                             // Eine Auswahl statt zweier Häkchen (#241, #245): wie die Konversation beginnt und ob sie beim
                             // Neu laden/Neustart fortgesetzt wird.
-                            ui.label(lang.t("Konversation", "Conversation"));
+                            ui.label(lang.t("Fortsetzen nach Neustart", "Resume after restart"));
                             let r = session_settings::conv_combo(ui, "newdlg_conv", conv, lang);
                             dlg_mark(ui, "conv", &r);
                             ui.end_row();
@@ -1432,7 +1436,7 @@ fn new_dialog_opts(d: &NewDialog) -> NewOpts {
         claude_opts: Some(d.copts.sanitized(true)),
         allow_bypass: true,
         continue_last: d.conv.continue_last(),
-        claude_continue: Some(d.conv.resume_later()),
+        resume_mode: Some(d.conv.mode()),
         prompt: Some(d.prompt.clone()),
         profile: Some(d.profile),
         group: Some(d.group.clone()),
@@ -1780,15 +1784,18 @@ mod layout_tests {
         use session_settings::ConvChoice;
         let ctx = egui::Context::default();
         let mut d = NewDialog::new("pwsh".into(), true, ClaudeOpts::default());
-        assert_eq!(d.conv, ConvChoice::Resume, "Standard wie bisher: neu, beim Neu laden fortsetzen");
+        assert_eq!(d.conv, ConvChoice::Resume, "Standard wie bisher: erster Start neu, beim Neu laden fortsetzen");
         frame(&ctx, &mut d, Vec2::new(1000.0, 700.0), 0.0, vec![]);
         super::super::opts_tabs::set(&ctx, "newdlg", super::super::opts_tabs::Tab::Claude);
         frame(&ctx, &mut d, Vec2::new(1000.0, 700.0), 0.1, vec![]);
         assert!(mark(&ctx, "conv", 0).is_some(), "eine Auswahl im Dialog (Reiter „Claude“)");
-        assert_eq!((ConvChoice::Resume.continue_last(), ConvChoice::Resume.resume_later()), (false, true));
-        assert_eq!((ConvChoice::ContinueLast.continue_last(), ConvChoice::ContinueLast.resume_later()), (true, true));
-        assert_eq!((ConvChoice::AlwaysNew.continue_last(), ConvChoice::AlwaysNew.resume_later()), (false, false));
+        use crate::state::ResumeMode;
+        assert_eq!((ConvChoice::Resume.continue_last(), ConvChoice::Resume.mode()), (false, ResumeMode::Continue));
+        assert_eq!((ConvChoice::ContinueLast.continue_last(), ConvChoice::ContinueLast.mode()), (true, ResumeMode::Continue));
+        assert_eq!((ConvChoice::Pick.continue_last(), ConvChoice::Pick.mode()), (false, ResumeMode::Pick));
+        assert_eq!((ConvChoice::AlwaysNew.continue_last(), ConvChoice::AlwaysNew.mode()), (false, ResumeMode::Off));
         for c in ConvChoice::ALL {
+            assert_eq!(ConvChoice::of(c.mode(), c.continue_last()), c);
             assert_ne!(c.label(Lang::De), c.label(Lang::En));
             assert_ne!(c.tip(Lang::De), c.tip(Lang::En));
         }

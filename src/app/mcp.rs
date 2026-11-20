@@ -1410,10 +1410,13 @@ impl App {
             Some(g) => Some(g),
             None => nest_group(self.mcp_child_group(None, caller), item.map(|it| it.group.trim().to_string())),
         };
-        // „Letzte Konversation im Ordner fortsetzen“ einer Vorlage gilt für Agenten nie (fremde Konversation); „bei jedem Start
-        // neu“ schon.
-        let claude_continue = item.and_then(|it| it.claude_continue);
-        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name, claude, claude_opts: Some(copts), prompt, group, claude_continue, profile: tpl_profile, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
+        // „Letzte Konversation im Ordner fortsetzen“ beim ersten Start gilt für Agenten nie (fremde Konversation). Den Modus
+        // „Fortsetzen nach Neustart“ übernimmt die Sitzung aber wie jede andere (#302): Der Schutz vor fremden Konversationen
+        // gilt nicht für „Fortsetzen“ per `--continue` beim Neu laden/Neustart/Programmstart – die neueste Konversation des
+        // Ordners kann einer anderen Sitzung, einem von Hand gestarteten Claude oder `claude -p` gehören. So hat es der
+        // Nutzer entschieden.
+        let resume_mode = item.map(|it| it.resume_mode());
+        let id = self.new_session(ctx, NewOpts { shell_id: shell, cwd, name, claude, claude_opts: Some(copts), prompt, group, resume_mode, profile: tpl_profile, quiet: true, window: Some(window), project: Some(project), ..NewOpts::default() });
         debug_assert!(!before.contains(&id));
         if let Some(err) = self.entries.get(&id).and_then(|e| e.error.clone()) {
             self.close_session(id);

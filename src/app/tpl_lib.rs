@@ -177,13 +177,7 @@ impl TplForm {
     /// Editor für eine vorhandene Vorlage (`index`) oder – mit `None` – für eine neue mit diesem Inhalt.
     pub(super) fn of(index: Option<usize>, t: &Template) -> Self {
         let item = t.items.first().cloned().unwrap_or_default();
-        let conv = if item.continue_last {
-            ConvChoice::ContinueLast
-        } else if item.claude_continue == Some(false) {
-            ConvChoice::AlwaysNew
-        } else {
-            ConvChoice::Resume
-        };
+        let conv = ConvChoice::of(item.resume_mode(), item.continue_last);
         TplForm {
             index,
             orig_name: index.map(|_| t.name.clone()),
@@ -227,12 +221,12 @@ impl TplForm {
         if it.claude {
             it.claude_opts = self.opts.sanitized(false);
             it.continue_last = self.conv.continue_last();
-            it.claude_continue = (!self.conv.resume_later()).then_some(false);
+            it.set_resume_mode(self.conv.mode());
             it.prompt = it.prompt.trim().to_string();
         } else {
             it.claude_opts = ClaudeOpts::default();
             it.continue_last = false;
-            it.claude_continue = None;
+            it.set_resume_mode(crate::state::ResumeMode::Continue);
             it.prompt = String::new();
         }
         // Die alte Zeile für ältere Versionen (die kennen nur Modell, Effort, Permission-Mode, Agent und Schalter):
@@ -537,7 +531,7 @@ impl App {
         // Schalter) – ohne `--safe-mode`: ältere Versionen fragen vor dem Start nicht nach.
         let mut legacy = o.clone();
         legacy.extra.flags.retain(|f| crate::claude_opts::agent_switch(f));
-        TplItem {
+        let mut it = TplItem {
             name: e.display_name(),
             shell_id: e.meta.shell_id.clone(),
             cwd: e.cwd_now(),
@@ -546,13 +540,16 @@ impl App {
             profile: e.meta.profile,
             group: e.meta.group.clone(),
             prompt: String::new(),
-            claude_continue: (!e.meta.claude_continue).then_some(false),
             color: Some(e.meta.color),
             tags: e.meta.tags.clone(),
             notes: e.meta.notes.clone(),
             claude_opts: if e.meta.claude { o } else { ClaudeOpts::default() },
             continue_last: false,
-        }
+            ..TplItem::default()
+        };
+        // „Fortsetzen nach Neustart“ aus dem wirksamen Modus (samt `claude_continue` für ältere Versionen, #302).
+        it.set_resume_mode(e.meta.resume_mode());
+        it
     }
 
     /// Farbe, Tags und Notizen der Vorlage auf eine neue Sitzung übertragen.
@@ -643,7 +640,7 @@ impl App {
                     prompt: Some(it.prompt.clone()).filter(|x| !x.trim().is_empty()),
                     profile: Some(it.profile),
                     group: Some(group),
-                    claude_continue: it.claude_continue,
+                    resume_mode: Some(it.resume_mode()),
                     quiet: pane.is_some(),
                     ..NewOpts::default()
                 },
