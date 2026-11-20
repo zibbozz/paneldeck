@@ -951,6 +951,7 @@ impl App {
             "read_chat" => Out::Now(self.mcp_read_chat(args)),
             "send_chat_message" => Out::Now(self.mcp_send_chat(ctx, args, caller)),
             "list_models" => Out::Now(Ok(models_json(&self.settings.llm_servers, self.settings.last_chat_model.as_ref()))),
+            "cleanup_sizes" => Out::Now(Ok(self.cleanup_sizes_json())),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
             "send_keys" => Out::Now(self.mcp_send_keys(args, caller)),
             "run_command" => self.mcp_run(args, caller, reply, tool, how),

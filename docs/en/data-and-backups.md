@@ -116,6 +116,26 @@ All new fields are optional: a missing field means the previous behaviour, and o
 - Before an update to a **new major version**, the self-update makes a database backup first (see [Updates](updates.md)).
 - The **undo history** of the to-do list (3 to 100 steps, default 25) is set on the same tab.
 
+## Clean up
+*Settings → Data & backup → **Clean up …*** (also in the command palette) opens a window where you tick what to delete. Each item shows its size or count (calculated in the background) and a short explanation; the bottom shows the total. Only harmless items are preselected: clipboard images, old backup files (`*.bak-*`, `*.defekt-*`), `crash.log` and orphaned scrollback/chat files that no session belongs to.
+
+| Group | Items |
+|---|---|
+| Save space | database backups (all except the newest *N*, default 3; “delete all” only with typing), clipboard images, old backup files; only if present: program copies of runs (`%TEMP%\paneldeck-run`), maintenance backups (files marked “maintenance” in the backup folder), hot-exit buffers (`hot-exit\`) |
+| History and logs | scrollback and chat histories, each **orphaned** or **all** (“all” also covers open sessions: terminals keep only the screen, chats become empty), optionally only files older than *X* days (default 30); `crash.log`; the MCP call log `mcp-log.jsonl` (it documents what agents did) |
+| Content | prompt library, terminal/group templates, custom themes (built-in themes and the example stay; an active deleted theme falls back to the default), `system-prompt.md`, the to-do/ticket database, sessions and layout |
+| Settings | all settings (like `--reset-settings`, with a `settings.json.bak-<time>` copy; the language stays), model servers and API keys, Claude defaults, keyboard shortcuts |
+| Windows integration | autostart Run values (profiles too) and Explorer context menu entries pointing to this `paneldeck.exe`, `paneldeck*` entries in `~/.claude.json` pointing to this exe, `claude-hooks*.json` in the data folder |
+| Everything | **Reset Paneldeck completely**: selects everything including the integration, saves the data folder as a ZIP file first (target folder selectable, outside the data folder; API keys are left out), then restarts like a first start |
+
+Other profiles (`profiles\<name>` with a `settings.json`) can be deleted completely, but only while their instance is not running.
+
+**Safety.** Deleting is permanent (no recycle bin). *Delete …* shows one summary of all selected items with their sizes; the button unlocks after 3 seconds, and irreversible items (database, all histories, prompt library, templates, themes, system prompt, sessions/layout, all settings, all backups, profiles, reset) additionally require typing `DELETE` (German: `LÖSCHEN`) – once per run. Before deleting, the database is backed up (`pre-cleanup-<time>.db` in the backup folder; switchable, always when the database itself is deleted – if that backup fails, the database is kept). Registry values are saved as `.reg` files and `~/.claude.json` as a copy in the backup folder before they change. Items that end open sessions list them and any running programs (detected through the shells' child processes): *Close them and delete* or *Cancel*. Files in use are skipped; the result lists every item with ✓ or the error and offers *Retry* and, where needed, *Restart now*.
+
+The database, sessions/layout and the complete reset cannot be deleted while Paneldeck uses them: they are scheduled in `cleanup-pending.json` and run at the next start, before anything is loaded; Paneldeck restarts right away and shows the result. The integration, other profiles and the ZIP backup run before the restart; without a ZIP backup nothing is reset.
+
+**Never touched:** Claude Code's own data (`~/.claude/projects`, transcripts). Agents can only read the sizes (MCP tool [`cleanup_sizes`](agent-interface.md)); there is no way for them to delete anything.
+
 ## Moving or copying the data
 Quit Paneldeck, then copy the whole data folder. To use it from another place, start Paneldeck with `--data-dir <folder>` or set `PANELDECK_DATA`.
 

@@ -13,8 +13,15 @@ use std::path::Path;
 use crate::launch;
 use crate::platform::registry::{self, RegOp};
 
-const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const CONTEXT_PROBE: &str = r"Software\Classes\Directory\shell\Paneldeck\command";
+pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+pub const CONTEXT_PROBE: &str = r"Software\Classes\Directory\shell\Paneldeck\command";
+/// Schlüssel des Kontextmenüs (je mit Beschriftung, `Icon` und `command`), wie `context_plan` sie schreibt.
+pub const CONTEXT_KEYS: [&str; 4] = [
+    r"Software\Classes\Directory\shell\Paneldeck",
+    r"Software\Classes\Directory\Background\shell\Paneldeck",
+    r"Software\Classes\Directory\shell\PaneldeckClaude",
+    r"Software\Classes\Directory\Background\shell\PaneldeckClaude",
+];
 
 /// Zustand einer Integration aus Sicht dieser Instanz.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +196,9 @@ mod tests {
         let off = context_plan(false, &exe, &[]).unwrap();
         assert_eq!(off.len(), 4);
         assert!(off.iter().all(|o| matches!(o, RegOp::DeleteTree { key } if key.starts_with(r"Software\Classes\Directory\"))));
+        // Aufräumen (#307) sichert genau diese Schlüssel
+        let off_keys: Vec<&str> = off.iter().map(|o| match o { RegOp::DeleteTree { key } => key.as_str(), _ => "" }).collect();
+        assert_eq!(off_keys, CONTEXT_KEYS);
         assert_eq!(CONTEXT_PROBE,r"Software\Classes\Directory\shell\Paneldeck\command");
     }
 

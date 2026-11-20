@@ -16,7 +16,7 @@ pub(super) mod release;
 pub(crate) mod sha256;
 mod ui;
 pub(super) mod version;
-mod zip;
+pub(crate) mod zip;
 
 // Für `main.rs`: vor der Einzelinstanz-Weiterleitung aufrufen.
 pub use install::wait_for_previous_instance;

@@ -1162,6 +1162,21 @@ impl Session {
         let _ = Line(0);
         lines[start..].join("\n")
     }
+
+    /// Verlauf (Scrollback) leeren, der Bildschirm bleibt (Aufräumen, #307). Die verworfenen Zeilen zählen wie bei CSI 3J
+    /// als aus dem Verlauf gefallen (#197), damit absolute Zeilen (Marken, `run_command`) gültig bleiben. Im alternativen
+    /// Bildschirm ist der Verlauf des Hauptbildschirms nicht erreichbar: dann `false` und nichts geändert.
+    pub fn clear_history(&self) -> bool {
+        let mut term = self.term.lock().unwrap_or_else(|e| e.into_inner());
+        if term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN) {
+            return false;
+        }
+        let h = term.grid().history_size();
+        term.grid_mut().clear_history();
+        self.dropped.fetch_add(h as u64, Ordering::Relaxed);
+        self.hist_primary.store(0, Ordering::Relaxed);
+        true
+    }
 }
 
 /// Setzt alle von Programmen geänderten Farben zurück (nach RIS, `OscEvent::FullReset`).

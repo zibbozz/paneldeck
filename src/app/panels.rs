@@ -815,6 +815,7 @@ impl App {
             (lang.t("Dateibaum ein/aus", "Toggle file tree").into(), self.binding_text("files"), Action::ToggleFiles),
             (lang.t("Claude-Verlauf (Konversationen fortsetzen)", "Claude history (resume conversations)").into(), String::new(), Action::OpenHistory),
             (lang.t("Einstellungen", "Settings").into(), String::new(), Action::OpenSettings),
+            (lang.t("Aufräumen …", "Clean up …").into(), String::new(), Action::OpenCleanup),
         ]);
         // „Neu laden“ nur für Terminals (ein Chat hat keinen Prozess).
         if self.entries.get(&f).is_some_and(|e| !e.is_chat()) {
