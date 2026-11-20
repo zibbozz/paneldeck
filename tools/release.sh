@@ -176,7 +176,8 @@ if [ "$PUBLISH" = 1 ]; then
   for f in "${LINUX_FILES[@]}"; do
     [ -f "$LINUX_DIR/$f" ] || { echo "Linux-Paket fehlt im Artefakt: $f"; exit 1; }
     # Herkunftsnachweis (actions/attest-build-provenance im Job `linux`): gebaut von diesem Repository in GitHub Actions.
-    "$GH" attestation verify "$LINUX_DIR/$f" -R zibbozz/paneldeck >/dev/null || { echo "Herkunftsnachweis von $f nicht bestätigt"; exit 1; }
+    "$GH" attestation verify "$LINUX_DIR/$f" -R zibbozz/paneldeck \
+      --signer-workflow zibbozz/paneldeck/.github/workflows/release-build.yml --source-ref "refs/tags/v$V" >/dev/null || { echo "Herkunftsnachweis von $f nicht bestätigt"; exit 1; }
     grep -q "  $f\$" "$SUMS_DIR/SHA256SUMS.txt" || grep "  $f\$" "$LINUX_DIR/SHA256SUMS-linux.txt" >> "$SUMS_DIR/SHA256SUMS.txt"
   done
   (cd "$LINUX_DIR" && sha256sum -c --quiet --ignore-missing "../sums-$V/SHA256SUMS.txt") || { echo "SHA256SUMS.txt passt nicht zu den Linux-Paketen"; exit 1; }
