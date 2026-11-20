@@ -279,7 +279,7 @@ mod unix {
         match blob.first() {
             Some(&KIND_KEYRING) => {
                 let key = keyring::key(false).map_err(|e| match e {
-                    keyring::Fail::Unavailable => Error::Keyring(crate::state::t("Kein Schlüsselbund (Secret Service) erreichbar", "No keyring (Secret Service) reachable").into()),
+                    keyring::Fail::Unavailable => Error::Keyring(crate::state::t("Kein Schlüsselbund des Systems erreichbar", "No system keyring reachable").into()),
                     keyring::Fail::Refused(e) => Error::Keyring(e),
                     keyring::Fail::Pending => Error::Pending,
                 })?;

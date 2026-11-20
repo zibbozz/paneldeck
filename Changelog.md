@@ -19,6 +19,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Linux: tray icon (StatusNotifierItem), desktop notifications, native file dialogs (XDG portal), optional start at login (XDG autostart) and optional "Open in Paneldeck" for Nautilus, Dolphin and Nemo; data folder `~/.local/share/Paneldeck` (private to the user); shells from `/etc/shells` started as login shells (#149)
 - Linux: API keys of chat servers are encrypted with a key from the system keyring (Secret Service); without a keyring Paneldeck asks for a master password on the first access to a key (#149)
 - Linux/macOS: the agent interface identifies the calling process itself (socket owner, complete process tree; on Linux Paneldeck is a subreaper) and refuses callers it cannot identify; programs that detach from a session stay restricted, as on Windows (#149)
+- macOS version (experimental, not signed): one universal app for Apple Silicon and Intel (macOS 12 or newer) as `.dmg` and `.zip`. It has a menu-bar icon, notifications, start at login (LaunchAgent, off by default), native file dialogs and API keys encrypted with a key in the Keychain. The app updates itself, checked against `SHA256SUMS.txt` and its code signature. Clicking a path never starts an app, script or installer – it is only shown in Finder. The About page shows an "experimental" notice; how to open the unsigned app the first time is in [macOS](docs/en/macos.md) (#150)
 
 ### Changed
 
