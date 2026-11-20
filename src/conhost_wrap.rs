@@ -592,10 +592,11 @@ mod tests {
         let bash = if powershell { "powershell.exe".to_string() } else { format!(r"{git}\bin\bash.exe") };
         let mut cmd = CommandBuilder::new(&bash);
         let spec = crate::shells::ShellSpec { id: "s".into(), label: "s".into(), program: bash.clone(), args: vec![] };
+        let plan = crate::shells::integration(&spec, &std::env::temp_dir(), &crate::shellinit::EnvCtx { env: &[], inherit: true });
         if powershell {
             cmd.arg("-NoLogo");
             cmd.arg("-NoProfile");
-            for a in crate::shells::integration(&spec).0 {
+            for a in &plan.args {
                 cmd.arg(a);
             }
         } else {
@@ -611,7 +612,7 @@ mod tests {
         cmd.env("TERM", "xterm-256color");
         cmd.env("PATH", format!(r"{git}\usr\bin;{}", std::env::var("PATH").unwrap_or_default()));
         cmd.env("PS1", "\\n\\[\\033[32m\\]u@pc \\[\\033[35m\\]MINGW64 \\[\\033[33m\\]~\\[\\033[0m\\]\\n$ ");
-        for (k, v) in crate::shells::integration(&spec).1 {
+        for (k, v) in &plan.env {
             cmd.env(k, v);
         }
         let mut child = pair.slave.spawn_command(cmd).unwrap();
