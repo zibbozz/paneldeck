@@ -11,7 +11,27 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ### Added
 
-- Shell-Integration für zsh und fish (#57): Befehlsmarken (Springen zwischen Befehlen), Exit-Code und Dauer, der aktuelle Ordner, exaktes `run_command` und der Claude-Status funktionieren jetzt auch in zsh und fish – in WSL und als Shell unter Linux/macOS –, ohne deine Startdateien anzufassen (zsh über ein vorübergehendes `ZDOTDIR`, das dein eigenes wiederherstellt, fish über `--init-command`; die Hilfsdateien im Datenordner werden beim Beenden gelöscht). Für WSL erkennt Paneldeck die Login-Shell der Distribution im Hintergrund und zeigt sie in Shell-Listen an, z. B. „WSL: Ubuntu (zsh)“; scheitert die Erkennung, gilt die bash-Integration und der Eintrag heißt „(Shell unbekannt)“. Ein mehrzeiliger System-Prompt behält in zsh und fish seine Zeilenumbrüche
+- Shell-Integration für zsh und fish (#57): Befehlsmarken (Springen zwischen Befehlen, Prompt-Ende OSC 133;B), Exit-Code und Dauer, der aktuelle Ordner (auch OSC 7), exaktes `run_command` und der Claude-Status funktionieren jetzt auch in zsh und fish – in WSL und als Shell unter Linux/macOS –, ohne deine Startdateien anzufassen (zsh über ein vorübergehendes `ZDOTDIR`, das dein eigenes wiederherstellt, fish über `--init-command`; die Hilfsdateien im Datenordner werden beim Beenden gelöscht). Für WSL erkennt Paneldeck die Login-Shell der Distribution im Hintergrund (bei einem Fehler nach 45 s erneut) und zeigt sie in Shell-Listen an, z. B. „WSL: Ubuntu (zsh)“; bis sie bekannt ist, bekommt bash seine Integration, fish sie über `XDG_DATA_DIRS` und zsh erst, sobald WSL die Hilfsdatei lesen kann. Ein mehrzeiliger System-Prompt behält in zsh und fish seine Zeilenumbrüche
+- Profile: „Shell in WSL“ wählt die Login-Shell je Profil (automatisch oder ein Eintrag aus `/etc/shells` der Distribution) (#57)
+- Verschachtelte Shells (ssh, tmux …) ohne Shell-Integration werden erkannt und als „ohne Shell-Integration“ angezeigt; `run_command` meldet dann `quality: approx` (#57)
+- *Einstellungen → Terminal* bietet kopierbare Schnipsel für bash, zsh und fish, um Befehlsmarken von entfernten Rechnern zu bekommen (#57)
+=======
+
+### Changed
+
+- Lokale Chats: Die eigene Kontextlänge unter *Einstellungen → Modelle* ist jetzt ein Schieberegler in Zweierpotenzen (4K, 8K … 512K, 1M; jede Stufe verdoppelt den Wert, ←/→ gehen eine Stufe) mit einem Zahlenfeld daneben für jeden Wert von 256 bis 16M; Kurzform (z. B. 32K) und volle Zahl werden angezeigt. Beim Server-Standard ist der Regler sichtbar, aber gesperrt; ältere Werte, die keine Stufe sind (z. B. 6000), bleiben unverändert, bis der Regler bewegt wird (#305)
+
+### Fixed
+
+- In ein Terminal gezogene oder eingefügte Dateinamen werden für die dort tatsächlich laufende Shell gequotet (z. B. fish unter Linux/macOS), ein präparierter Name kann so keine Befehle mehr ausführen (#57)
+- Von der Shell-Integration gemeldete Ordnernamen enthalten keine Steuerzeichen mehr (#57)
+
+## [2.4.2] - WIP
+
+### Fixed
+
+- Nur mit dem Konsolen-Host von Windows auf älteren Windows-Versionen (*Mitgelieferten Konsolen-Host verwenden* aus): Nach einer Zeile, die genau die Terminalbreite füllt, bleibt das Terminal nicht mehr eine Zeile zurück (fehlende Leerzeile vor dem Git-Bash-Prompt), und das Echo des nächsten Befehls erscheint nicht mehr doppelt (#264)
+>>>>>>> origin/develop
 
 ## [2.4.1] - 2026-11-20
 
@@ -402,6 +422,7 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
 [2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
+[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
 [2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2

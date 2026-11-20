@@ -11,7 +11,27 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ### Added
 
-- Shell integration for zsh and fish (#57): command marks (jump between commands), exit code and duration, the current folder, exact `run_command` and the Claude status now also work in zsh and fish – in WSL and as shells on Linux/macOS – without touching your startup files (zsh through a temporary `ZDOTDIR` that restores your own, fish through `--init-command`; the helper files in the data folder are removed when Paneldeck exits). For WSL, Paneldeck detects the distribution's login shell in the background and shows it in shell lists, e.g. "WSL: Ubuntu (zsh)"; if detection fails the bash integration applies and the entry is marked "(shell unknown)". A multi-line system prompt keeps its line breaks in zsh and fish
+- Shell integration for zsh and fish (#57): command marks (jump between commands, prompt end OSC 133;B), exit code and duration, the current folder (also OSC 7), exact `run_command` and the Claude status now also work in zsh and fish – in WSL and as shells on Linux/macOS – without touching your startup files (zsh through a temporary `ZDOTDIR` that restores your own, fish through `--init-command`; the helper files in the data folder are removed when Paneldeck exits). For WSL, Paneldeck detects the distribution's login shell in the background (retried after 45 s if it fails) and shows it in shell lists, e.g. "WSL: Ubuntu (zsh)"; until it is known bash gets its integration, fish gets it through `XDG_DATA_DIRS`, and zsh only once WSL can read the helper file. A multi-line system prompt keeps its line breaks in zsh and fish
+- Profiles: "Shell in WSL" chooses the login shell per profile (automatic or an entry from the distribution's `/etc/shells`) (#57)
+- Nested shells (ssh, tmux …) without shell integration are detected and shown as "without shell integration"; `run_command` then reports `quality: approx` (#57)
+- *Settings → Terminal* offers copyable snippets for bash, zsh and fish to get command marks from remote machines (#57)
+=======
+
+### Changed
+
+- Local chats: the custom context length in *Settings → Models* is now a slider in powers of two (4K, 8K … 512K, 1M; each step doubles the value, ←/→ move one step) with a number field next to it for any value from 256 to 16M; the short form (e.g. 32K) and the full number are shown. With the server default the slider is visible but disabled; older values that are not a step (e.g. 6000) are kept unchanged until the slider is moved (#305)
+
+### Fixed
+
+- File names dropped or inserted into a terminal are quoted for the shell that actually runs there (e.g. fish on Linux/macOS), so a crafted name can no longer run commands (#57)
+- Folder names reported by the shell integration no longer contain control characters (#57)
+
+## [2.4.2] - WIP
+
+### Fixed
+
+- Only with Windows' own console host on older Windows versions (*Use the bundled console host* off): after a line that exactly fills the terminal width, the terminal no longer falls one line behind (missing blank line before the Git Bash prompt), and the next command's echo is no longer drawn twice (#264)
+>>>>>>> origin/develop
 
 ## [2.4.1] - 2026-11-20
 
@@ -402,6 +422,7 @@ First public release. From here on, the public API (MCP interface, command line,
 - The executable contains no paths of the build machine.
 
 [2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
+[2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...HEAD
 [2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
