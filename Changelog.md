@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.5.0] - WIP
 
+### Added
+
+- Shell integration for zsh and fish (#57): command marks (jump between commands), exit code and duration, the current folder, exact `run_command` and the Claude status now also work in zsh and fish – in WSL and as shells on Linux/macOS – without touching your startup files (zsh through a temporary `ZDOTDIR` that restores your own, fish through `--init-command`; the helper files in the data folder are removed when Paneldeck exits). For WSL, Paneldeck detects the distribution's login shell in the background and shows it in shell lists, e.g. "WSL: Ubuntu (zsh)"; if detection fails the bash integration applies and the entry is marked "(shell unknown)". A multi-line system prompt keeps its line breaks in zsh and fish
+
 ## [2.4.1] - 2026-11-20
 
 ### Fixed

@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.5.0] - WIP
 
+### Added
+
+- Shell-Integration für zsh und fish (#57): Befehlsmarken (Springen zwischen Befehlen), Exit-Code und Dauer, der aktuelle Ordner, exaktes `run_command` und der Claude-Status funktionieren jetzt auch in zsh und fish – in WSL und als Shell unter Linux/macOS –, ohne deine Startdateien anzufassen (zsh über ein vorübergehendes `ZDOTDIR`, das dein eigenes wiederherstellt, fish über `--init-command`; die Hilfsdateien im Datenordner werden beim Beenden gelöscht). Für WSL erkennt Paneldeck die Login-Shell der Distribution im Hintergrund und zeigt sie in Shell-Listen an, z. B. „WSL: Ubuntu (zsh)“; scheitert die Erkennung, gilt die bash-Integration und der Eintrag heißt „(Shell unbekannt)“. Ein mehrzeiliger System-Prompt behält in zsh und fish seine Zeilenumbrüche
+
 ## [2.4.1] - 2026-11-20
 
 ### Fixed
