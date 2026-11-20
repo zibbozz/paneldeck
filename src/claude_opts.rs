@@ -699,8 +699,8 @@ pub type OptError = (String, String);
 
 /// Kommandozeilen-Teil eines Starts ([`ClaudeOpts::launch`]).
 pub struct LaunchArgs {
-    /// Mit führendem Leerzeichen; danach folgt immer noch eine Option von Paneldeck (`--session-id`, `--resume`,
-    /// `--continue`), die die mehrwertigen `--add-dir`/`--allowed-tools`/`--disallowed-tools` begrenzt.
+    /// Mit führendem Leerzeichen; danach folgt höchstens noch eine Option von Paneldeck (`--resume`, `--continue`), die
+    /// die mehrwertigen `--add-dir`/`--allowed-tools`/`--disallowed-tools` begrenzt – sonst endet die Zeile (#302).
     pub line: String,
     /// Tatsächlich gesetzte Optionen (ohne weggelassene Pfade) – für Auskünfte über MCP.
     pub applied: ClaudeOpts,
@@ -801,7 +801,7 @@ impl ClaudeOpts {
 
     /// Kommandozeilen-Teil für einen Start: [`ClaudeOpts::args`], die bereinigten freien Reste alter `claude_args`
     /// (`legacy_rest`) und zuletzt die Wertoptionen – so kann kein freier Rest von einem mehrwertigen `--add-dir`
-    /// geschluckt werden; dahinter setzt Paneldeck immer noch `--session-id`/`--resume`/`--continue`.
+    /// geschluckt werden; dahinter setzt Paneldeck höchstens noch `--resume`/`--continue`.
     pub fn launch(&self, kind: Kind, style: PathStyle, legacy_rest: &str) -> LaunchArgs {
         let o = self.sanitized(true);
         let mut line = o.args(kind);

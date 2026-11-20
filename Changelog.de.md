@@ -9,6 +9,16 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.5.0] - WIP
 
+## [2.4.1] - WIP
+
+### Fixed
+
+- Eine Textauswahl im Terminal beginnt jetzt bei dem Zeichen, auf dem die Maustaste gedrückt wurde; die ersten Zeichen fehlen nicht mehr (#300)
+- Chat mit lokalen Modellen: Eine Antwort ohne Text – etwa von einem denkenden Modell wie gemma4, das nur nachgedacht oder dabei seine Token-Grenze erreicht hat – endet nicht mehr still als leere Antwort, sondern zeigt einen Fehler mit „Wiederholen“; denkt das Modell, steht „Denkt nach …“ da (#299)
+- Chat mit lokalen Modellen: Solange noch nichts angekommen ist, zeigt der Chat statt nur „…“, wie lange er schon wartet, und nach 10 Sekunden, dass der Server das Modell vermutlich noch lädt – Ollama zeigt ein Modell erst nach dem Laden in `ollama ps` (#299)
+- Als `localhost` eingetragene Server werden zuerst über 127.0.0.1 und nur ersatzweise über ::1 erreicht, wie bei Ollama selbst; vorher konnte ein anderes Programm, das am selben Port auf ::1 lauscht (z. B. die WSL-Weiterleitung eines zweiten Ollama), die Anfragen bekommen, und der Chat hing (#299)
+- Fortsetzen nach Neustart (#302): Das Häkchen der Sitzung ist jetzt eine Auswahl *Aus* / *Fortsetzen* / *Konversation auswählen*. Neue Konversationen starten als einfaches `claude` (nur die Hook-Einstellungen, ohne `--session-id`). *Fortsetzen* nutzt ab dem ersten Neu laden/Neustart (und beim Programmstart, wenn eingeschaltet) `claude --continue`, wenn der Arbeitsordner eine Konversation hat, sonst startet eine neue. `--continue` nimmt die neueste Konversation des Ordners; sie kann einer anderen Sitzung, einem von Hand gestarteten Claude oder `claude -p` gehören. *Konversation auswählen* zeigt vor jedem Neu laden/Neustart und beim Programmstart die Konversationen des Arbeitsordners (neueste zuerst; in einer anderen Sitzung laufende sind markiert und nicht wählbar) und setzt die gewählte mit `--resume <id>` fort. Neues optionales Feld `claude_resume_mode` in `state.json`/`templates.json`; `claude_continue` wird für ältere Versionen weiter geschrieben.
+
 ## [2.4.0] - 2026-11-19
 
 ### Added
@@ -388,6 +398,7 @@ Erste öffentliche Version. Ab hier gilt die öffentliche API (MCP-Schnittstelle
 - Die Programmdatei enthält keine Pfade des Build-Rechners.
 
 [2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
+[2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
 [2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1

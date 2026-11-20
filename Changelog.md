@@ -9,6 +9,16 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.5.0] - WIP
 
+## [2.4.1] - WIP
+
+### Fixed
+
+- Selecting text in a terminal now starts at the character under the mouse when the button is pressed, so the first characters are no longer missed (#300)
+- Local AI chat: an answer without text – e.g. a thinking model such as gemma4 that only produced thinking output or reached its token limit while thinking – no longer ends silently as an empty reply but shows an error with Retry; thinking output shows "Thinking …" (#299)
+- Local AI chat: while no data has arrived yet, the chat shows how long it has been waiting and, after 10 seconds, that the server is probably still loading the model, instead of only "…" – Ollama lists a model in `ollama ps` only once it has loaded (#299)
+- Servers entered as `localhost` are reached on 127.0.0.1 first and on ::1 only as a fallback, like Ollama itself; before, another program listening on ::1 at the same port (e.g. the WSL relay of a second Ollama) could receive the requests, and the chat hung (#299)
+- Resume after restart (#302): the session's checkbox is now a choice *Off* / *Continue* / *Pick conversation*. New conversations start as plain `claude` (only the hooks settings, no `--session-id`). *Continue* uses `claude --continue` from the first reload/restart on (and at program start, if enabled) when the working folder has a conversation, otherwise it starts a new one. `--continue` takes the folder's most recent conversation, which can belong to another session, a Claude started by hand or `claude -p`. *Pick conversation* lists the working folder's conversations before every reload/restart and at program start (newest first; conversations running in another session are marked and cannot be picked) and resumes the chosen one with `--resume <id>`. New optional field `claude_resume_mode` in `state.json`/`templates.json`; `claude_continue` is still written for older versions.
+
 ## [2.4.0] - 2026-11-19
 
 ### Added
@@ -388,6 +398,7 @@ First public release. From here on, the public API (MCP interface, command line,
 - The executable contains no paths of the build machine.
 
 [2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
+[2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
 [2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1

@@ -304,7 +304,7 @@ impl App {
                             style::toggle(ui, &mut self.settings.claude_mode);
                         });
                         if self.settings.claude_mode {
-                            row(ui, lang.t("Fortsetzen", "Resume"), lang.t("Claude-Sitzungen beim Start mit --resume wiederherstellen", "Restore Claude sessions on start with --resume"), |ui| {
+                            row(ui, lang.t("Fortsetzen", "Resume"), lang.t("Claude-Sitzungen beim Programmstart fortsetzen (nach „Fortsetzen nach Neustart“ der Sitzung)", "Resume Claude sessions at program start (as set in the session's “Resume after restart”)"), |ui| {
                                 style::toggle(ui, &mut self.settings.claude_resume);
                             });
                             ui.add_space(S2);

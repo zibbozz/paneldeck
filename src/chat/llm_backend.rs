@@ -274,6 +274,24 @@ pub fn error_text(e: &LlmError, lang: Lang) -> String {
     }
 }
 
+/// Fehlertext für eine Antwort ohne Text und ohne Werkzeugaufruf (#299). `thought` = das Modell lieferte nur
+/// Denk-Ausgabe, `cut` = es endete an seiner Token-Grenze.
+pub fn empty_answer_text(thought: bool, cut: bool, lang: Lang) -> String {
+    match (thought, cut) {
+        (true, true) => lang.t(
+            "Das Modell hat nur nachgedacht und vor der Antwort seine Token-Grenze erreicht – Kontextlänge in Einstellungen → Modelle erhöhen oder erneut versuchen.",
+            "The model only produced thinking output and reached its token limit before answering – raise the context length in Settings → Models or try again.",
+        ),
+        (true, false) => lang.t("Das Modell hat nur nachgedacht und keine Antwort geliefert – erneut versuchen.", "The model only produced thinking output and no answer – try again."),
+        (false, true) => lang.t(
+            "Das Modell hat vor der Antwort seine Token-Grenze erreicht – Kontextlänge in Einstellungen → Modelle erhöhen.",
+            "The model reached its token limit before answering – raise the context length in Settings → Models.",
+        ),
+        (false, false) => lang.t("Das Modell hat eine leere Antwort geliefert – erneut versuchen.", "The model returned an empty answer – try again."),
+    }
+    .to_string()
+}
+
 /// Führt eine vorbereitete Anfrage aus (im eigenen Thread) und übersetzt die Ereignisse.
 fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::sync::mpsc::Sender<TurnEvent>, repaint: Repaint, lang: Lang) {
     let send = |ev: TurnEvent| {
@@ -294,12 +312,25 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
     }
     let mut ended = false;
     let with_tools = !p.request.tools.is_empty();
+    // Was kam an? Eine Antwort ohne Text und ohne Werkzeugaufruf wäre im Chat unsichtbar (#299).
+    let (mut answered, mut thought) = (false, false);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         llm::chat(t.as_ref(), &p.endpoint, &p.request, &cancel, &mut |ev| match ev {
-            StreamEvent::Delta(d) => send(TurnEvent::Delta(d)),
+            StreamEvent::Delta(d) => {
+                answered |= !d.trim().is_empty();
+                send(TurnEvent::Delta(d))
+            }
+            // Nur einmal melden: die Oberfläche braucht bloß „denkt nach“.
+            StreamEvent::Thinking => {
+                if !thought {
+                    thought = true;
+                    send(TurnEvent::Thinking);
+                }
+            }
             // Ohne angebotene Werkzeuge gibt es keine Aufrufe (ein Modell, das trotzdem welche schickt, bekommt
             // „unknown_tool“/„forbidden“ von der Werkzeug-Schleife).
             StreamEvent::ToolCalls(calls) => {
+                answered |= !calls.is_empty();
                 for c in calls {
                     send(TurnEvent::ToolCall(store::ToolCall { id: c.id, name: c.name, arguments: c.arguments }));
                 }
@@ -307,7 +338,13 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
             StreamEvent::Done { prompt_tokens, completion_tokens, finish_reason } => {
                 ended = true;
                 send(TurnEvent::Usage { prompt_tokens, completion_tokens });
-                if finish_reason.as_deref() == Some("length") {
+                let cut = finish_reason.as_deref() == Some("length");
+                if !answered {
+                    // Leere Antwort: als Fehler mit „Wiederholen“, nie stilles Nichts.
+                    send(TurnEvent::Error(empty_answer_text(thought, cut, lang)));
+                    return;
+                }
+                if cut {
                     send(TurnEvent::Note(cut_off_note(lang)));
                 }
                 send(TurnEvent::Done);
@@ -861,6 +898,120 @@ mod tests {
             other => panic!("{other:?}"),
         }
         h.join().unwrap();
+    }
+
+    #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)
+    /// Wie Ollama mit gemma4 (#299): Server nur auf 127.0.0.1, eingetragen ist `localhost`; erst Denk-Ausgabe, dann Text.
+    #[test]
+    fn end_to_end_thinking_model_answers() {
+        let body = concat!(
+            "{\"model\":\"m1\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"The user\"},\"done\":false}\n",
+            "{\"model\":\"m1\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\" greets me.\"},\"done\":false}\n",
+            "{\"model\":\"m1\",\"message\":{\"role\":\"assistant\",\"content\":\"Hello!\"},\"done\":false}\n",
+            "{\"model\":\"m1\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":40,\"eval_count\":9}\n"
+        );
+        let (base, h) = serve(format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{body}").into_bytes());
+        let base = base.replace("127.0.0.1", "localhost");
+        let ev = collect(&LlmBackend::new().start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![server(&base, ServerKind::Ollama)]), Arc::new(|| {})));
+        assert_eq!(ev.iter().filter(|e| **e == TurnEvent::Thinking).count(), 1, "„denkt nach“ nur einmal: {ev:?}");
+        assert_eq!(text(&ev), "Hello!");
+        assert_eq!(ev.last(), Some(&TurnEvent::Done));
+        assert!(h.join().unwrap().starts_with("POST /api/chat HTTP/1.1"));
+    }
+
+    #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)
+    /// Eine Antwort ohne Text und ohne Werkzeugaufruf war im Chat unsichtbar (#299): jetzt ein Fehler mit „Wiederholen“.
+    #[test]
+    fn end_to_end_empty_answers_are_visible_errors() {
+        let only_thinking = concat!(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"Hmm …\"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\",\"prompt_eval_count\":40,\"eval_count\":2048}\n"
+        );
+        let empty = "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let blank = "{\"message\":{\"role\":\"assistant\",\"content\":\"\\n\\n\"},\"done\":false}\n{\"done\":true,\"done_reason\":\"stop\"}\n";
+        for (body, want) in [(only_thinking, empty_answer_text(true, true, Lang::En)), (empty, empty_answer_text(false, false, Lang::En)), (blank, empty_answer_text(false, false, Lang::En))] {
+            let (base, h) = serve(format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{body}").into_bytes());
+            let ev = collect(&LlmBackend::new().start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![server(&base, ServerKind::Ollama)]), Arc::new(|| {})));
+            assert_eq!(ev.last(), Some(&TurnEvent::Error(want.clone())), "{ev:?}");
+            assert!(!ev.contains(&TurnEvent::Done), "{ev:?}");
+            h.join().unwrap();
+        }
+        // Im Chat: die leere Antwort trägt den Fehler (rote Box mit „Wiederholen“) statt still leer zu bleiben.
+        let (base, h) = serve(format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{empty}").into_bytes());
+        let mut c = super::super::ChatState::new(store::ChatFile::default(), None);
+        c.draft = "hi".into();
+        assert!(c.send(&LlmBackend::new(), &meta(), &cx(vec![server(&base, ServerKind::Ollama)]), Arc::new(|| {})));
+        let t = std::time::Instant::now();
+        while c.streaming() && t.elapsed() < Duration::from_secs(20) {
+            c.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(c.has_error(), "{:?}", c.messages());
+        assert_eq!(c.messages().last().unwrap().error.as_deref(), Some(empty_answer_text(false, false, Lang::En).as_str()));
+        h.join().unwrap();
+    }
+
+    #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)
+    /// Wie im Bericht #299, aber mit allem, was die Verbindungsprüfung NICHT hat: Stufe „Steuern“ (alle Werkzeuge,
+    /// großer Rumpf), `localhost` gegen einen Server nur auf 127.0.0.1, Antwort wie Go/Ollama (chunked, erst nach einer
+    /// Pause wie beim Laden des Modells, dann in Stücken). Der Server prüft, dass der ganze Rumpf ankommt.
+    #[test]
+    fn end_to_end_control_level_big_body_chunked_like_ollama() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://localhost:{}", l.local_addr().unwrap().port());
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            let (mut buf, mut tmp) = (Vec::new(), [0u8; 8192]);
+            let head_end = loop {
+                let n = s.read(&mut tmp).unwrap();
+                assert!(n > 0, "Verbindung zu früh zu");
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let len: usize = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).expect("Content-Length");
+            while buf.len() < head_end + len {
+                let n = s.read(&mut tmp).unwrap();
+                assert!(n > 0, "Rumpf unvollständig");
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let body: serde_json::Value = serde_json::from_slice(&buf[head_end..head_end + len]).expect("Rumpf ist JSON");
+            // „Modell lädt“: Kopfzeilen erst nach einer Pause, dann Stücke mit Pausen dazwischen.
+            std::thread::sleep(Duration::from_millis(1500));
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+            for line in ["{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"hm\"},\"done\":false}\n", "{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"done\":false}\n", "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n"] {
+                s.write_all(format!("{:x}\r\n{line}\r\n", line.len()).as_bytes()).unwrap();
+                s.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            // Nach `done` liest der Client nicht mehr und schließt – das letzte Stück darf scheitern.
+            let _ = s.write_all(b"0\r\n\r\n");
+            (head, len, body)
+        });
+        let mut s = server(&base, ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
+        let ev = collect(&LlmBackend::new().start(&meta(), &[msg(store::Role::User, "hi")], &cx(vec![s]), Arc::new(|| {})));
+        assert_eq!(text(&ev), "Hi", "{ev:?}");
+        assert_eq!(ev.last(), Some(&TurnEvent::Done));
+        let (head, len, body) = h.join().unwrap();
+        assert!(head.starts_with("POST /api/chat HTTP/1.1") && head.contains("Host: localhost:"), "{head}");
+        assert!(len > 20_000, "großer Rumpf mit allen Werkzeugen: {len}");
+        assert!(body["tools"].as_array().is_some_and(|t| t.len() > 10), "Werkzeuge gesendet");
+        eprintln!("CHAT BODY {len} bytes, {} tools", body["tools"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn empty_answer_texts_in_both_languages() {
+        for lang in [Lang::En, Lang::De] {
+            let all = [(true, true), (true, false), (false, true), (false, false)].map(|(t, c)| empty_answer_text(t, c, lang));
+            assert!(all.iter().all(|s| !s.is_empty()));
+            assert_eq!(all.iter().collect::<std::collections::HashSet<_>>().len(), 4, "vier verschiedene Texte");
+        }
+        assert!(empty_answer_text(true, true, Lang::De).contains("Einstellungen → Modelle"));
+        assert!(empty_answer_text(false, false, Lang::En).contains("empty answer"));
     }
 
     /// Geschätzte Tokens von Systemprompt und Werkzeug-Beschreibungen je Stufe (eingebaute Vorlage, EN/DE, einfacher
