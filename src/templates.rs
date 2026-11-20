@@ -57,6 +57,11 @@ pub struct TplItem {
     /// Beim Start einmalig die letzte Konversation im Ordner fortsetzen (`--continue`, #244); nur Starts des Nutzers.
     #[serde(skip_serializing_if = "is_false", deserialize_with = "lenient")]
     pub continue_last: bool,
+    /// „Fortsetzen nach Neustart“ der Sitzung (seit 2.4.1, #302): `off` / `pick`; fehlt = aus `claude_continue`
+    /// (`false` → aus, sonst fortsetzen). Unbekannte Werte laden wie fehlend. Nur über [`TplItem::resume_mode`] /
+    /// [`TplItem::set_resume_mode`] lesen und setzen.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::state::ResumeMode::lenient")]
+    pub claude_resume_mode: Option<crate::state::ResumeMode>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq, Debug)]
@@ -73,6 +78,17 @@ pub struct Template {
 }
 
 impl TplItem {
+    /// Wirksames „Fortsetzen nach Neustart“ (#302).
+    pub fn resume_mode(&self) -> crate::state::ResumeMode {
+        self.claude_resume_mode.unwrap_or(crate::state::ResumeMode::from_bool(self.claude_continue != Some(false)))
+    }
+
+    /// Setzt den Modus samt `claude_continue` (für ältere Versionen nur „aus“ gespeichert).
+    pub fn set_resume_mode(&mut self, m: crate::state::ResumeMode) {
+        self.claude_resume_mode = m.stored();
+        self.claude_continue = (m == crate::state::ResumeMode::Off).then_some(false);
+    }
+
     /// Startoptionen der Vorlage: die gespeicherten, sonst die aus der alten Zeile `claude_args` (ohne die Rechte
     /// erweiternden Wertoptionen – die Zeile kann aus einer weitergegebenen Vorlage stammen). Nie `bypassPermissions`.
     pub fn opts(&self) -> ClaudeOpts {
@@ -355,6 +371,25 @@ mod tests {
         assert!(s.contains(r#""claude_continue":false"#), "{s}");
         let back: TplItem = serde_json::from_str(&s).unwrap();
         assert_eq!(back.claude_continue, Some(false));
+        assert_eq!(back.resume_mode(), crate::state::ResumeMode::Off);
+        assert_eq!(old[0].items[0].resume_mode(), crate::state::ResumeMode::Continue);
+    }
+
+    /// #302: „Fortsetzen nach Neustart“ in Vorlagen – drei Werte, `claude_continue` für ältere Versionen.
+    #[test]
+    fn resume_mode_round_trips_in_templates() {
+        use crate::state::ResumeMode;
+        for (m, cont) in [(ResumeMode::Off, Some(false)), (ResumeMode::Continue, None), (ResumeMode::Pick, None)] {
+            let mut it = TplItem::default();
+            it.set_resume_mode(m);
+            assert_eq!(it.claude_continue, cont, "{m:?}");
+            let s = serde_json::to_string(&it).unwrap();
+            assert_eq!(s.contains("claude_resume_mode"), m != ResumeMode::Continue, "{s}");
+            let back: TplItem = serde_json::from_str(&s).unwrap();
+            assert_eq!(back.resume_mode(), m);
+        }
+        let it: TplItem = serde_json::from_str(r#"{"claude_resume_mode":"irgendwas"}"#).unwrap();
+        assert_eq!(it.resume_mode(), ResumeMode::Continue);
     }
 
     #[test]

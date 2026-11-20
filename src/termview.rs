@@ -500,13 +500,52 @@ fn emoji_cluster(
     crate::emoji::shape(&cps).map(|g| (g, used, span))
 }
 
-fn point_at(session: &Session, inner: Rect, cs: Vec2, pos: Pos2) -> (Point, Side) {
+/// Zelle (mit Seite) unter `pos`; `offset` = Scroll-Position im Verlauf (`display_offset`).
+fn grid_point(cols: u16, rows: u16, offset: usize, inner: Rect, cs: Vec2, pos: Pos2) -> (Point, Side) {
     let rel = pos - inner.min;
-    let col = (rel.x / cs.x).floor().clamp(0.0, session.cols as f32 - 1.0) as usize;
-    let row = (rel.y / cs.y).floor().clamp(0.0, session.rows as f32 - 1.0) as i32;
+    let col = (rel.x / cs.x).floor().clamp(0.0, cols as f32 - 1.0) as usize;
+    let row = (rel.y / cs.y).floor().clamp(0.0, rows as f32 - 1.0) as i32;
     let side = if (rel.x / cs.x).fract() < 0.5 { Side::Left } else { Side::Right };
-    let offset = session.term.lock().unwrap_or_else(|e| e.into_inner()).grid().display_offset() as i32;
-    (Point::new(Line(row - offset), Column(col)), side)
+    (Point::new(Line(row - offset as i32), Column(col)), side)
+}
+
+/// Textauswahl mit der linken Maustaste (ohne an das Programm weitergeleitete Maus):
+/// Dreifachklick = Zeile, Doppelklick = Wort, Ziehen = Bereich, einfacher Klick = Auswahl aufheben.
+/// Der Anker einer gezogenen Auswahl ist die Zelle, auf der die Taste **gedrückt** wurde (#300): egui meldet den
+/// Zug erst nach ein paar Pixeln Bewegung, dessen Position wäre schon hinter den ersten Zeichen.
+fn select_with_pointer<L: alacritty_terminal::event::EventListener>(
+    ui: &Ui,
+    response: &Response,
+    term: &mut alacritty_terminal::Term<L>,
+    cols: u16,
+    rows: u16,
+    inner: Rect,
+    cs: Vec2,
+) {
+    let Some(pos) = response.interact_pointer_pos() else { return };
+    let offset = term.grid().display_offset();
+    let at = |p: Pos2| grid_point(cols, rows, offset, inner, cs, p);
+    if response.triple_clicked() {
+        let (p, s) = at(pos);
+        term.selection = Some(Selection::new(SelectionType::Lines, p, s));
+    } else if response.double_clicked() {
+        let (p, s) = at(pos);
+        term.selection = Some(Selection::new(SelectionType::Semantic, p, s));
+    } else if response.drag_started_by(egui::PointerButton::Primary) {
+        let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
+        let (a, a_side) = at(origin);
+        let mut sel = Selection::new(SelectionType::Simple, a, a_side);
+        let (p, s) = at(pos);
+        sel.update(p, s);
+        term.selection = Some(sel);
+    } else if response.dragged_by(egui::PointerButton::Primary) {
+        let (p, s) = at(pos);
+        if let Some(sel) = term.selection.as_mut() {
+            sel.update(p, s);
+        }
+    } else if response.clicked_by(egui::PointerButton::Primary) {
+        term.selection = None;
+    }
 }
 
 /// Kodierung der Mausereignisse, wie sie das Programm angefordert hat: SGR (DECSET 1006), UTF-8 (1005) oder die
@@ -776,24 +815,10 @@ fn handle_mouse(ui: &Ui, response: &Response, session: &mut Session, inner: Rect
             }
         }
     }
-    if let Some(pos) = response.interact_pointer_pos().filter(|_| !forwarding) {
-        if response.triple_clicked() {
-            let (p, s) = point_at(session, inner, cs, pos);
-            session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = Some(Selection::new(SelectionType::Lines, p, s));
-        } else if response.double_clicked() {
-            let (p, s) = point_at(session, inner, cs, pos);
-            session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = Some(Selection::new(SelectionType::Semantic, p, s));
-        } else if response.drag_started_by(egui::PointerButton::Primary) {
-            let (p, s) = point_at(session, inner, cs, pos);
-            session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = Some(Selection::new(SelectionType::Simple, p, s));
-        } else if response.dragged_by(egui::PointerButton::Primary) {
-            let (p, s) = point_at(session, inner, cs, pos);
-            if let Some(sel) = session.term.lock().unwrap_or_else(|e| e.into_inner()).selection.as_mut() {
-                sel.update(p, s);
-            }
-        } else if response.clicked_by(egui::PointerButton::Primary) {
-            session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
-        }
+    if !forwarding && response.interact_pointer_pos().is_some() {
+        let (cols, rows) = (session.cols, session.rows);
+        let mut term = session.term.lock().unwrap_or_else(|e| e.into_inner());
+        select_with_pointer(ui, response, &mut term, cols, rows, inner, cs);
     }
 
     // Rechtsklick: Auswahl kopieren, sonst einfügen (wie Windows Terminal).
@@ -1174,6 +1199,128 @@ mod tests {
         let mut p: Processor = Processor::new();
         p.advance(&mut term, bytes.as_bytes());
         *term.mode()
+    }
+
+    /// Headless egui mit synthetischen Zeigerereignissen über einem 20×5-Terminal (Zelle 10×20 Punkte, ab (0,0)).
+    struct PointerRig {
+        ctx: egui::Context,
+        term: Term<VoidListener>,
+        t: f64,
+    }
+
+    impl PointerRig {
+        const CS: Vec2 = Vec2::new(10.0, 20.0);
+
+        fn new(text: &str) -> Self {
+            let mut term = Term::new(Config::default(), &TermSize::new(20, 5), VoidListener);
+            let mut p: Processor = Processor::new();
+            p.advance(&mut term, text.as_bytes());
+            let mut rig = PointerRig { ctx: egui::Context::default(), term, t: 0.0 };
+            // Der erste Durchlauf einer `Area` ist unsichtbar (Größe messen) und nimmt keine Eingaben an.
+            rig.frame(Vec::new());
+            rig
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            self.t += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))),
+                time: Some(self.t),
+                events,
+                ..Default::default()
+            };
+            let term = &mut self.term;
+            let _ = self.ctx.run(input, |ctx| {
+                egui::Area::new(Id::new("rig")).fixed_pos(Pos2::ZERO).show(ctx, |ui| {
+                    let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 100.0));
+                    let resp = ui.interact(rect, Id::new("term"), Sense::click_and_drag());
+                    select_with_pointer(ui, &resp, term, 20, 5, rect, Self::CS);
+                });
+            });
+        }
+
+        fn moved(&mut self, x: f32, y: f32) {
+            self.frame(vec![egui::Event::PointerMoved(Pos2::new(x, y))]);
+        }
+
+        fn button(&mut self, x: f32, y: f32, pressed: bool) {
+            self.frame(vec![egui::Event::PointerButton {
+                pos: Pos2::new(x, y),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            }]);
+        }
+
+        fn selected(&self) -> Option<String> {
+            self.term.selection_to_string()
+        }
+    }
+
+    #[test]
+    fn a_drag_selection_starts_at_the_cell_under_the_press() {
+        // #300: Gedrückt auf „e“ (Spalte 1, linke Hälfte), dann nach rechts gezogen: das „e“ gehört dazu, obwohl egui
+        // den Zug erst nach ein paar Pixeln meldet.
+        let mut r = PointerRig::new("hello world");
+        r.moved(5.0, 5.0);
+        r.moved(12.0, 5.0);
+        r.button(12.0, 5.0, true);
+        r.moved(16.0, 5.0); // noch unter der Zug-Schwelle: keine Auswahl
+        assert_eq!(r.selected(), None);
+        r.moved(52.0, 5.0); // Zug erkannt, Zeiger auf Spalte 5
+        assert_eq!(r.selected().as_deref(), Some("ello"));
+        r.moved(78.0, 5.0); // weiter ziehen erweitert vom Anker aus
+        assert_eq!(r.selected().as_deref(), Some("ello wo"));
+        r.button(78.0, 5.0, false);
+        assert_eq!(r.selected().as_deref(), Some("ello wo"));
+        // Nach links über den Anker hinaus: Auswahl dreht sich um den Druckpunkt.
+        let mut r = PointerRig::new("hello world");
+        r.moved(60.0, 5.0);
+        r.button(62.0, 5.0, true); // Spalte 6 („w“), linke Hälfte
+        r.moved(20.0, 5.0); // Spalte 2, linke Hälfte
+        assert_eq!(r.selected().as_deref(), Some("llo "));
+        r.button(20.0, 5.0, false);
+        // Mehrere Zeilen: der Anker bleibt in der ersten Zeile.
+        let mut r = PointerRig::new("abcdef\r\nghijkl");
+        r.moved(22.0, 5.0);
+        r.button(22.0, 5.0, true);
+        r.moved(42.0, 25.0);
+        assert_eq!(r.selected().as_deref(), Some("cdef\nghij"));
+        r.button(42.0, 25.0, false);
+    }
+
+    #[test]
+    fn a_click_without_movement_selects_nothing_and_clears() {
+        let mut r = PointerRig::new("hello world");
+        r.moved(12.0, 5.0);
+        r.button(12.0, 5.0, true);
+        r.moved(42.0, 5.0);
+        r.button(42.0, 5.0, false);
+        assert_eq!(r.selected().as_deref(), Some("ell"));
+        r.t += 1.0; // kein Doppelklick
+        r.moved(100.0, 5.0);
+        r.button(100.0, 5.0, true);
+        assert_eq!(r.selected().as_deref(), Some("ell"), "Drücken allein ändert nichts");
+        r.button(100.0, 5.0, false);
+        assert_eq!(r.selected(), None, "Klick hebt die Auswahl auf");
+        r.t += 1.0;
+        r.button(100.0, 5.0, true);
+        r.button(101.0, 5.0, false);
+        assert_eq!(r.selected(), None, "Klick ohne Bewegung wählt nichts aus");
+    }
+
+    #[test]
+    fn double_and_triple_click_still_select_word_and_line() {
+        let mut r = PointerRig::new("hello world\r\nnext");
+        r.moved(72.0, 5.0);
+        r.button(72.0, 5.0, true);
+        r.button(72.0, 5.0, false);
+        r.button(72.0, 5.0, true);
+        r.button(72.0, 5.0, false);
+        assert_eq!(r.selected().as_deref(), Some("world"));
+        r.button(72.0, 5.0, true);
+        r.button(72.0, 5.0, false);
+        assert_eq!(r.selected().as_deref(), Some("hello world\n"));
     }
 
     #[test]

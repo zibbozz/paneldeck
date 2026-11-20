@@ -464,8 +464,60 @@ pub struct SessionMeta {
     pub agent_chain: Vec<u64>,
     /// Claude-Sitzung (seit 2.3.0): „Neu laden“/„Neu starten“ setzt die Konversation fort (`--resume`) statt eine neue
     /// zu beginnen. Standard an (so verhielt sich der Neustart bisher); fehlt in der Datei, solange es an ist.
+    /// Ab 2.4.1 (#302) nur noch Spiegel von `claude_resume_mode` für ältere Versionen: `false` = „Aus“, sonst an.
     #[serde(skip_serializing_if = "is_true", deserialize_with = "lenient_bool_true")]
     pub claude_continue: bool,
+    /// „Fortsetzen nach Neustart“ (seit 2.4.1, #302): `off` / `continue` / `pick`. Fehlt = aus `claude_continue`
+    /// abgeleitet (`true` → `continue`, `false` → `off`); unbekannte Werte laden wie ein fehlendes Feld (und gehen beim
+    /// Speichern verloren). Geschrieben wird
+    /// es nur, wenn es nicht `continue` ist; `claude_continue` wird weiter mitgeschrieben (ältere Versionen).
+    /// Lesen und Setzen nur über [`SessionMeta::resume_mode`] / [`SessionMeta::set_resume_mode`].
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ResumeMode::lenient")]
+    pub claude_resume_mode: Option<ResumeMode>,
+}
+
+/// „Fortsetzen nach Neustart“ einer Claude-Sitzung (#302).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResumeMode {
+    /// Jeder Start beginnt eine neue Konversation.
+    Off,
+    /// Erster Start neu, ab dem ersten Neu laden/Neustart `claude --continue` (sofern es im Ordner schon eine gibt).
+    #[default]
+    Continue,
+    /// Bei jedem Neu laden/Neustart die Konversation aus der Liste des Arbeitsordners auswählen.
+    Pick,
+}
+
+impl ResumeMode {
+    /// Aus `claude_continue` (Dateien vor 2.4.1).
+    pub fn from_bool(on: bool) -> Self {
+        if on { ResumeMode::Continue } else { ResumeMode::Off }
+    }
+
+    /// Nachsichtig lesen: unbekannte Werte und falsche Typen zählen als fehlend (dann entscheidet `claude_continue`).
+    pub fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Self>, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(serde_json::from_value(v).ok())
+    }
+
+    /// Wert für Felder neben `claude_continue`: nur, was nicht der Standard ist.
+    pub fn stored(self) -> Option<Self> {
+        (self != ResumeMode::Continue).then_some(self)
+    }
+}
+
+impl SessionMeta {
+    /// Wirksames „Fortsetzen nach Neustart“ (#302).
+    pub fn resume_mode(&self) -> ResumeMode {
+        self.claude_resume_mode.unwrap_or(ResumeMode::from_bool(self.claude_continue))
+    }
+
+    /// Setzt den Modus samt `claude_continue` (für ältere Versionen: an bei `continue`/`pick`).
+    pub fn set_resume_mode(&mut self, m: ResumeMode) {
+        self.claude_resume_mode = m.stored();
+        self.claude_continue = m != ResumeMode::Off;
+    }
 }
 
 fn is_true(v: &bool) -> bool {
@@ -580,6 +632,7 @@ impl Default for SessionMeta {
             minimized: false,
             slot: None,
             claude_continue: true,
+            claude_resume_mode: None,
             claude_opts: Default::default(),
             agent_chain: Vec::new(),
         }
@@ -1670,6 +1723,42 @@ mod kind_tests {
         let back: SessionMeta = serde_json::from_str(r#"{"id":5,"claude_continue":"no"}"#).unwrap();
         assert!(back.claude_continue);
         assert_eq!(back.id, 5);
+    }
+
+    /// #302: „Fortsetzen nach Neustart“ mit drei Werten; alte Dateien (nur `claude_continue`) werden übernommen,
+    /// `claude_continue` wird für ältere Versionen weiter geschrieben.
+    #[test]
+    fn claude_resume_mode_migrates_from_the_old_bool_and_round_trips() {
+        // alt: an/fehlt → fortsetzen, aus → aus
+        let old: SessionMeta = serde_json::from_str(r#"{"id":1,"claude":true}"#).unwrap();
+        assert_eq!(old.resume_mode(), ResumeMode::Continue);
+        let old: SessionMeta = serde_json::from_str(r#"{"id":1,"claude":true,"claude_continue":false}"#).unwrap();
+        assert_eq!(old.resume_mode(), ResumeMode::Off);
+        // neu: jeder Modus übersteht die Rundreise; ältere Versionen lesen `claude_continue`
+        for (m, cont, field) in [
+            (ResumeMode::Off, false, Some(r#""claude_resume_mode":"off""#)),
+            (ResumeMode::Continue, true, None),
+            (ResumeMode::Pick, true, Some(r#""claude_resume_mode":"pick""#)),
+        ] {
+            let mut meta = SessionMeta { id: 2, claude: true, ..SessionMeta::default() };
+            meta.set_resume_mode(m);
+            assert_eq!(meta.claude_continue, cont, "{m:?}");
+            let s = serde_json::to_string(&meta).unwrap();
+            match field {
+                Some(f) => assert!(s.contains(f), "{s}"),
+                None => assert!(!s.contains("claude_resume_mode") && !s.contains("claude_continue"), "{s}"),
+            }
+            assert_eq!(s.contains(r#""claude_continue":false"#), !cont, "{s}");
+            let back: SessionMeta = serde_json::from_str(&s).unwrap();
+            assert_eq!(back.resume_mode(), m);
+        }
+        // Das neue Feld gewinnt; unbekannte Werte/Typen laden wie fehlend (dann zählt `claude_continue`)
+        let m: SessionMeta = serde_json::from_str(r#"{"id":3,"claude_continue":true,"claude_resume_mode":"pick"}"#).unwrap();
+        assert_eq!(m.resume_mode(), ResumeMode::Pick);
+        let m: SessionMeta = serde_json::from_str(r#"{"id":3,"claude_continue":false,"claude_resume_mode":"später"}"#).unwrap();
+        assert_eq!((m.id, m.resume_mode()), (3, ResumeMode::Off));
+        let m: SessionMeta = serde_json::from_str(r#"{"id":3,"claude_resume_mode":7}"#).unwrap();
+        assert_eq!(m.resume_mode(), ResumeMode::Continue);
     }
 
     #[test]

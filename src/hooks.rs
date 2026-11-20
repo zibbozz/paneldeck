@@ -80,6 +80,13 @@ pub fn session_end_is_exit(m: &HookMsg) -> bool {
     m.event == "SessionEnd" && !matches!(m.reason.as_deref(), Some("clear" | "resume"))
 }
 
+/// Meldet SessionEnd eindeutig, dass Claude beendet wurde (`/exit`, Abmelden, Rechte-Modus abgeschaltet)? Strenger als
+/// [`session_end_is_exit`]: `other` oder ein fehlender Grund zählen nicht (#302) – damit ein `/resume` im laufenden
+/// Claude nicht wie ein Ende aussieht.
+pub fn session_end_is_quit(m: &HookMsg) -> bool {
+    m.event == "SessionEnd" && matches!(m.reason.as_deref(), Some("prompt_input_exit" | "logout" | "bypass_permissions_disabled"))
+}
+
 /// Stammt die Meldung vom laufenden Start der Sitzung (#260)? `current` = Schlüssel dieses Starts (`Entry::session_key`).
 /// Ohne oder mit falschem Schlüssel (anderes Terminal, Prozess eines früheren Starts, Fälschung) nie.
 pub fn key_matches(current: &str, sent: Option<&str>) -> bool {
@@ -131,7 +138,7 @@ pub enum ConvMatch {
 pub struct ConvBinding {
     /// Zugeordnete Konversation des laufenden Claude.
     pub bound: Option<String>,
-    /// Beim Start übergebene Konversations-ID (`--session-id`/`--resume`): solange noch nichts zugeordnet ist, zählt
+    /// Beim Start übergebene Konversations-ID (`--resume`): solange noch nichts zugeordnet ist, zählt
     /// nur sie. Fällt weg, sobald der beim Start aufgerufene Claude endet.
     pub expect: Option<String>,
     /// Der Start hat die Hooks abgeschaltet (`--safe-mode`): alle Meldungen stammen dann von anderen Prozessen (z. B.
@@ -143,11 +150,26 @@ pub struct ConvBinding {
     /// „fremd“ und der Status eingefroren. Fällt weg, sobald sich die zugeordnete Konversation wieder meldet (sie lebt
     /// also doch) oder eine neue zugeordnet ist.
     pub open: bool,
+    /// Beim Start übergebene Konversations-ID; bleibt für den ganzen Start (anders als `expect`).
+    pub launched: Option<String>,
+    /// Es meldet sich noch der Claude, den der Hub gestartet hat: kein Ende (SessionEnd mit Beenden, Prompt der Shell)
+    /// seit dem Start. Ein danach im selben Terminal von Hand gestarteter Claude gehört nicht zur Sitzung (#302).
+    pub chain: bool,
+    /// Die zugeordnete Konversation gehört der Sitzung (#302): die beim Start übergebene ID, die mit `--continue`
+    /// fortgesetzte oder eine, zu der der vom Hub gestartete Claude selbst gewechselt hat (`/clear`, `/resume`,
+    /// Zusammenfassen). Nur sie wird in der Sitzung gespeichert und später mit `--resume` fortgesetzt – nie die eines
+    /// von Hand gestarteten Claude oder eines anderen Prozesses mit dem Schlüssel der Sitzung.
+    pub own: bool,
+    /// Die eigene Konversation endete ohne eindeutiges Beenden (`clear`, `resume`, `other`, kein Grund): Der gestartete
+    /// Claude läuft vermutlich mit einer anderen weiter. Der nächste SessionStart gehört der Sitzung nur mit `source`
+    /// `clear`/`resume`/`compact` – ein `startup` ist ein neu gestarteter Claude (#302).
+    pub soft_end: bool,
 }
 
 impl ConvBinding {
     pub fn launch(expect: Option<String>, hooks_off: bool) -> Self {
-        ConvBinding { bound: None, expect: expect.filter(|e| !e.is_empty()), hooks_off, open: false }
+        let expect = expect.filter(|e| !e.is_empty());
+        ConvBinding { bound: None, launched: expect.clone(), expect, hooks_off, open: false, chain: true, own: false, soft_end: false }
     }
 
     /// Die Shell zeigt nach dem Startbefehl wieder ihren Prompt: Was darin an Claude lief, ist beendet. Ein von Claude
@@ -155,10 +177,12 @@ impl ConvBinding {
     /// Prompt aus.
     pub fn shell_prompt(&mut self) {
         self.open = true;
+        self.chain = false;
     }
 
     /// Meldung `m` zuordnen und den Zustand fortschreiben. Eine neue Konversation zählt nur
-    /// - als erste des Starts: mit der beim Start übergebenen ID, ohne solche (`--continue`) nur über SessionStart;
+    /// - als erste des Starts: mit der beim Start übergebenen ID, ohne solche (neuer Start, `--continue`, #302) nur über
+    ///   SessionStart – der erste des gestarteten Claude gehört der Sitzung (`own`);
     /// - nach dem Ende der zugeordneten Konversation (SessionEnd, z. B. Claude beendet und im selben Terminal neu
     ///   gestartet): wieder über SessionStart;
     /// - als Wechsel über SessionStart mit `source` `clear`/`resume`/`compact`;
@@ -186,6 +210,16 @@ impl ConvBinding {
         };
         match &r {
             ConvMatch::Bind(id) | ConvMatch::Switch(id) => {
+                // Der Sitzung gehört sie nur, wenn sie die beim Start übergebene ist oder der gestartete Claude noch läuft
+                // (`/clear`, `/resume`, `--continue`) – nicht nach seinem Ende (#302). Nach einem nicht eindeutigen Ende
+                // der eigenen Konversation zählt nur ein Wechsel (`clear`/`resume`/`compact`), nie ein `startup`.
+                let switch = matches!(m.source.as_deref(), Some("clear" | "resume" | "compact"));
+                self.own = self.launched.as_deref() == Some(id.as_str()) || (self.chain && (!self.soft_end || switch));
+                if !self.own {
+                    // Ein anderer Claude meldet sich: der gestartete läuft nicht mehr (oder nicht mehr zuordenbar).
+                    self.chain = false;
+                }
+                self.soft_end = false;
                 self.bound = Some(id.clone());
                 self.expect = None;
                 self.open = false;
@@ -193,13 +227,31 @@ impl ConvBinding {
             // Der Claude dieser Konversation ist beendet: ein im selben Terminal neu gestarteter Claude darf sich mit
             // seinem SessionStart wieder zuordnen.
             ConvMatch::Same if m.event == "SessionEnd" => {
+                // Die eigene Konversation meldet sich: der gestartete Claude lief bis eben (auch nach einem vorgetäuschten
+                // Prompt der Shell). Eindeutig beendet (#302): was sich danach meldet, hat nicht der Hub gestartet; sonst
+                // (`/clear`, `/resume`, `other`) zählt nur ein folgender Wechsel als eigene Konversation.
+                if self.own {
+                    self.chain = true;
+                }
+                if session_end_is_quit(m) {
+                    self.chain = false;
+                } else if self.own {
+                    self.soft_end = true;
+                }
                 self.bound = None;
                 self.expect = None;
                 self.open = false;
+                self.own = false;
             }
             // Die zugeordnete Konversation meldet sich weiter: sie lebt, der Prompt der Shell hat getäuscht (Claude
             // angehalten, ungewöhnlicher Startbefehl). Ab jetzt wieder streng – ein `claude -p` übernimmt nichts.
-            ConvMatch::Same => self.open = false,
+            // War sie die der Sitzung, läuft auch der gestartete Claude noch.
+            ConvMatch::Same => {
+                self.open = false;
+                if self.own {
+                    self.chain = true;
+                }
+            }
             _ => {}
         }
         r
@@ -469,16 +521,6 @@ pub(crate) fn random_hex() -> String {
         b[8..16].copy_from_slice(&c.to_le_bytes());
     }
     b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-/// UUID v4 (für `claude --session-id`).
-pub fn new_uuid() -> String {
-    let h = random_hex();
-    let mut b: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap_or(0)).collect();
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let x: String = b.iter().map(|v| format!("{v:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &x[0..8], &x[8..12], &x[12..16], &x[16..20], &x[20..32])
 }
 
 /// Befehle einer zweiten Programminstanz (z. B. Explorer-Kontextmenü).
@@ -1446,7 +1488,8 @@ mod tests {
         assert_eq!(c.bound.as_deref(), Some("A"));
         // Ende der eigenen Konversation: Zuordnung frei
         assert_eq!(c.feed(&msg("SessionEnd", "A", None)), ConvMatch::Same);
-        assert_eq!(c, ConvBinding::default());
+        // Ohne eindeutigen Grund (#302): der gestartete Claude könnte weiterlaufen – nur ein Wechsel gehört noch der Sitzung
+        assert_eq!((c.bound.as_deref(), c.expect.as_deref(), c.open, c.chain, c.own, c.soft_end), (None, None, false, true, false, true));
         // Vor einem neuen SessionStart zählen fremde Meldungen nicht
         assert_eq!(c.feed(&msg("UserPromptSubmit", "X", None)), ConvMatch::Foreign);
         // `claude` erneut im selben Terminal: neue ID, wird zugeordnet und bleibt es
@@ -1456,6 +1499,54 @@ mod tests {
         // /clear: SessionEnd der alten, SessionStart der neuen Konversation
         assert_eq!(c.feed(&msg("SessionEnd", "B", None)), ConvMatch::Same);
         assert_eq!(c.feed(&msg("SessionStart", "D", Some("clear"))), ConvMatch::Bind("D".into()));
+    }
+
+    /// #302: Ein neuer Start ohne Konversations-ID (nur `claude`): der erste SessionStart (`startup`) des gestarteten
+    /// Claude ist die Konversation der Sitzung; `/clear` und `/resume` wechseln sie; ein nach `/exit` von Hand gestarteter
+    /// Claude gehört nie dazu, ebenso wenig einer nach dem Prompt der Shell (gestarteter Claude beendet).
+    #[test]
+    fn a_fresh_launch_without_id_owns_the_first_startup_only() {
+        let msg = |ev: &str, id: &str, src: Option<&str>, reason: Option<&str>| HookMsg {
+            event: ev.into(),
+            claude_session: Some(id.into()),
+            source: src.map(str::to_string),
+            reason: reason.map(str::to_string),
+            ..HookMsg::default()
+        };
+        let mut c = ConvBinding::launch(None, false);
+        assert_eq!((c.expect.as_deref(), c.launched.as_deref(), c.chain), (None, None, true));
+        assert_eq!(c.feed(&msg("SessionStart", "A", Some("startup"), None)), ConvMatch::Bind("A".into()));
+        assert!(c.own, "erster SessionStart des gestarteten Claude");
+        assert_eq!(c.feed(&msg("SessionStart", "N", Some("startup"), None)), ConvMatch::Foreign, "claude -p, solange A läuft");
+        // /clear: neue eigene Konversation
+        assert_eq!(c.feed(&msg("SessionEnd", "A", None, Some("clear"))), ConvMatch::Same);
+        assert_eq!(c.feed(&msg("SessionStart", "C", Some("clear"), None)), ConvMatch::Bind("C".into()));
+        assert!(c.own);
+        // /resume (SessionEnd mit Grund `other`/`resume` oder ohne): die fortgesetzte gehört der Sitzung
+        assert_eq!(c.feed(&msg("SessionEnd", "C", None, Some("resume"))), ConvMatch::Same);
+        assert_eq!(c.feed(&msg("SessionStart", "D", Some("resume"), None)), ConvMatch::Bind("D".into()));
+        assert!(c.own);
+        // /exit: Kette beendet – ein danach von Hand gestarteter Claude (auch `claude --resume X`) gehört nicht dazu
+        assert_eq!(c.feed(&msg("SessionEnd", "D", None, Some("prompt_input_exit"))), ConvMatch::Same);
+        assert!(!c.chain);
+        assert_eq!(c.feed(&msg("SessionStart", "H", Some("startup"), None)), ConvMatch::Bind("H".into()));
+        assert!(!c.own, "von Hand gestartet");
+        let mut c = ConvBinding::launch(None, false);
+        c.feed(&msg("SessionStart", "A", Some("startup"), None));
+        c.feed(&msg("SessionEnd", "A", None, Some("logout")));
+        assert_eq!(c.feed(&msg("SessionStart", "X", Some("resume"), None)), ConvMatch::Bind("X".into()));
+        assert!(!c.own);
+        // Gestarteter Claude kam nie (Prompt der Shell): ein danach gestarteter gehört nicht dazu
+        let mut c = ConvBinding::launch(None, false);
+        c.shell_prompt();
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"), None)), ConvMatch::Bind("B".into()));
+        assert!(!c.own);
+        // Ein neu gestarteter Claude nach einem nicht eindeutigen Ende (`startup` nach `other`) nie
+        let mut c = ConvBinding::launch(None, false);
+        c.feed(&msg("SessionStart", "A", Some("startup"), None));
+        c.feed(&msg("SessionEnd", "A", None, Some("other")));
+        assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"), None)), ConvMatch::Bind("B".into()));
+        assert!(!c.own);
     }
 
     /// Review zu #260: Meldungen ohne Schlüssel (globale Hooks einer älteren paneldeck.exe) zählen nur für den Status.
@@ -1484,7 +1575,7 @@ mod tests {
     #[test]
     fn only_the_launch_id_binds_and_safe_mode_takes_nothing() {
         let msg = |ev: &str, id: &str, src: Option<&str>| HookMsg { event: ev.into(), claude_session: Some(id.into()), source: src.map(str::to_string), ..HookMsg::default() };
-        // `--session-id A`: ein `claude -p` (B), dessen Meldung zuerst ankommt, wird nicht zur Konversation der Sitzung
+        // `--resume A`: ein `claude -p` (B), dessen Meldung zuerst ankommt, wird nicht zur Konversation der Sitzung
         let mut c = ConvBinding::launch(Some("A".into()), false);
         assert_eq!(c.feed(&msg("SessionStart", "B", Some("startup"))), ConvMatch::Foreign);
         assert_eq!(c.feed(&msg("UserPromptSubmit", "B", None)), ConvMatch::Foreign);
@@ -1493,6 +1584,7 @@ mod tests {
         let mut c = ConvBinding::launch(None, false);
         assert_eq!(c.feed(&msg("UserPromptSubmit", "B", None)), ConvMatch::Foreign);
         assert_eq!(c.feed(&msg("SessionStart", "C", Some("resume"))), ConvMatch::Bind("C".into()));
+        assert!(c.own);
         // `--safe-mode`: der Claude der Sitzung meldet nichts; was kommt, stammt von anderen Prozessen
         let mut c = ConvBinding::launch(Some("A".into()), true);
         for m in [msg("SessionStart", "B", Some("startup")), msg("SessionStart", "A", Some("startup")), msg("Stop", "B", None)] {
@@ -1670,12 +1762,5 @@ mod tests {
         english(msg(call_mcp(&dir, "list_sessions", &json!({}), None, None)));
         LEVEL.store(McpLevel::Off.as_u8(), Ordering::Relaxed);
         EXPERT.store(false, Ordering::Relaxed);
-    }
-
-    #[test]
-    fn uuid_shape() {
-        let u = new_uuid();
-        assert_eq!(u.len(), 36);
-        assert_eq!(&u[14..15], "4");
     }
 }

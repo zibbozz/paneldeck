@@ -297,7 +297,7 @@ pub(super) fn preview(ui: &mut Ui, lang: Lang, salt: &str, line: impl FnOnce() -
                 ui.ctx().copy_text(text.clone());
             }
         });
-        ui.label(RichText::new(lang.t("Ohne --session-id/--resume und --settings, die Paneldeck beim Start ergänzt.", "Without --session-id/--resume and --settings, which Paneldeck adds at start.")).small().color(crate::style::dim(ui)));
+        ui.label(RichText::new(lang.t("Ohne --resume/--continue und --settings, die Paneldeck beim Start ergänzt.", "Without --resume/--continue and --settings, which Paneldeck adds at start.")).small().color(crate::style::dim(ui)));
     }
 }
 
