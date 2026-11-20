@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.5.0] - WIP
 
+### Changed
+
+- Local chats: the custom context length in *Settings → Models* is now a slider in powers of two (4K, 8K … 512K, 1M; each step doubles the value, ←/→ move one step) with a number field next to it for any value from 256 to 16M; the short form (e.g. 32K) and the full number are shown. With the server default the slider is visible but disabled; older values that are not a step (e.g. 6000) are kept unchanged until the slider is moved (#305)
+
 ## [2.4.1] - 2026-11-20
 
 ### Fixed

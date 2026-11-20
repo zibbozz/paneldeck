@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.5.0] - WIP
 
+### Changed
+
+- Lokale Chats: Die eigene Kontextlänge unter *Einstellungen → Modelle* ist jetzt ein Schieberegler in Zweierpotenzen (4K, 8K … 512K, 1M; jede Stufe verdoppelt den Wert, ←/→ gehen eine Stufe) mit einem Zahlenfeld daneben für jeden Wert von 256 bis 16M; Kurzform (z. B. 32K) und volle Zahl werden angezeigt. Beim Server-Standard ist der Regler sichtbar, aber gesperrt; ältere Werte, die keine Stufe sind (z. B. 6000), bleiben unverändert, bis der Regler bewegt wird (#305)
+
 ## [2.4.1] - 2026-11-20
 
 ### Fixed
