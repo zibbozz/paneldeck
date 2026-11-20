@@ -6,3 +6,4 @@
 2.3.2|Paneldeck 2.3.2 – Bug fixes for Claude resume, dialogs, terminal input and the Terminals tab
 2.4.0|Paneldeck 2.4.0 – Terminal templates, reliable Claude status, tabbed session dialogs
 2.4.1|Paneldeck 2.4.1 – Fixes for Claude resume, local AI chat and terminal selection
+2.4.2|Paneldeck 2.4.2 – Terminal fix for exact-width lines on the Windows console host
