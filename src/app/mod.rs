@@ -405,6 +405,10 @@ enum Action {
     SetColor(u64, [u8; 3]),
     SetGroup(u64, String),
     Restart(u64),
+    /// Wartet die Sitzung auf die Auswahl der Konversation (#302): ohne Auswahl neu starten.
+    ConvPickFresh(u64),
+    /// Hauptfenster (mit der Auswahl der Konversation) nach vorn holen, auch aus dem Tray (#302).
+    ConvPickShow,
     /// „Neu laden“ (#169): Rückfrage, solange ein Prozess läuft, dann `Restart`. Chats: nichts.
     RequestReload(u64),
     /// Dialog „Einstellungen der Sitzung“ (#170) öffnen.
@@ -1783,7 +1787,7 @@ impl App {
         let spec = self.shell_by_id(&meta.shell_id);
         let kind = spec.as_ref().map(|s| crate::quote::kind_of_program(&s.program)).unwrap_or(crate::quote::Kind::Posix);
         let sid = spec.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| meta.shell_id.clone());
-        let is_wsl = sid.starts_with("wsl") || spec.as_ref().is_some_and(shells::is_wsl);
+        let is_wsl = shell_is_wsl(spec.as_ref(), &meta.shell_id);
         // Pfade der Optionen nach der Art der Shell (auch eigene Profile mit wsl.exe/bash.exe); Git Bash ohne MSYS-Umschreibung.
         let style = crate::claude_opts::PathStyle::for_shell(&sid, spec.as_ref().map(|s| s.program.as_str()).unwrap_or(""), kind);
         let mut c = String::from(style.claude_program());
@@ -1883,7 +1887,7 @@ impl App {
         // Ein gespeicherter `\\wsl$\<distro>\…`-Ordner derselben Distribution geht ebenfalls über `--cd`; Pfade mit `"`/`\`
         // erreichen die Kommandozeile nie (wsl.exe zerlegt sie selbst – Befehlseinschleusung).
         let cwd = if wsl {
-            let distro = shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args));
+            let distro = wsl_distro_of(&shell);
             let de = self.settings.language == Lang::De;
             // Der WSL-Starter `bash.exe` kennt kein `--cd`: er startet im Windows-Ordner (#261).
             let cd = if shells::is_system_bash(&shell.program) { crate::wsl::Cd::Windows } else { crate::wsl::apply_cd(&mut shell.args, &entry.meta.cwd, distro.as_deref()) };
@@ -2738,7 +2742,9 @@ impl App {
         // Weitere Dialoge über dem Terminal (#255): Neue Sitzung, Prompt an alle, Vorlagen, Worktree schließen. Nur ein
         // Terminal gibt den Fokus ab – ein Feld des Dialogs behält ihn.
         // Ebenso der Editor der Vorlagen-Bibliothek und die Rückfrage vor dem Start einer Vorlage (#244).
-        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() || self.tpl.form.is_some() || self.tpl.confirm.is_some() {
+        // Ebenso die Auswahl der Konversation (#302, nur im Hauptfenster): Enter/Esc gehören ihr, nicht dem Terminal.
+        let pick_here = self.wins.cur == 0 && self.conv_pick.open();
+        if self.new_dialog.is_some() || self.folder_prompt.as_ref().is_some_and(|p| p.kind == 2) || self.templates_open || self.wt_close.is_some() || self.tpl.form.is_some() || self.tpl.confirm.is_some() || pick_here {
             self.release_terminal_focus(ctx);
         }
         let theme = self.theme();
@@ -4061,6 +4067,8 @@ impl App {
                 }
             }
             Action::RequestReload(id) => self.request_reload(ctx, id),
+            Action::ConvPickFresh(id) => self.pick_fresh(ctx, id),
+            Action::ConvPickShow => self.show_pick_window(ctx),
             Action::OpenSessionSettings(id) => self.open_session_settings(id),
             Action::Restart(id) if self.entries.get(&id).is_some_and(|e| e.is_chat()) => {} // ein Chat hat keinen Prozess
             Action::Restart(id) => {
@@ -4829,8 +4837,17 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
             let msg = entry.error.clone().unwrap_or_else(|| "—".into());
             ui.scope_builder(UiBuilder::new().max_rect(body.shrink(12.0)), |ui| {
                 if entry.pick_pending {
-                    // Kein Fehler: die Sitzung startet nach der Auswahl der Konversation (#302).
+                    // Kein Fehler: die Sitzung startet nach der Auswahl der Konversation (#302). Die Auswahl erscheint im
+                    // Hauptfenster; von hier aus lässt sie sich dorthin holen oder überspringen.
                     ui.label(msg);
+                    ui.horizontal(|ui| {
+                        if ui.button(lang.t("Auswahl zeigen", "Show the choice")).clicked() {
+                            cx.actions.push(Action::ConvPickShow);
+                        }
+                        if ui.button(lang.t("Ohne Auswahl neu starten", "Start new without choosing")).clicked() {
+                            cx.actions.push(Action::ConvPickFresh(id));
+                        }
+                    });
                     return;
                 }
                 ui.colored_label(Color32::LIGHT_RED, format!("{}: {msg}", lang.t("Start fehlgeschlagen", "Failed to start")));
@@ -5083,6 +5100,18 @@ fn split_args(s: &str) -> Vec<String> {
 /// Taugt der gespeicherte Ordner einer WSL-Sitzung, deren Startordner `wsl.exe` nicht per `--cd` bekommt (eigenes
 /// `--cd` des Profils, Distribution unbekannt), als Windows-Startordner? Nie ein Linux-Pfad und nie ein `\\wsl$`-Pfad
 /// (den müsste der UI-Thread prüfen); sonst das Windows-Home.
+/// Läuft die Shell einer Sitzung in WSL? Eine Regel für den Start von Claude und die Auswahl der Konversation (#302):
+/// die Kennung (`wsl…`, auch ohne gefundene Shell) oder das Programm der Shell (eigene Profile mit wsl.exe/bash.exe).
+fn shell_is_wsl(spec: Option<&ShellSpec>, shell_id: &str) -> bool {
+    let sid = spec.map(|s| s.id.as_str()).unwrap_or(shell_id);
+    sid.starts_with("wsl") || spec.is_some_and(shells::is_wsl)
+}
+
+/// Distribution einer WSL-Shell: aus der Kennung `wsl:<Distro>`, sonst aus `-d <Distro>` der Argumente; `None` = Standard.
+fn wsl_distro_of(shell: &ShellSpec) -> Option<String> {
+    shell.id.strip_prefix("wsl:").filter(|d| !d.is_empty()).map(str::to_string).or_else(|| shells::wsl_distro(&shell.args))
+}
+
 fn spawn_cwd_is_windows(cwd: &str) -> bool {
     !cwd.trim().is_empty() && !crate::wsl::looks_linux(cwd.trim()) && !crate::wsl::is_wsl_unc(cwd)
 }

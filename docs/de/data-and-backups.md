@@ -106,7 +106,7 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
 - `claude_opts` (state.json), `claude_defaults` / `last_claude_opts` (settings.json) und Vorlagen → neue optionale Felder `plugin_dirs`, `mcp_configs` (Liste; der erste Eintrag steht für ältere Versionen zusätzlich in `mcp_config`, ein altes `mcp_config` wird übernommen), `strict_mcp_config` und `system_prompt`.
 
 ## Neue Felder in 2.4.1
-- `state.json` und `templates.json` → je Sitzung `claude_resume_mode`: *Fortsetzen nach Neustart* – `"off"`, `"continue"` oder `"pick"`. Fehlt = aus `claude_continue` übernommen (`false` → `off`, sonst `continue`); geschrieben nur, wenn es nicht `continue` ist. Unbekannte Werte laden wie ein fehlendes Feld. `claude_continue` wird weiter geschrieben (`false` nur bei `off`), damit ältere Versionen funktionieren: Sie behandeln `pick` wie ihr „fortsetzen“.
+- `state.json` und `templates.json` → je Sitzung `claude_resume_mode`: *Fortsetzen nach Neustart* – `"off"`, `"continue"` oder `"pick"`. Fehlt = aus `claude_continue` übernommen (`false` → `off`, sonst `continue`); geschrieben nur, wenn es nicht `continue` ist. Unbekannte Werte laden wie ein fehlendes Feld und gehen beim Speichern verloren. `claude_continue` wird weiter geschrieben (`false` nur bei `off`), damit ältere Versionen funktionieren: Sie behandeln `pick` wie ihr „fortsetzen“.
 - Neue Claude-Konversationen starten nicht mehr mit `--session-id`; `claude_session` einer Sitzung bleibt leer, bis Claude seine Konversation über die Hooks meldet.
 
 ## Sicherungen

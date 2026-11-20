@@ -531,7 +531,7 @@ impl App {
         // Schalter) – ohne `--safe-mode`: ältere Versionen fragen vor dem Start nicht nach.
         let mut legacy = o.clone();
         legacy.extra.flags.retain(|f| crate::claude_opts::agent_switch(f));
-        TplItem {
+        let mut it = TplItem {
             name: e.display_name(),
             shell_id: e.meta.shell_id.clone(),
             cwd: e.cwd_now(),
@@ -540,14 +540,16 @@ impl App {
             profile: e.meta.profile,
             group: e.meta.group.clone(),
             prompt: String::new(),
-            claude_continue: (!e.meta.claude_continue).then_some(false),
-            claude_resume_mode: e.meta.resume_mode().stored(),
             color: Some(e.meta.color),
             tags: e.meta.tags.clone(),
             notes: e.meta.notes.clone(),
             claude_opts: if e.meta.claude { o } else { ClaudeOpts::default() },
             continue_last: false,
-        }
+            ..TplItem::default()
+        };
+        // „Fortsetzen nach Neustart“ aus dem wirksamen Modus (samt `claude_continue` für ältere Versionen, #302).
+        it.set_resume_mode(e.meta.resume_mode());
+        it
     }
 
     /// Farbe, Tags und Notizen der Vorlage auf eine neue Sitzung übertragen.

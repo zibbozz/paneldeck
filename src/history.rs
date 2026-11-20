@@ -112,18 +112,33 @@ pub struct ConvItem {
 }
 
 /// Transkript-Dateien (`*.jsonl`) direkt in `dir` (= `projects/<slug>`), neueste zuerst: (Zeit, Größe, Pfad).
-fn folder_files(dir: &Path) -> Vec<(SystemTime, u64, PathBuf)> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
-    let mut files: Vec<(SystemTime, u64, PathBuf)> = rd
+/// Unsortiert (für den frühen Abbruch in [`folder_has_conversation`]).
+fn folder_files_unsorted(dir: &Path) -> impl Iterator<Item = (SystemTime, u64, PathBuf)> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
         .flatten()
         .filter(|f| f.path().extension().is_some_and(|e| e == "jsonl"))
         .filter_map(|f| {
             let m = f.metadata().ok().filter(|m| m.is_file())?;
             Some((m.modified().ok()?, m.len(), f.path()))
         })
-        .collect();
+}
+
+fn folder_files(dir: &Path) -> Vec<(SystemTime, u64, PathBuf)> {
+    let mut files: Vec<(SystemTime, u64, PathBuf)> = folder_files_unsorted(dir).collect();
     files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
     files
+}
+
+/// Eine Transkript-Datei als Konversation zur Auswahl: nur mit echtem Prompt und gültiger ID (gleiche Regel für
+/// [`folder_conversations`] und [`folder_has_conversation`]).
+fn conv_item(modified: SystemTime, size: u64, p: &Path) -> Option<ConvItem> {
+    if size == 0 {
+        return None;
+    }
+    let it = read_item(p)?;
+    crate::quote::is_uuid(&it.session_id).then(|| ConvItem { session_id: it.session_id, title: it.title, modified, size })
 }
 
 /// Konversationen eines Arbeitsordners (`dir` = `projects/<slug>`), neueste zuerst, höchstens `limit`. Konversationen
@@ -131,18 +146,16 @@ fn folder_files(dir: &Path) -> Vec<(SystemTime, u64, PathBuf)> {
 pub fn folder_conversations(dir: &Path, limit: usize) -> Vec<ConvItem> {
     folder_files(dir)
         .into_iter()
-        .filter_map(|(modified, size, p)| {
-            let it = read_item(&p)?;
-            crate::quote::is_uuid(&it.session_id).then(|| ConvItem { session_id: it.session_id, title: it.title, modified, size })
-        })
+        .filter_map(|(modified, size, p)| conv_item(modified, size, &p))
         .take(limit)
         .collect()
 }
 
-/// Gibt es im Ordner `dir` (= `projects/<slug>`) eine Konversation, die `claude --continue` fortsetzen kann (eine nicht
-/// leere Transkript-Datei)? Nur ein Verzeichnislisting, keine Inhalte.
+/// Gibt es im Ordner `dir` (= `projects/<slug>`) eine Konversation, die `claude --continue` fortsetzen kann? Dieselbe
+/// Regel wie [`folder_conversations`] (echter Prompt), aber unsortiert mit Abbruch beim ersten Treffer – läuft im
+/// UI-Thread (liest höchstens den Anfang der Dateien bis zum ersten Treffer).
 pub fn folder_has_conversation(dir: &Path) -> bool {
-    folder_files(dir).iter().any(|(_, size, _)| *size > 0)
+    folder_files_unsorted(dir).any(|(m, size, p)| conv_item(m, size, &p).is_some())
 }
 
 /// Größe für die Anzeige (`12 KB`, `3.4 MB`).
@@ -306,8 +319,7 @@ mod folder_tests {
         let a = "11111111-1111-4111-8111-111111111111";
         let b = "22222222-2222-4222-8222-222222222222";
         let empty = "33333333-3333-4333-8333-333333333333";
-        let line = |t: &str| format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{t}\"}}}}
-");
+        let line = |t: &str| format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{t}\"}}}}\n");
         std::fs::write(dir.join(format!("{a}.jsonl")), line("Erste")).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
         std::fs::write(dir.join(format!("{b}.jsonl")), line("Zweite")).unwrap();

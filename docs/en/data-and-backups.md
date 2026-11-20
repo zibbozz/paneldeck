@@ -106,7 +106,7 @@ All new fields are optional: a missing field means the previous behaviour, and o
 - `claude_opts` (state.json), `claude_defaults` / `last_claude_opts` (settings.json) and templates → new optional fields `plugin_dirs`, `mcp_configs` (list; the first entry is also written as `mcp_config` for older versions, and an old `mcp_config` is taken over), `strict_mcp_config` and `system_prompt`.
 
 ## New fields in 2.4.1
-- `state.json` and `templates.json` → per session `claude_resume_mode`: *Resume after restart* – `"off"`, `"continue"` or `"pick"`. Missing = taken from `claude_continue` (`false` → `off`, otherwise `continue`); written only when it is not `continue`. Unknown values load as if the field were missing. `claude_continue` is still written (`false` only for `off`), so older versions keep working: they treat `pick` like their resume option.
+- `state.json` and `templates.json` → per session `claude_resume_mode`: *Resume after restart* – `"off"`, `"continue"` or `"pick"`. Missing = taken from `claude_continue` (`false` → `off`, otherwise `continue`); written only when it is not `continue`. Unknown values load as if the field were missing and are lost when Paneldeck saves. `claude_continue` is still written (`false` only for `off`), so older versions keep working: they treat `pick` like their resume option.
 - New Claude conversations are no longer started with `--session-id`; `claude_session` of a session stays empty until Claude reports its conversation through the hooks.
 
 ## Backups

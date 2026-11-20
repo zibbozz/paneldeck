@@ -468,7 +468,8 @@ pub struct SessionMeta {
     #[serde(skip_serializing_if = "is_true", deserialize_with = "lenient_bool_true")]
     pub claude_continue: bool,
     /// „Fortsetzen nach Neustart“ (seit 2.4.1, #302): `off` / `continue` / `pick`. Fehlt = aus `claude_continue`
-    /// abgeleitet (`true` → `continue`, `false` → `off`); unbekannte Werte laden wie ein fehlendes Feld. Geschrieben wird
+    /// abgeleitet (`true` → `continue`, `false` → `off`); unbekannte Werte laden wie ein fehlendes Feld (und gehen beim
+    /// Speichern verloren). Geschrieben wird
     /// es nur, wenn es nicht `continue` ist; `claude_continue` wird weiter mitgeschrieben (ältere Versionen).
     /// Lesen und Setzen nur über [`SessionMeta::resume_mode`] / [`SessionMeta::set_resume_mode`].
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ResumeMode::lenient")]

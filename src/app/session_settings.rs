@@ -771,8 +771,8 @@ pub(super) fn resume_mode_tip(m: ResumeMode, lang: Lang) -> &'static str {
             "Every start (also reload, restart and program start) begins a new conversation.",
         ),
         ResumeMode::Continue => lang.t(
-            "Der erste Start beginnt neu. Ab dem ersten Neu laden/Neustart (und beim Programmstart, wenn das in den Einstellungen an ist) setzt Claude die letzte Konversation im Arbeitsordner fort (claude --continue) – das kann die einer anderen Sitzung im selben Ordner sein. Gibt es noch keine, beginnt eine neue.",
-            "The first start begins a new conversation. From the first reload/restart on (and at program start, if that is on in Settings) Claude continues the most recent conversation in the working folder (claude --continue) – that can be another session's in the same folder. If there is none yet, a new one begins.",
+            "Der erste Start beginnt neu. Ab dem ersten Neu laden/Neustart (und beim Programmstart, wenn das in den Einstellungen an ist) setzt Claude immer die neueste Konversation im Arbeitsordner fort (claude --continue). Die kann einer anderen Sitzung, einem von Hand gestarteten Claude oder einem claude -p gehören; mehrere Sitzungen im selben Ordner setzen beim Programmstart dieselbe fort. Gibt es noch keine, beginnt eine neue. Zum Wählen: „Konversation auswählen“.",
+            "The first start begins a new conversation. From the first reload/restart on (and at program start, if that is on in Settings) Claude always continues the most recent conversation in the working folder (claude --continue). It can belong to another session, to a Claude started by hand or to a claude -p; several sessions in the same folder continue the same one at program start. If there is none yet, a new one begins. To choose: “Pick conversation”.",
         ),
         ResumeMode::Pick => lang.t(
             "Der erste Start beginnt neu. Vor jedem Neu laden/Neustart (und beim Programmstart, wenn das in den Einstellungen an ist) zeigt Paneldeck die Konversationen des Arbeitsordners zur Auswahl, dazu „Neue Konversation“. Gibt es keine, startet Claude ohne Rückfrage neu.",
@@ -1161,6 +1161,8 @@ mod tests {
         std::fs::write(&f, "").unwrap();
         assert!(!folder_has_conversation(&m, false, Some(&projects), "C:\\u"), "leere Datei zählt nicht");
         std::fs::write(&f, "{}\n").unwrap();
+        assert!(!folder_has_conversation(&m, false, Some(&projects), "C:\\u"), "ohne echten Prompt zählt sie nicht");
+        std::fs::write(&f, "{\"type\":\"user\",\"message\":{\"content\":\"hallo\"}}\n").unwrap();
         assert!(folder_has_conversation(&m, false, Some(&projects), "C:\\u"), "ohne Hooks: Datei zählt");
         // Anderer Arbeitsordner: dort liegt keine → neu
         let moved = SessionMeta { cwd: "C:\\other".into(), ..m.clone() };
@@ -1794,7 +1796,7 @@ mod tests {
         for (restore, restart) in [(true, false), (false, true)] {
             assert_eq!(launch_start(restore, restart, None, false, true, &m, exists), ClaudeStart::Fresh, "noch keine Konversation");
         }
-        std::fs::write(dir.join("11111111-1111-4111-8111-111111111111.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+        std::fs::write(dir.join("11111111-1111-4111-8111-111111111111.jsonl"), "{\"type\":\"user\",\"message\":{\"content\":\"hallo\"}}\n").unwrap();
         for (restore, restart) in [(true, false), (false, true)] {
             assert_eq!(launch_start(restore, restart, None, false, true, &m, exists), ClaudeStart::Continue);
         }
