@@ -242,6 +242,11 @@ mod sys {
             let n = libc::proc_pidinfo(pid as i32, libc::PROC_PIDT_SHORTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size);
             (n == size).then_some(info)?
         };
+        // own processes always give the full info – if not, it is a transient failure (e.g. during exec): unknown
+        // SAFETY: plain system call.
+        if i.pbsi_uid == unsafe { libc::geteuid() } {
+            return None;
+        }
         Some(Stat { ppid: i.pbsi_ppid, start: 0, pgrp: i.pbsi_pgid as i64, tpgid: 0, tty: 0, zombie: i.pbsi_status == libc::SZOMB })
     }
 
@@ -771,6 +776,17 @@ impl Drop for PidFd {
 ///   process that already ran before (an ssh ControlMaster, a tmux/screen server, a VS Code server, a container with the
 ///   host network) and services that clear the tag (`at`, D-Bus activation) look like outside clients.
 pub fn resolve_peer(peer: SocketAddr, local: SocketAddr) -> Option<PeerChain> {
+    // A process that is just exec'ing can be unreadable for a moment (macOS): a few short tries, all fail closed.
+    for _ in 0..3 {
+        if let Some(pc) = resolve_once(peer, local) {
+            return Some(pc);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    None
+}
+
+fn resolve_once(peer: SocketAddr, local: SocketAddr) -> Option<PeerChain> {
     let pid = tcp_peer_pid(peer, local)?;
     let born = process_born(pid)?;
     #[cfg(target_os = "linux")]
