@@ -9,6 +9,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.6.0] - WIP
 
+### Added
+
+- Clean up window (*Settings → Data & backup → Clean up …*, also in the command palette): tick what to delete – database backups, clipboard images, old backup files, scrollback and chat histories (orphaned or all, optionally older than X days), logs, prompt library, templates, custom themes, system prompt, database, sessions, settings, Windows integration, other profiles – with sizes, a total and a summary before deleting; irreversible items need typing `DELETE`, the database is backed up first; *Reset Paneldeck completely* saves the data folder as a ZIP first (#307)
+- Agent interface: read-only tool `cleanup_sizes` (level Read) returns the sizes per clean-up area; agents cannot delete anything (#307)
+
 ## [2.5.0] - 2026-11-20
 
 ### Added

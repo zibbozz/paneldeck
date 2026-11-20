@@ -4,7 +4,7 @@ use super::*;
 use crate::backup::{self, Kind};
 
 impl App {
-    fn backup_dir_path(&self) -> PathBuf {
+    pub(super) fn backup_dir_path(&self) -> PathBuf {
         // `--backup-dir` gilt nur für diesen Start und landet nie in den Einstellungen.
         if let Some(b) = &crate::cli::get().backup_dir {
             return b.clone();
@@ -141,6 +141,18 @@ impl App {
                 });
             }
         });
+        ui.add_space(S2);
+        ui.separator();
+        ui.add_space(S2);
+        ui.label(RichText::new(lang.t("Aufräumen", "Clean up")).strong());
+        ui.label(RichText::new(lang.t(
+            "Wählen, was gelöscht werden soll: Sicherungen, Verlauf, Protokolle, Inhalte, Einstellungen, Integration – bis zum kompletten Zurücksetzen.",
+            "Choose what to delete: backups, history, logs, content, settings, integration – up to a complete reset.",
+        )).small().color(dim));
+        if ui.button(lang.t("Aufräumen …", "Clean up …")).clicked() {
+            let ctx = ui.ctx().clone();
+            self.open_cleanup(&ctx);
+        }
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S2);

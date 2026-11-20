@@ -339,6 +339,13 @@ pub fn tools() -> Vec<ToolDef> {
             description: "List the LLM servers configured in Paneldeck (Settings -> Models) for chats: id, name, kind (ollama/openai), host:port, and their models with the tool level the user allows the model (Off/Read/Control; level_chosen = false means the user has not decided yet - the first message to such a chat makes Paneldeck ask the user, send_chat_message then returns permission_pending), whether it can call tools, and `last_used` for the model chosen last. Use the names with create_session kind=chat. API keys are never returned.",
             schema: schema(json!({}), &[]),
         },
+        ToolDef {
+            name: "cleanup_sizes",
+            level: Read,
+            group: Group::Always,
+            description: "Read-only overview of what Paneldeck's data uses, as shown in its Clean up window (Settings -> Data -> Clean up): per area an id (e.g. db_backups, clipboard_images, scrollback_orphaned, chats_all, mcp_log, database, sessions_layout, autostart, claude_json, factory_reset), its group (space/history/content/settings/integration/everything), bytes, files and entries (registry/JSON/settings entries), whether the window preselects it, needs typed confirmation or a restart; the total of the data folder; and the number, size and running count of other profiles. Never returns paths or names. There is no tool to delete anything: only the user can clean up, in the Paneldeck window.",
+            schema: schema(json!({}), &[]),
+        },
         // ---- Todo-Liste (einfacher Modus) und Projekte/Tickets (Expertenmodus)
         ToolDef {
             name: "list_todos",
