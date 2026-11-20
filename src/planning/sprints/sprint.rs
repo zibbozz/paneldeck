@@ -382,8 +382,9 @@ pub fn complete_sprint(conn: &Connection, id: i64, leftover: Leftover) -> SRes<C
         let rows: Vec<(i64, bool)> = {
             let mut st = conn.prepare(
                 "SELECT st.ticket_id, COALESCE(s.category = 'done', 0) FROM sprint_tickets st JOIN tickets t ON t.id = st.ticket_id
-                 LEFT JOIN statuses s ON s.id = t.status_id WHERE st.sprint_id = ?1 AND st.removed_at IS NULL ORDER BY t.rank, t.id",
+                 LEFT JOIN statuses s ON s.id = t.status_id WHERE st.sprint_id = ?1 AND st.removed_at IS NULL AND t.archived = 0 ORDER BY t.rank, t.id",
             )?;
+            // Archivierte Tickets (Wartung) bleiben im abgeschlossenen Sprint und wandern nicht mit (wie im Abschlussdialog).
             st.query_map([id], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)))?.collect::<Result<_, _>>()?
         };
         let now = clock::now();
