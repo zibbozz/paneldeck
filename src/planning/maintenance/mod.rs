@@ -552,10 +552,27 @@ pub struct RunOpts {
     pub rules: bool,
     /// Auch ignorierte Befunde liefern.
     pub include_ignored: bool,
+    /// Obergrenze der Duplikat-Suche (`None` = nur [`checks_tickets::MAX_DUPLICATE_TICKETS`]). Wird sie erreicht, endet die
+    /// Suche und der Bericht meldet `duplicates_truncated`.
+    pub duplicate_budget: Option<DupBudget>,
+}
+
+/// Aufwand der Duplikat-Suche: höchstens so viele Titelvergleiche und so lange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DupBudget {
+    pub max_pairs: usize,
+    pub max_time: std::time::Duration,
+}
+
+impl DupBudget {
+    /// Für MCP (läuft in der Oberfläche): 200 000 Vergleiche bzw. eine Sekunde.
+    pub const MCP: DupBudget = DupBudget { max_pairs: 200_000, max_time: std::time::Duration::from_secs(1) };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DbScope {
+    /// Nur Fremdschlüssel und Zähler, ohne Integritätsprüfung der Datei (günstig, z. B. MCP ohne Kategorie).
+    Structure,
     /// Schnelle Prüfung (`quick_check`), z. B. für MCP.
     Quick,
     /// Vollständige Prüfung (`integrity_check`).
@@ -565,12 +582,12 @@ pub enum DbScope {
 impl RunOpts {
     /// Volle Prüfung (Seite öffnen).
     pub fn full(now: chrono::NaiveDateTime, lang: Lang) -> RunOpts {
-        RunOpts { now, lang, duplicates: true, database: Some(DbScope::Full), rules: true, include_ignored: false }
+        RunOpts { now, lang, duplicates: true, database: Some(DbScope::Full), rules: true, include_ignored: false, duplicate_budget: None }
     }
 
     /// Günstige Zählung (Übersicht): ohne Duplikat-Suche und ohne Datenbank-Prüfung.
     pub fn cheap(now: chrono::NaiveDateTime, lang: Lang) -> RunOpts {
-        RunOpts { now, lang, duplicates: false, database: None, rules: true, include_ignored: false }
+        RunOpts { now, lang, duplicates: false, database: None, rules: true, include_ignored: false, duplicate_budget: None }
     }
 }
 
@@ -584,6 +601,8 @@ pub struct Report {
     pub ignored: usize,
     /// Ausgelassene Prüfungen samt Grund (z. B. abgeschaltet), nur zur Anzeige.
     pub disabled: Vec<Check>,
+    /// Die Duplikat-Suche wurde wegen ihrer Obergrenze vorzeitig beendet (nicht alle Paare verglichen).
+    pub duplicates_truncated: bool,
 }
 
 impl Report {
@@ -661,7 +680,7 @@ pub fn maint_project(conn: &Connection, project_id: i64) -> MRes<super::projects
 pub fn run_report(conn: &Connection, project_id: i64, o: &RunOpts) -> MRes<Report> {
     let project = maint_project(conn, project_id)?;
     let settings = load_settings(conn, project_id)?;
-    let mut findings = checks_tickets::run(conn, &project, &settings, o)?;
+    let (mut findings, duplicates_truncated) = checks_tickets::run(conn, &project, &settings, o)?;
     findings.extend(checks_config::run(conn, &project, &settings, o)?);
     if let Some(scope) = o.database {
         findings.extend(dbcare::findings(conn, scope, o.lang)?);
@@ -684,6 +703,7 @@ pub fn run_report(conn: &Connection, project_id: i64, o: &RunOpts) -> MRes<Repor
         findings,
         ignored: ignored_count,
         disabled: settings.disabled.clone(),
+        duplicates_truncated,
     })
 }
 

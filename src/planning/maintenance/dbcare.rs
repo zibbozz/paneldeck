@@ -35,27 +35,103 @@ pub enum OrphanFix {
     Delete,
     /// Verweis leeren (wie `ON DELETE SET NULL`, z. B. Eltern-Ticket).
     SetNull,
-    /// Nicht eindeutig (z. B. Ticket ohne Typ): nur melden.
+    /// Nicht eindeutig (z. B. Ticket ohne Typ, oder Löschen träfe Tickets bzw. Ticketdaten): nur melden.
     Manual,
+}
+
+/// Eine Fremdschlüssel-Kante: Kind-Tabelle, Kind-Spalte, Eltern-Tabelle, Eltern-Spalte, `ON DELETE` (groß geschrieben).
+#[derive(Debug, Clone)]
+struct FkEdge {
+    child: String,
+    from: String,
+    parent: String,
+    to: String,
+    on_delete: String,
+}
+
+/// Alle Fremdschlüssel der Datenbank.
+fn fk_edges(conn: &Connection) -> Vec<FkEdge> {
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+        .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for t in tables {
+        let Ok(mut st) = conn.prepare(&format!("PRAGMA foreign_key_list({})", quote_ident(&t))) else { continue };
+        let rows = st.query_map([], |x| Ok((x.get::<_, String>(2)?, x.get::<_, String>(3)?, x.get::<_, Option<String>>(4)?, x.get::<_, String>(6)?)));
+        if let Ok(rows) = rows {
+            for (parent, from, to, on_delete) in rows.flatten() {
+                out.push(FkEdge { child: t.clone(), from, parent, to: to.unwrap_or_else(|| "id".into()), on_delete: on_delete.to_ascii_uppercase() });
+            }
+        }
+    }
+    out
+}
+
+/// Löscht ein `DELETE` aus `table` Tickets oder Ticketdaten mit? Das gilt für `tickets` selbst und für jede Tabelle, deren
+/// Löschen per `ON DELETE CASCADE` (auch über mehrere Stufen) in `tickets` oder eine Tabelle mit Verweis auf `tickets`
+/// (Werte, Kommentare, Verlauf, Zeiten, Verknüpfungen …) weiterläuft. Die Wartung löscht nie Tickets (Vorgabe in #308).
+fn delete_reaches_ticket_data(edges: &[FkEdge], table: &str) -> bool {
+    let refs_tickets = |t: &str| t == "tickets" || edges.iter().any(|e| e.child == t && e.parent == "tickets");
+    if table == "tickets" {
+        return true;
+    }
+    let mut seen = vec![table.to_string()];
+    let mut todo = vec![table.to_string()];
+    while let Some(t) = todo.pop() {
+        for e in edges.iter().filter(|e| e.parent == t && e.on_delete == "CASCADE") {
+            if refs_tickets(&e.child) {
+                return true;
+            }
+            if !seen.contains(&e.child) {
+                seen.push(e.child.clone());
+                todo.push(e.child.clone());
+            }
+        }
+    }
+    false
 }
 
 /// Wie eine verwaiste Zeile eindeutig repariert wird – nach der Fremdschlüssel-Regel der Spalte selbst.
 pub fn orphan_fix(conn: &Connection, r: &FkRef) -> OrphanFix {
-    // ON DELETE der Spalte ablesen (`PRAGMA foreign_key_list`): CASCADE → löschen, SET NULL → leeren, sonst manuell.
-    let Ok(mut st) = conn.prepare(&format!("PRAGMA foreign_key_list({})", quote_ident(&r.table))) else { return OrphanFix::Manual };
-    let rows = st.query_map([], |x| Ok((x.get::<_, String>(2)?, x.get::<_, String>(3)?, x.get::<_, String>(6)?)));
-    if let Ok(rows) = rows {
-        for (parent, from, on_delete) in rows.flatten() {
-            if parent == r.parent && from == r.column {
-                return match on_delete.to_ascii_uppercase().as_str() {
-                    "CASCADE" => OrphanFix::Delete,
-                    "SET NULL" => OrphanFix::SetNull,
-                    _ => OrphanFix::Manual,
-                };
-            }
-        }
+    orphan_fix_in(&fk_edges(conn), r)
+}
+
+fn orphan_fix_in(edges: &[FkEdge], r: &FkRef) -> OrphanFix {
+    // ON DELETE der Spalte: CASCADE → löschen (außer es träfe Ticketdaten), SET NULL → leeren, sonst manuell.
+    match edges.iter().find(|e| e.child == r.table && e.parent == r.parent && e.from == r.column) {
+        Some(e) if e.on_delete == "CASCADE" && !delete_reaches_ticket_data(edges, &r.table) => OrphanFix::Delete,
+        Some(e) if e.on_delete == "SET NULL" => OrphanFix::SetNull,
+        _ => OrphanFix::Manual,
     }
-    OrphanFix::Manual
+}
+
+/// Bedingung „Zeile ist verwaist über `r`“ (für `WHERE`, ohne Tabellenalias).
+fn orphan_cond(r: &FkRef) -> String {
+    format!(
+        "{c} IS NOT NULL AND {c} NOT IN (SELECT {pc} FROM {p})",
+        c = quote_ident(&r.column),
+        p = quote_ident(&r.parent),
+        pc = quote_ident(&r.parent_column)
+    )
+}
+
+/// Bedingung „Zeile wird noch von einer Tabelle verwiesen, die ein Löschen verbietet“ (`NO ACTION`/`RESTRICT`), z. B. ein
+/// verwaister Typ, den noch Tickets nutzen. Solche Zeilen löscht die Reparatur nicht (sonst schlüge sie mit
+/// `foreign_keys = ON` fehl und nähme alle anderen Schritte zurück). `None` = keine solche Tabelle.
+fn still_referenced_cond(edges: &[FkEdge], table: &str) -> Option<String> {
+    let parts: Vec<String> = edges
+        .iter()
+        .filter(|e| e.parent == table && !matches!(e.on_delete.as_str(), "CASCADE" | "SET NULL" | "SET DEFAULT"))
+        .map(|e| format!("EXISTS (SELECT 1 FROM {ch} k WHERE k.{f} = {t}.{to})", ch = quote_ident(&e.child), f = quote_ident(&e.from), t = quote_ident(table), to = quote_ident(&e.to)))
+        .collect();
+    (!parts.is_empty()).then(|| format!("({})", parts.join(" OR ")))
+}
+
+/// Verwaiste Zeilen von `r`, die noch verwiesen werden (siehe [`still_referenced_cond`]).
+fn still_referenced(conn: &Connection, edges: &[FkEdge], r: &FkRef) -> i64 {
+    let Some(cond) = still_referenced_cond(edges, &r.table) else { return 0 };
+    conn.query_row(&format!("SELECT COUNT(*) FROM {} WHERE {} AND {cond}", quote_ident(&r.table), orphan_cond(r)), [], |x| x.get(0)).unwrap_or(0)
 }
 
 pub fn quote_ident(s: &str) -> String {
@@ -144,6 +220,7 @@ impl Counter {
 /// Meldungen von `integrity_check` bzw. `quick_check` (leer = in Ordnung).
 pub fn integrity(conn: &Connection, scope: DbScope) -> rusqlite::Result<Vec<String>> {
     let pragma = match scope {
+        DbScope::Structure => return Ok(Vec::new()),
         DbScope::Quick => "quick_check",
         DbScope::Full => "integrity_check",
     };
@@ -178,8 +255,12 @@ pub fn findings(conn: &Connection, scope: DbScope, lang: Lang) -> MRes<Vec<Findi
         }
         Err(e) => out.push(mk(Check::DbIntegrity, "db_integrity:unreadable".into(), explain_integrity(&e.to_string(), lang), vec![], json!({"sqlite": e.to_string()}))),
     }
+    let edges = fk_edges(conn);
     for (r, n) in orphans(conn)? {
-        let fix = orphan_fix(conn, &r);
+        let mut fix = orphan_fix_in(&edges, &r);
+        if fix == OrphanFix::Delete && still_referenced(conn, &edges, &r) >= n {
+            fix = OrphanFix::Manual;
+        }
         let check = if r.table == "history" { Check::DbHistory } else { Check::DbForeignKey };
         let what = match (fix, lang) {
             (OrphanFix::Delete, Lang::De) => "Reparatur löscht sie",
@@ -245,9 +326,17 @@ impl RepairStep {
 /// Was die Reparatur tun würde (nur lesen).
 pub fn plan_repair(conn: &Connection) -> MRes<Vec<RepairStep>> {
     let mut v = Vec::new();
+    let edges = fk_edges(conn);
     for (r, rows) in orphans(conn)? {
-        let fix = orphan_fix(conn, &r);
-        v.push(RepairStep::Orphans { r, rows, fix });
+        let fix = orphan_fix_in(&edges, &r);
+        // Zeilen, die noch verwiesen werden (z. B. verwaister Status, den Tickets nutzen), bleiben stehen und werden nur gemeldet.
+        let kept = if fix == OrphanFix::Delete { still_referenced(conn, &edges, &r).min(rows) } else { 0 };
+        if rows > kept {
+            v.push(RepairStep::Orphans { r: r.clone(), rows: rows - kept, fix });
+        }
+        if kept > 0 {
+            v.push(RepairStep::Orphans { r, rows: kept, fix: OrphanFix::Manual });
+        }
     }
     v.extend(counters(conn)?.into_iter().map(RepairStep::Counter));
     let lines = integrity(conn, DbScope::Full).unwrap_or_default();
@@ -260,28 +349,22 @@ pub fn plan_repair(conn: &Connection) -> MRes<Vec<RepairStep>> {
 /// Führt die eindeutigen Schritte aus (in einer Transaktion; REINDEX danach). Liefert die Zahl der geänderten Zeilen/Zähler.
 pub fn apply_repair(conn: &Connection, steps: &[RepairStep]) -> MRes<i64> {
     let mut changed = 0i64;
+    let edges = fk_edges(conn);
     conn.execute_batch("SAVEPOINT maint_repair")?;
     let r = (|| -> MRes<()> {
         for s in steps {
             match s {
                 RepairStep::Orphans { r, fix: OrphanFix::Delete, .. } => {
-                    let sql = format!(
-                        "DELETE FROM {t} WHERE {c} IS NOT NULL AND {c} NOT IN (SELECT {pc} FROM {p})",
-                        t = quote_ident(&r.table),
-                        c = quote_ident(&r.column),
-                        p = quote_ident(&r.parent),
-                        pc = quote_ident(&r.parent_column)
-                    );
+                    // Schutz, auch wenn ein alter Plan übergeben wird: nie Tickets/Ticketdaten mitlöschen, nie noch Verwiesenes.
+                    if orphan_fix_in(&edges, r) != OrphanFix::Delete {
+                        continue;
+                    }
+                    let keep = still_referenced_cond(&edges, &r.table).map(|c| format!(" AND NOT {c}")).unwrap_or_default();
+                    let sql = format!("DELETE FROM {t} WHERE {cond}{keep}", t = quote_ident(&r.table), cond = orphan_cond(r));
                     changed += conn.execute(&sql, [])? as i64;
                 }
                 RepairStep::Orphans { r, fix: OrphanFix::SetNull, .. } => {
-                    let sql = format!(
-                        "UPDATE {t} SET {c} = NULL WHERE {c} IS NOT NULL AND {c} NOT IN (SELECT {pc} FROM {p})",
-                        t = quote_ident(&r.table),
-                        c = quote_ident(&r.column),
-                        p = quote_ident(&r.parent),
-                        pc = quote_ident(&r.parent_column)
-                    );
+                    let sql = format!("UPDATE {t} SET {c} = NULL WHERE {cond}", t = quote_ident(&r.table), c = quote_ident(&r.column), cond = orphan_cond(r));
                     changed += conn.execute(&sql, [])? as i64;
                 }
                 RepairStep::Orphans { .. } => {}
@@ -415,7 +498,12 @@ pub fn human_bytes(b: i64) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableRescue {
     pub table: String,
+    /// Vollständig gerettete Zeilen.
     pub rescued: i64,
+    /// Übernommene Zeilen mit unlesbaren Spalten (Text mit Ersatzzeichen bzw. leer) – nicht in `rescued` enthalten.
+    pub partial: i64,
+    /// Kennungen (rowid bzw. laufende Nummer) der teilweise geretteten Zeilen, höchstens [`MAX_PARTIAL_LISTED`].
+    pub partial_rows: Vec<String>,
     /// Zeilen, die die beschädigte Datei laut Zählung hatte (`None` = nicht zählbar).
     pub expected: Option<i64>,
     /// Übersprungene unlesbare Bereiche.
@@ -427,9 +515,12 @@ pub struct TableRescue {
 impl TableRescue {
     /// Verlorene Zeilen, soweit bekannt.
     pub fn lost(&self) -> Option<i64> {
-        self.expected.map(|e| (e - self.rescued).max(0))
+        self.expected.map(|e| (e - self.rescued - self.partial).max(0))
     }
 }
+
+/// Höchstzahl aufgeführter teilweise geretteter Zeilen je Tabelle.
+pub const MAX_PARTIAL_LISTED: usize = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RescueReport {
@@ -449,8 +540,13 @@ impl RescueReport {
         self.tables.iter().map(|t| t.rescued).sum()
     }
 
+    /// Zeilen, die nur teilweise gerettet wurden.
+    pub fn partial(&self) -> i64 {
+        self.tables.iter().map(|t| t.partial).sum()
+    }
+
     pub fn complete(&self) -> bool {
-        self.tables.iter().all(|t| t.error.is_none() && t.skipped_ranges == 0 && t.lost().unwrap_or(0) == 0)
+        self.tables.iter().all(|t| t.error.is_none() && t.skipped_ranges == 0 && t.partial == 0 && t.lost().unwrap_or(0) == 0)
     }
 
     /// Bericht als Text (wird neben die neue Datei gelegt).
@@ -469,6 +565,12 @@ impl RescueReport {
                 Lang::De => format!("{}: {} gerettet, {} verloren", t.table, t.rescued, lost),
                 Lang::En => format!("{}: {} rescued, {} lost", t.table, t.rescued, lost),
             });
+            if t.partial > 0 {
+                s.push_str(&match lang {
+                    Lang::De => format!(", {} nur teilweise", t.partial),
+                    Lang::En => format!(", {} only partly", t.partial),
+                });
+            }
             if t.skipped_ranges > 0 {
                 s.push_str(&match lang {
                     Lang::De => format!(", {} unlesbare Bereiche übersprungen", t.skipped_ranges),
@@ -482,9 +584,26 @@ impl RescueReport {
         }
         if self.dest_orphans > 0 {
             s.push_str(&match lang {
-                Lang::De => format!("\r\n{} Zeile(n) der neuen Datei verweisen auf Verlorenes; die Reparatur der Wartungsseite räumt sie auf.\r\n", self.dest_orphans),
-                Lang::En => format!("\r\n{} row(s) of the new file refer to lost data; the repair on the maintenance page cleans them up.\r\n", self.dest_orphans),
+                Lang::De => format!(
+                    "\r\n{} Zeile(n) der neuen Datei verweisen auf Verlorenes. Die Reparatur der Wartungsseite behebt nur eindeutige Fälle (z. B. Kommentare ohne Ticket); Tickets löscht sie nie – Tickets ohne Projekt, Typ oder Status bitte von Hand prüfen.\r\n",
+                    self.dest_orphans
+                ),
+                Lang::En => format!(
+                    "\r\n{} row(s) of the new file refer to lost data. The repair on the maintenance page only fixes unambiguous cases (e.g. comments without a ticket); it never deletes tickets – please check tickets without a project, type or status by hand.\r\n",
+                    self.dest_orphans
+                ),
             });
+        }
+        let partial: Vec<&TableRescue> = self.tables.iter().filter(|t| t.partial > 0).collect();
+        if !partial.is_empty() {
+            s.push_str(lang.t(
+                "\r\nTeilweise gerettete Zeilen (einzelne Spalten unlesbar; unlesbarer Text wurde mit Ersatzzeichen übernommen, sonst leer):\r\n",
+                "\r\nPartly rescued rows (single columns unreadable; unreadable text was kept with replacement characters, otherwise empty):\r\n",
+            ));
+            for t in partial {
+                let more = if (t.partial as usize) > t.partial_rows.len() { format!(" …(+{})", t.partial as usize - t.partial_rows.len()) } else { String::new() };
+                s.push_str(&format!("{}: {}{more}\r\n", t.table, t.partial_rows.join(", ")));
+            }
         }
         s
     }
@@ -543,14 +662,37 @@ pub fn rescue(source: &Path, dest_dir: &Path, lang: Lang) -> MRes<RescueReport> 
     out.pragma_update(None, "user_version", crate::db::schema_version())?;
     let dest_problems = integrity(&out, DbScope::Full).unwrap_or_else(|e| vec![e.to_string()]);
     let dest_orphans: i64 = orphans(&out).map(|m| m.values().sum()).unwrap_or(0);
+    // Protokoll nur in die neue Datei – die beschädigte Quelle bleibt unberührt.
+    let n: i64 = report.iter().map(|t| t.rescued + t.partial).sum();
+    let _ = super::write_log(&out, None, "rescue", n, None, &format!("from {}", source.display()));
     drop(out);
     let rep = RescueReport { source: source.to_path_buf(), dest: dest.clone(), tables: report, source_version, dest_problems, dest_orphans };
     let _ = std::fs::write(dest.with_extension("txt"), rep.text(lang));
     Ok(rep)
 }
 
+/// Liest die ersten `n` Spalten einer Zeile. Unlesbares (z. B. Text mit ungültigem UTF-8) wird so gut es geht übernommen –
+/// Text mit Ersatzzeichen, sonst NULL – und die Zeile als beschädigt gemeldet (`true`).
+fn read_row(r: &rusqlite::Row, n: usize) -> (Vec<rusqlite::types::Value>, bool) {
+    use rusqlite::types::{Value, ValueRef};
+    let mut damaged = false;
+    let vals = (0..n)
+        .map(|i| match r.get::<_, Value>(i) {
+            Ok(v) => v,
+            Err(_) => {
+                damaged = true;
+                match r.get_ref(i) {
+                    Ok(ValueRef::Text(b)) => Value::Text(String::from_utf8_lossy(b).into_owned()),
+                    _ => Value::Null,
+                }
+            }
+        })
+        .collect();
+    (vals, damaged)
+}
+
 fn rescue_table(src: &Connection, out: &Connection, table: &str) -> TableRescue {
-    let mut res = TableRescue { table: table.to_string(), rescued: 0, expected: None, skipped_ranges: 0, error: None };
+    let mut res = TableRescue { table: table.to_string(), rescued: 0, partial: 0, partial_rows: Vec::new(), expected: None, skipped_ranges: 0, error: None };
     let dest_cols = match columns(out, table) {
         Ok(c) => c,
         Err(e) => {
@@ -578,13 +720,25 @@ fn rescue_table(src: &Connection, out: &Connection, table: &str) -> TableRescue 
         res.error = Some("insert".into());
         return res;
     };
+    let has_rowid = has_rowid(src, table);
+    let mut ordinal: i64 = 0;
     let mut copy_row = |r: &rusqlite::Row, res: &mut TableRescue| {
-        let vals: Vec<rusqlite::types::Value> = (0..cols.len()).map(|i| r.get::<_, rusqlite::types::Value>(i).unwrap_or(rusqlite::types::Value::Null)).collect();
+        ordinal += 1;
+        let (vals, damaged) = read_row(r, cols.len());
         if ins.execute(rusqlite::params_from_iter(vals.iter())).map(|n| n > 0).unwrap_or(false) {
-            res.rescued += 1;
+            if damaged {
+                res.partial += 1;
+                if res.partial_rows.len() < MAX_PARTIAL_LISTED {
+                    // Kennung: rowid (letzte Spalte der Abfrage) bzw. laufende Nummer bei Tabellen ohne rowid
+                    let id = if has_rowid { r.get::<_, i64>(cols.len()).map(|v| format!("rowid {v}")).unwrap_or_else(|_| format!("#{ordinal}")) } else { format!("#{ordinal}") };
+                    res.partial_rows.push(id);
+                }
+            } else {
+                res.rescued += 1;
+            }
         }
     };
-    if !has_rowid(src, table) {
+    if !has_rowid {
         // ohne rowid: lesen, bis ein Fehler kommt
         let sql = format!("SELECT {list} FROM {}", quote_ident(table));
         match src.prepare(&sql) {

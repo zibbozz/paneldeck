@@ -183,8 +183,10 @@ fn ticket_row(ui: &mut Ui, d: &Detail, t: &Ticket, done: bool, lang: Lang) -> bo
     ui.painter().galley(Pos2::new(rect.left() + 28.0, rect.center().y - key.size().y / 2.0), key, dim);
     let status = t.status_id.and_then(|s| d.sum.status(s));
     let status_w = status.map(|s| ui.painter().layout_no_wrap(s.display(lang), egui::FontId::proportional(11.5), Color32::WHITE).size().x + 30.0).unwrap_or(0.0);
-    let col = if done { dim } else { ui.visuals().text_color() };
-    let mut job = egui::text::LayoutJob::simple_singleline(t.title.clone(), egui::TextStyle::Body.resolve(ui.style()), col);
+    // Archivierte Kinder bleiben sichtbar, aber gekennzeichnet und gedämpft.
+    let col = if done || t.archived { dim } else { ui.visuals().text_color() };
+    let title = if t.archived { format!("{} ({})", t.title, lang.t("archiviert", "archived")) } else { t.title.clone() };
+    let mut job = egui::text::LayoutJob::simple_singleline(title, egui::TextStyle::Body.resolve(ui.style()), col);
     if done {
         job.sections[0].format.strikethrough = Stroke::new(1.0_f32, col);
     }

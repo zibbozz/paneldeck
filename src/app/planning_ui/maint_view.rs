@@ -38,6 +38,8 @@ pub(super) enum Done {
     Report(MRes<Report>),
     Action(MRes<maint::actions::Outcome>, String),
     Repair(MRes<i64>),
+    /// Reparaturplan (Vorschau) – braucht ein volles `integrity_check`, läuft daher im Hintergrund.
+    Plan(MRes<Vec<RepairStep>>),
     Compact(MRes<dbcare::CompactResult>),
     Rescue(MRes<RescueReport>),
     Stats(MRes<Stats>),
@@ -296,6 +298,14 @@ impl PlanUi {
                 self.after_maint_write();
                 recheck = true;
             }
+            Done::Plan(r) => match r {
+                Ok(p) => {
+                    self.maint.repair_plan = Some(p);
+                    self.maint.dlg.repair = true;
+                    self.maint.dlg.since = Some(Instant::now());
+                }
+                Err(e) => self.maint.msg = Some((e.message(lang), false)),
+            },
             Done::Compact(r) => {
                 self.maint.msg = Some(match r {
                     Ok(c) => (format!("{}: {} → {}", lang.t("Verdichtet", "Compacted"), dbcare::human_bytes(c.before as i64), dbcare::human_bytes(c.after as i64)), true),
@@ -307,8 +317,7 @@ impl PlanUi {
             Done::Rescue(r) => match r {
                 Ok(rep) => {
                     self.maint.msg = Some((format!("{} {}", lang.t("Gerettet in", "Rescued into"), rep.dest.display()), true));
-                    let _ = maint::write_log(cx.conn, Some(self.maint.project), "rescue", rep.rescued(), None, &rep.dest.display().to_string());
-                    self.maint.log = None;
+                    // kein Protokolleintrag in der (beschädigten) Quelle: `rescue` schreibt ihn in die neue Datei
                     self.maint.rescue = Some(rep);
                 }
                 Err(e) => self.maint.msg = Some((e.message(lang), false)),
@@ -374,6 +383,25 @@ impl PlanUi {
             let _ = tx.send(Done::Repair(r));
         });
         self.maint.job = Some((rx, cx.lang.t("Repariere …", "Repairing …").to_string(), Instant::now()));
+    }
+
+    /// Reparaturplan im Hintergrund erstellen (eigene, nur lesende Verbindung); das Ergebnis öffnet den Reparatur-Dialog.
+    pub(super) fn maint_spawn_plan(&mut self, cx: &Cx) {
+        if self.maint.job.is_some() {
+            self.maint.msg = Some((cx.lang.t("Ein Wartungsauftrag läuft noch – bitte gleich noch einmal.", "A maintenance job is still running – please try again shortly.").into(), false));
+            return;
+        }
+        let path = cx.db.path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let r = (|| -> MRes<Vec<RepairStep>> {
+                let c = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+                c.busy_timeout(Duration::from_secs(10))?;
+                dbcare::plan_repair(&c)
+            })();
+            let _ = tx.send(Done::Plan(r));
+        });
+        self.maint.job = Some((rx, cx.lang.t("Prüfe die Datenbank …", "Checking the database …").to_string(), Instant::now()));
     }
 
     pub(super) fn maint_spawn_compact(&mut self, cx: &Cx) {
@@ -832,13 +860,7 @@ impl PlanUi {
                     self.maint_spawn_stats(cx);
                 }
                 if ui.button(lang.t("Reparieren …", "Repair …")).clicked() {
-                    match dbcare::plan_repair(cx.conn) {
-                        Ok(p) => {
-                            self.maint.repair_plan = Some(p);
-                            self.maint.dlg.repair = true;
-                        }
-                        Err(e) => self.maint.msg = Some((e.message(lang), false)),
-                    }
+                    self.maint_spawn_plan(cx);
                 }
                 if ui.button(lang.t("Verdichten …", "Compact …")).clicked() {
                     self.maint.dlg.compact = true;

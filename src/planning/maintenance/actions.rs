@@ -405,17 +405,23 @@ pub fn apply(conn: &Connection, project_id: i64, a: &Action, lang: Lang, backup:
     let p = preview(conn, project_id, a, lang)?;
     let src = Source::maintenance();
     conn.execute_batch("SAVEPOINT maint_action")?;
-    let r = run(conn, project_id, a, lang, &p, &src);
+    // Aktion und Protokoll gehören zusammen: scheitert eines, wird beides zurückgenommen.
+    let r = run(conn, project_id, a, lang, &p, &src).and_then(|(changed, skipped)| {
+        let detail = match a {
+            Action::Remove { .. } => p.lines.iter().filter(|l| !l.contains(" – ")).cloned().collect::<Vec<_>>().join("; "),
+            _ => p.tickets.iter().map(|t| t.key.clone()).collect::<Vec<_>>().join(", "),
+        };
+        let log_id = write_log(conn, Some(project_id), a.key(), changed as i64, backup, &detail.chars().take(4000).collect::<String>())?;
+        Ok((changed, skipped, log_id))
+    });
     match r {
-        Ok((changed, skipped)) => {
-            let detail = match a {
-                Action::Remove { .. } => p.lines.iter().filter(|l| !l.contains(" – ")).cloned().collect::<Vec<_>>().join("; "),
-                _ => p.tickets.iter().map(|t| t.key.clone()).collect::<Vec<_>>().join(", "),
-            };
-            let log_id = write_log(conn, Some(project_id), a.key(), changed as i64, backup, &detail.chars().take(4000).collect::<String>())?;
-            conn.execute_batch("RELEASE maint_action")?;
-            Ok(Outcome { changed, skipped, log_id })
-        }
+        Ok((changed, skipped, log_id)) => match conn.execute_batch("RELEASE maint_action") {
+            Ok(()) => Ok(Outcome { changed, skipped, log_id }),
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK TO maint_action; RELEASE maint_action");
+                Err(e.into())
+            }
+        },
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK TO maint_action; RELEASE maint_action");
             Err(e)

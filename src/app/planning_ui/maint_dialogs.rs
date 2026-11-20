@@ -22,6 +22,8 @@ pub(super) struct FixDlg {
     comment: String,
     due: String,
     since: Instant,
+    /// Zwischengespeicherte Vorschau zu (Kommentar, Fälligkeit) – neu berechnet nur, wenn sich die Eingaben ändern.
+    cache: Option<((String, String), Result<Preview, String>)>,
 }
 
 pub(super) struct CompareDlg {
@@ -119,20 +121,14 @@ impl PlanUi {
                 let reason = actions::reason_text(lang, Check::PossibleDuplicate, None);
                 self.maint.dlg.compare = Some(CompareDlg { finding: (*f).clone(), a, b, comment: actions::default_comment(lang, chrono::Local::now().date_naive(), &reason) });
             }
-            Fix::Repair => match maint::dbcare::plan_repair(cx.conn) {
-                Ok(p) => {
-                    self.maint.repair_plan = Some(p);
-                    self.maint.dlg.repair = true;
-                    self.maint.dlg.since = Some(Instant::now());
-                }
-                Err(e) => self.maint.msg = Some((e.message(lang), false)),
-            },
+            // Der Plan braucht ein volles `integrity_check` → Hintergrund-Auftrag; das Ergebnis öffnet den Dialog.
+            Fix::Repair => self.maint_spawn_plan(cx),
             _ => {
                 let same = findings.iter().all(|f| f.check == findings[0].check);
                 let days = if findings.len() == 1 { findings[0].detail.get("days").and_then(|d| d.as_i64()) } else { None };
                 let reason = actions::reason_text(lang, if same { findings[0].check } else { Check::CustomRule }, days);
                 let due = (chrono::Local::now().date_naive() + chrono::Duration::days(14)).format("%Y-%m-%d").to_string();
-                self.maint.dlg.fix = Some(FixDlg { fix, findings: findings.iter().map(|f| (*f).clone()).collect(), comment: actions::default_comment(lang, chrono::Local::now().date_naive(), &reason), due, since: Instant::now() });
+                self.maint.dlg.fix = Some(FixDlg { fix, findings: findings.iter().map(|f| (*f).clone()).collect(), comment: actions::default_comment(lang, chrono::Local::now().date_naive(), &reason), due, since: Instant::now(), cache: None });
             }
         }
     }
@@ -152,9 +148,18 @@ impl PlanUi {
         let lang = cx.lang;
         let refs: Vec<&Finding> = d.findings.iter().collect();
         let action = build_action(d.fix, &refs, d.comment.clone(), d.due.trim().to_string());
-        let preview: Result<Preview, String> = match &action {
-            Some(a) => actions::preview(cx.conn, self.maint.project, a, lang).map_err(|e| e.message(lang)),
-            None => Err(lang.t("Diese Auswahl lässt sich nicht gemeinsam beheben.", "This selection cannot be fixed together.").into()),
+        // Vorschau nicht in jedem Bild neu berechnen (sie liest Tickets aus der Datenbank), nur bei geänderten Eingaben.
+        let key = (d.comment.clone(), d.due.trim().to_string());
+        let preview: Result<Preview, String> = match &d.cache {
+            Some((k, p)) if *k == key => p.clone(),
+            _ => {
+                let p = match &action {
+                    Some(a) => actions::preview(cx.conn, self.maint.project, a, lang).map_err(|e| e.message(lang)),
+                    None => Err(lang.t("Diese Auswahl lässt sich nicht gemeinsam beheben.", "This selection cannot be fixed together.").into()),
+                };
+                d.cache = Some((key, p.clone()));
+                p
+            }
         };
         let (mut go, mut close, mut open_ticket, mut settings) = (false, false, None, false);
         let m = crate::style::modal(Self::modal_id("maint_fix")).show(ctx, |ui| {

@@ -475,6 +475,25 @@ fn sprints_and_versions_are_switched_independently() {
 }
 
 #[test]
+fn archived_tickets_leave_versions_and_sprints() {
+    let s = S::new();
+    let (fv, _) = fields(&s);
+    let v = ver(&s, "1.0");
+    let (a, b) = (s.task("A", Some(3.0)), s.task("B", Some(5.0)));
+    assign(&s, &a, &fv, v);
+    assign(&s, &b, &fv, v);
+    let sp = super::sprint::create_sprint(s.c(), &super::sprint::NewSprint::new(s.p(), "S"), &s.cal).unwrap();
+    super::sprint::move_tickets_to_sprint(s.c(), sp, &[a.id, b.id]).unwrap();
+    assert_eq!(version_progress(s.c(), v, Basis::TicketCount).unwrap().total(), 2);
+    s.c().execute("UPDATE tickets SET archived = 1 WHERE id = ?1", [b.id]).unwrap();
+    assert_eq!(version_progress(s.c(), v, Basis::TicketCount).unwrap().total(), 1, "archiviert zählt nicht");
+    assert_eq!(version_tickets(s.c(), v).unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), vec![a.id]);
+    let content = super::sprint::sprint_content(s.c(), sp).unwrap();
+    assert_eq!(content.items.iter().map(|i| i.ticket.id).collect::<Vec<_>>(), vec![a.id]);
+    assert_eq!(content.totals.total.points, 3.0);
+}
+
+#[test]
 fn labels_exist_in_both_languages() {
     for k in [ReleaseKind::Version, ReleaseKind::Milestone] {
         for done in [true, false] {

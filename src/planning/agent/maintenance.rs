@@ -42,14 +42,17 @@ pub(super) fn maintenance_report_tool(ctx: &Ctx, v: &Value) -> R {
     };
     let limit = a.opt_int("limit", 1, MCP_MAX_FINDINGS as i64)?.unwrap_or(MCP_MAX_FINDINGS as i64) as usize;
     let include_ignored = a.opt_bool("include_ignored")?.unwrap_or(false);
-    // Datenbank: schnelle Prüfung (quick_check), die Anwendung führt das Werkzeug in der Oberfläche aus
+    // Das Werkzeug läuft in der Oberfläche: die Integritätsprüfung der Datei (quick_check, liest die ganze Datei) nur mit
+    // `category = database`, sonst nur Fremdschlüssel und Zähler; die Duplikat-Suche hat eine Obergrenze (`duplicates_truncated`).
+    let db_integrity = category == Some(Category::Database);
     let opts = RunOpts {
         now: ctx.now,
         lang: ctx.lang,
         duplicates: category.is_none_or(|c| c == Category::Tickets),
-        database: category.is_none_or(|c| c == Category::Database).then_some(maint::DbScope::Quick),
+        database: category.is_none_or(|c| c == Category::Database).then_some(if db_integrity { maint::DbScope::Quick } else { maint::DbScope::Structure }),
         rules: category.is_none_or(|c| c == Category::Rules),
         include_ignored,
+        duplicate_budget: Some(maint::DupBudget::MCP),
     };
     let report = maint::run_report(ctx.conn, project.id, &opts).map_err(|e| ctx.err("db_error", e.message(Lang::De), e.message(Lang::En)))?;
     let ignored: std::collections::HashSet<String> = if include_ignored { maint::ignored(ctx.conn, project.id).unwrap_or_default().into_iter().map(|(id, _)| id).collect() } else { Default::default() };
@@ -93,6 +96,8 @@ pub(super) fn maintenance_report_tool(ctx: &Ctx, v: &Value) -> R {
         "counts": counts,
         "by_severity": by_sev,
         "ignored_hidden": if include_ignored { 0 } else { report.ignored },
+        "database_integrity_checked": db_integrity,
+        "duplicates_truncated": report.duplicates_truncated,
         "findings": findings,
         "note": untrusted(ctx.lang),
     }))

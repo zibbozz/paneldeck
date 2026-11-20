@@ -19,7 +19,8 @@ fn finding(check: Check, id: String, t: Option<&TRow>, target: Target, message: 
     Finding { id, check, severity: check.severity(), ticket: t.map(TRow::tref), other: None, target, message, fixes, detail }
 }
 
-pub fn run(conn: &Connection, project: &Project, s: &Settings, o: &RunOpts) -> MRes<Vec<Finding>> {
+/// Alle Ticket-Prüfungen; das `bool` meldet, dass die Duplikat-Suche an ihrer Obergrenze vorzeitig endete.
+pub fn run(conn: &Connection, project: &Project, s: &Settings, o: &RunOpts) -> MRes<(Vec<Finding>, bool)> {
     let lang = o.lang;
     let tickets = load_tickets(conn, project)?;
     let by_id: HashMap<i64, &TRow> = tickets.iter().map(|t| (t.id, t)).collect();
@@ -28,10 +29,11 @@ pub fn run(conn: &Connection, project: &Project, s: &Settings, o: &RunOpts) -> M
     open_in_finished(conn, project, lang, &tickets, &by_id, &mut out)?;
     structure(conn, project, lang, &tickets, &by_id, &mut out)?;
     values(conn, project, lang, &tickets, &mut out)?;
+    let mut truncated = false;
     if o.duplicates && s.enabled(Check::PossibleDuplicate) {
-        duplicates(conn, project, s, lang, &tickets, &mut out)?;
+        truncated = duplicates(conn, s, o, &tickets, &mut out)?;
     }
-    Ok(out)
+    Ok((out, truncated))
 }
 
 // ------------------------------------------------------------------ liegengeblieben, überfällig
@@ -375,7 +377,10 @@ fn ids(conn: &Connection, sql: &str, p: i64) -> rusqlite::Result<HashSet<i64>> {
 
 // ------------------------------------------------------------------ mögliche Duplikate
 
-fn duplicates(conn: &Connection, project: &Project, s: &Settings, lang: Lang, tickets: &[TRow], out: &mut Vec<Finding>) -> MRes<()> {
+/// Liefert `true`, wenn die Suche vorzeitig endete (mehr offene Tickets als [`MAX_DUPLICATE_TICKETS`] oder
+/// [`RunOpts::duplicate_budget`] erreicht).
+fn duplicates(conn: &Connection, s: &Settings, o: &RunOpts, tickets: &[TRow], out: &mut Vec<Finding>) -> MRes<bool> {
+    let lang = o.lang;
     // Schon als Duplikat verknüpfte Paare (Typ `duplicates`) nicht noch einmal vorschlagen.
     let mut st = conn.prepare(
         "SELECT l.from_ticket_id, l.to_ticket_id FROM links l JOIN link_types lt ON lt.id = l.link_type_id WHERE lt.key = 'duplicates' AND l.to_ticket_id IS NOT NULL",
@@ -386,6 +391,8 @@ fn duplicates(conn: &Connection, project: &Project, s: &Settings, lang: Lang, ti
         .into_iter()
         .flat_map(|(a, b)| [(a, b), (b, a)])
         .collect();
+    let all_open = tickets.iter().filter(|t| t.open() || t.category.is_none()).count();
+    let mut truncated = all_open > MAX_DUPLICATE_TICKETS;
     let open: Vec<&TRow> = tickets.iter().filter(|t| t.open() || t.category.is_none()).take(MAX_DUPLICATE_TICKETS).collect();
     let norm: Vec<(String, usize)> = open.iter().map(|t| {
         let n = similar::normalize(&t.title);
@@ -393,13 +400,22 @@ fn duplicates(conn: &Connection, project: &Project, s: &Settings, lang: Lang, ti
         (n, len)
     }).collect();
     let threshold = s.duplicate_percent.clamp(50, 100) as u32;
-    let _ = project;
-    for i in 0..open.len() {
+    let started = std::time::Instant::now();
+    let mut compared = 0usize;
+    'outer: for i in 0..open.len() {
         for j in (i + 1)..open.len() {
             let (a, b) = (open[i], open[j]);
             if similar::length_bound(norm[i].1, norm[j].1) < threshold || linked.contains(&(a.id, b.id)) {
                 continue;
             }
+            // Obergrenze: gezählt werden die teuren Vergleiche (Levenshtein); die Uhr nur alle 256 Vergleiche lesen.
+            if let Some(bud) = o.duplicate_budget {
+                if compared >= bud.max_pairs || (compared % 256 == 0 && compared > 0 && started.elapsed() >= bud.max_time) {
+                    truncated = true;
+                    break 'outer;
+                }
+            }
+            compared += 1;
             let p = similar::percent_normalized(&norm[i].0, &norm[j].0);
             if p < threshold {
                 continue;
@@ -413,5 +429,5 @@ fn duplicates(conn: &Connection, project: &Project, s: &Settings, lang: Lang, ti
             out.push(f);
         }
     }
-    Ok(())
+    Ok(truncated)
 }

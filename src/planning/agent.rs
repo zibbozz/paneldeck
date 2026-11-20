@@ -633,7 +633,7 @@ fn time_entry_json(ctx: &Ctx, e: &super::time_entries::TimeEntry, kinds: &[super
 // ------------------------------------------------------------------ Projekte (lesen)
 
 fn project_json(ctx: &Ctx, p: &Project) -> Value {
-    let count: i64 = ctx.conn.query_row("SELECT COUNT(*) FROM tickets WHERE project_id = ?1", [p.id], |r| r.get(0)).unwrap_or(0);
+    let count: i64 = ctx.conn.query_row("SELECT COUNT(*) FROM tickets WHERE project_id = ?1 AND archived = 0", [p.id], |r| r.get(0)).unwrap_or(0);
     json!({
         "key": p.key,
         "id": p.id,
@@ -1688,5 +1688,32 @@ mod tests {
         }
         assert_eq!(ticket_err(Lang::En, TicketError::Db("x".into())).code, "db_error");
         assert_eq!(ticket_err(Lang::En, TicketError::Plan(PlanError::SystemProtected)).code, "forbidden");
+    }
+
+    #[test]
+    fn archived_tickets_leave_the_project_count_and_children_are_marked() {
+        let f = Fx::new();
+        let parent = f.mk(f.epic, "Parent");
+        let child = crate::planning::tickets::create_child(&f.c, parent.id, f.story, "Child", vec![], &Source::ui()).unwrap().0;
+        let count = |f: &Fx| ok(f, "get_project", json!({"project": "PAN"})).result["project"]["ticket_count"].as_i64().unwrap();
+        assert_eq!(count(&f), 2);
+        f.c.execute("UPDATE tickets SET archived = 1 WHERE id = ?1", [child.id]).unwrap();
+        assert_eq!(count(&f), 1, "archiviert zählt nicht");
+        let d = ok(&f, "get_ticket", json!({"ticket": parent.key()}));
+        assert_eq!(d.result["children"][0]["archived"], true, "Kind bleibt, ist aber gekennzeichnet");
+    }
+
+    #[test]
+    fn maintenance_report_skips_the_integrity_check_unless_database_is_asked() {
+        let f = Fx::new();
+        f.mk(f.task, "Login fails on Safari");
+        f.mk(f.task, "Login fails in Safari");
+        let d = ok(&f, "maintenance_report", json!({"project": "PAN"}));
+        assert_eq!(d.result["database_integrity_checked"], false);
+        assert_eq!(d.result["duplicates_truncated"], false);
+        assert!(d.result["counts"]["database"].is_number() && d.result["truncated"].is_boolean() && d.result["total"].is_number());
+        assert!(d.result["findings"].as_array().unwrap().iter().any(|x| x["kind"] == "possible_duplicate"));
+        let d = ok(&f, "maintenance_report", json!({"project": "PAN", "category": "database"}));
+        assert_eq!(d.result["database_integrity_checked"], true);
     }
 }

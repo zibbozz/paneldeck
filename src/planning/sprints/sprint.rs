@@ -574,7 +574,7 @@ pub fn sprint_content(conn: &Connection, sprint_id: i64) -> SRes<SprintContent> 
     sprint_project(conn, sprint.project_id)?;
     let sql = format!(
         "SELECT {}, {}, COALESCE(s.category = 'done', 0), st.added_at {} JOIN sprint_tickets st ON st.ticket_id = t.id
-         LEFT JOIN statuses s ON s.id = t.status_id WHERE st.sprint_id = ?1 AND st.removed_at IS NULL ORDER BY t.rank, t.id",
+         LEFT JOIN statuses s ON s.id = t.status_id WHERE st.sprint_id = ?1 AND st.removed_at IS NULL AND t.archived = 0 ORDER BY t.rank, t.id",
         tickets::COLS,
         points_sql(),
         tickets::FROM

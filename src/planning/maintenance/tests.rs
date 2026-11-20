@@ -165,6 +165,39 @@ fn archive_hides_from_lists_and_search_and_restores() {
 }
 
 #[test]
+fn action_is_rolled_back_when_the_log_cannot_be_written() {
+    let m = build();
+    let c = &m.fx.c;
+    c.execute_batch("ALTER TABLE maintenance_log RENAME TO maintenance_log_away").unwrap();
+    let r = apply(c, m.fx.project, &Action::Archive { tickets: vec![m.id(1)] }, Lang::En, None);
+    assert!(r.is_err());
+    assert!(c.is_autocommit(), "kein offener Savepoint mehr");
+    assert!(!crate::planning::tickets::get_ticket(c, m.id(1)).unwrap().archived, "Aktion zurückgenommen");
+    c.execute_batch("ALTER TABLE maintenance_log_away RENAME TO maintenance_log").unwrap();
+    apply(c, m.fx.project, &Action::Archive { tickets: vec![m.id(1)] }, Lang::En, None).unwrap();
+    assert!(crate::planning::tickets::get_ticket(c, m.id(1)).unwrap().archived);
+}
+
+#[test]
+fn duplicate_search_stops_at_its_budget() {
+    let m = build();
+    let full = report(&m);
+    assert!(!full.duplicates_truncated);
+    assert!(full.findings.iter().any(|f| f.check == Check::PossibleDuplicate));
+    let capped = RunOpts { duplicate_budget: Some(DupBudget { max_pairs: 0, max_time: std::time::Duration::from_secs(60) }), ..RunOpts::full(m.now, Lang::En) };
+    let r = run_report(&m.fx.c, m.fx.project, &capped).unwrap();
+    assert!(r.duplicates_truncated);
+    assert!(!r.findings.iter().any(|f| f.check == Check::PossibleDuplicate));
+    let roomy = RunOpts { duplicate_budget: Some(DupBudget::MCP), ..RunOpts::full(m.now, Lang::En) };
+    let r = run_report(&m.fx.c, m.fx.project, &roomy).unwrap();
+    assert!(!r.duplicates_truncated && r.findings.iter().any(|f| f.check == Check::PossibleDuplicate));
+    // Ohne Integritätsprüfung (Structure) bleiben Fremdschlüssel- und Zähler-Befunde.
+    let light = RunOpts { database: Some(DbScope::Structure), ..RunOpts::full(m.now, Lang::En) };
+    let r = run_report(&m.fx.c, m.fx.project, &light).unwrap();
+    assert!(r.findings.iter().any(|f| f.check == Check::DbForeignKey) && r.findings.iter().any(|f| f.check == Check::DbCounter));
+}
+
+#[test]
 fn link_duplicate_creates_the_link_type_when_needed() {
     let m = build();
     let c = &m.fx.c;
