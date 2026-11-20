@@ -109,11 +109,17 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
 - `state.json` und `templates.json` → je Sitzung `claude_resume_mode`: *Fortsetzen nach Neustart* – `"off"`, `"continue"` oder `"pick"`. Fehlt = aus `claude_continue` übernommen (`false` → `off`, sonst `continue`); geschrieben nur, wenn es nicht `continue` ist. Unbekannte Werte laden wie ein fehlendes Feld und gehen beim Speichern verloren. `claude_continue` wird weiter geschrieben (`false` nur bei `off`), damit ältere Versionen funktionieren: Sie behandeln `pick` wie ihr „fortsetzen“.
 - Neue Claude-Konversationen starten nicht mehr mit `--session-id`; `claude_session` einer Sitzung bleibt leer, bis Claude seine Konversation über die Hooks meldet.
 
+## Neue Felder in 2.6.0
+- `paneldeck.db` Schema-Version 10 ([Wartung](todo-and-tickets.md#wartung)): Spalte `tickets.archived` und die Tabellen `maintenance_settings` (Zielstatus *Won't Do*, Schwellen, abgeschaltete Prüfungen je Projekt), `maintenance_ignored` (ignorierte Befunde), `maintenance_rules` (eigene Prüfregeln) und `maintenance_log` (Wartungsprotokoll, wird nie automatisch gelöscht). Das Update legt wie immer vorher eine Sicherung an.
+- Projektsicherungen (`paneldeck-project`) haben das Format Version 4: `tickets[].archived` und der optionale Abschnitt `maintenance` (Einstellungen und eigene Regeln). Paneldeck vor 2.6 lehnt Version 4 ab.
+- Sicherungen vor einer Wartungsaktion heißen `maintenance-<Datum>-<Uhrzeit>.db`; höchstens drei bleiben, und sie zählen nicht gegen die automatischen Sicherungen.
+
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
 
 - `--backup-dir <ordner>` schreibt die Sicherungen eines Starts in einen anderen Ordner (die Ordnerwahl ist dann gesperrt; siehe [Kommandozeile](command-line.md#--backup-dir-ordner)).
 - Vor einem Update auf eine **neue Hauptversion** legt das Selbst-Update zuerst eine Datenbank-Sicherung an (siehe [Updates](updates.md)).
+- Die **Datenbankpflege** (prüfen, Statistik, verdichten, reparieren, in eine neue Datei retten) liegt auf der [Wartungsseite](todo-and-tickets.md#wartung) eines Experten-Projekts; *Einstellungen → Daten & Sicherung* verweist darauf.
 - Der **Rückgängig-Verlauf** der Todo-Liste (3 bis 100 Schritte, Standard 25) wird im selben Tab eingestellt.
 
 ## Daten verschieben oder kopieren

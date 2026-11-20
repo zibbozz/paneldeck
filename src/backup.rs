@@ -20,6 +20,8 @@ pub enum Kind {
     Manual,
     PreMigration { from: u32, to: u32 },
     PreRestore,
+    /// Vor einer Wartungsaktion (Wartungsseite, #308); höchstens drei, zählt nicht gegen die automatischen.
+    PreMaintenance,
 }
 
 impl Kind {
@@ -29,6 +31,7 @@ impl Kind {
             Kind::Manual => "manual".into(),
             Kind::PreMigration { from, to } => format!("pre-migration-v{from}-v{to}"),
             Kind::PreRestore => "pre-restore".into(),
+            Kind::PreMaintenance => "maintenance".into(),
         }
     }
 
@@ -38,6 +41,7 @@ impl Kind {
             Kind::Manual => lang.t("Manuell", "Manual").into(),
             Kind::PreMigration { from, to } => format!("{} v{from} → v{to}", lang.t("Vor Update", "Before update")),
             Kind::PreRestore => lang.t("Vor Wiederherstellung", "Before restore").into(),
+            Kind::PreMaintenance => lang.t("Vor Wartung", "Before maintenance").into(),
         }
     }
 
@@ -46,6 +50,7 @@ impl Kind {
             "auto" => Some(Kind::Auto),
             "manual" => Some(Kind::Manual),
             "pre-restore" => Some(Kind::PreRestore),
+            "maintenance" => Some(Kind::PreMaintenance),
             p => {
                 let rest = p.strip_prefix("pre-migration-v")?;
                 let (from, to) = rest.split_once("-v")?;
@@ -122,6 +127,7 @@ pub fn rotate(dir: &Path, keep_auto: usize) {
     let mut auto = 0;
     let mut pre_mig = 0;
     let mut pre_restore = 0;
+    let mut pre_maint = 0;
     for b in all {
         let remove = match b.kind {
             Kind::Auto => {
@@ -136,11 +142,22 @@ pub fn rotate(dir: &Path, keep_auto: usize) {
                 pre_restore += 1;
                 pre_restore > KEEP_SAFETY
             }
+            Kind::PreMaintenance => {
+                pre_maint += 1;
+                pre_maint > KEEP_SAFETY
+            }
             Kind::Manual => false,
         };
         if remove {
             let _ = std::fs::remove_file(&b.path);
         }
+    }
+}
+
+/// Nur die Sicherungen vor Wartungsaktionen auf die letzten drei begrenzen (die übrigen Arten bleiben unberührt).
+pub fn rotate_maintenance(dir: &Path) {
+    for b in list(dir).into_iter().filter(|b| b.kind == Kind::PreMaintenance).skip(KEEP_SAFETY) {
+        let _ = std::fs::remove_file(&b.path);
     }
 }
 
@@ -256,6 +273,7 @@ mod tests {
         assert_eq!(parse_name("manual-20261114-103005-2.db").unwrap().0, Kind::Manual);
         assert_eq!(parse_name("pre-migration-v1-v2-20261114-103005.db").unwrap().0, Kind::PreMigration { from: 1, to: 2 });
         assert_eq!(parse_name("pre-restore-20261114-103005.db").unwrap().0, Kind::PreRestore);
+        assert_eq!(parse_name("maintenance-20261114-103005.db").unwrap().0, Kind::PreMaintenance);
         assert!(parse_name("paneldeck.db").is_none());
         assert!(parse_name("auto-xyz.db").is_none());
     }
@@ -287,6 +305,25 @@ mod tests {
         assert_eq!(l.iter().filter(|b| b.kind == Kind::Manual).count(), 1, "manuelle werden nie rotiert");
         assert_eq!(marker(&l[0].path), "eins");
         assert!(last_auto(&bdir).is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Sicherungen vor einer Wartungsaktion: höchstens drei (die ältesten fallen weg), sie zählen nicht gegen die automatischen.
+    #[test]
+    fn maintenance_backups_keep_three_and_leave_auto_alone() {
+        let d = tmp("bk-maint");
+        let db = d.join("paneldeck.db");
+        make_db(&db, "m");
+        let bdir = d.join("backups");
+        create(&db, &bdir, Kind::Auto).unwrap();
+        for _ in 0..5 {
+            create(&db, &bdir, Kind::PreMaintenance).unwrap();
+        }
+        assert!(list(&bdir).iter().any(|b| b.kind == Kind::PreMaintenance && b.path.file_name().unwrap().to_string_lossy().starts_with("maintenance-")));
+        rotate(&bdir, 1);
+        let l = list(&bdir);
+        assert_eq!(l.iter().filter(|b| b.kind == Kind::PreMaintenance).count(), 3);
+        assert_eq!(l.iter().filter(|b| b.kind == Kind::Auto).count(), 1, "die automatische Sicherung bleibt");
         let _ = std::fs::remove_dir_all(&d);
     }
 

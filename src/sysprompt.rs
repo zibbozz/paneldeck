@@ -207,6 +207,7 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "list_sprints" => ("Sprints eines Projekts.", "The sprints of a project."),
         "get_sprint" => ("Ein Sprint mit Tickets und Bericht.", "One sprint with its tickets and report."),
         "list_versions" => ("Versionen und Meilensteine eines Projekts mit Fortschritt.", "Versions and milestones of a project with progress."),
+        "maintenance_report" => ("Wartungsbericht eines Projekts (Tickets, Konfiguration, Datenbank, eigene Regeln).", "Maintenance report of a project (tickets, configuration, database, custom rules)."),
         "create_ticket" => ("Ticket anlegen (mit Beschreibung, Fälligkeit und Labels).", "Create a ticket (with description, due date and labels)."),
         "update_ticket" => ("Titel, Beschreibung, Fälligkeit, Labels oder Felder eines Tickets ändern.", "Change the title, description, due date, labels or fields of a ticket."),
         "transition_ticket" => ("Status eines Tickets nach dem Workflow wechseln.", "Change the status of a ticket under its workflow."),

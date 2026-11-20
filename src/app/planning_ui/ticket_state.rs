@@ -493,6 +493,7 @@ mod tests {
             starred: false,
             created_at: String::new(),
             updated_at: String::new(),
+            archived: false,
         }
     }
 

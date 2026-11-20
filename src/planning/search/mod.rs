@@ -78,11 +78,13 @@ pub struct Ctx {
     pub terminals: Vec<String>,
     pub lang: Lang,
     pub timeout: Duration,
+    /// Auch archivierte Tickets (MCP `include_archived`, Wartung); sonst nur, wenn die Abfrage nach `archived` fragt.
+    pub include_archived: bool,
 }
 
 impl Ctx {
     pub fn new(today: &str, lang: Lang) -> Ctx {
-        Ctx { today: today.to_string(), terminals: Vec::new(), lang, timeout: DEFAULT_TIMEOUT }
+        Ctx { today: today.to_string(), terminals: Vec::new(), lang, timeout: DEFAULT_TIMEOUT, include_archived: false }
     }
 
     /// Mit dem heutigen Datum der Systemuhr.
@@ -97,6 +99,11 @@ impl Ctx {
 
     pub fn with_timeout(mut self, t: Duration) -> Ctx {
         self.timeout = t;
+        self
+    }
+
+    pub fn with_archived(mut self, on: bool) -> Ctx {
+        self.include_archived = on;
         self
     }
 }

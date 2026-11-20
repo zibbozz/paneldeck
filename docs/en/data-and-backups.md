@@ -109,11 +109,17 @@ All new fields are optional: a missing field means the previous behaviour, and o
 - `state.json` and `templates.json` → per session `claude_resume_mode`: *Resume after restart* – `"off"`, `"continue"` or `"pick"`. Missing = taken from `claude_continue` (`false` → `off`, otherwise `continue`); written only when it is not `continue`. Unknown values load as if the field were missing and are lost when Paneldeck saves. `claude_continue` is still written (`false` only for `off`), so older versions keep working: they treat `pick` like their resume option.
 - New Claude conversations are no longer started with `--session-id`; `claude_session` of a session stays empty until Claude reports its conversation through the hooks.
 
+## New fields in 2.6.0
+- `paneldeck.db` schema version 10 ([maintenance](todo-and-tickets.md#maintenance)): column `tickets.archived` and the tables `maintenance_settings` (target status *Won't Do*, thresholds, switched-off checks per project), `maintenance_ignored` (ignored findings), `maintenance_rules` (custom check rules) and `maintenance_log` (maintenance log, never deleted automatically). The update makes a backup first, as always.
+- Project backups (`paneldeck-project`) use format version 4: `tickets[].archived` and the optional section `maintenance` (settings and custom rules). Paneldeck before 2.6 refuses version 4.
+- Backups made before a maintenance action are named `maintenance-<date>-<time>.db`; at most three are kept, and they do not count against the automatic backups.
+
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 
 - `--backup-dir <folder>` writes the backups of one start to another folder (the folder choice is then locked; see [Command line](command-line.md#--backup-dir-folder)).
 - Before an update to a **new major version**, the self-update makes a database backup first (see [Updates](updates.md)).
+- **Database care** (check, statistics, compact, repair, rescue into a new file) is on the [maintenance page](todo-and-tickets.md#maintenance) of an expert project; *Settings → Data & backup* links to it.
 - The **undo history** of the to-do list (3 to 100 steps, default 25) is set on the same tab.
 
 ## Moving or copying the data

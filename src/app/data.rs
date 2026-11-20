@@ -4,7 +4,7 @@ use super::*;
 use crate::backup::{self, Kind};
 
 impl App {
-    fn backup_dir_path(&self) -> PathBuf {
+    pub(super) fn backup_dir_path(&self) -> PathBuf {
         // `--backup-dir` gilt nur für diesen Start und landet nie in den Einstellungen.
         if let Some(b) = &crate::cli::get().backup_dir {
             return b.clone();
@@ -119,6 +119,16 @@ impl App {
         }
         ui.add_space(S2);
         ui.separator();
+        ui.add_space(S2);
+        // Datenbankpflege (#308) gibt es nur auf der Wartungsseite; hier nur der Weg dorthin.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(lang.t("Datenbankpflege (prüfen, verdichten, reparieren, retten):", "Database care (check, compact, repair, rescue):")).small());
+            if ui.add_enabled(self.db.is_some(), egui::Button::new(lang.t("Wartungsseite öffnen", "Open the maintenance page"))).clicked() {
+                self.plan.request_maintenance_db();
+                self.set_mode(titlebar::Mode::Tasks);
+                self.settings_open = false;
+            }
+        });
         ui.add_space(S2);
         ui.label(RichText::new(lang.t("Vorhandene Sicherungen", "Existing backups")).strong());
         if self.backups_dirty || self.backups_cache.is_none() {

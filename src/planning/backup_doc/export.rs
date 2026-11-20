@@ -235,6 +235,7 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
             rank: t.rank,
             flagged: t.flagged,
             starred: t.starred,
+            archived: t.archived,
             created_at: t.created_at.clone(),
             updated_at: t.updated_at.clone(),
             values: vals,
@@ -246,6 +247,7 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
     }
 
     let sprints = load_sprints(conn, project_id, &map.tickets)?;
+    let maintenance = export_maintenance(conn, project_id, &map)?;
 
     Ok(ProjectDoc {
         format: FORMAT.to_string(),
@@ -272,7 +274,40 @@ pub fn export_project(conn: &Connection, project_id: i64) -> Result<ProjectDoc, 
         versions,
         milestones,
         sprints,
+        maintenance,
     })
+}
+
+/// Wartungs-Einstellungen und eigene Regeln (#308); `None`, wenn das Projekt nichts davon hat.
+fn export_maintenance(conn: &Connection, project_id: i64, map: &ExportMap) -> Result<Option<super::DocMaintenance>, BackupError> {
+    use crate::planning::maintenance::{load_settings, rules::list_rules};
+    let has_settings: bool = conn.query_row("SELECT COUNT(*) FROM maintenance_settings WHERE project_id = ?1", [project_id], |r| r.get::<_, i64>(0))? > 0;
+    let rules = list_rules(conn, project_id)?;
+    if !has_settings && rules.is_empty() {
+        return Ok(None);
+    }
+    let s = load_settings(conn, project_id)?;
+    let doc_rules = rules
+        .iter()
+        .map(|r| {
+            let mut action = serde_json::to_value(&r.action).unwrap_or(serde_json::Value::Null);
+            if let Some(s) = action.get("status").and_then(|v| v.as_i64()) {
+                action["status"] = serde_json::json!(map.status.get(&s).copied().unwrap_or(0));
+            }
+            if let Some(f) = action.get("field").and_then(|v| v.as_i64()) {
+                action["field"] = serde_json::json!(map.fields.get(&f).copied().unwrap_or(0));
+            }
+            super::DocRule { name: r.name.clone(), jql: r.jql.clone(), severity: r.severity.as_str().to_string(), action, enabled: r.enabled }
+        })
+        .collect();
+    Ok(Some(super::DocMaintenance {
+        wont_do: s.wont_do.and_then(|w| map.status.get(&w).copied()),
+        stale_days: Some(s.stale_days),
+        field_days: Some(s.field_days),
+        duplicate_percent: Some(s.duplicate_percent),
+        disabled: s.disabled.iter().map(|c| c.as_str().to_string()).collect(),
+        rules: doc_rules,
+    }))
 }
 
 /// Versionen bzw. Meilensteine des Projekts in der Reihenfolge der Konfiguration; trägt die Nummern (1, 2, …) in `numbers` ein.

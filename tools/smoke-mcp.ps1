@@ -1034,7 +1034,7 @@ c.close()
     $script:prestart = $null
     [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
     $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
-    $expectTools = @('list_projects', 'get_project', 'search_tickets', 'get_ticket', 'get_time_entries', 'list_sprints', 'get_sprint', 'list_versions', 'create_ticket', 'update_ticket', 'transition_ticket', 'add_comment', 'log_time', 'link_ticket', 'link_terminal')
+    $expectTools = @('list_projects', 'get_project', 'search_tickets', 'get_ticket', 'get_time_entries', 'list_sprints', 'get_sprint', 'list_versions', 'maintenance_report', 'create_ticket', 'update_ticket', 'transition_ticket', 'add_comment', 'log_time', 'link_ticket', 'link_terminal')
     Check 'Expertenmodus: tools/list hat die Ticket-Werkzeuge' (@($expectTools | Where-Object { $names -notcontains $_ }).Count -eq 0)
     Check 'Expertenmodus: keine schreibenden Todo-Werkzeuge, list_todos bleibt' ($names -notcontains 'add_todo' -and $names -notcontains 'set_todo_done' -and $names -contains 'list_todos')
     Check 'Expertenmodus: add_todo -> wrong_mode' ((Code (Tool 'add_todo' @{ title = 'x' })) -eq 'wrong_mode')
@@ -1158,6 +1158,75 @@ c.close()
     Check 'Expert + Nur lesen: get_ticket liest' ((Tool 'get_ticket' @{ ticket = 'PAN-1' }).data.key -eq 'PAN-1')
     Check 'Expert + Nur lesen: list_sprints, list_versions und query lesen' ($names -contains 'list_sprints' -and $names -contains 'get_sprint' -and $names -contains 'list_versions' -and (Tool 'list_sprints' @{ project = 'PAN' }).data.total -eq 1 -and (Tool 'search_tickets' @{ query = 'type = Task' }).data.total -ge 1)
     Check 'Expert + Nur lesen: get_sprint und list_versions lesen' ((Tool 'get_sprint' @{ project = 'PAN'; sprint = 'Sprint 1' }).data.sprint.state -eq 'active' -and (Tool 'list_versions' @{ project = 'PAN' }).data.versions_total -ge 1)
+    Write-Host "== Wartung: maintenance_report, Archiv, busy (#308)" -ForegroundColor Cyan
+    # Zweites Projekt MNT mit bekannten Problemen: MNT-1 nie begonnen und alt (ignoriert), MNT-2 in Arbeit und alt, MNT-3/MNT-4
+    # fast gleiche Titel, MNT-5 archiviert (taucht nirgends auf), MNT-6 mit geloeschtem Eltern-Ticket.
+    $seedM = @'
+import sqlite3, sys, datetime
+c = sqlite3.connect(sys.argv[1])
+fresh = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+old = '2024-01-01T10:00:00'
+c.execute("INSERT INTO projects (key,name,description,color,work_dir,use_sprints,use_versions,next_number,position,created_at) VALUES ('MNT','Maint','','#335577','',0,0,7,2,?)", (fresh,))
+pid = c.execute("SELECT id FROM projects WHERE key='MNT'").fetchone()[0]
+st = {}
+for i, (n, cat) in enumerate([('To Do', 'todo'), ('In Progress', 'progress'), ('Done', 'done')]):
+    c.execute("INSERT INTO statuses (project_id,name,color,category,position) VALUES (?,?,?,?,?)", (pid, n, '#888888', cat, i))
+    st[cat] = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+c.execute("INSERT INTO ticket_types (project_id,name,color,workflow,system,position) VALUES (?,?,?,1,0,0)", (pid, 'Task', '#3366cc'))
+tt = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+for i, cat in enumerate(['todo', 'progress', 'done']):
+    c.execute("INSERT INTO type_statuses (type_id,status_id,position) VALUES (?,?,?)", (tt, st[cat], i))
+c.execute("INSERT INTO work_kinds (project_id,name,position) VALUES (?,?,0)", (pid, 'Development'))
+rows = [(1, 'Write the onboarding guide', 'todo', old, 0), (2, 'Refactor the session store', 'progress', old, 0),
+        (3, 'Login fails on Safari', 'todo', fresh, 0), (4, 'Login fails in Safari', 'todo', fresh, 0),
+        (5, 'Archived old item', 'todo', old, 1), (6, 'Child without parent', 'todo', fresh, 0)]
+for n, title, cat, upd, arch in rows:
+    c.execute("INSERT INTO tickets (project_id,number,type_id,title,status_id,rank,created_at,updated_at,archived) VALUES (?,?,?,?,?,?,?,?,?)", (pid, n, tt, title, st[cat], n, old, upd, arch))
+c.execute('PRAGMA foreign_keys=OFF')
+c.execute("UPDATE tickets SET parent_id = 99999 WHERE project_id = ? AND number = 6", (pid,))
+c.execute("INSERT INTO maintenance_ignored (project_id, finding, ignored_at) VALUES (?, 'stale_new:MNT-1', ?)", (pid, fresh))
+c.execute("INSERT INTO maintenance_settings (project_id, wont_do_status_id) VALUES (?, ?)", (pid, st['done']))
+c.commit()
+c.close()
+'@
+    $seedMFile = "$work\seed-maint.py"; [IO.File]::WriteAllText($seedMFile, $seedM, (New-Object Text.UTF8Encoding $false))
+    $script:prestart = { $env:PYTHONUTF8 = '1'; & python -I $seedMFile "$data\paneldeck.db"; if ($LASTEXITCODE -ne 0) { throw 'seed-maint.py fehlgeschlagen' } }
+    Set-Level 'Read'
+    $script:prestart = $null
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+    Check 'Wartung: maintenance_report ab Stufe Nur lesen in tools/list' ($names -contains 'maintenance_report')
+    $mr = Tool 'maintenance_report' @{ project = 'MNT'; category = 'tickets' }
+    $mids = @($mr.data.findings | ForEach-Object id | Sort-Object)
+    Check 'maintenance_report: Ticket-Befunde wie erwartet (ignorierter fehlt)' (-not $mr.err -and $mr.data.total -eq 3 -and ($mids -join ',') -eq 'orphaned_subtask:MNT-6,possible_duplicate:MNT-3:MNT-4,stale_in_progress:MNT-2' -and $mr.data.ignored_hidden -eq 1 -and $mr.data.truncated -eq $false) "$($mids -join ',') total=$($mr.data.total) hidden=$($mr.data.ignored_hidden)"
+    $dup = $mr.data.findings | Where-Object kind -eq 'possible_duplicate'
+    Check 'maintenance_report: Duplikat mit Partner, Schwere und Kategorie' ($dup.ticket -eq 'MNT-3' -and $dup.other_ticket -eq 'MNT-4' -and $dup.severity -eq 'hint' -and $dup.category -eq 'tickets' -and $mr.data.counts.tickets -eq 3)
+    Check 'maintenance_report: archiviertes Ticket taucht nicht auf' (@($mr.data.findings | Where-Object { $_.ticket -eq 'MNT-5' }).Count -eq 0)
+    $mi = Tool 'maintenance_report' @{ project = 'MNT'; category = 'tickets'; include_ignored = $true }
+    Check 'maintenance_report: include_ignored zeigt den ignorierten Befund' ($mi.data.total -eq 4 -and @($mi.data.findings | Where-Object { $_.id -eq 'stale_new:MNT-1' -and $_.ignored }).Count -eq 1) "total=$($mi.data.total)"
+    $ml = Tool 'maintenance_report' @{ project = 'MNT'; category = 'tickets'; limit = 1 }
+    Check 'maintenance_report: limit kuerzt mit truncated und total' ($ml.data.returned -eq 1 -and $ml.data.truncated -eq $true -and $ml.data.total -eq 3)
+    $me = Tool 'maintenance_report' @{ project = 'MNT'; category = 'tickets'; severity = 'error' }
+    Check 'maintenance_report: Filter Schwere (error = verwaiste Unteraufgabe)' ($me.data.total -eq 1 -and $me.data.findings[0].kind -eq 'orphaned_subtask')
+    $ma = Tool 'maintenance_report' @{ project = 'MNT' }
+    Check 'maintenance_report: ohne Filter alle Kategorien, hoechstens 200' (-not $ma.err -and $ma.data.total -ge 3 -and $ma.data.returned -le 200 -and $null -ne $ma.data.counts.database -and $null -ne $ma.data.counts.configuration)
+    Check 'maintenance_report: System-Projekt TODO -> forbidden' ((Code (Tool 'maintenance_report' @{ project = 'TODO' })) -eq 'forbidden')
+    Check 'maintenance_report: unbekannte Kategorie -> bad_args' ((Code (Tool 'maintenance_report' @{ project = 'MNT'; category = 'nope' })) -eq 'bad_args')
+    $sa = Tool 'search_tickets' @{ project = 'MNT' }
+    $sb = Tool 'search_tickets' @{ project = 'MNT'; include_archived = $true }
+    Check 'search_tickets: archivierte nur mit include_archived, Feld archived' ($sa.data.total -eq 5 -and $sb.data.total -eq 6 -and @($sb.data.tickets | Where-Object { $_.key -eq 'MNT-5' -and $_.archived -eq $true }).Count -eq 1 -and @($sa.data.tickets | Where-Object { $_.archived -eq $false }).Count -eq 5) "ohne=$($sa.data.total) mit=$($sb.data.total)"
+    Check 'search_tickets: query archived = true' ((Tool 'search_tickets' @{ project = 'MNT'; query = 'archived = true' }).data.total -eq 1)
+    Check 'get_ticket: Feld archived' ((Tool 'get_ticket' @{ ticket = 'MNT-5' }).data.archived -eq $true)
+
+    # Schreibsperre der Wartung: PANELDECK_TEST_MAINT_BUSY=1 haelt sie dauerhaft (nur in der Umgebung dieses Hub-Starts)
+    $env:PANELDECK_TEST_MAINT_BUSY = '1'
+    try { Set-Level 'Control' } finally { Remove-Item Env:PANELDECK_TEST_MAINT_BUSY -ErrorAction SilentlyContinue }
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+    $bz = Tool 'create_ticket' @{ project = 'MNT'; type = 'Task'; title = 'waehrend der Wartung' }
+    Check 'Wartung schreibt: create_ticket -> busy mit retry_after_ms' ((Code $bz) -eq 'busy' -and $bz.data.error.details.retry_after_ms -eq 2000) $bz.text
+    Check 'Wartung schreibt: add_comment -> busy' ((Code (Tool 'add_comment' @{ ticket = 'MNT-3'; body = 'x' })) -eq 'busy')
+    Check 'Wartung schreibt: Lesen geht weiter (get_ticket, maintenance_report)' (-not (Tool 'get_ticket' @{ ticket = 'MNT-3' }).err -and -not (Tool 'maintenance_report' @{ project = 'MNT'; category = 'tickets' }).err)
+    Check 'Wartung schreibt: nichts angelegt' ((Tool 'search_tickets' @{ project = 'MNT'; include_archived = $true }).data.total -eq 6)
   }
 
   Write-Host "== Systemprompt (initialize -> instructions)" -ForegroundColor Cyan

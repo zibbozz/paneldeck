@@ -32,6 +32,8 @@ mod icon_explorer_tests;
 mod keywords_ed;
 mod kinds_ed;
 mod links_ed;
+mod maint_dialogs;
+pub(super) mod maint_view;
 mod overview;
 mod project_form;
 mod quick_ed;
@@ -190,6 +192,8 @@ pub(super) struct PlanUi {
     due_mgr: due_ui::Manager,
     /// Zählung (überfällig, markiert) je Projekt (Kennung 0 = einfache Todo-Liste) für den Kopf, mit Zeitpunkt.
     due_counts: due_ui::Counts,
+    /// Wartungsseite (#308).
+    maint: maint_view::State,
 }
 
 impl Default for PlanUi {
@@ -229,6 +233,7 @@ impl Default for PlanUi {
             quick_ed: Default::default(),
             due_mgr: Default::default(),
             due_counts: Default::default(),
+            maint: Default::default(),
         }
     }
 }
@@ -289,6 +294,7 @@ impl PlanUi {
             self.workflow = Default::default();
             self.dirty = true;
             self.msg = None;
+            self.maint.open = false;
             if self.projects.iter().find(|p| p.id == id).is_some_and(|p| p.system) && !matches!(self.tab, Tab::Overview | Tab::Dashboards | Tab::Links) {
                 self.tab = Tab::Overview;
             }
@@ -346,6 +352,8 @@ impl PlanUi {
         }
         // Ticket aus dem Terminal Hub (Chip, Palette, Mini-Suche): vor dem Lesen des Expertenmodus öffnen, es kann ihn einschalten
         self.run_requested_open(&cx);
+        // Datenbankpflege aus „Einstellungen → Daten“ (#308)
+        self.run_maintenance_request(&cx);
         let fill = env.bg;
         let mut new_project = false;
         let mut pick: Option<i64> = None;
@@ -423,6 +431,8 @@ impl PlanUi {
             self.reload(&cx);
         }
         self.ticket_refresh(&cx, env.undo_steps);
+        // Ergebnisse der Wartung (#308) auch abholen, wenn die Seite gerade nicht offen ist
+        self.maint_poll(ctx, &cx);
         self.ticket_keys(ctx, &cx);
         let side = self.tab == Tab::Tickets && self.tickets.open.is_some() && self.tickets.mode == ticket_state::ViewMode::Panel && !self.project().is_some_and(|p| p.system);
         if side {
@@ -520,6 +530,11 @@ impl PlanUi {
         let col = Rect::from_min_size(Pos2::new(x0, avail.top() + S3), Vec2::new(w, avail.height() - S3));
         let mut below = avail.top() + S3;
         ui.scope_builder(UiBuilder::new().max_rect(col), |ui| {
+            // Wartungsseite (#308): eigene Seite über der Übersicht, mit Zurück / Esc
+            if self.tab == Tab::Overview && self.maint.open && !proj.system {
+                self.maint_page(ui, cx, &proj);
+                return;
+            }
             // Ticket als eigene Seite: ohne Reiter, mit Zurück-Pfeil
             if self.tab == Tab::Tickets && self.tickets.open.is_some() && self.tickets.mode == ticket_state::ViewMode::Page && !proj.system {
                 self.ticket_page(ui, cx);
@@ -603,6 +618,7 @@ impl PlanUi {
         self.quick_dialogs(ctx, cx);
         self.keywords_dialog_ui(ctx, cx);
         self.ticket_dialogs(ctx, cx);
+        self.maint_dialogs(ctx, cx);
     }
 
     /// Schnellzugriff für Dialoge: Id eines Modals dieses Bereichs.

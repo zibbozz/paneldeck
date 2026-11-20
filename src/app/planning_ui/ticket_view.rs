@@ -48,6 +48,8 @@ pub(super) enum Act {
     Title(String),
     Star(bool),
     Flag(bool),
+    /// Archivieren bzw. aus dem Archiv holen (#308).
+    Archive(bool),
     Transition { to: i64, needs: Vec<FieldLabel> },
     CommitField(i64),
     RevertField(i64),
@@ -259,6 +261,10 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
                     acts.push(Act::ChangeType);
                     ui.close();
                 }
+                if ui.button(if t.archived { lang.t("Aus dem Archiv holen", "Restore from archive") } else { lang.t("Archivieren", "Archive") }).clicked() {
+                    acts.push(Act::Archive(!t.archived));
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button(RichText::new(lang.t("Löschen …", "Delete …")).color(Color32::from_rgb(0xe0, 0x6c, 0x75))).clicked() {
                     acts.push(Act::Delete);
@@ -283,6 +289,16 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
         });
     });
     ui.add_space(S1);
+    // ---- archiviert (#308): Hinweis und „Wiederherstellen“
+    if t.archived {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(lang.t("Archiviert – aus Listen, Boards und Suche ausgeblendet (Suche: archived = true).", "Archived – hidden from lists, boards and search (search: archived = true).")).small().color(Color32::from_rgb(0xe5, 0xa0, 0x4b)));
+            if ui.small_button(lang.t("Wiederherstellen", "Restore")).clicked() {
+                acts.push(Act::Archive(false));
+            }
+        });
+        ui.add_space(S1);
+    }
     // ---- Titel
     let title_w = ui.available_width();
     if let Some(new) = title_edit(ui, Id::new(("ticket_title", t.id)), &t.title, title_w, lang.t("Titel", "Title")) {
@@ -975,6 +991,15 @@ impl PlanUi {
                 let r = set_flagged(cx.conn, tid, on, &src);
                 self.t_apply(cx, r);
             }
+            Act::Archive(on) => match crate::planning::maintenance::actions::set_archived_ui(cx.conn, tid, on) {
+                Ok(_) => {
+                    self.tickets.invalidate();
+                    self.tickets.detail_dirty = true;
+                    self.tickets.counts_dirty = true;
+                    self.dirty = true;
+                }
+                Err(e) => self.msg_error(cx, e.message(lang)),
+            },
             Act::Transition { to, needs } => {
                 if !needs.is_empty() {
                     self.open_transition(cx, tid, to, &needs);

@@ -59,6 +59,8 @@ pub struct TicketFilter {
     pub limit: Option<i64>,
     pub offset: i64,
     pub order: TicketOrder,
+    /// Auch archivierte Tickets (Wartung, #308); Standard: nur nicht archivierte.
+    pub include_archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +85,9 @@ pub fn list_tickets(conn: &Connection, project_id: Option<i64>, f: &TicketFilter
     };
     if let Some(p) = project_id {
         push("t.project_id = ?".into(), vec![Sql::Integer(p)], &mut wh);
+    }
+    if !f.include_archived {
+        push("t.archived = 0".into(), vec![], &mut wh);
     }
     if !f.types.is_empty() {
         push(format!("t.type_id IN ({})", vec!["?"; f.types.len()].join(",")), f.types.iter().map(|i| Sql::Integer(*i)).collect(), &mut wh);
