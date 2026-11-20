@@ -851,7 +851,7 @@ pub fn claude_json_path(config_dir: Option<std::ffi::OsString>, home: Option<std
 }
 
 fn home_dir() -> Option<std::ffi::OsString> {
-    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    if cfg!(windows) { std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) } else { std::env::var_os("HOME") }
 }
 
 /// Arbeitsordner für `claude`-Aufrufe: das Benutzerprofil, sonst der Ordner der .exe (nie ein zufälliger Ordner,
@@ -1211,7 +1211,11 @@ pub fn append_log(dir: &std::path::Path, e: &LogEntry) {
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 512 * 1024) {
         let _ = std::fs::rename(&path, dir.join("mcp-log.old.jsonl"));
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    if let Ok(mut f) = o.open(&path) {
         let _ = writeln!(f, "{}", serde_json::to_string(e).unwrap_or_default());
     }
 }

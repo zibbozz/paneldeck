@@ -1,5 +1,6 @@
 //! API-Schlüssel verschlüsselt ablegen: Windows-DPAPI (`CryptProtectData`, an den aktuellen Benutzer gebunden, in
-//! `platform::secret`), gespeichert als Base64 des Blobs. Klartext landet nie in einer Datei.
+//! `platform::secret`), Linux/macOS: ChaCha20-Poly1305 mit einem Schlüssel aus dem Schlüsselbund bzw. aus dem
+//! Master-Passwort (#149); gespeichert als Base64 des Blobs. Klartext landet nie in einer Datei.
 
 use crate::state::Lang;
 
@@ -11,9 +12,21 @@ pub enum SecretError {
     Utf8,
     /// DPAPI-Fehler (z. B. Blob eines anderen Benutzers/Rechners).
     Sys(u32),
-    /// Nicht unter Windows.
-    #[cfg_attr(windows, allow(dead_code))]
+    /// Auf diesem System nicht verfügbar.
+    #[allow(dead_code)]
     Unsupported,
+    /// Linux/macOS: Master-Passwort noch nicht eingegeben (das Fenster fragt jetzt danach).
+    #[cfg_attr(windows, allow(dead_code))]
+    NeedPassword,
+    /// Linux/macOS: falsches Master-Passwort (oder beschädigter Wert).
+    #[cfg_attr(windows, allow(dead_code))]
+    WrongPassword,
+    /// Linux: Schlüsselbund verweigert (Text).
+    #[cfg_attr(windows, allow(dead_code))]
+    Keyring(String),
+    /// Linux: Der Schlüsselbund wird gerade im Hintergrund geöffnet.
+    #[cfg_attr(windows, allow(dead_code))]
+    Pending,
 }
 
 impl SecretError {
@@ -27,7 +40,26 @@ impl SecretError {
                     "The stored API key cannot be decrypted (different user or computer?) – please enter it again.",
                 )
             ),
-            SecretError::Unsupported => lang.t("Nur unter Windows verfügbar.", "Only available on Windows.").into(),
+            SecretError::Unsupported => lang.t("Auf diesem System nicht verfügbar.", "Not available on this system.").into(),
+            SecretError::NeedPassword => lang
+                .t(
+                    "Kein Schlüsselbund verfügbar – bitte das Master-Passwort für API-Schlüssel eingeben (Fenster) und es dann erneut versuchen.",
+                    "No keyring available – please enter the master password for API keys (window) and then try again.",
+                )
+                .into(),
+            SecretError::WrongPassword => lang
+                .t(
+                    "Das Master-Passwort passt nicht zu diesem API-Schlüssel – bitte erneut eingeben oder den Schlüssel neu eintragen.",
+                    "The master password does not match this API key – please enter it again or enter the key anew.",
+                )
+                .into(),
+            SecretError::Pending => lang
+                .t(
+                    "Der Schlüsselbund des Systems wird geöffnet (evtl. fragt er nach seinem Passwort) – bitte gleich noch einmal versuchen.",
+                    "The system keyring is being opened (it may ask for its password) – please try again in a moment.",
+                )
+                .into(),
+            SecretError::Keyring(e) => format!("{} ({e})", lang.t("Der Schlüsselbund des Systems hat den Zugriff verweigert.", "The system keyring refused access.")),
         }
     }
 }
@@ -41,6 +73,12 @@ pub fn protect(plain: &str) -> Result<String, SecretError> {
 pub fn unprotect(b64: &str) -> Result<String, SecretError> {
     let blob = unbase64(b64.trim()).ok_or(SecretError::Encoding)?;
     String::from_utf8(imp::unprotect(&blob)?).map_err(|_| SecretError::Utf8)
+}
+
+/// Linux/macOS: Ist der gespeicherte Wert mit dem Master-Passwort verschlüsselt (statt über den Schlüsselbund)?
+#[cfg(unix)]
+pub fn is_password_protected(b64: &str) -> bool {
+    unbase64(b64.trim()).is_some_and(|b| crate::platform::secret::is_password_blob(&b))
 }
 
 /// Base64 (Standard-Alphabet, Auffüllung optional) → Bytes; `None` bei ungültigen Zeichen.
@@ -86,6 +124,10 @@ mod imp {
             Error::TooLarge => SecretError::Encoding,
             Error::Sys(c) => SecretError::Sys(c),
             Error::Unsupported => SecretError::Unsupported,
+            Error::NeedPassword => SecretError::NeedPassword,
+            Error::WrongPassword => SecretError::WrongPassword,
+            Error::Keyring(e) => SecretError::Keyring(e),
+            Error::Pending => SecretError::Pending,
         }
     }
 

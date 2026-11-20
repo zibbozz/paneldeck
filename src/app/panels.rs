@@ -32,6 +32,13 @@ pub(super) fn files_root(cwd: &str, start: &str, wsl: Option<Option<&str>>, home
     if c.is_empty() {
         return if wsl.is_some() { fallback() } else { home.to_string() };
     }
+    // Linux/macOS (#149): Unix-Pfade einer lokalen Sitzung sind die normalen Pfade (`~` = Home).
+    if !cfg!(windows) && wsl.is_none() {
+        return match c.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
+            _ => c.to_string(),
+        };
+    }
     if crate::wsl::looks_linux(c) {
         return match wsl {
             Some(d) if c.starts_with('/') => crate::wsl::linux_to_windows(d.unwrap_or(""), c).unwrap_or_else(fallback),

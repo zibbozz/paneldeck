@@ -102,7 +102,7 @@ pub(super) fn windows_cwd(meta: &SessionMeta, home: &str) -> String {
     let cwd = meta.cwd.trim();
     if cwd.is_empty() {
         home.to_string()
-    } else if crate::wsl::looks_linux(cwd) {
+    } else if cfg!(windows) && crate::wsl::looks_linux(cwd) {
         crate::wsl::linux_to_windows("", cwd).unwrap_or_else(|| home.to_string())
     } else {
         cwd.to_string()
@@ -1146,6 +1146,7 @@ mod tests {
     }
 
     /// #302: Windows entscheidet nach den Transkripten im Ordner des Arbeitsordners (geht auch ohne Hooks).
+    #[cfg(windows)] // Windows-Shells (unter Linux/macOS sind Unix-Pfade die normalen Pfade)
     #[test]
     fn windows_continue_needs_a_transcript_in_this_folder() {
         let root = std::env::temp_dir().join(format!("pd-conv-{}", std::process::id()));

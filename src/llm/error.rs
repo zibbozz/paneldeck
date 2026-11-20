@@ -32,25 +32,23 @@ pub enum LlmError {
     BadKey,
     /// HTTP-Status ≥ 300 mit dem Anfang (höchstens 8 KB) des Fehlertexts.
     Status { code: u16, body: String },
-    /// Zertifikat nicht vertrauenswürdig: WinHTTP-Fehlercode und Flags der TLS-Prüfung (`WINHTTP_CALLBACK_STATUS_FLAG_*`).
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// Zertifikat nicht vertrauenswürdig: WinHTTP-Fehlercode und Flags der TLS-Prüfung (`WINHTTP_CALLBACK_STATUS_FLAG_*`);
+    /// unter Linux/macOS dieselben Codes (`llm/http/unix.rs`).
     Cert { code: u32, flags: u32 },
     Cancelled,
-    /// Fehler eines WinHTTP-Aufrufs.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// Fehler eines WinHTTP-Aufrufs (Linux/macOS: dieselben Codes für die Fehler von ureq).
     Sys { code: u32, call: &'static str },
     /// Fehlermeldung des Servers im Datenstrom (`{"error": …}`).
     Server(String),
     /// Antwort nicht verständlich (falsches JSON, falscher Server-Typ …); Inhalt = technische Einzelheit.
     BadResponse(String),
     TooLarge,
-    /// Nicht unter Windows.
-    #[cfg_attr(windows, allow(dead_code))]
+    /// Auf diesem System nicht verfügbar (seit #149 ohne Erzeuger; bleibt für die Texte).
+    #[allow(dead_code)]
     Unsupported,
 }
 
 /// WinHTTP-Fehlercodes und TLS-Flags (winhttp.h), als Zahlen, damit die Texte auch ohne Windows testbar sind.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) mod code {
     pub const TIMEOUT: u32 = 12002;
     pub const NAME_NOT_RESOLVED: u32 = 12007;
@@ -152,12 +150,19 @@ impl LlmError {
                         "The server's certificate is not trusted (self-signed or unknown certificate authority).",
                     )
                 };
-                let hint = lang.t(
-                    "Zertifikat bzw. Stammzertifikat in Windows unter „Vertrauenswürdige Stammzertifizierungsstellen“ (aktueller Benutzer) importieren oder im lokalen Netz http:// verwenden.",
-                    "Import the certificate or its root into Windows under “Trusted Root Certification Authorities” (current user), or use http:// in the local network.",
-                );
+                let hint = if cfg!(windows) {
+                    lang.t(
+                        "Zertifikat bzw. Stammzertifikat in Windows unter „Vertrauenswürdige Stammzertifizierungsstellen“ (aktueller Benutzer) importieren oder im lokalen Netz http:// verwenden.",
+                        "Import the certificate or its root into Windows under “Trusted Root Certification Authorities” (current user), or use http:// in the local network.",
+                    )
+                } else {
+                    lang.t(
+                        "Stammzertifikat in den Zertifikatsspeicher des Systems aufnehmen (z. B. `update-ca-certificates`, `trust anchor`) oder im lokalen Netz http:// verwenden.",
+                        "Add the root certificate to the system certificate store (e.g. `update-ca-certificates`, `trust anchor`), or use http:// in the local network.",
+                    )
+                };
                 let f = if *flags != 0 { format!(", TLS 0x{flags:x}") } else { String::new() };
-                format!("{why} {hint} (WinHTTP {c}{f})")
+                if cfg!(windows) { format!("{why} {hint} (WinHTTP {c}{f})") } else { format!("{why} {hint}") }
             }
             LlmError::Cancelled => lang.t("Abgebrochen.", "Cancelled.").into(),
             LlmError::Sys { code: c, call } => {
@@ -172,7 +177,7 @@ impl LlmError {
                     code::SECURE_FAILURE => lang.t("Sichere Verbindung fehlgeschlagen (TLS).", "Secure connection failed (TLS)."),
                     _ => lang.t("Netzwerkfehler.", "Network error."),
                 };
-                format!("{msg} (WinHTTP {c}, {call})")
+                if cfg!(windows) { format!("{msg} (WinHTTP {c}, {call})") } else { msg.to_string() }
             }
             LlmError::Server(m) => format!("{}: {}", lang.t("Der Server meldet einen Fehler", "The server reported an error"), server_message(m)),
             LlmError::BadResponse(d) => format!("{} ({d})", lang.t("Unerwartete Antwort des Servers – stimmt der Server-Typ?", "Unexpected answer from the server – is the server type right?")),
@@ -229,7 +234,7 @@ mod tests {
         assert_eq!(classify(12175, 0x80000000, "x"), LlmError::Sys { code: 12175, call: "x" });
         assert_eq!(classify(12017, 0, "x"), LlmError::Cancelled);
         let t = classify(12175, 8, "x").text(Lang::En);
-        assert!(t.contains("self-signed") && t.contains("Trusted Root"), "{t}");
+        assert!(t.contains("self-signed") && (t.contains("Trusted Root") || !cfg!(windows)), "{t}");
         assert!(classify(12038, 0, "x").text(Lang::De).contains("passt nicht zum Servernamen"));
         assert!(classify(12175, 0x20, "x").text(Lang::En).contains("expired"));
         assert!(LlmError::Sys { code: 12029, call: "WinHttpSendRequest" }.text(Lang::En).contains("11434"));
