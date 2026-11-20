@@ -9,6 +9,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.6.0] - WIP
 
+### Added
+
+- Aufräumen-Fenster (*Einstellungen → Daten & Sicherung → Aufräumen …*, auch in der Befehls-Palette): ankreuzen, was gelöscht wird – Datenbank-Sicherungen, Bilder der Zwischenablage, alte Sicherungsdateien, Scrollback- und Chat-Verläufe (verwaist oder alle, optional älter als X Tage), Protokolle, Prompt-Bibliothek, Vorlagen, eigene Themes, System-Prompt, Datenbank, Sitzungen, Einstellungen, Windows-Integration, andere Profile – mit Größen, Summe und Übersicht vor dem Löschen; Unwiderrufliches erfordert das Eintippen von `LÖSCHEN`, die Datenbank wird vorher gesichert; *Paneldeck vollständig zurücksetzen* sichert den Datenordner vorher als ZIP (#307)
+- Agenten-Schnittstelle: lesendes Werkzeug `cleanup_sizes` (Stufe Lesen) liefert die Größen je Aufräum-Bereich; Agenten können nichts löschen (#307)
+
 ## [2.5.0] - 2026-11-20
 
 ### Added
