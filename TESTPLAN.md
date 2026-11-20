@@ -781,6 +781,7 @@ Automatisch (CI, Linux-Job): Aufrufer-Zuordnung inkl. Abweisung unbekannter MCP-
 - [ ] **Zwischenablage:** Text kopieren/einfügen in beide Richtungen; Bildschirmfoto in der Zwischenablage → Strg+V im Terminal fügt den Bildpfad ein (X11/XWayland).
 - [ ] **Beide Sprachen:** neue Texte (Desktop-Integration, Master-Passwort, Update-Hinweise) auf Deutsch und Englisch.
 
+
 ## 66 · Shell-Integration für zsh und fish (#57, 2.5.0)
 Vorbereitung: eine eigene **Test-Distribution** (nie die eigene), z. B. zwei Importe derselben Ubuntu-/Debian-Rootfs: `pd-zsh` (Login-Shell `zsh`, dazu Oh My Zsh oder Powerlevel10k in `~/.zshrc`) und `pd-fish` (Login-Shell `fish`, eigenes `config.fish` mit `set -g fish_greeting`). Testinstanz aus einer Kopie der .exe mit eigenem Datenordner. Automatisch: Unit-Tests `shellinit`, `shells`, `quote`, `claude_opts`; Smoke-Test mit `PANELDECK_TEST_WSL_ZSH=pd-zsh` und `PANELDECK_TEST_WSL_FISH=pd-fish`.
 - [ ] **Anzeige:** Paneldeck starten, während `pd-zsh` läuft → *+ Neu* → Shell-Liste zeigt nach kurzer Zeit „WSL: pd-zsh (zsh)“; `pd-fish` (lief nicht) zeigt nach dem ersten Sitzungsstart „WSL: pd-fish (fish)“. Gleiches in *Einstellungen → Allgemein → Standard-Shell*, Sitzungseinstellungen und Vorlagen.
@@ -801,3 +802,27 @@ Vorbereitung: eine eigene **Test-Distribution** (nie die eigene), z. B. zwei Imp
 - [ ] **Schnipsel:** *Einstellungen → Terminal* → je bash/zsh/fish „Kopieren“ → in die Startdatei auf dem anderen Rechner → nach neuem `ssh`: kein Hinweis „ohne Shell-Integration“, Sprünge funktionieren, `run_command` wieder exakt.
 - [ ] **Dateinamen:** eine Datei `x';touch pwned;#` (bzw. mit Backslash vor dem `'`) in eine fish-Sitzung ziehen → der Name steht korrekt gequotet in der Eingabe; Enter legt keine Datei `pwned` an.
 - [ ] **Beide Sprachen:** Zusätze „(Shell unbekannt)“/„(shell unknown)“ und „ohne Integration“/„without integration“ und der Text der Einstellung Shell-Integration auf Deutsch und Englisch.
+
+## 67 · macOS (#150, 2.5.0, experimentell) – nur mit einem echten Mac (Freiwillige, Beta-Aufruf)
+
+Automatisch (CI, Jobs `build-test (macos-15)` und `package-macos` auf macos-15): Build und Tests, Aufrufer-Zuordnung über libproc (`platform::unix_proc`), Universal-Binary (arm64 + x86_64, Mindestversion 12.0), `Paneldeck.app` ad-hoc signiert (`codesign --verify --deep --strict`), Start mit `--version` aus ZIP und DMG, ZIP-Inhalt für das Selbst-Update (keine Symlinks, kein ZIP64) und der Tausch des Bündels mit genau diesem ZIP (`macos_release_zip_installs`), LaunchAgent-Inhalt, Schriften-Scan, `osascript`-Argumente, Smoke-Test (`tools/smoke-linux.py` gegen die App aus dem ZIP: Stufen, `run_command` in bash, Zuordnung `whoami` = process, losgelöster Nachfahre eingeschränkt). Von Hand (macOS 12, 14 und 15, Apple Silicon und Intel, wenn möglich):
+
+- [ ] **Installation aus dem DMG:** Fenster zeigt `Paneldeck.app`, „Applications“ und die Hinweis-Datei; App nach Programme ziehen. Erster Start: macOS 12–14 Rechtsklick → Öffnen → Öffnen; macOS 15 Doppelklick → *Datenschutz & Sicherheit → Dennoch öffnen*; alternativ `xattr -d com.apple.quarantine /Applications/Paneldeck.app`. Zweiter Start ohne Rückfrage.
+- [ ] **ZIP:** entpacken (Finder), nach Programme verschieben, startet ebenso.
+- [ ] **Aus dem DMG gestartet:** *Einstellungen → Info* zeigt bei einer neueren Version nur den Hinweis mit Link (kein automatisches Update).
+- [ ] **Info-Seite:** Hinweis „macOS-Version: experimentell und nicht signiert …“ (DE/EN).
+- [ ] **Fenster:** eigene Titelleiste, Ziehen, Größe ändern am Rand, Doppelklick maximiert, Minimieren/Schließen; Retina scharf; mehrere Fenster (Strg+Klick auf Reiter).
+- [ ] **Shells:** neue Sitzung bietet die Shells aus `/etc/shells`, Standard zsh; Login-Shell (`echo $0` → `-zsh`, PATH aus `/etc/zprofile`/`path_helper` und `~/.zprofile`, Homebrew-Programme gefunden); `claude` wird gefunden. zsh-Integration (nach Merge von #57): Befehlsmarken, Exit-Code, Ordner im Dateibaum, `run_command` mit `quality: exact`; Oh My Zsh/Powerlevel10k funktionieren weiter, `~/.zshrc` unverändert.
+- [ ] **Tastatur:** Umlaute und `@`/`|`/`{}` (Option-Taste) im Terminal; Strg+C bricht ab; Kopieren/Einfügen im Terminal (Strg+Umschalt+C/V bzw. Kontextmenü) und in Textfeldern (Cmd+C/V).
+- [ ] **Menüleiste:** Symbol erscheint; Klick holt das Fenster; Menü „Paneldeck anzeigen“/„Beenden“; *Schließen → Tray* lässt das Fenster verschwinden, Klick holt es zurück; Tooltip zeigt wartende Sitzungen.
+- [ ] **Benachrichtigung:** Claude fertig in einer Hintergrundsitzung → Mitteilung (unter „Skript-Editor“; beim ersten Mal ggf. erlauben); mit Ton nur, wenn eingestellt.
+- [ ] **Autostart:** *Einstellungen → Fenster → Bei der Anmeldung starten* an → `~/Library/LaunchAgents/io.github.zibbozz.paneldeck.plist` mit `--tray`, macOS meldet „Hintergrundobjekt hinzugefügt“; ab- und wieder anmelden → Paneldeck startet minimiert (Symbol in der Menüleiste); aus → Datei weg. Instanz mit `--profile Work` → eigene Datei `…paneldeck-work.plist`.
+- [ ] **Finder:** Einstellungen zeigen statt des Schalters den Hinweis auf die Schnellaktion; die Schnellaktion aus `docs/de/macos.md` nachbauen → Rechtsklick auf Ordner öffnet ihn in Paneldeck.
+- [ ] **Öffnen:** Link im Terminal (Strg+Klick) öffnet den Browser; „Im Finder zeigen“ im Dateibaum: Ordner öffnet sich, Datei wird markiert; Datenordner öffnen (Einstellungen → Daten).
+- [ ] **Dateidialoge:** Export/Import (Tickets CSV, Vorlagen JSON), Ordner wählen beim Projekt – native macOS-Dialoge.
+- [ ] **Schriften:** Einstellungen → Terminal-Schrift listet installierte Festbreitenschriften (Menlo, SF Mono, Monaco, eine Nerd Font aus `~/Library/Fonts`); Wechsel wirkt, Fett/Kursiv; CJK-/Symbolzeichen erscheinen (Fallback Hiragino/Apple Symbols/Arial Unicode).
+- [ ] **API-Schlüssel (Schlüsselbund):** Chat-Server mit Schlüssel speichern → macOS fragt evtl. nach dem Schlüsselbund („Immer erlauben“); `settings.json` enthält nur Base64; Schlüsselbundverwaltung zeigt „Paneldeck“/„api-key-encryption“; nach Neustart funktioniert der Chat ohne neue Frage.
+- [ ] **Selbst-Update:** mit Test-Feed (`tools/update-feed.sh` um das macOS-ZIP ergänzen, Build mit `update-test-feed`) oder beim ersten echten Folge-Release: App in `/Applications` → Download, Prüfsumme, Tausch, Neustart; danach `.Paneldeck.app.old` weg; neue Version läuft, Gatekeeper fragt nicht erneut.
+- [ ] **Agenten-Schnittstelle:** MCP auf „Steuern“, `paneldeck mcp` aus einer Sitzung → `whoami` nennt die Sitzung; ein mit `nohup … &` losgelöster Prozess ist eingeschränkt (`forbidden` beim Chat-Start); Claude Code mit Paneldeck-MCP aus Terminal.app (extern) funktioniert.
+- [ ] **Claude-Hooks:** Claude in einer Sitzung starten → Status „arbeitet“/„bereit“ wechselt (Hooks laufen mit `/bin/sh`, Pfad der App mit Leerzeichen? → in einen Ordner mit Leerzeichen kopieren und prüfen).
+- [ ] **Beide Sprachen:** neue Texte (Info-Hinweis, Autostart-Tooltip, Finder-Hinweis, Update-Hinweise) auf Deutsch und Englisch.

@@ -4,8 +4,8 @@
 use std::path::Path;
 
 /// Does this platform have a file manager we can open (shows "Show in Explorer"/"Open folder" buttons)?
-/// Linux (#149): the desktop's file manager through `xdg-open`.
-pub const FILE_MANAGER: bool = cfg!(any(windows, all(unix, not(target_os = "macos"))));
+/// Linux (#149): the desktop's file manager through `xdg-open`; macOS (#150): Finder through `open`.
+pub const FILE_MANAGER: bool = true;
 
 /// Open `target` (URL, file or folder) with its default program. `false` if nothing could be started.
 pub fn launch(target: &str) -> bool {
@@ -20,11 +20,37 @@ pub fn launch(target: &str) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(target).spawn().is_ok()
+        // a bundle folder (X.app …) is only shown, never started
+        let p = Path::new(target);
+        let reveal = !target.contains("://") && p.is_dir() && is_bundle_like(p);
+        mac_open(if reveal { &["-R"] } else { &[] }, std::ffi::OsStr::new(target))
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         xdg_open(std::ffi::OsStr::new(target))
+    }
+}
+
+/// macOS (#150): `open [flags] <target>` in the background and waited for (no zombie). A path that starts with `-` would
+/// be read as an option: it is made `./-…`. `false` if it could not be started.
+#[cfg(target_os = "macos")]
+fn mac_open(flags: &[&str], target: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let arg: std::ffi::OsString = if target.as_bytes().starts_with(b"-") {
+        let mut s = std::ffi::OsString::from("./");
+        s.push(target);
+        s
+    } else {
+        target.to_owned()
+    };
+    match std::process::Command::new("/usr/bin/open").args(flags).arg(&arg).stdin(std::process::Stdio::null()).spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -38,7 +64,7 @@ pub fn reveal(target: &str) {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg("-R").arg(target).spawn();
+        mac_open(&["-R"], std::ffi::OsStr::new(target));
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -82,7 +108,16 @@ pub fn folder(dir: &Path) {
         xdg_open(dir.as_os_str());
     }
     #[cfg(target_os = "macos")]
-    let _ = dir;
+    {
+        mac_open(if is_bundle_like(dir) { &["-R"] } else { &[] }, dir.as_os_str());
+    }
+}
+
+/// macOS: ein Ordner mit Endung (`X.app`, `Y.prefPane`, `Z.workflow` …) ist ein Bündel – `open` würde es starten bzw.
+/// installieren. Solche Ordner werden nur im Finder markiert (`open -R`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn is_bundle_like(p: &Path) -> bool {
+    p.extension().is_some_and(|e| !e.is_empty())
 }
 
 /// File tree: a folder is opened, a file is shown selected in its folder. Only where `FILE_MANAGER` is true.
@@ -100,8 +135,24 @@ pub fn show_in_file_manager(path: &str, is_dir: bool) {
             xdg_open(t.as_os_str());
         }
     }
+    // macOS: a folder is opened in Finder, a file or a bundle (`X.app` is a folder too – `open` would start it) is shown
+    // selected (`open -R`).
     #[cfg(target_os = "macos")]
-    let _ = (path, is_dir);
+    {
+        let reveal = !is_dir || is_bundle_like(Path::new(path));
+        mac_open(if reveal { &["-R"] } else { &[] }, std::ffi::OsStr::new(path));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bundles_are_recognised() {
+        use std::path::Path;
+        assert!(super::is_bundle_like(Path::new("/Applications/Calculator.app")));
+        assert!(super::is_bundle_like(Path::new("/x/Y.prefPane/")));
+        assert!(!super::is_bundle_like(Path::new("/Users/a/projects")));
+    }
 }
 
 /// Open a web page (already checked by the caller) in the default browser. Windows: `ShellExecuteW` (no detour through

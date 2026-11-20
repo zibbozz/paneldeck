@@ -10,7 +10,8 @@
 //!   in memory only until Paneldeck quits (only the derived keys, not the password; [`password_wanted`], [`begin_unlock`]).
 //!   PBKDF2 runs in a background thread. A keyring that is there but refuses reports `Keyring(..)` – the master
 //!   password is only used when there is no keyring service at all.
-//! macOS: only the master password for now (Keychain follows in #150).
+//! macOS (#150): the key lives in the login Keychain as a generic password (service "Paneldeck", account
+//! "api-key-encryption"); the master password only if there is no usable Keychain.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -278,7 +279,7 @@ mod unix {
         match blob.first() {
             Some(&KIND_KEYRING) => {
                 let key = keyring::key(false).map_err(|e| match e {
-                    keyring::Fail::Unavailable => Error::Keyring(crate::state::t("Kein Schlüsselbund (Secret Service) erreichbar", "No keyring (Secret Service) reachable").into()),
+                    keyring::Fail::Unavailable => Error::Keyring(crate::state::t("Kein Schlüsselbund des Systems erreichbar", "No system keyring reachable").into()),
                     keyring::Fail::Refused(e) => Error::Keyring(e),
                     keyring::Fail::Pending => Error::Pending,
                 })?;
@@ -323,7 +324,7 @@ mod unix {
             Pending,
         }
 
-        #[cfg(any(target_os = "macos", test))]
+        #[cfg(test)]
         pub fn key(_create: bool) -> Result<Key, Fail> {
             // Tests never touch the real keyring of the machine.
             let _ = &KEYRING_KEY;
@@ -331,7 +332,7 @@ mod unix {
             Err(Fail::Unavailable)
         }
 
-        #[cfg(all(not(target_os = "macos"), not(test)))]
+        #[cfg(not(test))]
         enum State {
             Idle,
             Fetching,
@@ -339,12 +340,12 @@ mod unix {
             Refused(String),
         }
 
-        #[cfg(all(not(target_os = "macos"), not(test)))]
+        #[cfg(not(test))]
         static STATE: std::sync::Mutex<State> = std::sync::Mutex::new(State::Idle);
 
         /// The 32-byte key, if already fetched; otherwise the fetch starts in the background (`Pending`). A refusal is
         /// reported once, the next access tries again; "no service" stays for this run.
-        #[cfg(all(not(target_os = "macos"), not(test)))]
+        #[cfg(not(test))]
         pub fn key(create: bool) -> Result<Key, Fail> {
             if let Some(k) = lock(&KEYRING_KEY).as_ref() {
                 return Ok(k.clone());
@@ -377,6 +378,38 @@ mod unix {
                     });
                     Err(Fail::Pending)
                 }
+            }
+        }
+
+        /// macOS (#150): the 32-byte key as the generic password "Paneldeck" / "api-key-encryption" in the default
+        /// (login) Keychain; `create`: make it if missing (only when storing a key). Runs in the background thread of
+        /// [`key`]: the app is unsigned, so macOS may ask whether Paneldeck may use the item (again after an update, the
+        /// ad-hoc signature changes) – that question must never block the UI thread. Denied or cancelled → `Refused`; no
+        /// Keychain at all (e.g. no login session) → `Unavailable` (master password).
+        #[cfg(all(target_os = "macos", not(test)))]
+        fn fetch(create: bool) -> Result<Key, Fail> {
+            use security_framework::passwords::{get_generic_password, set_generic_password};
+            const SERVICE: &str = "Paneldeck";
+            const ACCOUNT: &str = "api-key-encryption";
+            // errSecItemNotFound; errSecNoSuchKeychain, errSecNotAvailable, errSecInteractionNotAllowed
+            const NOT_FOUND: i32 = -25300;
+            const NO_KEYCHAIN: [i32; 3] = [-25294, -25291, -25308];
+            let refused = |e: security_framework::base::Error| {
+                if NO_KEYCHAIN.contains(&e.code()) { Fail::Unavailable } else { Fail::Refused(format!("Keychain: {e}")) }
+            };
+            match get_generic_password(SERVICE, ACCOUNT) {
+                Ok(v) => {
+                    let v = zeroize::Zeroizing::new(v);
+                    Ok(Key::new(<[u8; 32]>::try_from(v.as_slice()).map_err(|_| Fail::Refused("invalid key length".into()))?))
+                }
+                Err(e) if e.code() == NOT_FOUND && create => {
+                    let mut k = Key::new([0u8; 32]);
+                    getrandom::fill(&mut *k).map_err(|e| Fail::Refused(e.to_string()))?;
+                    set_generic_password(SERVICE, ACCOUNT, &*k).map_err(refused)?;
+                    Ok(k)
+                }
+                Err(e) if e.code() == NOT_FOUND => Err(Fail::Refused(crate::state::t("Schlüssel im Schlüsselbund fehlt", "Key missing in the keyring").into())),
+                Err(e) => Err(refused(e)),
             }
         }
 

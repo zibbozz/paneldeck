@@ -641,6 +641,7 @@ pub fn note_own_child(pid: u32) {
 /// prove) and the MCP rules restrict it. A background thread reaps those orphans when they end – only zombies that are
 /// not the hub's own children ([`note_own_child`]) and have stayed zombies for 5 s.
 /// Call once, in the hub process only (not in the MCP bridge or other short-lived modes). macOS has no subreaper.
+#[cfg(target_os = "linux")]
 pub fn become_subreaper() -> bool {
     #[cfg(target_os = "linux")]
     {

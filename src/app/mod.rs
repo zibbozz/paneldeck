@@ -1011,7 +1011,7 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     // Optionale Systemschriften als Fallback für Symbole, Sonderzeichen, CJK, Thai, Indisch, Mathe usw.
     // Es werden nur vorhandene Dateien geladen; fehlt eine, ändert sich nichts.
     let sys = crate::platform::fonts::system_font;
-    let candidates: [(&str, Option<std::path::PathBuf>); 14] = [
+    let candidates: [(&str, Option<std::path::PathBuf>); 20] = [
         ("seguisym", sys("seguisym.ttf")),
         ("segoeui", sys("segoeui.ttf")),
         ("msyh", sys("msyh.ttc")),
@@ -1026,6 +1026,13 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
         ("cambria", sys("cambria.ttc")),
         ("arial", sys("arial.ttf")),
         ("dejavu", Some("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into())),
+        // macOS (#150): Symbole, breite Unicode-Abdeckung, CJK, Koreanisch, Thai, Mathe
+        ("applesymbols", sys("Apple Symbols.ttf")),
+        ("arialuni", sys("Arial Unicode.ttf")),
+        ("hiragino", sys("Hiragino Sans GB.ttc")),
+        ("applesdgothic", sys("AppleSDGothicNeo.ttc")),
+        ("thonburi", sys("Thonburi.ttc")),
+        ("stixmath", sys("STIXTwoMath.otf")),
     ];
     for (name, path) in candidates {
         if let Some(Ok(bytes)) = path.map(std::fs::read) {

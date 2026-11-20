@@ -63,8 +63,8 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_max_width(440.0);
                 ui.label(lang.t(
-                    "Es ist kein Schlüsselbund des Systems (Secret Service) erreichbar. Paneldeck verschlüsselt API-Schlüssel deshalb mit einem Master-Passwort.",
-                    "No system keyring (Secret Service) is reachable. Paneldeck therefore encrypts API keys with a master password.",
+                    "Es ist kein Schlüsselbund des Systems erreichbar. Paneldeck verschlüsselt API-Schlüssel deshalb mit einem Master-Passwort.",
+                    "No system keyring is reachable. Paneldeck therefore encrypts API keys with a master password.",
                 ));
                 ui.label(RichText::new(lang.t(
                     "Es wird nirgends gespeichert und nur bis zum Beenden im Speicher behalten. Ohne das Passwort lassen sich gespeicherte Schlüssel nicht mehr lesen.",

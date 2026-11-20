@@ -52,4 +52,4 @@ Works as on Windows. The hub identifies the calling process itself (owner of the
 - File dialogs (export, import, choose a folder) use the XDG desktop portal (GNOME, KDE and most desktops). Without a portal (e.g. a bare window manager) they do not open; exports then go to the data folder.
 - Claude Code hooks: Claude Code runs them with `/bin/sh`, whatever your shell is (bash, zsh, fish); the command quotes the path of the program (for the AppImage the `.AppImage` file) for that. `~/.claude` is taken from `$HOME` (or `$CLAUDE_CONFIG_DIR`).
 - Pasting an image from the clipboard (Ctrl+V into a terminal) uses X11 (on Wayland through XWayland).
-- macOS follows separately (experimental, #150).
+- macOS: see [macOS](macos.md) (experimental).

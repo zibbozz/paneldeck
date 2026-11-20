@@ -7,7 +7,9 @@
 //! Linux implementations (#149, 2.5.0): `unix_proc` (caller attribution, session tags), `tls` (rustls with the system
 //! trust store), `desktop` (XDG autostart, file-manager integration), `secret` (Secret Service or master password),
 //! `tray` (StatusNotifierItem), `notify` (D-Bus notifications), `fonts` (fontconfig), `clipboard`, `open` (xdg-open).
-//! macOS (#150) shares `unix_proc`, `tls`, `secret` (master password only) and `fonts`.
+//! macOS (#150, experimental, 2.5.0) shares `unix_proc`, `tls` and `secret` (key in the Keychain, else the master
+//! password) and has its own `desktop` (LaunchAgent autostart, `desktop_macos.rs`), `tray` (menu-bar icon, tray-icon),
+//! `notify` (`osascript`, dialogs through rfd), `fonts` (font folders read with ttf-parser), `open` (`open`).
 //!
 //! Areas in this folder:
 //! - `chrome`: borderless main window – rounded corners (DWM) and the Snap Layouts flyout at the maximize button.
@@ -62,6 +64,14 @@ pub mod console;
 pub mod conpty;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub mod desktop;
+/// macOS (#150): LaunchAgent for the autostart (same function surface as the Linux `desktop`). Compiled for the tests
+/// on every platform (pure functions).
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[path = "desktop_macos.rs"]
+pub mod desktop_macos;
+#[cfg(target_os = "macos")]
+pub use desktop_macos as desktop;
 pub mod fonts;
 pub mod fs;
 pub mod keyboard;
@@ -80,7 +90,7 @@ pub mod window;
 
 /// Self-update (`app::update`): the release assets (NSIS installer, portable ZIP with `paneldeck.exe`) exist only for
 /// Windows. Elsewhere `app::update::install::detect` finds no install flavor: a newer version is only announced.
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: `app::update::install::appimage_flavor`
+#[cfg_attr(unix, allow(dead_code))] // Linux: `app::update::install::appimage_flavor`, macOS: `macapp_flavor`
 pub const SELF_UPDATE: bool = cfg!(windows);
 
 /// Error text for a function that has no implementation on this platform yet.
