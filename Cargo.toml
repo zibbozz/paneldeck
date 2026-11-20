@@ -40,6 +40,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-native-certs = "0.8"
 # Verschlüsselung der API-Schlüssel (ChaCha20-Poly1305, PBKDF2 für das Master-Passwort; `platform::secret`); kommt mit rustls.
 ring = "0.17"
+# Passwort und Schlüssel im Speicher nach Gebrauch überschreiben (steckt über secret-service ohnehin im Baum).
+zeroize = "1"
 
 # Linux-Desktop (#149): Schlüsselbund (Secret Service), Tray (StatusNotifierItem), Benachrichtigungen – alles über D-Bus
 # in reinem Rust (zbus), keine GTK-/libdbus-Abhängigkeit beim Bauen.
@@ -48,6 +50,8 @@ secret-service = { version = "5", default-features = false, features = ["rt-asyn
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 # Benachrichtigungen: org.freedesktop.Notifications direkt über zbus (dieselbe Version wie ksni/secret-service).
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+# Native Datei-/Ordnerdialoge über das XDG-Desktop-Portal (GNOME, KDE, …; reines Rust, kein GTK).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8"

@@ -7,7 +7,9 @@
 //!   encryption", created on the first stored key), blob kind `K`, or
 //! * if there is no keyring: a **master password** (PBKDF2-HMAC-SHA256, 600 000 rounds, random salt per blob), blob
 //!   kind `P`. The password is asked in the window on the FIRST ACCESS to a key (never at start, #149 decision) and kept
-//!   in memory only until Paneldeck quits ([`password_wanted`], [`set_password`]).
+//!   in memory only until Paneldeck quits (only the derived keys, not the password; [`password_wanted`], [`begin_unlock`]).
+//!   PBKDF2 runs in a background thread. A keyring that is there but refuses reports `Keyring(..)` – the master
+//!   password is only used when there is no keyring service at all.
 //! macOS: only the master password for now (Keychain follows in #150).
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +86,7 @@ mod imp {
 }
 
 #[cfg(unix)]
-pub use unix::{is_password_blob, password_opens, password_wanted, protect, set_password, unprotect};
+pub use unix::{begin_unlock, cancel_password, is_password_blob, password_state, password_wanted, protect, unprotect, PwState};
 
 #[cfg(unix)]
 mod unix {
@@ -93,6 +95,7 @@ mod unix {
     use std::num::NonZeroU32;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use zeroize::Zeroizing;
 
     /// Blob kinds (first byte; also the additional authenticated data).
     pub const KIND_KEYRING: u8 = b'K';
@@ -100,28 +103,88 @@ mod unix {
     const SALT_LEN: usize = 16;
     const ROUNDS: u32 = 600_000;
 
-    /// Master password (in memory only) and the key derived last (salt, key) – reused for new blobs of this run.
-    struct Pw {
-        password: String,
-        derived: Vec<([u8; SALT_LEN], [u8; 32])>,
-    }
+    type Key = Zeroizing<[u8; 32]>;
 
-    static PASSWORD: Mutex<Option<Pw>> = Mutex::new(None);
+    /// Keys derived from the master password, one per salt (the password itself is not kept). New blobs use the
+    /// first salt.
+    static DERIVED: Mutex<Vec<([u8; SALT_LEN], Key)>> = Mutex::new(Vec::new());
     static WANTED: AtomicBool = AtomicBool::new(false);
     /// Key from the keyring, fetched once per run.
-    static KEYRING_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+    static KEYRING_KEY: Mutex<Option<Key>> = Mutex::new(None);
+
+    /// State of the background check started by [`begin_unlock`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum PwState {
+        Idle,
+        Working,
+        /// The password does not open the stored keys.
+        Wrong,
+        /// Accepted: the keys are ready.
+        Done,
+    }
+
+    static STATE: Mutex<PwState> = Mutex::new(PwState::Idle);
+
+    fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Does an access wait for the master password (the window shows the question)?
     pub fn password_wanted() -> bool {
         WANTED.load(Ordering::Relaxed)
     }
 
-    /// Master password entered in the window (`None` = cancelled: the question closes, the next access asks again).
-    pub fn set_password(pw: Option<String>) {
+    /// The question was cancelled: it closes; the next access asks again.
+    pub fn cancel_password() {
         WANTED.store(false, Ordering::Relaxed);
-        if let Some(p) = pw {
-            *PASSWORD.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pw { password: p, derived: Vec::new() });
+        *lock(&STATE) = PwState::Idle;
+    }
+
+    /// Current state of the check; `Done`/`Wrong` are reported once (then `Idle`).
+    pub fn password_state() -> PwState {
+        let mut g = lock(&STATE);
+        let s = *g;
+        if matches!(s, PwState::Done | PwState::Wrong) {
+            *g = PwState::Idle;
         }
+        s
+    }
+
+    /// Check the entered password in a background thread (PBKDF2 takes a moment – never in the UI thread and never under
+    /// a lock): derive the key for the salt of every stored blob (`blobs`, kind `P`), check that it opens the first one,
+    /// then keep the keys. Without stored blobs a new salt is made (a new password).
+    pub fn begin_unlock(password: Zeroizing<String>, blobs: Vec<Vec<u8>>) {
+        *lock(&STATE) = PwState::Working;
+        std::thread::spawn(move || {
+            let mut salts: Vec<[u8; SALT_LEN]> = Vec::new();
+            for b in blobs.iter().filter(|b| is_password_blob(b) && b.len() > 1 + SALT_LEN) {
+                if let Ok(s) = <[u8; SALT_LEN]>::try_from(&b[1..1 + SALT_LEN]) {
+                    if !salts.contains(&s) {
+                        salts.push(s);
+                    }
+                }
+            }
+            if salts.is_empty() {
+                match random::<SALT_LEN>() {
+                    Ok(s) => salts.push(s),
+                    Err(_) => {
+                        *lock(&STATE) = PwState::Wrong;
+                        return;
+                    }
+                }
+            }
+            let derived: Vec<([u8; SALT_LEN], Key)> = salts.into_iter().map(|s| (s, derive(&password, &s))).collect();
+            if let Some(first) = blobs.iter().find(|b| is_password_blob(b) && b.len() > 1 + SALT_LEN) {
+                let key = derived.iter().find(|(s, _)| *s == first[1..1 + SALT_LEN]).map(|(_, k)| k);
+                if key.is_none_or(|k| open(KIND_PASSWORD, k, &first[1 + SALT_LEN..]).is_none()) {
+                    *lock(&STATE) = PwState::Wrong;
+                    return;
+                }
+            }
+            *lock(&DERIVED) = derived;
+            // (WANTED clears the window when it has read `Done`, see `cancel_password`.)
+            *lock(&STATE) = PwState::Done;
+        });
     }
 
     /// Is this blob protected by the master password (kind `P`)?
@@ -135,9 +198,9 @@ mod unix {
         Ok(b)
     }
 
-    fn derive(password: &str, salt: &[u8; SALT_LEN]) -> [u8; 32] {
-        let mut out = [0u8; 32];
-        ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, NonZeroU32::new(ROUNDS).expect("rounds"), salt, password.as_bytes(), &mut out);
+    fn derive(password: &str, salt: &[u8; SALT_LEN]) -> Key {
+        let mut out = Zeroizing::new([0u8; 32]);
+        ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, NonZeroU32::new(ROUNDS).expect("rounds"), salt, password.as_bytes(), &mut *out);
         out
     }
 
@@ -159,78 +222,64 @@ mod unix {
         }
         let (nonce, data) = nonce_and_data.split_at(NONCE_LEN);
         let k = LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, key).ok()?);
-        let mut buf = data.to_vec();
+        let mut buf = Zeroizing::new(data.to_vec());
         let plain = k.open_in_place(Nonce::try_assume_unique_for_key(nonce).ok()?, Aad::from([kind]), &mut buf).ok()?;
         Some(plain.to_vec())
     }
 
-    /// Key derived from the master password for `salt` (cached). `NeedPassword` (and the question opens) without one.
-    fn password_key(salt: Option<[u8; SALT_LEN]>) -> Result<([u8; SALT_LEN], [u8; 32]), Error> {
-        let mut g = PASSWORD.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(pw) = g.as_mut() else {
-            WANTED.store(true, Ordering::Relaxed);
-            return Err(Error::NeedPassword);
+    /// Key for `salt` (or the first one for a new blob). `NeedPassword` (and the question opens) without one – it is
+    /// never derived here (this runs in the UI thread).
+    fn password_key(salt: Option<[u8; SALT_LEN]>) -> Result<([u8; SALT_LEN], Key), Error> {
+        let g = lock(&DERIVED);
+        let hit = match salt {
+            Some(s) => g.iter().find(|(x, _)| *x == s),
+            None => g.first(),
         };
-        let salt = match salt {
-            Some(s) => s,
-            None => match pw.derived.first() {
-                Some((s, _)) => *s,
-                None => random()?,
-            },
-        };
-        if let Some((_, k)) = pw.derived.iter().find(|(s, _)| *s == salt) {
-            return Ok((salt, *k));
+        match hit {
+            Some((s, k)) => Ok((*s, k.clone())),
+            None => {
+                WANTED.store(true, Ordering::Relaxed);
+                Err(Error::NeedPassword)
+            }
         }
-        let k = derive(&pw.password, &salt);
-        pw.derived.push((salt, k));
-        Ok((salt, k))
     }
 
     pub fn protect(plain: &[u8]) -> Result<Vec<u8>, Error> {
         match keyring::key(true) {
             Ok(k) => seal(KIND_KEYRING, &k, &[], plain),
-            Err(keyring::Unavailable) => {
+            // only when there is no keyring service at all: master password
+            Err(keyring::Fail::Unavailable) => {
                 let (salt, key) = password_key(None)?;
                 seal(KIND_PASSWORD, &key, &salt, plain)
             }
+            // a keyring that refuses (prompt dismissed, D-Bus error): no silent switch to the password
+            Err(keyring::Fail::Refused(e)) => Err(Error::Keyring(e)),
         }
     }
 
     pub fn unprotect(blob: &[u8]) -> Result<Vec<u8>, Error> {
         match blob.first() {
             Some(&KIND_KEYRING) => {
-                let key = keyring::key(false).map_err(|_| Error::Keyring(crate::state::t("Kein Schlüsselbund (Secret Service) erreichbar", "No keyring (Secret Service) reachable").into()))?;
+                let key = keyring::key(false).map_err(|e| match e {
+                    keyring::Fail::Unavailable => Error::Keyring(crate::state::t("Kein Schlüsselbund (Secret Service) erreichbar", "No keyring (Secret Service) reachable").into()),
+                    keyring::Fail::Refused(e) => Error::Keyring(e),
+                })?;
                 open(KIND_KEYRING, &key, &blob[1..]).ok_or(Error::Keyring(crate::state::t("Der Schlüssel im Schlüsselbund passt nicht", "The key in the keyring does not match").into()))
             }
             Some(&KIND_PASSWORD) if blob.len() > 1 + SALT_LEN => {
                 let salt: [u8; SALT_LEN] = blob[1..1 + SALT_LEN].try_into().map_err(|_| Error::TooLarge)?;
                 let (_, key) = password_key(Some(salt))?;
-                match open(KIND_PASSWORD, &key, &blob[1 + SALT_LEN..]) {
-                    Some(p) => Ok(p),
-                    None => {
-                        // wrong password: forget it, the next access asks again
-                        *PASSWORD.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                        Err(Error::WrongPassword)
-                    }
-                }
+                open(KIND_PASSWORD, &key, &blob[1 + SALT_LEN..]).ok_or(Error::WrongPassword)
             }
             _ => Err(Error::TooLarge),
         }
     }
 
-    /// Does `password` open `blob` (a `P` blob)? For the question in the window: check before accepting.
-    pub fn password_opens(password: &str, blob: &[u8]) -> bool {
-        if !is_password_blob(blob) || blob.len() <= 1 + SALT_LEN {
-            return false;
-        }
-        let Ok(salt) = <[u8; SALT_LEN]>::try_from(&blob[1..1 + SALT_LEN]) else { return false };
-        open(KIND_PASSWORD, &derive(password, &salt), &blob[1 + SALT_LEN..]).is_some()
-    }
-
     #[cfg(test)]
     pub fn test_reset() {
-        *PASSWORD.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        lock(&DERIVED).clear();
         WANTED.store(false, Ordering::Relaxed);
+        *lock(&STATE) = PwState::Idle;
     }
 
     #[cfg(test)]
@@ -241,50 +290,61 @@ mod unix {
 
     /// The system keyring (Linux: Secret Service over D-Bus).
     mod keyring {
-        use super::KEYRING_KEY;
+        use super::{Key, KEYRING_KEY};
 
-        /// No keyring service (no session bus, no Secret Service provider, macOS for now).
-        pub struct Unavailable;
+        pub enum Fail {
+            /// No keyring service (no session bus, no Secret Service provider, macOS for now): the master password is used.
+            Unavailable,
+            /// The service is there but refused (locked and the prompt was dismissed, D-Bus error): text of the error.
+            #[allow(dead_code)]
+            Refused(String),
+        }
 
         #[cfg(any(target_os = "macos", test))]
-        pub fn key(_create: bool) -> Result<[u8; 32], Unavailable> {
+        pub fn key(_create: bool) -> Result<Key, Fail> {
             // Tests never touch the real keyring of the machine.
             let _ = &KEYRING_KEY;
-            Err(Unavailable)
+            Err(Fail::Unavailable)
         }
 
         /// The 32-byte key of the item "Paneldeck – API key encryption" (attributes `application=paneldeck`,
-        /// `purpose=api-key-encryption`). `create`: make it if missing (only when storing a key). Unlocking the
-        /// collection may show the keyring's own unlock dialog.
+        /// `purpose=api-key-encryption`). `create`: make it if missing (only when storing a key). Unlocking may show the
+        /// keyring's own dialog.
         #[cfg(all(not(target_os = "macos"), not(test)))]
-        pub fn key(create: bool) -> Result<[u8; 32], Unavailable> {
+        pub fn key(create: bool) -> Result<Key, Fail> {
             use secret_service::blocking::SecretService;
-            use secret_service::EncryptionType;
+            use secret_service::{EncryptionType, Error as E};
             use std::collections::HashMap;
-            if let Some(k) = *KEYRING_KEY.lock().unwrap_or_else(|e| e.into_inner()) {
-                return Ok(k);
+            if let Some(k) = super::lock(&KEYRING_KEY).as_ref() {
+                return Ok(k.clone());
             }
-            let ss = SecretService::connect(EncryptionType::Dh).map_err(|_| Unavailable)?;
+            let refused = |e: E| Fail::Refused(e.to_string());
+            let ss = match SecretService::connect(EncryptionType::Dh) {
+                Ok(s) => s,
+                // no session bus or nobody provides org.freedesktop.secrets
+                Err(E::Unavailable | E::Zbus(_) | E::ZbusFdo(_)) => return Err(Fail::Unavailable),
+                Err(e) => return Err(refused(e)),
+            };
             let attrs = HashMap::from([("application", "paneldeck"), ("purpose", "api-key-encryption")]);
-            let found = ss.search_items(attrs.clone()).map_err(|_| Unavailable)?;
+            let found = ss.search_items(attrs.clone()).map_err(refused)?;
             let item = found.unlocked.into_iter().next().or_else(|| found.locked.into_iter().next());
             let key = match item {
                 Some(item) => {
-                    item.ensure_unlocked().map_err(|_| Unavailable)?;
-                    let v = item.get_secret().map_err(|_| Unavailable)?;
-                    <[u8; 32]>::try_from(v.as_slice()).map_err(|_| Unavailable)?
+                    item.ensure_unlocked().map_err(refused)?;
+                    let v = zeroize::Zeroizing::new(item.get_secret().map_err(refused)?);
+                    Key::new(<[u8; 32]>::try_from(v.as_slice()).map_err(|_| Fail::Refused("invalid key length".into()))?)
                 }
                 None if create => {
-                    let mut k = [0u8; 32];
-                    getrandom::fill(&mut k).map_err(|_| Unavailable)?;
-                    let coll = ss.get_default_collection().map_err(|_| Unavailable)?;
-                    coll.ensure_unlocked().map_err(|_| Unavailable)?;
-                    coll.create_item("Paneldeck – API key encryption", attrs, &k, true, "application/octet-stream").map_err(|_| Unavailable)?;
+                    let mut k = Key::new([0u8; 32]);
+                    getrandom::fill(&mut *k).map_err(|e| Fail::Refused(e.to_string()))?;
+                    let coll = ss.get_default_collection().map_err(refused)?;
+                    coll.ensure_unlocked().map_err(refused)?;
+                    coll.create_item("Paneldeck – API key encryption", attrs, &*k, true, "application/octet-stream").map_err(refused)?;
                     k
                 }
-                None => return Err(Unavailable),
+                None => return Err(Fail::Refused(crate::state::t("Schlüssel im Schlüsselbund fehlt", "Key missing in the keyring").into())),
             };
-            *KEYRING_KEY.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
+            *super::lock(&KEYRING_KEY) = Some(key.clone());
             Ok(key)
         }
     }
@@ -293,6 +353,17 @@ mod unix {
     mod tests {
         use super::*;
 
+        fn wait_state() -> PwState {
+            for _ in 0..600 {
+                let s = password_state();
+                if s != PwState::Working && s != PwState::Idle {
+                    return s;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("password check did not finish");
+        }
+
         #[test]
         fn master_password_flow() {
             test_reset();
@@ -300,21 +371,27 @@ mod unix {
             assert!(!password_wanted());
             assert_eq!(protect(b"sk-1"), Err(Error::NeedPassword));
             assert!(password_wanted());
-            set_password(Some("correct horse".into()));
+            // new password (no stored blobs): derived in the background
+            begin_unlock(Zeroizing::new("correct horse".into()), Vec::new());
+            assert_eq!(wait_state(), PwState::Done);
+            cancel_password();
             assert!(!password_wanted());
             let blob = protect(b"sk-1").unwrap();
             assert!(is_password_blob(&blob));
             assert!(!blob.windows(4).any(|w| w == b"sk-1"), "never plain text");
             assert_ne!(blob, protect(b"sk-1").unwrap(), "fresh nonce per blob");
             assert_eq!(unprotect(&blob).unwrap(), b"sk-1");
-            assert!(password_opens("correct horse", &blob));
-            assert!(!password_opens("wrong", &blob));
-            // a blob of another password: wrong password, the cached one is dropped and asked again next time
-            let other = test_seal_password("other", b"sk-2");
-            assert_eq!(unprotect(&other), Err(Error::WrongPassword));
+            // after a restart: wrong password is refused, the right one opens every stored blob
+            test_reset();
             assert_eq!(unprotect(&blob), Err(Error::NeedPassword));
-            set_password(Some("other".into()));
-            assert_eq!(unprotect(&other).unwrap(), b"sk-2");
+            let other = test_seal_password("correct horse", b"sk-2");
+            begin_unlock(Zeroizing::new("wrong".into()), vec![blob.clone(), other.clone()]);
+            assert_eq!(wait_state(), PwState::Wrong);
+            assert_eq!(unprotect(&blob), Err(Error::NeedPassword));
+            begin_unlock(Zeroizing::new("correct horse".into()), vec![blob.clone(), other.clone()]);
+            assert_eq!(wait_state(), PwState::Done);
+            assert_eq!(unprotect(&blob).unwrap(), b"sk-1");
+            assert_eq!(unprotect(&other).unwrap(), b"sk-2", "every salt was derived");
             // tampering is detected
             let mut bad = other.clone();
             let last = bad.len() - 1;
