@@ -136,6 +136,33 @@ function Test-WrapWidth([int]$sid, [string]$sh, [string]$prefix = '') {
     Check "${prefix}run_command $sh (Zeile mit $n Zeichen bei $cols Spalten: Ausgabe exakt)" ($r.data.finished -and $r.data.output -eq $want -and $r.data.quality -eq 'exact') "len=$("$($r.data.output)".Length) q=$($r.data.quality) finished=$($r.data.finished)"
   }
 }
+# #264: Mit der ConPTY von Windows (aelterer conhost) blieb das Terminal nach einer Zeile in genau Terminalbreite, die
+# allein in einem Frame von conhost endet, eine Zeile hinter conhost: Die Leerzeile vor dem Git-Bash-Prompt fehlte, und
+# ein spaeterer Befehl, den conhost nach Enter absolut neu zeichnet (laenger als eine Zeile), erschien doppelt.
+# `sleep 1` trennt die volle Zeile vom Zeilenvorschub (eigener Frame). Nur Sitzungen mit console_host = system; zeichnet
+# ein neuerer conhost ohnehin richtig, gelten die Pruefungen genauso.
+function Test-ConhostWrap([int]$sid, [string]$prefix = '') {
+  $name = "${prefix}#264 Git Bash, Zeile in Terminalbreite (System-ConPTY)"
+  $me = @((Tool 'list_sessions').data.sessions | Where-Object { $_.id -eq $sid })
+  if ($me.Count -ne 1 -or $me[0].console_host -ne 'system') { Skip $name "console_host = $(if ($me.Count) { $me[0].console_host } else { '?' })"; return }
+  $cols = (Tool 'read_terminal' @{ session = $sid; lines = 1 }).data.cols
+  if (-not $cols) { Skip $name 'cols unbekannt'; return }
+  [void](Tool 'run_command' @{ session = $sid; command = 'clear'; timeout_secs = 15 })
+  $r = Tool 'run_command' @{ session = $sid; command = "printf 'x%.0s' `$(seq 1 `$COLUMNS); sleep 1; echo"; timeout_secs = 25 }
+  $x = 'x' * $cols
+  Check "$name`: Ausgabe exakt" ($r.data.finished -and $r.data.output -eq $x -and $r.data.quality -eq 'exact') "len=$("$($r.data.output)".Length) q=$($r.data.quality) finished=$($r.data.finished)"
+  # Lange Pause wie beim Nutzer, dann ein Befehl laenger als eine Zeile.
+  Start-Sleep 3
+  $r = Tool 'run_command' @{ session = $sid; command = "echo nach-264 # $('z' * $cols)"; timeout_secs = 25 }
+  Check "$name`: naechster Befehl exakt" ($r.data.finished -and $r.data.output -eq 'nach-264' -and $r.data.quality -eq 'exact') "out='$($r.data.output)' q=$($r.data.quality)"
+  Start-Sleep -Milliseconds 500
+  $lines = @("$((Tool 'read_terminal' @{ session = $sid; screen = $true }).data.text)" -split "`r?`n" | ForEach-Object { $_.TrimEnd() })
+  $i = [array]::IndexOf($lines, $x)
+  $blank = $i -ge 0 -and $i + 2 -lt $lines.Count -and $lines[$i + 1] -eq '' -and $lines[$i + 2] -ne ''
+  Check "$name`: Leerzeile vor dem Prompt bleibt" $blank ($lines -join ' | ')
+  $echoes = @($lines | Where-Object { $_ -match '^\$ echo nach-264 #' }).Count
+  Check "$name`: Echo des naechsten Befehls genau einmal" ($echoes -eq 1) "Echos=${echoes}: $($lines -join ' | ')"
+}
 # OSC 52 (#181): ein Programm im Terminal kopiert in die Zwischenablage, der Hub legt den Text in die Windows-Zwischenablage.
 # Beruehrt die echte Zwischenablage: vorhandener Text wird vorher gesichert und danach wiederhergestellt (nur, wenn
 # inzwischen niemand anderes etwas kopiert hat). Enthaelt sie andere als reine Textformate (Bild, Dateien, HTML, RTF ...), wird die
@@ -350,6 +377,7 @@ try {
       $r = Tool 'run_command' @{ session = $id; command = 'printf "x\ny\n"'; timeout_secs = 25 }
       Check "run_command $sh (zweiter Befehl sauber)" ($r.data.output -eq "x`ny") $r.text
       Test-WrapWidth $id $sh
+      Test-ConhostWrap $id
       Test-FullHistory $id $sh
       Test-Osc52 $id $sh
     } else {
@@ -443,7 +471,9 @@ try {
     $req = @{ jsonrpc = '2.0'; id = 1; method = 'tools/call'; params = @{ name = $tool; arguments = $targs } } | ConvertTo-Json -Depth 8 -Compress
     $cmd = "`$env:PANELDECK_SESSION=`$null; '" + $req.Replace("'", "''") + "' | & '$dir\paneldeck.exe' mcp | Out-String"
     $r = Tool 'run_command' @{ session = $s; command = $cmd; timeout_secs = 40 }
-    try { ($r.data.output | ConvertFrom-Json).result } catch { $null }
+    $o = $null; try { $o = $r.data.output | ConvertFrom-Json } catch { }
+    if (-not $o) { Write-Host "      InS $tool`: keine JSON-Antwort: $($r.text)" -ForegroundColor DarkGray }
+    $o.result
   }
   function InA($tool, $targs) { InS $A $tool $targs }
   # Losgeloester Absender: eine kurzlebige Shell (in Sitzung $s per run_command, ohne $s vom Test selbst gestartet)
@@ -1769,6 +1799,7 @@ c.close()
         Check 'ConPTY: run_command gitbash (Ausgabe)' ($r.data.finished -and $r.data.output.Trim() -eq 'bash-ok') $r.text
         $r = Tool 'run_command' @{ session = $gid; command = 'false'; timeout_secs = 25 }
         Check 'ConPTY: run_command gitbash (Exit 1)' ($r.data.exit_code -eq 1) $r.text
+        Test-ConhostWrap $gid 'ConPTY: '
         # Sichtbarer Bildschirm, bis $pattern passt (oder Zeitlimit). Prompt der Bash = letzte Zeile "$".
         function Wait-Screen([string]$pattern, [int]$secs = 20) {
           $t = Get-Date
