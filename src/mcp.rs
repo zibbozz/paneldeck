@@ -836,7 +836,7 @@ pub fn claude_json_path(config_dir: Option<std::ffi::OsString>, home: Option<std
 }
 
 fn home_dir() -> Option<std::ffi::OsString> {
-    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    if cfg!(windows) { std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) } else { std::env::var_os("HOME") }
 }
 
 /// Arbeitsordner für `claude`-Aufrufe: das Benutzerprofil, sonst der Ordner der .exe (nie ein zufälliger Ordner,

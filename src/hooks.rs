@@ -869,7 +869,17 @@ pub fn send_event(port: u16, token: &str, session: u64, key: Option<&str>, paylo
 // ------------------------------------------------------------ Settings-Dateien
 
 pub fn hook_command(exe: &Path) -> String {
-    format!("\"{}\" --hook", exe.to_string_lossy().replace('\\', "/"))
+    #[cfg(windows)]
+    {
+        format!("\"{}\" --hook", exe.to_string_lossy().replace('\\', "/"))
+    }
+    // Linux/macOS (#149): Claude Code runs hook commands with `/bin/sh -c` – whatever the user's shell is (bash, zsh,
+    // fish). Single quotes keep every character of the path literal there (`$`, `` ` ``, `"`, spaces); a `'` in the path
+    // becomes `'\''`. For an AppImage `exe` is the `.AppImage` file (stable), not the temporary mount.
+    #[cfg(not(windows))]
+    {
+        format!("'{}' --hook", exe.to_string_lossy().replace('\'', "'\\''"))
+    }
 }
 
 fn hooks_value(cmd: &str) -> Value {
@@ -909,8 +919,15 @@ pub fn global_settings_path() -> Option<PathBuf> {
     settings_path_for(std::env::var_os("CLAUDE_CONFIG_DIR"), home_os())
 }
 
+/// Home folder: Windows `USERPROFILE` (else `HOME`); Linux/macOS only `HOME` (a `USERPROFILE` there, e.g. passed in from
+/// WSL interop, must never redirect `~/.claude`).
 fn home_os() -> Option<std::ffi::OsString> {
-    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    if cfg!(windows) {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    } else {
+        std::env::var_os("HOME")
+    }
+    .filter(|h| !h.is_empty())
 }
 
 fn settings_path_for(config_dir: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
@@ -1002,9 +1019,10 @@ pub fn global_foreign_exe(path: &Path, exe: &Path) -> Option<String> {
             return None;
         }
         let t = c.trim();
-        let exe_part = match t.strip_prefix('"') {
-            Some(r) => r.split('"').next().unwrap_or(r),
-            None => t.trim_end_matches("--hook").trim(),
+        let exe_part = match (t.strip_prefix('"'), t.strip_prefix('\'')) {
+            (Some(r), _) => r.split('"').next().unwrap_or(r),
+            (_, Some(r)) => r.split('\'').next().unwrap_or(r),
+            _ => t.trim_end_matches("--hook").trim(),
         };
         foreign.get_or_insert_with(|| exe_part.to_string());
     }
@@ -1624,6 +1642,7 @@ mod tests {
     }
 
     /// Review zu #260: globale Hooks einer anderen paneldeck.exe (ohne Schlüssel) werden erkannt – nur lesend.
+    #[cfg(windows)] // Windows-Pfade (Linux/macOS: `unix_hook_command_is_shell_safe`)
     #[test]
     fn global_hooks_of_another_exe_are_detected() {
         let dir = std::env::temp_dir().join(format!("hubtest-{}", random_hex()));
@@ -1645,6 +1664,29 @@ mod tests {
         std::fs::write(&f, r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo fremd"}]}]}}"#).unwrap();
         assert_eq!(global_foreign_exe(&f, exe), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Linux/macOS (#149): the hook command is safe for `/bin/sh -c`, whatever the path contains.
+    #[cfg(unix)]
+    #[test]
+    fn unix_hook_command_is_shell_safe() {
+        let c = hook_command(Path::new("/home/a b/Apps/Paneldeck-2.5.0-x86_64.AppImage"));
+        assert_eq!(c, "'/home/a b/Apps/Paneldeck-2.5.0-x86_64.AppImage' --hook");
+        let odd = hook_command(Path::new("/tmp/it's $HOME `x`/paneldeck"));
+        assert_eq!(odd, "'/tmp/it'\\''s $HOME `x`/paneldeck' --hook");
+        // what sh makes of it: exactly the path and --hook
+        let out = std::process::Command::new("sh").args(["-c", &odd.replace(" --hook", " ; :").replacen('\'', "printf %s '", 1)]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "/tmp/it's $HOME `x`/paneldeck");
+        // a stored command of another copy is recognised (single quotes)
+        let d = std::env::temp_dir().join(format!("pd-hookq-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.json");
+        let mut v = json!({});
+        v["hooks"] = hooks_value("'/opt/old/paneldeck' --hook");
+        std::fs::write(&f, v.to_string()).unwrap();
+        let foreign = global_foreign_exe(&f, Path::new("/usr/bin/paneldeck"));
+        assert_eq!(foreign.as_deref(), Some("/opt/old/paneldeck"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

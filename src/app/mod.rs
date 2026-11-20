@@ -1931,7 +1931,8 @@ impl App {
             }
         } else if entry.meta.cwd.is_empty() {
             home_dir()
-        } else if crate::wsl::looks_linux(&entry.meta.cwd) {
+        } else if cfg!(windows) && crate::wsl::looks_linux(&entry.meta.cwd) {
+            // (Linux/macOS, #149: Unix-Pfade sind dort die normalen Pfade.)
             // Nie einen Linux-Pfad an eine Windows-Shell geben: `/mnt/c/x` → `C:\x`, sonst das Windows-Home.
             crate::wsl::linux_to_windows("", &entry.meta.cwd).unwrap_or_else(home_dir)
         } else {

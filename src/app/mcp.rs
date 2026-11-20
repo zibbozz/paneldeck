@@ -2189,7 +2189,8 @@ fn check_create_cwd(c: &str, wsl: Option<Option<&str>>, de: bool, is_dir: impl F
                 Err(e) => bad(format!("Ungültiger Linux-Pfad: {}", e.message(true)), format!("Invalid Linux path: {}", e.message(false))),
             };
         }
-    } else if crate::wsl::looks_linux(c) {
+    } else if cfg!(windows) && crate::wsl::looks_linux(c) {
+        // (Linux/macOS, #149: dort sind Unix-Pfade die normalen Pfade.)
         // Nie einen Linux-Pfad an eine Windows-Shell geben (`/x` hieße dort `C:\x`).
         return bad(format!("Linux-Pfade gibt es nur für WSL-Shells: {c}"), format!("Linux paths are only allowed for WSL shells: {c}"));
     }
@@ -2279,6 +2280,15 @@ mod tests {
         assert_eq!(level, McpLevel::Read);
     }
 
+    /// Linux/macOS (#149): Unix-Pfade sind normale Startordner.
+    #[cfg(unix)]
+    #[test]
+    fn create_session_cwd_takes_unix_paths_on_unix() {
+        assert_eq!(check_create_cwd("/tmp", None, false, |_| true), Ok("/tmp".to_string()));
+        assert!(check_create_cwd("/gibt/es/nicht", None, false, |_| false).is_err());
+    }
+
+    #[cfg(windows)] // Windows-Shells (unter Linux/macOS sind Unix-Pfade die normalen Pfade)
     #[test]
     fn create_session_cwd_accepts_linux_paths_only_for_wsl() {
         let dirs = |p: &str| matches!(p, r"C:\Work" | r"\\wsl.localhost\Ubuntu\home\u");
