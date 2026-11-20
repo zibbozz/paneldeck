@@ -2012,21 +2012,21 @@ c.close()
 
   [void](Tool 'start_process' @{ process = 'Zaeh' })
   [void](Wait-Output 'Zaeh' 'zaeh-laeuft')
-  $t0 = Get-Date; while (-not (Get-Marker).Count -and ((Get-Date) - $t0).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 300 }
-  Check 'Prozesse: Kindprozess (eigene Konsole, ohne Strg+C) laeuft' ((Get-Marker).Count -ge 1)
+  $t0 = Get-Date; while (-not @(Get-Marker).Count -and ((Get-Date) - $t0).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 300 }
+  Check 'Prozesse: Kindprozess (eigene Konsole, ohne Strg+C) laeuft' (@(Get-Marker).Count -ge 1)
   [void](Tool 'stop_process' @{ process = 'Zaeh' })
   Start-Sleep 2
   Check 'Prozesse: ignoriert Strg+C -> nach 2 s noch stopping' ((Get-Proc 'Zaeh').status -eq 'stopping') (Get-Proc 'Zaeh').status
   $p = Wait-Proc 'Zaeh' @('stopped') 12
   Check 'Prozesse: nach 5 s ganzer Baum beendet (stopped)' ($p.status -eq 'stopped') $p.status
   Start-Sleep 1
-  Check 'Prozesse: Kindprozess mit beendet (Job Object)' ((Get-Marker).Count -eq 0) "$((Get-Marker).Count) uebrig"
+  Check 'Prozesse: Kindprozess mit beendet (Job Object)' (@(Get-Marker).Count -eq 0) "$(@(Get-Marker).Count) uebrig"
 
   [void](Tool 'start_process' @{ process = 'Zaeh' })
-  $t0 = Get-Date; while (-not (Get-Marker).Count -and ((Get-Date) - $t0).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 300 }
+  $t0 = Get-Date; while (-not @(Get-Marker).Count -and ((Get-Date) - $t0).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 300 }
   Stop-Hub
   Start-Sleep 2
-  Check 'Prozesse: Hub beendet (kill) -> Programme enden mit (KILL_ON_JOB_CLOSE)' ((Get-Marker).Count -eq 0) "$((Get-Marker).Count) uebrig"
+  Check 'Prozesse: Hub beendet (kill) -> Programme enden mit (KILL_ON_JOB_CLOSE)' (@(Get-Marker).Count -eq 0) "$(@(Get-Marker).Count) uebrig"
   Get-Marker | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath "$data\processes.json" -ErrorAction SilentlyContinue
 
