@@ -179,7 +179,9 @@ if [ "$PUBLISH" = 1 ]; then
     for f in "$@"; do
       [ -f "$dir/$f" ] || { echo "Paket fehlt im Artefakt \`$job\`: $f"; exit 1; }
       # Herkunftsnachweis (actions/attest-build-provenance im Job): gebaut von diesem Repository in GitHub Actions.
-      "$GH" attestation verify "$dir/$f" -R zibbozz/paneldeck >/dev/null || { echo "Herkunftsnachweis von $f nicht bestätigt"; exit 1; }
+      # Nur Nachweise aus release-build.yml für genau dieses Tag (kein anderer Workflow/Branch des Repositorys).
+      "$GH" attestation verify "$dir/$f" -R zibbozz/paneldeck \
+        --signer-workflow zibbozz/paneldeck/.github/workflows/release-build.yml --source-ref "refs/tags/v$V" >/dev/null || { echo "Herkunftsnachweis von $f nicht bestätigt"; exit 1; }
       grep -q "  $f\$" "$SUMS_DIR/SHA256SUMS.txt" || grep "  $f\$" "$dir/$sums" >> "$SUMS_DIR/SHA256SUMS.txt"
     done
     (cd "$dir" && sha256sum -c --quiet --ignore-missing "../sums-$V/SHA256SUMS.txt") || { echo "SHA256SUMS.txt passt nicht zu den Paketen von \`$job\`"; exit 1; }

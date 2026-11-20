@@ -15,6 +15,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Profiles: "Shell in WSL" chooses the login shell per profile (automatic or an entry from the distribution's `/etc/shells`) (#57)
 - Nested shells (ssh, tmux …) without shell integration are detected and shown as "without shell integration"; `run_command` then reports `quality: approx` (#57)
 - *Settings → Terminal* offers copyable snippets for bash, zsh and fish to get command marks from remote machines (#57)
+- Linux (x86_64) release: AppImage (updates itself, checked against `SHA256SUMS.txt`), `.deb`, `.rpm` and tarball, built by GitHub Actions with build provenance; minimum Ubuntu 22.04 / Debian 12 / Fedora 39, X11 and Wayland (#149)
+- Linux: tray icon (StatusNotifierItem), desktop notifications, native file dialogs (XDG portal), optional start at login (XDG autostart) and optional "Open in Paneldeck" for Nautilus, Dolphin and Nemo; data folder `~/.local/share/Paneldeck` (private to the user); shells from `/etc/shells` started as login shells (#149)
+- Linux: API keys of chat servers are encrypted with a key from the system keyring (Secret Service); without a keyring Paneldeck asks for a master password on the first access to a key (#149)
+- Linux/macOS: the agent interface identifies the calling process itself (socket owner, complete process tree; on Linux Paneldeck is a subreaper) and refuses callers it cannot identify; programs that detach from a session stay restricted, as on Windows (#149)
 
 ### Changed
 

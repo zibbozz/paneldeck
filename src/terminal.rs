@@ -561,6 +561,11 @@ impl Session {
         let child = spawned.map_err(|e| e.to_string())?;
         let job = Self::adopt_into_job(job, in_job, child.as_ref());
         let shell_pid = child.process_id();
+        // Linux: eigenes Kind – der Subreaper-Aufräumer fasst es nie an (`platform::unix_proc::note_own_child`).
+        #[cfg(unix)]
+        if let Some(p) = shell_pid {
+            crate::platform::unix_proc::note_own_child(p);
+        }
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;

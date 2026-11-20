@@ -953,6 +953,9 @@ pub struct App {
     /// (`models_save_tick`) – je Fenster getauscht, bliebe eine Änderung in einem gerade nicht gezeichneten Fenster
     /// ungespeichert. Folge: Ein offenes Server-Formular erscheint in jedem Fenster, das diesen Reiter zeigt.
     models_ui: models_ui::ModelsUi,
+    /// Linux/macOS: Eingaben der Master-Passwort-Frage (`secret_ui`, im Speicher überschrieben).
+    #[cfg(unix)]
+    master_pw: secret_ui::PwForm,
 }
 
 fn home_dir() -> String {
@@ -1286,6 +1289,8 @@ impl App {
             chat_backend: std::sync::Arc::new(chatmod::LlmBackend::new()),
             llm_conn: Default::default(),
             models_ui: Default::default(),
+            #[cfg(unix)]
+            master_pw: Default::default(),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
