@@ -97,7 +97,7 @@ jobs:
   # ad hoc, Start mit --version, Selbst-Update mit genau diesem ZIP), danach der Smoke-Test gegen die App aus dem ZIP
   # (macOS-Runner haben eine Anmeldesitzung mit Fenstern). Kostenlos (Standard-Runner im öffentlichen Repository).
   package-macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

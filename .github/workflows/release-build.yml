@@ -136,7 +136,7 @@ jobs:
   # Dateien die offiziellen macOS-Release-Dateien: `tools/release.sh … --publish` wartet auf diesen Job, lädt das Artefakt
   # `paneldeck-<v>-macos`, prüft die Prüfsummen und hängt die Dateien (und ihre Zeilen in SHA256SUMS.txt) an das Release.
   macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 60
     env:
       RUST_TOOLCHAIN: "1.99.1"
