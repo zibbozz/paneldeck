@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Deviation: instead of `[Unreleased]`, changes that are not yet released are listed under the number of the next release with `WIP` instead of a date (e.g. `## [1.1.0] - WIP`).
 
+## [2.4.1] - WIP
+
+### Fixed
+
+- Selecting text in a terminal now starts at the character under the mouse when the button is pressed, so the first characters are no longer missed (#300)
+- Local AI chat: an answer without text – e.g. a thinking model such as gemma4 that only produced thinking output or reached its token limit while thinking – no longer ends silently as an empty reply but shows an error with Retry; thinking output shows "Thinking …" (#299)
+- Local AI chat: while no data has arrived yet, the chat shows how long it has been waiting and, after 10 seconds, that the server is probably still loading the model, instead of only "…" – Ollama lists a model in `ollama ps` only once it has loaded (#299)
+- Servers entered as `localhost` are reached on 127.0.0.1 first and on ::1 only as a fallback, like Ollama itself; before, another program listening on ::1 at the same port (e.g. the WSL relay of a second Ollama) could receive the requests, and the chat hung (#299)
+- A Claude session no longer continues a conversation that is not its own: when Claude Code was started by hand in the same terminal after the session's Claude ended (or never started), Paneldeck adopted that conversation and resumed it with `--resume` on the next reload or restart. The first start of a new session always begins a new conversation, and `--resume` only ever uses the session's own conversation (the one Paneldeck started, continued with *Continue the last conversation in this folder*, or switched to inside it with `/clear` or `/resume`) (#302)
+
 ## [2.4.0] - 2026-11-19
 
 ### Added
@@ -385,6 +395,7 @@ First public release. From here on, the public API (MCP interface, command line,
 - All `unwrap()`/`expect()` calls in the program code were replaced by error handling (the release build aborts completely on a panic); the `unsafe` blocks are justified.
 - The executable contains no paths of the build machine.
 
+[2.4.1]: https://github.com/zibbozz/paneldeck/compare/v2.4.0...HEAD
 [2.4.0]: https://github.com/zibbozz/paneldeck/compare/v2.3.2...v2.4.0
 [2.3.2]: https://github.com/zibbozz/paneldeck/compare/v2.3.1...v2.3.2
 [2.3.1]: https://github.com/zibbozz/paneldeck/compare/v2.3.0...v2.3.1

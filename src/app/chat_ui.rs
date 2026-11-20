@@ -105,10 +105,45 @@ struct RowCx<'a> {
     pending: std::collections::HashMap<String, CallState>,
     /// Ziel des wartenden Aufrufs (`session 4 "build"`).
     target: Option<String>,
+    /// Text unter einer noch leeren Antwort („…“, „Denkt nach …“, „Warte auf das Modell … 12 s“).
+    waiting: String,
+}
+
+/// Ab so vielen Sekunden ohne Daten zeigt eine leere Antwort, wie lange schon gewartet wird (#299).
+const WAIT_SHOW_SECS: u64 = 3;
+/// Ab so vielen Sekunden kommt der Hinweis dazu, dass der Server das Modell vermutlich noch lädt. Ollama zeigt ein
+/// Modell erst nach dem Laden in `ollama ps`; das erste Laden kann deutlich länger dauern (#299: 18 s, dann
+/// abgebrochen, weil nichts zu sehen war).
+const WAIT_LOAD_HINT_SECS: u64 = 10;
+
+/// Text unter einer noch leeren Antwort: „Denkt nach …“ bei Denk-Ausgabe, sonst ab [`WAIT_SHOW_SECS`] die Wartezeit
+/// (das erste Token kann dauern, z. B. während Ollama das Modell lädt), ab [`WAIT_LOAD_HINT_SECS`] mit Hinweis aufs
+/// Laden, davor „…“ (#299).
+pub(super) fn waiting_text(thinking: bool, waited: Option<std::time::Duration>, lang: Lang) -> String {
+    if thinking {
+        return lang.t("Denkt nach …", "Thinking …").to_string();
+    }
+    match waited.map(|d| d.as_secs()) {
+        Some(s) if s >= WAIT_LOAD_HINT_SECS => match lang {
+            Lang::De => format!("Warte auf das Modell … {s} s – der Server lädt es vermutlich noch (das erste Laden kann länger dauern)"),
+            Lang::En => format!("Waiting for the model … {s} s – the server is probably still loading it (the first load can take a while)"),
+        },
+        Some(s) if s >= WAIT_SHOW_SECS => match lang {
+            Lang::De => format!("Warte auf das Modell … {s} s"),
+            Lang::En => format!("Waiting for the model … {s} s"),
+        },
+        _ => "…".to_string(),
+    }
 }
 
 fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: Lang, out: &mut ChatOut) {
     let streaming = chat.busy();
+    let waiting = waiting_text(chat.thinking, chat.turn_started.filter(|_| chat.streaming()).map(|t| t.elapsed()), lang);
+    let still_empty = chat.messages().last().is_some_and(|m| m.role == Role::Assistant && m.content.is_empty() && m.tool_calls.is_empty());
+    if chat.streaming() && !chat.thinking && still_empty {
+        // Wartezeit sekündlich nachführen (auch ohne neue Daten) – nur solange die Antwort noch leer ist.
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+    }
     let has_error = chat.has_error();
     let can_regen = !streaming && crate::chat::logic::can_regenerate(chat.messages());
     let rev = chat.rev();
@@ -151,6 +186,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         last_user: crate::chat::logic::last_user(msgs),
         context_start: crate::chat::logic::clamp_context_start(file.context_start, n),
         usage: *usage,
+        waiting,
         pending,
         target,
     };
@@ -247,7 +283,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
             let is_last = Some(i) == rc.last;
             assistant(ui, i, m, msgs, cache, rc, out);
             if is_last && rc.streaming && m.content.is_empty() && m.tool_calls.is_empty() {
-                ui.label(RichText::new("…").color(style::dim(ui)));
+                ui.label(RichText::new(&rc.waiting).color(style::dim(ui)));
             }
             if let Some(n) = &m.note {
                 ui.label(RichText::new(format!("⚠ {n}")).small().color(Color32::from_rgb(0xe5, 0xc0, 0x7b)));
@@ -741,6 +777,50 @@ mod tests {
         assert!(h.click(&mut c, Lang::En, p).regenerate);
         let p = h.pos_of("✎").expect("Bearbeiten-Knopf");
         assert!(h.click(&mut c, Lang::En, p).edit);
+    }
+
+    /// Eine noch leere Antwort zeigt, was los ist (#299): „…“, nach ein paar Sekunden die Wartezeit, bei Denk-Ausgabe
+    /// „Denkt nach …“ – statt endlos nur „…“.
+    #[test]
+    fn empty_answer_shows_waiting_time_and_thinking() {
+        /// Hält die Antwort offen (Sender bleibt hier) und schickt vorab die gegebenen Ereignisse.
+        struct Open(std::sync::Mutex<Vec<std::sync::mpsc::Sender<crate::chat::backend::TurnEvent>>>, Vec<crate::chat::backend::TurnEvent>);
+        impl crate::chat::ChatBackend for Open {
+            fn start(&self, _: &crate::state::ChatMeta, _: &[ChatMsg], _: &crate::chat::TurnContext, _: crate::chat::Repaint) -> crate::chat::backend::TurnHandle {
+                let (h, tx, _) = crate::chat::backend::TurnHandle::pair();
+                for ev in &self.1 {
+                    tx.send(ev.clone()).unwrap();
+                }
+                self.0.lock().unwrap().push(tx);
+                h
+            }
+        }
+        for lang in [Lang::En, Lang::De] {
+            let silent = Open(Default::default(), Vec::new());
+            let mut c = ChatState::new(ChatFile::default(), None);
+            c.draft = "hi".into();
+            assert!(c.send(&silent, &crate::state::ChatMeta::default(), &crate::chat::TurnContext::default(), Arc::new(|| {})));
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == "…"), "{:?}", h.texts);
+            c.turn_started = Some(Instant::now() - Duration::from_secs(12));
+            h.frame(&mut c, lang, false, vec![]);
+            let want = waiting_text(false, Some(Duration::from_secs(12)), lang);
+            assert!(h.texts.iter().any(|t| *t == want), "{want} fehlt: {:?}", h.texts);
+            let thinking = Open(Default::default(), vec![crate::chat::backend::TurnEvent::Thinking]);
+            let mut c = ChatState::new(ChatFile::default(), None);
+            c.draft = "hi".into();
+            assert!(c.send(&thinking, &crate::state::ChatMeta::default(), &crate::chat::TurnContext::default(), Arc::new(|| {})));
+            c.poll();
+            h.frame(&mut c, lang, false, vec![]);
+            let want = lang.t("Denkt nach …", "Thinking …");
+            assert!(h.texts.iter().any(|t| t == want), "{want} fehlt: {:?}", h.texts);
+        }
+        assert_eq!(waiting_text(false, Some(Duration::from_secs(2)), Lang::En), "…");
+        assert_eq!(waiting_text(false, None, Lang::En), "…");
+        assert_eq!(waiting_text(false, Some(Duration::from_secs(5)), Lang::De), "Warte auf das Modell … 5 s");
+        assert!(waiting_text(false, Some(Duration::from_secs(18)), Lang::En).starts_with("Waiting for the model … 18 s – the server is probably still loading it"));
+        assert!(waiting_text(false, Some(Duration::from_secs(65)), Lang::De).contains("lädt es vermutlich noch"));
     }
 
     #[test]

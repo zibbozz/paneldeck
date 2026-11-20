@@ -453,7 +453,13 @@ impl Transport for WinHttp {
     fn send(&self, req: &HttpRequest<'_>, cancel: &Arc<AtomicBool>) -> Result<Box<dyn HttpResponse>, LlmError> {
         // Host-Regel vor jeder Anfrage (Namen werden neu aufgelöst).
         let url = net::parse(req.url)?;
-        let addrs = net::check_with(&url, &self.resolve)?;
+        let mut addrs = net::check_with(&url, &self.resolve)?;
+        // `localhost`: erst 127.0.0.1, dann ::1 (#299). WinHTTP selbst nähme zuerst ::1 – lauscht dort etwas anderes als
+        // der Server (z. B. die WSL-Weiterleitung eines zweiten Ollama, weil das Windows-Ollama 127.0.0.1 schon belegt),
+        // gingen die Anfragen still dorthin. Ollama und sein `ollama ps` meinen mit „lokal“ 127.0.0.1.
+        if url.host == net::Host::Localhost {
+            addrs = localhost_order();
+        }
         if req.bearer.is_some_and(|k| !super::bearer_ok(k)) {
             return Err(LlmError::BadKey);
         }
@@ -461,10 +467,11 @@ impl Transport for WinHttp {
             return Err(LlmError::Cancelled);
         }
         // Ziele (IPv6 in Klammern, ohne: ERROR_WINHTTP_INVALID_URL):
-        // - DNS-Name: je geprüfte Adresse ein Versuch mit dem Namen, die IP per RESOLUTION_HOSTNAME gebunden.
-        // - IP-Literal oder `localhost` (löst Windows selbst auf, nie über DNS): direkt.
+        // - DNS-Name und `localhost`: je Adresse ein Versuch mit dem Namen, die IP per RESOLUTION_HOSTNAME gebunden
+        //   (`localhost`: 127.0.0.1, dann ::1; der nächste nur, wenn keine Verbindung zustande kam).
+        // - IP-Literal: direkt.
         let targets: Vec<Target> = match &url.host {
-            net::Host::Name(_) => addrs.iter().map(|ip| Target { connect: url.host_display(), host_header: None, pin: Some(*ip) }).collect(),
+            net::Host::Name(_) | net::Host::Localhost => addrs.iter().map(|ip| Target { connect: url.host_display(), host_header: None, pin: Some(*ip) }).collect(),
             _ => vec![Target { connect: url.host_display(), host_header: None, pin: None }],
         };
         let session = Self::session(req)?;
@@ -489,6 +496,11 @@ impl Transport for WinHttp {
             r => r.map(|r| Box::new(r) as Box<dyn HttpResponse>),
         }
     }
+}
+
+/// Reihenfolge der Adressen für `localhost` (#299): IPv4 zuerst wie Ollama, IPv6 nur als Rückfall.
+fn localhost_order() -> Vec<IpAddr> {
+    vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]
 }
 
 impl WinHttp {

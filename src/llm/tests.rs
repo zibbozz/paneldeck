@@ -121,6 +121,34 @@ fn ollama_streams_text() {
     assert_eq!(log[0].body.as_ref().unwrap()["stream"], json!(true));
 }
 
+/// Denkende Modelle (gemma4 über Ollama): lange nur `message.thinking`, dann Text (#299).
+#[test]
+fn ollama_thinking_is_reported_but_not_shown() {
+    let body = concat!(
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":"","thinking":"Let me"},"done":false}"#,
+        "\n",
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":"","thinking":" think."},"done":false}"#,
+        "\n",
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":"Hi"},"done":false}"#,
+        "\n",
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}"#,
+        "\n"
+    );
+    let t = Fake::default().with(Method::Post, OL_CHAT, Canned::ok(body));
+    let ev = run(&t, &Endpoint::new(ServerKind::Ollama, OL), &req());
+    assert_eq!(ev, vec![StreamEvent::Thinking, StreamEvent::Thinking, StreamEvent::Delta("Hi".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: Some("stop".into()) }]);
+    // Nur Denken bis zur Token-Grenze: gültiger Strom (kein „unlesbar“), Ende mit `length`.
+    let body = concat!(
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":"","thinking":"hmm"},"done":false}"#,
+        "\n",
+        r#"{"model":"gemma4:e2b","message":{"role":"assistant","content":""},"done":true,"done_reason":"length","eval_count":4096}"#,
+        "\n"
+    );
+    let t = Fake::default().with(Method::Post, OL_CHAT, Canned::ok(body));
+    let ev = run(&t, &Endpoint::new(ServerKind::Ollama, OL), &req());
+    assert_eq!(ev, vec![StreamEvent::Thinking, StreamEvent::Done { prompt_tokens: None, completion_tokens: Some(4096), finish_reason: Some("length".into()) }]);
+}
+
 #[test]
 fn ollama_tool_calls() {
     let body = concat!(
@@ -258,6 +286,57 @@ fn openai_streams_text_and_usage() {
     let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
     let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
     assert_eq!(ev, vec![StreamEvent::Delta("Hi".into()), StreamEvent::Delta(" there".into()), StreamEvent::Done { prompt_tokens: Some(20), completion_tokens: Some(2), finish_reason: Some("stop".into()) }]);
+}
+
+/// Denk-Ausgabe OpenAI-kompatibler Server (`reasoning_content` bei llama.cpp/vLLM, `reasoning` bei LM Studio/Ollama).
+#[test]
+fn openai_reasoning_is_reported_but_not_shown() {
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" more\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
+    let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
+    assert_eq!(ev, vec![StreamEvent::Thinking, StreamEvent::Thinking, StreamEvent::Delta("ok".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: Some("stop".into()) }]);
+}
+
+/// `"reasoning_content": null` neben `"reasoning": "…"` (manche Server schicken beide Felder): Letzteres zählt.
+#[test]
+fn openai_null_reasoning_content_does_not_hide_reasoning() {
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":null,\"reasoning\":\"plan\",\"content\":null}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":null,\"reasoning\":null,\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let t = Fake::default().with(Method::Post, OA_CHAT, Canned::ok(body));
+    let ev = run(&t, &Endpoint::new(ServerKind::OpenAi, OA), &req());
+    assert_eq!(ev, vec![StreamEvent::Thinking, StreamEvent::Delta("ok".into()), StreamEvent::Done { prompt_tokens: None, completion_tokens: None, finish_reason: Some("stop".into()) }]);
+}
+
+/// Sehr viel Denk-Ausgabe bricht die Antwort nicht ab (der Text wird nicht behalten): über der Grenze wird sie nur
+/// noch übergangen, der Antworttext danach kommt normal an.
+#[test]
+fn huge_thinking_output_is_ignored_not_an_error() {
+    let mut acc = Acc::default();
+    let mut ev = Vec::new();
+    let big = "x".repeat(MAX_CONTENT / 2 + 1);
+    for _ in 0..4 {
+        acc.thinking(&big, &mut |e| ev.push(e));
+    }
+    assert!(acc.error.is_none(), "kein TooLarge");
+    assert_eq!(ev, vec![StreamEvent::Thinking; 2], "das Stück, das die Grenze überschreitet, zählt noch, danach still");
+    acc.delta("answer", &mut |e| ev.push(e));
+    assert_eq!(ev.last(), Some(&StreamEvent::Delta("answer".into())));
+    // Über einen ganzen Ollama-Strom (18 MiB Denk-Ausgabe, dann Text)
+    let line = format!("{{\"message\":{{\"content\":\"\",\"thinking\":\"{}\"}},\"done\":false}}\n", "t".repeat(1 << 20));
+    let mut body = line.repeat(18);
+    body.push_str("{\"message\":{\"content\":\"Hi\"},\"done\":false}\n{\"done\":true,\"done_reason\":\"stop\"}\n");
+    let t = Fake::default().with(Method::Post, OL_CHAT, Canned::chunks(200, body.as_bytes().chunks(16 << 10).map(|c| c.to_vec()).collect()));
+    let ev = run(&t, &Endpoint::new(ServerKind::Ollama, OL), &req());
+    assert_eq!(text(&ev), "Hi");
+    assert!(matches!(ev.last(), Some(StreamEvent::Done { .. })), "{:?}", ev.last());
 }
 
 #[test]
@@ -464,7 +543,11 @@ mod e2e {
 
     /// Ein Server für genau eine Verbindung; `respond` schreibt die Antwort.
     fn serve(addr: &str, respond: impl FnOnce(&mut std::net::TcpStream) + Send + 'static) -> (String, std::thread::JoinHandle<Seen>) {
-        let l = TcpListener::bind(addr).unwrap();
+        serve_on(TcpListener::bind(addr).unwrap(), respond)
+    }
+
+    /// Wie [`serve`], auf einem schon gebundenen Lauscher.
+    fn serve_on(l: TcpListener, respond: impl FnOnce(&mut std::net::TcpStream) + Send + 'static) -> (String, std::thread::JoinHandle<Seen>) {
         let a = l.local_addr().unwrap();
         let base = if a.is_ipv6() { format!("http://[{}]:{}", a.ip(), a.port()) } else { format!("http://{a}") };
         let h = std::thread::spawn(move || {
@@ -541,6 +624,56 @@ mod e2e {
         let r = list_models(system_transport().as_ref(), &Endpoint::new(ServerKind::OpenAi, &format!("{base}/v1")), &no_cancel()).unwrap();
         assert_eq!(r, vec![ModelInfo { name: "phi-4".into(), tools: None, context_length: None }]);
         assert!(h.join().unwrap().head.starts_with("GET /v1/models HTTP/1.1\r\n"));
+    }
+
+    /// #299: Lauscht auf [::1] am selben Port etwas anderes (z. B. die WSL-Weiterleitung eines zweiten Ollama, das nie
+    /// antwortet), muss `localhost` trotzdem beim Server auf 127.0.0.1 landen – wie `ollama ps`. Vorher nahm WinHTTP ::1
+    /// zuerst: die Verbindungsprüfung ging zum falschen Server, der Chat hing bei „…“.
+    #[test]
+    fn real_winhttp_localhost_prefers_ipv4_over_a_stray_ipv6_listener() {
+        let (base, h) = serve("127.0.0.1:0", |s| {
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{\"message\":{\"content\":\"v4\"}}\n{\"done\":true}\n").unwrap();
+        });
+        let port = base.rsplit(':').next().unwrap().to_string();
+        let Ok(decoy) = TcpListener::bind(format!("[::1]:{port}")) else {
+            eprintln!("IPv6-Loopback nicht verfügbar oder Port belegt – Test übersprungen");
+            let _ = std::net::TcpStream::connect(format!("127.0.0.1:{port}"));
+            return;
+        };
+        decoy.set_nonblocking(true).unwrap();
+        let ep = Endpoint::new(ServerKind::Ollama, &format!("http://localhost:{port}")).with_receive_timeout(Duration::from_secs(5));
+        let mut ev = Vec::new();
+        chat(system_transport().as_ref(), &ep, &req(), &no_cancel(), &mut |e| ev.push(e));
+        assert_eq!(text(&ev), "v4", "{ev:?}");
+        assert!(h.join().unwrap().head.contains("Host: localhost:"), "Host bleibt der Name");
+        assert!(decoy.accept().is_err(), "nichts ging an den Lauscher auf ::1");
+    }
+
+    /// Lauscht der Server nur auf [::1] (z. B. `OLLAMA_HOST=[::1]`), kommt `localhost` über den Rückfall trotzdem an.
+    #[test]
+    fn real_winhttp_localhost_falls_back_to_ipv6() {
+        // Der Lauscher auf [::1] bleibt gebunden (kein Freigeben und Neubinden); 127.0.0.1 am selben Port muss frei sein –
+        // sonst nächster Port. Ein Rest-Rennen (jemand bindet 127.0.0.1:P genau jetzt) bleibt, ist aber sehr unwahrscheinlich.
+        let mut found = None;
+        for _ in 0..20 {
+            let Ok(l) = TcpListener::bind("[::1]:0") else {
+                eprintln!("IPv6-Loopback nicht verfügbar – Test übersprungen");
+                return;
+            };
+            let port = l.local_addr().unwrap().port();
+            if TcpListener::bind(format!("127.0.0.1:{port}")).is_ok() {
+                found = Some((l, port));
+                break;
+            }
+        }
+        let Some((l, port)) = found else { panic!("kein Port frei auf 127.0.0.1 und ::1") };
+        let (_, h) = serve_on(l, |s| {
+            let body = r#"{"models":[]}"#;
+            s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+        });
+        let r = list_models(system_transport().as_ref(), &Endpoint::new(ServerKind::Ollama, &format!("http://localhost:{port}")), &no_cancel());
+        assert_eq!(r, Ok(Vec::new()));
+        assert!(h.join().unwrap().head.starts_with("GET /api/tags HTTP/1.1\r\n"));
     }
 
     #[test]

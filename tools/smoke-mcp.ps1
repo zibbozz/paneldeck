@@ -529,6 +529,8 @@ $wait
     $cid = $cs.data.id
     $ct = Wait-FakeFile $calls '--session-id'
     Check 'Claude-Start erreicht den Ersatz (fakebin\calls.txt: --session-id, Hooks per --settings aus dem Test-Datenordner)' ($ct -match 'claude\.cmd' -and $ct -match '--session-id [0-9a-f-]{36}' -and $ct -match ('--settings "?[^ ]*' + [regex]::Escape($tag) + '/hub/paneldeck-data/claude-hooks\.json')) "calls.txt='$ct'"
+    # #302: der erste Start einer neuen Sitzung beginnt immer neu (--session-id), nie mit --resume/--continue.
+    Check 'Erster Start einer neuen Claude-Sitzung: --session-id, kein --resume/--continue (#302)' ($ct -notmatch '--resume' -and $ct -notmatch '--continue') "calls.txt='$ct'"
     Check 'Schein-Profil: keine globalen Hooks in ~/.claude/settings.json angelegt' (-not (Test-Path "$($script:iso.Profile)\.claude\settings.json"))
     # Schluessel des Starts (#260): der Ersatz schreibt PANELDECK_SESSION_KEY in calls.txt; ohne ihn verwirft der Hub Hooks.
     $hookKey = ''
