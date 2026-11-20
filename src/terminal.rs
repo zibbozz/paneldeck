@@ -582,7 +582,7 @@ impl Session {
             // mitten im Frame, `cat` einer Datei mit ESC[?2026h) bis zu 2 MiB und das Terminal zeigt nichts mehr an.
             let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
             std::thread::spawn(move || {
-                let mut buf = vec![0u8; 65536];
+                let mut buf = vec![0u8; READ_BUF];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -599,6 +599,8 @@ impl Session {
                 let mut scanner = OscScanner::default();
                 // Prompt-Anfang bei „Umbruch ausstehend“, dessen Zeile erst das nächste Zeichen festlegt (`advance_tracked`).
                 let mut pending_mark: Option<u64> = None;
+                // Umbruch nach einer Zeile in voller Breite wie der alte conhost-Renderer (#264, nur System-ConPTY).
+                let mut conhost_wrap = crate::conhost_wrap::ConhostWrap::new(console_host == Some("system"));
                 let hist_track = hist_track;
                 let mut win32_scan = crate::vtkeys::Win32ModeScanner::default();
                 let mut kitty_guard = crate::vtkeys::KittyStackGuard::default();
@@ -614,6 +616,8 @@ impl Session {
                     match msg {
                         Ok(bytes) => {
                             activity.store(mono_ms(), Ordering::Relaxed);
+                            // Weniger als der Lesepuffer: die Pipe war leer, das Stück endet mit einem Frame von conhost.
+                            let short_read = bytes.len() < READ_BUF;
                             // Nie beendete OSC kappen (vte puffert sie sonst ohne Grenze, #212) und den kitty-Stapel
                             // begrenzen (Absturz bei 4097 Pushes), bevor alacritty beides sieht.
                             let bytes = osc_limit.filter(&bytes);
@@ -632,8 +636,10 @@ impl Session {
                                     processor.stop_sync(&mut *t);
                                     hist_track.settle(&mut t, before);
                                 }
-                                let mut rd = ReaderState { hs: &hist_track, pending: &mut pending_mark, lst: &lst, shell_state: &shell_state, stale: &stale, deferred: &mut deferred, kitty_guard: &mut kitty_guard };
+                                conhost_wrap.chunk_begin(&t, &bytes);
+                                let mut rd = ReaderState { hs: &hist_track, pending: &mut pending_mark, lst: &lst, shell_state: &shell_state, stale: &stale, deferred: &mut deferred, kitty_guard: &mut kitty_guard, conhost_wrap: &mut conhost_wrap };
                                 process_chunk(&mut processor, &mut t, &bytes, (events, positions), &mut rd);
+                                conhost_wrap.chunk_end(&processor, &t, short_read);
                                 release_deferred(&processor, &lst, &mut deferred);
                                 lst.take_reply_bytes(&t, &view)
                             };
@@ -1156,6 +1162,8 @@ struct ReaderState<'a> {
     /// Antworten des Scanners, die auf das Ende eines Synchronized Update warten.
     deferred: &'a mut Vec<Reply>,
     kitty_guard: &'a mut crate::vtkeys::KittyStackGuard,
+    /// Umbruch wie conhost nach einer Zeile in voller Breite (#264).
+    conhost_wrap: &'a mut crate::conhost_wrap::ConhostWrap,
 }
 
 /// Ein Stück Programmausgabe durch die Emulation schicken (PTY-Thread, Emulation gesperrt). `scanned` = Ereignisse und
@@ -1164,9 +1172,9 @@ struct ReaderState<'a> {
 /// Listeners (`rd.lst`), Meldungen der Shell-Integration in `rd.shell_state`.
 fn process_chunk<T: EventListener>(processor: &mut Processor, t: &mut Term<T>, bytes: &[u8], scanned: (Vec<OscEvent>, Vec<usize>), rd: &mut ReaderState) {
     let (events, positions) = scanned;
-    let ReaderState { hs, pending, lst, shell_state, stale, deferred, kitty_guard } = rd;
+    let ReaderState { hs, pending, lst, shell_state, stale, deferred, kitty_guard, conhost_wrap } = rd;
     let (hs, lst, stale) = (*hs, *lst, *stale);
-    advance_tracked(processor, t, hs, bytes, events, positions, pending, shell_state, |ev, p, t| {
+    advance_tracked(processor, t, hs, bytes, events, positions, pending, shell_state, conhost_wrap, |ev, p, t| {
         match ev {
             OscEvent::FullReset => {
                 // Nach RIS die Farben des Themes: Palette (OSC 104), Vorder-/Hintergrund, Cursor (OSC 110–112). Die
@@ -1485,6 +1493,9 @@ pub struct HistoryTrack {
     primary: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// Lesepuffer des PTY-Threads; ein kürzeres Stück heißt, die Pipe war leer (Frame-Ende, `ConhostWrap`).
+const READ_BUF: usize = 65536;
+
 /// `HistoryTrack::primary`: Länge des Hauptbildschirm-Verlaufs unbekannt.
 const PRIMARY_UNKNOWN: usize = usize::MAX;
 
@@ -1569,12 +1580,13 @@ fn advance_tracked<T: EventListener>(
     positions: Vec<usize>,
     pending: &mut Option<u64>,
     state: &Arc<Mutex<ShellState>>,
+    cw: &mut crate::conhost_wrap::ConhostWrap,
     mut on_event: impl FnMut(&OscEvent, &mut Processor, &mut Term<T>),
 ) {
     let mut done = 0usize;
     for (ev, end) in events.into_iter().zip(positions) {
         let end = end.clamp(done, bytes.len());
-        advance_resolving(p, t, hs, &bytes[done..end], pending, state);
+        advance_resolving(p, t, hs, &bytes[done..end], pending, state, cw);
         done = end;
         on_event(&ev, p, t);
         // Shell-Integration und Meldungen von Programmen (Fortschritt, Benachrichtigungen) gehen an `state`; Anfragen,
@@ -1590,18 +1602,35 @@ fn advance_tracked<T: EventListener>(
             state.lock().unwrap_or_else(|e| e.into_inner()).mark_open = pending.is_some();
         }
     }
-    advance_resolving(p, t, hs, &bytes[done..], pending, state);
+    advance_resolving(p, t, hs, &bytes[done..], pending, state, cw);
 }
 
 /// Wie `Processor::advance`; solange eine Marke offen ist (`advance_tracked`), Byte für Byte mit Prüfung danach.
-fn advance_resolving<T: EventListener>(p: &mut Processor, t: &mut Term<T>, hs: &HistoryTrack, bytes: &[u8], pending: &mut Option<u64>, state: &Arc<Mutex<ShellState>>) {
+fn advance_resolving<T: EventListener>(
+    p: &mut Processor,
+    t: &mut Term<T>,
+    hs: &HistoryTrack,
+    bytes: &[u8],
+    pending: &mut Option<u64>,
+    state: &Arc<Mutex<ShellState>>,
+    cw: &mut crate::conhost_wrap::ConhostWrap,
+) {
     let mut i = 0;
     while pending.is_some() && i < bytes.len() {
-        hs.advance(p, t, &bytes[i..i + 1]);
+        advance_conhost(cw, p, t, hs, &bytes[i..i + 1]);
         i += 1;
         resolve_mark(t, hs.base(), pending, state);
     }
-    hs.advance(p, t, &bytes[i..]);
+    advance_conhost(cw, p, t, hs, &bytes[i..]);
+}
+
+/// `HistoryTrack::advance` mit dem Umbruch wie conhost (#264): ein eingeschobener Umbruch wird wie Ausgabe gezählt.
+fn advance_conhost<T: EventListener>(cw: &mut crate::conhost_wrap::ConhostWrap, p: &mut Processor, t: &mut Term<T>, hs: &HistoryTrack, bytes: &[u8]) {
+    cw.advance(p, t, bytes, |p, t, b| hs.advance(p, t, b), |t, wrap| {
+        let before = primary_history(t);
+        wrap(t);
+        hs.settle(t, before);
+    });
 }
 
 /// Offene Marke festlegen, sobald der ausstehende Umbruch erledigt ist: auf die Zeile, in der der Cursor dann steht.
@@ -2083,6 +2112,7 @@ mod run_output_tests {
         pending: Option<u64>,
         hs: HistoryTrack,
         st: Arc<Mutex<ShellState>>,
+        cw: crate::conhost_wrap::ConhostWrap,
     }
 
     impl Fake {
@@ -2100,6 +2130,7 @@ mod run_output_tests {
                 pending: None,
                 hs: HistoryTrack::new(scrolling_history, Arc::new(std::sync::atomic::AtomicU64::new(0))),
                 st: Arc::new(Mutex::new(ShellState::default())),
+                cw: Default::default(),
             }
         }
 
@@ -2115,11 +2146,18 @@ mod run_output_tests {
         fn feed(&mut self, bytes: &str) {
             let bytes = bytes.as_bytes();
             let (events, positions) = self.sc.feed_at(bytes);
-            advance_tracked(&mut self.p, &mut self.term, &self.hs, bytes, events, positions, &mut self.pending, &self.st, |_, _, _| {});
+            advance_tracked(&mut self.p, &mut self.term, &self.hs, bytes, events, positions, &mut self.pending, &self.st, &mut self.cw, |_, _, _| {});
         }
 
         fn last_mark(&self) -> Option<u64> {
             self.st.lock().unwrap().marks.last().copied()
+        }
+
+        /// Wie `feed`, als eigenes Lesestück (ein Frame der ConPTY) mit `ConhostWrap::chunk_end`.
+        fn frame(&mut self, bytes: &str) {
+            self.cw.chunk_begin(&self.term, bytes.as_bytes());
+            self.feed(bytes);
+            self.cw.chunk_end(&self.p, &self.term, true);
         }
     }
 
@@ -2386,6 +2424,82 @@ mod run_output_tests {
         f.feed("\r\n\x1b]133;A\x07$ ");
         assert_eq!(f.last_mark(), Some(2));
         assert!(!f.st.lock().unwrap().mark_open);
+    }
+
+    #[test]
+    fn exact_width_powershell_command_on_system_conpty() {
+        // #264, Mitschnitt (System-conhost, Windows PowerShell, 100 Spalten): Prompt + Befehl füllen genau drei Zeilen.
+        // conhost hat danach eine Leerzeile (absolute Sprünge späterer Prompts bestätigen das); die Ausgabe bleibt die
+        // JSON-Zeile.
+        let prompt = "PS C:\\Users\\u\\AppData\\Local\\Temp\\pd-conhost-cap-43416> ";
+        let ps = format!("\x1b]7777;dur=3\x07\x1b]133;D;0\x07\x1b]9;9;\"C:\\x\"\x07\x1b]133;A\x07{prompt}\x1b]133;B\x07");
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"bad_args: You cannot wait for your own session."}],"isError":true}}"#;
+        let head = format!("'{json}' ");
+        let pad = "a".repeat(300 - prompt.len() - head.len() - 2);
+        let cmd = format!("{head}# {pad}");
+        for system in [false, true] {
+            let mut f = Fake::new(100, 30);
+            f.cw = crate::conhost_wrap::ConhostWrap::new(system);
+            for chunk in ["\x1b[6n", "\x1b[?9001h\x1b[?1004h", "\x1b[m\x1b]0;powershell.exe\x07\x1b[?25h", &ps] {
+                f.frame(chunk);
+            }
+            let start_abs = f.cursor();
+            let mark0 = f.last_mark();
+            for chunk in [
+                "\x1b[?25l".to_string(),
+                "\x1b[36m'\x1b[?25h".into(),
+                "\x1b[m\x1b[?25l".into(),
+                format!("\x1b[36m\x08{head}\x1b[32m# {pad}\x1b[?25h"),
+                "\x1b[m".into(),
+                "\r\n".into(),
+                format!("\x1b]7777;dur=19\x07{json}\r\n{ps}"),
+            ] {
+                f.frame(&chunk);
+            }
+            let st = f.st.lock().unwrap();
+            let r = run_output(&f.term, f.base(), &cmd, start_abs, mark0, st.prompt_start(), true);
+            assert_eq!(r.lines.iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>(), vec![json.to_string()], "System-ConPTY {system}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn exact_width_git_bash_keeps_the_blank_line_on_system_conpty() {
+        // #264: Wie oben, aber mit dem Umbruch wie conhost (Frames als einzelne Lesestücke): Die Leerzeile aus PS1 bleibt,
+        // die Marke liegt auf ihr (wie mit der mitgelieferten ConPTY), die Ausgabe ist die volle Zeile.
+        // Nur außerhalb der untersten Zeile: dort rollt conhost selbst richtig (`conhost_wrap`); mit vollem Verlauf daher
+        // nach `clear` (Prompt wieder oben).
+        let line = "w".repeat(COLS);
+        for history in [0, 3, 200] {
+            let mut f = Fake::with_history(COLS, 8, 50);
+            f.cw = crate::conhost_wrap::ConhostWrap::new(true);
+            for chunk in ["\x1b[6n", "\x1b[?9001h\x1b[?1004h", "\x1b[m\x1b]0;C:\\Program Files\\Git\\bin\\bash.exe\x07\x1b[?25h"] {
+                f.frame(chunk);
+            }
+            for i in 0..history {
+                f.frame(&format!("alt {i}\r\n"));
+            }
+            if history > 8 {
+                f.frame("\x1b[H\x1b[2J");
+            }
+            f.frame(BASH_END);
+            f.frame("\x1b[?2004h");
+            f.frame(BASH_PS1);
+            let start_abs = f.cursor();
+            let mark0 = f.last_mark();
+            f.frame("printf w40\r\n\x1b]133;C\x07");
+            f.frame(&line);
+            let out_row = f.cursor();
+            f.frame(BASH_END);
+            f.frame("\x1b[?2004h");
+            f.frame(BASH_PS1);
+            let st = f.st.lock().unwrap();
+            assert!(!st.mark_open, "Verlauf {history}");
+            assert_eq!(st.marks.last(), Some(&(out_row + 1)), "Marke auf der Leerzeile, Verlauf {history}");
+            let r = run_output(&f.term, f.base(), "printf w40", start_abs, mark0, st.prompt_start(), true);
+            assert_eq!(text(&r), line, "Verlauf {history}");
+            drop(st);
+            assert_eq!(lines_abs_in(&f.term, f.base(), out_row, out_row + 3), vec![line.clone(), String::new(), "u@pc MINGW64 ~".into(), "$".into()], "Verlauf {history}");
+        }
     }
 
     #[test]
@@ -2749,7 +2863,7 @@ mod vt_reply_tests {
             let bytes = self.guard.filter(&bytes).into_owned();
             let bytes = &bytes[..];
             let scanned = self.scanner.feed_at(bytes);
-            let mut rd = ReaderState { hs: &self.hs, pending: &mut self.pending, lst: &self.lst, shell_state: &self.shell, stale: &self.stale, deferred: &mut self.deferred, kitty_guard: &mut self.guard };
+            let mut rd = ReaderState { hs: &self.hs, pending: &mut self.pending, lst: &self.lst, shell_state: &self.shell, stale: &self.stale, deferred: &mut self.deferred, kitty_guard: &mut self.guard, conhost_wrap: &mut Default::default() };
             process_chunk(&mut self.p, &mut self.term, bytes, scanned, &mut rd);
             release_deferred(&self.p, &self.lst, &mut self.deferred);
             let r = self.lst.take_reply_bytes(&self.term, &self.view);
