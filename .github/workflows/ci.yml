@@ -2,10 +2,13 @@ name: CI
 
 # Prüft jede Änderung: Build, Tests, Changelog-Format (englisch + deutsch, gleiche Versionen), Lizenztexte der Abhängigkeiten, Syntax der Shell-Skripte.
 # Läuft im öffentlichen Repository auf den kostenlosen Standard-Runnern.
+# Pull Requests (auch nach release/x.y) und Pushes auf develop; Release-Branches bekommen ihre Änderungen nur per PR.
+# Reine Doku-Änderungen (Job `changes`) überspringen Build, Tests und Pakete; `lint` läuft immer.
+# Caches (rust-cache) werden nur von develop gespeichert; PRs lesen sie nur.
 on:
   pull_request:
   push:
-    branches: [develop, "release/**", "feature/2.3", "feature/2.4"]
+    branches: [develop]
 
 permissions:
   contents: read
@@ -19,7 +22,63 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
+  # Nur Doku geändert? Erlaubt sind docs/**, README*.md, Changelog*.md, TESTPLAN.md, CLAUDE.md – nicht THIRD_PARTY.md und
+  # nicht tools/** (per include_str! eingebunden bzw. vom Build benutzt). Im Zweifel (Diff nicht bestimmbar) gilt: Code.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Code or docs only?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          range=""
+          if [ "$EVENT" = pull_request ]; then
+            git cat-file -e "$BASE^{commit}" 2>/dev/null || git fetch -q --depth=1 origin "$BASE" || true
+            range="$BASE"
+          elif [ "$BEFORE" = "$(git rev-parse -q --verify HEAD^1 || true)" ]; then
+            range="HEAD^1"   # genau ein neuer Commit (Squash-Merge); mehrere Commits oder Force-Push: alles prüfen
+          fi
+          code=true
+          if [ -n "$range" ] && files="$(git diff --no-renames --name-only "$range" HEAD)"; then
+            echo "$files"
+            if [ -n "$files" ] && ! grep -qvE '^(docs/|README[^/]*\.md$|Changelog[^/]*\.md$|TESTPLAN\.md$|CLAUDE\.md$)' <<<"$files"; then
+              code=false
+            fi
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
+  # Immer (auch bei reinen Doku-Änderungen): Changelog-Format und Syntax der Shell-Skripte.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Changelog format (Changelog.md + Changelog.de.md in sync)
+        run: python tools/changelog.py check
+      - name: Shell script syntax
+        run: |
+          for f in tools/*.sh tools/git-hooks/*; do
+            bash -n "$f" || exit 1
+          done
+
   build-test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -28,32 +87,42 @@ jobs:
         with:
           python-version: "3.11"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
       - name: Versions
         run: |
           rustc --version
           cargo --version
           python --version
-      - name: Build (release)
-        run: cargo build --release --locked
       - name: Tests
         run: cargo test --release --locked
-      - name: Changelog format (Changelog.md + Changelog.de.md in sync)
-        run: python tools/changelog.py check
       - name: Third-party licenses are up to date
         run: python tools/gen_licenses.py --check
-      - name: Shell script syntax
-        shell: bash
-        run: |
-          for f in tools/*.sh tools/git-hooks/*; do
-            bash -n "$f" || exit 1
-          done
 
-  # Linux und macOS (Vorbereitung #149/#150): Build und Tests der plattformunabhängigen Teile. Die Windows-Teile stecken hinter
-  # `src/platform/` und sind dort Stubs; Changelog, Lizenzen und Shell-Skripte prüft schon der Windows-Job.
+  # Release-Build unter Windows parallel zu den Tests (eigener Job, eigener Cache).
+  build-windows:
+    name: build (windows)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+      - name: Build (release)
+        run: cargo build --release --locked
+
+  # Linux und macOS (Vorbereitung #149/#150): Tests der plattformunabhängigen Teile. Die Windows-Teile stecken hinter
+  # `src/platform/` und sind dort Stubs; Changelog und Shell-Skripte prüft `lint`, die Lizenzen der Windows-Job.
+  # Das Release-Programm bauen package-linux und package-macos (dort auch geprüft).
   # Keine Systempakete nötig: tray-icon/rfd (Windows, macOS), ksni/zbus (Linux, reines Rust), arboard; eframe
   # lädt X11/OpenGL zur Laufzeit (die Tests öffnen kein Fenster), SQLite wird mit dem C-Compiler des Runners gebaut.
   build-test-unix:
     name: build-test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -63,18 +132,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
       - name: Versions
         run: |
           rustc --version
           cargo --version
-      - name: Build (release)
-        run: cargo build --release --locked
       - name: Tests
         run: cargo test --release --locked
 
   # Linux-Pakete (#149): AppImage, .deb, .rpm und Tarball bauen und prüfen (Start mit --version, Inhalt der Pakete) –
   # wie im Release-Build, auf ubuntu-22.04 (glibc-Untergrenze). Kostenlos (Standard-Runner im öffentlichen Repository).
   package-linux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -82,6 +153,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
       - name: Install rpmbuild and desktop-file-utils
         run: sudo apt-get update -q && sudo apt-get install -y -q rpm desktop-file-utils xvfb libgl1-mesa-dri libegl1 libxkbcommon-x11-0
       - name: Build and package
@@ -97,6 +170,8 @@ jobs:
   # ad hoc, Start mit --version, Selbst-Update mit genau diesem ZIP), danach der Smoke-Test gegen die App aus dem ZIP
   # (macOS-Runner haben eine Anmeldesitzung mit Fenstern). Kostenlos (Standard-Runner im öffentlichen Repository).
   package-macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -104,7 +179,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
       - name: Build and package
+        # Selbst-Update-Test mit dem Dev-Profil ohne Debug-Infos (sonst ein zweites Release-Programm nur für einen Test).
+        env:
+          PANELDECK_ZIPTEST_PROFILE: dev
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           v=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/' | tr -d '\r')
           bash tools/package-macos.sh "$v"

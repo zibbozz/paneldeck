@@ -4,7 +4,7 @@
 # Universal-Binary arm64 + x86_64, Mindestversion, ad-hoc-Signatur), dass das Programm aus ZIP und DMG startet
 # (`--version`, ohne Fenster), dass das ZIP nur Einträge enthält, die das Selbst-Update annimmt (keine Symlinks, nur
 # gespeichert/Deflate, kein ZIP64), und das Selbst-Update selbst: Entpacken und Tauschen des Bündels mit genau diesem ZIP
-# (Rust-Test `macos_release_zip_installs`, sonst übersprungen).
+# (Rust-Test `macos_release_zip_installs`; Test-Programm per PANELDECK_TEST_BIN oder cargo test, siehe unten).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 V="${1:?Version fehlt}"
@@ -59,8 +59,16 @@ PY
 ditto -x -k "$ZIP" "$W/zip"
 check_app "$W/zip/Paneldeck.app"
 
-# Selbst-Update mit genau diesem ZIP (entpacken mit dem eigenen ZIP-Leser, Bündel tauschen)
-PANELDECK_TEST_MACOS_ZIP="$PWD/$ZIP" cargo test --release --locked -- --ignored --exact app::update::install::macapp_tests::macos_release_zip_installs
+# Selbst-Update mit genau diesem ZIP (entpacken mit dem eigenen ZIP-Leser, Bündel tauschen). PANELDECK_TEST_BIN: fertiges
+# Test-Programm (release-build.yml, Job macos-test) statt cargo test; PANELDECK_ZIPTEST_PROFILE: Cargo-Profil für cargo test
+# (Standard release; ci.yml, Job package-macos, nimmt dev, damit nicht für einen Test ein zweites Release-Programm gebaut wird).
+ZIPTEST=app::update::install::macapp_tests::macos_release_zip_installs
+if [ -n "${PANELDECK_TEST_BIN:-}" ]; then
+  PANELDECK_TEST_MACOS_ZIP="$PWD/$ZIP" "$PANELDECK_TEST_BIN" --ignored --exact "$ZIPTEST" | tee "$W/ziptest.log"
+else
+  PANELDECK_TEST_MACOS_ZIP="$PWD/$ZIP" cargo test --profile "${PANELDECK_ZIPTEST_PROFILE:-release}" --locked -- --ignored --exact "$ZIPTEST" | tee "$W/ziptest.log"
+fi
+grep -q "test result: ok. 1 passed" "$W/ziptest.log" || fail "Selbst-Update-Test $ZIPTEST lief nicht"
 
 # --- DMG ----------------------------------------------------------------------------------------------------------------
 hdiutil attach -quiet -nobrowse -readonly -mountpoint "$MNT" "$DMG"
