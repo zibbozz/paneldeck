@@ -648,7 +648,7 @@ impl PlanUi {
                     ui.label(RichText::new(f.severity.label(lang)).small().color(col));
                     ui.label(RichText::new(f.check.label(lang)).small().strong());
                     if let Some(t) = &f.ticket {
-                        if ui.link(RichText::new(&t.key).monospace()).on_hover_text(&t.title).clicked() {
+                        if widgets::key_link(ui, &t.key).on_hover_text(&t.title).clicked() {
                             open_ticket = Some(t.id);
                         }
                         ui.label(RichText::new(clip(&t.title, 60)).small().color(style::dim(ui)));

@@ -70,6 +70,18 @@ pub fn error(ui: &mut Ui, text: &str) {
     ui.colored_label(crate::style::ui().error, text);
 }
 
+/// Anklickbarer Ticket-Schlüssel (z. B. `PAN-1`) in normaler Textfarbe. Bewusst nicht `ui.link`: dessen Farbe folgt im
+/// Todo-Reiter der Projektfarbe und ist bei dunklen Projektfarben auf dunklem Grund kaum lesbar. Beim Überfahren unterstrichen.
+pub fn key_link(ui: &mut Ui, key: &str) -> Response {
+    let col = style::ui().text;
+    let r = ui.add(egui::Label::new(RichText::new(key).monospace().color(col)).sense(Sense::click()).selectable(false)).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if r.hovered() {
+        let y = r.rect.bottom() - 1.0;
+        ui.painter().hline(r.rect.x_range(), y, Stroke::new(1.0_f32, col));
+    }
+    r
+}
+
 pub fn modal_width(ctx: &egui::Context, want: f32) -> f32 {
     want.min(ctx.content_rect().width() - 80.0).max(260.0)
 }
