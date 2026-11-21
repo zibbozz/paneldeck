@@ -53,16 +53,16 @@ pub fn resolve(path: &Path) -> EditorConfig {
         }
         levels += 1;
         let f = d.join(".editorconfig");
-        if let Ok(m) = std::fs::metadata(&f) {
-            if m.is_file() && m.len() <= MAX_FILE_SIZE {
-                if let Ok(bytes) = std::fs::read(&f) {
-                    let text = String::from_utf8_lossy(&bytes).into_owned();
-                    let root = is_root(&text);
-                    found.push((f, text));
-                    if root {
-                        break;
-                    }
-                }
+        if let Ok(m) = std::fs::metadata(&f)
+            && m.is_file()
+            && m.len() <= MAX_FILE_SIZE
+            && let Ok(bytes) = std::fs::read(&f)
+        {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let root = is_root(&text);
+            found.push((f, text));
+            if root {
+                break;
             }
         }
         dir = d.parent();
@@ -104,10 +104,11 @@ fn is_root(text: &str) -> bool {
         if l.starts_with('[') {
             return false;
         }
-        if let Some((k, v)) = l.split_once('=') {
-            if k.trim().eq_ignore_ascii_case("root") && v.trim().eq_ignore_ascii_case("true") {
-                return true;
-            }
+        if let Some((k, v)) = l.split_once('=')
+            && k.trim().eq_ignore_ascii_case("root")
+            && v.trim().eq_ignore_ascii_case("true")
+        {
+            return true;
         }
     }
     false

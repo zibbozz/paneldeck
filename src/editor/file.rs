@@ -291,11 +291,10 @@ impl ContentHasher {
             self.word(w);
             self.n = 0;
         }
-        let mut chunks = data.chunks_exact(8);
-        for c in &mut chunks {
-            self.word(u64::from_le_bytes(c.try_into().expect("8 bytes")));
+        let (words, rest) = data.as_chunks::<8>();
+        for c in words {
+            self.word(u64::from_le_bytes(*c));
         }
-        let rest = chunks.remainder();
         self.buf[..rest.len()].copy_from_slice(rest);
         self.n = rest.len();
     }
@@ -439,10 +438,10 @@ impl Document {
         if !meta.is_file() {
             return Err(OpenError::NotAFile);
         }
-        if let Some(max) = opts.max_size {
-            if meta.len() > max {
-                return Err(OpenError::TooLarge { size: meta.len(), max });
-            }
+        if let Some(max) = opts.max_size
+            && meta.len() > max
+        {
+            return Err(OpenError::TooLarge { size: meta.len(), max });
         }
         let bytes = std::fs::read(path)?;
         let meta = std::fs::metadata(path).unwrap_or(meta);
@@ -539,11 +538,11 @@ impl Document {
         if let Some(style) = ec.indent_style {
             ind.style = style;
             ind.source = IndentSource::EditorConfig;
-        } else if opts.detect_indent {
-            if let Some(style) = detect_indent(self.rope()) {
-                ind.style = style;
-                ind.source = IndentSource::Detected;
-            }
+        } else if opts.detect_indent
+            && let Some(style) = detect_indent(self.rope())
+        {
+            ind.style = style;
+            ind.source = IndentSource::Detected;
         }
         if let Some(tw) = ec.tab_width {
             ind.tab_width = tw;
@@ -723,10 +722,10 @@ impl Document {
             self.break_undo_group();
         }
         self.format.encoding = decoded.encoding;
-        if let Some(e) = decoded.eol_stats.majority() {
-            if self.editorconfig.end_of_line.is_none() {
-                self.format.eol = e;
-            }
+        if let Some(e) = decoded.eol_stats.majority()
+            && self.editorconfig.end_of_line.is_none()
+        {
+            self.format.eol = e;
         }
         self.load_info = LoadInfo {
             eol_stats: decoded.eol_stats,
@@ -743,10 +742,10 @@ impl Document {
     pub fn resolve_conflict(&mut self, sels: &mut Selections, choice: ConflictChoice) -> Result<ConflictOutcome, OpenError> {
         match choice {
             ConflictChoice::KeepMine => {
-                if let Some(p) = &self.path {
-                    if let Ok(s) = DiskSnapshot::of_file(p) {
-                        self.disk = Some(s);
-                    }
+                if let Some(p) = &self.path
+                    && let Ok(s) = DiskSnapshot::of_file(p)
+                {
+                    self.disk = Some(s);
                 }
                 Ok(ConflictOutcome::Kept)
             }
@@ -1024,9 +1023,10 @@ mod tests {
         large_round_trip(4 * 1024 * 1024);
     }
 
-    /// ~100 MB generated at runtime (run with `cargo test --release -- --ignored large_file_100mb`).
+    /// ~100 MB generated at runtime (about 1–2 s with `cargo test --release`; skipped in unoptimised debug builds,
+    /// run there with `-- --ignored large_file_100mb`).
     #[test]
-    #[ignore]
+    #[cfg_attr(debug_assertions, ignore)]
     fn large_file_100mb() {
         let t = std::time::Instant::now();
         large_round_trip(100 * 1024 * 1024);

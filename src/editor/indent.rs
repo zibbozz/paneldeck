@@ -120,13 +120,11 @@ pub fn detect_indent(rope: &Rope) -> Option<IndentStyle> {
         // A single space before `*` is the usual block comment continuation, not indentation.
         let comment_cont = n % 2 == 1 && line.chars().nth(n) == Some('*');
         if !comment_cont {
-            if let Some(p) = prev_spaces {
-                if n > p {
-                    let d = n - p;
-                    if d < deltas.len() {
-                        deltas[d] += 1;
-                    }
-                }
+            if let Some(p) = prev_spaces
+                && n > p
+                && n - p < deltas.len()
+            {
+                deltas[n - p] += 1;
             }
             prev_spaces = Some(n);
         }

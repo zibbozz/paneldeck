@@ -446,16 +446,14 @@ impl Document {
     /// Bring a view's selections up to date with edits made since it last saw the document (through another
     /// view, an agent, undo …). Cheap if nothing changed. Call before using positions of a view.
     pub fn sync(&self, sels: &mut Selections) {
-        if let Some(r) = sels.rev {
-            if r < self.revision {
-                let covered = self.log.front().is_some_and(|(first, _)| *first <= r + 1);
-                if covered {
-                    for (rev, cs) in self.log.iter() {
-                        if *rev > r {
-                            let cs = cs.clone();
-                            sels.transform(|s| map_selection(&cs, s));
-                        }
-                    }
+        if let Some(r) = sels.rev
+            && r < self.revision
+            && self.log.front().is_some_and(|(first, _)| *first <= r + 1)
+        {
+            for (rev, cs) in self.log.iter() {
+                if *rev > r {
+                    let cs = cs.clone();
+                    sels.transform(|s| map_selection(&cs, s));
                 }
             }
         }
@@ -657,7 +655,9 @@ mod tests {
         assert!(d.redo(&mut s));
         assert_eq!(d.text(), "HELLO world!");
         assert!(d.is_dirty());
-        assert!(d.apply_edits(&mut s, vec![TextEdit::new(3..1, "x")], EditOrigin::User).is_err());
+        #[allow(clippy::reversed_empty_ranges)]
+        let bad = TextEdit::new(3..1, "x");
+        assert!(d.apply_edits(&mut s, vec![bad], EditOrigin::User).is_err());
     }
 
     #[test]
@@ -665,17 +665,17 @@ mod tests {
         let mut d = Document::from_text("abc\n");
         let mut s = d.new_selections(0);
         d.apply_edits(&mut s, vec![TextEdit::insert(1, "XY")], EditOrigin::Agent).unwrap();
-        assert_eq!(d.agent_marks(), &[1..3]);
+        assert_eq!(d.agent_marks().to_vec(), vec![1..3]);
         assert_eq!(d.undo_origin(), Some(EditOrigin::Agent));
         // User typing before the mark shifts it.
         d.apply_edits(&mut s, vec![TextEdit::insert(0, "__")], EditOrigin::User).unwrap();
-        assert_eq!(d.agent_marks(), &[3..5]);
+        assert_eq!(d.agent_marks().to_vec(), vec![3..5]);
         d.undo(&mut s);
         d.undo(&mut s);
         assert_eq!(d.text(), "abc\n");
         assert!(d.agent_marks().is_empty());
         d.redo(&mut s);
-        assert_eq!(d.agent_marks(), &[1..3]);
+        assert_eq!(d.agent_marks().to_vec(), vec![1..3]);
     }
 
     #[test]

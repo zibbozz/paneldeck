@@ -150,7 +150,7 @@ pub fn prev_grapheme(rope: &Rope, pos: usize) -> usize {
     let line_start = rope.line_to_char(rope.char_to_line(pos - 1));
     let start = if pos - line_start <= GRAPHEME_WINDOW { line_start } else { pos - GRAPHEME_WINDOW };
     let s: String = rope.slice(start..pos).chars().collect();
-    match s.grapheme_indices(true).last() {
+    match s.grapheme_indices(true).next_back() {
         Some((b, _)) => start + s[..b].chars().count(),
         None => pos - 1,
     }
