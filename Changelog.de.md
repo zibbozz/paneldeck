@@ -9,6 +9,18 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [3.0.0] - WIP
 
+### Added
+
+- Neuer Reiter **Editor** (Titelleiste oder Alt+Umschalt+3): ein einfacher Texteditor mit eigenem Ordnerbaum, eigenen Tabs und Teilungen (dieselbe Datei in zwei Teilungen bleibt synchron), mehreren Cursorn (Strg+Alt+Hoch/Runter, Strg+D, Strg+Umschalt+L, Alt+Ziehen für eine Spalte), Suchen und Ersetzen mit regulären Ausdrücken, Gehe zu Zeile, Minimap und Zeilenumbruch. Er erkennt Kodierung (UTF-8 mit/ohne BOM, UTF-16, Windows-1252), Zeilenenden und Einrückung, beachtet `.editorconfig` und speichert atomar. Ungespeicherte Änderungen überstehen das Schließen von Paneldeck (Hot Exit), auf der Platte geänderte Dateien werden neu geladen oder mit *Meine behalten* / *Von der Platte laden* / *Unterschied anzeigen* angeboten, Dateien ab 20 MB öffnen im Modus für große Dateien, und *In Dateien suchen* (Strg+Umschalt+F) beachtet `.gitignore`. Neuer Bereich *Einstellungen → Editor* (Schrift, Schwelle für große Dateien, automatisches Speichern, Ausschlussmuster); neues optionales Objekt `editor` in `settings.json` (#54)
+- Dateien von außen im Editor öffnen: `paneldeck.exe --edit <datei>` und ein optionaler Explorer-Eintrag *In Paneldeck-Editor öffnen* (*Einstellungen → Fenster*, standardmäßig aus; die Deinstallation entfernt ihn, *Aufräumen* listet ihn) (#54)
+- Agenten-Schnittstelle: neue Werkzeuge `editor_list` und `editor_read` (Stufe Lesen, ungespeicherte Änderungen inklusive) sowie `editor_open`, `editor_edit`, `editor_save` (Stufe Steuern und je ein Schalter unter *Einstellungen → Editor → Agenten*, alle standardmäßig aus). Änderungen von Agenten bleiben ungespeichert, werden markiert und lassen sich rückgängig machen; Agenten nehmen nie den Tastaturfokus. Auch Chats mit lokalen Modellen bekommen die Editor-Werkzeuge – die lesenden nur, solange ein Dokument offen ist (#54)
+- Interaktives **Tutorial**: Eine kurze Tour und Kapitel (Editor, Todo-Liste & Expertenmodus, Claude Code, lokale Chats, Agenten-Schnittstelle, Profile & Datenordner, weitere Werkzeuge) laufen als geführte Schritte im echten Fenster, mit hervorgehobenem Ziel, Sprechblase und Aufgaben, die von selbst weitergehen. Touren laufen in einem eigenen Projekt und fragen am Ende, ob es gelöscht werden soll. Start über die Karte beim ersten Start, die Befehls-Palette (*Tutorial*) oder *Einstellungen → Info*; eine vorzeitig beendete Tour lässt sich fortsetzen. Nach einem Update bietet ein Hinweis eine Tour *Was ist neu* mit nur den neuen Schritten an; das neue optionale Feld `tutorial_whats_new` in `settings.json` startet sie von selbst (standardmäßig aus) (#143)
+
+### Fixed
+
+- Lokale Chats: Der Todo-Chip im Chat-Kopf verdeckt den gescrollten Verlauf nicht mehr
+- Lokale Chats in der deutschen Oberfläche: Freigaben nennen das Ziel *Chat-Terminal* bzw. *Sitzung N* (auch im Menü der dauerhaften Freigaben) statt englischer Bezeichnungen
+
 ## [2.7.0] - 2026-11-21
 
 ### Added
