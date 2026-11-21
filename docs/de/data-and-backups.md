@@ -21,7 +21,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 |---|---|
 | `settings.json` | Einstellungen (von Hand editierbar); `settings.json.bak-<Zeit>` = Kopie von `--reset-settings` |
 | `state.json` | Sitzungen, Projekte, Layout, weitere Fenster (`state.defekt.json` = Sicherung, falls die Datei beschädigt war; `state.json.bak-<Datum>` = Sicherung beim Ausschalten von *Sitzungen merken*) |
-| `paneldeck.db` | die lokale Datenbank (SQLite, seit 2.3.0 Schema-Version 9) mit Todo-Liste, Projekten und Tickets (`paneldeck.db-wal` / `-shm` gibt es nur, solange die App läuft) |
+| `paneldeck.db` | die lokale Datenbank (SQLite, seit 2.6.0 Schema-Version 10) mit Todo-Liste, Projekten und Tickets (`paneldeck.db-wal` / `-shm` gibt es nur, solange die App läuft) |
 | `backups/` | automatische und manuelle Kopien der Datenbank (der Ordner ist änderbar) |
 | `scrollback/` | gespeicherter Terminalverlauf |
 | `chats/` | Verläufe der [Chats](chat.md), je Chat eine `<id>.json` (siehe [Chatverläufe](#chatverläufe)) |
@@ -36,6 +36,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `mcp-log.jsonl` | Aufrufprotokoll der Agenten-Schnittstelle (nur wenn sie benutzt wurde) |
 | `profiles/<name>/` | Datenordner der [Profile](command-line.md#profile-und-mehrere-instanzen), jeweils mit demselben Aufbau |
 | `ipc.json` | Port und Token der laufenden Instanz (intern) |
+| `cleanup-pending.json` | Aufräum-Schritte, die für den nächsten Start vorgemerkt sind (intern, siehe [Aufräumen](#aufräumen); wird nach dem Ausführen gelöscht) |
 
 `settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json` und `mcp-log.jsonl` sind stabile Formate: Neuere Versionen lesen ältere Dateien weiter, neue Felder sind optional.
 
@@ -54,12 +55,15 @@ Jeder [Chat](chat.md) speichert seinen Verlauf in `chats/<id>.json` (`<id>` = Ke
     { "role": "tool", "content": "{\"sessions\":[]}", "ts": 1763200002,
       "tool_call_id": "c1", "tool_name": "list_sessions", "status": "ok" },
     { "role": "assistant", "content": "There are no sessions.", "ts": 1763200003 },
+    { "role": "assistant", "content": "", "ts": 1763200004,
+      "tool_calls": [ { "id": "c2", "name": "read_terminal", "arguments": { "session": 3, "lines": 50 } } ],
+      "repairs": [ { "id": "c2", "text_call": true, "fixes": [ "lines: \"50\" → 50" ] } ] },
     { "role": "assistant", "content": "", "ts": 1763200010, "error": "connection refused" }
   ]
 }
 ```
 
-- `role` ist `user`, `assistant`, `tool` oder `system`; `ts` = Sekunden seit 1970 (UTC). Eine Antwort kann `tool_calls`, einen Fehler `error` (angezeigt mit *Wiederholen*) oder einen Hinweis `note` tragen (z. B. „an der Token-Grenze abgeschnitten“; geht nicht an das Modell). Ein Werkzeug-Ergebnis hat `tool_call_id`, `tool_name` und `status` (`ok`, `error`, `denied`). `context_start` = die erste Nachricht, die das Modell bei der letzten Anfrage noch gesehen hat (fehlt, solange nichts weggelassen wurde). `always_allow` = die Regeln aus *Immer für diesen Chat*, je ein Werkzeug mit seiner Ziel-Sitzung (`{"tool": "send_text", "session": 4}`); ein Aufruf läuft nur ohne Nachfrage, wenn beides passt. Regeln ohne Sitzung werden nie geschrieben und gelten nie. *Dauerhafte Freigaben (N)* oben im Chat nimmt sie zurück.
+- `role` ist `user`, `assistant`, `tool` oder `system`; `ts` = Sekunden seit 1970 (UTC). Eine Antwort kann `tool_calls`, einen Fehler `error` (angezeigt mit *Wiederholen*) oder einen Hinweis `note` tragen (z. B. „an der Token-Grenze abgeschnitten“; geht nicht an das Modell). Seit 2.6.1 kann eine Antwort außerdem `repairs` tragen: was Paneldeck an ihren Werkzeugaufrufen repariert hat, ein Eintrag je Aufruf (`id` = Kennung des Aufrufs; `text_call: true` = das Modell hat den Aufruf als Text geschrieben und Paneldeck hat ihn erkannt; `fixes` = korrigierte Argumente wie `lines: "50" → 50`). Das wird nur im Chat angezeigt und nicht an das Modell gesendet; ein unlesbarer Wert wird ignoriert. Ein Werkzeug-Ergebnis hat `tool_call_id`, `tool_name` und `status` (`ok`, `error`, `denied`). `context_start` = die erste Nachricht, die das Modell bei der letzten Anfrage noch gesehen hat (fehlt, solange nichts weggelassen wurde). `always_allow` = die Regeln aus *Immer für diesen Chat*, je ein Werkzeug mit seiner Ziel-Sitzung (`{"tool": "send_text", "session": 4}`); ein Aufruf läuft nur ohne Nachfrage, wenn beides passt. Regeln ohne Sitzung werden nie geschrieben und gelten nie. *Dauerhafte Freigaben (N)* oben im Chat nimmt sie zurück.
 - Die Datei wird **atomar** geschrieben (temporäre Datei, dann umbenennen). Lesen ist tolerant: BOM erlaubt, unbekannte Felder werden ignoriert, eine einzelne ungültige Nachricht wird übersprungen. Eine beschädigte oder zu große Datei (über 8 MB) ergibt einen leeren Chat mit Hinweis; die Datei wird vorher als `chats/<id>.defekt-<Zeit>.json` gesichert. Beim Speichern verliert ein Verlauf über 8 MB seine ältesten Nachrichten.
 - Eine Verlaufsdatei, die zu keiner Sitzung gehört (z. B. nach einer zurückgesetzten `state.json`), wird nie in einen neuen Chat geladen, sondern als `chats/<id>.orphan-<Zeit>.json` beiseitegelegt.
 - **Schließen eines Chats löscht seine Datei** (samt ihrer `.defekt-…`-Sicherungen). *Verlauf als Datei speichern …* im Kontextmenü des Chats exportiert sie vorher als Markdown.
@@ -144,18 +148,46 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
 ## Neue Felder in 2.6.0
 - `paneldeck.db` Schema-Version 10 ([Wartung](todo-and-tickets.md#wartung)): Spalte `tickets.archived` und die Tabellen `maintenance_settings` (Zielstatus *Won't Do*, Schwellen, abgeschaltete Prüfungen je Projekt), `maintenance_ignored` (ignorierte Befunde), `maintenance_rules` (eigene Prüfregeln) und `maintenance_log` (Wartungsprotokoll, wird nie automatisch gelöscht). Das Update legt wie immer vorher eine Sicherung an.
 - Projektsicherungen (`paneldeck-project`) haben das Format Version 4: `tickets[].archived` und der optionale Abschnitt `maintenance` (Einstellungen und eigene Regeln). Paneldeck vor 2.6 lehnt Version 4 ab.
-- Sicherungen vor einer Wartungsaktion heißen `maintenance-<Datum>-<Uhrzeit>.db`; höchstens drei bleiben, und sie zählen nicht gegen die automatischen Sicherungen.
+- Sicherungen vor einer Wartungsaktion heißen `maintenance-<Datum>-<Uhrzeit>.db`; höchstens drei bleiben, und sie zählen nicht gegen die automatischen Sicherungen. Sicherungen vor dem [Aufräumen](#aufräumen) heißen `pre-cleanup-<Datum>-<Uhrzeit>.db` (auch davon bleiben höchstens drei).
+- Neue Datei `processes.json` für die [Prozessliste](processes.md) (siehe [oben](#prozessliste-processesjson)) und der Ordner `process-logs/`.
+- `themes/*.json` → optionales Objekt `ui` mit den [benannten Oberflächenfarben](themes.md#oberflächenfarben). Ältere Versionen ignorieren es.
+- `settings.json` → `theme_checks_off`: die abgeschalteten Regeln der [Design-Prüfung](themes.md#design-prüfung) im Theme-Editor (`contrast`, `distinct`, `status`, `terminal`, `harmony`; fehlt = alle an; unbekannte Werte bleiben erhalten).
+
+## Neue Felder in 2.6.1
+- `chats/<id>.json` → je Antwort die optionale Liste `repairs` (siehe [Chatverläufe](#chatverläufe)). Ältere Versionen ignorieren sie.
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
 
 - `--backup-dir <ordner>` schreibt die Sicherungen eines Starts in einen anderen Ordner (die Ordnerwahl ist dann gesperrt; siehe [Kommandozeile](command-line.md#--backup-dir-ordner)).
 - Vor einem Update auf eine **neue Hauptversion** legt das Selbst-Update zuerst eine Datenbank-Sicherung an (siehe [Updates](updates.md)).
-- Die **Datenbankpflege** (prüfen, Statistik, verdichten, reparieren, in eine neue Datei retten) liegt auf der [Wartungsseite](todo-and-tickets.md#wartung) eines Experten-Projekts; *Einstellungen → Daten & Sicherung* verweist darauf.
+- Die **Datenbankpflege** (prüfen, Statistik, verdichten, reparieren, in eine neue Datei retten) liegt auf der [Wartungsseite](todo-and-tickets.md#wartung) eines Experten-Projekts; *Einstellungen → Daten & Sicherung → Wartungsseite öffnen* führt dorthin.
 - Der **Rückgängig-Verlauf** der Todo-Liste (3 bis 100 Schritte, Standard 25) wird im selben Tab eingestellt.
 
 ## Aufräumen
-*Einstellungen → Daten & Sicherung → **Aufräumen …*** (auch in der Befehls-Palette) öffnet ein Fenster, in dem du ankreuzt, was gelöscht werden soll. Jeder Eintrag zeigt Größe bzw. Anzahl (im Hintergrund ermittelt) und eine kurze Erklärung, unten steht die Summe. Vorausgewählt ist nur Harmloses: Bilder aus der Zwischenablage, alte Sicherungsdateien (`*.bak-*`, `*.defekt-*`), `crash.log` sowie verwaiste Scrollback-/Chat-Dateien, zu denen es keine Sitzung mehr gibt.
+*Einstellungen → Daten & Sicherung → **Aufräumen …*** (auch *Aufräumen …* in der Befehls-Palette, `Strg+Umschalt+P`) öffnet ein Fenster, in dem du ankreuzt, was gelöscht werden soll. Jeder Eintrag zeigt Größe bzw. Anzahl (im Hintergrund ermittelt; *Neu ermitteln* rechnet neu) und eine kurze Erklärung, unten steht die Summe (*Wird gelöscht:*). Vorausgewählt ist nur Harmloses: Bilder aus der Zwischenablage, alte Sicherungsdateien (`*.bak-*`, `*.defekt-*`), `crash.log` sowie verwaiste Scrollback-/Chat-Dateien, zu denen es keine Sitzung mehr gibt. Das Fenster öffnet sich nur im Hauptfenster.
+
+<!-- screenshot: Fenster Aufräumen mit den Gruppen, Größen, den vorausgewählten Einträgen und der Summe unten, Einstellungen → Daten & Sicherung → Aufräumen … -->
+
+### So schaffst du Platz auf der Festplatte
+1. Öffne *Einstellungen → Daten & Sicherung* und klicke auf **Aufräumen …**.
+2. Warte, bis die Größen da sind (*Größen werden ermittelt …* verschwindet).
+3. Lass die vorausgewählten Einträge stehen und kreuze bei Bedarf unter *Platz schaffen* mehr an – z. B. *Datenbank-Sicherungen* mit *Neueste behalten:* `3`.
+4. Für alten Verlauf: Kreuze *Scrollback ohne Sitzung* oder *Chatverläufe ohne Sitzung* an und schalte *Nur Verlauf älter als* … *Tage* ein.
+5. Prüfe die Summe unten und klicke auf **Löschen …**.
+6. Die Zusammenfassung nennt jeden Eintrag mit seiner Größe. Warte 3 Sekunden, bis der Knopf frei wird, und klicke auf **Löschen**.
+7. Das Ergebnis zeigt je Eintrag ✓ oder einen Fehler. *Erneut versuchen* wiederholt die fehlgeschlagenen; *Schließen* schließt das Fenster.
+
+<!-- screenshot: Rückfrage „Endgültig löschen?“ mit der Liste der Einträge, dem 3-Sekunden-Knopf und dem Eingabefeld, Aufräumen → Löschen … -->
+
+### So setzt du Paneldeck komplett zurück
+1. Öffne *Einstellungen → Daten & Sicherung → Aufräumen …*.
+2. Kreuze **Paneldeck komplett zurücksetzen** an (Gruppe *Alles*). Damit ist alles gewählt.
+3. Prüfe den Ordner der ZIP-Sicherung (*ZIP-Sicherung nach:*, *Ordner wählen …*); er muss außerhalb des Datenordners liegen.
+4. Klicke auf **Zurücksetzen …**, tippe `LÖSCHEN` (englische Oberfläche: `DELETE`) und klicke auf **Zurücksetzen**, sobald der Knopf frei ist.
+5. Paneldeck speichert die ZIP-Datei, entfernt die Integration, startet neu und beginnt wie beim ersten Start. Das Ergebnis erscheint nach dem Neustart.
+
+<!-- screenshot: Ergebnisfenster „Aufräumen – Ergebnis“ mit ✓ und einem Fehler, Erneut versuchen und Jetzt neu starten, nach Aufräumen → Löschen -->
 
 | Gruppe | Einträge |
 |---|---|
@@ -172,7 +204,7 @@ Andere Profile (`profiles\<name>` mit `settings.json`) lassen sich komplett lös
 
 Datenbank, Sitzungen/Layout und das komplette Zurücksetzen lassen sich nicht löschen, solange Paneldeck sie benutzt: Sie werden in `cleanup-pending.json` vorgemerkt und beim nächsten Start vor dem Laden ausgeführt (mit dem Sicherungsordner dieses Starts – nie einem aus der Datei); Paneldeck startet sofort neu und zeigt das Ergebnis. Integration, andere Profile und die ZIP-Sicherung laufen vor dem Neustart; ohne ZIP-Sicherung wird nichts zurückgesetzt.
 
-**Nie berührt:** die Daten von Claude Code selbst (`~/.claude/projects`, Transkripte). Agenten können nur die Größen lesen (MCP-Werkzeug [`cleanup_sizes`](agent-interface.md)); löschen können sie nichts.
+**Nie berührt:** die Daten von Claude Code selbst (`~/.claude/projects`, Transkripte). Agenten können nur die Größen lesen (MCP-Werkzeug [`cleanup_sizes`](agent-interface.md#aufräumen)); löschen können sie nichts.
 
 ## Daten verschieben oder kopieren
 Paneldeck beenden, dann den ganzen Datenordner kopieren. Um ihn von einem anderen Ort zu nutzen, Paneldeck mit `--data-dir <ordner>` starten oder `PANELDECK_DATA` setzen.

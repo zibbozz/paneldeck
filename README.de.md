@@ -13,8 +13,11 @@ Paneldeck arbeitet **offline**: Es meldet sich nur bei GitHub, wenn du selbst na
 ## Funktionen
 - **Terminals** mit voller Emulation (ConPTY): PowerShell 7, Windows PowerShell, CMD, Git Bash, WSL-Distributionen – geordnet in Projekten, mit frei teilbaren Bereichen, mehreren Fenstern und einer Befehls-Palette. Moderne Tastaturprotokolle (kitty, win32-input-mode), Links aus Programmen (OSC 8, Strg+Klick), Fortschritt und Benachrichtigungen von Programmen, jede installierte Festbreitenschrift (z. B. Nerd Fonts), WSL-Sitzungen, die in Linux-Ordnern starten, und ein mitgelieferter, neuerer Konsolen-Host von Microsoft.
 - **Hintergrundprogramme:** Die Shell jedes Terminals läuft in einem eigenen Windows-Job-Object; Programme, die aus einer Sitzung gestartet werden, gehören dazu, auch losgelöst gestartet. Das gilt auch für langlebige Programme wie `code .`, einen Browser oder `wt`. Laufen solche Programme noch, wenn du eine Sitzung schließt oder neu lädst oder Paneldeck beendest, listet Paneldeck sie auf und fragt, ob sie weiterlaufen oder alle beendet werden sollen. „Alle beenden“ beendet sie sofort, ohne zu speichern. Programme in einer Sitzung können ihren Job nicht verlassen (`CREATE_BREAKAWAY_FROM_JOB` schlägt fehl); das ist gewollt.
+- **Prozessliste:** Entwicklungsserver und Watcher (`npm run dev`, `ng serve` …) getrennt von deinen Terminals – starten, stoppen und neu starten (auch als Gruppe), mit ihrer Ausgabe in einem eigenen Bereich und einem Link auf die lokale Adresse ([Prozessliste](docs/de/processes.md)).
 - **Claude-Modus** (abschaltbar): Statusanzeige per Hooks (arbeitet / Freigabe? / bereit), Benachrichtigungen, Token- und Kostenschätzung, Verlauf mit exaktem Fortsetzen, Startoptionen (Modell, Effort, Permission-Mode, Agent und mehr), Neu laden und Einstellungen je Sitzung.
-- **Todo-Liste und Tickets:** eine einfache Todo-Liste, die im *Expertenmodus* zu einem kleinen Jira wird – Projekte, Tickettypen, Workflows, Boards, eine Abfragesprache, Sprints und Dashboards, alles lokal gespeichert. Jedes Ticket hat eine Beschreibung, eine Fälligkeit mit einstellbaren Markierungen und Labels; Icons aus dem Lucide-Satz und eine bearbeitbare Farbpalette.
+- **Todo-Liste und Tickets:** eine einfache Todo-Liste, die im *Expertenmodus* zu einem kleinen Jira wird – Projekte, Tickettypen, Workflows, Boards, eine Abfragesprache, Sprints und Dashboards, alles lokal gespeichert. Jedes Ticket hat eine Beschreibung, eine Fälligkeit mit einstellbaren Markierungen und Labels; Icons aus dem Lucide-Satz und eine bearbeitbare Farbpalette. Eine [Wartungsseite](docs/de/todo-and-tickets.md#wartung) findet liegengebliebene, kaputte und doppelte Tickets und ungenutzte Konfiguration, archiviert Tickets und pflegt die Datenbank.
+- **Themes:** ein [Theme-Editor](docs/de/themes.md) mit Live-Vorschau, Design-Prüfung und benannten Oberflächenfarben; ein neues Theme lässt sich aus einer Hintergrund- und einer Akzentfarbe erzeugen.
+- **Aufräumen:** sehen, was Paneldeck speichert, und löschen, was du nicht mehr brauchst – Sicherungen, Verläufe, Protokolle, Inhalte, Einstellungen – bis zum kompletten Zurücksetzen ([Aufräumen](docs/de/data-and-backups.md#aufräumen)).
 - **Chats mit lokalen Modellen:** mit Ollama, LM Studio, llama.cpp oder vLLM auf diesem Rechner oder im eigenen Netz sprechen, direkt neben deinen Terminals – das Modell kann Paneldecks Werkzeuge nutzen, in Grenzen, die du je Modell festlegst.
 - **Agenten-Schnittstelle (MCP):** KI-Agenten können Sitzungen sehen, Terminals lesen, Befehle ausführen und mit deiner Todo-Liste und deinen Tickets arbeiten – standardmäßig aus, mit einstellbarem Systemprompt.
 - **Kommandozeile und Profile:** getrennte Datenordner und Profile, die nebeneinander laufen, jedes mit eigenem Autostart- und MCP-Eintrag.
@@ -51,14 +54,14 @@ Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en
 - [Terminals und Sitzungen](docs/de/terminals.md) – Sitzungen, Projekte, Teilen, Palette, Tastenkürzel
 - [Mehrere Fenster](docs/de/windows.md) – Strg+Klick auf einen Reiter, der leere Terminal Hub
 - [Claude Code](docs/de/claude-code.md) – Claude-Modus, Status, Kosten, Verlauf
-- [Todo-Liste und Tickets](docs/de/todo-and-tickets.md) – einfacher und Expertenmodus, Boards, Sprints, Dashboards, Schnellaktionen
+- [Todo-Liste und Tickets](docs/de/todo-and-tickets.md) – einfacher und Expertenmodus, Boards, Sprints, Dashboards, Schnellaktionen, Wartung und Archiv
 - [Abfragesprache](docs/de/query-language.md) – Tickets suchen, Beispiele, Referenz
 - [Prozessliste](docs/de/processes.md) – Entwicklungsserver und Watcher mit ihrer Ausgabe in einem eigenen Bereich
 - [Chats mit lokalen Modellen](docs/de/chat.md) – Ollama und OpenAI-kompatible Server, Modelle, Werkzeuge und Freigaben, Sicherheit
 - [Themes und der Theme-Editor](docs/de/themes.md) – Themes bearbeiten und erzeugen, Design-Prüfung, Dateiformat und Farbnamen
 - [Agenten-Schnittstelle (MCP)](docs/de/agent-interface.md) – Stufen, Werkzeuge, Sicherheit, Systemprompt
 - [Kommandozeile](docs/de/command-line.md) – alle Optionen, Suche des Datenordners, Profile, Exit-Codes
-- [Datenordner und Sicherungen](docs/de/data-and-backups.md) – Dateien, Sicherungen, portabel oder installiert
+- [Datenordner und Sicherungen](docs/de/data-and-backups.md) – Dateien, Sicherungen, Aufräumen, portabel oder installiert
 - [Windows-Integration](docs/de/windows-integration.md) – Tray, Autostart, Explorer-Kontextmenü
 - [Linux](docs/de/linux.md) – Pakete, Datenordner, Tray, Autostart, Dateimanager, API-Schlüssel, Selbst-Update der AppImage
 - [macOS](docs/de/macos.md) (experimentell) – die unsignierte App installieren, Datenordner, Menüleiste, Autostart, Schlüsselbund, Selbst-Update

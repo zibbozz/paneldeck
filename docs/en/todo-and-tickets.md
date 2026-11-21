@@ -71,17 +71,52 @@ The **Dashboards** tab has an edit mode (move and resize tiles, *Tidy up*); a cl
 
 ## Maintenance
 
-Since 2.6.0 the **Overview** tab of every expert project has a **Maintenance** button. It shows the number of problems (errors and warnings, counted cheaply when the Overview opens) and a dot when there are any. It opens its own page (like a ticket, with *Back* / `Esc`); the full check runs in the background when the page opens. The read-only system project `TODO` has no maintenance.
+Since 2.6.0 the **Overview** tab of every expert project has a **Maintenance** button. It shows the number of problems (errors and warnings, counted cheaply when the Overview opens) and a dot when there are any. It opens its own page (like a ticket, with *Back* / `Esc`); the full check runs in the background when the page opens, and *Check again* runs it once more. The read-only system project `TODO` has no maintenance.
+
+<!-- screenshot: Overview tab of an expert project with the Maintenance card and the button "Maintenance (12)" with its dot, Todo list → expert mode → project → Overview -->
+<!-- screenshot: maintenance page with the categories on the left and ticket findings with severity and actions on the right, Overview → Maintenance -->
 
 - **Left:** the categories *Tickets* · *Configuration* · *Database* · *Custom rules*, each with a count, plus *Ignored*, *Log* and *Checks*. **Right:** the findings with severity (*error* = broken structure or database, *warning* = overdue or stale, *hint* = unused configuration or possible duplicates), explanation and actions. Select several and use *Fix selection …*; *Ignore* hides a finding (remembered in the database, restorable under *Ignored*). Whole checks can be switched off per project under *Checks*.
-- **Ticket checks:** stale tickets (no change for 90 days by default) split into *in progress* (stuck) and *never started*; overdue due dates; open tickets in completed sprints, released versions or reached milestones; broken structure (subtasks whose parent was deleted, links to deleted tickets, a parent that is done while children are open, link cycles, empty required fields, invalid values such as a deleted option); **possible duplicates** (title similarity of at least 80 %, compared locally, shown side by side – only suggestions, *Link as duplicate* / *Link and close*; the link type *duplicates* is created when needed).
+- **Ticket checks:** stale tickets (no change for 90 days by default) split into *in progress* (stuck) and *never started*; overdue due dates; open tickets in completed sprints, released versions or reached milestones; broken structure (subtasks whose parent was deleted, links to deleted tickets, a parent that is done while children are open, link cycles, empty required fields, invalid values such as a deleted option); **possible duplicates** (title similarity of at least 80 %, compared locally, shown side by side with *Compare …* – only suggestions: *Link as duplicate*, *Link and close* or *Not a duplicate (ignore)*; the link type *duplicates* is created when needed).
 - **Configuration checks:** fields (unused, not set for 180 days, likely unused), unused options of choice fields, types without tickets, statuses without tickets in no workflow, unreachable statuses, near-identical labels (`bug` / `Bug `, merge them), unused link types and kinds of work, quick actions, dashboards, saved filters and boards that refer to deleted items or have broken queries. Only **unused** configuration can be removed; labels in use can be merged.
-- **Actions:** *Close as Won't Do* (sets the target status chosen in *Project settings → Maintenance* and adds a comment such as "Closed by maintenance on 2026-11-20: unchanged for 94 days." in the interface language, editable in the preview; without a target status the action is off), *Archive*, *Set due date*, *Link as duplicate*, *Remove* (unused configuration), *Merge* labels, *Detach* / *Clean up* broken references, and the suggestion of a custom rule. Maintenance sets the status directly (workflow transitions and their conditions do not apply); tickets whose type does not have the target status in its workflow are skipped and listed in the preview. **Maintenance never deletes tickets.**
+- **Actions:** *Close as Won't Do …* (sets the target status chosen in the project settings – *Overview → Settings … → Maintenance* – and adds a comment such as "Closed by maintenance on 2026-11-20: unchanged for 94 days." in the interface language, editable in the preview; without a target status the action is off), *Archive …*, *Set due date …*, *Compare …* (possible duplicates), *Remove …* (unused configuration), *Merge …* (labels), *Detach …* / *Clean up …* (broken references), *Apply suggestion …* (custom rules) and *Repair …* (database). Maintenance sets the status directly (workflow transitions and their conditions do not apply); tickets whose type does not have the target status in its workflow are skipped and listed in the preview. **Maintenance never deletes tickets.**
 - Every action shows a **preview** first (e.g. "23 tickets will be set to Won't Do", with a clickable list); more than 10 tickets and every removal need the 3-second button. Before each action Paneldeck makes a database backup marked **maintenance** (at most three are kept; they do not count against the automatic backups). There is no undo step – restore the backup instead. The ticket history shows "Maintenance" as the source, and the **log** (when, what, how many, which backup) is kept in the database, never deleted automatically, and can be exported as CSV.
 - **Archive:** archived tickets are hidden from lists, boards and search unless a query asks for `archived = true`; open such a ticket and press *Restore*, or use *Archive* / *Restore from archive* in the ticket's `⋯` menu.
-- **Custom rules:** saved queries of the [query language](query-language.md) with a name, a severity and a suggested action (set status, set field, archive). They are off until you create one, can be switched off one by one, and are part of the project backup.
-- **Database care** lives only here (*Settings → Data & backup* links to it): *Check database* (SQLite `integrity_check` and `foreign_key_check` plus Paneldeck's own checks of counters and history, explained in plain words), *Statistics* (for the project or the whole database: size, tickets, comments, history entries, the largest tickets, growth per month), *Compact* (VACUUM + ANALYZE + REINDEX over the whole file, with before/after), *Repair* (only what can be rebuilt unambiguously – orphaned rows, wrong counters, indexes – with every change in the preview), *Rescue into a new file* (reads everything readable into `paneldeck-rescued-<date>.db` next to the database, with a report of what was rescued and what was lost; the original stays untouched; *Use the rescued file* restores it like a backup) and *Restore the last backup*. If the database cannot be opened at all, the *Todo list* tab offers the rescue too.
+- **Custom rules:** saved queries of the [query language](query-language.md) with a name, a severity and a suggested action (*Report only*, *Archive*, *Set status*, *Set field*). They are off until you create one (category *Custom rules* → *+ New rule*), can be switched off one by one (*Rule is on*), and are part of the project backup.
+- **Database care** lives only here, in the category *Database* (*Settings → Data & backup → Open the maintenance page* leads here too): *Check database* (SQLite `integrity_check` and `foreign_key_check` plus Paneldeck's own checks of counters and history, explained in plain words), *Statistics* (for the project or the whole database: size, tickets, comments, history entries, the largest tickets, growth per month), *Compact* (VACUUM + ANALYZE + REINDEX over the whole file, with before/after), *Repair* (only what can be rebuilt unambiguously – orphaned rows, wrong counters, indexes – with every change in the preview), *Rescue into a new file* (reads everything readable into `paneldeck-rescued-<date>.db` next to the database, with a report of what was rescued and what was lost; the original stays untouched; *Use the rescued file* restores it like a backup) and *Restore the last backup*. If the database cannot be opened at all, the *Todo list* tab offers the rescue too.
 - While an action writes, agents that call a write tool get the error `busy` with `retry_after_ms`; the page shows a notice when agents are connected. Agents can read the report with [`maintenance_report`](agent-interface.md#tools) but cannot fix anything.
+
+### How to close old tickets as Won't Do
+1. Open the project's **Overview** tab and click **Settings …**.
+2. Under **Maintenance**, choose the *Target status of "Close as Won't Do"* (e.g. a status *Won't Do* in the category Done). Optionally change after how many days tickets count as stale. Save.
+3. Back on the **Overview**, click **Maintenance**.
+4. In the category *Tickets*, tick the stale tickets (or *Select all*) and click **Fix selection …** → *Close as Won't Do …*.
+5. Check the preview: the list of tickets, the skipped ones and the comment (you can change it). Click **Run** (with more than 10 tickets, after 3 seconds).
+6. Paneldeck makes a *maintenance* backup first. The action appears in the *Log*.
+
+<!-- screenshot: preview dialog of "Close as Won't Do" with the ticket list, the comment field and the Run button, Maintenance → Tickets → Fix selection … -->
+
+### How to archive tickets and find them again
+1. Open a ticket and choose **⋯ → Archive** (or use *Archive …* on the maintenance page for several tickets).
+2. The ticket disappears from lists, boards and search. Its page shows *Archived – hidden from lists, boards and search*.
+3. To find archived tickets, search with `archived = true` in the query bar or the *Search* tab.
+4. To bring one back, open it and click **Restore** (or **⋯ → Restore from archive**).
+
+### How to handle possible duplicates
+1. On the maintenance page, open *Tickets* and look for findings named *Possible duplicates*.
+2. Click **Compare …**: both tickets are shown side by side.
+3. Choose *Link as duplicate*, *Link and close* (needs a Won't Do target status) or *Not a duplicate (ignore)*.
+
+<!-- screenshot: dialog "Compare a possible duplicate" with both tickets side by side, Maintenance → Tickets → Compare … -->
+
+### How to check and repair the database
+1. Open the maintenance page of any expert project (or *Settings → Data & backup → Open the maintenance page*).
+2. Click the category **Database**, then **Check database**. Problems are listed as findings in plain words.
+3. If a finding offers **Repair …**, click it. The preview lists every change; Paneldeck makes a *maintenance* backup first.
+4. If the file is damaged badly, use **Rescue into a new file …**, read the report and then click *Use the rescued file …* → *Restore and quit*. The current file is backed up first, and the rescued file is used from the next start.
+5. **Compact …** makes the file smaller after many deletions; *Statistics* shows what takes up the space.
+
+<!-- screenshot: Database category with Database care buttons (Check database, Statistics, Compact …, Rescue into a new file …, Restore the last backup …) and the statistics table, Maintenance → Database -->
 
 ## Export and import
 

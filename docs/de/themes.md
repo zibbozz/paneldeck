@@ -14,11 +14,47 @@ Ein Theme legt die Farben des Terminals fest (Schrift, Hintergrund, Cursor, Ausw
 
 Bei Namensgleichheit (Import, Duplizieren, Als Kopie bearbeiten) wird nie etwas überschrieben: Es wird eine Nummer angehängt, „Mein Theme (2)“. Beim Umbenennen ziehen die Profile, die das Theme nutzen, mit.
 
-Eine Theme-Datei, die sich nicht laden lässt, steht mit dem Grund unter der Theme-Wahl (z. B. `Ungültige Farbe in „fg“: „white“`). Sie kann erst gewählt werden, wenn du sie korrigiert und *Neu laden* geklickt hast; ist das gewählte Theme ungültig, nimmt Paneldeck das Standard-Theme (One Dark).
+Eine Theme-Datei, die sich nicht laden lässt, steht mit dem Grund unter der Theme-Wahl (z. B. `Ungültige Farbe in „fg“: „white“`). Sie kann erst gewählt werden, wenn du sie korrigiert und *Neu laden* (Zeile *Eigene Themes*) geklickt hast; ist das gewählte Theme ungültig, nimmt Paneldeck das Standard-Theme (One Dark).
+
+<!-- screenshot: Reiter Darstellung mit der Theme-Auswahl, Theme bearbeiten …, Neues Theme …, offenem Menü ⋯ und einer ungültigen Theme-Datei darunter, Einstellungen → Darstellung -->
+
+## So änderst du eine Farbe eines Themes
+1. Öffne *Einstellungen → Darstellung* und wähle das Theme unter **Theme**.
+2. Klicke auf **Theme bearbeiten …** (bei einem eingebauten Theme: **Als Kopie bearbeiten …**). Der Editor öffnet sich.
+3. Such die Farbe: Tippe in *Farbe suchen …* (z. B. `accent`) oder klicke das Element in der Vorschau an.
+4. Ändere sie mit dem Farbwähler oder tippe einen Wert in das Hex-Feld.
+5. Lies die Hinweise der *Design-Prüfung* unter der Vorschau; *Übernehmen* übernimmt einen Vorschlag.
+6. Klicke auf **Speichern**. Die App nutzt jetzt das Theme; die Kopie eines eingebauten Themes wird als neue Datei in `themes/` gespeichert.
+
+## So erzeugst du ein neues Theme aus zwei Farben
+1. Öffne *Einstellungen → Darstellung* und klicke auf **Neues Theme …**. Der Editor öffnet sich mit *Aus wenigen Farben erzeugen*.
+2. Wähle *Hintergrund* und *Akzent* und unter *Art* *Dunkel* oder *Hell*. Der Balken darunter zeigt die 16 berechneten ANSI-Farben.
+3. Klicke auf **Erzeugen**.
+4. Gib oben im Editor einen **Namen** ein und passe bei Bedarf einzelne Farben an.
+5. Klicke auf **Speichern**.
+
+<!-- screenshot: Dialog „Aus wenigen Farben erzeugen“ mit Hintergrund, Akzent, Art und dem Vorschaubalken der ANSI-Farben, Einstellungen → Darstellung → Neues Theme … -->
+
+## So verknüpfst du eine Farbe mit einer anderen
+1. Klicke im Editor die Farbe an, die einer anderen folgen soll (z. B. `border`).
+2. Wähle unter **Verweis** das Ziel (z. B. `@text`) und eine Deckkraft (z. B. `20 %`).
+3. Klicke auf **Verknüpfen**. Der Wert lautet jetzt `@text/20` und ändert sich mit `text`.
+4. *Auf abgeleitet zurücksetzen* entfernt den Verweis wieder.
+
+## So gibst du ein Theme weiter
+- **Exportieren:** Theme wählen, dann **⋯ → Exportieren …** und den Speicherort der JSON-Datei wählen.
+- **Importieren:** **⋯ → Importieren …** und eine JSON-Datei wählen. Eine ungültige Datei wird mit dem Grund abgelehnt; ein vergebener Name bekommt eine Nummer.
+
+## So reparierst du eine Theme-Datei, die nicht lädt
+1. Lies den Grund unter der Theme-Wahl, z. B. `⚠ themes/mein.json: Ungültige Farbe in „fg“: „white“`.
+2. Öffne den Ordner (*Eigene Themes → Ordner öffnen*) und korrigiere die Datei in einem Texteditor (siehe [Dateiformat](#dateiformat)).
+3. Klicke in der Zeile *Eigene Themes* auf **Neu laden**. Danach lässt sich das Theme wieder wählen.
 
 ## Der Editor
 
-Der Editor ist ein großes Fenster, das du verschieben und vergrößern kannst: links die **Farbliste**, rechts die **Vorschau**, darunter die **Design-Prüfung**. Die App selbst ändert sich erst mit **Speichern**; **Verwerfen** schließt den Editor ohne zu speichern. Schließt du ihn mit ungespeicherten Änderungen, fragt Paneldeck: *Speichern*, *Verwerfen* oder *Abbrechen*. Rückgängig und Wiederholen: die Pfeil-Knöpfe oder Strg+Z / Strg+Y (solange kein Textfeld den Fokus hat); Ziehen im Farbwähler zählt als ein Schritt.
+Der Editor ist ein großes Fenster, das du verschieben und vergrößern kannst: links die **Farbliste**, rechts die **Vorschau**, darunter die **Design-Prüfung**. Die App selbst ändert sich erst mit **Speichern**; **Verwerfen** schließt den Editor ohne zu speichern. Schließt du ihn mit ungespeicherten Änderungen, fragt Paneldeck: *Speichern*, *Verwerfen* oder *Abbrechen*. Rückgängig und Wiederholen: die Pfeil-Knöpfe oder Strg+Z / Strg+Y (solange kein Textfeld den Fokus hat); Ziehen im Farbwähler zählt als ein Schritt. Der Editor öffnet sich nur im Hauptfenster; solange er offen ist, lässt sich das Theme nicht umbenennen, löschen oder importieren.
+
+<!-- screenshot: Theme-Editor mit Farbliste links, Vorschau rechts und Design-Prüfung darunter, eine Farbe gewählt, Einstellungen → Darstellung → Theme bearbeiten … -->
 
 **Farbliste.** Die Farben sind gruppiert (Grundflächen, Text, Flächen und Rahmen, Akzent und Auswahl, Status, Seitenleiste und Tabs, Tickets und Chips, Chat, Diff und Syntax, Terminal) und nach Name oder Beschreibung durchsuchbar. ● markiert einen Wert, den das Theme setzt, ○ einen abgeleiteten, \* einen seit dem letzten Speichern geänderten. Ein Klick auf eine Farbe öffnet die Bearbeitung:
 
@@ -27,6 +63,8 @@ Der Editor ist ein großes Fenster, das du verschieben und vergrößern kannst: 
 - **Auf abgeleitet zurücksetzen** entfernt den Wert wieder (Terminalfarben: *Auf gespeicherten Wert*; Cursor und Auswahl haben ebenfalls eine Ableitung).
 - **Kontrast** gegen die üblichen Hintergründe nach WCAG: ✓ ab 4,5:1 (Text), ◐ ab 3:1 (große Schrift ab 18 px, Symbole, Rahmen), ⚠ darunter.
 
+<!-- screenshot: Bearbeitung einer gewählten Farbe mit Farbwähler, Hex-Feld, Verweis-Auswahl mit Deckkraft, Auf abgeleitet zurücksetzen und den Kontrastwerten, Theme-Editor → Farbliste → Klick auf eine Farbe -->
+
 **Vorschau.** Eine Musterseite aus den echten Bedienelementen mit Beispieltexten: Knöpfe (normal, überfahren, gedrückt, deaktiviert, primär, zerstörend), Eingaben (leer, fokussiert, Fehler), Kontrollkästchen, Optionsfelder, Schalter, Regler und Fortschrittsbalken, Tabs, Einträge der Seitenleiste (aktiv, Ordner, Statuspunkte), Chips und Labels, ein Dialog, ein Toast und Hinweis-/Warnungs-/Fehlerkästen, eine Ticket-Karte in einer Board-Spalte, Chat-Blasen mit einer Werkzeug-Freigabe, ein Terminal-Ausschnitt mit allen 16 Farben, Auswahl und Cursor, ein Diff und eine Abfrage mit Syntaxfarben. Alles lässt sich anklicken und bedienen, bewirkt aber nichts; **ein Klick auf ein Element wählt seine Farbe in der Liste**.
 
 **Aus wenigen Farben erzeugen** (*Aus Farben erzeugen …*): Hintergrund, Akzent und hell oder dunkel wählen. Paneldeck berechnet Schriftfarbe (mindestens 7:1), Auswahl, Cursor und alle 16 ANSI-Farben (feste Farbtöne mit lesbarer Helligkeit, helle Varianten heller) und lässt Status-, Diff- und Syntaxfarben auf die ANSI-Farben verweisen, damit spätere Änderungen an der Palette durchschlagen. Danach kannst du jede Farbe einzeln anpassen; *Erzeugen* lässt sich rückgängig machen.
@@ -34,6 +72,8 @@ Der Editor ist ein großes Fenster, das du verschieben und vergrößern kannst: 
 ## Design-Prüfung
 
 Die Design-Prüfung unter der Vorschau zeigt **Hinweise, die das Speichern nie blockieren**, mit einem Zähler. Jeder Hinweis nennt die Regel, die beteiligten Farben und das Problem; ein Klick wählt die Farbe und hebt die Elemente in der Vorschau hervor. Wo möglich, bietet ein Hinweis einen **Vorschlag mit *Übernehmen***: die kleinste Helligkeitsänderung (Farbton bleibt), die die Regel erfüllt – rückgängig mit Strg+Z. Jede Regel lässt sich unter **⚙ Prüfungen** abschalten (Standard: alle an; die Wahl steht in `settings.json` als `theme_checks_off`).
+
+<!-- screenshot: Design-Prüfung mit einigen Hinweisen, einer davon mit Vorschlag und Knopf Übernehmen, dazu das offene Menü ⚙ Prüfungen, Theme-Editor → Design-Prüfung -->
 
 | Regel | Prüft |
 |---|---|
@@ -127,4 +167,4 @@ Terminalfarben für Verweise: `fg`, `bg`, `cursor`, `selection`, `ansi0` … `an
 
 ## Agenten
 
-Agenten mit der Stufe *Lesen* können Themes mit den MCP-Werkzeugen `theme_list` und `theme_get` auflisten und lesen (siehe [Agenten-Schnittstelle](agent-interface.md)); ändern können sie Themes nicht.
+Agenten mit der Stufe *Lesen* können Themes mit den MCP-Werkzeugen `theme_list` und `theme_get` auflisten und lesen (siehe [Agenten-Schnittstelle](agent-interface.md#themes)); ändern können sie Themes nicht.

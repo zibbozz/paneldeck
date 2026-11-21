@@ -14,11 +14,47 @@ A theme sets the colours of the terminal (text, background, cursor, selection an
 
 Name conflicts (import, duplicate, edit as copy) never overwrite anything: a number is appended, "My theme (2)". Renaming a theme also updates the profiles that use it.
 
-A theme file that cannot be loaded is listed under the theme choice with the reason (for example `Invalid colour in "fg": "white"`). It cannot be selected until you fix it and click *Reload*; if the selected theme is invalid, Paneldeck uses the default theme (One Dark).
+A theme file that cannot be loaded is listed under the theme choice with the reason (for example `Invalid colour in "fg": "white"`). It cannot be selected until you fix it and click *Reload* (row *Custom themes*); if the selected theme is invalid, Paneldeck uses the default theme (One Dark).
+
+<!-- screenshot: Appearance tab with the Theme dropdown, Edit theme …, New theme …, the ⋯ menu open and one invalid theme file listed below, Settings → Appearance -->
+
+## How to change a colour of a theme
+1. Open *Settings → Appearance* and choose the theme under **Theme**.
+2. Click **Edit theme …** (for a built-in theme: **Edit as copy …**). The editor opens.
+3. Find the colour: type into *Search colours …* (e.g. `accent`), or click the element in the preview.
+4. Change it with the colour picker or type a value into the hex field.
+5. Read the hints of the *Design check* below the preview; *Apply* takes a suggestion over.
+6. Click **Save**. The app now uses the theme; a copy of a built-in theme is saved as a new file in `themes/`.
+
+## How to make a new theme from two colours
+1. Open *Settings → Appearance* and click **New theme …**. The editor opens with *Generate from a few colours*.
+2. Choose *Background* and *Accent*, and under *Kind* *Dark* or *Light*. The bar below shows the 16 calculated ANSI colours.
+3. Click **Generate**.
+4. Type a **Name** at the top of the editor and fine-tune colours if you like.
+5. Click **Save**.
+
+<!-- screenshot: dialog "Generate from a few colours" with background, accent, kind and the ANSI preview bar, Settings → Appearance → New theme … -->
+
+## How to link one colour to another
+1. In the editor, click the colour that should follow another one (e.g. `border`).
+2. Under **Link**, choose the target (e.g. `@text`) and an opacity (e.g. `20 %`).
+3. Click **Link**. The value now reads `@text/20` and changes whenever `text` changes.
+4. *Reset to derived* removes the link again.
+
+## How to share a theme
+- **Export:** choose the theme, then **⋯ → Export …** and pick where to save the JSON file.
+- **Import:** **⋯ → Import …** and choose a JSON file. An invalid file is refused with the reason; a name that is taken gets a number.
+
+## How to fix a theme file that does not load
+1. Read the reason under the theme choice, e.g. `⚠ themes/my.json: Invalid colour in "fg": "white"`.
+2. Open the folder (*Custom themes → Open folder*) and correct the file in a text editor (see [File format](#file-format)).
+3. Click **Reload** in the row *Custom themes*. The theme can be selected again.
 
 ## The editor
 
-The editor is a large window you can move and resize: the **colour list** on the left, the **preview** on the right and the **design check** below it. The app itself only changes when you click **Save**; **Discard** closes the editor without saving. If you close it with unsaved changes, Paneldeck asks: *Save*, *Discard* or *Cancel*. Undo and redo: the arrow buttons or Ctrl+Z / Ctrl+Y (while no text field has the focus); dragging in the colour picker counts as one step.
+The editor is a large window you can move and resize: the **colour list** on the left, the **preview** on the right and the **design check** below it. The app itself only changes when you click **Save**; **Discard** closes the editor without saving. If you close it with unsaved changes, Paneldeck asks: *Save*, *Discard* or *Cancel*. Undo and redo: the arrow buttons or Ctrl+Z / Ctrl+Y (while no text field has the focus); dragging in the colour picker counts as one step. The editor opens in the main window only, and while it is open the theme cannot be renamed, deleted or imported.
+
+<!-- screenshot: theme editor with the colour list on the left, the preview on the right and the design check below, one colour selected, Settings → Appearance → Edit theme … -->
 
 **Colour list.** The colours are grouped (base, text, surfaces and borders, accent and selection, status, sidebar and tabs, tickets and chips, chat, diff and syntax, terminal) and can be searched by name or description. ● marks a value the theme sets, ○ a derived one, \* a value changed since the last save. Click a colour to edit it:
 
@@ -27,6 +63,8 @@ The editor is a large window you can move and resize: the **colour list** on the
 - **Reset to derived** removes the value again (terminal colours: *Reset to saved value*; cursor and selection have a derivation too).
 - **Contrast** against the usual backgrounds after WCAG: ✓ from 4.5:1 (text), ◐ from 3:1 (large text from 18 px, icons, borders), ⚠ below.
 
+<!-- screenshot: detail of one selected colour with picker, hex field, Link dropdown with opacity, Reset to derived and the contrast values, theme editor → colour list → click a colour -->
+
 **Preview.** A sample page built from the real controls with sample texts: buttons (normal, hover, pressed, disabled, primary, destructive), inputs (empty, focused, error), checkboxes, radio buttons, switch, slider and progress bar, tabs, sidebar entries (active, folder, status dots), chips and labels, a dialog, a toast and notice/warning/error boxes, a ticket card in a board column, chat bubbles with a tool approval, a terminal excerpt with all 16 colours, selection and cursor, a diff and a query with syntax colours. Everything can be clicked and operated but has no effect; **clicking an element selects its colour in the list**.
 
 **Generate from a few colours** (*Generate from colours …*): pick a background, an accent and light or dark. Paneldeck calculates the text colour (at least 7:1), the selection, the cursor and all 16 ANSI colours (fixed hues with readable brightness, bright variants brighter) and links status, diff and syntax colours to the ANSI colours, so later changes to the palette carry through. Then fine-tune any colour; *Generate* can be undone.
@@ -34,6 +72,8 @@ The editor is a large window you can move and resize: the **colour list** on the
 ## Design check
 
 The design check below the preview shows **hints that never block saving**, with a counter. Each hint names the rule, the colours involved and the problem; clicking it selects the colour and highlights the elements in the preview. Where possible a hint offers a **suggestion with *Apply***: the smallest change of lightness (hue kept) that satisfies the rule – undo with Ctrl+Z. Every rule can be switched off under **⚙ Checks** (all are on by default; the choice is saved in `settings.json` as `theme_checks_off`).
+
+<!-- screenshot: design check with a few hints, one with a suggestion and the Apply button, and the ⚙ Checks menu open, theme editor → Design check -->
 
 | Rule | Checks |
 |---|---|
@@ -127,4 +167,4 @@ Terminal colours for links: `fg`, `bg`, `cursor`, `selection`, `ansi0` … `ansi
 
 ## Agents
 
-Agents with the level *Read* can list and read themes with the MCP tools `theme_list` and `theme_get` (see [Agent interface](agent-interface.md)); they cannot change themes.
+Agents with the level *Read* can list and read themes with the MCP tools `theme_list` and `theme_get` (see [Agent interface](agent-interface.md#themes)); they cannot change themes.
