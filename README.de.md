@@ -53,6 +53,7 @@ Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en
 - [Claude Code](docs/de/claude-code.md) – Claude-Modus, Status, Kosten, Verlauf
 - [Todo-Liste und Tickets](docs/de/todo-and-tickets.md) – einfacher und Expertenmodus, Boards, Sprints, Dashboards, Schnellaktionen
 - [Abfragesprache](docs/de/query-language.md) – Tickets suchen, Beispiele, Referenz
+- [Prozessliste](docs/de/processes.md) – Entwicklungsserver und Watcher mit ihrer Ausgabe in einem eigenen Bereich
 - [Chats mit lokalen Modellen](docs/de/chat.md) – Ollama und OpenAI-kompatible Server, Modelle, Werkzeuge und Freigaben, Sicherheit
 - [Themes und der Theme-Editor](docs/de/themes.md) – Themes bearbeiten und erzeugen, Design-Prüfung, Dateiformat und Farbnamen
 - [Agenten-Schnittstelle (MCP)](docs/de/agent-interface.md) – Stufen, Werkzeuge, Sicherheit, Systemprompt

@@ -1015,6 +1015,8 @@ impl App {
             "read_chat" => Out::Now(self.mcp_read_chat(args)),
             "send_chat_message" => Out::Now(self.mcp_send_chat(ctx, args, caller)),
             "list_models" => Out::Now(Ok(models_json(&self.settings.llm_servers, self.settings.last_chat_model.as_ref()))),
+            "cleanup_sizes" => Out::Now(Ok(self.cleanup_sizes_json())),
+            "list_processes" | "read_process_output" | "start_process" | "stop_process" | "restart_process" => Out::Now(self.mcp_procs(ctx, tool, args)),
             "theme_list" => Out::Now(Ok(theme_list_json(&self.themes, &self.theme_issues, &self.settings.theme))),
             "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),

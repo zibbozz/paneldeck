@@ -306,6 +306,24 @@ impl ChatState {
         self.rev += 1;
     }
 
+    /// Verlauf leeren (Aufräumen, #307): der Chat wird leer, Eingabe und dauerhafte Freigaben bleiben. Nicht während einer
+    /// Runde oder Bearbeitung (`false`).
+    pub fn clear_history(&mut self) -> bool {
+        if self.busy() || self.editing {
+            return false;
+        }
+        self.file.messages.clear();
+        self.ui = UiCache::default();
+        self.usage = None;
+        self.notice = None;
+        self.steps = 0;
+        self.paused = false;
+        self.pause_note = None;
+        self.context_pause = false;
+        self.changed(0);
+        true
+    }
+
     /// Ungespeicherte Änderungen?
     pub fn dirty(&self) -> bool {
         self.saved.get() != self.rev

@@ -77,6 +77,75 @@ pub fn show(
     response
 }
 
+/// Was die Ausgabeansicht eines Prozesses (#243) gemeldet hat.
+pub struct OutputResponse {
+    pub response: Response,
+    /// Strg+C ohne Auswahl: den Prozess stoppen.
+    pub stop: bool,
+}
+
+/// Nur-Lese-Ansicht für die Prozessliste (#243): dieselbe Darstellung wie ein Terminal (Farben, Verlauf, Auswahl,
+/// Verweise mit Strg+Klick), aber ohne Eingabe – keine Tasten, kein Einfügen, keine Mausereignisse an das Programm.
+/// Strg+C kopiert eine Auswahl, ohne Auswahl meldet es `stop`; Rechtsklick kopiert die Auswahl; das Mausrad blättert.
+pub fn show_output(ui: &mut Ui, rect: Rect, id: Id, session: &mut Session, theme: &Theme, font: &FontId, cwd: &str) -> OutputResponse {
+    let response = ui.interact(rect, id, Sense::click_and_drag());
+    if response.clicked() || response.drag_started() || response.secondary_clicked() {
+        response.request_focus();
+    }
+    let focused = response.has_focus();
+    let cs = cell_size(ui, font);
+    let inner = rect.shrink(PAD);
+    let cols = (inner.width() / cs.x).floor().max(2.0) as u16;
+    let rows = (inner.height() / cs.y).floor().max(1.0) as u16;
+    let ppp = ui.ctx().pixels_per_point();
+    session.set_view(theme, (cs.x * ppp).round().clamp(0.0, u16::MAX as f32) as u16, (cs.y * ppp).round().clamp(0.0, u16::MAX as f32) as u16);
+    session.resize(cols, rows);
+
+    let mut stop = false;
+    if focused {
+        let copy = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Copy)));
+        if copy {
+            let sel = session.term.lock().unwrap_or_else(|e| e.into_inner()).selection_to_string();
+            match sel.filter(|t| !t.is_empty()) {
+                Some(t) => {
+                    ui.ctx().copy_text(t);
+                    session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
+                }
+                None => stop = !ui.input(|i| i.modifiers.shift),
+            }
+        }
+    }
+    let (opened_link, osc8_hover) = handle_links(ui, &response, session, inner, cs, cwd);
+    if !opened_link {
+        if response.interact_pointer_pos().is_some() {
+            let (c, r) = (session.cols, session.rows);
+            let mut term = session.term.lock().unwrap_or_else(|e| e.into_inner());
+            select_with_pointer(ui, &response, &mut term, c, r, inner, cs);
+        }
+        if response.secondary_clicked() {
+            let text = session.term.lock().unwrap_or_else(|e| e.into_inner()).selection_to_string();
+            if let Some(t) = text.filter(|t| !t.is_empty()) {
+                ui.ctx().copy_text(t);
+                session.term.lock().unwrap_or_else(|e| e.into_inner()).selection = None;
+            }
+        }
+        if response.hovered() {
+            let dy = ui.input(|i| i.raw_scroll_delta.y);
+            if dy != 0.0 {
+                session.scroll_acc += dy / cs.y;
+                let lines = session.scroll_acc.trunc() as i32;
+                session.scroll_acc -= lines as f32;
+                if lines != 0 {
+                    session.term.lock().unwrap_or_else(|e| e.into_inner()).scroll_display(Scroll::Delta(lines));
+                }
+            }
+        }
+    }
+    // Kein blinkender Cursor: hier wird nicht getippt.
+    paint(ui, rect, inner, session, theme, font, cs, false, false, osc8_hover.as_ref());
+    OutputResponse { response, stop }
+}
+
 /// IME (#248): Solange das Terminal den Fokus hat, die Eingabemethode erlauben (ohne `PlatformOutput::ime` schaltet
 /// egui-winit sie für das Fenster ab) und ihr Fenster an den Cursor setzen; ein laufender Zwischenstand
 /// (`Session::ime_preedit`) wird über dem Cursor gezeichnet, unterstrichen.

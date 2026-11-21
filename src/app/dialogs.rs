@@ -198,6 +198,10 @@ impl App {
 
         // Schließen bestätigen (eine oder viele Sitzungen, mit 3-Sekunden-Wartezeit)
         self.close_ask_ui(ctx, actions);
+        // Prozessliste (#243): Bearbeiten-Dialog und Rückfrage beim Beenden, nur im Hauptfenster.
+        if self.wins.cur == 0 {
+            self.procs_dialogs_ui(ctx);
+        }
         // Einstellungen einer Sitzung und Rückfrage „Neu laden?“ (#169, #170).
         // Die Rückfrage zuerst: sie bekommt Esc/Enter, bevor der Einstellungsdialog darunter sie sieht.
         self.reload_ask_ui(ctx, actions, None);

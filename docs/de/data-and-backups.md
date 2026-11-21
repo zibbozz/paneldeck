@@ -25,6 +25,8 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `backups/` | automatische und manuelle Kopien der Datenbank (der Ordner ist änderbar) |
 | `scrollback/` | gespeicherter Terminalverlauf |
 | `chats/` | Verläufe der [Chats](chat.md), je Chat eine `<id>.json` (siehe [Chatverläufe](#chatverläufe)) |
+| `processes.json` | Einträge der [Prozessliste](processes.md) (siehe [unten](#prozessliste-processesjson)) |
+| `process-logs/` | Protokolldateien von Einträgen der Prozessliste mit eingeschalteter *Protokolldatei* |
 | `prompts.json` | Prompt-Bibliothek |
 | `themes/*.json` | eigene Themes (Beispiel liegt bei; Format und Farbnamen: [Themes](themes.md#dateiformat), optionales Feld `ui` seit 2.6.0, höchstens 1 MB) |
 | `system-prompt.md` | deine eigene Vorlage des [Systemprompts für Agenten](agent-interface.md#systemprompt) (nur wenn du eine gespeichert hast); `system-prompt.md.bak` = die vorige Vorlage nach *Auf Standard zurücksetzen* |
@@ -35,7 +37,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `profiles/<name>/` | Datenordner der [Profile](command-line.md#profile-und-mehrere-instanzen), jeweils mit demselben Aufbau |
 | `ipc.json` | Port und Token der laufenden Instanz (intern) |
 
-`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json` und `mcp-log.jsonl` sind stabile Formate: Neuere Versionen lesen ältere Dateien weiter, neue Felder sind optional.
+`settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json` und `mcp-log.jsonl` sind stabile Formate: Neuere Versionen lesen ältere Dateien weiter, neue Felder sind optional.
 
 ## Chatverläufe
 Jeder [Chat](chat.md) speichert seinen Verlauf in `chats/<id>.json` (`<id>` = Kennung der Sitzung; Formatversion 1, seit 2.2.0):
@@ -61,6 +63,36 @@ Jeder [Chat](chat.md) speichert seinen Verlauf in `chats/<id>.json` (`<id>` = Ke
 - Die Datei wird **atomar** geschrieben (temporäre Datei, dann umbenennen). Lesen ist tolerant: BOM erlaubt, unbekannte Felder werden ignoriert, eine einzelne ungültige Nachricht wird übersprungen. Eine beschädigte oder zu große Datei (über 8 MB) ergibt einen leeren Chat mit Hinweis; die Datei wird vorher als `chats/<id>.defekt-<Zeit>.json` gesichert. Beim Speichern verliert ein Verlauf über 8 MB seine ältesten Nachrichten.
 - Eine Verlaufsdatei, die zu keiner Sitzung gehört (z. B. nach einer zurückgesetzten `state.json`), wird nie in einen neuen Chat geladen, sondern als `chats/<id>.orphan-<Zeit>.json` beiseitegelegt.
 - **Schließen eines Chats löscht seine Datei** (samt ihrer `.defekt-…`-Sicherungen). *Verlauf als Datei speichern …* im Kontextmenü des Chats exportiert sie vorher als Markdown.
+
+## Prozessliste (processes.json)
+Die Einträge der [Prozessliste](processes.md) (seit 2.6.0, Formatversion 1):
+
+```json
+{
+  "version": 1,
+  "processes": [
+    {
+      "id": 1,
+      "name": "API",
+      "command": "php -S localhost:8000",
+      "cwd": "C:\\work\\api",
+      "shell": "pwsh",
+      "env": [ { "name": "APP_ENV", "value_protected": "AQAAANCMnd8BFdER…" } ],
+      "project": 2,
+      "group": "Dev",
+      "order": 1,
+      "autostart": "project",
+      "log_file": true
+    },
+    { "id": 2, "name": "Web", "command": "npm run dev", "cwd": "C:\\work\\web", "group": "Dev", "order": 2 }
+  ]
+}
+```
+
+- Pflicht je Eintrag: `id` (eindeutige Zahl > 0), `name`, `command`. Alles andere ist optional; ein fehlendes Feld bedeutet den Standard und wird nicht geschrieben: `cwd` (leer = Standardordner der Shell), `shell` (Kennung einer erkannten Shell wie `powershell`, `pwsh`, `cmd`, `gitbash`, `wsl:<Distribution>`; leer = PowerShell), `env`, `project` (`0` = keins), `group` (leer = keine), `order` (`0`; kleiner startet zuerst), `autostart` (`"never"` Standard, `"paneldeck"`, `"project"`; unbekannte Werte zählen als `"never"`), `log_file` (`false`).
+- `env`: Liste von `{ "name", "value_protected" }`. Der Wert steht **nur** als `value_protected` = Base64 eines Windows-DPAPI-Blobs (aktueller Benutzer) in der Datei – nie im Klartext; ein Wert, der sich nicht entschlüsseln lässt (anderer Benutzer oder Rechner), fehlt beim Start mit einem Hinweis. Namen dürfen kein `=` und keine Leerzeichen enthalten, Namen mit `PANELDECK_` am Anfang werden abgelehnt.
+- Lesen ist tolerant: BOM erlaubt, ein ungültiger Eintrag wird übersprungen (die Datei wird vorher als `processes.defekt-<zeit>.json` gesichert), doppelte oder fehlende Kennungen werden neu vergeben. **Unbekannte Felder bleiben** beim Speichern erhalten (in den Einträgen und auf oberster Ebene), neuere Versionen können also Felder ergänzen. Geschrieben wird atomar. Paneldeck überschreibt die Datei nicht, wenn sie sich nicht lesen ließ (z. B. gesperrt) oder eine beschädigte Datei sich nicht sichern ließ, oder wenn ihre `version` neuer ist als die, die dieses Paneldeck kennt – Änderungen an der Liste werden dann mit einem Hinweis nicht gespeichert.
+- Laufzustand, Ausgabe und erkannte Adressen werden nicht gespeichert: Nach einem Neustart ist jeder Eintrag gestoppt.
 
 ## Neue Felder in 2.2.0
 - `settings.json` → `llm_servers`: die Server aus *Einstellungen → Modelle*, je mit `id`, `name`, `kind` (`ollama`/`openai`), `url`, optional `api_key` (Base64 eines Windows-DPAPI-Blobs – nie Klartext; nur derselbe Windows-Benutzer auf demselben Rechner kann ihn entschlüsseln), optional `receive_timeout_secs`, `models` (Einstellungen je Modell: `name`, `level`, `level_chosen`, `disabled_tools`, `ask_write`, `max_steps`, optional `tools`, `context_length`, `temperature`; `level_chosen: true` = die Stufe wurde in der [Frage nach der Stufe](chat.md#die-frage-nach-der-stufe) oder unter *Einstellungen → Modelle* gewählt – fehlt es oder ist es `false`, gilt das Modell als *Aus*, egal was in `level` steht) und `last_models` (Ergebnis des letzten *Verbinden*). Ein Server-Eintrag, der sich nicht lesen lässt (z. B. ein unbekannter `kind` einer neueren Version), bleibt unverändert erhalten und wird nur lesbar mit *Entfernen* angezeigt.
@@ -115,6 +147,26 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
 - `--backup-dir <ordner>` schreibt die Sicherungen eines Starts in einen anderen Ordner (die Ordnerwahl ist dann gesperrt; siehe [Kommandozeile](command-line.md#--backup-dir-ordner)).
 - Vor einem Update auf eine **neue Hauptversion** legt das Selbst-Update zuerst eine Datenbank-Sicherung an (siehe [Updates](updates.md)).
 - Der **Rückgängig-Verlauf** der Todo-Liste (3 bis 100 Schritte, Standard 25) wird im selben Tab eingestellt.
+
+## Aufräumen
+*Einstellungen → Daten & Sicherung → **Aufräumen …*** (auch in der Befehls-Palette) öffnet ein Fenster, in dem du ankreuzt, was gelöscht werden soll. Jeder Eintrag zeigt Größe bzw. Anzahl (im Hintergrund ermittelt) und eine kurze Erklärung, unten steht die Summe. Vorausgewählt ist nur Harmloses: Bilder aus der Zwischenablage, alte Sicherungsdateien (`*.bak-*`, `*.defekt-*`), `crash.log` sowie verwaiste Scrollback-/Chat-Dateien, zu denen es keine Sitzung mehr gibt.
+
+| Gruppe | Einträge |
+|---|---|
+| Platz schaffen | Datenbank-Sicherungen (alle außer den neuesten *N*, Standard 3; „alle löschen“ nur mit Eintippen), Bilder aus der Zwischenablage, alte Sicherungsdateien; nur wenn vorhanden: Programm-Kopien von Läufen (`%TEMP%\paneldeck-run`), Wartungs-Sicherungen (`maintenance-<zeit>.db` im Sicherungsordner – nur Dateien mit genau diesem Namensmuster), Hot-Exit-Puffer (`hot-exit\`) |
+| Verlauf und Protokolle | Scrollback und Chatverläufe, je **ohne Sitzung** oder **alle** („alle“ betrifft auch offene Sitzungen: Terminals behalten nur den Bildschirm, Chats werden leer), wahlweise nur Dateien älter als *X* Tage (Standard 30); `crash.log`; das MCP-Protokoll `mcp-log.jsonl` (es dokumentiert, was Agenten getan haben) |
+| Inhalte | Prompt-Bibliothek, Terminal-/Gruppenvorlagen, eigene Themes (eingebaute Themes und das Beispiel bleiben; ein aktives gelöschtes Theme fällt auf den Standard zurück), `system-prompt.md`, die Todo-/Ticket-Datenbank, Sitzungen und Layout |
+| Einstellungen | alle Einstellungen (wie `--reset-settings`, mit Kopie `settings.json.bak-<zeit>`; die Sprache bleibt), Modell-Server und API-Schlüssel, Claude-Standards, Tastenkürzel |
+| Windows-Integration | Autostart-Run-Werte (auch von Profilen) und Explorer-Kontextmenü, die auf diese `paneldeck.exe` zeigen, `paneldeck*`-Einträge in `~/.claude.json`, die auf diese .exe zeigen, `claude-hooks*.json` im Datenordner |
+| Alles | **Paneldeck komplett zurücksetzen**: wählt alles samt Integration, sichert den Datenordner vorher als ZIP-Datei (Zielordner wählbar, außerhalb des Datenordners; API-Schlüssel und die Werte der Umgebungsvariablen der Prozessliste bleiben draußen – auch aus Kopien wie `settings.json.bak-*`, unlesbare Kopien dieser Dateien ganz) und startet danach neu wie beim ersten Start |
+
+Andere Profile (`profiles\<name>` mit `settings.json`) lassen sich komplett löschen, aber nur, solange ihre Instanz nicht läuft.
+
+**Sicherheit.** Gelöscht wird endgültig (kein Papierkorb). *Löschen …* zeigt eine Zusammenfassung aller gewählten Einträge mit Größen; der Knopf wird nach 3 Sekunden frei, unwiderrufliche Einträge (Datenbank, alle Verläufe, Prompt-Bibliothek, Vorlagen, Themes, Systemprompt, Sitzungen/Layout, alle Einstellungen, alle Sicherungen, Profile, Zurücksetzen) verlangen zusätzlich das Eintippen von `LÖSCHEN` (Englisch: `DELETE`) – einmal je Lauf. Vor dem Löschen wird die Datenbank gesichert (`pre-cleanup-<zeit>.db` im Sicherungsordner; abschaltbar, immer, wenn die Datenbank selbst gelöscht wird – schlägt diese Sicherung fehl, bleibt die Datenbank). Registry-Werte werden als `.reg`-Datei und `~/.claude.json` als Kopie im Sicherungsordner gesichert, bevor sie sich ändern (beim kompletten Zurücksetzen stattdessen neben der ZIP-Datei, weil der Sicherungsordner im Datenordner mit gelöscht wird). Ein Ordner, der selbst ein Link ist (Symlink/Junction, z. B. `clipboard\`), wird nicht betreten und als nicht berührt gemeldet. Einträge mit Neustart warnen, dass in Terminals laufende Programme beim Neustart sofort enden (ohne Strg+C). Einträge, die offene Sitzungen beenden, nennen diese und laufende Programme (erkannt über die Kindprozesse der Shells): *Schließen und löschen* oder *Abbrechen*. Dateien in Benutzung werden übersprungen; das Ergebnis nennt jeden Eintrag mit ✓ oder dem Fehler und bietet *Erneut versuchen* und bei Bedarf *Jetzt neu starten*.
+
+Datenbank, Sitzungen/Layout und das komplette Zurücksetzen lassen sich nicht löschen, solange Paneldeck sie benutzt: Sie werden in `cleanup-pending.json` vorgemerkt und beim nächsten Start vor dem Laden ausgeführt (mit dem Sicherungsordner dieses Starts – nie einem aus der Datei); Paneldeck startet sofort neu und zeigt das Ergebnis. Integration, andere Profile und die ZIP-Sicherung laufen vor dem Neustart; ohne ZIP-Sicherung wird nichts zurückgesetzt.
+
+**Nie berührt:** die Daten von Claude Code selbst (`~/.claude/projects`, Transkripte). Agenten können nur die Größen lesen (MCP-Werkzeug [`cleanup_sizes`](agent-interface.md)); löschen können sie nichts.
 
 ## Daten verschieben oder kopieren
 Paneldeck beenden, dann den ganzen Datenordner kopieren. Um ihn von einem anderen Ort zu nutzen, Paneldeck mit `--data-dir <ordner>` starten oder `PANELDECK_DATA` setzen.
