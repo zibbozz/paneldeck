@@ -45,7 +45,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 <!-- screenshot: info bar "changed on disk" with Keep mine / Load from disk / Show difference -->
 
 ## Search in files
-Searches all files of the open folder (*Search in files*):
+**Ctrl+Shift+F** in the Editor tab opens the window *Search in files*; it searches all files of the open folder. **F4** / **Shift+F4** jump to the next / previous result.
 - respects **`.gitignore`** (also nested ones and those of parent folders), `.git/info/exclude`, the global Git exclude file and `.ignore` – also outside a Git repository; **Include ignored** switches that off for one search (the default is set in the settings);
 - your own **exclude patterns** (*Settings → Editor*, gitignore syntax, e.g. `node_modules`, `*.min.js`, `dist/`) always apply; `.git`, `.hg` and `.svn` are never searched;
 - skips **binary files** and files over the large-file threshold (the summary counts them);

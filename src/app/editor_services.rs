@@ -29,11 +29,14 @@ pub(super) struct EditorServices {
     pub edit_context: crate::integration::Status,
     /// Text des Feldes „Ausschlussmuster“, solange der Tab offen ist (gespeichert wird bereinigt).
     excludes_buf: Option<String>,
+    /// Fenster „In Dateien suchen“ offen und seine Eingaben.
+    pub search_open: bool,
+    pub search: super::editor_search_ui::SearchInput,
 }
 
 impl Default for EditorServices {
     fn default() -> Self {
-        EditorServices { watch: DiskWatch::new(), find: find::Results::default(), open_queue: Vec::new(), edit_context: crate::integration::Status::Off, excludes_buf: None }
+        EditorServices { watch: DiskWatch::new(), find: find::Results::default(), open_queue: Vec::new(), edit_context: crate::integration::Status::Off, excludes_buf: None, search_open: false, search: Default::default() }
     }
 }
 
@@ -112,6 +115,7 @@ impl App {
         if let Some(d) = self.editor_svc.watch.next_due(Instant::now(), !open.is_empty()) {
             ctx.request_repaint_after(d.max(Duration::from_millis(50)));
         }
+        self.editor_search_window(ctx);
         if self.editor_svc.find.poll() || self.editor_svc.find.running() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -125,7 +129,7 @@ impl App {
     /// MCP-Werkzeuge `editor_*` (Stufe prüft der Hub bzw. die Werkzeug-Regeln des Chats; die Schalter prüft `tools`).
     pub(super) fn mcp_editor(&mut self, ctx: &egui::Context, tool: &str, args: &Value) -> Result<Value, (String, String)> {
         let settings = self.settings.editor.clone();
-        let mut host = BridgeHost { app: self, ctx };
+        let mut host = BridgeHost { app: self };
         let r = tools::call(tool, &mut host, &settings, args);
         if r.is_ok() && matches!(tool, "editor_open" | "editor_edit" | "editor_save") {
             ctx.request_repaint();
@@ -272,54 +276,153 @@ impl App {
 
     // ───────────────────────── Brücke zum Editor (Oberfläche des Editor-Reiters) ─────────────────────────
     //
-    // Diese Funktionen verbinden die Dienste mit den Dokumenten des Editors. Solange der Editor-Reiter nicht da ist,
-    // gibt es keine offenen Dokumente; Öffnen meldet einen Fehler.
+    // Diese Funktionen verbinden die Dienste mit den Dokumenten des Editors (`app::editor_ui`, Schnittstelle dort).
 
-    /// Datei in einem neuen Editor-Tab öffnen (offene Datei: nach vorn holen). Für `--edit` und das Explorer-Menü.
+    /// Datei in einem neuen Editor-Tab öffnen (offene Datei: nach vorn holen). Für `--edit` und das Explorer-Menü –
+    /// eine Aktion des Nutzers, nie „von einem Agenten“.
     fn editor_bridge_open(&mut self, _ctx: &egui::Context, path: &Path) -> Result<(), String> {
-        let _ = path;
-        Err(state::t("Der Editor-Reiter ist in diesem Build nicht verfügbar.", "The Editor tab is not available in this build.").to_string())
+        self.editor_open(path, true, false).map(|_| ())
     }
 
-    /// Pfade aller offenen Dokumente mit Datei (für das Beobachten der Platte).
-    fn editor_bridge_paths(&self) -> Vec<PathBuf> {
-        Vec::new()
+    /// Pfade aller offenen Dokumente mit Datei (für das Beobachten der Platte). Vorher den Vergleichsstand der Dateien
+    /// neu setzen, die der Editor selbst gelesen oder gespeichert hat (eigenes Schreiben ist keine fremde Änderung).
+    fn editor_bridge_paths(&mut self) -> Vec<PathBuf> {
+        for p in self.editor_take_touched() {
+            self.editor_svc.watch.baseline(&p);
+        }
+        self.editor_open_paths()
     }
 
-    /// Eine Datei hat sich auf der Platte geändert (Infoleiste bzw. still neu laden).
-    fn editor_bridge_disk_event(&mut self, _ctx: &egui::Context, _ev: DiskEvent) {}
+    /// Eine Datei hat sich auf der Platte geändert, ist verschwunden oder wieder da: der Editor entscheidet (still neu
+    /// laden mit Hinweis, Infoleiste *Meine behalten* / *Von der Platte laden* / *Unterschied anzeigen*).
+    fn editor_bridge_disk_event(&mut self, _ctx: &egui::Context, ev: DiskEvent) {
+        self.editor_disk_changed(ev.path());
+    }
+
+    /// Einstellungen für den Editor (ersetzt die Vorgaben von `editor_prefs`).
+    pub(super) fn editor_prefs_from_settings(&self) -> super::editor_ui::EditorPrefs {
+        let e = &self.settings.editor;
+        super::editor_ui::EditorPrefs {
+            font_size: self.settings.font_size,
+            large_file_bytes: e.large_file_bytes(),
+            autosave: e.autosave.then(|| Duration::from_millis(e.autosave_delay_ms as u64)),
+        }
+    }
+
+    /// Fenster „In Dateien suchen“ (Strg+Umschalt+F im Editor-Reiter): Panel aus `editor_search_ui`, Treffer öffnen die
+    /// Datei an der Fundstelle; F4 / Umschalt+F4 springen zum nächsten / vorigen Treffer.
+    fn editor_search_window(&mut self, ctx: &egui::Context) {
+        if self.mode != titlebar::Mode::Editor {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::F)) {
+            self.editor_svc.search_open = true;
+            self.editor_svc.search.focus = true;
+        }
+        let step = ctx.input_mut(|i| {
+            if i.consume_key(Modifiers::SHIFT, Key::F4) {
+                Some(false)
+            } else if i.consume_key(Modifiers::NONE, Key::F4) {
+                Some(true)
+            } else {
+                None
+            }
+        });
+        let mut target = step.and_then(|f| self.editor_svc.find.step(f));
+        if self.editor_svc.search_open {
+            let lang = self.settings.language;
+            let root = self.editor_root();
+            let mut open = true;
+            let settings = self.settings.editor.clone();
+            let svc = &mut self.editor_svc;
+            let mut action = None;
+            style::movable(ctx, Id::new("editor_find_files"), egui::Window::new(lang.t("In Dateien suchen", "Search in files")))
+                .open(&mut open)
+                .default_size([520.0, 420.0])
+                .show(ctx, |ui| {
+                    action = super::editor_search_ui::show(ui, lang, &mut svc.search, &mut svc.find, root.as_deref(), &settings);
+                });
+            if let Some(super::editor_search_ui::PanelAction::Open { path, line, col }) = action {
+                target = Some((path, line, col));
+            }
+            if !open {
+                self.editor_svc.search_open = false;
+                self.editor_svc.find.cancel();
+            }
+        }
+        if let Some((path, line, col)) = target {
+            // Treffer: Zeile/Spalte ab 1, der Editor zählt ab 0.
+            if let Err(e) = self.editor_open_at(&path, line.saturating_sub(1), col.saturating_sub(1)) {
+                self.notify_text(format!("{}: {e}", path.display()));
+            }
+        }
+    }
 }
 
 /// Die App als `EditorHost` für die MCP-Werkzeuge (nur im Hauptdurchlauf).
 struct BridgeHost<'a> {
     app: &'a mut App,
-    ctx: &'a egui::Context,
+}
+
+fn doc_info(d: super::editor_ui::DocInfo) -> DocInfo {
+    use crate::editor_svc::tools::DiskState;
+    DocInfo {
+        id: d.id,
+        path: d.path,
+        title: d.title,
+        dirty: d.dirty,
+        agent_edited: d.agent_edited,
+        opened_by_agent: d.opened_by_agent,
+        lines: d.lines,
+        bytes: d.bytes as u64,
+        encoding: d.encoding,
+        eol: d.eol,
+        large: d.large,
+        read_only: d.read_only,
+        disk: if d.disk_deleted {
+            DiskState::Deleted
+        } else if d.disk_changed {
+            DiskState::Changed
+        } else {
+            DiskState::InSync
+        },
+        active: d.active,
+    }
 }
 
 impl EditorHost for BridgeHost<'_> {
     fn docs(&self) -> Vec<DocInfo> {
-        let _ = &self.app;
-        Vec::new()
+        self.app.editor_list().into_iter().map(doc_info).collect()
     }
 
-    fn text(&self, _doc: u64) -> Option<String> {
-        None
+    fn text(&mut self, doc: u64) -> Option<String> {
+        self.app.editor_text(doc)
     }
 
     fn open_file(&mut self, path: &Path, show: bool) -> Result<u64, String> {
-        let _ = (path, show, self.ctx);
-        Err(state::t("Der Editor-Reiter ist in diesem Build nicht verfügbar.", "The Editor tab is not available in this build.").to_string())
+        self.app.editor_open(path, show, true)
     }
 
-    fn open_untitled(&mut self, _name: Option<&str>, _text: &str, _show: bool) -> Result<u64, String> {
-        Err(state::t("Der Editor-Reiter ist in diesem Build nicht verfügbar.", "The Editor tab is not available in this build.").to_string())
+    fn open_untitled(&mut self, text: &str, show: bool) -> Result<u64, String> {
+        Ok(self.app.editor_new(text, show, true))
     }
 
-    fn apply_agent_edits(&mut self, _doc: u64, _edits: &[TextEdit]) -> Result<(), String> {
-        Err("no editor".into())
+    fn apply_agent_edits(&mut self, doc: u64, edits: &[TextEdit]) -> Result<(), String> {
+        self.app.editor_apply_agent_edit_bytes(doc, edits.iter().map(|e| (e.range.clone(), e.text.clone())).collect())
     }
 
-    fn save(&mut self, _doc: u64) -> Result<(), String> {
-        Err("no editor".into())
+    fn show(&mut self, doc: u64) {
+        self.app.editor_focus(doc);
+    }
+
+    fn save(&mut self, doc: u64) -> Result<(), String> {
+        let r = self.app.editor_save_doc(doc);
+        // Eigenes Speichern: neuer Vergleichsstand, sonst meldete die Überwachung es als fremde Änderung.
+        if r.is_ok()
+            && let Some(p) = self.app.editor_list().into_iter().find(|d| d.id == doc).and_then(|d| d.path)
+        {
+            self.app.editor_svc.watch.baseline(&p);
+        }
+        r
     }
 }

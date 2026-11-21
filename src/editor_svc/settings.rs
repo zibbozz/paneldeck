@@ -81,17 +81,6 @@ pub enum AgentRight {
     Save,
 }
 
-impl AgentRight {
-    /// Name des Feldes in `settings.json` (für Meldungen).
-    pub fn field(self) -> &'static str {
-        match self {
-            AgentRight::Open => "agent_open",
-            AgentRight::Edit => "agent_edit",
-            AgentRight::Save => "agent_save",
-        }
-    }
-}
-
 impl EditorSettings {
     /// Tolerant aus einem JSON-Wert lesen (siehe Moduldoku); Zahlen werden auf ihre Grenzen gesetzt.
     pub fn from_value(v: &Value) -> EditorSettings {

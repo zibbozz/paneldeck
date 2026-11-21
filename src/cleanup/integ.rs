@@ -104,7 +104,7 @@ fn context_values() -> Vec<(String, Option<String>, String)> {
 /// Gespeicherte Werte (Beschriftung, Symbol, Befehl) der angegebenen Schlüssel.
 fn key_values(keys: &[&str]) -> Vec<(String, Option<String>, String)> {
     let mut v = Vec::new();
-    for key in keys.iter().copied() {
+    for &key in keys {
         for (k, name) in [(key.to_string(), None), (key.to_string(), Some("Icon")), (format!("{key}\\command"), None)] {
             if let Some(val) = registry::get_str(&k, name) {
                 v.push((k, name.map(str::to_string), val));
@@ -171,6 +171,11 @@ fn delete_run_values(ctx: &Ctx, vals: &[(String, String)], stem: &str, r: &mut I
     }
 }
 
+/// Gespeicherte Registry-Werte (Schlüssel, Wertname, Inhalt).
+type RegValues = Vec<(String, Option<String>, String)>;
+/// Ein Teil des Kontextmenüs: gespeicherte Werte, Name der Sicherung, Ausschalter.
+type ContextPart = (Option<RegValues>, &'static str, fn(bool, &Path) -> Result<(), String>);
+
 /// Einen Integrations-Eintrag entfernen (nur im laufenden Betrieb).
 pub fn remove(ctx: &Ctx, item: Item, r: &mut ItemReport) {
     let st = State::current(ctx);
@@ -181,8 +186,7 @@ pub fn remove(ctx: &Ctx, item: Item, r: &mut ItemReport) {
                 return;
             }
             // Ordner-Einträge und Editor-Eintrag (#54): je eigene Sicherung, dann entfernen.
-            let parts: [(Option<Vec<(String, Option<String>, String)>>, &str, fn(bool, &Path) -> Result<(), String>); 2] =
-                [(st.context, "context-menu", crate::integration::set_context), (st.edit_context, "context-menu-editor", crate::integration::set_edit_context)];
+            let parts: [ContextPart; 2] = [(st.context, "context-menu", crate::integration::set_context), (st.edit_context, "context-menu-editor", crate::integration::set_edit_context)];
             for (vals, stem, off) in parts {
                 let Some(vals) = vals else { continue };
                 match write_reg_backup(ctx.safety_dir(), stem, &vals) {

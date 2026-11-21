@@ -127,10 +127,10 @@ pub fn check_file(raw: &str) -> Result<PathBuf, Refusal> {
     let p = check_syntax(raw)?;
     // Verbundenes Netzlaufwerk schon am Buchstaben erkennen (fragt das Netz nicht an; `canonicalize` könnte an einer
     // getrennten Freigabe hängen).
-    if let Some(letter) = p.to_string_lossy().chars().next().filter(|_| crate::platform::fs::DRIVE_LETTERS) {
-        if crate::platform::fs::drive_type(letter) == Some(4) {
-            return Err(network());
-        }
+    if let Some(letter) = p.to_string_lossy().chars().next().filter(|_| crate::platform::fs::DRIVE_LETTERS)
+        && crate::platform::fs::drive_type(letter) == Some(4)
+    {
+        return Err(network());
     }
     let canon = match std::fs::canonicalize(&p) {
         Ok(c) => c,

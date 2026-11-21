@@ -295,7 +295,8 @@ impl super::App {
     /// Einstellungen des Editors (Einstellungen → Editor). Solange es dort nichts gibt: Standardwerte mit der Schriftgröße
     /// des Terminals.
     pub(crate) fn editor_prefs(&self) -> EditorPrefs {
-        EditorPrefs { font_size: self.settings.font_size, ..EditorPrefs::default() }
+        // Einstellungen → Editor (Services, `app::editor_services`).
+        self.editor_prefs_from_settings()
     }
 
     /// Jedes Bild im Hauptdurchgang, auch außerhalb des Editor-Reiters: automatisches Speichern.

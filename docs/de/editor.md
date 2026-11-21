@@ -45,7 +45,7 @@ Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Cl
 <!-- screenshot: Infoleiste „auf der Platte geändert“ mit Meine behalten / Von der Platte laden / Unterschied anzeigen -->
 
 ## Suche in Dateien
-Durchsucht alle Dateien des offenen Ordners (*In Dateien suchen*):
+**Strg+Umschalt+F** öffnet im Editor-Reiter das Fenster *In Dateien suchen*; es durchsucht alle Dateien des offenen Ordners. **F4** / **Umschalt+F4** springen zum nächsten / vorigen Treffer.
 - beachtet **`.gitignore`** (auch verschachtelte und die der Elternordner), `.git/info/exclude`, die globale Git-Ausschlussdatei und `.ignore` – auch außerhalb eines Git-Repositorys; **Ignorierte einbeziehen** schaltet das für eine Suche ab (die Vorgabe steht in den Einstellungen);
 - deine eigenen **Ausschlussmuster** (*Einstellungen → Editor*, Syntax wie `.gitignore`, z. B. `node_modules`, `*.min.js`, `dist/`) gelten immer; `.git`, `.hg` und `.svn` werden nie durchsucht;
 - überspringt **Binärdateien** und Dateien über der Schwelle für große Dateien (die Zusammenfassung zählt sie);

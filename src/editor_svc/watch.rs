@@ -111,7 +111,8 @@ impl Tracker {
         out
     }
 
-    /// Ist der Pfad bekannt (für Tests und die Oberfläche)?
+    /// Ist der Pfad bekannt (für Tests)?
+    #[cfg(test)]
     pub fn known(&self, path: &Path) -> Option<Stamp> {
         self.files.get(path).and_then(|t| t.known)
     }
@@ -141,11 +142,6 @@ impl DiskWatch {
     /// Nach dem eigenen Laden oder Speichern aufrufen (misst sofort; die Datei ist lokal gerade geschrieben).
     pub fn baseline(&mut self, path: &Path) {
         self.tracker.baseline(path, Stamp::of(path));
-    }
-
-    /// Wie [`DiskWatch::baseline`] mit einem schon bekannten Stand (z. B. vom Kern beim Laden gemessen).
-    pub fn baseline_with(&mut self, path: &Path, stamp: Stamp) {
-        self.tracker.baseline(path, stamp);
     }
 
     fn spawn(&mut self, wake: Box<dyn Fn() + Send>) {
@@ -187,11 +183,11 @@ impl DiskWatch {
         if self.tx.is_none() {
             self.spawn(Box::new(wake));
         }
-        if let Some(tx) = &self.tx {
-            if tx.send(open.to_vec()).is_ok() {
-                self.in_flight = true;
-                self.last = Some(now);
-            }
+        if let Some(tx) = &self.tx
+            && tx.send(open.to_vec()).is_ok()
+        {
+            self.in_flight = true;
+            self.last = Some(now);
         }
         events
     }

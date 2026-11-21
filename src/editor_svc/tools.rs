@@ -112,7 +112,7 @@ pub trait EditorHost {
         Some(text.split('\n').skip(start).take(count).map(str::to_string).collect())
     }
     /// Datei in einem neuen Tab öffnen (geprüfter, lokaler Pfad), als „von einem Agenten geöffnet“; `show` = den
-    /// Editor-Reiter nach vorn holen (die Tastatur bleibt, wo sie ist). Liefert die Dokument-Kennung.
+    /// in den Editor-Reiter wechseln. Liefert die Dokument-Kennung.
     fn open_file(&mut self, path: &Path, show: bool) -> Result<u64, String>;
     /// Neuer unbenannter Tab mit `text` (als „von einem Agenten geöffnet“).
     fn open_untitled(&mut self, text: &str, show: bool) -> Result<u64, String>;
@@ -121,6 +121,8 @@ pub trait EditorHost {
     fn apply_agent_edits(&mut self, doc: u64, edits: &[TextEdit]) -> Result<(), String>;
     /// Speichern (atomar, Kodierung und Zeilenenden des Dokuments).
     fn save(&mut self, doc: u64) -> Result<(), String>;
+    /// Reiter eines offenen Dokuments zeigen (wechselt in den Editor-Reiter).
+    fn show(&mut self, _doc: u64) {}
 }
 
 /// Ergebnis wie im Hub.
@@ -192,13 +194,13 @@ pub fn defs() -> Vec<ToolDef> {
             name: "editor_open",
             level: McpLevel::Control,
             group: Group::Always,
-            description: "Open a local file in a new tab of the Editor tab (an already open file is not opened twice: its id is returned with already_open = true), or with untitled = true a new untitled tab with optional `text`. Needs the user's switch \"Agents may open files\" (Settings -> Editor -> Agents), else forbidden. `path` must be an absolute local path of an existing regular file: network and UNC paths (\\\\server\\share, \\\\wsl.localhost\\..., mapped network drives) and devices (\\\\.\\..., \\\\?\\..., CON, NUL, COM1, /dev, /proc, /sys) are refused with forbidden; a missing file gives not_found. show = true also brings the Editor tab to the front (the keyboard focus stays where it is). Opening never changes a file. An untitled tab can only be saved by the user.",
+            description: "Open a local file in a new tab of the Editor tab (an already open file is not opened twice: its id is returned with already_open = true), or with untitled = true a new untitled tab with optional `text`. Needs the user's switch \"Agents may open files\" (Settings -> Editor -> Agents), else forbidden. `path` must be an absolute local path of an existing regular file: network and UNC paths (\\\\server\\share, \\\\wsl.localhost\\..., mapped network drives) and devices (\\\\.\\..., \\\\?\\..., CON, NUL, COM1, /dev, /proc, /sys) are refused with forbidden; a missing file gives not_found. show = true also switches Paneldeck to the Editor tab and shows the file (default: opened in the background). Opening never changes a file. An untitled tab can only be saved by the user.",
             schema: schema(
                 json!({
                     "path": {"type": "string", "description": "Absolute local file path, e.g. C:\\\\work\\\\README.md"},
                     "untitled": {"type": "boolean", "description": "Open a new untitled tab instead of a file"},
                     "text": {"type": "string", "description": "Only with untitled=true: initial text (at most 1 MB)"},
-                    "show": {"type": "boolean", "description": "Bring the Editor tab to the front (default false)"}
+                    "show": {"type": "boolean", "description": "Switch to the Editor tab and show the file (default false)"}
                 }),
                 &[],
             ),
@@ -298,10 +300,10 @@ fn resolve(docs: &[DocInfo], args: &Value) -> Result<DocInfo, (String, String)> 
         }
         Some(Value::String(s)) if !s.trim().is_empty() => {
             // Ziffern als Text sind eine Kennung (manche Modelle schicken Zahlen als Text).
-            if let Ok(id) = s.trim().parse::<u64>() {
-                if let Some(d) = docs.iter().find(|d| d.id == id) {
-                    return Ok(d.clone());
-                }
+            if let Ok(id) = s.trim().parse::<u64>()
+                && let Some(d) = docs.iter().find(|d| d.id == id)
+            {
+                return Ok(d.clone());
             }
             let want = Path::new(s.trim());
             docs.iter().find(|d| d.path.as_deref().is_some_and(|p| agent_path::same_file(p, want))).cloned().ok_or_else(|| missing(crate::mcp::short(s, 120)))
@@ -442,8 +444,8 @@ pub fn open(host: &mut dyn EditorHost, s: &EditorSettings, args: &Value) -> R {
             let raw = Path::new(p.trim());
             if let Some(d) = host.docs().into_iter().find(|d| d.path.as_deref().is_some_and(|dp| agent_path::same_file(dp, &checked) || agent_path::same_file(dp, raw))) {
                 if show {
-                    // Zeigen ohne zweiten Tab: die Umsetzung erkennt die offene Datei und holt sie nach vorn.
-                    let _ = host.open_file(&checked, true);
+                    // Zeigen ohne zweiten Tab und ohne die Markierung „von einem Agenten geöffnet“.
+                    host.show(d.id);
                 }
                 return opened(host, d.id, true);
             }
@@ -697,6 +699,9 @@ pub(crate) mod fake {
             d.info.agent_edited = true;
             Self::refresh(d);
             Ok(())
+        }
+        fn show(&mut self, doc: u64) {
+            self.shown.push(doc);
         }
         fn save(&mut self, doc: u64) -> Result<(), String> {
             let d = self.docs.iter_mut().find(|d| d.info.id == doc).ok_or("gone")?;

@@ -3,9 +3,6 @@
 //! (aufklappbar, Treffer hervorgehoben). Das Modell und die Suche stehen in `editor_svc::find`; wo das Panel im
 //! Editor-Reiter steht und was „öffnen“ heißt, entscheidet der Editor über die zurückgegebene [`PanelAction`].
 
-// Das Panel zeigt der Editor-Reiter (Oberfläche des Editors); bis er es einbindet, ist es nur über Tests erreichbar.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::*;
 use crate::editor_svc::find::{self, Query, Results};
 use crate::editor_svc::settings::EditorSettings;
@@ -171,11 +168,11 @@ pub(super) fn show(ui: &mut Ui, lang: Lang, input: &mut SearchInput, results: &m
         let color = if results.error.is_some() { crate::style::ui().error } else { style::dim(ui) };
         ui.label(RichText::new(text).small().color(color));
     });
-    if start {
-        if let Some(root) = root.filter(|_| !input.pattern.is_empty()) {
-            let ctx = ui.ctx().clone();
-            results.start(root.to_path_buf(), input.query(settings), move || ctx.request_repaint());
-        }
+    if start
+        && let Some(root) = root.filter(|_| !input.pattern.is_empty())
+    {
+        let ctx = ui.ctx().clone();
+        results.start(root.to_path_buf(), input.query(settings), move || ctx.request_repaint());
     }
     ui.separator();
     egui::ScrollArea::vertical().id_salt("editor_find_results").auto_shrink([false, false]).show(ui, |ui| {

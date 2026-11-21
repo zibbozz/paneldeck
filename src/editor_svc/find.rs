@@ -138,7 +138,7 @@ pub fn is_binary(bytes: &[u8]) -> bool {
 /// Bytes als Text: BOM für UTF-8/UTF-16 beachten, sonst UTF-8 mit Ersatzzeichen.
 pub fn decode(bytes: &[u8]) -> String {
     let utf16 = |b: &[u8], le: bool| {
-        let units: Vec<u16> = b.chunks_exact(2).map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) }).collect();
+        let units: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| if le { u16::from_le_bytes(*c) } else { u16::from_be_bytes(*c) }).collect();
         String::from_utf16_lossy(&units)
     };
     if let Some(b) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
@@ -372,8 +372,6 @@ pub fn start(root: PathBuf, q: Query, wake: impl Fn() + Send + 'static) -> Resul
 /// Modell des Ergebnis-Panels: gesammelte Treffer, Fortschritt, Abschluss, aufgeklappte Dateien, Auswahl.
 #[derive(Default)]
 pub struct Results {
-    pub root: PathBuf,
-    pub query: Query,
     pub files: Vec<FileHits>,
     /// Durchsuchte Dateien bis jetzt.
     pub progress: u64,
@@ -391,7 +389,7 @@ impl Results {
     /// Neue Suche starten (eine laufende wird abgebrochen).
     pub fn start(&mut self, root: PathBuf, q: Query, wake: impl Fn() + Send + 'static) {
         self.cancel();
-        *self = Results { root: root.clone(), query: q.clone(), ..Default::default() };
+        *self = Results::default();
         match start(root, q, wake) {
             Ok(j) => self.job = Some(j),
             Err(e) => self.error = Some(e.0),

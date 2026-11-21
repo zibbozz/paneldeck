@@ -25,6 +25,7 @@ Paneldeck ist aus freier Software aufgebaut. Die wichtigsten Bestandteile und ih
 | encoding_rs | Kodierungen im Editor (Windows-1252) | (Apache-2.0 oder MIT) und BSD-3-Clause (WHATWG-Daten) |
 | similar | Unterschied Datei/Puffer im Editor | Apache-2.0 |
 | unicode-segmentation, unicode-width | Graphem-Grenzen und Spaltenbreiten im Editor | MIT oder Apache-2.0 |
+| ignore (mit globset, walkdir, same-file) | Suche in Dateien im Editor: Ordner durchlaufen mit `.gitignore`-Regeln | Unlicense oder MIT |
 
 Alle weiteren transitiven Abhängigkeiten stehen unter MIT, Apache-2.0, BSD, Zlib, ISC, BSL-1.0, Unicode, CC0 oder Unlicense (teils wahlweise); eine Ausnahme ist `option-ext` unter der MPL-2.0 (Copyleft nur für die Datei selbst; Paneldeck bindet sie unverändert ein, der Quelltext liegt bei crates.io). `r-efi` bietet LGPL-2.1 nur als Wahloption neben MIT/Apache an. Die **vollständigen Lizenztexte** aller Pakete stehen in `THIRD_PARTY_LICENSES.txt` (erzeugt mit `python tools/gen_licenses.py`), die genaue Liste ergibt sich aus `Cargo.lock`.
 
