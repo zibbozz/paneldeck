@@ -4,6 +4,11 @@
 //! Alles läuft im UI-Thread (kurze Operationen); Wartendes (`run_command`, `wait_for_status`) bleibt in
 //! `McpState::pending` und wird bei jedem Frame geprüft. So gibt es keine Sperren zwischen Threads und kein
 //! Blockieren der Oberfläche.
+//!
+//! Die Agenten-Werkzeuge der Chats (#338, nicht für externe Agenten) stehen in [`agent`](self::agent_tools).
+
+#[path = "mcp/agent.rs"]
+mod agent_tools;
 
 use super::*;
 use crate::hooks::McpJob;
@@ -82,6 +87,8 @@ enum Pend {
     /// `create_session` mit Linux-`cwd`: wartet auf die Ordnerprüfung in WSL (Hintergrund-Thread, #172).
     /// `distro`/`path`: was geprüft wird (beim Anlegen muss es noch passen).
     Create { rx: std::sync::mpsc::Receiver<crate::wsl::DirCheck>, distro: String, path: String },
+    /// `run_command` im Terminal eines Chats (#338): wartet, bis die Shell des (frisch gestarteten) Terminals bereit ist.
+    AgentRun,
 }
 
 pub(super) struct PendingMcp {
@@ -110,6 +117,8 @@ pub(super) struct McpState {
     next_token: u64,
     /// Der gerade ausgeführte Aufruf kommt von einem nicht zuzuordnenden (losgelösten) Prozess (#152).
     unattributable: bool,
+    /// Terminal je Chat für `run_command` ohne `session` (#338): Chat → Sitzung.
+    chat_terms: HashMap<u64, u64>,
 }
 
 impl McpState {
@@ -728,6 +737,10 @@ impl App {
         // Wartende zuerst (neue Anfragen können weitere anhängen).
         let pend = std::mem::take(&mut self.mcp.pending);
         for p in pend {
+            if let Pend::AgentRun = &p.kind {
+                self.agent_ready(p);
+                continue;
+            }
             if let Pend::Create { rx, distro, path } = &p.kind {
                 // Ordnerprüfung fertig (oder Frist um: dann gilt „unbekannt“ und die Sitzung wird trotzdem angelegt).
                 // Lange danach (der Aufrufer hat aufgegeben) wird nichts mehr angelegt.
@@ -1873,7 +1886,7 @@ impl App {
                 }
                 None
             }
-            Pend::Shot { .. } | Pend::Create { .. } => None,
+            Pend::Shot { .. } | Pend::Create { .. } | Pend::AgentRun => None,
             Pend::Run { cmd, prompt0, cwd0, start_abs, max_lines, cmd_shell, started, mark0, nested, zsh } => {
                 let Some(s) = &e.live else { return Some(Err(er("session_not_running", tr("Die Sitzung läuft nicht mehr.", "The session is no longer running.")))) };
                 let (advanced, exit, mark) = {

@@ -156,6 +156,17 @@ All new fields are optional: a missing field means the previous behaviour, and o
 ## New fields in 2.6.1
 - `chats/<id>.json` → per answer the optional list `repairs` (see [Chat histories](#chat-histories)). Older versions ignore it.
 
+## New fields in 2.7.0 (agent tools in chats)
+All fields are optional; older versions ignore them, and missing fields mean the defaults below. See [Agent tools](chat.md#agent-tools).
+- `chats/<id>.json` → `todos`: the model's to-do list (`update_todos`), shown at the top of the chat – a list of `{"content": "…", "status": "pending" | "in_progress" | "completed"}`. Only written when not empty; unreadable entries are skipped. *Clear history* also clears it.
+- `chats/<id>.json` → `always_allow` can now also hold rules of the agent tools **without a session**: `{"tool": "edit_file", "session": null}` applies to that tool in the whole chat; `{"tool": "run_command", "session": null, "prefix": "cargo test"}` applies to commands in the chat's terminal that start with these words (never to commands with `;`, `&`, `|`, redirections or `$( … )`). A `run_command` rule without `prefix`, a `read_file` rule and session-less rules of other tools (e.g. from pre-releases of 2.2.0) still never apply and are not written. Calls that touch a sensitive file always ask, whatever the rules say.
+- `settings.json` → `agent_tools` (*Settings → Models → Agent tools*), with these defaults:
+  - `sensitive`: the patterns of sensitive files (reading, changing or moving them always asks) – default `.env`, `.env.*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `*.ppk`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `credentials`, `credentials.*`, `secrets.*`, `*.secret`, `.npmrc`, `.pypirc`, `.htpasswd`, `*.tfstate`, `*.tfstate.*`, `*.tfvars`;
+  - `command_timeout_secs`: timeout of `run_command` in the chat's terminal, default `120` (5–600);
+  - `web_fetch`: offer `web_fetch`, default `true`;
+  - `search`: `off` (default), `searxng`, `brave` or `tavily`; `searxng_url`: address of your SearXNG instance; `search_key`: your Brave/Tavily API key, encrypted like server keys (never plain text). The last two are only written when set.
+  An unreadable field falls back to its default; the other fields stay.
+
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 

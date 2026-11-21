@@ -2,6 +2,7 @@
 //! einem Ersatz-Hub testen lässt. Die App setzt [`ChatToolHost`] um (Ausführung über den MCP-Ausführer mit dem Chat
 //! als Aufrufer, nächste Anfrage über das Backend des Hubs).
 
+use super::agent;
 use super::session::{ChatState, ToolStep};
 use super::store::ToolCall;
 use super::tools::{ToolPolicy, ToolResult};
@@ -58,12 +59,24 @@ pub fn drive(host: &mut dyn ChatToolHost, id: u64) -> Driven {
         out.changed |= c.rev() != before;
         match step {
             ToolStep::Idle => {
-                // Freigabe-Zeile: Ziel mit Namen (einmal je wartendem Aufruf).
-                let pending = host.chat(id).and_then(|c| if c.approval_target.is_none() { c.pending_approval().cloned() } else { None });
-                if let Some(call) = pending {
-                    let label = target_label(&call, |s| host.session_name(s));
+                // Freigabe-Zeile: Ziel mit Namen und – bei edit_file/write_file – die Diff-Vorschau (einmal je wartendem
+                // Aufruf; die Vorschau liest die Datei einmal von der Platte).
+                let pending = host.chat(id).and_then(|c| {
+                    let call = c.pending_approval()?.clone();
+                    let need_label = c.approval_target.is_none();
+                    let need_preview = c.approval_preview.as_ref().is_none_or(|(cid, _)| *cid != call.id);
+                    (need_label || need_preview).then_some((call, need_label, need_preview))
+                });
+                if let Some((call, need_label, need_preview)) = pending {
+                    let label = need_label.then(|| if agent::is_local(&call) { agent::target(&call) } else { target_label(&call, |s| host.session_name(s)) }).flatten();
+                    let preview = if need_preview && agent::is_local(&call) { agent::files::preview(&call.name, &call.arguments, &policy.agent).map(|p| (call.id.clone(), p)) } else { None };
                     if let Some(c) = host.chat(id) {
-                        c.approval_target = label;
+                        if need_label {
+                            c.approval_target = label;
+                        }
+                        if preview.is_some() {
+                            c.approval_preview = preview;
+                        }
                     }
                 }
                 return out;
@@ -128,11 +141,12 @@ mod tests {
         /// Werkzeuge, deren Ergebnis erst später kommt; der Sender wartet hier.
         later: Vec<&'static str>,
         waiting: Vec<SyncSender<ToolResult>>,
+        agent: crate::chat::agent::AgentEnv,
     }
 
     impl Fake {
         fn new(cfg: LlmModel, turns: Vec<Vec<TurnEvent>>) -> Fake {
-            Fake { chats: HashMap::new(), cfg, backend: Script(Mutex::new(turns)), executed: Vec::new(), later: Vec::new(), waiting: Vec::new() }
+            Fake { chats: HashMap::new(), cfg, backend: Script(Mutex::new(turns)), executed: Vec::new(), later: Vec::new(), waiting: Vec::new(), agent: Default::default() }
         }
         fn send(&mut self, id: u64, text: &str) {
             let c = self.chats.entry(id).or_insert_with(|| ChatState::new(ChatFile::default(), None));
@@ -161,7 +175,7 @@ mod tests {
             self.chats.get_mut(&id)
         }
         fn policy(&self, _: u64) -> ToolPolicy {
-            ToolPolicy::new(self.cfg.clone(), None, false)
+            ToolPolicy::new(self.cfg.clone(), None, false).with_agent(self.agent.clone())
         }
         fn execute(&mut self, chat: u64, call: &ToolCall) -> Receiver<ToolResult> {
             self.executed.push((chat, call.name.clone(), call.arguments.clone()));
@@ -242,6 +256,36 @@ mod tests {
         assert_eq!(c.steps, crate::chat::session::LOOP_LIMIT);
         assert!(h.executed.is_empty());
         assert_eq!(c.status(), ChatStatus::Ready);
+    }
+
+    #[test]
+    fn agent_edits_wait_with_a_diff_preview_and_reads_run_freely() {
+        let (d, env) = crate::chat::agent::paths::tests::tmp_root("driver");
+        std::fs::write(d.join("a.txt"), "one\ntwo\n").unwrap();
+        let mut h = Fake::new(
+            cfg(McpLevel::Control, 10),
+            vec![
+                vec![tc("r", "read_file", serde_json::json!({"path": "a.txt"})), tc("e", "edit_file", serde_json::json!({"path": "a.txt", "old_string": "two", "new_string": "2"})), TurnEvent::Done],
+                vec![TurnEvent::Delta("ok".into()), TurnEvent::Done],
+            ],
+        );
+        h.agent = env;
+        h.send(5, "edit");
+        h.frames(5, 4);
+        assert_eq!(h.executed.iter().map(|e| e.1.as_str()).collect::<Vec<_>>(), ["read_file"], "Lesen ohne Freigabe");
+        let c = h.chat_ref(5);
+        assert_eq!(c.status(), ChatStatus::Approval);
+        assert_eq!(c.approval_target.as_deref(), Some("a.txt"));
+        let (id, p) = c.approval_preview.clone().expect("Diff-Vorschau");
+        assert_eq!(id, "e");
+        let diff = p.diff.unwrap();
+        assert_eq!((diff.added, diff.removed, p.path.as_str()), (1, 1, "a.txt"));
+        assert!(h.chats.get_mut(&5).unwrap().decide("e", Decision::Allow));
+        assert!(h.chat_ref(5).approval_preview.is_none(), "nach der Entscheidung weg");
+        h.frames(5, 4);
+        assert_eq!(h.executed.len(), 2);
+        assert_eq!(h.chat_ref(5).status(), ChatStatus::Ready);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

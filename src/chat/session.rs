@@ -126,6 +126,9 @@ pub struct ChatState {
     context_pause: bool,
     /// Ziel des wartenden Aufrufs für die Freigabe-Zeile, z. B. `session 4 "build"` (setzt der Hub).
     pub approval_target: Option<String>,
+    /// Diff-Vorschau des wartenden `edit_file`/`write_file` (#338): (Kennung des Aufrufs, Vorschau); setzt der Hub
+    /// zusammen mit `approval_target`.
+    pub approval_preview: Option<(String, super::agent::files::Preview)>,
     /// Einmalige Frage nach der Stufe des Modells ist offen (setzt der Hub beim ersten Senden; siehe
     /// [`ChatState::awaiting_level_choice`]) – und wer sie ausgelöst hat: Nur bei [`LevelAsker::User`] geht nach der
     /// Antwort der Entwurf im Eingabefeld los.
@@ -253,6 +256,7 @@ impl ChatState {
             token_scale: 1.0,
             context_pause: false,
             approval_target: None,
+            approval_preview: None,
             level_question: None,
             origin_sessions: Vec::new(),
             context_warned: false,
@@ -353,6 +357,8 @@ impl ChatState {
             return false;
         }
         self.file.messages.clear();
+        // Die To-do-Liste gehört zum Gespräch (#338).
+        self.file.todos.clear();
         self.ui = UiCache::default();
         self.usage = None;
         self.context = None;
@@ -526,6 +532,7 @@ impl ChatState {
         self.context_pause = false;
         self.loop_stop = false;
         self.approval_target = None;
+        self.approval_preview = None;
         if had || fixed > 0 {
             self.changed(self.turn_msg.min(self.file.messages.len()));
         }
@@ -540,6 +547,7 @@ impl ChatState {
         let at = self.file.messages.len();
         self.file.messages.push(logic::tool_result(&p.call, status, content));
         self.approval_target = None;
+        self.approval_preview = None;
         self.changed(at);
     }
 
@@ -575,11 +583,20 @@ impl ChatState {
     /// Platz höchstens die Hälfte dessen, was in der Runde noch frei ist. Der Platz ist in geschätzten Tokens (ASCII ≈
     /// 3 Zeichen je Token) und wird mit dem neuesten Abgleich `token_scale` nachkorrigiert.
     pub fn result_cap(&self) -> usize {
+        self.result_cap_with(tools::MAX_RESULT_BYTES)
+    }
+
+    /// Wie [`ChatState::result_cap`], aber mit der Grenze des Werkzeugs `tool` (`read_file`: 32 KB, #338).
+    pub fn result_cap_for(&self, tool: &str) -> usize {
+        self.result_cap_with(tools::max_result_bytes(tool))
+    }
+
+    fn result_cap_with(&self, limit: usize) -> usize {
         match self.history_budget {
-            None => tools::MAX_RESULT_BYTES,
+            None => limit,
             Some(b) => {
                 let b = (b as f64 * self.budget_scale as f64 / self.token_scale.max(1.0) as f64) as usize;
-                (b.saturating_sub(self.round_tokens()) * 3 / 2).min(tools::MAX_RESULT_BYTES)
+                (b.saturating_sub(self.round_tokens()) * 3 / 2).min(limit)
             }
         }
     }
@@ -626,7 +643,7 @@ impl ChatState {
             self.pause_context();
             return;
         }
-        let (st, content) = tools::result_message(name, r, self.result_cap());
+        let (st, content) = tools::result_message(name, r, self.result_cap_for(name));
         self.finish_first(st, content);
         if let Some(c) = call {
             if self.note_outcome(&c, failed) {
@@ -679,7 +696,7 @@ impl ChatState {
         if m.role != Role::Assistant || m.error.is_some() || !m.tool_calls.is_empty() {
             return false;
         }
-        let Some(found) = repair::find_text_calls(&m.content, &|n| crate::mcp::tool_level(n).is_some()) else { return false };
+        let Some(found) = repair::find_text_calls(&m.content, &|n| crate::mcp::tool_level(n).is_some() || super::agent::is_agent_tool(n)) else { return false };
         let mut calls = Vec::new();
         let mut repairs = Vec::new();
         for (k, tc) in found.calls.into_iter().enumerate() {
@@ -834,8 +851,17 @@ impl ChatState {
             }
         }
         self.approval_target = None;
+        self.approval_preview = None;
         self.touch();
         true
+    }
+
+    /// To-do-Liste des Chats ersetzen (`update_todos`, #338).
+    pub fn set_todos(&mut self, todos: Vec<super::store::ChatTodo>) {
+        if self.file.todos != todos {
+            self.file.todos = todos;
+            self.touch();
+        }
     }
 
     /// Dauerhafte Freigabe zurücknehmen. `false`, wenn es sie nicht gab.
@@ -1376,7 +1402,7 @@ mod tests {
         let id = c.pending_approval().unwrap().id.clone();
         assert!(c.decide(&id, Decision::Always));
         assert_eq!(drive(&mut c, &b, &p, &ok_exec), ["send_text"]);
-        let rule = AllowRule { tool: "send_text".into(), session: Some(2) };
+        let rule = AllowRule { tool: "send_text".into(), session: Some(2), prefix: None };
         assert_eq!(c.file.always_allow, [rule.clone()]);
         c.draft = "third".into();
         c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));

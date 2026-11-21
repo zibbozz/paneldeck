@@ -284,7 +284,8 @@ fn sockaddr_ip(s: &[u64; 16]) -> Option<IpAddr> {
     }
 }
 
-fn remote_ip(h: *mut c_void) -> Option<IpAddr> {
+/// Tatsächliche Gegenstelle einer gesendeten Anfrage (auch für `web_fetch` der Chat-Werkzeuge, #338).
+pub(crate) fn remote_ip(h: *mut c_void) -> Option<IpAddr> {
     let mut ci = ConnInfo { cb: std::mem::size_of::<ConnInfo>() as u32, local: [0; 16], remote: [0; 16] };
     let mut len = std::mem::size_of::<ConnInfo>() as u32;
     // SAFETY: Puffer der angegebenen Größe; synchrone Abfrage nach dem Verbindungsaufbau.

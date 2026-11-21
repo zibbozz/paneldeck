@@ -136,51 +136,125 @@ pub struct ChatFile {
     /// gelesen, gelten aber nie und fallen beim Speichern weg.
     #[serde(skip_serializing_if = "no_session_rules", serialize_with = "session_rules", deserialize_with = "lenient_rules")]
     pub always_allow: Vec<AllowRule>,
+    /// To-do-Liste des Chats (`update_todos`, seit 2.7.0, #338); oben im Chat angezeigt. Unlesbares ergibt eine leere
+    /// Liste.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_todos")]
+    pub todos: Vec<ChatTodo>,
     pub messages: Vec<ChatMsg>,
 }
 
 impl Default for ChatFile {
     fn default() -> Self {
-        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), messages: Vec::new() }
+        ChatFile { version: VERSION, context_start: None, always_allow: Vec::new(), todos: Vec::new(), messages: Vec::new() }
     }
 }
 
+/// Stand eines To-dos des Chats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl TodoStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TodoStatus::Pending => "pending",
+            TodoStatus::InProgress => "in_progress",
+            TodoStatus::Completed => "completed",
+        }
+    }
+}
+
+/// Ein To-do des Chats (`update_todos`).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatTodo {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
+/// To-dos tolerant lesen: Unlesbares fällt weg, ein falscher Typ ergibt eine leere Liste.
+fn lenient_todos<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ChatTodo>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_array().map(|a| a.iter().filter_map(|x| serde_json::from_value::<ChatTodo>(x.clone()).ok()).filter(|t| !t.content.trim().is_empty()).collect()).unwrap_or_default())
+}
+
 /// Eine dauerhafte Freigabe: dieses Werkzeug für diese Ziel-Sitzung (`session` aus den Argumenten des Aufrufs). Nur
-/// wenn beides passt, läuft ein Aufruf ohne Nachfrage. Regeln ohne Sitzung (`null`, aus Vorabständen) gelten nie.
+/// wenn beides passt, läuft ein Aufruf ohne Nachfrage. Regeln ohne Sitzung (`null`, aus Vorabständen) gelten nie –
+/// außer für die Agenten-Werkzeuge des Chats (seit 2.7.0, #338): dort gilt eine Regel je Werkzeug für den ganzen
+/// Chat, bei `run_command` im Terminal des Chats nur mit `prefix` (Befehle, die wortweise so beginnen).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllowRule {
     pub tool: String,
     pub session: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 /// Werkzeuge, für die es nie „Immer für diesen Chat“ gibt (auch mit `session`-Argument nicht).
 pub const NEVER_ALWAYS: &[&str] = &["create_session"];
 
 impl AllowRule {
-    /// Regel für einen Aufruf (Werkzeug + Ziel-Sitzung aus `arguments.session`).
+    /// Regel für einen Aufruf: Werkzeug + Ziel-Sitzung aus `arguments.session`; Agenten-Werkzeuge ohne Sitzung,
+    /// `run_command` im Terminal des Chats mit dem Präfix des Befehls.
     pub fn for_call(call: &ToolCall) -> Self {
-        AllowRule { tool: call.name.clone(), session: call.arguments.get("session").and_then(|s| s.as_u64()) }
+        if super::agent::is_local(call) {
+            let prefix = (call.name == "run_command").then(|| call.arguments.get("command").and_then(|c| c.as_str()).and_then(super::agent::command_prefix)).flatten();
+            return AllowRule { tool: call.name.clone(), session: None, prefix };
+        }
+        AllowRule { tool: call.name.clone(), session: call.arguments.get("session").and_then(|s| s.as_u64()), prefix: None }
     }
 
-    /// Darf es für diesen Aufruf „Immer für diesen Chat“ geben? Nur mit einer Ziel-Sitzung (Zahl im Argument
-    /// `session`) und nie für [`NEVER_ALWAYS`]. Werkzeuge ohne Ziel (Tickets, Todos, `create_session` …) fragen immer.
+    /// Darf es für diesen Aufruf „Immer für diesen Chat“ geben? Paneldeck-Werkzeuge nur mit einer Ziel-Sitzung (Zahl
+    /// im Argument `session`) und nie für [`NEVER_ALWAYS`] – Werkzeuge ohne Ziel (Tickets, Todos, `create_session` …)
+    /// fragen immer. Agenten-Werkzeuge: siehe `agent::always_eligible` (nie für sensible Dateien).
     pub fn eligible(call: &ToolCall) -> bool {
+        if super::agent::is_local(call) {
+            return super::agent::always_eligible(call);
+        }
         call.arguments.get("session").is_some_and(|s| s.as_u64().is_some()) && !NEVER_ALWAYS.contains(&call.name.as_str())
     }
 
     pub fn matches(&self, call: &ToolCall) -> bool {
-        self.session.is_some() && AllowRule::eligible(call) && *self == AllowRule::for_call(call)
+        if self.session.is_none() {
+            // Regel eines Agenten-Werkzeugs (nur gültige; alte Regeln ohne Sitzung gelten weiter nie).
+            if !self.valid() || self.tool != call.name || !super::agent::is_local(call) || !AllowRule::eligible(call) {
+                return false;
+            }
+            return match &self.prefix {
+                Some(p) => call.arguments.get("command").and_then(|c| c.as_str()).is_some_and(|c| super::agent::prefix_matches(p, c)),
+                None => true,
+            };
+        }
+        AllowRule::eligible(call) && *self == AllowRule::for_call(call)
+    }
+
+    /// Gilt die Regel überhaupt? Mit Sitzung immer; ohne nur für Agenten-Werkzeuge (außer `read_file`), bei
+    /// `run_command` nur mit einem nicht leeren Präfix.
+    pub fn valid(&self) -> bool {
+        if self.session.is_some() {
+            return self.prefix.is_none();
+        }
+        match self.tool.as_str() {
+            "run_command" => self.prefix.as_deref().is_some_and(|p| !p.trim().is_empty()),
+            "read_file" => false,
+            t => super::agent::is_agent_tool(t) && self.prefix.is_none(),
+        }
     }
 }
 
 fn no_session_rules(v: &[AllowRule]) -> bool {
-    v.iter().all(|r| r.session.is_none())
+    !v.iter().any(AllowRule::valid)
 }
 
-/// Nur Regeln mit Sitzung schreiben.
+/// Nur gültige Regeln schreiben (mit Sitzung oder gültige Regeln der Agenten-Werkzeuge).
 fn session_rules<S: serde::Serializer>(v: &[AllowRule], s: S) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeSeq;
-    let keep: Vec<&AllowRule> = v.iter().filter(|r| r.session.is_some()).collect();
+    let keep: Vec<&AllowRule> = v.iter().filter(|r| r.valid()).collect();
     let mut seq = s.serialize_seq(Some(keep.len()))?;
     for r in keep {
         seq.serialize_element(r)?;
@@ -199,14 +273,18 @@ fn lenient_rules<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AllowRule
     let v = serde_json::Value::deserialize(d)?;
     let one = |x: &serde_json::Value| -> Option<AllowRule> {
         if let Some(s) = x.as_str() {
-            return Some(AllowRule { tool: s.to_string(), session: None });
+            return Some(AllowRule { tool: s.to_string(), session: None, prefix: None });
         }
         let tool = x.get("tool")?.as_str()?.to_string();
         let session = match x.get("session") {
             None | Some(serde_json::Value::Null) => None,
             Some(s) => Some(s.as_u64()?),
         };
-        Some(AllowRule { tool, session })
+        let prefix = match x.get("prefix") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(p) => Some(p.as_str()?.to_string()),
+        };
+        Some(AllowRule { tool, session, prefix })
     };
     let mut out: Vec<AllowRule> = Vec::new();
     for r in v.as_array().map(|a| a.iter().filter_map(one).collect::<Vec<_>>()).unwrap_or_default() {
@@ -307,7 +385,7 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let keep_from = file.messages.iter().take_while(|m| m.role == Role::System).count();
     let size = |from: usize| -> usize { parts[..keep_from].iter().chain(&parts[from..]).map(|p| p.len() + 1).sum() };
     // Kopf ohne Nachrichten (+ Reserve für context_start): `{"version":1,"context_start":N,"always_allow":[…],"messages":[]}`
-    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + 16;
+    let head_len = 64 + serde_json::to_vec(&file.always_allow).map(|v| v.len()).unwrap_or(0) + serde_json::to_vec(&file.todos).map(|v| v.len() + 10).unwrap_or(0) + 16;
     let mut drop_to = keep_from;
     if head_len + size(keep_from) > cap {
         let mut total = size(keep_from);
@@ -319,7 +397,7 @@ pub fn serialize_capped(file: &ChatFile, cap: usize) -> Vec<u8> {
     let dropped = drop_to - keep_from;
     // Gekürzt: der Index rückt nach; lag er im weggefallenen Teil, sieht das Modell ohnehin alles Übrige.
     let context_start = if dropped == 0 { file.context_start } else { file.context_start.and_then(|c| (c >= drop_to).then(|| c - dropped)).filter(|c| *c > keep_from) };
-    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), messages: Vec::new() };
+    let head = ChatFile { version: file.version, context_start, always_allow: file.always_allow.clone(), todos: file.todos.clone(), messages: Vec::new() };
     let mut data = serde_json::to_vec(&head).unwrap_or_default();
     // `messages` ist das letzte Feld: `…"messages":[]}` → Nachrichten zwischen die Klammern setzen.
     data.truncate(data.len().saturating_sub(2));
@@ -403,7 +481,7 @@ mod tests {
         t.status = Some(ToolStatus::Ok);
         let mut e = ChatMsg::new(Role::Assistant, "");
         e.error = Some("connection refused".into());
-        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![AllowRule { tool: "send_text".into(), session: Some(4) }], messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
+        ChatFile { version: VERSION, context_start: Some(1), always_allow: vec![rule("send_text", Some(4))], todos: Vec::new(), messages: vec![ChatMsg::new(Role::User, "Hi ä 😀"), a, t, ChatMsg::new(Role::Assistant, "**done**"), e] }
     }
 
     #[test]
@@ -454,7 +532,53 @@ mod tests {
     }
 
     fn rule(tool: &str, session: Option<u64>) -> AllowRule {
-        AllowRule { tool: tool.into(), session }
+        AllowRule { tool: tool.into(), session, prefix: None }
+    }
+
+    #[test]
+    fn agent_tool_rules_are_per_tool_and_commands_per_prefix() {
+        let call = |name: &str, args: serde_json::Value| ToolCall { id: "c".into(), name: name.into(), arguments: args };
+        // Agenten-Werkzeug: eine Regel für den ganzen Chat
+        let edit = call("edit_file", serde_json::json!({"path": "a.rs", "old_string": "x", "new_string": "y"}));
+        assert!(AllowRule::eligible(&edit));
+        let r = AllowRule::for_call(&edit);
+        assert_eq!(r, rule("edit_file", None));
+        assert!(r.valid() && r.matches(&call("edit_file", serde_json::json!({"path": "b.rs"}))));
+        assert!(!r.matches(&call("write_file", serde_json::json!({"path": "b.rs"}))));
+        // Sensible Dateien: nie „Immer“
+        assert!(!AllowRule::eligible(&call("read_file", serde_json::json!({"path": ".env"}))));
+        assert!(!rule("read_file", None).valid());
+        // Befehle im Terminal des Chats: nur mit Präfix, wortweise, ohne Verkettung
+        let cmd = |c: &str| call("run_command", serde_json::json!({"command": c}));
+        let r = AllowRule::for_call(&cmd("cargo test --release"));
+        assert_eq!(r, AllowRule { tool: "run_command".into(), session: None, prefix: Some("cargo test".into()) });
+        assert!(r.matches(&cmd("cargo test")) && r.matches(&cmd("cargo test -p x")));
+        assert!(!r.matches(&cmd("cargo build")) && !r.matches(&cmd("cargo test; del x")));
+        assert!(!r.matches(&call("run_command", serde_json::json!({"command": "cargo test", "session": 4}))), "nicht für andere Sitzungen");
+        // Alte Regel „run_command“ ohne Sitzung und Präfix gilt nie
+        assert!(!rule("run_command", None).matches(&cmd("cargo test")));
+        assert!(!rule("run_command", None).valid());
+        // Speichern: gültige Regeln der Agenten-Werkzeuge bleiben, ungültige fallen weg
+        let f = ChatFile { always_allow: vec![rule("edit_file", None), r.clone(), rule("send_text", None), rule("read_file", None)], ..ChatFile::default() };
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(text.contains(r#""always_allow":[{"tool":"edit_file","session":null},{"tool":"run_command","session":null,"prefix":"cargo test"}]"#), "{text}");
+        let (back, _) = parse(&text).unwrap();
+        assert_eq!(back.always_allow, [rule("edit_file", None), r]);
+    }
+
+    #[test]
+    fn todos_are_optional_lenient_and_round_trip() {
+        let (f, _) = parse(r#"{"messages":[]}"#).unwrap();
+        assert!(f.todos.is_empty());
+        assert!(!String::from_utf8(serialize_capped(&f, 1000)).unwrap().contains("todos"));
+        let (f, skipped) = parse(r#"{"todos":[{"content":"a","status":"in_progress"},5,{"content":"","status":"pending"},{"content":"b","status":"weird"},{"content":"c"}],"messages":[{"role":"user","content":"x"}]}"#).unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(f.todos, [ChatTodo { content: "a".into(), status: TodoStatus::InProgress }, ChatTodo { content: "c".into(), status: TodoStatus::Pending }]);
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(text.contains(r#""todos":[{"content":"a","status":"in_progress"},{"content":"c","status":"pending"}]"#), "{text}");
+        assert_eq!(parse(&text).unwrap().0, f);
+        let (f, _) = parse(r#"{"todos":"x","messages":[]}"#).unwrap();
+        assert!(f.todos.is_empty());
     }
 
     #[test]

@@ -13,6 +13,11 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - The chat always shows how full the model's context is, e.g. `4342/8192 (53%)`. Numbers come from the server's last answer; before the first answer an estimate marked with `~` is shown. A tooltip splits it into system prompt + tools, history and the answer reserve. Near the limit the display changes colour and warns that old messages will drop out (#339)
 - Settings → Models: a switch for each part of the local chats' instructions (Paneldeck explanation, call rules, tool descriptions, examples per tool, error handling, model family addition, answer language, safety rules), globally and per model, with a manual choice of the model family, a preview and a token count. The count uses the server's tokenizer where there is one (llama.cpp, vLLM), otherwise an estimate marked `~`. Switching off the safety rules shows a warning; Paneldeck still enforces them. New optional fields in `settings.json`: `chat_prompt_parts`, and per model `prompt_parts` and `prompt_family` (#341)
+- Chats with local models get agent tools for their project folder: read files with line numbers, list folders, find files (`glob`), search contents with regular expressions (`grep`, respects `.gitignore`), edit and write files with a diff preview in the approval, move files and delete them to the recycle bin, run commands in the chat's own visible terminal, read-only `git_status`/`git_diff`/`git_log`, fetch public web pages, search the web with your own SearXNG, Brave or Tavily (off by default), and a to-do list shown at the top of the chat. Access stays inside the project folder; sensitive files such as `.env` or keys are only read, changed or moved after approval. The master prompt documents the agent tools like Paneldeck's own tools. New section *Settings → Models → Agent tools*. The tools are only available in Paneldeck's chats, not to external MCP clients (#338)
+
+### Changed
+
+- Local chats: without a custom context length, Ollama now gets 65536 tokens for level Control when the chat has a project folder (the agent tools make the full instructions larger); level Read stays at 32768 (#338)
 
 ## [2.6.1] - 2026-11-21
 

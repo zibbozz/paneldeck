@@ -1502,6 +1502,20 @@ c.close()
           $done = '{"model":"fake-model","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":5,"eval_count":1}'
           if ($hasTools -and $last -match 'loop please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_terminal","arguments":{"session":"abc"}}}]},"done":false}' }
           elseif ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
+          # #338 Agenten-Werkzeuge: "agent <x> please" -> ein Aufruf des jeweiligen Werkzeugs im Projektordner des Chats.
+          elseif ($hasTools -and $last -match 'agent (read|grep|todos|write|edit|outside|env|cmd) please') {
+            $call = switch ($Matches[1]) {
+              'read' { '{"name":"read_file","arguments":{"path":"notes.txt"}}' }
+              'grep' { '{"name":"grep","arguments":{"pattern":"needle","output_mode":"files_with_matches"}}' }
+              'todos' { '{"name":"update_todos","arguments":{"todos":[{"content":"Smoke step","status":"in_progress"},{"content":"Done step","status":"done"}]}}' }
+              'write' { '{"name":"write_file","arguments":{"path":"out/new.txt","content":"agent-written\n"}}' }
+              'edit' { '{"name":"edit_file","arguments":{"path":"notes.txt","old_string":"hello needle","new_string":"hello edited"}}' }
+              'outside' { '{"name":"read_file","arguments":{"path":"../outside.txt"}}' }
+              'env' { '{"name":"read_file","arguments":{"path":".env"}}' }
+              'cmd' { '{"name":"run_command","arguments":{"command":"echo agent-cmd-ok"}}' }
+            }
+            $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":' + $call + '}]},"done":false}'
+          }
           elseif ($hasTools -and $last -match 'text call please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"Let me check.\n<tool_call>\n{\"name\": \"list_sessions\", \"arguments\": {}}\n</tool_call>"},"done":false}' }
           elseif ($hasTools -and $last -match 'typed call please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_chat","arguments":{"session":"' + $Matches[1] + '","last":"2"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'chain please (\d+) (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_chat_message","arguments":{"session":' + $Matches[1] + ',"text":"proxy please ' + $Matches[2] + '"}}}]},"done":false}' }
@@ -1616,6 +1630,52 @@ c.close()
   $lu = -1; $ms = @($rc.data.messages); for ($i = 0; $i -lt $ms.Count; $i++) { if ($ms[$i].role -eq 'user') { $lu = $i } }
   $bt = @($ms | Select-Object -Skip ($lu + 1) | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_terminal' })
   Check 'Schleifen-Schutz (#340): 3x derselbe fehlerhafte Aufruf -> angehalten mit Hinweis, je bad_args mit Beispiel' ($w.data.matched -eq $true -and $rc.data.paused -eq $true -and $rc.data.pause_note -match 'same failing tool call \(read_terminal\) 3 times in a row' -and $bt.Count -eq 3 -and @($bt | Where-Object { $_.status -eq 'error' -and $_.content -match 'bad_args' -and $_.content -match 'must be an integer' -and $_.content -match 'Correct example' }).Count -eq 3) $rc.text
+  # #338 Agenten-Werkzeuge nur im Chat: eigener Chat mit Projektordner $proj\agent (ask_write des Fake-Modells ist aus,
+  # schreibende Werkzeuge laufen also ohne Freigabe; sensible Dateien fragen trotzdem).
+  $agDir = New-Item -ItemType Directory -Force "$proj\agent"
+  [IO.File]::WriteAllText("$agDir\notes.txt", "hello needle`nsecond line`n", (New-Object Text.UTF8Encoding $false))
+  [IO.File]::WriteAllText("$agDir\.env", "TOKEN=needle-secret`n", (New-Object Text.UTF8Encoding $false))
+  [IO.File]::WriteAllText("$proj\outside.txt", "outside-content`n", (New-Object Text.UTF8Encoding $false))
+  $tl = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Agenten-Werkzeuge (#338) nicht im externen MCP-Server' (-not ($tl -contains 'read_file' -or $tl -contains 'grep' -or $tl -contains 'edit_file' -or $tl -contains 'update_todos'))
+  $AG = (Tool 'create_session' @{ kind = 'chat'; server = 'Fake'; model = 'fake-model'; name = 'Smoke-Agent'; cwd = "$agDir" }).data.id
+  $agentStep = {
+    param($text, $tool, $timeout = 40)
+    [void](Tool 'send_chat_message' @{ session = $AG; text = $text })
+    $w = Tool 'wait_for_status' @{ session = $AG; status = @('ready'); timeout_secs = $timeout } (($timeout + 10) * 1000)
+    $rc = Tool 'read_chat' @{ session = $AG; last = 4 }
+    $t = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq $tool })
+    @{ ok = ($w.data.matched -eq $true); tool = $(if ($t.Count -ge 1) { $t[-1] } else { $null }); text = $rc.text }
+  }
+  $r = & $agentStep 'agent read please' 'read_file'
+  Check 'Agent read_file (#338): Inhalt mit Zeilennummern, frei (ohne Freigabe)' ($r.ok -and $r.tool.status -eq 'ok' -and $r.tool.content -match 'hello needle' -and $r.tool.content -match '\\t' -and $r.tool.content -match 'total_lines') $r.text
+  Check 'Agent-Werkzeuge in der Anfrage an das Modell (read_file, grep)' (@($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"name"\s*:\s*"read_file"' -and $_ -match '"name"\s*:\s*"grep"' }).Count -ge 1)
+  $r = & $agentStep 'agent grep please' 'grep'
+  Check 'Agent grep (#338): findet notes.txt, ueberspringt die sensible .env' ($r.ok -and $r.tool.status -eq 'ok' -and $r.tool.content -match 'notes.txt' -and $r.tool.content -notmatch 'needle-secret' -and $r.tool.content -match '"sensitive":1') $r.text
+  $r = & $agentStep 'agent todos please' 'update_todos'
+  Start-Sleep 1
+  $cj = if (Test-Path "$data\chats\$AG.json") { [IO.File]::ReadAllText("$data\chats\$AG.json") } else { '' }
+  Check 'Agent update_todos (#338): Liste im Chat gespeichert, "done" korrigiert' ($r.ok -and $r.tool.status -eq 'ok' -and $r.tool.content -match 'corrected' -and $cj -match '"todos":\[\{"content":"Smoke step","status":"in_progress"\},\{"content":"Done step","status":"completed"\}\]') "$($r.text) /// $cj"
+  $r = & $agentStep 'agent write please' 'write_file'
+  $nf = "$agDir\out\new.txt"
+  Check 'Agent write_file (#338): Datei mit Ordner angelegt' ($r.ok -and $r.tool.status -eq 'ok' -and (Test-Path $nf) -and [IO.File]::ReadAllText($nf) -eq "agent-written`n") $r.text
+  $r = & $agentStep 'agent edit please' 'edit_file'
+  Check 'Agent edit_file (#338): genau eine Ersetzung' ($r.ok -and $r.tool.status -eq 'ok' -and [IO.File]::ReadAllText("$agDir\notes.txt") -eq "hello edited`nsecond line`n") $r.text
+  $r = & $agentStep 'agent outside please' 'read_file'
+  Check 'Agent read_file ausserhalb des Projektordners -> outside_project, nichts gelesen' ($r.ok -and $r.tool.status -eq 'error' -and $r.tool.content -match 'outside_project' -and $r.text -notmatch 'outside-content') $r.text
+  $r = & $agentStep 'agent cmd please' 'run_command' 90
+  $kids = @((Tool 'list_sessions').data.sessions) | Where-Object { $_.parent -eq $AG -and $_.kind -eq 'terminal' }
+  Check 'Agent run_command ohne session (#338): eigenes Terminal des Chats im Projektordner, Ausgabe kommt zurueck' ($r.ok -and $r.tool.status -eq 'ok' -and $r.tool.content -match 'agent-cmd-ok' -and @($kids).Count -eq 1 -and $kids[0].name -like '*commands*') "$($r.text) /// $($kids | ConvertTo-Json -Compress)"
+  $r2 = & $agentStep 'agent cmd please' 'run_command' 60
+  $kids2 = @((Tool 'list_sessions').data.sessions) | Where-Object { $_.parent -eq $AG -and $_.kind -eq 'terminal' }
+  Check 'Agent run_command: das Terminal des Chats wird wiederverwendet' ($r2.ok -and $r2.tool.status -eq 'ok' -and @($kids2).Count -eq 1) "$($r2.text) /// $($kids2 | ConvertTo-Json -Compress)"
+  # Sensible Datei: fragt auch ohne ask_write; der Chat wartet (approval), der Inhalt erscheint nirgends.
+  [void](Tool 'send_chat_message' @{ session = $AG; text = 'agent env please' })
+  $w = Tool 'wait_for_status' @{ session = $AG; status = @('approval'); timeout_secs = 30 } 40000
+  $rc = Tool 'read_chat' @{ session = $AG; last = 3 }
+  Check 'Agent read_file .env (#338): wartet auf Freigabe trotz ask_write=false, Inhalt nicht gelesen' ($w.data.matched -eq $true -and $w.data.needs_you -eq $true -and $rc.text -notmatch 'needle-secret') $rc.text
+  foreach ($k in @($kids2)) { [void](Tool 'close_session' @{ session = $k.id }) }
+  Check 'Chat mit offener Freigabe schliessen (vom Agenten angelegt)' ((Tool 'close_session' @{ session = $AG }).err -ne $true)
   # Kein Umweg: ein Agent in Sitzung $A laesst den Chat send_text in $A aufrufen -> forbidden, nichts getippt.
   $pa = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Proxy-Agent' }; $A = $pa.data.id; Start-Sleep 4
   $px = InA 'send_chat_message' @{ session = $C; text = "proxy please $A" }

@@ -259,6 +259,88 @@ pub(super) struct ModelsUi {
     pub dirty_since: Option<std::time::Instant>,
     /// Schalter für die Teile des Master-Prompts (#341): globale Auswahl, Vorschauen, Token-Zähler.
     pub prompt: super::prompt_ui::PromptUi,
+    /// Abschnitt „Agenten-Werkzeuge“ (#338): Textfeld der sensiblen Muster (eine Zeile je Muster, `None` = aus den
+    /// Einstellungen neu füllen), eingegebener API-Schlüssel (Klartext nur im Speicher) und Meldung dazu.
+    pub sensitive_text: Option<String>,
+    pub search_key: String,
+    pub search_msg: Option<String>,
+}
+
+/// Abschnitt „Agenten-Werkzeuge“ unter den Servern (#338): sensible Dateien, Zeitlimit für Befehle im Terminal des
+/// Chats, `web_fetch` und der eigene Suchdienst für `web_search`. `true` = geändert (speichern).
+pub(super) fn agent_tools_section(ui: &mut Ui, lang: Lang, s: &mut crate::chat::agent::AgentToolSettings, st: &mut ModelsUi) -> bool {
+    use crate::chat::agent::{SearchProvider, DEFAULT_COMMAND_TIMEOUT};
+    let before = s.clone();
+    ui.add_space(S2);
+    ui.label(RichText::new(lang.t("Agenten-Werkzeuge der Chats", "Agent tools in chats")).strong());
+    ui.label(RichText::new(lang.t(
+        "Dateien lesen und bearbeiten, suchen, Git, Befehle im Terminal des Chats und Web – nur im Projektordner des Chats. Schreiben, Löschen, Befehle und Web fragen vorher; einzelne Werkzeuge lassen sich je Modell abwählen.",
+        "Read and edit files, search, git, commands in the chat's terminal and web – only inside the chat's project folder. Writing, deleting, commands and web ask first; single tools can be unchecked per model.",
+    )).small().color(style::dim(ui)));
+    ui.add_space(S1);
+    row(ui, lang.t("Zeitlimit für Befehle", "Command timeout"), |ui| {
+        ui.add(egui::DragValue::new(&mut s.command_timeout_secs).range(5..=crate::mcp::MAX_WAIT_SECS).suffix(" s"));
+        if s.command_timeout_secs != DEFAULT_COMMAND_TIMEOUT && ui.small_button(lang.t("Standard", "Default")).clicked() {
+            s.command_timeout_secs = DEFAULT_COMMAND_TIMEOUT;
+        }
+    });
+    row(ui, lang.t("Webseiten abrufen", "Fetch web pages"), |ui| {
+        ui.checkbox(&mut s.web_fetch, lang.t("web_fetch anbieten (nur öffentliche https-Seiten, mit Freigabe)", "offer web_fetch (public https pages only, with approval)"));
+    });
+    row(ui, lang.t("Websuche", "Web search"), |ui| {
+        for (p, de, en) in [(SearchProvider::Off, "Aus", "Off"), (SearchProvider::Searxng, "SearXNG", "SearXNG"), (SearchProvider::Brave, "Brave", "Brave"), (SearchProvider::Tavily, "Tavily", "Tavily")] {
+            crate::afford::choice_value(ui, &mut s.search, p, lang.t(de, en), 0.0);
+        }
+    });
+    match s.search {
+        SearchProvider::Off => {
+            ui.label(RichText::new(lang.t("web_search gibt es erst mit einem eigenen Suchdienst (keine Kosten durch Paneldeck).", "web_search needs your own search service (Paneldeck adds no costs).")).small().color(style::dim(ui)));
+        }
+        SearchProvider::Searxng => {
+            row(ui, lang.t("SearXNG-Adresse", "SearXNG address"), |ui| {
+                ui.add(egui::TextEdit::singleline(&mut s.searxng_url).hint_text("http://localhost:8888").desired_width(260.0));
+            });
+            ui.label(RichText::new(lang.t("Die Instanz muss das JSON-Format erlauben (search.formats: json in settings.yml).", "The instance must allow the JSON format (search.formats: json in settings.yml).")).small().color(style::dim(ui)));
+        }
+        SearchProvider::Brave | SearchProvider::Tavily => {
+            row(ui, lang.t("API-Schlüssel", "API key"), |ui| {
+                let hint = if s.search_key.is_empty() { lang.t("Schlüssel eingeben", "enter key") } else { lang.t("gespeichert – neu eingeben zum Ersetzen", "stored – type to replace") };
+                ui.add(egui::TextEdit::singleline(&mut st.search_key).password(true).hint_text(hint).desired_width(220.0));
+                if !st.search_key.trim().is_empty() && ui.button(lang.t("Speichern", "Save")).clicked() {
+                    match llm::secret::protect(st.search_key.trim()) {
+                        Ok(b64) => {
+                            s.search_key = b64;
+                            st.search_key.clear();
+                            st.search_msg = Some(lang.t("Schlüssel verschlüsselt gespeichert.", "Key stored encrypted.").into());
+                        }
+                        Err(e) => st.search_msg = Some(e.text(lang)),
+                    }
+                }
+                if !s.search_key.is_empty() && ui.small_button(lang.t("Entfernen", "Remove")).clicked() {
+                    s.search_key.clear();
+                    st.search_msg = None;
+                }
+            });
+            if let Some(m) = &st.search_msg {
+                ui.label(RichText::new(m).small().color(style::dim(ui)));
+            }
+        }
+    }
+    ui.add_space(S1);
+    ui.label(lang.t("Sensible Dateien (Lesen nur mit Freigabe), ein Muster je Zeile:", "Sensitive files (reading only with approval), one pattern per line:"));
+    let text = st.sensitive_text.get_or_insert_with(|| s.sensitive.join("\n"));
+    let r = ui.add(egui::TextEdit::multiline(text).desired_rows(4).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+    if r.changed() {
+        s.sensitive = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+    }
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(lang.t("Ohne / gilt ein Muster für Dateinamen (*.pem), mit / für Pfade (config/*.json).", "Without / a pattern matches file names (*.pem), with / paths (config/*.json).")).small().color(style::dim(ui)));
+        if s.sensitive != crate::chat::agent::AgentToolSettings::default().sensitive && ui.small_button(lang.t("Standardliste", "Default list")).clicked() {
+            s.sensitive = crate::chat::agent::AgentToolSettings::default().sensitive;
+            st.sensitive_text = None;
+        }
+    });
+    *s != before
 }
 
 /// Jetzt speichern? Sofort, wenn nicht gezogen wird; beim Ziehen spätestens nach 500 ms.
@@ -610,23 +692,30 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
         });
         if cfg.level != McpLevel::Off {
             ui.label(RichText::new(lang.t("Werkzeuge (abgewählte darf das Modell nicht nutzen):", "Tools (unchecked ones are not available to the model):")).small().color(style::dim(ui)));
-            let tools: Vec<_> = crate::mcp::tools().into_iter().filter(|t| t.level <= cfg.level && t.group.available(expert)).collect();
-            egui::Grid::new(("llm_tools", s.id.as_str(), name)).num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
-                for (k, t) in tools.iter().enumerate() {
-                    let mut on = !cfg.disabled_tools.iter().any(|d| d == t.name);
-                    let desc: String = t.description.chars().take(300).collect();
-                    if ui.checkbox(&mut on, RichText::new(t.name).monospace().size(12.0)).on_hover_text(desc).changed() {
-                        if on {
-                            cfg.disabled_tools.retain(|d| d != t.name);
-                        } else {
-                            cfg.disabled_tools.push(t.name.to_string());
+            // Paneldeck-Werkzeuge, darunter die Agenten-Werkzeuge der Chats (#338; `run_command` steht nur dort).
+            let tools: Vec<(&str, String)> = crate::mcp::tools().into_iter().filter(|t| t.level <= cfg.level && t.group.available(expert) && !crate::chat::agent::is_agent_tool(t.name)).map(|t| (t.name, t.description.chars().take(300).collect())).collect();
+            let agent: Vec<(&str, String)> = crate::chat::agent::defs().into_iter().filter(|d| d.level <= cfg.level).map(|d| (d.name, d.description.to_string())).collect();
+            for (title, list, salt) in [(None, tools, "llm_tools"), (Some(lang.t("Agenten-Werkzeuge (Dateien, Suche, Befehle, Git, Web, To-dos):", "Agent tools (files, search, commands, git, web, to-dos):")), agent, "llm_agent_tools")] {
+                if let Some(t) = title {
+                    ui.add_space(S1);
+                    ui.label(RichText::new(t).small().color(style::dim(ui)));
+                }
+                egui::Grid::new((salt, s.id.as_str(), name)).num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
+                    for (k, (tool, desc)) in list.iter().enumerate() {
+                        let mut on = !cfg.disabled_tools.iter().any(|d| d == tool);
+                        if ui.checkbox(&mut on, RichText::new(*tool).monospace().size(12.0)).on_hover_text(desc.as_str()).changed() {
+                            if on {
+                                cfg.disabled_tools.retain(|d| d != tool);
+                            } else {
+                                cfg.disabled_tools.push(tool.to_string());
+                            }
+                        }
+                        if !k.is_multiple_of(2) {
+                            ui.end_row();
                         }
                     }
-                    if k % 2 == 1 {
-                        ui.end_row();
-                    }
-                }
-            });
+                });
+            }
         }
         // Teile des Master-Prompts für dieses Modell (#341).
         super::prompt_ui::model_section(ui, lang, s, name, &mut cfg, prompt, expert);
@@ -839,7 +928,8 @@ impl super::App {
         for id in &out.connect {
             self.llm_connect(ctx, id);
         }
-        if out.changed {
+        let agent_changed = agent_tools_section(ui, lang, &mut self.settings.agent_tools, &mut self.models_ui);
+        if out.changed || agent_changed {
             self.models_ui.dirty_since.get_or_insert_with(std::time::Instant::now);
         }
         self.models_save_tick(ctx);

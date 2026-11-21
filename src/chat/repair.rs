@@ -458,6 +458,10 @@ fn single_type(ps: &Value) -> Option<&str> {
 /// Argumente des Aufrufs gegen das Schema seines Werkzeugs normalisieren (nur Eindeutiges, siehe
 /// [`normalize_with`]). Gibt die Korrekturen zurück; ein unbekanntes Werkzeug bleibt unverändert.
 pub fn normalize(call: &mut ToolCall) -> Vec<String> {
+    // Agenten-Werkzeuge des Chats (#338) haben ein eigenes Schema.
+    if let Some(schema) = super::agent::schema_for(call) {
+        return normalize_with(&schema, &mut call.arguments);
+    }
     match mcp::tools().into_iter().find(|d| d.name == call.name) {
         Some(def) => normalize_with(&def.schema, &mut call.arguments),
         None => Vec::new(),
