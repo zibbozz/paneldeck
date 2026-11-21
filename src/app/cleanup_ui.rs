@@ -363,6 +363,10 @@ impl App {
                 ui.label(RichText::new("⚠").small().color(style::ui().error)).on_hover_text(lang.t("Unwiderruflich – verlangt das Eintippen der Bestätigung.", "Irreversible – requires typing the confirmation."));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Platz für die (schwebende) Bildlaufleiste lassen, sonst liegt sie über dem
+                // Ende der Größenangabe und schneidet die letzten Zeichen ab.
+                let pad = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
+                ui.add_space(pad);
                 ui.label(RichText::new(amount_text(c.scan.as_ref(), item, opts, lang)).small().monospace());
             });
         });

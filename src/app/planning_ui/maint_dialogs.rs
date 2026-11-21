@@ -180,7 +180,7 @@ impl PlanUi {
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                         for t in &p.tickets {
                             ui.horizontal(|ui| {
-                                if ui.link(RichText::new(&t.key).monospace()).clicked() {
+                                if widgets::key_link(ui, &t.key).clicked() {
                                     open_ticket = Some(t.id);
                                 }
                                 ui.label(RichText::new(&t.title).small());

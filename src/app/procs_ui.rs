@@ -832,11 +832,17 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // Die Knöpfe rechts stehen eng (2 px); Name, Status und Befehl brauchen wieder
+                // normalen Abstand und einen Trenner, sonst kleben sie aneinander.
+                ui.spacing_mut().item_spacing.x = style::S1 + 2.0;
+                let dim = style::dim(ui);
                 let (dr, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
                 ui.painter().circle_filled(dr.center(), 4.5, status_color(status));
                 ui.label(RichText::new(&d.name).strong());
+                ui.label(RichText::new("·").color(dim));
                 ui.label(RichText::new(status.label(lang, code)).color(status_color(status)));
-                ui.add(egui::Label::new(RichText::new(&d.command).small().monospace().color(style::dim(ui))).truncate());
+                ui.label(RichText::new("·").color(dim));
+                ui.add(egui::Label::new(RichText::new(&d.command).small().monospace().color(dim)).truncate());
             });
         });
         if close {
