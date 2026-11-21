@@ -47,6 +47,7 @@ mod glyph_tests;
 mod mcp;
 mod models_ui;
 mod multiwin;
+mod prompt_ui;
 mod palette_ui;
 mod osc52;
 mod link_ask;
@@ -3248,6 +3249,7 @@ impl App {
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         serde_json::to_vec(&self.settings.llm_servers).unwrap_or_default().hash(&mut h);
+        serde_json::to_vec(&self.settings.chat_prompt_parts).unwrap_or_default().hash(&mut h);
         crate::mcp::expert_mode().hash(&mut h);
         let base = h.finish();
         for id in idle {
@@ -3331,6 +3333,7 @@ impl App {
             lang: self.settings.language,
             expert: crate::mcp::expert_mode(),
             token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
+            prompt_parts: self.settings.chat_prompt_parts,
         }
     }
 

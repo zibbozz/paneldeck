@@ -494,6 +494,30 @@ fn dropping_the_handle_cancels() {
     assert!(c.load(Ordering::Relaxed));
 }
 
+/// Tokenizer des Servers (#341): llama.cpp (`tokens`), vLLM (`count`), ohne Tokenizer `None`, Ollama fragt nie.
+#[test]
+fn count_tokens_uses_the_servers_tokenizer_where_there_is_one() {
+    let url = "http://127.0.0.1:1234/tokenize";
+    let ep = Endpoint::new(ServerKind::OpenAi, OA);
+    let t = Fake::default().with(Method::Post, url, Canned::ok(r#"{"tokens":[1,2,3,4]}"#));
+    assert_eq!(count_tokens(&t, &ep, "m1", "four words here ok", &no_cancel()).unwrap(), Some(4));
+    let body = t.log()[0].body.clone().unwrap();
+    assert_eq!((body["content"].as_str(), body["prompt"].as_str(), body["model"].as_str()), (Some("four words here ok"), Some("four words here ok"), Some("m1")));
+    let t = Fake::default().with(Method::Post, url, Canned::ok(r#"{"count":7,"tokens":[1],"max_model_len":4096}"#));
+    assert_eq!(count_tokens(&t, &ep, "m1", "x", &no_cancel()).unwrap(), Some(7), "vLLM: count gilt");
+    for code in [404, 405, 501] {
+        let t = Fake::default().with(Method::Post, url, Canned::status(code, "nope"));
+        assert_eq!(count_tokens(&t, &ep, "m1", "x", &no_cancel()).unwrap(), None, "{code}");
+    }
+    let t = Fake::default().with(Method::Post, url, Canned::status(500, "boom"));
+    assert!(count_tokens(&t, &ep, "m1", "x", &no_cancel()).is_err());
+    let t = Fake::default().with(Method::Post, url, Canned::ok(r#"{"other":1}"#));
+    assert!(matches!(count_tokens(&t, &ep, "m1", "x", &no_cancel()), Err(LlmError::BadResponse(_))));
+    let t = Fake::default();
+    assert_eq!(count_tokens(&t, &Endpoint::new(ServerKind::Ollama, OL), "m1", "x", &no_cancel()).unwrap(), None);
+    assert!(t.log().is_empty(), "Ollama: keine Anfrage");
+}
+
 // ---------- Typen und Faden ----------
 
 #[test]

@@ -88,11 +88,14 @@ pub struct TurnContext {
     pub expert: bool,
     /// So viel mehr Tokens zählt der Server als geschätzt (aus der letzten Antwort des Chats, 1,0–4,0; 1,0 = unbekannt).
     pub token_scale: f32,
+    /// Globale Schalter für die Teile des Master-Prompts (`Settings::chat_prompt_parts`, #341); je Modell abweichend in
+    /// `LlmModel::prompt_parts`.
+    pub prompt_parts: crate::llm::prompt_parts::PromptParts,
 }
 
 impl Default for TurnContext {
     fn default() -> Self {
-        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0 }
+        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0, prompt_parts: Default::default() }
     }
 }
 

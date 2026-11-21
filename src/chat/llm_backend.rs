@@ -97,9 +97,11 @@ pub fn system_prompt(policy: &ToolPolicy, model: &str, cx: &TurnContext) -> Stri
     system_prompt_variant(policy, model, cx, super::master_prompt::Variant::Full)
 }
 
-/// Wie [`system_prompt`], in der gewählten Fassung (voll oder Kurzfassung für kleine Kontexte).
+/// Wie [`system_prompt`], in der gewählten Fassung (voll oder Kurzfassung für kleine Kontexte). Es gelten die Schalter
+/// für die Teile (`cx.prompt_parts`, darüber die des Modells) und die Familie des Modells (#341).
 pub fn system_prompt_variant(policy: &ToolPolicy, model: &str, cx: &TurnContext, v: super::master_prompt::Variant) -> String {
-    let text = super::master_prompt::render_variant(policy, model, v);
+    let spec = super::master_prompt::Spec::for_model(policy, model, cx.prompt_parts);
+    let text = super::master_prompt::render_variant_with(policy, &spec, v);
     let line = context_line(cx);
     if line.is_empty() { text } else { format!("{}\n\n{line}", text.trim_end()) }
 }
@@ -185,6 +187,56 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
     (msgs, origin)
 }
 
+/// Systemprompt und Werkzeuge einer Anfrage samt Kontextlänge und Fassung (#340/#341) – die eine Stelle für Anfrage,
+/// Füllstandsanzeige und die Vorschau in Einstellungen → Modelle.
+#[derive(Debug, Clone)]
+pub struct PromptPlan {
+    /// Systemprompt (mit Kontextzeile) in der gewählten Fassung.
+    pub system: String,
+    /// Werkzeug-Beschreibungen für das API-Feld `tools` (Kurzfassung: knapp).
+    pub tools: Vec<llm::ToolSpec>,
+    /// Geschätzte Tokens (ohne Abgleich) von Systemnachricht und Werkzeugen.
+    pub sys_tokens: usize,
+    pub tool_tokens: usize,
+    /// Kontextlänge der Anfrage.
+    pub ctx_len: u32,
+    pub variant: super::master_prompt::Variant,
+}
+
+impl PromptPlan {
+    /// Werkzeuge als JSON (wie sie geschätzt werden; für den Tokenizer des Servers).
+    pub fn tools_json(&self) -> String {
+        if self.tools.is_empty() { String::new() } else { serde_json::to_string(&self.tools).unwrap_or_default() }
+    }
+}
+
+/// Plant den Prompt: voller Master-Prompt mit den eingeschalteten Teilen, Kontextlänge (ohne eigene Angabe nach
+/// `llm::config::auto_context` für genau diesen Prompt), dann die Wahl zwischen voller Fassung und Kurzfassung nach
+/// `llm::config::prompt_fits` – abgeschaltete Teile machen den Prompt kleiner und zählen bei beiden Entscheidungen mit.
+pub fn plan_prompt(server: &crate::llm::config::LlmServer, model: &str, policy: &ToolPolicy, cx: &TurnContext) -> PromptPlan {
+    let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
+    let tokens_of = |tools: &[llm::ToolSpec]| if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(tools).unwrap_or_default()) };
+    let real = |n: usize| (n as f64 * scale as f64).ceil() as usize;
+    let mut system = system_prompt(policy, model, cx);
+    // Die Werkzeug-Beschreibungen belegen ebenfalls Kontext.
+    let mut tools = policy.specs();
+    let mut tool_tokens = tokens_of(&tools);
+    let mut sys_tokens = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system.clone()));
+    // Ohne eigene Angabe: so viel Kontext, wie der volle Prompt und die Werkzeuge samt Platz für das Gespräch brauchen
+    // (in echten Tokens). Ohne Werkzeuge (Stufe Aus, keine Werkzeug-Fähigkeit) bleibt es bei 8192.
+    let ctx_len = server.request_context(model, policy.enabled().then_some(real(sys_tokens + tool_tokens)));
+    // Passt der volle Prompt nicht gut in diesen Kontext (eigene kleine Angabe, OpenAI-kompatibler Server ohne
+    // gemeldete Länge, kleines Modell), gilt die Kurzfassung mit knappen Werkzeug-Beschreibungen (#340).
+    let variant = super::master_prompt::choose(ctx_len, real(sys_tokens + tool_tokens));
+    if variant == super::master_prompt::Variant::Compact {
+        system = system_prompt_variant(policy, model, cx, variant);
+        tools = super::master_prompt::minimal_specs(tools);
+        tool_tokens = tokens_of(&tools);
+        sys_tokens = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system.clone()));
+    }
+    PromptPlan { system, tools, sys_tokens, tool_tokens, ctx_len, variant }
+}
+
 /// Anfrage bauen: Server suchen, Schlüssel entschlüsseln, Systemprompt, Verlauf, Kürzung auf die Kontextlänge.
 /// Fehler = Text für den Nutzer (in `cx.lang`).
 pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result<Prepared, String> {
@@ -210,30 +262,14 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     let endpoint = if with_key { server.endpoint(lang)? } else { Endpoint::new(server.kind, &server.url) };
     let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert);
     let (hist, origin) = map_history(history);
-    let mut messages = Vec::with_capacity(hist.len() + 1);
-    messages.push(ChatMessage::new(Role::System, system_prompt(&policy, model, cx)));
-    messages.extend(hist);
     // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
     // ist entsprechend weniger Platz.
     let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
-    let tokens_of = |tools: &[llm::ToolSpec]| if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(tools).unwrap_or_default()) };
     let real = |n: usize| (n as f64 * scale as f64).ceil() as usize;
-    // Die Werkzeug-Beschreibungen belegen ebenfalls Kontext.
-    let mut tools = policy.specs();
-    let mut tool_tokens = tokens_of(&tools);
-    let mut sys_tokens = llm::tokens::message_tokens(&messages[0]);
-    // Ohne eigene Angabe: so viel Kontext, wie der volle Prompt und die Werkzeuge samt Platz für das Gespräch brauchen
-    // (in echten Tokens). Ohne Werkzeuge (Stufe Aus, keine Werkzeug-Fähigkeit) bleibt es bei 8192.
-    let ctx_len = server.request_context(model, policy.enabled().then_some(real(sys_tokens + tool_tokens)));
-    // Passt der volle Prompt nicht gut in diesen Kontext (eigene kleine Angabe, OpenAI-kompatibler Server ohne
-    // gemeldete Länge, kleines Modell), gilt die Kurzfassung mit knappen Werkzeug-Beschreibungen (#340).
-    let variant = super::master_prompt::choose(ctx_len, real(sys_tokens + tool_tokens));
-    if variant == super::master_prompt::Variant::Compact {
-        messages[0] = ChatMessage::new(Role::System, system_prompt_variant(&policy, model, cx, variant));
-        tools = super::master_prompt::minimal_specs(tools);
-        tool_tokens = tokens_of(&tools);
-        sys_tokens = llm::tokens::message_tokens(&messages[0]);
-    }
+    let PromptPlan { system, tools, sys_tokens, tool_tokens, ctx_len, .. } = plan_prompt(server, model, &policy, cx);
+    let mut messages = Vec::with_capacity(hist.len() + 1);
+    messages.push(ChatMessage::new(Role::System, system));
+    messages.extend(hist);
     let prompt_real = real(sys_tokens + tool_tokens);
     let budget_real = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
     let budget = (budget_real as f64 / scale as f64) as usize;
@@ -703,6 +739,60 @@ mod tests {
         let mut o = s;
         o.kind = ServerKind::OpenAi;
         assert_eq!(prepare(&meta(), &hist, &cx(vec![o])).unwrap().request.num_predict, None);
+    }
+
+    /// Prompt-Teile (#341): abgeschaltete Teile fehlen in der Anfrage und zählen bei der automatischen Kontextlänge und
+    /// bei der Wahl zwischen voller Fassung und Kurzfassung mit (dieselbe Schätzung wie `prompt_fits`/`auto_context`).
+    #[test]
+    fn switched_off_parts_shrink_the_prompt_context_and_variant() {
+        use crate::llm::prompt_parts::{PromptPart, PromptParts};
+        let control = LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("qwen3:8b") };
+        let mut small = PromptParts::default();
+        for p in [PromptPart::About, PromptPart::ToolDocs, PromptPart::Examples, PromptPart::Errors] {
+            small.set(p, false);
+        }
+        let hist = [msg(store::Role::User, "q")];
+        let m = ChatMeta { server: "s1".into(), model: "qwen3:8b".into() };
+        let run = |s: &LlmServer, parts: PromptParts| {
+            let mut c = cx(vec![s.clone()]);
+            c.prompt_parts = parts;
+            c.expert = true;
+            prepare(&m, &hist, &c).unwrap()
+        };
+        // Ollama ohne eigene Angabe: der kleinere Prompt braucht weniger Kontext.
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.last_models = vec![ModelInfo { name: "qwen3:8b".into(), tools: Some(true), context_length: Some(131_072) }];
+        s.set_model_cfg(control.clone());
+        let (full, reduced) = (run(&s, PromptParts::default()), run(&s, small));
+        assert!(!reduced.request.messages[0].content.contains("## What Paneldeck is") && full.request.messages[0].content.contains("## What Paneldeck is"));
+        assert!(reduced.parts.system < full.parts.system);
+        assert!(reduced.request.num_ctx <= full.request.num_ctx, "{:?} {:?}", reduced.request.num_ctx, full.request.num_ctx);
+        // Plan = Anfrage; Kontext nach derselben Regel wie `auto_context`.
+        let mut c = cx(vec![s.clone()]);
+        c.prompt_parts = small;
+        c.expert = true;
+        let plan = plan_prompt(&s, "qwen3:8b", &ToolPolicy::new(control.clone(), Some(true), true), &c);
+        assert_eq!((plan.system.as_str(), plan.ctx_len), (reduced.request.messages[0].content.as_str(), reduced.request.num_ctx.unwrap()));
+        assert_eq!(plan.sys_tokens + plan.tool_tokens, reduced.parts.system + reduced.parts.tools);
+        // Eigene Kontextlänge, in die nur der kleinere Prompt voll passt: voll statt Kurzfassung.
+        let need = plan.sys_tokens + plan.tool_tokens;
+        let mut ctx = 4096u32;
+        while !crate::llm::config::prompt_fits(ctx, need) {
+            ctx += 1024;
+        }
+        let mut own = s.clone();
+        own.set_model_cfg(LlmModel { context_length: Some(ctx), ..control.clone() });
+        let full_plan = plan_prompt(&own, "qwen3:8b", &ToolPolicy::new(own.model_cfg("qwen3:8b"), Some(true), true), &TurnContext { expert: true, ..cx(vec![]) });
+        assert_eq!(full_plan.variant, super::super::master_prompt::Variant::Compact, "alles an: passt nicht voll in {ctx}");
+        let small_plan = plan_prompt(&own, "qwen3:8b", &ToolPolicy::new(own.model_cfg("qwen3:8b"), Some(true), true), &c);
+        assert_eq!(small_plan.variant, super::super::master_prompt::Variant::Full, "weniger Teile: voll in {ctx}");
+        // Je Modell abweichend: die Abweichung gilt.
+        let mut per = s.clone();
+        let mut cfg = control.clone();
+        cfg.prompt_parts.set(PromptPart::Safety, Some(false));
+        per.set_model_cfg(cfg);
+        let p = run(&per, PromptParts::default());
+        assert!(!p.request.messages[0].content.contains("## Safety rules"));
     }
 
     /// Aufteilung für die Füllstandsanzeige (#339): stimmt mit der Anfrage überein, rechnet mit dem Abgleich hoch und

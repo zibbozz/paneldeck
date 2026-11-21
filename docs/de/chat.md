@@ -114,6 +114,26 @@ Oben rechts zeigt jeder Chat immer, wie voll der Kontext des Modells ist, geschr
 - **Tooltip:** Systemprompt + Werkzeuge, Verlauf, die Reserve für die Antwort (ein Viertel des Kontexts), ab wie vielen Tokens die ältesten Nachrichten herausfallen und ob die Zahl vom Server stammt oder geschätzt ist. Die Aufteilung in Systemprompt, Werkzeuge und Verlauf ist immer geschätzt.
 - **Farbe:** Ab 80 % des Platzes vor der Kürzung (Kontext ohne Antwort-Reserve) wechselt die Anzeige in die Warnfarbe mit dem Hinweis „bald fallen alte Nachrichten heraus“; ist dieser Platz voll oder fallen ältere Nachrichten schon heraus, in die Fehlerfarbe mit „alte Nachrichten fallen heraus“. Die Farben kommen aus dem Theme (`warning`, `error`).
 
+### Prompt-Teile (Einstellungen → Modelle)
+*Einstellungen → Modelle → Anweisungen für Chat-Modelle (Master-Prompt)* legt fest, welche Teile der Anweisungen jedes Chat-Modell bekommt – alle sind standardmäßig an:
+
+| Teil | Was es ist |
+|---|---|
+| **Paneldeck-Erklärung** | was Paneldeck ist: Sitzungen, Chats, Todo-Liste und Tickets, Prozessliste, Stufen, wo was in der Oberfläche ist |
+| **Aufruf-Regeln** | nummerierte Regeln, wie das Modell Werkzeuge aufruft |
+| **Werkzeug-Beschreibungen** | je Werkzeug Zweck, Felder, Typen und Hinweise (die kurzen Beschreibungen in den Werkzeug-Definitionen der Anfrage bleiben) |
+| **Beispiele je Werkzeug** | Beispiel-Argumente je Werkzeug (nur zusammen mit den Werkzeug-Beschreibungen) |
+| **Fehlerbehandlung** | die Fehlercodes und wie das Modell reagieren soll |
+| **Zusatz für die Modellfamilie** | ein kurzer Hinweis zu bekannten Eigenheiten der Modellfamilie (Qwen, Llama, Mistral …) |
+| **Antwortsprache** | die Regel, in der Sprache deiner letzten Nachricht zu antworten |
+| **Sicherheitsregeln** | Werkzeuginhalte sind nicht vertrauenswürdig, nie in den eigenen Chat schreiben, nichts bei offener Freigabe … |
+
+Wer die **Sicherheitsregeln** abschaltet, sieht eine Warnung: Das Modell erfährt diese Regeln nicht mehr, Paneldeck setzt sie aber weiter im Code durch (nie die eigene Sitzung, nichts bei offener Freigabe, Freigaben für Schreibzugriffe).
+
+- **Je Modell:** In den Einstellungen eines Modells gibt *Anweisungen (Master-Prompt)* → *Eigene Auswahl für dieses Modell* dem Modell eigene Schalter (z. B. keine Beispiele für große Modelle); aus, gelten die globalen. *Modellfamilie* wählt den Familienzusatz von Hand; *Automatisch* erkennt ihn am Modellnamen.
+- **Vorschau und Token-Zähler:** Unter den Schaltern zeigt eine Vorschau den Prompt für ein wählbares Modell, so wie ihn ein Chat bekäme – volle Fassung oder Kurzfassung für kleine Kontexte, mit Kontextlänge. Darunter die Tokens von Systemprompt und Werkzeug-Schemas, nach jeder Änderung neu gezählt: mit dem Tokenizer des Servers, wo es einen gibt (llama.cpp-Server, vLLM: `POST /tokenize`), sonst Paneldecks Schätzung, markiert mit `~` – dieselbe Schätzung, nach der die automatische Kontextlänge und die Fassung gewählt werden. Abgeschaltete Teile machen den Prompt kleiner und können dafür sorgen, dass die volle Fassung passt, wo sonst die Kurzfassung gälte.
+- Gespeichert in `settings.json` als `chat_prompt_parts` (global, nur geschrieben, wenn etwas aus ist) und je Modell als `prompt_parts` / `prompt_family` in `llm_servers[].models[]`; fehlende Felder bedeuten „an“ bzw. „automatisch“.
+
 ## Erlaubte Adressen und Sicherheit
 Paneldeck verbindet sich nur mit **diesem Rechner und privaten Netzen**:
 

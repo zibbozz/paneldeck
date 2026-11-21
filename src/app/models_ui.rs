@@ -257,6 +257,8 @@ pub(super) struct ModelsUi {
     pub confirm_remove: Option<String>,
     /// Ungespeicherte Änderung seit diesem Zeitpunkt (Speichern verzögert, siehe `App::models_save_tick`).
     pub dirty_since: Option<std::time::Instant>,
+    /// Schalter für die Teile des Master-Prompts (#341): globale Auswahl, Vorschauen, Token-Zähler.
+    pub prompt: super::prompt_ui::PromptUi,
 }
 
 /// Jetzt speichern? Sofort, wenn nicht gezogen wird; beim Ziehen spätestens nach 500 ms.
@@ -291,6 +293,10 @@ pub(super) fn models_tab(ui: &mut Ui, lang: Lang, all: &mut LlmServers, st: &mut
         "Lokale Modelle (Ollama oder OpenAI-kompatible Server) antworten in Chats. Erlaubt sind nur dieser Rechner und private Netze. Die Stufe je Modell legt fest, was ein Modell in seinen Chats darf – sie ist unabhängig von der MCP-Stufe für externe Agenten (Reiter „Agenten“).",
         "Local models (Ollama or OpenAI-compatible servers) answer in chats. Only this computer and private networks are allowed. The level per model decides what a model may do in its chats – it is independent of the MCP level for external agents (“Agents” tab).",
     )).small().color(style::dim(ui)));
+    ui.add_space(S2);
+    if super::prompt_ui::global_section(ui, lang, all, &mut st.prompt, expert) {
+        out.changed = true;
+    }
     ui.add_space(S2);
     let mut drop_raw = None;
     for (i, v) in all.unreadable.iter().enumerate() {
@@ -405,7 +411,7 @@ fn server_block(ui: &mut Ui, lang: Lang, s: &mut LlmServer, st: &mut ModelsUi, c
             ui.label(RichText::new(lang.t("Noch keine Modelle bekannt – „Verbinden“ ruft die Liste ab.", "No models known yet – “Connect” fetches the list.")).small().color(style::dim(ui)));
         }
         for name in names {
-            model_row(ui, lang, s, &name, expert, out);
+            model_row(ui, lang, s, &name, expert, out, &mut st.prompt);
         }
     });
 }
@@ -528,7 +534,7 @@ pub(super) fn model_summary(s: &LlmServer, name: &str, lang: Lang) -> String {
     format!("{tools} · {} {ctx}{missing}", lang.t("Kontext", "context"))
 }
 
-fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: bool, out: &mut ModelsOut) {
+fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: bool, out: &mut ModelsOut, prompt: &mut super::prompt_ui::PromptUi) {
     let before = s.model_cfg(name);
     let mut cfg = before.clone();
     let mut job = egui::text::LayoutJob::default();
@@ -622,6 +628,8 @@ fn model_row(ui: &mut Ui, lang: Lang, s: &mut LlmServer, name: &str, expert: boo
                 }
             });
         }
+        // Teile des Master-Prompts für dieses Modell (#341).
+        super::prompt_ui::model_section(ui, lang, s, name, &mut cfg, prompt, expert);
     });
     if cfg != before {
         s.set_model_cfg(cfg);
@@ -824,7 +832,10 @@ impl super::App {
     /// Sicherheitseinstellungen) – während gezogen wird (Zahlenfelder) erst beim Loslassen bzw. höchstens alle 500 ms.
     pub(super) fn models_settings_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let lang = self.settings.language;
+        self.models_ui.prompt.global = self.settings.chat_prompt_parts;
+        self.models_ui.prompt.repaint = Some(Self::llm_repaint(ctx));
         let out = models_tab(ui, lang, &mut self.settings.llm_servers, &mut self.models_ui, &self.llm_conn, crate::mcp::expert_mode());
+        self.settings.chat_prompt_parts = self.models_ui.prompt.global;
         for id in &out.connect {
             self.llm_connect(ctx, id);
         }

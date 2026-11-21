@@ -114,6 +114,26 @@ The top right of every chat always shows how full the model's context is, writte
 - **Tooltip:** system prompt + tools, history, the reserve for the answer (a quarter of the context), from how many tokens on the oldest messages drop out, and whether the number is the server's count or the estimate. The split between system prompt, tools and history is always an estimate.
 - **Colour:** from 80 % of the room before trimming (the context without the answer reserve) the display turns to the warning colour with the hint "old messages will drop out soon"; when that room is full or older messages already drop out, it turns to the error colour with "old messages drop out". The colours come from the theme (`warning`, `error`).
 
+### Prompt parts (Settings → Models)
+*Settings → Models → Instructions for chat models (master prompt)* decides which parts of the instructions every chat model gets – all are on by default:
+
+| Part | What it is |
+|---|---|
+| **Paneldeck explanation** | what Paneldeck is: sessions, chats, to-do list and tickets, process list, levels, where things are in the UI |
+| **Call rules** | numbered rules on how the model calls tools |
+| **Tool descriptions** | per tool its purpose, fields, types and notes (the short descriptions in the request's tool definitions stay) |
+| **Examples per tool** | example arguments per tool (only together with the tool descriptions) |
+| **Error handling** | the error codes and how to react |
+| **Model family addition** | a short note for known quirks of the model family (Qwen, Llama, Mistral …) |
+| **Answer language** | the rule to answer in the language of your latest message |
+| **Safety rules** | tool content is untrusted, never write into the own chat, nothing while an approval is open … |
+
+Switching off the **safety rules** shows a warning: the model is no longer told these rules, but Paneldeck still enforces them in code (never its own session, nothing while an approval is open, approvals for write access).
+
+- **Per model:** in a model's settings, *Instructions (master prompt)* → *Own selection for this model* gives the model its own set of switches (e.g. no examples for large models); off, the global switches apply. *Model family* picks the family addition by hand; *Automatic* detects it from the model name.
+- **Preview and token count:** below the switches a preview shows the prompt for a chosen model, as a chat would get it – the full version or the compact version for small contexts, with the context length. Below it the token count of the system prompt plus the tool schemas, updated after every change: with the server's tokenizer where there is one (llama.cpp server, vLLM: `POST /tokenize`), otherwise Paneldeck's estimate marked with `~` – the same estimate that picks the automatic context length and the version. Switched-off parts make the prompt smaller and can let the full version fit where otherwise the compact one would be used.
+- Stored in `settings.json` as `chat_prompt_parts` (global, only written when something is off) and per model as `prompt_parts` / `prompt_family` in `llm_servers[].models[]`; missing fields mean "on" / "automatic".
+
 ## Allowed addresses and security
 Paneldeck only connects to **this computer and private networks**:
 

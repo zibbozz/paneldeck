@@ -16,6 +16,25 @@ pub fn list_models(t: &dyn Transport, ep: &Endpoint, cancel: &Arc<AtomicBool>) -
     Ok(data.iter().filter_map(|m| m.get("id").and_then(|i| i.as_str())).map(|id| ModelInfo { name: id.to_string(), tools: None, context_length: None }).collect())
 }
 
+/// `POST /tokenize` (neben `/v1`): der llama.cpp-Server liest `content` und antwortet `{"tokens": […]}`, vLLM liest
+/// `model`/`prompt` und antwortet zusätzlich mit `count`. Beide ignorieren die Felder des anderen. 404/405/501 (kein
+/// Tokenizer, etwa LM Studio) = `Ok(None)`.
+pub fn count_tokens(t: &dyn Transport, ep: &Endpoint, model: &str, text: &str, cancel: &Arc<AtomicBool>) -> Result<Option<usize>, LlmError> {
+    let url = ep.api_url("/tokenize")?;
+    let body = serde_json::to_vec(&json!({ "content": text, "prompt": text, "model": model, "add_special": false })).map_err(|e| LlmError::BadResponse(e.to_string()))?;
+    let mut r = match http::send_ok(t, &ep.request(Method::Post, &url, Some(&body), "application/json"), cancel) {
+        Ok(r) => r,
+        Err(LlmError::Status { code: 404 | 405 | 501, .. }) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let bytes = http::read_all(r.as_mut(), MAX_BODY, cancel)?;
+    let v: Value = serde_json::from_slice(&bytes).map_err(|e| LlmError::BadResponse(format!("/tokenize: {e}")))?;
+    if let Some(n) = v.get("count").and_then(Value::as_u64) {
+        return Ok(Some(n as usize));
+    }
+    v.get("tokens").and_then(Value::as_array).map(|a| Some(a.len())).ok_or_else(|| LlmError::BadResponse("/tokenize: no \"tokens\"".into()))
+}
+
 fn role(r: Role) -> &'static str {
     match r {
         Role::System => "system",
