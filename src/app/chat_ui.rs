@@ -149,7 +149,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let rev = chat.rev();
     let from = std::mem::replace(&mut chat.changed_from, usize::MAX);
     let pending = chat.calls.iter().map(|p| (p.call.id.clone(), p.state)).collect();
-    let paused = chat.paused.then(|| (chat.steps, chat.pause_note.clone()));
+    let paused = chat.paused.then(|| (chat.steps, chat.pause_note.clone(), chat.loop_stop));
     let level_question = chat.level_question.is_some();
     let target = chat.approval_target.clone();
     let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
@@ -247,10 +247,10 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
             y += mh;
         }
         // Angehalten an der Höchstzahl der Werkzeugaufrufe: Hinweis mit „Weiter“ unter der letzten Nachricht.
-        if let Some((steps, note)) = paused {
+        if let Some((steps, note, loop_stop)) = paused {
             let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(width, 1.0e6));
             let mut bar = ui.new_child(UiBuilder::new().id_salt(("chat_paused", session)).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
-            paused_bar(&mut bar, steps, note.as_deref(), lang, out);
+            paused_bar(&mut bar, steps, note.as_deref(), loop_stop, lang, out);
             y += bar.min_rect().height() + S1;
         }
         // Einmalige Frage nach der Stufe (die Nachricht wartet im Eingabefeld).
@@ -305,7 +305,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
         }
         // Ergebnisse mit passendem Aufruf stehen in dessen Zeile.
         Role::Tool if cache.matched.contains(&i) => {}
-        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, None, lang, out),
+        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, None, None, lang, out),
         Role::System => {
             egui::CollapsingHeader::new(RichText::new(lang.t("Systemprompt", "System prompt")).small().color(style::dim(ui))).id_salt(("chat_sys", rc.session, i)).show(ui, |ui| {
                 ui.label(RichText::new(&m.content).small().monospace());
@@ -385,8 +385,20 @@ fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut U
         let result = cache.tool_results.get(&c.id).and_then(|j| msgs.get(*j));
         let state = if result.is_some() { None } else { rc.pending.get(&c.id).copied() };
         let target = if state == Some(CallState::Approval) { rc.target.as_deref() } else { None };
-        tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some((c.id.as_str(), &c.arguments)), result, state, target, lang, out);
+        let note = m.repairs.iter().find(|r| r.id == c.id).and_then(|r| repair_note(r, lang));
+        tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some((c.id.as_str(), &c.arguments)), result, state, target, note.as_deref(), lang, out);
     }
+}
+
+/// Dezenter Hinweis am Werkzeug-Block, wenn Paneldeck den Aufruf repariert hat (#340): „als Textaufruf erkannt“ und die
+/// korrigierten Argumente (`lines: "3" → 3`). `None` ohne Reparatur.
+pub(super) fn repair_note(r: &crate::chat::store::CallRepair, lang: Lang) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if r.text_call {
+        parts.push(lang.t("als Textaufruf erkannt", "recognised as a text call").to_string());
+    }
+    parts.extend(r.fixes.iter().cloned());
+    (!parts.is_empty()).then(|| format!("{} {}", lang.t("Von Paneldeck repariert:", "Repaired by Paneldeck:"), parts.join(" · ")))
 }
 
 /// Zeichen und Farbe für den Stand eines Werkzeugaufrufs (`None` = läuft: Kreisel).
@@ -404,11 +416,14 @@ fn tool_mark(result: Option<&ChatMsg>, state: Option<CallState>, lang: Lang, dim
 
 /// Eine eingeklappte Zeile je Werkzeugaufruf (`▸ name ✓`), aufgeklappt Parameter und Ergebnis (als JSON eingerückt,
 /// gekürzt). Wartet der Aufruf auf Freigabe, stehen darunter Kurzfassung und die Knöpfe Erlauben / Immer / Ablehnen.
+/// `note`: dezenter Hinweis unter der Zeile, wenn Paneldeck den Aufruf repariert hat ([`repair_note`]).
 #[allow(clippy::too_many_arguments)]
-fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::Value)>, result: Option<&ChatMsg>, state: Option<CallState>, target: Option<&str>, lang: Lang, out: &mut ChatOut) {
+fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::Value)>, result: Option<&ChatMsg>, state: Option<CallState>, target: Option<&str>, note: Option<&str>, lang: Lang, out: &mut ChatOut) {
     let args = call.map(|c| c.1);
     let mark = tool_mark(result, state, lang, style::dim(ui));
     let mut job = egui::text::LayoutJob::default();
+    // Ein Aufruf ohne erkennbaren Namen (als Text geschrieben) heißt „?“.
+    let name = if name.trim().is_empty() { "?" } else { name };
     job.append(name, 0.0, egui::TextFormat { font_id: FontId::monospace(12.5), color: ui.visuals().text_color(), ..Default::default() });
     if let Some((mark, col)) = mark {
         job.append(mark, 6.0, egui::TextFormat { font_id: FontId::proportional(12.5), color: col, ..Default::default() });
@@ -431,6 +446,9 @@ fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::V
             ui.add(egui::Spinner::new().size(12.0));
         }
     });
+    if let Some(n) = note {
+        ui.label(RichText::new(n).small().color(crate::style::ui().text_dim));
+    }
     if let (Some(CallState::Approval), Some((call_id, args))) = (state, call) {
         approval(ui, id, call_id, name, args, target, lang, out);
     }
@@ -496,8 +514,16 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
 }
 
 /// Angehalten: „Nach N Werkzeugaufrufen angehalten“ (oder der Grund, z. B. Kontext voll) mit dem Knopf „Weiter“.
-fn paused_bar(ui: &mut Ui, steps: u32, note: Option<&str>, lang: Lang, out: &mut ChatOut) {
-    egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
+/// `loop_stop`: der Schleifen-Schutz hielt an (derselbe fehlerhafte Aufruf mehrmals in Folge, #340) – deutlich in der
+/// Warnfarbe statt dezent.
+fn paused_bar(ui: &mut Ui, steps: u32, note: Option<&str>, loop_stop: bool, lang: Lang, out: &mut ChatOut) {
+    let warn = crate::style::ui().warning;
+    let frame = if loop_stop {
+        egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6)))
+    } else {
+        egui::Frame::new().fill(ui.visuals().faint_bg_color)
+    };
+    frame.corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
             let text = match note {
@@ -505,7 +531,8 @@ fn paused_bar(ui: &mut Ui, steps: u32, note: Option<&str>, lang: Lang, out: &mut
                 None if lang == Lang::De => format!("Nach {steps} Werkzeugaufrufen angehalten."),
                 None => format!("Stopped after {steps} tool calls."),
             };
-            ui.label(RichText::new(text).color(style::dim(ui)));
+            let text = if loop_stop { RichText::new(format!("⚠ {text}")).strong() } else { RichText::new(text).color(style::dim(ui)) };
+            ui.label(text);
             if ui.button(lang.t("Weiter", "Continue")).on_hover_text(lang.t("Noch einmal so viele Werkzeugaufrufe erlauben", "Allow the same number of tool calls again")).clicked() {
                 out.cont = true;
             }
@@ -1114,6 +1141,37 @@ mod tests {
         assert_eq!(tool_mark(None, Some(CallState::Approval), Lang::De, dim).unwrap().0, "wartet auf Freigabe");
         assert_eq!(pretty("{\"a\":1}"), "{\n  \"a\": 1\n}");
         assert_eq!(pretty("not json"), "not json");
+    }
+
+    /// #340: Reparaturen stehen dezent am Werkzeug-Block (beide Sprachen); der Schleifen-Schutz hält deutlich sichtbar an.
+    #[test]
+    fn repaired_calls_show_a_note_and_a_stopped_loop_a_warning() {
+        use crate::chat::store::CallRepair;
+        let mut a = ChatMsg::new(Role::Assistant, "");
+        a.tool_calls.push(ToolCall { id: "c1".into(), name: "read_terminal".into(), arguments: serde_json::json!({"session": 3}) });
+        a.tool_calls.push(ToolCall { id: "c2".into(), name: "whoami".into(), arguments: serde_json::json!({}) });
+        a.repairs.push(CallRepair { id: "c1".into(), text_call: true, fixes: vec![r#"session: "3" → 3"#.into()] });
+        let mut r = ChatMsg::new(Role::Tool, "{}");
+        r.tool_call_id = Some("c1".into());
+        r.status = Some(ToolStatus::Ok);
+        for (lang, note) in [
+            (Lang::En, r#"Repaired by Paneldeck: recognised as a text call · session: "3" → 3"#),
+            (Lang::De, r#"Von Paneldeck repariert: als Textaufruf erkannt · session: "3" → 3"#),
+        ] {
+            let mut c = ChatState::new(ChatFile { messages: vec![ChatMsg::new(Role::User, "q"), a.clone(), r.clone()], ..ChatFile::default() }, None);
+            c.paused = true;
+            c.loop_stop = true;
+            c.pause_note = Some("LOOP-NOTE".into());
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert_eq!(h.texts.iter().filter(|t| t.starts_with(lang.t("Von Paneldeck", "Repaired by"))).count(), 1, "nur am reparierten Aufruf: {:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == note), "{:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == "⚠ LOOP-NOTE"), "{:?}", h.texts);
+            assert!(h.pos_of(lang.t("Weiter", "Continue")).is_some());
+        }
+        assert_eq!(repair_note(&CallRepair { id: "x".into(), text_call: false, fixes: vec![] }, Lang::En), None);
+        assert_eq!(repair_note(&CallRepair { id: "x".into(), text_call: false, fixes: vec!["a: 1 → \"1\"".into()] }, Lang::En).as_deref(), Some("Repaired by Paneldeck: a: 1 → \"1\""));
     }
 
     #[test]

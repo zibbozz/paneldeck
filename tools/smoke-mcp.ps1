@@ -1465,6 +1465,9 @@ c.close()
   # /api/chat: Antwort "pong"; "slow" in der letzten Nutzer-Nachricht -> 3 s Pause; "tools please" mit tools-Liste ->
   # Werkzeugaufruf list_sessions; "proxy please <id>" -> send_text in Sitzung <id>; "chain please <chat> <id>" ->
   # send_chat_message an <chat> mit "proxy please <id>"; "read please <chat>" -> read_chat (last 40);
+  # #340: "text call please" -> Aufruf als Text (<tool_call>{...}</tool_call>, list_sessions); "typed call please <chat>"
+  # -> read_chat mit Zahlen als Text ("950", "2"); "loop please" -> immer wieder read_terminal mit session "abc" (auch
+  # nach Werkzeug-Ergebnissen, fuer den Schleifen-Schutz);
   # nach einer tool-Nachricht -> "done". Jede Anfrage landet in $script:fakeLog.
   $fake = {
     param($listener, $log)
@@ -1497,7 +1500,10 @@ c.close()
           $toolAfter = $false; for ($i = $lu + 1; $i -lt $msgs.Count; $i++) { if ($msgs[$i].role -eq 'tool') { $toolAfter = $true } }
           $hasTools = $j -and $j.PSObject.Properties.Name -contains 'tools' -and @($j.tools).Count -gt 0
           $done = '{"model":"fake-model","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":5,"eval_count":1}'
-          if ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
+          if ($hasTools -and $last -match 'loop please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_terminal","arguments":{"session":"abc"}}}]},"done":false}' }
+          elseif ($toolAfter) { $first = '{"model":"fake-model","message":{"role":"assistant","content":"done"},"done":false}' }
+          elseif ($hasTools -and $last -match 'text call please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"Let me check.\n<tool_call>\n{\"name\": \"list_sessions\", \"arguments\": {}}\n</tool_call>"},"done":false}' }
+          elseif ($hasTools -and $last -match 'typed call please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_chat","arguments":{"session":"' + $Matches[1] + '","last":"2"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'chain please (\d+) (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"send_chat_message","arguments":{"session":' + $Matches[1] + ',"text":"proxy please ' + $Matches[2] + '"}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'read please (\d+)') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_chat","arguments":{"session":' + $Matches[1] + ',"last":40}}}]},"done":false}' }
           elseif ($hasTools -and $last -match 'spawn please') { $first = '{"model":"fake-model","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"create_session","arguments":{"shell":"powershell","name":"Chat-Kind"}}}]},"done":false}' }
@@ -1586,6 +1592,30 @@ c.close()
   $tm = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'list_sessions' })
   $lastA = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' })[-1]
   Check 'Werkzeug-Schleife: Chat ruft list_sessions auf und antwortet "done"' ($w.data.matched -eq $true -and $tm.Count -ge 1 -and $tm[0].status -eq 'ok' -and $lastA.content -eq 'done') $rc.text
+  # #340: Aufruf als Text (<tool_call>...</tool_call>) wird erkannt und wie ein echter ausgefuehrt; der Aufruf-Text faellt
+  # aus der Antwort, der Aufruf steht als tool_calls darin.
+  [void](Tool 'send_chat_message' @{ session = $C; text = 'text call please' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $rc = Tool 'read_chat' @{ session = $C; last = 4 }
+  $tm = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'list_sessions' })
+  $ca = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' -and @($_.tool_calls).Count -ge 1 })
+  $lastA = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' })[-1]
+  Check 'Textaufruf (#340): <tool_call>{list_sessions} wird ausgefuehrt, Text faellt aus der Antwort, danach "done"' ($w.data.matched -eq $true -and $tm.Count -ge 1 -and $tm[-1].status -eq 'ok' -and $ca.Count -ge 1 -and $ca[-1].tool_calls[0].name -eq 'list_sessions' -and $ca[-1].content -eq 'Let me check.' -and $ca[-1].content -notmatch 'tool_call' -and $lastA.content -eq 'done') $rc.text
+  # #340: falsche Typen ("950", "2") werden normalisiert statt abgewiesen (vorher: bad_args "session (number) is missing").
+  [void](Tool 'send_chat_message' @{ session = $C; text = 'typed call please 950' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $rc = Tool 'read_chat' @{ session = $C; last = 4 }
+  $tm = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_chat' })
+  $ca = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' -and @($_.tool_calls).Count -ge 1 })
+  $args0 = if ($ca.Count -ge 1) { $ca[-1].tool_calls[0].arguments } else { $null }
+  Check 'Normalisierung (#340): read_chat mit session "950" und last "2" laeuft mit Zahlen (ok, Argumente korrigiert gespeichert)' ($w.data.matched -eq $true -and $tm.Count -ge 1 -and $tm[-1].status -eq 'ok' -and $tm[-1].content -match 'smoke-answer' -and $null -ne $args0 -and $args0.session -eq 950 -and -not ($args0.session -is [string]) -and $args0.last -eq 2 -and -not ($args0.last -is [string])) $rc.text
+  # #340: Schleifen-Schutz - derselbe fehlerhafte Aufruf dreimal in Folge haelt die Runde an (paused, pause_note).
+  [void](Tool 'send_chat_message' @{ session = $C; text = 'loop please' })
+  $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
+  $rc = Tool 'read_chat' @{ session = $C; last = 10 }
+  $lu = -1; $ms = @($rc.data.messages); for ($i = 0; $i -lt $ms.Count; $i++) { if ($ms[$i].role -eq 'user') { $lu = $i } }
+  $bt = @($ms | Select-Object -Skip ($lu + 1) | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_terminal' })
+  Check 'Schleifen-Schutz (#340): 3x derselbe fehlerhafte Aufruf -> angehalten mit Hinweis, je bad_args mit Beispiel' ($w.data.matched -eq $true -and $rc.data.paused -eq $true -and $rc.data.pause_note -match 'same failing tool call \(read_terminal\) 3 times in a row' -and $bt.Count -eq 3 -and @($bt | Where-Object { $_.status -eq 'error' -and $_.content -match 'bad_args' -and $_.content -match 'must be an integer' -and $_.content -match 'Correct example' }).Count -eq 3) $rc.text
   # Kein Umweg: ein Agent in Sitzung $A laesst den Chat send_text in $A aufrufen -> forbidden, nichts getippt.
   $pa = Tool 'create_session' @{ shell = 'powershell'; cwd = "$proj"; name = 'Proxy-Agent' }; $A = $pa.data.id; Start-Sleep 4
   $px = InA 'send_chat_message' @{ session = $C; text = "proxy please $A" }

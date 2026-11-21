@@ -12,6 +12,11 @@
 //!     { "role": "tool", "content": "{\"sessions\":[]}", "ts": 1763200002,
 //!       "tool_call_id": "c1", "tool_name": "list_sessions", "status": "ok" },
 //!     { "role": "assistant", "content": "There are no sessions.", "ts": 1763200003 },
+//!     { "role": "assistant", "content": "", "ts": 1763200004,
+//!       "tool_calls": [ { "id": "c2", "name": "read_terminal", "arguments": { "session": 3, "lines": 50 } } ],
+//!       "repairs": [ { "id": "c2", "text_call": true, "fixes": [ "lines: \"50\" → 50" ] } ] },
+//!     { "role": "tool", "content": "{\"text\":\"…\"}", "ts": 1763200005,
+//!       "tool_call_id": "c2", "tool_name": "read_terminal", "status": "ok" },
 //!     { "role": "assistant", "content": "", "ts": 1763200010, "error": "connection refused" }
 //!   ]
 //! }
@@ -85,6 +90,30 @@ pub struct ChatMsg {
     /// nicht an das Modell gesendet).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Nur Antworten des Modells: was Paneldeck an den Werkzeugaufrufen repariert hat (seit 2.6.1, #340; je Aufruf über
+    /// `id`). Nur für die Anzeige, wird nicht an das Modell gesendet; Unlesbares ergibt eine leere Liste.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_repairs")]
+    pub repairs: Vec<CallRepair>,
+}
+
+/// Reparatur an einem Werkzeugaufruf (#340): als Text geschriebener Aufruf erkannt und/oder Argumente normalisiert.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CallRepair {
+    /// `ToolCall::id` des Aufrufs.
+    pub id: String,
+    /// Das Modell schrieb den Aufruf als Text (z. B. `<tool_call>{…}</tool_call>`); Paneldeck hat ihn erkannt.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub text_call: bool,
+    /// Korrigierte Argumente in JSON-Schreibweise, z. B. `lines: "3" → 3` (sprachneutral).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<String>,
+}
+
+/// Reparaturen tolerant lesen: Unlesbares fällt weg, ein falscher Typ ergibt eine leere Liste (die Nachricht bleibt).
+fn lenient_repairs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<CallRepair>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_array().map(|a| a.iter().filter_map(|x| serde_json::from_value::<CallRepair>(x.clone()).ok()).filter(|r| !r.id.is_empty()).collect()).unwrap_or_default())
 }
 
 impl ChatMsg {
@@ -405,6 +434,23 @@ mod tests {
         assert!(data.len() <= 4_000);
         let (back, _) = parse(std::str::from_utf8(&data).unwrap()).unwrap();
         assert_eq!(back.always_allow, [rule("send_text", Some(4))]);
+    }
+
+    #[test]
+    fn repairs_are_optional_lenient_and_round_trip() {
+        // Datei älterer Versionen ohne das Feld: gelesen, und ohne Reparaturen wird es nicht geschrieben
+        let (f, skipped) = parse(r#"{"messages":[{"role":"assistant","content":"x","tool_calls":[{"id":"a","name":"whoami","arguments":{}}]}]}"#).unwrap();
+        assert_eq!((skipped, f.messages[0].repairs.len()), (0, 0));
+        assert!(!String::from_utf8(serialize_capped(&f, 10_000)).unwrap().contains("repairs"));
+        // Unlesbares fällt weg, die Nachricht bleibt
+        let (f, skipped) = parse(r#"{"messages":[{"role":"assistant","content":"x","repairs":"oops"},{"role":"assistant","content":"y","repairs":[5,{"id":"a","text_call":true},{"text_call":true},{"id":"b","fixes":["n: \"3\" → 3"],"future":1}]}]}"#).unwrap();
+        assert_eq!((skipped, f.messages.len()), (0, 2));
+        assert!(f.messages[0].repairs.is_empty());
+        assert_eq!(f.messages[1].repairs, [CallRepair { id: "a".into(), text_call: true, fixes: vec![] }, CallRepair { id: "b".into(), text_call: false, fixes: vec!["n: \"3\" → 3".into()] }]);
+        // Hin und zurück; leere Teile werden nicht geschrieben
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(text.contains(r#""repairs":[{"id":"a","text_call":true},{"id":"b","fixes":["n: \"3\" → 3"]}]"#), "{text}");
+        assert_eq!(parse(&text).unwrap().0, f);
     }
 
     fn rule(tool: &str, session: Option<u64>) -> AllowRule {
