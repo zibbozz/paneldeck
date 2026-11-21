@@ -104,6 +104,16 @@ Kleine lokale Modelle rufen Werkzeuge oft leicht falsch auf. Seit 2.6.1 reparier
 
 Auch externe Agenten sehen Chats und können ihnen Nachrichten schicken – siehe [Agenten-Schnittstelle](agent-interface.md#chats).
 
+## Füllstand des Kontexts und Prompt-Teile
+
+### Füllstand des Kontexts
+Oben rechts zeigt jeder Chat immer, wie voll der Kontext des Modells ist, geschrieben als **`4342/8192 (53%)`**: belegte Tokens / Kontextlänge (Anteil an der Kontextlänge), daneben ein kleiner Balken.
+
+- **Woher die Zahlen kommen:** nach einer Antwort aus der Zählung des Servers (Ollama `prompt_eval_count` + `eval_count`, OpenAI-kompatible Server `usage`). Vor der ersten Antwort, während einer Anfrage und nach dem Leeren des Verlaufs zeigt Paneldeck seine eigene Schätzung, markiert mit **`~`** (z. B. `~4342/8192 (53%)`); hat der Server einmal gezählt, wird die Schätzung an seine Zahlen angeglichen.
+- **Höchstwert:** die Kontextlänge der Anfrage – deine eigene Angabe unter *Einstellungen → Modelle*, sonst die automatische bzw. erkannte Länge, sonst 8192 (siehe [Grenzen](#grenzen)).
+- **Tooltip:** Systemprompt + Werkzeuge, Verlauf, die Reserve für die Antwort (ein Viertel des Kontexts), ab wie vielen Tokens die ältesten Nachrichten herausfallen und ob die Zahl vom Server stammt oder geschätzt ist. Die Aufteilung in Systemprompt, Werkzeuge und Verlauf ist immer geschätzt.
+- **Farbe:** Ab 80 % des Platzes vor der Kürzung (Kontext ohne Antwort-Reserve) wechselt die Anzeige in die Warnfarbe mit dem Hinweis „bald fallen alte Nachrichten heraus“; ist dieser Platz voll oder fallen ältere Nachrichten schon heraus, in die Fehlerfarbe mit „alte Nachrichten fallen heraus“. Die Farben kommen aus dem Theme (`warning`, `error`).
+
 ## Erlaubte Adressen und Sicherheit
 Paneldeck verbindet sich nur mit **diesem Rechner und privaten Netzen**:
 

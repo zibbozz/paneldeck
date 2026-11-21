@@ -12,6 +12,7 @@
 //! und die Werkzeug-Schleife in `ChatState` führt sie aus.
 
 use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
+use super::context::ContextParts;
 use super::logic;
 use super::store::{self, ChatMsg};
 use crate::llm::{self, ChatMessage, ChatRequest, Endpoint, LlmError, Role, StreamEvent, Transport};
@@ -55,6 +56,8 @@ pub struct Prepared {
     pub history_budget: usize,
     /// Geschätzte Tokens der ganzen Anfrage (zum Abgleich mit `prompt_tokens` des Servers).
     pub prompt_estimate: usize,
+    /// Aufteilung für die Anzeige des Füllstands (#339), mit `token_scale` hochgerechnet.
+    pub parts: ContextParts,
 }
 
 /// Höchstlänge von Projektname und Ordner in der Kontextzeile (Zeichen).
@@ -185,6 +188,18 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
 /// Anfrage bauen: Server suchen, Schlüssel entschlüsseln, Systemprompt, Verlauf, Kürzung auf die Kontextlänge.
 /// Fehler = Text für den Nutzer (in `cx.lang`).
 pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result<Prepared, String> {
+    build(meta, history, cx, true)
+}
+
+/// Füllstand, den die nächste Anfrage hätte (#339: Anzeige vor der ersten Antwort und zwischen den Antworten) – genau
+/// wie [`prepare`] gerechnet, aber ohne den Schlüssel zu entschlüsseln. `None`, wenn keine Anfrage möglich wäre
+/// (unbekannter Server, kein Modell).
+pub fn context_estimate(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Option<ContextParts> {
+    build(meta, history, cx, false).ok().map(|p| p.parts)
+}
+
+/// [`prepare`]; `with_key = false` lässt den Schlüssel weg (nur für [`context_estimate`], nie zum Senden).
+fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool) -> Result<Prepared, String> {
     let lang = cx.lang;
     let server = cx.servers.iter().find(|s| s.id == meta.server).ok_or_else(|| unknown_server(lang))?;
     let model = meta.model.trim();
@@ -192,7 +207,7 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
         return Err(lang.t("Dieser Chat hat kein Modell – bitte einen neuen Chat beginnen.", "This chat has no model – please start a new chat.").into());
     }
     let cfg = server.model_cfg(model);
-    let endpoint = server.endpoint(lang)?;
+    let endpoint = if with_key { server.endpoint(lang)? } else { Endpoint::new(server.kind, &server.url) };
     let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert);
     let (hist, origin) = map_history(history);
     let mut messages = Vec::with_capacity(hist.len() + 1);
@@ -249,7 +264,17 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     // Ollama: die Antwort darf nur die Reserve nutzen, sonst schöbe sie den Anfang der Anfrage aus dem Kontext.
     let num_predict = ollama.then_some(ctx_len.saturating_sub(budget_real as u32).max(1));
     let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx, num_predict };
-    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate })
+    // Für die Anzeige in echten Tokens (mit dem Abgleich hochgerechnet).
+    let parts = ContextParts {
+        system: real(sys_tokens),
+        tools: real(tool_tokens),
+        history: real(prompt_estimate.saturating_sub(sys_tokens + tool_tokens)),
+        max: ctx_len,
+        reserve: ctx_len.saturating_sub(budget_real as u32),
+        dropped: context_start.is_some(),
+        scale,
+    };
+    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate, parts })
 }
 
 /// Hinweis: die eigene Kontextlänge reicht nicht für die Werkzeug-Stufe des Modells.
@@ -310,6 +335,7 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
         repaint();
     };
     send(TurnEvent::Budget { history: p.history_budget, prompt: p.prompt_estimate });
+    send(TurnEvent::Context(p.parts));
     if let Some(cs) = p.context_start {
         send(TurnEvent::ContextStart(cs));
     }
@@ -656,6 +682,7 @@ mod tests {
         assert!(seen.contains("\"m1\"") && seen.contains("Demo") && seen.contains("\"hi\""), "{seen}");
         assert!(!seen.contains("\"tools\""), "Standard „Aus“: keine Werkzeuge: {seen}");
         assert!(matches!(ev.first(), Some(TurnEvent::Budget { history, prompt }) if *history > 0 && *prompt > 0), "Platz kommt zuerst: {ev:?}");
+        assert!(matches!(ev.get(1), Some(TurnEvent::Context(p)) if p.max == 8192 && p.reserve == 2048 && p.total() > 0), "dann die Aufteilung: {ev:?}");
         // Ollama: die Antwort bekommt nur die Reserve (25 % von 8192)
         assert!(seen.contains("\"num_predict\":2048"), "{seen}");
     }
@@ -676,6 +703,40 @@ mod tests {
         let mut o = s;
         o.kind = ServerKind::OpenAi;
         assert_eq!(prepare(&meta(), &hist, &cx(vec![o])).unwrap().request.num_predict, None);
+    }
+
+    /// Aufteilung für die Füllstandsanzeige (#339): stimmt mit der Anfrage überein, rechnet mit dem Abgleich hoch und
+    /// geht auch ohne entschlüsselbaren Schlüssel.
+    #[test]
+    fn context_parts_match_the_request() {
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, context_length: Some(16384), ..LlmModel::named("m1") });
+        let hist = [msg(store::Role::User, "hello"), msg(store::Role::Assistant, "hi there"), msg(store::Role::User, "q")];
+        let p = prepare(&meta(), &hist, &cx(vec![s.clone()])).unwrap();
+        let parts = p.parts;
+        assert_eq!(parts.total(), p.prompt_estimate, "Systemprompt + Werkzeuge + Verlauf = geschätzte Anfrage");
+        assert_eq!(parts.system, llm::tokens::message_tokens(&p.request.messages[0]));
+        assert!(parts.tools > 0 && parts.history > 0);
+        assert_eq!((parts.max, parts.reserve, parts.dropped, parts.scale), (16384, 4096, false, 1.0));
+        assert_eq!(context_estimate(&meta(), &hist, &cx(vec![s.clone()])), Some(parts), "Schätzung = Anfrage");
+        // Abgleich: alles in echten Tokens.
+        let mut c = cx(vec![s.clone()]);
+        c.token_scale = 2.0;
+        let two = context_estimate(&meta(), &hist, &c).unwrap();
+        assert_eq!((two.system, two.tools, two.history, two.scale), (parts.system * 2, parts.tools * 2, parts.history * 2, 2.0));
+        // Gekürzt: `dropped`.
+        let long = "x".repeat(30_000);
+        let big = [msg(store::Role::User, &long), msg(store::Role::Assistant, &long), msg(store::Role::User, "q")];
+        let d = context_estimate(&meta(), &big, &cx(vec![s.clone()])).unwrap();
+        assert!(d.dropped && d.total() <= d.limit(), "{d:?}");
+        // Schlüssel nicht entschlüsselbar: Senden scheitert, die Anzeige geht trotzdem.
+        let mut k = s.clone();
+        k.api_key = "not-a-dpapi-blob".into();
+        assert!(prepare(&meta(), &hist, &cx(vec![k.clone()])).is_err());
+        assert_eq!(context_estimate(&meta(), &hist, &cx(vec![k])), Some(parts));
+        // Unbekannter Server, kein Modell: nichts.
+        assert_eq!(context_estimate(&meta(), &hist, &cx(Vec::new())), None);
+        assert_eq!(context_estimate(&ChatMeta { server: "s1".into(), model: " ".into() }, &hist, &cx(vec![s])), None);
     }
 
     #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)

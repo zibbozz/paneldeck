@@ -29,8 +29,10 @@ pub(super) struct ChatOut {
     pub level: Option<McpLevel>,
 }
 
-/// Höhe der Kopfzeile mit den dauerhaften Freigaben.
+/// Höhe der Kopfzeile (Füllstand des Kontexts, dauerhafte Freigaben).
 const HEAD_H: f32 = 24.0;
+/// Breite des kleinen Füllstandsbalkens in der Kopfzeile.
+const GAUGE_W: f32 = 48.0;
 /// Sichtbare Zeilen der Parameter in der Freigabe-Zeile (mehr: scrollen, mit Hinweis „+N Zeichen“).
 const APPROVAL_ROWS: usize = 12;
 
@@ -51,15 +53,20 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     let input_h = lines as f32 * row_h + 12.0;
     let edit_h = if chat.editing { 22.0 } else { 0.0 };
     let bottom_h = input_h + 2.0 * PAD + edit_h;
-    let head_h = if chat.file.always_allow.is_empty() { 0.0 } else { HEAD_H };
-    let head_rect = Rect::from_min_max(body.min, Pos2::new(body.max.x, body.min.y + head_h));
+    // Kopfzeile: immer da (Füllstand des Kontexts, #339), links ggf. die dauerhaften Freigaben.
+    let head_rect = Rect::from_min_max(body.min, Pos2::new(body.max.x, body.min.y + HEAD_H));
     let list_rect = Rect::from_min_max(Pos2::new(body.min.x, head_rect.max.y), Pos2::new(body.max.x, (body.max.y - bottom_h).max(head_rect.max.y)));
     let bar_rect = Rect::from_min_max(Pos2::new(body.min.x, list_rect.max.y), body.max);
-    if head_h > 0.0 {
-        ui.scope_builder(UiBuilder::new().max_rect(head_rect.shrink2(Vec2::new(PAD, 2.0))), |ui| {
-            approvals_menu(ui, session, &chat.file.always_allow, lang, &mut out);
+    ui.scope_builder(UiBuilder::new().max_rect(head_rect.shrink2(Vec2::new(PAD, 2.0))), |ui| {
+        ui.horizontal_centered(|ui| {
+            if !chat.file.always_allow.is_empty() {
+                approvals_menu(ui, session, &chat.file.always_allow, lang, &mut out);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                context_gauge(ui, session, chat, lang);
+            });
         });
-    }
+    });
 
     // Trennlinie über der Eingabe
     ui.painter().hline(bar_rect.x_range(), bar_rect.min.y + 0.5, Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(0.7)));
@@ -585,6 +592,42 @@ fn approvals_menu(ui: &mut Ui, session: u64, rules: &[AllowRule], lang: Lang, ou
                 }
             });
         });
+    });
+}
+
+/// Füllstand des Kontexts rechts in der Kopfzeile (#339, #341): `4342/8192 (53%)` (geschätzt mit `~`), ein kleiner
+/// Balken, nahe der Grenze in Warn- bzw. Fehlerfarbe mit Hinweis; Tooltip mit Aufteilung und Herkunft der Zahl.
+/// Im Layout von rechts nach links aufrufen.
+fn context_gauge(ui: &mut Ui, session: u64, chat: &ChatState, lang: Lang) {
+    use crate::chat::context::{self, FillLevel};
+    let Some(fill) = context::fill(chat.context.as_ref(), chat.usage, chat.file.context_start.is_some()) else {
+        ui.label(RichText::new("–").small().color(style::dim(ui))).on_hover_text(lang.t(
+            "Füllstand des Kontexts unbekannt (Server oder Modell des Chats fehlt).",
+            "Context fill level unknown (the chat's server or model is missing).",
+        ));
+        return;
+    };
+    let col = match fill.level() {
+        FillLevel::Normal => style::dim(ui),
+        FillLevel::Near => crate::style::ui().warning,
+        FillLevel::Full => error_col(),
+    };
+    let bar_col = if fill.level() == FillLevel::Normal { crate::style::ui().accent } else { col };
+    let tip = fill.tooltip(lang);
+    ui.push_id(("chat_ctx", session), |ui| {
+        // Von rechts nach links: Balken, Zahl, Hinweis.
+        let (rect, mut r) = ui.allocate_exact_size(Vec2::new(GAUGE_W, 6.0), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::same(3), ui.visuals().widgets.noninteractive.bg_stroke.color);
+        let share = (fill.used as f32 / fill.parts.max.max(1) as f32).clamp(0.0, 1.0);
+        if share > 0.0 {
+            p.rect_filled(Rect::from_min_size(rect.min, Vec2::new((GAUGE_W * share).max(2.0), rect.height())), CornerRadius::same(3), bar_col);
+        }
+        r |= ui.add(egui::Label::new(RichText::new(fill.text()).small().monospace().color(col)).selectable(false));
+        if let Some(h) = fill.hint(lang) {
+            r |= ui.add(egui::Label::new(RichText::new(h).small().color(col)).selectable(false));
+        }
+        r.on_hover_text(tip);
     });
 }
 
@@ -1196,5 +1239,44 @@ mod tests {
         }
         assert_eq!(usage_text(Some((None, Some(3))), Lang::En).as_deref(), Some("Tokens: 3 out"));
         assert_eq!(usage_text(Some((None, None)), Lang::En), None);
+    }
+
+    /// Füllstand des Kontexts (#339) in der Kopfzeile: immer da, geschätzt mit `~`, vom Server ohne, nahe der Grenze mit
+    /// Hinweis, Tooltip mit Aufteilung.
+    #[test]
+    fn context_fill_level_is_always_shown_in_the_header() {
+        use crate::chat::context::ContextParts;
+        let parts = |history: usize| ContextParts { system: 3000, tools: 1000, history, max: 8192, reserve: 2048, dropped: false, scale: 1.0 };
+        // Ohne Aufteilung (Server fehlt): Platzhalter.
+        let mut c = ChatState::new(ChatFile::default(), None);
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "–"), "{:?}", h.texts);
+        // Vor der ersten Antwort: Schätzung.
+        c.context = Some(parts(342));
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "~4342/8192 (53%)"), "{:?}", h.texts);
+        assert!(!h.texts.iter().any(|t| t.contains("drop out")), "{:?}", h.texts);
+        // Zahl des Servers.
+        c.usage = Some((Some(4000), Some(342)));
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "4342/8192 (53%)"), "{:?}", h.texts);
+        // Tooltip beim Überfahren.
+        let p = h.pos_of("4342/8192 (53%)").unwrap();
+        h.frame(&mut c, Lang::En, false, vec![Event::PointerMoved(p)]);
+        for _ in 0..30 {
+            h.frame(&mut c, Lang::En, false, vec![]);
+        }
+        assert!(h.texts.iter().any(|t| t.contains("System prompt + tools: ~4000") && t.contains("Source: the server's count")), "{:?}", h.texts);
+        // Nahe der Grenze (Platz vor der Kürzung 6144): Hinweis, deutsch.
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.context = Some(parts(1000));
+        let mut h = H::new();
+        h.frame(&mut c, Lang::De, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "~5000/8192 (61%)") && h.texts.iter().any(|t| t == "bald fallen alte Nachrichten heraus"), "{:?}", h.texts);
+        // Ältere Nachrichten fallen schon weg.
+        c.file.context_start = Some(0);
+        h.frame(&mut c, Lang::De, false, vec![]);
+        assert!(h.texts.iter().any(|t| t == "alte Nachrichten fallen heraus"), "{:?}", h.texts);
     }
 }

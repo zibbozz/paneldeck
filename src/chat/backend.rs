@@ -32,6 +32,8 @@ pub enum TurnEvent {
     /// Antwort-Reserve, Systemprompt und Werkzeug-Beschreibungen; damit hält die Werkzeug-Schleife Ergebnisse klein
     /// genug). `prompt`: geschätzte Tokens der ganzen Anfrage (Abgleich mit `Usage::prompt_tokens`).
     Budget { history: usize, prompt: usize },
+    /// Aufteilung der Anfrage für die Anzeige des Füllstands (#339; kommt direkt nach `Budget`).
+    Context(super::context::ContextParts),
     /// Verbrauch der Anfrage laut Server (Tokens der Eingabe und der Antwort), kurz vor `Done`.
     Usage { prompt_tokens: Option<u32>, completion_tokens: Option<u32> },
     /// Hinweis zur Antwort (z. B. „an der Token-Grenze abgeschnitten“), landet in [`ChatMsg::note`].

@@ -104,6 +104,16 @@ Small local models often call tools in a slightly wrong way. Since 2.6.1 Panelde
 
 External agents can see chats too and send them messages – see [Agent interface](agent-interface.md#chats).
 
+## Context fill level and prompt parts
+
+### Context fill level
+The top right of every chat always shows how full the model's context is, written as **`4342/8192 (53%)`**: tokens used / context length (percentage of the context length), with a small bar next to it.
+
+- **Where the numbers come from:** after an answer, from the server's own count (Ollama `prompt_eval_count` + `eval_count`, OpenAI-compatible servers `usage`). Before the first answer, while a request is running and after the history was cleared, Paneldeck shows its own estimate, marked with **`~`** (e.g. `~4342/8192 (53%)`); once the server has counted, the estimate is matched to the server's numbers.
+- **Maximum:** the context length of the request – your custom value under *Settings → Models*, otherwise the automatic or detected length, otherwise 8192 (see [Limits](#limits)).
+- **Tooltip:** system prompt + tools, history, the reserve for the answer (a quarter of the context), from how many tokens on the oldest messages drop out, and whether the number is the server's count or the estimate. The split between system prompt, tools and history is always an estimate.
+- **Colour:** from 80 % of the room before trimming (the context without the answer reserve) the display turns to the warning colour with the hint "old messages will drop out soon"; when that room is full or older messages already drop out, it turns to the error colour with "old messages drop out". The colours come from the theme (`warning`, `error`).
+
 ## Allowed addresses and security
 Paneldeck only connects to **this computer and private networks**:
 
