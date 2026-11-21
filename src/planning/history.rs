@@ -51,6 +51,9 @@ impl SourceKind {
     }
 }
 
+/// Zusatz der Quelle für Änderungen der Wartungsseite.
+pub const MAINTENANCE: &str = "maintenance";
+
 /// Wer eine Änderung ausgelöst hat.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Source {
@@ -78,9 +81,20 @@ impl Source {
         Source { kind: SourceKind::Import, detail: None }
     }
 
+    /// Wartungsseite (#308): eine Änderung der Oberfläche mit dem Zusatz `maintenance` (das Schema kennt keine eigene Quelle);
+    /// der Verlauf zeigt „geändert durch Wartung“.
+    pub fn maintenance() -> Self {
+        Source { kind: SourceKind::Ui, detail: Some(MAINTENANCE.to_string()) }
+    }
+
+    pub fn is_maintenance(&self) -> bool {
+        self.kind == SourceKind::Ui && self.detail.as_deref() == Some(MAINTENANCE)
+    }
+
     /// Anzeigetext: „User interface“, „Quick menu“, „Agent (Sitzung)“, „Import“.
     pub fn label(&self, lang: Lang) -> String {
         match self.kind {
+            SourceKind::Ui if self.is_maintenance() => lang.t("Wartung", "Maintenance").to_string(),
             SourceKind::Ui => lang.t("Oberfläche", "User interface").to_string(),
             SourceKind::Quick => lang.t("Quick-Menü", "Quick menu").to_string(),
             SourceKind::Agent => match &self.detail {
@@ -347,6 +361,10 @@ pub fn describe(conn: &Connection, e: &HistoryEntry, lang: Lang) -> String {
             }
             format!("{name}: {}", arrow(value_text(conn, field.as_ref(), &e.old, lang), value_text(conn, field.as_ref(), &e.new, lang)))
         }
+        HistoryField::Other(s) if s == "archived" => {
+            if e.new.as_deref() == Some("1") { lang.t("Archiviert", "Archived") } else { lang.t("Aus dem Archiv geholt", "Restored from the archive") }.to_string()
+        }
+        HistoryField::Other(s) if s == "broken_link" => lang.t("Verknüpfung zu einem gelöschten Ticket entfernt", "Link to a deleted ticket removed").to_string(),
         HistoryField::Other(s) => s.clone(),
     }
 }

@@ -15,6 +15,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Agent interface: read-only tool `cleanup_sizes` (level Read) returns the sizes per clean-up area; agents cannot delete anything (#307)
 - Process list: a *Processes* section in the Terminals sidebar runs long-running programs such as dev servers and watchers apart from the terminal sessions – start, stop and restart (also as a group in order), output in a pane of its own with error count and a link to a detected local address, optional log file, environment variables (values encrypted), autostart with Paneldeck or the project; stored in the new data file `processes.json` (#243)
 - Agent interface: tools `list_processes` and `read_process_output` (level Read) and `start_process`, `stop_process`, `restart_process` (level Control) for the entries the user created; agents cannot add or change entries (#243)
+- Expert projects: **Maintenance** page (button on the Overview tab) – checks tickets (stale, overdue, open in finished sprints/versions/milestones, broken structure, possible duplicates), configuration (unused fields, options, types, statuses, labels, link types; broken quick actions, dashboards, filters, boards) and custom rules (saved queries); actions with a preview and a database backup marked `maintenance` first (at most three kept): close as Won't Do (target status per project), archive, set due date, link as duplicate, remove unused configuration, merge labels; findings can be ignored; a log of all actions; maintenance never deletes tickets (#308)
+- Ticket archive: archived tickets are hidden from lists, boards and search unless a query asks for `archived = true`; *Archive* / *Restore from archive* in the ticket menu (#308)
+- Database care on the maintenance page: check (`integrity_check`, `foreign_key_check` and own checks), statistics, compact, repair what can be rebuilt unambiguously, and rescue into a new file (#308)
+- Agent interface: tool `maintenance_report` (level Read, expert mode, at most 200 findings with `truncated` and `total`); the ticket tools get the optional parameter `include_archived` and the field `archived`; write tools return the new error `busy` with `details.retry_after_ms` while a maintenance action writes (#308)
 - Theme editor (*Settings → Appearance → Edit theme … / New theme …*): colour list with picker, hex input and links to other colours (`@text/20`), live preview of all UI building blocks with real controls (clicking an element jumps to its colour), undo/redo, contrast values, generate a theme from background + accent, rename, duplicate, delete, import and export; the app only changes on *Save* (#309)
 - Themes can set **named interface colours** in the new optional `ui` object of `themes/*.json` (backgrounds, text, borders, accent, status, sidebar and tabs, chips, chat, diff and syntax); colours that are not set are derived as before, so existing themes keep working (#309)
 - Design check in the theme editor: hints on contrast (WCAG), distinguishable states, status colours under colour blindness, the terminal palette and harmony; never blocks saving, single checks can be switched off (#309)
@@ -22,6 +26,7 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ### Changed
 
+- Project backups use format version 4 (archived tickets, maintenance settings, custom rules); versions before 2.6.0 refuse them with a clear message, older backups still import. The database is migrated to schema 10 on the first start, with a backup first (#308)
 - A theme file that cannot be loaded is listed with the reason and cannot be selected until it is fixed; with an invalid selected theme Paneldeck uses the default theme (#309)
 
 ## [2.5.0] - 2026-11-20

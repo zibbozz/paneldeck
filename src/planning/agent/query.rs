@@ -36,12 +36,12 @@ pub fn search_err(lang: Lang, e: SearchError) -> ToolError {
 }
 
 /// Führt die Abfrage aus und liefert die Seite im Format von `search_tickets`.
-pub(super) fn run(ctx: &Ctx, project: Option<&Project>, query: &str, limit: i64, offset: i64) -> R {
+pub(super) fn run(ctx: &Ctx, project: Option<&Project>, query: &str, limit: i64, offset: i64, include_archived: bool) -> R {
     let scope = match project {
         Some(p) => Scope::Project(p.id),
         None => Scope::All,
     };
-    let sctx = search::Ctx::new(&ctx.now.format("%Y-%m-%d").to_string(), ctx.lang).with_timeout(QUERY_TIMEOUT);
+    let sctx = search::Ctx::new(&ctx.now.format("%Y-%m-%d").to_string(), ctx.lang).with_timeout(QUERY_TIMEOUT).with_archived(include_archived);
     let page = search::run_query(ctx.conn, &sctx, scope, query, Page::new(limit, offset)).map_err(|e| search_err(ctx.lang, e))?;
     let mut tickets = Vec::with_capacity(page.rows.len());
     for r in &page.rows {

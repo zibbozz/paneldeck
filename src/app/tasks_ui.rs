@@ -174,6 +174,8 @@ pub(super) struct TasksUi {
     due_mgr: Option<DueManager>,
     /// (überfällig, markiert) der offenen Karten für die Übersicht (Reiter-Kopf).
     pub(super) due_counts: (usize, usize),
+    /// „Daten in neue Datei retten“ wurde gedrückt (Datenbank nicht verfügbar, #308); die Anwendung führt es aus.
+    pub(super) rescue_request: bool,
 }
 
 impl Default for TasksUi {
@@ -208,6 +210,7 @@ impl Default for TasksUi {
             thresholds: crate::due::default_thresholds(),
             due_mgr: None,
             due_counts: (0, 0),
+            rescue_request: false,
         }
     }
 }
@@ -656,6 +659,10 @@ impl TasksUi {
                         ui.label(RichText::new(msg).color(style::dim(ui)));
                         if let Some(e) = env.db_error {
                             ui.colored_label(Color32::LIGHT_RED, e);
+                            ui.add_space(8.0);
+                            if ui.button(lang.t("Daten in eine neue Datei retten …", "Rescue the data into a new file …")).on_hover_text(lang.t("Liest alles Lesbare in eine neue Datei neben der Datenbank; die Datenbank selbst bleibt unverändert.", "Reads everything readable into a new file next to the database; the database itself stays unchanged.")).clicked() {
+                                self.rescue_request = true;
+                            }
                         }
                     });
                 });
@@ -1431,6 +1438,7 @@ impl App {
     pub(super) fn tasks_view(&mut self, ctx: &egui::Context) {
         let env = Env { db: self.db.as_ref(), db_error: self.db_error.as_deref(), lang: self.settings.language, bg: self.theme().bg, undo_steps: self.settings.undo_steps as usize };
         if let Some(db) = env.db {
+            self.plan.set_maint_dirs(self.backup_dir_path(), self.dir.clone());
             self.plan.ensure_loaded(Some(db));
             self.plan.header(ctx, &env, db);
             #[cfg(feature = "readme-shots")]
@@ -1442,6 +1450,10 @@ impl App {
                     self.set_mode(titlebar::Mode::Terminals);
                     ctx.request_repaint();
                 }
+                if let Some(p) = self.plan.take_restore_request() {
+                    // Wartungsseite: letzte Sicherung oder gerettete Datei einspielen (Dialog der Anwendung)
+                    self.confirm_restore = Some(p);
+                }
                 let outs = self.plan.take_quick_out();
                 self.handle_quick_out(ctx, outs);
                 for t in self.plan.take_toasts() {
@@ -1451,10 +1463,27 @@ impl App {
             }
         }
         self.tasks.show(ctx, &env);
+        if std::mem::take(&mut self.tasks.rescue_request) {
+            self.rescue_unavailable_db();
+        }
         // Kopf („3 überfällig“) mit dem Stand der gerade geladenen Liste
         self.plan.set_todo_due_counts(self.tasks.due_counts);
         if let Some(n) = self.tasks.notice.take() {
             self.notice = Some((n, Instant::now()));
+        }
+    }
+
+    /// Datenbank nicht verfügbar (z. B. beschädigt): alles Lesbare in eine neue Datei retten und anbieten, sie wie eine Sicherung
+    /// einzuspielen (#308). Die Datenbank selbst bleibt unverändert.
+    fn rescue_unavailable_db(&mut self) {
+        let lang = self.settings.language;
+        let src = self.dir.join(crate::db::FILE);
+        match crate::planning::maintenance::dbcare::rescue(&src, &self.dir, lang) {
+            Ok(rep) => {
+                self.toast(format!("{} {} ({} {})", lang.t("Gerettet in", "Rescued into"), rep.dest.display(), rep.rescued(), lang.t("Zeilen", "rows")));
+                self.confirm_restore = Some(rep.dest);
+            }
+            Err(e) => self.toast(e.message(lang)),
         }
     }
 

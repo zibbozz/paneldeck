@@ -22,7 +22,7 @@ fn seeded() -> (Connection, SeededDemo, DemoSpec) {
 }
 
 fn ctx_for(d: &SeededDemo, lang: Lang) -> Ctx {
-    Ctx { today: d.today.clone(), terminals: d.terminals.clone(), lang, timeout: std::time::Duration::from_secs(10) }
+    Ctx { today: d.today.clone(), terminals: d.terminals.clone(), lang, timeout: std::time::Duration::from_secs(10), include_archived: false }
 }
 
 fn keys_of(c: &Connection, ctx: &Ctx, d: &SeededDemo, jql: &str) -> Result<Vec<String>, SearchError> {

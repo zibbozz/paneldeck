@@ -54,6 +54,8 @@ pub(super) enum Act {
     Title(String),
     Star(bool),
     Flag(bool),
+    /// Archivieren bzw. aus dem Archiv holen (#308).
+    Archive(bool),
     Transition { to: i64, needs: Vec<FieldLabel> },
     CommitField(i64),
     RevertField(i64),
@@ -187,8 +189,10 @@ fn ticket_row(ui: &mut Ui, d: &Detail, t: &Ticket, done: bool, lang: Lang) -> bo
     ui.painter().galley(Pos2::new(rect.left() + 28.0, rect.center().y - key.size().y / 2.0), key, dim);
     let status = t.status_id.and_then(|s| d.sum.status(s));
     let status_w = status.map(|s| ui.painter().layout_no_wrap(s.display(lang), egui::FontId::proportional(11.5), Color32::WHITE).size().x + 30.0).unwrap_or(0.0);
-    let col = if done { dim } else { ui.visuals().text_color() };
-    let mut job = egui::text::LayoutJob::simple_singleline(t.title.clone(), egui::TextStyle::Body.resolve(ui.style()), col);
+    // Archivierte Kinder bleiben sichtbar, aber gekennzeichnet und gedämpft.
+    let col = if done || t.archived { dim } else { ui.visuals().text_color() };
+    let title = if t.archived { format!("{} ({})", t.title, lang.t("archiviert", "archived")) } else { t.title.clone() };
+    let mut job = egui::text::LayoutJob::simple_singleline(title, egui::TextStyle::Body.resolve(ui.style()), col);
     if done {
         job.sections[0].format.strikethrough = Stroke::new(1.0_f32, col);
     }
@@ -265,6 +269,10 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
                     acts.push(Act::ChangeType);
                     ui.close();
                 }
+                if ui.button(if t.archived { lang.t("Aus dem Archiv holen", "Restore from archive") } else { lang.t("Archivieren", "Archive") }).clicked() {
+                    acts.push(Act::Archive(!t.archived));
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button(RichText::new(lang.t("Löschen …", "Delete …")).color(crate::style::ui().error)).clicked() {
                     acts.push(Act::Delete);
@@ -289,6 +297,16 @@ pub(super) fn draw(ui: &mut Ui, vc: &VCx, d: &Detail, view: &mut ViewState) -> V
         });
     });
     ui.add_space(S1);
+    // ---- archiviert (#308): Hinweis und „Wiederherstellen“
+    if t.archived {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(lang.t("Archiviert – aus Listen, Boards und Suche ausgeblendet (Suche: archived = true).", "Archived – hidden from lists, boards and search (search: archived = true).")).small().color(Color32::from_rgb(0xe5, 0xa0, 0x4b)));
+            if ui.small_button(lang.t("Wiederherstellen", "Restore")).clicked() {
+                acts.push(Act::Archive(false));
+            }
+        });
+        ui.add_space(S1);
+    }
     // ---- Titel
     let title_w = ui.available_width();
     if let Some(new) = title_edit(ui, Id::new(("ticket_title", t.id)), &t.title, title_w, lang.t("Titel", "Title")) {
@@ -981,6 +999,15 @@ impl PlanUi {
                 let r = set_flagged(cx.conn, tid, on, &src);
                 self.t_apply(cx, r);
             }
+            Act::Archive(on) => match crate::planning::maintenance::actions::set_archived_ui(cx.conn, tid, on) {
+                Ok(_) => {
+                    self.tickets.invalidate();
+                    self.tickets.detail_dirty = true;
+                    self.tickets.counts_dirty = true;
+                    self.dirty = true;
+                }
+                Err(e) => self.msg_error(cx, e.message(lang)),
+            },
             Act::Transition { to, needs } => {
                 if !needs.is_empty() {
                     self.open_transition(cx, tid, to, &needs);

@@ -46,6 +46,8 @@ pub struct Ticket {
     pub starred: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// Archiviert (Wartung, ab Schema 10): aus Listen, Boards und Suche ausgeblendet, jederzeit wiederherstellbar.
+    pub archived: bool,
 }
 
 impl Ticket {
@@ -55,7 +57,7 @@ impl Ticket {
     }
 }
 
-pub(crate) const COLS: &str = "t.id, t.project_id, p.key, t.number, t.type_id, t.title, t.status_id, t.parent_id, t.rank, t.flagged, t.starred, t.created_at, t.updated_at";
+pub(crate) const COLS: &str = "t.id, t.project_id, p.key, t.number, t.type_id, t.title, t.status_id, t.parent_id, t.rank, t.flagged, t.starred, t.created_at, t.updated_at, t.archived";
 pub(crate) const FROM: &str = "FROM tickets t JOIN projects p ON p.id = t.project_id";
 
 pub(crate) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Ticket> {
@@ -73,6 +75,7 @@ pub(crate) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Ticket> {
         starred: r.get::<_, i64>(10)? != 0,
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
+        archived: r.get::<_, i64>(13)? != 0,
     })
 }
 

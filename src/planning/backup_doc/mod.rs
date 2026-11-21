@@ -109,7 +109,9 @@ pub const FORMAT: &str = "paneldeck-project";
 /// Aktuelle Format-Version. 3 (Paneldeck 2.3): eingebaute Felder Beschreibung, Fälligkeit (Datum allein erlaubt) und Labels,
 /// Schwellen der Fälligkeit (`project.due_thresholds`). Ältere Programmversionen lehnen ein Dokument der Version 3 ab, statt an
 /// einem reinen Datum in der Fälligkeit mit einem unverständlichen Wertfehler abzubrechen; Version 1 und 2 bleiben lesbar.
-pub const VERSION: u32 = 3;
+/// 4 (Paneldeck 2.6, #308): archivierte Tickets (`tickets[].archived`) und der Abschnitt `maintenance` (Einstellungen und eigene
+/// Prüfregeln der Wartung); ältere Programmversionen lehnen das Dokument ab, statt Archiv-Markierung und Regeln zu verlieren.
+pub const VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDoc {
@@ -141,6 +143,41 @@ pub struct ProjectDoc {
     /// Sprints in der Reihenfolge des Anlegens (Nummer = Position, von 1 an). Ab Version 2.
     #[serde(default)]
     pub sprints: Vec<DocSprint>,
+    /// Wartung: Einstellungen und eigene Prüfregeln. Ab Version 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<DocMaintenance>,
+}
+
+/// Wartungs-Einstellungen eines Projekts (Status und Felder als Vorlagen-Nummern).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DocMaintenance {
+    /// Vorlagen-Nummer des Zielstatus „Won't Do“.
+    #[serde(default)]
+    pub wont_do: Option<i64>,
+    #[serde(default)]
+    pub stale_days: Option<i64>,
+    #[serde(default)]
+    pub field_days: Option<i64>,
+    #[serde(default)]
+    pub duplicate_percent: Option<i64>,
+    /// Abgeschaltete Prüfungen (Kennungen wie in `maintenance_report`).
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    #[serde(default)]
+    pub rules: Vec<DocRule>,
+}
+
+/// Eine eigene Prüfregel. `action` wie in der Datenbank, Status/Feld als Vorlagen-Nummern.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocRule {
+    pub name: String,
+    pub jql: String,
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub action: Value,
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Eine Version oder ein Meilenstein.
@@ -253,6 +290,9 @@ pub struct DocTicket {
     pub flagged: bool,
     #[serde(default)]
     pub starred: bool,
+    /// Archiviert (Wartung). Ab Version 4.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
     pub created_at: String,
     pub updated_at: String,
     /// Gesetzte Feldwerte nach Feld-Nummer; Ticket-Felder enthalten die Ticketnummer des Ziels.

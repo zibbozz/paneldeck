@@ -34,6 +34,8 @@ pub(super) struct Form {
     original_key: Option<String>,
     focus_name: bool,
     err: Option<String>,
+    /// Nur Einstellungen: Wartung (#308) – Zielstatus „Won't Do“ und Schwellen, samt der Status zur Auswahl.
+    maint: Option<(crate::planning::maintenance::Settings, Vec<(i64, String)>)>,
 }
 
 impl Form {
@@ -54,6 +56,7 @@ impl Form {
             original_key: None,
             focus_name: true,
             err: None,
+            maint: None,
         }
     }
 
@@ -73,6 +76,7 @@ impl Form {
             original_key: Some(p.key.clone()),
             focus_name: false,
             err: None,
+            maint: None,
         }
     }
 
@@ -206,6 +210,37 @@ fn form_ui(ui: &mut Ui, f: &mut Form, lang: Lang, new: bool) -> bool {
     enter
 }
 
+/// Abschnitt „Wartung“ der Projekt-Einstellungen: Zielstatus „Won't Do“, Schwellen für liegengebliebene Tickets und Felder,
+/// Ähnlichkeit für Duplikate.
+fn maint_ui(ui: &mut Ui, m: &mut crate::planning::maintenance::Settings, statuses: &[(i64, String)], lang: Lang) {
+    use crate::planning::maintenance::{DAYS_RANGE, PERCENT_RANGE};
+    ui.add_space(S3);
+    ui.label(RichText::new(lang.t("Wartung", "Maintenance")).strong());
+    ui.horizontal(|ui| {
+        ui.label(lang.t("Zielstatus „Als Won't Do schließen“:", "Target status of “Close as Won't Do”:"));
+        let none = lang.t("– keiner (Aktion aus) –", "– none (action off) –");
+        let sel = m.wont_do.and_then(|s| statuses.iter().find(|x| x.0 == s)).map(|x| x.1.clone()).unwrap_or_else(|| none.to_string());
+        egui::ComboBox::from_id_salt("maint_wont_do").selected_text(sel).show_ui(ui, |ui| {
+            ui.selectable_value(&mut m.wont_do, None, none);
+            for (id, name) in statuses {
+                ui.selectable_value(&mut m.wont_do, Some(*id), name);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(lang.t("Tickets gelten als liegengeblieben nach", "Tickets count as stale after"));
+        ui.add(egui::DragValue::new(&mut m.stale_days).range(DAYS_RANGE));
+        ui.label(lang.t("Tagen, Felder nach", "days, fields after"));
+        ui.add(egui::DragValue::new(&mut m.field_days).range(DAYS_RANGE));
+        ui.label(lang.t("Tagen", "days"));
+    });
+    ui.horizontal(|ui| {
+        ui.label(lang.t("Mögliche Duplikate ab Titel-Ähnlichkeit", "Possible duplicates from title similarity"));
+        ui.add(egui::DragValue::new(&mut m.duplicate_percent).range(PERCENT_RANGE).suffix(" %"));
+    });
+    hint(ui, lang.t("Ohne Zielstatus ist „Als Won't Do schließen“ auf der Wartungsseite aus.", "Without a target status, “Close as Won't Do” is off on the maintenance page."));
+}
+
 impl PlanUi {
     // ------------------------------------------------------------------ Assistent „Neues Projekt“
 
@@ -280,6 +315,11 @@ impl PlanUi {
     pub(super) fn settings_dialog(&mut self, ctx: &egui::Context, cx: &Cx) {
         let Some((id, mut f)) = self.settings.take() else { return };
         let lang = cx.lang;
+        if f.maint.is_none() {
+            let s = crate::planning::maintenance::load_settings(cx.conn, id).unwrap_or_default();
+            let st = crate::planning::statuses::list_statuses(cx.conn, id).unwrap_or_default().iter().map(|s| (s.id, s.display(lang))).collect();
+            f.maint = Some((s, st));
+        }
         let mut save = false;
         let mut close = false;
         let m = crate::style::modal(Self::modal_id("settings")).show(ctx, |ui| {
@@ -288,6 +328,9 @@ impl PlanUi {
             egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 220.0).max(240.0)).auto_shrink([true, true]).show(ui, |ui| {
                 if form_ui(ui, &mut f, lang, false) && f.is_valid() {
                     save = true;
+                }
+                if let Some((m, statuses)) = f.maint.as_mut() {
+                    maint_ui(ui, m, statuses, lang);
                 }
             });
             ui.add_space(S2);
@@ -318,9 +361,14 @@ impl PlanUi {
                 use_versions: Some(f.versions),
                 tag_color_mode: Some(f.tag_mode),
             };
-            match update_project(cx.conn, id, &u) {
+            let r = update_project(cx.conn, id, &u).and_then(|()| match &f.maint {
+                Some((m, _)) => crate::planning::maintenance::save_settings(cx.conn, id, m).map_err(PlanError::from),
+                None => Ok(()),
+            });
+            match r {
                 Ok(()) => {
                     self.dirty = true;
+                    self.maint.counts.remove(&id);
                     close = true;
                 }
                 Err(e) => f.err = Some(e.message(lang)),

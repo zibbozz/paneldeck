@@ -40,7 +40,7 @@ pub(super) fn FLAG_RED() -> Color32 {
 /// Alle Tickets des Projekts und davon erledigte (für die Übersicht).
 pub fn project_counts(conn: &Connection, project_id: i64) -> (usize, usize) {
     conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), 0) FROM tickets t LEFT JOIN statuses s ON s.id = t.status_id WHERE t.project_id = ?1",
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), 0) FROM tickets t LEFT JOIN statuses s ON s.id = t.status_id WHERE t.project_id = ?1 AND t.archived = 0",
         [project_id],
         |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as usize)),
     )
@@ -674,6 +674,9 @@ mod tests {
         transition_ticket(&f.c, a.id, f.done, &[], &Source::ui()).unwrap();
         assert_eq!(project_counts(&f.c, f.project), (2, 1));
         assert_eq!(project_counts(&f.c, 9999), (0, 0));
+        // archivierte Tickets zählen nicht (#308)
+        f.c.execute("UPDATE tickets SET archived = 1 WHERE id = ?1", [a.id]).unwrap();
+        assert_eq!(project_counts(&f.c, f.project), (1, 0));
     }
 
     #[test]

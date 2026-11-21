@@ -12,7 +12,8 @@
 //!   [`SearchSchema::conflicts`] (die Oberfläche kann darauf hinweisen). Ein Feld, das wie ein eingebautes Pseudo-Feld heißt
 //!   (`type`, `status`, `title` …), steht ebenfalls in den Konflikten: das eingebaute gewinnt.
 //! * **Eingebaute Pseudo-Felder:** `key`, `type`, `status`, `summary`/`title`, `parent`, `created`, `updated`, `flagged`, `starred`,
-//!   `project`, `sprint` (nur wenn ein Projekt des Bereichs Sprints nutzt), `changedBy`, `terminal`.
+//!   `project`, `sprint` (nur wenn ein Projekt des Bereichs Sprints nutzt), `changedBy`, `terminal`, `archived` (ab 2.6.0: ohne
+//!   Bedingung auf `archived` blendet jede Abfrage archivierte Tickets aus, siehe `compile`).
 //! * **Eingebaute Felder jedes Tickets:** `description` (dt. auch „Beschreibung“; eigene Text-Felder dieses Namens gehören dazu)
 //!   und `due` (dt. auch „Fällig“). Die Fälligkeit vergleicht „nur Datum“ als Ende des Tages; ein Vergleich mit einem reinen
 //!   Datum vergleicht nur den Tag (`due = 2026-11-20` trifft auch 14:30 an dem Tag). Eigene Datums-Felder namens „Due“/„Fällig“
@@ -153,6 +154,8 @@ pub(super) enum Store {
     Updated,
     Flagged,
     Starred,
+    /// Archiviert (Wartung, #308). Ohne Bedingung auf `archived` blendet die Abfrage archivierte Tickets aus.
+    Archived,
     ChangedBy,
     Sprint,
     Type(OptionSet),
@@ -434,6 +437,7 @@ pub fn search_schema(conn: &Connection, scope: Scope, lang: Lang) -> SRes<Search
     reg.add(&nm("updated", "Geändert"), FieldType::DateTime, false, Store::Updated);
     reg.add(&nm("flagged", "Markiert"), FieldType::Bool, false, Store::Flagged);
     reg.add(&nm("starred", "Stern"), FieldType::Bool, false, Store::Starred);
+    reg.add(&nm("archived", "Archiviert"), FieldType::Bool, false, Store::Archived);
     reg.add(&nm("project", "Projekt"), FieldType::Option(project_set.flat_names()), false, Store::Project(project_set));
     if projects.iter().any(|p| p.use_sprints) {
         // Auswahlwerte: die Namen der Sprints (siehe `pending.rs`)

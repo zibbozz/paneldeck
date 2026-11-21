@@ -721,11 +721,11 @@ pub fn scan(ctx: &Ctx) -> Scan {
     for item in Item::ALL {
         let f = match item {
             Item::DbBackups => Found {
-                files: backups.iter().map(|b| FileEntry { path: b.path.clone(), bytes: b.size, modified: std::fs::metadata(&b.path).and_then(|m| m.modified()).ok() }).collect(),
+                files: backups.iter().filter(|b| b.kind != crate::backup::Kind::PreMaintenance).map(|b| FileEntry { path: b.path.clone(), bytes: b.size, modified: std::fs::metadata(&b.path).and_then(|m| m.modified()).ok() }).collect(),
                 ..Default::default()
             },
             Item::MaintenanceBackups => Found {
-                files: files_in_followed(&ctx.backup_dir, is_maintenance_backup_name).into_iter().filter(|f| !backup_paths.contains(&f.path.as_path())).collect(),
+                files: files_in_followed(&ctx.backup_dir, is_maintenance_backup_name).into_iter().filter(|f| backup_paths.contains(&f.path.as_path())).collect(),
                 ..Default::default()
             },
             Item::Clipboard => sub_tree(&d.join("clipboard")),
