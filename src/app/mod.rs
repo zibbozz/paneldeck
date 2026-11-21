@@ -37,6 +37,7 @@ mod claude_status;
 mod data;
 mod dialogs;
 mod dragdrop;
+pub(crate) mod editor_ui;
 mod empty_hub;
 pub(crate) mod folder_picker;
 mod fresh_start;
@@ -953,6 +954,8 @@ pub struct App {
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
+    /// Reiter „Editor“ (#54): Ordnerbaum, Dokumente, Teilungen. Für alle Fenster gemeinsam (nicht in `view_fields!`).
+    ed: editor_ui::EditorUi,
     applied_font: String,
     /// Weitere Fenster (`multiwin.rs`, #110).
     wins: multiwin::Wins,
@@ -1306,6 +1309,7 @@ impl App {
             hwnd: crate::platform::window::hwnd_from(cc),
             in_tray: false,
             editor: None,
+            ed: Default::default(),
             applied_font: String::new(),
             wins: Default::default(),
             // `--no-update-check`: keine automatische Prüfung für diesen Start (die manuelle geht weiter).
@@ -1434,6 +1438,8 @@ impl App {
         if let Some(e) = app.db_error.clone() {
             app.notify_text(e);
         }
+        // Editor (#54): Ordner, Reiter, Teilungen und ungespeicherte Puffer (Hot Exit) des letzten Laufs.
+        app.ed = editor_ui::EditorUi::restore(&app.dir);
         app
     }
 
@@ -2543,6 +2549,7 @@ impl App {
             }
         }
         self.save_chats();
+        self.ed.save(&self.dir);
     }
 
     /// Nur `state.json` schreiben (Sitzungen, Layout, Projekte) – leicht genug für sofortiges Speichern, z. B. wenn sich
@@ -2682,6 +2689,8 @@ impl App {
             ("mode_tasks", titlebar::Mode::Tasks),
             ("mode_terminals_alt", titlebar::Mode::Terminals),
             ("mode_tasks_alt", titlebar::Mode::Tasks),
+            ("mode_editor", titlebar::Mode::Editor),
+            ("mode_editor_alt", titlebar::Mode::Editor),
         ] {
             if let Some((m, k)) = self.binding(id) {
                 if ctx.input_mut(|i| consume_key_exact(i, m, k, true)) {
@@ -2696,6 +2705,8 @@ impl App {
     fn set_mode(&mut self, mode: titlebar::Mode) {
         if self.mode != mode {
             self.focus_return = (mode == titlebar::Mode::Terminals).then_some(0);
+            // Editor (#54): beim Wechsel dorthin hat das Textfeld der aktiven Teilung die Tastatur.
+            self.ed.want_focus |= mode == titlebar::Mode::Editor;
         }
         if mode != titlebar::Mode::Tasks {
             self.plan.forget_terminal_return(); // von Hand weggeschaltet: der Rückweg „Zurück zum Terminal Hub“ gilt nicht mehr
@@ -4318,6 +4329,7 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.poll_mcp(ctx);
+        self.editor_tick(ctx);
         self.poll_procs(ctx);
         self.poll_retired(ctx);
         // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).
@@ -4380,6 +4392,8 @@ impl eframe::App for App {
             self.files_ui(ctx, &mut actions);
             self.central(ctx, &mut actions);
             self.handle_drag(ctx);
+        } else if self.mode == titlebar::Mode::Editor {
+            self.editor_view(ctx);
         } else {
             self.tasks_view(ctx);
         }
@@ -4426,6 +4440,8 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         crate::platform::chrome::shutdown();
         self.save_for_exit();
+        // Editor (#54) unabhängig von „Sitzungen merken“: Reiter und ungespeicherte Puffer (Hot Exit) immer sichern.
+        self.ed.save(&self.dir);
         // Hilfsdateien der zsh/fish-Integration (#57) entfernen.
         crate::shellinit::remove_files(&self.dir);
     }

@@ -11,6 +11,8 @@ pub(super) enum Mode {
     #[default]
     Terminals,
     Tasks,
+    /// Texteditor (#54): eigener Bereich mit Ordnerbaum, Reitern und Teilungen, unabhängig von den Terminals.
+    Editor,
 }
 
 pub(super) const BAR_HEIGHT: f32 = 34.0;
@@ -50,9 +52,10 @@ impl App {
                 painter.rect_filled(Rect::from_center_size(icon_c, Vec2::splat(18.0)), 5.0, style::brand());
                 style::paint_icon(painter, SIcon::Terminal, icon_c, Color32::WHITE);
                 // Reiter
-                let tabs: [(Mode, SIcon, &str); 2] = [
+                let tabs: [(Mode, SIcon, &str); 3] = [
                     (Mode::Terminals, SIcon::Terminal, lang.t("Terminal Hub", "Terminal Hub")),
                     (Mode::Tasks, SIcon::Checklist, lang.t("Todo-Liste", "Todo list")),
+                    (Mode::Editor, SIcon::Doc, lang.t("Editor", "Editor")),
                 ];
                 let ctrl_hint = lang.t("Strg+Klick: in neuem Fenster öffnen", "Ctrl+click: open in a new window");
                 let mut x = rect.left() + 42.0;

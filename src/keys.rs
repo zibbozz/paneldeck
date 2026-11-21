@@ -26,9 +26,12 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // Reiterwechsel der Fensterleiste (nicht Strg+Alt+Zahl: das ist AltGr auf deutschen Tastaturen)
     ("mode_terminals", "Alt+Shift+1"),
     ("mode_tasks", "Alt+Shift+2"),
+    ("mode_editor", "Alt+Shift+3"),
     // Zweite Belegung ohne Alt+Shift (Windows schaltet damit die Eingabesprache um); Strg+1/2 verbraucht der Hub; Strg+3…0 gehen ans Terminal (win32-input-mode, #183)
     ("mode_terminals_alt", "Ctrl+1"),
     ("mode_tasks_alt", "Ctrl+2"),
+    // Editor (#54): zweite Belegung standardmäßig leer – Strg+3 gehört dem Terminal (#183).
+    ("mode_editor_alt", ""),
     // Alle Sitzungen schließen (#156): standardmäßig ohne Kürzel (leer = keins)
     ("close_all", ""),
     // Sitzung neu laden (#169): standardmäßig ohne Kürzel
@@ -65,6 +68,8 @@ pub fn label(id: &str, de: bool) -> &'static str {
         "mode_tasks" => ("Reiter „Todo-Liste“", "“Todo list” tab"),
         "mode_terminals_alt" => ("Reiter „Terminal Hub“ (zweite Belegung)", "“Terminal Hub” tab (alternative)"),
         "mode_tasks_alt" => ("Reiter „Todo-Liste“ (zweite Belegung)", "“Todo list” tab (alternative)"),
+        "mode_editor" => ("Reiter „Editor“", "“Editor” tab"),
+        "mode_editor_alt" => ("Reiter „Editor“ (zweite Belegung)", "“Editor” tab (alternative)"),
         "close_all" => ("Alle Sitzungen schließen", "Close all sessions"),
         "reload" => ("Sitzung neu laden", "Reload session"),
         _ => ("?", "?"),
