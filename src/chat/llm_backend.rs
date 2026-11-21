@@ -1,8 +1,9 @@
 //! Echtes Backend der Chats: verteilt nach [`ChatMeta::server`] auf die Server aus den Einstellungen
 //! (`Settings::llm_servers`, siehe `llm::config`) und streamt die Antwort über `llm::chat`.
 //!
-//! Anfrage: Systemprompt (Vorlage aus `system-prompt.md` bzw. eingebaut, gerendert für die Stufe des Modells und den
-//! Expertenmodus) plus eine Kontextzeile mit Projekt und Ordner des Chats, dann der Verlauf ohne fehlgeschlagene Antworten.
+//! Anfrage: Systemprompt (der Master-Prompt der Chats aus `master_prompt`, immer Englisch, für Stufe, Modus und Werkzeuge
+//! des Modells – seit 2.6.1 nicht mehr `system-prompt.md`, die gilt nur für externe Agenten) plus eine Kontextzeile mit
+//! Projekt und Ordner des Chats, dann der Verlauf ohne fehlgeschlagene Antworten.
 //! Passt der Verlauf nicht in die Kontextlänge (abzüglich 25 % für die Antwort), fallen die ältesten Runden weg
 //! (`TurnEvent::ContextStart`). Folgen nach einer fehlgeschlagenen Antwort zwei Nutzer-Nachrichten aufeinander, werden
 //! sie zu einer zusammengefasst (mit Leerzeile getrennt), damit das Modell eine abwechselnde Folge sieht.
@@ -14,7 +15,8 @@ use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
 use super::logic;
 use super::store::{self, ChatMsg};
 use crate::llm::{self, ChatMessage, ChatRequest, Endpoint, LlmError, Role, StreamEvent, Transport};
-use crate::mcp::{sysprompt, HubInfo, McpLevel};
+use super::tools::ToolPolicy;
+use crate::mcp::McpLevel;
 use crate::state::{ChatMeta, Lang};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -85,38 +87,29 @@ pub fn chat_notice(servers: &[crate::llm::config::LlmServer], meta: &ChatMeta, l
     (cfg.level == McpLevel::Off && cfg.level_chosen).then(|| lang.t("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle).", "Tools are off for this model (Settings → Models).").to_string())
 }
 
-/// Systemprompt für die Stufe des Modells: eigene Vorlage (Datenordner) oder die eingebaute, in der Prompt-Sprache.
-pub fn system_prompt(level: McpLevel, cx: &TurnContext) -> String {
-    let lang = cx.prompt_lang;
-    let template = cx.data_dir.as_deref().map(|d| sysprompt::load(d, lang).template).unwrap_or_else(|| sysprompt::builtin(lang).to_string());
-    let ctx = sysprompt::Ctx::new(lang, Some(HubInfo { level, expert: cx.expert }));
-    let text = sysprompt::render(&template, &ctx).text;
-    let text = if text.trim().is_empty() { sysprompt::render(sysprompt::builtin(lang), &ctx).text } else { text };
+/// Systemprompt eines Chats (#340): der Master-Prompt für Stufe, Modus, Werkzeuge und Modellfamilie (`policy`, `model`)
+/// plus die Kontextzeile. Immer Englisch – die Einstellung „Sprache des Systemprompts“ (`Settings::mcp_prompt_lang`)
+/// gilt nur noch für externe Agenten; das Modell antwortet in der Sprache des Nutzers.
+pub fn system_prompt(policy: &ToolPolicy, model: &str, cx: &TurnContext) -> String {
+    let text = super::master_prompt::render(policy, model);
     let line = context_line(cx);
     if line.is_empty() { text } else { format!("{}\n\n{line}", text.trim_end()) }
 }
 
-/// Kurze Kontextzeile mit Projekt und Ordner des Chats (in der Prompt-Sprache; leer, wenn beides fehlt).
+/// Kurze Kontextzeile mit Projekt und Ordner des Chats (Englisch wie der Prompt; leer, wenn beides fehlt).
 pub fn context_line(cx: &TurnContext) -> String {
     let (p, f) = (clean_field(&cx.project), clean_field(&cx.folder));
-    let (p, f) = (p.as_str(), f.as_str());
-    let de = cx.prompt_lang == Lang::De;
     let mut parts = Vec::new();
     if !p.is_empty() {
-        parts.push(if de { format!("Projekt „{p}“") } else { format!("project “{p}”") });
+        parts.push(format!("project “{p}”"));
     }
     if !f.is_empty() {
-        parts.push(if de { format!("Ordner {f}") } else { format!("folder {f}") });
+        parts.push(format!("folder {f}"));
     }
     if parts.is_empty() {
         return String::new();
     }
-    let what = parts.join(", ");
-    if de {
-        format!("Dieser Chat gehört in Paneldeck zu: {what}. Du hast keinen direkten Zugriff auf das Dateisystem.")
-    } else {
-        format!("This chat belongs to the Paneldeck {what}. You have no direct file system access.")
-    }
+    format!("This chat belongs to the Paneldeck {}. You have no direct file system access.", parts.join(", "))
 }
 
 fn role(r: store::Role) -> Role {
@@ -195,10 +188,10 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     }
     let cfg = server.model_cfg(model);
     let endpoint = server.endpoint(lang)?;
-    let policy = super::tools::ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert);
+    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert);
     let (hist, origin) = map_history(history);
     let mut messages = Vec::with_capacity(hist.len() + 1);
-    messages.push(ChatMessage::new(Role::System, system_prompt(policy.prompt_level(), cx)));
+    messages.push(ChatMessage::new(Role::System, system_prompt(&policy, model, cx)));
     messages.extend(hist);
     // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
     // ist entsprechend weniger Platz.
@@ -216,8 +209,8 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     let context_notice = (server.user_context(model).is_some() && policy.enabled() && llm::config::context_too_small(ctx_len, prompt_real)).then(|| context_notice(ctx_len, lang));
     let note = if sys_tokens > budget {
         Some(lang.t(
-            "Der Systemprompt ist größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen oder system-prompt.md kürzen.",
-            "The system prompt is larger than the model's context – raise the context length in Settings → Models or shorten system-prompt.md.",
+            "Der Systemprompt ist größer als der Kontext des Modells – Kontextlänge in Einstellungen → Modelle erhöhen.",
+            "The system prompt is larger than the model's context – raise the context length in Settings → Models.",
         ))
     } else if sys_tokens + tool_tokens > budget {
         Some(lang.t(
@@ -438,26 +431,33 @@ mod tests {
         assert!(read.history_budget < p.history_budget, "Werkzeug-Beschreibungen gehen vom Platz ab");
         assert_eq!((p.request.num_ctx, p.request.temperature, p.context_start), (Some(crate::llm::config::DEFAULT_CONTEXT), None, None), "Ollama: num_ctx immer");
         assert_eq!(p.endpoint.base_url, "http://localhost:11434");
-        // Deutsch als Prompt-Sprache
+        // Deutsche Oberfläche: der Chat-Prompt bleibt Englisch, mit der Regel „in der Sprache des Nutzers antworten“ (#340).
         let mut c = cx(vec![server("http://localhost:11434", ServerKind::Ollama)]);
-        c.prompt_lang = Lang::De;
-        assert!(prepare(&meta(), &hist, &c).unwrap().request.messages[0].content.contains("Dieser Chat gehört in Paneldeck zu: Projekt „Demo“"));
+        c.lang = Lang::De;
+        let de = prepare(&meta(), &hist, &c).unwrap().request.messages[0].content.clone();
+        assert_eq!(de, p.request.messages[0].content);
+        assert!(de.contains("This chat belongs to the Paneldeck project “Demo”") && de.contains("answer in the language of the user's latest message"));
     }
 
+    fn pol(level: McpLevel, expert: bool) -> ToolPolicy {
+        ToolPolicy::new(LlmModel { level, level_chosen: true, ..LlmModel::named("m1") }, None, expert)
+    }
+
+    /// Der Chat nutzt den Master-Prompt (#340), nicht die Anweisungen für externe Agenten (`system-prompt.md` kennt das
+    /// Backend gar nicht mehr).
     #[test]
-    fn system_prompt_follows_model_level_and_custom_template() {
+    fn system_prompt_is_the_chat_master_prompt_for_the_model_level() {
         let mut c = cx(Vec::new());
-        let read = system_prompt(McpLevel::Read, &c);
-        let control = system_prompt(McpLevel::Control, &c);
+        let read = system_prompt(&pol(McpLevel::Read, false), "m1", &c);
+        let control = system_prompt(&pol(McpLevel::Control, false), "m1", &c);
         assert_ne!(read, control, "Stufe geht in den Prompt ein");
-        let d = std::env::temp_dir().join(format!("paneldeck-llm-backend-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join(sysprompt::FILE_NAME), "Own prompt, level {{level}}.").unwrap();
-        c.data_dir = Some(d.clone());
+        assert!(read.contains("\n### list_sessions\n") && !read.contains("\n### send_text\n") && control.contains("\n### send_text\n"));
+        assert!(!read.contains("tools/list") && !read.contains("isError"), "keine Anweisungen für externe Agenten");
+        assert_ne!(system_prompt(&pol(McpLevel::Control, true), "m1", &c), control, "Modus geht in den Prompt ein");
+        assert!(system_prompt(&pol(McpLevel::Read, false), "qwen3:8b", &c).contains("## Notes for Qwen models"), "Familienzusatz");
         c.project.clear();
         c.folder.clear();
-        assert_eq!(system_prompt(McpLevel::Read, &c), sysprompt::render("Own prompt, level {{level}}.", &sysprompt::Ctx::new(Lang::En, Some(HubInfo { level: McpLevel::Read, expert: false }))).text);
-        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(system_prompt(&pol(McpLevel::Read, false), "m1", &c), super::super::master_prompt::render(&pol(McpLevel::Read, false), "m1"), "ohne Projekt/Ordner keine Kontextzeile");
     }
 
     #[test]
@@ -494,45 +494,44 @@ mod tests {
         assert_eq!(chat_notice(&v, &m2, Lang::De).as_deref(), Some("Werkzeuge sind für dieses Modell aus (Einstellungen → Modelle)."));
     }
 
-    /// Datenordner mit einer winzigen eigenen Vorlage („S“ = 5 geschätzte Tokens), damit die Rechnung exakt ist.
-    fn tiny_prompt_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("paneldeck-llm-backend-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join(sysprompt::FILE_NAME), "S").unwrap();
-        d
-    }
-
     #[test]
     fn trimming_reports_exact_context_start_in_chat_indices() {
-        let long = "x".repeat(400); // 100 + 4 = 104 geschätzte Tokens je Nachricht
+        let long = "x".repeat(400);
         let mut failed = msg(store::Role::Assistant, "");
         failed.error = Some("e".into());
-        // 0 U, 1 (fehlgeschlagen, fällt weg), 2 A, 3 U, 4 A, 5 U „last“ (5 Tokens)
+        // 0 U, 1 (fehlgeschlagen, fällt weg), 2 A, 3 U, 4 A, 5 U „last“
         let hist = vec![msg(store::Role::User, &long), failed, msg(store::Role::Assistant, &long), msg(store::Role::User, &long), msg(store::Role::Assistant, &long), msg(store::Role::User, "last")];
-        let d = tiny_prompt_dir("trim");
+        let off = LlmModel { temperature: Some(0.5), level: McpLevel::Off, ..LlmModel::named("m1") };
         let run = |ctx: u32| {
             let mut s = server("http://localhost:11434", ServerKind::Ollama);
-            s.set_model_cfg(LlmModel { context_length: Some(ctx), temperature: Some(0.5), level: McpLevel::Off, ..LlmModel::named("m1") });
+            s.set_model_cfg(LlmModel { context_length: Some(ctx), ..off.clone() });
             let mut c = cx(vec![s]);
             c.project.clear();
             c.folder.clear();
-            c.data_dir = Some(d.clone());
             prepare(&meta(), &hist, &c).unwrap()
         };
-        // Gesamt 5 + 4·104 + 5 = 426. Kontext 384 → Budget 288: erste Runde (208) fällt weg → 218, Start bei Index 3.
-        let p = run(384);
+        // Größe des Systemprompts (Stufe Aus, ohne Kontextzeile) und der letzten Nachricht, in geschätzten Tokens.
+        let sys = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system_prompt(&ToolPolicy::new(off.clone(), None, false), "m1", &TurnContext::default())));
+        let last = llm::tokens::message_tokens(&ChatMessage::new(Role::User, "last"));
+        // Kontext, dessen Budget (75 %) genau `budget` Tokens hat.
+        let ctx_for = |budget: usize| (budget * 100).div_ceil(75) as u32;
+        // Eine Runde = zwei lange Nachrichten.
+        let round = 2 * llm::tokens::message_tokens(&ChatMessage::new(Role::User, &long));
+        // Budget sys + Runde + last + 50: die erste Runde fällt weg, Start bei Index 3.
+        let c1 = ctx_for(sys + round + last + 50);
+        let p = run(c1);
         assert_eq!(p.context_start, Some(3));
-        assert_eq!((p.request.num_ctx, p.request.temperature), (Some(384), Some(0.5)));
-        assert_eq!(p.request.messages.iter().map(|m| m.content.len()).collect::<Vec<_>>(), [1, 400, 400, 4]);
+        assert_eq!((p.request.num_ctx, p.request.temperature), (Some(c1), Some(0.5)));
+        assert_eq!(p.request.messages[0].role, Role::System);
+        assert_eq!(p.request.messages[1..].iter().map(|m| m.content.len()).collect::<Vec<_>>(), [400, 400, 4]);
         assert_eq!(p.note, None);
-        // Kontext 256 → Budget 192: auch die zweite Runde fällt weg, nur „last“ bleibt (Index 5).
-        let p = run(256);
+        // Budget sys + last + 50: auch die zweite Runde fällt weg, nur „last“ bleibt (Index 5).
+        let p = run(ctx_for(sys + last + 50));
         assert_eq!(p.context_start, Some(5));
         assert_eq!(p.request.messages.len(), 2);
         assert_eq!((p.request.messages[0].role, p.request.messages[1].content.as_str()), (Role::System, "last"));
         // Genug Platz: nichts gekürzt.
-        assert_eq!(run(100_000).context_start, None);
-        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(run(1_000_000).context_start, None);
     }
 
     #[test]
@@ -550,9 +549,8 @@ mod tests {
         let mut s = server("http://localhost:11434", ServerKind::Ollama);
         s.set_model_cfg(LlmModel { context_length: Some(256), ..LlmModel::named("m1") });
         let mut c = cx(vec![s]);
-        c.data_dir = None; // eingebaute Vorlage: deutlich mehr als 192 Tokens
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
-        assert_eq!(p.note.as_deref(), Some("The system prompt is larger than the model's context – raise the context length in Settings → Models or shorten system-prompt.md."));
+        assert_eq!(p.note.as_deref(), Some("The system prompt is larger than the model's context – raise the context length in Settings → Models."));
         assert_eq!(p.request.messages.len(), 2, "die Frage geht trotzdem mit");
         c.lang = Lang::De;
         assert!(prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap().note.unwrap().starts_with("Der Systemprompt ist größer"));
@@ -759,7 +757,9 @@ mod tests {
         s.set_model_cfg(LlmModel { tools: Some(false), level: McpLevel::Control, ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
         assert!(p.request.tools.is_empty());
-        assert_eq!(p.request.messages[0].content, system_prompt(McpLevel::Off, &cx(vec![s])), "Prompt für „Aus“");
+        let off = |c: &TurnContext| system_prompt(&pol(McpLevel::Off, false), "m1", c);
+        assert_eq!(p.request.messages[0].content, off(&cx(vec![s])), "Prompt für „Aus“");
+        assert!(p.request.messages[0].content.contains("**no tools**") && !p.request.messages[0].content.contains("## Tools"));
         // Unbekannte Fähigkeit (OpenAI-kompatibel): Werkzeuge werden gesendet
         let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
         o.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("m1") });
@@ -769,7 +769,7 @@ mod tests {
         o.set_model_cfg(LlmModel { level: McpLevel::Control, level_chosen: false, ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![o.clone()])).unwrap();
         assert!(p.request.tools.is_empty());
-        assert_eq!(p.request.messages[0].content, system_prompt(McpLevel::Off, &cx(vec![o])));
+        assert_eq!(p.request.messages[0].content, off(&cx(vec![o])));
     }
 
     #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)
@@ -830,7 +830,9 @@ mod tests {
         let resp = |b: &str| format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{b}").into_bytes();
         let (base, h) = serve_many(vec![resp(turn1), resp(turn2)]);
         let b = LlmBackend::new();
-        let read = LlmModel { level: McpLevel::Read, level_chosen: true, ..LlmModel::named("m1") };
+        // OpenAI-kompatible Server melden keine Kontextlänge: wie in der Anleitung eine eigene Angabe, damit der
+        // Master-Prompt und das Werkzeug-Ergebnis Platz haben (ohne sie gilt 8192).
+        let read = LlmModel { level: McpLevel::Read, level_chosen: true, context_length: Some(32768), ..LlmModel::named("m1") };
         let mut s = server(&format!("{base}/v1"), ServerKind::OpenAi);
         s.set_model_cfg(read.clone());
         let c = cx(vec![s]);
@@ -1014,22 +1016,24 @@ mod tests {
         assert!(empty_answer_text(false, false, Lang::En).contains("empty answer"));
     }
 
-    /// Geschätzte Tokens von Systemprompt und Werkzeug-Beschreibungen je Stufe (eingebaute Vorlage, EN/DE, einfacher
-    /// Modus und Expertenmodus): die Grundlage der Kontextgröße ohne eigene Angabe (`--nocapture` zeigt die Zahlen).
+    /// Geschätzte Tokens von Systemprompt und Werkzeug-Beschreibungen je Stufe (Master-Prompt, einfacher Modus und
+    /// Expertenmodus, mit Familienzusatz): die Grundlage der Kontextgröße ohne eigene Angabe (`--nocapture` zeigt die Zahlen).
     #[test]
     fn prompt_and_tool_sizes_per_level() {
-        for lang in [Lang::En, Lang::De] {
+        for model in ["qwen3:8b", "m"] {
             for expert in [false, true] {
                 for level in [McpLevel::Read, McpLevel::Control] {
-                    let cx = TurnContext { prompt_lang: lang, expert, ..TurnContext::default() };
-                    let sys = llm::tokens::estimate_tokens(&system_prompt(level, &cx)) + 4;
-                    let policy = super::super::tools::ToolPolicy::new(LlmModel { level, level_chosen: true, ..LlmModel::named("m") }, None, expert);
+                    let cx = TurnContext { expert, project: "Demo".into(), folder: "C:\\work\\demo".into(), ..TurnContext::default() };
+                    let policy = ToolPolicy::new(LlmModel { level, level_chosen: true, ..LlmModel::named(model) }, None, expert);
+                    let sys = llm::tokens::estimate_tokens(&system_prompt(&policy, model, &cx)) + 4;
                     let tools = llm::tokens::estimate_tokens(&serde_json::to_string(&policy.specs()).unwrap());
-                    eprintln!("SIZES {lang:?} expert={expert} {level:?}: system {sys} + tools {tools} = {}", sys + tools);
-                    // ohne eigene Angabe passt jede Stufe in den automatisch gewählten Kontext (höchstens 32768)
+                    eprintln!("SIZES {model} expert={expert} {level:?}: system {sys} + tools {tools} = {}", sys + tools);
+                    // ohne eigene Angabe passt jede Stufe in den automatisch gewählten Kontext (höchstens 65536)
                     let ctx = crate::llm::config::auto_context(sys + tools, None);
-                    assert!(!crate::llm::config::context_too_small(ctx, sys + tools), "{lang:?} {expert} {level:?}: {ctx}");
+                    assert!(!crate::llm::config::context_too_small(ctx, sys + tools), "{model} {expert} {level:?}: {ctx}");
                     eprintln!("SIZES   -> auto context {ctx}");
+                    // Nur Steuern im Expertenmodus (die meisten Werkzeuge) braucht mehr als 32768.
+                    assert!(ctx <= 32768 || (expert && level == McpLevel::Control), "{model} {expert} {level:?}: {ctx}");
                 }
             }
         }

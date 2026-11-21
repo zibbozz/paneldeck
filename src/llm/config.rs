@@ -386,8 +386,10 @@ impl LlmServer {
     }
 }
 
-/// Ohne eigene Angabe höchstens so viel Kontext (Ollama reserviert Speicher für die ganze Länge).
-pub const MAX_AUTO_CONTEXT: u32 = 32768;
+/// Ohne eigene Angabe höchstens so viel Kontext (Ollama reserviert Speicher für die ganze Länge). Seit 2.6.1 (#340)
+/// 65536: der Master-Prompt der Chats dokumentiert jedes Werkzeug vollständig; Steuern im Expertenmodus braucht damit
+/// mehr als 32768 (die übrigen Stufen bleiben bei 32768).
+pub const MAX_AUTO_CONTEXT: u32 = 65536;
 /// Platz für Verlauf und Werkzeug-Ergebnisse, der neben Systemprompt und Werkzeugen mindestens bleiben soll.
 pub const MIN_ROOM_TOKENS: usize = 4096;
 /// Anteil des Kontexts, der für die Antwort frei bleibt (Prozent; wie `chat::llm_backend::ANSWER_RESERVE_PERCENT`).
@@ -523,7 +525,8 @@ mod tests {
         assert_eq!(s.request_context("big", None), DEFAULT_CONTEXT, "Ollama: ohne bekannten Bedarf 8192");
         assert_eq!(s.request_context("big", Some(9_000)), 32768, "Bedarf (9000 + 4096) / 0,75 → 32768");
         assert_eq!(s.request_context("big", Some(5_000)), 16384);
-        assert_eq!(s.request_context("big", Some(500_000)), MAX_AUTO_CONTEXT, "höchstens 32768");
+        assert_eq!(s.request_context("big", Some(500_000)), MAX_AUTO_CONTEXT, "höchstens 65536");
+        assert_eq!(s.request_context("big", Some(22_000)), 65536, "Bedarf (22000 + 4096) / 0,75 → 65536");
         assert_eq!(s.request_context("small", Some(9_000)), 2048, "höchstens die Länge des Modells");
         assert_eq!(s.request_context("small", None), 2048);
         assert_eq!(s.request_context("unknown", None), DEFAULT_CONTEXT);
