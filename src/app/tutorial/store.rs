@@ -80,6 +80,16 @@ impl Default for Progress {
     }
 }
 
+impl Progress {
+    /// Tour, die „Fortsetzen“ weiterführt: die zuletzt laufende, wenn sie einen gemerkten Schritt hat. `finished` zählt
+    /// dabei nicht – es bleibt nach dem ersten vollständigen Durchlauf stehen (Haken in der Liste), auch wenn eine neue
+    /// Runde derselben Tour mittendrin beendet wurde; zu Ende gelaufen leert `step` (siehe `tut_stop`).
+    pub(super) fn resumable(&self) -> Option<&str> {
+        let tp = self.tours.get(&self.last_tour)?;
+        (!tp.step.is_empty()).then_some(self.last_tour.as_str())
+    }
+}
+
 pub(super) fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }

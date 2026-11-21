@@ -272,13 +272,9 @@ impl App {
         match cmd {
             Cmd::Start(id) => self.tut_start(ctx, id, false),
             Cmd::Continue => {
-                let last = self.tut.p.last_tour.clone();
-                let resumable = steps::tour(&last).is_some_and(|_| self.tut.p.tours.get(&last).is_some_and(|tp| !tp.finished && !tp.step.is_empty()));
-                if resumable {
-                    let id = steps::tour(&last).map(|t| t.id).unwrap_or("basics");
-                    self.tut_start(ctx, id, true);
-                } else {
-                    self.tut_start(ctx, "basics", false);
+                match self.tut_resumable() {
+                    Some(id) => self.tut_start(ctx, id, true),
+                    None => self.tut_start(ctx, "basics", false),
                 }
             }
             Cmd::WhatsNew => self.tut_start(ctx, steps::WHATS_NEW, false),
@@ -751,12 +747,7 @@ impl App {
 
     /// Titel der Tour, die „Fortsetzen“ fortsetzt (nicht beendet, mit gemerktem Schritt).
     fn tut_resumable(&self) -> Option<&'static str> {
-        let last = &self.tut.p.last_tour;
-        let tp = self.tut.p.tours.get(last)?;
-        if tp.finished || tp.step.is_empty() {
-            return None;
-        }
-        steps::tour(last).map(|t| t.id)
+        steps::tour(self.tut.p.resumable()?).map(|t| t.id)
     }
 
     /// Knopf im leeren Terminal Hub: „Tour starten“ bzw. „Tour fortsetzen“ (nicht während einer Tour).

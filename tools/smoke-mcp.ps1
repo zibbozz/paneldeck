@@ -2479,7 +2479,8 @@ c.close()
       Check "Tutorial ${tid}: Fortschritt beendet" ($s -and $s.progress.$tid.finished)
       Check "Tutorial ${tid}: Expertenmodus wie vorher" ($s -and [bool]$s.expert -eq $expert0)
       if ($tid -eq 'basics') {
-        $mine = Tut-Sessions
+        # @(…): eine einzelne Sitzung kaeme sonst als PSCustomObject zurueck, und dessen .Count ist in PowerShell 5.1 $null.
+        $mine = @(Tut-Sessions)
         Check 'Tutorial basics: Sitzungen im Projekt "Tutorial" (list_sessions)' ($mine.Count -ge 1) "$($mine.Count)"
         Check 'Tutorial basics: in der Tour angelegte To-dos gemerkt' (@($s.todos).Count -ge 1) "$(@($s.todos).Count)"
       }
@@ -2487,7 +2488,7 @@ c.close()
       $s = Tut-Wait { param($x) -not $x.ask -and -not $x.project.exists }
       Check "Tutorial ${tid}: Loeschen entfernt das Projekt" ($s -and -not $s.ask -and -not $s.project.exists -and @($s.todos).Count -eq 0 -and $null -eq $s.plan_project) ($s | ConvertTo-Json -Depth 2 -Compress)
       Start-Sleep -Milliseconds 500
-      Check "Tutorial ${tid}: keine Sitzung mehr im Projekt Tutorial" ((Tut-Sessions).Count -eq 0)
+      Check "Tutorial ${tid}: keine Sitzung mehr im Projekt Tutorial" (@(Tut-Sessions).Count -eq 0)
     }
     $todos = Tool 'list_todos' @{ state = 'all'; limit = 200 }
     Check 'Tutorial: To-dos der Tour geloescht (list_todos)' (-not $todos.err -and -not ("$($todos.text)" -match 'Smoke-Tutorial-Todo')) "$($todos.text)"

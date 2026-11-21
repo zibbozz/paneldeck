@@ -346,6 +346,41 @@ fn version_bookkeeping_offers_whats_new_only_after_an_update() {
     assert_eq!(p.last_version, "2.7.0", "ältere Version (Rückkehr) ändert nichts");
 }
 
+/// „Fortsetzen“ macht beim gemerkten Schritt weiter – auch bei einer Tour, die schon einmal ganz durchlief und in einer
+/// neuen Runde mittendrin beendet wurde (Smoke: kurze Tour fertig, neu gestartet, bei `basics.new_terminal` beendet,
+/// „Fortsetzen“ begann wieder bei `basics.welcome`, weil `finished` vom ersten Durchlauf stehen blieb).
+#[test]
+fn continue_resumes_a_new_round_of_a_finished_tour() {
+    let mut p = store::Progress { last_tour: "basics".into(), ..Default::default() };
+    assert_eq!(p.resumable(), None, "nichts gemerkt");
+    // Erster Durchlauf bis zum Ende: Haken, kein Schritt.
+    p.tours.insert("basics".into(), store::TourProgress { step: String::new(), finished: true, skipped: vec![] });
+    assert_eq!(p.resumable(), None, "zu Ende gelaufen: von vorn");
+    // Neue Runde, bei Schritt 3 beendet.
+    p.tours.get_mut("basics").unwrap().step = "basics.new_terminal".into();
+    assert_eq!(p.resumable(), Some("basics"));
+    assert!(p.tours["basics"].finished, "der Haken des ersten Durchlaufs bleibt");
+    // Eine Tour, die nie fertig wurde, ebenso.
+    p.last_tour = "todo".into();
+    p.tours.insert("todo".into(), store::TourProgress { step: "todo.ticket".into(), finished: false, skipped: vec![] });
+    assert_eq!(p.resumable(), Some("todo"));
+    // „Was ist neu“ ist keine Tour der Tabelle: die App fängt dann von vorn an (`tut_resumable` sucht in `TOURS`).
+    assert!(steps::tour(steps::WHATS_NEW).is_none());
+}
+
+/// Smoke (#143): Die Sitzungen des Tutorial-Projekts werden mit `@(Tut-Sessions)` gezählt. Ohne `@(…)` kommt eine
+/// einzelne Sitzung als PSCustomObject zurück, dessen `.Count` in Windows PowerShell 5.1 `$null` ist – die Prüfung
+/// „Sitzungen im Projekt Tutorial“ schlug dann genau mit der einen Sitzung der Tour fehl (die App war richtig).
+#[test]
+fn smoke_counts_tutorial_sessions_as_an_array() {
+    let script = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools").join("smoke-mcp.ps1")).unwrap();
+    let uses: Vec<&str> = script.lines().filter(|l| l.contains("Tut-Sessions") && !l.trim_start().starts_with("function ") && !l.trim_start().starts_with('#')).collect();
+    assert!(uses.len() >= 2, "{uses:?}");
+    for l in uses {
+        assert!(l.contains("@(Tut-Sessions)"), "ohne @(…) zählt PowerShell 5.1 eine einzelne Sitzung als null: {l}");
+    }
+}
+
 #[test]
 fn progress_file_is_tolerant() {
     let p: store::Progress = serde_json::from_str("{}").unwrap();
