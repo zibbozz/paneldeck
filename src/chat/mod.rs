@@ -9,8 +9,10 @@
 //! * [`repair`]: als Text geschriebene Werkzeugaufrufe erkennen, Argumente normalisieren und prüfen (#340).
 //! * [`master_prompt`]: der Systemprompt der Chats (#340) – Regeln, Paneldeck, Fehler, erzeugte Werkzeug-Dokumentation.
 //! * [`driver`]: führt die Werkzeug-Schleife je Bild weiter, über [`driver::ChatToolHost`] (umgesetzt von der App).
+//! * [`context`]: Füllstand des Kontexts (`4342/8192 (53%)`, #339) aus Schätzung und Zählung des Servers.
 
 pub mod backend;
+pub mod context;
 pub mod driver;
 pub mod llm_backend;
 pub mod logic;

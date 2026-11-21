@@ -10,6 +10,7 @@
 //! das Modell stimmig bleibt.
 
 use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
+use super::context::ContextParts;
 use super::logic;
 use super::repair;
 use super::store::{AllowRule, CallRepair, ChatFile, ChatMsg, Role, ToolCall, ToolStatus};
@@ -88,6 +89,11 @@ pub struct ChatState {
     pub notice: Option<String>,
     /// Token-Verbrauch der letzten Antwort (Eingabe, Antwort) laut Server; nicht gespeichert.
     pub usage: Option<(Option<u32>, Option<u32>)>,
+    /// Aufteilung der laufenden bzw. nächsten Anfrage für die Anzeige des Füllstands (#339): während einer Runde aus
+    /// `TurnEvent::Context`, sonst von der App geschätzt (`llm_backend::context_estimate`). Nicht gespeichert.
+    pub context: Option<ContextParts>,
+    /// Stand (Verlauf, Einstellungen), für den die App `context` zuletzt geschätzt hat.
+    pub context_key: Option<u64>,
     /// Offene Werkzeugaufrufe der laufenden Runde, in Reihenfolge (erledigte fallen weg).
     pub calls: Vec<PendingCall>,
     /// Nach den offenen Aufrufen folgt die nächste Anfrage an das Modell.
@@ -231,6 +237,8 @@ impl ChatState {
             ui: UiCache::default(),
             notice: None,
             usage: None,
+            context: None,
+            context_key: None,
             calls: Vec::new(),
             next_request: false,
             steps: 0,
@@ -347,6 +355,8 @@ impl ChatState {
         self.file.messages.clear();
         self.ui = UiCache::default();
         self.usage = None;
+        self.context = None;
+        self.context_key = None;
         self.notice = None;
         self.steps = 0;
         self.paused = false;
@@ -934,6 +944,7 @@ impl ChatState {
                     self.budget_scale = self.token_scale;
                     self.prompt_estimate = Some(prompt);
                 }
+                TurnEvent::Context(parts) => self.context = Some(parts),
                 TurnEvent::ContextNotice(n) => {
                     if !self.context_warned {
                         self.context_warned = true;
@@ -1176,6 +1187,23 @@ mod tests {
         c.draft = "q2".into();
         c.send(&Canned, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
         assert_eq!(c.usage, None, "neue Anfrage: alter Verbrauch weg");
+    }
+
+    /// Füllstand (#339): die Aufteilung kommt mit der Anfrage, die Zählung des Servers mit der Antwort; Leeren setzt
+    /// beides zurück.
+    #[test]
+    fn context_parts_and_server_count_feed_the_fill_level() {
+        let parts = ContextParts { system: 3000, tools: 1000, history: 300, max: 8192, reserve: 2048, dropped: false, scale: 1.0 };
+        let b = Script::new(vec![vec![TurnEvent::Context(parts), TurnEvent::Delta("a".into()), TurnEvent::Usage { prompt_tokens: Some(4000), completion_tokens: Some(342) }, TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.context_key = Some(7);
+        start(&mut c, &b, "q");
+        assert!(c.poll().finished);
+        assert_eq!(c.context, Some(parts));
+        let f = super::super::context::fill(c.context.as_ref(), c.usage, c.file.context_start.is_some()).unwrap();
+        assert_eq!(f.text(), "4342/8192 (53%)");
+        assert!(c.clear_history());
+        assert_eq!((c.context, c.context_key, c.usage), (None, None, None));
     }
 
     /// Antwortet nach einem Drehbuch: je Anfrage die nächste Liste von Ereignissen (die letzte wiederholt sich).

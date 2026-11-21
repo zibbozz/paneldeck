@@ -12,6 +12,7 @@
 //! und die Werkzeug-Schleife in `ChatState` führt sie aus.
 
 use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
+use super::context::ContextParts;
 use super::logic;
 use super::store::{self, ChatMsg};
 use crate::llm::{self, ChatMessage, ChatRequest, Endpoint, LlmError, Role, StreamEvent, Transport};
@@ -55,6 +56,8 @@ pub struct Prepared {
     pub history_budget: usize,
     /// Geschätzte Tokens der ganzen Anfrage (zum Abgleich mit `prompt_tokens` des Servers).
     pub prompt_estimate: usize,
+    /// Aufteilung für die Anzeige des Füllstands (#339), mit `token_scale` hochgerechnet.
+    pub parts: ContextParts,
 }
 
 /// Höchstlänge von Projektname und Ordner in der Kontextzeile (Zeichen).
@@ -94,9 +97,11 @@ pub fn system_prompt(policy: &ToolPolicy, model: &str, cx: &TurnContext) -> Stri
     system_prompt_variant(policy, model, cx, super::master_prompt::Variant::Full)
 }
 
-/// Wie [`system_prompt`], in der gewählten Fassung (voll oder Kurzfassung für kleine Kontexte).
+/// Wie [`system_prompt`], in der gewählten Fassung (voll oder Kurzfassung für kleine Kontexte). Es gelten die Schalter
+/// für die Teile (`cx.prompt_parts`, darüber die des Modells) und die Familie des Modells (#341).
 pub fn system_prompt_variant(policy: &ToolPolicy, model: &str, cx: &TurnContext, v: super::master_prompt::Variant) -> String {
-    let text = super::master_prompt::render_variant(policy, model, v);
+    let spec = super::master_prompt::Spec::for_model(policy, model, cx.prompt_parts);
+    let text = super::master_prompt::render_variant_with(policy, &spec, v);
     let line = context_line(cx);
     if line.is_empty() { text } else { format!("{}\n\n{line}", text.trim_end()) }
 }
@@ -182,31 +187,41 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
     (msgs, origin)
 }
 
-/// Anfrage bauen: Server suchen, Schlüssel entschlüsseln, Systemprompt, Verlauf, Kürzung auf die Kontextlänge.
-/// Fehler = Text für den Nutzer (in `cx.lang`).
-pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result<Prepared, String> {
-    let lang = cx.lang;
-    let server = cx.servers.iter().find(|s| s.id == meta.server).ok_or_else(|| unknown_server(lang))?;
-    let model = meta.model.trim();
-    if model.is_empty() {
-        return Err(lang.t("Dieser Chat hat kein Modell – bitte einen neuen Chat beginnen.", "This chat has no model – please start a new chat.").into());
+/// Systemprompt und Werkzeuge einer Anfrage samt Kontextlänge und Fassung (#340/#341) – die eine Stelle für Anfrage,
+/// Füllstandsanzeige und die Vorschau in Einstellungen → Modelle.
+#[derive(Debug, Clone)]
+pub struct PromptPlan {
+    /// Systemprompt (mit Kontextzeile) in der gewählten Fassung.
+    pub system: String,
+    /// Werkzeug-Beschreibungen für das API-Feld `tools` (Kurzfassung: knapp).
+    pub tools: Vec<llm::ToolSpec>,
+    /// Geschätzte Tokens (ohne Abgleich) von Systemnachricht und Werkzeugen.
+    pub sys_tokens: usize,
+    pub tool_tokens: usize,
+    /// Kontextlänge der Anfrage.
+    pub ctx_len: u32,
+    pub variant: super::master_prompt::Variant,
+}
+
+impl PromptPlan {
+    /// Werkzeuge als JSON (wie sie geschätzt werden; für den Tokenizer des Servers).
+    pub fn tools_json(&self) -> String {
+        if self.tools.is_empty() { String::new() } else { serde_json::to_string(&self.tools).unwrap_or_default() }
     }
-    let cfg = server.model_cfg(model);
-    let endpoint = server.endpoint(lang)?;
-    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert);
-    let (hist, origin) = map_history(history);
-    let mut messages = Vec::with_capacity(hist.len() + 1);
-    messages.push(ChatMessage::new(Role::System, system_prompt(&policy, model, cx)));
-    messages.extend(hist);
-    // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
-    // ist entsprechend weniger Platz.
+}
+
+/// Plant den Prompt: voller Master-Prompt mit den eingeschalteten Teilen, Kontextlänge (ohne eigene Angabe nach
+/// `llm::config::auto_context` für genau diesen Prompt), dann die Wahl zwischen voller Fassung und Kurzfassung nach
+/// `llm::config::prompt_fits` – abgeschaltete Teile machen den Prompt kleiner und zählen bei beiden Entscheidungen mit.
+pub fn plan_prompt(server: &crate::llm::config::LlmServer, model: &str, policy: &ToolPolicy, cx: &TurnContext) -> PromptPlan {
     let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
     let tokens_of = |tools: &[llm::ToolSpec]| if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(tools).unwrap_or_default()) };
     let real = |n: usize| (n as f64 * scale as f64).ceil() as usize;
+    let mut system = system_prompt(policy, model, cx);
     // Die Werkzeug-Beschreibungen belegen ebenfalls Kontext.
     let mut tools = policy.specs();
     let mut tool_tokens = tokens_of(&tools);
-    let mut sys_tokens = llm::tokens::message_tokens(&messages[0]);
+    let mut sys_tokens = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system.clone()));
     // Ohne eigene Angabe: so viel Kontext, wie der volle Prompt und die Werkzeuge samt Platz für das Gespräch brauchen
     // (in echten Tokens). Ohne Werkzeuge (Stufe Aus, keine Werkzeug-Fähigkeit) bleibt es bei 8192.
     let ctx_len = server.request_context(model, policy.enabled().then_some(real(sys_tokens + tool_tokens)));
@@ -214,11 +229,47 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     // gemeldete Länge, kleines Modell), gilt die Kurzfassung mit knappen Werkzeug-Beschreibungen (#340).
     let variant = super::master_prompt::choose(ctx_len, real(sys_tokens + tool_tokens));
     if variant == super::master_prompt::Variant::Compact {
-        messages[0] = ChatMessage::new(Role::System, system_prompt_variant(&policy, model, cx, variant));
+        system = system_prompt_variant(policy, model, cx, variant);
         tools = super::master_prompt::minimal_specs(tools);
         tool_tokens = tokens_of(&tools);
-        sys_tokens = llm::tokens::message_tokens(&messages[0]);
+        sys_tokens = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system.clone()));
     }
+    PromptPlan { system, tools, sys_tokens, tool_tokens, ctx_len, variant }
+}
+
+/// Anfrage bauen: Server suchen, Schlüssel entschlüsseln, Systemprompt, Verlauf, Kürzung auf die Kontextlänge.
+/// Fehler = Text für den Nutzer (in `cx.lang`).
+pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result<Prepared, String> {
+    build(meta, history, cx, true)
+}
+
+/// Füllstand, den die nächste Anfrage hätte (#339: Anzeige vor der ersten Antwort und zwischen den Antworten) – genau
+/// wie [`prepare`] gerechnet, aber ohne den Schlüssel zu entschlüsseln. `None`, wenn keine Anfrage möglich wäre
+/// (unbekannter Server, kein Modell).
+pub fn context_estimate(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Option<ContextParts> {
+    build(meta, history, cx, false).ok().map(|p| p.parts)
+}
+
+/// [`prepare`]; `with_key = false` lässt den Schlüssel weg (nur für [`context_estimate`], nie zum Senden).
+fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool) -> Result<Prepared, String> {
+    let lang = cx.lang;
+    let server = cx.servers.iter().find(|s| s.id == meta.server).ok_or_else(|| unknown_server(lang))?;
+    let model = meta.model.trim();
+    if model.is_empty() {
+        return Err(lang.t("Dieser Chat hat kein Modell – bitte einen neuen Chat beginnen.", "This chat has no model – please start a new chat.").into());
+    }
+    let cfg = server.model_cfg(model);
+    let endpoint = if with_key { server.endpoint(lang)? } else { Endpoint::new(server.kind, &server.url) };
+    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert);
+    let (hist, origin) = map_history(history);
+    // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
+    // ist entsprechend weniger Platz.
+    let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
+    let real = |n: usize| (n as f64 * scale as f64).ceil() as usize;
+    let PromptPlan { system, tools, sys_tokens, tool_tokens, ctx_len, .. } = plan_prompt(server, model, &policy, cx);
+    let mut messages = Vec::with_capacity(hist.len() + 1);
+    messages.push(ChatMessage::new(Role::System, system));
+    messages.extend(hist);
     let prompt_real = real(sys_tokens + tool_tokens);
     let budget_real = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
     let budget = (budget_real as f64 / scale as f64) as usize;
@@ -249,7 +300,17 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     // Ollama: die Antwort darf nur die Reserve nutzen, sonst schöbe sie den Anfang der Anfrage aus dem Kontext.
     let num_predict = ollama.then_some(ctx_len.saturating_sub(budget_real as u32).max(1));
     let request = ChatRequest { model: model.to_string(), messages, tools, temperature: cfg.temperature, num_ctx, num_predict };
-    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate })
+    // Für die Anzeige in echten Tokens (mit dem Abgleich hochgerechnet).
+    let parts = ContextParts {
+        system: real(sys_tokens),
+        tools: real(tool_tokens),
+        history: real(prompt_estimate.saturating_sub(sys_tokens + tool_tokens)),
+        max: ctx_len,
+        reserve: ctx_len.saturating_sub(budget_real as u32),
+        dropped: context_start.is_some(),
+        scale,
+    };
+    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate, parts })
 }
 
 /// Hinweis: die eigene Kontextlänge reicht nicht für die Werkzeug-Stufe des Modells.
@@ -310,6 +371,7 @@ fn run(t: Arc<dyn Transport>, p: Prepared, cancel: Arc<AtomicBool>, tx: std::syn
         repaint();
     };
     send(TurnEvent::Budget { history: p.history_budget, prompt: p.prompt_estimate });
+    send(TurnEvent::Context(p.parts));
     if let Some(cs) = p.context_start {
         send(TurnEvent::ContextStart(cs));
     }
@@ -656,6 +718,7 @@ mod tests {
         assert!(seen.contains("\"m1\"") && seen.contains("Demo") && seen.contains("\"hi\""), "{seen}");
         assert!(!seen.contains("\"tools\""), "Standard „Aus“: keine Werkzeuge: {seen}");
         assert!(matches!(ev.first(), Some(TurnEvent::Budget { history, prompt }) if *history > 0 && *prompt > 0), "Platz kommt zuerst: {ev:?}");
+        assert!(matches!(ev.get(1), Some(TurnEvent::Context(p)) if p.max == 8192 && p.reserve == 2048 && p.total() > 0), "dann die Aufteilung: {ev:?}");
         // Ollama: die Antwort bekommt nur die Reserve (25 % von 8192)
         assert!(seen.contains("\"num_predict\":2048"), "{seen}");
     }
@@ -676,6 +739,94 @@ mod tests {
         let mut o = s;
         o.kind = ServerKind::OpenAi;
         assert_eq!(prepare(&meta(), &hist, &cx(vec![o])).unwrap().request.num_predict, None);
+    }
+
+    /// Prompt-Teile (#341): abgeschaltete Teile fehlen in der Anfrage und zählen bei der automatischen Kontextlänge und
+    /// bei der Wahl zwischen voller Fassung und Kurzfassung mit (dieselbe Schätzung wie `prompt_fits`/`auto_context`).
+    #[test]
+    fn switched_off_parts_shrink_the_prompt_context_and_variant() {
+        use crate::llm::prompt_parts::{PromptPart, PromptParts};
+        let control = LlmModel { level: McpLevel::Control, level_chosen: true, ..LlmModel::named("qwen3:8b") };
+        let mut small = PromptParts::default();
+        for p in [PromptPart::About, PromptPart::ToolDocs, PromptPart::Examples, PromptPart::Errors] {
+            small.set(p, false);
+        }
+        let hist = [msg(store::Role::User, "q")];
+        let m = ChatMeta { server: "s1".into(), model: "qwen3:8b".into() };
+        let run = |s: &LlmServer, parts: PromptParts| {
+            let mut c = cx(vec![s.clone()]);
+            c.prompt_parts = parts;
+            c.expert = true;
+            prepare(&m, &hist, &c).unwrap()
+        };
+        // Ollama ohne eigene Angabe: der kleinere Prompt braucht weniger Kontext.
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.last_models = vec![ModelInfo { name: "qwen3:8b".into(), tools: Some(true), context_length: Some(131_072) }];
+        s.set_model_cfg(control.clone());
+        let (full, reduced) = (run(&s, PromptParts::default()), run(&s, small));
+        assert!(!reduced.request.messages[0].content.contains("## What Paneldeck is") && full.request.messages[0].content.contains("## What Paneldeck is"));
+        assert!(reduced.parts.system < full.parts.system);
+        assert!(reduced.request.num_ctx <= full.request.num_ctx, "{:?} {:?}", reduced.request.num_ctx, full.request.num_ctx);
+        // Plan = Anfrage; Kontext nach derselben Regel wie `auto_context`.
+        let mut c = cx(vec![s.clone()]);
+        c.prompt_parts = small;
+        c.expert = true;
+        let plan = plan_prompt(&s, "qwen3:8b", &ToolPolicy::new(control.clone(), Some(true), true), &c);
+        assert_eq!((plan.system.as_str(), plan.ctx_len), (reduced.request.messages[0].content.as_str(), reduced.request.num_ctx.unwrap()));
+        assert_eq!(plan.sys_tokens + plan.tool_tokens, reduced.parts.system + reduced.parts.tools);
+        // Eigene Kontextlänge, in die nur der kleinere Prompt voll passt: voll statt Kurzfassung.
+        let need = plan.sys_tokens + plan.tool_tokens;
+        let mut ctx = 4096u32;
+        while !crate::llm::config::prompt_fits(ctx, need) {
+            ctx += 1024;
+        }
+        let mut own = s.clone();
+        own.set_model_cfg(LlmModel { context_length: Some(ctx), ..control.clone() });
+        let full_plan = plan_prompt(&own, "qwen3:8b", &ToolPolicy::new(own.model_cfg("qwen3:8b"), Some(true), true), &TurnContext { expert: true, ..cx(vec![]) });
+        assert_eq!(full_plan.variant, super::super::master_prompt::Variant::Compact, "alles an: passt nicht voll in {ctx}");
+        let small_plan = plan_prompt(&own, "qwen3:8b", &ToolPolicy::new(own.model_cfg("qwen3:8b"), Some(true), true), &c);
+        assert_eq!(small_plan.variant, super::super::master_prompt::Variant::Full, "weniger Teile: voll in {ctx}");
+        // Je Modell abweichend: die Abweichung gilt.
+        let mut per = s.clone();
+        let mut cfg = control.clone();
+        cfg.prompt_parts.set(PromptPart::Safety, Some(false));
+        per.set_model_cfg(cfg);
+        let p = run(&per, PromptParts::default());
+        assert!(!p.request.messages[0].content.contains("## Safety rules"));
+    }
+
+    /// Aufteilung für die Füllstandsanzeige (#339): stimmt mit der Anfrage überein, rechnet mit dem Abgleich hoch und
+    /// geht auch ohne entschlüsselbaren Schlüssel.
+    #[test]
+    fn context_parts_match_the_request() {
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, context_length: Some(16384), ..LlmModel::named("m1") });
+        let hist = [msg(store::Role::User, "hello"), msg(store::Role::Assistant, "hi there"), msg(store::Role::User, "q")];
+        let p = prepare(&meta(), &hist, &cx(vec![s.clone()])).unwrap();
+        let parts = p.parts;
+        assert_eq!(parts.total(), p.prompt_estimate, "Systemprompt + Werkzeuge + Verlauf = geschätzte Anfrage");
+        assert_eq!(parts.system, llm::tokens::message_tokens(&p.request.messages[0]));
+        assert!(parts.tools > 0 && parts.history > 0);
+        assert_eq!((parts.max, parts.reserve, parts.dropped, parts.scale), (16384, 4096, false, 1.0));
+        assert_eq!(context_estimate(&meta(), &hist, &cx(vec![s.clone()])), Some(parts), "Schätzung = Anfrage");
+        // Abgleich: alles in echten Tokens.
+        let mut c = cx(vec![s.clone()]);
+        c.token_scale = 2.0;
+        let two = context_estimate(&meta(), &hist, &c).unwrap();
+        assert_eq!((two.system, two.tools, two.history, two.scale), (parts.system * 2, parts.tools * 2, parts.history * 2, 2.0));
+        // Gekürzt: `dropped`.
+        let long = "x".repeat(30_000);
+        let big = [msg(store::Role::User, &long), msg(store::Role::Assistant, &long), msg(store::Role::User, "q")];
+        let d = context_estimate(&meta(), &big, &cx(vec![s.clone()])).unwrap();
+        assert!(d.dropped && d.total() <= d.limit(), "{d:?}");
+        // Schlüssel nicht entschlüsselbar: Senden scheitert, die Anzeige geht trotzdem.
+        let mut k = s.clone();
+        k.api_key = "not-a-dpapi-blob".into();
+        assert!(prepare(&meta(), &hist, &cx(vec![k.clone()])).is_err());
+        assert_eq!(context_estimate(&meta(), &hist, &cx(vec![k])), Some(parts));
+        // Unbekannter Server, kein Modell: nichts.
+        assert_eq!(context_estimate(&meta(), &hist, &cx(Vec::new())), None);
+        assert_eq!(context_estimate(&ChatMeta { server: "s1".into(), model: " ".into() }, &hist, &cx(vec![s])), None);
     }
 
     #[cfg(windows)] // WinHTTP (andere Systeme haben noch keinen Transport, #149/#150)

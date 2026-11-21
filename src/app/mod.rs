@@ -47,6 +47,7 @@ mod glyph_tests;
 mod mcp;
 mod models_ui;
 mod multiwin;
+mod prompt_ui;
 mod palette_ui;
 mod osc52;
 mod link_ask;
@@ -3234,6 +3235,39 @@ impl App {
         if tools_running {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        self.refresh_chat_context();
+    }
+
+    /// Füllstand des Kontexts (#339) für Chats ohne laufende Runde schätzen: so, wie die nächste Anfrage aussähe – nur,
+    /// wenn sich Verlauf, Einstellungen der Modelle, Expertenmodus, Abgleich oder Projekt/Ordner geändert haben.
+    /// Während einer Runde kommt die Aufteilung mit der Anfrage (`TurnEvent::Context`).
+    fn refresh_chat_context(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let idle: Vec<u64> = self.entries.iter().filter(|(_, e)| e.chat.as_ref().is_some_and(|c| !c.busy())).map(|(id, _)| *id).collect();
+        if idle.is_empty() {
+            return;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_vec(&self.settings.llm_servers).unwrap_or_default().hash(&mut h);
+        serde_json::to_vec(&self.settings.chat_prompt_parts).unwrap_or_default().hash(&mut h);
+        crate::mcp::expert_mode().hash(&mut h);
+        let base = h.finish();
+        for id in idle {
+            let Some(e) = self.entries.get(&id) else { continue };
+            let (Some(c), Some(meta)) = (e.chat.as_ref(), e.meta.chat.as_ref()) else { continue };
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (base, c.rev(), c.token_scale.to_bits(), &meta.server, &meta.model, &e.meta.cwd).hash(&mut h);
+            self.projects.iter().find(|p| p.id == e.meta.project).map(|p| &p.name).hash(&mut h);
+            let key = h.finish();
+            if c.context_key == Some(key) {
+                continue;
+            }
+            let parts = chatmod::llm_backend::context_estimate(meta, c.messages(), &self.turn_context(id));
+            if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+                c.context = parts;
+                c.context_key = Some(key);
+            }
+        }
     }
 
     /// Was für die Werkzeuge eines Chats gerade gilt: Einstellungen seines Modells (unbekannter Server: Stufe „Aus“),
@@ -3299,6 +3333,7 @@ impl App {
             lang: self.settings.language,
             expert: crate::mcp::expert_mode(),
             token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
+            prompt_parts: self.settings.chat_prompt_parts,
         }
     }
 

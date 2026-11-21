@@ -290,6 +290,10 @@ pub struct Settings {
     /// `distinct`, `status`, `terminal`, `harmony`; unbekannte bleiben erhalten.
     #[serde(deserialize_with = "lenient_strings")]
     pub theme_checks_off: Vec<String>,
+    /// Schalter für die Teile des Master-Prompts der Chats (seit 2.7.0, #341; Standard: alle an, dann fehlt das Feld).
+    /// Je Modell abweichend in `llm_servers[].models[].prompt_parts`. Tolerant: nur ein echtes `false` schaltet aus.
+    #[serde(skip_serializing_if = "crate::llm::prompt_parts::PromptParts::is_default")]
+    pub chat_prompt_parts: crate::llm::prompt_parts::PromptParts,
 }
 
 /// Liste von Texten tolerant lesen: Einträge mit falschem Typ fallen weg, ein falscher Typ insgesamt ergibt eine leere Liste.
@@ -406,6 +410,7 @@ impl Default for Settings {
             progress_indicator: true,
             cursor_blink: true,
             theme_checks_off: Vec::new(),
+            chat_prompt_parts: Default::default(),
         }
     }
 }
@@ -1480,6 +1485,14 @@ mod tests {
         assert_eq!(s.theme_checks_off, ["contrast", "harmony"]);
         let s: Settings = serde_json::from_str(r#"{"theme_checks_off":"x"}"#).unwrap();
         assert!(s.theme_checks_off.is_empty());
+        // Prompt-Teile der Chats (#341): fehlt = alles an und wird nicht geschrieben; falscher Typ = alles an.
+        use crate::llm::prompt_parts::PromptPart;
+        assert!(s.chat_prompt_parts.is_default());
+        assert!(serde_json::to_value(&s).unwrap().get("chat_prompt_parts").is_none());
+        let s: Settings = serde_json::from_str(r#"{"chat_prompt_parts":{"safety":false,"examples":"off"}}"#).unwrap();
+        assert!(!s.chat_prompt_parts.get(PromptPart::Safety) && s.chat_prompt_parts.get(PromptPart::Examples));
+        assert_eq!(serde_json::to_value(&s).unwrap()["chat_prompt_parts"]["safety"], serde_json::json!(false));
+        assert!(serde_json::from_str::<Settings>(r#"{"chat_prompt_parts":7}"#).unwrap().chat_prompt_parts.is_default());
         assert!(s.claude_defaults.is_empty() && s.last_claude_opts.as_ref().is_none_or(|o| o.is_empty()));
         assert!(s.wsl_recent.is_empty());
         // echte Werte gelten weiter

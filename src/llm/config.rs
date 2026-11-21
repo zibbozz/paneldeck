@@ -5,7 +5,8 @@
 //!   { "id": "srv-18a3f0c2b1d4e5f6", "name": "Ollama", "kind": "ollama", "url": "http://localhost:11434",
 //!     "receive_timeout_secs": 600,
 //!     "models": [ { "name": "llama3.1:8b", "level": "Read", "level_chosen": true, "disabled_tools": ["read_terminal"], "ask_write": true,
-//!                   "max_steps": 10, "tools": true, "context_length": 16384, "temperature": 0.7 } ],
+//!                   "max_steps": 10, "tools": true, "context_length": 16384, "temperature": 0.7,
+//!                   "prompt_parts": { "examples": false }, "prompt_family": "llama" } ],
 //!     "last_models": [ { "name": "llama3.1:8b", "tools": true, "context_length": 131072 } ] }
 //! ]
 //! ```
@@ -16,6 +17,7 @@
 //! lesbar, mit „Entfernen“). Fehlende Felder haben Standardwerte; ein Modell-Eintrag ist je Feld tolerant (siehe
 //! [`LlmModel`]).
 
+use super::prompt_parts::PromptOverride;
 use super::{Endpoint, ModelInfo, ServerKind};
 use crate::mcp::McpLevel;
 use crate::state::Lang;
@@ -124,11 +126,30 @@ pub struct LlmModel {
     pub context_length: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Abweichungen von den globalen Schaltern für die Teile des Master-Prompts (seit 2.7.0, #341; fehlt = wie global).
+    #[serde(skip_serializing_if = "PromptOverride::is_empty")]
+    pub prompt_parts: PromptOverride,
+    /// Von Hand gewählte Modellfamilie für den Familienzusatz (Schlüssel aus `prompt_parts::FAMILIES`, seit 2.7.0;
+    /// fehlt = am Modellnamen erkannt; ein unbekannter Wert bleibt erhalten und gilt wie fehlend).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_family: Option<String>,
 }
 
 impl Default for LlmModel {
     fn default() -> Self {
-        LlmModel { name: String::new(), level: McpLevel::Off, level_chosen: false, disabled_tools: Vec::new(), ask_write: true, max_steps: DEFAULT_MAX_STEPS, tools: None, context_length: None, temperature: None }
+        LlmModel {
+            name: String::new(),
+            level: McpLevel::Off,
+            level_chosen: false,
+            disabled_tools: Vec::new(),
+            ask_write: true,
+            max_steps: DEFAULT_MAX_STEPS,
+            tools: None,
+            context_length: None,
+            temperature: None,
+            prompt_parts: PromptOverride::default(),
+            prompt_family: None,
+        }
     }
 }
 
@@ -155,6 +176,8 @@ impl<'de> Deserialize<'de> for LlmModel {
             tools: get(o, "tools", None),
             context_length: get(o, "context_length", None),
             temperature: get(o, "temperature", None),
+            prompt_parts: get(o, "prompt_parts", PromptOverride::default()),
+            prompt_family: get(o, "prompt_family", None),
             name: def.name,
         })
     }
@@ -170,6 +193,7 @@ impl LlmModel {
         self.max_steps = self.max_steps.clamp(1, MAX_STEPS);
         self.context_length = self.context_length.filter(|c| *c > 0).map(|c| c.clamp(MIN_CONTEXT, MAX_CONTEXT));
         self.temperature = self.temperature.filter(|t| t.is_finite()).map(|t| t.clamp(0.0, 2.0));
+        self.prompt_family = self.prompt_family.take().map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
         let mut seen = std::collections::HashSet::new();
         self.disabled_tools.retain(|t| !t.trim().is_empty() && seen.insert(t.clone()));
     }
@@ -515,6 +539,27 @@ mod tests {
         assert!(serde_json::from_str::<LlmModel>(r#"{"level":"Off"}"#).is_err());
         let s: LlmServer = serde_json::from_str(r#"{"id":"a","models":[{"name":"x","level":"Off","context_length":-1}]}"#).unwrap();
         assert_eq!(s.model_cfg("x").level, McpLevel::Off);
+    }
+
+    /// Prompt-Teile und Familie je Modell (#341): optional, tolerant, nur geschrieben, wenn gesetzt.
+    #[test]
+    fn model_prompt_parts_and_family_are_optional() {
+        use crate::llm::prompt_parts::PromptPart;
+        let m: LlmModel = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+        assert!(m.prompt_parts.is_empty() && m.prompt_family.is_none());
+        let j = serde_json::to_value(&m).unwrap();
+        assert!(j.get("prompt_parts").is_none() && j.get("prompt_family").is_none(), "{j}");
+        let m: LlmModel = serde_json::from_str(r#"{"name":"x","prompt_parts":{"examples":false,"safety":1},"prompt_family":"llama"}"#).unwrap();
+        assert_eq!((m.prompt_parts.get(PromptPart::Examples), m.prompt_parts.get(PromptPart::Safety)), (Some(false), None));
+        assert_eq!(m.prompt_family.as_deref(), Some("llama"));
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!((j["prompt_parts"].clone(), j["prompt_family"].clone()), (serde_json::json!({"examples": false}), serde_json::json!("llama")));
+        // Falsche Typen: wie fehlend; leere Familie fällt beim Bereinigen weg.
+        let m: LlmModel = serde_json::from_str(r#"{"name":"x","prompt_parts":[1],"prompt_family":3}"#).unwrap();
+        assert!(m.prompt_parts.is_empty() && m.prompt_family.is_none());
+        let mut v = vec![LlmServer { models: vec![LlmModel { prompt_family: Some("  ".into()), ..LlmModel::named("x") }], ..Default::default() }];
+        sanitize(&mut v);
+        assert_eq!(v[0].models[0].prompt_family, None);
     }
 
     #[test]

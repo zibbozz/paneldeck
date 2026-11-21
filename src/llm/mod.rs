@@ -10,6 +10,7 @@ pub mod http;
 pub mod net;
 mod ollama;
 mod openai;
+pub mod prompt_parts;
 pub mod secret;
 pub mod tokens;
 
@@ -190,6 +191,15 @@ pub fn list_models(t: &dyn Transport, ep: &Endpoint, cancel: &Arc<AtomicBool>) -
     match ep.kind {
         ServerKind::Ollama => ollama::list_models(t, ep, cancel),
         ServerKind::OpenAi => openai::list_models(t, ep, cancel),
+    }
+}
+
+/// Tokens eines Texts laut Tokenizer des Servers (#341: Zähler unter der Prompt-Vorschau). `Ok(None)`: Der Server hat
+/// keinen erreichbaren Tokenizer (Ollama nie; OpenAI-kompatibel nur der llama.cpp-Server und vLLM mit `POST /tokenize`).
+pub fn count_tokens(t: &dyn Transport, ep: &Endpoint, model: &str, text: &str, cancel: &Arc<AtomicBool>) -> Result<Option<usize>, LlmError> {
+    match ep.kind {
+        ServerKind::Ollama => Ok(None),
+        ServerKind::OpenAi => openai::count_tokens(t, ep, model, text, cancel),
     }
 }
 
