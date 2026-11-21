@@ -381,6 +381,7 @@ pub fn tools() -> Vec<ToolDef> {
             group: Group::Always,
             description: "Restart a process-list entry (`process`) or a group (`group`) - give exactly one: a running entry is stopped like stop_process and started again once it has ended; a stopped, exited, crashed or failed one starts at once. Returns at once.",
             schema: schema(json!({"process": {"type": ["integer", "string"], "description": "Process id or name from list_processes"}, "group": {"type": "string", "description": "Group name from list_processes"}}), &[]),
+        },
         // ---- Themes (#309, nur lesen)
         ToolDef {
             name: "theme_list",

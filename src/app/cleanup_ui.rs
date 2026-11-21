@@ -16,7 +16,6 @@ use super::*;
 use crate::cleanup::{self, Group, Item, ItemReport, Opts, Phase, Scan, Selection};
 use std::sync::mpsc::Receiver;
 
-const DANGER: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
 
 /// Rückfrage vor dem Löschen.
 struct Confirm {
@@ -313,7 +312,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let can = !busy && !c.sel.is_empty() && c.scan.is_some();
                     let label = if reset { lang.t("Zurücksetzen …", "Reset …") } else { lang.t("Löschen …", "Delete …") };
-                    let btn = egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(if can { DANGER } else { DANGER.gamma_multiply(0.4) });
+                    let btn = egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(if can { style::ui().danger_button } else { style::ui().danger_button.gamma_multiply(0.4) });
                     if ui.add_enabled(can, btn).clicked() {
                         go = true;
                     }
@@ -351,7 +350,7 @@ impl App {
         ui.horizontal(|ui| {
             let mut text = RichText::new(item.label(lang));
             if item == Item::FactoryReset {
-                text = text.color(DANGER).strong();
+                text = text.color(style::ui().error).strong();
             }
             if ui.add_enabled(!forced && !c.busy(), egui::Checkbox::new(&mut on, text)).changed() {
                 if on {
@@ -361,7 +360,7 @@ impl App {
                 }
             }
             if item.needs_typing(c.all_backups) {
-                ui.label(RichText::new("⚠").small().color(DANGER)).on_hover_text(lang.t("Unwiderruflich – verlangt das Eintippen der Bestätigung.", "Irreversible – requires typing the confirmation."));
+                ui.label(RichText::new("⚠").small().color(style::ui().error)).on_hover_text(lang.t("Unwiderruflich – verlangt das Eintippen der Bestätigung.", "Irreversible – requires typing the confirmation."));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(amount_text(c.scan.as_ref(), item, opts, lang)).small().monospace());
@@ -369,7 +368,7 @@ impl App {
         });
         ui.horizontal_wrapped(|ui| {
             ui.add_space(24.0);
-            let col = if item == Item::McpLog { Color32::from_rgb(0xe5, 0xc0, 0x7b) } else { style::dim(ui) };
+            let col = if item == Item::McpLog { style::ui().warning } else { style::dim(ui) };
             ui.label(RichText::new(item.hint(lang)).small().color(col));
         });
         if item == Item::DbBackups && (on || forced) {
@@ -503,10 +502,10 @@ impl App {
                             "On the restart every program running in a terminal ends at once (without Ctrl+C) – save and quit them first.",
                         ))
                         .small()
-                        .color(if cf.running.is_empty() { dim } else { DANGER }),
+                        .color(if cf.running.is_empty() { dim } else { style::ui().error }),
                     );
                     if cf.affected.is_empty() && !cf.running.is_empty() {
-                        ui.label(RichText::new(lang.t("Darin laufen noch Programme:", "Programs are still running in:")).color(DANGER));
+                        ui.label(RichText::new(lang.t("Darin laufen noch Programme:", "Programs are still running in:")).color(style::ui().error));
                         for (n, w) in &cf.running {
                             ui.label(RichText::new(format!("• {n} – {w}")).small());
                         }
@@ -517,7 +516,7 @@ impl App {
                     ui.label(RichText::new(if ends { lang.t("Diese Sitzungen werden beendet:", "These sessions are ended:") } else { lang.t("Betroffene Sitzungen:", "Affected sessions:") }).strong());
                     ui.label(RichText::new(cf.affected.join(", ")).small());
                     if !cf.running.is_empty() {
-                        ui.label(RichText::new(lang.t("Darin laufen noch Programme:", "Programs are still running in:")).color(DANGER));
+                        ui.label(RichText::new(lang.t("Darin laufen noch Programme:", "Programs are still running in:")).color(style::ui().error));
                         for (n, w) in &cf.running {
                             ui.label(RichText::new(format!("• {n} – {w}")).small());
                         }
@@ -762,7 +761,7 @@ impl App {
                 egui::ScrollArea::vertical().id_salt("cleanup_report_list").max_height(360.0).show(ui, |ui| {
                     for r in &list {
                         ui.horizontal(|ui| {
-                            let (mark, col) = if r.ok() { ("✓", Color32::from_rgb(0x98, 0xc3, 0x79)) } else { ("✗", DANGER) };
+                            let (mark, col) = if r.ok() { ("✓", style::ui().success) } else { ("✗", style::ui().error) };
                             ui.label(RichText::new(mark).color(col).strong());
                             ui.label(r.label(lang));
                             if r.bytes > 0 || r.files > 0 || r.entries > 0 {
@@ -770,7 +769,7 @@ impl App {
                             }
                         });
                         for e in &r.errors {
-                            ui.label(RichText::new(format!("    {e}")).small().color(DANGER));
+                            ui.label(RichText::new(format!("    {e}")).small().color(style::ui().error));
                         }
                         for (de, en) in &r.notes {
                             ui.label(RichText::new(format!("    {}", if lang == Lang::De { de } else { en })).small().color(dim));
