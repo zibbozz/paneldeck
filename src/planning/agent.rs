@@ -37,6 +37,7 @@ use chrono::NaiveDateTime;
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 
+mod maintenance;
 mod query;
 mod sprints;
 #[cfg(test)]
@@ -560,6 +561,7 @@ fn ticket_json(ctx: &Ctx, t: &Ticket) -> Value {
         "parent": parent,
         "flagged": t.flagged,
         "starred": t.starred,
+        "archived": t.archived,
         "created_at": t.created_at,
         "updated_at": t.updated_at,
         "description": builtin_text(ctx, t, super::builtin_fields::DESCRIPTION_KEY).map(|s| clip(&s)),
@@ -631,7 +633,7 @@ fn time_entry_json(ctx: &Ctx, e: &super::time_entries::TimeEntry, kinds: &[super
 // ------------------------------------------------------------------ Projekte (lesen)
 
 fn project_json(ctx: &Ctx, p: &Project) -> Value {
-    let count: i64 = ctx.conn.query_row("SELECT COUNT(*) FROM tickets WHERE project_id = ?1", [p.id], |r| r.get(0)).unwrap_or(0);
+    let count: i64 = ctx.conn.query_row("SELECT COUNT(*) FROM tickets WHERE project_id = ?1 AND archived = 0", [p.id], |r| r.get(0)).unwrap_or(0);
     json!({
         "key": p.key,
         "id": p.id,
@@ -773,7 +775,8 @@ pub fn run_search(conn: &Connection, spec: &SearchSpec) -> TRes<TicketPage> {
 }
 
 fn search_tickets_tool(ctx: &Ctx, v: &Value) -> R {
-    let a = args(ctx, v, &["project", "query", "text", "type", "status", "starred", "flagged", "parent", "no_parent", "order", "limit", "offset"])?;
+    let a = args(ctx, v, &["project", "query", "text", "type", "status", "starred", "flagged", "parent", "no_parent", "order", "limit", "offset", "include_archived"])?;
+    let include_archived = a.opt_bool("include_archived")?.unwrap_or(false);
     let project = if a.get("project").is_some() { Some(project_arg(ctx, &a, "project")?) } else { None };
     // Abfrage der Abfragesprache (nur lesen): ersetzt die einfachen Filter
     if let Some(q) = a.opt_str("query", crate::planning::search::MAX_QUERY_CHARS)? {
@@ -784,7 +787,7 @@ fn search_tickets_tool(ctx: &Ctx, v: &Value) -> R {
             ));
         }
         let (limit, offset) = a.paging()?;
-        return query::run(ctx, project.as_ref(), &q, limit, offset);
+        return query::run(ctx, project.as_ref(), &q, limit, offset, include_archived);
     }
     let types_in = a.str_list("type", 20, MAX_NAME_CHARS)?;
     let status_in = a.str_list("status", 20, MAX_NAME_CHARS)?;
@@ -827,6 +830,7 @@ fn search_tickets_tool(ctx: &Ctx, v: &Value) -> R {
     let (limit, offset) = a.paging()?;
     f.limit = Some(limit);
     f.offset = offset;
+    f.include_archived = include_archived;
     let page = tk(ctx, run_search(ctx.conn, &SearchSpec { project: project.map(|p| p.id), filter: f }))?;
     read(json!({
         "tickets": page.items.iter().map(|t| ticket_json(ctx, t)).collect::<Vec<_>>(),
@@ -1198,7 +1202,7 @@ fn set_todo_done_tool(ctx: &Ctx, v: &Value) -> R {
 // ------------------------------------------------------------------ Einstieg
 
 /// Alle Werkzeuge dieser Datei (ohne `link_terminal`, das die Anwendung selbst aufruft, weil es Sitzungen kennen muss).
-pub const TOOLS: [&str; 18] = [
+pub const TOOLS: [&str; 19] = [
     "list_todos",
     "add_todo",
     "set_todo_done",
@@ -1210,6 +1214,7 @@ pub const TOOLS: [&str; 18] = [
     "list_sprints",
     "get_sprint",
     "list_versions",
+    "maintenance_report",
     "create_ticket",
     "update_ticket",
     "transition_ticket",
@@ -1234,6 +1239,7 @@ pub fn call(ctx: &Ctx, tool: &str, v: &Value, todos_read_only: bool) -> R {
         "list_sprints" => sprints::list_sprints_tool(ctx, v),
         "get_sprint" => sprints::get_sprint_tool(ctx, v),
         "list_versions" => sprints::list_versions_tool(ctx, v),
+        "maintenance_report" => maintenance::maintenance_report_tool(ctx, v),
         "create_ticket" => create_ticket_tool(ctx, v),
         "update_ticket" => update_ticket_tool(ctx, v),
         "transition_ticket" => transition_ticket_tool(ctx, v),
@@ -1682,5 +1688,32 @@ mod tests {
         }
         assert_eq!(ticket_err(Lang::En, TicketError::Db("x".into())).code, "db_error");
         assert_eq!(ticket_err(Lang::En, TicketError::Plan(PlanError::SystemProtected)).code, "forbidden");
+    }
+
+    #[test]
+    fn archived_tickets_leave_the_project_count_and_children_are_marked() {
+        let f = Fx::new();
+        let parent = f.mk(f.epic, "Parent");
+        let child = crate::planning::tickets::create_child(&f.c, parent.id, f.story, "Child", vec![], &Source::ui()).unwrap().0;
+        let count = |f: &Fx| ok(f, "get_project", json!({"project": "PAN"})).result["project"]["ticket_count"].as_i64().unwrap();
+        assert_eq!(count(&f), 2);
+        f.c.execute("UPDATE tickets SET archived = 1 WHERE id = ?1", [child.id]).unwrap();
+        assert_eq!(count(&f), 1, "archiviert zählt nicht");
+        let d = ok(&f, "get_ticket", json!({"ticket": parent.key()}));
+        assert_eq!(d.result["children"][0]["archived"], true, "Kind bleibt, ist aber gekennzeichnet");
+    }
+
+    #[test]
+    fn maintenance_report_skips_the_integrity_check_unless_database_is_asked() {
+        let f = Fx::new();
+        f.mk(f.task, "Login fails on Safari");
+        f.mk(f.task, "Login fails in Safari");
+        let d = ok(&f, "maintenance_report", json!({"project": "PAN"}));
+        assert_eq!(d.result["database_integrity_checked"], false);
+        assert_eq!(d.result["duplicates_truncated"], false);
+        assert!(d.result["counts"]["database"].is_number() && d.result["truncated"].is_boolean() && d.result["total"].is_number());
+        assert!(d.result["findings"].as_array().unwrap().iter().any(|x| x["kind"] == "possible_duplicate"));
+        let d = ok(&f, "maintenance_report", json!({"project": "PAN", "category": "database"}));
+        assert_eq!(d.result["database_integrity_checked"], true);
     }
 }

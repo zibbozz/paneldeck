@@ -81,6 +81,10 @@ pub fn compile(q: &Query, schema: &SearchSchema, ctx: &Ctx) -> SRes<Compiled> {
         let p = cx.int(id);
         parts.push(format!("t.project_id = {p}"));
     }
+    // Archivierte Tickets (Wartung, #308) nur, wenn die Abfrage selbst nach `archived` fragt (z. B. `archived = true`).
+    if !ctx.include_archived && !q.filter.as_ref().is_some_and(|e| refs_archived(e, schema)) {
+        parts.push("t.archived = 0".to_string());
+    }
     if let Some(e) = &q.filter {
         parts.push(format!("({})", cx.expr(e, 0)?));
     }
@@ -92,6 +96,17 @@ pub fn compile(q: &Query, schema: &SearchSchema, ctx: &Ctx) -> SRes<Compiled> {
         return Err(SearchError::TooComplex { max: MAX_NODES });
     }
     Ok(Compiled { sql, params: cx.params, where_sql, order_sql, where_params })
+}
+
+/// Fragt der Ausdruck irgendwo nach dem Pseudo-Feld `archived` (auch verneint oder als `IS EMPTY`)?
+fn refs_archived(e: &Expr, schema: &SearchSchema) -> bool {
+    let is = |name: &str| schema.binding(name).is_some_and(|b| matches!(b.store, Store::Archived));
+    match e {
+        Expr::And(v) | Expr::Or(v) => v.iter().any(|x| refs_archived(x, schema)),
+        Expr::Not(x) => refs_archived(x, schema),
+        Expr::Compare { field, .. } | Expr::In { field, .. } | Expr::IsEmpty { field, .. } => is(&field.text),
+        Expr::Predicate { .. } | Expr::Text(..) => false,
+    }
 }
 
 /// Die Zustände der Übersetzung: Parameter und Zähler.
@@ -503,8 +518,12 @@ impl<'a> Cx<'a> {
                 }
                 Ok(or_join(parts))
             }
-            Store::Flagged | Store::Starred => {
-                let col = if matches!(b.store, Store::Flagged) { "t.flagged" } else { "t.starred" };
+            Store::Flagged | Store::Starred | Store::Archived => {
+                let col = match b.store {
+                    Store::Flagged => "t.flagged",
+                    Store::Archived => "t.archived",
+                    _ => "t.starred",
+                };
                 let mut want: Vec<i64> = vals.iter().filter_map(|v| parse_bool(v)).map(i64::from).collect();
                 want.sort_unstable();
                 want.dedup();
@@ -675,7 +694,7 @@ impl<'a> Cx<'a> {
     /// Aussage „das Feld hat keinen Wert“ (nie `NULL`).
     fn is_empty(&mut self, b: &Binding) -> SRes<String> {
         Ok(match &b.store {
-            Store::Key | Store::Title | Store::Created | Store::Updated | Store::Flagged | Store::Starred | Store::Type(_) | Store::Project(_) => "0".to_string(),
+            Store::Key | Store::Title | Store::Created | Store::Updated | Store::Flagged | Store::Starred | Store::Archived | Store::Type(_) | Store::Project(_) => "0".to_string(),
             Store::Status(_) => "t.status_id IS NULL".to_string(),
             Store::Parent => "t.parent_id IS NULL".to_string(),
             Store::ChangedBy => "NOT EXISTS (SELECT 1 FROM history h WHERE h.ticket_id = t.id)".to_string(),
@@ -862,6 +881,7 @@ impl<'a> Cx<'a> {
             Store::Updated => vec![plain("t.updated_at", false, false)],
             Store::Flagged => vec![plain("t.flagged", false, false)],
             Store::Starred => vec![plain("t.starred", false, false)],
+            Store::Archived => vec![plain("t.archived", false, false)],
             Store::ChangedBy => {
                 let mut sql = "SELECT CASE h.source".to_string();
                 for (i, name) in CHANGED_BY.iter().enumerate() {

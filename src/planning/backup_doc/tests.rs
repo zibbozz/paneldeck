@@ -1011,7 +1011,7 @@ fn version_1_documents_still_import_but_their_version_values_are_skipped() {
 fn versions_milestones_and_sprints_roundtrip_with_all_details() {
     let r = rich();
     let a = export(&r);
-    assert_eq!(a.version, 3);
+    assert_eq!(a.version, 4);
     assert_eq!(a.versions.iter().map(|v| (v.name.as_str(), v.done, v.due_date.as_deref())).collect::<Vec<_>>(), vec![("1.0", true, Some("2026-12-01")), ("2.0", false, None)]);
     assert!(a.versions[0].done_at.is_some() && a.versions[1].done_at.is_none());
     assert_eq!(a.versions[0].description, "Erste Version");

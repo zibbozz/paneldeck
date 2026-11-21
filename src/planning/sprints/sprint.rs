@@ -382,8 +382,9 @@ pub fn complete_sprint(conn: &Connection, id: i64, leftover: Leftover) -> SRes<C
         let rows: Vec<(i64, bool)> = {
             let mut st = conn.prepare(
                 "SELECT st.ticket_id, COALESCE(s.category = 'done', 0) FROM sprint_tickets st JOIN tickets t ON t.id = st.ticket_id
-                 LEFT JOIN statuses s ON s.id = t.status_id WHERE st.sprint_id = ?1 AND st.removed_at IS NULL ORDER BY t.rank, t.id",
+                 LEFT JOIN statuses s ON s.id = t.status_id WHERE st.sprint_id = ?1 AND st.removed_at IS NULL AND t.archived = 0 ORDER BY t.rank, t.id",
             )?;
+            // Archivierte Tickets (Wartung) bleiben im abgeschlossenen Sprint und wandern nicht mit (wie im Abschlussdialog).
             st.query_map([id], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)))?.collect::<Result<_, _>>()?
         };
         let now = clock::now();
@@ -530,7 +531,7 @@ pub(crate) fn points_sql() -> String {
 pub fn backlog(conn: &Connection, project_id: i64, include_done: bool) -> SRes<Vec<Ticket>> {
     sprint_project(conn, project_id)?;
     let sql = format!(
-        "SELECT {} {} LEFT JOIN statuses s ON s.id = t.status_id WHERE t.project_id = ?1
+        "SELECT {} {} LEFT JOIN statuses s ON s.id = t.status_id WHERE t.project_id = ?1 AND t.archived = 0
          AND NOT EXISTS (SELECT 1 FROM sprint_tickets st JOIN sprints sp ON sp.id = st.sprint_id
                          WHERE st.ticket_id = t.id AND st.removed_at IS NULL AND sp.state IN ('planned', 'active'))
          {} ORDER BY t.rank, t.id",
@@ -574,14 +575,14 @@ pub fn sprint_content(conn: &Connection, sprint_id: i64) -> SRes<SprintContent> 
     sprint_project(conn, sprint.project_id)?;
     let sql = format!(
         "SELECT {}, {}, COALESCE(s.category = 'done', 0), st.added_at {} JOIN sprint_tickets st ON st.ticket_id = t.id
-         LEFT JOIN statuses s ON s.id = t.status_id WHERE st.sprint_id = ?1 AND st.removed_at IS NULL ORDER BY t.rank, t.id",
+         LEFT JOIN statuses s ON s.id = t.status_id WHERE st.sprint_id = ?1 AND st.removed_at IS NULL AND t.archived = 0 ORDER BY t.rank, t.id",
         tickets::COLS,
         points_sql(),
         tickets::FROM
     );
     let mut st = conn.prepare(&sql)?;
     let items = st
-        .query_map([sprint_id], |r| Ok(SprintItem { ticket: tickets::from_row(r)?, points: r.get(13)?, done: r.get::<_, i64>(14)? != 0, added_at: r.get(15)? }))?
+        .query_map([sprint_id], |r| Ok(SprintItem { ticket: tickets::from_row(r)?, points: r.get(14)?, done: r.get::<_, i64>(15)? != 0, added_at: r.get(16)? }))?
         .collect::<Result<Vec<_>, _>>()?;
     let mut totals = SprintTotals::default();
     for i in &items {

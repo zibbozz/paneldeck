@@ -235,6 +235,7 @@ fn planning_log_info(tool: &str, args: &Value) -> String {
         "get_project" => s("project"),
         "search_tickets" => mcp::short(&if s("query").is_empty() { s("text") } else { s("query") }, 60),
         "list_sprints" | "list_versions" => s("project"),
+        "maintenance_report" => format!("{} {} {}", s("project"), s("category"), s("severity")).trim().to_string(),
         "get_sprint" => args.get("sprint").map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default(),
         "log_time" => format!("{} {}", s("ticket"), args.get("duration").map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default()),
         "transition_ticket" => format!("{} -> {}", s("ticket"), s("status")),
@@ -982,6 +983,16 @@ impl App {
             .map(|(id, name)| if name.trim().is_empty() { format!("#{id}") } else { name })
             .unwrap_or_default();
         let source = Source::agent(&who);
+        // Während eine Wartungsaktion schreibt (#308), warten schreibende Werkzeuge: Code `busy` mit `retry_after_ms`.
+        if mcp::tool_level(tool) == Some(mcp::McpLevel::Control) {
+            if let Some(ms) = crate::planning::maintenance::busy() {
+                return Err(tool_err(agent::ToolError {
+                    code: "busy",
+                    message: tr("Die Wartung schreibt gerade in die Datenbank – bitte kurz warten und erneut versuchen.", "Maintenance is writing to the database – please wait briefly and try again.").to_string(),
+                    details: Some(json!({"retry_after_ms": ms})),
+                }));
+            }
+        }
         let ctx = agent::Ctx { conn: &db.conn, lang, source: source.clone(), now: chrono::Local::now().naive_local() };
         let res = if tool == "link_terminal" {
             (|| {

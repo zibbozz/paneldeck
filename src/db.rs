@@ -53,7 +53,25 @@ const MIGRATIONS: &[&str] = &[
     crate::planning::builtin_fields::MIGRATION,
     // 9: eingebaute Labels an jedem Typ (Issue #195), SQL in `planning/builtin_fields.rs`
     crate::planning::builtin_fields::MIGRATION_LABELS,
+    // 10: Wartung (Issue #308): Archiv-Markierung der Tickets, Wartungs-Einstellungen, ignorierte Befunde, eigene Regeln,
+    // Wartungsprotokoll, SQL in `planning/maintenance/schema.rs`
+    crate::planning::maintenance::schema::MIGRATION,
 ];
+
+/// Schema-Version dieser Programmversion (auch für die Rettung einer beschädigten Datenbank in eine neue Datei).
+pub fn schema_version() -> u32 {
+    MIGRATIONS.len() as u32
+}
+
+/// Legt in einer leeren Verbindung das vollständige aktuelle Schema an (Rettung in eine neue Datei, `planning::maintenance`).
+pub fn create_schema(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    for m in MIGRATIONS {
+        tx.execute_batch(m)?;
+    }
+    tx.pragma_update(None, "user_version", MIGRATIONS.len() as u32)?;
+    tx.commit()
+}
 
 /// Aktuelle Schema-Version dieser Programmversion.
 #[cfg(test)]
@@ -500,7 +518,7 @@ mod tests {
         };
         // die Sicherung vor dem Update ist der Stand von 2.2.0
         let l = backup::list(&bdir);
-        assert!(l.len() == 1 && matches!(l[0].kind, backup::Kind::PreMigration { from: 7, to: 9 }));
+        assert!(l.len() == 1 && matches!(l[0].kind, backup::Kind::PreMigration { from: 7, to } if to == latest_version()));
         // idempotent: die Umwandlung noch einmal (wie nach jedem neuen Typ) ändert nichts
         crate::planning::builtin_fields::ensure(&db.conn).unwrap();
         crate::planning::builtin_fields::ensure(&db.conn).unwrap();

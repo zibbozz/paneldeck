@@ -32,6 +32,7 @@ pub mod icons;
 pub mod integrity;
 pub mod link_types;
 pub mod links;
+pub mod maintenance;
 pub mod names;
 pub mod ops;
 pub mod projects;

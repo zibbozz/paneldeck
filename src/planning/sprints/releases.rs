@@ -258,7 +258,7 @@ pub fn delete_release(conn: &Connection, kind: ReleaseKind, id: i64, mode: Optio
 pub fn release_tickets(conn: &Connection, kind: ReleaseKind, id: i64) -> SRes<Vec<Ticket>> {
     let cur = get_release(conn, kind, id)?;
     release_project(conn, cur.project_id)?;
-    let sql = format!("SELECT {} {} WHERE t.project_id = ?1 AND t.id IN ({}) ORDER BY t.rank, t.id", tickets::COLS, tickets::FROM, referencing_sql());
+    let sql = format!("SELECT {} {} WHERE t.project_id = ?1 AND t.archived = 0 AND t.id IN ({}) ORDER BY t.rank, t.id", tickets::COLS, tickets::FROM, referencing_sql());
     let mut st = conn.prepare(&sql)?;
     Ok(st.query_map(params![cur.project_id, kind.field_kind(), id], tickets::from_row)?.collect::<Result<Vec<_>, _>>()?)
 }
@@ -291,7 +291,7 @@ impl ReleaseProgress {
 pub fn release_progress(conn: &Connection, kind: ReleaseKind, id: i64, basis: Basis) -> SRes<ReleaseProgress> {
     let cur = get_release(conn, kind, id)?;
     release_project(conn, cur.project_id)?;
-    let sql = format!("SELECT s.category, {} FROM tickets t LEFT JOIN statuses s ON s.id = t.status_id WHERE t.project_id = ?1 AND t.id IN ({})", points_sql(), referencing_sql());
+    let sql = format!("SELECT s.category, {} FROM tickets t LEFT JOIN statuses s ON s.id = t.status_id WHERE t.project_id = ?1 AND t.archived = 0 AND t.id IN ({})", points_sql(), referencing_sql());
     let mut st = conn.prepare(&sql)?;
     let rows = st
         .query_map(params![cur.project_id, kind.field_kind(), id], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<f64>>(1)?)))?

@@ -316,9 +316,9 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress:
         check_ts(w, &t.updated_at)?;
         let number = if renumber { i as i64 + 1 } else { t.number };
         conn.prepare_cached(
-            "INSERT INTO tickets (project_id, number, type_id, title, status_id, parent_id, rank, flagged, starred, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO tickets (project_id, number, type_id, title, status_id, parent_id, rank, flagged, starred, created_at, updated_at, archived) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?
-        .execute(params![pid, number, type_id, title, status, t.rank, t.flagged as i64, t.starred as i64, t.created_at, t.updated_at])?;
+        .execute(params![pid, number, type_id, title, status, t.rank, t.flagged as i64, t.starred as i64, t.created_at, t.updated_at, t.archived as i64])?;
         let id = conn.last_insert_rowid();
         map.tickets.insert(t.number, id);
         real_type.insert(t.number, type_id);
@@ -503,6 +503,11 @@ fn run(conn: &Connection, doc: &ProjectDoc, key: &str, renumber: bool, progress:
         }
     }
 
+    // Wartung (#308): Einstellungen und eigene Regeln (Status/Felder über die Vorlagen-Nummern)
+    if let Some(m) = &doc.maintenance {
+        import_maintenance(conn, pid, m, &map.status, &map.fields)?;
+    }
+
     if renumber {
         report.warnings.insert(0, Warning::Renumbered { from_key: normalize_key(&p.key), to_key: key.to_string() });
     }
@@ -601,6 +606,35 @@ fn import_sprints(conn: &Connection, pid: i64, doc: &ProjectDoc) -> Result<Vec<i
 }
 
 /// Zeilen der Sprint-Zugehörigkeit: ein Ticket steckt höchstens in einem offenen (geplanten/aktiven) Sprint.
+fn import_maintenance(conn: &Connection, pid: i64, m: &super::DocMaintenance, status: &HashMap<i64, i64>, fields: &HashMap<i64, i64>) -> Result<(), BackupError> {
+    use crate::planning::maintenance::{rules::RuleAction, save_settings, Check, Settings, Severity};
+    let d = Settings::default();
+    let s = Settings {
+        wont_do: m.wont_do.and_then(|w| status.get(&w).copied()),
+        stale_days: m.stale_days.unwrap_or(d.stale_days),
+        field_days: m.field_days.unwrap_or(d.field_days),
+        duplicate_percent: m.duplicate_percent.unwrap_or(d.duplicate_percent),
+        disabled: m.disabled.iter().filter_map(|c| Check::parse(c)).collect(),
+    };
+    save_settings(conn, pid, &s)?;
+    for (i, r) in m.rules.iter().enumerate() {
+        let mut action = r.action.clone();
+        if let Some(n) = action.get("status").and_then(|v| v.as_i64()) {
+            action["status"] = serde_json::json!(status.get(&n).copied().unwrap_or(0));
+        }
+        if let Some(n) = action.get("field").and_then(|v| v.as_i64()) {
+            action["field"] = serde_json::json!(fields.get(&n).copied().unwrap_or(0));
+        }
+        let action: RuleAction = serde_json::from_value(action).unwrap_or_default();
+        let severity = Severity::parse(&r.severity).unwrap_or(Severity::Warning);
+        conn.execute(
+            "INSERT INTO maintenance_rules (project_id, name, jql, severity, action, enabled, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![pid, r.name.chars().take(crate::planning::maintenance::rules::MAX_NAME_CHARS).collect::<String>(), r.jql, severity.as_str(), serde_json::to_string(&action).unwrap_or_else(|_| "{}".into()), r.enabled as i64, i as i64],
+        )?;
+    }
+    Ok(())
+}
+
 fn import_sprint_tickets(conn: &Connection, doc: &ProjectDoc, sprint_ids: &[i64], tickets: &HashMap<i64, i64>) -> Result<(), BackupError> {
     let mut open_in: HashMap<i64, i64> = HashMap::new();
     let mut open_rows: HashSet<(i64, i64)> = HashSet::new();

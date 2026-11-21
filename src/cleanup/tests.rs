@@ -122,6 +122,7 @@ fn sizes_counts_and_orphans() {
     assert!(s.visible(Item::RunTemp) && s.visible(Item::HotExit) && s.visible(Item::MaintenanceBackups));
     assert_eq!(amount(Item::HotExit, s.found(Item::HotExit).unwrap(), &o, now), (3, 1, 0));
     assert_eq!(amount(Item::MaintenanceBackups, s.found(Item::MaintenanceBackups).unwrap(), &o, now), (11, 1, 0));
+    assert!(!s.found(Item::DbBackups).unwrap().files.iter().any(|f| f.path.ends_with("maintenance-20260101-120000.db")), "Wartungs-Sicherungen nicht unter den Datenbank-Sicherungen");
     // Doppelt gewählte Dateien zählen einmal
     let (bytes, files) = total(&s, &sel(&[Item::ScrollbackAll, Item::ScrollbackOrphaned]), &o, now);
     assert_eq!((bytes, files), (300, 2));

@@ -190,6 +190,35 @@ impl PlanUi {
                 });
             });
         });
+        ui.add_space(S3);
+        // Wartung (#308): günstige Zählung der Probleme (Fehler und Warnungen), Punkt bei Problemen
+        let count = self.maint_count(cx, proj.id);
+        let mut open = false;
+        widgets::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(lang.t("Wartung", "Maintenance")).strong());
+                    ui.add_space(S1);
+                    ui.label(RichText::new(lang.t(
+                        "Liegengebliebene und kaputte Tickets, ungenutzte Konfiguration, Datenbankpflege.",
+                        "Stale and broken tickets, unused configuration, database care.",
+                    )).color(style::dim(ui)));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let r = ui.button(super::maint_view::button_text(count, lang));
+                    if count.is_some_and(|n| n > 0) {
+                        let c = egui::pos2(r.rect.right() - 3.0, r.rect.top() + 3.0);
+                        ui.painter().circle_filled(c, 4.0, super::maint_view::severity_color(crate::planning::maintenance::Severity::Warning));
+                    }
+                    if r.clicked() {
+                        open = true;
+                    }
+                });
+            });
+        });
+        if open {
+            self.open_maintenance(cx, proj.id, None);
+        }
     }
 
     // ------------------------------------------------------------------ System-Projekt „Todolist“

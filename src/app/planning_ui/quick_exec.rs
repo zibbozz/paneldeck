@@ -175,7 +175,7 @@ fn search_tickets(conn: &Connection, project_id: i64, query: &str, target_types:
     let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
     let Ok(mut st) = conn.prepare(
         "SELECT t.id, p.key, t.number, t.title, t.type_id FROM tickets t JOIN projects p ON p.id = t.project_id
-         WHERE t.project_id = ?1 AND (?2 = '' OR t.title LIKE ?3 ESCAPE '\\' OR t.number = ?4) ORDER BY t.updated_at DESC, t.id DESC LIMIT 60",
+         WHERE t.project_id = ?1 AND t.archived = 0 AND (?2 = '' OR t.title LIKE ?3 ESCAPE '\\' OR t.number = ?4) ORDER BY t.updated_at DESC, t.id DESC LIMIT 60",
     ) else {
         return Vec::new();
     };
