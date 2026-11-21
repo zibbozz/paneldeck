@@ -81,9 +81,9 @@ pub(super) struct State {
 /// Farbe der Schwere.
 pub(super) fn severity_color(s: Severity) -> Color32 {
     match s {
-        Severity::Error => Color32::from_rgb(0xe0, 0x6c, 0x75),
-        Severity::Warning => Color32::from_rgb(0xe5, 0xa0, 0x4b),
-        Severity::Hint => Color32::from_rgb(0x6f, 0xa8, 0xdc),
+        Severity::Error => crate::style::ui().error,
+        Severity::Warning => crate::style::ui().warning,
+        Severity::Hint => crate::style::ui().info,
     }
 }
 
