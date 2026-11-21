@@ -382,7 +382,14 @@ fn edit_target(args: &Value, env: &AgentEnv) -> Result<(Root, Resolved, TextFile
     let new = str_arg(args, "new_string").ok_or_else(|| err("bad_args", format!("new_string is missing (use \"\" to delete the text). Example: {ex}")))?;
     let all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
     let tf = read_text(&root, &r, EDIT_MAX_FILE)?;
-    let plan = plan_edit(&tf.text, tf.crlf, old, new, all, &r.rel)?;
+    // Sensible Datei: keine Hinweise auf ihren Inhalt in Fehlermeldungen (Zeilennummern, ähnliche Zeilen).
+    let plan = plan_edit(&tf.text, tf.crlf, old, new, all, &r.rel).map_err(|(code, msg)| {
+        if paths::is_sensitive(&r.rel, &env.settings.sensitive) && matches!(code.as_str(), "no_match" | "ambiguous_match") {
+            (code, format!("old_string does not match exactly once in the sensitive file “{}”; ask the user for the exact text.", r.rel))
+        } else {
+            (code, msg)
+        }
+    })?;
     Ok((root, r, tf, plan))
 }
 
@@ -508,21 +515,29 @@ pub struct Preview {
     pub error: Option<String>,
     /// Ersetzung nur mit Toleranz gefunden.
     pub tolerant: bool,
+    /// Der Aufruf berührt eine sensible Datei (`agent::sensitive_call`): fragt immer, ohne „Immer für diesen Chat“.
+    pub sensitive: bool,
 }
 
-/// Vorschau für `edit_file`/`write_file` (Diff gegen die Datei auf der Platte). `None` für andere Werkzeuge.
+/// Vorschau für die Freigabe-Zeile: Diff bei `edit_file`/`write_file` (gegen die Datei auf der Platte); bei
+/// `read_file`/`move_file` nur, wenn eine sensible Datei betroffen ist (Hinweis, kein „Immer“). `None` sonst.
 pub fn preview(name: &str, args: &Value, env: &AgentEnv) -> Option<Preview> {
-    match name {
-        "edit_file" => Some(match edit_target(args, env) {
-            Ok((_, r, tf, plan)) => Preview { path: r.rel, diff: Some(diff::diff(&tf.text, &plan.new_text, 3, PREVIEW_LINES)), new_file: false, error: None, tolerant: plan.tolerant },
+    let call = super::ToolCall { id: String::new(), name: name.to_string(), arguments: args.clone() };
+    let sensitive = super::sensitive_call(&call, env);
+    let p = match name {
+        "edit_file" => match edit_target(args, env) {
+            Ok((_, r, tf, plan)) => Preview { path: r.rel, diff: Some(diff::diff(&tf.text, &plan.new_text, 3, PREVIEW_LINES)), tolerant: plan.tolerant, ..Preview::default() },
             Err((_, m)) => Preview { path: str_arg(args, "path").unwrap_or("").to_string(), error: Some(m), ..Preview::default() },
-        }),
-        "write_file" => Some(match write_target(args, env) {
-            Ok((_, r, old, _, text)) => Preview { path: r.rel, diff: Some(diff::diff(old.as_ref().map_or("", |o| o.text.as_str()), &text, 3, PREVIEW_LINES)), new_file: old.is_none(), error: None, tolerant: false },
+        },
+        "write_file" => match write_target(args, env) {
+            Ok((_, r, old, _, text)) => Preview { path: r.rel, diff: Some(diff::diff(old.as_ref().map_or("", |o| o.text.as_str()), &text, 3, PREVIEW_LINES)), new_file: old.is_none(), ..Preview::default() },
             Err((_, m)) => Preview { path: str_arg(args, "path").unwrap_or("").to_string(), error: Some(m), ..Preview::default() },
-        }),
-        _ => None,
-    }
+        },
+        "read_file" if sensitive => Preview { path: str_arg(args, "path").unwrap_or("").to_string(), ..Preview::default() },
+        "move_file" if sensitive => Preview { path: format!("{} → {}", str_arg(args, "source").unwrap_or(""), str_arg(args, "destination").unwrap_or("")), ..Preview::default() },
+        _ => return None,
+    };
+    Some(Preview { sensitive, ..p })
 }
 
 #[cfg(test)]

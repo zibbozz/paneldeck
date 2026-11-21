@@ -156,6 +156,17 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
 ## Neue Felder in 2.6.1
 - `chats/<id>.json` → je Antwort die optionale Liste `repairs` (siehe [Chatverläufe](#chatverläufe)). Ältere Versionen ignorieren sie.
 
+## Neue Felder in 2.7.0 (Agenten-Werkzeuge in Chats)
+Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bedeuten die Standardwerte unten. Siehe [Agenten-Werkzeuge](chat.md#agenten-werkzeuge).
+- `chats/<id>.json` → `todos`: die To-do-Liste des Modells (`update_todos`), oben im Chat angezeigt – eine Liste von `{"content": "…", "status": "pending" | "in_progress" | "completed"}`. Nur geschrieben, wenn sie nicht leer ist; unlesbare Einträge werden übersprungen. *Verlauf leeren* leert sie mit.
+- `chats/<id>.json` → `always_allow` kann jetzt auch Regeln der Agenten-Werkzeuge **ohne Sitzung** enthalten: `{"tool": "edit_file", "session": null}` gilt für dieses Werkzeug im ganzen Chat; `{"tool": "run_command", "session": null, "prefix": "cargo test"}` gilt für Befehle im Terminal des Chats, die mit diesen Wörtern beginnen (nie für Befehle mit `;`, `&`, `|`, Umleitungen oder `$( … )`). Eine `run_command`-Regel ohne `prefix`, eine `read_file`-Regel und Regeln ohne Sitzung für andere Werkzeuge (z. B. aus Vorabständen von 2.2.0) gelten weiter nie und werden nicht geschrieben. Aufrufe, die eine sensible Datei berühren, fragen immer – egal, welche Regeln es gibt.
+- `settings.json` → `agent_tools` (*Einstellungen → Modelle → Agenten-Werkzeuge*), mit diesen Standardwerten:
+  - `sensitive`: Muster sensibler Dateien (Lesen, Ändern oder Verschieben fragt immer) – Standard `.env`, `.env.*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `*.ppk`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `credentials`, `credentials.*`, `secrets.*`, `*.secret`, `.npmrc`, `.pypirc`, `.htpasswd`, `*.tfstate`, `*.tfstate.*`, `*.tfvars`;
+  - `command_timeout_secs`: Zeitlimit von `run_command` im Terminal des Chats, Standard `120` (5–600);
+  - `web_fetch`: `web_fetch` anbieten, Standard `true`;
+  - `search`: `off` (Standard), `searxng`, `brave` oder `tavily`; `searxng_url`: Adresse deiner SearXNG-Instanz; `search_key`: dein Brave-/Tavily-API-Schlüssel, verschlüsselt wie die Schlüssel der Server (nie Klartext). Die letzten beiden werden nur geschrieben, wenn sie gesetzt sind.
+  Ein unlesbares Feld fällt auf seinen Standard zurück; die übrigen bleiben.
+
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
 

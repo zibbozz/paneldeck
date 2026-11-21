@@ -173,10 +173,12 @@ impl PromptUi {
 }
 
 /// Plant den Prompt genau wie eine Anfrage (`llm_backend::plan_prompt`: Teile, Familie, Kontextlänge, volle Fassung
-/// oder Kurzfassung) – ohne Projekt/Ordner und ohne Abgleich mit dem Server.
+/// oder Kurzfassung) – ohne Projekt und ohne Abgleich mit dem Server. Wie ein Chat mit Projektordner: die
+/// Agenten-Werkzeuge (#338) mit ihren Standard-Einstellungen sind dabei (der größte übliche Fall).
 pub(super) fn plan_for(server: &LlmServer, model: &str, global: PromptParts, expert: bool) -> PromptPlan {
-    let policy = ToolPolicy::new(server.model_cfg(model), server.tools_supported(model), expert);
-    let cx = crate::chat::TurnContext { expert, prompt_parts: global, ..crate::chat::TurnContext::default() };
+    let agent = crate::chat::agent::AgentEnv { root: Some(std::path::PathBuf::from("project")), ..Default::default() };
+    let policy = ToolPolicy::new(server.model_cfg(model), server.tools_supported(model), expert).with_agent(agent.clone());
+    let cx = crate::chat::TurnContext { expert, prompt_parts: global, agent, ..crate::chat::TurnContext::default() };
     crate::chat::llm_backend::plan_prompt(server, model, &policy, &cx)
 }
 

@@ -196,9 +196,13 @@ impl ToolPolicy {
 
     /// Muss der Nutzer diesen Aufruf freigeben? `ask` aus [`ToolPolicy::check`]; `always` = dauerhafte Freigaben des
     /// Chats (passen nur bei gleichem Werkzeug und gleicher Ziel-Sitzung).
-    /// Sensible Dateien (`read_file`, #338) fragen immer, auch wenn „Vor Schreib-Aktionen nachfragen“ aus ist.
+    /// Aufrufe, die eine sensible Datei berühren (#338: lesen, ändern, verschieben), fragen immer – auch wenn „Vor
+    /// Schreib-Aktionen nachfragen“ aus ist und trotz „Immer für diesen Chat“.
     pub fn needs_approval(&self, ask: bool, call: &ToolCall, always: &[AllowRule]) -> bool {
-        ask && (self.cfg.ask_write || agent::must_ask(call, &self.agent)) && !always.iter().any(|r| r.matches(call))
+        if ask && agent::must_ask(call, &self.agent) {
+            return true;
+        }
+        ask && self.cfg.ask_write && !always.iter().any(|r| r.matches(call))
     }
 }
 
@@ -983,6 +987,53 @@ mod tests {
         assert!(c.check(&call("read_files", json!({}))).unwrap_err().1.contains("read_file"));
         assert_eq!(max_result_bytes("read_file"), 32 * 1024);
         assert_eq!(max_result_bytes("grep"), MAX_RESULT_BYTES);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn moving_or_changing_sensitive_files_always_asks() {
+        let (d, env) = agent::paths::tests::tmp_root("sensmove");
+        std::fs::create_dir_all(d.join("conf")).unwrap();
+        std::fs::write(d.join("conf/.env"), "TOKEN=1\n").unwrap();
+        std::fs::write(d.join("notes.txt"), "x\n").unwrap();
+        std::fs::create_dir_all(d.join("plain")).unwrap();
+        std::fs::write(d.join("plain/a.txt"), "a\n").unwrap();
+        let mut quiet = policy(McpLevel::Control, &[], false).with_agent(env.clone());
+        quiet.cfg.ask_write = false;
+        let mv = |s: &str, t: &str| call("move_file", json!({"source": s, "destination": t}));
+        // Gegenprobe: harmlos verschieben läuft ohne „Vor Schreib-Aktionen nachfragen“ ohne Frage
+        assert!(!quiet.needs_approval(true, &mv("notes.txt", "n2.txt"), &[]));
+        assert!(!quiet.needs_approval(true, &mv("plain", "plain2"), &[]));
+        // Quelle, Ziel oder Ordner mit sensibler Datei: immer fragen, auch trotz „Immer für diesen Chat“
+        let always = [AllowRule { tool: "move_file".into(), session: None, prefix: None }];
+        for c in [mv("conf/.env", "conf/notes.txt"), mv("notes.txt", ".env"), mv("conf", "settings"), mv("notes.txt", "keys/server.pem")] {
+            assert!(quiet.needs_approval(true, &c, &always), "{}", c.arguments);
+            let p = agent::files::preview("move_file", &c.arguments, &env).expect("Hinweis in der Freigabe");
+            assert!(p.sensitive, "{}", c.arguments);
+        }
+        assert!(agent::files::preview("move_file", &mv("notes.txt", "n2.txt").arguments, &env).is_none());
+        // Ordner, dessen Dateien erst am Ziel sensibel würden (Muster mit Pfad)
+        let mut custom = env.clone();
+        custom.settings.sensitive = vec!["secret/*.txt".into()];
+        let pc = policy(McpLevel::Control, &[], false).with_agent(custom.clone());
+        assert!(pc.needs_approval(true, &mv("plain", "secret"), &always) && !pc.needs_approval(true, &mv("plain", "other"), &always));
+        // Ändern einer sensiblen Datei: immer fragen; Fehlermeldungen verraten nichts über den Inhalt
+        let edit = call("edit_file", json!({"path": "conf/.env", "old_string": "TOKEN=2", "new_string": "x"}));
+        assert!(quiet.needs_approval(true, &edit, &[AllowRule::for_call(&edit)]));
+        assert!(quiet.needs_approval(true, &call("write_file", json!({"path": ".env", "content": "x"})), &[]));
+        let e = agent::execute("edit_file", &json!({"path": "conf/.env", "old_string": "TOKEN", "new_string": "x", "replace_all": false}), &env);
+        assert!(e.is_ok(), "eine Fundstelle: ersetzt");
+        let e = agent::execute("edit_file", &json!({"path": "conf/.env", "old_string": "nothing-here", "new_string": "y"}), &env).unwrap_err();
+        assert!(e.0 == "no_match" && !e.1.contains("line") && e.1.contains("sensitive"), "{e:?}");
+        let p = agent::files::preview("edit_file", &edit.arguments, &env).unwrap();
+        assert!(p.sensitive);
+        // Inhalte sensibler Dateien erscheinen in keinem lesenden Werkzeug
+        std::fs::write(d.join("conf/.env"), "TOKEN=leak-me\n").unwrap();
+        for (t, a) in [("grep", json!({"pattern": "leak-me"})), ("grep", json!({"pattern": "leak", "path": "conf/.env"})), ("glob", json!({"pattern": "*"})), ("list_dir", json!({"path": "conf"}))] {
+            let v = agent::execute(t, &a, &env).unwrap();
+            // (das Suchmuster selbst steht im Ergebnis; der Inhalt der Datei nicht)
+            assert!(!v.to_string().contains("TOKEN"), "{t}: {v}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

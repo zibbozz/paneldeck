@@ -542,8 +542,14 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
     let local = crate::chat::agent::is_local(&call);
     egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
+        let sensitive = preview.is_some_and(|p| p.sensitive);
         let what = match name {
             _ if !local => lang.t("Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:", "The model wants to use a tool with write access:"),
+            "move_file" if sensitive => lang.t(
+                "Das Modell möchte eine sensible Datei verschieben (z. B. mit Passwörtern oder Schlüsseln) – unter einem anderen Namen wäre sie danach ohne Nachfrage lesbar:",
+                "The model wants to move a sensitive file (e.g. with passwords or keys) – under another name it could then be read without asking:",
+            ),
+            "edit_file" | "write_file" if sensitive => lang.t("Das Modell möchte eine sensible Datei ändern (z. B. mit Passwörtern oder Schlüsseln):", "The model wants to change a sensitive file (e.g. with passwords or keys):"),
             "read_file" => lang.t("Das Modell möchte eine sensible Datei lesen (z. B. mit Passwörtern oder Schlüsseln):", "The model wants to read a sensitive file (e.g. with passwords or keys):"),
             "web_fetch" | "web_search" => lang.t("Das Modell möchte auf das Internet zugreifen:", "The model wants to access the internet:"),
             "run_command" => lang.t("Das Modell möchte einen Befehl im Terminal des Chats ausführen:", "The model wants to run a command in the chat's terminal:"),
@@ -581,7 +587,8 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
             let allow = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(crate::style::ui().chat_send));
             // „Immer“ nur mit Ziel-Sitzung (Werkzeug + Sitzung); Tickets, Todos, create_session … fragen jedes Mal.
             // Agenten-Werkzeuge (#338): je Werkzeug für den Chat, Befehle nur für denselben Anfang (`cargo test`).
-            let always = AllowRule::eligible(&call).then(|| {
+            // Sensible Dateien (#338): jedes Mal fragen.
+            let always = (AllowRule::eligible(&call) && !sensitive).then(|| {
                 let scope = match AllowRule::for_call(&call) {
                     AllowRule { prefix: Some(p), .. } => {
                         if lang == Lang::De {
