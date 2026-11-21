@@ -7,12 +7,14 @@
 //! * [`session`]: [`ChatState`] – Nachrichten, Eingabe, laufende Antwort, Werkzeug-Schleife.
 //! * [`tools`]: welche Paneldeck-Werkzeuge ein Modell bekommt, Prüfung der Aufrufe, Ergebnis-Nachrichten.
 //! * [`repair`]: als Text geschriebene Werkzeugaufrufe erkennen, Argumente normalisieren und prüfen (#340).
+//! * [`master_prompt`]: der Systemprompt der Chats (#340) – Regeln, Paneldeck, Fehler, erzeugte Werkzeug-Dokumentation.
 //! * [`driver`]: führt die Werkzeug-Schleife je Bild weiter, über [`driver::ChatToolHost`] (umgesetzt von der App).
 
 pub mod backend;
 pub mod driver;
 pub mod llm_backend;
 pub mod logic;
+pub mod master_prompt;
 pub mod repair;
 pub mod session;
 pub mod store;

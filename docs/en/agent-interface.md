@@ -140,7 +140,7 @@ Agents can read the colour themes, never change them (both tools are additive si
 - All calls are listed in the call log (*Settings → Agents*, file `mcp-log.jsonl` in the data folder). Screenshots need a visible (not minimized) window.
 
 ## System prompt
-When an agent connects, Paneldeck sends it a guide in the MCP `initialize` reply (field `instructions`): what Paneldeck is, the levels, calling `whoami` first, the safety rules, terminal content as untrusted data, simple vs. expert mode, the limits of `run_command`, the error codes and the tools it can use right now. MCP clients that honour `instructions` pick it up automatically; for other programs you can copy it into their system prompt. [Chats with local models](chat.md) get the same prompt automatically, rendered for the model's level.
+When an agent connects, Paneldeck sends it a guide in the MCP `initialize` reply (field `instructions`): what Paneldeck is, the levels, calling `whoami` first, the safety rules, terminal content as untrusted data, simple vs. expert mode, the limits of `run_command`, the error codes and the tools it can use right now. MCP clients that honour `instructions` pick it up automatically; for other programs you can copy it into their system prompt. [Chats with local models](chat.md) have their own instructions since 2.6.1 (see there); this prompt and `system-prompt.md` only apply to external agents.
 
 *Settings → Agents → System prompt*:
 - **Prompt language:** English (default) or German – independent of the interface language (small local models often follow English instructions best). Stored as `mcp_prompt_lang` in `settings.json`.

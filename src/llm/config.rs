@@ -386,20 +386,31 @@ impl LlmServer {
     }
 }
 
-/// Ohne eigene Angabe höchstens so viel Kontext (Ollama reserviert Speicher für die ganze Länge).
-pub const MAX_AUTO_CONTEXT: u32 = 32768;
+/// Ohne eigene Angabe höchstens so viel Kontext (Ollama reserviert Speicher für die ganze Länge). Seit 2.6.1 (#340)
+/// 65536: der Master-Prompt der Chats dokumentiert jedes Werkzeug vollständig; Steuern im Expertenmodus braucht damit
+/// mehr als 32768 (die übrigen Stufen bleiben bei 32768).
+pub const MAX_AUTO_CONTEXT: u32 = 65536;
 /// Platz für Verlauf und Werkzeug-Ergebnisse, der neben Systemprompt und Werkzeugen mindestens bleiben soll.
 pub const MIN_ROOM_TOKENS: usize = 4096;
 /// Anteil des Kontexts, der für die Antwort frei bleibt (Prozent; wie `chat::llm_backend::ANSWER_RESERVE_PERCENT`).
 pub const ANSWER_RESERVE_PERCENT: usize = 25;
 
-/// Kontextlänge, die Systemprompt und Werkzeuge (`prompt_tokens`) samt [`MIN_ROOM_TOKENS`] und der Antwort-Reserve
-/// braucht: auf die nächste Zweierpotenz aufgerundet, mindestens `DEFAULT_CONTEXT`, höchstens [`MAX_AUTO_CONTEXT`] und
-/// höchstens die erkannte Länge des Modells.
+/// Passt ein Systemprompt samt Werkzeug-Beschreibungen (`prompt_tokens`) in den Kontext `ctx` und lässt dem Gespräch
+/// genug Platz? Nach der Antwort-Reserve muss für Verlauf und Werkzeug-Ergebnisse mindestens ein Viertel des übrigen
+/// Platzes und mindestens [`MIN_ROOM_TOKENS`] bleiben. Danach wählt der Chat zwischen vollem Prompt und Kurzfassung
+/// (#340, `chat::master_prompt::choose`), und [`auto_context`] bemisst den Kontext nach derselben Regel.
+pub fn prompt_fits(ctx: u32, prompt_tokens: usize) -> bool {
+    let budget = (ctx as usize) * (100 - ANSWER_RESERVE_PERCENT) / 100;
+    budget >= prompt_tokens && budget - prompt_tokens >= MIN_ROOM_TOKENS.max(budget / 4)
+}
+
+/// Kleinste Kontextlänge (Zweierpotenz ab `DEFAULT_CONTEXT`), in die Systemprompt und Werkzeuge (`prompt_tokens`) nach
+/// [`prompt_fits`] passen; höchstens [`MAX_AUTO_CONTEXT`] und höchstens die erkannte Länge des Modells.
 pub fn auto_context(prompt_tokens: usize, detected: Option<u32>) -> u32 {
-    let need = (prompt_tokens + MIN_ROOM_TOKENS).saturating_mul(100).div_ceil(100 - ANSWER_RESERVE_PERCENT);
-    let need = u32::try_from(need).unwrap_or(u32::MAX).checked_next_power_of_two().unwrap_or(MAX_AUTO_CONTEXT);
-    let c = need.clamp(DEFAULT_CONTEXT, MAX_AUTO_CONTEXT);
+    let mut c = DEFAULT_CONTEXT;
+    while c < MAX_AUTO_CONTEXT && !prompt_fits(c, prompt_tokens) {
+        c *= 2;
+    }
     detected.map_or(c, |d| c.min(d))
 }
 
@@ -511,8 +522,14 @@ mod tests {
         assert_eq!(auto_context(0, None), DEFAULT_CONTEXT);
         assert_eq!(auto_context(2_000, None), DEFAULT_CONTEXT, "(2000 + 4096) / 0,75 = 8128");
         assert_eq!(auto_context(2_100, None), 16384);
-        assert_eq!(auto_context(20_000, None), 32768);
+        assert_eq!(auto_context(16_000, None), 32768, "24576 − 16000 = 8576 ≥ ein Viertel von 24576");
+        assert_eq!(auto_context(20_000, None), 65536, "bei 32768 blieben nur 4576 < 6144 (ein Viertel)");
+        assert_eq!(auto_context(500_000, None), MAX_AUTO_CONTEXT);
         assert_eq!(auto_context(20_000, Some(4096)), 4096);
+        // Regel für vollen Prompt oder Kurzfassung: mindestens 4096 und ein Viertel des Platzes bleiben für das Gespräch.
+        assert!(prompt_fits(8192, 2_000) && !prompt_fits(8192, 2_100), "6144 − 2048 = 4096");
+        assert!(prompt_fits(32768, 18_432) && !prompt_fits(32768, 18_433), "24576 − 6144");
+        assert!(!prompt_fits(1000, 0) && !prompt_fits(8192, 1_000_000));
         assert!(context_too_small(8192, 6_612) && !context_too_small(16384, 6_612));
         assert!(!context_too_small(8192, 2_000));
     }
@@ -523,7 +540,8 @@ mod tests {
         assert_eq!(s.request_context("big", None), DEFAULT_CONTEXT, "Ollama: ohne bekannten Bedarf 8192");
         assert_eq!(s.request_context("big", Some(9_000)), 32768, "Bedarf (9000 + 4096) / 0,75 → 32768");
         assert_eq!(s.request_context("big", Some(5_000)), 16384);
-        assert_eq!(s.request_context("big", Some(500_000)), MAX_AUTO_CONTEXT, "höchstens 32768");
+        assert_eq!(s.request_context("big", Some(500_000)), MAX_AUTO_CONTEXT, "höchstens 65536");
+        assert_eq!(s.request_context("big", Some(22_000)), 65536, "Bedarf (22000 + 4096) / 0,75 → 65536");
         assert_eq!(s.request_context("small", Some(9_000)), 2048, "höchstens die Länge des Modells");
         assert_eq!(s.request_context("small", None), 2048);
         assert_eq!(s.request_context("unknown", None), DEFAULT_CONTEXT);

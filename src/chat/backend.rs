@@ -78,10 +78,8 @@ pub struct TurnContext {
     pub folder: String,
     /// Server aus den Einstellungen (`Settings::llm_servers`).
     pub servers: Vec<crate::llm::config::LlmServer>,
-    /// Datenordner (eigene Vorlage `system-prompt.md`); `None` = eingebaute Vorlage.
-    pub data_dir: Option<std::path::PathBuf>,
-    /// Sprache des Systemprompts (Einstellung „Sprache des Systemprompts“), auch die Sprache des Modells.
-    pub prompt_lang: Lang,
+    // Seit 2.6.1 (#340) ohne Datenordner und Prompt-Sprache: der Chat nutzt den Master-Prompt (immer Englisch), nicht
+    // `system-prompt.md` und nicht die Einstellung „Sprache des Systemprompts“ (die gelten nur für externe Agenten).
     /// Sprache der Oberfläche (Fehlermeldungen, Hinweise).
     pub lang: Lang,
     /// Expertenmodus der Todo-Liste (bestimmt die Werkzeuge im Systemprompt).
@@ -92,7 +90,7 @@ pub struct TurnContext {
 
 impl Default for TurnContext {
     fn default() -> Self {
-        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), data_dir: None, prompt_lang: Lang::En, lang: Lang::En, expert: false, token_scale: 1.0 }
+        TurnContext { project: String::new(), folder: String::new(), servers: Vec::new(), lang: Lang::En, expert: false, token_scale: 1.0 }
     }
 }
 
