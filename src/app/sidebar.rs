@@ -8,8 +8,23 @@ impl App {
         let panel_fill = ctx.style().visuals.panel_fill;
         let panel = sidebar_panel(ctx, self.settings.sidebar_width, panel_fill, |ui| {
             // Fußzeile: Gesamtverbrauch und Version (Einstellungen und MCP-Status stehen in der Fensterleiste, #240)
-            egui::TopBottomPanel::bottom("sidebar_footer").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
+            let footer = egui::TopBottomPanel::bottom("sidebar_footer").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
                 ui.add_space(S1);
+                // Nach einem Update: dezenter Hinweis auf die Tour „Was ist neu“ (#143).
+                if let Some(hint) = self.tut_hint() {
+                    ui.horizontal(|ui| {
+                        let r = ui.add(egui::Label::new(RichText::new(hint).small().color(style::ui().link)).sense(Sense::click()).truncate());
+                        if r.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if r.clicked() {
+                            actions.push(Action::Tutorial(tutorial::Cmd::WhatsNew));
+                        }
+                        if style::icon_btn_small(ui, SIcon::Close, lang.t("Hinweis ausblenden", "Hide this hint")).clicked() {
+                            actions.push(Action::Tutorial(tutorial::Cmd::DismissHint));
+                        }
+                    });
+                }
                 let (mut tok, mut cost) = (0u64, 0.0f64);
                 if self.settings.claude_mode {
                     for id in self.entries.keys().copied().collect::<Vec<_>>() {
@@ -38,6 +53,7 @@ impl App {
                     });
                 }
             });
+            footer.response.spot(Spot::SidebarFooter);
             // Vorlagen-Bibliothek (#244): einklappbar über der Fußzeile.
             self.templates_section(ui, actions);
             // Prozessliste (#243): über den Vorlagen, nur im Hauptfenster (ihre Ausgabe erscheint dort).
@@ -48,34 +64,34 @@ impl App {
             // Werkzeugleiste
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
-                if style::icon_btn(ui, SIcon::Plus, &format!("{} ({})", lang.t("Neue Sitzung …", "New session …"), self.binding_text("new")), false).clicked() {
+                if style::icon_btn(ui, SIcon::Plus, &format!("{} ({})", lang.t("Neue Sitzung …", "New session …"), self.binding_text("new")), false).spot(Spot::SidebarNew).clicked() {
                     actions.push(Action::NewDialog(false));
                 }
-                if self.settings.claude_mode && style::icon_btn(ui, SIcon::Spark, lang.t("Neue Claude-Sitzung …", "New Claude session …"), false).clicked() {
+                if self.settings.claude_mode && style::icon_btn(ui, SIcon::Spark, lang.t("Neue Claude-Sitzung …", "New Claude session …"), false).spot(Spot::SidebarClaude).clicked() {
                     actions.push(Action::NewDialog(true));
                 }
-                if style::icon_btn(ui, SIcon::Chat, lang.t("Neuer Chat (lokales Modell)", "New chat (local model)"), false).clicked() {
+                if style::icon_btn(ui, SIcon::Chat, lang.t("Neuer Chat (lokales Modell)", "New chat (local model)"), false).spot(Spot::SidebarChat).clicked() {
                     actions.push(Action::NewChat);
                 }
-                if style::icon_btn(ui, SIcon::Queue, &format!("{} ({})", lang.t("Prompt-Composer", "Prompt composer"), self.binding_text("composer")), self.composer_open).clicked() {
+                if style::icon_btn(ui, SIcon::Queue, &format!("{} ({})", lang.t("Prompt-Composer", "Prompt composer"), self.binding_text("composer")), self.composer_open).spot(Spot::SidebarComposer).clicked() {
                     actions.push(Action::ToggleComposer);
                 }
-                if style::icon_btn(ui, SIcon::Search, &format!("{} ({})", lang.t("Befehle", "Commands"), self.binding_text("palette")), false).clicked() {
+                if style::icon_btn(ui, SIcon::Search, &format!("{} ({})", lang.t("Befehle", "Commands"), self.binding_text("palette")), false).spot(Spot::SidebarPalette).clicked() {
                     actions.push(Action::OpenPalette);
                 }
-                if style::icon_btn(ui, SIcon::Prompt, lang.t("Prompt-Bibliothek", "Prompt library"), self.prompts_open).clicked() {
+                if style::icon_btn(ui, SIcon::Prompt, lang.t("Prompt-Bibliothek", "Prompt library"), self.prompts_open).spot(Spot::SidebarPrompts).clicked() {
                     actions.push(Action::OpenPrompts);
                 }
-                if style::icon_btn(ui, SIcon::Folder, &format!("{} ({})", lang.t("Dateibaum", "File tree"), self.binding_text("files")), self.files_open).clicked() {
+                if style::icon_btn(ui, SIcon::Folder, &format!("{} ({})", lang.t("Dateibaum", "File tree"), self.binding_text("files")), self.files_open).spot(Spot::SidebarFiles).clicked() {
                     actions.push(Action::ToggleFiles);
                 }
-                if style::icon_btn(ui, SIcon::Diff, &format!("{} ({})", lang.t("Änderungen (Diff, Stage, Commit)", "Changes (diff, stage, commit)"), self.binding_text("diff")), self.diff_open).clicked() {
+                if style::icon_btn(ui, SIcon::Diff, &format!("{} ({})", lang.t("Änderungen (Diff, Stage, Commit)", "Changes (diff, stage, commit)"), self.binding_text("diff")), self.diff_open).spot(Spot::SidebarDiff).clicked() {
                     actions.push(Action::ToggleDiff);
                 }
                 if self.settings.claude_mode && style::icon_btn(ui, SIcon::Doc, &format!("{} ({})", lang.t("CLAUDE.md / Claude-Dateien", "CLAUDE.md / Claude files"), self.binding_text("editor")), self.editor.is_some()).clicked() {
                     actions.push(Action::OpenEditor);
                 }
-                if self.settings.claude_mode && style::icon_btn(ui, SIcon::Clock, lang.t("Claude-Verlauf", "Claude history"), self.history_open).clicked() {
+                if self.settings.claude_mode && style::icon_btn(ui, SIcon::Clock, lang.t("Claude-Verlauf", "Claude history"), self.history_open).spot(Spot::SidebarHistory).clicked() {
                     actions.push(Action::OpenHistory);
                 }
                 if style::icon_btn(ui, SIcon::Template, lang.t("Sitzungs-Vorlagen", "Session templates"), self.templates_open).clicked() {
@@ -178,6 +194,7 @@ impl App {
             });
         });
         self.settings.sidebar_width = panel.response.rect.width();
+        panel.response.clone().spot(Spot::Sidebar);
         if panel.response.hovered() && ctx.input(|i| i.key_pressed(Key::F2)) {
             actions.push(Action::StartRename(self.focused));
         }
@@ -452,6 +469,9 @@ impl App {
 
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click_and_drag());
         self.tree_geo.sess.insert(id, rect);
+        if focused {
+            tutorial::spot_rect(ui, Spot::SessionRow, rect);
+        }
         // Nur mit der linken Taste ziehen: ein Mittelklick (schließt) mit etwas Bewegung startet kein Ziehen.
         if resp.drag_started_by(egui::PointerButton::Primary) {
             self.dragging = Some(id);

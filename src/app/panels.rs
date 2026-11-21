@@ -849,6 +849,10 @@ impl App {
         for (i, s) in self.prompts.iter().enumerate() {
             v.push((format!("{} {}", lang.t("Prompt senden:", "Send prompt:"), s.name), String::new(), Action::SendSnippet(i)));
         }
+        // Tutorial (#143): Tour, Fortsetzen, Kapitel, „Was ist neu“ (nur im Hauptfenster).
+        if self.wins.cur == 0 {
+            v.extend(self.tut_palette_items());
+        }
         v
     }
 
@@ -899,7 +903,7 @@ impl App {
         let top = (screen.height() * 0.1).clamp(8.0, 70.0);
         let list_h = (screen.height() - top - 90.0).max(80.0);
         let width = (screen.width() - 32.0).clamp(240.0, 560.0);
-        egui::Window::new("palette")
+        let win = egui::Window::new("palette")
             .title_bar(false)
             .resizable(false)
             .anchor(Align2::CENTER_TOP, Vec2::new(0.0, top))
@@ -941,6 +945,9 @@ impl App {
                     ui.weak(lang.t("Keine Treffer", "No matches"));
                 }
             });
+        if let Some(w) = win {
+            w.response.spot(Spot::Palette);
+        }
         if chosen.is_some() {
             close = true;
         }

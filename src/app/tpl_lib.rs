@@ -735,7 +735,7 @@ impl App {
     pub(super) fn templates_section(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let lang = self.settings.language;
         let max_h = (ui.available_height() * 0.4).max(90.0);
-        egui::TopBottomPanel::bottom("sidebar_templates").frame(egui::Frame::NONE).show_separator_line(false).resizable(false).show_inside(ui, |ui| {
+        let panel = egui::TopBottomPanel::bottom("sidebar_templates").frame(egui::Frame::NONE).show_separator_line(false).resizable(false).show_inside(ui, |ui| {
             ui.add_space(S1);
             let id = ui.make_persistent_id("tpl_section");
             let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
@@ -795,6 +795,7 @@ impl App {
                 }
             });
         });
+        panel.response.spot(Spot::TemplatesSection);
     }
 
     /// Eine Zeile der Bibliothek: Doppelklick startet, Ziehen legt ab, Rechtsklick öffnet das Menü.

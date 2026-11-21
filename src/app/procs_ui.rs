@@ -572,7 +572,7 @@ impl App {
     pub(super) fn procs_section(&mut self, ui: &mut Ui) {
         let lang = self.settings.language;
         let max_h = (ui.available_height() * 0.35).max(90.0);
-        egui::TopBottomPanel::bottom("sidebar_procs").frame(egui::Frame::NONE).show_separator_line(false).resizable(false).show_inside(ui, |ui| {
+        let panel = egui::TopBottomPanel::bottom("sidebar_procs").frame(egui::Frame::NONE).show_separator_line(false).resizable(false).show_inside(ui, |ui| {
             ui.add_space(S1);
             let id = ui.make_persistent_id("procs_section");
             let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
@@ -658,6 +658,7 @@ impl App {
                 }
             });
         });
+        panel.response.spot(Spot::ProcsSection);
     }
 
     fn proc_row(&mut self, ui: &mut Ui, id: u64) {

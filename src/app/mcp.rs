@@ -2080,7 +2080,9 @@ impl App {
         );
         ui.add_space(S2);
         let before = self.settings.mcp_level;
+        let top = ui.cursor().min.y;
         level_selector(ui, &mut self.settings.mcp_level, lang);
+        super::tutorial::spot_since(ui, Spot::McpLevel, top);
         if self.settings.mcp_level != before {
             // Sofort sichern: die Stufe ist eine Sicherheitseinstellung und darf nicht bis zum nächsten Zeitgeber warten.
             state::save_json(&self.dir.join("settings.json"), &self.settings);
@@ -2118,6 +2120,7 @@ impl App {
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S1);
+        let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("In Claude Code einrichten", "Set up in Claude Code")).strong());
         let inst_args = crate::launch::instance_args();
         let server = crate::launch::mcp_server_name(&crate::launch::Instance::from_args(&inst_args));
@@ -2149,6 +2152,7 @@ impl App {
                 ctx.copy_text(serde_json::to_string_pretty(&v).unwrap_or_default());
             }
         });
+        super::tutorial::spot_since(ui, Spot::McpRegister, top);
         let msg = self.mcp.msg.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !msg.is_empty() {
             ui.label(RichText::new(msg).small().color(style::dim(ui)));
@@ -2161,10 +2165,13 @@ impl App {
             .small()
             .color(style::dim(ui)),
         );
+        let top = ui.cursor().min.y;
         self.sysprompt_settings_ui(ui);
+        super::tutorial::spot_since(ui, Spot::McpSysprompt, top);
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S1);
+        let log_top = ui.cursor().min.y;
         ui.horizontal(|ui| {
             ui.label(RichText::new(lang.t("Aufrufprotokoll", "Call log")).strong());
             if ui.small_button(lang.t("Leeren", "Clear")).clicked() {
@@ -2185,6 +2192,7 @@ impl App {
                 ui.label(RichText::new(format!("{}s  {}{}  {}", age, e.tool, sess, e.info)).small().monospace().color(col));
             }
         });
+        super::tutorial::spot_since(ui, Spot::McpLog, log_top);
     }
 
     /// MCP-Status in der Fensterleiste links neben Update/Einstellungen (#240), solange die Schnittstelle an ist; leuchtet

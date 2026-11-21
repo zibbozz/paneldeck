@@ -15,6 +15,7 @@ impl App {
         self.remember_off_ui(ctx);
         let lang = self.settings.language;
         let mut open = true;
+        let mut tut_cmd: Option<tutorial::Cmd> = None;
         // Frei verschiebbar (#275, #288): öffnet mittig, behält die gezogene Position, solange es offen ist, bleibt im Bild.
         style::movable(ctx, Id::new("settings_win"), egui::Window::new(lang.t("Einstellungen", "Settings")))
             .open(&mut open)
@@ -50,6 +51,17 @@ impl App {
                     for i in ORDER {
                         let t = tabs[i];
                         let r = style::tab(ui, t, self.settings_tab == i);
+                        // Tutorial (#143): Reiter als Ziele.
+                        let spot = match i {
+                            5 => Some(Spot::TabShortcuts),
+                            6 => Some(Spot::TabProfiles),
+                            models_ui::SETTINGS_TAB => Some(Spot::TabModels),
+                            _ => None,
+                        };
+                        let r = match spot {
+                            Some(s) => r.spot(s),
+                            None => r,
+                        };
                         if r.clicked() {
                             self.settings_tab = i;
                         }
@@ -156,6 +168,7 @@ impl App {
                         )).small().color(style::dim(ui)));
                     }
                     1 => {
+                        let top = ui.cursor().min.y;
                         row(ui, "Theme", "", |ui| {
                             egui::ComboBox::from_id_salt("themesel").selected_text(self.settings.theme.clone()).show_ui(ui, |ui| {
                                 for t in &self.themes {
@@ -164,6 +177,7 @@ impl App {
                             });
                         });
                         self.theme_manage_ui(ui);
+                        tutorial::spot_since(ui, Spot::ThemeManage, top);
                         row(ui, lang.t("Schriftgröße", "Font size"), lang.t("Terminalschrift (Cascadia Mono)", "Terminal font (Cascadia Mono)"), |ui| {
                             ui.add(egui::Slider::new(&mut self.settings.font_size, 9.0..=28.0).suffix(" pt"));
                         });
@@ -305,14 +319,17 @@ impl App {
                         );
                     }
                     2 => {
+                        let top = ui.cursor().min.y;
                         row(ui, lang.t("Claude-Modus", "Claude mode"), lang.t("Zeigt Claude-Funktionen: Start, Status, Kosten, Verlauf", "Shows Claude features: start, status, cost, history"), |ui| {
                             style::toggle(ui, &mut self.settings.claude_mode);
                         });
+                        tutorial::spot_since(ui, Spot::ClaudeMode, top);
                         if self.settings.claude_mode {
                             row(ui, lang.t("Fortsetzen", "Resume"), lang.t("Claude-Sitzungen beim Programmstart fortsetzen (nach „Fortsetzen nach Neustart“ der Sitzung)", "Resume Claude sessions at program start (as set in the session's “Resume after restart”)"), |ui| {
                                 style::toggle(ui, &mut self.settings.claude_resume);
                             });
                             ui.add_space(S2);
+                            let top = ui.cursor().min.y;
                             ui.label(lang.t("Standards für neue Claude-Sitzungen", "Defaults for new Claude sessions"));
                             ui.label(RichText::new(lang.t(
                                 "Gelten für Sitzungen aus dem Dialog „Neue Sitzung“ (Vorauswahl), dem Kontextmenü, Vorlagen und über MCP, wenn nichts angegeben ist. „Standard von Claude Code“ setzt keine Option. bypassPermissions lässt sich nur im Dialog „Neue Sitzung“ für eine einzelne Sitzung wählen. Ohne Permission-Mode starten Agenten-Sitzungen mit „default“.",
@@ -344,13 +361,16 @@ impl App {
                                 // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).
                                 self.settings.last_claude_opts = None;
                             }
+                            tutorial::spot_since(ui, Spot::ClaudeDefaults, top);
                             ui.add_space(S2);
+                            let top = ui.cursor().min.y;
                             row(ui, lang.t("Tagesbudget", "Daily budget"), lang.t("Hinweis, wenn die geschätzten Tageskosten (UTC-Tag, alle Sitzungen) den Betrag in USD überschreiten; 0 = aus", "Notice when estimated daily cost (UTC day, all sessions) exceeds this USD amount; 0 = off"), |ui| {
                                 ui.add(egui::DragValue::new(&mut self.settings.daily_budget).range(0.0..=100000.0).speed(0.5).prefix("$ ").fixed_decimals(2));
                             });
                             row(ui, lang.t("Sitzungsbudget", "Session budget"), lang.t("Hinweis, sobald eine einzelne Sitzung die geschätzten Kosten in USD überschreitet (einmal je Sitzung); 0 = aus", "Notice once a single session exceeds this estimated USD cost; 0 = off"), |ui| {
                                 ui.add(egui::DragValue::new(&mut self.settings.session_budget).range(0.0..=100000.0).speed(0.5).prefix("$ ").fixed_decimals(2));
                             });
+                            tutorial::spot_since(ui, Spot::ClaudeBudget, top);
                             ui.add_space(S2);
                             ui.label(lang.t("Preise für die Kostenschätzung (USD pro Million Token)", "Prices for the cost estimate (USD per million tokens)"));
                             ui.label(RichText::new(lang.t("Nur eine Schätzung auf Basis der lokalen Transkripte. Unbekannte Modelle werden wie Sonnet gerechnet.", "Estimate only, based on local transcripts. Unknown models are priced like Sonnet.")).small().color(style::dim(ui)));
@@ -708,6 +728,7 @@ impl App {
                         }
                         ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – funktioniert offline; kontaktiert GitHub nur, wenn du nach Updates suchst oder die automatische Prüfung einschaltest.", "Terminal hub for Claude Code and many terminals – works offline; only contacts GitHub when you check for updates or switch on the automatic check.")).color(style::dim(ui)));
                         ui.add_space(S2);
+                        let top = ui.cursor().min.y;
                         for (k, v) in [
                             (lang.t("Programm", "Program"), self.exe.display().to_string()),
                             (lang.t("Datenordner", "Data folder"), self.dir.display().to_string()),
@@ -724,6 +745,7 @@ impl App {
                                 ui.label(RichText::new(v).small());
                             });
                         }
+                        tutorial::spot_since(ui, Spot::AboutInfo, top);
                         ui.add_space(S2);
                         ui.horizontal(|ui| {
                             if ui.button(lang.t("Diagnose kopieren", "Copy diagnostics")).clicked() {
@@ -737,6 +759,10 @@ impl App {
                             }
                         });
                         self.update_about_ui(ui); // Abschnitt „Updates“ (update/ui.rs)
+                        // Abschnitt „Tutorial“ (#143); ein Start schließt die Einstellungen über die Vorbereitung des Schritts.
+                        if let Some(cmd) = self.tut_about_ui(ui) {
+                            tut_cmd = Some(cmd);
+                        }
                         if self.show_licenses {
                             ui.add_space(S1);
                             egui::ScrollArea::vertical().max_height(220.0).id_salt("lic").show(ui, |ui| {
@@ -848,6 +874,9 @@ impl App {
             self.capture_key = None;
         }
         self.settings_open = open;
+        if let Some(c) = tut_cmd {
+            self.tut_cmd(ctx, c);
+        }
     }
 
     pub(super) fn editor_ui(&mut self, ctx: &egui::Context) {

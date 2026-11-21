@@ -302,6 +302,10 @@ pub struct Settings {
     /// Unlesbares ergibt je Wert den Standard.
     #[serde(deserialize_with = "crate::editor_svc::settings::EditorSettings::lenient")]
     pub editor: crate::editor_svc::settings::EditorSettings,
+    /// Nach einem Update die Tour „Was ist neu“ von selbst starten (seit 3.0.0, #143; Standard aus: dann nur ein Hinweis
+    /// in der Seitenleiste).
+    #[serde(deserialize_with = "lenient_false")]
+    pub tutorial_whats_new: bool,
 }
 
 /// Liste von Texten tolerant lesen: Einträge mit falschem Typ fallen weg, ein falscher Typ insgesamt ergibt eine leere Liste.
@@ -421,6 +425,7 @@ impl Default for Settings {
             theme_checks_off: Vec::new(),
             chat_prompt_parts: Default::default(),
             editor: Default::default(),
+            tutorial_whats_new: false,
         }
     }
 }

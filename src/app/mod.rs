@@ -78,7 +78,10 @@ mod theme_preview;
 mod titlebar;
 mod toasts;
 mod tpl_lib;
+mod tutorial;
 pub(crate) mod update;
+
+use tutorial::{Spot, TutMark};
 
 /// Vorgabefarbe einer neuen Sitzung/eines neuen Projekts Nummer `i` aus der geltenden Palette des Terminal-Hubs
 /// (läuft im Kreis; bis 2.2 die feste Palette, jetzt `crate::palette::HUB_DEFAULTS` bzw. die gemeinsame).
@@ -467,6 +470,8 @@ enum Action {
     ChatRevoke(u64, chatmod::AllowRule),
     /// Antwort auf die einmalige Frage nach der Stufe des Modells.
     ChatLevel(u64, crate::mcp::McpLevel),
+    /// Tutorial (#143): Tour starten, fortsetzen, „Was ist neu“, Hinweis ausblenden.
+    Tutorial(tutorial::Cmd),
 }
 
 struct NewDialog {
@@ -979,6 +984,8 @@ pub struct App {
     /// Linux/macOS: Eingaben der Master-Passwort-Frage (`secret_ui`, im Speicher überschrieben).
     #[cfg(unix)]
     master_pw: secret_ui::PwForm,
+    /// Interaktives Tutorial (#143): laufende Tour, Fortschritt (`tutorial.json`), Karte beim ersten Start.
+    tut: tutorial::Tut,
 }
 
 fn home_dir() -> String {
@@ -1331,6 +1338,7 @@ impl App {
             models_ui: Default::default(),
             #[cfg(unix)]
             master_pw: Default::default(),
+            tut: Default::default(),
         };
         // `--no-tray`: kein Tray-Symbol; Schließen/Minimieren verhalten sich dann normal (siehe `handle_tray`).
         if !crate::cli::get().no_tray {
@@ -3020,7 +3028,7 @@ impl App {
             .iter()
             .map(|p| (p.id, p.name.clone(), p.color, self.entries.values().filter(|e| e.meta.project == p.id && self.in_win(e)).count()))
             .collect();
-        ui.horizontal_wrapped(|ui| {
+        let bar = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
             for (id, name, c, n) in projects {
                 let col = Color32::from_rgb(c[0], c[1], c[2]);
@@ -3079,6 +3087,7 @@ impl App {
                 actions.push(Action::NewProjectPrompt);
             }
         });
+        bar.response.spot(Spot::ProjectBar);
     }
 
     /// Git-Befehl im Hintergrund ausführen; Ergebnis als Hinweis anzeigen und Ansicht aktualisieren.
@@ -4319,6 +4328,7 @@ impl App {
                 self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, cwd, Some(path)));
             }
             Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, ..) | Action::ChatContinue(id) | Action::ChatRevoke(id, _) | Action::ChatLevel(id, _) => self.chat_action(ctx, id, &a),
+            Action::Tutorial(c) => self.tut_cmd(ctx, c),
         }
     }
 }
@@ -4371,6 +4381,8 @@ impl eframe::App for App {
         }
         #[cfg(feature = "readme-shots")]
         self.dev_shot_mode();
+        // Tutorial (#143): Ziele des vorigen Bilds verwerfen, Esc für die laufende Tour abfangen.
+        self.tut_begin(ctx);
         self.track_focus(ctx);
         for n in self.spawn_notes.take() {
             self.notify_text(n);
@@ -4464,6 +4476,8 @@ impl eframe::App for App {
         self.restore_dialog(ctx);
         self.cleanup_ui(ctx);
         self.update_frame(ctx);
+        // Tutorial (#143) zuletzt: liest die in diesem Bild gemeldeten Ziele und zeichnet über allem.
+        self.tut_frame(ctx, &mut actions);
         for a in actions {
             self.apply(ctx, a);
         }
@@ -4902,7 +4916,16 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
                         PaneBtn::SplitRight => (SIcon::SplitRight, lang.t("Rechts teilen (Strg+Umschalt+D)", "Split right (Ctrl+Shift+D)").into(), Action::Split(id, Dir::Horizontal)),
                         PaneBtn::Link => (SIcon::Link, lang.t("Ticket verknüpfen …", "Link ticket …").into(), Action::LinkTicket(id)),
                     };
-                    if style::icon_btn_small(ui, icon, &tip).clicked() {
+                    let r = style::icon_btn_small(ui, icon, &tip);
+                    // Tutorial (#143): Teilen/Minimieren des fokussierten Bereichs.
+                    if id == cx.focused && !cx.detached {
+                        match b {
+                            PaneBtn::SplitRight => tutorial::spot_rect(ui, Spot::PaneSplit, r.rect),
+                            PaneBtn::Minimize => tutorial::spot_rect(ui, Spot::PaneMinimize, r.rect),
+                            _ => {}
+                        }
+                    }
+                    if r.clicked() {
                         cx.actions.push(action);
                     }
                 }

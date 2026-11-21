@@ -37,6 +37,9 @@ readme-shots = []
 # Nur für den lokalen Ende-zu-Ende-Test des Selbst-Updates: Release-Feed aus einem Ordner (PANELDECK_UPDATE_TEST_FEED, siehe
 # tools/update-feed.sh). Nie im Release (tools/release.sh prüft das).
 update-test-feed = []
+# Nur für den Smoke-Test des Tutorials (#143, tools/smoke-mcp.ps1 -TutorialExe): Zustand und Befehle über Dateien im Ordner
+# PANELDECK_TUTORIAL_TEST (src/app/tutorial/hook.rs). Nie im Release (tools/release.sh prüft das).
+tutorial-test = []
 
 [build-dependencies]
 embed-resource = "3"
