@@ -83,6 +83,7 @@ pub mod secret;
 pub mod taskbar;
 #[cfg(unix)]
 pub mod tls;
+pub mod trash;
 pub mod tray;
 #[cfg(unix)]
 pub mod unix_proc;

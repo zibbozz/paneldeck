@@ -3281,6 +3281,7 @@ impl App {
             None => chatmod::tools::ToolPolicy::new(crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Off, ..crate::llm::config::LlmModel::named(&meta.model) }, None, self.plan.expert),
         }
         .with_origins(origins)
+        .with_agent(self.agent_env(id))
     }
 
     /// Muss der Chat vor dem Senden einmal nach der Stufe seines Modells fragen? Ja, wenn das Modell Werkzeuge nutzen
@@ -3334,6 +3335,7 @@ impl App {
             expert: crate::mcp::expert_mode(),
             token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
             prompt_parts: self.settings.chat_prompt_parts,
+            agent: self.agent_env(id),
         }
     }
 
@@ -5939,6 +5941,11 @@ impl chatmod::driver::ChatToolHost for ChatHost<'_> {
         self.app.chat_policy(id)
     }
     fn execute(&mut self, chat: u64, call: &chatmod::store::ToolCall) -> std::sync::mpsc::Receiver<chatmod::tools::ToolResult> {
+        // Agenten-Werkzeuge (#338; `run_command` nur ohne `session`) laufen im Hub selbst, nicht über den MCP-Ausführer.
+        if chatmod::agent::is_local(call) {
+            let max = self.app.entries.get(&chat).and_then(|e| e.chat.as_ref()).map_or(0, |c| c.result_cap_for(&call.name));
+            return self.app.agent_call(self.ctx, chat, call, max);
+        }
         self.app.mcp_call_chat(self.ctx, chat, &call.name, &call.arguments)
     }
     fn request(&mut self, id: u64) {

@@ -134,6 +134,39 @@ Switching off the **safety rules** shows a warning: the model is no longer told 
 - **Preview and token count:** below the switches a preview shows the prompt for a chosen model, as a chat would get it – the full version or the compact version for small contexts, with the context length. Below it the token count of the system prompt plus the tool schemas, updated after every change: with the server's tokenizer where there is one (llama.cpp server, vLLM: `POST /tokenize`), otherwise Paneldeck's estimate marked with `~` – the same estimate that picks the automatic context length and the version. Switched-off parts make the prompt smaller and can let the full version fit where otherwise the compact one would be used.
 - Stored in `settings.json` as `chat_prompt_parts` (global, only written when something is off) and per model as `prompt_parts` / `prompt_family` in `llm_servers[].models[]`; missing fields mean "on" / "automatic".
 
+<!-- Section "Agent tools" (#338, 2.7.0) – kept self-contained. -->
+## Agent tools
+Besides the Paneldeck tools, chat models get **agent tools** for working in the chat's **project folder** (the folder the chat was started in). They exist **only in Paneldeck's own chats** – external MCP clients do not get them. Every enabled tool is offered to every model according to its level; single tools can be unchecked per model (*Settings → Models*, list *Agent tools*). Without a project folder, the file, search and git tools are not offered.
+
+| Tool | Level | Approval | What it does |
+|---|---|---|---|
+| `read_file` | Read | only for sensitive files | Reads a text file with line numbers: 500 lines by default (`offset`, `limit` up to 2000), at most 32 KB per call, with a hint such as "Lines 1–500 of 2310; continue with offset=501". Binary files are refused. |
+| `list_dir` | Read | – | Folders (ending in `/`) and files with sizes; entries ignored by `.gitignore` are marked. |
+| `glob` | Read | – | Finds files by pattern (`src/**/*.rs`, `*.toml`; without `/` the pattern matches file names in all folders). Respects `.gitignore` (`include_ignored` for the rest). At most 500 paths. |
+| `grep` | Read | – | Built-in regular expression search (no ripgrep needed): `content` (`path:line: text`, default), `files_with_matches` or `count`; `glob`, `case_insensitive`, `context` (0–5). Respects `.gitignore`, skips binary files, files over 4 MB and sensitive files. At most 200 results with a note about more. |
+| `git_status`, `git_diff`, `git_log` | Read | – | Read-only: branch, ahead/behind and changed files; diff of the work tree, the index (`staged`) or against a `commit`; recent commits. Diffs of sensitive files are left out. Commit, push and checkout only through `run_command`. |
+| `update_todos` | Read | – | The model's plan for multi-step work, shown at the top of the chat (**To-dos 2/5 · ▸ current item**). |
+| `web_fetch` | Read | yes | Fetches a public `https` page as text/Markdown (at most 2 MB download, 16 KB to the model). Can be switched off. |
+| `web_search` | Read | yes | Searches with **your own** search service: a SearXNG instance or your own Brave or Tavily API key. **Off** until you set one up. |
+| `edit_file` | Control | yes, with diff | Exact search/replace: `old_string` must occur exactly once (or `replace_all`). Trailing spaces and CRLF/LF differences are tolerated; the file keeps its line endings and BOM. |
+| `write_file` | Control | yes, with diff | Creates or overwrites a whole file (folders are created). |
+| `move_file` | Control | yes | Moves or renames inside the project; the destination must not exist. |
+| `delete_file` | Control | yes | Moves a file or folder **to the recycle bin** – never deleted permanently. |
+| `run_command` | Control | yes | Runs one command in the **chat's own terminal**: a visible terminal session in the project folder (a child of the chat in the sidebar), created at the first command and reused afterwards. Timeout 120 s by default (*Settings → Models → Agent tools*, up to 600 s). With `session` the command runs in that terminal instead, as before. |
+
+**Approvals.** Write, move, delete, command and web calls wait for your approval like the other write tools (*Ask before write actions*). For `edit_file` and `write_file` the approval line shows a **diff preview** (file, +/− lines, changed lines in colour) above the full parameters; when the call would fail anyway (e.g. `old_string` not found), it says so instead. **Sensitive files** (e.g. `.env`, `*.pem`, `*.key`, `id_rsa*`, `credentials.*`, `secrets.*`) are only read after approval – even when *Ask before write actions* is off – and *Always for this chat* is never offered for them. *Always for this chat* applies per tool for the whole chat; for commands in the chat's terminal it applies to commands that start with the same words (e.g. `cargo test`), never to commands with `;`, `&`, `|`, redirections or `$( … )`, and never to a bare interpreter or shell (`python`, `pwsh`, `bash` …).
+
+**Path rules.** Only paths inside the project folder are allowed. Paths are resolved (`..`, links, junctions); the real target must be inside the folder, and it is checked again when the file is opened. Network (UNC) and device paths, alternate data streams (`file:stream`), reserved names (`CON`, `NUL` …) and `~` are refused. Off-limits even with approval: Paneldeck's data folder, the secret folders of your user profile (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.claude.json`, `~/.aws`, `AppData` …) and writing inside `.git`.
+
+**Web rules.** `web_fetch` reaches only public addresses over `https` (every resolved address must be public; private, local and carrier-grade NAT addresses are blocked), no user names or passwords in the address, no cookies, no automatic sign-in, no proxy, at most 5 redirects (each checked again). Page content is marked as untrusted. Your SearXNG address may also be on this computer or in your network – you entered it yourself.
+
+**Settings → Models → Agent tools:** command timeout, *Fetch web pages* on/off, *Web search* (Off / SearXNG with its address / Brave / Tavily with an API key that is stored encrypted like server keys), and the list of sensitive file patterns (one per line; without `/` a pattern matches file names, with `/` paths).
+
+**Helpful errors.** Every failure names the reason and shows the expected format with a short example, often with a suggestion ("Did you mean src/main.rs?", "old_string occurs 3 times (lines 4, 9, 12) …"). Small deviations (a number as text, a limit above the maximum) are corrected and noted in the result under `corrected`.
+
+The tool names are part of the history (`read_chat`). The to-do list is stored in the chat's history file (`todos`), permanent approvals of agent tools in `always_allow` (without `session`; for commands with `prefix`) – see [Data folder](data-and-backups.md#chat-histories).
+<!-- End of section "Agent tools". -->
+
 ## Allowed addresses and security
 Paneldeck only connects to **this computer and private networks**:
 

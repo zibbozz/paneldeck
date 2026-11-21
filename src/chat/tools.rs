@@ -6,6 +6,7 @@
 //! Schutzregeln des Hubs (nie die eigene Sitzung, keine Administrator-Profile, nur eigene Kinder schließen …) gelten
 //! unverändert, weil derselbe Ausführer läuft.
 
+use super::agent::{self, AgentEnv};
 use super::store::{AllowRule, ToolCall, ToolStatus};
 use crate::llm::config::LlmModel;
 use crate::llm::ToolSpec;
@@ -15,6 +16,11 @@ use serde_json::{json, Value};
 /// Größte Ergebnis-Nachricht an das Modell (Bytes); Größeres wird gekürzt und als gekürzt gekennzeichnet. Wird der
 /// Kontext knapp, gilt eine kleinere Grenze (`ChatState::result_cap`).
 pub const MAX_RESULT_BYTES: usize = 16 * 1024;
+
+/// Größte Ergebnis-Nachricht je Werkzeug: `read_file` darf bis 32 KB liefern (#338), alle anderen [`MAX_RESULT_BYTES`].
+pub fn max_result_bytes(tool: &str) -> usize {
+    if tool == "read_file" { agent::files::READ_MAX_BYTES } else { MAX_RESULT_BYTES }
+}
 
 /// Werkzeuge der Stufe „Steuern“, die trotzdem ohne Nachfrage laufen: Sie ändern weder Terminalinhalt noch Daten
 /// (`wait_for_status` wartet nur, `focus_session` zeigt nur eine Sitzung im Fenster). Alle anderen Werkzeuge ab
@@ -51,6 +57,8 @@ pub struct ToolPolicy {
     /// laufende Runde ausgelöst hat (`ChatState::origin_sessions`). Schreibende Aufrufe dorthin sind verboten, schon vor
     /// einer Freigabe-Frage. Leer = vom Nutzer angelegt und ausgelöst.
     pub origin_sessions: Vec<u64>,
+    /// Projektordner und Einstellungen der Agenten-Werkzeuge (#338).
+    pub agent: AgentEnv,
 }
 
 impl ToolPolicy {
@@ -60,13 +68,30 @@ impl ToolPolicy {
         if !cfg.level_chosen {
             cfg.level = McpLevel::Off;
         }
-        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new() }
+        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default() }
     }
 
     /// Dieselbe Momentaufnahme mit den Sitzungen der auslösenden Agenten-Kette.
     pub fn with_origins(mut self, origins: Vec<u64>) -> Self {
         self.origin_sessions = origins;
         self
+    }
+
+    /// Dieselbe Momentaufnahme mit Projektordner und Einstellungen der Agenten-Werkzeuge.
+    pub fn with_agent(mut self, env: AgentEnv) -> Self {
+        self.agent = env;
+        self
+    }
+
+    /// Darf das Modell dieses Agenten-Werkzeug nutzen (Stufe, einzeln gesperrt)? Ob es angeboten wird, prüft
+    /// zusätzlich `agent::offered`.
+    fn agent_allowed(&self, d: &agent::AgentDef) -> bool {
+        d.level <= self.cfg.level && !self.cfg.disabled_tools.iter().any(|t| t == d.name)
+    }
+
+    /// Namen aller Werkzeuge, die das Modell gerade hat (Paneldeck- und Agenten-Werkzeuge).
+    pub fn tool_names(&self) -> Vec<String> {
+        self.specs().into_iter().map(|s| s.name).collect()
     }
 
     /// Bekommt das Modell überhaupt Werkzeuge?
@@ -84,17 +109,28 @@ impl ToolPolicy {
     }
 
     /// Werkzeuge für die Anfrage: alle, die Stufe und Modus erlauben und die nicht einzeln gesperrt sind.
+    /// Dazu die Agenten-Werkzeuge (#338), die Stufe, Projektordner und Einstellungen erlauben; `run_command` in der
+    /// Fassung des Chats (ohne `session` im Terminal des Chats) statt der des MCP-Servers.
     pub fn specs(&self) -> Vec<ToolSpec> {
         if !self.enabled() {
             return Vec::new();
         }
-        mcp::tools().into_iter().filter(|d| self.allowed(d)).map(|d| ToolSpec { name: d.name.to_string(), description: compact_description(&d), parameters: compact_schema(d.schema) }).collect()
+        let mut v: Vec<ToolSpec> = mcp::tools()
+            .into_iter()
+            .filter(|d| self.allowed(d) && !agent::is_agent_tool(d.name))
+            .map(|d| ToolSpec { name: d.name.to_string(), description: compact_description(&d), parameters: compact_schema(d.schema) })
+            .collect();
+        v.extend(agent::defs().into_iter().filter(|d| self.agent_allowed(d) && agent::offered(d, &self.agent).is_ok()).map(|d| ToolSpec { name: d.name.to_string(), description: d.description.to_string(), parameters: d.schema }));
+        v
     }
 
     /// Darf der Aufruf jetzt laufen? `Ok(freigabepflichtig)` = Stufe „Steuern“ und nicht in [`NO_APPROVAL`]; sonst die
     /// Ergebnis-Nachricht für das Modell (Status, Inhalt).
     /// Geprüft wird bei der Ausführung, nicht beim Senden: die Einstellungen können sich dazwischen ändern.
     pub fn check(&self, call: &ToolCall) -> Result<bool, (ToolStatus, String)> {
+        if agent::is_local(call) {
+            return self.check_agent(call);
+        }
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
             return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
@@ -125,9 +161,32 @@ impl ToolPolicy {
         Ok(def.level >= McpLevel::Control && !approval_free(def.name, &call.arguments))
     }
 
+    /// [`ToolPolicy::check`] für ein Agenten-Werkzeug (#338): Stufe, Sperre, angeboten (Projektordner, Einstellungen),
+    /// Argumente; dann `Ok(fragen)` nach seiner Freigaberegel. Die Kette der auslösenden Agenten gilt auch hier (kein
+    /// Start der MCP-Brücke über `run_command`).
+    fn check_agent(&self, call: &ToolCall) -> Result<bool, (ToolStatus, String)> {
+        let Some(def) = agent::def(&call.name) else {
+            return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
+        };
+        if !self.enabled() || !self.agent_allowed(&def) {
+            return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
+        }
+        if let Err(why) = agent::offered(&def, &self.agent) {
+            return Err((ToolStatus::Error, error_json("not_available", &why)));
+        }
+        if let Err(msg) = super::repair::validate(def.name, &def.schema, &call.arguments) {
+            return Err((ToolStatus::Error, error_json("bad_args", &msg)));
+        }
+        if let Some(msg) = spawn_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
+            return Err((ToolStatus::Denied, error_json("forbidden", msg)));
+        }
+        Ok(agent::asks(&def, call, &self.agent))
+    }
+
     /// Meldung für einen Aufruf ohne oder mit unbekanntem Werkzeugnamen: nennt die Werkzeuge, die das Modell hat (#340).
     fn unknown_tool_message(&self, name: &str) -> String {
-        let names: Vec<&str> = if self.enabled() { mcp::tools().iter().filter(|d| self.allowed(d)).map(|d| d.name).collect() } else { Vec::new() };
+        let all = if self.enabled() { self.tool_names() } else { Vec::new() };
+        let names: Vec<&str> = all.iter().map(String::as_str).collect();
         let head = if name.trim().is_empty() { "This tool call has no tool name.".to_string() } else { format!("There is no tool named “{}”.", mcp::short(name, 80)) };
         if names.is_empty() {
             return format!("{head} Use only the tools you were given.");
@@ -137,8 +196,9 @@ impl ToolPolicy {
 
     /// Muss der Nutzer diesen Aufruf freigeben? `ask` aus [`ToolPolicy::check`]; `always` = dauerhafte Freigaben des
     /// Chats (passen nur bei gleichem Werkzeug und gleicher Ziel-Sitzung).
+    /// Sensible Dateien (`read_file`, #338) fragen immer, auch wenn „Vor Schreib-Aktionen nachfragen“ aus ist.
     pub fn needs_approval(&self, ask: bool, call: &ToolCall, always: &[AllowRule]) -> bool {
-        ask && self.cfg.ask_write && !always.iter().any(|r| r.matches(call))
+        ask && (self.cfg.ask_write || agent::must_ask(call, &self.agent)) && !always.iter().any(|r| r.matches(call))
     }
 }
 
@@ -554,7 +614,8 @@ mod tests {
     #[test]
     fn compact_specs_keep_names_parameters_and_safety_notes() {
         let p = policy(McpLevel::Control, &[], true);
-        let specs = p.specs();
+        // Nur die Paneldeck-Werkzeuge (die Agenten-Werkzeuge haben eigene, kurze Beschreibungen, #338).
+        let specs: Vec<ToolSpec> = p.specs().into_iter().filter(|s| !agent::is_agent_tool(&s.name)).collect();
         let full: Vec<mcp::ToolDef> = mcp::tools().into_iter().filter(|d| specs.iter().any(|s| s.name == d.name)).collect();
         for (s, d) in specs.iter().zip(full.iter()) {
             assert_eq!(s.name, d.name);
@@ -714,7 +775,7 @@ mod tests {
         // Freigabe
         let st = |s: u64| call("send_text", json!({"session": s, "text": "x"}));
         assert!(c.needs_approval(true, &st(4), &[]));
-        let rules = [AllowRule { tool: "send_text".into(), session: Some(4) }];
+        let rules = [AllowRule { tool: "send_text".into(), session: Some(4), prefix: None }];
         assert!(!c.needs_approval(true, &st(4), &rules), "Werkzeug und Ziel passen");
         assert!(c.needs_approval(true, &st(5), &rules), "andere Ziel-Sitzung: wieder fragen");
         assert!(!c.needs_approval(false, &call("list_sessions", json!({})), &[]));
@@ -867,6 +928,73 @@ mod tests {
         // Schreibendes Werkzeug mit falschen Argumenten: Fehler vor der Freigabe-Frage (nicht Ok(true))
         let c = policy(McpLevel::Control, &[], false);
         assert!(c.check(&call("send_text", json!({"session": 1}))).unwrap_err().1.contains("missing required field"));
+    }
+
+    #[test]
+    fn agent_tools_follow_level_folder_and_their_approval_rules() {
+        let (d, env) = agent::paths::tests::tmp_root("policy");
+        let with = |level: McpLevel, disabled: &[&str]| policy(level, disabled, false).with_agent(env.clone());
+        // Stufe Lesen: lesende Agenten-Werkzeuge, keine schreibenden; run_command nur ab Steuern (und nur einmal)
+        let read = names(&with(McpLevel::Read, &[]));
+        for t in ["read_file", "list_dir", "glob", "grep", "git_status", "git_diff", "git_log", "update_todos", "web_fetch"] {
+            assert!(read.contains(&t.to_string()), "{t}");
+        }
+        assert!(!read.contains(&"web_search".to_string()), "ohne Suchdienst nicht angeboten");
+        assert!(!read.iter().any(|n| ["edit_file", "write_file", "move_file", "delete_file", "run_command"].contains(&n.as_str())));
+        let control = names(&with(McpLevel::Control, &[]));
+        assert_eq!(control.iter().filter(|n| *n == "run_command").count(), 1);
+        let rc = with(McpLevel::Control, &[]).specs().into_iter().find(|s| s.name == "run_command").unwrap();
+        assert_eq!(rc.parameters["required"], json!(["command"]), "Fassung des Chats: session ist optional");
+        // Ohne Projektordner: keine Datei-Werkzeuge, To-dos und Befehle schon
+        let none = names(&policy(McpLevel::Control, &[], false));
+        assert!(!none.contains(&"read_file".to_string()) && none.contains(&"update_todos".to_string()) && none.contains(&"run_command".to_string()));
+        assert!(names(&with(McpLevel::Control, &["grep"])).iter().all(|n| n != "grep"), "einzeln abwählbar");
+        // Prüfung und Freigaben
+        let c = with(McpLevel::Control, &[]);
+        assert_eq!(c.check(&call("read_file", json!({"path": "src/main.rs"}))), Ok(false), "Lesen frei");
+        assert_eq!(c.check(&call("read_file", json!({"path": ".env"}))), Ok(true), "sensible Datei: Freigabe");
+        assert_eq!(c.check(&call("grep", json!({"pattern": "x"}))), Ok(false));
+        assert_eq!(c.check(&call("update_todos", json!({"todos": []}))), Ok(false));
+        for (t, a) in [("edit_file", json!({"path": "a", "old_string": "x", "new_string": "y"})), ("write_file", json!({"path": "a", "content": ""})), ("move_file", json!({"source": "a", "destination": "b"})), ("delete_file", json!({"path": "a"})), ("run_command", json!({"command": "cargo test"})), ("web_fetch", json!({"url": "https://x.org"}))] {
+            assert_eq!(c.check(&call(t, a)), Ok(true), "{t}");
+        }
+        assert!(c.check(&call("edit_file", json!({"path": "a"}))).unwrap_err().1.contains("missing required field"));
+        assert!(c.check(&call("web_search", json!({"query": "x"}))).unwrap_err().1.contains("not_available"));
+        assert!(with(McpLevel::Read, &[]).check(&call("write_file", json!({"path": "a", "content": ""}))).unwrap_err().1.contains("forbidden"));
+        assert!(policy(McpLevel::Control, &[], false).check(&call("read_file", json!({"path": "a"}))).unwrap_err().1.contains("project folder"));
+        // sensible Dateien fragen auch ohne „Vor Schreib-Aktionen nachfragen“, schreibende dann nicht
+        let mut quiet = c.clone();
+        quiet.cfg.ask_write = false;
+        let env_call = call("read_file", json!({"path": ".env"}));
+        assert!(quiet.needs_approval(true, &env_call, &[]));
+        assert!(quiet.needs_approval(true, &env_call, &[AllowRule { tool: "read_file".into(), session: None, prefix: None }]), "keine Regel für sensible Dateien");
+        assert!(!quiet.needs_approval(true, &call("edit_file", json!({"path": "a"})), &[]));
+        // dauerhafte Freigabe je Werkzeug, Befehle je Präfix
+        let edit = call("edit_file", json!({"path": "a", "old_string": "x", "new_string": "y"}));
+        assert!(!c.needs_approval(true, &edit, &[AllowRule::for_call(&edit)]));
+        let rule = AllowRule::for_call(&call("run_command", json!({"command": "cargo test"})));
+        assert!(!c.needs_approval(true, &call("run_command", json!({"command": "cargo test --release"})), std::slice::from_ref(&rule)));
+        assert!(c.needs_approval(true, &call("run_command", json!({"command": "cargo build"})), &[rule]));
+        // Kette eines Agenten: keine MCP-Brücke über das Terminal des Chats
+        let chained = with(McpLevel::Control, &[]).with_origins(vec![3]);
+        let (st, body) = chained.check(&call("run_command", json!({"command": "paneldeck mcp"}))).unwrap_err();
+        assert!(st == ToolStatus::Denied && body.contains(SPAWN_BRIDGE_MESSAGE), "{body}");
+        // unbekanntes Werkzeug: die Liste nennt auch die Agenten-Werkzeuge
+        assert!(c.check(&call("read_files", json!({}))).unwrap_err().1.contains("read_file"));
+        assert_eq!(max_result_bytes("read_file"), 32 * 1024);
+        assert_eq!(max_result_bytes("grep"), MAX_RESULT_BYTES);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn agent_tool_specs_fit_into_the_default_context() {
+        let (d, env) = agent::paths::tests::tmp_root("specsize");
+        let size = |p: &ToolPolicy| crate::llm::tokens::estimate_tokens(&serde_json::to_string(&p.specs()).unwrap());
+        let read = size(&policy(McpLevel::Read, &[], false).with_agent(env.clone()));
+        let all = size(&policy(McpLevel::Control, &[], true).with_agent(env));
+        eprintln!("tool spec tokens with agent tools: read {read}, control+expert {all}");
+        assert!(read < crate::llm::config::DEFAULT_CONTEXT as usize / 2, "{read}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -2,7 +2,9 @@
 //! Neu erzeugen und Bearbeiten meldet [`chat_body`] zurück; die App führt sie aus (`Action::Chat*`).
 
 use crate::afford::Clickable;
+use crate::chat::agent::files::Preview;
 use crate::chat::session::{CallState, UiCache};
+use crate::chat::store::{ChatTodo, TodoStatus};
 use crate::chat::{AllowRule, ChatMsg, ChatState, Decision, Role, ToolStatus};
 use crate::mcp::McpLevel;
 use crate::markdown::{self, RenderOpts};
@@ -53,12 +55,16 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     let input_h = lines as f32 * row_h + 12.0;
     let edit_h = if chat.editing { 22.0 } else { 0.0 };
     let bottom_h = input_h + 2.0 * PAD + edit_h;
-    // Kopfzeile: immer da (Füllstand des Kontexts, #339), links ggf. die dauerhaften Freigaben.
+    // Kopfzeile: immer da (Füllstand des Kontexts, #339), links ggf. die To-dos des Modells (#338) und die dauerhaften
+    // Freigaben.
     let head_rect = Rect::from_min_max(body.min, Pos2::new(body.max.x, body.min.y + HEAD_H));
     let list_rect = Rect::from_min_max(Pos2::new(body.min.x, head_rect.max.y), Pos2::new(body.max.x, (body.max.y - bottom_h).max(head_rect.max.y)));
     let bar_rect = Rect::from_min_max(Pos2::new(body.min.x, list_rect.max.y), body.max);
     ui.scope_builder(UiBuilder::new().max_rect(head_rect.shrink2(Vec2::new(PAD, 2.0))), |ui| {
         ui.horizontal_centered(|ui| {
+            if !chat.file.todos.is_empty() {
+                todos_menu(ui, session, &chat.file.todos, lang);
+            }
             if !chat.file.always_allow.is_empty() {
                 approvals_menu(ui, session, &chat.file.always_allow, lang, &mut out);
             }
@@ -112,6 +118,8 @@ struct RowCx<'a> {
     pending: std::collections::HashMap<String, CallState>,
     /// Ziel des wartenden Aufrufs (`session 4 "build"`).
     target: Option<String>,
+    /// Diff-Vorschau des wartenden Aufrufs (Kennung, Vorschau).
+    preview: Option<(String, Preview)>,
     /// Text unter einer noch leeren Antwort („…“, „Denkt nach …“, „Warte auf das Modell … 12 s“).
     waiting: String,
 }
@@ -143,6 +151,11 @@ pub(super) fn waiting_text(thinking: bool, waited: Option<std::time::Duration>, 
     }
 }
 
+/// Wartet ein Aufruf mit dieser Kennung auf Freigabe?
+fn pending_has(calls: &[crate::chat::session::PendingCall], id: &str) -> bool {
+    calls.iter().any(|p| p.call.id == id && p.state == CallState::Approval)
+}
+
 fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: Lang, out: &mut ChatOut) {
     let streaming = chat.busy();
     let waiting = waiting_text(chat.thinking, chat.turn_started.filter(|_| chat.streaming()).map(|t| t.elapsed()), lang);
@@ -159,6 +172,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let paused = chat.paused.then(|| (chat.steps, chat.pause_note.clone(), chat.loop_stop));
     let level_question = chat.level_question.is_some();
     let target = chat.approval_target.clone();
+    let preview = chat.approval_preview.clone().filter(|(id, _)| pending_has(&chat.calls, id));
     let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
@@ -196,6 +210,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         waiting,
         pending,
         target,
+        preview,
     };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
     let jump = std::mem::take(follow);
@@ -312,7 +327,7 @@ fn row(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut UiCache
         }
         // Ergebnisse mit passendem Aufruf stehen in dessen Zeile.
         Role::Tool if cache.matched.contains(&i) => {}
-        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, None, None, lang, out),
+        Role::Tool => tool_line(ui, Id::new(("chat_tool_r", rc.session, i)), m.tool_name.as_deref().unwrap_or("?"), None, Some(m), None, (None, None), None, lang, out),
         Role::System => {
             egui::CollapsingHeader::new(RichText::new(lang.t("Systemprompt", "System prompt")).small().color(style::dim(ui))).id_salt(("chat_sys", rc.session, i)).show(ui, |ui| {
                 ui.label(RichText::new(&m.content).small().monospace());
@@ -392,8 +407,9 @@ fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut U
         let result = cache.tool_results.get(&c.id).and_then(|j| msgs.get(*j));
         let state = if result.is_some() { None } else { rc.pending.get(&c.id).copied() };
         let target = if state == Some(CallState::Approval) { rc.target.as_deref() } else { None };
+        let preview = rc.preview.as_ref().filter(|(id, _)| state == Some(CallState::Approval) && *id == c.id).map(|(_, p)| p);
         let note = m.repairs.iter().find(|r| r.id == c.id).and_then(|r| repair_note(r, lang));
-        tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some((c.id.as_str(), &c.arguments)), result, state, target, note.as_deref(), lang, out);
+        tool_line(ui, Id::new(("chat_tool", session, i, k)), &c.name, Some((c.id.as_str(), &c.arguments)), result, state, (target, preview), note.as_deref(), lang, out);
     }
 }
 
@@ -424,8 +440,10 @@ fn tool_mark(result: Option<&ChatMsg>, state: Option<CallState>, lang: Lang, dim
 /// Eine eingeklappte Zeile je Werkzeugaufruf (`▸ name ✓`), aufgeklappt Parameter und Ergebnis (als JSON eingerückt,
 /// gekürzt). Wartet der Aufruf auf Freigabe, stehen darunter Kurzfassung und die Knöpfe Erlauben / Immer / Ablehnen.
 /// `note`: dezenter Hinweis unter der Zeile, wenn Paneldeck den Aufruf repariert hat ([`repair_note`]).
+/// `pending` = (Ziel, Diff-Vorschau) des wartenden Aufrufs.
 #[allow(clippy::too_many_arguments)]
-fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::Value)>, result: Option<&ChatMsg>, state: Option<CallState>, target: Option<&str>, note: Option<&str>, lang: Lang, out: &mut ChatOut) {
+fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::Value)>, result: Option<&ChatMsg>, state: Option<CallState>, pending: (Option<&str>, Option<&Preview>), note: Option<&str>, lang: Lang, out: &mut ChatOut) {
+    let (target, preview) = pending;
     let args = call.map(|c| c.1);
     let mark = tool_mark(result, state, lang, style::dim(ui));
     let mut job = egui::text::LayoutJob::default();
@@ -457,22 +475,91 @@ fn tool_line(ui: &mut Ui, id: Id, name: &str, call: Option<(&str, &serde_json::V
         ui.label(RichText::new(n).small().color(crate::style::ui().text_dim));
     }
     if let (Some(CallState::Approval), Some((call_id, args))) = (state, call) {
-        approval(ui, id, call_id, name, args, target, lang, out);
+        approval(ui, id, call_id, name, args, target, preview, lang, out);
     }
+}
+
+/// Zeilen der Diff-Vorschau, die ohne Scrollen sichtbar sind.
+const DIFF_ROWS: usize = 16;
+
+/// Diff-Vorschau von `edit_file`/`write_file` in der Freigabe-Zeile (#338): Datei, +/−, farbige Zeilen; scheitert der
+/// Aufruf absehbar, steht stattdessen der Grund da.
+fn diff_preview(ui: &mut Ui, id: Id, p: &Preview, lang: Lang) {
+    use crate::chat::agent::diff::Line;
+    let t = crate::style::ui();
+    if let Some(e) = &p.error {
+        ui.label(RichText::new(format!("{} {e}", lang.t("Dieser Aufruf wird so scheitern:", "This call will fail as it is:"))).small().color(t.warning));
+        return;
+    }
+    let Some(d) = &p.diff else { return };
+    let mut head = egui::text::LayoutJob::default();
+    let small = FontId::proportional(12.0);
+    head.append(&p.path, 0.0, egui::TextFormat { font_id: FontId::monospace(12.0), color: ui.visuals().text_color(), ..Default::default() });
+    if p.new_file {
+        head.append(lang.t("(neue Datei)", "(new file)"), 6.0, egui::TextFormat { font_id: small.clone(), color: style::dim(ui), ..Default::default() });
+    }
+    head.append(&format!("+{}", d.added), 8.0, egui::TextFormat { font_id: small.clone(), color: t.success, ..Default::default() });
+    head.append(&format!("−{}", d.removed), 6.0, egui::TextFormat { font_id: small, color: error_col(), ..Default::default() });
+    ui.label(head);
+    if p.tolerant {
+        ui.label(RichText::new(lang.t("Gefunden mit Toleranz für Leerzeichen am Zeilenende und Zeilenenden.", "Matched with tolerance for trailing spaces and line endings.")).small().color(style::dim(ui)));
+    }
+    let font = FontId::monospace(12.0);
+    let row_h = ui.fonts_mut(|f| f.row_height(&font));
+    egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(6)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        egui::ScrollArea::vertical().id_salt(id.with("approval_diff")).max_height(row_h * DIFF_ROWS as f32 + 2.0).auto_shrink([false, true]).show(ui, |ui| {
+            let mut job = egui::text::LayoutJob::default();
+            let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+            let (add, del, dim) = (t.success, error_col(), style::dim(ui));
+            for l in &d.lines {
+                let (text, col) = match l {
+                    Line::Same(n, s) => (format!("{n:>5}   {s}\n"), dim),
+                    Line::Add(n, s) => (format!("{n:>5} + {s}\n"), add),
+                    Line::Del(n, s) => (format!("{n:>5} − {s}\n"), del),
+                    Line::Gap(n) => (if lang == Lang::De { format!("      ⋯ {n} unveränderte Zeilen\n") } else { format!("      ⋯ {n} unchanged lines\n") }, dim),
+                };
+                job.append(&text, 0.0, fmt(col));
+            }
+            if d.truncated {
+                job.append(lang.t("      ⋯ (Vorschau gekürzt – die vollständigen Parameter stehen darunter)\n", "      ⋯ (preview cut – the full parameters are below)\n"), 0.0, fmt(t.warning));
+            }
+            if d.lines.is_empty() {
+                job.append(lang.t("(keine Änderung am Inhalt)", "(no change to the content)"), 0.0, fmt(dim));
+            }
+            job.wrap.max_width = ui.available_width();
+            ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Wrap));
+        });
+    });
 }
 
 /// Freigabe-Zeile eines schreibenden Aufrufs. Enter gilt nur, wenn ein Knopf hier den Fokus hat (Tab), nie aus der
 /// Eingabe heraus – so gibt niemand versehentlich frei, während er tippt.
-fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::Value, target: Option<&str>, lang: Lang, out: &mut ChatOut) {
+#[allow(clippy::too_many_arguments)]
+fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::Value, target: Option<&str>, preview: Option<&Preview>, lang: Lang, out: &mut ChatOut) {
     let warn = crate::style::ui().warning;
+    let call = crate::chat::store::ToolCall { id: call_id.to_string(), name: name.to_string(), arguments: args.clone() };
+    let local = crate::chat::agent::is_local(&call);
     egui::Frame::new().fill(warn.gamma_multiply(0.14)).stroke(Stroke::new(1.0_f32, warn.gamma_multiply(0.6))).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        ui.label(RichText::new(lang.t("Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:", "The model wants to use a tool with write access:")).small());
+        let what = match name {
+            _ if !local => lang.t("Das Modell möchte ein Werkzeug mit Schreibzugriff nutzen:", "The model wants to use a tool with write access:"),
+            "read_file" => lang.t("Das Modell möchte eine sensible Datei lesen (z. B. mit Passwörtern oder Schlüsseln):", "The model wants to read a sensitive file (e.g. with passwords or keys):"),
+            "web_fetch" | "web_search" => lang.t("Das Modell möchte auf das Internet zugreifen:", "The model wants to access the internet:"),
+            "run_command" => lang.t("Das Modell möchte einen Befehl im Terminal des Chats ausführen:", "The model wants to run a command in the chat's terminal:"),
+            "delete_file" => lang.t("Das Modell möchte etwas in den Papierkorb legen:", "The model wants to move something to the recycle bin:"),
+            _ => lang.t("Das Modell möchte Dateien im Projektordner ändern:", "The model wants to change files in the project folder:"),
+        };
+        ui.label(RichText::new(what).small());
         let head = match target {
             Some(t) => format!("{name} → {t}"),
             None => name.to_string(),
         };
         ui.label(RichText::new(head).monospace().strong().size(12.5));
+        if let Some(p) = preview {
+            diff_preview(ui, id, p, lang);
+            ui.label(RichText::new(lang.t("Parameter", "Parameters")).small().color(style::dim(ui)));
+        }
         // Alle Parameter vollständig (scrollbar), damit kein gefährliches Ende verborgen bleibt.
         let text = serde_json::to_string_pretty(args).unwrap_or_default();
         let font = FontId::monospace(12.0);
@@ -493,10 +580,30 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
         ui.horizontal_wrapped(|ui| {
             let allow = ui.add(egui::Button::new(RichText::new(lang.t("Erlauben", "Allow")).strong()).fill(crate::style::ui().chat_send));
             // „Immer“ nur mit Ziel-Sitzung (Werkzeug + Sitzung); Tickets, Todos, create_session … fragen jedes Mal.
-            let call = crate::chat::store::ToolCall { id: call_id.to_string(), name: name.to_string(), arguments: args.clone() };
+            // Agenten-Werkzeuge (#338): je Werkzeug für den Chat, Befehle nur für denselben Anfang (`cargo test`).
             let always = AllowRule::eligible(&call).then(|| {
-                let session = args.get("session").and_then(|s| s.as_u64()).unwrap_or(0);
-                let scope = format!("{name} → {}", target.map(str::to_string).unwrap_or_else(|| format!("session {session}")));
+                let scope = match AllowRule::for_call(&call) {
+                    AllowRule { prefix: Some(p), .. } => {
+                        if lang == Lang::De {
+                            format!("Befehle, die mit „{p}“ beginnen")
+                        } else {
+                            format!("commands starting with “{p}”")
+                        }
+                    }
+                    _ if local => {
+                        let web = name.starts_with("web_");
+                        match (lang, web) {
+                            (Lang::De, true) => format!("{name} in diesem Chat (alle Adressen bzw. Suchen)"),
+                            (Lang::De, false) => format!("{name} in diesem Chat (alle Pfade im Projektordner)"),
+                            (_, true) => format!("{name} in this chat (all addresses or searches)"),
+                            (_, false) => format!("{name} in this chat (all paths in the project folder)"),
+                        }
+                    }
+                    _ => {
+                        let session = args.get("session").and_then(|s| s.as_u64()).unwrap_or(0);
+                        format!("{name} → {}", target.map(str::to_string).unwrap_or_else(|| format!("session {session}")))
+                    }
+                };
                 ui.button(lang.t("Immer für diesen Chat", "Always for this chat")).on_hover_text(if lang == Lang::De {
                     format!("Immer für {scope} (oben im Chat widerrufbar)")
                 } else {
@@ -572,6 +679,39 @@ fn level_bar(ui: &mut Ui, lang: Lang, out: &mut ChatOut) {
     });
 }
 
+/// Zeichen und Farbe für den Stand eines To-dos.
+fn todo_mark(s: TodoStatus, dim: Color32) -> (&'static str, Color32) {
+    match s {
+        TodoStatus::Completed => ("✓", crate::style::ui().success),
+        TodoStatus::InProgress => ("▸", crate::style::ui().warning),
+        TodoStatus::Pending => ("·", dim),
+    }
+}
+
+/// Kopfzeile: To-do-Liste des Modells (`update_todos`, #338) – „To-dos 2/5 · ▸ aktueller Punkt“, aufgeklappt die
+/// ganze Liste.
+fn todos_menu(ui: &mut Ui, session: u64, todos: &[ChatTodo], lang: Lang) {
+    let done = todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
+    let title = match todos.iter().find(|t| t.status == TodoStatus::InProgress) {
+        Some(t) => format!("{} {done}/{} · ▸ {}", lang.t("To-dos", "To-dos"), todos.len(), crate::mcp::short(&t.content, 60)),
+        None => format!("{} {done}/{}", lang.t("To-dos", "To-dos"), todos.len()),
+    };
+    let dim = style::dim(ui);
+    ui.push_id(("chat_todos", session), |ui| {
+        ui.menu_button(RichText::new(title).small(), |ui| {
+            ui.label(RichText::new(lang.t("Plan des Modells (update_todos)", "The model's plan (update_todos)")).small().color(dim));
+            for t in todos {
+                ui.horizontal(|ui| {
+                    let (mark, col) = todo_mark(t.status, dim);
+                    ui.label(RichText::new(mark).color(col));
+                    let text = RichText::new(&t.content).size(12.5);
+                    ui.label(if t.status == TodoStatus::Completed { text.color(dim).strikethrough() } else { text });
+                });
+            }
+        });
+    });
+}
+
 /// Kopfzeile: „Dauerhafte Freigaben (N)“ mit „Widerrufen“ je Eintrag.
 fn approvals_menu(ui: &mut Ui, session: u64, rules: &[AllowRule], lang: Lang, out: &mut ChatOut) {
     ui.horizontal(|ui| {
@@ -580,9 +720,10 @@ fn approvals_menu(ui: &mut Ui, session: u64, rules: &[AllowRule], lang: Lang, ou
             ui.menu_button(RichText::new(title).small(), |ui| {
                 for r in rules {
                     ui.horizontal(|ui| {
-                        let what = match r.session {
-                            Some(s) => format!("{} → session {s}", r.tool),
-                            None => r.tool.clone(),
+                        let what = match (r.session, &r.prefix) {
+                            (Some(s), _) => format!("{} → session {s}", r.tool),
+                            (None, Some(p)) => format!("{}: {p} …", r.tool),
+                            (None, None) => r.tool.clone(),
                         };
                         ui.label(RichText::new(what).monospace().size(12.0));
                         if ui.small_button(lang.t("Widerrufen", "Revoke")).clicked() {
@@ -1043,6 +1184,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_approval_shows_the_diff_preview_and_the_todo_header() {
+        struct One(ToolCall);
+        impl crate::chat::ChatBackend for One {
+            fn start(&self, _: &crate::state::ChatMeta, _: &[ChatMsg], _: &crate::chat::TurnContext, _: crate::chat::Repaint) -> crate::chat::backend::TurnHandle {
+                let (h, tx, _) = crate::chat::backend::TurnHandle::pair();
+                tx.send(crate::chat::backend::TurnEvent::ToolCall(self.0.clone())).unwrap();
+                tx.send(crate::chat::backend::TurnEvent::Done).unwrap();
+                h
+            }
+        }
+        let (d, env) = crate::chat::agent::paths::tests::tmp_root("chatui");
+        std::fs::write(d.join("a.txt"), "one\ntwo\n").unwrap();
+        let call = ToolCall { id: "e".into(), name: "edit_file".into(), arguments: serde_json::json!({"path": "a.txt", "old_string": "two", "new_string": "2"}) };
+        let mut c = ChatState::new(ChatFile::default(), None);
+        c.draft = "edit".into();
+        assert!(c.send(&One(call.clone()), &crate::state::ChatMeta::default(), &crate::chat::TurnContext::default(), Arc::new(|| {})));
+        c.poll();
+        assert_eq!(c.tool_step(&control().with_agent(env.clone())), crate::chat::ToolStep::Idle);
+        assert!(c.awaiting_approval());
+        c.approval_target = Some("a.txt".into());
+        c.approval_preview = crate::chat::agent::files::preview("edit_file", &call.arguments, &env).map(|p| ("e".to_string(), p));
+        c.set_todos(vec![ChatTodo { content: "Fix it".into(), status: TodoStatus::InProgress }, ChatTodo { content: "Test".into(), status: TodoStatus::Completed }]);
+        for (lang, what) in [(Lang::En, "The model wants to change files in the project folder:"), (Lang::De, "Das Modell möchte Dateien im Projektordner ändern:")] {
+            let mut h = H::new();
+            h.frame(&mut c, lang, false, vec![]);
+            h.frame(&mut c, lang, false, vec![]);
+            assert!(h.texts.iter().any(|t| t == what), "{:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == "edit_file → a.txt"), "{:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t.starts_with("a.txt") && t.contains("+1") && t.contains("−1")), "Kopf der Vorschau: {:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t.contains("− two") && t.contains("+ 2")), "Diff-Zeilen: {:?}", h.texts);
+            assert!(h.texts.iter().any(|t| t == "To-dos 1/2 · ▸ Fix it"), "To-do-Kopfzeile: {:?}", h.texts);
+            let always = if lang == Lang::De { "Immer für diesen Chat" } else { "Always for this chat" };
+            assert!(h.texts.iter().any(|t| t == always), "Immer je Werkzeug: {:?}", h.texts);
+        }
+        // Scheitert der Aufruf absehbar, steht der Grund statt des Diffs da
+        c.approval_preview = crate::chat::agent::files::preview("edit_file", &serde_json::json!({"path": "a.txt", "old_string": "zwei", "new_string": "2"}), &env).map(|p| ("e".to_string(), p));
+        let mut h = H::new();
+        h.frame(&mut c, Lang::En, false, vec![]);
+        h.frame(&mut c, Lang::En, false, vec![]);
+        assert!(h.texts.iter().any(|t| t.starts_with("This call will fail as it is:") && t.contains("not found")), "{:?}", h.texts);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn always_is_offered_only_for_calls_with_a_target_session() {
         let cases = [
             (ToolCall { id: "a".into(), name: "create_session".into(), arguments: serde_json::json!({"name": "x"}) }, false),
@@ -1113,7 +1298,7 @@ mod tests {
         }
         // Dauerhafte Freigaben: Menü in der Kopfzeile, „Widerrufen“ je Eintrag
         for (lang, title, revoke) in [(Lang::En, "Permanent approvals (2)", "Revoke"), (Lang::De, "Dauerhafte Freigaben (2)", "Widerrufen")] {
-            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4) }, AllowRule { tool: "add_todo".into(), session: None }];
+            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4), prefix: None }, AllowRule { tool: "add_todo".into(), session: None, prefix: None }];
             let mut c = ChatState::new(ChatFile { always_allow: rules.clone(), ..ChatFile::default() }, None);
             let mut h = H::new();
             h.frame(&mut c, lang, false, vec![]);

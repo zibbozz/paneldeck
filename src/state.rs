@@ -213,6 +213,9 @@ pub struct Settings {
     /// LLM-Server für Chats (seit 2.2.0, `llm::config`). Unlesbare Einträge bleiben unverändert erhalten.
     #[serde(skip_serializing_if = "crate::llm::config::LlmServers::is_blank")]
     pub llm_servers: crate::llm::config::LlmServers,
+    /// Agenten-Werkzeuge der Chats (seit 2.7.0, #338): sensible Dateien, Zeitlimit für Befehle, Web. Fehlt in älteren
+    /// Dateien (dann Standard); unlesbare Felder ergeben ihren Standard.
+    pub agent_tools: crate::chat::agent::AgentToolSettings,
     /// Zuletzt im Dialog „Neuer Chat“ gewähltes Modell (Vorauswahl beim nächsten Mal).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_chat_meta")]
     pub last_chat_model: Option<ChatMeta>,
@@ -392,6 +395,7 @@ impl Default for Settings {
             update_last_check: 0,
             update_skip_version: String::new(),
             llm_servers: Default::default(),
+            agent_tools: Default::default(),
             last_chat_model: None,
             alt_screen_wheel: AltScreenWheel::Arrows,
             remember_sessions: true,

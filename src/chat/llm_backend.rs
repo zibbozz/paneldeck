@@ -260,7 +260,7 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     }
     let cfg = server.model_cfg(model);
     let endpoint = if with_key { server.endpoint(lang)? } else { Endpoint::new(server.kind, &server.url) };
-    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert);
+    let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone());
     let (hist, origin) = map_history(history);
     // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
     // ist entsprechend weniger Platz.

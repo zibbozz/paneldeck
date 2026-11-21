@@ -134,6 +134,39 @@ Wer die **Sicherheitsregeln** abschaltet, sieht eine Warnung: Das Modell erfähr
 - **Vorschau und Token-Zähler:** Unter den Schaltern zeigt eine Vorschau den Prompt für ein wählbares Modell, so wie ihn ein Chat bekäme – volle Fassung oder Kurzfassung für kleine Kontexte, mit Kontextlänge. Darunter die Tokens von Systemprompt und Werkzeug-Schemas, nach jeder Änderung neu gezählt: mit dem Tokenizer des Servers, wo es einen gibt (llama.cpp-Server, vLLM: `POST /tokenize`), sonst Paneldecks Schätzung, markiert mit `~` – dieselbe Schätzung, nach der die automatische Kontextlänge und die Fassung gewählt werden. Abgeschaltete Teile machen den Prompt kleiner und können dafür sorgen, dass die volle Fassung passt, wo sonst die Kurzfassung gälte.
 - Gespeichert in `settings.json` als `chat_prompt_parts` (global, nur geschrieben, wenn etwas aus ist) und je Modell als `prompt_parts` / `prompt_family` in `llm_servers[].models[]`; fehlende Felder bedeuten „an“ bzw. „automatisch“.
 
+<!-- Abschnitt „Agenten-Werkzeuge“ (#338, 2.7.0) – in sich abgeschlossen. -->
+## Agenten-Werkzeuge
+Neben den Paneldeck-Werkzeugen bekommen Chat-Modelle **Agenten-Werkzeuge** für die Arbeit im **Projektordner** des Chats (dem Ordner, in dem der Chat begonnen wurde). Es gibt sie **nur in den Chats von Paneldeck** – externe MCP-Clients bekommen sie nicht. Jedes eingeschaltete Werkzeug wird jedem Modell nach seiner Stufe angeboten; einzelne Werkzeuge lassen sich je Modell abwählen (*Einstellungen → Modelle*, Liste *Agenten-Werkzeuge*). Ohne Projektordner gibt es die Datei-, Such- und Git-Werkzeuge nicht.
+
+| Werkzeug | Stufe | Freigabe | Was es tut |
+|---|---|---|---|
+| `read_file` | Lesen | nur für sensible Dateien | Liest eine Textdatei mit Zeilennummern: standardmäßig 500 Zeilen (`offset`, `limit` bis 2000), höchstens 32 KB je Aufruf, mit einem Hinweis wie „Lines 1–500 of 2310; continue with offset=501“. Binärdateien werden abgelehnt. |
+| `list_dir` | Lesen | – | Ordner (mit `/` am Ende) und Dateien mit Größe; von `.gitignore` ausgeschlossene Einträge sind markiert. |
+| `glob` | Lesen | – | Findet Dateien nach Muster (`src/**/*.rs`, `*.toml`; ohne `/` gilt das Muster für Dateinamen in allen Ordnern). Beachtet `.gitignore` (`include_ignored` für den Rest). Höchstens 500 Pfade. |
+| `grep` | Lesen | – | Eingebaute Suche mit regulären Ausdrücken (ohne ripgrep): `content` (`pfad:zeile: text`, Standard), `files_with_matches` oder `count`; `glob`, `case_insensitive`, `context` (0–5). Beachtet `.gitignore`, überspringt Binärdateien, Dateien über 4 MB und sensible Dateien. Höchstens 200 Ergebnisse mit Hinweis auf weitere. |
+| `git_status`, `git_diff`, `git_log` | Lesen | – | Nur lesend: Zweig, voraus/zurück und geänderte Dateien; Diff des Arbeitsverzeichnisses, des Index (`staged`) oder gegen einen `commit`; letzte Commits. Diffs sensibler Dateien fallen weg. Commit, Push und Checkout nur über `run_command`. |
+| `update_todos` | Lesen | – | Der Plan des Modells für mehrschrittige Arbeit, oben im Chat angezeigt (**To-dos 2/5 · ▸ aktueller Punkt**). |
+| `web_fetch` | Lesen | ja | Ruft eine öffentliche `https`-Seite als Text/Markdown ab (höchstens 2 MB Download, 16 KB an das Modell). Abschaltbar. |
+| `web_search` | Lesen | ja | Sucht mit **deinem eigenen** Suchdienst: einer SearXNG-Instanz oder einem eigenen API-Schlüssel für Brave oder Tavily. **Aus**, bis du einen einrichtest. |
+| `edit_file` | Steuern | ja, mit Diff | Exaktes Suchen/Ersetzen: `old_string` muss genau einmal vorkommen (oder `replace_all`). Leerzeichen am Zeilenende und CRLF/LF-Unterschiede werden toleriert; die Datei behält Zeilenenden und BOM. |
+| `write_file` | Steuern | ja, mit Diff | Legt eine ganze Datei an oder überschreibt sie (Ordner werden angelegt). |
+| `move_file` | Steuern | ja | Verschiebt oder benennt im Projekt um; das Ziel darf es noch nicht geben. |
+| `delete_file` | Steuern | ja | Legt eine Datei oder einen Ordner **in den Papierkorb** – nie endgültig gelöscht. |
+| `run_command` | Steuern | ja | Führt einen Befehl im **eigenen Terminal des Chats** aus: eine sichtbare Terminal-Sitzung im Projektordner (Kind des Chats in der Seitenleiste), beim ersten Befehl angelegt und danach weiter benutzt. Zeitlimit standardmäßig 120 s (*Einstellungen → Modelle → Agenten-Werkzeuge*, bis 600 s). Mit `session` läuft der Befehl wie bisher in diesem Terminal. |
+
+**Freigaben.** Schreiben, Verschieben, Löschen, Befehle und Web warten wie die anderen schreibenden Werkzeuge auf deine Freigabe (*Vor Schreib-Aktionen nachfragen*). Bei `edit_file` und `write_file` zeigt die Freigabe-Zeile über den vollständigen Parametern eine **Diff-Vorschau** (Datei, +/− Zeilen, geänderte Zeilen farbig); würde der Aufruf ohnehin scheitern (z. B. `old_string` nicht gefunden), steht stattdessen das da. **Sensible Dateien** (z. B. `.env`, `*.pem`, `*.key`, `id_rsa*`, `credentials.*`, `secrets.*`) werden nur nach Freigabe gelesen – auch wenn *Vor Schreib-Aktionen nachfragen* aus ist –, und *Immer für diesen Chat* gibt es für sie nie. *Immer für diesen Chat* gilt je Werkzeug für den ganzen Chat; bei Befehlen im Terminal des Chats für Befehle, die mit denselben Wörtern beginnen (z. B. `cargo test`), nie für Befehle mit `;`, `&`, `|`, Umleitungen oder `$( … )` und nie für einen bloßen Interpreter oder eine Shell (`python`, `pwsh`, `bash` …).
+
+**Pfadregeln.** Erlaubt sind nur Pfade im Projektordner. Pfade werden aufgelöst (`..`, Links, Junctions); das echte Ziel muss im Ordner liegen, und beim Öffnen der Datei wird noch einmal geprüft. Netzwerk- (UNC-) und Gerätepfade, alternative Datenströme (`datei:strom`), reservierte Namen (`CON`, `NUL` …) und `~` werden abgelehnt. Tabu auch mit Freigabe: der Datenordner von Paneldeck, die Geheimnis-Ordner deines Benutzerprofils (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.claude.json`, `~/.aws`, `AppData` …) und Schreiben in `.git`.
+
+**Web-Regeln.** `web_fetch` erreicht nur öffentliche Adressen über `https` (jede aufgelöste Adresse muss öffentlich sein; private, lokale und Carrier-Grade-NAT-Adressen sind gesperrt), keine Benutzernamen oder Passwörter in der Adresse, keine Cookies, keine automatische Anmeldung, kein Proxy, höchstens 5 Weiterleitungen (jede neu geprüft). Seiteninhalt ist als nicht vertrauenswürdig markiert. Deine SearXNG-Adresse darf auch auf diesem Rechner oder in deinem Netz liegen – du hast sie selbst eingetragen.
+
+**Einstellungen → Modelle → Agenten-Werkzeuge:** Zeitlimit für Befehle, *Webseiten abrufen* an/aus, *Websuche* (Aus / SearXNG mit Adresse / Brave / Tavily mit API-Schlüssel, verschlüsselt gespeichert wie die Schlüssel der Server) und die Liste der Muster für sensible Dateien (eins je Zeile; ohne `/` gilt ein Muster für Dateinamen, mit `/` für Pfade).
+
+**Hilfreiche Fehler.** Jeder Fehler nennt den Grund und zeigt das erwartete Format mit einem kurzen Beispiel, oft mit einem Vorschlag („Did you mean src/main.rs?“, „old_string occurs 3 times (lines 4, 9, 12) …“). Kleine Abweichungen (eine Zahl als Text, eine Grenze über dem Höchstwert) werden korrigiert und im Ergebnis unter `corrected` vermerkt.
+
+Die Werkzeugnamen stehen im Verlauf (`read_chat`). Die To-do-Liste steht in der Verlaufsdatei des Chats (`todos`), dauerhafte Freigaben der Agenten-Werkzeuge in `always_allow` (ohne `session`; bei Befehlen mit `prefix`) – siehe [Datenordner](data-and-backups.md#chatverläufe).
+<!-- Ende des Abschnitts „Agenten-Werkzeuge“. -->
+
 ## Erlaubte Adressen und Sicherheit
 Paneldeck verbindet sich nur mit **diesem Rechner und privaten Netzen**:
 
