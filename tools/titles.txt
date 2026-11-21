@@ -10,3 +10,4 @@
 2.5.0|Paneldeck 2.5.0 – Linux and macOS (experimental), zsh/fish shell integration
 2.6.0|Paneldeck 2.6.0 – Clean up, process list, project maintenance, theme editor
 2.6.1|Paneldeck 2.6.1 – Reliable tool calls in local chats
+2.7.0|Paneldeck 2.7.0 – Agent tools, context display and prompt switches for local chats
