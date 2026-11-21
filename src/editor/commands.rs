@@ -180,11 +180,12 @@ impl Document {
                 let line = rope.char_to_line(pos);
                 let ls = rope.line_to_char(line);
                 let col = pos - ls;
-                if let Some(n) = unit {
-                    if col > 0 && rope.slice(ls..pos).chars().all(|c| c == ' ') {
-                        let k = (col - 1) % n + 1;
-                        return Some(SelEdit::delete(pos - k..pos));
-                    }
+                if let Some(n) = unit
+                    && col > 0
+                    && rope.slice(ls..pos).chars().all(|c| c == ' ')
+                {
+                    let k = (col - 1) % n + 1;
+                    return Some(SelEdit::delete(pos - k..pos));
                 }
                 Some(SelEdit::delete(prev_grapheme(rope, pos)..pos))
             })

@@ -225,7 +225,7 @@ pub fn decode(bytes: &[u8], forced: Option<TextEncoding>) -> Decoded {
             let le = encoding == TextEncoding::Utf16Le;
             let b = bytes.strip_prefix(encoding.bom()).unwrap_or(bytes);
             let odd = b.len() % 2 == 1;
-            let units = b.chunks_exact(2).map(|p| if le { u16::from_le_bytes([p[0], p[1]]) } else { u16::from_be_bytes([p[0], p[1]]) });
+            let units = b.as_chunks::<2>().0.iter().map(|p| if le { u16::from_le_bytes(*p) } else { u16::from_be_bytes(*p) });
             let mut lossy = odd;
             let mut s = String::with_capacity(b.len() / 2);
             for r in char::decode_utf16(units) {

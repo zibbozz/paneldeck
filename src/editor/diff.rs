@@ -36,12 +36,12 @@ pub fn minimal_edits(old: &str, new: &str) -> Vec<TextEdit> {
         let text: String = new_lines[n].concat();
         let range = starts[o.start]..starts[o.end];
         // Join with a directly preceding edit (keeps the change set small).
-        if let Some(last) = out.last_mut() {
-            if last.range.end == range.start {
-                last.range.end = range.end;
-                last.text.push_str(&text);
-                continue;
-            }
+        if let Some(last) = out.last_mut()
+            && last.range.end == range.start
+        {
+            last.range.end = range.end;
+            last.text.push_str(&text);
+            continue;
         }
         out.push(TextEdit { range, text });
     }
