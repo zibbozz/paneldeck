@@ -9,6 +9,11 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.7.0] - WIP
 
+### Added
+
+- Der Chat zeigt immer, wie voll der Kontext des Modells ist, z. B. `4342/8192 (53%)`. Die Zahlen stammen aus der letzten Antwort des Servers; vor der ersten Antwort steht eine mit `~` markierte Schätzung. Ein Tooltip teilt auf in Systemprompt + Werkzeuge, Verlauf und Antwort-Reserve. Nahe der Grenze wechselt die Farbe mit dem Hinweis, dass alte Nachrichten herausfallen (#339)
+- Einstellungen → Modelle: Schalter für jeden Teil der Anweisungen lokaler Chats (Paneldeck-Erklärung, Aufruf-Regeln, Werkzeug-Beschreibungen, Beispiele je Werkzeug, Fehlerbehandlung, Zusatz für die Modellfamilie, Antwortsprache, Sicherheitsregeln), global und je Modell, mit Wahl der Modellfamilie von Hand, Vorschau und Token-Zähler. Der Zähler nutzt den Tokenizer des Servers, wo es einen gibt (llama.cpp, vLLM), sonst eine Schätzung mit `~`. Beim Abschalten der Sicherheitsregeln erscheint eine Warnung; Paneldeck setzt sie weiter durch. Neue optionale Felder in `settings.json`: `chat_prompt_parts` sowie je Modell `prompt_parts` und `prompt_family` (#341)
+
 ## [2.6.1] - 2026-11-21
 
 ### Fixed
