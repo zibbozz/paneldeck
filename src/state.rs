@@ -290,6 +290,10 @@ pub struct Settings {
     /// `distinct`, `status`, `terminal`, `harmony`; unbekannte bleiben erhalten.
     #[serde(deserialize_with = "lenient_strings")]
     pub theme_checks_off: Vec<String>,
+    /// Nach einem Update die Tour „Was ist neu“ von selbst starten (seit 3.0.0, #143; Standard aus: dann nur ein Hinweis
+    /// in der Seitenleiste).
+    #[serde(deserialize_with = "lenient_false")]
+    pub tutorial_whats_new: bool,
 }
 
 /// Liste von Texten tolerant lesen: Einträge mit falschem Typ fallen weg, ein falscher Typ insgesamt ergibt eine leere Liste.
@@ -406,6 +410,7 @@ impl Default for Settings {
             progress_indicator: true,
             cursor_blink: true,
             theme_checks_off: Vec::new(),
+            tutorial_whats_new: false,
         }
     }
 }

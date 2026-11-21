@@ -312,6 +312,46 @@ impl PlanUi {
         self.dash_invalidate();
     }
 
+    /// Reiter der Projektansicht als feste Kennung (Tutorial, #143).
+    pub(super) fn tab_key(&self) -> &'static str {
+        match self.tab {
+            Tab::Tickets => "tickets",
+            Tab::Overview => "overview",
+            Tab::Search => "search",
+            Tab::Boards => "boards",
+            Tab::Backlog => "backlog",
+            Tab::Releases => "releases",
+            Tab::Dashboards => "dashboards",
+            _ => "other",
+        }
+    }
+
+    /// Reiter der Projektansicht wählen (Tutorial, #143); unbekannte Kennungen ändern nichts.
+    pub(super) fn set_tab_key(&mut self, key: &str) {
+        let tab = match key {
+            "tickets" => Tab::Tickets,
+            "overview" => Tab::Overview,
+            "search" => Tab::Search,
+            "boards" => Tab::Boards,
+            "backlog" => Tab::Backlog,
+            "releases" => Tab::Releases,
+            "dashboards" => Tab::Dashboards,
+            _ => return,
+        };
+        if self.tab != tab {
+            self.tab = tab;
+            self.msg = None;
+            self.tickets.forget_return();
+        }
+    }
+
+    /// Projekt wählen (Tutorial, #143: das Experten-Projekt der Tour).
+    pub(super) fn select_project(&mut self, db: &Db, id: i64) {
+        let cx = Cx { conn: &db.conn, db, lang: crate::state::lang() };
+        self.dirty = true;
+        self.select(&cx, id);
+    }
+
     pub(super) fn set_expert(&mut self, db: &Db, on: bool) {
         self.expert = on;
         db.set_meta("expert_mode", if on { "1" } else { "0" });
@@ -372,11 +412,13 @@ impl PlanUi {
                     "Expert mode: projects with their own types, fields, statuses and workflows. Off: the simple to-do list.",
                 );
                 let r = style::toggle(ui, &mut expert).on_hover_text(tip);
-                let _ = r;
-                ui.label(RichText::new(lang.t("Expertenmodus", "Expert mode")).color(if expert { ui.visuals().text_color() } else { style::dim(ui) }));
+                let l = ui.label(RichText::new(lang.t("Expertenmodus", "Expert mode")).color(if expert { ui.visuals().text_color() } else { style::dim(ui) }));
+                // Tutorial (#143): Schalter samt Beschriftung.
+                crate::app::tutorial::spot_rect(ui, crate::app::tutorial::Spot::ExpertToggle, r.rect.union(l.rect));
             });
             if self.expert {
                 ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| {
+                    crate::app::tutorial::spot_rect(ui, crate::app::tutorial::Spot::PlanProjects, left);
                     egui::ScrollArea::horizontal().id_salt("plan_projects").auto_shrink([false, true]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
                         ui.horizontal_centered(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
@@ -548,7 +590,18 @@ impl PlanUi {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
                 for (t, label) in &tabs {
-                    if style::tab(ui, label, self.tab == *t).clicked() {
+                    let r = style::tab(ui, label, self.tab == *t);
+                    // Tutorial (#143): Reiter Boards, Backlog, Suche als Ziele.
+                    let spot = match t {
+                        Tab::Boards => Some(crate::app::tutorial::Spot::PlanTabBoards),
+                        Tab::Backlog => Some(crate::app::tutorial::Spot::PlanTabBacklog),
+                        Tab::Search => Some(crate::app::tutorial::Spot::PlanTabSearch),
+                        _ => None,
+                    };
+                    if let Some(s) = spot {
+                        crate::app::tutorial::spot_rect(ui, s, r.rect);
+                    }
+                    if r.clicked() {
                         self.tab = *t;
                         self.msg = None;
                         // von Hand gewechselt: der Rückweg des Tickets (Board, Backlog …) gilt nicht mehr

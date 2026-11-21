@@ -403,6 +403,7 @@ impl App {
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S1);
+        let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("Updates", "Updates")).strong());
         let flavor = self.updater.flavor(&self.exe);
         ui.horizontal(|ui| {
@@ -435,6 +436,7 @@ impl App {
             style::toggle(ui, &mut self.settings.update_auto_check);
             ui.label(lang.t("Automatisch prüfen (beim Start, höchstens einmal am Tag)", "Check automatically (at start, at most once a day)"));
         });
+        crate::app::tutorial::spot_since(ui, crate::app::tutorial::Spot::AboutUpdates, top);
         let last = if self.settings.update_last_check > 0 {
             chrono::DateTime::from_timestamp(self.settings.update_last_check, 0)
                 .map(|t| t.with_timezone(&chrono::Local).format(if lang == Lang::De { "%d.%m.%Y %H:%M" } else { "%Y-%m-%d %H:%M" }).to_string())

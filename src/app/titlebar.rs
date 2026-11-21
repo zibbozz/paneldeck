@@ -59,6 +59,9 @@ impl App {
                 for (mode, icon, tip) in tabs {
                     let r = Rect::from_min_size(Pos2::new(x, rect.top() + 4.0), Vec2::new(40.0, BAR_HEIGHT - 8.0));
                     let resp = ui.interact(r, Id::new(("titlebar_tab", mode as u8)), Sense::click()).on_hover_text(format!("{tip}\n{ctrl_hint}"));
+                    if mode == Mode::Tasks {
+                        super::tutorial::spot_rect(ui, Spot::TitlebarTodo, r);
+                    }
                     let active = self.mode == mode;
                     if active {
                         painter.rect_filled(r, 6.0, style::accent().gamma_multiply(0.22));
@@ -78,6 +81,7 @@ impl App {
                     x += 44.0;
                 }
                 let tabs_end = x;
+                super::tutorial::spot_rect(ui, Spot::TitlebarTabs, Rect::from_min_max(Pos2::new(rect.left() + 42.0, rect.top() + 4.0), Pos2::new(tabs_end - 4.0, rect.bottom() - 4.0)));
                 // Fensterknöpfe rechts; links davon (von rechts nach links) Einstellungen, Update und MCP-Status (#240) –
                 // in jedem Bereich und jedem Fenster. Der MCP-Status entfällt, wenn sonst kein Platz für die Reiter bliebe.
                 let bw = 46.0;

@@ -719,7 +719,7 @@ impl TasksUi {
                         .desired_width(w)
                         .margin(Margin::symmetric(10, 7))
                         .hint_text(lang.t("Neues To-do – schreiben und Enter drücken …", "New to-do – type and press Enter …")),
-                );
+                ).spot(Spot::TodoInput);
                 if focus == Some(Focus::Quick) {
                     r.request_focus();
                 }
@@ -936,6 +936,10 @@ impl TasksUi {
                 let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), lay.size.y), Sense::hover());
                 let rect = Rect::from_min_size(Pos2::new(cx - w / 2.0, row.top()), lay.size);
                 rects.push((it.id, rect));
+                // Tutorial (#143): die oberste Karte (meist die gerade angelegte) zum Abhaken.
+                if rects.len() == 1 {
+                    tutorial::spot_rect(ui, Spot::TodoList, rect);
+                }
                 let dragging_this = self.drag.as_ref().is_some_and(|d| d.id == it.id);
                 if !ui.is_rect_visible(rect) && !dragging_this {
                     continue;
