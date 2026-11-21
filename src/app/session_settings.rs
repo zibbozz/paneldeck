@@ -727,7 +727,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                 ui.label(RichText::new(lang.t("Profil, Shell, Arbeitsordner, Claude und die Claude-Optionen wirken erst nach einem Neu laden.", "Profile, shell, working folder, Claude and the Claude options take effect after a reload.")).small().color(style::dim(ui)));
             }
             for p in &f.problems {
-                ui.colored_label(Color32::from_rgb(0xe0, 0x6c, 0x75), p.text(lang));
+                ui.colored_label(crate::style::ui().error, p.text(lang));
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -737,7 +737,7 @@ pub(super) fn session_form_ui(ctx: &egui::Context, f: &mut SessionForm, shells: 
                     out = FormOutcome::Save;
                 }
                 if let Some(h) = &invalid {
-                    ui.label(RichText::new(h).small().color(Color32::from_rgb(0xe0, 0x6c, 0x75)));
+                    ui.label(RichText::new(h).small().color(crate::style::ui().error));
                 }
                 let cancel = ui.button(lang.t("Abbrechen", "Cancel"));
                 mark(ui, "cancel", &cancel);

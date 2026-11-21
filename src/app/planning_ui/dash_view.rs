@@ -574,7 +574,7 @@ impl PlanUi {
         egui::Area::new(Id::new("dash_toast")).anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -18.0)).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
             let mut f = egui::Frame::popup(ui.style()).corner_radius(egui::CornerRadius::same(10));
             if error {
-                f = f.stroke(Stroke::new(1.2_f32, widgets::DANGER));
+                f = f.stroke(Stroke::new(1.2_f32, widgets::DANGER()));
             }
             f.show(ui, |ui| {
                 ui.set_max_width(520.0);

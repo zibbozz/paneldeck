@@ -10,7 +10,7 @@ use super::format::{Format, Words, apply_format_with};
 use super::parse::parse;
 use super::render::{RenderOpts, RenderOutput, render};
 use crate::state::{Lang, lang, t};
-use crate::style::{ACCENT, D_BASE, D_FAST, RADIUS, anim, dim, mix};
+use crate::style::{D_BASE, D_FAST, RADIUS, anim, dim, mix};
 use eframe::egui::{
     self, CornerRadius, FontId, Id, Key, Margin, Modifiers, Pos2, Rect, Response, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2,
     text::{CCursor, CCursorRange, LayoutJob, TextFormat},
@@ -226,7 +226,7 @@ fn mode_switch(ui: &mut Ui, id: Id, mode: &mut FieldMode) {
         let on = anim(ui.ctx(), id.with(("on", i)), *mode == modes[i], D_BASE);
         let cr = if i == 0 { CornerRadius { nw: r, sw: r, ne: 0, se: 0 } } else { CornerRadius { nw: 0, sw: 0, ne: r, se: r } };
         ui.painter().rect_filled(seg, cr, hover_bg.gamma_multiply(hv * (1.0 - on)));
-        ui.painter().rect_filled(seg, cr, ACCENT.gamma_multiply(0.28 * on));
+        ui.painter().rect_filled(seg, cr, crate::style::brand().gamma_multiply(0.28 * on));
         let tc = mix(text_c.gamma_multiply(0.72), text_c, on.max(hv * 0.6));
         let g = &galleys[i];
         ui.painter().galley(Pos2::new(seg.center().x - g.size().x / 2.0, seg.center().y - g.size().y / 2.0), g.clone(), tc);

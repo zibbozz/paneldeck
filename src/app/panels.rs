@@ -295,7 +295,7 @@ impl App {
                     e.meta.queue.clear();
                 }
                 if !e.is_claude() {
-                    ui.colored_label(Color32::from_rgb(0xe5, 0xc0, 0x7b), lang.t("Keine Claude-Sitzung – die Warteschlange läuft nur bei Claude.", "Not a Claude session – the queue only runs with Claude."));
+                    ui.colored_label(crate::style::ui().warning, lang.t("Keine Claude-Sitzung – die Warteschlange läuft nur bei Claude.", "Not a Claude session – the queue only runs with Claude."));
                 }
             });
             ui.separator();
@@ -358,8 +358,8 @@ impl App {
             return;
         }
         egui::Frame::new()
-            .fill(style::ACCENT.gamma_multiply(0.12))
-            .stroke(Stroke::new(1.0_f32, style::ACCENT.gamma_multiply(0.5)))
+            .fill(style::brand().gamma_multiply(0.12))
+            .stroke(Stroke::new(1.0_f32, style::brand().gamma_multiply(0.5)))
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::same(8))
             .show(ui, |ui| {
@@ -409,7 +409,7 @@ impl App {
         let mut select: Option<(String, bool)> = None;
         style::movable(ctx, Id::new("diff_win"), egui::Window::new(lang.t("Änderungen", "Changes"))).open(&mut open).default_size([960.0, 540.0]).show(ctx, |ui| {
             if let Some(err) = &snap.error {
-                ui.colored_label(Color32::from_rgb(0xe5, 0xc0, 0x7b), err);
+                ui.colored_label(crate::style::ui().warning, err);
                 ui.label(RichText::new(&dir).small().color(style::dim(ui)));
                 return;
             }
@@ -436,11 +436,11 @@ impl App {
                                     toggle = Some((c.clone(), staged));
                                 }
                                 let (letter, col) = match (c.x, c.y) {
-                                    ('?', _) => ('?', Color32::from_rgb(0x98, 0xc3, 0x79)),
-                                    ('A', _) | (_, 'A') => ('A', Color32::from_rgb(0x98, 0xc3, 0x79)),
-                                    ('D', _) | (_, 'D') => ('D', Color32::from_rgb(0xe0, 0x6c, 0x75)),
-                                    ('R', _) => ('R', Color32::from_rgb(0x61, 0xaf, 0xef)),
-                                    _ => ('M', Color32::from_rgb(0xe5, 0xc0, 0x7b)),
+                                    ('?', _) => ('?', crate::style::ui().diff_add),
+                                    ('A', _) | (_, 'A') => ('A', crate::style::ui().diff_add),
+                                    ('D', _) | (_, 'D') => ('D', crate::style::ui().diff_remove),
+                                    ('R', _) => ('R', crate::style::ui().diff_rename),
+                                    _ => ('M', crate::style::ui().diff_change),
                                 };
                                 ui.label(RichText::new(letter.to_string()).monospace().color(col));
                                 let is_sel = self.diff_sel.as_ref().is_some_and(|(p, _)| *p == c.path);
@@ -477,11 +477,11 @@ impl App {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for l in &lines[range] {
                             let col = if l.starts_with('+') && !l.starts_with("+++") {
-                                Color32::from_rgb(0x98, 0xc3, 0x79)
+                                crate::style::ui().diff_add
                             } else if l.starts_with('-') && !l.starts_with("---") {
-                                Color32::from_rgb(0xe0, 0x6c, 0x75)
+                                crate::style::ui().diff_remove
                             } else if l.starts_with("@@") {
-                                Color32::from_rgb(0x61, 0xaf, 0xef)
+                                crate::style::ui().diff_rename
                             } else {
                                 style::dim(ui)
                             };
@@ -577,7 +577,7 @@ impl App {
             });
             if budget > 0.0 {
                 let frac = (today_c / budget).clamp(0.0, 1.0) as f32;
-                ui.add(egui::ProgressBar::new(frac).text(format!("{} ${:.2} / ${:.2}", lang.t("Tagesbudget", "Daily budget"), today_c, budget)).fill(if today_c > budget { Color32::from_rgb(0xe0, 0x4f, 0x5f) } else { style::ACCENT }));
+                ui.add(egui::ProgressBar::new(frac).text(format!("{} ${:.2} / ${:.2}", lang.t("Tagesbudget", "Daily budget"), today_c, budget)).fill(if today_c > budget { crate::style::ui().danger } else { style::brand() }));
             }
             ui.add_space(S2);
             ui.label(RichText::new(lang.t("Letzte 14 Tage", "Last 14 days")).strong());
@@ -590,7 +590,7 @@ impl App {
                 let h = ((*c / max) as f32 * (rect.height() - 34.0)).max(if *c > 0.0 { 2.0 } else { 0.0 });
                 let x0 = rect.min.x + i as f32 * bw;
                 let bar = Rect::from_min_max(Pos2::new(x0 + bw * 0.18, rect.max.y - 16.0 - h), Pos2::new(x0 + bw * 0.82, rect.max.y - 16.0));
-                let col = if *d == today { style::ACCENT } else { style::ACCENT.gamma_multiply(0.55) };
+                let col = if *d == today { style::brand() } else { style::brand().gamma_multiply(0.55) };
                 p.rect_filled(bar, 2.0, col);
                 if *c > 0.0 {
                     p.text(Pos2::new(bar.center().x, bar.min.y - 2.0), Align2::CENTER_BOTTOM, format!("{c:.2}"), FontId::proportional(9.5), weak);

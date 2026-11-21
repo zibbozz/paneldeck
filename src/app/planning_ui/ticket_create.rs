@@ -238,7 +238,7 @@ impl PlanUi {
             ui.horizontal(|ui| {
                 ui.allocate_ui_with_layout(Vec2::new(160.0, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.label(RichText::new(lang.t("Titel", "Title")).strong());
-                    ui.label(RichText::new("*").color(widgets::DANGER).strong());
+                    ui.label(RichText::new("*").color(widgets::DANGER()).strong());
                 });
                 let id = Id::new(("create_title", dlg.salt));
                 let r = ui.add_sized([ui.available_width().min(460.0), 28.0], egui::TextEdit::singleline(&mut dlg.title).id(id).hint_text(lang.t("Kurzer, aussagekräftiger Titel", "A short, meaningful title")).margin(egui::Margin::symmetric(8, 5)));

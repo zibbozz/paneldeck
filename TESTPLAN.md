@@ -891,3 +891,19 @@ Vorbereitung: Testinstanz aus einer Kopie der .exe mit eigenem Datenordner und S
 - [ ] **Einstellungen → Daten:** *Wartungsseite öffnen* → Fenster schließt, Reiter *Todo-Liste*, Expertenmodus an, Wartungsseite mit Kategorie *Datenbank*.
 - [ ] **Agenten:** während *Verdichten* (große Datenbank) bzw. einer Aktion auf vielen Tickets ruft ein Agent `create_ticket` → Fehler `busy` mit `retry_after_ms`; die Seite zeigt bei verbundenen Agenten den Hinweis „Agenten sind verbunden …“.
 - [ ] **Beide Sprachen:** Seite, Dialoge, Befundtexte, Standard-Kommentar („Closed by maintenance on …“ / „Von der Wartung am … geschlossen …“), Protokoll und Projekt-Einstellungen auf Deutsch und Englisch.
+
+
+## 71 · Theme-Editor (#309, 2.6.0)
+Testinstanz aus einer Kopie der .exe mit eigenem Datenordner. Automatisch: Unit-Tests `theme::*` (Format, Verweise, Kontrast/ΔE, Generator, Prüfung, Größengrenze), `app::theme_editor`, `app::theme_preview`, `app::mcp::tests::theme_tools_list_and_read_themes`; Smoke-Test `theme_list`/`theme_get` (gültiges und ungültiges Theme im Datenordner).
+- [ ] **Öffnen:** *Einstellungen → Darstellung* → bei „One Dark“ heißt der Knopf „Als Kopie bearbeiten …“ → Editor öffnet „One Dark (2)“; Fenster lässt sich verschieben und vergrößern; links Farbliste mit Gruppen, rechts Vorschau, unten Design-Prüfung mit Zähler.
+- [ ] **Liste:** Suche „rahmen“ (DE) bzw. „border“ (EN) filtert; Klick auf `accent` klappt Farbwähler, Hex-Feld, Verweis, Zurücksetzen und Kontrastangaben auf; ● gesetzt / ○ abgeleitet / * geändert stimmen.
+- [ ] **Farbe ändern:** im Farbwähler ziehen → Vorschau (Knöpfe, Tabs, Links, Fortschritt) folgt sofort, die App selbst nicht; Hex `#0080ff` + Enter übernimmt; ungültiges Hex zeigt Fehlertext; Strg+Z (ohne Fokus im Textfeld) macht das Ziehen in einem Schritt rückgängig, Strg+Y wiederholt.
+- [ ] **Verweis:** `border` → Verweis `@text` 20 % → „Verknüpfen“; danach `text` ändern → Rahmen folgt; `text` auf `@border` verknüpfen → Fehlermeldung „Verweise im Kreis“, nichts geändert. „Auf abgeleitet zurücksetzen“ entfernt den Wert (○).
+- [ ] **Vorschau:** Knöpfe, Eingaben, Kontrollkästchen, Regler, Schalter, Tabs lassen sich bedienen, bewirken nichts; Klick auf den Freigabe-Knopf im Chat wählt `chat_send` in der Liste (scrollt hin) und hebt das Element hervor.
+- [ ] **Design-Prüfung:** `text` sehr dunkel machen → Kontrast-Hinweis erscheint, Klick hebt Farbe und Elemente hervor, „Übernehmen“ setzt die vorgeschlagene Farbe (Strg+Z nimmt es zurück); ⚙ Prüfungen → „Kontrast“ aus → Hinweise verschwinden, nach Neustart weiterhin aus; wieder an.
+- [ ] **Generator:** „Aus Farben erzeugen …“ → Hintergrund, Akzent, Hell → Palettenvorschau ändert sich → „Erzeugen“ → ganze Vorschau hell, Terminal-Palette lesbar; Strg+Z stellt den vorigen Stand her.
+- [ ] **Speichern/Schließen:** Speichern → Toast, Datei `themes/one-dark-2.json` entsteht, App nutzt das Theme sofort (Statusfarben, Seitenleiste, Akzent); erneut ändern und Fenster per X schließen → Rückfrage Speichern/Verwerfen/Abbrechen, alle drei Wege prüfen; „Verwerfen“-Knopf schließt ohne Speichern.
+- [ ] **Verwaltung:** ⋯ → Umbenennen (Name schon vergeben → Fehlermeldung; Profil mit diesem Theme zieht mit), Duplizieren („… (2)“), Im Explorer zeigen (Datei markiert), Exportieren (.json), Importieren derselben Datei (→ „… (3)“, nichts überschrieben), Löschen mit Rückfrage (gewähltes Theme → Standard).
+- [ ] **Ungültige Datei:** in `themes/` eine Datei mit `"fg":"white"` und eine > 1 MB anlegen → „Neu laden“ → beide mit Grund unter der Theme-Wahl, nicht in der Auswahl; Import der großen Datei → Fehler-Toast „größer als 1 MB“. Ist das gewählte Theme ungültig: Neustart → App startet mit One Dark.
+- [ ] **Alte Datei:** `nord-beispiel.json` (ohne `ui`) lädt und sieht aus wie vor 2.6.0; eine Datei mit unbekanntem `ui`-Namen lädt.
+- [ ] **Beide Sprachen:** Editor, Generator, Rückfragen, Hinweise, Fehlermeldungen und Toasts auf Deutsch und Englisch.

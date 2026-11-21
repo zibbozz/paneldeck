@@ -26,9 +26,15 @@ use eframe::egui::{self, Align, Color32, FontId, Pos2, Rect, RichText, Sense, St
 use std::collections::HashMap;
 
 pub const ROW_H: f32 = 30.0;
-const AMBER: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+#[allow(non_snake_case)]
+fn AMBER() -> Color32 {
+    crate::style::ui().warning
+}
 /// Rot der Fehler (wie in der Abfrage-Leiste).
-const RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+#[allow(non_snake_case)]
+fn RED() -> Color32 {
+    crate::style::ui().error
+}
 
 // ------------------------------------------------------------------ Baustein
 
@@ -253,7 +259,7 @@ fn pager(ui: &mut Ui, lang: Lang, total: i64, page: i64) -> Option<i64> {
 pub fn draw_error(ui: &mut Ui, lang: Lang, err: &SearchError, query: &str) {
     let problems: Vec<Problem> = err.problems(lang);
     let timeout = matches!(err, SearchError::Timeout);
-    let color = if timeout { AMBER } else { RED };
+    let color = if timeout { AMBER() } else { RED() };
     ui.add_space(S1);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -542,7 +548,7 @@ fn draw_row(ui: &mut Ui, cfg: &TableCfg, w: &Widths, row: &TicketRow, i: usize, 
     let star_r = Rect::from_center_size(Pos2::new(x + 14.0, cy), Vec2::splat(22.0));
     let flag_r = Rect::from_center_size(Pos2::new(x + 40.0, cy), Vec2::splat(22.0));
     let mut hit_mark = false;
-    for (r, is_star, on, col) in [(star_r, true, row.starred, GOLD), (flag_r, false, row.flagged, FLAG_RED)] {
+    for (r, is_star, on, col) in [(star_r, true, row.starred, GOLD()), (flag_r, false, row.flagged, FLAG_RED())] {
         let rs = ui.interact(r, egui::Id::new((cfg.salt, "mark", row.id, is_star)), Sense::click());
         let c = if on { col } else if rs.hovered() { col.gamma_multiply(0.7) } else { dim.gamma_multiply(0.45) };
         paint_mark(ui.painter(), if is_star { "star" } else { "flag" }, r.center(), on, c);

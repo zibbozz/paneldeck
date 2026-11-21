@@ -43,7 +43,7 @@ Ein Werkzeug oberhalb der aktuellen Stufe liefert `forbidden`. Die Stufe wird im
 ## Werkzeuge
 | Werkzeug | Stufe | Zweck |
 |---|---|---|
-| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `screenshot`, `get_usage`, `search_history`, `cleanup_sizes` | Lesen | Wer bin ich (Sitzung des Agenten), Sitzungen (mit Art `kind` und Fenster `window`), Terminaltext, die Nachrichten eines Chats, die LLM-Server und Modelle für Chats, Bild von Fenster/Sitzung, Kosten, Claude-Verlauf, Größen der Paneldeck-Daten |
+| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `theme_list`, `theme_get`, `screenshot`, `get_usage`, `search_history`, `cleanup_sizes` | Lesen | Wer bin ich (Sitzung des Agenten), Sitzungen (mit Art `kind` und Fenster `window`), Terminaltext, die Nachrichten eines Chats, die LLM-Server und Modelle für Chats, die Farbthemes, Bild von Fenster/Sitzung, Kosten, Claude-Verlauf, Größen der Paneldeck-Daten |
 | `create_session`, `send_text`, `send_keys`, `run_command`, `queue_prompt`, `wait_for_status`, `rename_session`, `focus_session`, `close_session`, `send_chat_message` | Steuern | Sitzungen anlegen/steuern (auch Chats), Befehle mit Ausgabe und Exit-Code, auf Claude- oder Chat-Status warten, Nachricht an einen Chat senden |
 | `list_processes`, `read_process_output` | Lesen | Die [Prozessliste](#prozessliste): Einträge mit Status, erkannten lokalen Adressen und Fehlerzahl; die Ausgabe eines Eintrags |
 | `start_process`, `stop_process`, `restart_process` | Steuern | Einen Eintrag oder eine Gruppe der Prozessliste starten, stoppen (Strg+C, nach 5 s der ganze Baum) und neu starten |
@@ -121,6 +121,13 @@ Die [Prozessliste](processes.md) (seit 2.6.0) führt Entwicklungsserver und Watc
 - **`start_process`**, **`stop_process`**, **`restart_process`** (Steuern): entweder `process` (Kennung oder Name) oder `group` – genau eines, sonst `bad_args`; ein unbekannter Eintrag bzw. eine unbekannte Gruppe ergibt `not_found`. Eine Gruppe startet aufsteigend nach `order` und stoppt umgekehrt. Alle drei antworten sofort mit `processes` (`id`, `name`, `status`, `exit_code`, `message`); Stoppen sendet Strg+C und beendet nach 5 s den ganzen Prozessbaum – `list_processes` zeigt `stopped`, sobald er beendet ist.
 - `status` ist `stopped` (vom Nutzer gestoppt oder nicht gestartet), `running`, `stopping`, `exited` (Exit-Code 0), `crashed` (anderer Exit-Code) oder `failed` (Start fehlgeschlagen: Befehl, Shell oder Ordner nicht gefunden; ohne Exit-Code).
 - Befehle und Ausgabe sind **nicht vertrauenswürdige Daten** (`note` in jeder Antwort). Ein aus der Prozessliste gestartetes Programm, das selbst die Agenten-Schnittstelle aufruft, zählt als keine Sitzung (`caller` = `null`, wie ein verwaister Prozess) und kann also nicht als Agent einer Sitzung handeln.
+
+## Themes
+
+Agenten können die Farbthemes lesen, nie ändern (beide Werkzeuge neu seit 2.6.0, Stufe *Lesen*):
+
+- **`theme_list`**: `active` (das Theme, das die App nutzt) und `themes`, je mit `name`, `dark`, `builtin` (eingebaute Themes sind schreibgeschützt), `file` (Dateiname in `themes/`, `null` bei eingebauten) und `active`. Dateien, die sich nicht laden lassen, stehen unter `invalid` mit `file` und `error`; sie sind nicht wählbar (`error` zitiert höchstens 40 Zeichen eines fehlerhaften Werts). Pfade werden nie zurückgegeben. `note`: Theme-Namen und Fehlertexte sind nicht vertrauenswürdig.
+- **`theme_get`**: optionaler Parameter `name` (Standard: das aktive Theme). Liefert `name`, `dark`, `builtin`, `file`, `active`, `terminal` (`fg`, `bg`, `cursor`, `selection`, `ansi` mit 16 Farben), `colors` (jede [Oberflächenfarbe](themes.md#oberflächenfarben) aufgelöst als `#rrggbb` oder `#rrggbbaa`) und `overrides` (nur die Werte, die das Theme selbst setzt – eine Farbe oder ein Verweis wie `"@text/20"`). `note`: Theme-Namen sind nicht vertrauenswürdig. Unbekannter Name: `not_found`.
 
 ## Sicherheit
 - Der Zugriff läuft nur lokal über die laufende Instanz (`127.0.0.1`, eigener Token). Die Stufe ist standardmäßig **Aus**.

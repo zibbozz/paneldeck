@@ -13,7 +13,7 @@
 
 use super::folder_picker::Target;
 use crate::state::Lang;
-use eframe::egui::{self, Color32, Id, Key, Modifiers, Popup, PopupCloseBehavior, RichText, Ui};
+use eframe::egui::{self, Id, Key, Modifiers, Popup, PopupCloseBehavior, RichText, Ui};
 
 /// Was die Liste enthält (Texte, Dialog).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +98,7 @@ pub(super) fn list_editor(
         st.selected = None;
     }
     let mut changed = false;
-    let red = Color32::from_rgb(0xe0, 0x6c, 0x75);
+    let red = crate::style::ui().error;
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             // Liste in einem Rahmen, damit sie auch leer als Feld erkennbar ist.

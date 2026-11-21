@@ -68,7 +68,7 @@ pub fn draw_body(ui: &mut Ui, cx: &BodyCx, data: Option<&TileData>, events: &mut
 /// Hinweis oder Fehler in der Mitte der Kachel.
 fn message(ui: &mut Ui, text: &str, error: bool) {
     ui.add_space(6.0);
-    let color = if error { widgets::DANGER } else { style::dim(ui) };
+    let color = if error { widgets::DANGER() } else { style::dim(ui) };
     ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
 }
 

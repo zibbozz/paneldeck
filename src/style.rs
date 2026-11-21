@@ -5,13 +5,15 @@
 //! leichte Helligkeitsstufen statt über Rahmen gegliedert; eine Akzentfarbe; Abstände im 4-px-Raster;
 //! wenige Schriftgrößen; ausreichender Kontrast (kein reines Schwarz/Weiß).
 
-use crate::theme::Theme;
+use crate::theme::{Theme, UiColors};
 use eframe::egui::{
     self, epaint::Shadow, Color32, CornerRadius, FontFamily, FontId, Margin, Painter, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, TextStyle, Ui, Vec2,
 };
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::RwLock;
 
 // Motion-Tokens: Hover/Klick ~120 ms, Zustandswechsel ~200 ms, Layout ~280 ms; Kurve: ease-out.
 pub const D_FAST: f32 = 0.12;
@@ -155,13 +157,53 @@ pub fn anim(ctx: &egui::Context, id: egui::Id, target: bool, dur: f32) -> f32 {
     ctx.animate_bool_with_time_and_easing(salted(id), target, d, egui::emath::easing::cubic_out)
 }
 
-/// Standard-Akzentfarbe (Terminal Hub). Im Todolist-Reiter ersetzt die Projektfarbe sie (siehe [`accent`]).
-pub const ACCENT: Color32 = Color32::from_rgb(0xd9, 0x77, 0x57);
-
 static ACCENT_RGB: AtomicU32 = AtomicU32::new(0x00d9_7757);
 
-/// Aktuelle Akzentfarbe: Standard ([`ACCENT`]) oder die Farbe des gewählten Projekts im Todolist-Reiter.
+/// Oberflächenfarben des aktiven Themes (#309), gesetzt von [`apply`] bzw. [`set_theme_ui`].
+static THEME_UI: RwLock<Option<UiColors>> = RwLock::new(None);
+
+thread_local! {
+    /// Vorschau des Theme-Editors: solange gesetzt, liefern [`ui`] und [`accent`] die Farben des bearbeiteten Themes.
+    static PREVIEW: Cell<Option<UiColors>> = const { Cell::new(None) };
+}
+
+/// Oberflächenfarben des aktiven Themes (benannte Farben, siehe `theme::tokens`). Ersetzt feste Farbwerte in der
+/// Oberfläche (Status, Diff, Syntax …), damit eigene Themes sie ändern können.
+pub fn ui() -> UiColors {
+    if let Some(u) = PREVIEW.with(|p| p.get()) {
+        return u;
+    }
+    if let Some(u) = *THEME_UI.read().unwrap_or_else(|e| e.into_inner()) {
+        return u;
+    }
+    let u = crate::theme::all()[0].ui_colors();
+    *THEME_UI.write().unwrap_or_else(|e| e.into_inner()) = Some(u);
+    u
+}
+
+/// Oberflächenfarben des aktiven Themes setzen (ohne den egui-Stil neu zu bauen).
+pub fn set_theme_ui(u: UiColors) {
+    *THEME_UI.write().unwrap_or_else(|e| e.into_inner()) = Some(u);
+}
+
+/// `f` mit den Farben `u` als aktive Oberflächenfarben ausführen (Vorschau im Theme-Editor).
+pub fn with_preview<R>(u: UiColors, f: impl FnOnce() -> R) -> R {
+    let prev = PREVIEW.with(|p| p.replace(Some(u)));
+    let r = f();
+    PREVIEW.with(|p| p.set(prev));
+    r
+}
+
+/// Akzentfarbe des Themes (ohne Projektfarbe) – früher die feste Konstante `ACCENT`.
+pub fn brand() -> Color32 {
+    ui().accent
+}
+
+/// Aktuelle Akzentfarbe: die des Themes ([`brand`]) oder die Farbe des gewählten Projekts im Todolist-Reiter.
 pub fn accent() -> Color32 {
+    if let Some(u) = PREVIEW.with(|p| p.get()) {
+        return u.accent;
+    }
     let v = ACCENT_RGB.load(Ordering::Relaxed);
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
@@ -182,69 +224,73 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
 
-fn opaque(c: Color32) -> Color32 {
-    Color32::from_rgb(c.r(), c.g(), c.b())
+/// Stil auf den egui-Kontext anwenden. `opacity` (0.3–1.0) wirkt auf Seitenleiste und Flächen. Setzt auch die
+/// Oberflächenfarben für [`ui`].
+pub fn apply(ctx: &egui::Context, theme: &Theme, opacity: f32) {
+    set_theme_ui(theme.ui_colors());
+    let mut style = (*ctx.style()).clone();
+    build_style(&mut style, theme, opacity, accent());
+    ctx.set_style(style);
 }
 
-/// Stil auf den egui-Kontext anwenden. `opacity` (0.3–1.0) wirkt auf Seitenleiste und Flächen.
-pub fn apply(ctx: &egui::Context, theme: &Theme, opacity: f32) {
-    let bg = opaque(theme.bg);
-    let (white, black) = (Color32::WHITE, Color32::BLACK);
+/// Stil aus einem Theme bauen (auch für die Vorschau des Theme-Editors). `accent`: aktuelle Akzentfarbe (Projektfarbe
+/// im Todo-Reiter); weicht sie vom Akzent des Themes ab, folgen ihr alle Farben, die auf `@accent` verweisen.
+pub fn build_style(style: &mut egui::Style, theme: &Theme, opacity: f32, accent: Color32) {
+    let base = theme.ui_colors();
+    let u = if accent.to_opaque() != base.accent.to_opaque() {
+        let mut t = theme.clone();
+        t.ui.insert("accent".into(), crate::theme::Spec::Hex(accent.to_opaque()));
+        t.ui_colors()
+    } else {
+        base
+    };
     let dark = theme.dark;
-    // Flächenstufen: Seitenleiste etwas abgesetzt, Kopfzeilen/Eingabefelder/Hover in feinen Schritten.
-    let side = if dark { mix(bg, black, 0.22) } else { mix(bg, black, 0.045) };
-    let raised = if dark { mix(bg, white, 0.045) } else { mix(bg, white, 0.6) };
-    let hover = if dark { mix(side, white, 0.07) } else { mix(side, black, 0.06) };
-    let input = if dark { mix(side, black, 0.30) } else { mix(side, white, 0.7) };
-    let border = if dark { mix(bg, white, 0.12) } else { mix(bg, black, 0.14) };
-    let text = if dark { mix(theme.fg, white, 0.18) } else { mix(theme.fg, black, 0.15) };
-    let dim = mix(text, side, 0.42);
     let a = opacity.clamp(0.3, 1.0);
     let fade = |c: Color32| c.gamma_multiply(a);
 
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-    v.panel_fill = fade(side);
-    v.window_fill = if dark { mix(side, white, 0.05) } else { raised };
-    v.window_stroke = Stroke::new(1.0_f32, border);
+    v.panel_fill = fade(u.sidebar_bg);
+    v.window_fill = u.window_bg;
+    v.window_stroke = Stroke::new(1.0_f32, u.border);
     v.window_corner_radius = CornerRadius::same(10);
     v.menu_corner_radius = CornerRadius::same(8);
     let shadow = Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(if dark { 130 } else { 50 }) };
     v.window_shadow = shadow;
     v.popup_shadow = shadow;
-    v.faint_bg_color = fade(raised);
-    v.extreme_bg_color = input;
-    v.code_bg_color = input;
+    v.faint_bg_color = fade(u.surface);
+    v.extreme_bg_color = u.input_bg;
+    v.code_bg_color = u.code_bg;
     v.override_text_color = None;
-    v.hyperlink_color = accent();
-    v.selection.bg_fill = accent().gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0_f32, accent());
-    v.text_cursor.stroke = Stroke::new(1.5_f32, accent());
+    v.weak_text_color = Some(u.text_dim);
+    v.hyperlink_color = u.link;
+    v.selection.bg_fill = u.selection_bg;
+    v.selection.stroke = Stroke::new(1.0_f32, u.focus);
+    v.text_cursor.stroke = Stroke::new(1.5_f32, u.focus);
 
     let r = CornerRadius::same(RADIUS);
     let w = &mut v.widgets;
-    w.noninteractive.bg_fill = side;
-    w.noninteractive.weak_bg_fill = side;
-    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, border);
-    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, text);
+    w.noninteractive.bg_fill = u.sidebar_bg;
+    w.noninteractive.weak_bg_fill = u.sidebar_bg;
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, u.border);
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, u.text);
     w.noninteractive.corner_radius = r;
-    w.inactive.bg_fill = if dark { mix(side, white, 0.10) } else { mix(side, black, 0.08) };
-    w.inactive.weak_bg_fill = w.inactive.bg_fill;
-    w.inactive.bg_stroke = Stroke::new(1.0_f32, mix(side, text, 0.16));
-    w.inactive.fg_stroke = Stroke::new(1.0_f32, text);
+    w.inactive.bg_fill = u.widget_bg;
+    w.inactive.weak_bg_fill = u.widget_bg;
+    w.inactive.bg_stroke = Stroke::new(1.0_f32, u.widget_border);
+    w.inactive.fg_stroke = Stroke::new(1.0_f32, u.text);
     w.inactive.corner_radius = r;
-    w.hovered.bg_fill = hover;
-    w.hovered.weak_bg_fill = hover;
-    w.hovered.bg_stroke = Stroke::new(1.0_f32, mix(border, text, 0.25));
-    w.hovered.fg_stroke = Stroke::new(1.0_f32, if dark { white } else { black });
+    w.hovered.bg_fill = u.hover_bg;
+    w.hovered.weak_bg_fill = u.hover_bg;
+    w.hovered.bg_stroke = Stroke::new(1.0_f32, u.hover_border);
+    w.hovered.fg_stroke = Stroke::new(1.0_f32, u.text_strong);
     w.hovered.corner_radius = r;
-    w.active.bg_fill = accent().gamma_multiply(0.45);
-    w.active.weak_bg_fill = accent().gamma_multiply(0.45);
-    w.active.bg_stroke = Stroke::new(1.0_f32, accent());
-    w.active.fg_stroke = Stroke::new(1.0_f32, if dark { white } else { black });
+    w.active.bg_fill = u.active_bg;
+    w.active.weak_bg_fill = u.active_bg;
+    w.active.bg_stroke = Stroke::new(1.0_f32, u.accent);
+    w.active.fg_stroke = Stroke::new(1.0_f32, u.text_strong);
     w.active.corner_radius = r;
     w.open = w.hovered.clone();
 
-    let mut style = (*ctx.style()).clone();
     style.visuals = v;
     style.spacing.item_spacing = Vec2::new(S2, 6.0);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
@@ -261,8 +307,6 @@ pub fn apply(ctx: &egui::Context, theme: &Theme, opacity: f32) {
     style.text_styles.insert(TextStyle::Button, FontId::new(13.0, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Small, FontId::new(11.5, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace));
-    ctx.set_style(style);
-    let _ = (dim,);
 }
 
 /// Dezente Zweitfarbe für Hinweistexte.
@@ -572,14 +616,16 @@ pub fn icon_btn_small(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
     resp.on_hover_text(tip)
 }
 
-/// Rot für Fehler und zerstörende Aktionen in der Oberfläche (das Rot des Standard-Themas One Dark).
-pub const DANGER_SOFT: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+/// Rot für Fehler und zerstörende Aktionen in der Oberfläche (Farbe `error` des Themes; Standard: das Rot von One Dark).
+pub fn danger_soft() -> Color32 {
+    ui().error
+}
 
 /// Farbe des Symbols von [`danger_icon_at`] bei Überfahren-Anteil `hover` (0..1, animiert): in Ruhe unauffällig in der
 /// gedämpften Textfarbe (kein Rot), beim Überfahren das übliche Warnrot (Entscheidung des Nutzers zu #156, wie der
 /// Papierkorb der Todo-Karten). `enabled = false`: blass.
 pub fn danger_icon_color(text: Color32, enabled: bool, hover: f32) -> Color32 {
-    if enabled { mix(text.gamma_multiply(0.7), DANGER_SOFT, hover) } else { text.gamma_multiply(0.3) }
+    if enabled { mix(text.gamma_multiply(0.7), danger_soft(), hover) } else { text.gamma_multiply(0.3) }
 }
 
 /// Zerstörender Icon-Knopf (Papierkorb, „alle schließen“) an einer festen Stelle: in Ruhe unauffällig, beim Überfahren
@@ -592,7 +638,7 @@ pub fn danger_icon_at(ui: &mut Ui, rect: Rect, id: egui::Id, tip: &str, enabled:
     if enabled && resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    ui.painter().rect_filled(rect, RADIUS as f32, DANGER_SOFT.gamma_multiply(0.18 * h));
+    ui.painter().rect_filled(rect, RADIUS as f32, danger_soft().gamma_multiply(0.18 * h));
     paint_icon(ui.painter(), Icon::Trash, rect.center(), danger_icon_color(text, enabled, h));
     resp.on_hover_text(tip)
 }
@@ -609,7 +655,7 @@ pub fn pill(ui: &mut Ui, text: &str, count: Option<usize>, color: Color32, activ
     let h = anim(ui.ctx(), resp.id.with("h"), resp.hovered(), D_FAST);
     let on = anim(ui.ctx(), resp.id.with("on"), active, D_BASE);
     ui.painter().rect_filled(rect, 12.0, hover_bg.gamma_multiply(h * (1.0 - on)));
-    ui.painter().rect_filled(rect, 12.0, color.gamma_multiply(0.28 * on));
+    ui.painter().rect_filled(rect, 12.0, chip_fill(color).gamma_multiply(on));
     ui.painter().rect_stroke(rect, 12.0, Stroke::new(1.0_f32, color.gamma_multiply(0.7 * on)), StrokeKind::Inside);
     ui.painter().circle_filled(Pos2::new(rect.min.x + 12.0, rect.center().y), 3.5, color);
     let tc = mix(text_c.gamma_multiply(0.75), text_c, on.max(h * 0.6));
@@ -655,6 +701,22 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
     resp
 }
 
+fn ui_tab_active() -> Color32 {
+    ui().tab_active
+}
+
+/// Fläche, die dem Akzent folgt: Hat das Theme sie nicht geändert (Standard `@accent/<pct>`), die aktuelle
+/// Akzentfarbe (Projektfarbe im Todo-Reiter) mit dieser Deckkraft, sonst die Farbe des Themes.
+fn follow_accent(themed: Color32, pct: f32) -> Color32 {
+    if themed == brand().gamma_multiply(pct) { accent().gamma_multiply(pct) } else { themed }
+}
+
+/// Fläche eines aktiven Chips der Farbe `color`: Standard `color` zu 28 %; setzt das Theme `chip_active`, dessen Farbe.
+fn chip_fill(color: Color32) -> Color32 {
+    let themed = ui().chip_active;
+    if themed == brand().gamma_multiply(0.28) { color.gamma_multiply(0.28) } else { themed }
+}
+
 /// Tab-Pille ohne Farbpunkt (z. B. Einstellungen).
 pub fn tab(ui: &mut Ui, text: &str, active: bool) -> Response {
     let font = FontId::proportional(13.0);
@@ -664,7 +726,7 @@ pub fn tab(ui: &mut Ui, text: &str, active: bool) -> Response {
     let h = anim(ui.ctx(), resp.id.with("h"), resp.hovered(), D_FAST);
     let on = anim(ui.ctx(), resp.id.with("on"), active, D_BASE);
     ui.painter().rect_filled(rect, 13.0, hover_bg.gamma_multiply(h * (1.0 - on)));
-    ui.painter().rect_filled(rect, 13.0, accent().gamma_multiply(0.25 * on));
+    ui.painter().rect_filled(rect, 13.0, follow_accent(ui_tab_active(), 0.25).gamma_multiply(on));
     let tc = mix(text_c.gamma_multiply(0.72), text_c, on.max(h * 0.6));
     ui.painter().galley(Pos2::new(rect.min.x + 12.0, rect.center().y - g.size().y / 2.0), g, tc);
     if resp.hovered() {
@@ -682,7 +744,7 @@ mod tests {
         let text = Color32::from_gray(200);
         let rest = danger_icon_color(text, true, 0.0);
         assert!(rest.r() == rest.g() && rest.g() == rest.b(), "in Ruhe kein Rot: {rest:?}");
-        assert_eq!(danger_icon_color(text, true, 1.0), DANGER_SOFT, "überfahren: Warnrot");
+        assert_eq!(danger_icon_color(text, true, 1.0), danger_soft(), "überfahren: Warnrot");
         let half = danger_icon_color(text, true, 0.5);
         assert!(half.r() > half.g(), "Übergang wird rötlich");
         let off = danger_icon_color(text, false, 1.0);

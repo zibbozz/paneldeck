@@ -34,9 +34,9 @@ pub enum ToastKind {
 impl ToastKind {
     fn color(self) -> Color32 {
         match self {
-            ToastKind::Info => style::ACCENT,
-            ToastKind::Warning => Color32::from_rgb(0xe5, 0xc0, 0x7b),
-            ToastKind::Error => Color32::from_rgb(0xe0, 0x4f, 0x5f),
+            ToastKind::Info => crate::style::ui().info,
+            ToastKind::Warning => crate::style::ui().warning,
+            ToastKind::Error => crate::style::ui().danger,
         }
     }
 }

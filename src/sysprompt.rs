@@ -202,6 +202,8 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "start_process" => ("Prozess oder Gruppe der Prozessliste starten.", "Start a process-list entry or group."),
         "stop_process" => ("Prozess oder Gruppe stoppen (Strg+C, nach 5 s der ganze Prozessbaum).", "Stop a process-list entry or group (Ctrl+C, after 5 s the whole process tree)."),
         "restart_process" => ("Prozess oder Gruppe der Prozessliste neu starten.", "Restart a process-list entry or group."),
+        "theme_list" => ("Farbthemes auflisten (aktives, eingebaute, ungültige Dateien).", "List the colour themes (active, built-in, invalid files)."),
+        "theme_get" => ("Ein Farbtheme lesen: Terminal- und Oberflächenfarben.", "Read one colour theme: terminal and interface colours."),
         "list_todos" => ("Karten der einfachen Todo-Liste lesen.", "Read the cards of the simple to-do list."),
         "add_todo" => ("Karte zur einfachen Todo-Liste hinzufügen (optional mit Fälligkeit).", "Add a card to the simple to-do list (optionally with a due date)."),
         "set_todo_done" => ("Todo-Karte abhaken oder wieder öffnen.", "Tick off a to-do card or reopen it."),

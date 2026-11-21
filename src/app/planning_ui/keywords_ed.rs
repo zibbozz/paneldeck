@@ -25,7 +25,10 @@ use eframe::egui::{self, Color32, Id, RichText, Ui};
 use rusqlite::Connection;
 use serde_json::Value;
 
-const RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+#[allow(non_snake_case)]
+fn RED() -> Color32 {
+    crate::style::ui().error
+}
 
 /// Ein wählbares Feld (aus allen Projekten, weil Schlüsselwörter global sind).
 #[derive(Clone, Debug)]
@@ -284,7 +287,7 @@ pub fn keywords_dialog(ctx: &egui::Context, st: &mut State, conn: &Connection, l
                                 if k.builtin {
                                     widgets::lock_icon(ui, lang.t("Eingebaut: nicht löschbar, nur die Beschreibung ist änderbar", "Built in: cannot be deleted, only the description can be changed"));
                                 } else if is_broken {
-                                    ui.label(RichText::new("▲").color(RED)).on_hover_text(lang.t("Kaputt: ein Feld der Definition gibt es nicht mehr", "Broken: a field of the definition no longer exists"));
+                                    ui.label(RichText::new("▲").color(RED())).on_hover_text(lang.t("Kaputt: ein Feld der Definition gibt es nicht mehr", "Broken: a field of the definition no longer exists"));
                                 }
                                 ui.label(RichText::new(&k.name).monospace().strong());
                                 let (txt, tip) = match k.kind {
@@ -310,7 +313,7 @@ pub fn keywords_dialog(ctx: &egui::Context, st: &mut State, conn: &Connection, l
                                 ui.label(RichText::new(lang.t(
                                     "Kaputt: Ein Feld dieser Definition gibt es nicht mehr. Das Schlüsselwort wird in Abfragen nicht angeboten – repariere es oder lösche es.",
                                     "Broken: a field of this definition no longer exists. The keyword is not offered in queries – repair or delete it.",
-                                )).small().color(RED));
+                                )).small().color(RED()));
                             }
                         });
                         ui.add_space(S1);
@@ -580,7 +583,7 @@ fn compare_editor(ui: &mut Ui, c: &mut Cond, fields: &[FieldChoice], lang: Lang,
         let before = *field_id;
         let cur = find(fields, *field_id);
         let sel = cur.map(|f| f.label.clone()).unwrap_or_else(|| lang.t("(Feld fehlt – neu wählen)", "(field missing – choose again)").to_string());
-        let text = if cur.is_some() { RichText::new(sel) } else { RichText::new(sel).color(RED) };
+        let text = if cur.is_some() { RichText::new(sel) } else { RichText::new(sel).color(RED()) };
         egui::ComboBox::from_id_salt(salt.with("f")).selected_text(text).width(250.0).show_ui(ui, |ui| {
             for f in fields {
                 ui.selectable_value(field_id, f.id, &f.label);

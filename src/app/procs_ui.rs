@@ -229,9 +229,9 @@ impl ProcsState {
 /// Farbe des Statuspunkts.
 fn status_color(s: Status) -> Color32 {
     match s {
-        Status::Running => Color32::from_rgb(0x4c, 0xc3, 0x6e),
-        Status::Stopping => Color32::from_rgb(0xe5, 0xc0, 0x7b),
-        Status::Crashed | Status::Failed => style::DANGER_SOFT,
+        Status::Running => style::ui().success,
+        Status::Stopping => style::ui().warning,
+        Status::Crashed | Status::Failed => style::danger_soft(),
         Status::Exited | Status::Stopped => Color32::from_gray(130),
     }
 }
@@ -672,7 +672,7 @@ impl App {
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::click());
         let hover_bg = ui.visuals().widgets.hovered.bg_fill;
         if selected {
-            ui.painter().rect_filled(rect, style::RADIUS as f32, style::ACCENT.gamma_multiply(0.22));
+            ui.painter().rect_filled(rect, style::RADIUS as f32, style::accent().gamma_multiply(0.22));
         } else if resp.hovered() {
             ui.painter().rect_filled(rect, style::RADIUS as f32, hover_bg.gamma_multiply(0.6));
         }
@@ -702,7 +702,7 @@ impl App {
             }
         }
         if errors > 0 {
-            child.add(egui::Label::new(RichText::new(format!("! {errors}")).small().color(style::DANGER_SOFT))).on_hover_text(lang.t("Fehlerzeilen in der Ausgabe", "Error lines in the output"));
+            child.add(egui::Label::new(RichText::new(format!("! {errors}")).small().color(style::danger_soft()))).on_hover_text(lang.t("Fehlerzeilen in der Ausgabe", "Error lines in the output"));
         }
         child.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             let (dr, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
@@ -886,7 +886,7 @@ impl App {
                     if leftover {
                         text.push_str(&format!(" – {}", lang.t("von der Shell gestartete Programme laufen noch", "programs started by the shell are still running")));
                     }
-                    ui.colored_label(if status == Status::Exited { Color32::from_gray(220) } else { style::DANGER_SOFT }, text);
+                    ui.colored_label(if status == Status::Exited { Color32::from_gray(220) } else { style::danger_soft() }, text);
                     if leftover && ui.button(lang.t("Restprozesse beenden", "End remaining processes")).clicked() {
                         self.procs.cmds.push(Cmd::Stop(id));
                     }
@@ -1016,7 +1016,7 @@ impl App {
             }
             if let Some(e) = &ed.error {
                 ui.add_space(S1);
-                ui.colored_label(style::DANGER_SOFT, e);
+                ui.colored_label(style::danger_soft(), e);
             }
             ui.add_space(S2);
             ui.horizontal(|ui| {
@@ -1025,7 +1025,7 @@ impl App {
                 if ed.id.is_some() {
                     ui.add_space(S3);
                     let label = if ed.confirm_delete { lang.t("Wirklich löschen?", "Really delete?") } else { lang.t("Löschen …", "Delete …") };
-                    let b = ui.add_enabled(!running, egui::Button::new(RichText::new(label).color(style::DANGER_SOFT)));
+                    let b = ui.add_enabled(!running, egui::Button::new(RichText::new(label).color(style::danger_soft())));
                     let b = if running { b.on_disabled_hover_text(lang.t("Erst stoppen.", "Stop it first.")) } else { b };
                     if b.clicked() {
                         if ed.confirm_delete {

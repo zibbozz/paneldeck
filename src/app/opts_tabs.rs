@@ -75,7 +75,10 @@ impl TabInfo {
 }
 
 const ORANGE: Color32 = Color32::from_rgb(0xe5, 0xa0, 0x4b);
-const RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+#[allow(non_snake_case)]
+fn RED() -> Color32 {
+    crate::style::ui().error
+}
 
 fn tab_id(salt: &str) -> Id {
     Id::new(("opts_tab", salt.to_string()))
@@ -227,7 +230,7 @@ pub(super) fn strip(ui: &mut Ui, lang: Lang, salt: &str, infos: &[TabInfo]) -> T
             let r = ui.add(egui::Button::selectable(cur == info.tab, text)).on_hover_text(format!("Alt+{}", n + 1));
             if info.mark != Mark::None {
                 // Punkt oben rechts am Reiter.
-                let c = if info.mark == Mark::Error { RED } else { ORANGE };
+                let c = if info.mark == Mark::Error { RED() } else { ORANGE };
                 ui.painter().circle_filled(r.rect.right_top() + egui::vec2(-3.0, 3.0), 3.0, c);
             }
             #[cfg(test)]
@@ -346,7 +349,7 @@ pub(super) fn invalid_hint(lang: Lang, infos: &[TabInfo]) -> Option<String> {
 /// Hinweis zeigen (rot, klein) und als Tooltip des gesperrten Knopfs.
 pub(super) fn show_invalid(ui: &mut Ui, hint: &Option<String>, button: &egui::Response) {
     if let Some(h) = hint {
-        ui.label(RichText::new(h).small().color(RED));
+        ui.label(RichText::new(h).small().color(RED()));
         button.clone().on_disabled_hover_text(h.as_str());
     }
 }

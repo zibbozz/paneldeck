@@ -55,6 +55,7 @@ Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en
 - [Abfragesprache](docs/de/query-language.md) – Tickets suchen, Beispiele, Referenz
 - [Prozessliste](docs/de/processes.md) – Entwicklungsserver und Watcher mit ihrer Ausgabe in einem eigenen Bereich
 - [Chats mit lokalen Modellen](docs/de/chat.md) – Ollama und OpenAI-kompatible Server, Modelle, Werkzeuge und Freigaben, Sicherheit
+- [Themes und der Theme-Editor](docs/de/themes.md) – Themes bearbeiten und erzeugen, Design-Prüfung, Dateiformat und Farbnamen
 - [Agenten-Schnittstelle (MCP)](docs/de/agent-interface.md) – Stufen, Werkzeuge, Sicherheit, Systemprompt
 - [Kommandozeile](docs/de/command-line.md) – alle Optionen, Suche des Datenordners, Profile, Exit-Codes
 - [Datenordner und Sicherungen](docs/de/data-and-backups.md) – Dateien, Sicherungen, portabel oder installiert

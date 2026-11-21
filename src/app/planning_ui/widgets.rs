@@ -9,7 +9,10 @@ use crate::style::{self, S1, S2};
 use eframe::egui::{self, Color32, Id, Key, Painter, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use std::hash::Hash;
 
-pub const DANGER: Color32 = Color32::from_rgb(0xc2, 0x41, 0x41);
+#[allow(non_snake_case)]
+pub fn DANGER() -> Color32 {
+    crate::style::ui().danger_button
+}
 
 // ------------------------------------------------------------------ Schaltflächen und Rahmen
 
@@ -29,12 +32,12 @@ pub fn secondary(ui: &mut Ui, text: &str) -> Response {
 /// Zerstörende Aktion; `wait` = Sekunden bis zur Freigabe (0 = sofort), im Text als Countdown.
 pub fn danger(ui: &mut Ui, text: &str, wait: u32) -> Response {
     let label = if wait > 0 { format!("{text} ({wait})") } else { text.to_string() };
-    let b = egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(if wait > 0 { DANGER.gamma_multiply(0.4) } else { DANGER }).min_size(Vec2::new(110.0, 28.0));
+    let b = egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(if wait > 0 { DANGER().gamma_multiply(0.4) } else { DANGER() }).min_size(Vec2::new(110.0, 28.0));
     ui.add_enabled(wait == 0, b)
 }
 
 pub fn small_danger(ui: &mut Ui, text: &str) -> Response {
-    ui.add(egui::Button::new(RichText::new(text).small().color(Color32::from_rgb(0xe0, 0x6c, 0x75))))
+    ui.add(egui::Button::new(RichText::new(text).small().color(crate::style::ui().error)))
 }
 
 /// Abgesetzte Karte für zusammengehörige Einstellungen.
@@ -64,7 +67,7 @@ pub fn hint(ui: &mut Ui, text: &str) {
 }
 
 pub fn error(ui: &mut Ui, text: &str) {
-    ui.colored_label(Color32::from_rgb(0xe0, 0x6c, 0x75), text);
+    ui.colored_label(crate::style::ui().error, text);
 }
 
 pub fn modal_width(ctx: &egui::Context, want: f32) -> f32 {
@@ -236,7 +239,7 @@ pub fn palette_and_hex(ui: &mut Ui, salt: impl Hash, hex: &mut String, lang: Lan
             }
         }
         if hex_input(&buf).is_none() {
-            ui.label(RichText::new(lang.t("Form #RRGGBB", "Use #RRGGBB")).small().color(Color32::from_rgb(0xe0, 0x6c, 0x75)));
+            ui.label(RichText::new(lang.t("Form #RRGGBB", "Use #RRGGBB")).small().color(crate::style::ui().error));
         }
     });
     changed

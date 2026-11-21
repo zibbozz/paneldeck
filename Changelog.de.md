@@ -19,10 +19,15 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Ticket-Archiv: archivierte Tickets sind in Listen, Boards und Suche ausgeblendet, außer eine Abfrage fragt nach `archived = true`; *Archivieren* / *Aus dem Archiv holen* im Ticket-Menü (#308)
 - Datenbankpflege auf der Wartungsseite: Prüfen (`integrity_check`, `foreign_key_check` und eigene Prüfungen), Statistik, Komprimieren, Reparieren, was sich eindeutig wiederherstellen lässt, und Retten in eine neue Datei (#308)
 - Agenten-Schnittstelle: Werkzeug `maintenance_report` (Stufe Lesen, Expertenmodus, höchstens 200 Funde mit `truncated` und `total`); die Ticket-Werkzeuge erhalten den optionalen Parameter `include_archived` und das Feld `archived`; schreibende Werkzeuge liefern den neuen Fehler `busy` mit `details.retry_after_ms`, solange eine Wartungsaktion schreibt (#308)
+- Theme-Editor (*Einstellungen → Darstellung → Theme bearbeiten … / Neues Theme …*): Farbliste mit Farbwähler, Hex-Eingabe und Verweisen auf andere Farben (`@text/20`), Live-Vorschau aller Bausteine der Oberfläche mit echten Bedienelementen (Klick auf ein Element springt zu seiner Farbe), Rückgängig/Wiederholen, Kontrastwerte, Theme aus Hintergrund + Akzent erzeugen, Umbenennen, Duplizieren, Löschen, Import und Export; die App ändert sich erst beim *Speichern* (#309)
+- Themes können **benannte Oberflächenfarben** im neuen optionalen Objekt `ui` von `themes/*.json` festlegen (Hintergründe, Text, Rahmen, Akzent, Status, Seitenleiste und Reiter, Chips, Chat, Diff und Syntax); nicht gesetzte Farben werden wie bisher abgeleitet, bestehende Themes funktionieren weiter (#309)
+- Design-Prüfung im Theme-Editor: Hinweise zu Kontrast (WCAG), unterscheidbaren Zuständen, Statusfarben bei Farbsehschwächen, der Terminal-Palette und Harmonie; blockiert das Speichern nie, einzelne Prüfungen lassen sich abschalten (#309)
+- Agenten-Schnittstelle: lesende Werkzeuge `theme_list` und `theme_get` (Stufe Lesen); Agenten können Themes nicht ändern (#309)
 
 ### Changed
 
 - Projekt-Sicherungen verwenden Formatversion 4 (archivierte Tickets, Wartungseinstellungen, eigene Regeln); Versionen vor 2.6.0 lehnen sie mit klarer Meldung ab, ältere Sicherungen lassen sich weiter importieren. Die Datenbank wird beim ersten Start auf Schema 10 migriert, vorher mit Sicherung (#308)
+- Eine Theme-Datei, die sich nicht laden lässt, wird mit dem Grund angezeigt und ist erst nach der Korrektur wählbar; ist das gewählte Theme ungültig, nutzt Paneldeck das Standard-Theme (#309)
 
 ## [2.5.0] - 2026-11-20
 

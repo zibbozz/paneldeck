@@ -17,7 +17,10 @@ const CARD_PAD: f32 = 12.0;
 const CHIP_H: f32 = 18.0;
 /// Wartezeit der Sicherheitsabfrage vor dem endgültigen Löschen.
 const CONFIRM_SECS: f32 = 3.0;
-const DANGER: Color32 = Color32::from_rgb(0xc2, 0x41, 0x41);
+#[allow(non_snake_case)]
+fn DANGER() -> Color32 {
+    crate::style::ui().danger_button
+}
 
 fn quick_id() -> Id {
     Id::new("todo_quick_input")
@@ -347,7 +350,7 @@ fn layout_card(p: &Painter, it: &Item, all: &[Tag], w: f32, col: &Colors, st: Op
     let mut due = None;
     if let Some(d) = it.due.as_deref() {
         let overdue = st.is_some_and(|s| s.overdue());
-        let c = if overdue { DANGER } else { col.dim };
+        let c = if overdue { DANGER() } else { col.dim };
         let g = galley(p, &crate::due::display(d, lang), FontId::proportional(12.0), c.gamma_multiply(fade), it.done, inner - 22.0);
         let marker = st.and_then(|s| s.marker()).map(|_| Rect::from_min_size(Pos2::new(CARD_PAD, y), Vec2::splat(16.0)));
         let x = if marker.is_some() { CARD_PAD + 21.0 } else { CARD_PAD };
@@ -417,9 +420,9 @@ fn paint_card(p: &Painter, rect: Rect, lay: &CardLayout, it: &Item, col: &Colors
     // Mülltonne
     let tr = lay.trash.translate(o);
     if hv.trash {
-        p.rect_filled(tr, 5.0, Color32::from_rgba_unmultiplied(DANGER.r(), DANGER.g(), DANGER.b(), 70));
+        p.rect_filled(tr, 5.0, Color32::from_rgba_unmultiplied(DANGER().r(), DANGER().g(), DANGER().b(), 70));
     }
-    style::paint_icon(p, SIcon::Trash, tr.center(), if hv.trash { DANGER } else { col.dim.gamma_multiply(if it.done { 0.8 } else { 1.0 }) });
+    style::paint_icon(p, SIcon::Trash, tr.center(), if hv.trash { DANGER() } else { col.dim.gamma_multiply(if it.done { 0.8 } else { 1.0 }) });
     // Checkbox
     let cb = lay.check.translate(o);
     if it.done {
@@ -1209,7 +1212,7 @@ impl TasksUi {
         let m = crate::style::modal(Id::new("todo_confirm_modal")).show(ctx, |ui| {
             ui.set_width(Self::modal_width(ctx, 400.0));
             ui.horizontal(|ui| {
-                ui.colored_label(DANGER, RichText::new("!").heading().strong());
+                ui.colored_label(DANGER(), RichText::new("!").heading().strong());
                 ui.label(RichText::new(title).heading());
             });
             ui.add_space(S2);
@@ -1217,7 +1220,7 @@ impl TasksUi {
             ui.add_space(S3);
             ui.horizontal(|ui| {
                 let label = if secs > 0 { format!("{} ({secs})", lang.t("Löschen", "Delete")) } else { lang.t("Löschen", "Delete").to_string() };
-                let b = egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(if secs > 0 { DANGER.gamma_multiply(0.4) } else { DANGER }).min_size(Vec2::new(110.0, 28.0));
+                let b = egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(if secs > 0 { DANGER().gamma_multiply(0.4) } else { DANGER() }).min_size(Vec2::new(110.0, 28.0));
                 if ui.add_enabled(secs == 0, b).clicked() {
                     go = true;
                 }
@@ -1552,7 +1555,7 @@ impl App {
             self.plan.ensure_loaded(self.db.as_ref());
         }
         let c = if self.mode == titlebar::Mode::Tasks { self.plan.accent() } else { None };
-        style::set_accent(c.unwrap_or(style::ACCENT));
+        style::set_accent(c.unwrap_or(style::brand()));
     }
 
     /// Auswahl „Änderungshistorie“ im Tab „Daten & Sicherung“.

@@ -43,7 +43,7 @@ A tool above the current level returns `forbidden`. The level is checked in the 
 ## Tools
 | Tool | Level | Purpose |
 |---|---|---|
-| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `screenshot`, `get_usage`, `search_history`, `cleanup_sizes` | Read | Who am I (the agent's own session), sessions (with their `kind` and the `window` they belong to), terminal text, the messages of a chat, the LLM servers and models for chats, image of window/session, costs, Claude history, sizes of Paneldeck's data |
+| `whoami`, `list_sessions`, `read_terminal`, `read_chat`, `list_models`, `theme_list`, `theme_get`, `screenshot`, `get_usage`, `search_history`, `cleanup_sizes` | Read | Who am I (the agent's own session), sessions (with their `kind` and the `window` they belong to), terminal text, the messages of a chat, the LLM servers and models for chats, the colour themes, image of window/session, costs, Claude history, sizes of Paneldeck's data |
 | `create_session`, `send_text`, `send_keys`, `run_command`, `queue_prompt`, `wait_for_status`, `rename_session`, `focus_session`, `close_session`, `send_chat_message` | Control | Create/control sessions (also chats), commands with output and exit code, wait for Claude or chat status, send a message to a chat |
 | `list_processes`, `read_process_output` | Read | The [process list](#process-list): entries with status, detected local addresses and error count; the output of an entry |
 | `start_process`, `stop_process`, `restart_process` | Control | Start, stop (Ctrl+C, after 5 s the whole tree) and restart an entry or a group of the process list |
@@ -121,6 +121,13 @@ The [process list](processes.md) (since 2.6.0) runs dev servers and watchers apa
 - **`start_process`**, **`stop_process`**, **`restart_process`** (Control): either `process` (id or name) or `group` – exactly one, otherwise `bad_args`; an unknown entry or group gives `not_found`. A group starts in ascending `order` and stops in reverse. All three return at once with `processes` (`id`, `name`, `status`, `exit_code`, `message`); stopping sends Ctrl+C and ends the whole process tree after 5 s – `list_processes` shows `stopped` once it has ended.
 - `status` is one of `stopped` (by the user, or not started), `running`, `stopping`, `exited` (exit code 0), `crashed` (another exit code), `failed` (could not start: command, shell or folder not found; no exit code).
 - Commands and output are **untrusted data** (`note` in every answer). A program started from the process list that calls the agent interface itself counts as no session (`caller` = `null`, like an orphaned process), so it cannot act as an agent of any session.
+
+## Themes
+
+Agents can read the colour themes, never change them (both tools are additive since 2.6.0, level *Read*):
+
+- **`theme_list`**: `active` (the theme the app uses) and `themes`, each with `name`, `dark`, `builtin` (built-in themes are read-only), `file` (file name in `themes/`, `null` for built-in themes) and `active`. Files that cannot be loaded are listed under `invalid` with `file` and `error`; they cannot be selected (`error` quotes at most 40 characters of a faulty value). No paths are returned. `note`: theme names and error texts are untrusted.
+- **`theme_get`**: optional parameter `name` (default: the active theme). Returns `name`, `dark`, `builtin`, `file`, `active`, `terminal` (`fg`, `bg`, `cursor`, `selection`, `ansi` with 16 colours), `colors` (every [interface colour](themes.md#interface-colours) resolved to `#rrggbb` or `#rrggbbaa`) and `overrides` (only the values the theme sets itself – a colour or a link such as `"@text/20"`). `note`: theme names are untrusted. Unknown name: `not_found`.
 
 ## Security
 - Access only runs locally through the running instance (`127.0.0.1`, own token). The level is **Off** by default.

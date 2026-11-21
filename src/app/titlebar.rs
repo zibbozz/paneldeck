@@ -47,7 +47,7 @@ impl App {
                 let painter = ui.painter();
                 // Programmsymbol
                 let icon_c = Pos2::new(rect.left() + 20.0, rect.center().y);
-                painter.rect_filled(Rect::from_center_size(icon_c, Vec2::splat(18.0)), 5.0, style::ACCENT);
+                painter.rect_filled(Rect::from_center_size(icon_c, Vec2::splat(18.0)), 5.0, style::brand());
                 style::paint_icon(painter, SIcon::Terminal, icon_c, Color32::WHITE);
                 // Reiter
                 let tabs: [(Mode, SIcon, &str); 2] = [

@@ -210,7 +210,7 @@ fn release_picker(ui: &mut Ui, ic: &InCx, salt: Id, kind: ReleaseKind, cur: Opti
                 }
                 if let Some(r) = sel {
                     if r.is_overdue(today) {
-                        ui.label(RichText::new(lang.t("überfällig", "overdue")).small().color(widgets::DANGER));
+                        ui.label(RichText::new(lang.t("überfällig", "overdue")).small().color(widgets::DANGER()));
                     }
                 }
             });

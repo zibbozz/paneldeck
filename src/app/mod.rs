@@ -68,6 +68,8 @@ mod sysprompt_ui;
 mod taint;
 mod tasks_ui;
 mod terminal_links;
+mod theme_editor;
+mod theme_preview;
 mod titlebar;
 mod toasts;
 mod tpl_lib;
@@ -270,19 +272,19 @@ impl Entry {
     }
     fn status_color(&self, t: f64) -> Color32 {
         if self.chat.as_ref().is_some_and(|c| c.has_error()) {
-            return Color32::from_rgb(0xe0, 0x6c, 0x75);
+            return crate::style::ui().error;
         }
         if self.exited() {
             return Color32::from_gray(110);
         }
         match self.status {
-            ClaudeStatus::Unknown | ClaudeStatus::Idle => Color32::from_rgb(0x4c, 0xc2, 0x6a),
+            ClaudeStatus::Unknown | ClaudeStatus::Idle => crate::style::ui().success,
             ClaudeStatus::Working => {
                 let k = 0.55 + 0.45 * ((t * 4.0).sin() as f32 * 0.5 + 0.5);
-                Color32::from_rgb(0xd9, 0x77, 0x57).gamma_multiply(k)
+                crate::style::brand().gamma_multiply(k)
             }
-            ClaudeStatus::Permission => Color32::from_rgb(0xe0, 0x4f, 0x5f),
-            ClaudeStatus::Input => Color32::from_rgb(0xe5, 0xc0, 0x7b),
+            ClaudeStatus::Permission => crate::style::ui().danger,
+            ClaudeStatus::Input => crate::style::ui().warning,
         }
     }
 }
@@ -786,6 +788,10 @@ pub struct App {
     settings: Settings,
     shells: Vec<ShellSpec>,
     themes: Vec<Theme>,
+    /// Theme-Dateien, die nicht geladen werden konnten (Grund für die Einstellungen und `theme_list`).
+    theme_issues: Vec<theme::Issue>,
+    /// Theme-Editor und Verwaltung eigener Themes (#309).
+    theme_ui: theme_editor::ThemeUi,
     entries: BTreeMap<u64, Entry>,
     layout: Option<Node>,
     focused: u64,
@@ -1164,6 +1170,8 @@ impl App {
             settings,
             shells,
             themes: Vec::new(),
+            theme_issues: Vec::new(),
+            theme_ui: theme_editor::ThemeUi::default(),
             entries: BTreeMap::new(),
             layout: None,
             focused: 0,
@@ -1571,11 +1579,18 @@ impl App {
         self.dir.join("themes")
     }
 
+    /// Themes neu laden (eingebaute + `themes/*.json`). Ungültige Dateien landen mit Grund in `theme_issues` und sind nicht
+    /// wählbar; ist das gewählte Theme darunter, gilt das Standard-Theme (#309). Leert den Stil-Zwischenspeicher, damit
+    /// ein geändertes Theme gleichen Namens sofort wirkt.
     fn reload_themes(&mut self) {
         theme::write_example(&self.themes_dir());
         let mut t = theme::all();
-        t.extend(theme::load_dir(&self.themes_dir()));
+        let (custom, issues) = theme::load_dir(&self.themes_dir(), &t);
+        t.extend(custom);
         self.themes = t;
+        self.theme_issues = issues;
+        self.style_cache.clear();
+        self.applied_theme.clear();
     }
 
     fn binding(&self, id: &str) -> Option<(Modifiers, Key)> {
@@ -2585,6 +2600,8 @@ impl App {
             return;
         }
         style::set_animations(self.settings.animations);
+        // Oberflächenfarben (#309) gelten global; auch bei einem Treffer im Zwischenspeicher setzen.
+        style::set_theme_ui(theme.ui_colors());
         match self.style_cache.iter().find(|(k, _)| *k == key) {
             Some((_, s)) => ctx.set_style(s.clone()),
             None => {
@@ -2593,6 +2610,8 @@ impl App {
                     self.style_cache.remove(0);
                 }
                 self.style_cache.push((key.clone(), ctx.style()));
+                // Ein neuer Theme-Akzent erreicht `sync_accent` erst im nächsten Bild – dann den Stil noch einmal bauen.
+                ctx.request_repaint();
             }
         }
         self.applied_theme = key;
@@ -4609,7 +4628,7 @@ fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut PaneCx) {
                 Dir::Vertical => Rect::from_center_size(rsep.center(), Vec2::new(rsep.width(), 1.0 + 2.0 * hv)),
             };
             let base = ui.visuals().widgets.noninteractive.bg_stroke.color;
-            ui.painter().rect_filled(line, 0.0, style::mix(base, style::ACCENT, hv));
+            ui.painter().rect_filled(line, 0.0, style::mix(base, style::brand(), hv));
             show_node(ui, a, ra, cx);
             show_node(ui, b, rb, cx);
         }
@@ -4729,7 +4748,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
     ui.painter().circle_filled(Pos2::new(header.min.x + 14.0, cy), 3.6, if entry.exited() { Color32::from_gray(110) } else { status_col });
     let mut hx = header.min.x + 26.0;
     if claude {
-        style::paint_icon(ui.painter(), SIcon::SparkSmall, Pos2::new(hx + 4.0, cy), style::ACCENT);
+        style::paint_icon(ui.painter(), SIcon::SparkSmall, Pos2::new(hx + 4.0, cy), style::brand());
         hx += 14.0;
     }
     let name_col = mix_col(text_c, strong_c, fo);
@@ -4937,7 +4956,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         edge_buttons(ui, id, body, cx, true);
     }
     if cx.broadcast {
-        ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::from_rgb(0xd9, 0x77, 0x57)), StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.5_f32, crate::style::brand()), StrokeKind::Inside);
     }
 }
 
@@ -5840,7 +5859,7 @@ fn edge_buttons(ui: &mut Ui, id: u64, body: Rect, cx: &mut PaneCx, bottom: bool)
     let hover = style::anim(ui.ctx(), Id::new(("edge_h", id, side)), resp.hovered(), style::D_FAST);
     let r = 11.0 + 2.0 * hover;
     let painter = ui.painter();
-    painter.circle_filled(center, r, style::ACCENT.gamma_multiply((0.55 + 0.4 * hover) * appear));
+    painter.circle_filled(center, r, style::brand().gamma_multiply((0.55 + 0.4 * hover) * appear));
     painter.circle_stroke(center, r, Stroke::new(1.0_f32, Color32::from_black_alpha((80.0 * appear) as u8)));
     style::paint_icon(painter, SIcon::Plus, center, Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * appear) as u8));
     if resp.hovered() {

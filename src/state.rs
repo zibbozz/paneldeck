@@ -286,6 +286,16 @@ pub struct Settings {
     /// (seit 2.3.0, #183, Standard an).
     #[serde(deserialize_with = "lenient_true")]
     pub cursor_blink: bool,
+    /// Abgeschaltete Regeln der Design-Prüfung im Theme-Editor (seit 2.6.0, #309; Standard: alle an). Werte: `contrast`,
+    /// `distinct`, `status`, `terminal`, `harmony`; unbekannte bleiben erhalten.
+    #[serde(deserialize_with = "lenient_strings")]
+    pub theme_checks_off: Vec<String>,
+}
+
+/// Liste von Texten tolerant lesen: Einträge mit falschem Typ fallen weg, ein falscher Typ insgesamt ergibt eine leere Liste.
+fn lenient_strings<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default())
 }
 
 /// Tolerant lesen: nur `false` schaltet aus, alles andere (auch ein falscher Typ) ist `true`.
@@ -395,6 +405,7 @@ impl Default for Settings {
             bell_toast: false,
             progress_indicator: true,
             cursor_blink: true,
+            theme_checks_off: Vec::new(),
         }
     }
 }
@@ -1464,6 +1475,11 @@ mod tests {
         assert_eq!((s.remember_sessions, s.osc52_copy, s.warn_multiline_paste), (d.remember_sessions, d.osc52_copy, d.warn_multiline_paste));
         assert_eq!((s.shift_enter_newline_powershell, s.inherit_env, s.bell_toast), (false, false, false));
         assert!(s.program_notify && s.progress_indicator && s.cursor_blink && s.bundled_conpty);
+        // Theme-Prüfung (#309): falsche Typen werden toleriert.
+        let s: Settings = serde_json::from_str(r#"{"theme_checks_off":["contrast",3,"harmony"]}"#).unwrap();
+        assert_eq!(s.theme_checks_off, ["contrast", "harmony"]);
+        let s: Settings = serde_json::from_str(r#"{"theme_checks_off":"x"}"#).unwrap();
+        assert!(s.theme_checks_off.is_empty());
         assert!(s.claude_defaults.is_empty() && s.last_claude_opts.as_ref().is_none_or(|o| o.is_empty()));
         assert!(s.wsl_recent.is_empty());
         // echte Werte gelten weiter

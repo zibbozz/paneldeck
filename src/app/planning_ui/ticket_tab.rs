@@ -28,8 +28,14 @@ const ROW_H: f32 = 30.0;
 pub(super) const W_REFS: f32 = 200.0;
 /// Ab dieser Listenbreite erscheint die Spalte (und nur, wenn mindestens ein Ticket einen Wert hat).
 pub(super) const REFS_MIN_WIDTH: f32 = 900.0;
-pub(super) const GOLD: Color32 = Color32::from_rgb(0xe5, 0xc0, 0x7b);
-pub(super) const FLAG_RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+#[allow(non_snake_case)]
+pub(super) fn GOLD() -> Color32 {
+    crate::style::ui().ticket_star
+}
+#[allow(non_snake_case)]
+pub(super) fn FLAG_RED() -> Color32 {
+    crate::style::ui().ticket_flag
+}
 
 /// Alle Tickets des Projekts und davon erledigte (für die Übersicht).
 pub fn project_counts(conn: &Connection, project_id: i64) -> (usize, usize) {
@@ -272,12 +278,12 @@ impl PlanUi {
             }
             ui.add_space(S2);
             let mut star = self.tickets.filters.starred;
-            if mark_toggle(ui, "star", &mut star, GOLD, lang.t("Nur Favoriten (Stern)", "Starred only")) {
+            if mark_toggle(ui, "star", &mut star, GOLD(), lang.t("Nur Favoriten (Stern)", "Starred only")) {
                 self.tickets.filters.starred = star;
                 changed = true;
             }
             let mut flag = self.tickets.filters.flagged;
-            if mark_toggle(ui, "flag", &mut flag, FLAG_RED, lang.t("Nur markierte Tickets (Flag)", "Flagged only")) {
+            if mark_toggle(ui, "flag", &mut flag, FLAG_RED(), lang.t("Nur markierte Tickets (Flag)", "Flagged only")) {
                 self.tickets.filters.flagged = flag;
                 changed = true;
             }
@@ -502,7 +508,7 @@ impl PlanUi {
                             tx += 20.0;
                         }
                         let overdue = due_st.as_ref().is_some_and(|s| s.overdue());
-                        let c = if overdue { FLAG_RED } else { text_col };
+                        let c = if overdue { FLAG_RED() } else { text_col };
                         let g = ui.painter().layout_no_wrap(crate::due::display(d, lang), egui::FontId::proportional(12.0), c);
                         ui.painter().galley(Pos2::new(tx, rect.center().y - g.size().y / 2.0), g, c);
                         if let Some(st) = &due_st {
@@ -539,7 +545,7 @@ impl PlanUi {
                 let star_r = Rect::from_center_size(Pos2::new(x + 14.0, rect.center().y), Vec2::splat(22.0));
                 let flag_r = Rect::from_center_size(Pos2::new(x + 40.0, rect.center().y), Vec2::splat(22.0));
                 let mut hit_mark = false;
-                for (r, is_star, on, col) in [(star_r, true, t.starred, GOLD), (flag_r, false, t.flagged, FLAG_RED)] {
+                for (r, is_star, on, col) in [(star_r, true, t.starred, GOLD()), (flag_r, false, t.flagged, FLAG_RED())] {
                     let rs = ui.interact(r, egui::Id::new(("rowmark", t.id, is_star)), Sense::click());
                     let c = if on { col } else if rs.hovered() { col.gamma_multiply(0.7) } else { style::dim(ui).gamma_multiply(0.45) };
                     paint_mark(ui.painter(), if is_star { "star" } else { "flag" }, r.center(), on, c);
