@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [3.0.0] - WIP
 
+### Changed
+
+- Maintenance page: "Rescue into a new file" is much faster, especially on Windows – each table is now copied in one transaction instead of writing row by row (#363)
+
 ## [2.7.0] - 2026-11-21
 
 ### Added

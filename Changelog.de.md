@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [3.0.0] - WIP
 
+### Changed
+
+- Wartungsseite: „In neue Datei retten“ ist deutlich schneller, vor allem unter Windows – jede Tabelle wird jetzt in einer Transaktion kopiert statt Zeile für Zeile geschrieben (#363)
+
 ## [2.7.0] - 2026-11-21
 
 ### Added
