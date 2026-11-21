@@ -42,6 +42,8 @@ impl SearchInput {
 pub(super) enum PanelAction {
     /// Datei an Zeile/Spalte (ab 1) öffnen bzw. dorthin springen.
     Open { path: PathBuf, line: usize, col: usize },
+    /// Esc im Suchfeld: Fenster schließen.
+    Close,
 }
 
 /// Zusammenfassung als Text (für die Statuszeile des Panels).
@@ -122,36 +124,46 @@ fn line_job(ui: &Ui, hit: &find::LineHit) -> LayoutJob {
 }
 
 /// Das Panel zeichnen. `root` = geöffneter Ordner des Editors (`None`: kein Ordner offen – Suche nicht möglich).
+/// Nichts darin ist breiter als der verfügbare Platz: Schalter rechts zuerst, das Suchfeld nimmt den Rest, lange Texte
+/// werden gekürzt – sonst wuchs das Fenster mit jedem Bild über den Rand des Hauptfensters.
 pub(super) fn show(ui: &mut Ui, lang: Lang, input: &mut SearchInput, results: &mut Results, root: Option<&Path>, settings: &EditorSettings) -> Option<PanelAction> {
     let mut action = None;
     let mut start = false;
+    let mut close = false;
     ui.horizontal(|ui| {
-        let edit = egui::TextEdit::singleline(&mut input.pattern).hint_text(lang.t("In Dateien suchen", "Search in files")).desired_width((ui.available_width() - 150.0).max(80.0));
-        let r = ui.add(edit);
-        if std::mem::take(&mut input.focus) {
-            r.request_focus();
-        }
-        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            start = true;
-        }
-        for (on, label, tip) in [
-            (&mut input.case_sensitive, "Aa", lang.t("Groß-/Kleinschreibung beachten", "Match case")),
-            (&mut input.whole_word, "W", lang.t("Nur ganze Wörter", "Whole word")),
-            (&mut input.regex, ".*", lang.t("Regulärer Ausdruck", "Regular expression")),
-        ] {
-            if ui.selectable_label(*on, RichText::new(label).monospace()).on_hover_text(tip).clicked() {
-                *on = !*on;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut inc = input.include_ignored.unwrap_or(settings.search_include_ignored);
+            if ui
+                .selectable_label(inc, lang.t("Ignorierte", "Ignored"))
+                .on_hover_text(lang.t("Ignorierte einbeziehen: auch Dateien, die .gitignore ausschließt (eigene Ausschlussmuster gelten weiter)", "Include ignored: also files excluded by .gitignore (your own exclude patterns still apply)"))
+                .clicked()
+            {
+                inc = !inc;
+                input.include_ignored = Some(inc);
             }
-        }
-        let mut inc = input.include_ignored.unwrap_or(settings.search_include_ignored);
-        if ui
-            .selectable_label(inc, lang.t("Ignorierte", "Ignored"))
-            .on_hover_text(lang.t("Ignorierte einbeziehen: auch Dateien, die .gitignore ausschließt (eigene Ausschlussmuster gelten weiter)", "Include ignored: also files excluded by .gitignore (your own exclude patterns still apply)"))
-            .clicked()
-        {
-            inc = !inc;
-            input.include_ignored = Some(inc);
-        }
+            for (on, label, tip) in [
+                (&mut input.regex, ".*", lang.t("Regulärer Ausdruck", "Regular expression")),
+                (&mut input.whole_word, "W", lang.t("Nur ganze Wörter", "Whole word")),
+                (&mut input.case_sensitive, "Aa", lang.t("Groß-/Kleinschreibung beachten", "Match case")),
+            ] {
+                if ui.selectable_label(*on, RichText::new(label).monospace()).on_hover_text(tip).clicked() {
+                    *on = !*on;
+                }
+            }
+            // Die Breite ist die des Textes, der Innenrand kommt dazu.
+            let edit = egui::TextEdit::singleline(&mut input.pattern).hint_text(lang.t("In Dateien suchen", "Search in files")).desired_width((ui.available_width() - 12.0).max(40.0));
+            let r = ui.add(edit);
+            if std::mem::take(&mut input.focus) {
+                r.request_focus();
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                start = true;
+            }
+            // Esc im Suchfeld (egui nimmt ihm dabei den Fokus) schließt das Fenster.
+            if (r.has_focus() || r.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape)) {
+                close = true;
+            }
+        });
     });
     ui.horizontal(|ui| {
         if results.running() {
@@ -166,7 +178,7 @@ pub(super) fn show(ui: &mut Ui, lang: Lang, input: &mut SearchInput, results: &m
         }
         let text = if root.is_none() { lang.t("Kein Ordner geöffnet.", "No folder is open.").to_string() } else { summary_text(results, lang) };
         let color = if results.error.is_some() { crate::style::ui().error } else { style::dim(ui) };
-        ui.label(RichText::new(text).small().color(color));
+        ui.add(egui::Label::new(RichText::new(text).small().color(color)).truncate());
     });
     if start
         && let Some(root) = root.filter(|_| !input.pattern.is_empty())
@@ -180,7 +192,7 @@ pub(super) fn show(ui: &mut Ui, lang: Lang, input: &mut SearchInput, results: &m
             let open = !results.collapsed.contains(&fi);
             let f = &results.files[fi];
             let head = format!("{} {}  ({})", if open { "▾" } else { "▸" }, f.rel, f.matches);
-            let r = ui.selectable_label(false, RichText::new(head).strong()).on_hover_text(f.path.display().to_string());
+            let r = ui.add(egui::Button::selectable(false, RichText::new(head).strong()).truncate()).on_hover_text(f.path.display().to_string());
             if r.clicked() {
                 if open {
                     results.collapsed.insert(fi);
@@ -194,7 +206,10 @@ pub(super) fn show(ui: &mut Ui, lang: Lang, input: &mut SearchInput, results: &m
             let f = &results.files[fi];
             for (li, hit) in f.lines.iter().enumerate() {
                 let sel = results.selected == Some((fi, li));
-                let r = ui.selectable_label(sel, line_job(ui, hit));
+                let mut job = line_job(ui, hit);
+                // Eine Zeile, am Rand gekürzt (die ganze Zeile steht in der Datei).
+                job.wrap = egui::text::TextWrapping::truncate_at_width((ui.available_width() - ui.spacing().button_padding.x * 2.0).max(40.0));
+                let r = ui.selectable_label(sel, job);
                 if r.clicked() {
                     action = Some(PanelAction::Open { path: f.path.clone(), line: hit.line, col: hit.col });
                 }
@@ -206,6 +221,9 @@ pub(super) fn show(ui: &mut Ui, lang: Lang, input: &mut SearchInput, results: &m
     });
     if let Some(PanelAction::Open { path, line, .. }) = &action {
         results.selected = results.files.iter().enumerate().find_map(|(fi, f)| (f.path == *path).then(|| f.lines.iter().position(|l| l.line == *line).map(|li| (fi, li))).flatten());
+    }
+    if close && action.is_none() {
+        action = Some(PanelAction::Close);
     }
     action
 }
@@ -249,5 +267,71 @@ mod tests {
             });
         });
         assert!(out.is_none());
+    }
+
+    /// Klicktest 3.0.0: Mit langen Treffern, langem Suchtext und langer Zusammenfassung bleibt das Fenster im Hauptfenster
+    /// (Suchfeld, „Suchen“ und „Ignorierte“ sichtbar), wächst nicht und schrumpft mit einem kleineren Hauptfenster.
+    #[test]
+    fn the_window_stays_inside_the_main_window() {
+        let ctx = egui::Context::default();
+        let mut input = SearchInput { pattern: "z".repeat(300), ..Default::default() };
+        let mut results = Results::default();
+        results.files = (0..30)
+            .map(|i| find::FileHits {
+                path: PathBuf::from(format!("/r/f{i}.rs")),
+                rel: format!("{}f{i}.rs", "deep/".repeat(40)),
+                lines: (0..10).map(|l| find::LineHit { line: l + 1, col: 1, preview: "y".repeat(400), ranges: vec![(0, 3)], count: 1 }).collect(),
+                matches: 10,
+                more: true,
+            })
+            .collect();
+        results.summary = Some(find::Summary { files_scanned: 123_456, skipped_binary: 2, skipped_large: 3, errors: 4, truncated: true, ..Default::default() });
+        let s = EditorSettings::default();
+        let root = PathBuf::from("/r");
+        let mut n = 0;
+        for (w, h) in [(1500.0, 960.0), (1100.0, 700.0), (600.0, 420.0)] {
+            let mut rects = Vec::new();
+            let mut seen = None;
+            for _ in 0..8 {
+                n += 1;
+                let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))), time: Some(n as f64 * 0.05), ..Default::default() };
+                let _ = ctx.run(raw, |ctx| {
+                    let mut open = true;
+                    super::super::editor_services::find_files_window(ctx, Lang::En).open(&mut open).show(ctx, |ui| {
+                        let _ = show(ui, Lang::En, &mut input, &mut results, Some(&root), &s);
+                        seen = Some((ui.min_rect(), ui.max_rect()));
+                    });
+                });
+                rects.push(ctx.memory(|m| m.area_rect(Id::new("editor_find_files"))).expect("Fenster"));
+            }
+            let win = *rects.last().unwrap();
+            assert!(win.min.x >= -0.5 && win.min.y >= -0.5 && win.max.x <= w + 0.5 && win.max.y <= h + 0.5, "{w}×{h}: Fenster {win:?} ragt hinaus");
+            assert!((rects[4].width() - win.width()).abs() < 0.5 && (rects[4].height() - win.height()).abs() < 0.5, "{w}×{h}: Fenster wächst: {rects:?}");
+            assert!(win.width() <= 520.0 + 40.0, "{w}×{h}: breiter als vorgesehen: {win:?}");
+            let (used, avail) = seen.expect("gezeichnet");
+            assert!(used.max.x <= avail.max.x + 0.5 && used.min.x >= avail.min.x - 0.5, "{w}×{h}: Inhalt {used:?} breiter als das Fenster {avail:?}");
+        }
+    }
+
+    /// Esc im Suchfeld schließt das Fenster.
+    #[test]
+    fn escape_in_the_search_field_closes() {
+        let ctx = egui::Context::default();
+        let mut input = SearchInput { focus: true, ..Default::default() };
+        let mut results = Results::default();
+        let s = EditorSettings::default();
+        let mut last = None;
+        for (i, ev) in [vec![], vec![], vec![egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]].into_iter().enumerate() {
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))), time: Some(i as f64 * 0.05), events: ev, ..Default::default() };
+            let _ = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    last = show(ui, Lang::En, &mut input, &mut results, None, &s);
+                });
+            });
+            if i < 2 {
+                assert!(last.is_none());
+            }
+        }
+        assert_eq!(last, Some(PanelAction::Close));
     }
 }

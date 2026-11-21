@@ -41,6 +41,19 @@ pub fn movable<'a>(ctx: &egui::Context, id: egui::Id, w: egui::Window<'a>) -> eg
     if reopened { w.current_pos(center) } else { w }
 }
 
+/// Größe eines Fensters an das Hauptfenster binden (wie der Theme-Editor, 2.6.0): Anfangsgröße `default`, aber höchstens
+/// so groß wie das Hauptfenster abzüglich eines Randes; die Höchstgröße folgt dem Hauptfenster in jedem Bild (egui merkt
+/// sich die Größe und begrenzt nur den Inhalt, der Rahmen samt Titelleiste ragte sonst über den Rand); im Fenster gehalten.
+pub fn fit_to_screen<'a>(ctx: &egui::Context, w: egui::Window<'a>, default: [f32; 2], min: [f32; 2]) -> egui::Window<'a> {
+    let max = fit_max(ctx.content_rect().size(), min);
+    w.default_size([default[0].min(max[0]), default[1].min(max[1])]).min_size(min).max_size(max).constrain(true)
+}
+
+/// Höchstgröße des Inhalts eines Fensters im Hauptfenster der Größe `screen` (Rand, Titelleiste und Rahmen abgezogen).
+pub fn fit_max(screen: egui::Vec2, min: [f32; 2]) -> [f32; 2] {
+    [(screen.x - 40.0).max(min[0]), (screen.y - 80.0).max(min[1])]
+}
+
 /// Im vorigen Durchlauf nicht gezeichnet = gerade geöffnet (merkt sich den aktuellen Durchlauf unter `key`).
 fn just_opened(ctx: &egui::Context, key: egui::Id) -> bool {
     let pass = ctx.cumulative_pass_nr();

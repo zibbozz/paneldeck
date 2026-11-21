@@ -340,17 +340,22 @@ impl App {
             let settings = self.settings.editor.clone();
             let svc = &mut self.editor_svc;
             let mut action = None;
-            let win = style::movable(ctx, Id::new("editor_find_files"), egui::Window::new(lang.t("In Dateien suchen", "Search in files")))
-                .open(&mut open)
-                .default_size([520.0, 420.0])
-                .show(ctx, |ui| {
-                    action = super::editor_search_ui::show(ui, lang, &mut svc.search, &mut svc.find, root.as_deref(), &settings);
-                });
+            let esc = !egui::Popup::is_any_open(ctx) && ctx.input(|i| i.key_pressed(Key::Escape));
+            let win = find_files_window(ctx, lang).open(&mut open).show(ctx, |ui| {
+                action = super::editor_search_ui::show(ui, lang, &mut svc.search, &mut svc.find, root.as_deref(), &settings);
+            });
             if let Some(w) = win {
+                // Esc schließt das Fenster, wenn es gemeint ist: im Suchfeld (siehe `PanelAction::Close`) oder mit dem
+                // Zeiger über dem Fenster – nicht beim Tippen im Editor (dort hebt Esc die Auswahl auf).
+                if esc && w.response.contains_pointer() {
+                    open = false;
+                }
                 let _ = w.response.spot(Spot::EditorSearchFiles);
             }
-            if let Some(super::editor_search_ui::PanelAction::Open { path, line, col }) = action {
-                target = Some((path, line, col));
+            match action {
+                Some(super::editor_search_ui::PanelAction::Open { path, line, col }) => target = Some((path, line, col)),
+                Some(super::editor_search_ui::PanelAction::Close) => open = false,
+                None => {}
             }
             if !open {
                 self.editor_svc.search_open = false;
@@ -364,6 +369,11 @@ impl App {
             }
         }
     }
+}
+
+/// Fenster „In Dateien suchen“: nie größer als das Hauptfenster (Ränder, Suchfeld und Schalter bleiben sichtbar).
+pub(super) fn find_files_window<'a>(ctx: &egui::Context, lang: Lang) -> egui::Window<'a> {
+    style::fit_to_screen(ctx, style::movable(ctx, Id::new("editor_find_files"), egui::Window::new(lang.t("In Dateien suchen", "Search in files"))), [520.0, 420.0], [340.0, 200.0]).collapsible(false)
 }
 
 /// Die App als `EditorHost` für die MCP-Werkzeuge (nur im Hauptdurchlauf).
