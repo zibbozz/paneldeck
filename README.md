@@ -42,12 +42,14 @@ The installer and `paneldeck.exe` are **not code-signed**. A certificate costs m
 2. Paneldeck starts with an empty Terminal Hub: **Ctrl+Shift+T** opens a new session, **Ctrl+Shift+P** the command palette, **Ctrl+Shift+D/E** splits a pane.
 3. For Claude: click the spark button, pick a folder, done.
 4. **Ctrl+2** (or the *Todo list* tab in the title bar) opens the to-do list, **Ctrl+1** goes back to the Terminal Hub. **Ctrl+click** on a tab opens it in a new window.
+5. On the first start Paneldeck offers a **short tour** (about 3 minutes) right in the window; it and its chapters are always in the command palette (*Tutorial*) and under *Settings → About* – see [Tutorial](docs/en/tutorial.md).
 
 All shortcuts can be changed under *Settings → Shortcuts*.
 
 ## Documentation
 The guides live in [`docs/en/`](docs/en/) (German: [`docs/de/`](docs/de/)) and are versioned with the code:
 
+- [Tutorial](docs/en/tutorial.md) – the guided tour and chapters inside the app
 - [Terminals and sessions](docs/en/terminals.md) – sessions, projects, splits, palette, keyboard shortcuts
 - [Multiple windows](docs/en/windows.md) – Ctrl+click on a tab, the empty Terminal Hub
 - [Claude Code](docs/en/claude-code.md) – Claude mode, status, costs, history

@@ -42,12 +42,14 @@ Installer und `paneldeck.exe` sind **nicht code-signiert**. Ein Zertifikat koste
 2. Paneldeck startet mit einem leeren Terminal Hub: **Strg+Umschalt+T** öffnet eine neue Sitzung, **Strg+Umschalt+P** die Befehls-Palette, **Strg+Umschalt+D/E** teilt einen Bereich.
 3. Für Claude: Button mit dem Funken-Symbol, Ordner wählen, fertig.
 4. **Strg+2** (oder der Reiter *Todo-Liste* in der Fensterleiste) öffnet die Todo-Liste, **Strg+1** führt zurück zum Terminal Hub. **Strg+Klick** auf einen Reiter öffnet ihn in einem neuen Fenster.
+5. Beim ersten Start bietet Paneldeck eine **kurze Tour** (etwa 3 Minuten) direkt im Fenster an; sie und ihre Kapitel stehen jederzeit in der Befehls-Palette (*Tutorial*) und unter *Einstellungen → Info* – siehe [Tutorial](docs/de/tutorial.md).
 
 Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 
 ## Dokumentation
 Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en/)) und werden mit dem Code versioniert:
 
+- [Tutorial](docs/de/tutorial.md) – die geführte Tour und Kapitel in der App
 - [Terminals und Sitzungen](docs/de/terminals.md) – Sitzungen, Projekte, Teilen, Palette, Tastenkürzel
 - [Mehrere Fenster](docs/de/windows.md) – Strg+Klick auf einen Reiter, der leere Terminal Hub
 - [Claude Code](docs/de/claude-code.md) – Claude-Modus, Status, Kosten, Verlauf

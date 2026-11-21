@@ -43,7 +43,12 @@ param(
   # zsh/fish-Integration (#57) in eigenen WSL-Test-Distributionen (nie der eigenen): Name einer Distribution mit Login-Shell
   # zsh bzw. fish. Ohne Angabe werden diese Pruefungen uebersprungen.
   [string]$WslZsh = $env:PANELDECK_TEST_WSL_ZSH,
-  [string]$WslFish = $env:PANELDECK_TEST_WSL_FISH
+  [string]$WslFish = $env:PANELDECK_TEST_WSL_FISH,
+  # Tutorial (#143): Test-Build mit der Test-Schnittstelle des Tutorials, gebaut mit
+  #   cargo build --release --features tutorial-test --target-dir E:\paneldeck-test\target-tutorial-test
+  # Ohne Angabe wird der Tutorial-Teil uebersprungen. Die Ziele (Rechtecke) werden nur mit -Visible geprueft
+  # (ein minimiertes Fenster hat keine Flaeche).
+  [string]$TutorialExe = ''
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -2195,6 +2200,166 @@ c.close()
     }
   } else {
     Skip 'Beenden: Hilfsdateien entfernt' 'kein laufender Hub'
+  }
+
+  # ---------------------------------------------------------------- Tutorial (#143, nur mit dem Test-Build)
+  # Die Release-.exe darf die Test-Schnittstelle nie enthalten (Feature tutorial-test, siehe tools/release.sh).
+  $relBytes = [IO.File]::ReadAllBytes($Exe)
+  $hookName = [Text.Encoding]::ASCII.GetString($relBytes) -match 'PANELDECK_TUTORIAL_TEST'
+  Check 'Tutorial: gepruefte .exe ohne Test-Schnittstelle (kein PANELDECK_TUTORIAL_TEST)' (-not $hookName)
+  if (-not $TutorialExe) {
+    Skip 'Tutorial (#143): Touren, Ziele, Erkennung, Aufraeumen' 'kein -TutorialExe (Test-Build: cargo build --release --features tutorial-test)'
+  } else {
+    Write-Host "== Tutorial (#143): Test-Build $TutorialExe" -ForegroundColor Cyan
+    Stop-Hub
+    $TutorialExe = (Resolve-Path $TutorialExe).Path
+    $u8 = New-Object Text.UTF8Encoding $false
+    $mainDir = $dir; $mainData = $data
+    $dir = New-Item -ItemType Directory -Force "$work\tut"
+    Copy-Item $TutorialExe "$dir\paneldeck.exe"
+    if ($hasConPty) { Copy-Item "$exeDir\conpty.dll", "$exeDir\OpenConsole.exe" $dir }
+    $data = "$dir\paneldeck-data"
+    New-Item -ItemType Directory -Force $data | Out-Null
+    $hook = "$dir\hook"
+    New-Item -ItemType Directory -Force $hook | Out-Null
+    # Steuern fuer die MCP-Pruefungen; Profil 1 = Schein-Umgebung fuer jedes Terminal (das Projekt "Tutorial" erbt das
+    # Standardprofil des aktiven Projekts).
+    $ts = [pscustomobject]@{ mcp_level = 'Control'; scrollback_lines = 1000; profiles = @([pscustomobject]@{ id = 1; name = 'Smoke-Isolation'; env = $ptyEnv }) }
+    if ($ConPty -eq 'system') { $ts | Add-Member -Force bundled_conpty $false }
+    [IO.File]::WriteAllText("$data\settings.json", ($ts | ConvertTo-Json -Depth 10), $u8)
+    [IO.File]::WriteAllText("$data\state.json", '{"projects":[{"id":1,"name":"Standard","profile":1}],"active_project":1,"next_id":1}', $u8)
+    function Tut-Cmd([string]$line) {
+      $f = "$hook\tutorial-cmd.txt"; $t0 = Get-Date
+      while ((Test-Path -LiteralPath $f) -and ((Get-Date) - $t0).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
+      [IO.File]::WriteAllText("$f.tmp", $line + "`n", (New-Object Text.UTF8Encoding $false))
+      Move-Item -Force -LiteralPath "$f.tmp" -Destination $f
+    }
+    function Tut-Status {
+      $f = "$hook\tutorial-status.json"
+      if (Test-Path -LiteralPath $f) { try { [IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { $null } } else { $null }
+    }
+    function Tut-Wait([scriptblock]$cond, [int]$ms = 12000) {
+      $t0 = Get-Date
+      do {
+        $s = Tut-Status
+        if ($s -and (& $cond $s)) { return $s }
+        Start-Sleep -Milliseconds 150
+      } while (((Get-Date) - $t0).TotalMilliseconds -lt $ms)
+      Tut-Status
+    }
+    function Tut-Sessions { @((Tool 'list_sessions').data.sessions | Where-Object { $_.project -eq 'Tutorial' }) }
+    $env:PANELDECK_TUTORIAL_TEST = $hook
+    $style = if ($Visible) { 'Normal' } else { 'Minimized' }
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
+    Remove-Item Env:PANELDECK_TUTORIAL_TEST
+    $t0 = Get-Date
+    while (-not (Test-Path "$data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
+    Start-Sleep 2
+    Start-Bridge
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke-tutorial'; version = '1' } })
+
+    $s = Tut-Wait { param($x) $x.card }
+    Check 'Tutorial: Karte "Kurze Tour?" beim ersten Start' ($s -and $s.card) ($s | ConvertTo-Json -Depth 3 -Compress)
+    Tut-Cmd 'card later'
+    $s = Tut-Wait { param($x) -not $x.card }
+    Check 'Tutorial: "Spaeter" blendet die Karte aus' ($s -and -not $s.card)
+    $saved = if (Test-Path "$data\tutorial.json") { [IO.File]::ReadAllText("$data\tutorial.json") | ConvertFrom-Json } else { $null }
+    Check 'Tutorial: tutorial.json im Datenordner (card = later)' ($saved -and $saved.card -eq 'later')
+    $cat = @($s.catalogue)
+    Check 'Tutorial: Katalog mit kurzer Tour und Kapiteln' ($cat.Count -ge 7 -and $cat[0].id -eq 'basics') "$($cat.Count) Touren"
+    $expert0 = [bool]$s.expert
+
+    foreach ($tour in $cat) {
+      $tid = $tour.id; $steps = @($tour.steps)
+      Tut-Cmd "start $tid"
+      $s = Tut-Wait { param($x) $x.running -and $x.run.tour -eq $tid -and $x.run.index -eq 1 -and $x.run.ready }
+      Check "Tutorial ${tid}: startet bei Schritt 1/$($steps.Count)" ($s -and $s.run.total -eq $steps.Count -and $s.project.exists -and $s.project.active) ($s.run | ConvertTo-Json -Compress)
+      $missingSpots = @()
+      for ($i = 1; $i -le $steps.Count; $i++) {
+        $s = Tut-Wait { param($x) $x.running -and $x.run.index -eq $i -and $x.run.ready }
+        if (-not ($s -and $s.running -and $s.run.index -eq $i)) { Check "Tutorial ${tid}: Schritt $i erreicht" $false ($s | ConvertTo-Json -Depth 3 -Compress); break }
+        $r = $s.run
+        if ($r.spot) {
+          if ($Visible) { if (-not $r.spot_found) { $missingSpots += "$($r.step) ($($r.spot))" } }
+        }
+        $auto = $null
+        switch ($r.step) {
+          'basics.new_terminal' { $auto = { [void](Tool 'create_session' @{ name = 'Smoke-Tutorial' }) } }
+          'basics.todo_add' { $auto = { [void](Tool 'add_todo' @{ title = 'Smoke-Tutorial-Todo' }) } }
+          'todo.list' { $auto = { [void](Tool 'add_todo' @{ title = 'Smoke-Tutorial-Todo-2' }) } }
+        }
+        if ($auto) {
+          & $auto
+          $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i } 15000
+          Check "Tutorial ${tid}: $($r.step) geht nach der Aktion per MCP von selbst weiter" ($n -and (-not $n.running -or $n.run.index -gt $i)) ($n.run | ConvertTo-Json -Compress)
+        } else {
+          Tut-Cmd 'next'
+          [void](Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i })
+        }
+      }
+      if ($Visible) {
+        Check "Tutorial ${tid}: jedes Ziel sichtbar" ($missingSpots.Count -eq 0) ($missingSpots -join ', ')
+      } else {
+        Skip "Tutorial ${tid}: jedes Ziel sichtbar" 'Fenster minimiert (mit -Visible pruefen)'
+      }
+      $s = Tut-Wait { param($x) -not $x.running -and $x.ask -eq 'finished' }
+      Check "Tutorial ${tid}: am Ende die Rueckfrage zum Tutorial-Projekt" ($s -and $s.ask -eq 'finished') ($s | ConvertTo-Json -Depth 2 -Compress)
+      Check "Tutorial ${tid}: Fortschritt beendet" ($s -and $s.progress.$tid.finished)
+      Check "Tutorial ${tid}: Expertenmodus wie vorher" ($s -and [bool]$s.expert -eq $expert0)
+      if ($tid -eq 'basics') {
+        $mine = Tut-Sessions
+        Check 'Tutorial basics: Sitzungen im Projekt "Tutorial" (list_sessions)' ($mine.Count -ge 1) "$($mine.Count)"
+        Check 'Tutorial basics: in der Tour angelegte To-dos gemerkt' (@($s.todos).Count -ge 1) "$(@($s.todos).Count)"
+      }
+      Tut-Cmd 'end delete'
+      $s = Tut-Wait { param($x) -not $x.ask -and -not $x.project.exists }
+      Check "Tutorial ${tid}: Loeschen entfernt das Projekt" ($s -and -not $s.ask -and -not $s.project.exists -and @($s.todos).Count -eq 0 -and $null -eq $s.plan_project) ($s | ConvertTo-Json -Depth 2 -Compress)
+      Start-Sleep -Milliseconds 500
+      Check "Tutorial ${tid}: keine Sitzung mehr im Projekt Tutorial" ((Tut-Sessions).Count -eq 0)
+    }
+    $todos = Tool 'list_todos' @{ state = 'all'; limit = 200 }
+    Check 'Tutorial: To-dos der Tour geloescht (list_todos)' (-not $todos.err -and -not ("$($todos.text)" -match 'Smoke-Tutorial-Todo')) "$($todos.text)"
+
+    # Beenden, behalten, fortsetzen, zurueck
+    Tut-Cmd 'start basics'
+    [void](Tut-Wait { param($x) $x.running -and $x.run.index -eq 1 -and $x.run.ready })
+    Tut-Cmd 'next'; [void](Tut-Wait { param($x) $x.run.index -eq 2 })
+    Tut-Cmd 'back'
+    $s = Tut-Wait { param($x) $x.run.index -eq 1 }
+    Check 'Tutorial: Zurueck' ($s -and $s.run.index -eq 1)
+    Tut-Cmd 'next'; [void](Tut-Wait { param($x) $x.run.index -eq 2 })
+    Tut-Cmd 'skip'
+    $s = Tut-Wait { param($x) $x.run.index -eq 3 }
+    Check 'Tutorial: Ueberspringen merkt den Schritt' ($s -and $s.run.index -eq 3 -and @($s.progress.basics.skipped) -contains 'basics.sidebar') ($s.progress | ConvertTo-Json -Compress)
+    Tut-Cmd 'quit'
+    $s = Tut-Wait { param($x) -not $x.running -and $x.ask -eq 'paused' }
+    Check 'Tutorial: Beenden fragt nach dem Projekt' ($s -and $s.ask -eq 'paused')
+    Tut-Cmd 'end keep'
+    $s = Tut-Wait { param($x) -not $x.ask }
+    Check 'Tutorial: Behalten laesst das Projekt stehen' ($s -and $s.project.exists)
+    Tut-Cmd 'continue'
+    $s = Tut-Wait { param($x) $x.running -and $x.run.ready }
+    Check 'Tutorial: Fortsetzen beim gemerkten Schritt' ($s -and $s.run.tour -eq 'basics' -and $s.run.step -eq 'basics.new_terminal') ($s.run | ConvertTo-Json -Compress)
+    Tut-Cmd 'quit'; [void](Tut-Wait { param($x) $x.ask })
+    Tut-Cmd 'end delete'; [void](Tut-Wait { param($x) -not $x.ask -and -not $x.project.exists })
+
+    # Was ist neu
+    Tut-Cmd 'whatsnew_from 2.5.0'
+    $s = Tut-Wait { param($x) $x.hint }
+    Check 'Tutorial: Hinweis "Neu in ..." nach einem Update' ($s -and $s.hint) "$($s.hint)"
+    Tut-Cmd 'whatsnew'
+    $s = Tut-Wait { param($x) $x.running -and $x.run.tour -eq 'whatsnew' }
+    $since = @{}; foreach ($t in $cat) { foreach ($st in $t.steps) { $since[$st.id] = $st.since } }
+    $old = @($s.run.steps | Where-Object { [version]$since[$_] -le [version]'2.5.0' })
+    Check 'Tutorial: "Was ist neu" nur mit Schritten nach 2.5.0' ($s -and $s.run.total -ge 1 -and $old.Count -eq 0) "$($s.run.steps -join ', ')"
+    Tut-Cmd 'quit'; [void](Tut-Wait { param($x) $x.ask })
+    Tut-Cmd 'end delete'; [void](Tut-Wait { param($x) -not $x.ask })
+    Tut-Cmd 'whatsnew_from 2.5.0'; [void](Tut-Wait { param($x) $x.hint })
+    Tut-Cmd 'dismiss'
+    $s = Tut-Wait { param($x) -not $x.hint }
+    Check 'Tutorial: Hinweis laesst sich ausblenden' ($s -and -not $s.hint)
+    Stop-Hub
+    $dir = $mainDir; $data = $mainData
   }
 } catch {
   # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.
