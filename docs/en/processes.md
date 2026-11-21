@@ -4,8 +4,39 @@
 
 The **process list** runs long-running programs such as dev servers and watchers – `php -S localhost:8000`, `ng serve`, `npm run dev`, `cargo watch` – apart from your interactive terminal sessions. You don't type into them: you start a process, watch its output in a pane of its own and stop it again. *(Since 2.6.0.)*
 
+<!-- screenshot: Processes section with one running entry (green dot, ↗, error count) and one stopped entry, Terminal Hub → sidebar → PROCESSES -->
+
+## How to add a dev server
+1. Open the **Terminal Hub** (`Ctrl+1`).
+2. In the sidebar, click **+** next to **PROCESSES** (tooltip *New process …*).
+3. Enter a **Name** (e.g. `Web`) and a **Command** (e.g. `npm run dev`).
+4. Choose the **Folder** (folder button *Choose a folder*; empty = the shell's default folder). If needed, pick a **Shell** and a **Project**.
+5. Click **Save**. The entry appears in the *Processes* section and is stopped.
+6. Click **▷** (*Start*) in its row or double-click the row. Click the row to see the output.
+
+<!-- screenshot: New process dialog with all fields filled in (name, command, folder, shell, project, group, order, start automatically, log file, one environment variable), Terminal Hub → PROCESSES → + -->
+
+## How to start several programs together
+1. Right-click the first entry → *Edit …*.
+2. Type a **Group** name (e.g. `Dev`) and set **Order** to `1`. Click **Save**.
+3. Do the same for the second entry with the same group (pick it with **▾**) and **Order** `2`.
+4. The entries are now listed under the group name. The group's start button (*Start the group (in its order)*) starts them in ascending order; its stop button (*Stop the group (in reverse order)*) stops them the other way round.
+
+## How to start a process with Paneldeck or with a project
+1. Right-click the entry → *Edit …*.
+2. Set **Start automatically** to *With Paneldeck* or *When the project is opened*.
+3. Click **Save**. The setting applies from the next start of Paneldeck or the next time you open the project.
+
+## How to find out why a process stopped
+1. A crashed entry turns red and you get a notification. Click its row to open the output.
+2. The header shows the state, e.g. `crashed (code 1)`. `! n` in the row counts the lines that look like errors.
+3. Use *Search the output* (Ctrl+F) to find the first error.
+4. Fix the cause, then click *Restart* in the red bar at the bottom of the output or in its header (or right-click the row → *Restart*).
+
+<!-- screenshot: output pane of a crashed process with its header (state, restart, search, copy, clear, edit, close), Terminal Hub → PROCESSES → click a red entry -->
+
 ## The *Processes* section
-The *Processes* section sits in the Terminals sidebar above the templates and can be collapsed. Its title shows how many entries are running (e.g. `PROCESSES 2/5`).
+The *Processes* section sits in the Terminals sidebar above the templates (in the main window only) and can be collapsed. Its title shows how many entries are running (e.g. `PROCESSES 2/5`).
 
 - **+** adds a new entry.
 - Each row shows a status dot, the name and on the right a **Start** (▷) or **Stop** (□) button. A running entry with a detected local address gets **↗** (open in browser), and `! n` counts the lines of its output that look like errors.
@@ -20,17 +51,17 @@ The *Processes* section sits in the Terminals sidebar above the templates and ca
 | Name | Shown in the list, in notifications and to agents. |
 | Command | A command line, run through the chosen shell – so `npm`, `php`, `ng` and other programs are found via `PATH` like in a terminal. |
 | Folder | Working folder (empty = the shell's default folder). A folder that doesn't exist makes the start fail – as does a network folder that doesn't answer within a moment (then try again). |
-| Shell | PowerShell by default (PowerShell 7 if installed, else Windows PowerShell); or any detected shell – cmd, Git Bash, WSL. PowerShell starts without your profile (`-NoProfile`). With cmd, `%NAME%` in the command is replaced like on a typed command line (e.g. `cd %USERPROFILE%pp && npm start`); unknown variables stay as they are, `%X:~0,3%` and `%X:a=b%` are not evaluated. |
+| Shell | PowerShell by default (PowerShell 7 if installed, else Windows PowerShell); or any detected shell – cmd, Git Bash, WSL. PowerShell starts without your profile (`-NoProfile`). With cmd, `%NAME%` in the command is replaced like on a typed command line (e.g. `cd %USERPROFILE%\app && npm start`); unknown variables stay as they are, `%X:~0,3%` and `%X:a=b%` are not evaluated. |
 | Project | The project the entry belongs to (or none). |
 | Group, Order | Entries with the same group start and stop together: in ascending *Order* when starting (e.g. backend 1, frontend 2), in reverse when stopping. *Order* is only the order of starting: the next entry starts as soon as the previous one has been started – Paneldeck does not wait until it is ready (e.g. listening on its port). |
-| Start automatically | *Never* (default), *With Paneldeck* or *When the project is opened* (also at start when it is the open project; once per run). |
+| Start automatically | *Never (only by hand)* (default), *With Paneldeck* or *When the project is opened* (also at start when it is the open project; once per run). |
 | Log file | Also write the output to `process-logs/<id>-<name>.log` in the data folder (off by default). Each line gets a time stamp; at 5 MB the file is rotated (`.1` … `.3`). |
 | Environment variables | Name and value. Values are stored **encrypted** (Windows DPAPI, readable only by the same Windows user on the same computer) and never shown to agents or written to logs. When editing, an empty value keeps the stored one. |
 
 Changes to a running entry apply from its next start. An entry can only be deleted when it is not running.
 
 ## Running, stopping, states
-A process runs in a console without input (colours and progress bars work, typing is disabled). The output keeps the last **10,000 lines**; *Search* (Ctrl+F), *Copy the whole output* and *Clear the output* are in the pane's header, and selected text is copied with Ctrl+C or a right-click.
+A process runs in a console without input (colours and progress bars work, typing is disabled). The output keeps the last **10,000 lines**. The pane's header has *Start* / *Stop*, *Restart*, *Search the output* (Ctrl+F), *Copy the whole output*, *Clear the output*, *Edit …* (gear) and **×** (back to the sessions), and while the process runs up to two buttons with detected local addresses. Selected text is copied with Ctrl+C or a right-click.
 
 **Stop** (button or Ctrl+C in the output without a selection) sends Ctrl+C; if the process hasn't ended **after 5 seconds**, Paneldeck ends the **whole process tree** (Windows: the job object the process runs in; Linux/macOS: its process group). *Restart* stops a running process this way and starts it again.
 

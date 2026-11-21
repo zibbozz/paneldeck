@@ -21,7 +21,7 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 |---|---|
 | `settings.json` | settings (hand-editable); `settings.json.bak-<time>` = copy made by `--reset-settings` |
 | `state.json` | sessions, projects, layout, further windows (`state.defekt.json` = backup if the file was corrupted; `state.json.bak-<date>` = backup made when *Remember sessions* was switched off) |
-| `paneldeck.db` | the local database (SQLite, schema version 9 since 2.3.0) with the to-do list, projects and tickets (`paneldeck.db-wal` / `-shm` exist while the app runs) |
+| `paneldeck.db` | the local database (SQLite, schema version 10 since 2.6.0) with the to-do list, projects and tickets (`paneldeck.db-wal` / `-shm` exist while the app runs) |
 | `backups/` | automatic and manual copies of the database (the folder can be changed) |
 | `scrollback/` | saved terminal history |
 | `chats/` | histories of the [chats](chat.md), one `<id>.json` per chat (see [Chat histories](#chat-histories)) |
@@ -36,6 +36,7 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | `mcp-log.jsonl` | call log of the agent interface (only if it was used) |
 | `profiles/<name>/` | data folders of the [profiles](command-line.md#profiles-and-several-instances), each with the same structure |
 | `ipc.json` | port and token of the running instance (internal) |
+| `cleanup-pending.json` | clean-up steps scheduled for the next start (internal, see [Clean up](#clean-up); deleted once they ran) |
 
 `settings.json`, `state.json`, `prompts.json`, `themes/*.json`, `system-prompt.md`, `chats/*.json`, `processes.json` and `mcp-log.jsonl` are stable formats: newer versions keep reading older files, and new fields are optional.
 
@@ -54,12 +55,15 @@ Each [chat](chat.md) keeps its history in `chats/<id>.json` (`<id>` = the sessio
     { "role": "tool", "content": "{\"sessions\":[]}", "ts": 1763200002,
       "tool_call_id": "c1", "tool_name": "list_sessions", "status": "ok" },
     { "role": "assistant", "content": "There are no sessions.", "ts": 1763200003 },
+    { "role": "assistant", "content": "", "ts": 1763200004,
+      "tool_calls": [ { "id": "c2", "name": "read_terminal", "arguments": { "session": 3, "lines": 50 } } ],
+      "repairs": [ { "id": "c2", "text_call": true, "fixes": [ "lines: \"50\" → 50" ] } ] },
     { "role": "assistant", "content": "", "ts": 1763200010, "error": "connection refused" }
   ]
 }
 ```
 
-- `role` is `user`, `assistant`, `tool` or `system`; `ts` = seconds since 1970 (UTC). An answer can carry `tool_calls`, an `error` (shown with *Retry*) or a `note` (e.g. "cut off at the token limit"; not sent to the model). A tool result has `tool_call_id`, `tool_name` and `status` (`ok`, `error`, `denied`). `context_start` = the first message the model still saw at the last request (missing while nothing was left out). `always_allow` = the rules from *Always for this chat*, each a tool plus its target session (`{"tool": "send_text", "session": 4}`); a call runs without asking only when both match. Rules without a session are never written and never apply. *Permanent approvals (N)* in the chat header revokes them.
+- `role` is `user`, `assistant`, `tool` or `system`; `ts` = seconds since 1970 (UTC). An answer can carry `tool_calls`, an `error` (shown with *Retry*) or a `note` (e.g. "cut off at the token limit"; not sent to the model). Since 2.6.1 an answer can also carry `repairs`: what Paneldeck fixed in its tool calls, one entry per call (`id` = the call's id; `text_call: true` = the model wrote the call as text and Paneldeck recognised it; `fixes` = corrected arguments such as `lines: "50" → 50`). It is only shown in the chat and not sent to the model; an unreadable value is ignored. A tool result has `tool_call_id`, `tool_name` and `status` (`ok`, `error`, `denied`). `context_start` = the first message the model still saw at the last request (missing while nothing was left out). `always_allow` = the rules from *Always for this chat*, each a tool plus its target session (`{"tool": "send_text", "session": 4}`); a call runs without asking only when both match. Rules without a session are never written and never apply. *Permanent approvals (N)* in the chat header revokes them.
 - The file is written **atomically** (temporary file, then rename). Reading is tolerant: a BOM is allowed, unknown fields are ignored, a single invalid message is skipped. A corrupt or too large file (over 8 MB) gives an empty chat with a notice; the file is first saved as `chats/<id>.defekt-<time>.json`. When saving, a history over 8 MB loses its oldest messages.
 - A history file that does not belong to a session (e.g. after `state.json` was reset) is never loaded into a new chat: it is moved aside as `chats/<id>.orphan-<time>.json`.
 - **Closing a chat deletes its file** (and its `.defekt-…` backups). *Save history to file …* in the chat's context menu exports it as Markdown first.
@@ -144,18 +148,46 @@ All new fields are optional: a missing field means the previous behaviour, and o
 ## New fields in 2.6.0
 - `paneldeck.db` schema version 10 ([maintenance](todo-and-tickets.md#maintenance)): column `tickets.archived` and the tables `maintenance_settings` (target status *Won't Do*, thresholds, switched-off checks per project), `maintenance_ignored` (ignored findings), `maintenance_rules` (custom check rules) and `maintenance_log` (maintenance log, never deleted automatically). The update makes a backup first, as always.
 - Project backups (`paneldeck-project`) use format version 4: `tickets[].archived` and the optional section `maintenance` (settings and custom rules). Paneldeck before 2.6 refuses version 4.
-- Backups made before a maintenance action are named `maintenance-<date>-<time>.db`; at most three are kept, and they do not count against the automatic backups.
+- Backups made before a maintenance action are named `maintenance-<date>-<time>.db`; at most three are kept, and they do not count against the automatic backups. Backups made before a [clean-up](#clean-up) are named `pre-cleanup-<date>-<time>.db` (at most three are kept as well).
+- New file `processes.json` for the [process list](processes.md) (see [above](#process-list-processesjson)) and the folder `process-logs/`.
+- `themes/*.json` → optional object `ui` with the [named interface colours](themes.md#interface-colours). Older versions ignore it.
+- `settings.json` → `theme_checks_off`: the rules of the theme editor's [design check](themes.md#design-check) that are switched off (`contrast`, `distinct`, `status`, `terminal`, `harmony`; missing = all on; unknown values are kept).
+
+## New fields in 2.6.1
+- `chats/<id>.json` → per answer the optional list `repairs` (see [Chat histories](#chat-histories)). Older versions ignore it.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 
 - `--backup-dir <folder>` writes the backups of one start to another folder (the folder choice is then locked; see [Command line](command-line.md#--backup-dir-folder)).
 - Before an update to a **new major version**, the self-update makes a database backup first (see [Updates](updates.md)).
-- **Database care** (check, statistics, compact, repair, rescue into a new file) is on the [maintenance page](todo-and-tickets.md#maintenance) of an expert project; *Settings → Data & backup* links to it.
+- **Database care** (check, statistics, compact, repair, rescue into a new file) is on the [maintenance page](todo-and-tickets.md#maintenance) of an expert project; *Settings → Data & backup → Open the maintenance page* takes you there.
 - The **undo history** of the to-do list (3 to 100 steps, default 25) is set on the same tab.
 
 ## Clean up
-*Settings → Data & backup → **Clean up …*** (also in the command palette) opens a window where you tick what to delete. Each item shows its size or count (calculated in the background) and a short explanation; the bottom shows the total. Only harmless items are preselected: clipboard images, old backup files (`*.bak-*`, `*.defekt-*`), `crash.log` and orphaned scrollback/chat files that no session belongs to.
+*Settings → Data & backup → **Clean up …*** (also *Clean up …* in the command palette, `Ctrl+Shift+P`) opens a window where you tick what to delete. Each item shows its size or count (calculated in the background; *Refresh* calculates again) and a short explanation; the bottom shows the total (*Will be deleted:*). Only harmless items are preselected: clipboard images, old backup files (`*.bak-*`, `*.defekt-*`), `crash.log` and orphaned scrollback/chat files that no session belongs to. The window opens in the main window only.
+
+<!-- screenshot: Clean up window with the groups, sizes, the preselected items and the total at the bottom, Settings → Data & backup → Clean up … -->
+
+### How to free disk space
+1. Open *Settings → Data & backup* and click **Clean up …**.
+2. Wait until the sizes are shown (*Calculating sizes …* disappears).
+3. Keep the preselected items and, if you like, tick more under *Save space* – e.g. *Database backups* with *Keep newest:* `3`.
+4. For old histories: tick *Orphaned scrollback* or *Orphaned chat histories* and switch on *Only history older than* … *days*.
+5. Check the total at the bottom, then click **Delete …**.
+6. The summary lists every item with its size. Wait 3 seconds until the button unlocks and click **Delete**.
+7. The result shows ✓ or an error per item. *Retry* repeats the failed ones; *Close* closes the window.
+
+<!-- screenshot: confirmation "Delete permanently?" with the list of items, the 3-second button and the typing field, Clean up → Delete … -->
+
+### How to reset Paneldeck completely
+1. Open *Settings → Data & backup → Clean up …*.
+2. Tick **Reset Paneldeck completely** (group *Everything*). All items are selected with it.
+3. Check the folder of the ZIP backup (*ZIP backup to:*, *Choose folder …*); it has to be outside the data folder.
+4. Click **Reset …**, type `DELETE` (German interface: `LÖSCHEN`) and click **Reset** once the button unlocks.
+5. Paneldeck saves the ZIP file, removes the integration, restarts and starts like the first time. The result is shown after the restart.
+
+<!-- screenshot: result window "Clean up – result" with ✓ and one error, Retry and Restart now, after Clean up → Delete -->
 
 | Group | Items |
 |---|---|
@@ -172,7 +204,7 @@ Other profiles (`profiles\<name>` with a `settings.json`) can be deleted complet
 
 The database, sessions/layout and the complete reset cannot be deleted while Paneldeck uses them: they are scheduled in `cleanup-pending.json` and run at the next start, before anything is loaded (with the backup folder of that start – never one named in the file); Paneldeck restarts right away and shows the result. The integration, other profiles and the ZIP backup run before the restart; without a ZIP backup nothing is reset.
 
-**Never touched:** Claude Code's own data (`~/.claude/projects`, transcripts). Agents can only read the sizes (MCP tool [`cleanup_sizes`](agent-interface.md)); there is no way for them to delete anything.
+**Never touched:** Claude Code's own data (`~/.claude/projects`, transcripts). Agents can only read the sizes (MCP tool [`cleanup_sizes`](agent-interface.md#clean-up)); there is no way for them to delete anything.
 
 ## Moving or copying the data
 Quit Paneldeck, then copy the whole data folder. To use it from another place, start Paneldeck with `--data-dir <folder>` or set `PANELDECK_DATA`.

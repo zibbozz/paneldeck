@@ -13,8 +13,11 @@ Paneldeck works **offline**: it only contacts GitHub when you check for updates 
 ## Features
 - **Terminals** with full emulation (ConPTY): PowerShell 7, Windows PowerShell, CMD, Git Bash, WSL distributions – organized in projects, with freely splittable panes, several windows and a command palette. Modern keyboard protocols (kitty, win32-input-mode), links from programs (OSC 8, Ctrl+click), progress and notifications from programs, any installed monospace font (e.g. Nerd Fonts), WSL sessions that start in Linux folders and a bundled, newer console host from Microsoft.
 - **Background programs:** every terminal's shell runs in its own Windows Job Object, so programs started from a session stay part of it, even when started detached. This includes long-lived apps such as `code .`, a browser or `wt`. When you close or reload a session, or quit Paneldeck, and such programs are still running, Paneldeck lists them and asks whether to keep them running or end them all. "End all" terminates them immediately, without saving. Programs inside a session cannot break away from its job (`CREATE_BREAKAWAY_FROM_JOB` fails); this is intended.
+- **Process list:** dev servers and watchers (`npm run dev`, `ng serve` …) apart from your terminals – start, stop and restart them (also as a group), with their output in a pane of their own and a link to the local address ([Process list](docs/en/processes.md)).
 - **Claude mode** (can be turned off): status via hooks (working / approval? / ready), notifications, token and cost estimates, history with exact resume, start options (model, effort, permission mode, agent and more), reload and settings per session.
-- **Todo list and tickets:** a simple to-do list that turns into a small Jira in *expert mode* – projects, ticket types, workflows, boards, a query language, sprints and dashboards, all stored locally. Every ticket has a description, a due date with configurable markers and labels; icons from the Lucide set and an editable color palette.
+- **Todo list and tickets:** a simple to-do list that turns into a small Jira in *expert mode* – projects, ticket types, workflows, boards, a query language, sprints and dashboards, all stored locally. Every ticket has a description, a due date with configurable markers and labels; icons from the Lucide set and an editable color palette. A [maintenance page](docs/en/todo-and-tickets.md#maintenance) finds stale, broken and duplicate tickets and unused configuration, archives tickets and takes care of the database.
+- **Themes:** a [theme editor](docs/en/themes.md) with live preview, design check and named interface colours; a new theme can be generated from a background and an accent colour.
+- **Clean up:** see what Paneldeck stores and delete what you no longer need – backups, histories, logs, content, settings – up to a complete reset ([Clean up](docs/en/data-and-backups.md#clean-up)).
 - **Chats with local models:** talk to Ollama, LM Studio, llama.cpp or vLLM on this computer or in your network, right next to your terminals – the model can use Paneldeck's tools within limits you set per model.
 - **Agent interface (MCP):** AI agents can see sessions, read terminals, run commands and work with your to-do list and tickets – off by default, with a configurable system prompt.
 - **Command line and profiles:** separate data folders and profiles that run side by side, each with its own autostart and MCP entry.
@@ -51,14 +54,14 @@ The guides live in [`docs/en/`](docs/en/) (German: [`docs/de/`](docs/de/)) and a
 - [Terminals and sessions](docs/en/terminals.md) – sessions, projects, splits, palette, keyboard shortcuts
 - [Multiple windows](docs/en/windows.md) – Ctrl+click on a tab, the empty Terminal Hub
 - [Claude Code](docs/en/claude-code.md) – Claude mode, status, costs, history
-- [Todo list and tickets](docs/en/todo-and-tickets.md) – simple and expert mode, boards, sprints, dashboards, quick actions
+- [Todo list and tickets](docs/en/todo-and-tickets.md) – simple and expert mode, boards, sprints, dashboards, quick actions, maintenance and archive
 - [Query language](docs/en/query-language.md) – searching tickets, examples, reference
 - [Process list](docs/en/processes.md) – dev servers and watchers with their output in a pane of their own
 - [Chats with local models](docs/en/chat.md) – Ollama and OpenAI-compatible servers, models, tools and approvals, security
 - [Themes and the theme editor](docs/en/themes.md) – editing and generating themes, design check, file format and colour names
 - [Agent interface (MCP)](docs/en/agent-interface.md) – levels, tools, security, system prompt
 - [Command line](docs/en/command-line.md) – every option, data folder lookup, profiles, exit codes
-- [Data folder and backups](docs/en/data-and-backups.md) – files, backups, portable vs. installed
+- [Data folder and backups](docs/en/data-and-backups.md) – files, backups, clean up, portable vs. installed
 - [Windows integration](docs/en/windows-integration.md) – tray, autostart, Explorer context menu
 - [Linux](docs/en/linux.md) – packages, data folder, tray, autostart, file manager, API keys, self-update of the AppImage
 - [macOS](docs/en/macos.md) (experimental) – installing the unsigned app, data folder, menu bar, autostart, Keychain, self-update
