@@ -2712,10 +2712,10 @@ mod tests {
         let mut own = themes[0].clone();
         own.name = "Mine".into();
         own.builtin = false;
-        own.source = Some(std::path::PathBuf::from(r"C:\secret\themes\mine.json"));
+        own.source = Some(std::env::temp_dir().join("secret").join("themes").join("mine.json"));
         own.ui.insert("border".into(), crate::theme::Spec::Link { to: "text".into(), alpha: Some(20) });
         themes.push(own);
-        let issues = vec![crate::theme::Issue { path: std::path::PathBuf::from(r"C:\secret\themes\bad.json"), msg: crate::theme::file::Msg::new("kaputt", "broken") }];
+        let issues = vec![crate::theme::Issue { path: std::env::temp_dir().join("secret").join("themes").join("bad.json"), msg: crate::theme::file::Msg::new("kaputt", "broken") }];
         let l = theme_list_json(&themes, &issues, "Mine");
         assert_eq!(l["active"], "Mine");
         let mine = l["themes"].as_array().unwrap().iter().find(|t| t["name"] == "Mine").unwrap();
