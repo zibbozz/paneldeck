@@ -1585,7 +1585,7 @@ c.close()
   Check 'send_chat_message mit leerem Text -> bad_args' ((Code (Tool 'send_chat_message' @{ session = $C; text = '  ' })) -eq 'bad_args')
   $hadTools = @($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"tools"\s*:\s*\[\s*\{' }).Count -gt 0
   Check 'Modell bekommt Werkzeuge (Stufe Steuern, level_chosen)' $hadTools
-  Check 'Stufe Steuern ohne eigene Kontextlaenge: num_ctx nach Bedarf (16384/32768), kein Kontext-Hinweis' (@($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"num_ctx"\s*:\s*(16384|32768)' }).Count -ge 1 -and -not ((Tool 'read_chat' @{ session = $C; last = 50 }).text -match 'larger than the model|too small for its tool level'))
+  Check 'Stufe Steuern ohne eigene Kontextlaenge: num_ctx nach Bedarf (32768/65536, #340), kein Kontext-Hinweis' (@($script:fakeLog | Where-Object { $_ -like '/api/chat *' -and $_ -match '"num_ctx"\s*:\s*(32768|65536)' }).Count -ge 1 -and -not ((Tool 'read_chat' @{ session = $C; last = 50 }).text -match 'larger than the model|too small for its tool level'))
   [void](Tool 'send_chat_message' @{ session = $C; text = 'tools please' })
   $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
   $rc = Tool 'read_chat' @{ session = $C; last = 10 }

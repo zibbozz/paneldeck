@@ -224,6 +224,10 @@ pub fn chain_origins(caller: Option<u64>, caller_chain: &[u64]) -> Vec<u64> {
 /// wichtigen Sicherheitshinweise. Externe MCP-Clients bekommen weiter die volle Beschreibung (`mcp::tools`).
 pub fn compact_description(def: &mcp::ToolDef) -> String {
     let mut s = mcp::sysprompt::short_desc(def.name).map(|(_, en)| en.to_string()).unwrap_or_else(|| def.description.to_string());
+    // Im Chat gilt „zuerst aufrufen“ nicht (#340, widerspräche dem Master-Prompt): der Chat ist selbst die Sitzung.
+    if def.name == "whoami" {
+        s = "Your own session (this chat) and the sessions you created (children).".into();
+    }
     let has_session = def.schema["properties"].get("session").is_some();
     if def.level >= McpLevel::Control && has_session && def.name != "wait_for_status" {
         s.push_str(" Never your own session; refused while it waits for an approval.");
