@@ -55,6 +55,30 @@ fi
 grep -q "^$V|" tools/titles.txt || { echo "tools/titles.txt hat keinen (englischen) Titel für $V"; exit 1; }
 [ -f "docs/release-notes/$V.en.md" ] || { echo "docs/release-notes/$V.en.md fehlt (englischer Release-Text)"; exit 1; }
 
+# Früher Start der Linux-/macOS-Pakete (nur --publish): release-build.yml per workflow_dispatch auf genau diesem Commit von
+# release/x.y, damit die CI-Builds (macOS ca. 19 min, ohne Cache) parallel zum lokalen Teil laufen. Das Tag wird weiterhin
+# erst nach allen lokalen Prüfungen (Tests, Build, Defender) gepusht – nie vorher, ein gepushtes Tag wird nie verschoben.
+# Herkunftsnachweis dieser Pakete: gleicher Workflow, Ref release/x.y und genau der Commit des Tags (--source-digest).
+# Klappt der frühe Start nicht (oder hat das Tag einen anderen Commit), wird wie bisher auf den Build des Tags gewartet.
+EARLY_SHA=""; EARLY_RUN=""
+if [ "$PUBLISH" = 1 ]; then
+  EARLY_SHA="$(git rev-parse HEAD)"
+  EARLY_SINCE="$(date -u -d '-2 min' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if "$GH" workflow run release-build.yml --ref "$BRANCH_WANT" >/dev/null 2>&1; then
+    for _ in $(seq 1 24); do
+      EARLY_RUN="$("$GH" run list --workflow release-build.yml --event workflow_dispatch --limit 10 --json databaseId,headSha,createdAt \
+        --jq ".[] | select(.headSha==\"$EARLY_SHA\" and .createdAt >= \"$EARLY_SINCE\") | .databaseId" | head -1)"
+      [ -n "$EARLY_RUN" ] && break
+      sleep 5
+    done
+  fi
+  if [ -n "$EARLY_RUN" ]; then
+    echo "Linux-/macOS-Pakete früh gestartet (Lauf $EARLY_RUN, Commit $EARLY_SHA)"
+  else
+    echo "Hinweis: früher Start der Linux-/macOS-Pakete nicht möglich – sie werden nach dem Push des Tags gebaut"
+  fi
+fi
+
 fetch_conpty   # dist/conpty/{conpty.dll,OpenConsole.exe} für Tests, Installer und ZIP (geprüft per SHA-256)
 # Tests auch gegen die ausgelieferte ConPTY (conpty::tests::pty_runs_on_selected_host startet eine Sitzung darauf).
 PANELDECK_TEST_CONPTY_DIR="$(abspath dist/conpty)" cargo test --release --quiet  # bricht bei fehlschlagenden Tests ab (set -e)
@@ -151,8 +175,13 @@ if [ "$PUBLISH" = 1 ]; then
   # das, wird kein Release angelegt; das Tag ist dann schon gepusht – Ursache beheben (z. B. den Job in GitHub neu starten)
   # und das Release danach von Hand anlegen.
   SHA_TAG="$(git rev-parse "v$V^{commit}")"
-  RUN=""
+  RUN=""; SRC_REF="refs/tags/v$V"
+  if [ -n "$EARLY_RUN" ] && [ "$EARLY_SHA" = "$SHA_TAG" ]; then
+    RUN="$EARLY_RUN"; SRC_REF="refs/heads/$BRANCH_WANT"
+    echo "Nehme den früh gestarteten Lauf $RUN (Commit $SHA_TAG)"
+  fi
   for _ in $(seq 1 60); do
+    [ -n "$RUN" ] && break
     RUN="$("$GH" run list --workflow release-build.yml --event push --limit 20 --json databaseId,headSha,headBranch \
       --jq ".[] | select(.headSha==\"$SHA_TAG\" and .headBranch==\"v$V\") | .databaseId" | head -1)"
     [ -n "$RUN" ] && break
@@ -179,9 +208,11 @@ if [ "$PUBLISH" = 1 ]; then
     for f in "$@"; do
       [ -f "$dir/$f" ] || { echo "Paket fehlt im Artefakt \`$job\`: $f"; exit 1; }
       # Herkunftsnachweis (actions/attest-build-provenance im Job): gebaut von diesem Repository in GitHub Actions.
-      # Nur Nachweise aus release-build.yml für genau dieses Tag (kein anderer Workflow/Branch des Repositorys).
+      # Nur Nachweise aus release-build.yml für genau dieses Tag bzw. den früh gestarteten Lauf auf release/x.y, in beiden
+      # Fällen für genau den Commit des Tags (kein anderer Workflow, Branch oder Commit des Repositorys).
       "$GH" attestation verify "$dir/$f" -R zibbozz/paneldeck \
-        --signer-workflow zibbozz/paneldeck/.github/workflows/release-build.yml --source-ref "refs/tags/v$V" >/dev/null || { echo "Herkunftsnachweis von $f nicht bestätigt"; exit 1; }
+        --signer-workflow zibbozz/paneldeck/.github/workflows/release-build.yml --source-ref "$SRC_REF" \
+        --source-digest "$SHA_TAG" >/dev/null || { echo "Herkunftsnachweis von $f nicht bestätigt"; exit 1; }
       grep -q "  $f\$" "$SUMS_DIR/SHA256SUMS.txt" || grep "  $f\$" "$dir/$sums" >> "$SUMS_DIR/SHA256SUMS.txt"
     done
     (cd "$dir" && sha256sum -c --quiet --ignore-missing "../sums-$V/SHA256SUMS.txt") || { echo "SHA256SUMS.txt passt nicht zu den Paketen von \`$job\`"; exit 1; }
