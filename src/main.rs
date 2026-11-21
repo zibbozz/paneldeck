@@ -10,6 +10,7 @@ mod cleanup;
 mod claude_opts;
 mod db;
 mod due;
+mod editor;
 mod clip;
 mod conhost_wrap;
 mod emoji;

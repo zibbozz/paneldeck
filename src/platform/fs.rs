@@ -50,3 +50,42 @@ pub fn drive_type(letter: char) -> Option<u32> {
         None
     }
 }
+
+/// Replace `target` by `replacement` (same folder) in one step, for atomic saving. Windows: `ReplaceFileW` when the
+/// target exists (keeps attributes such as hidden, the ACL and the creation time of the target), else a move.
+/// Elsewhere: `rename` (atomic on the same file system; the caller copies the permissions beforehand).
+pub fn replace_file(replacement: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn ReplaceFileW(
+                replaced: *const u16,
+                replacement: *const u16,
+                backup: *const u16,
+                flags: u32,
+                exclude: *mut core::ffi::c_void,
+                reserved: *mut core::ffi::c_void,
+            ) -> i32;
+        }
+        const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x2;
+        if target.exists() {
+            let w = |p: &std::path::Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
+            let (t, r) = (w(target), w(replacement));
+            // SAFETY: beide Pfade sind nullterminiert und leben während des Aufrufs; keine Sicherung, keine Reserven.
+            let ok = unsafe {
+                ReplaceFileW(t.as_ptr(), r.as_ptr(), std::ptr::null(), REPLACEFILE_IGNORE_MERGE_ERRORS, std::ptr::null_mut(), std::ptr::null_mut())
+            };
+            if ok != 0 {
+                return Ok(());
+            }
+            // Fällt z. B. auf FAT-Laufwerken oder bei fehlenden Rechten auf die Attribute aus: normales Umbenennen.
+        }
+        std::fs::rename(replacement, target)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(replacement, target)
+    }
+}
