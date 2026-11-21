@@ -91,7 +91,12 @@ pub fn chat_notice(servers: &[crate::llm::config::LlmServer], meta: &ChatMeta, l
 /// plus die Kontextzeile. Immer Englisch – die Einstellung „Sprache des Systemprompts“ (`Settings::mcp_prompt_lang`)
 /// gilt nur noch für externe Agenten; das Modell antwortet in der Sprache des Nutzers.
 pub fn system_prompt(policy: &ToolPolicy, model: &str, cx: &TurnContext) -> String {
-    let text = super::master_prompt::render(policy, model);
+    system_prompt_variant(policy, model, cx, super::master_prompt::Variant::Full)
+}
+
+/// Wie [`system_prompt`], in der gewählten Fassung (voll oder Kurzfassung für kleine Kontexte).
+pub fn system_prompt_variant(policy: &ToolPolicy, model: &str, cx: &TurnContext, v: super::master_prompt::Variant) -> String {
+    let text = super::master_prompt::render_variant(policy, model, v);
     let line = context_line(cx);
     if line.is_empty() { text } else { format!("{}\n\n{line}", text.trim_end()) }
 }
@@ -196,14 +201,25 @@ pub fn prepare(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext) -> Result
     // Alle Rechnungen in geschätzten Tokens: zählt der Server mehr als geschätzt (Faktor aus der letzten Antwort),
     // ist entsprechend weniger Platz.
     let scale = if cx.token_scale.is_finite() { cx.token_scale.clamp(1.0, 4.0) } else { 1.0 };
+    let tokens_of = |tools: &[llm::ToolSpec]| if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(tools).unwrap_or_default()) };
+    let real = |n: usize| (n as f64 * scale as f64).ceil() as usize;
     // Die Werkzeug-Beschreibungen belegen ebenfalls Kontext.
-    let tools = policy.specs();
-    let tool_tokens = if tools.is_empty() { 0 } else { llm::tokens::estimate_tokens(&serde_json::to_string(&tools).unwrap_or_default()) };
-    let sys_tokens = llm::tokens::message_tokens(&messages[0]);
-    // Ohne eigene Angabe: so viel Kontext, wie Systemprompt und Werkzeuge samt Mindestplatz brauchen (in echten Tokens).
-    let prompt_real = ((sys_tokens + tool_tokens) as f64 * scale as f64).ceil() as usize;
-    // Ohne Werkzeuge (Stufe Aus, keine Werkzeug-Fähigkeit) bleibt es bei 8192: der Mindestplatz gilt den Ergebnissen.
-    let ctx_len = server.request_context(model, policy.enabled().then_some(prompt_real));
+    let mut tools = policy.specs();
+    let mut tool_tokens = tokens_of(&tools);
+    let mut sys_tokens = llm::tokens::message_tokens(&messages[0]);
+    // Ohne eigene Angabe: so viel Kontext, wie der volle Prompt und die Werkzeuge samt Platz für das Gespräch brauchen
+    // (in echten Tokens). Ohne Werkzeuge (Stufe Aus, keine Werkzeug-Fähigkeit) bleibt es bei 8192.
+    let ctx_len = server.request_context(model, policy.enabled().then_some(real(sys_tokens + tool_tokens)));
+    // Passt der volle Prompt nicht gut in diesen Kontext (eigene kleine Angabe, OpenAI-kompatibler Server ohne
+    // gemeldete Länge, kleines Modell), gilt die Kurzfassung mit knappen Werkzeug-Beschreibungen (#340).
+    let variant = super::master_prompt::choose(ctx_len, real(sys_tokens + tool_tokens));
+    if variant == super::master_prompt::Variant::Compact {
+        messages[0] = ChatMessage::new(Role::System, system_prompt_variant(&policy, model, cx, variant));
+        tools = super::master_prompt::minimal_specs(tools);
+        tool_tokens = tokens_of(&tools);
+        sys_tokens = llm::tokens::message_tokens(&messages[0]);
+    }
+    let prompt_real = real(sys_tokens + tool_tokens);
     let budget_real = (ctx_len as u64 * (100 - ANSWER_RESERVE_PERCENT) as u64 / 100) as usize;
     let budget = (budget_real as f64 / scale as f64) as usize;
     let context_notice = (server.user_context(model).is_some() && policy.enabled() && llm::config::context_too_small(ctx_len, prompt_real)).then(|| context_notice(ctx_len, lang));
@@ -381,6 +397,7 @@ impl ChatBackend for LlmBackend {
 
 #[cfg(test)]
 mod tests {
+    use super::super::master_prompt::Variant;
     use super::*;
     use crate::llm::config::{LlmModel, LlmServer};
     use crate::llm::{ModelInfo, ServerKind};
@@ -510,8 +527,10 @@ mod tests {
             c.folder.clear();
             prepare(&meta(), &hist, &c).unwrap()
         };
-        // Größe des Systemprompts (Stufe Aus, ohne Kontextzeile) und der letzten Nachricht, in geschätzten Tokens.
-        let sys = llm::tokens::message_tokens(&ChatMessage::new(Role::System, system_prompt(&ToolPolicy::new(off.clone(), None, false), "m1", &TurnContext::default())));
+        // Größe des Systemprompts (Stufe Aus, ohne Kontextzeile; bei diesen kleinen Kontexten die Kurzfassung) und der
+        // letzten Nachricht, in geschätzten Tokens.
+        let compact = system_prompt_variant(&ToolPolicy::new(off.clone(), None, false), "m1", &TurnContext::default(), Variant::Compact);
+        let sys = llm::tokens::message_tokens(&ChatMessage::new(Role::System, compact.clone()));
         let last = llm::tokens::message_tokens(&ChatMessage::new(Role::User, "last"));
         // Kontext, dessen Budget (75 %) genau `budget` Tokens hat.
         let ctx_for = |budget: usize| (budget * 100).div_ceil(75) as u32;
@@ -522,7 +541,7 @@ mod tests {
         let p = run(c1);
         assert_eq!(p.context_start, Some(3));
         assert_eq!((p.request.num_ctx, p.request.temperature), (Some(c1), Some(0.5)));
-        assert_eq!(p.request.messages[0].role, Role::System);
+        assert_eq!((p.request.messages[0].role, &p.request.messages[0].content), (Role::System, &compact));
         assert_eq!(p.request.messages[1..].iter().map(|m| m.content.len()).collect::<Vec<_>>(), [400, 400, 4]);
         assert_eq!(p.note, None);
         // Budget sys + last + 50: auch die zweite Runde fällt weg, nur „last“ bleibt (Index 5).
@@ -757,7 +776,8 @@ mod tests {
         s.set_model_cfg(LlmModel { tools: Some(false), level: McpLevel::Control, ..LlmModel::named("m1") });
         let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s.clone()])).unwrap();
         assert!(p.request.tools.is_empty());
-        let off = |c: &TurnContext| system_prompt(&pol(McpLevel::Off, false), "m1", c);
+        // Stufe Aus: 8192 Tokens Kontext, darin die Kurzfassung ohne Werkzeuge
+        let off = |c: &TurnContext| system_prompt_variant(&pol(McpLevel::Off, false), "m1", c, Variant::Compact);
         assert_eq!(p.request.messages[0].content, off(&cx(vec![s])), "Prompt für „Aus“");
         assert!(p.request.messages[0].content.contains("**no tools**") && !p.request.messages[0].content.contains("## Tools"));
         // Unbekannte Fähigkeit (OpenAI-kompatibel): Werkzeuge werden gesendet
@@ -1062,5 +1082,48 @@ mod tests {
         // Stufe Aus: kein Hinweis
         s.set_model_cfg(LlmModel { level: McpLevel::Off, level_chosen: true, context_length: Some(8192), ..LlmModel::named("m1") });
         assert!(prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s])).unwrap().context_notice.is_none());
+    }
+
+    /// Kleiner Kontext (#340): OpenAI-kompatibler Server ohne gemeldete Länge (8192) oder eigene kleine Angabe – die
+    /// Kurzfassung samt knappen Werkzeug-Beschreibungen passt bei jeder Stufe und jedem Modus, ohne Hinweis. Mit genug
+    /// Kontext gibt es den vollen Prompt.
+    #[test]
+    fn small_contexts_get_the_compact_prompt_and_large_ones_the_full_prompt() {
+        let full_marker = "## What Paneldeck is";
+        for (level, expert) in [(McpLevel::Read, false), (McpLevel::Read, true), (McpLevel::Control, false), (McpLevel::Control, true)] {
+            let cfg = LlmModel { level, level_chosen: true, ..LlmModel::named("m1") };
+            let mut c = cx(Vec::new());
+            c.expert = expert;
+            // OpenAI-kompatibel ohne gemeldete Länge: 8192
+            let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
+            o.set_model_cfg(cfg.clone());
+            c.servers = vec![o];
+            let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
+            let sys = &p.request.messages[0].content;
+            assert!(!sys.contains(full_marker) && sys.contains("## Tool call rules") && sys.contains("## Safety rules"), "{level:?} {expert}: Kurzfassung");
+            assert_eq!(p.note, None, "{level:?} {expert}: passt in 8192");
+            assert!(p.request.tools.iter().all(|t| t.parameters["properties"].as_object().unwrap().values().all(|v| v.get("description").is_none())), "knappe Werkzeuge");
+            assert_eq!(p.request.tools.len(), ToolPolicy::new(cfg.clone(), None, expert).specs().len(), "alle Werkzeuge der Stufe");
+            eprintln!("SMALL {level:?} expert={expert}: history budget {} of 6144", p.history_budget);
+            assert!(p.history_budget >= 1200, "{level:?} {expert}: Platz für das Gespräch {}", p.history_budget);
+            // eigene Angabe 65536: voller Prompt mit vollen Werkzeugen
+            let mut o = server("http://localhost:1234/v1", ServerKind::OpenAi);
+            o.set_model_cfg(LlmModel { context_length: Some(65536), ..cfg.clone() });
+            c.servers = vec![o];
+            let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
+            assert!(p.request.messages[0].content.contains(full_marker), "{level:?} {expert}: voller Prompt");
+            assert_eq!(p.request.tools, ToolPolicy::new(cfg.clone(), None, expert).specs());
+            // Ollama ohne eigene Angabe: automatischer Kontext, voller Prompt
+            let mut s = server("http://localhost:11434", ServerKind::Ollama);
+            s.set_model_cfg(cfg.clone());
+            c.servers = vec![s];
+            let p = prepare(&meta(), &[msg(store::Role::User, "q")], &c).unwrap();
+            assert!(p.request.messages[0].content.contains(full_marker) && p.note.is_none() && p.context_notice.is_none(), "{level:?} {expert}");
+        }
+        // Selbst die Kurzfassung passt nicht: der bisherige Hinweis bleibt.
+        let mut s = server("http://localhost:11434", ServerKind::Ollama);
+        s.set_model_cfg(LlmModel { level: McpLevel::Read, level_chosen: true, context_length: Some(1024), ..LlmModel::named("m1") });
+        let p = prepare(&meta(), &[msg(store::Role::User, "q")], &cx(vec![s])).unwrap();
+        assert!(p.note.is_some() && !p.request.messages[0].content.contains(full_marker), "{:?}", p.note);
     }
 }
