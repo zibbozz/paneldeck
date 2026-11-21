@@ -6010,6 +6010,9 @@ impl chatmod::driver::ChatToolHost for ChatHost<'_> {
     fn session_name(&self, id: u64) -> Option<String> {
         self.app.entries.get(&id).map(|e| e.display_name())
     }
+    fn lang(&self) -> crate::state::Lang {
+        self.app.settings.language
+    }
 }
 
 #[cfg(test)]

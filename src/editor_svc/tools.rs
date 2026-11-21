@@ -194,7 +194,7 @@ pub fn defs() -> Vec<ToolDef> {
             name: "editor_open",
             level: McpLevel::Control,
             group: Group::Always,
-            description: "Open a local file in a new tab of the Editor tab (an already open file is not opened twice: its id is returned with already_open = true), or with untitled = true a new untitled tab with optional `text`. Needs the user's switch \"Agents may open files\" (Settings -> Editor -> Agents), else forbidden. `path` must be an absolute local path of an existing regular file: network and UNC paths (\\\\server\\share, \\\\wsl.localhost\\..., mapped network drives) and devices (\\\\.\\..., \\\\?\\..., CON, NUL, COM1, /dev, /proc, /sys) are refused with forbidden; a missing file gives not_found. show = true also switches Paneldeck to the Editor tab and shows the file (default: opened in the background). Opening never changes a file. An untitled tab can only be saved by the user.",
+            description: "Open a local file in a new tab of the Editor tab (an already open file is not opened twice: its id is returned with already_open = true), or with untitled = true a new untitled tab with optional `text`. Needs the user's switch \"Agents may open files\" (Settings -> Editor -> Agents), else forbidden. `path` must be an absolute local path of an existing regular file: network and UNC paths (\\\\server\\share, \\\\wsl.localhost\\..., mapped network drives) and devices (\\\\.\\..., \\\\?\\..., CON, NUL, COM1, /dev, /proc, /sys) are refused with forbidden; a missing file gives not_found. show = true also switches Paneldeck to the Editor tab and shows the file, but never takes the user's keyboard focus (default: opened in the background). Opening never changes a file. An untitled tab can only be saved by the user.",
             schema: schema(
                 json!({
                     "path": {"type": "string", "description": "Absolute local file path, e.g. C:\\\\work\\\\README.md"},
@@ -239,12 +239,15 @@ fn schema(props: Value, required: &[&str]) -> Value {
 
 /// Bekommt ein Chat-Modell dieses Werkzeug angeboten? Schreibende Editor-Werkzeuge nur, wenn ihr Schalter an ist
 /// (`bits` = [`super::settings::AGENT_SWITCHES`]) – sonst wären sie nur Platz im Kontext kleiner Modelle und lieferten
-/// immer `forbidden`. Externe Agenten sehen sie immer (mit einer Meldung, die den Schalter nennt).
+/// immer `forbidden`. Lesen, Bearbeiten und Speichern außerdem nur, solange im Editor ein Dokument offen ist
+/// ([`super::settings::DOCS_OPEN`]). Externe Agenten sehen sie immer (mit einer Meldung, die den Schalter nennt).
 pub fn offered_to_chats(name: &str, bits: u8) -> bool {
+    let docs = bits & super::settings::DOCS_OPEN != 0;
     match name {
         "editor_open" => bits & 1 != 0,
-        "editor_edit" => bits & 2 != 0,
-        "editor_save" => bits & 4 != 0,
+        "editor_edit" => docs && bits & 2 != 0,
+        "editor_save" => docs && bits & 4 != 0,
+        "editor_list" | "editor_read" => docs,
         _ => true,
     }
 }
@@ -942,14 +945,20 @@ mod tests {
 
     #[test]
     fn chats_get_write_tools_only_with_their_switch() {
+        use crate::editor_svc::settings::DOCS_OPEN;
         for n in ["editor_list", "editor_read", "list_sessions"] {
-            assert!(offered_to_chats(n, 0), "{n}");
+            assert!(offered_to_chats(n, DOCS_OPEN), "{n}");
         }
-        assert!(!offered_to_chats("editor_open", 0) && !offered_to_chats("editor_edit", 0) && !offered_to_chats("editor_save", 0));
+        assert!(offered_to_chats("list_sessions", 0));
+        assert!(!offered_to_chats("editor_list", 0) && !offered_to_chats("editor_read", 0), "ohne offene Dokumente nichts zu lesen");
+        assert!(!offered_to_chats("editor_open", DOCS_OPEN) && !offered_to_chats("editor_edit", DOCS_OPEN) && !offered_to_chats("editor_save", DOCS_OPEN));
         let bits = crate::editor_svc::settings::switch_bits(&EditorSettings { agent_edit: true, ..Default::default() });
         assert_eq!(bits, 2);
+        assert!(!offered_to_chats("editor_edit", bits), "Bearbeiten erst mit offenem Dokument");
+        let bits = bits | DOCS_OPEN;
         assert!(!offered_to_chats("editor_open", bits) && offered_to_chats("editor_edit", bits) && !offered_to_chats("editor_save", bits));
         assert_eq!(crate::editor_svc::settings::switch_bits(&all_on()), 7);
+        assert!(offered_to_chats("editor_open", 7), "Öffnen geht auch ohne offene Dokumente");
     }
 
     #[test]

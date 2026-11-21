@@ -287,6 +287,7 @@ impl Document {
     }
 
     /// File name for tab titles (`None` for untitled documents).
+    #[allow(dead_code)] // API (die Oberfläche bildet Titel selbst)
     pub fn file_name(&self) -> Option<String> {
         self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
     }
@@ -333,6 +334,7 @@ impl Document {
     }
 
     /// Properties from `.editorconfig` found when the document was opened.
+    #[allow(dead_code)] // API (Anzeige der .editorconfig-Werte, später)
     pub fn editorconfig(&self) -> &EditorConfig {
         &self.editorconfig
     }
@@ -347,6 +349,7 @@ impl Document {
     }
 
     /// Accept the current file on disk as known (e.g. "Keep mine": no new prompt for the same change).
+    #[allow(dead_code)] // API (die Oberfläche nutzt die Konfliktwahl in `file.rs`)
     pub fn acknowledge_disk(&mut self, snap: DiskSnapshot) {
         self.disk = Some(snap);
     }
@@ -419,6 +422,7 @@ impl Document {
     }
 
     /// Forget undo/redo (e.g. after loading another file into the document).
+    #[allow(dead_code)] // API
     pub fn clear_history(&mut self) {
         self.history.clear();
     }
@@ -430,6 +434,7 @@ impl Document {
         &self.agent_marks
     }
 
+    #[allow(dead_code)] // API
     pub fn clear_agent_marks(&mut self) {
         self.agent_marks.clear();
     }

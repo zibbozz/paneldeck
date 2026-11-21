@@ -317,6 +317,7 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     paint(ui, rect, doc, view, &geo, &rows, cx, focused);
     if let Some(m) = minimap {
         minimap_ui(ui, m, doc, view, &geo, cx);
+        crate::app::tutorial::spot_rect(ui, crate::app::tutorial::Spot::EditorMinimap, m);
     }
     scrollbar_ui(ui, &geo, doc, view, &rows, cx);
     if focused {

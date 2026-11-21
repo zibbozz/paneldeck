@@ -6,6 +6,7 @@ use super::panes::Drop as PaneDrop;
 use super::text::{self, TextCx};
 use super::tree::TreeOut;
 use super::{CloseAsk, EditorUi, TabDrag};
+use crate::app::tutorial::{spot_rect, Spot, TutMark};
 use crate::layout::{Dir, Node};
 use crate::state::Lang;
 use crate::style::{self, Icon};
@@ -500,10 +501,19 @@ impl EditorUi {
 
 /// Statusleiste, Ordnerbaum und Teilungen zeichnen (ohne Dialoge); sammelt die Befehle in `cmds`.
 pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme::Theme, prefs: &super::EditorPrefs, lang: Lang, cmds: &mut Vec<Cmd>) {
+    // Ein Agent hat Reiter oder Teilung gewechselt: Tasten des Nutzers dürfen nicht in dessen Datei landen (#54).
+    if std::mem::take(&mut ed.blur)
+        && let Some(f) = ctx.memory(|m| m.focused())
+        && ed.panes.groups.keys().any(|g| text_id(*g) == f)
+    {
+        ctx.memory_mut(|m| m.surrender_focus(f));
+    }
     egui::TopBottomPanel::bottom(style::salted(Id::new("ed_status")))
         .exact_height(STATUS_H)
         .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(10, 0)))
-        .show(ctx, |ui| status_bar(ui, ed, lang, prefs, cmds));
+        .show(ctx, |ui| status_bar(ui, ed, lang, prefs, cmds))
+        .response
+        .spot(Spot::EditorStatus);
     if ed.tree_open {
         let r = egui::SidePanel::left(style::salted(Id::new("ed_tree")))
             .resizable(true)
@@ -512,6 +522,7 @@ pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme:
             .frame(egui::Frame::new().fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(8, 8)))
             .show(ctx, |ui| super::super::panels::fixed_body(ui, |ui| tree_panel(ui, ed, lang, cmds)));
         ed.tree_width = r.response.rect.width();
+        let _ = r.response.spot(Spot::EditorTree);
     }
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme.bg)).show(ctx, |ui| {
         let rect = ui.available_rect_before_wrap();
@@ -623,6 +634,7 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
             super::find::show_bar(ui, r, &mut f, view, d, cx.lang);
         }
         ed.find = f;
+        spot_rect(ui, Spot::EditorFind, r);
         if !ed.find.visible {
             ed.want_focus = true;
         }
@@ -637,8 +649,11 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
     let find_hl = ed.find.highlight();
     let Some(d) = ed.docs.get_mut(&doc_id) else { return };
     let Some(view) = ed.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(idx)).map(|t| &mut t.view) else { return };
-    let tcx = TextCx { id: style::salted(Id::new(("ed_text", g))), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, wrap, minimap, request_focus: want, find: find_hl.as_ref(), lang: cx.lang };
+    let tcx = TextCx { id: text_id(g), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, wrap, minimap, request_focus: want, find: find_hl.as_ref(), lang: cx.lang };
     let out = text::show(ui, body, d, view, &tcx);
+    if focused {
+        spot_rect(ui, Spot::EditorText, body);
+    }
     if out.focused && ed.panes.focused != g {
         ed.panes.focused = g;
     }
@@ -649,6 +664,11 @@ fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, 
     if focused && ed.panes.groups.len() > 1 {
         ui.painter().rect_stroke(rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, style::accent().gamma_multiply(0.5)), StrokeKind::Inside);
     }
+}
+
+/// Id des Textfelds einer Gruppe (Tastaturfokus).
+pub(super) fn text_id(g: u64) -> Id {
+    style::salted(Id::new(("ed_text", g)))
 }
 
 /// Schrift des Textfelds: die eigene Familie „editor“ (Einstellungen → Editor; gleich der Terminalschrift, solange dort
@@ -893,12 +913,17 @@ fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: 
         });
     }
     ed.bar_rects.insert(g, (tabs_r, rects));
+    if focused {
+        spot_rect(ui, Spot::EditorTabBar, tabs_r);
+    }
     // Teilen-Knöpfe
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(btn_r.shrink2(Vec2::new(2.0, 4.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
     if style::icon_btn_small(&mut child, Icon::SplitDown, lang.t("Unten teilen", "Split down")).clicked() {
         cmds.push(Cmd::Split(g, Dir::Vertical));
     }
-    if style::icon_btn_small(&mut child, Icon::SplitRight, lang.t("Rechts teilen", "Split right")).clicked() {
+    let split = style::icon_btn_small(&mut child, Icon::SplitRight, lang.t("Rechts teilen", "Split right"));
+    let split = if focused { split.spot(Spot::EditorSplit) } else { split };
+    if split.clicked() {
         cmds.push(Cmd::Split(g, Dir::Horizontal));
     }
 }

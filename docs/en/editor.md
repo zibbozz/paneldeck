@@ -80,6 +80,7 @@ Agents (Claude Code and others via the [agent interface](agent-interface.md#edit
   - **Agents may open files** – in a new tab; only local paths, never network/UNC paths (`\\server\share`, `\\wsl.localhost\…`, mapped network drives) or devices. An agent may also open an untitled tab with text.
   - **Agents may edit open files** – the change stays **unsaved**, is marked as made by the agent (*Opened or changed by an agent*) and can be undone.
   - **Agents may save** – only files that are open and already exist; untitled tabs are saved by you only.
+- Agents never take the keyboard focus: a file an agent opens or shows is not focused, so what you are typing never lands in it by accident.
 - These rules apply to text mode and to the later hex mode alike.
 
 ## Not yet

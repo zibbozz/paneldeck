@@ -1247,7 +1247,20 @@ pub fn minimal_specs(specs: Vec<crate::llm::ToolSpec>) -> Vec<crate::llm::ToolSp
                     }
                 }
             }
-            s.description = first_sentence(short_purpose(&s.name), 80);
+            // Editor (#54): ohne die optionalen Felder, deren Vorgabe genügt (`show`, `limit`, `replace_all`); `doc` nur
+            // als Id aus editor_list (der Hub nimmt weiter auch den Pfad).
+            if s.name.starts_with("editor_")
+                && let Some(props) = s.parameters.get_mut("properties").and_then(Value::as_object_mut)
+            {
+                for k in ["show", "limit", "replace_all"] {
+                    props.remove(k);
+                }
+                if let Some(d) = props.get_mut("doc") {
+                    *d = serde_json::json!({"type": "integer"});
+                }
+            }
+            // Der Hinweis „(needs a switch)“ der Editor-Werkzeuge entfällt: ein Chat bekommt sie nur mit Schalter.
+            s.description = first_sentence(&short_purpose(&s.name).replace(" (needs a switch)", ""), 80);
             s
         })
         .collect()
@@ -1780,6 +1793,10 @@ mod tests {
     /// Mit allen Agenten-Werkzeugen (#338, Projektordner und Suchdienst) passt jede Stufe weiter in 8192 Tokens; Steuern im
     /// Expertenmodus (58 Werkzeuge) lässt dann aber nur noch gut 5 % Platz (wer dort ein kleines Modell nutzt, wählt
     /// Werkzeuge ab), Steuern ohne Expertenmodus weiter ein Fünftel, Lesen weiter die Hälfte.
+    ///
+    /// Editor (#54): Die Editor-Werkzeuge kommen nur mit offenen Dokumenten bzw. eingeschalteten Schaltern dazu (sonst
+    /// unverändert wie oben). Sind alle da, bleibt Steuern ohne Expertenmodus bei einem Fünftel und Lesen bei der Hälfte;
+    /// Steuern im Expertenmodus mit allen Agenten- und Editor-Werkzeugen (63) passt noch, mit nur gut 2 % Platz.
     #[test]
     fn the_compact_prompt_fits_into_8192_with_room_left() {
         let budget = 8192 * 3 / 4;
@@ -1796,8 +1813,38 @@ mod tests {
                 let room = if level == McpLevel::Control && expert { budget / 20 } else { budget / 5 };
                 assert!(a + room <= budget, "Agenten-Werkzeuge {level:?} {expert} {model}: {a} von {budget}");
                 assert!(level == McpLevel::Control || a <= budget / 2 + 500, "Agenten-Werkzeuge {level:?} {expert} {model}: {a}");
+                // dazu Dokumente im Editor offen und alle drei Editor-Schalter an (#54: alle fünf editor_*-Werkzeuge;
+                // bei Lesen nur editor_list/editor_read)
+                let all = crate::editor_svc::settings::DOCS_OPEN | 7;
+                let e = request_tokens(&policy(level, expert).with_editor_switches(all), model, Variant::Compact);
+                eprintln!("COMPACT+AGENT+EDITOR {level:?} expert={expert} {model}: {e} tokens, room {}", budget - e.min(budget));
+                let room = if level == McpLevel::Control && expert { budget / 50 } else { budget / 5 };
+                assert!(e + room <= budget, "mit Editor-Werkzeugen {level:?} {expert} {model}: {e} von {budget}");
+                assert!(level == McpLevel::Control || e <= budget / 2 + 500, "mit Editor-Werkzeugen {level:?} {expert} {model}: {e}");
             }
         }
+    }
+
+    /// Die Editor-Werkzeuge (#54) bekommt ein Chat nur, wenn sie etwas tun können: schreibende nur mit ihrem Schalter
+    /// (und Stufe Steuern), Lesen, Bearbeiten und Speichern nur, solange im Editor ein Dokument offen ist.
+    #[test]
+    fn editor_tools_follow_switches_and_open_documents() {
+        use crate::editor_svc::settings::DOCS_OPEN;
+        let names = |p: &ToolPolicy| p.specs().into_iter().map(|s| s.name).filter(|n| n.starts_with("editor_")).collect::<Vec<_>>();
+        assert!(names(&policy(McpLevel::Control, false).with_editor_switches(0)).is_empty());
+        assert_eq!(names(&policy(McpLevel::Control, false).with_editor_switches(DOCS_OPEN)), ["editor_list", "editor_read"]);
+        assert_eq!(names(&policy(McpLevel::Control, false).with_editor_switches(DOCS_OPEN | 7)), ["editor_list", "editor_read", "editor_open", "editor_edit", "editor_save"]);
+        assert_eq!(names(&policy(McpLevel::Control, false).with_editor_switches(DOCS_OPEN | 2)), ["editor_list", "editor_read", "editor_edit"]);
+        assert_eq!(names(&policy(McpLevel::Control, false).with_editor_switches(7)), ["editor_open"], "ohne offene Dokumente nur Öffnen");
+        assert_eq!(names(&policy(McpLevel::Read, false).with_editor_switches(DOCS_OPEN | 7)), ["editor_list", "editor_read"]);
+        // Kurzfassung: knappe Schemas ohne Felder, deren Vorgabe genügt
+        let min = minimal_specs(policy(McpLevel::Control, false).with_editor_switches(DOCS_OPEN | 7).specs());
+        let read = min.iter().find(|s| s.name == "editor_read").unwrap();
+        assert!(read.parameters["properties"].get("limit").is_none() && read.parameters["properties"]["doc"]["type"] == "integer");
+        assert!(min.iter().find(|s| s.name == "editor_open").unwrap().parameters["properties"].get("show").is_none());
+        // Volle Fassung: Abschnitte nur für angebotene Werkzeuge
+        let full = render(&policy(McpLevel::Control, false).with_editor_switches(1), "m");
+        assert!(full.contains("\n### editor_open\n") && !full.contains("\n### editor_save\n"));
     }
 
     /// Die Entscheidung ist eine reine Funktion der Kontextlänge: volle Fassung ab dem Kontext, den Ollama ohne eigene

@@ -6,6 +6,7 @@ use super::text::{CharClass, char_class, next_grapheme, prev_grapheme};
 
 /// A cursor movement (keys: arrows, Ctrl+arrows, Home/End, Ctrl+Home/End, PageUp/Down = `Up(n)`/`Down(n)`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // nicht jede Bewegung hat einen eigenen Test
 pub enum Motion {
     /// One grapheme cluster left.
     Left,

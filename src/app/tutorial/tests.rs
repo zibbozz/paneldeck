@@ -158,11 +158,17 @@ enum Home {
     Tasks,
     Plan,
     Palette,
+    /// Editor-Reiter; `true` = braucht eine offene Datei (die Beispieldatei der Tour).
+    Editor(bool),
 }
 
 fn home(s: Spot) -> Home {
     use Spot::*;
     match s {
+        TabEditor | EditorSearchSettings | EditorAgentSwitches => Home::Settings(super::super::editor_services::SETTINGS_TAB),
+        EditorTree => Home::Editor(false),
+        EditorTabBar | EditorSplit | EditorText | EditorFind | EditorStatus | EditorMinimap | EditorSearchFiles => Home::Editor(true),
+        TitlebarEditor => Home::Hub,
         ThemeManage => Home::Settings(1),
         ClaudeMode | ClaudeDefaults | ClaudeBudget => Home::Settings(2),
         TabShortcuts => Home::Settings(5),
@@ -196,14 +202,29 @@ fn preparations_open_the_home_of_each_target() {
             Home::Tasks => assert!(has(Prep::Tasks) && has(Prep::NoSettings), "{}: Todo-Liste", s.id),
             Home::Plan => assert!(has(Prep::Tasks) && has(Prep::Expert(true)) && has(Prep::PlanProject), "{}: Experten-Projekt", s.id),
             Home::Palette => assert!(has(Prep::Palette(true)), "{}: Palette offen", s.id),
+            Home::Editor(file) => {
+                assert!(has(Prep::Editor) && has(Prep::NoSettings), "{}: Editor-Reiter ohne Einstellungen", s.id);
+                assert!(!file || has(Prep::EditorFile), "{}: Beispieldatei der Tour offen", s.id);
+            }
         }
         // Ziele, die eine Sitzung brauchen
         if matches!(spot, Spot::SessionRow | Spot::PaneSplit | Spot::PaneMinimize) {
             assert!(has(Prep::Session), "{}: braucht eine Sitzung", s.id);
         }
+        // Ziele des Editors, die erst eine Leiste oder ein Fenster zeigen
+        match spot {
+            Spot::EditorTree => assert!(has(Prep::EditorTree), "{}: Ordnerbaum einblenden", s.id),
+            Spot::EditorFind => assert!(has(Prep::EditorFind(true)), "{}: Suchleiste öffnen", s.id),
+            Spot::EditorSearchFiles => assert!(has(Prep::EditorSearch(true)), "{}: Suchfenster öffnen", s.id),
+            _ => {}
+        }
+        // Erkennung „Suche geöffnet“ braucht eine geschlossene Suchleiste beim Betreten
+        if s.id == "editor.find" {
+            assert!(has(Prep::EditorFind(false)), "{}: Suchleiste zu Beginn zu", s.id);
+        }
         for p in s.prep {
             if let Prep::Settings(i) = p {
-                assert!(*i <= 12, "{}: Reiter {i}", s.id);
+                assert!(*i <= super::super::editor_services::SETTINGS_TAB, "{}: Reiter {i}", s.id);
             }
         }
     }
@@ -261,6 +282,18 @@ fn actions_are_recognised_from_the_state() {
     assert!(done("claude.queue", &base, &Probe { composer: true, ..base.clone() }));
     assert!(done("chat.new", &base, &Probe { new_chat: true, ..base.clone() }));
     assert!(done("tools.files", &base, &Probe { files: true, ..base.clone() }));
+    // Editor (#54)
+    assert!(done("basics.editor", &base, &Probe { editor: true, ..base.clone() }));
+    assert!(done("editor.intro", &base, &Probe { editor: true, ..base.clone() }));
+    assert!(!done("editor.intro", &Probe { editor: true, ..base.clone() }, &Probe { editor: true, ..base.clone() }), "schon offen beim Betreten");
+    assert!(done("editor.open", &Probe { editor_docs: 1, ..base.clone() }, &Probe { editor_docs: 2, ..base.clone() }));
+    assert!(!done("editor.open", &Probe { editor_docs: 2, ..base.clone() }, &Probe { editor_docs: 1, ..base.clone() }), "Schließen zählt nicht");
+    assert!(done("editor.split", &Probe { editor_groups: 1, ..base.clone() }, &Probe { editor_groups: 2, ..base.clone() }));
+    assert!(done("editor.find", &base, &Probe { editor_find: true, ..base.clone() }));
+    let one = Probe { editor_cursors: 1, ..base.clone() };
+    assert!(done("editor.cursors", &one, &Probe { editor_cursors: 2, ..base.clone() }));
+    assert!(!done("editor.cursors", &base, &one), "ein Cursor ist kein weiterer");
+    assert!(step("editor.disk").done.is_none() && step("editor.disk").spot.is_none(), "Blase in der Mitte, nur Weiter");
     // Ohne Erkennung: nur „Weiter“.
     assert!(step("basics.welcome").done.is_none() && step("mcp.register").done.is_none());
 }
@@ -276,6 +309,22 @@ fn whats_new_lists_the_steps_since_a_version() {
     let all = steps::whats_new_steps("0.0.0", "9.9.9").len();
     assert_eq!(all, all_steps().count(), "jeder Schritt einmal");
     assert!(ids("2.6.0", steps::TUTORIAL_VERSION).contains(&"basics.help"), "die Hilfe zum Tutorial ist neu in 3.0.0");
+    // Der Editor (#54) kam mit 3.0.0: die Tour „Was ist neu“ für 2.x zeigt ihn, mit dem Schritt der kurzen Tour zuerst.
+    let editor = ids("2.7.0", "3.0.0");
+    assert!(editor.contains(&"basics.editor") && editor.contains(&"editor.agents") && editor.contains(&"editor.search"), "{editor:?}");
+    assert!(steps::tour("editor").is_some_and(|t| t.steps.iter().all(|s| s.since == "3.0.0")));
+}
+
+/// Die Schritte im Editor arbeiten in einer eigenen Beispieldatei der Tour im Temp-Ordner, nie in einer des Nutzers.
+#[test]
+fn the_editor_sample_belongs_to_the_tour() {
+    let p = super::super::App::tut_sample_path();
+    assert!(p.starts_with(std::env::temp_dir()), "{p:?}");
+    assert!(p.to_string_lossy().contains("paneldeck-tutorial"));
+    for lang in [Lang::De, Lang::En] {
+        let t = super::sample_text(lang);
+        assert!(t.lines().count() >= 40, "genug Zeilen für Minimap und Suche");
+    }
 }
 
 #[test]

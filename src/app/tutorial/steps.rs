@@ -10,8 +10,8 @@
 //! Neue sichtbare Funktionen bekommen hier ihre Schritte (Regel 10 in CLAUDE.md); die Tests in `tests.rs` prüfen Ziel,
 //! beide Sprachen, Versionen und Platzhalter.
 //!
-//! Editor-Reiter (#54, 3.0.0): seine Schritte kommen als eigenes Kapitel dazu, sobald der Reiter in `develop` ist (Liste
-//! der geplanten Schritte: `notes/tutorial-editor-steps.md` im Test-Ordner bzw. im Bericht zu #143).
+//! Editor-Reiter (#54, 3.0.0): Kapitel `editor` und der Schritt `basics.editor`; Schritte mit Text im Editor öffnen eine
+//! eigene Beispieldatei der Tour (`Prep::EditorFile`, nie eine Datei des Nutzers).
 
 use super::marks::Spot;
 
@@ -56,6 +56,16 @@ pub(super) struct Probe {
     pub files: bool,
     /// Dialog „Neuer Chat“ offen.
     pub new_chat: bool,
+    /// Reiter „Editor“ aktiv (#54).
+    pub editor: bool,
+    /// Offene Dokumente im Editor.
+    pub editor_docs: usize,
+    /// Teilungen des Editors.
+    pub editor_groups: usize,
+    /// Suchleiste des Editors offen.
+    pub editor_find: bool,
+    /// Cursor (Auswahlen) im aktiven Reiter des Editors.
+    pub editor_cursors: usize,
 }
 
 /// Erkennung „Aufgabe erledigt“: Zustand beim Betreten des Schritts, Zustand jetzt.
@@ -88,6 +98,16 @@ pub(super) enum Prep {
     PlanProject,
     /// Reiter der Projektansicht (`tab_key`).
     PlanTab(&'static str),
+    /// Reiter „Editor“ zeigen (#54).
+    Editor,
+    /// Ordnerbaum des Editors einblenden.
+    EditorTree,
+    /// Beispieldatei der Tour im Editor öffnen und zeigen (eine eigene Datei im Temp-Ordner, nie eine des Nutzers).
+    EditorFile,
+    /// Suchleiste des Editors offen (mit Ersetzen) bzw. geschlossen.
+    EditorFind(bool),
+    /// Fenster „In Dateien suchen“ offen bzw. geschlossen.
+    EditorSearch(bool),
 }
 
 /// Voraussetzung eines Schritts.
@@ -198,6 +218,21 @@ fn files_toggled(a: &Probe, b: &Probe) -> bool {
 fn chat_started(a: &Probe, b: &Probe) -> bool {
     (b.new_chat && !a.new_chat) || b.sessions > a.sessions
 }
+fn editor_shown(a: &Probe, b: &Probe) -> bool {
+    b.editor && !a.editor
+}
+fn editor_docs_grew(a: &Probe, b: &Probe) -> bool {
+    b.editor_docs > a.editor_docs
+}
+fn editor_split(a: &Probe, b: &Probe) -> bool {
+    b.editor_groups > a.editor_groups
+}
+fn editor_find_opened(a: &Probe, b: &Probe) -> bool {
+    b.editor_find && !a.editor_find
+}
+fn editor_cursor_added(a: &Probe, b: &Probe) -> bool {
+    b.editor_cursors > 1 && b.editor_cursors > a.editor_cursors
+}
 
 // Indizes der Einstellungsreiter (siehe `settings.rs`).
 const S_APPEARANCE: usize = 1;
@@ -208,8 +243,11 @@ const S_AGENTS: usize = 7;
 const S_DATA: usize = 8;
 const S_ABOUT: usize = 9;
 const S_MODELS: usize = super::super::models_ui::SETTINGS_TAB;
+const S_EDITOR: usize = super::super::editor_services::SETTINGS_TAB;
 
 const HUB: &[Prep] = &[Prep::Terminals, Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::TutProject];
+/// Editor mit der Beispieldatei der Tour, ohne Suchleiste und Suchfenster.
+const EDITOR_FILE: &[Prep] = &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::EditorSearch(false), Prep::Editor, Prep::EditorFile, Prep::EditorFind(false)];
 const HUB_SESSION: &[Prep] = &[Prep::Terminals, Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::Session];
 const TODO_SIMPLE: &[Prep] = &[Prep::NoSettings, Prep::Tasks, Prep::Expert(false)];
 const PLAN: &[Prep] = &[Prep::NoSettings, Prep::Tasks, Prep::Expert(true), Prep::PlanProject];
@@ -314,11 +352,24 @@ const BASICS: &[Step] = &[
         spot: Some(Spot::TitlebarTabs),
         title: tx("Weitere Fenster", "More windows"),
         body: tx(
-            "Strg+Klick auf einen Reiter hier oben (Terminal Hub, Todo-Liste) öffnet ihn in einem neuen Fenster. Auch eine Sitzung bekommt ein eigenes Fenster: Rechtsklick → „In eigenem Fenster öffnen“.",
-            "Ctrl+click a tab up here (Terminal Hub, To-do list) to open it in a new window. A session can get its own window too: right-click it → “Open in own window”.",
+            "Strg+Klick auf einen Reiter hier oben (Terminal Hub, Todo-Liste, Editor) öffnet ihn in einem neuen Fenster. Auch eine Sitzung bekommt ein eigenes Fenster: Rechtsklick → „In eigenem Fenster öffnen“.",
+            "Ctrl+click a tab up here (Terminal Hub, To-do list, Editor) to open it in a new window. A session can get its own window too: right-click it → “Open in own window”.",
         ),
         prep: HUB,
         done: None,
+        need: None,
+    },
+    Step {
+        id: "basics.editor",
+        since: "3.0.0",
+        spot: Some(Spot::TitlebarEditor),
+        title: tx("Editor", "Editor"),
+        body: tx(
+            "Der Reiter Editor ({key:mode_editor}) ist ein eigener Texteditor: Reiter, Teilungen, Suchen und Ersetzen, mehrere Cursor, Suche in Dateien. Klick darauf und sieh dich um – das Kapitel „Der Editor“ zeigt mehr.",
+            "The Editor tab ({key:mode_editor}) is a text editor of its own: tabs, splits, find and replace, multiple cursors, search in files. Click it and have a look – the chapter “The editor” shows more.",
+        ),
+        prep: HUB,
+        done: Some(editor_shown),
         need: None,
     },
     Step {
@@ -474,6 +525,192 @@ const BASICS: &[Step] = &[
             "That's it! The tour and the chapters on single topics are always here, in the command palette (“Tutorial”) and in the empty Terminal Hub. At the end you decide whether the tutorial project is kept.",
         ),
         prep: &[Prep::Terminals, Prep::Settings(S_ABOUT)],
+        done: None,
+        need: None,
+    },
+];
+
+/// Kapitel „Der Editor“ (#54, 3.0.0). Schritte mit Text arbeiten in der Beispieldatei der Tour (`Prep::EditorFile`).
+const EDITOR: &[Step] = &[
+    Step {
+        id: "editor.intro",
+        since: "3.0.0",
+        spot: Some(Spot::TitlebarEditor),
+        title: tx("Der Reiter Editor", "The Editor tab"),
+        body: tx(
+            "Der Editor ist ein schlichter Texteditor mit eigenem Ordnerbaum und eigenen Dateien – unabhängig von den Terminals. Öffne ihn mit einem Klick oder {key:mode_editor}, um weiterzumachen.",
+            "The editor is a plain text editor with its own folder tree and its own files – independent of the terminals. Open it with a click or {key:mode_editor} to continue.",
+        ),
+        prep: HUB,
+        done: Some(editor_shown),
+        need: None,
+    },
+    Step {
+        id: "editor.open",
+        since: "3.0.0",
+        spot: Some(Spot::EditorTree),
+        title: tx("Dateien und Ordner öffnen", "Open files and folders"),
+        body: tx(
+            "„Ordner öffnen …“ (Strg+Umschalt+O) zeigt einen Ordner als Baum; ein Klick öffnet eine Datei in einem Reiter, Strg+O öffnet eine einzelne Datei, Strg+B blendet den Baum aus. Ungespeicherte Änderungen überstehen einen Neustart. Öffne eine Datei, um weiterzumachen – oder geh mit „Weiter“ zur Beispieldatei der Tour.",
+            "“Open folder …” (Ctrl+Shift+O) shows a folder as a tree; a click opens a file in a tab, Ctrl+O opens a single file, Ctrl+B hides the tree. Unsaved changes survive a restart. Open a file to continue – or use “Next” to get the tour's sample file.",
+        ),
+        prep: &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::EditorSearch(false), Prep::Editor, Prep::EditorTree],
+        done: Some(editor_docs_grew),
+        need: None,
+    },
+    Step {
+        id: "editor.tabs",
+        since: "3.0.0",
+        spot: Some(Spot::EditorTabBar),
+        title: tx("Reiter", "Tabs"),
+        body: tx(
+            "Die Tour hat eine eigene Beispieldatei geöffnet. Jede Teilung hat ihre eigene Reiterleiste: Reiter lassen sich ziehen – auch in eine andere Teilung –, Mittelklick schließt, Strg+Tab wechselt. Ein Punkt zeigt ungespeicherte Änderungen; Strg+S speichert.",
+            "The tour opened a sample file of its own. Every split has its own tab bar: drag tabs – also into another split –, middle-click closes, Ctrl+Tab switches. A dot shows unsaved changes; Ctrl+S saves.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.split",
+        since: "3.0.0",
+        spot: Some(Spot::EditorSplit),
+        title: tx("Teilen", "Split"),
+        body: tx(
+            "Teile den Editor nach rechts ({key:split_r}) oder nach unten ({key:split_d}), wie im Terminal Hub; Strg+Alt+Pfeil wechselt die Teilung. Dieselbe Datei in zwei Teilungen bleibt gleich, jede mit eigenem Cursor. Teile ihn einmal, um weiterzumachen.",
+            "Split the editor to the right ({key:split_r}) or below ({key:split_d}), like in the Terminal Hub; Ctrl+Alt+arrow moves between splits. The same file in two splits stays in sync, each with its own cursor. Split it once to continue.",
+        ),
+        prep: EDITOR_FILE,
+        done: Some(editor_split),
+        need: None,
+    },
+    Step {
+        id: "editor.find",
+        since: "3.0.0",
+        spot: Some(Spot::EditorText),
+        title: tx("Suchen", "Find"),
+        body: tx(
+            "Klick in den Text und drücke Strg+F zum Suchen oder Strg+H zum Ersetzen. Öffne die Suche, um weiterzumachen.",
+            "Click into the text and press Ctrl+F to find or Ctrl+H to replace. Open the search to continue.",
+        ),
+        prep: EDITOR_FILE,
+        done: Some(editor_find_opened),
+        need: None,
+    },
+    Step {
+        id: "editor.replace",
+        since: "3.0.0",
+        spot: Some(Spot::EditorFind),
+        title: tx("Suchen und Ersetzen", "Find and replace"),
+        body: tx(
+            "Aa beachtet Groß-/Kleinschreibung, W sucht ganze Wörter, .* nimmt reguläre Ausdrücke (beim Ersetzen mit $1 für Gruppen). Enter springt zum nächsten Treffer, „Alle ersetzen“ ist ein Schritt zum Rückgängigmachen. Esc schließt die Leiste.",
+            "Aa matches case, W finds whole words, .* takes regular expressions (with $1 for groups when replacing). Enter jumps to the next match, “Replace all” is one step to undo. Esc closes the bar.",
+        ),
+        prep: &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::EditorSearch(false), Prep::Editor, Prep::EditorFile, Prep::EditorFind(true)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.cursors",
+        since: "3.0.0",
+        spot: Some(Spot::EditorText),
+        title: tx("Mehrere Cursor", "Multiple cursors"),
+        body: tx(
+            "Alt+Klick setzt einen weiteren Cursor, Alt+Umschalt+↑/↓ einen darüber oder darunter, Strg+D markiert das nächste gleiche Wort, Alt+Ziehen eine Spalte – alles, was du tippst, geht an alle. Esc lässt nur einen übrig. Setz einen zweiten Cursor, um weiterzumachen.",
+            "Alt+click adds a cursor, Alt+Shift+Up/Down adds one above or below, Ctrl+D selects the next match of the word, Alt+drag selects a column – everything you type goes to all of them. Esc keeps only one. Add a second cursor to continue.",
+        ),
+        prep: EDITOR_FILE,
+        done: Some(editor_cursor_added),
+        need: None,
+    },
+    Step {
+        id: "editor.status",
+        since: "3.0.0",
+        spot: Some(Spot::EditorStatus),
+        title: tx("Statusleiste, Gehe zu Zeile", "Status bar, go to line"),
+        body: tx(
+            "Die Statusleiste zeigt Zeile und Spalte, Einrückung, Kodierung und Zeilenende – beide werden beim Öffnen erkannt und lassen sich per Klick umstellen (UTF-8, UTF-16, Windows-1252; LF oder CRLF). Strg+G springt zu einer Zeile.",
+            "The status bar shows line and column, indentation, encoding and line endings – both are detected on opening and can be switched with a click (UTF-8, UTF-16, Windows-1252; LF or CRLF). Ctrl+G jumps to a line.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.minimap",
+        since: "3.0.0",
+        spot: Some(Spot::EditorMinimap),
+        title: tx("Minimap", "Minimap"),
+        body: tx(
+            "Die Minimap zeigt die ganze Datei im Kleinen; Klicken oder Ziehen rollt dorthin. Große Dateien (ab 20 MB) öffnen ohne Minimap und Umbruch und bleiben auch mit mehreren hundert MB flüssig.",
+            "The minimap shows the whole file in small; click or drag it to scroll there. Large files (from 20 MB) open without minimap and wrapping and stay smooth even with several hundred MB.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.disk",
+        since: "3.0.0",
+        spot: None,
+        title: tx("Auf der Platte geändert", "Changed on disk"),
+        body: tx(
+            "Ändert ein anderes Programm (z. B. Claude Code) eine offene Datei, lädt der Editor sie still neu. Hast du dort ungespeicherte Änderungen, fragt eine Leiste: „Meine behalten“, „Von der Platte laden“ oder „Unterschied anzeigen“. Gespeichert wird immer über eine temporäre Datei, damit nichts halb geschrieben zurückbleibt.",
+            "When another program (e.g. Claude Code) changes an open file, the editor reloads it quietly. If you have unsaved changes there, a bar asks: “Keep mine”, “Load from disk” or “Show difference”. Saving always goes through a temporary file, so nothing is left half written.",
+        ),
+        prep: EDITOR_FILE,
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.search",
+        since: "3.0.0",
+        spot: Some(Spot::EditorSearchFiles),
+        title: tx("In Dateien suchen", "Search in files"),
+        body: tx(
+            "Strg+Umschalt+F durchsucht den geöffneten Ordner – auch mit regulären Ausdrücken; .gitignore wird beachtet, Binärdateien und große Dateien werden übersprungen. Ein Klick auf einen Treffer öffnet die Datei an der Stelle, F4 und Umschalt+F4 springen zum nächsten und vorigen.",
+            "Ctrl+Shift+F searches the opened folder – also with regular expressions; .gitignore is respected, binary and large files are skipped. A click on a result opens the file at that spot, F4 and Shift+F4 jump to the next and previous one.",
+        ),
+        prep: &[Prep::NoSettings, Prep::Palette(false), Prep::NoTools, Prep::Editor, Prep::EditorFile, Prep::EditorFind(false), Prep::EditorSearch(true)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.settings",
+        since: "3.0.0",
+        spot: Some(Spot::TabEditor),
+        title: tx("Einstellungen → Editor", "Settings → Editor"),
+        body: tx(
+            "Hier stellst du die Schrift des Editors ein (Standard: die Terminalschrift), ab welcher Größe eine Datei als groß gilt und ob automatisch gespeichert wird – nur Dateien, die es schon gibt.",
+            "Here you choose the editor font (default: the terminal font), from which size a file counts as large and whether files are saved automatically – only files that already exist.",
+        ),
+        prep: &[Prep::Palette(false), Prep::NoTools, Prep::EditorSearch(false), Prep::Editor, Prep::Settings(S_EDITOR)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.search_settings",
+        since: "3.0.0",
+        spot: Some(Spot::EditorSearchSettings),
+        title: tx("Suche in Dateien einstellen", "Search in files settings"),
+        body: tx(
+            "„Ignorierte einbeziehen“ ist die Vorgabe für den Schalter im Suchfenster; Ausschlussmuster (wie in .gitignore, z. B. node_modules oder *.min.js) gelten immer.",
+            "“Include ignored” is the default of the switch in the search window; exclude patterns (as in .gitignore, e.g. node_modules or *.min.js) always apply.",
+        ),
+        prep: &[Prep::Editor, Prep::Settings(S_EDITOR)],
+        done: None,
+        need: None,
+    },
+    Step {
+        id: "editor.agents",
+        since: "3.0.0",
+        spot: Some(Spot::EditorAgentSwitches),
+        title: tx("Agenten und der Editor", "Agents and the editor"),
+        body: tx(
+            "Agenten dürfen offene Dateien ab der Stufe „Nur lesen“ lesen. Öffnen, Bearbeiten und Speichern brauchen die Stufe „Steuern“ und je einen eigenen Schalter hier – alle standardmäßig aus. Änderungen eines Agenten bleiben ungespeichert und lassen sich rückgängig machen; die Tastatur nimmt ein Agent dir nie.",
+            "Agents may read open files from level “Read only”. Opening, editing and saving need level “Control” plus their own switch here – all off by default. Changes by an agent stay unsaved and can be undone; an agent never takes your keyboard focus.",
+        ),
+        prep: &[Prep::Editor, Prep::Settings(S_EDITOR)],
         done: None,
         need: None,
     },
@@ -974,6 +1211,7 @@ const TOOLS: &[Step] = &[
 /// Alle Touren: zuerst die kurze Tour, dann die Kapitel.
 pub(super) static TOURS: &[Tour] = &[
     Tour { id: "basics", title: tx("Kurze Tour", "Short tour"), summary: tx("Die wichtigsten Teile in etwa 3 Minuten", "The main parts in about 3 minutes"), steps: BASICS },
+    Tour { id: "editor", title: tx("Der Editor", "The editor"), summary: tx("Dateien, Reiter, Teilungen, Suchen und Ersetzen, mehrere Cursor, Suche in Dateien, Agenten", "Files, tabs, splits, find and replace, multiple cursors, search in files, agents"), steps: EDITOR },
     Tour { id: "todo", title: tx("Todo-Liste & Expertenmodus", "To-do list & expert mode"), summary: tx("Liste, Projekte, Tickets, Boards, Sprints, Abfragen", "List, projects, tickets, boards, sprints, queries"), steps: TODO },
     Tour { id: "claude", title: tx("Claude Code im Detail", "Claude Code in detail"), summary: tx("Claude-Modus, Status, Kosten und Budget, Verlauf, Prompts, Warteschlange", "Claude mode, status, costs and budget, history, prompts, queue"), steps: CLAUDE },
     Tour { id: "chat", title: tx("Chats mit lokalen Modellen", "Chats with local models"), summary: tx("Ollama einrichten, Modelle verbinden, Stufen und Freigaben", "Set up Ollama, connect models, levels and approvals"), steps: CHAT },

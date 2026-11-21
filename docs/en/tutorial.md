@@ -18,11 +18,13 @@ If a step needs something that is not installed – **Claude Code** or **Ollama*
 ## Your data stays untouched
 Every tour runs in a project of its own called **Tutorial** with its own sessions. To-dos and the example expert project (key `TUT`) created during a tour belong to it as well, and expert mode is switched back afterwards.
 At the end – or when you end a tour early – Paneldeck asks whether to **delete** the tutorial project (the default, also with Enter) or **keep** it. Delete closes its sessions and removes its to-dos and tickets; Esc keeps everything.
+The steps in the Editor tab use a sample file of the tour (`paneldeck-tutorial.txt` in the temporary folder), never one of your files; it is closed and deleted at the end (if you changed it, together with the tutorial project).
 
 ## Tours
 | Tour | Content |
 |---|---|
-| Short tour | Sidebar, new terminal, rename/colour, projects, split, minimize, more windows, command palette, shortcuts, Claude Code, status and costs, chats, to-do list, expert mode, agent interface |
+| Short tour | Sidebar, new terminal, rename/colour, projects, split, minimize, more windows, command palette, shortcuts, Claude Code, status and costs, chats, to-do list, expert mode, agent interface, the Editor tab |
+| The editor | the Editor tab, opening files and folders, tabs, splits, find and replace, multiple cursors, status bar and go to line, minimap, files changed on disk, search in files, *Settings → Editor* (search, agent switches) |
 | To-do list & expert mode | simple list, expert mode, projects with a key, a ticket, boards, backlog and sprints, search with the query language |
 | Claude Code in detail | Claude mode, defaults, budget, starting, status, history, prompt library, composer and queue |
 | Chats with local models | local servers, *Settings → Models*, connecting, levels and approvals, a new chat (works without a real model) |

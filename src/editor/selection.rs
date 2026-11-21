@@ -108,6 +108,7 @@ impl Selections {
     }
 
     /// Always false (there is at least one selection); for clippy's `len_without_is_empty`.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.ranges.is_empty()
     }

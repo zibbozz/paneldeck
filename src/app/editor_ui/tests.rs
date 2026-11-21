@@ -341,3 +341,55 @@ fn closing_a_dirty_tab_asks_and_a_clean_one_closes() {
     assert!(ed.docs[&id].dirty() && ed.docs[&id].agent_edited);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Aufrufe von Agenten (öffnen, neuer Reiter, zeigen) nehmen nie die Tastatur: Tippt der Nutzer gerade im Editor, landen
+/// seine Tasten danach weder in der Datei des Agenten noch sonst in einem Dokument. Aktionen des Nutzers fokussieren
+/// weiter.
+#[test]
+fn agent_calls_never_take_the_keyboard_focus() {
+    let dir = test_dir("agentfocus");
+    let a = write(&dir, "a.txt", "mine\n");
+    let b = write(&dir, "b.txt", "agent\n");
+    let c = write(&dir, "c.txt", "user\n");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut ed = EditorUi::default();
+    let ida = ed.open_path(&a, false);
+    for _ in 0..2 {
+        frame(&ctx, &mut ed, vec![], &mut t);
+    }
+    frame(&ctx, &mut ed, vec![Event::Text("1".into())], &mut t);
+    assert_eq!(ed.docs[&ida].text().unwrap(), "1mine\n", "der Nutzer tippt in a.txt");
+    // Agent öffnet b.txt: Reiter wird aktiv, die Tastatur bekommt er nicht.
+    let m = ed.begin_agent();
+    let idb = ed.open_path(&b, false);
+    ed.end_agent(m);
+    assert!(!ed.want_focus && ed.blur);
+    for _ in 0..2 {
+        frame(&ctx, &mut ed, vec![], &mut t);
+    }
+    frame(&ctx, &mut ed, vec![Event::Text("X".into())], &mut t);
+    assert_eq!(ed.active_doc(), Some(idb));
+    assert_eq!(ed.docs[&idb].text().unwrap(), "agent\n", "keine Taste in der Datei des Agenten");
+    assert_eq!(ed.docs[&ida].text().unwrap(), "1mine\n");
+    assert_eq!(ctx.memory(|m| m.focused()), None);
+    // Neuer unbenannter Reiter und Reiter zeigen: ebenso ohne Tastatur.
+    let m = ed.begin_agent();
+    let idn = ed.new_untitled(Some("note"));
+    ed.end_agent(m);
+    frame(&ctx, &mut ed, vec![Event::Text("Y".into())], &mut t);
+    assert_eq!(ed.docs[&idn].text().unwrap(), "note");
+    // Eine Aktion des Nutzers (Datei öffnen) fokussiert wieder.
+    let idc = ed.open_path(&c, false);
+    frame(&ctx, &mut ed, vec![], &mut t);
+    frame(&ctx, &mut ed, vec![Event::Text("Z".into())], &mut t);
+    assert_eq!(ed.docs[&idc].text().unwrap(), "Zuser\n");
+    // Ein Agent, der nichts am gezeigten Reiter ändert, lässt die Tastatur dem Nutzer.
+    let m = ed.begin_agent();
+    ed.open_path(&c, false);
+    ed.end_agent(m);
+    assert!(!ed.blur);
+    frame(&ctx, &mut ed, vec![Event::Text("W".into())], &mut t);
+    assert_eq!(ed.docs[&idc].text().unwrap(), "ZWuser\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

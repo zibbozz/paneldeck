@@ -88,6 +88,9 @@ pub(crate) struct EditorUi {
     pub(super) hint: Option<(String, Instant)>,
     /// Im nächsten Bild das Textfeld der fokussierten Gruppe fokussieren.
     pub(super) want_focus: bool,
+    /// Ein Agent hat das gezeigte Dokument gewechselt: Hat ein Textfeld des Editors die Tastatur, gibt es sie im nächsten
+    /// Bild ab (Aufrufe von Agenten nehmen nie die Tastatur, [`EditorUi::end_agent`]).
+    pub(super) blur: bool,
     /// Flächen der Gruppen im letzten Bild (Fokus per Strg+Alt+Pfeil, Ablage gezogener Reiter).
     pub(super) group_rects: HashMap<u64, eframe::egui::Rect>,
     /// Reiterleisten im letzten Bild (Gruppe → Fläche, Reiter-Flächen).
@@ -284,13 +287,102 @@ impl EditorUi {
     pub(super) fn set_hint(&mut self, text: String) {
         self.hint = Some((text, Instant::now()));
     }
+
+    /// Vor einem Aufruf eines Agenten (MCP oder Chat): Stand merken für [`EditorUi::end_agent`].
+    pub(super) fn begin_agent(&self) -> AgentMark {
+        AgentMark { want_focus: self.want_focus, active: (self.panes.focused, self.active_doc()) }
+    }
+
+    /// Nach einem Aufruf eines Agenten: Agenten dürfen Reiter zeigen und in den Editor-Reiter wechseln, nehmen aber nie
+    /// die Tastatur – sonst landeten Tasten des Nutzers in einer Datei, die der Agent gerade geöffnet hat. Ein vom Aufruf
+    /// gesetztes `want_focus` fällt weg; ist danach eine andere Teilung aktiv oder zeigt sie ein anderes Dokument, gibt
+    /// ein Textfeld des Editors, das die Tastatur hat, sie im nächsten Bild ab.
+    pub(super) fn end_agent(&mut self, m: AgentMark) {
+        self.want_focus = m.want_focus;
+        if (self.panes.focused, self.active_doc()) != m.active {
+            self.blur = true;
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ Tutorial (#143)
+
+/// Was die Tour vom Editor sieht (Erkennung der Aufgaben).
+pub(crate) struct EditorProbe {
+    /// Offene Dokumente.
+    pub docs: usize,
+    /// Teilungen mit mindestens einem Reiter.
+    pub groups: usize,
+    /// Suchleiste offen.
+    pub find: bool,
+    /// Cursor (Auswahlen) im aktiven Reiter.
+    pub cursors: usize,
+}
+
+impl super::App {
+    pub(crate) fn editor_probe(&self) -> EditorProbe {
+        EditorProbe {
+            docs: self.ed.docs.len(),
+            groups: self.ed.panes.groups.values().filter(|g| !g.tabs.is_empty()).count(),
+            find: self.ed.find.visible,
+            cursors: self.ed.focused_view_and_doc().map_or(0, |(v, _)| v.selection_count()),
+        }
+    }
+
+    /// Ordnerbaum einblenden.
+    pub(crate) fn editor_show_tree(&mut self) {
+        self.ed.tree_open = true;
+    }
+
+    /// Suchleiste öffnen (mit Ersetzen) bzw. schließen.
+    pub(crate) fn editor_find_bar(&mut self, open: bool) {
+        if open && !self.ed.find.visible {
+            self.ed.find.open(true);
+        } else if !open && self.ed.find.visible {
+            self.ed.find.visible = false;
+        }
+    }
+
+    /// Ist diese Datei im Editor offen? `Some(ungespeichert)`.
+    pub(crate) fn editor_path_state(&self, path: &Path) -> Option<bool> {
+        self.ed.doc_for_path(path).and_then(|id| self.ed.docs.get(&id)).map(|d| d.dirty())
+    }
+
+    /// Alle Reiter einer Datei schließen, ohne zu fragen (`discard`: auch mit ungespeicherten Änderungen, die dann
+    /// verloren sind). `false`, wenn sie ungespeichert ist und `discard` fehlt.
+    pub(crate) fn editor_close_path(&mut self, path: &Path, discard: bool) -> bool {
+        let Some(id) = self.ed.doc_for_path(path) else { return true };
+        if !discard && self.ed.docs.get(&id).is_some_and(|d| d.dirty()) {
+            return false;
+        }
+        while let Some((g, i)) = self.ed.panes.tabs_of(id).first().copied() {
+            if self.ed.panes.close_tab(g, i).is_none() {
+                break;
+            }
+        }
+        let dir = self.dir.clone();
+        self.ed.release_doc(id, &dir);
+        true
+    }
+
+    /// Hat ein Textfeld des Editors gerade die Tastatur (dann braucht der Editor Esc selbst)?
+    pub(crate) fn editor_text_focused(&self, ctx: &eframe::egui::Context) -> bool {
+        ctx.memory(|m| m.focused()).is_some_and(|f| self.ed.panes.groups.keys().any(|g| view::text_id(*g) == f))
+    }
+}
+
+/// Stand vor einem Aufruf eines Agenten ([`EditorUi::begin_agent`]).
+#[must_use]
+pub(super) struct AgentMark {
+    want_focus: bool,
+    /// Fokussierte Teilung und ihr aktives Dokument.
+    active: (u64, Option<u64>),
 }
 
 // ------------------------------------------------------------------------------------------------ Schnittstelle (App)
 
-// Schnittstelle für MCP-Werkzeuge, Einstellungen und Explorer-Kontextmenü (Services-Teil von #54, eigener Branch);
-// bis dahin nur teilweise genutzt. Beschreibung: `notes/editor-ui-api.md` im Testordner.
-#[allow(dead_code)]
+// Schnittstelle für MCP-Werkzeuge, Einstellungen und Explorer-Kontextmenü (`app::editor_services`). Beschreibung:
+// `notes/editor-ui-api.md` im Testordner.
 impl super::App {
     /// Einstellungen des Editors (Einstellungen → Editor). Solange es dort nichts gibt: Standardwerte mit der Schriftgröße
     /// des Terminals.
@@ -344,8 +436,10 @@ impl super::App {
         self.ed.docs.values_mut().filter_map(|d| if std::mem::take(&mut d.touched) { d.path.clone() } else { None }).collect()
     }
 
-    /// Wie [`App::editor_apply_agent_edit`], aber mit Bereichen in **Bytes** des Textes (`\n`-Zeilenenden, wie
-    /// `editor_text`). Ein Bereich, der nicht auf Zeichengrenzen liegt, ist ein Fehler.
+    /// Änderung eines Agenten anwenden: `edits` = (Bereich in **Bytes** des Textes mit `\n`-Zeilenenden wie
+    /// `editor_text`, neuer Text), alle bezogen auf den aktuellen Text, ohne Überlappung. Eine rückgängig machbare
+    /// Änderung, ungespeichert, als „von einem Agenten“ markiert; die Cursor aller Ansichten folgen (sie gleichen sich
+    /// beim nächsten Zeichnen ab). Ein Bereich, der nicht auf Zeichengrenzen liegt, ist ein Fehler.
     pub(crate) fn editor_apply_agent_edit_bytes(&mut self, id: u64, edits: Vec<(std::ops::Range<usize>, String)>) -> Result<(), String> {
         let lang = self.settings.language;
         let prefs = self.editor_prefs();
@@ -364,10 +458,21 @@ impl super::App {
         d.apply_agent_edit(chars, lang)
     }
 
-    /// Datei im Editor öffnen (oder ihren Reiter zeigen). `show`: in den Editor-Reiter wechseln und den Reiter fokussieren.
-    /// `by_agent`: der Reiter wird als „von einem Agenten geöffnet“ markiert. Liefert die Dokument-Id; Fehler, wenn der
-    /// Pfad keine lesbare Datei ist (Text für Menschen in der eingestellten Sprache).
+    /// Datei im Editor öffnen (oder ihren Reiter zeigen). `show`: in den Editor-Reiter wechseln. `by_agent`: der Reiter
+    /// wird als „von einem Agenten geöffnet“ markiert und bekommt **nicht** die Tastatur (nur Aktionen des Nutzers
+    /// fokussieren das Textfeld, [`EditorUi::end_agent`]). Liefert die Dokument-Id; Fehler, wenn der Pfad keine lesbare
+    /// Datei ist (Text für Menschen in der eingestellten Sprache).
     pub(crate) fn editor_open(&mut self, path: &Path, show: bool, by_agent: bool) -> Result<u64, String> {
+        if by_agent {
+            let mark = self.ed.begin_agent();
+            let r = self.editor_open_inner(path, show, true);
+            self.ed.end_agent(mark);
+            return r;
+        }
+        self.editor_open_inner(path, show, false)
+    }
+
+    fn editor_open_inner(&mut self, path: &Path, show: bool, by_agent: bool) -> Result<u64, String> {
         let lang = self.settings.language;
         if !path.is_file() {
             return Err(lang.t("Datei nicht gefunden", "File not found").to_string());
@@ -389,8 +494,10 @@ impl super::App {
         Ok(id)
     }
 
-    /// Neue unbenannte Datei mit Inhalt (z. B. von einem Agenten). Liefert die Dokument-Id.
+    /// Neue unbenannte Datei mit Inhalt (z. B. von einem Agenten; dann ohne Tastatur wie bei [`App::editor_open`]).
+    /// Liefert die Dokument-Id.
     pub(crate) fn editor_new(&mut self, text: &str, show: bool, by_agent: bool) -> u64 {
+        let mark = by_agent.then(|| self.ed.begin_agent());
         let id = self.ed.new_untitled(Some(text));
         if let Some(d) = self.ed.docs.get_mut(&id) {
             d.opened_by_agent = by_agent;
@@ -400,6 +507,9 @@ impl super::App {
         }
         if show {
             self.set_mode(super::titlebar::Mode::Editor);
+        }
+        if let Some(m) = mark {
+            self.ed.end_agent(m);
         }
         id
     }
@@ -418,11 +528,13 @@ impl super::App {
         d.text()
     }
 
-    /// Reiter eines Dokuments zeigen und fokussieren (wechselt in den Editor-Reiter).
+    /// Reiter eines Dokuments zeigen (wechselt in den Editor-Reiter) – für Agenten (`editor_open` mit `show`): die
+    /// Teilung des Reiters wird die aktive, die Tastatur bekommt sein Textfeld aber nicht ([`EditorUi::end_agent`]).
     pub(crate) fn editor_focus(&mut self, id: u64) -> bool {
         if !self.ed.docs.contains_key(&id) {
             return false;
         }
+        let mark = self.ed.begin_agent();
         if let Some((g, i)) = self.ed.panes.tabs_of(id).first().copied() {
             self.ed.panes.focused = g;
             if let Some(grp) = self.ed.panes.groups.get_mut(&g) {
@@ -431,21 +543,9 @@ impl super::App {
         } else {
             self.ed.panes.open(id);
         }
-        self.ed.want_focus = true;
         self.set_mode(super::titlebar::Mode::Editor);
+        self.ed.end_agent(mark);
         true
-    }
-
-    /// Änderung eines Agenten anwenden: `edits` = (Bereich in Zeichen, neuer Text), alle bezogen auf den aktuellen Text,
-    /// ohne Überlappung. Eine rückgängig machbare Änderung, ungespeichert, als „von einem Agenten“ markiert; die Cursor
-    /// aller Ansichten folgen. Fehlertext, wenn das Dokument fehlt oder ein Bereich ungültig ist.
-    pub(crate) fn editor_apply_agent_edit(&mut self, id: u64, edits: Vec<(std::ops::Range<usize>, String)>) -> Result<(), String> {
-        let lang = self.settings.language;
-        let prefs = self.editor_prefs();
-        let d = self.ed.docs.get_mut(&id).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?;
-        d.ensure_loaded_now(&prefs);
-        // Die Ansichten gleichen sich beim nächsten Zeichnen selbst ab (`Document::sync`).
-        d.apply_agent_edit(edits, lang)
     }
 
     /// Dokument speichern (für `editor_save`; der Aufrufer prüft die Regeln, z. B. nur vorhandene Dateien).

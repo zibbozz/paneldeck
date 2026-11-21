@@ -97,7 +97,7 @@ impl App {
     /// Je Bild (Hauptfenster): `--edit`-Warteschlange abarbeiten, offene Dateien auf Änderungen prüfen, Suche weiterführen.
     pub(super) fn poll_editor_services(&mut self, ctx: &egui::Context) {
         // Schalter für die Werkzeugliste der Chats (wie `mcp::LEVEL`).
-        crate::editor_svc::settings::publish(&self.settings.editor);
+        crate::editor_svc::settings::publish(&self.settings.editor, self.editor_probe().docs > 0);
         if self.wins.cur != 0 {
             return;
         }
@@ -180,6 +180,7 @@ impl App {
             }
         });
         ui.add_space(S2);
+        let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("Suche in Dateien", "Search in files")).strong());
         row(
             ui,
@@ -206,6 +207,7 @@ impl App {
         if r.lost_focus() {
             self.editor_svc.excludes_buf = Some(self.settings.editor.excludes_text());
         }
+        super::tutorial::spot_since(ui, Spot::EditorSearchSettings, top);
         ui.add_space(S2);
         self.editor_agents_ui(ui);
     }
@@ -213,6 +215,7 @@ impl App {
     /// Abschnitt „Agenten“ der Editor-Einstellungen: die drei Schalter (Standard aus, nur bei Stufe Steuern wirksam).
     fn editor_agents_ui(&mut self, ui: &mut Ui) {
         let lang = self.settings.language;
+        let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("Agenten", "Agents")).strong());
         let control = self.settings.mcp_level == crate::mcp::McpLevel::Control;
         ui.label(
@@ -236,6 +239,7 @@ impl App {
         row(ui, lang.t("Agenten dürfen speichern", "Agents may save"), lang.t("Nur offene Dateien, die es schon gibt; unbenannte Tabs speichert nur du", "Only open files that already exist; only you save untitled tabs"), |ui| {
             style::toggle(ui, &mut ed.agent_save);
         });
+        super::tutorial::spot_since(ui, Spot::EditorAgentSwitches, top);
     }
 
     /// Zeile „In Paneldeck-Editor öffnen“ unter *Einstellungen → Fenster* (nur Windows). Fehler gehen an den Aufrufer.
@@ -336,12 +340,15 @@ impl App {
             let settings = self.settings.editor.clone();
             let svc = &mut self.editor_svc;
             let mut action = None;
-            style::movable(ctx, Id::new("editor_find_files"), egui::Window::new(lang.t("In Dateien suchen", "Search in files")))
+            let win = style::movable(ctx, Id::new("editor_find_files"), egui::Window::new(lang.t("In Dateien suchen", "Search in files")))
                 .open(&mut open)
                 .default_size([520.0, 420.0])
                 .show(ctx, |ui| {
                     action = super::editor_search_ui::show(ui, lang, &mut svc.search, &mut svc.find, root.as_deref(), &settings);
                 });
+            if let Some(w) = win {
+                let _ = w.response.spot(Spot::EditorSearchFiles);
+            }
             if let Some(super::editor_search_ui::PanelAction::Open { path, line, col }) = action {
                 target = Some((path, line, col));
             }

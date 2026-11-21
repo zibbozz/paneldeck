@@ -18,11 +18,13 @@ Braucht ein Schritt etwas, das nicht installiert ist – **Claude Code** oder **
 ## Deine Daten bleiben unberührt
 Jede Tour läuft in einem eigenen Projekt **Tutorial** mit eigenen Sitzungen. Auch die in einer Tour angelegten To-dos und das Beispiel-Experten-Projekt (Schlüssel `TUT`) gehören dazu, und der Expertenmodus wird danach zurückgestellt.
 Am Ende – oder wenn du eine Tour vorzeitig beendest – fragt Paneldeck, ob das Tutorial-Projekt **gelöscht** (Standard, auch mit Enter) oder **behalten** wird. Löschen schließt seine Sitzungen und entfernt seine To-dos und Tickets; Esc behält alles.
+Die Schritte im Editor-Reiter nutzen eine Beispieldatei der Tour (`paneldeck-tutorial.txt` im temporären Ordner), nie eine deiner Dateien; sie wird am Ende geschlossen und gelöscht (hast du sie geändert, zusammen mit dem Tutorial-Projekt).
 
 ## Touren
 | Tour | Inhalt |
 |---|---|
-| Kurze Tour | Seitenleiste, neues Terminal, Umbenennen/Farbe, Projekte, Teilen, Minimieren, weitere Fenster, Befehls-Palette, Tastenkürzel, Claude Code, Status und Kosten, Chats, Todo-Liste, Expertenmodus, Agenten-Schnittstelle |
+| Kurze Tour | Seitenleiste, neues Terminal, Umbenennen/Farbe, Projekte, Teilen, Minimieren, weitere Fenster, Befehls-Palette, Tastenkürzel, Claude Code, Status und Kosten, Chats, Todo-Liste, Expertenmodus, Agenten-Schnittstelle, der Editor-Reiter |
+| Der Editor | der Editor-Reiter, Dateien und Ordner öffnen, Reiter, Teilungen, Suchen und Ersetzen, mehrere Cursor, Statusleiste und Gehe zu Zeile, Minimap, auf der Platte geänderte Dateien, Suche in Dateien, *Einstellungen → Editor* (Suche, Agenten-Schalter) |
 | Todo-Liste & Expertenmodus | einfache Liste, Expertenmodus, Projekte mit Schlüssel, ein Ticket, Boards, Backlog und Sprints, Suche mit der Abfragesprache |
 | Claude Code im Detail | Claude-Modus, Standards, Budget, Starten, Status, Verlauf, Prompt-Bibliothek, Composer und Warteschlange |
 | Chats mit lokalen Modellen | lokale Server, *Einstellungen → Modelle*, Verbinden, Stufen und Freigaben, ein neuer Chat (geht ohne echtes Modell) |

@@ -629,6 +629,7 @@ impl Document {
     }
 
     /// Write a copy to `path` without changing the document (no save fixes, still dirty).
+    #[allow(dead_code)] // API („Kopie speichern unter“, später)
     pub fn save_copy(&self, path: &Path) -> Result<SaveReport, SaveError> {
         if let Some(u) = self.first_unencodable() {
             return Err(SaveError::Unencodable(u));

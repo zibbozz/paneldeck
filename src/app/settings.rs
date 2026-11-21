@@ -56,6 +56,7 @@ impl App {
                             5 => Some(Spot::TabShortcuts),
                             6 => Some(Spot::TabProfiles),
                             models_ui::SETTINGS_TAB => Some(Spot::TabModels),
+                            editor_services::SETTINGS_TAB => Some(Spot::TabEditor),
                             _ => None,
                         };
                         let r = match spot {

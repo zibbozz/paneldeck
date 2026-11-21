@@ -25,10 +25,12 @@ impl Change {
         self.start + self.removed_len
     }
 
+    #[allow(dead_code)] // API (Hex-Modus #301)
     pub fn removed_len(&self) -> usize {
         self.removed_len
     }
 
+    #[allow(dead_code)] // API (Hex-Modus #301)
     pub fn inserted_len(&self) -> usize {
         self.inserted_len
     }

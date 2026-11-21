@@ -59,13 +59,17 @@ impl Default for EditorSettings {
 }
 
 /// Stand der drei Agenten-Schalter für Stellen ohne Zugriff auf die Einstellungen (Werkzeugliste der Chats), wie
-/// `mcp::LEVEL`: Bit 0 öffnen, 1 bearbeiten, 2 speichern. Die Oberfläche schreibt ihn jedes Bild ([`publish`]); geprüft
-/// wird beim Ausführen trotzdem immer an den Einstellungen selbst.
+/// `mcp::LEVEL`: Bit 0 öffnen, 1 bearbeiten, 2 speichern, dazu [`DOCS_OPEN`]. Die Oberfläche schreibt ihn jedes Bild
+/// ([`publish`]); geprüft wird beim Ausführen trotzdem immer an den Einstellungen selbst.
 pub static AGENT_SWITCHES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// Schalter veröffentlichen (jedes Bild).
-pub fn publish(s: &EditorSettings) {
-    AGENT_SWITCHES.store(switch_bits(s), std::sync::atomic::Ordering::Relaxed);
+/// Bit in [`AGENT_SWITCHES`]: Im Editor ist mindestens ein Dokument offen (sonst gibt es für Chats nichts zu lesen,
+/// zu bearbeiten oder zu speichern, und die Werkzeuge kosteten nur Platz im Kontext kleiner Modelle).
+pub const DOCS_OPEN: u8 = 8;
+
+/// Schalter und „Dokumente offen“ veröffentlichen (jedes Bild).
+pub fn publish(s: &EditorSettings, docs_open: bool) {
+    AGENT_SWITCHES.store(switch_bits(s) | if docs_open { DOCS_OPEN } else { 0 }, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Schalter als Bits (siehe [`AGENT_SWITCHES`]).

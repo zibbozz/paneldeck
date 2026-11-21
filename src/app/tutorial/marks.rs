@@ -86,6 +86,19 @@ spots! {
     PlanTabBacklog = "plan.tab.backlog",
     PlanTabSearch = "plan.tab.search",
     QueryBar = "plan.query",
+    // Editor-Reiter (#54, 3.0.0)
+    TitlebarEditor = "titlebar.editor",
+    EditorTree = "editor.tree",
+    EditorTabBar = "editor.tabs",
+    EditorSplit = "editor.split_right",
+    EditorText = "editor.text",
+    EditorFind = "editor.find",
+    EditorStatus = "editor.status",
+    EditorMinimap = "editor.minimap",
+    EditorSearchFiles = "editor.search_files",
+    TabEditor = "settings.tab.editor",
+    EditorSearchSettings = "settings.editor.search",
+    EditorAgentSwitches = "settings.editor.agents",
 }
 
 /// Wo ein Ziel in diesem Bild lag: ganzes Rechteck und der sichtbare (nicht weggeschnittene) Teil.

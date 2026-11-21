@@ -125,6 +125,28 @@ pub(super) fn fill_keys(text: &str, lang: Lang, key: impl Fn(&str) -> String) ->
     out
 }
 
+/// Inhalt der Beispieldatei für die Schritte im Editor (#54): genug Zeilen für Minimap und Suche, Wörter, die mehrfach
+/// vorkommen (Strg+D, Ersetzen), eine Spalte für die Spaltenauswahl.
+fn sample_text(lang: Lang) -> String {
+    let (head, lines): (&str, [&str; 6]) = match lang {
+        Lang::De => (
+            "Beispieldatei der Paneldeck-Tour – ändere hier, was du willst; sie gehört der Tour und wird am Ende gelöscht.",
+            ["Strg+F sucht, Strg+H ersetzt.", "Alt+Klick setzt einen weiteren Cursor.", "Strg+D markiert das nächste gleiche Wort: apfel apfel apfel.", "Alt+Ziehen markiert eine Spalte.", "Strg+G springt zu einer Zeile.", "Strg+Umschalt+F durchsucht einen ganzen Ordner."],
+        ),
+        Lang::En => (
+            "Sample file of the Paneldeck tour – change whatever you like; it belongs to the tour and is deleted at the end.",
+            ["Ctrl+F finds, Ctrl+H replaces.", "Alt+click adds another cursor.", "Ctrl+D selects the next match of a word: apple apple apple.", "Alt+drag selects a column.", "Ctrl+G jumps to a line.", "Ctrl+Shift+F searches a whole folder."],
+        ),
+    };
+    let mut s = format!("{head}\n\n");
+    for i in 1..=8 {
+        for l in lines {
+            s.push_str(&format!("{i:>2} | {l}\n"));
+        }
+    }
+    s
+}
+
 /// Prüfsumme über eigene Namen und Farben von Sitzungen (Umbenennen/Farbe erkennen; automatische Namen zählen nicht).
 fn names_hash<'a>(it: impl Iterator<Item = (&'a u64, &'a Entry)>) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -145,7 +167,7 @@ impl App {
     pub(super) fn tut_begin(&mut self, ctx: &egui::Context) {
         let want = self.tut.run.as_ref().and_then(|r| r.step().spot);
         marks::begin_frame(self.tut.run.is_some(), want);
-        if self.tut.run.is_some() && self.tut.ask.is_none() && self.tut_esc_free() && esc_for_tour(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        if self.tut.run.is_some() && self.tut.ask.is_none() && self.tut_esc_free() && esc_for_tour(ctx) && !self.editor_text_focused(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.tut_quit();
         }
     }
@@ -343,6 +365,8 @@ impl App {
             self.plan.set_expert(db, before);
         }
         self.palette = None;
+        // Beispieldatei des Editors: ohne eigene Änderungen gleich weg, sonst entscheidet die Rückfrage.
+        self.tut_drop_sample(false);
         self.tut_save();
     }
 
@@ -360,7 +384,7 @@ impl App {
 
     /// Gibt es etwas, das die Tour angelegt hat (Projekt, To-dos, Experten-Projekt)?
     fn tut_has_data(&self) -> bool {
-        self.tut.p.project.is_some_and(|id| self.projects.iter().any(|p| p.id == id)) || !self.tut.p.todos.is_empty() || self.tut.p.plan_project.is_some()
+        self.tut.p.project.is_some_and(|id| self.projects.iter().any(|p| p.id == id)) || !self.tut.p.todos.is_empty() || self.tut.p.plan_project.is_some() || self.editor_path_state(&Self::tut_sample_path()).is_some()
     }
 
     /// Was zum Tutorial-Projekt gehört (für die Rückfrage).
@@ -381,6 +405,9 @@ impl App {
         }
         if self.tut.p.plan_project.is_some() {
             parts.push(lang.t("das Experten-Projekt „Tutorial“ mit seinen Tickets", "the expert project “Tutorial” with its tickets").to_string());
+        }
+        if self.editor_path_state(&Self::tut_sample_path()).is_some() {
+            parts.push(lang.t("die Beispieldatei im Editor (mit deinen Änderungen)", "the sample file in the editor (with your changes)").to_string());
         }
         format!("{}.", parts.join(", "))
     }
@@ -410,6 +437,7 @@ impl App {
             }
         }
         self.tut.p.prev_project = None;
+        self.tut_drop_sample(true);
         if let Some(db) = self.db.as_ref() {
             for id in std::mem::take(&mut self.tut.p.todos) {
                 let _ = crate::tasks::delete_item(&db.conn, id);
@@ -459,7 +487,13 @@ impl App {
             }
         }
         let (todos, todos_done, tickets) = self.tut.db_counts;
+        let ed = self.editor_probe();
         Probe {
+            editor: self.mode == titlebar::Mode::Editor,
+            editor_docs: ed.docs,
+            editor_groups: ed.groups,
+            editor_find: ed.find,
+            editor_cursors: ed.cursors,
             sessions,
             panes,
             minimized,
@@ -535,7 +569,45 @@ impl App {
                 }
                 Prep::PlanProject => self.tut_plan_project(),
                 Prep::PlanTab(k) => self.plan.set_tab_key(k),
+                Prep::Editor => self.set_mode(titlebar::Mode::Editor),
+                Prep::EditorTree => self.editor_show_tree(),
+                Prep::EditorFile => self.tut_editor_sample(),
+                Prep::EditorFind(open) => self.editor_find_bar(open),
+                Prep::EditorSearch(open) => {
+                    self.editor_svc.search_open = open;
+                    if !open {
+                        self.editor_svc.find.cancel();
+                    }
+                }
             }
+        }
+    }
+
+    /// Beispieldatei der Tour für die Schritte im Editor (#54): eine eigene Datei im Temp-Ordner, nie eine des Nutzers.
+    fn tut_sample_path() -> PathBuf {
+        std::env::temp_dir().join("paneldeck-tutorial").join("paneldeck-tutorial.txt")
+    }
+
+    /// Beispieldatei anlegen (falls nötig) und im Editor zeigen.
+    fn tut_editor_sample(&mut self) {
+        let path = Self::tut_sample_path();
+        if !path.is_file() {
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+            if std::fs::write(&path, sample_text(self.settings.language)).is_err() {
+                return;
+            }
+        }
+        if let Err(e) = self.editor_open(&path, false, false) {
+            self.notify_text(format!("{}: {e}", path.display()));
+        }
+    }
+
+    /// Beispieldatei schließen und löschen (`discard`: auch mit ungespeicherten Änderungen). Ungespeichert und ohne
+    /// `discard` bleibt sie offen.
+    fn tut_drop_sample(&mut self, discard: bool) {
+        let path = Self::tut_sample_path();
+        if self.editor_close_path(&path, discard) {
+            let _ = std::fs::remove_file(&path);
         }
     }
 

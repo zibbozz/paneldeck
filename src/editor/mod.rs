@@ -13,8 +13,10 @@
 //! Positions are char indices into the text; see `text.rs` for line/column helpers. API overview for the UI and
 //! services: `notes/editor-core-api.md` in the test folder (kept up to date with this module).
 
-// Die Oberfläche und die MCP-Werkzeuge bauen auf dieser API auf (eigene Branches); bis dahin ist vieles ungenutzt.
-#![allow(dead_code)]
+// Ein Teil der API ist (mit Tests) schon da, wird aber erst von späteren Funktionen benutzt (Gehe zu Symbol und
+// Sprachunterstützung #312, Hex-Modus #301, Zeilen-Befehle, Speichern unter mit anderer Kodierung, Hot-Exit-Verwaltung).
+// Nur außerhalb der Tests erlaubt: Im Test-Build muss jedes Stück wenigstens von einem Test benutzt werden.
+#![cfg_attr(not(test), allow(dead_code))]
 
 pub mod change;
 pub mod commands;

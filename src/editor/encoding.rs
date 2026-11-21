@@ -93,6 +93,7 @@ impl LineEnding {
         }
     }
 
+    #[allow(dead_code)] // API (die Statusleiste zeigt LF/CRLF selbst)
     pub fn label(self) -> &'static str {
         match self {
             LineEnding::Lf => "LF",

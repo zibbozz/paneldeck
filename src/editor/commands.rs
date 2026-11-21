@@ -673,6 +673,7 @@ impl Document {
     }
 
     /// Remove trailing whitespace on all lines (one undo step).
+    #[allow(dead_code)] // API (Befehl „Leerzeichen am Zeilenende entfernen“, später)
     pub fn trim_trailing_whitespace_now(&mut self, sels: &mut Selections, origin: EditOrigin) -> bool {
         self.sync(sels);
         let edits = self.trailing_whitespace_ranges().into_iter().map(|r| (r, String::new())).collect();

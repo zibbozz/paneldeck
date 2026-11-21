@@ -65,6 +65,9 @@ impl App {
                     if mode == Mode::Tasks {
                         super::tutorial::spot_rect(ui, Spot::TitlebarTodo, r);
                     }
+                    if mode == Mode::Editor {
+                        super::tutorial::spot_rect(ui, Spot::TitlebarEditor, r);
+                    }
                     let active = self.mode == mode;
                     if active {
                         painter.rect_filled(r, 6.0, style::accent().gamma_multiply(0.22));
