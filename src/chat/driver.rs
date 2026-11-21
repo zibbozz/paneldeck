@@ -232,13 +232,14 @@ mod tests {
 
     #[test]
     fn rejected_calls_count_and_the_round_stops() {
-        // Das Modell ruft immer wieder ein unbekanntes Werkzeug auf: früher eine Endlosschleife.
+        // Das Modell ruft immer wieder ein unbekanntes Werkzeug auf: früher eine Endlosschleife. Seit #340 hält schon der
+        // Schleifen-Schutz an (dreimal derselbe fehlerhafte Aufruf), vor der Höchstzahl 4.
         let mut h = Fake::new(cfg(McpLevel::Read, 4), vec![vec![tc("x", "no_such_tool", serde_json::json!({})), TurnEvent::Done]]);
         h.send(1, "loop");
         h.frames(1, 50);
         let c = h.chat_ref(1);
-        assert!(c.paused, "angehalten");
-        assert_eq!(c.steps, 4);
+        assert!(c.paused && c.loop_stop, "angehalten");
+        assert_eq!(c.steps, crate::chat::session::LOOP_LIMIT);
         assert!(h.executed.is_empty());
         assert_eq!(c.status(), ChatStatus::Ready);
     }
