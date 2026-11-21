@@ -11,7 +11,8 @@
 
 use super::backend::{ChatBackend, Repaint, TurnContext, TurnEvent, TurnHandle};
 use super::logic;
-use super::store::{AllowRule, ChatFile, ChatMsg, Role, ToolCall, ToolStatus};
+use super::repair;
+use super::store::{AllowRule, CallRepair, ChatFile, ChatMsg, Role, ToolCall, ToolStatus};
 use super::tools::{self, ToolPolicy, ToolResult};
 use crate::state::{self, ChatMeta};
 use std::cell::Cell;
@@ -134,7 +135,19 @@ pub struct ChatState {
     pub thinking: bool,
     /// Beginn der laufenden Anfrage (für „Warte auf das Modell … N s“ solange nichts ankommt; #299).
     pub turn_started: Option<std::time::Instant>,
+    /// Die eben fertige Antwort hat Text, aber keine Werkzeugaufrufe: Der nächste [`ChatState::tool_step`] sucht darin
+    /// als Text geschriebene Aufrufe (#340; dafür braucht es die Werkzeug-Einstellungen, die erst dort vorliegen).
+    text_check: bool,
+    /// Letzter fehlgeschlagener Aufruf (Werkzeug, normalisierte Argumente) und wie oft er in Folge fehlschlug (#340).
+    fail_streak: Option<(String, serde_json::Value)>,
+    fail_count: u32,
+    /// Die Runde hielt an, weil derselbe Aufruf [`LOOP_LIMIT`]-mal in Folge fehlschlug (deutlich angezeigt).
+    pub loop_stop: bool,
 }
+
+/// So oft in Folge darf derselbe fehlgeschlagene Aufruf (gleiches Werkzeug, gleiche Argumente) kommen, dann hält die
+/// Runde an (#340).
+pub const LOOP_LIMIT: u32 = 3;
 
 /// Wer die einmalige Frage nach der Stufe des Modells ausgelöst hat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +165,21 @@ pub enum ChatStatus {
     Ready,
     Working,
     Approval,
+}
+
+/// Kennung für einen Werkzeugaufruf der Antwort `i`, die im ganzen Chat und unter `pending` (Aufrufe, die gerade erst
+/// angelegt werden) noch frei ist: `call_<i>_<k>`, `k` ab `from`. Ollama vergibt je Antwort `call_0`, `call_1` …, darum
+/// reichen die Kennungen des Servers nicht.
+fn unique_call_id(msgs: &[ChatMsg], pending: &[ToolCall], i: usize, from: usize) -> String {
+    let taken = |id: &str| msgs.iter().any(|m| m.tool_calls.iter().any(|x| x.id == id)) || pending.iter().any(|x| x.id == id);
+    let mut k = from;
+    loop {
+        let id = format!("call_{i}_{k}");
+        if !taken(&id) {
+            return id;
+        }
+        k += 1;
+    }
 }
 
 /// Kleinster sinnvoller Platz für ein neues Ergebnis (Bytes); weniger → ältere Ergebnisse der Runde entfernen bzw.
@@ -222,6 +250,10 @@ impl ChatState {
             context_warned: false,
             thinking: false,
             turn_started: None,
+            text_check: false,
+            fail_streak: None,
+            fail_count: 0,
+            loop_stop: false,
         };
         if fixed > 0 {
             c.touch();
@@ -267,7 +299,7 @@ impl ChatState {
 
     /// Die Runde läuft noch: Antwort wird erzeugt, Werkzeuge laufen oder warten auf Freigabe (nicht: angehalten).
     pub fn busy(&self) -> bool {
-        self.streaming() || (!self.paused && (!self.calls.is_empty() || self.next_request))
+        self.streaming() || (!self.paused && (!self.calls.is_empty() || self.next_request || self.text_check))
     }
 
     /// Ein schreibender Aufruf wartet auf die Entscheidung des Nutzers.
@@ -320,6 +352,8 @@ impl ChatState {
         self.paused = false;
         self.pause_note = None;
         self.context_pause = false;
+        self.text_check = false;
+        self.loop_stop = false;
         self.changed(0);
         true
     }
@@ -411,6 +445,9 @@ impl ChatState {
         self.context_pause = false;
         self.idle_steps = 0;
         self.step_executed = false;
+        self.fail_streak = None;
+        self.fail_count = 0;
+        self.loop_stop = false;
     }
 
     fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
@@ -418,6 +455,7 @@ impl ChatState {
         self.file.context_start = None;
         self.usage = None;
         self.thinking = false;
+        self.text_check = false;
         self.turn_started = Some(std::time::Instant::now());
         let handle = backend.start(meta, &self.file.messages, cx, repaint);
         self.file.messages.push(ChatMsg::new(Role::Assistant, ""));
@@ -472,9 +510,11 @@ impl ChatState {
         // Auch Aufrufe einer abgebrochenen Antwort, die noch nicht in `calls` standen.
         let fixed = logic::close_orphans(&mut self.file.messages, tools::cancelled);
         self.next_request = false;
+        self.text_check = false;
         self.paused = false;
         self.pause_note = None;
         self.context_pause = false;
+        self.loop_stop = false;
         self.approval_target = None;
         if had || fixed > 0 {
             self.changed(self.turn_msg.min(self.file.messages.len()));
@@ -568,6 +608,8 @@ impl ChatState {
     /// Ausführung wurde schon geprüft, dass Platz ist; reicht er trotzdem nicht, kommt ein Platzhalter und die Runde
     /// hält an – der Systemprompt darf nie abgeschnitten werden.)
     fn record_result(&mut self, name: &str, r: ToolResult) {
+        let call = self.calls.first().map(|p| p.call.clone());
+        let failed = r.is_err();
         if !self.room_for_result() {
             let status = if r.is_ok() { ToolStatus::Ok } else { ToolStatus::Error };
             self.finish_first(status, tools::elided());
@@ -576,6 +618,75 @@ impl ChatState {
         }
         let (st, content) = tools::result_message(name, r, self.result_cap());
         self.finish_first(st, content);
+        if let Some(c) = call {
+            if self.note_outcome(&c, failed) {
+                self.stop_loop(&c.name);
+            }
+        }
+    }
+
+    /// Ausgang eines Aufrufs für den Schleifen-Schutz merken. `true`, wenn derselbe Aufruf (gleiches Werkzeug, gleiche
+    /// normalisierte Argumente) jetzt [`LOOP_LIMIT`]-mal in Folge fehlschlug. Ein gelungener oder anderer Aufruf
+    /// beginnt die Zählung neu.
+    fn note_outcome(&mut self, call: &ToolCall, failed: bool) -> bool {
+        if !failed {
+            self.fail_streak = None;
+            self.fail_count = 0;
+            return false;
+        }
+        let key = (call.name.clone(), tools::exec_args(call));
+        if self.fail_streak.as_ref() == Some(&key) {
+            self.fail_count += 1;
+        } else {
+            self.fail_streak = Some(key);
+            self.fail_count = 1;
+        }
+        self.fail_count >= LOOP_LIMIT
+    }
+
+    /// Schleifen-Schutz: anhalten, deutlich sichtbar („Weiter“ gibt die Runde wieder frei; kommt derselbe Fehler danach
+    /// noch einmal, hält sie gleich wieder an).
+    fn stop_loop(&mut self, tool: &str) {
+        let tool = crate::mcp::short(tool, 60);
+        let note = if state::lang() == state::Lang::De {
+            format!("Das Modell hat {LOOP_LIMIT}-mal hintereinander denselben fehlerhaften Werkzeugaufruf ({tool}) gesendet – angehalten.")
+        } else {
+            format!("The model sent the same failing tool call ({tool}) {LOOP_LIMIT} times in a row – stopped.")
+        };
+        self.loop_stop = true;
+        self.pause(Some(note));
+    }
+
+    /// Als Text geschriebene Werkzeugaufrufe der eben fertigen Antwort übernehmen (#340): Sie kommen wie echte Aufrufe
+    /// in die Antwort (der Text des Aufrufs fällt aus dem Antworttext) und laufen danach durch dieselbe Prüfung,
+    /// Freigabe und Ausführung. Nur wenn das Modell überhaupt Werkzeuge hat. `true`, wenn welche erkannt wurden.
+    fn adopt_text_calls(&mut self, policy: &ToolPolicy) -> bool {
+        let i = self.turn_msg;
+        if !policy.enabled() || i + 1 != self.file.messages.len() {
+            return false;
+        }
+        let m = &self.file.messages[i];
+        if m.role != Role::Assistant || m.error.is_some() || !m.tool_calls.is_empty() {
+            return false;
+        }
+        let Some(found) = repair::find_text_calls(&m.content, &|n| crate::mcp::tool_level(n).is_some()) else { return false };
+        let mut calls = Vec::new();
+        let mut repairs = Vec::new();
+        for (k, tc) in found.calls.into_iter().enumerate() {
+            let mut c = ToolCall { id: String::new(), name: tc.name, arguments: tc.arguments };
+            c.id = unique_call_id(&self.file.messages, &calls, i, k);
+            let fixes = repair::normalize(&mut c);
+            repairs.push(CallRepair { id: c.id.clone(), text_call: true, fixes });
+            calls.push(c);
+        }
+        let m = &mut self.file.messages[i];
+        m.content = found.rest;
+        m.tool_calls = calls;
+        m.repairs = repairs;
+        self.calls = m.tool_calls.iter().map(|c| PendingCall { call: c.clone(), state: CallState::Queued, rx: None }).collect();
+        self.next_request = true;
+        self.changed(i);
+        true
     }
 
     /// Nächster Schritt der Werkzeug-Schleife (im Hauptdurchgang, jedes Bild). Ungültige oder verbotene Aufrufe
@@ -589,6 +700,9 @@ impl ChatState {
     pub fn tool_step(&mut self, policy: &ToolPolicy) -> ToolStep {
         if self.streaming() || self.paused {
             return ToolStep::Idle;
+        }
+        if std::mem::take(&mut self.text_check) {
+            self.adopt_text_calls(policy);
         }
         let max = policy.cfg.max_steps.max(1);
         loop {
@@ -631,7 +745,12 @@ impl ChatState {
                     if !approved {
                         self.steps += 1;
                     }
+                    let call = p.call.clone();
                     self.finish_first(st, content);
+                    if self.note_outcome(&call, true) {
+                        self.stop_loop(&call.name);
+                        return ToolStep::Idle;
+                    }
                     continue;
                 }
             };
@@ -738,6 +857,8 @@ impl ChatState {
         }
         self.paused = false;
         self.pause_note = None;
+        // Der Schleifen-Schutz zählt weiter: schlägt derselbe Aufruf noch einmal fehl, hält die Runde gleich wieder an.
+        self.loop_stop = false;
         self.idle_steps = 0;
         self.step_executed = true; // „Weiter“ zählt nicht als leerer Schritt
         self.grants += 1;
@@ -792,17 +913,9 @@ impl ChatState {
                 TurnEvent::Thinking => self.thinking = true,
                 TurnEvent::ToolCall(mut c) => {
                     // Kennungen müssen im ganzen Chat eindeutig sein (Ollama vergibt je Antwort `call_0`, `call_1` …).
-                    let taken = |id: &str, msgs: &[ChatMsg]| id.is_empty() || msgs.iter().any(|m| m.tool_calls.iter().any(|x| x.id == id));
-                    if taken(&c.id, &self.file.messages) {
-                        let mut k = self.file.messages.get(i).map_or(0, |m| m.tool_calls.len());
-                        loop {
-                            let id = format!("call_{i}_{k}");
-                            if !taken(&id, &self.file.messages) {
-                                c.id = id;
-                                break;
-                            }
-                            k += 1;
-                        }
+                    if c.id.is_empty() || self.file.messages.iter().any(|m| m.tool_calls.iter().any(|x| x.id == c.id)) {
+                        let k = self.file.messages.get(i).map_or(0, |m| m.tool_calls.len());
+                        c.id = unique_call_id(&self.file.messages, &[], i, k);
                     }
                     if let Some(m) = self.file.messages.get_mut(i) {
                         m.tool_calls.push(c);
@@ -840,10 +953,23 @@ impl ChatState {
                 TurnEvent::Done => {
                     self.turn = None;
                     p.finished = true;
-                    // Werkzeugaufrufe: die Runde geht weiter (der Hub führt sie aus, dann folgt die nächste Anfrage).
-                    if let Some(m) = self.file.messages.get(i).filter(|m| m.error.is_none() && !m.tool_calls.is_empty()) {
-                        self.calls = m.tool_calls.iter().map(|c| PendingCall { call: c.clone(), state: CallState::Queued, rx: None }).collect();
-                        self.next_request = true;
+                    // Werkzeugaufrufe: die Runde geht weiter (der Hub führt sie aus, dann folgt die nächste Anfrage). Ihre
+                    // Argumente werden vorher gegen das Schema normalisiert (#340; gespeichert wird die korrigierte Fassung,
+                    // die Korrekturen stehen in `repairs`). Nur Text: vielleicht ein als Text geschriebener Aufruf – das
+                    // prüft der nächste `tool_step`.
+                    if let Some(m) = self.file.messages.get_mut(i).filter(|m| m.error.is_none()) {
+                        if !m.tool_calls.is_empty() {
+                            for c in &mut m.tool_calls {
+                                let fixes = repair::normalize(c);
+                                if !fixes.is_empty() {
+                                    m.repairs.push(CallRepair { id: c.id.clone(), text_call: false, fixes });
+                                }
+                            }
+                            self.calls = m.tool_calls.iter().map(|c| PendingCall { call: c.clone(), state: CallState::Queued, rx: None }).collect();
+                            self.next_request = true;
+                        } else if repair::may_contain_call(&m.content) {
+                            self.text_check = true;
+                        }
                     }
                 }
                 TurnEvent::Error(e) => {
@@ -1173,7 +1299,8 @@ mod tests {
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "loop".into();
         c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
-        assert_eq!(drive(&mut c, &b, &p, &|_| Err(("boom".into(), "fails".into()))).len(), 3);
+        // (gelingende Aufrufe: derselbe fehlschlagende Aufruf hielte schon der Schleifen-Schutz an, siehe unten)
+        assert_eq!(drive(&mut c, &b, &p, &ok_exec).len(), 3);
         assert!(c.paused && !c.busy() && c.steps == 3);
         assert_eq!(c.calls.len(), 1, "der vierte Aufruf wartet auf „Weiter“");
         // Gespeichert wird stimmig (der wartende Aufruf als unterbrochen)
@@ -1249,8 +1376,10 @@ mod tests {
 
     #[test]
     fn calls_that_never_execute_stop_the_round() {
-        // Jede Antwort verlangt ein verbotenes Werkzeug: zählt, und nach `max_steps` ist Schluss.
-        let b = Script::new(vec![vec![tc("x", "send_text", serde_json::json!({"session": 1, "text": "x"})), TurnEvent::Done]]);
+        // Jede Antwort verlangt ein verbotenes Werkzeug (immer mit anderem Text, sonst hielte schon der Schleifen-Schutz
+        // an): zählt, und nach `max_steps` ist Schluss.
+        let turn = |t: &str| vec![tc("x", "send_text", serde_json::json!({"session": 1, "text": t})), TurnEvent::Done];
+        let b = Script::new(vec![turn("a"), turn("b"), turn("a"), turn("b"), turn("a"), turn("b"), turn("a"), turn("b"), turn("a"), turn("b")]);
         let p = policy(crate::mcp::McpLevel::Read, 5);
         let mut c = ChatState::new(ChatFile::default(), None);
         c.draft = "go".into();
@@ -1490,5 +1619,194 @@ mod tests {
         }
         assert_eq!(c.messages()[1].note.as_deref(), Some("small"));
         assert!(c.messages()[3].note.is_none(), "nur einmal je Chat");
+    }
+
+    // ---- #340: als Text geschriebene Aufrufe, normalisierte Argumente, Schleifen-Schutz
+
+    fn text(s: &str) -> Vec<TurnEvent> {
+        vec![TurnEvent::Delta(s.into()), TurnEvent::Done]
+    }
+
+    fn start(c: &mut ChatState, b: &dyn ChatBackend, q: &str) {
+        c.draft = q.into();
+        assert!(c.send(b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {})));
+    }
+
+    #[test]
+    fn a_text_tool_call_runs_like_a_native_one() {
+        // qwen schreibt den Aufruf als Text (Ollama hat ihn nicht erkannt)
+        let b = Script::new(vec![text("Checking.\n<tool_call>\n{\"name\": \"read_terminal\", \"arguments\": {\"session\": \"3\", \"lines\": \"20\"}}\n</tool_call>"), text("Done.")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "read terminal 3");
+        let seen = std::sync::Mutex::new(Vec::new());
+        let ran = drive(&mut c, &b, &policy(crate::mcp::McpLevel::Read, 10), &|call| {
+            seen.lock().unwrap().push(call.arguments.clone());
+            Ok(serde_json::json!({"text": "hello"}))
+        });
+        assert_eq!(ran, ["read_terminal"]);
+        assert_eq!(seen.lock().unwrap()[0], serde_json::json!({"session": 3, "lines": 20}), "normalisiert ausgeführt");
+        let a = &c.messages()[1];
+        assert_eq!(a.content, "Checking.", "der Aufruf-Text fällt aus der Antwort");
+        assert_eq!(a.tool_calls.len(), 1);
+        assert_eq!(a.tool_calls[0].arguments, serde_json::json!({"session": 3, "lines": 20}), "gespeichert wird die korrigierte Fassung");
+        let r = &a.repairs[0];
+        assert_eq!((r.id.as_str(), r.text_call), (a.tool_calls[0].id.as_str(), true));
+        assert_eq!(r.fixes.len(), 2, "{:?}", r.fixes);
+        assert_eq!(c.messages()[2].status, Some(ToolStatus::Ok));
+        assert_eq!(c.messages().last().unwrap().content, "Done.");
+        assert!(!c.busy());
+        consistent(&c);
+        // Gespeichert und wieder geladen: die Reparatur bleibt
+        let back = super::super::store::parse(std::str::from_utf8(&super::super::store::serialize_capped(&c.file, 1 << 20)).unwrap()).unwrap().0;
+        assert_eq!(back.messages[1].repairs, c.messages()[1].repairs);
+    }
+
+    #[test]
+    fn text_calls_need_tools_and_prose_stays_untouched() {
+        let call = "<tool_call>{\"name\": \"list_sessions\", \"arguments\": {}}</tool_call>";
+        // Stufe Aus / Modell ohne Werkzeuge: der Text bleibt, nichts läuft
+        for p in [policy(crate::mcp::McpLevel::Off, 10), {
+            let mut p = policy(crate::mcp::McpLevel::Read, 10);
+            p.tools_supported = Some(false);
+            p
+        }] {
+            let b = Script::new(vec![text(call)]);
+            let mut c = ChatState::new(ChatFile::default(), None);
+            start(&mut c, &b, "q");
+            assert!(drive(&mut c, &b, &p, &|_| panic!("ohne Werkzeuge")).is_empty());
+            assert_eq!((c.messages().len(), c.messages()[1].content.as_str()), (2, call));
+            assert!(!c.busy() && c.messages()[1].tool_calls.is_empty());
+        }
+        // Text über JSON ohne Aufruf: unverändert
+        let prose = "The config looks like ```json\n{\"name\": \"x\", \"arguments\": {}}\n``` – that is all.";
+        let b = Script::new(vec![text(prose)]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        assert!(drive(&mut c, &b, &policy(crate::mcp::McpLevel::Read, 10), &|_| panic!("kein Aufruf")).is_empty());
+        assert_eq!(c.messages()[1].content, prose);
+        assert!(!c.busy() && c.status() == ChatStatus::Ready);
+        // Gleich nach dem Ende einer Antwort mit `{` (vor dem nächsten Schritt) gilt der Chat noch als beschäftigt …
+        let b = Script::new(vec![text("a set {x}")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        c.poll();
+        assert!(c.busy(), "Textprüfung steht noch aus");
+        assert_eq!(c.tool_step(&policy(crate::mcp::McpLevel::Read, 10)), ToolStep::Idle);
+        assert!(!c.busy());
+        // … gewöhnlicher Text ohne JSON braucht keinen weiteren Schritt
+        let b = Script::new(vec![text("hello")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        c.poll();
+        assert!(!c.busy());
+    }
+
+    #[test]
+    fn text_calls_get_the_same_approval_and_safety_checks() {
+        // Schreibendes Werkzeug als Text (Mistral): wartet auf Freigabe wie ein echter Aufruf
+        let b = Script::new(vec![text("[TOOL_CALLS]send_text[ARGS]{\"session\": \"2\", \"text\": \"dir\"}"), text("ok")]);
+        let p = policy(crate::mcp::McpLevel::Control, 10);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "type dir");
+        assert!(drive(&mut c, &b, &p, &|_| panic!("erst nach Freigabe")).is_empty());
+        assert!(c.awaiting_approval());
+        assert_eq!(c.pending_approval().unwrap().arguments, serde_json::json!({"session": 2, "text": "dir"}));
+        // Stufe Lesen: verboten
+        let b = Script::new(vec![text("[TOOL_CALLS]send_text[ARGS]{\"session\": 2, \"text\": \"dir\"}"), text("ok")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "type dir");
+        assert!(drive(&mut c, &b, &policy(crate::mcp::McpLevel::Read, 10), &|_| panic!("verboten")).is_empty());
+        assert_eq!(c.messages()[2].status, Some(ToolStatus::Denied));
+        // Von einem Agenten (Sitzung 7) ausgelöst: auch "7" als Text zielt nach der Normalisierung auf 7 → Umweg-Schutz
+        let b = Script::new(vec![text("<tool_call>{\"name\": \"send_text\", \"arguments\": {\"session\": \"7\", \"text\": \"x\"}}</tool_call>"), text("ok")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        assert!(drive(&mut c, &b, &p.clone().with_origins(vec![7]), &|_| panic!("Umweg")).is_empty());
+        assert!(!c.awaiting_approval());
+        assert!(c.messages()[2].content.contains(tools::PROXY_MESSAGE), "{}", c.messages()[2].content);
+        // … und keine Claude-Sitzung, auch nicht mit "true" als Text
+        let b = Script::new(vec![text("<tool_call>{\"name\": \"create_session\", \"arguments\": {\"claude\": \"true\"}}</tool_call>"), text("ok")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        assert!(drive(&mut c, &b, &p.clone().with_origins(vec![7]), &|_| panic!("Claude-Start")).is_empty());
+        assert!(c.messages()[2].content.contains(tools::SPAWN_CLAUDE_MESSAGE));
+    }
+
+    #[test]
+    fn broken_text_calls_and_unknown_tools_get_a_hint() {
+        let b = Script::new(vec![
+            text("<tool_call>{\"name\": \"read_terminal\", \"arguments\": {\"session\": 3,}}</tool_call>"),
+            text("<tool_call>{\"name\": \"get_weather\", \"arguments\": {}}</tool_call>"),
+            text("Sorry."),
+        ]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        assert!(drive(&mut c, &b, &policy(crate::mcp::McpLevel::Read, 10), &|_| panic!("darf nicht laufen")).is_empty());
+        let res: Vec<&ChatMsg> = c.messages().iter().filter(|m| m.role == Role::Tool).collect();
+        assert_eq!(res.len(), 2);
+        assert!(res[0].content.contains("bad_args") && res[0].content.contains("not valid JSON") && res[0].content.contains("Correct example"), "{}", res[0].content);
+        assert!(res[1].content.contains("unknown_tool") && res[1].content.contains("list_sessions"), "{}", res[1].content);
+        assert_eq!(c.messages().last().unwrap().content, "Sorry.", "das Modell bekommt die Hinweise und antwortet");
+        assert!(c.messages()[1].repairs[0].text_call);
+        consistent(&c);
+    }
+
+    #[test]
+    fn native_calls_are_normalised_and_the_fixes_recorded() {
+        let b = Script::new(vec![vec![tc("a", "read_terminal", serde_json::json!({"session": "4", "screen": "true"})), tc("b", "whoami", serde_json::json!({})), TurnEvent::Done], text("ok")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        let seen = std::sync::Mutex::new(Vec::new());
+        drive(&mut c, &b, &policy(crate::mcp::McpLevel::Read, 10), &|call| {
+            seen.lock().unwrap().push(call.arguments.clone());
+            ok_exec(call)
+        });
+        assert_eq!(seen.lock().unwrap()[0], serde_json::json!({"session": 4, "screen": true}));
+        let a = &c.messages()[1];
+        assert_eq!(a.repairs.len(), 1, "nur der korrigierte Aufruf");
+        assert_eq!((a.repairs[0].id.as_str(), a.repairs[0].text_call), ("a", false));
+        assert_eq!(a.repairs[0].fixes, [r#"screen: "true" → true"#, r#"session: "4" → 4"#]);
+    }
+
+    #[test]
+    fn the_same_failing_call_three_times_in_a_row_stops_the_loop() {
+        let bad = || vec![tc("x", "read_terminal", serde_json::json!({"session": "abc"})), TurnEvent::Done];
+        let b = Script::new(vec![bad()]);
+        let p = policy(crate::mcp::McpLevel::Read, 10);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        drive(&mut c, &b, &p, &|_| panic!("ungültig"));
+        assert!(c.paused && c.loop_stop && !c.busy());
+        assert_eq!(c.steps, LOOP_LIMIT);
+        assert_eq!(c.pause_note.as_deref(), Some("The model sent the same failing tool call (read_terminal) 3 times in a row – stopped."));
+        assert_eq!(c.messages().iter().filter(|m| m.role == Role::Tool).count(), 3);
+        consistent(&c);
+        // „Weiter“: kommt derselbe Fehler noch einmal, hält die Runde gleich wieder an
+        assert!(c.resume() && !c.loop_stop);
+        drive(&mut c, &b, &p, &|_| panic!("ungültig"));
+        assert!(c.paused && c.loop_stop && c.steps == LOOP_LIMIT + 1);
+        // Neue Nachricht: alles neu
+        start(&mut c, &Script::new(vec![text("ok")]), "enough");
+        assert!(!c.loop_stop && !c.paused);
+        // Fehler bei der Ausführung zählen genauso
+        let b = Script::new(vec![vec![tc("x", "list_sessions", serde_json::json!({})), TurnEvent::Done]]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        assert_eq!(drive(&mut c, &b, &p, &|_| Err(("boom".into(), "fails".into()))).len(), 3);
+        assert!(c.paused && c.loop_stop);
+        // Andere Argumente oder ein Erfolg dazwischen: kein Anhalten durch den Schleifen-Schutz
+        let turn = |s: &str| vec![tc("x", "read_terminal", serde_json::json!({"session": s})), TurnEvent::Done];
+        let b = Script::new(vec![turn("a"), turn("b"), turn("a"), turn("b"), text("ok")]);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "q");
+        drive(&mut c, &b, &p, &|_| panic!("ungültig"));
+        assert!(!c.loop_stop && !c.paused, "{:?}", c.pause_note);
+        let ok_then_fail = Script::new(vec![vec![tc("x", "list_sessions", serde_json::json!({})), TurnEvent::Done]]);
+        let n = std::sync::atomic::AtomicU32::new(0);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &ok_then_fail, "q");
+        let ran = drive(&mut c, &ok_then_fail, &p, &|_| if n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 2 == 0 { ok_exec(&ToolCall::default()) } else { Err(("boom".into(), "x".into())) });
+        assert_eq!(ran.len(), 10, "bis zur Höchstzahl, nicht vom Schleifen-Schutz angehalten");
+        assert!(c.paused && !c.loop_stop);
     }
 }

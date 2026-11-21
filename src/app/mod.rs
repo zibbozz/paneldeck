@@ -3296,8 +3296,6 @@ impl App {
             project,
             folder: e.map(|e| e.meta.cwd.clone()).unwrap_or_default(),
             servers: self.settings.llm_servers.list.clone(),
-            data_dir: Some(self.dir.clone()),
-            prompt_lang: self.settings.mcp_prompt_lang,
             lang: self.settings.language,
             expert: crate::mcp::expert_mode(),
             token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),

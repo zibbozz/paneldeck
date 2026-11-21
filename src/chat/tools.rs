@@ -96,7 +96,7 @@ impl ToolPolicy {
     /// Geprüft wird bei der Ausführung, nicht beim Senden: die Einstellungen können sich dazwischen ändern.
     pub fn check(&self, call: &ToolCall) -> Result<bool, (ToolStatus, String)> {
         let Some(def) = mcp::tools().into_iter().find(|d| d.name == call.name) else {
-            return Err((ToolStatus::Error, error_json("unknown_tool", &format!("There is no tool named “{}”. Use only the tools you were given.", mcp::short(&call.name, 80)))));
+            return Err((ToolStatus::Error, error_json("unknown_tool", &self.unknown_tool_message(&call.name))));
         };
         if !self.enabled() || def.level > self.cfg.level || self.cfg.disabled_tools.iter().any(|t| t == def.name) {
             return Err((ToolStatus::Denied, error_json("forbidden", "This tool is not allowed for this model (Settings → Models).")));
@@ -109,9 +109,10 @@ impl ToolPolicy {
             };
             return Err((ToolStatus::Denied, error_json("wrong_mode", msg)));
         }
-        match &call.arguments {
-            Value::Object(_) | Value::Null => {}
-            _ => return Err((ToolStatus::Error, error_json("bad_args", "arguments must be a JSON object"))),
+        // Argumente (schon normalisiert, `repair::normalize`): Objekt, Pflichtfelder, Typen – vor jeder Freigabe-Frage,
+        // mit einer Meldung, die Feld, erwarteten Typ und ein richtiges Beispiel nennt (#340).
+        if let Err(msg) = super::repair::validate(def.name, &def.schema, &call.arguments) {
+            return Err((ToolStatus::Error, error_json("bad_args", &msg)));
         }
         // Kein Umweg in die Sitzung des Agenten, der diese Runde ausgelöst hat – geprüft vor jeder Freigabe-Frage.
         if proxy_forbidden(&call.name, &call.arguments, &self.origin_sessions) {
@@ -122,6 +123,16 @@ impl ToolPolicy {
             return Err((ToolStatus::Denied, error_json("forbidden", msg)));
         }
         Ok(def.level >= McpLevel::Control && !approval_free(def.name, &call.arguments))
+    }
+
+    /// Meldung für einen Aufruf ohne oder mit unbekanntem Werkzeugnamen: nennt die Werkzeuge, die das Modell hat (#340).
+    fn unknown_tool_message(&self, name: &str) -> String {
+        let names: Vec<&str> = if self.enabled() { mcp::tools().iter().filter(|d| self.allowed(d)).map(|d| d.name).collect() } else { Vec::new() };
+        let head = if name.trim().is_empty() { "This tool call has no tool name.".to_string() } else { format!("There is no tool named “{}”.", mcp::short(name, 80)) };
+        if names.is_empty() {
+            return format!("{head} Use only the tools you were given.");
+        }
+        format!("{head} Call one of these tools by its exact name, through the tool-calling interface with a JSON object of arguments: {}.", names.join(", "))
     }
 
     /// Muss der Nutzer diesen Aufruf freigeben? `ask` aus [`ToolPolicy::check`]; `always` = dauerhafte Freigaben des
@@ -213,6 +224,10 @@ pub fn chain_origins(caller: Option<u64>, caller_chain: &[u64]) -> Vec<u64> {
 /// wichtigen Sicherheitshinweise. Externe MCP-Clients bekommen weiter die volle Beschreibung (`mcp::tools`).
 pub fn compact_description(def: &mcp::ToolDef) -> String {
     let mut s = mcp::sysprompt::short_desc(def.name).map(|(_, en)| en.to_string()).unwrap_or_else(|| def.description.to_string());
+    // Im Chat gilt „zuerst aufrufen“ nicht (#340, widerspräche dem Master-Prompt): der Chat ist selbst die Sitzung.
+    if def.name == "whoami" {
+        s = "Your own session (this chat) and the sessions you created (children).".into();
+    }
     let has_session = def.schema["properties"].get("session").is_some();
     if def.level >= McpLevel::Control && has_session && def.name != "wait_for_status" {
         s.push_str(" Never your own session; refused while it waits for an approval.");
@@ -684,14 +699,16 @@ mod tests {
         let c = policy(McpLevel::Control, &[], false);
         assert_eq!(c.check(&call("send_text", json!({"session": 1, "text": "x"}))), Ok(true), "schreibend");
         for t in NO_APPROVAL {
-            assert_eq!(c.check(&call(t, json!({}))), Ok(false), "{t}: ohne Freigabe");
+            assert_eq!(c.check(&call(t, json!({"session": 1, "status": ["ready"]}))), Ok(false), "{t}: ohne Freigabe");
             assert_eq!(mcp::tool_level(t), Some(McpLevel::Control), "{t} ist ein Steuern-Werkzeug");
+            // Pflichtfelder fehlen: bad_args schon vor einer Freigabe-Frage (#340)
+            assert!(c.check(&call(t, json!({}))).unwrap_err().1.contains("missing required field \\\"session\\\""), "{t}");
         }
         // focus_session mit placement (#162): normale Freigaberegeln; null zählt wie „ohne“
         assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": "solo"}))), Ok(true));
         assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": "replace"}))), Ok(true));
         assert_eq!(c.check(&call("focus_session", json!({"session": 1, "placement": null}))), Ok(false));
-        assert_eq!(c.check(&call("wait_for_status", json!({"session": 1, "placement": "solo"}))), Ok(false));
+        assert_eq!(c.check(&call("wait_for_status", json!({"session": 1, "status": ["ready"], "placement": "solo"}))), Ok(false));
         assert!(c.check(&call("create_ticket", json!({}))).unwrap_err().1.contains("wrong_mode"));
         assert!(policy(McpLevel::Off, &[], false).check(&call("list_sessions", json!({}))).unwrap_err().1.contains("forbidden"));
         // Freigabe
@@ -827,6 +844,29 @@ mod tests {
         }
         // Ein Ergebnis über cap_for mit winzigem Platz bleibt gültiges JSON
         assert!(serde_json::from_str::<Value>(&cap_for("list_sessions", json!({"text": big}), 5)).is_ok());
+    }
+
+    #[test]
+    fn bad_args_and_unknown_tools_say_how_to_call_correctly() {
+        let p = policy(McpLevel::Read, &[], false);
+        // Falscher Typ (nicht normalisierbar): Feld, erwarteter Typ, Beispiel – nie still {}
+        let (st, body) = p.check(&call("read_terminal", json!({"session": "abc"}))).unwrap_err();
+        let v: Value = serde_json::from_str(&body).unwrap();
+        let msg = v["message"].as_str().unwrap();
+        assert_eq!((st, v["error"].as_str()), (ToolStatus::Error, Some("bad_args")));
+        assert!(msg.contains("field \"session\" must be an integer") && msg.contains("Correct example: {\"session\":1}"), "{msg}");
+        // Kaputtes JSON: der empfangene Text steht in der Meldung
+        let (_, body) = p.check(&call("read_terminal", Value::String("{\"session\": 3,}".into()))).unwrap_err();
+        assert!(body.contains("not valid JSON") && body.contains("Received:"), "{body}");
+        // Unbekanntes Werkzeug / ohne Namen: die verfügbaren Werkzeuge werden genannt (nur die erlaubten)
+        let (_, body) = p.check(&call("list_session", json!({}))).unwrap_err();
+        assert!(body.contains("\"unknown_tool\"") && body.contains("list_sessions") && body.contains("read_terminal") && !body.contains("send_text"), "{body}");
+        let (_, body) = p.check(&call("", json!({}))).unwrap_err();
+        assert!(body.contains("no tool name") && body.contains("whoami"), "{body}");
+        assert!(policy(McpLevel::Off, &[], false).check(&call("x", json!({}))).unwrap_err().1.contains("Use only the tools you were given"));
+        // Schreibendes Werkzeug mit falschen Argumenten: Fehler vor der Freigabe-Frage (nicht Ok(true))
+        let c = policy(McpLevel::Control, &[], false);
+        assert!(c.check(&call("send_text", json!({"session": 1}))).unwrap_err().1.contains("missing required field"));
     }
 
     #[test]

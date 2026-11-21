@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Deviation: instead of `[Unreleased]`, changes that are not yet released are listed under the number of the next release with `WIP` instead of a date (e.g. `## [1.1.0] - WIP`).
 
+## [2.6.1] - WIP
+
+### Fixed
+
+- Local chats now get their own instructions written for the chat instead of the instructions for external agents: always in English with the rule to answer in your language, clear rules for tool calls, safety rules, an explanation of Paneldeck, what each error means, and every tool of the model's level and mode with all its fields and examples, plus short hints for known model families (Qwen, Llama, Mistral, Gemma, Phi, DeepSeek, Granite, Bonsai, gpt-oss). When the context is small (e.g. 8192 tokens for an OpenAI-compatible server that reports no length), a compact version with shortened tool descriptions is sent instead, so chats work at every level. Without a custom context length, Ollama gets 32768 tokens, and 65536 for level Control in expert mode (#340)
+- Local chats: tool calls that a model writes as text (e.g. `<tool_call>…</tool_call>`, `[TOOL_CALLS]…`, a JSON block) are now recognised and run with the same permission checks as normal calls; unambiguous argument types are corrected (`"3"` → `3`, `"true"` → `true`, a single value → a list); invalid calls get an error that names the field, the expected type and a correct example instead of failing silently; the same failing call three times in a row stops the round with a visible message. Repaired calls are marked in the chat (#340)
+
 ## [2.6.0] - 2026-11-21
 
 ### Added
@@ -447,6 +454,7 @@ First public release. From here on, the public API (MCP interface, command line,
 - All `unwrap()`/`expect()` calls in the program code were replaced by error handling (the release build aborts completely on a panic); the `unsafe` blocks are justified.
 - The executable contains no paths of the build machine.
 
+[2.6.1]: https://github.com/zibbozz/paneldeck/compare/v2.6.0...HEAD
 [2.6.0]: https://github.com/zibbozz/paneldeck/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/zibbozz/paneldeck/compare/v2.4.2...v2.5.0
 [2.4.2]: https://github.com/zibbozz/paneldeck/compare/v2.4.1...v2.4.2
