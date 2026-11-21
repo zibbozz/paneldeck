@@ -337,10 +337,10 @@ impl App {
         if finished && run.tour == steps::WHATS_NEW {
             self.tut.p.whats_new_after.clear();
         }
-        if let (Some(before), Some(db)) = (self.tut.p.expert_before.take(), self.db.as_ref()) {
-            if self.plan.expert != before {
-                self.plan.set_expert(db, before);
-            }
+        if let (Some(before), Some(db)) = (self.tut.p.expert_before.take(), self.db.as_ref())
+            && self.plan.expert != before
+        {
+            self.plan.set_expert(db, before);
         }
         self.palette = None;
         self.tut_save();
@@ -520,17 +520,17 @@ impl App {
                 }
                 Prep::Expert(on) => {
                     self.plan.ensure_loaded(self.db.as_ref());
-                    if let Some(db) = self.db.as_ref() {
-                        if self.plan.expert != on {
-                            self.plan.set_expert(db, on);
-                        }
+                    if let Some(db) = self.db.as_ref()
+                        && self.plan.expert != on
+                    {
+                        self.plan.set_expert(db, on);
                     }
                 }
                 Prep::ExpertRestore => {
-                    if let (Some(before), Some(db)) = (self.tut.p.expert_before, self.db.as_ref()) {
-                        if self.plan.expert != before {
-                            self.plan.set_expert(db, before);
-                        }
+                    if let (Some(before), Some(db)) = (self.tut.p.expert_before, self.db.as_ref())
+                        && self.plan.expert != before
+                    {
+                        self.plan.set_expert(db, before);
                     }
                 }
                 Prep::PlanProject => self.tut_plan_project(),

@@ -21,7 +21,7 @@ macro_rules! spots {
 
         impl Spot {
             /// Alle Kennungen (für die Tests).
-            #[cfg_attr(not(any(test, feature = "tutorial-test")), allow(dead_code))]
+            #[cfg_attr(not(test), allow(dead_code))]
             pub(in crate::app) const ALL: &'static [Spot] = &[$(Spot::$v,)*];
 
             /// Stabile Kennung als Text (Statusdatei des Test-Builds, Fehlermeldungen der Tests).
