@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [2.6.1] - WIP
 
+### Fixed
+
+- Lokale Chats: Werkzeugaufrufe, die ein Modell als Text schreibt (z. B. `<tool_call>…</tool_call>`, `[TOOL_CALLS]…`, ein JSON-Block), werden jetzt erkannt und mit denselben Berechtigungsprüfungen wie normale Aufrufe ausgeführt; eindeutige Argumenttypen werden korrigiert (`"3"` → `3`, `"true"` → `true`, ein einzelner Wert → eine Liste); ungültige Aufrufe bekommen eine Fehlermeldung mit Feld, erwartetem Typ und einem richtigen Beispiel, statt still zu scheitern; derselbe fehlschlagende Aufruf dreimal hintereinander hält die Runde mit einem sichtbaren Hinweis an. Reparierte Aufrufe sind im Chat markiert (#340)
+
 ## [2.6.0] - 2026-11-21
 
 ### Added

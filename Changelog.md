@@ -9,6 +9,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 ## [2.6.1] - WIP
 
+### Fixed
+
+- Local chats: tool calls that a model writes as text (e.g. `<tool_call>…</tool_call>`, `[TOOL_CALLS]…`, a JSON block) are now recognised and run with the same permission checks as normal calls; unambiguous argument types are corrected (`"3"` → `3`, `"true"` → `true`, a single value → a list); invalid calls get an error that names the field, the expected type and a correct example instead of failing silently; the same failing call three times in a row stops the round with a visible message. Repaired calls are marked in the chat (#340)
+
 ## [2.6.0] - 2026-11-21
 
 ### Added
