@@ -1598,7 +1598,7 @@ c.close()
   $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
   $rc = Tool 'read_chat' @{ session = $C; last = 4 }
   $tm = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'list_sessions' })
-  $ca = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' -and @($_.tool_calls).Count -ge 1 })
+  $ca = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' -and $null -ne $_.tool_calls -and @($_.tool_calls).Count -ge 1 })
   $lastA = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' })[-1]
   Check 'Textaufruf (#340): <tool_call>{list_sessions} wird ausgefuehrt, Text faellt aus der Antwort, danach "done"' ($w.data.matched -eq $true -and $tm.Count -ge 1 -and $tm[-1].status -eq 'ok' -and $ca.Count -ge 1 -and $ca[-1].tool_calls[0].name -eq 'list_sessions' -and $ca[-1].content -eq 'Let me check.' -and $ca[-1].content -notmatch 'tool_call' -and $lastA.content -eq 'done') $rc.text
   # #340: falsche Typen ("950", "2") werden normalisiert statt abgewiesen (vorher: bad_args "session (number) is missing").
@@ -1606,7 +1606,7 @@ c.close()
   $w = Tool 'wait_for_status' @{ session = $C; status = @('ready'); timeout_secs = 40 } 50000
   $rc = Tool 'read_chat' @{ session = $C; last = 4 }
   $tm = @($rc.data.messages | Where-Object { $_.role -eq 'tool' -and $_.tool_name -eq 'read_chat' })
-  $ca = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' -and @($_.tool_calls).Count -ge 1 })
+  $ca = @($rc.data.messages | Where-Object { $_.role -eq 'assistant' -and $null -ne $_.tool_calls -and @($_.tool_calls).Count -ge 1 })
   $args0 = if ($ca.Count -ge 1) { $ca[-1].tool_calls[0].arguments } else { $null }
   Check 'Normalisierung (#340): read_chat mit session "950" und last "2" laeuft mit Zahlen (ok, Argumente korrigiert gespeichert)' ($w.data.matched -eq $true -and $tm.Count -ge 1 -and $tm[-1].status -eq 'ok' -and $tm[-1].content -match 'smoke-answer' -and $null -ne $args0 -and $args0.session -eq 950 -and -not ($args0.session -is [string]) -and $args0.last -eq 2 -and -not ($args0.last -is [string])) $rc.text
   # #340: Schleifen-Schutz - derselbe fehlerhafte Aufruf dreimal in Folge haelt die Runde an (paused, pause_note).
