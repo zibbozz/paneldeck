@@ -414,7 +414,7 @@ pub const DOCS: &[ToolDoc] = &[
             "`path` must be an absolute local path of an existing file; network/UNC paths and devices are refused (`forbidden`), a missing file gives `not_found`. An open file is not opened twice (`already_open`).",
             "`untitled` = true opens a new tab with `text`; only the user can save it.",
         ],
-        examples: &[(r#"{"path": "C:\\work\\demo\\README.md"}"#, "open a file"), (r#"{"untitled": true, "name": "Plan", "text": "1. Read the code\n2. Fix the bug"}"#, "a new untitled tab with text")],
+        examples: &[(r#"{"path": "C:\\work\\demo\\README.md"}"#, "open a file"), (r#"{"untitled": true, "text": "1. Read the code\n2. Fix the bug"}"#, "a new untitled tab with text")],
     },
     ToolDoc {
         name: "editor_edit",

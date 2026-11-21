@@ -104,18 +104,18 @@ pub trait EditorHost {
     /// Alle offenen Dokumente (ein Eintrag je Dokument, auch wenn es in mehreren Tabs steht), in Tab-Reihenfolge.
     fn docs(&self) -> Vec<DocInfo>;
     /// Ganzer Text eines Dokuments mit `\n` als Zeilenende (`None`: unbekannt).
-    fn text(&self, doc: u64) -> Option<String>;
+    fn text(&mut self, doc: u64) -> Option<String>;
     /// Zeilen `start..start+count` (ab 0) ohne Zeilenende (`None`: unbekannt). Darf für große Dateien schneller sein als
     /// [`EditorHost::text`].
-    fn lines(&self, doc: u64, start: usize, count: usize) -> Option<Vec<String>> {
+    fn lines(&mut self, doc: u64, start: usize, count: usize) -> Option<Vec<String>> {
         let text = self.text(doc)?;
         Some(text.split('\n').skip(start).take(count).map(str::to_string).collect())
     }
     /// Datei in einem neuen Tab öffnen (geprüfter, lokaler Pfad), als „von einem Agenten geöffnet“; `show` = den
     /// Editor-Reiter nach vorn holen (die Tastatur bleibt, wo sie ist). Liefert die Dokument-Kennung.
     fn open_file(&mut self, path: &Path, show: bool) -> Result<u64, String>;
-    /// Neuer unbenannter Tab mit `text`; `name` = Vorschlag für den Tab-Namen.
-    fn open_untitled(&mut self, name: Option<&str>, text: &str, show: bool) -> Result<u64, String>;
+    /// Neuer unbenannter Tab mit `text` (als „von einem Agenten geöffnet“).
+    fn open_untitled(&mut self, text: &str, show: bool) -> Result<u64, String>;
     /// Änderungen eines Agenten anwenden: ungespeichert, ein Rückgängig-Schritt, Herkunft „Agent“. Die Bereiche
     /// überlappen nicht und sind aufsteigend sortiert.
     fn apply_agent_edits(&mut self, doc: u64, edits: &[TextEdit]) -> Result<(), String>;
@@ -192,13 +192,12 @@ pub fn defs() -> Vec<ToolDef> {
             name: "editor_open",
             level: McpLevel::Control,
             group: Group::Always,
-            description: "Open a local file in a new tab of the Editor tab (an already open file is not opened twice: its id is returned with already_open = true), or with untitled = true a new untitled tab with optional `text` and `name`. Needs the user's switch \"Agents may open files\" (Settings -> Editor -> Agents), else forbidden. `path` must be an absolute local path of an existing regular file: network and UNC paths (\\\\server\\share, \\\\wsl.localhost\\..., mapped network drives) and devices (\\\\.\\..., \\\\?\\..., CON, NUL, COM1, /dev, /proc, /sys) are refused with forbidden; a missing file gives not_found. show = true also brings the Editor tab to the front (the keyboard focus stays where it is). Opening never changes a file. An untitled tab can only be saved by the user.",
+            description: "Open a local file in a new tab of the Editor tab (an already open file is not opened twice: its id is returned with already_open = true), or with untitled = true a new untitled tab with optional `text`. Needs the user's switch \"Agents may open files\" (Settings -> Editor -> Agents), else forbidden. `path` must be an absolute local path of an existing regular file: network and UNC paths (\\\\server\\share, \\\\wsl.localhost\\..., mapped network drives) and devices (\\\\.\\..., \\\\?\\..., CON, NUL, COM1, /dev, /proc, /sys) are refused with forbidden; a missing file gives not_found. show = true also brings the Editor tab to the front (the keyboard focus stays where it is). Opening never changes a file. An untitled tab can only be saved by the user.",
             schema: schema(
                 json!({
                     "path": {"type": "string", "description": "Absolute local file path, e.g. C:\\\\work\\\\README.md"},
                     "untitled": {"type": "boolean", "description": "Open a new untitled tab instead of a file"},
                     "text": {"type": "string", "description": "Only with untitled=true: initial text (at most 1 MB)"},
-                    "name": {"type": "string", "description": "Only with untitled=true: suggested tab name"},
                     "show": {"type": "boolean", "description": "Bring the Editor tab to the front (default false)"}
                 }),
                 &[],
@@ -251,8 +250,9 @@ pub fn offered_to_chats(name: &str, bits: u8) -> bool {
 /// Kurzbeschreibungen für den Systemprompt (`sysprompt::short_desc`), (de, en).
 pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
     Some(match name {
-        "editor_list" => ("Im Editor-Reiter offene Dokumente mit Zustand (ungespeichert, vom Agenten, Platte).", "Documents open in the Editor tab with their state (unsaved, by agent, disk)."),
-        "editor_read" => ("Zeilen eines offenen Dokuments lesen, auch ungespeicherte Änderungen.", "Read lines of an open document, unsaved changes included."),
+        // Kurz halten: zählt in der Kurzfassung des Chat-Prompts (8192-Token-Budget).
+        "editor_list" => ("Offene Editor-Dokumente.", "Open editor documents."),
+        "editor_read" => ("Zeilen eines Editor-Dokuments lesen.", "Read lines of an editor document."),
         "editor_open" => ("Lokale Datei oder neuen unbenannten Tab im Editor öffnen (Schalter nötig).", "Open a local file or a new untitled tab in the editor (needs a switch)."),
         "editor_edit" => ("Offenes Dokument ändern – ungespeichert, als Agent markiert, rückgängig machbar (Schalter nötig).", "Change an open document – unsaved, marked as agent, undoable (needs a switch)."),
         "editor_save" => ("Offene, vorhandene Datei speichern (Schalter nötig).", "Save an open, existing file (needs a switch)."),
@@ -376,7 +376,7 @@ fn cut_line(s: &str) -> (String, bool) {
 }
 
 /// `editor_read`.
-pub fn read(host: &dyn EditorHost, args: &Value) -> R {
+pub fn read(host: &mut dyn EditorHost, args: &Value) -> R {
     let d = resolve(&host.docs(), args)?;
     let offset = int_arg(args, "offset")?.unwrap_or(1);
     let limit = int_arg(args, "limit")?.unwrap_or(READ_DEFAULT_LINES as i64);
@@ -423,7 +423,6 @@ pub fn open(host: &mut dyn EditorHost, s: &EditorSettings, args: &Value) -> R {
     let show = bool_arg(args, "show")?;
     let path = str_arg(args, "path")?;
     let text = str_arg(args, "text")?;
-    let name = str_arg(args, "name")?;
     match (path, untitled) {
         (Some(_), true) => Err(er("bad_args", t("Entweder path oder untitled = true angeben, nicht beides.", "Give either path or untitled = true, not both."))),
         (None, false) => Err(er("bad_args", t("path fehlt (oder untitled = true für einen neuen Tab).", "path is missing (or untitled = true for a new tab)."))),
@@ -432,13 +431,12 @@ pub fn open(host: &mut dyn EditorHost, s: &EditorSettings, args: &Value) -> R {
             if text.len() > MAX_AGENT_TEXT {
                 return Err(too_large("text"));
             }
-            let name = name.map(|n| n.trim().chars().take(80).collect::<String>()).filter(|n| !n.is_empty());
-            let id = host.open_untitled(name.as_deref(), &normalize_eol(text), show).map_err(|e| er("internal", e))?;
+            let id = host.open_untitled(&normalize_eol(text), show).map_err(|e| er("internal", e))?;
             opened(host, id, false)
         }
         (Some(p), false) => {
-            if text.is_some() || name.is_some() {
-                return Err(er("bad_args", t("text und name gibt es nur mit untitled = true.", "text and name only work with untitled = true.")));
+            if text.is_some() {
+                return Err(er("bad_args", t("text gibt es nur mit untitled = true.", "text only works with untitled = true.")));
             }
             let checked = agent_path::check_file(p)?;
             let raw = Path::new(p.trim());
@@ -661,7 +659,7 @@ pub(crate) mod fake {
         fn docs(&self) -> Vec<DocInfo> {
             self.docs.iter().map(|d| d.info.clone()).collect()
         }
-        fn text(&self, doc: u64) -> Option<String> {
+        fn text(&mut self, doc: u64) -> Option<String> {
             self.docs.iter().find(|d| d.info.id == doc).map(|d| d.text.clone())
         }
         fn open_file(&mut self, path: &Path, show: bool) -> Result<u64, String> {
@@ -679,14 +677,11 @@ pub(crate) mod fake {
             }
             Ok(id)
         }
-        fn open_untitled(&mut self, name: Option<&str>, text: &str, show: bool) -> Result<u64, String> {
+        fn open_untitled(&mut self, text: &str, show: bool) -> Result<u64, String> {
             let id = self.add(None, text);
             let d = self.doc_mut(id);
             d.info.opened_by_agent = true;
             d.info.dirty = !text.is_empty();
-            if let Some(n) = name {
-                d.info.title = n.into();
-            }
             if show {
                 self.shown.push(id);
             }
@@ -754,7 +749,7 @@ mod tests {
         let mut h = FakeHost::with_file(r"C:\w\a.txt", "one\ntwo");
         let off = EditorSettings::default();
         assert_eq!(code(list(&h, &off)), "ok");
-        assert_eq!(code(read(&h, &json!({"doc": 1}))), "ok");
+        assert_eq!(code(read(&mut h, &json!({"doc": 1}))), "ok");
         let (c, m) = open(&mut h, &off, &json!({"untitled": true})).unwrap_err();
         assert_eq!(c, "forbidden");
         assert!(m.contains("Agents may open files") || m.contains("Agenten dürfen Dateien öffnen"), "{m}");
@@ -772,35 +767,35 @@ mod tests {
     #[test]
     fn list_and_read_with_offsets_caps_and_untrusted_note() {
         let text: String = (1..=500).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        let h = FakeHost::with_file(r"C:\w\big.txt", &text);
+        let mut h = FakeHost::with_file(r"C:\w\big.txt", &text);
         let v = list(&h, &EditorSettings::default()).unwrap();
         assert_eq!(v["docs"][0]["id"], 1);
         assert_eq!(v["docs"][0]["path"], r"C:\w\big.txt");
         assert_eq!(v["docs"][0]["lines"], 500);
         assert_eq!(v["docs"][0]["disk"], "in_sync");
-        let r = read(&h, &json!({"doc": 1})).unwrap();
+        let r = read(&mut h, &json!({"doc": 1})).unwrap();
         assert_eq!((r["start_line"].as_u64(), r["end_line"].as_u64(), r["more_below"].as_bool()), (Some(1), Some(200), Some(true)));
         assert!(r["text"].as_str().unwrap().starts_with("line 1\nline 2\n"));
         assert!(r["note"].as_str().unwrap().contains("untrusted") || r["note"].as_str().unwrap().contains("vertrauenswürdig"));
-        let r = read(&h, &json!({"doc": "1", "offset": 495, "limit": 100})).unwrap();
+        let r = read(&mut h, &json!({"doc": "1", "offset": 495, "limit": 100})).unwrap();
         assert_eq!((r["start_line"].as_u64(), r["end_line"].as_u64(), r["more_below"].as_bool()), (Some(495), Some(500), Some(false)));
         assert_eq!(r["text"], "line 495\nline 496\nline 497\nline 498\nline 499\nline 500");
         // Nach dem Ende: leer, kein Fehler.
-        let r = read(&h, &json!({"doc": 1, "offset": 900})).unwrap();
+        let r = read(&mut h, &json!({"doc": 1, "offset": 900})).unwrap();
         assert_eq!(r["text"], "");
         assert_eq!(r["more_below"], false);
         // Über den Pfad, ohne Groß-/Kleinschreibung unter Windows
         if cfg!(windows) {
-            assert_eq!(read(&h, &json!({"doc": r"c:\W\BIG.txt", "limit": 1})).unwrap()["text"], "line 1");
+            assert_eq!(read(&mut h, &json!({"doc": r"c:\W\BIG.txt", "limit": 1})).unwrap()["text"], "line 1");
         }
-        assert_eq!(code(read(&h, &json!({"doc": 7}))), "not_found");
-        assert_eq!(code(read(&h, &json!({"doc": r"C:\w\other.txt"}))), "not_found");
-        assert_eq!(code(read(&h, &json!({}))), "bad_args");
-        assert_eq!(code(read(&h, &json!({"doc": 1, "offset": 0}))), "bad_args");
+        assert_eq!(code(read(&mut h, &json!({"doc": 7}))), "not_found");
+        assert_eq!(code(read(&mut h, &json!({"doc": r"C:\w\other.txt"}))), "not_found");
+        assert_eq!(code(read(&mut h, &json!({}))), "bad_args");
+        assert_eq!(code(read(&mut h, &json!({"doc": 1, "offset": 0}))), "bad_args");
         // Byte-Grenze und lange Zeilen
         let long = "x".repeat(READ_MAX_LINE_CHARS + 10);
-        let h = FakeHost::with_file(r"C:\w\l.txt", &vec![long.as_str(); 100].join("\n"));
-        let r = read(&h, &json!({"doc": 1, "limit": 2000})).unwrap();
+        let mut h = FakeHost::with_file(r"C:\w\l.txt", &vec![long.as_str(); 100].join("\n"));
+        let r = read(&mut h, &json!({"doc": 1, "limit": 2000})).unwrap();
         assert!(r["text"].as_str().unwrap().len() <= READ_MAX_BYTES);
         assert!(r["truncated_lines"].as_u64().unwrap() > 0 && r["more_below"] == true);
     }
@@ -838,8 +833,8 @@ mod tests {
         assert_eq!(code(open(&mut h, &s, &json!({"path": f.to_string_lossy(), "untitled": true}))), "bad_args");
         assert_eq!(code(open(&mut h, &s, &json!({"path": f.to_string_lossy(), "text": "x"}))), "bad_args");
         // Unbenannt
-        let v = open(&mut h, &s, &json!({"untitled": true, "text": "a\r\nb", "name": "Notes"})).unwrap();
-        assert_eq!((v["untitled"].as_bool(), v["name"].as_str()), (Some(true), Some("Notes")));
+        let v = open(&mut h, &s, &json!({"untitled": true, "text": "a\r\nb"})).unwrap();
+        assert_eq!((v["untitled"].as_bool(), v["opened_by_agent"].as_bool()), (Some(true), Some(true)));
         assert_eq!(h.doc(v["doc"].as_u64().unwrap()).text, "a\nb");
         let big = "x".repeat(MAX_AGENT_TEXT + 1);
         assert_eq!(code(open(&mut h, &s, &json!({"untitled": true, "text": big}))), "too_large");

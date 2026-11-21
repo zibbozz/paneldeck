@@ -617,7 +617,7 @@ fn editor_buffers_and_editor_context_entry() {
     assert!(Item::HotExit.label(Lang::En).starts_with("Editor") && Item::HotExit.label(Lang::De).starts_with("Editor"));
     assert!(Item::HotExit.needs_typing(false) && !Item::HotExit.preselected());
     assert!(Item::HotExit.needs_restart(), "offene Tabs schreiben ihre Puffer beim Beenden neu");
-    assert_eq!(HOT_EXIT, "editor-hotexit", "Ordner des Kerns (editor::HotExitStore)");
+    assert_eq!(HOT_EXIT, "hot-exit", "Ordner des Editors (app::editor_ui HOT_DIR)");
     // editor-state.json gehört zu „Sitzungen und Layout“.
     let d0 = tmp("edstate");
     put(&d0.join(EDITOR_STATE), 5);

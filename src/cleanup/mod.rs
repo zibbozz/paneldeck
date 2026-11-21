@@ -30,8 +30,8 @@ use std::time::{Duration, SystemTime};
 pub const PENDING_FILE: &str = "cleanup-pending.json";
 /// Ordner der Programm-Kopien von Läufen unter `%TEMP%` (#312).
 pub const RUN_TEMP: &str = "paneldeck-run";
-/// Ordner der Hot-Exit-Puffer des Editors im Datenordner (#54, `editor::HotExitStore`).
-pub const HOT_EXIT: &str = "editor-hotexit";
+/// Ordner der Hot-Exit-Puffer des Editors im Datenordner (#54, `editor::HotExitStore` in `app::editor_ui` `HOT_DIR`).
+pub const HOT_EXIT: &str = "hot-exit";
 /// Zustand des Editor-Reiters (offener Ordner, Tabs, Teilungen, zuletzt geöffnet; #54, intern) – gehört zu
 /// „Sitzungen und Layout“.
 pub const EDITOR_STATE: &str = "editor-state.json";
@@ -286,7 +286,7 @@ impl Item {
             Clipboard => l.t("Eingefügte Bilder (clipboard\\).", "Pasted images (clipboard\\)."),
             OldBackups => l.t("*.bak-* und *.defekt-* im Datenordner.", "*.bak-* and *.defekt-* in the data folder."),
             RunTemp => l.t("Kopien der Programmdatei unter %TEMP%\\paneldeck-run.", "Copies of the program under %TEMP%\\paneldeck-run."),
-            HotExit => l.t("Ungespeicherte Änderungen von Editor-Tabs (editor-hotexit\\) – sie gehen verloren. Neustart.", "Unsaved changes of editor tabs (editor-hotexit\\) – they are lost. Restart."),
+            HotExit => l.t("Ungespeicherte Änderungen von Editor-Tabs (hot-exit\\) – sie gehen verloren. Neustart.", "Unsaved changes of editor tabs (hot-exit\\) – they are lost. Restart."),
             ScrollbackOrphaned => l.t("Gespeicherter Terminaltext, zu dem es keine Sitzung mehr gibt.", "Saved terminal text that no session belongs to any more."),
             ScrollbackAll => l.t("Auch offene Terminals: sie behalten nur den Bildschirm.", "Open terminals too: they keep only the screen."),
             ChatsOrphaned => l.t("Verläufe, zu denen es keinen Chat mehr gibt.", "Histories that no chat belongs to any more."),

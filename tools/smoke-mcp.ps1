@@ -2255,7 +2255,7 @@ c.close()
   Check 'Editor: gespeichert mit den Zeilenenden der Datei (CRLF)' ([IO.File]::ReadAllText($edA) -eq "top`r`nalpha`r`nBETA`r`ngamma`r`n") ([IO.File]::ReadAllText($edA))
   Check 'Editor: editor_save ohne Aenderungen -> saved false' ((Tool 'editor_save' @{ doc = $A }).data.saved -eq $false)
   # Unbenannter Tab: anlegen ja, speichern nur der Nutzer.
-  $un = Tool 'editor_open' @{ untitled = $true; name = 'Smoke'; text = "draft`r`ntext" }
+  $un = Tool 'editor_open' @{ untitled = $true; text = "draft`r`ntext" }
   Check 'Editor: unbenannter Tab mit Text' (-not $un.err -and $un.data.untitled -eq $true -and $null -eq $un.data.path) $un.text
   Check 'Editor: unbenannter Tab nicht speicherbar (forbidden)' ((Code (Tool 'editor_save' @{ doc = $un.data.doc })) -eq 'forbidden')
   # Auf der Platte geloescht: nicht speichern.

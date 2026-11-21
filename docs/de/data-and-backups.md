@@ -34,7 +34,7 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `claude-hooks*.json` | von Paneldeck erzeugte Hook-Konfiguration |
 | `crash.log` | Absturzprotokoll (nur wenn etwas schiefging) |
 | `mcp-log.jsonl` | Aufrufprotokoll der Agenten-Schnittstelle (nur wenn sie benutzt wurde) |
-| `editor-hotexit/` | ungespeicherte Änderungen von [Editor](editor.md)-Tabs als reiner Text für den nächsten Start (*Hot Exit*, seit 3.0.0); ein Puffer wird gelöscht, wenn sein Tab gespeichert oder geschlossen wird |
+| `hot-exit/` | ungespeicherte Änderungen von [Editor](editor.md)-Tabs als reiner Text für den nächsten Start (*Hot Exit*, seit 3.0.0); ein Puffer wird gelöscht, wenn sein Tab gespeichert oder geschlossen wird |
 | `profiles/<name>/` | Datenordner der [Profile](command-line.md#profile-und-mehrere-instanzen), jeweils mit demselben Aufbau |
 | `editor-state.json` | offener Ordner, Tabs, Teilungen und zuletzt geöffnete Dateien des [Editor-Reiters](editor.md) (intern, seit 3.0.0) |
 | `ipc.json` | Port und Token der laufenden Instanz (intern) |
@@ -161,7 +161,7 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
   | `search_include_ignored` | `false` | Vorgabe des Such-Schalters *Ignorierte einbeziehen* |
   | `agent_open`, `agent_edit`, `agent_save` | `false` | die [Agenten-Schalter](editor.md#agenten) (nur `true` schaltet ein; wirken nur bei Stufe *Steuern*) |
 
-- `editor-hotexit/`: ungespeicherte Editor-Puffer; `editor-state.json`: offener Ordner, Tabs, Teilungen und zuletzt geöffnete Dateien des Editor-Reiters (beides interne Formate; im *Aufräumen* als *Editor: ungespeicherte Puffer* bzw. als Teil von *Sitzungen und Layout*).
+- `hot-exit/`: ungespeicherte Editor-Puffer; `editor-state.json`: offener Ordner, Tabs, Teilungen und zuletzt geöffnete Dateien des Editor-Reiters (beides interne Formate; im *Aufräumen* als *Editor: ungespeicherte Puffer* bzw. als Teil von *Sitzungen und Layout*).
 
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
@@ -176,7 +176,7 @@ Alle neuen Felder sind optional: Ein fehlendes Feld bedeutet das bisherige Verha
 
 | Gruppe | Einträge |
 |---|---|
-| Platz schaffen | Datenbank-Sicherungen (alle außer den neuesten *N*, Standard 3; „alle löschen“ nur mit Eintippen), Bilder aus der Zwischenablage, alte Sicherungsdateien; nur wenn vorhanden: Programm-Kopien von Läufen (`%TEMP%\paneldeck-run`), Wartungs-Sicherungen (`maintenance-<zeit>.db` im Sicherungsordner – nur Dateien mit genau diesem Namensmuster), *Editor: ungespeicherte Puffer* (`editor-hotexit\`, die ungespeicherten Änderungen von Editor-Tabs – nur mit Eintippen und Neustart, sie lassen sich nicht wiederherstellen) |
+| Platz schaffen | Datenbank-Sicherungen (alle außer den neuesten *N*, Standard 3; „alle löschen“ nur mit Eintippen), Bilder aus der Zwischenablage, alte Sicherungsdateien; nur wenn vorhanden: Programm-Kopien von Läufen (`%TEMP%\paneldeck-run`), Wartungs-Sicherungen (`maintenance-<zeit>.db` im Sicherungsordner – nur Dateien mit genau diesem Namensmuster), *Editor: ungespeicherte Puffer* (`hot-exit\`, die ungespeicherten Änderungen von Editor-Tabs – nur mit Eintippen und Neustart, sie lassen sich nicht wiederherstellen) |
 | Verlauf und Protokolle | Scrollback und Chatverläufe, je **ohne Sitzung** oder **alle** („alle“ betrifft auch offene Sitzungen: Terminals behalten nur den Bildschirm, Chats werden leer), wahlweise nur Dateien älter als *X* Tage (Standard 30); `crash.log`; das MCP-Protokoll `mcp-log.jsonl` (es dokumentiert, was Agenten getan haben) |
 | Inhalte | Prompt-Bibliothek, Terminal-/Gruppenvorlagen, eigene Themes (eingebaute Themes und das Beispiel bleiben; ein aktives gelöschtes Theme fällt auf den Standard zurück), `system-prompt.md`, die Todo-/Ticket-Datenbank, Sitzungen und Layout |
 | Einstellungen | alle Einstellungen (wie `--reset-settings`, mit Kopie `settings.json.bak-<zeit>`; die Sprache bleibt), Modell-Server und API-Schlüssel, Claude-Standards, Tastenkürzel |
