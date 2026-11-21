@@ -14,6 +14,8 @@ use std::sync::OnceLock;
 pub struct Cli {
     pub open: Option<String>,
     pub claude: bool,
+    /// `--edit <datei>` (#54, 3.0.0): Datei im Editor-Reiter öffnen, bereits absolut.
+    pub edit: Option<String>,
     pub tray: bool,
     /// Unterbefehl `mcp` (stdio-Brücke für Agenten).
     pub mcp: bool,
@@ -42,6 +44,8 @@ pub enum CliError {
     BadLang(String),
     Unexpected(String),
     NotWithMcp(String),
+    /// `--edit` zusammen mit `--open`/`--claude` oder einem Ordner ohne Option.
+    EditWithOpen,
 }
 
 impl CliError {
@@ -61,6 +65,7 @@ impl CliError {
             CliError::BadLang(v) => format!("{} {} – {}", l.t("Ungültige Sprache:", "Invalid language:"), l.q(v), l.t("erlaubt sind en und de", "allowed are en and de")),
             CliError::Unexpected(a) => format!("{} {}", l.t("Unerwartetes Argument:", "Unexpected argument:"), a),
             CliError::NotWithMcp(o) => format!("{} {}", l.t("Mit mcp sind nur --data-dir, --profile, --lang und --help erlaubt, nicht:", "With mcp only --data-dir, --profile, --lang and --help are allowed, not:"), o),
+            CliError::EditWithOpen => l.t("--edit geht nicht zusammen mit --open, --claude oder einem Ordner.", "--edit cannot be combined with --open, --claude or a folder.").to_string(),
         };
         format!("Paneldeck: {body}\n{}", l.t("Hilfe: paneldeck.exe --help", "Help: paneldeck.exe --help"))
     }
@@ -225,7 +230,7 @@ pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf, kind: &dyn Fn(&std:
             Some((o, v)) if o.starts_with("--") => (o.to_string(), Some(v.to_string())),
             _ => (raw.clone(), None),
         };
-        let takes_value = matches!(opt.as_str(), "--open" | "--data-dir" | "--backup-dir" | "--profile" | "--lang");
+        let takes_value = matches!(opt.as_str(), "--open" | "--edit" | "--data-dir" | "--backup-dir" | "--profile" | "--lang");
         if inline.is_some() && !takes_value {
             return Err(CliError::Unknown(raw));
         }
@@ -247,12 +252,19 @@ pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf, kind: &dyn Fn(&std:
             return Err(if opt.starts_with('-') { CliError::NotWithMcp(raw) } else { CliError::Unexpected(raw) });
         }
         match opt.as_str() {
-            "--open" | "--data-dir" | "--backup-dir" => {
+            "--open" | "--edit" | "--data-dir" | "--backup-dir" => {
                 let (v, more) = split_quoted(&value(&mut rest)?);
                 for m in more.into_iter().rev() {
                     rest.push_front(m);
                 }
                 match opt.as_str() {
+                    "--edit" => {
+                        if c.edit.is_some() {
+                            return Err(CliError::Unexpected(raw));
+                        }
+                        // Wie --open relativ zum Ordner dieses Aufrufs (die laufende Instanz hat einen anderen).
+                        c.edit = Some(abs(&v).display().to_string());
+                    }
                     "--open" => {
                         if positional {
                             return Err(CliError::Unexpected(raw));
@@ -304,6 +316,9 @@ pub fn parse(args: &[String], abs: &dyn Fn(&str) -> PathBuf, kind: &dyn Fn(&std:
                 c.open = Some(dir.display().to_string());
             }
         }
+    }
+    if c.edit.is_some() && (c.open.is_some() || c.claude) {
+        return Err(CliError::EditWithOpen);
     }
     Ok(c)
 }
@@ -541,6 +556,32 @@ mod tests {
             assert!(e.message(Lang::En).contains("--help") && e.message(Lang::De).contains("--help"));
             assert_ne!(e.message(Lang::En), e.message(Lang::De));
         }
+    }
+
+    #[test]
+    fn edit_option_opens_a_file_in_the_editor() {
+        // absolut, relativ zum Aufruf, mit Instanz-Argumenten und in der Form `--edit=…`
+        assert_eq!(p(&["--edit", r"C:\Dev\app\main.rs"]).unwrap().edit.as_deref(), Some(r"C:\Dev\app\main.rs"));
+        assert_eq!(p(&["--edit", "rel.txt"]).unwrap().edit.as_deref(), Some(r"C:\cwd\rel.txt"));
+        let c = p(&["--profile", "work", "--edit=notes.md", "--lang", "de"]).unwrap();
+        assert_eq!((c.edit.as_deref(), c.profile.as_deref(), c.open.as_deref()), (Some(r"C:\cwd\notes.md"), Some("work"), None));
+        // Fehler: ohne Wert, doppelt, mit --open/--claude/Ordner, mit mcp
+        assert_eq!(p(&["--edit"]), Err(CliError::MissingValue("--edit".into())));
+        assert!(matches!(p(&["--edit", "a", "--edit", "b"]), Err(CliError::Unexpected(_))));
+        assert_eq!(p(&["--edit", "a", "--open", r"C:\Dev\app"]), Err(CliError::EditWithOpen));
+        assert_eq!(p(&["--edit", "a", "--claude"]), Err(CliError::EditWithOpen));
+        assert_eq!(p(&[r"C:\Dev\app", "--edit", "a"]), Err(CliError::EditWithOpen));
+        assert!(matches!(p(&["mcp", "--edit", "a"]), Err(CliError::NotWithMcp(_))));
+        let m = CliError::EditWithOpen;
+        assert!(m.message(Lang::En).contains("--edit") && m.message(Lang::De).contains("--edit") && m.message(Lang::En) != m.message(Lang::De));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn edit_option_from_the_explorer_entry() {
+        // So ruft der Explorer-Eintrag (`integration::edit_context_command`) Paneldeck auf.
+        let c = line(r#""C:\Program Files\Paneldeck\paneldeck.exe" --profile work --edit "C:\Users\A B\x y.txt""#).unwrap();
+        assert_eq!((c.edit.as_deref(), c.profile.as_deref()), (Some(r"C:\Users\A B\x y.txt"), Some("work")));
     }
 
     #[test]

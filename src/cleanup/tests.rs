@@ -68,7 +68,7 @@ fn ids_are_unique_and_round_trip() {
     let pre: Vec<Item> = Item::ALL.into_iter().filter(|i| i.preselected()).collect();
     assert_eq!(pre, [Item::Clipboard, Item::OldBackups, Item::ScrollbackOrphaned, Item::ChatsOrphaned, Item::CrashLog]);
     // Unwiderruflich: Datenbank, alle Chats, alle Einstellungen, Sitzungen/Layout, Vorlagen, Prompts, Zurücksetzen
-    for i in [Item::Database, Item::ChatsAll, Item::SettingsAll, Item::Sessions, Item::Templates, Item::Prompts, Item::FactoryReset, Item::ScrollbackAll] {
+    for i in [Item::Database, Item::ChatsAll, Item::SettingsAll, Item::Sessions, Item::Templates, Item::Prompts, Item::FactoryReset, Item::ScrollbackAll, Item::HotExit] {
         assert!(i.needs_typing(false), "{}", i.id());
     }
     assert!(!Item::DbBackups.needs_typing(false) && Item::DbBackups.needs_typing(true));
@@ -112,7 +112,7 @@ fn sizes_counts_and_orphans() {
     assert_eq!(amt(Item::ChatsAll), (707, 3, 0));
     assert_eq!(amt(Item::Sessions).1, 6, "state.json + Scrollback + Chats");
     assert!(!s.visible(Item::RunTemp) && !s.visible(Item::HotExit) && !s.visible(Item::MaintenanceBackups), "optionale Einträge ohne Ordner fehlen");
-    put(&d.join("hot-exit").join("a").join("buf.txt"), 3);
+    put(&d.join(HOT_EXIT).join("a").join("buf.txt"), 3);
     put(&d.join("tmp").join(RUN_TEMP).join("1").join("paneldeck.exe"), 9);
     put(&d.join("backups").join("maintenance-20260101-120000.db"), 11);
     // fremde Dateien mit „maintenance“ im Namen gehören nicht dazu
@@ -607,4 +607,34 @@ fn linked_root_folders_are_not_followed() {
     }
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&outside);
+}
+
+/// Editor (#54): Hot-Exit-Puffer heißen „Editor: ungespeicherte Puffer“ und verlangen das Eintippen; der Explorer-Eintrag
+/// „In Paneldeck-Editor öffnen“ zählt zum Eintrag „Explorer-Kontextmenü“ (und zu „alles zurücksetzen“).
+#[test]
+fn editor_buffers_and_editor_context_entry() {
+    assert_eq!(Item::HotExit.id(), "hot_exit", "Kennung bleibt (cleanup_sizes)");
+    assert!(Item::HotExit.label(Lang::En).starts_with("Editor") && Item::HotExit.label(Lang::De).starts_with("Editor"));
+    assert!(Item::HotExit.needs_typing(false) && !Item::HotExit.preselected());
+    assert!(Item::HotExit.needs_restart(), "offene Tabs schreiben ihre Puffer beim Beenden neu");
+    assert_eq!(HOT_EXIT, "hot-exit", "Ordner des Editors (app::editor_ui HOT_DIR)");
+    // editor-state.json gehört zu „Sitzungen und Layout“.
+    let d0 = tmp("edstate");
+    put(&d0.join(EDITOR_STATE), 5);
+    assert!(scan(&ctx(&d0)).found(Item::Sessions).unwrap().files.iter().any(|f| f.path.ends_with(EDITOR_STATE)));
+    let _ = std::fs::remove_dir_all(&d0);
+    let d = tmp("edctx");
+    let vals = vec![(crate::integration::EDIT_CONTEXT_KEY.to_string(), None, "Open in Paneldeck editor".to_string())];
+    let only_editor = integ::State { edit_context: Some(vals.clone()), ..Default::default() };
+    assert_eq!(only_editor.context_entries(), [r"*\shell\PaneldeckEdit"]);
+    let both = integ::State { context: Some(vals.clone()), edit_context: Some(vals), ..Default::default() };
+    assert_eq!(both.context_entries().len(), 2);
+    let c = Ctx { integ_override: Some(both), ..ctx(&d) };
+    let s = scan(&c);
+    assert_eq!(s.found(Item::ContextMenu).unwrap().entries.len(), 2);
+    assert_eq!(s.found(Item::FactoryReset).unwrap().entries.len(), 2);
+    // Ohne System-Integration (Tests) wird nichts angefasst.
+    let r = execute(&c, &s, &sel(&[Item::ContextMenu]), &Opts { backup_db: false, ..Opts::default() }, Phase::Live);
+    assert_eq!(r[0].entries, 0);
+    let _ = std::fs::remove_dir_all(&d);
 }

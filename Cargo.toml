@@ -20,6 +20,16 @@ miniz_oxide = "0.8"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 # Regex-Suche des Chat-Werkzeugs `grep` (#338); steckt über alacritty_terminal ohnehin im Baum (keine neue Crate).
 regex-automata = "0.4"
+# Editor-Tab (#54, `src/editor/`): Rope-Text (nur LF als Zeilenende, keine Unicode-Zeilentrenner), Suchen/Ersetzen mit
+# regulären Ausdrücken, Kodierungen (UTF-16, Windows-1252), Unterschied Datei/Puffer, Graphem-Grenzen und Spaltenbreiten.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
+regex = "1"
+encoding_rs = "0.8"
+similar = "2"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+# Editor (#54): Suche in Dateien – Ordner durchlaufen mit .gitignore-Regeln (ignore, MIT/Unlicense, aus ripgrep).
+ignore = "0.4"
 
 [features]
 # Nur für die README-Screenshots (tools/readme-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.

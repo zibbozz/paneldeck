@@ -18,6 +18,7 @@ Paneldeck works **offline**: it only contacts GitHub when you check for updates 
 - **Todo list and tickets:** a simple to-do list that turns into a small Jira in *expert mode* – projects, ticket types, workflows, boards, a query language, sprints and dashboards, all stored locally. Every ticket has a description, a due date with configurable markers and labels; icons from the Lucide set and an editable color palette. A [maintenance page](docs/en/todo-and-tickets.md#maintenance) finds stale, broken and duplicate tickets and unused configuration, archives tickets and takes care of the database.
 - **Themes:** a [theme editor](docs/en/themes.md) with live preview, design check and named interface colours; a new theme can be generated from a background and an accent colour.
 - **Clean up:** see what Paneldeck stores and delete what you no longer need – backups, histories, logs, content, settings – up to a complete reset ([Clean up](docs/en/data-and-backups.md#clean-up)).
+- **Editor:** a plain text editor tab with folder tree, tabs, free splits, multiple cursors, minimap, find/replace (regex) and search in files (respects `.gitignore`); keeps encoding and line endings, saves atomically, keeps unsaved changes across restarts and stays smooth with files of several hundred MB. Agents can read it and – only with your switches – open, edit and save files.
 - **Chats with local models:** talk to Ollama, LM Studio, llama.cpp or vLLM on this computer or in your network, right next to your terminals – the model can use Paneldeck's tools within limits you set per model.
 - **Agent interface (MCP):** AI agents can see sessions, read terminals, run commands and work with your to-do list and tickets – off by default, with a configurable system prompt.
 - **Command line and profiles:** separate data folders and profiles that run side by side, each with its own autostart and MCP entry.
@@ -57,6 +58,7 @@ The guides live in [`docs/en/`](docs/en/) (German: [`docs/de/`](docs/de/)) and a
 - [Todo list and tickets](docs/en/todo-and-tickets.md) – simple and expert mode, boards, sprints, dashboards, quick actions, maintenance and archive
 - [Query language](docs/en/query-language.md) – searching tickets, examples, reference
 - [Process list](docs/en/processes.md) – dev servers and watchers with their output in a pane of their own
+- [Editor](docs/en/editor.md) – the Editor tab: files and folders, splits, find/replace, search in files, encodings, hot exit, large files, agents
 - [Chats with local models](docs/en/chat.md) – Ollama and OpenAI-compatible servers, models, tools and approvals, security
 - [Themes and the theme editor](docs/en/themes.md) – editing and generating themes, design check, file format and colour names
 - [Agent interface (MCP)](docs/en/agent-interface.md) – levels, tools, security, system prompt

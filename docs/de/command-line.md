@@ -16,6 +16,7 @@ Optionen mit Wert lassen sich auch als `--option=wert` schreiben (`--profile=arb
 |---|---|
 | `--open <ordner>` | Neue Sitzung in `<ordner>` öffnen (eine Datei öffnet ihren Ordner) |
 | `--claude` | Mit `--open`: Claude Code in der neuen Sitzung starten |
+| `--edit <datei>` | `<datei>` in einem neuen Tab des [Editor-Reiters](editor.md) öffnen (seit 3.0.0) |
 | `--tray` | Minimiert im Tray starten |
 | `--no-tray` | Kein Tray-Symbol für diesen Start |
 | `--data-dir <ordner>` | `<ordner>` als Datenordner verwenden |
@@ -44,6 +45,11 @@ Zusammen mit `--open`: Die neue Sitzung startet Claude Code (Claude-Modus nötig
     paneldeck.exe --open "C:\Dev\meine-app" --claude
 
 Die Sitzung nutzt deine Standard-[Claude-Startoptionen](claude-code.md#startoptionen). In einem Paneldeck-Terminal eingegeben, wendet `--open … --claude` deine Standards für zusätzliche Ordner, erlaubte Werkzeuge, eine MCP-Konfiguration oder `--safe-mode` nie an, und die neue Sitzung wird nur mit einer [Agenten-Kette](agent-interface.md#sicherheit) markiert, wenn dieses Terminal eine hat.
+
+### --edit \<datei\>
+*(Seit 3.0.0.)* Öffnet `<datei>` im laufenden Paneldeck (oder nach dem Start) in einem neuen Tab des [Editor-Reiters](editor.md); eine schon offene Datei wird stattdessen nach vorn geholt, nicht doppelt geöffnet. Ein relativer Pfad gilt ab dem aktuellen Ordner des Aufrufers. `--edit` geht nicht zusammen mit `--open`, `--claude` oder einem Ordner ohne Option (Exit-Code 2), nur mit den Instanz-Optionen (`--profile`, `--data-dir`, `--lang` …). Der Explorer-Eintrag *In Paneldeck-Editor öffnen* nutzt das (standardmäßig aus, siehe [Windows-Integration](windows-integration.md#in-paneldeck-editor-öffnen)). Eine so geöffnete Datei zählt nie als Aktion eines Agenten, auch wenn der Befehl in einem Paneldeck-Terminal getippt wird.
+
+    paneldeck.exe --edit "C:\Dev\meine-app\README.md"
 
 ### --tray
 Startet minimiert im Tray (so startet *Mit Windows starten*). Läuft Paneldeck schon, wird es stattdessen angezeigt.
@@ -126,7 +132,7 @@ Der Datenordner wird in dieser Reihenfolge gewählt (der erste Treffer gilt):
 - Ein weiteres *Fenster* (Strg+Klick auf einen Reiter) ist keine neue Instanz: Es gehört zum selben Prozess und Datenordner (siehe [Mehrere Fenster](windows.md)).
 
 ## Was an eine laufende Instanz übergeben wird
-Läuft Paneldeck schon mit demselben Datenordner, übergibt ein neuer Start nur **`--open`/`--claude`** (bzw. zeigt bei `--tray` und einem schlichten Start das Fenster). Die Optionen, die nur den Start einer Instanz betreffen – **`--lang`, `--backup-dir`, `--no-tray`, `--no-update-check`** – wirken dann nicht, und **`--reset-settings`** schlägt mit einer Fehlermeldung fehl. Vorher Paneldeck beenden.
+Läuft Paneldeck schon mit demselben Datenordner, übergibt ein neuer Start nur **`--open`/`--claude`** oder **`--edit`** (bzw. zeigt bei `--tray` und einem schlichten Start das Fenster). Die Optionen, die nur den Start einer Instanz betreffen – **`--lang`, `--backup-dir`, `--no-tray`, `--no-update-check`** – wirken dann nicht, und **`--reset-settings`** schlägt mit einer Fehlermeldung fehl. Vorher Paneldeck beenden.
 
 ## Exit-Codes
 | Code | Bedeutung |

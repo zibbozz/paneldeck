@@ -1,0 +1,1154 @@
+//! Editor-Bereich zeichnen (#54): Ordnerbaum links, Teilungen mit eigener Reiterleiste, Hinweisleisten, Textfeld,
+//! Statusleiste unten, Rückfragen. Tastenkürzel des Editors.
+
+use super::doc::{DocEntry, StatusInfo};
+use super::panes::Drop as PaneDrop;
+use super::text::{self, TextCx};
+use super::tree::TreeOut;
+use super::{CloseAsk, EditorUi, TabDrag};
+use crate::layout::{Dir, Node};
+use crate::state::Lang;
+use crate::style::{self, Icon};
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Id, Key, Margin, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+pub(super) const BAR_H: f32 = 30.0;
+const STATUS_H: f32 = 24.0;
+const GAP: f32 = 6.0;
+const TAB_MIN_W: f32 = 90.0;
+const TAB_MAX_W: f32 = 220.0;
+const INFO_H: f32 = 30.0;
+
+/// Ergebnis eines Klicks irgendwo im Bereich, nach dem Zeichnen ausgeführt.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Cmd {
+    OpenPath(PathBuf, bool),
+    OpenFileDialog,
+    OpenFolderDialog,
+    SetRoot(PathBuf),
+    CloseRoot,
+    NewFile,
+    Activate(u64, usize),
+    Close(Vec<(u64, u64)>),
+    Split(u64, Dir),
+    Save(u64),
+    SaveAs(u64),
+    Reload(u64),
+    KeepMine(u64),
+    ShowDiff(u64),
+    DismissLarge(u64),
+    DismissAgent(u64),
+    Drop(TabDrag, PaneDrop),
+    CopyPath(PathBuf),
+    SetEncoding(u64, &'static str),
+    SetEol(u64, bool),
+    ForgetRecent,
+}
+
+impl super::super::App {
+    /// Editor-Bereich (statt Seitenleiste und Terminals).
+    pub(crate) fn editor_view(&mut self, ctx: &egui::Context) {
+        let lang = self.settings.language;
+        let prefs = self.editor_prefs();
+        let theme = self.theme();
+        let mut cmds: Vec<Cmd> = Vec::new();
+        self.editor_keys(ctx, &mut cmds);
+        // Dateien aus dem Explorer ablegen: Dateien öffnen, ein Ordner wird die Wurzel.
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        for p in dropped {
+            cmds.push(if p.is_dir() { Cmd::SetRoot(p) } else { Cmd::OpenPath(p, false) });
+        }
+        draw(ctx, &mut self.ed, &theme, &prefs, lang, &mut cmds);
+        self.editor_dialogs(ctx, &mut cmds);
+        for c in cmds {
+            self.editor_cmd(ctx, c);
+        }
+        if let Some((_, t)) = &self.ed.hint {
+            if t.elapsed() > Duration::from_secs(4) {
+                self.ed.hint = None;
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(500));
+            }
+        }
+    }
+
+    /// Tastenkürzel des Editors (nur im Editor-Reiter). Teilen nutzt die Belegung des Terminal Hub (`split_r`/`split_d`).
+    fn editor_keys(&mut self, ctx: &egui::Context, cmds: &mut Vec<Cmd>) {
+        if self.capture_key.is_some() || self.ed.close_ask.is_some() {
+            return;
+        }
+        let g = self.ed.panes.focused;
+        let doc = self.ed.active_doc();
+        let binds: Vec<(&str, Option<(Modifiers, Key)>)> = vec![("split_r", self.binding("split_r")), ("split_d", self.binding("split_d"))];
+        let ctrl = Modifiers::CTRL;
+        let cs = Modifiers::CTRL | Modifiers::SHIFT;
+        let ca = Modifiers::CTRL | Modifiers::ALT;
+        let mut nav = None;
+        ctx.input_mut(|i| {
+            for (id, b) in &binds {
+                if let Some((m, k)) = b
+                    && super::super::consume_key_exact(i, *m, *k, false)
+                {
+                    cmds.push(Cmd::Split(g, if *id == "split_r" { Dir::Horizontal } else { Dir::Vertical }));
+                }
+            }
+            let mut take = |m: Modifiers, k: Key| super::super::consume_key_exact(i, m, k, false);
+            if let Some(d) = doc {
+                if take(cs, Key::S) {
+                    cmds.push(Cmd::SaveAs(d));
+                }
+                if take(ctrl, Key::S) {
+                    cmds.push(Cmd::Save(d));
+                }
+                if take(ctrl, Key::W) || take(ctrl, Key::F4) {
+                    cmds.push(Cmd::Close(vec![(g, d)]));
+                }
+            }
+            if take(ctrl, Key::N) {
+                cmds.push(Cmd::NewFile);
+            }
+            if take(ctrl, Key::O) {
+                cmds.push(Cmd::OpenFileDialog);
+            }
+            if take(cs, Key::O) {
+                cmds.push(Cmd::OpenFolderDialog);
+            }
+            if take(ctrl, Key::B) {
+                self.ed.tree_open = !self.ed.tree_open;
+            }
+            if take(Modifiers::ALT, Key::Z) {
+                self.ed.wrap = !self.ed.wrap;
+            }
+            for (k, n) in [(Key::ArrowLeft, super::super::Nav::Left), (Key::ArrowRight, super::super::Nav::Right), (Key::ArrowUp, super::super::Nav::Up), (Key::ArrowDown, super::super::Nav::Down)] {
+                if super::super::focus_target(&self.ed.group_rects, g, n).is_some() && take(ca, k) {
+                    nav = Some(n);
+                }
+            }
+            if let Some(grp) = self.ed.panes.groups.get(&g) {
+                let n = grp.tabs.len();
+                if n > 1 {
+                    if take(cs, Key::Tab) {
+                        cmds.push(Cmd::Activate(g, (grp.active + n - 1) % n));
+                    } else if take(ctrl, Key::Tab) {
+                        cmds.push(Cmd::Activate(g, (grp.active + 1) % n));
+                    }
+                }
+            }
+            if doc.is_some() {
+                if take(ctrl, Key::F) {
+                    self.ed.find.open(false);
+                }
+                if take(ctrl, Key::H) {
+                    self.ed.find.open(true);
+                }
+                if take(ctrl, Key::G) {
+                    self.ed.goto = Some(super::find::GotoLine::default());
+                }
+            }
+        });
+        if let Some(n) = nav
+            && let Some(t) = super::super::focus_target(&self.ed.group_rects, g, n)
+        {
+            self.ed.panes.focused = t;
+            self.ed.want_focus = true;
+        }
+        // Suchtext aus der Auswahl übernehmen, wenn die Leiste gerade aufgeht.
+        if self.ed.find.just_opened()
+            && let Some(sel) = self.ed.focused_view_and_doc().and_then(|(v, d)| v.selected_text(d))
+            && !sel.contains('\n')
+            && !sel.is_empty()
+        {
+            self.ed.find.query = sel;
+        }
+    }
+
+    /// Befehl aus dem Bild ausführen.
+    fn editor_cmd(&mut self, ctx: &egui::Context, c: Cmd) {
+        let lang = self.settings.language;
+        let prefs = self.editor_prefs();
+        let dir = self.dir.clone();
+        match c {
+            Cmd::OpenPath(p, side) => {
+                if p.is_file() {
+                    self.ed.open_path(&p, side);
+                } else {
+                    self.ed.set_hint(format!("{}: {}", lang.t("Datei nicht gefunden", "File not found"), p.display()));
+                    let s = p.to_string_lossy().to_string();
+                    self.ed.recent_files.retain(|x| *x != s);
+                }
+            }
+            Cmd::OpenFileDialog => {
+                let start = self.ed.root.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                if let Some(p) = crate::platform::notify::pick_file(&start) {
+                    self.ed.open_path(&p, false);
+                }
+            }
+            Cmd::OpenFolderDialog => {
+                let start = self.ed.root.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                if let Some(p) = crate::platform::notify::pick_folder(&start) {
+                    self.ed.set_root(Path::new(&p));
+                }
+            }
+            Cmd::SetRoot(p) => {
+                if p.is_dir() {
+                    self.ed.set_root(&p);
+                } else {
+                    let s = p.to_string_lossy().to_string();
+                    self.ed.recent_folders.retain(|x| *x != s);
+                }
+            }
+            Cmd::CloseRoot => self.ed.root = None,
+            Cmd::NewFile => {
+                self.ed.new_untitled(None);
+            }
+            Cmd::Activate(g, i) => {
+                self.ed.panes.focused = g;
+                if let Some(grp) = self.ed.panes.groups.get_mut(&g)
+                    && i < grp.tabs.len()
+                {
+                    grp.active = i;
+                }
+                self.ed.want_focus = true;
+            }
+            Cmd::Close(tabs) => {
+                self.ed.close_ask = Some(CloseAsk { tabs });
+                self.editor_close_step(&dir);
+            }
+            Cmd::Split(g, d) => {
+                if self.ed.panes.split(g, d).is_some() {
+                    self.ed.want_focus = true;
+                }
+            }
+            Cmd::Save(id) => {
+                let untitled = self.ed.docs.get(&id).is_some_and(|d| d.path.is_none());
+                if untitled {
+                    self.editor_cmd(ctx, Cmd::SaveAs(id));
+                } else if let Some(d) = self.ed.docs.get_mut(&id) {
+                    match d.save(None, lang) {
+                        Ok(()) => {
+                            d.drop_hot(&dir);
+                            let t = d.title(lang);
+                            self.ed.set_hint(format!("{t}: {}", lang.t("gespeichert", "saved")));
+                        }
+                        Err(e) => self.notify_text(e),
+                    }
+                }
+            }
+            Cmd::SaveAs(id) => {
+                let Some(d) = self.ed.docs.get(&id) else { return };
+                let name = d.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("{}.txt", d.title(lang)));
+                let start = d.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(|| self.ed.root.clone());
+                if let Some(p) = crate::platform::notify::save_any(start.as_deref(), &name) {
+                    let other = self.ed.doc_for_path(&p).filter(|o| *o != id);
+                    if let Some(d) = self.ed.docs.get_mut(&id) {
+                        match d.save(Some(p.clone()), lang) {
+                            Ok(()) => {
+                                d.drop_hot(&dir);
+                                super::persist::push_recent(&mut self.ed.recent_files, &p.to_string_lossy());
+                                if other.is_some() {
+                                    // Dieselbe Datei war noch in einem anderen Reiter offen: der lädt sie neu.
+                                    if let Some(o) = other.and_then(|o| self.ed.docs.get_mut(&o)) {
+                                        let _ = o.reload_from_disk(&prefs);
+                                    }
+                                }
+                            }
+                            Err(e) => self.notify_text(e),
+                        }
+                    }
+                }
+            }
+            Cmd::Reload(id) => {
+                if let Some(d) = self.ed.docs.get_mut(&id) {
+                    let _ = d.reload_from_disk(&prefs);
+                }
+                if self.ed.diff_doc == Some(id) {
+                    self.ed.diff_doc = None;
+                }
+            }
+            Cmd::KeepMine(id) => {
+                if let Some(d) = self.ed.docs.get_mut(&id) {
+                    d.keep_mine();
+                }
+                if self.ed.diff_doc == Some(id) {
+                    self.ed.diff_doc = None;
+                }
+            }
+            Cmd::ShowDiff(id) => self.ed.diff_doc = Some(id),
+            Cmd::DismissLarge(id) => {
+                if let Some(d) = self.ed.docs.get_mut(&id) {
+                    d.large_dismissed = true;
+                }
+            }
+            Cmd::DismissAgent(id) => {
+                if let Some(d) = self.ed.docs.get_mut(&id) {
+                    d.agent_note_dismissed = true;
+                }
+            }
+            Cmd::Drop(drag, to) => {
+                self.ed.panes.move_tab(drag.group, drag.index, to);
+                self.ed.want_focus = true;
+            }
+            Cmd::CopyPath(p) => ctx.copy_text(p.to_string_lossy().to_string()),
+            Cmd::SetEncoding(id, enc) => {
+                if let Some(d) = self.ed.docs.get_mut(&id)
+                    && let Err(e) = d.set_encoding(enc, lang)
+                {
+                    self.notify_text(e);
+                }
+            }
+            Cmd::SetEol(id, crlf) => {
+                if let Some(d) = self.ed.docs.get_mut(&id) {
+                    d.set_eol(crlf);
+                }
+            }
+            Cmd::ForgetRecent => {
+                self.ed.recent_files.clear();
+                self.ed.recent_folders.clear();
+            }
+        }
+    }
+
+    /// Nächster Schritt einer Schließen-Rückfrage: Reiter ohne ungespeicherte Änderungen (oder deren Dokument noch in
+    /// einem anderen Reiter offen ist) schließen, beim ersten mit Änderungen anhalten und fragen.
+    fn editor_close_step(&mut self, dir: &Path) {
+        let Some(mut ask) = self.ed.close_ask.take() else { return };
+        while let Some(&(g, doc)) = ask.tabs.first() {
+            let elsewhere = self.ed.panes.tabs_of(doc).len() > 1;
+            let dirty = self.ed.docs.get(&doc).is_some_and(|d| d.dirty());
+            if dirty && !elsewhere {
+                self.ed.close_ask = Some(ask);
+                return;
+            }
+            ask.tabs.remove(0);
+            self.editor_close_now(g, doc, dir);
+        }
+    }
+
+    fn editor_close_now(&mut self, g: u64, doc: u64, dir: &Path) {
+        if let Some(i) = self.ed.panes.groups.get(&g).and_then(|grp| grp.find(doc))
+            && let Some(gone) = self.ed.panes.close_tab(g, i)
+        {
+            self.ed.release_doc(gone, dir);
+        }
+        self.ed.want_focus = true;
+    }
+
+    /// Rückfragen und Fenster des Editors: Speichern beim Schließen, Gehe zu Zeile, Unterschied anzeigen.
+    fn editor_dialogs(&mut self, ctx: &egui::Context, cmds: &mut Vec<Cmd>) {
+        let lang = self.settings.language;
+        let dir = self.dir.clone();
+        // Schließen mit ungespeicherten Änderungen
+        if let Some(ask) = self.ed.close_ask.clone() {
+            let Some(&(g, doc)) = ask.tabs.first() else {
+                self.ed.close_ask = None;
+                return;
+            };
+            let name = self.ed.docs.get(&doc).map(|d| d.title(lang)).unwrap_or_default();
+            let mut choice = None;
+            let r = style::modal(Id::new("ed_close_ask")).show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading(lang.t("Änderungen speichern?", "Save changes?"));
+                ui.add_space(style::S2);
+                ui.label(format!("{} {}", lang.q(&name), lang.t("hat ungespeicherte Änderungen.", "has unsaved changes.")));
+                if ask.tabs.len() > 1 {
+                    ui.weak(format!("{} {}", ask.tabs.len() - 1, lang.t("weitere Reiter werden danach geschlossen.", "more tabs will be closed afterwards.")));
+                }
+                ui.add_space(style::S3);
+                ui.horizontal(|ui| {
+                    if ui.button(lang.t("Speichern", "Save")).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                        choice = Some(0);
+                    }
+                    if ui.button(lang.t("Nicht speichern", "Don't save")).clicked() {
+                        choice = Some(1);
+                    }
+                    if ui.button(lang.t("Abbrechen", "Cancel")).clicked() {
+                        choice = Some(2);
+                    }
+                });
+            });
+            if r.should_close() && choice.is_none() {
+                choice = Some(2);
+            }
+            match choice {
+                Some(0) => {
+                    let untitled = self.ed.docs.get(&doc).is_some_and(|d| d.path.is_none());
+                    if untitled {
+                        self.ed.close_ask = None;
+                        self.editor_cmd(ctx, Cmd::SaveAs(doc));
+                        if self.ed.docs.get(&doc).is_some_and(|d| !d.dirty()) {
+                            self.ed.close_ask = Some(ask);
+                            self.editor_close_step(&dir);
+                        }
+                    } else if let Some(d) = self.ed.docs.get_mut(&doc) {
+                        match d.save(None, lang) {
+                            Ok(()) => self.editor_close_step(&dir),
+                            Err(e) => {
+                                self.ed.close_ask = None;
+                                self.notify_text(e);
+                            }
+                        }
+                    }
+                }
+                Some(1) => {
+                    if let Some(d) = self.ed.docs.get_mut(&doc) {
+                        d.discard_changes();
+                    }
+                    let mut ask = ask;
+                    ask.tabs.remove(0);
+                    self.editor_close_now(g, doc, &dir);
+                    self.ed.close_ask = Some(ask);
+                    self.editor_close_step(&dir);
+                }
+                Some(_) => self.ed.close_ask = None,
+                None => {}
+            }
+        }
+        // Gehe zu Zeile
+        if self.ed.goto.is_some() {
+            let max = self.ed.focused_view_and_doc().map(|(_, d)| d.line_count()).unwrap_or(1);
+            let mut target = None;
+            let mut close = false;
+            if let Some(gl) = self.ed.goto.as_mut() {
+                let r = style::modal(Id::new("ed_goto")).anchor(Align2::CENTER_TOP, Vec2::new(0.0, 90.0)).show(ctx, |ui| {
+                    ui.set_width(300.0);
+                    ui.label(format!("{} (1–{max})", lang.t("Gehe zu Zeile", "Go to line")));
+                    let resp = ui.add(egui::TextEdit::singleline(&mut gl.text).hint_text(lang.t("Zeile[:Spalte]", "line[:column]")).desired_width(f32::INFINITY));
+                    if !gl.focused {
+                        resp.request_focus();
+                        gl.focused = true;
+                    }
+                    if ui.input(|i| i.key_pressed(Key::Enter)) {
+                        target = super::find::parse_goto(&gl.text, max);
+                        close = true;
+                    }
+                });
+                if r.should_close() {
+                    close = true;
+                }
+            }
+            if close {
+                self.ed.goto = None;
+                self.ed.want_focus = true;
+            }
+            if let Some((line, col)) = target {
+                self.ed.goto_line(line, col);
+            }
+        }
+        // Unterschied Platte ↔ Puffer
+        if let Some(id) = self.ed.diff_doc {
+            let mut open = true;
+            let lines = self.ed.docs.get(&id).map(|d| d.disk_diff(lang)).unwrap_or_default();
+            let title = self.ed.docs.get(&id).map(|d| d.title(lang)).unwrap_or_default();
+            let mono = FontId::monospace(self.settings.font_size.min(14.0));
+            style::movable(ctx, Id::new("ed_diff_win"), egui::Window::new(format!("{} – {title}", lang.t("Unterschied", "Difference")))).open(&mut open).default_size(Vec2::new(720.0, 480.0)).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(style::ui().diff_remove, lang.t("− auf der Platte", "− on disk"));
+                    ui.colored_label(style::ui().diff_add, lang.t("+ im Editor", "+ in the editor"));
+                });
+                ui.separator();
+                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                    if lines.is_empty() {
+                        ui.weak(lang.t("Keine Unterschiede.", "No differences."));
+                    }
+                    for (kind, text) in &lines {
+                        let (c, p) = match kind {
+                            '+' => (style::ui().diff_add, "+ "),
+                            '-' => (style::ui().diff_remove, "- "),
+                            '@' => (style::ui().info, ""),
+                            _ => (style::dim(ui), "  "),
+                        };
+                        ui.label(RichText::new(format!("{p}{text}")).font(mono.clone()).color(c));
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(lang.t("Meine behalten", "Keep mine")).clicked() {
+                        cmds.push(Cmd::KeepMine(id));
+                    }
+                    if ui.button(lang.t("Von der Platte laden", "Load from disk")).clicked() {
+                        cmds.push(Cmd::Reload(id));
+                    }
+                });
+            });
+            if !open {
+                self.ed.diff_doc = None;
+            }
+        }
+    }
+}
+
+impl EditorUi {
+    /// Ansicht und Dokument des aktiven Reiters der fokussierten Gruppe.
+    pub(super) fn focused_view_and_doc(&self) -> Option<(&text::View, &DocEntry)> {
+        let t = self.panes.groups.get(&self.panes.focused)?.active_tab()?;
+        Some((&t.view, self.docs.get(&t.doc)?))
+    }
+
+    /// Cursor des aktiven Reiters auf Zeile/Spalte (ab 0) setzen und dorthin rollen.
+    pub(super) fn goto_line(&mut self, line: usize, col: usize) {
+        let g = self.panes.focused;
+        let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.active_tab_mut()) else { return };
+        if let Some(d) = self.docs.get(&t.doc) {
+            t.view.goto(d, line, col);
+        }
+        self.want_focus = true;
+    }
+}
+
+// -------------------------------------------------------------------------------------------------------- Bausteine
+
+/// Statusleiste, Ordnerbaum und Teilungen zeichnen (ohne Dialoge); sammelt die Befehle in `cmds`.
+pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme::Theme, prefs: &super::EditorPrefs, lang: Lang, cmds: &mut Vec<Cmd>) {
+    egui::TopBottomPanel::bottom(style::salted(Id::new("ed_status")))
+        .exact_height(STATUS_H)
+        .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(10, 0)))
+        .show(ctx, |ui| status_bar(ui, ed, lang, prefs, cmds));
+    if ed.tree_open {
+        let r = egui::SidePanel::left(style::salted(Id::new("ed_tree")))
+            .resizable(true)
+            .default_width(ed.tree_width)
+            .width_range(160.0..=600.0)
+            .frame(egui::Frame::new().fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(8, 8)))
+            .show(ctx, |ui| super::super::panels::fixed_body(ui, |ui| tree_panel(ui, ed, lang, cmds)));
+        ed.tree_width = r.response.rect.width();
+    }
+    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme.bg)).show(ctx, |ui| {
+        let rect = ui.available_rect_before_wrap();
+        ed.group_rects.clear();
+        ed.bar_rects.clear();
+        let Some(mut layout) = ed.panes.layout.take() else {
+            welcome(ui, rect, ed, lang, cmds);
+            return;
+        };
+        if ed.panes.groups.values().all(|g| g.tabs.is_empty()) {
+            ed.panes.layout = Some(layout);
+            welcome(ui, rect, ed, lang, cmds);
+            return;
+        }
+        let cx = GroupCx { theme, prefs, lang };
+        show_node(ui, &mut layout, rect, ed, &cx, cmds);
+        ed.panes.layout = Some(layout);
+        drag_overlay(ui, ed, lang, cmds);
+    });
+}
+
+struct GroupCx<'a> {
+    theme: &'a crate::theme::Theme,
+    prefs: &'a super::EditorPrefs,
+    lang: Lang,
+}
+
+fn show_node(ui: &mut Ui, node: &mut Node, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, cmds: &mut Vec<Cmd>) {
+    match node {
+        Node::Leaf(g) => show_group(ui, *g, rect, ed, cx, cmds),
+        Node::Split { dir, ratio, a, b } => {
+            let min = 120.0;
+            let (ra, rsep, rb) = match dir {
+                Dir::Horizontal => {
+                    let w = rect.width() - GAP;
+                    let wa = super::super::split_px(w, *ratio, min, min);
+                    (
+                        Rect::from_min_size(rect.min, Vec2::new(wa, rect.height())),
+                        Rect::from_min_size(Pos2::new(rect.min.x + wa, rect.min.y), Vec2::new(GAP, rect.height())),
+                        Rect::from_min_max(Pos2::new(rect.min.x + wa + GAP, rect.min.y), rect.max),
+                    )
+                }
+                Dir::Vertical => {
+                    let h = rect.height() - GAP;
+                    let ha = super::super::split_px(h, *ratio, min, min);
+                    (
+                        Rect::from_min_size(rect.min, Vec2::new(rect.width(), ha)),
+                        Rect::from_min_size(Pos2::new(rect.min.x, rect.min.y + ha), Vec2::new(rect.width(), GAP)),
+                        Rect::from_min_max(Pos2::new(rect.min.x, rect.min.y + ha + GAP), rect.max),
+                    )
+                }
+            };
+            let sep_id = style::salted(Id::new(("ed_sep", a.leaf_ids()[0], b.leaf_ids()[0])));
+            let resp = ui.interact(rsep, sep_id, Sense::drag());
+            if resp.hovered() || resp.dragged() {
+                ui.ctx().set_cursor_icon(match dir {
+                    Dir::Horizontal => egui::CursorIcon::ResizeHorizontal,
+                    Dir::Vertical => egui::CursorIcon::ResizeVertical,
+                });
+            }
+            if resp.dragged() {
+                let d = resp.drag_delta();
+                let (delta, len, cur) = match dir {
+                    Dir::Horizontal => (d.x, rect.width() - GAP, ra.width()),
+                    Dir::Vertical => (d.y, rect.height() - GAP, ra.height()),
+                };
+                *ratio = super::super::drag_ratio(cur / len.max(1.0), delta, len, min, min);
+            }
+            let hv = style::anim(ui.ctx(), sep_id.with("h"), resp.hovered() || resp.dragged(), style::D_FAST);
+            ui.painter().rect_filled(rsep, 0.0, ui.visuals().panel_fill);
+            let line = match dir {
+                Dir::Horizontal => Rect::from_center_size(rsep.center(), Vec2::new(1.0 + 2.0 * hv, rsep.height())),
+                Dir::Vertical => Rect::from_center_size(rsep.center(), Vec2::new(rsep.width(), 1.0 + 2.0 * hv)),
+            };
+            ui.painter().rect_filled(line, 0.0, style::mix(style::ui().border, style::brand(), hv));
+            show_node(ui, a, ra, ed, cx, cmds);
+            show_node(ui, b, rb, ed, cx, cmds);
+        }
+    }
+}
+
+/// Eine Gruppe: Reiterleiste, Hinweisleisten, ggf. Suchleiste, Textfeld.
+fn show_group(ui: &mut Ui, g: u64, rect: Rect, ed: &mut EditorUi, cx: &GroupCx, cmds: &mut Vec<Cmd>) {
+    ed.group_rects.insert(g, rect);
+    let focused = ed.panes.focused == g;
+    let bar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), BAR_H));
+    tab_bar(ui, g, bar, ed, cx.lang, cmds);
+    let mut body = Rect::from_min_max(Pos2::new(rect.left(), bar.bottom()), rect.max);
+    let Some((doc_id, idx)) = ed.panes.groups.get(&g).and_then(|grp| grp.active_tab().map(|t| (t.doc, grp.active))) else {
+        ui.painter().text(body.center(), Align2::CENTER_CENTER, cx.lang.t("Keine Datei offen", "No file open"), FontId::proportional(13.0), style::dim(ui));
+        return;
+    };
+    // Datei erst jetzt lesen (zuerst sichtbar).
+    if let Some(d) = ed.docs.get_mut(&doc_id) {
+        d.ensure_loaded(cx.prefs);
+    }
+    // Hinweisleisten
+    for bar_kind in info_bars(ed.docs.get(&doc_id), cx.prefs) {
+        let r = Rect::from_min_size(body.min, Vec2::new(body.width(), INFO_H));
+        info_bar(ui, r, doc_id, bar_kind, cx.lang, cmds);
+        body.min.y += INFO_H;
+    }
+    // Suchleiste (nur in der fokussierten Gruppe)
+    if focused && ed.find.visible {
+        let h = ed.find.height();
+        let r = Rect::from_min_size(body.min, Vec2::new(body.width(), h));
+        let mut f = std::mem::take(&mut ed.find);
+        if let (Some(view), Some(d)) = ed.view_doc_mut(g, idx) {
+            super::find::show_bar(ui, r, &mut f, view, d, cx.lang);
+        }
+        ed.find = f;
+        if !ed.find.visible {
+            ed.want_focus = true;
+        }
+        body.min.y += h;
+    }
+    if body.height() < 10.0 {
+        return;
+    }
+    let want = focused && std::mem::take(&mut ed.want_focus);
+    let wrap = ed.wrap;
+    let minimap = ed.minimap;
+    let find_hl = ed.find.highlight();
+    let Some(d) = ed.docs.get_mut(&doc_id) else { return };
+    let Some(view) = ed.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(idx)).map(|t| &mut t.view) else { return };
+    let tcx = TextCx { id: style::salted(Id::new(("ed_text", g))), font: editor_font(ui.ctx(), cx.prefs.font_size), theme: cx.theme, prefs: cx.prefs, wrap, minimap, request_focus: want, find: find_hl.as_ref(), lang: cx.lang };
+    let out = text::show(ui, body, d, view, &tcx);
+    if out.focused && ed.panes.focused != g {
+        ed.panes.focused = g;
+    }
+    if out.clicked {
+        ed.panes.focused = g;
+    }
+    // Rahmen der fokussierten Gruppe (bei mehreren)
+    if focused && ed.panes.groups.len() > 1 {
+        ui.painter().rect_stroke(rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, style::accent().gamma_multiply(0.5)), StrokeKind::Inside);
+    }
+}
+
+/// Schrift des Textfelds: die eigene Familie „editor“ (Einstellungen → Editor; gleich der Terminalschrift, solange dort
+/// nichts gewählt ist), wenn sie angemeldet ist, sonst die Monospace-Schrift des Terminals.
+fn editor_font(ctx: &egui::Context, size: f32) -> FontId {
+    let fam = egui::FontFamily::Name("editor".into());
+    if ctx.fonts(|f| f.families().contains(&fam)) { FontId::new(size, fam) } else { FontId::monospace(size) }
+}
+
+impl EditorUi {
+    /// Ansicht des Reiters `idx` der Gruppe `g` und das Dokument dazu (getrennt ausgeliehen).
+    fn view_doc_mut(&mut self, g: u64, idx: usize) -> (Option<&mut text::View>, Option<&mut DocEntry>) {
+        let Some(t) = self.panes.groups.get_mut(&g).and_then(|grp| grp.tabs.get_mut(idx)) else { return (None, None) };
+        let doc = t.doc;
+        (Some(&mut t.view), self.docs.get_mut(&doc))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum InfoKind {
+    LoadError,
+    DiskConflict,
+    Deleted,
+    Large,
+    Agent,
+}
+
+fn info_bars(d: Option<&DocEntry>, prefs: &super::EditorPrefs) -> Vec<InfoKind> {
+    let Some(d) = d else { return Vec::new() };
+    let mut v = Vec::new();
+    if d.load_error.is_some() {
+        v.push(InfoKind::LoadError);
+    }
+    if d.disk_conflict {
+        v.push(InfoKind::DiskConflict);
+    }
+    if d.disk_deleted {
+        v.push(InfoKind::Deleted);
+    }
+    if d.is_large(prefs) && !d.large_dismissed {
+        v.push(InfoKind::Large);
+    }
+    if d.agent_edited && !d.agent_note_dismissed {
+        v.push(InfoKind::Agent);
+    }
+    v
+}
+
+fn info_bar(ui: &mut Ui, r: Rect, doc: u64, kind: InfoKind, lang: Lang, cmds: &mut Vec<Cmd>) {
+    let u = style::ui();
+    let col = match kind {
+        InfoKind::LoadError => u.error,
+        InfoKind::DiskConflict | InfoKind::Deleted => u.warning,
+        InfoKind::Large => u.info,
+        InfoKind::Agent => u.info,
+    };
+    ui.painter().rect_filled(r, 0.0, col.gamma_multiply(0.16));
+    ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, col.gamma_multiply(0.5)));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(Vec2::new(10.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let ui = &mut child;
+    ui.painter().circle_filled(Pos2::new(r.left() + 14.0, r.center().y), 3.5, col);
+    ui.add_space(14.0);
+    match kind {
+        InfoKind::LoadError => {
+            ui.label(lang.t("Datei konnte nicht gelesen werden.", "The file could not be read."));
+        }
+        InfoKind::DiskConflict => {
+            ui.label(lang.t("Die Datei wurde auf der Platte geändert, hier gibt es ungespeicherte Änderungen.", "The file changed on disk and has unsaved changes here."));
+            if ui.small_button(lang.t("Meine behalten", "Keep mine")).clicked() {
+                cmds.push(Cmd::KeepMine(doc));
+            }
+            if ui.small_button(lang.t("Von der Platte laden", "Load from disk")).clicked() {
+                cmds.push(Cmd::Reload(doc));
+            }
+            if ui.small_button(lang.t("Unterschied anzeigen", "Show difference")).clicked() {
+                cmds.push(Cmd::ShowDiff(doc));
+            }
+        }
+        InfoKind::Deleted => {
+            ui.label(lang.t("Die Datei wurde auf der Platte gelöscht. Speichern legt sie neu an.", "The file was deleted on disk. Saving creates it again."));
+            if ui.small_button(lang.t("Speichern", "Save")).clicked() {
+                cmds.push(Cmd::Save(doc));
+            }
+        }
+        InfoKind::Large => {
+            ui.label(lang.t("Große Datei: Minimap und Zeilenumbruch sind aus.", "Large file: minimap and word wrap are off."));
+            if ui.small_button(lang.t("Ausblenden", "Dismiss")).clicked() {
+                cmds.push(Cmd::DismissLarge(doc));
+            }
+        }
+        InfoKind::Agent => {
+            ui.label(lang.t("Von einem Agenten geändert – noch nicht gespeichert. Strg+Z macht es rückgängig.", "Changed by an agent – not saved yet. Ctrl+Z undoes it."));
+            if ui.small_button(lang.t("Ausblenden", "Dismiss")).clicked() {
+                cmds.push(Cmd::DismissAgent(doc));
+            }
+        }
+    }
+}
+
+/// Reiterleiste einer Gruppe: Reiter (Name, ungespeichert-Punkt, Schließen beim Überfahren), Ziehen zwischen Leisten und
+/// in neue Teilungen, Mittelklick schließt, Kontextmenü; rechts Teilen-Knöpfe.
+fn tab_bar(ui: &mut Ui, g: u64, bar: Rect, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
+    let u = style::ui();
+    ui.painter().rect_filled(bar, 0.0, u.surface);
+    ui.painter().line_segment([bar.left_bottom() - Vec2::new(0.0, 0.5), bar.right_bottom() - Vec2::new(0.0, 0.5)], Stroke::new(1.0_f32, u.border));
+    let Some(grp) = ed.panes.groups.get(&g) else { return };
+    let focused = ed.panes.focused == g;
+    // Knöpfe rechts
+    let btn_w = 24.0;
+    let btn_r = Rect::from_min_max(Pos2::new(bar.right() - btn_w * 2.0 - 6.0, bar.top()), bar.max);
+    let tabs_r = Rect::from_min_max(bar.min, Pos2::new(btn_r.left(), bar.bottom()));
+    let n = grp.tabs.len();
+    let font = FontId::proportional(12.5);
+    let titles: Vec<(String, bool, bool, Option<PathBuf>)> = grp
+        .tabs
+        .iter()
+        .map(|t| match ed.docs.get(&t.doc) {
+            Some(d) => (d.title(lang), d.dirty(), d.agent_edited || d.opened_by_agent, d.path.clone()),
+            None => ("?".into(), false, false, None),
+        })
+        .collect();
+    let widths: Vec<f32> = titles.iter().map(|(t, ..)| (ui.painter().layout_no_wrap(t.clone(), font.clone(), Color32::PLACEHOLDER).size().x + 44.0).clamp(TAB_MIN_W, TAB_MAX_W)).collect();
+    let total: f32 = widths.iter().sum();
+    // Bildlauf der Leiste, wenn die Reiter nicht passen (Mausrad über der Leiste); der aktive bleibt sichtbar.
+    let off_id = style::salted(Id::new(("ed_bar_off", g)));
+    let mut off: f32 = ui.data(|d| d.get_temp(off_id)).unwrap_or(0.0);
+    let room = tabs_r.width();
+    if total > room {
+        if ui.rect_contains_pointer(tabs_r) {
+            let s = ui.input(|i| i.smooth_scroll_delta);
+            off -= s.x + s.y;
+        }
+        let a0: f32 = widths.iter().take(grp.active).sum();
+        let a1 = a0 + widths.get(grp.active).copied().unwrap_or(0.0);
+        if ed.panes.focused == g && (a0 < off || a1 > off + room) && !ui.rect_contains_pointer(tabs_r) {
+            off = if a0 < off { a0 } else { a1 - room };
+        }
+        off = off.clamp(0.0, total - room);
+    } else {
+        off = 0.0;
+    }
+    ui.data_mut(|d| d.insert_temp(off_id, off));
+    let painter = ui.painter().with_clip_rect(tabs_r);
+    let mut x = tabs_r.left() - off;
+    let mut rects = Vec::with_capacity(n);
+    for (i, (title, dirty, agent, path)) in titles.iter().enumerate() {
+        let r = Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(widths[i], BAR_H));
+        x += widths[i];
+        rects.push(r);
+        let vis = r.intersect(tabs_r);
+        if vis.width() <= 1.0 {
+            continue;
+        }
+        let id = style::salted(Id::new(("ed_tab", g, i)));
+        let resp = ui.interact(vis, id, Sense::click_and_drag());
+        let active = i == grp.active;
+        let hovered = resp.hovered();
+        if active {
+            painter.rect_filled(r, 0.0, ui.visuals().extreme_bg_color.gamma_multiply(0.0).linear_multiply(0.0));
+            painter.rect_filled(r, 0.0, u.tab_active.gamma_multiply(if focused { 0.55 } else { 0.3 }));
+            painter.line_segment([Pos2::new(r.left(), r.top() + 1.0), Pos2::new(r.right(), r.top() + 1.0)], Stroke::new(2.0_f32, if focused { style::accent() } else { u.border }));
+        } else if hovered {
+            painter.rect_filled(r, 0.0, u.hover_bg);
+        }
+        painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0_f32, u.border.gamma_multiply(0.6)));
+        let tc = if active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(0.8) };
+        let tc = if *agent { style::mix(tc, u.info, 0.6) } else { tc };
+        let text_r = Rect::from_min_max(Pos2::new(r.left() + 10.0, r.top()), Pos2::new(r.right() - 26.0, r.bottom()));
+        let gal = painter.layout_no_wrap(title.clone(), font.clone(), tc);
+        painter.with_clip_rect(text_r.intersect(tabs_r)).galley(Pos2::new(text_r.left(), r.center().y - gal.size().y / 2.0), gal, tc);
+        // Rechts: Schließen beim Überfahren, sonst Punkt bei ungespeicherten Änderungen
+        let close_r = Rect::from_center_size(Pos2::new(r.right() - 14.0, r.center().y), Vec2::splat(18.0));
+        let close_hover = ui.rect_contains_pointer(close_r.intersect(tabs_r)) && hovered;
+        if hovered || (active && !dirty) {
+            if close_hover {
+                painter.rect_filled(close_r, 4.0, u.hover_bg);
+            }
+            let c = close_r.center();
+            let col = if close_hover { ui.visuals().strong_text_color() } else { style::dim(ui) };
+            let st = Stroke::new(1.3_f32, col);
+            painter.line_segment([c + Vec2::new(-3.5, -3.5), c + Vec2::new(3.5, 3.5)], st);
+            painter.line_segment([c + Vec2::new(3.5, -3.5), c + Vec2::new(-3.5, 3.5)], st);
+        } else if *dirty {
+            painter.circle_filled(close_r.center(), 3.5, tc);
+        }
+        resp.clone().on_hover_text(tab_tooltip(path.as_deref(), *dirty, *agent, lang));
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let doc = grp.tabs[i].doc;
+        if resp.clicked() {
+            if close_hover {
+                cmds.push(Cmd::Close(vec![(g, doc)]));
+            } else {
+                cmds.push(Cmd::Activate(g, i));
+            }
+        }
+        if resp.middle_clicked() {
+            cmds.push(Cmd::Close(vec![(g, doc)]));
+        }
+        if resp.drag_started() && ed.drag.is_none() {
+            ed.drag = Some(TabDrag { group: g, index: i, doc });
+        }
+        let others: Vec<(u64, u64)> = grp.tabs.iter().filter(|t| t.doc != doc).map(|t| (g, t.doc)).collect();
+        let all: Vec<(u64, u64)> = grp.tabs.iter().map(|t| (g, t.doc)).collect();
+        let path = path.clone();
+        resp.context_menu(|ui| {
+            if ui.button(lang.t("Schließen", "Close")).clicked() {
+                cmds.push(Cmd::Close(vec![(g, doc)]));
+                ui.close();
+            }
+            if ui.add_enabled(!others.is_empty(), egui::Button::new(lang.t("Andere schließen", "Close others"))).clicked() {
+                cmds.push(Cmd::Close(others.clone()));
+                ui.close();
+            }
+            if ui.button(lang.t("Alle schließen", "Close all")).clicked() {
+                cmds.push(Cmd::Close(all.clone()));
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(lang.t("Rechts teilen", "Split right")).clicked() {
+                cmds.push(Cmd::Activate(g, i));
+                cmds.push(Cmd::Split(g, Dir::Horizontal));
+                ui.close();
+            }
+            if ui.button(lang.t("Unten teilen", "Split down")).clicked() {
+                cmds.push(Cmd::Activate(g, i));
+                cmds.push(Cmd::Split(g, Dir::Vertical));
+                ui.close();
+            }
+            if let Some(p) = &path {
+                ui.separator();
+                if ui.button(lang.t("Pfad kopieren", "Copy path")).clicked() {
+                    cmds.push(Cmd::CopyPath(p.clone()));
+                    ui.close();
+                }
+                if crate::platform::open::FILE_MANAGER && ui.button(if cfg!(windows) { lang.t("Im Explorer anzeigen", "Show in Explorer") } else { lang.t("Im Dateimanager anzeigen", "Show in file manager") }).clicked() {
+                    crate::platform::open::show_in_file_manager(&p.to_string_lossy(), false);
+                    ui.close();
+                }
+            }
+        });
+    }
+    ed.bar_rects.insert(g, (tabs_r, rects));
+    // Teilen-Knöpfe
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(btn_r.shrink2(Vec2::new(2.0, 4.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    if style::icon_btn_small(&mut child, Icon::SplitDown, lang.t("Unten teilen", "Split down")).clicked() {
+        cmds.push(Cmd::Split(g, Dir::Vertical));
+    }
+    if style::icon_btn_small(&mut child, Icon::SplitRight, lang.t("Rechts teilen", "Split right")).clicked() {
+        cmds.push(Cmd::Split(g, Dir::Horizontal));
+    }
+}
+
+fn tab_tooltip(path: Option<&Path>, dirty: bool, agent: bool, lang: Lang) -> String {
+    let mut s = path.map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| lang.t("Noch nicht gespeichert", "Not saved yet").to_string());
+    if dirty {
+        s.push('\n');
+        s.push_str(lang.t("Ungespeicherte Änderungen", "Unsaved changes"));
+    }
+    if agent {
+        s.push('\n');
+        s.push_str(lang.t("Von einem Agenten geöffnet oder geändert", "Opened or changed by an agent"));
+    }
+    s
+}
+
+/// Ziehen eines Reiters: Geist am Zeiger, Ablageziel hervorheben, beim Loslassen ablegen.
+fn drag_overlay(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
+    let Some(drag) = ed.drag else { return };
+    let (pos, released, down) = ui.input(|i| (i.pointer.interact_pos(), i.pointer.any_released(), i.pointer.any_down()));
+    let target = pos.and_then(|p| drop_target(ed, p));
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("ed_drag")));
+    if let Some((_, r)) = target {
+        painter.rect_filled(r, 4.0, style::accent().gamma_multiply(0.18));
+        painter.rect_stroke(r, 4.0, Stroke::new(2.0_f32, style::accent()), StrokeKind::Inside);
+    }
+    if let Some(p) = pos {
+        let name = ed.docs.get(&drag.doc).map(|d| d.title(lang)).unwrap_or_default();
+        let g = painter.layout_no_wrap(name, FontId::proportional(12.5), ui.visuals().strong_text_color());
+        let r = Rect::from_min_size(p + Vec2::new(12.0, 8.0), g.size() + Vec2::new(16.0, 8.0));
+        painter.rect_filled(r, CornerRadius::same(5), style::ui().window_bg);
+        painter.rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0_f32, style::accent()), StrokeKind::Inside);
+        painter.galley(r.min + Vec2::new(8.0, 4.0), g, Color32::PLACEHOLDER);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+    if released || !down {
+        ed.drag = None;
+        if let Some((to, _)) = target {
+            cmds.push(Cmd::Drop(drag, to));
+        }
+    }
+    ui.ctx().request_repaint();
+}
+
+/// Ablageziel unter dem Zeiger: Reiterleiste (Position zwischen Reitern) oder Rand/Mitte einer Gruppe.
+pub(super) fn drop_target(ed: &EditorUi, p: Pos2) -> Option<(PaneDrop, Rect)> {
+    for (g, (bar, tabs)) in &ed.bar_rects {
+        if bar.contains(p) {
+            let idx = tabs.iter().position(|r| p.x < r.center().x).unwrap_or(tabs.len());
+            let x = tabs.get(idx).map(|r| r.left()).or_else(|| tabs.last().map(|r| r.right())).unwrap_or(bar.left());
+            return Some((PaneDrop::Bar { group: *g, index: idx }, Rect::from_center_size(Pos2::new(x, bar.center().y), Vec2::new(4.0, bar.height()))));
+        }
+    }
+    for (g, r) in &ed.group_rects {
+        if !r.contains(p) {
+            continue;
+        }
+        let body = Rect::from_min_max(Pos2::new(r.left(), r.top() + BAR_H), r.max);
+        let (fx, fy) = ((p.x - body.left()) / body.width().max(1.0), (p.y - body.top()) / body.height().max(1.0));
+        let edge = 0.25;
+        let half = |dir: Dir, before: bool| -> Rect {
+            match (dir, before) {
+                (Dir::Horizontal, true) => Rect::from_min_max(body.min, Pos2::new(body.center().x, body.bottom())),
+                (Dir::Horizontal, false) => Rect::from_min_max(Pos2::new(body.center().x, body.top()), body.max),
+                (Dir::Vertical, true) => Rect::from_min_max(body.min, Pos2::new(body.right(), body.center().y)),
+                (Dir::Vertical, false) => Rect::from_min_max(Pos2::new(body.left(), body.center().y), body.max),
+            }
+        };
+        let split = if fx < edge {
+            Some((Dir::Horizontal, true))
+        } else if fx > 1.0 - edge {
+            Some((Dir::Horizontal, false))
+        } else if fy < edge {
+            Some((Dir::Vertical, true))
+        } else if fy > 1.0 - edge {
+            Some((Dir::Vertical, false))
+        } else {
+            None
+        };
+        return Some(match split {
+            Some((dir, before)) => (PaneDrop::Split { group: *g, dir, before }, half(dir, before)),
+            None => {
+                let n = ed.panes.groups.get(g).map(|x| x.tabs.len()).unwrap_or(0);
+                (PaneDrop::Bar { group: *g, index: n }, body)
+            }
+        });
+    }
+    None
+}
+
+/// Ordnerbaum mit Kopf; ohne Ordner: Knöpfe und zuletzt geöffnete Ordner.
+fn tree_panel(ui: &mut Ui, ed: &mut EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
+    ui.horizontal(|ui| {
+        let name = ed.root.as_ref().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| lang.t("Kein Ordner", "No folder").to_string());
+        ui.add(egui::Label::new(RichText::new(name).strong()).truncate()).on_hover_text(ed.root.as_ref().map(|r| r.to_string_lossy().to_string()).unwrap_or_default());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if style::icon_btn_small(ui, Icon::FolderPlus, lang.t("Ordner öffnen … (Strg+Umschalt+O)", "Open folder … (Ctrl+Shift+O)")).clicked() {
+                cmds.push(Cmd::OpenFolderDialog);
+            }
+            if ed.root.is_some() && style::icon_btn_small(ui, Icon::Reload, lang.t("Aktualisieren", "Refresh")).clicked() {
+                ed.tree.refresh();
+            }
+        });
+    });
+    if ed.root.is_some() {
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut ed.tree.hidden, lang.t("versteckte", "hidden")).changed() {
+                ed.tree.refresh();
+            }
+            if ui.small_button(lang.t("Ordner schließen", "Close folder")).clicked() {
+                cmds.push(Cmd::CloseRoot);
+            }
+        });
+    }
+    ui.add_space(style::S1);
+    ui.separator();
+    match ed.root.clone() {
+        Some(root) => {
+            egui::ScrollArea::vertical().id_salt("ed_tree_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                for o in ed.tree.show(ui, &root, lang) {
+                    cmds.push(match o {
+                        TreeOut::Open(p) => Cmd::OpenPath(p, false),
+                        TreeOut::OpenSide(p) => Cmd::OpenPath(p, true),
+                        TreeOut::CopyPath(p) => Cmd::CopyPath(p),
+                        TreeOut::SetRoot(p) => Cmd::SetRoot(p),
+                    });
+                }
+            });
+        }
+        None => {
+            egui::ScrollArea::vertical().id_salt("ed_tree_recent").auto_shrink([false, false]).show(ui, |ui| recent_lists(ui, ed, lang, cmds));
+        }
+    }
+}
+
+/// Zuletzt geöffnete Ordner und Dateien.
+fn recent_lists(ui: &mut Ui, ed: &EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
+    if ui.button(lang.t("Ordner öffnen …", "Open folder …")).clicked() {
+        cmds.push(Cmd::OpenFolderDialog);
+    }
+    if ui.button(lang.t("Datei öffnen …", "Open file …")).clicked() {
+        cmds.push(Cmd::OpenFileDialog);
+    }
+    for (title, list, folders) in [(lang.t("Zuletzt geöffnete Ordner", "Recent folders"), &ed.recent_folders, true), (lang.t("Zuletzt geöffnete Dateien", "Recent files"), &ed.recent_files, false)] {
+        if list.is_empty() {
+            continue;
+        }
+        ui.add_space(style::S3);
+        ui.weak(title);
+        for p in list {
+            let name = Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
+            let r = ui.add(egui::Button::new(name).frame(false)).on_hover_text(p);
+            if r.clicked() {
+                cmds.push(if folders { Cmd::SetRoot(PathBuf::from(p)) } else { Cmd::OpenPath(PathBuf::from(p), false) });
+            }
+        }
+    }
+    if !ed.recent_files.is_empty() || !ed.recent_folders.is_empty() {
+        ui.add_space(style::S2);
+        if ui.small_button(lang.t("Liste leeren", "Clear list")).clicked() {
+            cmds.push(Cmd::ForgetRecent);
+        }
+    }
+}
+
+/// Leerer Editor: Einstieg mit Knöpfen, zuletzt geöffneten Einträgen und Tastenkürzeln.
+fn welcome(ui: &mut Ui, rect: Rect, ed: &EditorUi, lang: Lang, cmds: &mut Vec<Cmd>) {
+    let w = 380.0_f32.min(rect.width() - 32.0).max(100.0);
+    let r = Rect::from_center_size(Pos2::new(rect.center().x, rect.top() + (rect.height() * 0.38).max(160.0)), Vec2::new(w, 320.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::top_down(egui::Align::Min)));
+    let ui = &mut child;
+    ui.heading(lang.t("Editor", "Editor"));
+    ui.weak(lang.t("Einfacher Texteditor – unabhängig von den Terminals.", "Plain text editor – independent of the terminals."));
+    ui.add_space(style::S3);
+    ui.horizontal(|ui| {
+        if ui.button(lang.t("Neue Datei", "New file")).clicked() {
+            cmds.push(Cmd::NewFile);
+        }
+        if ui.button(lang.t("Datei öffnen …", "Open file …")).clicked() {
+            cmds.push(Cmd::OpenFileDialog);
+        }
+        if ui.button(lang.t("Ordner öffnen …", "Open folder …")).clicked() {
+            cmds.push(Cmd::OpenFolderDialog);
+        }
+    });
+    ui.add_space(style::S3);
+    let files: Vec<&String> = ed.recent_files.iter().take(8).collect();
+    if !files.is_empty() {
+        ui.weak(lang.t("Zuletzt geöffnet", "Recent"));
+        for p in files {
+            let name = Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
+            if ui.add(egui::Button::new(name).frame(false)).on_hover_text(p).clicked() {
+                cmds.push(Cmd::OpenPath(PathBuf::from(p), false));
+            }
+        }
+        ui.add_space(style::S3);
+    }
+    let de = lang == Lang::De;
+    for (k, t) in [
+        ("Ctrl+N", lang.t("Neue Datei", "New file")),
+        ("Ctrl+O", lang.t("Datei öffnen", "Open file")),
+        ("Ctrl+Shift+O", lang.t("Ordner öffnen", "Open folder")),
+        ("Ctrl+B", lang.t("Ordnerbaum ein/aus", "Toggle folder tree")),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(crate::keys::pretty(k, de)).monospace().weak());
+            ui.weak(t);
+        });
+    }
+}
+
+/// Statusleiste: Zeile:Spalte, Auswahlen, Einrückung, Kodierung und Zeilenende (anklickbar), Hinweise.
+fn status_bar(ui: &mut Ui, ed: &EditorUi, lang: Lang, prefs: &super::EditorPrefs, cmds: &mut Vec<Cmd>) {
+    ui.horizontal_centered(|ui| {
+        let doc = ed.active_doc();
+        let info: Option<(StatusInfo, String, usize)> = ed.focused_view_and_doc().and_then(|(v, d)| d.status(prefs, lang).map(|s| (s, v.position_text(d, lang), v.selection_count())));
+        if let Some((_, pos, n)) = &info {
+            ui.label(RichText::new(pos).small());
+            if *n > 1 {
+                ui.label(RichText::new(format!("{n} {}", lang.t("Auswahlen", "selections"))).small().color(style::accent()));
+            }
+        }
+        if let Some((t, _)) = &ed.hint {
+            ui.add_space(style::S3);
+            ui.label(RichText::new(t).small().color(style::ui().info));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (Some(id), Some((s, ..))) = (doc, info) else { return };
+            ui.label(RichText::new(lang.t("Nur Text", "Plain text")).small().weak());
+            ui.add_space(style::S2);
+            let eol = ui.add(egui::Button::new(RichText::new(if s.crlf { "CRLF" } else { "LF" }).small()).frame(false)).on_hover_text(lang.t("Zeilenende ändern", "Change line endings"));
+            egui::Popup::menu(&eol).show(|ui| {
+                for (crlf, label) in [(false, "LF"), (true, "CRLF")] {
+                    if ui.selectable_label(s.crlf == crlf, label).clicked() {
+                        cmds.push(Cmd::SetEol(id, crlf));
+                        ui.close();
+                    }
+                }
+            });
+            let enc = ui.add(egui::Button::new(RichText::new(&s.encoding).small()).frame(false)).on_hover_text(lang.t("Kodierung ändern (beim nächsten Speichern)", "Change encoding (applies on next save)"));
+            egui::Popup::menu(&enc).show(|ui| {
+                for (key, label) in super::doc::ENCODINGS {
+                    if ui.selectable_label(s.encoding_key == *key, *label).clicked() {
+                        cmds.push(Cmd::SetEncoding(id, key));
+                        ui.close();
+                    }
+                }
+            });
+            ui.label(RichText::new(&s.indent).small()).on_hover_text(lang.t("Einrückung (erkannt bzw. aus .editorconfig)", "Indentation (detected or from .editorconfig)"));
+        });
+    });
+}

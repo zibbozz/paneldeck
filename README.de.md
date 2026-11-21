@@ -18,6 +18,7 @@ Paneldeck arbeitet **offline**: Es meldet sich nur bei GitHub, wenn du selbst na
 - **Todo-Liste und Tickets:** eine einfache Todo-Liste, die im *Expertenmodus* zu einem kleinen Jira wird – Projekte, Tickettypen, Workflows, Boards, eine Abfragesprache, Sprints und Dashboards, alles lokal gespeichert. Jedes Ticket hat eine Beschreibung, eine Fälligkeit mit einstellbaren Markierungen und Labels; Icons aus dem Lucide-Satz und eine bearbeitbare Farbpalette. Eine [Wartungsseite](docs/de/todo-and-tickets.md#wartung) findet liegengebliebene, kaputte und doppelte Tickets und ungenutzte Konfiguration, archiviert Tickets und pflegt die Datenbank.
 - **Themes:** ein [Theme-Editor](docs/de/themes.md) mit Live-Vorschau, Design-Prüfung und benannten Oberflächenfarben; ein neues Theme lässt sich aus einer Hintergrund- und einer Akzentfarbe erzeugen.
 - **Aufräumen:** sehen, was Paneldeck speichert, und löschen, was du nicht mehr brauchst – Sicherungen, Verläufe, Protokolle, Inhalte, Einstellungen – bis zum kompletten Zurücksetzen ([Aufräumen](docs/de/data-and-backups.md#aufräumen)).
+- **Editor:** ein Reiter mit einfachem Texteditor – Ordnerbaum, Tabs, freie Teilungen, mehrere Cursor, Minimap, Suchen/Ersetzen (auch regulär) und Suche in Dateien (beachtet `.gitignore`); behält Kodierung und Zeilenenden, speichert atomar, rettet ungespeicherte Änderungen über einen Neustart und bleibt auch bei Dateien mit mehreren hundert MB flüssig. Agenten können ihn lesen und – nur mit deinen Schaltern – Dateien öffnen, bearbeiten und speichern.
 - **Chats mit lokalen Modellen:** mit Ollama, LM Studio, llama.cpp oder vLLM auf diesem Rechner oder im eigenen Netz sprechen, direkt neben deinen Terminals – das Modell kann Paneldecks Werkzeuge nutzen, in Grenzen, die du je Modell festlegst.
 - **Agenten-Schnittstelle (MCP):** KI-Agenten können Sitzungen sehen, Terminals lesen, Befehle ausführen und mit deiner Todo-Liste und deinen Tickets arbeiten – standardmäßig aus, mit einstellbarem Systemprompt.
 - **Kommandozeile und Profile:** getrennte Datenordner und Profile, die nebeneinander laufen, jedes mit eigenem Autostart- und MCP-Eintrag.
@@ -57,6 +58,7 @@ Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en
 - [Todo-Liste und Tickets](docs/de/todo-and-tickets.md) – einfacher und Expertenmodus, Boards, Sprints, Dashboards, Schnellaktionen, Wartung und Archiv
 - [Abfragesprache](docs/de/query-language.md) – Tickets suchen, Beispiele, Referenz
 - [Prozessliste](docs/de/processes.md) – Entwicklungsserver und Watcher mit ihrer Ausgabe in einem eigenen Bereich
+- [Editor](docs/de/editor.md) – der Editor-Reiter: Dateien und Ordner, Teilungen, Suchen/Ersetzen, Suche in Dateien, Kodierungen, Hot Exit, große Dateien, Agenten
 - [Chats mit lokalen Modellen](docs/de/chat.md) – Ollama und OpenAI-kompatible Server, Modelle, Werkzeuge und Freigaben, Sicherheit
 - [Themes und der Theme-Editor](docs/de/themes.md) – Themes bearbeiten und erzeugen, Design-Prüfung, Dateiformat und Farbnamen
 - [Agenten-Schnittstelle (MCP)](docs/de/agent-interface.md) – Stufen, Werkzeuge, Sicherheit, Systemprompt

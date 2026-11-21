@@ -1,0 +1,479 @@
+//! Reiter „Editor“ (#54): ein schlichter Texteditor als eigener Hauptbereich – Ordnerbaum, Reiter, freie Teilungen mit
+//! eigener Reiterleiste, Suchen/Ersetzen, Gehe zu Zeile, Statusleiste, Hinweisleisten, Hot Exit.
+//!
+//! Aufteilung:
+//! - `panes`: Teilungen und Reiter (reine Logik),
+//! - `doc`: offene Dokumente – dünne Schicht über dem Editor-Kern (`crate::editor`),
+//! - `text`: das Textfeld (nur sichtbare Zeilen, Cursor, Auswahl, Maus, Tastatur, Minimap),
+//! - `view`: Bereich zeichnen (Baum, Teilungen, Reiterleisten, Hinweisleisten, Statusleiste, Dialoge),
+//! - `find`: Suchen/Ersetzen-Leiste und „Gehe zu Zeile“,
+//! - `tree`: Ordnerbaum, `persist`: `editor-state.json`.
+//!
+//! Der Zustand ist für alle Fenster gemeinsam (`App::ed`, nicht in `view_fields!`): Ein weiteres Fenster im Editor-Reiter
+//! zeigt dieselben Dateien und Teilungen. Ein Dokument gibt es genau einmal (`docs`), auch wenn es in mehreren Teilungen
+//! offen ist; jeder Reiter hat seine eigene Ansicht (Cursor, Bildlauf).
+
+mod doc;
+mod find;
+mod panes;
+mod persist;
+mod text;
+mod tree;
+mod view;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use doc::DocInfo;
+use doc::DocEntry;
+use panes::Panes;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+use text::View;
+
+/// Einstellungen, die der Editor liest (Einstellungen → Editor; Standardwerte, solange es dort nichts gibt).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EditorPrefs {
+    /// Schriftgröße; Schrift ist die des Terminals (Monospace), solange nichts anderes gewählt ist.
+    pub font_size: f32,
+    /// Ab dieser Größe (Bytes) sind Minimap und Umbruch aus („große Datei“).
+    pub large_file_bytes: u64,
+    /// Automatisch speichern so lange nach der letzten Änderung (`None` = aus, Standard). Nur Dateien mit Pfad.
+    pub autosave: Option<std::time::Duration>,
+}
+
+impl Default for EditorPrefs {
+    fn default() -> Self {
+        EditorPrefs { font_size: 14.0, large_file_bytes: crate::editor::DEFAULT_LARGE_FILE_THRESHOLD, autosave: None }
+    }
+}
+
+/// Wartende Rückfrage „Änderungen speichern?“ beim Schließen.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CloseAsk {
+    /// Zu schließende Reiter (Gruppe, Dokument); die Rückfrage gilt dem ersten mit ungespeicherten Änderungen.
+    pub tabs: Vec<(u64, u64)>,
+}
+
+/// Gerade gezogener Reiter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TabDrag {
+    pub group: u64,
+    pub index: usize,
+    pub doc: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct EditorUi {
+    pub(super) docs: BTreeMap<u64, DocEntry>,
+    pub(super) panes: Panes<View>,
+    next_doc: u64,
+    next_untitled: u32,
+    pub(super) root: Option<PathBuf>,
+    pub(super) tree: tree::Tree,
+    pub(super) tree_open: bool,
+    pub(super) tree_width: f32,
+    pub(super) recent_folders: Vec<String>,
+    pub(super) recent_files: Vec<String>,
+    /// Weicher Umbruch / Minimap (Ansicht; bei großen Dateien immer aus).
+    pub(super) wrap: bool,
+    pub(super) minimap: bool,
+    pub(super) find: find::FindBar,
+    pub(super) goto: Option<find::GotoLine>,
+    pub(super) close_ask: Option<CloseAsk>,
+    /// Fenster „Unterschied anzeigen“ (Datei auf der Platte gegen den Puffer) für dieses Dokument.
+    pub(super) diff_doc: Option<u64>,
+    pub(super) drag: Option<TabDrag>,
+    /// Kurzer Hinweis (z. B. „neu geladen“), unten in der Statusleiste.
+    pub(super) hint: Option<(String, Instant)>,
+    /// Im nächsten Bild das Textfeld der fokussierten Gruppe fokussieren.
+    pub(super) want_focus: bool,
+    /// Flächen der Gruppen im letzten Bild (Fokus per Strg+Alt+Pfeil, Ablage gezogener Reiter).
+    pub(super) group_rects: HashMap<u64, eframe::egui::Rect>,
+    /// Reiterleisten im letzten Bild (Gruppe → Fläche, Reiter-Flächen).
+    pub(super) bar_rects: HashMap<u64, (eframe::egui::Rect, Vec<eframe::egui::Rect>)>,
+    /// Ist der Zustand geladen (`restore`)? Erst dann wird gespeichert.
+    loaded: bool,
+}
+
+impl EditorUi {
+    /// Gemerkten Zustand laden (Reiter, Teilungen, Ordner) und ungespeicherte Puffer aus dem Hot-Exit-Speicher holen.
+    /// Dateien werden erst gelesen, wenn ihr Reiter zum ersten Mal sichtbar ist.
+    pub(crate) fn restore(dir: &Path) -> Self {
+        let s = persist::load(dir);
+        let mut ed = EditorUi { loaded: true, ..Default::default() };
+        ed.apply_saved(s, dir);
+        ed
+    }
+
+    fn apply_saved(&mut self, s: persist::Saved, dir: &Path) {
+        self.root = s.root.map(PathBuf::from).filter(|p| p.is_dir());
+        self.tree.expanded = s.expanded.into_iter().map(PathBuf::from).collect();
+        self.recent_folders = s.recent_folders;
+        self.recent_files = s.recent_files;
+        self.tree_open = s.tree_open;
+        self.tree_width = if s.tree_width.is_finite() { s.tree_width.clamp(160.0, 600.0) } else { 240.0 };
+        self.wrap = s.wrap;
+        self.minimap = s.minimap;
+        self.next_untitled = s.next_untitled.max(1);
+        let (store, entries) = doc::hot_entries(dir);
+        for d in s.docs {
+            let id = d.key.max(1);
+            if self.docs.contains_key(&id) {
+                continue;
+            }
+            let path = d.path.map(PathBuf::from);
+            // Datei weg und nichts Ungespeichertes: Reiter nicht wiederherstellen.
+            let hot = d.hot.and_then(|k| entries.iter().find(|e| e.id == k).cloned()).map(|e| (store.clone(), e));
+            if path.as_ref().is_some_and(|p| !p.is_file()) && hot.is_none() {
+                continue;
+            }
+            if path.is_none() && hot.is_none() {
+                continue; // leere unbenannte Datei
+            }
+            self.docs.insert(id, DocEntry::pending(path, d.untitled, hot));
+            self.next_doc = self.next_doc.max(id + 1);
+        }
+        for g in s.groups {
+            let tabs: Vec<panes::Tab<View>> = g.tabs.into_iter().filter(|t| self.docs.contains_key(&t.doc)).map(|t| panes::Tab { doc: t.doc, view: View::restored(t.line, t.col, t.top) }).collect();
+            self.panes.insert_group(g.id.max(1), panes::Group { tabs, active: g.active });
+        }
+        self.panes.layout = s.layout;
+        self.panes.focused = s.focused;
+        self.panes.normalize();
+        // Dokumente ohne Reiter wieder vergessen.
+        let shown = self.panes.docs();
+        self.docs.retain(|id, _| shown.contains(id));
+    }
+
+    /// Zustand für `editor-state.json` und ungespeicherte Puffer in den Hot-Exit-Speicher schreiben.
+    pub(crate) fn save(&self, dir: &Path) {
+        if !self.loaded {
+            return;
+        }
+        let mut docs = Vec::new();
+        for (id, d) in self.docs.iter() {
+            let hot = d.store_hot(dir, &format!("doc{id}"), crate::state::Lang::En);
+            docs.push(persist::SavedDoc { key: *id, path: d.path.as_ref().map(|p| p.to_string_lossy().to_string()), untitled: d.untitled, hot });
+        }
+        let groups = self
+            .panes
+            .group_ids()
+            .into_iter()
+            .map(|g| {
+                let grp = &self.panes.groups[&g];
+                persist::SavedGroup {
+                    id: g,
+                    active: grp.active,
+                    tabs: grp
+                        .tabs
+                        .iter()
+                        .map(|t| {
+                            let (line, col) = self.docs.get(&t.doc).map(|d| t.view.cursor_linecol(d)).unwrap_or(t.view.restore_pos());
+                            persist::SavedTab { doc: t.doc, line, col, top: t.view.top_f32() }
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        let s = persist::Saved {
+            version: persist::VERSION,
+            root: self.root.as_ref().map(|p| p.to_string_lossy().to_string()),
+            expanded: self.tree.expanded.iter().filter(|p| self.root.as_ref().is_some_and(|r| p.starts_with(r))).map(|p| p.to_string_lossy().to_string()).collect(),
+            recent_folders: self.recent_folders.clone(),
+            recent_files: self.recent_files.clone(),
+            layout: self.panes.layout.clone(),
+            focused: self.panes.focused,
+            groups,
+            docs,
+            tree_open: self.tree_open,
+            tree_width: self.tree_width,
+            wrap: self.wrap,
+            minimap: self.minimap,
+            next_untitled: self.next_untitled,
+        };
+        persist::save(dir, &s);
+        doc::prune_hot(dir, &self.docs.values().filter_map(|d| d.hot_key()).collect::<Vec<_>>());
+    }
+
+    /// Dokument zu einem Pfad (schon offen?).
+    pub(super) fn doc_for_path(&self, path: &Path) -> Option<u64> {
+        let key = doc::path_key(path);
+        self.docs.iter().find(|(_, d)| d.path.as_deref().is_some_and(|p| doc::path_key(p) == key)).map(|(id, _)| *id)
+    }
+
+    /// Datei öffnen (oder ihren Reiter zeigen). `side`: in einer neuen Teilung rechts. Liefert das Dokument.
+    pub(super) fn open_path(&mut self, path: &Path, side: bool) -> u64 {
+        let id = match self.doc_for_path(path) {
+            Some(id) => id,
+            None => {
+                let id = self.alloc_doc();
+                self.docs.insert(id, DocEntry::pending(Some(path.to_path_buf()), 0, None));
+                id
+            }
+        };
+        persist::push_recent(&mut self.recent_files, &path.to_string_lossy());
+        if let Some(root) = self.root.clone()
+            && path.starts_with(&root)
+        {
+            self.tree.reveal(&root, path);
+        }
+        self.show_doc(id, side);
+        id
+    }
+
+    /// Dokument zeigen: in der fokussierten Gruppe (oder rechts daneben) aktivieren.
+    pub(super) fn show_doc(&mut self, id: u64, side: bool) {
+        if side {
+            let g = self.panes.ensure_group();
+            let has_tab = self.panes.groups.get(&g).is_some_and(|grp| !grp.tabs.is_empty());
+            // Die neue Teilung zeigt erst die Kopie des alten Reiters – durch das Dokument ersetzen.
+            if has_tab
+                && let Some(ng) = self.panes.split(g, crate::layout::Dir::Horizontal)
+                && let Some(grp) = self.panes.groups.get_mut(&ng)
+            {
+                grp.tabs.clear();
+                grp.active = 0;
+            }
+        }
+        self.panes.open(id);
+        self.want_focus = true;
+    }
+
+    fn alloc_doc(&mut self) -> u64 {
+        let id = self.next_doc.max(self.docs.keys().next_back().map(|k| k + 1).unwrap_or(1)).max(1);
+        self.next_doc = id + 1;
+        id
+    }
+
+    /// Neue unbenannte Datei (optional mit Inhalt) in der fokussierten Gruppe.
+    pub(super) fn new_untitled(&mut self, text: Option<&str>) -> u64 {
+        let id = self.alloc_doc();
+        let n = self.next_untitled.max(1);
+        self.next_untitled = n + 1;
+        self.docs.insert(id, DocEntry::untitled(n, text));
+        self.show_doc(id, false);
+        id
+    }
+
+    /// Ordner als Wurzel des Baums öffnen.
+    pub(super) fn set_root(&mut self, dir: &Path) {
+        self.root = Some(dir.to_path_buf());
+        self.tree.refresh();
+        self.tree_open = true;
+        persist::push_recent(&mut self.recent_folders, &dir.to_string_lossy());
+    }
+
+    /// Dokument, das der Nutzer gerade bearbeitet (aktiver Reiter der fokussierten Gruppe).
+    pub(super) fn active_doc(&self) -> Option<u64> {
+        self.panes.groups.get(&self.panes.focused).and_then(|g| g.active_tab()).map(|t| t.doc)
+    }
+
+    /// Reiter freigeben: das Dokument verschwindet, wenn es in keinem Reiter mehr offen ist (Hot-Exit-Daten mit).
+    pub(super) fn release_doc(&mut self, doc: u64, dir: &Path) {
+        if !self.panes.shows(doc) {
+            if let Some(mut d) = self.docs.remove(&doc) {
+                d.drop_hot(dir);
+            }
+            if self.diff_doc == Some(doc) {
+                self.diff_doc = None;
+            }
+        }
+    }
+
+    pub(super) fn set_hint(&mut self, text: String) {
+        self.hint = Some((text, Instant::now()));
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ Schnittstelle (App)
+
+// Schnittstelle für MCP-Werkzeuge, Einstellungen und Explorer-Kontextmenü (Services-Teil von #54, eigener Branch);
+// bis dahin nur teilweise genutzt. Beschreibung: `notes/editor-ui-api.md` im Testordner.
+#[allow(dead_code)]
+impl super::App {
+    /// Einstellungen des Editors (Einstellungen → Editor). Solange es dort nichts gibt: Standardwerte mit der Schriftgröße
+    /// des Terminals.
+    pub(crate) fn editor_prefs(&self) -> EditorPrefs {
+        // Einstellungen → Editor (Services, `app::editor_services`).
+        self.editor_prefs_from_settings()
+    }
+
+    /// Jedes Bild im Hauptdurchgang, auch außerhalb des Editor-Reiters: automatisches Speichern.
+    pub(crate) fn editor_tick(&mut self, ctx: &eframe::egui::Context) {
+        let prefs = self.editor_prefs();
+        let Some(delay) = prefs.autosave else { return };
+        let lang = self.settings.language;
+        let mut next: Option<std::time::Duration> = None;
+        for d in self.ed.docs.values_mut() {
+            let Some(at) = d.edited_at else { continue };
+            if d.path.is_none() || !d.dirty() || d.disk_conflict {
+                continue;
+            }
+            let age = at.elapsed();
+            if age >= delay {
+                if d.save(None, lang).is_ok() {
+                    d.drop_hot(&self.dir);
+                }
+                d.edited_at = None;
+            } else {
+                let rest = delay - age;
+                next = Some(next.map_or(rest, |n| n.min(rest)));
+            }
+        }
+        if let Some(n) = next {
+            ctx.request_repaint_after(n);
+        }
+    }
+
+    /// Geöffneter Ordner des Editors (Wurzel des Baums; für „In Dateien suchen“).
+    pub(crate) fn editor_root(&self) -> Option<PathBuf> {
+        self.ed.root.clone()
+    }
+
+    /// Datei öffnen und den Cursor auf Zeile/Spalte (ab 0) setzen (Treffer der Suche in Dateien).
+    pub(crate) fn editor_open_at(&mut self, path: &Path, line: usize, col: usize) -> Result<u64, String> {
+        let id = self.editor_open(path, true, false)?;
+        self.ed.goto_line(line, col);
+        Ok(id)
+    }
+
+    /// Dateien, die der Editor seit dem letzten Aufruf selbst gelesen, gespeichert oder neu geladen hat (die Überwachung
+    /// setzt für sie den Vergleichsstand neu, `watch.baseline`).
+    pub(crate) fn editor_take_touched(&mut self) -> Vec<PathBuf> {
+        self.ed.docs.values_mut().filter_map(|d| if std::mem::take(&mut d.touched) { d.path.clone() } else { None }).collect()
+    }
+
+    /// Wie [`App::editor_apply_agent_edit`], aber mit Bereichen in **Bytes** des Textes (`\n`-Zeilenenden, wie
+    /// `editor_text`). Ein Bereich, der nicht auf Zeichengrenzen liegt, ist ein Fehler.
+    pub(crate) fn editor_apply_agent_edit_bytes(&mut self, id: u64, edits: Vec<(std::ops::Range<usize>, String)>) -> Result<(), String> {
+        let lang = self.settings.language;
+        let prefs = self.editor_prefs();
+        let d = self.ed.docs.get_mut(&id).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?;
+        d.ensure_loaded_now(&prefs);
+        let doc = d.doc.as_ref().ok_or_else(|| lang.t("Datei konnte nicht gelesen werden.", "The file could not be read.").to_string())?;
+        let len = doc.len_bytes();
+        let mut chars = Vec::with_capacity(edits.len());
+        for (r, t) in edits {
+            let ok = |b: usize| b <= len && doc.char_to_byte(doc.byte_to_char(b)) == b;
+            if r.start > r.end || !ok(r.start) || !ok(r.end) {
+                return Err(lang.t("Bereich liegt nicht auf Zeichengrenzen", "Range is not on character boundaries").to_string());
+            }
+            chars.push((doc.byte_to_char(r.start)..doc.byte_to_char(r.end), t));
+        }
+        d.apply_agent_edit(chars, lang)
+    }
+
+    /// Datei im Editor öffnen (oder ihren Reiter zeigen). `show`: in den Editor-Reiter wechseln und den Reiter fokussieren.
+    /// `by_agent`: der Reiter wird als „von einem Agenten geöffnet“ markiert. Liefert die Dokument-Id; Fehler, wenn der
+    /// Pfad keine lesbare Datei ist (Text für Menschen in der eingestellten Sprache).
+    pub(crate) fn editor_open(&mut self, path: &Path, show: bool, by_agent: bool) -> Result<u64, String> {
+        let lang = self.settings.language;
+        if !path.is_file() {
+            return Err(lang.t("Datei nicht gefunden", "File not found").to_string());
+        }
+        let id = self.ed.open_path(path, false);
+        let prefs = self.editor_prefs();
+        if let Some(d) = self.ed.docs.get_mut(&id) {
+            d.ensure_loaded_now(&prefs);
+            if let Some(e) = &d.load_error {
+                return Err(e.clone());
+            }
+            if by_agent {
+                d.opened_by_agent = true;
+            }
+        }
+        if show {
+            self.set_mode(super::titlebar::Mode::Editor);
+        }
+        Ok(id)
+    }
+
+    /// Neue unbenannte Datei mit Inhalt (z. B. von einem Agenten). Liefert die Dokument-Id.
+    pub(crate) fn editor_new(&mut self, text: &str, show: bool, by_agent: bool) -> u64 {
+        let id = self.ed.new_untitled(Some(text));
+        if let Some(d) = self.ed.docs.get_mut(&id) {
+            d.opened_by_agent = by_agent;
+            if by_agent {
+                d.agent_edited = true;
+            }
+        }
+        if show {
+            self.set_mode(super::titlebar::Mode::Editor);
+        }
+        id
+    }
+
+    /// Offene Dokumente (für `editor_list`).
+    pub(crate) fn editor_list(&self) -> Vec<DocInfo> {
+        let active = self.ed.active_doc();
+        self.ed.panes.docs().into_iter().filter_map(|id| self.ed.docs.get(&id).map(|d| d.info(id, active == Some(id), &self.editor_prefs()))).collect()
+    }
+
+    /// Text eines offenen Dokuments (lädt es bei Bedarf). `None`, wenn es die Id nicht gibt oder die Datei nicht lesbar ist.
+    pub(crate) fn editor_text(&mut self, id: u64) -> Option<String> {
+        let prefs = self.editor_prefs();
+        let d = self.ed.docs.get_mut(&id)?;
+        d.ensure_loaded_now(&prefs);
+        d.text()
+    }
+
+    /// Reiter eines Dokuments zeigen und fokussieren (wechselt in den Editor-Reiter).
+    pub(crate) fn editor_focus(&mut self, id: u64) -> bool {
+        if !self.ed.docs.contains_key(&id) {
+            return false;
+        }
+        if let Some((g, i)) = self.ed.panes.tabs_of(id).first().copied() {
+            self.ed.panes.focused = g;
+            if let Some(grp) = self.ed.panes.groups.get_mut(&g) {
+                grp.active = i;
+            }
+        } else {
+            self.ed.panes.open(id);
+        }
+        self.ed.want_focus = true;
+        self.set_mode(super::titlebar::Mode::Editor);
+        true
+    }
+
+    /// Änderung eines Agenten anwenden: `edits` = (Bereich in Zeichen, neuer Text), alle bezogen auf den aktuellen Text,
+    /// ohne Überlappung. Eine rückgängig machbare Änderung, ungespeichert, als „von einem Agenten“ markiert; die Cursor
+    /// aller Ansichten folgen. Fehlertext, wenn das Dokument fehlt oder ein Bereich ungültig ist.
+    pub(crate) fn editor_apply_agent_edit(&mut self, id: u64, edits: Vec<(std::ops::Range<usize>, String)>) -> Result<(), String> {
+        let lang = self.settings.language;
+        let prefs = self.editor_prefs();
+        let d = self.ed.docs.get_mut(&id).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?;
+        d.ensure_loaded_now(&prefs);
+        // Die Ansichten gleichen sich beim nächsten Zeichnen selbst ab (`Document::sync`).
+        d.apply_agent_edit(edits, lang)
+    }
+
+    /// Dokument speichern (für `editor_save`; der Aufrufer prüft die Regeln, z. B. nur vorhandene Dateien).
+    pub(crate) fn editor_save_doc(&mut self, id: u64) -> Result<(), String> {
+        let lang = self.settings.language;
+        let d = self.ed.docs.get_mut(&id).ok_or_else(|| lang.t("Kein solches Dokument", "No such document").to_string())?;
+        d.save(None, lang)
+    }
+
+    /// Pfade der offenen Dateien (für die Überwachung auf Änderungen).
+    pub(crate) fn editor_open_paths(&self) -> Vec<PathBuf> {
+        self.ed.docs.values().filter_map(|d| d.path.clone()).collect()
+    }
+
+    /// Eine offene Datei wurde auf der Platte geändert (meldet die Überwachung): ohne eigene Änderungen leise neu laden (mit
+    /// kurzem Hinweis), sonst die Hinweisleiste *Meine behalten* / *Von der Platte laden* / *Unterschied anzeigen*.
+    pub(crate) fn editor_disk_changed(&mut self, path: &Path) {
+        let lang = self.settings.language;
+        let prefs = self.editor_prefs();
+        let Some(id) = self.ed.doc_for_path(path) else { return };
+        let Some(d) = self.ed.docs.get_mut(&id) else { return };
+        match d.disk_changed(&prefs, lang) {
+            doc::DiskReaction::Reloaded(summary) => {
+                let name = d.title(lang);
+                let extra = if summary.is_empty() { String::new() } else { format!(" ({summary})") };
+                self.ed.set_hint(format!("{name}: {}{extra}", lang.t("von der Platte neu geladen", "reloaded from disk")));
+            }
+            doc::DiskReaction::Asked | doc::DiskReaction::Nothing => {}
+        }
+    }
+}

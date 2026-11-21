@@ -31,6 +31,11 @@ Rechtsklick auf einen Ordner oder den leeren Hintergrund eines Ordnerfensters (a
 
 Es gibt **nur ein Kontextmenü**: Die Instanz, die es zuletzt einschaltet, wird von ihm gestartet. Eine andere Instanz zeigt dann „→ anderes Paneldeck“ neben dem Schalter (der Befehl steht im Tooltip); schaltet man es dort ein, übernimmt sie es.
 
+## In Paneldeck-Editor öffnen
+*(Seit 3.0.0.)* Mit *Einstellungen → Fenster → Explorer: „In Paneldeck-Editor öffnen“* (**standardmäßig aus**, getrennt von den Ordner-Einträgen) bietet ein Rechtsklick auf **jede Datei** **In Paneldeck-Editor öffnen** an: Die Datei öffnet sich in einem neuen Tab des [Editor-Reiters](editor.md) (eine offene Datei wird nach vorn geholt). Der Eintrag ist der Schlüssel `HKCU\Software\Classes\*\shell\PaneldeckEdit` (Beschriftung, `Icon`, `command` = `"<exe>" [Instanz-Optionen] --edit "%1"`, siehe [`--edit`](command-line.md#--edit-datei)). Wie die Ordner-Einträge gibt es ihn nur einmal (die Instanz, die ihn zuletzt einschaltet), er zeigt „→ anderes Paneldeck“, wenn er woandershin zeigt, und steht in der gespeicherten Sprache. Ausschalten löscht den Schlüssel. Die Deinstallation und *Einstellungen → Daten & Sicherung → Aufräumen* (Eintrag *Explorer-Kontextmenü*) entfernen ihn ebenfalls, wenn er auf diese `paneldeck.exe` zeigt.
+
+<!-- screenshot: Explorer-Kontextmenü einer .txt-Datei mit „In Paneldeck-Editor öffnen“ -->
+
 ## Status in den Einstellungen
 Für Autostart und Kontextmenü zeigt *Einstellungen → Fenster*, ob der Eintrag **aus** ist, **an** (genau mit dem Befehl dieser Instanz) oder auf ein **anderes Paneldeck** zeigt (eine andere `.exe` oder eine andere Instanz).
 

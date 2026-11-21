@@ -37,7 +37,11 @@ mod claude_status;
 mod data;
 mod dialogs;
 mod dragdrop;
+pub(crate) mod editor_ui;
 mod empty_hub;
+// Editor-Reiter (#54): Einstellungen, MCP-Werkzeuge, Plattenänderungen, --edit, Explorer-Eintrag, Suche in Dateien.
+mod editor_services;
+mod editor_search_ui;
 pub(crate) mod folder_picker;
 mod fresh_start;
 mod closing;
@@ -908,6 +912,8 @@ pub struct App {
     quit_ok: bool,
     /// Prozessliste (#243): Einträge, Laufzeit, Ausgabeansicht, Dialoge.
     procs: procs_ui::ProcsState,
+    /// Dienste des Editor-Reiters (#54): Plattenänderungen, Suche in Dateien, `--edit`, Explorer-Eintrag.
+    editor_svc: editor_services::EditorServices,
     detached: Vec<u64>,
     settings_tab: usize,
     capture_key: Option<String>,
@@ -954,6 +960,8 @@ pub struct App {
     hwnd: Option<isize>,
     in_tray: bool,
     editor: Option<Editor>,
+    /// Reiter „Editor“ (#54): Ordnerbaum, Dokumente, Teilungen. Für alle Fenster gemeinsam (nicht in `view_fields!`).
+    ed: editor_ui::EditorUi,
     applied_font: String,
     /// Weitere Fenster (`multiwin.rs`, #110).
     wins: multiwin::Wins,
@@ -1007,8 +1015,11 @@ fn hooks_foreign_note(other: &str) -> String {
     )
 }
 
-fn setup_fonts(ctx: &egui::Context, choice: &str) {
-    ctx.set_fonts(build_fonts(choice));
+fn setup_fonts(ctx: &egui::Context, choice: &str, editor_font: &str) {
+    let mut fonts = build_fonts(choice);
+    // Schrift des Editor-Reiters (#54): eigene Familie „editor“, Standard = Terminalschrift.
+    editor_services::add_editor_family(&mut fonts, editor_font, choice);
+    ctx.set_fonts(fonts);
 }
 
 /// Baut die Schriftdefinitionen der App (eingebettete + vorhandene Systemschriften); getrennt von `setup_fonts`,
@@ -1118,6 +1129,8 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
         fonts.families.insert(egui::FontFamily::Name(fam_name.into()), list);
     }
     crate::sysfonts::set_real_variants(real[0], real[1], real[2]);
+    // Familie „editor“ gibt es immer (Standard: wie die Terminalschrift), damit sie nie fehlt (#54).
+    editor_services::add_editor_family(&mut fonts, "", choice);
     fonts
 }
 
@@ -1268,6 +1281,7 @@ impl App {
             quitting: false,
             quit_ok: false,
             procs: procs_state,
+            editor_svc: editor_services::EditorServices::from_cli(),
             detached: saved.detached.clone(),
             settings_tab: 0,
             capture_key: None,
@@ -1307,6 +1321,7 @@ impl App {
             hwnd: crate::platform::window::hwnd_from(cc),
             in_tray: false,
             editor: None,
+            ed: Default::default(),
             applied_font: String::new(),
             wins: Default::default(),
             // `--no-update-check`: keine automatische Prüfung für diesen Start (die manuelle geht weiter).
@@ -1435,6 +1450,8 @@ impl App {
         if let Some(e) = app.db_error.clone() {
             app.notify_text(e);
         }
+        // Editor (#54): Ordner, Reiter, Teilungen und ungespeicherte Puffer (Hot Exit) des letzten Laufs.
+        app.ed = editor_ui::EditorUi::restore(&app.dir);
         app
     }
 
@@ -1467,6 +1484,11 @@ impl App {
         let cmds: Vec<IpcCmd> = self.hook_server.as_ref().map(|h| h.cmd_rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             self.from_tray(ctx);
+            if let IpcCmd::Edit { path } = c {
+                // `paneldeck --edit <datei>` (#54): im Editor-Reiter öffnen (keine Sitzung, keine Agenten-Kette).
+                self.editor_open_from_ipc(path);
+                continue;
+            }
             if let IpcCmd::Open { path, claude, origin } = c {
                 // `paneldeck --open` aus einem Hub-Terminal heraus: Hat das Terminal eine Agenten-Kette, erbt die neue
                 // Sitzung sie samt ihm (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Ohne Kette (der
@@ -2544,6 +2566,7 @@ impl App {
             }
         }
         self.save_chats();
+        self.ed.save(&self.dir);
     }
 
     /// Nur `state.json` schreiben (Sitzungen, Layout, Projekte) – leicht genug für sofortiges Speichern, z. B. wenn sich
@@ -2683,6 +2706,8 @@ impl App {
             ("mode_tasks", titlebar::Mode::Tasks),
             ("mode_terminals_alt", titlebar::Mode::Terminals),
             ("mode_tasks_alt", titlebar::Mode::Tasks),
+            ("mode_editor", titlebar::Mode::Editor),
+            ("mode_editor_alt", titlebar::Mode::Editor),
         ] {
             if let Some((m, k)) = self.binding(id) {
                 if ctx.input_mut(|i| consume_key_exact(i, m, k, true)) {
@@ -2697,6 +2722,8 @@ impl App {
     fn set_mode(&mut self, mode: titlebar::Mode) {
         if self.mode != mode {
             self.focus_return = (mode == titlebar::Mode::Terminals).then_some(0);
+            // Editor (#54): beim Wechsel dorthin hat das Textfeld der aktiven Teilung die Tastatur.
+            self.ed.want_focus |= mode == titlebar::Mode::Editor;
         }
         if mode != titlebar::Mode::Tasks {
             self.plan.forget_terminal_return(); // von Hand weggeschaltet: der Rückweg „Zurück zum Terminal Hub“ gilt nicht mehr
@@ -4355,7 +4382,9 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.poll_mcp(ctx);
+        self.editor_tick(ctx);
         self.poll_procs(ctx);
+        self.poll_editor_services(ctx);
         self.poll_retired(ctx);
         // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).
         #[cfg(unix)]
@@ -4417,6 +4446,8 @@ impl eframe::App for App {
             self.files_ui(ctx, &mut actions);
             self.central(ctx, &mut actions);
             self.handle_drag(ctx);
+        } else if self.mode == titlebar::Mode::Editor {
+            self.editor_view(ctx);
         } else {
             self.tasks_view(ctx);
         }
@@ -4463,6 +4494,8 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         crate::platform::chrome::shutdown();
         self.save_for_exit();
+        // Editor (#54) unabhängig von „Sitzungen merken“: Reiter und ungespeicherte Puffer (Hot Exit) immer sichern.
+        self.ed.save(&self.dir);
         // Hilfsdateien der zsh/fish-Integration (#57) entfernen.
         crate::shellinit::remove_files(&self.dir);
     }

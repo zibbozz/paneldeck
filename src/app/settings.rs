@@ -41,9 +41,11 @@ impl App {
                     lang.t("Farben", "Colors"),
                     // Index 12 (`TERMINAL_TAB`, #57), angezeigt hinter „Allgemein“.
                     "Terminal",
+                    // Index 13 (`editor_services::SETTINGS_TAB`, #54), angezeigt hinter „Terminal“.
+                    "Editor",
                 ];
                 // Anzeigereihenfolge (die Indizes bleiben fest).
-                const ORDER: [usize; 13] = [0, TERMINAL_TAB, 1, palette_ui::SETTINGS_TAB, 2, 3, 4, 5, 6, 7, 8, 9, models_ui::SETTINGS_TAB];
+                const ORDER: [usize; 14] = [0, TERMINAL_TAB, editor_services::SETTINGS_TAB, 1, palette_ui::SETTINGS_TAB, 2, 3, 4, 5, 6, 7, 8, 9, models_ui::SETTINGS_TAB];
                 ui.horizontal_wrapped(|ui| {
                     for i in ORDER {
                         let t = tabs[i];
@@ -694,6 +696,7 @@ impl App {
                     palette_ui::SETTINGS_TAB => palette_ui::settings_view(ui, &mut self.settings.palette, lang),
                     8 => self.data_settings_ui(ui),
                     TERMINAL_TAB => terminal_tab(ui, lang),
+                    editor_services::SETTINGS_TAB => self.editor_settings_ui(ui),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
                         // macOS (#150): experimentell, unsigniert – Hinweis wie im Release-Text.
@@ -756,6 +759,7 @@ impl App {
                         if ui.small_button(lang.t("Status aktualisieren", "Refresh status")).clicked() || (!self.win_probed) {
                             self.win_autostart = crate::integration::autostart_status();
                             self.win_context = crate::integration::context_status();
+                            self.editor_svc.edit_context = crate::integration::edit_context_status();
                             self.win_probed = true;
                         }
                         let exe = self.exe.clone();
@@ -825,6 +829,10 @@ impl App {
                             }
                             other_hint(ui, lang, &self.win_context, lang.t("Das Kontextmenü", "The context menu"));
                         }); }
+                        // „In Paneldeck-Editor öffnen“ für alle Dateien (#54, nur Windows, Standard aus).
+                        if let Some(e) = self.edit_context_row(ui, &exe) {
+                            err = Some(e);
+                        }
                         if let Some(e) = err {
                             self.hooks_msg = e.clone();
                             ui.colored_label(Color32::LIGHT_RED, e);
@@ -904,9 +912,11 @@ impl App {
     }
 
     pub(super) fn apply_font(&mut self, ctx: &egui::Context) {
-        if self.applied_font != self.settings.terminal_font {
-            setup_fonts(ctx, &self.settings.terminal_font);
-            self.applied_font = self.settings.terminal_font.clone();
+        // Terminal- und Editorschrift (#54) zusammen: eine Änderung an einer baut die Schriften neu.
+        let want = format!("{}\u{1}{}", self.settings.terminal_font, self.settings.editor.font);
+        if self.applied_font != want {
+            setup_fonts(ctx, &self.settings.terminal_font, &self.settings.editor.font);
+            self.applied_font = want;
         }
     }
 }

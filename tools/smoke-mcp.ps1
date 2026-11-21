@@ -2240,6 +2240,118 @@ c.close()
   Get-Marker | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath "$data\processes.json" -ErrorAction SilentlyContinue
 
+  Write-Host "== Editor (#54): editor_* ueber MCP (Stufen, Schalter, Pfadregeln, Speichern, grosse Datei), --edit" -ForegroundColor Cyan
+  # Testdateien im Arbeitsordner; die grosse Datei entsteht erst hier (ueber der Schwelle large_file_mb = 1).
+  $edDir = Join-Path $work 'editor'
+  New-Item -ItemType Directory -Force $edDir | Out-Null
+  $utf8 = New-Object Text.UTF8Encoding $false
+  $edA = Join-Path $edDir 'notes.txt'; [IO.File]::WriteAllText($edA, "alpha`r`nbeta`r`ngamma`r`n", $utf8)
+  $edB = Join-Path $edDir 'gone.txt'; [IO.File]::WriteAllText($edB, "will be deleted`n", $utf8)
+  $edC = Join-Path $edDir 'changed.txt'; [IO.File]::WriteAllText($edC, "one`n", $utf8)
+  $edD = Join-Path $edDir 'from-cli.txt'; [IO.File]::WriteAllText($edD, "opened with --edit`n", $utf8)
+  $edBig = Join-Path $edDir 'big.log'
+  $sw = New-Object IO.StreamWriter($edBig, $false, $utf8)
+  for ($i = 1; $i -le 40000; $i++) { $sw.WriteLine("line $i of a large file generated at runtime for the editor smoke test") }
+  $sw.Close()
+  # Schalter der Editor-Einstellungen vor jedem Start setzen (settings.json -> editor).
+  $script:edSw = @{ open = $false; edit = $false; save = $false }
+  $script:prestart = {
+    $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $ed = [pscustomobject]@{ large_file_mb = 1; agent_open = $script:edSw.open; agent_edit = $script:edSw.edit; agent_save = $script:edSw.save }
+    $j | Add-Member -Force editor $ed
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  }
+  # Stufe Lesen: lesen ja, schreiben nein (auch mit eingeschalteten Schaltern).
+  $script:edSw = @{ open = $true; edit = $true; save = $true }
+  Set-Level 'Read' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Editor, Nur lesen: editor_list/editor_read ja, open/edit/save nein' ($names -contains 'editor_list' -and $names -contains 'editor_read' -and $names -notcontains 'editor_open' -and $names -notcontains 'editor_edit' -and $names -notcontains 'editor_save') ($names -join ',')
+  $el = Tool 'editor_list'
+  Check 'Editor, Nur lesen: editor_list ohne offene Dokumente, Schalter gemeldet' (-not $el.err -and @($el.data.docs).Count -eq 0 -and $el.data.agents.open -eq $true) $el.text
+  Check 'Editor, Nur lesen: editor_open verboten (Stufe)' ((Code (Tool 'editor_open' @{ path = $edA })) -eq 'forbidden')
+  # Stufe Steuern, Schalter aus: forbidden mit Hinweis auf den Schalter.
+  $script:edSw = @{ open = $false; edit = $false; save = $false }
+  Set-Level 'Control' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Editor, Steuern: alle fuenf editor_* in tools/list' (@('editor_list', 'editor_read', 'editor_open', 'editor_edit', 'editor_save' | Where-Object { $names -contains $_ }).Count -eq 5) ($names -join ',')
+  $eo = Tool 'editor_open' @{ path = $edA }
+  Check 'Editor, Schalter aus: editor_open forbidden mit Hinweis auf den Schalter' ((Code $eo) -eq 'forbidden' -and $eo.text -match 'Agents may open files|Agenten d') $eo.text
+  Check 'Editor, Schalter aus: editor_edit forbidden' ((Code (Tool 'editor_edit' @{ doc = 1; old_text = 'a'; new_text = 'b' })) -eq 'forbidden')
+  Check 'Editor, Schalter aus: editor_save forbidden' ((Code (Tool 'editor_save' @{ doc = 1 })) -eq 'forbidden')
+  Check 'Editor, Schalter aus: Datei unveraendert' ([IO.File]::ReadAllText($edA) -eq "alpha`r`nbeta`r`ngamma`r`n")
+  # Steuern, alle Schalter an.
+  $script:edSw = @{ open = $true; edit = $true; save = $true }
+  Set-Level 'Control' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  foreach ($bad in @('\\localhost\c$\Windows\win.ini', '\\wsl.localhost\Ubuntu\etc\hosts', '\\.\PhysicalDrive0', '\\?\C:\Windows\win.ini', 'C:\NUL', "$edDir\con.txt")) {
+    Check "Editor: editor_open lehnt $bad ab (forbidden)" ((Code (Tool 'editor_open' @{ path = $bad })) -eq 'forbidden')
+  }
+  Check 'Editor: editor_open mit relativem Pfad -> bad_args' ((Code (Tool 'editor_open' @{ path = 'notes.txt' })) -eq 'bad_args')
+  Check 'Editor: editor_open mit Ordner -> bad_args' ((Code (Tool 'editor_open' @{ path = $edDir })) -eq 'bad_args')
+  Check 'Editor: editor_open fehlende Datei -> not_found' ((Code (Tool 'editor_open' @{ path = (Join-Path $edDir 'fehlt.txt') })) -eq 'not_found')
+  $oa = Tool 'editor_open' @{ path = $edA }
+  $A = $oa.data.doc
+  Check 'Editor: editor_open oeffnet die Datei in einem neuen Tab' (-not $oa.err -and $A -and $oa.data.already_open -eq $false -and $oa.data.opened_by_agent -eq $true -and $oa.data.eol -eq 'crlf') $oa.text
+  $oa2 = Tool 'editor_open' @{ path = $edA.ToUpper() }
+  Check 'Editor: zweites editor_open (andere Schreibweise) -> derselbe Tab, already_open' ($oa2.data.doc -eq $A -and $oa2.data.already_open -eq $true) $oa2.text
+  $rd = Tool 'editor_read' @{ doc = $A }
+  Check 'Editor: editor_read liefert Zeilen mit \n und Hinweis untrusted' ($rd.data.text -eq "alpha`nbeta`ngamma`n" -and $rd.data.start_line -eq 1 -and $rd.data.note -match 'untrusted|vertrauensw') $rd.text
+  $rp = Tool 'editor_read' @{ doc = $edA; offset = 2; limit = 1 }
+  Check 'Editor: editor_read ueber den Pfad mit offset/limit' ($rp.data.text -eq 'beta' -and $rp.data.more_below -eq $true) $rp.text
+  Check 'Editor: editor_edit mehrdeutig -> bad_args' ((Code (Tool 'editor_edit' @{ doc = $A; old_text = 'a'; new_text = 'x' })) -eq 'bad_args')
+  Check 'Editor: editor_edit nicht gefunden -> not_found' ((Code (Tool 'editor_edit' @{ doc = $A; old_text = 'delta'; new_text = 'x' })) -eq 'not_found')
+  $ed1 = Tool 'editor_edit' @{ doc = $A; old_text = 'beta'; new_text = 'BETA' }
+  Check 'Editor: editor_edit ungespeichert, vom Agenten markiert' (-not $ed1.err -and $ed1.data.dirty -eq $true -and $ed1.data.agent_edited -eq $true -and $ed1.data.replaced -eq 1) $ed1.text
+  Check 'Editor: Datei auf der Platte noch unveraendert' ([IO.File]::ReadAllText($edA) -eq "alpha`r`nbeta`r`ngamma`r`n")
+  $ed2 = Tool 'editor_edit' @{ doc = $A; start_line = 1; end_line = 0; text = 'top' }
+  Check 'Editor: editor_edit mit Zeilen (einfuegen)' (-not $ed2.err -and (Tool 'editor_read' @{ doc = $A; limit = 2 }).data.text -eq "top`nalpha") $ed2.text
+  $sv = Tool 'editor_save' @{ doc = $A }
+  Check 'Editor: editor_save speichert die offene Datei' (-not $sv.err -and $sv.data.saved -eq $true) $sv.text
+  Check 'Editor: gespeichert mit den Zeilenenden der Datei (CRLF)' ([IO.File]::ReadAllText($edA) -eq "top`r`nalpha`r`nBETA`r`ngamma`r`n") ([IO.File]::ReadAllText($edA))
+  Check 'Editor: editor_save ohne Aenderungen -> saved false' ((Tool 'editor_save' @{ doc = $A }).data.saved -eq $false)
+  # Unbenannter Tab: anlegen ja, speichern nur der Nutzer.
+  $un = Tool 'editor_open' @{ untitled = $true; text = "draft`r`ntext" }
+  Check 'Editor: unbenannter Tab mit Text' (-not $un.err -and $un.data.untitled -eq $true -and $null -eq $un.data.path) $un.text
+  Check 'Editor: unbenannter Tab nicht speicherbar (forbidden)' ((Code (Tool 'editor_save' @{ doc = $un.data.doc })) -eq 'forbidden')
+  # Auf der Platte geloescht: nicht speichern.
+  $ob = Tool 'editor_open' @{ path = $edB }
+  [void](Tool 'editor_edit' @{ doc = $ob.data.doc; old_text = 'deleted'; new_text = 'kept' })
+  Remove-Item -LiteralPath $edB -Force
+  Start-Sleep 4
+  Check 'Editor: geloeschte Datei nicht speicherbar (forbidden), nicht neu angelegt' ((Code (Tool 'editor_save' @{ doc = $ob.data.doc })) -eq 'forbidden' -and -not (Test-Path -LiteralPath $edB))
+  # Auf der Platte geaendert + ungespeichert: conflict, der Nutzer entscheidet.
+  $oc = Tool 'editor_open' @{ path = $edC }
+  [void](Tool 'editor_edit' @{ doc = $oc.data.doc; old_text = 'one'; new_text = 'mine' })
+  [IO.File]::WriteAllText($edC, "theirs`n", $utf8)
+  Start-Sleep 4
+  $lc = @((Tool 'editor_list').data.docs) | Where-Object { $_.id -eq $oc.data.doc }
+  Check 'Editor: Plattenaenderung erkannt (disk = changed)' ($lc.disk -eq 'changed') ($lc | ConvertTo-Json -Compress)
+  Check 'Editor: Speichern bei Plattenaenderung -> conflict, Datei bleibt' ((Code (Tool 'editor_save' @{ doc = $oc.data.doc })) -eq 'conflict' -and [IO.File]::ReadAllText($edC) -eq "theirs`n")
+  # Grosse Datei (zur Laufzeit erzeugt): lesen ja (gedeckelt), bearbeiten nein.
+  $og = Tool 'editor_open' @{ path = $edBig }
+  Check 'Editor: grosse Datei geoeffnet (large)' (-not $og.err -and $og.data.large -eq $true -and $og.data.lines -ge 40000) $og.text
+  $rg = Tool 'editor_read' @{ doc = $og.data.doc; offset = 39995; limit = 10 }
+  Check 'Editor: grosse Datei, Ende lesbar' ($rg.data.text -match 'line 40000 of' -and $rg.data.more_below -eq $false) $rg.text
+  $rm = Tool 'editor_read' @{ doc = $og.data.doc; limit = 5000 }
+  Check 'Editor: editor_read hoechstens 2000 Zeilen / 128 KB' ((($rm.data.end_line - $rm.data.start_line + 1) -le 2000) -and $rm.data.text.Length -le 131072 -and $rm.data.more_below -eq $true) "$($rm.data.start_line)-$($rm.data.end_line)"
+  Check 'Editor: grosse Datei nicht bearbeitbar (too_large)' ((Code (Tool 'editor_edit' @{ doc = $og.data.doc; old_text = 'line 1 of'; new_text = 'x' })) -eq 'too_large')
+  # --edit aus einer zweiten Instanz: Datei erscheint als Tab (nicht vom Agenten geoeffnet).
+  $second = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle Hidden -ArgumentList '--edit', "`"$edD`""
+  [void]$second.WaitForExit(10000)
+  Start-Sleep 2
+  $ld = @((Tool 'editor_list').data.docs) | Where-Object { $_.path -and $_.path -ieq $edD }
+  Check 'Editor: paneldeck --edit oeffnet die Datei im laufenden Hub' ($ld -and $ld.opened_by_agent -eq $false) ((@((Tool 'editor_list').data.docs) | ForEach-Object path) -join ',')
+  Check 'Editor: zweite Instanz hat sich beendet (Weiterleitung)' ($second.HasExited) ''
+  # Protokoll ohne Dateiinhalt
+  $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
+  Check 'Editor: mcp-log.jsonl nennt editor_*, aber keinen Dateiinhalt' ($log -match 'editor_edit' -and $log -notmatch 'BETA' -and $log -notmatch 'draft') ''
+  $script:prestart = $null
+
   Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
   # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.
   Set-Level 'Control' -Empty

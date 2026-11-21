@@ -29,6 +29,11 @@ pub const CONTEXT_KEYS: [&str; 4] = [
     r"Software\Classes\Directory\Background\shell\PaneldeckClaude",
 ];
 
+/// Explorer-Kontextmenü „In Paneldeck-Editor öffnen“ für alle Dateien (#54, 3.0.0; Standard aus, Schalter unter
+/// *Einstellungen → Fenster*). Ein Schlüssel unter `*\shell` (gilt für jede Dateiart), Befehl `"<exe>" [Instanz] --edit "%1"`.
+pub const EDIT_CONTEXT_KEY: &str = r"Software\Classes\*\shell\PaneldeckEdit";
+pub const EDIT_CONTEXT_PROBE: &str = r"Software\Classes\*\shell\PaneldeckEdit\command";
+
 /// Zustand einer Integration aus Sicht dieser Instanz.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -104,6 +109,33 @@ fn context_plan(on: bool, exe: &Path, args: &[String]) -> Result<Vec<RegOp>, Str
     Ok(ops)
 }
 
+/// Befehl des Editor-Eintrags: `"<exe>" [Instanz-Argumente] --edit "%1"`.
+pub fn edit_context_command(exe: &Path, args: &[String]) -> Result<String, String> {
+    Ok(format!("{} --edit \"%1\"", launch::command_line(exe, args)?))
+}
+
+/// Status des Editor-Eintrags aus dem gespeicherten Befehl.
+fn edit_context_status_of(stored: Option<&str>, exe: &Path, args: &[String]) -> Status {
+    status_of(stored, edit_context_command(exe, args))
+}
+
+/// Plan für „In Paneldeck-Editor öffnen“: Beschriftung, Symbol, Befehl bzw. Schlüssel löschen.
+fn edit_context_plan(on: bool, exe: &Path, args: &[String]) -> Result<Vec<RegOp>, String> {
+    if !on {
+        return Ok(vec![RegOp::DeleteTree { key: EDIT_CONTEXT_KEY.into() }]);
+    }
+    Ok(vec![
+        RegOp::SetStr { key: EDIT_CONTEXT_KEY.into(), name: None, value: crate::state::t("In Paneldeck-Editor öffnen", "Open in Paneldeck editor").into() },
+        RegOp::SetStr { key: EDIT_CONTEXT_KEY.into(), name: Some("Icon".into()), value: format!("\"{}\"", exe.to_string_lossy()) },
+        RegOp::SetStr { key: EDIT_CONTEXT_PROBE.into(), name: None, value: edit_context_command(exe, args)? },
+    ])
+}
+
+/// Darf das Deinstallieren den Editor-Eintrag entfernen? Nur, wenn er auf diese .exe zeigt (gleich welche Instanz).
+fn edit_context_is_ours(stored: Option<&str>, exe: &Path) -> bool {
+    stored.is_some_and(|c| launch::same_path(launch::program_of(c), &exe.to_string_lossy()))
+}
+
 /// Beim Deinstallieren: Run-Werte `Paneldeck (…)` (Instanzen mit Profil/Datenordner), deren Programm diese .exe ist.
 /// Der Standardwert `Paneldeck` gehört dem Installer und wird dort entfernt.
 fn instance_run_values_for(values: &[(String, String)], exe: &Path) -> Vec<String> {
@@ -156,6 +188,20 @@ pub fn set_context(on: bool, _exe: &Path) -> Result<(), String> {
 #[cfg(unix)]
 pub fn remove_instance_autostarts() {}
 
+/// Editor-Eintrag gibt es nur unter Windows (Registry); sonst immer „aus“.
+#[cfg(unix)]
+pub fn edit_context_status() -> Status {
+    Status::Off
+}
+
+#[cfg(unix)]
+pub fn set_edit_context(_on: bool, _exe: &Path) -> Result<(), String> {
+    Err(crate::state::t("Nur unter Windows verfügbar.", "Only available on Windows.").into())
+}
+
+#[cfg(unix)]
+pub fn remove_edit_context_if_ours() {}
+
 #[cfg(windows)]
 pub fn autostart_status() -> Status {
     let args = launch::instance_args();
@@ -188,6 +234,26 @@ pub fn set_context(on: bool, exe: &Path) -> Result<(), String> {
 pub fn remove_instance_autostarts() {
     for name in instance_run_values_for(&registry::values(RUN_KEY), &this_exe()) {
         let _ = registry::apply(&[RegOp::DeleteValue { key: RUN_KEY.into(), name }]);
+    }
+}
+
+/// „In Paneldeck-Editor öffnen“: aus, an (zeigt auf diese Instanz) oder von einer anderen Instanz/.exe geschrieben.
+#[cfg(windows)]
+pub fn edit_context_status() -> Status {
+    edit_context_status_of(registry::get_str(EDIT_CONTEXT_PROBE, None).as_deref(), &this_exe(), &launch::instance_args())
+}
+
+/// Editor-Eintrag ein-/ausschalten (nur auf ausdrücklichen Wunsch des Nutzers in den Einstellungen).
+#[cfg(windows)]
+pub fn set_edit_context(on: bool, exe: &Path) -> Result<(), String> {
+    registry::apply(&edit_context_plan(on, exe, &launch::instance_args())?)
+}
+
+/// Vom Deinstallationsprogramm (`--uninstall-hooks`): den Editor-Eintrag entfernen, wenn er auf diese .exe zeigt.
+#[cfg(windows)]
+pub fn remove_edit_context_if_ours() {
+    if edit_context_is_ours(registry::get_str(EDIT_CONTEXT_PROBE, None).as_deref(), &this_exe()) {
+        let _ = registry::apply(&edit_context_plan(false, &this_exe(), &[]).unwrap_or_default());
     }
 }
 
@@ -247,6 +313,32 @@ mod tests {
         let off_keys: Vec<&str> = off.iter().map(|o| match o { RegOp::DeleteTree { key } => key.as_str(), _ => "" }).collect();
         assert_eq!(off_keys, CONTEXT_KEYS);
         assert_eq!(CONTEXT_PROBE,r"Software\Classes\Directory\shell\Paneldeck\command");
+    }
+
+    #[test]
+    fn edit_context_plan_strings() {
+        let exe = PathBuf::from(r"C:\Program Files\Paneldeck\paneldeck.exe");
+        let e = r#""C:\Program Files\Paneldeck\paneldeck.exe""#;
+        let label = crate::state::t("In Paneldeck-Editor öffnen", "Open in Paneldeck editor");
+        assert_eq!(
+            edit_context_plan(true, &exe, &[]).unwrap(),
+            [set(EDIT_CONTEXT_KEY, None, label), set(EDIT_CONTEXT_KEY, Some("Icon"), e), set(EDIT_CONTEXT_PROBE, None, &format!(r#"{e} --edit "%1""#))]
+        );
+        assert_eq!(edit_context_plan(true, &exe, &s(&["--profile", "work"])).unwrap()[2], set(EDIT_CONTEXT_PROBE, None, &format!(r#"{e} --profile work --edit "%1""#)));
+        assert_eq!(edit_context_plan(false, &exe, &[]).unwrap(), [RegOp::DeleteTree { key: EDIT_CONTEXT_KEY.into() }]);
+        // Für alle Dateiarten (`*`), getrennt von den Ordner-Einträgen.
+        assert_eq!(EDIT_CONTEXT_KEY, r"Software\Classes\*\shell\PaneldeckEdit");
+        assert_eq!(EDIT_CONTEXT_PROBE, format!(r"{EDIT_CONTEXT_KEY}\command"));
+        assert!(!CONTEXT_KEYS.contains(&EDIT_CONTEXT_KEY));
+        // Status und Deinstallation
+        let cmd = format!(r#"{e} --edit "%1""#);
+        assert!(edit_context_status_of(Some(&cmd), &exe, &[]).is_mine());
+        assert!(edit_context_status_of(Some(&cmd), &exe, &s(&["--profile", "work"])).other().is_some());
+        assert_eq!(edit_context_status_of(None, &exe, &[]), Status::Off);
+        assert!(edit_context_is_ours(Some(&cmd), &exe));
+        assert!(edit_context_is_ours(Some(&format!(r#"{e} --profile work --edit "%1""#)), &exe), "jede Instanz dieser .exe");
+        assert!(!edit_context_is_ours(Some(r#""D:\other\paneldeck.exe" --edit "%1""#), &exe));
+        assert!(!edit_context_is_ours(None, &exe));
     }
 
     #[test]

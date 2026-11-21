@@ -896,6 +896,8 @@ impl App {
             (_, "rename_session") | (_, "create_session") => mcp::short(args["name"].as_str().unwrap_or(""), 120),
             // Todo-Liste und Tickets: nur Kennungen und Kurztitel ins Protokoll, nie Kommentar- oder Beschreibungstexte.
             (_, t) if agent::TOOLS.contains(&t) => planning_log_info(t, args),
+            // Editor (#54): Dokument bzw. Pfad, nie Dateiinhalt.
+            (_, t) if crate::editor_svc::tools::TOOLS.contains(&t) => crate::editor_svc::tools::log_info(t, args),
             _ => String::new(),
         };
         let (log_how, model) = self.log_origin(how, caller);
@@ -1033,6 +1035,8 @@ impl App {
             "list_processes" | "read_process_output" | "start_process" | "stop_process" | "restart_process" => Out::Now(self.mcp_procs(ctx, tool, args)),
             "theme_list" => Out::Now(Ok(theme_list_json(&self.themes, &self.theme_issues, &self.settings.theme))),
             "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args)),
+            // Editor-Reiter (#54): Schalter und Pfadregeln in `editor_svc::tools`.
+            t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.mcp_editor(ctx, t, args)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
             "send_keys" => Out::Now(self.mcp_send_keys(args, caller)),
             "run_command" => self.mcp_run(args, caller, reply, tool, how),

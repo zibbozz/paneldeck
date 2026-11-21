@@ -16,6 +16,7 @@ Options with a value can also be written as `--option=value` (`--profile=work`).
 |---|---|
 | `--open <folder>` | Open a new session in `<folder>` (a file opens its folder) |
 | `--claude` | With `--open`: start Claude Code in the new session |
+| `--edit <file>` | Open `<file>` in a new tab of the [Editor tab](editor.md) (since 3.0.0) |
 | `--tray` | Start minimized in the tray |
 | `--no-tray` | No tray icon for this start |
 | `--data-dir <folder>` | Use `<folder>` as the data folder |
@@ -44,6 +45,11 @@ Together with `--open`: the new session starts Claude Code (needs Claude mode).
     paneldeck.exe --open "C:\Dev\my-app" --claude
 
 The session uses your default [Claude start options](claude-code.md#start-options). Typed in a Paneldeck terminal, `--open … --claude` never applies your defaults for extra folders, allowed tools, an MCP config or `--safe-mode`, and the new session is marked with an [agent chain](agent-interface.md#security) only if that terminal has one.
+
+### --edit \<file\>
+*(Since 3.0.0.)* Opens `<file>` in a new tab of the [Editor tab](editor.md) of the running Paneldeck (or starts it); a file that is already open is brought to the front instead of being opened twice. A relative path is resolved against the caller's current folder. `--edit` cannot be combined with `--open`, `--claude` or a folder without an option (exit code 2), only with the instance options (`--profile`, `--data-dir`, `--lang` …). The Explorer entry *Open in Paneldeck editor* uses this (off by default, see [Windows integration](windows-integration.md#open-in-paneldeck-editor)). Opening a file this way is no agent action, even when it is typed in a Paneldeck terminal.
+
+    paneldeck.exe --edit "C:\Dev\my-app\README.md"
 
 ### --tray
 Starts minimized to the tray icon (used by *Start with Windows*). If Paneldeck already runs, it is shown instead.
@@ -126,7 +132,7 @@ The data folder is chosen in this order (the first match wins):
 - A further *window* (Ctrl+click on a tab) is not a new instance: it belongs to the same process and data folder (see [Multiple windows](windows.md)).
 
 ## What is handed over to a running instance
-If Paneldeck already runs with the same data folder, a new start only hands over **`--open`/`--claude`** (or shows the window for `--tray` and a plain start). The options that only affect the start of an instance – **`--lang`, `--backup-dir`, `--no-tray`, `--no-update-check`** – have no effect then, and **`--reset-settings`** fails with an error. Quit Paneldeck first to use them.
+If Paneldeck already runs with the same data folder, a new start only hands over **`--open`/`--claude`** or **`--edit`** (or shows the window for `--tray` and a plain start). The options that only affect the start of an instance – **`--lang`, `--backup-dir`, `--no-tray`, `--no-update-check`** – have no effect then, and **`--reset-settings`** fails with an error. Quit Paneldeck first to use them.
 
 ## Exit codes
 | Code | Meaning |
