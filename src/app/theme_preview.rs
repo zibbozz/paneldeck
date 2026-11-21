@@ -39,15 +39,24 @@ fn heading(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// Gefärbter Kasten (Hinweis, Warnung, Fehler, Toast).
+/// Breite des Inhalts eines gefärbten Kastens.
+const BOX_W: f32 = 260.0;
+
+/// Gefärbter Kasten (Hinweis, Warnung, Fehler, Toast) in einer umbrechenden Zeile. Passt er nicht mehr in die Zeile,
+/// beginnt er eine neue – früher bekam er nur den Rest der Zeile, der Text brach Wort für Wort um, und lange Wörter
+/// ragten rechts hinaus (das Editor-Fenster wuchs mit).
 fn tinted_box(ui: &mut Ui, m: &mut Marks, col: Color32, tok: &'static str, title: &str, body: &str) {
+    // In einer umbrechenden Zeile meint `available_width` die ganze Zeile; der Rest der aktuellen Zeile ist das hier.
+    if ui.available_size_before_wrap().x < BOX_W + 22.0 {
+        ui.end_row();
+    }
     let r = egui::Frame::new()
         .fill(col.gamma_multiply(0.12))
         .stroke(Stroke::new(1.0_f32, col.gamma_multiply(0.55)))
         .corner_radius(CornerRadius::same(style::RADIUS))
         .inner_margin(Margin::symmetric(10, 6))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width().min(380.0));
+            ui.set_width(BOX_W.min(ui.available_width()));
             ui.label(RichText::new(title).strong().color(col));
             ui.label(body);
         })
@@ -125,13 +134,16 @@ pub(super) fn page(ui: &mut Ui, t: &Theme, u: &UiColors, lang: Lang, s: &mut Sam
     });
 
     ui.add_space(4.0);
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
+    two_cols(
+        ui,
+        m,
+        "sidebar",
+        12.0,
+        |ui, m| {
             heading(ui, lang.t("Seitenleiste", "Sidebar"));
             sidebar(ui, u, lang, m);
-        });
-        ui.add_space(12.0);
-        ui.vertical(|ui| {
+        },
+        |ui, m| {
             heading(ui, lang.t("Chips und Labels", "Chips and labels"));
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(360.0);
@@ -169,8 +181,8 @@ pub(super) fn page(ui: &mut Ui, t: &Theme, u: &UiColors, lang: Lang, s: &mut Sam
                 });
             });
             mark(m, r.response.rect, "border");
-        });
-    });
+        },
+    );
 
     heading(ui, lang.t("Toast und Hinweise", "Toast and notices"));
     ui.horizontal_wrapped(|ui| {
@@ -187,33 +199,61 @@ pub(super) fn page(ui: &mut Ui, t: &Theme, u: &UiColors, lang: Lang, s: &mut Sam
         tinted_box(ui, m, u.danger, "danger", lang.t("Freigabe nötig", "Approval needed"), lang.t("Claude wartet auf deine Erlaubnis.", "Claude is waiting for your permission."));
     });
 
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
+    two_cols(
+        ui,
+        m,
+        "board",
+        12.0,
+        |ui, m| {
             heading(ui, lang.t("Ticket und Board-Spalte", "Ticket card and board column"));
             board(ui, u, lang, m);
-        });
-        ui.add_space(12.0);
-        ui.vertical(|ui| {
+        },
+        |ui, m| {
             heading(ui, lang.t("Chat und Freigabe", "Chat and tool approval"));
             chat(ui, u, lang, m);
-        });
-    });
+        },
+    );
 
     heading(ui, lang.t("Terminal", "Terminal"));
     terminal(ui, t, m);
 
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
+    two_cols(
+        ui,
+        m,
+        "diff",
+        16.0,
+        |ui, m| {
             heading(ui, "Diff");
             diff(ui, u, m);
-        });
-        ui.add_space(16.0);
-        ui.vertical(|ui| {
+        },
+        |ui, m| {
             heading(ui, lang.t("Code mit Syntaxfarben", "Code with syntax colours"));
             code(ui, u, m);
-        });
-    });
+        },
+    );
     ui.add_space(12.0);
+}
+
+/// Zwei Spalten nebeneinander – oder untereinander, wenn sie nebeneinander nicht in die Breite passen (schmales
+/// Editor-Fenster). Die Spalten haben feste Breiten; ihre Summe stammt aus dem letzten Bild.
+fn two_cols(ui: &mut Ui, m: &mut Marks, salt: &str, gap: f32, left: impl FnOnce(&mut Ui, &mut Marks), right: impl FnOnce(&mut Ui, &mut Marks)) {
+    let id = ui.id().with(("pd_preview_cols", salt));
+    let need = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    let (wl, wr) = if need <= ui.available_width() {
+        ui.horizontal_top(|ui| {
+            let wl = ui.vertical(|ui| left(ui, m)).response.rect.width();
+            ui.add_space(gap);
+            let wr = ui.vertical(|ui| right(ui, m)).response.rect.width();
+            (wl, wr)
+        })
+        .inner
+    } else {
+        let wl = ui.vertical(|ui| left(ui, m)).response.rect.width();
+        let wr = ui.vertical(|ui| right(ui, m)).response.rect.width();
+        (wl, wr)
+    };
+    let need = wl + gap + wr + 2.0 * ui.spacing().item_spacing.x;
+    ui.ctx().data_mut(|d| d.insert_temp(id, need));
 }
 
 fn sidebar(ui: &mut Ui, u: &UiColors, lang: Lang, m: &mut Marks) {

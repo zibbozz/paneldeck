@@ -149,6 +149,8 @@ impl Editor {
             self.redo.push(std::mem::replace(&mut self.theme, t));
             self.hex_for = None;
             self.last_edit = f64::NEG_INFINITY;
+            // Eine Meldung zu einer abgelehnten Änderung passt nach einem Schritt zurück nicht mehr.
+            self.error = None;
         }
     }
 
@@ -157,7 +159,16 @@ impl Editor {
             self.undo.push(std::mem::replace(&mut self.theme, t));
             self.hex_for = None;
             self.last_edit = f64::NEG_INFINITY;
+            self.error = None;
         }
+    }
+
+    /// Nach erfolgreichem Speichern unter `path`: Stand merken; eine alte Meldung (z. B. ein abgelehnter Kreis)
+    /// verschwindet.
+    fn mark_saved(&mut self, path: std::path::PathBuf) {
+        self.theme.source = Some(path);
+        self.saved = self.theme.clone();
+        self.error = None;
     }
 
     fn select(&mut self, name: &'static str) {
@@ -319,8 +330,7 @@ impl App {
         };
         file::write(&path, &ed.theme).map_err(|e| format!("{} {e}", lang.t("Speichern fehlgeschlagen:", "Saving failed:")))?;
         let old = ed.saved.source.as_ref().map(|_| ed.saved.name.clone());
-        ed.theme.source = Some(path);
-        ed.saved = ed.theme.clone();
+        ed.mark_saved(path);
         self.reload_themes();
         if let Some(old) = old.filter(|o| *o != ed.theme.name) {
             let old: String = old;
@@ -504,15 +514,7 @@ impl App {
         let mut action = None;
         let title = format!("{} – {}", lang.t("Theme-Editor", "Theme editor"), ed.theme.name);
         let base_style = (*ctx.style()).clone();
-        egui::Window::new(title)
-            .id(Id::new("pd_theme_editor"))
-            .open(&mut open)
-            .default_size([1240.0, 800.0])
-            .min_size([860.0, 540.0])
-            .resizable(true)
-            .collapsible(false)
-            .constrain(true)
-            .show(ctx, |ui| body(&mut ed, ui, lang, now, &off, &base_style, &mut action));
+        editor_window(ctx, title).open(&mut open).show(ctx, |ui| body(&mut ed, ui, lang, now, &off, &base_style, &mut action));
         let mut close = false;
         if !open {
             if ed.dirty() {
@@ -630,52 +632,78 @@ impl App {
     }
 }
 
+/// Das Editor-Fenster (ohne Schließen-Knopf; den setzt der Aufrufer). Anfangs höchstens so groß wie das Hauptfenster
+/// abzüglich eines Randes – egui begrenzt nur den Inhalt, der Rahmen ragte sonst über den Rand.
+fn editor_window<'a>(ctx: &egui::Context, title: String) -> egui::Window<'a> {
+    let screen = ctx.content_rect().size();
+    egui::Window::new(title)
+        .id(Id::new("pd_theme_editor"))
+        .default_size([1240.0_f32.min(screen.x - 24.0), 800.0_f32.min(screen.y - 24.0)])
+        .min_size([860.0, 540.0])
+        .resizable(true)
+        .collapsible(false)
+        .constrain(true)
+}
+
 /// Inhalt des Editor-Fensters.
 fn body(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64, off: &[String], base_style: &egui::Style, action: &mut Option<EdAction>) {
-    // Kopfzeile: Name, hell/dunkel, Generator, Rückgängig, Prüfregeln, Speichern/Verwerfen.
-    ui.horizontal(|ui| {
-        ui.label(lang.t("Name", "Name"));
-        let mut name = ed.theme.name.clone();
-        if ui.add(egui::TextEdit::singleline(&mut name).desired_width(220.0)).changed() {
-            ed.edit(now, true, |t| t.name = name);
-        }
-        let mut dark = ed.theme.dark;
-        if ui.checkbox(&mut dark, lang.t("Dunkel", "Dark")).on_hover_text(lang.t("Bestimmt, wie abgeleitete Farben berechnet werden", "Decides how derived colours are calculated")).changed() {
-            // Hell/dunkel stellt Ableitungen um – das darf mit eigenen Verweisen keinen Kreis ergeben.
-            ed.edit_checked(now, lang, |t| t.dark = dark);
-        }
-        ui.separator();
-        if ui.button(lang.t("Aus Farben erzeugen …", "Generate from colours …")).on_hover_text(lang.t("Hintergrund, Akzent und hell/dunkel wählen – alles andere wird berechnet", "Pick background, accent and light/dark – everything else is calculated")).clicked() {
-            ed.generator = Some(Seed::from_theme(&ed.theme));
-        }
-        if ui.add_enabled(!ed.undo.is_empty(), egui::Button::new("↶")).on_hover_text(lang.t("Rückgängig (Strg+Z)", "Undo (Ctrl+Z)")).clicked() {
-            ed.undo();
-        }
-        if ui.add_enabled(!ed.redo.is_empty(), egui::Button::new("↷")).on_hover_text(lang.t("Wiederholen (Strg+Y)", "Redo (Ctrl+Y)")).clicked() {
-            ed.redo();
-        }
-        ui.menu_button(format!("⚙ {}", lang.t("Prüfungen", "Checks")), |ui| {
-            ui.label(RichText::new(lang.t("Regeln der Design-Prüfung (nur Hinweise)", "Design check rules (hints only)")).small().color(style::dim(ui)));
-            for r in Rule::ALL {
-                let mut on = !off.iter().any(|o| o == r.key());
-                if ui.checkbox(&mut on, r.label(lang)).on_hover_text(r.desc(lang)).changed() {
-                    *action = Some(EdAction::ToggleRule(r));
+    // Kopfzeile: Name, hell/dunkel, Generator, Rückgängig, Prüfregeln, Speichern/Verwerfen. Speichern/Verwerfen
+    // stehen rechts und werden zuerst gesetzt; der Rest nimmt nur die übrige Breite und bricht in schmalen Fenstern
+    // in eine zweite Zeile um, statt die Knöpfe aus dem Fenster zu schieben.
+    let dirty = ed.dirty();
+    let (_, right) = egui::Sides::new().shrink_left().show(
+        ui,
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(lang.t("Name", "Name"));
+                let mut name = ed.theme.name.clone();
+                if ui.add(egui::TextEdit::singleline(&mut name).desired_width(220.0)).changed() {
+                    ed.edit(now, true, |t| t.name = name);
                 }
-            }
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let mut dark = ed.theme.dark;
+                if ui.checkbox(&mut dark, lang.t("Dunkel", "Dark")).on_hover_text(lang.t("Bestimmt, wie abgeleitete Farben berechnet werden", "Decides how derived colours are calculated")).changed() {
+                    // Hell/dunkel stellt Ableitungen um – das darf mit eigenen Verweisen keinen Kreis ergeben.
+                    ed.edit_checked(now, lang, |t| t.dark = dark);
+                }
+                ui.separator();
+                if ui.button(lang.t("Aus Farben erzeugen …", "Generate from colours …")).on_hover_text(lang.t("Hintergrund, Akzent und hell/dunkel wählen – alles andere wird berechnet", "Pick background, accent and light/dark – everything else is calculated")).clicked() {
+                    ed.generator = Some(Seed::from_theme(&ed.theme));
+                }
+                if ui.add_enabled(!ed.undo.is_empty(), egui::Button::new("↶")).on_hover_text(lang.t("Rückgängig (Strg+Z)", "Undo (Ctrl+Z)")).clicked() {
+                    ed.undo();
+                }
+                if ui.add_enabled(!ed.redo.is_empty(), egui::Button::new("↷")).on_hover_text(lang.t("Wiederholen (Strg+Y)", "Redo (Ctrl+Y)")).clicked() {
+                    ed.redo();
+                }
+                ui.menu_button(format!("⚙ {}", lang.t("Prüfungen", "Checks")), |ui| {
+                    ui.label(RichText::new(lang.t("Regeln der Design-Prüfung (nur Hinweise)", "Design check rules (hints only)")).small().color(style::dim(ui)));
+                    for r in Rule::ALL {
+                        let mut on = !off.iter().any(|o| o == r.key());
+                        if ui.checkbox(&mut on, r.label(lang)).on_hover_text(r.desc(lang)).changed() {
+                            *action = Some(EdAction::ToggleRule(r));
+                        }
+                    }
+                });
+            });
+        },
+        |ui| {
+            let mut act = None;
             if ui.button(lang.t("Verwerfen", "Discard")).on_hover_text(lang.t("Änderungen verwerfen und schließen", "Discard the changes and close")).clicked() {
-                *action = Some(EdAction::Discard);
+                act = Some(EdAction::Discard);
             }
             let save = egui::Button::new(RichText::new(lang.t("Speichern", "Save")).strong()).fill(style::brand().gamma_multiply(0.7));
-            if ui.add_enabled(ed.dirty(), save).on_hover_text(lang.t("Speichern und in der App verwenden", "Save and use it in the app")).clicked() {
-                *action = Some(EdAction::Save);
+            if ui.add_enabled(dirty, save).on_hover_text(lang.t("Speichern und in der App verwenden", "Save and use it in the app")).clicked() {
+                act = Some(EdAction::Save);
             }
-            if ed.dirty() {
+            if dirty {
                 ui.label(RichText::new(lang.t("● ungespeichert", "● unsaved")).small().color(style::ui().warning));
             }
-        });
-    });
+            act
+        },
+    );
+    if right.is_some() {
+        *action = right;
+    }
     // Strg+Z / Strg+Y, solange kein Textfeld den Fokus hat.
     if ui.ctx().memory(|m| m.focused().is_none()) {
         let (z, y) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z), i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y)));
@@ -715,7 +743,8 @@ fn list(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(lang.t("● gesetzt   ○ abgeleitet   * geändert", "● set   ○ derived   * changed")).small().color(style::dim(ui)));
     });
-    egui::ScrollArea::vertical().id_salt("pd_theme_list").auto_shrink([false, false]).show(ui, |ui| {
+    // Beide Richtungen: Zu breiter Inhalt rollt, statt das Fenster über den Rand wachsen zu lassen.
+    let out = egui::ScrollArea::both().id_salt("pd_theme_list").auto_shrink([false, false]).show(ui, |ui| {
         for g in Group::ALL {
             let toks: Vec<&'static Token> = all_tokens().filter(|t| t.group == g && matches(t, &ed.search, lang)).collect();
             if toks.is_empty() {
@@ -728,6 +757,19 @@ fn list(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
             }
         }
     });
+    note_overflow(ui, &out);
+}
+
+/// Nur in Tests: merkt sich, wie weit der Inhalt einer Rollfläche breiter ist als sie (es soll nie seitlich gerollt
+/// werden müssen; der Rollbalken ist nur die Sicherung gegen ein wachsendes Fenster).
+fn note_overflow<R>(ui: &Ui, out: &egui::scroll_area::ScrollAreaOutput<R>) {
+    if cfg!(test) {
+        let over = out.content_size.x - out.inner_rect.width();
+        ui.ctx().data_mut(|d| {
+            let v = d.get_temp_mut_or(Id::new("pd_theme_overflow"), 0.0_f32);
+            *v = v.max(over);
+        });
+    }
 }
 
 fn row(ed: &mut Editor, ui: &mut Ui, tok: &'static Token, lang: Lang, now: f64) {
@@ -903,7 +945,8 @@ fn preview(ed: &mut Editor, ui: &mut Ui, lang: Lang, base_style: &egui::Style, h
     ui.painter().rect_filled(clip, CornerRadius::same(6), u.window_bg);
     ed.marks.clear();
     let Editor { theme, sample, marks, .. } = ed;
-    egui::ScrollArea::vertical().id_salt("pd_theme_preview").max_height(h).min_scrolled_height(h).auto_shrink([false, false]).show(ui, |ui| {
+    // Beide Richtungen: Eine nur senkrecht rollende Fläche wüchse mit zu breitem Inhalt mit – samt Fenster.
+    let out = egui::ScrollArea::both().id_salt("pd_theme_preview").max_height(h).min_scrolled_height(h).auto_shrink([false, false]).show(ui, |ui| {
         style::with_preview(u, || {
             ui.scope(|ui| {
                 ui.set_style(st.clone());
@@ -913,6 +956,7 @@ fn preview(ed: &mut Editor, ui: &mut Ui, lang: Lang, base_style: &egui::Style, h
             });
         });
     });
+    note_overflow(ui, &out);
     // Klick in die Vorschau: Farbe des Elements in der Liste wählen (die Bedienelemente bewirken nichts).
     let click = ui.input(|i| if i.pointer.primary_clicked() { i.pointer.interact_pos() } else { None });
     if let Some(pos) = click.filter(|p| clip.contains(*p)) {
@@ -942,29 +986,39 @@ fn checks_panel(ed: &mut Editor, ui: &mut Ui, lang: Lang, now: f64) {
     });
     let mut apply = None;
     let mut pick = None;
-    egui::ScrollArea::vertical().id_salt("pd_theme_checks").auto_shrink([false, false]).show(ui, |ui| {
+    // Beide Richtungen: Sollte doch etwas zu breit sein, erscheint ein Rollbalken, statt dass das Fenster wächst.
+    let out = egui::ScrollArea::both().id_salt("pd_theme_checks").auto_shrink([false, false]).show(ui, |ui| {
         for (i, h) in ed.hints.iter().enumerate() {
-            let r = ui.horizontal(|ui| {
-                ui.label(RichText::new(h.rule.label(lang)).small().color(style::dim(ui)));
-                let msg = ui.add(egui::Label::new(h.msg.get(lang)).sense(Sense::click()).truncate()).on_hover_text(h.msg.get(lang));
-                if msg.clicked() {
-                    pick = Some(i);
-                }
-                if let Some(f) = &h.fix {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // „Übernehmen“ und Farbfeld zuerst rechts setzen; der Text bekommt nur die übrige Breite und bricht um.
+            // (Vorher nahm der abgeschnittene Text die ganze Breite, und die Knöpfe ragten rechts aus dem Fenster.)
+            let (left, ()) = egui::Sides::new().shrink_left().show(
+                ui,
+                |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.label(RichText::new(h.rule.label(lang)).small().color(style::dim(ui)));
+                        let msg = ui.add(egui::Label::new(h.msg.get(lang)).sense(Sense::click()).wrap());
+                        if msg.clicked() {
+                            pick = Some(i);
+                        }
+                    })
+                    .response
+                },
+                |ui| {
+                    if let Some(f) = &h.fix {
                         if ui.button(lang.t("Übernehmen", "Apply")).on_hover_text(format!("{} ({})", checks::fix_text(f), lang.t("rückgängig mit Strg+Z", "undo with Ctrl+Z"))).clicked() {
                             apply = Some(i);
                         }
                         let (sr, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                         swatch(ui.painter(), sr, f.color, ui.visuals().widgets.noninteractive.bg_stroke.color);
-                    });
-                }
-            });
-            if r.response.interact(Sense::click()).clicked() {
+                    }
+                },
+            );
+            if left.interact(Sense::click()).clicked() {
                 pick = Some(i);
             }
         }
     });
+    note_overflow(ui, &out);
     if let Some(i) = pick {
         let toks = ed.hints[i].tokens.clone();
         if let Some(&first) = toks.first() {
@@ -1113,6 +1167,72 @@ mod tests {
         }));
         assert!(e.edit_checked(4.0, Lang::En, |t| t.dark = false));
         assert!(!e.theme.dark && e.theme.extra.ui.is_empty() && e.error.is_none());
+    }
+
+    #[test]
+    fn a_refused_edit_message_goes_away_after_the_next_change_undo_or_save() {
+        let mut e = ed();
+        e.edit(1.0, false, |t| {
+            t.ui.insert("surface".into(), Spec::Link { to: "window_bg".into(), alpha: None });
+        });
+        let refuse = |e: &mut Editor, now: f64| {
+            assert!(!e.edit_checked(now, Lang::En, |t| t.dark = false));
+            assert!(e.error.is_some());
+        };
+        refuse(&mut e, 2.0);
+        e.edit(3.0, false, |t| {
+            theme::set_color(t, "accent", Color32::RED);
+        });
+        assert!(e.error.is_none(), "nach einer erfolgreichen Änderung");
+        refuse(&mut e, 4.0);
+        e.undo();
+        assert!(e.error.is_none(), "nach Rückgängig");
+        refuse(&mut e, 5.0);
+        e.redo();
+        assert!(e.error.is_none(), "nach Wiederholen");
+        refuse(&mut e, 6.0);
+        e.mark_saved(std::path::PathBuf::from("x.json"));
+        assert!(e.error.is_none() && !e.dirty(), "nach dem Speichern");
+    }
+
+    /// Das Fenster wächst nicht über seine Größe hinaus (früher schob die abgeschnittene Zeile der Design-Prüfung
+    /// „Übernehmen“ rechts hinaus, das Fenster wuchs jedes Bild bis über den Bildschirmrand), und der Inhalt passt auch
+    /// in ein schmales Hauptfenster.
+    #[test]
+    fn editor_fits_the_window_and_does_not_grow() {
+        for (w, h) in [(1500.0, 960.0), (1100.0, 760.0)] {
+            for lang in [Lang::En, Lang::De] {
+                let ctx = egui::Context::default();
+                let mut e = ed();
+                // Dunkler Text auf dunklem Grund: Hinweise mit Vorschlag und langen Texten.
+                theme::set_color(&mut e.theme, "text", Color32::from_gray(40));
+                e.select("accent");
+                e.refresh_hints(&[], 0.0);
+                assert!(e.hints.iter().any(|h| h.fix.is_some()), "Hinweis mit „Übernehmen“");
+                let mut seen = None;
+                for frame in 0..8 {
+                    let mut action = None;
+                    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))), time: Some(frame as f64 * 0.05), ..Default::default() };
+                    let _ = ctx.run(input, |ctx| {
+                        let st = (*ctx.style()).clone();
+                        ctx.data_mut(|d| d.insert_temp(Id::new("pd_theme_overflow"), 0.0_f32));
+                        editor_window(ctx, "t".into()).show(ctx, |ui| {
+                            body(&mut e, ui, lang, 0.0, &[], &st, &mut action);
+                            seen = Some((ui.min_rect(), ui.max_rect()));
+                        });
+                    });
+                    assert!(action.is_none());
+                }
+                let (used, avail) = seen.expect("gezeichnet");
+                assert!(used.max.x <= avail.max.x + 0.5, "{w}/{lang:?}: Inhalt {used:?} breiter als das Fenster {avail:?}");
+                // Liste, Vorschau und Design-Prüfung passen in ihre Breite (kein seitliches Rollen nötig).
+                let over = ctx.data(|d| d.get_temp::<f32>(Id::new("pd_theme_overflow"))).unwrap_or(0.0);
+                assert!(over <= 0.5, "{w}/{lang:?}: eine Rollfläche ist um {over} px zu breit");
+                let win = ctx.memory(|m| m.area_rect(Id::new("pd_theme_editor"))).expect("Fenster");
+                assert!(win.min.x >= -0.5 && win.max.x <= w + 0.5, "{w}/{lang:?}: Fenster {win:?} ragt aus dem Bildschirm");
+                assert!(win.width() <= 1240.0 + 40.0, "{w}/{lang:?}: Fenster gewachsen: {win:?}");
+            }
+        }
     }
 
     #[test]
