@@ -662,6 +662,10 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             return;
         }
+        // Laufende Prozesse der Prozessliste (#243): erst „Alle stoppen“ / „Abbrechen“; danach schließt Paneldeck erneut.
+        if self.procs_quit_guard(ctx) {
+            return;
+        }
         let ids: Vec<u64> = self.entries.keys().copied().collect();
         let lingering = self.lingering_of(&ids);
         if lingering.is_empty() {

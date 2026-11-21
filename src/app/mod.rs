@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod chat_ui;
+mod cleanup_ui;
 mod claude_status;
 mod data;
 mod dialogs;
@@ -55,6 +56,7 @@ mod vt_notify;
 mod panels;
 mod paste_ask;
 mod planning_ui;
+mod procs_ui;
 mod session_settings;
 mod settings;
 #[cfg(feature = "readme-shots")]
@@ -390,6 +392,8 @@ enum Action {
     ResumeHistory(usize),
     OpenSearch,
     OpenSettings,
+    /// Fenster „Aufräumen …“ (#307).
+    OpenCleanup,
     OpenPrompts,
     OpenNotes(u64),
     /// Agenten-Kette einer Sitzung aufheben (nur der Nutzer, Kontextmenü, #152).
@@ -842,6 +846,8 @@ pub struct App {
     backup_checked: Instant,
     backup_msg: Option<String>,
     backups_cache: Option<Vec<crate::backup::BackupInfo>>,
+    /// Fenster „Aufräumen …“ bzw. Ergebnis eines beim Start ausgeführten Aufräumens (#307).
+    cleanup: Option<cleanup_ui::CleanupUi>,
     backups_dirty: bool,
     confirm_restore: Option<PathBuf>,
     restore_error: Option<String>,
@@ -893,6 +899,8 @@ pub struct App {
     quitting: bool,
     /// Beenden trotz Hintergrundprozessen bestätigt (#168, `closing::App::quit_guard`): nicht noch einmal fragen.
     quit_ok: bool,
+    /// Prozessliste (#243): Einträge, Laufzeit, Ausgabeansicht, Dialoge.
+    procs: procs_ui::ProcsState,
     detached: Vec<u64>,
     settings_tab: usize,
     capture_key: Option<String>,
@@ -1110,6 +1118,11 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Schrift wird in update() über apply_font gesetzt.
         let dir = state::data_dir();
+        // Vorgemerktes Aufräumen (#307) zuerst: es kann Einstellungen, Zustand und Datenbank betreffen.
+        let cleanup_report = crate::cleanup::apply_pending(&dir, || {
+            let s: Settings = state::load_json(&dir.join("settings.json")).unwrap_or_default();
+            crate::cli::get().backup_dir.clone().unwrap_or_else(|| crate::backup::dir(&dir, &s.backup_dir))
+        });
         let mut settings: Settings = state::load_json(&dir.join("settings.json")).unwrap_or_default();
         settings.sanitize();
         // `--lang`: nur für diesen Start (beim Speichern bleibt die gespeicherte Sprache, siehe `state::ser_language`).
@@ -1146,6 +1159,7 @@ impl App {
             crate::shellinit::detect_running_wsl();
         }
         let bg = std::sync::mpsc::channel::<String>();
+        let procs_state = procs_ui::ProcsState::load(&dir);
         let mut app = App {
             settings,
             shells,
@@ -1196,6 +1210,7 @@ impl App {
             backup_checked: Instant::now().checked_sub(Duration::from_secs(61)).unwrap_or_else(Instant::now),
             backup_msg: None,
             backups_cache: None,
+            cleanup: cleanup_report.map(cleanup_ui::CleanupUi::with_report),
             backups_dirty: true,
             confirm_restore: None,
             restore_error: None,
@@ -1243,6 +1258,7 @@ impl App {
             tray_rx: std::sync::mpsc::channel().1,
             quitting: false,
             quit_ok: false,
+            procs: procs_state,
             detached: saved.detached.clone(),
             settings_tab: 0,
             capture_key: None,
@@ -1649,6 +1665,7 @@ impl App {
         }
         self.active_project = id;
         self.load_project_view(p.layout, p.focused);
+        self.procs_project_opened(id);
     }
 
     /// Zeile der Sitzung in der Seitenleiste sichtbar machen: Filter leeren, wenn er sie verbirgt, eingeklappte Ordner
@@ -2830,6 +2847,10 @@ impl App {
             .frame(egui::Frame::NONE.fill(theme.bg))
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
+                // Ausgabe eines Prozesses der Prozessliste (#243) statt der Sitzungen.
+                if self.proc_pane(ui, rect, &theme, &font) {
+                    return;
+                }
                 let Some(mut layout) = self.layout.take() else {
                     let kind = self.empty_heading();
                     let hints = self.empty_hints();
@@ -3742,6 +3763,7 @@ impl App {
                 }
             }
             Action::OpenSettings => self.settings_open = true,
+            Action::OpenCleanup => self.open_cleanup(ctx),
             Action::OpenPrompts => self.prompts_open = true,
             Action::NewDialog(claude) => {
                 // Aus der Palette: den Fokus nicht ans Terminal zurückgeben, er gehört dem Dialog (#255).
@@ -3868,6 +3890,8 @@ impl App {
                 ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of(("detached", id)), egui::ViewportCommand::Focus);
             }
             Action::Activate(id) | Action::Focus(id) => {
+                // Eine Sitzung nach vorn: die Ausgabe eines Prozesses (#243) macht ihr Platz.
+                self.procs.view = None;
                 if let Some(pid) = self.entries.get(&id).map(|e| e.meta.project) {
                     self.switch_project(pid);
                 }
@@ -4277,6 +4301,7 @@ impl eframe::App for App {
             self.notify_text(n);
         }
         self.poll_mcp(ctx);
+        self.poll_procs(ctx);
         self.poll_retired(ctx);
         // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).
         #[cfg(unix)]
@@ -4352,6 +4377,7 @@ impl eframe::App for App {
             self.tlinks_picker_ui(ctx);
         }
         self.restore_dialog(ctx);
+        self.cleanup_ui(ctx);
         self.update_frame(ctx);
         for a in actions {
             self.apply(ctx, a);

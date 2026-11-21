@@ -528,6 +528,27 @@ impl SessionJob {
         super::unix_proc::job_terminate_all(self.key)
     }
 
+    /// Alle Prozesse des Jobs enden, sobald sein Handle geschlossen wird (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) – auch
+    /// wenn der Hub abstürzt. Für die Prozessliste (#243): ihre Programme enden mit Paneldeck. Sitzungs-Jobs bekommen
+    /// das nie (dort entscheidet der Nutzer, siehe oben). `true`, wenn die Grenze gesetzt ist.
+    #[cfg(windows)]
+    pub fn kill_on_close(&self) -> bool {
+        use windows_sys::Win32::System::JobObjects::{JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+        jobs().iter().find(|(k, _)| *k == self.key).is_some_and(|&(_, jh)| {
+            // SAFETY: genullte Struktur mit nur dem einen Grenz-Flag; gültiges Job-Handle unter der Sperre.
+            unsafe {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(jh as windows_sys::Win32::Foundation::HANDLE, JobObjectExtendedLimitInformation, (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32) != 0
+            }
+        })
+    }
+
+    #[cfg(not(windows))]
+    pub fn kill_on_close(&self) -> bool {
+        false
+    }
+
     /// Nur diese Prozesse beenden ((PID, Erzeugungszeit), z. B. die in einer Meldung genannten): jeden nur, wenn er
     /// noch in diesem Job läuft und dieselbe Erzeugungszeit hat (die PID also nicht neu vergeben ist). Anzahl beendeter.
     #[cfg(windows)]
@@ -890,6 +911,20 @@ pub fn spawn_in_job<T>(job: Option<&SessionJob>, spawn: impl FnOnce() -> T) -> (
 #[cfg(not(windows))]
 pub fn spawn_in_job<T>(_job: Option<&SessionJob>, spawn: impl FnOnce() -> T) -> (T, bool) {
     (spawn(), false)
+}
+
+/// Ganze Prozessgruppe von `pid` beenden (Unix, #243): portable-pty startet das Kind mit `setsid`, es führt also eine
+/// eigene Gruppe an; `SIGKILL` an `-pid` trifft alle ihre Prozesse. Unter Windows nichts (dort beendet der Job den Baum).
+#[cfg(unix)]
+pub fn kill_group(pid: u32) -> bool {
+    let Ok(p) = i32::try_from(pid) else { return false };
+    // SAFETY: reiner Systemaufruf; eine negative PID adressiert die Gruppe, p > 1 (PID 0/1 nie).
+    p > 1 && unsafe { libc::kill(-p, libc::SIGKILL) } == 0
+}
+
+#[cfg(not(unix))]
+pub fn kill_group(_pid: u32) -> bool {
+    false
 }
 
 impl Drop for SessionJob {

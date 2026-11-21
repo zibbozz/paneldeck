@@ -1980,6 +1980,158 @@ c.close()
     Skip 'Konsolen-Host und DLL-Suche' 'keine conpty.dll/OpenConsole.exe neben der .exe (tools\fetch-conpty.ps1)'
   }
 
+  Write-Host "== Aufraeumen (#307): cleanup_sizes und vorgemerkter Lauf im Test-Datenordner" -ForegroundColor Cyan
+  Set-Level 'Read' -Empty
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'cleanup_sizes: in tools/list (Lesen), kein Werkzeug zum Loeschen' ($names -contains 'cleanup_sizes' -and -not ($names | Where-Object { $_ -match 'clean|delete|purge|reset' -and $_ -ne 'cleanup_sizes' })) ($names -join ',')
+  New-Item -ItemType Directory -Force "$data\clipboard", "$data\scrollback", "$data\chats" | Out-Null
+  [IO.File]::WriteAllBytes("$data\clipboard\clip-1-0.png", (New-Object byte[] 2048))
+  [IO.File]::WriteAllText("$data\crash.log", 'smoke')
+  [IO.File]::WriteAllText("$data\state.json.bak-20250101-000000", '{}')
+  [IO.File]::WriteAllText("$data\scrollback\99999.txt", 'alt')
+  [IO.File]::WriteAllText("$data\chats\99998.json", '{}')
+  $r = Tool 'cleanup_sizes'
+  $it = @{}; foreach ($x in @($r.data.items)) { $it[$x.id] = $x }
+  Check 'cleanup_sizes: Antwort mit Bereichen und Gruppen' (-not $r.err -and $it.Count -ge 10 -and $it['database'].group -eq 'content' -and $it['factory_reset'].needs_typing) $r.text
+  Check 'cleanup_sizes: Zwischenablage 2048 B, 1 Datei, vorausgewaehlt' ($it['clipboard_images'].bytes -eq 2048 -and $it['clipboard_images'].files -eq 1 -and $it['clipboard_images'].preselected) ($it['clipboard_images'] | ConvertTo-Json -Compress)
+  Check 'cleanup_sizes: verwaister Verlauf gezaehlt' ($it['scrollback_orphaned'].files -ge 1 -and $it['chats_orphaned'].files -ge 1)
+  Check 'cleanup_sizes: Datenordner-Summe und Profile' ($r.data.data_folder.bytes -gt 0 -and $null -ne $r.data.profiles.count)
+  Check 'cleanup_sizes: keine Pfade in der Antwort' ($r.text -notmatch [regex]::Escape($data) -and $r.text -notmatch [regex]::Escape($data.Replace('\', '\\')))
+  # Vorgemerkter Lauf (wie nach "Loeschen" mit Neustart): wird beim naechsten Start vor dem Laden ausgefuehrt. Integration
+  # (autostart) wird aus der Vormerkung nie ausgefuehrt - Registry bleibt unberuehrt.
+  Stop-Hub
+  $hadDb = Test-Path -LiteralPath "$data\paneldeck.db"
+  $pending = @{ version = 1; items = @('clipboard_images', 'crash_log', 'old_backup_files', 'scrollback_orphaned', 'chats_orphaned', 'database', 'autostart'); opts = @{ keep_backups = 3; backup_db = $true } } | ConvertTo-Json -Depth 5
+  [IO.File]::WriteAllText("$data\cleanup-pending.json", $pending, (New-Object Text.UTF8Encoding $false))
+  Set-Level 'Read' -Empty
+  Check 'Aufraeumen beim Start: Vormerkung verbraucht' (-not (Test-Path -LiteralPath "$data\cleanup-pending.json"))
+  Check 'Aufraeumen beim Start: Dateien geloescht' (-not (Test-Path "$data\clipboard\clip-1-0.png") -and -not (Test-Path "$data\crash.log") -and -not (Test-Path "$data\state.json.bak-20250101-000000") -and -not (Test-Path "$data\scrollback\99999.txt") -and -not (Test-Path "$data\chats\99998.json"))
+  if ($hadDb) {
+    $pre = @(Get-ChildItem -LiteralPath "$data\backups" -Filter 'pre-cleanup-*.db' -ErrorAction SilentlyContinue)
+    Check 'Aufraeumen beim Start: Datenbank vorher gesichert (pre-cleanup-*.db)' ($pre.Count -ge 1) ($pre.Name -join ',')
+  } else { Skip 'Aufraeumen: Datenbank-Sicherung' 'keine paneldeck.db im Test-Datenordner' }
+  $r = Tool 'cleanup_sizes'
+  $it = @{}; foreach ($x in @($r.data.items)) { $it[$x.id] = $x }
+  Check 'Aufraeumen beim Start: Hub laeuft, Zwischenablage leer' (-not $r.err -and $it['clipboard_images'].files -eq 0) $r.text
+  Write-Host "== Prozessliste (#243)" -ForegroundColor Cyan
+  # Eintraege von Hand in processes.json (Agenten koennen keine anlegen). Der Wert der Umgebungsvariable per DPAPI (aktueller
+  # Benutzer) wie in Paneldeck; harmlose Programme: ping, ein TCP-Listener auf 127.0.0.1, exit 3, ein unbekannter Befehl.
+  Add-Type -AssemblyName System.Security
+  $secret = 'geheim-smoke-42'
+  $blob = [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($secret), $null, 'CurrentUser'))
+  $pdefs = @(
+    @{ id = 1; name = 'Ping'; command = 'ping -n 30 127.0.0.1'; group = 'G'; order = 2 },
+    @{ id = 2; name = 'Http'; command = '$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0); $l.Start(); Write-Output ("Listening on http://127.0.0.1:" + $l.LocalEndpoint.Port + "/"); Write-Output "ERROR: smoke-fehlerzeile"; Start-Sleep 60'; group = 'G'; order = 1 },
+    @{ id = 3; name = 'Crash'; command = 'Write-Output vor-dem-absturz; exit 3' },
+    @{ id = 4; name = 'Missing'; command = 'gibtsnicht-pd-smoke-xyz' },
+    @{ id = 5; name = 'Env'; command = 'Write-Output ("env=" + $env:PD_SMOKE_SECRET); Start-Sleep 30'; env = @(@{ name = 'PD_SMOKE_SECRET'; value_protected = $blob }) },
+    @{ id = 6; name = 'Zaeh'; command = 'Start-Process ping -ArgumentList ''-n'',''117'',''127.0.0.1'' -WindowStyle Hidden; [Console]::TreatControlCAsInput=$true; Write-Output zaeh-laeuft; while($true){ Start-Sleep 1 }' },
+    @{ id = 7; name = 'Cmd'; command = 'echo "a b" && exit 4'; shell = 'cmd' },
+    @{ id = 8; name = 'Auto'; command = 'Write-Output auto-gestartet; Start-Sleep 60'; autostart = 'paneldeck' }
+  )
+  New-Item -ItemType Directory -Force $data | Out-Null
+  [IO.File]::WriteAllText("$data\processes.json", (@{ version = 1; processes = $pdefs } | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding $false))
+  function Get-Proc([string]$n) { (Tool 'list_processes').data.processes | Where-Object name -eq $n }
+  function Wait-Proc([string]$n, [string[]]$want, [int]$sec = 15) {
+    $t0 = Get-Date
+    do { $p = Get-Proc $n; if ($p -and $want -contains $p.status) { return $p }; Start-Sleep -Milliseconds 300 } while (((Get-Date) - $t0).TotalSeconds -lt $sec)
+    $p
+  }
+  function Wait-Output([string]$n, [string]$pattern, [int]$sec = 15) {
+    $t0 = Get-Date
+    do { $o = Tool 'read_process_output' @{ process = $n; lines = 200 }; if ("$($o.data.text)" -match $pattern) { return $o }; Start-Sleep -Milliseconds 300 } while (((Get-Date) - $t0).TotalSeconds -lt $sec)
+    $o
+  }
+  # Kind mit eigener (verborgener) Konsole: bekommt kein Strg+C, endet nur mit dem Job Object.
+  function Get-Marker { @(Get-CimInstance Win32_Process -Filter "Name='PING.EXE'" | Where-Object { $_.CommandLine -like '*-n 117 127.0.0.1*' }) }
+
+  Set-Level 'Read' -Empty
+  $l = Tool 'list_processes'
+  Check 'Prozesse (Lesen): list_processes liefert alle Eintraege, nach dem Start gestoppt' (-not $l.err -and @($l.data.processes).Count -eq 8 -and -not (@($l.data.processes) | Where-Object { $_.status -ne 'stopped' -and $_.name -ne 'Auto' })) $l.text
+  $p = Wait-Proc 'Auto' @('running') 5
+  Check 'Prozesse: Autostart "Mit Paneldeck" laeuft' ($p.status -eq 'running' -and $p.autostart -eq 'paneldeck') ($p | ConvertTo-Json -Compress)
+  Check 'Prozesse: Gruppe G gemeldet' (@($l.data.groups) -contains 'G') ($l.data.groups -join ',')
+  $e = @($l.data.processes) | Where-Object name -eq 'Env'
+  Check 'Prozesse: env_names ohne Werte (kein Klartext, kein Blob)' (@($e.env_names) -contains 'PD_SMOKE_SECRET' -and $l.text -notmatch [regex]::Escape($secret) -and $l.text -notmatch [regex]::Escape($blob.Substring(0, 20))) $l.text
+  Check 'Prozesse: Hinweis nicht vertrauenswuerdig' ($l.data.note -match 'untrusted|vertrauensw') $l.data.note
+  Check 'Prozesse (Lesen): start_process -> forbidden' ((Code (Tool 'start_process' @{ process = 'Ping' })) -eq 'forbidden')
+
+  Set-Level 'Control' -Empty
+  Check 'Prozesse: start_process ohne process/group -> bad_args' ((Code (Tool 'start_process' @{})) -eq 'bad_args')
+  Check 'Prozesse: start_process mit process und group -> bad_args' ((Code (Tool 'start_process' @{ process = 'Ping'; group = 'G' })) -eq 'bad_args')
+  Check 'Prozesse: unbekannter Prozess -> not_found' ((Code (Tool 'start_process' @{ process = 'gibtsnicht' })) -eq 'not_found')
+  Check 'Prozesse: unbekannte Gruppe -> not_found' ((Code (Tool 'stop_process' @{ group = 'gibtsnicht' })) -eq 'not_found')
+  Check 'Prozesse: read_process_output vor dem Start (leer, gestoppt)' ((Tool 'read_process_output' @{ process = 1 }).data.status -eq 'stopped')
+
+  $s = Tool 'start_process' @{ process = 'Ping' }
+  Check 'Prozesse: start_process Ping -> running' (-not $s.err -and $s.data.processes[0].status -eq 'running') $s.text
+  $o = Wait-Output 'Ping' '127\.0\.0\.1'
+  Check 'Prozesse: Ausgabe von ping lesbar (read_process_output)' ("$($o.data.text)" -match '127\.0\.0\.1' -and $o.data.note -match 'untrusted|vertrauensw') "$($o.data.text)"
+  Check 'Prozesse: started_at gesetzt' ((Get-Proc 'Ping').started_at -gt 0)
+  $s = Tool 'stop_process' @{ process = 'Ping' }
+  Check 'Prozesse: stop_process -> stopping' (-not $s.err -and $s.data.processes[0].status -in @('stopping', 'stopped')) $s.text
+  $p = Wait-Proc 'Ping' @('stopped') 10
+  Check 'Prozesse: Strg+C stoppt ping (Status stopped, nicht crashed)' ($p.status -eq 'stopped') ($p | ConvertTo-Json -Compress)
+
+  [void](Tool 'start_process' @{ process = 'Crash' })
+  $p = Wait-Proc 'Crash' @('crashed', 'exited', 'failed') 15
+  Check 'Prozesse: exit 3 -> crashed, exit_code 3' ($p.status -eq 'crashed' -and $p.exit_code -eq 3) ($p | ConvertTo-Json -Compress)
+  $o = Tool 'read_process_output' @{ process = 3 }
+  Check 'Prozesse: Ausgabe nach dem Ende weiter lesbar' ("$($o.data.text)" -match 'vor-dem-absturz') "$($o.data.text)"
+  [void](Tool 'start_process' @{ process = 'Missing' })
+  $p = Wait-Proc 'Missing' @('crashed', 'exited', 'failed') 15
+  Check 'Prozesse: unbekannter Befehl -> failed ohne exit_code' ($p.status -eq 'failed' -and $null -eq $p.exit_code) ($p | ConvertTo-Json -Compress)
+  [void](Tool 'start_process' @{ process = 'Cmd' })
+  $p = Wait-Proc 'Cmd' @('crashed', 'exited', 'failed') 15
+  $o = Tool 'read_process_output' @{ process = 'Cmd' }
+  Check 'Prozesse: cmd mit && und Anfuehrungszeichen, exit 4 -> crashed 4' ($p.status -eq 'crashed' -and $p.exit_code -eq 4 -and "$($o.data.text)" -match '"a b"') "$($p.status)/$($p.exit_code): $($o.data.text)"
+
+  $s = Tool 'start_process' @{ group = 'G' }
+  Check 'Prozesse: start_process group -> Reihenfolge Http, Ping' (-not $s.err -and ($s.data.processes.name -join ',') -eq 'Http,Ping') $s.text
+  $p = Wait-Proc 'Http' @('running') 5
+  $t0 = Get-Date
+  while (-not @($p.urls).Count -and ((Get-Date) - $t0).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 400; $p = Get-Proc 'Http' }
+  $url = @($p.urls) | Select-Object -First 1
+  Check 'Prozesse: lokale Adresse erkannt (urls)' ($url -match '^http://127\.0\.0\.1:\d+/$') ($p | ConvertTo-Json -Compress)
+  Check 'Prozesse: Fehlerzeile gezaehlt (error_lines)' ($p.error_lines -ge 1) "error_lines=$($p.error_lines)"
+  $port = if ($url -match ':(\d+)/') { [int]$Matches[1] } else { 0 }
+  $ok = $false; if ($port) { try { $c = [Net.Sockets.TcpClient]::new('127.0.0.1', $port); $ok = $c.Connected; $c.Close() } catch {} }
+  Check 'Prozesse: Listener des Prozesses erreichbar' $ok "port=$port"
+  $s = Tool 'stop_process' @{ group = 'G' }
+  Check 'Prozesse: stop_process group in umgekehrter Reihenfolge' (-not $s.err -and ($s.data.processes.name -join ',') -eq 'Ping,Http') $s.text
+  $a = Wait-Proc 'Http' @('stopped') 12; $b = Wait-Proc 'Ping' @('stopped') 12
+  Check 'Prozesse: Gruppe gestoppt' ($a.status -eq 'stopped' -and $b.status -eq 'stopped') "$($a.status)/$($b.status)"
+
+  [void](Tool 'start_process' @{ process = 'Env' })
+  $o = Wait-Output 'Env' 'env='
+  Check 'Prozesse: verschluesselte Umgebungsvariable kommt an' ("$($o.data.text)" -match "env=$secret") "$($o.data.text)"
+  $l = Tool 'list_processes'
+  Check 'Prozesse: Wert nie in list_processes' ($l.text -notmatch [regex]::Escape($secret))
+  $r = Tool 'restart_process' @{ process = 'Env' }
+  $p = Wait-Proc 'Env' @('running') 12
+  Check 'Prozesse: restart_process -> wieder running' (-not $r.err -and $p.status -eq 'running') ($p | ConvertTo-Json -Compress)
+  [void](Tool 'stop_process' @{ process = 'Env' })
+
+  [void](Tool 'start_process' @{ process = 'Zaeh' })
+  [void](Wait-Output 'Zaeh' 'zaeh-laeuft')
+  $t0 = Get-Date; while (-not @(Get-Marker).Count -and ((Get-Date) - $t0).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 300 }
+  Check 'Prozesse: Kindprozess (eigene Konsole, ohne Strg+C) laeuft' (@(Get-Marker).Count -ge 1)
+  [void](Tool 'stop_process' @{ process = 'Zaeh' })
+  Start-Sleep 2
+  Check 'Prozesse: ignoriert Strg+C -> nach 2 s noch stopping' ((Get-Proc 'Zaeh').status -eq 'stopping') (Get-Proc 'Zaeh').status
+  $p = Wait-Proc 'Zaeh' @('stopped') 12
+  Check 'Prozesse: nach 5 s ganzer Baum beendet (stopped)' ($p.status -eq 'stopped') $p.status
+  Start-Sleep 1
+  Check 'Prozesse: Kindprozess mit beendet (Job Object)' (@(Get-Marker).Count -eq 0) "$(@(Get-Marker).Count) uebrig"
+
+  [void](Tool 'start_process' @{ process = 'Zaeh' })
+  $t0 = Get-Date; while (-not @(Get-Marker).Count -and ((Get-Date) - $t0).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 300 }
+  Stop-Hub
+  Start-Sleep 2
+  Check 'Prozesse: Hub beendet (kill) -> Programme enden mit (KILL_ON_JOB_CLOSE)' (@(Get-Marker).Count -eq 0) "$(@(Get-Marker).Count) uebrig"
+  Get-Marker | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  Remove-Item -LiteralPath "$data\processes.json" -ErrorAction SilentlyContinue
+
   Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
   # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.
   Set-Level 'Control' -Empty

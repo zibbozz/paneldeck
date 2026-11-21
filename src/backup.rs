@@ -20,6 +20,8 @@ pub enum Kind {
     Manual,
     PreMigration { from: u32, to: u32 },
     PreRestore,
+    /// Vor dem Aufräumen (#307, seit 2.6.0).
+    PreCleanup,
     /// Vor einer Wartungsaktion (Wartungsseite, #308); höchstens drei, zählt nicht gegen die automatischen.
     PreMaintenance,
 }
@@ -31,6 +33,7 @@ impl Kind {
             Kind::Manual => "manual".into(),
             Kind::PreMigration { from, to } => format!("pre-migration-v{from}-v{to}"),
             Kind::PreRestore => "pre-restore".into(),
+            Kind::PreCleanup => "pre-cleanup".into(),
             Kind::PreMaintenance => "maintenance".into(),
         }
     }
@@ -41,6 +44,7 @@ impl Kind {
             Kind::Manual => lang.t("Manuell", "Manual").into(),
             Kind::PreMigration { from, to } => format!("{} v{from} → v{to}", lang.t("Vor Update", "Before update")),
             Kind::PreRestore => lang.t("Vor Wiederherstellung", "Before restore").into(),
+            Kind::PreCleanup => lang.t("Vor dem Aufräumen", "Before clean-up").into(),
             Kind::PreMaintenance => lang.t("Vor Wartung", "Before maintenance").into(),
         }
     }
@@ -50,6 +54,7 @@ impl Kind {
             "auto" => Some(Kind::Auto),
             "manual" => Some(Kind::Manual),
             "pre-restore" => Some(Kind::PreRestore),
+            "pre-cleanup" => Some(Kind::PreCleanup),
             "maintenance" => Some(Kind::PreMaintenance),
             p => {
                 let rest = p.strip_prefix("pre-migration-v")?;
@@ -127,6 +132,7 @@ pub fn rotate(dir: &Path, keep_auto: usize) {
     let mut auto = 0;
     let mut pre_mig = 0;
     let mut pre_restore = 0;
+    let mut pre_cleanup = 0;
     let mut pre_maint = 0;
     for b in all {
         let remove = match b.kind {
@@ -141,6 +147,10 @@ pub fn rotate(dir: &Path, keep_auto: usize) {
             Kind::PreRestore => {
                 pre_restore += 1;
                 pre_restore > KEEP_SAFETY
+            }
+            Kind::PreCleanup => {
+                pre_cleanup += 1;
+                pre_cleanup > KEEP_SAFETY
             }
             Kind::PreMaintenance => {
                 pre_maint += 1;
