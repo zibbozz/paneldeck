@@ -15,6 +15,7 @@ Paneldeck works **offline**: it only contacts GitHub when you check for updates 
 - **Background programs:** every terminal's shell runs in its own Windows Job Object, so programs started from a session stay part of it, even when started detached. This includes long-lived apps such as `code .`, a browser or `wt`. When you close or reload a session, or quit Paneldeck, and such programs are still running, Paneldeck lists them and asks whether to keep them running or end them all. "End all" terminates them immediately, without saving. Programs inside a session cannot break away from its job (`CREATE_BREAKAWAY_FROM_JOB` fails); this is intended.
 - **Claude mode** (can be turned off): status via hooks (working / approval? / ready), notifications, token and cost estimates, history with exact resume, start options (model, effort, permission mode, agent and more), reload and settings per session.
 - **Todo list and tickets:** a simple to-do list that turns into a small Jira in *expert mode* – projects, ticket types, workflows, boards, a query language, sprints and dashboards, all stored locally. Every ticket has a description, a due date with configurable markers and labels; icons from the Lucide set and an editable color palette.
+- **Editor:** a plain text editor tab with folder tree, tabs, free splits, multiple cursors, minimap, find/replace (regex) and search in files (respects `.gitignore`); keeps encoding and line endings, saves atomically, keeps unsaved changes across restarts and stays smooth with files of several hundred MB. Agents can read it and – only with your switches – open, edit and save files.
 - **Chats with local models:** talk to Ollama, LM Studio, llama.cpp or vLLM on this computer or in your network, right next to your terminals – the model can use Paneldeck's tools within limits you set per model.
 - **Agent interface (MCP):** AI agents can see sessions, read terminals, run commands and work with your to-do list and tickets – off by default, with a configurable system prompt.
 - **Command line and profiles:** separate data folders and profiles that run side by side, each with its own autostart and MCP entry.
@@ -54,6 +55,7 @@ The guides live in [`docs/en/`](docs/en/) (German: [`docs/de/`](docs/de/)) and a
 - [Todo list and tickets](docs/en/todo-and-tickets.md) – simple and expert mode, boards, sprints, dashboards, quick actions
 - [Query language](docs/en/query-language.md) – searching tickets, examples, reference
 - [Process list](docs/en/processes.md) – dev servers and watchers with their output in a pane of their own
+- [Editor](docs/en/editor.md) – the Editor tab: files and folders, splits, find/replace, search in files, encodings, hot exit, large files, agents
 - [Chats with local models](docs/en/chat.md) – Ollama and OpenAI-compatible servers, models, tools and approvals, security
 - [Themes and the theme editor](docs/en/themes.md) – editing and generating themes, design check, file format and colour names
 - [Agent interface (MCP)](docs/en/agent-interface.md) – levels, tools, security, system prompt

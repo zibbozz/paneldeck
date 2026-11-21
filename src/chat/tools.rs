@@ -80,7 +80,11 @@ impl ToolPolicy {
     }
 
     fn allowed(&self, def: &mcp::ToolDef) -> bool {
-        def.level <= self.cfg.level && def.group.available(self.expert) && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
+        def.level <= self.cfg.level
+            && def.group.available(self.expert)
+            && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
+            // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
+            && crate::editor_svc::tools::offered_to_chats(def.name, crate::editor_svc::settings::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Werkzeuge für die Anfrage: alle, die Stufe und Modus erlauben und die nicht einzeln gesperrt sind.

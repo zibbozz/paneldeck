@@ -9,7 +9,7 @@
 //! weitere Felder von [`State`] dazu, sobald die Plattform-Schicht sie anlegt.
 
 use super::{Ctx, Item, ItemReport};
-use crate::integration::{CONTEXT_KEYS, CONTEXT_PROBE, RUN_KEY};
+use crate::integration::{CONTEXT_KEYS, CONTEXT_PROBE, EDIT_CONTEXT_KEY, EDIT_CONTEXT_PROBE, RUN_KEY};
 use crate::launch;
 use crate::platform::registry::{self, RegOp};
 use std::path::{Path, PathBuf};
@@ -21,6 +21,9 @@ pub struct State {
     pub run_values: Vec<(String, String)>,
     /// Kontextmenü zeigt auf diese .exe: gespeicherte Werte (Schlüssel, Wertname, Inhalt) für die Sicherung.
     pub context: Option<Vec<(String, Option<String>, String)>>,
+    /// Explorer-Eintrag „In Paneldeck-Editor öffnen“ (#54) zeigt auf diese .exe: gespeicherte Werte für die Sicherung.
+    /// Gehört zum selben Fenster-Eintrag „Explorer-Kontextmenü“ wie die Ordner-Einträge.
+    pub edit_context: Option<Vec<(String, Option<String>, String)>>,
     /// `~/.claude.json` (bzw. `$CLAUDE_CONFIG_DIR/.claude.json`).
     pub claude_json: Option<PathBuf>,
     /// `mcpServers`-Namen darin, die auf diese .exe zeigen.
@@ -66,9 +69,22 @@ impl State {
     pub fn read(exe: &Path, _data_dir: &Path) -> State {
         let run_values = our_run_values(&registry::values(RUN_KEY), exe);
         let context = registry::get_str(CONTEXT_PROBE, None).filter(|c| launch::same_path(launch::program_of(c), &exe.to_string_lossy())).map(|_| context_values());
+        let edit_context = registry::get_str(EDIT_CONTEXT_PROBE, None).filter(|c| launch::same_path(launch::program_of(c), &exe.to_string_lossy())).map(|_| key_values(&[EDIT_CONTEXT_KEY]));
         let claude_json = claude_json_path().filter(|p| p.is_file());
         let claude_json_servers = claude_json.as_deref().map(|p| servers_in(p, exe)).unwrap_or_default();
-        State { run_values, context, claude_json, claude_json_servers }
+        State { run_values, context, edit_context, claude_json, claude_json_servers }
+    }
+
+    /// Einträge des Fenster-Eintrags „Explorer-Kontextmenü“: Ordner-Menü und Editor-Eintrag (je einer, wenn vorhanden).
+    pub fn context_entries(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.context.is_some() {
+            v.push("Directory\\shell\\Paneldeck".to_string());
+        }
+        if self.edit_context.is_some() {
+            v.push("*\\shell\\PaneldeckEdit".to_string());
+        }
+        v
     }
 
     fn current(ctx: &Ctx) -> State {
@@ -82,8 +98,13 @@ impl State {
 
 /// Gespeicherte Werte der Kontextmenü-Schlüssel (Beschriftung, Symbol, Befehl).
 fn context_values() -> Vec<(String, Option<String>, String)> {
+    key_values(&CONTEXT_KEYS)
+}
+
+/// Gespeicherte Werte (Beschriftung, Symbol, Befehl) der angegebenen Schlüssel.
+fn key_values(keys: &[&str]) -> Vec<(String, Option<String>, String)> {
     let mut v = Vec::new();
-    for key in CONTEXT_KEYS {
+    for key in keys.iter().copied() {
         for (k, name) in [(key.to_string(), None), (key.to_string(), Some("Icon")), (format!("{key}\\command"), None)] {
             if let Some(val) = registry::get_str(&k, name) {
                 v.push((k, name.map(str::to_string), val));
@@ -156,20 +177,28 @@ pub fn remove(ctx: &Ctx, item: Item, r: &mut ItemReport) {
     match item {
         Item::Autostart => delete_run_values(ctx, &st.run_values, "autostart", r),
         Item::ContextMenu => {
-            let Some(vals) = st.context.filter(|_| ctx.system_integration) else { return };
-            match write_reg_backup(ctx.safety_dir(), "context-menu", &vals) {
-                Ok(p) => {
-                    let p = p.display().to_string();
-                    r.notes.push((format!("Gesichert: {p}"), format!("Saved: {p}")));
-                }
-                Err(e) => {
-                    r.errors.push(e);
-                    return;
-                }
+            if !ctx.system_integration {
+                return;
             }
-            match crate::integration::set_context(false, &ctx.exe) {
-                Ok(()) => r.entries += 1,
-                Err(e) => r.errors.push(e),
+            // Ordner-Einträge und Editor-Eintrag (#54): je eigene Sicherung, dann entfernen.
+            let parts: [(Option<Vec<(String, Option<String>, String)>>, &str, fn(bool, &Path) -> Result<(), String>); 2] =
+                [(st.context, "context-menu", crate::integration::set_context), (st.edit_context, "context-menu-editor", crate::integration::set_edit_context)];
+            for (vals, stem, off) in parts {
+                let Some(vals) = vals else { continue };
+                match write_reg_backup(ctx.safety_dir(), stem, &vals) {
+                    Ok(p) => {
+                        let p = p.display().to_string();
+                        r.notes.push((format!("Gesichert: {p}"), format!("Saved: {p}")));
+                    }
+                    Err(e) => {
+                        r.errors.push(e);
+                        continue; // ohne Sicherung nichts ändern
+                    }
+                }
+                match off(false, &ctx.exe) {
+                    Ok(()) => r.entries += 1,
+                    Err(e) => r.errors.push(e),
+                }
             }
         }
         Item::ClaudeJson => {

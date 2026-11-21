@@ -39,6 +39,9 @@ mod dialogs;
 mod dragdrop;
 pub(crate) mod editor_ui;
 mod empty_hub;
+// Editor-Reiter (#54): Einstellungen, MCP-Werkzeuge, Plattenänderungen, --edit, Explorer-Eintrag, Suche in Dateien.
+mod editor_services;
+mod editor_search_ui;
 pub(crate) mod folder_picker;
 mod fresh_start;
 mod closing;
@@ -908,6 +911,8 @@ pub struct App {
     quit_ok: bool,
     /// Prozessliste (#243): Einträge, Laufzeit, Ausgabeansicht, Dialoge.
     procs: procs_ui::ProcsState,
+    /// Dienste des Editor-Reiters (#54): Plattenänderungen, Suche in Dateien, `--edit`, Explorer-Eintrag.
+    editor_svc: editor_services::EditorServices,
     detached: Vec<u64>,
     settings_tab: usize,
     capture_key: Option<String>,
@@ -1009,8 +1014,11 @@ fn hooks_foreign_note(other: &str) -> String {
     )
 }
 
-fn setup_fonts(ctx: &egui::Context, choice: &str) {
-    ctx.set_fonts(build_fonts(choice));
+fn setup_fonts(ctx: &egui::Context, choice: &str, editor_font: &str) {
+    let mut fonts = build_fonts(choice);
+    // Schrift des Editor-Reiters (#54): eigene Familie „editor“, Standard = Terminalschrift.
+    editor_services::add_editor_family(&mut fonts, editor_font, choice);
+    ctx.set_fonts(fonts);
 }
 
 /// Baut die Schriftdefinitionen der App (eingebettete + vorhandene Systemschriften); getrennt von `setup_fonts`,
@@ -1120,6 +1128,8 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
         fonts.families.insert(egui::FontFamily::Name(fam_name.into()), list);
     }
     crate::sysfonts::set_real_variants(real[0], real[1], real[2]);
+    // Familie „editor“ gibt es immer (Standard: wie die Terminalschrift), damit sie nie fehlt (#54).
+    editor_services::add_editor_family(&mut fonts, "", choice);
     fonts
 }
 
@@ -1270,6 +1280,7 @@ impl App {
             quitting: false,
             quit_ok: false,
             procs: procs_state,
+            editor_svc: editor_services::EditorServices::from_cli(),
             detached: saved.detached.clone(),
             settings_tab: 0,
             capture_key: None,
@@ -1472,6 +1483,11 @@ impl App {
         let cmds: Vec<IpcCmd> = self.hook_server.as_ref().map(|h| h.cmd_rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             self.from_tray(ctx);
+            if let IpcCmd::Edit { path } = c {
+                // `paneldeck --edit <datei>` (#54): im Editor-Reiter öffnen (keine Sitzung, keine Agenten-Kette).
+                self.editor_open_from_ipc(path);
+                continue;
+            }
             if let IpcCmd::Open { path, claude, origin } = c {
                 // `paneldeck --open` aus einem Hub-Terminal heraus: Hat das Terminal eine Agenten-Kette, erbt die neue
                 // Sitzung sie samt ihm (#152) – sonst entstünde so eine unmarkierte Claude-Sitzung. Ohne Kette (der
@@ -4331,6 +4347,7 @@ impl eframe::App for App {
         self.poll_mcp(ctx);
         self.editor_tick(ctx);
         self.poll_procs(ctx);
+        self.poll_editor_services(ctx);
         self.poll_retired(ctx);
         // Linux/macOS: Master-Passwort für API-Schlüssel, wenn ein Zugriff darauf wartet (#149).
         #[cfg(unix)]

@@ -223,7 +223,8 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "log_time" => ("Arbeitszeit auf einem Ticket erfassen.", "Log work time on a ticket."),
         "link_ticket" => ("Ticket mit Ticket, URL oder Git-Branch verknüpfen.", "Link a ticket to a ticket, URL or git branch."),
         "link_terminal" => ("Ticket mit einer Terminal-Sitzung verknüpfen.", "Link a ticket to a terminal session."),
-        _ => return None,
+        // Editor-Reiter (#54): Texte bei den Werkzeugen selbst.
+        n => return crate::editor_svc::tools::short_desc(n),
     })
 }
 

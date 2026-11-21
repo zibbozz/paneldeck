@@ -26,6 +26,8 @@ encoding_rs = "0.8"
 similar = "2"
 unicode-segmentation = "1"
 unicode-width = "0.2"
+# Editor (#54): Suche in Dateien – Ordner durchlaufen mit .gitignore-Regeln (ignore, MIT/Unlicense, aus ripgrep).
+ignore = "0.4"
 
 [features]
 # Nur für die README-Screenshots (tools/readme-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.

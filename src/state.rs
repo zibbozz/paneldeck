@@ -290,6 +290,11 @@ pub struct Settings {
     /// `distinct`, `status`, `terminal`, `harmony`; unbekannte bleiben erhalten.
     #[serde(deserialize_with = "lenient_strings")]
     pub theme_checks_off: Vec<String>,
+    /// Editor-Reiter (seit 3.0.0, #54): Schrift, große Dateien, automatisch speichern, Suche in Dateien und die drei
+    /// Agenten-Schalter (`editor_svc::settings`). Fehlt in älteren Dateien (dann die Standards, Agenten-Schalter aus);
+    /// Unlesbares ergibt je Wert den Standard.
+    #[serde(deserialize_with = "crate::editor_svc::settings::EditorSettings::lenient")]
+    pub editor: crate::editor_svc::settings::EditorSettings,
 }
 
 /// Liste von Texten tolerant lesen: Einträge mit falschem Typ fallen weg, ein falscher Typ insgesamt ergibt eine leere Liste.
@@ -406,6 +411,7 @@ impl Default for Settings {
             progress_indicator: true,
             cursor_blink: true,
             theme_checks_off: Vec::new(),
+            editor: Default::default(),
         }
     }
 }
@@ -1480,6 +1486,14 @@ mod tests {
         assert_eq!(s.theme_checks_off, ["contrast", "harmony"]);
         let s: Settings = serde_json::from_str(r#"{"theme_checks_off":"x"}"#).unwrap();
         assert!(s.theme_checks_off.is_empty());
+        // Editor (#54): fehlt = Standards (Agenten-Schalter aus), Unlesbares je Wert, Rundweg über settings.json.
+        assert_eq!(s.editor, crate::editor_svc::settings::EditorSettings::default());
+        let e: Settings = serde_json::from_str(r#"{"editor":{"agent_open":true,"large_file_mb":"x","search_exclude":["dist/"]},"theme":"Dracula"}"#).unwrap();
+        assert!(e.editor.agent_open && !e.editor.agent_edit && e.editor.large_file_mb == 20 && e.editor.search_exclude == ["dist/"] && e.theme == "Dracula");
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back.editor, e.editor);
+        let e: Settings = serde_json::from_str(r#"{"editor":"kaputt","theme":"Dracula"}"#).unwrap();
+        assert!(!e.editor.agent_open && e.theme == "Dracula", "ein kaputtes editor-Feld kostet nicht die übrigen Einstellungen");
         assert!(s.claude_defaults.is_empty() && s.last_claude_opts.as_ref().is_none_or(|o| o.is_empty()));
         assert!(s.wsl_recent.is_empty());
         // echte Werte gelten weiter
