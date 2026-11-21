@@ -633,13 +633,16 @@ impl App {
 }
 
 /// Das Editor-Fenster (ohne Schließen-Knopf; den setzt der Aufrufer). Anfangs höchstens so groß wie das Hauptfenster
-/// abzüglich eines Randes – egui begrenzt nur den Inhalt, der Rahmen ragte sonst über den Rand.
+/// abzüglich eines Randes – egui begrenzt nur den Inhalt, der Rahmen ragte sonst über den Rand. Die Höchstgröße folgt
+/// dem Hauptfenster in jedem Bild: egui merkt sich die Größe, ein verkleinertes Hauptfenster schnitte sonst ab.
 fn editor_window<'a>(ctx: &egui::Context, title: String) -> egui::Window<'a> {
+    const MIN: [f32; 2] = [860.0, 540.0];
     let screen = ctx.content_rect().size();
     egui::Window::new(title)
         .id(Id::new("pd_theme_editor"))
         .default_size([1240.0_f32.min(screen.x - 24.0), 800.0_f32.min(screen.y - 24.0)])
-        .min_size([860.0, 540.0])
+        .min_size(MIN)
+        .max_size([(screen.x - 40.0).max(MIN[0]), (screen.y - 80.0).max(MIN[1])])
         .resizable(true)
         .collapsible(false)
         .constrain(true)
@@ -1233,6 +1236,32 @@ mod tests {
                 assert!(win.width() <= 1240.0 + 40.0, "{w}/{lang:?}: Fenster gewachsen: {win:?}");
             }
         }
+    }
+
+    /// egui merkt sich die Fenstergröße: Wird das Hauptfenster bei offenem Editor (oder zwischen zwei Öffnungen)
+    /// verkleinert, schrumpft der Editor mit, statt rechts abgeschnitten zu werden.
+    #[test]
+    fn editor_shrinks_with_a_smaller_main_window() {
+        let ctx = egui::Context::default();
+        let mut e = ed();
+        let mut frame = 0;
+        let mut run = |w: f32, h: f32, n: usize| {
+            for _ in 0..n {
+                let mut action = None;
+                let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))), time: Some(frame as f64 * 0.05), ..Default::default() };
+                frame += 1;
+                let _ = ctx.run(input, |ctx| {
+                    let st = (*ctx.style()).clone();
+                    editor_window(ctx, "t".into()).show(ctx, |ui| body(&mut e, ui, Lang::De, 0.0, &[], &st, &mut action));
+                });
+            }
+            ctx.memory(|m| m.area_rect(Id::new("pd_theme_editor"))).expect("Fenster")
+        };
+        let big = run(1500.0, 960.0, 6);
+        assert!(big.width() > 1100.0, "Ausgangslage: breiter als das spätere Hauptfenster ({big:?})");
+        let small = run(1100.0, 760.0, 8);
+        assert!(small.min.x >= -0.5 && small.max.x <= 1100.5, "Fenster {small:?} ragt aus 1100 px");
+        assert!(small.min.y >= -0.5 && small.max.y <= 760.5, "Fenster {small:?} ragt aus 760 px");
     }
 
     #[test]
