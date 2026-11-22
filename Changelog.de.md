@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [3.1.0] - WIP
 
+### Added
+
+- **Plan-Modus** für lokale Chats: Ein Schalter **Plan** neben *Senden* (Umschalt+Tab im Eingabefeld) mit den Stufen *niedrig*, *mittel*, *hoch*, *sehr hoch* und *maximal* (low … max) gilt für die nächste Nachricht. Das Modell recherchiert zuerst nur mit lesenden Werkzeugen – jeden schreibenden Aufruf lehnt Paneldeck mit dem Fehler `plan_mode` ab – und schreibt dann einen Plan; jede Stufe hat feste Anweisungen für Aufbau, Tiefe und ein Recherche-Budget (von 5 Werkzeugaufrufen bei *niedrig* bis ohne Grenze bei *maximal*), und ab *hoch* klärt das Modell offene Punkte vorher mit Auswahlfragen (bei *maximal* Pflicht). Der Plan erscheint als **Plan-Karte** mit *Ausführen*, *Änderungen anfragen* (mit Kommentar), *Verwerfen* und *Exportieren*; erst *Ausführen* gibt die schreibenden Werkzeuge frei, füllt die To-do-Liste des Chats mit den Schritten des Plans und speichert den Plan als Markdown im Datenordner (`plans/`). Neues optionales Feld `plan` in `chats/<id>.json` (#358)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added

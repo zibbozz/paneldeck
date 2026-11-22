@@ -1012,6 +1012,20 @@ const CHAT: &[Step] = &[
         done: Some(chat_started),
         need: None,
     },
+    Step {
+        // Der Schalter steht nur in einem offenen Chat (das Tutorial legt keinen an): Schritt ohne Ziel.
+        id: "chat.plan",
+        since: "3.1.0",
+        spot: None,
+        title: tx("Erst planen, dann ändern", "Plan first, then change"),
+        body: tx(
+            "Neben „Senden“ steht im Chat der Schalter „Plan“ (Umschalt+Tab) mit einer Stufe von „niedrig“ bis „maximal“. Ist er an, recherchiert das Modell zuerst nur lesend und schreibt einen Plan – Schreib-Werkzeuge sperrt Paneldeck so lange. Der Plan erscheint als Karte: „Ausführen“ gibt ihn frei und füllt die To-do-Liste, „Änderungen anfragen“ lässt ihn überarbeiten, „Verwerfen“ beendet den Plan-Modus.",
+            "Next to “Send” a chat has the “Plan” toggle (Shift+Tab) with a level from “low” to “max”. When it is on, the model first researches read-only and writes a plan – Paneldeck locks the writing tools until then. The plan appears as a card: “Execute” approves it and fills the to-do list, “Request changes” has it revised, “Discard” ends the plan mode.",
+        ),
+        prep: HUB,
+        done: None,
+        need: None,
+    },
 ];
 
 /// Kapitel „Agenten-Schnittstelle (MCP)“.

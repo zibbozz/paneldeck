@@ -233,6 +233,97 @@ impl App {
         }
     }
 
+    /// Chat mit einer Plan-Karte (#358): eingeschalteter Schalter *Plan* (Stufe „hoch“) neben *Senden* und ein
+    /// vorgeschlagener Plan mit *Ausführen* / *Änderungen anfragen* / *Verwerfen* / *Exportieren*. Server und Modell
+    /// stehen nur in den Einstellungen der Aufnahme; es wird nichts gesendet.
+    fn shot_chat_plan(&mut self, ctx: &egui::Context) {
+        use crate::chat::plan::{Plan, PlanLevel, PlanStatus};
+        use crate::llm::config::{LlmModel, LlmServer, OLLAMA_LOCAL};
+        const SERVER: &str = "shot-ollama";
+        const MODEL: &str = "qwen3:14b";
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        let pid = self.active_project;
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        if !self.settings.llm_servers.list.iter().any(|s| s.id == SERVER) {
+            let mut s = LlmServer {
+                id: SERVER.into(),
+                name: "Ollama".into(),
+                url: OLLAMA_LOCAL.into(),
+                last_models: vec![crate::llm::ModelInfo { name: MODEL.into(), tools: Some(true), context_length: Some(32768) }],
+                ..LlmServer::default()
+            };
+            s.set_model_cfg(LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, ..LlmModel::named(MODEL) });
+            self.settings.llm_servers.list.push(s);
+        }
+        let lang = self.settings.language;
+        let chat = state::ChatMeta { server: SERVER.into(), model: MODEL.into() };
+        let id = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), chat: Some(chat), ..NewOpts::default() });
+        self.shot_name(id, lang.t("Bestellungen stornieren", "Cancel orders"));
+        let question = lang.t(
+            "Stornierte Bestellungen sollen eine Erstattung auslösen. Plane das bitte zuerst.",
+            "Cancelled orders should trigger a refund. Please plan this first.",
+        );
+        let plan = lang.t(
+            "# Plan: Erstattung beim Stornieren
+
+## Ziel
+`cancel_order` löst für bezahlte Bestellungen eine Erstattung aus; doppelte Stornos erstatten nichts.
+
+## Befunde
+- `src/orders.rs`: `cancel_order` setzt nur `cancelled = true`.
+- `src/payments.rs`: `charge` gibt eine Zahlungs-Kennung zurück, eine Erstattung gibt es noch nicht.
+
+## Steps
+1. `src/payments.rs`: `refund(charge_id)` mit eigenem Fehlertyp ergänzen
+2. `src/orders.rs`: Zahlungs-Kennung in `Order` speichern
+3. `src/orders.rs`: `cancel_order` ruft `refund` nur beim ersten Storno auf
+4. `tests/orders.rs`: Tests für Erstattung und doppeltes Storno
+5. `cargo test` ausführen
+
+## Risiken
+- Bestellungen ohne Zahlung: keine Erstattung versuchen.
+
+## Tests
+- `cargo test`",
+            "# Plan: Refund on cancel
+
+## Goal
+`cancel_order` triggers a refund for paid orders; cancelling twice refunds nothing.
+
+## Findings
+- `src/orders.rs`: `cancel_order` only sets `cancelled = true`.
+- `src/payments.rs`: `charge` returns a charge id; there is no refund yet.
+
+## Steps
+1. `src/payments.rs`: add `refund(charge_id)` with its own error type
+2. `src/orders.rs`: store the charge id in `Order`
+3. `src/orders.rs`: `cancel_order` calls `refund` only on the first cancel
+4. `tests/orders.rs`: tests for the refund and a double cancel
+5. Run `cargo test`
+
+## Risks
+- Orders without a payment: do not try a refund.
+
+## Tests
+- `cargo test`",
+        );
+        if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+            use crate::chat::{ChatMsg, Role};
+            c.file.messages = vec![ChatMsg::new(Role::User, question), ChatMsg::new(Role::Assistant, plan)];
+            c.file.plan = Some(Plan { level: PlanLevel::High, status: PlanStatus::Proposed, markdown: plan.trim().to_string(), revision: 1, created: crate::chat::now_secs(), approved: None, file: None });
+            c.planning.on = true;
+            c.planning.level = PlanLevel::High;
+            c.focus_input = false;
+            c.touch();
+        }
+        self.activate(id);
+    }
+
     /// Ansicht aufbauen (einmal).
     fn shot_setup(&mut self, ctx: &egui::Context, view: &str, arg: &str) {
         let demo = demo_dir(&self.dir);
@@ -318,6 +409,8 @@ impl App {
             "theme-editor" => self.shot_theme_editor("accent", false),
             "theme-color" => self.shot_theme_editor("selection", false),
             "theme-checks" => self.shot_theme_editor("ansi8", true),
+            // ---- Chats
+            "chat-plan" => self.shot_chat_plan(ctx),
             // ---- Tutorial
             "tutorial-card" => self.set_mode(titlebar::Mode::Terminals),
             "tutorial-tour" => {

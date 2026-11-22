@@ -85,6 +85,8 @@ $AllViews = @(
   @{ Name = 'theme-editor';        Spec = 'theme-editor';        W = 1400; H = 900 }
   @{ Name = 'theme-color';         Spec = 'theme-color';         W = 1400; H = 900 }
   @{ Name = 'theme-checks';        Spec = 'theme-checks';        W = 1400; H = 900; Wait = 2 }
+  # Chats
+  @{ Name = 'chat-plan';           Spec = 'chat-plan';           W = 1300; H = 900;  Wait = 2 }
   # Tutorial
   @{ Name = 'tutorial-card';       Spec = 'tutorial-card';       Wait = 1 }
   @{ Name = 'tutorial-tour';       Spec = 'tutorial-tour:basics/basics.sidebar'; Wait = 2 }

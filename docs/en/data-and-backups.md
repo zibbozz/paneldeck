@@ -25,6 +25,7 @@ With `--profile <name>` the subfolder `profiles\<name>` of that folder is used.
 | `backups/` | automatic and manual copies of the database (the folder can be changed) |
 | `scrollback/` | saved terminal history |
 | `chats/` | histories of the [chats](chat.md), one `<id>.json` per chat (see [Chat histories](#chat-histories)) |
+| `plans/` | approved plans of the chats' [plan mode](chat.md#plan-mode) as Markdown files (since 3.1.0) |
 | `processes.json` | entries of the [process list](processes.md) (see [below](#process-list-processesjson)) |
 | `process-logs/` | log files of process-list entries with *Log file* switched on |
 | `prompts.json` | prompt library |
@@ -183,6 +184,11 @@ All fields are optional; older versions ignore them, and missing fields mean the
   | `agent_open`, `agent_edit`, `agent_save` | `false` | the [agent switches](editor.md#agents) (only `true` switches one on; only effective at level *Control*) |
 
 - `hot-exit/`: unsaved editor buffers; `editor-state.json`: open folder, tabs, splits and recent files of the Editor tab (both internal formats; in *Clean up* as *Editor: unsaved buffers* and as part of *Sessions and layout*).
+
+## New fields in 3.1.0
+<!-- Plan mode (#358) -->
+- `chats/<id>.json` → `plan`: the chat's current plan from [plan mode](chat.md#plan-mode) – `{"level": "low" | "medium" | "high" | "xhigh" | "max", "status": "proposed" | "revising" | "approved" | "discarded", "markdown": "# Plan: …", "revision": 1, "created": 1763200000, "approved": 1763200100, "file": "plans/12-1763200100.md"}` (`approved` and `file` only after *Execute*). Only written when there is a plan; an unreadable or empty value means no plan. *Clear history* also clears it. Older versions ignore it.
+- `plans/`: approved plans as Markdown files, `<chat id>-<time>.md`, with a comment line on top (chat, level, revision, time). They are documents for you to keep: closing the chat does not delete them, and the format is not a stable interface.
 
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.

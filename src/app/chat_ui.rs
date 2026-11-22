@@ -29,6 +29,8 @@ pub(super) struct ChatOut {
     pub revoke: Option<AllowRule>,
     /// Antwort auf die einmalige Frage nach der Stufe des Modells.
     pub level: Option<McpLevel>,
+    /// Knopf der Plan-Karte (#358).
+    pub plan: Option<crate::chat::plan::PlanAction>,
 }
 
 /// Höhe der Kopfzeile (Füllstand des Kontexts, dauerhafte Freigaben).
@@ -72,6 +74,7 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
             if !chat.file.always_allow.is_empty() {
                 approvals_menu(ui, session, &chat.file.always_allow, lang, &mut out);
             }
+            super::chat_plan_ui::plan_chip(ui, chat, lang);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 context_gauge(ui, session, chat, lang);
             });
@@ -131,6 +134,9 @@ struct RowCx<'a> {
     preview: Option<(String, Preview)>,
     /// Text unter einer noch leeren Antwort („…“, „Denkt nach …“, „Warte auf das Modell … 12 s“).
     waiting: String,
+    /// Aktueller Plan (#358): seine Nachricht wird als Plan-Karte gezeichnet; `plan_decidable` = Knöpfe aktiv.
+    plan: Option<&'a crate::chat::plan::Plan>,
+    plan_decidable: bool,
 }
 
 /// Ab so vielen Sekunden ohne Daten zeigt eine leere Antwort, wie lange schon gewartet wird (#299).
@@ -182,6 +188,7 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let level_question = chat.level_question.is_some();
     let target = chat.approval_target.clone();
     let preview = chat.approval_preview.clone().filter(|(id, _)| pending_has(&chat.calls, id));
+    let plan_decidable = chat.plan_decidable();
     let ChatState { file, ui: cache, warning, follow, notice, usage, .. } = chat;
     let msgs = &file.messages;
     let n = msgs.len();
@@ -220,6 +227,8 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
         pending,
         target,
         preview,
+        plan: file.plan.as_ref(),
+        plan_decidable,
     };
     // Am Ende kleben, solange der Nutzer nicht hochscrollt; nach dem Öffnen und nach dem Senden einmal ganz nach unten.
     let jump = std::mem::take(follow);
@@ -406,10 +415,15 @@ fn assistant(ui: &mut Ui, i: usize, m: &ChatMsg, msgs: &[ChatMsg], cache: &mut U
     ui.label(RichText::new(rc.model).small().color(style::dim(ui)));
     if !m.content.is_empty() {
         let doc = cache.md.entry(i).or_insert_with(|| markdown::parse_plain(&m.content));
-        let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };
-        let o = markdown::render(ui, doc, &opts);
-        if let Some(u) = o.clicked_url {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(u));
+        // Die Antwort mit dem aktuellen Plan ist eine Plan-Karte (#358).
+        if let Some(p) = rc.plan.filter(|p| m.error.is_none() && m.content.trim() == p.markdown) {
+            super::chat_plan_ui::plan_card(ui, session, p, doc, rc.plan_decidable, lang, out);
+        } else {
+            let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };
+            let o = markdown::render(ui, doc, &opts);
+            if let Some(u) = o.clicked_url {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(u));
+            }
         }
     }
     for (k, c) in m.tool_calls.iter().enumerate() {
@@ -861,6 +875,10 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
         });
     }
     let focused = ui.memory(|m| m.has_focus(tid));
+    // Umschalt+Tab schaltet den Plan-Modus um (#358), statt den Fokus zu verschieben.
+    if focused {
+        super::chat_plan_ui::shift_tab(ui, chat);
+    }
     // Enter sendet; während einer Antwort tut es nichts (auch keinen Zeilenumbruch). Nicht während einer IME-Eingabe.
     if focused && !ime_composing(ui, tid) && take_plain_enter(ui) && !streaming {
         out.send = true;
@@ -869,8 +887,12 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
         chat.cancel_edit();
     }
     let avail = ui.available_rect_before_wrap();
-    let field = Rect::from_min_max(avail.min, Pos2::new(avail.max.x - BTN_W - S2, avail.min.y + input_h));
+    // Rechts: Schalter *Plan* mit Stufe (#358), dann *Senden*.
+    let plan_w = super::chat_plan_ui::PLAN_W;
+    let field = Rect::from_min_max(avail.min, Pos2::new((avail.max.x - BTN_W - plan_w - 2.0 * S2).max(avail.min.x + 40.0), avail.min.y + input_h));
     let btn = Rect::from_min_max(Pos2::new(avail.max.x - BTN_W, field.max.y - 30.0), Pos2::new(avail.max.x, field.max.y));
+    let plan_rect = Rect::from_min_max(Pos2::new(btn.min.x - S2 - plan_w, btn.min.y), Pos2::new(btn.min.x - S2, btn.max.y));
+    let hint = if chat.planning.on { super::chat_plan_ui::input_hint(lang) } else { lang.t("Nachricht … (Enter sendet, Umschalt+Enter: neue Zeile)", "Message … (Enter sends, Shift+Enter: new line)") };
     let resp = ui
         .scope_builder(UiBuilder::new().max_rect(field), |ui| {
             egui::ScrollArea::vertical().id_salt(("chat_input_scroll", session)).max_height(input_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -879,7 +901,7 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
                         .id(tid)
                         .desired_rows(1)
                         .desired_width(f32::INFINITY)
-                        .hint_text(lang.t("Nachricht … (Enter sendet, Umschalt+Enter: neue Zeile)", "Message … (Enter sends, Shift+Enter: new line)")),
+                        .hint_text(hint),
                 )
             })
             .inner
@@ -901,6 +923,7 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
             out.send = true;
         }
     }
+    super::chat_plan_ui::plan_toggle(ui, plan_rect, session, chat, lang);
 }
 
 #[cfg(test)]

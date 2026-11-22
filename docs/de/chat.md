@@ -167,6 +167,38 @@ Neben den Paneldeck-Werkzeugen bekommen Chat-Modelle **Agenten-Werkzeuge** für 
 Die Werkzeugnamen stehen im Verlauf (`read_chat`). Die To-do-Liste steht in der Verlaufsdatei des Chats (`todos`), dauerhafte Freigaben der Agenten-Werkzeuge in `always_allow` (ohne `session`; bei Befehlen mit `prefix`) – siehe [Datenordner](data-and-backups.md#chatverläufe).
 <!-- Ende des Abschnitts „Agenten-Werkzeuge“. -->
 
+<!-- Abschnitt „Plan-Modus“ (#358, 3.1.0) – in sich geschlossen. -->
+## Plan-Modus
+Im Plan-Modus **recherchiert das Modell zuerst und schreibt einen Plan; geändert wird nichts, bis du ihn freigibst**. Gedacht für größere Aufgaben, bei denen du den Weg sehen willst, bevor Dateien bearbeitet oder Befehle ausgeführt werden.
+
+![Ein Chat mit dem Schalter Plan (Stufe hoch) neben Senden und einer Plan-Karte mit Ausführen, Änderungen anfragen, Verwerfen und Exportieren](../images/de/chat-plan.png)
+
+**Einschalten.** Neben **Senden** gibt es den Schalter **Plan** mit einer Stufenwahl. Er gilt für die **nächste Nachricht**, die du sendest; **Umschalt+Tab** im Eingabefeld schaltet ihn um (wie in Claude Code). Eingeschaltet ist der Schalter hervorgehoben (**Plan ✓**), und das Eingabefeld zeigt „Plan-Modus: Aufgabe beschreiben …“. Er bleibt an, bis du den Plan ausführst oder verwirfst oder ihn abschaltest. Eine Stufe wählen schaltet ihn ein. Nachrichten externer Agenten (`send_chat_message`) laufen nie im Plan-Modus.
+
+**Stufen.** Jede Stufe hat feste Anweisungen für Aufbau und Tiefe des Plans und ein **Recherche-Budget** (lesende Werkzeugaufrufe je Runde):
+
+| Stufe | Plan | Recherche-Budget | Vorher Rückfragen |
+|---|---|---|---|
+| **niedrig** (low) | kurz: Ziel, 3–7 Schritte, wie testen | 5 | nur bei Bedarf |
+| **mittel** (medium, Standard) | Ziel, Befunde, Schritte mit Dateien, Risiken, Tests | 12 | nur bei Bedarf |
+| **hoch** (high) | Datei für Datei, Risiken und Randfälle, Tests, Annahmen | 25 | ja, offene Punkte werden vorher geklärt |
+| **sehr hoch** (xhigh) | wie hoch, dazu Alternativen und Kompatibilität/Rückweg | 50 | ja |
+| **maximal** (max) | extrem ausführlich: Umfang, Ist-Zustand, Änderungen Datei für Datei, Risiken, Tests, Alternativen, offene Fragen, kleine Schritte | ohne Grenze | Pflicht |
+
+Rückfragen stellt das Modell mit dem Frage-Werkzeug `ask_user`, wenn es das hat; sonst stellt es ein paar nummerierte Auswahlfragen in einer normalen Antwort (ohne Plan) und schreibt den Plan nach deinen Antworten. Das Budget ersetzt für die Plan-Runde die *Höchstzahl Aufrufe* des Modells; ist es aufgebraucht, bekommen weitere Aufrufe den Fehler `plan_budget` („schreib jetzt den Plan“). Bei *maximal* gibt es kein Budget und keine Pause nach der Höchstzahl; **Stopp** beendet die Runde jederzeit (der Schleifen-Schutz und ein voller Kontext halten sie weiterhin an).
+
+**Nur lesen – durchgesetzt.** Während einer Plan-Runde darf das Modell nur Werkzeuge nutzen, die lesen: die lesenden Agenten-Werkzeuge (`read_file`, `list_dir`, `glob`, `grep`, `git_status`, `git_diff`, `git_log`, `web_fetch`, `web_search`), Paneldeck-Werkzeuge der Stufe *Lesen*, `wait_for_status` und `ask_user`. Jeden anderen Aufruf – Dateien bearbeiten, schreiben, verschieben oder löschen, `run_command`, in Terminals tippen, Sitzungen, To-dos oder Tickets ändern, und jedes unbekannte Werkzeug – **lehnt Paneldeck ab** mit dem Fehler `plan_mode` (in der Werkzeugzeile als abgelehnt); das ist nicht nur eine Regel im Prompt. Freigaben gelten wie sonst für das, was laufen darf (z. B. `web_fetch`, sensible Dateien). Während einer Plan-Runde zeigt die Kopfzeile des Chats **Plan-Modus · Stufe · nur lesen**.
+
+**Die Plan-Karte.** Die Antwort mit dem Plan (sie beginnt mit `# Plan: …` und hat einen Abschnitt `## Steps` mit einer nummerierten Liste) erscheint als **Plan-Karte** mit Stufe, Fassung und Stand und diesen Knöpfen:
+
+- **Ausführen** – gibt den Plan frei: Der Plan-Modus geht aus, die Schritte füllen die **To-do-Liste** des Chats, die Nachricht „Plan freigegeben – bitte ausführen.“ geht los, und das Modell arbeitet die Schritte mit den üblichen Werkzeugen und Freigaben ab. Der freigegebene Plan wird als Markdown im Datenordner gespeichert (`plans/<Chat>-<Zeit>.md`, siehe [Datenordner](data-and-backups.md#neue-felder-in-310)); die Karte nennt die Datei.
+- **Änderungen anfragen** – öffnet ein Kommentarfeld; *Änderungen senden* schickt deinen Kommentar als neue Plan-Runde mit der Stufe des Plans. Das Modell schreibt den vollständigen überarbeiteten Plan, er wird die nächste Fassung. Fragt es nur nach, wartet der vorige Plan wieder.
+- **Verwerfen** – die Karte bleibt, als verworfen markiert, und der Plan-Modus geht aus.
+- **Exportieren …** – speichert den Plan als Markdown-Datei deiner Wahl (in jedem Stand).
+
+Die Knöpfe gehen nur, solange keine Antwort läuft; wartet ein Plan auf deine Entscheidung, zeigt die Kopfzeile **Plan wartet auf dich**. Nach der Freigabe bleibt die Karte im Chat. Der Plan steht in der Verlaufsdatei des Chats (`plan`); *Verlauf leeren* entfernt ihn. Bearbeiten oder Neu erzeugen der Frage entfernt einen noch nicht freigegebenen Plan.
+<!-- Ende des Abschnitts „Plan-Modus“. -->
+
 ## Erlaubte Adressen und Sicherheit
 Paneldeck verbindet sich nur mit **diesem Rechner und privaten Netzen**:
 

@@ -101,7 +101,11 @@ pub fn system_prompt(policy: &ToolPolicy, model: &str, cx: &TurnContext) -> Stri
 /// für die Teile (`cx.prompt_parts`, darüber die des Modells) und die Familie des Modells (#341).
 pub fn system_prompt_variant(policy: &ToolPolicy, model: &str, cx: &TurnContext, v: super::master_prompt::Variant) -> String {
     let spec = super::master_prompt::Spec::for_model(policy, model, cx.prompt_parts);
-    let text = super::master_prompt::render_variant_with(policy, &spec, v);
+    let mut text = super::master_prompt::render_variant_with(policy, &spec, v);
+    // Plan-Modus (#358): Anweisungen der Stufe bzw. der Ausführung; die Rückfrage `ask_user` nur, wenn es sie gibt.
+    if let Some(phase) = &cx.plan {
+        text = format!("{}\n\n{}", text.trim_end(), super::plan::instructions(phase, &policy.tool_names()));
+    }
     let line = context_line(cx);
     if line.is_empty() { text } else { format!("{}\n\n{line}", text.trim_end()) }
 }

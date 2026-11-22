@@ -167,6 +167,38 @@ Besides the Paneldeck tools, chat models get **agent tools** for working in the 
 The tool names are part of the history (`read_chat`). The to-do list is stored in the chat's history file (`todos`), permanent approvals of agent tools in `always_allow` (without `session`; for commands with `prefix`) – see [Data folder](data-and-backups.md#chat-histories).
 <!-- End of section "Agent tools". -->
 
+<!-- Section "Plan mode" (#358, 3.1.0) – kept self-contained. -->
+## Plan mode
+In plan mode the model **researches first and writes a plan; nothing is changed until you approve it**. Use it for larger tasks where you want to see the approach before files are edited or commands run.
+
+![A chat with the Plan toggle (level high) next to Send and a plan card with Execute, Request changes, Discard and Export](../images/chat-plan.png)
+
+**Switching it on.** Next to **Send** there is a **Plan** toggle with a level picker. It applies to the **next message** you send; **Shift+Tab** in the input toggles it (like in Claude Code). When it is on, the toggle is highlighted (**Plan ✓**) and the input says "Plan mode: describe the task …". It stays on until you execute or discard the plan, or switch it off. Picking a level switches it on. Messages from external agents (`send_chat_message`) never run in plan mode.
+
+**Levels.** Each level has fixed instructions for the structure and depth of the plan and a **research budget** (read-only tool calls per round):
+
+| Level | Plan | Research budget | Questions first |
+|---|---|---|---|
+| **low** | short: goal, 3–7 steps, how to test | 5 | only when needed |
+| **medium** (default) | goal, findings, steps with files, risks, tests | 12 | only when needed |
+| **high** | file by file, risks and edge cases, tests, assumptions | 25 | yes, open points are clarified first |
+| **xhigh** | like high, plus alternatives and compatibility/rollback | 50 | yes |
+| **max** | extremely detailed: scope, current state, changes file by file, risks, tests, alternatives, open questions, small steps | no limit | mandatory |
+
+Questions are asked with the question tool `ask_user` when the model has it; otherwise the model asks a few numbered choice questions in a normal answer (without a plan) and writes the plan after your answers. The budget replaces the model's *max steps* for the plan round; once it is used up, further calls get the error `plan_budget` ("write the plan now"). At *max* there is no budget and no *max steps* pause; **Stop** ends the round at any time (the loop guard and a full context still pause it).
+
+**Read-only is enforced.** During a plan round the model may only use tools that read: the read-only agent tools (`read_file`, `list_dir`, `glob`, `grep`, `git_status`, `git_diff`, `git_log`, `web_fetch`, `web_search`), Paneldeck tools of the level *Read*, `wait_for_status` and `ask_user`. Every other call – editing, writing, moving or deleting files, `run_command`, typing into terminals, changing sessions, to-dos or tickets, and any unknown tool – is **refused by Paneldeck** with the error `plan_mode` (shown as denied in the tool line); it is not only a rule in the prompt. Approvals work as usual for what may run (e.g. `web_fetch`, sensitive files). While a plan round runs, the chat header shows **Plan mode · level · read-only**.
+
+**The plan card.** The answer with the plan (it starts with `# Plan: …` and has a `## Steps` section with a numbered list) is shown as a **plan card** with level, revision and status, and these buttons:
+
+- **Execute** – approves the plan: the plan mode switches off, the steps fill the chat's **to-do list**, the message "Plan approved – please execute it." is sent and the model works through the steps with the usual tools and approvals. The approved plan is saved as Markdown in the data folder (`plans/<chat>-<time>.md`, see [Data folder](data-and-backups.md#new-fields-in-310)); the card names the file.
+- **Request changes** – opens a comment field; *Send changes* sends your comment as a new plan round at the plan's level. The model writes the complete revised plan, which becomes the next revision. If it only asks back, the previous plan waits again.
+- **Discard** – the card stays, marked as discarded, and the plan mode switches off.
+- **Export …** – saves the plan as a Markdown file of your choice (in every state).
+
+The buttons only work while no answer is running; meanwhile the header shows **Plan waiting for you** when a plan waits for your decision. After approval the card stays in the chat. The plan is stored in the chat's history file (`plan`); *Clear history* removes it. Editing or regenerating the question removes a plan that was not approved yet.
+<!-- End of section "Plan mode". -->
+
 ## Allowed addresses and security
 Paneldeck only connects to **this computer and private networks**:
 
