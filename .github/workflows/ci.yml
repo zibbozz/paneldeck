@@ -39,6 +39,10 @@ jobs:
         run: cargo test --release --locked
       - name: Changelog format (Changelog.md + Changelog.de.md in sync)
         run: python tools/changelog.py check
+      - name: README and docs images (no screenshot placeholders, no missing images, EN/DE sets equal)
+        run: python tools/check_docs_images.py
+        env:
+          PYTHONUTF8: "1"
       - name: Third-party licenses are up to date
         run: python tools/gen_licenses.py --check
       - name: Shell script syntax
