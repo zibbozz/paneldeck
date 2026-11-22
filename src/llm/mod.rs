@@ -170,6 +170,9 @@ pub struct ChatRequest {
     /// Höchstzahl Tokens der Antwort (nur Ollama: `options.num_predict`), damit die Antwort die Anfrage nicht aus dem
     /// Kontext drängt.
     pub num_predict: Option<u32>,
+    /// Höchstzahl Tokens der Antwort bei OpenAI-kompatiblen Servern (`max_tokens`); nur die Zusammenfassung beim
+    /// Kompaktieren setzt sie (#359), normale Anfragen lassen sie weg.
+    pub max_tokens: Option<u32>,
 }
 
 /// Ereignisse eines Chat-Aufrufs. Am Ende kommt genau eines von `Done` oder `Error`; `ToolCalls` (falls vorhanden) direkt

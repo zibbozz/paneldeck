@@ -184,6 +184,10 @@ All fields are optional; older versions ignore them, and missing fields mean the
 
 - `hot-exit/`: unsaved editor buffers; `editor-state.json`: open folder, tabs, splits and recent files of the Editor tab (both internal formats; in *Clean up* as *Editor: unsaved buffers* and as part of *Sessions and layout*).
 
+## New fields in 3.1.0
+- `chats/<id>.json` → after [compacting](chat.md#compacting-long-chats) the replaced messages carry `"compacted": true` (they stay in the file but are no longer sent to the model), and at the cut stands the summary: a message with `"role": "system"`, `content` = the text the model sees, and `"summary": {"messages": 12, "files": [{"path": "src/a.rs", "changed": true}], "text": "…"}` (number of replaced messages, touched files, the model's own summary). Older versions do not send system messages and therefore still see the whole history. Compacted messages without a summary after them are treated as normal again when loading.
+- `settings.json` → `chat_compact` (*Settings → Models → Compacting chats*), all optional: `auto` (default `false`), `threshold_percent` (`80`, 50–95), `window_percent` (`15`, 5–40) and `window_min` (`4096`, 1024–32768). Only written when something differs from the defaults; an unreadable value falls back to its default.
+
 ## Backups
 *Settings → Data & backup* controls the automatic backups of `paneldeck.db`: by default one copy every 24 hours, keeping two (plus the database itself). If the computer was off when a backup was due, it is made at the next start; several missed ones result in just one. You can choose another backup folder, open it, press **Back up now** (manual copies are never deleted automatically) and **Restore** any copy from the list – the current state is backed up first, Paneldeck then quits and applies the restore at the next start. Before every database update (migration) Paneldeck makes a copy as well, and it never touches a database created by a newer version.
 

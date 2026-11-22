@@ -343,6 +343,49 @@ pub(super) fn agent_tools_section(ui: &mut Ui, lang: Lang, s: &mut crate::chat::
     *s != before
 }
 
+/// Abschnitt „Kompaktieren“ unter den Agenten-Werkzeugen (#359): automatischer Modus (Standard aus), Schwelle und
+/// Sicherheitsfenster. `true` = geändert (speichern).
+pub(super) fn compact_section(ui: &mut Ui, lang: Lang, s: &mut crate::chat::compact::CompactSettings) -> bool {
+    use crate::chat::compact::{self, CompactSettings};
+    let before = *s;
+    ui.add_space(S2);
+    ui.label(RichText::new(lang.t("Kompaktieren der Chats", "Compacting chats")).strong());
+    ui.label(RichText::new(lang.t(
+        "Lange Chats: Das Modell fasst ältere Nachrichten zusammen, die Zusammenfassung ersetzt sie in den Anfragen. Systemprompt, die letzten zwei Runden, offene To-dos und berührte Dateien bleiben wörtlich; die Originale bleiben im Chat (aufklappbar). Von Hand jederzeit mit „Kompaktieren“ oder /compact.",
+        "Long chats: the model summarises older messages and the summary replaces them in the requests. The system prompt, the last two rounds, open to-dos and touched files are kept as they are; the originals stay in the chat (expandable). Manually any time with “Compact” or /compact.",
+    )).small().color(style::dim(ui)));
+    ui.add_space(S1);
+    row(ui, lang.t("Automatisch", "Automatic"), |ui| {
+        ui.checkbox(&mut s.auto, lang.t("vor einer Anfrage kompaktieren, wenn der Kontext fast voll ist", "compact before a request when the context is almost full"));
+    });
+    ui.add_enabled_ui(s.auto, |ui| {
+        row(ui, lang.t("Ab Füllstand", "From fill level"), |ui| {
+            ui.add(egui::DragValue::new(&mut s.threshold_percent).range(compact::THRESHOLD_MIN..=compact::THRESHOLD_MAX).suffix(" %"));
+            ui.label(RichText::new(lang.t("des Platzes vor der Kürzung", "of the room before old messages drop out")).small().color(style::dim(ui)));
+        });
+    });
+    ui.label(RichText::new(lang.t("Ohne den automatischen Modus fallen alte Nachrichten wie bisher heraus.", "Without the automatic mode, old messages drop out as before.")).small().color(style::dim(ui)));
+    row(ui, lang.t("Sicherheitsfenster", "Safety window"), |ui| {
+        ui.add(egui::DragValue::new(&mut s.window_percent).range(compact::WINDOW_PERCENT_MIN..=compact::WINDOW_PERCENT_MAX).suffix(" %"));
+        ui.label(lang.t("des Kontexts, mindestens", "of the context, at least"));
+        ui.add(egui::DragValue::new(&mut s.window_min).range(compact::WINDOW_MIN_MIN..=compact::WINDOW_MIN_MAX).speed(64.0).suffix(lang.t(" Tokens", " tokens")));
+    });
+    let w = |ctx: u32| compact::safety_window(ctx, s);
+    let example = match lang {
+        Lang::De => format!("Für die Zusammenfassung selbst frei gehalten, damit ihre Anfrage immer in den Kontext passt (8K → {}, 32K → {}, 128K → {} Tokens).", w(8192), w(32768), w(131_072)),
+        Lang::En => format!("Kept free for the summary itself, so that its request always fits into the context (8K → {}, 32K → {}, 128K → {} tokens).", w(8192), w(32768), w(131_072)),
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(example).small().color(style::dim(ui)));
+        let def = CompactSettings { auto: s.auto, ..CompactSettings::default() };
+        if *s != def && ui.small_button(lang.t("Standard", "Default")).clicked() {
+            *s = def;
+        }
+    });
+    *s = s.clamped();
+    *s != before
+}
+
 /// Jetzt speichern? Sofort, wenn nicht gezogen wird; beim Ziehen spätestens nach 500 ms.
 pub(super) fn save_due(elapsed: std::time::Duration, dragging: bool) -> bool {
     !dragging || elapsed >= std::time::Duration::from_millis(500)
@@ -932,7 +975,8 @@ impl super::App {
             self.llm_connect(ctx, id);
         }
         let agent_changed = agent_tools_section(ui, lang, &mut self.settings.agent_tools, &mut self.models_ui);
-        if out.changed || agent_changed {
+        let compact_changed = compact_section(ui, lang, &mut self.settings.chat_compact);
+        if out.changed || agent_changed || compact_changed {
             self.models_ui.dirty_since.get_or_insert_with(std::time::Instant::now);
         }
         self.models_save_tick(ctx);
@@ -1144,6 +1188,31 @@ mod tests {
             assert_eq!(servers[0].model_cfg("llama3").context_length, Some(4096));
             assert_eq!(servers[0].models.len(), 1, "nur das geänderte Modell wird gespeichert");
         }
+    }
+
+    /// Einstellungen → Modelle → Kompaktieren (#359): Schalter aus als Standard, Klick schaltet ein, Beispiele des
+    /// Sicherheitsfensters, „Standard“ setzt die Zahlen zurück; Texte in beiden Sprachen.
+    #[test]
+    fn compact_section_switches_auto_mode_and_resets_to_defaults() {
+        use crate::chat::compact::CompactSettings;
+        let mut s = CompactSettings::default();
+        let mut h = H::new();
+        let changed = h.run(vec![], |ui| compact_section(ui, Lang::En, &mut s));
+        assert!(!changed && !s.auto);
+        assert!(h.has("Compacting chats") && h.has("Without the automatic mode, old messages drop out as before."));
+        assert!(h.has("Kept free for the summary itself, so that its request always fits into the context (8K → 4096, 32K → 4915, 128K → 19660 tokens)."));
+        assert!(!h.has("Default"), "Standardwerte: kein Knopf");
+        let changed = h.click("compact before a request when the context is almost full", |ui| compact_section(ui, Lang::En, &mut s), |a, b| *a |= b);
+        assert!(changed && s.auto, "Klick schaltet ein");
+        s.threshold_percent = 60;
+        s.window_min = 8192;
+        h.run(vec![], |ui| compact_section(ui, Lang::En, &mut s));
+        assert!(h.has("(8K → 4096, 32K → 8192, 128K → 19660 tokens)"), "Hälfte des Kontexts als Obergrenze");
+        let changed = h.click("Default", |ui| compact_section(ui, Lang::En, &mut s), |a, b| *a |= b);
+        assert!(changed);
+        assert_eq!(s, CompactSettings { auto: true, ..CompactSettings::default() }, "Standard lässt den Schalter");
+        h.run(vec![], |ui| compact_section(ui, Lang::De, &mut s));
+        assert!(h.has("Kompaktieren der Chats") && h.has("vor einer Anfrage kompaktieren, wenn der Kontext fast voll ist") && h.has("Sicherheitsfenster"));
     }
 
     #[test]

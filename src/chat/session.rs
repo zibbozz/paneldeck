@@ -152,6 +152,8 @@ pub struct ChatState {
     fail_count: u32,
     /// Die Runde hielt an, weil derselbe Aufruf [`LOOP_LIMIT`]-mal in Folge fehlschlug (deutlich angezeigt).
     pub loop_stop: bool,
+    /// Kompaktieren (#359): laufende Zusammenfassung, letzte Fehlermeldung (siehe `chat::compact`).
+    pub compact: super::compact::CompactState,
 }
 
 /// So oft in Folge darf derselbe fehlgeschlagene Aufruf (gleiches Werkzeug, gleiche Argumente) kommen, dann hält die
@@ -266,6 +268,7 @@ impl ChatState {
             fail_streak: None,
             fail_count: 0,
             loop_stop: false,
+            compact: Default::default(),
         };
         if fixed > 0 {
             c.touch();
@@ -311,7 +314,7 @@ impl ChatState {
 
     /// Die Runde läuft noch: Antwort wird erzeugt, Werkzeuge laufen oder warten auf Freigabe (nicht: angehalten).
     pub fn busy(&self) -> bool {
-        self.streaming() || (!self.paused && (!self.calls.is_empty() || self.next_request || self.text_check))
+        self.streaming() || self.compact.running() || (!self.paused && (!self.calls.is_empty() || self.next_request || self.text_check))
     }
 
     /// Ein schreibender Aufruf wartet auf die Entscheidung des Nutzers.
@@ -370,6 +373,7 @@ impl ChatState {
         self.context_pause = false;
         self.text_check = false;
         self.loop_stop = false;
+        self.compact.reset();
         self.changed(0);
         true
     }
@@ -402,6 +406,16 @@ impl ChatState {
         let text = self.draft.trim().to_string();
         if text.is_empty() || self.busy() {
             return false;
+        }
+        // `/compact` (#359): kompaktieren statt senden (Fehler zeigt der Chat).
+        if super::compact::is_command(&text) {
+            if self.editing {
+                self.cancel_edit();
+            } else {
+                self.draft.clear();
+            }
+            let _ = self.compact_now(backend, meta, cx, repaint);
+            return true;
         }
         // Eine angehaltene Runde endet: ihre offenen Aufrufe laufen nicht mehr.
         self.cancel_tools();
@@ -448,8 +462,23 @@ impl ChatState {
 
     /// Nächste Anfrage einer Werkzeug-Runde (nach [`ToolStep::Request`]).
     pub fn next_request(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
-        if !self.streaming() {
+        if !self.streaming() && !self.compact.running() {
             self.start_turn(backend, meta, cx, repaint);
+        }
+    }
+
+    /// Die nächste Anfrage über die Werkzeug-Schleife starten lassen ([`ToolStep::Request`]), ohne dass das als leerer
+    /// Schritt zählt (nach einer Kompaktierung vor der Anfrage, #359).
+    pub(super) fn queue_request(&mut self) {
+        self.next_request = true;
+        self.step_executed = true;
+    }
+
+    /// Bei `at` wurde eine Nachricht eingefügt (die Zusammenfassung, #359): der Index der letzten Antwort rückt nach
+    /// (z. B. für eine angehaltene Runde, die danach mit „Weiter“ fortgesetzt wird).
+    pub(super) fn inserted_at(&mut self, at: usize) {
+        if self.turn_msg >= at {
+            self.turn_msg += 1;
         }
     }
 
@@ -467,6 +496,10 @@ impl ChatState {
     }
 
     fn start_turn(&mut self, backend: &dyn ChatBackend, meta: &ChatMeta, cx: &TurnContext, repaint: Repaint) {
+        // Automatisch kompaktieren (#359, nur mit Schalter): dann folgt die Anfrage nach der Zusammenfassung.
+        if self.compact_before_turn(backend, meta, cx, &repaint) {
+            return;
+        }
         // Die Kürzung gilt nur für eine Anfrage; das Backend meldet sie neu (`TurnEvent::ContextStart`), wenn es kürzt.
         self.file.context_start = None;
         self.usage = None;
@@ -509,6 +542,10 @@ impl ChatState {
     /// Werkzeugaufrufe (auch ein laufender) bekommen das Ergebnis „abgebrochen“; ein schon gestartetes Werkzeug kann im
     /// Hub trotzdem noch zu Ende laufen, sein Ergebnis wird verworfen.
     pub fn stop(&mut self) {
+        // Eine laufende Zusammenfassung (#359) endet ohne Wirkung; eine zurückgehaltene Anfrage läuft nicht mehr.
+        if self.compact.cancel() {
+            self.touch();
+        }
         if self.streaming() && !self.poll().finished && self.turn.take().is_some() {
             self.drop_empty_answer();
             self.changed(self.turn_msg);
@@ -914,6 +951,9 @@ impl ChatState {
 
     /// Ereignisse der laufenden Antwort abholen (jedes Bild, für alle Chats).
     pub fn poll(&mut self) -> Polled {
+        if self.compact.running() {
+            return self.poll_compact();
+        }
         let mut p = Polled::default();
         let Some(turn) = &self.turn else { return p };
         let mut events = Vec::new();

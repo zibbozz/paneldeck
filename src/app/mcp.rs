@@ -434,6 +434,13 @@ fn chat_msg_json_max(index: usize, m: &chatmod::ChatMsg, max: usize) -> Value {
     if truncated {
         o["truncated"] = json!(true);
     }
+    // Kompaktierung (#359): ersetzte Originale (gehen nicht mehr an das Modell) und die Zusammenfassung.
+    if m.compacted {
+        o["compacted"] = json!(true);
+    }
+    if m.summary.is_some() {
+        o["summary"] = json!(true);
+    }
     if !m.tool_calls.is_empty() {
         let calls: Vec<Value> = m
             .tool_calls

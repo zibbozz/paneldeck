@@ -470,6 +470,8 @@ enum Action {
     ChatRevoke(u64, chatmod::AllowRule),
     /// Antwort auf die einmalige Frage nach der Stufe des Modells.
     ChatLevel(u64, crate::mcp::McpLevel),
+    /// Chat jetzt kompaktieren (#359, Knopf „Kompaktieren“).
+    ChatCompact(u64),
     /// Tutorial (#143): Tour starten, fortsetzen, „Was ist neu“, Hinweis ausblenden.
     Tutorial(tutorial::Cmd),
 }
@@ -3372,6 +3374,7 @@ impl App {
             token_scale: e.and_then(|e| e.chat.as_ref()).map_or(1.0, |c| c.token_scale),
             prompt_parts: self.settings.chat_prompt_parts,
             agent: self.agent_env(id),
+            compact: self.settings.chat_compact,
         }
     }
 
@@ -3387,13 +3390,15 @@ impl App {
             Some(t) => t.trim().is_empty(),
             None => c.draft.trim().is_empty(),
         };
+        // `/compact` (#359) kompaktiert statt zu senden: keine neue Nachricht, an die eine Markierung gehörte.
+        let compact_cmd = chatmod::compact::is_command(text.unwrap_or(&c.draft));
         if empty {
             return ChatSendResult::Empty;
         }
         if c.busy() {
             return ChatSendResult::Busy;
         }
-        if self.chat_level_unchosen(id) {
+        if !compact_cmd && self.chat_level_unchosen(id) {
             if let Some(e) = self.entries.get_mut(&id) {
                 if let Some(c) = e.chat.as_mut() {
                     c.level_question = Some(level_asker(c.level_question, &origin));
@@ -3420,7 +3425,7 @@ impl App {
             Some(t) => c.send_text(t, backend.as_ref(), &meta, &tcx, repaint),
             None => c.send(backend.as_ref(), &meta, &tcx, repaint),
         };
-        if sent {
+        if sent && !compact_cmd {
             // Herkunft der Runde: der Nutzer hebt eine Agenten-Herkunft auf; ein Agent markiert seine Nachricht.
             c.origin_sessions = chain;
             match origin {
@@ -3466,7 +3471,7 @@ impl App {
         let backend = self.chat_backend.clone();
         let rctx = ctx.clone();
         let repaint: chatmod::Repaint = std::sync::Arc::new(move || rctx.request_repaint());
-        let tcx = if matches!(a, Action::ChatSend(_) | Action::ChatRegenerate(_)) { self.turn_context(id) } else { chatmod::TurnContext::default() };
+        let tcx = if matches!(a, Action::ChatSend(_) | Action::ChatRegenerate(_) | Action::ChatCompact(_)) { self.turn_context(id) } else { chatmod::TurnContext::default() };
         let Some(e) = self.entries.get_mut(&id) else { return };
         let meta = e.meta.chat.clone().unwrap_or_default();
         let Some(c) = e.chat.as_mut() else { return };
@@ -3492,6 +3497,8 @@ impl App {
             }
             Action::ChatContinue(_) => c.resume(),
             Action::ChatRevoke(_, rule) => c.revoke(rule),
+            // Fehler zeigt der Chat selbst (`compact.failure`).
+            Action::ChatCompact(_) => c.compact_now(backend.as_ref(), &meta, &tcx, repaint).is_ok(),
             _ => false,
         };
         e.status = chat_claude_status(c.status());
@@ -4327,7 +4334,7 @@ impl App {
                 let cwd = proj.and_then(|p| p.inherited(&path, |f| Some(f.cwd.clone()).filter(|c| !c.is_empty())));
                 self.new_chat = Some(models_ui::NewChatDlg::new(&self.settings, cwd, Some(path)));
             }
-            Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, ..) | Action::ChatContinue(id) | Action::ChatRevoke(id, _) | Action::ChatLevel(id, _) => self.chat_action(ctx, id, &a),
+            Action::ChatSend(id) | Action::ChatStop(id) | Action::ChatRegenerate(id) | Action::ChatEdit(id) | Action::ChatDecide(id, ..) | Action::ChatContinue(id) | Action::ChatRevoke(id, _) | Action::ChatLevel(id, _) | Action::ChatCompact(id) => self.chat_action(ctx, id, &a),
             Action::Tutorial(c) => self.tut_cmd(ctx, c),
         }
     }
@@ -4945,7 +4952,7 @@ fn show_pane(ui: &mut Ui, id: u64, rect: Rect, cx: &mut PaneCx) {
         if o.focus && cx.focused != id {
             cx.actions.push(Action::Focus(id));
         }
-        for (hit, a) in [(o.send, Action::ChatSend(id)), (o.stop, Action::ChatStop(id)), (o.regenerate, Action::ChatRegenerate(id)), (o.edit, Action::ChatEdit(id)), (o.cont, Action::ChatContinue(id))] {
+        for (hit, a) in [(o.send, Action::ChatSend(id)), (o.stop, Action::ChatStop(id)), (o.regenerate, Action::ChatRegenerate(id)), (o.edit, Action::ChatEdit(id)), (o.cont, Action::ChatContinue(id)), (o.compact, Action::ChatCompact(id))] {
             if hit {
                 cx.actions.push(a);
             }

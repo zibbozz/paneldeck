@@ -9,6 +9,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 ## [3.1.0] - WIP
 
+### Added
+
+- Lokale Chats: **Kompaktieren** – *Kompaktieren* in der Kopfzeile des Chats oder `/compact` lässt das Modell des Chats die älteren Nachrichten zusammenfassen; die Zusammenfassung ersetzt sie in den Anfragen, Systemprompt, die letzten zwei Runden, offene To-dos und die berührten Dateien bleiben wörtlich. Die Originale bleiben im Chat (*Original anzeigen*), gehen aber nicht mehr mit. Ein Sicherheitsfenster von max(4096, 15 % des Kontexts) Tokens hält die Anfrage der Zusammenfassung immer im Kontext; Werkzeug-Ergebnisse werden dafür gekürzt. Optional automatisch vor einer Anfrage ab 80 % des Platzes (*Einstellungen → Modelle → Kompaktieren der Chats*, Standard aus); schlägt das Kompaktieren fehl, bleibt der Chat unverändert. Neues optionales `settings.json`-Objekt `chat_compact` und Felder `compacted`/`summary` in der Chat-Datei; `read_chat` markiert beides (#359)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added

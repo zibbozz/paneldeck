@@ -80,6 +80,9 @@ pub fn request_json(req: &ChatRequest) -> Value {
     if let Some(t) = req.temperature {
         body["temperature"] = json!(t);
     }
+    if let Some(n) = req.max_tokens {
+        body["max_tokens"] = json!(n);
+    }
     body
 }
 
