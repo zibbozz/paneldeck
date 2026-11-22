@@ -25,6 +25,25 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 - **Minimap** and word wrap (both off for [large files](#large-files)).
 - Undo/redo per document; changes made by an agent are their own undo steps.
 
+## Syntax colours
+*(Since 3.1.0.)* Every document has a **mode**, shown at the right of the status bar next to the **language**:
+- **Text** – the plain editor. **This is the default for every file** until you switch Syntax on.
+- **Syntax** – the language is detected and the text is coloured (comments, strings, numbers, keywords, types, functions, tags, preprocessor lines …). The colours come from the active theme (`code_*` colours, editable in the [theme editor](themes.md#interface-colours)), so light and dark themes work alike.
+- *Smart* (language server) comes in a later version; it is shown greyed out.
+
+Switching it on:
+- **For one file:** click the mode in the status bar → *This file: Syntax*. The choice is remembered with the tab.
+- **For all files of a language:** in the same menu *All files: Rust → Syntax*, or in *Settings → Editor → Languages → Mode per language*.
+- **For all files:** *Default for all other files → Syntax* in the menu, or *Settings → Editor → Default mode*.
+
+**Language detection:** your own mappings first (*Settings → Editor → Own mappings*, e.g. `*.tpl` → HTML or `Jenkinsfile` → Groovy), then the file name (`Makefile`, `CMakeLists.txt`, `Dockerfile`, `Gemfile` …) and the extension, then a shebang line (`#!/usr/bin/env python3`) or a modeline (`vim: ft=yaml`, `-*- mode: ruby -*-`). A click on the language in the status bar picks another one for this file (type to filter, Enter takes the first match; *Detect automatically* goes back). The choice is remembered with the tab.
+
+**Languages:** AutoIt, Batch, BibTeX, C, C#, C++, CMake, CSS, Diff, Dockerfile, Go, HTML, INI, Inno Setup, Java, JavaScript, JSON, Kotlin, LaTeX, Less, Lua, Makefile, Markdown, NSIS, Pascal / Delphi, Perl, PHP, PowerShell, Python, Ruby, Rust, SCSS, Shell (Bash), SQL, Swift, TeX, TOML, TypeScript, TSX/JSX, Visual Basic (VB.NET, VBA, VBScript), XML, YAML – plus every other grammar bundled from [bat](https://github.com/sharkdp/bat) (Haskell, Kotlin, Terraform, Zig, …; listed under *More grammars* in the picker). AutoIt, Inno Setup, Visual Basic and PowerShell use small grammars of Paneldeck's own.
+
+Colouring is incremental and runs in the background, so typing and scrolling never wait for it: only the visible lines (and a few around them) are coloured, an edit only recolours from the changed line on, and all splits of a file share the work. Lines over 3 000 characters stay plain. In [large-file mode](#large-files) the colours stay off.
+
+![Editor tab in Syntax mode: a Rust file and a Markdown file with syntax colours, the status bar shows mode and language](../images/editor-syntax.png)
+
 ![Find bar with a regular expression and Replace](../images/editor-find.png)
 
 ## Encoding, line endings, indentation
@@ -55,7 +74,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 ![Find in files with the matches grouped by file](../images/editor-search.png)
 
 ## Large files
-Files from **20 MB** (*Settings → Editor → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap and word wrap are off** (later also syntax colours), and an info bar says so. Search in files skips them; agents can read but not edit them.
+Files from **20 MB** (*Settings → Editor → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap, word wrap and syntax colours are off**, and an info bar says so. Search in files skips them; agents can read but not edit them.
 
 ## Settings
 *Settings → Editor*:
@@ -67,9 +86,12 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 | Autosave / Delay | off / 1 s | save existing files automatically after the last change |
 | Include ignored | off | default of the search switch |
 | Exclude patterns | – | one per line, gitignore syntax |
+| Default mode | Text | mode of files whose language has no own setting ([Syntax colours](#syntax-colours)) |
+| Mode per language | Default | Text or Syntax for all files of one language |
+| Own mappings | – | file name or extension → language, before the built-in detection |
 | **Agents** | all off | see [Agents](#agents) |
 
-Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300)).
+Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300), [new in 3.1.0](data-and-backups.md#new-fields-in-310)).
 
 ![Settings, Editor tab](../images/editor-settings.png)
 
@@ -84,4 +106,4 @@ Agents (Claude Code and others via the [agent interface](agent-interface.md#edit
 - These rules apply to text mode and to the later hex mode alike.
 
 ## Not yet
-Syntax colours come with 3.1.0; language servers (*Go to symbol*, formatting, diagnostics) and AI inline completion with 3.3.0, the language pack with 3.4.0, running files and projects with 3.5.0, a hex mode with 3.6.0.
+Language servers (*Smart* mode: *Go to symbol*, formatting, diagnostics) and AI inline completion come with 3.3.0, the language pack with 3.4.0, running files and projects with 3.5.0, a hex mode with 3.6.0.

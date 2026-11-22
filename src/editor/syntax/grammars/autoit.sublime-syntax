@@ -1,0 +1,50 @@
+%YAML 1.2
+---
+# AutoIt v3 – compact grammar of Paneldeck (MIT, see LICENSE). Comments, strings, numbers, variables ($x), macros
+# (@ScriptDir), keywords, directives (#include, #RequireAdmin, #Region …), function names and calls.
+name: AutoIt
+file_extensions: [au3]
+scope: source.autoit
+contexts:
+  main:
+    - match: '(?i)^\s*#(cs|comments-start)\b.*$'
+      scope: comment.block.autoit
+      push: block_comment
+    - match: ';.*$'
+      scope: comment.line.semicolon.autoit
+    - match: '(?i)^\s*(#include(?:-once)?)\s*(<[^<>]*>|"[^"]*"|''[^'']*'')?'
+      captures:
+        1: keyword.preprocessor.autoit
+        2: string.quoted.other.autoit
+    - match: '(?i)^\s*#[a-z][\w-]*'
+      scope: keyword.preprocessor.autoit
+    - match: '"(?:[^"]|"")*"?'
+      scope: string.quoted.double.autoit
+    - match: '''(?:[^'']|'''')*''?'
+      scope: string.quoted.single.autoit
+    - match: '\$\w+'
+      scope: variable.other.readwrite.autoit
+    - match: '@\w+'
+      scope: support.constant.macro.autoit
+    - match: '\b(?:0[xX][0-9A-Fa-f]+|[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)\b'
+      scope: constant.numeric.autoit
+    - match: '(?i)\b(Func)\s+([A-Za-z_]\w*)'
+      captures:
+        1: keyword.control.autoit
+        2: entity.name.function.autoit
+    - match: '(?i)\b(?:Func|EndFunc|Return|If|Then|Else|ElseIf|EndIf|While|WEnd|Do|Until|For|To|Step|Next|In|Select|EndSelect|Switch|EndSwitch|Case|ContinueLoop|ExitLoop|ContinueCase|Exit|With|EndWith)\b'
+      scope: keyword.control.autoit
+    - match: '(?i)\b(?:Dim|Local|Global|Const|Static|Enum|ByRef|ReDim|Volatile)\b'
+      scope: storage.modifier.autoit
+    - match: '(?i)\b(?:And|Or|Not)\b'
+      scope: keyword.operator.logical.autoit
+    - match: '(?i)\b(?:True|False|Default|Null)\b'
+      scope: constant.language.autoit
+    - match: '\b[A-Za-z_]\w*(?=\s*\()'
+      scope: variable.function.autoit
+    - match: '[-+*/&^]=?|<>|<=|>=|==|=|<|>|\?|:'
+      scope: keyword.operator.autoit
+  block_comment:
+    - meta_scope: comment.block.autoit
+    - match: '(?i)^\s*#(ce|comments-end)\b.*$'
+      pop: true

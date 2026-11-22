@@ -907,3 +907,16 @@ Testinstanz aus einer Kopie der .exe mit eigenem Datenordner. Automatisch: Unit-
 - [ ] **Ungültige Datei:** in `themes/` eine Datei mit `"fg":"white"` und eine > 1 MB anlegen → „Neu laden“ → beide mit Grund unter der Theme-Wahl, nicht in der Auswahl; Import der großen Datei → Fehler-Toast „größer als 1 MB“. Ist das gewählte Theme ungültig: Neustart → App startet mit One Dark.
 - [ ] **Alte Datei:** `nord-beispiel.json` (ohne `ui`) lädt und sieht aus wie vor 2.6.0; eine Datei mit unbekanntem `ui`-Namen lädt.
 - [ ] **Beide Sprachen:** Editor, Generator, Rückfragen, Hinweise, Fehlermeldungen und Toasts auf Deutsch und Englisch.
+
+## 72 · Editor: Syntax-Modus (#312, 3.1.0)
+Testinstanz aus einer Kopie der .exe mit eigenem Datenordner. Automatisch: Unit-Tests `editor::syntax::*` (Erkennung, alle Sprachen, eigene Grammatiken, Invalidierung, Zeitbudget), `editor_svc::settings` (Felder, alter Stand), `app::editor_ui::tests::status_bar_picks_the_language_and_the_mode_is_text_by_default`, `app::theme_preview`.
+- [ ] **Standard Text:** Ordner mit `main.rs`, `script.py`, `setup.iss`, `a.au3`, `m.vbs`, `p.ps1`, `Makefile`, `CMakeLists.txt`, `Dockerfile` öffnen → alle ohne Farben, Statusleiste rechts „Text“ und die erkannte Sprache (Rust, Python, Inno Setup, AutoIt, Visual Basic …, PowerShell, Makefile, CMake, Dockerfile).
+- [ ] **Diese Datei:** Klick auf „Text“ → *Diese Datei: Syntax* → `main.rs` farbig (Kommentare, Zeichenketten, Schlüsselwörter, Funktionen); „Smart (Sprachserver)“ ausgegraut mit Tooltip „Kommt in einer späteren Version.“; *Einstellung verwenden* stellt zurück.
+- [ ] **Je Sprache / alle:** im Menü *Alle Dateien: Python → Syntax* → jede `.py` farbig, andere nicht; *Standard für alle übrigen Dateien → Syntax* → alles farbig; unter *Einstellungen → Editor → Sprachen* stehen die Werte genauso, Umstellen wirkt sofort.
+- [ ] **Sprache wählen:** Klick auf die Sprache → Suchfeld hat den Fokus, „pyth“ tippen + Enter → Python; *Automatisch erkennen* stellt zurück; unter *Weitere Grammatiken (bat)* z. B. Haskell wählen. Neustart → gewählte Sprache und Modus des Tabs sind noch da.
+- [ ] **Erkennung ohne Endung:** Datei `tool` mit `#!/usr/bin/env python3`, Datei `conf` mit `# vim: ft=yaml` → Python bzw. YAML; eigene Zuordnung `*.tpl` → HTML (*Eigene Zuordnungen*, „+ Zuordnung“) → `x.tpl` wird HTML, ✕ entfernt sie.
+- [ ] **Bearbeiten:** in einer großen Rust-Datei (≈ 50 000 Zeilen) im Syntax-Modus ans Ende springen, flüssig rollen; oben `/*` tippen → alles darunter wird Kommentar, `*/` dahinter → zurück; zweite Teilung derselben Datei zeigt es ebenso; Tippen bleibt flüssig.
+- [ ] **Große Datei:** Datei ab 20 MB im Syntax-Modus → keine Farben, Modusknopf „Syntax (aus: große Datei)“, Menü sagt „Große Datei: Syntaxfarben bleiben aus.“
+- [ ] **Theme:** helles und dunkles Theme wechseln → Farben passen; Theme-Editor → Gruppe „Editor: Syntaxfarben“ (`code_*`), Vorschau-Block „Editor: Syntaxfarben“, Ändern von `code_keyword` färbt nach dem Speichern die Schlüsselwörter im Editor um.
+- [ ] **Agenten:** `editor_list`/`editor_read`/`editor_edit` unverändert; eine Agenten-Änderung in einer farbigen Datei färbt neu.
+- [ ] **Beide Sprachen:** Statusleiste, Menüs, Einstellungen auf Deutsch und Englisch.
