@@ -2404,7 +2404,13 @@ c.close()
       $f = "$hook\tutorial-cmd.txt"; $t0 = Get-Date
       while ((Test-Path -LiteralPath $f) -and ((Get-Date) - $t0).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
       [IO.File]::WriteAllText("$f.tmp", $line + "`n", (New-Object Text.UTF8Encoding $false))
-      Move-Item -Force -LiteralPath "$f.tmp" -Destination $f
+      # Die Instanz loescht die vorige Befehlsdatei; solange Windows sie noch als "Loeschen ausstehend" fuehrt,
+      # schlaegt das Umbenennen fehl – dann kurz warten und erneut versuchen, statt den Befehl zu verlieren.
+      for ($try = 0; $try -lt 50; $try++) {
+        try { Move-Item -Force -LiteralPath "$f.tmp" -Destination $f -ErrorAction Stop; return }
+        catch { Start-Sleep -Milliseconds 100 }
+      }
+      Write-Host "  WARN  Tutorial-Befehl '$line' liess sich nicht schreiben"
     }
     function Tut-Status {
       $f = "$hook\tutorial-status.json"
@@ -2466,7 +2472,11 @@ c.close()
           Check "Tutorial ${tid}: $($r.step) geht nach der Aktion per MCP von selbst weiter" ($n -and (-not $n.running -or $n.run.index -gt $i)) ($n.run | ConvertTo-Json -Compress)
         } else {
           Tut-Cmd 'next'
-          [void](Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i })
+          $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i }
+          if (-not ($n -and (-not $n.running -or $n.run.index -gt $i))) {
+            $pending = Test-Path -LiteralPath "$hook\tutorial-cmd.txt"
+            Write-Host "  WARN  Tutorial ${tid}: 'next' bei $($r.step) ohne Wirkung (Befehlsdatei noch da: $pending)"
+          }
         }
       }
       if ($Visible) {
