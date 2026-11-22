@@ -176,6 +176,7 @@ impl EditorUi {
             let mut entry = DocEntry::pending(path, d.untitled, hot);
             entry.syntax.lang = d.language.filter(|l| crate::editor::syntax::languages::is_known(l));
             entry.syntax.mode = d.mode.as_deref().and_then(crate::editor::syntax::Mode::from_id);
+            entry.syntax.mode_unknown = d.mode.filter(|m| crate::editor::syntax::Mode::from_id(m).is_none() && !m.trim().is_empty() && m.len() <= 40);
             self.docs.insert(id, entry);
             self.next_doc = self.next_doc.max(id + 1);
         }
@@ -199,7 +200,7 @@ impl EditorUi {
         let mut docs = Vec::new();
         for (id, d) in self.docs.iter() {
             let hot = d.store_hot(dir, &format!("doc{id}"), crate::state::Lang::En);
-            docs.push(persist::SavedDoc { key: *id, path: d.path.as_ref().map(|p| p.to_string_lossy().to_string()), untitled: d.untitled, hot, language: d.syntax.lang.clone(), mode: d.syntax.mode.map(|m| m.id().to_string()) });
+            docs.push(persist::SavedDoc { key: *id, path: d.path.as_ref().map(|p| p.to_string_lossy().to_string()), untitled: d.untitled, hot, language: d.syntax.lang.clone(), mode: d.syntax.mode.map(|m| m.id().to_string()).or_else(|| d.syntax.mode_unknown.clone()) });
         }
         let groups = self
             .panes

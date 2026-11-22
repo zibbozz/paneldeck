@@ -22,7 +22,7 @@ impl UserMap {
         self.entries
             .iter()
             .filter_map(|(p, l)| suffix_of(p).map(|s| (s, l)))
-            .filter(|(s, _)| name.len() > s.len() && name.ends_with(s.as_str()))
+            .filter(|(s, _)| name.ends_with(s.as_str()))
             .max_by_key(|(s, _)| s.len())
             .map(|(_, l)| l.as_str())
     }
@@ -53,9 +53,9 @@ pub fn detect(path: Option<&Path>, head: &str, tail: &str, user: &UserMap) -> Op
         }
         // Ganze Namen aus bats Liste (`go.mod`, `requirements.txt`, `Jenkinsfile`) – nur mit Punkt oder großem
         // Anfangsbuchstaben, sonst träfe eine Datei `build` oder `conf` eine Endung.
-        if (name.contains('.') || name.starts_with(|c: char| c.is_ascii_uppercase()))
-            && let Some(id) = engine::bat_by_extension(&name)
-        {
+        // Ohne Punkt nur mit genau dieser Schreibweise (`Build` ist keine NAnt-Datei `build`).
+        let whole = if name.contains('.') { engine::bat_by_extension(&name) } else if name.starts_with(|c: char| c.is_ascii_uppercase()) { engine::bat_by_name_exact(&name) } else { None };
+        if let Some(id) = whole {
             return Some(id);
         }
         if let Some((_, ext)) = name.rsplit_once('.')
@@ -84,7 +84,21 @@ pub fn detect(path: Option<&Path>, head: &str, tail: &str, user: &UserMap) -> Op
     {
         return Some(id.to_string());
     }
-    engine::bat_by_first_line(first)
+    by_first_line(first).map(str::to_string).or_else(|| engine::bat_by_first_line(first))
+}
+
+/// Eindeutige erste Zeilen vor den Mustern der bat-Grammatiken (die z. B. jede HTML-Datei als Svelte ansähen).
+fn by_first_line(first: &str) -> Option<&'static str> {
+    let t = first.trim_start_matches('\u{feff}').trim_start().to_ascii_lowercase();
+    if t.starts_with("<!doctype html") || t.starts_with("<html") {
+        Some("html")
+    } else if t.starts_with("<?xml") {
+        Some("xml")
+    } else if t.starts_with("<?php") {
+        Some("php")
+    } else {
+        None
+    }
 }
 
 /// Built-in language by exact file name (or prefix entry `Dockerfile.`).
@@ -105,6 +119,35 @@ fn sniff(ext: &str, head: &str) -> Option<&'static str> {
         "cls" => {
             let t = head.trim_start();
             Some(if t.starts_with("VERSION ") || t.starts_with("Attribute VB_") || t.contains("\nAttribute VB_") { "vb" } else { "tex" })
+        }
+        // PHP, Pascal/Delphi oder Assembler.
+        "inc" => {
+            let l = head.to_ascii_lowercase();
+            Some(if l.contains("<?php") {
+                "php"
+            } else if ["{$", "procedure ", "function ", "begin", "unit ", "interface", "const\n", "type\n"].iter().any(|k| l.contains(k)) {
+                "pascal"
+            } else if ["%macro", "section ", "mov ", " db ", "equ ", "proc "].iter().any(|k| l.contains(k)) {
+                "source.asm.x86_64"
+            } else {
+                "plaintext"
+            })
+        }
+        // F# oder GLSL-Fragment-Shader.
+        "fs" => Some(if head.contains("#version") || head.contains("gl_FragColor") || head.contains("void main") { "source.glsl" } else { "source.fsharp" }),
+        // nginx nur, wenn es danach aussieht; sonst INI-artig oder reiner Text.
+        "conf" => {
+            let l = head.to_ascii_lowercase();
+            Some(if ["server {", "http {", "location ", "upstream ", "worker_processes", "events {"].iter().any(|k| l.contains(k)) {
+                "source.nginx"
+            } else if head.lines().any(|x| {
+                let x = x.trim();
+                (x.starts_with('[') && x.ends_with(']')) || (x.contains('=') && !x.starts_with('#'))
+            }) {
+                "ini"
+            } else {
+                "plaintext"
+            })
         }
         _ => None,
     }

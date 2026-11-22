@@ -4,9 +4,10 @@
 //! Both grammar sets are loaded lazily on first use (bat's set is a ready-made dump of about 1 MB, ~5 ms; ours are a
 //! few kB of YAML). The grammars' regexes compile on demand while parsing.
 //!
-//! Incremental highlighting: the parser state is kept at a checkpoint every [`STEP`] lines; colours are only computed
-//! for the lines that are drawn (plus a few around them), within a time budget per frame, and an edit only invalidates
-//! from its first changed line on.
+//! Incremental highlighting: the parser state is kept at a checkpoint every [`STEP`] lines and where the last call
+//! stopped (resume point); colours are only computed for the lines that are asked for, in steps with a time budget, and
+//! an edit only invalidates from its first changed line on. The editor runs this on a worker thread
+//! ([`super::DocHighlight`]), so compiling a grammar's regexes or a slow line never blocks drawing.
 
 use super::languages::{Grammar, LANGUAGES, language};
 use super::scopes::{is_key_scope, tok_for_scope};
@@ -77,6 +78,12 @@ pub fn bat_by_extension(ext: &str) -> Option<String> {
     (!s.hidden && s.name != "Plain Text").then(|| bat_id(s))
 }
 
+/// Language by a whole file name in bat's set, exactly as written (`Jenkinsfile`, `Rakefile`; for names without a dot).
+pub fn bat_by_name_exact(name: &str) -> Option<String> {
+    let s = registry().bat.syntaxes().iter().rev().find(|s| !s.hidden && s.name != "Plain Text" && s.file_extensions.iter().any(|e| e == name))?;
+    Some(bat_id(s))
+}
+
 /// Language by the first-line patterns of bat's grammars (`<?xml`, `<?php`, shebangs).
 pub fn bat_by_first_line(first: &str) -> Option<String> {
     let first: String = first.chars().take(500).collect();
@@ -122,6 +129,9 @@ pub struct SyntectHighlighter {
     checkpoints: Vec<(ParseState, ScopeStack)>,
     /// Highlighted lines.
     lines: HashMap<usize, Box<[Span]>>,
+    /// Where the last call stopped: parser state before line `.0` (each call continues from here, so progress never
+    /// depends on finishing a whole checkpoint step within one budget).
+    resume: Option<(usize, ParseState, ScopeStack)>,
     memo: HashMap<Scope, ScopeInfo>,
     buf: String,
     failed: bool,
@@ -131,7 +141,7 @@ impl SyntectHighlighter {
     pub fn new(lang: &str) -> Option<SyntectHighlighter> {
         let (set, syntax, sigil) = resolve(lang)?;
         let start = ParseState::new(&set.syntaxes()[syntax]);
-        Some(SyntectHighlighter { set, sigil, checkpoints: vec![(start, ScopeStack::new())], lines: HashMap::new(), memo: HashMap::new(), buf: String::new(), failed: false })
+        Some(SyntectHighlighter { set, sigil, checkpoints: vec![(start, ScopeStack::new())], lines: HashMap::new(), resume: None, memo: HashMap::new(), buf: String::new(), failed: false })
     }
 
     /// Number of stored parser states (for tests).
@@ -228,6 +238,9 @@ impl Highlighter for SyntectHighlighter {
     fn invalidate_from(&mut self, line: usize) {
         self.checkpoints.truncate((line / STEP + 1).max(1));
         self.lines.retain(|l, _| *l < line);
+        if self.resume.as_ref().is_some_and(|(r, ..)| *r > line) {
+            self.resume = None;
+        }
     }
 
     fn prepare(&mut self, rope: &Rope, lines: Range<usize>, deadline: Instant) -> bool {
@@ -242,8 +255,11 @@ impl Highlighter for SyntectHighlighter {
             self.lines.retain(|l, _| *l + 2 * STEP >= start && *l < end + 2 * STEP);
         }
         let k = (first_missing / STEP).min(self.checkpoints.len() - 1);
-        let (mut ps, mut stack) = self.checkpoints[k].clone();
-        let mut line = k * STEP;
+        // Start at the resume point if it lies between the checkpoint and the first missing line, else at the checkpoint.
+        let (mut line, mut ps, mut stack) = match &self.resume {
+            Some((r, ps, st)) if *r <= first_missing && *r > k * STEP => (*r, ps.clone(), st.clone()),
+            _ => (k * STEP, self.checkpoints[k].0.clone(), self.checkpoints[k].1.clone()),
+        };
         let keep_from = start.saturating_sub(2 * STEP);
         while line < end {
             if line.is_multiple_of(STEP) && line / STEP == self.checkpoints.len() {
@@ -263,9 +279,11 @@ impl Highlighter for SyntectHighlighter {
             }
             line += 1;
             if line < end && Instant::now() >= deadline {
+                self.resume = Some((line, ps, stack));
                 return false;
             }
         }
+        self.resume = Some((line, ps, stack));
         true
     }
 

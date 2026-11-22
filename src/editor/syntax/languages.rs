@@ -87,7 +87,7 @@ pub const LANGUAGES: &[Language] = &[
     sigil(interp(modes(lang("perl", "Perl", Bat("Perl"), &["pl", "pm", "t", "pod", "psgi", "cgi"]), &["perl"]), &["perl"])),
     sigil(interp(modes(lang("php", "PHP", Bat("PHP"), &["php", "phtml", "php3", "php4", "php5", "php7", "php8", "phps", "phpt"]), &["php"]), &["php"])),
     modes(lang("plaintext", "Plain text", Bat("Plain Text"), &["txt", "text"]), &["text", "txt"]),
-    sigil(interp(modes(lang("powershell", "PowerShell", Own("PowerShell"), &["ps1", "psm1", "psd1", "ps1xml"]), &["ps1", "powershell", "pwsh"]), &["pwsh", "powershell"])),
+    sigil(interp(modes(lang("powershell", "PowerShell", Own("PowerShell"), &["ps1", "psm1", "psd1"]), &["ps1", "powershell", "pwsh"]), &["pwsh", "powershell"])),
     interp(modes(names(lang("python", "Python", Bat("Python"), &["py", "pyw", "pyi", "pyx", "pxd", "py3", "rpy", "gyp", "gypi"]), &["SConstruct", "SConscript", "wscript"]), &["python", "py"]), &["python", "pypy", "py"]),
     sigil(interp(modes(names(lang("ruby", "Ruby", Bat("Ruby"), &["rb", "rake", "gemspec", "ru", "rbw", "podspec", "thor", "jbuilder"]), &["Rakefile", "Gemfile", "Guardfile", "Podfile", "Vagrantfile", "Brewfile", "Capfile", "Fastfile"]), &["ruby"]), &["ruby", "jruby", "macruby", "rake"])),
     interp(modes(lang("rust", "Rust", Bat("Rust"), &["rs"]), &["rust"]), &["rust-script"]),
@@ -100,7 +100,7 @@ pub const LANGUAGES: &[Language] = &[
     interp(modes(lang("typescript", "TypeScript", Bat("TypeScript"), &["ts", "mts", "cts"]), &["typescript", "ts"]), &["deno", "ts-node", "tsx"]),
     modes(lang("tsx", "TypeScript React / JSX", Bat("TypeScriptReact"), &["tsx", "jsx"]), &["tsx", "jsx", "typescriptreact"]),
     modes(lang("vb", "Visual Basic (VB.NET, VBA, VBScript)", Own("Visual Basic"), &["vb", "vbs", "vba", "bas", "frm", "ctl", "dsr", "vbhtml"]), &["vb", "vbnet", "vbscript", "vba"]),
-    modes(lang("xml", "XML", Bat("XML"), &["xml", "xsd", "xsl", "xslt", "svg", "xaml", "csproj", "vbproj", "fsproj", "vcxproj", "props", "targets", "nuspec", "resx", "plist", "wsdl", "rss", "atom", "manifest", "config", "wxs", "wxi", "xul", "kml", "gpx", "iml", "ruleset", "pubxml", "storyboard", "xib", "tld", "rng", "opml"]), &["xml"]),
+    modes(lang("xml", "XML", Bat("XML"), &["xml", "ps1xml", "xsd", "xsl", "xslt", "svg", "xaml", "csproj", "vbproj", "fsproj", "vcxproj", "props", "targets", "nuspec", "resx", "plist", "wsdl", "rss", "atom", "manifest", "config", "wxs", "wxi", "xul", "kml", "gpx", "iml", "ruleset", "pubxml", "storyboard", "xib", "tld", "rng", "opml"]), &["xml"]),
     modes(lang("yaml", "YAML", Bat("YAML"), &["yaml", "yml", "sublime-syntax"]), &["yaml"]),
 ];
 

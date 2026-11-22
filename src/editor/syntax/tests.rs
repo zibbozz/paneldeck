@@ -115,6 +115,8 @@ fn detection_by_extension_and_name() {
         ("Cargo.toml", "toml"),
         ("Cargo.lock", "toml"),
         ("notes.txt", "plaintext"),
+        ("Types.ps1xml", "xml"),
+        ("site.conf", "plaintext"),
     ];
     for (name, want) in cases {
         assert_eq!(det(name, "").as_deref(), Some(want), "{name}");
@@ -129,6 +131,15 @@ fn detection_by_extension_and_name() {
     assert_eq!(det("data.unknownext", "hello"), None);
     assert_eq!(det("build", "x"), None, "kein ganzer Name aus bats Liste ohne Punkt/Großbuchstaben");
     assert_eq!(det("Jenkinsfile", "").as_deref(), Some("source.groovy"));
+    assert_eq!(det("Build", "x"), None, "großgeschrieben, aber nicht genau so in bats Liste");
+    assert_eq!(det("a.inc", "<?php echo 1;").as_deref(), Some("php"));
+    assert_eq!(det("a.inc", "procedure Foo;\nbegin\nend;").as_deref(), Some("pascal"));
+    assert_eq!(det("a.inc", "%macro x 0\n").as_deref(), Some("source.asm.x86_64"));
+    assert_eq!(det("Prog.fs", "module M\nlet x = 1\n").as_deref(), Some("source.fsharp"));
+    assert_eq!(det("shade.fs", "#version 330\nvoid main() {}\n").as_deref(), Some("source.glsl"));
+    assert_eq!(det("nginx.conf", "server {\n  listen 80;\n}\n").as_deref(), Some("source.nginx"));
+    assert_eq!(det("app.conf", "[main]\nkey=value\n").as_deref(), Some("ini"));
+    assert_eq!(det("page", "<!DOCTYPE html>\n<html></html>\n").as_deref(), Some("html"), "nicht Svelte");
     let (h, t) = head_tail(&Rope::from_str("hello"));
     assert_eq!(detect(None, &h, &t, &UserMap::default()), None);
 }
@@ -171,6 +182,10 @@ fn user_mappings_come_first() {
     assert_eq!(d("view.blade.php").as_deref(), Some("html"), "längste Endung gewinnt");
     assert_eq!(d("x.php").as_deref(), Some("php"));
     assert_eq!(user.lookup("tpl"), None, "ein Name ohne Punkt ist kein Treffer für *.tpl");
+    let dots = UserMap { entries: vec![(".clang-format".into(), "yaml".into()), ("*.prettierrc".into(), "json".into()), (".envrc".into(), "shell".into())] };
+    assert_eq!(dots.lookup(".clang-format"), Some("yaml"), "Punktdatei selbst");
+    assert_eq!(dots.lookup(".prettierrc"), Some("json"));
+    assert_eq!(dots.lookup(".ENVRC"), Some("shell"));
 }
 
 /// Kleine Probe je Sprache der Tabelle.
@@ -280,19 +295,22 @@ fn edits_invalidate_from_the_changed_line() {
     let text: String = (0..100).map(|i| format!("int x{i} = {i};\n")).collect();
     let mut doc = Document::from_text(&text);
     let mut hl = DocHighlight::new("c", &doc).unwrap();
-    assert!(hl.prepare(&doc, 0..100, later()));
+    let wait = Duration::from_secs(20);
+    assert!(hl.wait(&doc, 0..100, wait));
     assert_eq!(hl.spans(95).unwrap()[0].tok, Tok::Keyword, "int");
     // Block-Kommentar in Zeile 10 öffnen: alles darunter wird Kommentar – auch in einer anderen „Ansicht“.
     let mut sels = doc.new_selections(0);
     let pos = doc.line_to_char(10);
     doc.apply_edits(&mut sels, vec![TextEdit::insert(pos, "/* ")], EditOrigin::User).unwrap();
     assert!(hl.spans(95).is_some(), "noch nicht abgeglichen");
-    assert!(hl.prepare(&doc, 0..100, later()));
+    assert!(!hl.prepare(&doc, 0..100), "neue Farben kommen erst aus dem Hilfsthread");
+    assert_eq!(hl.spans(95).map(|s| s[0].tok), Some(Tok::Keyword), "bis dahin die alten Farben (gleiche Zeilenzahl)");
+    assert!(hl.wait(&doc, 0..100, wait));
     assert!(hl.spans(95).unwrap().iter().all(|s| s.tok == Tok::Comment), "{:?}", hl.spans(95));
     assert_eq!(hl.spans(5).map(|s| s[0].tok), Some(Tok::Keyword), "davor unverändert");
     // Rückgängig: wieder Code.
     doc.undo(&mut sels);
-    assert!(hl.prepare(&doc, 90..100, later()));
+    assert!(hl.wait(&doc, 90..100, wait));
     assert_eq!(hl.spans(95).unwrap()[0].tok, Tok::Keyword);
 }
 
@@ -314,6 +332,49 @@ fn budget_limits_work_per_frame_and_checkpoints_resume() {
     // Invalidieren behält die Zwischenstände davor.
     h.invalidate_from(100);
     assert_eq!(h.checkpoint_count(), 100 / STEP + 1);
+}
+
+/// Jeder Aufruf kommt voran, auch wenn schon eine Zeile das Budget sprengt (Markdown, Sprung ans Ende): Mit abgelaufener
+/// Frist arbeitet jeder Aufruf genau eine Zeile ab und merkt sich, wo er stand.
+#[test]
+fn every_call_makes_progress_even_with_no_budget() {
+    let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+    let rope = Rope::from_str(&readme);
+    let n = rope.len_lines();
+    let mut h = SyntectHighlighter::new("markdown").unwrap();
+    let mut calls = 0;
+    while !h.prepare(&rope, 0..n.min(60), Instant::now()) {
+        calls += 1;
+        assert!(calls <= n.min(60) + 1, "kein Fortschritt nach {calls} Aufrufen");
+    }
+    assert!(h.spans(0).is_some());
+    // Ende einer langen Datei ohne Budget: höchstens eine Zeile je Aufruf, aber stetig.
+    let text: String = (0..3_000).map(|i| format!("# Kapitel {i}\n\nText *kursiv* `code` {i}\n")).collect();
+    let rope = Rope::from_str(&text);
+    let n = rope.len_lines();
+    let mut h = SyntectHighlighter::new("markdown").unwrap();
+    let mut calls = 0;
+    while !h.prepare(&rope, n - 40..n, Instant::now()) {
+        calls += 1;
+        assert!(calls <= n + 1, "kein Fortschritt nach {calls} Aufrufen");
+    }
+    assert!(h.spans(n - 4).is_some_and(|s| s.iter().any(|x| x.tok == Tok::Heading)), "{:?}", h.spans(n - 4));
+}
+
+#[test]
+fn the_worker_highlights_without_blocking_and_follows_scrolling() {
+    let text: String = (0..5_000).map(|i| format!("const x{i}: number = {i}; // c\n")).collect();
+    let doc = Document::from_text(&text);
+    let mut hl = DocHighlight::new("typescript", &doc).unwrap();
+    let t = Instant::now();
+    let first = hl.prepare(&doc, 4_900..4_950);
+    assert!(t.elapsed() < Duration::from_millis(50), "prepare blockiert nicht ({:?})", t.elapsed());
+    assert!(!first, "beim ersten Aufruf noch nichts fertig");
+    assert!(hl.wait(&doc, 4_900..4_950, Duration::from_secs(30)));
+    assert_eq!(hl.spans(4_920).unwrap()[0].tok, Tok::Keyword, "const");
+    assert!(hl.wait(&doc, 0..50, Duration::from_secs(30)), "zurück an den Anfang");
+    assert!(!hl.failed());
+    assert!(DocHighlight::new("plaintext", &doc).is_none());
 }
 
 #[test]

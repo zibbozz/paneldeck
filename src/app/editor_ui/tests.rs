@@ -608,8 +608,15 @@ fn status_bar_picks_the_language_and_the_mode_is_text_by_default() {
     ed.set_doc_mode(id, Some(Mode::Syntax));
     let g = ed.panes.focused;
     ed.panes.split(g, Dir::Horizontal).unwrap();
-    frame(&ctx, &mut ed, vec![], &mut t);
-    frame(&ctx, &mut ed, vec![], &mut t);
+    // Die Farben entstehen im Hilfsthread: zeichnen, bis sie da sind.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        frame(&ctx, &mut ed, vec![], &mut t);
+        if ed.docs[&id].syntax.hl.as_ref().is_some_and(|h| h.spans(0).is_some()) || std::time::Instant::now() > until {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let d = &ed.docs[&id];
     let hl = d.syntax.hl.as_ref().expect("Syntaxfarben an");
     assert_eq!(hl.lang, "rust");
@@ -637,5 +644,23 @@ fn status_bar_picks_the_language_and_the_mode_is_text_by_default() {
     assert_eq!(back.docs[&bid].syntax.lang.as_deref(), Some("source.haskell"));
     assert_eq!(back.docs[&bid].syntax.mode, Some(Mode::Syntax));
     frame(&ctx, &mut back, vec![], &mut t);
+    // Ein Modus einer neueren Version bleibt beim Speichern erhalten.
+    let mut s = persist::load(&data);
+    s.docs[0].mode = Some("smart".into());
+    persist::save(&data, &s);
+    let again = EditorUi::restore(&data);
+    assert_eq!(again.docs.values().next().unwrap().syntax.mode, None);
+    again.save(&data);
+    assert_eq!(persist::load(&data).docs[0].mode.as_deref(), Some("smart"));
+
+    // Unbenannte Datei: ein später getippter Shebang führt zur Sprache.
+    let mut ed2 = EditorUi::default();
+    let u = ed2.new_untitled(Some("print(1)\n"));
+    frame(&ctx, &mut ed2, vec![], &mut t);
+    assert_eq!(ed2.docs.get_mut(&u).unwrap().language(&prefs), None);
+    let d = ed2.docs.get_mut(&u).unwrap();
+    let mut sels = d.doc.as_ref().unwrap().new_selections(0);
+    d.doc.as_mut().unwrap().apply_edits(&mut sels, vec![crate::editor::TextEdit::insert(0, "#!/usr/bin/env python3\n")], crate::editor::EditOrigin::User).unwrap();
+    assert_eq!(d.language(&prefs).as_deref(), Some("python"));
     let _ = std::fs::remove_dir_all(&dir);
 }

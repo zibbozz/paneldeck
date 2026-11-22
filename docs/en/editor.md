@@ -40,9 +40,9 @@ Switching it on:
 
 **Languages:** AutoIt, Batch, BibTeX, C, C#, C++, CMake, CSS, Diff, Dockerfile, Go, HTML, INI, Inno Setup, Java, JavaScript, JSON, Kotlin, LaTeX, Less, Lua, Makefile, Markdown, NSIS, Pascal / Delphi, Perl, PHP, PowerShell, Python, Ruby, Rust, SCSS, Shell (Bash), SQL, Swift, TeX, TOML, TypeScript, TSX/JSX, Visual Basic (VB.NET, VBA, VBScript), XML, YAML – plus every other grammar bundled from [bat](https://github.com/sharkdp/bat) (Haskell, Kotlin, Terraform, Zig, …; listed under *More grammars* in the picker). AutoIt, Inno Setup, Visual Basic and PowerShell use small grammars of Paneldeck's own.
 
-Colouring is incremental: only the visible lines are coloured, an edit only recolours from the changed line on, and all splits of a file share the work. Lines over 10 000 characters stay plain. In [large-file mode](#large-files) the colours stay off.
+Colouring is incremental and runs in the background, so typing and scrolling never wait for it: only the visible lines (and a few around them) are coloured, an edit only recolours from the changed line on, and all splits of a file share the work. Lines over 3 000 characters stay plain. In [large-file mode](#large-files) the colours stay off.
 
-<!-- screenshot: editor-syntax – Editor tab with a Rust file in Syntax mode, status bar showing "Syntax" and "Rust", the mode menu open -->
+![Editor tab in Syntax mode: a Rust file and a Markdown file with syntax colours, the status bar shows mode and language](../images/editor-syntax.png)
 
 ![Find bar with a regular expression and Replace](../images/editor-find.png)
 

@@ -3,7 +3,7 @@
 //! Alt+Klick für weitere Cursor, Alt+Ziehen für Spaltenauswahl), Tastatur, Bildlauf, IME und Zwischenablage.
 //!
 //! Im Syntax-Modus (#312) färbt es die sichtbaren Zeilen mit den Syntaxfarben des Dokuments (`crate::editor::syntax`,
-//! Farben `code_*` des Themes); sie werden je Bild nur für die gezeichneten Zeilen und mit Zeitbudget berechnet.
+//! Farben `code_*` des Themes); berechnet werden sie in einem Hilfsthread je Dokument, das Zeichnen wartet nie darauf.
 //!
 //! Positionen sind Zeichen-Indizes im Rope des Kerns. Spalten auf dem Bildschirm sind *visuelle* Spalten (Tabs bis zum
 //! nächsten Tabstopp, breite Zeichen doppelt) im Raster der Monospace-Schrift. Sehr lange Zeilen (ab [`LONG_LINE`]
@@ -25,8 +25,8 @@ const SCROLLBAR_W: f32 = 10.0;
 const MINIMAP_ROW: f32 = 2.0;
 /// Höchstzahl Spalten, die die Minimap je Zeile ansieht.
 const MINIMAP_COLS: usize = 120;
-/// Zeitbudget je Bild für Syntaxfarben; was nicht fertig wird, folgt im nächsten Bild (bis dahin ohne Farben).
-const SYNTAX_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+/// Solange Syntaxfarben im Hilfsthread entstehen: so oft neu zeichnen, um sie abzuholen.
+const SYNTAX_POLL: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Farben der Syntax-Klassen aus dem Theme (Reihenfolge wie [`Tok::ALL`]).
 pub(super) fn code_palette(u: &crate::theme::tokens::UiColors) -> [Color32; 17] {
@@ -351,9 +351,9 @@ pub(super) fn show(ui: &mut Ui, rect: Rect, d: &mut DocEntry, view: &mut View, c
     // Syntaxfarben der sichtbaren Zeilen (gemeinsam für alle Ansichten des Dokuments).
     let mut hl = d.syntax.hl.as_mut();
     if let (Some(h), Some(first), Some(last)) = (hl.as_deref_mut(), rows.first(), rows.last())
-        && !h.prepare(doc, first.line..last.line + 1, std::time::Instant::now() + SYNTAX_BUDGET)
+        && !h.prepare(doc, first.line..last.line + 1)
     {
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(SYNTAX_POLL);
     }
     paint(ui, rect, doc, view, &geo, &rows, cx, focused, hl.as_deref());
     if let Some(m) = minimap {

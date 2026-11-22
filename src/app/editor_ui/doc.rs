@@ -75,6 +75,8 @@ pub(crate) struct SyntaxDoc {
     pub lang: Option<String>,
     /// Modus in der Statusleiste gewählt (`None` = aus den Einstellungen).
     pub mode: Option<Mode>,
+    /// Gemerkter Modus, den diese Version nicht kennt (z. B. `smart` einer neueren): bleibt beim Speichern erhalten.
+    pub mode_unknown: Option<String>,
     /// Erkannte Sprache und wofür erkannt wurde (Pfad, Zuordnungen, Dokument gelesen).
     detected: Option<(DetectKey, Option<String>)>,
     pub(super) hl: Option<DocHighlight>,
@@ -85,6 +87,8 @@ struct DetectKey {
     path: Option<PathBuf>,
     map_gen: u64,
     loaded: bool,
+    /// Unbenannte Datei: ihre Shebang-Zeile (neu erkennen, sobald eine dazukommt oder sich ändert).
+    shebang: Option<String>,
 }
 
 /// Reaktion auf eine Änderung auf der Platte.
@@ -330,7 +334,12 @@ impl DocEntry {
         if let Some(l) = &self.syntax.lang {
             return Some(l.clone());
         }
-        let key = DetectKey { path: self.path.clone(), map_gen: prefs.syntax.map_gen, loaded: self.doc.is_some() };
+        let shebang = if self.path.is_none() {
+            self.doc.as_ref().map(|d| d.line_part(0, 0..200).to_string()).filter(|l| l.starts_with("#!"))
+        } else {
+            None
+        };
+        let key = DetectKey { path: self.path.clone(), map_gen: prefs.syntax.map_gen, loaded: self.doc.is_some(), shebang };
         if let Some((k, l)) = &self.syntax.detected
             && *k == key
         {
@@ -372,6 +381,7 @@ impl DocEntry {
     /// Modus wählen (`None` = wieder aus den Einstellungen).
     pub fn set_mode(&mut self, mode: Option<Mode>) {
         self.syntax.mode = mode;
+        self.syntax.mode_unknown = None;
     }
 
     /// Syntaxfarben bereitstellen, wenn sie an sind (Modus Syntax, Sprache mit Grammatik, keine große Datei), sonst
