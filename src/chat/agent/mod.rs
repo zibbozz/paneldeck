@@ -481,15 +481,15 @@ pub fn must_ask(call: &ToolCall, env: &AgentEnv) -> bool {
     is_local(call) && sensitive_call(call, env)
 }
 
-/// Ziel für die Freigabe-Zeile (`src/main.rs`, `a → b`, `chat terminal`, Adresse).
-pub fn target(call: &ToolCall) -> Option<String> {
+/// Ziel für die Freigabe-Zeile (`src/main.rs`, `a → b`, „Chat-Terminal“, Adresse) in der Sprache der Oberfläche.
+pub fn target(call: &ToolCall, lang: crate::state::Lang) -> Option<String> {
     let a = &call.arguments;
     let s = |k: &str| str_arg(a, k).map(|v| crate::mcp::short(v.trim(), 120));
     match call.name.as_str() {
         "move_file" => Some(format!("{} → {}", s("source")?, s("destination")?)),
         "web_fetch" => s("url"),
         "web_search" => s("query").map(|q| format!("“{q}”")),
-        "run_command" => Some("chat terminal".into()),
+        "run_command" => Some(lang.t("Chat-Terminal", "chat terminal").into()),
         _ => path_of(call).map(|p| crate::mcp::short(p, 120)),
     }
 }

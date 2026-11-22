@@ -379,7 +379,8 @@ impl PlanUi {
             ui.add_space(S2);
             match progress.fraction() {
                 Some(f) if importing => {
-                    ui.add(egui::ProgressBar::new(f).show_percentage().desired_width(ui.available_width()));
+                    let fill = crate::style::bar_fill(f, ui.visuals().selection.bg_fill);
+                    ui.add(egui::ProgressBar::new(f).show_percentage().desired_width(ui.available_width()).fill(fill));
                 }
                 _ => {
                     ui.horizontal(|ui| {

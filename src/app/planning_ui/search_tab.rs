@@ -111,7 +111,10 @@ impl PlanUi {
         let key = proj.key.clone();
         let project_for_filters = (!self.search.scope_all).then_some(proj.id);
         let bar_ctx = QueryBarCtx::new(&loaded.schema, lang).with_filters(cx.conn, project_for_filters, if self.search.scope_all { "" } else { &key });
+        let top = ui.cursor().min.y;
         let out = query_bar(ui, &mut self.search.bar, &bar_ctx);
+        // Tutorial (#143): die Abfrage-Leiste als Ziel.
+        crate::app::tutorial::spot_since(ui, crate::app::tutorial::Spot::QueryBar, top);
         if out.help_clicked {
             self.help.open_at(None);
         }

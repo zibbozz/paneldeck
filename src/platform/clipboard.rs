@@ -12,6 +12,12 @@ pub fn image() -> Option<image::RgbaImage> {
     image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())
 }
 
+/// Text in the clipboard (editor context menu "Paste", #54 – keyboard pastes come through egui). `None` if there is none
+/// or the clipboard is not available.
+pub fn get_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok().filter(|t| !t.is_empty())
+}
+
 /// Put text into the system clipboard. `false` if that failed (e.g. locked by another program) or there is no
 /// implementation – the caller then goes through egui (Linux/macOS: always egui; on X11 a clipboard owned by a
 /// short-lived arboard instance could vanish with it).

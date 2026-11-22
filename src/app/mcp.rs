@@ -896,6 +896,8 @@ impl App {
             (_, "rename_session") | (_, "create_session") => mcp::short(args["name"].as_str().unwrap_or(""), 120),
             // Todo-Liste und Tickets: nur Kennungen und Kurztitel ins Protokoll, nie Kommentar- oder Beschreibungstexte.
             (_, t) if agent::TOOLS.contains(&t) => planning_log_info(t, args),
+            // Editor (#54): Dokument bzw. Pfad, nie Dateiinhalt.
+            (_, t) if crate::editor_svc::tools::TOOLS.contains(&t) => crate::editor_svc::tools::log_info(t, args),
             _ => String::new(),
         };
         let (log_how, model) = self.log_origin(how, caller);
@@ -1033,6 +1035,8 @@ impl App {
             "list_processes" | "read_process_output" | "start_process" | "stop_process" | "restart_process" => Out::Now(self.mcp_procs(ctx, tool, args)),
             "theme_list" => Out::Now(Ok(theme_list_json(&self.themes, &self.theme_issues, &self.settings.theme))),
             "theme_get" => Out::Now(theme_get_json(&self.themes, &self.settings.theme, args)),
+            // Editor-Reiter (#54): Schalter und Pfadregeln in `editor_svc::tools`.
+            t if crate::editor_svc::tools::TOOLS.contains(&t) => Out::Now(self.mcp_editor(ctx, t, args)),
             "send_text" => Out::Now(self.mcp_send_text(args, caller)),
             "send_keys" => Out::Now(self.mcp_send_keys(args, caller)),
             "run_command" => self.mcp_run(args, caller, reply, tool, how),
@@ -2076,7 +2080,9 @@ impl App {
         );
         ui.add_space(S2);
         let before = self.settings.mcp_level;
+        let top = ui.cursor().min.y;
         level_selector(ui, &mut self.settings.mcp_level, lang);
+        super::tutorial::spot_since(ui, Spot::McpLevel, top);
         if self.settings.mcp_level != before {
             // Sofort sichern: die Stufe ist eine Sicherheitseinstellung und darf nicht bis zum nächsten Zeitgeber warten.
             state::save_json(&self.dir.join("settings.json"), &self.settings);
@@ -2114,6 +2120,7 @@ impl App {
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S1);
+        let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("In Claude Code einrichten", "Set up in Claude Code")).strong());
         let inst_args = crate::launch::instance_args();
         let server = crate::launch::mcp_server_name(&crate::launch::Instance::from_args(&inst_args));
@@ -2145,6 +2152,7 @@ impl App {
                 ctx.copy_text(serde_json::to_string_pretty(&v).unwrap_or_default());
             }
         });
+        super::tutorial::spot_since(ui, Spot::McpRegister, top);
         let msg = self.mcp.msg.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !msg.is_empty() {
             ui.label(RichText::new(msg).small().color(style::dim(ui)));
@@ -2157,10 +2165,13 @@ impl App {
             .small()
             .color(style::dim(ui)),
         );
+        let top = ui.cursor().min.y;
         self.sysprompt_settings_ui(ui);
+        super::tutorial::spot_since(ui, Spot::McpSysprompt, top);
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S1);
+        let log_top = ui.cursor().min.y;
         ui.horizontal(|ui| {
             ui.label(RichText::new(lang.t("Aufrufprotokoll", "Call log")).strong());
             if ui.small_button(lang.t("Leeren", "Clear")).clicked() {
@@ -2181,6 +2192,7 @@ impl App {
                 ui.label(RichText::new(format!("{}s  {}{}  {}", age, e.tool, sess, e.info)).small().monospace().color(col));
             }
         });
+        super::tutorial::spot_since(ui, Spot::McpLog, log_top);
     }
 
     /// MCP-Status in der Fensterleiste links neben Update/Einstellungen (#240), solange die Schnittstelle an ist; leuchtet

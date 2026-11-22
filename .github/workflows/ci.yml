@@ -70,6 +70,10 @@ jobs:
           python-version: "3.11"
       - name: Changelog format (Changelog.md + Changelog.de.md in sync)
         run: python tools/changelog.py check
+      - name: README and docs images (no screenshot placeholders, no missing images, EN/DE sets equal)
+        run: python tools/check_docs_images.py
+        env:
+          PYTHONUTF8: "1"
       - name: Shell script syntax
         run: |
           for f in tools/*.sh tools/git-hooks/*; do

@@ -31,6 +31,11 @@ Right-click a folder or the empty background of a folder window (also of a drive
 
 There is **only one context menu**: the instance that switches it on last is the one it starts. Another instance then shows "→ another Paneldeck" next to the switch (the command is in the tooltip); switching it on there takes it over.
 
+## Open in Paneldeck editor
+*(Since 3.0.0.)* With *Settings → Window → Explorer: "Open in Paneldeck editor"* (**off by default**, separate from the folder entries) a right-click on **any file** offers **Open in Paneldeck editor**: the file opens in a new tab of the [Editor tab](editor.md) (an open file is brought to the front). The entry is the key `HKCU\Software\Classes\*\shell\PaneldeckEdit` (label, `Icon`, `command` = `"<exe>" [instance options] --edit "%1"`, see [`--edit`](command-line.md#--edit-file)). Like the folder entries it exists only once (the instance that switches it on last), shows "→ another Paneldeck" when it points elsewhere, and is written in the saved language. Switching it off deletes the key. The uninstaller and *Settings → Data & backup → Clean up* (entry *Explorer context menu*) remove it as well, if it points to this `paneldeck.exe`.
+
+<!-- screenshot-manual: Explorer context menu of a .txt file with "Open in Paneldeck editor" -->
+
 ## Status in the settings
 For autostart and the context menu, *Settings → Window* shows whether the entry is **off**, **on** (exactly this instance's command) or points to **another Paneldeck** (another `.exe` or another instance).
 

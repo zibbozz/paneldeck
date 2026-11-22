@@ -11,6 +11,8 @@ pub(super) enum Mode {
     #[default]
     Terminals,
     Tasks,
+    /// Texteditor (#54): eigener Bereich mit Ordnerbaum, Reitern und Teilungen, unabhängig von den Terminals.
+    Editor,
 }
 
 pub(super) const BAR_HEIGHT: f32 = 34.0;
@@ -50,15 +52,22 @@ impl App {
                 painter.rect_filled(Rect::from_center_size(icon_c, Vec2::splat(18.0)), 5.0, style::brand());
                 style::paint_icon(painter, SIcon::Terminal, icon_c, Color32::WHITE);
                 // Reiter
-                let tabs: [(Mode, SIcon, &str); 2] = [
+                let tabs: [(Mode, SIcon, &str); 3] = [
                     (Mode::Terminals, SIcon::Terminal, lang.t("Terminal Hub", "Terminal Hub")),
                     (Mode::Tasks, SIcon::Checklist, lang.t("Todo-Liste", "Todo list")),
+                    (Mode::Editor, SIcon::Doc, lang.t("Editor", "Editor")),
                 ];
                 let ctrl_hint = lang.t("Strg+Klick: in neuem Fenster öffnen", "Ctrl+click: open in a new window");
                 let mut x = rect.left() + 42.0;
                 for (mode, icon, tip) in tabs {
                     let r = Rect::from_min_size(Pos2::new(x, rect.top() + 4.0), Vec2::new(40.0, BAR_HEIGHT - 8.0));
                     let resp = ui.interact(r, Id::new(("titlebar_tab", mode as u8)), Sense::click()).on_hover_text(format!("{tip}\n{ctrl_hint}"));
+                    if mode == Mode::Tasks {
+                        super::tutorial::spot_rect(ui, Spot::TitlebarTodo, r);
+                    }
+                    if mode == Mode::Editor {
+                        super::tutorial::spot_rect(ui, Spot::TitlebarEditor, r);
+                    }
                     let active = self.mode == mode;
                     if active {
                         painter.rect_filled(r, 6.0, style::accent().gamma_multiply(0.22));
@@ -78,6 +87,7 @@ impl App {
                     x += 44.0;
                 }
                 let tabs_end = x;
+                super::tutorial::spot_rect(ui, Spot::TitlebarTabs, Rect::from_min_max(Pos2::new(rect.left() + 42.0, rect.top() + 4.0), Pos2::new(tabs_end - 4.0, rect.bottom() - 4.0)));
                 // Fensterknöpfe rechts; links davon (von rechts nach links) Einstellungen, Update und MCP-Status (#240) –
                 // in jedem Bereich und jedem Fenster. Der MCP-Status entfällt, wenn sonst kein Platz für die Reiter bliebe.
                 let bw = 46.0;

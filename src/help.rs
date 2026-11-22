@@ -17,6 +17,7 @@ const EN: &str = r#"Usage:
 Options:
   --open <folder>         Open a new session in <folder> (a file opens its folder).
   --claude                With --open: start Claude Code in the new session.
+  --edit <file>           Open <file> in a new tab of the Editor tab.
   --tray                  Start minimized in the tray.
   --no-tray               No tray icon for this start.
   --data-dir <folder>     Use <folder> as the data folder.
@@ -45,7 +46,7 @@ Notes:
   - --lang, --backup-dir, --no-tray and --no-update-check apply only to this start
     and are never written to settings.json. They (and --reset-settings) only take
     effect when this start opens the instance: if Paneldeck already runs with that
-    data folder, the start only hands --open/--claude over (--reset-settings then fails).
+    data folder, the start only hands --open/--claude/--edit over (--reset-settings then fails).
   - A single folder without an option (e.g. dropped onto paneldeck.exe) works
     like --open <folder>; a file opens its folder.
   - Exit codes: 0 = ok, 1 = error (e.g. unusable data folder), 2 = invalid command line.
@@ -60,6 +61,12 @@ Details and examples:
   --claude
     Together with --open: the new session starts Claude Code (needs Claude mode).
       paneldeck.exe --open "C:\Dev\my-app" --claude
+
+  --edit <file>
+    Opens <file> in a new tab of the Editor tab of the running Paneldeck (or starts
+    it); a file that is already open gets the focus instead. Not together with --open
+    or --claude. The Explorer entry "Open in Paneldeck editor" uses this.
+      paneldeck.exe --edit "C:\Dev\my-app\README.md"
 
   --tray
     Starts minimized to the tray icon (used by "Start with Windows"). If Paneldeck
@@ -130,6 +137,7 @@ const DE: &str = r#"Aufruf:
 Optionen:
   --open <ordner>         Neue Sitzung in <ordner> öffnen (eine Datei öffnet ihren Ordner).
   --claude                Mit --open: Claude Code in der neuen Sitzung starten.
+  --edit <datei>          <datei> in einem neuen Tab des Editor-Reiters öffnen.
   --tray                  Minimiert im Tray starten.
   --no-tray               Kein Tray-Symbol für diesen Start.
   --data-dir <ordner>     <ordner> als Datenordner verwenden.
@@ -158,7 +166,7 @@ Hinweise:
   - --lang, --backup-dir, --no-tray und --no-update-check gelten nur für diesen Start
     und werden nie in settings.json gespeichert. Sie (und --reset-settings) wirken nur,
     wenn dieser Start die Instanz öffnet: Läuft Paneldeck mit diesem Datenordner schon,
-    übergibt der Start nur --open/--claude (--reset-settings schlägt dann fehl).
+    übergibt der Start nur --open/--claude/--edit (--reset-settings schlägt dann fehl).
   - Ein einzelner Ordner ohne Option (z. B. auf paneldeck.exe gezogen) wirkt wie
     --open <ordner>; eine Datei öffnet ihren Ordner.
   - Exit-Codes: 0 = ok, 1 = Fehler (z. B. unbrauchbarer Datenordner), 2 = ungültige Kommandozeile.
@@ -173,6 +181,12 @@ Einzelheiten und Beispiele:
   --claude
     Zusammen mit --open: Die neue Sitzung startet Claude Code (Claude-Modus nötig).
       paneldeck.exe --open "C:\Dev\meine-app" --claude
+
+  --edit <datei>
+    Öffnet <datei> im laufenden Paneldeck (oder nach dem Start) in einem neuen Tab des
+    Editor-Reiters; eine schon offene Datei bekommt stattdessen den Fokus. Nicht zusammen
+    mit --open oder --claude. Der Explorer-Eintrag „In Paneldeck-Editor öffnen“ nutzt das.
+      paneldeck.exe --edit "C:\Dev\meine-app\README.md"
 
   --tray
     Startet minimiert im Tray (so startet „Mit Windows starten“). Läuft Paneldeck
@@ -243,7 +257,7 @@ mod tests {
 
     #[test]
     fn every_option_in_both_languages() {
-        let opts = ["--open", "--claude", "--tray", "--no-tray", "--data-dir", "--profile", "--backup-dir", "--lang", "--reset-settings", "--no-update-check", "--version", "--help", "-h", "-?", "mcp", "PANELDECK_DATA", "%APPDATA%", "paneldeck-data"];
+        let opts = ["--open", "--claude", "--edit", "--tray", "--no-tray", "--data-dir", "--profile", "--backup-dir", "--lang", "--reset-settings", "--no-update-check", "--version", "--help", "-h", "-?", "mcp", "PANELDECK_DATA", "%APPDATA%", "paneldeck-data"];
         for l in [Lang::En, Lang::De] {
             let t = text(l);
             assert!(t.contains(env!("CARGO_PKG_VERSION")));

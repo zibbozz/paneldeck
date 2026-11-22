@@ -231,6 +231,8 @@ Section "Uninstall"
   DeleteRegKey HKCU "Software\Classes\Directory\shell\PaneldeckClaude"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\Paneldeck"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\PaneldeckClaude"
+  ; Explorer-Eintrag "In Paneldeck-Editor oeffnen" fuer alle Dateien (#54, nur wenn eingeschaltet)
+  DeleteRegKey HKCU "Software\Classes\*\shell\PaneldeckEdit"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Paneldeck"
   DeleteRegKey HKCU "Software\Paneldeck"
   ; Daten (Einstellungen, Verläufe) nur auf Wunsch löschen

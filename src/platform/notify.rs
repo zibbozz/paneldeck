@@ -108,6 +108,36 @@ mod tests {
     }
 }
 
+/// Öffnen-Dialog für beliebige Dateien (Editor, #54); `start` = Startordner, wenn er lokal existiert.
+#[cfg(any(windows, unix))]
+pub fn pick_file(start: &str) -> Option<std::path::PathBuf> {
+    let mut d = rfd::FileDialog::new();
+    if !crate::pathfmt::is_remote(start) && !crate::wsl::is_wsl_unc(start) && std::path::Path::new(start).is_dir() {
+        d = d.set_directory(start);
+    }
+    d.pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn pick_file(_start: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// „Speichern unter“ für beliebige Dateien (Editor, #54): Startordner `dir` (wenn lokal vorhanden), Vorschlag `name`.
+#[cfg(any(windows, unix))]
+pub fn save_any(dir: Option<&std::path::Path>, name: &str) -> Option<std::path::PathBuf> {
+    let mut d = rfd::FileDialog::new().set_file_name(name);
+    if let Some(dir) = dir.filter(|p| !crate::pathfmt::is_remote(&p.to_string_lossy()) && p.is_dir()) {
+        d = d.set_directory(dir);
+    }
+    d.save_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn save_any(_dir: Option<&std::path::Path>, _name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Speichern-Dialog (Windows); anderswo `None`.
 #[cfg(any(windows, unix))]
 pub fn save_file(default_name: &str) -> Option<std::path::PathBuf> {

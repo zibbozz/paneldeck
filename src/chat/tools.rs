@@ -59,6 +59,9 @@ pub struct ToolPolicy {
     pub origin_sessions: Vec<u64>,
     /// Projektordner und Einstellungen der Agenten-Werkzeuge (#338).
     pub agent: AgentEnv,
+    /// Editor-Schalter der Agenten (#54, Bits wie `editor_svc::settings::AGENT_SWITCHES`, beim Anlegen gelesen):
+    /// schreibende Editor-Werkzeuge bekommt das Modell nur, wenn ihr Schalter an ist.
+    pub editor_switches: u8,
 }
 
 impl ToolPolicy {
@@ -68,7 +71,15 @@ impl ToolPolicy {
         if !cfg.level_chosen {
             cfg.level = McpLevel::Off;
         }
-        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default() }
+        let editor_switches = crate::editor_svc::settings::AGENT_SWITCHES.load(std::sync::atomic::Ordering::Relaxed);
+        ToolPolicy { cfg, tools_supported, expert, origin_sessions: Vec::new(), agent: AgentEnv::default(), editor_switches }
+    }
+
+    /// Dieselbe Momentaufnahme mit anderen Editor-Schaltern (Tests, ohne die globalen Schalter anzufassen).
+    #[cfg(test)]
+    pub fn with_editor_switches(mut self, bits: u8) -> Self {
+        self.editor_switches = bits;
+        self
     }
 
     /// Dieselbe Momentaufnahme mit den Sitzungen der auslösenden Agenten-Kette.
@@ -105,7 +116,11 @@ impl ToolPolicy {
     }
 
     fn allowed(&self, def: &mcp::ToolDef) -> bool {
-        def.level <= self.cfg.level && def.group.available(self.expert) && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
+        def.level <= self.cfg.level
+            && def.group.available(self.expert)
+            && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
+            // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
+            && crate::editor_svc::tools::offered_to_chats(def.name, self.editor_switches)
     }
 
     /// Werkzeuge für die Anfrage: alle, die Stufe und Modus erlauben und die nicht einzeln gesperrt sind.

@@ -16,7 +16,7 @@ Name conflicts (import, duplicate, edit as copy) never overwrite anything: a num
 
 A theme file that cannot be loaded is listed under the theme choice with the reason (for example `Invalid colour in "fg": "white"`). It cannot be selected until you fix it and click *Reload* (row *Custom themes*); if the selected theme is invalid, Paneldeck uses the default theme (One Dark).
 
-<!-- screenshot: Appearance tab with the Theme dropdown, Edit theme …, New theme …, the ⋯ menu open and one invalid theme file listed below, Settings → Appearance -->
+![Appearance tab with the theme dropdown, Edit theme …, New theme …, the ⋯ menu button and one invalid theme file listed below](../images/theme-appearance.png)
 
 ## How to change a colour of a theme
 1. Open *Settings → Appearance* and choose the theme under **Theme**.
@@ -33,7 +33,7 @@ A theme file that cannot be loaded is listed under the theme choice with the rea
 4. Type a **Name** at the top of the editor and fine-tune colours if you like.
 5. Click **Save**.
 
-<!-- screenshot: dialog "Generate from a few colours" with background, accent, kind and the ANSI preview bar, Settings → Appearance → New theme … -->
+![Dialog “Generate from a few colours” with background, accent, kind and the preview of the ANSI colours](../images/theme-generate.png)
 
 ## How to link one colour to another
 1. In the editor, click the colour that should follow another one (e.g. `border`).
@@ -54,7 +54,7 @@ A theme file that cannot be loaded is listed under the theme choice with the rea
 
 The editor is a large window you can move and resize: the **colour list** on the left, the **preview** on the right and the **design check** below it. The app itself only changes when you click **Save**; **Discard** closes the editor without saving. If you close it with unsaved changes, Paneldeck asks: *Save*, *Discard* or *Cancel*. Undo and redo: the arrow buttons or Ctrl+Z / Ctrl+Y (while no text field has the focus); dragging in the colour picker counts as one step. The editor opens in the main window only, and while it is open the theme cannot be renamed, deleted or imported.
 
-<!-- screenshot: theme editor with the colour list on the left, the preview on the right and the design check below, one colour selected, Settings → Appearance → Edit theme … -->
+![Theme editor with the colour list on the left, the preview on the right and the design check below, one colour selected](../images/theme-editor.png)
 
 **Colour list.** The colours are grouped (base, text, surfaces and borders, accent and selection, status, sidebar and tabs, tickets and chips, chat, diff and syntax, terminal) and can be searched by name or description. ● marks a value the theme sets, ○ a derived one, \* a value changed since the last save. Click a colour to edit it:
 
@@ -63,7 +63,7 @@ The editor is a large window you can move and resize: the **colour list** on the
 - **Reset to derived** removes the value again (terminal colours: *Reset to saved value*; cursor and selection have a derivation too).
 - **Contrast** against the usual backgrounds after WCAG: ✓ from 4.5:1 (text), ◐ from 3:1 (large text from 18 px, icons, borders), ⚠ below.
 
-<!-- screenshot: detail of one selected colour with picker, hex field, Link dropdown with opacity, Reset to derived and the contrast values, theme editor → colour list → click a colour -->
+![Theme editor with a selected colour: picker, hex field, Link dropdown with opacity, Reset to derived and the contrast values](../images/theme-color.png)
 
 **Preview.** A sample page built from the real controls with sample texts: buttons (normal, hover, pressed, disabled, primary, destructive), inputs (empty, focused, error), checkboxes, radio buttons, switch, slider and progress bar, tabs, sidebar entries (active, folder, status dots), chips and labels, a dialog, a toast and notice/warning/error boxes, a ticket card in a board column, chat bubbles with a tool approval, a terminal excerpt with all 16 colours, selection and cursor, a diff and a query with syntax colours. Everything can be clicked and operated but has no effect; **clicking an element selects its colour in the list**.
 
@@ -73,7 +73,7 @@ The editor is a large window you can move and resize: the **colour list** on the
 
 The design check below the preview shows **hints that never block saving**, with a counter. Each hint names the rule, the colours involved and the problem; clicking it selects the colour and highlights the elements in the preview. Where possible a hint offers a **suggestion with *Apply***: the smallest change of lightness (hue kept) that satisfies the rule – undo with Ctrl+Z. Every rule can be switched off under **⚙ Checks** (all are on by default; the choice is saved in `settings.json` as `theme_checks_off`).
 
-<!-- screenshot: design check with a few hints, one with a suggestion and the Apply button, and the ⚙ Checks menu open, theme editor → Design check -->
+![Design check with a few hints, some with a suggested colour and the Apply button](../images/theme-checks.png)
 
 | Rule | Checks |
 |---|---|

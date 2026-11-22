@@ -15,6 +15,7 @@ impl App {
         self.remember_off_ui(ctx);
         let lang = self.settings.language;
         let mut open = true;
+        let mut tut_cmd: Option<tutorial::Cmd> = None;
         // Frei verschiebbar (#275, #288): öffnet mittig, behält die gezogene Position, solange es offen ist, bleibt im Bild.
         style::movable(ctx, Id::new("settings_win"), egui::Window::new(lang.t("Einstellungen", "Settings")))
             .open(&mut open)
@@ -41,13 +42,27 @@ impl App {
                     lang.t("Farben", "Colors"),
                     // Index 12 (`TERMINAL_TAB`, #57), angezeigt hinter „Allgemein“.
                     "Terminal",
+                    // Index 13 (`editor_services::SETTINGS_TAB`, #54), angezeigt hinter „Terminal“.
+                    "Editor",
                 ];
                 // Anzeigereihenfolge (die Indizes bleiben fest).
-                const ORDER: [usize; 13] = [0, TERMINAL_TAB, 1, palette_ui::SETTINGS_TAB, 2, 3, 4, 5, 6, 7, 8, 9, models_ui::SETTINGS_TAB];
+                const ORDER: [usize; 14] = [0, TERMINAL_TAB, editor_services::SETTINGS_TAB, 1, palette_ui::SETTINGS_TAB, 2, 3, 4, 5, 6, 7, 8, 9, models_ui::SETTINGS_TAB];
                 ui.horizontal_wrapped(|ui| {
                     for i in ORDER {
                         let t = tabs[i];
                         let r = style::tab(ui, t, self.settings_tab == i);
+                        // Tutorial (#143): Reiter als Ziele.
+                        let spot = match i {
+                            5 => Some(Spot::TabShortcuts),
+                            6 => Some(Spot::TabProfiles),
+                            models_ui::SETTINGS_TAB => Some(Spot::TabModels),
+                            editor_services::SETTINGS_TAB => Some(Spot::TabEditor),
+                            _ => None,
+                        };
+                        let r = match spot {
+                            Some(s) => r.spot(s),
+                            None => r,
+                        };
                         if r.clicked() {
                             self.settings_tab = i;
                         }
@@ -154,6 +169,7 @@ impl App {
                         )).small().color(style::dim(ui)));
                     }
                     1 => {
+                        let top = ui.cursor().min.y;
                         row(ui, "Theme", "", |ui| {
                             egui::ComboBox::from_id_salt("themesel").selected_text(self.settings.theme.clone()).show_ui(ui, |ui| {
                                 for t in &self.themes {
@@ -162,6 +178,7 @@ impl App {
                             });
                         });
                         self.theme_manage_ui(ui);
+                        tutorial::spot_since(ui, Spot::ThemeManage, top);
                         row(ui, lang.t("Schriftgröße", "Font size"), lang.t("Terminalschrift (Cascadia Mono)", "Terminal font (Cascadia Mono)"), |ui| {
                             ui.add(egui::Slider::new(&mut self.settings.font_size, 9.0..=28.0).suffix(" pt"));
                         });
@@ -303,14 +320,17 @@ impl App {
                         );
                     }
                     2 => {
+                        let top = ui.cursor().min.y;
                         row(ui, lang.t("Claude-Modus", "Claude mode"), lang.t("Zeigt Claude-Funktionen: Start, Status, Kosten, Verlauf", "Shows Claude features: start, status, cost, history"), |ui| {
                             style::toggle(ui, &mut self.settings.claude_mode);
                         });
+                        tutorial::spot_since(ui, Spot::ClaudeMode, top);
                         if self.settings.claude_mode {
                             row(ui, lang.t("Fortsetzen", "Resume"), lang.t("Claude-Sitzungen beim Programmstart fortsetzen (nach „Fortsetzen nach Neustart“ der Sitzung)", "Resume Claude sessions at program start (as set in the session's “Resume after restart”)"), |ui| {
                                 style::toggle(ui, &mut self.settings.claude_resume);
                             });
                             ui.add_space(S2);
+                            let top = ui.cursor().min.y;
                             ui.label(lang.t("Standards für neue Claude-Sitzungen", "Defaults for new Claude sessions"));
                             ui.label(RichText::new(lang.t(
                                 "Gelten für Sitzungen aus dem Dialog „Neue Sitzung“ (Vorauswahl), dem Kontextmenü, Vorlagen und über MCP, wenn nichts angegeben ist. „Standard von Claude Code“ setzt keine Option. bypassPermissions lässt sich nur im Dialog „Neue Sitzung“ für eine einzelne Sitzung wählen. Ohne Permission-Mode starten Agenten-Sitzungen mit „default“.",
@@ -342,13 +362,16 @@ impl App {
                                 // Neue Standards gelten auch im Dialog wieder (statt der zuletzt dort gewählten Optionen).
                                 self.settings.last_claude_opts = None;
                             }
+                            tutorial::spot_since(ui, Spot::ClaudeDefaults, top);
                             ui.add_space(S2);
+                            let top = ui.cursor().min.y;
                             row(ui, lang.t("Tagesbudget", "Daily budget"), lang.t("Hinweis, wenn die geschätzten Tageskosten (UTC-Tag, alle Sitzungen) den Betrag in USD überschreiten; 0 = aus", "Notice when estimated daily cost (UTC day, all sessions) exceeds this USD amount; 0 = off"), |ui| {
                                 ui.add(egui::DragValue::new(&mut self.settings.daily_budget).range(0.0..=100000.0).speed(0.5).prefix("$ ").fixed_decimals(2));
                             });
                             row(ui, lang.t("Sitzungsbudget", "Session budget"), lang.t("Hinweis, sobald eine einzelne Sitzung die geschätzten Kosten in USD überschreitet (einmal je Sitzung); 0 = aus", "Notice once a single session exceeds this estimated USD cost; 0 = off"), |ui| {
                                 ui.add(egui::DragValue::new(&mut self.settings.session_budget).range(0.0..=100000.0).speed(0.5).prefix("$ ").fixed_decimals(2));
                             });
+                            tutorial::spot_since(ui, Spot::ClaudeBudget, top);
                             ui.add_space(S2);
                             ui.label(lang.t("Preise für die Kostenschätzung (USD pro Million Token)", "Prices for the cost estimate (USD per million tokens)"));
                             ui.label(RichText::new(lang.t("Nur eine Schätzung auf Basis der lokalen Transkripte. Unbekannte Modelle werden wie Sonnet gerechnet.", "Estimate only, based on local transcripts. Unknown models are priced like Sonnet.")).small().color(style::dim(ui)));
@@ -694,6 +717,7 @@ impl App {
                     palette_ui::SETTINGS_TAB => palette_ui::settings_view(ui, &mut self.settings.palette, lang),
                     8 => self.data_settings_ui(ui),
                     TERMINAL_TAB => terminal_tab(ui, lang),
+                    editor_services::SETTINGS_TAB => self.editor_settings_ui(ui),
                     9 => {
                         ui.label(RichText::new(format!("Paneldeck {}", env!("CARGO_PKG_VERSION"))).heading());
                         // macOS (#150): experimentell, unsigniert – Hinweis wie im Release-Text.
@@ -705,6 +729,7 @@ impl App {
                         }
                         ui.label(RichText::new(lang.t("Terminal-Zentrale für Claude Code und viele Terminals – funktioniert offline; kontaktiert GitHub nur, wenn du nach Updates suchst oder die automatische Prüfung einschaltest.", "Terminal hub for Claude Code and many terminals – works offline; only contacts GitHub when you check for updates or switch on the automatic check.")).color(style::dim(ui)));
                         ui.add_space(S2);
+                        let top = ui.cursor().min.y;
                         for (k, v) in [
                             (lang.t("Programm", "Program"), self.exe.display().to_string()),
                             (lang.t("Datenordner", "Data folder"), self.dir.display().to_string()),
@@ -721,6 +746,7 @@ impl App {
                                 ui.label(RichText::new(v).small());
                             });
                         }
+                        tutorial::spot_since(ui, Spot::AboutInfo, top);
                         ui.add_space(S2);
                         ui.horizontal(|ui| {
                             if ui.button(lang.t("Diagnose kopieren", "Copy diagnostics")).clicked() {
@@ -734,6 +760,10 @@ impl App {
                             }
                         });
                         self.update_about_ui(ui); // Abschnitt „Updates“ (update/ui.rs)
+                        // Abschnitt „Tutorial“ (#143); ein Start schließt die Einstellungen über die Vorbereitung des Schritts.
+                        if let Some(cmd) = self.tut_about_ui(ui) {
+                            tut_cmd = Some(cmd);
+                        }
                         if self.show_licenses {
                             ui.add_space(S1);
                             egui::ScrollArea::vertical().max_height(220.0).id_salt("lic").show(ui, |ui| {
@@ -756,6 +786,7 @@ impl App {
                         if ui.small_button(lang.t("Status aktualisieren", "Refresh status")).clicked() || (!self.win_probed) {
                             self.win_autostart = crate::integration::autostart_status();
                             self.win_context = crate::integration::context_status();
+                            self.editor_svc.edit_context = crate::integration::edit_context_status();
                             self.win_probed = true;
                         }
                         let exe = self.exe.clone();
@@ -825,6 +856,10 @@ impl App {
                             }
                             other_hint(ui, lang, &self.win_context, lang.t("Das Kontextmenü", "The context menu"));
                         }); }
+                        // „In Paneldeck-Editor öffnen“ für alle Dateien (#54, nur Windows, Standard aus).
+                        if let Some(e) = self.edit_context_row(ui, &exe) {
+                            err = Some(e);
+                        }
                         if let Some(e) = err {
                             self.hooks_msg = e.clone();
                             ui.colored_label(Color32::LIGHT_RED, e);
@@ -840,6 +875,9 @@ impl App {
             self.capture_key = None;
         }
         self.settings_open = open;
+        if let Some(c) = tut_cmd {
+            self.tut_cmd(ctx, c);
+        }
     }
 
     pub(super) fn editor_ui(&mut self, ctx: &egui::Context) {
@@ -904,9 +942,11 @@ impl App {
     }
 
     pub(super) fn apply_font(&mut self, ctx: &egui::Context) {
-        if self.applied_font != self.settings.terminal_font {
-            setup_fonts(ctx, &self.settings.terminal_font);
-            self.applied_font = self.settings.terminal_font.clone();
+        // Terminal- und Editorschrift (#54) zusammen: eine Änderung an einer baut die Schriften neu.
+        let want = format!("{}\u{1}{}", self.settings.terminal_font, self.settings.editor.font);
+        if self.applied_font != want {
+            setup_fonts(ctx, &self.settings.terminal_font, &self.settings.editor.font);
+            self.applied_font = want;
         }
     }
 }

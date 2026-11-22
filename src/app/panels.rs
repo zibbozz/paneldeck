@@ -577,7 +577,10 @@ impl App {
             });
             if budget > 0.0 {
                 let frac = (today_c / budget).clamp(0.0, 1.0) as f32;
-                ui.add(egui::ProgressBar::new(frac).text(format!("{} ${:.2} / ${:.2}", lang.t("Tagesbudget", "Daily budget"), today_c, budget)).fill(if today_c > budget { crate::style::ui().danger } else { style::brand() }));
+                // Beschriftung über dem Balken statt darin: Im Balken stand der Text in der Auswahlfarbe auf der Akzentfarbe
+                // und war je nach Füllstand kaum oder gar nicht zu lesen.
+                ui.label(RichText::new(format!("{} ${:.2} / ${:.2}", lang.t("Tagesbudget", "Daily budget"), today_c, budget)).small());
+                ui.add(egui::ProgressBar::new(frac).desired_height(8.0).fill(style::bar_fill(frac, if today_c > budget { crate::style::ui().danger } else { style::brand() })));
             }
             ui.add_space(S2);
             ui.label(RichText::new(lang.t("Letzte 14 Tage", "Last 14 days")).strong());
@@ -849,6 +852,10 @@ impl App {
         for (i, s) in self.prompts.iter().enumerate() {
             v.push((format!("{} {}", lang.t("Prompt senden:", "Send prompt:"), s.name), String::new(), Action::SendSnippet(i)));
         }
+        // Tutorial (#143): Tour, Fortsetzen, Kapitel, „Was ist neu“ (nur im Hauptfenster).
+        if self.wins.cur == 0 {
+            v.extend(self.tut_palette_items());
+        }
         v
     }
 
@@ -899,7 +906,7 @@ impl App {
         let top = (screen.height() * 0.1).clamp(8.0, 70.0);
         let list_h = (screen.height() - top - 90.0).max(80.0);
         let width = (screen.width() - 32.0).clamp(240.0, 560.0);
-        egui::Window::new("palette")
+        let win = egui::Window::new("palette")
             .title_bar(false)
             .resizable(false)
             .anchor(Align2::CENTER_TOP, Vec2::new(0.0, top))
@@ -941,6 +948,9 @@ impl App {
                     ui.weak(lang.t("Keine Treffer", "No matches"));
                 }
             });
+        if let Some(w) = win {
+            w.response.spot(Spot::Palette);
+        }
         if chosen.is_some() {
             close = true;
         }

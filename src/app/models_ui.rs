@@ -401,6 +401,8 @@ pub(super) fn models_tab(ui: &mut Ui, lang: Lang, all: &mut LlmServers, st: &mut
         out.changed = true;
     }
     let servers: &mut Vec<LlmServer> = all;
+    // Tutorial (#143): Server-Liste samt „Hinzufügen“ als Ziel.
+    let spot_top = ui.cursor().min.y;
 
     if servers.is_empty() && st.form.is_none() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -435,6 +437,7 @@ pub(super) fn models_tab(ui: &mut Ui, lang: Lang, all: &mut LlmServers, st: &mut
     if st.form.is_none() && ui.button(lang.t("+ Server hinzufügen", "+ Add server")).clicked() {
         st.form = Some(ServerForm::new_server(ServerKind::Ollama));
     }
+    super::tutorial::spot_since(ui, super::tutorial::Spot::ModelsServers, spot_top);
     // Formular für einen neuen Server (Bearbeiten steht beim Server selbst).
     if st.form.as_ref().is_some_and(|f| f.id.is_none()) {
         ui.add_space(S1);

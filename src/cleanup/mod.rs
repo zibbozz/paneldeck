@@ -30,8 +30,11 @@ use std::time::{Duration, SystemTime};
 pub const PENDING_FILE: &str = "cleanup-pending.json";
 /// Ordner der Programm-Kopien von Läufen unter `%TEMP%` (#312).
 pub const RUN_TEMP: &str = "paneldeck-run";
-/// Ordner der Hot-Exit-Puffer im Datenordner (#54).
+/// Ordner der Hot-Exit-Puffer des Editors im Datenordner (#54, `editor::HotExitStore` in `app::editor_ui` `HOT_DIR`).
 pub const HOT_EXIT: &str = "hot-exit";
+/// Zustand des Editor-Reiters (offener Ordner, Tabs, Teilungen, zuletzt geöffnet; #54, intern) – gehört zu
+/// „Sitzungen und Layout“.
+pub const EDITOR_STATE: &str = "editor-state.json";
 /// Beispiel-Theme, das immer bleibt (wird beim Start ohnehin neu angelegt).
 pub const EXAMPLE_THEME: &str = "nord-beispiel.json";
 /// Standard für „älter als X Tage“.
@@ -199,14 +202,17 @@ impl Item {
         use Item::*;
         match self {
             DbBackups => all_backups,
-            ScrollbackAll | ChatsAll | Prompts | Templates | Themes | SystemPrompt | Database | Sessions | SettingsAll | FactoryReset => true,
+            // Hot-Exit (#54): ungespeicherte Arbeit des Nutzers, nicht wiederherstellbar.
+            HotExit | ScrollbackAll | ChatsAll | Prompts | Templates | Themes | SystemPrompt | Database | Sessions | SettingsAll | FactoryReset => true,
             _ => false,
         }
     }
 
     /// Geht nur ohne laufende Instanz: wird vorgemerkt und beim Neustart ausgeführt.
     pub fn needs_restart(self) -> bool {
-        matches!(self, Item::Database | Item::Sessions | Item::FactoryReset)
+        // Hot-Exit (#54): offene Tabs schreiben ihre Puffer beim Beenden neu – gelöscht wird beim nächsten Start, bevor der
+        // Editor sie wiederherstellt.
+        matches!(self, Item::Database | Item::Sessions | Item::FactoryReset | Item::HotExit)
     }
 
     /// Erscheint nur, wenn es etwas davon gibt (künftige Unterordner, #54/#308/#312).
@@ -247,7 +253,7 @@ impl Item {
             Clipboard => l.t("Bilder aus der Zwischenablage", "Clipboard images"),
             OldBackups => l.t("Alte Sicherungsdateien", "Old backup files"),
             RunTemp => l.t("Programm-Kopien von Läufen", "Program copies of runs"),
-            HotExit => l.t("Hot-Exit-Puffer", "Hot-exit buffers"),
+            HotExit => l.t("Editor: ungespeicherte Puffer", "Editor: unsaved buffers"),
             ScrollbackOrphaned => l.t("Scrollback ohne Sitzung", "Orphaned scrollback"),
             ScrollbackAll => l.t("Scrollback – alle", "Scrollback – all"),
             ChatsOrphaned => l.t("Chatverläufe ohne Sitzung", "Orphaned chat histories"),
@@ -280,7 +286,7 @@ impl Item {
             Clipboard => l.t("Eingefügte Bilder (clipboard\\).", "Pasted images (clipboard\\)."),
             OldBackups => l.t("*.bak-* und *.defekt-* im Datenordner.", "*.bak-* and *.defekt-* in the data folder."),
             RunTemp => l.t("Kopien der Programmdatei unter %TEMP%\\paneldeck-run.", "Copies of the program under %TEMP%\\paneldeck-run."),
-            HotExit => l.t("Ungespeicherte Puffer (hot-exit\\).", "Unsaved buffers (hot-exit\\)."),
+            HotExit => l.t("Ungespeicherte Änderungen von Editor-Tabs (hot-exit\\) – sie gehen verloren. Neustart.", "Unsaved changes of editor tabs (hot-exit\\) – they are lost. Restart."),
             ScrollbackOrphaned => l.t("Gespeicherter Terminaltext, zu dem es keine Sitzung mehr gibt.", "Saved terminal text that no session belongs to any more."),
             ScrollbackAll => l.t("Auch offene Terminals: sie behalten nur den Bildschirm.", "Open terminals too: they keep only the screen."),
             ChatsOrphaned => l.t("Verläufe, zu denen es keinen Chat mehr gibt.", "Histories that no chat belongs to any more."),
@@ -292,13 +298,13 @@ impl Item {
             Themes => l.t("Selbst angelegte Themes (themes\\*.json); eingebaute und das Beispiel bleiben.", "Themes you created (themes\\*.json); built-in ones and the example stay."),
             SystemPrompt => l.t("Zurück zur eingebauten Vorlage.", "Back to the built-in template."),
             Database => l.t("paneldeck.db – wird vorher immer gesichert. Neustart.", "paneldeck.db – always backed up first. Restart."),
-            Sessions => l.t("state.json, Scrollback und Chats; offene Sitzungen werden beendet. Neustart.", "state.json, scrollback and chats; open sessions are ended. Restart."),
+            Sessions => l.t("state.json, Scrollback, Chats und die Tabs des Editors (editor-state.json); offene Sitzungen werden beendet. Neustart.", "state.json, scrollback, chats and the editor's tabs (editor-state.json); open sessions are ended. Restart."),
             SettingsAll => l.t("Wie --reset-settings (mit .bak-Kopie).", "Like --reset-settings (with a .bak copy)."),
             SettingsModels => l.t("Eingerichtete LLM-Server samt gespeicherter Schlüssel.", "Configured LLM servers including stored keys."),
             SettingsClaude => l.t("Standard-Startoptionen neuer Claude-Sitzungen.", "Default start options of new Claude sessions."),
             SettingsKeys => l.t("Eigene Tastenkürzel – zurück zu den Standards.", "Custom shortcuts – back to the defaults."),
             Autostart => l.t("Run-Werte (auch von Profilen), die auf diese paneldeck.exe zeigen.", "Run values (profiles too) that point to this paneldeck.exe."),
-            ContextMenu => l.t("„In Paneldeck öffnen“, wenn es auf diese paneldeck.exe zeigt.", "“Open in Paneldeck”, if it points to this paneldeck.exe."),
+            ContextMenu => l.t("„In Paneldeck öffnen“ und „In Paneldeck-Editor öffnen“, wenn sie auf diese paneldeck.exe zeigen.", "“Open in Paneldeck” and “Open in Paneldeck editor”, if they point to this paneldeck.exe."),
             ClaudeJson => l.t("paneldeck*-MCP-Einträge, die auf diese .exe zeigen (Datei wird vorher gesichert).", "paneldeck* MCP entries pointing to this .exe (the file is backed up first)."),
             Hooks => l.t("claude-hooks*.json im Datenordner (auch für WSL).", "claude-hooks*.json in the data folder (also for WSL)."),
             FactoryReset => l.t("Alles oben, samt Integration. Vorher ZIP-Sicherung, danach Neustart wie beim ersten Start.", "Everything above, including integration. ZIP backup first, then a restart like the first start."),
@@ -755,6 +761,8 @@ pub fn scan(ctx: &Ctx) -> Scan {
             Item::Database => Found { files: db_files(d), ..Default::default() },
             Item::Sessions => {
                 let mut files = one_file(&d.join("state.json"));
+                // Tabs, Teilungen und „zuletzt geöffnet“ des Editor-Reiters (#54).
+                files.extend(one_file(&d.join(EDITOR_STATE)));
                 files.extend(sb_all.iter().cloned());
                 files.extend(ch_all.iter().cloned());
                 Found { files, linked: sb_link.iter().chain(ch_link.iter()).cloned().collect(), ..Default::default() }
@@ -767,7 +775,7 @@ pub fn scan(ctx: &Ctx) -> Scan {
             },
             Item::SettingsKeys => Found { entries: settings.keys.keys().cloned().collect(), ..Default::default() },
             Item::Autostart => Found { entries: integ_state.run_values.iter().map(|(n, _)| n.clone()).collect(), ..Default::default() },
-            Item::ContextMenu => Found { entries: integ_state.context.iter().map(|_| "Directory\\shell\\Paneldeck".to_string()).collect(), ..Default::default() },
+            Item::ContextMenu => Found { entries: integ_state.context_entries(), ..Default::default() },
             Item::ClaudeJson => Found { entries: integ_state.claude_json_servers.clone(), ..Default::default() },
             Item::Hooks => Found { files: files_in_followed(d, |n| n.starts_with("claude-hooks") && n.ends_with(".json")), ..Default::default() },
             Item::FactoryReset => {
@@ -776,7 +784,7 @@ pub fn scan(ctx: &Ctx) -> Scan {
                 if !ctx.backup_dir.starts_with(d) {
                     files.extend(backups.iter().map(|b| FileEntry { path: b.path.clone(), bytes: b.size, modified: None }));
                 }
-                let entries = integ_state.run_values.len() + integ_state.context.iter().count() + integ_state.claude_json_servers.len();
+                let entries = integ_state.run_values.len() + integ_state.context_entries().len() + integ_state.claude_json_servers.len();
                 Found { files, entries: (0..entries).map(|i| i.to_string()).collect(), ..Default::default() }
             }
         };

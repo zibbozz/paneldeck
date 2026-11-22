@@ -142,6 +142,8 @@ pub fn tickets() -> Vec<Tk> {
         tk!("u", Task, "Load test the payment flow", "Lasttest für den Zahlungsablauf", "u5", 3, 5, 20, Sp::None, &[], &["testing", "payments"]),
         tk!("v", Task, "Remove legacy order endpoints", "Alte Bestell-Endpunkte entfernen", "e1", 5, 3, 20, Sp::None, &[], &["backend"]),
         tk!("w", Task, "Accessibility pass on the checkout", "Barrierefreiheit im Checkout prüfen", "u2", 3, 3, 21, Sp::None, &[], &["frontend"]),
+        // fast gleich wie „k“: das mögliche Duplikat für das Wartungs-Bild (maint-duplicate, tools/docs-shots.ps1)
+        tk!("k2", Task, "Alert on failed payment", "Alarm bei fehlgeschlagener Zahlung", "u5", 3, 2, 22, Sp::None, &[], &["payments"]),
     ];
     // Version und Meilenstein der Stories und einiger Aufgaben
     for t in &mut v {

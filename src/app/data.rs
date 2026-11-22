@@ -69,6 +69,7 @@ impl App {
             ui.colored_label(Color32::LIGHT_RED, e);
             ui.add_space(S2);
         }
+        let top = ui.cursor().min.y;
         ui.label(RichText::new(lang.t("Datenbank-Sicherung", "Database backup")).strong());
         ui.label(RichText::new(lang.t(
             "Paneldeck legt automatisch Kopien der Datenbank an. War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt (mehrere verpasste ergeben nur eine).",
@@ -117,6 +118,7 @@ impl App {
         if let Some(m) = &self.backup_msg {
             ui.label(RichText::new(m).small().color(dim));
         }
+        tutorial::spot_since(ui, Spot::DataBackups, top);
         ui.add_space(S2);
         ui.separator();
         ui.add_space(S2);
@@ -159,7 +161,7 @@ impl App {
             "Wählen, was gelöscht werden soll: Sicherungen, Verlauf, Protokolle, Inhalte, Einstellungen, Integration – bis zum kompletten Zurücksetzen.",
             "Choose what to delete: backups, history, logs, content, settings, integration – up to a complete reset.",
         )).small().color(dim));
-        if ui.button(lang.t("Aufräumen …", "Clean up …")).clicked() {
+        if ui.button(lang.t("Aufräumen …", "Clean up …")).spot(Spot::DataCleanup).clicked() {
             let ctx = ui.ctx().clone();
             self.open_cleanup(&ctx);
         }

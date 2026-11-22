@@ -43,7 +43,12 @@ param(
   # zsh/fish-Integration (#57) in eigenen WSL-Test-Distributionen (nie der eigenen): Name einer Distribution mit Login-Shell
   # zsh bzw. fish. Ohne Angabe werden diese Pruefungen uebersprungen.
   [string]$WslZsh = $env:PANELDECK_TEST_WSL_ZSH,
-  [string]$WslFish = $env:PANELDECK_TEST_WSL_FISH
+  [string]$WslFish = $env:PANELDECK_TEST_WSL_FISH,
+  # Tutorial (#143): Test-Build mit der Test-Schnittstelle des Tutorials, gebaut mit
+  #   cargo build --release --features tutorial-test --target-dir E:\paneldeck-test\target-tutorial-test
+  # Ohne Angabe wird der Tutorial-Teil uebersprungen. Die Ziele (Rechtecke) werden nur mit -Visible geprueft
+  # (ein minimiertes Fenster hat keine Flaeche).
+  [string]$TutorialExe = ''
 )
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path $Exe).Path
@@ -2240,6 +2245,118 @@ c.close()
   Get-Marker | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath "$data\processes.json" -ErrorAction SilentlyContinue
 
+  Write-Host "== Editor (#54): editor_* ueber MCP (Stufen, Schalter, Pfadregeln, Speichern, grosse Datei), --edit" -ForegroundColor Cyan
+  # Testdateien im Arbeitsordner; die grosse Datei entsteht erst hier (ueber der Schwelle large_file_mb = 1).
+  $edDir = Join-Path $work 'editor'
+  New-Item -ItemType Directory -Force $edDir | Out-Null
+  $utf8 = New-Object Text.UTF8Encoding $false
+  $edA = Join-Path $edDir 'notes.txt'; [IO.File]::WriteAllText($edA, "alpha`r`nbeta`r`ngamma`r`n", $utf8)
+  $edB = Join-Path $edDir 'gone.txt'; [IO.File]::WriteAllText($edB, "will be deleted`n", $utf8)
+  $edC = Join-Path $edDir 'changed.txt'; [IO.File]::WriteAllText($edC, "one`n", $utf8)
+  $edD = Join-Path $edDir 'from-cli.txt'; [IO.File]::WriteAllText($edD, "opened with --edit`n", $utf8)
+  $edBig = Join-Path $edDir 'big.log'
+  $sw = New-Object IO.StreamWriter($edBig, $false, $utf8)
+  for ($i = 1; $i -le 40000; $i++) { $sw.WriteLine("line $i of a large file generated at runtime for the editor smoke test") }
+  $sw.Close()
+  # Schalter der Editor-Einstellungen vor jedem Start setzen (settings.json -> editor).
+  $script:edSw = @{ open = $false; edit = $false; save = $false }
+  $script:prestart = {
+    $f = "$data\settings.json"; $j = [IO.File]::ReadAllText($f).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $ed = [pscustomobject]@{ large_file_mb = 1; agent_open = $script:edSw.open; agent_edit = $script:edSw.edit; agent_save = $script:edSw.save }
+    $j | Add-Member -Force editor $ed
+    [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+  }
+  # Stufe Lesen: lesen ja, schreiben nein (auch mit eingeschalteten Schaltern).
+  $script:edSw = @{ open = $true; edit = $true; save = $true }
+  Set-Level 'Read' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Editor, Nur lesen: editor_list/editor_read ja, open/edit/save nein' ($names -contains 'editor_list' -and $names -contains 'editor_read' -and $names -notcontains 'editor_open' -and $names -notcontains 'editor_edit' -and $names -notcontains 'editor_save') ($names -join ',')
+  $el = Tool 'editor_list'
+  Check 'Editor, Nur lesen: editor_list ohne offene Dokumente, Schalter gemeldet' (-not $el.err -and @($el.data.docs).Count -eq 0 -and $el.data.agents.open -eq $true) $el.text
+  Check 'Editor, Nur lesen: editor_open verboten (Stufe)' ((Code (Tool 'editor_open' @{ path = $edA })) -eq 'forbidden')
+  # Stufe Steuern, Schalter aus: forbidden mit Hinweis auf den Schalter.
+  $script:edSw = @{ open = $false; edit = $false; save = $false }
+  Set-Level 'Control' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  $names = @((Rpc 'tools/list').result.tools | ForEach-Object name)
+  Check 'Editor, Steuern: alle fuenf editor_* in tools/list' (@('editor_list', 'editor_read', 'editor_open', 'editor_edit', 'editor_save' | Where-Object { $names -contains $_ }).Count -eq 5) ($names -join ',')
+  $eo = Tool 'editor_open' @{ path = $edA }
+  Check 'Editor, Schalter aus: editor_open forbidden mit Hinweis auf den Schalter' ((Code $eo) -eq 'forbidden' -and $eo.text -match 'Agents may open files|Agenten d') $eo.text
+  Check 'Editor, Schalter aus: editor_edit forbidden' ((Code (Tool 'editor_edit' @{ doc = 1; old_text = 'a'; new_text = 'b' })) -eq 'forbidden')
+  Check 'Editor, Schalter aus: editor_save forbidden' ((Code (Tool 'editor_save' @{ doc = 1 })) -eq 'forbidden')
+  Check 'Editor, Schalter aus: Datei unveraendert' ([IO.File]::ReadAllText($edA) -eq "alpha`r`nbeta`r`ngamma`r`n")
+  # Steuern, alle Schalter an.
+  $script:edSw = @{ open = $true; edit = $true; save = $true }
+  Set-Level 'Control' -Empty
+  [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke'; version = '1' } })
+  Start-Sleep 2
+  foreach ($bad in @('\\localhost\c$\Windows\win.ini', '\\wsl.localhost\Ubuntu\etc\hosts', '\\.\PhysicalDrive0', '\\?\C:\Windows\win.ini', 'C:\NUL', "$edDir\con.txt")) {
+    Check "Editor: editor_open lehnt $bad ab (forbidden)" ((Code (Tool 'editor_open' @{ path = $bad })) -eq 'forbidden')
+  }
+  Check 'Editor: editor_open mit relativem Pfad -> bad_args' ((Code (Tool 'editor_open' @{ path = 'notes.txt' })) -eq 'bad_args')
+  Check 'Editor: editor_open mit Ordner -> bad_args' ((Code (Tool 'editor_open' @{ path = $edDir })) -eq 'bad_args')
+  Check 'Editor: editor_open fehlende Datei -> not_found' ((Code (Tool 'editor_open' @{ path = (Join-Path $edDir 'fehlt.txt') })) -eq 'not_found')
+  $oa = Tool 'editor_open' @{ path = $edA }
+  $A = $oa.data.doc
+  Check 'Editor: editor_open oeffnet die Datei in einem neuen Tab' (-not $oa.err -and $A -and $oa.data.already_open -eq $false -and $oa.data.opened_by_agent -eq $true -and $oa.data.eol -eq 'crlf') $oa.text
+  $oa2 = Tool 'editor_open' @{ path = $edA.ToUpper() }
+  Check 'Editor: zweites editor_open (andere Schreibweise) -> derselbe Tab, already_open' ($oa2.data.doc -eq $A -and $oa2.data.already_open -eq $true) $oa2.text
+  $rd = Tool 'editor_read' @{ doc = $A }
+  Check 'Editor: editor_read liefert Zeilen mit \n und Hinweis untrusted' ($rd.data.text -eq "alpha`nbeta`ngamma`n" -and $rd.data.start_line -eq 1 -and $rd.data.note -match 'untrusted|vertrauensw') $rd.text
+  $rp = Tool 'editor_read' @{ doc = $edA; offset = 2; limit = 1 }
+  Check 'Editor: editor_read ueber den Pfad mit offset/limit' ($rp.data.text -eq 'beta' -and $rp.data.more_below -eq $true) $rp.text
+  Check 'Editor: editor_edit mehrdeutig -> bad_args' ((Code (Tool 'editor_edit' @{ doc = $A; old_text = 'a'; new_text = 'x' })) -eq 'bad_args')
+  Check 'Editor: editor_edit nicht gefunden -> not_found' ((Code (Tool 'editor_edit' @{ doc = $A; old_text = 'delta'; new_text = 'x' })) -eq 'not_found')
+  $ed1 = Tool 'editor_edit' @{ doc = $A; old_text = 'beta'; new_text = 'BETA' }
+  Check 'Editor: editor_edit ungespeichert, vom Agenten markiert' (-not $ed1.err -and $ed1.data.dirty -eq $true -and $ed1.data.agent_edited -eq $true -and $ed1.data.replaced -eq 1) $ed1.text
+  Check 'Editor: Datei auf der Platte noch unveraendert' ([IO.File]::ReadAllText($edA) -eq "alpha`r`nbeta`r`ngamma`r`n")
+  $ed2 = Tool 'editor_edit' @{ doc = $A; start_line = 1; end_line = 0; text = 'top' }
+  Check 'Editor: editor_edit mit Zeilen (einfuegen)' (-not $ed2.err -and (Tool 'editor_read' @{ doc = $A; limit = 2 }).data.text -eq "top`nalpha") $ed2.text
+  $sv = Tool 'editor_save' @{ doc = $A }
+  Check 'Editor: editor_save speichert die offene Datei' (-not $sv.err -and $sv.data.saved -eq $true) $sv.text
+  Check 'Editor: gespeichert mit den Zeilenenden der Datei (CRLF)' ([IO.File]::ReadAllText($edA) -eq "top`r`nalpha`r`nBETA`r`ngamma`r`n") ([IO.File]::ReadAllText($edA))
+  Check 'Editor: editor_save ohne Aenderungen -> saved false' ((Tool 'editor_save' @{ doc = $A }).data.saved -eq $false)
+  # Unbenannter Tab: anlegen ja, speichern nur der Nutzer.
+  $un = Tool 'editor_open' @{ untitled = $true; text = "draft`r`ntext" }
+  Check 'Editor: unbenannter Tab mit Text' (-not $un.err -and $un.data.untitled -eq $true -and $null -eq $un.data.path) $un.text
+  Check 'Editor: unbenannter Tab nicht speicherbar (forbidden)' ((Code (Tool 'editor_save' @{ doc = $un.data.doc })) -eq 'forbidden')
+  # Auf der Platte geloescht: nicht speichern.
+  $ob = Tool 'editor_open' @{ path = $edB }
+  [void](Tool 'editor_edit' @{ doc = $ob.data.doc; old_text = 'deleted'; new_text = 'kept' })
+  Remove-Item -LiteralPath $edB -Force
+  Start-Sleep 4
+  Check 'Editor: geloeschte Datei nicht speicherbar (forbidden), nicht neu angelegt' ((Code (Tool 'editor_save' @{ doc = $ob.data.doc })) -eq 'forbidden' -and -not (Test-Path -LiteralPath $edB))
+  # Auf der Platte geaendert + ungespeichert: conflict, der Nutzer entscheidet.
+  $oc = Tool 'editor_open' @{ path = $edC }
+  [void](Tool 'editor_edit' @{ doc = $oc.data.doc; old_text = 'one'; new_text = 'mine' })
+  [IO.File]::WriteAllText($edC, "theirs`n", $utf8)
+  Start-Sleep 4
+  $lc = @((Tool 'editor_list').data.docs) | Where-Object { $_.id -eq $oc.data.doc }
+  Check 'Editor: Plattenaenderung erkannt (disk = changed)' ($lc.disk -eq 'changed') ($lc | ConvertTo-Json -Compress)
+  Check 'Editor: Speichern bei Plattenaenderung -> conflict, Datei bleibt' ((Code (Tool 'editor_save' @{ doc = $oc.data.doc })) -eq 'conflict' -and [IO.File]::ReadAllText($edC) -eq "theirs`n")
+  # Grosse Datei (zur Laufzeit erzeugt): lesen ja (gedeckelt), bearbeiten nein.
+  $og = Tool 'editor_open' @{ path = $edBig }
+  Check 'Editor: grosse Datei geoeffnet (large)' (-not $og.err -and $og.data.large -eq $true -and $og.data.lines -ge 40000) $og.text
+  $rg = Tool 'editor_read' @{ doc = $og.data.doc; offset = 39995; limit = 10 }
+  Check 'Editor: grosse Datei, Ende lesbar' ($rg.data.text -match 'line 40000 of' -and $rg.data.more_below -eq $false) $rg.text
+  $rm = Tool 'editor_read' @{ doc = $og.data.doc; limit = 5000 }
+  Check 'Editor: editor_read hoechstens 2000 Zeilen / 128 KB' ((($rm.data.end_line - $rm.data.start_line + 1) -le 2000) -and $rm.data.text.Length -le 131072 -and $rm.data.more_below -eq $true) "$($rm.data.start_line)-$($rm.data.end_line)"
+  Check 'Editor: grosse Datei nicht bearbeitbar (too_large)' ((Code (Tool 'editor_edit' @{ doc = $og.data.doc; old_text = 'line 1 of'; new_text = 'x' })) -eq 'too_large')
+  # --edit aus einer zweiten Instanz: Datei erscheint als Tab (nicht vom Agenten geoeffnet).
+  $second = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle Hidden -ArgumentList '--edit', "`"$edD`""
+  [void]$second.WaitForExit(10000)
+  Start-Sleep 2
+  $ld = @((Tool 'editor_list').data.docs) | Where-Object { $_.path -and $_.path -ieq $edD }
+  Check 'Editor: paneldeck --edit oeffnet die Datei im laufenden Hub' ($ld -and $ld.opened_by_agent -eq $false) ((@((Tool 'editor_list').data.docs) | ForEach-Object path) -join ',')
+  Check 'Editor: zweite Instanz hat sich beendet (Weiterleitung)' ($second.HasExited) ''
+  # Protokoll ohne Dateiinhalt
+  $log = if (Test-Path "$data\mcp-log.jsonl") { [IO.File]::ReadAllText("$data\mcp-log.jsonl") } else { '' }
+  Check 'Editor: mcp-log.jsonl nennt editor_*, aber keinen Dateiinhalt' ($log -match 'editor_edit' -and $log -notmatch 'BETA' -and $log -notmatch 'draft') ''
+  $script:prestart = $null
+
   Write-Host "== Shell-Integration: Hilfsdateien beim Beenden geloescht (#57)" -ForegroundColor Cyan
   # Eigener Hub ohne Sitzungen (keine Rueckfrage beim Schliessen); Fenster normal schliessen statt Prozess beenden.
   Set-Level 'Control' -Empty
@@ -2255,6 +2372,177 @@ c.close()
     }
   } else {
     Skip 'Beenden: Hilfsdateien entfernt' 'kein laufender Hub'
+  }
+
+  # ---------------------------------------------------------------- Tutorial (#143, nur mit dem Test-Build)
+  # Die Release-.exe darf die Test-Schnittstelle nie enthalten (Feature tutorial-test, siehe tools/release.sh).
+  $relBytes = [IO.File]::ReadAllBytes($Exe)
+  $hookName = [Text.Encoding]::ASCII.GetString($relBytes) -match 'PANELDECK_TUTORIAL_TEST'
+  Check 'Tutorial: gepruefte .exe ohne Test-Schnittstelle (kein PANELDECK_TUTORIAL_TEST)' (-not $hookName)
+  if (-not $TutorialExe) {
+    Skip 'Tutorial (#143): Touren, Ziele, Erkennung, Aufraeumen' 'kein -TutorialExe (Test-Build: cargo build --release --features tutorial-test)'
+  } else {
+    Write-Host "== Tutorial (#143): Test-Build $TutorialExe" -ForegroundColor Cyan
+    Stop-Hub
+    $TutorialExe = (Resolve-Path $TutorialExe).Path
+    $u8 = New-Object Text.UTF8Encoding $false
+    $mainDir = $dir; $mainData = $data
+    $dir = New-Item -ItemType Directory -Force "$work\tut"
+    Copy-Item $TutorialExe "$dir\paneldeck.exe"
+    if ($hasConPty) { Copy-Item "$exeDir\conpty.dll", "$exeDir\OpenConsole.exe" $dir }
+    $data = "$dir\paneldeck-data"
+    New-Item -ItemType Directory -Force $data | Out-Null
+    $hook = "$dir\hook"
+    New-Item -ItemType Directory -Force $hook | Out-Null
+    # Steuern fuer die MCP-Pruefungen; Profil 1 = Schein-Umgebung fuer jedes Terminal (das Projekt "Tutorial" erbt das
+    # Standardprofil des aktiven Projekts).
+    $ts = [pscustomobject]@{ mcp_level = 'Control'; scrollback_lines = 1000; profiles = @([pscustomobject]@{ id = 1; name = 'Smoke-Isolation'; env = $ptyEnv }) }
+    if ($ConPty -eq 'system') { $ts | Add-Member -Force bundled_conpty $false }
+    [IO.File]::WriteAllText("$data\settings.json", ($ts | ConvertTo-Json -Depth 10), $u8)
+    [IO.File]::WriteAllText("$data\state.json", '{"projects":[{"id":1,"name":"Standard","profile":1}],"active_project":1,"next_id":1}', $u8)
+    function Tut-Cmd([string]$line) {
+      $f = "$hook\tutorial-cmd.txt"; $t0 = Get-Date
+      while ((Test-Path -LiteralPath $f) -and ((Get-Date) - $t0).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
+      [IO.File]::WriteAllText("$f.tmp", $line + "`n", (New-Object Text.UTF8Encoding $false))
+      # Die Instanz loescht die vorige Befehlsdatei; solange Windows sie noch als "Loeschen ausstehend" fuehrt,
+      # schlaegt das Umbenennen fehl – dann kurz warten und erneut versuchen, statt den Befehl zu verlieren.
+      for ($try = 0; $try -lt 50; $try++) {
+        try { Move-Item -Force -LiteralPath "$f.tmp" -Destination $f -ErrorAction Stop; return }
+        catch { Start-Sleep -Milliseconds 100 }
+      }
+      Write-Host "  WARN  Tutorial-Befehl '$line' liess sich nicht schreiben"
+    }
+    function Tut-Status {
+      $f = "$hook\tutorial-status.json"
+      if (Test-Path -LiteralPath $f) { try { [IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { $null } } else { $null }
+    }
+    function Tut-Wait([scriptblock]$cond, [int]$ms = 12000) {
+      $t0 = Get-Date
+      do {
+        $s = Tut-Status
+        if ($s -and (& $cond $s)) { return $s }
+        Start-Sleep -Milliseconds 150
+      } while (((Get-Date) - $t0).TotalMilliseconds -lt $ms)
+      Tut-Status
+    }
+    function Tut-Sessions { @((Tool 'list_sessions').data.sessions | Where-Object { $_.project -eq 'Tutorial' }) }
+    $env:PANELDECK_TUTORIAL_TEST = $hook
+    $style = if ($Visible) { 'Normal' } else { 'Minimized' }
+    $script:hub = Start-Process "$dir\paneldeck.exe" -PassThru -WindowStyle $style
+    Remove-Item Env:PANELDECK_TUTORIAL_TEST
+    $t0 = Get-Date
+    while (-not (Test-Path "$data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 20) { Start-Sleep -Milliseconds 200 }
+    Start-Sleep 2
+    Start-Bridge
+    [void](Rpc 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'smoke-tutorial'; version = '1' } })
+
+    $s = Tut-Wait { param($x) $x.card }
+    Check 'Tutorial: Karte "Kurze Tour?" beim ersten Start' ($s -and $s.card) ($s | ConvertTo-Json -Depth 3 -Compress)
+    Tut-Cmd 'card later'
+    $s = Tut-Wait { param($x) -not $x.card }
+    Check 'Tutorial: "Spaeter" blendet die Karte aus' ($s -and -not $s.card)
+    $saved = if (Test-Path "$data\tutorial.json") { [IO.File]::ReadAllText("$data\tutorial.json") | ConvertFrom-Json } else { $null }
+    Check 'Tutorial: tutorial.json im Datenordner (card = later)' ($saved -and $saved.card -eq 'later')
+    $cat = @($s.catalogue)
+    Check 'Tutorial: Katalog mit kurzer Tour und Kapiteln' ($cat.Count -ge 7 -and $cat[0].id -eq 'basics') "$($cat.Count) Touren"
+    $expert0 = [bool]$s.expert
+
+    foreach ($tour in $cat) {
+      $tid = $tour.id; $steps = @($tour.steps)
+      Tut-Cmd "start $tid"
+      $s = Tut-Wait { param($x) $x.running -and $x.run.tour -eq $tid -and $x.run.index -eq 1 -and $x.run.ready }
+      Check "Tutorial ${tid}: startet bei Schritt 1/$($steps.Count)" ($s -and $s.run.total -eq $steps.Count -and $s.project.exists -and $s.project.active) ($s.run | ConvertTo-Json -Compress)
+      $missingSpots = @()
+      for ($i = 1; $i -le $steps.Count; $i++) {
+        $s = Tut-Wait { param($x) $x.running -and $x.run.index -eq $i -and $x.run.ready }
+        if (-not ($s -and $s.running -and $s.run.index -eq $i)) { Check "Tutorial ${tid}: Schritt $i erreicht" $false ($s | ConvertTo-Json -Depth 3 -Compress); break }
+        $r = $s.run
+        if ($r.spot) {
+          if ($Visible) { if (-not $r.spot_found) { $missingSpots += "$($r.step) ($($r.spot))" } }
+        }
+        $auto = $null
+        switch ($r.step) {
+          'basics.new_terminal' { $auto = { [void](Tool 'create_session' @{ name = 'Smoke-Tutorial' }) } }
+          'basics.todo_add' { $auto = { [void](Tool 'add_todo' @{ title = 'Smoke-Tutorial-Todo' }) } }
+          'todo.list' { $auto = { [void](Tool 'add_todo' @{ title = 'Smoke-Tutorial-Todo-2' }) } }
+        }
+        if ($auto) {
+          & $auto
+          $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i } 15000
+          Check "Tutorial ${tid}: $($r.step) geht nach der Aktion per MCP von selbst weiter" ($n -and (-not $n.running -or $n.run.index -gt $i)) ($n.run | ConvertTo-Json -Compress)
+        } else {
+          Tut-Cmd 'next'
+          $n = Tut-Wait { param($x) -not $x.running -or $x.run.index -gt $i }
+          if (-not ($n -and (-not $n.running -or $n.run.index -gt $i))) {
+            $pending = Test-Path -LiteralPath "$hook\tutorial-cmd.txt"
+            Write-Host "  WARN  Tutorial ${tid}: 'next' bei $($r.step) ohne Wirkung (Befehlsdatei noch da: $pending)"
+          }
+        }
+      }
+      if ($Visible) {
+        Check "Tutorial ${tid}: jedes Ziel sichtbar" ($missingSpots.Count -eq 0) ($missingSpots -join ', ')
+      } else {
+        Skip "Tutorial ${tid}: jedes Ziel sichtbar" 'Fenster minimiert (mit -Visible pruefen)'
+      }
+      $s = Tut-Wait { param($x) -not $x.running -and $x.ask -eq 'finished' }
+      Check "Tutorial ${tid}: am Ende die Rueckfrage zum Tutorial-Projekt" ($s -and $s.ask -eq 'finished') ($s | ConvertTo-Json -Depth 2 -Compress)
+      Check "Tutorial ${tid}: Fortschritt beendet" ($s -and $s.progress.$tid.finished)
+      Check "Tutorial ${tid}: Expertenmodus wie vorher" ($s -and [bool]$s.expert -eq $expert0)
+      if ($tid -eq 'basics') {
+        # @(…): eine einzelne Sitzung kaeme sonst als PSCustomObject zurueck, und dessen .Count ist in PowerShell 5.1 $null.
+        $mine = @(Tut-Sessions)
+        Check 'Tutorial basics: Sitzungen im Projekt "Tutorial" (list_sessions)' ($mine.Count -ge 1) "$($mine.Count)"
+        Check 'Tutorial basics: in der Tour angelegte To-dos gemerkt' (@($s.todos).Count -ge 1) "$(@($s.todos).Count)"
+      }
+      Tut-Cmd 'end delete'
+      $s = Tut-Wait { param($x) -not $x.ask -and -not $x.project.exists }
+      Check "Tutorial ${tid}: Loeschen entfernt das Projekt" ($s -and -not $s.ask -and -not $s.project.exists -and @($s.todos).Count -eq 0 -and $null -eq $s.plan_project) ($s | ConvertTo-Json -Depth 2 -Compress)
+      Start-Sleep -Milliseconds 500
+      Check "Tutorial ${tid}: keine Sitzung mehr im Projekt Tutorial" (@(Tut-Sessions).Count -eq 0)
+    }
+    $todos = Tool 'list_todos' @{ state = 'all'; limit = 200 }
+    Check 'Tutorial: To-dos der Tour geloescht (list_todos)' (-not $todos.err -and -not ("$($todos.text)" -match 'Smoke-Tutorial-Todo')) "$($todos.text)"
+
+    # Beenden, behalten, fortsetzen, zurueck
+    Tut-Cmd 'start basics'
+    [void](Tut-Wait { param($x) $x.running -and $x.run.index -eq 1 -and $x.run.ready })
+    Tut-Cmd 'next'; [void](Tut-Wait { param($x) $x.run.index -eq 2 })
+    Tut-Cmd 'back'
+    $s = Tut-Wait { param($x) $x.run.index -eq 1 }
+    Check 'Tutorial: Zurueck' ($s -and $s.run.index -eq 1)
+    Tut-Cmd 'next'; [void](Tut-Wait { param($x) $x.run.index -eq 2 })
+    Tut-Cmd 'skip'
+    $s = Tut-Wait { param($x) $x.run.index -eq 3 }
+    Check 'Tutorial: Ueberspringen merkt den Schritt' ($s -and $s.run.index -eq 3 -and @($s.progress.basics.skipped) -contains 'basics.sidebar') ($s.progress | ConvertTo-Json -Compress)
+    Tut-Cmd 'quit'
+    $s = Tut-Wait { param($x) -not $x.running -and $x.ask -eq 'paused' }
+    Check 'Tutorial: Beenden fragt nach dem Projekt' ($s -and $s.ask -eq 'paused')
+    Tut-Cmd 'end keep'
+    $s = Tut-Wait { param($x) -not $x.ask }
+    Check 'Tutorial: Behalten laesst das Projekt stehen' ($s -and $s.project.exists)
+    Tut-Cmd 'continue'
+    $s = Tut-Wait { param($x) $x.running -and $x.run.ready }
+    Check 'Tutorial: Fortsetzen beim gemerkten Schritt' ($s -and $s.run.tour -eq 'basics' -and $s.run.step -eq 'basics.new_terminal') ($s.run | ConvertTo-Json -Compress)
+    Tut-Cmd 'quit'; [void](Tut-Wait { param($x) $x.ask })
+    Tut-Cmd 'end delete'; [void](Tut-Wait { param($x) -not $x.ask -and -not $x.project.exists })
+
+    # Was ist neu
+    Tut-Cmd 'whatsnew_from 2.5.0'
+    $s = Tut-Wait { param($x) $x.hint }
+    Check 'Tutorial: Hinweis "Neu in ..." nach einem Update' ($s -and $s.hint) "$($s.hint)"
+    Tut-Cmd 'whatsnew'
+    $s = Tut-Wait { param($x) $x.running -and $x.run.tour -eq 'whatsnew' }
+    $since = @{}; foreach ($t in $cat) { foreach ($st in $t.steps) { $since[$st.id] = $st.since } }
+    $old = @($s.run.steps | Where-Object { [version]$since[$_] -le [version]'2.5.0' })
+    Check 'Tutorial: "Was ist neu" nur mit Schritten nach 2.5.0' ($s -and $s.run.total -ge 1 -and $old.Count -eq 0) "$($s.run.steps -join ', ')"
+    Tut-Cmd 'quit'; [void](Tut-Wait { param($x) $x.ask })
+    Tut-Cmd 'end delete'; [void](Tut-Wait { param($x) -not $x.ask })
+    Tut-Cmd 'whatsnew_from 2.5.0'; [void](Tut-Wait { param($x) $x.hint })
+    Tut-Cmd 'dismiss'
+    $s = Tut-Wait { param($x) -not $x.hint }
+    Check 'Tutorial: Hinweis laesst sich ausblenden' ($s -and -not $s.hint)
+    Stop-Hub
+    $dir = $mainDir; $data = $mainData
   }
 } catch {
   # Abbruch (z. B. Sicherheitspruefung): als Fehler zaehlen, aufraeumen und die Schutzpruefung trotzdem ausfuehren.

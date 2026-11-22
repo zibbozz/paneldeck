@@ -18,6 +18,7 @@ Paneldeck arbeitet **offline**: Es meldet sich nur bei GitHub, wenn du selbst na
 - **Todo-Liste und Tickets:** eine einfache Todo-Liste, die im *Expertenmodus* zu einem kleinen Jira wird – Projekte, Tickettypen, Workflows, Boards, eine Abfragesprache, Sprints und Dashboards, alles lokal gespeichert. Jedes Ticket hat eine Beschreibung, eine Fälligkeit mit einstellbaren Markierungen und Labels; Icons aus dem Lucide-Satz und eine bearbeitbare Farbpalette. Eine [Wartungsseite](docs/de/todo-and-tickets.md#wartung) findet liegengebliebene, kaputte und doppelte Tickets und ungenutzte Konfiguration, archiviert Tickets und pflegt die Datenbank.
 - **Themes:** ein [Theme-Editor](docs/de/themes.md) mit Live-Vorschau, Design-Prüfung und benannten Oberflächenfarben; ein neues Theme lässt sich aus einer Hintergrund- und einer Akzentfarbe erzeugen.
 - **Aufräumen:** sehen, was Paneldeck speichert, und löschen, was du nicht mehr brauchst – Sicherungen, Verläufe, Protokolle, Inhalte, Einstellungen – bis zum kompletten Zurücksetzen ([Aufräumen](docs/de/data-and-backups.md#aufräumen)).
+- **Editor:** ein Reiter mit einfachem Texteditor – Ordnerbaum, Tabs, freie Teilungen, mehrere Cursor, Minimap, Suchen/Ersetzen (auch regulär) und Suche in Dateien (beachtet `.gitignore`); behält Kodierung und Zeilenenden, speichert atomar, rettet ungespeicherte Änderungen über einen Neustart und bleibt auch bei Dateien mit mehreren hundert MB flüssig. Agenten können ihn lesen und – nur mit deinen Schaltern – Dateien öffnen, bearbeiten und speichern.
 - **Chats mit lokalen Modellen:** mit Ollama, LM Studio, llama.cpp oder vLLM auf diesem Rechner oder im eigenen Netz sprechen, direkt neben deinen Terminals – das Modell kann Paneldecks Werkzeuge nutzen, in Grenzen, die du je Modell festlegst.
 - **Agenten-Schnittstelle (MCP):** KI-Agenten können Sitzungen sehen, Terminals lesen, Befehle ausführen und mit deiner Todo-Liste und deinen Tickets arbeiten – standardmäßig aus, mit einstellbarem Systemprompt.
 - **Kommandozeile und Profile:** getrennte Datenordner und Profile, die nebeneinander laufen, jedes mit eigenem Autostart- und MCP-Eintrag.
@@ -45,18 +46,21 @@ Installer und `paneldeck.exe` sind **nicht code-signiert**. Ein Zertifikat koste
 2. Paneldeck startet mit einem leeren Terminal Hub: **Strg+Umschalt+T** öffnet eine neue Sitzung, **Strg+Umschalt+P** die Befehls-Palette, **Strg+Umschalt+D/E** teilt einen Bereich.
 3. Für Claude: Button mit dem Funken-Symbol, Ordner wählen, fertig.
 4. **Strg+2** (oder der Reiter *Todo-Liste* in der Fensterleiste) öffnet die Todo-Liste, **Strg+1** führt zurück zum Terminal Hub. **Strg+Klick** auf einen Reiter öffnet ihn in einem neuen Fenster.
+5. Beim ersten Start bietet Paneldeck eine **kurze Tour** (etwa 3 Minuten) direkt im Fenster an; sie und ihre Kapitel stehen jederzeit in der Befehls-Palette (*Tutorial*) und unter *Einstellungen → Info* – siehe [Tutorial](docs/de/tutorial.md).
 
 Alle Kürzel lassen sich unter *Einstellungen → Tastenkürzel* ändern.
 
 ## Dokumentation
 Die Anleitungen liegen in [`docs/de/`](docs/de/) (Englisch: [`docs/en/`](docs/en/)) und werden mit dem Code versioniert:
 
+- [Tutorial](docs/de/tutorial.md) – die geführte Tour und Kapitel in der App
 - [Terminals und Sitzungen](docs/de/terminals.md) – Sitzungen, Projekte, Teilen, Palette, Tastenkürzel
 - [Mehrere Fenster](docs/de/windows.md) – Strg+Klick auf einen Reiter, der leere Terminal Hub
 - [Claude Code](docs/de/claude-code.md) – Claude-Modus, Status, Kosten, Verlauf
 - [Todo-Liste und Tickets](docs/de/todo-and-tickets.md) – einfacher und Expertenmodus, Boards, Sprints, Dashboards, Schnellaktionen, Wartung und Archiv
 - [Abfragesprache](docs/de/query-language.md) – Tickets suchen, Beispiele, Referenz
 - [Prozessliste](docs/de/processes.md) – Entwicklungsserver und Watcher mit ihrer Ausgabe in einem eigenen Bereich
+- [Editor](docs/de/editor.md) – der Editor-Reiter: Dateien und Ordner, Teilungen, Suchen/Ersetzen, Suche in Dateien, Kodierungen, Hot Exit, große Dateien, Agenten
 - [Chats mit lokalen Modellen](docs/de/chat.md) – Ollama und OpenAI-kompatible Server, Modelle, Werkzeuge und Freigaben, Sicherheit
 - [Themes und der Theme-Editor](docs/de/themes.md) – Themes bearbeiten und erzeugen, Design-Prüfung, Dateiformat und Farbnamen
 - [Agenten-Schnittstelle (MCP)](docs/de/agent-interface.md) – Stufen, Werkzeuge, Sicherheit, Systemprompt

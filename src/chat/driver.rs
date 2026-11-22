@@ -20,6 +20,10 @@ pub trait ChatToolHost {
     fn request(&mut self, id: u64);
     /// Anzeigename einer Sitzung (für die Freigabe-Zeile), `None` wenn unbekannt.
     fn session_name(&self, id: u64) -> Option<String>;
+    /// Sprache der Oberfläche (für die Freigabe-Zeile).
+    fn lang(&self) -> crate::state::Lang {
+        crate::state::Lang::En
+    }
 }
 
 /// Höchstens so viele Schritte je Bild (sofort fertige Werkzeuge laufen nacheinander, ohne das Bild lange aufzuhalten).
@@ -34,12 +38,14 @@ pub struct Driven {
     pub more: bool,
 }
 
-/// Ziel eines Aufrufs für die Freigabe-Zeile: `session 4 "build"` (bzw. nur die Nummer bei unbekanntem Namen).
-pub fn target_label(call: &ToolCall, name: impl Fn(u64) -> Option<String>) -> Option<String> {
+/// Ziel eines Aufrufs für die Freigabe-Zeile: `session 4 "build"` bzw. `Sitzung 4 "build"` (nur die Nummer bei
+/// unbekanntem Namen).
+pub fn target_label(call: &ToolCall, name: impl Fn(u64) -> Option<String>, lang: crate::state::Lang) -> Option<String> {
     let id = call.arguments.get("session").and_then(|s| s.as_u64())?;
+    let word = lang.t("Sitzung", "session");
     Some(match name(id) {
-        Some(n) if !n.trim().is_empty() => format!("session {id} {:?}", crate::mcp::short(n.trim(), 60)),
-        _ => format!("session {id}"),
+        Some(n) if !n.trim().is_empty() => format!("{word} {id} {:?}", crate::mcp::short(n.trim(), 60)),
+        _ => format!("{word} {id}"),
     })
 }
 
@@ -68,7 +74,8 @@ pub fn drive(host: &mut dyn ChatToolHost, id: u64) -> Driven {
                     (need_label || need_preview).then_some((call, need_label, need_preview))
                 });
                 if let Some((call, need_label, need_preview)) = pending {
-                    let label = need_label.then(|| if agent::is_local(&call) { agent::target(&call) } else { target_label(&call, |s| host.session_name(s)) }).flatten();
+                    let lang = host.lang();
+                    let label = need_label.then(|| if agent::is_local(&call) { agent::target(&call, lang) } else { target_label(&call, |s| host.session_name(s), lang) }).flatten();
                     let preview = if need_preview && agent::is_local(&call) { agent::files::preview(&call.name, &call.arguments, &policy.agent).map(|p| (call.id.clone(), p)) } else { None };
                     if let Some(c) = host.chat(id) {
                         if need_label {
@@ -291,7 +298,13 @@ mod tests {
     #[test]
     fn target_label_without_name_or_session() {
         let call = |a: serde_json::Value| ToolCall { id: "c".into(), name: "send_text".into(), arguments: a };
-        assert_eq!(target_label(&call(serde_json::json!({"session": 9})), |_| None).as_deref(), Some("session 9"));
-        assert_eq!(target_label(&call(serde_json::json!({"text": "x"})), |_| Some("n".into())), None);
+        use crate::state::Lang;
+        assert_eq!(target_label(&call(serde_json::json!({"session": 9})), |_| None, Lang::En).as_deref(), Some("session 9"));
+        assert_eq!(target_label(&call(serde_json::json!({"text": "x"})), |_| Some("n".into()), Lang::En), None);
+        // In der deutschen Oberfläche deutsch – auch das Ziel von `run_command` (Terminal des Chats).
+        assert_eq!(target_label(&call(serde_json::json!({"session": 4})), |_| Some("build".into()), Lang::De).as_deref(), Some("Sitzung 4 \"build\""));
+        let rc = ToolCall { id: "r".into(), name: "run_command".into(), arguments: serde_json::json!({"command": "cargo test"}) };
+        assert_eq!(agent::target(&rc, Lang::De).as_deref(), Some("Chat-Terminal"));
+        assert_eq!(agent::target(&rc, Lang::En).as_deref(), Some("chat terminal"));
     }
 }
