@@ -327,6 +327,12 @@ pub fn dim(ui: &Ui) -> Color32 {
     ui.visuals().weak_text_color()
 }
 
+/// Füllfarbe eines Fortschrittsbalkens: Bei 0 % zeichnet egui den gefüllten Teil als Kreis von Balkenhöhe (über dem
+/// Anfang der Beschriftung) – dann keine Füllung.
+pub fn bar_fill(frac: f32, color: Color32) -> Color32 {
+    if frac > 0.0 { color } else { Color32::TRANSPARENT }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Icon {
     Plus,

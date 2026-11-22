@@ -738,7 +738,12 @@ impl App {
         let panel = egui::TopBottomPanel::bottom("sidebar_templates").frame(egui::Frame::NONE).show_separator_line(false).resizable(false).show_inside(ui, |ui| {
             ui.add_space(S1);
             let id = ui.make_persistent_id("tpl_section");
-            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+            // Doku-Screenshots der Prozessliste: Vorlagen eingeklappt, damit alle Prozesse Platz haben.
+            #[cfg(feature = "readme-shots")]
+            let default_open = !super::shot_start::templates_closed();
+            #[cfg(not(feature = "readme-shots"))]
+            let default_open = true;
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
             let open = state.is_open();
             ui.horizontal(|ui| {
                 let (r, resp) = ui.allocate_exact_size(Vec2::new((ui.available_width() - 34.0).max(40.0), 22.0), Sense::click());

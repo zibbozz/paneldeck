@@ -44,6 +44,11 @@ pub(super) fn wants_card() -> bool {
     spec().is_some_and(|(v, _)| v == "tutorial-card")
 }
 
+/// Abschnitt „Vorlagen“ der Seitenleiste eingeklappt (Bilder der Prozessliste: alle Prozesse sollen Platz haben).
+pub(super) fn templates_closed() -> bool {
+    spec().is_some_and(|(v, _)| v == "processes" || v == "process-output")
+}
+
 /// Ordner des Beispielprojekts neben dem Datenordner der Aufnahme.
 fn demo_dir(data: &Path) -> PathBuf {
     data.parent().unwrap_or(data).join("acme-shop")
@@ -154,7 +159,14 @@ impl App {
             p.name = "Acme Shop".into();
             p.folder = demo.to_string_lossy().to_string();
         }
-        let Some(first) = self.shot_sessions().first().copied() else { return };
+        // Der Demo-Datenordner hat keine gemerkten Sitzungen (der Hub startet leer): die erste selbst anlegen.
+        let first = match self.shot_sessions().first().copied() {
+            Some(id) => id,
+            None => {
+                let pid = self.active_project;
+                self.new_session(ctx, NewOpts { project: Some(pid), ..NewOpts::default() })
+            }
+        };
         self.split_at(ctx, first, Dir::Horizontal, false);
         let second = self.shot_sessions().into_iter().find(|i| *i != first);
         if let Some(second) = second {
@@ -212,6 +224,17 @@ impl App {
     /// Ansicht aufbauen (einmal).
     fn shot_setup(&mut self, ctx: &egui::Context, view: &str, arg: &str) {
         let demo = demo_dir(&self.dir);
+        if matches!(view, "processes" | "process-output" | "process-new") && self.shot_sessions().is_empty() {
+            // eine Sitzung im Beispielordner, damit der Hauptbereich ein Terminal zeigt (der Demo-Hub startet leer)
+            write_demo_project(&demo);
+            let pid = self.active_project;
+            if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+                p.name = "Acme Shop".into();
+                p.folder = demo.to_string_lossy().to_string();
+            }
+            let id = self.new_session(ctx, NewOpts { project: Some(pid), ..NewOpts::default() });
+            self.shot_name(id, "api-server");
+        }
         match view {
             // ---- README
             "app" => self.shot_hub(ctx),
@@ -299,11 +322,13 @@ impl App {
         match view {
             "app" | "kosten" => {
                 self.shot_status();
-                if n == 25 && view == "app" {
-                    if let Some(e) = self.shot_sessions().first().and_then(|id| self.entries.get(id))
-                        && let Some(s) = e.live.as_ref()
-                    {
-                        s.send_text_agent(&format!("Set-Location '{}'; Get-ChildItem -Name", demo.display()), true);
+                if n == 40 && view == "app" {
+                    // echte Ausgaben im Beispielordner (die Sitzungen starten dort, Set-Location nur zur Sicherheit)
+                    let cmds = ["Get-ChildItem -Recurse -File -Name", "Get-Content README.md", "Get-Content Cargo.toml"];
+                    for (id, cmd) in self.shot_sessions().iter().zip(cmds) {
+                        if let Some(s) = self.entries.get(id).and_then(|e| e.live.as_ref()) {
+                            s.send_text_agent(&format!("Set-Location '{}'; Clear-Host; {cmd}", demo.display()), true);
+                        }
                     }
                 }
                 if view == "kosten" && n % 20 == 0 {

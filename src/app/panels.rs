@@ -577,7 +577,7 @@ impl App {
             });
             if budget > 0.0 {
                 let frac = (today_c / budget).clamp(0.0, 1.0) as f32;
-                ui.add(egui::ProgressBar::new(frac).text(format!("{} ${:.2} / ${:.2}", lang.t("Tagesbudget", "Daily budget"), today_c, budget)).fill(if today_c > budget { crate::style::ui().danger } else { style::brand() }));
+                ui.add(egui::ProgressBar::new(frac).text(format!("{} ${:.2} / ${:.2}", lang.t("Tagesbudget", "Daily budget"), today_c, budget)).fill(style::bar_fill(frac, if today_c > budget { crate::style::ui().danger } else { style::brand() })));
             }
             ui.add_space(S2);
             ui.label(RichText::new(lang.t("Letzte 14 Tage", "Last 14 days")).strong());

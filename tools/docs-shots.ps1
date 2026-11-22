@@ -56,7 +56,7 @@ $AllViews = @(
   # README / Terminals / Claude Code / Agenten
   @{ Name = 'app';                 Spec = 'app';                 W = 1400; H = 860;  Wait = 4; Rename = $false }
   @{ Name = 'kosten';              Spec = 'kosten';              W = 1240; H = 860;  Wait = 4; Rename = $false }
-  @{ Name = 'agenten';             Spec = 'agenten';             W = 1100; H = 860 }
+  @{ Name = 'agenten';             Spec = 'agenten';             W = 1100; H = 1060 }
   # Todo-Liste (Demo-Datenbank "Acme Shop")
   @{ Name = 'todo-tickets';        Spec = 'tickets:{TICKET}';    W = 1300; H = 1260 }
   @{ Name = 'todo-dashboard';      Spec = 'dashboard' }
@@ -76,9 +76,9 @@ $AllViews = @(
   @{ Name = 'editor-search';       Spec = 'editor-search';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-settings';     Spec = 'editor-settings';     W = 1100; H = 900 }
   # Prozesse
-  @{ Name = 'processes';           Spec = 'processes';           Wait = 6 }
+  @{ Name = 'processes';           Spec = 'processes';           H = 1000; Wait = 6 }
   @{ Name = 'process-new';         Spec = 'process-new';         H = 900; Wait = 2 }
-  @{ Name = 'process-output';      Spec = 'process-output';      Wait = 6 }
+  @{ Name = 'process-output';      Spec = 'process-output';      H = 1000; Wait = 6 }
   # Themes
   @{ Name = 'theme-appearance';    Spec = 'theme-appearance';    W = 1100; H = 860 }
   @{ Name = 'theme-generate';      Spec = 'theme-generate';      W = 1100; H = 860 }
@@ -103,7 +103,31 @@ $work = Join-Path $WorkRoot ('pd-docs-shots-' + [guid]::NewGuid().ToString('N').
 $script:inst = $null
 $script:haveLock = $false
 $failed = @()
-Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hh, bool r);' -Name W -Namespace DocShots
+Add-Type -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hh, bool r);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+'@ -Name W -Namespace DocShots
+
+# Hauptfenster der Instanz (0, solange es noch keins gibt).
+function Get-InstHwnd { if (-not $script:inst) { return [IntPtr]::Zero }; $script:inst.Refresh(); $script:inst.MainWindowHandle }
+# Warten, bis das Fenster sichtbar und nicht minimiert ist (höchstens $sec Sekunden); $true, wenn es so weit ist.
+function Wait-Visible([int]$sec = 30) {
+  $t0 = Get-Date
+  while (((Get-Date) - $t0).TotalSeconds -lt $sec) {
+    $h = Get-InstHwnd
+    if ($h -ne [IntPtr]::Zero -and [DocShots.W]::IsWindowVisible($h) -and -not [DocShots.W]::IsIconic($h)) { return $true }
+    Start-Sleep -Milliseconds 300
+  }
+  return $false
+}
+# Fenster zeigen (falls verborgen/minimiert), ohne Maus oder Tastatur: SW_SHOWNOACTIVATE bzw. SW_RESTORE.
+function Show-Inst {
+  $h = Get-InstHwnd
+  if ($h -eq [IntPtr]::Zero) { return }
+  if ([DocShots.W]::IsIconic($h)) { [void][DocShots.W]::ShowWindow($h, 9) } elseif (-not [DocShots.W]::IsWindowVisible($h)) { [void][DocShots.W]::ShowWindow($h, 4) }
+}
 
 function Get-Lock {
   while ($true) {
@@ -140,9 +164,15 @@ function Mcp-Screenshot($exe, $png, [bool]$rename) {
       }
       Start-Sleep 2
     }
-    Send @{ jsonrpc = '2.0'; id = 2; method = 'tools/call'; params = @{ name = 'screenshot'; arguments = @{} } }
-    $r = Recv
-    $img = $r.result.content | Where-Object type -eq 'image' | Select-Object -First 1
+    # Fenster noch nicht sichtbar (window_hidden/not_visible) oder Zeitüberschreitung: ein paar Mal neu versuchen
+    $img = $null; $r = $null
+    for ($try = 1; $try -le 6 -and -not $img; $try++) {
+      if ($try -gt 1) { Show-Inst; Start-Sleep 2 }
+      Send @{ jsonrpc = '2.0'; id = (10 + $try); method = 'tools/call'; params = @{ name = 'screenshot'; arguments = @{} } }
+      $r = Recv
+      $img = $r.result.content | Where-Object type -eq 'image' | Select-Object -First 1
+      if (-not $img) { Write-Host "  Screenshot-Versuch $try ohne Bild: $(($r | ConvertTo-Json -Depth 5 -Compress) -replace '(.{300}).*', '$1')" }
+    }
     if (-not $img) { throw ('kein Bild: ' + ($r | ConvertTo-Json -Depth 5 -Compress)) }
     [IO.File]::WriteAllBytes($png, [Convert]::FromBase64String($img.data))
   } finally {
@@ -217,10 +247,11 @@ try {
         $t0 = Get-Date
         while (-not (Test-Path "$app\paneldeck-data\ipc.json") -and ((Get-Date) - $t0).TotalSeconds -lt 30) { Start-Sleep -Milliseconds 300 }
         if (-not (Test-Path "$app\paneldeck-data\ipc.json")) { throw 'Instanz meldet sich nicht (ipc.json fehlt)' }
-        Start-Sleep 3
-        $script:inst.Refresh()
-        [void][DocShots.W]::MoveWindow($script:inst.MainWindowHandle, 40, 20, $w, $h, $true)
+        if (-not (Wait-Visible 30)) { Show-Inst; if (-not (Wait-Visible 10)) { throw 'Fenster wird nicht sichtbar' } }
+        Start-Sleep 2
+        [void][DocShots.W]::MoveWindow((Get-InstHwnd), 40, 20, $w, $h, $true)
         Start-Sleep (3 + $wait)
+        [void](Wait-Visible 10)
         $raw = Join-Path $work "$lg-$name.png"
         Mcp-Screenshot "$app\paneldeck.exe" $raw $rename
       } catch {
