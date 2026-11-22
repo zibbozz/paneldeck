@@ -914,7 +914,8 @@ mod tests {
 
     #[test]
     fn save_only_open_existing_local_files() {
-        let mut h = FakeHost::with_file(r"C:\w\a.txt", "x");
+        // Speichern prüft den Pfad wie beim Öffnen: absolut auf der jeweiligen Plattform.
+        let mut h = FakeHost::with_file(if cfg!(windows) { r"C:\w\a.txt" } else { "/w/a.txt" }, "x");
         let s = all_on();
         let v = save(&mut h, &s, &json!({"doc": 1}), |_| true).unwrap();
         assert_eq!(v["saved"], false, "nichts zu speichern");

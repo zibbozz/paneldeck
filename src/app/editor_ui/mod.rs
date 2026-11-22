@@ -91,6 +91,10 @@ pub(crate) struct EditorUi {
     /// Ein Agent hat das gezeigte Dokument gewechselt: Hat ein Textfeld des Editors die Tastatur, gibt es sie im nächsten
     /// Bild ab (Aufrufe von Agenten nehmen nie die Tastatur, [`EditorUi::end_agent`]).
     pub(super) blur: bool,
+    /// Zählt, wie oft ein Agent das gezeigte Dokument gewechselt hat: Lag so ein Wechsel in der Zeit, in der das Fenster
+    /// inaktiv oder minimiert war, bekommt das Textfeld die Tastatur danach nicht zurück
+    /// (`view::keep_focus_across_deactivation`).
+    pub(super) agent_switches: u64,
     /// Flächen der Gruppen im letzten Bild (Fokus per Strg+Alt+Pfeil, Ablage gezogener Reiter).
     pub(super) group_rects: HashMap<u64, eframe::egui::Rect>,
     /// Reiterleisten im letzten Bild (Gruppe → Fläche, Reiter-Flächen).
@@ -301,6 +305,8 @@ impl EditorUi {
         self.want_focus = m.want_focus;
         if (self.panes.focused, self.active_doc()) != m.active {
             self.blur = true;
+            // Auch nach einem Fensterwechsel bekommt das Textfeld die Tastatur dann nicht zurück.
+            self.agent_switches += 1;
         }
     }
 }

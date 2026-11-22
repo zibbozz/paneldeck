@@ -4,7 +4,7 @@
 use super::view::{self, Cmd};
 use super::*;
 use crate::layout::Dir;
-use eframe::egui::{self, Event, Key, Modifiers, Pos2, Rect, Vec2};
+use eframe::egui::{self, Event, Id, Key, Modifiers, Pos2, Rect, Vec2};
 
 fn test_dir(name: &str) -> PathBuf {
     let base = std::env::var("PANELDECK_TEST_ROOT").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
@@ -28,6 +28,19 @@ fn frame(ctx: &egui::Context, ed: &mut EditorUi, events: Vec<Event>, t: &mut f64
     let _ = ctx.run(input, |ctx| view::draw(ctx, ed, &th, &prefs, crate::state::Lang::En, &mut cmds));
     cmds
 }
+
+/// Wie [`frame`], aber mit Fenstergröße und Fokus des Fensters (minimiert meldet Windows 0×0 ohne Fokus).
+fn frame_at(ctx: &egui::Context, ed: &mut EditorUi, events: Vec<Event>, t: &mut f64, size: Vec2, active: bool) -> Vec<Cmd> {
+    *t += 0.05;
+    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(*t), events, focused: active, ..Default::default() };
+    let mut cmds = Vec::new();
+    let th = theme();
+    let prefs = EditorPrefs::default();
+    let _ = ctx.run(input, |ctx| view::draw(ctx, ed, &th, &prefs, crate::state::Lang::En, &mut cmds));
+    cmds
+}
+
+const BIG: Vec2 = Vec2::new(1500.0, 960.0);
 
 fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
     let p = dir.join(name);
@@ -276,7 +289,8 @@ fn deleted_and_changed_files_show_info_bars() {
     assert_eq!(ed.docs[&id].text().as_deref(), Some("one\ntwo\n"));
     // Mit eigenen Änderungen: Hinweisleiste
     ed.docs.get_mut(&id).unwrap().apply_agent_edit(vec![(0..0, "x".into())], lang).unwrap();
-    std::fs::write(&p, "changed\n").unwrap();
+    // andere Größe als "one\ntwo\n": auf schnellen Rechnern kann die Änderungszeit gleich bleiben
+    std::fs::write(&p, "changed on disk\n").unwrap();
     assert!(matches!(ed.docs.get_mut(&id).unwrap().disk_changed(&prefs, lang), doc::DiskReaction::Asked));
     assert!(ed.docs[&id].disk_conflict);
     assert!(!ed.docs[&id].disk_diff(lang).is_empty());
@@ -392,4 +406,141 @@ fn agent_calls_never_take_the_keyboard_focus() {
     frame(&ctx, &mut ed, vec![Event::Text("W".into())], &mut t);
     assert_eq!(ed.docs[&idc].text().unwrap(), "ZWuser\n");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Klicktest 3.0.0: Nach Minimieren und Wiederherstellen bzw. einem Wechsel zu einem anderen Programm tippt der Nutzer
+/// weiter in das Textfeld, das vorher die Tastatur hatte – aber nur dann, nie nach einem Reiterwechsel durch einen Agenten
+/// und nicht, wenn inzwischen ein anderes Feld die Tastatur hat.
+#[test]
+fn keyboard_comes_back_after_minimize_and_window_switch() {
+    let dir = test_dir("refocus");
+    let a = write(&dir, "a.txt", "text\n");
+    let b = write(&dir, "b.txt", "agent\n");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut ed = EditorUi::default();
+    let ida = ed.open_path(&a, false);
+    let type_ = |ctx: &egui::Context, ed: &mut EditorUi, t: &mut f64, s: &str| {
+        frame_at(ctx, ed, vec![Event::Text(s.into())], t, BIG, true);
+    };
+    for _ in 0..2 {
+        frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+    }
+    type_(&ctx, &mut ed, &mut t, "1");
+    assert_eq!(ed.docs[&ida].text().unwrap(), "1text\n");
+    // Minimiert: 0×0 und ohne Fokus, mehrere Bilder lang (egui nahm dem nicht gezeichneten Feld die Tastatur).
+    for _ in 0..3 {
+        frame_at(&ctx, &mut ed, vec![], &mut t, Vec2::ZERO, false);
+    }
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+    type_(&ctx, &mut ed, &mut t, "2");
+    assert_eq!(ed.docs[&ida].text().unwrap(), "12text\n", "nach dem Wiederherstellen");
+    // Ein anderes Programm im Vordergrund, das Fenster bleibt sichtbar; die Tastatur geht dabei verloren.
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, false);
+    let g = ed.panes.focused;
+    ctx.memory_mut(|m| m.surrender_focus(view::text_id(g)));
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, false);
+    assert_eq!(ctx.memory(|m| m.focused()), None);
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+    type_(&ctx, &mut ed, &mut t, "3");
+    assert_eq!(ed.docs[&ida].text().unwrap(), "123text\n", "nach dem Fensterwechsel");
+    // Ein Agent zeigt in der Zeit eine andere Datei: die Tastatur kommt nicht zurück.
+    frame_at(&ctx, &mut ed, vec![], &mut t, Vec2::ZERO, false);
+    let m = ed.begin_agent();
+    let idb = ed.open_path(&b, false);
+    ed.end_agent(m);
+    frame_at(&ctx, &mut ed, vec![], &mut t, Vec2::ZERO, false);
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+    type_(&ctx, &mut ed, &mut t, "X");
+    assert_eq!(ed.docs[&idb].text().unwrap(), "agent\n", "keine Taste in der Datei des Agenten");
+    assert_eq!(ed.docs[&ida].text().unwrap(), "123text\n");
+    assert_eq!(ctx.memory(|m| m.focused()), None);
+    // Ohne Tastatur vor dem Wechsel auch danach keine.
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, false);
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+    type_(&ctx, &mut ed, &mut t, "Y");
+    assert_eq!(ed.docs[&idb].text().unwrap(), "agent\n");
+    // Der Nutzer fokussiert wieder; während das Fenster weg ist, nimmt ein anderes Feld die Tastatur: sie bleibt dort.
+    ed.want_focus = true;
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+    type_(&ctx, &mut ed, &mut t, "4");
+    assert_eq!(ed.docs[&idb].text().unwrap(), "4agent\n");
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, false);
+    ctx.memory_mut(|m| m.request_focus(Id::new("some_dialog_field")));
+    frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+    assert_ne!(ctx.memory(|m| m.focused()), Some(view::text_id(ed.panes.focused)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Klicktest 3.0.0: Der Ordnerbaum behält seine Breite über Minimieren (0×0) und ein sehr schmales Fenster hinweg; die
+/// an den fehlenden Platz angepasste Breite wird weder übernommen noch gemerkt.
+#[test]
+fn tree_width_survives_minimize_and_a_tiny_window() {
+    use egui::containers::panel::PanelState;
+    assert_eq!(view::tree_width_seen(240.0, 0.0, 0.0), 240.0, "minimiert");
+    assert_eq!(view::tree_width_seen(240.0, 200.0, 200.0), 240.0, "an zu wenig Platz angepasst");
+    assert_eq!(view::tree_width_seen(240.0, 300.0, 1200.0), 300.0, "breiter gezogen");
+    assert_eq!(view::tree_width_seen(240.0, 160.0, 1200.0), 160.0, "schmaler gezogen");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut ed = EditorUi { tree_open: true, tree_width: 240.0, ..Default::default() };
+    let panel = |ctx: &egui::Context| PanelState::load(ctx, Id::new("ed_tree")).map(|s| s.rect.width());
+    for _ in 0..3 {
+        frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+    }
+    assert!((ed.tree_width - 240.0).abs() < 0.5 && panel(&ctx).is_some_and(|w| (w - 240.0).abs() < 0.5), "{} {:?}", ed.tree_width, panel(&ctx));
+    for (size, active) in [(Vec2::ZERO, false), (Vec2::new(200.0, 400.0), true)] {
+        for _ in 0..3 {
+            frame_at(&ctx, &mut ed, vec![], &mut t, size, active);
+        }
+        assert_eq!(ed.tree_width, 240.0, "{size:?}: gemerkte Breite");
+        for _ in 0..2 {
+            frame_at(&ctx, &mut ed, vec![], &mut t, BIG, true);
+        }
+        let w = panel(&ctx).unwrap();
+        assert!((w - 240.0).abs() < 0.5, "{size:?}: danach wieder 240 px breit, nicht {w}");
+        assert_eq!(ed.tree_width, 240.0);
+    }
+}
+
+/// Klicktest 3.0.0 (Blocker): Das Fenster „Unterschied anzeigen“ bleibt mit einem langen Unterschied im Hauptfenster –
+/// Titelleiste (Schließen) und Knöpfe erreichbar, auch wenn das Hauptfenster kleiner wird – und wächst nicht.
+#[test]
+fn diff_window_stays_inside_the_main_window() {
+    let lines: Vec<(char, String)> = (0..3000).map(|i| (if i % 2 == 0 { '+' } else { '-' }, format!("line {i} {}", "x".repeat(300)))).collect();
+    let mono = egui::FontId::monospace(13.0);
+    let ctx = egui::Context::default();
+    let mut n = 0;
+    let mut run = |w: f32, h: f32| {
+        let mut seen = None;
+        let mut rects = Vec::new();
+        for _ in 0..8 {
+            n += 1;
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))), time: Some(n as f64 * 0.05), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                let mut open = true;
+                let mut cmds = Vec::new();
+                view::diff_window(ctx, "Difference – a.txt".into()).open(&mut open).show(ctx, |ui| {
+                    view::diff_body(ui, 1, &lines, &mono, crate::state::Lang::En, &mut cmds);
+                    seen = Some((ui.min_rect(), ui.max_rect()));
+                });
+            });
+            rects.push(ctx.memory(|m| m.area_rect(Id::new("ed_diff_win"))).expect("Fenster"));
+        }
+        let win = *rects.last().unwrap();
+        assert!(win.min.x >= -0.5 && win.min.y >= -0.5 && win.max.x <= w + 0.5 && win.max.y <= h + 0.5, "{w}×{h}: Fenster {win:?} ragt hinaus");
+        assert!((rects[4].height() - win.height()).abs() < 0.5, "{w}×{h}: Fenster wächst: {rects:?}");
+        let (used, avail) = seen.expect("gezeichnet");
+        assert!(used.max.y <= avail.max.y + 0.5, "{w}×{h}: Knöpfe {used:?} unter dem Fensterrand {avail:?}");
+    };
+    run(1500.0, 960.0);
+    run(1100.0, 700.0);
+    run(1500.0, 960.0);
+}
+
+/// Schmale Teilung: Die Knöpfe der Hinweisleiste bekommen Kurzformen, statt abgeschnitten zu werden.
+#[test]
+fn info_bar_buttons_shorten_in_narrow_splits() {
+    assert!(!view::info_narrow(900.0, 380.0));
+    assert!(view::info_narrow(500.0, 380.0));
 }

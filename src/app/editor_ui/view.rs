@@ -20,6 +20,12 @@ const GAP: f32 = 6.0;
 const TAB_MIN_W: f32 = 90.0;
 const TAB_MAX_W: f32 = 220.0;
 const INFO_H: f32 = 30.0;
+/// Breite des Ordnerbaums: Grenzen und Vorgabe.
+pub(super) const TREE_MIN: f32 = 160.0;
+pub(super) const TREE_MAX: f32 = 600.0;
+const TREE_DEFAULT: f32 = 240.0;
+/// Darunter (Breite oder Höhe des Fensters) wird der Editor nicht gezeichnet – so meldet Windows ein minimiertes Fenster.
+const MIN_DRAW: f32 = 120.0;
 
 /// Ergebnis eines Klicks irgendwo im Bereich, nach dem Zeichnen ausgeführt.
 #[derive(Clone, Debug, PartialEq)]
@@ -442,41 +448,57 @@ impl super::super::App {
             let lines = self.ed.docs.get(&id).map(|d| d.disk_diff(lang)).unwrap_or_default();
             let title = self.ed.docs.get(&id).map(|d| d.title(lang)).unwrap_or_default();
             let mono = FontId::monospace(self.settings.font_size.min(14.0));
-            style::movable(ctx, Id::new("ed_diff_win"), egui::Window::new(format!("{} – {title}", lang.t("Unterschied", "Difference")))).open(&mut open).default_size(Vec2::new(720.0, 480.0)).show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(style::ui().diff_remove, lang.t("− auf der Platte", "− on disk"));
-                    ui.colored_label(style::ui().diff_add, lang.t("+ im Editor", "+ in the editor"));
-                });
-                ui.separator();
-                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                    if lines.is_empty() {
-                        ui.weak(lang.t("Keine Unterschiede.", "No differences."));
-                    }
-                    for (kind, text) in &lines {
-                        let (c, p) = match kind {
-                            '+' => (style::ui().diff_add, "+ "),
-                            '-' => (style::ui().diff_remove, "- "),
-                            '@' => (style::ui().info, ""),
-                            _ => (style::dim(ui), "  "),
-                        };
-                        ui.label(RichText::new(format!("{p}{text}")).font(mono.clone()).color(c));
-                    }
-                });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button(lang.t("Meine behalten", "Keep mine")).clicked() {
-                        cmds.push(Cmd::KeepMine(id));
-                    }
-                    if ui.button(lang.t("Von der Platte laden", "Load from disk")).clicked() {
-                        cmds.push(Cmd::Reload(id));
-                    }
-                });
-            });
+            // Esc schließt das Fenster (wie die anderen Fenster), außer ein Menü ist offen.
+            if self.ed.close_ask.is_none() && !egui::Popup::is_any_open(ctx) && ctx.input(|i| i.key_pressed(Key::Escape)) {
+                open = false;
+            }
+            diff_window(ctx, format!("{} – {title}", lang.t("Unterschied", "Difference"))).open(&mut open).show(ctx, |ui| diff_body(ui, id, &lines, &mono, lang, cmds));
             if !open {
                 self.ed.diff_doc = None;
             }
         }
     }
+}
+
+/// Fenster „Unterschied anzeigen“: so groß wie es passt, nie größer als das Hauptfenster (Titelleiste mit Schließen und
+/// die Knöpfe unten bleiben erreichbar).
+pub(super) fn diff_window<'a>(ctx: &egui::Context, title: String) -> egui::Window<'a> {
+    style::fit_to_screen(ctx, style::movable(ctx, Id::new("ed_diff_win"), egui::Window::new(title)), [720.0, 480.0], [360.0, 220.0]).collapsible(false)
+}
+
+/// Inhalt des Unterschied-Fensters. Die Rollfläche nimmt nur die Höhe über den Knöpfen – mit allem Platz schob sie die
+/// Knöpfe unter den Rand, und das Fenster wuchs jedes Bild weiter.
+pub(super) fn diff_body(ui: &mut Ui, id: u64, lines: &[(char, String)], mono: &FontId, lang: Lang, cmds: &mut Vec<Cmd>) {
+    ui.horizontal(|ui| {
+        ui.colored_label(style::ui().diff_remove, lang.t("− auf der Platte", "− on disk"));
+        ui.colored_label(style::ui().diff_add, lang.t("+ im Editor", "+ in the editor"));
+    });
+    ui.separator();
+    let sp = ui.spacing();
+    let footer = sp.interact_size.y.max(24.0) + sp.item_spacing.y * 3.0 + 10.0;
+    egui::ScrollArea::both().id_salt("ed_diff_scroll").auto_shrink([false, false]).max_height((ui.available_height() - footer).max(60.0)).show(ui, |ui| {
+        if lines.is_empty() {
+            ui.weak(lang.t("Keine Unterschiede.", "No differences."));
+        }
+        for (kind, text) in lines {
+            let (c, p) = match kind {
+                '+' => (style::ui().diff_add, "+ "),
+                '-' => (style::ui().diff_remove, "- "),
+                '@' => (style::ui().info, ""),
+                _ => (style::dim(ui), "  "),
+            };
+            ui.add(egui::Label::new(RichText::new(format!("{p}{text}")).font(mono.clone()).color(c)).extend());
+        }
+    });
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(lang.t("Meine behalten", "Keep mine")).clicked() {
+            cmds.push(Cmd::KeepMine(id));
+        }
+        if ui.button(lang.t("Von der Platte laden", "Load from disk")).clicked() {
+            cmds.push(Cmd::Reload(id));
+        }
+    });
 }
 
 impl EditorUi {
@@ -508,6 +530,11 @@ pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme:
     {
         ctx.memory_mut(|m| m.surrender_focus(f));
     }
+    // Minimiert (Windows meldet dann 0×0) nichts zeichnen: egui passte sonst die Breite des Ordnerbaums an den fehlenden
+    // Platz an und merkte sie sich, und das nicht gezeichnete Textfeld verlöre die Tastatur.
+    if !keep_focus_across_deactivation(ctx, ed) {
+        return;
+    }
     egui::TopBottomPanel::bottom(style::salted(Id::new("ed_status")))
         .exact_height(STATUS_H)
         .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(10, 0)))
@@ -515,13 +542,22 @@ pub(super) fn draw(ctx: &egui::Context, ed: &mut EditorUi, theme: &crate::theme:
         .response
         .spot(Spot::EditorStatus);
     if ed.tree_open {
-        let r = egui::SidePanel::left(style::salted(Id::new("ed_tree")))
+        use egui::containers::panel::PanelState;
+        let id = style::salted(Id::new("ed_tree"));
+        let avail = ctx.available_rect().width();
+        ed.tree_width = if ed.tree_width.is_finite() { ed.tree_width.clamp(TREE_MIN, TREE_MAX) } else { TREE_DEFAULT };
+        // egui merkt sich die Breite des letzten Bilds, auch eine an zu wenig Platz angepasste. Weicht sie von der
+        // eigenen ab (nur so möglich, ein Ziehen übernimmt die neue Breite sofort), gilt wieder die eigene.
+        if PanelState::load(ctx, id).is_some_and(|s| (s.rect.width() - ed.tree_width).abs() > 0.5) {
+            ctx.data_mut(|d| d.remove::<PanelState>(id));
+        }
+        let r = egui::SidePanel::left(id)
             .resizable(true)
             .default_width(ed.tree_width)
-            .width_range(160.0..=600.0)
+            .width_range(TREE_MIN..=TREE_MAX)
             .frame(egui::Frame::new().fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(8, 8)))
             .show(ctx, |ui| super::super::panels::fixed_body(ui, |ui| tree_panel(ui, ed, lang, cmds)));
-        ed.tree_width = r.response.rect.width();
+        ed.tree_width = tree_width_seen(ed.tree_width, r.response.rect.width(), avail);
         let _ = r.response.spot(Spot::EditorTree);
     }
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme.bg)).show(ctx, |ui| {
@@ -671,6 +707,46 @@ pub(super) fn text_id(g: u64) -> Id {
     style::salted(Id::new(("ed_text", g)))
 }
 
+/// Tastatur über einen Fensterwechsel retten (#54): Wird das Fenster inaktiv oder minimiert, merkt es sich (je Fenster),
+/// welches Textfeld des Editors die Tastatur hatte. Ist es wieder aktiv und hat inzwischen nichts anderes die Tastatur
+/// bekommen (kein Dialog, kein anderes Feld, kein Klick in diesem Bild, kein Reiterwechsel durch einen Agenten), bekommt
+/// dieses Textfeld sie zurück – wie bei den Terminals. Ein Agent bekommt so nie die Tastatur: zurück geht sie nur an das
+/// Feld, das sie vorher hatte. Liefert, ob der Editor gezeichnet werden soll (nicht minimiert, nicht winzig).
+pub(super) fn keep_focus_across_deactivation(ctx: &egui::Context, ed: &mut EditorUi) -> bool {
+    let key = Id::new("pd_ed_away");
+    let (active, minimized, pressed) = ctx.input(|i| (i.focused, i.viewport().minimized == Some(true), i.pointer.any_pressed()));
+    let size = ctx.content_rect().size();
+    let visible = !minimized && size.x >= MIN_DRAW && size.y >= MIN_DRAW;
+    let focused = ctx.memory(|m| m.focused());
+    let mine = focused.and_then(|f| ed.panes.groups.keys().copied().find(|g| text_id(*g) == f));
+    let away: Option<(Option<u64>, u64)> = ctx.data(|d| d.get_temp(key));
+    if !active || !visible {
+        if away.is_none() {
+            ctx.data_mut(|d| d.insert_temp(key, (mine, ed.agent_switches)));
+        }
+    } else if let Some((back, switches)) = away {
+        ctx.data_mut(|d| d.remove::<(Option<u64>, u64)>(key));
+        if let Some(g) = back
+            && focused.is_none()
+            && !pressed
+            && switches == ed.agent_switches
+            && ed.close_ask.is_none()
+            && ed.goto.is_none()
+            && ed.panes.groups.contains_key(&g)
+        {
+            ed.panes.focused = g;
+            ed.want_focus = true;
+        }
+    }
+    visible
+}
+
+/// Breite des Ordnerbaums nach einem Bild: Hat egui sie an zu wenig Platz angepasst (minimiert, sehr schmales Fenster –
+/// der Baum nimmt dann den ganzen Platz), bleibt die bisherige; sonst gilt die gezeichnete (auch nach dem Ziehen).
+pub(super) fn tree_width_seen(prev: f32, drawn: f32, avail: f32) -> f32 {
+    if !drawn.is_finite() || avail < TREE_MIN + 1.0 || drawn + 1.0 >= avail { prev } else { drawn.clamp(TREE_MIN, TREE_MAX) }
+}
+
 /// Schrift des Textfelds: die eigene Familie „editor“ (Einstellungen → Editor; gleich der Terminalschrift, solange dort
 /// nichts gewählt ist), wenn sie angemeldet ist, sonst die Monospace-Schrift des Terminals.
 fn editor_font(ctx: &egui::Context, size: f32) -> FontId {
@@ -727,45 +803,68 @@ fn info_bar(ui: &mut Ui, r: Rect, doc: u64, kind: InfoKind, lang: Lang, cmds: &m
     };
     ui.painter().rect_filled(r, 0.0, col.gamma_multiply(0.16));
     ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, col.gamma_multiply(0.5)));
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(Vec2::new(10.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    let ui = &mut child;
     ui.painter().circle_filled(Pos2::new(r.left() + 14.0, r.center().y), 3.5, col);
-    ui.add_space(14.0);
-    match kind {
-        InfoKind::LoadError => {
-            ui.label(lang.t("Datei konnte nicht gelesen werden.", "The file could not be read."));
-        }
-        InfoKind::DiskConflict => {
-            ui.label(lang.t("Die Datei wurde auf der Platte geändert, hier gibt es ungespeicherte Änderungen.", "The file changed on disk and has unsaved changes here."));
-            if ui.small_button(lang.t("Meine behalten", "Keep mine")).clicked() {
-                cmds.push(Cmd::KeepMine(doc));
-            }
-            if ui.small_button(lang.t("Von der Platte laden", "Load from disk")).clicked() {
-                cmds.push(Cmd::Reload(doc));
-            }
-            if ui.small_button(lang.t("Unterschied anzeigen", "Show difference")).clicked() {
-                cmds.push(Cmd::ShowDiff(doc));
-            }
-        }
-        InfoKind::Deleted => {
-            ui.label(lang.t("Die Datei wurde auf der Platte gelöscht. Speichern legt sie neu an.", "The file was deleted on disk. Saving creates it again."));
-            if ui.small_button(lang.t("Speichern", "Save")).clicked() {
-                cmds.push(Cmd::Save(doc));
-            }
-        }
-        InfoKind::Large => {
-            ui.label(lang.t("Große Datei: Minimap und Zeilenumbruch sind aus.", "Large file: minimap and word wrap are off."));
-            if ui.small_button(lang.t("Ausblenden", "Dismiss")).clicked() {
-                cmds.push(Cmd::DismissLarge(doc));
-            }
-        }
-        InfoKind::Agent => {
-            ui.label(lang.t("Von einem Agenten geändert – noch nicht gespeichert. Strg+Z macht es rückgängig.", "Changed by an agent – not saved yet. Ctrl+Z undoes it."));
-            if ui.small_button(lang.t("Ausblenden", "Dismiss")).clicked() {
-                cmds.push(Cmd::DismissAgent(doc));
-            }
+    let (text, buttons) = info_content(kind, doc, lang);
+    // Knöpfe rechts zuerst, der Text nimmt den Rest und wird gekürzt (ganzer Text beim Überfahren). In schmalen Teilungen
+    // tragen die Knöpfe Kurzformen, damit sie nicht abgeschnitten werden.
+    let inner = r.shrink2(Vec2::new(10.0, 3.0));
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
+    let full_w: f32 = buttons.iter().map(|b| ui.painter().layout_no_wrap(b.full.to_string(), font.clone(), Color32::PLACEHOLDER).size().x + pad).sum();
+    let narrow = info_narrow(inner.width(), full_w);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    let ui = &mut child;
+    for b in buttons.iter().rev() {
+        let resp = ui.small_button(if narrow { b.short } else { b.full });
+        let resp = if narrow { resp.on_hover_text(b.full) } else { resp };
+        if resp.clicked() {
+            cmds.push(b.cmd.clone());
         }
     }
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.add_space(14.0);
+        ui.add(egui::Label::new(text).truncate());
+    });
+}
+
+/// Knopf einer Hinweisleiste: voller Text, Kurzform für schmale Teilungen, Befehl.
+struct InfoButton {
+    full: &'static str,
+    short: &'static str,
+    cmd: Cmd,
+}
+
+/// Text und Knöpfe einer Hinweisleiste.
+fn info_content(kind: InfoKind, doc: u64, lang: Lang) -> (&'static str, Vec<InfoButton>) {
+    let b = |full, short, cmd| InfoButton { full, short, cmd };
+    match kind {
+        InfoKind::LoadError => (lang.t("Datei konnte nicht gelesen werden.", "The file could not be read."), Vec::new()),
+        InfoKind::DiskConflict => (
+            lang.t("Die Datei wurde auf der Platte geändert, hier gibt es ungespeicherte Änderungen.", "The file changed on disk and has unsaved changes here."),
+            vec![
+                b(lang.t("Meine behalten", "Keep mine"), lang.t("Meine", "Mine"), Cmd::KeepMine(doc)),
+                b(lang.t("Von der Platte laden", "Load from disk"), lang.t("Laden", "Load"), Cmd::Reload(doc)),
+                b(lang.t("Unterschied anzeigen", "Show difference"), lang.t("Vergleich", "Diff"), Cmd::ShowDiff(doc)),
+            ],
+        ),
+        InfoKind::Deleted => (
+            lang.t("Die Datei wurde auf der Platte gelöscht. Speichern legt sie neu an.", "The file was deleted on disk. Saving creates it again."),
+            vec![b(lang.t("Speichern", "Save"), lang.t("Speichern", "Save"), Cmd::Save(doc))],
+        ),
+        InfoKind::Large => (
+            lang.t("Große Datei: Minimap und Zeilenumbruch sind aus.", "Large file: minimap and word wrap are off."),
+            vec![b(lang.t("Ausblenden", "Dismiss"), lang.t("Ausblenden", "Dismiss"), Cmd::DismissLarge(doc))],
+        ),
+        InfoKind::Agent => (
+            lang.t("Von einem Agenten geändert – noch nicht gespeichert. Strg+Z macht es rückgängig.", "Changed by an agent – not saved yet. Ctrl+Z undoes it."),
+            vec![b(lang.t("Ausblenden", "Dismiss"), lang.t("Ausblenden", "Dismiss"), Cmd::DismissAgent(doc))],
+        ),
+    }
+}
+
+/// Kurzformen der Knöpfe, wenn neben den vollen Knöpfen weniger als 200 px für den Text bleiben.
+pub(super) fn info_narrow(width: f32, buttons_w: f32) -> bool {
+    width - buttons_w < 200.0
 }
 
 /// Reiterleiste einer Gruppe: Reiter (Name, ungespeichert-Punkt, Schließen beim Überfahren), Ziehen zwischen Leisten und

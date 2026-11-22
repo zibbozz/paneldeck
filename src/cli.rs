@@ -363,17 +363,31 @@ pub fn get() -> &'static Cli {
 mod tests {
     use super::*;
 
+    /// Aktuelles Verzeichnis, ein vorhandener Ordner und eine Datei darin – je Plattform mit echten absoluten Pfaden.
+    #[cfg(windows)]
+    const CWD: &str = r"C:\cwd";
+    #[cfg(not(windows))]
+    const CWD: &str = "/cwd";
+    #[cfg(windows)]
+    const APP: &str = r"C:\Dev\app";
+    #[cfg(not(windows))]
+    const APP: &str = "/dev/app";
+    #[cfg(windows)]
+    const MAIN_RS: &str = r"C:\Dev\app\main.rs";
+    #[cfg(not(windows))]
+    const MAIN_RS: &str = "/dev/app/main.rs";
+
     fn p(args: &[&str]) -> Result<Cli, CliError> {
         let a: Vec<String> = std::iter::once("x.exe").chain(args.iter().copied()).map(|s| s.to_string()).collect();
         parse(
             &a,
             &|s| {
                 let p = std::path::Path::new(s);
-                if p.is_absolute() { p.to_path_buf() } else { PathBuf::from("C:\\cwd").join(s) }
+                if p.is_absolute() { p.to_path_buf() } else { PathBuf::from(CWD).join(s) }
             },
             &|p| match p.to_string_lossy().as_ref() {
-                "C:\\Dev\\app" | "C:\\cwd\\rel" | "C:\\" => Some(true),
-                "C:\\Dev\\app\\main.rs" => Some(false),
+                "C:\\Dev\\app" | "C:\\cwd\\rel" | "C:\\" | "/dev/app" | "/cwd/rel" => Some(true),
+                "C:\\Dev\\app\\main.rs" | "/dev/app/main.rs" => Some(false),
                 _ => None,
             },
         )
@@ -561,16 +575,21 @@ mod tests {
     #[test]
     fn edit_option_opens_a_file_in_the_editor() {
         // absolut, relativ zum Aufruf, mit Instanz-Argumenten und in der Form `--edit=…`
-        assert_eq!(p(&["--edit", r"C:\Dev\app\main.rs"]).unwrap().edit.as_deref(), Some(r"C:\Dev\app\main.rs"));
+        let in_cwd = |name: &str| PathBuf::from(CWD).join(name).display().to_string();
+        assert_eq!(p(&["--edit", MAIN_RS]).unwrap().edit.as_deref(), Some(MAIN_RS));
+        assert_eq!(p(&["--edit", "rel.txt"]).unwrap().edit, Some(in_cwd("rel.txt")));
+        #[cfg(windows)]
         assert_eq!(p(&["--edit", "rel.txt"]).unwrap().edit.as_deref(), Some(r"C:\cwd\rel.txt"));
+        #[cfg(not(windows))]
+        assert_eq!(p(&["--edit", "rel.txt"]).unwrap().edit.as_deref(), Some("/cwd/rel.txt"));
         let c = p(&["--profile", "work", "--edit=notes.md", "--lang", "de"]).unwrap();
-        assert_eq!((c.edit.as_deref(), c.profile.as_deref(), c.open.as_deref()), (Some(r"C:\cwd\notes.md"), Some("work"), None));
+        assert_eq!((c.edit, c.profile.as_deref(), c.open.as_deref()), (Some(in_cwd("notes.md")), Some("work"), None));
         // Fehler: ohne Wert, doppelt, mit --open/--claude/Ordner, mit mcp
         assert_eq!(p(&["--edit"]), Err(CliError::MissingValue("--edit".into())));
         assert!(matches!(p(&["--edit", "a", "--edit", "b"]), Err(CliError::Unexpected(_))));
-        assert_eq!(p(&["--edit", "a", "--open", r"C:\Dev\app"]), Err(CliError::EditWithOpen));
+        assert_eq!(p(&["--edit", "a", "--open", APP]), Err(CliError::EditWithOpen));
         assert_eq!(p(&["--edit", "a", "--claude"]), Err(CliError::EditWithOpen));
-        assert_eq!(p(&[r"C:\Dev\app", "--edit", "a"]), Err(CliError::EditWithOpen));
+        assert_eq!(p(&[APP, "--edit", "a"]), Err(CliError::EditWithOpen));
         assert!(matches!(p(&["mcp", "--edit", "a"]), Err(CliError::NotWithMcp(_))));
         let m = CliError::EditWithOpen;
         assert!(m.message(Lang::En).contains("--edit") && m.message(Lang::De).contains("--edit") && m.message(Lang::En) != m.message(Lang::De));
