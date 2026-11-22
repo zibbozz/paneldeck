@@ -16,7 +16,7 @@ Bei Namensgleichheit (Import, Duplizieren, Als Kopie bearbeiten) wird nie etwas 
 
 Eine Theme-Datei, die sich nicht laden lässt, steht mit dem Grund unter der Theme-Wahl (z. B. `Ungültige Farbe in „fg“: „white“`). Sie kann erst gewählt werden, wenn du sie korrigiert und *Neu laden* (Zeile *Eigene Themes*) geklickt hast; ist das gewählte Theme ungültig, nimmt Paneldeck das Standard-Theme (One Dark).
 
-<!-- screenshot: Reiter Darstellung mit der Theme-Auswahl, Theme bearbeiten …, Neues Theme …, offenem Menü ⋯ und einer ungültigen Theme-Datei darunter, Einstellungen → Darstellung -->
+![Reiter Darstellung mit der Theme-Auswahl, Theme bearbeiten …, Neues Theme …, dem Menüknopf ⋯ und einer ungültigen Theme-Datei darunter](../images/de/theme-appearance.png)
 
 ## So änderst du eine Farbe eines Themes
 1. Öffne *Einstellungen → Darstellung* und wähle das Theme unter **Theme**.
@@ -33,7 +33,7 @@ Eine Theme-Datei, die sich nicht laden lässt, steht mit dem Grund unter der The
 4. Gib oben im Editor einen **Namen** ein und passe bei Bedarf einzelne Farben an.
 5. Klicke auf **Speichern**.
 
-<!-- screenshot: Dialog „Aus wenigen Farben erzeugen“ mit Hintergrund, Akzent, Art und dem Vorschaubalken der ANSI-Farben, Einstellungen → Darstellung → Neues Theme … -->
+![Dialog „Aus wenigen Farben erzeugen“ mit Hintergrund, Akzent, Art und der Vorschau der ANSI-Farben](../images/de/theme-generate.png)
 
 ## So verknüpfst du eine Farbe mit einer anderen
 1. Klicke im Editor die Farbe an, die einer anderen folgen soll (z. B. `border`).
@@ -54,7 +54,7 @@ Eine Theme-Datei, die sich nicht laden lässt, steht mit dem Grund unter der The
 
 Der Editor ist ein großes Fenster, das du verschieben und vergrößern kannst: links die **Farbliste**, rechts die **Vorschau**, darunter die **Design-Prüfung**. Die App selbst ändert sich erst mit **Speichern**; **Verwerfen** schließt den Editor ohne zu speichern. Schließt du ihn mit ungespeicherten Änderungen, fragt Paneldeck: *Speichern*, *Verwerfen* oder *Abbrechen*. Rückgängig und Wiederholen: die Pfeil-Knöpfe oder Strg+Z / Strg+Y (solange kein Textfeld den Fokus hat); Ziehen im Farbwähler zählt als ein Schritt. Der Editor öffnet sich nur im Hauptfenster; solange er offen ist, lässt sich das Theme nicht umbenennen, löschen oder importieren.
 
-<!-- screenshot: Theme-Editor mit Farbliste links, Vorschau rechts und Design-Prüfung darunter, eine Farbe gewählt, Einstellungen → Darstellung → Theme bearbeiten … -->
+![Theme-Editor mit Farbliste links, Vorschau rechts und Design-Prüfung darunter, eine Farbe gewählt](../images/de/theme-editor.png)
 
 **Farbliste.** Die Farben sind gruppiert (Grundflächen, Text, Flächen und Rahmen, Akzent und Auswahl, Status, Seitenleiste und Tabs, Tickets und Chips, Chat, Diff und Syntax, Terminal) und nach Name oder Beschreibung durchsuchbar. ● markiert einen Wert, den das Theme setzt, ○ einen abgeleiteten, \* einen seit dem letzten Speichern geänderten. Ein Klick auf eine Farbe öffnet die Bearbeitung:
 
@@ -63,7 +63,7 @@ Der Editor ist ein großes Fenster, das du verschieben und vergrößern kannst: 
 - **Auf abgeleitet zurücksetzen** entfernt den Wert wieder (Terminalfarben: *Auf gespeicherten Wert*; Cursor und Auswahl haben ebenfalls eine Ableitung).
 - **Kontrast** gegen die üblichen Hintergründe nach WCAG: ✓ ab 4,5:1 (Text), ◐ ab 3:1 (große Schrift ab 18 px, Symbole, Rahmen), ⚠ darunter.
 
-<!-- screenshot: Bearbeitung einer gewählten Farbe mit Farbwähler, Hex-Feld, Verweis-Auswahl mit Deckkraft, Auf abgeleitet zurücksetzen und den Kontrastwerten, Theme-Editor → Farbliste → Klick auf eine Farbe -->
+![Theme-Editor mit einer gewählten Farbe: Farbwähler, Hex-Feld, Verweis-Auswahl mit Deckkraft, Auf abgeleitet zurücksetzen und Kontrastwerte](../images/de/theme-color.png)
 
 **Vorschau.** Eine Musterseite aus den echten Bedienelementen mit Beispieltexten: Knöpfe (normal, überfahren, gedrückt, deaktiviert, primär, zerstörend), Eingaben (leer, fokussiert, Fehler), Kontrollkästchen, Optionsfelder, Schalter, Regler und Fortschrittsbalken, Tabs, Einträge der Seitenleiste (aktiv, Ordner, Statuspunkte), Chips und Labels, ein Dialog, ein Toast und Hinweis-/Warnungs-/Fehlerkästen, eine Ticket-Karte in einer Board-Spalte, Chat-Blasen mit einer Werkzeug-Freigabe, ein Terminal-Ausschnitt mit allen 16 Farben, Auswahl und Cursor, ein Diff und eine Abfrage mit Syntaxfarben. Alles lässt sich anklicken und bedienen, bewirkt aber nichts; **ein Klick auf ein Element wählt seine Farbe in der Liste**.
 
@@ -73,7 +73,7 @@ Der Editor ist ein großes Fenster, das du verschieben und vergrößern kannst: 
 
 Die Design-Prüfung unter der Vorschau zeigt **Hinweise, die das Speichern nie blockieren**, mit einem Zähler. Jeder Hinweis nennt die Regel, die beteiligten Farben und das Problem; ein Klick wählt die Farbe und hebt die Elemente in der Vorschau hervor. Wo möglich, bietet ein Hinweis einen **Vorschlag mit *Übernehmen***: die kleinste Helligkeitsänderung (Farbton bleibt), die die Regel erfüllt – rückgängig mit Strg+Z. Jede Regel lässt sich unter **⚙ Prüfungen** abschalten (Standard: alle an; die Wahl steht in `settings.json` als `theme_checks_off`).
 
-<!-- screenshot: Design-Prüfung mit einigen Hinweisen, einer davon mit Vorschlag und Knopf Übernehmen, dazu das offene Menü ⚙ Prüfungen, Theme-Editor → Design-Prüfung -->
+![Design-Prüfung mit einigen Hinweisen, manche mit vorgeschlagener Farbe und dem Knopf Übernehmen](../images/de/theme-checks.png)
 
 | Regel | Prüft |
 |---|---|

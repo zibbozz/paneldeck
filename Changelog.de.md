@@ -20,6 +20,8 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 - Lokale Chats: Der Todo-Chip im Chat-Kopf verdeckt den gescrollten Verlauf nicht mehr
 - Lokale Chats in der deutschen Oberfläche: Freigaben nennen das Ziel *Chat-Terminal* bzw. *Sitzung N* (auch im Menü der dauerhaften Freigaben) statt englischer Bezeichnungen
+- Fortschrittsbalken bei 0 % (Update-Download, Import einer Sicherung) zeichnen keinen gefüllten Kreis mehr über den Anfang ihrer Beschriftung; in der Kosten-Übersicht steht die Beschriftung des Tagesbudgets jetzt über dem Balken und ist bei jedem Füllstand lesbar
+- Die Abschnitte Prozesse und Vorlagen in der Seitenleiste zeigen wieder alle Einträge, wenn Platz ist; ab drei Einträgen war die Liste auf eine feste, kleine Höhe abgeschnitten
 
 ## [2.7.0] - 2026-11-21
 

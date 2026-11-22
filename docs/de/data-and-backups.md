@@ -195,7 +195,7 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 ## Aufräumen
 *Einstellungen → Daten & Sicherung → **Aufräumen …*** (auch *Aufräumen …* in der Befehls-Palette, `Strg+Umschalt+P`) öffnet ein Fenster, in dem du ankreuzt, was gelöscht werden soll. Jeder Eintrag zeigt Größe bzw. Anzahl (im Hintergrund ermittelt; *Neu ermitteln* rechnet neu) und eine kurze Erklärung, unten steht die Summe (*Wird gelöscht:*). Vorausgewählt ist nur Harmloses: Bilder aus der Zwischenablage, alte Sicherungsdateien (`*.bak-*`, `*.defekt-*`), `crash.log` sowie verwaiste Scrollback-/Chat-Dateien, zu denen es keine Sitzung mehr gibt. Das Fenster öffnet sich nur im Hauptfenster.
 
-<!-- screenshot: Fenster Aufräumen mit den Gruppen, Größen, den vorausgewählten Einträgen und der Summe unten, Einstellungen → Daten & Sicherung → Aufräumen … -->
+![Fenster Aufräumen mit den Gruppen, Größen, den vorausgewählten Einträgen und der Summe unten](../images/de/cleanup.png)
 
 ### So schaffst du Platz auf der Festplatte
 1. Öffne *Einstellungen → Daten & Sicherung* und klicke auf **Aufräumen …**.
@@ -206,7 +206,7 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 6. Die Zusammenfassung nennt jeden Eintrag mit seiner Größe. Warte 3 Sekunden, bis der Knopf frei wird, und klicke auf **Löschen**.
 7. Das Ergebnis zeigt je Eintrag ✓ oder einen Fehler. *Erneut versuchen* wiederholt die fehlgeschlagenen; *Schließen* schließt das Fenster.
 
-<!-- screenshot: Rückfrage „Endgültig löschen?“ mit der Liste der Einträge, dem 3-Sekunden-Knopf und dem Eingabefeld, Aufräumen → Löschen … -->
+![Rückfrage „Endgültig löschen?“ mit der Liste der Einträge und dem Löschen-Knopf, der nach 3 Sekunden frei wird](../images/de/cleanup-confirm.png)
 
 ### So setzt du Paneldeck komplett zurück
 1. Öffne *Einstellungen → Daten & Sicherung → Aufräumen …*.
@@ -215,7 +215,7 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 4. Klicke auf **Zurücksetzen …**, tippe `LÖSCHEN` (englische Oberfläche: `DELETE`) und klicke auf **Zurücksetzen**, sobald der Knopf frei ist.
 5. Paneldeck speichert die ZIP-Datei, entfernt die Integration, startet neu und beginnt wie beim ersten Start. Das Ergebnis erscheint nach dem Neustart.
 
-<!-- screenshot: Ergebnisfenster „Aufräumen – Ergebnis“ mit ✓ und einem Fehler, Erneut versuchen und Jetzt neu starten, nach Aufräumen → Löschen -->
+![Ergebnisfenster „Aufräumen – Ergebnis“ mit ✓ je Eintrag, einem Fehler, Erneut versuchen und Jetzt neu starten](../images/de/cleanup-result.png)
 
 | Gruppe | Einträge |
 |---|---|

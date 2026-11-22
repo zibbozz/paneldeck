@@ -4,7 +4,7 @@
 
 Die **Prozessliste** führt lang laufende Programme wie Entwicklungsserver und Watcher aus – `php -S localhost:8000`, `ng serve`, `npm run dev`, `cargo watch` – getrennt von deinen interaktiven Terminal-Sitzungen. Getippt wird dort nicht: Du startest einen Prozess, siehst seine Ausgabe in einem eigenen Bereich und stoppst ihn wieder. *(Seit 2.6.0.)*
 
-<!-- screenshot: Abschnitt Prozesse mit einem laufenden Eintrag (grüner Punkt, ↗, Fehlerzähler) und einem gestoppten, Terminal Hub → Seitenleiste → PROZESSE -->
+![Abschnitt Prozesse in der Seitenleiste mit einem laufenden Eintrag (grüner Punkt, Fehlerzähler), einem gestoppten und einem abgestürzten](../images/de/processes.png)
 
 ## So legst du einen Entwicklungsserver an
 1. Öffne den **Terminal Hub** (`Strg+1`).
@@ -14,7 +14,7 @@ Die **Prozessliste** führt lang laufende Programme wie Entwicklungsserver und W
 5. Klicke auf **Speichern**. Der Eintrag steht im Abschnitt *Prozesse* und ist gestoppt.
 6. Klicke in seiner Zeile auf **▷** (*Starten*) oder doppelklicke die Zeile. Ein Klick auf die Zeile zeigt die Ausgabe.
 
-<!-- screenshot: Dialog Neuer Prozess mit allen Feldern ausgefüllt (Name, Befehl, Ordner, Shell, Projekt, Gruppe, Reihenfolge, Automatisch starten, Protokolldatei, eine Umgebungsvariable), Terminal Hub → PROZESSE → + -->
+![Dialog Neuer Prozess mit allen Feldern ausgefüllt (Name, Befehl, Ordner, Shell, Projekt, Gruppe, Reihenfolge, Automatisch starten, Protokolldatei, eine Umgebungsvariable)](../images/de/process-new.png)
 
 ## So startest du mehrere Programme gemeinsam
 1. Rechtsklick auf den ersten Eintrag → *Bearbeiten …*.
@@ -33,7 +33,7 @@ Die **Prozessliste** führt lang laufende Programme wie Entwicklungsserver und W
 3. Mit *In der Ausgabe suchen* (Strg+F) findest du den ersten Fehler.
 4. Behebe die Ursache und klicke dann im roten Balken unten in der Ausgabe oder in ihrem Kopf auf *Neu starten* (oder Rechtsklick auf die Zeile → *Neu starten*).
 
-<!-- screenshot: Ausgabe eines abgestürzten Prozesses mit Kopfzeile (Zustand, Neu starten, Suchen, Kopieren, Leeren, Bearbeiten, Schließen), Terminal Hub → PROZESSE → Klick auf einen roten Eintrag -->
+![Ausgabe eines abgestürzten Prozesses mit Kopfzeile (Zustand, Neu starten, Suchen, Kopieren, Leeren, Bearbeiten, Schließen)](../images/de/process-output.png)
 
 ## Der Abschnitt *Prozesse*
 Der Abschnitt *Prozesse* liegt in der Seitenleiste des Terminal Hubs über den Vorlagen (nur im Hauptfenster) und lässt sich einklappen. Sein Titel zeigt, wie viele Einträge laufen (z. B. `PROZESSE 2/5`).

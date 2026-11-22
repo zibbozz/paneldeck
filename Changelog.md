@@ -20,6 +20,8 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - Local chats: the to-do chip in the chat header no longer covers the scrolled history
 - Local chats in the German UI: approvals name the target as *Chat-Terminal* and *Sitzung N* (also in the permanent approvals menu) instead of English labels
+- Progress bars at 0 % (update download, backup import) no longer draw a filled circle over the start of their label; in the cost overview the daily budget label now sits above the bar and is readable at every fill level
+- The Processes and Templates sections in the sidebar show all their entries again when there is room; from three entries on, the list was cut off at a fixed small height
 
 ## [2.7.0] - 2026-11-21
 

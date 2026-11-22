@@ -83,6 +83,14 @@ pub(super) struct Tut {
     hook: hook::Hook,
 }
 
+/// Karte beim ersten Start trotz Screenshot-Build zeigen? Nur für die Doku-Ansicht `tutorial-card`.
+fn shot_card() -> bool {
+    #[cfg(feature = "readme-shots")]
+    return super::shot_start::wants_card();
+    #[cfg(not(feature = "readme-shots"))]
+    false
+}
+
 /// Text in der Sprache `lang`.
 fn t(lang: Lang, x: Txt) -> &'static str {
     lang.t(x.de, x.en)
@@ -253,13 +261,27 @@ impl App {
 
     /// Karte „Kurze Tour?“ jetzt zeigen? Nur im Terminal Hub ohne offene Dialoge, nicht im Tray und nicht für README-Bilder.
     fn tut_card_due(&self) -> bool {
-        !cfg!(feature = "readme-shots")
+        (!cfg!(feature = "readme-shots") || shot_card())
             && self.tut.p.card != store::Card::Never
             && !self.tut.card_hidden
             && self.mode == titlebar::Mode::Terminals
             && !self.in_tray
             && self.tut_esc_free()
             && self.cleanup.is_none()
+    }
+
+    /// Nur für die Doku-Screenshots: Tour `tour` starten und bis zum Schritt `step` vorspulen (die Vorbereitungen des
+    /// Schritts laufen im nächsten Bild wie sonst auch).
+    #[cfg(feature = "readme-shots")]
+    pub(super) fn tut_shot(&mut self, ctx: &egui::Context, tour: &str, step: &str) {
+        let Some(t) = steps::tour(tour) else { return };
+        self.tut_cmd(ctx, Cmd::Start(t.id));
+        if let Some(run) = self.tut.run.as_mut()
+            && let Some(i) = run.steps.iter().position(|s| s.id == step)
+        {
+            run.idx = i;
+            run.frames = 0;
+        }
     }
 
     /// Befehl aus der Hilfe ausführen.

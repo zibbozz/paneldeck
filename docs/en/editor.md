@@ -4,7 +4,7 @@
 
 The **Editor** tab is a plain text editor inside Paneldeck, independent of the terminals: its own folder tree, its own tabs and splits. Open it with the **Editor** tab in the title bar or **Alt+Shift+3** (configurable in *Settings → Shortcuts*). *(Since 3.0.0.)*
 
-<!-- screenshot: Editor tab with folder tree, two splits, tabs and the status bar -->
+![Editor tab with folder tree, two splits with tabs and the status bar](../images/editor.png)
 
 ## Files and folders
 - **Open folder …** (**Ctrl+Shift+O**) shows a folder as a tree on the left (**Toggle folder tree** hides it); **Close folder** closes it again. In the tree, a click opens a file in the focused split; the context menu has *Open to the side*, *Copy path*, *Show in Explorer* and *Open as root folder*.
@@ -25,7 +25,7 @@ The **Editor** tab is a plain text editor inside Paneldeck, independent of the t
 - **Minimap** and word wrap (both off for [large files](#large-files)).
 - Undo/redo per document; changes made by an agent are their own undo steps.
 
-<!-- screenshot: find bar with regex and replace -->
+![Find bar with a regular expression and Replace](../images/editor-find.png)
 
 ## Encoding, line endings, indentation
 - On opening, Paneldeck detects the **encoding** (UTF-8 with or without BOM, UTF-16 LE/BE, Windows-1252) and keeps the **line endings** as they are (LF or CRLF; mixed files keep the majority, with a hint). Both are shown in the status bar and can be switched there (*Change encoding (applies on next save)*, *Change line endings*). A character that does not fit the chosen encoding stops saving with a message – the file stays unchanged.
@@ -42,7 +42,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 - **With unsaved edits** an info bar offers **Keep mine**, **Load from disk** and **Show difference**.
 - A **deleted** file keeps its text in the editor and is marked unsaved; saving creates it again.
 
-<!-- screenshot: info bar "changed on disk" with Keep mine / Load from disk / Show difference -->
+![Info bar “changed on disk” with Keep mine, Load from disk and Show difference](../images/editor-disk-changed.png)
 
 ## Search in files
 **Ctrl+Shift+F** in the Editor tab opens the window *Search in files*; it searches all files of the open folder. **F4** / **Shift+F4** jump to the next / previous result.
@@ -52,7 +52,7 @@ Paneldeck notices when an open file is changed by another program (for example b
 - *Match case*, *Whole word*, *Regular expression*; matches are searched line by line;
 - results arrive while the search runs, grouped by file with line numbers and highlighted matches; **Cancel** stops it. A click opens the file at the match. At most 20 000 matches in 5 000 files (1 000 lines per file) – then narrow the search.
 
-<!-- screenshot: search results panel with matches grouped by file -->
+![Find in files with the matches grouped by file](../images/editor-search.png)
 
 ## Large files
 Files from **20 MB** (*Settings → Editor → Large files from*) open in large-file mode: the editor stays smooth with files of several hundred megabytes, but **minimap and word wrap are off** (later also syntax colours), and an info bar says so. Search in files skips them; agents can read but not edit them.
@@ -71,7 +71,7 @@ Files from **20 MB** (*Settings → Editor → Large files from*) open in large-
 
 Stored in `settings.json` as `editor` ([data format](data-and-backups.md#new-fields-in-300)).
 
-<!-- screenshot: Settings → Editor -->
+![Settings, Editor tab](../images/editor-settings.png)
 
 ## Agents
 Agents (Claude Code and others via the [agent interface](agent-interface.md#editor), and [chats with local models](chat.md)) can use the editor:
@@ -84,4 +84,4 @@ Agents (Claude Code and others via the [agent interface](agent-interface.md#edit
 - These rules apply to text mode and to the later hex mode alike.
 
 ## Not yet
-Syntax colours, *Go to symbol*, language servers and formatting come with 3.1.0; a hex mode with 3.2.0.
+Syntax colours come with 3.1.0; language servers (*Go to symbol*, formatting, diagnostics) and AI inline completion with 3.3.0, the language pack with 3.4.0, running files and projects with 3.5.0, a hex mode with 3.6.0.

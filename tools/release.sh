@@ -51,6 +51,7 @@ if [ "$NOGIT" = 0 ]; then
 else
   "$PY" tools/changelog.py check        # Probelauf: nur Format
 fi
+"$PY" tools/check_docs_images.py       # README/Doku: keine offenen Screenshot-Platzhalter, alle Bilder da, EN/DE gleich (tools/docs-shots.ps1)
 "$PY" tools/gen_licenses.py --check   # Lizenztexte der Abhängigkeiten passen zu Cargo.lock (sonst: python tools/gen_licenses.py)
 grep -q "^$V|" tools/titles.txt || { echo "tools/titles.txt hat keinen (englischen) Titel für $V"; exit 1; }
 [ -f "docs/release-notes/$V.en.md" ] || { echo "docs/release-notes/$V.en.md fehlt (englischer Release-Text)"; exit 1; }
@@ -108,6 +109,10 @@ fi
 # Ebenso die Test-Schnittstelle des Tutorials (Cargo-Feature tutorial-test, #143).
 if grep -a -q 'PANELDECK_TUTORIAL_TEST' "dist/paneldeck-$V.exe"; then
   echo "Programmdatei enthält die Test-Schnittstelle des Tutorials (Feature tutorial-test) – so nicht veröffentlichen"; exit 1
+fi
+# Ebenso die Startansichten für die Doku-Screenshots (Cargo-Feature readme-shots, tools/docs-shots.ps1).
+if grep -a -q 'PANELDECK_README_SHOTS_BUILD' "dist/paneldeck-$V.exe"; then
+  echo "Programmdatei enthält die Screenshot-Startansichten (Feature readme-shots) – so nicht veröffentlichen"; exit 1
 fi
 
 # Defender-Prüfung auf Fehlalarme (Windows): paneldeck.exe (steckt unverändert auch im ZIP) und der Installer.

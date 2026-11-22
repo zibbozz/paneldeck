@@ -738,7 +738,12 @@ impl App {
         let panel = egui::TopBottomPanel::bottom("sidebar_templates").frame(egui::Frame::NONE).show_separator_line(false).resizable(false).show_inside(ui, |ui| {
             ui.add_space(S1);
             let id = ui.make_persistent_id("tpl_section");
-            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+            // Doku-Screenshots der Prozessliste: Vorlagen eingeklappt, damit alle Prozesse Platz haben.
+            #[cfg(feature = "readme-shots")]
+            let default_open = !super::shot_start::templates_closed();
+            #[cfg(not(feature = "readme-shots"))]
+            let default_open = true;
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
             let open = state.is_open();
             ui.horizontal(|ui| {
                 let (r, resp) = ui.allocate_exact_size(Vec2::new((ui.available_width() - 34.0).max(40.0), 22.0), Sense::click());
@@ -785,7 +790,10 @@ impl App {
             }
             let q = self.tpl.search.trim().to_string();
             let shown: Vec<usize> = (0..self.templates.len()).filter(|i| self.templates[*i].matches(&q)).collect();
-            egui::ScrollArea::vertical().id_salt("tpl_section_list").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+            // `min_scrolled_height`: Der Bereich wächst bis `max_h` mit (kleinerer Inhalt schrumpft ihn weiter, siehe
+            // auto_shrink). Ohne bliebe er bei den 64 px der Vorgabe hängen: Das Panel ist nur so hoch wie im vorigen Bild,
+            // und die Liste bekam nie mehr als den Platz darin.
+            egui::ScrollArea::vertical().id_salt("tpl_section_list").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 if shown.is_empty() {
                     ui.label(RichText::new(lang.t("Keine Treffer.", "No matches.")).small().color(style::dim(ui)));

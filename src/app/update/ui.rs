@@ -258,7 +258,9 @@ impl App {
                 if phase == Phase::Downloading {
                     let (d, t) = self.updater.progress();
                     ui.add_space(S1);
-                    ui.add(egui::ProgressBar::new(if t > 0 { d as f32 / t as f32 } else { 0.0 }).text(format!("{} / {}", fmt_mb(d), fmt_mb(t))));
+                    let frac = if t > 0 { d as f32 / t as f32 } else { 0.0 };
+                    let fill = crate::style::bar_fill(frac, ui.visuals().selection.bg_fill);
+                    ui.add(egui::ProgressBar::new(frac).text(format!("{} / {}", fmt_mb(d), fmt_mb(t))).fill(fill));
                 }
                 if phase == Phase::Installing {
                     ui.add_space(S1);
