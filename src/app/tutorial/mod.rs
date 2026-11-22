@@ -621,11 +621,13 @@ impl App {
     }
 
     /// Beispieldatei schließen und löschen (`discard`: auch mit ungespeicherten Änderungen). Ungespeichert und ohne
-    /// `discard` bleibt sie offen.
+    /// `discard` bleibt sie offen. Gelöscht verschwindet sie auch aus „Zuletzt geöffnet“.
     fn tut_drop_sample(&mut self, discard: bool) {
         let path = Self::tut_sample_path();
         if self.editor_close_path(&path, discard) {
             let _ = std::fs::remove_file(&path);
+            let s = path.to_string_lossy().to_string();
+            self.ed.recent_files.retain(|x| *x != s);
         }
     }
 

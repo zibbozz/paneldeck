@@ -158,6 +158,8 @@ pub(super) fn show(ui: &mut Ui, lang: Lang, input: &mut SearchInput, results: &m
             }
             if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 start = true;
+                // Fokus bleibt im Suchfeld: weitersuchen mit Enter, schließen mit Esc.
+                r.request_focus();
             }
             // Esc im Suchfeld (egui nimmt ihm dabei den Fokus) schließt das Fenster.
             if (r.has_focus() || r.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -330,6 +332,29 @@ mod tests {
             });
             if i < 2 {
                 assert!(last.is_none());
+            }
+        }
+        assert_eq!(last, Some(PanelAction::Close));
+    }
+
+    /// Nach Enter (Suche starten) bleibt der Fokus im Suchfeld: Esc schließt das Fenster danach weiterhin.
+    #[test]
+    fn escape_after_enter_still_closes() {
+        let ctx = egui::Context::default();
+        let mut input = SearchInput { focus: true, pattern: "needle".into(), ..Default::default() };
+        let mut results = Results::default();
+        let s = EditorSettings::default();
+        let key = |key| vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }];
+        let mut last = None;
+        for (i, ev) in [vec![], vec![], key(Key::Enter), vec![], vec![], key(Key::Escape)].into_iter().enumerate() {
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))), time: Some(i as f64 * 0.05), events: ev, ..Default::default() };
+            let _ = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    last = show(ui, Lang::En, &mut input, &mut results, None, &s);
+                });
+            });
+            if i < 5 {
+                assert_ne!(last, Some(PanelAction::Close), "Bild {i}");
             }
         }
         assert_eq!(last, Some(PanelAction::Close));
