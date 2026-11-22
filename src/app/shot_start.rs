@@ -136,6 +136,18 @@ impl App {
         }
     }
 
+    /// In der PowerShell-Sitzung `id`: neutraler Prompt `PS C:\Dev\acme-shop>` (kein Pfad des Aufnahme-Rechners im
+    /// Bild), Bildschirm leeren und optional `cmd` so ausführen, als wäre er am Prompt getippt worden.
+    fn shot_run(&self, id: u64, demo: &Path, cmd: Option<&str>) {
+        const PROMPT: &str = r"PS C:\Dev\acme-shop> ";
+        let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) else { return };
+        let mut line = format!("function global:prompt {{ '{PROMPT}' }}; Set-Location -LiteralPath '{}'; Clear-Host", demo.display());
+        if let Some(c) = cmd {
+            line.push_str(&format!("; Write-Host '{PROMPT}{c}'; {c}"));
+        }
+        s.send_text_agent(&line, true);
+    }
+
     /// Sitzungen des Hauptfensters im aktiven Projekt (die erste ist die beim Start angelegte).
     fn shot_sessions(&self) -> Vec<u64> {
         let mut v: Vec<u64> = self.entries.iter().filter(|(_, e)| e.meta.project == self.active_project && e.meta.window == 0 && !e.is_chat()).map(|(i, _)| *i).collect();
@@ -322,17 +334,20 @@ impl App {
         match view {
             "app" | "kosten" => {
                 self.shot_status();
-                if n == 40 && view == "app" {
+                if n == 40 {
                     // echte Ausgaben im Beispielordner (die Sitzungen starten dort, Set-Location nur zur Sicherheit)
                     let cmds = ["Get-ChildItem -Recurse -File -Name", "Get-Content README.md", "Get-Content Cargo.toml"];
                     for (id, cmd) in self.shot_sessions().iter().zip(cmds) {
-                        if let Some(s) = self.entries.get(id).and_then(|e| e.live.as_ref()) {
-                            s.send_text_agent(&format!("Set-Location '{}'; Clear-Host; {cmd}", demo.display()), true);
-                        }
+                        self.shot_run(*id, &demo, (view == "app").then_some(cmd));
                     }
                 }
                 if view == "kosten" && n % 20 == 0 {
                     self.shot_usage();
+                }
+            }
+            "processes" | "process-output" | "process-new" if n == 40 => {
+                if let Some(id) = self.shot_sessions().first().copied() {
+                    self.shot_run(id, &demo, Some("Get-ChildItem -Name"));
                 }
             }
             "editor-find" if n == 10 => {

@@ -790,7 +790,10 @@ impl App {
             }
             let q = self.tpl.search.trim().to_string();
             let shown: Vec<usize> = (0..self.templates.len()).filter(|i| self.templates[*i].matches(&q)).collect();
-            egui::ScrollArea::vertical().id_salt("tpl_section_list").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+            // `min_scrolled_height`: Der Bereich wächst bis `max_h` mit (kleinerer Inhalt schrumpft ihn weiter, siehe
+            // auto_shrink). Ohne bliebe er bei den 64 px der Vorgabe hängen: Das Panel ist nur so hoch wie im vorigen Bild,
+            // und die Liste bekam nie mehr als den Platz darin.
+            egui::ScrollArea::vertical().id_salt("tpl_section_list").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 if shown.is_empty() {
                     ui.label(RichText::new(lang.t("Keine Treffer.", "No matches.")).small().color(style::dim(ui)));

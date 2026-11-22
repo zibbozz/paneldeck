@@ -577,7 +577,10 @@ impl App {
             });
             if budget > 0.0 {
                 let frac = (today_c / budget).clamp(0.0, 1.0) as f32;
-                ui.add(egui::ProgressBar::new(frac).text(format!("{} ${:.2} / ${:.2}", lang.t("Tagesbudget", "Daily budget"), today_c, budget)).fill(style::bar_fill(frac, if today_c > budget { crate::style::ui().danger } else { style::brand() })));
+                // Beschriftung über dem Balken statt darin: Im Balken stand der Text in der Auswahlfarbe auf der Akzentfarbe
+                // und war je nach Füllstand kaum oder gar nicht zu lesen.
+                ui.label(RichText::new(format!("{} ${:.2} / ${:.2}", lang.t("Tagesbudget", "Daily budget"), today_c, budget)).small());
+                ui.add(egui::ProgressBar::new(frac).desired_height(8.0).fill(style::bar_fill(frac, if today_c > budget { crate::style::ui().danger } else { style::brand() })));
             }
             ui.add_space(S2);
             ui.label(RichText::new(lang.t("Letzte 14 Tage", "Last 14 days")).strong());

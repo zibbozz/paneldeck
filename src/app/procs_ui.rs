@@ -626,7 +626,10 @@ impl App {
                 );
                 return;
             }
-            egui::ScrollArea::vertical().id_salt("procs_section_list").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+            // `min_scrolled_height`: Der Bereich wächst bis `max_h` mit (kleinerer Inhalt schrumpft ihn weiter, siehe
+            // auto_shrink). Ohne bliebe er bei den 64 px der Vorgabe hängen: Das Panel ist nur so hoch wie im vorigen Bild,
+            // und die Liste bekam nie mehr als den Platz darin – ab drei Einträgen war der Rest abgeschnitten.
+            egui::ScrollArea::vertical().id_salt("procs_section_list").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 for id in shown.iter().copied().filter(|id| self.procs.defs.iter().any(|d| d.id == *id && d.group.trim().is_empty())).collect::<Vec<_>>() {
                     self.proc_row(ui, id);
@@ -1293,7 +1296,8 @@ impl App {
             id: None,
             name: "web".into(),
             command: "npm run dev -- --port 5173".into(),
-            cwd: self.dir.parent().map(|p| p.join("acme-shop").to_string_lossy().to_string()).unwrap_or_default(),
+            // neutraler Pfad statt des Arbeitsordners der Aufnahme (der Dialog wird nicht gespeichert)
+            cwd: r"C:\Dev\acme-shop".into(),
             shell: "powershell".into(),
             project,
             group: "shop".into(),
