@@ -220,12 +220,20 @@ fn lenient_todos<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ChatTodo>
 /// wenn beides passt, läuft ein Aufruf ohne Nachfrage. Regeln ohne Sitzung (`null`, aus Vorabständen) gelten nie –
 /// außer für die Agenten-Werkzeuge des Chats (seit 2.7.0, #338): dort gilt eine Regel je Werkzeug für den ganzen
 /// Chat, bei `run_command` im Terminal des Chats nur mit `prefix` (Befehle, die wortweise so beginnen).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AllowRule {
     pub tool: String,
     pub session: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    /// Nur `run_command` mit `prefix` (seit 3.1.0, #355): die Regel gilt nur für diese Shell (Vergleichsform des Namens,
+    /// `bg_commands::shell_key`; fehlt = das Profil des Projekts) …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    /// … und nur im Vordergrund bzw. nur im Hintergrund. Ältere Regeln (ohne beides) gelten nur im Vordergrund mit dem
+    /// Profil des Projekts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
 }
 
 /// Werkzeuge, für die es nie „Immer für diesen Chat“ gibt (auch mit `session`-Argument nicht).
@@ -236,10 +244,12 @@ impl AllowRule {
     /// `run_command` im Terminal des Chats mit dem Präfix des Befehls.
     pub fn for_call(call: &ToolCall) -> Self {
         if super::agent::is_local(call) {
-            let prefix = (call.name == "run_command").then(|| call.arguments.get("command").and_then(|c| c.as_str()).and_then(super::agent::command_prefix)).flatten();
-            return AllowRule { tool: call.name.clone(), session: None, prefix };
+            let rc = call.name == "run_command";
+            let prefix = rc.then(|| call.arguments.get("command").and_then(|c| c.as_str()).and_then(super::agent::command_prefix)).flatten();
+            let (shell, background) = if rc { (super::bg_commands::shell_key(&call.arguments), super::bg_commands::flag_set(call.arguments.get("background"))) } else { (None, false) };
+            return AllowRule { tool: call.name.clone(), session: None, prefix, shell, background };
         }
-        AllowRule { tool: call.name.clone(), session: call.arguments.get("session").and_then(|s| s.as_u64()), prefix: None }
+        AllowRule { tool: call.name.clone(), session: call.arguments.get("session").and_then(|s| s.as_u64()), ..AllowRule::default() }
     }
 
     /// Darf es für diesen Aufruf „Immer für diesen Chat“ geben? Paneldeck-Werkzeuge nur mit einer Ziel-Sitzung (Zahl
@@ -259,7 +269,13 @@ impl AllowRule {
                 return false;
             }
             return match &self.prefix {
-                Some(p) => call.arguments.get("command").and_then(|c| c.as_str()).is_some_and(|c| super::agent::prefix_matches(p, c)),
+                // Befehle: gleicher Anfang, dieselbe Shell und derselbe Modus (Vorder-/Hintergrund, #355 Review).
+                Some(p) => {
+                    let a = &call.arguments;
+                    a.get("command").and_then(|c| c.as_str()).is_some_and(|c| super::agent::prefix_matches(p, c))
+                        && self.shell == super::bg_commands::shell_key(a)
+                        && self.background == super::bg_commands::flag_set(a.get("background"))
+                }
                 None => true,
             };
         }
@@ -275,7 +291,7 @@ impl AllowRule {
         match self.tool.as_str() {
             "run_command" => self.prefix.as_deref().is_some_and(|p| !p.trim().is_empty()),
             "read_file" => false,
-            t => super::agent::is_agent_tool(t) && self.prefix.is_none(),
+            t => super::agent::is_agent_tool(t) && self.prefix.is_none() && self.shell.is_none() && !self.background,
         }
     }
 }
@@ -306,7 +322,7 @@ fn lenient_rules<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AllowRule
     let v = serde_json::Value::deserialize(d)?;
     let one = |x: &serde_json::Value| -> Option<AllowRule> {
         if let Some(s) = x.as_str() {
-            return Some(AllowRule { tool: s.to_string(), session: None, prefix: None });
+            return Some(AllowRule { tool: s.to_string(), ..AllowRule::default() });
         }
         let tool = x.get("tool")?.as_str()?.to_string();
         let session = match x.get("session") {
@@ -317,7 +333,15 @@ fn lenient_rules<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AllowRule
             None | Some(serde_json::Value::Null) => None,
             Some(p) => Some(p.as_str()?.to_string()),
         };
-        Some(AllowRule { tool, session, prefix })
+        let shell = match x.get("shell") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(p) => Some(p.as_str()?.to_string()),
+        };
+        let background = match x.get("background") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(b) => b.as_bool()?,
+        };
+        Some(AllowRule { tool, session, prefix, shell, background })
     };
     let mut out: Vec<AllowRule> = Vec::new();
     for r in v.as_array().map(|a| a.iter().filter_map(one).collect::<Vec<_>>()).unwrap_or_default() {
@@ -566,7 +590,7 @@ mod tests {
     }
 
     fn rule(tool: &str, session: Option<u64>) -> AllowRule {
-        AllowRule { tool: tool.into(), session, prefix: None }
+        AllowRule { tool: tool.into(), session, ..AllowRule::default() }
     }
 
     #[test]
@@ -585,7 +609,7 @@ mod tests {
         // Befehle im Terminal des Chats: nur mit Präfix, wortweise, ohne Verkettung
         let cmd = |c: &str| call("run_command", serde_json::json!({"command": c}));
         let r = AllowRule::for_call(&cmd("cargo test --release"));
-        assert_eq!(r, AllowRule { tool: "run_command".into(), session: None, prefix: Some("cargo test".into()) });
+        assert_eq!(r, AllowRule { tool: "run_command".into(), session: None, prefix: Some("cargo test".into()), ..AllowRule::default() });
         assert!(r.matches(&cmd("cargo test")) && r.matches(&cmd("cargo test -p x")));
         assert!(!r.matches(&cmd("cargo build")) && !r.matches(&cmd("cargo test; del x")));
         assert!(!r.matches(&call("run_command", serde_json::json!({"command": "cargo test", "session": 4}))), "nicht für andere Sitzungen");
@@ -597,7 +621,30 @@ mod tests {
         let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
         assert!(text.contains(r#""always_allow":[{"tool":"edit_file","session":null},{"tool":"run_command","session":null,"prefix":"cargo test"}]"#), "{text}");
         let (back, _) = parse(&text).unwrap();
-        assert_eq!(back.always_allow, [rule("edit_file", None), r]);
+        assert_eq!(back.always_allow, [rule("edit_file", None), r.clone()]);
+        // #355 Review: Befehlsregeln gelten nur für dieselbe Shell und denselben Modus; Ersetzungen fragen immer.
+        let with = |c: &str, extra: serde_json::Value| {
+            let mut a = serde_json::json!({"command": c});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            call("run_command", a)
+        };
+        assert!(!r.matches(&with("cargo test", serde_json::json!({"shell": "Git Bash"}))), "andere Shell");
+        assert!(!r.matches(&with("cargo test", serde_json::json!({"background": true}))), "Hintergrund");
+        assert!(r.matches(&with("cargo test", serde_json::json!({"background": "false", "shell": ""}))), "Standard");
+        assert!(!r.matches(&cmd("cargo test (Remove-Item -Recurse -Force src)")), "PowerShell-Ausdruck");
+        let gb = AllowRule::for_call(&with("cargo test", serde_json::json!({"shell": "Git Bash", "background": true})));
+        assert_eq!((gb.shell.as_deref(), gb.background), (Some("gitbash"), true));
+        assert!(gb.matches(&with("cargo test -q", serde_json::json!({"shell": "git-bash", "background": "yes"}))));
+        assert!(!gb.matches(&with("cargo test", serde_json::json!({"shell": "Git Bash"}))), "Vordergrund");
+        assert!(!gb.matches(&cmd("cargo test")));
+        let f = ChatFile { always_allow: vec![gb.clone()], ..ChatFile::default() };
+        let text = String::from_utf8(serialize_capped(&f, 10_000)).unwrap();
+        assert!(text.contains(r#"{"tool":"run_command","session":null,"prefix":"cargo test","shell":"gitbash","background":true}"#), "{text}");
+        assert_eq!(parse(&text).unwrap().0.always_allow, [gb]);
+        // Regeln anderer Werkzeuge mit Shell-Angabe sind ungültig.
+        assert!(!AllowRule { tool: "edit_file".into(), shell: Some("x".into()), ..AllowRule::default() }.valid());
     }
 
     #[test]

@@ -659,13 +659,11 @@ fn approval(ui: &mut Ui, id: Id, call_id: &str, name: &str, args: &serde_json::V
             // Agenten-Werkzeuge (#338): je Werkzeug für den Chat, Befehle nur für denselben Anfang (`cargo test`).
             // Sensible Dateien (#338): jedes Mal fragen.
             let always = (AllowRule::eligible(&call) && !sensitive).then(|| {
-                let scope = match AllowRule::for_call(&call) {
+                let rule = AllowRule::for_call(&call);
+                let scope = match &rule {
                     AllowRule { prefix: Some(p), .. } => {
-                        if lang == Lang::De {
-                            format!("Befehle, die mit „{p}“ beginnen")
-                        } else {
-                            format!("commands starting with “{p}”")
-                        }
+                        let base = if lang == Lang::De { format!("Befehle, die mit „{p}“ beginnen") } else { format!("commands starting with “{p}”") };
+                        format!("{base}{}", rule_scope(&rule, lang))
                     }
                     _ if local => {
                         let web = name.starts_with("web_");
@@ -729,6 +727,18 @@ fn paused_bar(ui: &mut Ui, steps: u32, note: Option<&str>, loop_stop: bool, lang
             }
         });
     });
+}
+
+/// Geltungsbereich einer Befehlsregel (#355): „ · Shell gitbash · im Hintergrund“ (leer für Vordergrund mit Projektprofil).
+fn rule_scope(r: &AllowRule, lang: Lang) -> String {
+    let mut s = String::new();
+    if let Some(sh) = &r.shell {
+        s.push_str(&format!(" · {} {sh}", lang.t("Shell", "shell")));
+    }
+    if r.background {
+        s.push_str(&format!(" · {}", lang.t("im Hintergrund", "in the background")));
+    }
+    s
 }
 
 /// Einmalige Frage vor dem ersten Senden: Darf dieses Modell Paneldeck nutzen? (Aus / Lesen / Steuern.)
@@ -799,7 +809,7 @@ fn approvals_menu(ui: &mut Ui, session: u64, rules: &[AllowRule], lang: Lang, ou
                     ui.horizontal(|ui| {
                         let what = match (r.session, &r.prefix) {
                             (Some(s), _) => format!("{} → {} {s}", r.tool, lang.t("Sitzung", "session")),
-                            (None, Some(p)) => format!("{}: {p} …", r.tool),
+                            (None, Some(p)) => format!("{}: {p} …{}", r.tool, rule_scope(r, lang)),
                             (None, None) => r.tool.clone(),
                         };
                         ui.label(RichText::new(what).monospace().size(12.0));
@@ -1410,7 +1420,7 @@ mod tests {
         }
         // Dauerhafte Freigaben: Menü in der Kopfzeile, „Widerrufen“ je Eintrag
         for (lang, title, revoke) in [(Lang::En, "Permanent approvals (2)", "Revoke"), (Lang::De, "Dauerhafte Freigaben (2)", "Widerrufen")] {
-            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4), prefix: None }, AllowRule { tool: "add_todo".into(), session: None, prefix: None }];
+            let rules = vec![AllowRule { tool: "send_text".into(), session: Some(4), prefix: None, ..AllowRule::default() }, AllowRule { tool: "add_todo".into(), session: None, prefix: None, ..AllowRule::default() }];
             let mut c = ChatState::new(ChatFile { always_allow: rules.clone(), ..ChatFile::default() }, None);
             let mut h = H::new();
             h.frame(&mut c, lang, false, vec![]);

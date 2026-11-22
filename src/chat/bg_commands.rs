@@ -85,6 +85,54 @@ pub struct RunRequest {
     pub shell: Option<String>,
 }
 
+/// Ist ein Schalter (`background`) gesetzt? `false`, `"false"`, `"no"`, `"0"`, `""`, `0` und `null` nicht; ein unklarer
+/// Wert zählt als gesetzt (dann meldet [`parse_run`] `bad_args`).
+pub fn flag_set(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => !matches!(s.trim().to_lowercase().as_str(), "false" | "no" | "0" | ""),
+        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
+        Some(_) => true,
+    }
+}
+
+/// Nennt der Aufruf eine Shell (`shell`, nicht leer)? Ein Wert, der kein Text ist, zählt als genannt (dann `bad_args`).
+pub fn shell_given(args: &Value) -> bool {
+    match args.get("shell") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) => !s.trim().is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// Schlüssel der verlangten Shell für Freigaben und Terminals: Name in Vergleichsform (`Git Bash` = `git-bash` =
+/// `gitbash`); `None` = das Profil des Projekts.
+pub fn shell_key(args: &Value) -> Option<String> {
+    args.get("shell").and_then(Value::as_str).map(norm).filter(|s| !s.is_empty())
+}
+
+/// Höchste Nummer eines Hintergrund-Befehls (`bgN`) im Verlauf – aus den Nachrichten von Paneldeck und den Ergebnissen
+/// von `run_command` –, damit die Kennungen nach einem Neustart weiterzählen (#355 Review).
+pub fn max_id_in(msgs: &[super::store::ChatMsg]) -> u32 {
+    let num = |id: &str| id.strip_prefix("bg").and_then(|n| n.parse::<u32>().ok());
+    msgs.iter()
+        .filter_map(|m| {
+            if let Some(e) = &m.event {
+                return num(&e.id);
+            }
+            if m.tool_name.as_deref() == Some("run_command") {
+                let v: Value = serde_json::from_str(&m.content).ok()?;
+                if v.get("background").and_then(Value::as_bool) == Some(true) {
+                    return v.get("id").and_then(Value::as_str).and_then(num);
+                }
+            }
+            None
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// Wahrheitswert auch aus Text.
 fn bool_arg(args: &Value, key: &str) -> Result<bool, ToolErr> {
     match args.get(key) {
@@ -191,8 +239,9 @@ pub fn available_names(cands: &[ShellCandidate]) -> String {
 }
 
 /// Welche Shell meint `name`? Zuerst genaue Namen von Profilen, dann von Shells (Groß-/Kleinschreibung, Leerzeichen und
-/// Bindestriche egal), dann ein eindeutiger Teil eines Namens. Gesperrte Profile ergeben ihren Fehler, Unbekanntes
-/// `bad_args` mit den verfügbaren Namen. `Ok(Index in cands)`.
+/// Bindestriche egal), dann ein eindeutiger Teil eines Namens. Heißt ein gesperrtes Profil wie eine erlaubte Shell, gilt
+/// die Shell. Gesperrte Profile ergeben ihren Fehler, Unbekanntes `bad_args` mit den verfügbaren Namen.
+/// `Ok(Index in cands)`.
 pub fn resolve_shell(name: &str, cands: &[ShellCandidate]) -> Result<usize, ToolErr> {
     let want = norm(name);
     let pick = |i: usize| -> Result<usize, ToolErr> {
@@ -204,8 +253,11 @@ pub fn resolve_shell(name: &str, cands: &[ShellCandidate]) -> Result<usize, Tool
     if want.is_empty() {
         return Err(err("bad_args", format!("shell is empty. Available: {}.", available_names(cands))));
     }
-    for profiles in [true, false] {
-        if let Some(i) = cands.iter().position(|c| c.profile == profiles && c.names().any(|n| norm(n) == want)) {
+    // Genaue Treffer: ein erlaubtes Profil, sonst eine (erlaubte) Shell, erst dann der Fehler eines gesperrten Profils.
+    let exact: Vec<usize> = (0..cands.len()).filter(|i| cands[*i].names().any(|n| norm(n) == want)).collect();
+    let rules: [fn(&ShellCandidate) -> bool; 3] = [|c| c.profile && c.blocked.is_none(), |c| !c.profile && c.blocked.is_none(), |_| true];
+    for ok in rules {
+        if let Some(i) = exact.iter().copied().find(|i| ok(&cands[*i])) {
             return pick(i);
         }
     }
@@ -227,8 +279,10 @@ pub fn resolve_shell(name: &str, cands: &[ShellCandidate]) -> Result<usize, Tool
 pub trait BgHost {
     /// Terminal für einen Hintergrund-Befehl des Chats `chat` öffnen (sichtbar, Kind des Chats, im Projektordner, mit der
     /// Shell aus `req.shell`) – oder eines aus `reuse` wiederverwenden (Terminals beendeter Befehle mit derselben Shell,
-    /// wenn sie noch leben und frei sind). `title` = Name für die Seitenleiste. `Ok((Sitzung, Shell zur Anzeige))`.
-    fn open_terminal(&mut self, chat: u64, req: &RunRequest, title: &str, reuse: &[u64]) -> Result<(u64, String), ToolErr>;
+    /// wenn sie noch leben und an ihrem Prompt ruhen). `title` = Name für die Seitenleiste.
+    /// `Ok((Sitzung, Shell zur Anzeige, Hinweis für das Modell))` – der Hinweis z. B., wenn statt des Projektprofils die
+    /// Standard-Shell gilt.
+    fn open_terminal(&mut self, chat: u64, req: &RunRequest, title: &str, reuse: &[u64]) -> Result<(u64, String, Option<String>), ToolErr>;
     /// Ist die Shell der Sitzung bereit (Shell-Integration gemeldet)? `None` = die Sitzung gibt es nicht mehr.
     fn terminal_ready(&self, session: u64) -> Option<bool>;
     /// Befehl eingeben (wie `run_command`, ohne Zeitlimit); das Ergebnis kommt über den Kanal, wenn er endet.
@@ -237,7 +291,8 @@ pub trait BgHost {
     fn live_output(&self, id: &str, session: u64, command: &str) -> Option<Vec<String>>;
     /// Strg+C an das Terminal.
     fn interrupt(&mut self, session: u64);
-    /// Terminal schließen (wenn Strg+C nicht reichte).
+    /// Alle Prozesse des Terminals beenden (Job der Sitzung, wie „Alle beenden“) und es schließen – wenn Strg+C nicht
+    /// reichte. Danach läuft nichts davon weiter.
     fn close_terminal(&mut self, session: u64);
     /// Ein Befehl ist zu Ende: Nachricht `text` (für das Modell) mit `event` (für die Anzeige) in den Chat.
     fn finished(&mut self, chat: u64, event: ChatEvent, text: String);
@@ -427,12 +482,14 @@ impl BgCommands {
         }
         let n = self.counters.get(&chat).copied().unwrap_or(0) + 1;
         let id = format!("bg{n}");
-        let reuse: Vec<u64> = self.of_chat(chat).filter(|c| c.reusable && c.shell_req == req.shell && !c.state.active()).map(|c| c.session).collect();
+        let key = |s: &Option<String>| s.as_deref().map(norm).filter(|k| !k.is_empty());
+        let reuse: Vec<u64> = self.of_chat(chat).filter(|c| c.reusable && key(&c.shell_req) == key(&req.shell) && !c.state.active()).map(|c| c.session).collect();
         // Ein Terminal, das gerade ein anderer laufender Befehl nutzt, kommt nie in Frage.
         let busy: Vec<u64> = self.items.iter().filter(|c| c.state.active()).map(|c| c.session).collect();
         let reuse: Vec<u64> = reuse.into_iter().filter(|s| !busy.contains(s)).collect();
         let title = format!("{id}: {}", crate::mcp::short(&req.command, 40));
-        let (session, shell) = host.open_terminal(chat, req, &title, &reuse)?;
+        let (session, shell, note) = host.open_terminal(chat, req, &title, &reuse)?;
+        let fixes: Vec<String> = fixes.iter().cloned().chain(note).collect();
         self.counters.insert(chat, n);
         // Das Terminal gehört jetzt diesem Befehl (ein früherer Befehl darin ist beendet).
         for c in self.items.iter_mut().filter(|c| c.session == session) {
@@ -644,6 +701,17 @@ impl BgCommands {
         }
     }
 
+    /// Kennungen nach einem Neustart weiterzählen: der Chat hat schon Befehle bis `bg<n>` (aus dem Verlauf).
+    pub fn seed(&mut self, chat: u64, n: u32) {
+        let c = self.counters.entry(chat).or_insert(0);
+        *c = (*c).max(n);
+    }
+
+    /// (Sitzung, Kennung) aller Befehle des Chats.
+    pub fn keys_of(&self, chat: u64) -> Vec<(u64, String)> {
+        self.of_chat(chat).map(|c| (c.session, c.id.clone())).collect()
+    }
+
     /// Chat geschlossen: seine Befehle vergessen (die Terminals bleiben als normale Sitzungen).
     pub fn chat_closed(&mut self, chat: u64) {
         self.items.retain(|c| c.chat != chat);
@@ -786,9 +854,13 @@ mod tests {
         assert_eq!(code, "bad_args");
         assert!(msg.contains("several"), "{msg}");
         assert_eq!(resolve_shell(" ", &c).unwrap_err().0, "bad_args");
-        // Ein Profil gewinnt vor einer gleichnamigen Shell.
+        // Ein Profil gewinnt vor einer gleichnamigen Shell – ein gesperrtes nicht (dann gilt die Shell).
         let c2 = vec![ShellCandidate::shell("gitbash", "Git Bash"), ShellCandidate::profile(9, "Git Bash", false, false)];
         assert_eq!(resolve_shell("git bash", &c2), Ok(1));
+        let c3 = vec![ShellCandidate::profile(9, "PowerShell 7", true, false), ShellCandidate::shell("pwsh", "PowerShell 7")];
+        assert_eq!(resolve_shell("PowerShell 7", &c3), Ok(1), "Administrator-Profil mit dem Namen einer Shell");
+        let c4 = vec![ShellCandidate::profile(9, "Admin", true, false), ShellCandidate::shell("pwsh", "PowerShell 7")];
+        assert_eq!(resolve_shell("admin", &c4).unwrap_err().0, "admin_profile", "ohne gleichnamige Shell: klarer Fehler");
     }
 
     #[test]
@@ -836,18 +908,19 @@ mod tests {
     }
 
     impl BgHost for Fake {
-        fn open_terminal(&mut self, _chat: u64, req: &RunRequest, _title: &str, reuse: &[u64]) -> Result<(u64, String), ToolErr> {
+        fn open_terminal(&mut self, _chat: u64, req: &RunRequest, _title: &str, reuse: &[u64]) -> Result<(u64, String, Option<String>), ToolErr> {
             if self.fail_open {
                 return Err(err("terminal_failed", "no terminal"));
             }
             let shell = req.shell.clone().unwrap_or_else(|| "PowerShell".into());
+            let note = (req.command == "noted").then(|| "default shell used".to_string());
             if let Some(s) = reuse.iter().copied().find(|s| self.ready.contains_key(s) && !self.closed.contains(s)) {
                 self.reused.push(s);
-                return Ok((s, shell));
+                return Ok((s, shell, note));
             }
             self.next += 1;
             self.ready.insert(self.next, false);
-            Ok((self.next, shell))
+            Ok((self.next, shell, note))
         }
         fn terminal_ready(&self, session: u64) -> Option<bool> {
             if self.closed.contains(&session) { None } else { self.ready.get(&session).copied() }
@@ -1019,6 +1092,35 @@ mod tests {
         assert!(msg.contains("bg1, bg2"), "{msg}");
         assert_eq!(bg.output(&h, 1, &json!({}), 0).unwrap_err().0, "bad_args");
         assert!(bg.stop(&mut h, 2, &json!({"id": "bg1"}), t0).unwrap_err().1.contains("no background commands"));
+    }
+
+    #[test]
+    fn flags_shell_keys_and_ids_from_the_history() {
+        for (v, want) in [(json!(true), true), (json!("yes"), true), (json!(1), true), (json!(false), false), (json!("false"), false), (json!(0), false), (json!(""), false), (Value::Null, false), (json!([1]), true)] {
+            assert_eq!(flag_set(Some(&v)), want, "{v}");
+        }
+        assert!(!flag_set(None));
+        assert_eq!(shell_key(&json!({"shell": " Git-Bash "})), Some("gitbash".into()));
+        assert_eq!(shell_key(&json!({"shell": "  "})), None);
+        assert!(shell_given(&json!({"shell": 3})) && !shell_given(&json!({"shell": ""})));
+        use super::super::store::{ChatMsg, Role};
+        let mut ev = ChatMsg::new(Role::System, "x");
+        ev.event = Some(ChatEvent { kind: ChatEvent::BACKGROUND_COMMAND.into(), id: "bg4".into(), ..ChatEvent::default() });
+        let mut tr = ChatMsg::new(Role::Tool, r#"{"id":"bg7","status":"running","background":true}"#);
+        tr.tool_name = Some("run_command".into());
+        let mut fg = ChatMsg::new(Role::Tool, r#"{"id":"bg99","output":"x"}"#);
+        fg.tool_name = Some("run_command".into());
+        assert_eq!(max_id_in(&[ev, tr, fg]), 7, "Vordergrund-Ergebnisse zählen nicht");
+        assert_eq!(max_id_in(&[]), 0);
+        // weiterzählen
+        let mut h = Fake::default();
+        let mut bg = BgCommands::default();
+        bg.seed(5, 7);
+        assert_eq!(bg.start(&mut h, 5, &req("x"), 3, &[], Instant::now()).unwrap()["id"], "bg8");
+        // Hinweis des Hubs (z. B. Standard-Shell statt Projektprofil) landet in `corrected`
+        let v = bg.start(&mut h, 5, &req("noted"), 3, &["a".into()], Instant::now()).unwrap();
+        assert_eq!(v["corrected"], json!(["a", "default shell used"]));
+        assert_eq!(bg.keys_of(5).len(), 2);
     }
 
     #[test]

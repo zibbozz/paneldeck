@@ -459,8 +459,7 @@ pub fn is_local(call: &ToolCall) -> bool {
     match call.name.as_str() {
         "run_command" => {
             let a = &call.arguments;
-            let set = |k: &str| a.get(k).is_some_and(|v| !v.is_null() && *v != Value::Bool(false));
-            a.get("session").is_none_or(Value::is_null) || set("background") || set("shell")
+            a.get("session").is_none_or(Value::is_null) || super::bg_commands::flag_set(a.get("background")) || super::bg_commands::shell_given(a)
         }
         n => is_agent_tool(n),
     }
@@ -593,9 +592,17 @@ const NO_SINGLE_PREFIX: &[&str] = &[
     "ssh", "scp", "sudo", "runas", "env", "xargs", "npx", "eval", "exec", "rm", "del", "remove-item", "rmdir", "rd", "git", "paneldeck",
 ];
 
-/// Enthält der Befehl Verkettungen, Umleitungen oder Ersetzungen? Dann gilt kein Präfix.
+/// Enthält der Befehl Verkettungen, Umleitungen, Ersetzungen oder Erweiterungen? Dann gilt kein Präfix (es wird gefragt).
+/// Zeichen, mit denen eine der Shells einen weiteren Befehl ausführen oder Text ersetzen kann:
+/// * `;`, `&`, `|`, Zeilenumbrüche: Verkettung (alle Shells);
+/// * `` ` ``, `$(`: Befehlsersetzung (bash/zsh, PowerShell-Escape);
+/// * `(` und `)`: PowerShell wertet `(…)`, `@(…)` und `$(…)` auch in Argumenten nativer Programme aus, fish `(…)`, zsh
+///   `=(…)`, `<(…)` und Glob-Qualifier `*(e:…:)`, bash Subshells (#355 Review);
+/// * `{` und `}`: Skriptblöcke in PowerShell, `${…}`-Ersetzungen, Gruppen in bash/zsh/fish;
+/// * `>`, `<`: Umleitungen und Prozessersetzung;
+/// * `%`: Variablen in cmd (`%VAR%`, auch `%COMSPEC%`), `!`: verzögerte Erweiterung in cmd, Verlauf in bash/zsh.
 pub fn has_chaining(cmd: &str) -> bool {
-    [";", "&", "|", "`", "$(", ">", "<", "\n", "\r", "\u{2028}"].iter().any(|c| cmd.contains(c))
+    [";", "&", "|", "`", "$(", ">", "<", "(", ")", "{", "}", "%", "!", "\n", "\r", "\u{2028}", "\u{2029}", "\u{85}"].iter().any(|c| cmd.contains(c))
 }
 
 /// Präfix für „Immer für diesen Chat“: Programm und – wenn es ein schlichtes Unterkommando ist – das zweite Wort
@@ -871,7 +878,7 @@ pub fn compact(name: &str) -> Option<(&'static str, &'static [&'static str])> {
         "git_diff" => ("Git diff (read-only).", &["path", "staged", "commit"]),
         "git_log" => ("Recent git commits.", &["max_count"]),
         "update_todos" => ("Set this chat's to-dos.", &[]),
-        "ask_user" => ("Ask the user: questions=[{question, options:[text]}].", &[]),
+        "ask_user" => ("Ask: questions=[{question, options:[text]}].", &[]),
         "web_fetch" => ("Fetch a web page.", &[]),
         "web_search" => ("Search the web.", &[]),
         "edit_file" => ("Replace exact text in a file.", &[]),
@@ -880,11 +887,18 @@ pub fn compact(name: &str) -> Option<(&'static str, &'static [&'static str])> {
         "delete_file" => ("Move a file to the recycle bin.", &[]),
         // `background`/`shell` fallen in der Kurzfassung weg (Platz); der Hub nimmt sie weiter an.
         "run_command" => ("Run a command in the chat's own terminal.", &[]),
-        "command_status" => ("Status of background commands.", &["id"]),
-        "command_output" => ("Output of a background command.", &["tail"]),
-        "stop_command" => ("Stop a background command.", &[]),
+        // Kurzfassung der Hintergrund-Werkzeuge (#355 Review): Felder nur in der Beschreibung, das Schema ist leer (Platz).
+        "command_status" => ("Status {id}.", &[]),
+        "command_output" => ("Output {id, tail}.", &[]),
+        "stop_command" => ("Stop {id}.", &[]),
         _ => return None,
     })
+}
+
+/// Stehen die Felder des Werkzeugs in der Kurzfassung nur in seiner Kurzbeschreibung (leeres Schema)? Die drei
+/// Hintergrund-Werkzeuge (#355) – sonst passte Steuern im Expertenmodus mit allen Werkzeugen nicht mehr in 8192 Tokens.
+pub fn compact_fields_in_description(name: &str) -> bool {
+    matches!(name, "command_status" | "command_output" | "stop_command")
 }
 
 /// Definition als `mcp::ToolDef` (für die erzeugte Dokumentation des Master-Prompts).
@@ -950,6 +964,11 @@ mod tests {
         assert!(is_local(&call("run_command", json!({"command": "dir", "session": 4, "background": true}))));
         assert!(is_local(&call("run_command", json!({"command": "dir", "session": 4, "shell": "Git Bash"}))));
         assert!(!is_local(&call("run_command", json!({"command": "dir", "session": 4, "background": false}))));
+        for off in [json!("false"), json!(0), json!("no"), json!("")] {
+            assert!(!is_local(&call("run_command", json!({"command": "dir", "session": 4, "background": off}))), "{off}");
+        }
+        assert!(!is_local(&call("run_command", json!({"command": "dir", "session": 4, "shell": " "}))));
+        assert!(is_local(&call("run_command", json!({"command": "dir", "session": 4, "background": "yes"}))));
         assert!(is_local(&call("read_file", json!({}))) && !is_local(&call("send_text", json!({}))));
         assert!(schema_for(&call("run_command", json!({"command": "x", "session": 3}))).is_none());
         assert!(schema_for(&call("grep", json!({}))).is_some());
@@ -972,6 +991,32 @@ mod tests {
         assert!(!prefix_matches("cargo test", "cargo test | tee x"));
         assert!(!prefix_matches("cargo test", "cargo test $(whoami)"));
         assert!(!prefix_matches("cargo test", "cargo"));
+        // #355 Review: Ersetzungen und Erweiterungen jeder Shell-Familie gelten als Verkettung.
+        for bad in [
+            // PowerShell: Ausdrücke in Argumenten, Arrays, Skriptblöcke, Unterausdrücke
+            "cargo test (Remove-Item -Recurse -Force src)",
+            "cargo test @(Get-ChildItem)",
+            "cargo test {Remove-Item x}",
+            "cargo test $(whoami)",
+            // bash/zsh: Subshell, Prozessersetzung, ${…}, Verlauf
+            "cargo test (rm -rf src)",
+            "cargo test <(curl x)",
+            "cargo test ${IFS}x",
+            "cargo test !!",
+            // zsh: =(…) und Glob-Qualifier
+            "cargo test =(curl x)",
+            "cargo test *(e:'rm -rf src':)",
+            // fish: (cmd)
+            "cargo test (curl evil)",
+            // cmd: Variablen und verzögerte Erweiterung
+            "cargo test %COMSPEC%",
+            "cargo test !CMD!",
+        ] {
+            assert!(has_chaining(bad), "{bad}");
+            assert!(!prefix_matches("cargo test", bad), "{bad}");
+            assert_eq!(command_prefix(bad), None, "{bad}");
+        }
+        assert!(prefix_matches("cargo test", "cargo test --release -p paneldeck"), "harmlose Argumente bleiben");
         assert!(!prefix_matches("", "x"));
         assert!(always_eligible(&call("run_command", json!({"command": "cargo build"}))));
         assert!(!always_eligible(&call("run_command", json!({"command": "pwsh -c x"}))));

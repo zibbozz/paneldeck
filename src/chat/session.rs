@@ -158,6 +158,9 @@ pub struct ChatState {
     /// Nachrichten von Paneldeck (#355, z. B. „Hintergrund-Befehl beendet“), die noch nicht in den Verlauf durften,
     /// weil gerade eine Antwort läuft oder Werkzeugaufrufe offen sind ([`ChatState::push_event`]).
     events: Vec<PendingEvent>,
+    /// Eine Nachricht von Paneldeck kam während der Runde und steht schon im Verlauf: der nächste `tool_step` fragt das
+    /// Modell noch einmal an (geht nicht verloren, wenn sie außerhalb von `tool_step` einsortiert wurde).
+    events_resume: bool,
 }
 
 /// Wartende Nachricht von Paneldeck.
@@ -281,6 +284,7 @@ impl ChatState {
             loop_stop: false,
             ask: None,
             events: Vec::new(),
+            events_resume: false,
         };
         if fixed > 0 {
             c.touch();
@@ -303,7 +307,7 @@ impl ChatState {
     /// vorher, zeigt der Chat nach dem Neustart „Wiederholen“). Die fertige Antwort überschreibt das später.
     /// Offene Werkzeugaufrufe stehen in der Datei mit dem Ergebnis „unterbrochen“ (im Speicher laufen sie weiter).
     pub fn file_for_save(&self) -> std::borrow::Cow<'_, ChatFile> {
-        if !self.streaming() && self.calls.is_empty() {
+        if !self.streaming() && self.calls.is_empty() && self.events.is_empty() {
             return std::borrow::Cow::Borrowed(&self.file);
         }
         let mut f = self.file.clone();
@@ -313,6 +317,9 @@ impl ChatState {
             }
         }
         logic::close_orphans(&mut f.messages, tools::interrupted);
+        // Wartende Nachrichten von Paneldeck (#355, z. B. während die Runde angehalten ist) gehen nicht verloren: in der
+        // Datei stehen sie hinter den (dort als unterbrochen geschlossenen) Aufrufen.
+        f.messages.extend(self.events.iter().map(|e| e.msg.clone()));
         std::borrow::Cow::Owned(f)
     }
 
@@ -353,6 +360,13 @@ impl ChatState {
         self.touch();
     }
 
+    /// Nur für die Doku-Bilder (`readme-shots`): ein laufender `ask_user`-Aufruf mit offenem Formular, ohne Hub.
+    #[cfg(feature = "readme-shots")]
+    pub fn shot_ask(&mut self, call: ToolCall, form: super::ask::AskForm) {
+        self.calls.push(PendingCall { call, state: CallState::Running, rx: None });
+        self.open_ask(form);
+    }
+
     /// Antwort des Nutzers auf die offenen Fragen (Absenden oder Abbrechen): das Ergebnis geht an den wartenden Aufruf.
     /// `false`, wenn es keine Fragen gibt oder „Absenden“ noch nicht geht (nicht alles beantwortet).
     pub fn answer_ask(&mut self, r: super::ask::AskReply) -> bool {
@@ -380,7 +394,7 @@ impl ChatState {
 
     /// Warten Nachrichten von Paneldeck auf ihren Platz im Verlauf?
     pub fn events_pending(&self) -> bool {
-        !self.events.is_empty()
+        !self.events.is_empty() || self.events_resume
     }
 
     /// Wartende Nachrichten in den Verlauf, wenn es geht (keine Antwort läuft, keine offenen Aufrufe, keine Antwort
@@ -397,6 +411,7 @@ impl ChatState {
         }
         self.follow = true;
         self.changed(at);
+        self.events_resume |= resume;
         resume
     }
 
@@ -613,8 +628,9 @@ impl ChatState {
         if had || fixed > 0 {
             self.changed(self.turn_msg.min(self.file.messages.len()));
         }
-        // Wartende Nachrichten von Paneldeck (#355) kommen jetzt in den Verlauf (die Runde ist vorbei).
+        // Wartende Nachrichten von Paneldeck (#355) kommen jetzt in den Verlauf (die Runde ist vorbei, keine neue Anfrage).
         self.flush_events();
+        self.events_resume = false;
     }
 
     /// Ergebnis des ersten offenen Aufrufs eintragen und ihn entfernen.
@@ -820,7 +836,8 @@ impl ChatState {
                 // Chat das Modell danach noch einmal (auch wenn die Antwort schon ohne Aufrufe endete).
                 // Nach einer fehlgeschlagenen Antwort nicht von selbst weiter (der Server ist vielleicht weg).
                 let errored = self.has_error();
-                let resume = self.flush_events() && !errored;
+                self.flush_events();
+                let resume = std::mem::take(&mut self.events_resume) && !errored;
                 if !self.next_request {
                     return if resume { ToolStep::Request } else { ToolStep::Idle };
                 }
@@ -1489,7 +1506,7 @@ mod tests {
         let id = c.pending_approval().unwrap().id.clone();
         assert!(c.decide(&id, Decision::Always));
         assert_eq!(drive(&mut c, &b, &p, &ok_exec), ["send_text"]);
-        let rule = AllowRule { tool: "send_text".into(), session: Some(2), prefix: None };
+        let rule = AllowRule { tool: "send_text".into(), session: Some(2), prefix: None, ..AllowRule::default() };
         assert_eq!(c.file.always_allow, [rule.clone()]);
         c.draft = "third".into();
         c.send(&b, &ChatMeta::default(), &TurnContext::default(), Arc::new(|| {}));
@@ -2091,5 +2108,22 @@ mod tests {
         assert!(!c.events_pending());
         assert_eq!(c.messages().last().unwrap().role, Role::System, "nach Stopp im Verlauf");
         consistent(&c);
+        // Angehalten (Höchstzahl) mit wartenden Aufrufen: die Nachricht wartet im Speicher, steht aber in der Datei.
+        let b = Script::new(vec![vec![tc("a", "list_sessions", serde_json::json!({})), tc("b", "list_sessions", serde_json::json!({})), TurnEvent::Done], text("ok")]);
+        let p1 = policy(crate::mcp::McpLevel::Read, 1);
+        let mut c = ChatState::new(ChatFile::default(), None);
+        start(&mut c, &b, "go");
+        let ToolStep::Execute(_) = step(&mut c, &p1) else { panic!() };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(ok_exec(&ToolCall::default())).unwrap();
+        c.tool_started(rx);
+        assert_eq!(step(&mut c, &p1), ToolStep::Idle);
+        assert!(c.paused);
+        c.push_event(bg_event("bg6"), "bg6 finished".into());
+        assert!(c.events_pending());
+        let saved = c.file_for_save();
+        assert!(saved.messages.last().unwrap().event.as_ref().is_some_and(|e| e.id == "bg6"), "in der Datei");
+        let mut m = saved.messages.clone();
+        assert_eq!(logic::close_orphans(&mut m, tools::interrupted), 0, "Datei stimmig");
     }
 }

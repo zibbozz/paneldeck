@@ -19,12 +19,13 @@ struct BgHub<'a> {
 }
 
 impl BgHost for BgHub<'_> {
-    fn open_terminal(&mut self, chat: u64, req: &RunRequest, title: &str, reuse: &[u64]) -> Result<(u64, String), (String, String)> {
+    fn open_terminal(&mut self, chat: u64, req: &RunRequest, title: &str, reuse: &[u64]) -> Result<(u64, String, Option<String>), (String, String)> {
         let pick: ShellPick = self.app.agent_shell(chat, req.shell.as_deref())?;
         let chat_name = self.app.entries.get(&chat).map(|e| e.display_name()).unwrap_or_default();
         let name = format!("{} – {title}", mcp::short(chat_name.trim(), 30));
-        // Ein freies Terminal eines beendeten Befehls (noch offen, nichts wartet darin): umbenennen und weiter nutzen.
-        let free = reuse.iter().copied().find(|s| self.app.agent_term_alive(*s) && !self.app.pending_for(*s) && self.app.entries.get(s).is_some_and(|e| e.status != ClaudeStatus::Permission));
+        // Ein freies Terminal eines beendeten Befehls (noch offen, Shell ruht an ihrem Prompt – der Nutzer hat dort nichts
+        // gestartet, `term_idle`): umbenennen und weiter nutzen. Sonst ein neues; nie in ein Programm des Nutzers tippen.
+        let free = reuse.iter().copied().find(|s| self.app.term_idle(*s) && self.app.entries.get(s).is_some_and(|e| e.status != ClaudeStatus::Permission));
         let id = match free {
             Some(s) => {
                 if let Some(e) = self.app.entries.get_mut(&s) {
@@ -36,7 +37,7 @@ impl BgHost for BgHub<'_> {
             None => self.app.agent_new_terminal(self.ctx, chat, &pick, &name)?,
         };
         let shell = self.app.entries.get(&id).map(|e| e.eff_shell()).and_then(|sid| self.app.shell_by_id(sid).map(|s| s.label)).unwrap_or_default();
-        Ok((id, shell))
+        Ok((id, shell, pick.note))
     }
 
     fn terminal_ready(&self, session: u64) -> Option<bool> {
@@ -80,6 +81,11 @@ impl BgHost for BgHub<'_> {
     }
 
     fn close_terminal(&mut self, session: u64) {
+        // Erst alles im Job der Sitzung beenden (wie „Alle beenden“): ein Programm, das Strg+C ignoriert, liefe sonst
+        // im aufbewahrten Job weiter, obwohl der Befehl als angehalten gilt (#355 Review).
+        if let Some(s) = self.app.entries.get(&session).and_then(|e| e.live.as_ref()) {
+            s.end_job();
+        }
         if self.app.entries.contains_key(&session) {
             self.app.close_session(session);
         }
@@ -98,6 +104,9 @@ impl App {
     /// `run_command` mit `background: true` (schon geprüft und freigegeben): Terminal öffnen, sofort die Kennung.
     pub(super) fn agent_bg_start(&mut self, ctx: &egui::Context, chat: u64, req: &RunRequest, fixes: &[String]) -> R {
         let limit = self.settings.agent_tools.background_limit;
+        // Nach einem Neustart zählen die Kennungen weiter (bg1 … aus dem Verlauf).
+        let seen = self.entries.get(&chat).and_then(|e| e.chat.as_ref()).map_or(0, |c| crate::chat::bg_commands::max_id_in(c.messages()));
+        self.mcp.bg.seed(chat, seen);
         let mut bg = std::mem::take(&mut self.mcp.bg);
         let r = bg.start(&mut BgHub { app: self, ctx }, chat, req, limit, fixes, Instant::now());
         // Während `start` kann nichts Neues dazugekommen sein (die Liste lag hier); zurücklegen.

@@ -324,8 +324,111 @@ impl App {
                 let (tour, step) = arg.split_once('/').unwrap_or(("basics", "basics.sidebar"));
                 self.tut_shot(ctx, tour, step);
             }
+            // ---- Chats (#355, #356): Verlauf nur im Speicher, kein Server nötig
+            "chat-background-command" | "chat-ask-form" => self.shot_chat(ctx, view == "chat-ask-form"),
             _ => eprintln!("{SHOT_MARK}: unknown view {view}"),
         }
+    }
+
+    /// Chat mit lokalem Modell (#355/#356): eingerichteter Beispiel-Server (nur in den Einstellungen der Aufnahme), ein Chat
+    /// im Beispielprojekt mit festem Verlauf. `ask`: offenes `ask_user`-Formular mit Empfehlung; sonst ein beendeter
+    /// Hintergrund-Befehl samt Nachricht von Paneldeck und seinem Terminal rechts daneben.
+    fn shot_chat(&mut self, ctx: &egui::Context, ask: bool) {
+        use crate::chat::store::{ChatEvent, ChatMsg, Role, ToolCall, ToolStatus};
+        let lang = self.settings.language;
+        let demo = demo_dir(&self.dir);
+        write_demo_project(&demo);
+        self.set_mode(titlebar::Mode::Terminals);
+        let pid = self.active_project;
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid) {
+            p.name = "Acme Shop".into();
+            p.folder = demo.to_string_lossy().to_string();
+        }
+        let model = "qwen3:8b";
+        let server = crate::llm::config::LlmServer {
+            id: "shot-ollama".into(),
+            name: "Ollama".into(),
+            url: "http://localhost:11434".into(),
+            models: vec![crate::llm::config::LlmModel { level: crate::mcp::McpLevel::Control, level_chosen: true, ..crate::llm::config::LlmModel::named(model) }],
+            last_models: vec![crate::llm::ModelInfo { name: model.into(), tools: Some(true), context_length: Some(40960) }],
+            ..Default::default()
+        };
+        self.settings.llm_servers.list.retain(|s| s.id != server.id);
+        self.settings.llm_servers.list.push(server);
+        let meta = crate::state::ChatMeta { server: "shot-ollama".into(), model: model.into() };
+        let name = if ask { lang.t("Test-Setup", "Test setup") } else { lang.t("Build-Helfer", "Build helper") };
+        let chat = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), name: Some(name.into()), chat: Some(meta), ..NewOpts::default() });
+        let call = |id: &str, tool: &str, args: serde_json::Value| ToolCall { id: id.into(), name: tool.into(), arguments: args };
+        let answer = |text: &str, calls: Vec<ToolCall>| {
+            let mut m = ChatMsg::new(Role::Assistant, text);
+            m.tool_calls = calls;
+            m
+        };
+        let result = |c: &ToolCall, content: serde_json::Value| crate::chat::logic::tool_result(c, ToolStatus::Ok, content.to_string());
+        let mut msgs = Vec::new();
+        if ask {
+            msgs.push(ChatMsg::new(Role::User, lang.t("Richte Tests für den Shop ein.", "Set up tests for the shop.")));
+            let q = call(
+                "call_1_0",
+                "ask_user",
+                serde_json::json!({"questions": [
+                    {"question": lang.t("Welches Test-Framework soll ich einrichten?", "Which test framework should I set up?"), "header": "Tests", "options": [
+                        {"label": lang.t("Eingebaute Rust-Tests", "Built-in Rust tests"), "description": lang.t("cargo test, keine neue Abhängigkeit", "cargo test, no new dependency"), "recommended": true},
+                        {"label": "nextest", "description": lang.t("schneller, braucht cargo-nextest", "faster, needs cargo-nextest")}
+                    ]},
+                    {"question": lang.t("Was soll zusätzlich geprüft werden?", "What should be checked as well?"), "multi_select": true, "options": [
+                        {"label": "clippy", "recommended": true}, {"label": "rustfmt"}, {"label": lang.t("Abdeckung", "Coverage")}
+                    ]}
+                ]}),
+            );
+            msgs.push(answer(lang.t("Bevor ich anfange, zwei kurze Fragen:", "Before I start, two quick questions:"), vec![q.clone()]));
+            if let Some(c) = self.entries.get_mut(&chat).and_then(|e| e.chat.as_mut()) {
+                c.file.messages = msgs;
+                if let Ok((qs, fixes)) = crate::chat::ask::parse(&q.arguments) {
+                    c.shot_ask(q, crate::chat::ask::AskForm::new("call_1_0", qs, fixes, None));
+                    // Vorauswahl wie von Hand: die empfohlene Antwort der ersten Frage
+                    if let Some(f) = c.ask.as_mut() {
+                        f.toggle(0, 0);
+                    }
+                }
+                c.touch();
+            }
+            self.activate(chat);
+            return;
+        }
+        msgs.push(ChatMsg::new(Role::User, lang.t("Baue den Shop im Release-Modus, im Hintergrund.", "Build the shop in release mode, in the background.")));
+        let rc = call("call_1_0", "run_command", serde_json::json!({"command": "cargo build --release", "background": true}));
+        msgs.push(answer("", vec![rc.clone()]));
+        msgs.push(result(&rc, serde_json::json!({"id": "bg1", "status": "running", "background": true, "shell": "PowerShell 7"})));
+        msgs.push(answer(lang.t("Der Build läuft im Hintergrund als bg1. Ich melde mich, wenn er fertig ist.", "The build runs in the background as bg1. I will report back when it is done."), vec![]));
+        let ev = ChatEvent { kind: ChatEvent::BACKGROUND_COMMAND.into(), id: "bg1".into(), command: "cargo build --release".into(), state: "exited".into(), exit_code: Some(0), duration_ms: 74_000, error: None };
+        let mut m = ChatMsg::new(Role::System, crate::chat::bg_commands::event_text(&ev, 3, None));
+        m.event = Some(ev);
+        msgs.push(m);
+        let out = call("call_5_0", "command_output", serde_json::json!({"id": "bg1", "tail": 3}));
+        msgs.push(answer("", vec![out.clone()]));
+        msgs.push(result(&out, serde_json::json!({"id": "bg1", "status": "exited", "finished": true, "text": "   Compiling acme-shop v0.1.0\n    Finished `release` profile [optimized] target(s) in 1m 14s"})));
+        msgs.push(answer(lang.t("Der Release-Build ist fertig (Exit-Code 0, 1 min 14 s). Die Programmdatei liegt in `target/release/acme-shop`.", "The release build finished (exit code 0, 1 min 14 s). The binary is in `target/release/acme-shop`."), vec![]));
+        if let Some(c) = self.entries.get_mut(&chat).and_then(|e| e.chat.as_mut()) {
+            c.file.messages = msgs;
+            c.touch();
+        }
+        // Terminal des Befehls unter dem Chat (Ordner mit dem Namen des Chats, wie bei Kindern eines Agenten)
+        let chat_name = self.entries.get(&chat).map(|e| e.display_name()).unwrap_or_default();
+        let group = Some(chat_name.clone());
+        let term = self.new_session(ctx, NewOpts { project: Some(pid), cwd: Some(demo.to_string_lossy().to_string()), quiet: true, group, ..NewOpts::default() });
+        self.shot_name(term, &format!("{chat_name} – bg1: cargo build --release"));
+        // Neutraler Prompt wie in `shot_run`, dazu die Ausgabe des Builds (ohne echtes cargo auf dem Aufnahme-Rechner).
+        if let Some(s) = self.entries.get(&term).and_then(|e| e.live.as_ref()) {
+            let line = format!(
+                "function global:prompt {{ 'PS C:\\Dev\\acme-shop> ' }}; Set-Location -LiteralPath '{}'; Clear-Host; Write-Host 'PS C:\\Dev\\acme-shop> cargo build --release'; Write-Host '   Compiling acme-shop v0.1.0'; Write-Host '    Finished release profile [optimized] target(s) in 1m 14s'",
+                demo.display()
+            );
+            s.send_text_agent(&line, true);
+        }
+        self.activate(chat);
+        self.place(term, crate::layout::Placement::SplitRight, None, &[]);
+        self.activate(chat);
     }
 
     /// Schritte nach dem Aufbau (`n` = Bilder seit dem Aufbau, ca. 10 je Sekunde).

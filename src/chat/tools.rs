@@ -798,7 +798,7 @@ mod tests {
         // Freigabe
         let st = |s: u64| call("send_text", json!({"session": s, "text": "x"}));
         assert!(c.needs_approval(true, &st(4), &[]));
-        let rules = [AllowRule { tool: "send_text".into(), session: Some(4), prefix: None }];
+        let rules = [AllowRule { tool: "send_text".into(), session: Some(4), prefix: None, ..AllowRule::default() }];
         assert!(!c.needs_approval(true, &st(4), &rules), "Werkzeug und Ziel passen");
         assert!(c.needs_approval(true, &st(5), &rules), "andere Ziel-Sitzung: wieder fragen");
         assert!(!c.needs_approval(false, &call("list_sessions", json!({})), &[]));
@@ -990,7 +990,7 @@ mod tests {
         quiet.cfg.ask_write = false;
         let env_call = call("read_file", json!({"path": ".env"}));
         assert!(quiet.needs_approval(true, &env_call, &[]));
-        assert!(quiet.needs_approval(true, &env_call, &[AllowRule { tool: "read_file".into(), session: None, prefix: None }]), "keine Regel für sensible Dateien");
+        assert!(quiet.needs_approval(true, &env_call, &[AllowRule { tool: "read_file".into(), session: None, prefix: None, ..AllowRule::default() }]), "keine Regel für sensible Dateien");
         assert!(!quiet.needs_approval(true, &call("edit_file", json!({"path": "a"})), &[]));
         // dauerhafte Freigabe je Werkzeug, Befehle je Präfix
         let edit = call("edit_file", json!({"path": "a", "old_string": "x", "new_string": "y"}));
@@ -1024,7 +1024,7 @@ mod tests {
         assert!(!quiet.needs_approval(true, &mv("notes.txt", "n2.txt"), &[]));
         assert!(!quiet.needs_approval(true, &mv("plain", "plain2"), &[]));
         // Quelle, Ziel oder Ordner mit sensibler Datei: immer fragen, auch trotz „Immer für diesen Chat“
-        let always = [AllowRule { tool: "move_file".into(), session: None, prefix: None }];
+        let always = [AllowRule { tool: "move_file".into(), session: None, prefix: None, ..AllowRule::default() }];
         for c in [mv("conf/.env", "conf/notes.txt"), mv("notes.txt", ".env"), mv("conf", "settings"), mv("notes.txt", "keys/server.pem")] {
             assert!(quiet.needs_approval(true, &c, &always), "{}", c.arguments);
             let p = agent::files::preview("move_file", &c.arguments, &env).expect("Hinweis in der Freigabe");

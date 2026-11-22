@@ -19,6 +19,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 
 - Local chats: the foreground time limit of `run_command` (`timeout_secs`) now goes up to 30 minutes (before: 10 minutes); default (2 minutes) and maximum are set under *Settings → Models → Agent tools*. A larger value is lowered to the maximum and noted in the result. New optional `settings.json` field `agent_tools.command_timeout_max_secs` (#355)
 
+### Security
+
+- Local chats: a permanent approval *Always for this chat* for commands (e.g. `cargo test`) no longer applies to commands with command substitution or expansions (parentheses, braces, `%`, `!` …) – they always ask. Such rules now also apply only to the same shell and the same mode (foreground or background) (#355)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added

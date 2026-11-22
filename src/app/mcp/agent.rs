@@ -99,6 +99,20 @@ impl App {
         self.entries.get(&id).is_some_and(|e| !e.is_chat() && !e.is_claude() && !e.exited() && e.live.as_ref().is_some_and(|s| !s.has_exited()))
     }
 
+    /// Ruht die Shell des Terminals `id` an ihrem Prompt, so wie der letzte Befehl eines Chats sie verlassen hat (#355
+    /// Review)? Nur dann darf ein Chat dort wieder tippen: kein Vollbildprogramm, keine verschachtelte Shell, keine
+    /// Eingabe mit Enter seit dem Prompt und seit dem Ende des letzten `run_command` kein neuer Prompt (der Nutzer hat
+    /// dort nichts ausgeführt). Sonst bekommt der Chat ein neues Terminal – er tippt nie in ein Programm des Nutzers.
+    pub(super) fn term_idle(&self, id: u64) -> bool {
+        if !self.agent_term_alive(id) || self.pending_for(id) {
+            return false;
+        }
+        let Some(s) = self.entries.get(&id).and_then(|e| e.live.as_ref()) else { return false };
+        let alt = s.alt_screen();
+        let st = s.shell_state.lock().unwrap_or_else(|x| x.into_inner());
+        st.integration_seen && !alt && st.enters_since_prompt == 0 && !st.nested(alt) && self.mcp.run_end_seq.get(&id) == Some(&st.prompt_seq)
+    }
+
     /// Profile und erkannte Shells, die ein Befehl eines Chats nennen kann (#355; gesperrte mit Grund).
     pub(super) fn shell_candidates(&self) -> Vec<ShellCandidate> {
         let mut v: Vec<ShellCandidate> = self
@@ -191,7 +205,7 @@ impl App {
             let pick = self.agent_shell(chat, req.shell.as_deref())?;
             fixes.extend(pick.note.clone());
             let key = (chat, pick.key.clone());
-            let id = match self.mcp.chat_terms.get(&key).copied().filter(|id| self.agent_term_alive(*id)) {
+            let id = match self.mcp.chat_terms.get(&key).copied().filter(|id| self.term_idle(*id)) {
                 Some(id) => id,
                 None => {
                     let chat_name = self.entries.get(&chat).map(|e| e.display_name()).unwrap_or_default();

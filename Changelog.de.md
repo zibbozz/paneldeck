@@ -19,6 +19,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 
 - Lokale Chats: Das Zeitlimit von `run_command` im Vordergrund (`timeout_secs`) reicht jetzt bis 30 Minuten (bisher 10 Minuten); Standard (2 Minuten) und Höchstwert stellst du unter *Einstellungen → Modelle → Agenten-Werkzeuge* ein. Ein größerer Wert wird auf den Höchstwert gesetzt und im Ergebnis vermerkt. Neues optionales Feld `agent_tools.command_timeout_max_secs` in `settings.json` (#355)
 
+### Security
+
+- Lokale Chats: Eine dauerhafte Freigabe *Immer für diesen Chat* für Befehle (z. B. `cargo test`) gilt nicht mehr für Befehle mit Befehlsersetzung oder Erweiterungen (Klammern, geschweifte Klammern, `%`, `!` …) – sie fragen immer. Solche Regeln gelten außerdem nur noch für dieselbe Shell und denselben Modus (Vorder- oder Hintergrund) (#355)
+
 ## [3.0.0] - 2026-11-22
 
 ### Added

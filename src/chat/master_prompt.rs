@@ -1264,6 +1264,11 @@ pub fn minimal_specs(specs: Vec<crate::llm::ToolSpec>) -> Vec<crate::llm::ToolSp
                     *d = serde_json::json!({"type": "integer"});
                 }
             }
+            // Hintergrund-Befehle (#355): die Felder stehen in der Kurzbeschreibung, das Schema bleibt leer (spart Platz;
+            // der Hub prüft weiter gegen das volle Schema).
+            if agent::compact_fields_in_description(&s.name) {
+                s.parameters = serde_json::json!({"type": "object"});
+            }
             // Der Hinweis „(needs a switch)“ der Editor-Werkzeuge entfällt: ein Chat bekommt sie nur mit Schalter.
             s.description = first_sentence(&short_purpose(&s.name).replace(" (needs a switch)", ""), 80);
             s
@@ -1850,6 +1855,18 @@ mod tests {
                 let room = if level == McpLevel::Control && expert { budget / 100 } else { budget / 5 };
                 assert!(e + room <= budget, "mit Editor-Werkzeugen {level:?} {expert} {model}: {e} von {budget}");
                 assert!(level == McpLevel::Control || e <= budget / 2 + 500, "mit Editor-Werkzeugen {level:?} {expert} {model}: {e}");
+                // dazu Hintergrund-Befehle im Chat (#355): command_status, command_output, stop_command
+                let mut env = agent_env();
+                env.background = true;
+                let b = request_tokens(&policy(level, expert).with_agent(env.clone()), model, Variant::Compact);
+                let be = request_tokens(&policy(level, expert).with_agent(env).with_editor_switches(all), model, Variant::Compact);
+                eprintln!("COMPACT+AGENT+BG {level:?} expert={expert} {model}: {b} tokens, room {}; +EDITOR {be}, room {}", budget - b.min(budget), budget - be.min(budget));
+                // Steuern im Expertenmodus mit Hintergrund-Befehlen: etwa 5 % Platz; mit allem (auch Editor) passt es gerade
+                // noch. Mehr Platz gibt es dort nur mit größerem Kontext oder abgewählten Werkzeugen.
+                let room = if level == McpLevel::Control && expert { budget / 25 } else { budget / 5 };
+                assert!(b + room <= budget, "mit Hintergrund-Befehlen {level:?} {expert} {model}: {b} von {budget}");
+                let room = if level == McpLevel::Control && expert { 0 } else { budget / 5 };
+                assert!(be + room <= budget, "mit Hintergrund-Befehlen und Editor {level:?} {expert} {model}: {be} von {budget}");
             }
         }
     }

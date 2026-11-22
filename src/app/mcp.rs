@@ -126,6 +126,9 @@ pub(super) struct McpState {
     pub(super) bg: crate::chat::bg_commands::BgCommands,
     /// Anfang der Ausgabe je laufendem Hintergrund-Befehl: (Sitzung, Kennung) → festgehaltene Zeile (folgt dem Umbruch).
     bg_live: HashMap<(u64, String), crate::terminal::AbsPin>,
+    /// `prompt_seq` jeder Sitzung, als dort zuletzt ein `run_command` endete: Ein Terminal eines Chats wird nur wieder
+    /// benutzt, wenn seither kein Prompt dazukam (der Nutzer hat dort nichts ausgeführt, #355 Review).
+    run_end_seq: HashMap<u64, u64>,
 }
 
 impl McpState {
@@ -133,9 +136,14 @@ impl McpState {
     /// ihre Kinder verlieren die Zuordnung zum Elternteil (bleiben aber vom Nutzer steuerbar).
     pub(super) fn session_closed(&mut self, id: u64) {
         forget_created(&mut self.created, id);
-        // Ein geschlossener Chat vergisst seine Hintergrund-Befehle (#355; ihre Terminals bleiben normale Sitzungen).
+        // Ein geschlossener Chat vergisst seine Hintergrund-Befehle (#355; ihre Terminals bleiben normale Sitzungen). Die
+        // festgehaltenen Zeilen hängen an den Terminals der Befehle, nicht am Chat.
+        for k in self.bg.keys_of(id) {
+            self.bg_live.remove(&k);
+        }
         self.bg.chat_closed(id);
         self.bg_live.retain(|(s, _), _| *s != id);
+        self.run_end_seq.remove(&id);
         self.chat_terms.retain(|(c, _), s| *c != id && *s != id);
     }
 }
@@ -788,7 +796,15 @@ impl App {
                 continue;
             }
             match self.mcp_check(&p) {
-                Some(r) => self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r),
+                Some(r) => {
+                    if let Pend::Run { .. } = &p.kind {
+                        if let Some(s) = self.entries.get(&p.session).and_then(|e| e.live.as_ref()) {
+                            let seq = s.shell_state.lock().unwrap_or_else(|x| x.into_inner()).prompt_seq;
+                            self.mcp.run_end_seq.insert(p.session, seq);
+                        }
+                    }
+                    self.mcp_finish(&p.reply, &p.tool, &p.args, p.caller, p.how, r)
+                }
                 None => self.mcp.pending.push(p),
             }
         }
