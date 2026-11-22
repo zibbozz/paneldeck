@@ -204,6 +204,28 @@ pub fn open_csv() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Öffnen-Dialog für iCal-Dateien (Kalender-Import, #164); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn open_ics() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("iCalendar", &["ics", "ical", "ifb", "icalendar"]).pick_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn open_ics() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Speichern-Dialog für iCal-Dateien (Kalender-Export, #164); anderswo `None`.
+#[cfg(any(windows, unix))]
+pub fn save_ics(default_name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_file_name(default_name).add_filter("iCalendar", &["ics"]).save_file()
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn save_ics(_default_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Ordner-Auswahldialog.
 #[cfg(any(windows, unix))]
 pub fn pick_folder(start: &str) -> Option<String> {

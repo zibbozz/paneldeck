@@ -612,6 +612,8 @@ pub fn tools() -> Vec<ToolDef> {
     .into_iter()
     // ---- Editor-Reiter (#54, 3.0.0): lesen bei Stufe Lesen, öffnen/bearbeiten/speichern bei Steuern + Schalter
     .chain(crate::editor_svc::tools::defs())
+    // ---- Kalender (#164, 3.2.0): lesen bei Stufe Lesen, anlegen/ändern bei Steuern (kein Löschen)
+    .chain(crate::calendar::agent::defs())
     .collect()
 }
 

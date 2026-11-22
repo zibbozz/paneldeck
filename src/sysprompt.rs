@@ -83,6 +83,10 @@ A tool of the other mode returns `wrong_mode`. Reload the tool list (tools/list)
 You can never delete tickets or to-do cards, and never change ticket types, workflows or projects.
 Ticket types have an optional `icon` (in get_project): a built-in name such as `bug`, or `lucide:<name>` from the Lucide icon set (https://lucide.dev/icons).
 
+## Calendar
+
+`list_calendar_events` reads the calendar of a date range (at most 366 days, paged): the user's own events with their recurrences expanded and the sources the user switched on in the calendar options (due dates, sprints, versions and milestones, booked time). At Control level `create_calendar_event` and `update_calendar_event` create and change own events (title, start, duration or days, note, colour, reminder, recurrence). Times are the user's local time. A recurrence is a cron expression with 5 fields (minute hour day month weekday; `@daily`, `@weekly` …; `MON#1` = first Monday of the month) plus optional `until`, `count` and `exceptions`. When both day of month and day of week are set, cron matches when EITHER fits – the answer then carries `warning`. You can never delete events, and due dates, sprints or time entries are not changed through the calendar.
+
 ## Errors
 
 A failed call returns `isError` with a code at the start of the text (`code: message`) and may carry details (for example `details.missing_fields` lists the fields to fill in). Codes:
@@ -154,6 +158,10 @@ Ein Werkzeug des anderen Modus liefert `wrong_mode`. Lade die Werkzeugliste (too
 Du kannst nie Tickets oder Todo-Karten löschen und nie Tickettypen, Workflows oder Projekte ändern.
 Tickettypen haben ein optionales `icon` (in get_project): einen eingebauten Namen wie `bug` oder `lucide:<name>` aus dem Lucide-Icon-Satz (https://lucide.dev/icons).
 
+## Kalender
+
+`list_calendar_events` liest den Kalender eines Zeitraums (höchstens 366 Tage, seitenweise): die eigenen Termine des Nutzers mit ausgerechneten Wiederholungen und die Quellen, die der Nutzer in den Kalender-Optionen eingeschaltet hat (Fälligkeiten, Sprints, Versionen und Meilensteine, gebuchte Zeit). Auf der Stufe Steuern legen `create_calendar_event` und `update_calendar_event` eigene Termine an bzw. ändern sie (Titel, Beginn, Dauer oder Tage, Notiz, Farbe, Erinnerung, Wiederholung). Zeiten sind die lokale Zeit des Nutzers. Eine Wiederholung ist ein Cron-Ausdruck mit 5 Feldern (Minute Stunde Tag Monat Wochentag; `@daily`, `@weekly` …; `MON#1` = erster Montag im Monat) und optional `until`, `count` und `exceptions`. Sind Tag und Wochentag beide gesetzt, passt Cron, wenn EINES von beiden zutrifft – die Antwort enthält dann `warning`. Termine kannst du nie löschen; Fälligkeiten, Sprints und Zeiteinträge ändert der Kalender nicht.
+
 ## Fehler
 
 Ein fehlgeschlagener Aufruf liefert `isError` mit einem Code am Anfang des Textes (`code: Meldung`) und kann Einzelheiten tragen (z. B. listet `details.missing_fields` die auszufüllenden Felder). Codes:
@@ -224,7 +232,8 @@ pub fn short_desc(name: &str) -> Option<(&'static str, &'static str)> {
         "link_ticket" => ("Ticket mit Ticket, URL oder Git-Branch verknüpfen.", "Link a ticket to a ticket, URL or git branch."),
         "link_terminal" => ("Ticket mit einer Terminal-Sitzung verknüpfen.", "Link a ticket to a terminal session."),
         // Editor-Reiter (#54): Texte bei den Werkzeugen selbst.
-        n => return crate::editor_svc::tools::short_desc(n),
+        // Kalender (#164): ebenso.
+        n => return crate::editor_svc::tools::short_desc(n).or_else(|| crate::calendar::agent::short_desc(n)),
     })
 }
 

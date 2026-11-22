@@ -56,6 +56,8 @@ const MIGRATIONS: &[&str] = &[
     // 10: Wartung (Issue #308): Archiv-Markierung der Tickets, Wartungs-Einstellungen, ignorierte Befunde, eigene Regeln,
     // Wartungsprotokoll, SQL in `planning/maintenance/schema.rs`
     crate::planning::maintenance::schema::MIGRATION,
+    // 11: Kalender (Issue #164): eigene Termine (`cal_events`) und Einstellungen (`cal_settings`), SQL in `calendar/store.rs`
+    crate::calendar::store::MIGRATION,
 ];
 
 /// Schema-Version dieser Programmversion (auch für die Rettung einer beschädigten Datenbank in eine neue Datei).

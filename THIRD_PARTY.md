@@ -20,6 +20,7 @@ Paneldeck ist aus freier Software aufgebaut. Die wichtigsten Bestandteile und ih
 | embed-resource | Icon/Versionsinfo in der .exe | MIT |
 | rusqlite (mit eingebautem SQLite) | lokale Datenbank und Sicherungen | MIT (SQLite selbst: gemeinfrei/Public Domain) |
 | chrono | Datum und Uhrzeit | MIT oder Apache-2.0 |
+| iana-time-zone | Name der Zeitzone für den iCal-Export des Kalenders (kam schon über chrono mit) | MIT oder Apache-2.0 |
 | regex-automata | Regex-Suche des Chat-Werkzeugs `grep` (kam schon über alacritty_terminal mit) | MIT oder Apache-2.0 |
 | ropey (mit str_indices) | Text des Editors (Rope, auch für sehr große Dateien) | MIT (str_indices: MIT oder Apache-2.0) |
 | regex | Suchen/Ersetzen im Editor (reguläre Ausdrücke), `.editorconfig`-Muster | MIT oder Apache-2.0 |

@@ -121,6 +121,8 @@ impl ToolPolicy {
             && !self.cfg.disabled_tools.iter().any(|t| t == def.name)
             // Editor (#54): schreibende Werkzeuge nur, wenn ihr Schalter an ist (geprüft wird beim Ausführen ohnehin).
             && crate::editor_svc::tools::offered_to_chats(def.name, self.editor_switches)
+            // Kalender (#164): vorerst nur für externe Agenten – der Chat-Prompt hat kein Budget mehr dafür.
+            && !crate::calendar::agent::TOOLS.contains(&def.name)
     }
 
     /// Werkzeuge für die Anfrage: alle, die Stufe und Modus erlauben und die nicht einzeln gesperrt sind.

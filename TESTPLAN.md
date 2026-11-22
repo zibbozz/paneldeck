@@ -907,3 +907,24 @@ Testinstanz aus einer Kopie der .exe mit eigenem Datenordner. Automatisch: Unit-
 - [ ] **Ungültige Datei:** in `themes/` eine Datei mit `"fg":"white"` und eine > 1 MB anlegen → „Neu laden“ → beide mit Grund unter der Theme-Wahl, nicht in der Auswahl; Import der großen Datei → Fehler-Toast „größer als 1 MB“. Ist das gewählte Theme ungültig: Neustart → App startet mit One Dark.
 - [ ] **Alte Datei:** `nord-beispiel.json` (ohne `ui`) lädt und sieht aus wie vor 2.6.0; eine Datei mit unbekanntem `ui`-Namen lädt.
 - [ ] **Beide Sprachen:** Editor, Generator, Rückfragen, Hinweise, Fehlermeldungen und Toasts auf Deutsch und Englisch.
+
+## 72 · Kalender im Zeit-Reiter (#164, 3.2.0)
+Testinstanz aus einer Kopie der .exe mit eigenem Datenordner, ein Expertenprojekt mit Sprints/Versionen an, ein paar Tickets mit Fälligkeit (eins mit Uhrzeit), eine Todo-Karte mit Fälligkeit, ein Sprint mit Datum, eine Version mit Fälligkeit, ein Zeiteintrag. Automatisch: `calendar::*` (Cron-Parser/-Auswerter mit Sommerzeit, Schaltjahr, `#`, ODER-Fall; Baukasten; RRULE ↔ Cron; iCal-Rundreise, Bericht, 10-MB-Grenze; Quellen; Erinnerungen; MCP; Migration; Sicherung; 1000 Termine), `app::calendar_ui::tests` (Monat, Woche, Tag, Liste, Dialog ohne Fenster); Smoke-Abschnitt „Kalender (#164)“.
+- [ ] **Öffnen:** Reiter *Zeit → Kalender* → Monatsansicht des aktuellen Monats, heutiger Tag hervorgehoben; nur die Ticket-/Todo-Fälligkeiten sind zu sehen (Sprints, Versionen, gebuchte Zeit aus).
+- [ ] **Blättern/Ansichten:** *◀*, *▶*, *Heute*; *Woche* (KW-Titel, rote Jetzt-Linie, auf die aktuelle Stunde gerollt), *Tag*, *Liste* (nächste 60 Tage, Details rechts); nach Neustart ist die letzte Ansicht wieder da.
+- [ ] **Neuer Termin:** *+ Neuer Termin* → Fokus im Titel; Titel, Datum, Uhrzeit, Dauer (Knöpfe 15m/1h), Erinnerung, Farbe (Palette), Notiz → *Speichern* (oder Strg+Enter) → Termin erscheint und ist ausgewählt; Esc bricht ab.
+- [ ] **Doppelklick:** in der Woche auf eine freie Stelle Do 14:xx → Dialog mit Do und 14:00/14:30; im Monat auf eine Zelle → 09:00; auf einen eigenen Termin → Bearbeiten.
+- [ ] **Ganztägig/mehrtägig:** *Ganztägig*, 3 Tage → Balken über drei Tage oben in Woche/Tag und im Monat; über ein Wochenende hinweg in zwei Wochenzeilen.
+- [ ] **Überschneidung:** zwei Termine 09:00–11:00 und 10:00–11:00 am selben Tag → in Woche/Tag nebeneinander.
+- [ ] **Baukasten:** *Werktags* → Feld zeigt `30 9 * * MON-FRI`, Text „Werktags (Mo–Fr) um 09:30“, Vorschau mit 5 Terminen; *Wöchentlich an …* mit Mo/Mi; *Monatlich am n-ten Wochentag* 1. Montag → `MON#1`; *Monatlich am Tag* 31 → Hinweis „Monate ohne diesen Tag …“; *Jährlich* am 29.02. → „Nur in Schaltjahren“; *Alle X Minuten* nur 1…30 (Teiler von 60).
+- [ ] **Eigener Ausdruck:** im Cron-Feld `0 9 13 * FRI` tippen → Auswahl springt auf *Eigener Ausdruck*, rote Warnung zum ODER-Fall, Vorschau mit 13. und Freitagen; `61 * * * *` → Fehlertext, Speichern bleibt mit Meldung offen; `@weekly` geht.
+- [ ] **Ende und Ausnahmen:** *nach 3 Mal* → Vorschau nur 3; *am* Datum; Ausnahme-Tag hinzufügen/entfernen; im Detailbereich *Dieses Vorkommen auslassen* → Vorkommen verschwindet.
+- [ ] **Bearbeiten/Löschen:** *Bearbeiten …* zeigt den Baukasten mit dem gespeicherten Muster; *Löschen …* fragt nach und löscht die Serie.
+- [ ] **Optionen:** *Optionen …* → Raster „Alle Projekte (Standard)“, „Einfache Todo-Liste“, Projekte; *Sprints* an → Sprint als Balken; *Versionen* an → Version am Fälligkeitstag; *Gebuchte Zeit* an → Block in Woche/Tag; für ein Projekt *Fälligkeiten* aus → dessen Fälligkeiten weg, *Standard* setzt zurück; Einstellungen bleiben nach Neustart.
+- [ ] **Erinnerung:** Optionen *Erinnerungen an Termine* an; Termin in 3 Minuten mit „Zu Beginn“ → Benachrichtigung (über den Benachrichtiger des Zeit-Reiters). Paneldeck schließen, Erinnerungszeit verstreichen lassen, starten → Hinweis „Verpasst: …“.
+- [ ] **iCal-Export:** *iCal ▾ → Exportieren …* → Meldung „N Termine exportiert …“; Datei in Outlook/Thunderbird/Google Kalender importieren → Zeiten und Wiederholungen (werktags, 1. Montag) stimmen, auch über die Zeitumstellung.
+- [ ] **iCal-Import:** eine Datei aus einem anderen Kalender importieren → Bericht (importiert, doppelt, fehlerhaft, Hinweise); erneut importieren → alles „doppelt“; Datei > 10 MB → Fehlermeldung ohne Import.
+- [ ] **Agenten:** `create_calendar_event` per MCP → Toast „Kalender: Termin … angelegt“ und der Termin erscheint sofort; `update_calendar_event` ändert ihn.
+- [ ] **Leistung:** per Python 1000 Termine (davon 200 wiederkehrend) in `cal_events` → Monat/Woche/Liste blättern ruckelfrei.
+- [ ] **Sicherung:** manuelle Sicherung, Termin anlegen, Sicherung wiederherstellen → der neue Termin ist weg, die alten und die Optionen sind da.
+- [ ] **Beide Sprachen:** Ansichten, Dialog, Baukasten-Texte, Warnungen, Optionen, Bericht, Meldungen auf Deutsch und Englisch (Wochentage, Monatsnamen, Datumsformat).
