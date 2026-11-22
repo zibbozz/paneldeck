@@ -9,6 +9,11 @@ name: Release build
 # Dateien (und ihre Zeilen in SHA256SUMS.txt) an das Release.
 # macOS (#150, ab 2.5.0, experimentell): Job `macos` baut Paneldeck.app (Universal, ad-hoc signiert) als .dmg und .zip
 # (tools/package-macos.sh); `tools/release.sh … --publish` wartet ebenso darauf und hängt die Dateien an.
+# Linux und macOS laufen je in drei Jobs: `<os>-build` (Pakete bauen, als Kandidat für einen Tag ablegen) und `<os>-test`
+# (cargo test) parallel, danach der Abschluss-Job `linux` bzw. `macos` (Name fest, release.sh wartet genau auf ihn): lädt
+# beides, prüft die Prüfsumme des Kandidaten, prüft die Pakete, erzeugt den Herkunftsnachweis und legt das Artefakt
+# `paneldeck-<v>-<os>` ab. Nur der Abschluss-Job darf Nachweise erzeugen (id-token/attestations). Kein Cache in diesem
+# Workflow (ein vergifteter Cache könnte in die Release-Dateien gelangen).
 # Vorbereitet für die Code-Signatur (SignPath Foundation): der Signatur-Schritt steht unten auskommentiert und wird
 # aktiviert, sobald das Projekt freigeschaltet ist und die Secrets/Variablen angelegt sind.
 on:
@@ -18,6 +23,12 @@ on:
 
 permissions:
   contents: read
+
+# Warteschlange je Commit: der früh per workflow_dispatch gestartete Lauf (release.sh --publish) und der Lauf des Tags auf
+# demselben Commit bauen nicht gleichzeitig; nichts wird abgebrochen.
+concurrency:
+  group: release-build-${{ github.sha }}
+  cancel-in-progress: false
 
 env:
   PYTHONUTF8: "1"
@@ -84,15 +95,17 @@ jobs:
       #     wait-for-completion: true
       #     output-artifact-directory: signed
 
-  linux:
+  # --- Linux ---------------------------------------------------------------------------------------------------------------
+  # Pakete bauen (ohne Tests – die laufen parallel in `linux-test`) und als Kandidat ablegen; die Prüfsumme aller Dateien
+  # geht als Job-Ausgabe an den Abschluss-Job `linux`.
+  linux-build:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
       RUST_TOOLCHAIN: "1.99.1"
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      digest: ${{ steps.digest.outputs.digest }}
     steps:
       # Release build: no cache (a poisoned cache could reach the release files), no credentials in the checkout,
       # toolchain pinned (same version as the local Windows release builds).
@@ -114,40 +127,103 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$v" ]]; then
             echo "Tag $GITHUB_REF_NAME does not match version $v in Cargo.toml"; exit 1
           fi
-      - name: Tests
-        run: cargo test --release --locked
       - name: Build and package (AppImage, .deb, .rpm, tarball)
         run: bash tools/package-linux.sh "${{ steps.ver.outputs.version }}"
-      - name: Check the packages
-        run: bash tools/check-linux-packages.sh "${{ steps.ver.outputs.version }}"
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
-        with:
-          subject-path: |
-            dist/linux-${{ steps.ver.outputs.version }}/Paneldeck-*.AppImage
-            dist/linux-${{ steps.ver.outputs.version }}/*.deb
-            dist/linux-${{ steps.ver.outputs.version }}/*.rpm
-            dist/linux-${{ steps.ver.outputs.version }}/*.tar.gz
+      - name: Digest of the candidate
+        id: digest
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          cd "dist/linux-$V"
+          LC_ALL=C sha256sum -- * | LC_ALL=C sort -k2 | tee "$RUNNER_TEMP/candidate.sha256"
+          echo "digest=$(sha256sum < "$RUNNER_TEMP/candidate.sha256" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: paneldeck-${{ steps.ver.outputs.version }}-linux
+          name: candidate-linux
           path: dist/linux-${{ steps.ver.outputs.version }}/*
+          retention-days: 1
           if-no-files-found: error
 
-  # macOS (#150, experimentell, unsigniert): Paneldeck.app als Universal-Binary (Apple Silicon + Intel, macOS 12+), ad-hoc
-  # signiert, als .dmg und .zip (tools/package-macos.sh, geprüft von tools/check-macos-packages.sh). Wie bei Linux sind diese
-  # Dateien die offiziellen macOS-Release-Dateien: `tools/release.sh … --publish` wartet auf diesen Job, lädt das Artefakt
-  # `paneldeck-<v>-macos`, prüft die Prüfsummen und hängt die Dateien (und ihre Zeilen in SHA256SUMS.txt) an das Release.
-  macos:
-    runs-on: macos-15
+  linux-test:
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
       RUST_TOOLCHAIN: "1.99.1"
+    steps:
+      # Same clean setup as linux-build (no cache, no credentials, pinned toolchain).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (pinned)
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+      - name: Tests
+        run: cargo test --release --locked
+
+  # Abschluss (Name `linux` fest – tools/release.sh wartet auf genau diesen Job und lädt sein Artefakt): erst wenn Build und
+  # Tests grün sind. Kandidat laden, Prüfsumme gegen die Ausgabe von linux-build prüfen, Pakete prüfen, Herkunftsnachweis.
+  linux:
+    needs: [linux-build, linux-test]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
       attestations: write
+    env:
+      V: ${{ needs.linux-build.outputs.version }}
+      DIGEST: ${{ needs.linux-build.outputs.digest }}
     steps:
-      # Release build: no cache, no credentials in the checkout, toolchain pinned (as in the Linux job).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install rpm (check of the .rpm)
+        run: sudo apt-get update -q && sudo apt-get install -y -q rpm
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-linux
+          path: dist/linux-${{ needs.linux-build.outputs.version }}
+      - name: Verify the candidate (SHA-256 from linux-build)
+        run: |
+          [ -n "$V" ] && [ -n "$DIGEST" ] || { echo "Version or digest missing from linux-build"; exit 1; }
+          cd "dist/linux-$V"
+          LC_ALL=C sha256sum -- * | LC_ALL=C sort -k2 | tee "$RUNNER_TEMP/candidate.sha256"
+          got="$(sha256sum < "$RUNNER_TEMP/candidate.sha256" | cut -d' ' -f1)"
+          [ "$got" = "$DIGEST" ] || { echo "Candidate digest $got != $DIGEST from linux-build"; exit 1; }
+          # Artifacts do not keep the executable bit (the content is unchanged and already verified).
+          chmod 755 "Paneldeck-$V-x86_64.AppImage"
+      - name: Check the packages
+        run: bash tools/check-linux-packages.sh "$V"
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            dist/linux-${{ needs.linux-build.outputs.version }}/Paneldeck-*.AppImage
+            dist/linux-${{ needs.linux-build.outputs.version }}/*.deb
+            dist/linux-${{ needs.linux-build.outputs.version }}/*.rpm
+            dist/linux-${{ needs.linux-build.outputs.version }}/*.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: paneldeck-${{ needs.linux-build.outputs.version }}-linux
+          path: dist/linux-${{ needs.linux-build.outputs.version }}/*
+          if-no-files-found: error
+
+  # --- macOS ---------------------------------------------------------------------------------------------------------------
+  # macOS (#150, experimentell, unsigniert): Paneldeck.app als Universal-Binary (Apple Silicon + Intel, macOS 12+), ad-hoc
+  # signiert, als .dmg und .zip (tools/package-macos.sh, geprüft von tools/check-macos-packages.sh). Wie bei Linux sind diese
+  # Dateien die offiziellen macOS-Release-Dateien: `tools/release.sh … --publish` wartet auf den Abschluss-Job `macos`, lädt
+  # das Artefakt `paneldeck-<v>-macos`, prüft die Prüfsummen und hängt die Dateien (und ihre Zeilen in SHA256SUMS.txt) an.
+  macos-build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      RUST_TOOLCHAIN: "1.99.1"
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      # Release build: no cache, no credentials in the checkout, toolchain pinned (as in the Linux jobs).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -164,19 +240,104 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$v" ]]; then
             echo "Tag $GITHUB_REF_NAME does not match version $v in Cargo.toml"; exit 1
           fi
-      - name: Tests
-        run: cargo test --release --locked
       - name: Build and package (universal .dmg and .zip)
         run: bash tools/package-macos.sh "${{ steps.ver.outputs.version }}"
+      - name: Digest of the candidate
+        id: digest
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          cd "dist/macos-$V"
+          LC_ALL=C shasum -a 256 -- * | LC_ALL=C sort -k2 | tee "$RUNNER_TEMP/candidate.sha256"
+          echo "digest=$(shasum -a 256 < "$RUNNER_TEMP/candidate.sha256" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-macos
+          path: dist/macos-${{ steps.ver.outputs.version }}/*
+          retention-days: 1
+          if-no-files-found: error
+
+  # Tests (nativ, Apple Silicon) und das Test-Programm für den Selbst-Update-Test mit dem echten ZIP im Abschluss-Job
+  # (tools/check-macos-packages.sh mit PANELDECK_TEST_BIN statt eines zweiten cargo test).
+  macos-test:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      RUST_TOOLCHAIN: "1.99.1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (pinned)
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+      - name: Tests
+        run: cargo test --release --locked
+      - name: Test executable for the self-update test
+        run: |
+          exe="$(cargo test --release --locked --no-run --message-format=json | python3 -I -c '
+          import json, sys
+          for line in sys.stdin:
+              m = json.loads(line)
+              if m.get("reason") == "compiler-artifact" and m.get("profile", {}).get("test") and m["target"]["name"] == "paneldeck" and "bin" in m["target"]["kind"] and m.get("executable"):
+                  print(m["executable"])
+          ')"
+          [ "$(printf '%s\n' "$exe" | grep -c .)" = 1 ] || { echo "Expected exactly one test executable, got: $exe"; exit 1; }
+          "$exe" --list --ignored | grep -qx 'app::update::install::macapp_tests::macos_release_zip_installs: test' \
+            || { echo "$exe does not contain macos_release_zip_installs"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/testbin"
+          cp "$exe" "$RUNNER_TEMP/testbin/paneldeck-tests"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: testbin-macos
+          path: ${{ runner.temp }}/testbin/paneldeck-tests
+          retention-days: 1
+          if-no-files-found: error
+
+  # Abschluss (Name `macos` fest – tools/release.sh wartet auf genau diesen Job und lädt sein Artefakt).
+  macos:
+    needs: [macos-build, macos-test]
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      V: ${{ needs.macos-build.outputs.version }}
+      DIGEST: ${{ needs.macos-build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-macos
+          path: dist/macos-${{ needs.macos-build.outputs.version }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: testbin-macos
+          path: ${{ runner.temp }}/testbin
+      - name: Verify the candidate (SHA-256 from macos-build)
+        run: |
+          [ -n "$V" ] && [ -n "$DIGEST" ] || { echo "Version or digest missing from macos-build"; exit 1; }
+          cd "dist/macos-$V"
+          LC_ALL=C shasum -a 256 -- * | LC_ALL=C sort -k2 | tee "$RUNNER_TEMP/candidate.sha256"
+          got="$(shasum -a 256 < "$RUNNER_TEMP/candidate.sha256" | cut -d' ' -f1)"
+          [ "$got" = "$DIGEST" ] || { echo "Candidate digest $got != $DIGEST from macos-build"; exit 1; }
+          # Artifacts do not keep the executable bit.
+          chmod 755 "$RUNNER_TEMP/testbin/paneldeck-tests"
       - name: Check the packages
-        run: bash tools/check-macos-packages.sh "${{ steps.ver.outputs.version }}"
+        run: PANELDECK_TEST_BIN="$RUNNER_TEMP/testbin/paneldeck-tests" bash tools/check-macos-packages.sh "$V"
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
-            dist/macos-${{ steps.ver.outputs.version }}/*.dmg
-            dist/macos-${{ steps.ver.outputs.version }}/*.zip
+            dist/macos-${{ needs.macos-build.outputs.version }}/*.dmg
+            dist/macos-${{ needs.macos-build.outputs.version }}/*.zip
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: paneldeck-${{ steps.ver.outputs.version }}-macos
-          path: dist/macos-${{ steps.ver.outputs.version }}/*
+          name: paneldeck-${{ needs.macos-build.outputs.version }}-macos
+          path: dist/macos-${{ needs.macos-build.outputs.version }}/*
           if-no-files-found: error

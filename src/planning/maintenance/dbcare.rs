@@ -644,21 +644,36 @@ pub fn rescue(source: &Path, dest_dir: &Path, lang: Lang) -> MRes<RescueReport> 
         st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?
     };
     // Vorgaben des neuen Schemas (System-Projekt, Verknüpfungstypen …) weichen den geretteten Zeilen.
+    let tx = out.transaction()?;
     for t in &tables {
-        out.execute(&format!("DELETE FROM {}", quote_ident(t)), [])?;
+        tx.execute(&format!("DELETE FROM {}", quote_ident(t)), [])?;
     }
-    out.execute("DELETE FROM sqlite_sequence", [])?;
+    tx.execute("DELETE FROM sqlite_sequence", [])?;
+    tx.commit()?;
+    // Je Tabelle eine Transaktion statt einer Schreibrunde je Zeile (sonst sehr langsam, v. a. unter Windows). Eine
+    // abgewiesene Zeile verwirft wie bisher nur ihre eigene Anweisung; scheitert das Festschreiben, zählt die Tabelle als
+    // nicht gerettet.
     let mut report = Vec::new();
     for t in &tables {
-        report.push(rescue_table(&src, &out, t));
+        let tx = out.transaction()?;
+        let mut r = rescue_table(&src, &tx, t);
+        if let Err(e) = tx.commit() {
+            r.error = Some(format!("commit: {e}"));
+            r.rescued = 0;
+            r.partial = 0;
+            r.partial_rows.clear();
+        }
+        report.push(r);
     }
     // Schlüsselfolgen an die geretteten Kennungen anpassen
+    let tx = out.transaction()?;
     for t in &tables {
-        let max: Option<i64> = out.query_row(&format!("SELECT MAX(rowid) FROM {}", quote_ident(t)), [], |r| r.get(0)).unwrap_or(None);
+        let max: Option<i64> = tx.query_row(&format!("SELECT MAX(rowid) FROM {}", quote_ident(t)), [], |r| r.get(0)).unwrap_or(None);
         if let Some(m) = max {
-            let _ = out.execute("INSERT OR REPLACE INTO sqlite_sequence (name, seq) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE name = ?1 AND sql LIKE '%AUTOINCREMENT%')", params![t, m]);
+            let _ = tx.execute("INSERT OR REPLACE INTO sqlite_sequence (name, seq) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE name = ?1 AND sql LIKE '%AUTOINCREMENT%')", params![t, m]);
         }
     }
+    tx.commit()?;
     out.pragma_update(None, "user_version", crate::db::schema_version())?;
     let dest_problems = integrity(&out, DbScope::Full).unwrap_or_else(|e| vec![e.to_string()]);
     let dest_orphans: i64 = orphans(&out).map(|m| m.values().sum()).unwrap_or(0);

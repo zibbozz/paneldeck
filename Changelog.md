@@ -16,6 +16,10 @@ Deviation: instead of `[Unreleased]`, changes that are not yet released are list
 - Agent interface: new tools `editor_list` and `editor_read` (level Read, unsaved changes included) and `editor_open`, `editor_edit`, `editor_save` (level Control plus one switch each in *Settings → Editor → Agents*, all off by default). Agent edits stay unsaved, are marked and can be undone; agents never take the keyboard focus. Chats with local models get the editor tools too – the reading ones only while a document is open (#54)
 - Interactive **tutorial**: a short tour and chapters (editor, to-do list & expert mode, Claude Code, local chats, agent interface, profiles & data folder, more tools) run as guided steps in the real window, with a highlighted target, a speech bubble and tasks that continue by themselves. Tours run in a project of their own and ask at the end whether to delete it. Start it from the first-start card, the command palette (*Tutorial*) or *Settings → About*; a tour ended early can be continued. After an update a hint offers a *What's new* tour with only the new steps; new optional `settings.json` field `tutorial_whats_new` starts it by itself (off by default) (#143)
 
+### Changed
+
+- Maintenance page: "Rescue into a new file" is much faster, especially on Windows – each table is now copied in one transaction instead of writing row by row (#363)
+
 ### Fixed
 
 - Local chats: the to-do chip in the chat header no longer covers the scrolled history

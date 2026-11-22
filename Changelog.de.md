@@ -16,6 +16,10 @@ Abweichung: Statt `[Unreleased]` stehen noch nicht veröffentlichte Änderungen 
 - Agenten-Schnittstelle: neue Werkzeuge `editor_list` und `editor_read` (Stufe Lesen, ungespeicherte Änderungen inklusive) sowie `editor_open`, `editor_edit`, `editor_save` (Stufe Steuern und je ein Schalter unter *Einstellungen → Editor → Agenten*, alle standardmäßig aus). Änderungen von Agenten bleiben ungespeichert, werden markiert und lassen sich rückgängig machen; Agenten nehmen nie den Tastaturfokus. Auch Chats mit lokalen Modellen bekommen die Editor-Werkzeuge – die lesenden nur, solange ein Dokument offen ist (#54)
 - Interaktives **Tutorial**: Eine kurze Tour und Kapitel (Editor, Todo-Liste & Expertenmodus, Claude Code, lokale Chats, Agenten-Schnittstelle, Profile & Datenordner, weitere Werkzeuge) laufen als geführte Schritte im echten Fenster, mit hervorgehobenem Ziel, Sprechblase und Aufgaben, die von selbst weitergehen. Touren laufen in einem eigenen Projekt und fragen am Ende, ob es gelöscht werden soll. Start über die Karte beim ersten Start, die Befehls-Palette (*Tutorial*) oder *Einstellungen → Info*; eine vorzeitig beendete Tour lässt sich fortsetzen. Nach einem Update bietet ein Hinweis eine Tour *Was ist neu* mit nur den neuen Schritten an; das neue optionale Feld `tutorial_whats_new` in `settings.json` startet sie von selbst (standardmäßig aus) (#143)
 
+### Changed
+
+- Wartungsseite: „In neue Datei retten“ ist deutlich schneller, vor allem unter Windows – jede Tabelle wird jetzt in einer Transaktion kopiert statt Zeile für Zeile geschrieben (#363)
+
 ### Fixed
 
 - Lokale Chats: Der Todo-Chip im Chat-Kopf verdeckt den gescrollten Verlauf nicht mehr
