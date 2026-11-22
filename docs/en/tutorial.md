@@ -9,11 +9,15 @@ Paneldeck can show you around itself: a **short tour** and **chapters** on singl
 - **Any time:** command palette (**Ctrl+Shift+P**, type *Tutorial*), *Settings → About → Tutorial*, or *Take the short tour* in the empty Terminal Hub.
 - **Continue:** a tour you ended early continues at the step where you left it (*Tutorial: Continue* in the palette, *Continue* under *Settings → About*).
 
+![The card “Short tour (3 min)?” at the first start with Start, Later and Never](../images/tutorial-card.png)
+
 ## How a step works
 The element the step is about is highlighted – the rest of the window is dimmed, a pulsing frame marks it (the frame stays still when *Animations* are off) – and a speech bubble explains it with *Step x/y* and **Back**, **Next**, **Skip** and **×**.
 Steps with a task (e.g. *split the pane*, *add a to-do*) continue by themselves as soon as Paneldeck sees that you did it; *Next* and *Skip* always work too. **Esc** or **×** ends the tour; your progress is kept.
 
 If a step needs something that is not installed – **Claude Code** or **Ollama** (looked up in `PATH` only, nothing is started) – it says so, links to the official installation page and can simply be skipped.
+
+![A tour step: the sidebar is highlighted, the rest of the window is dimmed, and the speech bubble shows Step x/y with Back, Next, Skip and ×](../images/tutorial-tour.png)
 
 ## Your data stays untouched
 Every tour runs in a project of its own called **Tutorial** with its own sessions. To-dos and the example expert project (key `TUT`) created during a tour belong to it as well, and expert mode is switched back afterwards.

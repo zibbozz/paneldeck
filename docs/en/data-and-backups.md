@@ -195,7 +195,7 @@ All fields are optional; older versions ignore them, and missing fields mean the
 ## Clean up
 *Settings → Data & backup → **Clean up …*** (also *Clean up …* in the command palette, `Ctrl+Shift+P`) opens a window where you tick what to delete. Each item shows its size or count (calculated in the background; *Refresh* calculates again) and a short explanation; the bottom shows the total (*Will be deleted:*). Only harmless items are preselected: clipboard images, old backup files (`*.bak-*`, `*.defekt-*`), `crash.log` and orphaned scrollback/chat files that no session belongs to. The window opens in the main window only.
 
-<!-- screenshot: Clean up window with the groups, sizes, the preselected items and the total at the bottom, Settings → Data & backup → Clean up … -->
+![Clean up window with the groups, sizes, the preselected items and the total at the bottom](../images/cleanup.png)
 
 ### How to free disk space
 1. Open *Settings → Data & backup* and click **Clean up …**.
@@ -206,7 +206,7 @@ All fields are optional; older versions ignore them, and missing fields mean the
 6. The summary lists every item with its size. Wait 3 seconds until the button unlocks and click **Delete**.
 7. The result shows ✓ or an error per item. *Retry* repeats the failed ones; *Close* closes the window.
 
-<!-- screenshot: confirmation "Delete permanently?" with the list of items, the 3-second button and the typing field, Clean up → Delete … -->
+![Confirmation “Delete permanently?” with the list of items and the delete button that unlocks after 3 seconds](../images/cleanup-confirm.png)
 
 ### How to reset Paneldeck completely
 1. Open *Settings → Data & backup → Clean up …*.
@@ -215,7 +215,7 @@ All fields are optional; older versions ignore them, and missing fields mean the
 4. Click **Reset …**, type `DELETE` (German interface: `LÖSCHEN`) and click **Reset** once the button unlocks.
 5. Paneldeck saves the ZIP file, removes the integration, restarts and starts like the first time. The result is shown after the restart.
 
-<!-- screenshot: result window "Clean up – result" with ✓ and one error, Retry and Restart now, after Clean up → Delete -->
+![Result window “Clean up – result” with ✓ per item, one error, Retry and Restart now](../images/cleanup-result.png)
 
 | Group | Items |
 |---|---|

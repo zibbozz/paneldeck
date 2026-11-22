@@ -4,7 +4,7 @@
 
 Der Reiter **Editor** ist ein einfacher Texteditor in Paneldeck, unabhängig von den Terminals: eigener Ordnerbaum, eigene Tabs und Teilungen. Geöffnet wird er über den Reiter **Editor** in der Titelleiste oder mit **Alt+Umschalt+3** (änderbar unter *Einstellungen → Tastenkürzel*). *(Seit 3.0.0.)*
 
-<!-- screenshot: Editor-Reiter mit Ordnerbaum, zwei Teilungen, Tabs und Statusleiste -->
+![Editor-Reiter mit Ordnerbaum, zwei Teilungen mit Tabs und Statusleiste](../images/de/editor.png)
 
 ## Dateien und Ordner
 - **Ordner öffnen …** (**Strg+Umschalt+O**) zeigt einen Ordner links als Baum (**Ordnerbaum ein/aus** blendet ihn aus); **Ordner schließen** schließt ihn wieder. Im Baum öffnet ein Klick die Datei in der fokussierten Teilung; das Kontextmenü hat *Rechts daneben öffnen*, *Pfad kopieren*, *Im Explorer anzeigen* und *Als Wurzel öffnen*.
@@ -25,7 +25,7 @@ Der Reiter **Editor** ist ein einfacher Texteditor in Paneldeck, unabhängig von
 - **Minimap** und Zeilenumbruch (beides aus bei [großen Dateien](#große-dateien)).
 - Rückgängig/Wiederholen je Dokument; Änderungen eines Agenten sind eigene Rückgängig-Schritte.
 
-<!-- screenshot: Suchleiste mit regulärem Ausdruck und Ersetzen -->
+![Suchleiste mit regulärem Ausdruck und Ersetzen](../images/de/editor-find.png)
 
 ## Kodierung, Zeilenenden, Einrückung
 - Beim Öffnen erkennt Paneldeck die **Kodierung** (UTF-8 mit oder ohne BOM, UTF-16 LE/BE, Windows-1252) und behält die **Zeilenenden** wie vorgefunden (LF oder CRLF; gemischte Dateien behalten die Mehrheit, mit Hinweis). Beides steht in der Statusleiste und lässt sich dort umschalten (*Kodierung ändern (beim nächsten Speichern)*, *Zeilenende ändern*). Ein Zeichen, das nicht in die gewählte Kodierung passt, hält das Speichern mit einer Meldung an – die Datei bleibt unverändert.
@@ -42,7 +42,7 @@ Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Cl
 - **Mit ungespeicherten Änderungen** bietet eine Infoleiste **Meine behalten**, **Von der Platte laden** und **Unterschied anzeigen**.
 - Eine **gelöschte** Datei behält ihren Text im Editor und gilt als ungespeichert; Speichern legt sie neu an.
 
-<!-- screenshot: Infoleiste „auf der Platte geändert“ mit Meine behalten / Von der Platte laden / Unterschied anzeigen -->
+![Infoleiste „auf der Platte geändert“ mit Meine behalten, Von der Platte laden und Unterschied anzeigen](../images/de/editor-disk-changed.png)
 
 ## Suche in Dateien
 **Strg+Umschalt+F** öffnet im Editor-Reiter das Fenster *In Dateien suchen*; es durchsucht alle Dateien des offenen Ordners. **F4** / **Umschalt+F4** springen zum nächsten / vorigen Treffer.
@@ -52,7 +52,7 @@ Paneldeck bemerkt, wenn ein anderes Programm eine offene Datei ändert (z. B. Cl
 - *Groß-/Kleinschreibung beachten*, *Nur ganze Wörter*, *Regulärer Ausdruck*; gesucht wird zeilenweise;
 - die Treffer erscheinen schon während der Suche, nach Dateien gruppiert mit Zeilennummern und hervorgehobenen Stellen; **Abbrechen** hält sie an. Ein Klick öffnet die Datei an der Fundstelle. Höchstens 20 000 Treffer in 5 000 Dateien (1 000 Zeilen je Datei) – dann die Suche eingrenzen.
 
-<!-- screenshot: Ergebnis-Panel der Suche in Dateien, nach Dateien gruppiert -->
+![Suche in Dateien mit den Treffern nach Dateien gruppiert](../images/de/editor-search.png)
 
 ## Große Dateien
 Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen im Modus für große Dateien: Der Editor bleibt auch bei mehreren hundert Megabyte flüssig, aber **Minimap und Zeilenumbruch sind aus** (später auch Syntaxfarben), und eine Infoleiste sagt das. Die Suche in Dateien überspringt sie; Agenten können sie lesen, aber nicht bearbeiten.
@@ -71,7 +71,7 @@ Dateien ab **20 MB** (*Einstellungen → Editor → Große Dateien ab*) öffnen 
 
 Gespeichert in `settings.json` als `editor` ([Datenformat](data-and-backups.md#neue-felder-in-300)).
 
-<!-- screenshot: Einstellungen → Editor -->
+![Einstellungen, Reiter Editor](../images/de/editor-settings.png)
 
 ## Agenten
 Agenten (Claude Code und andere über die [Agenten-Schnittstelle](agent-interface.md#editor) sowie [Chats mit lokalen Modellen](chat.md)) können den Editor benutzen:

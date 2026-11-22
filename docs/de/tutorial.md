@@ -9,11 +9,15 @@ Paneldeck zeigt sich auch selbst: Eine **kurze Tour** und **Kapitel** zu einzeln
 - **Jederzeit:** Befehls-Palette (**Strg+Umschalt+P**, *Tutorial* tippen), *Einstellungen → Info → Tutorial* oder *Kurze Tour starten* im leeren Terminal Hub.
 - **Fortsetzen:** Eine vorzeitig beendete Tour macht bei dem Schritt weiter, an dem du aufgehört hast (*Tutorial: Fortsetzen* in der Palette, *Fortsetzen* unter *Einstellungen → Info*).
 
+![Die Karte „Kurze Tour (3 Min.)?“ beim ersten Start mit Starten, Später und Nie](../images/de/tutorial-card.png)
+
 ## So läuft ein Schritt
 Das Element, um das es geht, wird hervorgehoben – der Rest des Fensters ist abgedunkelt, ein pulsierender Rahmen markiert es (bei ausgeschalteten *Animationen* steht der Rahmen still) – und eine Sprechblase erklärt es mit *Schritt x/y* und **Zurück**, **Weiter**, **Überspringen** und **×**.
 Schritte mit einer Aufgabe (z. B. *Bereich teilen*, *To-do anlegen*) gehen von selbst weiter, sobald Paneldeck sieht, dass du sie erledigt hast; *Weiter* und *Überspringen* gehen trotzdem immer. **Esc** oder **×** beendet die Tour; dein Fortschritt bleibt erhalten.
 
 Braucht ein Schritt etwas, das nicht installiert ist – **Claude Code** oder **Ollama** (gesucht wird nur im `PATH`, gestartet wird nichts) –, sagt er das, verlinkt die offizielle Installationsseite und lässt sich einfach überspringen.
+
+![Ein Schritt der Tour: Die Seitenleiste ist hervorgehoben, der Rest des Fensters abgedunkelt, die Sprechblase zeigt Schritt x/y mit Zurück, Weiter, Überspringen und ×](../images/de/tutorial-tour.png)
 
 ## Deine Daten bleiben unberührt
 Jede Tour läuft in einem eigenen Projekt **Tutorial** mit eigenen Sitzungen. Auch die in einer Tour angelegten To-dos und das Beispiel-Experten-Projekt (Schlüssel `TUT`) gehören dazu, und der Expertenmodus wird danach zurückgestellt.
