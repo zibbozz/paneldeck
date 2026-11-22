@@ -1260,6 +1260,53 @@ impl App {
     }
 }
 
+/// Nur für die Doku-Screenshots (Feature `readme-shots`, nie im Release): Beispiel-Prozesse im Datenordner der Aufnahme.
+#[cfg(feature = "readme-shots")]
+impl App {
+    /// Drei Beispiel-Einträge (läuft, gestoppt, stürzt ab) im Projekt `project`; startet „api-server“ und „migrate“.
+    /// Liefert die Kennung des abstürzenden Eintrags.
+    pub(super) fn shot_procs_demo(&mut self, ctx: &egui::Context, project: u64) -> u64 {
+        let lang = self.settings.language;
+        let mut api = ProcDef::new(1, "api-server", "Write-Output 'Listening on http://localhost:8080'; Write-Output 'ERROR cache warm-up failed, retrying in 5 s'; $i = 0; while ($true) { $i++; Write-Output \"GET /api/orders/$i 200 12ms\"; Start-Sleep -Milliseconds 700 }");
+        api.project = project;
+        api.group = "shop".into();
+        let mut worker = ProcDef::new(2, "worker", "npm run worker");
+        worker.project = project;
+        worker.group = "shop".into();
+        worker.order = 1;
+        let mut migrate = ProcDef::new(3, "migrate", if lang == Lang::De {
+            "Write-Output 'Wende Migration 0042_orders_v2 an …'; Write-Output 'Tabelle orders_v2: 12 Spalten'; Write-Output 'ERROR: relation \"orders_v2\" already exists'; exit 1"
+        } else {
+            "Write-Output 'Applying migration 0042_orders_v2 …'; Write-Output 'table orders_v2: 12 columns'; Write-Output 'ERROR: relation \"orders_v2\" already exists'; exit 1"
+        });
+        migrate.project = project;
+        self.procs.defs = vec![api, worker, migrate];
+        self.procs_save();
+        self.proc_cmd(ctx, Cmd::Start(1));
+        self.proc_cmd(ctx, Cmd::Start(3));
+        3
+    }
+
+    /// Dialog „Neuer Prozess“ mit allen Feldern ausgefüllt.
+    pub(super) fn shot_proc_editor(&mut self, project: u64) {
+        self.procs.editor = Some(Editor {
+            id: None,
+            name: "web".into(),
+            command: "npm run dev -- --port 5173".into(),
+            cwd: self.dir.parent().map(|p| p.join("acme-shop").to_string_lossy().to_string()).unwrap_or_default(),
+            shell: "powershell".into(),
+            project,
+            group: "shop".into(),
+            order: 2,
+            autostart: Autostart::Project,
+            log_file: true,
+            env: vec![EnvRow { name: "NODE_ENV".into(), value: "development".into(), stored: None }],
+            error: None,
+            confirm_delete: false,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

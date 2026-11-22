@@ -518,7 +518,7 @@ mod tests {
                 assert_eq!(built.tickets, data::tickets().len());
                 let n: i64 = c.query_row("SELECT COUNT(*) FROM tickets", [], |r| r.get(0)).unwrap();
                 assert_eq!(n as usize, built.tickets, "{lang:?} {today}");
-                // tools/readme-shots.ps1 öffnet dieses Ticket im Seitenpanel
+                // tools/docs-shots.ps1 öffnet dieses Ticket im Seitenpanel
                 assert_eq!(built.keys.get("e").map(String::as_str), Some("SHOP-23"));
                 // „heute“ liegt im aktiven Sprint, der Burndown hat Verlauf
                 let s = crate::planning::sprints::sprint::get_sprint(&c, built.s12_id).unwrap();
@@ -534,6 +534,22 @@ mod tests {
                 let totals = sprint_totals(&c, built.s12_id).unwrap();
                 assert!(totals.total.tickets >= 10);
             }
+        }
+    }
+
+    /// Die Wartungs-Bilder (`maint-fix`, `maint-duplicate`, tools/docs-shots.ps1) brauchen Befunde in den Demo-Daten:
+    /// mindestens einen mit „Als Won't Do schließen“ und ein mögliches Duplikat.
+    #[test]
+    fn demo_data_has_maintenance_findings_for_the_shots() {
+        use crate::planning::maintenance::{run_report, Check, Fix, RunOpts};
+        for lang in [Lang::En, Lang::De] {
+            let today = day(2026, 11, 12);
+            let (c, built) = mem(lang, today);
+            let now = today.and_hms_opt(12, 0, 0).unwrap();
+            let r = run_report(&c, built.project_id, &RunOpts::full(now, lang)).unwrap_or_else(|e| panic!("{e:?}"));
+            let checks: Vec<Check> = r.findings.iter().map(|f| f.check).collect();
+            assert!(r.findings.iter().any(|f| f.fixes.contains(&Fix::CloseWontDo)), "{lang:?}: kein Befund mit Won't Do: {checks:?}");
+            assert!(checks.contains(&Check::PossibleDuplicate), "{lang:?}: kein mögliches Duplikat: {checks:?}");
         }
     }
 

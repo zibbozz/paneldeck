@@ -32,7 +32,7 @@ unicode-width = "0.2"
 ignore = "0.4"
 
 [features]
-# Nur für die README-Screenshots (tools/readme-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.
+# Nur für die README- und Doku-Screenshots (tools/docs-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.
 readme-shots = []
 # Nur für den lokalen Ende-zu-Ende-Test des Selbst-Updates: Release-Feed aus einem Ordner (PANELDECK_UPDATE_TEST_FEED, siehe
 # tools/update-feed.sh). Nie im Release (tools/release.sh prüft das).

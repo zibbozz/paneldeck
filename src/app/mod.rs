@@ -4380,7 +4380,7 @@ impl eframe::App for App {
             ctx.set_zoom_factor(self.settings.ui_scale);
         }
         #[cfg(feature = "readme-shots")]
-        self.dev_shot_mode();
+        self.dev_shot_mode(ctx);
         // Tutorial (#143): Ziele des vorigen Bilds verwerfen, Esc für die laufende Tour abfangen.
         self.tut_begin(ctx);
         self.track_focus(ctx);
