@@ -289,7 +289,8 @@ fn deleted_and_changed_files_show_info_bars() {
     assert_eq!(ed.docs[&id].text().as_deref(), Some("one\ntwo\n"));
     // Mit eigenen Änderungen: Hinweisleiste
     ed.docs.get_mut(&id).unwrap().apply_agent_edit(vec![(0..0, "x".into())], lang).unwrap();
-    std::fs::write(&p, "changed\n").unwrap();
+    // andere Größe als "one\ntwo\n": auf schnellen Rechnern kann die Änderungszeit gleich bleiben
+    std::fs::write(&p, "changed on disk\n").unwrap();
     assert!(matches!(ed.docs.get_mut(&id).unwrap().disk_changed(&prefs, lang), doc::DiskReaction::Asked));
     assert!(ed.docs[&id].disk_conflict);
     assert!(!ed.docs[&id].disk_diff(lang).is_empty());
