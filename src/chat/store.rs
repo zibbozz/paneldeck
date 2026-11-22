@@ -120,6 +120,13 @@ pub struct SummaryInfo {
     pub files: Vec<TouchedFile>,
     /// Die Zusammenfassung, wie das Modell sie schrieb (ohne Dateien, To-dos und Plan; Stoff der nächsten Kompaktierung).
     pub text: String,
+    /// So viele der ältesten Nachrichten passten nicht mehr in die Anfrage der Zusammenfassung (fehlt bei 0).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Eine berührte Datei: gelesen oder geändert (bearbeitet, geschrieben, verschoben, gelöscht).
@@ -649,11 +656,11 @@ mod tests {
         let mut b = ChatMsg::new(Role::Assistant, "old answer");
         b.compacted = true;
         let mut s = ChatMsg::new(Role::System, "[Summary …] The user asked X.");
-        s.summary = Some(SummaryInfo { messages: 2, files: vec![TouchedFile { path: "src/a.rs".into(), changed: true }, TouchedFile { path: "b.md".into(), changed: false }], text: "The user asked X.".into() });
+        s.summary = Some(SummaryInfo { messages: 2, files: vec![TouchedFile { path: "src/a.rs".into(), changed: true }, TouchedFile { path: "b.md".into(), changed: false }], text: "The user asked X.".into(), omitted: 3 });
         let file = ChatFile { messages: vec![a, b, s, ChatMsg::new(Role::User, "new question")], ..ChatFile::default() };
         let text = String::from_utf8(serialize_capped(&file, 100_000)).unwrap();
         assert!(text.contains(r#""content":"old question","ts":"#) && text.contains(r#""compacted":true"#), "{text}");
-        assert!(text.contains(r#""summary":{"messages":2,"files":[{"path":"src/a.rs","changed":true},{"path":"b.md"}],"text":"The user asked X."}"#), "{text}");
+        assert!(text.contains(r#""summary":{"messages":2,"files":[{"path":"src/a.rs","changed":true},{"path":"b.md"}],"text":"The user asked X.","omitted":3}"#), "{text}");
         let (back, _) = parse(&text).unwrap();
         assert_eq!(back, file);
         let d = tmp("compact");
@@ -667,7 +674,7 @@ mod tests {
         assert!(!f.messages[0].compacted && f.messages[1].summary.is_none());
         assert_eq!(f.messages[2].summary, None, "messages kein Zahl: ganze Angabe unlesbar");
         let (f, _) = parse(r#"{"messages":[{"role":"system","content":"t","summary":{"files":[1,{"path":""},{"path":"ok.rs"}],"future":true}}]}"#).unwrap();
-        assert_eq!(f.messages[0].summary, Some(SummaryInfo { messages: 0, files: vec![TouchedFile { path: "ok.rs".into(), changed: false }], text: String::new() }));
+        assert_eq!(f.messages[0].summary, Some(SummaryInfo { messages: 0, files: vec![TouchedFile { path: "ok.rs".into(), changed: false }], text: String::new(), omitted: 0 }));
         // Kompaktiert, aber keine Zusammenfassung dahinter (z. B. von Hand gelöscht): wieder normal, damit nichts verloren geht.
         let (f, _) = parse(r#"{"messages":[{"role":"user","content":"a","compacted":true},{"role":"assistant","content":"b","compacted":true}]}"#).unwrap();
         assert!(f.messages.iter().all(|m| !m.compacted));

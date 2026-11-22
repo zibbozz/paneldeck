@@ -188,7 +188,8 @@ fn messages(ui: &mut Ui, session: u64, chat: &mut ChatState, model: &str, lang: 
     let rev = chat.rev();
     let from = std::mem::replace(&mut chat.changed_from, usize::MAX);
     let pending = chat.calls.iter().map(|p| (p.call.id.clone(), p.state)).collect();
-    let paused = chat.paused.then(|| (chat.steps, chat.pause_note.clone(), chat.loop_stop));
+    // Während einer Zusammenfassung (#359) kein „Weiter“: die Runde geht erst danach weiter.
+    let paused = (chat.paused && !chat.compact.running()).then(|| (chat.steps, chat.pause_note.clone(), chat.loop_stop));
     let level_question = chat.level_question.is_some();
     let target = chat.approval_target.clone();
     let preview = chat.approval_preview.clone().filter(|(id, _)| pending_has(&chat.calls, id));
@@ -465,6 +466,14 @@ fn summary_card(ui: &mut Ui, i: usize, m: &ChatMsg, cache: &mut UiCache, rc: &Ro
                 }
             }
         });
+        let omitted = m.summary.as_ref().map_or(0, |s| s.omitted);
+        if omitted > 0 {
+            let text = match lang {
+                Lang::De => format!("{omitted} der ältesten Nachrichten passten nicht mehr in die Anfrage und fehlen in der Zusammenfassung."),
+                Lang::En => format!("{omitted} of the oldest messages no longer fitted into the request and are missing from the summary."),
+            };
+            ui.label(RichText::new(format!("⚠ {text}")).small().color(crate::style::ui().warning));
+        }
         ui.label(RichText::new(lang.t("Das sieht das Modell statt der älteren Nachrichten:", "The model sees this instead of the older messages:")).small().color(style::dim(ui)));
         let doc = cache.md.entry(i).or_insert_with(|| markdown::parse_plain(&m.content));
         let opts = RenderOpts { soft_breaks_as_newlines: true, copy_button: Some(lang.t("Kopieren", "Copy")) };

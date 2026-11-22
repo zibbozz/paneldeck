@@ -278,7 +278,7 @@ impl App {
             "You want an order to be cancellable only once. `cancel_order` in `src/orders.rs` now returns `false` when it is already cancelled; `cargo test` passes. Still open: a test for cancelling twice.",
         );
         let mut summary = msg(chatmod::Role::System, &compact::summary_content(text, &files, &todos, None));
-        summary.summary = Some(SummaryInfo { messages: 6, files, text: text.into() });
+        summary.summary = Some(SummaryInfo { messages: 6, files, text: text.into(), omitted: 0 });
         let messages = vec![
             old(chatmod::Role::User, lang.t("Wie storniere ich eine Bestellung?", "How do I cancel an order?")),
             call,

@@ -1673,6 +1673,24 @@ impl App {
         if c.awaiting_level_choice() {
             return Err(level_question());
         }
+        // `/compact` (#359): kompaktiert statt zu senden – eigenes Ergebnis, kein Hinweis „Von Agent gesendet“.
+        if chatmod::compact::is_command(text) {
+            return match self.chat_send(ctx, id, Some(text), super::ChatSendOrigin::Agent { caller, note: None }) {
+                super::ChatSendResult::Sent => {
+                    ctx.request_repaint();
+                    let c = self.entries.get(&id).and_then(|e| e.chat.as_ref());
+                    if c.is_some_and(|c| c.compact.running()) {
+                        Ok(json!({"ok": true, "session": id, "compacting": true, "index": null, "note": tr("Der Chat wird kompaktiert. Warten mit wait_for_status (ready).", "The chat is being compacted. Wait with wait_for_status (ready).")}))
+                    } else {
+                        let why = c.and_then(|c| c.compact.failure.clone()).unwrap_or_default();
+                        Err(er("compact_failed", why))
+                    }
+                }
+                super::ChatSendResult::Busy => Err(er("busy", tr("Im Chat läuft gerade eine Antwort.", "An answer is running in the chat."))),
+                super::ChatSendResult::NotAChat => Err(not_a_chat()),
+                super::ChatSendResult::LevelQuestion | super::ChatSendResult::Empty => Err(er("bad_args", tr("text ist leer", "text is empty"))),
+            };
+        }
         match self.chat_send(ctx, id, Some(text), super::ChatSendOrigin::Agent { caller, note: Some(note.clone()) }) {
             super::ChatSendResult::Sent => {
                 self.mcp_taint_write(caller, id);

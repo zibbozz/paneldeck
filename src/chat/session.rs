@@ -542,9 +542,13 @@ impl ChatState {
     /// Werkzeugaufrufe (auch ein laufender) bekommen das Ergebnis „abgebrochen“; ein schon gestartetes Werkzeug kann im
     /// Hub trotzdem noch zu Ende laufen, sein Ergebnis wird verworfen.
     pub fn stop(&mut self) {
-        // Eine laufende Zusammenfassung (#359) endet ohne Wirkung; eine zurückgehaltene Anfrage läuft nicht mehr.
-        if self.compact.cancel() {
+        // Eine laufende Zusammenfassung (#359) endet ohne Wirkung. Kompaktieren auf Wunsch: nur das – eine angehaltene Runde
+        // bleibt mit ihren Aufrufen stehen. Automatisch vor einer Anfrage: die zurückgehaltene Anfrage fällt mit weg.
+        if let Some(then_turn) = self.compact.cancel() {
             self.touch();
+            if !then_turn {
+                return;
+            }
         }
         if self.streaming() && !self.poll().finished && self.turn.take().is_some() {
             self.drop_empty_answer();
@@ -762,7 +766,8 @@ impl ChatState {
     ///   Hinweis; bei `max_steps = 1` sieht das Modell so die Ablehnung noch einmal).
     /// * Kein Aufruf läuft ohne Platz für sein Ergebnis: dann hält die Runde vorher an.
     pub fn tool_step(&mut self, policy: &ToolPolicy) -> ToolStep {
-        if self.streaming() || self.paused {
+        // Während einer Zusammenfassung (#359) ruht die Schleife (eine wartende Anfrage bleibt vorgemerkt).
+        if self.streaming() || self.paused || self.compact.running() {
             return ToolStep::Idle;
         }
         if std::mem::take(&mut self.text_check) {
@@ -916,7 +921,8 @@ impl ChatState {
     /// Aufrufe nicht mehr (sie bekommen „nicht ausgeführt“); stattdessen geht gleich die nächste Anfrage mit neu
     /// berechnetem Platz los – das Modell entscheidet dann selbst, was es noch braucht.
     pub fn resume(&mut self) -> bool {
-        if !self.paused {
+        // Während einer Zusammenfassung (#359) nicht: die Runde geht erst danach weiter.
+        if !self.paused || self.compact.running() {
             return false;
         }
         if std::mem::take(&mut self.context_pause) {

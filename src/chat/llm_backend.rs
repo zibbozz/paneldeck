@@ -145,6 +145,8 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
     // Aufrufe der letzten gesendeten Antwort, die noch auf ihr Ergebnis warten (Kennung, Name), und deren Index.
     let mut open: Vec<(String, String)> = Vec::new();
     let mut open_at = 0;
+    // Die zuletzt gesendete Nachricht ist eine Zusammenfassung (#359): die nächste Nutzer-Nachricht kommt klar getrennt dazu.
+    let mut after_summary = false;
     let close = |msgs: &mut Vec<ChatMessage>, origin: &mut Vec<usize>, open: &mut Vec<(String, String)>, at: usize| {
         for (id, name) in open.drain(..) {
             let call = llm::ToolCall { id, name, arguments: serde_json::Value::Null };
@@ -175,12 +177,17 @@ pub fn map_history(history: &[ChatMsg]) -> (Vec<ChatMessage>, Vec<usize>) {
             open_at = i;
         }
         if let Some(prev) = msgs.last_mut().filter(|p: &&mut ChatMessage| p.role == Role::User && r == Role::User) {
-            prev.content = format!("{}\n\n{}", prev.content.trim_end(), m.content);
+            prev.content = if std::mem::take(&mut after_summary) {
+                super::compact::with_user_message(&prev.content, &m.content)
+            } else {
+                format!("{}\n\n{}", prev.content.trim_end(), m.content)
+            };
             continue;
         }
+        after_summary = summary;
         msgs.push(ChatMessage {
             role: r,
-            content: m.content.clone(),
+            content: if summary { super::compact::summary_block(&m.content) } else { m.content.clone() },
             tool_calls: m.tool_calls.iter().map(|c| llm::ToolCall { id: c.id.clone(), name: c.name.clone(), arguments: c.arguments.clone() }).collect(),
             tool_call_id: m.tool_call_id.clone(),
             tool_name: m.tool_name.clone(),
@@ -293,11 +300,26 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     }
     .map(str::to_string);
     let history_budget = budget.saturating_sub(tool_tokens).saturating_sub(sys_tokens);
-    let start = llm::tokens::trim_to_budget(&messages, budget.saturating_sub(tool_tokens));
+    let mut start = llm::tokens::trim_to_budget(&messages, budget.saturating_sub(tool_tokens));
     let first = llm::tokens::first_turn(&messages);
+    // Die Zusammenfassung (#359) bleibt wie der Systemprompt: fällt ihre Runde der Kürzung zum Opfer, kommt sie vor die
+    // erste behaltene Nachricht (die Kürzung macht dafür Platz).
+    let pinned = (start > first)
+        .then(|| origin.first().and_then(|&i| history.get(i)).filter(|m| m.summary.is_some() && !m.compacted))
+        .flatten()
+        .map(|m| super::compact::summary_block(&m.content));
+    if let Some(block) = &pinned {
+        let extra = llm::tokens::estimate_tokens(block) + 16;
+        start = start.max(llm::tokens::trim_to_budget(&messages, budget.saturating_sub(tool_tokens).saturating_sub(extra)));
+    }
     // Index in `messages` → Index im Verlauf (die Systemnachricht steht nicht im Verlauf).
     let context_start = (start > first).then(|| origin.get(start - first).copied()).flatten();
-    let messages = llm::tokens::visible(&messages, start);
+    let mut messages = llm::tokens::visible(&messages, start);
+    if let Some(block) = pinned {
+        if let Some(m) = messages.get_mut(first).filter(|m| m.role == Role::User) {
+            m.content = super::compact::with_user_message(&block, &m.content);
+        }
+    }
     let prompt_estimate = messages.iter().map(llm::tokens::message_tokens).sum::<usize>() + tool_tokens;
     let ollama = server.kind == llm::ServerKind::Ollama;
     let num_ctx = ollama.then_some(ctx_len);
@@ -664,6 +686,43 @@ mod tests {
         assert_eq!((p.request.messages[0].role, p.request.messages[1].content.as_str()), (Role::System, "last"));
         // Genug Platz: nichts gekürzt.
         assert_eq!(run(1_000_000).context_start, None);
+    }
+
+    /// #359: Die Zusammenfassung bleibt wie der Systemprompt – fällt die Runde, in der sie steht, der Kürzung zum Opfer,
+    /// kommt sie (in `<summary>` gefasst) vor die erste behaltene Nachricht. Originale gehen nie mit.
+    #[test]
+    fn the_summary_stays_when_older_kept_rounds_are_trimmed() {
+        let long = "y".repeat(3000);
+        let mut old = msg(store::Role::User, "old question");
+        old.compacted = true;
+        let mut sum = msg(store::Role::System, "[Notes …] The user wants X.");
+        sum.summary = Some(store::SummaryInfo { messages: 1, text: "The user wants X.".into(), ..Default::default() });
+        let hist = vec![old, sum, msg(store::Role::User, &long), msg(store::Role::Assistant, &long), msg(store::Role::User, "last")];
+        let off = LlmModel { level: McpLevel::Off, ..LlmModel::named("m1") };
+        let run = |ctx: u32| {
+            let mut s = server("http://localhost:11434", ServerKind::Ollama);
+            s.set_model_cfg(LlmModel { context_length: Some(ctx), ..off.clone() });
+            let mut c = cx(vec![s]);
+            c.project.clear();
+            c.folder.clear();
+            prepare(&meta(), &hist, &c).unwrap()
+        };
+        let compact = system_prompt_variant(&ToolPolicy::new(off.clone(), None, false), "m1", &TurnContext::default(), Variant::Compact);
+        let sys = llm::tokens::message_tokens(&ChatMessage::new(Role::System, compact));
+        let block = super::super::compact::summary_block("[Notes …] The user wants X.");
+        let room = sys + llm::tokens::estimate_tokens(&block) + 200;
+        // Platz für Systemprompt, Zusammenfassung und „last“, nicht für die lange Runde.
+        let p = run((room * 100).div_ceil(75) as u32);
+        assert_eq!(p.context_start, Some(4));
+        let m = &p.request.messages;
+        assert_eq!(m.len(), 2, "{m:#?}");
+        assert!(m[1].content.starts_with("<summary>\n[Notes …] The user wants X.\n</summary>") && m[1].content.ends_with("The user's message:\nlast"), "{}", m[1].content);
+        assert!(!m.iter().any(|m| m.content.contains("old question") || m.content.contains(&long)));
+        // Genug Platz: die Zusammenfassung steht vor der ersten behaltenen Frage.
+        let p = run(1_000_000);
+        assert_eq!(p.context_start, None);
+        assert!(p.request.messages[1].content.starts_with("<summary>") && p.request.messages[1].content.ends_with(&format!("The user's message:\n{long}")));
+        assert!(!p.request.messages.iter().any(|m| m.content.contains("old question")));
     }
 
     #[test]
