@@ -97,30 +97,61 @@ pub(super) fn open_image(ctx: &egui::Context, session: u64) -> Option<u32> {
     ctx.data(|d| d.get_temp::<u32>(popup_id(session)))
 }
 
-/// Popup schließen (auch die Textur fällt weg).
+/// Popup schließen (die Texturen bleiben im kleinen Zwischenspeicher des Chats).
 pub(super) fn close(ctx: &egui::Context, session: u64) {
-    ctx.data_mut(|d| {
-        d.remove::<u32>(popup_id(session));
-        d.remove::<(u32, Result<egui::TextureHandle, String>)>(texture_id(session));
-    });
+    ctx.data_mut(|d| d.remove::<u32>(popup_id(session)));
 }
 
-/// Textur des Originals (einmal je geöffnetem Bild geladen).
-fn texture(ctx: &egui::Context, session: u64, n: u32, entry: Option<&ImageEntry>, dir: Option<&Path>, lang: Lang) -> Result<egui::TextureHandle, String> {
-    if let Some((k, t)) = ctx.data(|d| d.get_temp::<(u32, Result<egui::TextureHandle, String>)>(texture_id(session)))
-        && k == n
-    {
-        return t;
-    }
-    let r = match (entry, dir) {
-        (Some(e), Some(dir)) => images::load_view(dir, e).map(|img| {
-            let size = [img.width() as usize, img.height() as usize];
-            ctx.load_texture(format!("chat-image-{session}-{n}"), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR)
-        }),
-        _ => Err(lang.t("Bild nicht gefunden", "Image not found").to_string()),
+/// Ergebnis des Dekodierens im Hintergrund (holt das nächste Bild ab).
+type Slot = Arc<std::sync::Mutex<Option<Result<egui::ColorImage, String>>>>;
+
+/// Zustand eines Bildes im Popup.
+#[derive(Clone)]
+pub(super) enum View {
+    /// Wird im Hintergrund dekodiert („Lädt …“).
+    Loading(Slot),
+    Ready(egui::TextureHandle),
+    Failed(String),
+}
+
+/// So viele Bilder je Chat behält der Zwischenspeicher (zuletzt gezeigte zuerst).
+const CACHE: usize = 4;
+
+/// Zwischenspeicher je Chat: (Nummer, Datei, Zustand).
+#[derive(Clone, Default)]
+struct Cache(Vec<(u32, String, View)>);
+
+/// Bild `n` fürs Popup: aus dem Zwischenspeicher, sonst im Hintergrund dekodieren (der Hauptdurchgang wartet nie auf
+/// die Platte oder das Dekodieren).
+pub(super) fn view(ctx: &egui::Context, session: u64, n: u32, entry: Option<&ImageEntry>, dir: Option<&Path>, lang: Lang) -> View {
+    let (Some(e), Some(dir)) = (entry, dir) else { return View::Failed(lang.t("Bild nicht gefunden", "Image not found").to_string()) };
+    let mut cache = ctx.data(|d| d.get_temp::<Cache>(texture_id(session))).unwrap_or_default();
+    let pos = cache.0.iter().position(|(k, f, _)| *k == n && *f == e.file);
+    let mut v = match pos {
+        Some(i) => cache.0.remove(i).2,
+        None => {
+            let slot: Slot = Arc::new(std::sync::Mutex::new(None));
+            let (s2, c2, d2, e2) = (slot.clone(), ctx.clone(), dir.to_path_buf(), e.clone());
+            std::thread::spawn(move || {
+                let r = images::load_view(&d2, &e2).map(|img| egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()));
+                *s2.lock().unwrap_or_else(|x| x.into_inner()) = Some(r);
+                c2.request_repaint();
+            });
+            View::Loading(slot)
+        }
     };
-    ctx.data_mut(|d| d.insert_temp(texture_id(session), (n, r.clone())));
-    r
+    if let View::Loading(slot) = &v {
+        let done = slot.lock().unwrap_or_else(|x| x.into_inner()).take();
+        match done {
+            Some(Ok(img)) => v = View::Ready(ctx.load_texture(format!("chat-image-{session}-{n}"), img, egui::TextureOptions::LINEAR)),
+            Some(Err(msg)) => v = View::Failed(msg),
+            None => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
+        }
+    }
+    cache.0.insert(0, (n, e.file.clone(), v.clone()));
+    cache.0.truncate(CACHE);
+    ctx.data_mut(|d| d.insert_temp(texture_id(session), cache));
+    v
 }
 
 /// Größe, in der ein Bild `size` in `max` passt (nie größer als das Original).
@@ -151,7 +182,7 @@ pub(super) fn caption(n: u32, e: Option<&ImageEntry>) -> String {
 pub(super) fn popup(ctx: &egui::Context, session: u64, entries: &[ImageEntry], dir: Option<&Path>, lang: Lang) {
     let Some(n) = open_image(ctx, session) else { return };
     let entry = entries.iter().find(|e| e.n == n);
-    let tex = texture(ctx, session, n, entry, dir, lang);
+    let tex = view(ctx, session, n, entry, dir, lang);
     let screen = ctx.content_rect();
     let max = (screen.size() * 0.92 - Vec2::new(24.0, 64.0)).max(Vec2::splat(64.0));
     let r = egui::Modal::new(Id::new(("chat_img_modal", session))).show(ctx, |ui| {
@@ -164,11 +195,17 @@ pub(super) fn popup(ctx: &egui::Context, session: u64, entries: &[ImageEntry], d
         });
         ui.add_space(style::S1);
         match &tex {
-            Ok(t) => {
+            View::Ready(t) => {
                 let size = fit_size(t.size_vec2(), max);
                 ui.add(egui::Image::new((t.id(), size)));
             }
-            Err(e) => {
+            View::Loading(_) => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label(lang.t("Lädt …", "Loading …"));
+                });
+            }
+            View::Failed(e) => {
                 ui.label(RichText::new(e).color(crate::style::ui().error));
             }
         }
@@ -246,13 +283,30 @@ pub(super) fn paste_requested(ui: &Ui) -> bool {
 }
 
 /// Platzhalter `n` an der Cursor-Position des Eingabefelds `id` einfügen (ohne Zustand: am Ende) und den Cursor
-/// dahinter setzen.
+/// dahinter setzen. Eine Auswahl wird ersetzt (wie beim Einfügen von Text).
 pub(super) fn insert_token(ctx: &egui::Context, id: Id, draft: &mut String, n: u32) {
     let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-    let at = state.cursor.char_range().map_or_else(|| draft.chars().count(), |r| r.primary.index.max(r.secondary.index));
-    let after = images::insert_token(draft, at, n);
+    let len = draft.chars().count();
+    let (lo, hi) = state.cursor.char_range().map_or((len, len), |r| (r.primary.index.min(r.secondary.index).min(len), r.primary.index.max(r.secondary.index).min(len)));
+    if hi > lo {
+        let byte = |c: usize| draft.char_indices().nth(c).map_or(draft.len(), |(b, _)| b);
+        let (a, b) = (byte(lo), byte(hi));
+        draft.replace_range(a..b, "");
+    }
+    let after = images::insert_token(draft, lo, n);
     state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(after))));
     state.store(ctx, id);
+}
+
+/// Nach einer Eingabe im Feld `id`: Platzhalter, die nur zum Teil getroffen wurden, fallen ganz weg (siehe
+/// [`images::keep_tokens_whole`]); der Cursor steht dann an der Stelle.
+pub(super) fn keep_tokens_whole(ctx: &egui::Context, id: Id, before: &str, draft: &mut String) {
+    if let Some((text, cursor)) = images::keep_tokens_whole(before, draft) {
+        *draft = text;
+        let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(cursor))));
+        state.store(ctx, id);
+    }
 }
 
 /// Hinweiszeile unter dem Eingabefeld: Bild wird vorbereitet, Fehler beim Einfügen, Modell ohne Bildverständnis.

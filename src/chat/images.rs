@@ -32,7 +32,11 @@ pub const MAX_SEND_BYTES: usize = 5 * 1024 * 1024;
 /// Größte Datei, die eingelesen wird (Datei-Auswahl, Ablegen, `read_file`).
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// Größte Seite eines Bildes, das überhaupt dekodiert wird (Schutz vor riesigen Bildern).
-pub const MAX_DIM: u32 = 20_000;
+pub const MAX_DIM: u32 = 12_000;
+/// Höchstens so viele Pixel je Bild (auch aus der Zwischenablage), sonst wird es abgelehnt.
+pub const MAX_PIXELS: u64 = 50_000_000;
+/// Höchstens so viel Speicher beim Dekodieren eines Bildes.
+pub const MAX_ALLOC: u64 = 512 << 20;
 /// Größte Seite des Bildes im Popup (Textur der Grafikkarte).
 pub const MAX_VIEW_SIDE: u32 = 4096;
 /// Dateiendungen, die als Bild gelten.
@@ -82,6 +86,18 @@ pub struct ImageEntry {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
     pub source: Source,
+    /// Nur `read_file`: Pfad im Projektordner, Änderungszeit (Sekunden) und Größe der gelesenen Datei – liest das
+    /// Modell dieselbe unveränderte Datei noch einmal, wird das Bild nicht erneut abgelegt.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub source_path: String,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub source_mtime: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub source_size: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl ImageEntry {
@@ -90,9 +106,9 @@ impl ImageEntry {
         self.send.as_deref().unwrap_or(&self.file)
     }
 
-    /// Ist der Eintrag brauchbar (Nummer, sichere Dateinamen)? Unbrauchbare fallen beim Laden weg.
+    /// Ist der Eintrag brauchbar (Nummer, sichere Dateinamen, PNG/JPEG)? Unbrauchbare fallen beim Laden weg.
     pub fn valid(&self) -> bool {
-        self.n > 0 && safe_name(&self.file) && self.send.as_deref().is_none_or(safe_name) && !self.mime.is_empty()
+        self.n > 0 && safe_name(&self.file) && self.send.as_deref().is_none_or(safe_name) && matches!(self.mime.as_str(), "image/png" | "image/jpeg")
     }
 }
 
@@ -109,11 +125,25 @@ pub fn lenient_entries<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Ima
     Ok(out)
 }
 
-/// Dateiname im Bilderordner ohne Pfadanteile (kein `..`, kein Trenner, kein Laufwerk): nur Buchstaben, Ziffern, `.`,
-/// `-`, `_`, nicht mit `.` beginnend, höchstens 64 Zeichen. Eine manipulierte Verlaufsdatei kann so keine fremde Datei
-/// ins Popup holen oder an das Modell schicken.
+/// Dateiname im Bilderordner, genau wie Paneldeck ihn anlegt: `<n>.png`, `<n>.jpg`, `<n>.send.png`, `<n>.send.jpg`
+/// (n = Ziffern, höchstens 10). Eine manipulierte Verlaufsdatei kann so keine fremde Datei ins Popup holen oder an das
+/// Modell schicken.
 pub fn safe_name(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 64 && !s.starts_with('.') && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    let Some(stem) = s.strip_suffix(".png").or_else(|| s.strip_suffix(".jpg")) else { return false };
+    let digits = stem.strip_suffix(".send").unwrap_or(stem);
+    !digits.is_empty() && digits.len() <= 10 && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Eine echte Datei (kein Link, kein Ordner)? Bilder des Chats werden nur so gelesen.
+fn regular_file(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// Nur ein Bild zur Zeit dekodieren und kodieren (mehrere große Fotos auf einmal könnten sonst den Speicher sprengen).
+fn one_at_a_time<T>(f: impl FnOnce() -> T) -> T {
+    static WORK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = WORK.lock().unwrap_or_else(|e| e.into_inner());
+    f()
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -177,6 +207,54 @@ pub fn insert_token(text: &mut String, at: usize, n: u32) -> usize {
     }
     text.insert_str(byte, &ins);
     at + ins.chars().count()
+}
+
+/// Platzhalter bleiben im Eingabefeld ganz (#357): Hat eine Änderung von `before` zu `after` einen Platzhalter nur zum
+/// Teil getroffen (Rücktaste mitten in `[Image#12]`, Tippen darin), fällt der ganze Platzhalter weg – so wird aus
+/// `[Image#12]` nie still `[Image#1]`. Rückgabe: der berichtigte Text und die Cursor-Position (Zeichen) dahinter;
+/// `None`, wenn nichts zu tun ist.
+pub fn keep_tokens_whole(before: &str, after: &str) -> Option<(String, usize)> {
+    if before == after {
+        return None;
+    }
+    // Gemeinsamer Anfang und gemeinsames Ende (an Zeichengrenzen).
+    let mut p = before.bytes().zip(after.bytes()).take_while(|(a, b)| a == b).count();
+    while !before.is_char_boundary(p) || !after.is_char_boundary(p) {
+        p -= 1;
+    }
+    let max_q = before.len().min(after.len()) - p;
+    let mut q = before.bytes().rev().zip(after.bytes().rev()).take(max_q).take_while(|(a, b)| a == b).count();
+    while !before.is_char_boundary(before.len() - q) || !after.is_char_boundary(after.len() - q) {
+        q -= 1;
+    }
+    let (a, b) = (p, before.len() - q);
+    let inserted = &after[p..after.len() - q];
+    let mut lo = a;
+    let mut hi = b;
+    let mut hit = false;
+    for (s, e, _) in tokens(before) {
+        let partial = if a == b { s < a && a < e } else { a < e && b > s && !(a <= s && b >= e) };
+        if partial {
+            hit = true;
+            lo = lo.min(s);
+            hi = hi.max(e);
+        }
+    }
+    if !hit {
+        return None;
+    }
+    let mut out = String::with_capacity(before.len());
+    out.push_str(&before[..lo]);
+    out.push_str(inserted);
+    out.push_str(&before[hi..]);
+    // Ein Platzhalter, der vorher da war und nach der Änderung noch ganz dasteht, bleibt (die Zerlegung in Anfang und
+    // Ende kann eine Löschung falsch zuordnen, z. B. wenn ein ganzer Platzhalter neben einem gleichen wegfällt).
+    let count = |s: &str, n: u32| tokens(s).iter().filter(|t| t.2 == n).count();
+    if tokens(after).iter().any(|t| count(&out, t.2) < count(after, t.2).min(count(before, t.2))) {
+        return None;
+    }
+    let cursor = before[..lo].chars().count() + inserted.chars().count();
+    Some((out, cursor))
 }
 
 /// Platzhalter `n` aus dem Text entfernen (samt eines Leerzeichens dahinter), z. B. wenn das Bild nicht gelesen werden
@@ -250,17 +328,46 @@ fn t(de: &'static str, en: &'static str) -> &'static str {
     crate::state::t(de, en)
 }
 
-/// Bild dekodieren (PNG, JPEG, BMP; mit Grenzen für Größe und Speicher).
-fn decode(bytes: &[u8]) -> Result<(image::DynamicImage, image::ImageFormat), String> {
+/// Fehlertext für ein zu großes Bild.
+fn too_big() -> String {
+    match crate::state::lang() {
+        Lang::De => format!("Bild ist zu groß (höchstens {MAX_DIM} Pixel je Seite und {} Megapixel)", MAX_PIXELS / 1_000_000),
+        Lang::En => format!("Image is too large (at most {MAX_DIM} pixels per side and {} megapixels)", MAX_PIXELS / 1_000_000),
+    }
+}
+
+/// Passt die Größe (Seiten, Pixel)?
+fn size_ok(w: u32, h: u32) -> bool {
+    w <= MAX_DIM && h <= MAX_DIM && (w as u64) * (h as u64) <= MAX_PIXELS
+}
+
+/// Bild dekodieren (PNG, JPEG, BMP; mit Grenzen für Größe und Speicher). Die EXIF-Ausrichtung wird angewandt; `true`
+/// im Ergebnis heißt, das Bild wurde dabei gedreht oder gespiegelt.
+fn decode(bytes: &[u8]) -> Result<(image::DynamicImage, image::ImageFormat, bool), String> {
+    use image::ImageDecoder;
     let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
     let fmt = r.format().filter(|f| matches!(f, image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::Bmp)).ok_or_else(|| t("Kein unterstütztes Bild (PNG, JPEG oder BMP)", "Not a supported image (PNG, JPEG or BMP)").to_string())?;
     let mut lim = image::Limits::default();
     lim.max_image_width = Some(MAX_DIM);
     lim.max_image_height = Some(MAX_DIM);
-    lim.max_alloc = Some(1 << 30);
+    lim.max_alloc = Some(MAX_ALLOC);
     r.limits(lim);
-    let img = r.decode().map_err(|e| format!("{}: {e}", t("Bild nicht lesbar", "Image could not be read")))?;
-    Ok((img, fmt))
+    let unreadable = |e: image::ImageError| match e {
+        image::ImageError::Limits(_) => too_big(),
+        e => format!("{}: {e}", t("Bild nicht lesbar", "Image could not be read")),
+    };
+    let mut dec = r.into_decoder().map_err(unreadable)?;
+    let (w, h) = dec.dimensions();
+    if !size_ok(w, h) {
+        return Err(too_big());
+    }
+    let orientation = dec.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(dec).map_err(unreadable)?;
+    let turned = orientation != image::metadata::Orientation::NoTransforms;
+    if turned {
+        img.apply_orientation(orientation);
+    }
+    Ok((img, fmt, turned))
 }
 
 fn encode_png(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
@@ -324,40 +431,57 @@ fn encode_within(mut img: image::DynamicImage, prefer_jpeg: bool) -> Result<(Vec
     }
 }
 
-/// Fassung für das Modell: `None`, wenn das Original klein genug ist (Seite ≤ [`MAX_SIDE`], ≤ [`MAX_SEND_BYTES`]) und
-/// PNG/JPEG ist.
 /// Fassung für das Modell (Bytes und Endung; `None` = das Original), Medientyp, Breite, Höhe.
 type SendVersion = (Option<(Vec<u8>, &'static str)>, &'static str, u32, u32);
 
-fn send_version(img: &image::DynamicImage, original: &[u8], ext: &'static str) -> Result<SendVersion, String> {
+/// Fassung für das Modell: `None`, wenn das Original klein genug ist (Seite ≤ [`MAX_SIDE`], ≤ [`MAX_SEND_BYTES`]), PNG/JPEG
+/// ist und nicht erst gedreht werden musste (`turned`). Sehr große Bilder werden zuerst grob (schnell) verkleinert.
+fn send_version(img: &image::DynamicImage, original: &[u8], ext: &'static str, turned: bool) -> Result<SendVersion, String> {
     let (w, h) = (img.width(), img.height());
-    if w.max(h) <= MAX_SIDE && original.len() <= MAX_SEND_BYTES {
+    if w.max(h) <= MAX_SIDE && original.len() <= MAX_SEND_BYTES && !turned {
         return Ok((None, mime_of(ext), w, h));
     }
     let (nw, nh) = fit(w, h, MAX_SIDE);
-    let scaled = if (nw, nh) == (w, h) { img.clone() } else { img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3) };
+    let scaled = if (nw, nh) == (w, h) {
+        img.clone()
+    } else {
+        let rough = if w.max(h) > 2 * MAX_SIDE { std::borrow::Cow::Owned(img.thumbnail(2 * MAX_SIDE, 2 * MAX_SIDE)) } else { std::borrow::Cow::Borrowed(img) };
+        rough.resize_exact(nw, nh, image::imageops::FilterType::Triangle)
+    };
     let (bytes, e, sw, sh) = encode_within(scaled, ext == "jpg")?;
     Ok((Some((bytes, e)), mime_of(e), sw, sh))
 }
 
 /// Bilddatei (Bytes) aufbereiten. PNG und JPEG bleiben als Original erhalten, BMP wird verlustfrei zu PNG.
 pub fn process_bytes(bytes: Vec<u8>) -> Result<Processed, String> {
-    let (img, fmt) = decode(&bytes)?;
-    let (original, ext) = match fmt {
-        image::ImageFormat::Png => (bytes, "png"),
-        image::ImageFormat::Jpeg => (bytes, "jpg"),
-        _ => (encode_png(&img)?, "png"),
-    };
-    let (send, mime, send_width, send_height) = send_version(&img, &original, ext)?;
-    Ok(Processed { width: img.width(), height: img.height(), original, original_ext: ext, send, mime, send_width, send_height })
+    one_at_a_time(|| {
+        let (img, fmt, turned) = decode(&bytes)?;
+        let (original, ext) = match fmt {
+            image::ImageFormat::Png => (bytes, "png"),
+            image::ImageFormat::Jpeg => (bytes, "jpg"),
+            _ => (encode_png(&img)?, "png"),
+        };
+        let (send, mime, send_width, send_height) = send_version(&img, &original, ext, turned)?;
+        Ok(Processed { width: img.width(), height: img.height(), original, original_ext: ext, send, mime, send_width, send_height })
+    })
 }
 
-/// Bild aus der Zwischenablage aufbereiten (Original als PNG).
+/// Bild aus der Zwischenablage aufbereiten (Original als PNG); zu große Bilder werden abgelehnt.
 pub fn process_rgba(rgba: image::RgbaImage) -> Result<Processed, String> {
-    let img = image::DynamicImage::ImageRgba8(rgba);
-    let original = encode_png(&img)?;
-    let (send, mime, send_width, send_height) = send_version(&img, &original, "png")?;
-    Ok(Processed { width: img.width(), height: img.height(), original, original_ext: "png", send, mime, send_width, send_height })
+    if !size_ok(rgba.width(), rgba.height()) {
+        return Err(too_big());
+    }
+    one_at_a_time(|| {
+        let img = image::DynamicImage::ImageRgba8(rgba);
+        let original = encode_png(&img)?;
+        let (send, mime, send_width, send_height) = send_version(&img, &original, "png", false)?;
+        Ok(Processed { width: img.width(), height: img.height(), original, original_ext: "png", send, mime, send_width, send_height })
+    })
+}
+
+/// Passt ein Bild aus der Zwischenablage (Breite, Höhe)? Sonst der Fehlertext.
+pub fn check_size(w: u32, h: u32) -> Result<(), String> {
+    if size_ok(w, h) { Ok(()) } else { Err(too_big()) }
 }
 
 /// Aufbereitetes Bild als Nummer `n` im Bilderordner ablegen.
@@ -374,7 +498,16 @@ pub fn store(dir: &Path, n: u32, p: Processed, name: &str, source: Source) -> Re
         None => None,
     };
     let name: String = name.chars().filter(|c| !c.is_control()).take(200).collect();
-    Ok(ImageEntry { n, file, send, mime: p.mime.into(), width: p.width, height: p.height, send_width: p.send_width, send_height: p.send_height, name, source })
+    Ok(ImageEntry { n, file, send, mime: p.mime.into(), width: p.width, height: p.height, send_width: p.send_width, send_height: p.send_height, name, source, ..Default::default() })
+}
+
+/// Dateien eines Eintrags löschen (Bild verworfen, z. B. kein Platz im Kontext oder der Chat ist schon zu).
+pub fn remove_files(dir: &Path, e: &ImageEntry) {
+    for f in std::iter::once(e.file.as_str()).chain(e.send.as_deref()) {
+        if let Some(p) = path_of(dir, f) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// Bild aus der Zwischenablage als Nummer `n` ablegen.
@@ -407,11 +540,14 @@ pub fn import_file(dir: &Path, n: u32, path: &Path) -> Result<ImageEntry, String
 
 /// Original zum Anzeigen dekodieren (für das Popup, höchstens [`MAX_VIEW_SIDE`] je Seite).
 pub fn load_view(dir: &Path, e: &ImageEntry) -> Result<image::RgbaImage, String> {
-    let p = path_of(dir, &e.file).ok_or_else(|| t("Ungültiger Dateiname", "Invalid file name").to_string())?;
-    let (img, _) = decode(&read_limited(&p)?)?;
-    let (w, h) = fit(img.width(), img.height(), MAX_VIEW_SIDE);
-    let img = if (w, h) == (img.width(), img.height()) { img } else { img.resize_exact(w, h, image::imageops::FilterType::Triangle) };
-    Ok(img.to_rgba8())
+    let p = path_of(dir, &e.file).filter(|p| regular_file(p)).ok_or_else(|| t("Bild nicht gefunden", "Image not found").to_string())?;
+    let bytes = read_limited(&p)?;
+    one_at_a_time(|| {
+        let (img, _, _) = decode(&bytes)?;
+        let (w, h) = fit(img.width(), img.height(), MAX_VIEW_SIDE);
+        let img = if (w, h) == (img.width(), img.height()) { img } else { img.thumbnail(w, h) };
+        Ok(img.to_rgba8())
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -420,6 +556,11 @@ pub fn load_view(dir: &Path, e: &ImageEntry) -> Result<image::RgbaImage, String>
 /// Geschätzte Tokens eines Bildes im Kontext: je 28 × 28 Pixel ein Token (wie Qwen-VL), mindestens 256, höchstens 4096.
 pub fn tokens_for(w: u32, h: u32) -> usize {
     (w.div_ceil(28) as usize * h.div_ceil(28) as usize).clamp(256, 4096)
+}
+
+/// Geschätzte Tokens der Bilder `nums` (Einträge aus `entries`; unbekannte zählen nicht).
+pub fn image_tokens(nums: &[u32], entries: &[ImageEntry]) -> usize {
+    nums.iter().filter_map(|n| entries.iter().find(|e| e.n == *n)).map(|e| tokens_for(e.send_width.max(1), e.send_height.max(1))).sum()
 }
 
 /// Bild als Teil einer Nachricht; die Daten liest erst [`load_parts`] (im Hintergrund, kurz vor dem Senden).
@@ -436,7 +577,7 @@ pub fn load_parts(messages: &mut [ChatMessage]) -> usize {
             if !p.data.is_empty() {
                 return true;
             }
-            let bytes = p.path.as_deref().and_then(|path| std::fs::read(path).ok()).filter(|b| !b.is_empty() && b.len() <= MAX_SEND_BYTES * 2);
+            let bytes = p.path.as_deref().filter(|path| regular_file(path)).and_then(|path| std::fs::read(path).ok()).filter(|b| !b.is_empty() && b.len() <= MAX_SEND_BYTES * 2);
             match bytes {
                 Some(b) => {
                     p.data = crate::mcp::base64(&b);
@@ -459,18 +600,31 @@ pub struct TurnImages {
     pub entries: Vec<ImageEntry>,
 }
 
-/// Hat der Server ein Bild abgelehnt? Nur sinnvoll, wenn die Anfrage Bilder enthielt. Erkannt an der Meldung (Bild,
-/// Vision, multimodal, mmproj …) oder am Status 415; andere Fehler (Verbindung, Schlüssel, 404) zählen nicht.
+/// Hat der Server Bilder grundsätzlich abgelehnt (das Modell kann keine lesen)? Nur sinnvoll, wenn die Anfrage Bilder
+/// enthielt. Status 415, „mmproj“ (llama.cpp ohne Bild-Projektor) oder eine Meldung, dass Bilder/Multimodal nicht
+/// unterstützt werden („not supported“, „does not support images“, „not a multimodal model“, „missing data required for
+/// image input“). Andere Fehler – auch Probleme mit einem einzelnen Bild („failed to process image“) – zählen nicht.
 pub fn is_rejection(e: &LlmError) -> bool {
     let text = match e {
         LlmError::Status { code: 415, .. } => return true,
         LlmError::Status { code: 400 | 422 | 500 | 501, body } => body,
         LlmError::Server(m) => m,
-        LlmError::BadResponse(m) => m,
         _ => return false,
     };
     let t = text.to_ascii_lowercase();
-    ["image", "vision", "multimodal", "multi-modal", "mmproj", "image_url"].iter().any(|k| t.contains(k))
+    const PHRASES: &[&str] = &["mmproj", "not a multimodal model", "missing data required for image", "vision add-on", "does not support vision", "vision is not supported", "vision not supported"];
+    if PHRASES.iter().any(|k| t.contains(k)) {
+        return true;
+    }
+    // „not support…“ mit „image“/„multimodal“ kurz davor oder danach („does not support images“, „image input is not
+    // supported“). „vision“ zählt hier nicht: es steht oft im Modellnamen („llama3.2-vision: tools are not supported“).
+    let near = |at: usize| {
+        let lo = t[..at].char_indices().rev().nth(40).map_or(0, |(i, _)| i);
+        let hi = t[at..].char_indices().nth(40).map_or(t.len(), |(i, _)| at + i);
+        let w = &t[lo..hi];
+        w.contains("image") || w.contains("multimodal") || w.contains("multi-modal")
+    };
+    t.match_indices("not support").map(|(i, _)| i).chain(t.match_indices("unsupported").map(|(i, _)| i)).any(near)
 }
 
 /// Fehlertext, wenn der Server das Bild abgelehnt hat (Paneldeck sendet dem Modell dann keine Bilder mehr).
@@ -514,11 +668,22 @@ pub fn no_vision_note(lang: Lang, suitable: &[String]) -> String {
 // ---------------------------------------------------------------------------------------------------------------
 // Werkzeuge
 
-/// Wohin ein Werkzeug sein Bild legt (`AgentEnv::images`, Nummer schon vergeben).
+/// Wohin ein Werkzeug sein Bild legt (`AgentEnv::images`, Nummer schon vergeben). `reuse` = Bilder, die `read_file` in
+/// diesem Chat schon gelesen hat (dieselbe unveränderte Datei wird nicht noch einmal abgelegt).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ImageSink {
     pub dir: PathBuf,
     pub n: u32,
+    pub reuse: Vec<ImageEntry>,
+}
+
+impl ImageSink {
+    /// Schon gelesenes Bild derselben Datei (Pfad, Änderungszeit, Größe), dessen Dateien noch da sind.
+    pub fn reusable(&self, rel: &str, mtime: u64, size: u64) -> Option<&ImageEntry> {
+        self.reuse.iter().find(|e| {
+            e.source == Source::Tool && e.source_path == rel && e.source_mtime == mtime && e.source_size == size && path_of(&self.dir, e.send_file()).is_some_and(|p| regular_file(&p))
+        })
+    }
 }
 
 /// Abgelegtes Bild ins Ergebnis eines Werkzeugs schreiben: `image` = Platzhalter (für das Modell), [`TOOL_KEY`] = Eintrag
@@ -574,8 +739,11 @@ struct Job {
     rx: Receiver<Result<ImageEntry, String>>,
 }
 
+fn internal_error() -> String {
+    t("Interner Fehler beim Aufbereiten des Bildes", "Internal error while preparing the image").to_string()
+}
+
 /// Bilder eines Chats zur Laufzeit (`ChatState::img`; nicht gespeichert).
-#[derive(Default)]
 pub struct ChatImages {
     /// Bilderordner des Chats (setzt die App).
     pub dir: Option<PathBuf>,
@@ -587,8 +755,37 @@ pub struct ChatImages {
     /// Letzter Fehler beim Einfügen (unter dem Eingabefeld, bis zum nächsten Einfügen oder Senden).
     pub error: Option<String>,
     /// Der Server hat in der letzten Antwort ein Bild abgelehnt (`TurnEvent::VisionRejected`; die App merkt sich das
-    /// am Modell und wiederholt die Antwort).
+    /// am Modell und wiederholt die Antwort, sobald die Runde zu Ende ist).
     pub rejected: bool,
+    /// Die laufende Runde wurde schon einmal ohne Bilder wiederholt (höchstens einmal je Runde; `send` setzt zurück).
+    pub auto_retried: bool,
+    /// Werkzeugaufrufe, denen ein Bild zusteht: Kennung des Aufrufs → vergebene Nummer. Nur diese Ergebnisse dürfen ein
+    /// Bild in den Chat bringen.
+    pub expected: std::collections::HashMap<String, u32>,
+    /// Lebt der Chat noch? Fällt beim Schließen weg; eine danach fertige Aufbereitung löscht ihre Dateien wieder.
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for ChatImages {
+    fn default() -> Self {
+        ChatImages {
+            dir: None,
+            vision: None,
+            reserved: 0,
+            jobs: Vec::new(),
+            error: None,
+            rejected: false,
+            auto_retried: false,
+            expected: Default::default(),
+            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+}
+
+impl Drop for ChatImages {
+    fn drop(&mut self) {
+        self.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl ChatImages {
@@ -600,12 +797,25 @@ impl ChatImages {
         self.reserved
     }
 
-    /// Aufbereitung im Hintergrund starten; das Ergebnis holt [`ChatImages::poll`] ab.
-    pub fn start(&mut self, n: u32, work: impl FnOnce() -> Result<ImageEntry, String> + Send + 'static, repaint: super::Repaint) {
+    /// Aufbereitung im Hintergrund starten (legt in `dir` ab); das Ergebnis holt [`ChatImages::poll`] ab. Ist der Chat
+    /// inzwischen geschlossen, wird nichts angefangen bzw. das Abgelegte wieder gelöscht.
+    pub fn start(&mut self, n: u32, dir: PathBuf, work: impl FnOnce() -> Result<ImageEntry, String> + Send + 'static, repaint: super::Repaint) {
         let (tx, rx) = std::sync::mpsc::channel();
         self.error = None;
+        let alive = self.alive.clone();
         std::thread::spawn(move || {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| Err("internal error".into()));
+            let live = || alive.load(std::sync::atomic::Ordering::SeqCst);
+            if !live() {
+                return;
+            }
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| Err(internal_error()));
+            if !live() {
+                if let Ok(e) = &r {
+                    remove_files(&dir, e);
+                }
+                let _ = std::fs::remove_dir(&dir);
+                return;
+            }
             let _ = tx.send(r);
             repaint();
         });
@@ -632,7 +842,7 @@ impl ChatImages {
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                done.push((j.n, Err("internal error".into())));
+                done.push((j.n, Err(internal_error())));
                 false
             }
         });
@@ -691,9 +901,34 @@ mod tests {
     }
 
     #[test]
+    fn tokens_stay_whole_when_edited() {
+        // Rücktaste mitten im Platzhalter: der ganze fällt weg (nie [Image#12] → [Image#1])
+        assert_eq!(keep_tokens_whole("a [Image#12] b", "a [Image#1] b"), Some(("a  b".into(), 2)));
+        assert_eq!(keep_tokens_whole("a [Image#12] b", "a [Image#12 b"), Some(("a  b".into(), 2)));
+        // Tippen darin ersetzt ihn durch das Getippte
+        assert_eq!(keep_tokens_whole("[Image#3]", "[Imxage#3]"), Some(("x".into(), 1)));
+        // Davor, dahinter, ganz gelöscht oder ganz ersetzt: nichts zu tun
+        assert_eq!(keep_tokens_whole("a [Image#3]", "ab [Image#3]"), None);
+        assert_eq!(keep_tokens_whole("[Image#3] a", "[Image#3]x a"), None);
+        assert_eq!(keep_tokens_whole("x [Image#3] y", "x  y"), None);
+        assert_eq!(keep_tokens_whole("same", "same"), None);
+        // Auswahl über Teile zweier Platzhalter: beide fallen ganz weg; Umlaute davor
+        assert_eq!(keep_tokens_whole("ä[Image#1][Image#2]ö", "ä[Image#2]ö"), None, "erster ganz gelöscht");
+        assert_eq!(keep_tokens_whole("ä[Image#1][Image#2]ö", "ä[Imaö"), Some(("äö".into(), 1)));
+    }
+
+    #[test]
+    fn huge_images_are_refused() {
+        assert!(check_size(8000, 6000).is_ok());
+        assert!(check_size(MAX_DIM + 1, 10).is_err());
+        assert!(check_size(10_000, 10_000).is_err(), "über 50 Megapixel");
+        assert!(process_rgba(image::RgbaImage::new(MAX_DIM + 1, 1)).is_err());
+    }
+
+    #[test]
     fn entries_are_lenient_and_file_names_safe() {
         assert!(safe_name("1.png") && safe_name("12.send.jpg"));
-        for bad in ["", "../x.png", "a/b.png", "a\\b.png", "C:x.png", ".hidden", "x y.png", &"a".repeat(65)] {
+        for bad in ["", "../x.png", "a/b.png", "a\\b.png", "C:x.png", ".hidden", "x y.png", "1.gif", "a.png", "1.send.send.png", ".png", &"1".repeat(11)] {
             assert!(!safe_name(bad), "{bad}");
         }
         #[derive(Deserialize)]
@@ -729,15 +964,19 @@ mod tests {
         let small = process_rgba(image::RgbaImage::from_pixel(300, 200, image::Rgba([10, 20, 30, 255]))).unwrap();
         assert!(small.send.is_none());
         assert_eq!((small.mime, small.width, small.send_width), ("image/png", 300, 300));
-        // Großes Rauschen: verkleinert, und weil PNG über 5 MB läge, als JPEG
-        let big = process_rgba(noise(3000, 1700)).unwrap();
-        assert_eq!((big.width, big.height), (3000, 1700), "Original bleibt in voller Größe");
-        let (bytes, ext) = big.send.as_ref().unwrap();
+        // Großes Rauschen: verkleinert auf 1568 px und höchstens 5 MB; das Original bleibt
+        let big = process_rgba(noise(4000, 2250)).unwrap();
+        assert_eq!((big.width, big.height), (4000, 2250), "Original bleibt in voller Größe");
+        let (bytes, _) = big.send.as_ref().unwrap();
         assert!(bytes.len() <= MAX_SEND_BYTES, "{}", bytes.len());
-        assert_eq!(big.send_width.max(big.send_height), MAX_SIDE);
-        assert_eq!((*ext, big.mime), ("jpg", "image/jpeg"));
-        let (back, fmt) = decode(bytes).unwrap();
-        assert_eq!((back.width(), back.height(), fmt), (big.send_width, big.send_height, image::ImageFormat::Jpeg));
+        assert_eq!((big.send_width, big.send_height), (1568, 882));
+        // Rauschen in passender Größe, aber als PNG über 5 MB: JPEG
+        let noisy = process_rgba(noise(1560, 1100)).unwrap();
+        let (bytes, ext) = noisy.send.as_ref().unwrap();
+        assert!(bytes.len() <= MAX_SEND_BYTES, "{}", bytes.len());
+        assert_eq!((*ext, noisy.mime, noisy.send_width), ("jpg", "image/jpeg", 1560));
+        let (back, fmt, _) = decode(bytes).unwrap();
+        assert_eq!((back.width(), back.height(), fmt), (1560, 1100, image::ImageFormat::Jpeg));
         // Glattes großes Bild bleibt PNG
         let flat = process_rgba(image::RgbaImage::from_pixel(2400, 1200, image::Rgba([200, 100, 50, 255]))).unwrap();
         assert_eq!((flat.send.as_ref().unwrap().1, flat.send_width, flat.send_height), ("png", 1568, 784));
@@ -794,6 +1033,12 @@ mod tests {
         assert!(!is_rejection(&st(400, "tools are not supported")), "anderer Grund");
         assert!(!is_rejection(&st(404, "image not found")), "404 = Modell fehlt");
         assert!(!is_rejection(&LlmError::Cancelled));
+        // Probleme mit einem einzelnen Bild oder Modellnamen mit „vision“ schalten Bilder nicht ab
+        assert!(!is_rejection(&LlmError::Server("failed to process image".into())));
+        assert!(!is_rejection(&st(500, "llama3.2-vision:11b does not support tools")));
+        assert!(!is_rejection(&st(400, "The decoder prompt (length 9000) is longer than the maximum model length; multimodal tokens counted")));
+        assert!(is_rejection(&st(400, "Vision add-on is not loaded")));
+        assert!(is_rejection(&LlmError::Server("this model is missing data required for image input".into())));
     }
 
     #[test]
@@ -820,7 +1065,7 @@ mod tests {
     #[test]
     fn tool_results_carry_the_image_entry_and_screenshots_are_stored() {
         let d = tmp("tool");
-        let sink = ImageSink { dir: d.join("images"), n: 3 };
+        let sink = ImageSink { dir: d.join("images"), n: 3, reuse: Vec::new() };
         let mut png = Vec::new();
         image::DynamicImage::ImageRgba8(noise(40, 30)).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         let r = screenshot_result(Ok(json!({"image_png_base64": crate::mcp::base64(&png), "width": 40, "height": 30, "session": 4})), &sink);
@@ -834,7 +1079,7 @@ mod tests {
         // Über den Kanal
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         tx.send(Ok(json!({"image_png_base64": crate::mcp::base64(&png)}))).unwrap();
-        let out = forward_screenshot(rx, ImageSink { dir: d.join("images"), n: 4 }).recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+        let out = forward_screenshot(rx, ImageSink { dir: d.join("images"), n: 4, reuse: Vec::new() }).recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
         assert_eq!(out["image"], "[Image#4]");
         // Fehler und kaputte Daten bleiben unverändert
         assert!(screenshot_result(Err(("x".into(), "y".into())), &sink).is_err());
@@ -852,8 +1097,8 @@ mod tests {
         let mut ci = ChatImages::default();
         assert_eq!(ci.reserve(&f), 6);
         assert_eq!(ci.reserve(&f), 7, "auch laufende Aufbereitungen zählen");
-        ci.start(7, || Ok(entry(7)), std::sync::Arc::new(|| {}));
-        ci.start(8, || Err("boom".into()), std::sync::Arc::new(|| {}));
+        ci.start(7, PathBuf::new(), || Ok(entry(7)), std::sync::Arc::new(|| {}));
+        ci.start(8, PathBuf::new(), || Err("boom".into()), std::sync::Arc::new(|| {}));
         assert!(ci.busy() && ci.pending(7));
         let t = std::time::Instant::now();
         let mut done = Vec::new();

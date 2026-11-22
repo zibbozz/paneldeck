@@ -75,6 +75,8 @@ $AllViews = @(
   @{ Name = 'editor-disk-changed'; Spec = 'editor-disk-changed'; W = 1400; H = 860; Wait = 4 }
   @{ Name = 'editor-search';       Spec = 'editor-search';       W = 1400; H = 860; Wait = 3 }
   @{ Name = 'editor-settings';     Spec = 'editor-settings';     W = 1100; H = 900 }
+  # Chats
+  @{ Name = 'chat-images';         Spec = 'chat-images';         W = 1300; H = 860; Wait = 3 }
   # Prozesse
   @{ Name = 'processes';           Spec = 'processes';           H = 1000; Wait = 6 }
   @{ Name = 'process-new';         Spec = 'process-new';         H = 900; Wait = 2 }

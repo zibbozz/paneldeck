@@ -15,7 +15,7 @@ impl App {
     /// Kann das Modell des Chats Bilder lesen (eigene Angabe bzw. gemerkte Ablehnung vor Erkanntem; `None` = unbekannt)?
     pub(super) fn chat_vision(&self, id: u64) -> Option<bool> {
         let m = self.entries.get(&id)?.meta.chat.as_ref()?;
-        self.settings.llm_servers.iter().find(|s| s.id == m.server)?.vision_supported(&m.model)
+        self.settings.llm_servers.iter().find(|s| s.id == m.server)?.vision_supported(m.model.trim())
     }
 
     /// Bilder des Chats für die nächste Anfrage (`TurnContext::images`).
@@ -30,6 +30,13 @@ impl App {
             ImageReq::Paste => {
                 // Nur ein Bild ohne Text (Text fügt egui selbst ein).
                 if let Some(rgba) = crate::platform::clipboard::image() {
+                    // Riesige Bilder gar nicht erst aufbereiten (Speicher).
+                    if let Err(e) = images::check_size(rgba.width(), rgba.height()) {
+                        if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
+                            c.img.error = Some(e);
+                        }
+                        return;
+                    }
                     self.chat_add_image(ctx, id, move |dir, n| images::import_rgba(&dir, n, rgba));
                 }
             }
@@ -56,13 +63,15 @@ impl App {
         super::chat_images_ui::insert_token(ctx, super::chat_ui::input_id(id), &mut c.draft, n);
         c.focus_input = true;
         let rctx = ctx.clone();
-        c.img.start(n, move || work(dir, n), std::sync::Arc::new(move || rctx.request_repaint()));
+        let d = dir.clone();
+        c.img.start(n, dir, move || work(d, n), std::sync::Arc::new(move || rctx.request_repaint()));
         ctx.request_repaint();
     }
 
     /// Jedes Bild (nach dem Abholen der Antworten): Ordner und Bildverständnis an jeden Chat, fertige Aufbereitungen
-    /// übernehmen; hat der Server ein Bild abgelehnt, „keine Bilder“ am Modell merken und die Antwort ohne Bild
-    /// wiederholen.
+    /// übernehmen. Hat der Server ein Bild abgelehnt (nur gemeldet, solange das Bildverständnis des Modells unbekannt
+    /// war), wird nach dem Ende der Runde „keine Bilder“ am Modell gemerkt – nie gegen eine erkannte Fähigkeit oder eine
+    /// Wahl des Nutzers – und die Antwort einmal ohne Bild wiederholt.
     pub(super) fn poll_chat_images(&mut self, ctx: &egui::Context) {
         let ids: Vec<u64> = self.entries.iter().filter(|(_, e)| e.chat.is_some()).map(|(id, _)| *id).collect();
         for id in ids {
@@ -74,7 +83,13 @@ impl App {
             c.img.dir = Some(dir);
             c.img.vision = vision;
             let changed = c.poll_images();
-            let rejected = std::mem::take(&mut c.img.rejected);
+            // Erst nach dem Ende der Runde (der Fehler kommt nach `VisionRejected`; vorher ginge das Wiederholen nicht).
+            let rejected = c.img.rejected && !c.busy();
+            let retry = rejected && !c.img.auto_retried;
+            if rejected {
+                c.img.rejected = false;
+                c.img.auto_retried = true;
+            }
             if changed {
                 self.save_chat(id);
             }
@@ -82,15 +97,21 @@ impl App {
                 if let Some(m) = meta
                     && let Some(s) = self.settings.llm_servers.iter_mut().find(|s| s.id == m.server)
                 {
-                    let mut cfg = s.model_cfg(&m.model);
-                    cfg.vision = Some(false);
-                    s.set_model_cfg(cfg);
-                    state::save_json(&self.dir.join("settings.json"), &self.settings);
+                    let name = m.model.trim();
+                    let mut cfg = s.model_cfg(name);
+                    if cfg.vision.is_none() && s.info(name).and_then(|i| i.vision).is_none() {
+                        cfg.vision = Some(false);
+                        s.set_model_cfg(cfg);
+                        state::save_json(&self.dir.join("settings.json"), &self.settings);
+                    }
                 }
+                let vision = self.chat_vision(id);
                 if let Some(c) = self.entries.get_mut(&id).and_then(|e| e.chat.as_mut()) {
-                    c.img.vision = Some(false);
+                    c.img.vision = vision;
                 }
-                self.chat_action(ctx, id, &Action::ChatRegenerate(id));
+                if retry && vision == Some(false) {
+                    self.chat_action(ctx, id, &Action::ChatRegenerate(id));
+                }
             }
         }
     }
@@ -109,6 +130,9 @@ impl App {
         let dir = self.chat_images_dir(chat);
         let c = self.entries.get_mut(&chat).and_then(|e| e.chat.as_mut())?;
         let n = c.img.reserve(&c.file);
-        Some(ImageSink { dir, n })
+        // Nur dieser Aufruf darf ein Bild bringen (mit dieser Nummer oder einem schon gelesenen von `read_file`).
+        c.img.expected.insert(call.id.clone(), n);
+        let reuse = if call.name == "read_file" { c.file.images.iter().filter(|e| e.source == images::Source::Tool && !e.source_path.is_empty()).cloned().collect() } else { Vec::new() };
+        Some(ImageSink { dir, n, reuse })
     }
 }

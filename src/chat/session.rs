@@ -409,6 +409,8 @@ impl ChatState {
         // Bilder (#357): die Platzhalter im Text, die es im Chat gibt.
         let images = super::images::referenced(&text, &self.file.images);
         self.img.error = None;
+        self.img.auto_retried = false;
+        self.img.rejected = false;
         // Eine angehaltene Runde endet: ihre offenen Aufrufe laufen nicht mehr.
         self.cancel_tools();
         self.reset_steps();
@@ -613,7 +615,7 @@ impl ChatState {
 
     /// Größe der laufenden Runde in geschätzten Tokens (wie das Backend schätzt).
     fn round_tokens(&self) -> usize {
-        self.file.messages[logic::last_user(&self.file.messages).unwrap_or(0)..].iter().filter(|m| logic::sendable(m)).map(logic::msg_tokens).sum()
+        self.file.messages[logic::last_user(&self.file.messages).unwrap_or(0)..].iter().filter(|m| logic::sendable(m)).map(|m| logic::msg_tokens(m) + super::images::image_tokens(&m.images, &self.file.images)).sum()
     }
 
     /// Wie groß ein neues Werkzeug-Ergebnis höchstens sein darf (Bytes): [`tools::MAX_RESULT_BYTES`], bei bekanntem
@@ -646,10 +648,17 @@ impl ChatState {
         let to = self.turn_msg.min(self.file.messages.len());
         let short = tools::elided();
         let mut any = false;
+        // Bilder schon gesehener Ergebnisse (#357) gehen mit – außer dem neuesten.
+        let newest_image = (from..to).rev().find(|i| self.file.messages[*i].role == Role::Tool && !self.file.messages[*i].images.is_empty());
         for i in from..to {
             let m = &mut self.file.messages[i];
             if m.role == Role::Tool && m.content.len() > short.len() {
                 m.content = short.clone();
+                any = true;
+                self.changed_from = self.changed_from.min(i);
+            }
+            if m.role == Role::Tool && !m.images.is_empty() && Some(i) != newest_image {
+                m.images.clear();
                 any = true;
                 self.changed_from = self.changed_from.min(i);
             }
@@ -676,16 +685,49 @@ impl ChatState {
         let failed = r.is_err();
         // Bild des Werkzeugs (#357, `screenshot`/`read_file` bei Modellen mit Bildverständnis): schon abgelegt, der
         // Eintrag kommt in den Chat, die Nachricht nennt seine Nummer.
-        let image = r.as_mut().ok().and_then(super::images::take_from_result);
-        if let Some(e) = &image {
-            self.file.images.retain(|x| x.n != e.n);
-            self.file.images.push(e.clone());
+        // Nur ein Aufruf, dem die App ein Bild zugesagt hat, darf eines bringen – mit genau dieser Nummer oder einem schon
+        // vorhandenen Bild desselben Werkzeugs (`read_file` auf dieselbe Datei).
+        let expected = call.as_ref().and_then(|c| self.img.expected.remove(&c.id));
+        let taken = r.as_mut().ok().and_then(super::images::take_from_result);
+        let reused = |e: &super::images::ImageEntry, file: &ChatFile| file.images.iter().any(|x| x == e && x.source == super::images::Source::Tool);
+        let mut image = taken.filter(|e| expected.is_some_and(|n| n == e.n) || (expected.is_some() && reused(e, &self.file)));
+        if image.is_none() {
+            if let Ok(v) = r.as_mut() {
+                if v.get(super::images::TOOL_KEY).is_none() && v.get("image").and_then(|x| x.as_str()).is_some_and(|s| s.starts_with("[Image#")) {
+                    v["image"] = serde_json::json!("omitted");
+                }
+            }
         }
         if !self.room_for_result() {
+            if let (Some(e), Some(dir)) = (&image, &self.img.dir) {
+                if !reused(e, &self.file) {
+                    super::images::remove_files(dir, e);
+                }
+            }
             let status = if r.is_ok() { ToolStatus::Ok } else { ToolStatus::Error };
             self.finish_first(status, tools::elided());
             self.pause_context();
             return;
+        }
+        // Kein Platz für das Bild im Kontext: weglassen (das Modell erfährt es), statt den Systemprompt zu verdrängen.
+        if let Some(e) = &image {
+            let room = self.result_cap_with(usize::MAX) * 2 / 3;
+            let need = super::images::tokens_for(e.send_width.max(1), e.send_height.max(1)) + MIN_RESULT_BYTES / 3;
+            if self.history_budget.is_some() && need > room {
+                if let Some(dir) = &self.img.dir {
+                    if !reused(e, &self.file) {
+                        super::images::remove_files(dir, e);
+                    }
+                }
+                if let Ok(v) = r.as_mut() {
+                    v["image"] = serde_json::json!("omitted – no room for the image in the model's context; ask for a smaller part or continue without it");
+                }
+                image = None;
+            }
+        }
+        if let Some(e) = &image {
+            self.file.images.retain(|x| x.n != e.n);
+            self.file.images.push(e.clone());
         }
         let (st, content) = tools::result_message(name, r, self.result_cap_for(name));
         self.finish_first(st, content);
@@ -1146,12 +1188,12 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let n = c.img.reserve(&c.file);
         assert_eq!(n, 1);
-        c.img.start(n, move || {
+        c.img.start(n, std::path::PathBuf::new(), move || {
             let _ = rx.recv();
             Ok(crate::chat::images::ImageEntry { n: 1, file: "1.png".into(), mime: "image/png".into(), ..Default::default() })
         }, rp.clone());
         let n2 = c.img.reserve(&c.file);
-        c.img.start(n2, || Err("kaputt".into()), rp.clone());
+        c.img.start(n2, std::path::PathBuf::new(), || Err("kaputt".into()), rp.clone());
         c.draft = "look [Image#1] and [Image#2] and [Image#7]".into();
         assert!(c.images_pending(&c.draft));
         assert!(!c.send(&b, &meta, &TurnContext::default(), rp.clone()), "wartet auf das Bild");
@@ -1194,16 +1236,64 @@ mod tests {
     #[test]
     fn a_tool_image_is_attached_to_its_result_message() {
         let mut c = ChatState::new(ChatFile::default(), None);
-        let call = ToolCall { id: "s1".into(), name: "screenshot".into(), arguments: serde_json::json!({}) };
-        c.calls.push(PendingCall { call: call.clone(), state: CallState::Running, rx: None });
-        let e = crate::chat::images::ImageEntry { n: 4, file: "4.png".into(), mime: "image/png".into(), width: 9, height: 9, source: crate::chat::images::Source::Tool, ..Default::default() };
-        let mut v = serde_json::json!({"width": 9});
-        crate::chat::images::attach_to_result(&mut v, &e);
-        c.record_result("screenshot", Ok(v));
+        let e = crate::chat::images::ImageEntry { n: 4, file: "4.png".into(), mime: "image/png".into(), width: 9, height: 9, send_width: 9, send_height: 9, source: crate::chat::images::Source::Tool, ..Default::default() };
+        let result = |e: &crate::chat::images::ImageEntry| {
+            let mut v = serde_json::json!({"width": 9});
+            crate::chat::images::attach_to_result(&mut v, e);
+            v
+        };
+        let run = |c: &mut ChatState, id: &str, v: serde_json::Value| {
+            let call = ToolCall { id: id.into(), name: "screenshot".into(), arguments: serde_json::json!({}) };
+            c.calls.push(PendingCall { call, state: CallState::Running, rx: None });
+            c.record_result("screenshot", Ok(v));
+        };
+        // Ohne Zusage (kein Bild-Ziel vergeben): kein Bild in den Chat
+        run(&mut c, "s0", result(&e));
+        let m = c.messages().last().unwrap();
+        assert!(m.images.is_empty() && c.file.images.is_empty() && m.content.contains("\"image\":\"omitted\""), "{}", m.content);
+        // Zugesagt, aber andere Nummer: ebenso nicht
+        c.img.expected.insert("s1".into(), 5);
+        run(&mut c, "s1", result(&e));
+        assert!(c.messages().last().unwrap().images.is_empty());
+        // Zugesagt mit dieser Nummer: kommt in den Chat
+        c.img.expected.insert("s2".into(), 4);
+        run(&mut c, "s2", result(&e));
         let m = c.messages().last().unwrap();
         assert_eq!(m.images, [4]);
         assert!(m.content.contains("[Image#4]") && !m.content.contains(crate::chat::images::TOOL_KEY), "{}", m.content);
-        assert_eq!(c.file.images, [e]);
+        assert_eq!(c.file.images, [e.clone()]);
+        // Kein Platz im Kontext: das Bild fällt weg
+        c.history_budget = Some(300);
+        let big = crate::chat::images::ImageEntry { n: 6, file: "6.png".into(), send_width: 1568, send_height: 1568, ..e.clone() };
+        c.img.expected.insert("s3".into(), 6);
+        run(&mut c, "s3", result(&big));
+        assert!(c.file.images.iter().all(|x| x.n != 6));
+        assert!(c.messages().iter().all(|m| !m.images.contains(&6)));
+    }
+
+    /// Bilder zählen im Platz der Runde; schon gesehene Bild-Ergebnisse verlieren beim Auslassen ihr Bild, das neueste
+    /// bleibt (#357).
+    #[test]
+    fn images_count_toward_the_round_and_elision_keeps_only_the_newest() {
+        let mut c = ChatState::new(ChatFile::default(), None);
+        let entry = |n: u32| crate::chat::images::ImageEntry { n, file: format!("{n}.png"), mime: "image/png".into(), send_width: 1120, send_height: 1120, ..Default::default() };
+        c.file.images = vec![entry(1), entry(2)];
+        c.file.messages.push(ChatMsg::new(Role::User, "q"));
+        let before = c.round_tokens();
+        let mut a = ChatMsg::new(Role::Assistant, "");
+        a.tool_calls = vec![ToolCall { id: "a".into(), name: "screenshot".into(), arguments: serde_json::json!({}) }, ToolCall { id: "b".into(), name: "screenshot".into(), arguments: serde_json::json!({}) }];
+        c.file.messages.push(a.clone());
+        for (id, n) in [("a", 1u32), ("b", 2)] {
+            let mut t = logic::tool_result(&a.tool_calls[0], ToolStatus::Ok, format!("{{\"id\":\"{id}\",\"pad\":\"{}\"}}", "x".repeat(200)));
+            t.tool_call_id = Some(id.into());
+            t.images = vec![n];
+            c.file.messages.push(t);
+        }
+        assert!(c.round_tokens() >= before + 2 * 1600, "{}", c.round_tokens());
+        c.turn_msg = c.file.messages.len();
+        assert!(c.elide_round_results());
+        assert!(c.file.messages[2].images.is_empty(), "älteres Bild fällt weg");
+        assert_eq!(c.file.messages[3].images, [2], "das neueste bleibt");
     }
 
     #[test]

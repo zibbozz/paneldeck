@@ -58,6 +58,9 @@ pub struct Prepared {
     pub prompt_estimate: usize,
     /// Aufteilung für die Anzeige des Füllstands (#339), mit `token_scale` hochgerechnet.
     pub parts: ContextParts,
+    /// Ob das Modell Bilder lesen kann, ist unbekannt (nicht erkannt, keine Wahl des Nutzers): Nur dann darf eine
+    /// Ablehnung „keine Bilder“ für das Modell lehren (#357, `TurnEvent::VisionRejected`).
+    pub learn_vision: bool,
 }
 
 /// Höchstlänge von Projektname und Ordner in der Kontextzeile (Zeichen).
@@ -304,7 +307,9 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
     let policy = ToolPolicy::new(cfg.clone(), server.tools_supported(model), cx.expert).with_agent(cx.agent.clone());
     // Bilder (#357): an alle Modelle außer denen, die sicher keine lesen (unbekannt = versuchen; lehnt der Server ab,
     // merkt sich die App „keine Bilder“). Ohne Bildverständnis ein Hinweis, wenn die laufende Runde Bilder hat.
-    let send_images = server.vision_supported(model) != Some(false);
+    let vision = server.vision_supported(model);
+    let send_images = vision != Some(false);
+    let learn_vision = vision.is_none();
     let send = cx.images.dir.as_deref().filter(|_| send_images).map(|dir| SendImages { dir, entries: &cx.images.entries });
     let (hist, origin) = map_history_with(history, send);
     let round = logic::last_user(history).unwrap_or(0);
@@ -361,7 +366,7 @@ fn build(meta: &ChatMeta, history: &[ChatMsg], cx: &TurnContext, with_key: bool)
         dropped: context_start.is_some(),
         scale,
     };
-    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate, parts })
+    Ok(Prepared { endpoint, request, context_start, note, context_notice, history_budget, prompt_estimate, parts, learn_vision })
 }
 
 /// Hinweis: die eigene Kontextlänge reicht nicht für die Werkzeug-Stufe des Modells.
@@ -479,7 +484,7 @@ fn run(t: Arc<dyn Transport>, mut p: Prepared, cancel: Arc<AtomicBool>, tx: std:
                 // Abgebrochen (Stopp / Chat geschlossen): niemand wartet mehr.
                 if !cancel.load(Ordering::SeqCst) {
                     let mut text = error_text(&e, lang);
-                    if with_images && super::images::is_rejection(&e) {
+                    if with_images && p.learn_vision && super::images::is_rejection(&e) {
                         // Bild abgelehnt (#357): die App merkt sich „keine Bilder“ und wiederholt die Antwort.
                         send(TurnEvent::VisionRejected);
                         text = format!("{} ({text})", super::images::rejected_text(lang));

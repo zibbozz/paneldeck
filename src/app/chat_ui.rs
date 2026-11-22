@@ -906,6 +906,7 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
     let btn = Rect::from_min_max(Pos2::new(avail.max.x - BTN_W, field.max.y - 30.0), Pos2::new(avail.max.x, field.max.y));
     let clip = Rect::from_min_max(Pos2::new(btn.min.x - S1 - clip_w, btn.min.y), Pos2::new(btn.min.x - S1, btn.max.y));
     let has_tokens = !crate::chat::images::tokens(&chat.draft).is_empty();
+    let before = has_tokens.then(|| chat.draft.clone());
     let output = ui
         .scope_builder(UiBuilder::new().max_rect(field), |ui| {
             egui::ScrollArea::vertical().id_salt(("chat_input_scroll", session)).max_height(input_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -933,6 +934,10 @@ fn input_bar(ui: &mut Ui, session: u64, chat: &mut ChatState, lang: Lang, input_
         {
             super::chat_images_ui::open(ui.ctx(), session, n);
         }
+    }
+    // Platzhalter bleiben ganz (#357): Rücktaste/Tippen mitten darin löscht den ganzen.
+    if let Some(before) = before.filter(|b| *b != chat.draft) {
+        super::chat_images_ui::keep_tokens_whole(ui.ctx(), tid, &before, &mut chat.draft);
     }
     if grab_focus || chat.focus_input {
         resp.request_focus();
@@ -1059,8 +1064,6 @@ mod tests {
         assert!(h.click(&mut c, Lang::En, p).edit);
     }
 
-    /// Eine noch leere Antwort zeigt, was los ist (#299): „…“, nach ein paar Sekunden die Wartezeit, bei Denk-Ausgabe
-    /// „Denkt nach …“ – statt endlos nur „…“.
     /// Bilder (#357): Strg+V im Eingabefeld meldet „einfügen“, der Platzhalter landet an der Cursor-Position; ein Klick
     /// auf den Platzhalter (eigene Nachricht, Eingabefeld, Werkzeug-Ergebnis) öffnet das Popup mit dem Original, Esc
     /// schließt es.
@@ -1089,6 +1092,18 @@ mod tests {
             assert_eq!(c.draft, "see [Image#2] ");
             h.frame(&mut c, lang, false, vec![Event::Text("x".into())]);
             assert_eq!(c.draft, "see [Image#2] x", "Cursor steht hinter dem Platzhalter");
+            // Rücktaste mitten im Platzhalter löscht ihn ganz (aus [Image#2] wird nie etwas anderes)
+            let mut st = egui::text_edit::TextEditState::load(&h.ctx, input_id(1)).unwrap();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(12))));
+            st.store(&h.ctx, input_id(1));
+            h.frame(&mut c, lang, false, vec![key(Key::Backspace, Modifiers::NONE)]);
+            assert_eq!(c.draft, "see  x");
+            // Einfügen mit Auswahl ersetzt die Auswahl
+            let mut st = egui::text_edit::TextEditState::load(&h.ctx, input_id(1)).unwrap();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(3))));
+            st.store(&h.ctx, input_id(1));
+            ciu::insert_token(&h.ctx, input_id(1), &mut c.draft, 3);
+            assert_eq!(c.draft, "[Image#3]  x");
             // Büroklammer
             let clip = h.shapes.iter().find_map(|s| match &s.shape {
                 egui::Shape::Path(p) if p.points.len() > 20 => Some(egui::Rect::from_points(&p.points).center()),
@@ -1112,7 +1127,18 @@ mod tests {
                 .expect("Nachricht");
             h.click(&mut c, lang, Pos2::new(r.min.x + 12.0, r.center().y));
             assert_eq!(ciu::open_image(&h.ctx, 1), Some(1));
+            // Das Original wird im Hintergrund dekodiert („Lädt …“), dann gezeigt
+            let t0 = Instant::now();
+            loop {
+                h.frame(&mut c, lang, false, vec![]);
+                if matches!(ciu::view(&h.ctx, 1, 1, c.file.images.first(), Some(&d), lang), ciu::View::Ready(_)) || t0.elapsed() > Duration::from_secs(5) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(matches!(ciu::view(&h.ctx, 1, 1, c.file.images.first(), Some(&d), lang), ciu::View::Ready(_)));
             h.frame(&mut c, lang, false, vec![]);
+            assert!(!h.texts.iter().any(|t| t == lang.t("Lädt …", "Loading …")));
             assert!(h.texts.iter().any(|t| t == "[Image#1] · 40 × 30"), "{:?}", h.texts);
             assert!(h.texts.iter().any(|t| t == lang.t("Schließen", "Close")));
             // Esc schließt
@@ -1151,6 +1177,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Eine noch leere Antwort zeigt, was los ist (#299): „…“, nach ein paar Sekunden die Wartezeit, bei Denk-Ausgabe
+    /// „Denkt nach …“ – statt endlos nur „…“.
     #[test]
     fn empty_answer_shows_waiting_time_and_thinking() {
         /// Hält die Antwort offen (Sender bleibt hier) und schickt vorab die gegebenen Ereignisse.
