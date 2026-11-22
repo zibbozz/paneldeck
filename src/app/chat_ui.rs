@@ -56,11 +56,15 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
     let edit_h = if chat.editing { 22.0 } else { 0.0 };
     let bottom_h = input_h + 2.0 * PAD + edit_h;
     // Kopfzeile: immer da (Füllstand des Kontexts, #339), links ggf. die To-dos des Modells (#338) und die dauerhaften
-    // Freigaben.
-    let head_rect = Rect::from_min_max(body.min, Pos2::new(body.max.x, body.min.y + HEAD_H));
+    // Freigaben. Die Zeile hat ihren eigenen Platz: so hoch wie ein Knopf (der To-do-Chip ist ein Menüknopf), der
+    // Verlauf beginnt darunter und nichts aus der Kopfzeile ragt in ihn hinein (sonst lag der Chip beim Scrollen über
+    // dem Text).
+    let head_h = head_height(ui);
+    let head_rect = Rect::from_min_max(body.min, Pos2::new(body.max.x, (body.min.y + head_h).min(body.max.y)));
     let list_rect = Rect::from_min_max(Pos2::new(body.min.x, head_rect.max.y), Pos2::new(body.max.x, (body.max.y - bottom_h).max(head_rect.max.y)));
     let bar_rect = Rect::from_min_max(Pos2::new(body.min.x, list_rect.max.y), body.max);
     ui.scope_builder(UiBuilder::new().max_rect(head_rect.shrink2(Vec2::new(PAD, 2.0))), |ui| {
+        ui.set_clip_rect(ui.clip_rect().intersect(head_rect));
         ui.horizontal_centered(|ui| {
             if !chat.file.todos.is_empty() {
                 todos_menu(ui, session, &chat.file.todos, lang);
@@ -94,6 +98,11 @@ pub(super) fn chat_body(ui: &mut Ui, body: Rect, session: u64, chat: &mut ChatSt
         input_bar(ui, session, chat, lang, input_h, grab_focus, &mut out);
     });
     out
+}
+
+/// Höhe der Kopfzeile: mindestens [`HEAD_H`], sonst ein Knopf (Mindesthöhe der Bedienelemente) plus Rand.
+fn head_height(ui: &Ui) -> f32 {
+    HEAD_H.max(ui.spacing().interact_size.y + 6.0)
 }
 
 /// Geschätzte Höhe einer noch nie gezeichneten Nachricht.
@@ -728,7 +737,7 @@ fn approvals_menu(ui: &mut Ui, session: u64, rules: &[AllowRule], lang: Lang, ou
                 for r in rules {
                     ui.horizontal(|ui| {
                         let what = match (r.session, &r.prefix) {
-                            (Some(s), _) => format!("{} → session {s}", r.tool),
+                            (Some(s), _) => format!("{} → {} {s}", r.tool, lang.t("Sitzung", "session")),
                             (None, Some(p)) => format!("{}: {p} …", r.tool),
                             (None, None) => r.tool.clone(),
                         };
@@ -1234,6 +1243,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Der To-do-Chip der Kopfzeile liegt nie über dem Verlauf: Auch mit den Maßen von Paneldeck (Knöpfe 26 px hoch)
+    /// beginnt der sichtbare Bereich des Verlaufs erst unter dem Knopf, und nichts der Kopfzeile wird darunter gezeichnet.
+    #[test]
+    fn the_todo_chip_never_overlaps_the_history() {
+        let mut file = ChatFile::default();
+        for i in 0..200 {
+            file.messages.push(ChatMsg::new(if i % 2 == 0 { Role::User } else { Role::Assistant }, format!("m{i}")));
+        }
+        let mut c = ChatState::new(file, None);
+        c.set_todos(vec![ChatTodo { content: "Fix it".into(), status: TodoStatus::InProgress }, ChatTodo { content: "Test".into(), status: TodoStatus::Pending }]);
+        let mut h = H::new();
+        h.ctx.style_mut(|s| {
+            s.spacing.interact_size = Vec2::new(32.0, 26.0);
+            s.spacing.button_padding = Vec2::new(10.0, 5.0);
+        });
+        for _ in 0..3 {
+            h.frame(&mut c, Lang::En, false, vec![]);
+        }
+        let text_shape = |pred: &dyn Fn(&str) -> bool| {
+            h.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if pred(t.galley.text()) => Some((t.visual_bounding_rect(), s.clip_rect)),
+                _ => None,
+            })
+        };
+        let (chip, chip_clip) = text_shape(&|t| t == "To-dos 0/2 · ▸ Fix it").unwrap_or_else(|| panic!("{:?}", h.texts));
+        let (_, list_clip) = text_shape(&|t| t.starts_with('m') && t.len() > 1 && t[1..].chars().all(|c| c.is_ascii_digit())).expect("Nachricht");
+        // Knopf um den Text: mindestens 26 px hoch, mittig zum Text.
+        let button_bottom = chip.center().y + 13.0;
+        assert!(button_bottom <= list_clip.min.y + 0.5, "Chip unten {button_bottom} > Verlauf oben {}", list_clip.min.y);
+        // Die Kopfzeile zeichnet nur in ihrem Bereich, der Verlauf beginnt darunter (sein Clip ragt um den Rand
+        // `clip_rect_margin` von egui darüber hinaus).
+        let margin = h.ctx.style().visuals.clip_rect_margin;
+        assert!(chip_clip.max.y <= list_clip.min.y + margin + 0.5, "Kopfzeile zeichnet nur in ihrem Bereich: {chip_clip:?} / {list_clip:?}");
+    }
+
     #[test]
     fn always_is_offered_only_for_calls_with_a_target_session() {
         let cases = [
@@ -1315,7 +1359,8 @@ mod tests {
                 h.frame(&mut c, lang, false, evs);
             }
             h.frame(&mut c, lang, false, vec![]);
-            assert!(h.texts.iter().any(|t| t == "send_text → session 4"), "{:?}", h.texts);
+            let target = if lang == Lang::De { "send_text → Sitzung 4" } else { "send_text → session 4" };
+            assert!(h.texts.iter().any(|t| t == target), "{:?}", h.texts);
             let p = h.pos_of(revoke).expect("Widerrufen-Knopf");
             let mv = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
             let mut got = None;

@@ -12,16 +12,21 @@
 #                     das Skript an: von Hand lösen (Changelogs: Abschnitt [<version>] aus develop übernehmen), dann
 #                     `git cherry-pick --continue` und das Skript mit denselben Argumenten ohne die schon übertragenen Commits
 #                     erneut aufrufen (der Branch release-prep/<version> wird dann weiterverwendet).
+#   --no-shots       die Screenshots nicht neu erzeugen (z. B. beim erneuten Aufruf nach einem Konflikt); geprüft wird trotzdem.
+# Vor dem Commit erzeugt tools/docs-shots.ps1 (nur Windows) alle README- und Doku-Bilder aus der Software dieses Releases
+# neu (docs/images/*.png, docs/images/de/*.png); danach bricht tools/check_docs_images.py ab, wenn noch ein Platzhalter
+# `<!-- screenshot: … -->` übrig ist, ein eingebundenes Bild fehlt oder die Bildsätze EN/DE verschieden sind.
 # Mit --pr wird der Branch gepusht und ein Pull Request nach release/<x.y> geöffnet. Gemergt wird nach grüner CI;
 # danach auf release/<x.y> (neu gezogen, Datum muss noch „heute“ sein): tools/release.sh <version> --publish.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source tools/common.sh
 V="${1:?Version fehlt}"; TITLE="${2:?Englischer Titel fehlt}"; shift 2
-PR=0; NOTES=""; PICKS=()
+PR=0; NOTES=""; PICKS=(); SHOTS=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --pr) PR=1 ;;
+    --no-shots) SHOTS=0 ;;
     --notes) NOTES="${2:?--notes braucht eine Datei}"; shift ;;
     --pick) shift; while [ $# -gt 0 ] && [[ "$1" != --* ]]; do PICKS+=("$1"); shift; done; continue ;;
     *) echo "Unbekannte Option: $1"; exit 1 ;;
@@ -60,6 +65,16 @@ printf '%s|%s\n' "$V" "$TITLE" >> tools/titles.txt
 [ -f "docs/release-notes/$V.en.md" ] || echo "ACHTUNG: docs/release-notes/$V.en.md fehlt noch (englischer Release-Text) – vor dem Commit anlegen!"
 grep -q '^### ' "docs/release-notes/$V.en.md" 2>/dev/null || echo "ACHTUNG: docs/release-notes/$V.en.md enthält keinen englischen Changelog-Abschnitt (### Added/Fixed …)"
 "$PY" tools/gen_licenses.py --check
+# README- und Doku-Bilder aus der Software dieses Releases neu erzeugen (vor jedem Release, auch PATCH), dann prüfen.
+if [ "$SHOTS" = 1 ]; then
+  if [ "$IS_WIN" = 1 ]; then
+    WR=(); [ -z "${PANELDECK_TEST_ROOT:-}" ] || WR=(-WorkRoot "$(_w "$PANELDECK_TEST_ROOT")")
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(_w tools/docs-shots.ps1)" -NoCheck "${WR[@]}"       || { echo "Screenshots fehlgeschlagen (tools/docs-shots.ps1) – nichts committet"; exit 1; }
+  else
+    echo "HINWEIS: Die Screenshots entstehen nur unter Windows (tools/docs-shots.ps1) – hier übersprungen; geprüft wird trotzdem."
+  fi
+fi
+"$PY" tools/check_docs_images.py || { echo "README/Doku-Bilder unvollständig (siehe oben) – nichts committet"; exit 1; }
 git add -A
 git commit -q -F - <<MSGEOF
 Prepare release $V
@@ -72,5 +87,13 @@ if [ "$PR" = 1 ]; then
   BODY="Sets the version, changelog date, title and English release text for **$V**."
   [ ${#PICKS[@]} -eq 0 ] || BODY="$BODY Also backports from develop (cherry-pick -x): ${PICKS[*]}."
   BODY="$BODY After the merge: \`tools/release.sh $V --publish\` on \`$REL\` (the changelog date must equal the tag date, i.e. today)."
+  BODY="$BODY
+
+### README and docs checklist
+- [ ] Screenshots regenerated from this release (\`tools/docs-shots.ps1\`, done by this script on Windows) and looked at: EN \`docs/images/\`, DE \`docs/images/de/\`
+- [ ] \`python tools/check_docs_images.py\` passes (no \`<!-- screenshot: … -->\` left, every image present, EN/DE sets equal)
+- [ ] Manual images (\`<!-- screenshot-manual: … -->\`, e.g. the Explorer context menu) still match the software
+- [ ] README.md / README.de.md: download links, first steps and feature list match this version
+- [ ] Guides in docs/en and docs/de describe every user-visible change of this version (EN and DE in sync)"
   "$GH" pr create --base "$REL" --head "$BR" --title "Prepare release $V" --body "$BODY"
 fi

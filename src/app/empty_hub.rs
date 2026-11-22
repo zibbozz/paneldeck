@@ -8,6 +8,8 @@ pub(super) struct EmptyHints {
     pub palette: String,
     pub new: String,
     pub split: String,
+    /// Beschriftung des Tutorial-Knopfs („Kurze Tour starten“ / „Tour fortsetzen“, #143); `None` = keiner.
+    pub tour: Option<String>,
 }
 
 /// Überschrift des leeren Hubs.
@@ -38,6 +40,7 @@ pub(super) struct EmptyHits {
     pub new: Option<Rect>,
     pub claude: Option<Rect>,
     pub chat: Option<Rect>,
+    pub tour: Option<Rect>,
 }
 
 /// Mittiger Hinweis „keine Sitzung“ im Bereich `rect`; `kind` bestimmt die Überschrift (siehe `empty_kind`).
@@ -94,6 +97,18 @@ pub(super) fn empty_state(ui: &mut Ui, rect: Rect, lang: Lang, claude_mode: bool
             hint(ui, &hints.palette, lang.t("Befehle & Suche", "Commands & search"));
             hint(ui, &hints.new, lang.t("Neue Sitzung", "New session"));
             hint(ui, &hints.split, lang.t("Bereich teilen", "Split pane"));
+            // Tutorial (#143): Einstieg in die Tour.
+            if let Some(label) = &hints.tour {
+                ui.add_space(S3);
+                let r = ui.add(egui::Button::new(RichText::new(format!("▶ {label}")).color(style::ui().link)).frame(false));
+                if r.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                hits.tour = Some(r.rect);
+                if r.clicked() {
+                    actions.push(Action::Tutorial(tutorial::Cmd::Continue));
+                }
+            }
         });
     });
     hits
@@ -111,7 +126,7 @@ impl App {
     }
 
     pub(super) fn empty_hints(&self) -> EmptyHints {
-        EmptyHints { palette: self.binding_text("palette"), new: self.binding_text("new"), split: format!("{} / {}", self.binding_text("split_r"), self.binding_text("split_d")) }
+        EmptyHints { palette: self.binding_text("palette"), new: self.binding_text("new"), split: format!("{} / {}", self.binding_text("split_r"), self.binding_text("split_d")), tour: self.tut_hub_label() }
     }
 }
 
@@ -135,7 +150,7 @@ mod tests {
         fn frame(&mut self, lang: Lang, claude: bool, events: Vec<Event>) {
             self.time += 0.1;
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))), time: Some(self.time), events, ..Default::default() };
-            let hints = EmptyHints { palette: "Ctrl+Shift+P".into(), new: "Ctrl+Shift+T".into(), split: "Ctrl+Shift+D / Ctrl+Shift+E".into() };
+            let hints = EmptyHints { palette: "Ctrl+Shift+P".into(), new: "Ctrl+Shift+T".into(), split: "Ctrl+Shift+D / Ctrl+Shift+E".into(), tour: Some(lang.t("Kurze Tour starten", "Take the short tour").into()) };
             let mut acts = Vec::new();
             let mut hits = EmptyHits::default();
             let out = self.ctx.run(input, |ctx| {
@@ -175,6 +190,19 @@ mod tests {
             let p = h.hits.chat.expect("Chat-Knopf gezeichnet").center();
             h.click(lang, true, p);
             assert!(matches!(h.actions.as_slice(), [Action::NewQuick, Action::NewDialog(true), Action::NewChat]));
+        }
+    }
+
+    #[test]
+    fn empty_hub_offers_the_tutorial() {
+        for (lang, label) in [(Lang::En, "▶ Take the short tour"), (Lang::De, "▶ Kurze Tour starten")] {
+            let mut h = H::new();
+            h.frame(lang, true, vec![]);
+            h.frame(lang, true, vec![]);
+            assert!(h.texts.iter().any(|t| t == label), "{lang:?}: {:?}", h.texts);
+            let p = h.hits.tour.expect("Tutorial-Knopf gezeichnet").center();
+            h.click(lang, true, p);
+            assert!(matches!(h.actions.as_slice(), [Action::Tutorial(tutorial::Cmd::Continue)]), "Klick startet bzw. setzt die Tour fort");
         }
     }
 

@@ -20,13 +20,26 @@ miniz_oxide = "0.8"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 # Regex-Suche des Chat-Werkzeugs `grep` (#338); steckt über alacritty_terminal ohnehin im Baum (keine neue Crate).
 regex-automata = "0.4"
+# Editor-Tab (#54, `src/editor/`): Rope-Text (nur LF als Zeilenende, keine Unicode-Zeilentrenner), Suchen/Ersetzen mit
+# regulären Ausdrücken, Kodierungen (UTF-16, Windows-1252), Unterschied Datei/Puffer, Graphem-Grenzen und Spaltenbreiten.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
+regex = "1"
+encoding_rs = "0.8"
+similar = "2"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+# Editor (#54): Suche in Dateien – Ordner durchlaufen mit .gitignore-Regeln (ignore, MIT/Unlicense, aus ripgrep).
+ignore = "0.4"
 
 [features]
-# Nur für die README-Screenshots (tools/readme-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.
+# Nur für die README- und Doku-Screenshots (tools/docs-shots.ps1): Startansicht per Umgebungsvariable PANELDECK_SHOT. Nie im Release.
 readme-shots = []
 # Nur für den lokalen Ende-zu-Ende-Test des Selbst-Updates: Release-Feed aus einem Ordner (PANELDECK_UPDATE_TEST_FEED, siehe
 # tools/update-feed.sh). Nie im Release (tools/release.sh prüft das).
 update-test-feed = []
+# Nur für den Smoke-Test des Tutorials (#143, tools/smoke-mcp.ps1 -TutorialExe): Zustand und Befehle über Dateien im Ordner
+# PANELDECK_TUTORIAL_TEST (src/app/tutorial/hook.rs). Nie im Release (tools/release.sh prüft das).
+tutorial-test = []
 
 [build-dependencies]
 embed-resource = "3"

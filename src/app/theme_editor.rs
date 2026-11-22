@@ -1111,6 +1111,30 @@ fn generator_ui(ed: &mut Editor, ctx: &egui::Context, lang: Lang, now: f64) {
     }
 }
 
+/// Nur für die Doku-Screenshots (Feature `readme-shots`, nie im Release).
+#[cfg(feature = "readme-shots")]
+impl App {
+    /// Theme-Editor mit einer Kopie des aktuellen Themes öffnen und die Farbe `token` wählen. `weak`: ein paar Farben mit
+    /// schwachem Kontrast, damit die Design-Prüfung Hinweise (mit Vorschlag) zeigt.
+    pub(super) fn shot_theme_editor(&mut self, token: &'static str, weak: bool) {
+        let cur = self.themes.iter().find(|t| t.name == self.settings.theme).or(self.themes.first()).map(|t| t.name.clone());
+        let Some(cur) = cur else { return };
+        self.theme_open_editor(&cur);
+        let Some(ed) = self.theme_ui.editor.as_mut() else { return };
+        if weak {
+            let bg = solid(&ed.theme, "bg");
+            let near = |d: u8| Color32::from_rgb(bg.r().saturating_add(d), bg.g().saturating_add(d), bg.b().saturating_add(d));
+            ed.edit(0.0, false, |t| {
+                theme::set_color(t, "ansi8", near(28));
+                theme::set_color(t, "ansi4", near(40));
+                theme::set_color(t, "selection", near(10));
+            });
+        }
+        ed.select(token);
+        ed.scroll_to = Some(token);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

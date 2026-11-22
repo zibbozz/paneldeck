@@ -10,6 +10,7 @@ mod cleanup;
 mod claude_opts;
 mod db;
 mod due;
+mod editor;
 mod clip;
 mod conhost_wrap;
 mod emoji;
@@ -32,6 +33,8 @@ mod paths;
 mod planning;
 mod platform;
 mod procs;
+// Dienste des Editor-Reiters (#54): MCP-Werkzeuge, Suche in Dateien, Plattenänderungen, Einstellungen.
+mod editor_svc;
 mod prompts;
 mod query;
 mod search;
@@ -177,6 +180,8 @@ fn main() -> eframe::Result<()> {
         mcp::unregister_if_ours();
         // Autostart-Werte `Paneldeck (…)` von Instanzen mit Profil/Datenordner (den Standardwert löscht der Installer).
         integration::remove_instance_autostarts();
+        // Explorer-Eintrag „In Paneldeck-Editor öffnen“ (#54), wenn er auf diese .exe zeigt.
+        integration::remove_edit_context_if_ours();
         std::process::exit(if ok { 0 } else { 1 });
     }
     // Sprache für Hilfe und Meldungen: --lang > settings.json des Datenordners > Englisch.
@@ -224,9 +229,10 @@ fn main() -> eframe::Result<()> {
     install_panic_hook();
     // "paneldeck.exe.old" (Update über eine laufende Instanz) wird erst nach dem ersten gezeichneten Frame gelöscht –
     // siehe `app::update::install::remove_old_exe`.
-    let cmd = match &cli.open {
-        Some(p) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude, origin: None },
-        None => hooks::IpcCmd::Show,
+    let cmd = match (&cli.open, &cli.edit) {
+        (Some(p), _) => hooks::IpcCmd::Open { path: p.clone(), claude: cli.claude, origin: None },
+        (None, Some(f)) => hooks::IpcCmd::Edit { path: f.clone() },
+        (None, None) => hooks::IpcCmd::Show,
     };
     // `--reset-settings` nur, wenn keine Instanz mit diesem Datenordner läuft (sie würde die Datei wieder schreiben).
     if cli.reset_settings {

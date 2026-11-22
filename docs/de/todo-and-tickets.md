@@ -73,8 +73,8 @@ Der Reiter **Dashboards** hat einen Bearbeitungsmodus (Kacheln verschieben und i
 
 Seit 2.6.0 hat der Reiter **Übersicht** jedes Experten-Projekts einen Knopf **Wartung**. Er zeigt die Zahl der Probleme (Fehler und Warnungen, beim Öffnen der Übersicht günstig gezählt) und einen Punkt, wenn es welche gibt. Er öffnet eine eigene Seite (wie ein Ticket, mit *Zurück* / `Esc`); die volle Prüfung läuft beim Öffnen im Hintergrund, *Erneut prüfen* startet sie noch einmal. Das schreibgeschützte System-Projekt `TODO` hat keine Wartung.
 
-<!-- screenshot: Reiter Übersicht eines Experten-Projekts mit der Karte Wartung und dem Knopf „Wartung (12)“ samt Punkt, Todo-Liste → Expertenmodus → Projekt → Übersicht -->
-<!-- screenshot: Wartungsseite mit den Kategorien links und Ticket-Befunden mit Schwere und Aktionen rechts, Übersicht → Wartung -->
+![Reiter Übersicht eines Experten-Projekts mit der Karte Wartung und dem Knopf Wartung mit der Zahl der Befunde](../images/de/maint-overview.png)
+![Wartungsseite mit den Kategorien links und Ticket-Befunden mit Schwere und Aktionen rechts](../images/de/maint-page.png)
 
 - **Links:** die Kategorien *Tickets* · *Konfiguration* · *Datenbank* · *Eigene Regeln* mit ihrer Anzahl, dazu *Ignoriert*, *Protokoll* und *Prüfungen*. **Rechts:** die Befunde mit Schwere (*Fehler* = kaputte Struktur oder Datenbank, *Warnung* = überfällig oder liegengeblieben, *Hinweis* = ungenutzte Konfiguration oder mögliche Duplikate), Erklärung und Aktionen. Mehrere auswählen und *Auswahl beheben …*; *Ignorieren* blendet einen Befund aus (in der Datenbank gemerkt, unter *Ignoriert* wiederherstellbar). Ganze Prüfungen lassen sich je Projekt unter *Prüfungen* abschalten.
 - **Ticket-Prüfungen:** liegengebliebene Tickets (standardmäßig 90 Tage ohne Änderung), getrennt nach *in Arbeit* (hängt fest) und *nie begonnen*; überfällige Fälligkeiten; offene Tickets in abgeschlossenen Sprints, veröffentlichten Versionen oder erreichten Meilensteinen; kaputte Struktur (Unteraufgaben mit gelöschtem Eltern-Ticket, Verknüpfungen zu gelöschten Tickets, erledigtes Eltern-Ticket mit offenen Kindern, Zyklen in Verknüpfungen, leere Pflichtfelder, ungültige Werte wie ein gelöschter Auswahlwert); **mögliche Duplikate** (Titel zu mindestens 80 % ähnlich, lokal verglichen, mit *Vergleichen …* nebeneinander gezeigt – nur Vorschläge: *Als Duplikat verknüpfen*, *Verknüpfen und schließen* oder *Kein Duplikat (ignorieren)*; der Verknüpfungstyp *duplicates* wird bei Bedarf angelegt).
@@ -94,7 +94,7 @@ Seit 2.6.0 hat der Reiter **Übersicht** jedes Experten-Projekts einen Knopf **W
 5. Prüfe die Vorschau: die Liste der Tickets, die übersprungenen und den Kommentar (änderbar). Klicke auf **Ausführen** (bei mehr als 10 Tickets nach 3 Sekunden).
 6. Paneldeck legt vorher eine Sicherung *maintenance* an. Die Aktion steht danach im *Protokoll*.
 
-<!-- screenshot: Vorschau von „Als Won't Do schließen“ mit Ticketliste, Kommentarfeld und Knopf Ausführen, Wartung → Tickets → Auswahl beheben … -->
+![Vorschau von „Als Won't Do schließen“ mit Ticketliste, Kommentarfeld und Knopf Ausführen](../images/de/maint-fix.png)
 
 ### So archivierst du Tickets und findest sie wieder
 1. Öffne ein Ticket und wähle **⋯ → Archivieren** (für mehrere Tickets: *Archivieren …* auf der Wartungsseite).
@@ -107,7 +107,7 @@ Seit 2.6.0 hat der Reiter **Übersicht** jedes Experten-Projekts einen Knopf **W
 2. Klicke auf **Vergleichen …**: Beide Tickets stehen nebeneinander.
 3. Wähle *Als Duplikat verknüpfen*, *Verknüpfen und schließen* (braucht einen Zielstatus Won't Do) oder *Kein Duplikat (ignorieren)*.
 
-<!-- screenshot: Dialog „Mögliches Duplikat vergleichen“ mit beiden Tickets nebeneinander, Wartung → Tickets → Vergleichen … -->
+![Dialog „Mögliches Duplikat vergleichen“ mit beiden Tickets nebeneinander](../images/de/maint-duplicate.png)
 
 ### So prüfst und reparierst du die Datenbank
 1. Öffne die Wartungsseite eines beliebigen Experten-Projekts (oder *Einstellungen → Daten & Sicherung → Wartungsseite öffnen*).
@@ -116,7 +116,7 @@ Seit 2.6.0 hat der Reiter **Übersicht** jedes Experten-Projekts einen Knopf **W
 4. Ist die Datei stark beschädigt, nimm **In neue Datei retten …**, lies den Bericht und klicke dann auf *Gerettete Datei verwenden …* → *Wiederherstellen und beenden*. Die aktuelle Datei wird vorher gesichert, ab dem nächsten Start gilt die gerettete.
 5. **Verdichten …** macht die Datei nach vielen Löschungen kleiner; *Statistik* zeigt, was den Platz belegt.
 
-<!-- screenshot: Kategorie Datenbank mit den Knöpfen der Datenbankpflege (Datenbank prüfen, Statistik, Verdichten …, In neue Datei retten …, Letzte Sicherung wiederherstellen …) und der Statistik-Tabelle, Wartung → Datenbank -->
+![Kategorie Datenbank mit den Knöpfen der Datenbankpflege und der Statistik-Tabelle](../images/de/maint-database.png)
 
 ## Export und Import
 

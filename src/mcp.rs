@@ -609,6 +609,10 @@ pub fn tools() -> Vec<ToolDef> {
             schema: schema(json!({"ticket": ticket.clone(), "session": {"type": "integer", "description": "Session id; default: your own session"}}), &["ticket"]),
         },
     ]
+    .into_iter()
+    // ---- Editor-Reiter (#54, 3.0.0): lesen bei Stufe Lesen, öffnen/bearbeiten/speichern bei Steuern + Schalter
+    .chain(crate::editor_svc::tools::defs())
+    .collect()
 }
 
 pub fn tool_level(name: &str) -> Option<McpLevel> {

@@ -509,7 +509,7 @@ Automatisch: siehe Abschnitt 32a (`tools\smoke-mcp.ps1` mit 136 Prüfungen, Unit
 - [ ] **Rückfall auf 1.x:** Eine 1.0.x-Version lässt `paneldeck.db` unbenutzt, aber ungestört (README weist darauf hin).
 - [ ] **Leistung:** 10.000 Tickets (z. B. per Agent oder Skript angelegt): Start der Todo-Liste < 2 s, Board/Liste/Suche flüssig, Terminal Hub bleibt davon unberührt; Speicherbedarf der .exe-Datei wächst nicht merklich.
 - [ ] **Beide Sprachen:** kompletter Durchlauf der Abschnitte 34–46 auf Deutsch; Stichprobe: kein englischer/deutscher Resttext an der falschen Stelle.
-- [ ] **Dokumentation:** README (Englisch/Deutsch) und Changelog stimmen mit dem Programm überein; Screenshots für alle `TODO screenshot`-Kommentare in den READMEs sind erzeugt.
+- [ ] **Dokumentation:** README (Englisch/Deutsch), Anleitungen (`docs/en`, `docs/de`) und Changelog stimmen mit dem Programm überein. Die Bilder sind aus dieser Version neu erzeugt (`tools/docs-shots.ps1`, macht `tools/release-prep.sh` unter Windows selbst) und angesehen (EN und DE, stimmt jede Ansicht mit ihrem Alt-Text überein?); `python tools/check_docs_images.py` läuft ohne Fehler (kein `<!-- screenshot: … -->` mehr, alle Bilder da, EN/DE gleich); von Hand gepflegte Bilder (`<!-- screenshot-manual: … -->`, Explorer-Kontextmenü) stimmen noch.
 
 ## 48 · Kommandozeile, Datenordner und Profile (2.1.0)
 Vorbereitung: Kopie der .exe in einem eigenen Ordner unter `E:\paneldeck-test` (eigener Datenordner daneben), Schein-`USERPROFILE`. Automatisch: Unit-Tests `cli`, `help`, `paths` (Parser, Hilfetext mit jedem Beispiel, Suchreihenfolge, Profile, Fehler).

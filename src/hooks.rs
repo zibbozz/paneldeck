@@ -530,6 +530,8 @@ pub enum IpcCmd {
     /// `origin`: Prozessbaum des Absenders – ermittelt der Hub selbst aus der Verbindung (#152), nie aus der Anfrage.
     /// Liegt eine Sitzung darin, erbt die neue Sitzung deren Agenten-Kette.
     Open { path: String, claude: bool, origin: Option<crate::platform::process::PeerChain> },
+    /// `--edit <datei>` (#54): Datei im Editor-Reiter öffnen (schreibt in keine Sitzung, keine Agenten-Kette).
+    Edit { path: String },
 }
 
 pub struct HookServer {
@@ -672,6 +674,7 @@ fn parse_cmd(raw: &str, token: &str) -> Option<IpcCmd> {
     match v.get("cmd")?.as_str()? {
         "show" => Some(IpcCmd::Show),
         "open" => Some(IpcCmd::Open { path: v.get("path")?.as_str()?.to_string(), claude: v.get("claude").and_then(|c| c.as_bool()).unwrap_or(false), origin: None }),
+        "edit" => Some(IpcCmd::Edit { path: v.get("path")?.as_str()?.to_string() }),
         _ => None,
     }
 }
@@ -692,6 +695,7 @@ pub fn forward_to_running(dir: &Path, cmd: &IpcCmd) -> bool {
     let body = match cmd {
         IpcCmd::Show => json!({"token": token, "cmd": "show"}),
         IpcCmd::Open { path, claude, .. } => json!({"token": token, "cmd": "open", "path": path, "claude": claude}),
+        IpcCmd::Edit { path } => json!({"token": token, "cmd": "edit", "path": path}),
     };
     if stream.write_all(body.to_string().as_bytes()).is_err() {
         return false;
@@ -1713,6 +1717,12 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // `--edit` (#54) kommt als eigener Befehl an.
+        assert!(forward_to_running(&dir, &IpcCmd::Edit { path: "C:\\x\\a.txt".into() }));
+        assert_eq!(srv.cmd_rx.recv_timeout(Duration::from_secs(2)).unwrap(), IpcCmd::Edit { path: "C:\\x\\a.txt".into() });
+        assert_eq!(parse_cmd(r#"{"token":"t","cmd":"edit","path":"C:\\y"}"#, "t"), Some(IpcCmd::Edit { path: "C:\\y".into() }));
+        assert_eq!(parse_cmd(r#"{"token":"t","cmd":"edit"}"#, "t"), None, "ohne Pfad");
+        assert_eq!(parse_cmd(r#"{"token":"u","cmd":"edit","path":"C:\\y"}"#, "t"), None, "falscher Token");
         // veraltete Datei (falscher Port) → keine Bestätigung
         write_ipc_file(&dir, 1, "x");
         assert!(!forward_to_running(&dir, &IpcCmd::Show));

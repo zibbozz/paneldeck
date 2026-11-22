@@ -436,7 +436,7 @@ impl PlanUi {
         self.maint.job = Some((rx, cx.lang.t("Rette Daten …", "Rescuing data …").to_string(), Instant::now()));
     }
 
-    fn maint_spawn_stats(&mut self, cx: &Cx) {
+    pub(super) fn maint_spawn_stats(&mut self, cx: &Cx) {
         if self.maint.job.is_some() {
             return;
         }

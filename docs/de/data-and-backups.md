@@ -34,7 +34,9 @@ Mit `--profile <name>` wird der Unterordner `profiles\<name>` dieses Ordners gen
 | `claude-hooks*.json` | von Paneldeck erzeugte Hook-Konfiguration |
 | `crash.log` | Absturzprotokoll (nur wenn etwas schiefging) |
 | `mcp-log.jsonl` | Aufrufprotokoll der Agenten-Schnittstelle (nur wenn sie benutzt wurde) |
+| `hot-exit/` | ungespeicherte Änderungen von [Editor](editor.md)-Tabs als reiner Text für den nächsten Start (*Hot Exit*, seit 3.0.0); ein Puffer wird gelöscht, wenn sein Tab gespeichert oder geschlossen wird |
 | `profiles/<name>/` | Datenordner der [Profile](command-line.md#profile-und-mehrere-instanzen), jeweils mit demselben Aufbau |
+| `editor-state.json` | offener Ordner, Tabs, Teilungen und zuletzt geöffnete Dateien des [Editor-Reiters](editor.md) (intern, seit 3.0.0) |
 | `ipc.json` | Port und Token der laufenden Instanz (intern) |
 | `cleanup-pending.json` | Aufräum-Schritte, die für den nächsten Start vorgemerkt sind (intern, siehe [Aufräumen](#aufräumen); wird nach dem Ausführen gelöscht) |
 
@@ -167,6 +169,21 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
   - `search`: `off` (Standard), `searxng`, `brave` oder `tavily`; `searxng_url`: Adresse deiner SearXNG-Instanz; `search_key`: dein Brave-/Tavily-API-Schlüssel, verschlüsselt wie die Schlüssel der Server (nie Klartext). Die letzten beiden werden nur geschrieben, wenn sie gesetzt sind.
   Ein unlesbares Feld fällt auf seinen Standard zurück; die übrigen bleiben.
 
+## Neue Felder in 3.0.0
+- `settings.json` → `editor` ([Editor-Reiter](editor.md#einstellungen)), alle optional (fehlt = Standard; ein Wert mit falschem Typ fällt allein auf seinen Standard zurück, unbekannte Werte werden ignoriert):
+
+  | Feld | Standard | Bedeutung |
+  |---|---|---|
+  | `font` | `""` | Schriftfamilie des Editors; leer = die Terminalschrift |
+  | `large_file_mb` | `20` | Dateien ab dieser Größe (1–4096 MB) sind groß: Minimap und Umbruch sind aus, die Suche in Dateien überspringt sie |
+  | `autosave` | `false` | automatisch speichern (nur Dateien, die es schon gibt) |
+  | `autosave_delay_ms` | `1000` | Verzögerung nach der letzten Änderung (200–600000 ms) |
+  | `search_exclude` | `[]` | eigene Ausschlussmuster der Suche in Dateien (Syntax wie .gitignore, höchstens 100) |
+  | `search_include_ignored` | `false` | Vorgabe des Such-Schalters *Ignorierte einbeziehen* |
+  | `agent_open`, `agent_edit`, `agent_save` | `false` | die [Agenten-Schalter](editor.md#agenten) (nur `true` schaltet ein; wirken nur bei Stufe *Steuern*) |
+
+- `hot-exit/`: ungespeicherte Editor-Puffer; `editor-state.json`: offener Ordner, Tabs, Teilungen und zuletzt geöffnete Dateien des Editor-Reiters (beides interne Formate; im *Aufräumen* als *Editor: ungespeicherte Puffer* bzw. als Teil von *Sitzungen und Layout*).
+
 ## Sicherungen
 *Einstellungen → Daten & Sicherung* steuert die automatischen Sicherungen von `paneldeck.db`: Standard ist eine Kopie alle 24 Stunden, behalten werden zwei (zusätzlich zur Datenbank selbst). War der Rechner zur fälligen Zeit aus, wird die Sicherung beim nächsten Start nachgeholt; mehrere verpasste ergeben nur eine. Du kannst einen anderen Sicherungsordner wählen, ihn öffnen, mit **Jetzt sichern** eine Kopie anlegen (manuelle Kopien werden nie automatisch gelöscht) und jede Kopie aus der Liste **wiederherstellen** – dabei wird zuerst der aktuelle Stand gesichert, danach beendet sich Paneldeck und spielt die Wiederherstellung beim nächsten Start ein. Vor jedem Datenbank-Update (Migration) legt Paneldeck ebenfalls eine Kopie an und fasst eine Datenbank einer neueren Version nie an.
 
@@ -178,7 +195,7 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 ## Aufräumen
 *Einstellungen → Daten & Sicherung → **Aufräumen …*** (auch *Aufräumen …* in der Befehls-Palette, `Strg+Umschalt+P`) öffnet ein Fenster, in dem du ankreuzt, was gelöscht werden soll. Jeder Eintrag zeigt Größe bzw. Anzahl (im Hintergrund ermittelt; *Neu ermitteln* rechnet neu) und eine kurze Erklärung, unten steht die Summe (*Wird gelöscht:*). Vorausgewählt ist nur Harmloses: Bilder aus der Zwischenablage, alte Sicherungsdateien (`*.bak-*`, `*.defekt-*`), `crash.log` sowie verwaiste Scrollback-/Chat-Dateien, zu denen es keine Sitzung mehr gibt. Das Fenster öffnet sich nur im Hauptfenster.
 
-<!-- screenshot: Fenster Aufräumen mit den Gruppen, Größen, den vorausgewählten Einträgen und der Summe unten, Einstellungen → Daten & Sicherung → Aufräumen … -->
+![Fenster Aufräumen mit den Gruppen, Größen, den vorausgewählten Einträgen und der Summe unten](../images/de/cleanup.png)
 
 ### So schaffst du Platz auf der Festplatte
 1. Öffne *Einstellungen → Daten & Sicherung* und klicke auf **Aufräumen …**.
@@ -189,7 +206,7 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 6. Die Zusammenfassung nennt jeden Eintrag mit seiner Größe. Warte 3 Sekunden, bis der Knopf frei wird, und klicke auf **Löschen**.
 7. Das Ergebnis zeigt je Eintrag ✓ oder einen Fehler. *Erneut versuchen* wiederholt die fehlgeschlagenen; *Schließen* schließt das Fenster.
 
-<!-- screenshot: Rückfrage „Endgültig löschen?“ mit der Liste der Einträge, dem 3-Sekunden-Knopf und dem Eingabefeld, Aufräumen → Löschen … -->
+![Rückfrage „Endgültig löschen?“ mit der Liste der Einträge und dem Löschen-Knopf, der nach 3 Sekunden frei wird](../images/de/cleanup-confirm.png)
 
 ### So setzt du Paneldeck komplett zurück
 1. Öffne *Einstellungen → Daten & Sicherung → Aufräumen …*.
@@ -198,20 +215,20 @@ Alle Felder sind optional; ältere Versionen ignorieren sie, fehlende Felder bed
 4. Klicke auf **Zurücksetzen …**, tippe `LÖSCHEN` (englische Oberfläche: `DELETE`) und klicke auf **Zurücksetzen**, sobald der Knopf frei ist.
 5. Paneldeck speichert die ZIP-Datei, entfernt die Integration, startet neu und beginnt wie beim ersten Start. Das Ergebnis erscheint nach dem Neustart.
 
-<!-- screenshot: Ergebnisfenster „Aufräumen – Ergebnis“ mit ✓ und einem Fehler, Erneut versuchen und Jetzt neu starten, nach Aufräumen → Löschen -->
+![Ergebnisfenster „Aufräumen – Ergebnis“ mit ✓ je Eintrag, einem Fehler, Erneut versuchen und Jetzt neu starten](../images/de/cleanup-result.png)
 
 | Gruppe | Einträge |
 |---|---|
-| Platz schaffen | Datenbank-Sicherungen (alle außer den neuesten *N*, Standard 3; „alle löschen“ nur mit Eintippen), Bilder aus der Zwischenablage, alte Sicherungsdateien; nur wenn vorhanden: Programm-Kopien von Läufen (`%TEMP%\paneldeck-run`), Wartungs-Sicherungen (`maintenance-<zeit>.db` im Sicherungsordner – nur Dateien mit genau diesem Namensmuster), Hot-Exit-Puffer (`hot-exit\`) |
+| Platz schaffen | Datenbank-Sicherungen (alle außer den neuesten *N*, Standard 3; „alle löschen“ nur mit Eintippen), Bilder aus der Zwischenablage, alte Sicherungsdateien; nur wenn vorhanden: Programm-Kopien von Läufen (`%TEMP%\paneldeck-run`), Wartungs-Sicherungen (`maintenance-<zeit>.db` im Sicherungsordner – nur Dateien mit genau diesem Namensmuster), *Editor: ungespeicherte Puffer* (`hot-exit\`, die ungespeicherten Änderungen von Editor-Tabs – nur mit Eintippen und Neustart, sie lassen sich nicht wiederherstellen) |
 | Verlauf und Protokolle | Scrollback und Chatverläufe, je **ohne Sitzung** oder **alle** („alle“ betrifft auch offene Sitzungen: Terminals behalten nur den Bildschirm, Chats werden leer), wahlweise nur Dateien älter als *X* Tage (Standard 30); `crash.log`; das MCP-Protokoll `mcp-log.jsonl` (es dokumentiert, was Agenten getan haben) |
 | Inhalte | Prompt-Bibliothek, Terminal-/Gruppenvorlagen, eigene Themes (eingebaute Themes und das Beispiel bleiben; ein aktives gelöschtes Theme fällt auf den Standard zurück), `system-prompt.md`, die Todo-/Ticket-Datenbank, Sitzungen und Layout |
 | Einstellungen | alle Einstellungen (wie `--reset-settings`, mit Kopie `settings.json.bak-<zeit>`; die Sprache bleibt), Modell-Server und API-Schlüssel, Claude-Standards, Tastenkürzel |
-| Windows-Integration | Autostart-Run-Werte (auch von Profilen) und Explorer-Kontextmenü, die auf diese `paneldeck.exe` zeigen, `paneldeck*`-Einträge in `~/.claude.json`, die auf diese .exe zeigen, `claude-hooks*.json` im Datenordner |
+| Windows-Integration | Autostart-Run-Werte (auch von Profilen) und Explorer-Kontextmenü (Ordner-Einträge und *In Paneldeck-Editor öffnen*), die auf diese `paneldeck.exe` zeigen, `paneldeck*`-Einträge in `~/.claude.json`, die auf diese .exe zeigen, `claude-hooks*.json` im Datenordner |
 | Alles | **Paneldeck komplett zurücksetzen**: wählt alles samt Integration, sichert den Datenordner vorher als ZIP-Datei (Zielordner wählbar, außerhalb des Datenordners; API-Schlüssel und die Werte der Umgebungsvariablen der Prozessliste bleiben draußen – auch aus Kopien wie `settings.json.bak-*`, unlesbare Kopien dieser Dateien ganz) und startet danach neu wie beim ersten Start |
 
 Andere Profile (`profiles\<name>` mit `settings.json`) lassen sich komplett löschen, aber nur, solange ihre Instanz nicht läuft.
 
-**Sicherheit.** Gelöscht wird endgültig (kein Papierkorb). *Löschen …* zeigt eine Zusammenfassung aller gewählten Einträge mit Größen; der Knopf wird nach 3 Sekunden frei, unwiderrufliche Einträge (Datenbank, alle Verläufe, Prompt-Bibliothek, Vorlagen, Themes, Systemprompt, Sitzungen/Layout, alle Einstellungen, alle Sicherungen, Profile, Zurücksetzen) verlangen zusätzlich das Eintippen von `LÖSCHEN` (Englisch: `DELETE`) – einmal je Lauf. Vor dem Löschen wird die Datenbank gesichert (`pre-cleanup-<zeit>.db` im Sicherungsordner; abschaltbar, immer, wenn die Datenbank selbst gelöscht wird – schlägt diese Sicherung fehl, bleibt die Datenbank). Registry-Werte werden als `.reg`-Datei und `~/.claude.json` als Kopie im Sicherungsordner gesichert, bevor sie sich ändern (beim kompletten Zurücksetzen stattdessen neben der ZIP-Datei, weil der Sicherungsordner im Datenordner mit gelöscht wird). Ein Ordner, der selbst ein Link ist (Symlink/Junction, z. B. `clipboard\`), wird nicht betreten und als nicht berührt gemeldet. Einträge mit Neustart warnen, dass in Terminals laufende Programme beim Neustart sofort enden (ohne Strg+C). Einträge, die offene Sitzungen beenden, nennen diese und laufende Programme (erkannt über die Kindprozesse der Shells): *Schließen und löschen* oder *Abbrechen*. Dateien in Benutzung werden übersprungen; das Ergebnis nennt jeden Eintrag mit ✓ oder dem Fehler und bietet *Erneut versuchen* und bei Bedarf *Jetzt neu starten*.
+**Sicherheit.** Gelöscht wird endgültig (kein Papierkorb). *Löschen …* zeigt eine Zusammenfassung aller gewählten Einträge mit Größen; der Knopf wird nach 3 Sekunden frei, unwiderrufliche Einträge (Datenbank, alle Verläufe, ungespeicherte Editor-Puffer, Prompt-Bibliothek, Vorlagen, Themes, Systemprompt, Sitzungen/Layout, alle Einstellungen, alle Sicherungen, Profile, Zurücksetzen) verlangen zusätzlich das Eintippen von `LÖSCHEN` (Englisch: `DELETE`) – einmal je Lauf. Vor dem Löschen wird die Datenbank gesichert (`pre-cleanup-<zeit>.db` im Sicherungsordner; abschaltbar, immer, wenn die Datenbank selbst gelöscht wird – schlägt diese Sicherung fehl, bleibt die Datenbank). Registry-Werte werden als `.reg`-Datei und `~/.claude.json` als Kopie im Sicherungsordner gesichert, bevor sie sich ändern (beim kompletten Zurücksetzen stattdessen neben der ZIP-Datei, weil der Sicherungsordner im Datenordner mit gelöscht wird). Ein Ordner, der selbst ein Link ist (Symlink/Junction, z. B. `clipboard\`), wird nicht betreten und als nicht berührt gemeldet. Einträge mit Neustart warnen, dass in Terminals laufende Programme beim Neustart sofort enden (ohne Strg+C). Einträge, die offene Sitzungen beenden, nennen diese und laufende Programme (erkannt über die Kindprozesse der Shells): *Schließen und löschen* oder *Abbrechen*. Dateien in Benutzung werden übersprungen; das Ergebnis nennt jeden Eintrag mit ✓ oder dem Fehler und bietet *Erneut versuchen* und bei Bedarf *Jetzt neu starten*.
 
 Datenbank, Sitzungen/Layout und das komplette Zurücksetzen lassen sich nicht löschen, solange Paneldeck sie benutzt: Sie werden in `cleanup-pending.json` vorgemerkt und beim nächsten Start vor dem Laden ausgeführt (mit dem Sicherungsordner dieses Starts – nie einem aus der Datei); Paneldeck startet sofort neu und zeigt das Ergebnis. Integration, andere Profile und die ZIP-Sicherung laufen vor dem Neustart; ohne ZIP-Sicherung wird nichts zurückgesetzt.
 

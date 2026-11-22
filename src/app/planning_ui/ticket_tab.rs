@@ -260,7 +260,9 @@ impl PlanUi {
         let mut changed = false;
         // ---- Zeile 1: Neu, Suche, Stern/Markierung, Zähler
         ui.horizontal(|ui| {
-            if widgets::primary(ui, &format!("+ {}", lang.t("Neues Ticket", "New ticket"))).on_hover_text(lang.t("Neues Ticket anlegen (Strg+N)", "Create a new ticket (Ctrl+N)")).clicked() {
+            let new = widgets::primary(ui, &format!("+ {}", lang.t("Neues Ticket", "New ticket"))).on_hover_text(lang.t("Neues Ticket anlegen (Strg+N)", "Create a new ticket (Ctrl+N)"));
+            crate::app::tutorial::spot_rect(ui, crate::app::tutorial::Spot::PlanNewTicket, new.rect);
+            if new.clicked() {
                 self.open_create(cx, None);
             }
             ui.add_space(S2);

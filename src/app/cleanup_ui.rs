@@ -831,3 +831,32 @@ impl App {
         true
     }
 }
+
+/// Nur für die Doku-Screenshots (Feature `readme-shots`, nie im Release).
+#[cfg(feature = "readme-shots")]
+impl App {
+    /// Fenster „Aufräumen“ öffnen und die Rückfrage „Endgültig löschen?“ für die vorausgewählten Einträge zeigen.
+    pub(super) fn shot_cleanup_confirm(&mut self, ctx: &egui::Context) {
+        self.open_cleanup(ctx);
+        if let Some(mut c) = self.cleanup.take() {
+            c.confirm = Some(self.cleanup_confirm_for(&c));
+            self.cleanup = Some(c);
+        }
+    }
+
+    /// Ergebnisfenster eines Laufs mit einem Fehler (Beispielwerte, es wird nichts gelöscht).
+    pub(super) fn shot_cleanup_result(&mut self) {
+        let lang = self.settings.language;
+        let rep = |item: Item, bytes: u64, files: u64| ItemReport { id: item.id().to_string(), bytes, files, ..Default::default() };
+        let mut clip = rep(Item::Clipboard, 18_400_000, 42);
+        clip.errors.push(lang.t("clip-20261102-0915.png: Datei in Benutzung (ein anderes Programm hat sie geöffnet)", "clip-20261102-0915.png: file in use (another program has it open)").to_string());
+        let mut hot = rep(Item::HotExit, 260_000, 3);
+        hot.restart = true;
+        let list = vec![rep(Item::DbBackups, 52_300_000, 9), rep(Item::RunTemp, 4_100_000, 117), clip, rep(Item::CrashLog, 12_000, 1), hot];
+        let sel = Selection { items: [Item::DbBackups, Item::RunTemp, Item::Clipboard, Item::CrashLog, Item::HotExit].into_iter().collect(), profiles: Default::default() };
+        let mut c = CleanupUi::with_report(list);
+        let opts = c.opts();
+        c.last = Some((sel, opts));
+        self.cleanup = Some(c);
+    }
+}

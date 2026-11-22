@@ -4,7 +4,7 @@
 
 The **process list** runs long-running programs such as dev servers and watchers – `php -S localhost:8000`, `ng serve`, `npm run dev`, `cargo watch` – apart from your interactive terminal sessions. You don't type into them: you start a process, watch its output in a pane of its own and stop it again. *(Since 2.6.0.)*
 
-<!-- screenshot: Processes section with one running entry (green dot, ↗, error count) and one stopped entry, Terminal Hub → sidebar → PROCESSES -->
+![Processes section in the sidebar with a running entry (green dot, error count), a stopped and a crashed one](../images/processes.png)
 
 ## How to add a dev server
 1. Open the **Terminal Hub** (`Ctrl+1`).
@@ -14,7 +14,7 @@ The **process list** runs long-running programs such as dev servers and watchers
 5. Click **Save**. The entry appears in the *Processes* section and is stopped.
 6. Click **▷** (*Start*) in its row or double-click the row. Click the row to see the output.
 
-<!-- screenshot: New process dialog with all fields filled in (name, command, folder, shell, project, group, order, start automatically, log file, one environment variable), Terminal Hub → PROCESSES → + -->
+![New process dialog with all fields filled in (name, command, folder, shell, project, group, order, start automatically, log file, one environment variable)](../images/process-new.png)
 
 ## How to start several programs together
 1. Right-click the first entry → *Edit …*.
@@ -33,7 +33,7 @@ The **process list** runs long-running programs such as dev servers and watchers
 3. Use *Search the output* (Ctrl+F) to find the first error.
 4. Fix the cause, then click *Restart* in the red bar at the bottom of the output or in its header (or right-click the row → *Restart*).
 
-<!-- screenshot: output pane of a crashed process with its header (state, restart, search, copy, clear, edit, close), Terminal Hub → PROCESSES → click a red entry -->
+![Output of a crashed process with its header (state, restart, search, copy, clear, edit, close)](../images/process-output.png)
 
 ## The *Processes* section
 The *Processes* section sits in the Terminals sidebar above the templates (in the main window only) and can be collapsed. Its title shows how many entries are running (e.g. `PROCESSES 2/5`).
